@@ -331,7 +331,7 @@ function Sidebar({
   return (
     <aside className="atm-sidebar">
       <div className="atm-sidebar-inner">
-        <div className="atm-brand">
+        <div className="atm-brand" data-testid="window-drag-brand">
           <span className="atm-brand-mark">
             {brandLogoSrc ? (
               <img src={brandLogoSrc} alt="" aria-hidden="true" />
@@ -3699,7 +3699,7 @@ function App({
             <MagnifyingGlass size={17} />
             搜索任务、记录和项目<kbd>Ctrl K</kbd>
           </button>
-          <div className="atm-top-actions">
+          <div className="atm-top-actions" data-testid="window-drag-actions">
             <button
               className="atm-button atm-icon-button atm-theme-toggle"
               aria-label={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}

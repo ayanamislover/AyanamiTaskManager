@@ -16,6 +16,9 @@ const executable = resolve(
 );
 const outputDir = join(root, "output");
 const dataDir = resolve(process.env.ATM_SMOKE_DATA_DIR ?? join(outputDir, "packaged-smoke-data"));
+const electronUserDataDir = resolve(
+  process.env.ATM_SMOKE_USER_DATA_DIR ?? join(outputDir, "packaged-smoke-electron-profile"),
+);
 const reportPath = resolve(
   process.env.ATM_SMOKE_REPORT ?? join(outputDir, "packaged-smoke-report.json"),
 );
@@ -55,7 +58,7 @@ async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): 
 }
 
 function startApp(): RunningApp {
-  const child = spawn(executable, ["--background"], {
+  const child = spawn(executable, ["--background", `--user-data-dir=${electronUserDataDir}`], {
     cwd: root,
     env: smokeEnvironment,
     windowsHide: true,
@@ -92,7 +95,7 @@ async function waitForExit(child: ChildProcess, timeoutMs = 15_000): Promise<num
 
 async function stopApp(app: RunningApp): Promise<void> {
   if (app.child.exitCode !== null) return;
-  const request = spawn(executable, ["--smoke-quit"], {
+  const request = spawn(executable, ["--smoke-quit", `--user-data-dir=${electronUserDataDir}`], {
     cwd: root,
     env: smokeEnvironment,
     windowsHide: true,
@@ -207,6 +210,7 @@ if (!existsSync(executable)) throw new Error(`找不到打包应用：${executab
 await mkdir(outputDir, { recursive: true });
 await mkdir(dirname(reportPath), { recursive: true });
 await rm(dataDir, { recursive: true, force: true });
+await rm(electronUserDataDir, { recursive: true, force: true });
 
 let app = startApp();
 try {

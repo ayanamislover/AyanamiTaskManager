@@ -39,11 +39,32 @@ html[data-atm-desktop="true"] .atm-main::-webkit-scrollbar-thumb {
   background-clip: padding-box;
 }
 
+html[data-atm-desktop="true"] .atm-sidebar {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+html[data-atm-desktop="true"] .atm-sidebar-inner {
+  -webkit-app-region: no-drag;
+}
+
 html[data-atm-desktop="true"] .atm-topbar {
   grid-template-columns: minmax(140px, 1fr) minmax(260px, 520px) minmax(150px, 1fr);
   padding-right: 166px;
   -webkit-app-region: no-drag;
   user-select: none;
+}
+
+html[data-atm-desktop="true"] .atm-brand,
+html[data-atm-desktop="true"] .atm-brand *,
+html[data-atm-desktop="true"] .atm-top-actions,
+html[data-atm-desktop="true"] .atm-top-actions > .atm-badge {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+html[data-atm-desktop="true"] .atm-brand img {
+  -webkit-user-drag: none;
 }
 
 html[data-atm-desktop="true"] .atm-breadcrumb {
@@ -58,6 +79,8 @@ html[data-atm-desktop="true"] .atm-topbar input,
 html[data-atm-desktop="true"] .atm-topbar select,
 html[data-atm-desktop="true"] .atm-topbar textarea,
 html[data-atm-desktop="true"] .atm-topbar a,
+html[data-atm-desktop="true"] .atm-topbar button *,
+html[data-atm-desktop="true"] .atm-topbar a *,
 .atm-window-chrome,
 .atm-window-chrome * {
   -webkit-app-region: no-drag;

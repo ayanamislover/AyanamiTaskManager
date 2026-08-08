@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { expect, _electron as electron } from "@playwright/test";
@@ -9,9 +10,21 @@ const executable = resolve(
     join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe"),
 );
 const dataDir = resolve(join(root, "output", "window-smoke-data"));
+const electronUserDataDir = resolve(join(root, "output", "window-smoke-electron-profile"));
+const nativeHitTestScript = resolve(join(root, "scripts", "native-window-hittest.ps1"));
+const windowsPowerShell = join(
+  process.env.SystemRoot ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe",
+);
 const screenshot = resolve(join(root, "output", "playwright", "packaged-window-polish.png"));
 if (!existsSync(executable)) throw new Error(`找不到打包应用：${executable}`);
+if (!existsSync(nativeHitTestScript))
+  throw new Error(`找不到原生命中测试脚本：${nativeHitTestScript}`);
 await rm(dataDir, { recursive: true, force: true });
+await rm(electronUserDataDir, { recursive: true, force: true });
 await mkdir(join(root, "output", "playwright"), { recursive: true });
 
 const inheritedEnvironment = Object.fromEntries(
@@ -19,6 +32,7 @@ const inheritedEnvironment = Object.fromEntries(
 );
 const application = await electron.launch({
   executablePath: executable,
+  args: [`--user-data-dir=${electronUserDataDir}`],
   env: {
     ...inheritedEnvironment,
     ATM_DATA_DIR: dataDir,
@@ -30,8 +44,78 @@ try {
   const page = await application.firstWindow();
   await page.waitForSelector(".atm-shell");
   const nativeWindow = await application.browserWindow(page);
+  const nativeWindowHandle = await nativeWindow.evaluate((window) => {
+    const handle = window.getNativeWindowHandle();
+    return handle.length === 8
+      ? handle.readBigUInt64LE(0).toString()
+      : BigInt(handle.readUInt32LE(0)).toString();
+  });
   await expect(page.locator(".atm-brand img")).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "窗口控制" })).toBeVisible();
+  await expect
+    .poll(() => nativeWindow.evaluate((window) => window.getBounds()))
+    .toMatchObject({
+      width: 1920,
+      height: 1080,
+    });
+  await expect
+    .poll(() =>
+      page
+        .locator(".atm-nav button")
+        .first()
+        .evaluate((element) => getComputedStyle(element).userSelect),
+    )
+    .toBe("none");
+
+  const expectNativeRegion = async (
+    selector: string,
+    expectedRegion: "drag" | "no-drag",
+    expectedHit: 1 | 2,
+  ) => {
+    const target = page.locator(selector);
+    await expect
+      .poll(() =>
+        target.evaluate((element) =>
+          getComputedStyle(element).getPropertyValue("-webkit-app-region"),
+        ),
+      )
+      .toBe(expectedRegion);
+    const box = await target.boundingBox();
+    if (!box) throw new Error(`原生命中区域不可见：${selector}`);
+    const hit = Number(
+      execFileSync(
+        windowsPowerShell,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-File",
+          nativeHitTestScript,
+          "-WindowHandle",
+          nativeWindowHandle,
+          "-ClientX",
+          String(box.x + box.width / 2),
+          "-ClientY",
+          String(box.y + box.height / 2),
+        ],
+        { encoding: "utf8" },
+      ).trim(),
+    );
+    expect(hit).toBe(expectedHit);
+  };
+
+  await expectNativeRegion('[data-testid="window-drag-brand"]', "drag", 2);
+  await expectNativeRegion('[data-testid="window-drag-actions"] > .atm-badge', "drag", 2);
+
+  await page.getByRole("button", { name: /搜索任务、记录和项目/u }).click();
+  await expect(page.getByRole("dialog", { name: "全局搜索" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  const themeBefore = await page.locator("html").getAttribute("data-theme");
+  await page.getByRole("button", { name: /切换至.+模式/u }).click();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme", themeBefore ?? "");
+
+  await expectNativeRegion('[data-testid="window-minimize"]', "no-drag", 1);
+  await expectNativeRegion('[data-testid="window-maximize"]', "no-drag", 1);
+  await expectNativeRegion('[data-testid="window-close"]', "no-drag", 1);
 
   const maximize = page.getByTestId("window-maximize");
   await maximize.click();
@@ -47,6 +131,11 @@ try {
     window.focus();
   });
   await expect.poll(() => nativeWindow.evaluate((window) => window.isMinimized())).toBe(false);
+
+  await nativeWindow.evaluate((window) => window.setSize(1440, 900));
+  await expect
+    .poll(() => nativeWindow.evaluate((window) => window.getBounds()))
+    .toMatchObject({ width: 1440, height: 900 });
 
   const scroll = page.locator(".atm-main");
   const metrics = await scroll.evaluate((element) => ({

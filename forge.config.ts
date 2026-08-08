@@ -22,6 +22,7 @@ const config: ForgeConfig = {
       /^\/docs(?:\/|$)/,
       /^\/release(?:\/|$)/,
       /^\/coverage(?:\/|$)/,
+      /^\/out(?:\/|$)/,
       /^\/output(?:\/|$)/,
       /^\/playwright-report(?:\/|$)/,
       /^\/test-results(?:\/|$)/,
