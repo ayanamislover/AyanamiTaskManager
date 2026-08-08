@@ -1,6 +1,5 @@
 # Agent 施工进度（最近 15 条）
 
-- 2026-08-08：按用户要求以 ATM Session `01KZG0T56EDGPQFJDN03JAFR1G` 推进新一轮工作；创建 ATM-T-0005～0008，分别覆盖卡巴斯基删除完整性恢复、网页暗黑主题、端口 9999、简短长期记忆说明与最终验收；ATM-T-0005 已 claim/start。
 - 2026-08-08：增量创建 ATM-T-0009（配色一致的无边框本地 EXE）并完成参考图核对；完整性基线进度更新为 55%，确认工作区/依赖/静态检查/43 测试/build/native SQLite/既有发布哈希正常；用户新增初版与完成版 GitHub 双提交要求，登记 ATM-T-0010 推进。
 - 2026-08-08：用户要求将过短的进度摘要上限按实际放宽并进行真实 3 子线程 ATM 分工验收；创建 ATM-T-0011，将 progress summary 上限目标定为 500 字并要求 REST/MCP 边界回归；计划在初版 Git 推送后由三线程分别领取暗黑、端口+协议、无边框 EXE。
 - 2026-08-08：完成初版 GitHub 发布：排除 output/release/out/.playwright-cli 等运行与生成目录，凭据特征扫描无命中；根提交 `d99e86e`（145 文件、29196 行）已推送至 `origin/ayanamislover/complete-implementation`，ATM-T-0010 更新至 50%，完成版提交待最终验收。
@@ -15,3 +14,4 @@
 - 2026-08-08：打包暗黑截图补充复核完成：短 REVIEWER Session `01KZG2YCQ4QRVY7GKSDTF6BFSE` 启动 seq 99；恢复 dark 后等待 450ms，主题按钮、顶部临时任务、底部添加或晋升的 computed background 均为 `rgb(41, 38, 46)`，精确对应 `--atm-surface: #29262e`，覆盖重截 `output/playwright/packaged-frameless-window-dark.png` 后视觉正常；确认原图仅捕获 0.16s 过渡，无需 CSS 修改；FACT `ATM-R-009` seq 100，Session completed seq 101。
 - 2026-08-08：最终 `pnpm release` 的 lint/format/typecheck、30 文件 47 测试、4 E2E、benchmark、build/make、unpacked/portable/installed smoke 均通过，仅旧卸载断言未识别 Squirrel `.dead` 状态；修正为 fail-closed 验证无进程、卸载注册项与快捷方式已移除且用户数据保留，只对精确安装目录执行安全清理；独立 distribution smoke 再跑 portable/installed 各 11/11、完整卸载判据全绿。
 - 2026-08-08：`release --resume` 完成最终十阶段 10/10 组装，根 `release/` Setup SHA-256 `235EAE7E...AFF6517`、portable SHA-256 `EEB30AFE...C432BA`；重启新 daemon 后正式 Session `01KZG3XXN1GX3W101W316X0RXN` 实收 314 字 progress（seq 103），证明 500 字上限在线生效；ATM-T-0005 与 ATM-T-0008 已按 verify/complete 闭环为 DONE/100%，提交前 format/lint/typecheck/diff-check 全绿，待最终 GitHub push/CI。
+- 2026-08-08：完成版提交 `8eb74bd` 已推送；GitHub Actions `31246104529` 在干净 Windows runner 安装成功，随后因 runner `core.autocrlf` 将 136 个文本文件检出为 CRLF 而被 Prettier 默认 LF 判定失败，非业务代码/依赖故障；新增仓库级 `.gitattributes` 强制文本 LF、显式标记二进制类型，准备以干净检出复验 CI。
