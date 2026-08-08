@@ -9,8 +9,8 @@ export function createWindowOptions(
   iconPath?: string,
 ): BrowserWindowConstructorOptions {
   return {
-    width: 1440,
-    height: 900,
+    width: 1920,
+    height: 1080,
     minWidth: 1100,
     minHeight: 680,
     show: false,

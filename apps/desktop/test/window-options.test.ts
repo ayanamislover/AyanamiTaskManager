@@ -6,6 +6,8 @@ describe("createWindowOptions", () => {
     const options = createWindowOptions("C:\\atm\\preload.cjs", false, "C:\\atm\\logo.png");
 
     expect(options).toMatchObject({
+      width: 1920,
+      height: 1080,
       frame: false,
       resizable: true,
       minimizable: true,
