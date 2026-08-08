@@ -47,6 +47,12 @@ describe("Ayanami MCP", () => {
     ]);
     expect(listed.tools.every((tool) => tool.outputSchema)).toBe(true);
     expect(JSON.stringify(listed.tools).length).toBeLessThanOrEqual(8_000);
+    expect(listed.tools.find((tool) => tool.name === "atm_begin")?.description).toContain(
+      "直接使用返回的 brief",
+    );
+    expect(listed.tools.find((tool) => tool.name === "atm_brief")?.description).toContain(
+      "仅在上下文压缩、长时间离开或明确恢复 working set",
+    );
 
     const result = await client.callTool({
       name: "atm_begin",

@@ -62,7 +62,8 @@ describe("Agent MCP 配置适配", () => {
     expect(rendered.stdio).toContain("--mcp-stdio");
     expect(rendered.stdio).toContain("ELECTRON_RUN_AS_NODE");
     expect(JSON.parse(rendered.generic).mcpServers["ayanami-task-manager"]).toBeTruthy();
-    expect(rendered.agentRule).toContain("R:\\Project_All\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md");
+    expect(rendered.agentRule).toContain("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md");
+    expect(rendered.agentRule).not.toContain("R:\\Project_All");
     expect(rendered.agentRule).toContain("后续所有任务执行均依赖 ATM");
   });
 });

@@ -3,8 +3,8 @@
 ## 先运行健康检查
 
 ```powershell
-pnpm atm -- status
-pnpm atm -- doctor
+pnpm atm status
+pnpm atm doctor
 ```
 
 `status` 检查本地服务和 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram、每个活动项目数据库及双库分离。开发态可显式传入 `--endpoint` 和 `--token`，但不要把 token 粘贴到 issue 或日志。

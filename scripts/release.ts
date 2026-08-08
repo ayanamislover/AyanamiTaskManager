@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  computeReleaseFingerprint,
+  decideReleaseResume,
+  type ReleaseFingerprint,
+  type ReleaseResumeDecision,
+} from "./release-fingerprint.js";
 
 type CommandResult = {
   name: string;
@@ -31,12 +37,24 @@ const commands: Array<{ name: string; args: string[] }> = [
 
 await mkdir(logDir, { recursive: true });
 const resume = process.argv.includes("--resume");
+const fingerprint = await computeReleaseFingerprint(root);
 const previous =
   resume && existsSync(reportPath)
-    ? (JSON.parse(await readFile(reportPath, "utf8")) as { commands?: CommandResult[] })
+    ? (JSON.parse(await readFile(reportPath, "utf8")) as {
+        fingerprint?: ReleaseFingerprint;
+        commands?: CommandResult[];
+      })
     : null;
+const resumeDecision: ReleaseResumeDecision = decideReleaseResume(
+  resume,
+  previous?.fingerprint,
+  fingerprint,
+);
+process.stdout.write(
+  `[release] resume: ${resumeDecision.reuse ? "允许复用" : "重新执行"} (${resumeDecision.reason})\n`,
+);
 const reusable = new Map(
-  (previous?.commands ?? [])
+  (resumeDecision.reuse ? (previous?.commands ?? []) : [])
     .filter((result) => result.exitCode === 0)
     .map((result) => [result.name, result]),
 );
@@ -91,7 +109,17 @@ const passed =
   results.length === commands.length && results.every((result) => result.exitCode === 0);
 await writeFile(
   reportPath,
-  `${JSON.stringify({ passed, completedAt: new Date().toISOString(), commands: results }, null, 2)}\n`,
+  `${JSON.stringify(
+    {
+      passed,
+      completedAt: new Date().toISOString(),
+      fingerprint,
+      resume: resumeDecision,
+      commands: results,
+    },
+    null,
+    2,
+  )}\n`,
   "utf8",
 );
 if (!passed) {

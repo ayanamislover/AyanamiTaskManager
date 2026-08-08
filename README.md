@@ -15,17 +15,17 @@ pnpm dev
 
 开发态 Web 界面固定监听 `http://127.0.0.1:9999`；daemon API 仍使用独立的本机运行时端口。
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。开发和测试可通过 `AYANAMI_TASK_DATA_DIR` 指向隔离目录。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。开发和测试可通过 `ATM_DATA_DIR` 指向隔离目录。
 
 ## 命令
 
 ```powershell
-pnpm atm -- status
-pnpm atm -- project list
-pnpm atm -- doctor
+pnpm atm status
+pnpm atm project list
+pnpm atm doctor
 ```
 
-Agent 执行项目前先阅读根目录 `ATM_AGENT_GUIDE.md`。完整用户说明见 `docs/user-guide.md`，详细 Agent 接入见 `docs/agent-integration.md`，架构与数据边界见 `docs/architecture.md` 和 `docs/data-model.md`。
+安装版启动后会把 Guide 与完整文档同步到 `%LOCALAPPDATA%\AyanamiTaskManager\`。Agent 执行项目前先阅读 `%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md`；源码仓库内保留同名文件作为发布源。
 
 ## 验收与发布
 

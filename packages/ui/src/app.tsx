@@ -17,6 +17,7 @@ import {
 import { ArchiveIcon as Archive } from "@phosphor-icons/react/dist/icons/Archive";
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
+import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
 import { CheckSquareIcon as CheckSquare } from "@phosphor-icons/react/dist/icons/CheckSquare";
 import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-icons/react/dist/icons/ClockCounterClockwise";
@@ -2822,6 +2823,7 @@ function ProjectPage({
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
+  const [engineeringCollapsed, setEngineeringCollapsed] = useState(false);
   const tasks = useQuery({
     queryKey: ["tasks", project.code],
     queryFn: () => client.tasks.list(project.code, { limit: 100 }),
@@ -3303,12 +3305,25 @@ function ProjectPage({
           )}
         </article>
       </section>
-      <section className="atm-panel atm-engineering" aria-label="工程统计">
+      <section
+        className={`atm-panel atm-engineering${engineeringCollapsed ? " is-collapsed" : ""}`}
+        aria-label="工程统计"
+      >
         <div className="atm-panel-head">
-          <div>
-            <h2>工程统计</h2>
-            <div className="atm-row-sub">由本地 Git 与文件事实计算，不生成质量评分</div>
-          </div>
+          <button
+            type="button"
+            className="atm-engineering-toggle"
+            aria-label={engineeringCollapsed ? "展开工程统计" : "折叠工程统计"}
+            aria-expanded={!engineeringCollapsed}
+            aria-controls="engineering-metrics-content"
+            onClick={() => setEngineeringCollapsed((collapsed) => !collapsed)}
+          >
+            <CaretDown size={17} aria-hidden="true" />
+            <span>
+              <strong>工程统计</strong>
+              <small>由本地 Git 与文件事实计算，不生成质量评分</small>
+            </span>
+          </button>
           <button
             className="atm-button"
             disabled={refreshEngineering.isPending}
@@ -3317,76 +3332,80 @@ function ProjectPage({
             {refreshEngineering.isPending ? "正在统计" : "刷新统计"}
           </button>
         </div>
-        {engineering.isLoading ? (
-          <LoadingRows count={2} />
-        ) : engineering.data?.available ? (
-          <div className="atm-engineering-body">
-            <div className="atm-engineering-kpis">
-              <div>
-                <span>Source LOC</span>
-                <strong>{Number(engineering.data.project.sourceLoc).toLocaleString()}</strong>
+        <div id="engineering-metrics-content" hidden={engineeringCollapsed}>
+          {engineering.isLoading ? (
+            <LoadingRows count={2} />
+          ) : engineering.data?.available ? (
+            <div className="atm-engineering-body">
+              <div className="atm-engineering-kpis">
+                <div>
+                  <span>Source LOC</span>
+                  <strong>{Number(engineering.data.project.sourceLoc).toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>Test LOC</span>
+                  <strong>{Number(engineering.data.project.testLoc).toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>文件</span>
+                  <strong>{Number(engineering.data.project.fileCount).toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>依赖</span>
+                  <strong>
+                    {Number(engineering.data.project.dependencyCount).toLocaleString()}
+                  </strong>
+                </div>
+                <div>
+                  <span>7 日净 LOC</span>
+                  <strong>{Number(engineering.data.project.netLoc7d).toLocaleString()}</strong>
+                </div>
+                <div>
+                  <span>30 日净 LOC</span>
+                  <strong>{Number(engineering.data.project.netLoc30d).toLocaleString()}</strong>
+                </div>
               </div>
-              <div>
-                <span>Test LOC</span>
-                <strong>{Number(engineering.data.project.testLoc).toLocaleString()}</strong>
+              {Math.abs(Number(engineering.data.project.netLoc7d)) > 5_000 ? (
+                <div className="atm-inline-warning">
+                  最近 7 日实现规模偏大，请确认工作项是否需要继续拆分。
+                </div>
+              ) : null}
+              <div className="atm-form-grid">
+                <div>
+                  <h3>最大文件</h3>
+                  {(engineering.data.project.largestFiles as any[]).slice(0, 6).map((item) => (
+                    <div className="atm-metric-file" key={item.path}>
+                      <span>{item.path}</span>
+                      <strong>{item.loc} LOC</strong>
+                    </div>
+                  ))}
+                </div>
+                <div>
+                  <h3>高 churn（30 日）</h3>
+                  {(engineering.data.project.highChurnFiles as any[]).slice(0, 6).map((item) => (
+                    <div className="atm-metric-file" key={item.path}>
+                      <span>{item.path}</span>
+                      <strong>{item.churn}</strong>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div>
-                <span>文件</span>
-                <strong>{Number(engineering.data.project.fileCount).toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>依赖</span>
-                <strong>{Number(engineering.data.project.dependencyCount).toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>7 日净 LOC</span>
-                <strong>{Number(engineering.data.project.netLoc7d).toLocaleString()}</strong>
-              </div>
-              <div>
-                <span>30 日净 LOC</span>
-                <strong>{Number(engineering.data.project.netLoc30d).toLocaleString()}</strong>
+              <div className="atm-row-sub">
+                HEAD {String(engineering.data.project.head).slice(0, 10)} ·{" "}
+                {formatTime(engineering.data.project.capturedAt)}
               </div>
             </div>
-            {Math.abs(Number(engineering.data.project.netLoc7d)) > 5_000 ? (
-              <div className="atm-inline-warning">
-                最近 7 日实现规模偏大，请确认工作项是否需要继续拆分。
-              </div>
-            ) : null}
-            <div className="atm-form-grid">
-              <div>
-                <h3>最大文件</h3>
-                {(engineering.data.project.largestFiles as any[]).slice(0, 6).map((item) => (
-                  <div className="atm-metric-file" key={item.path}>
-                    <span>{item.path}</span>
-                    <strong>{item.loc} LOC</strong>
-                  </div>
-                ))}
-              </div>
-              <div>
-                <h3>高 churn（30 日）</h3>
-                {(engineering.data.project.highChurnFiles as any[]).slice(0, 6).map((item) => (
-                  <div className="atm-metric-file" key={item.path}>
-                    <span>{item.path}</span>
-                    <strong>{item.churn}</strong>
-                  </div>
-                ))}
+          ) : (
+            <div className="atm-panel-body">
+              <div className="atm-row-title">此项目暂不可统计</div>
+              <div className="atm-row-sub">
+                {engineering.data?.reason === "NO_SOURCE_PATH"
+                  ? "项目没有源码目录"
+                  : (engineering.data?.message ?? "源码目录不是可读取的 Git 仓库")}
               </div>
             </div>
-            <div className="atm-row-sub">
-              HEAD {String(engineering.data.project.head).slice(0, 10)} ·{" "}
-              {formatTime(engineering.data.project.capturedAt)}
-            </div>
-          </div>
-        ) : (
-          <div className="atm-panel-body">
-            <div className="atm-row-title">此项目暂不可统计</div>
-            <div className="atm-row-sub">
-              {engineering.data?.reason === "NO_SOURCE_PATH"
-                ? "项目没有源码目录"
-                : (engineering.data?.message ?? "源码目录不是可读取的 Git 仓库")}
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </section>
       <div className="atm-toolbar">
         <div className="atm-tabs" role="tablist">

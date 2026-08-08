@@ -30,6 +30,7 @@ import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
+import { installAgentDocumentation } from "./agent-documentation.js";
 import { createWindowOptions } from "./window-options.js";
 import { randomStartupDelayMs, shouldDelayStartup, waitForStartupDelay } from "./startup.js";
 
@@ -98,6 +99,10 @@ function applicationLogoPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "logo.png")
     : join(app.getAppPath(), "logo.png");
+}
+
+function bundledDocumentationRoot(): string {
+  return app.isPackaged ? process.resourcesPath : app.getAppPath();
 }
 
 function trayImage() {
@@ -311,6 +316,7 @@ function installDesktopEventObservers(): void {
 
 async function startApplication(background: boolean): Promise<void> {
   const dataDir = dataDirBeforeReady();
+  installAgentDocumentation(bundledDocumentationRoot(), dataDir);
   const migrationsRoot = join(app.getAppPath(), "migrations");
   service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
   const runtimeDir = join(dataDir, "runtime");
