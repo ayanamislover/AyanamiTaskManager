@@ -17,6 +17,11 @@ describe("Agent 文档正式数据根分发", () => {
     const bundled = join(root, "bundled");
     const dataDir = join(root, "data");
     mkdirSync(join(bundled, "docs", "adr"), { recursive: true });
+    for (const name of ["atm-plan", "atm-task"]) {
+      const skill = join(bundled, "integrations", "skills", name);
+      mkdirSync(skill, { recursive: true });
+      writeFileSync(join(skill, "SKILL.md"), `---\nname: ${name}\n---\n`, "utf8");
+    }
     writeFileSync(join(bundled, "ATM_AGENT_GUIDE.md"), "guide-v1\n", "utf8");
     writeFileSync(join(bundled, "docs", "agent-integration.md"), "integration-v1\n", "utf8");
     writeFileSync(join(bundled, "docs", "adr", "ADR-001.md"), "adr-v1\n", "utf8");
@@ -52,5 +57,21 @@ describe("Agent 文档正式数据根分发", () => {
     expect(installed).toContain("拆成多个可独立完成和验收的子 WorkItem");
     const guide = readFileSync(join(dataDir, "ATM_AGENT_GUIDE.md"), "utf8");
     expect(guide).toContain("拆成多个可独立完成和验收的子 WorkItem");
+  });
+
+  it("把 atm-plan 与 atm-task Skills 发布到设备无关数据根", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-agent-skills-"));
+    temporary.push(root);
+    const dataDir = join(root, "data");
+
+    const installed = installAgentDocumentation(process.cwd(), dataDir);
+
+    expect(installed.skillsPath).toBe(join(dataDir, "skills"));
+    expect(readFileSync(join(installed.skillsPath, "atm-plan", "SKILL.md"), "utf8")).toContain(
+      "name: atm-plan",
+    );
+    expect(readFileSync(join(installed.skillsPath, "atm-task", "SKILL.md"), "utf8")).toContain(
+      "name: atm-task",
+    );
   });
 });

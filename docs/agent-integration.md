@@ -22,6 +22,14 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
 
+### Session Git Context
+
+ATM 从 `cwd` 确定性采集 Git 上下文，使用只读查询得到 branch、HEAD、仓库根、worktree 根/common dir、detached、dirty 和可用性。调用方自报的 branch/head 只作提示，不能覆盖本机观察值。Git 目录不存在、命令失败或权限不足时，Session 仍照常创建和推进；界面会显示不可用及 `git_error`，不会把失败降级误报成干净仓库。
+
+上下文自动刷新仅发生在以下边界：`atm_begin`、有意义的 `atm_progress_add`（含项目更新）、`verify`、`complete`、`atm_end`。需要立即重新观察时，用户可调用 `POST /api/v1/projects/:code/sessions/:id/git-context/refresh`；普通列表读取不会触发刷新。刷新结果会持久化到 Session，并在发生变化时追加 `agent.git_context.updated` 事件。
+
+同一 `worktree` 或 branch 被多个在线 Session 使用时，ATM 只给出冲突警告供 Agent 协调；它不是锁，不会自动终止 Session、撤销领取或阻止执行。请结合实际协作约定决定是否继续。
+
 ### 任务拆分
 
 开始实现前先判断当前 WorkItem 是否可在一个独立工作阶段内完成。
@@ -31,6 +39,8 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
 可用的 11 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。
+
+工作中发现新的独立事项时，用 `atm_task_create` 的 `discovered_from` 指向已有任务，或用 `discovered_from_ref` 指向同一批次的 `client_ref`。这是可追溯的发现关系，不会阻塞 ready queue，也不应替代 `depends_on`。
 
 ## 稀疏控制面约束
 

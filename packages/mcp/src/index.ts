@@ -34,6 +34,7 @@ function compactJsonSchema(value: unknown): unknown {
     "exclusiveMaximum",
     "minItems",
     "maxItems",
+    "additionalProperties",
   ]);
   return Object.fromEntries(
     Object.entries(source)
@@ -145,6 +146,34 @@ function pickBriefSections(
   return Object.fromEntries(Object.entries(payload).filter(([key]) => keep.has(key)));
 }
 
+// atm_brief is a working-set snapshot, not a second atm_task_get. Keep the fields
+// needed to resume work, while excluding persistence/session metadata whose object
+// overhead cannot be reduced by bounded() and could otherwise evict the requested task.
+function compactBriefTask(value: unknown): Record<string, unknown> {
+  const task = plain(value);
+  const source = task && typeof task === "object" ? (task as Record<string, unknown>) : {};
+  const keys = [
+    "key",
+    "title",
+    "type",
+    "status",
+    "priority",
+    "progress",
+    "version",
+    "description",
+    "acceptance",
+    "checklist",
+    "dependencies",
+    "blockedReason",
+    "waitingFor",
+    "discoveredFrom",
+    "discovered",
+  ];
+  return Object.fromEntries(
+    keys.filter((key) => source[key] !== undefined).map((key) => [key, source[key]]),
+  );
+}
+
 // 装不下时的丢弃顺序，越靠前越先丢。恢复 working set 最需要的
 // handoff / currentTask / task 放在最后，宁可只剩它们也不要退化成空回执。
 // task 与 delta 只在调用方显式传了 task_key / since_seq 时才存在，
@@ -186,34 +215,41 @@ function fitBrief(
   }
 }
 
-const workItemCreate = z.object({
-  client_ref: z.string().min(1).max(100),
-  objective_id: z.string().optional(),
-  milestone_id: z.string().nullable().optional(),
-  parent_key: z.string().nullable().optional(),
-  parent_ref: z.string().nullable().optional(),
-  depends_on: z.array(z.string()).max(50).default([]),
-  depends_on_refs: z.array(z.string()).max(50).default([]),
-  title: z.string().trim().min(1).max(400),
-  description: z.string().max(50_000).default(""),
-  type: z.enum(["EPIC", "TASK", "SUBTASK", "BUG", "RESEARCH", "REVIEW"]).default("TASK"),
-  priority: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
-  status: z.enum(["BACKLOG", "READY"]).default("BACKLOG"),
-  acceptance: z.array(z.string().max(1000)).max(100).default([]),
-  checklist: z
-    .array(
-      z.object({
-        title: z.string().min(1).max(400),
-        evidence_required: z.boolean().default(false),
-        weight: z.number().positive().max(1000).default(1),
-      }),
-    )
-    .max(100)
-    .default([]),
-  weight: z.number().positive().max(1000).default(1),
-  target_date: z.string().nullable().optional(),
-  verification_required: z.boolean().default(false),
-});
+const workItemCreate = z
+  .object({
+    client_ref: z.string().min(1).max(100),
+    objective_id: z.string().optional(),
+    milestone_id: z.string().nullable().optional(),
+    parent_key: z.string().nullable().optional(),
+    parent_ref: z.string().nullable().optional(),
+    depends_on: z.array(z.string()).max(50).default([]),
+    depends_on_refs: z.array(z.string()).max(50).default([]),
+    discovered_from: z.string().min(1).max(100).optional(),
+    discovered_from_ref: z.string().min(1).max(100).optional(),
+    title: z.string().trim().min(1).max(400),
+    description: z.string().max(50_000).default(""),
+    type: z.enum(["EPIC", "TASK", "SUBTASK", "BUG", "RESEARCH", "REVIEW"]).default("TASK"),
+    priority: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
+    status: z.enum(["BACKLOG", "READY"]).default("BACKLOG"),
+    acceptance: z.array(z.string().max(1000)).max(100).default([]),
+    checklist: z
+      .array(
+        z.object({
+          title: z.string().min(1).max(400),
+          evidence_required: z.boolean().default(false),
+          weight: z.number().positive().max(1000).default(1),
+        }),
+      )
+      .max(100)
+      .default([]),
+    weight: z.number().positive().max(1000).default(1),
+    target_date: z.string().nullable().optional(),
+    verification_required: z.boolean().default(false),
+  })
+  .refine((value) => !(value.discovered_from && value.discovered_from_ref), {
+    message: "discovered_from 与 discovered_from_ref 只能指定一个",
+    path: ["discovered_from_ref"],
+  });
 
 const workItemPatch = z.object({
   task_key: taskKey,
@@ -271,7 +307,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_begin",
     {
-      description: "开工或恢复只调用一次；直接使用返回的 brief，task_list/task_get 按需。",
+      description: "开工一次；直接使用返回的 brief；task_list/task_get 按需。",
       inputSchema: {
         cwd: z.string().min(1).optional(),
         project_code: projectCode.optional(),
@@ -365,7 +401,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_brief",
     {
-      description: "仅在上下文压缩、长时间离开或明确恢复 working set 时重建紧凑上下文。",
+      description: "仅在上下文压缩、长时间离开或明确恢复 working set 时调用。",
       inputSchema: {
         project_code: projectCode,
         session_id: sessionId.optional(),
@@ -389,7 +425,11 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         extras === 0 ? input.max_chars : Math.max(300, Math.floor(input.max_chars / (extras + 1)));
       const brief = await service.brief(input.project_code, input.session_id, briefBudget);
       const detail = withTask
-        ? { task: await service.getWorkItem(input.project_code, input.task_key!, "context") }
+        ? {
+            task: compactBriefTask(
+              await service.getWorkItem(input.project_code, input.task_key!, "context"),
+            ),
+          }
         : {};
       const delta = withDelta
         ? { delta: await service.delta(input.project_code, input.since_seq!, 20) }
@@ -401,7 +441,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_task_list",
     {
-      description: "筛选并分页列出任务。",
+      description: "分页列任务。",
       inputSchema: {
         project: projectCode,
         status: z.string().optional(),
@@ -445,7 +485,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_task_get",
     {
-      description: "读取单个任务。",
+      description: "读单个任务。",
       inputSchema: {
         project: projectCode,
         task_key: taskKey,
@@ -468,7 +508,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_task_create",
     {
-      description: "批量创建任务及父子依赖。",
+      description: "批量创建任务与关系。",
       inputSchema: {
         project: projectCode,
         session: sessionId,
@@ -491,6 +531,10 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
             objectiveId,
             dependsOn: item.depends_on,
             dependsOnRefs: item.depends_on_refs,
+            ...(item.discovered_from === undefined ? {} : { discoveredFrom: item.discovered_from }),
+            ...(item.discovered_from_ref === undefined
+              ? {}
+              : { discoveredFromRef: item.discovered_from_ref }),
             title: item.title,
             description: item.description,
             type: item.type,
@@ -531,7 +575,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_task_patch",
     {
-      description: "批量变更任务状态或字段。",
+      description: "批量变更任务。",
       inputSchema: {
         project: projectCode,
         session: sessionId,
@@ -577,7 +621,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_progress_add",
     {
-      description: "写入有意义的任务或项目进度。",
+      description: "写任务或项目进度。",
       inputSchema: {
         project: projectCode,
         session: sessionId,
@@ -628,7 +672,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_record",
     {
-      description: "保存或取代关键项目记录。",
+      description: "保存关键记录。",
       inputSchema: {
         project: projectCode,
         session: sessionId,
@@ -662,7 +706,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_search",
     {
-      description: "搜索项目或全局事实。",
+      description: "搜索事实。",
       inputSchema: {
         project: projectCode.optional(),
         query: z.string().trim().min(1).max(500),
@@ -687,7 +731,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_delta",
     {
-      description: "读取序列号后的紧凑变化。",
+      description: "读增量变化。",
       inputSchema: {
         project: projectCode,
         since_seq: z.number().int().nonnegative(),
@@ -704,7 +748,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_end",
     {
-      description: "结束或退役会话并保存交接。",
+      description: "结束会话并交接。",
       inputSchema: {
         project: projectCode,
         session: sessionId,

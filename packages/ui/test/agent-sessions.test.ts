@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { summarizeAgentSessions } from "../src/agent-sessions.js";
+import {
+  findAgentSessionConflicts,
+  groupAgentSessions,
+  summarizeAgentSessions,
+} from "../src/agent-sessions.js";
 
 const session = (
   id: string,
@@ -17,6 +21,40 @@ const session = (
   last_seen_at: lastSeenAt,
 });
 
+describe("Agent Git context conflicts", () => {
+  it("提示两个活动 Session 共用同一 Worktree", () => {
+    expect(
+      findAgentSessionConflicts([
+        {
+          ...session("one", "codex", "ATM", "ONLINE", "2026-08-08T12:00:00Z"),
+          worktree_root: "R:\\repo",
+        },
+        {
+          ...session("two", "claude", "ATM", "ONLINE", "2026-08-08T12:01:00Z"),
+          worktree_root: "r:\\repo",
+        },
+      ]),
+    ).toContainEqual(expect.objectContaining({ kind: "SAME_WORKTREE", count: 2 }));
+  });
+
+  it("提示两个活动 Session 共用同一 branch", () => {
+    expect(
+      findAgentSessionConflicts([
+        {
+          ...session("one", "codex", "ATM", "ONLINE", "2026-08-08T12:00:00Z"),
+          git_branch: "feature/shared",
+          worktree_root: "R:\\one",
+        },
+        {
+          ...session("two", "claude", "ATM", "ONLINE", "2026-08-08T12:01:00Z"),
+          git_branch: "feature/shared",
+          worktree_root: "R:\\two",
+        },
+      ]),
+    ).toContainEqual(expect.objectContaining({ kind: "SAME_BRANCH", count: 2 }));
+  });
+});
+
 describe("Agent Session 聚合", () => {
   it("同项目同 Agent 只保留一行并优先在线 Session", () => {
     const result = summarizeAgentSessions([
@@ -27,6 +65,11 @@ describe("Agent Session 聚合", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ id: "online", sessionCount: 3 });
+    expect(result[0]?.sessionHistory.map((item) => item.id)).toEqual([
+      "new-closed",
+      "online",
+      "old-closed",
+    ]);
   });
 
   it("不同 Agent 或不同项目不会误合并，并按在线和最近活动排序", () => {
@@ -38,5 +81,25 @@ describe("Agent Session 聚合", () => {
 
     expect(result.map((item) => item.id)).toEqual(["e2e-codex", "atm-claude", "atm-codex"]);
     expect(result.every((item) => item.sessionCount === 1)).toBe(true);
+  });
+
+  it("按项目聚合 Agent 身份，同时保留每个身份的完整历史", () => {
+    const result = groupAgentSessions([
+      session("atm-old", "codex-root", "ATM", "CLOSED", "2026-08-08T10:00:00Z"),
+      session("atm-online", "codex-root", "ATM", "ONLINE", "2026-08-08T12:00:00Z"),
+      session("atm-review", "reviewer", "ATM", "CLOSED", "2026-08-08T11:00:00Z"),
+      session("aot-online", "codex-root", "AOT", "ONLINE", "2026-08-08T09:00:00Z"),
+    ]);
+
+    expect(result.map((group) => group.project)).toEqual(["ATM", "AOT"]);
+    expect(result[0]).toMatchObject({ project: "ATM", sessionCount: 3, onlineCount: 1 });
+    expect(result[0]?.agents).toHaveLength(2);
+    expect(result[0]?.agents.find((item) => item.agent_id === "codex-root"))?.toMatchObject({
+      id: "atm-online",
+      sessionCount: 2,
+    });
+    expect(
+      result[0]?.agents.find((item) => item.agent_id === "codex-root")?.sessionHistory,
+    ).toHaveLength(2);
   });
 });

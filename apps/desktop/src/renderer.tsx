@@ -21,6 +21,11 @@ type DesktopBridge = {
     agentRule: string;
   }>;
   installMcp(client: "CODEX" | "CLAUDE"): Promise<{ path: string; backupPath: string | null }>;
+  getAgentIntegrations(): Promise<AgentIntegrationReport[]>;
+  manageAgentIntegration(
+    client: "CODEX" | "CLAUDE",
+    action: AgentIntegrationAction,
+  ): Promise<{ report: AgentIntegrationReport; preview: AgentRulePreview | null }>;
   copyText(text: string): Promise<boolean>;
   minimizeWindow(): Promise<void>;
   toggleMaximizeWindow(): Promise<boolean>;
@@ -28,6 +33,19 @@ type DesktopBridge = {
   closeWindow(): Promise<void>;
   onWindowMaximizedChange(listener: (maximized: boolean) => void): () => void;
   onNavigate(listener: (route: string) => void): () => void;
+};
+
+type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
+type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
+type AgentRulePreview = { current: string; proposed: string };
+type AgentIntegrationReport = {
+  client: "CODEX" | "CLAUDE";
+  mcpInstalled: boolean;
+  rule: { state: AgentIntegrationState; path: string; version: number | null };
+  skills: {
+    state: AgentIntegrationState;
+    skills: Array<{ name: string; state: AgentIntegrationState; version: number | null }>;
+  };
 };
 
 declare global {

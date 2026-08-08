@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
@@ -59,6 +59,121 @@ const LOCK_FILES = new Set([
   "uv.lock",
   "yarn.lock",
 ]);
+
+export type GitContextError = "NOT_GIT" | "WORKTREE_MISSING" | "COMMAND_TIMEOUT" | "COMMAND_FAILED";
+
+export type GitContext = {
+  available: boolean;
+  repoRoot: string | null;
+  worktreeRoot: string | null;
+  gitCommonDir: string | null;
+  isLinkedWorktree: boolean | null;
+  branch: string | null;
+  head: string | null;
+  detached: boolean | null;
+  dirty: boolean | null;
+  error: GitContextError | null;
+};
+
+export type GitCommandResult = {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  signal?: string | null;
+  error?: Error & { code?: string };
+};
+
+export type GitCommandRunner = (args: string[], cwd: string, timeoutMs: number) => GitCommandResult;
+
+function defaultGitCommandRunner(args: string[], cwd: string, timeoutMs: number): GitCommandResult {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: timeoutMs,
+    windowsHide: true,
+  });
+  return {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    signal: result.signal,
+    ...(result.error ? { error: result.error } : {}),
+  };
+}
+
+function unavailable(error: GitContextError): GitContext {
+  return {
+    available: false,
+    repoRoot: null,
+    worktreeRoot: null,
+    gitCommonDir: null,
+    isLinkedWorktree: null,
+    branch: null,
+    head: null,
+    detached: null,
+    dirty: null,
+    error,
+  };
+}
+
+function gitContextFailure(result: GitCommandResult): GitContextError {
+  if (result.error?.code === "ETIMEDOUT" || result.signal === "SIGTERM") return "COMMAND_TIMEOUT";
+  return /not a git repository/iu.test(`${result.stderr}\n${result.stdout}`)
+    ? "NOT_GIT"
+    : "COMMAND_FAILED";
+}
+
+function absoluteGitPath(cwd: string, value: string): string | null {
+  const trimmed = value.trim();
+  return trimmed ? resolve(cwd, trimmed) : null;
+}
+
+export function inspectGitContext(
+  cwd: string,
+  options: { timeoutMs?: number; runner?: GitCommandRunner } = {},
+): GitContext {
+  if (!existsSync(cwd)) return unavailable("WORKTREE_MISSING");
+  const timeoutMs = Math.max(100, Math.min(10_000, options.timeoutMs ?? 1500));
+  const runner = options.runner ?? defaultGitCommandRunner;
+  const run = (args: string[]) => runner(args, cwd, timeoutMs);
+  const rootResult = run(["rev-parse", "--show-toplevel"]);
+  if (rootResult.status !== 0) return unavailable(gitContextFailure(rootResult));
+
+  const worktreeRoot = absoluteGitPath(cwd, rootResult.stdout);
+  if (!worktreeRoot) return unavailable("COMMAND_FAILED");
+  const gitDirResult = run(["rev-parse", "--absolute-git-dir"]);
+  const commonDirResult = run(["rev-parse", "--git-common-dir"]);
+  const headResult = run(["rev-parse", "HEAD"]);
+  const branchResult = run(["branch", "--show-current"]);
+  const statusResult = run(["status", "--porcelain", "--untracked-files=normal"]);
+  const worktreesResult = run(["worktree", "list", "--porcelain"]);
+  const gitDir = gitDirResult.status === 0 ? absoluteGitPath(cwd, gitDirResult.stdout) : null;
+  const gitCommonDir =
+    commonDirResult.status === 0 ? absoluteGitPath(cwd, commonDirResult.stdout) : null;
+  const worktrees =
+    worktreesResult.status === 0
+      ? worktreesResult.stdout
+          .split(/\r?\n/gu)
+          .filter((line) => line.startsWith("worktree "))
+          .map((line) => absoluteGitPath(cwd, line.slice("worktree ".length)))
+          .filter((path): path is string => Boolean(path))
+      : [];
+  const branch = branchResult.status === 0 ? branchResult.stdout.trim() || null : null;
+  const head = headResult.status === 0 ? headResult.stdout.trim() || null : null;
+  return {
+    available: true,
+    repoRoot: worktrees[0] ?? worktreeRoot,
+    worktreeRoot,
+    gitCommonDir,
+    isLinkedWorktree:
+      gitDir && gitCommonDir ? gitDir.toLowerCase() !== gitCommonDir.toLowerCase() : null,
+    branch,
+    head,
+    detached: head ? branch === null : null,
+    dirty: statusResult.status === 0 ? statusResult.stdout.trim().length > 0 : null,
+    error: null,
+  };
+}
 
 export type FileMetric = { path: string; loc: number };
 export type ChurnMetric = { path: string; added: number; deleted: number; churn: number };

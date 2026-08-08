@@ -21,9 +21,23 @@ import {
   Tray,
 } from "electron";
 import {
+  defaultClaudeRulePath,
+  defaultClaudeSkillsPath,
+  defaultCodexRulePath,
+  defaultCodexSkillsPath,
+  inspectAgentSkills,
+  inspectManagedAgentRule,
   installClaudeConfig,
   installCodexConfig,
+  installAgentSkills,
+  isClaudeConfigInstalled,
+  isCodexConfigInstalled,
+  manageAgentRule,
   renderMcpConfigs,
+  uninstallAgentSkills,
+  uninstallClaudeConfig,
+  uninstallCodexConfig,
+  type AgentRuleAction,
 } from "@ayanami-task/agent-config";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { AyanamiClient } from "@ayanami-task/client";
@@ -109,6 +123,25 @@ function applicationLogoPath(): string {
 
 function bundledDocumentationRoot(): string {
   return app.isPackaged ? process.resourcesPath : app.getAppPath();
+}
+
+function agentIntegrationPaths(client: "CODEX" | "CLAUDE") {
+  return client === "CODEX"
+    ? { rulePath: defaultCodexRulePath(), skillsPath: defaultCodexSkillsPath() }
+    : { rulePath: defaultClaudeRulePath(), skillsPath: defaultClaudeSkillsPath() };
+}
+
+function agentIntegrationReport(client: "CODEX" | "CLAUDE") {
+  const paths = agentIntegrationPaths(client);
+  return {
+    client,
+    mcpInstalled: client === "CODEX" ? isCodexConfigInstalled() : isClaudeConfigInstalled(),
+    rule: inspectManagedAgentRule(paths.rulePath),
+    skills: inspectAgentSkills({
+      sourceRoot: join(dataDirBeforeReady(), "skills"),
+      targetRoot: paths.skillsPath,
+    }),
+  };
 }
 
 function trayImage() {
@@ -412,6 +445,47 @@ async function startApplication(background: boolean): Promise<void> {
       return installClaudeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
     throw new Error("MCP_CLIENT_UNSUPPORTED");
   });
+  ipcMain.handle("atm:get-agent-integrations", () => [
+    agentIntegrationReport("CODEX"),
+    agentIntegrationReport("CLAUDE"),
+  ]);
+  ipcMain.handle(
+    "atm:manage-agent-integration",
+    (_event, client: "CODEX" | "CLAUDE", action: AgentRuleAction) => {
+      if (!(client === "CODEX" || client === "CLAUDE")) throw new Error("MCP_CLIENT_UNSUPPORTED");
+      const paths = agentIntegrationPaths(client);
+      const skillState = inspectAgentSkills({
+        sourceRoot: join(dataDirBeforeReady(), "skills"),
+        targetRoot: paths.skillsPath,
+      }).state;
+      if (
+        action !== "PREVIEW" &&
+        action !== "UNINSTALL" &&
+        skillState === "MODIFIED" &&
+        action !== "REPAIR"
+      ) {
+        throw new Error("AGENT_SKILL_MODIFIED_REQUIRES_REPAIR");
+      }
+      const rule = manageAgentRule({ path: paths.rulePath, action });
+      if (action === "PREVIEW") return { report: agentIntegrationReport(client), preview: rule };
+      if (action === "UNINSTALL") {
+        if (client === "CODEX") uninstallCodexConfig();
+        else uninstallClaudeConfig();
+        uninstallAgentSkills(paths.skillsPath);
+      } else {
+        if (client === "CODEX" && !isCodexConfigInstalled())
+          installCodexConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+        if (client === "CLAUDE" && !isClaudeConfigInstalled())
+          installClaudeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+        if (skillState !== "INSTALLED")
+          installAgentSkills({
+            sourceRoot: join(dataDirBeforeReady(), "skills"),
+            targetRoot: paths.skillsPath,
+          });
+      }
+      return { report: agentIntegrationReport(client), preview: null };
+    },
+  );
   ipcMain.handle("atm:copy-text", (_event, text: string) => {
     clipboard.writeText(text);
     return true;

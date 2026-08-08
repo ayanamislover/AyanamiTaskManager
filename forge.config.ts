@@ -13,6 +13,7 @@ const config: ForgeConfig = {
       "logo.png",
       "ATM_AGENT_GUIDE.md",
       "docs",
+      "integrations",
       "apps/desktop/resources/mcp-stdio.cjs",
     ],
     ignore: [

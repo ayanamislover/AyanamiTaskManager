@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
 import {
   gitHead,
+  inspectGitContext,
   scanProjectMetrics,
   scanWorkItemChanges,
 } from "@ayanami-task/engineering-metrics";
@@ -317,6 +318,13 @@ export class AyanamiTaskService {
     return { type: "AGENT", id: session.agent_id, sessionId };
   }
 
+  async #refreshSessionGitContext(projectCode: string, sessionId: string) {
+    const repository = await this.#repository(projectCode);
+    const session = repository.getSession(sessionId);
+    if (!session.cwd) return { updated: false, sequence: repository.meta.sequence };
+    return repository.updateSessionGitContext(sessionId, inspectGitContext(String(session.cwd)));
+  }
+
   #userActor(): ProjectActor {
     return { type: "USER", id: "USER", sessionId: null };
   }
@@ -427,6 +435,7 @@ export class AyanamiTaskService {
       });
     }
     const repository = await this.#repository(project.code);
+    const gitContext = input.cwd ? inspectGitContext(input.cwd) : null;
     const session = repository.createSession({
       agentId: input.agentId,
       displayName: input.displayName ?? input.agentId,
@@ -437,6 +446,7 @@ export class AyanamiTaskService {
       ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       ...(input.gitBranch === undefined ? {} : { gitBranch: input.gitBranch }),
       ...(input.gitHead === undefined ? {} : { gitHead: input.gitHead }),
+      gitContext,
       ...(input.resume === undefined ? {} : { resume: input.resume }),
       ...(input.predecessorSessionId === undefined
         ? {}
@@ -659,6 +669,9 @@ export class AyanamiTaskService {
       opId,
       patches,
     );
+    if (patches.some((patch) => ["verify", "complete"].includes(String(patch.operation)))) {
+      await this.#refreshSessionGitContext(projectCode, sessionId);
+    }
     await this.#flush(projectCode);
     const starts = patches
       .filter((patch) => ["start", "claim"].includes(String(patch.operation)))
@@ -740,6 +753,7 @@ export class AyanamiTaskService {
   ): Promise<ReturnType<ProjectRepository["addProgress"]>> {
     const repository = await this.#repository(projectCode);
     const result = repository.addProgress(await this.#actor(projectCode, sessionId), opId, input);
+    await this.#refreshSessionGitContext(projectCode, sessionId);
     await this.#flush(projectCode);
     return result;
   }
@@ -768,6 +782,7 @@ export class AyanamiTaskService {
         next: input.next ?? [],
       },
     );
+    await this.#refreshSessionGitContext(projectCode, sessionId);
     await this.#flush(projectCode);
     return result;
   }
@@ -827,6 +842,7 @@ export class AyanamiTaskService {
       .listWorkItems({ limit: 500 })
       .filter((task) => task.claimedBySessionId === sessionId)
       .map((task) => task.key);
+    await this.#refreshSessionGitContext(projectCode, sessionId);
     const result = repository.endSession(await this.#actor(projectCode, sessionId), opId, input);
     await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(projectCode, claimedTaskKeys, false);
@@ -838,6 +854,12 @@ export class AyanamiTaskService {
     const result = repository.forceCloseSession(sessionId, releaseClaims);
     await this.#flush(projectCode);
     return result;
+  }
+
+  async refreshSessionGitContextAsUser(projectCode: string, sessionId: string) {
+    const result = await this.#refreshSessionGitContext(projectCode, sessionId);
+    await this.#flush(projectCode);
+    return { ...result, session: (await this.#repository(projectCode)).getSession(sessionId) };
   }
 
   async doctor(): Promise<Awaited<ReturnType<AyanamiDatabaseManager["doctor"]>>> {
