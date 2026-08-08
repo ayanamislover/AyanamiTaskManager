@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -30,10 +30,11 @@ function repository(name: string): string {
 describe("deterministic Git context", () => {
   it("识别普通主工作树", () => {
     const cwd = repository("atm-git-main");
+    const canonicalCwd = realpathSync.native(cwd);
     expect(inspectGitContext(cwd)).toMatchObject({
       available: true,
-      repoRoot: cwd,
-      worktreeRoot: cwd,
+      repoRoot: canonicalCwd,
+      worktreeRoot: canonicalCwd,
       isLinkedWorktree: false,
       detached: false,
       dirty: false,
@@ -46,8 +47,8 @@ describe("deterministic Git context", () => {
     git(cwd, ["worktree", "add", "--detach", linked, "HEAD"]);
     expect(inspectGitContext(linked)).toMatchObject({
       available: true,
-      repoRoot: cwd,
-      worktreeRoot: linked,
+      repoRoot: realpathSync.native(cwd),
+      worktreeRoot: realpathSync.native(linked),
       isLinkedWorktree: true,
     });
   });

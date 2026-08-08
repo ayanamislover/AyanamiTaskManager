@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -25,6 +25,7 @@ describe("Session Git context", () => {
     writeFileSync(join(cwd, "tracked.txt"), "baseline\n", "utf8");
     git(cwd, ["add", "tracked.txt"]);
     git(cwd, ["commit", "-m", "baseline"]);
+    const canonicalCwd = realpathSync.native(cwd);
 
     const service = await AyanamiTaskService.open({
       dataDir: join(root, "data"),
@@ -49,7 +50,7 @@ describe("Session Git context", () => {
         cwd,
         git_available: 1,
         git_dirty: 0,
-        worktree_root: cwd,
+        worktree_root: canonicalCwd,
       });
       expect(initial.git_branch).not.toBe("model/fabricated");
       expect(initial.git_head).toMatch(/^[0-9a-f]{40}$/u);
@@ -83,7 +84,7 @@ describe("Session Git context", () => {
       expect(
         (await service.getWorkItem(project.code, started.items[0]!.key, "context"))
           .executionSession,
-      ).toMatchObject({ git_head: initial.git_head, worktree_root: cwd });
+      ).toMatchObject({ git_head: initial.git_head, worktree_root: canonicalCwd });
 
       writeFileSync(join(cwd, "tracked.txt"), "dirty\n", "utf8");
       await service.addProjectProgress(project.code, begun.session, "git-progress", {
