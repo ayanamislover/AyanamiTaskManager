@@ -1,6 +1,5 @@
 # Agent 施工进度（最近 15 条）
 
-- 2026-08-08：端口与协议子线程通过 ATM Session `01KZG1G4D8XN7GM5Y0795DMHFG` 领取并启动 ATM-T-0007/0011；Web/Vite 开发、视觉与 E2E 端口统一为 9999，保留 daemon 4393/4394 与生产动态端口；进度摘要协议/MCP 上限改为 500，新增协议 500/501、REST 300/501、MCP 300/500/501 回归，定向 9 测试全绿。
 - 2026-08-08：无边框 EXE 源码切片推进至 ATM-T-0009 `VERIFYING`/80%：`createWindowOptions` 红绿测试 2/2，`frame:false`、原生暗色首屏、窗口 IPC/最大化通知、Electron 专属可拖动顶栏和语义 token 控件已接通；desktop/UI typecheck、定向 ESLint、desktop production build 全绿，Session `01KZG1GVF65T5TQHA11JEZFB9T` 保留待打包 smoke。
 - 2026-08-08：暗黑主题最终验收完成：9999 端口 Playwright 4/4 通过，确认系统浅色默认、手动切换、`atm.theme` reload 持久化并复核 `output/playwright/e2e-theme-dark.png`；FACT `ATM-R-005` seq 75，ATM-T-0006 verify/complete seq 79/80，Session `01KZG1G7SN5S8BWNRNXNTMDJPK` completed seq 81。
 - 2026-08-08：端口/协议全链路完成：9999 页面 HTTP 200，Playwright 4/4；协议/REST/MCP 9 项边界回归、lint/typecheck/format 全绿，ATM daemon 4393/PID 5016 未重启；ATM-T-0007/0011 经 verify seq 86、complete seq 88 均 DONE，子 Session `01KZG1G4D8XN7GM5Y0795DMHFG` completed seq 89、无 handoff。
@@ -15,3 +14,4 @@
 - 2026-08-08：`improve-animations` 要求的四路只读审计已全部按 ATM 子任务闭环（ATM-T-0020～0023 DONE，FACT ATM-R-013～016），未改源码；确认只实施窗口命中/内部滚动、抽屉/普通弹层/通知、motion token、GPU skeleton 与无障碍降级，明确拒绝命令面板、路由和列表装饰动效。已将审计、拒绝项、实施与验收计划写入 `plans/000～002`。
 - 2026-08-08：窗口/品牌/运行行为与动效第一批实现完成：topbar 仅 breadcrumb 可拖、三键独立 no-drag 命中并重塑为 ATM capsule；desktop 改为距 resize edge 7px 的内部滚动容器与自定义 thumb；根 `logo.png` 已接入 sidebar/favicon/window/tray/通知，派生 7 尺寸 `logo.ico` 接入 Forge/Squirrel；新增 8～45 秒可中断随机自启动、根 `ATM_AGENT_GUIDE.md`、安全数据根迁移器及 9 项定向测试。lint/typecheck、Playwright 5/5 全绿，暗色截图已复核。
 - 2026-08-08：历史确认未删除，已从 `output/playwright/data` 安全迁移到正式 `%LOCALAPPDATA%\AyanamiTaskManager`，源目录与迁移前空数据根均保留；默认打包 EXE 历史 smoke 显示 1 个项目及上轮记录。最终 `pnpm release` 十阶段 10/10：51 tests、5 E2E、packaged/portable/installed 各 11 项 smoke、distribution 23 项全绿；Setup SHA-256 `18982F86...E5EB6BD`、portable `74BDEFEE...8405CE`，ATM-T-0019 progress seq 218，待 GitHub/CI。
+- 2026-08-08：功能提交 `7f1b44a` 已推送到 `ayanamislover/complete-implementation`；GitHub Actions run `31252731932` 在干净 Windows runner 依次通过 install、format、lint、typecheck、51 tests 与 build，耗时 3m12s。ATM-T-0019 云端验收进度 seq 219，准备提交本条最终审计记录并复验远端。
