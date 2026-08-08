@@ -1,6 +1,5 @@
 # Agent 施工进度（最近 15 条）
 
-- 2026-08-08：用户要求将过短的进度摘要上限按实际放宽并进行真实 3 子线程 ATM 分工验收；创建 ATM-T-0011，将 progress summary 上限目标定为 500 字并要求 REST/MCP 边界回归；计划在初版 Git 推送后由三线程分别领取暗黑、端口+协议、无边框 EXE。
 - 2026-08-08：完成初版 GitHub 发布：排除 output/release/out/.playwright-cli 等运行与生成目录，凭据特征扫描无命中；根提交 `d99e86e`（145 文件、29196 行）已推送至 `origin/ayanamislover/complete-implementation`，ATM-T-0010 更新至 50%，完成版提交待最终验收。
 - 2026-08-08：暗黑主题子线程按 ATM 建立 Session `01KZG1G7SN5S8BWNRNXNTMDJPK`，完成 brief 并 claim/start `ATM-T-0006`（ACK seq 63/64）；首次解析误建的空白重复 Session 已立即关闭，进入 UI token、手动切换及持久化实现。
 - 2026-08-08：无边框 EXE 子线程按 ATM 建立 Session `01KZG1GVF65T5TQHA11JEZFB9T`，完成 brief 并 claim/start `ATM-T-0009`；限定只改 desktop 壳层，先以红测约束 `frame:false` 与系统主题背景，再接窗口 IPC/overlay，打包待并发改动稳定后执行。
@@ -15,3 +14,4 @@
 - 2026-08-08：`release --resume` 完成最终十阶段 10/10 组装，根 `release/` Setup SHA-256 `235EAE7E...AFF6517`、portable SHA-256 `EEB30AFE...C432BA`；重启新 daemon 后正式 Session `01KZG3XXN1GX3W101W316X0RXN` 实收 314 字 progress（seq 103），证明 500 字上限在线生效；ATM-T-0005 与 ATM-T-0008 已按 verify/complete 闭环为 DONE/100%，提交前 format/lint/typecheck/diff-check 全绿，待最终 GitHub push/CI。
 - 2026-08-08：完成版提交 `8eb74bd` 已推送；GitHub Actions `31246104529` 在干净 Windows runner 安装成功，随后因 runner `core.autocrlf` 将 136 个文本文件检出为 CRLF 而被 Prettier 默认 LF 判定失败，非业务代码/依赖故障；新增仓库级 `.gitattributes` 强制文本 LF、显式标记二进制类型，准备以干净检出复验 CI。
 - 2026-08-08：LF 修复提交 `21de6d8` 的云端 run `31246200067` 已通过 install/format/lint/typecheck，测试仅暴露 Windows runner `%TEMP%` 的 `RUNNER~1` 短路径与 `runneradmin` 长路径等价性；API 测试改用 `realpathSync.native` 比较真实路径，定向 7/7、全量 30 文件 47/47、format/lint/diff-check 本地全绿，待第三次云端复验。
+- 2026-08-08：最终源码提交 `0820ce1` 已推送，GitHub Actions `31246331578` 在干净 Windows runner 的 install/format/lint/typecheck/47 tests/build 全绿；ATM-T-0010 progress/verify/complete 后为 DONE/100%/v10，项目最终进度已记录，主 Session `01KZG3XXN1GX3W101W316X0RXN` completed seq 120、handoffs 0；ATM-T-0005～0011 全部闭环，三个子线程 Session 均已关闭。
