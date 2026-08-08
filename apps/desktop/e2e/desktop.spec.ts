@@ -121,11 +121,19 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
 test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢复", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   await page.goto("/#project:E2E");
+  await page.locator("html").evaluate((root) => {
+    root.dataset.atmDesktop = "true";
+  });
   const task = page.getByRole("button", { name: /验证键盘与焦点/u }).first();
   await task.click();
   const drawer = page.getByRole("dialog", { name: "任务详情" });
   await expect(drawer).toBeVisible();
-  await expect(drawer.getByRole("button", { name: "关闭" })).toBeFocused();
+  const drawerClose = drawer.getByRole("button", { name: "关闭" });
+  await expect(drawerClose).toBeFocused();
+  const reservedWindowControlsWidth = await drawer
+    .locator(".atm-drawer-head")
+    .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingRight));
+  expect(reservedWindowControlsWidth).toBeGreaterThanOrEqual(158);
   await page.keyboard.press("Shift+Tab");
   expect(await page.evaluate(() => Boolean(document.activeElement?.closest("[role=dialog]")))).toBe(
     true,
@@ -152,6 +160,7 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
 });
 
 test("项目视图、全局搜索和保存视图走真实 API", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/#project:E2E");
   await page.getByRole("button", { name: "看板" }).click();
   await expect(page.getByText("待开始", { exact: true })).toBeVisible();
@@ -161,12 +170,57 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page })
   await expect(page.getByText("还没有项目记录")).toBeVisible();
   await page.getByRole("button", { name: "列表" }).click();
 
-  await page.getByLabel("状态筛选").selectOption("READY");
+  const prioritySort = page.getByRole("button", { name: "按优先级排序" });
+  const statusSort = page.getByRole("button", { name: "按状态排序" });
+  const updatedSort = page.getByRole("button", { name: "按更新时间排序" });
+  await prioritySort.click();
+  await expect(page.getByRole("columnheader", { name: /优先级/u })).toHaveAttribute(
+    "aria-sort",
+    "descending",
+  );
+  await expect(page.locator(".atm-table tbody tr").first()).toContainText("验证键盘与焦点");
+  await prioritySort.click();
+  await expect(page.getByRole("columnheader", { name: /优先级/u })).toHaveAttribute(
+    "aria-sort",
+    "ascending",
+  );
+  await expect(page.locator(".atm-table tbody tr").first()).toContainText("验证搜索与保存视图");
+  await statusSort.click();
+  await expect(page.getByRole("columnheader", { name: /状态/u })).toHaveAttribute(
+    "aria-sort",
+    "descending",
+  );
+  await expect(page.locator(".atm-table th[aria-sort]")).toHaveCount(1);
+  await updatedSort.click();
+  await expect(page.getByRole("columnheader", { name: /更新/u })).toHaveAttribute(
+    "aria-sort",
+    "descending",
+  );
+  await expect(page.locator(".atm-table th[aria-sort]")).toHaveCount(1);
+
+  await expect(page.locator(".atm-filterbar select")).toHaveCount(0);
+  const statusFilter = page.getByRole("combobox", { name: "状态筛选" });
+  await statusFilter.click();
+  await page.getByRole("option", { name: "可开始" }).click();
+  await expect(statusFilter).toContainText("可开始");
+
+  const progressSourceFilter = page.getByRole("combobox", { name: "进度来源筛选" });
+  await progressSourceFilter.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("option", { name: "人工报告" })).toBeVisible();
+  await page.waitForTimeout(250);
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-custom-select-dark.png"),
+    fullPage: true,
+  });
+  await page.keyboard.press("Escape");
+  await expect(progressSourceFilter).toBeFocused();
+
   page.once("dialog", (dialog) => dialog.accept("E2E 可开始"));
   await page.getByRole("button", { name: "保存当前" }).click();
-  await expect(page.getByLabel("保存视图").getByRole("option", { name: "E2E 可开始" })).toHaveCount(
-    1,
-  );
+  await page.getByRole("combobox", { name: "保存视图" }).click();
+  await expect(page.getByRole("option", { name: "E2E 可开始" })).toHaveCount(1);
+  await page.keyboard.press("Escape");
 
   await page.keyboard.press("Control+k");
   await page.getByRole("textbox", { name: "全局搜索" }).fill("保存视图");

@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -7,7 +8,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  QueryClient,
   QueryClientProvider,
   useMutation,
   useQueries,
@@ -38,6 +38,13 @@ import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/U
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import { AyanamiClient, type RegisteredProject } from "@ayanami-task/client";
+import { createAyanamiQueryClient } from "./query-policy.js";
+import {
+  sortProjectTasks,
+  toggleProjectTaskSort,
+  type ProjectTaskSort,
+  type ProjectTaskSortField,
+} from "./task-sort.js";
 import "./styles.css";
 
 type Route =
@@ -190,6 +197,141 @@ function statusClass(status: string): string {
 
 function Status({ value }: { value: string }) {
   return <span className={`atm-badge ${statusClass(value)}`}>{statusLabels[value] ?? value}</span>;
+}
+
+type AtmSelectOption = { value: string; label: string };
+
+function AtmSelect({
+  ariaLabel,
+  value,
+  options,
+  onChange,
+  className = "",
+}: {
+  ariaLabel: string;
+  value: string;
+  options: AtmSelectOption[];
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const openingIndexRef = useRef(0);
+  const listboxId = `atm-select-${useId().replaceAll(":", "")}`;
+  const selectedIndex = Math.max(
+    0,
+    options.findIndex((option) => option.value === value),
+  );
+  const selectedLabel = options[selectedIndex]?.label ?? options[0]?.label ?? "未选择";
+
+  const openAt = (index: number) => {
+    openingIndexRef.current = Math.max(0, Math.min(index, options.length - 1));
+    setOpen(true);
+  };
+  const closeAndFocusTrigger = () => {
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  const choose = (index: number) => {
+    const option = options[index];
+    if (!option) return;
+    onChange(option.value);
+    closeAndFocusTrigger();
+  };
+  const focusOption = (index: number) => {
+    const next = (index + options.length) % options.length;
+    optionRefs.current[next]?.focus();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() =>
+      optionRefs.current[openingIndexRef.current]?.focus(),
+    );
+    const handleOutsidePress = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", handleOutsidePress, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("pointerdown", handleOutsidePress, true);
+    };
+  }, [open]);
+
+  return (
+    <div
+      ref={rootRef}
+      className={`atm-select ${className}`.trim()}
+      data-open={open ? "true" : "false"}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="atm-filter atm-select-trigger"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-controls={listboxId}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        onClick={() => (open ? closeAndFocusTrigger() : openAt(selectedIndex))}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            openAt(selectedIndex);
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            openAt(selectedIndex < 0 ? options.length - 1 : selectedIndex);
+          }
+        }}
+      >
+        <span>{selectedLabel}</span>
+        <CaretDown size={14} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="atm-select-popover" id={listboxId} role="listbox" aria-label={ariaLabel}>
+          {options.map((option, index) => (
+            <button
+              ref={(element) => {
+                optionRefs.current[index] = element;
+              }}
+              type="button"
+              className="atm-select-option"
+              role="option"
+              aria-selected={option.value === value}
+              data-selected={option.value === value ? "true" : "false"}
+              key={option.value || "__empty"}
+              onClick={() => choose(index)}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  focusOption(index + 1);
+                } else if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  focusOption(index - 1);
+                } else if (event.key === "Home") {
+                  event.preventDefault();
+                  focusOption(0);
+                } else if (event.key === "End") {
+                  event.preventDefault();
+                  focusOption(options.length - 1);
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeAndFocusTrigger();
+                } else if (event.key === "Tab") {
+                  setOpen(false);
+                }
+              }}
+            >
+              <span>{option.label}</span>
+              {option.value === value ? <CheckCircle size={15} weight="fill" /> : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function formatTime(value?: string | null): string {
@@ -400,12 +542,10 @@ function OverviewPage({
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => client.overview(),
-    refetchInterval: 15_000,
   });
   const quickQuery = useQuery({
     queryKey: ["quick"],
     queryFn: () => client.quick.list(),
-    refetchInterval: 15_000,
   });
   const completeQuick = useMutation({
     mutationFn: (task: any) =>
@@ -2664,102 +2804,90 @@ function ProjectTaskFilterBar({
   ];
   return (
     <div className="atm-filterbar">
-      <select
-        className="atm-filter"
-        aria-label="保存视图"
+      <AtmSelect
+        ariaLabel="保存视图"
         value={selected}
-        onChange={(event) => {
-          const id = event.target.value;
+        options={[
+          { value: "", label: "保存视图" },
+          ...(views.data ?? []).map((view) => ({ value: String(view.id), label: view.name })),
+        ]}
+        onChange={(id) => {
           setSelected(id);
           const view = views.data?.find((candidate) => candidate.id === id);
           if (view)
             onChange({ ...emptyTaskFilters, ...(view.query as Partial<ProjectTaskFilters>) });
         }}
-      >
-        <option value="">保存视图</option>
-        {views.data?.map((view) => (
-          <option key={view.id} value={view.id}>
-            {view.name}
-          </option>
-        ))}
-      </select>
-      <select
-        className="atm-filter"
-        aria-label="状态筛选"
+      />
+      <AtmSelect
+        ariaLabel="状态筛选"
         value={value.status}
-        onChange={(event) => patch({ status: event.target.value })}
-      >
-        <option value="">全部状态</option>
-        {Object.entries(statusLabels)
-          .filter(([key]) =>
-            [
-              "BACKLOG",
-              "READY",
-              "CLAIMED",
-              "IN_PROGRESS",
-              "BLOCKED",
-              "WAITING_USER",
-              "WAITING_AGENT",
-              "VERIFYING",
-              "DONE",
-              "CANCELLED",
-            ].includes(key),
-          )
-          .map(([key, label]) => (
-            <option value={key} key={key}>
-              {label}
-            </option>
-          ))}
-      </select>
-      <select
-        className="atm-filter"
-        aria-label="Agent 筛选"
+        options={[
+          { value: "", label: "全部状态" },
+          ...Object.entries(statusLabels)
+            .filter(([key]) =>
+              [
+                "BACKLOG",
+                "READY",
+                "CLAIMED",
+                "IN_PROGRESS",
+                "BLOCKED",
+                "WAITING_USER",
+                "WAITING_AGENT",
+                "VERIFYING",
+                "DONE",
+                "CANCELLED",
+              ].includes(key),
+            )
+            .map(([key, label]) => ({ value: key, label })),
+        ]}
+        onChange={(status) => patch({ status })}
+      />
+      <AtmSelect
+        ariaLabel="Agent 筛选"
+        className="wide"
         value={value.assignee}
-        onChange={(event) => patch({ assignee: event.target.value })}
-      >
-        <option value="">全部负责人</option>
-        {assignees.map((agent) => (
-          <option value={agent} key={agent}>
-            {agent === "USER" ? "桌面用户" : agent}
-          </option>
-        ))}
-      </select>
-      <select
-        className="atm-filter"
-        aria-label="里程碑筛选"
+        options={[
+          { value: "", label: "全部负责人" },
+          ...assignees.map((agent) => ({
+            value: agent,
+            label: agent === "USER" ? "桌面用户" : agent,
+          })),
+        ]}
+        onChange={(assignee) => patch({ assignee })}
+      />
+      <AtmSelect
+        ariaLabel="里程碑筛选"
+        className="medium"
         value={value.milestone}
-        onChange={(event) => patch({ milestone: event.target.value })}
-      >
-        <option value="">全部里程碑</option>
-        {milestones.data?.map((milestone) => (
-          <option value={milestone.id} key={milestone.id}>
-            {milestone.title}
-          </option>
-        ))}
-      </select>
-      <select
-        className="atm-filter"
-        aria-label="截止日期筛选"
+        options={[
+          { value: "", label: "全部里程碑" },
+          ...(milestones.data ?? []).map((milestone) => ({
+            value: String(milestone.id),
+            label: milestone.title,
+          })),
+        ]}
+        onChange={(milestone) => patch({ milestone })}
+      />
+      <AtmSelect
+        ariaLabel="截止日期筛选"
         value={value.due}
-        onChange={(event) => patch({ due: event.target.value as ProjectTaskFilters["due"] })}
-      >
-        <option value="">全部日期</option>
-        <option value="OVERDUE">已超期</option>
-        <option value="DATED">已设目标日</option>
-      </select>
-      <select
-        className="atm-filter"
-        aria-label="进度来源筛选"
+        options={[
+          { value: "", label: "全部日期" },
+          { value: "OVERDUE", label: "已超期" },
+          { value: "DATED", label: "已设目标日" },
+        ]}
+        onChange={(due) => patch({ due: due as ProjectTaskFilters["due"] })}
+      />
+      <AtmSelect
+        ariaLabel="进度来源筛选"
+        className="medium"
         value={value.progressSource}
-        onChange={(event) => patch({ progressSource: event.target.value })}
-      >
-        <option value="">全部进度来源</option>
-        {Object.entries(progressSourceLabels).map(([key, label]) => (
-          <option value={key} key={key}>
-            {label}
-          </option>
-        ))}
-      </select>
+        options={[
+          { value: "", label: "全部进度来源" },
+          ...Object.entries(progressSourceLabels).map(([key, label]) => ({ value: key, label })),
+        ]}
+        onChange={(progressSource) => patch({ progressSource })}
+      />
       <label className="atm-filter atm-filter-check">
         <input
           type="checkbox"
@@ -2801,6 +2929,37 @@ function ProjectTaskFilterBar({
   );
 }
 
+function ProjectTaskSortHeader({
+  field,
+  label,
+  sort,
+  onSort,
+}: {
+  field: ProjectTaskSortField;
+  label: string;
+  sort: ProjectTaskSort | null;
+  onSort: (field: ProjectTaskSortField) => void;
+}) {
+  const active = sort?.field === field;
+  return (
+    <th aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}>
+      <button
+        className="atm-table-sort"
+        data-active={active ? "true" : "false"}
+        data-direction={active ? sort.direction : undefined}
+        aria-label={`按${label}排序`}
+        title={
+          active ? `当前${sort.direction === "asc" ? "正序" : "倒序"}，点击切换` : "点击倒序排列"
+        }
+        onClick={() => onSort(field)}
+      >
+        <span>{label}</span>
+        <CaretDown size={13} weight="bold" aria-hidden="true" />
+      </button>
+    </th>
+  );
+}
+
 function ProjectPage({
   client,
   project,
@@ -2819,6 +2978,7 @@ function ProjectPage({
   const queryClient = useQueryClient();
   const [view, setView] = useState<"list" | "board" | "timeline" | "tree" | "records">("list");
   const [filters, setFilters] = useState<ProjectTaskFilters>(emptyTaskFilters);
+  const [taskSort, setTaskSort] = useState<ProjectTaskSort | null>(null);
   const [create, setCreate] = useState(false);
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
@@ -2916,6 +3076,7 @@ function ProjectPage({
       return false;
     return true;
   });
+  const sortedFiltered = sortProjectTasks(filtered, taskSort);
   const content = () => {
     if (tasks.isLoading) return <LoadingRows count={6} />;
     if (tasks.error) return <ErrorState error={tasks.error} />;
@@ -3063,18 +3224,33 @@ function ProjectPage({
         <thead>
           <tr>
             <th>任务</th>
-            <th>状态</th>
-            <th>优先级</th>
+            <ProjectTaskSortHeader
+              field="status"
+              label="状态"
+              sort={taskSort}
+              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
+            />
+            <ProjectTaskSortHeader
+              field="priority"
+              label="优先级"
+              sort={taskSort}
+              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
+            />
             <th>负责人</th>
             <th>层级</th>
             <th>计划日</th>
             <th>阻塞 / 等待</th>
             <th>进度</th>
-            <th>更新</th>
+            <ProjectTaskSortHeader
+              field="updatedAt"
+              label="更新时间"
+              sort={taskSort}
+              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
+            />
           </tr>
         </thead>
         <tbody>
-          {filtered.map((task: any) => (
+          {sortedFiltered.map((task: any) => (
             <tr key={task.id} onClick={() => openTask(task.key)}>
               <td>
                 <div className="atm-row-title">{task.title}</div>
@@ -3784,15 +3960,7 @@ export function AyanamiTaskManager({
   desktop?: DesktopBridge;
   brandLogoSrc?: string;
 }) {
-  const [queryClient] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: { retry: 1, staleTime: 3000, refetchOnWindowFocus: true },
-          mutations: { retry: false },
-        },
-      }),
-  );
+  const [queryClient] = useState(() => createAyanamiQueryClient());
   return (
     <QueryClientProvider client={queryClient}>
       <App
