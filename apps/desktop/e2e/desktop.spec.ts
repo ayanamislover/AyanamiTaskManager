@@ -10,7 +10,18 @@ const longSidebarProjectName =
 test.beforeAll(async () => {
   mkdirSync(resolve("output", "playwright"), { recursive: true });
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
-  await expect.poll(async () => (await api.get(`${apiUrl}/system/status`)).status()).toBe(200);
+  await expect
+    .poll(
+      async () => {
+        try {
+          return (await api.get(`${apiUrl}/system/status`)).status();
+        } catch {
+          return 0;
+        }
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(200);
   const existing = await api.get(`${apiUrl}/projects`);
   expect(existing.ok()).toBeTruthy();
   const projects = (await existing.json()) as Array<{ code: string }>;
