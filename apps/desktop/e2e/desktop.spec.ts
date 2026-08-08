@@ -93,6 +93,31 @@ test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ p
   }
 });
 
+test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
+  await page.goto("/#project:E2E");
+  const region = page.getByRole("region", { name: "工程统计" });
+  const collapse = region.getByRole("button", { name: "折叠工程统计" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator("#engineering-metrics-content")).toBeVisible();
+
+  await collapse.click();
+  const expand = region.getByRole("button", { name: "展开工程统计" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator("#engineering-metrics-content")).toBeHidden();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-engineering-collapsed.png"),
+    fullPage: true,
+  });
+
+  await expand.focus();
+  await page.keyboard.press("Enter");
+  await expect(region.getByRole("button", { name: "折叠工程统计" })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(page.locator("#engineering-metrics-content")).toBeVisible();
+});
+
 test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢复", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   await page.goto("/#project:E2E");

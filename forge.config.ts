@@ -12,7 +12,7 @@ const config: ForgeConfig = {
     extraResource: [
       "logo.png",
       "ATM_AGENT_GUIDE.md",
-      "docs/portable-usage.md",
+      "docs",
       "apps/desktop/resources/mcp-stdio.cjs",
     ],
     ignore: [

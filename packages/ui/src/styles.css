@@ -572,6 +572,45 @@ button.atm-row:hover {
 .atm-engineering {
   margin-bottom: 18px;
 }
+.atm-engineering.is-collapsed .atm-panel-head {
+  border-bottom-color: transparent;
+}
+.atm-engineering-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  border: 0;
+  color: var(--atm-text);
+  background: transparent;
+  text-align: left;
+}
+.atm-engineering-toggle > svg {
+  flex: 0 0 auto;
+  color: var(--atm-text-muted);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-engineering.is-collapsed .atm-engineering-toggle > svg {
+  transform: rotate(-90deg);
+}
+.atm-engineering-toggle > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.atm-engineering-toggle strong {
+  font-size: 14px;
+}
+.atm-engineering-toggle small {
+  overflow: hidden;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .atm-engineering-body {
   display: grid;
   gap: 16px;

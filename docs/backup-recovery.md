@@ -20,8 +20,8 @@ ATM 使用 SQLite Online Backup 对活动 WAL 数据库创建一致性快照。�
 桌面端进入项目“数据工具 → 立即备份”。CLI：
 
 ```powershell
-pnpm atm -- backup create --project ATM
-pnpm atm -- backup list --project ATM
+pnpm atm backup create --project ATM
+pnpm atm backup list --project ATM
 ```
 
 备份完成只有在 SQLite `quick_check`、文件 SHA-256 和 manifest 写入都成功后才返回成功。失败事件会出现在总览“需要处理”。
@@ -38,8 +38,8 @@ pnpm atm -- backup list --project ATM
 CLI：
 
 ```powershell
-pnpm atm -- backup restore <backup-id>
-pnpm atm -- doctor
+pnpm atm backup restore <backup-id>
+pnpm atm doctor
 ```
 
 恢复后应检查项目目标、任务数、最近事件序列和 `doctor`。不要在应用仍运行时手工复制 WAL/SHM 文件替换数据库。
@@ -49,9 +49,9 @@ pnpm atm -- doctor
 `.aytproj` 包含一致性数据库快照和校验清单，适合长期保存和迁移。JSON/CSV 是只读审查格式，不能替代可恢复数据库。
 
 ```powershell
-pnpm atm -- export ATM --format aytproj
-pnpm atm -- export ATM --format json
-pnpm atm -- export ATM --format csv
+pnpm atm export ATM --format aytproj
+pnpm atm export ATM --format json
+pnpm atm export ATM --format csv
 ```
 
 异机恢复前先退出 ATM，保留原数据目录副本，再使用应用支持的导入/恢复入口。不要只复制 Registry：正式任务事实位于各项目独立数据库。
@@ -60,6 +60,6 @@ pnpm atm -- export ATM --format csv
 
 - Registry 与项目库必须来自一致的受支持备份流程；
 - `manifest.json` 中 SHA-256 必须与文件一致；
-- `pnpm atm -- doctor` 或桌面状态必须报告 Registry、项目库和 FTS 正常；
+- `pnpm atm doctor` 或桌面状态必须报告 Registry、项目库和 FTS 正常；
 - 验证一个任务详情、一次项目搜索和最新事件序列；
 - 保留恢复前自动生成的备份，直到人工确认完成。

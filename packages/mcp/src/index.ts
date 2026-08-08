@@ -192,14 +192,14 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     { name: "ayanami-task-manager", version: "1.0.0" },
     {
       instructions:
-        "开工调用一次 atm_begin；先认领或 start。只在语义变化、阻塞、阶段完成或交接时写入；优先 delta，结束调用 atm_end。",
+        "开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。",
     },
   );
 
   server.registerTool(
     "atm_begin",
     {
-      description: "开工或恢复一次调用，返回紧凑上下文。",
+      description: "开工或恢复只调用一次；直接使用返回的 brief，task_list/task_get 按需。",
       inputSchema: {
         cwd: z.string().min(1).optional(),
         project_code: projectCode.optional(),
@@ -293,7 +293,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_brief",
     {
-      description: "按需恢复紧凑项目上下文。",
+      description: "仅在上下文压缩、长时间离开或明确恢复 working set 时重建紧凑上下文。",
       inputSchema: {
         project_code: projectCode,
         session_id: sessionId.optional(),

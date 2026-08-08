@@ -13,12 +13,14 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 ## 标准 Session 流程
 
 1. 开工只调用一次 `atm_begin`，显式传入 `project_code`；若项目未注册，先由用户确认是否创建。
-2. 用 `atm_brief` 获取当前目标、里程碑、下一任务和短上下文。
-3. 用 `atm_task_list` 选择 `READY` 工作项，再以 `atm_task_patch` 执行 `claim` 和 `start`。
+2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。
+3. 选择 `READY` 工作项后，以 `atm_task_patch` 执行 `claim` 和 `start`。
 4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
 5. 决策、约束、事实、风险、参考和经验写入 `atm_record`；长历史不要反复塞回上下文。
 6. 增量同步优先 `atm_delta`，需要精确详情时才调用 `atm_task_get`。
 7. 完成任务后执行 `complete`；Session 结束必须调用 `atm_end`。
+
+正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
 
 可用的 11 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。
 
@@ -41,12 +43,12 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 ## CLI 等价入口
 
 ```powershell
-pnpm atm -- status
-pnpm atm -- brief ATM
-pnpm atm -- task list ATM --ready
-pnpm atm -- task show ATM-T-0003 --view context
-pnpm atm -- progress ATM-T-0003 --percent 50 --summary "文档已完成一半"
-pnpm atm -- record ATM --kind FACT --summary "验收证据已生成"
+pnpm atm status
+pnpm atm brief ATM
+pnpm atm task list ATM --ready
+pnpm atm task show ATM-T-0003 --view context
+pnpm atm progress ATM-T-0003 --percent 50 --summary "文档已完成一半"
+pnpm atm record ATM --kind FACT --summary "验收证据已生成"
 ```
 
 CLI 写操作会创建短生命周期 Session 并在结束时关闭。需要持续领取、handoff 或多 Agent 协作时，应使用 MCP 或 REST 的正式 Session。

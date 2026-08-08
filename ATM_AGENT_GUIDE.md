@@ -10,13 +10,13 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## ATM 未运行怎么办
 
-已安装环境直接启动 AyanamiTaskManager 桌面应用；窗口关闭到托盘后服务仍运行。源码环境在 `R:\Project_All\AyanamiTaskManager` 执行 `pnpm dev`。随后用 `pnpm atm status` 或 `pnpm atm doctor` 验证。若 runtime 指向已退出进程，先“完全退出”旧应用再重新启动，不要复用过期 endpoint/token。
+已安装环境直接启动 AyanamiTaskManager 桌面应用；窗口关闭到托盘后服务仍运行。源码环境在仓库根目录执行 `pnpm dev`。随后用 `pnpm atm status` 或 `pnpm atm doctor` 验证。若 runtime 指向已退出进程，先“完全退出”旧应用再重新启动，不要复用过期 endpoint/token。
 
 ## Codex 怎么接入
 
 在 ATM 的“设置 → Agent 接入”选择“安装 Codex 配置”，ATM 会备份并最小合并 `%USERPROFILE%\.codex\config.toml`。配置变化后让 Codex 重新加载 MCP。项目规则应包含：
 
-> 执行项目前先访问 ATM 工具，并阅读 R:\Project_All\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
+> 执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
 
 ## Claude 怎么接入
 
@@ -26,7 +26,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 | 目的                             | 工具                                               |
 | -------------------------------- | -------------------------------------------------- |
-| 开始、恢复、结束 Session         | `atm_begin`、`atm_brief`、`atm_end`                |
+| 开始、恢复 working set、结束     | `atm_begin`、`atm_brief`、`atm_end`                |
 | 查找与创建任务                   | `atm_task_list`、`atm_task_get`、`atm_task_create` |
 | 领取、启动、阻塞、验证、完成任务 | `atm_task_patch`                                   |
 | 写阶段进度与关键证据             | `atm_progress_add`、`atm_record`                   |
@@ -36,17 +36,20 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## 最短工作流
 
-1. `atm_begin(project_code, agent_id, role)`，每个 Session 只调用一次。
-2. `atm_brief` → `atm_task_list(ready_only=true)`。
+1. `atm_begin(project_code, agent_id, role)`，每个 Session 只调用一次，并直接使用返回的 brief。
+2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
 3. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
 4. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`。
 5. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`。
 6. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 
+正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
 ## 完整文档在哪
 
-- Agent 协议与协作细节：`docs/agent-integration.md`
-- 用户操作：`docs/user-guide.md`
-- 故障排查：`docs/troubleshooting.md`
-- 架构与数据边界：`docs/architecture.md`、`docs/data-model.md`
-- 发布验收：`docs/release-checklist.md`
+- Agent 协议与协作细节：`%LOCALAPPDATA%\AyanamiTaskManager\docs\agent-integration.md`
+- 用户操作：`%LOCALAPPDATA%\AyanamiTaskManager\docs\user-guide.md`
+- 故障排查：`%LOCALAPPDATA%\AyanamiTaskManager\docs\troubleshooting.md`
+- 架构与数据边界：`%LOCALAPPDATA%\AyanamiTaskManager\docs\architecture.md`、`%LOCALAPPDATA%\AyanamiTaskManager\docs\data-model.md`
+- 发布验收：`%LOCALAPPDATA%\AyanamiTaskManager\docs\release-checklist.md`
+- 最新在线版本：`https://github.com/ayanamislover/AyanamiTaskManager`

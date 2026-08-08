@@ -222,6 +222,16 @@ try {
     "打包 native SQLite 可用",
     Boolean((status.sqlite as Record<string, unknown>)?.sqliteVersion),
   );
+  const installedGuide = join(dataDir, "ATM_AGENT_GUIDE.md");
+  const installedAgentDocs = join(dataDir, "docs", "agent-integration.md");
+  check("Agent Guide 安装到正式数据根", existsSync(installedGuide), installedGuide);
+  check("完整 docs 安装到正式数据根", existsSync(installedAgentDocs), installedAgentDocs);
+  const guideContent = await readFile(installedGuide, "utf8");
+  check(
+    "Agent Guide 使用设备无关路径",
+    guideContent.includes("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md") &&
+      !guideContent.includes("R:\\Project_All"),
+  );
 
   const project = await client.projects.create({
     name: "打包烟测项目",
