@@ -510,13 +510,14 @@ function Sidebar({
                 .map((project) => (
                   <button
                     key={project.id}
+                    className="atm-nav-project"
                     aria-current={route === `project:${project.code}` ? "page" : undefined}
+                    aria-label={`${project.code} · ${project.name}`}
+                    title={`${project.code} · ${project.name}`}
                     onClick={() => setRoute(`project:${project.code}`)}
                   >
-                    <span className="atm-key" style={{ minWidth: 30 }}>
-                      {project.code}
-                    </span>
-                    <span>{project.name}</span>
+                    <span className="atm-key atm-nav-project-code">{project.code}</span>
+                    <span className="atm-nav-project-name">{project.name}</span>
                   </button>
                 ))}
             </nav>

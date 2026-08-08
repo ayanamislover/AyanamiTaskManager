@@ -12,6 +12,17 @@ test.beforeAll(async () => {
   const existing = await api.get(`${apiUrl}/projects`);
   expect(existing.ok()).toBeTruthy();
   const projects = (await existing.json()) as Array<{ code: string }>;
+  if (!projects.some((project) => project.code === "AGENTPERM")) {
+    const longProject = await api.post(`${apiUrl}/projects`, {
+      data: {
+        name: "Codex Agent Permission Preflight",
+        sourcePath: null,
+        code: "AGENTPERM",
+        description: "侧栏长项目名称布局回归",
+      },
+    });
+    expect(longProject.ok()).toBeTruthy();
+  }
   if (projects.some((project) => project.code === "E2E")) {
     await api.dispose();
     return;
@@ -60,6 +71,46 @@ test.beforeAll(async () => {
   });
   expect(tasks.ok()).toBeTruthy();
   await api.dispose();
+});
+
+test("长项目名称保持在侧栏项目按钮内", async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 768 });
+  await page.goto("/#overview");
+
+  const project = page
+    .locator(".atm-sidebar")
+    .getByRole("button", { name: /Codex Agent Permission Preflight/u });
+  await expect(project).toHaveAttribute("title", "AGENTPERM · Codex Agent Permission Preflight");
+
+  const layout = await project.evaluate((button) => {
+    const code = button.querySelector<HTMLElement>(".atm-nav-project-code");
+    const name = button.querySelector<HTMLElement>(".atm-nav-project-name");
+    if (!code || !name) throw new Error("项目导航文本缺失");
+    const buttonRect = button.getBoundingClientRect();
+    const nameRect = name.getBoundingClientRect();
+    const nameStyle = getComputedStyle(name);
+    return {
+      buttonFits: button.scrollWidth <= button.clientWidth,
+      nameFits: nameRect.right <= buttonRect.right,
+      nameIsTruncated: name.scrollWidth > name.clientWidth,
+      overflow: nameStyle.overflow,
+      textOverflow: nameStyle.textOverflow,
+      whiteSpace: nameStyle.whiteSpace,
+    };
+  });
+
+  expect(layout).toEqual({
+    buttonFits: true,
+    nameFits: true,
+    nameIsTruncated: true,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  });
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-sidebar-project-ellipsis.png"),
+    fullPage: true,
+  });
 });
 
 test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ page }) => {

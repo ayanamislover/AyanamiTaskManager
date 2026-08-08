@@ -123,6 +123,25 @@ html[data-theme-switching="true"] *::after {
   background: var(--atm-primary-soft);
   font-weight: 650;
 }
+.atm-nav-project {
+  min-width: 0;
+  overflow: hidden;
+}
+.atm-nav-project-code {
+  flex: 0 1 auto;
+  min-width: 30px;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-nav-project-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .atm-sidebar-footer {
   margin-top: auto;
   padding: 14px 9px 0;
