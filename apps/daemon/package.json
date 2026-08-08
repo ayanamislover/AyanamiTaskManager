@@ -1,0 +1,26 @@
+{
+  "name": "@ayanami-task/daemon",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/main.ts --format esm --dts --clean --external better-sqlite3",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ayanami-task/application": "workspace:*",
+    "@ayanami-task/mcp": "workspace:*",
+    "@ayanami-task/protocol": "workspace:*",
+    "@ayanami-task/storage-sqlite": "workspace:*",
+    "@fastify/cors": "11.0.1",
+    "@fastify/websocket": "11.3.0",
+    "fastify": "5.11.2"
+  }
+}

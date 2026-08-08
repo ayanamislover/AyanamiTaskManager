@@ -1,0 +1,14 @@
+node_modules/
+dist/
+out/
+release/
+coverage/
+test-results/
+playwright-report/
+output/
+*.tsbuildinfo
+*.log
+.vite/
+.playwright-cli/
+.ayanami-task/
+.atm-test-data/

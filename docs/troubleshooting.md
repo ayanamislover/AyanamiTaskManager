@@ -1,0 +1,61 @@
+# 排障指南
+
+## 先运行健康检查
+
+```powershell
+pnpm atm -- status
+pnpm atm -- doctor
+```
+
+`status` 检查本地服务和 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram、每个活动项目数据库及双库分离。开发态可显式传入 `--endpoint` 和 `--token`，但不要把 token 粘贴到 issue 或日志。
+
+## 应用无法启动
+
+1. 确认 Windows 版本和磁盘可写；
+2. 检查 `%LOCALAPPDATA%\AyanamiTaskManager\logs` 与数据目录 `runtime/daemon.json`；
+3. 确认没有另一个实例占用运行时端口；第二实例正常情况下会唤起现有窗口；
+4. 若最近迁移失败，先备份整个数据目录，不要删除数据库；
+5. portable 包请确认完整解压，`resources` 和原生模块未被杀毒软件隔离。
+
+## MCP 无法连接
+
+- 桌面设置中重新运行“连接测试”；
+- 确认配置指向当前运行时 endpoint/token 或 packaged stdio 代理；
+- Windows packaged stdio 必须使用 `resources/mcp-stdio.cjs` 配合 `ELECTRON_RUN_AS_NODE=1`，不能直接把 GUI EXE 当 stdio；
+- `401` 表示 token 错误或过期；重新从设置复制配置；
+- `SESSION_CLOSED` 表示旧 Session 已结束，应重新 `atm_begin`；
+- `SESSION_NOT_RETIRED` 表示 predecessor 没有显式退休，不可 resume。
+
+## 任务更新失败
+
+- `VERSION_CONFLICT`：重新读取任务，用新版本判断后重试；
+- `INVALID_TRANSITION`：按 READY→CLAIMED→IN_PROGRESS→VERIFYING/DONE 的状态机执行；
+- `CLAIM_CONFLICT`：任务被其他 Session 领取；等待释放或确认 lease 已过期后显式接管；
+- `IDEMPOTENCY_CONFLICT`：同一 `op_id` 被用于不同请求，改用新的 `op_id`；
+- `PROJECT_DB_UNAVAILABLE`：项目正在迁移、恢复、已进垃圾箱或迁移失败。
+
+## 项目或搜索缺少数据
+
+项目详情是事实源，Registry 总览和全局搜索是可重建投影。若项目写入成功但总览暂未刷新：
+
+1. 打开项目确认任务事实存在；
+2. 等待 WebSocket 增量或刷新页面；
+3. 运行 `doctor`；
+4. 检查项目是否为 `MIGRATION_FAILED`；
+5. 不要直接编辑 Registry 缓存表。
+
+## 工程统计不可用
+
+- `NO_SOURCE_PATH`：为项目附加源码目录；
+- 目录不是 Git 工作树：初始化 Git 或改绑正确目录；
+- 尚无 commit 可以统计，ATM 使用空树 baseline；不会替用户提交；
+- 文件权限或 Git 命令超时只降级指标，不影响任务事务；
+- 生成目录、依赖目录、lockfile、vendor、release/output 不计入 Source/Test LOC。
+
+## 备份或恢复失败
+
+不要手工删除 `.tmp`、WAL 或当前数据库。ATM 下次启动会清理中断临时文件，但正式恢复应从数据工具发起。校验失败时保留原备份与 manifest，检查磁盘空间、权限、SHA-256 和 SQLite `quick_check`。详见 [backup-recovery.md](./backup-recovery.md)。
+
+## 收集最小诊断材料
+
+可共享：应用版本、错误代码、request id、`doctor` 的非敏感结果、复现步骤、是否 installer/portable。不要共享：本地 token、完整任务正文、项目数据库、用户目录清单或私有源码。

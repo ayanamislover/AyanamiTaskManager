@@ -1,0 +1,26 @@
+{
+  "name": "@ayanami-task/cli",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "atm": "./dist/bin.js"
+  },
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/bin.ts --format esm --dts --clean",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@ayanami-task/client": "workspace:*",
+    "@ayanami-task/mcp": "workspace:*",
+    "@ayanami-task/protocol": "workspace:*",
+    "commander": "14.0.0"
+  }
+}

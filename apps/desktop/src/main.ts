@@ -1,0 +1,457 @@
+import { randomBytes } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification as ElectronNotification,
+  shell,
+  Tray,
+} from "electron";
+import {
+  installClaudeConfig,
+  installCodexConfig,
+  renderMcpConfigs,
+} from "@ayanami-task/agent-config";
+import { AyanamiTaskService } from "@ayanami-task/application";
+import { AyanamiClient } from "@ayanami-task/client";
+import { createCliProgram } from "@ayanami-task/cli";
+import { buildAyanamiServer } from "@ayanami-task/daemon";
+import { runStdioMcpProxy } from "@ayanami-task/mcp";
+
+type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
+
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let quitting = false;
+let service: AyanamiTaskService | null = null;
+let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+let runtime: Runtime | null = null;
+let maintenanceTimer: NodeJS.Timeout | null = null;
+let initialMaintenanceTimer: NodeJS.Timeout | null = null;
+let shutdownStarted = false;
+let shutdownComplete = false;
+let unsubscribeGlobal: (() => void) | null = null;
+const unsubscribeProjects = new Map<string, () => void>();
+const projectSequences = new Map<string, number>();
+const notificationDedup = new Map<string, number>();
+
+function dataDirBeforeReady(): string {
+  if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
+  return join(process.env.LOCALAPPDATA ?? process.cwd(), "AyanamiTaskManager");
+}
+
+function readRuntime(): Runtime {
+  const path = join(dataDirBeforeReady(), "runtime", "daemon.json");
+  if (!existsSync(path)) throw new Error("AyanamiTaskManager 服务未运行");
+  return JSON.parse(readFileSync(path, "utf8")) as Runtime;
+}
+
+function smokeTrace(stage: string, detail: unknown = null): void {
+  if (process.env.ATM_PACKAGED_SMOKE !== "1") return;
+  const runtimeDir = join(dataDirBeforeReady(), "runtime");
+  mkdirSync(runtimeDir, { recursive: true });
+  appendFileSync(
+    join(runtimeDir, "headless-smoke.ndjson"),
+    `${JSON.stringify({ stage, detail, at: new Date().toISOString() })}\n`,
+    "utf8",
+  );
+}
+
+async function runHeadlessModes(args: string[]): Promise<boolean> {
+  if (args.includes("--mcp-stdio")) {
+    smokeTrace("mcp-stdio.start", { argv: process.argv });
+    const current = readRuntime();
+    await runStdioMcpProxy({ endpoint: `${current.endpoint}/mcp`, token: current.token });
+    smokeTrace("mcp-stdio.end");
+    return true;
+  }
+  if (args.includes("--doctor")) {
+    const current = readRuntime();
+    process.stdout.write(`${JSON.stringify(await new AyanamiClient(current).doctor())}\n`);
+    return true;
+  }
+  const cliIndex = args.indexOf("--cli");
+  if (cliIndex >= 0) {
+    await createCliProgram().parseAsync(["node", "atm", ...args.slice(cliIndex + 1)]);
+    return true;
+  }
+  return false;
+}
+
+function trayImage() {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="8" fill="#5D42BF"/><path d="M9 16.5l4 4L23 10.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  return nativeImage.createFromBuffer(Buffer.from(svg)).resize({ width: 20, height: 20 });
+}
+
+function showWindow(): void {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function navigate(route: string): void {
+  showWindow();
+  mainWindow?.webContents.send("atm:navigate", route);
+}
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    minWidth: 1100,
+    minHeight: 680,
+    show: false,
+    backgroundColor: "#F7F5F0",
+    title: "AyanamiTaskManager",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  mainWindow.on("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("close", (event) => {
+    if (!quitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
+  });
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+  if (process.env.ATM_RENDERER_URL) void mainWindow.loadURL(process.env.ATM_RENDERER_URL);
+  else void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
+}
+
+function notificationsEnabled(): boolean {
+  return service?.databases.getSetting<boolean>("notification.enabled", true).value !== false;
+}
+
+function autoLaunchEnabled(): boolean {
+  return app.getLoginItemSettings({ path: process.execPath, args: ["--background"] }).openAtLogin;
+}
+
+function setAutoLaunch(enabled: boolean): boolean {
+  app.setLoginItemSettings({
+    openAtLogin: enabled,
+    path: process.execPath,
+    args: ["--background"],
+  });
+  return autoLaunchEnabled();
+}
+
+function trayMenu(): Menu {
+  const overview = service?.overview() as any;
+  const projects = (overview?.projects ?? []) as any[];
+  const blocked = projects.reduce((sum, project) => sum + Number(project.blocked_count ?? 0), 0);
+  const waiting = projects.reduce(
+    (sum, project) => sum + Number(project.waiting_user_count ?? 0),
+    0,
+  );
+  const enabled = notificationsEnabled();
+  return Menu.buildFromTemplate([
+    { label: "打开绫波任务管理器", click: showWindow },
+    { label: "新建临时任务", click: () => navigate("quick") },
+    { label: `受阻 ${blocked} / 等待用户 ${waiting}`, enabled: false },
+    { type: "separator" },
+    {
+      label: enabled ? "暂停系统通知" : "恢复系统通知",
+      click: () => {
+        service?.setSetting("notification.enabled", !enabled);
+        tray?.setContextMenu(trayMenu());
+      },
+    },
+    { label: "设置", click: () => navigate("settings") },
+    { type: "separator" },
+    {
+      label: "完全退出",
+      click: () => {
+        quitting = true;
+        app.quit();
+      },
+    },
+  ]);
+}
+
+function createTray(): void {
+  tray = new Tray(trayImage());
+  tray.setToolTip("AyanamiTaskManager");
+  tray.setContextMenu(trayMenu());
+  tray.on("double-click", showWindow);
+}
+
+function showProjectNotification(
+  project: string,
+  event: { seq: number; type: string; key: string | null; summary: string | null },
+): void {
+  if (!notificationsEnabled()) return;
+  const labels: Record<string, string> = {
+    "work.waiting": "任务正在等待",
+    "work.blocked": "任务受阻",
+    "work.completed": "任务已完成",
+    "agent.recovered_stale": "Agent 异常退出",
+  };
+  const title = labels[event.type];
+  if (!title) return;
+  const key = `${project}:${event.type}:${event.key}`;
+  const now = Date.now();
+  if ((notificationDedup.get(key) ?? 0) > now - 10 * 60_000) return;
+  notificationDedup.set(key, now);
+  for (const [candidate, at] of notificationDedup)
+    if (at < now - 60 * 60_000) notificationDedup.delete(candidate);
+  if (ElectronNotification.isSupported()) {
+    new ElectronNotification({
+      title: `${project} · ${title}`,
+      body: event.summary || event.key || title,
+    }).show();
+  }
+}
+
+function ensureProjectSubscriptions(): void {
+  if (!service) return;
+  const overview = service.overview() as any;
+  const active = new Set<string>();
+  for (const project of (overview.projects ?? []) as any[]) {
+    if (project.lifecycle !== "ACTIVE") continue;
+    const code = String(project.code);
+    active.add(code);
+    if (unsubscribeProjects.has(code)) continue;
+    projectSequences.set(code, Number(project.project_sequence ?? 0));
+    let running = false;
+    let dirty = false;
+    const consume = async () => {
+      if (!service || running) {
+        dirty = true;
+        return;
+      }
+      running = true;
+      try {
+        do {
+          dirty = false;
+          let delta;
+          do {
+            delta = await service.delta(code, projectSequences.get(code) ?? 0, 100);
+            for (const event of delta.events) showProjectNotification(code, event);
+            const lastEvent = delta.events.at(-1);
+            if (lastEvent) projectSequences.set(code, lastEvent.seq);
+          } while (delta.hasMore);
+        } while (dirty);
+      } finally {
+        running = false;
+        tray?.setContextMenu(trayMenu());
+      }
+    };
+    unsubscribeProjects.set(
+      code,
+      service.subscribeProject(code, () => void consume()),
+    );
+  }
+  for (const [code, unsubscribe] of unsubscribeProjects) {
+    if (!active.has(code)) {
+      unsubscribe();
+      unsubscribeProjects.delete(code);
+      projectSequences.delete(code);
+    }
+  }
+}
+
+function installDesktopEventObservers(): void {
+  if (!service) return;
+  ensureProjectSubscriptions();
+  let sequence = Number((service.overview() as any).sequence ?? 0);
+  unsubscribeGlobal = service.subscribeGlobal(() => {
+    if (!service) return;
+    const delta = service.globalDelta(sequence, 100);
+    sequence = delta.nextSequence;
+    for (const event of delta.events) {
+      if (
+        event.type === "backup.failed" &&
+        notificationsEnabled() &&
+        ElectronNotification.isSupported()
+      ) {
+        const key = `global:${event.type}:${event.key}`;
+        if (!notificationDedup.has(key)) {
+          notificationDedup.set(key, Date.now());
+          new ElectronNotification({ title: "备份失败", body: event.summary }).show();
+        }
+      }
+    }
+    ensureProjectSubscriptions();
+    tray?.setContextMenu(trayMenu());
+  });
+}
+
+async function startApplication(background: boolean): Promise<void> {
+  const dataDir = dataDirBeforeReady();
+  const migrationsRoot = join(app.getAppPath(), "migrations");
+  service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
+  const runtimeDir = join(dataDir, "runtime");
+  const tokenPath = join(runtimeDir, "local.token");
+  mkdirSync(runtimeDir, { recursive: true });
+  const token = existsSync(tokenPath)
+    ? readFileSync(tokenPath, "utf8").trim()
+    : randomBytes(32).toString("base64url");
+  if (!existsSync(tokenPath))
+    writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  server = await buildAyanamiServer({ service, token });
+  await server.listen({ host: "127.0.0.1", port: 0 });
+  const address = server.server.address();
+  if (!address || typeof address === "string") throw new Error("DAEMON_TCP_ADDRESS_MISSING");
+  runtime = {
+    endpoint: `http://127.0.0.1:${address.port}`,
+    token,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+  writeFileSync(join(runtimeDir, "daemon.json"), JSON.stringify(runtime), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+
+  if (process.env.ATM_PACKAGED_SMOKE === "1") {
+    const original = autoLaunchEnabled();
+    const toggled = setAutoLaunch(!original);
+    const restored = setAutoLaunch(original);
+    writeFileSync(
+      join(runtimeDir, "autolaunch-smoke.json"),
+      JSON.stringify({
+        original,
+        toggled,
+        restored,
+        passed: toggled === !original && restored === original,
+      }),
+      "utf8",
+    );
+  }
+
+  ipcMain.on("atm:get-runtime", (event) => {
+    event.returnValue = runtime;
+  });
+  ipcMain.handle("atm:get-auto-launch", autoLaunchEnabled);
+  ipcMain.handle("atm:set-auto-launch", (_event, enabled: boolean) => setAutoLaunch(enabled));
+  ipcMain.handle("atm:show-item", (_event, path: string) => shell.showItemInFolder(path));
+  const stdioCommand = process.execPath;
+  const stdioArgs = [
+    app.isPackaged
+      ? join(process.resourcesPath, "mcp-stdio.cjs")
+      : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs"),
+  ];
+  const stdioEnv = { ELECTRON_RUN_AS_NODE: "1" };
+  ipcMain.handle("atm:get-mcp-configs", () => {
+    if (!runtime) throw new Error("RUNTIME_NOT_READY");
+    return renderMcpConfigs({ ...runtime, command: stdioCommand, args: stdioArgs, env: stdioEnv });
+  });
+  ipcMain.handle("atm:install-mcp", (_event, client: "CODEX" | "CLAUDE") => {
+    if (client === "CODEX")
+      return installCodexConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+    if (client === "CLAUDE")
+      return installClaudeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+    throw new Error("MCP_CLIENT_UNSUPPORTED");
+  });
+  ipcMain.handle("atm:copy-text", (_event, text: string) => {
+    clipboard.writeText(text);
+    return true;
+  });
+  initialMaintenanceTimer = setTimeout(() => {
+    void service?.runMaintenance();
+  }, 2500);
+  maintenanceTimer = setInterval(
+    () => {
+      void service?.runMaintenance();
+    },
+    60 * 60 * 1000,
+  );
+  maintenanceTimer.unref();
+  createTray();
+  createWindow();
+  installDesktopEventObservers();
+  if (background) mainWindow?.hide();
+}
+
+async function bootstrap(): Promise<void> {
+  const args = process.argv.slice(1);
+  smokeTrace("bootstrap", { argv: process.argv, args });
+  if (await runHeadlessModes(args)) {
+    app.exit(0);
+    return;
+  }
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    return;
+  }
+  app.on("second-instance", (_event, commandLine) => {
+    if (process.env.ATM_PACKAGED_SMOKE === "1" && commandLine.includes("--smoke-quit")) {
+      quitting = true;
+      app.quit();
+      return;
+    }
+    showWindow();
+  });
+  await app.whenReady();
+  await startApplication(args.includes("--background"));
+  app.on("activate", () => {
+    if (!mainWindow) createWindow();
+    else showWindow();
+  });
+}
+
+async function shutdown(): Promise<void> {
+  if (initialMaintenanceTimer) clearTimeout(initialMaintenanceTimer);
+  if (maintenanceTimer) clearInterval(maintenanceTimer);
+  initialMaintenanceTimer = null;
+  maintenanceTimer = null;
+  unsubscribeGlobal?.();
+  unsubscribeGlobal = null;
+  for (const unsubscribe of unsubscribeProjects.values()) unsubscribe();
+  unsubscribeProjects.clear();
+  projectSequences.clear();
+  if (server) await server.close();
+  service?.close();
+  server = null;
+  service = null;
+  if (runtime) rmSync(join(dataDirBeforeReady(), "runtime", "daemon.json"), { force: true });
+  runtime = null;
+}
+
+app.on("before-quit", (event) => {
+  quitting = true;
+  if (shutdownComplete) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  void shutdown().finally(() => {
+    shutdownComplete = true;
+    app.quit();
+  });
+});
+app.on("window-all-closed", () => {});
+app.on("will-quit", () => {
+  tray?.destroy();
+  tray = null;
+});
+
+void bootstrap().catch((error) => {
+  smokeTrace(
+    "bootstrap.error",
+    error instanceof Error ? (error.stack ?? error.message) : String(error),
+  );
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+  );
+  app.exit(1);
+});

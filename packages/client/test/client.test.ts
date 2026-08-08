@@ -1,0 +1,47 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { AyanamiTaskService } from "../../application/src/index.js";
+import { buildAyanamiServer } from "../../../apps/daemon/src/index.js";
+import { AyanamiClient, AyanamiClientError } from "../src/index.js";
+
+const cleanup: Array<() => Promise<void> | void> = [];
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close();
+});
+
+describe("typed client", () => {
+  it("通过真实 HTTP 创建项目并保留结构化错误码", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "atm-client-"));
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "typed-token" });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    cleanup.push(async () => {
+      await app.close();
+      service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("测试服务未监听 TCP");
+    const endpoint = `http://127.0.0.1:${address.port}`;
+
+    const denied = new AyanamiClient({ endpoint, token: "wrong" });
+    await expect(denied.status()).rejects.toMatchObject<AyanamiClientError>({
+      code: "UNAUTHORIZED",
+      status: 401,
+    });
+
+    const client = new AyanamiClient({ endpoint, token: "typed-token" });
+    const created = await client.projects.create({
+      name: "客户端项目",
+      sourcePath: null,
+      code: "CLI",
+    });
+    expect(created).toMatchObject({ code: "CLI", name: "客户端项目" });
+    await expect(client.projects.list()).resolves.toHaveLength(1);
+  });
+});
