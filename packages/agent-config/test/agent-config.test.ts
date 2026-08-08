@@ -65,5 +65,6 @@ describe("Agent MCP 配置适配", () => {
     expect(rendered.agentRule).toContain("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md");
     expect(rendered.agentRule).not.toContain("R:\\Project_All");
     expect(rendered.agentRule).toContain("后续所有任务执行均依赖 ATM");
+    expect(rendered.agentRule).toContain("拆分成可独立验收的工作项");
   });
 });

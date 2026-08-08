@@ -38,12 +38,21 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 1. `atm_begin(project_code, agent_id, role)`，每个 Session 只调用一次，并直接使用返回的 brief。
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
-3. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
-4. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`。
-5. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`。
-6. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
+3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
+4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
+5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`。
+6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`。
+7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
+### 任务拆分
+
+开始实现前先判断当前 WorkItem 是否可在一个独立工作阶段内完成。
+若任务包含多个独立交付物、多个验证阶段、明显跨模块，或预计需要较长连续开发，不要直接执行该大任务；先用 `atm_task_create` 拆成多个可独立完成和验收的子 WorkItem，再领取具体子任务执行。
+
+Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直接执行单元。
+拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
 ## 完整文档在哪
 

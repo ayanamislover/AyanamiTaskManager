@@ -18,6 +18,7 @@ import { ArchiveIcon as Archive } from "@phosphor-icons/react/dist/icons/Archive
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
+import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/CaretRight";
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
 import { CheckSquareIcon as CheckSquare } from "@phosphor-icons/react/dist/icons/CheckSquare";
 import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-icons/react/dist/icons/ClockCounterClockwise";
@@ -38,6 +39,7 @@ import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/U
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import { AyanamiClient, type RegisteredProject } from "@ayanami-task/client";
+import { summarizeAgentSessions, type AgentSessionLike } from "./agent-sessions.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import {
   sortProjectTasks,
@@ -451,6 +453,14 @@ function useDialogAccessibility(close: () => void) {
   return dialogRef;
 }
 
+function sidebarProjectHint(name: string): string {
+  const isLongAsciiName =
+    name.length > 28 &&
+    /[A-Za-z]/u.test(name) &&
+    Array.from(name).every((character) => (character.codePointAt(0) ?? 0) <= 0x7f);
+  return isLongAsciiName ? `${name}\n名称较长，建议改用简洁中文名称。` : name;
+}
+
 function Sidebar({
   route,
   setRoute,
@@ -512,11 +522,10 @@ function Sidebar({
                     key={project.id}
                     className="atm-nav-project"
                     aria-current={route === `project:${project.code}` ? "page" : undefined}
-                    aria-label={`${project.code} · ${project.name}`}
-                    title={`${project.code} · ${project.name}`}
+                    aria-label={project.name}
+                    title={sidebarProjectHint(project.name)}
                     onClick={() => setRoute(`project:${project.code}`)}
                   >
-                    <span className="atm-key atm-nav-project-code">{project.code}</span>
                     <span className="atm-nav-project-name">{project.name}</span>
                   </button>
                 ))}
@@ -1383,12 +1392,14 @@ function AgentsPage({
         <LoadingRows />
       </>
     );
-  const sessions = queries.flatMap((query) => query.data ?? []);
+  const sessions = summarizeAgentSessions(
+    queries.flatMap((query) => query.data ?? []) as AgentSessionLike[],
+  );
   return (
     <>
       <PageHead
         title="Agent"
-        description="在线状态来自项目数据库中的正式会话；可显式关闭异常会话并释放其领取。"
+        description="按项目与 Agent 身份聚合正式 Session；保留历史数量，并可关闭异常在线会话。"
       />
       <section className="atm-panel">
         {sessions.length === 0 ? (
@@ -1410,7 +1421,10 @@ function AgentsPage({
                 <tr key={`${session.project}:${session.id}`}>
                   <td>
                     <div className="atm-row-title">{session.display_name}</div>
-                    <span className="atm-key">{session.agent_id}</span>
+                    <div className="atm-row-sub">
+                      <span className="atm-key">{session.agent_id}</span> · {session.sessionCount}{" "}
+                      个 Session
+                    </div>
                   </td>
                   <td>{session.project}</td>
                   <td>{statusLabels[session.role] ?? session.role}</td>
@@ -1920,6 +1934,15 @@ function TaskDrawer({
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="atm-drawer-head">
+          <button
+            type="button"
+            className="atm-drawer-collapse"
+            onClick={close}
+            aria-label="收起任务详情"
+            title="收起任务详情"
+          >
+            <CaretRight size={18} weight="bold" aria-hidden="true" />
+          </button>
           <div>
             {query.data ? (
               <>
@@ -1930,9 +1953,6 @@ function TaskDrawer({
               <span>载入任务</span>
             )}
           </div>
-          <button className="atm-button atm-icon-button" onClick={close} aria-label="关闭">
-            <X size={17} />
-          </button>
         </header>
         {query.isLoading ? (
           <LoadingRows />
@@ -3025,7 +3045,7 @@ function ProjectPage({
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
-  const [engineeringCollapsed, setEngineeringCollapsed] = useState(false);
+  const [engineeringCollapsed, setEngineeringCollapsed] = useState(true);
   const tasks = useQuery({
     queryKey: ["tasks", project.code],
     queryFn: () => client.tasks.list(project.code, { limit: 100 }),
@@ -3049,6 +3069,7 @@ function ProjectPage({
   const engineering = useQuery({
     queryKey: ["engineering-metrics", project.code],
     queryFn: () => client.projects.engineeringMetrics(project.code),
+    enabled: !engineeringCollapsed,
   });
   const refreshEngineering = useMutation({
     mutationFn: () => client.projects.engineeringMetrics(project.code, undefined, true),
@@ -3542,13 +3563,15 @@ function ProjectPage({
               <small>由本地 Git 与文件事实计算，不生成质量评分</small>
             </span>
           </button>
-          <button
-            className="atm-button"
-            disabled={refreshEngineering.isPending}
-            onClick={() => refreshEngineering.mutate()}
-          >
-            {refreshEngineering.isPending ? "正在统计" : "刷新统计"}
-          </button>
+          {!engineeringCollapsed ? (
+            <button
+              className="atm-button"
+              disabled={refreshEngineering.isPending}
+              onClick={() => refreshEngineering.mutate()}
+            >
+              {refreshEngineering.isPending ? "正在统计" : "刷新统计"}
+            </button>
+          ) : null}
         </div>
         <div id="engineering-metrics-content" hidden={engineeringCollapsed}>
           {engineering.isLoading ? (

@@ -127,20 +127,17 @@ html[data-theme-switching="true"] *::after {
   min-width: 0;
   overflow: hidden;
 }
-.atm-nav-project-code {
-  flex: 0 1 auto;
-  min-width: 30px;
-  max-width: 45%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .atm-nav-project-name {
+  display: -webkit-box;
   flex: 1 1 auto;
   min-width: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 .atm-sidebar-footer {
   margin-top: auto;
@@ -1209,11 +1206,42 @@ button.atm-row:hover {
   top: 0;
   z-index: 1;
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 16px;
-  padding: 19px 20px;
+  min-height: 68px;
+  padding: 19px 20px 19px 60px;
   border-bottom: 1px solid var(--atm-border);
   background: var(--atm-surface);
+}
+.atm-drawer-head > div {
+  min-width: 0;
+}
+.atm-drawer-collapse {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: grid;
+  width: 44px;
+  min-height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--atm-border);
+  border-radius: 0;
+  color: var(--atm-text-muted);
+  background: color-mix(in srgb, var(--atm-surface-muted) 58%, transparent);
+  transition:
+    color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-drawer-collapse:hover {
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+}
+.atm-drawer-collapse > svg {
+  transition: transform var(--atm-duration-press) var(--atm-ease-out);
+}
+.atm-drawer-collapse:active > svg {
+  transform: translateX(2px);
 }
 .atm-drawer-body {
   display: grid;
@@ -1419,6 +1447,14 @@ button.atm-row:hover {
   .atm-select-trigger:active,
   .atm-select[data-open="true"] .atm-select-trigger > svg,
   .atm-select-popover {
+    transform: none;
+  }
+
+  .atm-drawer-collapse > svg {
+    transition: none;
+  }
+
+  .atm-drawer-collapse:active > svg {
     transform: none;
   }
 

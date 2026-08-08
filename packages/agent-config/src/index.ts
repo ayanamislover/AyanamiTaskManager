@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const AGENT_RULE_SNIPPET =
-  "执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。";
+  "执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。受管开发任务开始实现前必须按可交付结果和可验证验收拆分成可独立验收的工作项。";
 
 export type McpRuntime = {
   endpoint: string;
