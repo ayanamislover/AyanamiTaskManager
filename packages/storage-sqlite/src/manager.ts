@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import Database from "better-sqlite3";
 import { strToU8, zipSync, type Zippable } from "fflate";
 import { allocateProjectCode } from "@ayanami-task/domain";
@@ -29,6 +30,22 @@ import {
   type PresentedEvent,
 } from "./event-presentation.js";
 import { ProjectRepository } from "./project-repository.js";
+
+const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  const attempts = process.platform === "win32" ? 8 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      renameSync(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (!TRANSIENT_RENAME_ERRORS.has(code) || attempt === attempts - 1) throw error;
+      await delay(25 * 2 ** attempt);
+    }
+  }
+}
 
 export type RegisteredProject = {
   id: string;
@@ -957,7 +974,7 @@ export class AyanamiDatabaseManager {
       projectDatabase.sqlite.pragma("wal_checkpoint(TRUNCATE)");
       projectDatabase.sqlite.close();
       projectDatabase = null;
-      renameSync(temporaryDirectory, finalDirectory);
+      await renameWithRetry(temporaryDirectory, finalDirectory);
       const databasePath = join(finalDirectory, "project.sqlite");
       writeFileSync(
         join(finalDirectory, "manifest.json"),
@@ -1622,7 +1639,7 @@ export class AyanamiDatabaseManager {
       const healthy = quickCheck(snapshot);
       snapshot.close();
       if (!healthy) throw new Error("BACKUP_INTEGRITY_FAILED");
-      renameSync(temporaryPath, finalPath);
+      await renameWithRetry(temporaryPath, finalPath);
       const sha256 = sha256File(finalPath);
       const sizeBytes = statSync(finalPath).size;
       const verifiedAt = nowIso();
@@ -1868,9 +1885,9 @@ export class AyanamiDatabaseManager {
       rmSync(rollbackPath, { force: true });
       for (const suffix of ["-wal", "-shm"])
         rmSync(`${project.databasePath}${suffix}`, { force: true });
-      renameSync(project.databasePath, rollbackPath);
+      await renameWithRetry(project.databasePath, rollbackPath);
       try {
-        renameSync(candidatePath, project.databasePath);
+        await renameWithRetry(candidatePath, project.databasePath);
         this.registry.sqlite
           .prepare(
             "UPDATE projects SET lifecycle = 'ACTIVE', version = version + 1, updated_at = ? WHERE id = ?",
@@ -1885,7 +1902,7 @@ export class AyanamiDatabaseManager {
       } catch (error) {
         this.closeProject(project.id);
         rmSync(project.databasePath, { force: true });
-        renameSync(rollbackPath, project.databasePath);
+        await renameWithRetry(rollbackPath, project.databasePath);
         this.registry.sqlite
           .prepare("UPDATE projects SET lifecycle = 'ACTIVE', updated_at = ? WHERE id = ?")
           .run(nowIso(), project.id);
