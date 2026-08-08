@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 export const AGENT_RULE_SNIPPET =
-  "项目使用 AyanamiTaskManager。开工只调用一次 atm_begin，先领取/start；仅在状态变化、有意义阶段、阻塞/等待/交接/完成时写入，summary≤80字，不贴日志。结束调用 atm_end；一次性工作用 Quick Task。";
+  "执行项目前先访问 ATM 工具，并阅读 R:\\Project_All\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。";
 
 export type McpRuntime = {
   endpoint: string;

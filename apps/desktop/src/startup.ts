@@ -1,0 +1,26 @@
+export const STARTUP_DELAY_MIN_MS = 8_000;
+export const STARTUP_DELAY_MAX_MS = 45_000;
+
+export function randomStartupDelayMs(random: () => number = Math.random): number {
+  const sample = Math.min(0.999_999, Math.max(0, random()));
+  return Math.floor(
+    STARTUP_DELAY_MIN_MS + sample * (STARTUP_DELAY_MAX_MS - STARTUP_DELAY_MIN_MS + 1),
+  );
+}
+
+export function shouldDelayStartup(args: string[], smoke: boolean): boolean {
+  return !smoke && args.includes("--background") && args.includes("--random-startup-delay");
+}
+
+export function waitForStartupDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted || milliseconds <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(finish, milliseconds);
+    function finish() {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    }
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}

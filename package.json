@@ -30,7 +30,10 @@
     "make": "pnpm build && tsx scripts/forge-make.ts",
     "release": "tsx scripts/release.ts",
     "smoke:packaged": "tsx scripts/packaged-smoke.ts",
-    "benchmark": "tsx scripts/benchmark.ts"
+    "smoke:window": "tsx scripts/window-smoke.ts",
+    "smoke:history": "tsx scripts/default-history-smoke.ts",
+    "benchmark": "tsx scripts/benchmark.ts",
+    "migrate:data-root": "tsx scripts/migrate-data-root.ts"
   },
   "dependencies": {
     "@fastify/cors": "11.0.1",

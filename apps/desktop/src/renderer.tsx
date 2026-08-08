@@ -6,6 +6,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AyanamiClient } from "@ayanami-task/client";
 import { AyanamiTaskManager } from "@ayanami-task/ui";
+import brandLogoUrl from "../../../logo.png?url";
 import "./window-chrome.css";
 
 type DesktopBridge = {
@@ -54,6 +55,7 @@ function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
     <div className="atm-window-chrome" role="toolbar" aria-label="窗口控制">
       <button
         className="atm-window-button"
+        data-testid="window-minimize"
         type="button"
         aria-label="最小化窗口"
         title="最小化窗口"
@@ -63,6 +65,7 @@ function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
       </button>
       <button
         className="atm-window-button"
+        data-testid="window-maximize"
         type="button"
         aria-label={maximized ? "还原窗口" : "最大化窗口"}
         title={maximized ? "还原窗口" : "最大化窗口"}
@@ -72,6 +75,7 @@ function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
       </button>
       <button
         className="atm-window-button atm-window-button-close"
+        data-testid="window-close"
         type="button"
         aria-label="关闭窗口并保留托盘运行"
         title="关闭窗口并保留托盘运行"
@@ -87,6 +91,8 @@ const browserEndpoint = import.meta.env.VITE_ATM_ENDPOINT as string | undefined;
 const browserToken = import.meta.env.VITE_ATM_TOKEN as string | undefined;
 const desktop = window.ayanamiDesktop;
 if (desktop) document.documentElement.dataset.atmDesktop = "true";
+const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+if (favicon) favicon.href = brandLogoUrl;
 const runtime = desktop?.runtime ?? {
   endpoint: browserEndpoint ?? "http://127.0.0.1:43127",
   token: browserToken ?? "browser-preview-token",
@@ -98,6 +104,10 @@ if (!root) throw new Error("ROOT_ELEMENT_MISSING");
 createRoot(root).render(
   <StrictMode>
     {desktop ? <DesktopWindowChrome desktop={desktop} /> : null}
-    <AyanamiTaskManager client={client} {...(desktop === undefined ? {} : { desktop })} />
+    <AyanamiTaskManager
+      client={client}
+      brandLogoSrc={brandLogoUrl}
+      {...(desktop === undefined ? {} : { desktop })}
+    />
   </StrictMode>,
 );

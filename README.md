@@ -25,7 +25,7 @@ pnpm atm -- project list
 pnpm atm -- doctor
 ```
 
-完整用户说明见 `docs/user-guide.md`，Agent 接入见 `docs/agent-integration.md`，架构与数据边界见 `docs/architecture.md` 和 `docs/data-model.md`。
+Agent 执行项目前先阅读根目录 `ATM_AGENT_GUIDE.md`。完整用户说明见 `docs/user-guide.md`，详细 Agent 接入见 `docs/agent-integration.md`，架构与数据边界见 `docs/architecture.md` 和 `docs/data-model.md`。
 
 ## 验收与发布
 

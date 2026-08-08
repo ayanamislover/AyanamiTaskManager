@@ -31,6 +31,7 @@ import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { createWindowOptions } from "./window-options.js";
+import { randomStartupDelayMs, shouldDelayStartup, waitForStartupDelay } from "./startup.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 
@@ -48,6 +49,7 @@ let unsubscribeGlobal: (() => void) | null = null;
 const unsubscribeProjects = new Map<string, () => void>();
 const projectSequences = new Map<string, number>();
 const notificationDedup = new Map<string, number>();
+const loginItemArgs = ["--background", "--random-startup-delay"];
 
 function dataDirBeforeReady(): string {
   if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
@@ -92,9 +94,14 @@ async function runHeadlessModes(args: string[]): Promise<boolean> {
   return false;
 }
 
+function applicationLogoPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "logo.png")
+    : join(app.getAppPath(), "logo.png");
+}
+
 function trayImage() {
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><rect x="2" y="2" width="28" height="28" rx="8" fill="#5D42BF"/><path d="M9 16.5l4 4L23 10.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  return nativeImage.createFromBuffer(Buffer.from(svg)).resize({ width: 20, height: 20 });
+  return nativeImage.createFromPath(applicationLogoPath()).resize({ width: 20, height: 20 });
 }
 
 function showWindow(): void {
@@ -109,11 +116,17 @@ function navigate(route: string): void {
   mainWindow?.webContents.send("atm:navigate", route);
 }
 
-function createWindow(): void {
+function createWindow(showWhenReady = true): void {
   mainWindow = new BrowserWindow(
-    createWindowOptions(join(__dirname, "preload.cjs"), nativeTheme.shouldUseDarkColors),
+    createWindowOptions(
+      join(__dirname, "preload.cjs"),
+      nativeTheme.shouldUseDarkColors,
+      applicationLogoPath(),
+    ),
   );
-  mainWindow.on("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("ready-to-show", () => {
+    if (showWhenReady) showWindow();
+  });
   const publishMaximizedState = () => {
     mainWindow?.webContents.send("atm:window-maximized-changed", mainWindow.isMaximized());
   };
@@ -137,14 +150,14 @@ function notificationsEnabled(): boolean {
 }
 
 function autoLaunchEnabled(): boolean {
-  return app.getLoginItemSettings({ path: process.execPath, args: ["--background"] }).openAtLogin;
+  return app.getLoginItemSettings({ path: process.execPath, args: loginItemArgs }).openAtLogin;
 }
 
 function setAutoLaunch(enabled: boolean): boolean {
   app.setLoginItemSettings({
     openAtLogin: enabled,
     path: process.execPath,
-    args: ["--background"],
+    args: loginItemArgs,
   });
   return autoLaunchEnabled();
 }
@@ -186,6 +199,7 @@ function createTray(): void {
   tray = new Tray(trayImage());
   tray.setToolTip("AyanamiTaskManager");
   tray.setContextMenu(trayMenu());
+  tray.on("click", showWindow);
   tray.on("double-click", showWindow);
 }
 
@@ -212,6 +226,7 @@ function showProjectNotification(
     new ElectronNotification({
       title: `${project} · ${title}`,
       body: event.summary || event.key || title,
+      icon: applicationLogoPath(),
     }).show();
   }
 }
@@ -281,7 +296,11 @@ function installDesktopEventObservers(): void {
         const key = `global:${event.type}:${event.key}`;
         if (!notificationDedup.has(key)) {
           notificationDedup.set(key, Date.now());
-          new ElectronNotification({ title: "备份失败", body: event.summary }).show();
+          new ElectronNotification({
+            title: "备份失败",
+            body: event.summary,
+            icon: applicationLogoPath(),
+          }).show();
         }
       }
     }
@@ -385,9 +404,8 @@ async function startApplication(background: boolean): Promise<void> {
   );
   maintenanceTimer.unref();
   createTray();
-  createWindow();
+  createWindow(!background);
   installDesktopEventObservers();
-  if (background) mainWindow?.hide();
 }
 
 async function bootstrap(): Promise<void> {
@@ -401,18 +419,26 @@ async function bootstrap(): Promise<void> {
     app.quit();
     return;
   }
+  let foregroundRequested = false;
+  const startupDelayController = new AbortController();
   app.on("second-instance", (_event, commandLine) => {
     if (process.env.ATM_PACKAGED_SMOKE === "1" && commandLine.includes("--smoke-quit")) {
       quitting = true;
+      startupDelayController.abort();
       app.quit();
       return;
     }
+    foregroundRequested = true;
+    startupDelayController.abort();
     showWindow();
   });
   await app.whenReady();
-  await startApplication(args.includes("--background"));
+  if (shouldDelayStartup(args, process.env.ATM_PACKAGED_SMOKE === "1")) {
+    await waitForStartupDelay(randomStartupDelayMs(), startupDelayController.signal);
+  }
+  await startApplication(args.includes("--background") && !foregroundRequested);
   app.on("activate", () => {
-    if (!mainWindow) createWindow();
+    if (!mainWindow) createWindow(true);
     else showWindow();
   });
 }
