@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -69,7 +69,7 @@ describe("REST 边界", () => {
         payload: { path: sourcePath, primary: true },
       });
       expect(attached.statusCode).toBe(200);
-      expect(attached.json().sourcePaths).toEqual([resolve(sourcePath)]);
+      expect(attached.json().sourcePaths).toEqual([realpathSync.native(sourcePath)]);
     } finally {
       await app.close();
       service.close();
