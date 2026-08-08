@@ -106,12 +106,84 @@ function bounded(value: unknown, maxChars: number): Record<string, unknown> {
   return { truncated: true, code: "RESULT_TOO_LARGE", hint: "缩小 limit、field_mask 或 include" };
 }
 
-function result(value: unknown, maxChars = 4000) {
-  const structuredContent = bounded(value, maxChars);
+function wrap(structuredContent: Record<string, unknown>) {
   return {
     content: [{ type: "text" as const, text: JSON.stringify(structuredContent) }],
     structuredContent,
   };
+}
+
+function result(value: unknown, maxChars = 4000) {
+  return wrap(bounded(value, maxChars));
+}
+
+// brief 的分节名 -> 载荷字段。truncated/project/seq 是身份字段，任何 include 都保留。
+const briefSections = {
+  objective: ["objective", "milestone"],
+  counts: ["active", "blocked", "waitingUser", "waitingAgent"],
+  own: ["own"],
+  next: ["next"],
+  records: ["records"],
+  current: ["currentTask"],
+  handoff: ["handoff"],
+  progress: ["recentProgress"],
+  artifacts: ["artifacts"],
+  task: ["task"],
+  delta: ["delta"],
+} as const;
+type BriefSection = keyof typeof briefSections;
+const briefSectionNames = Object.keys(briefSections) as [BriefSection, ...BriefSection[]];
+const briefAlwaysKeys = ["truncated", "project", "seq"];
+
+// include 为空表示全要；非空时只保留被点名的分节。
+function pickBriefSections(
+  payload: Record<string, unknown>,
+  include: readonly BriefSection[],
+): Record<string, unknown> {
+  if (include.length === 0) return payload;
+  const keep = new Set([...briefAlwaysKeys, ...include.flatMap((name) => briefSections[name])]);
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => keep.has(key)));
+}
+
+// 装不下时的丢弃顺序，越靠前越先丢。恢复 working set 最需要的
+// handoff / currentTask / task 放在最后，宁可只剩它们也不要退化成空回执。
+// task 与 delta 只在调用方显式传了 task_key / since_seq 时才存在，
+// 属于点名要的内容，因此排在泛泛的 records / progress 之后。
+const briefDropOrder: readonly BriefSection[] = [
+  "artifacts",
+  "own",
+  "counts",
+  "objective",
+  "next",
+  "records",
+  "progress",
+  "delta",
+  "task",
+  "current",
+  "handoff",
+];
+
+// bounded() 只截字符串和数组、从不删字段，因此存在删不掉的下限；撞到下限时
+// 它会退化成 RESULT_TOO_LARGE 空回执，对调用方毫无用处。这里改为按价值逐级
+// 丢分节后重试，保证返回的是「装得下的最大子集」而不是什么都没有。
+function fitBrief(
+  payload: Record<string, unknown>,
+  include: readonly BriefSection[],
+  maxChars: number,
+): Record<string, unknown> {
+  let current = pickBriefSections(payload, include);
+  const droppable = briefDropOrder.filter((name) =>
+    briefSections[name].some((key) => key in current),
+  );
+  for (;;) {
+    const attempt = bounded(current, maxChars);
+    if (attempt.code !== "RESULT_TOO_LARGE") return attempt;
+    const victim = droppable.shift();
+    if (victim === undefined) return attempt;
+    const dropped = new Set<string>(briefSections[victim]);
+    current = Object.fromEntries(Object.entries(current).filter(([key]) => !dropped.has(key)));
+    current.truncated = true;
+  }
 }
 
 const workItemCreate = z.object({
@@ -300,21 +372,29 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         task_key: taskKey.optional(),
         since_seq: z.number().int().nonnegative().optional(),
         max_chars: z.number().int().min(300).max(5000).default(1200),
-        include: z.array(z.string()).max(20).default([]),
+        include: z.array(z.enum(briefSectionNames)).max(briefSectionNames.length).default([]),
       },
       outputSchema,
       annotations: { readOnlyHint: true },
     },
     async (input) => {
-      const brief = await service.brief(input.project_code, input.session_id, input.max_chars);
-      const detail = input.task_key
-        ? { task: await service.getWorkItem(input.project_code, input.task_key, "context") }
+      const wanted = (section: BriefSection) =>
+        input.include.length === 0 || input.include.includes(section);
+      const withTask = input.task_key !== undefined && wanted("task");
+      const withDelta = input.since_seq !== undefined && wanted("delta");
+      // 附加分节拼在 brief 之上，bounded() 只截字符串和数组、从不删字段，
+      // 所以 brief 不能独占全部预算，否则带 task_key 时必然撞上删不掉的下限。
+      const extras = (withTask ? 1 : 0) + (withDelta ? 1 : 0);
+      const briefBudget =
+        extras === 0 ? input.max_chars : Math.max(300, Math.floor(input.max_chars / (extras + 1)));
+      const brief = await service.brief(input.project_code, input.session_id, briefBudget);
+      const detail = withTask
+        ? { task: await service.getWorkItem(input.project_code, input.task_key!, "context") }
         : {};
-      const delta =
-        input.since_seq === undefined
-          ? {}
-          : { delta: await service.delta(input.project_code, input.since_seq, 20) };
-      return result({ ...brief, ...detail, ...delta }, input.max_chars);
+      const delta = withDelta
+        ? { delta: await service.delta(input.project_code, input.since_seq!, 20) }
+        : {};
+      return wrap(fitBrief({ ...brief, ...detail, ...delta }, input.include, input.max_chars));
     },
   );
 

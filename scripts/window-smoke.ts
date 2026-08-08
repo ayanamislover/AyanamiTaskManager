@@ -20,6 +20,9 @@ const windowsPowerShell = join(
   "powershell.exe",
 );
 const screenshot = resolve(join(root, "output", "playwright", "packaged-window-polish.png"));
+const drawerScreenshot = resolve(
+  join(root, "output", "playwright", "packaged-window-drawer-safe-area.png"),
+);
 if (!existsSync(executable)) throw new Error(`找不到打包应用：${executable}`);
 if (!existsSync(nativeHitTestScript))
   throw new Error(`找不到原生命中测试脚本：${nativeHitTestScript}`);
@@ -43,6 +46,22 @@ const application = await electron.launch({
 try {
   const page = await application.firstWindow();
   await page.waitForSelector(".atm-shell");
+  const runtime = JSON.parse(await readFile(join(dataDir, "runtime", "daemon.json"), "utf8")) as {
+    endpoint: string;
+    token: string;
+  };
+  const post = async (path: string, body: unknown): Promise<any> => {
+    const response = await fetch(`${runtime.endpoint}${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${runtime.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`${path} 创建验收数据失败：${response.status}`);
+    return response.json();
+  };
   const nativeWindow = await application.browserWindow(page);
   const nativeWindowHandle = await nativeWindow.evaluate((window) => {
     const handle = window.getNativeWindowHandle();
@@ -117,6 +136,81 @@ try {
   await expectNativeRegion('[data-testid="window-maximize"]', "no-drag", 1);
   await expectNativeRegion('[data-testid="window-close"]', "no-drag", 1);
 
+  await post("/api/v1/projects", {
+    name: "窗口安全区验收",
+    sourcePath: null,
+    code: "WIN",
+    description: "真实 Electron 抽屉验收",
+  });
+  const objective = await post("/api/v1/projects/WIN/ui/objectives", {
+    opId: "window-smoke-objective",
+    title: "验证窗口控件",
+    description: "",
+    definitionOfDone: [],
+  });
+  await post("/api/v1/projects/WIN/ui/work-items", {
+    opId: "window-smoke-task",
+    items: [
+      {
+        clientRef: "drawer-safe-area",
+        objectiveId: objective.id,
+        title: "验证窗口控制安全区",
+        status: "READY",
+        priority: "HIGH",
+        acceptance: [],
+        checklist: [],
+      },
+    ],
+  });
+  await page.evaluate(() => {
+    location.hash = "project:WIN";
+    location.reload();
+  });
+  await page.waitForSelector(".atm-shell");
+  await page
+    .getByRole("button", { name: /验证窗口控制安全区/u })
+    .first()
+    .click();
+  const drawer = page.getByRole("dialog", { name: "任务详情" });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByRole("heading", { name: "验证窗口控制安全区" })).toBeVisible();
+  await expect
+    .poll(() =>
+      drawer.evaluate((element) => {
+        const matrix = new DOMMatrixReadOnly(getComputedStyle(element).transform);
+        return Math.abs(matrix.m41) < 0.5;
+      }),
+    )
+    .toBe(true);
+  const chromeBox = await page.getByRole("toolbar", { name: "窗口控制" }).boundingBox();
+  const drawerCloseBox = await drawer.getByRole("button", { name: "关闭" }).boundingBox();
+  if (!chromeBox || !drawerCloseBox) throw new Error("窗口控制或抽屉关闭按钮不可见");
+  const drawerLayout = await drawer.locator(".atm-drawer-head").evaluate((element) => ({
+    desktop: document.documentElement.dataset.atmDesktop,
+    paddingRight: getComputedStyle(element).paddingRight,
+    box: element.getBoundingClientRect().toJSON(),
+  }));
+  const overlaps = !(
+    drawerCloseBox.x + drawerCloseBox.width <= chromeBox.x ||
+    drawerCloseBox.x >= chromeBox.x + chromeBox.width ||
+    drawerCloseBox.y + drawerCloseBox.height <= chromeBox.y ||
+    drawerCloseBox.y >= chromeBox.y + chromeBox.height
+  );
+  await page.screenshot({ path: drawerScreenshot });
+  const separation = Math.max(
+    chromeBox.x - (drawerCloseBox.x + drawerCloseBox.width),
+    drawerCloseBox.x - (chromeBox.x + chromeBox.width),
+    chromeBox.y - (drawerCloseBox.y + drawerCloseBox.height),
+    drawerCloseBox.y - (chromeBox.y + chromeBox.height),
+  );
+  if (overlaps || separation < 12) {
+    throw new Error(
+      `窗口控制与抽屉关闭按钮安全区不足：${JSON.stringify({ chromeBox, drawerCloseBox, drawerLayout, overlaps, separation })}`,
+    );
+  }
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden();
+
   const maximize = page.getByTestId("window-maximize");
   await maximize.click();
   await expect.poll(() => nativeWindow.evaluate((window) => window.isMaximized())).toBe(true);
@@ -170,10 +264,6 @@ try {
   await page.screenshot({ path: screenshot });
   await page.getByTestId("window-close").click();
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(false);
-  const runtime = JSON.parse(await readFile(join(dataDir, "runtime", "daemon.json"), "utf8")) as {
-    endpoint: string;
-    token: string;
-  };
   const health = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
     headers: { authorization: `Bearer ${runtime.token}` },
   });
@@ -181,7 +271,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, scrollbar: metrics, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerSafeArea: { chromeBox, drawerCloseBox, drawerLayout, separation }, scrollbar: metrics, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();

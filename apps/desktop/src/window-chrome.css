@@ -86,6 +86,11 @@ html[data-atm-desktop="true"] .atm-topbar a *,
   -webkit-app-region: no-drag;
 }
 
+html[data-atm-desktop="true"] .atm-drawer-head {
+  min-height: 68px;
+  padding-right: 158px;
+}
+
 .atm-window-chrome {
   position: fixed;
   top: 12px;

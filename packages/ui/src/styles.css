@@ -701,6 +701,98 @@ button.atm-row:hover {
   border-radius: 9px;
   background: var(--atm-surface);
 }
+.atm-select {
+  position: relative;
+  min-width: 120px;
+}
+.atm-select.medium {
+  min-width: 150px;
+}
+.atm-select.wide {
+  min-width: 180px;
+}
+.atm-select-trigger {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--atm-text);
+  text-align: left;
+  white-space: nowrap;
+  transition:
+    border-color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-press) var(--atm-ease-out);
+}
+.atm-select-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--atm-text-muted);
+  transition: transform 160ms var(--atm-ease-out);
+}
+.atm-select[data-open="true"] .atm-select-trigger {
+  border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
+  background: var(--atm-surface);
+}
+.atm-select[data-open="true"] .atm-select-trigger > svg {
+  transform: rotate(180deg);
+}
+.atm-select-trigger:active {
+  transform: scale(0.98);
+}
+.atm-select-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 45;
+  display: grid;
+  min-width: max(100%, 180px);
+  max-width: min(280px, calc(100vw - 32px));
+  max-height: min(320px, calc(100vh - 120px));
+  padding: 5px;
+  border: 1px solid var(--atm-border);
+  border-radius: 11px;
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-raised);
+  opacity: 1;
+  overflow-y: auto;
+  transform: translateY(0) scale(1);
+  transform-origin: top left;
+  transition:
+    opacity 160ms var(--atm-ease-out),
+    transform 160ms var(--atm-ease-out);
+}
+@starting-style {
+  .atm-select-popover {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+.atm-select-option {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--atm-text-muted);
+  background: transparent;
+  text-align: left;
+  white-space: nowrap;
+}
+.atm-select-option > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.atm-select-option > svg {
+  color: var(--atm-primary-strong);
+}
+.atm-select-option[data-selected="true"] {
+  color: var(--atm-text);
+  background: color-mix(in srgb, var(--atm-primary) 12%, transparent);
+}
 .atm-filterbar {
   display: flex;
   align-items: center;
@@ -712,6 +804,17 @@ button.atm-row:hover {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-select-trigger:hover {
+    border-color: color-mix(in srgb, var(--atm-primary) 38%, var(--atm-border));
+    background: var(--atm-surface);
+  }
+
+  .atm-select-option:hover {
+    color: var(--atm-text);
+    background: var(--atm-surface-muted);
+  }
 }
 .atm-record {
   padding: 16px 18px;
@@ -749,6 +852,51 @@ button.atm-row:hover {
   font-size: 11px;
   font-weight: 650;
   text-align: left;
+}
+.atm-table-sort {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 5px;
+  margin: -5px -7px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  transition:
+    color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-table-sort > svg {
+  opacity: 0;
+  transform: translateY(-1px);
+  transition:
+    opacity var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-table-sort[data-active="true"] {
+  color: var(--atm-primary-strong);
+  background: color-mix(in srgb, var(--atm-primary) 10%, transparent);
+}
+.atm-table-sort[data-active="true"] > svg {
+  opacity: 1;
+}
+.atm-table-sort[data-active="true"][data-direction="asc"] > svg {
+  transform: rotate(180deg) translateY(1px);
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-table-sort:hover {
+    color: var(--atm-text);
+    background: var(--atm-surface-muted);
+  }
+
+  .atm-table-sort:hover > svg {
+    opacity: 0.64;
+  }
 }
 .atm-table td {
   height: 51px;
@@ -1176,6 +1324,18 @@ button.atm-row:hover {
   .atm-skeleton::after {
     animation: none;
     content: none;
+  }
+
+  .atm-select-trigger,
+  .atm-select-trigger > svg,
+  .atm-select-popover {
+    transition-property: color, background-color, border-color, opacity;
+  }
+
+  .atm-select-trigger:active,
+  .atm-select[data-open="true"] .atm-select-trigger > svg,
+  .atm-select-popover {
+    transform: none;
   }
 
   @starting-style {
