@@ -170,3 +170,28 @@ test("暗黑主题可手动切换并在 reload 后持久化", async ({ page }) =
     fullPage: true,
   });
 });
+
+test("新品牌、抽屉空间层与 reduced motion 降级可用", async ({ page }) => {
+  await page.goto("/#project:E2E");
+  const logo = page.locator(".atm-brand img");
+  await expect(logo).toBeVisible();
+  expect(await logo.getAttribute("src")).toContain("logo");
+
+  await page
+    .getByRole("button", { name: /验证键盘与焦点/u })
+    .first()
+    .click();
+  await expect(page.locator(".atm-drawer-backdrop")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "任务详情" })).toBeVisible();
+  await page.keyboard.press("Escape");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.keyboard.press("Control+n");
+  const dialog = page.getByRole("dialog", { name: "新建任务" });
+  await expect(dialog).toBeVisible();
+  expect(await dialog.evaluate((element) => getComputedStyle(element).transform)).toBe("none");
+  expect(await dialog.evaluate((element) => getComputedStyle(element).transitionProperty)).toBe(
+    "opacity",
+  );
+  await page.keyboard.press("Escape");
+});

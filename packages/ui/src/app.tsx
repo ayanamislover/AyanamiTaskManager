@@ -90,6 +90,15 @@ function persistTheme(theme: Theme) {
   }
 }
 
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
+    Boolean(target.closest('[contenteditable="true"]'))
+  );
+}
+
 const statusLabels: Record<string, string> = {
   BACKLOG: "待整理",
   READY: "可开始",
@@ -302,10 +311,12 @@ function Sidebar({
   route,
   setRoute,
   projects,
+  brandLogoSrc,
 }: {
   route: Route;
   setRoute: (route: Route) => void;
   projects: RegisteredProject[];
+  brandLogoSrc?: string;
 }) {
   const global = [
     ["overview", "总览", House],
@@ -322,7 +333,11 @@ function Sidebar({
       <div className="atm-sidebar-inner">
         <div className="atm-brand">
           <span className="atm-brand-mark">
-            <CheckSquare size={18} weight="bold" />
+            {brandLogoSrc ? (
+              <img src={brandLogoSrc} alt="" aria-hidden="true" />
+            ) : (
+              <CheckSquare size={18} weight="bold" />
+            )}
           </span>
           <span>AyanamiTaskManager</span>
         </div>
@@ -1556,7 +1571,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
               <div className="atm-row">
                 <div>
                   <div className="atm-row-title">登录时启动</div>
-                  <div className="atm-row-sub">使用 --background 并常驻托盘</div>
+                  <div className="atm-row-sub">登录后随机延迟 8–45 秒启动，并常驻托盘</div>
                 </div>
                 <button
                   className="atm-button"
@@ -1711,172 +1726,175 @@ function TaskDrawer({
     patch.mutate(input);
   };
   return (
-    <aside
-      ref={dialogRef}
-      className="atm-drawer"
-      role="dialog"
-      aria-modal="true"
-      aria-label="任务详情"
-      tabIndex={-1}
-    >
-      <header className="atm-drawer-head">
-        <div>
-          {query.data ? (
-            <>
-              <span className="atm-key">{taskKey}</span>
-              <h2 style={{ margin: "6px 0 0", fontSize: 19 }}>{String(query.data.title)}</h2>
-            </>
-          ) : (
-            <span>载入任务</span>
-          )}
-        </div>
-        <button className="atm-button atm-icon-button" onClick={close} aria-label="关闭">
-          <X size={17} />
-        </button>
-      </header>
-      {query.isLoading ? (
-        <LoadingRows />
-      ) : query.error ? (
-        <ErrorState error={query.error} />
-      ) : (
-        <div className="atm-drawer-body">
-          <div className="atm-actions">
-            <Status value={String(query.data!.status)} />
-            {actions(
-              String(query.data!.status),
-              Boolean(
-                query.data!.claimLeaseUntil &&
-                  Date.parse(String(query.data!.claimLeaseUntil)) <= Date.now(),
-              ),
-            ).map(([operation, label]) => (
-              <button
-                className={`atm-button ${["start", "verify", "complete"].includes(operation) ? "primary" : operation === "cancel" ? "danger" : ""}`}
-                disabled={patch.isPending}
-                key={operation}
-                onClick={() => runAction(operation)}
-              >
-                {label}
-              </button>
-            ))}
+    <div className="atm-drawer-backdrop" role="presentation" onMouseDown={close}>
+      <aside
+        ref={dialogRef}
+        className="atm-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="任务详情"
+        tabIndex={-1}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="atm-drawer-head">
+          <div>
+            {query.data ? (
+              <>
+                <span className="atm-key">{taskKey}</span>
+                <h2 style={{ margin: "6px 0 0", fontSize: 19 }}>{String(query.data.title)}</h2>
+              </>
+            ) : (
+              <span>载入任务</span>
+            )}
           </div>
-          {patch.error ? (
-            <div className="atm-inline-error">
-              {patch.error instanceof Error ? patch.error.message : String(patch.error)}
-            </div>
-          ) : null}
-          <section className="atm-section">
-            <h3>说明</h3>
-            <div className="atm-description">
-              {String(query.data!.description || "尚未填写说明")}
-            </div>
-          </section>
-          <section className="atm-section">
-            <h3>进度</h3>
-            <div className="atm-progress">
-              <span style={{ width: `${Number(query.data!.progress ?? 0)}%` }} />
-            </div>
-            <div className="atm-row-sub">
-              {Math.round(Number(query.data!.progress ?? 0))}% ·{" "}
-              {progressSourceLabels[String(query.data!.progressSource)] ?? "状态计算"}
-            </div>
-          </section>
-          <section className="atm-section">
-            <h3>验收标准</h3>
-            {(query.data!.acceptance as string[]).length ? (
-              (query.data!.acceptance as string[]).map((item) => (
-                <div className="atm-check" key={item}>
-                  <CheckCircle size={17} color="var(--atm-success)" />
-                  <span>{item}</span>
-                </div>
-              ))
-            ) : (
-              <div className="atm-row-sub">未设置验收标准</div>
-            )}
-          </section>
-          <section className="atm-section">
-            <h3>检查项</h3>
-            {(query.data!.checklist as any[]).length ? (
-              (query.data!.checklist as any[]).map((item) => (
-                <label className="atm-check" key={item.id}>
-                  <input
-                    type="checkbox"
-                    checked={item.status === "DONE"}
-                    disabled={check.isPending}
-                    onChange={() => check.mutate(item)}
-                  />
-                  <span>
-                    {item.title}
-                    {item.evidenceRequired ? (
-                      <span className="atm-row-sub"> · 需要证据</span>
-                    ) : null}
-                  </span>
-                </label>
-              ))
-            ) : (
-              <div className="atm-row-sub">未设置检查项</div>
-            )}
-          </section>
-          <section className="atm-section">
-            <h3>依赖</h3>
+          <button className="atm-button atm-icon-button" onClick={close} aria-label="关闭">
+            <X size={17} />
+          </button>
+        </header>
+        {query.isLoading ? (
+          <LoadingRows />
+        ) : query.error ? (
+          <ErrorState error={query.error} />
+        ) : (
+          <div className="atm-drawer-body">
             <div className="atm-actions">
-              {(query.data!.dependencies as string[]).length ? (
-                (query.data!.dependencies as string[]).map((key) => (
-                  <span className="atm-badge" key={key}>
-                    {key}
-                  </span>
-                ))
-              ) : (
-                <span className="atm-row-sub">没有前置依赖</span>
-              )}
+              <Status value={String(query.data!.status)} />
+              {actions(
+                String(query.data!.status),
+                Boolean(
+                  query.data!.claimLeaseUntil &&
+                    Date.parse(String(query.data!.claimLeaseUntil)) <= Date.now(),
+                ),
+              ).map(([operation, label]) => (
+                <button
+                  className={`atm-button ${["start", "verify", "complete"].includes(operation) ? "primary" : operation === "cancel" ? "danger" : ""}`}
+                  disabled={patch.isPending}
+                  key={operation}
+                  onClick={() => runAction(operation)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          </section>
-          {engineering.data?.available && engineering.data.workItem?.metrics ? (
-            <section className="atm-section">
-              <h3>工程变更</h3>
-              <div className="atm-engineering-kpis compact">
-                <div>
-                  <span>修改</span>
-                  <strong>{engineering.data.workItem.metrics.filesChanged}</strong>
-                </div>
-                <div>
-                  <span>新建</span>
-                  <strong>{engineering.data.workItem.metrics.filesCreated}</strong>
-                </div>
-                <div>
-                  <span>删除</span>
-                  <strong>{engineering.data.workItem.metrics.filesDeleted}</strong>
-                </div>
-                <div>
-                  <span>新增行</span>
-                  <strong>+{engineering.data.workItem.metrics.linesAdded}</strong>
-                </div>
-                <div>
-                  <span>删除行</span>
-                  <strong>-{engineering.data.workItem.metrics.linesDeleted}</strong>
-                </div>
-                <div>
-                  <span>净行数</span>
-                  <strong>{engineering.data.workItem.metrics.netLines}</strong>
-                </div>
-                <div>
-                  <span>Source +</span>
-                  <strong>{engineering.data.workItem.metrics.sourceLinesAdded}</strong>
-                </div>
-                <div>
-                  <span>Test +</span>
-                  <strong>{engineering.data.workItem.metrics.testLinesAdded}</strong>
-                </div>
+            {patch.error ? (
+              <div className="atm-inline-error">
+                {patch.error instanceof Error ? patch.error.message : String(patch.error)}
               </div>
-              <div className="atm-row-sub">
-                新增依赖：
-                {(engineering.data.workItem.metrics.dependenciesAdded as string[]).join("、") ||
-                  "无"}
+            ) : null}
+            <section className="atm-section">
+              <h3>说明</h3>
+              <div className="atm-description">
+                {String(query.data!.description || "尚未填写说明")}
               </div>
             </section>
-          ) : null}
-        </div>
-      )}
-    </aside>
+            <section className="atm-section">
+              <h3>进度</h3>
+              <div className="atm-progress">
+                <span style={{ width: `${Number(query.data!.progress ?? 0)}%` }} />
+              </div>
+              <div className="atm-row-sub">
+                {Math.round(Number(query.data!.progress ?? 0))}% ·{" "}
+                {progressSourceLabels[String(query.data!.progressSource)] ?? "状态计算"}
+              </div>
+            </section>
+            <section className="atm-section">
+              <h3>验收标准</h3>
+              {(query.data!.acceptance as string[]).length ? (
+                (query.data!.acceptance as string[]).map((item) => (
+                  <div className="atm-check" key={item}>
+                    <CheckCircle size={17} color="var(--atm-success)" />
+                    <span>{item}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="atm-row-sub">未设置验收标准</div>
+              )}
+            </section>
+            <section className="atm-section">
+              <h3>检查项</h3>
+              {(query.data!.checklist as any[]).length ? (
+                (query.data!.checklist as any[]).map((item) => (
+                  <label className="atm-check" key={item.id}>
+                    <input
+                      type="checkbox"
+                      checked={item.status === "DONE"}
+                      disabled={check.isPending}
+                      onChange={() => check.mutate(item)}
+                    />
+                    <span>
+                      {item.title}
+                      {item.evidenceRequired ? (
+                        <span className="atm-row-sub"> · 需要证据</span>
+                      ) : null}
+                    </span>
+                  </label>
+                ))
+              ) : (
+                <div className="atm-row-sub">未设置检查项</div>
+              )}
+            </section>
+            <section className="atm-section">
+              <h3>依赖</h3>
+              <div className="atm-actions">
+                {(query.data!.dependencies as string[]).length ? (
+                  (query.data!.dependencies as string[]).map((key) => (
+                    <span className="atm-badge" key={key}>
+                      {key}
+                    </span>
+                  ))
+                ) : (
+                  <span className="atm-row-sub">没有前置依赖</span>
+                )}
+              </div>
+            </section>
+            {engineering.data?.available && engineering.data.workItem?.metrics ? (
+              <section className="atm-section">
+                <h3>工程变更</h3>
+                <div className="atm-engineering-kpis compact">
+                  <div>
+                    <span>修改</span>
+                    <strong>{engineering.data.workItem.metrics.filesChanged}</strong>
+                  </div>
+                  <div>
+                    <span>新建</span>
+                    <strong>{engineering.data.workItem.metrics.filesCreated}</strong>
+                  </div>
+                  <div>
+                    <span>删除</span>
+                    <strong>{engineering.data.workItem.metrics.filesDeleted}</strong>
+                  </div>
+                  <div>
+                    <span>新增行</span>
+                    <strong>+{engineering.data.workItem.metrics.linesAdded}</strong>
+                  </div>
+                  <div>
+                    <span>删除行</span>
+                    <strong>-{engineering.data.workItem.metrics.linesDeleted}</strong>
+                  </div>
+                  <div>
+                    <span>净行数</span>
+                    <strong>{engineering.data.workItem.metrics.netLines}</strong>
+                  </div>
+                  <div>
+                    <span>Source +</span>
+                    <strong>{engineering.data.workItem.metrics.sourceLinesAdded}</strong>
+                  </div>
+                  <div>
+                    <span>Test +</span>
+                    <strong>{engineering.data.workItem.metrics.testLinesAdded}</strong>
+                  </div>
+                </div>
+                <div className="atm-row-sub">
+                  新增依赖：
+                  {(engineering.data.workItem.metrics.dependenciesAdded as string[]).join("、") ||
+                    "无"}
+                </div>
+              </section>
+            ) : null}
+          </div>
+        )}
+      </aside>
+    </div>
   );
 }
 
@@ -3512,7 +3530,15 @@ function CommandPalette({
   );
 }
 
-function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBridge }) {
+function App({
+  client,
+  desktop,
+  brandLogoSrc,
+}: {
+  client: AyanamiClient;
+  desktop?: DesktopBridge;
+  brandLogoSrc?: string;
+}) {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
   const [route, setRoute] = useState<Route>(() => (location.hash.slice(1) as Route) || "overview");
   const [theme, setTheme] = useState<Theme>(() => readStoredTheme() ?? readSystemTheme());
@@ -3528,7 +3554,18 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
     location.hash = route;
   }, [route]);
   useLayoutEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    const root = document.documentElement;
+    root.dataset.themeSwitching = "true";
+    root.dataset.theme = theme;
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => delete root.dataset.themeSwitching);
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+      delete root.dataset.themeSwitching;
+    };
   }, [theme]);
   useEffect(() => {
     if (hasManualTheme) return;
@@ -3541,7 +3578,13 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
   useEffect(() => desktop?.onNavigate?.((next) => setRoute(next as Route)), [desktop]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey)) return;
+      if (
+        event.defaultPrevented ||
+        !(event.ctrlKey || event.metaKey) ||
+        isEditableTarget(event.target) ||
+        document.querySelector('[role="dialog"]')
+      )
+        return;
       if (event.key.toLowerCase() === "k") {
         event.preventDefault();
         setPalette(true);
@@ -3643,7 +3686,12 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
   else page = <ErrorState error="找不到这个项目，可能已被移除或路径发生变化。" />;
   return (
     <div className="atm-shell">
-      <Sidebar route={route} setRoute={setRoute} projects={projectList} />
+      <Sidebar
+        route={route}
+        setRoute={setRoute}
+        projects={projectList}
+        {...(brandLogoSrc ? { brandLogoSrc } : {})}
+      />
       <main className="atm-main">
         <header className="atm-topbar">
           <div className="atm-breadcrumb">{title}</div>
@@ -3711,9 +3759,11 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
 export function AyanamiTaskManager({
   client,
   desktop,
+  brandLogoSrc,
 }: {
   client: AyanamiClient;
   desktop?: DesktopBridge;
+  brandLogoSrc?: string;
 }) {
   const [queryClient] = useState(
     () =>
@@ -3726,7 +3776,11 @@ export function AyanamiTaskManager({
   );
   return (
     <QueryClientProvider client={queryClient}>
-      <App client={client} {...(desktop === undefined ? {} : { desktop })} />
+      <App
+        client={client}
+        {...(desktop === undefined ? {} : { desktop })}
+        {...(brandLogoSrc ? { brandLogoSrc } : {})}
+      />
     </QueryClientProvider>
   );
 }

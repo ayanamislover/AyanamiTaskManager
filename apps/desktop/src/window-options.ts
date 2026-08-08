@@ -6,6 +6,7 @@ const DARK_WINDOW_BACKGROUND = "#1F1D23";
 export function createWindowOptions(
   preloadPath: string,
   dark: boolean,
+  iconPath?: string,
 ): BrowserWindowConstructorOptions {
   return {
     width: 1440,
@@ -20,6 +21,7 @@ export function createWindowOptions(
     closable: true,
     backgroundColor: dark ? DARK_WINDOW_BACKGROUND : LIGHT_WINDOW_BACKGROUND,
     title: "AyanamiTaskManager",
+    ...(iconPath ? { icon: iconPath } : {}),
     autoHideMenuBar: true,
     webPreferences: {
       preload: preloadPath,

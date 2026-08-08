@@ -21,7 +21,16 @@
   --atm-shadow-raised: 0 1px 5px rgb(50 35 25 / 0.08);
   --atm-drawer-shadow: -15px 0 45px rgb(50 34 25 / 0.12);
   --atm-overlay: rgb(28 24 34 / 0.45);
+  --atm-focus: #5d42bf;
+  --atm-scrollbar-thumb: #aaa1ae;
+  --atm-scrollbar-thumb-hover: #7257d6;
   --atm-sidebar: 252px;
+  --atm-duration-press: 120ms;
+  --atm-duration-hover: 160ms;
+  --atm-duration-surface: 220ms;
+  --atm-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --atm-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --atm-ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
   --atm-font: "Segoe UI Variable", "Microsoft YaHei UI", "PingFang SC", sans-serif;
   --atm-mono: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
@@ -48,6 +57,9 @@
   --atm-shadow-raised: 0 1px 6px rgb(0 0 0 / 0.24);
   --atm-drawer-shadow: -15px 0 45px rgb(0 0 0 / 0.32);
   --atm-overlay: rgb(8 7 11 / 0.68);
+  --atm-focus: #b7a6f3;
+  --atm-scrollbar-thumb: #6a6270;
+  --atm-scrollbar-thumb-hover: #a895ee;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -73,5 +85,8 @@
     --atm-shadow-raised: 0 1px 6px rgb(0 0 0 / 0.24);
     --atm-drawer-shadow: -15px 0 45px rgb(0 0 0 / 0.32);
     --atm-overlay: rgb(8 7 11 / 0.68);
+    --atm-focus: #b7a6f3;
+    --atm-scrollbar-thumb: #6a6270;
+    --atm-scrollbar-thumb-hover: #a895ee;
   }
 }

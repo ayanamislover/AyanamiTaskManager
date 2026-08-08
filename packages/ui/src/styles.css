@@ -31,8 +31,14 @@ button:disabled {
   opacity: 0.5;
 }
 :focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--atm-primary) 45%, transparent);
+  outline: 2px solid var(--atm-focus);
   outline-offset: 2px;
+}
+
+html[data-theme-switching="true"] *,
+html[data-theme-switching="true"] *::before,
+html[data-theme-switching="true"] *::after {
+  transition: none !important;
 }
 
 .atm-shell {
@@ -67,6 +73,12 @@ button:disabled {
   color: var(--atm-on-primary);
   background: var(--atm-primary-fill);
   box-shadow: 0 5px 15px color-mix(in srgb, var(--atm-primary) 24%, transparent);
+  overflow: hidden;
+}
+.atm-brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .atm-nav-group {
   margin: 10px 0 18px;
@@ -95,16 +107,16 @@ button:disabled {
   background: transparent;
   text-align: left;
   transition:
-    background-color 0.16s ease,
-    color 0.16s ease,
-    transform 0.12s ease;
+    background-color var(--atm-duration-hover) var(--atm-ease-out),
+    color var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-press) var(--atm-ease-out);
 }
 .atm-nav button:hover {
   color: var(--atm-text);
   background: var(--atm-surface-muted);
 }
 .atm-nav button:active {
-  transform: translateY(1px);
+  transform: scale(0.97);
 }
 .atm-nav button[aria-current="page"] {
   color: var(--atm-primary-strong);
@@ -230,15 +242,15 @@ button:disabled {
   font-weight: 620;
   white-space: nowrap;
   transition:
-    transform 0.12s ease,
-    border-color 0.16s ease,
-    background-color 0.16s ease;
+    transform var(--atm-duration-press) var(--atm-ease-out),
+    border-color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
 }
 .atm-button:hover {
   border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
 }
 .atm-button:active {
-  transform: translateY(1px);
+  transform: scale(0.97);
 }
 .atm-button.primary {
   border-color: var(--atm-primary-fill);
@@ -394,24 +406,32 @@ button.atm-row:hover {
   color: var(--atm-danger);
 }
 .atm-skeleton {
+  position: relative;
   min-height: 54px;
   border-radius: 9px;
+  background: var(--atm-surface-muted);
+  overflow: hidden;
+}
+.atm-skeleton::after {
+  position: absolute;
+  inset: 0;
   background: linear-gradient(
     90deg,
-    var(--atm-surface-muted),
-    color-mix(in srgb, var(--atm-surface-muted) 40%, var(--atm-surface)),
-    var(--atm-surface-muted)
+    transparent,
+    color-mix(in srgb, var(--atm-surface) 68%, transparent),
+    transparent
   );
-  background-size: 220% 100%;
+  content: "";
+  transform: translateX(-100%);
 }
 @media (prefers-reduced-motion: no-preference) {
-  .atm-skeleton {
-    animation: atm-shimmer 1.35s ease-in-out infinite;
+  .atm-skeleton::after {
+    animation: atm-shimmer 1.35s linear infinite;
   }
 }
 @keyframes atm-shimmer {
   to {
-    background-position: -120% 0;
+    transform: translateX(100%);
   }
 }
 
@@ -429,8 +449,8 @@ button.atm-row:hover {
   background: var(--atm-surface);
   text-align: left;
   transition:
-    transform 0.15s ease,
-    border-color 0.15s ease;
+    transform var(--atm-duration-hover) var(--atm-ease-out),
+    border-color var(--atm-duration-hover) var(--atm-ease-out);
 }
 .atm-project-main {
   display: grid;
@@ -454,9 +474,11 @@ button.atm-row:hover {
 .atm-project > .atm-button {
   margin-top: 12px;
 }
-.atm-project:hover {
-  border-color: color-mix(in srgb, var(--atm-primary) 44%, var(--atm-border));
-  transform: translateY(-1px);
+@media (hover: hover) and (pointer: fine) {
+  .atm-project:hover {
+    border-color: color-mix(in srgb, var(--atm-primary) 44%, var(--atm-border));
+    transform: translateY(-1px);
+  }
 }
 .atm-project-code {
   color: var(--atm-primary-strong);
@@ -780,6 +802,8 @@ button.atm-row:hover {
   padding: 24px;
   background: var(--atm-overlay);
   backdrop-filter: blur(3px);
+  opacity: 1;
+  transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
 }
 .atm-modal {
   width: min(640px, 100%);
@@ -789,6 +813,28 @@ button.atm-row:hover {
   background: var(--atm-surface);
   box-shadow: var(--atm-shadow);
   overflow: auto;
+}
+.atm-modal:not(.atm-command) {
+  opacity: 1;
+  transform: scale(1);
+  transform-origin: center;
+  transition:
+    opacity var(--atm-duration-surface) var(--atm-ease-out),
+    transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+.atm-modal-backdrop:has(.atm-command),
+.atm-command {
+  transition: none;
+}
+@starting-style {
+  .atm-modal-backdrop:not(:has(.atm-command)) {
+    opacity: 0;
+  }
+
+  .atm-modal:not(.atm-command) {
+    opacity: 0;
+    transform: scale(0.96);
+  }
 }
 .atm-modal.wide {
   width: min(920px, 100%);
@@ -854,15 +900,38 @@ button.atm-row:hover {
   color: var(--atm-danger);
   background: color-mix(in srgb, var(--atm-danger) 10%, transparent);
 }
-.atm-drawer {
+.atm-drawer-backdrop {
   position: fixed;
-  inset: 0 0 0 auto;
+  inset: 0;
   z-index: 14;
+  background: color-mix(in srgb, var(--atm-overlay) 68%, transparent);
+  opacity: 1;
+  overscroll-behavior: contain;
+  transition: opacity 180ms var(--atm-ease-out);
+}
+.atm-shell:has(.atm-drawer-backdrop) > .atm-main,
+.atm-shell:has(.atm-drawer-backdrop) > .atm-sidebar {
+  overflow: hidden;
+}
+.atm-drawer {
+  position: absolute;
+  inset: 0 0 0 auto;
   width: min(540px, calc(100vw - var(--atm-sidebar)));
   border-left: 1px solid var(--atm-border);
   background: var(--atm-surface);
   box-shadow: var(--atm-drawer-shadow);
   overflow-y: auto;
+  transform: translateX(0);
+  transition: transform var(--atm-duration-surface) var(--atm-ease-drawer);
+}
+@starting-style {
+  .atm-drawer-backdrop {
+    opacity: 0;
+  }
+
+  .atm-drawer {
+    transform: translateX(100%);
+  }
 }
 .atm-drawer-head {
   position: sticky;
@@ -927,6 +996,17 @@ button.atm-row:hover {
   border-radius: 10px;
   background: var(--atm-surface);
   box-shadow: var(--atm-shadow);
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--atm-duration-surface) var(--atm-ease-out),
+    transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+@starting-style {
+  .atm-notice {
+    opacity: 0;
+    transform: translateY(16px);
+  }
 }
 
 @media (max-width: 1100px) {
@@ -1033,12 +1113,72 @@ button.atm-row:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
+  .atm-nav button,
+  .atm-button,
+  .atm-project {
+    transition-property: color, background-color, border-color;
+  }
+
+  .atm-nav button:active,
+  .atm-button:active,
+  .atm-project:hover,
+  .atm-modal:not(.atm-command),
+  .atm-drawer,
+  .atm-notice {
+    transform: none;
+  }
+
+  .atm-modal:not(.atm-command),
+  .atm-drawer,
+  .atm-notice {
+    transition: opacity 160ms var(--atm-ease-out);
+  }
+
+  .atm-skeleton::after {
+    animation: none;
+    content: none;
+  }
+
+  @starting-style {
+    .atm-modal:not(.atm-command),
+    .atm-drawer,
+    .atm-notice {
+      opacity: 0;
+      transform: none;
+    }
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .atm-sidebar,
+  .atm-topbar,
+  .atm-modal-backdrop {
+    backdrop-filter: none;
+  }
+
+  .atm-sidebar,
+  .atm-topbar {
+    background: var(--atm-bg);
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+
+  .atm-sidebar,
+  .atm-topbar,
+  .atm-modal-backdrop {
+    backdrop-filter: none;
+  }
+
+  .atm-button,
+  .atm-panel,
+  .atm-project,
+  .atm-task-card,
+  .atm-modal,
+  .atm-drawer {
+    border-color: ButtonText;
   }
 }
