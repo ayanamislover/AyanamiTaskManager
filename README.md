@@ -13,6 +13,8 @@ pnpm typecheck
 pnpm dev
 ```
 
+开发态 Web 界面固定监听 `http://127.0.0.1:9999`；daemon API 仍使用独立的本机运行时端口。
+
 正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。开发和测试可通过 `AYANAMI_TASK_DATA_DIR` 指向隔离目录。
 
 ## 命令

@@ -1557,7 +1557,7 @@ CI 或本机 release 脚本必须真正启动打包后的应用，完成：
 | 单个任务 `core` | ≤ 800 字符 | 1200 字符 |
 | 单个任务 `context` | ≤ 2400 字符 | 3600 字符 |
 | mutation 成功 ACK | ≤ 160 字符 | 256 字符 |
-| 普通进度 `summary` | ≤ 80 中文字符 | 120 字符 |
+| 普通进度 `summary` | ≤ 120 中文字符 | 500 字符 |
 | `blocker` / `next` 单字段 | ≤ 80 中文字符 | 120 字符 |
 
 mutation 默认只返回类似：
@@ -2034,4 +2034,3 @@ release/
 - SQLite：Write-Ahead Logging、ATTACH DATABASE、Online Backup API、VACUUM INTO、FTS5 Trigram Tokenizer。
 - Electron：`app.setLoginItemSettings`、Electron Forge Packaging、Native Module Auto Unpack。
 - Model Context Protocol：Tools、Structured Content、Output Schema、Pagination、Build an MCP Server。
-

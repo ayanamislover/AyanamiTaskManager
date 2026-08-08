@@ -15,6 +15,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  nativeTheme,
   Notification as ElectronNotification,
   shell,
   Tray,
@@ -29,6 +30,7 @@ import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
+import { createWindowOptions } from "./window-options.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 
@@ -108,23 +110,15 @@ function navigate(route: string): void {
 }
 
 function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1100,
-    minHeight: 680,
-    show: false,
-    backgroundColor: "#F7F5F0",
-    title: "AyanamiTaskManager",
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(__dirname, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
+  mainWindow = new BrowserWindow(
+    createWindowOptions(join(__dirname, "preload.cjs"), nativeTheme.shouldUseDarkColors),
+  );
   mainWindow.on("ready-to-show", () => mainWindow?.show());
+  const publishMaximizedState = () => {
+    mainWindow?.webContents.send("atm:window-maximized-changed", mainWindow.isMaximized());
+  };
+  mainWindow.on("maximize", publishMaximizedState);
+  mainWindow.on("unmaximize", publishMaximizedState);
   mainWindow.on("close", (event) => {
     if (!quitting) {
       event.preventDefault();
@@ -344,6 +338,19 @@ async function startApplication(background: boolean): Promise<void> {
   });
   ipcMain.handle("atm:get-auto-launch", autoLaunchEnabled);
   ipcMain.handle("atm:set-auto-launch", (_event, enabled: boolean) => setAutoLaunch(enabled));
+  ipcMain.handle("atm:window-minimize", () => {
+    mainWindow?.minimize();
+  });
+  ipcMain.handle("atm:window-toggle-maximize", () => {
+    if (!mainWindow) return false;
+    if (mainWindow.isMaximized()) mainWindow.unmaximize();
+    else mainWindow.maximize();
+    return mainWindow.isMaximized();
+  });
+  ipcMain.handle("atm:window-is-maximized", () => mainWindow?.isMaximized() ?? false);
+  ipcMain.handle("atm:window-close", () => {
+    mainWindow?.close();
+  });
   ipcMain.handle("atm:show-item", (_event, path: string) => shell.showItemInFolder(path));
   const stdioCommand = process.execPath;
   const stdioArgs = [

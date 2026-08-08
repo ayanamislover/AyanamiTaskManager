@@ -17,6 +17,8 @@ pnpm atm -- doctor
 4. 若最近迁移失败，先备份整个数据目录，不要删除数据库；
 5. portable 包请确认完整解压，`resources` 和原生模块未被杀毒软件隔离。
 
+开发态 Web 界面固定使用 `127.0.0.1:9999`。若 Vite 报端口占用，先关闭占用 9999 的旧开发进程；不要把 daemon 的 4393/4394 或生产动态端口改成 9999。
+
 ## MCP 无法连接
 
 - 桌面设置中重新运行“连接测试”；
@@ -33,6 +35,7 @@ pnpm atm -- doctor
 - `CLAIM_CONFLICT`：任务被其他 Session 领取；等待释放或确认 lease 已过期后显式接管；
 - `IDEMPOTENCY_CONFLICT`：同一 `op_id` 被用于不同请求，改用新的 `op_id`；
 - `PROJECT_DB_UNAVAILABLE`：项目正在迁移、恢复、已进垃圾箱或迁移失败。
+- `VALIDATION_ERROR` 且指向 `summary`：单条进度摘要最多 500 字；精简日志和重复上下文后重试。
 
 ## 项目或搜索缺少数据
 

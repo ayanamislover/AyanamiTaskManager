@@ -9,6 +9,15 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
   installMcp: (client: "CODEX" | "CLAUDE") => ipcRenderer.invoke("atm:install-mcp", client),
   copyText: (text: string) => ipcRenderer.invoke("atm:copy-text", text),
+  minimizeWindow: () => ipcRenderer.invoke("atm:window-minimize"),
+  toggleMaximizeWindow: () => ipcRenderer.invoke("atm:window-toggle-maximize"),
+  isWindowMaximized: () => ipcRenderer.invoke("atm:window-is-maximized"),
+  closeWindow: () => ipcRenderer.invoke("atm:window-close"),
+  onWindowMaximizedChange: (listener: (maximized: boolean) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, maximized: boolean) => listener(maximized);
+    ipcRenderer.on("atm:window-maximized-changed", handler);
+    return () => ipcRenderer.off("atm:window-maximized-changed", handler);
+  },
   onNavigate: (listener: (route: string) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, route: string) => listener(route);
     ipcRenderer.on("atm:navigate", handler);

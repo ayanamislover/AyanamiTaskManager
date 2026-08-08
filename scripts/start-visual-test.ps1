@@ -17,7 +17,7 @@ $daemon = Start-Process -FilePath $node `
 $env:VITE_ATM_ENDPOINT = "http://127.0.0.1:4393"
 $env:VITE_ATM_TOKEN = "visual-test-token"
 $vite = Start-Process -FilePath $node `
-  -ArgumentList @("node_modules/vite/bin/vite.js", "--config", "apps/desktop/vite.config.ts", "--host", "127.0.0.1", "--port", "5174") `
+  -ArgumentList @("node_modules/vite/bin/vite.js", "--config", "apps/desktop/vite.config.ts", "--host", "127.0.0.1", "--port", "9999", "--strictPort") `
   -WorkingDirectory $workspace -WindowStyle Hidden `
   -RedirectStandardOutput (Join-Path $output "vite.stdout.log") `
   -RedirectStandardError (Join-Path $output "vite.stderr.log") -PassThru
@@ -27,7 +27,7 @@ for ($attempt = 0; $attempt -lt 100; $attempt += 1) {
   try {
     $headers = @{ Authorization = "Bearer visual-test-token" }
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:4393/api/v1/system/status" -Headers $headers -TimeoutSec 1
-    $page = Invoke-WebRequest -Uri "http://127.0.0.1:5174" -TimeoutSec 1
+    $page = Invoke-WebRequest -Uri "http://127.0.0.1:9999" -TimeoutSec 1
     if ($health.ok -and $page.StatusCode -eq 200) {
       $ready = $true
       break

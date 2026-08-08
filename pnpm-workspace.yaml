@@ -6,7 +6,9 @@ blockExoticSubdeps: false
 nodeLinker: hoisted
 
 allowBuilds:
-  better-sqlite3: true
+  # v13 includes the win32 Node-API binary; rebuilding it is unnecessary and
+  # makes clean CI installs depend on the runner's Visual Studio version.
+  better-sqlite3: false
   electron: true
   electron-winstaller: true
   esbuild: true

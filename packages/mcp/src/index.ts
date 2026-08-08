@@ -505,7 +505,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         scope: z.enum(["task", "project"]),
         task_key: taskKey.optional(),
         percent: z.number().min(0).max(100).optional(),
-        summary: z.string().min(1).max(120),
+        summary: z.string().min(1).max(500),
         completed: z.array(z.string().max(500)).max(20).default([]),
         next: z.array(z.string().max(500)).max(20).default([]),
         blocker: z.string().max(1000).nullable().optional(),

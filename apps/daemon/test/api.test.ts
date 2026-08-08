@@ -305,4 +305,63 @@ describe("REST 边界", () => {
       service.close();
     }
   });
+
+  it("REST 接受较长进度摘要并在 500 字边界后拒绝", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-progress-summary-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/api/v1/projects",
+        headers,
+        payload: { name: "进度摘要 API", sourcePath: null, code: "PSUM" },
+      });
+      const begun = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers,
+        payload: {
+          mode: "project",
+          projectCode: "PSUM",
+          agentId: "rest-summary-test",
+          clientKind: "test",
+          signals: {},
+        },
+      });
+      expect(begun.statusCode).toBe(201);
+      const base = {
+        session: begun.json().session,
+        scope: "project",
+        completed: [],
+        next: [],
+        evidence: [],
+      };
+      const longEnough = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/PSUM/progress-updates",
+        headers,
+        payload: { ...base, opId: "rest-summary-300", summary: "进".repeat(300) },
+      });
+      expect(longEnough.statusCode).toBe(200);
+      expect(longEnough.json()).toMatchObject({ summary: "进".repeat(300) });
+
+      const tooLong = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/PSUM/progress-updates",
+        headers,
+        payload: { ...base, opId: "rest-summary-501", summary: "进".repeat(501) },
+      });
+      expect(tooLong.statusCode).toBeGreaterThanOrEqual(400);
+      expect(tooLong.json()).toMatchObject({ error: { code: expect.any(String) } });
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
 });

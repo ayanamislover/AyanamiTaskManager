@@ -277,7 +277,7 @@ export const ProgressAddInputSchema = z.object({
   scope: z.enum(["task", "project"]),
   taskKey: z.string().optional(),
   percent: z.number().min(0).max(100).optional(),
-  summary: NonEmptyTextSchema.max(120),
+  summary: NonEmptyTextSchema.max(500),
   completed: z.array(z.string().max(500)).max(20).default([]),
   next: z.array(z.string().max(500)).max(20).default([]),
   blocker: z.string().max(1000).nullable().optional(),

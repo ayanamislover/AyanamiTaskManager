@@ -69,7 +69,7 @@ describe("Ayanami MCP", () => {
         session: firstSession,
         op_id: "project-progress-1",
         scope: "project",
-        summary: "完成 MCP 恢复协议",
+        summary: "进".repeat(300),
         health: "ON_TRACK",
         completed: [],
         next: ["继续烟测"],
@@ -77,6 +77,34 @@ describe("Ayanami MCP", () => {
       },
     });
     expect(projectProgress.structuredContent).toMatchObject({ ok: true, health: "ON_TRACK" });
+    const boundaryProgress = await client.callTool({
+      name: "atm_progress_add",
+      arguments: {
+        project: "MCP",
+        session: firstSession,
+        op_id: "project-progress-500",
+        scope: "project",
+        summary: "界".repeat(500),
+        completed: [],
+        next: [],
+        evidence: [],
+      },
+    });
+    expect(boundaryProgress.structuredContent).toMatchObject({ ok: true });
+    const rejectedProgress = await client.callTool({
+      name: "atm_progress_add",
+      arguments: {
+        project: "MCP",
+        session: firstSession,
+        op_id: "project-progress-501",
+        scope: "project",
+        summary: "界".repeat(501),
+        completed: [],
+        next: [],
+        evidence: [],
+      },
+    });
+    expect(rejectedProgress.isError).toBe(true);
     const retired = await client.callTool({
       name: "atm_end",
       arguments: {

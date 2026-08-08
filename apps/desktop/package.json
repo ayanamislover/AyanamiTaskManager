@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n renderer,desktop -c cyan,magenta \"vite --host 127.0.0.1 --port 5174\" \"tsx scripts/dev-electron.ts\"",
+    "dev": "concurrently -k -n renderer,desktop -c cyan,magenta \"vite --host 127.0.0.1 --port 9999 --strictPort\" \"tsx scripts/dev-electron.ts\"",
     "build": "tsx scripts/build.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

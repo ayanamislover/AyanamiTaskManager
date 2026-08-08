@@ -64,8 +64,8 @@ button:disabled {
   width: 30px;
   height: 30px;
   border-radius: 9px;
-  color: #fff;
-  background: var(--atm-primary-strong);
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
   box-shadow: 0 5px 15px color-mix(in srgb, var(--atm-primary) 24%, transparent);
 }
 .atm-nav-group {
@@ -159,7 +159,7 @@ button:disabled {
   color: var(--atm-text-muted);
   background: var(--atm-surface);
   text-align: left;
-  box-shadow: 0 2px 10px rgb(70 52 38 / 0.04);
+  box-shadow: var(--atm-shadow-subtle);
 }
 .atm-search-button kbd {
   margin-left: auto;
@@ -174,6 +174,9 @@ button:disabled {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.atm-theme-toggle {
+  flex: 0 0 38px;
 }
 .atm-top-actions kbd {
   padding: 2px 5px;
@@ -238,9 +241,9 @@ button:disabled {
   transform: translateY(1px);
 }
 .atm-button.primary {
-  border-color: var(--atm-primary-strong);
-  color: #fff;
-  background: var(--atm-primary-strong);
+  border-color: var(--atm-primary-fill);
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
 }
 .atm-button.danger {
   color: var(--atm-danger);
@@ -621,7 +624,7 @@ button.atm-row:hover {
 .atm-tabs button[aria-selected="true"] {
   color: var(--atm-text);
   background: var(--atm-surface);
-  box-shadow: 0 1px 5px rgb(50 35 25 / 0.08);
+  box-shadow: var(--atm-shadow-raised);
 }
 .atm-toolbar {
   display: flex;
@@ -775,7 +778,7 @@ button.atm-row:hover {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgb(28 24 34 / 0.45);
+  background: var(--atm-overlay);
   backdrop-filter: blur(3px);
 }
 .atm-modal {
@@ -858,7 +861,7 @@ button.atm-row:hover {
   width: min(540px, calc(100vw - var(--atm-sidebar)));
   border-left: 1px solid var(--atm-border);
   background: var(--atm-surface);
-  box-shadow: -15px 0 45px rgb(50 34 25 / 0.12);
+  box-shadow: var(--atm-drawer-shadow);
   overflow-y: auto;
 }
 .atm-drawer-head {

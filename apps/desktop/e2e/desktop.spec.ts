@@ -147,3 +147,26 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page })
   await page.getByRole("textbox", { name: "全局搜索" }).fill("保存视图");
   await expect(page.getByRole("button", { name: /验证搜索与保存视图/u }).first()).toBeVisible();
 });
+
+test("暗黑主题可手动切换并在 reload 后持久化", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await page.goto("/#overview");
+
+  const root = page.locator("html");
+  await expect(root).toHaveAttribute("data-theme", "light");
+  const darkToggle = page.getByRole("button", { name: "切换至暗黑模式" });
+  await expect(darkToggle).toBeVisible();
+  await darkToggle.click();
+
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("button", { name: "切换至亮色模式" })).toBeVisible();
+  expect(await page.evaluate(() => window.localStorage.getItem("atm.theme"))).toBe("dark");
+
+  await page.reload();
+  await expect(root).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("button", { name: "切换至亮色模式" })).toBeVisible();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-theme-dark.png"),
+    fullPage: true,
+  });
+});

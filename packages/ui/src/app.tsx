@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import {
   QueryClient,
   QueryClientProvider,
@@ -21,9 +28,11 @@ import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
 import { LightningIcon as Lightning } from "@phosphor-icons/react/dist/icons/Lightning";
 import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
 import { MagnifyingGlassIcon as MagnifyingGlass } from "@phosphor-icons/react/dist/icons/MagnifyingGlass";
+import { MoonIcon as Moon } from "@phosphor-icons/react/dist/icons/Moon";
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
+import { SunIcon as Sun } from "@phosphor-icons/react/dist/icons/Sun";
 import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/UsersThree";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
@@ -41,6 +50,7 @@ type Route =
   | "settings"
   | `project:${string}`;
 type Notify = (message: string) => void;
+type Theme = "light" | "dark";
 type DesktopBridge = {
   runtime?: { endpoint: string; token: string };
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
@@ -56,6 +66,29 @@ type DesktopBridge = {
   copyText?: (text: string) => Promise<boolean>;
   onNavigate?: (listener: (route: string) => void) => () => void;
 };
+
+const themeStorageKey = "atm.theme";
+
+function readStoredTheme(): Theme | null {
+  try {
+    const value = window.localStorage.getItem(themeStorageKey);
+    return value === "light" || value === "dark" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSystemTheme(): Theme {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function persistTheme(theme: Theme) {
+  try {
+    window.localStorage.setItem(themeStorageKey, theme);
+  } catch {
+    // 本地存储不可用时仍保留当前窗口的主题切换能力。
+  }
+}
 
 const statusLabels: Record<string, string> = {
   BACKLOG: "待整理",
@@ -3482,6 +3515,8 @@ function CommandPalette({
 function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBridge }) {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
   const [route, setRoute] = useState<Route>(() => (location.hash.slice(1) as Route) || "overview");
+  const [theme, setTheme] = useState<Theme>(() => readStoredTheme() ?? readSystemTheme());
+  const [hasManualTheme, setHasManualTheme] = useState(() => readStoredTheme() !== null);
   const [palette, setPalette] = useState(false);
   const [notice, setNotice] = useState("");
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
@@ -3492,6 +3527,17 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
   useEffect(() => {
     location.hash = route;
   }, [route]);
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+  useEffect(() => {
+    if (hasManualTheme) return;
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const syncSystemTheme = (event: MediaQueryListEvent) =>
+      setTheme(event.matches ? "dark" : "light");
+    preference.addEventListener("change", syncSystemTheme);
+    return () => preference.removeEventListener("change", syncSystemTheme);
+  }, [hasManualTheme]);
   useEffect(() => desktop?.onNavigate?.((next) => setRoute(next as Route)), [desktop]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -3606,6 +3652,19 @@ function App({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBrid
             搜索任务、记录和项目<kbd>Ctrl K</kbd>
           </button>
           <div className="atm-top-actions">
+            <button
+              className="atm-button atm-icon-button atm-theme-toggle"
+              aria-label={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
+              title={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
+              onClick={() => {
+                const nextTheme = theme === "light" ? "dark" : "light";
+                setHasManualTheme(true);
+                setTheme(nextTheme);
+                persistTheme(nextTheme);
+              }}
+            >
+              {theme === "light" ? <Moon size={17} /> : <Sun size={17} />}
+            </button>
             <button
               className="atm-button"
               onClick={() => {

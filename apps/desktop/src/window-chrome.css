@@ -1,0 +1,66 @@
+html[data-atm-desktop="true"] .atm-topbar {
+  grid-template-columns: minmax(140px, 1fr) minmax(260px, 520px) minmax(150px, 1fr);
+  padding-right: 164px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+html[data-atm-desktop="true"] .atm-topbar button,
+html[data-atm-desktop="true"] .atm-topbar input,
+html[data-atm-desktop="true"] .atm-topbar select,
+html[data-atm-desktop="true"] .atm-topbar textarea,
+html[data-atm-desktop="true"] .atm-topbar a {
+  -webkit-app-region: no-drag;
+}
+
+.atm-window-chrome {
+  position: fixed;
+  top: 11px;
+  right: 12px;
+  z-index: 50;
+  display: flex;
+  height: 38px;
+  overflow: hidden;
+  border: 1px solid var(--atm-border);
+  border-radius: 10px;
+  color: var(--atm-text-muted);
+  background: color-mix(in srgb, var(--atm-surface) 92%, transparent);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--atm-text) 8%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-app-region: no-drag;
+}
+
+.atm-window-button {
+  display: grid;
+  width: 42px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--atm-border);
+  color: inherit;
+  background: transparent;
+  place-items: center;
+  transition:
+    color 0.16s ease,
+    background-color 0.16s ease;
+}
+
+.atm-window-button:hover {
+  color: var(--atm-text);
+  background: var(--atm-surface-muted);
+}
+
+.atm-window-button:last-child {
+  border-right: 0;
+}
+
+.atm-window-button-close:hover {
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 14%, var(--atm-surface));
+}
+
+@media (max-width: 1220px) {
+  html[data-atm-desktop="true"] .atm-topbar {
+    grid-template-columns: minmax(110px, 1fr) minmax(220px, 420px) minmax(130px, 1fr);
+  }
+}

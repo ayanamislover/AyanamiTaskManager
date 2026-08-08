@@ -15,7 +15,7 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 1. 开工只调用一次 `atm_begin`，显式传入 `project_code`；若项目未注册，先由用户确认是否创建。
 2. 用 `atm_brief` 获取当前目标、里程碑、下一任务和短上下文。
 3. 用 `atm_task_list` 选择 `READY` 工作项，再以 `atm_task_patch` 执行 `claim` 和 `start`。
-4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`。
+4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
 5. 决策、约束、事实、风险、参考和经验写入 `atm_record`；长历史不要反复塞回上下文。
 6. 增量同步优先 `atm_delta`，需要精确详情时才调用 `atm_task_get`。
 7. 完成任务后执行 `complete`；Session 结束必须调用 `atm_end`。
@@ -25,6 +25,7 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 ## 稀疏控制面约束
 
 - 不要按分钟轮询或重复上报相同百分比。
+- 进度 `summary` 上限为 500 字；仍应保持信息密度，避免为填满上限而复制日志或上下文。
 - 写操作必须提供新的 `op_id`；重试同一请求时复用原 `op_id`。
 - 更新任务必须带 `expected_version`。发生 `VERSION_CONFLICT` 后重新读取任务再决定，不要盲目覆盖。
 - `claim` 只领取依赖已满足的任务；接管过期领取必须显式使用 `takeover_stale`。

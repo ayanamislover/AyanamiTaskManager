@@ -13,12 +13,12 @@ export default defineConfig({
   ],
   webServer: {
     command: "pnpm exec tsx scripts/start-e2e.ts",
-    url: "http://127.0.0.1:5175",
+    url: "http://127.0.0.1:9999",
     timeout: 120_000,
     reuseExistingServer: false,
   },
   use: {
-    baseURL: "http://127.0.0.1:5175",
+    baseURL: "http://127.0.0.1:9999",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",

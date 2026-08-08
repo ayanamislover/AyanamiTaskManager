@@ -34,7 +34,8 @@ const vite = spawn(
     "--host",
     "127.0.0.1",
     "--port",
-    "5175",
+    "9999",
+    "--strictPort",
   ],
   {
     cwd: workspace,
