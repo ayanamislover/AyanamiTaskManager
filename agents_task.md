@@ -1,6 +1,5 @@
 # Agent 施工进度（最近 15 条）
 
-- 2026-08-08：`release --resume` 完成最终十阶段 10/10 组装，根 `release/` Setup SHA-256 `235EAE7E...AFF6517`、portable SHA-256 `EEB30AFE...C432BA`；重启新 daemon 后正式 Session `01KZG3XXN1GX3W101W316X0RXN` 实收 314 字 progress（seq 103），证明 500 字上限在线生效；ATM-T-0005 与 ATM-T-0008 已按 verify/complete 闭环为 DONE/100%，提交前 format/lint/typecheck/diff-check 全绿，待最终 GitHub push/CI。
 - 2026-08-08：完成版提交 `8eb74bd` 已推送；GitHub Actions `31246104529` 在干净 Windows runner 安装成功，随后因 runner `core.autocrlf` 将 136 个文本文件检出为 CRLF 而被 Prettier 默认 LF 判定失败，非业务代码/依赖故障；新增仓库级 `.gitattributes` 强制文本 LF、显式标记二进制类型，准备以干净检出复验 CI。
 - 2026-08-08：LF 修复提交 `21de6d8` 的云端 run `31246200067` 已通过 install/format/lint/typecheck，测试仅暴露 Windows runner `%TEMP%` 的 `RUNNER~1` 短路径与 `runneradmin` 长路径等价性；API 测试改用 `realpathSync.native` 比较真实路径，定向 7/7、全量 30 文件 47/47、format/lint/diff-check 本地全绿，待第三次云端复验。
 - 2026-08-08：最终源码提交 `0820ce1` 已推送，GitHub Actions `31246331578` 在干净 Windows runner 的 install/format/lint/typecheck/47 tests/build 全绿；ATM-T-0010 progress/verify/complete 后为 DONE/100%/v10，项目最终进度已记录，主 Session `01KZG3XXN1GX3W101W316X0RXN` completed seq 120、handoffs 0；ATM-T-0005～0011 全部闭环，三个子线程 Session 均已关闭。
@@ -15,3 +14,4 @@
 - 2026-08-08：ATM-T-0038/0039 已建立并进行中：按用户反馈移除任务抽屉标题右侧 X，改为左边缘 `>` 收起按钮；同时把未注册策略改为“受管开发任务自动创建，仅名称/代码/目录无法可靠确定时询问”。追加反馈将建立任务拆分硬规则与 Agent 页重复 Session 聚合清洗，保留审计历史、不直接删除数据；红测已证明旧 X 与旧确认文案仍存在。
 - 2026-08-08：ATM-T-0038～0043 实现已完成至 70%（progress seq 429～434）：抽屉左边缘 `>` 收起、未注册项目自动创建、可独立验收 WorkItem 拆分硬规则、Agent 按项目与身份聚合但保留历史数量、工程统计默认折叠且展开才请求、活动项目仅两行全名并在纯英文过长时提示使用中文；定向 Vitest 7/7、Playwright 4/4 全绿，三张截图人工复核正常，待全量验证、打包与 GitHub CI。
 - 2026-08-08：ATM-T-0038～0043 本地完整验收通过：format/lint/typecheck、38 文件 65 tests、9 E2E、production build 全绿；`pnpm make` 生成新版 EXE 与 Setup，packaged smoke 14/14、真实 window smoke 通过，左缘 `>` 命中区 44×86、关闭到托盘正常；Guide 与完整 docs 已同步正式 `%LOCALAPPDATA%\AyanamiTaskManager` 且 SHA-256 与源码一致，六项 checklist 均 DONE/v1，待提交、推送和 GitHub CI。
+- 2026-08-08：功能提交 `d4b819a` 已推送，GitHub Actions `31278360978` 在干净 Windows runner 的 install/format/lint/typecheck/65 tests/build 全绿；最终 FACT `ATM-R-039` seq 447，ATM-T-0038～0043 progress seq 448～453 后全部 verify/complete 为 DONE/100%（v12，T-0043 v13）。新版裸 EXE SHA-256 `F6373445...CCD490`，Setup SHA-256 `D9F6B6FC...4F4261`；待提交本条审计记录并关闭主 Session。
