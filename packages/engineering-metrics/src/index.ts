@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -125,7 +125,16 @@ function gitContextFailure(result: GitCommandResult): GitContextError {
 
 function absoluteGitPath(cwd: string, value: string): string | null {
   const trimmed = value.trim();
-  return trimmed ? resolve(cwd, trimmed) : null;
+  if (!trimmed) return null;
+  const absolute = resolve(cwd, trimmed);
+  try {
+    // Windows may expose cwd through an 8.3 alias while Git returns the long path.
+    // Canonicalize every observed Git path so identity and linked-worktree checks
+    // compare the same filesystem object instead of two textual spellings.
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
 }
 
 export function inspectGitContext(

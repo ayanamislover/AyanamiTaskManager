@@ -25,6 +25,7 @@ describe("REST 边界", () => {
     writeFileSync(join(cwd, "tracked.txt"), "baseline\n", "utf8");
     git(["add", "tracked.txt"]);
     git(["commit", "-m", "baseline"]);
+    const canonicalCwd = realpathSync.native(cwd);
 
     const dataDir = join(root, "data");
     const service = await AyanamiTaskService.open({
@@ -69,7 +70,7 @@ describe("REST 边界", () => {
       expect(initial).toMatchObject({
         cwd,
         git_available: 1,
-        worktree_root: cwd,
+        worktree_root: canonicalCwd,
         git_dirty: 0,
       });
       expect(initial?.git_head).toMatch(/^[0-9a-f]{40}$/u);
@@ -88,7 +89,7 @@ describe("REST 边界", () => {
           id: sessionId,
           cwd,
           git_available: 1,
-          worktree_root: cwd,
+          worktree_root: canonicalCwd,
           git_dirty: 1,
         },
       });
