@@ -31,6 +31,12 @@ import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
+import {
+  normalizeNotificationMode,
+  notificationModes,
+  shouldNotify,
+  type NotificationMode,
+} from "./notification-policy.js";
 import { createWindowOptions } from "./window-options.js";
 import { randomStartupDelayMs, shouldDelayStartup, waitForStartupDelay } from "./startup.js";
 
@@ -150,8 +156,10 @@ function createWindow(showWhenReady = true): void {
   else void mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
 }
 
-function notificationsEnabled(): boolean {
-  return service?.databases.getSetting<boolean>("notification.enabled", true).value !== false;
+function notificationMode(): NotificationMode {
+  const mode = service?.databases.getSetting<unknown>("notification.mode", null).value;
+  const legacyEnabled = service?.databases.getSetting<unknown>("notification.enabled", true).value;
+  return normalizeNotificationMode(mode, legacyEnabled);
 }
 
 function autoLaunchEnabled(): boolean {
@@ -175,18 +183,28 @@ function trayMenu(): Menu {
     (sum, project) => sum + Number(project.waiting_user_count ?? 0),
     0,
   );
-  const enabled = notificationsEnabled();
+  const mode = notificationMode();
+  const notificationLabels: Record<NotificationMode, string> = {
+    ALL: "全部通知",
+    CRITICAL: "仅严重事件",
+    OFF: "不通知",
+  };
   return Menu.buildFromTemplate([
     { label: "打开绫波任务管理器", click: showWindow },
     { label: "新建临时任务", click: () => navigate("quick") },
     { label: `受阻 ${blocked} / 等待用户 ${waiting}`, enabled: false },
     { type: "separator" },
     {
-      label: enabled ? "暂停系统通知" : "恢复系统通知",
-      click: () => {
-        service?.setSetting("notification.enabled", !enabled);
-        tray?.setContextMenu(trayMenu());
-      },
+      label: `系统通知 · ${notificationLabels[mode]}`,
+      submenu: notificationModes.map((candidate) => ({
+        label: notificationLabels[candidate],
+        type: "radio" as const,
+        checked: candidate === mode,
+        click: () => {
+          service?.setSetting("notification.mode", candidate);
+          tray?.setContextMenu(trayMenu());
+        },
+      })),
     },
     { label: "设置", click: () => navigate("settings") },
     { type: "separator" },
@@ -212,7 +230,6 @@ function showProjectNotification(
   project: string,
   event: { seq: number; type: string; key: string | null; summary: string | null },
 ): void {
-  if (!notificationsEnabled()) return;
   const labels: Record<string, string> = {
     "work.waiting": "任务正在等待",
     "work.blocked": "任务受阻",
@@ -220,7 +237,7 @@ function showProjectNotification(
     "agent.recovered_stale": "Agent 异常退出",
   };
   const title = labels[event.type];
-  if (!title) return;
+  if (!title || !shouldNotify(notificationMode(), event.type)) return;
   const key = `${project}:${event.type}:${event.key}`;
   const now = Date.now();
   if ((notificationDedup.get(key) ?? 0) > now - 10 * 60_000) return;
@@ -295,7 +312,7 @@ function installDesktopEventObservers(): void {
     for (const event of delta.events) {
       if (
         event.type === "backup.failed" &&
-        notificationsEnabled() &&
+        shouldNotify(notificationMode(), event.type) &&
         ElectronNotification.isSupported()
       ) {
         const key = `global:${event.type}:${event.key}`;

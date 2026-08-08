@@ -250,6 +250,31 @@ test("暗黑主题可手动切换并在 reload 后持久化", async ({ page }) =
   });
 });
 
+test("系统通知可在全部、仅严重和不通知三档间持久化切换", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/#settings");
+
+  const all = page.getByRole("radio", { name: /全部通知/u });
+  const critical = page.getByRole("radio", { name: /仅严重事件/u });
+  const off = page.getByRole("radio", { name: /不通知/u });
+  await expect(all).toHaveAttribute("aria-checked", "true");
+  await critical.click();
+  await expect(critical).toHaveAttribute("aria-checked", "true");
+  await expect(all).toHaveAttribute("aria-checked", "false");
+  await expect(off).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
+
+  await page.getByRole("button", { name: "保存设置" }).click();
+  await expect(page.getByText("设置已保存", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(critical).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-notification-policy-dark.png"),
+    fullPage: true,
+  });
+});
+
 test("新品牌、抽屉空间层与 reduced motion 降级可用", async ({ page }) => {
   await page.goto("/#project:E2E");
   const logo = page.locator(".atm-brand img");

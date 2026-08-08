@@ -87,7 +87,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       }
       callback(new Error("FORBIDDEN: 仅允许本机页面访问"), false);
     },
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
   app.setErrorHandler((error, request, reply) => {
     const code = errorCode(error);

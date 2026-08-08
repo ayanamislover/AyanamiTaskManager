@@ -136,6 +136,29 @@ try {
   await expectNativeRegion('[data-testid="window-maximize"]', "no-drag", 1);
   await expectNativeRegion('[data-testid="window-close"]', "no-drag", 1);
 
+  await page.evaluate(() => {
+    location.hash = "settings";
+    location.reload();
+  });
+  await page.waitForSelector(".atm-shell");
+  const criticalNotifications = page.getByRole("radio", { name: /仅严重事件/u });
+  await criticalNotifications.click();
+  await expect(criticalNotifications).toHaveAttribute("aria-checked", "true");
+  await page.getByRole("button", { name: "保存设置" }).click();
+  await expect(page.getByText("设置已保存", { exact: true })).toBeVisible();
+  const settingsResponse = await fetch(`${runtime.endpoint}/api/v1/settings`, {
+    headers: { authorization: `Bearer ${runtime.token}` },
+  });
+  if (!settingsResponse.ok) throw new Error(`读取打包版通知设置失败：${settingsResponse.status}`);
+  const storedSettings = (await settingsResponse.json()) as Array<{
+    key: string;
+    value: unknown;
+  }>;
+  const storedNotificationMode = storedSettings.find(
+    (setting) => setting.key === "notification.mode",
+  )?.value;
+  expect(storedNotificationMode).toBe("CRITICAL");
+
   await post("/api/v1/projects", {
     name: "窗口安全区验收",
     sourcePath: null,
@@ -271,7 +294,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerSafeArea: { chromeBox, drawerCloseBox, drawerLayout, separation }, scrollbar: metrics, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerSafeArea: { chromeBox, drawerCloseBox, drawerLayout, separation }, notificationMode: storedNotificationMode, scrollbar: metrics, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();
