@@ -45,6 +45,17 @@ describe("REST 边界", () => {
           await app.inject({ method: "GET", url: "/api/v1/saved-views?project=VAPI", headers })
         ).json(),
       ).toContainEqual(expect.objectContaining({ name: "已阻塞", version: 0 }));
+      const preflight = await app.inject({
+        method: "OPTIONS",
+        url: "/api/v1/settings/notification.mode",
+        headers: {
+          origin: "http://127.0.0.1:9999",
+          "access-control-request-method": "PUT",
+          "access-control-request-headers": "authorization,content-type",
+        },
+      });
+      expect(preflight.statusCode).toBe(204);
+      expect(preflight.headers["access-control-allow-methods"]).toContain("PUT");
       const setting = await app.inject({
         method: "PUT",
         url: "/api/v1/settings/backup.policy",

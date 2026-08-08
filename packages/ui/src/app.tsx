@@ -59,6 +59,7 @@ type Route =
   | `project:${string}`;
 type Notify = (message: string) => void;
 type Theme = "light" | "dark";
+type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 type DesktopBridge = {
   runtime?: { endpoint: string; token: string };
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
@@ -1492,7 +1493,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
   const [dailyEnabled, setDailyEnabled] = useState(true);
   const [dailyKeep, setDailyKeep] = useState(7);
   const [weeklyKeep, setWeeklyKeep] = useState(4);
-  const [notifications, setNotifications] = useState(true);
+  const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
   const [feedback, setFeedback] = useState("");
   useEffect(() => {
     void desktop?.getAutoLaunch?.().then(setAutoLaunch);
@@ -1500,27 +1501,42 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
   useEffect(() => {
     if (!settings.data) return;
     const backup = settings.data.find((entry) => entry.key === "backup.policy")?.value as any;
-    const notification = settings.data.find((entry) => entry.key === "notification.enabled")?.value;
+    const notification = settings.data.find((entry) => entry.key === "notification.mode")?.value;
+    const legacyNotification = settings.data.find(
+      (entry) => entry.key === "notification.enabled",
+    )?.value;
     if (backup) {
       setDailyEnabled(backup.enabled !== false);
       setDailyKeep(Number(backup.dailyKeep ?? 7));
       setWeeklyKeep(Number(backup.weeklyKeep ?? 4));
     }
-    if (typeof notification === "boolean") setNotifications(notification);
+    if (["ALL", "CRITICAL", "OFF"].includes(String(notification))) {
+      setNotificationMode(notification as NotificationMode);
+    } else if (legacyNotification === false) {
+      setNotificationMode("OFF");
+    }
   }, [settings.data]);
   const savePolicy = useMutation({
     mutationFn: async () => {
       const backup = settings.data?.find((entry) => entry.key === "backup.policy");
-      const notification = settings.data?.find((entry) => entry.key === "notification.enabled");
+      const notification = settings.data?.find((entry) => entry.key === "notification.mode");
+      const legacyNotification = settings.data?.find(
+        (entry) => entry.key === "notification.enabled",
+      );
       await client.settings.put(
         "backup.policy",
         { enabled: dailyEnabled, dailyKeep, weeklyKeep },
         Number(backup?.version ?? -1),
       );
       await client.settings.put(
-        "notification.enabled",
-        notifications,
+        "notification.mode",
+        notificationMode,
         Number(notification?.version ?? -1),
+      );
+      await client.settings.put(
+        "notification.enabled",
+        notificationMode !== "OFF",
+        Number(legacyNotification?.version ?? -1),
       );
     },
     onSuccess: async () => {
@@ -1700,14 +1716,39 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                 />
               </div>
             </div>
-            <label className="atm-check">
-              <input
-                type="checkbox"
-                checked={notifications}
-                onChange={(event) => setNotifications(event.target.checked)}
-              />
-              <span>允许系统通知（等待、严重阻塞、完成和维护失败）</span>
-            </label>
+            <div className="atm-notification-policy">
+              <div className="atm-row-title">系统通知</div>
+              <div className="atm-notification-options" role="radiogroup" aria-label="系统通知级别">
+                {(
+                  [
+                    ["ALL", "全部通知", "等待、阻塞、完成、异常退出和维护失败"],
+                    ["CRITICAL", "仅严重事件", "阻塞、Agent 异常退出和维护失败"],
+                    ["OFF", "不通知", "保持后台运行，不弹出系统通知"],
+                  ] as const
+                ).map(([value, label, description]) => {
+                  const selected = notificationMode === value;
+                  return (
+                    <button
+                      className="atm-notification-option"
+                      data-selected={selected ? "true" : "false"}
+                      type="button"
+                      role="radio"
+                      aria-checked={selected}
+                      onClick={() => setNotificationMode(value)}
+                      key={value}
+                    >
+                      <span className="atm-notification-radio" aria-hidden="true">
+                        {selected ? <CheckCircle size={17} weight="fill" /> : null}
+                      </span>
+                      <span>
+                        <strong>{label}</strong>
+                        <small>{description}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             {desktop?.setAutoLaunch ? (
               <div className="atm-row">
                 <div>
