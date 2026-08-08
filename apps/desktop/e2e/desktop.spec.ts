@@ -133,6 +133,47 @@ test("长项目名称保持在侧栏项目按钮内", async ({ page }) => {
   });
 });
 
+test("侧栏默认精简、工作区可折叠且设置固定在底部", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/#overview");
+
+  const sidebar = page.locator(".atm-sidebar");
+  const workspace = sidebar.getByRole("button", { name: "工作区", exact: true });
+  await expect(sidebar.getByRole("button", { name: "总览", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "项目", exact: true })).toBeVisible();
+  await expect(workspace).toHaveAttribute("aria-expanded", "false");
+  await expect(sidebar.getByRole("button", { name: "Agent", exact: true })).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "设置", exact: true })).toBeVisible();
+  await expect(sidebar.getByText("本地优先 · 每项目独立数据库")).toHaveCount(0);
+
+  await workspace.focus();
+  await page.keyboard.press("Enter");
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+  await expect(sidebar.getByRole("button", { name: "Agent", exact: true })).toBeVisible();
+  await sidebar.getByRole("button", { name: "Agent", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Agent", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+
+  await workspace.click();
+  await expect(workspace).toHaveAttribute("aria-expanded", "false");
+  await sidebar.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "设置", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "设置", exact: true })).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-sidebar-workspace-collapsed.png"),
+    fullPage: true,
+  });
+});
+
 test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ page }) => {
   const viewports = [
     { width: 1366, height: 768 },
@@ -194,6 +235,171 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
     "false",
   );
   expect(engineeringRequests).toBe(1);
+});
+
+test("全局与项目时间线展示真实任务、进度和记录语义", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const projectCode = `TL${suffix.toUpperCase()}`;
+  const projectName = `时间线语义验收 ${suffix}`;
+  const taskTitle = `时间线验收任务 ${suffix}`;
+  const progressSummary = `已完成时间线真实事件投影 ${suffix}`;
+  const recordTitle = `时间线验收事实 ${suffix}`;
+  let sessionId = "";
+
+  const task = async (key: string) => {
+    const response = await api.get(`${apiUrl}/projects/${projectCode}/work-items/${key}`);
+    expect(response.ok()).toBeTruthy();
+    return (await response.json()) as Record<string, any>;
+  };
+  const patchTask = async (key: string, operation: string, opId: string) => {
+    const current = await task(key);
+    const response = await api.post(`${apiUrl}/projects/${projectCode}/work-items/patch`, {
+      data: {
+        session: sessionId,
+        opId,
+        items: [{ taskKey: key, expectedVersion: current.version, operation }],
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  try {
+    const project = await api.post(`${apiUrl}/projects`, {
+      data: {
+        name: projectName,
+        sourcePath: null,
+        code: projectCode,
+        description: "隔离的真实时间线浏览器验收",
+      },
+    });
+    expect(project.ok()).toBeTruthy();
+    const objective = await api.post(`${apiUrl}/projects/${projectCode}/ui/objectives`, {
+      data: {
+        opId: `e2e-timeline-objective-${suffix}`,
+        title: "验证真实事件语义",
+        description: "",
+        definitionOfDone: [],
+      },
+    });
+    expect(objective.ok()).toBeTruthy();
+    const objectiveId = String(((await objective.json()) as Record<string, any>).id);
+
+    const begin = await api.post(`${apiUrl}/sessions`, {
+      data: {
+        cwd: process.cwd(),
+        projectCode,
+        mode: "project",
+        agentId: `e2e-timeline-${suffix}`,
+        displayName: `E2E Timeline ${suffix}`,
+        clientKind: "playwright",
+        role: "SUBAGENT",
+        resume: false,
+        allowProjectCreate: false,
+      },
+    });
+    expect(begin.ok()).toBeTruthy();
+    sessionId = String((await begin.json()).session);
+
+    const created = await api.post(`${apiUrl}/projects/${projectCode}/work-items`, {
+      data: {
+        session: sessionId,
+        opId: `e2e-timeline-create-${suffix}`,
+        items: [
+          {
+            clientRef: `timeline-${suffix}`,
+            objectiveId,
+            title: taskTitle,
+            description: "验证时间线不再只显示项目摘要已更新",
+            type: "TASK",
+            priority: "HIGH",
+            status: "READY",
+            acceptance: ["全局与项目时间线可读"],
+            checklist: [],
+            verificationRequired: true,
+          },
+        ],
+      },
+    });
+    expect(created.ok()).toBeTruthy();
+    const key = String(((await created.json()) as any).items[0].key);
+
+    await patchTask(key, "claim", `e2e-timeline-claim-${suffix}`);
+    await patchTask(key, "start", `e2e-timeline-start-${suffix}`);
+    const progress = await api.post(`${apiUrl}/projects/${projectCode}/progress-updates`, {
+      data: {
+        project: projectCode,
+        session: sessionId,
+        opId: `e2e-timeline-progress-${suffix}`,
+        scope: "task",
+        taskKey: key,
+        percent: 100,
+        summary: progressSummary,
+        completed: ["真实事件语义已落库"],
+        next: [],
+        evidence: [{ kind: "E2E", ref: suffix }],
+      },
+    });
+    expect(progress.ok()).toBeTruthy();
+    const record = await api.post(`${apiUrl}/projects/${projectCode}/ui/records`, {
+      data: {
+        opId: `e2e-timeline-record-${suffix}`,
+        kind: "FACT",
+        title: recordTitle,
+        summary: "时间线能够区分记录与任务状态",
+        detail: "Playwright 真实服务验收",
+        importance: "HIGH",
+        scope: "WORK_ITEM",
+        workItemKey: key,
+      },
+    });
+    expect(record.ok()).toBeTruthy();
+    await patchTask(key, "verify", `e2e-timeline-verify-${suffix}`);
+    await patchTask(key, "complete", `e2e-timeline-complete-${suffix}`);
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto(`/#project:${projectCode}`);
+    await page.getByRole("tablist").getByRole("button", { name: "时间线" }).click();
+    await expect(page.getByText(progressSummary)).toBeVisible();
+    await expect(page.getByText(recordTitle)).toBeVisible();
+    await expect(page.getByText("任务进度已更新", { exact: true })).toBeVisible();
+    await expect(page.getByText(key, { exact: true }).first()).toBeVisible();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-project-timeline-readable-dark.png"),
+      fullPage: true,
+    });
+
+    await page.getByRole("button", { name: "工作区", exact: true }).click();
+    await page.getByRole("button", { name: "全局时间线", exact: true }).click();
+    await expect(page.getByText(progressSummary)).toBeVisible();
+    await expect(page.getByText(key, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("项目摘要已更新", { exact: true })).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-global-timeline-readable-dark.png"),
+      fullPage: true,
+    });
+  } finally {
+    if (sessionId) {
+      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+        data: {
+          project: projectCode,
+          opId: `e2e-timeline-close-${suffix}`,
+          outcome: "completed",
+          summary: "时间线 E2E 清理",
+          next: [],
+          releaseClaims: true,
+        },
+      });
+      expect(close.ok()).toBeTruthy();
+    }
+    await api.dispose();
+  }
 });
 
 test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢复", async ({ page }) => {
@@ -299,9 +505,21 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
   const onlineSession = await begin();
   try {
     await page.goto("/#agents");
-    const row = page.getByRole("row").filter({ hasText: displayName });
-    await expect(row).toHaveCount(1);
-    await expect(row).toContainText("2 个 Session");
+    const project = page.locator(".agent-project-group").filter({
+      has: page.locator(".agent-project-title").getByText("E2E", { exact: true }),
+    });
+    const card = project.locator(".agent-session-card").filter({ hasText: displayName });
+    await expect(project).toHaveCount(1);
+    await expect(card).toHaveCount(1);
+    await expect(card).toContainText("2 个 Session");
+    await card.getByText(/详细上下文与历史/u).click();
+    await expect(card.getByLabel("历史 Session")).toContainText(closedSession);
+    await expect(card.getByLabel("历史 Session")).toContainText(onlineSession);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    ).toBe(true);
     await page.screenshot({
       path: resolve("output", "playwright", "e2e-agent-deduplicated.png"),
       fullPage: true,
@@ -310,6 +528,215 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
     await close(onlineSession);
     await api.dispose();
   }
+});
+
+test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const sessions: string[] = [];
+  const begin = async (label: string) => {
+    const response = await api.post(`${apiUrl}/sessions`, {
+      data: {
+        cwd: process.cwd(),
+        projectCode: "E2E",
+        mode: "project",
+        agentId: `e2e-git-context-${label}-${suffix}`,
+        displayName: `E2E Git Context ${label} ${suffix}`,
+        clientKind: "playwright",
+        role: "SUBAGENT",
+        resume: false,
+        allowProjectCreate: false,
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+    const sessionId = String((await response.json()).session);
+    sessions.push(sessionId);
+    return sessionId;
+  };
+  const close = async (sessionId: string) => {
+    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      data: {
+        project: "E2E",
+        opId: `e2e-git-context-close-${crypto.randomUUID()}`,
+        outcome: "completed",
+        summary: "Git Context E2E 清理",
+        next: [],
+        releaseClaims: true,
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  const primarySession = await begin("primary");
+  await begin("conflict");
+  const listedTasks = await api.get(`${apiUrl}/projects/E2E/work-items?limit=100`);
+  expect(listedTasks.ok()).toBeTruthy();
+  const taskList = (await listedTasks.json()) as Array<Record<string, any>>;
+  const task = taskList.find((item) => item.title === "验证键盘与焦点");
+  expect(task).toBeTruthy();
+  const claim = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+    data: {
+      session: primarySession,
+      opId: `e2e-git-context-claim-${suffix}`,
+      items: [
+        {
+          taskKey: task.key,
+          expectedVersion: task.version,
+          operation: "claim",
+        },
+      ],
+    },
+  });
+  expect(claim.ok()).toBeTruthy();
+
+  try {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("/#agents");
+    const project = page.locator(".agent-project-group").filter({
+      has: page.locator(".agent-project-title").getByText("E2E", { exact: true }),
+    });
+    const primary = project
+      .locator(".agent-session-card")
+      .filter({ hasText: `E2E Git Context primary ${suffix}` });
+    await expect(primary).toHaveCount(1);
+    await expect(primary).toContainText(task.key);
+    await expect(primary).toContainText("子 Agent");
+    await expect(primary).toContainText("在线");
+
+    const agents = await api.get(`${apiUrl}/projects/E2E/agents`);
+    expect(agents.ok()).toBeTruthy();
+    const agentRows = (await agents.json()) as Array<Record<string, any>>;
+    const primaryAgent = agentRows.find((agent) => agent.id === primarySession);
+    expect(primaryAgent).toBeTruthy();
+    expect(String(primaryAgent.git_branch || "")).not.toBe("");
+    expect(String(primaryAgent.worktree_root || "")).not.toBe("");
+    expect(String(primaryAgent.git_head || "")).not.toBe("");
+    await expect(primary).toContainText(String(primaryAgent.git_branch));
+    await expect(primary).toContainText(String(primaryAgent.worktree_root).split("\\").pop()!);
+
+    await primary.getByText(/详细上下文与历史/u).click();
+    await expect(primary).toContainText("工作目录");
+    await expect(primary).toContainText("HEAD");
+    await expect(primary).toContainText("持续时间");
+    await expect(primary).toContainText(/clean|dirty|未观察/u);
+
+    const warning = page.getByRole("status");
+    await expect(warning).toContainText("同一 Worktree");
+    await expect(warning).toContainText("同一 Git branch");
+
+    const refreshResponse = page.waitForResponse(
+      (response) =>
+        response.url().includes(`/projects/E2E/sessions/${primarySession}/git-context/refresh`) &&
+        response.request().method() === "POST" &&
+        response.ok(),
+    );
+    await primary.getByRole("button", { name: "刷新 Git" }).click();
+    await refreshResponse;
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-agent-git-context-dark.png"),
+      fullPage: true,
+    });
+
+    await page.getByRole("button", { name: "E2E 验收项目", exact: true }).click();
+    const projectAgents = page
+      .locator(".atm-panel")
+      .filter({ has: page.getByRole("heading", { name: "Agent 与领取" }) });
+    await expect(projectAgents).toContainText(`E2E Git Context primary ${suffix}`);
+    await expect(projectAgents).toContainText(task.key);
+
+    await page
+      .getByRole("button", { name: /验证键盘与焦点/u })
+      .first()
+      .click();
+    const drawer = page.getByRole("dialog", { name: "任务详情" });
+    await expect(drawer).toBeVisible();
+    await expect(drawer.getByRole("heading", { name: "执行 Session" })).toBeVisible();
+    await expect(drawer).toContainText(`E2E Git Context primary ${suffix}`);
+    await expect(drawer).toContainText(String(primaryAgent.git_branch));
+    await expect(drawer).toContainText("Worktree");
+    await expect(drawer).toContainText("HEAD");
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
+      ),
+    ).toBe(true);
+  } finally {
+    for (const sessionId of sessions) await close(sessionId);
+    await api.dispose();
+  }
+});
+
+test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", async ({ page }) => {
+  await page.addInitScript(
+    ({ endpoint, token }) => {
+      const installed = { state: "INSTALLED", version: 1 };
+      (window as any).ayanamiDesktop = {
+        runtime: { endpoint, token },
+        getAgentIntegrations: async () => [
+          {
+            client: "CODEX",
+            mcpInstalled: true,
+            rule: { ...installed, path: "C:\\Users\\tester\\.codex\\AGENTS.md" },
+            skills: {
+              state: "INSTALLED",
+              skills: [
+                { name: "atm-plan", ...installed },
+                { name: "atm-task", ...installed },
+              ],
+            },
+          },
+          {
+            client: "CLAUDE",
+            mcpInstalled: true,
+            rule: { ...installed, path: "C:\\Users\\tester\\.claude\\CLAUDE.md" },
+            skills: {
+              state: "INSTALLED",
+              skills: [
+                { name: "atm-plan", ...installed },
+                { name: "atm-task", ...installed },
+              ],
+            },
+          },
+        ],
+        manageAgentIntegration: async (client: string) => ({
+          report: null,
+          preview: {
+            current: "Personal rule.",
+            proposed: `<!-- AYANAMI_TASK_MANAGER:BEGIN -->\n## ${client}\n<!-- AYANAMI_TASK_MANAGER:END -->`,
+          },
+        }),
+        getMcpConfigs: async () => ({
+          streamableHttp: "{}",
+          stdio: "{}",
+          generic: "{}",
+          agentRule: "ATM",
+        }),
+        getAutoLaunch: async () => false,
+        setAutoLaunch: async () => false,
+        copyText: async () => true,
+        showItemInFolder: async () => undefined,
+        minimizeWindow: async () => undefined,
+        toggleMaximizeWindow: async () => false,
+        isWindowMaximized: async () => false,
+        closeWindow: async () => undefined,
+        onWindowMaximizedChange: () => () => undefined,
+        onNavigate: () => () => undefined,
+      };
+    },
+    { endpoint: apiUrl, token: headers.authorization.replace("Bearer ", "") },
+  );
+  await page.goto("/#settings");
+
+  const codex = page.locator(".atm-integration-card").filter({ hasText: "Codex" });
+  await expect(codex).toContainText("MCP");
+  await expect(codex).toContainText("全局 ATM 规则");
+  await expect(codex).toContainText("atm-plan");
+  await expect(codex).toContainText("atm-task");
+  await codex.getByRole("button", { name: "预览修改" }).click();
+  await expect(page.getByText("Codex 规则修改预览")).toBeVisible();
+  await expect(page.locator(".atm-integration-preview pre")).toContainText(
+    "AYANAMI_TASK_MANAGER:BEGIN",
+  );
 });
 
 test("项目视图、全局搜索和保存视图走真实 API", async ({ page }) => {

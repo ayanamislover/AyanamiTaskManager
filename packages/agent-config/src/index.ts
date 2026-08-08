@@ -1,5 +1,15 @@
-import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -14,6 +24,124 @@ export type McpRuntime = {
   env?: Record<string, string>;
 };
 export type InstallResult = { client: "CODEX" | "CLAUDE"; path: string; backupPath: string | null };
+export const ATM_SKILL_NAMES = ["atm-plan", "atm-task"] as const;
+const ATM_SKILL_RESOURCE_DIRECTORIES = ["_shared"] as const;
+export const ATM_INTEGRATION_VERSION = 1;
+export type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
+export type AgentRuleAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
+
+const managedRuleBegin = "<!-- AYANAMI_TASK_MANAGER:BEGIN -->";
+const managedRuleEnd = "<!-- AYANAMI_TASK_MANAGER:END -->";
+const managedRulePayload = `## AyanamiTaskManager
+
+- ATM 是受管开发项目的计划、任务状态、长期记录和 Session 交接事实源。
+- 复杂任务形成执行计划后，必须把可独立交付/验证的主要步骤同步为 ATM WorkItem，不能只登记最高层目标。
+- 实际执行优先领取 READY 的叶子 WorkItem；Objective / Milestone / EPIC 用于表达目标和范围。
+- 开工使用一次 \`atm_begin\` 并直接使用其 brief；不要紧接 \`atm_brief\`。
+- 仅在有意义状态变化时写 progress；长期决策/事实/风险写 record。
+- 上下文恢复优先 ATM brief / delta，不重新扫描整个项目历史。
+- 完整规则见 \`%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md\`。`;
+
+function managedRuleHash(version: number, payload: string): string {
+  return createHash("sha256").update(`${version}\n${payload}`).digest("hex");
+}
+
+export function renderManagedAgentRule(): string {
+  const hash = managedRuleHash(ATM_INTEGRATION_VERSION, managedRulePayload);
+  return `${managedRuleBegin}
+<!-- ATM-INTEGRATION-VERSION: ${ATM_INTEGRATION_VERSION} -->
+<!-- ATM-INTEGRATION-HASH: ${hash} -->
+
+${managedRulePayload}
+${managedRuleEnd}`;
+}
+
+function managedRuleRange(content: string): { start: number; end: number; block: string } | null {
+  const start = content.indexOf(managedRuleBegin);
+  const endMarker = content.indexOf(managedRuleEnd, Math.max(0, start));
+  if (start < 0 && endMarker < 0) return null;
+  if (start < 0 || endMarker < start) {
+    return {
+      start: Math.max(0, start),
+      end: content.length,
+      block: content.slice(Math.max(0, start)),
+    };
+  }
+  const end = endMarker + managedRuleEnd.length;
+  return { start, end, block: content.slice(start, end) };
+}
+
+function contentWithoutManagedRule(content: string): string {
+  const range = managedRuleRange(content);
+  if (!range) return content;
+  const before = content.slice(0, range.start).trimEnd();
+  const after = content.slice(range.end).trimStart();
+  const remaining = [before, after].filter(Boolean).join("\n\n");
+  return remaining ? `${remaining}\n` : "";
+}
+
+function contentWithManagedRule(content: string): string {
+  const base = contentWithoutManagedRule(content).trimEnd();
+  return `${base}${base ? "\n\n" : ""}${renderManagedAgentRule()}\n`;
+}
+
+export function inspectManagedAgentRule(path: string): {
+  state: AgentIntegrationState;
+  path: string;
+  version: number | null;
+} {
+  const content = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const range = managedRuleRange(content);
+  if (!range) return { state: "NOT_INSTALLED", path, version: null };
+  const versionMatch = /<!-- ATM-INTEGRATION-VERSION: (\d+) -->/u.exec(range.block);
+  const hashMatch = /<!-- ATM-INTEGRATION-HASH: ([a-f0-9]{64}) -->/u.exec(range.block);
+  const version = versionMatch ? Number(versionMatch[1]) : null;
+  const payloadStart = hashMatch ? (hashMatch.index ?? 0) + hashMatch[0].length : -1;
+  const payloadEnd = range.block.lastIndexOf(managedRuleEnd);
+  const payload = payloadStart >= 0 ? range.block.slice(payloadStart, payloadEnd).trim() : "";
+  if (version === null || !hashMatch || hashMatch[1] !== managedRuleHash(version, payload)) {
+    return { state: "MODIFIED", path, version };
+  }
+  if (version !== ATM_INTEGRATION_VERSION) return { state: "NEEDS_UPDATE", path, version };
+  return {
+    state: range.block === renderManagedAgentRule() ? "INSTALLED" : "MODIFIED",
+    path,
+    version,
+  };
+}
+
+export function manageAgentRule(input: { path: string; action: AgentRuleAction }): {
+  state: AgentIntegrationState;
+  path: string;
+  backupPath: string | null;
+  current: string;
+  proposed: string;
+} {
+  const current = existsSync(input.path) ? readFileSync(input.path, "utf8") : "";
+  const inspected = inspectManagedAgentRule(input.path);
+  const proposed =
+    input.action === "UNINSTALL"
+      ? contentWithoutManagedRule(current)
+      : contentWithManagedRule(current);
+  if (input.action === "PREVIEW") return { ...inspected, backupPath: null, current, proposed };
+  if (inspected.state === "MODIFIED" && input.action !== "REPAIR" && input.action !== "UNINSTALL") {
+    throw new Error("AGENT_RULE_MODIFIED_REQUIRES_REPAIR");
+  }
+  if (input.action === "UPDATE" && inspected.state === "INSTALLED") {
+    return { ...inspected, backupPath: null, current, proposed: current };
+  }
+  if (input.action === "INSTALL" && inspected.state === "NEEDS_UPDATE") {
+    throw new Error("AGENT_RULE_NEEDS_EXPLICIT_UPDATE");
+  }
+  if (current === proposed) return { ...inspected, backupPath: null, current, proposed };
+  const backupPath = replaceFileWithBackup(input.path, proposed);
+  return {
+    ...inspectManagedAgentRule(input.path),
+    backupPath,
+    current,
+    proposed,
+  };
+}
 
 function backupName(path: string): string {
   const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
@@ -70,6 +198,184 @@ export function defaultClaudeConfigPath(): string {
     "Claude",
     "claude_desktop_config.json",
   );
+}
+
+export function defaultCodexSkillsPath(): string {
+  return join(homedir(), ".codex", "skills");
+}
+
+export function defaultClaudeSkillsPath(): string {
+  return join(homedir(), ".claude", "skills");
+}
+
+export function defaultCodexRulePath(): string {
+  return join(homedir(), ".codex", "AGENTS.md");
+}
+
+export function defaultClaudeRulePath(): string {
+  return join(homedir(), ".claude", "CLAUDE.md");
+}
+
+export function installAgentSkills(input: { sourceRoot: string; targetRoot: string }): {
+  skills: string[];
+  paths: string[];
+  backupPaths: string[];
+} {
+  mkdirSync(input.targetRoot, { recursive: true });
+  const paths: string[] = [];
+  const backupPaths: string[] = [];
+  for (const name of [...ATM_SKILL_NAMES, ...ATM_SKILL_RESOURCE_DIRECTORIES]) {
+    const source = join(input.sourceRoot, name);
+    const target = join(input.targetRoot, name);
+    if (!existsSync(source)) throw new Error(`AGENT_SKILL_MISSING: ${name}`);
+    if (name !== "_shared" && !existsSync(join(source, "SKILL.md"))) {
+      throw new Error(`AGENT_SKILL_MISSING: ${name}`);
+    }
+    const staging = join(
+      input.targetRoot,
+      `.${name}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`,
+    );
+    cpSync(source, staging, { recursive: true, force: true });
+    let backupPath: string | null = null;
+    try {
+      if (existsSync(target)) {
+        backupPath = backupName(target);
+        renameSync(target, backupPath);
+        backupPaths.push(backupPath);
+      }
+      renameSync(staging, target);
+      paths.push(target);
+    } catch (error) {
+      rmSync(staging, { recursive: true, force: true });
+      if (backupPath && !existsSync(target) && existsSync(backupPath))
+        renameSync(backupPath, target);
+      throw error;
+    }
+  }
+  return { skills: [...ATM_SKILL_NAMES], paths, backupPaths };
+}
+
+function directoryFingerprint(path: string): string | null {
+  if (!existsSync(path)) return null;
+  const hash = createHash("sha256");
+  const visit = (directory: string, prefix: string) => {
+    for (const name of readdirSync(directory).sort()) {
+      const absolute = join(directory, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      const stat = statSync(absolute);
+      if (stat.isDirectory()) visit(absolute, relative);
+      else {
+        hash.update(relative);
+        hash.update("\0");
+        hash.update(readFileSync(absolute));
+        hash.update("\0");
+      }
+    }
+  };
+  visit(path, "");
+  return hash.digest("hex");
+}
+
+function skillVersion(path: string): number | null {
+  const manifest = join(path, "SKILL.md");
+  if (!existsSync(manifest)) return null;
+  const match = /atm-integration-version:\s*(\d+)/u.exec(readFileSync(manifest, "utf8"));
+  return match ? Number(match[1]) : null;
+}
+
+export function inspectAgentSkills(input: { sourceRoot: string; targetRoot: string }): {
+  state: AgentIntegrationState;
+  skills: Array<{ name: string; state: AgentIntegrationState; version: number | null }>;
+} {
+  const skills = ATM_SKILL_NAMES.map((name) => {
+    const source = join(input.sourceRoot, name);
+    const target = join(input.targetRoot, name);
+    if (!existsSync(target)) return { name, state: "NOT_INSTALLED" as const, version: null };
+    const sourceVersion = skillVersion(source);
+    const targetVersion = skillVersion(target);
+    if (sourceVersion !== targetVersion) {
+      return { name, state: "NEEDS_UPDATE" as const, version: targetVersion };
+    }
+    return {
+      name,
+      state:
+        directoryFingerprint(source) === directoryFingerprint(target)
+          ? ("INSTALLED" as const)
+          : ("MODIFIED" as const),
+      version: targetVersion,
+    };
+  });
+  const sharedSource = join(input.sourceRoot, "_shared");
+  const sharedTarget = join(input.targetRoot, "_shared");
+  const sharedState: AgentIntegrationState = !existsSync(sharedTarget)
+    ? "NOT_INSTALLED"
+    : directoryFingerprint(sharedSource) === directoryFingerprint(sharedTarget)
+      ? "INSTALLED"
+      : "MODIFIED";
+  if (sharedState !== "INSTALLED") {
+    const plan = skills.find((skill) => skill.name === "atm-plan");
+    if (plan && plan.state !== "NEEDS_UPDATE") plan.state = sharedState;
+  }
+  const state = skills.some((skill) => skill.state === "MODIFIED")
+    ? "MODIFIED"
+    : skills.some((skill) => skill.state === "NEEDS_UPDATE")
+      ? "NEEDS_UPDATE"
+      : skills.every((skill) => skill.state === "INSTALLED")
+        ? "INSTALLED"
+        : "NOT_INSTALLED";
+  return { state, skills };
+}
+
+export function uninstallAgentSkills(targetRoot: string): { backupPaths: string[] } {
+  const backupPaths: string[] = [];
+  for (const name of [...ATM_SKILL_NAMES, ...ATM_SKILL_RESOURCE_DIRECTORIES]) {
+    const target = join(targetRoot, name);
+    if (!existsSync(target)) continue;
+    const backupPath = backupName(target);
+    renameSync(target, backupPath);
+    backupPaths.push(backupPath);
+  }
+  return { backupPaths };
+}
+
+export function isCodexConfigInstalled(path = defaultCodexConfigPath()): boolean {
+  if (!existsSync(path)) return false;
+  return /\[mcp_servers\.(?:"ayanami-task-manager"|ayanami-task-manager)\]/u.test(
+    readFileSync(path, "utf8"),
+  );
+}
+
+export function isClaudeConfigInstalled(path = defaultClaudeConfigPath()): boolean {
+  if (!existsSync(path)) return false;
+  try {
+    const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+    return Boolean(content.mcpServers?.["ayanami-task-manager"]);
+  } catch {
+    return false;
+  }
+}
+
+export function uninstallCodexConfig(path = defaultCodexConfigPath()): InstallResult {
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const next = withoutOwnCodexSection(existing);
+  const content = next ? `${next}\n` : "";
+  const backupPath = existing === content ? null : replaceFileWithBackup(path, content);
+  return { client: "CODEX", path, backupPath };
+}
+
+export function uninstallClaudeConfig(path = defaultClaudeConfigPath()): InstallResult {
+  if (!existsSync(path)) return { client: "CLAUDE", path, backupPath: null };
+  let existing: Record<string, any>;
+  try {
+    existing = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+  } catch {
+    throw new Error("CLAUDE_CONFIG_INVALID_JSON");
+  }
+  const servers = { ...(existing.mcpServers ?? {}) };
+  delete servers["ayanami-task-manager"];
+  const content = `${JSON.stringify({ ...existing, mcpServers: servers }, null, 2)}\n`;
+  const backupPath = replaceFileWithBackup(path, content);
+  return { client: "CLAUDE", path, backupPath };
 }
 
 export function installCodexConfig(input: {

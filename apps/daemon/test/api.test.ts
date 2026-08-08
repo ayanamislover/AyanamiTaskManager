@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +12,156 @@ afterEach(() => {
 });
 
 describe("REST 边界", () => {
+  it("REST begin 从 cwd 确定性采集并手动刷新持久化 Git context", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-api-git-context-"));
+    temporary.push(root);
+    const cwd = join(root, "repository");
+    mkdirSync(cwd);
+    const git = (args: string[]) =>
+      execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true }).trim();
+    git(["init"]);
+    git(["config", "user.email", "atm@example.test"]);
+    git(["config", "user.name", "ATM Test"]);
+    writeFileSync(join(cwd, "tracked.txt"), "baseline\n", "utf8");
+    git(["add", "tracked.txt"]);
+    git(["commit", "-m", "baseline"]);
+
+    const dataDir = join(root, "data");
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    try {
+      const project = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects",
+        headers,
+        payload: { name: "REST Git context", sourcePath: cwd, code: "GREST" },
+      });
+      expect(project.statusCode).toBe(201);
+      const begun = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers,
+        payload: {
+          mode: "project",
+          projectCode: "GREST",
+          agentId: "rest-git-context",
+          clientKind: "test",
+          role: "SUBAGENT",
+          cwd,
+          signals: {},
+        },
+      });
+      expect(begun.statusCode).toBe(201);
+      const sessionId = String(begun.json().session);
+      const agents = await app.inject({
+        method: "GET",
+        url: "/api/v1/projects/GREST/agents",
+        headers,
+      });
+      expect(agents.statusCode).toBe(200);
+      const initial = (agents.json() as Array<Record<string, unknown>>).find(
+        (item) => item.id === sessionId,
+      );
+      expect(initial).toMatchObject({
+        cwd,
+        git_available: 1,
+        worktree_root: cwd,
+        git_dirty: 0,
+      });
+      expect(initial?.git_head).toMatch(/^[0-9a-f]{40}$/u);
+      expect(typeof initial?.git_branch).toBe("string");
+
+      writeFileSync(join(cwd, "tracked.txt"), "dirty\n", "utf8");
+      const refreshed = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/GREST/sessions/${sessionId}/git-context/refresh`,
+        headers,
+      });
+      expect(refreshed.statusCode).toBe(200);
+      expect(refreshed.json()).toMatchObject({
+        updated: true,
+        session: {
+          id: sessionId,
+          cwd,
+          git_available: 1,
+          worktree_root: cwd,
+          git_dirty: 1,
+        },
+      });
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
+  it("在 WorkItem DTO 中往返 DISCOVERED_FROM 同批引用", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-discovered-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "REST 发现关系",
+      sourcePath: null,
+      code: "DREST",
+    });
+    const begun = await service.begin({ projectCode: project.code, agentId: "codex" });
+    const objective = await service.createObjective(project.code, begun.session, {
+      title: "验证 REST 关系",
+      description: "",
+      definitionOfDone: [],
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/DREST/work-items",
+        headers,
+        payload: {
+          session: begun.session,
+          opId: "rest-discovered-batch",
+          items: [
+            {
+              clientRef: "follow-up",
+              objectiveId: objective.id,
+              discoveredFromRef: "origin",
+              title: "REST 跟进项",
+              type: "TASK",
+              priority: "HIGH",
+              status: "READY",
+            },
+            {
+              clientRef: "origin",
+              objectiveId: objective.id,
+              title: "REST 原任务",
+              type: "TASK",
+              priority: "NORMAL",
+              status: "READY",
+            },
+          ],
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      const [followUp, origin] = created.json().items as Array<{ key: string }>;
+      const detail = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/DREST/work-items/${followUp!.key}?view=context`,
+        headers,
+      });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json()).toMatchObject({ discoveredFrom: origin!.key });
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
   it("提供保存视图和设置的版本化 API", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-api-settings-"));
     temporary.push(dataDir);

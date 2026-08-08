@@ -387,6 +387,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           objectiveId: item.objectiveId,
           dependsOn: item.dependsOn,
           dependsOnRefs: item.dependsOnRefs,
+          ...(item.discoveredFrom === undefined ? {} : { discoveredFrom: item.discoveredFrom }),
+          ...(item.discoveredFromRef === undefined
+            ? {}
+            : { discoveredFromRef: item.discoveredFromRef }),
           title: item.title,
           description: item.description,
           type: item.type,
@@ -463,6 +467,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           objectiveId: item.objectiveId,
           dependsOn: item.dependsOn,
           dependsOnRefs: item.dependsOnRefs,
+          ...(item.discoveredFrom === undefined ? {} : { discoveredFrom: item.discoveredFrom }),
+          ...(item.discoveredFromRef === undefined
+            ? {}
+            : { discoveredFromRef: item.discoveredFromRef }),
           title: item.title,
           description: item.description,
           type: item.type,
@@ -670,6 +678,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     if (typeof body.project !== "string")
       throw new Error("PROJECT_REQUIRED: 关闭 Session 需要 project");
     return options.service.forceCloseSessionAsUser(body.project, id, body.releaseClaims !== false);
+  });
+  app.post("/api/v1/projects/:code/sessions/:id/git-context/refresh", async (request) => {
+    const { code, id } = request.params as { code: string; id: string };
+    return options.service.refreshSessionGitContextAsUser(code, id);
   });
 
   app.get("/api/v1/quick-tasks", async (request) => {

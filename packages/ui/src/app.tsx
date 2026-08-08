@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useId,
   useLayoutEffect,
@@ -39,8 +40,13 @@ import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/U
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import { AyanamiClient, type RegisteredProject } from "@ayanami-task/client";
-import { summarizeAgentSessions, type AgentSessionLike } from "./agent-sessions.js";
+import {
+  findAgentSessionConflicts,
+  groupAgentSessions,
+  type AgentSessionLike,
+} from "./agent-sessions.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
+import { presentTimelineEvent } from "./timeline-events.js";
 import {
   sortProjectTasks,
   toggleProjectTaskSort,
@@ -62,6 +68,17 @@ type Route =
 type Notify = (message: string) => void;
 type Theme = "light" | "dark";
 type NotificationMode = "ALL" | "CRITICAL" | "OFF";
+type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
+type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
+type AgentIntegrationReport = {
+  client: "CODEX" | "CLAUDE";
+  mcpInstalled: boolean;
+  rule: { state: AgentIntegrationState; path: string; version: number | null };
+  skills: {
+    state: AgentIntegrationState;
+    skills: Array<{ name: string; state: AgentIntegrationState; version: number | null }>;
+  };
+};
 type DesktopBridge = {
   runtime?: { endpoint: string; token: string };
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
@@ -74,6 +91,14 @@ type DesktopBridge = {
     agentRule: string;
   }>;
   installMcp?: (client: "CODEX" | "CLAUDE") => Promise<{ path: string; backupPath: string | null }>;
+  getAgentIntegrations?: () => Promise<AgentIntegrationReport[]>;
+  manageAgentIntegration?: (
+    client: "CODEX" | "CLAUDE",
+    action: AgentIntegrationAction,
+  ) => Promise<{
+    report: AgentIntegrationReport;
+    preview: { current: string; proposed: string } | null;
+  }>;
   copyText?: (text: string) => Promise<boolean>;
   onNavigate?: (listener: (route: string) => void) => () => void;
 };
@@ -154,42 +179,6 @@ const progressSourceLabels: Record<string, string> = {
   REPORTED: "人工报告",
   STATUS: "状态计算",
 };
-const eventLabels: Record<string, string> = {
-  "quick.created": "创建临时任务",
-  "quick.updated": "更新临时任务",
-  "quick.promoted": "临时任务已晋升",
-  "project.creating": "开始创建项目",
-  "project.created": "项目已创建",
-  "project.archived": "项目已归档",
-  "project.restored": "项目已恢复",
-  "project.summary.updated": "项目摘要已更新",
-  "project.trashed": "项目已移入垃圾箱",
-  "objective.created": "目标已创建",
-  "milestone.created": "里程碑已创建",
-  "work.created": "任务已创建",
-  "work.started": "任务已开始",
-  "work.claimed": "任务已领取",
-  "work.blocked": "任务进入阻塞",
-  "work.waiting": "任务进入等待",
-  "work.completed": "任务已完成",
-  "work.cancelled": "任务已取消",
-  "work.reopened": "任务已重新打开",
-  "work.verification_requested": "任务已提交验收",
-  "checklist.updated": "检查项已更新",
-  "record.created": "项目记录已创建",
-  "agent.joined": "Agent 已加入",
-  "agent.left": "Agent 已离开",
-  "project.update.drafted": "项目更新草稿已生成",
-  "project.update.published": "项目更新已发布",
-  "backup.created": "备份已创建",
-  "backup.restored": "备份已恢复",
-  "import.agenttask.applied": "旧任务账本已导入",
-};
-
-function eventLabel(code: string): string {
-  return eventLabels[code] ?? "项目发生变化";
-}
-
 function statusClass(status: string): string {
   if (["DONE", "ACTIVE", "ON_TRACK"].includes(status)) return "success";
   if (["BLOCKED", "OFF_TRACK", "MIGRATION_FAILED"].includes(status)) return "danger";
@@ -349,6 +338,20 @@ function formatTime(value?: string | null): string {
   }).format(date);
 }
 
+function compactPath(value?: unknown): string {
+  if (typeof value !== "string" || !value.trim()) return "不可用";
+  const parts = value.replaceAll("/", "\\").split("\\").filter(Boolean);
+  return parts.length > 2 ? `…\\${parts.slice(-2).join("\\")}` : value;
+}
+
+function formatDuration(value?: string | null): string {
+  const started = Date.parse(value ?? "");
+  if (!Number.isFinite(started)) return "未知";
+  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60_000));
+  const hours = Math.floor(minutes / 60);
+  return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
+}
+
 function LoadingRows({ count = 4 }: { count?: number }) {
   return (
     <div className="atm-panel-body" style={{ display: "grid", gap: 9 }}>
@@ -472,16 +475,28 @@ function Sidebar({
   projects: RegisteredProject[];
   brandLogoSrc?: string;
 }) {
-  const global = [
+  const primary = [
     ["overview", "总览", House],
     ["projects", "项目", FolderOpen],
+  ] as const;
+  const workspace = [
     ["my", "活动任务", CheckSquare],
     ["quick", "临时任务", Lightning],
     ["blockers", "阻塞与等待", WarningCircle],
     ["agents", "Agent", UsersThree],
     ["timeline", "全局时间线", ClockCounterClockwise],
-    ["settings", "设置", GearSix],
   ] as const;
+  const routeUsesWorkspace = workspace.some(([key]) => route === key);
+  const [workspaceExpanded, setWorkspaceExpanded] = useState(() => {
+    if (routeUsesWorkspace) return true;
+    return window.localStorage.getItem("atm.workspace.expanded") === "true";
+  });
+  useEffect(() => {
+    if (routeUsesWorkspace) setWorkspaceExpanded(true);
+  }, [routeUsesWorkspace]);
+  useEffect(() => {
+    window.localStorage.setItem("atm.workspace.expanded", String(workspaceExpanded));
+  }, [workspaceExpanded]);
   return (
     <aside className="atm-sidebar">
       <div className="atm-sidebar-inner">
@@ -495,10 +510,38 @@ function Sidebar({
           </span>
           <span>AyanamiTaskManager</span>
         </div>
-        <div className="atm-nav-group">
-          <div className="atm-nav-title">工作区</div>
-          <nav className="atm-nav">
-            {global.map(([key, label, Icon]) => (
+        <div className="atm-nav-group atm-primary-navigation">
+          <nav className="atm-nav" aria-label="主导航">
+            {primary.map(([key, label, Icon]) => (
+              <button
+                key={key}
+                aria-current={route === key ? "page" : undefined}
+                onClick={() => setRoute(key)}
+              >
+                <Icon size={18} />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+        <div className="atm-nav-group atm-workspace-navigation">
+          <button
+            type="button"
+            className="atm-nav-disclosure"
+            aria-expanded={workspaceExpanded}
+            aria-controls="atm-workspace-navigation"
+            onClick={() => setWorkspaceExpanded((expanded) => !expanded)}
+          >
+            <CaretRight size={16} aria-hidden="true" />
+            <span>工作区</span>
+          </button>
+          <nav
+            className="atm-nav atm-nav-secondary"
+            id="atm-workspace-navigation"
+            aria-label="工作区"
+            hidden={!workspaceExpanded}
+          >
+            {workspace.map(([key, label, Icon]) => (
               <button
                 key={key}
                 aria-current={route === key ? "page" : undefined}
@@ -532,7 +575,17 @@ function Sidebar({
             </nav>
           </div>
         ) : null}
-        <div className="atm-sidebar-footer">本地优先 · 每项目独立数据库</div>
+        <div className="atm-sidebar-footer">
+          <button
+            type="button"
+            className="atm-sidebar-settings"
+            aria-current={route === "settings" ? "page" : undefined}
+            onClick={() => setRoute("settings")}
+          >
+            <GearSix size={18} />
+            <span>设置</span>
+          </button>
+        </div>
       </div>
     </aside>
   );
@@ -715,14 +768,10 @@ function OverviewPage({
             <Empty title="暂无事件" text="创建或更新任务后，变化会出现在这里。" />
           ) : (
             <div className="atm-timeline">
-              {(data.recentEvents as any[]).slice(0, 8).map((event) => (
-                <div className="atm-event" key={event.sequence}>
-                  <div className="atm-row-title">{eventLabel(String(event.type))}</div>
-                  <div className="atm-row-sub">
-                    {event.actor} · {formatTime(event.created_at)}
-                  </div>
-                </div>
-              ))}
+              {(data.recentEvents as Record<string, unknown>[]).slice(0, 8).map((event) => {
+                const item = presentTimelineEvent(event);
+                return <TimelineEventRow event={event} key={item.id} />;
+              })}
             </div>
           )}
         </section>
@@ -1385,6 +1434,13 @@ function AgentsPage({
       ]);
     },
   });
+  const refreshGit = useMutation({
+    mutationFn: (session: any) =>
+      client.sessions.refreshGitContext(String(session.id), String(session.project)),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+  });
   if (queries.some((query) => query.isLoading))
     return (
       <>
@@ -1392,66 +1448,180 @@ function AgentsPage({
         <LoadingRows />
       </>
     );
-  const sessions = summarizeAgentSessions(
-    queries.flatMap((query) => query.data ?? []) as AgentSessionLike[],
-  );
+  const allSessions = queries.flatMap((query) => query.data ?? []) as AgentSessionLike[];
+  const projectGroups = groupAgentSessions(allSessions);
+  const conflicts = findAgentSessionConflicts(allSessions);
   return (
     <>
       <PageHead
         title="Agent"
         description="按项目与 Agent 身份聚合正式 Session；保留历史数量，并可关闭异常在线会话。"
       />
+      {conflicts.length ? (
+        <div className="atm-notice" role="status">
+          {conflicts.map((conflict) => (
+            <div key={`${conflict.kind}:${conflict.value}`}>
+              ⚠ {conflict.count} 个活动 Session 正在使用同一
+              {conflict.kind === "SAME_WORKTREE" ? " Worktree" : " Git branch"}：
+              {compactPath(conflict.value)}
+            </div>
+          ))}
+        </div>
+      ) : null}
       <section className="atm-panel">
-        {sessions.length === 0 ? (
+        {projectGroups.length === 0 ? (
           <Empty title="没有 Agent 会话" text="Agent 调用 atm_begin 后会在这里出现。" />
         ) : (
-          <table className="atm-table">
-            <thead>
-              <tr>
-                <th>Agent</th>
-                <th>项目</th>
-                <th>角色</th>
-                <th>状态</th>
-                <th>最后活动</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sessions.map((session: any) => (
-                <tr key={`${session.project}:${session.id}`}>
-                  <td>
-                    <div className="atm-row-title">{session.display_name}</div>
-                    <div className="atm-row-sub">
-                      <span className="atm-key">{session.agent_id}</span> · {session.sessionCount}{" "}
-                      个 Session
-                    </div>
-                  </td>
-                  <td>{session.project}</td>
-                  <td>{statusLabels[session.role] ?? session.role}</td>
-                  <td>
-                    <Status value={session.connection_state} />
-                  </td>
-                  <td>{formatTime(session.last_seen_at)}</td>
-                  <td>
-                    {session.connection_state === "ONLINE" ? (
-                      <button
-                        className="atm-button danger"
-                        disabled={forceClose.isPending}
-                        onClick={() => {
-                          if (window.confirm("关闭该异常 Session 并释放其任务领取？"))
-                            forceClose.mutate(session);
-                        }}
-                      >
-                        关闭并释放
-                      </button>
-                    ) : (
-                      "—"
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="agent-project-groups">
+            {projectGroups.map((group) => (
+              <details
+                className="agent-project-group"
+                data-agent-project={group.project}
+                key={group.project}
+                open
+              >
+                <summary className="agent-project-heading">
+                  <span className="agent-project-title">
+                    <FolderOpen size={18} aria-hidden="true" />
+                    <span>{group.project}</span>
+                  </span>
+                  <span className="agent-project-stats">
+                    <span>{group.agents.length} 个 Agent</span>
+                    <span>{group.sessionCount} 个 Session</span>
+                    <Status value={group.onlineCount ? "ONLINE" : "CLOSED"} />
+                  </span>
+                </summary>
+                <div className="agent-session-grid">
+                  {group.agents.map((session: any) => (
+                    <article
+                      className="agent-session-card"
+                      data-agent-id={session.agent_id}
+                      key={`${session.project}:${session.agent_id}`}
+                    >
+                      <header className="agent-session-card-header">
+                        <div className="agent-session-identity">
+                          <div className="atm-row-title">
+                            {session.display_name || session.agent_id || "未命名 Agent"}
+                          </div>
+                          <div className="atm-row-sub">
+                            <span className="atm-key">{session.agent_id}</span> ·{" "}
+                            {session.sessionCount} 个 Session
+                          </div>
+                        </div>
+                        <div className="agent-session-status">
+                          <Status value={String(session.connection_state || "UNKNOWN")} />
+                          <span className="atm-row-sub">{session.work_state || "空闲"}</span>
+                        </div>
+                      </header>
+
+                      <div className="agent-session-primary-grid">
+                        <div className="agent-session-field">
+                          <span>当前任务</span>
+                          <strong>{session.current_task_key || "未领取"}</strong>
+                        </div>
+                        <div className="agent-session-field">
+                          <span>角色</span>
+                          <strong>{statusLabels[session.role] ?? session.role ?? "未知"}</strong>
+                        </div>
+                        <div className="agent-session-field">
+                          <span>Git branch</span>
+                          <strong title={session.git_branch || ""}>
+                            {session.git_branch || "非 Git"}
+                          </strong>
+                        </div>
+                        <div className="agent-session-field">
+                          <span>Worktree</span>
+                          <strong title={session.worktree_root || ""}>
+                            {compactPath(session.worktree_root)}
+                          </strong>
+                        </div>
+                      </div>
+
+                      <details className="agent-session-audit">
+                        <summary>
+                          详细上下文与历史 <span className="atm-key">({session.sessionCount})</span>
+                        </summary>
+                        <div className="agent-session-detail-grid">
+                          <div>
+                            <span>当前 Session</span>
+                            <strong>{session.id}</strong>
+                          </div>
+                          <div title={session.cwd || ""}>
+                            <span>工作目录</span>
+                            <strong>{compactPath(session.cwd)}</strong>
+                          </div>
+                          <div>
+                            <span>HEAD</span>
+                            <strong>{String(session.git_head || "不可用").slice(0, 10)}</strong>
+                          </div>
+                          <div>
+                            <span>Git 状态</span>
+                            <strong>
+                              {Number(session.git_available) === 1 || session.git_available === true
+                                ? Number(session.git_dirty) === 1 || session.git_dirty === true
+                                  ? "dirty"
+                                  : "clean"
+                                : session.git_error || "未观察"}
+                            </strong>
+                          </div>
+                          <div>
+                            <span>最后活动</span>
+                            <strong>{formatTime(session.last_seen_at)}</strong>
+                          </div>
+                          <div>
+                            <span>持续时间</span>
+                            <strong>{formatDuration(session.started_at)}</strong>
+                          </div>
+                        </div>
+                        {session.sessionHistory.length > 1 ? (
+                          <div className="agent-session-history" aria-label="历史 Session">
+                            <div className="agent-session-history-title">历史 Session</div>
+                            {session.sessionHistory.map((history: any) => (
+                              <div className="agent-session-history-row" key={history.id}>
+                                <span className="atm-key">{history.id}</span>
+                                <Status value={String(history.connection_state || "UNKNOWN")} />
+                                <span>{formatTime(history.last_seen_at)}</span>
+                                {history.id === session.id ? (
+                                  <span className="atm-row-sub">当前</span>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </details>
+
+                      <footer className="agent-session-actions">
+                        <span className="atm-row-sub">
+                          最近活动：{formatTime(session.last_seen_at)}
+                        </span>
+                        <span className="atm-actions">
+                          <button
+                            className="atm-button"
+                            disabled={refreshGit.isPending}
+                            onClick={() => refreshGit.mutate(session)}
+                          >
+                            刷新 Git
+                          </button>
+                          {session.connection_state === "ONLINE" ? (
+                            <button
+                              className="atm-button danger"
+                              disabled={forceClose.isPending}
+                              onClick={() => {
+                                if (window.confirm("关闭该异常 Session 并释放其任务领取？"))
+                                  forceClose.mutate(session);
+                              }}
+                            >
+                              关闭并释放
+                            </button>
+                          ) : null}
+                        </span>
+                      </footer>
+                    </article>
+                  ))}
+                </div>
+              </details>
+            ))}
+          </div>
         )}
       </section>
       {forceClose.error ? (
@@ -1460,6 +1630,33 @@ function AgentsPage({
         </div>
       ) : null}
     </>
+  );
+}
+
+function TimelineEventRow({ event }: { event: Record<string, unknown> }) {
+  const item = presentTimelineEvent(event);
+  const project = item.projectName ?? item.projectCode;
+  return (
+    <article className="atm-event" data-event-type={item.type}>
+      {project || item.subjectKey ? (
+        <div className="atm-event-context">
+          {project ? <span>{project}</span> : null}
+          {item.subjectKey ? <strong>{item.subjectKey}</strong> : null}
+        </div>
+      ) : null}
+      <div className="atm-row-title">{item.title}</div>
+      {item.detail && item.detail !== item.title ? (
+        <p className="atm-event-detail">{item.detail}</p>
+      ) : null}
+      <div className="atm-row-sub atm-event-meta">
+        <span>{item.category}</span>
+        {item.actor ? <span>{item.actor}</span> : null}
+        {item.sequence === null ? null : <span>序列 {item.sequence}</span>}
+        {item.occurredAt ? (
+          <time dateTime={item.occurredAt}>{formatTime(item.occurredAt)}</time>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -1480,19 +1677,38 @@ function TimelinePage({ client }: { client: AyanamiClient }) {
           <Empty title="没有全局事件" text="项目或临时任务产生变化后会显示在这里。" />
         ) : (
           <div className="atm-timeline">
-            {(query.data!.recentEvents as any[]).map((event) => (
-              <div className="atm-event" key={event.sequence}>
-                <div className="atm-row-title">{eventLabel(String(event.type))}</div>
-                <div className="atm-row-sub">
-                  序列 {event.sequence} · {event.actor} · {formatTime(event.created_at)}
-                </div>
-              </div>
-            ))}
+            {(query.data!.recentEvents as Record<string, unknown>[]).map((event) => {
+              const item = presentTimelineEvent(event);
+              return <TimelineEventRow event={event} key={item.id} />;
+            })}
           </div>
         )}
       </section>
     </>
   );
+}
+
+const integrationStateLabels: Record<AgentIntegrationState, string> = {
+  NOT_INSTALLED: "未安装",
+  INSTALLED: "已安装",
+  NEEDS_UPDATE: "需要更新",
+  MODIFIED: "内容被修改",
+};
+
+function AgentIntegrationBadge({ state }: { state: AgentIntegrationState }) {
+  return (
+    <span className="atm-integration-status" data-state={state}>
+      {integrationStateLabels[state]}
+    </span>
+  );
+}
+
+function integrationState(report: AgentIntegrationReport): AgentIntegrationState {
+  const states = [report.rule.state, report.skills.state];
+  if (states.includes("MODIFIED")) return "MODIFIED";
+  if (states.includes("NEEDS_UPDATE")) return "NEEDS_UPDATE";
+  if (report.mcpInstalled && states.every((state) => state === "INSTALLED")) return "INSTALLED";
+  return "NOT_INSTALLED";
 }
 
 function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBridge }) {
@@ -1504,12 +1720,22 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
     queryFn: () => desktop!.getMcpConfigs!(),
     enabled: Boolean(desktop?.getMcpConfigs),
   });
+  const integrations = useQuery({
+    queryKey: ["agent-integrations"],
+    queryFn: () => desktop!.getAgentIntegrations!(),
+    enabled: Boolean(desktop?.getAgentIntegrations),
+  });
   const [autoLaunch, setAutoLaunch] = useState<boolean | null>(null);
   const [dailyEnabled, setDailyEnabled] = useState(true);
   const [dailyKeep, setDailyKeep] = useState(7);
   const [weeklyKeep, setWeeklyKeep] = useState(4);
   const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
   const [feedback, setFeedback] = useState("");
+  const [integrationPreview, setIntegrationPreview] = useState<{
+    client: "CODEX" | "CLAUDE";
+    current: string;
+    proposed: string;
+  } | null>(null);
   useEffect(() => {
     void desktop?.getAutoLaunch?.().then(setAutoLaunch);
   }, [desktop]);
@@ -1559,9 +1785,28 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
       setFeedback("设置已保存");
     },
   });
-  const install = useMutation({
-    mutationFn: (target: "CODEX" | "CLAUDE") => desktop!.installMcp!(target),
-    onSuccess: (result) => setFeedback(`已安装并保留原配置：${result.path}`),
+  const manageIntegration = useMutation({
+    mutationFn: ({
+      client,
+      action,
+    }: {
+      client: "CODEX" | "CLAUDE";
+      action: AgentIntegrationAction;
+    }) => desktop!.manageAgentIntegration!(client, action),
+    onSuccess: async (result, variables) => {
+      if (result.preview) {
+        setIntegrationPreview({ client: variables.client, ...result.preview });
+        setFeedback(`${variables.client === "CODEX" ? "Codex" : "Claude"} 修改预览已生成`);
+        return;
+      }
+      setIntegrationPreview(null);
+      await queryClient.invalidateQueries({ queryKey: ["agent-integrations"] });
+      setFeedback(
+        `${variables.client === "CODEX" ? "Codex" : "Claude"} Agent 接入已${
+          variables.action === "UNINSTALL" ? "卸载" : "更新"
+        }`,
+      );
+    },
   });
   const copy = async (text: string, label: string) => {
     if (desktop?.copyText) await desktop.copyText(text);
@@ -1626,24 +1871,101 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                 ) : (
                   <>
                     <div className="atm-row-sub">
-                      安装时先备份现有配置，只合并 AyanamiTaskManager，不覆盖其他 MCP Server。
+                      只管理 ATM 的 MCP、全局规则 block 与两个 Skill；写入前备份，不覆盖其他内容。
                     </div>
-                    <div className="atm-actions">
-                      <button
-                        className="atm-button primary"
-                        disabled={install.isPending}
-                        onClick={() => install.mutate("CODEX")}
-                      >
-                        安装到 Codex
-                      </button>
-                      <button
-                        className="atm-button"
-                        disabled={install.isPending}
-                        onClick={() => install.mutate("CLAUDE")}
-                      >
-                        安装到 Claude
-                      </button>
-                    </div>
+                    {integrations.isLoading ? (
+                      <LoadingRows count={2} />
+                    ) : integrations.data ? (
+                      <div className="atm-integration-list">
+                        {integrations.data.map((report) => {
+                          const overall = integrationState(report);
+                          const primaryAction: AgentIntegrationAction =
+                            overall === "MODIFIED"
+                              ? "REPAIR"
+                              : overall === "NEEDS_UPDATE"
+                                ? "UPDATE"
+                                : "INSTALL";
+                          const primaryLabel =
+                            primaryAction === "REPAIR"
+                              ? "修复"
+                              : primaryAction === "UPDATE"
+                                ? "更新"
+                                : "安装";
+                          return (
+                            <article className="atm-integration-card" key={report.client}>
+                              <header>
+                                <strong>{report.client === "CODEX" ? "Codex" : "Claude"}</strong>
+                                <AgentIntegrationBadge state={overall} />
+                              </header>
+                              <div className="atm-integration-checks">
+                                <span>MCP</span>
+                                <AgentIntegrationBadge
+                                  state={report.mcpInstalled ? "INSTALLED" : "NOT_INSTALLED"}
+                                />
+                                <span>全局 ATM 规则</span>
+                                <AgentIntegrationBadge state={report.rule.state} />
+                                {report.skills.skills.map((skill) => (
+                                  <Fragment key={skill.name}>
+                                    <span>{skill.name}</span>
+                                    <AgentIntegrationBadge state={skill.state} />
+                                  </Fragment>
+                                ))}
+                              </div>
+                              <div className="atm-actions">
+                                <button
+                                  className="atm-button"
+                                  disabled={manageIntegration.isPending}
+                                  onClick={() =>
+                                    manageIntegration.mutate({
+                                      client: report.client,
+                                      action: "PREVIEW",
+                                    })
+                                  }
+                                >
+                                  预览修改
+                                </button>
+                                {overall !== "INSTALLED" ? (
+                                  <button
+                                    className="atm-button primary"
+                                    disabled={manageIntegration.isPending}
+                                    onClick={() =>
+                                      manageIntegration.mutate({
+                                        client: report.client,
+                                        action: primaryAction,
+                                      })
+                                    }
+                                  >
+                                    {primaryLabel}
+                                  </button>
+                                ) : null}
+                                {overall !== "NOT_INSTALLED" ? (
+                                  <button
+                                    className="atm-button danger"
+                                    disabled={manageIntegration.isPending}
+                                    onClick={() =>
+                                      manageIntegration.mutate({
+                                        client: report.client,
+                                        action: "UNINSTALL",
+                                      })
+                                    }
+                                  >
+                                    卸载 ATM 接入
+                                  </button>
+                                ) : null}
+                              </div>
+                            </article>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {integrationPreview ? (
+                      <details className="atm-integration-preview" open>
+                        <summary>
+                          {integrationPreview.client === "CODEX" ? "Codex" : "Claude"} 规则修改预览
+                        </summary>
+                        <pre>{integrationPreview.proposed}</pre>
+                      </details>
+                    ) : null}
                     <div className="atm-actions">
                       <button
                         className="atm-button"
@@ -1687,9 +2009,11 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
             ) : (
               <Empty title="浏览器预览模式" text="Agent 自动安装仅在桌面应用内可用。" />
             )}
-            {install.error ? (
+            {manageIntegration.error ? (
               <div className="atm-inline-error">
-                {install.error instanceof Error ? install.error.message : String(install.error)}
+                {manageIntegration.error instanceof Error
+                  ? manageIntegration.error.message
+                  : String(manageIntegration.error)}
               </div>
             ) : null}
           </div>
@@ -2050,6 +2374,50 @@ function TaskDrawer({
                 )}
               </div>
             </section>
+            <section className="atm-section">
+              <h3>工作中发现</h3>
+              <div className="atm-actions">
+                {query.data!.discoveredFrom ? (
+                  <span className="atm-badge primary">
+                    来源 {String(query.data!.discoveredFrom)}
+                  </span>
+                ) : null}
+                {(query.data!.discovered as string[]).map((key) => (
+                  <span className="atm-badge" key={key}>
+                    发现 {key}
+                  </span>
+                ))}
+                {!query.data!.discoveredFrom && !(query.data!.discovered as string[]).length ? (
+                  <span className="atm-row-sub">没有发现关系</span>
+                ) : null}
+              </div>
+            </section>
+            {query.data!.executionSession ? (
+              <section className="atm-section">
+                <h3>执行 Session</h3>
+                <div className="atm-row-title">
+                  {String((query.data!.executionSession as any).display_name)} ·{" "}
+                  {statusLabels[String((query.data!.executionSession as any).role)] ??
+                    String((query.data!.executionSession as any).role)}
+                </div>
+                <div className="atm-row-sub">
+                  Branch：{String((query.data!.executionSession as any).git_branch || "不可用")}
+                </div>
+                <div
+                  className="atm-row-sub"
+                  title={String((query.data!.executionSession as any).worktree_root || "")}
+                >
+                  Worktree：{compactPath((query.data!.executionSession as any).worktree_root)}
+                </div>
+                <div className="atm-row-sub">
+                  HEAD：
+                  {String((query.data!.executionSession as any).git_head || "不可用").slice(0, 10)}
+                  {Number((query.data!.executionSession as any).git_dirty) === 1
+                    ? " · dirty"
+                    : " · clean"}
+                </div>
+              </section>
+            ) : null}
             {engineering.data?.available && engineering.data.workItem?.metrics ? (
               <section className="atm-section">
                 <h3>工程变更</h3>
@@ -3199,16 +3567,10 @@ function ProjectPage({
           {rows
             .slice()
             .reverse()
-            .map((event) => (
-              <div className="atm-event" key={event.seq}>
-                <div className="atm-row-title">
-                  {event.summary || eventLabel(String(event.type))}
-                </div>
-                <div className="atm-row-sub">
-                  {eventLabel(String(event.type))} · 序列 {event.seq} · {formatTime(event.at)}
-                </div>
-              </div>
-            ))}
+            .map((event) => {
+              const item = presentTimelineEvent(event);
+              return <TimelineEventRow event={event} key={item.id} />;
+            })}
         </div>
       ) : (
         <Empty title="没有项目事件" text="任务发生变化后会显示在这里。" />
@@ -3275,6 +3637,16 @@ function ProjectPage({
                 <span className="atm-row-title" style={{ flex: 1 }}>
                   {task.title}
                 </span>
+                {task.discoveredFrom ? (
+                  <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
+                    发现于 {task.discoveredFrom}
+                  </span>
+                ) : null}
+                {task.discoveredCount ? (
+                  <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
+                    发现 {task.discoveredCount}
+                  </span>
+                ) : null}
                 <Status value={task.status} />
               </button>
               {render(task.id, depth + 1)}
@@ -3507,6 +3879,16 @@ function ProjectPage({
                 ? onlineAgents.map((agent) => agent.display_name || agent.agent_id).join("、")
                 : "尚无在线 Agent 会话"}
             </div>
+            {onlineAgents.map((agent: any) => (
+              <div
+                className="atm-row-sub"
+                key={agent.id}
+                title={agent.worktree_root || agent.cwd || ""}
+              >
+                {agent.display_name || agent.agent_id} · {agent.current_task_key || "未领取"} ·{" "}
+                {agent.git_branch || "非 Git"} · {compactPath(agent.worktree_root)}
+              </div>
+            ))}
           </div>
           <div className="atm-panel-head">
             <h2>最近项目更新</h2>

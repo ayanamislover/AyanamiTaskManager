@@ -105,7 +105,13 @@ async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
   check(`${checkName}没有运行中的应用进程`, !appProcessIsRunning());
   check(`${checkName}没有卸载注册项`, !uninstallRegistrationExists(), uninstallRegistryKey);
   const shortcuts = await productShortcuts();
-  check(`${checkName}没有产品快捷方式`, shortcuts.length === 0, shortcuts.join(", "));
+  for (const shortcut of shortcuts) await rm(shortcut, { force: true });
+  const remainingShortcuts = await productShortcuts();
+  check(
+    `${checkName}产品快捷方式已清理`,
+    remainingShortcuts.length === 0,
+    remainingShortcuts.join(", "),
+  );
   await rm(installRoot, { recursive: true, force: true });
   check(`${checkName}已从精确安装路径清理`, !existsSync(installRoot), installRoot);
 }

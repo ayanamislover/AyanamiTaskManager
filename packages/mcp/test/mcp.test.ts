@@ -53,6 +53,9 @@ describe("Ayanami MCP", () => {
     expect(listed.tools.find((tool) => tool.name === "atm_brief")?.description).toContain(
       "仅在上下文压缩、长时间离开或明确恢复 working set",
     );
+    expect(
+      JSON.stringify(listed.tools.find((tool) => tool.name === "atm_task_create")?.inputSchema),
+    ).toContain("discovered_from");
 
     const result = await client.callTool({
       name: "atm_begin",

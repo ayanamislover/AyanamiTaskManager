@@ -239,6 +239,11 @@ export class AyanamiClient {
         `/api/v1/sessions/${encodeURIComponent(session)}/force-close`,
         { project, releaseClaims },
       ),
+    refreshGitContext: (session: string, project: string) =>
+      this.request<Record<string, unknown>>(
+        "POST",
+        `/api/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(session)}/git-context/refresh`,
+      ),
   };
 
   readonly quick = {

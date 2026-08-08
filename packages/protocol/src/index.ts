@@ -203,25 +203,32 @@ export const ChecklistCreateInputSchema = z.object({
   weight: z.number().positive().max(1000).default(1),
 });
 
-export const WorkItemCreateInputSchema = z.object({
-  clientRef: NonEmptyTextSchema.max(100),
-  objectiveId: NonEmptyTextSchema,
-  milestoneId: z.string().nullable().optional(),
-  parentKey: z.string().nullable().optional(),
-  parentRef: z.string().nullable().optional(),
-  dependsOn: z.array(z.string()).max(50).default([]),
-  dependsOnRefs: z.array(z.string()).max(50).default([]),
-  title: NonEmptyTextSchema.max(400),
-  description: z.string().max(50_000).default(""),
-  type: WorkItemTypeSchema.default("TASK"),
-  priority: PrioritySchema.default("NORMAL"),
-  status: WorkItemStatusSchema.default("BACKLOG"),
-  acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).default([]),
-  checklist: z.array(ChecklistCreateInputSchema).max(100).default([]),
-  weight: z.number().positive().max(1000).default(1),
-  targetDate: NullableDateOnlySchema,
-  verificationRequired: z.boolean().default(false),
-});
+export const WorkItemCreateInputSchema = z
+  .object({
+    clientRef: NonEmptyTextSchema.max(100),
+    objectiveId: NonEmptyTextSchema,
+    milestoneId: z.string().nullable().optional(),
+    parentKey: z.string().nullable().optional(),
+    parentRef: z.string().nullable().optional(),
+    dependsOn: z.array(z.string()).max(50).default([]),
+    dependsOnRefs: z.array(z.string()).max(50).default([]),
+    discoveredFrom: NonEmptyTextSchema.max(100).optional(),
+    discoveredFromRef: NonEmptyTextSchema.max(100).optional(),
+    title: NonEmptyTextSchema.max(400),
+    description: z.string().max(50_000).default(""),
+    type: WorkItemTypeSchema.default("TASK"),
+    priority: PrioritySchema.default("NORMAL"),
+    status: WorkItemStatusSchema.default("BACKLOG"),
+    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).default([]),
+    checklist: z.array(ChecklistCreateInputSchema).max(100).default([]),
+    weight: z.number().positive().max(1000).default(1),
+    targetDate: NullableDateOnlySchema,
+    verificationRequired: z.boolean().default(false),
+  })
+  .refine((value) => !(value.discoveredFrom && value.discoveredFromRef), {
+    message: "discoveredFrom 与 discoveredFromRef 只能指定一个",
+    path: ["discoveredFromRef"],
+  });
 
 export const TaskCreateBatchInputSchema = z.object({
   project: NonEmptyTextSchema,

@@ -23,6 +23,11 @@ import {
   sqliteCapabilities,
   type ManagedDatabase,
 } from "./database.js";
+import {
+  presentEvent,
+  type EventProjectContext,
+  type PresentedEvent,
+} from "./event-presentation.js";
 import { ProjectRepository } from "./project-repository.js";
 
 export type RegisteredProject = {
@@ -277,6 +282,63 @@ export class AyanamiDatabaseManager {
       )
       .run(row.current_sequence, type, aggregateId, actor, JSON.stringify(payload), now);
     return row.current_sequence;
+  }
+
+  private projectContextForGlobalEvent(
+    payload: Record<string, unknown>,
+    aggregateId: string | null,
+  ): EventProjectContext | null {
+    const projectId =
+      typeof payload.projectId === "string"
+        ? payload.projectId
+        : typeof payload.project_id === "string"
+          ? payload.project_id
+          : null;
+    const row = this.registry.sqlite
+      .prepare(
+        `SELECT id, code, name FROM projects
+         WHERE (? IS NOT NULL AND id = ?) OR (? IS NOT NULL AND code = ?)
+            OR (? IS NOT NULL AND id = ?)
+         LIMIT 1`,
+      )
+      .get(projectId, projectId, projectId, projectId, aggregateId, aggregateId) as
+      | { id: string; code: string; name: string }
+      | undefined;
+    return row ?? null;
+  }
+
+  private presentGlobalRow(row: {
+    sequence: number;
+    type: string;
+    aggregate_id: string;
+    actor: string;
+    payload_json: string;
+    created_at: string;
+  }): PresentedEvent & {
+    seq: number;
+    sequence: number;
+    at: string;
+    payload_json: string;
+    projectCode: string | null;
+    projectName: string | null;
+  } {
+    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+    const presented = presentEvent({
+      type: row.type,
+      aggregateId: row.aggregate_id,
+      actor: row.actor,
+      payload,
+      project: this.projectContextForGlobalEvent(payload, row.aggregate_id),
+    });
+    return {
+      ...presented,
+      seq: row.sequence,
+      sequence: row.sequence,
+      at: row.created_at,
+      payload_json: row.payload_json,
+      projectCode: presented.project?.code ?? null,
+      projectName: presented.project?.name ?? null,
+    };
   }
 
   private recoverCreatingProjects(): void {
@@ -1277,9 +1339,20 @@ export class AyanamiDatabaseManager {
           document.summary,
         );
       }
-      this.appendGlobalEvent("project.summary.updated", project.id, "SYSTEM", {
-        projectSequence: projection.projectSequence,
-      });
+      for (const change of pending) {
+        if (!change.eventType) continue;
+        this.appendGlobalEvent(change.eventType, change.aggregateId || project.id, change.actor, {
+          ...change.eventPayload,
+          projectId: project.id,
+          projectCode: project.code,
+          projectName: project.name,
+          projectSequence: change.project_sequence,
+          sourceEventId: change.eventId,
+          sourceProjectSequence: change.project_sequence,
+          sourceAggregateType: change.aggregateType,
+          sourceAggregateId: change.aggregateId,
+        });
+      }
     })();
     repository.markOutboxDelivered(pending.map((item) => item.id));
     return { delivered: pending.length, sequence: projection.projectSequence };
@@ -1372,12 +1445,24 @@ export class AyanamiDatabaseManager {
     const sequence = this.registry.sqlite
       .prepare("SELECT current_sequence FROM app_meta WHERE singleton = 1")
       .get() as { current_sequence: number };
-    const recentEvents = this.registry.sqlite
+    const recentEventRows = this.registry.sqlite
       .prepare(
         `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events ORDER BY sequence DESC LIMIT 40`,
+         FROM global_events
+         WHERE type <> 'project.summary.updated'
+         ORDER BY sequence DESC LIMIT 40`,
       )
       .all() as Array<Record<string, unknown>>;
+    const recentEvents = recentEventRows.map((row) =>
+      this.presentGlobalRow({
+        sequence: Number(row.sequence),
+        type: String(row.type),
+        aggregate_id: String(row.aggregate_id ?? ""),
+        actor: String(row.actor ?? "SYSTEM"),
+        payload_json: String(row.payload_json ?? "{}"),
+        created_at: String(row.created_at),
+      }),
+    );
     return { sequence: sequence.current_sequence, projects, quick: totals, recentEvents };
   }
 
@@ -1388,9 +1473,12 @@ export class AyanamiDatabaseManager {
     events: Array<{
       seq: number;
       type: string;
-      key: string;
+      key: string | null;
       summary: string;
       actor: string;
+      title: string;
+      detail: string;
+      project: EventProjectContext | null;
       at: string;
     }>;
     nextSequence: number;
@@ -1400,20 +1488,12 @@ export class AyanamiDatabaseManager {
     const rows = this.registry.sqlite
       .prepare(
         `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events WHERE sequence > ? ORDER BY sequence LIMIT ?`,
+         FROM global_events
+         WHERE sequence > ? AND type <> 'project.summary.updated'
+         ORDER BY sequence LIMIT ?`,
       )
       .all(Math.max(0, sinceSequence), bounded + 1) as any[];
-    const page = rows.slice(0, bounded).map((row) => {
-      const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-      return {
-        seq: row.sequence,
-        type: row.type,
-        key: row.aggregate_id,
-        summary: String(payload.summary ?? payload.title ?? row.type),
-        actor: row.actor,
-        at: row.created_at,
-      };
-    });
+    const page = rows.slice(0, bounded).map((row) => this.presentGlobalRow(row));
     return {
       events: page,
       nextSequence: page.at(-1)?.seq ?? Math.max(0, sinceSequence),

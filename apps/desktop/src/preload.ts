@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   showItemInFolder: (path: string) => ipcRenderer.invoke("atm:show-item", path),
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
   installMcp: (client: "CODEX" | "CLAUDE") => ipcRenderer.invoke("atm:install-mcp", client),
+  getAgentIntegrations: () => ipcRenderer.invoke("atm:get-agent-integrations"),
+  manageAgentIntegration: (
+    client: "CODEX" | "CLAUDE",
+    action: "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL",
+  ) => ipcRenderer.invoke("atm:manage-agent-integration", client, action),
   copyText: (text: string) => ipcRenderer.invoke("atm:copy-text", text),
   minimizeWindow: () => ipcRenderer.invoke("atm:window-minimize"),
   toggleMaximizeWindow: () => ipcRenderer.invoke("atm:window-toggle-maximize"),
