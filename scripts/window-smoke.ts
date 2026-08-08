@@ -205,30 +205,23 @@ try {
       }),
     )
     .toBe(true);
-  const chromeBox = await page.getByRole("toolbar", { name: "窗口控制" }).boundingBox();
-  const drawerCloseBox = await drawer.getByRole("button", { name: "关闭" }).boundingBox();
-  if (!chromeBox || !drawerCloseBox) throw new Error("窗口控制或抽屉关闭按钮不可见");
+  const drawerBox = await drawer.boundingBox();
+  const drawerCollapseBox = await drawer
+    .getByRole("button", { name: "收起任务详情" })
+    .boundingBox();
+  if (!drawerBox || !drawerCollapseBox) throw new Error("任务抽屉或左侧收起按钮不可见");
+  await expect(drawer.getByRole("button", { name: "关闭", exact: true })).toHaveCount(0);
   const drawerLayout = await drawer.locator(".atm-drawer-head").evaluate((element) => ({
     desktop: document.documentElement.dataset.atmDesktop,
     paddingRight: getComputedStyle(element).paddingRight,
+    paddingLeft: getComputedStyle(element).paddingLeft,
     box: element.getBoundingClientRect().toJSON(),
   }));
-  const overlaps = !(
-    drawerCloseBox.x + drawerCloseBox.width <= chromeBox.x ||
-    drawerCloseBox.x >= chromeBox.x + chromeBox.width ||
-    drawerCloseBox.y + drawerCloseBox.height <= chromeBox.y ||
-    drawerCloseBox.y >= chromeBox.y + chromeBox.height
-  );
   await page.screenshot({ path: drawerScreenshot });
-  const separation = Math.max(
-    chromeBox.x - (drawerCloseBox.x + drawerCloseBox.width),
-    drawerCloseBox.x - (chromeBox.x + chromeBox.width),
-    chromeBox.y - (drawerCloseBox.y + drawerCloseBox.height),
-    drawerCloseBox.y - (chromeBox.y + chromeBox.height),
-  );
-  if (overlaps || separation < 12) {
+  const leftOffset = drawerCollapseBox.x - drawerBox.x;
+  if (Math.abs(leftOffset) > 1 || drawerCollapseBox.width < 44 || drawerCollapseBox.height < 44) {
     throw new Error(
-      `窗口控制与抽屉关闭按钮安全区不足：${JSON.stringify({ chromeBox, drawerCloseBox, drawerLayout, overlaps, separation })}`,
+      `抽屉收起按钮未贴合左边缘或命中区不足：${JSON.stringify({ drawerBox, drawerCollapseBox, drawerLayout, leftOffset })}`,
     );
   }
   await page.keyboard.press("Escape");
@@ -294,7 +287,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerSafeArea: { chromeBox, drawerCloseBox, drawerLayout, separation }, notificationMode: storedNotificationMode, scrollbar: metrics, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: metrics, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();

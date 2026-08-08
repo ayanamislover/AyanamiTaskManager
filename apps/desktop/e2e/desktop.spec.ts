@@ -4,6 +4,8 @@ import { expect, request as createRequest, test } from "@playwright/test";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 const headers = { authorization: "Bearer e2e-test-token" };
+const longSidebarProjectName =
+  "Codex Agent Permission Preflight And Deployment Readiness Verification";
 
 test.beforeAll(async () => {
   mkdirSync(resolve("output", "playwright"), { recursive: true });
@@ -22,6 +24,17 @@ test.beforeAll(async () => {
       },
     });
     expect(longProject.ok()).toBeTruthy();
+  }
+  if (!projects.some((project) => project.code === "SIDEBARLONG")) {
+    const veryLongProject = await api.post(`${apiUrl}/projects`, {
+      data: {
+        name: longSidebarProjectName,
+        sourcePath: null,
+        code: "SIDEBARLONG",
+        description: "侧栏两行项目名称截断回归",
+      },
+    });
+    expect(veryLongProject.ok()).toBeTruthy();
   }
   if (projects.some((project) => project.code === "E2E")) {
     await api.dispose();
@@ -79,20 +92,25 @@ test("长项目名称保持在侧栏项目按钮内", async ({ page }) => {
 
   const project = page
     .locator(".atm-sidebar")
-    .getByRole("button", { name: /Codex Agent Permission Preflight/u });
-  await expect(project).toHaveAttribute("title", "AGENTPERM · Codex Agent Permission Preflight");
+    .getByRole("button", { name: longSidebarProjectName });
+  await expect(project).toHaveAttribute(
+    "title",
+    `${longSidebarProjectName}\n名称较长，建议改用简洁中文名称。`,
+  );
+  await expect(project.locator(".atm-nav-project-code")).toHaveCount(0);
 
   const layout = await project.evaluate((button) => {
-    const code = button.querySelector<HTMLElement>(".atm-nav-project-code");
     const name = button.querySelector<HTMLElement>(".atm-nav-project-name");
-    if (!code || !name) throw new Error("项目导航文本缺失");
+    if (!name) throw new Error("项目导航文本缺失");
     const buttonRect = button.getBoundingClientRect();
     const nameRect = name.getBoundingClientRect();
     const nameStyle = getComputedStyle(name);
     return {
       buttonFits: button.scrollWidth <= button.clientWidth,
       nameFits: nameRect.right <= buttonRect.right,
-      nameIsTruncated: name.scrollWidth > name.clientWidth,
+      nameIsTruncated: name.scrollHeight > name.clientHeight,
+      lineClamp: nameStyle.webkitLineClamp,
+      lineCount: Math.round(name.clientHeight / Number.parseFloat(nameStyle.lineHeight)),
       overflow: nameStyle.overflow,
       textOverflow: nameStyle.textOverflow,
       whiteSpace: nameStyle.whiteSpace,
@@ -103,9 +121,11 @@ test("长项目名称保持在侧栏项目按钮内", async ({ page }) => {
     buttonFits: true,
     nameFits: true,
     nameIsTruncated: true,
+    lineClamp: "2",
+    lineCount: 2,
     overflow: "hidden",
     textOverflow: "ellipsis",
-    whiteSpace: "nowrap",
+    whiteSpace: "normal",
   });
   await page.screenshot({
     path: resolve("output", "playwright", "e2e-sidebar-project-ellipsis.png"),
@@ -145,16 +165,17 @@ test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ p
 });
 
 test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
+  let engineeringRequests = 0;
+  page.on("request", (request) => {
+    if (request.url().includes("/engineering-metrics")) engineeringRequests += 1;
+  });
   await page.goto("/#project:E2E");
   const region = page.getByRole("region", { name: "工程统计" });
-  const collapse = region.getByRole("button", { name: "折叠工程统计" });
-  await expect(collapse).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator("#engineering-metrics-content")).toBeVisible();
-
-  await collapse.click();
   const expand = region.getByRole("button", { name: "展开工程统计" });
   await expect(expand).toHaveAttribute("aria-expanded", "false");
   await expect(page.locator("#engineering-metrics-content")).toBeHidden();
+  await page.waitForTimeout(250);
+  expect(engineeringRequests).toBe(0);
   await page.screenshot({
     path: resolve("output", "playwright", "e2e-engineering-collapsed.png"),
     fullPage: true,
@@ -162,11 +183,17 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
 
   await expand.focus();
   await page.keyboard.press("Enter");
-  await expect(region.getByRole("button", { name: "折叠工程统计" })).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
+  const collapse = region.getByRole("button", { name: "折叠工程统计" });
+  await expect(collapse).toHaveAttribute("aria-expanded", "true");
+  await expect.poll(() => engineeringRequests).toBe(1);
   await expect(page.locator("#engineering-metrics-content")).toBeVisible();
+
+  await collapse.click();
+  await expect(region.getByRole("button", { name: "展开工程统计" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  expect(engineeringRequests).toBe(1);
 });
 
 test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢复", async ({ page }) => {
@@ -179,8 +206,29 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
   await task.click();
   const drawer = page.getByRole("dialog", { name: "任务详情" });
   await expect(drawer).toBeVisible();
-  const drawerClose = drawer.getByRole("button", { name: "关闭" });
-  await expect(drawerClose).toBeFocused();
+  await expect(drawer.getByRole("button", { name: "关闭", exact: true })).toHaveCount(0);
+  const drawerCollapse = drawer.getByRole("button", { name: "收起任务详情" });
+  await expect(drawerCollapse).toBeFocused();
+  const collapseLayout = await drawerCollapse.evaluate((button) => {
+    const drawer = button.closest<HTMLElement>(".atm-drawer");
+    if (!drawer) throw new Error("任务抽屉缺失");
+    const buttonBox = button.getBoundingClientRect();
+    const drawerBox = drawer.getBoundingClientRect();
+    return {
+      atLeftEdge: buttonBox.left <= drawerBox.left + 1,
+      insideDrawer: buttonBox.right <= drawerBox.right,
+      width: buttonBox.width,
+      height: buttonBox.height,
+    };
+  });
+  expect(collapseLayout.atLeftEdge).toBe(true);
+  expect(collapseLayout.insideDrawer).toBe(true);
+  expect(collapseLayout.width).toBeGreaterThanOrEqual(44);
+  expect(collapseLayout.height).toBeGreaterThanOrEqual(44);
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-drawer-left-collapse.png"),
+    fullPage: true,
+  });
   const reservedWindowControlsWidth = await drawer
     .locator(".atm-drawer-head")
     .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingRight));
@@ -208,6 +256,60 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
   await expect(page.locator("#task-title")).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(createDialog).toBeHidden();
+});
+
+test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const agentId = `e2e-dedupe-${suffix}`;
+  const displayName = `E2E Duplicate Agent ${suffix}`;
+  const begin = async () => {
+    const response = await api.post(`${apiUrl}/sessions`, {
+      data: {
+        cwd: process.cwd(),
+        projectCode: "E2E",
+        mode: "project",
+        agentId,
+        displayName,
+        clientKind: "playwright",
+        role: "PRIMARY",
+        resume: false,
+        allowProjectCreate: false,
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+    return String((await response.json()).session);
+  };
+  const close = async (sessionId: string) => {
+    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      data: {
+        project: "E2E",
+        opId: `e2e-close-${crypto.randomUUID()}`,
+        outcome: "completed",
+        summary: "Agent 聚合 E2E 清理",
+        next: [],
+        releaseClaims: true,
+      },
+    });
+    expect(response.ok()).toBeTruthy();
+  };
+
+  const closedSession = await begin();
+  await close(closedSession);
+  const onlineSession = await begin();
+  try {
+    await page.goto("/#agents");
+    const row = page.getByRole("row").filter({ hasText: displayName });
+    await expect(row).toHaveCount(1);
+    await expect(row).toContainText("2 个 Session");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-agent-deduplicated.png"),
+      fullPage: true,
+    });
+  } finally {
+    await close(onlineSession);
+    await api.dispose();
+  }
 });
 
 test("项目视图、全局搜索和保存视图走真实 API", async ({ page }) => {
