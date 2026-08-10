@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+
 const runtime = ipcRenderer.sendSync("atm:get-runtime") as { endpoint: string; token: string };
 contextBridge.exposeInMainWorld("ayanamiDesktop", {
   runtime,
@@ -7,10 +9,10 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   getAutoLaunch: () => ipcRenderer.invoke("atm:get-auto-launch"),
   showItemInFolder: (path: string) => ipcRenderer.invoke("atm:show-item", path),
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
-  installMcp: (client: "CODEX" | "CLAUDE") => ipcRenderer.invoke("atm:install-mcp", client),
+  installMcp: (client: McpClient) => ipcRenderer.invoke("atm:install-mcp", client),
   getAgentIntegrations: () => ipcRenderer.invoke("atm:get-agent-integrations"),
   manageAgentIntegration: (
-    client: "CODEX" | "CLAUDE",
+    client: McpClient,
     action: "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL",
   ) => ipcRenderer.invoke("atm:manage-agent-integration", client, action),
   copyText: (text: string) => ipcRenderer.invoke("atm:copy-text", text),

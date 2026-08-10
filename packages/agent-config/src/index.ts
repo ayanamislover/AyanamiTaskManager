@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   cpSync,
@@ -23,7 +24,8 @@ export type McpRuntime = {
   args?: string[];
   env?: Record<string, string>;
 };
-export type InstallResult = { client: "CODEX" | "CLAUDE"; path: string; backupPath: string | null };
+export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+export type InstallResult = { client: McpClient; path: string; backupPath: string | null };
 export const ATM_SKILL_NAMES = ["atm-plan", "atm-task"] as const;
 const ATM_SKILL_RESOURCE_DIRECTORIES = ["_shared"] as const;
 export const ATM_INTEGRATION_VERSION = 1;
@@ -198,6 +200,37 @@ export function defaultClaudeConfigPath(): string {
     "Claude",
     "claude_desktop_config.json",
   );
+}
+
+// Claude Code 不读 claude_desktop_config.json；它的 MCP 注册在 ~/.claude.json。
+// 该文件由 Claude Code 自己持有并高频整体重写（含各项目会话状态），ATM 读-改-写
+// 会吞掉对方的更新，所以这里只记录路径用于探测，写入一律交给 claude CLI。
+export function defaultClaudeCodeConfigPath(): string {
+  return join(homedir(), ".claude.json");
+}
+
+const claudeCodeCliCandidates = [
+  join(homedir(), ".local", "bin", "claude.exe"),
+  join(homedir(), ".local", "bin", "claude"),
+  join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "claude.cmd"),
+  join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "npm", "claude"),
+];
+
+// 依次查已知安装位置和 PATH。找不到就返回 null，由调用方明确报错——
+// 绝不退化成直接改写 ~/.claude.json。
+export function findClaudeCodeCli(): string | null {
+  for (const candidate of claudeCodeCliCandidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  const separator = process.platform === "win32" ? ";" : ":";
+  const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+  for (const directory of (process.env.PATH ?? "").split(separator).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = join(directory, `claude${extension}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
 }
 
 export function defaultCodexSkillsPath(): string {
@@ -376,6 +409,124 @@ export function uninstallClaudeConfig(path = defaultClaudeConfigPath()): Install
   const content = `${JSON.stringify({ ...existing, mcpServers: servers }, null, 2)}\n`;
   const backupPath = replaceFileWithBackup(path, content);
   return { client: "CLAUDE", path, backupPath };
+}
+
+export function isClaudeCodeConfigInstalled(path = defaultClaudeCodeConfigPath()): boolean {
+  return readClaudeCodeServerConfig(path) !== null;
+}
+
+function readClaudeCodeServerConfig(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+    const server = content.mcpServers?.["ayanami-task-manager"];
+    return server && typeof server === "object" ? (server as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+export type ClaudeCodeCliRunner = (cli: string, args: string[]) => void;
+
+const runClaudeCodeCli: ClaudeCodeCliRunner = (cli, args) => {
+  try {
+    const isWindowsCommandShim =
+      process.platform === "win32" && /\.(?:cmd|bat)$/iu.test(cli.toLowerCase());
+    execFileSync(cli, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      shell: isWindowsCommandShim,
+    });
+  } catch (error) {
+    const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
+    throw new Error(`CLAUDE_CODE_CLI_FAILED: ${stderr || (error as Error).message}`);
+  }
+};
+
+function claudeCodeCli(input: { cliPath?: string; findCli?: () => string | null }): string {
+  const cli = input.cliPath ?? (input.findCli ?? findClaudeCodeCli)();
+  if (!cli) throw new Error("CLAUDE_CODE_CLI_NOT_FOUND");
+  return cli;
+}
+
+export function installClaudeCodeConfig(input: {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cliPath?: string;
+  findCli?: () => string | null;
+  configPath?: string;
+  runCli?: ClaudeCodeCliRunner;
+}): InstallResult {
+  const cli = claudeCodeCli(input);
+  const run = input.runCli ?? runClaudeCodeCli;
+  const path = input.configPath ?? defaultClaudeCodeConfigPath();
+  const previous = readClaudeCodeServerConfig(path);
+  let removed = false;
+  // add-json 遇到同名 server 会失败，先移除保证可重复安装；未安装时的移除失败要忽略。
+  if (previous) {
+    try {
+      run(cli, ["mcp", "remove", "ayanami-task-manager", "--scope", "user"]);
+      removed = true;
+    } catch {
+      /* 已不存在或 CLI 拒绝移除时继续尝试安装，由 add 的失败来报错 */
+    }
+  }
+  try {
+    run(cli, [
+      "mcp",
+      "add-json",
+      "ayanami-task-manager",
+      JSON.stringify({
+        command: input.command,
+        args: input.args ?? ["--mcp-stdio"],
+        ...(input.env ? { env: input.env } : {}),
+      }),
+      "--scope",
+      "user",
+    ]);
+  } catch (error) {
+    if (removed && previous) {
+      try {
+        run(cli, [
+          "mcp",
+          "add-json",
+          "ayanami-task-manager",
+          JSON.stringify(previous),
+          "--scope",
+          "user",
+        ]);
+      } catch (rollbackError) {
+        throw new Error(
+          `CLAUDE_CODE_INSTALL_AND_ROLLBACK_FAILED: ${error instanceof Error ? error.message : String(error)}; rollback: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          { cause: error },
+        );
+      }
+    }
+    throw error;
+  }
+  return { client: "CLAUDE_CODE", path, backupPath: null };
+}
+
+export function uninstallClaudeCodeConfig(
+  input: {
+    cliPath?: string;
+    findCli?: () => string | null;
+    configPath?: string;
+    runCli?: ClaudeCodeCliRunner;
+  } = {},
+): InstallResult {
+  const path = input.configPath ?? defaultClaudeCodeConfigPath();
+  if (!isClaudeCodeConfigInstalled(path)) return { client: "CLAUDE_CODE", path, backupPath: null };
+  const cli = claudeCodeCli(input);
+  (input.runCli ?? runClaudeCodeCli)(cli, [
+    "mcp",
+    "remove",
+    "ayanami-task-manager",
+    "--scope",
+    "user",
+  ]);
+  return { client: "CLAUDE_CODE", path, backupPath: null };
 }
 
 export function installCodexConfig(input: {

@@ -2,6 +2,10 @@ import type { ForgeConfig } from "@electron-forge/shared-types";
 import { MakerSquirrel } from "@electron-forge/maker-squirrel";
 import { MakerZIP } from "@electron-forge/maker-zip";
 import { AutoUnpackNativesPlugin } from "@electron-forge/plugin-auto-unpack-natives";
+import { readFileSync } from "node:fs";
+
+const packageVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"))
+  .version as string;
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -39,7 +43,7 @@ const config: ForgeConfig = {
   makers: [
     new MakerSquirrel({
       name: "AyanamiTaskManagerDesktop",
-      setupExe: "AyanamiTaskManager-Setup-1.0.0-win-x64.exe",
+      setupExe: `AyanamiTaskManager-Setup-${packageVersion}-win-x64.exe`,
       setupIcon: "logo.ico",
       iconUrl:
         "https://raw.githubusercontent.com/ayanamislover/AyanamiTaskManager/refs/heads/ayanamislover/complete-implementation/logo.ico",

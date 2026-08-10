@@ -9,6 +9,8 @@ import { AyanamiTaskManager } from "@ayanami-task/ui";
 import brandLogoUrl from "../../../logo.png?url";
 import "./window-chrome.css";
 
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+
 type DesktopBridge = {
   runtime: { endpoint: string; token: string };
   setAutoLaunch(enabled: boolean): Promise<boolean>;
@@ -20,10 +22,10 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
-  installMcp(client: "CODEX" | "CLAUDE"): Promise<{ path: string; backupPath: string | null }>;
+  installMcp(client: McpClient): Promise<{ path: string; backupPath: string | null }>;
   getAgentIntegrations(): Promise<AgentIntegrationReport[]>;
   manageAgentIntegration(
-    client: "CODEX" | "CLAUDE",
+    client: McpClient,
     action: AgentIntegrationAction,
   ): Promise<{ report: AgentIntegrationReport; preview: AgentRulePreview | null }>;
   copyText(text: string): Promise<boolean>;
@@ -39,8 +41,10 @@ type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "M
 type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
 type AgentRulePreview = { current: string; proposed: string };
 type AgentIntegrationReport = {
-  client: "CODEX" | "CLAUDE";
+  client: McpClient;
   mcpInstalled: boolean;
+  sharesRuleAndSkillsWith: "CLAUDE" | null;
+  cliAvailable: boolean;
   rule: { state: AgentIntegrationState; path: string; version: number | null };
   skills: {
     state: AgentIntegrationState;

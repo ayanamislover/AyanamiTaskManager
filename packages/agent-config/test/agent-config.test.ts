@@ -6,11 +6,13 @@ import {
   inspectManagedAgentRule,
   inspectAgentSkills,
   installAgentSkills,
+  installClaudeCodeConfig,
   installClaudeConfig,
   installCodexConfig,
   manageAgentRule,
   renderMcpConfigs,
   uninstallAgentSkills,
+  uninstallClaudeCodeConfig,
   uninstallClaudeConfig,
   uninstallCodexConfig,
 } from "../src/index.js";
@@ -67,6 +69,109 @@ describe("Agent MCP 配置适配", () => {
     expect(removed.theme).toBe("dark");
     expect(removed.mcpServers.other).toEqual({ command: "other" });
     expect(removed.mcpServers["ayanami-task-manager"]).toBeUndefined();
+  });
+
+  it("Claude Code 经 CLI 写 user scope，绝不自行改写 ~/.claude.json", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-claude-code-config-"));
+    temporary.push(root);
+    const path = join(root, ".claude.json");
+    // 这个文件平时由 Claude Code 持有，含大量会话状态；安装过程一个字节都不该动它。
+    const original = JSON.stringify({
+      projects: { "R:\\demo": { history: ["x"] } },
+      mcpServers: { other: { command: "other" } },
+    });
+    writeFileSync(path, original, "utf8");
+
+    const calls: Array<{ cli: string; args: string[] }> = [];
+    const result = installClaudeCodeConfig({
+      command: "C:\\ATM\\AyanamiTaskManager.exe",
+      args: ["C:\\ATM\\resources\\mcp-stdio.cjs"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      cliPath: "C:\\fake\\claude.exe",
+      configPath: path,
+      runCli: (cli, args) => calls.push({ cli, args }),
+    });
+
+    expect(result.client).toBe("CLAUDE_CODE");
+    expect(readFileSync(path, "utf8")).toBe(original);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.cli).toBe("C:\\fake\\claude.exe");
+    expect(calls[0]!.args.slice(0, 3)).toEqual(["mcp", "add-json", "ayanami-task-manager"]);
+    expect(calls[0]!.args.slice(-2)).toEqual(["--scope", "user"]);
+    const payload = JSON.parse(calls[0]!.args[3]!);
+    // stdio 传输：不能把每次重启都会变的 endpoint / token 写死进配置。
+    expect(payload).toEqual({
+      command: "C:\\ATM\\AyanamiTaskManager.exe",
+      args: ["C:\\ATM\\resources\\mcp-stdio.cjs"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+    expect(JSON.stringify(payload)).not.toContain("Bearer");
+    expect(JSON.stringify(payload)).not.toContain("127.0.0.1");
+
+    // 已安装时重复安装先移除再新增，保证幂等。
+    writeFileSync(
+      path,
+      JSON.stringify({ mcpServers: { "ayanami-task-manager": { command: "old" } } }),
+      "utf8",
+    );
+    calls.length = 0;
+    installClaudeCodeConfig({
+      command: "C:\\ATM\\new.exe",
+      cliPath: "C:\\fake\\claude.exe",
+      configPath: path,
+      runCli: (cli, args) => calls.push({ cli, args }),
+    });
+    expect(calls.map((call) => call.args[1])).toEqual(["remove", "add-json"]);
+
+    // 新配置注册失败时，必须仍通过 CLI 恢复旧 server，不能把现有接入删掉。
+    calls.length = 0;
+    expect(() =>
+      installClaudeCodeConfig({
+        command: "C:\\ATM\\broken.exe",
+        cliPath: "C:\\fake\\claude.exe",
+        configPath: path,
+        runCli: (cli, args) => {
+          calls.push({ cli, args });
+          if (args[1] === "add-json" && JSON.parse(args[3]!).command === "C:\\ATM\\broken.exe") {
+            throw new Error("new registration failed");
+          }
+        },
+      }),
+    ).toThrow("new registration failed");
+    expect(calls.map((call) => call.args[1])).toEqual(["remove", "add-json", "add-json"]);
+    expect(JSON.parse(calls[2]!.args[3]!)).toEqual({ command: "old" });
+
+    // 未安装时卸载是空操作，不该白白调用 CLI。
+    writeFileSync(path, JSON.stringify({ mcpServers: {} }), "utf8");
+    calls.length = 0;
+    uninstallClaudeCodeConfig({
+      cliPath: "C:\\fake\\claude.exe",
+      configPath: path,
+      runCli: (cli, args) => calls.push({ cli, args }),
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("找不到 claude CLI 时报错，不退化成直接改写配置", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-claude-code-nocli-"));
+    temporary.push(root);
+    const path = join(root, ".claude.json");
+    const original = JSON.stringify({ mcpServers: { other: { command: "other" } } });
+    writeFileSync(path, original, "utf8");
+    let ran = false;
+    expect(() =>
+      installClaudeCodeConfig({
+        command: "C:\\ATM\\AyanamiTaskManager.exe",
+        configPath: path,
+        // 模拟未安装 Claude Code 的机器；不能依赖真实探测，本机就装着 claude。
+        findCli: () => null,
+        runCli: () => {
+          ran = true;
+        },
+      }),
+    ).toThrow("CLAUDE_CODE_CLI_NOT_FOUND");
+    expect(ran).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(original);
   });
 
   it("生成 Streamable HTTP、stdio 和通用 JSON 配置", () => {

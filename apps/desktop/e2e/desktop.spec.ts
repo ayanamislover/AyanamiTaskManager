@@ -678,6 +678,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
 });
 
 test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.addInitScript(
     ({ endpoint, token }) => {
       const installed = { state: "INSTALLED", version: 1 };
@@ -687,6 +688,8 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
           {
             client: "CODEX",
             mcpInstalled: true,
+            sharesRuleAndSkillsWith: null,
+            cliAvailable: true,
             rule: { ...installed, path: "C:\\Users\\tester\\.codex\\AGENTS.md" },
             skills: {
               state: "INSTALLED",
@@ -699,6 +702,22 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
           {
             client: "CLAUDE",
             mcpInstalled: true,
+            sharesRuleAndSkillsWith: null,
+            cliAvailable: true,
+            rule: { ...installed, path: "C:\\Users\\tester\\.claude\\CLAUDE.md" },
+            skills: {
+              state: "INSTALLED",
+              skills: [
+                { name: "atm-plan", ...installed },
+                { name: "atm-task", ...installed },
+              ],
+            },
+          },
+          {
+            client: "CLAUDE_CODE",
+            mcpInstalled: false,
+            sharesRuleAndSkillsWith: "CLAUDE",
+            cliAvailable: false,
             rule: { ...installed, path: "C:\\Users\\tester\\.claude\\CLAUDE.md" },
             skills: {
               state: "INSTALLED",
@@ -748,6 +767,14 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await expect(page.locator(".atm-integration-preview pre")).toContainText(
     "AYANAMI_TASK_MANAGER:BEGIN",
   );
+  const claudeCode = page.locator(".atm-integration-card").filter({ hasText: "Claude Code" });
+  await expect(claudeCode).toContainText("与 Claude Desktop 共用");
+  await expect(claudeCode).toContainText("未检测到");
+  await expect(claudeCode.getByRole("button", { name: "安装" })).toBeDisabled();
+  await claudeCode.scrollIntoViewIfNeeded();
+  await claudeCode.screenshot({
+    path: resolve("output", "playwright", "e2e-claude-code-integration-dark.png"),
+  });
 });
 
 test("项目视图、全局搜索和保存视图走真实 API", async ({ page }) => {
