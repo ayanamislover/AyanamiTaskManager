@@ -25,19 +25,24 @@ import {
   defaultClaudeSkillsPath,
   defaultCodexRulePath,
   defaultCodexSkillsPath,
+  findClaudeCodeCli,
   inspectAgentSkills,
   inspectManagedAgentRule,
+  installClaudeCodeConfig,
   installClaudeConfig,
   installCodexConfig,
   installAgentSkills,
+  isClaudeCodeConfigInstalled,
   isClaudeConfigInstalled,
   isCodexConfigInstalled,
   manageAgentRule,
   renderMcpConfigs,
   uninstallAgentSkills,
+  uninstallClaudeCodeConfig,
   uninstallClaudeConfig,
   uninstallCodexConfig,
   type AgentRuleAction,
+  type McpClient,
 } from "@ayanami-task/agent-config";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { AyanamiClient } from "@ayanami-task/client";
@@ -125,17 +130,29 @@ function bundledDocumentationRoot(): string {
   return app.isPackaged ? process.resourcesPath : app.getAppPath();
 }
 
-function agentIntegrationPaths(client: "CODEX" | "CLAUDE") {
+// Claude Code 与 Claude Desktop 共用 ~/.claude/CLAUDE.md 与 ~/.claude/skills，
+// 只有 MCP 注册位置不同：Desktop 读 claude_desktop_config.json，Claude Code 读 ~/.claude.json。
+function agentIntegrationPaths(client: McpClient) {
   return client === "CODEX"
     ? { rulePath: defaultCodexRulePath(), skillsPath: defaultCodexSkillsPath() }
     : { rulePath: defaultClaudeRulePath(), skillsPath: defaultClaudeSkillsPath() };
 }
 
-function agentIntegrationReport(client: "CODEX" | "CLAUDE") {
+function mcpInstalledFor(client: McpClient): boolean {
+  if (client === "CODEX") return isCodexConfigInstalled();
+  if (client === "CLAUDE") return isClaudeConfigInstalled();
+  return isClaudeCodeConfigInstalled();
+}
+
+function agentIntegrationReport(client: McpClient) {
   const paths = agentIntegrationPaths(client);
   return {
     client,
-    mcpInstalled: client === "CODEX" ? isCodexConfigInstalled() : isClaudeConfigInstalled(),
+    mcpInstalled: mcpInstalledFor(client),
+    // 规则与技能和哪个客户端同源；UI 合并显示时据此避免重复计数。
+    sharesRuleAndSkillsWith: client === "CLAUDE_CODE" ? ("CLAUDE" as const) : null,
+    // Claude Code 的 user scope 必须由 claude CLI 代写，找不到时安装按钮应不可用。
+    cliAvailable: client === "CLAUDE_CODE" ? findClaudeCodeCli() !== null : true,
     rule: inspectManagedAgentRule(paths.rulePath),
     skills: inspectAgentSkills({
       sourceRoot: join(dataDirBeforeReady(), "skills"),
@@ -438,21 +455,25 @@ async function startApplication(background: boolean): Promise<void> {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
     return renderMcpConfigs({ ...runtime, command: stdioCommand, args: stdioArgs, env: stdioEnv });
   });
-  ipcMain.handle("atm:install-mcp", (_event, client: "CODEX" | "CLAUDE") => {
+  ipcMain.handle("atm:install-mcp", (_event, client: McpClient) => {
     if (client === "CODEX")
       return installCodexConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
     if (client === "CLAUDE")
       return installClaudeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+    if (client === "CLAUDE_CODE")
+      return installClaudeCodeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
     throw new Error("MCP_CLIENT_UNSUPPORTED");
   });
   ipcMain.handle("atm:get-agent-integrations", () => [
     agentIntegrationReport("CODEX"),
     agentIntegrationReport("CLAUDE"),
+    agentIntegrationReport("CLAUDE_CODE"),
   ]);
   ipcMain.handle(
     "atm:manage-agent-integration",
-    (_event, client: "CODEX" | "CLAUDE", action: AgentRuleAction) => {
-      if (!(client === "CODEX" || client === "CLAUDE")) throw new Error("MCP_CLIENT_UNSUPPORTED");
+    (_event, client: McpClient, action: AgentRuleAction) => {
+      if (!(client === "CODEX" || client === "CLAUDE" || client === "CLAUDE_CODE"))
+        throw new Error("MCP_CLIENT_UNSUPPORTED");
       const paths = agentIntegrationPaths(client);
       const skillState = inspectAgentSkills({
         sourceRoot: join(dataDirBeforeReady(), "skills"),
@@ -466,17 +487,29 @@ async function startApplication(background: boolean): Promise<void> {
       ) {
         throw new Error("AGENT_SKILL_MODIFIED_REQUIRES_REPAIR");
       }
-      const rule = manageAgentRule({ path: paths.rulePath, action });
+      // CLAUDE 与 CLAUDE_CODE 共用规则与技能路径。卸载其中一个时，只要另一个还装着
+      // MCP，就必须保留共用的规则和技能，否则会连带废掉仍在使用的那一个。
+      const sibling: McpClient | null =
+        client === "CLAUDE" ? "CLAUDE_CODE" : client === "CLAUDE_CODE" ? "CLAUDE" : null;
+      const siblingStillInstalled = sibling !== null && mcpInstalledFor(sibling);
+      const removeSharedAssets = action === "UNINSTALL" && !siblingStillInstalled;
+      const rule = manageAgentRule({
+        path: paths.rulePath,
+        action: action === "UNINSTALL" && !removeSharedAssets ? "PREVIEW" : action,
+      });
       if (action === "PREVIEW") return { report: agentIntegrationReport(client), preview: rule };
       if (action === "UNINSTALL") {
         if (client === "CODEX") uninstallCodexConfig();
-        else uninstallClaudeConfig();
-        uninstallAgentSkills(paths.skillsPath);
+        else if (client === "CLAUDE") uninstallClaudeConfig();
+        else uninstallClaudeCodeConfig();
+        if (removeSharedAssets) uninstallAgentSkills(paths.skillsPath);
       } else {
         if (client === "CODEX" && !isCodexConfigInstalled())
           installCodexConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
         if (client === "CLAUDE" && !isClaudeConfigInstalled())
           installClaudeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
+        if (client === "CLAUDE_CODE" && !isClaudeCodeConfigInstalled())
+          installClaudeCodeConfig({ command: stdioCommand, args: stdioArgs, env: stdioEnv });
         if (skillState !== "INSTALLED")
           installAgentSkills({
             sourceRoot: join(dataDirBeforeReady(), "skills"),

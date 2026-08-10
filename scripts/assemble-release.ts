@@ -112,10 +112,11 @@ if (
 }
 
 const makeFiles = await filesBelow(join(root, "out", "make"));
-const setupSource = makeFiles.find(
-  (path) => path.toLowerCase().endsWith(".exe") && basename(path).toLowerCase().includes("setup"),
-);
-const zipSource = makeFiles.find((path) => path.toLowerCase().endsWith(".zip"));
+const expectedSetupName =
+  `AyanamiTaskManager-Setup-${packageJson.version}-win-x64.exe`.toLowerCase();
+const expectedZipName = `AyanamiTaskManager-win32-x64-${packageJson.version}.zip`.toLowerCase();
+const setupSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedSetupName);
+const zipSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedZipName);
 if (!setupSource || !zipSource) throw new Error("Forge make 产物不完整：缺少安装包或 zip");
 
 await rm(releaseDir, { recursive: true, force: true });

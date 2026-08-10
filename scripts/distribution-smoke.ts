@@ -8,6 +8,9 @@ type Check = { name: string; passed: boolean; detail?: string };
 const root = process.cwd();
 const outputRoot = join(root, "output", "distribution-smoke");
 const reportPath = join(root, "output", "distribution-smoke-report.json");
+const packageVersion = (
+  JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string }
+).version;
 const localAppData = process.env.LOCALAPPDATA;
 if (!localAppData) throw new Error("LOCALAPPDATA_MISSING");
 
@@ -165,10 +168,10 @@ await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
 
 const makeFiles = await filesBelow(join(root, "out", "make"));
-const setup = makeFiles.find(
-  (path) => path.toLowerCase().endsWith(".exe") && basename(path).toLowerCase().includes("setup"),
-);
-const portableZip = makeFiles.find((path) => path.toLowerCase().endsWith(".zip"));
+const expectedSetupName = `AyanamiTaskManager-Setup-${packageVersion}-win-x64.exe`.toLowerCase();
+const expectedPortableName = `AyanamiTaskManager-win32-x64-${packageVersion}.zip`.toLowerCase();
+const setup = makeFiles.find((path) => basename(path).toLowerCase() === expectedSetupName);
+const portableZip = makeFiles.find((path) => basename(path).toLowerCase() === expectedPortableName);
 check("Forge Setup 存在", setup, setup);
 check("Forge portable ZIP 存在", portableZip, portableZip);
 check(

@@ -70,9 +70,12 @@ type Theme = "light" | "dark";
 type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
 type AgentIntegrationReport = {
-  client: "CODEX" | "CLAUDE";
+  client: McpClient;
   mcpInstalled: boolean;
+  sharesRuleAndSkillsWith: "CLAUDE" | null;
+  cliAvailable: boolean;
   rule: { state: AgentIntegrationState; path: string; version: number | null };
   skills: {
     state: AgentIntegrationState;
@@ -90,10 +93,10 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
-  installMcp?: (client: "CODEX" | "CLAUDE") => Promise<{ path: string; backupPath: string | null }>;
+  installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;
   getAgentIntegrations?: () => Promise<AgentIntegrationReport[]>;
   manageAgentIntegration?: (
-    client: "CODEX" | "CLAUDE",
+    client: McpClient,
     action: AgentIntegrationAction,
   ) => Promise<{
     report: AgentIntegrationReport;
@@ -848,8 +851,10 @@ function ProjectWizard({
     enabled: step === 2 && Boolean(desktop?.getMcpConfigs),
   });
   const install = useMutation({
-    mutationFn: (target: "CODEX" | "CLAUDE") => desktop!.installMcp!(target),
+    mutationFn: (target: McpClient) => desktop!.installMcp!(target),
     onSuccess: (result) => notify(`Agent 配置已安装：${result.path}`),
+    onError: (error) =>
+      notify(`Agent 配置安装失败：${error instanceof Error ? error.message : String(error)}`),
   });
   const mutation = useMutation({
     mutationFn: async () => {
@@ -1012,7 +1017,14 @@ function ProjectWizard({
                       disabled={install.isPending || !desktop.installMcp}
                       onClick={() => install.mutate("CLAUDE")}
                     >
-                      安装到 Claude
+                      安装到 Claude Desktop
+                    </button>
+                    <button
+                      className="atm-button"
+                      disabled={install.isPending || !desktop.installMcp}
+                      onClick={() => install.mutate("CLAUDE_CODE")}
+                    >
+                      安装到 Claude Code
                     </button>
                     <button
                       className="atm-button"
@@ -1711,6 +1723,12 @@ function integrationState(report: AgentIntegrationReport): AgentIntegrationState
   return "NOT_INSTALLED";
 }
 
+function agentClientLabel(client: McpClient): string {
+  if (client === "CODEX") return "Codex";
+  if (client === "CLAUDE_CODE") return "Claude Code";
+  return "Claude Desktop";
+}
+
 function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBridge }) {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["status"], queryFn: () => client.status() });
@@ -1732,7 +1750,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
   const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
   const [feedback, setFeedback] = useState("");
   const [integrationPreview, setIntegrationPreview] = useState<{
-    client: "CODEX" | "CLAUDE";
+    client: McpClient;
     current: string;
     proposed: string;
   } | null>(null);
@@ -1786,23 +1804,18 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
     },
   });
   const manageIntegration = useMutation({
-    mutationFn: ({
-      client,
-      action,
-    }: {
-      client: "CODEX" | "CLAUDE";
-      action: AgentIntegrationAction;
-    }) => desktop!.manageAgentIntegration!(client, action),
+    mutationFn: ({ client, action }: { client: McpClient; action: AgentIntegrationAction }) =>
+      desktop!.manageAgentIntegration!(client, action),
     onSuccess: async (result, variables) => {
       if (result.preview) {
         setIntegrationPreview({ client: variables.client, ...result.preview });
-        setFeedback(`${variables.client === "CODEX" ? "Codex" : "Claude"} 修改预览已生成`);
+        setFeedback(`${agentClientLabel(variables.client)} 修改预览已生成`);
         return;
       }
       setIntegrationPreview(null);
       await queryClient.invalidateQueries({ queryKey: ["agent-integrations"] });
       setFeedback(
-        `${variables.client === "CODEX" ? "Codex" : "Claude"} Agent 接入已${
+        `${agentClientLabel(variables.client)} Agent 接入已${
           variables.action === "UNINSTALL" ? "卸载" : "更新"
         }`,
       );
@@ -1891,10 +1904,13 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                               : primaryAction === "UPDATE"
                                 ? "更新"
                                 : "安装";
+                          const cliUnavailable =
+                            report.client === "CLAUDE_CODE" && !report.cliAvailable;
+                          const installNeedsCli = cliUnavailable && !report.mcpInstalled;
                           return (
                             <article className="atm-integration-card" key={report.client}>
                               <header>
-                                <strong>{report.client === "CODEX" ? "Codex" : "Claude"}</strong>
+                                <strong>{agentClientLabel(report.client)}</strong>
                                 <AgentIntegrationBadge state={overall} />
                               </header>
                               <div className="atm-integration-checks">
@@ -1902,14 +1918,29 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                                 <AgentIntegrationBadge
                                   state={report.mcpInstalled ? "INSTALLED" : "NOT_INSTALLED"}
                                 />
-                                <span>全局 ATM 规则</span>
-                                <AgentIntegrationBadge state={report.rule.state} />
-                                {report.skills.skills.map((skill) => (
-                                  <Fragment key={skill.name}>
-                                    <span>{skill.name}</span>
-                                    <AgentIntegrationBadge state={skill.state} />
-                                  </Fragment>
-                                ))}
+                                {report.sharesRuleAndSkillsWith ? (
+                                  <>
+                                    <span>规则/技能</span>
+                                    <span className="atm-row-sub">与 Claude Desktop 共用</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span>全局 ATM 规则</span>
+                                    <AgentIntegrationBadge state={report.rule.state} />
+                                    {report.skills.skills.map((skill) => (
+                                      <Fragment key={skill.name}>
+                                        <span>{skill.name}</span>
+                                        <AgentIntegrationBadge state={skill.state} />
+                                      </Fragment>
+                                    ))}
+                                  </>
+                                )}
+                                {cliUnavailable ? (
+                                  <>
+                                    <span>CLI</span>
+                                    <span className="atm-row-sub">未检测到，安装/卸载不可用</span>
+                                  </>
+                                ) : null}
                               </div>
                               <div className="atm-actions">
                                 <button
@@ -1927,7 +1958,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                                 {overall !== "INSTALLED" ? (
                                   <button
                                     className="atm-button primary"
-                                    disabled={manageIntegration.isPending}
+                                    disabled={manageIntegration.isPending || installNeedsCli}
                                     onClick={() =>
                                       manageIntegration.mutate({
                                         client: report.client,
@@ -1941,7 +1972,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                                 {overall !== "NOT_INSTALLED" ? (
                                   <button
                                     className="atm-button danger"
-                                    disabled={manageIntegration.isPending}
+                                    disabled={manageIntegration.isPending || cliUnavailable}
                                     onClick={() =>
                                       manageIntegration.mutate({
                                         client: report.client,
@@ -1961,7 +1992,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                     {integrationPreview ? (
                       <details className="atm-integration-preview" open>
                         <summary>
-                          {integrationPreview.client === "CODEX" ? "Codex" : "Claude"} 规则修改预览
+                          {agentClientLabel(integrationPreview.client)} 规则修改预览
                         </summary>
                         <pre>{integrationPreview.proposed}</pre>
                       </details>

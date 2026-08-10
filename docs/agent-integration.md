@@ -4,7 +4,17 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 
 ## 一次性接入
 
-桌面端进入“设置 → Agent 接入”，可直接安装 Codex 或 Claude 配置，也可复制 streamable HTTP、stdio 或通用 JSON 配置。安装操作会最小合并现有配置，并在写入前创建备份。
+桌面端进入“设置 → Agent 接入”，可直接安装 Codex、Claude Desktop 或 Claude Code 配置，也可复制 streamable HTTP、stdio 或通用 JSON 配置。安装操作会最小合并现有配置，并在写入前创建备份。
+
+三个客户端的落点互不相同，不能互相替代：
+
+| 客户端         | MCP 注册                                      | 规则                  | 技能                  |
+| -------------- | --------------------------------------------- | --------------------- | --------------------- |
+| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`  | `~/.codex/skills`     |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md` | `~/.claude/skills`    |
+| Claude Code    | `~/.claude.json`（user scope）                | 同上，与 Desktop 共用 | 同上，与 Desktop 共用 |
+
+Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~/.claude.json`：该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会丢失对方更新。找不到 CLI 时安装会以 `CLAUDE_CODE_CLI_NOT_FOUND` 失败，不会退化成直接改文件。由于规则与技能同 Desktop 共用，卸载其中一个客户端时，只要另一个仍装着 MCP，共用的规则和技能会被保留。
 
 本地服务只监听 `127.0.0.1`，每次启动生成或加载本地 token。运行时发现文件位于数据目录的 `runtime/daemon.json`。不要把 token 写进仓库、任务记录或日志。
 
