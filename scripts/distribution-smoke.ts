@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { resolveSystemTar } from "./system-tar.js";
 
 type Check = { name: string; passed: boolean; detail?: string };
 
@@ -202,7 +203,7 @@ let uninstallState: "removed" | "dead" | null = null;
 try {
   const portableRoot = join(outputRoot, "portable");
   await mkdir(portableRoot, { recursive: true });
-  run("tar.exe", ["-xf", portableZip, "-C", portableRoot]);
+  run(resolveSystemTar(), ["-xf", portableZip, "-C", portableRoot]);
   const portableExecutable = (await filesBelow(portableRoot)).find(
     (path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe",
   );
