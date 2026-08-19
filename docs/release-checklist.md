@@ -78,4 +78,4 @@ release/
 - [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
 - [x] 发布结论只引用 `release/test-report` 中可复核证据
 
-本次 1.0.1 验收结果见 `../release/test-report/summary.md`；全部命令退出码、原始 JSON 与截图均随发布目录保留。
+本次 1.0.2 验收结果见 `../release/test-report/summary.md`；全部命令退出码、原始 JSON 与截图均随发布目录保留。
