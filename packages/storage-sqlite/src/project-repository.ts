@@ -1580,7 +1580,7 @@ export class ProjectRepository {
     const evidenceFailure = this.#sqlite
       .prepare(
         `SELECT id FROM checklist_items WHERE work_item_id = ? AND evidence_required = 1
-         AND (status <> 'DONE' OR evidence_json = '[]') LIMIT 1`,
+         AND status <> 'SKIPPED' AND (status <> 'DONE' OR evidence_json = '[]') LIMIT 1`,
       )
       .get(row.id);
     if (evidenceFailure) throw new Error("COMPLETION_GATE_FAILED: evidence missing");

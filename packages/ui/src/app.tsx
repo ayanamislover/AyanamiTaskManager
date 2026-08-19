@@ -45,6 +45,7 @@ import {
   groupAgentSessions,
   type AgentSessionLike,
 } from "./agent-sessions.js";
+import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { presentTimelineEvent } from "./timeline-events.js";
 import {
@@ -2175,6 +2176,8 @@ function TaskDrawer({
 }) {
   const queryClient = useQueryClient();
   const dialogRef = useDialogAccessibility(close);
+  // 正在为哪个检查项补证据；null 表示没有展开的输入框。
+  const [evidenceDraft, setEvidenceDraft] = useState<{ id: string; text: string } | null>(null);
   const query = useQuery({
     queryKey: ["task", project, taskKey],
     queryFn: () => client.tasks.get(project, taskKey, "context"),
@@ -2200,13 +2203,17 @@ function TaskDrawer({
     },
   });
   const check = useMutation({
-    mutationFn: async (item: any) =>
-      client.tasks.checklistAsUser(project, item.id, {
+    mutationFn: async (input: {
+      item: any;
+      status: "TODO" | "DONE" | "SKIPPED";
+      evidence?: unknown[];
+    }) =>
+      client.tasks.checklistAsUser(project, input.item.id, {
         opId: `ui-check-${crypto.randomUUID()}`,
-        checklistId: item.id,
-        expectedVersion: item.version,
-        status: item.status === "DONE" ? "TODO" : "DONE",
-        evidence: item.evidence ?? [],
+        checklistId: input.item.id,
+        expectedVersion: input.item.version,
+        status: input.status,
+        evidence: input.evidence ?? input.item.evidence ?? [],
       }),
     onSuccess: async () => {
       await Promise.all([
@@ -2215,7 +2222,11 @@ function TaskDrawer({
         queryClient.invalidateQueries({ queryKey: ["brief", project] }),
         queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
+      setEvidenceDraft(null);
     },
+    // 失败必须可见：证据闸门是最常见的拒绝原因，静默会让人以为勾选框坏了。
+    onError: (error) =>
+      notify(`检查项更新失败：${error instanceof Error ? error.message : String(error)}`),
   });
   const actions = (status: string, stale: boolean): Array<[string, string]> => {
     if (["BACKLOG", "READY"].includes(status))
@@ -2371,22 +2382,112 @@ function TaskDrawer({
             <section className="atm-section">
               <h3>检查项</h3>
               {(query.data!.checklist as any[]).length ? (
-                (query.data!.checklist as any[]).map((item) => (
-                  <label className="atm-check" key={item.id}>
-                    <input
-                      type="checkbox"
-                      checked={item.status === "DONE"}
-                      disabled={check.isPending}
-                      onChange={() => check.mutate(item)}
-                    />
-                    <span>
-                      {item.title}
-                      {item.evidenceRequired ? (
-                        <span className="atm-row-sub"> · 需要证据</span>
+                (query.data!.checklist as any[]).map((item) => {
+                  const evidence: unknown[] = item.evidence ?? [];
+                  const draft = evidenceDraft?.id === item.id ? evidenceDraft : null;
+                  return (
+                    <div className="atm-checkline" key={item.id}>
+                      <label className="atm-check">
+                        <input
+                          type="checkbox"
+                          checked={item.status === "DONE"}
+                          disabled={check.isPending}
+                          onChange={() => {
+                            const intent = checklistToggleIntent(item);
+                            if (intent.action === "request-evidence") {
+                              setEvidenceDraft({ id: item.id, text: "" });
+                              return;
+                            }
+                            check.mutate({ item, status: intent.status });
+                          }}
+                        />
+                        <span>
+                          {item.title}
+                          {item.evidenceRequired ? (
+                            <span className="atm-row-sub"> · 需要证据</span>
+                          ) : null}
+                          {item.status === "SKIPPED" ? (
+                            <span className="atm-row-sub"> · 已跳过</span>
+                          ) : null}
+                        </span>
+                      </label>
+                      {evidence.length ? (
+                        <ul className="atm-evidence">
+                          {evidence.map((entry, index) => (
+                            <li key={index}>{evidenceText(entry)}</li>
+                          ))}
+                        </ul>
                       ) : null}
-                    </span>
-                  </label>
-                ))
+                      {draft ? (
+                        <div className="atm-field atm-evidence-form">
+                          <label htmlFor={`evidence-${item.id}`}>证据</label>
+                          <textarea
+                            id={`evidence-${item.id}`}
+                            value={draft.text}
+                            autoFocus
+                            placeholder="例如：packaged smoke 11/11，或 commit ab06501"
+                            onChange={(event) =>
+                              setEvidenceDraft({ id: item.id, text: event.target.value })
+                            }
+                          />
+                          <div className="atm-actions">
+                            <button
+                              className="atm-button"
+                              type="button"
+                              disabled={!draft.text.trim() || check.isPending}
+                              onClick={() =>
+                                check.mutate({
+                                  item,
+                                  status: "DONE",
+                                  evidence: [...evidence, draft.text.trim()],
+                                })
+                              }
+                            >
+                              附上并完成
+                            </button>
+                            <button
+                              className="atm-button"
+                              type="button"
+                              onClick={() => setEvidenceDraft(null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="atm-actions atm-evidence-actions">
+                          <button
+                            className="atm-button"
+                            type="button"
+                            disabled={check.isPending}
+                            onClick={() => setEvidenceDraft({ id: item.id, text: "" })}
+                          >
+                            添加证据
+                          </button>
+                          {item.status === "SKIPPED" ? (
+                            <button
+                              className="atm-button"
+                              type="button"
+                              disabled={check.isPending}
+                              onClick={() => check.mutate({ item, status: "TODO" })}
+                            >
+                              恢复
+                            </button>
+                          ) : (
+                            <button
+                              className="atm-button"
+                              type="button"
+                              disabled={check.isPending}
+                              onClick={() => check.mutate({ item, status: "SKIPPED" })}
+                            >
+                              跳过
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
               ) : (
                 <div className="atm-row-sub">未设置检查项</div>
               )}

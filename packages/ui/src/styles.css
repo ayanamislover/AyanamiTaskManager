@@ -1605,6 +1605,34 @@ button.atm-row:hover {
 .atm-check input {
   margin-top: 3px;
 }
+.atm-checkline {
+  padding: 2px 0;
+}
+.atm-checkline .atm-check {
+  padding-bottom: 3px;
+}
+.atm-evidence {
+  margin: 0 0 6px;
+  padding-left: 29px;
+  display: grid;
+  gap: 4px;
+  list-style: none;
+}
+.atm-evidence li {
+  font-size: 12px;
+  color: var(--atm-text-muted);
+  line-height: 1.6;
+  word-break: break-word;
+}
+.atm-evidence li::before {
+  content: "· ";
+}
+.atm-evidence-form {
+  padding: 0 0 10px 29px;
+}
+.atm-evidence-actions {
+  padding: 0 0 8px 29px;
+}
 .atm-command {
   width: min(720px, 100%);
   align-self: start;
