@@ -1,6 +1,6 @@
 # 发布清单
 
-本清单适用于 Windows x64 的 1.0.1 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
+本清单适用于 Windows x64 的 1.0.2 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
 
 ## 代码与数据门禁
 
@@ -52,8 +52,8 @@ pnpm exec tsx scripts/assemble-release.ts
 
 ```text
 release/
-├─ AyanamiTaskManager-Setup-1.0.1-win-x64.exe
-├─ AyanamiTaskManager-1.0.1-win-x64-portable.zip
+├─ AyanamiTaskManager-Setup-1.0.2-win-x64.exe
+├─ AyanamiTaskManager-1.0.2-win-x64-portable.zip
 ├─ SHA256SUMS.txt
 ├─ release.json
 ├─ sbom.spdx.json
