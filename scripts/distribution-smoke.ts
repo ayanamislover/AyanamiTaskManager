@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolveSystemTar } from "./system-tar.js";
+import { describeAppProcesses, parseTasklistCsv, type AppProcess } from "./app-processes.js";
 
 type Check = { name: string; passed: boolean; detail?: string };
 
@@ -55,7 +56,7 @@ function run(command: string, args: string[], env?: NodeJS.ProcessEnv): void {
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} 退出码 ${result.status}`);
 }
 
-function appProcessIsRunning(): boolean {
+function appProcesses(): AppProcess[] {
   const result = spawnSync(
     "tasklist.exe",
     ["/fo", "csv", "/nh", "/fi", "IMAGENAME eq AyanamiTaskManager.exe"],
@@ -63,7 +64,18 @@ function appProcessIsRunning(): boolean {
   );
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`tasklist.exe 退出码 ${result.status}`);
-  return /"AyanamiTaskManager\.exe"/iu.test(result.stdout);
+  return parseTasklistCsv(result.stdout);
+}
+
+function appProcessIsRunning(): boolean {
+  return appProcesses().length > 0;
+}
+
+// 进程类检查一律走这里。失败信息全靠 check 的第三个参数，把一个光秃秃的布尔量
+// 交上去，PID 和「是谁在占」就都没了——上一版正是这样，报「未通过」三个字。
+function checkNoAppProcess(checkName: string): void {
+  const running = appProcesses();
+  check(checkName, running.length === 0, describeAppProcesses(running));
 }
 
 function uninstallRegistrationExists(): boolean {
@@ -106,7 +118,7 @@ function assertSafeInstallRoot(): void {
 async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
   assertSafeInstallRoot();
   check(`${checkName}带有 Squirrel .dead 标记`, existsSync(deadMarker), deadMarker);
-  check(`${checkName}没有运行中的应用进程`, !appProcessIsRunning());
+  checkNoAppProcess(`${checkName}没有运行中的应用进程`);
   check(`${checkName}没有卸载注册项`, !uninstallRegistrationExists(), uninstallRegistryKey);
   const shortcuts = await productShortcuts();
   for (const shortcut of shortcuts) await rm(shortcut, { force: true });
@@ -193,7 +205,7 @@ check(
   !priorInstallFiles.some((path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe"),
   installRoot,
 );
-check("验收前没有运行中的同名进程", !appProcessIsRunning());
+checkNoAppProcess("验收前没有运行中的同名进程");
 check("验收前没有同名卸载注册项", !uninstallRegistrationExists(), uninstallRegistryKey);
 const priorShortcuts = await productShortcuts();
 check("验收前没有同名产品快捷方式", priorShortcuts.length === 0, priorShortcuts.join(", "));
@@ -230,7 +242,7 @@ try {
   check("Squirrel 卸载器存在", existsSync(updater), updater);
   run(updater, ["--uninstall", "-s"]);
   uninstallState = await waitForUninstallState(installedExecutable);
-  check("卸载后应用进程已退出", !appProcessIsRunning());
+  checkNoAppProcess("卸载后应用进程已退出");
   check("卸载后卸载注册项已移除", !uninstallRegistrationExists(), uninstallRegistryKey);
   const remainingShortcuts = await productShortcuts();
   check("卸载后产品快捷方式已移除", remainingShortcuts.length === 0, remainingShortcuts.join(", "));
