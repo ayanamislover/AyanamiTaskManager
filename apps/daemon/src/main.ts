@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   });
   writeFileSync(
     join(runtime, "daemon.json"),
-    `${JSON.stringify({ endpoint: address, token, pid: process.pid, version: "1.0.2", startedAt: new Date().toISOString() })}\n`,
+    `${JSON.stringify({ endpoint: address, token, pid: process.pid, version: "1.0.3", startedAt: new Date().toISOString() })}\n`,
     "utf8",
   );
   const initialMaintenance = setTimeout(() => {
