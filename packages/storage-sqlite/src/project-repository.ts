@@ -1304,9 +1304,9 @@ export class ProjectRepository {
               row.assignee_agent_id === actor.id;
             targetStatus =
               patch.operation === "start" || successorReclaim ? "IN_PROGRESS" : "CLAIMED";
-            if (!successorReclaim && !["READY", "BACKLOG", "CLAIMED"].includes(row.status)) {
-              throw new Error(`INVALID_TRANSITION: ${row.status} -> ${targetStatus}`);
-            }
+            // 来源状态只认转移表。自带白名单会让「表说可以、接口不给」重新出现，
+            // 也会把 start 一个已在 IN_PROGRESS 的任务误判成非法转移。
+            assertWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = ?",
               "assignee_agent_id = ?",
@@ -1333,6 +1333,7 @@ export class ProjectRepository {
               throw new Error("CLAIM_OWNER_REQUIRED");
             }
             targetStatus = "READY";
+            assertWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = 'READY'",
               "assignee_agent_id = NULL",
@@ -1377,9 +1378,19 @@ export class ProjectRepository {
             updates.push("status = 'CANCELLED'");
             eventType = "work.cancelled";
           } else if (patch.operation === "reopen") {
-            assertWorkItemTransition(row.status, row.status === "DONE" ? "IN_PROGRESS" : "BACKLOG");
-            targetStatus = row.status === "DONE" ? "IN_PROGRESS" : "BACKLOG";
-            updates.push("status = ?", "completed_at = NULL");
+            // reopen 的语义是「把停住的任务拉回来继续做」：界面在 BLOCKED /
+            // WAITING_USER / WAITING_AGENT 上把它叫「重新打开」、在 VERIFYING 上叫
+            // 「退回」，四处都指望回到 IN_PROGRESS。只有 CANCELLED 才该退回 BACKLOG
+            // 重新排期。原先一律指向 BACKLOG，那四个按钮点下去必然 INVALID_TRANSITION。
+            targetStatus = row.status === "CANCELLED" ? "BACKLOG" : "IN_PROGRESS";
+            assertWorkItemTransition(row.status, targetStatus);
+            // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
+            updates.push(
+              "status = ?",
+              "completed_at = NULL",
+              "blocked_reason = NULL",
+              "waiting_for = NULL",
+            );
             values.push(targetStatus);
             eventType = "work.reopened";
           } else if (patch.operation === "edit") {
