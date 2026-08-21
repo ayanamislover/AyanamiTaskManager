@@ -33,6 +33,7 @@ const FIXTURE_FILES = [
   "packages/domain/src/index.ts",
   "migrations/project/0001_initial.sql",
   "scripts/benchmark.ts",
+  "scripts/start-e2e.ts",
   "scripts/release.ts",
   "scripts/version-sites.ts",
   "forge.config.ts",
@@ -130,6 +131,46 @@ describe("按阶段依赖复用", () => {
     for (const stage of ["distribution-smoke", "benchmark", "e2e"]) {
       expect(normalized[stage]).not.toBe(notNormalized[stage]);
     }
+  });
+
+  // e2e 的 testDir 是 apps/desktop/e2e；apps/desktop/test 等目录里是 vitest 单测，
+  // 由 test 阶段跑。前缀只写到包一级的话，改一个单测就把 e2e 作废掉——1.0.7 那次
+  // 就是被 apps/desktop/test/product-install-sites.test.ts 顶成了 stage-inputs-changed。
+  it("单测文件不作废 e2e，同目录下的 e2e 用例必须作废它", async () => {
+    const base = await computeStageHashes(root, FIXTURE_FILES, currentVersion);
+
+    const withUnitTest = await computeStageHashes(
+      root,
+      [...FIXTURE_FILES, "apps/desktop/test/squirrel.test.ts"],
+      currentVersion,
+    );
+    expect(withUnitTest["e2e"]).toBe(base["e2e"]);
+
+    // 阳性对照：同一棵目录树下的 e2e 规格必须让它变，否则上一条只是「排除了一切」。
+    const withE2eSpec = await computeStageHashes(
+      root,
+      [...FIXTURE_FILES, "apps/desktop/e2e/desktop.spec.ts"],
+      currentVersion,
+    );
+    expect(withE2eSpec["e2e"]).not.toBe(base["e2e"]);
+  });
+
+  // 排除项的失效方向和包含项相反：包含项烂掉是「哈希不再变」，排除项写宽了是
+  // 「哈希从来不变」。两者都是永远复用、一路绿。
+  it("排除项吃掉全部输入时必须报错", () => {
+    const eatsEverything = {
+      e2e: { include: ["packages/ui/"], exclude: ["packages/ui/test/"] },
+    };
+    expect(() => assertStageInputsResolve(["packages/ui/test/a.test.ts"], eatsEverything)).toThrow(
+      /STAGE_INPUT_EXCLUDES_EVERYTHING/u,
+    );
+    // 阳性对照：留下一个没被排除的文件就该通过。
+    expect(() =>
+      assertStageInputsResolve(
+        ["packages/ui/test/a.test.ts", "packages/ui/src/app.tsx"],
+        eatsEverything,
+      ),
+    ).not.toThrow();
   });
 
   // 这套设计另一个致命失效：声明悄悄烂掉（目录改名、包被拆分）。那样哈希不再
