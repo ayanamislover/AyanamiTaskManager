@@ -1,20 +1,29 @@
 /**
- * 一条命令走完：升版本号 → 十阶段流水线 → 卸载旧版 → 安装新版 → 对运行实例实测。
+ * 一条命令走完：升版本号 → 十阶段流水线 → 投递更新 → 就地应用 → 对运行实例实测。
+ *
+ * 常规改动不再卸载重装：distribution-smoke 验的是安装器本身，它的依赖没变时会被
+ * 复用，于是整套清场可以跳过，Squirrel 直接把新版本铺到 app-<version>。只有碰了
+ * 打包配置、发布脚本、原生依赖或迁移，才会退回「清场 + 全量验收」。
  *
  * 必须在能真实写入 %LOCALAPPDATA% 的终端里跑。Agent 的 Bash 工具对该路径的
  * 创建会落进只有它自己看得见的覆盖层（删除却是穿透的），安装看起来成功、实际
  * 没落盘；PowerShell 工具与真实磁盘一致。详见 ATM-R-067。
  *
- *   pnpm exec tsx scripts/release-and-install.ts --version 1.0.5
+ *   pnpm exec tsx scripts/release-and-install.ts --version 1.0.6
  *   pnpm exec tsx scripts/release-and-install.ts            # 不升版，重打当前版本
  *   ... --skip-install                                      # 只跑到产出 release/
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { assertSafeInstallRoot, removeProductShortcuts } from "./product-install-sites.js";
+import {
+  computeReleaseFingerprint,
+  decideStageReuse,
+  type ReleaseFingerprint,
+} from "./release-fingerprint.js";
 import {
   bumpVersion,
   findVersionLeftovers,
@@ -93,6 +102,8 @@ if (target !== currentVersion) {
 const setupName = `AyanamiTaskManager-Setup-${target}-win-x64.exe`;
 const localAppData = process.env.LOCALAPPDATA;
 if (!localAppData) throw new Error("LOCALAPPDATA_MISSING");
+// 收窄后再固化一次：闭包里 TS 不保留顶层的 narrowing。
+const localAppDataRoot: string = localAppData;
 const installRoot = join(localAppData, "AyanamiTaskManagerDesktop");
 
 function appProcesses(): number[] {
@@ -108,44 +119,74 @@ function appProcesses(): number[] {
     .map(Number);
 }
 
-step("清场：关闭同名进程并卸载旧版");
-// MCP stdio 桥用的是同一个 exe 名，退出桌面应用不会带走它们；它们还占着安装
-// 目录里的 exe 句柄，不杀干净 Squirrel 只能留下 .dead 标记。
-const running = appProcesses();
-if (running.length > 0) {
+// distribution-smoke 的前置条件要求「没有已安装版本、没有同名进程」，所以只有
+// 它真要跑时才需要清场。它的依赖没变（没碰打包配置、发布脚本、原生依赖、迁移）
+// 时会被复用，这一整套卸载重装就可以整个跳过——应用全程活着，靠 feed 自更新。
+const previousReport = join(root, "output", "release-verification.json");
+const previousRun = existsSync(previousReport)
+  ? (JSON.parse(readFileSync(previousReport, "utf8")) as {
+      fingerprint?: ReleaseFingerprint;
+      commands?: Array<{ name: string; exitCode: number }>;
+    })
+  : null;
+const distributionSmoke = decideStageReuse(
+  "distribution-smoke",
+  previousRun?.fingerprint,
+  await computeReleaseFingerprint(root),
+  previousRun?.commands?.find((command) => command.name === "distribution-smoke")?.exitCode,
+);
+const needsCleanRoom = !distributionSmoke.reuse;
+
+if (!needsCleanRoom) {
+  step("跳过清场");
   process.stdout.write(
-    `  结束 ${running.length} 个 AyanamiTaskManager.exe（含 MCP stdio 桥）：${running.join("、")}\n`,
+    `  distribution-smoke 的输入没变（${distributionSmoke.reason}），本轮复用上次结果。\n` +
+      `  不卸载、不杀进程：应用保持运行，更新通过 feed 生效。\n`,
   );
-  for (const pid of running)
-    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-  await sleep(1200);
-}
-const updater = join(installRoot, "Update.exe");
-if (existsSync(updater)) {
-  process.stdout.write("  Squirrel 静默卸载\n");
-  run(updater, ["--uninstall", "-s"]);
-  await sleep(3000);
-  for (const pid of appProcesses())
-    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-} else {
-  process.stdout.write("  没有已安装版本，跳过\n");
 }
 
-// Squirrel 静默卸载会留下开始菜单快捷方式、.dead 标记和半个 app-<version> 目录。
-// distribution-smoke 的前置条件要求这些全都不在，否则跑完九个阶段才在第十阶段
-// 倒掉——1.0.5 就白跑了一轮。清理位置与它共用 product-install-sites。
-const strandedShortcuts = await removeProductShortcuts();
-if (strandedShortcuts.length > 0) {
-  process.stdout.write(`  清理残留快捷方式 ${strandedShortcuts.length} 个\n`);
-}
-if (existsSync(installRoot)) {
-  assertSafeInstallRoot(installRoot, localAppData);
-  if (appProcesses().length > 0) {
-    throw new Error(`INSTALL_ROOT_BUSY: 仍有同名进程占用 ${installRoot}`);
+async function clearInstallation(): Promise<void> {
+  step("清场：关闭同名进程并卸载旧版");
+  // MCP stdio 桥用的是同一个 exe 名，退出桌面应用不会带走它们；它们还占着安装
+  // 目录里的 exe 句柄，不杀干净 Squirrel 只能留下 .dead 标记。
+  const running = appProcesses();
+  if (running.length > 0) {
+    process.stdout.write(
+      `  结束 ${running.length} 个 AyanamiTaskManager.exe（含 MCP stdio 桥）：${running.join("、")}\n`,
+    );
+    for (const pid of running)
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
+    await sleep(1200);
   }
-  await rm(installRoot, { recursive: true, force: true });
-  process.stdout.write(`  清理卸载残留目录：${installRoot}\n`);
+  const updater = join(installRoot, "Update.exe");
+  if (existsSync(updater)) {
+    process.stdout.write("  Squirrel 静默卸载\n");
+    run(updater, ["--uninstall", "-s"]);
+    await sleep(3000);
+    for (const pid of appProcesses())
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
+  } else {
+    process.stdout.write("  没有已安装版本，跳过\n");
+  }
+
+  // Squirrel 静默卸载会留下开始菜单快捷方式、.dead 标记和半个 app-<version> 目录。
+  // distribution-smoke 的前置条件要求这些全都不在，否则跑完九个阶段才在第十阶段
+  // 倒掉——1.0.5 就白跑了一轮。清理位置与它共用 product-install-sites。
+  const strandedShortcuts = await removeProductShortcuts();
+  if (strandedShortcuts.length > 0) {
+    process.stdout.write(`  清理残留快捷方式 ${strandedShortcuts.length} 个\n`);
+  }
+  if (existsSync(installRoot)) {
+    assertSafeInstallRoot(installRoot, localAppDataRoot);
+    if (appProcesses().length > 0) {
+      throw new Error(`INSTALL_ROOT_BUSY: 仍有同名进程占用 ${installRoot}`);
+    }
+    await rm(installRoot, { recursive: true, force: true });
+    process.stdout.write(`  清理卸载残留目录：${installRoot}\n`);
+  }
 }
+
+if (needsCleanRoom) await clearInstallation();
 
 step("十阶段流水线");
 const releaseExit = run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "pnpm release"]);
@@ -161,13 +202,47 @@ if (flag("skip-install")) {
   process.exit(0);
 }
 
-step(`安装 ${setupName}`);
-const install = run(setup, ["--silent"]);
-if (install !== 0) throw new Error(`SETUP_EXIT: ${install}`);
+// 更新源是一个本地目录，不是服务器。169 MB 在本机是一次文件复制而不是一次网络
+// 下载，所以不需要 delta 包——delta 是为跨机分发省流量的。
+step("投递更新到本地 feed");
+const feed = join(localAppData, "AyanamiTaskManager", "updates");
+mkdirSync(feed, { recursive: true });
+const squirrelOut = join(root, "out", "make", "squirrel.windows", "x64");
+for (const name of ["RELEASES", `AyanamiTaskManagerDesktop-${target}-full.nupkg`]) {
+  const source = join(squirrelOut, name);
+  if (!existsSync(source)) throw new Error(`FEED_SOURCE_MISSING: ${source}`);
+  copyFileSync(source, join(feed, name));
+  process.stdout.write(`  ${name}\n`);
+}
+
+const alreadyInstalled = existsSync(join(installRoot, "Update.exe"));
+if (!alreadyInstalled) {
+  step(`首次安装 ${setupName}`);
+  const install = run(setup, ["--silent"]);
+  if (install !== 0) throw new Error(`SETUP_EXIT: ${install}`);
+} else {
+  // 已经装过就不再卸载重装：让 Squirrel 就地把新版本铺到 app-<version>。
+  // 运行中的应用自己也会在 6 小时内或下次启动时发现，这里主动应用只是为了
+  // 让这条命令结束时就能对新版本做实测。
+  step("就地应用更新");
+  const applied = run(join(installRoot, "Update.exe"), ["--update", feed]);
+  if (applied !== 0) throw new Error(`UPDATE_EXIT: ${applied}`);
+}
 for (let i = 0; i < 60 && !existsSync(join(installRoot, `app-${target}`)); i += 1)
   await sleep(1000);
 if (!existsSync(join(installRoot, `app-${target}`)))
   throw new Error(`INSTALL_DIR_MISSING: app-${target}`);
+
+// 启动壳始终拉最新的 app-<version>，但已经在跑的进程仍是旧版，MCP stdio 桥也
+// 一样（它们是各 Agent 拉起的独立进程，用同一个 exe 名）。要让实测打在新版本
+// 上，就得先把它们全带走。
+const stale = appProcesses();
+if (stale.length > 0) {
+  process.stdout.write(`  结束 ${stale.length} 个旧版进程（含 MCP stdio 桥）\n`);
+  for (const pid of stale)
+    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
+  await sleep(1500);
+}
 
 step("启动并对运行实例实测");
 spawn(join(installRoot, "AyanamiTaskManager.exe"), [], { detached: true, stdio: "ignore" }).unref();

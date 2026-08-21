@@ -10,6 +10,7 @@ import {
 import { join } from "node:path";
 import {
   app,
+  autoUpdater,
   BrowserWindow,
   clipboard,
   ipcMain,
@@ -48,6 +49,8 @@ import { AyanamiTaskService } from "@ayanami-task/application";
 import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
+import { handleSquirrelStartup } from "./squirrel.js";
+import { updateFeedDir, updateFeedReady } from "./updater.js";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
 import {
@@ -243,6 +246,10 @@ function trayMenu(): Menu {
     { label: "打开绫波任务管理器", click: showWindow },
     { label: "新建临时任务", click: () => navigate("quick") },
     { label: `受阻 ${blocked} / 等待用户 ${waiting}`, enabled: false },
+    // 只在真有待生效的更新时出现——常驻一行「已是最新」是噪音。
+    ...(updateDownloaded === null
+      ? []
+      : [{ label: `${updateDownloaded} 已就绪，重启生效`, enabled: false } as const]),
     { type: "separator" },
     {
       label: `系统通知 · ${notificationLabels[mode]}`,
@@ -536,9 +543,61 @@ async function startApplication(background: boolean): Promise<void> {
   createTray();
   createWindow(!background);
   installDesktopEventObservers();
+  startAutoUpdate();
+}
+
+let updateFeedConfigured = false;
+let updateDownloaded: string | null = null;
+
+function checkForUpdates(): void {
+  // 开发态没有 Update.exe，autoUpdater 一碰就抛。
+  if (!app.isPackaged) return;
+  const dataDir = dataDirBeforeReady();
+  // 还没发过任何更新是完全正常的状态，不该在用户面前变成一条报错。
+  if (!updateFeedReady(dataDir)) return;
+  try {
+    if (!updateFeedConfigured) {
+      autoUpdater.setFeedURL({ url: updateFeedDir(dataDir) });
+      updateFeedConfigured = true;
+    }
+    autoUpdater.checkForUpdates();
+  } catch (error) {
+    smokeTrace("update.check-failed", error instanceof Error ? error.message : String(error));
+  }
+}
+
+function startAutoUpdate(): void {
+  if (!app.isPackaged) return;
+  autoUpdater.on("error", (error: Error) => {
+    // 更新失败不能影响正在用的应用：记一笔，继续跑当前版本。
+    smokeTrace("update.error", error.message);
+  });
+  autoUpdater.on("update-downloaded", (_event, _notes, releaseName: string) => {
+    // Squirrel 已经把新版本铺到 app-<version> 目录；启动壳始终拉最新的那个，
+    // 所以不需要 quitAndInstall——下次重启自然就是新版。这里只负责告知，
+    // 不打断用户手上的事。
+    updateDownloaded = releaseName;
+    smokeTrace("update.downloaded", releaseName);
+    tray?.setContextMenu(trayMenu());
+    if (notificationMode() === "OFF" || !ElectronNotification.isSupported()) return;
+    new ElectronNotification({
+      title: "AyanamiTaskManager 已更新",
+      body: `${releaseName} 已就绪，下次启动生效。`,
+      icon: applicationLogoPath(),
+    }).show();
+  });
+  checkForUpdates();
+  const timer = setInterval(checkForUpdates, 6 * 60 * 60 * 1000);
+  timer.unref();
 }
 
 async function bootstrap(): Promise<void> {
+  // Squirrel 生命周期调用必须最先处理：不取单实例锁、不开窗口、不起服务，
+  // 做完该做的立刻退出，否则安装过程会挂在这里等到超时。
+  if (handleSquirrelStartup(process.argv, process.execPath)) {
+    app.quit();
+    return;
+  }
   const args = process.argv.slice(1);
   smokeTrace("bootstrap", { argv: process.argv, args });
   if (await runHeadlessModes(args)) {
