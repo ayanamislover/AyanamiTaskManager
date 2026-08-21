@@ -593,6 +593,54 @@ export class AyanamiTaskService {
     return { objectiveId: objective?.id ?? null, milestoneId: milestone?.id ?? null };
   }
 
+  // 项目还没有目标时任务无处落位。这不是「必须先规划」的领域约束——promote 路径
+  // 早就在做同一件事（getActiveObjective() ?? createObjective(...)），只有 MCP 适配层
+  // 比领域更严，把它抛成 OBJECTIVE_REQUIRED，于是纯 MCP 会话在一个新项目里一个任务
+  // 也建不出来。这里把 promote 的既有做法提上来共用，不再各写一份。
+  //
+  // 自动补建目标是一次静默的规划决策：标题必须一眼看出是机器补的，调用方也必须
+  // 拿到回执，否则事后没人分得清这个目标是谁定的。
+  //
+  // objectiveProvisioned 只说目标，不说里程碑。在人定的目标下补一个「执行」里程碑
+  // 是无关紧要的落位动作（promote 一直这么做），把它也算进回执，回执就会在几乎每个
+  // 项目的第一次建任务时亮起，反而失去指示作用。
+  async ensurePlanningRoot(
+    projectCode: string,
+    sessionId?: string,
+  ): Promise<{ objectiveId: string; milestoneId: string; objectiveProvisioned: boolean }> {
+    const repository = await this.#repository(projectCode);
+    const activeObjective = repository.getActiveObjective();
+    const activeMilestone = repository.getActiveMilestone(activeObjective?.id);
+    if (activeObjective && activeMilestone) {
+      return {
+        objectiveId: activeObjective.id,
+        milestoneId: activeMilestone.id,
+        objectiveProvisioned: false,
+      };
+    }
+    const actor: ProjectActor = sessionId
+      ? await this.#actor(projectCode, sessionId)
+      : { type: "SYSTEM", id: "planning-root", sessionId: null };
+    const project = this.databases.getProject(projectCode);
+    const objective =
+      activeObjective ??
+      repository.createObjective(actor, {
+        title: `${project?.name ?? projectCode.toUpperCase()}（自动补建）`,
+        description:
+          "项目尚无目标时自动补建，用于承载任务。请按实际规划改写标题与验收，或另建目标后归档它。",
+        definitionOfDone: [],
+      });
+    const milestone =
+      repository.getActiveMilestone(objective.id) ??
+      repository.createMilestone(actor, { objectiveId: objective.id, title: "执行" });
+    await this.#flush(projectCode);
+    return {
+      objectiveId: objective.id,
+      milestoneId: milestone.id,
+      objectiveProvisioned: !activeObjective,
+    };
+  }
+
   async listObjectives(projectCode: string) {
     return (await this.#repository(projectCode)).listObjectives();
   }

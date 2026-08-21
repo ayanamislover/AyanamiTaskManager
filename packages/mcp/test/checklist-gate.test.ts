@@ -23,10 +23,9 @@ async function connect() {
     migrationsRoot: join(process.cwd(), "migrations"),
   });
   services.push(service);
-  // 建项目和建 objective 都没有 MCP 工具（objective 只有 REST 的
-  // POST /api/v1/projects/:code/objectives），只能在这里搭台。这本身是同一族的
-  // 第三个缺口，已另立任务；本用例要守的是「有了台子之后，检查项闸门能不能靠
-  // 工具穿过去」。
+  // 建项目没有 MCP 工具，只能在这里搭台。objective 已经不用管了：项目没有活动
+  // 目标时 atm_task_create 会自己补规划根（见 planning-root.test.ts）。本用例要
+  // 守的是「有了台子之后，检查项闸门能不能靠工具穿过去」。
   const project = await service.createProject({ name: "闸门", sourcePath: null, code: "GATE" });
   const server = createAyanamiMcpServer(service);
   const client = new Client({ name: "gate-test", version: "1.0.0" });
