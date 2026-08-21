@@ -48,17 +48,17 @@ describe("升版后的残留检查", () => {
   // git grep 拿退出码当结果：0 有匹配，1 没有匹配。把非零一律当失败，这条检查
   // 就会在旧版本号被清得最干净时恰好挂掉——发布链因此在升版第一步就中止。
   it("没有匹配是通过，不是失败", () => {
-    expect(findVersionLeftovers("1.0.4", () => ({ status: 1, stdout: "" }))).toEqual([]);
+    expect(findVersionLeftovers("9.9.9", () => ({ status: 1, stdout: "" }))).toEqual([]);
   });
 
   it("有残留时如实报出，真出错时不吞", () => {
     expect(
-      findVersionLeftovers("1.0.4", () => ({
+      findVersionLeftovers("9.9.9", () => ({
         status: 0,
-        stdout: "docs/user-guide.md:12:1.0.4\npackage.json:3:1.0.4\n",
+        stdout: "docs/user-guide.md:12:9.9.9\npackage.json:3:9.9.9\n",
       })),
-    ).toEqual(["docs/user-guide.md:12:1.0.4", "package.json:3:1.0.4"]);
-    expect(() => findVersionLeftovers("1.0.4", () => ({ status: 128, stdout: "" }))).toThrow(
+    ).toEqual(["docs/user-guide.md:12:9.9.9", "package.json:3:9.9.9"]);
+    expect(() => findVersionLeftovers("9.9.9", () => ({ status: 128, stdout: "" }))).toThrow(
       /GIT_GREP_FAILED/u,
     );
   });

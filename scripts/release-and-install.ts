@@ -67,15 +67,22 @@ const target = value("version") ?? currentVersion;
 if (target !== currentVersion) {
   step(`升版本号 ${currentVersion} → ${target}`);
   const changed = bumpVersion(root, currentVersion, target);
-  for (const file of VERSIONED_FILES) {
-    if (!changed.includes(file))
-      throw new Error(`VERSION_SITE_MISSED: ${file} 里没有找到 ${currentVersion}`);
-    process.stdout.write(`  ${file}\n`);
-  }
-  // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
-  const leftovers = findVersionLeftovers(currentVersion);
-  if (leftovers.length > 0) {
-    throw new Error(`VERSION_LEFTOVER: 代码里仍有 ${currentVersion}\n${leftovers.join("\n")}`);
+  try {
+    for (const file of VERSIONED_FILES) {
+      if (!changed.includes(file))
+        throw new Error(`VERSION_SITE_MISSED: ${file} 里没有找到 ${currentVersion}`);
+      process.stdout.write(`  ${file}\n`);
+    }
+    // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
+    const leftovers = findVersionLeftovers(currentVersion);
+    if (leftovers.length > 0) {
+      throw new Error(`VERSION_LEFTOVER: 代码里仍有 ${currentVersion}\n${leftovers.join("\n")}`);
+    }
+  } catch (error) {
+    // 升版失败就把版本号退回去。半升的工作树会让下一次运行卡在「工作树不干净」，
+    // 而那些改动是脚本自己留下的，人还得先分辨一遍哪些是自己的。
+    bumpVersion(root, target, currentVersion);
+    throw error;
   }
   resetReleaseChecklist(root, currentVersion, target);
   process.stdout.write(`  docs/release-checklist.md：勾选已重置、验收结果已清空待填\n`);
