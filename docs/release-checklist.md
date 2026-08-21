@@ -37,6 +37,23 @@
 
 ## 构建与安装
 
+一条命令走完升版、十阶段、卸载、安装与实测：
+
+```powershell
+pnpm exec tsx scripts/release-and-install.ts --version 1.0.5
+```
+
+它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
+升版本号后校验没有遗漏站点，清掉同名进程（**包括 MCP stdio 桥**，它们用同一个
+exe 名且占着安装目录句柄），跑完十阶段，静默安装，最后启动并核对运行实例自报的
+版本号。加 `--skip-install` 只跑到产出 `release/`。
+
+必须在能真实写入 `%LOCALAPPDATA%` 的终端里跑——Agent 的 Bash 通道对该路径的
+创建会落进只有它自己看得见的覆盖层，安装看起来成功、实际没落盘；PowerShell
+通道与真实磁盘一致（ATM-R-067）。
+
+分步执行时：
+
 ```powershell
 pnpm make
 pnpm smoke:packaged
