@@ -64,6 +64,7 @@ describe("Ayanami MCP", () => {
     const result = await client.callTool({
       name: "atm_begin",
       arguments: {
+        op_id: "mcp-session-begin-same-request",
         project_code: project.code,
         mode: "project",
         agent_id: "codex",
@@ -75,6 +76,41 @@ describe("Ayanami MCP", () => {
     expect(text.length).toBeLessThanOrEqual(1200);
 
     const firstSession = String((result.structuredContent as Record<string, unknown>).session);
+    const replayed = await client.callTool({
+      name: "atm_begin",
+      arguments: {
+        op_id: "mcp-session-begin-same-request",
+        project_code: project.code,
+        mode: "project",
+        agent_id: "codex",
+      },
+    });
+    expect(replayed.structuredContent).toMatchObject({ session: firstSession });
+    expect(result.structuredContent).toMatchObject({
+      atomicBegin: {
+        operationId: "mcp-session-begin-same-request",
+        disposition: "CREATED",
+      },
+    });
+    expect(replayed.structuredContent).toMatchObject({
+      atomicBegin: {
+        operationId: "mcp-session-begin-same-request",
+        disposition: "RECOVERED",
+      },
+    });
+    const identityConflict = await client.callTool({
+      name: "atm_begin",
+      arguments: {
+        op_id: "mcp-session-begin-same-request",
+        project_code: project.code,
+        mode: "project",
+        agent_id: "codex",
+        thread_id: "thr_mcp_different",
+      },
+    });
+    expect(identityConflict.isError).toBe(true);
+    expect(JSON.stringify(identityConflict.content)).toMatch(/IDEMPOTENCY_CONFLICT/i);
+    expect(await service.listAgentSessions(project.code)).toHaveLength(1);
     const projectProgress = await client.callTool({
       name: "atm_progress_add",
       arguments: {
@@ -302,6 +338,24 @@ describe("Ayanami MCP", () => {
       false,
     );
     expect(bogus.isError).toBe(true);
+
+    // 原子回执是兼容性/权威证明，项目上下文再大也不能被 1200 字预算整体替换掉。
+    const longAtomicOperationId = `atomic-${"x".repeat(120)}`;
+    const atomicBegin = await call("atm_begin", {
+      op_id: longAtomicOperationId,
+      project_code: "BRF",
+      mode: "project",
+      agent_id: "codex",
+      role: "OBSERVER",
+    });
+    const atomicBody = atomicBegin.structuredContent as Record<string, unknown>;
+    expect(atomicBody.code).toBeUndefined();
+    expect(atomicBody.atomicBegin).toEqual({
+      operationId: longAtomicOperationId,
+      disposition: "CREATED",
+    });
+    expect(typeof atomicBody.session).toBe("string");
+    expect(JSON.stringify(atomicBody).length).toBeLessThanOrEqual(1200);
 
     await Promise.all([client.close(), server.close()]);
     service.close();

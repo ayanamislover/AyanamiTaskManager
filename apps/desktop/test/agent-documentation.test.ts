@@ -43,16 +43,18 @@ describe("Agent 文档正式数据根分发", () => {
     );
   });
 
-  it("随包分发受管开发任务的自动注册与拆分规则", () => {
+  it("随包分发交互式自动注册、原子 Session 边界与拆分规则", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-agent-policy-"));
     temporary.push(root);
     const dataDir = join(root, "data");
 
     installAgentDocumentation(process.cwd(), dataDir);
     const installed = readFileSync(join(dataDir, "docs", "agent-integration.md"), "utf8");
-    expect(installed).toContain(
-      "受管开发任务未注册时应自动创建；只有无法可靠确定项目名称、代码或目录时才请求用户确认。",
-    );
+    expect(installed).toContain("普通交互式开工可在受管开发任务未注册时自动创建");
+    expect(installed).toContain("需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`");
+    expect(installed).toContain("该保证的键空间是 `(project, op_id)`");
+    expect(installed).toContain("必须验证该回执");
+    expect(installed).toContain("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT");
     expect(installed).not.toContain("若项目未注册，先由用户确认是否创建");
     expect(installed).toContain("拆成多个可独立完成和验收的子 WorkItem");
     const guide = readFileSync(join(dataDir, "ATM_AGENT_GUIDE.md"), "utf8");

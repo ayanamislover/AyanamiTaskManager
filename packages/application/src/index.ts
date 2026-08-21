@@ -10,6 +10,7 @@ import {
 import {
   AyanamiDatabaseManager,
   ProjectRepository,
+  type CreateSessionInput,
   type ProjectActor,
   type RegisteredProject,
 } from "@ayanami-task/storage-sqlite";
@@ -383,6 +384,7 @@ export class AyanamiTaskService {
   }
 
   async begin(input: {
+    operationId?: string;
     projectCode?: string;
     cwd?: string | null;
     title?: string;
@@ -410,8 +412,15 @@ export class AyanamiTaskService {
     allowProjectCreate?: boolean;
     creationReason?: string;
   }): Promise<any> {
+    const operationId = input.operationId?.trim();
+    if (input.operationId !== undefined && (!operationId || operationId.length > 128)) {
+      throw new Error("OPERATION_ID_INVALID");
+    }
     let project = input.projectCode ? this.databases.getProject(input.projectCode) : null;
     if (!project && input.cwd) project = this.databases.identifyProject(input.cwd);
+    if (operationId && !project) {
+      throw new Error("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT");
+    }
     const classification = classifyTaskScope({
       matchedProject: Boolean(project),
       explicitMode: input.mode ?? "auto",
@@ -436,7 +445,7 @@ export class AyanamiTaskService {
     }
     const repository = await this.#repository(project.code);
     const gitContext = input.cwd ? inspectGitContext(input.cwd) : null;
-    const session = repository.createSession({
+    const sessionInput: CreateSessionInput = {
       agentId: input.agentId,
       displayName: input.displayName ?? input.agentId,
       clientKind: input.clientKind ?? "generic",
@@ -451,12 +460,48 @@ export class AyanamiTaskService {
       ...(input.predecessorSessionId === undefined
         ? {}
         : { predecessorSessionId: input.predecessorSessionId }),
-    });
+    };
+    let session: { id: string; sequence: number };
+    let atomicBegin: {
+      operationId: string;
+      disposition: "CREATED" | "RECOVERED";
+    } | null = null;
+    if (operationId) {
+      const recovered = repository.recoverOrCreateSession(
+        operationId,
+        {
+          projectCode: project.code,
+          cwd: input.cwd ?? null,
+          title: input.title ?? null,
+          mode: input.mode ?? "auto",
+          agentId: input.agentId,
+          displayName: input.displayName ?? input.agentId,
+          clientKind: input.clientKind ?? "generic",
+          parentSessionId: input.parentSessionId ?? null,
+          threadId: input.threadId ?? null,
+          role: input.role ?? "PRIMARY",
+          gitBranch: input.gitBranch ?? null,
+          gitHead: input.gitHead ?? null,
+          resume: input.resume ?? false,
+          predecessorSessionId: input.predecessorSessionId ?? null,
+          maxChars: input.maxChars ?? 1200,
+          signals: input.signals ?? {},
+          allowProjectCreate: input.allowProjectCreate ?? false,
+          creationReason: input.creationReason ?? null,
+        },
+        sessionInput,
+      );
+      session = recovered;
+      atomicBegin = { operationId, disposition: recovered.disposition };
+    } else {
+      session = repository.createSession(sessionInput);
+    }
     await this.#flush(project.code);
     return {
       scope: "project",
       session: session.id,
       score: classification.score,
+      ...(atomicBegin === null ? {} : { atomicBegin }),
       ...repository.brief(session.id, input.maxChars ?? 1200),
     };
   }

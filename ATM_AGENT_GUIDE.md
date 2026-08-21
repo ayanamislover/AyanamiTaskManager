@@ -49,7 +49,7 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 
 ## 最短工作流
 
-1. `atm_begin(project_code, agent_id, role)`，每个 Session 只调用一次，并直接使用返回的 brief。
+1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
 3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
@@ -58,6 +58,8 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
+`atm_begin(op_id=...)` 的原子键作用域是 `(project, op_id)`。它要求项目已经存在且可解析；不得把 quick task 或自动创建项目混入这次原子恢复。调用方必须验证返回的 `atomicBegin.operationId` 及 `CREATED|RECOVERED` disposition；缺失回执表示服务端没有证明原子能力。同一 `op_id` 的请求身份发生变化会得到 `IDEMPOTENCY_CONFLICT`，不能改 key 或退化为枚举 Session 后猜测。
 
 ### 完成闸门
 

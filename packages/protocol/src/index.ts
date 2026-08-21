@@ -170,6 +170,7 @@ export const CreateProjectInputSchema = z.object({
 });
 
 export const BeginInputSchema = z.object({
+  operationId: OpIdSchema.optional(),
   cwd: z.string().min(1).optional(),
   projectCode: z.string().optional(),
   title: z.string().max(400).optional(),
