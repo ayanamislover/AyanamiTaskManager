@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -41,6 +41,21 @@ export async function removeProductShortcuts(
   const shortcuts = await findProductShortcuts(roots);
   for (const shortcut of shortcuts) await rm(shortcut, { force: true });
   return shortcuts;
+}
+
+/**
+ * Squirrel 卸载时在安装根写下 .dead，告诉启动壳「这个应用已经没了」。
+ * distribution-smoke 会走一整轮装—验—卸，于是留下这个标记；紧接着的就地更新
+ * 把 app-<version> 铺回来，却不会清掉它。结果是一个「已卸载」标记贴在活着的
+ * 安装上——下一轮走快速路径时，Update.exe 要对着这个自相矛盾的状态跑。
+ *
+ * 只在确实有对应版本目录时清除：没有 app-<version> 的话，.dead 是准确的。
+ */
+export function clearStaleDeadMarker(installRoot: string, version: string): boolean {
+  const marker = join(installRoot, ".dead");
+  if (!existsSync(marker) || !existsSync(join(installRoot, `app-${version}`))) return false;
+  rmSync(marker, { force: true });
+  return true;
 }
 
 // 删目录之前先证明它确实是安装目录。路径来自环境变量，环境变量出错时

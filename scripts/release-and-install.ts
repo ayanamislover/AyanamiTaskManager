@@ -18,7 +18,11 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { assertSafeInstallRoot, removeProductShortcuts } from "./product-install-sites.js";
+import {
+  assertSafeInstallRoot,
+  clearStaleDeadMarker,
+  removeProductShortcuts,
+} from "./product-install-sites.js";
 import {
   computeReleaseFingerprint,
   decideStageReuse,
@@ -232,6 +236,11 @@ for (let i = 0; i < 60 && !existsSync(join(installRoot, `app-${target}`)); i += 
   await sleep(1000);
 if (!existsSync(join(installRoot, `app-${target}`)))
   throw new Error(`INSTALL_DIR_MISSING: app-${target}`);
+// distribution-smoke 走完一整轮装—验—卸后会留下 .dead，紧接着的就地更新把
+// app-<version> 铺回来却不清它，于是「已卸载」标记贴在活着的安装上。
+if (clearStaleDeadMarker(installRoot, target)) {
+  process.stdout.write("  清除烟测遗留的 .dead 标记\n");
+}
 
 // 启动壳始终拉最新的 app-<version>，但已经在跑的进程仍是旧版，MCP stdio 桥也
 // 一样（它们是各 Agent 拉起的独立进程，用同一个 exe 名）。要让实测打在新版本
