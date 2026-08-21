@@ -1026,6 +1026,38 @@ button.atm-row:hover {
 .atm-table {
   width: 100%;
   border-collapse: collapse;
+  /* 列宽由每张表自己的 colgroup 定死。用默认的 auto 布局时，任务标题那一列的
+     max-content 会把整张表撑开，剩下的列被压到 min-content——而中文的
+     min-content 就是一个字宽，于是表头和单元格逐字竖排成一列。长英文标题
+     （没有断词点）最容易触发。 */
+  table-layout: fixed;
+}
+.atm-table th,
+.atm-table td {
+  /* 窄列一律不折行：宽度不够就省略号收尾，绝不逐字竖排。需要折行的单元格
+     另行开口（.atm-row-title 与 .atm-cell-wrap）。 */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 任务标题是唯一允许占多行的：先一行，长了折到两行、三行，超出才省略。
+   它不再去抢别的列的宽度，因为列宽已经是固定比例。 */
+.atm-table .atm-row-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  white-space: normal;
+  /* 长英文标题没有断词点，不允许任意处断开就会直接溢出。 */
+  overflow-wrap: anywhere;
+}
+/* 阻塞 / 等待是自由文本，给两行。 */
+.atm-cell-wrap {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .atm-table th {
   height: 39px;
