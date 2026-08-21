@@ -11,8 +11,10 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { assertSafeInstallRoot, removeProductShortcuts } from "./product-install-sites.js";
 import {
   bumpVersion,
   findVersionLeftovers,
@@ -127,6 +129,22 @@ if (existsSync(updater)) {
     spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
 } else {
   process.stdout.write("  没有已安装版本，跳过\n");
+}
+
+// Squirrel 静默卸载会留下开始菜单快捷方式、.dead 标记和半个 app-<version> 目录。
+// distribution-smoke 的前置条件要求这些全都不在，否则跑完九个阶段才在第十阶段
+// 倒掉——1.0.5 就白跑了一轮。清理位置与它共用 product-install-sites。
+const strandedShortcuts = await removeProductShortcuts();
+if (strandedShortcuts.length > 0) {
+  process.stdout.write(`  清理残留快捷方式 ${strandedShortcuts.length} 个\n`);
+}
+if (existsSync(installRoot)) {
+  assertSafeInstallRoot(installRoot, localAppData);
+  if (appProcesses().length > 0) {
+    throw new Error(`INSTALL_ROOT_BUSY: 仍有同名进程占用 ${installRoot}`);
+  }
+  await rm(installRoot, { recursive: true, force: true });
+  process.stdout.write(`  清理卸载残留目录：${installRoot}\n`);
 }
 
 step("十阶段流水线");

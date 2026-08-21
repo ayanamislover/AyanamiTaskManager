@@ -4,6 +4,11 @@ import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolveSystemTar } from "./system-tar.js";
 import { describeAppProcesses, parseTasklistCsv, type AppProcess } from "./app-processes.js";
+import {
+  assertSafeInstallRoot as assertInstallRootIsProduct,
+  findProductShortcuts,
+  removeProductShortcuts,
+} from "./product-install-sites.js";
 
 type Check = { name: string; passed: boolean; detail?: string };
 
@@ -89,30 +94,11 @@ function uninstallRegistrationExists(): boolean {
   throw new Error(`reg.exe query 退出码 ${result.status}`);
 }
 
-async function productShortcuts(): Promise<string[]> {
-  const shortcutRoots = [
-    process.env.APPDATA
-      ? resolve(process.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs")
-      : null,
-    process.env.USERPROFILE ? resolve(process.env.USERPROFILE, "Desktop") : null,
-  ].filter((path): path is string => path !== null);
-  const shortcuts = (
-    await Promise.all(shortcutRoots.map(async (directory) => await filesBelow(directory)))
-  ).flat();
-  return shortcuts.filter(
-    (path) =>
-      path.toLowerCase().endsWith(".lnk") &&
-      basename(path).toLowerCase().includes("ayanamitaskmanager"),
-  );
-}
+// 扫描位置与卸载后的清理共用 product-install-sites，两边不能各存一份。
+const productShortcuts = async (): Promise<string[]> => await findProductShortcuts();
 
 function assertSafeInstallRoot(): void {
-  if (
-    basename(installRoot) !== "AyanamiTaskManagerDesktop" ||
-    dirname(installRoot).toLowerCase() !== localAppDataRoot.toLowerCase()
-  ) {
-    throw new Error(`拒绝清理未验证的安装目录：${installRoot}`);
-  }
+  assertInstallRootIsProduct(installRoot, localAppDataRoot);
 }
 
 async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
@@ -120,8 +106,7 @@ async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
   check(`${checkName}带有 Squirrel .dead 标记`, existsSync(deadMarker), deadMarker);
   checkNoAppProcess(`${checkName}没有运行中的应用进程`);
   check(`${checkName}没有卸载注册项`, !uninstallRegistrationExists(), uninstallRegistryKey);
-  const shortcuts = await productShortcuts();
-  for (const shortcut of shortcuts) await rm(shortcut, { force: true });
+  await removeProductShortcuts();
   const remainingShortcuts = await productShortcuts();
   check(
     `${checkName}产品快捷方式已清理`,
