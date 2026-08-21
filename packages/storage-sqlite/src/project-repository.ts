@@ -1323,6 +1323,12 @@ export class ProjectRepository {
               updates.push("started_at = ?");
               values.push(now);
             }
+            if (targetStatus === "IN_PROGRESS") {
+              // 「接着做」意味着阻塞与等待都已不成立。只清任务行上的列而不关
+              // blockers 记录，任务会看起来一切正常、却永远完成不了。
+              updates.push("blocked_reason = NULL", "waiting_for = NULL");
+              this.resolveActiveBlockers(row.id, now);
+            }
             eventType = targetStatus === "IN_PROGRESS" ? "work.started" : "work.claimed";
           } else if (patch.operation === "release") {
             const stale = row.claim_lease_until && Date.parse(row.claim_lease_until) <= Date.now();
@@ -1385,6 +1391,7 @@ export class ProjectRepository {
             targetStatus = row.status === "CANCELLED" ? "BACKLOG" : "IN_PROGRESS";
             assertWorkItemTransition(row.status, targetStatus);
             // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
+            this.resolveActiveBlockers(row.id, now);
             updates.push(
               "status = ?",
               "completed_at = NULL",
@@ -1476,6 +1483,21 @@ export class ProjectRepository {
         return { items: result, sequence };
       },
     });
+  }
+
+  // blockers 是独立记录，work_items.blocked_reason 只是它在任务行上的影子。
+  // 表结构里 status 允许 RESOLVED/CANCELLED、还有 resolved_at 和 version，
+  // 说明它本就是照「可关闭」设计的；但在此之前全仓库只有一处 INSERT（progress
+  // 带 blocker）和一处闸门 SELECT，没有任何路径能把它置成非 ACTIVE。于是任务
+  // 只要被带 blocker 的 progress 写过一次，就永远过不了完成闸门（blocker active），
+  // 而且清掉 blocked_reason 之后界面上看不出任何异常。
+  resolveActiveBlockers(workItemId: string, now: string): number {
+    return this.#sqlite
+      .prepare(
+        `UPDATE blockers SET status = ?, resolved_at = ?, updated_at = ?, version = version + 1
+         WHERE work_item_id = ? AND status = 'ACTIVE'`,
+      )
+      .run("RESOLVED", now, now, workItemId).changes;
   }
 
   updateChecklist(
