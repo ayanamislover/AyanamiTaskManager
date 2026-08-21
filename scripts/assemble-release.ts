@@ -4,11 +4,13 @@ import { readdirSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
+import { nonBlockingItems, stageProvenance, type StageDecisions } from "./release-report.js";
 
 type Artifact = { name: string; bytes: number; sha256: string };
 type Verification = {
   passed: boolean;
   completedAt: string;
+  stages?: StageDecisions;
   commands: Array<{
     name: string;
     command: string;
@@ -153,6 +155,12 @@ for (const screenshot of screenshots) {
 
 const testLog = await readFile(join(output, "release-logs", "test.log"), "utf8");
 const vitestCount = Number(/Tests\s+(\d+) passed/u.exec(testLog)?.[1] ?? 0);
+const provenance = (stage: string) => stageProvenance(verification.stages, stage);
+const reused = (stage: string) => verification.stages?.[stage]?.reuse === true;
+const remaining = nonBlockingItems(
+  await readFile(join(root, "docs", "release-checklist.md"), "utf8"),
+  packageJson.version,
+);
 const summary = {
   passed: true,
   completedAt: verification.completedAt,
@@ -165,15 +173,21 @@ const summary = {
     passed: e2e.stats.expected,
     failed: e2e.stats.unexpected,
     flaky: e2e.stats.flaky,
+    reused: reused("e2e"),
   },
   packagedSmoke: { passed: true, checks: packagedSmoke.checks.length },
   portableSmoke: { passed: true, checks: portableSmoke.checks.length },
   installedSmoke: { passed: true, checks: installedSmoke.checks.length },
-  distributionSmoke: { passed: true, checks: distributionSmoke.checks.length },
-  benchmark: { passed: true, metrics: benchmark.metrics },
+  distributionSmoke: {
+    passed: true,
+    checks: distributionSmoke.checks.length,
+    reused: reused("distribution-smoke"),
+  },
+  benchmark: { passed: true, metrics: benchmark.metrics, reused: reused("benchmark") },
   screenshots: screenshots.map((name) => `screenshots/${name}`),
+  stages: verification.stages ?? {},
   commands: verification.commands,
-  knownNonBlockingItems: [],
+  knownNonBlockingItems: remaining,
 };
 await writeFile(
   join(testReportDir, "summary.json"),
@@ -185,12 +199,13 @@ await writeFile(
   `# AyanamiTaskManager ${packageJson.version} 测试报告\n\n` +
     `- 结论：通过\n` +
     `- 单元/集成：${vitestCount} 项通过，退出码 0\n` +
-    `- 桌面 E2E：${e2e.stats.expected} 项通过，失败 ${e2e.stats.unexpected}\n` +
+    `- 桌面 E2E：${e2e.stats.expected} 项通过，失败 ${e2e.stats.unexpected}${provenance("e2e")}\n` +
     `- packaged smoke：${packagedSmoke.checks.length} 项通过\n` +
     `- portable smoke：${portableSmoke.checks.length} 项通过\n` +
     `- installed smoke：${installedSmoke.checks.length} 项通过\n` +
-    `- benchmark：全部阈值通过\n` +
-    `- 已知非阻塞剩余项：无\n\n` +
+    `- distribution smoke：${distributionSmoke.checks.length} 项通过${provenance("distribution-smoke")}\n` +
+    `- benchmark：全部阈值通过${provenance("benchmark")}\n` +
+    `- 已知非阻塞剩余项：${remaining.length === 0 ? "无" : `${remaining.length} 条\n${remaining.map((item) => `  - ${item}`).join("\n")}`}\n\n` +
     `原始 JSON、命令日志和 1366/1920/3440 截图均位于本目录。\n`,
   "utf8",
 );
