@@ -54,6 +54,8 @@ ATM 从 `cwd` 确定性采集 Git 上下文，使用只读查询得到 branch、
 若任务包含多个独立交付物、多个验证阶段、明显跨模块，或预计需要较长连续开发，不要直接执行该大任务；先用 `atm_task_create` 拆成多个可独立完成和验收的子 WorkItem，再领取具体子任务执行。
 
 Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直接执行单元。
+
+新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器代替人做出的规划决策，因此它是显式回执而不是静默行为：拿到它就应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
 可用的 11 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。

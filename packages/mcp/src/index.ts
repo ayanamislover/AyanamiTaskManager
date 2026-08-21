@@ -520,12 +520,19 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       outputSchema,
     },
     async (input) => {
-      const context = await service.planningContext(input.project);
+      // 只有在确实有条目没自带 objective_id 时才去确保规划根，否则会给一个已经
+      // 规划好的项目凭空多建一个目标。
+      const needsPlanningRoot = input.items.some((item) => item.objective_id === undefined);
+      const context = needsPlanningRoot
+        ? await service.ensurePlanningRoot(input.project, input.session)
+        : { ...(await service.planningContext(input.project)), objectiveProvisioned: false };
       const created = await service.createWorkItems(
         input.project,
         input.session,
         input.op_id,
         input.items.map((item) => {
+          // 走到这里 objectiveId 一定有值：没自带的条目上面已经确保过规划根。
+          // 这条保留下来是给类型收窄用的（planningContext 返回 string | null）。
           const objectiveId = item.objective_id ?? context.objectiveId;
           if (!objectiveId) throw new Error("OBJECTIVE_REQUIRED: 项目尚无活动目标");
           return {
@@ -565,6 +572,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         ok: true,
         project: input.project.toUpperCase(),
         seq: created.sequence,
+        // 目标是机器补的就要说出来，否则事后没人分得清它是谁定的。
+        ...(context.objectiveProvisioned ? { planning_root: "PROVISIONED" } : {}),
         created: created.items.map((item, index) => ({
           client_ref: input.items[index]!.client_ref,
           task_key: item.key,
