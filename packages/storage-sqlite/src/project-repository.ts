@@ -57,6 +57,31 @@ export type SessionGitContext = {
   error: string | null;
 };
 
+export type CreateSessionInput = {
+  agentId: string;
+  displayName: string;
+  clientKind: string;
+  parentSessionId?: string | null;
+  threadId?: string | null;
+  role: "PRIMARY" | "SUBAGENT" | "REVIEWER" | "OBSERVER";
+  cwd?: string | null;
+  gitBranch?: string | null;
+  gitHead?: string | null;
+  gitContext?: SessionGitContext | null;
+  resume?: boolean;
+  predecessorSessionId?: string | null;
+};
+
+type MutationInput<T> = {
+  actor: ProjectActor;
+  opId: string;
+  operation: string;
+  request: unknown;
+  action: () => T;
+  idempotencyKey?: string;
+  immediate?: boolean;
+};
+
 export type WorkItemView = {
   id: string;
   key: string;
@@ -212,14 +237,12 @@ export class ProjectRepository {
     return sequenceRow.current_sequence;
   }
 
-  private mutate<T>(input: {
-    actor: ProjectActor;
-    opId: string;
-    operation: string;
-    request: unknown;
-    action: () => T;
-  }): T {
-    const key = `${input.actor.sessionId ?? input.actor.id}:${input.opId}`;
+  private mutate<T>(input: MutationInput<T>): T {
+    return this.mutateWithReplay(input).value;
+  }
+
+  private mutateWithReplay<T>(input: MutationInput<T>): { value: T; replayed: boolean } {
+    const key = input.idempotencyKey ?? `${input.actor.sessionId ?? input.actor.id}:${input.opId}`;
     const fingerprint = requestFingerprint(input.request);
     const transaction = this.#sqlite.transaction(() => {
       const cached = this.#sqlite
@@ -229,7 +252,7 @@ export class ProjectRepository {
         if (cached.operation !== input.operation || cached.request_fingerprint !== fingerprint) {
           throw new Error(`IDEMPOTENCY_CONFLICT: ${key}`);
         }
-        return JSON.parse(cached.response_json) as T;
+        return { value: JSON.parse(cached.response_json) as T, replayed: true };
       }
       const result = input.action();
       this.#sqlite
@@ -239,25 +262,12 @@ export class ProjectRepository {
            ) VALUES (?, ?, ?, ?, ?)`,
         )
         .run(key, input.operation, fingerprint, JSON.stringify(result), nowIso());
-      return result;
+      return { value: result, replayed: false };
     });
-    return transaction();
+    return input.immediate ? transaction.immediate() : transaction();
   }
 
-  createSession(input: {
-    agentId: string;
-    displayName: string;
-    clientKind: string;
-    parentSessionId?: string | null;
-    threadId?: string | null;
-    role: "PRIMARY" | "SUBAGENT" | "REVIEWER" | "OBSERVER";
-    cwd?: string | null;
-    gitBranch?: string | null;
-    gitHead?: string | null;
-    gitContext?: SessionGitContext | null;
-    resume?: boolean;
-    predecessorSessionId?: string | null;
-  }): { id: string; sequence: number } {
+  createSession(input: CreateSessionInput): { id: string; sequence: number } {
     return this.#sqlite.transaction(() => {
       const now = nowIso();
       if (input.resume && input.predecessorSessionId) {
@@ -353,6 +363,30 @@ export class ProjectRepository {
       );
       return { id, sequence };
     })();
+  }
+
+  recoverOrCreateSession(
+    operationId: string,
+    request: unknown,
+    input: CreateSessionInput,
+  ): { id: string; sequence: number; disposition: "CREATED" | "RECOVERED" } {
+    const normalizedOperationId = operationId.trim();
+    if (!normalizedOperationId || normalizedOperationId.length > 128) {
+      throw new Error("OPERATION_ID_INVALID");
+    }
+    const mutation = this.mutateWithReplay({
+      actor: { type: "SYSTEM", id: "session-begin", sessionId: null },
+      opId: normalizedOperationId,
+      operation: "session.recover-or-begin",
+      request,
+      idempotencyKey: `session-begin:${normalizedOperationId}`,
+      immediate: true,
+      action: () => this.createSession(input),
+    });
+    return {
+      ...mutation.value,
+      disposition: mutation.replayed ? "RECOVERED" : "CREATED",
+    };
   }
 
   getSession(id: string): any {

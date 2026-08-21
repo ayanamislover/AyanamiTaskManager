@@ -38,9 +38,13 @@ function errorCode(error: unknown): string {
 
 function statusForCode(code: string): number {
   if (code === "NOT_FOUND" || code.endsWith("_NOT_FOUND")) return 404;
+  // 前置条件类错误一律 4xx：调用方重试多少次都不会变，回 500 会让崩溃重放
+  // 控制器把永久失败当成服务端抖动，无限重试下去。REQUIRED 和 REQUIRES 都要收，
+  // PROJECT_REQUIRED 与 ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT 都落在这一档。
   if (
     code === "VALIDATION_ERROR" ||
     code.includes("REQUIRED") ||
+    code.includes("REQUIRES") ||
     code.includes("INVALID") ||
     code.includes("HASH_MISMATCH") ||
     code.includes("MANIFEST_MISMATCH") ||
@@ -55,7 +59,6 @@ function statusForCode(code: string): number {
     code.includes("CLAIMED") ||
     code.includes("COMPLETION_GATE") ||
     code.includes("DEPENDENCY_NOT_READY") ||
-    code.includes("PROJECT_REQUIRED") ||
     code.includes("MIGRATION")
   )
     return 409;
@@ -617,6 +620,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const input = BeginInputSchema.parse(request.body);
     return reply.code(201).send(
       await options.service.begin({
+        ...(input.operationId === undefined ? {} : { operationId: input.operationId }),
         mode: input.mode,
         agentId: input.agentId,
         clientKind: input.clientKind,

@@ -22,7 +22,7 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 
 ## 标准 Session 流程
 
-1. 开工只调用一次 `atm_begin`，显式传入 `project_code`；受管开发任务未注册时应自动创建；只有无法可靠确定项目名称、代码或目录时才请求用户确认。
+1. 开工调用 `atm_begin`，显式传入 `project_code`。普通交互式开工可在受管开发任务未注册时自动创建；需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`，不能把项目创建和 Session 原子恢复混为一次调用。只有无法可靠确定项目名称、代码或目录时才请求用户确认。
 2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。
 3. 选择 `READY` 工作项后，以 `atm_task_patch` 执行 `claim` 和 `start`。
 4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
@@ -31,6 +31,14 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 7. 完成任务后执行 `complete`；Session 结束必须调用 `atm_end`。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
+### 原子 Session recover-or-begin
+
+`atm_begin` 的可选 `op_id` 为调用方提供项目内的 at-most-once Session 创建语义。调用方必须在首次请求、超时重试、响应丢失后的冷启动和凭据轮换后复用同一个 `op_id` 与完全相同的请求身份；ATM 会返回同一 Session，并在 `atomicBegin` 回执中原样绑定规范化后的 operation ID，首次为 `CREATED`、重放为 `RECOVERED`。自动化调用方必须验证该回执，不能因旧服务忽略未知 `op_id` 而假定原子性。相同 `op_id` 携带不同 project/cwd/agent/client/role/thread/parent/resume 等身份时，ATM 以 `IDEMPOTENCY_CONFLICT` 拒绝，不创建第二个 Session。
+
+该保证的键空间是 `(project, op_id)`，事务边界是已经存在且能确定解析的 project SQLite。携带 `op_id` 时，quick task 和 `allow_project_create` 不在该事务边界内，因此项目不存在会在任何 Quick Task、Project 或 Session 写入前以 `ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT` 拒绝。同一个 `op_id` 可以在两个不同项目中各自创建一个 Session；调用方不得把它当成跨项目全局 ID。
+
+原子事务同时提交 Agent/Session、`agent.joined` 事件、outbox 和幂等响应。服务重启或访问凭据轮换不改变幂等身份。重放时 Session ID 与创建序列保持不变，但 brief 与 scope score 会从当前持久状态重新计算，因此它不是整个 HTTP/MCP 响应字节的缓存。
 
 ### Session Git Context
 

@@ -12,6 +12,138 @@ afterEach(() => {
 });
 
 describe("REST 边界", () => {
+  it("按 operationId 原子恢复同一 Session，并拒绝身份漂移", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-session-begin-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "REST atomic begin",
+      sourcePath: null,
+      code: "RBEGIN",
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    const payload = {
+      operationId: "rest-session-begin-same-request",
+      mode: "project",
+      projectCode: project.code,
+      agentId: "rest-atomic-begin",
+      clientKind: "test",
+      role: "OBSERVER",
+      threadId: "thr_rest_exact",
+      signals: {},
+    };
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers,
+        payload,
+      });
+      const replay = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers,
+        payload,
+      });
+      expect(first.statusCode).toBe(201);
+      expect(replay.statusCode).toBe(201);
+      expect(first.json().atomicBegin).toEqual({
+        operationId: payload.operationId,
+        disposition: "CREATED",
+      });
+      expect(replay.json().atomicBegin).toEqual({
+        operationId: payload.operationId,
+        disposition: "RECOVERED",
+      });
+      expect(replay.json().session).toBe(first.json().session);
+      expect(await service.listAgentSessions(project.code)).toHaveLength(1);
+
+      const conflict = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers,
+        payload: { ...payload, threadId: "thr_rest_different" },
+      });
+      expect(conflict.statusCode).toBe(409);
+      expect(conflict.json()).toMatchObject({ error: { code: "IDEMPOTENCY_CONFLICT" } });
+      expect(await service.listAgentSessions(project.code)).toHaveLength(1);
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
+  it("在提交响应丢失、daemon 重启和凭据轮换后恢复同一 Session", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-session-restart-"));
+    temporary.push(dataDir);
+    const migrationsRoot = resolve(process.cwd(), "migrations");
+    const payload = {
+      operationId: "rest-session-begin-response-lost",
+      mode: "project",
+      projectCode: "RLOST",
+      agentId: "rest-response-lost",
+      clientKind: "test",
+      role: "OBSERVER",
+      threadId: "thr_response_lost",
+      signals: {},
+    };
+
+    const firstService = await AyanamiTaskService.open({ dataDir, migrationsRoot });
+    await firstService.createProject({
+      name: "REST response loss",
+      sourcePath: null,
+      code: "RLOST",
+    });
+    const firstApp = await buildAyanamiServer({ service: firstService, token: "first-secret" });
+    const committed = await firstApp.inject({
+      method: "POST",
+      url: "/api/v1/sessions",
+      headers: { authorization: "Bearer first-secret" },
+      payload,
+    });
+    expect(committed.statusCode).toBe(201);
+    const committedSession = String(committed.json().session);
+    await firstApp.close();
+    firstService.close();
+
+    const recoveredService = await AyanamiTaskService.open({ dataDir, migrationsRoot });
+    const recoveredApp = await buildAyanamiServer({
+      service: recoveredService,
+      token: "rotated-secret",
+    });
+    try {
+      const staleCredential = await recoveredApp.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers: { authorization: "Bearer first-secret" },
+        payload,
+      });
+      expect(staleCredential.statusCode).toBe(401);
+
+      const replay = await recoveredApp.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers: { authorization: "Bearer rotated-secret" },
+        payload,
+      });
+      expect(replay.statusCode).toBe(201);
+      expect(replay.json().atomicBegin).toEqual({
+        operationId: payload.operationId,
+        disposition: "RECOVERED",
+      });
+      expect(replay.json().session).toBe(committedSession);
+      expect(await recoveredService.listAgentSessions("RLOST")).toHaveLength(1);
+    } finally {
+      await recoveredApp.close();
+      recoveredService.close();
+    }
+  });
+
   it("REST begin 从 cwd 确定性采集并手动刷新持久化 Git context", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-api-git-context-"));
     temporary.push(root);

@@ -309,6 +309,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     {
       description: "开工一次；直接使用返回的 brief；task_list/task_get 按需。",
       inputSchema: {
+        op_id: opId.optional(),
         cwd: z.string().min(1).optional(),
         project_code: projectCode.optional(),
         title: z.string().max(400).optional(),
@@ -339,6 +340,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     },
     async (input) => {
       const started = await service.begin({
+        ...(input.op_id === undefined ? {} : { operationId: input.op_id }),
         mode: input.mode,
         agentId: input.agent_id,
         clientKind: input.client_kind,
