@@ -215,6 +215,11 @@ try {
   installedExecutable = await waitForInstalledExecutable();
   check("Squirrel Setup 可静默安装", existsSync(installedExecutable), installedExecutable);
   check("Squirrel 卸载注册项已创建", uninstallRegistrationExists(), uninstallRegistryKey);
+  // 1.0.5 装完开始菜单里什么都没有，卸载注册项却正常——只验注册项漏掉了这个。
+  // Electron 应用带 Squirrel-aware 标记，Squirrel 把建快捷方式的责任交给应用；
+  // 应用不接管就两边都不做，而这条链路只有装完一看才发现。
+  const installedShortcuts = await productShortcuts();
+  check("安装后存在产品快捷方式", installedShortcuts.length > 0, installedShortcuts.join(", "));
   runPackagedSmoke("installed", installedExecutable);
   const installedReport = JSON.parse(
     await readFile(join(root, "output", "installed-smoke-report.json"), "utf8"),
