@@ -9,7 +9,8 @@ export default defineConfig({
   outDir: "apps/desktop/dist/main",
   outExtension: () => ({ js: ".cjs" }),
   clean: true,
-  sourcemap: true,
+  // 同 vite：main.cjs 344 KB，它的 map 623 KB。生产包不发 map。
+  sourcemap: false,
   dts: false,
   external: ["electron", "better-sqlite3"],
   noExternal: [/^@ayanami-task\//u],
