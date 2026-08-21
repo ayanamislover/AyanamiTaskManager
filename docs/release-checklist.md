@@ -1,6 +1,6 @@
 # 发布清单
 
-本清单适用于 Windows x64 的 1.0.7 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
+本清单适用于 Windows x64 的 1.0.8 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
 
 勾选一律以 `release/test-report` 里可复核的证据为准：命令退出码、smoke 的逐项 JSON、benchmark 的阈值与实测、以及安装后对运行实例的实测。没有对应证据的条目保持未勾选，并在文末“非阻塞剩余项”里写明缺口。
 
@@ -40,7 +40,7 @@
 一条命令走完升版、十阶段、卸载、安装与实测：
 
 ```powershell
-pnpm exec tsx scripts/release-and-install.ts --version 1.0.7
+pnpm exec tsx scripts/release-and-install.ts --version 1.0.8
 ```
 
 它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
@@ -73,8 +73,8 @@ pnpm exec tsx scripts/assemble-release.ts
 
 ```text
 release/
-├─ AyanamiTaskManager-Setup-1.0.7-win-x64.exe
-├─ AyanamiTaskManager-1.0.7-win-x64-portable.zip
+├─ AyanamiTaskManager-Setup-1.0.8-win-x64.exe
+├─ AyanamiTaskManager-1.0.8-win-x64-portable.zip
 ├─ SHA256SUMS.txt
 ├─ release.json
 ├─ sbom.spdx.json
@@ -99,7 +99,7 @@ release/
 - [ ] README、用户指南、Agent 接入、备份恢复和排障文档已同步
 - [ ] 发布结论只引用 `release/test-report` 中可复核证据
 
-## 1.0.7 非阻塞剩余项
+## 1.0.8 非阻塞剩余项
 
 以下四条至今没有可复核证据，一律保持未勾选。它们在 1.0.2 及更早的清单里是勾上的，但仓库里始终没有对应用例——即那些勾属于超额声明，自 1.0.3 起按清单自身的规矩改回未验证。功能本身没有已知缺陷，只是没有守卫，因此列为非阻塞。
 
@@ -116,6 +116,6 @@ release/
 
 同时记下一次有意的放宽：加入第 12 个工具 `atm_checklist`（471 字节）后总长 8085，超过原先钉的 `8_000`，因此把守卫对齐到本清单一直写着的 8 KB（8192 字节）。这不是把标准改到能过——文档要求的一直是 8 KB——但它确实吃掉了原有 192 字节的余量，下一个工具再进来时预算就真的紧了。
 
-## 1.0.7 验收结果
+## 1.0.8 验收结果
 
 本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。
