@@ -1241,6 +1241,13 @@ function TasksAcrossProjects({
   return (
     <section className="atm-panel">
       <table className="atm-table">
+        <colgroup>
+          <col style={{ width: "38%" }} />
+          <col style={{ width: "20%" }} />
+          <col style={{ width: "12%" }} />
+          <col style={{ width: "20%" }} />
+          <col style={{ width: "10%" }} />
+        </colgroup>
         <thead>
           <tr>
             <th>任务</th>
@@ -3788,6 +3795,20 @@ function ProjectPage({
     }
     return (
       <table className="atm-table">
+        {/* 比例定死，窗口变窄时一起等比缩，而不是让任务列把别人挤没。
+            数值按 1366 宽下的实测下限定：可排序表头自带图标，「更新时间」表头
+            本身就要 76px、「优先级」要 65px，比单元格文本更吃宽度。 */}
+        <colgroup>
+          <col style={{ width: "27%" }} />
+          <col style={{ width: "9%" }} />
+          <col style={{ width: "9%" }} />
+          <col style={{ width: "11%" }} />
+          <col style={{ width: "7%" }} />
+          <col style={{ width: "9%" }} />
+          <col style={{ width: "12%" }} />
+          <col style={{ width: "5%" }} />
+          <col style={{ width: "11%" }} />
+        </colgroup>
         <thead>
           <tr>
             <th>任务</th>
@@ -3832,7 +3853,11 @@ function ProjectPage({
               </td>
               <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
               <td>{task.targetDate ?? "—"}</td>
-              <td>{task.blockedReason || task.waitingFor || "—"}</td>
+              <td>
+                <span className="atm-cell-wrap">
+                  {task.blockedReason || task.waitingFor || "—"}
+                </span>
+              </td>
               <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
               <td>{formatTime(task.updatedAt)}</td>
             </tr>
