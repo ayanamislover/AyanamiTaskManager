@@ -120,8 +120,9 @@ describe("按阶段依赖复用", () => {
   // 整套设计空转，而且看起来一切正常。
   it("升版本号不改变任何阶段的指纹", async () => {
     const normalized = await computeStageHashes(root, FIXTURE_FILES, currentVersion);
-    // 用一个文件里根本不存在的版本串去归一，等于没归一。
-    const absent = await computeStageHashes(root, FIXTURE_FILES, "9.9.9");
+    // 用一个文件里根本不存在的版本串去归一，等于没归一。这里不能用 9.9.9：
+    // 它是夹具约定用的号，已经出现在 scripts/ 的注释里了。
+    const absent = await computeStageHashes(root, FIXTURE_FILES, "123.456.789");
     const notNormalized = await computeStageHashes(root, FIXTURE_FILES, null);
     expect(absent).toEqual(notNormalized);
     // 归一确实改变了哈希，说明当前版本号真的被从内容里摘掉了——摘掉之后，

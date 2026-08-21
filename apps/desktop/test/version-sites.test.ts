@@ -1,7 +1,11 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { findVersionLeftovers, VERSIONED_FILES } from "../../../scripts/version-sites.js";
+import {
+  findVersionLeftovers,
+  isVersionSiteLine,
+  VERSIONED_FILES,
+} from "../../../scripts/version-sites.js";
 
 const root = process.cwd();
 const currentVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
@@ -52,14 +56,42 @@ describe("升版后的残留检查", () => {
   });
 
   it("有残留时如实报出，真出错时不吞", () => {
-    expect(
-      findVersionLeftovers("9.9.9", () => ({
-        status: 0,
-        stdout: "docs/user-guide.md:12:9.9.9\npackage.json:3:9.9.9\n",
-      })),
-    ).toEqual(["docs/user-guide.md:12:9.9.9", "package.json:3:9.9.9"]);
+    const stdout = ['package.json:3:  "version": "9.9.9",', "a.ts:9:  version: '9.9.9',", ""].join(
+      "\n",
+    );
+    expect(findVersionLeftovers("9.9.9", () => ({ status: 0, stdout }))).toEqual([
+      'package.json:3:  "version": "9.9.9",',
+      "a.ts:9:  version: '9.9.9',",
+    ]);
     expect(() => findVersionLeftovers("9.9.9", () => ({ status: 128, stdout: "" }))).toThrow(
       /GIT_GREP_FAILED/u,
     );
+  });
+
+  // 解释性注释里提到旧版本（「9.9.9 那次就是」）不是版本站点，但同样含有那串
+  // 数字。纯子串匹配会把它们全报成漏改，历史注释越写越多误报越多，最后逼人去
+  // 删注释讨好检查。真正的站点在 .ts/.json 里一律是带引号的字符串字面量。
+  it("注释里的历史叙述不算版本站点", () => {
+    const stdout = [
+      "scripts/x.ts:7:// 9.9.9 那次 Squirrel 静默卸载留下开始菜单快捷方式",
+      "apps/y.ts:13: * 两边就都不做——9.9.9 装完开始菜单里什么都没有",
+      "docs/z.ts:2:// 见 9.9.9 的发布清单",
+      "",
+    ].join("\n");
+    expect(findVersionLeftovers("9.9.9", () => ({ status: 0, stdout }))).toEqual([]);
+    // 阳性对照：同一批行里只要有一行是真站点，就必须被报出来。
+    const mixed = [
+      "scripts/x.ts:7:// 9.9.9 那次就是",
+      'apps/daemon/src/index.ts:112:      version: "9.9.9",',
+      "",
+    ].join("\n");
+    expect(findVersionLeftovers("9.9.9", () => ({ status: 0, stdout: mixed }))).toEqual([
+      'apps/daemon/src/index.ts:112:      version: "9.9.9",',
+    ]);
+  });
+
+  it("版本号里的点不能当正则通配", () => {
+    expect(isVersionSiteLine('x.ts:1: version: "9X9X9",', "9.9.9")).toBe(false);
+    expect(isVersionSiteLine('x.ts:1: version: "9.9.9",', "9.9.9")).toBe(true);
   });
 });
