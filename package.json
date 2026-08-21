@@ -1,7 +1,7 @@
 {
   "name": "ayanami-task-manager",
   "productName": "AyanamiTaskManager",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Local-first Windows project progress control plane for AI agents.",
   "author": "ayanami",
   "private": true,

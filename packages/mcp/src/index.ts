@@ -297,7 +297,7 @@ function compactTask(item: Record<string, any>, fieldMask: string[] = []) {
 
 export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   const server = new McpServer(
-    { name: "ayanami-task-manager", version: "1.0.3" },
+    { name: "ayanami-task-manager", version: "1.0.4" },
     {
       instructions:
         "开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。",
