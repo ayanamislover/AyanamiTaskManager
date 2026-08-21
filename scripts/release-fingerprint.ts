@@ -23,35 +23,78 @@ export type ReleaseFingerprint = {
  * 声明式而不是 --fast 开关：开关会用错（人判断"这次改动小"），声明不会——碰了
  * scripts/ 或 forge.config.ts，distribution-smoke 自动回来。
  */
-export const STAGE_INPUTS: Record<string, string[]> = {
+export type StageInputs = {
+  include: string[];
+  /**
+   * 只写「这个阶段确定不会读」的路径。方向严重不对称：漏排除不过是多跑一次，
+   * 排错了却会让该跑的阶段被跳过，而且一路是绿的——所以这里只放能证明无关的目录。
+   */
+  exclude?: string[];
+};
+
+export const STAGE_INPUTS: Record<string, StageInputs> = {
   // 界面行为：渲染层、界面包，以及它调用的 daemon/协议/客户端。
-  e2e: [
-    "apps/desktop/",
-    "apps/daemon/",
-    "packages/ui/",
-    "packages/client/",
-    "packages/protocol/",
-    "playwright.config",
-  ],
+  e2e: {
+    include: [
+      "apps/desktop/",
+      "apps/daemon/",
+      "packages/ui/",
+      "packages/client/",
+      "packages/protocol/",
+      "playwright.config",
+      // webServer 起的是它，改了它 e2e 跑的就是另一个东西。
+      "scripts/start-e2e.ts",
+    ],
+    // playwright 的 testDir 是 apps/desktop/e2e，这些目录里是 vitest 单测，由 test
+    // 阶段跑。不排掉的话，改一个单测文件就会作废 e2e——1.0.7 那次正是这样。
+    exclude: [
+      "apps/desktop/test/",
+      "apps/daemon/test/",
+      "packages/ui/test/",
+      "packages/client/test/",
+      "packages/protocol/test/",
+    ],
+  },
   // 性能阈值只跟存储与查询路径有关。
-  benchmark: [
-    "packages/storage-sqlite/",
-    "packages/application/",
-    "packages/domain/",
-    "migrations/",
-    "scripts/benchmark.ts",
-  ],
+  benchmark: {
+    include: [
+      "packages/storage-sqlite/",
+      "packages/application/",
+      "packages/domain/",
+      "migrations/",
+      "scripts/benchmark.ts",
+    ],
+    exclude: [
+      "packages/storage-sqlite/test/",
+      "packages/application/test/",
+      "packages/domain/test/",
+    ],
+  },
   // 它验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
   // 一遍安装卸载，证明不了任何新东西。
-  "distribution-smoke": [
-    "forge.config.ts",
-    "scripts/",
-    "package.json",
-    "pnpm-lock.yaml",
-    "apps/desktop/src/",
-    "migrations/",
-  ],
+  //
+  // 这里不排任何东西。scripts/ 收得宽是有意的：安装链会外调其中一批脚本，
+  // 而「装不上」的代价远大于多跑三十秒。
+  "distribution-smoke": {
+    include: [
+      "forge.config.ts",
+      "scripts/",
+      "package.json",
+      "pnpm-lock.yaml",
+      "apps/desktop/src/",
+      "migrations/",
+    ],
+  },
 };
+
+// 前缀匹配收敛到一处：包含命中、且没有被排除命中。
+export function stageInputFiles(files: string[], inputs: StageInputs): string[] {
+  return files.filter(
+    (file) =>
+      inputs.include.some((prefix) => file.startsWith(prefix)) &&
+      !(inputs.exclude ?? []).some((prefix) => file.startsWith(prefix)),
+  );
+}
 
 export type ReleaseResumeDecision = {
   reuse: boolean;
@@ -111,9 +154,8 @@ export async function computeStageHashes(
   version: string | null = null,
 ): Promise<Record<string, string>> {
   const hashes: Record<string, string> = {};
-  for (const [stage, prefixes] of Object.entries(STAGE_INPUTS)) {
-    const matched = files.filter((file) => prefixes.some((prefix) => file.startsWith(prefix)));
-    hashes[stage] = await sourceHash(root, matched, version);
+  for (const [stage, inputs] of Object.entries(STAGE_INPUTS)) {
+    hashes[stage] = await sourceHash(root, stageInputFiles(files, inputs), version);
   }
   return hashes;
 }
@@ -125,12 +167,20 @@ export async function computeStageHashes(
  * 校验是仓库健康断言，不是哈希的职责——所以它单独一个函数，由发布链在真实仓库
  * 上调用；computeStageHashes 保持纯粹，合成仓库（用例里的临时目录）照样能用。
  */
-export function assertStageInputsResolve(files: string[]): void {
-  for (const [stage, prefixes] of Object.entries(STAGE_INPUTS)) {
-    for (const prefix of prefixes) {
+export function assertStageInputsResolve(
+  files: string[],
+  declaration: Record<string, StageInputs> = STAGE_INPUTS,
+): void {
+  for (const [stage, inputs] of Object.entries(declaration)) {
+    for (const prefix of [...inputs.include, ...(inputs.exclude ?? [])]) {
       if (!files.some((file) => file.startsWith(prefix))) {
         throw new Error(`STAGE_INPUT_PREFIX_UNMATCHED: ${stage} 的 "${prefix}" 匹配不到任何文件`);
       }
+    }
+    // 排除项把包含项吃干净，等于这个阶段声明了「我没有输入」——哈希从此恒定，
+    // 永远复用。空排除项只是多跑一次，这一条却是真会漏验的失效。
+    if (stageInputFiles(files, inputs).length === 0) {
+      throw new Error(`STAGE_INPUT_EXCLUDES_EVERYTHING: ${stage} 的排除项吃掉了全部输入`);
     }
   }
 }
