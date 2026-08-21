@@ -41,6 +41,7 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 | 开始、恢复 working set、结束     | `atm_begin`、`atm_brief`、`atm_end`                |
 | 查找与创建任务                   | `atm_task_list`、`atm_task_get`、`atm_task_create` |
 | 领取、启动、阻塞、验证、完成任务 | `atm_task_patch`                                   |
+| 给检查项打勾并挂证据             | `atm_checklist`                                    |
 | 写阶段进度与关键证据             | `atm_progress_add`、`atm_record`                   |
 | 搜索历史与增量同步               | `atm_search`、`atm_delta`                          |
 
@@ -57,6 +58,25 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
+### 完成闸门
+
+`complete` 依次检查：检查项 → 证据 → 子任务 → 阻塞 → 依赖 → 验收，任何一道不过都抛 `COMPLETION_GATE_FAILED: <原因>`。逐条的出路：
+
+| 报错                                     | 含义与出路                                                                                                                                                                                                                                                                             |
+| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checklist incomplete`                   | 还有检查项停在 TODO/DOING。用 `atm_checklist` 逐条置 `DONE` 或 `SKIPPED`。`id` 与 `expected_version` 取自 `atm_task_get(view="context")`——`core` 视图不返回 `checklist`；`expected_version` 是**检查项自己**的版本、新建为 `0`，不是任务的版本。                                       |
+| `evidence required` / `evidence missing` | 该检查项标了「需要证据」。要么带 `evidence` 挂上真证据，要么置 `SKIPPED`——跳过的必证项不再要求证据。不要为了打勾而编证据。                                                                                                                                                             |
+| `child incomplete`                       | 还有子 WorkItem 不在 DONE/CANCELLED。                                                                                                                                                                                                                                                  |
+| `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。 |
+| `dependency not ready`                   | 有 BLOCKS 关系的前置任务尚未 DONE。                                                                                                                                                                                                                                                    |
+| `verification required`                  | 任务要求验收，先 `verify` 再 `complete`。                                                                                                                                                                                                                                              |
+
+### MCP 没有的能力走 REST
+
+少数能力目前只有 REST 入口，例如创建 Objective / Milestone（`POST /api/v1/projects/{code}/objectives`、`.../milestones`）。REST 与 MCP 用同一个 `endpoint` 和 token（见「ATM 服务如何发现」），写操作同样需要 `session` 与唯一 `op_id`。
+
+方法用错会返回 **405** 并在 `allow` 头和错误信息里列出该路径接受的方法——看到 405 是「方法不对」，看到 404 才是「路径不存在」，不要因为 404 就去猜别的路径名。
 
 ### 任务拆分
 

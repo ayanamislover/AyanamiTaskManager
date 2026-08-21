@@ -822,6 +822,33 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     });
   });
 
+  // Fastify 对「路径存在但方法没注册」同样返回 404，和「路径不存在」一模一样。
+  // 于是用错方法的人会去猜端点，越猜越远——checklist 的正确入口是 PATCH，
+  // 有人试了 POST 拿到 404，就此认定它不存在，绕开了整条路。把这两种情况分开。
+  const probeMethods = ["GET", "POST", "PATCH", "PUT", "DELETE"] as const;
+  app.setNotFoundHandler((request, reply) => {
+    const allowed = probeMethods.filter(
+      (method) => method !== request.method && app.findRoute({ method, url: request.url }),
+    );
+    if (allowed.length === 0) {
+      reply.code(404).send({
+        error: { code: "NOT_FOUND", message: `NOT_FOUND: ${request.method} ${request.url}` },
+        request_id: request.id,
+      });
+      return;
+    }
+    reply
+      .code(405)
+      .header("allow", allowed.join(", "))
+      .send({
+        error: {
+          code: "METHOD_NOT_ALLOWED",
+          message: `METHOD_NOT_ALLOWED: ${request.url} 只接受 ${allowed.join(" / ")}，收到 ${request.method}`,
+        },
+        request_id: request.id,
+      });
+  });
+
   await app.ready();
   return app;
 }

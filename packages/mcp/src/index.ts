@@ -619,6 +619,45 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   );
 
   server.registerTool(
+    "atm_checklist",
+    {
+      // 完成闸门的第一道就是检查项。没有这个工具，只用 MCP 的会话到不了 DONE，
+      // 而且从工具列表里看不出缺口在哪——只能一路撞到 checklist incomplete。
+      // id 与 expected_version 都取自 atm_task_get 的 context 视图（core 不返回 checklist），
+      // expected_version 是检查项自己的版本、新建为 0，不是任务的版本。
+      description: "改检查项状态并挂证据。",
+      inputSchema: {
+        project: projectCode,
+        session: sessionId,
+        op_id: opId,
+        id: z.string().trim(),
+        expected_version: z.number().int().nonnegative(),
+        status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
+        evidence: z.array(z.string()).optional(),
+      },
+      outputSchema,
+    },
+    async (input) => {
+      const updated = await service.updateChecklist(input.project, input.session, input.op_id, {
+        checklistId: input.id,
+        expectedVersion: input.expected_version,
+        status: input.status,
+        ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+      });
+      return result({
+        ok: true,
+        project: input.project.toUpperCase(),
+        seq: updated.sequence,
+        id: input.id,
+        status: updated.checklist.status,
+        version: updated.checklist.version,
+        evidence: updated.checklist.evidence.length,
+        task_version: updated.taskVersion,
+      });
+    },
+  );
+
+  server.registerTool(
     "atm_progress_add",
     {
       description: "写任务或项目进度。",
