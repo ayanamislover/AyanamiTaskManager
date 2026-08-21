@@ -6,33 +6,33 @@
 
 ## 代码与数据门禁
 
-- [ ] `pnpm lint`
-- [ ] `pnpm typecheck`
-- [ ] `pnpm test`
-- [ ] `pnpm build`
-- [ ] `pnpm test:e2e`
-- [ ] `pnpm benchmark`
+- [x] `pnpm lint`
+- [x] `pnpm typecheck`
+- [x] `pnpm test`
+- [x] `pnpm build`
+- [x] `pnpm test:e2e`
+- [x] `pnpm benchmark`
 - [ ] 项目迁移从空库和 v1/v2 数据库均通过
-- [ ] Registry 与项目库 `quick_check` 通过
-- [ ] 12 个 MCP schema 总长度不超过 8 KB
+- [x] Registry 与项目库 `quick_check` 通过
+- [x] 12 个 MCP schema 总长度不超过 8 KB
 
 ## 桌面与可访问性
 
-- [ ] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
-- [ ] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
-- [ ] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
+- [x] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
+- [x] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
+- [x] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
 - [ ] 归档→PRE_TRASH→垃圾箱→恢复通过
-- [ ] 工程统计项目级和 WorkItem 级展示通过
+- [x] 工程统计项目级和 WorkItem 级展示通过
 - [ ] 托盘、二次启动唤起、自启动开关与五类通知通过
 
 ## 可靠性与性能
 
-- [ ] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
-- [ ] 100 项目总览 p95 ≤200 ms
-- [ ] 10,000 任务筛选 p95 ≤200 ms
-- [ ] 写入+事件 p95 ≤100 ms
-- [ ] 50,000 中文文档搜索 p95 ≤300 ms
-- [ ] 服务 RSS ≤150 MB
+- [x] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
+- [x] 100 项目总览 p95 ≤200 ms
+- [x] 10,000 任务筛选 p95 ≤200 ms
+- [x] 写入+事件 p95 ≤100 ms
+- [x] 50,000 中文文档搜索 p95 ≤300 ms
+- [x] 服务 RSS ≤150 MB
 - [ ] 空闲项目数据库 5 分钟 LRU 关闭
 
 ## 构建与安装
@@ -60,12 +60,12 @@ pnpm smoke:packaged
 pnpm exec tsx scripts/assemble-release.ts
 ```
 
-- [ ] Squirrel Setup EXE 可安装到当前用户
-- [ ] 安装版可首次启动、退出、重启并保留数据
-- [ ] 卸载不误删用户项目数据
-- [ ] portable ZIP 解压后可启动
-- [ ] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
-- [ ] `docs/portable-usage.md` 随包存在
+- [x] Squirrel Setup EXE 可安装到当前用户
+- [x] 安装版可首次启动、退出、重启并保留数据
+- [x] 卸载不误删用户项目数据
+- [x] portable ZIP 解压后可启动
+- [x] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
+- [x] `docs/portable-usage.md` 随包存在
 
 `distribution-smoke` 要求机器上没有同名安装、没有运行中的同名进程、没有卸载注册项、没有产品快捷方式。注意 **MCP stdio 桥接进程用的是同一个 `AyanamiTaskManager.exe` 镜像名**：只要还有 Claude 会话连着 ATM，`appProcessIsRunning()` 就成立，验收会停在“没有运行中的应用进程”，而且这些桥还占着安装目录里的 exe 句柄，Squirrel 卸载只能留下 `.dead` 标记。发布前先断开所有连着 ATM 的会话。
 
@@ -94,10 +94,10 @@ release/
 
 ## 签发
 
-- [ ] 从干净的构建输入运行最终命令（不删除用户工作树变更）
-- [ ] 逐项复核哈希和产物可打开
-- [ ] README、用户指南、Agent 接入、备份恢复和排障文档已同步
-- [ ] 发布结论只引用 `release/test-report` 中可复核证据
+- [x] 从干净的构建输入运行最终命令（不删除用户工作树变更）
+- [x] 逐项复核哈希和产物可打开
+- [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
+- [x] 发布结论只引用 `release/test-report` 中可复核证据
 
 ## 1.0.6 非阻塞剩余项
 
@@ -118,4 +118,50 @@ release/
 
 ## 1.0.6 验收结果
 
-本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。
+一条命令 `pnpm exec tsx scripts/release-and-install.ts --version 1.0.6` 全程由 Agent 在
+PowerShell 通道跑完。本轮改动碰了 `scripts/` 与 `apps/desktop/src/`，正落在
+distribution-smoke 的依赖集内，因此**按规则退回完整清场与全量验收**——这既是必要的，
+也顺带验证了「碰了打包相关就不许跳过」这条规则本身。
+
+**十阶段 10/10**，流水线合计 3.7 分钟。阶段判定记录在 `output/release-verification.json`
+的 `stages` 字段：e2e、benchmark、distribution-smoke 三条均为 `stage-inputs-changed`
+执行，其余为 `stage-has-no-declared-inputs` 照跑。
+
+- 单元/集成 **162 通过**（64 个文件）；e2e **13 通过 / 0 失败 / 0 flaky**。
+- packaged / portable / installed smoke 各 **14/14**；distribution-smoke **18/18**。
+  比 1.0.5 的 23 条少 5 条不是覆盖变少：那 5 条属于 `cleanupDeadInstallRoot`，只在烟测
+  卸载后仍留下 exe 时才触发，本轮没有留下，因此未被触发。
+- benchmark 全部低于阈值：总览 p95 **2.15 ms**（≤200）、10,000 项筛选 p95 **11.849 ms**
+  （≤200）、写入+事件 p95 **34.148 ms**（≤100）、delta 100 事件 **16.073 ms**（≤100）、
+  50,000 中文文档搜索 p95 **0.547 ms**（≤300）、服务 RSS **127.55 MB**（≤150）、
+  冷启动 **761.802 ms**（≤3000）。
+
+产物哈希为本机独立复算：
+
+| 产物                                            | 大小     | 对比 1.0.5 | SHA-256                                                            |
+| ----------------------------------------------- | -------- | ---------- | ------------------------------------------------------------------ |
+| `AyanamiTaskManager-Setup-1.0.6-win-x64.exe`    | 162.8 MB | −7.6 MB    | `9FDF14A478A7D5E3858DDCD4C84F45BE794B58CA2743932EDF0C5A90C6F05E1F` |
+| `AyanamiTaskManager-1.0.6-win-x64-portable.zip` | 167.4 MB | −8.0 MB    | `F1EB795D210C793752B403463832DA05EBF509B42C6A54DCF780C5E481E2FC54` |
+
+装机后的 `app.asar` 从 **134.9 MB 降到 100.9 MB**（−34 MB）。安装包只少 7.6 MB 是因为
+nupkg 是压缩的，19 份高度相似的 bundle 与 source map 压缩率极高；磁盘占用才是完整收益。
+asar 内实测只剩 **1 份** renderer bundle、**0 份** source map。
+
+**对装机版实测**：安装目录 `app-1.0.6`，`system/status` 报 `version=1.0.6`、`ok=true`、
+`projectCount=10`。本轮新能力逐条落地：
+
+- **开始菜单与桌面快捷方式由应用自动创建**，安装目录出现 `Squirrel-Shortcut.log`——
+  主进程确实接管了 `--squirrel-install` 并调用了 `--createShortcut`。1.0.5 那次是人工补建的。
+- **本地目录更新源已投递**：`%LOCALAPPDATA%\AyanamiTaskManager\updates` 下有
+  `AyanamiTaskManagerDesktop-1.0.6-full.nupkg`（161.7 MB）与 `RELEASES`。
+
+**勾选 28/32**，其余四条见「1.0.6 非阻塞剩余项」。
+
+### 本轮发现并当场修复
+
+| 问题                                                                                           | 提交      |
+| ---------------------------------------------------------------------------------------------- | --------- |
+| 残留检查把注释里的历史版本叙述当成漏改站点，历史注释越写越多误报越多，最后会逼人删注释讨好检查 | `93e305b` |
+| `--squirrel-firstrun` 被当成生命周期事件退掉，表现为「装完点图标没反应」（守卫先抓到，未流出） | `6656a60` |
+| 版本号散在依赖路径里，不归一则每次升版都让所有阶段指纹一起变，按阶段依赖门永远空转且一路绿灯   | `6656a60` |
+| distribution-smoke 卸载留下的 `.dead` 贴在活着的安装上，下轮快速路径要对着自相矛盾的状态跑     | `1ede2a4` |
