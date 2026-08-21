@@ -23,6 +23,7 @@ import {
   clearStaleDeadMarker,
   removeProductShortcuts,
 } from "./product-install-sites.js";
+import { pruneUpdateFeed, updateFeedDir } from "./update-feed.js";
 import {
   computeReleaseFingerprint,
   decideStageReuse,
@@ -209,7 +210,7 @@ if (flag("skip-install")) {
 // 更新源是一个本地目录，不是服务器。169 MB 在本机是一次文件复制而不是一次网络
 // 下载，所以不需要 delta 包——delta 是为跨机分发省流量的。
 step("投递更新到本地 feed");
-const feed = join(localAppData, "AyanamiTaskManager", "updates");
+const feed = updateFeedDir(join(localAppData, "AyanamiTaskManager"));
 mkdirSync(feed, { recursive: true });
 const squirrelOut = join(root, "out", "make", "squirrel.windows", "x64");
 for (const name of ["RELEASES", `AyanamiTaskManagerDesktop-${target}-full.nupkg`]) {
@@ -217,6 +218,11 @@ for (const name of ["RELEASES", `AyanamiTaskManagerDesktop-${target}-full.nupkg`
   if (!existsSync(source)) throw new Error(`FEED_SOURCE_MISSING: ${source}`);
   copyFileSync(source, join(feed, name));
   process.stdout.write(`  ${name}\n`);
+}
+// 投递之后才清：RELEASES 这时已经换成新的，旧包到这一刻才真正没人要了。
+const staleFeedPackages = pruneUpdateFeed(feed);
+if (staleFeedPackages.length > 0) {
+  process.stdout.write(`  清理 ${staleFeedPackages.length} 个 RELEASES 未列出的旧包\n`);
 }
 
 const alreadyInstalled = existsSync(join(installRoot, "Update.exe"));
