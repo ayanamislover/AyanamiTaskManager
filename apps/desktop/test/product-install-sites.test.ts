@@ -1,9 +1,18 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   assertSafeInstallRoot,
+  clearStaleDeadMarker,
   findProductShortcuts,
   productShortcutRoots,
   removeProductShortcuts,
@@ -83,5 +92,26 @@ describe("产品安装位置", () => {
       readFileSync(join(scriptsDir, name), "utf8").includes("Start Menu"),
     );
     expect(hardcoded).toEqual(["product-install-sites.ts"]);
+  });
+});
+
+describe("卸载标记", () => {
+  // distribution-smoke 走完一整轮装—验—卸会留下 .dead，紧接着的就地更新把
+  // app-<version> 铺回来却不清它，于是「已卸载」标记贴在活着的安装上，
+  // 下一轮快速路径的 Update.exe 要对着这个自相矛盾的状态跑。
+  it("有对应版本目录时清除 .dead，没有时保留", () => {
+    const installRoot = mkdtempSync(join(tmpdir(), "atm-dead-"));
+    temporary.push(installRoot);
+    writeFileSync(join(installRoot, ".dead"), "", "utf8");
+
+    // 没有 app-<version>：.dead 是准确的，不能动。
+    expect(clearStaleDeadMarker(installRoot, "9.9.9")).toBe(false);
+    expect(existsSync(join(installRoot, ".dead"))).toBe(true);
+
+    mkdirSync(join(installRoot, "app-9.9.9"), { recursive: true });
+    expect(clearStaleDeadMarker(installRoot, "9.9.9")).toBe(true);
+    expect(existsSync(join(installRoot, ".dead"))).toBe(false);
+    // 幂等：已经清过就不再报「清了」。
+    expect(clearStaleDeadMarker(installRoot, "9.9.9")).toBe(false);
   });
 });
