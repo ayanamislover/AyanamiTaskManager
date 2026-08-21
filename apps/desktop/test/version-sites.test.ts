@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { VERSIONED_FILES } from "../../../scripts/version-sites.js";
+import { findVersionLeftovers, VERSIONED_FILES } from "../../../scripts/version-sites.js";
 
 const root = process.cwd();
 const currentVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
@@ -41,5 +41,25 @@ describe("版本号站点清单", () => {
     expect(outside).toEqual([]);
     // 阳性对照：扫描确实找得到已知的那几处，否则上面的断言只是在对空集成立。
     expect(hardcoded.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+describe("升版后的残留检查", () => {
+  // git grep 拿退出码当结果：0 有匹配，1 没有匹配。把非零一律当失败，这条检查
+  // 就会在旧版本号被清得最干净时恰好挂掉——发布链因此在升版第一步就中止。
+  it("没有匹配是通过，不是失败", () => {
+    expect(findVersionLeftovers("1.0.4", () => ({ status: 1, stdout: "" }))).toEqual([]);
+  });
+
+  it("有残留时如实报出，真出错时不吞", () => {
+    expect(
+      findVersionLeftovers("1.0.4", () => ({
+        status: 0,
+        stdout: "docs/user-guide.md:12:1.0.4\npackage.json:3:1.0.4\n",
+      })),
+    ).toEqual(["docs/user-guide.md:12:1.0.4", "package.json:3:1.0.4"]);
+    expect(() => findVersionLeftovers("1.0.4", () => ({ status: 128, stdout: "" }))).toThrow(
+      /GIT_GREP_FAILED/u,
+    );
   });
 });
