@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -40,4 +41,21 @@ export function resetReleaseChecklist(root: string, from: string, to: string): v
   const head = (index >= 0 ? lines.slice(0, index) : lines).join("\n").replace(/\n+$/u, "");
   const pending = "本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。";
   writeFileSync(path, `${head}\n\n${heading}\n\n${pending}\n`, "utf8");
+}
+
+export type GrepRunner = (args: string[]) => { status: number | null; stdout: string };
+
+// git grep 用退出码表达结果：0 有匹配，1 没有匹配，>1 才是真出错。把「没有匹配」
+// 当失败，会让这条检查在版本号改得最干净的时候恰好挂掉——1.0.5 那次就是。
+export function findVersionLeftovers(version: string, run: GrepRunner = defaultGrep): string[] {
+  const result = run(["grep", "-n", "--fixed-strings", version, "--", "*.ts", "*.json"]);
+  if (result.status === 1) return [];
+  if (result.status !== 0) throw new Error(`GIT_GREP_FAILED: 退出码 ${result.status}`);
+  return result.stdout.split("\n").filter(Boolean);
+}
+
+function defaultGrep(args: string[]): { status: number | null; stdout: string } {
+  const result = spawnSync("git", args, { encoding: "utf8", windowsHide: true });
+  if (result.error) throw result.error;
+  return { status: result.status, stdout: result.stdout ?? "" };
 }

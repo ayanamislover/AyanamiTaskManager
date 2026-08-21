@@ -13,7 +13,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { bumpVersion, resetReleaseChecklist, VERSIONED_FILES } from "./version-sites.js";
+import {
+  bumpVersion,
+  findVersionLeftovers,
+  resetReleaseChecklist,
+  VERSIONED_FILES,
+} from "./version-sites.js";
 
 const root = resolve(process.cwd());
 const args = process.argv.slice(2);
@@ -68,9 +73,7 @@ if (target !== currentVersion) {
     process.stdout.write(`  ${file}\n`);
   }
   // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
-  const leftovers = git(["grep", "-n", "--fixed-strings", currentVersion, "--", "*.ts", "*.json"])
-    .split("\n")
-    .filter(Boolean);
+  const leftovers = findVersionLeftovers(currentVersion);
   if (leftovers.length > 0) {
     throw new Error(`VERSION_LEFTOVER: 代码里仍有 ${currentVersion}\n${leftovers.join("\n")}`);
   }
