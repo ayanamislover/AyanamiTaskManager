@@ -10,7 +10,7 @@ afterEach(() => {
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-const execPath = "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\app-1.0.6\\ATM.exe";
+const execPath = "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\app-9.9.9\\ATM.exe";
 const updateExe = "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\Update.exe";
 
 function capture() {
@@ -29,19 +29,20 @@ describe("Squirrel 生命周期事件", () => {
   it("安装与更新时建快捷方式，卸载时删", () => {
     for (const event of ["--squirrel-install", "--squirrel-updated"]) {
       const { calls, run } = capture();
-      expect(handleSquirrelStartup([execPath, event, "1.0.6"], execPath, run)).toBe(true);
+      expect(handleSquirrelStartup([execPath, event, "9.9.9"], execPath, run)).toBe(true);
       expect(calls).toEqual([{ exe: updateExe, args: ["--createShortcut", "ATM.exe"] }]);
     }
     const removal = capture();
     expect(
-      handleSquirrelStartup([execPath, "--squirrel-uninstall", "1.0.6"], execPath, removal.run),
+      handleSquirrelStartup([execPath, "--squirrel-uninstall", "9.9.9"], execPath, removal.run),
     ).toBe(true);
     expect(removal.calls).toEqual([{ exe: updateExe, args: ["--removeShortcut", "ATM.exe"] }]);
   });
 
   it("obsolete 安静退出，不动快捷方式", () => {
     const { calls, run } = capture();
-    expect(handleSquirrelStartup([execPath, "--squirrel-obsolete", "1.0.5"], execPath, run)).toBe(
+    // 夹具用永不发布的版本号：写真版本号会被升版时的残留检查当成漏改的站点。
+    expect(handleSquirrelStartup([execPath, "--squirrel-obsolete", "9.9.9"], execPath, run)).toBe(
       true,
     );
     expect(calls).toEqual([]);
