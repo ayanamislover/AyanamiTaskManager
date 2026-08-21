@@ -27,6 +27,10 @@ function scratch(): string {
   return root;
 }
 
+// 夹具版本号不能取任何真实版本：升版时的残留扫描按「引号里出现旧版本号」判定
+// 漏改站点，用真实版本会把这个文件误报成版本站点，而它根本不是。
+const FIXTURE_VERSION = "9.9.9";
+
 /** Squirrel 安装：安装根有启动壳与 Update.exe，真实 exe 在 app-<version> 里。 */
 function squirrelInstall(version: string): { installRoot: string; execPath: string } {
   const installRoot = scratch();
@@ -43,12 +47,15 @@ describe("MCP 启动方式", () => {
   // 就把它指向一个不存在的文件——表现是「Agent 连不上」，而应用本身一切正常，
   // 没人会想到去看配置里那串版本号。实测配置停在 1.0.3、应用已经 1.0.10。
   it("产出的路径里不含任何版本号目录", () => {
-    const { installRoot, execPath } = squirrelInstall("1.0.10");
+    const { installRoot, execPath } = squirrelInstall(FIXTURE_VERSION);
     const dataDir = scratch();
     const launch = mcpLaunch({ execPath, dataDir });
 
     for (const path of [launch.command, ...launch.args]) {
-      expect({ path, pinned: path.includes("app-1.0.10") }).toEqual({ path, pinned: false });
+      expect({ path, pinned: path.includes(`app-${FIXTURE_VERSION}`) }).toEqual({
+        path,
+        pinned: false,
+      });
     }
     expect(launch.command).toBe(join(installRoot, "AyanamiTaskManager.exe"));
     expect(launch.args).toEqual([join(dataDir, MCP_STDIO_FILENAME)]);
@@ -66,7 +73,7 @@ describe("MCP 启动方式", () => {
     expect(mcpLaunch({ execPath, dataDir }).command).toBe(execPath);
 
     // 只有壳、没有 Update.exe 也不算：那可能是任何一个同名文件。
-    const half = squirrelInstall("1.0.10");
+    const half = squirrelInstall(FIXTURE_VERSION);
     rmSync(join(half.installRoot, "Update.exe"), { force: true });
     expect(mcpLaunch({ execPath: half.execPath, dataDir }).command).toBe(half.execPath);
   });
