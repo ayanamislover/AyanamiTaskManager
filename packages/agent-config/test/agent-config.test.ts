@@ -9,6 +9,9 @@ import {
   installClaudeCodeConfig,
   installClaudeConfig,
   installCodexConfig,
+  installedClaudeCodeLaunch,
+  installedClaudeLaunch,
+  installedCodexLaunch,
   manageAgentRule,
   renderMcpConfigs,
   uninstallAgentSkills,
@@ -275,5 +278,77 @@ describe("Agent MCP 配置适配", () => {
     expect(inspectManagedAgentRule(path).state).toBe("INSTALLED");
     manageAgentRule({ path, action: "UNINSTALL" });
     expect(readFileSync(path, "utf8")).toBe("Personal rule.\n");
+  });
+});
+
+// 判断「装没装」不够用：配置可以装着、却指向一个已经不存在的路径。要修就得先能
+// 读出登记的到底是什么，而且读回来的必须和写进去的逐字相同——否则每次启动都会
+// 判成「过期」，无休止地重写用户的配置文件。
+describe("读回已登记的 MCP 启动方式", () => {
+  const launch = {
+    command: "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\AyanamiTaskManager.exe",
+    args: ["C:\\Users\\x\\AppData\\Local\\AyanamiTaskManager\\mcp-stdio.cjs"],
+    env: { ELECTRON_RUN_AS_NODE: "1" },
+  };
+
+  it("Codex：写进去什么就读回什么，别人的段不影响", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-read-codex-"));
+    temporary.push(root);
+    const path = join(root, "config.toml");
+    writeFileSync(
+      path,
+      'model = "gpt"\n\n[mcp_servers.other]\ncommand = "other.exe"\nargs = ["x"]\n',
+      "utf8",
+    );
+    expect(installedCodexLaunch(path)).toBeNull();
+
+    installCodexConfig({ path, ...launch });
+    expect(installedCodexLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+  });
+
+  it("Claude Desktop：写进去什么就读回什么", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-read-claude-"));
+    temporary.push(root);
+    const path = join(root, "claude_desktop_config.json");
+    expect(installedClaudeLaunch(path)).toBeNull();
+
+    installClaudeConfig({ path, ...launch });
+    expect(installedClaudeLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+  });
+
+  it("Claude Code：写进去什么就读回什么", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-read-claude-code-"));
+    temporary.push(root);
+    const path = join(root, ".claude.json");
+    expect(installedClaudeCodeLaunch(path)).toBeNull();
+
+    installClaudeCodeConfig({
+      configPath: path,
+      ...launch,
+      cliPath: "claude",
+      runCli: (_cli, args) => {
+        const payload = JSON.parse(args[args.indexOf("add-json") + 2] as string) as Record<
+          string,
+          unknown
+        >;
+        writeFileSync(
+          path,
+          `${JSON.stringify({ mcpServers: { "ayanami-task-manager": payload } }, null, 2)}\n`,
+          "utf8",
+        );
+      },
+    });
+    expect(installedClaudeCodeLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+  });
+
+  // 坏文件不能让启动挂掉，也不能被当成「已登记但不一致」而触发重写。
+  it("文件损坏或没有这一项时返回 null", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-read-broken-"));
+    temporary.push(root);
+    const broken = join(root, "broken.json");
+    writeFileSync(broken, "{ not json", "utf8");
+    expect(installedClaudeLaunch(broken)).toBeNull();
+    expect(installedClaudeCodeLaunch(broken)).toBeNull();
+    expect(installedCodexLaunch(join(root, "missing.toml"))).toBeNull();
   });
 });
