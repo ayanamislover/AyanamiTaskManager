@@ -1,12 +1,15 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  assertStageInputsResolve,
   computeReleaseFingerprint,
   decideReleaseResume,
+  decideStageReuse,
   type ReleaseFingerprint,
   type ReleaseResumeDecision,
+  type StageDecision,
 } from "./release-fingerprint.js";
 
 type CommandResult = {
@@ -36,15 +39,26 @@ const commands: Array<{ name: string; args: string[] }> = [
 ];
 
 await mkdir(logDir, { recursive: true });
+// 声明烂掉会让阶段永远被复用且一路是绿的，所以在真实仓库上先验一次。
+assertStageInputsResolve(
+  execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+    cwd: root,
+    encoding: "utf8",
+  })
+    .split("\0")
+    .filter(Boolean),
+);
 const resume = process.argv.includes("--resume");
 const fingerprint = await computeReleaseFingerprint(root);
-const previous =
-  resume && existsSync(reportPath)
-    ? (JSON.parse(await readFile(reportPath, "utf8")) as {
-        fingerprint?: ReleaseFingerprint;
-        commands?: CommandResult[];
-      })
-    : null;
+// 按阶段复用不依赖 --resume：它就是「本地早就测过的东西不要再全量跑一遍」这句
+// 话本身。--full 强制全部重跑。
+const forceFull = process.argv.includes("--full");
+const previous = existsSync(reportPath)
+  ? (JSON.parse(await readFile(reportPath, "utf8")) as {
+      fingerprint?: ReleaseFingerprint;
+      commands?: CommandResult[];
+    })
+  : null;
 const resumeDecision: ReleaseResumeDecision = decideReleaseResume(
   resume,
   previous?.fingerprint,
@@ -58,6 +72,8 @@ const reusable = new Map(
     .filter((result) => result.exitCode === 0)
     .map((result) => [result.name, result]),
 );
+const previousByName = new Map((previous?.commands ?? []).map((result) => [result.name, result]));
+const stageDecisions: Record<string, StageDecision> = {};
 const results: CommandResult[] = [];
 
 async function run(name: string, args: string[]): Promise<CommandResult> {
@@ -98,9 +114,21 @@ async function run(name: string, args: string[]): Promise<CommandResult> {
 }
 
 for (const command of commands) {
-  const saved = reusable.get(command.name);
+  const stage = decideStageReuse(
+    command.name,
+    previous?.fingerprint,
+    fingerprint,
+    previousByName.get(command.name)?.exitCode,
+  );
+  stageDecisions[command.name] = stage;
+  const globallyReusable = reusable.get(command.name);
+  const stageReusable = !forceFull && stage.reuse ? previousByName.get(command.name) : undefined;
+  const saved = globallyReusable ?? stageReusable;
   const result = saved ?? (await run(command.name, command.args));
-  if (saved) process.stdout.write(`[release] ${command.name}: 复用已通过证据\n`);
+  if (saved) {
+    const why = globallyReusable ? resumeDecision.reason : stage.reason;
+    process.stdout.write(`[release] ${command.name}: 复用已通过证据（${why}）\n`);
+  }
   results.push(result);
   if (result.exitCode !== 0) break;
 }
@@ -115,6 +143,7 @@ await writeFile(
       completedAt: new Date().toISOString(),
       fingerprint,
       resume: resumeDecision,
+      stages: stageDecisions,
       commands: results,
     },
     null,
