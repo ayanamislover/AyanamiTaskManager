@@ -32,6 +32,9 @@ import {
   installClaudeCodeConfig,
   installClaudeConfig,
   installCodexConfig,
+  installedClaudeCodeLaunch,
+  installedClaudeLaunch,
+  installedCodexLaunch,
   installAgentSkills,
   isClaudeCodeConfigInstalled,
   isClaudeConfigInstalled,
@@ -43,6 +46,7 @@ import {
   uninstallClaudeConfig,
   uninstallCodexConfig,
   type AgentRuleAction,
+  type InstalledMcpLaunch,
   type McpClient,
 } from "@ayanami-task/agent-config";
 import { AyanamiTaskService } from "@ayanami-task/application";
@@ -53,6 +57,13 @@ import { handleSquirrelStartup } from "./squirrel.js";
 import { updateFeedDir, updateFeedReady } from "./updater.js";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
+import {
+  installMcpStdioBridge,
+  mcpLaunch,
+  mcpLaunchStale,
+  shouldRepairMcpConfigs,
+  type McpLaunch,
+} from "./mcp-launch.js";
 import {
   normalizeNotificationMode,
   notificationModes,
@@ -131,6 +142,61 @@ function applicationLogoPath(): string {
 
 function bundledDocumentationRoot(): string {
   return app.isPackaged ? process.resourcesPath : app.getAppPath();
+}
+
+// 只有这个文件不跟文档同一个相对位置：打包时它被 extraResource 摊平到 resources 根，
+// 开发态还在源码树里。
+function bundledMcpStdioPath(): string {
+  return app.isPackaged
+    ? join(process.resourcesPath, "mcp-stdio.cjs")
+    : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs");
+}
+
+/**
+ * 旧配置里的路径钉着 app-<version>，自更新之后就指向一个不存在的文件。光把新配置
+ * 写对不够：机器上那份旧的没人会去改——`isInstalled` 一直为真，界面一直显示「已安装」，
+ * 用户没有任何理由再点一次安装，只会看到 Agent 连不上而找不到原因。
+ *
+ * 所以每次启动核对一次，只动 ayanami-task-manager 这一项，且只在它与当前应当写入的
+ * 不一致时动。任何一个客户端出错都不能影响启动：记一笔，继续下一个。
+ */
+function repairStaleMcpConfigs(launch: McpLaunch): void {
+  const write = { command: launch.command, args: launch.args, env: launch.env };
+  const clients: Array<{
+    client: McpClient;
+    installed: () => InstalledMcpLaunch | null;
+    repair: () => void;
+  }> = [
+    {
+      client: "CODEX",
+      installed: () => installedCodexLaunch(),
+      repair: () => void installCodexConfig(write),
+    },
+    {
+      client: "CLAUDE",
+      installed: () => installedClaudeLaunch(),
+      repair: () => void installClaudeConfig(write),
+    },
+    {
+      // Claude Code 的 user scope 只能由 claude CLI 代写；找不到 CLI 时无从修起，
+      // 每次启动抛一次异常也没有意义。
+      client: "CLAUDE_CODE",
+      installed: () => (findClaudeCodeCli() === null ? null : installedClaudeCodeLaunch()),
+      repair: () => void installClaudeCodeConfig(write),
+    },
+  ];
+  for (const entry of clients) {
+    try {
+      if (!mcpLaunchStale(entry.installed(), launch)) continue;
+      entry.repair();
+      smokeTrace("mcp.config-repaired", entry.client);
+    } catch (error) {
+      smokeTrace("mcp.config-repair-failed", {
+        client: entry.client,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 // Claude Code 与 Claude Desktop 共用 ~/.claude/CLAUDE.md 与 ~/.claude/skills，
@@ -391,6 +457,7 @@ function installDesktopEventObservers(): void {
 async function startApplication(background: boolean): Promise<void> {
   const dataDir = dataDirBeforeReady();
   installAgentDocumentation(bundledDocumentationRoot(), dataDir);
+  installMcpStdioBridge(bundledMcpStdioPath(), dataDir);
   const migrationsRoot = join(app.getAppPath(), "migrations");
   service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
   const runtimeDir = join(dataDir, "runtime");
@@ -451,13 +518,11 @@ async function startApplication(background: boolean): Promise<void> {
     mainWindow?.close();
   });
   ipcMain.handle("atm:show-item", (_event, path: string) => shell.showItemInFolder(path));
-  const stdioCommand = process.execPath;
-  const stdioArgs = [
-    app.isPackaged
-      ? join(process.resourcesPath, "mcp-stdio.cjs")
-      : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs"),
-  ];
-  const stdioEnv = { ELECTRON_RUN_AS_NODE: "1" };
+  const launch = mcpLaunch({ execPath: process.execPath, dataDir: dataDirBeforeReady() });
+  const stdioCommand = launch.command;
+  const stdioArgs = launch.args;
+  const stdioEnv = launch.env;
+  if (shouldRepairMcpConfigs()) repairStaleMcpConfigs(launch);
   ipcMain.handle("atm:get-mcp-configs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
     return renderMcpConfigs({ ...runtime, command: stdioCommand, args: stdioArgs, env: stdioEnv });

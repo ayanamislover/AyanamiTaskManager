@@ -611,3 +611,65 @@ export function renderMcpConfigs(runtime: McpRuntime): {
     agentRule: AGENT_RULE_SNIPPET,
   };
 }
+
+export type InstalledMcpLaunch = { command: string; args: string[] };
+
+function launchFromServerConfig(server: Record<string, unknown> | null): InstalledMcpLaunch | null {
+  if (!server || typeof server.command !== "string") return null;
+  return {
+    command: server.command,
+    args: Array.isArray(server.args) ? server.args.map((value) => String(value)) : [],
+  };
+}
+
+function readJsonServerConfig(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
+    const server = content.mcpServers?.["ayanami-task-manager"];
+    return server && typeof server === "object" ? (server as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读出各客户端里 ATM 那一项当前登记的 command/args。
+ *
+ * 判断「装没装」不够用：配置可以装着、却指向一个已经不存在的路径。1.0.3 的
+ * 配置一路留到 1.0.10，isInstalled 全程为真，而 Agent 侧一直连不上。要修就得
+ * 先能读出登记的到底是什么。
+ */
+export function installedClaudeLaunch(path = defaultClaudeConfigPath()): InstalledMcpLaunch | null {
+  return launchFromServerConfig(readJsonServerConfig(path));
+}
+
+export function installedClaudeCodeLaunch(
+  path = defaultClaudeCodeConfigPath(),
+): InstalledMcpLaunch | null {
+  return launchFromServerConfig(readClaudeCodeServerConfig(path));
+}
+
+export function installedCodexLaunch(path = defaultCodexConfigPath()): InstalledMcpLaunch | null {
+  if (!existsSync(path)) return null;
+  let inside = false;
+  let command: string | null = null;
+  let args: string[] = [];
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
+    const header = line.trim().match(/^\[([^\]]+)\]$/u)?.[1];
+    if (header !== undefined) {
+      inside = new Set([
+        'mcp_servers."ayanami-task-manager"',
+        "mcp_servers.ayanami-task-manager",
+      ]).has(header);
+      continue;
+    }
+    if (!inside) continue;
+    // command/args 是本模块自己用 JSON.stringify 写出去的，反过来照样解得开。
+    const commandValue = line.trim().match(/^command\s*=\s*(".*")$/u)?.[1];
+    if (commandValue) command = JSON.parse(commandValue) as string;
+    const argsValue = line.trim().match(/^args\s*=\s*(\[.*\])$/u)?.[1];
+    if (argsValue) args = (JSON.parse(argsValue) as unknown[]).map((value) => String(value));
+  }
+  return command === null ? null : { command, args };
+}

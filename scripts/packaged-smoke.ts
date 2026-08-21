@@ -160,7 +160,11 @@ async function createThroughPackagedMcp(
 ): Promise<Record<string, unknown>> {
   const transport = new StdioClientTransport({
     command: executable,
-    args: [join(dirname(executable), "resources", "mcp-stdio.cjs")],
+    // 走数据根那一份，不是 resources 里的那一份。这正是应用写进 Agent 配置的位置，
+    // 而原先这里自己拼 dirname(executable)/resources/——于是烟测证明的是「桥能跑」，
+    // 从来没证明过「配置里写的那条路径能跑」。配置钉在 app-1.0.3 上一路留到 1.0.10，
+    // 每一轮烟测都是绿的。
+    args: [join(dataDir, "mcp-stdio.cjs")],
     cwd: root,
     env: { ...smokeEnvironment, ELECTRON_RUN_AS_NODE: "1" },
     stderr: "pipe",
@@ -245,6 +249,10 @@ try {
     definitionOfDone: ["MCP、事件、备份恢复与重启通过"],
   });
   check("创建独立项目数据库", existsSync(project.databasePath), project.databasePath);
+
+  // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
+  const bridgePath = join(dataDir, "mcp-stdio.cjs");
+  check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
 
   const live = await withProjectEvent(
     runtime,
