@@ -1,6 +1,15 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   installClaudeConfig,
@@ -9,9 +18,11 @@ import {
   installedCodexLaunch,
 } from "@ayanami-task/agent-config";
 import {
+  installMcpRuntimeLink,
   installMcpStdioBridge,
   mcpLaunch,
   mcpLaunchStale,
+  MCP_RUNTIME_LINK,
   MCP_STDIO_FILENAME,
   shouldRepairMcpConfigs,
 } from "../src/mcp-launch.js";
@@ -43,33 +54,82 @@ function squirrelInstall(version: string): { installRoot: string; execPath: stri
 }
 
 describe("MCP 启动方式", () => {
-  // 曾经改用过安装根那个启动壳，因为它的路径不带版本号。那是错的：它是给 GUI 用的
-  // launcher，拉起真实 exe 之后自己就退出（实测 +5542ms，code 0，stdin 还开着；
-  // 真实 exe 同样条件下 12 秒全程存活）。握手会成功——输出经继承的管道回来了——
-  // 但 MCP 客户端盯的是直接子进程，它一退客户端就判定 server 挂了。
-  //
-  // 也就是说「只验握手不验进程寿命」正是当时放过它的原因，所以这条守卫钉的是
-  // 「command 不是那个壳」，而寿命本身由 packaged-smoke 在真打包件上验。
-  it("command 用真实 exe，不用安装根的 Squirrel 启动壳", () => {
+  // 装了链接之后，command 与 args 都不认版本。这是这套东西唯一的目的：
+  // 客户端在会话开始时把配置读进内存，之后 ATM 再怎么改盘上那份都影响不到它，
+  // 所以路径本身必须永远有效，而不是靠别人重新读一遍配置。
+  it("command 走数据根下版本无关的链接，不带 app-<version>", () => {
     const { installRoot, execPath } = squirrelInstall(FIXTURE_VERSION);
-    const launch = mcpLaunch({ execPath, dataDir: scratch() });
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+    const launch = mcpLaunch({ execPath, dataDir });
 
-    expect(launch.command).toBe(execPath);
+    expect(launch.command).toBe(join(dataDir, MCP_RUNTIME_LINK, "AyanamiTaskManager.exe"));
+    expect(launch.command).not.toContain(`app-${FIXTURE_VERSION}`);
+    // 也不是安装根那个启动壳：它是给 GUI 用的 launcher，拉起真实 exe 之后自己就退出
+    //（实测 +5542ms，code 0，stdin 还开着；真实 exe 同样条件下 12 秒全程存活）。
+    // 握手会成功——输出经继承的管道回来了——但客户端盯的是直接子进程。
     expect(launch.command).not.toBe(join(installRoot, "AyanamiTaskManager.exe"));
     expect(launch.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
+    // 穿透之后拿到的确实是 app-<version> 里那个真实 exe。
+    expect(readFileSync(launch.command, "utf8")).toBe("real");
   });
 
-  // command 认版本号是有意的取舍，安全性来自启动时的修复：桥接脚本要读
-  // runtime/daemon.json 才能干活，也就是 ATM 必须正在运行；而 ATM 一启动就已经把
-  // 配置修到自己这一版了，Squirrel 也不会删掉正在运行的那一版。
-  it("换了版本目录就判为过期，交给启动时修复跟上", () => {
+  // 1.0.12 是靠「每次启动把配置改回当前版本」兜的，兜不住已经把配置读进内存的客户端。
+  // 现在换版本对配置是零改动，也就没有需要客户端配合的时机。
+  it("换了版本目录，启动方式一字不变，也不判为过期", () => {
     const dataDir = scratch();
-    const before = mcpLaunch({ execPath: squirrelInstall("1.0.1").execPath, dataDir });
-    const after = mcpLaunch({ execPath: squirrelInstall("1.0.2").execPath, dataDir });
+    const first = squirrelInstall("1.0.1").execPath;
+    const second = squirrelInstall("1.0.2").execPath;
 
-    expect(mcpLaunchStale(before, after)).toBe(true);
-    // 而参数不跟着版本走：少一处要跟版本的东西，就少一处会走丢。
-    expect(before.args).toEqual(after.args);
+    installMcpRuntimeLink(first, dataDir);
+    const before = mcpLaunch({ execPath: first, dataDir });
+    installMcpRuntimeLink(second, dataDir);
+    const after = mcpLaunch({ execPath: second, dataDir });
+
+    expect(after).toEqual(before);
+    expect(mcpLaunchStale(before, after)).toBe(false);
+    // 而链接确实换指了：拿到的是新版本那个 exe。
+    expect(readlinkSync(join(dataDir, MCP_RUNTIME_LINK))).toBe(dirname(second));
+  });
+
+  it("已经指对时不重建——重建的空窗期里 spawn 会失败", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const link = installMcpRuntimeLink(execPath, dataDir)!;
+    const created = lstatSync(link).ctimeMs;
+
+    expect(installMcpRuntimeLink(execPath, dataDir)).toBe(link);
+    expect(lstatSync(link).ctimeMs).toBe(created);
+  });
+
+  // 这条链接指向的是**安装根**。数据根被递归删除的场合到处都是（烟测的临时数据根、
+  // 用户清数据），只要哪个删除动作穿透了链接，删掉的就是用户装好的应用。
+  it("递归删掉数据根不会穿透链接删掉安装目录", () => {
+    const { installRoot, execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+
+    rmSync(dataDir, { recursive: true, force: true });
+
+    expect({ dataDir: existsSync(dataDir), exe: existsSync(execPath) }).toEqual({
+      dataDir: false,
+      exe: true,
+    });
+    expect(existsSync(installRoot)).toBe(true);
+  });
+
+  // 位置被真目录占了就退开：那不是我们建的，删它等于替用户做主删他的东西。
+  // 回落到真实 exe——那是 1.0.12 的行为，是下限不是缺陷。
+  it("位置被真目录占住时回落到真实 exe，不动那个目录", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const squatter = join(dataDir, MCP_RUNTIME_LINK);
+    mkdirSync(squatter, { recursive: true });
+    writeFileSync(join(squatter, "someone-elses.txt"), "keep", "utf8");
+
+    expect(installMcpRuntimeLink(execPath, dataDir)).toBeNull();
+    expect(readFileSync(join(squatter, "someone-elses.txt"), "utf8")).toBe("keep");
+    expect(mcpLaunch({ execPath, dataDir }).command).toBe(execPath);
   });
 
   it("桥接脚本的路径落在数据根，且不含版本号", () => {
