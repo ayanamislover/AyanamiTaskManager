@@ -1,43 +1,38 @@
 import { copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 
 export const MCP_STDIO_FILENAME = "mcp-stdio.cjs";
 
 export type McpLaunch = { command: string; args: string[]; env: Record<string, string> };
 
 /**
- * 写进 Agent 的 MCP 配置里的每一个路径都必须与版本号无关。
+ * MCP 配置里的 `command` 必须是一个**会一直活着**的进程，`args` 必须与版本号无关。
+ * 这两条约束互相拉扯，最后的取舍是：command 认版本、靠启动时修复跟上；args 不认版本。
  *
- * 原先两处都带 `app-<version>`：可执行文件取自 `process.execPath`，桥接脚本取自
- * `process.resourcesPath`。Squirrel 每次更新都把新版本铺到一个新的 `app-<version>`
- * 目录，旧目录迟早被删——于是配置指向一个不存在的文件。它的表现是「Agent 连不上
- * ATM」，而应用本身完全正常，日志里也没有任何异常，没人会想到去看配置里那串版本号。
- * 实测配置停在 1.0.3、应用已经跑到 1.0.10 才被发现，中间每一次自更新都在扩大裂口。
+ * 起因：原先两处都带 `app-<version>`（execPath 与 resourcesPath），而 Squirrel 每次更新
+ * 都换一个 `app-<version>` 目录，旧目录迟早被删。表现只有「Agent 连不上 ATM」一条，
+ * 应用本身完全正常。实测配置停在 1.0.3、应用已经跑到 1.0.10。
  *
- * 这个缺陷是自更新带来的：以前每次发版都卸载重装、顺手重新安装配置，版本号是对的。
- * 一旦应用能自己换版本而配置不跟着换，版本号就成了两边之间的硬耦合。
+ * **不能用 Squirrel 在安装根留下的那个启动壳**，尽管它的路径不带版本号。它是给 GUI
+ * 准备的 launcher：拉起真实 exe 之后自己就退出。实测同一份配置下——
  *
- * 两处都换成不随版本变的位置：
- * - 可执行文件用 Squirrel 在安装根留下的启动壳。它永远拉最新的 `app-<version>`，
- *   并且原样转发参数与 `ELECTRON_RUN_AS_NODE`（已实测：与真实 exe 输出逐字相同）。
- * - 桥接脚本复制一份到数据根，那里跨版本稳定；每次启动覆盖，随应用一起更新。
+ *   启动壳：+5542ms 自行退出 code=0（stdin 仍打开）
+ *   真实 exe：12 秒全程存活
  *
- * portable 包不是 Squirrel 安装，没有启动壳，这时只能用 execPath——但 portable
- * 解压到哪跑到哪，本来就没有「更新换目录」这回事。
+ * ——握手能成功（输出经继承的管道回来了），可 MCP 客户端盯的是直接子进程：它一退，
+ * 客户端就判定 server 挂了。只验握手不验进程寿命，会得到「测着是通的、用起来是断的」。
+ *
+ * 所以 command 用真实 exe，认版本号；让它安全的是启动时的修复（见 mcpLaunchStale）。
+ * 这条链路是自洽的：桥接脚本要读 `runtime/daemon.json` 才能干活，也就是说 ATM 必须
+ * 正在运行；而 ATM 一旦启动就已经把配置修到自己这一版了。Squirrel 也不会删掉正在
+ * 运行的那一版。因此「配置指向的 exe 不存在」这个状态不会出现。
+ *
+ * args 仍然不认版本：桥接脚本复制一份到数据根，每次启动覆盖。少一处要跟着版本走的
+ * 东西，就少一处会走丢。
  */
-export function mcpLaunch(input: {
-  execPath: string;
-  dataDir: string;
-  exists?: (path: string) => boolean;
-}): McpLaunch {
-  const exists = input.exists ?? existsSync;
-  const installRoot = resolve(dirname(input.execPath), "..");
-  const stub = join(installRoot, "AyanamiTaskManager.exe");
-  // 只有 Squirrel 安装才有 Update.exe。两个都在才认这是启动壳，否则宁可用 execPath：
-  // 猜错方向会写出一个根本不存在的 command，比版本钉死还糟。
-  const squirrelInstall = exists(join(installRoot, "Update.exe")) && exists(stub);
+export function mcpLaunch(input: { execPath: string; dataDir: string }): McpLaunch {
   return {
-    command: squirrelInstall ? stub : input.execPath,
+    command: input.execPath,
     args: [join(input.dataDir, MCP_STDIO_FILENAME)],
     env: { ELECTRON_RUN_AS_NODE: "1" },
   };

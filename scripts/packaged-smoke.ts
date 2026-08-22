@@ -5,6 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AyanamiClient } from "../packages/client/src/index.js";
+import { mcpLaunch } from "../apps/desktop/src/mcp-launch.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 type RunningApp = { child: ChildProcess; stderr: string[] };
@@ -153,20 +154,66 @@ async function withProjectEvent<T>(
   });
 }
 
+/**
+ * MCP 客户端盯的是它直接拉起的那个进程：那个进程一退，客户端就判定 server 挂了，
+ * 哪怕响应已经从继承的管道回来过。
+ *
+ * 1.0.11 把 command 改成 Squirrel 的启动壳（路径不带版本号，看着更对），而那是给
+ * GUI 用的 launcher：拉起真实 exe 之后自己就退出。实测 +5542ms 退出、code 0。
+ * 当时验了握手、没验寿命，于是得到「测着是通的、用起来是断的」——用户那边每开一次
+ * 会话报一次错。
+ *
+ * 所以这条单独验寿命：保持 stdin 打开、什么都不发，看它到点还在不在。
+ */
+async function checkMcpProcessOutlivesHandshake(): Promise<void> {
+  const launch = mcpLaunch({ execPath: executable, dataDir });
+  const child = spawn(launch.command, launch.args, {
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let exitedAfterMs: number | null = null;
+  const started = Date.now();
+  child.once("exit", () => (exitedAfterMs = Date.now() - started));
+  child.stdin?.write(
+    `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2024-11-05",
+        capabilities: {},
+        clientInfo: { name: "packaged-smoke", version: "1.0.0" },
+      },
+    })}\n`,
+  );
+  // 门槛取 9 秒：启动壳那次是 5.5 秒退的，留足余量又不至于把烟测拖长。
+  await delay(9_000);
+  const alive = exitedAfterMs === null;
+  child.kill();
+  check(
+    "MCP 进程在握手后仍然存活",
+    alive,
+    alive ? launch.command : `${launch.command} 在 +${String(exitedAfterMs)}ms 就退出了`,
+  );
+}
+
 async function createThroughPackagedMcp(
   project: string,
   title: string,
   opId: string,
 ): Promise<Record<string, unknown>> {
+  // 直接用应用写进 Agent 配置的那一份，不再自己拼。原先这里拼的是
+  // dirname(executable)/resources/mcp-stdio.cjs——于是烟测证明的是「桥能跑」，
+  // 从来没证明过「配置里写的那条路径能跑」。配置钉在 app-1.0.3 上一路留到 1.0.10，
+  // 每一轮烟测都是绿的。
+  const launch = mcpLaunch({ execPath: executable, dataDir });
   const transport = new StdioClientTransport({
-    command: executable,
-    // 走数据根那一份，不是 resources 里的那一份。这正是应用写进 Agent 配置的位置，
-    // 而原先这里自己拼 dirname(executable)/resources/——于是烟测证明的是「桥能跑」，
-    // 从来没证明过「配置里写的那条路径能跑」。配置钉在 app-1.0.3 上一路留到 1.0.10，
-    // 每一轮烟测都是绿的。
-    args: [join(dataDir, "mcp-stdio.cjs")],
+    command: launch.command,
+    args: launch.args,
     cwd: root,
-    env: { ...smokeEnvironment, ELECTRON_RUN_AS_NODE: "1" },
+    env: { ...smokeEnvironment, ...launch.env },
     stderr: "pipe",
   });
   const stderr: string[] = [];
@@ -253,6 +300,7 @@ try {
   // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
   const bridgePath = join(dataDir, "mcp-stdio.cjs");
   check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
+  await checkMcpProcessOutlivesHandshake();
 
   const live = await withProjectEvent(
     runtime,
