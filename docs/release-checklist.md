@@ -1,6 +1,6 @@
 # 发布清单
 
-本清单适用于 Windows x64 的 1.0.11 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
+本清单适用于 Windows x64 的 1.0.12 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
 
 勾选一律以 `release/test-report` 里可复核的证据为准：命令退出码、smoke 的逐项 JSON、benchmark 的阈值与实测、以及安装后对运行实例的实测。没有对应证据的条目保持未勾选，并在文末“非阻塞剩余项”里写明缺口。
 
@@ -40,7 +40,7 @@
 一条命令走完升版、十阶段、卸载、安装与实测：
 
 ```powershell
-pnpm exec tsx scripts/release-and-install.ts --version 1.0.11
+pnpm exec tsx scripts/release-and-install.ts --version 1.0.12
 ```
 
 它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
@@ -73,8 +73,8 @@ pnpm exec tsx scripts/assemble-release.ts
 
 ```text
 release/
-├─ AyanamiTaskManager-Setup-1.0.11-win-x64.exe
-├─ AyanamiTaskManager-1.0.11-win-x64-portable.zip
+├─ AyanamiTaskManager-Setup-1.0.12-win-x64.exe
+├─ AyanamiTaskManager-1.0.12-win-x64-portable.zip
 ├─ SHA256SUMS.txt
 ├─ release.json
 ├─ sbom.spdx.json
@@ -99,7 +99,7 @@ release/
 - [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
 - [x] 发布结论只引用 `release/test-report` 中可复核证据
 
-## 1.0.11 非阻塞剩余项
+## 1.0.12 非阻塞剩余项
 
 以下四条至今没有可复核证据，一律保持未勾选。它们在 1.0.2 及更早的清单里是勾上的，但仓库里始终没有对应用例——即那些勾属于超额声明，自 1.0.3 起按清单自身的规矩改回未验证。功能本身没有已知缺陷，只是没有守卫，因此列为非阻塞。
 
@@ -116,49 +116,52 @@ release/
 
 同时记下一次有意的放宽：加入第 12 个工具 `atm_checklist`（471 字节）后总长 8085，超过原先钉的 `8_000`，因此把守卫对齐到本清单一直写着的 8 KB（8192 字节）。这不是把标准改到能过——文档要求的一直是 8 KB——但它确实吃掉了原有 192 字节的余量，下一个工具再进来时预算就真的紧了。
 
-## 1.0.11 验收结果
+## 1.0.12 验收结果
 
-**十阶段 10/10**，执行 142.1 秒、跳过 46.9 秒（benchmark 判为 `stage-inputs-unchanged` 复用；
-e2e 与 distribution-smoke 因为改动碰了 `apps/desktop/src/` 与 `scripts/` 而重跑）。
+**十阶段 10/10**，执行 168.7 秒、跳过 46.9 秒（benchmark 复用）。
 
-- 单元/集成 **185 通过**（67 个文件）；e2e **13 通过 / 0 失败 / 0 flaky**。
-- packaged / portable / installed smoke 各 **15/15**（比上轮多的一条是「MCP 桥接脚本安装到
-  数据根」）；distribution-smoke **19/19**。
-- benchmark 沿用上一轮实测，全部低于阈值。
+- 单元/集成 **187 通过**（67 个文件）；e2e **13 通过 / 0 失败 / 0 flaky**。
+- packaged / portable / installed smoke 各 **16/16**（新增的是「MCP 进程在握手后仍然存活」）；
+  distribution-smoke **19/19**。
 
 | 产物                                             | SHA-256                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------ |
-| `AyanamiTaskManager-Setup-1.0.11-win-x64.exe`    | `884A8D7F29E461ACA69B8E727690D72BAE17A8A360B65F7261855A2D330B544A` |
-| `AyanamiTaskManager-1.0.11-win-x64-portable.zip` | `16773234E5F9CCC9B43A416BB362ABA45F44AD71CC3CD6352B518C2F5BFEF6F7` |
+| `AyanamiTaskManager-Setup-1.0.12-win-x64.exe`    | `FDA147BD5138274D184DBBD4509F196E144832555A796DE0C5DC208D71FABA1C` |
+| `AyanamiTaskManager-1.0.12-win-x64-portable.zip` | `3690E28186048A4C99526AA983811D0CCBB992780468B82BA73884EF8AA1E26A` |
 
-**对装机版实测**：`app-1.0.11`，`system/status` 报 `version=1.0.11`、`ok=true`、`projectCount=10`。
+### 本轮修的：1.0.11 用错了 Squirrel 启动壳
 
-### 本轮修的：MCP 配置被版本号钉死
+1.0.11 为了让 MCP 配置不带版本号，把 `command` 换成安装根那个启动壳。**那是错的**，
+而当时的验证不足以发现它：只验了握手，没验进程寿命。
 
-写进 Agent MCP 配置的两个路径都带 `app-<version>`。自更新换目录、旧目录被删之后，配置就
-指向一个不存在的文件。表现只是「Agent 连不上 ATM」——应用本身完全正常，日志里没有任何异常。
-实测 **Codex 的配置停在 1.0.3**（自更新上线以来一直是断的，没人发现），两个 Claude 的配置是
-用户手动改回来的。
+启动壳是给 GUI 用的 launcher，拉起真实 exe 之后自己就退出。同一份配置下实测：
 
-这是自更新带来的：以前每次发版都卸载重装、顺手重装配置，版本号总是对的。
+| 直接子进程      | 结果                                        |
+| --------------- | ------------------------------------------- |
+| Squirrel 启动壳 | **+5542ms 自行退出 code=0**（stdin 仍打开） |
+| 真实 exe        | 12 秒全程存活                               |
 
-修完之后在真机上逐条核对：
+握手是成功的——输出经继承的管道回来了——但 MCP 客户端盯的是它直接拉起的那个进程，
+它一退客户端就判定 server 挂了。结果是「测着是通的、用起来是断的」，用户每开一次会话
+报一次错。**这是同一个缺陷的第二次：1.0.10 那次是只验了「桥能跑」没验「配置里的路径能
+跑」，1.0.11 这次是只验了「能握手」没验「能一直活着」。两次都是验收面比真实使用面窄。**
 
-| 客户端         | 修复后的 command                                     | 参数                                 |
-| -------------- | ---------------------------------------------------- | ------------------------------------ |
-| Codex          | `…\AyanamiTaskManagerDesktop\AyanamiTaskManager.exe` | `…\AyanamiTaskManager\mcp-stdio.cjs` |
-| Claude Desktop | 同上                                                 | 同上                                 |
-| Claude Code    | 同上                                                 | 同上                                 |
+改回真实 exe。`command` 因此重新认版本号，这是有意的取舍，安全性来自 1.0.11 已经加好的
+启动时修复，而且链路是自洽的：桥接脚本要读 `runtime/daemon.json` 才能干活，也就是 ATM
+必须正在运行，而 ATM 一启动就已经把配置修到自己这一版；Squirrel 也不会删掉正在运行的
+那一版。`args` 仍然不认版本。
 
-- 三条路径里都没有版本号，两个文件都真实存在。
-- 按配置原样起进程做了一次真实握手：`initialize` 返回 `ayanami-task-manager 1.0.11`，
-  `tools/list` 返回 **12 个工具**。
-- 幂等实测：重启应用一次，`~/.codex` 与 `%APPDATA%\Claude` 的 `.bak-*` 数量都**没有增加**
-  （34 / 4 保持不变）。这条必须验——修复改成每次启动自动跑，比对差一个字节就会每启动一次
-  重写一次，而每次重写留一份备份。
+**真机验证**（1.0.12 装完后）：
 
-这个缺陷能一路溜到 1.0.10，是因为 packaged-smoke 自己拼 `dirname(executable)/resources/`，
-从来没用过应用写进配置的那条路径：它证明的是「桥能跑」，不是「配置里写的路径能跑」。
-现在它走数据根那一份，并多了一条「MCP 桥接脚本安装到数据根」的检查。
+- Codex / Claude Desktop / Claude Code 三份配置的 `command` 都已改写为 `app-1.0.12\…exe`，
+  `args` 都是数据根那一份，两个路径都真实存在。
+- 按配置原样起进程：**15 秒全程存活**，`initialize` 返回 `ayanami-task-manager 1.0.12`，
+  空闲 14 秒后再发 `tools/list` 仍返回 12 个工具。
+- 配置备份从 34 份收敛到 **5 份**（新加的保留上限）——`command` 认版本意味着每发一版就
+  重写三份配置各留一个 `.bak`，不设上限会一直堆下去。
 
-**勾选 28/32**，其余四条见「1.0.11 非阻塞剩余项」，与 1.0.6 起相同，本轮无新增缺口。
+守卫补在了会真正拦住它的地方：packaged-smoke 现在直接用 `mcpLaunch` 的产出（不再自己拼
+路径），并单独验一条进程寿命（保持 stdin 打开、9 秒后必须还活着）。验红：把 `command`
+改回启动壳，该检查报「在 +5561ms 就退出了」。
+
+**勾选 28/32**，其余四条见「1.0.12 非阻塞剩余项」，本轮无新增缺口。
