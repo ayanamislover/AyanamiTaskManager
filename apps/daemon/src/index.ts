@@ -109,7 +109,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const doctor = await options.service.doctor();
     return {
       ok: doctor.registry.ok && doctor.projects.every((project) => project.ok),
-      version: "1.0.12",
+      version: "1.0.13",
       sqlite: doctor.registry,
       projectCount: doctor.projects.length,
       at: new Date().toISOString(),
