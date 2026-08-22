@@ -43,39 +43,45 @@ function squirrelInstall(version: string): { installRoot: string; execPath: stri
 }
 
 describe("MCP 启动方式", () => {
-  // 这条是本次缺陷的核心不变量。配置里只要留下一个 app-<version>，下一次自更新
-  // 就把它指向一个不存在的文件——表现是「Agent 连不上」，而应用本身一切正常，
-  // 没人会想到去看配置里那串版本号。实测配置停在 1.0.3、应用已经 1.0.10。
-  it("产出的路径里不含任何版本号目录", () => {
+  // 曾经改用过安装根那个启动壳，因为它的路径不带版本号。那是错的：它是给 GUI 用的
+  // launcher，拉起真实 exe 之后自己就退出（实测 +5542ms，code 0，stdin 还开着；
+  // 真实 exe 同样条件下 12 秒全程存活）。握手会成功——输出经继承的管道回来了——
+  // 但 MCP 客户端盯的是直接子进程，它一退客户端就判定 server 挂了。
+  //
+  // 也就是说「只验握手不验进程寿命」正是当时放过它的原因，所以这条守卫钉的是
+  // 「command 不是那个壳」，而寿命本身由 packaged-smoke 在真打包件上验。
+  it("command 用真实 exe，不用安装根的 Squirrel 启动壳", () => {
     const { installRoot, execPath } = squirrelInstall(FIXTURE_VERSION);
-    const dataDir = scratch();
-    const launch = mcpLaunch({ execPath, dataDir });
+    const launch = mcpLaunch({ execPath, dataDir: scratch() });
 
-    for (const path of [launch.command, ...launch.args]) {
-      expect({ path, pinned: path.includes(`app-${FIXTURE_VERSION}`) }).toEqual({
-        path,
-        pinned: false,
-      });
-    }
-    expect(launch.command).toBe(join(installRoot, "AyanamiTaskManager.exe"));
-    expect(launch.args).toEqual([join(dataDir, MCP_STDIO_FILENAME)]);
+    expect(launch.command).toBe(execPath);
+    expect(launch.command).not.toBe(join(installRoot, "AyanamiTaskManager.exe"));
     expect(launch.env).toEqual({ ELECTRON_RUN_AS_NODE: "1" });
   });
 
-  // portable 不是 Squirrel 安装，没有启动壳。猜错方向会写出一个根本不存在的
-  // command，比版本钉死还糟——所以两个文件都在才认。
-  it("没有 Squirrel 启动壳时退回 execPath", () => {
-    const root = scratch();
-    mkdirSync(join(root, "AyanamiTaskManager-win32-x64"), { recursive: true });
-    const execPath = join(root, "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe");
-    writeFileSync(execPath, "portable", "utf8");
+  // command 认版本号是有意的取舍，安全性来自启动时的修复：桥接脚本要读
+  // runtime/daemon.json 才能干活，也就是 ATM 必须正在运行；而 ATM 一启动就已经把
+  // 配置修到自己这一版了，Squirrel 也不会删掉正在运行的那一版。
+  it("换了版本目录就判为过期，交给启动时修复跟上", () => {
     const dataDir = scratch();
-    expect(mcpLaunch({ execPath, dataDir }).command).toBe(execPath);
+    const before = mcpLaunch({ execPath: squirrelInstall("1.0.1").execPath, dataDir });
+    const after = mcpLaunch({ execPath: squirrelInstall("1.0.2").execPath, dataDir });
 
-    // 只有壳、没有 Update.exe 也不算：那可能是任何一个同名文件。
-    const half = squirrelInstall(FIXTURE_VERSION);
-    rmSync(join(half.installRoot, "Update.exe"), { force: true });
-    expect(mcpLaunch({ execPath: half.execPath, dataDir }).command).toBe(half.execPath);
+    expect(mcpLaunchStale(before, after)).toBe(true);
+    // 而参数不跟着版本走：少一处要跟版本的东西，就少一处会走丢。
+    expect(before.args).toEqual(after.args);
+  });
+
+  it("桥接脚本的路径落在数据根，且不含版本号", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const launch = mcpLaunch({ execPath, dataDir });
+
+    expect(launch.args).toEqual([join(dataDir, MCP_STDIO_FILENAME)]);
+    expect({
+      arg: launch.args[0],
+      pinned: launch.args[0]!.includes(`app-${FIXTURE_VERSION}`),
+    }).toEqual({ arg: launch.args[0], pinned: false });
   });
 
   it("桥接脚本复制到数据根，源缺失时大声报错", () => {

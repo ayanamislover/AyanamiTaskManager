@@ -7,7 +7,11 @@ const scriptsRoot = join(process.cwd(), "scripts");
 
 // check 的第三个参数是失败时唯一会被打印的东西。进程类检查若直接把布尔量交上去，
 // 报错就只剩「未通过」，看不出是谁占着——发布卡住时这句话等于没说。
-const bareProcessCheck = /check\(\s*[`"'][^`"']*进程/u;
+// 「不带 detail」原先是拿「出现了『进程』二字」近似的：那时 scripts 里所有进程类
+// check 都走 checkNoAppProcess，近似成立。现在 packaged-smoke 有一条自己带 detail 的
+// 进程检查，近似开始误伤——而误伤的代价是逼人给检查改名去讨好守卫，那比漏检更糟。
+// 收紧成真正判断「只有两个实参」：字符串、逗号、一个不含逗号的表达式，然后就收尾。
+const bareProcessCheck = /check\(\s*[`"'][^`"']*进程[^`"']*[`"']\s*,\s*[^,;]*\);/u;
 
 const tasklistOutput = [
   '"AyanamiTaskManager.exe","972","Console","1","185,236 K"',
@@ -47,5 +51,9 @@ describe("发布验收的同名进程诊断", () => {
       true,
     );
     expect(bareProcessCheck.test("check(`${name}没有运行中的应用进程`, !running);")).toBe(true);
+    // 反向对照：带了 detail 的进程类 check 不能被判成违规，否则唯一的出路是改名。
+    expect(bareProcessCheck.test('check("MCP 进程在握手后仍然存活", alive, launch.command);')).toBe(
+      false,
+    );
   });
 });

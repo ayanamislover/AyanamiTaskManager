@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +20,7 @@ import {
   installedClaudeCodeLaunch,
   installedClaudeLaunch,
   installedCodexLaunch,
+  BACKUP_RETENTION,
   manageAgentRule,
   renderMcpConfigs,
   uninstallAgentSkills,
@@ -350,5 +359,37 @@ describe("读回已登记的 MCP 启动方式", () => {
     expect(installedClaudeLaunch(broken)).toBeNull();
     expect(installedClaudeCodeLaunch(broken)).toBeNull();
     expect(installedCodexLaunch(join(root, "missing.toml"))).toBeNull();
+  });
+});
+
+// 备份原本只在用户手动点安装时产生，攒得慢。改成每次启动核对、版本变了就重写之后，
+// 每发一版给三个客户端各留一份，一年就是几百个文件躺在 ~/.codex 和 %APPDATA%\Claude 里。
+describe("配置备份保留上限", () => {
+  it("只保留最近几份，且只删自己的备份", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-backup-retention-"));
+    temporary.push(root);
+    const path = join(root, "claude_desktop_config.json");
+    // 别人的文件和别人的备份都不能被碰到。
+    const foreign = join(root, "other.json");
+    const foreignBackup = join(root, "other.json.bak-2020-01-01T00-00-00-000Z-aaaaaa");
+    writeFileSync(foreign, "{}", "utf8");
+    writeFileSync(foreignBackup, "{}", "utf8");
+
+    // 写 BACKUP_RETENTION + 3 次，每次都会先备份上一版。
+    const marker = (index: number) => `ATM_BACKUP_MARKER_${String(index)}`;
+    for (let i = 0; i < BACKUP_RETENTION + 3; i += 1) {
+      installClaudeConfig({ path, command: marker(i) });
+    }
+    const backups = readdirSync(root).filter((name) =>
+      name.startsWith("claude_desktop_config.json.bak-"),
+    );
+    expect(backups).toHaveLength(BACKUP_RETENTION);
+    // 留下的必须是最新那几份：最早那次写的 v0 不该还在。
+    const contents = backups.map((name) => readFileSync(join(root, name), "utf8"));
+    expect(contents.some((text) => text.includes(marker(0)))).toBe(false);
+    expect(contents.some((text) => text.includes(marker(BACKUP_RETENTION + 1)))).toBe(true);
+
+    expect(existsSync(foreign)).toBe(true);
+    expect(existsSync(foreignBackup)).toBe(true);
   });
 });

@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export const AGENT_RULE_SNIPPET =
   "执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。受管开发任务开始实现前必须按可交付结果和可验证验收拆分成可独立验收的工作项。";
@@ -150,6 +150,28 @@ function backupName(path: string): string {
   return `${path}.bak-${stamp}-${randomBytes(3).toString("hex")}`;
 }
 
+export const BACKUP_RETENTION = 5;
+
+/**
+ * 备份原本只在用户手动点安装时产生，攒得慢。改成每次启动核对、版本变了就重写之后，
+ * 每发一版就给三个客户端各留一份——一年下来几百个文件躺在 ~/.codex 和 %APPDATA%\Claude
+ * 里，而有价值的只有最近那几份。实测在加这条之前 ~/.codex 已经攒了 34 个。
+ *
+ * 只删自己这个文件的备份（按 `<basename>.bak-` 前缀），别人的东西一律不碰。
+ * 名字里的时间戳是 ISO 的，所以按名字倒序就是按时间倒序。
+ */
+function pruneBackups(path: string, keep = BACKUP_RETENTION): string[] {
+  const directory = dirname(path);
+  const prefix = `${basename(path)}.bak-`;
+  const stale = readdirSync(directory)
+    .filter((name) => name.startsWith(prefix))
+    .sort()
+    .reverse()
+    .slice(keep);
+  for (const name of stale) rmSync(join(directory, name), { force: true });
+  return stale;
+}
+
 function replaceFileWithBackup(path: string, content: string): string | null {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
@@ -162,11 +184,17 @@ function replaceFileWithBackup(path: string, content: string): string | null {
   renameSync(path, backupPath);
   try {
     renameSync(temporary, path);
-    return backupPath;
   } catch (error) {
     if (!existsSync(path) && existsSync(backupPath)) renameSync(backupPath, path);
     throw error;
   }
+  // 只在新文件已经就位之后才清旧备份：清理失败不该让一次成功的写入变成失败。
+  try {
+    pruneBackups(path);
+  } catch {
+    /* 备份清理是卫生问题，不是正确性问题 */
+  }
+  return backupPath;
 }
 
 function tomlString(value: string): string {
