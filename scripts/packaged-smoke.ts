@@ -1,11 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AyanamiClient } from "../packages/client/src/index.js";
-import { mcpLaunch } from "../apps/desktop/src/mcp-launch.js";
+import { MCP_RUNTIME_LINK, mcpLaunch } from "../apps/desktop/src/mcp-launch.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 type RunningApp = { child: ChildProcess; stderr: string[] };
@@ -300,6 +300,22 @@ try {
   // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
   const bridgePath = join(dataDir, "mcp-stdio.cjs");
   check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
+
+  // 写进 Agent 配置的 command 也不能带版本号。1.0.12 是靠「启动时把配置改回当前版本」
+  // 兜的，可那只改得动盘上的文件，改不动已经把配置读进内存的客户端——Claude 桌面版
+  // 一个会话里始终拿启动那一刻的路径去 spawn，于是用户看到 app-1.0.10 ENOENT。
+  // 路径本身不认版本，客户端拿多旧的配置都无所谓。
+  const launchPath = mcpLaunch({ execPath: executable, dataDir }).command;
+  check(
+    "MCP 启动路径落在数据根的版本无关链接下",
+    launchPath.startsWith(join(dataDir, MCP_RUNTIME_LINK) + sep),
+    launchPath,
+  );
+  check(
+    "MCP 启动路径不含 app-<version> 段",
+    !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
+    launchPath,
+  );
   await checkMcpProcessOutlivesHandshake();
 
   const live = await withProjectEvent(

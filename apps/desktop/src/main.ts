@@ -33,7 +33,7 @@ import {
   installClaudeConfig,
   installCodexConfig,
   installedClaudeCodeLaunch,
-  installedClaudeLaunch,
+  installedClaudeLaunches,
   installedCodexLaunch,
   installAgentSkills,
   isClaudeCodeConfigInstalled,
@@ -46,7 +46,6 @@ import {
   uninstallClaudeConfig,
   uninstallCodexConfig,
   type AgentRuleAction,
-  type InstalledMcpLaunch,
   type McpClient,
 } from "@ayanami-task/agent-config";
 import { AyanamiTaskService } from "@ayanami-task/application";
@@ -58,6 +57,7 @@ import { updateFeedDir, updateFeedReady } from "./updater.js";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
 import {
+  installMcpRuntimeLink,
   installMcpStdioBridge,
   mcpLaunch,
   mcpLaunchStale,
@@ -162,32 +162,31 @@ function bundledMcpStdioPath(): string {
  */
 function repairStaleMcpConfigs(launch: McpLaunch): void {
   const write = { command: launch.command, args: launch.args, env: launch.env };
-  const clients: Array<{
-    client: McpClient;
-    installed: () => InstalledMcpLaunch | null;
-    repair: () => void;
-  }> = [
+  const clients: Array<{ client: McpClient; stale: () => boolean; repair: () => void }> = [
     {
       client: "CODEX",
-      installed: () => installedCodexLaunch(),
+      stale: () => mcpLaunchStale(installedCodexLaunch(), launch),
       repair: () => void installCodexConfig(write),
     },
     {
+      // Claude 桌面版有两份配置（Store 装的那份被重定向进包容器），任何一份过期都要修：
+      // 修了 A 没修 B，就是应用读 B 的那台机器一直坏着，而我们这边看着是绿的。
       client: "CLAUDE",
-      installed: () => installedClaudeLaunch(),
+      stale: () => installedClaudeLaunches().some((each) => mcpLaunchStale(each, launch)),
       repair: () => void installClaudeConfig(write),
     },
     {
       // Claude Code 的 user scope 只能由 claude CLI 代写；找不到 CLI 时无从修起，
       // 每次启动抛一次异常也没有意义。
       client: "CLAUDE_CODE",
-      installed: () => (findClaudeCodeCli() === null ? null : installedClaudeCodeLaunch()),
+      stale: () =>
+        findClaudeCodeCli() !== null && mcpLaunchStale(installedClaudeCodeLaunch(), launch),
       repair: () => void installClaudeCodeConfig(write),
     },
   ];
   for (const entry of clients) {
     try {
-      if (!mcpLaunchStale(entry.installed(), launch)) continue;
+      if (!entry.stale()) continue;
       entry.repair();
       smokeTrace("mcp.config-repaired", entry.client);
     } catch (error) {
@@ -458,6 +457,7 @@ async function startApplication(background: boolean): Promise<void> {
   const dataDir = dataDirBeforeReady();
   installAgentDocumentation(bundledDocumentationRoot(), dataDir);
   installMcpStdioBridge(bundledMcpStdioPath(), dataDir);
+  installMcpRuntimeLink(process.execPath, dataDir);
   const migrationsRoot = join(app.getAppPath(), "migrations");
   service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
   const runtimeDir = join(dataDir, "runtime");

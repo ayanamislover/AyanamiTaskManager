@@ -222,12 +222,44 @@ export function defaultCodexConfigPath(): string {
   return join(homedir(), ".codex", "config.toml");
 }
 
-export function defaultClaudeConfigPath(): string {
-  return join(
-    process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"),
+const CLAUDE_DESKTOP_CONFIG = "claude_desktop_config.json";
+
+/**
+ * Claude 桌面版有两种安装形态，配置落在两个完全不同的地方。
+ *
+ * Microsoft Store（MSIX）装的那份带包身份，写 `%APPDATA%` 会被系统重定向进包容器：
+ *
+ *   %LOCALAPPDATA%\Packages\Claude_<publisherId>\LocalCache\Roaming\Claude\claude_desktop_config.json
+ *
+ * 而本模块从 `process.env.APPDATA` 拼出来的是 `%APPDATA%\Claude\...`——那个路径上
+ * 可能确实存在一个同名文件（旧的非 Store 安装留下的），于是写进去、读回来、一切
+ * 正常，唯独应用永远看不到。实测连续三轮「已修复」都写进了这个幽灵文件，用户那边
+ * 的 MCP 一直指着几个版本之前的 exe。
+ *
+ * 所以路径不能只给一个。返回所有**父目录已经存在**的候选：目录都不存在就说明那种
+ * 形态没装，凭空建一个只会再造一个幽灵。一个都不存在时退回经典路径，好让全新安装
+ * 仍然装得上。
+ */
+export function claudeDesktopConfigPaths(env: NodeJS.ProcessEnv = process.env): string[] {
+  const classic = join(
+    env.APPDATA ?? join(homedir(), "AppData", "Roaming"),
     "Claude",
-    "claude_desktop_config.json",
+    CLAUDE_DESKTOP_CONFIG,
   );
+  const packagesRoot = join(env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "Packages");
+  // 包名里的 publisherId 是按发布者证书算出来的哈希，不能写死。
+  const packaged = (existsSync(packagesRoot) ? readdirSync(packagesRoot) : [])
+    .filter((name) => name.startsWith("Claude_"))
+    .map((name) =>
+      join(packagesRoot, name, "LocalCache", "Roaming", "Claude", CLAUDE_DESKTOP_CONFIG),
+    )
+    .sort();
+  const live = [...packaged, classic].filter((path) => existsSync(dirname(path)));
+  return live.length > 0 ? live : [classic];
+}
+
+export function defaultClaudeConfigPath(): string {
+  return claudeDesktopConfigPaths()[0]!;
 }
 
 // Claude Code 不读 claude_desktop_config.json；它的 MCP 注册在 ~/.claude.json。
@@ -406,7 +438,9 @@ export function isCodexConfigInstalled(path = defaultCodexConfigPath()): boolean
   );
 }
 
-export function isClaudeConfigInstalled(path = defaultClaudeConfigPath()): boolean {
+export function isClaudeConfigInstalled(path?: string): boolean {
+  if (path === undefined)
+    return claudeDesktopConfigPaths().some((each) => isClaudeConfigInstalled(each));
   if (!existsSync(path)) return false;
   try {
     const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
@@ -424,7 +458,12 @@ export function uninstallCodexConfig(path = defaultCodexConfigPath()): InstallRe
   return { client: "CODEX", path, backupPath };
 }
 
-export function uninstallClaudeConfig(path = defaultClaudeConfigPath()): InstallResult {
+export function uninstallClaudeConfig(path?: string): InstallResult {
+  if (path === undefined) {
+    // 只留一处没清等于没卸载：应用读哪一份由安装形态决定，不是我们能挑的。
+    const results = claudeDesktopConfigPaths().map((each) => uninstallClaudeConfig(each));
+    return results.find((result) => result.backupPath !== null) ?? results[0]!;
+  }
   if (!existsSync(path)) return { client: "CLAUDE", path, backupPath: null };
   let existing: Record<string, any>;
   try {
@@ -588,7 +627,15 @@ export function installClaudeConfig(input: {
   args?: string[];
   env?: Record<string, string>;
 }): InstallResult {
-  const path = input.path ?? defaultClaudeConfigPath();
+  if (input.path === undefined) {
+    // 两种安装形态各有一份配置，而「应用读哪一份」由安装形态决定，不是我们能挑的。
+    // 只写一份就赌对了一半——赌输的那半是「写进去了、读回来是对的、应用永远看不到」。
+    const results = claudeDesktopConfigPaths().map((path) =>
+      installClaudeConfig({ ...input, path }),
+    );
+    return results[0]!;
+  }
+  const path = input.path;
   let existing: Record<string, unknown> = {};
   if (existsSync(path)) {
     try {
@@ -670,6 +717,16 @@ function readJsonServerConfig(path: string): Record<string, unknown> | null {
  */
 export function installedClaudeLaunch(path = defaultClaudeConfigPath()): InstalledMcpLaunch | null {
   return launchFromServerConfig(readJsonServerConfig(path));
+}
+
+/**
+ * 两种安装形态各有一份配置，任何一份过期都要修——修了 A 没修 B，就是「应用读 B 的
+ * 那台机器一直坏着，而我们这边看着是绿的」。
+ */
+export function installedClaudeLaunches(): InstalledMcpLaunch[] {
+  return claudeDesktopConfigPaths()
+    .map((path) => installedClaudeLaunch(path))
+    .filter((launch): launch is InstalledMcpLaunch => launch !== null);
 }
 
 export function installedClaudeCodeLaunch(
