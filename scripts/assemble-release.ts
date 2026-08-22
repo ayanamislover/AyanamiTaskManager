@@ -5,11 +5,13 @@ import { copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "nod
 import { basename, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { nonBlockingItems, stageProvenance, type StageDecisions } from "./release-report.js";
+import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
 
 type Artifact = { name: string; bytes: number; sha256: string };
 type Verification = {
   passed: boolean;
   completedAt: string;
+  fingerprint: ReleaseFingerprint;
   stages?: StageDecisions;
   commands: Array<{
     name: string;
@@ -74,11 +76,6 @@ function electronVersions(): Record<string, string> {
   return JSON.parse(probe.stdout.trim()) as Record<string, string>;
 }
 
-function gitCommit(): string {
-  const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" });
-  return result.status === 0 ? result.stdout.trim() : "uncommitted";
-}
-
 function spdxId(name: string): string {
   return `SPDXRef-Package-${name.replace(/[^A-Za-z0-9.-]+/gu, "-")}`;
 }
@@ -86,6 +83,7 @@ function spdxId(name: string): string {
 const output = join(root, "output");
 const verification = await readJson<Verification>(join(output, "release-verification.json"));
 if (!verification.passed) throw new Error("RELEASE_VERIFICATION_FAILED");
+const source = await verifyReleaseSource(root, verification.fingerprint);
 const e2e = await readJson<{ stats: Record<string, number> }>(join(output, "e2e", "results.json"));
 const benchmark = await readJson<{ passed: boolean; metrics: Record<string, unknown> }>(
   join(output, "benchmark-report.json"),
@@ -235,7 +233,8 @@ const release = {
     registry: latestSchema(join(root, "migrations", "registry")),
     project: latestSchema(join(root, "migrations", "project")),
   },
-  commit: gitCommit(),
+  commit: source.gitHead,
+  source,
   builtAt: new Date().toISOString(),
   artifacts,
   testReport: { path: "test-report/summary.json", passed: true },

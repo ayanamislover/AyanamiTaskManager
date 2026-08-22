@@ -25,6 +25,7 @@ import {
 } from "./product-install-sites.js";
 import { pruneUpdateFeed, updateFeedDir } from "./update-feed.js";
 import {
+  commitReleasePreparation,
   computeReleaseFingerprint,
   decideStageReuse,
   type ReleaseFingerprint,
@@ -68,10 +69,10 @@ function git(commandArgs: string[]): string {
 // 发布是从工作树打包的，不是从 HEAD。工作树里若有别人未提交的改动，会被一起
 // 打进产物——前几轮都是靠人工 stash 才躲开的，这里直接拒绝。
 const dirty = git(["status", "--porcelain=v1", "--untracked-files=all"]).trim();
-if (dirty && !flag("allow-dirty")) {
+if (dirty) {
   process.stderr.write(
     `工作树不干净，拒绝发布（发布从工作树打包，会把这些改动一起打进产物）：\n${dirty}\n` +
-      `先提交或 git stash，或明确加 --allow-dirty。\n`,
+      `先提交或 git stash。正式产物必须能从 release.json 声明的 clean HEAD 重建。\n`,
   );
   process.exit(2);
 }
@@ -102,6 +103,11 @@ if (target !== currentVersion) {
   }
   resetReleaseChecklist(root, currentVersion, target);
   process.stdout.write(`  docs/release-checklist.md：勾选已重置、验收结果已清空待填\n`);
+  const releaseHead = commitReleasePreparation(root, target, [
+    ...VERSIONED_FILES,
+    "docs/release-checklist.md",
+  ]);
+  process.stdout.write(`  发布准备已提交到 clean HEAD：${releaseHead}\n`);
 }
 
 const setupName = `AyanamiTaskManager-Setup-${target}-win-x64.exe`;

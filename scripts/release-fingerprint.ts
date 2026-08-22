@@ -13,6 +13,16 @@ export type ReleaseFingerprint = {
   stageHashes: Record<string, string>;
 };
 
+export type ReleaseSourceProvenance = {
+  schemaVersion: 1;
+  version: string;
+  gitHead: string;
+  dirty: false;
+  dirtyStateHash: string;
+  sourceHash: string;
+  lockfileHash: string;
+};
+
 /**
  * 昂贵且作用域明确的阶段各自声明依赖：输入没变就复用上次的绿，而不是重证已证之事。
  *
@@ -111,6 +121,44 @@ function sha256(value: string | Buffer): string {
 
 function git(root: string, args: string[]): string {
   return execFileSync("git", args, { cwd: root, encoding: "utf8" });
+}
+
+export function commitReleasePreparation(
+  root: string,
+  targetVersion: string,
+  files: readonly string[],
+): string {
+  if (files.length === 0) throw new Error("RELEASE_PREPARATION_EMPTY");
+  execFileSync("git", ["add", "--", ...files], { cwd: root, stdio: "ignore" });
+
+  const unstaged = execFileSync("git", ["diff", "--name-only"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard"], {
+    cwd: root,
+    encoding: "utf8",
+  }).trim();
+  if (unstaged || untracked) {
+    throw new Error(
+      `RELEASE_PREPARATION_UNEXPECTED_DIRTY: ${[unstaged, untracked].filter(Boolean).join(", ")}`,
+    );
+  }
+
+  try {
+    execFileSync("git", ["diff", "--cached", "--quiet"], { cwd: root, stdio: "ignore" });
+    throw new Error("RELEASE_PREPARATION_EMPTY");
+  } catch (error) {
+    if ((error as { status?: number }).status !== 1) throw error;
+  }
+
+  execFileSync("git", ["commit", "--quiet", "-m", `chore: prepare release ${targetVersion}`], {
+    cwd: root,
+    stdio: "ignore",
+  });
+  const status = git(root, ["status", "--porcelain=v1", "--untracked-files=all"]).trim();
+  if (status) throw new Error(`RELEASE_PREPARATION_COMMIT_DIRTY: ${status}`);
+  return git(root, ["rev-parse", "HEAD"]).trim();
 }
 
 const TEXT_FILE = /\.(?:ts|tsx|json|md|sql|css|html|ya?ml)$/u;
@@ -213,6 +261,43 @@ export async function computeReleaseFingerprint(root: string): Promise<ReleaseFi
     // 全局 sourceHash 保持含版本号（--resume 本来就该在升版后失效）；只有按阶段
     // 的指纹把版本号归一。
     stageHashes: await computeStageHashes(root, files, await readPackageVersion(root)),
+  };
+}
+
+/**
+ * 将发布报告中的输入指纹重新和当前 checkout 对齐，并证明 package 版本确实存在于
+ * 声明的 HEAD。release.json 只引用 HEAD 不够：从脏工作树升版再构建时，那个提交
+ * 检出的仍是旧版本。
+ */
+export async function verifyReleaseSource(
+  root: string,
+  verified: ReleaseFingerprint,
+): Promise<ReleaseSourceProvenance> {
+  const current = await computeReleaseFingerprint(root);
+  if (!releaseFingerprintsMatch(verified, current)) {
+    throw new Error("RELEASE_SOURCE_CHANGED_SINCE_VERIFICATION");
+  }
+  if (current.dirty) throw new Error("RELEASE_SOURCE_DIRTY");
+
+  const workingVersion = await readPackageVersion(root);
+  if (!workingVersion) throw new Error("RELEASE_PACKAGE_VERSION_MISSING");
+  const committedPackage = JSON.parse(git(root, ["show", `${current.gitHead}:package.json`])) as {
+    version?: string;
+  };
+  if (committedPackage.version !== workingVersion) {
+    throw new Error(
+      `RELEASE_HEAD_VERSION_MISMATCH: HEAD=${String(committedPackage.version)} working=${workingVersion}`,
+    );
+  }
+
+  return {
+    schemaVersion: 1,
+    version: workingVersion,
+    gitHead: current.gitHead,
+    dirty: false,
+    dirtyStateHash: current.dirtyStateHash,
+    sourceHash: current.sourceHash,
+    lockfileHash: current.lockfileHash,
   };
 }
 

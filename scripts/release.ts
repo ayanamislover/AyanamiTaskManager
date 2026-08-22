@@ -7,6 +7,7 @@ import {
   computeReleaseFingerprint,
   decideReleaseResume,
   decideStageReuse,
+  verifyReleaseSource,
   type ReleaseFingerprint,
   type ReleaseResumeDecision,
   type StageDecision,
@@ -50,6 +51,9 @@ assertStageInputsResolve(
 );
 const resume = process.argv.includes("--resume");
 const fingerprint = await computeReleaseFingerprint(root);
+// 在十阶段开始前就拒绝脏工作树或「HEAD 还是旧版本」的升版输入，避免花完流水线
+// 时间后才由 assembler 发现产物无法从声明 commit 重建。
+await verifyReleaseSource(root, fingerprint);
 // 按阶段复用不依赖 --resume：它就是「本地早就测过的东西不要再全量跑一遍」这句
 // 话本身。--full 强制全部重跑。
 const forceFull = process.argv.includes("--full");

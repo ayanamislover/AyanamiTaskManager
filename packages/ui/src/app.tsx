@@ -198,12 +198,14 @@ function Status({ value }: { value: string }) {
 type AtmSelectOption = { value: string; label: string };
 
 function AtmSelect({
+  id,
   ariaLabel,
   value,
   options,
   onChange,
   className = "",
 }: {
+  id?: string;
   ariaLabel: string;
   value: string;
   options: AtmSelectOption[];
@@ -211,6 +213,7 @@ function AtmSelect({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [placement, setPlacement] = useState<"top" | "bottom">("bottom");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -224,6 +227,15 @@ function AtmSelect({
 
   const openAt = (index: number) => {
     openingIndexRef.current = Math.max(0, Math.min(index, options.length - 1));
+    const root = rootRef.current;
+    if (root) {
+      const bounds = root.getBoundingClientRect();
+      const boundary = root.closest(".atm-modal, .atm-drawer")?.getBoundingClientRect();
+      const desired = Math.min(320, options.length * 34 + 12);
+      const spaceBelow = (boundary?.bottom ?? window.innerHeight) - bounds.bottom - 12;
+      const spaceAbove = bounds.top - (boundary?.top ?? 0) - 12;
+      setPlacement(spaceBelow < desired && spaceAbove > spaceBelow ? "top" : "bottom");
+    }
     setOpen(true);
   };
   const closeAndFocusTrigger = () => {
@@ -259,13 +271,15 @@ function AtmSelect({
   return (
     <div
       ref={rootRef}
-      className={`atm-select ${className}`.trim()}
+      className={`atm-select atm-field-shell ${className}`.trim()}
       data-open={open ? "true" : "false"}
+      data-placement={placement}
     >
       <button
         ref={triggerRef}
+        id={id}
         type="button"
-        className="atm-filter atm-select-trigger"
+        className="atm-select-trigger"
         role="combobox"
         aria-label={ariaLabel}
         aria-controls={listboxId}
@@ -956,15 +970,17 @@ function ProjectWizard({
               </div>
               <div className="atm-field">
                 <label htmlFor="project-mode">协作模式</label>
-                <select
+                <AtmSelect
                   id="project-mode"
+                  ariaLabel="协作模式"
                   value={form.mode}
-                  onChange={(e) => field("mode", e.target.value)}
-                >
-                  <option value="SOLO">单 Agent</option>
-                  <option value="AUTO">自动判断</option>
-                  <option value="MULTI">多 Agent</option>
-                </select>
+                  options={[
+                    { value: "SOLO", label: "单 Agent" },
+                    { value: "AUTO", label: "自动判断" },
+                    { value: "MULTI", label: "多 Agent" },
+                  ]}
+                  onChange={(mode) => field("mode", mode)}
+                />
               </div>
             </div>
           ) : step === 1 ? (
@@ -1326,21 +1342,21 @@ function QuickPage({ client, notify }: { client: AyanamiClient; notify: Notify }
         title="临时任务"
         description="一次性、低复杂度工作留在全局注册库，需要持续管理时再晋升为项目。"
         actions={
-          <select
-            className="atm-filter"
-            aria-label="晋升目标项目"
+          <AtmSelect
+            className="wide"
+            ariaLabel="晋升目标项目"
             value={targetProject}
-            onChange={(event) => setTargetProject(event.target.value)}
-          >
-            <option value="">选择晋升目标</option>
-            {projects.data
-              ?.filter((project) => project.lifecycle === "ACTIVE")
-              .map((project) => (
-                <option key={project.id} value={project.code}>
-                  {project.code} · {project.name}
-                </option>
-              ))}
-          </select>
+            options={[
+              { value: "", label: "选择晋升目标" },
+              ...(projects.data ?? [])
+                .filter((project) => project.lifecycle === "ACTIVE")
+                .map((project) => ({
+                  value: project.code,
+                  label: `${project.code} · ${project.name}`,
+                })),
+            ]}
+            onChange={setTargetProject}
+          />
         }
       />
       <section className="atm-panel" style={{ marginBottom: 16 }}>
@@ -2704,16 +2720,18 @@ function CreateTaskModal({
             </div>
             <div className="atm-field">
               <label htmlFor="task-priority">优先级</label>
-              <select
+              <AtmSelect
                 id="task-priority"
+                ariaLabel="优先级"
                 value={priority}
-                onChange={(e) => setPriority(e.target.value)}
-              >
-                <option value="LOW">低</option>
-                <option value="NORMAL">普通</option>
-                <option value="HIGH">高</option>
-                <option value="CRITICAL">紧急</option>
-              </select>
+                options={[
+                  { value: "LOW", label: "低" },
+                  { value: "NORMAL", label: "普通" },
+                  { value: "HIGH", label: "高" },
+                  { value: "CRITICAL", label: "紧急" },
+                ]}
+                onChange={setPriority}
+              />
             </div>
             <div className="atm-field">
               <label htmlFor="task-acceptance">验收标准</label>
@@ -2806,33 +2824,37 @@ function CreateRecordModal({
           <div className="atm-form-grid">
             <div className="atm-field">
               <label htmlFor="record-kind">类型</label>
-              <select
+              <AtmSelect
                 id="record-kind"
+                ariaLabel="记录类型"
                 value={kind}
-                onChange={(event) => setKind(event.target.value)}
-              >
-                <option value="DECISION">决策</option>
-                <option value="CONSTRAINT">约束</option>
-                <option value="FACT">事实</option>
-                <option value="RISK">风险</option>
-                <option value="REFERENCE">参考</option>
-                <option value="LESSON">经验</option>
-                <option value="VERIFICATION">验证</option>
-                <option value="WAIVER">豁免</option>
-              </select>
+                options={[
+                  { value: "DECISION", label: "决策" },
+                  { value: "CONSTRAINT", label: "约束" },
+                  { value: "FACT", label: "事实" },
+                  { value: "RISK", label: "风险" },
+                  { value: "REFERENCE", label: "参考" },
+                  { value: "LESSON", label: "经验" },
+                  { value: "VERIFICATION", label: "验证" },
+                  { value: "WAIVER", label: "豁免" },
+                ]}
+                onChange={setKind}
+              />
             </div>
             <div className="atm-field">
               <label htmlFor="record-importance">重要性</label>
-              <select
+              <AtmSelect
                 id="record-importance"
+                ariaLabel="记录重要性"
                 value={importance}
-                onChange={(event) => setImportance(event.target.value)}
-              >
-                <option value="LOW">低</option>
-                <option value="NORMAL">普通</option>
-                <option value="HIGH">高</option>
-                <option value="CRITICAL">紧急</option>
-              </select>
+                options={[
+                  { value: "LOW", label: "低" },
+                  { value: "NORMAL", label: "普通" },
+                  { value: "HIGH", label: "高" },
+                  { value: "CRITICAL", label: "紧急" },
+                ]}
+                onChange={setImportance}
+              />
             </div>
           </div>
           <div className="atm-field">
@@ -2971,16 +2993,18 @@ function ProjectUpdateModal({
             <>
               <div className="atm-field">
                 <label htmlFor="project-health">项目健康度</label>
-                <select
+                <AtmSelect
                   id="project-health"
+                  ariaLabel="项目健康度"
                   value={health}
-                  onChange={(event) => setHealth(event.target.value)}
-                >
-                  <option value="UNKNOWN">未知</option>
-                  <option value="ON_TRACK">正常</option>
-                  <option value="AT_RISK">有风险</option>
-                  <option value="OFF_TRACK">偏离计划</option>
-                </select>
+                  options={[
+                    { value: "UNKNOWN", label: "未知" },
+                    { value: "ON_TRACK", label: "正常" },
+                    { value: "AT_RISK", label: "有风险" },
+                    { value: "OFF_TRACK", label: "偏离计划" },
+                  ]}
+                  onChange={setHealth}
+                />
               </div>
               <div className="atm-field">
                 <label htmlFor="project-update-summary">当前判断</label>

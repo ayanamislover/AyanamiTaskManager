@@ -888,6 +888,27 @@ button.atm-row:hover {
   position: relative;
   min-width: 120px;
 }
+.atm-select.atm-field-shell {
+  min-height: 38px;
+  border: 1px solid var(--atm-border);
+  border-radius: 9px;
+  background: var(--atm-surface);
+  transition:
+    border-color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-field-shell:has(> .atm-select-trigger:focus-visible) {
+  border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
+  outline: 2px solid var(--atm-focus);
+  outline-offset: 2px;
+}
+.atm-field-shell > .atm-select-trigger {
+  border: 0;
+}
+.atm-field-shell > .atm-select-trigger:is(:hover, :focus, :focus-visible):not(:disabled) {
+  outline: none;
+  box-shadow: none;
+}
 .atm-select.medium {
   min-width: 150px;
 }
@@ -897,10 +918,14 @@ button.atm-row:hover {
 .atm-select-trigger {
   display: flex;
   width: 100%;
+  min-height: 36px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  padding: 7px 10px;
+  border-radius: 8px;
   color: var(--atm-text);
+  background: transparent;
   text-align: left;
   white-space: nowrap;
   transition:
@@ -913,8 +938,10 @@ button.atm-row:hover {
   color: var(--atm-text-muted);
   transition: transform 160ms var(--atm-ease-out);
 }
-.atm-select[data-open="true"] .atm-select-trigger {
+.atm-select.atm-field-shell[data-open="true"] {
   border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
+}
+.atm-select[data-open="true"] .atm-select-trigger {
   background: var(--atm-surface);
 }
 .atm-select[data-open="true"] .atm-select-trigger > svg {
@@ -945,10 +972,19 @@ button.atm-row:hover {
     opacity 160ms var(--atm-ease-out),
     transform 160ms var(--atm-ease-out);
 }
+.atm-select[data-placement="top"] .atm-select-popover {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform-origin: bottom left;
+}
 @starting-style {
   .atm-select-popover {
     opacity: 0;
     transform: translateY(-4px) scale(0.98);
+  }
+
+  .atm-select[data-placement="top"] .atm-select-popover {
+    transform: translateY(4px) scale(0.98);
   }
 }
 .atm-select-option {
@@ -989,7 +1025,7 @@ button.atm-row:hover {
   gap: 7px;
 }
 @media (hover: hover) and (pointer: fine) {
-  .atm-select-trigger:hover {
+  .atm-select.atm-field-shell:has(> .atm-select-trigger:hover) {
     border-color: color-mix(in srgb, var(--atm-primary) 38%, var(--atm-border));
     background: var(--atm-surface);
   }
@@ -1512,14 +1548,21 @@ button.atm-row:hover {
   font-weight: 650;
 }
 .atm-field input,
-.atm-field textarea,
-.atm-field select {
+.atm-field textarea {
   width: 100%;
   min-height: 40px;
   padding: 9px 11px;
   border: 1px solid var(--atm-border);
   border-radius: 9px;
   background: var(--atm-bg);
+}
+.atm-field .atm-select.atm-field-shell {
+  width: 100%;
+  min-height: 40px;
+  background: var(--atm-bg);
+}
+.atm-field .atm-select-trigger {
+  min-height: 38px;
 }
 .atm-field textarea {
   min-height: 90px;
@@ -1883,6 +1926,11 @@ button.atm-row:hover {
 @media (forced-colors: active) {
   :focus-visible {
     outline-color: Highlight;
+  }
+
+  .atm-field-shell > .atm-select-trigger:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
   }
 
   .atm-sidebar,

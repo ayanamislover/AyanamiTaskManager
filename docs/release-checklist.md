@@ -44,7 +44,9 @@ pnpm exec tsx scripts/release-and-install.ts --version 1.0.13
 ```
 
 它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
-升版本号后校验没有遗漏站点，清掉同名进程（**包括 MCP stdio 桥**，它们用同一个
+升版本号并校验没有遗漏站点后，先把版本站点与重置后的发布清单提交为
+`chore: prepare release <version>`；后续十阶段只接受这个可直接检出同版本的 clean HEAD。
+随后清掉同名进程（**包括 MCP stdio 桥**，它们用同一个
 exe 名且占着安装目录句柄），跑完十阶段，静默安装，最后启动并核对运行实例自报的
 版本号。加 `--skip-install` 只跑到产出 `release/`。
 
@@ -81,7 +83,10 @@ release/
 └─ test-report/
 ```
 
-`SHA256SUMS.txt` 必须覆盖 Setup、portable ZIP、release manifest 和 SBOM。`release.json` 记录版本、平台、构建时间、Git 状态、产物名/大小/哈希和测试报告索引。SBOM 使用 SPDX JSON。
+`SHA256SUMS.txt` 必须覆盖 Setup、portable ZIP、release manifest 和 SBOM。`release.json`
+记录版本、平台、构建时间、产物名/大小/哈希和测试报告索引；`source` 节同时固化可检出
+同版本的 `gitHead`、`dirty=false`、工作树状态哈希、源码哈希与 lockfile 哈希。assembler
+会重新计算这些值，验证报告之后发生任何源码变化都会拒绝组装。SBOM 使用 SPDX JSON。
 
 ## test-report 最小内容
 
