@@ -323,6 +323,71 @@ export const EvidenceReferenceSchema = z.object({
 
 export const EvidenceInputSchema = z.union([NonEmptyTextSchema.max(2000), EvidenceReferenceSchema]);
 
+export const ReviewCandidateHashSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[a-z][a-z0-9_.:-]*$/iu),
+  value: z
+    .string()
+    .trim()
+    .regex(/^[a-f0-9]{7,128}$/iu),
+});
+
+export const ReviewCandidateHashesSchema = z
+  .array(ReviewCandidateHashSchema)
+  .min(1)
+  .max(20)
+  .superRefine((hashes, context) => {
+    const names = new Set<string>();
+    for (const [index, hash] of hashes.entries()) {
+      const normalized = hash.name.toLowerCase();
+      if (names.has(normalized)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "name"],
+          message: `重复候选 hash 名称: ${normalized}`,
+        });
+      }
+      names.add(normalized);
+    }
+  });
+
+export function normalizeReviewCandidateHashes(
+  hashes: ReadonlyArray<{ name: string; value: string }>,
+): Array<{ name: string; value: string }> {
+  return ReviewCandidateHashesSchema.parse(hashes)
+    .map((hash) => ({
+      name: hash.name.trim().toLowerCase(),
+      value: hash.value.trim().toLowerCase(),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export const ReviewRequestCreateInputSchema = z.object({
+  project: NonEmptyTextSchema,
+  session: NonEmptyTextSchema,
+  opId: OpIdSchema,
+  reviewTaskKey: NonEmptyTextSchema.max(100),
+  expectedReviewTaskVersion: z.number().int().nonnegative(),
+  parentChecklistId: NonEmptyTextSchema.max(128),
+  expectedParentChecklistVersion: z.number().int().nonnegative(),
+  expectedCandidateHashes: ReviewCandidateHashesSchema,
+});
+
+export const ReviewSubmitInputSchema = z.object({
+  project: NonEmptyTextSchema,
+  session: NonEmptyTextSchema,
+  opId: OpIdSchema,
+  requestKey: NonEmptyTextSchema.max(128),
+  expectedReviewTaskVersion: z.number().int().nonnegative(),
+  verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]),
+  reviewedHashes: ReviewCandidateHashesSchema,
+  evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
+});
+
 export const ProgressCompletedInputSchema = z.union([
   z.string().max(500),
   z.object({
@@ -547,3 +612,5 @@ export type WorkItemCreateInput = z.infer<typeof WorkItemCreateInputSchema>;
 export type WorkItemPatchInput = z.infer<typeof WorkItemPatchInputSchema>;
 export type ChecklistBatchUpdateInput = z.infer<typeof ChecklistBatchUpdateInputSchema>;
 export type VerifyAndCompleteInput = z.infer<typeof VerifyAndCompleteInputSchema>;
+export type ReviewRequestCreateInput = z.infer<typeof ReviewRequestCreateInputSchema>;
+export type ReviewSubmitInput = z.infer<typeof ReviewSubmitInputSchema>;

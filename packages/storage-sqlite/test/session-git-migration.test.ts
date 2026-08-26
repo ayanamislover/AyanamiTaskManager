@@ -22,6 +22,7 @@ describe("Session Git context migration", () => {
       "0007_operation_trace.sql",
       "0008_work_item_phase_waiting.sql",
       "0009_structured_cancel.sql",
+      "0010_review_workflow.sql",
     ]) {
       rmSync(join(migrationsRoot, "project", name));
     }
@@ -55,6 +56,7 @@ describe("Session Git context migration", () => {
       "0007_operation_trace.sql",
       "0008_work_item_phase_waiting.sql",
       "0009_structured_cancel.sql",
+      "0010_review_workflow.sql",
     ]) {
       copyFileSync(
         resolve(process.cwd(), "migrations", "project", name),
@@ -64,7 +66,7 @@ describe("Session Git context migration", () => {
     manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     try {
       const upgraded = await manager.openProject(project.code);
-      expect(upgraded.schemaVersion).toBe(9);
+      expect(upgraded.schemaVersion).toBe(10);
       expect(
         upgraded.sqlite
           .prepare(

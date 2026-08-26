@@ -13,6 +13,8 @@ import {
   ProgressAddInputSchema,
   QuickTaskCreateInputSchema,
   RecordInputSchema,
+  ReviewRequestCreateInputSchema,
+  ReviewSubmitInputSchema,
   SearchInputSchema,
   TaskCreateBatchInputSchema,
   TaskPatchBatchInputSchema,
@@ -342,6 +344,16 @@ function errorCode(error: unknown): string {
 function statusForCode(code: string): number {
   if (code === "INVALID_ARGUMENT") return 400;
   if (code === "NOT_FOUND" || code.endsWith("_NOT_FOUND")) return 404;
+  if (code === "REVIEWER_REQUIRED") return 403;
+  if (
+    code === "REVIEW_IDENTITY_MISMATCH" ||
+    code === "REVIEW_ALREADY_SUBMITTED" ||
+    code === "REVIEW_TASK_CLOSED" ||
+    code === "REVIEW_CHECKLIST_CLOSED" ||
+    code === "REVIEW_BINDING_MISMATCH" ||
+    code === "IMMUTABLE_RECORD"
+  )
+    return 409;
   if (code === "SESSION_CLOSED" || code === "INVALID_TRANSITION") return 409;
   // 前置条件类错误一律 4xx：调用方重试多少次都不会变，回 500 会让崩溃重放
   // 控制器把永久失败当成服务端抖动，无限重试下去。REQUIRED 和 REQUIRES 都要收，
@@ -941,6 +953,41 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { code, taskKey } = request.params as { code: string; taskKey: string };
     const { view } = request.query as { view?: "core" | "context" | "full" };
     return options.service.getWorkItem(code, taskKey, view ?? "core");
+  });
+  app.post("/api/v1/projects/:code/reviews/requests", async (request, reply) => {
+    const { code } = request.params as { code: string };
+    const input = ReviewRequestCreateInputSchema.parse({
+      ...(request.body as object),
+      project: code,
+    });
+    return reply.code(201).send(
+      await options.service.createReviewRequest(code, input.session, input.opId, {
+        reviewTaskKey: input.reviewTaskKey,
+        expectedReviewTaskVersion: input.expectedReviewTaskVersion,
+        parentChecklistId: input.parentChecklistId,
+        expectedParentChecklistVersion: input.expectedParentChecklistVersion,
+        expectedCandidateHashes: input.expectedCandidateHashes,
+      }),
+    );
+  });
+  app.get("/api/v1/projects/:code/reviews/requests/:requestKey", async (request) => {
+    const { code, requestKey } = request.params as { code: string; requestKey: string };
+    return options.service.getReviewRequest(code, requestKey);
+  });
+  app.post("/api/v1/projects/:code/reviews/requests/:requestKey/submit", async (request) => {
+    const { code, requestKey } = request.params as { code: string; requestKey: string };
+    const input = ReviewSubmitInputSchema.parse({
+      ...(request.body as object),
+      project: code,
+      requestKey,
+    });
+    return options.service.submitReview(code, input.session, input.opId, {
+      requestKey: input.requestKey,
+      expectedReviewTaskVersion: input.expectedReviewTaskVersion,
+      verdict: input.verdict,
+      reviewedHashes: input.reviewedHashes,
+      evidence: input.evidence,
+    });
   });
   app.patch("/api/v1/projects/:code/checklist/batch", async (request) => {
     const { code } = request.params as { code: string };

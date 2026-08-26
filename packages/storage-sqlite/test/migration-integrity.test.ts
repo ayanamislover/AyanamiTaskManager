@@ -46,7 +46,7 @@ describe("迁移完整性", () => {
       try {
         expect(manager.registry.schemaVersion).toBe(3);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(9);
+        expect(upgraded.schemaVersion).toBe(10);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")
@@ -71,6 +71,13 @@ describe("迁移完整性", () => {
           ),
         ).toEqual(expect.arrayContaining(["topic", "subject_key"]));
         expect(upgraded.sqlite.pragma("foreign_key_check")).toEqual([]);
+        expect(
+          upgraded.sqlite
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('review_requests','review_submissions') ORDER BY name",
+            )
+            .all(),
+        ).toEqual([{ name: "review_requests" }, { name: "review_submissions" }]);
         expect(
           (upgraded.sqlite.pragma("table_info(idempotency_keys)") as Array<{ name: string }>).map(
             (column) => column.name,

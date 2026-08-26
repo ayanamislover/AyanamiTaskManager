@@ -4,7 +4,9 @@ import { assertParentMove, assertAcyclicDependency, computeProgress } from "@aya
 import {
   assertWorkItemTransition,
   createUlid,
+  EvidenceReferenceSchema,
   legalWorkItemOperations,
+  normalizeReviewCandidateHashes,
   nowIso,
   type WorkItemPhase,
   type WorkItemStatus,
@@ -162,6 +164,37 @@ export type RecordView = {
   opId: string | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type ReviewCandidateHash = { name: string; value: string };
+
+export type ReviewSubmissionView = {
+  key: string;
+  requestKey: string;
+  verdict: "APPROVED" | "CHANGES_REQUESTED";
+  reviewedHashes: ReviewCandidateHash[];
+  evidence: unknown[];
+  recordKey: string;
+  reviewerAgentId: string;
+  reviewerSessionId: string;
+  reviewTaskVersion: number;
+  parentChecklistVersion: number;
+  createdAt: string;
+  opId: string;
+};
+
+export type ReviewRequestView = {
+  key: string;
+  reviewTaskKey: string;
+  parentTaskKey: string;
+  parentChecklistId: string;
+  parentChecklistVersion: number;
+  expectedCandidateHashes: ReviewCandidateHash[];
+  createdByAgentId: string;
+  createdBySessionId: string;
+  createdAt: string;
+  opId: string;
+  submission: ReviewSubmissionView | null;
 };
 
 export type MutationActorResolution = {
@@ -1440,6 +1473,433 @@ export class ProjectRepository {
       discovered,
       executionSession,
     };
+  }
+
+  private reviewRequestRow(requestKey: string): any {
+    const prefix = `${this.meta.code}-RR-`;
+    const suffix = requestKey.startsWith(prefix) ? requestKey.slice(prefix.length) : "";
+    if (!/^\d+$/u.test(suffix)) throw new Error(`REVIEW_REQUEST_NOT_FOUND: ${requestKey}`);
+    const row = this.#sqlite
+      .prepare("SELECT * FROM review_requests WHERE local_no = ?")
+      .get(Number(suffix));
+    if (!row) throw new Error(`REVIEW_REQUEST_NOT_FOUND: ${requestKey}`);
+    return row;
+  }
+
+  private reviewRequestKey(localNo: number): string {
+    return `${this.meta.code}-RR-${String(localNo).padStart(4, "0")}`;
+  }
+
+  private reviewSubmissionKey(localNo: number): string {
+    return `${this.meta.code}-RS-${String(localNo).padStart(4, "0")}`;
+  }
+
+  getReviewRequest(requestKey: string): ReviewRequestView {
+    const request = this.reviewRequestRow(requestKey);
+    const reviewTaskKey = this.taskKeyForId(request.review_work_item_id);
+    const parentTaskKey = this.taskKeyForId(request.parent_work_item_id);
+    if (!reviewTaskKey || !parentTaskKey) throw new Error("INTERNAL_ERROR: review binding invalid");
+    const submission = this.#sqlite
+      .prepare("SELECT * FROM review_submissions WHERE request_id = ?")
+      .get(request.id) as any;
+    let submissionView: ReviewSubmissionView | null = null;
+    if (submission) {
+      const record = this.#sqlite
+        .prepare("SELECT local_no, kind FROM records WHERE id = ?")
+        .get(submission.record_id) as { local_no: number; kind: string } | undefined;
+      if (!record) throw new Error("INTERNAL_ERROR: review submission record missing");
+      submissionView = {
+        key: this.reviewSubmissionKey(Number(submission.local_no)),
+        requestKey: this.reviewRequestKey(Number(request.local_no)),
+        verdict: submission.verdict,
+        reviewedHashes: json<ReviewCandidateHash[]>(submission.reviewed_hashes_json, []),
+        evidence: json<unknown[]>(submission.evidence_json, []),
+        recordKey: this.recordKey(record),
+        reviewerAgentId: submission.reviewer_agent_id,
+        reviewerSessionId: submission.reviewer_session_id,
+        reviewTaskVersion: Number(submission.review_task_version),
+        parentChecklistVersion: Number(submission.parent_checklist_version),
+        createdAt: String(submission.created_at),
+        opId: String(submission.op_id),
+      };
+    }
+    return {
+      key: this.reviewRequestKey(Number(request.local_no)),
+      reviewTaskKey,
+      parentTaskKey,
+      parentChecklistId: String(request.parent_checklist_id),
+      parentChecklistVersion: Number(request.parent_checklist_version),
+      expectedCandidateHashes: json<ReviewCandidateHash[]>(
+        request.expected_candidate_hashes_json,
+        [],
+      ),
+      createdByAgentId: String(request.created_by_agent_id),
+      createdBySessionId: String(request.created_by_session_id),
+      createdAt: String(request.created_at),
+      opId: String(request.op_id),
+      submission: submissionView,
+    };
+  }
+
+  createReviewRequest(
+    actor: ProjectActor,
+    opId: string,
+    input: {
+      reviewTaskKey: string;
+      expectedReviewTaskVersion: number;
+      parentChecklistId: string;
+      expectedParentChecklistVersion: number;
+      expectedCandidateHashes: ReviewCandidateHash[];
+    },
+  ): { request: ReviewRequestView; sequence: number } {
+    const normalizedInput = {
+      ...input,
+      expectedCandidateHashes: normalizeReviewCandidateHashes(input.expectedCandidateHashes),
+    };
+    return this.mutate({
+      actor,
+      opId,
+      operation: "review.request.create",
+      request: normalizedInput,
+      immediate: true,
+      action: () => {
+        if (!actor.sessionId) throw new Error("REVIEW_REQUEST_REQUIRES_SESSION");
+        const reviewTask = this.rowForTaskKey(normalizedInput.reviewTaskKey);
+        if (reviewTask.type !== "REVIEW") {
+          throw new Error(`REVIEW_TASK_INVALID: ${normalizedInput.reviewTaskKey}`);
+        }
+        if (reviewTask.version !== normalizedInput.expectedReviewTaskVersion) {
+          throw new Error(
+            `VERSION_CONFLICT: ${normalizedInput.reviewTaskKey}:${reviewTask.version}`,
+          );
+        }
+        if (reviewTask.status === "DONE" || reviewTask.status === "CANCELLED") {
+          throw new Error(`REVIEW_TASK_CLOSED: ${normalizedInput.reviewTaskKey}`);
+        }
+        const checklist = this.#sqlite
+          .prepare("SELECT * FROM checklist_items WHERE id = ?")
+          .get(normalizedInput.parentChecklistId) as any;
+        if (!checklist)
+          throw new Error(`CHECKLIST_NOT_FOUND: ${normalizedInput.parentChecklistId}`);
+        if (checklist.version !== normalizedInput.expectedParentChecklistVersion) {
+          throw new Error(`VERSION_CONFLICT: ${checklist.version}`);
+        }
+        if (!reviewTask.parent_id || reviewTask.parent_id !== checklist.work_item_id) {
+          throw new Error(`REVIEW_BINDING_MISMATCH: ${normalizedInput.reviewTaskKey}`);
+        }
+        if (checklist.status === "DONE" || checklist.status === "SKIPPED") {
+          throw new Error(`REVIEW_CHECKLIST_CLOSED: ${normalizedInput.parentChecklistId}`);
+        }
+        const existing = this.#sqlite
+          .prepare("SELECT id FROM review_requests WHERE review_work_item_id = ?")
+          .get(reviewTask.id);
+        if (existing) throw new Error(`REVIEW_REQUEST_CONFLICT: ${normalizedInput.reviewTaskKey}`);
+        const id = createUlid();
+        const localNo = this.nextNumber("review_request");
+        const key = this.reviewRequestKey(localNo);
+        const now = nowIso();
+        this.#sqlite
+          .prepare(
+            `INSERT INTO review_requests(
+               id, local_no, review_work_item_id, parent_work_item_id, parent_checklist_id,
+               parent_checklist_version, expected_candidate_hashes_json, created_by_agent_id,
+               created_by_session_id, created_at, op_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            id,
+            localNo,
+            reviewTask.id,
+            checklist.work_item_id,
+            checklist.id,
+            checklist.version,
+            JSON.stringify(normalizedInput.expectedCandidateHashes),
+            actor.id,
+            actor.sessionId,
+            now,
+            opId,
+          );
+        const sequence = this.appendEvent("review.requested", actor, "REVIEW_REQUEST", id, {
+          key,
+          reviewTaskKey: normalizedInput.reviewTaskKey,
+          parentTaskKey: this.taskKeyForId(checklist.work_item_id),
+          parentChecklistId: checklist.id,
+          expectedCandidateHashes: normalizedInput.expectedCandidateHashes,
+        });
+        return { request: this.getReviewRequest(key), sequence };
+      },
+    });
+  }
+
+  submitReview(
+    actor: ProjectActor,
+    opId: string,
+    input: {
+      requestKey: string;
+      expectedReviewTaskVersion: number;
+      verdict: "APPROVED" | "CHANGES_REQUESTED";
+      reviewedHashes: ReviewCandidateHash[];
+      evidence: unknown[];
+    },
+  ): {
+    requestKey: string;
+    submissionKey: string;
+    recordKey: string;
+    verdict: "APPROVED" | "CHANGES_REQUESTED";
+    reviewTask: { key: string; status: WorkItemStatus; version: number };
+    parentChecklist: { id: string; status: string; version: number };
+    parentTask: { key: string; status: WorkItemStatus; version: number };
+    sequence: number;
+  } {
+    const normalizedInput = {
+      ...input,
+      reviewedHashes: normalizeReviewCandidateHashes(input.reviewedHashes),
+      evidence: this.normalizeEvidence(
+        input.evidence.map((entry) => EvidenceReferenceSchema.parse(entry)),
+      ),
+    };
+    return this.mutate({
+      actor,
+      opId,
+      operation: "review.submit",
+      request: normalizedInput,
+      immediate: true,
+      action: () => {
+        if (!actor.sessionId) throw new Error("REVIEWER_SESSION_REQUIRED");
+        const session = this.getSession(actor.sessionId);
+        if (
+          session.role !== "REVIEWER" ||
+          session.agent_id !== actor.id ||
+          session.connection_state !== "ONLINE"
+        ) {
+          throw new Error(`REVIEWER_REQUIRED: ${actor.sessionId}`);
+        }
+        const request = this.reviewRequestRow(normalizedInput.requestKey);
+        const existing = this.#sqlite
+          .prepare("SELECT id FROM review_submissions WHERE request_id = ?")
+          .get(request.id);
+        if (existing) throw new Error(`REVIEW_ALREADY_SUBMITTED: ${normalizedInput.requestKey}`);
+        const reviewTask = this.#sqlite
+          .prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(request.review_work_item_id) as any;
+        if (!reviewTask || reviewTask.type !== "REVIEW") {
+          throw new Error("INTERNAL_ERROR: review request points to invalid task");
+        }
+        const reviewTaskKey = this.taskKeyForId(reviewTask.id);
+        if (!reviewTaskKey) throw new Error("INTERNAL_ERROR: review task key missing");
+        if (reviewTask.version !== normalizedInput.expectedReviewTaskVersion) {
+          throw new Error(`VERSION_CONFLICT: ${reviewTaskKey}:${reviewTask.version}`);
+        }
+        if (
+          reviewTask.assignee_agent_id !== actor.id ||
+          reviewTask.claimed_by_session_id !== actor.sessionId
+        ) {
+          throw new Error(`REVIEW_IDENTITY_MISMATCH: ${reviewTaskKey}`);
+        }
+        const expectedHashes = json<ReviewCandidateHash[]>(
+          request.expected_candidate_hashes_json,
+          [],
+        );
+        if (JSON.stringify(expectedHashes) !== JSON.stringify(normalizedInput.reviewedHashes)) {
+          throw new Error(`CANDIDATE_HASH_MISMATCH: ${normalizedInput.requestKey}`);
+        }
+        const parentChecklist = this.#sqlite
+          .prepare("SELECT * FROM checklist_items WHERE id = ?")
+          .get(request.parent_checklist_id) as any;
+        if (
+          !parentChecklist ||
+          parentChecklist.work_item_id !== request.parent_work_item_id ||
+          reviewTask.parent_id !== request.parent_work_item_id
+        ) {
+          throw new Error("INTERNAL_ERROR: stored review binding invalid");
+        }
+        if (parentChecklist.version !== request.parent_checklist_version) {
+          throw new Error(`VERSION_CONFLICT: ${parentChecklist.version}`);
+        }
+        this.assertCompletionGate(reviewTask);
+        assertWorkItemTransition(reviewTask.status as WorkItemStatus, "DONE");
+
+        const now = nowIso();
+        const requestKey = this.reviewRequestKey(Number(request.local_no));
+        const submissionId = createUlid();
+        const submissionLocalNo = this.nextNumber("review_submission");
+        const submissionKey = this.reviewSubmissionKey(submissionLocalNo);
+        const recordId = createUlid();
+        const recordLocalNo = this.nextNumber("record");
+        const recordKey = this.recordKey({ local_no: recordLocalNo, kind: "VERIFICATION" });
+        const summary = `${normalizedInput.verdict} review for ${reviewTaskKey}`;
+        const detail = JSON.stringify(
+          {
+            requestKey,
+            submissionKey,
+            verdict: normalizedInput.verdict,
+            expectedCandidateHashes: expectedHashes,
+            reviewedHashes: normalizedInput.reviewedHashes,
+            evidence: normalizedInput.evidence,
+            reviewerAgentId: actor.id,
+            reviewerSessionId: actor.sessionId,
+          },
+          null,
+          2,
+        );
+        this.#sqlite
+          .prepare(
+            `INSERT INTO records(
+               id, local_no, kind, title, summary, detail, importance, status,
+               supersedes_id, scope, work_item_id, actor, version, created_at, updated_at,
+               source_type, source_actor_id, source_session_id, source_ref, topic, subject_key,
+               op_id
+             ) VALUES (?, ?, 'VERIFICATION', ?, ?, ?, 'HIGH', 'ACTIVE', NULL,
+               'REVIEW_AUDIT', ?, ?, 0, ?, ?, 'AGENT', ?, ?, ?, 'review-verdict', ?, ?)`,
+          )
+          .run(
+            recordId,
+            recordLocalNo,
+            `Review ${normalizedInput.verdict}: ${reviewTaskKey}`,
+            summary,
+            detail,
+            reviewTask.id,
+            actor.id,
+            now,
+            now,
+            actor.id,
+            actor.sessionId,
+            submissionKey,
+            reviewTaskKey,
+            opId,
+          );
+        this.appendEvent("record.created", actor, "RECORD", recordId, {
+          key: recordKey,
+          kind: "VERIFICATION",
+          title: `Review ${normalizedInput.verdict}: ${reviewTaskKey}`,
+          summary,
+          topic: "review-verdict",
+          subjectKey: reviewTaskKey,
+        });
+        this.upsertSearchDocument(
+          "RECORD",
+          recordId,
+          recordKey,
+          `Review ${normalizedInput.verdict}: ${reviewTaskKey}`,
+          `${summary}\n${detail}`,
+        );
+
+        if (normalizedInput.verdict === "APPROVED") {
+          this.#sqlite
+            .prepare(
+              `UPDATE checklist_items SET status = 'DONE', evidence_json = ?,
+               version = version + 1, updated_at = ? WHERE id = ?`,
+            )
+            .run(JSON.stringify(normalizedInput.evidence), now, parentChecklist.id);
+          this.recomputeWorkItem(parentChecklist.work_item_id);
+          this.appendEvent("checklist.updated", actor, "CHECKLIST", parentChecklist.id, {
+            workItemId: parentChecklist.work_item_id,
+            taskKey: this.taskKeyForId(parentChecklist.work_item_id),
+            status: "DONE",
+            reviewRequestKey: requestKey,
+            reviewSubmissionKey: submissionKey,
+          });
+        }
+
+        this.#sqlite
+          .prepare(
+            `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
+             waiting_on = NULL, waiting_for = NULL, completed_at = ?, computed_progress = 100,
+             reported_progress = 100, version = version + 1, updated_at = ? WHERE id = ?`,
+          )
+          .run(now, now, reviewTask.id);
+        this.#sqlite
+          .prepare(
+            `UPDATE agent_sessions SET current_work_item_id = NULL, work_state = 'IDLE',
+             heartbeat_at = ?, updated_at = ?, version = version + 1
+             WHERE id = ? AND current_work_item_id = ?`,
+          )
+          .run(now, now, actor.sessionId, reviewTask.id);
+        this.appendEvent("work.completed", actor, "WORK_ITEM", reviewTask.id, {
+          key: reviewTaskKey,
+          title: reviewTask.title,
+          operation: "review_submit",
+          status: "DONE",
+          phase: "DONE",
+          reviewRequestKey: requestKey,
+          verdict: normalizedInput.verdict,
+        });
+        this.recomputeWorkItem(request.parent_work_item_id);
+
+        const finalReviewTask = this.#sqlite
+          .prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(reviewTask.id) as any;
+        const finalChecklist = this.#sqlite
+          .prepare("SELECT * FROM checklist_items WHERE id = ?")
+          .get(parentChecklist.id) as any;
+        const finalParent = this.#sqlite
+          .prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(request.parent_work_item_id) as any;
+        const parentTaskKey = this.taskKeyForId(finalParent.id);
+        if (!parentTaskKey) throw new Error("INTERNAL_ERROR: parent task key missing");
+        this.#sqlite
+          .prepare(
+            `INSERT INTO review_submissions(
+               id, local_no, request_id, verdict, reviewed_hashes_json, evidence_json,
+               record_id, reviewer_agent_id, reviewer_session_id, review_task_version,
+               parent_checklist_version, created_at, op_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            submissionId,
+            submissionLocalNo,
+            request.id,
+            normalizedInput.verdict,
+            JSON.stringify(normalizedInput.reviewedHashes),
+            JSON.stringify(normalizedInput.evidence),
+            recordId,
+            actor.id,
+            actor.sessionId,
+            finalReviewTask.version,
+            finalChecklist.version,
+            now,
+            opId,
+          );
+        const sequence = this.appendEvent(
+          "review.submitted",
+          actor,
+          "REVIEW_SUBMISSION",
+          submissionId,
+          {
+            key: submissionKey,
+            requestKey,
+            reviewTaskKey,
+            parentTaskKey,
+            parentChecklistId: finalChecklist.id,
+            recordKey,
+            verdict: normalizedInput.verdict,
+            reviewedHashes: normalizedInput.reviewedHashes,
+          },
+        );
+        return {
+          requestKey,
+          submissionKey,
+          recordKey,
+          verdict: normalizedInput.verdict,
+          reviewTask: {
+            key: reviewTaskKey,
+            status: finalReviewTask.status,
+            version: finalReviewTask.version,
+          },
+          parentChecklist: {
+            id: finalChecklist.id,
+            status: finalChecklist.status,
+            version: finalChecklist.version,
+          },
+          parentTask: {
+            key: parentTaskKey,
+            status: finalParent.status,
+            version: finalParent.version,
+          },
+          sequence,
+        };
+      },
+    });
   }
 
   listWorkItems(
@@ -2762,6 +3222,14 @@ export class ProjectRepository {
           : null;
         const now = nowIso();
         if (normalizedInput.supersedes) {
+          const superseded = this.#sqlite
+            .prepare("SELECT local_no, kind, scope FROM records WHERE id = ?")
+            .get(normalizedInput.supersedes) as
+            | { local_no: number; kind: string; scope: string }
+            | undefined;
+          if (superseded?.scope === "REVIEW_AUDIT") {
+            throw new Error(`IMMUTABLE_RECORD: ${this.recordKey(superseded)}`);
+          }
           this.#sqlite
             .prepare(
               `UPDATE records SET status = 'SUPERSEDED', version = version + 1,
