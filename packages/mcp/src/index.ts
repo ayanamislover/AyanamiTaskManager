@@ -8,7 +8,12 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
-import { EvidenceInputSchema, WorkItemPatchInputSchema } from "@ayanami-task/protocol";
+import {
+  EvidenceInputSchema,
+  EvidenceReferenceSchema,
+  ReviewCandidateHashSchema,
+  WorkItemPatchInputSchema,
+} from "@ayanami-task/protocol";
 
 const outputSchema = z.object({}).catchall(z.unknown());
 const projectCode = z.string().trim().min(1).max(20);
@@ -67,6 +72,7 @@ function compactJsonSchema(value: unknown): unknown {
     "minItems",
     "maxItems",
     "additionalProperties",
+    "pattern",
   ]);
   // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
   // 输出 schema 里既然为了体积省掉 default，就同步从 required 去掉这些键；这既更紧凑，
@@ -135,18 +141,62 @@ function compactPublicToolSchema(name: string, value: unknown): Record<string, u
       "predecessor_session_id",
       "signals",
       "creation_reason",
+      "resume",
+      "max_chars",
+      "allow_project_create",
     ]);
   }
   if (name === "atm_task_list") {
-    omit(schema.properties, ["owner", "parent_key", "milestone_id", "query"]);
+    omit(schema.properties, ["owner", "parent_key", "milestone_id", "query", "ready_only"]);
   }
   if (name === "atm_task_create") {
-    omit(schema.properties?.items?.items?.properties, [
+    const item = schema.properties?.items?.items;
+    omit(item?.properties, [
       "milestone_id",
       "parent_key",
       "depends_on",
       "discovered_from",
+      "objective_id",
+      "description",
+      "weight",
+      "target_date",
+      "verification_required",
     ]);
+    omit(item?.properties?.checklist?.items?.properties, ["weight"]);
+  }
+  if (name === "atm_task_patch") {
+    const item = schema.properties?.items?.items;
+    if (item) {
+      omit(item.properties, ["assignee_agent_id", "target_date", "parent_key", "takeover_stale"]);
+      item.properties.candidate_hashes = {
+        type: "object",
+        propertyNames: { type: "string" },
+        additionalProperties: { type: "string" },
+      };
+      delete item.properties.evidence?.items?.properties?.note;
+      item.allOf = [
+        {
+          if: { properties: { operation: { const: "review_request" } } },
+          then: {
+            required: [
+              "parent_checklist_id",
+              "expected_parent_checklist_version",
+              "candidate_hashes",
+            ],
+          },
+        },
+        {
+          if: { properties: { operation: { const: "review_submit" } } },
+          then: { required: ["request_key", "verdict", "candidate_hashes", "evidence"] },
+        },
+      ];
+    }
+  }
+  if (name === "atm_progress_add") {
+    omit(schema.properties, ["completed", "next", "blocker", "health"]);
+  }
+  if (name === "atm_end") {
+    omit(schema.properties, ["next", "release_claims", "retirement_reason"]);
   }
   return schema;
 }
@@ -664,6 +714,42 @@ const workItemExpectedFields = z
   .strict()
   .refine((value) => Object.keys(value).length > 0, "expected_fields 至少包含一个字段");
 
+const reviewPatchCommon = {
+  task_key: taskKey,
+  expected_version: z.number().int().nonnegative(),
+  takeover_stale: z.literal(false).default(false),
+};
+const reviewCandidateHashMap = z
+  .record(ReviewCandidateHashSchema.shape.name, ReviewCandidateHashSchema.shape.value)
+  .superRefine((hashes, context) => {
+    const count = Object.keys(hashes).length;
+    if (count < 1 || count > 20) {
+      context.addIssue({
+        code: "custom",
+        message: "candidate_hashes 需要 1 到 20 项",
+      });
+    }
+  });
+const reviewRequestPatchInput = z
+  .object({
+    ...reviewPatchCommon,
+    operation: z.literal("review_request"),
+    parent_checklist_id: z.string().trim().min(1).max(128),
+    expected_parent_checklist_version: z.number().int().nonnegative(),
+    candidate_hashes: reviewCandidateHashMap,
+  })
+  .strict();
+const reviewSubmitPatchInput = z
+  .object({
+    ...reviewPatchCommon,
+    operation: z.literal("review_submit"),
+    request_key: z.string().trim().min(1).max(128),
+    verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]),
+    candidate_hashes: reviewCandidateHashMap,
+    evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
+  })
+  .strict();
+
 function coreWorkItemPatch(item: Record<string, any>): Record<string, unknown> {
   const expectedFields = item.expected_fields
     ? {
@@ -713,6 +799,8 @@ const workItemPatch = z
       "verify",
       "complete",
       "verify_and_complete",
+      "review_request",
+      "review_submit",
       "cancel",
       "reopen",
       "edit",
@@ -728,8 +816,34 @@ const workItemPatch = z
     target_date: z.string().nullable().optional(),
     parent_key: z.string().nullable().optional(),
     takeover_stale: z.boolean().default(false),
+    parent_checklist_id: z.string().trim().min(1).max(128).optional(),
+    expected_parent_checklist_version: z.number().int().nonnegative().optional(),
+    request_key: z.string().trim().min(1).max(128).optional(),
+    candidate_hashes: reviewCandidateHashMap.optional(),
+    verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]).optional(),
+    evidence: z.array(EvidenceReferenceSchema).min(1).max(100).optional(),
   })
   .superRefine((value, context) => {
+    if (value.operation === "review_request" || value.operation === "review_submit") {
+      const parsed = (
+        value.operation === "review_request" ? reviewRequestPatchInput : reviewSubmitPatchInput
+      ).safeParse(value);
+      if (parsed.success) return;
+      for (const issue of parsed.error.issues) {
+        if (issue.code === "unrecognized_keys") {
+          for (const key of issue.keys) {
+            context.addIssue({
+              code: "custom",
+              path: [key],
+              message: `${value.operation} 不接受 ${key}`,
+            });
+          }
+          continue;
+        }
+        context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+      }
+      return;
+    }
     if (value.operation === "verify_and_complete") {
       const allowed = new Set(["task_key", "expected_version", "operation", "takeover_stale"]);
       for (const [field, fieldValue] of Object.entries(value)) {
@@ -778,12 +892,14 @@ const taskPatchToolInput = z
     items: z.array(workItemPatch).min(1).max(50),
   })
   .superRefine((value, context) => {
-    const composite = value.items.filter((item) => item.operation === "verify_and_complete");
+    const composite = value.items.filter((item) =>
+      ["verify_and_complete", "review_request", "review_submit"].includes(item.operation),
+    );
     if (composite.length > 0 && value.items.length !== 1) {
       context.addIssue({
         code: "custom",
         path: ["items"],
-        message: "verify_and_complete 必须作为唯一 item",
+        message: `${composite[0]!.operation} 必须作为唯一 item`,
       });
     }
   });
@@ -1674,14 +1790,93 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       outputSchema,
     },
     async (input) => {
-      const composite = input.items.filter((item) => item.operation === "verify_and_complete");
+      const composite = input.items.filter((item) =>
+        ["verify_and_complete", "review_request", "review_submit"].includes(item.operation),
+      );
       if (composite.length > 0) {
         if (input.items.length !== 1) {
           throw new Error(
-            "VALIDATION_ERROR: verify_and_complete 必须作为 atm_task_patch 的唯一 item",
+            `VALIDATION_ERROR: ${composite[0]!.operation} 必须作为 atm_task_patch 的唯一 item`,
           );
         }
-        const item = composite[0]!;
+      }
+      if (composite[0]?.operation === "review_request") {
+        const item = reviewRequestPatchInput.parse(composite[0]);
+        const created = await service.createReviewRequest(
+          input.project,
+          input.session,
+          input.op_id,
+          {
+            reviewTaskKey: item.task_key,
+            expectedReviewTaskVersion: item.expected_version,
+            parentChecklistId: item.parent_checklist_id,
+            expectedParentChecklistVersion: item.expected_parent_checklist_version,
+            expectedCandidateHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
+              name,
+              value,
+            })),
+          },
+        );
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
+          project: input.project.toUpperCase(),
+          seq: created.sequence,
+          review_request: {
+            request_key: created.request.key,
+            review_task_key: created.request.reviewTaskKey,
+            parent_task_key: created.request.parentTaskKey,
+            parent_checklist_id: created.request.parentChecklistId,
+            parent_checklist_version: created.request.parentChecklistVersion,
+            expected_candidate_hashes: created.request.expectedCandidateHashes,
+            created_by_agent_id: created.request.createdByAgentId,
+            created_by_session_id: created.request.createdBySessionId,
+            submission: created.request.submission,
+          },
+        });
+      }
+      if (composite[0]?.operation === "review_submit") {
+        const item = reviewSubmitPatchInput.parse(composite[0]);
+        const request = await service.getReviewRequest(input.project, item.request_key);
+        if (request.reviewTaskKey !== item.task_key) {
+          throw new Error(`REVIEW_BINDING_MISMATCH: ${item.task_key}`);
+        }
+        const submitted = await service.submitReview(input.project, input.session, input.op_id, {
+          requestKey: item.request_key,
+          expectedReviewTaskVersion: item.expected_version,
+          verdict: item.verdict,
+          reviewedHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
+            name,
+            value,
+          })),
+          evidence: item.evidence,
+        });
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, submitted as unknown as Record<string, unknown>),
+          project: input.project.toUpperCase(),
+          seq: submitted.sequence,
+          review_submission: {
+            request_key: submitted.requestKey,
+            submission_key: submitted.submissionKey,
+            record_key: submitted.recordKey,
+            verdict: submitted.verdict,
+            review_task: {
+              task_key: submitted.reviewTask.key,
+              status: submitted.reviewTask.status,
+              version: submitted.reviewTask.version,
+            },
+            parent_checklist: submitted.parentChecklist,
+            parent_task: {
+              task_key: submitted.parentTask.key,
+              status: submitted.parentTask.status,
+              version: submitted.parentTask.version,
+            },
+          },
+        });
+      }
+      if (composite[0]?.operation === "verify_and_complete") {
+        const item = composite[0];
         const completed = await service.verifyAndComplete(
           input.project,
           input.session,
