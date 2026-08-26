@@ -24,6 +24,225 @@ export type AyanamiServerOptions = {
   token: string;
 };
 
+type PublicErrorDetails = Record<string, unknown>;
+
+type ZodLikeIssue = {
+  code?: unknown;
+  path?: unknown;
+  message?: unknown;
+  maximum?: unknown;
+  minimum?: unknown;
+};
+
+type ProjectCompletedEntry = string | { text: string; workItemKey?: string };
+
+function completedEntryText(entry: string | { text: string }): string {
+  return typeof entry === "string" ? entry : entry.text;
+}
+
+function boundedText(value: unknown, limit: number): string {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function isZodError(error: unknown): error is { issues: ZodLikeIssue[] } {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      (error as { name?: unknown }).name === "ZodError" &&
+      Array.isArray((error as { issues?: unknown }).issues),
+  );
+}
+
+function valueAtPath(root: unknown, path: unknown): unknown {
+  if (!Array.isArray(path)) return undefined;
+  let current = root;
+  for (const segment of path) {
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      (typeof segment !== "string" && typeof segment !== "number")
+    ) {
+      return undefined;
+    }
+    current = (current as Record<string | number, unknown>)[segment];
+  }
+  return current;
+}
+
+function validationDetails(error: unknown, requestBody?: unknown): PublicErrorDetails | null {
+  if (!isZodError(error)) return null;
+  const rawIssues = (error as { issues: ZodLikeIssue[] }).issues;
+  const issueLimit = 50;
+  const issues = rawIssues.slice(0, issueLimit).map((issue) => {
+    const value = valueAtPath(requestBody, issue.path);
+    const actualLength =
+      typeof value === "string" || Array.isArray(value) ? value.length : undefined;
+    const limit =
+      typeof issue.maximum === "number"
+        ? issue.maximum
+        : typeof issue.minimum === "number"
+          ? issue.minimum
+          : undefined;
+    return {
+      code: boundedText(issue.code, 64) || "invalid_value",
+      path: Array.isArray(issue.path)
+        ? boundedText(issue.path.map((segment) => String(segment)).join("."), 256)
+        : "",
+      message: boundedText(issue.message, 500) || "参数不合法",
+      ...(actualLength === undefined ? {} : { actual_length: actualLength }),
+      ...(limit === undefined ? {} : { limit }),
+    };
+  });
+  return {
+    issues,
+    issue_count: rawIssues.length,
+    issues_truncated: rawIssues.length > issueLimit,
+  };
+}
+
+function expectedVersionFromBody(body: unknown, taskKey?: string): number | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const candidate = body as Record<string, unknown>;
+  if (Number.isInteger(candidate.expectedVersion)) return Number(candidate.expectedVersion);
+  if (!Array.isArray(candidate.items)) return null;
+  const item = candidate.items.find(
+    (entry) =>
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (!taskKey || (entry as Record<string, unknown>).taskKey === taskKey),
+  ) as Record<string, unknown> | undefined;
+  return item && Number.isInteger(item.expectedVersion) ? Number(item.expectedVersion) : null;
+}
+
+function domainErrorDetails(
+  code: string,
+  error: unknown,
+  requestBody?: unknown,
+): PublicErrorDetails | null {
+  if (!(error instanceof Error)) return null;
+  const detailText = error.message.slice(error.message.indexOf(":") + 1).trim();
+  if (code === "VERSION_CONFLICT") {
+    const segments = detailText.split(":");
+    const currentVersion = Number(segments.at(-1));
+    if (!Number.isInteger(currentVersion) || currentVersion < -1) return null;
+    const taskKey = segments.length > 1 ? boundedText(segments[0], 128) : undefined;
+    const expectedVersion = expectedVersionFromBody(requestBody, taskKey);
+    return {
+      current_version: currentVersion,
+      ...(expectedVersion === null
+        ? {}
+        : {
+            expected_version: expectedVersion,
+            version_gap: currentVersion - expectedVersion,
+          }),
+      ...(taskKey ? { task_key: taskKey } : {}),
+    };
+  }
+  if (code === "SESSION_CLOSED" && detailText) {
+    return { session_id: boundedText(detailText, 128) };
+  }
+  if (code === "INVALID_TRANSITION") {
+    const transition = /^([A-Z_]+)\s*->\s*([A-Z_]+)(?:\s+\(|$)/u.exec(detailText);
+    if (transition) {
+      return { current_status: transition[1], requested_status: transition[2] };
+    }
+  }
+  return null;
+}
+
+function normalizedSuggestionText(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/gu, "");
+}
+
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1]! + 1,
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length]!;
+}
+
+function projectSuggestionDetails(
+  service: AyanamiTaskService,
+  error: unknown,
+): PublicErrorDetails | null {
+  if (!(error instanceof Error)) return null;
+  const query = normalizedSuggestionText(
+    boundedText(error.message.slice(error.message.indexOf(":") + 1).trim(), 128),
+  );
+  if (!query) return null;
+  try {
+    const ranked = service
+      .listProjects()
+      .filter((project) => project.lifecycle !== "TRASHED")
+      .map((project) => {
+        const code = normalizedSuggestionText(project.code);
+        const name = normalizedSuggestionText(project.name);
+        const rawScore = Math.min(editDistance(query, code), editDistance(query, name));
+        const prefix = code.startsWith(query) || name.startsWith(query);
+        return { project, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
+      })
+      .sort(
+        (left, right) =>
+          left.score - right.score || left.project.code.localeCompare(right.project.code),
+      )
+      .slice(0, 5);
+    if (ranked.length === 0) return { did_you_mean: null, candidates: [] };
+    const first = ranked[0]!;
+    const plausible = first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34));
+    return {
+      did_you_mean: plausible ? first.project.code : null,
+      candidates: ranked.map(({ project }) => ({ code: project.code, name: project.name })),
+    };
+  } catch {
+    // 错误处理本身不能因候选索引不可用而覆盖原 PROJECT_NOT_FOUND。
+    return null;
+  }
+}
+
+function projectCompletedEntries(value: unknown): ProjectCompletedEntry[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new Error("INVALID_ARGUMENT: completed 必须是最多 20 项的数组");
+  }
+  return value.map((entry, index) => {
+    if (typeof entry === "string") return entry;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`INVALID_ARGUMENT: completed[${index}] 必须是字符串或结构化完成项`);
+    }
+    const candidate = entry as Record<string, unknown>;
+    if (typeof candidate.text !== "string" || candidate.text.length > 500) {
+      throw new Error(`INVALID_ARGUMENT: completed[${index}].text 必填且不超过 500 字符`);
+    }
+    if (
+      candidate.workItemKey !== undefined &&
+      (typeof candidate.workItemKey !== "string" ||
+        !candidate.workItemKey.trim() ||
+        candidate.workItemKey.length > 128)
+    ) {
+      throw new Error(
+        `INVALID_ARGUMENT: completed[${index}].workItemKey 必须是非空且不超过 128 字符`,
+      );
+    }
+    return {
+      text: candidate.text,
+      ...(typeof candidate.workItemKey === "string"
+        ? { workItemKey: candidate.workItemKey.trim() }
+        : {}),
+    };
+  });
+}
+
 function bearer(request: FastifyRequest): string | null {
   const value = request.headers.authorization;
   if (!value?.startsWith("Bearer ")) return null;
@@ -31,13 +250,16 @@ function bearer(request: FastifyRequest): string | null {
 }
 
 function errorCode(error: unknown): string {
+  if (isZodError(error)) return "INVALID_ARGUMENT";
   if (!(error instanceof Error)) return "INTERNAL_ERROR";
   const candidate = error.message.split(":", 1)[0]!.trim();
   return /^[A-Z][A-Z0-9_]+$/u.test(candidate) ? candidate : "INTERNAL_ERROR";
 }
 
 function statusForCode(code: string): number {
+  if (code === "INVALID_ARGUMENT") return 400;
   if (code === "NOT_FOUND" || code.endsWith("_NOT_FOUND")) return 404;
+  if (code === "SESSION_CLOSED" || code === "INVALID_TRANSITION") return 409;
   // 前置条件类错误一律 4xx：调用方重试多少次都不会变，回 500 会让崩溃重放
   // 控制器把永久失败当成服务端抖动，无限重试下去。REQUIRED 和 REQUIRES 都要收，
   // PROJECT_REQUIRED 与 ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT 都落在这一档。
@@ -94,8 +316,23 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
   app.setErrorHandler((error, request, reply) => {
     const code = errorCode(error);
+    const details =
+      validationDetails(error, request.body) ??
+      domainErrorDetails(code, error, request.body) ??
+      (code === "PROJECT_NOT_FOUND" && bearer(request) === options.token
+        ? projectSuggestionDetails(options.service, error)
+        : null);
     reply.code(statusForCode(code)).send({
-      error: { code, message: error instanceof Error ? error.message : String(error) },
+      error: {
+        code,
+        message:
+          code === "INVALID_ARGUMENT"
+            ? "请求参数不合法"
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        ...(details ? { details } : {}),
+      },
       request_id: request.id,
     });
   });
@@ -297,6 +534,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { code } = request.params as { code: string };
     const { limit } = request.query as { limit?: string };
     return options.service.listRecords(code, Number(limit ?? 100));
+  });
+  app.get("/api/v1/projects/:code/records/:recordKey", async (request) => {
+    const { code, recordKey } = request.params as { code: string; recordKey: string };
+    return options.service.getRecord(code, recordKey);
   });
   app.get("/api/v1/projects/:code/project-updates", async (request) => {
     const { code } = request.params as { code: string };
@@ -535,11 +776,17 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
   app.post("/api/v1/projects/:code/progress-updates", async (request) => {
     const { code } = request.params as { code: string };
-    const input = ProgressAddInputSchema.parse({ ...(request.body as object), project: code });
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const completedEntries = projectCompletedEntries(body.completed);
+    const input = ProgressAddInputSchema.parse({
+      ...body,
+      completed: completedEntries.map(completedEntryText),
+      project: code,
+    });
     if (input.scope === "project") {
       return options.service.addProjectProgress(code, input.session, input.opId, {
         summary: input.summary,
-        completed: input.completed,
+        completed: completedEntries,
         next: input.next,
         ...(input.health === undefined ? {} : { health: input.health }),
         ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
@@ -550,7 +797,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       taskKey: input.taskKey,
       ...(input.percent === undefined ? {} : { percent: input.percent }),
       summary: input.summary,
-      completed: input.completed,
+      completed: input.completed.map(completedEntryText),
       next: input.next,
       evidence: input.evidence,
       ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
