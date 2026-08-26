@@ -16,8 +16,10 @@ import {
   type RegisteredProject,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
+import { reconcileWorkItems } from "./reconcile.js";
 
 export * from "./agenttask-import.js";
+export * from "./reconcile.js";
 
 function mutationAck<T extends Record<string, unknown>>(
   result: T,
@@ -819,6 +821,64 @@ export class AyanamiTaskService {
     filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
   ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
     return (await this.#repository(projectCode)).listWorkItems(filters);
+  }
+
+  async reconcileProject(projectCode: string, input: { includeActive?: boolean } = {}) {
+    const project = this.databases.getProject(projectCode);
+    const repository = await this.#repository(project.code);
+    const tasks: ReturnType<ProjectRepository["listWorkItems"]> = [];
+    for (let offset = 0; ; offset += 100) {
+      const page = repository.listWorkItems({ limit: 100, offset });
+      tasks.push(...page);
+      if (page.length < 100) break;
+    }
+
+    const previouslyClaimedKeys = new Set<string>();
+    let sinceSequence = 0;
+    for (;;) {
+      const page = repository.delta(sinceSequence, 100, ["work.claimed", "work.started"]);
+      for (const event of page.events) {
+        if (event.key) previouslyClaimedKeys.add(event.key);
+      }
+      if (!page.hasMore) break;
+      const nextSequence = page.events.at(-1)?.seq ?? sinceSequence;
+      if (nextSequence <= sinceSequence) break;
+      sinceSequence = nextSequence;
+    }
+
+    const sessions = repository.listAgentSessions(200);
+    const knownSessionIds = new Set(sessions.map((session) => String(session.id)));
+    for (const task of tasks) {
+      const sessionId = task.claimedBySessionId;
+      if (!sessionId || knownSessionIds.has(sessionId)) continue;
+      try {
+        const session = repository.getSession(sessionId);
+        sessions.push({
+          ...session,
+          last_seen_at: session.heartbeat_at ?? session.updated_at ?? null,
+          ended_at: session.closed_at ?? null,
+        });
+        knownSessionIds.add(sessionId);
+      } catch {
+        // Missing claim owners remain visible as stalled rather than making reconciliation fail.
+      }
+    }
+
+    const result = reconcileWorkItems({
+      sourceRoot: project.sourcePaths[0] ?? null,
+      tasks,
+      sessions,
+      previouslyClaimedKeys,
+      includeActive: input.includeActive ?? false,
+    });
+    return {
+      project: {
+        code: project.code,
+        name: project.name,
+        sourceRoot: project.sourcePaths[0] ?? null,
+      },
+      ...result,
+    };
   }
 
   async getWorkItem(

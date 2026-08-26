@@ -43,5 +43,13 @@ describe("typed client", () => {
     });
     expect(created).toMatchObject({ code: "CLI", name: "客户端项目" });
     await expect(client.projects.list()).resolves.toHaveLength(1);
+    await expect(client.projects.reconciliation("CLI")).resolves.toMatchObject({
+      project: { code: "CLI", sourceRoot: null },
+      attentionCount: 0,
+      items: [],
+    });
+    await expect(client.projects.reconciliation("CLI", true)).resolves.toMatchObject({
+      counts: { ACTIVE: 0, LEASE_EXPIRED_ONLINE: 0, STALLED: 0, POSSIBLY_COMPLETE: 0 },
+    });
   });
 });

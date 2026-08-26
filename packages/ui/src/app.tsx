@@ -47,6 +47,11 @@ import {
 } from "./agent-sessions.js";
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
+import {
+  formatReconciliationAge,
+  reconciliationLabel,
+  reconciliationSummary,
+} from "./reconciliation.js";
 import { presentTimelineEvent } from "./timeline-events.js";
 import { taskProgressPresentation } from "./task-progress.js";
 import {
@@ -2294,6 +2299,7 @@ function TaskDrawer({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tasks", project] }),
         queryClient.invalidateQueries({ queryKey: ["task", project, taskKey] }),
+        queryClient.invalidateQueries({ queryKey: ["reconciliation", project] }),
         queryClient.invalidateQueries({ queryKey: ["brief", project] }),
         queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
@@ -2317,6 +2323,7 @@ function TaskDrawer({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["task", project, taskKey] }),
         queryClient.invalidateQueries({ queryKey: ["tasks", project] }),
+        queryClient.invalidateQueries({ queryKey: ["reconciliation", project] }),
         queryClient.invalidateQueries({ queryKey: ["brief", project] }),
         queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
@@ -2764,6 +2771,7 @@ function CreateTaskModal({
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tasks", project] }),
+        queryClient.invalidateQueries({ queryKey: ["reconciliation", project] }),
         queryClient.invalidateQueries({ queryKey: ["brief", project] }),
         queryClient.invalidateQueries({ queryKey: ["overview"] }),
       ]);
@@ -3676,6 +3684,7 @@ function ProjectPage({
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
   const [engineeringCollapsed, setEngineeringCollapsed] = useState(true);
+  const [reconciliationCollapsed, setReconciliationCollapsed] = useState(true);
   const tasks = useQuery({
     queryKey: ["tasks", project.code],
     queryFn: () => client.tasks.list(project.code, { limit: 100 }),
@@ -3695,6 +3704,10 @@ function ProjectPage({
   const updates = useQuery({
     queryKey: ["project-updates", project.code],
     queryFn: () => client.projects.updates(project.code),
+  });
+  const reconciliation = useQuery({
+    queryKey: ["reconciliation", project.code],
+    queryFn: () => client.projects.reconciliation(project.code),
   });
   const engineering = useQuery({
     queryKey: ["engineering-metrics", project.code],
@@ -4211,6 +4224,77 @@ function ProjectPage({
             <Empty title="没有 READY 任务" text="拆解并创建下一项可执行工作。" />
           )}
         </article>
+      </section>
+      <section
+        className={`atm-panel atm-engineering${reconciliationCollapsed ? " is-collapsed" : ""}`}
+        aria-label="任务对账"
+      >
+        <div className="atm-panel-head">
+          <button
+            type="button"
+            className="atm-engineering-toggle"
+            aria-label={reconciliationCollapsed ? "展开任务对账" : "折叠任务对账"}
+            aria-expanded={!reconciliationCollapsed}
+            aria-controls="task-reconciliation-content"
+            onClick={() => setReconciliationCollapsed((collapsed) => !collapsed)}
+          >
+            <CaretDown size={17} aria-hidden="true" />
+            <span>
+              <strong>
+                {reconciliation.error ? "对账检查失败" : reconciliationSummary(reconciliation.data)}
+              </strong>
+            </span>
+          </button>
+        </div>
+        <div id="task-reconciliation-content" hidden={reconciliationCollapsed}>
+          {reconciliation.isLoading ? (
+            <LoadingRows count={2} />
+          ) : reconciliation.error ? (
+            <ErrorState error={reconciliation.error} />
+          ) : reconciliation.data?.items.length ? (
+            <div className="atm-list">
+              {reconciliation.data.items.map((item) => (
+                <button
+                  className="atm-row"
+                  key={`${item.taskKey}:${item.classification}`}
+                  onClick={() => openTask(item.taskKey)}
+                >
+                  <div>
+                    <div className="atm-row-title">{item.title}</div>
+                    <div className="atm-row-sub">
+                      {item.taskKey} · {reconciliationLabel(item.classification)} · 已持续{" "}
+                      {formatReconciliationAge(item.ageSeconds)}
+                    </div>
+                    {item.session ? (
+                      <div className="atm-row-sub">
+                        Session：{item.session.displayName} · {item.session.connectionState}
+                      </div>
+                    ) : null}
+                    {item.evidencePaths.length ? (
+                      <div className="atm-row-sub">已发现产物：{item.evidencePaths.join("、")}</div>
+                    ) : null}
+                    <div className="atm-row-sub">建议：{item.suggestedAction}</div>
+                  </div>
+                  <span
+                    className={`atm-badge ${
+                      item.classification === "STALLED"
+                        ? "danger"
+                        : item.classification === "LEASE_EXPIRED_ONLINE"
+                          ? "warning"
+                          : "primary"
+                    }`}
+                  >
+                    {reconciliationLabel(item.classification)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="atm-panel-body">
+              <div className="atm-row-title">当前没有需对账项</div>
+            </div>
+          )}
+        </div>
       </section>
       <section
         className={`atm-panel atm-engineering${engineeringCollapsed ? " is-collapsed" : ""}`}
