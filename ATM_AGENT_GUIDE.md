@@ -1,5 +1,7 @@
 # ATM Agent 快速入门
 
+> MCP 工具面版本：`2`。`atm_begin` 的 `surface_version` 可用于检测客户端缓存或文档是否过期。
+
 ## ATM 是什么
 
 AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保存目标、任务、Session、进度、证据、阻塞和交接。它不是聊天记录或日志仓库；只在工作状态有实际变化时写入。
@@ -49,7 +51,7 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 
 ## 最短工作流
 
-1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
+1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。默认 `brief="full"`；低上下文客户端可用 `minimal`，只要 Session 回执则用 `none`。`max_chars` 只裁剪 brief，不会丢失 `session`、`project`、`scope` 或原子回执。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
 3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。

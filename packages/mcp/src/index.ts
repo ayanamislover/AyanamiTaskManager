@@ -13,12 +13,25 @@ const projectCode = z.string().trim().min(1).max(20);
 const taskKey = z.string().trim().min(1).max(40);
 const opId = z.string().trim().min(1).max(128);
 const sessionId = z.string().trim().min(1).max(128);
+export const MCP_SURFACE_VERSION = 2;
 
 function compactJsonSchema(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(compactJsonSchema);
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, unknown>;
-  if (Array.isArray(source.anyOf) && source.anyOf.length === 2) {
+  if (Object.keys(source).length === 0) return { description: "JSON value" };
+  if (
+    Array.isArray(source.anyOf) &&
+    source.anyOf.length === 2 &&
+    source.anyOf.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        !("enum" in entry) &&
+        !("const" in entry),
+    )
+  ) {
     const types = source.anyOf.map((entry) => (entry as Record<string, unknown>)?.type);
     if (types.every((type) => typeof type === "string") && types.includes("null"))
       return { type: types };
@@ -26,18 +39,15 @@ function compactJsonSchema(value: unknown): unknown {
   const omitted = new Set([
     "$schema",
     "default",
-    "minLength",
-    "maxLength",
     "minimum",
     "maximum",
     "exclusiveMinimum",
     "exclusiveMaximum",
+    "minLength",
     "minItems",
     "maxItems",
     "additionalProperties",
   ]);
-  // enum 已经把允许值和原始类型都钉死，保留同层 type 只是重复字节。
-  if (Array.isArray(source.enum) && source.enum.length > 0) omitted.add("type");
   // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
   // 输出 schema 里既然为了体积省掉 default，就同步从 required 去掉这些键；这既更紧凑，
   // 也让 Agent 看到的必填项与真实运行时一致。
@@ -60,6 +70,7 @@ function compactJsonSchema(value: unknown): unknown {
     Object.entries(source)
       .filter(([key, entry]) => !omitted.has(key) && entry !== undefined)
       .flatMap(([key, entry]) => {
+        if (key === "maxLength" && typeof entry === "number" && entry > 300) return [];
         if (key === "required" && Array.isArray(entry) && defaulted.size > 0) {
           const required = entry.filter((field) => !defaulted.has(String(field)));
           return required.length === 0 ? [] : [[key, compactJsonSchema(required)]];
@@ -86,12 +97,12 @@ function installCompactToolList(server: McpServer): void {
       .map(([name, tool]) => ({
         name,
         ...(tool.title ? { title: tool.title } : {}),
-        ...(tool.description ? { description: tool.description } : {}),
+        ...(["atm_begin", "atm_brief"].includes(name) && tool.description
+          ? { description: tool.description }
+          : {}),
         inputSchema: compactJsonSchema(
           tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : { type: "object" },
         ) as any,
-        outputSchema: { type: "object" as const },
-        ...(tool.annotations ? { annotations: tool.annotations } : {}),
         ...(tool._meta ? { _meta: tool._meta } : {}),
       })),
   }));
@@ -241,6 +252,77 @@ function fitBrief(
   }
 }
 
+type BeginBriefMode = "none" | "minimal" | "full";
+
+/**
+ * `atm_begin` 先在服务端创建 Session，再附带工作摘要。摘要是可降级载荷，Session 身份不是。
+ * 通用 bounded() 会递归截断所有字符串，最坏时还会把整个对象换成 RESULT_TOO_LARGE；用于
+ * begin 就可能把已经提交的 session/operationId 一并丢掉。这里把不可截断的回执外壳和可裁剪
+ * brief 分开计算预算，任何规模下都先保住调用方继续使用 ATM 所必需的门牌号。
+ */
+function fitBegin(
+  payload: Record<string, unknown>,
+  mode: BeginBriefMode,
+  maxChars: number,
+): Record<string, unknown> {
+  const identity: Record<string, unknown> = {
+    scope: payload.scope,
+    session: payload.session,
+    project: payload.project,
+    surface_version: MCP_SURFACE_VERSION,
+    ...(payload.atomicBegin === undefined ? {} : { atomicBegin: payload.atomicBegin }),
+  };
+  if (mode === "none") return { ...identity, brief_mode: mode, brief_truncated: false };
+
+  const selected =
+    mode === "minimal"
+      ? pickBriefSections(payload, ["counts", "next", "current", "handoff"])
+      : payload;
+  let current = Object.fromEntries(
+    Object.entries(selected).filter(
+      ([key]) =>
+        !["scope", "session", "project", "score", "atomicBegin", "truncated"].includes(key),
+    ),
+  );
+  const droppable = briefDropOrder.filter((name) =>
+    briefSections[name].some((key) => key in current),
+  );
+  const dropped: BriefSection[] = [];
+  const serviceTruncated = payload.truncated === true;
+
+  for (;;) {
+    const identityChars = JSON.stringify(identity).length;
+    const optionalBudget = Math.max(0, maxChars - identityChars - 1);
+    const attempt = bounded(current, optionalBudget);
+    if (attempt.code !== "RESULT_TOO_LARGE") {
+      const briefTruncated = serviceTruncated || dropped.length > 0;
+      const candidate: Record<string, unknown> = {
+        ...identity,
+        ...attempt,
+        brief_mode: mode,
+        truncated: briefTruncated,
+        brief_truncated: briefTruncated,
+        ...(dropped.length === 0 ? {} : { omitted_sections: dropped }),
+      };
+      if (JSON.stringify(candidate).length <= maxChars) return candidate;
+      delete candidate.omitted_sections;
+      if (JSON.stringify(candidate).length <= maxChars) return candidate;
+    }
+    const victim = droppable.shift();
+    if (victim === undefined) {
+      return {
+        ...identity,
+        brief_mode: mode,
+        truncated: true,
+        brief_truncated: true,
+      };
+    }
+    dropped.push(victim);
+    const keys = new Set<string>(briefSections[victim]);
+    current = Object.fromEntries(Object.entries(current).filter(([key]) => !keys.has(key)));
+  }
+}
+
 const workItemCreate = z
   .object({
     client_ref: z.string().min(1).max(100),
@@ -326,14 +408,14 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     { name: "ayanami-task-manager", version: "1.0.15" },
     {
       instructions:
-        "开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。",
+        "MCP surface v2。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。",
     },
   );
 
   server.registerTool(
     "atm_begin",
     {
-      description: "开工一次；直接使用返回的 brief；task_list/task_get 按需。",
+      description: "开工；直接使用返回的 brief。",
       inputSchema: {
         op_id: opId.optional(),
         cwd: z.string().min(1).optional(),
@@ -346,6 +428,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         thread_id: z.string().nullable().optional(),
         parent_session_id: z.string().nullable().optional(),
         resume: z.boolean().default(false),
+        brief: z.enum(["none", "minimal", "full"]).default("full"),
+        max_chars: z.number().int().min(300).max(5000).default(1200),
         predecessor_session_id: z.string().nullable().optional(),
         role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
         signals: z
@@ -372,6 +456,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         clientKind: input.client_kind,
         role: input.role,
         resume: input.resume,
+        maxChars: input.max_chars,
         allowProjectCreate: input.allow_project_create,
         signals: {
           ...(input.signals.expected_minutes === undefined
@@ -416,13 +501,14 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
             quick: started.quick.key,
             status: started.quick.status,
             version: started.quick.version,
+            surface_version: MCP_SURFACE_VERSION,
           },
           1200,
         );
       }
       const { score, ...brief } = started;
       void score;
-      return result(brief, 1200);
+      return wrap(fitBegin(brief, input.brief, input.max_chars));
     },
   );
 
