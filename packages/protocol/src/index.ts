@@ -253,6 +253,23 @@ const NullableDateOnlySchema = DateOnlySchema.nullable().optional();
 const NonEmptyTextSchema = z.string().trim().min(1);
 const OpIdSchema = z.string().trim().min(1).max(128);
 
+export const RECORD_SUMMARY_CODE_POINT_LIMIT = 300;
+
+export function unicodeCodePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+export const RecordSummarySchema = NonEmptyTextSchema.superRefine((value, context) => {
+  if (unicodeCodePointLength(value) <= RECORD_SUMMARY_CODE_POINT_LIMIT) return;
+  context.addIssue({
+    code: "too_big",
+    origin: "string",
+    maximum: RECORD_SUMMARY_CODE_POINT_LIMIT,
+    inclusive: true,
+    message: `摘要不能超过 ${RECORD_SUMMARY_CODE_POINT_LIMIT} 个 Unicode code point`,
+  });
+}).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
+
 export const CreateProjectInputSchema = z.object({
   name: NonEmptyTextSchema.max(200),
   sourcePath: z.string().min(1).nullable(),
@@ -567,7 +584,7 @@ export const RecordInputSchema = z.object({
   opId: OpIdSchema,
   kind: RecordKindSchema,
   title: NonEmptyTextSchema.max(400),
-  summary: NonEmptyTextSchema.max(300),
+  summary: RecordSummarySchema,
   detail: z.string().max(100_000).default(""),
   importance: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
   scope: z.string().max(100).default("PROJECT"),

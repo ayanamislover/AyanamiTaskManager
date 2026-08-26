@@ -18,6 +18,7 @@ import {
   SearchInputSchema,
   TaskCreateBatchInputSchema,
   TaskPatchBatchInputSchema,
+  unicodeCodePointLength,
   VerifyAndCompleteInputSchema,
 } from "@ayanami-task/protocol";
 import type { AyanamiTaskService } from "@ayanami-task/application";
@@ -89,7 +90,11 @@ function validationDetails(error: unknown, requestBody?: unknown): PublicErrorDe
   const issues = rawIssues.slice(0, issueLimit).map((issue) => {
     const value = valueAtPath(requestBody, issue.path);
     const actualLength =
-      typeof value === "string" || Array.isArray(value) ? value.length : undefined;
+      typeof value === "string"
+        ? unicodeCodePointLength(value)
+        : Array.isArray(value)
+          ? value.length
+          : undefined;
     const limit =
       typeof issue.maximum === "number"
         ? issue.maximum
