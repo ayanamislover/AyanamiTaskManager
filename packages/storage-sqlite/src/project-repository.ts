@@ -90,6 +90,7 @@ export type WorkItemView = {
   key: string;
   localNo: number;
   parentId: string | null;
+  parentKey: string | null;
   objectiveId: string;
   milestoneId: string | null;
   type: string;
@@ -111,6 +112,9 @@ export type WorkItemView = {
   weight: number;
   blockedReason: string | null;
   waitingFor: string | null;
+  cancelReason: string | null;
+  duplicateOf: string | null;
+  supersededBy: string | null;
   targetDate: string | null;
   discoveredFrom: string | null;
   discoveredCount: number;
@@ -181,6 +185,7 @@ function workItemFromRow(
     key: `${projectCode}-T-${String(row.local_no).padStart(4, "0")}`,
     localNo: row.local_no,
     parentId: row.parent_id,
+    parentKey: row.parent_key ?? null,
     objectiveId: row.objective_id,
     milestoneId: row.milestone_id,
     type: row.type,
@@ -205,6 +210,9 @@ function workItemFromRow(
     weight: row.weight,
     blockedReason: row.blocked_reason,
     waitingFor: row.waiting_for,
+    cancelReason: row.cancel_reason ?? null,
+    duplicateOf: row.duplicate_of_key ?? null,
+    supersededBy: row.superseded_by_key ?? null,
     targetDate: row.target_date,
     discoveredFrom:
       typeof row.discovered_from_local_no === "number"
@@ -1321,7 +1329,16 @@ export class ProjectRepository {
   }
 
   private workItemViewFromRow(row: any): WorkItemView {
-    return workItemFromRow(row, this.meta.code, this.progressBreakdownForRow(row));
+    return workItemFromRow(
+      {
+        ...row,
+        parent_key: row.parent_id ? this.taskKeyForId(row.parent_id) : null,
+        duplicate_of_key: row.duplicate_of_id ? this.taskKeyForId(row.duplicate_of_id) : null,
+        superseded_by_key: row.superseded_by_id ? this.taskKeyForId(row.superseded_by_id) : null,
+      },
+      this.meta.code,
+      this.progressBreakdownForRow(row),
+    );
   }
 
   private taskKeyForId(workItemId: string): string | null {
@@ -1720,17 +1737,35 @@ export class ProjectRepository {
     patches: Array<{
       taskKey: string;
       expectedVersion: number;
+      expectedFields?: {
+        title?: string;
+        description?: string;
+        targetDate?: string | null;
+        parentKey?: string | null;
+      };
       operation: string;
       title?: string;
       description?: string;
       blockedReason?: string;
       waitingFor?: string;
+      cancelReason?: string;
+      duplicateOf?: string | null;
+      supersededBy?: string | null;
       assigneeAgentId?: string | null;
       targetDate?: string | null;
       parentKey?: string | null;
       takeoverStale?: boolean;
     }>,
-  ): { items: WorkItemView[]; sequence: number } {
+  ): {
+    items: WorkItemView[];
+    sequence: number;
+    merges?: Array<{
+      taskKey: string;
+      expectedVersion: number;
+      actualVersion: number;
+      fields: string[];
+    }>;
+  } {
     if (patches.length === 0 || patches.length > 50)
       throw new Error("VALIDATION_ERROR: patches 1..50");
     return this.mutate({
@@ -1740,11 +1775,59 @@ export class ProjectRepository {
       request: patches,
       action: () => {
         const result: WorkItemView[] = [];
+        const merges: Array<{
+          taskKey: string;
+          expectedVersion: number;
+          actualVersion: number;
+          fields: string[];
+        }> = [];
         let sequence = this.meta.sequence;
         for (const patch of patches) {
           const row = this.rowForTaskKey(patch.taskKey);
+          let mergeReceipt:
+            | {
+                taskKey: string;
+                expectedVersion: number;
+                actualVersion: number;
+                fields: string[];
+              }
+            | undefined;
           if (row.version !== patch.expectedVersion) {
-            throw new Error(`VERSION_CONFLICT: ${patch.taskKey}:${row.version}`);
+            const changedFields = (
+              ["title", "description", "targetDate", "parentKey"] as const
+            ).filter((field) => patch[field] !== undefined);
+            const currentFields = {
+              title: row.title as string,
+              description: row.description as string,
+              targetDate: (row.target_date ?? null) as string | null,
+              parentKey: row.parent_id ? this.taskKeyForId(row.parent_id) : null,
+            };
+            const expectedFields = patch.expectedFields;
+            const safeMerge =
+              patch.operation === "edit" &&
+              patch.assigneeAgentId === undefined &&
+              patch.cancelReason === undefined &&
+              patch.duplicateOf === undefined &&
+              patch.supersededBy === undefined &&
+              changedFields.length > 0 &&
+              expectedFields !== undefined &&
+              changedFields.every((field) =>
+                Object.prototype.hasOwnProperty.call(expectedFields, field),
+              ) &&
+              Object.entries(expectedFields).every(
+                ([field, expected]) =>
+                  currentFields[field as keyof typeof currentFields] === expected,
+              );
+            if (!safeMerge) {
+              throw new Error(`VERSION_CONFLICT: ${patch.taskKey}:${row.version}`);
+            }
+            mergeReceipt = {
+              taskKey: patch.taskKey,
+              expectedVersion: patch.expectedVersion,
+              actualVersion: row.version,
+              fields: changedFields,
+            };
+            merges.push(mergeReceipt);
           }
           const updates: string[] = [];
           const values: unknown[] = [];
@@ -1885,6 +1968,11 @@ export class ProjectRepository {
             eventType = "work.completed";
           } else if (patch.operation === "cancel") {
             assertWorkItemTransition(row.status, "CANCELLED");
+            const duplicateOf = patch.duplicateOf ? this.rowForTaskKey(patch.duplicateOf) : null;
+            const supersededBy = patch.supersededBy ? this.rowForTaskKey(patch.supersededBy) : null;
+            if (duplicateOf?.id === row.id || supersededBy?.id === row.id) {
+              throw new Error("VALIDATION_ERROR: cancelled task cannot reference itself");
+            }
             targetStatus = "CANCELLED";
             targetPhase = "CANCELLED";
             updates.push(
@@ -1893,6 +1981,14 @@ export class ProjectRepository {
               "phase_inferred = 0",
               "waiting_on = NULL",
               "waiting_for = NULL",
+              "cancel_reason = ?",
+              "duplicate_of_id = ?",
+              "superseded_by_id = ?",
+            );
+            values.push(
+              patch.cancelReason?.trim() ?? null,
+              duplicateOf?.id ?? null,
+              supersededBy?.id ?? null,
             );
             eventType = "work.cancelled";
           } else if (patch.operation === "reopen") {
@@ -1997,6 +2093,14 @@ export class ProjectRepository {
             operation: patch.operation,
             status: targetStatus,
             phase: targetPhase,
+            ...(mergeReceipt === undefined ? {} : { mergedAcrossVersion: mergeReceipt }),
+            ...(patch.operation === "cancel"
+              ? {
+                  cancelReason: patch.cancelReason?.trim() ?? null,
+                  duplicateOf: patch.duplicateOf ?? null,
+                  supersededBy: patch.supersededBy ?? null,
+                }
+              : {}),
             waitingOn:
               patch.operation === "wait_agent"
                 ? "AGENT"
@@ -2008,7 +2112,7 @@ export class ProjectRepository {
           const updated = this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(row.id);
           result.push(this.workItemViewFromRow(updated));
         }
-        return { items: result, sequence };
+        return { items: result, sequence, ...(merges.length === 0 ? {} : { merges }) };
       },
     });
   }
@@ -2849,6 +2953,131 @@ export class ProjectRepository {
       currentSequence: this.meta.sequence,
       hasMore,
     };
+  }
+
+  recentWorkItemChanges(
+    taskKey: string,
+    limit = 6,
+  ): Array<{
+    seq: number;
+    type: string;
+    key: string;
+    summary: string;
+    opId: string | null;
+    at: string;
+  }> {
+    const task = this.rowForTaskKey(taskKey);
+    const bounded = Math.max(1, Math.min(6, limit));
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
+                payload_json, created_at, op_id
+         FROM events
+         WHERE aggregate_type = 'WORK_ITEM' AND aggregate_id = ?
+         ORDER BY sequence DESC LIMIT ?`,
+      )
+      .all(task.id, bounded) as any[];
+    return rows.map((row) => {
+      const presented = presentEvent({
+        type: row.type,
+        aggregateType: row.aggregate_type,
+        aggregateId: row.aggregate_id,
+        actor: row.actor_id ?? row.actor_type,
+        payload: json<Record<string, unknown>>(row.payload_json, {}),
+        project: {
+          id: this.meta.id,
+          code: this.meta.code,
+          name: this.meta.name,
+        },
+      });
+      return {
+        seq: Number(row.sequence),
+        type: String(row.type),
+        key: taskKey,
+        summary: presented.summary,
+        opId: row.op_id ?? null,
+        at: String(row.created_at),
+      };
+    });
+  }
+
+  checklistConflictSnapshot(checklistId: string): {
+    id: string;
+    taskKey: string;
+    taskVersion: number;
+    title: string;
+    status: string;
+    evidenceRequired: boolean;
+    evidenceCount: number;
+    version: number;
+    updatedAt: string;
+  } {
+    const row = this.#sqlite
+      .prepare(
+        `SELECT checklist.*, task.local_no AS task_local_no, task.version AS task_version
+         FROM checklist_items checklist
+         JOIN work_items task ON task.id = checklist.work_item_id
+         WHERE checklist.id = ?`,
+      )
+      .get(checklistId) as any;
+    if (!row) throw new Error(`NOT_FOUND: ${checklistId}`);
+    return {
+      id: row.id,
+      taskKey: `${this.meta.code}-T-${String(row.task_local_no).padStart(4, "0")}`,
+      taskVersion: Number(row.task_version),
+      title: String(row.title),
+      status: String(row.status),
+      evidenceRequired: Number(row.evidence_required) === 1,
+      evidenceCount: json<unknown[]>(row.evidence_json, []).length,
+      version: Number(row.version),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  recentChecklistChanges(
+    checklistId: string,
+    limit = 6,
+  ): Array<{
+    seq: number;
+    type: string;
+    key: string;
+    summary: string;
+    opId: string | null;
+    at: string;
+  }> {
+    this.checklistConflictSnapshot(checklistId);
+    const bounded = Math.max(1, Math.min(6, limit));
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
+                payload_json, created_at, op_id
+         FROM events
+         WHERE aggregate_type = 'CHECKLIST' AND aggregate_id = ?
+         ORDER BY sequence DESC LIMIT ?`,
+      )
+      .all(checklistId, bounded) as any[];
+    return rows.map((row) => {
+      const presented = presentEvent({
+        type: row.type,
+        aggregateType: row.aggregate_type,
+        aggregateId: row.aggregate_id,
+        actor: row.actor_id ?? row.actor_type,
+        payload: json<Record<string, unknown>>(row.payload_json, {}),
+        project: {
+          id: this.meta.id,
+          code: this.meta.code,
+          name: this.meta.name,
+        },
+      });
+      return {
+        seq: Number(row.sequence),
+        type: String(row.type),
+        key: checklistId,
+        summary: presented.summary,
+        opId: row.op_id ?? null,
+        at: String(row.created_at),
+      };
+    });
   }
 
   endSession(

@@ -1083,6 +1083,18 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).delta(sinceSequence, limit, types);
   }
 
+  async recentWorkItemChanges(projectCode: string, taskKey: string, limit = 6) {
+    return (await this.#repository(projectCode)).recentWorkItemChanges(taskKey, limit);
+  }
+
+  async checklistConflictSnapshot(projectCode: string, checklistId: string) {
+    return (await this.#repository(projectCode)).checklistConflictSnapshot(checklistId);
+  }
+
+  async recentChecklistChanges(projectCode: string, checklistId: string, limit = 6) {
+    return (await this.#repository(projectCode)).recentChecklistChanges(checklistId, limit);
+  }
+
   async getOperationTrace(projectCode: string, opId: string, sessionId?: string | null) {
     return (await this.#repository(projectCode)).getOperationTrace(opId, sessionId);
   }

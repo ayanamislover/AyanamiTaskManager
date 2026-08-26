@@ -162,6 +162,112 @@ function domainErrorDetails(
   return null;
 }
 
+async function enrichVersionConflictDetails(
+  service: AyanamiTaskService,
+  request: FastifyRequest,
+  details: PublicErrorDetails | null,
+): Promise<PublicErrorDetails | null> {
+  const taskKey = typeof details?.task_key === "string" ? details.task_key : null;
+  const expected = typeof details?.expected_version === "number" ? details.expected_version : null;
+  const actual = typeof details?.current_version === "number" ? details.current_version : null;
+  const projectCode =
+    request.params && typeof request.params === "object"
+      ? (request.params as { code?: unknown }).code
+      : null;
+  const checklistId =
+    request.params &&
+    typeof request.params === "object" &&
+    request.url.includes("/checklist/") &&
+    typeof (request.params as { id?: unknown }).id === "string"
+      ? ((request.params as { id: string }).id ?? null)
+      : null;
+  if (typeof projectCode !== "string" || expected === null || actual === null) {
+    return details;
+  }
+  if (checklistId) {
+    try {
+      const [current, recentChanges] = await Promise.all([
+        service.checklistConflictSnapshot(projectCode, checklistId),
+        service.recentChecklistChanges(projectCode, checklistId, 6),
+      ]);
+      return {
+        ...details,
+        entity: "CHECKLIST",
+        key: checklistId,
+        expected,
+        actual,
+        checklist_id: checklistId,
+        task_key: current.taskKey,
+        current: {
+          id: current.id,
+          task_key: current.taskKey,
+          task_version: current.taskVersion,
+          title: boundedText(current.title, 400),
+          status: current.status,
+          evidence_required: current.evidenceRequired,
+          evidence_count: current.evidenceCount,
+          version: current.version,
+          updated_at: current.updatedAt,
+        },
+        recent_changes: recentChanges.slice(0, 6).map((change) => ({
+          seq: change.seq,
+          type: boundedText(change.type, 100),
+          key: change.key,
+          summary: boundedText(change.summary, 500),
+          op_id: change.opId,
+          at: change.at,
+        })),
+        changes_complete: false,
+      };
+    } catch {
+      return details;
+    }
+  }
+  if (!taskKey) return details;
+  try {
+    const [current, recentChanges] = await Promise.all([
+      service.getWorkItem(projectCode, taskKey, "core"),
+      service.recentWorkItemChanges(projectCode, taskKey, 6),
+    ]);
+    return {
+      ...details,
+      entity: "WORK_ITEM",
+      key: taskKey,
+      expected,
+      actual,
+      current: {
+        key: current.key,
+        version: current.version,
+        status: current.status,
+        phase: current.phase,
+        title: boundedText(current.title, 400),
+        description: boundedText(current.description, 1200),
+        assignee_agent_id: current.assigneeAgentId,
+        claimed_by_session_id: current.claimedBySessionId,
+        target_date: current.targetDate,
+        parent_key: current.parentKey,
+        cancel_reason:
+          current.cancelReason === null ? null : boundedText(current.cancelReason, 500),
+        duplicate_of: current.duplicateOf,
+        superseded_by: current.supersededBy,
+        updated_at: current.updatedAt,
+      },
+      recent_changes: recentChanges.slice(0, 6).map((change) => ({
+        seq: change.seq,
+        type: boundedText(change.type, 100),
+        key: change.key,
+        summary: boundedText(change.summary, 500),
+        op_id: change.opId,
+        at: change.at,
+      })),
+      changes_complete: false,
+    };
+  } catch {
+    // 冲突诊断是附加能力；实体在错误处理窗口消失时仍保留旧版稳定详情。
+    return details;
+  }
+}
+
 function normalizedSuggestionText(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/gu, "");
 }
@@ -291,14 +397,17 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
-  app.setErrorHandler((error, request, reply) => {
+  app.setErrorHandler(async (error, request, reply) => {
     const code = errorCode(error);
-    const details =
+    let details =
       validationDetails(error, request.body) ??
       domainErrorDetails(code, error, request.body) ??
       (code === "PROJECT_NOT_FOUND" && bearer(request) === options.token
         ? projectSuggestionDetails(options.service, error)
         : null);
+    if (code === "VERSION_CONFLICT") {
+      details = await enrichVersionConflictDetails(options.service, request, details);
+    }
     reply.code(statusForCode(code)).send({
       error: {
         code,
@@ -649,12 +758,33 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       parsed.items.map((item) => ({
         taskKey: item.taskKey,
         expectedVersion: item.expectedVersion,
+        ...(item.expectedFields === undefined
+          ? {}
+          : {
+              expectedFields: {
+                ...(item.expectedFields.title === undefined
+                  ? {}
+                  : { title: item.expectedFields.title }),
+                ...(item.expectedFields.description === undefined
+                  ? {}
+                  : { description: item.expectedFields.description }),
+                ...(item.expectedFields.targetDate === undefined
+                  ? {}
+                  : { targetDate: item.expectedFields.targetDate }),
+                ...(item.expectedFields.parentKey === undefined
+                  ? {}
+                  : { parentKey: item.expectedFields.parentKey }),
+              },
+            }),
         operation: item.operation,
         takeoverStale: item.takeoverStale,
         ...(item.title === undefined ? {} : { title: item.title }),
         ...(item.description === undefined ? {} : { description: item.description }),
         ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
         ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
+        ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),
+        ...(item.duplicateOf === undefined ? {} : { duplicateOf: item.duplicateOf }),
+        ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
         ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
         ...(item.targetDate === undefined ? {} : { targetDate: item.targetDate }),
         ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
@@ -762,12 +892,33 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       parsed.items.map((item) => ({
         taskKey: item.taskKey,
         expectedVersion: item.expectedVersion,
+        ...(item.expectedFields === undefined
+          ? {}
+          : {
+              expectedFields: {
+                ...(item.expectedFields.title === undefined
+                  ? {}
+                  : { title: item.expectedFields.title }),
+                ...(item.expectedFields.description === undefined
+                  ? {}
+                  : { description: item.expectedFields.description }),
+                ...(item.expectedFields.targetDate === undefined
+                  ? {}
+                  : { targetDate: item.expectedFields.targetDate }),
+                ...(item.expectedFields.parentKey === undefined
+                  ? {}
+                  : { parentKey: item.expectedFields.parentKey }),
+              },
+            }),
         operation: item.operation,
         takeoverStale: item.takeoverStale,
         ...(item.title === undefined ? {} : { title: item.title }),
         ...(item.description === undefined ? {} : { description: item.description }),
         ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
         ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
+        ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),
+        ...(item.duplicateOf === undefined ? {} : { duplicateOf: item.duplicateOf }),
+        ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
         ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
         ...(item.targetDate === undefined ? {} : { targetDate: item.targetDate }),
         ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
