@@ -5,6 +5,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import {
   findProductShortcuts,
   productShortcutRoots,
   removeProductShortcuts,
+  walkProductFiles,
 } from "../../../scripts/product-install-sites.js";
 
 const temporary: string[] = [];
@@ -54,6 +56,48 @@ describe("产品安装位置", () => {
       "AyanamiTaskManager.txt",
       "SomethingElse.lnk",
     ]);
+  });
+
+  it("不跟随开始菜单中的目录链接或循环 junction", async () => {
+    const root = shortcutFixture();
+    const outside = mkdtempSync(join(tmpdir(), "atm-shortcuts-outside-"));
+    temporary.push(outside);
+    writeFileSync(join(outside, "AyanamiTaskManager Outside.lnk"), "lnk", "utf8");
+    symlinkSync(outside, join(root, "outside-junction"), "junction");
+    symlinkSync(root, join(root, "loop-junction"), "junction");
+
+    const found = await findProductShortcuts([root]);
+
+    expect(found.map((path) => path.slice(root.length + 1)).sort()).toEqual([
+      "AyanamiTaskManager.lnk",
+      "Ayanami\\AyanamiTaskManager Desktop.lnk",
+    ]);
+  });
+
+  it("超宽目录逐项汇总，不用 spread 把文件数变成调用栈参数", async () => {
+    const root = "C:\\synthetic-root";
+    const wide = join(root, "wide");
+    const files = Array.from({ length: 70_000 }, (_, index) => ({
+      name: `${index}.lnk`,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    }));
+    const found = await walkProductFiles(root, async (directory) =>
+      directory === root
+        ? [
+            {
+              name: "wide",
+              isDirectory: () => true,
+              isSymbolicLink: () => false,
+            },
+          ]
+        : directory === wide
+          ? files
+          : [],
+    );
+
+    expect(found).toHaveLength(70_000);
+    expect(found.at(-1)).toBe(join(wide, "69999.lnk"));
   });
 
   it("扫描位置覆盖开始菜单与桌面", () => {
