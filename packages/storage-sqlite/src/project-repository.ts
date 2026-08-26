@@ -6,7 +6,9 @@ import {
   createUlid,
   legalWorkItemOperations,
   nowIso,
+  type WorkItemPhase,
   type WorkItemStatus,
+  type WorkItemWaitingOn,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
@@ -95,6 +97,9 @@ export type WorkItemView = {
   description: string;
   acceptance: string[];
   status: WorkItemStatus;
+  phase: WorkItemPhase;
+  waitingOn: WorkItemWaitingOn | null;
+  phaseInferred: boolean;
   priority: string;
   assigneeAgentId: string | null;
   claimedBySessionId: string | null;
@@ -102,6 +107,7 @@ export type WorkItemView = {
   progress: number;
   reportedProgress: number | null;
   progressSource: string;
+  progressBreakdown: WorkItemProgressBreakdown;
   weight: number;
   blockedReason: string | null;
   waitingFor: string | null;
@@ -110,6 +116,17 @@ export type WorkItemView = {
   discoveredCount: number;
   version: number;
   updatedAt: string;
+};
+
+export type WorkItemProgressBreakdown = {
+  computed: number;
+  reported: number | null;
+  source: string;
+  doneWeight: number;
+  totalWeight: number;
+  doneStages: number;
+  totalStages: number;
+  blocker: string | null;
 };
 
 export type ChecklistView = {
@@ -149,7 +166,16 @@ export type MutationActorResolution = {
   requestedSessionId: string;
 };
 
-function workItemFromRow(row: any, projectCode: string): WorkItemView {
+function workItemFromRow(
+  row: any,
+  projectCode: string,
+  progressBreakdown: WorkItemProgressBreakdown,
+): WorkItemView {
+  const status = row.status as WorkItemStatus;
+  const phase = (row.phase ??
+    (status === "WAITING_AGENT" || status === "WAITING_USER"
+      ? "IN_PROGRESS"
+      : status)) as WorkItemPhase;
   return {
     id: row.id,
     key: `${projectCode}-T-${String(row.local_no).padStart(4, "0")}`,
@@ -161,7 +187,13 @@ function workItemFromRow(row: any, projectCode: string): WorkItemView {
     title: row.title,
     description: row.description,
     acceptance: json(row.acceptance_json, []),
-    status: row.status,
+    status,
+    phase,
+    waitingOn:
+      row.waiting_on ??
+      (status === "WAITING_AGENT" ? "AGENT" : status === "WAITING_USER" ? "USER" : null),
+    phaseInferred:
+      Number(row.phase_inferred ?? (status === "WAITING_AGENT" || status === "WAITING_USER")) === 1,
     priority: row.priority,
     assigneeAgentId: row.assignee_agent_id,
     claimedBySessionId: row.claimed_by_session_id,
@@ -169,6 +201,7 @@ function workItemFromRow(row: any, projectCode: string): WorkItemView {
     progress: row.computed_progress,
     reportedProgress: row.reported_progress,
     progressSource: row.progress_source,
+    progressBreakdown,
     weight: row.weight,
     blockedReason: row.blocked_reason,
     waitingFor: row.waiting_for,
@@ -716,6 +749,8 @@ export class ProjectRepository {
         this.#sqlite
           .prepare(
             `UPDATE work_items SET status = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE status END,
+             phase = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE phase END,
+             phase_inferred = CASE WHEN status = 'CLAIMED' THEN 0 ELSE phase_inferred END,
              assignee_agent_id = CASE WHEN status = 'CLAIMED' THEN NULL ELSE assignee_agent_id END,
              claimed_by_session_id = NULL, claim_lease_until = NULL,
              version = version + 1, updated_at = ? WHERE claimed_by_session_id = ?`,
@@ -1236,6 +1271,59 @@ export class ProjectRepository {
     return row;
   }
 
+  private progressBreakdownForRow(row: any): WorkItemProgressBreakdown {
+    type Denominator = {
+      done_weight: number;
+      total_weight: number;
+      done_stages: number;
+      total_stages: number;
+    };
+    const children = this.#sqlite
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN status = 'DONE' THEN weight ELSE 0 END), 0) AS done_weight,
+           COALESCE(SUM(weight), 0) AS total_weight,
+           SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
+           COUNT(*) AS total_stages
+         FROM work_items
+         WHERE parent_id = ? AND archived_at IS NULL AND status <> 'CANCELLED'`,
+      )
+      .get(row.id) as Denominator;
+    const checklist = this.#sqlite
+      .prepare(
+        `SELECT
+           COALESCE(SUM(CASE WHEN status = 'DONE' THEN weight ELSE 0 END), 0) AS done_weight,
+           COALESCE(SUM(weight), 0) AS total_weight,
+           SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
+           COUNT(*) AS total_stages
+         FROM checklist_items
+         WHERE work_item_id = ? AND status <> 'SKIPPED'`,
+      )
+      .get(row.id) as Denominator;
+    const denominator = children.total_stages > 0 ? children : checklist;
+    const activeBlocker = this.#sqlite
+      .prepare(
+        `SELECT COALESCE(NULLIF(detail, ''), NULLIF(waiting_for, ''), title) AS reason
+         FROM blockers WHERE work_item_id = ? AND status = 'ACTIVE'
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(row.id) as { reason: string } | undefined;
+    return {
+      computed: Number(row.computed_progress),
+      reported: row.reported_progress === null ? null : Number(row.reported_progress),
+      source: String(row.progress_source),
+      doneWeight: Number(denominator.done_weight),
+      totalWeight: Number(denominator.total_weight),
+      doneStages: Number(denominator.done_stages),
+      totalStages: Number(denominator.total_stages),
+      blocker: row.blocked_reason ?? activeBlocker?.reason ?? null,
+    };
+  }
+
+  private workItemViewFromRow(row: any): WorkItemView {
+    return workItemFromRow(row, this.meta.code, this.progressBreakdownForRow(row));
+  }
+
   private taskKeyForId(workItemId: string): string | null {
     const row = this.#sqlite
       .prepare("SELECT local_no FROM work_items WHERE id = ?")
@@ -1328,7 +1416,7 @@ export class ProjectRepository {
           .get(row.claimed_by_session_id) as Record<string, unknown> | undefined) ?? null)
       : null;
     return {
-      ...workItemFromRow(row, code),
+      ...this.workItemViewFromRow(row),
       checklist,
       dependencies,
       discoveredFrom,
@@ -1407,7 +1495,7 @@ export class ProjectRepository {
        FROM work_items WHERE id = ?`,
     );
     return rows.map((row) =>
-      workItemFromRow({ ...row, ...(relationStatement.get(row.id) as object) }, this.meta.code),
+      this.workItemViewFromRow({ ...row, ...(relationStatement.get(row.id) as object) }),
     );
   }
 
@@ -1485,16 +1573,21 @@ export class ProjectRepository {
           const key = `${code}-T-${String(localNo).padStart(4, "0")}`;
           const now = nowIso();
           const status = item.status ?? "BACKLOG";
+          const phase =
+            status === "WAITING_AGENT" || status === "WAITING_USER" ? "IN_PROGRESS" : status;
+          const waitingOn =
+            status === "WAITING_AGENT" ? "AGENT" : status === "WAITING_USER" ? "USER" : null;
           const sortKey = localNo * 1000;
           this.#sqlite
             .prepare(
               `INSERT INTO work_items(
                  id, local_no, parent_id, objective_id, milestone_id, type, title, description,
-                 acceptance_json, status, priority, sort_key, target_date, reported_progress,
+                 acceptance_json, status, phase, waiting_on, phase_inferred,
+                 priority, sort_key, target_date, reported_progress,
                  computed_progress, progress_source, weight, verification_required, version,
                  created_by_agent_id, created_by_session_id, created_at, updated_at, source_quick_id,
                  assignee_agent_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -1507,6 +1600,8 @@ export class ProjectRepository {
               item.description ?? "",
               JSON.stringify(item.acceptance ?? []),
               status,
+              phase,
+              waitingOn,
               item.priority,
               sortKey,
               item.targetDate ?? null,
@@ -1577,9 +1672,8 @@ export class ProjectRepository {
             createdAt: now,
           });
           result.push(
-            workItemFromRow(
+            this.workItemViewFromRow(
               this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(id),
-              code,
             ),
           );
         }
@@ -1656,6 +1750,10 @@ export class ProjectRepository {
           const values: unknown[] = [];
           let eventType = "work.updated";
           let targetStatus: WorkItemStatus = row.status;
+          let targetPhase = (row.phase ??
+            (row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
+              ? "IN_PROGRESS"
+              : row.status)) as WorkItemPhase;
           const now = nowIso();
           if (patch.operation === "claim" || patch.operation === "start") {
             const dependency = this.#sqlite
@@ -1678,17 +1776,21 @@ export class ProjectRepository {
               row.assignee_agent_id === actor.id;
             targetStatus =
               patch.operation === "start" || successorReclaim ? "IN_PROGRESS" : "CLAIMED";
+            targetPhase = targetStatus;
             // 来源状态只认转移表。自带白名单会让「表说可以、接口不给」重新出现，
             // 也会把 start 一个已在 IN_PROGRESS 的任务误判成非法转移。
             assertWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = ?",
+              "phase = ?",
+              "phase_inferred = 0",
               "assignee_agent_id = ?",
               "claimed_by_session_id = ?",
               "claim_lease_until = ?",
             );
             values.push(
               targetStatus,
+              targetPhase,
               actor.id,
               actor.sessionId,
               actor.sessionId ? new Date(Date.now() + 10 * 60_000).toISOString() : null,
@@ -1700,7 +1802,7 @@ export class ProjectRepository {
             if (targetStatus === "IN_PROGRESS") {
               // 「接着做」意味着阻塞与等待都已不成立。只清任务行上的列而不关
               // blockers 记录，任务会看起来一切正常、却永远完成不了。
-              updates.push("blocked_reason = NULL", "waiting_for = NULL");
+              updates.push("blocked_reason = NULL", "waiting_on = NULL", "waiting_for = NULL");
               this.resolveActiveBlockers(row.id, now);
             }
             eventType = targetStatus === "IN_PROGRESS" ? "work.started" : "work.claimed";
@@ -1713,9 +1815,14 @@ export class ProjectRepository {
               throw new Error("CLAIM_OWNER_REQUIRED");
             }
             targetStatus = "READY";
+            targetPhase = "READY";
             assertWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = 'READY'",
+              "phase = 'READY'",
+              "phase_inferred = 0",
+              "waiting_on = NULL",
+              "waiting_for = NULL",
               "assignee_agent_id = NULL",
               "claimed_by_session_id = NULL",
               "claim_lease_until = NULL",
@@ -1725,27 +1832,51 @@ export class ProjectRepository {
             if (!patch.blockedReason?.trim()) throw new Error("BLOCKED_REASON_REQUIRED");
             assertWorkItemTransition(row.status, "BLOCKED");
             targetStatus = "BLOCKED";
-            updates.push("status = 'BLOCKED'", "blocked_reason = ?");
+            targetPhase = "BLOCKED";
+            updates.push(
+              "status = 'BLOCKED'",
+              "phase = 'BLOCKED'",
+              "phase_inferred = 0",
+              "waiting_on = NULL",
+              "waiting_for = NULL",
+              "blocked_reason = ?",
+            );
             values.push(patch.blockedReason.trim());
             eventType = "work.blocked";
           } else if (patch.operation === "wait_user" || patch.operation === "wait_agent") {
             if (!patch.waitingFor?.trim()) throw new Error("WAITING_FOR_REQUIRED");
             targetStatus = patch.operation === "wait_user" ? "WAITING_USER" : "WAITING_AGENT";
             assertWorkItemTransition(row.status, targetStatus);
-            updates.push("status = ?", "waiting_for = ?");
-            values.push(targetStatus, patch.waitingFor.trim());
+            updates.push("status = ?", "waiting_on = ?", "waiting_for = ?");
+            values.push(
+              targetStatus,
+              patch.operation === "wait_user" ? "USER" : "AGENT",
+              patch.waitingFor.trim(),
+            );
             eventType = "work.waiting";
           } else if (patch.operation === "verify") {
             assertWorkItemTransition(row.status, "VERIFYING");
             targetStatus = "VERIFYING";
-            updates.push("status = 'VERIFYING'");
+            targetPhase = "VERIFYING";
+            updates.push(
+              "status = 'VERIFYING'",
+              "phase = 'VERIFYING'",
+              "phase_inferred = 0",
+              "waiting_on = NULL",
+              "waiting_for = NULL",
+            );
             eventType = "work.verification_requested";
           } else if (patch.operation === "complete") {
             this.assertCompletionGate(row);
             assertWorkItemTransition(row.status, "DONE");
             targetStatus = "DONE";
+            targetPhase = "DONE";
             updates.push(
               "status = 'DONE'",
+              "phase = 'DONE'",
+              "phase_inferred = 0",
+              "waiting_on = NULL",
+              "waiting_for = NULL",
               "completed_at = ?",
               "computed_progress = 100",
               "reported_progress = 100",
@@ -1755,24 +1886,40 @@ export class ProjectRepository {
           } else if (patch.operation === "cancel") {
             assertWorkItemTransition(row.status, "CANCELLED");
             targetStatus = "CANCELLED";
-            updates.push("status = 'CANCELLED'");
+            targetPhase = "CANCELLED";
+            updates.push(
+              "status = 'CANCELLED'",
+              "phase = 'CANCELLED'",
+              "phase_inferred = 0",
+              "waiting_on = NULL",
+              "waiting_for = NULL",
+            );
             eventType = "work.cancelled";
           } else if (patch.operation === "reopen") {
             // reopen 的语义是「把停住的任务拉回来继续做」：界面在 BLOCKED /
             // WAITING_USER / WAITING_AGENT 上把它叫「重新打开」、在 VERIFYING 上叫
             // 「退回」，四处都指望回到 IN_PROGRESS。只有 CANCELLED 才该退回 BACKLOG
             // 重新排期。原先一律指向 BACKLOG，那四个按钮点下去必然 INVALID_TRANSITION。
-            targetStatus = row.status === "CANCELLED" ? "BACKLOG" : "IN_PROGRESS";
+            targetStatus =
+              row.status === "CANCELLED"
+                ? "BACKLOG"
+                : row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
+                  ? targetPhase
+                  : "IN_PROGRESS";
+            targetPhase = targetStatus;
             assertWorkItemTransition(row.status, targetStatus);
             // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
             this.resolveActiveBlockers(row.id, now);
             updates.push(
               "status = ?",
+              "phase = ?",
+              "phase_inferred = 0",
               "completed_at = NULL",
               "blocked_reason = NULL",
+              "waiting_on = NULL",
               "waiting_for = NULL",
             );
-            values.push(targetStatus);
+            values.push(targetStatus, targetPhase);
             eventType = "work.reopened";
           } else if (patch.operation === "edit") {
             for (const [value, column] of [
@@ -1808,7 +1955,7 @@ export class ProjectRepository {
             .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
             .run(...values);
           if (actor.sessionId) {
-            if (["claim", "start", "verify"].includes(patch.operation)) {
+            if (["claim", "start", "verify", "reopen"].includes(patch.operation)) {
               this.#sqlite
                 .prepare(
                   `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WORKING',
@@ -1849,10 +1996,17 @@ export class ProjectRepository {
             title: row.title,
             operation: patch.operation,
             status: targetStatus,
+            phase: targetPhase,
+            waitingOn:
+              patch.operation === "wait_agent"
+                ? "AGENT"
+                : patch.operation === "wait_user"
+                  ? "USER"
+                  : null,
           });
           if (row.parent_id) this.recomputeWorkItem(row.parent_id);
           const updated = this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(row.id);
-          result.push(workItemFromRow(updated, this.meta.code));
+          result.push(this.workItemViewFromRow(updated));
         }
         return { items: result, sequence };
       },
@@ -2174,7 +2328,14 @@ export class ProjectRepository {
         const updates = ["reported_progress = ?", "version = version + 1", "updated_at = ?"];
         const values: unknown[] = [bucket, now];
         if (normalizedInput.blocker?.trim()) {
-          updates.push("status = 'BLOCKED'", "blocked_reason = ?");
+          updates.push(
+            "status = 'BLOCKED'",
+            "phase = 'BLOCKED'",
+            "phase_inferred = 0",
+            "waiting_on = NULL",
+            "waiting_for = NULL",
+            "blocked_reason = ?",
+          );
           values.push(normalizedInput.blocker.trim());
           const blockerId = createUlid();
           this.#sqlite
@@ -2514,6 +2675,8 @@ export class ProjectRepository {
           this.#sqlite
             .prepare(
               `UPDATE work_items SET status = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE status END,
+               phase = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE phase END,
+               phase_inferred = CASE WHEN status = 'CLAIMED' THEN 0 ELSE phase_inferred END,
                claimed_by_session_id = NULL, claim_lease_until = NULL,
                version = version + 1, updated_at = ? WHERE claimed_by_session_id = ?`,
             )

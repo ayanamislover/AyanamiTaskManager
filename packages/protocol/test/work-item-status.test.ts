@@ -18,4 +18,15 @@ describe("工作项状态协议", () => {
       "INVALID_TRANSITION: CLAIMED -> VERIFYING (legal operations from CLAIMED: start -> IN_PROGRESS, release -> READY, cancel -> CANCELLED)",
     );
   });
+
+  it("VERIFYING 可正交进入等待用户或等待 Agent 的兼容状态", () => {
+    expect(legalWorkItemOperations("VERIFYING")).toEqual(
+      expect.arrayContaining([
+        { operation: "wait_agent", target: "WAITING_AGENT" },
+        { operation: "wait_user", target: "WAITING_USER" },
+      ]),
+    );
+    expect(() => assertWorkItemTransition("VERIFYING", "WAITING_AGENT")).not.toThrow();
+    expect(() => assertWorkItemTransition("VERIFYING", "WAITING_USER")).not.toThrow();
+  });
 });

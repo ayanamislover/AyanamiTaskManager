@@ -16,6 +16,23 @@ export const WORK_ITEM_STATUSES = [
 export const WorkItemStatusSchema = z.enum(WORK_ITEM_STATUSES);
 export type WorkItemStatus = z.infer<typeof WorkItemStatusSchema>;
 
+export const WORK_ITEM_PHASES = [
+  "BACKLOG",
+  "READY",
+  "CLAIMED",
+  "IN_PROGRESS",
+  "BLOCKED",
+  "VERIFYING",
+  "DONE",
+  "CANCELLED",
+] as const;
+export const WorkItemPhaseSchema = z.enum(WORK_ITEM_PHASES);
+export type WorkItemPhase = z.infer<typeof WorkItemPhaseSchema>;
+
+export const WORK_ITEM_WAITING_ON = ["USER", "AGENT"] as const;
+export const WorkItemWaitingOnSchema = z.enum(WORK_ITEM_WAITING_ON);
+export type WorkItemWaitingOn = z.infer<typeof WorkItemWaitingOnSchema>;
+
 export const WORK_ITEM_STATUS_LABELS: Record<WorkItemStatus, string> = {
   BACKLOG: "待整理",
   READY: "可开始",
@@ -51,7 +68,7 @@ export const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStat
   BLOCKED: ["IN_PROGRESS", "READY", "CANCELLED"],
   WAITING_AGENT: ["IN_PROGRESS", "READY", "VERIFYING", "CANCELLED"],
   WAITING_USER: ["IN_PROGRESS", "READY", "VERIFYING", "CANCELLED"],
-  VERIFYING: ["DONE", "IN_PROGRESS", "READY", "CANCELLED"],
+  VERIFYING: ["WAITING_AGENT", "WAITING_USER", "DONE", "IN_PROGRESS", "READY", "CANCELLED"],
   DONE: ["IN_PROGRESS"],
   CANCELLED: ["BACKLOG"],
 };
@@ -114,6 +131,8 @@ const WORK_ITEM_LEGAL_OPERATIONS: Record<
     { operation: "cancel", target: "CANCELLED" },
   ],
   VERIFYING: [
+    { operation: "wait_agent", target: "WAITING_AGENT" },
+    { operation: "wait_user", target: "WAITING_USER" },
     { operation: "complete", target: "DONE" },
     { operation: "reopen", target: "IN_PROGRESS" },
     { operation: "release", target: "READY" },

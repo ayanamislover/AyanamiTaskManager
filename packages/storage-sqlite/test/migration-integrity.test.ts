@@ -46,7 +46,7 @@ describe("迁移完整性", () => {
       try {
         expect(manager.registry.schemaVersion).toBe(3);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(7);
+        expect(upgraded.schemaVersion).toBe(8);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")
@@ -76,6 +76,11 @@ describe("迁移完整性", () => {
             (column) => column.name,
           ),
         ).toEqual(expect.arrayContaining(["op_id", "actor_session_id"]));
+        expect(
+          (upgraded.sqlite.pragma("table_info(work_items)") as Array<{ name: string }>).map(
+            (column) => column.name,
+          ),
+        ).toEqual(expect.arrayContaining(["phase", "waiting_on", "phase_inferred"]));
       } finally {
         manager.close();
       }

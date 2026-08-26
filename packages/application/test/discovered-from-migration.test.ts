@@ -16,8 +16,14 @@ describe("DISCOVERED_FROM schema migration", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    rmSync(join(migrationsRoot, "project", "0004_discovered_from.sql"));
-    rmSync(join(migrationsRoot, "project", "0005_session_git_context.sql"));
+    const pendingMigrations = [
+      "0004_discovered_from.sql",
+      "0005_session_git_context.sql",
+      "0006_record_topics.sql",
+      "0007_operation_trace.sql",
+      "0008_work_item_phase_waiting.sql",
+    ];
+    for (const name of pendingMigrations) rmSync(join(migrationsRoot, "project", name));
 
     let service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
     const project = await service.createProject({
@@ -25,40 +31,49 @@ describe("DISCOVERED_FROM schema migration", () => {
       sourcePath: null,
       code: "UPREL",
     });
-    const objective = await service.createObjectiveAsUser(project.code, "v3-objective", {
-      title: "升级关系模型",
-      description: "",
-      definitionOfDone: [],
-    });
-    const v3Tasks = await service.createWorkItemsAsUser(project.code, "v3-plan", [
-      {
-        clientRef: "origin",
-        objectiveId: objective.id,
-        title: "原任务",
-        type: "TASK",
-        priority: "NORMAL",
-        status: "READY",
-      },
-      {
-        clientRef: "blocked",
-        objectiveId: objective.id,
-        dependsOnRefs: ["origin"],
-        title: "依赖任务",
-        type: "TASK",
-        priority: "NORMAL",
-        status: "READY",
-      },
-    ]);
+    const v3Database = await service.databases.openProject(project.code);
+    const now = "2026-08-26T00:00:00.000Z";
+    v3Database.sqlite
+      .prepare(
+        `INSERT INTO objectives(
+           id, local_no, title, description, definition_of_done_json, status,
+           weight, version, created_at, updated_at
+         ) VALUES ('v3-objective', 1, '升级关系模型', '', '[]', 'ACTIVE', 1, 0, ?, ?)`,
+      )
+      .run(now, now);
+    const v3Tasks = {
+      items: [
+        { id: "v3-origin", key: "UPREL-T-0001" },
+        { id: "v3-blocked", key: "UPREL-T-0002" },
+      ],
+    };
+    for (const [index, task] of v3Tasks.items.entries()) {
+      v3Database.sqlite
+        .prepare(
+          `INSERT INTO work_items(
+             id, local_no, objective_id, type, title, status, priority, sort_key,
+             version, created_at, updated_at
+           ) VALUES (?, ?, 'v3-objective', 'TASK', ?, 'READY', 'NORMAL', ?, 0, ?, ?)`,
+        )
+        .run(task.id, index + 1, index === 0 ? "原任务" : "依赖任务", (index + 1) * 1000, now, now);
+    }
+    v3Database.sqlite
+      .prepare(
+        `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
+         VALUES ('v3-origin', 'v3-blocked', 'BLOCKS', ?)`,
+      )
+      .run(now);
+    v3Database.sqlite
+      .prepare("UPDATE counters SET next_value = 3 WHERE name = 'work_item'")
+      .run();
     service.close();
 
-    copyFileSync(
-      resolve(process.cwd(), "migrations", "project", "0004_discovered_from.sql"),
-      join(migrationsRoot, "project", "0004_discovered_from.sql"),
-    );
-    copyFileSync(
-      resolve(process.cwd(), "migrations", "project", "0005_session_git_context.sql"),
-      join(migrationsRoot, "project", "0005_session_git_context.sql"),
-    );
+    for (const name of pendingMigrations) {
+      copyFileSync(
+        resolve(process.cwd(), "migrations", "project", name),
+        join(migrationsRoot, "project", name),
+      );
+    }
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
     try {
       const begun = await service.begin({ projectCode: project.code, agentId: "codex-v4" });
@@ -69,7 +84,7 @@ describe("DISCOVERED_FROM schema migration", () => {
       const followUp = await service.createWorkItems(project.code, begun.session, "v4-discover", [
         {
           clientRef: "follow-up",
-          objectiveId: objective.id,
+          objectiveId: "v3-objective",
           discoveredFrom: v3Tasks.items[0]!.key,
           title: "升级后发现",
           type: "TASK",
