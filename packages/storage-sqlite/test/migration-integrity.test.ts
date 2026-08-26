@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe("迁移完整性", () => {
-  for (const legacyVersion of [1, 2]) {
+  for (const legacyVersion of [1, 2, 5]) {
     it(`从 v${legacyVersion} Registry 与项目库升级到当前 schema 并保留数据`, async () => {
       const root = mkdtempSync(join(tmpdir(), `atm-migration-v${legacyVersion}-`));
       temporary.push(root);
@@ -46,7 +46,7 @@ describe("迁移完整性", () => {
       try {
         expect(manager.registry.schemaVersion).toBe(3);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(5);
+        expect(upgraded.schemaVersion).toBe(7);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")
@@ -65,6 +65,17 @@ describe("迁移完整性", () => {
             (column) => column.name === "git_repo_root",
           ),
         ).toBe(true);
+        expect(
+          (upgraded.sqlite.pragma("table_info(records)") as Array<{ name: string }>).map(
+            (column) => column.name,
+          ),
+        ).toEqual(expect.arrayContaining(["topic", "subject_key"]));
+        expect(upgraded.sqlite.pragma("foreign_key_check")).toEqual([]);
+        expect(
+          (upgraded.sqlite.pragma("table_info(idempotency_keys)") as Array<{ name: string }>).map(
+            (column) => column.name,
+          ),
+        ).toEqual(expect.arrayContaining(["op_id", "actor_session_id"]));
       } finally {
         manager.close();
       }

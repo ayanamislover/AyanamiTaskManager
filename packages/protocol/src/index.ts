@@ -56,6 +56,79 @@ export const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStat
   CANCELLED: ["BACKLOG"],
 };
 
+export type WorkItemOperation =
+  | "claim"
+  | "start"
+  | "release"
+  | "block"
+  | "wait_agent"
+  | "wait_user"
+  | "verify"
+  | "complete"
+  | "cancel"
+  | "reopen";
+
+const WORK_ITEM_LEGAL_OPERATIONS: Record<
+  WorkItemStatus,
+  ReadonlyArray<{ operation: WorkItemOperation; target: WorkItemStatus }>
+> = {
+  BACKLOG: [
+    { operation: "claim", target: "CLAIMED" },
+    { operation: "start", target: "IN_PROGRESS" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  READY: [
+    { operation: "claim", target: "CLAIMED" },
+    { operation: "start", target: "IN_PROGRESS" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  CLAIMED: [
+    { operation: "start", target: "IN_PROGRESS" },
+    { operation: "release", target: "READY" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  IN_PROGRESS: [
+    { operation: "block", target: "BLOCKED" },
+    { operation: "wait_agent", target: "WAITING_AGENT" },
+    { operation: "wait_user", target: "WAITING_USER" },
+    { operation: "verify", target: "VERIFYING" },
+    { operation: "complete", target: "DONE" },
+    { operation: "release", target: "READY" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  BLOCKED: [
+    { operation: "reopen", target: "IN_PROGRESS" },
+    { operation: "release", target: "READY" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  WAITING_AGENT: [
+    { operation: "reopen", target: "IN_PROGRESS" },
+    { operation: "release", target: "READY" },
+    { operation: "verify", target: "VERIFYING" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  WAITING_USER: [
+    { operation: "reopen", target: "IN_PROGRESS" },
+    { operation: "release", target: "READY" },
+    { operation: "verify", target: "VERIFYING" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  VERIFYING: [
+    { operation: "complete", target: "DONE" },
+    { operation: "reopen", target: "IN_PROGRESS" },
+    { operation: "release", target: "READY" },
+    { operation: "cancel", target: "CANCELLED" },
+  ],
+  DONE: [{ operation: "reopen", target: "IN_PROGRESS" }],
+  CANCELLED: [{ operation: "reopen", target: "BACKLOG" }],
+};
+
+export function legalWorkItemOperations(
+  status: WorkItemStatus,
+): ReadonlyArray<{ operation: WorkItemOperation; target: WorkItemStatus }> {
+  return WORK_ITEM_LEGAL_OPERATIONS[status];
+}
+
 export function workItemStatusLabel(status: WorkItemStatus): string {
   return WORK_ITEM_STATUS_LABELS[status];
 }
@@ -63,7 +136,12 @@ export function workItemStatusLabel(status: WorkItemStatus): string {
 export function assertWorkItemTransition(from: WorkItemStatus, to: WorkItemStatus): void {
   if (from === to) return;
   if (!WORK_ITEM_TRANSITIONS[from].includes(to)) {
-    throw new Error(`INVALID_TRANSITION: ${from} -> ${to}`);
+    const legal = legalWorkItemOperations(from)
+      .map((entry) => `${entry.operation} -> ${entry.target}`)
+      .join(", ");
+    throw new Error(
+      `INVALID_TRANSITION: ${from} -> ${to} (legal operations from ${from}: ${legal || "none"})`,
+    );
   }
 }
 
@@ -218,6 +296,22 @@ export const ChecklistCreateInputSchema = z.object({
   weight: z.number().positive().max(1000).default(1),
 });
 
+export const EvidenceReferenceSchema = z.object({
+  kind: z.enum(["git_sha", "atm_record", "atm_task", "test_result", "url", "file"]),
+  value: NonEmptyTextSchema.max(2000),
+  note: z.string().trim().max(500).optional(),
+});
+
+export const EvidenceInputSchema = z.union([NonEmptyTextSchema.max(2000), EvidenceReferenceSchema]);
+
+export const ProgressCompletedInputSchema = z.union([
+  z.string().max(500),
+  z.object({
+    text: NonEmptyTextSchema.max(500),
+    workItemKey: NonEmptyTextSchema.max(100).optional(),
+  }),
+]);
+
 export const WorkItemCreateInputSchema = z
   .object({
     clientRef: NonEmptyTextSchema.max(100),
@@ -239,6 +333,7 @@ export const WorkItemCreateInputSchema = z
     weight: z.number().positive().max(1000).default(1),
     targetDate: NullableDateOnlySchema,
     verificationRequired: z.boolean().default(false),
+    assigneeAgentId: z.string().trim().min(1).max(128).nullable().optional(),
   })
   .refine((value) => !(value.discoveredFrom && value.discoveredFromRef), {
     message: "discoveredFrom 与 discoveredFromRef 只能指定一个",
@@ -289,7 +384,7 @@ export const ChecklistUpdateInputSchema = z.object({
   checklistId: NonEmptyTextSchema,
   expectedVersion: z.number().int().nonnegative(),
   status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
-  evidence: z.array(z.unknown()).max(100).optional(),
+  evidence: z.array(EvidenceInputSchema).max(100).optional(),
 });
 
 export const ProgressAddInputSchema = z.object({
@@ -300,11 +395,11 @@ export const ProgressAddInputSchema = z.object({
   taskKey: z.string().optional(),
   percent: z.number().min(0).max(100).optional(),
   summary: NonEmptyTextSchema.max(500),
-  completed: z.array(z.string().max(500)).max(20).default([]),
+  completed: z.array(ProgressCompletedInputSchema).max(20).default([]),
   next: z.array(z.string().max(500)).max(20).default([]),
   blocker: z.string().max(1000).nullable().optional(),
   health: ProjectHealthSchema.nullable().optional(),
-  evidence: z.array(z.unknown()).max(20).default([]),
+  evidence: z.array(EvidenceInputSchema).max(20).default([]),
 });
 
 export const RecordInputSchema = z.object({
