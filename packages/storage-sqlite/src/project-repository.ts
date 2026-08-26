@@ -4,6 +4,7 @@ import { assertParentMove, assertAcyclicDependency, computeProgress } from "@aya
 import {
   assertWorkItemTransition,
   createUlid,
+  legalWorkItemOperations,
   nowIso,
   type WorkItemStatus,
 } from "@ayanami-task/protocol";
@@ -122,6 +123,32 @@ export type ChecklistView = {
   version: number;
 };
 
+export type RecordView = {
+  id: string;
+  key: string;
+  kind: string;
+  title: string;
+  summary: string;
+  detail: string;
+  importance: string;
+  scope: string;
+  workItemKey: string | null;
+  supersedes: string | null;
+  status: string;
+  topic: string | null;
+  subjectKey: string | null;
+  relatedRecords: string[];
+  opId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MutationActorResolution = {
+  actor: ProjectActor;
+  disposition: "CURRENT" | "REPLAY" | "REBOUND";
+  requestedSessionId: string;
+};
+
 function workItemFromRow(row: any, projectCode: string): WorkItemView {
   return {
     id: row.id,
@@ -159,6 +186,7 @@ function workItemFromRow(row: any, projectCode: string): WorkItemView {
 export class ProjectRepository {
   readonly database: ManagedDatabase;
   readonly #sqlite: Database.Database;
+  #activeOperationId: string | null = null;
 
   constructor(database: ManagedDatabase) {
     this.database = database;
@@ -207,8 +235,8 @@ export class ProjectRepository {
       .prepare(
         `INSERT INTO events(
            id, sequence, type, actor_type, actor_id, session_id, aggregate_type, aggregate_id,
-           causation_id, correlation_id, payload_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+           causation_id, correlation_id, payload_json, created_at, op_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       )
       .run(
         eventId,
@@ -222,6 +250,7 @@ export class ProjectRepository {
         correlationId,
         JSON.stringify(payload),
         at,
+        this.#activeOperationId,
       );
     this.#sqlite
       .prepare(
@@ -254,14 +283,29 @@ export class ProjectRepository {
         }
         return { value: JSON.parse(cached.response_json) as T, replayed: true };
       }
-      const result = input.action();
+      const previousOperationId = this.#activeOperationId;
+      this.#activeOperationId = input.opId;
+      let result: T;
+      try {
+        result = input.action();
+      } finally {
+        this.#activeOperationId = previousOperationId;
+      }
       this.#sqlite
         .prepare(
           `INSERT INTO idempotency_keys(
-             key, operation, request_fingerprint, response_json, created_at
-           ) VALUES (?, ?, ?, ?, ?)`,
+             key, operation, request_fingerprint, response_json, created_at, op_id, actor_session_id
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(key, input.operation, fingerprint, JSON.stringify(result), nowIso());
+        .run(
+          key,
+          input.operation,
+          fingerprint,
+          JSON.stringify(result),
+          nowIso(),
+          input.opId,
+          input.actor.sessionId,
+        );
       return { value: result, replayed: false };
     });
     return input.immediate ? transaction.immediate() : transaction();
@@ -393,6 +437,93 @@ export class ProjectRepository {
     const row = this.#sqlite.prepare("SELECT * FROM agent_sessions WHERE id = ?").get(id);
     if (!row) throw new Error(`SESSION_NOT_FOUND: ${id}`);
     return row;
+  }
+
+  private normalizeMutationRequest(operation: string, request: unknown): unknown {
+    if (
+      operation !== "record.create" ||
+      !request ||
+      typeof request !== "object" ||
+      Array.isArray(request)
+    ) {
+      return request;
+    }
+    const record = request as Record<string, unknown>;
+    return {
+      ...record,
+      ...(typeof record.supersedes === "string" && record.supersedes.trim()
+        ? { supersedes: this.recordRow(record.supersedes).id }
+        : {}),
+      ...(typeof record.topic === "string" ? { topic: record.topic.trim() || null } : {}),
+      ...(typeof record.subjectKey === "string"
+        ? { subjectKey: record.subjectKey.trim() || null }
+        : {}),
+    };
+  }
+
+  /** Resolve exact replay or a safe successor before the application rejects a closed Session. */
+  resolveMutationActor(
+    sessionId: string,
+    opId: string,
+    operation: string,
+    request: unknown,
+  ): MutationActorResolution {
+    const normalizedOpId = opId.trim();
+    if (!normalizedOpId || normalizedOpId.length > 128) throw new Error("OPERATION_ID_INVALID");
+    const fingerprint = requestFingerprint(this.normalizeMutationRequest(operation, request));
+    const requested = this.getSession(sessionId);
+    const visited = new Set<string>();
+    let candidate: any | undefined = requested;
+    while (candidate && !visited.has(String(candidate.id))) {
+      visited.add(String(candidate.id));
+      const cached = this.#sqlite
+        .prepare("SELECT operation, request_fingerprint FROM idempotency_keys WHERE key = ?")
+        .get(`${candidate.id}:${normalizedOpId}`) as
+        | { operation: string; request_fingerprint: string }
+        | undefined;
+      if (cached) {
+        if (cached.operation !== operation || cached.request_fingerprint !== fingerprint) {
+          throw new Error(`IDEMPOTENCY_CONFLICT: ${candidate.id}:${normalizedOpId}`);
+        }
+        return {
+          actor: { type: "AGENT", id: candidate.agent_id, sessionId: candidate.id },
+          disposition: "REPLAY",
+          requestedSessionId: sessionId,
+        };
+      }
+      if (requested.connection_state !== "ONLINE" || !candidate.predecessor_session_id) break;
+      candidate = this.#sqlite
+        .prepare("SELECT * FROM agent_sessions WHERE id = ?")
+        .get(candidate.predecessor_session_id);
+    }
+
+    if (requested.connection_state === "ONLINE") {
+      return {
+        actor: { type: "AGENT", id: requested.agent_id, sessionId },
+        disposition: "CURRENT",
+        requestedSessionId: sessionId,
+      };
+    }
+    if (requested.retirement_reason !== "startup recovery: heartbeat expired") {
+      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+    }
+    const successors = this.#sqlite
+      .prepare(
+        `SELECT * FROM agent_sessions
+         WHERE predecessor_session_id = ? AND connection_state = 'ONLINE'
+         ORDER BY started_at DESC`,
+      )
+      .all(sessionId) as any[];
+    if (successors.length > 1) throw new Error(`SESSION_SUCCESSOR_AMBIGUOUS: ${sessionId}`);
+    const successor = successors[0];
+    if (!successor || successor.agent_id !== requested.agent_id) {
+      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+    }
+    return {
+      actor: { type: "AGENT", id: successor.agent_id, sessionId: successor.id },
+      disposition: "REBOUND",
+      requestedSessionId: sessionId,
+    };
   }
 
   updateSessionGitContext(
@@ -611,14 +742,164 @@ export class ProjectRepository {
   }
 
   listRecords(limit = 100): any[] {
-    return this.#sqlite
-      .prepare(
-        `SELECT id, kind, title, summary, detail, importance, scope, work_item_id,
+    return (
+      this.#sqlite
+        .prepare(
+          `SELECT id, local_no, kind, title, summary, detail, importance, scope, work_item_id,
                 supersedes_id, status, source_type, source_actor_id,
-                source_session_id, source_ref, created_at, updated_at
+                source_session_id, source_ref, topic, subject_key, op_id, created_at, updated_at
          FROM records ORDER BY updated_at DESC LIMIT ?`,
+        )
+        .all(Math.min(200, Math.max(1, limit))) as any[]
+    ).map((row) => ({
+      ...row,
+      key: this.recordKey(row),
+      topic: row.topic ?? null,
+      subjectKey: row.subject_key ?? null,
+      opId: row.op_id ?? null,
+      relatedRecords: this.relatedRecordKeys(row),
+    }));
+  }
+
+  private recordKey(row: { local_no: number; kind: string }): string {
+    return `${this.meta.code}-${row.kind === "DECISION" ? "D" : "R"}-${String(row.local_no).padStart(3, "0")}`;
+  }
+
+  private recordRow(reference: string): any {
+    const normalized = reference.trim();
+    let row = this.#sqlite.prepare("SELECT * FROM records WHERE id = ?").get(normalized) as any;
+    if (!row) {
+      const publicPrefix = `${this.meta.code}-`;
+      if (normalized.startsWith(publicPrefix)) {
+        const suffix = normalized.slice(publicPrefix.length);
+        const match = /^(D|R)-(\d{3,})$/u.exec(suffix);
+        if (match) {
+          row = this.#sqlite
+            .prepare("SELECT * FROM records WHERE local_no = ?")
+            .get(Number(match[2])) as any;
+          if (row && (match[1] === "D") !== (row.kind === "DECISION")) row = undefined;
+        }
+      }
+    }
+    if (!row) throw new Error(`RECORD_NOT_FOUND: ${reference}`);
+    return row;
+  }
+
+  private relatedRecordKeys(row: any): string[] {
+    if (!row.topic && !row.subject_key) return [];
+    return (
+      this.#sqlite
+        .prepare(
+          `SELECT local_no, kind FROM records
+           WHERE id <> ? AND status = 'ACTIVE' AND (
+             (? IS NOT NULL AND topic = ?) OR (? IS NOT NULL AND subject_key = ?)
+           ) ORDER BY updated_at DESC LIMIT 20`,
+        )
+        .all(row.id, row.topic, row.topic, row.subject_key, row.subject_key) as Array<{
+        local_no: number;
+        kind: string;
+      }>
+    ).map((candidate) => this.recordKey(candidate));
+  }
+
+  getRecord(reference: string): RecordView {
+    const row = this.recordRow(reference);
+    return {
+      id: row.id,
+      key: this.recordKey(row),
+      kind: row.kind,
+      title: row.title,
+      summary: row.summary,
+      detail: row.detail,
+      importance: row.importance,
+      scope: row.scope,
+      workItemKey: row.work_item_id ? this.taskKeyForId(row.work_item_id) : null,
+      supersedes: row.supersedes_id
+        ? this.recordKey(this.recordRow(String(row.supersedes_id)))
+        : null,
+      status: row.status,
+      topic: row.topic ?? null,
+      subjectKey: row.subject_key ?? null,
+      relatedRecords: this.relatedRecordKeys(row),
+      opId: row.op_id ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  getOperationTrace(opId: string, sessionId?: string | null): any {
+    const normalized = opId.trim();
+    if (!normalized) throw new Error("OPERATION_ID_INVALID");
+    const mutations = this.#sqlite
+      .prepare(
+        `SELECT operation, response_json, actor_session_id, created_at
+         FROM idempotency_keys WHERE op_id = ? AND (? IS NULL OR actor_session_id = ?)
+         ORDER BY created_at`,
       )
-      .all(Math.min(200, Math.max(1, limit))) as any[];
+      .all(normalized, sessionId ?? null, sessionId ?? null)
+      .map((row: any) => ({
+        operation: row.operation,
+        response: json(row.response_json, null),
+        sessionId: row.actor_session_id,
+        createdAt: row.created_at,
+      }));
+    const records = (
+      this.#sqlite
+        .prepare("SELECT id FROM records WHERE op_id = ? ORDER BY created_at")
+        .all(normalized) as Array<{ id: string }>
+    ).map((row) => this.getRecord(row.id));
+    const progress = (
+      this.#sqlite
+        .prepare(
+          `SELECT progress.*, item.local_no FROM progress_updates progress
+           JOIN work_items item ON item.id = progress.work_item_id
+           WHERE progress.op_id = ? ORDER BY progress.created_at`,
+        )
+        .all(normalized) as any[]
+    ).map((row) => ({
+      opId: row.op_id,
+      taskKey: `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}`,
+      percent: row.percent,
+      summary: row.summary,
+      completed: json(row.completed_json, []),
+      next: json(row.next_json, []),
+      evidence: json(row.evidence_json, []),
+      blocker: row.blocker_text,
+      sessionId: row.session_id,
+      createdAt: row.created_at,
+    }));
+    const projectUpdates = this.listProjectUpdates(100).filter(
+      (update) => update.opId === normalized,
+    );
+    const events = (
+      this.#sqlite
+        .prepare(
+          `SELECT sequence, type, aggregate_type, aggregate_id, actor_id, session_id,
+                  payload_json, created_at, op_id
+           FROM events WHERE op_id = ? ORDER BY sequence`,
+        )
+        .all(normalized) as any[]
+    ).map((row) => ({
+      seq: row.sequence,
+      type: row.type,
+      aggregateType: row.aggregate_type,
+      aggregateId: row.aggregate_id,
+      actor: row.actor_id,
+      sessionId: row.session_id,
+      payload: json(row.payload_json, {}),
+      at: row.created_at,
+      opId: row.op_id,
+    }));
+    if (
+      mutations.length === 0 &&
+      records.length === 0 &&
+      progress.length === 0 &&
+      projectUpdates.length === 0 &&
+      events.length === 0
+    ) {
+      throw new Error(`OPERATION_NOT_FOUND: ${normalized}`);
+    }
+    return { opId: normalized, mutations, records, progress, projectUpdates, events };
   }
 
   listProjectUpdates(limit = 50): any[] {
@@ -626,7 +907,8 @@ export class ProjectRepository {
       this.#sqlite
         .prepare(
           `SELECT id, health, summary, completed_json, risks_json, next_json,
-                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at
+                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
+                op_id
          FROM project_updates ORDER BY created_at DESC LIMIT ?`,
         )
         .all(Math.min(100, Math.max(1, limit))) as any[]
@@ -644,6 +926,7 @@ export class ProjectRepository {
       publishedAt: row.published_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      opId: row.op_id ?? null,
     }));
   }
 
@@ -693,8 +976,9 @@ export class ProjectRepository {
           .prepare(
             `INSERT INTO project_updates(
                id, health, summary, completed_json, risks_json, next_json,
-               from_sequence, to_sequence, status, actor, published_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, NULL, ?, ?)`,
+               from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
+               op_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, NULL, ?, ?, ?)`,
           )
           .run(
             id,
@@ -708,6 +992,7 @@ export class ProjectRepository {
             actor.id,
             now,
             now,
+            opId,
           );
         const seq = this.appendEvent("project.update.drafted", actor, "PROJECT_UPDATE", id, {
           fromSequence,
@@ -725,30 +1010,42 @@ export class ProjectRepository {
       draftId?: string | null;
       health: "ON_TRACK" | "AT_RISK" | "OFF_TRACK" | "UNKNOWN";
       summary: string;
-      completed?: string[];
+      completed?: Array<string | { text: string; workItemKey?: string }>;
       risks?: string[];
       next?: string[];
     },
   ): any {
+    const normalizedInput = {
+      ...input,
+      ...(input.completed === undefined
+        ? {}
+        : {
+            completed: input.completed.map((entry) => {
+              if (typeof entry === "string" || entry.workItemKey === undefined) return entry;
+              const row = this.rowForTaskKey(entry.workItemKey);
+              return { ...entry, workItemKey: this.taskKeyForId(row.id)! };
+            }),
+          }),
+    };
     return this.mutate({
       actor,
       opId,
       operation: "project-update.publish",
-      request: input,
+      request: normalizedInput,
       action: () => {
-        const draft = input.draftId
+        const draft = normalizedInput.draftId
           ? (this.#sqlite
               .prepare("SELECT * FROM project_updates WHERE id = ? AND status = 'DRAFT'")
-              .get(input.draftId) as any)
+              .get(normalizedInput.draftId) as any)
           : null;
-        if (input.draftId && !draft)
-          throw new Error(`PROJECT_UPDATE_DRAFT_NOT_FOUND: ${input.draftId}`);
+        if (normalizedInput.draftId && !draft)
+          throw new Error(`PROJECT_UPDATE_DRAFT_NOT_FOUND: ${normalizedInput.draftId}`);
         const id = draft?.id ?? createUlid();
         const now = nowIso();
         const meta = this.meta;
-        const completed = input.completed ?? json(draft?.completed_json, []);
-        const risks = input.risks ?? json(draft?.risks_json, []);
-        const next = input.next ?? json(draft?.next_json, []);
+        const completed = normalizedInput.completed ?? json(draft?.completed_json, []);
+        const risks = normalizedInput.risks ?? json(draft?.risks_json, []);
+        const next = normalizedInput.next ?? json(draft?.next_json, []);
         const fromSequence =
           draft?.from_sequence ??
           (
@@ -764,17 +1061,19 @@ export class ProjectRepository {
           this.#sqlite
             .prepare(
               `UPDATE project_updates SET health = ?, summary = ?, completed_json = ?, risks_json = ?,
-               next_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?, updated_at = ? WHERE id = ?`,
+               next_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?, updated_at = ?,
+               op_id = ? WHERE id = ?`,
             )
             .run(
-              input.health,
-              input.summary.trim(),
+              normalizedInput.health,
+              normalizedInput.summary.trim(),
               JSON.stringify(completed),
               JSON.stringify(risks),
               JSON.stringify(next),
               actor.id,
               now,
               now,
+              opId,
               id,
             );
         } else {
@@ -782,13 +1081,14 @@ export class ProjectRepository {
             .prepare(
               `INSERT INTO project_updates(
                  id, health, summary, completed_json, risks_json, next_json,
-                 from_sequence, to_sequence, status, actor, published_at, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?)`,
+                 from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
+                 op_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
-              input.health,
-              input.summary.trim(),
+              normalizedInput.health,
+              normalizedInput.summary.trim(),
               JSON.stringify(completed),
               JSON.stringify(risks),
               JSON.stringify(next),
@@ -796,6 +1096,7 @@ export class ProjectRepository {
               toSequence,
               actor.id,
               now,
+              opId,
               now,
               now,
             );
@@ -804,12 +1105,29 @@ export class ProjectRepository {
           .prepare(
             "UPDATE project_meta SET health = ?, version = version + 1, updated_at = ? WHERE singleton = 1",
           )
-          .run(input.health, now);
+          .run(normalizedInput.health, now);
         const seq = this.appendEvent("project.update.published", actor, "PROJECT_UPDATE", id, {
-          health: input.health,
-          summary: input.summary.trim(),
+          health: normalizedInput.health,
+          summary: normalizedInput.summary.trim(),
         });
-        return { ...this.listProjectUpdates(100).find((update) => update.id === id), seq };
+        const linkedKeys = new Set(
+          completed.flatMap((entry: string | { text: string; workItemKey?: string }) =>
+            typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
+          ),
+        );
+        const openWorkItems = this.listWorkItems({ limit: 100 })
+          .filter(
+            (item) => !["DONE", "CANCELLED"].includes(item.status) && !linkedKeys.has(item.key),
+          )
+          .slice(0, 5)
+          .map((item) => item.key);
+        return {
+          ...this.listProjectUpdates(100).find((update) => update.id === id),
+          seq,
+          opId,
+          unlinked: completed.length > 0 && openWorkItems.length > 0,
+          openWorkItems: completed.length > 0 ? openWorkItems : [],
+        };
       },
     });
   }
@@ -909,10 +1227,12 @@ export class ProjectRepository {
   }
 
   private rowForTaskKey(taskKey: string): any {
-    const localNo = Number(taskKey.match(/-T-(\d+)$/u)?.[1]);
-    if (!Number.isSafeInteger(localNo)) throw new Error(`WORK_ITEM_KEY_INVALID: ${taskKey}`);
+    const prefix = `${this.meta.code}-T-`;
+    const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
+    const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
+    if (!Number.isSafeInteger(localNo)) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
     const row = this.#sqlite.prepare("SELECT * FROM work_items WHERE local_no = ?").get(localNo);
-    if (!row) throw new Error(`NOT_FOUND: ${taskKey}`);
+    if (!row) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
     return row;
   }
 
@@ -921,6 +1241,23 @@ export class ProjectRepository {
       .prepare("SELECT local_no FROM work_items WHERE id = ?")
       .get(workItemId) as { local_no: number } | undefined;
     return row ? `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}` : null;
+  }
+
+  private normalizeEvidence(evidence: unknown[]): unknown[] {
+    return evidence.map((entry) => {
+      if (typeof entry === "string") return entry;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+      const reference = entry as Record<string, unknown>;
+      if (reference.kind !== "atm_record" && reference.kind !== "atm_task") return entry;
+      if (typeof reference.value !== "string" || !reference.value.trim()) {
+        throw new Error(`VALIDATION_ERROR: ${String(reference.kind)} evidence value required`);
+      }
+      if (reference.kind === "atm_record") {
+        return { ...reference, value: this.getRecord(reference.value).key };
+      }
+      const row = this.rowForTaskKey(reference.value);
+      return { ...reference, value: this.taskKeyForId(row.id) };
+    });
   }
 
   getWorkItem(taskKey: string): WorkItemView & {
@@ -1098,6 +1435,7 @@ export class ProjectRepository {
       targetDate?: string | null;
       verificationRequired?: boolean;
       sourceQuickId?: string | null;
+      assigneeAgentId?: string | null;
     }>,
   ): { items: WorkItemView[]; sequence: number } {
     if (items.length === 0 || items.length > 50) throw new Error("VALIDATION_ERROR: items 1..50");
@@ -1154,8 +1492,9 @@ export class ProjectRepository {
                  id, local_no, parent_id, objective_id, milestone_id, type, title, description,
                  acceptance_json, status, priority, sort_key, target_date, reported_progress,
                  computed_progress, progress_source, weight, verification_required, version,
-                 created_by_agent_id, created_by_session_id, created_at, updated_at, source_quick_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?)`,
+                 created_by_agent_id, created_by_session_id, created_at, updated_at, source_quick_id,
+                 assignee_agent_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -1178,6 +1517,7 @@ export class ProjectRepository {
               now,
               now,
               item.sourceQuickId ?? null,
+              item.assigneeAgentId ?? null,
             );
           for (const checklist of item.checklist ?? []) {
             this.#sqlite
@@ -1544,11 +1884,15 @@ export class ProjectRepository {
       evidence?: unknown[];
     },
   ): { checklist: ChecklistView; taskProgress: number; taskVersion: number; sequence: number } {
+    const normalizedInput = {
+      ...input,
+      ...(input.evidence === undefined ? {} : { evidence: this.normalizeEvidence(input.evidence) }),
+    };
     return this.mutate({
       actor,
       opId,
       operation: "checklist.update",
-      request: input,
+      request: normalizedInput,
       action: () => {
         const row = this.#sqlite
           .prepare("SELECT * FROM checklist_items WHERE id = ?")
@@ -1556,7 +1900,7 @@ export class ProjectRepository {
         if (!row) throw new Error(`NOT_FOUND: ${input.checklistId}`);
         if (row.version !== input.expectedVersion)
           throw new Error(`VERSION_CONFLICT: ${row.version}`);
-        const evidence = input.evidence ?? json(row.evidence_json, []);
+        const evidence = normalizedInput.evidence ?? json(row.evidence_json, []);
         if (
           input.status === "DONE" &&
           Number(row.evidence_required) === 1 &&
@@ -1637,31 +1981,32 @@ export class ProjectRepository {
   }
 
   private assertCompletionGate(row: any): void {
+    const failures: string[] = [];
     const checklistFailure = this.#sqlite
       .prepare(
         `SELECT id FROM checklist_items WHERE work_item_id = ? AND kind <> 'OPTIONAL'
          AND status NOT IN ('DONE','SKIPPED') LIMIT 1`,
       )
       .get(row.id);
-    if (checklistFailure) throw new Error("COMPLETION_GATE_FAILED: checklist incomplete");
+    if (checklistFailure) failures.push("checklist incomplete");
     const evidenceFailure = this.#sqlite
       .prepare(
         `SELECT id FROM checklist_items WHERE work_item_id = ? AND evidence_required = 1
          AND status <> 'SKIPPED' AND (status <> 'DONE' OR evidence_json = '[]') LIMIT 1`,
       )
       .get(row.id);
-    if (evidenceFailure) throw new Error("COMPLETION_GATE_FAILED: evidence missing");
+    if (evidenceFailure) failures.push("evidence missing");
     const childFailure = this.#sqlite
       .prepare(
         `SELECT id FROM work_items WHERE parent_id = ? AND archived_at IS NULL
          AND status NOT IN ('DONE','CANCELLED') LIMIT 1`,
       )
       .get(row.id);
-    if (childFailure) throw new Error("COMPLETION_GATE_FAILED: child incomplete");
+    if (childFailure) failures.push("child incomplete");
     const blocker = this.#sqlite
       .prepare("SELECT id FROM blockers WHERE work_item_id = ? AND status = 'ACTIVE' LIMIT 1")
       .get(row.id);
-    if (blocker) throw new Error("COMPLETION_GATE_FAILED: blocker active");
+    if (blocker) failures.push("blocker active");
     const dependency = this.#sqlite
       .prepare(
         `SELECT source.id FROM work_item_relations relation
@@ -1670,10 +2015,19 @@ export class ProjectRepository {
            AND source.status <> 'DONE' LIMIT 1`,
       )
       .get(row.id);
-    if (dependency) throw new Error("COMPLETION_GATE_FAILED: dependency incomplete");
+    if (dependency) failures.push("dependency incomplete");
     if (Number(row.verification_required) === 1 && row.status !== "VERIFYING") {
-      throw new Error("COMPLETION_GATE_FAILED: verification required");
+      failures.push("verification required");
     }
+    if (!(row.status === "DONE" || row.status === "IN_PROGRESS" || row.status === "VERIFYING")) {
+      const legal = legalWorkItemOperations(row.status as WorkItemStatus)
+        .map((entry) => `${entry.operation} -> ${entry.target}`)
+        .join(", ");
+      failures.push(
+        `current-state ${row.status} cannot complete (legal operations: ${legal || "none"})`,
+      );
+    }
+    if (failures.length > 0) throw new Error(`COMPLETION_GATE_FAILED: ${failures.join("; ")}`);
   }
 
   private upsertSearchDocument(
@@ -1749,24 +2103,28 @@ export class ProjectRepository {
       taskKey: string;
       percent?: number;
       summary: string;
-      completed?: string[];
+      completed?: Array<string | { text: string; workItemKey?: string }>;
       next?: string[];
       blocker?: string | null;
       evidence?: unknown[];
     },
-  ): { ok: 1; noop?: true; seq: number; key: string; v: number } {
+  ): { ok: 1; noop?: true; seq: number; key: string; v: number; opId: string } {
+    const normalizedInput = {
+      ...input,
+      ...(input.evidence === undefined ? {} : { evidence: this.normalizeEvidence(input.evidence) }),
+    };
     return this.mutate({
       actor,
       opId,
       operation: "work.progress",
-      request: input,
+      request: normalizedInput,
       action: () => {
-        const row = this.rowForTaskKey(input.taskKey);
+        const row = this.rowForTaskKey(normalizedInput.taskKey);
         const bucket =
-          input.percent === undefined
+          normalizedInput.percent === undefined
             ? null
-            : Math.round(Math.max(0, Math.min(100, input.percent)) / 10) * 10;
-        const hash = createHash("sha256").update(input.summary.trim()).digest("hex");
+            : Math.round(Math.max(0, Math.min(100, normalizedInput.percent)) / 10) * 10;
+        const hash = createHash("sha256").update(normalizedInput.summary.trim()).digest("hex");
         const last = this.#sqlite
           .prepare(
             `SELECT progress_bucket, summary_hash FROM progress_updates
@@ -1777,37 +2135,47 @@ export class ProjectRepository {
           last &&
           last.progress_bucket === bucket &&
           last.summary_hash === hash &&
-          !input.blocker
+          !normalizedInput.blocker
         ) {
-          return { ok: 1, noop: true, seq: this.meta.sequence, key: input.taskKey, v: row.version };
+          return {
+            ok: 1,
+            noop: true,
+            seq: this.meta.sequence,
+            key: normalizedInput.taskKey,
+            v: row.version,
+            opId,
+          };
         }
         const now = nowIso();
         this.#sqlite
           .prepare(
             `INSERT INTO progress_updates(
                id, work_item_id, percent, progress_bucket, summary, summary_hash,
-               completed_json, next_json, blocker_text, actor, session_id, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               completed_json, next_json, blocker_text, actor, session_id, created_at,
+               evidence_json, op_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             createUlid(),
             row.id,
-            input.percent ?? null,
+            normalizedInput.percent ?? null,
             bucket,
-            input.summary.trim(),
+            normalizedInput.summary.trim(),
             hash,
-            JSON.stringify(input.completed ?? []),
-            JSON.stringify(input.next ?? []),
-            input.blocker ?? null,
+            JSON.stringify(normalizedInput.completed ?? []),
+            JSON.stringify(normalizedInput.next ?? []),
+            normalizedInput.blocker ?? null,
             actor.id,
             actor.sessionId,
             now,
+            JSON.stringify(normalizedInput.evidence ?? []),
+            opId,
           );
         const updates = ["reported_progress = ?", "version = version + 1", "updated_at = ?"];
         const values: unknown[] = [bucket, now];
-        if (input.blocker?.trim()) {
+        if (normalizedInput.blocker?.trim()) {
           updates.push("status = 'BLOCKED'", "blocked_reason = ?");
-          values.push(input.blocker.trim());
+          values.push(normalizedInput.blocker.trim());
           const blockerId = createUlid();
           this.#sqlite
             .prepare(
@@ -1820,8 +2188,8 @@ export class ProjectRepository {
               blockerId,
               this.nextNumber("blocker"),
               row.id,
-              input.blocker.trim(),
-              input.blocker.trim(),
+              normalizedInput.blocker.trim(),
+              normalizedInput.blocker.trim(),
               actor.id,
               now,
               now,
@@ -1838,26 +2206,27 @@ export class ProjectRepository {
           version: number;
         };
         const seq = this.appendEvent(
-          input.blocker ? "work.blocked" : "work.progressed",
+          normalizedInput.blocker ? "work.blocked" : "work.progressed",
           actor,
           "WORK_ITEM",
           row.id,
           {
-            key: input.taskKey,
+            key: normalizedInput.taskKey,
             title: row.title,
             from: row.computed_progress,
             to: bucket,
-            summary: input.summary.trim(),
+            summary: normalizedInput.summary.trim(),
+            evidence: normalizedInput.evidence ?? [],
           },
         );
         this.upsertSearchDocument(
           "PROGRESS",
           createUlid(),
-          input.taskKey,
-          input.summary.trim(),
-          input.summary.trim(),
+          normalizedInput.taskKey,
+          normalizedInput.summary.trim(),
+          normalizedInput.summary.trim(),
         );
-        return { ok: 1, seq, key: input.taskKey, v: updated.version };
+        return { ok: 1, seq, key: normalizedInput.taskKey, v: updated.version, opId };
       },
     });
   }
@@ -1874,74 +2243,103 @@ export class ProjectRepository {
       scope?: string;
       workItemKey?: string | null;
       supersedes?: string | null;
+      topic?: string | null;
+      subjectKey?: string | null;
       sourceType?: "USER" | "AGENT" | "SYSTEM" | "IMPORT";
       sourceActorId?: string | null;
       sourceSessionId?: string | null;
       sourceRef?: string | null;
     },
-  ): { ok: 1; seq: number; key: string; v: number } {
+  ): { ok: 1; seq: number; key: string; v: number; relatedRecords: string[] } {
+    const normalizedInput = this.normalizeMutationRequest("record.create", input) as typeof input;
     return this.mutate({
       actor,
       opId,
       operation: "record.create",
-      request: input,
+      request: normalizedInput,
       action: () => {
-        if (input.summary.length > 300) throw new Error("VALIDATION_ERROR: summary max 300");
+        if (normalizedInput.summary.length > 300)
+          throw new Error("VALIDATION_ERROR: summary max 300");
         const id = createUlid();
         const localNo = this.nextNumber("record");
         const code = this.meta.code;
-        const key = `${code}-${input.kind === "DECISION" ? "D" : "R"}-${String(localNo).padStart(3, "0")}`;
-        const workItemId = input.workItemKey ? this.rowForTaskKey(input.workItemKey).id : null;
+        const key = `${code}-${normalizedInput.kind === "DECISION" ? "D" : "R"}-${String(localNo).padStart(3, "0")}`;
+        const workItemId = normalizedInput.workItemKey
+          ? this.rowForTaskKey(normalizedInput.workItemKey).id
+          : null;
         const now = nowIso();
-        if (input.supersedes) {
+        if (normalizedInput.supersedes) {
           this.#sqlite
             .prepare(
               `UPDATE records SET status = 'SUPERSEDED', version = version + 1,
                updated_at = ? WHERE id = ?`,
             )
-            .run(now, input.supersedes);
+            .run(now, normalizedInput.supersedes);
         }
         this.#sqlite
           .prepare(
             `INSERT INTO records(
                id, local_no, kind, title, summary, detail, importance, status,
                supersedes_id, scope, work_item_id, actor, version, created_at, updated_at,
-               source_type, source_actor_id, source_session_id, source_ref
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+               source_type, source_actor_id, source_session_id, source_ref, topic, subject_key,
+               op_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             id,
             localNo,
-            input.kind,
-            input.title,
-            input.summary,
-            input.detail ?? "",
-            input.importance ?? "NORMAL",
-            input.supersedes ?? null,
-            input.scope ?? "PROJECT",
+            normalizedInput.kind,
+            normalizedInput.title,
+            normalizedInput.summary,
+            normalizedInput.detail ?? "",
+            normalizedInput.importance ?? "NORMAL",
+            normalizedInput.supersedes ?? null,
+            normalizedInput.scope ?? "PROJECT",
             workItemId,
             actor.id,
             now,
             now,
-            input.sourceType ?? actor.type,
-            input.sourceActorId ?? actor.id,
-            input.sourceSessionId ?? actor.sessionId,
-            input.sourceRef ?? null,
+            normalizedInput.sourceType ?? actor.type,
+            normalizedInput.sourceActorId ?? actor.id,
+            normalizedInput.sourceSessionId ?? actor.sessionId,
+            normalizedInput.sourceRef ?? null,
+            normalizedInput.topic ?? null,
+            normalizedInput.subjectKey ?? null,
+            opId,
           );
         const seq = this.appendEvent("record.created", actor, "RECORD", id, {
           key,
-          kind: input.kind,
-          title: input.title,
-          summary: input.summary,
+          kind: normalizedInput.kind,
+          title: normalizedInput.title,
+          summary: normalizedInput.summary,
+          topic: normalizedInput.topic ?? null,
+          subjectKey: normalizedInput.subjectKey ?? null,
         });
         this.upsertSearchDocument(
           "RECORD",
           id,
           key,
-          input.title,
-          `${input.summary}\n${input.detail ?? ""}`,
+          normalizedInput.title,
+          `${normalizedInput.summary}\n${normalizedInput.detail ?? ""}`,
         );
-        return { ok: 1, seq, key, v: 0 };
+        const relatedRecords = (
+          this.#sqlite
+            .prepare(
+              `SELECT local_no, kind FROM records
+               WHERE id <> ? AND status = 'ACTIVE' AND (
+                 (? IS NOT NULL AND topic = ?) OR
+                 (? IS NOT NULL AND subject_key = ?)
+               ) ORDER BY updated_at DESC LIMIT 20`,
+            )
+            .all(
+              id,
+              normalizedInput.topic ?? null,
+              normalizedInput.topic ?? null,
+              normalizedInput.subjectKey ?? null,
+              normalizedInput.subjectKey ?? null,
+            ) as Array<{ local_no: number; kind: string }>
+        ).map((row) => this.recordKey(row));
+        return { ok: 1, seq, key, v: 0, relatedRecords };
       },
     });
   }
@@ -2007,6 +2405,7 @@ export class ProjectRepository {
       project: { id: string; code: string; name: string };
       projectCode: string;
       projectName: string;
+      opId: string | null;
       at: string;
     }>;
     currentSequence: number;
@@ -2023,7 +2422,7 @@ export class ProjectRepository {
     const rows = this.#sqlite
       .prepare(
         `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
-                payload_json, created_at FROM events
+                payload_json, created_at, op_id FROM events
          WHERE ${clauses.join(" AND ")} ORDER BY sequence LIMIT ?`,
       )
       .all(...params) as any[];
@@ -2054,6 +2453,7 @@ export class ProjectRepository {
           project: presented.project!,
           projectCode: this.meta.code,
           projectName: this.meta.name,
+          opId: row.op_id ?? null,
           at: row.created_at,
         };
       }),

@@ -16,7 +16,13 @@ describe("Session Git context migration", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    rmSync(join(migrationsRoot, "project", "0005_session_git_context.sql"));
+    for (const name of [
+      "0005_session_git_context.sql",
+      "0006_record_topics.sql",
+      "0007_operation_trace.sql",
+    ]) {
+      rmSync(join(migrationsRoot, "project", name));
+    }
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({
@@ -41,14 +47,20 @@ describe("Session Git context migration", () => {
       .run(now, now);
     manager.close();
 
-    copyFileSync(
-      resolve(process.cwd(), "migrations", "project", "0005_session_git_context.sql"),
-      join(migrationsRoot, "project", "0005_session_git_context.sql"),
-    );
+    for (const name of [
+      "0005_session_git_context.sql",
+      "0006_record_topics.sql",
+      "0007_operation_trace.sql",
+    ]) {
+      copyFileSync(
+        resolve(process.cwd(), "migrations", "project", name),
+        join(migrationsRoot, "project", name),
+      );
+    }
     manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     try {
       const upgraded = await manager.openProject(project.code);
-      expect(upgraded.schemaVersion).toBe(5);
+      expect(upgraded.schemaVersion).toBe(7);
       expect(
         upgraded.sqlite
           .prepare(
