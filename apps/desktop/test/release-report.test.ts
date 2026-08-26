@@ -51,11 +51,7 @@ describe("已知非阻塞剩余项", () => {
     );
   });
 
-  // 阳性对照：真实清单里当前版本的小节必须读得出条目。解析器烂掉、或者清单被
-  // 改成别的结构时，这条先红——否则 summary.md 会安静地退回“无”。
-  it("真实清单读得出当前版本的剩余项", () => {
-    const items = nonBlockingItems(CHECKLIST, VERSION);
-    expect(items.length).toBeGreaterThan(0);
-    expect(items).toContain("空闲项目数据库 5 分钟 LRU 关闭");
+  it("真实清单在四项验收补齐后明确返回空名单", () => {
+    expect(nonBlockingItems(CHECKLIST, VERSION)).toEqual([]);
   });
 });
