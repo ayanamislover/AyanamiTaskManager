@@ -34,10 +34,18 @@ type ZodLikeIssue = {
   minimum?: unknown;
 };
 
-type ProjectCompletedEntry = string | { text: string; workItemKey?: string };
-
 function completedEntryText(entry: string | { text: string }): string {
   return typeof entry === "string" ? entry : entry.text;
+}
+
+function completedEntryForProject(
+  entry: string | { text: string; workItemKey?: string | undefined },
+): string | { text: string; workItemKey?: string } {
+  if (typeof entry === "string") return entry;
+  return {
+    text: entry.text,
+    ...(entry.workItemKey === undefined ? {} : { workItemKey: entry.workItemKey }),
+  };
 }
 
 function boundedText(value: unknown, limit: number): string {
@@ -208,39 +216,6 @@ function projectSuggestionDetails(
     // 错误处理本身不能因候选索引不可用而覆盖原 PROJECT_NOT_FOUND。
     return null;
   }
-}
-
-function projectCompletedEntries(value: unknown): ProjectCompletedEntry[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 20) {
-    throw new Error("INVALID_ARGUMENT: completed 必须是最多 20 项的数组");
-  }
-  return value.map((entry, index) => {
-    if (typeof entry === "string") return entry;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
-      throw new Error(`INVALID_ARGUMENT: completed[${index}] 必须是字符串或结构化完成项`);
-    }
-    const candidate = entry as Record<string, unknown>;
-    if (typeof candidate.text !== "string" || candidate.text.length > 500) {
-      throw new Error(`INVALID_ARGUMENT: completed[${index}].text 必填且不超过 500 字符`);
-    }
-    if (
-      candidate.workItemKey !== undefined &&
-      (typeof candidate.workItemKey !== "string" ||
-        !candidate.workItemKey.trim() ||
-        candidate.workItemKey.length > 128)
-    ) {
-      throw new Error(
-        `INVALID_ARGUMENT: completed[${index}].workItemKey 必须是非空且不超过 128 字符`,
-      );
-    }
-    return {
-      text: candidate.text,
-      ...(typeof candidate.workItemKey === "string"
-        ? { workItemKey: candidate.workItemKey.trim() }
-        : {}),
-    };
-  });
 }
 
 function bearer(request: FastifyRequest): string | null {
@@ -777,16 +752,11 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.post("/api/v1/projects/:code/progress-updates", async (request) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
-    const completedEntries = projectCompletedEntries(body.completed);
-    const input = ProgressAddInputSchema.parse({
-      ...body,
-      completed: completedEntries.map(completedEntryText),
-      project: code,
-    });
+    const input = ProgressAddInputSchema.parse({ ...body, project: code });
     if (input.scope === "project") {
       return options.service.addProjectProgress(code, input.session, input.opId, {
         summary: input.summary,
-        completed: completedEntries,
+        completed: input.completed.map(completedEntryForProject),
         next: input.next,
         ...(input.health === undefined ? {} : { health: input.health }),
         ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
