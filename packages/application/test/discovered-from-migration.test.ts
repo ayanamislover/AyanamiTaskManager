@@ -22,6 +22,7 @@ describe("DISCOVERED_FROM schema migration", () => {
       "0006_record_topics.sql",
       "0007_operation_trace.sql",
       "0008_work_item_phase_waiting.sql",
+      "0009_structured_cancel.sql",
     ];
     for (const name of pendingMigrations) rmSync(join(migrationsRoot, "project", name));
 
@@ -63,9 +64,7 @@ describe("DISCOVERED_FROM schema migration", () => {
          VALUES ('v3-origin', 'v3-blocked', 'BLOCKS', ?)`,
       )
       .run(now);
-    v3Database.sqlite
-      .prepare("UPDATE counters SET next_value = 3 WHERE name = 'work_item'")
-      .run();
+    v3Database.sqlite.prepare("UPDATE counters SET next_value = 3 WHERE name = 'work_item'").run();
     service.close();
 
     for (const name of pendingMigrations) {

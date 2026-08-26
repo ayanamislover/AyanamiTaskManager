@@ -366,31 +366,83 @@ export const TaskCreateBatchInputSchema = z.object({
   items: z.array(WorkItemCreateInputSchema).min(1).max(50),
 });
 
-export const WorkItemPatchInputSchema = z.object({
-  taskKey: NonEmptyTextSchema,
-  expectedVersion: z.number().int().nonnegative(),
-  operation: z.enum([
-    "claim",
-    "start",
-    "release",
-    "block",
-    "wait_user",
-    "wait_agent",
-    "verify",
-    "complete",
-    "cancel",
-    "reopen",
-    "edit",
-  ]),
-  title: z.string().trim().min(1).max(400).optional(),
-  description: z.string().max(50_000).optional(),
-  blockedReason: z.string().trim().min(1).max(2000).optional(),
-  waitingFor: z.string().trim().min(1).max(1000).optional(),
-  assigneeAgentId: z.string().nullable().optional(),
-  targetDate: NullableDateOnlySchema,
-  parentKey: z.string().nullable().optional(),
-  takeoverStale: z.boolean().default(false),
-});
+export const WorkItemExpectedFieldsSchema = z
+  .object({
+    title: z.string().trim().min(1).max(400).optional(),
+    description: z.string().max(50_000).optional(),
+    targetDate: NullableDateOnlySchema,
+    parentKey: z.string().trim().min(1).max(100).nullable().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, "expectedFields 至少包含一个字段");
+
+export const WorkItemPatchInputSchema = z
+  .object({
+    taskKey: NonEmptyTextSchema,
+    expectedVersion: z.number().int().nonnegative(),
+    expectedFields: WorkItemExpectedFieldsSchema.optional(),
+    operation: z.enum([
+      "claim",
+      "start",
+      "release",
+      "block",
+      "wait_user",
+      "wait_agent",
+      "verify",
+      "complete",
+      "cancel",
+      "reopen",
+      "edit",
+    ]),
+    title: z.string().trim().min(1).max(400).optional(),
+    description: z.string().max(50_000).optional(),
+    blockedReason: z.string().trim().min(1).max(2000).optional(),
+    waitingFor: z.string().trim().min(1).max(1000).optional(),
+    cancelReason: z.string().trim().min(1).max(2000).optional(),
+    duplicateOf: z.string().trim().min(1).max(100).nullable().optional(),
+    supersededBy: z.string().trim().min(1).max(100).nullable().optional(),
+    assigneeAgentId: z.string().nullable().optional(),
+    targetDate: NullableDateOnlySchema,
+    parentKey: z.string().nullable().optional(),
+    takeoverStale: z.boolean().default(false),
+  })
+  .superRefine((value, context) => {
+    if (!value.expectedFields) return;
+    if (value.operation !== "edit") {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedFields"],
+        message: "expectedFields 仅适用于 edit",
+      });
+      return;
+    }
+    if (value.assigneeAgentId !== undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["assigneeAgentId"],
+        message: "assigneeAgentId 必须使用严格 expectedVersion",
+      });
+    }
+    const changedFields = (["title", "description", "targetDate", "parentKey"] as const).filter(
+      (field) => value[field] !== undefined,
+    );
+    if (changedFields.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedFields"],
+        message: "expectedFields 要求至少编辑一个白名单字段",
+      });
+    }
+    for (const field of changedFields) {
+      if (!Object.prototype.hasOwnProperty.call(value.expectedFields, field)) {
+        context.addIssue({
+          code: "custom",
+          path: ["expectedFields", field],
+          message: `缺少被修改字段 ${field} 的 compare value`,
+        });
+      }
+    }
+  });
 
 export const TaskPatchBatchInputSchema = z.object({
   project: NonEmptyTextSchema,
