@@ -13,13 +13,44 @@ export function productShortcutRoots(env: NodeJS.ProcessEnv = process.env): stri
   ].filter((path): path is string => path !== null);
 }
 
-async function filesBelow(directory: string): Promise<string[]> {
-  if (!existsSync(directory)) return [];
+type DirectoryEntryLike = {
+  name: string;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+};
+
+type DirectoryReader = (directory: string) => Promise<DirectoryEntryLike[]>;
+
+const readDirectory: DirectoryReader = async (directory) =>
+  readdir(directory, { withFileTypes: true });
+
+export async function walkProductFiles(
+  directory: string,
+  readEntries: DirectoryReader = readDirectory,
+): Promise<string[]> {
   const result: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) result.push(...(await filesBelow(path)));
-    else result.push(path);
+  const pending = [directory];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const identity = resolve(current).toLowerCase();
+    if (visited.has(identity)) continue;
+    visited.add(identity);
+    let entries: DirectoryEntryLike[];
+    try {
+      entries = await readEntries(current);
+    } catch {
+      // 开始菜单可能包含已失效或无权访问的系统目录；它们与本产品快捷方式无关。
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(current, entry.name);
+      // junction / symlink 可能逃出扫描根或形成循环。快捷方式本身是普通 .lnk 文件，
+      // 因此扫描时没有任何跟随 reparse point 的必要。
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) pending.push(path);
+      else result.push(path);
+    }
   }
   return result;
 }
@@ -27,7 +58,7 @@ async function filesBelow(directory: string): Promise<string[]> {
 export async function findProductShortcuts(
   roots: string[] = productShortcutRoots(),
 ): Promise<string[]> {
-  const found = (await Promise.all(roots.map(async (root) => await filesBelow(root)))).flat();
+  const found = (await Promise.all(roots.map(async (root) => await walkProductFiles(root)))).flat();
   return found.filter(
     (path) =>
       path.toLowerCase().endsWith(".lnk") &&
