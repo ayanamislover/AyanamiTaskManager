@@ -92,3 +92,8 @@ export function quickCheck(sqlite: Database.Database): boolean {
   const rows = sqlite.pragma("quick_check") as Array<{ quick_check: string }>;
   return rows.length === 1 && rows[0]?.quick_check === "ok";
 }
+
+export function foreignKeyCheck(sqlite: Database.Database): boolean {
+  const rows = sqlite.pragma("foreign_key_check") as Array<Record<string, unknown>>;
+  return rows.length === 0;
+}

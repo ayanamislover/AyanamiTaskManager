@@ -743,6 +743,24 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
         }),
         getAutoLaunch: async () => false,
         setAutoLaunch: async () => false,
+        getUpdateStatus: async () => ({
+          phase: "VERIFY",
+          outcome: "ERROR",
+          code: "VERIFY_FAILED",
+          message: "package checksum mismatch",
+          action: "更新包校验失败，请重新生成并投递完整安装包。",
+          at: "2026-08-26T12:00:00.000Z",
+          version: null,
+        }),
+        checkForUpdates: async () => ({
+          phase: "CHECK",
+          outcome: "IN_PROGRESS",
+          code: "CHECKING",
+          message: "正在检查本地更新",
+          action: "正在检查本地更新。",
+          at: "2026-08-26T12:01:00.000Z",
+          version: null,
+        }),
         copyText: async () => true,
         showItemInFolder: async () => undefined,
         minimizeWindow: async () => undefined,
@@ -756,6 +774,16 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
     { endpoint: apiUrl, token: headers.authorization.replace("Bearer ", "") },
   );
   await page.goto("/#settings");
+
+  const updateDiagnostics = page.getByTestId("update-diagnostics");
+  await expect(updateDiagnostics).toContainText("自动更新");
+  await expect(updateDiagnostics).toContainText("package checksum mismatch");
+  await expect(updateDiagnostics).toContainText("更新包校验失败");
+  await updateDiagnostics.getByRole("button", { name: "立即检查" }).click();
+  await expect(updateDiagnostics).toContainText("正在检查本地更新");
+  await updateDiagnostics.screenshot({
+    path: resolve("output", "playwright", "e2e-update-diagnostics-dark.png"),
+  });
 
   const codex = page.locator(".atm-integration-card").filter({ hasText: "Codex" });
   await expect(codex).toContainText("MCP");

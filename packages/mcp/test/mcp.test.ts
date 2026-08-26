@@ -6,6 +6,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { createAyanamiMcpServer } from "../src/index.js";
+import {
+  assertMcpSchemaBudget,
+  MCP_SCHEMA_LIMIT_BYTES,
+  MCP_SCHEMA_RESERVE_BYTES,
+} from "../src/schema-budget.js";
 
 const roots: string[] = [];
 
@@ -47,10 +52,26 @@ describe("Ayanami MCP", () => {
       "atm_end",
     ]);
     expect(listed.tools.every((tool) => tool.outputSchema)).toBe(true);
-    // 预算是 docs/release-checklist.md 写的 8 KB，即 8192 字节；此处原本钉的是更严的
-    // 8_000，第 12 个工具 atm_checklist（471 字节）放不下。对齐到文档说的那个数，
-    // 而不是改字段名去凑——但要清楚：这确实吃掉了原先 192 字节的余量。
-    expect(JSON.stringify(listed.tools).length).toBeLessThanOrEqual(8_192);
+    const schemaBudget = assertMcpSchemaBudget(listed.tools);
+    expect(schemaBudget).toEqual({
+      bytes: expect.any(Number),
+      limitBytes: MCP_SCHEMA_LIMIT_BYTES,
+      reserveBytes: MCP_SCHEMA_RESERVE_BYTES,
+      usableBytes: MCP_SCHEMA_LIMIT_BYTES - MCP_SCHEMA_RESERVE_BYTES,
+    });
+    // 阳性对照：守卫必须真的会在吃掉预留余量时变红，不能只量一个永远通过的数字。
+    expect(() =>
+      assertMcpSchemaBudget([
+        ...listed.tools,
+        { name: "oversized", inputSchema: { type: "object", padding: "x".repeat(800) } },
+      ]),
+    ).toThrow(/MCP_SCHEMA_BUDGET_EXCEEDED/u);
+    const beginSchema = listed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(beginSchema.required).toEqual(["agent_id"]);
+    expect(beginSchema.properties?.mode).toEqual({ enum: ["auto", "quick", "project"] });
     expect(listed.tools.find((tool) => tool.name === "atm_begin")?.description).toContain(
       "直接使用返回的 brief",
     );

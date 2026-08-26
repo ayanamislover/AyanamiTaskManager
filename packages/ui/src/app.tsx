@@ -72,6 +72,15 @@ type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
 type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type UpdateStatus = {
+  phase: "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
+  outcome: "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
+  code: string;
+  message: string;
+  action: string;
+  at: string;
+  version: string | null;
+};
 type AgentIntegrationReport = {
   client: McpClient;
   mcpInstalled: boolean;
@@ -87,6 +96,8 @@ type DesktopBridge = {
   runtime?: { endpoint: string; token: string };
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
   getAutoLaunch?: () => Promise<boolean>;
+  getUpdateStatus?: () => Promise<UpdateStatus | null>;
+  checkForUpdates?: () => Promise<UpdateStatus | null>;
   showItemInFolder?: (path: string) => Promise<void>;
   getMcpConfigs?: () => Promise<{
     streamableHttp: string;
@@ -1767,6 +1778,12 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
     queryFn: () => desktop!.getAgentIntegrations!(),
     enabled: Boolean(desktop?.getAgentIntegrations),
   });
+  const updateStatus = useQuery({
+    queryKey: ["desktop-update-status"],
+    queryFn: () => desktop!.getUpdateStatus!(),
+    enabled: Boolean(desktop?.getUpdateStatus),
+    refetchInterval: 30_000,
+  });
   const [autoLaunch, setAutoLaunch] = useState<boolean | null>(null);
   const [dailyEnabled, setDailyEnabled] = useState(true);
   const [dailyKeep, setDailyKeep] = useState(7);
@@ -1843,6 +1860,13 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
           variables.action === "UNINSTALL" ? "卸载" : "更新"
         }`,
       );
+    },
+  });
+  const checkUpdate = useMutation({
+    mutationFn: () => desktop!.checkForUpdates!(),
+    onSuccess: (status) => {
+      queryClient.setQueryData(["desktop-update-status"], status);
+      setFeedback(status?.message ?? "更新检查已启动");
     },
   });
   const copy = async (text: string, label: string) => {
@@ -2156,6 +2180,56 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                 >
                   {autoLaunch ? "已开启" : "已关闭"}
                 </button>
+              </div>
+            ) : null}
+            {desktop?.getUpdateStatus ? (
+              <div className="atm-row" data-testid="update-diagnostics">
+                <div>
+                  <div className="atm-row-title">自动更新</div>
+                  <div className="atm-row-sub">
+                    {updateStatus.isLoading
+                      ? "正在读取最近结果…"
+                      : updateStatus.data
+                        ? `${updateStatus.data.message} · ${formatTime(updateStatus.data.at)}${
+                            updateStatus.data.outcome === "ERROR"
+                              ? `；${updateStatus.data.action}`
+                              : ""
+                          }`
+                        : "尚无更新检查记录"}
+                  </div>
+                </div>
+                <div className="atm-actions">
+                  {updateStatus.data ? (
+                    <span
+                      className={`atm-badge ${
+                        updateStatus.data.outcome === "ERROR"
+                          ? "danger"
+                          : updateStatus.data.outcome === "SUCCESS"
+                            ? "success"
+                            : updateStatus.data.outcome === "IN_PROGRESS"
+                              ? "primary"
+                              : ""
+                      }`}
+                    >
+                      {updateStatus.data.outcome === "ERROR"
+                        ? "失败"
+                        : updateStatus.data.outcome === "SUCCESS"
+                          ? "已完成"
+                          : updateStatus.data.outcome === "IN_PROGRESS"
+                            ? "检查中"
+                            : "无更新"}
+                    </span>
+                  ) : null}
+                  {desktop.checkForUpdates ? (
+                    <button
+                      className="atm-button"
+                      disabled={checkUpdate.isPending}
+                      onClick={() => checkUpdate.mutate()}
+                    >
+                      立即检查
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
             <button

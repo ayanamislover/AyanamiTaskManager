@@ -10,11 +10,22 @@ import brandLogoUrl from "../../../logo.png?url";
 import "./window-chrome.css";
 
 type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type UpdateStatus = {
+  phase: "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
+  outcome: "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
+  code: string;
+  message: string;
+  action: string;
+  at: string;
+  version: string | null;
+};
 
 type DesktopBridge = {
   runtime: { endpoint: string; token: string };
   setAutoLaunch(enabled: boolean): Promise<boolean>;
   getAutoLaunch(): Promise<boolean>;
+  getUpdateStatus(): Promise<UpdateStatus | null>;
+  checkForUpdates(): Promise<UpdateStatus | null>;
   showItemInFolder(path: string): Promise<void>;
   getMcpConfigs(): Promise<{
     streamableHttp: string;

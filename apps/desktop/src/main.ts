@@ -53,7 +53,14 @@ import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
 import { buildAyanamiServer } from "@ayanami-task/daemon";
 import { handleSquirrelStartup } from "./squirrel.js";
-import { updateFeedDir, updateFeedReady } from "./updater.js";
+import {
+  classifyUpdateFailure,
+  createUpdateDiagnostics,
+  updateFeedDir,
+  updateFeedReady,
+  type UpdatePhase,
+  type UpdateStatus,
+} from "./updater.js";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
 import {
@@ -71,7 +78,14 @@ import {
   type NotificationMode,
 } from "./notification-policy.js";
 import { createWindowOptions } from "./window-options.js";
-import { randomStartupDelayMs, shouldDelayStartup, waitForStartupDelay } from "./startup.js";
+import {
+  LOGIN_ITEM_ARGS,
+  loginItemExecutable,
+  randomStartupDelayMs,
+  shouldDelayStartup,
+  shouldStartInBackground,
+  waitForStartupDelay,
+} from "./startup.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 
@@ -89,12 +103,13 @@ let unsubscribeGlobal: (() => void) | null = null;
 const unsubscribeProjects = new Map<string, () => void>();
 const projectSequences = new Map<string, number>();
 const notificationDedup = new Map<string, number>();
-const loginItemArgs = ["--background", "--random-startup-delay"];
 
 function dataDirBeforeReady(): string {
   if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
   return join(process.env.LOCALAPPDATA ?? process.cwd(), "AyanamiTaskManager");
 }
+
+const updateDiagnostics = createUpdateDiagnostics(dataDirBeforeReady());
 
 function readRuntime(): Runtime {
   const path = join(dataDirBeforeReady(), "runtime", "daemon.json");
@@ -281,14 +296,17 @@ function notificationMode(): NotificationMode {
 }
 
 function autoLaunchEnabled(): boolean {
-  return app.getLoginItemSettings({ path: process.execPath, args: loginItemArgs }).openAtLogin;
+  return app.getLoginItemSettings({
+    path: loginItemExecutable(dataDirBeforeReady()),
+    args: [...LOGIN_ITEM_ARGS],
+  }).openAtLogin;
 }
 
 function setAutoLaunch(enabled: boolean): boolean {
   app.setLoginItemSettings({
     openAtLogin: enabled,
-    path: process.execPath,
-    args: loginItemArgs,
+    path: loginItemExecutable(dataDirBeforeReady()),
+    args: [...LOGIN_ITEM_ARGS],
   });
   return autoLaunchEnabled();
 }
@@ -493,6 +511,8 @@ async function startApplication(background: boolean): Promise<void> {
         original,
         toggled,
         restored,
+        path: loginItemExecutable(dataDir),
+        args: [...LOGIN_ITEM_ARGS],
         passed: toggled === !original && restored === original,
       }),
       "utf8",
@@ -504,6 +524,8 @@ async function startApplication(background: boolean): Promise<void> {
   });
   ipcMain.handle("atm:get-auto-launch", autoLaunchEnabled);
   ipcMain.handle("atm:set-auto-launch", (_event, enabled: boolean) => setAutoLaunch(enabled));
+  ipcMain.handle("atm:get-update-status", () => updateDiagnostics.read());
+  ipcMain.handle("atm:check-for-updates", () => checkForUpdates());
   ipcMain.handle("atm:window-minimize", () => {
     mainWindow?.minimize();
   });
@@ -613,13 +635,28 @@ async function startApplication(background: boolean): Promise<void> {
 
 let updateFeedConfigured = false;
 let updateDownloaded: string | null = null;
+let updatePhase: UpdatePhase = "CHECK";
 
-function checkForUpdates(): void {
+function checkForUpdates(): UpdateStatus | null {
   // 开发态没有 Update.exe，autoUpdater 一碰就抛。
-  if (!app.isPackaged) return;
+  if (!app.isPackaged) return updateDiagnostics.read();
   const dataDir = dataDirBeforeReady();
   // 还没发过任何更新是完全正常的状态，不该在用户面前变成一条报错。
-  if (!updateFeedReady(dataDir)) return;
+  if (!updateFeedReady(dataDir)) {
+    return updateDiagnostics.record({
+      phase: "CHECK",
+      outcome: "SKIPPED",
+      code: "UPDATE_SOURCE_MISSING",
+      detail: "当前没有待安装的本地更新",
+    });
+  }
+  updatePhase = "CHECK";
+  const checking = updateDiagnostics.record({
+    phase: "CHECK",
+    outcome: "IN_PROGRESS",
+    code: "CHECKING",
+    detail: "正在检查本地更新",
+  });
   try {
     if (!updateFeedConfigured) {
       autoUpdater.setFeedURL({ url: updateFeedDir(dataDir) });
@@ -627,22 +664,66 @@ function checkForUpdates(): void {
     }
     autoUpdater.checkForUpdates();
   } catch (error) {
-    smokeTrace("update.check-failed", error instanceof Error ? error.message : String(error));
+    const detail = error instanceof Error ? error.message : String(error);
+    const failure = classifyUpdateFailure(detail, updatePhase);
+    const status = updateDiagnostics.record({
+      ...failure,
+      outcome: "ERROR",
+      detail,
+    });
+    smokeTrace("update.check-failed", status);
+    return status;
   }
+  return checking;
 }
 
 function startAutoUpdate(): void {
   if (!app.isPackaged) return;
+  autoUpdater.on("checking-for-update", () => {
+    updatePhase = "CHECK";
+  });
+  autoUpdater.on("update-available", () => {
+    updatePhase = "DOWNLOAD";
+    updateDiagnostics.record({
+      phase: "DOWNLOAD",
+      outcome: "IN_PROGRESS",
+      code: "UPDATE_AVAILABLE",
+      detail: "已发现新版本，正在下载并校验",
+    });
+  });
+  autoUpdater.on("update-not-available", () => {
+    updatePhase = "READY";
+    updateDiagnostics.record({
+      phase: "READY",
+      outcome: "SUCCESS",
+      code: "UP_TO_DATE",
+      detail: "当前已是最新版本",
+    });
+  });
   autoUpdater.on("error", (error: Error) => {
     // 更新失败不能影响正在用的应用：记一笔，继续跑当前版本。
-    smokeTrace("update.error", error.message);
+    const failure = classifyUpdateFailure(error, updatePhase);
+    const status = updateDiagnostics.record({
+      ...failure,
+      outcome: "ERROR",
+      detail: error,
+    });
+    smokeTrace("update.error", status);
   });
   autoUpdater.on("update-downloaded", (_event, _notes, releaseName: string) => {
     // Squirrel 已经把新版本铺到 app-<version> 目录；启动壳始终拉最新的那个，
     // 所以不需要 quitAndInstall——下次重启自然就是新版。这里只负责告知，
     // 不打断用户手上的事。
     updateDownloaded = releaseName;
-    smokeTrace("update.downloaded", releaseName);
+    updatePhase = "READY";
+    const status = updateDiagnostics.record({
+      phase: "READY",
+      outcome: "SUCCESS",
+      code: "UPDATE_READY",
+      detail: `${releaseName} 已就绪，下次启动生效`,
+      version: releaseName,
+    });
+    smokeTrace("update.downloaded", status);
     tray?.setContextMenu(trayMenu());
     if (notificationMode() === "OFF" || !ElectronNotification.isSupported()) return;
     new ElectronNotification({
@@ -659,7 +740,16 @@ function startAutoUpdate(): void {
 async function bootstrap(): Promise<void> {
   // Squirrel 生命周期调用必须最先处理：不取单实例锁、不开窗口、不起服务，
   // 做完该做的立刻退出，否则安装过程会挂在这里等到超时。
-  if (handleSquirrelStartup(process.argv, process.execPath)) {
+  if (
+    handleSquirrelStartup(process.argv, process.execPath, undefined, (detail) => {
+      updateDiagnostics.record({
+        phase: "INSTALL",
+        outcome: "ERROR",
+        code: "INSTALL_FAILED",
+        detail,
+      });
+    })
+  ) {
     app.quit();
     return;
   }
@@ -690,7 +780,7 @@ async function bootstrap(): Promise<void> {
   if (shouldDelayStartup(args, process.env.ATM_PACKAGED_SMOKE === "1")) {
     await waitForStartupDelay(randomStartupDelayMs(), startupDelayController.signal);
   }
-  await startApplication(args.includes("--background") && !foregroundRequested);
+  await startApplication(shouldStartInBackground(args, foregroundRequested));
   app.on("activate", () => {
     if (!mainWindow) createWindow(true);
     else showWindow();

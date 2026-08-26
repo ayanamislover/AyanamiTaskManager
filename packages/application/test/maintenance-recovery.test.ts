@@ -10,6 +10,50 @@ afterEach(() => {
 });
 
 describe("自动维护与崩溃恢复", () => {
+  it("按默认 5 分钟边界关闭空闲项目数据库", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-lru-policy-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "LRU 策略", sourcePath: null, code: "LRU" });
+      const openedBefore = Date.now();
+      await service.databases.openProject("LRU");
+      const openedAfter = Date.now();
+      expect(service.databases.closeIdleProjects(undefined, openedBefore + 5 * 60_000 - 1)).toBe(0);
+      expect(service.databases.closeIdleProjects(undefined, openedAfter + 5 * 60_000)).toBe(1);
+    } finally {
+      service.close();
+    }
+  });
+
+  it("归档、PRE_TRASH 备份、垃圾箱与恢复形成完整可逆链路", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-project-lifecycle-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "生命周期", sourcePath: null, code: "LIFE" });
+      await service.archiveProject("LIFE");
+      expect(service.databases.getProject("LIFE").lifecycle).toBe("ARCHIVED");
+      expect(service.listBackups("LIFE").map((backup) => backup.reason)).toContain("PRE_ARCHIVE");
+
+      await service.trashProject("LIFE");
+      expect(service.databases.getProject("LIFE").lifecycle).toBe("TRASHED");
+      expect(service.listBackups("LIFE").map((backup) => backup.reason)).toContain("PRE_TRASH");
+
+      service.restoreProject("LIFE");
+      expect(service.databases.getProject("LIFE").lifecycle).toBe("ACTIVE");
+      expect((await service.databases.openProject("LIFE")).schemaVersion).toBe(5);
+    } finally {
+      service.close();
+    }
+  });
+
   it("每日维护幂等备份 Registry 和活动项目，关闭策略后不写入", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-maintenance-"));
     temporary.push(dataDir);

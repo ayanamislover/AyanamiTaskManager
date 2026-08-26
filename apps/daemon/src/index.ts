@@ -112,6 +112,8 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       version: "1.0.13",
       sqlite: doctor.registry,
       projectCount: doctor.projects.length,
+      projectCounts: doctor.projectCounts,
+      projectFailures: doctor.projects.filter((project) => !project.ok),
       at: new Date().toISOString(),
     };
   });

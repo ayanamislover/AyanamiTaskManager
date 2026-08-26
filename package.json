@@ -26,7 +26,7 @@
     "start": "electron .",
     "atm": "tsx packages/cli/src/bin.ts",
     "doctor": "tsx packages/cli/src/bin.ts doctor",
-    "package": "pnpm build && electron-forge package",
+    "package": "pnpm build && tsx scripts/forge-package.ts",
     "make": "pnpm build && tsx scripts/forge-make.ts",
     "release": "tsx scripts/release.ts",
     "smoke:packaged": "tsx scripts/packaged-smoke.ts",

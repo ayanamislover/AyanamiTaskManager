@@ -1,10 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { basename, dirname, resolve } from "node:path";
 
-export type UpdateRunner = (updateExe: string, args: string[]) => void;
+export type UpdateRunnerResult = { ok: boolean; detail?: string };
+export type UpdateRunner = (updateExe: string, args: string[]) => UpdateRunnerResult | void;
 
 const defaultRunner: UpdateRunner = (updateExe, args) => {
-  spawnSync(updateExe, args, { windowsHide: true });
+  const result = spawnSync(updateExe, args, { windowsHide: true });
+  if (result.error) return { ok: false, detail: result.error.message };
+  if (result.status !== 0)
+    return { ok: false, detail: `Update.exe exit ${result.status ?? "unknown"}` };
+  return { ok: true };
 };
 
 /**
@@ -29,6 +34,7 @@ export function handleSquirrelStartup(
   argv: string[],
   execPath: string,
   run: UpdateRunner = defaultRunner,
+  onFailure?: (detail: string) => void,
 ): boolean {
   const event = argv[1];
   if (!event || !LIFECYCLE_EVENTS.has(event)) return false;
@@ -36,9 +42,11 @@ export function handleSquirrelStartup(
   const updateExe = resolve(dirname(execPath), "..", "Update.exe");
   const target = basename(execPath);
   if (event === "--squirrel-install" || event === "--squirrel-updated") {
-    run(updateExe, ["--createShortcut", target]);
+    const result = run(updateExe, ["--createShortcut", target]);
+    if (result && !result.ok) onFailure?.(result.detail ?? "Update.exe failed");
   } else if (event === "--squirrel-uninstall") {
-    run(updateExe, ["--removeShortcut", target]);
+    const result = run(updateExe, ["--removeShortcut", target]);
+    if (result && !result.ok) onFailure?.(result.detail ?? "Update.exe failed");
   }
   // --squirrel-obsolete 只需要安静退出。
   return true;

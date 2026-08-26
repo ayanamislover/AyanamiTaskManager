@@ -12,6 +12,44 @@ afterEach(() => {
 });
 
 describe("REST 边界", () => {
+  it("doctor 状态按生命周期报告所有项目库计数和失败", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-doctor-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const active = await service.createProject({ name: "活动项目", sourcePath: null });
+    const archived = await service.createProject({ name: "归档项目", sourcePath: null });
+    const trashed = await service.createProject({ name: "垃圾箱项目", sourcePath: null });
+    await service.archiveProject(archived.code);
+    await service.trashProject(trashed.code);
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    try {
+      const status = await app.inject({
+        method: "GET",
+        url: "/api/v1/system/status",
+        headers: { authorization: "Bearer local-secret" },
+      });
+
+      expect(status.statusCode).toBe(200);
+      expect(status.json()).toMatchObject({
+        ok: true,
+        projectCount: 3,
+        projectCounts: {
+          ACTIVE: { total: 1, failed: 0 },
+          ARCHIVED: { total: 1, failed: 0 },
+          TRASHED: { total: 1, failed: 0 },
+        },
+        projectFailures: [],
+      });
+      expect(active.lifecycle).toBe("ACTIVE");
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
   it("按 operationId 原子恢复同一 Session，并拒绝身份漂移", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-api-session-begin-"));
     temporary.push(dataDir);

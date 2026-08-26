@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   runtime,
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke("atm:set-auto-launch", enabled),
   getAutoLaunch: () => ipcRenderer.invoke("atm:get-auto-launch"),
+  getUpdateStatus: () => ipcRenderer.invoke("atm:get-update-status"),
+  checkForUpdates: () => ipcRenderer.invoke("atm:check-for-updates"),
   showItemInFolder: (path: string) => ipcRenderer.invoke("atm:show-item", path),
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
   installMcp: (client: McpClient) => ipcRenderer.invoke("atm:install-mcp", client),
