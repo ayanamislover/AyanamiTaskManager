@@ -11,12 +11,27 @@ import {
   AyanamiDatabaseManager,
   ProjectRepository,
   type CreateSessionInput,
+  type MutationActorResolution,
   type ProjectActor,
   type RegisteredProject,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
 
 export * from "./agenttask-import.js";
+
+function mutationAck<T extends Record<string, unknown>>(
+  result: T,
+  opId: string,
+  resolution: MutationActorResolution,
+) {
+  return {
+    ...result,
+    opId,
+    ...(resolution.disposition === "REBOUND"
+      ? { sessionRebound: true, session: resolution.actor.sessionId }
+      : {}),
+  };
+}
 
 export class AyanamiTaskService {
   readonly databases: AyanamiDatabaseManager;
@@ -732,15 +747,12 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
-  ): Promise<ReturnType<ProjectRepository["createWorkItems"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
-    const result = repository.createWorkItems(
-      await this.#actor(projectCode, sessionId),
-      opId,
-      items,
-    );
+    const resolution = repository.resolveMutationActor(sessionId, opId, "work.create.batch", items);
+    const result = repository.createWorkItems(resolution.actor, opId, items);
     await this.#flush(projectCode);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async createWorkItemsAsUser(
@@ -759,15 +771,17 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
-  ): Promise<ReturnType<ProjectRepository["patchWorkItems"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
-    const result = repository.patchWorkItems(
-      await this.#actor(projectCode, sessionId),
+    const resolution = repository.resolveMutationActor(
+      sessionId,
       opId,
+      "work.patch.batch",
       patches,
     );
+    const result = repository.patchWorkItems(resolution.actor, opId, patches);
     if (patches.some((patch) => ["verify", "complete"].includes(String(patch.operation)))) {
-      await this.#refreshSessionGitContext(projectCode, sessionId);
+      await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
     }
     await this.#flush(projectCode);
     const starts = patches
@@ -778,7 +792,7 @@ export class AyanamiTaskService {
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async patchWorkItemsAsUser(
@@ -820,15 +834,12 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
-  ): Promise<ReturnType<ProjectRepository["updateChecklist"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
-    const result = repository.updateChecklist(
-      await this.#actor(projectCode, sessionId),
-      opId,
-      input,
-    );
+    const resolution = repository.resolveMutationActor(sessionId, opId, "checklist.update", input);
+    const result = repository.updateChecklist(resolution.actor, opId, input);
     await this.#flush(projectCode);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async updateChecklistAsUser(
@@ -847,12 +858,13 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     input: Parameters<ProjectRepository["addProgress"]>[2],
-  ): Promise<ReturnType<ProjectRepository["addProgress"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
-    const result = repository.addProgress(await this.#actor(projectCode, sessionId), opId, input);
-    await this.#refreshSessionGitContext(projectCode, sessionId);
+    const resolution = repository.resolveMutationActor(sessionId, opId, "work.progress", input);
+    const result = repository.addProgress(resolution.actor, opId, input);
+    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
     await this.#flush(projectCode);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async addProjectProgress(
@@ -875,18 +887,21 @@ export class AyanamiTaskService {
       ),
     );
     for (const taskKey of linkedKeys) repository.getWorkItem(taskKey);
-    const result = repository.publishProjectUpdate(
-      await this.#actor(projectCode, sessionId),
+    const update = {
+      health: input.health ?? (input.blocker ? "AT_RISK" : "UNKNOWN"),
+      summary: input.summary,
+      completed,
+      risks: input.blocker ? [input.blocker] : [],
+      next: input.next ?? [],
+    };
+    const resolution = repository.resolveMutationActor(
+      sessionId,
       opId,
-      {
-        health: input.health ?? (input.blocker ? "AT_RISK" : "UNKNOWN"),
-        summary: input.summary,
-        completed: completed.map((entry) => (typeof entry === "string" ? entry : entry.text)),
-        risks: input.blocker ? [input.blocker] : [],
-        next: input.next ?? [],
-      },
+      "project-update.publish",
+      update,
     );
-    await this.#refreshSessionGitContext(projectCode, sessionId);
+    const result = repository.publishProjectUpdate(resolution.actor, opId, update);
+    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
     await this.#flush(projectCode);
     const openWorkItems = repository
       .listWorkItems({ limit: 500 })
@@ -894,8 +909,7 @@ export class AyanamiTaskService {
       .slice(0, 20)
       .map((item) => item.key);
     return {
-      ...result,
-      opId,
+      ...mutationAck(result, opId, resolution),
       unlinked:
         completed.length > 0 &&
         completed.some((entry) => typeof entry === "string" || !entry.workItemKey),
@@ -908,11 +922,12 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     input: Parameters<ProjectRepository["createRecord"]>[2],
-  ): Promise<ReturnType<ProjectRepository["createRecord"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
-    const result = repository.createRecord(await this.#actor(projectCode, sessionId), opId, input);
+    const resolution = repository.resolveMutationActor(sessionId, opId, "record.create", input);
+    const result = repository.createRecord(resolution.actor, opId, input);
     await this.#flush(projectCode);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async createRecordAsUser(
@@ -947,22 +962,30 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).delta(sinceSequence, limit, types);
   }
 
+  async getOperationTrace(projectCode: string, opId: string, sessionId?: string | null) {
+    return (await this.#repository(projectCode)).getOperationTrace(opId, sessionId);
+  }
+
   async end(
     projectCode: string,
     sessionId: string,
     opId: string,
     input: Parameters<ProjectRepository["endSession"]>[2],
-  ): Promise<ReturnType<ProjectRepository["endSession"]>> {
+  ) {
     const repository = await this.#repository(projectCode);
+    const resolution = repository.resolveMutationActor(sessionId, opId, "session.end", input);
+    const effectiveSessionId = String(resolution.actor.sessionId);
     const claimedTaskKeys = repository
       .listWorkItems({ limit: 500 })
-      .filter((task) => task.claimedBySessionId === sessionId)
+      .filter((task) => task.claimedBySessionId === effectiveSessionId)
       .map((task) => task.key);
-    await this.#refreshSessionGitContext(projectCode, sessionId);
-    const result = repository.endSession(await this.#actor(projectCode, sessionId), opId, input);
+    if (resolution.disposition !== "REPLAY") {
+      await this.#refreshSessionGitContext(projectCode, effectiveSessionId);
+    }
+    const result = repository.endSession(resolution.actor, opId, input);
     await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(projectCode, claimedTaskKeys, false);
-    return result;
+    return mutationAck(result, opId, resolution);
   }
 
   async forceCloseSessionAsUser(projectCode: string, sessionId: string, releaseClaims = true) {
