@@ -74,6 +74,12 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - 阻塞必须填写原因；等待用户和等待 Agent 必须写清所需条件。
 - mutation 返回短 ACK；需要新状态时再用 `atm_delta` 或单任务读取。
 
+### MCP 与 REST 字段名
+
+MCP 工具参数统一使用 `snake_case`，例如 `project_code`、`session_id`、`op_id`、`task_key`、`expected_version`、`field_mask`。REST JSON 统一使用 `camelCase`，对应为 `projectCode`、`sessionId`、`opId`、`taskKey`、`expectedVersion`、`fieldMask`。两套入口语义相同但不会混收命名；从 MCP 示例切到 REST 时必须按此规则转换，不能把一次参数拒绝当作端点不存在。
+
+错误响应中的 `path` 始终沿用当前入口的公开字段名，批量条目会包含数组下标；调用方应一次修复 `issues` 中列出的全部字段后再重试。
+
 ## 恢复与交接
 
 计划换代时，前任 Session 用 `atm_end(outcome="retired")`，填写 `retirement_reason`、摘要和下一步。ATM 会为尚未完成且已领取的任务生成 handoff。后继用相同 `agent_id` 调用 `atm_begin(resume=true, predecessor_session_id=...)`，确认 handoff 后重新领取或继续任务。
