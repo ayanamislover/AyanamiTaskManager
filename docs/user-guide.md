@@ -2,7 +2,7 @@
 
 ## 安装与首次启动
 
-运行 `AyanamiTaskManager-Setup-1.0.13-win-x64.exe` 完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。应用在本机启动内置服务，不需要云端账号。
+运行 `AyanamiTaskManager-Setup-1.0.14-win-x64.exe` 完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。应用在本机启动内置服务，不需要云端账号。
 
 正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。portable 包默认仍使用正式数据目录；如需完全隔离，启动前设置 `AYANAMI_TASK_DATA_DIR`。
 
