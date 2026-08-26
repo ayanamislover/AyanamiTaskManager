@@ -6,34 +6,34 @@
 
 ## 代码与数据门禁
 
-- [ ] `pnpm lint`
-- [ ] `pnpm typecheck`
-- [ ] `pnpm test`
-- [ ] `pnpm build`
-- [ ] `pnpm test:e2e`
-- [ ] `pnpm benchmark`
-- [ ] 项目迁移从空库和 v1/v2 数据库均通过
-- [ ] Registry 与项目库 `quick_check` 通过
-- [ ] 12 个 MCP schema 的 UTF-8 序列化体积不超过 8 KB，并预留 512 bytes
+- [x] `pnpm lint`
+- [x] `pnpm typecheck`
+- [x] `pnpm test`
+- [x] `pnpm build`
+- [x] `pnpm test:e2e`
+- [x] `pnpm benchmark`
+- [x] 项目迁移从空库和 v1/v2 数据库均通过
+- [x] Registry 与项目库 `quick_check` 通过
+- [x] 12 个 MCP schema 的 UTF-8 序列化体积不超过 8 KB，并预留 512 bytes
 
 ## 桌面与可访问性
 
-- [ ] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
-- [ ] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
-- [ ] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
-- [ ] 归档→PRE_TRASH→垃圾箱→恢复通过
-- [ ] 工程统计项目级和 WorkItem 级展示通过
-- [ ] 托盘、二次启动唤起、自启动开关与五类通知通过
+- [x] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
+- [x] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
+- [x] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
+- [x] 归档→PRE_TRASH→垃圾箱→恢复通过
+- [x] 工程统计项目级和 WorkItem 级展示通过
+- [x] 托盘、二次启动唤起、自启动开关与五类通知通过
 
 ## 可靠性与性能
 
-- [ ] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
-- [ ] 100 项目总览 p95 ≤200 ms
-- [ ] 10,000 任务筛选 p95 ≤200 ms
-- [ ] 写入+事件 p95 ≤100 ms
-- [ ] 50,000 中文文档搜索 p95 ≤300 ms
-- [ ] 服务 RSS ≤150 MB
-- [ ] 空闲项目数据库 5 分钟 LRU 关闭
+- [x] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
+- [x] 100 项目总览 p95 ≤200 ms
+- [x] 10,000 任务筛选 p95 ≤200 ms
+- [x] 写入+事件 p95 ≤100 ms
+- [x] 50,000 中文文档搜索 p95 ≤300 ms
+- [x] 服务 RSS ≤150 MB
+- [x] 空闲项目数据库 5 分钟 LRU 关闭
 
 ## 构建与安装
 
@@ -62,12 +62,12 @@ pnpm smoke:packaged
 pnpm exec tsx scripts/assemble-release.ts
 ```
 
-- [ ] Squirrel Setup EXE 可安装到当前用户
-- [ ] 安装版可首次启动、退出、重启并保留数据
-- [ ] 卸载不误删用户项目数据
-- [ ] portable ZIP 解压后可启动
-- [ ] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
-- [ ] `docs/portable-usage.md` 随包存在
+- [x] Squirrel Setup EXE 可安装到当前用户
+- [x] 安装版可首次启动、退出、重启并保留数据
+- [x] 卸载不误删用户项目数据
+- [x] portable ZIP 解压后可启动
+- [x] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
+- [x] `docs/portable-usage.md` 随包存在
 
 `distribution-smoke` 要求机器上没有同名安装、没有运行中的同名进程、没有卸载注册项、没有产品快捷方式。注意 **MCP stdio 桥接进程用的是同一个 `AyanamiTaskManager.exe` 镜像名**：只要还有 Claude 会话连着 ATM，`appProcessIsRunning()` 就成立，验收会停在“没有运行中的应用进程”，而且这些桥还占着安装目录里的 exe 句柄，Squirrel 卸载只能留下 `.dead` 标记。发布前先断开所有连着 ATM 的会话。
 
@@ -91,7 +91,7 @@ release/
 ## test-report 最小内容
 
 - 单元/集成/E2E 总结与退出码；
-- packaged smoke 的 11 项结果；
+- packaged smoke 的 19 项结果；
 - benchmark 原始阈值与实测；
 - 1366/1920/3440 截图；
 - installer 与 portable 启动证据；
@@ -99,10 +99,10 @@ release/
 
 ## 签发
 
-- [ ] 从干净的构建输入运行最终命令（不删除用户工作树变更）
-- [ ] 逐项复核哈希和产物可打开
-- [ ] README、用户指南、Agent 接入、备份恢复和排障文档已同步
-- [ ] 发布结论只引用 `release/test-report` 中可复核证据
+- [x] 从干净的构建输入运行最终命令（不删除用户工作树变更）
+- [x] 逐项复核哈希和产物可打开
+- [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
+- [x] 发布结论只引用 `release/test-report` 中可复核证据
 
 ## 1.0.15 非阻塞剩余项
 
@@ -116,4 +116,23 @@ release/
 
 ## 1.0.15 验收结果
 
-本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。
+2026-08-26 已从干净提交 `0257f09307dc245a637903f6f155a638c68a8510` 完成十阶段、
+静默安装和运行实例验收。`release/test-report/summary.json` 结论为通过，且
+`knownNonBlockingItems` 为空：
+
+- 单元/集成测试 222 项、E2E 13 项全部通过；
+- packaged、portable、installed、distribution smoke 均为 19 项通过；
+- 冷启动 578.316 ms，100 项目总览 p95 1.749 ms，10,000 任务筛选 p95 7.696 ms；
+- 写入与事件 p95 35.749 ms，100 事件增量 p95 19.955 ms，50,000 中文文档搜索
+  p95 0.281 ms，服务 RSS 122.55 MB；
+- 安装后运行实例自报 1.0.15，Registry/项目库检查 14 个项目、0 个失败；
+- `%LOCALAPPDATA%\AyanamiTaskManager\current` 指向 `app-1.0.15`，通过该稳定入口实测
+  12 个 MCP 工具，并完成 `atm_begin → atm_task_get → atm_end`；
+- 后台启动保持隐藏、二次启动唤回窗口、关闭窗口缩入托盘均通过；登录启动项使用
+  `current\AyanamiTaskManager.exe --background --random-startup-delay`。
+
+Setup SHA-256 为
+`3D7D3D96D1EC5DE0CEF2AB5C6B6C7E664D3D2C08C5BBA004353C64CE7EC7F7CB`，portable ZIP
+SHA-256 为
+`F69A03DB3A5F02A36DA9789A2E940F2A9F4BD0B704FB8E1F344E2D2BEE0617BC`；其余签发哈希见
+`release/SHA256SUMS.txt`。
