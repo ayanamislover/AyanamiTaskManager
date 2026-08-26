@@ -8,6 +8,7 @@ import {
   legalWorkItemOperations,
   normalizeReviewCandidateHashes,
   nowIso,
+  RecordSummarySchema,
   type WorkItemPhase,
   type WorkItemStatus,
   type WorkItemWaitingOn,
@@ -3211,7 +3212,7 @@ export class ProjectRepository {
       operation: "record.create",
       request: normalizedInput,
       action: () => {
-        if (normalizedInput.summary.length > 300)
+        if (!RecordSummarySchema.safeParse(normalizedInput.summary).success)
           throw new Error("VALIDATION_ERROR: summary max 300");
         const id = createUlid();
         const localNo = this.nextNumber("record");
