@@ -8,6 +8,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
+import { EvidenceInputSchema } from "@ayanami-task/protocol";
 
 const outputSchema = z.object({}).catchall(z.unknown());
 const projectCode = z.string().trim().min(1).max(20);
@@ -56,6 +57,18 @@ function compactJsonSchema(value: unknown): unknown {
     source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
       ? (source.properties as Record<string, unknown>)
       : null;
+  // `signals` are optional begin-time scheduling hints, not a public contract agents need to
+  // construct field-by-field. Keep the object type visible while leaving the detailed runtime
+  // validation to Zod so higher-value evidence schemas fit inside the fixed tools/list budget.
+  if (
+    source.type === "object" &&
+    properties &&
+    ["expected_minutes", "subtask_count", "multi_session", "multi_agent"].every((key) =>
+      Object.hasOwn(properties, key),
+    )
+  ) {
+    return { type: "object" };
+  }
   const defaulted = new Set(
     properties
       ? Object.entries(properties)
@@ -199,6 +212,18 @@ function wrap(structuredContent: Record<string, unknown>) {
 
 function result(value: unknown, maxChars = 4000) {
   return wrap(bounded(value, maxChars));
+}
+
+function mutationAck(opId: string, serviceResult: Record<string, unknown>) {
+  return {
+    op_id: opId,
+    ...(serviceResult.sessionRebound === true
+      ? {
+          session_rebound: true,
+          ...(typeof serviceResult.session === "string" ? { session: serviceResult.session } : {}),
+        }
+      : {}),
+  };
 }
 
 type FieldCursor = { v: 1; path: Array<string | number>; offset: number };
@@ -471,11 +496,16 @@ function fitBegin(
   mode: BeginBriefMode,
   maxChars: number,
 ): Record<string, unknown> {
+  const atomicOperationId =
+    payload.atomicBegin && typeof payload.atomicBegin === "object"
+      ? (payload.atomicBegin as Record<string, unknown>).operationId
+      : undefined;
   const identity: Record<string, unknown> = {
     scope: payload.scope,
     session: payload.session,
     project: payload.project,
     surface_version: MCP_SURFACE_VERSION,
+    ...(typeof atomicOperationId === "string" ? { op_id: atomicOperationId } : {}),
     ...(payload.atomicBegin === undefined ? {} : { atomicBegin: payload.atomicBegin }),
   };
   if (mode === "none") return { ...identity, brief_mode: mode, brief_truncated: false };
@@ -656,6 +686,7 @@ type DeltaEvent = {
   actor: string;
   title: string;
   detail: string;
+  op_id: string | null;
   at: string;
 };
 
@@ -675,6 +706,7 @@ function fitDelta(
       actor: String(event.actor ?? ""),
       title: String(event.title ?? ""),
       detail: String(event.detail ?? ""),
+      op_id: event.opId === null || event.opId === undefined ? null : String(event.opId),
       at: String(event.at ?? ""),
     }),
   );
@@ -777,6 +809,78 @@ function compactSearchHit(hit: Record<string, unknown>): Record<string, unknown>
     title: hit.title,
     snippet: hit.snippet,
     updated_at: hit.updatedAt,
+  };
+}
+
+function compactRecord(record: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: record.id,
+    key: record.key,
+    kind: record.kind,
+    title: record.title,
+    summary: record.summary,
+    detail: record.detail,
+    importance: record.importance,
+    scope: record.scope,
+    work_item_key: record.workItemKey ?? null,
+    supersedes: record.supersedes ?? null,
+    status: record.status,
+    topic: record.topic ?? null,
+    subject_key: record.subjectKey ?? null,
+    related_records: Array.isArray(record.relatedRecords) ? record.relatedRecords : [],
+    op_id: record.opId ?? null,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+  };
+}
+
+function compactOperationTrace(trace: Record<string, any>): Record<string, unknown> {
+  return {
+    op_id: trace.opId,
+    mutations: (Array.isArray(trace.mutations) ? trace.mutations : []).map(
+      (mutation: Record<string, unknown>) => ({
+        operation: mutation.operation,
+        response: mutation.response,
+        session_id: mutation.sessionId,
+        created_at: mutation.createdAt,
+      }),
+    ),
+    records: (Array.isArray(trace.records) ? trace.records : []).map(
+      (record: Record<string, unknown>) => compactRecord(record),
+    ),
+    progress: (Array.isArray(trace.progress) ? trace.progress : []).map(
+      (progress: Record<string, unknown>) => ({
+        op_id: progress.opId,
+        task_key: progress.taskKey,
+        percent: progress.percent,
+        summary: progress.summary,
+        completed: progress.completed,
+        next: progress.next,
+        evidence: progress.evidence,
+        blocker: progress.blocker,
+        session_id: progress.sessionId,
+        created_at: progress.createdAt,
+      }),
+    ),
+    project_updates: (Array.isArray(trace.projectUpdates) ? trace.projectUpdates : []).map(
+      (update: Record<string, unknown>) => ({
+        ...update,
+        op_id: update.opId,
+      }),
+    ),
+    events: (Array.isArray(trace.events) ? trace.events : []).map(
+      (event: Record<string, unknown>) => ({
+        seq: event.seq,
+        type: event.type,
+        aggregate_type: event.aggregateType,
+        aggregate_id: event.aggregateId,
+        actor: event.actor,
+        session_id: event.sessionId,
+        payload: event.payload,
+        at: event.at,
+        op_id: event.opId,
+      }),
+    ),
   };
 }
 
@@ -935,6 +1039,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
             status: started.quick.status,
             version: started.quick.version,
             surface_version: MCP_SURFACE_VERSION,
+            ...(input.op_id === undefined ? {} : { op_id: input.op_id }),
           },
           1200,
         );
@@ -1158,6 +1263,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       );
       return result({
         ok: true,
+        ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
         project: input.project.toUpperCase(),
         seq: created.sequence,
         // 目标是机器补的就要说出来，否则事后没人分得清它是谁定的。
@@ -1206,6 +1312,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       );
       return result({
         ok: true,
+        ...mutationAck(input.op_id, patched as unknown as Record<string, unknown>),
         project: input.project.toUpperCase(),
         seq: patched.sequence,
         items: patched.items.map((item) => ({
@@ -1232,7 +1339,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         id: z.string().trim(),
         expected_version: z.number().int().nonnegative(),
         status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
-        evidence: z.array(z.string()).optional(),
+        evidence: z.array(EvidenceInputSchema).max(100).optional(),
       },
       outputSchema,
     },
@@ -1245,6 +1352,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       });
       return result({
         ok: true,
+        ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
         project: input.project.toUpperCase(),
         seq: updated.sequence,
         id: input.id,
@@ -1272,7 +1380,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         next: z.array(z.string().max(500)).max(20).default([]),
         blocker: z.string().max(1000).nullable().optional(),
         health: z.enum(["ON_TRACK", "AT_RISK", "OFF_TRACK", "UNKNOWN"]).nullable().optional(),
-        evidence: z.array(z.unknown()).max(20).default([]),
+        evidence: z.array(EvidenceInputSchema).max(20).default([]),
       },
       outputSchema,
     },
@@ -1285,7 +1393,13 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
           ...(input.health === undefined ? {} : { health: input.health }),
           ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
         });
-        return result({ ok: true, update: update.id, health: update.health, seq: update.seq });
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, update as unknown as Record<string, unknown>),
+          update: update.id,
+          health: update.health,
+          seq: update.seq,
+        });
       }
       if (!input.task_key) throw new Error("VALIDATION_ERROR: task scope 要求 task_key");
       const updated = await service.addProgress(input.project, input.session, input.op_id, {
@@ -1299,6 +1413,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       });
       return result({
         ok: true,
+        ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
         task_key: updated.key,
         version: updated.v,
         seq: updated.seq,
@@ -1337,7 +1452,14 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         ...(input.work_item_key === undefined ? {} : { workItemKey: input.work_item_key }),
         ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
       });
-      return result({ ok: true, record: created.key, version: created.v, seq: created.seq });
+      return result({
+        ok: true,
+        ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
+        record: created.key,
+        version: created.v,
+        seq: created.seq,
+        related_records: Array.isArray(created.relatedRecords) ? created.relatedRecords : [],
+      });
     },
   );
 
@@ -1347,7 +1469,9 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       description: "搜索事实。",
       inputSchema: {
         project: projectCode.optional(),
-        query: z.string().trim().min(1).max(500),
+        query: z.string().trim().min(1).max(500).optional(),
+        op_id: opId.optional(),
+        session: sessionId.optional(),
         limit: z.number().int().min(1).max(30).default(20),
         cursor: z.string().optional(),
         field_mask: z.array(z.string()).max(20).default([]),
@@ -1357,13 +1481,28 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       annotations: { readOnlyHint: true },
     },
     async (input) => {
+      if (input.op_id) {
+        if (!input.project) throw new Error("PROJECT_REQUIRED: op_id 精确回查要求 project");
+        const trace = compactOperationTrace(
+          plain(await service.getOperationTrace(input.project, input.op_id, input.session)),
+        );
+        const source = selectFields(trace, input.field_mask);
+        const fitted = fitFieldRead(
+          source,
+          Math.max(300, input.max_chars - 80),
+          "atm_search",
+          input.cursor,
+        );
+        return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
+      }
+      if (!input.query) throw new Error("VALIDATION_ERROR: query 或 op_id 至少提供一个");
       const kind = publicKeyKind(input.query);
       const exactProject = input.project ?? projectFromPublicKey(input.query) ?? undefined;
       if (kind && exactProject) {
         const entity =
           kind === "WORK_ITEM"
             ? await service.getWorkItem(exactProject, input.query, "full")
-            : await service.getRecord(exactProject, input.query);
+            : compactRecord(plain(await service.getRecord(exactProject, input.query)));
         const source = selectFields(plain(entity), input.field_mask);
         const fitted = fitFieldRead(
           source,
@@ -1448,7 +1587,13 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
           ? {}
           : { retirementReason: input.retirement_reason }),
       });
-      return result({ ok: true, session: ended.session, seq: ended.seq, handoffs: ended.handoffs });
+      return result({
+        ok: true,
+        ...mutationAck(input.op_id, ended as unknown as Record<string, unknown>),
+        session: ended.session,
+        seq: ended.seq,
+        handoffs: ended.handoffs,
+      });
     },
   );
 
