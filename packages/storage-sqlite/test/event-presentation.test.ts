@@ -68,6 +68,27 @@ describe("event presentation", () => {
     ).toContain("main");
   });
 
+  it("把批量 checklist 事件投影为含任务键与数量的可读时间线", () => {
+    const event = presentEvent({
+      type: "checklist.batch_updated",
+      aggregateType: "WORK_ITEM",
+      aggregateId: "work-1",
+      actor: "codex-root",
+      payload: {
+        taskKey: "ATM-T-0111",
+        items: [
+          { checklistId: "one", status: "DONE" },
+          { checklistId: "two", status: "DONE" },
+        ],
+      },
+      project,
+    });
+
+    expect(event.title).toBe("批量更新验收清单");
+    expect(event.detail).toContain("ATM-T-0111");
+    expect(event.detail).toContain("2 项");
+  });
+
   it("covers the lifecycle events used by task, project, agent and backup timelines", () => {
     const cases = [
       ["work.created", "创建任务", { key: "ATM-T-0002", title: "新任务" }],

@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
   BeginInputSchema,
+  ChecklistBatchUpdateInputSchema,
   ChecklistUpdateInputSchema,
   CreateMilestoneInputSchema,
   CreateObjectiveInputSchema,
@@ -15,6 +16,7 @@ import {
   SearchInputSchema,
   TaskCreateBatchInputSchema,
   TaskPatchBatchInputSchema,
+  VerifyAndCompleteInputSchema,
 } from "@ayanami-task/protocol";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { handleAyanamiMcpHttp } from "@ayanami-task/mcp";
@@ -628,6 +630,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           checklist: item.checklist,
           weight: item.weight,
           verificationRequired: item.verificationRequired,
+          ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
           ...(item.milestoneId === undefined ? {} : { milestoneId: item.milestoneId }),
           ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
           ...(item.parentRef === undefined ? {} : { parentRef: item.parentRef }),
@@ -657,6 +660,38 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
       })),
     );
+  });
+  app.post("/api/v1/projects/:code/ui/work-items/:taskKey/verify-and-complete", async (request) => {
+    const { code, taskKey } = request.params as { code: string; taskKey: string };
+    const body = request.body as Record<string, unknown>;
+    const input = VerifyAndCompleteInputSchema.parse({
+      ...body,
+      project: code,
+      session: "USER",
+      taskKey,
+    });
+    return options.service.verifyAndCompleteAsUser(code, input.opId, {
+      taskKey: input.taskKey,
+      expectedVersion: input.expectedVersion,
+    });
+  });
+  app.patch("/api/v1/projects/:code/ui/checklist/batch", async (request) => {
+    const { code } = request.params as { code: string };
+    const body = request.body as Record<string, unknown>;
+    const input = ChecklistBatchUpdateInputSchema.parse({
+      ...body,
+      project: code,
+      session: "USER",
+    });
+    return options.service.updateChecklistBatchAsUser(code, input.opId, {
+      taskKey: input.taskKey,
+      expectedVersion: input.expectedVersion,
+      items: input.items.map((item) => ({
+        checklistId: item.checklistId,
+        status: item.status,
+        ...(item.evidence === undefined ? {} : { evidence: item.evidence }),
+      })),
+    });
   });
   app.patch("/api/v1/projects/:code/ui/checklist/:id", async (request) => {
     const { code, id } = request.params as { code: string; id: string };
@@ -708,6 +743,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           checklist: item.checklist,
           weight: item.weight,
           verificationRequired: item.verificationRequired,
+          ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
           ...(item.milestoneId === undefined ? {} : { milestoneId: item.milestoneId }),
           ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
           ...(item.parentRef === undefined ? {} : { parentRef: item.parentRef }),
@@ -738,10 +774,38 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       })),
     );
   });
+  app.post("/api/v1/projects/:code/work-items/:taskKey/verify-and-complete", async (request) => {
+    const { code, taskKey } = request.params as { code: string; taskKey: string };
+    const input = VerifyAndCompleteInputSchema.parse({
+      ...(request.body as object),
+      project: code,
+      taskKey,
+    });
+    return options.service.verifyAndComplete(code, input.session, input.opId, {
+      taskKey: input.taskKey,
+      expectedVersion: input.expectedVersion,
+    });
+  });
   app.get("/api/v1/projects/:code/work-items/:taskKey", async (request) => {
     const { code, taskKey } = request.params as { code: string; taskKey: string };
     const { view } = request.query as { view?: "core" | "context" | "full" };
     return options.service.getWorkItem(code, taskKey, view ?? "core");
+  });
+  app.patch("/api/v1/projects/:code/checklist/batch", async (request) => {
+    const { code } = request.params as { code: string };
+    const input = ChecklistBatchUpdateInputSchema.parse({
+      ...(request.body as object),
+      project: code,
+    });
+    return options.service.updateChecklistBatch(code, input.session, input.opId, {
+      taskKey: input.taskKey,
+      expectedVersion: input.expectedVersion,
+      items: input.items.map((item) => ({
+        checklistId: item.checklistId,
+        status: item.status,
+        ...(item.evidence === undefined ? {} : { evidence: item.evidence }),
+      })),
+    });
   });
   app.patch("/api/v1/projects/:code/checklist/:id", async (request) => {
     const { code, id } = request.params as { code: string; id: string };

@@ -333,6 +333,65 @@ describe("REST 边界", () => {
     }
   });
 
+  it("创建 WorkItem 时在同一请求内持久化 assigneeAgentId", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-create-assignee-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "REST 创建即分派",
+      sourcePath: null,
+      code: "RASSIGN",
+    });
+    const begun = await service.begin({ projectCode: project.code, agentId: "codex" });
+    const objective = await service.createObjective(project.code, begun.session, {
+      title: "验证原子分派",
+      description: "",
+      definitionOfDone: [],
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/RASSIGN/work-items",
+        headers,
+        payload: {
+          session: begun.session,
+          opId: "rest-create-assigned",
+          items: [
+            {
+              clientRef: "review",
+              objectiveId: objective.id,
+              title: "创建后直接交给 reviewer",
+              type: "REVIEW",
+              priority: "HIGH",
+              status: "READY",
+              assigneeAgentId: "claude-reviewer",
+            },
+          ],
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json().items[0]).toMatchObject({
+        assigneeAgentId: "claude-reviewer",
+        status: "READY",
+      });
+
+      const stored = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/RASSIGN/work-items/${created.json().items[0].key}`,
+        headers,
+      });
+      expect(stored.json()).toMatchObject({ assigneeAgentId: "claude-reviewer" });
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
   it("提供保存视图和设置的版本化 API", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-api-settings-"));
     temporary.push(dataDir);

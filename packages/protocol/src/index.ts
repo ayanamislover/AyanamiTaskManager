@@ -406,6 +406,29 @@ export const ChecklistUpdateInputSchema = z.object({
   evidence: z.array(EvidenceInputSchema).max(100).optional(),
 });
 
+export const ChecklistBatchItemInputSchema = z.object({
+  checklistId: NonEmptyTextSchema,
+  status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
+  evidence: z.array(EvidenceInputSchema).max(100).optional(),
+});
+
+export const ChecklistBatchUpdateInputSchema = z.object({
+  project: NonEmptyTextSchema,
+  session: NonEmptyTextSchema,
+  opId: OpIdSchema,
+  taskKey: NonEmptyTextSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  items: z.array(ChecklistBatchItemInputSchema).min(1).max(100),
+});
+
+export const VerifyAndCompleteInputSchema = z.object({
+  project: NonEmptyTextSchema,
+  session: NonEmptyTextSchema,
+  opId: OpIdSchema,
+  taskKey: NonEmptyTextSchema,
+  expectedVersion: z.number().int().nonnegative(),
+});
+
 export const ProgressAddInputSchema = z.object({
   project: NonEmptyTextSchema,
   session: NonEmptyTextSchema,
@@ -470,3 +493,5 @@ export const QuickTaskCreateInputSchema = z.object({
 export type BeginInput = z.infer<typeof BeginInputSchema>;
 export type WorkItemCreateInput = z.infer<typeof WorkItemCreateInputSchema>;
 export type WorkItemPatchInput = z.infer<typeof WorkItemPatchInputSchema>;
+export type ChecklistBatchUpdateInput = z.infer<typeof ChecklistBatchUpdateInputSchema>;
+export type VerifyAndCompleteInput = z.infer<typeof VerifyAndCompleteInputSchema>;
