@@ -621,7 +621,8 @@ const workItemPatch = z.object({
   takeover_stale: z.boolean().default(false),
 });
 
-type TaskListView = "core" | "context" | "full";
+type TaskProjectionView = "core" | "context" | "full";
+type TaskListView = TaskProjectionView | "reconcile";
 
 function summarizeChecklist(value: unknown): Record<string, number> {
   const checklist = Array.isArray(value) ? (value as Array<Record<string, any>>) : [];
@@ -642,10 +643,31 @@ function summarizeChecklist(value: unknown): Record<string, number> {
   };
 }
 
+function taskStateProjection(item: Record<string, any>): Record<string, unknown> {
+  const breakdown = plain(item.progressBreakdown);
+  return {
+    phase: item.phase ?? item.status,
+    waiting_on: item.waitingOn ?? null,
+    phase_inferred: item.phaseInferred === true,
+    reported_progress: item.reportedProgress ?? null,
+    progress_source: item.progressSource ?? breakdown.source ?? "NONE",
+    progress_breakdown: {
+      computed: breakdown.computed ?? item.progress,
+      reported: breakdown.reported ?? item.reportedProgress ?? null,
+      source: breakdown.source ?? item.progressSource ?? "NONE",
+      done_weight: breakdown.doneWeight ?? 0,
+      total_weight: breakdown.totalWeight ?? 0,
+      done_stages: breakdown.doneStages ?? 0,
+      total_stages: breakdown.totalStages ?? 0,
+      blocker: breakdown.blocker ?? null,
+    },
+  };
+}
+
 function compactTask(
   item: Record<string, any>,
   fieldMask: string[] = [],
-  view: TaskListView = "core",
+  view: TaskProjectionView = "core",
 ) {
   const compact: Record<string, unknown> = {
     key: item.key,
@@ -658,6 +680,7 @@ function compactTask(
     version: item.version,
     due: item.targetDate ?? null,
     blocked: item.blockedReason ?? null,
+    ...taskStateProjection(item),
   };
   if (view !== "core" || fieldMask.includes("checklist")) {
     compact.description = item.description ?? "";
@@ -676,6 +699,30 @@ function compactTask(
   return Object.fromEntries(
     fieldMask.filter((field) => field in compact).map((field) => [field, compact[field]]),
   );
+}
+
+function compactReconciliationItem(item: Record<string, any>): Record<string, unknown> {
+  const session = item.session && typeof item.session === "object" ? plain(item.session) : null;
+  return {
+    task_key: item.taskKey,
+    title: item.title,
+    status: item.status,
+    classification: item.classification,
+    reason: item.reason,
+    age_seconds: item.ageSeconds,
+    session: session
+      ? {
+          id: session.id,
+          agent_id: session.agentId,
+          display_name: session.displayName,
+          connection_state: session.connectionState,
+          last_seen_at: session.lastSeenAt ?? null,
+          ended_at: session.endedAt ?? null,
+        }
+      : null,
+    suggested_action: item.suggestedAction,
+    evidence_paths: Array.isArray(item.evidencePaths) ? item.evidencePaths : [],
+  };
 }
 
 type DeltaEvent = {
@@ -940,6 +987,70 @@ function fitTaskPage(
   };
 }
 
+function fitReconciliationPage(
+  projectCode: string,
+  reconciliation: Record<string, any>,
+  offset: number,
+  maxChars: number,
+  items: Array<Record<string, unknown>>,
+  sourceHasMore: boolean,
+): Record<string, unknown> {
+  const project = plain(reconciliation.project);
+  for (let count = items.length; count >= 1; count -= 1) {
+    const returned = items.slice(0, count);
+    const budgetTruncated = count < items.length;
+    const hasMore = budgetTruncated || sourceHasMore;
+    const candidate: Record<string, unknown> = {
+      project: String(project.code ?? projectCode).toUpperCase(),
+      project_name: project.name ?? null,
+      source_root: project.sourceRoot ?? null,
+      view: "reconcile",
+      generated_at: reconciliation.generatedAt,
+      attention_count: reconciliation.attentionCount,
+      counts: reconciliation.counts,
+      returned_count: returned.length,
+      items: returned,
+      next_cursor: hasMore ? String(offset + returned.length) : null,
+      has_more: hasMore,
+      truncated: budgetTruncated,
+    };
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+  const first = items[0];
+  if (first) {
+    const identityKeys = ["task_key", "classification"];
+    const identity = Object.fromEntries(
+      identityKeys.filter((key) => key in first).map((key) => [key, first[key]]),
+    );
+    const hasMore = items.length > 1 || sourceHasMore;
+    const omittedFields = Object.keys(first).filter((key) => !identityKeys.includes(key));
+    const truncatedItem = {
+      project: String(project.code ?? projectCode).toUpperCase(),
+      view: "reconcile",
+      returned_count: 1,
+      items: [identity],
+      next_cursor: hasMore ? String(offset + 1) : null,
+      has_more: hasMore,
+      truncated: true,
+      truncation: {
+        path: "items[0]",
+        retry_cursor: String(offset),
+        omitted_fields: omittedFields,
+      },
+    };
+    if (JSON.stringify(truncatedItem).length <= maxChars) return truncatedItem;
+  }
+  return {
+    project: projectCode.toUpperCase(),
+    view: "reconcile",
+    returned_count: 0,
+    items: [],
+    next_cursor: items.length > 0 || sourceHasMore ? String(offset) : null,
+    has_more: items.length > 0 || sourceHasMore,
+    truncated: items.length > 0,
+  };
+}
+
 export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   const server = new McpServer(
     { name: "ayanami-task-manager", version: "1.0.15" },
@@ -1104,7 +1215,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         query: z.string().max(500).optional(),
         limit: z.number().int().min(1).max(100).default(10),
         cursor: z.string().optional(),
-        view: z.enum(["core", "context", "full"]).default("core"),
+        view: z.enum(["core", "context", "full", "reconcile"]).default("core"),
+        include_active: z.boolean().default(false),
         field_mask: z.array(z.string()).max(20).default([]),
         max_chars: z.number().int().min(500).max(50_000).default(12_000),
       },
@@ -1113,6 +1225,29 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     },
     async (input) => {
       const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
+      if (input.view === "reconcile") {
+        const reconciliation = plain(
+          await service.reconcileProject(input.project, { includeActive: input.include_active }),
+        );
+        const allItems = Array.isArray(reconciliation.items)
+          ? (reconciliation.items as Array<Record<string, any>>)
+          : [];
+        const page = allItems.slice(offset, offset + input.limit);
+        const projected = page.map((item) =>
+          selectFields(compactReconciliationItem(item), input.field_mask),
+        );
+        return wrap(
+          fitReconciliationPage(
+            input.project,
+            reconciliation,
+            offset,
+            input.max_chars,
+            projected,
+            offset + page.length < allItems.length,
+          ),
+        );
+      }
+      const projectionView: TaskProjectionView = input.view;
       const filters = {
         readyOnly: input.ready_only,
         limit: input.limit,
@@ -1140,12 +1275,12 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       const projectedItems = await Promise.all(
         items.map(async (item) => {
           const source = needsContext
-            ? await service.getWorkItem(input.project, item.key, input.view)
+            ? await service.getWorkItem(input.project, item.key, projectionView)
             : item;
           return compactTask(
             source as unknown as Record<string, any>,
             input.field_mask,
-            input.view,
+            projectionView,
           );
         }),
       );
@@ -1161,7 +1296,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       return wrap(
         fitTaskPage(
           input.project,
-          input.view,
+          projectionView,
           offset,
           input.limit,
           input.max_chars,
@@ -1195,7 +1330,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       const projected =
         input.view === "core"
           ? compactTask(item, input.field_mask)
-          : selectFields(plain(item), input.field_mask);
+          : selectFields({ ...plain(item), ...taskStateProjection(item) }, input.field_mask);
       return wrap(fitFieldRead(projected, input.max_chars, "atm_task_get", input.cursor));
     },
   );

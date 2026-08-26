@@ -228,6 +228,279 @@ describe("MCP read plane", () => {
     }
   });
 
+  it("preserves orthogonal task phase and computed progress in task_list and task_get", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-task-phase-"));
+    roots.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "Task phase projection",
+      sourcePath: null,
+      code: "TPP",
+    });
+    const begun = await service.begin({ projectCode: project.code, agentId: "phase-list-test" });
+    const objective = await service.createObjective(project.code, begun.session, {
+      title: "Phase projection",
+      description: "",
+      definitionOfDone: [],
+    });
+    const created = await service.createWorkItems(project.code, begun.session, "phase-list-task", [
+      {
+        clientRef: "phase-one",
+        objectiveId: objective.id,
+        title: "Review waits for another agent",
+        description: "",
+        type: "REVIEW",
+        priority: "HIGH",
+        status: "READY",
+        checklist: Array.from({ length: 5 }, (_, index) => ({
+          title: `Stage ${index + 1}`,
+          evidenceRequired: false,
+        })),
+      },
+    ]);
+    let truth = created.items[0]!;
+    truth = (
+      await service.patchWorkItems(project.code, begun.session, "phase-start", [
+        { taskKey: truth.key, expectedVersion: truth.version, operation: "start" },
+      ])
+    ).items[0]!;
+    await service.addProgress(project.code, begun.session, "phase-report-90", {
+      taskKey: truth.key,
+      percent: 90,
+      summary: "Reported progress must not replace checklist progress.",
+      completed: [],
+      next: [],
+      evidence: [],
+    });
+    for (const index of [0, 1]) {
+      const context = await service.getWorkItem(project.code, truth.key, "context");
+      await service.updateChecklist(project.code, begun.session, `phase-check-${index}`, {
+        checklistId: context.checklist[index]!.id,
+        expectedVersion: context.checklist[index]!.version,
+        status: "DONE",
+      });
+    }
+    truth = await service.getWorkItem(project.code, truth.key, "context");
+    truth = (
+      await service.patchWorkItems(project.code, begun.session, "phase-verify", [
+        { taskKey: truth.key, expectedVersion: truth.version, operation: "verify" },
+      ])
+    ).items[0]!;
+    truth = (
+      await service.patchWorkItems(project.code, begun.session, "phase-wait-agent", [
+        {
+          taskKey: truth.key,
+          expectedVersion: truth.version,
+          operation: "wait_agent",
+          waitingFor: "independent-reviewer",
+        },
+      ])
+    ).items[0]!;
+
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "phase-projection-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const fieldMask = [
+        "key",
+        "status",
+        "phase",
+        "waiting_on",
+        "phase_inferred",
+        "progress",
+        "reported_progress",
+        "progress_breakdown",
+      ];
+      const listed = await client.callTool({
+        name: "atm_task_list",
+        arguments: { project: project.code, field_mask: fieldMask },
+      });
+      const fetched = await client.callTool({
+        name: "atm_task_get",
+        arguments: { project: project.code, task_key: truth.key, field_mask: fieldMask },
+      });
+      const expected = {
+        key: truth.key,
+        status: "WAITING_AGENT",
+        phase: "VERIFYING",
+        waiting_on: "AGENT",
+        phase_inferred: false,
+        progress: 40,
+        reported_progress: 90,
+        progress_breakdown: {
+          computed: 40,
+          reported: 90,
+          source: "CHECKLIST",
+          done_weight: 2,
+          total_weight: 5,
+          done_stages: 2,
+          total_stages: 5,
+          blocker: null,
+        },
+      };
+
+      expect(listed.structuredContent).toMatchObject({ items: [expected] });
+      expect(fetched.structuredContent).toEqual(expected);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+      service.close();
+    }
+  });
+
+  it("routes task_list reconcile view through the read-only reconciliation projection", async () => {
+    const longTitle = `Stalled task ${"title".repeat(300)}`;
+    const longDisplayName = `Agent One ${"display".repeat(250)}`;
+    const longSuggestedAction = `Inspect evidence before takeover. ${"action".repeat(300)}`;
+    const calls: Array<{ project: string; includeActive?: boolean }> = [];
+    const service = {
+      reconcileProject: async (project: string, input: { includeActive?: boolean }) => {
+        calls.push({ project, ...input });
+        return {
+          project: { code: "REC", name: "Reconcile", sourceRoot: "R:\\Project" },
+          generatedAt: "2026-08-27T00:00:00.000Z",
+          attentionCount: 2,
+          counts: { ACTIVE: 0, LEASE_EXPIRED_ONLINE: 0, STALLED: 1, POSSIBLY_COMPLETE: 1 },
+          items: [
+            {
+              taskKey: "REC-T-0001",
+              title: longTitle,
+              status: "CLAIMED",
+              classification: "STALLED",
+              reason: "session_closed_and_lease_expired",
+              ageSeconds: 120,
+              session: {
+                id: "session-1",
+                agentId: "agent-1",
+                displayName: longDisplayName,
+                connectionState: "CLOSED",
+                lastSeenAt: "2026-08-26T23:00:00.000Z",
+                endedAt: "2026-08-26T23:01:00.000Z",
+              },
+              suggestedAction: longSuggestedAction,
+              evidencePaths: [],
+            },
+            {
+              taskKey: "REC-T-0002",
+              title: "Existing artifact",
+              status: "READY",
+              classification: "POSSIBLY_COMPLETE",
+              reason: "all_explicit_acceptance_paths_exist_and_never_claimed",
+              ageSeconds: 60,
+              session: null,
+              suggestedAction: "Verify the artifact before completion.",
+              evidencePaths: ["release/done.txt"],
+            },
+          ],
+        };
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "reconcile-projection-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const listedTools = await client.listTools();
+      const listSchema = listedTools.tools.find((tool) => tool.name === "atm_task_list")
+        ?.inputSchema as {
+        properties?: Record<string, { type?: string; enum?: string[] }>;
+      };
+      expect(listSchema.properties?.view?.enum).toContain("reconcile");
+      expect(listSchema.properties?.include_active).toMatchObject({ type: "boolean" });
+
+      const first = await client.callTool({
+        name: "atm_task_list",
+        arguments: {
+          project: "REC",
+          view: "reconcile",
+          include_active: true,
+          limit: 1,
+        },
+      });
+      expect(calls).toEqual([{ project: "REC", includeActive: true }]);
+      expect(first.structuredContent).toMatchObject({
+        project: "REC",
+        project_name: "Reconcile",
+        source_root: "R:\\Project",
+        view: "reconcile",
+        generated_at: "2026-08-27T00:00:00.000Z",
+        attention_count: 2,
+        returned_count: 1,
+        has_more: true,
+        next_cursor: "1",
+        items: [
+          {
+            task_key: "REC-T-0001",
+            classification: "STALLED",
+            age_seconds: 120,
+            session: {
+              id: "session-1",
+              agent_id: "agent-1",
+              display_name: longDisplayName,
+              connection_state: "CLOSED",
+              last_seen_at: "2026-08-26T23:00:00.000Z",
+              ended_at: "2026-08-26T23:01:00.000Z",
+            },
+            suggested_action: longSuggestedAction,
+            evidence_paths: [],
+          },
+        ],
+      });
+
+      const second = await client.callTool({
+        name: "atm_task_list",
+        arguments: {
+          project: "REC",
+          view: "reconcile",
+          include_active: true,
+          limit: 1,
+          cursor: "1",
+        },
+      });
+      expect(second.structuredContent).toMatchObject({
+        returned_count: 1,
+        has_more: false,
+        next_cursor: null,
+        items: [
+          {
+            task_key: "REC-T-0002",
+            classification: "POSSIBLY_COMPLETE",
+            evidence_paths: ["release/done.txt"],
+          },
+        ],
+      });
+
+      const budgeted = await client.callTool({
+        name: "atm_task_list",
+        arguments: {
+          project: "REC",
+          view: "reconcile",
+          include_active: true,
+          limit: 1,
+          max_chars: 500,
+        },
+      });
+      expect(JSON.stringify(budgeted.structuredContent).length).toBeLessThanOrEqual(500);
+      expect(budgeted.structuredContent).toMatchObject({
+        returned_count: 1,
+        has_more: true,
+        next_cursor: "1",
+        truncated: true,
+        items: [{ task_key: "REC-T-0001", classification: "STALLED" }],
+        truncation: {
+          path: "items[0]",
+          retry_cursor: "0",
+          omitted_fields: expect.arrayContaining(["title", "session", "suggested_action"]),
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   it("continues a long task field without losing or repeating characters", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-task-field-"));
     roots.push(dataDir);
