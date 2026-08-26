@@ -48,6 +48,7 @@ import {
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { presentTimelineEvent } from "./timeline-events.js";
+import { taskProgressPresentation } from "./task-progress.js";
 import {
   sortProjectTasks,
   toggleProjectTaskSort,
@@ -2385,6 +2386,7 @@ function TaskDrawer({
     if (operation === "cancel" && !window.confirm("确认取消这个任务？")) return;
     patch.mutate(input);
   };
+  const progress = query.data ? taskProgressPresentation(query.data) : null;
   return (
     <div className="atm-drawer-backdrop" role="presentation" onMouseDown={close}>
       <aside
@@ -2425,6 +2427,9 @@ function TaskDrawer({
           <div className="atm-drawer-body">
             <div className="atm-actions">
               <Status value={String(query.data!.status)} />
+              {progress && progress.phaseLabel !== String(query.data!.status) ? (
+                <span className="atm-badge">{progress.phaseLabel}</span>
+              ) : null}
               {actions(
                 String(query.data!.status),
                 Boolean(
@@ -2456,12 +2461,21 @@ function TaskDrawer({
             <section className="atm-section">
               <h3>进度</h3>
               <div className="atm-progress">
-                <span style={{ width: `${Number(query.data!.progress ?? 0)}%` }} />
+                <span style={{ width: `${progress!.computed}%` }} />
               </div>
               <div className="atm-row-sub">
-                {Math.round(Number(query.data!.progress ?? 0))}% ·{" "}
-                {progressSourceLabels[String(query.data!.progressSource)] ?? "状态计算"}
+                派生 {Math.round(progress!.computed)}% ·{" "}
+                {progressSourceLabels[progress!.source] ?? "状态计算"}
+                {progress!.totalStages
+                  ? ` · ${progress!.doneStages}/${progress!.totalStages} 阶段 · 权重 ${progress!.doneWeight}/${progress!.totalWeight}`
+                  : ""}
               </div>
+              {progress!.reported !== null && progress!.reported !== progress!.computed ? (
+                <div className="atm-row-sub">Agent 报告：{Math.round(progress!.reported)}%</div>
+              ) : null}
+              {progress!.blocker ? (
+                <div className="atm-inline-error">当前门禁：{progress!.blocker}</div>
+              ) : null}
             </section>
             <section className="atm-section">
               <h3>验收标准</h3>
