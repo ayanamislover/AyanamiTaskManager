@@ -85,7 +85,21 @@ describe("项目更新", () => {
         unlinked: true,
         openWorkItems: [open.items[0]!.key],
       });
-      expect(await service.listProjectUpdates("UPD")).toHaveLength(2);
+      const linked = await service.addProjectProgress(
+        "UPD",
+        String(begun.session),
+        "agent-update-linked",
+        {
+          summary: "任务图已关联",
+          completed: [{ text: "完成编译", workItemKey: open.items[0]!.key }],
+        },
+      );
+      expect(linked).toMatchObject({
+        opId: "agent-update-linked",
+        unlinked: false,
+        openWorkItems: [],
+      });
+      expect(await service.listProjectUpdates("UPD")).toHaveLength(3);
       expect((service.overview().projects as any[])[0]).toMatchObject({ health: "AT_RISK" });
     } finally {
       service.close();
