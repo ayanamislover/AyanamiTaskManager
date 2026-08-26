@@ -657,6 +657,10 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).listRecords(limit);
   }
 
+  async getRecord(projectCode: string, reference: string) {
+    return (await this.#repository(projectCode)).getRecord(reference);
+  }
+
   async listProjectUpdates(projectCode: string, limit = 50) {
     return (await this.#repository(projectCode)).listProjectUpdates(limit);
   }

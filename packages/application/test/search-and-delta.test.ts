@@ -43,6 +43,16 @@ describe("中文搜索与增量事件", () => {
       ]);
       expect((await service.search(project.code, "数据库"))[0]?.title).toContain("数据库");
       expect((await service.search(project.code, "迁移"))[0]?.title).toContain("迁移");
+      const record = await service.createRecord(project.code, begun.session, "record-exact", {
+        kind: "FACT",
+        title: "精确记录读取",
+        summary: "公开 key 必须可以直接读取",
+        detail: "完整 detail 不经过全文检索",
+      });
+      expect(await service.getRecord(project.code, record.key)).toMatchObject({
+        key: record.key,
+        detail: "完整 detail 不经过全文检索",
+      });
       const delta = await service.delta(project.code, 0, 100);
       expect(delta.events.length).toBeGreaterThan(0);
       expect(delta.events.map((event) => event.seq)).toEqual(
