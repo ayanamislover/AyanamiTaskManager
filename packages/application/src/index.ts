@@ -858,26 +858,45 @@ export class AyanamiTaskService {
     input: {
       health?: "ON_TRACK" | "AT_RISK" | "OFF_TRACK" | "UNKNOWN" | null;
       summary: string;
-      completed?: string[];
+      completed?: Array<string | { text: string; workItemKey?: string }>;
       next?: string[];
       blocker?: string | null;
     },
   ) {
     const repository = await this.#repository(projectCode);
+    const completed = input.completed ?? [];
+    const linkedKeys = new Set(
+      completed.flatMap((entry) =>
+        typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
+      ),
+    );
+    for (const taskKey of linkedKeys) repository.getWorkItem(taskKey);
     const result = repository.publishProjectUpdate(
       await this.#actor(projectCode, sessionId),
       opId,
       {
         health: input.health ?? (input.blocker ? "AT_RISK" : "UNKNOWN"),
         summary: input.summary,
-        completed: input.completed ?? [],
+        completed: completed.map((entry) => (typeof entry === "string" ? entry : entry.text)),
         risks: input.blocker ? [input.blocker] : [],
         next: input.next ?? [],
       },
     );
     await this.#refreshSessionGitContext(projectCode, sessionId);
     await this.#flush(projectCode);
-    return result;
+    const openWorkItems = repository
+      .listWorkItems({ limit: 500 })
+      .filter((item) => !["DONE", "CANCELLED"].includes(item.status) && !linkedKeys.has(item.key))
+      .slice(0, 20)
+      .map((item) => item.key);
+    return {
+      ...result,
+      opId,
+      unlinked:
+        completed.length > 0 &&
+        completed.some((entry) => typeof entry === "string" || !entry.workItemKey),
+      openWorkItems,
+    };
   }
 
   async createRecord(
