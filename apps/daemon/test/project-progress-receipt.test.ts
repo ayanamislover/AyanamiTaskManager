@@ -63,6 +63,28 @@ describe("项目进度 REST 回执", () => {
         unlinked: false,
         openWorkItems: [],
       });
+
+      const invalid = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/${project.code}/progress-updates`,
+        headers: { authorization: "Bearer local-secret" },
+        payload: {
+          session: String(begin.session),
+          opId: "empty-structured-project-progress",
+          scope: "project",
+          summary: "对象字段不能绕过协议校验",
+          completed: [{ text: "", workItemKey: task.key }],
+        },
+      });
+      expect(invalid.statusCode).toBe(400);
+      expect(invalid.json()).toMatchObject({
+        error: {
+          code: "INVALID_ARGUMENT",
+          details: {
+            issues: [expect.objectContaining({ path: "completed.0.text" })],
+          },
+        },
+      });
     } finally {
       await app.close();
       service.close();
