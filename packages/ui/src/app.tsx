@@ -2869,6 +2869,7 @@ function CreateRecordModal({
   const dialogRef = useDialogAccessibility(close);
   const [kind, setKind] = useState("DECISION");
   const [importance, setImportance] = useState("NORMAL");
+  const [topic, setTopic] = useState("");
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [detail, setDetail] = useState("");
@@ -2881,6 +2882,7 @@ function CreateRecordModal({
         title,
         summary,
         detail,
+        ...(topic.trim() ? { topic: topic.trim() } : {}),
         scope: "PROJECT",
       }),
     onSuccess: async () => {
@@ -2944,6 +2946,15 @@ function CreateRecordModal({
                 onChange={setImportance}
               />
             </div>
+          </div>
+          <div className="atm-field">
+            <label htmlFor="record-topic">主题（可选，用于发现相关记录）</label>
+            <input
+              id="record-topic"
+              value={topic}
+              placeholder="例如：release/1.0.16 或 review/candidate-a"
+              onChange={(event) => setTopic(event.target.value)}
+            />
           </div>
           <div className="atm-field">
             <label htmlFor="record-title">标题</label>
@@ -3796,7 +3807,13 @@ function ProjectPage({
                 </span>
               </div>
               <h3>{record.title}</h3>
+              {record.topic ? <div className="atm-key">主题：{record.topic}</div> : null}
               <p>{record.summary}</p>
+              {(record.relatedRecords ?? record.related_records)?.length ? (
+                <div className="atm-row-sub">
+                  相关记录：{(record.relatedRecords ?? record.related_records).join("、")}
+                </div>
+              ) : null}
               {record.detail ? (
                 <details>
                   <summary>查看详情</summary>
