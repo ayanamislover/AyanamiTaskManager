@@ -10,6 +10,76 @@ afterEach(() => {
 });
 
 describe("Session retirement 与低成本恢复", () => {
+  it("在 application actor 检查前回放旧 Session 写入，并沿显式 successor 保持幂等", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-rotation-replay-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "回放测试", sourcePath: null, code: "REPLAY" });
+      const first = await service.begin({
+        projectCode: "REPLAY",
+        mode: "project",
+        agentId: "codex",
+        clientKind: "test",
+      });
+      const input = {
+        kind: "FACT",
+        title: "响应可能丢失",
+        summary: "同一 op 必须只落一条记录",
+        detail: "application 不得先用 SESSION_CLOSED 拒绝",
+      };
+      const created = await service.createRecord(
+        "REPLAY",
+        String(first.session),
+        "lost-record",
+        input,
+      );
+      const endInput = {
+        outcome: "retired" as const,
+        summary: "切换 Session",
+        next: ["继续"],
+        releaseClaims: true,
+        retirementReason: "context rotation",
+      };
+      const ended = await service.end("REPLAY", String(first.session), "lost-end", endInput);
+      const replayed = await service.createRecord(
+        "REPLAY",
+        String(first.session),
+        "lost-record",
+        input,
+      );
+      expect(replayed).toMatchObject({ key: created.key, opId: "lost-record" });
+      expect(await service.listRecords("REPLAY")).toHaveLength(1);
+      expect(
+        await service.end("REPLAY", String(first.session), "lost-end", endInput),
+      ).toMatchObject({ seq: ended.seq, opId: "lost-end" });
+
+      const successor = await service.begin({
+        projectCode: "REPLAY",
+        mode: "project",
+        agentId: "codex",
+        clientKind: "test",
+        resume: true,
+        predecessorSessionId: String(first.session),
+      });
+      expect(
+        await service.createRecord("REPLAY", String(successor.session), "lost-record", input),
+      ).toMatchObject({ key: created.key, opId: "lost-record" });
+      await expect(
+        service.createRecord("REPLAY", String(successor.session), "lost-record", {
+          ...input,
+          summary: "相同 op 的不同载荷必须冲突",
+        }),
+      ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+      expect(await service.listRecords("REPLAY")).toHaveLength(1);
+    } finally {
+      service.close();
+    }
+  });
+
   it("同一 Agent successor 恢复当前任务、handoff 和 USER 约束，且不误完成任务", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-rotation-"));
     temporary.push(dataDir);
