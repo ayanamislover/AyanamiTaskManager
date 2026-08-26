@@ -46,6 +46,25 @@ describe("项目更新", () => {
         agentId: "agent-update",
         clientKind: "test",
       });
+      const objective = await service.createObjectiveAsUser("UPD", "objective-unlinked", {
+        title: "任务图关联",
+        description: "",
+        definitionOfDone: [],
+      });
+      const open = await service.createWorkItemsAsUser("UPD", "task-unlinked", [
+        {
+          clientRef: "open",
+          objectiveId: objective.id,
+          title: "仍需更新的任务",
+          description: "",
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY",
+          acceptance: [],
+          checklist: [],
+          verificationRequired: false,
+        },
+      ]);
       const fromAgent = await service.addProjectProgress(
         "UPD",
         String(begun.session),
@@ -62,6 +81,9 @@ describe("项目更新", () => {
         status: "PUBLISHED",
         health: "AT_RISK",
         risks: ["ABI 尚未验证"],
+        opId: "agent-update-1",
+        unlinked: true,
+        openWorkItems: [open.items[0]!.key],
       });
       expect(await service.listProjectUpdates("UPD")).toHaveLength(2);
       expect((service.overview().projects as any[])[0]).toMatchObject({ health: "AT_RISK" });
