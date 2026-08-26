@@ -23,7 +23,7 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 ## 标准 Session 流程
 
 1. 开工调用 `atm_begin`，显式传入 `project_code`。普通交互式开工可在受管开发任务未注册时自动创建；需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`，不能把项目创建和 Session 原子恢复混为一次调用。只有无法可靠确定项目名称、代码或目录时才请求用户确认。
-2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。
+2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。MCP 工具面当前为 v2，`atm_begin.surface_version` 是客户端检查缓存契约的锚点。
 3. 选择 `READY` 工作项后，以 `atm_task_patch` 执行 `claim` 和 `start`。
 4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
 5. 决策、约束、事实、风险、参考和经验写入 `atm_record`；长历史不要反复塞回上下文。
@@ -31,6 +31,8 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 7. 完成任务后执行 `complete`；Session 结束必须调用 `atm_end`。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
+
+`atm_begin` 默认返回 `brief="full"`。上下文预算紧张时可选 `minimal`，只建立 Session 时可选 `none`。`max_chars` 只约束可降级的 brief；`session`、`project`、`scope`、`surface_version` 和 `atomicBegin` 属于不可截断回执，即使项目摘要很大也必须返回。调用方应检查 `brief_truncated`，需要被省略的分节时再按需读取。
 
 ### 原子 Session recover-or-begin
 
@@ -58,7 +60,7 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器代替人做出的规划决策，因此它是显式回执而不是静默行为：拿到它就应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
-可用的 11 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。
+可用的 12 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_checklist`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。
 
 工作中发现新的独立事项时，用 `atm_task_create` 的 `discovered_from` 指向已有任务，或用 `discovered_from_ref` 指向同一批次的 `client_ref`。这是可追溯的发现关系，不会阻塞 ready queue，也不应替代 `depends_on`。
 

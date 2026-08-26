@@ -51,7 +51,62 @@ describe("Ayanami MCP", () => {
       "atm_delta",
       "atm_end",
     ]);
-    expect(listed.tools.every((tool) => tool.outputSchema)).toBe(true);
+    const beginSchema = listed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
+      properties?: Record<string, unknown>;
+      required?: string[];
+    };
+    expect(beginSchema.required).toEqual(["agent_id"]);
+    expect(beginSchema.properties?.mode).toEqual({
+      type: "string",
+      enum: ["auto", "quick", "project"],
+    });
+    const recordSchema = listed.tools.find((tool) => tool.name === "atm_record")?.inputSchema as {
+      properties?: Record<string, { type?: unknown; enum?: unknown; maxLength?: number }>;
+      required?: string[];
+    };
+    expect(recordSchema.required).toEqual([
+      "project",
+      "session",
+      "op_id",
+      "kind",
+      "title",
+      "summary",
+    ]);
+    expect(recordSchema.properties?.kind).toMatchObject({
+      type: "string",
+      enum: ["DECISION", "CONSTRAINT", "FACT", "RISK", "REFERENCE", "LESSON"],
+    });
+    expect(recordSchema.properties?.summary).toMatchObject({
+      type: "string",
+      maxLength: 300,
+    });
+    const enumNodes: Array<Record<string, unknown>> = [];
+    const collectEnums = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        value.forEach(collectEnums);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const node = value as Record<string, unknown>;
+      if (Array.isArray(node.enum)) enumNodes.push(node);
+      Object.values(node).forEach(collectEnums);
+    };
+    listed.tools.forEach((tool) => collectEnums(tool.inputSchema));
+    expect(enumNodes.length).toBeGreaterThan(10);
+    expect(enumNodes.every((node) => node.type === "string")).toBe(true);
+    const emptySchemaNodes: string[] = [];
+    const collectEmptySchemas = (value: unknown, path: string): void => {
+      if (Array.isArray(value)) {
+        value.forEach((entry, index) => collectEmptySchemas(entry, `${path}[${index}]`));
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const node = value as Record<string, unknown>;
+      if (Object.keys(node).length === 0) emptySchemaNodes.push(path);
+      Object.entries(node).forEach(([key, entry]) => collectEmptySchemas(entry, `${path}.${key}`));
+    };
+    listed.tools.forEach((tool) => collectEmptySchemas(tool.inputSchema, tool.name));
+    expect(emptySchemaNodes).toEqual([]);
     const schemaBudget = assertMcpSchemaBudget(listed.tools);
     expect(schemaBudget).toEqual({
       bytes: expect.any(Number),
@@ -66,12 +121,6 @@ describe("Ayanami MCP", () => {
         { name: "oversized", inputSchema: { type: "object", padding: "x".repeat(800) } },
       ]),
     ).toThrow(/MCP_SCHEMA_BUDGET_EXCEEDED/u);
-    const beginSchema = listed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
-      properties?: Record<string, unknown>;
-      required?: string[];
-    };
-    expect(beginSchema.required).toEqual(["agent_id"]);
-    expect(beginSchema.properties?.mode).toEqual({ enum: ["auto", "quick", "project"] });
     expect(listed.tools.find((tool) => tool.name === "atm_begin")?.description).toContain(
       "直接使用返回的 brief",
     );
@@ -81,6 +130,23 @@ describe("Ayanami MCP", () => {
     expect(
       JSON.stringify(listed.tools.find((tool) => tool.name === "atm_task_create")?.inputSchema),
     ).toContain("discovered_from");
+
+    const invalidContract = await client.callTool({
+      name: "atm_record",
+      arguments: {
+        project: "",
+        session: "",
+        op_id: "",
+        kind: "NOT_A_KIND",
+        title: "",
+        summary: "界".repeat(301),
+      },
+    });
+    expect(invalidContract.isError).toBe(true);
+    const invalidText = JSON.stringify(invalidContract.content);
+    for (const field of ["project", "session", "op_id", "kind", "title", "summary"]) {
+      expect(invalidText).toContain(field);
+    }
 
     const result = await client.callTool({
       name: "atm_begin",
@@ -241,7 +307,7 @@ describe("Ayanami MCP", () => {
     });
     const session = String((begun.structuredContent as Record<string, unknown>).session);
     await service.createObjective(project.code, session, {
-      title: "目".repeat(80),
+      title: "目".repeat(11),
       description: "标".repeat(300),
       definitionOfDone: ["完成度可验证"],
     });
@@ -254,7 +320,7 @@ describe("Ayanami MCP", () => {
       items: [
         {
           client_ref: "brief-1",
-          title: "标".repeat(120),
+          title: "标".repeat(26),
           description: "述".repeat(900),
           type: "TASK",
           priority: "HIGH",
@@ -264,7 +330,7 @@ describe("Ayanami MCP", () => {
           depends_on: [],
           depends_on_refs: [],
           checklist: [],
-          acceptance: ["验".repeat(200), "收".repeat(200), "条".repeat(200)],
+          acceptance: ["验".repeat(19), "收".repeat(25), "条".repeat(31)],
         },
       ],
     });
@@ -294,12 +360,77 @@ describe("Ayanami MCP", () => {
         op_id: `brief-record-${n}`,
         kind: "FACT",
         title: `事实 ${n} ${"标".repeat(60)}`,
-        summary: "要".repeat(300),
+        // 多条中等长度摘要会让 repository brief 刚好卡在 1200 字以内，
+        // 再叠加 begin 自己的 session/atomicBegin 外壳后越界；这正是现场形状。
+        summary: "要".repeat(87),
         detail: "详".repeat(400),
         importance: "CRITICAL",
         scope: "project",
       });
     }
+
+    // 来自真实多项目恢复场景：begin 在服务端已经创建 Session 后，不能因为 brief
+    // 超过 MCP 文本预算就把整个结果替换成 RESULT_TOO_LARGE，连 Session 号也丢掉。
+    // 当前 Agent 仍被分派到上面的长任务，且项目已有多条 CRITICAL Record，足以复现。
+    const resumedBegin = await call("atm_begin", {
+      op_id: "brief-rich-resume",
+      project_code: "BRF",
+      mode: "project",
+      agent_id: "codex",
+      client_kind: "feedback-regression",
+      resume: true,
+    });
+    const resumedBody = resumedBegin.structuredContent as Record<string, unknown>;
+    expect(resumedBody.code).toBeUndefined();
+    expect(resumedBody).toMatchObject({
+      scope: "project",
+      project: "BRF",
+      surface_version: 2,
+      brief_mode: "full",
+    });
+    expect(resumedBody.session).toEqual(expect.any(String));
+    expect(JSON.stringify(resumedBody).length).toBeLessThanOrEqual(1200);
+
+    const identityOnly = await call("atm_begin", {
+      op_id: "brief-none",
+      project_code: "BRF",
+      mode: "project",
+      agent_id: "codex-none",
+      role: "OBSERVER",
+      brief: "none",
+      max_chars: 300,
+    });
+    const identityBody = identityOnly.structuredContent as Record<string, unknown>;
+    expect(identityBody).toMatchObject({
+      scope: "project",
+      project: "BRF",
+      surface_version: 2,
+      brief_mode: "none",
+      brief_truncated: false,
+    });
+    expect(identityBody.session).toEqual(expect.any(String));
+    expect(identityBody).not.toHaveProperty("records");
+    expect(JSON.stringify(identityBody).length).toBeLessThanOrEqual(300);
+
+    const minimal = await call("atm_begin", {
+      op_id: "brief-minimal",
+      project_code: "BRF",
+      mode: "project",
+      agent_id: "codex-minimal",
+      role: "OBSERVER",
+      brief: "minimal",
+      max_chars: 600,
+    });
+    const minimalBody = minimal.structuredContent as Record<string, unknown>;
+    expect(minimalBody).toMatchObject({
+      scope: "project",
+      project: "BRF",
+      surface_version: 2,
+      brief_mode: "minimal",
+    });
+    expect(minimalBody).not.toHaveProperty("records");
+    expect(minimalBody).not.toHaveProperty("objective");
+    expect(JSON.stringify(minimalBody).length).toBeLessThanOrEqual(600);
 
     // ATM-T-0035：带 task_key 且使用默认 max_chars，不得再返回 RESULT_TOO_LARGE。
     const defaulted = await call("atm_brief", { project_code: "BRF", task_key: taskKey });
