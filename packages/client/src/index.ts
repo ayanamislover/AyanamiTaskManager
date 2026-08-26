@@ -30,6 +30,37 @@ export type RegisteredProject = {
   version: number;
 };
 
+export type ReconciliationClassification =
+  | "ACTIVE"
+  | "LEASE_EXPIRED_ONLINE"
+  | "STALLED"
+  | "POSSIBLY_COMPLETE";
+
+export type ReconciliationResult = {
+  project: { code: string; name: string; sourceRoot: string | null };
+  generatedAt: string;
+  attentionCount: number;
+  counts: Record<ReconciliationClassification, number>;
+  items: Array<{
+    taskKey: string;
+    title: string;
+    status: string;
+    classification: ReconciliationClassification;
+    reason: string;
+    ageSeconds: number;
+    session: {
+      id: string;
+      agentId: string;
+      displayName: string;
+      connectionState: string;
+      lastSeenAt: string | null;
+      endedAt: string | null;
+    } | null;
+    suggestedAction: string;
+    evidencePaths: string[];
+  }>;
+};
+
 function queryString(values: Record<string, unknown>): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -199,6 +230,11 @@ export class AyanamiClient {
       this.request<Array<Record<string, any>>>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/agents`,
+      ),
+    reconciliation: (code: string, includeActive = false) =>
+      this.request<ReconciliationResult>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(code)}/reconciliation${queryString({ include_active: includeActive ? 1 : undefined })}`,
       ),
     records: (code: string) =>
       this.request<Array<Record<string, any>>>(

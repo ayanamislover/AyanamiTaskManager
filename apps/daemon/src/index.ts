@@ -505,6 +505,13 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { limit } = request.query as { limit?: string };
     return options.service.listAgentSessions(code, Number(limit ?? 100));
   });
+  app.get("/api/v1/projects/:code/reconciliation", async (request) => {
+    const { code } = request.params as { code: string };
+    const { include_active: includeActive } = request.query as { include_active?: string };
+    return options.service.reconcileProject(code, {
+      includeActive: includeActive === "1" || includeActive === "true",
+    });
+  });
   app.get("/api/v1/projects/:code/records", async (request) => {
     const { code } = request.params as { code: string };
     const { limit } = request.query as { limit?: string };
