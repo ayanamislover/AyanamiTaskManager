@@ -87,13 +87,23 @@ describe("MCP mutation contracts", () => {
           project: project.code,
           session,
           op_id: "checklist-ack-exact",
-          id: detail.checklist[0]!.id,
-          expected_version: 0,
-          status: "DONE",
-          evidence: ["focused-test"],
+          mode: "batch",
+          task_key: taskKey,
+          expected_version: detail.version,
+          items: [
+            {
+              id: detail.checklist[0]!.id,
+              status: "DONE",
+              evidence: ["focused-test"],
+            },
+          ],
         },
       });
-      expect(checklist.structuredContent).toMatchObject({ op_id: "checklist-ack-exact" });
+      expect(checklist.structuredContent).toMatchObject({
+        op_id: "checklist-ack-exact",
+        task_key: taskKey,
+        updated_count: 1,
+      });
 
       const progress = await client.callTool({
         name: "atm_progress_add",
@@ -108,6 +118,34 @@ describe("MCP mutation contracts", () => {
         },
       });
       expect(progress.structuredContent).toMatchObject({ op_id: "progress-ack-exact" });
+
+      const completed = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: project.code,
+          session,
+          op_id: "verify-complete-ack-exact",
+          items: [
+            {
+              task_key: taskKey,
+              expected_version: (progress.structuredContent as { version: number }).version,
+              operation: "verify_and_complete",
+            },
+          ],
+        },
+      });
+      expect(completed.structuredContent).toMatchObject({
+        op_id: "verify-complete-ack-exact",
+        items: [
+          {
+            task_key: taskKey,
+            from_status: "IN_PROGRESS",
+            status: "DONE",
+            transitions: ["VERIFYING", "DONE"],
+          },
+        ],
+      });
+      expect(await service.getWorkItem(project.code, taskKey)).toMatchObject({ status: "DONE" });
 
       const record = await client.callTool({
         name: "atm_record",
@@ -190,7 +228,7 @@ describe("MCP mutation contracts", () => {
           project: project.code,
           session,
           op_id: "end-ack-exact",
-          outcome: "paused",
+          outcome: "completed",
           summary: "Mutation ACK test finished",
         },
       });
@@ -276,7 +314,8 @@ describe("MCP mutation contracts", () => {
         const schema = listed.tools.find((tool) => tool.name === toolName)?.inputSchema as {
           properties?: Record<string, { items?: { anyOf?: Array<Record<string, any>> } }>;
         };
-        const branches = schema.properties?.evidence?.items?.anyOf ?? [];
+        const evidenceSchema = schema.properties?.evidence;
+        const branches = evidenceSchema?.items?.anyOf ?? [];
         expect(branches).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ type: "string" }),
@@ -341,6 +380,424 @@ describe("MCP mutation contracts", () => {
         },
       });
       expect(invalid.isError).toBe(true);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("updates one task checklist atomically through the existing checklist tool", async () => {
+    const captured: Array<Record<string, unknown>> = [];
+    const service = {
+      updateChecklistBatch: async (
+        project: string,
+        session: string,
+        opId: string,
+        input: Record<string, unknown>,
+      ) => {
+        captured.push({ project, session, opId, input });
+        return {
+          taskKey: "BAT-T-0001",
+          checklist: [
+            { id: "check-1", status: "DONE", version: 1, evidence: ["proof"] },
+            { id: "check-2", status: "SKIPPED", version: 1, evidence: [] },
+          ],
+          taskProgress: 100,
+          taskVersion: 4,
+          updatedCount: 2,
+          sequence: 9,
+          opId,
+          sessionRebound: true,
+          session: "successor-session",
+        };
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "checklist-batch-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const listed = await client.listTools();
+      const schema = listed.tools.find((tool) => tool.name === "atm_checklist")?.inputSchema as {
+        anyOf?: Array<{ required?: string[]; properties?: Record<string, any> }>;
+        required?: string[];
+        properties?: Record<string, any>;
+      };
+      const single = schema.anyOf?.find((branch) => branch.required?.includes("id"));
+      const batch = schema.anyOf?.find((branch) => branch.required?.includes("task_key"));
+      expect(schema.required).toEqual(["project", "session", "op_id", "expected_version"]);
+      expect(single?.required).toEqual(["id", "status"]);
+      expect(single?.properties?.mode).toEqual({ const: "single" });
+      expect(batch?.required).toEqual(["mode", "task_key", "items"]);
+      expect(batch?.properties?.mode).toEqual({ const: "batch" });
+      expect(schema.properties?.status).toEqual({
+        type: "string",
+        enum: ["TODO", "DOING", "DONE", "SKIPPED"],
+      });
+      expect(schema.properties?.items?.items).toMatchObject({
+        type: "object",
+        required: ["id", "status"],
+        properties: {
+          id: { type: "string" },
+          status: { $ref: "#/properties/status" },
+          evidence: { $ref: "#/properties/evidence" },
+        },
+      });
+
+      const response = await client.callTool({
+        name: "atm_checklist",
+        arguments: {
+          project: "BAT",
+          session: "old-session",
+          op_id: "batch-checklist-op",
+          mode: "batch",
+          task_key: "BAT-T-0001",
+          expected_version: 3,
+          items: [
+            { id: "check-1", status: "DONE", evidence: ["proof"] },
+            { id: "check-2", status: "SKIPPED" },
+          ],
+        },
+      });
+
+      expect(captured).toEqual([
+        {
+          project: "BAT",
+          session: "old-session",
+          opId: "batch-checklist-op",
+          input: {
+            taskKey: "BAT-T-0001",
+            expectedVersion: 3,
+            items: [
+              { checklistId: "check-1", status: "DONE", evidence: ["proof"] },
+              { checklistId: "check-2", status: "SKIPPED" },
+            ],
+          },
+        },
+      ]);
+      expect(response.structuredContent).toMatchObject({
+        ok: true,
+        op_id: "batch-checklist-op",
+        session_rebound: true,
+        session: "successor-session",
+        task_key: "BAT-T-0001",
+        task_version: 4,
+        progress: 100,
+        updated_count: 2,
+        seq: 9,
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("aggregates invalid checklist fields for both single and batch modes", async () => {
+    const service = {} as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "checklist-invalid-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const invalidBatch = await client.callTool({
+        name: "atm_checklist",
+        arguments: {
+          project: "BAT",
+          session: "session",
+          op_id: "invalid-batch",
+          mode: "batch",
+          expected_version: 3,
+          id: "legacy-id",
+          status: "DONE",
+          items: [],
+        },
+      });
+      expect(invalidBatch.isError).toBe(true);
+      const batchError = JSON.stringify(invalidBatch.content);
+      for (const field of ["task_key", "items", "id", "status"]) {
+        expect(batchError).toContain(field);
+      }
+
+      const invalidSingle = await client.callTool({
+        name: "atm_checklist",
+        arguments: {
+          project: "BAT",
+          session: "session",
+          op_id: "invalid-single",
+          mode: "single",
+          expected_version: 0,
+          task_key: "BAT-T-0001",
+          items: [{ id: "check-1", status: "DONE" }],
+        },
+      });
+      expect(invalidSingle.isError).toBe(true);
+      const singleError = JSON.stringify(invalidSingle.content);
+      for (const field of ["id", "status", "task_key", "items"]) {
+        expect(singleError).toContain(field);
+      }
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("routes verify_and_complete through the atomic workflow primitive", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const service = {
+      verifyAndComplete: async (
+        project: string,
+        session: string,
+        opId: string,
+        input: Record<string, unknown>,
+      ) => {
+        calls.push({ project, session, opId, input });
+        return {
+          taskKey: "WF-T-0001",
+          fromStatus: "IN_PROGRESS",
+          status: "DONE",
+          fromVersion: 7,
+          taskVersion: 9,
+          transitions: ["VERIFYING", "DONE"],
+          item: { key: "WF-T-0001", status: "DONE", version: 9 },
+          sequence: 18,
+          opId,
+          sessionRebound: true,
+          session: "workflow-successor",
+        };
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "verify-complete-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const listed = await client.listTools();
+      const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
+        properties?: Record<string, any>;
+      };
+      expect(schema.properties?.items?.items?.properties?.operation).toMatchObject({
+        type: "string",
+        enum: expect.arrayContaining(["verify_and_complete"]),
+      });
+
+      const response = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "WF",
+          session: "old-session",
+          op_id: "verify-complete-op",
+          items: [
+            {
+              task_key: "WF-T-0001",
+              expected_version: 7,
+              operation: "verify_and_complete",
+            },
+          ],
+        },
+      });
+
+      expect(calls).toEqual([
+        {
+          project: "WF",
+          session: "old-session",
+          opId: "verify-complete-op",
+          input: { taskKey: "WF-T-0001", expectedVersion: 7 },
+        },
+      ]);
+      expect(response.structuredContent).toMatchObject({
+        ok: true,
+        op_id: "verify-complete-op",
+        session_rebound: true,
+        session: "workflow-successor",
+        project: "WF",
+        seq: 18,
+        items: [
+          {
+            task_key: "WF-T-0001",
+            from_status: "IN_PROGRESS",
+            status: "DONE",
+            from_version: 7,
+            version: 9,
+            transitions: ["VERIFYING", "DONE"],
+          },
+        ],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("maps conflict-aware expected_fields and structured cancellation", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const service = {
+      patchWorkItems: async (
+        project: string,
+        session: string,
+        opId: string,
+        items: Array<Record<string, unknown>>,
+      ) => {
+        calls.push({ project, session, opId, items });
+        return {
+          sequence: 12,
+          items: [
+            { key: "SAFE-T-0001", status: "READY", version: 4 },
+            { key: "SAFE-T-0002", status: "CANCELLED", version: 8 },
+          ],
+          opId,
+        };
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "safe-edit-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const listed = await client.listTools();
+      const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
+        properties?: Record<string, any>;
+      };
+      const itemSchema = schema.properties?.items?.items;
+      expect(itemSchema.properties?.expected_fields).toMatchObject({
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          description: { type: "string" },
+          target_date: { type: ["string", "null"] },
+          parent_key: { type: ["string", "null"] },
+        },
+      });
+      expect(itemSchema.properties).toMatchObject({
+        cancel_reason: { type: "string" },
+        duplicate_of: { type: ["string", "null"] },
+        superseded_by: { type: ["string", "null"] },
+      });
+
+      const response = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "SAFE",
+          session: "session",
+          op_id: "safe-edit-cancel-op",
+          items: [
+            {
+              task_key: "SAFE-T-0001",
+              expected_version: 3,
+              operation: "edit",
+              expected_fields: {
+                title: "Old title",
+                target_date: null,
+              },
+              title: "New title",
+              target_date: "2026-09-01",
+            },
+            {
+              task_key: "SAFE-T-0002",
+              expected_version: 7,
+              operation: "cancel",
+              cancel_reason: "Duplicate scope",
+              duplicate_of: "SAFE-T-0003",
+              superseded_by: "SAFE-T-0004",
+            },
+          ],
+        },
+      });
+
+      expect(calls).toEqual([
+        {
+          project: "SAFE",
+          session: "session",
+          opId: "safe-edit-cancel-op",
+          items: [
+            {
+              taskKey: "SAFE-T-0001",
+              expectedVersion: 3,
+              expectedFields: { title: "Old title", targetDate: null },
+              operation: "edit",
+              takeoverStale: false,
+              title: "New title",
+              targetDate: "2026-09-01",
+            },
+            {
+              taskKey: "SAFE-T-0002",
+              expectedVersion: 7,
+              operation: "cancel",
+              takeoverStale: false,
+              cancelReason: "Duplicate scope",
+              duplicateOf: "SAFE-T-0003",
+              supersededBy: "SAFE-T-0004",
+            },
+          ],
+        },
+      ]);
+      expect(response.structuredContent).toMatchObject({
+        ok: true,
+        op_id: "safe-edit-cancel-op",
+        seq: 12,
+        items: [
+          { key: "SAFE-T-0001", status: "READY", version: 4 },
+          { key: "SAFE-T-0002", status: "CANCELLED", version: 8 },
+        ],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("aggregates unsafe edit and composite workflow validation issues", async () => {
+    const service = {} as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service);
+    const client = new Client({ name: "task-patch-invalid-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const unsafeEdit = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "SAFE",
+          session: "session",
+          op_id: "unsafe-edit",
+          items: [
+            {
+              task_key: "SAFE-T-0001",
+              expected_version: 3,
+              operation: "edit",
+              expected_fields: { title: "Old title" },
+              description: "New description",
+              assignee_agent_id: "other-agent",
+            },
+          ],
+        },
+      });
+      expect(unsafeEdit.isError).toBe(true);
+      const editError = JSON.stringify(unsafeEdit.content);
+      for (const field of ["expected_fields", "description", "assignee_agent_id"]) {
+        expect(editError).toContain(field);
+      }
+
+      const mixedComposite = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "SAFE",
+          session: "session",
+          op_id: "mixed-composite",
+          items: [
+            {
+              task_key: "SAFE-T-0001",
+              expected_version: 3,
+              operation: "verify_and_complete",
+              title: "Forbidden extra",
+            },
+            {
+              task_key: "SAFE-T-0002",
+              expected_version: 4,
+              operation: "cancel",
+              cancel_reason: "No longer needed",
+            },
+          ],
+        },
+      });
+      expect(mixedComposite.isError).toBe(true);
+      const compositeError = JSON.stringify(mixedComposite.content);
+      for (const field of ["items", "title"]) {
+        expect(compositeError).toContain(field);
+      }
     } finally {
       await Promise.all([client.close(), server.close()]);
     }
