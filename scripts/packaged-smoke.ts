@@ -338,8 +338,15 @@ try {
 
   const autoLaunch = JSON.parse(
     await readFile(join(dataDir, "runtime", "autolaunch-smoke.json"), "utf8"),
-  ) as { passed: boolean };
+  ) as { passed: boolean; path: string; args: string[] };
   check("自启动开关写入并恢复", autoLaunch.passed === true);
+  check(
+    "自启动使用版本无关入口与后台随机延迟参数",
+    autoLaunch.path === join(dataDir, "current", "AyanamiTaskManager.exe") &&
+      JSON.stringify(autoLaunch.args) ===
+        JSON.stringify(["--background", "--random-startup-delay"]),
+    `${autoLaunch.path} ${autoLaunch.args.join(" ")}`,
+  );
 
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));

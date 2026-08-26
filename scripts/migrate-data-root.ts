@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
@@ -86,6 +86,11 @@ function rewriteRegistryPaths(registryPath: string, source: string, destination:
   }
 }
 
+async function copyableDataRootEntry(path: string, sourceRoot: string): Promise<boolean> {
+  if (path === sourceRoot) return true;
+  return !(await lstat(path)).isSymbolicLink();
+}
+
 export async function migrateDataRoot(input: {
   source: string;
   destination: string;
@@ -137,7 +142,12 @@ export async function migrateDataRoot(input: {
   const staging = join(dirname(destination), `${basename(destination)}-migrating-${stamp}`);
   if (existsSync(staging) || (destinationBackup && existsSync(destinationBackup)))
     throw new Error("MIGRATION_TARGET_ALREADY_EXISTS");
-  await cp(source, staging, { recursive: true, errorOnExist: true, force: false });
+  await cp(source, staging, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+    filter: (sourcePath) => copyableDataRootEntry(sourcePath, source),
+  });
   const stagedRegistry = join(staging, "registry", "registry.sqlite");
   rewriteRegistryPaths(stagedRegistry, source, destination);
   await mkdir(join(staging, "runtime"), { recursive: true });

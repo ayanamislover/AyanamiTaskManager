@@ -36,10 +36,36 @@ function compactJsonSchema(value: unknown): unknown {
     "maxItems",
     "additionalProperties",
   ]);
+  // enum 已经把允许值和原始类型都钉死，保留同层 type 只是重复字节。
+  if (Array.isArray(source.enum) && source.enum.length > 0) omitted.add("type");
+  // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
+  // 输出 schema 里既然为了体积省掉 default，就同步从 required 去掉这些键；这既更紧凑，
+  // 也让 Agent 看到的必填项与真实运行时一致。
+  const properties =
+    source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+      ? (source.properties as Record<string, unknown>)
+      : null;
+  const defaulted = new Set(
+    properties
+      ? Object.entries(properties)
+          .filter(([, schema]) =>
+            Boolean(
+              schema && typeof schema === "object" && !Array.isArray(schema) && "default" in schema,
+            ),
+          )
+          .map(([key]) => key)
+      : [],
+  );
   return Object.fromEntries(
     Object.entries(source)
       .filter(([key, entry]) => !omitted.has(key) && entry !== undefined)
-      .map(([key, entry]) => [key, compactJsonSchema(entry)]),
+      .flatMap(([key, entry]) => {
+        if (key === "required" && Array.isArray(entry) && defaulted.size > 0) {
+          const required = entry.filter((field) => !defaulted.has(String(field)));
+          return required.length === 0 ? [] : [[key, compactJsonSchema(required)]];
+        }
+        return [[key, compactJsonSchema(entry)]];
+      }),
   );
 }
 

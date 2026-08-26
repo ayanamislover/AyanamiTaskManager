@@ -19,6 +19,7 @@ import { strToU8, zipSync, type Zippable } from "fflate";
 import { allocateProjectCode } from "@ayanami-task/domain";
 import { createUlid, nowIso } from "@ayanami-task/protocol";
 import {
+  foreignKeyCheck,
   openManagedDatabase,
   quickCheck,
   sqliteCapabilities,
@@ -1213,7 +1214,15 @@ export class AyanamiDatabaseManager {
 
   async doctor(): Promise<{
     registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
-    projects: Array<{ code: string; ok: boolean; separateDatabase: boolean }>;
+    projectCounts: Record<string, { total: number; failed: number }>;
+    projects: Array<{
+      code: string;
+      lifecycle: string;
+      ok: boolean;
+      quickCheck: boolean;
+      foreignKeys: boolean;
+      separateDatabase: boolean;
+    }>;
   }> {
     const registryCapabilities = sqliteCapabilities(this.registry.sqlite);
     const registry = {
@@ -1223,26 +1232,44 @@ export class AyanamiDatabaseManager {
       trigram: registryCapabilities.trigram,
     };
     const registryPath = resolve(this.registry.path).toLowerCase();
-    const projects = this.listProjects()
-      .filter((project) => project.lifecycle === "ACTIVE")
-      .map((project) => {
-        try {
-          const sqlite = new Database(project.databasePath, {
-            readonly: true,
-            fileMustExist: true,
-          });
-          const ok = quickCheck(sqlite);
-          sqlite.close();
-          return {
-            code: project.code,
-            ok,
-            separateDatabase: resolve(project.databasePath).toLowerCase() !== registryPath,
-          };
-        } catch {
-          return { code: project.code, ok: false, separateDatabase: true };
-        }
-      });
-    return { registry, projects };
+    const projects = this.listProjects(true).map((project) => {
+      let sqlite: Database.Database | null = null;
+      try {
+        sqlite = new Database(project.databasePath, {
+          readonly: true,
+          fileMustExist: true,
+        });
+        const projectQuickCheck = quickCheck(sqlite);
+        const projectForeignKeys = foreignKeyCheck(sqlite);
+        return {
+          code: project.code,
+          lifecycle: project.lifecycle,
+          ok: projectQuickCheck && projectForeignKeys,
+          quickCheck: projectQuickCheck,
+          foreignKeys: projectForeignKeys,
+          separateDatabase: resolve(project.databasePath).toLowerCase() !== registryPath,
+        };
+      } catch {
+        return {
+          code: project.code,
+          lifecycle: project.lifecycle,
+          ok: false,
+          quickCheck: false,
+          foreignKeys: false,
+          separateDatabase: true,
+        };
+      } finally {
+        sqlite?.close();
+      }
+    });
+    const projectCounts: Record<string, { total: number; failed: number }> = {};
+    for (const project of projects) {
+      const current = projectCounts[project.lifecycle] ?? { total: 0, failed: 0 };
+      current.total += 1;
+      if (!project.ok) current.failed += 1;
+      projectCounts[project.lifecycle] = current;
+    }
+    return { registry, projects, projectCounts };
   }
 
   async dispatchProject(projectCodeOrId: string): Promise<{ delivered: number; sequence: number }> {

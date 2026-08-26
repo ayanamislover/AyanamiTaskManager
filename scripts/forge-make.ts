@@ -1,6 +1,6 @@
-import { api } from "@electron-forge/core";
+import { makeApplication, packageApplication } from "./forge-api.js";
 
 const dir = process.cwd();
-await api.package({ dir, interactive: false });
-const outputs = await api.make({ dir, interactive: false, skipPackage: true });
+await packageApplication(dir);
+const outputs = await makeApplication(dir);
 process.stdout.write(`${JSON.stringify({ passed: true, outputs }, null, 2)}\n`);

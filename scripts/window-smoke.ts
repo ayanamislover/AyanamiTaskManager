@@ -35,7 +35,7 @@ const inheritedEnvironment = Object.fromEntries(
 );
 const application = await electron.launch({
   executablePath: executable,
-  args: [`--user-data-dir=${electronUserDataDir}`],
+  args: ["--background", `--user-data-dir=${electronUserDataDir}`],
   env: {
     ...inheritedEnvironment,
     ATM_DATA_DIR: dataDir,
@@ -63,6 +63,18 @@ try {
     return response.json();
   };
   const nativeWindow = await application.browserWindow(page);
+  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(false);
+  execFileSync(executable, [`--user-data-dir=${electronUserDataDir}`], {
+    cwd: root,
+    env: {
+      ...inheritedEnvironment,
+      ATM_DATA_DIR: dataDir,
+      ATM_PACKAGED_SMOKE: "1",
+    },
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   const nativeWindowHandle = await nativeWindow.evaluate((window) => {
     const handle = window.getNativeWindowHandle();
     return handle.length === 8
@@ -287,7 +299,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: metrics, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: metrics, backgroundStartsHidden: true, secondInstanceRestoresWindow: true, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();

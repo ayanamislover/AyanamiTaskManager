@@ -1,5 +1,12 @@
+import { join } from "node:path";
+
 export const STARTUP_DELAY_MIN_MS = 8_000;
 export const STARTUP_DELAY_MAX_MS = 45_000;
+export const LOGIN_ITEM_ARGS = ["--background", "--random-startup-delay"] as const;
+
+export function loginItemExecutable(dataDir: string): string {
+  return join(dataDir, "current", "AyanamiTaskManager.exe");
+}
 
 export function randomStartupDelayMs(random: () => number = Math.random): number {
   const sample = Math.min(0.999_999, Math.max(0, random()));
@@ -9,7 +16,11 @@ export function randomStartupDelayMs(random: () => number = Math.random): number
 }
 
 export function shouldDelayStartup(args: string[], smoke: boolean): boolean {
-  return !smoke && args.includes("--background") && args.includes("--random-startup-delay");
+  return !smoke && LOGIN_ITEM_ARGS.every((argument) => args.includes(argument));
+}
+
+export function shouldStartInBackground(args: string[], foregroundRequested: boolean): boolean {
+  return args.includes("--background") && !foregroundRequested;
 }
 
 export function waitForStartupDelay(milliseconds: number, signal: AbortSignal): Promise<void> {

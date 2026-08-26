@@ -7,7 +7,7 @@ pnpm atm status
 pnpm atm doctor
 ```
 
-`status` 检查本地服务和 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram、每个活动项目数据库及双库分离。开发态可显式传入 `--endpoint` 和 `--token`，但不要把 token 粘贴到 issue 或日志。
+`status` 检查本地服务和 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram，以及磁盘上所有受管项目数据库（含 `ACTIVE`、`ARCHIVED`、`TRASHED`）的 `quick_check`、外键完整性和双库分离。输出按 lifecycle 给出总数与失败数，并列出失败项目；归档或移入垃圾箱不会让数据库退出健康检查。开发态可显式传入 `--endpoint` 和 `--token`，但不要把 token 粘贴到 issue 或日志。
 
 ## 应用无法启动
 
@@ -58,6 +58,9 @@ pnpm atm doctor
 ## 备份或恢复失败
 
 不要手工删除 `.tmp`、WAL 或当前数据库。ATM 下次启动会清理中断临时文件，但正式恢复应从数据工具发起。校验失败时保留原备份与 manifest，检查磁盘空间、权限、SHA-256 和 SQLite `quick_check`。详见 [backup-recovery.md](./backup-recovery.md)。
+
+若外部备份体积异常增大，检查工具是否跟随了数据根下的 `current` junction。该入口指向完整安装目录，
+必须按“跳过重解析点/目录链接”处理；它不属于用户数据，也不应复制到另一台设备。
 
 ## 收集最小诊断材料
 
