@@ -23,6 +23,7 @@ describe("DISCOVERED_FROM schema migration", () => {
       "0007_operation_trace.sql",
       "0008_work_item_phase_waiting.sql",
       "0009_structured_cancel.sql",
+      "0010_review_workflow.sql",
     ];
     for (const name of pendingMigrations) rmSync(join(migrationsRoot, "project", name));
 

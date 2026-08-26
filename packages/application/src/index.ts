@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
+import { normalizeReviewCandidateHashes } from "@ayanami-task/protocol";
 import {
   gitHead,
   inspectGitContext,
@@ -919,6 +920,54 @@ export class AyanamiTaskService {
     _view: "core" | "context" | "full" = "core",
   ): Promise<ReturnType<ProjectRepository["getWorkItem"]>> {
     return (await this.#repository(projectCode)).getWorkItem(taskKey);
+  }
+
+  async createReviewRequest(
+    projectCode: string,
+    sessionId: string,
+    opId: string,
+    input: Parameters<ProjectRepository["createReviewRequest"]>[2],
+  ) {
+    const repository = await this.#repository(projectCode);
+    const normalizedInput = {
+      ...input,
+      expectedCandidateHashes: normalizeReviewCandidateHashes(input.expectedCandidateHashes),
+    };
+    const resolution = repository.resolveMutationActor(
+      sessionId,
+      opId,
+      "review.request.create",
+      normalizedInput,
+    );
+    const result = repository.createReviewRequest(resolution.actor, opId, normalizedInput);
+    await this.#flush(projectCode);
+    return mutationAck(result, opId, resolution);
+  }
+
+  async getReviewRequest(projectCode: string, requestKey: string) {
+    return (await this.#repository(projectCode)).getReviewRequest(requestKey);
+  }
+
+  async submitReview(
+    projectCode: string,
+    sessionId: string,
+    opId: string,
+    input: Parameters<ProjectRepository["submitReview"]>[2],
+  ) {
+    const repository = await this.#repository(projectCode);
+    const normalizedInput = {
+      ...input,
+      reviewedHashes: normalizeReviewCandidateHashes(input.reviewedHashes),
+    };
+    const resolution = repository.resolveMutationActor(
+      sessionId,
+      opId,
+      "review.submit",
+      normalizedInput,
+    );
+    const result = repository.submitReview(resolution.actor, opId, normalizedInput);
+    await this.#flush(projectCode);
+    return mutationAck(result, opId, resolution);
   }
 
   async updateChecklist(
