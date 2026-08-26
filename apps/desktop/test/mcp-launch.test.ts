@@ -92,6 +92,20 @@ describe("MCP 启动方式", () => {
     expect(readlinkSync(join(dataDir, MCP_RUNTIME_LINK))).toBe(dirname(second));
   });
 
+  it("旧版本目录已删除导致 junction 悬空时仍能换指到新版本", () => {
+    const dataDir = scratch();
+    const first = squirrelInstall("1.0.1").execPath;
+    const second = squirrelInstall("1.0.2").execPath;
+    const link = installMcpRuntimeLink(first, dataDir)!;
+    rmSync(dirname(first), { recursive: true, force: true });
+    expect(existsSync(link)).toBe(false);
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+
+    expect(installMcpRuntimeLink(second, dataDir)).toBe(link);
+    expect(readlinkSync(link)).toBe(dirname(second));
+    expect(readFileSync(join(link, "AyanamiTaskManager.exe"), "utf8")).toBe("real");
+  });
+
   it("已经指对时不重建——重建的空窗期里 spawn 会失败", () => {
     const { execPath } = squirrelInstall(FIXTURE_VERSION);
     const dataDir = scratch();

@@ -64,8 +64,11 @@ export function installMcpRuntimeLink(execPath: string, dataDir: string): string
   const link = join(dataDir, MCP_RUNTIME_LINK);
   try {
     mkdirSync(dataDir, { recursive: true });
-    if (existsSync(link)) {
-      const stat = lstatSync(link);
+    // existsSync 会沿着 junction 看目标：旧 app-<version> 已删时它返回 false，
+    // 但链接目录项本身仍在。随后直接 symlink 会 EEXIST，并被 catch 静默回退到
+    // 带版本号的真实 exe。lstat 看的是目录项本身，悬空链接也能被识别和换指。
+    const stat = lstatSync(link, { throwIfNoEntry: false });
+    if (stat) {
       if (!stat.isSymbolicLink()) return null; // 有人拿真目录占了位，不替他做主删掉
       if (readlinkSync(link) === target) return link;
       // rmdir 删 Windows 的 junction，unlink 删 POSIX 的目录符号链接。两个都只作用在
