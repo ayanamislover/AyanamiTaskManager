@@ -49,6 +49,8 @@ claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resou
 
 所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
 
+MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCase`。不要把两套命名混用。
+
 ## 最短工作流
 
 1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。默认 `brief="full"`；低上下文客户端可用 `minimal`，只要 Session 回执则用 `none`。`max_chars` 只裁剪 brief，不会丢失 `session`、`project`、`scope` 或原子回执。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
