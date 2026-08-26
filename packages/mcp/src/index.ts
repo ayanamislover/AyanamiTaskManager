@@ -8,7 +8,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
-import { EvidenceInputSchema } from "@ayanami-task/protocol";
+import { EvidenceInputSchema, WorkItemPatchInputSchema } from "@ayanami-task/protocol";
 
 const outputSchema = z.object({}).catchall(z.unknown());
 const projectCode = z.string().trim().min(1).max(20);
@@ -37,6 +37,24 @@ function compactJsonSchema(value: unknown): unknown {
     const types = source.anyOf.map((entry) => (entry as Record<string, unknown>)?.type);
     if (types.every((type) => typeof type === "string") && types.includes("null"))
       return { type: types };
+  }
+  if (
+    Array.isArray(source.anyOf) &&
+    source.anyOf.length > 0 &&
+    source.anyOf.every(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        (entry as Record<string, unknown>).type === "object",
+    )
+  ) {
+    const { anyOf, ...rest } = source;
+    return compactJsonSchema({
+      ...rest,
+      type: "object",
+      anyOf: (anyOf as Array<Record<string, unknown>>).map(({ type: _type, ...branch }) => branch),
+    });
   }
   const omitted = new Set([
     "$schema",
@@ -97,6 +115,42 @@ function compactJsonSchema(value: unknown): unknown {
   );
 }
 
+function compactPublicToolSchema(name: string, value: unknown): Record<string, unknown> {
+  const schema = compactJsonSchema(value) as Record<string, any>;
+  const omit = (properties: Record<string, unknown> | undefined, fields: readonly string[]) => {
+    if (!properties) return;
+    for (const field of fields) delete properties[field];
+  };
+
+  // tools/list has a hard shared 8 KiB ceiling. Runtime validation remains the full Zod schema;
+  // the public projection keeps the preferred/common workflow and omits only advanced aliases or
+  // filters whose absence does not prevent a tool from being called correctly.
+  if (name === "atm_begin") {
+    omit(schema.properties, [
+      "title",
+      "display_name",
+      "client_kind",
+      "thread_id",
+      "parent_session_id",
+      "predecessor_session_id",
+      "signals",
+      "creation_reason",
+    ]);
+  }
+  if (name === "atm_task_list") {
+    omit(schema.properties, ["owner", "parent_key", "milestone_id", "query"]);
+  }
+  if (name === "atm_task_create") {
+    omit(schema.properties?.items?.items?.properties, [
+      "milestone_id",
+      "parent_key",
+      "depends_on",
+      "discovered_from",
+    ]);
+  }
+  return schema;
+}
+
 function installCompactToolList(server: McpServer): void {
   type RegisteredTool = {
     enabled: boolean;
@@ -117,8 +171,13 @@ function installCompactToolList(server: McpServer): void {
         ...(["atm_begin", "atm_brief"].includes(name) && tool.description
           ? { description: tool.description }
           : {}),
-        inputSchema: compactJsonSchema(
-          tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : { type: "object" },
+        inputSchema: compactPublicToolSchema(
+          name,
+          name === "atm_checklist"
+            ? checklistPublicJsonSchema()
+            : tool.inputSchema
+              ? z.toJSONSchema(tool.inputSchema)
+              : { type: "object" },
         ) as any,
         ...(tool._meta ? { _meta: tool._meta } : {}),
       })),
@@ -595,31 +654,226 @@ const workItemCreate = z
     path: ["discovered_from_ref"],
   });
 
-const workItemPatch = z.object({
-  task_key: taskKey,
+const workItemExpectedFields = z
+  .object({
+    title: z.string().trim().min(1).max(400).optional(),
+    description: z.string().max(50_000).optional(),
+    target_date: z.string().nullable().optional(),
+    parent_key: z.string().trim().min(1).max(100).nullable().optional(),
+  })
+  .strict()
+  .refine((value) => Object.keys(value).length > 0, "expected_fields 至少包含一个字段");
+
+function coreWorkItemPatch(item: Record<string, any>): Record<string, unknown> {
+  const expectedFields = item.expected_fields
+    ? {
+        ...(item.expected_fields.title === undefined ? {} : { title: item.expected_fields.title }),
+        ...(item.expected_fields.description === undefined
+          ? {}
+          : { description: item.expected_fields.description }),
+        ...(item.expected_fields.target_date === undefined
+          ? {}
+          : { targetDate: item.expected_fields.target_date }),
+        ...(item.expected_fields.parent_key === undefined
+          ? {}
+          : { parentKey: item.expected_fields.parent_key }),
+      }
+    : undefined;
+  return {
+    taskKey: item.task_key,
+    expectedVersion: item.expected_version,
+    operation: item.operation,
+    takeoverStale: item.takeover_stale,
+    ...(expectedFields === undefined ? {} : { expectedFields }),
+    ...(item.title === undefined ? {} : { title: item.title }),
+    ...(item.description === undefined ? {} : { description: item.description }),
+    ...(item.blocked_reason === undefined ? {} : { blockedReason: item.blocked_reason }),
+    ...(item.waiting_for === undefined ? {} : { waitingFor: item.waiting_for }),
+    ...(item.cancel_reason === undefined ? {} : { cancelReason: item.cancel_reason }),
+    ...(item.duplicate_of === undefined ? {} : { duplicateOf: item.duplicate_of }),
+    ...(item.superseded_by === undefined ? {} : { supersededBy: item.superseded_by }),
+    ...(item.assignee_agent_id === undefined ? {} : { assigneeAgentId: item.assignee_agent_id }),
+    ...(item.target_date === undefined ? {} : { targetDate: item.target_date }),
+    ...(item.parent_key === undefined ? {} : { parentKey: item.parent_key }),
+  };
+}
+
+const workItemPatch = z
+  .object({
+    task_key: taskKey,
+    expected_version: z.number().int().nonnegative(),
+    expected_fields: workItemExpectedFields.optional(),
+    operation: z.enum([
+      "claim",
+      "start",
+      "release",
+      "block",
+      "wait_user",
+      "wait_agent",
+      "verify",
+      "complete",
+      "verify_and_complete",
+      "cancel",
+      "reopen",
+      "edit",
+    ]),
+    title: z.string().min(1).max(400).optional(),
+    description: z.string().max(50_000).optional(),
+    blocked_reason: z.string().min(1).max(2000).optional(),
+    waiting_for: z.string().min(1).max(1000).optional(),
+    cancel_reason: z.string().trim().min(1).max(2000).optional(),
+    duplicate_of: z.string().trim().min(1).max(100).nullable().optional(),
+    superseded_by: z.string().trim().min(1).max(100).nullable().optional(),
+    assignee_agent_id: z.string().nullable().optional(),
+    target_date: z.string().nullable().optional(),
+    parent_key: z.string().nullable().optional(),
+    takeover_stale: z.boolean().default(false),
+  })
+  .superRefine((value, context) => {
+    if (value.operation === "verify_and_complete") {
+      const allowed = new Set(["task_key", "expected_version", "operation", "takeover_stale"]);
+      for (const [field, fieldValue] of Object.entries(value)) {
+        if (!allowed.has(field) && fieldValue !== undefined) {
+          context.addIssue({
+            code: "custom",
+            path: [field],
+            message: `verify_and_complete 不接受 ${field}`,
+          });
+        }
+      }
+      return;
+    }
+    const parsed = WorkItemPatchInputSchema.safeParse(coreWorkItemPatch(value));
+    if (parsed.success) return;
+    const pathNames: Record<string, string> = {
+      taskKey: "task_key",
+      expectedVersion: "expected_version",
+      expectedFields: "expected_fields",
+      targetDate: "target_date",
+      parentKey: "parent_key",
+      blockedReason: "blocked_reason",
+      waitingFor: "waiting_for",
+      cancelReason: "cancel_reason",
+      duplicateOf: "duplicate_of",
+      supersededBy: "superseded_by",
+      assigneeAgentId: "assignee_agent_id",
+      takeoverStale: "takeover_stale",
+    };
+    for (const issue of parsed.error.issues) {
+      context.addIssue({
+        code: "custom",
+        path: issue.path.map((part) =>
+          typeof part === "string" ? (pathNames[part] ?? part) : part,
+        ),
+        message: issue.message,
+      });
+    }
+  });
+
+const taskPatchToolInput = z
+  .object({
+    project: projectCode,
+    session: sessionId,
+    op_id: opId,
+    items: z.array(workItemPatch).min(1).max(50),
+  })
+  .superRefine((value, context) => {
+    const composite = value.items.filter((item) => item.operation === "verify_and_complete");
+    if (composite.length > 0 && value.items.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        path: ["items"],
+        message: "verify_and_complete 必须作为唯一 item",
+      });
+    }
+  });
+
+const checklistStatus = z.enum(["TODO", "DOING", "DONE", "SKIPPED"]);
+const checklistToolCommon = {
+  project: projectCode,
+  session: sessionId,
+  op_id: opId,
   expected_version: z.number().int().nonnegative(),
-  operation: z.enum([
-    "claim",
-    "start",
-    "release",
-    "block",
-    "wait_user",
-    "wait_agent",
-    "verify",
-    "complete",
-    "cancel",
-    "reopen",
-    "edit",
-  ]),
-  title: z.string().min(1).max(400).optional(),
-  description: z.string().max(50_000).optional(),
-  blocked_reason: z.string().min(1).max(2000).optional(),
-  waiting_for: z.string().min(1).max(1000).optional(),
-  assignee_agent_id: z.string().nullable().optional(),
-  target_date: z.string().nullable().optional(),
-  parent_key: z.string().nullable().optional(),
-  takeover_stale: z.boolean().default(false),
-});
+};
+const checklistBatchItem = z
+  .object({
+    id: z.string().trim().min(1),
+    status: checklistStatus,
+    evidence: z.array(EvidenceInputSchema).max(100).optional(),
+  })
+  .strict();
+const checklistSingleInput = z
+  .object({
+    ...checklistToolCommon,
+    mode: z.enum(["single"]).optional(),
+    id: z.string().trim().min(1),
+    status: checklistStatus,
+    evidence: z.array(EvidenceInputSchema).max(100).optional(),
+  })
+  .strict();
+const checklistBatchInput = z
+  .object({
+    ...checklistToolCommon,
+    mode: z.enum(["batch"]),
+    task_key: taskKey,
+    items: z.array(checklistBatchItem).min(1).max(100),
+  })
+  .strict();
+function checklistPublicJsonSchema(): Record<string, unknown> {
+  const single = z.toJSONSchema(checklistSingleInput) as Record<string, any>;
+  const batch = z.toJSONSchema(checklistBatchInput) as Record<string, any>;
+  const batchItems = batch.properties?.items?.items;
+  if (batchItems?.properties) {
+    batchItems.properties.evidence = { $ref: "#/properties/evidence" };
+    batchItems.properties.status = { $ref: "#/properties/status" };
+  }
+  return {
+    type: "object",
+    properties: {
+      ...(single.properties ?? {}),
+      ...(batch.properties ?? {}),
+      mode: { type: "string", enum: ["single", "batch"] },
+    },
+    required: ["project", "session", "op_id", "expected_version"],
+    anyOf: [
+      {
+        properties: { mode: { const: "single" } },
+        required: ["id", "status"],
+      },
+      {
+        properties: { mode: { const: "batch" } },
+        required: ["mode", "task_key", "items"],
+      },
+    ],
+  };
+}
+
+const checklistToolInput = z
+  .object({
+    ...checklistToolCommon,
+    mode: z.enum(["single", "batch"]).optional(),
+    id: z.string().optional(),
+    status: checklistStatus.optional(),
+    evidence: z.array(EvidenceInputSchema).max(100).optional(),
+    task_key: taskKey.optional(),
+    items: z.array(checklistBatchItem).max(100).optional(),
+  })
+  .passthrough()
+  .superRefine((value, context) => {
+    const parsed = (value.mode === "batch" ? checklistBatchInput : checklistSingleInput).safeParse(
+      value,
+    );
+    if (parsed.success) return;
+    for (const issue of parsed.error.issues) {
+      if (issue.code === "unrecognized_keys") {
+        for (const key of issue.keys) {
+          context.addIssue({ code: "custom", path: [key], message: `当前 mode 不接受 ${key}` });
+        }
+        continue;
+      }
+      context.addIssue({ code: "custom", path: issue.path, message: issue.message });
+    }
+  });
 
 type TaskProjectionView = "core" | "context" | "full";
 type TaskListView = TaskProjectionView | "reconcile";
@@ -1063,7 +1317,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_begin",
     {
-      description: "开工；直接使用返回的 brief。",
+      description: "直接使用返回的 brief",
       inputSchema: {
         op_id: opId.optional(),
         cwd: z.string().min(1).optional(),
@@ -1164,7 +1418,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   server.registerTool(
     "atm_brief",
     {
-      description: "仅在上下文压缩、长时间离开或明确恢复 working set 时调用。",
+      description: "仅在上下文压缩、长时间离开或明确恢复 working set",
       inputSchema: {
         project_code: projectCode,
         session_id: sessionId.optional(),
@@ -1416,34 +1670,49 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_task_patch",
     {
       description: "批量变更任务。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        items: z.array(workItemPatch).min(1).max(50),
-      },
+      inputSchema: taskPatchToolInput,
       outputSchema,
     },
     async (input) => {
+      const composite = input.items.filter((item) => item.operation === "verify_and_complete");
+      if (composite.length > 0) {
+        if (input.items.length !== 1) {
+          throw new Error(
+            "VALIDATION_ERROR: verify_and_complete 必须作为 atm_task_patch 的唯一 item",
+          );
+        }
+        const item = composite[0]!;
+        const completed = await service.verifyAndComplete(
+          input.project,
+          input.session,
+          input.op_id,
+          {
+            taskKey: item.task_key,
+            expectedVersion: item.expected_version,
+          },
+        );
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, completed as unknown as Record<string, unknown>),
+          project: input.project.toUpperCase(),
+          seq: completed.sequence,
+          items: [
+            {
+              task_key: completed.taskKey,
+              from_status: completed.fromStatus,
+              status: completed.status,
+              from_version: completed.fromVersion,
+              version: completed.taskVersion,
+              transitions: completed.transitions,
+            },
+          ],
+        });
+      }
       const patched = await service.patchWorkItems(
         input.project,
         input.session,
         input.op_id,
-        input.items.map((item) => ({
-          taskKey: item.task_key,
-          expectedVersion: item.expected_version,
-          operation: item.operation,
-          takeoverStale: item.takeover_stale,
-          ...(item.title === undefined ? {} : { title: item.title }),
-          ...(item.description === undefined ? {} : { description: item.description }),
-          ...(item.blocked_reason === undefined ? {} : { blockedReason: item.blocked_reason }),
-          ...(item.waiting_for === undefined ? {} : { waitingFor: item.waiting_for }),
-          ...(item.assignee_agent_id === undefined
-            ? {}
-            : { assigneeAgentId: item.assignee_agent_id }),
-          ...(item.target_date === undefined ? {} : { targetDate: item.target_date }),
-          ...(item.parent_key === undefined ? {} : { parentKey: item.parent_key }),
-        })),
+        input.items.map((item) => coreWorkItemPatch(item) as any),
       );
       return result({
         ok: true,
@@ -1467,30 +1736,56 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       // id 与 expected_version 都取自 atm_task_get 的 context 视图（core 不返回 checklist），
       // expected_version 是检查项自己的版本、新建为 0，不是任务的版本。
       description: "改检查项状态并挂证据。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        id: z.string().trim(),
-        expected_version: z.number().int().nonnegative(),
-        status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
-        evidence: z.array(EvidenceInputSchema).max(100).optional(),
-      },
+      inputSchema: checklistToolInput,
       outputSchema,
     },
     async (input) => {
-      const updated = await service.updateChecklist(input.project, input.session, input.op_id, {
-        checklistId: input.id,
-        expectedVersion: input.expected_version,
-        status: input.status,
-        ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+      if (input.mode === "batch") {
+        const batch = checklistBatchInput.parse(input);
+        const updated = await service.updateChecklistBatch(
+          batch.project,
+          batch.session,
+          batch.op_id,
+          {
+            taskKey: batch.task_key,
+            expectedVersion: batch.expected_version,
+            items: batch.items.map((item) => ({
+              checklistId: item.id,
+              status: item.status,
+              ...(item.evidence === undefined ? {} : { evidence: item.evidence }),
+            })),
+          },
+        );
+        return result({
+          ok: true,
+          ...mutationAck(batch.op_id, updated as unknown as Record<string, unknown>),
+          project: batch.project.toUpperCase(),
+          seq: updated.sequence,
+          task_key: updated.taskKey,
+          task_version: updated.taskVersion,
+          progress: updated.taskProgress,
+          updated_count: updated.updatedCount,
+          items: updated.checklist.map((item) => ({
+            id: item.id,
+            status: item.status,
+            version: item.version,
+            evidence: item.evidence.length,
+          })),
+        });
+      }
+      const single = checklistSingleInput.parse(input);
+      const updated = await service.updateChecklist(single.project, single.session, single.op_id, {
+        checklistId: single.id,
+        expectedVersion: single.expected_version,
+        status: single.status,
+        ...(single.evidence === undefined ? {} : { evidence: single.evidence }),
       });
       return result({
         ok: true,
-        ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
-        project: input.project.toUpperCase(),
+        ...mutationAck(single.op_id, updated as unknown as Record<string, unknown>),
+        project: single.project.toUpperCase(),
         seq: updated.sequence,
-        id: input.id,
+        id: single.id,
         status: updated.checklist.status,
         version: updated.checklist.version,
         evidence: updated.checklist.evidence.length,
