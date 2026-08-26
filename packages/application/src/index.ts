@@ -816,6 +816,38 @@ export class AyanamiTaskService {
     return result;
   }
 
+  async verifyAndComplete(
+    projectCode: string,
+    sessionId: string,
+    opId: string,
+    input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
+  ) {
+    const repository = await this.#repository(projectCode);
+    const resolution = repository.resolveMutationActor(
+      sessionId,
+      opId,
+      "work.verify-and-complete",
+      input,
+    );
+    const result = repository.verifyAndComplete(resolution.actor, opId, input);
+    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
+    await this.#flush(projectCode);
+    await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
+    return mutationAck(result, opId, resolution);
+  }
+
+  async verifyAndCompleteAsUser(
+    projectCode: string,
+    opId: string,
+    input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
+  ): Promise<ReturnType<ProjectRepository["verifyAndComplete"]>> {
+    const repository = await this.#repository(projectCode);
+    const result = repository.verifyAndComplete(this.#userActor(), opId, input);
+    await this.#flush(projectCode);
+    await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
+    return result;
+  }
+
   async listWorkItems(
     projectCode: string,
     filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
@@ -909,6 +941,35 @@ export class AyanamiTaskService {
   ): Promise<ReturnType<ProjectRepository["updateChecklist"]>> {
     const repository = await this.#repository(projectCode);
     const result = repository.updateChecklist(this.#userActor(), opId, input);
+    await this.#flush(projectCode);
+    return result;
+  }
+
+  async updateChecklistBatch(
+    projectCode: string,
+    sessionId: string,
+    opId: string,
+    input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
+  ) {
+    const repository = await this.#repository(projectCode);
+    const resolution = repository.resolveMutationActor(
+      sessionId,
+      opId,
+      "checklist.update.batch",
+      input,
+    );
+    const result = repository.updateChecklistBatch(resolution.actor, opId, input);
+    await this.#flush(projectCode);
+    return mutationAck(result, opId, resolution);
+  }
+
+  async updateChecklistBatchAsUser(
+    projectCode: string,
+    opId: string,
+    input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
+  ): Promise<ReturnType<ProjectRepository["updateChecklistBatch"]>> {
+    const repository = await this.#repository(projectCode);
+    const result = repository.updateChecklistBatch(this.#userActor(), opId, input);
     await this.#flush(projectCode);
     return result;
   }

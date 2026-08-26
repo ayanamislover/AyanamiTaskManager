@@ -32,6 +32,7 @@ const EVENT_TITLES: Record<string, string> = {
   "backup.created": "创建备份",
   "backup.failed": "备份失败",
   "backup.restored": "恢复备份",
+  "checklist.batch_updated": "批量更新验收清单",
   "checklist.updated": "更新验收清单",
   "milestone.created": "创建里程碑",
   "objective.created": "创建目标",
@@ -152,6 +153,11 @@ function detailFor(
     const status = asText(payload.status);
     const taskKey = asText(payload.taskKey);
     return `验收清单${taskKey ? `（${taskKey}）` : ""}${status ? `状态变为 ${status}` : "已更新"}`;
+  }
+  if (type === "checklist.batch_updated") {
+    const taskKey = asText(payload.taskKey) ?? key;
+    const count = Array.isArray(payload.items) ? payload.items.length : null;
+    return `批量更新验收清单${taskKey ? `（${taskKey}）` : ""}${count === null ? "" : `：${count} 项`}`;
   }
   if (type === "agent.joined") {
     const agent = asText(payload.agentId) ?? input.actor ?? key;

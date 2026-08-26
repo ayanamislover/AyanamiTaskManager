@@ -2013,6 +2013,124 @@ export class ProjectRepository {
     });
   }
 
+  verifyAndComplete(
+    actor: ProjectActor,
+    opId: string,
+    input: { taskKey: string; expectedVersion: number },
+  ): {
+    taskKey: string;
+    fromStatus: WorkItemStatus;
+    status: "DONE";
+    fromVersion: number;
+    taskVersion: number;
+    transitions: Array<"VERIFYING" | "DONE">;
+    item: WorkItemView;
+    sequence: number;
+  } {
+    return this.mutate({
+      actor,
+      opId,
+      operation: "work.verify-and-complete",
+      request: input,
+      immediate: true,
+      action: () => {
+        const initial = this.rowForTaskKey(input.taskKey);
+        if (initial.version !== input.expectedVersion) {
+          throw new Error(`VERSION_CONFLICT: ${input.taskKey}:${initial.version}`);
+        }
+        const fromStatus = initial.status as WorkItemStatus;
+        const fromVersion = Number(initial.version);
+        const transitions: Array<"VERIFYING" | "DONE"> = [];
+        const now = nowIso();
+        let sequence = this.meta.sequence;
+        let verificationSequence: number | null = null;
+        let verifying = initial;
+
+        if (fromStatus !== "VERIFYING") {
+          assertWorkItemTransition(fromStatus, "VERIFYING");
+          this.#sqlite
+            .prepare(
+              `UPDATE work_items SET status = 'VERIFYING', phase = 'VERIFYING', phase_inferred = 0,
+               waiting_on = NULL, waiting_for = NULL, version = version + 1, updated_at = ?
+               WHERE id = ?`,
+            )
+            .run(now, initial.id);
+          if (actor.sessionId) {
+            this.#sqlite
+              .prepare(
+                `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WORKING',
+                 heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
+              )
+              .run(initial.id, now, now, actor.sessionId);
+          }
+          sequence = this.appendEvent(
+            "work.verification_requested",
+            actor,
+            "WORK_ITEM",
+            initial.id,
+            {
+              key: input.taskKey,
+              title: initial.title,
+              operation: "verify_and_complete",
+              status: "VERIFYING",
+              phase: "VERIFYING",
+              composite: true,
+            },
+          );
+          verificationSequence = sequence;
+          transitions.push("VERIFYING");
+          verifying = this.#sqlite
+            .prepare("SELECT * FROM work_items WHERE id = ?")
+            .get(initial.id) as any;
+        }
+
+        this.assertCompletionGate(verifying);
+        assertWorkItemTransition(verifying.status as WorkItemStatus, "DONE");
+        this.#sqlite
+          .prepare(
+            `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
+             waiting_on = NULL, waiting_for = NULL, completed_at = ?, computed_progress = 100,
+             reported_progress = 100, version = version + 1, updated_at = ? WHERE id = ?`,
+          )
+          .run(now, now, initial.id);
+        if (actor.sessionId) {
+          this.#sqlite
+            .prepare(
+              `UPDATE agent_sessions SET current_work_item_id = NULL, work_state = 'IDLE',
+               heartbeat_at = ?, updated_at = ?, version = version + 1
+               WHERE id = ? AND current_work_item_id = ?`,
+            )
+            .run(now, now, actor.sessionId, initial.id);
+        }
+        sequence = this.appendEvent("work.completed", actor, "WORK_ITEM", initial.id, {
+          key: input.taskKey,
+          title: initial.title,
+          operation: "verify_and_complete",
+          status: "DONE",
+          phase: "DONE",
+          composite: true,
+          ...(verificationSequence === null ? {} : { verificationSequence }),
+        });
+        transitions.push("DONE");
+        if (initial.parent_id) this.recomputeWorkItem(initial.parent_id);
+        const updated = this.#sqlite
+          .prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(initial.id);
+        const item = this.workItemViewFromRow(updated);
+        return {
+          taskKey: input.taskKey,
+          fromStatus,
+          status: "DONE",
+          fromVersion,
+          taskVersion: item.version,
+          transitions,
+          item,
+          sequence,
+        };
+      },
+    });
+  }
+
   // blockers 是独立记录，work_items.blocked_reason 只是它在任务行上的影子。
   // 表结构里 status 允许 RESOLVED/CANCELLED、还有 resolved_at 和 version，
   // 说明它本就是照「可关闭」设计的；但在此之前全仓库只有一处 INSERT（progress
@@ -2095,6 +2213,116 @@ export class ProjectRepository {
           },
           taskProgress,
           taskVersion: task.version,
+          sequence,
+        };
+      },
+    });
+  }
+
+  updateChecklistBatch(
+    actor: ProjectActor,
+    opId: string,
+    input: {
+      taskKey: string;
+      expectedVersion: number;
+      items: Array<{
+        checklistId: string;
+        status: "TODO" | "DOING" | "DONE" | "SKIPPED";
+        evidence?: unknown[];
+      }>;
+    },
+  ): {
+    taskKey: string;
+    checklist: ChecklistView[];
+    taskProgress: number;
+    taskVersion: number;
+    updatedCount: number;
+    sequence: number;
+  } {
+    if (input.items.length === 0 || input.items.length > 100) {
+      throw new Error("VALIDATION_ERROR: items 1..100");
+    }
+    if (new Set(input.items.map((item) => item.checklistId)).size !== input.items.length) {
+      throw new Error("VALIDATION_ERROR: duplicate checklistId");
+    }
+    const normalizedInput = {
+      ...input,
+      items: input.items.map((item) => ({
+        ...item,
+        ...(item.evidence === undefined ? {} : { evidence: this.normalizeEvidence(item.evidence) }),
+      })),
+    };
+    return this.mutate({
+      actor,
+      opId,
+      operation: "checklist.update.batch",
+      request: normalizedInput,
+      immediate: true,
+      action: () => {
+        const task = this.rowForTaskKey(input.taskKey);
+        if (task.version !== input.expectedVersion) {
+          throw new Error(`VERSION_CONFLICT: ${input.taskKey}:${task.version}`);
+        }
+        const rows = normalizedInput.items.map((item) => {
+          const row = this.#sqlite
+            .prepare("SELECT * FROM checklist_items WHERE id = ?")
+            .get(item.checklistId) as any;
+          if (!row) throw new Error(`NOT_FOUND: ${item.checklistId}`);
+          if (row.work_item_id !== task.id) {
+            throw new Error(`CHECKLIST_TASK_MISMATCH: ${item.checklistId}`);
+          }
+          const evidence = item.evidence ?? json(row.evidence_json, []);
+          if (
+            item.status === "DONE" &&
+            Number(row.evidence_required) === 1 &&
+            evidence.length === 0
+          ) {
+            throw new Error(`COMPLETION_GATE_FAILED: evidence required (${item.checklistId})`);
+          }
+          return { row, item, evidence };
+        });
+
+        const now = nowIso();
+        for (const { row, item, evidence } of rows) {
+          this.#sqlite
+            .prepare(
+              `UPDATE checklist_items SET status = ?, evidence_json = ?, version = version + 1,
+               updated_at = ? WHERE id = ?`,
+            )
+            .run(item.status, JSON.stringify(evidence), now, row.id);
+        }
+        const taskProgress = this.recomputeWorkItem(task.id);
+        const updatedTask = this.#sqlite
+          .prepare("SELECT version FROM work_items WHERE id = ?")
+          .get(task.id) as { version: number };
+        const sequence = this.appendEvent("checklist.batch_updated", actor, "WORK_ITEM", task.id, {
+          key: input.taskKey,
+          taskKey: input.taskKey,
+          expectedVersion: input.expectedVersion,
+          taskVersion: updatedTask.version,
+          items: rows.map(({ row, item }) => ({ checklistId: row.id, status: item.status })),
+        });
+        const checklist = rows.map(({ row }) => {
+          const updated = this.#sqlite
+            .prepare("SELECT * FROM checklist_items WHERE id = ?")
+            .get(row.id) as any;
+          return {
+            id: updated.id,
+            title: updated.title,
+            kind: updated.kind,
+            status: updated.status,
+            weight: updated.weight,
+            evidenceRequired: Number(updated.evidence_required) === 1,
+            evidence: json(updated.evidence_json, []),
+            version: updated.version,
+          };
+        });
+        return {
+          taskKey: input.taskKey,
+          checklist,
+          taskProgress,
+          taskVersion: updatedTask.version,
+          updatedCount: checklist.length,
           sequence,
         };
       },
