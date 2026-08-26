@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline";
+import { Buffer } from "node:buffer";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Readable, Writable } from "node:stream";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -70,7 +71,10 @@ function compactJsonSchema(value: unknown): unknown {
     Object.entries(source)
       .filter(([key, entry]) => !omitted.has(key) && entry !== undefined)
       .flatMap(([key, entry]) => {
-        if (key === "maxLength" && typeof entry === "number" && entry > 300) return [];
+        // Claude 的 tools/list 只有 8 KiB 总预算。保留反馈里会直接造成整次写入失败的
+        // 300 字摘要边界；高频 identifier 的长度边界由同一份运行时 Zod 继续执行，
+        // 其字符串类型、枚举与 required 仍完整公开。
+        if (key === "maxLength" && entry !== 300) return [];
         if (key === "required" && Array.isArray(entry) && defaulted.size > 0) {
           const required = entry.filter((field) => !defaulted.has(String(field)));
           return required.length === 0 ? [] : [[key, compactJsonSchema(required)]];
@@ -117,31 +121,73 @@ function plain(value: unknown): Record<string, unknown> {
 
 function bounded(value: unknown, maxChars: number): Record<string, unknown> {
   const normalized = plain(value);
+  if (JSON.stringify(normalized).length <= maxChars) return normalized;
+
+  type TruncatedField = {
+    path: string;
+    original_chars: number;
+    returned_chars: number;
+  };
+  type TruncatedCollection = {
+    path: string;
+    original_items: number;
+    returned_items: number;
+  };
   for (const [maxString, maxArray] of [
+    [512, 20],
     [180, 10],
     [120, 8],
     [80, 5],
     [48, 3],
   ] as const) {
-    const shrink = (entry: unknown): unknown => {
+    const truncatedFields: TruncatedField[] = [];
+    const truncatedCollections: TruncatedCollection[] = [];
+    const shrink = (entry: unknown, path: string): unknown => {
       if (typeof entry === "string") {
-        return entry.length > maxString ? `${entry.slice(0, maxString - 1)}…` : entry;
+        if (entry.length <= maxString) return entry;
+        const returned = `${entry.slice(0, Math.max(0, maxString - 1))}…`;
+        truncatedFields.push({
+          path,
+          original_chars: entry.length,
+          returned_chars: returned.length,
+        });
+        return returned;
       }
-      if (Array.isArray(entry)) return entry.slice(0, maxArray).map(shrink);
+      if (Array.isArray(entry)) {
+        const returned = entry.slice(0, maxArray);
+        if (returned.length < entry.length) {
+          truncatedCollections.push({
+            path,
+            original_items: entry.length,
+            returned_items: returned.length,
+          });
+        }
+        return returned.map((child, index) => shrink(child, `${path}[${index}]`));
+      }
       if (entry && typeof entry === "object") {
         return Object.fromEntries(
-          Object.entries(entry as Record<string, unknown>).map(([key, child]) => [
-            key,
-            shrink(child),
-          ]),
+          Object.entries(entry as Record<string, unknown>).map(([key, child]) => {
+            const childPath = path ? `${path}.${key}` : key;
+            return [key, shrink(child, childPath)];
+          }),
         );
       }
       return entry;
     };
-    const candidate = shrink(normalized) as Record<string, unknown>;
-    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+    const candidate = shrink(normalized, "") as Record<string, unknown>;
+    const annotated: Record<string, unknown> = {
+      ...candidate,
+      truncated: true,
+      ...(truncatedFields.length === 0 ? {} : { truncated_fields: truncatedFields }),
+      ...(truncatedCollections.length === 0 ? {} : { truncated_collections: truncatedCollections }),
+    };
+    if (JSON.stringify(annotated).length <= maxChars) return annotated;
   }
-  return { truncated: true, code: "RESULT_TOO_LARGE", hint: "缩小 limit、field_mask 或 include" };
+  return {
+    truncated: true,
+    code: "RESULT_TOO_LARGE",
+    hint: "使用该工具的 max_chars、cursor、field_mask、limit 或 include 缩小读取范围",
+  };
 }
 
 function wrap(structuredContent: Record<string, unknown>) {
@@ -153,6 +199,166 @@ function wrap(structuredContent: Record<string, unknown>) {
 
 function result(value: unknown, maxChars = 4000) {
   return wrap(bounded(value, maxChars));
+}
+
+type FieldCursor = { v: 1; path: Array<string | number>; offset: number };
+
+function encodeFieldCursor(cursor: FieldCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeFieldCursor(token: string): FieldCursor {
+  try {
+    const value = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as FieldCursor;
+    if (
+      value.v !== 1 ||
+      !Array.isArray(value.path) ||
+      value.path.some((part) => typeof part !== "string" && !Number.isInteger(part)) ||
+      !Number.isInteger(value.offset) ||
+      value.offset < 0
+    ) {
+      throw new Error("invalid shape");
+    }
+    return value;
+  } catch {
+    throw new Error("INVALID_CURSOR: continuation cursor 无效或已损坏");
+  }
+}
+
+function fieldPath(path: Array<string | number>): string {
+  return path.reduce<string>(
+    (result, part) =>
+      typeof part === "number" ? `${result}[${part}]` : result ? `${result}.${part}` : part,
+    "",
+  );
+}
+
+function getAtPath(value: unknown, path: Array<string | number>): unknown {
+  let current = value;
+  for (const part of path) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string | number, unknown>)[part];
+  }
+  return current;
+}
+
+function selectFields(
+  value: Record<string, unknown>,
+  fieldMask: string[],
+): Record<string, unknown> {
+  if (fieldMask.length === 0 || fieldMask.includes("*")) return value;
+  return Object.fromEntries(
+    fieldMask.filter((field) => field in value).map((field) => [field, value[field]]),
+  );
+}
+
+function continueField(
+  source: Record<string, unknown>,
+  cursorToken: string,
+  maxChars: number,
+): Record<string, unknown> {
+  const cursor = decodeFieldCursor(cursorToken);
+  const field = getAtPath(source, cursor.path);
+  if (typeof field !== "string" || cursor.offset > field.length) {
+    throw new Error("INVALID_CURSOR: cursor 指向的字段不存在或内容已变化");
+  }
+  const identity = {
+    ...(typeof source.key === "string" ? { key: source.key } : {}),
+    field: fieldPath(cursor.path),
+    offset: cursor.offset,
+    original_chars: field.length,
+  };
+  let low = 0;
+  let high = field.length - cursor.offset;
+  let best: Record<string, unknown> | null = null;
+  while (low <= high) {
+    const length = Math.floor((low + high) / 2);
+    const nextOffset = cursor.offset + length;
+    const done = nextOffset >= field.length;
+    const candidate: Record<string, unknown> = {
+      ...identity,
+      value: field.slice(cursor.offset, nextOffset),
+      returned_chars: length,
+      done,
+      next_cursor: done ? null : encodeFieldCursor({ v: 1, path: cursor.path, offset: nextOffset }),
+    };
+    if (JSON.stringify(candidate).length <= maxChars) {
+      best = candidate;
+      low = length + 1;
+    } else {
+      high = length - 1;
+    }
+  }
+  if (!best || best.returned_chars === 0) {
+    throw new Error(`RESULT_TOO_LARGE: max_chars=${maxChars} 无法容纳 continuation 回执`);
+  }
+  return best;
+}
+
+function fitFieldRead(
+  source: Record<string, unknown>,
+  maxChars: number,
+  tool: "atm_task_get" | "atm_search",
+  cursor?: string,
+): Record<string, unknown> {
+  if (cursor) return continueField(source, cursor, maxChars);
+  if (JSON.stringify(source).length <= maxChars) return source;
+
+  const shrink = (
+    value: unknown,
+    maxString: number,
+    path: Array<string | number>,
+    truncated: Array<{
+      path: string;
+      original_chars: number;
+      returned_chars: number;
+      continuation: { tool: string; cursor: string };
+    }>,
+  ): unknown => {
+    if (typeof value === "string" && value.length > maxString) {
+      const returned = value.slice(0, maxString);
+      truncated.push({
+        path: fieldPath(path),
+        original_chars: value.length,
+        returned_chars: returned.length,
+        continuation: {
+          tool,
+          cursor: encodeFieldCursor({ v: 1, path, offset: returned.length }),
+        },
+      });
+      return returned;
+    }
+    if (Array.isArray(value)) {
+      return value.map((entry, index) => shrink(entry, maxString, [...path, index], truncated));
+    }
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+          key,
+          shrink(entry, maxString, [...path, key], truncated),
+        ]),
+      );
+    }
+    return value;
+  };
+
+  for (const maxString of [1000, 512, 256, 128, 64, 0]) {
+    const truncatedFields: Array<{
+      path: string;
+      original_chars: number;
+      returned_chars: number;
+      continuation: { tool: string; cursor: string };
+    }> = [];
+    const projected = shrink(source, maxString, [], truncatedFields) as Record<string, unknown>;
+    const candidate = {
+      ...projected,
+      truncated: true,
+      truncated_fields: truncatedFields,
+    };
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+
+  return bounded(source, maxChars);
 }
 
 // brief 的分节名 -> 载荷字段。truncated/project/seq 是身份字段，任何 include 都保留。
@@ -385,22 +591,249 @@ const workItemPatch = z.object({
   takeover_stale: z.boolean().default(false),
 });
 
-function compactTask(item: Record<string, any>, fieldMask: string[] = []) {
+type TaskListView = "core" | "context" | "full";
+
+function summarizeChecklist(value: unknown): Record<string, number> {
+  const checklist = Array.isArray(value) ? (value as Array<Record<string, any>>) : [];
+  const count = (status: string) => checklist.filter((item) => item.status === status).length;
+  return {
+    total: checklist.length,
+    todo: count("TODO"),
+    doing: count("DOING"),
+    done: count("DONE"),
+    skipped: count("SKIPPED"),
+    evidence_required: checklist.filter((item) => item.evidenceRequired === true).length,
+    evidence_missing: checklist.filter(
+      (item) =>
+        item.evidenceRequired === true &&
+        item.status !== "SKIPPED" &&
+        (!Array.isArray(item.evidence) || item.evidence.length === 0),
+    ).length,
+  };
+}
+
+function compactTask(
+  item: Record<string, any>,
+  fieldMask: string[] = [],
+  view: TaskListView = "core",
+) {
   const compact: Record<string, unknown> = {
     key: item.key,
     title: item.title,
+    type: item.type,
     status: item.status,
     priority: item.priority,
     owner: item.assigneeAgentId ?? null,
-    progress: item.effectiveProgress,
+    progress: item.progress,
     version: item.version,
     due: item.targetDate ?? null,
     blocked: item.blockedReason ?? null,
   };
-  if (fieldMask.length === 0) return compact;
+  if (view !== "core" || fieldMask.includes("checklist")) {
+    compact.description = item.description ?? "";
+    compact.acceptance = Array.isArray(item.acceptance) ? item.acceptance : [];
+    compact.checklist = summarizeChecklist(item.checklist);
+    compact.dependencies = Array.isArray(item.dependencies) ? item.dependencies : [];
+    compact.discovered_from = item.discoveredFrom ?? null;
+    compact.discovered_count = Number(item.discoveredCount ?? 0);
+  }
+  if (view === "full") {
+    compact.checklist_items = Array.isArray(item.checklist) ? item.checklist : [];
+    compact.discovered = Array.isArray(item.discovered) ? item.discovered : [];
+    compact.execution_session = item.executionSession ?? null;
+  }
+  if (fieldMask.length === 0 || fieldMask.includes("*")) return compact;
   return Object.fromEntries(
     fieldMask.filter((field) => field in compact).map((field) => [field, compact[field]]),
   );
+}
+
+type DeltaEvent = {
+  seq: number;
+  type: string;
+  key: string | null;
+  summary: string | null;
+  actor: string;
+  title: string;
+  detail: string;
+  at: string;
+};
+
+function fitDelta(
+  project: string,
+  sinceSeq: number,
+  requestedLimit: number,
+  maxChars: number,
+  payload: Record<string, any>,
+): Record<string, unknown> {
+  const events = (Array.isArray(payload.events) ? payload.events : []).map(
+    (event: Record<string, any>): DeltaEvent => ({
+      seq: Number(event.seq),
+      type: String(event.type ?? ""),
+      key: event.key === null || event.key === undefined ? null : String(event.key),
+      summary: event.summary === null || event.summary === undefined ? null : String(event.summary),
+      actor: String(event.actor ?? ""),
+      title: String(event.title ?? ""),
+      detail: String(event.detail ?? ""),
+      at: String(event.at ?? ""),
+    }),
+  );
+  const currentSequence = Number(payload.currentSequence ?? sinceSeq);
+  const serviceHasMore = payload.hasMore === true;
+  const projectInfo =
+    payload.events?.[0]?.project && typeof payload.events[0].project === "object"
+      ? {
+          code: String(payload.events[0].project.code ?? project).toUpperCase(),
+          name: String(payload.events[0].project.name ?? ""),
+        }
+      : { code: project.toUpperCase() };
+
+  for (let count = events.length; count >= 0; count -= 1) {
+    const returned = events.slice(0, count);
+    const nextSeq = returned.at(-1)?.seq ?? sinceSeq;
+    const budgetTruncated = count < events.length;
+    const hasMore = budgetTruncated || serviceHasMore;
+    const candidate: Record<string, unknown> = {
+      project: projectInfo,
+      since_seq: sinceSeq,
+      requested_limit: requestedLimit,
+      returned_count: returned.length,
+      events: returned,
+      current_sequence: currentSequence,
+      next_seq: nextSeq,
+      has_more: hasMore,
+      truncated: budgetTruncated,
+      ...(budgetTruncated
+        ? {
+            truncated_collections: [
+              {
+                path: "events",
+                original_items: events.length,
+                returned_items: returned.length,
+              },
+            ],
+          }
+        : {}),
+      ...(hasMore
+        ? {
+            continuation: {
+              tool: "atm_delta",
+              arguments: {
+                project: project.toUpperCase(),
+                since_seq: nextSeq,
+                limit: requestedLimit,
+                max_chars: maxChars,
+              },
+            },
+          }
+        : {}),
+    };
+    if (count === 0 && events.length > 0) {
+      const firstEvent = events[0]!;
+      const firstEventChars = JSON.stringify(firstEvent).length;
+      candidate.oversized_event = {
+        seq: firstEvent.seq,
+        chars: firstEventChars,
+        suggested_max_chars: Math.min(50_000, Math.max(maxChars + 1, firstEventChars + 800)),
+      };
+      const continuation = candidate.continuation as Record<string, any> | undefined;
+      if (continuation) {
+        continuation.arguments.max_chars = (
+          candidate.oversized_event as Record<string, number>
+        ).suggested_max_chars;
+      }
+    }
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+
+  return {
+    project: projectInfo,
+    since_seq: sinceSeq,
+    requested_limit: requestedLimit,
+    returned_count: 0,
+    events: [],
+    current_sequence: currentSequence,
+    next_seq: sinceSeq,
+    has_more: events.length > 0 || serviceHasMore,
+    truncated: events.length > 0,
+  };
+}
+
+function publicKeyKind(value: string): "WORK_ITEM" | "RECORD" | null {
+  if (/-T-\d+$/iu.test(value)) return "WORK_ITEM";
+  if (/-[DR]-\d+$/iu.test(value)) return "RECORD";
+  return null;
+}
+
+function projectFromPublicKey(value: string): string | null {
+  const match = /^(.*)-(?:T|D|R)-\d+$/iu.exec(value.trim());
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
+function compactSearchHit(hit: Record<string, unknown>): Record<string, unknown> {
+  return {
+    entity_type: hit.entityType,
+    entity_key: hit.entityKey,
+    title: hit.title,
+    snippet: hit.snippet,
+    updated_at: hit.updatedAt,
+  };
+}
+
+function fitTaskPage(
+  project: string,
+  view: TaskListView,
+  offset: number,
+  requestedLimit: number,
+  maxChars: number,
+  items: Array<Record<string, unknown>>,
+  sourceHasMore: boolean,
+): Record<string, unknown> {
+  for (let count = items.length; count >= 0; count -= 1) {
+    const returned = items.slice(0, count);
+    const budgetTruncated = count < items.length;
+    const hasMore = budgetTruncated || sourceHasMore;
+    const nextCursor = hasMore ? String(offset + returned.length) : null;
+    const candidate: Record<string, unknown> = {
+      project: project.toUpperCase(),
+      view,
+      returned_count: returned.length,
+      items: returned,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+      truncated: budgetTruncated,
+      ...(budgetTruncated
+        ? {
+            truncated_collections: [
+              {
+                path: "items",
+                original_items: items.length,
+                returned_items: returned.length,
+              },
+            ],
+          }
+        : {}),
+    };
+    if (count === 0 && items.length > 0) {
+      const firstItemChars = JSON.stringify(items[0]).length;
+      candidate.oversized_item = {
+        key: items[0]?.key,
+        chars: firstItemChars,
+        suggested_max_chars: Math.min(50_000, Math.max(maxChars + 1, firstItemChars + 800)),
+        hint: "提高 max_chars，或用 field_mask 缩小列表投影，再以相同 cursor 重试",
+      };
+    }
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+  return {
+    project: project.toUpperCase(),
+    view,
+    returned_count: 0,
+    items: [],
+    next_cursor: String(offset),
+    has_more: items.length > 0 || sourceHasMore,
+    truncated: items.length > 0,
+  };
 }
 
 export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
@@ -566,14 +999,16 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         query: z.string().max(500).optional(),
         limit: z.number().int().min(1).max(100).default(10),
         cursor: z.string().optional(),
+        view: z.enum(["core", "context", "full"]).default("core"),
         field_mask: z.array(z.string()).max(20).default([]),
+        max_chars: z.number().int().min(500).max(50_000).default(12_000),
       },
       outputSchema,
       annotations: { readOnlyHint: true },
     },
     async (input) => {
       const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
-      const items = await service.listWorkItems(input.project, {
+      const filters = {
         readyOnly: input.ready_only,
         limit: input.limit,
         offset,
@@ -582,16 +1017,52 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         ...(input.parent_key === undefined ? {} : { parentKey: input.parent_key }),
         ...(input.milestone_id === undefined ? {} : { milestoneId: input.milestone_id }),
         ...(input.query === undefined ? {} : { query: input.query }),
-      });
-      return result(
-        {
-          project: input.project.toUpperCase(),
-          items: items.map((item) =>
-            compactTask(item as unknown as Record<string, any>, input.field_mask),
-          ),
-          next_cursor: items.length === input.limit ? String(offset + items.length) : null,
-        },
-        input.limit <= 10 ? 2400 : 12_000,
+      };
+      const items = await service.listWorkItems(input.project, filters);
+      const needsContext =
+        input.view !== "core" ||
+        input.field_mask.some((field) =>
+          [
+            "checklist",
+            "checklist_items",
+            "description",
+            "acceptance",
+            "dependencies",
+            "discovered",
+            "execution_session",
+          ].includes(field),
+        );
+      const projectedItems = await Promise.all(
+        items.map(async (item) => {
+          const source = needsContext
+            ? await service.getWorkItem(input.project, item.key, input.view)
+            : item;
+          return compactTask(
+            source as unknown as Record<string, any>,
+            input.field_mask,
+            input.view,
+          );
+        }),
+      );
+      const sourceHasMore =
+        items.length === input.limit &&
+        (
+          await service.listWorkItems(input.project, {
+            ...filters,
+            limit: 1,
+            offset: offset + items.length,
+          })
+        ).length > 0;
+      return wrap(
+        fitTaskPage(
+          input.project,
+          input.view,
+          offset,
+          input.limit,
+          input.max_chars,
+          projectedItems,
+          sourceHasMore,
+        ),
       );
     },
   );
@@ -605,6 +1076,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         task_key: taskKey,
         view: z.enum(["core", "context", "full"]).default("core"),
         field_mask: z.array(z.string()).max(30).default([]),
+        cursor: z.string().max(2000).optional(),
+        max_chars: z.number().int().min(300).max(50_000).default(12_000),
       },
       outputSchema,
       annotations: { readOnlyHint: true },
@@ -614,8 +1087,11 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         string,
         any
       >;
-      if (input.view === "core") return result(compactTask(item, input.field_mask));
-      return result(item, input.view === "full" ? 12_000 : 6000);
+      const projected =
+        input.view === "core"
+          ? compactTask(item, input.field_mask)
+          : selectFields(plain(item), input.field_mask);
+      return wrap(fitFieldRead(projected, input.max_chars, "atm_task_get", input.cursor));
     },
   );
 
@@ -875,19 +1351,50 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         limit: z.number().int().min(1).max(30).default(20),
         cursor: z.string().optional(),
         field_mask: z.array(z.string()).max(20).default([]),
+        max_chars: z.number().int().min(300).max(50_000).default(6000),
       },
       outputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (input) =>
-      result(
+    async (input) => {
+      const kind = publicKeyKind(input.query);
+      const exactProject = input.project ?? projectFromPublicKey(input.query) ?? undefined;
+      if (kind && exactProject) {
+        const entity =
+          kind === "WORK_ITEM"
+            ? await service.getWorkItem(exactProject, input.query, "full")
+            : await service.getRecord(exactProject, input.query);
+        const source = selectFields(plain(entity), input.field_mask);
+        const fitted = fitFieldRead(
+          source,
+          Math.max(300, input.max_chars - 80),
+          "atm_search",
+          input.cursor,
+        );
+        return wrap({
+          exact: true,
+          entity_type: kind,
+          entity: fitted,
+        });
+      }
+
+      const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
+      const fetchLimit = Math.min(30, offset + input.limit + 1);
+      const allHits = input.project
+        ? await service.search(input.project, input.query, fetchLimit)
+        : service.globalSearch(input.query, fetchLimit);
+      const hits = allHits
+        .slice(offset, offset + input.limit)
+        .map((hit) => selectFields(compactSearchHit(plain(hit)), input.field_mask));
+      return result(
         {
-          hits: input.project
-            ? await service.search(input.project, input.query, input.limit)
-            : service.globalSearch(input.query, input.limit),
+          exact: false,
+          hits,
+          next_cursor: offset + hits.length < allHits.length ? String(offset + hits.length) : null,
         },
-        6000,
-      ),
+        input.max_chars,
+      );
+    },
   );
 
   server.registerTool(
@@ -899,12 +1406,20 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         since_seq: z.number().int().nonnegative(),
         limit: z.number().int().min(1).max(100).default(50),
         types: z.array(z.string()).max(50).default([]),
+        max_chars: z.number().int().min(1000).max(50_000).default(12_000),
       },
       outputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (input) =>
-      result(await service.delta(input.project, input.since_seq, input.limit, input.types), 2400),
+    async (input) => {
+      const delta = (await service.delta(
+        input.project,
+        input.since_seq,
+        input.limit,
+        input.types,
+      )) as Record<string, unknown>;
+      return wrap(fitDelta(input.project, input.since_seq, input.limit, input.max_chars, delta));
+    },
   );
 
   server.registerTool(
