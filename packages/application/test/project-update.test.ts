@@ -90,6 +90,7 @@ describe("项目更新", () => {
         String(begun.session),
         "agent-update-linked",
         {
+          health: "AT_RISK",
           summary: "任务图已关联",
           completed: [{ text: "完成编译", workItemKey: open.items[0]!.key }],
         },
