@@ -10,15 +10,22 @@ import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
+  BeginInputSchema,
+  BeginSignalsSchema,
   ChecklistBatchFailureDetailsSchema,
+  ChecklistCreateInputSchema,
   EvidenceInputSchema,
   EvidenceReferenceSchema,
+  type ExternalNameMap,
   RECORD_SUMMARY_CODE_POINT_LIMIT,
   RecordSubjectKeySchema,
   RecordSummarySchema,
   RecordTopicSchema,
   ReviewCandidateHashSchema,
+  TaskCreateBatchInputSchema,
+  WorkItemCreateInputSchema,
   WorkItemPatchInputSchema,
+  externalizeObjectSchema,
   unicodeCodePointLength,
 } from "@ayanami-task/protocol";
 
@@ -63,11 +70,12 @@ const mcpProfileTools: Record<AyanamiMcpProfile, readonly string[]> = {
   legacy: [...coreMcpTools, ...memoryMcpTools],
 };
 
-function compactJsonSchema(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(compactJsonSchema);
+function compactJsonSchema(value: unknown, preserveBusinessSemantics = false): unknown {
+  if (Array.isArray(value))
+    return value.map((entry) => compactJsonSchema(entry, preserveBusinessSemantics));
   if (!value || typeof value !== "object") return value;
   const source = value as Record<string, unknown>;
-  if (Object.keys(source).length === 0) return { description: "JSON value" };
+  if (Object.keys(source).length === 0) return {};
   if (
     Array.isArray(source.anyOf) &&
     source.anyOf.length === 2 &&
@@ -96,27 +104,33 @@ function compactJsonSchema(value: unknown): unknown {
     )
   ) {
     const { anyOf, ...rest } = source;
-    return compactJsonSchema({
-      ...rest,
-      type: "object",
-      anyOf: (anyOf as Array<Record<string, unknown>>).map(({ type: _type, ...branch }) => branch),
-    });
+    return compactJsonSchema(
+      {
+        ...rest,
+        type: "object",
+        anyOf: (anyOf as Array<Record<string, unknown>>).map(
+          ({ type: _type, ...branch }) => branch,
+        ),
+      },
+      preserveBusinessSemantics,
+    );
   }
-  const omitted = new Set([
-    "$schema",
-    "default",
-    "minimum",
-    "maximum",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "minLength",
-    "minItems",
-    "maxItems",
-    "pattern",
-  ]);
+  const omitted = preserveBusinessSemantics
+    ? new Set(["$schema"])
+    : new Set([
+        "$schema",
+        "default",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "minLength",
+        "minItems",
+        "maxItems",
+        "pattern",
+      ]);
   // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
-  // 输出 schema 里既然为了体积省掉 default，就同步从 required 去掉这些键；这既更紧凑，
-  // 也让 Agent 看到的必填项与真实运行时一致。
+  // Agent 需要看到 default 的完整语义，因此保留 default，只把这些键从 required 去掉。
   const properties =
     source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
       ? (source.properties as Record<string, unknown>)
@@ -139,21 +153,23 @@ function compactJsonSchema(value: unknown): unknown {
         if (key === "type" && entry === "string" && (source.enum || source.const !== undefined)) {
           return [];
         }
-        // Claude 的 tools/list 只有 8 KiB 总预算。保留反馈里会直接造成整次写入失败的
-        // 300 字摘要边界；高频 identifier 的长度边界由同一份运行时 Zod 继续执行，
-        // 其字符串类型、枚举与 required 仍完整公开。
-        if (key === "maxLength" && entry !== 300) return [];
+        if (!preserveBusinessSemantics && key === "maxLength" && entry !== 300) return [];
         if (key === "required" && Array.isArray(entry) && defaulted.size > 0) {
           const required = entry.filter((field) => !defaulted.has(String(field)));
-          return required.length === 0 ? [] : [[key, compactJsonSchema(required)]];
+          return required.length === 0
+            ? []
+            : [[key, compactJsonSchema(required, preserveBusinessSemantics)]];
         }
-        return [[key, compactJsonSchema(entry)]];
+        return [[key, compactJsonSchema(entry, preserveBusinessSemantics)]];
       }),
   );
 }
 
 function publicToolJsonSchema(name: string, value: unknown): Record<string, unknown> {
-  const schema = compactJsonSchema(value) as Record<string, any>;
+  const schema = compactJsonSchema(
+    value,
+    name === "atm_begin" || name === "atm_task_create",
+  ) as Record<string, any>;
   if (name === "atm_task_patch") {
     const item = schema.properties?.items?.items;
     if (item) {
@@ -163,10 +179,6 @@ function publicToolJsonSchema(name: string, value: unknown): Record<string, unkn
       const checklistItem = item.properties.checklist_items.items;
       checklistItem.properties.evidence.items.anyOf[1] = { $ref: "#/$defs/e" };
       item.properties.checklist_items.minItems = 1;
-      item.properties.candidate_hashes = {
-        type: "object",
-        additionalProperties: { type: "string" },
-      };
       item.dependentSchemas = {
         expected_fields: { properties: { operation: { const: "edit" } } },
       };
@@ -1407,45 +1419,123 @@ function fitBegin(
   });
 }
 
-const workItemCreate = z
+const beginSignalNames = {
+  expectedMinutes: "expected_minutes",
+  subtaskCount: "subtask_count",
+  multiSession: "multi_session",
+  multiAgent: "multi_agent",
+  hasDependencies: "has_dependencies",
+  needsEvidence: "needs_evidence",
+  hasTargetDate: "has_target_date",
+} as const satisfies ExternalNameMap<typeof BeginSignalsSchema>;
+const beginSignalsExternal = externalizeObjectSchema(BeginSignalsSchema, beginSignalNames);
+
+const beginNames = {
+  operationId: "op_id",
+  cwd: "cwd",
+  projectCode: "project_code",
+  title: "title",
+  mode: "mode",
+  agentId: "agent_id",
+  displayName: "display_name",
+  clientKind: "client_kind",
+  threadId: "thread_id",
+  parentSessionId: "parent_session_id",
+  resume: "resume",
+  predecessorSessionId: "predecessor_session_id",
+  maxChars: "max_chars",
+  role: "role",
+  signals: "signals",
+  allowProjectCreate: "allow_project_create",
+  creationReason: "creation_reason",
+} as const satisfies ExternalNameMap<typeof BeginInputSchema>;
+const beginExternal = externalizeObjectSchema(BeginInputSchema, beginNames, {
+  signals: {
+    schema: beginSignalsExternal.inputSchema.default({}),
+    decode: (value) => beginSignalsExternal.parse(value),
+  },
+});
+const beginFields = beginExternal.inputSchema.shape;
+const beginToolInput = z
   .object({
-    client_ref: z.string().min(1).max(100),
-    objective_id: z.string().optional(),
-    milestone_id: z.string().nullable().optional(),
-    parent_key: z.string().nullable().optional(),
-    parent_ref: z.string().nullable().optional(),
-    depends_on: z.array(z.string()).max(50).default([]),
-    depends_on_refs: z.array(z.string()).max(50).default([]),
-    discovered_from: z.string().min(1).max(100).optional(),
-    discovered_from_ref: z.string().min(1).max(100).optional(),
-    title: z.string().trim().min(1).max(400),
-    description: z.string().max(50_000).default(""),
-    type: z.enum(["EPIC", "TASK", "SUBTASK", "BUG", "RESEARCH", "REVIEW"]).default("TASK"),
-    priority: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
-    status: z.enum(["BACKLOG", "READY"]).default("BACKLOG"),
-    acceptance: z.array(z.string().max(1000)).max(100).default([]),
-    checklist: z
-      .array(
-        z
-          .object({
-            title: z.string().min(1).max(400),
-            evidence_required: z.boolean().default(false),
-            weight: z.number().positive().max(1000).default(1),
-          })
-          .strict(),
-      )
-      .max(100)
-      .default([]),
-    weight: z.number().positive().max(1000).default(1),
-    target_date: z.string().nullable().optional(),
-    verification_required: z.boolean().default(false),
-    assignee_agent_id: z.string().trim().min(1).max(128).nullable().optional(),
+    op_id: beginFields.op_id!,
+    cwd: beginFields.cwd!,
+    project_code: beginFields.project_code!,
+    title: beginFields.title!,
+    mode: beginFields.mode!,
+    agent_id: beginFields.agent_id!,
+    display_name: beginFields.display_name!,
+    client_kind: beginFields.client_kind!,
+    thread_id: beginFields.thread_id!,
+    parent_session_id: beginFields.parent_session_id!,
+    resume: beginFields.resume!,
+    brief: z.enum(["none", "minimal", "full"]).default("full"),
+    max_chars: beginFields.max_chars!,
+    predecessor_session_id: beginFields.predecessor_session_id!,
+    role: beginFields.role!,
+    signals: beginFields.signals!,
+    allow_project_create: beginFields.allow_project_create!,
+    creation_reason: beginFields.creation_reason!,
   })
-  .strict()
-  .refine((value) => !(value.discovered_from && value.discovered_from_ref), {
-    message: "discovered_from 与 discovered_from_ref 只能指定一个",
-    path: ["discovered_from_ref"],
-  });
+  .strict();
+
+const checklistCreateNames = {
+  title: "title",
+  evidenceRequired: "evidence_required",
+  weight: "weight",
+} as const satisfies ExternalNameMap<typeof ChecklistCreateInputSchema>;
+const checklistCreateExternal = externalizeObjectSchema(
+  ChecklistCreateInputSchema,
+  checklistCreateNames,
+);
+
+const workItemCreateNames = {
+  clientRef: "client_ref",
+  objectiveId: "objective_id",
+  milestoneId: "milestone_id",
+  parentKey: "parent_key",
+  parentRef: "parent_ref",
+  dependsOn: "depends_on",
+  dependsOnRefs: "depends_on_refs",
+  discoveredFrom: "discovered_from",
+  discoveredFromRef: "discovered_from_ref",
+  title: "title",
+  description: "description",
+  type: "type",
+  priority: "priority",
+  status: "status",
+  acceptance: "acceptance",
+  checklist: "checklist",
+  weight: "weight",
+  targetDate: "target_date",
+  verificationRequired: "verification_required",
+  assigneeAgentId: "assignee_agent_id",
+} as const satisfies ExternalNameMap<typeof WorkItemCreateInputSchema>;
+const workItemCreateExternal = externalizeObjectSchema(
+  WorkItemCreateInputSchema,
+  workItemCreateNames,
+  {
+    checklist: {
+      schema: z.array(checklistCreateExternal.inputSchema).max(100).default([]),
+      decode: (value) =>
+        (value as unknown[]).map((checklistItem) => checklistCreateExternal.parse(checklistItem)),
+    },
+  },
+);
+
+const taskCreateNames = {
+  project: "project",
+  session: "session",
+  opId: "op_id",
+  items: "items",
+} as const satisfies ExternalNameMap<typeof TaskCreateBatchInputSchema>;
+const taskCreateExternal = externalizeObjectSchema(TaskCreateBatchInputSchema, taskCreateNames, {
+  items: {
+    schema: z.array(workItemCreateExternal.inputSchema).min(1).max(50),
+    decode: (value) =>
+      (value as unknown[]).map((workItem) => workItemCreateExternal.parse(workItem)),
+  },
+});
 
 const workItemExpectedFields = z
   .object({
@@ -2263,93 +2353,20 @@ export function createAyanamiMcpServer(
     "atm_begin",
     {
       description: "直接使用返回的 brief",
-      inputSchema: z
-        .object({
-          op_id: opId.optional(),
-          cwd: z.string().min(1).optional(),
-          project_code: projectCode.optional(),
-          title: z.string().max(400).optional(),
-          mode: z.enum(["auto", "quick", "project"]).default("auto"),
-          agent_id: z.string().min(1).max(128),
-          display_name: z.string().max(200).optional(),
-          client_kind: z.string().max(100).default("generic"),
-          thread_id: z.string().nullable().optional(),
-          parent_session_id: z.string().nullable().optional(),
-          resume: z.boolean().default(false),
-          brief: z.enum(["none", "minimal", "full"]).default("full"),
-          max_chars: z.number().int().min(300).max(5000).default(1200),
-          predecessor_session_id: z.string().nullable().optional(),
-          role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
-          signals: z
-            .object({
-              expected_minutes: z.number().int().nonnegative().optional(),
-              subtask_count: z.number().int().nonnegative().optional(),
-              multi_session: z.boolean().optional(),
-              multi_agent: z.boolean().optional(),
-              has_dependencies: z.boolean().optional(),
-              needs_evidence: z.boolean().optional(),
-              has_target_date: z.boolean().optional(),
-            })
-            .strict()
-            .default({}),
-          allow_project_create: z.boolean().default(false),
-          creation_reason: z.string().max(500).optional(),
-        })
-        .strict(),
+      inputSchema: beginToolInput,
       outputSchema,
     },
     async (input) => {
+      const { brief, ...externalInput } = input;
+      const canonical = beginExternal.parse(externalInput);
+      const beginInput = Object.fromEntries(
+        Object.entries(canonical).filter(([, value]) => value !== undefined),
+      ) as Parameters<AyanamiTaskService["begin"]>[0];
+      const briefMode = z.enum(["none", "minimal", "full"]).parse(brief);
       const started = await withMcpErrorDetails(
         service,
-        input.project_code === undefined ? {} : { project: input.project_code },
-        () =>
-          service.begin({
-            ...(input.op_id === undefined ? {} : { operationId: input.op_id }),
-            mode: input.mode,
-            agentId: input.agent_id,
-            clientKind: input.client_kind,
-            role: input.role,
-            resume: input.resume,
-            maxChars: input.max_chars,
-            allowProjectCreate: input.allow_project_create,
-            signals: {
-              ...(input.signals.expected_minutes === undefined
-                ? {}
-                : { expectedMinutes: input.signals.expected_minutes }),
-              ...(input.signals.subtask_count === undefined
-                ? {}
-                : { subtaskCount: input.signals.subtask_count }),
-              ...(input.signals.multi_session === undefined
-                ? {}
-                : { multiSession: input.signals.multi_session }),
-              ...(input.signals.multi_agent === undefined
-                ? {}
-                : { multiAgent: input.signals.multi_agent }),
-              ...(input.signals.has_dependencies === undefined
-                ? {}
-                : { hasDependencies: input.signals.has_dependencies }),
-              ...(input.signals.needs_evidence === undefined
-                ? {}
-                : { needsEvidence: input.signals.needs_evidence }),
-              ...(input.signals.has_target_date === undefined
-                ? {}
-                : { hasTargetDate: input.signals.has_target_date }),
-            },
-            ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-            ...(input.project_code === undefined ? {} : { projectCode: input.project_code }),
-            ...(input.title === undefined ? {} : { title: input.title }),
-            ...(input.display_name === undefined ? {} : { displayName: input.display_name }),
-            ...(input.thread_id === undefined ? {} : { threadId: input.thread_id }),
-            ...(input.parent_session_id === undefined
-              ? {}
-              : { parentSessionId: input.parent_session_id }),
-            ...(input.predecessor_session_id === undefined
-              ? {}
-              : { predecessorSessionId: input.predecessor_session_id }),
-            ...(input.creation_reason === undefined
-              ? {}
-              : { creationReason: input.creation_reason }),
-          }),
+        canonical.projectCode === undefined ? {} : { project: canonical.projectCode },
+        () => service.begin(beginInput),
       );
       if (started.scope === "quick") {
         return result(
@@ -2359,7 +2376,7 @@ export function createAyanamiMcpServer(
             status: started.quick.status,
             version: started.quick.version,
             surface_version: MCP_SURFACE_VERSION,
-            ...(input.op_id === undefined ? {} : { op_id: input.op_id }),
+            ...(canonical.operationId === undefined ? {} : { op_id: canonical.operationId }),
           },
           1200,
         );
@@ -2371,7 +2388,7 @@ export function createAyanamiMcpServer(
       const { score, truncated: _legacyTruncated, ...beginIdentity } = started;
       void score;
       void _legacyTruncated;
-      return wrap(fitBegin({ ...beginIdentity, ...snapshot }, input.brief, input.max_chars));
+      return wrap(fitBegin({ ...beginIdentity, ...snapshot }, briefMode, canonical.maxChars));
     },
   );
 
@@ -2575,69 +2592,35 @@ export function createAyanamiMcpServer(
     "atm_task_create",
     {
       description: "批量创建任务与关系。",
-      inputSchema: z
-        .object({
-          project: projectCode,
-          session: sessionId,
-          op_id: opId,
-          items: z.array(workItemCreate).min(1).max(50),
-        })
-        .strict(),
+      inputSchema: taskCreateExternal.inputSchema,
       outputSchema,
     },
     async (input) => {
+      const canonical = taskCreateExternal.parse(input);
+      const canonicalItems = canonical.items.map((item) =>
+        Object.fromEntries(Object.entries(item).filter(([, value]) => value !== undefined)),
+      ) as Parameters<AyanamiTaskService["createWorkItems"]>[3];
       const created = await service.createWorkItems(
-        input.project,
-        input.session,
-        input.op_id,
-        input.items.map((item) => {
-          return {
-            clientRef: item.client_ref,
-            dependsOn: item.depends_on,
-            dependsOnRefs: item.depends_on_refs,
-            ...(item.discovered_from === undefined ? {} : { discoveredFrom: item.discovered_from }),
-            ...(item.discovered_from_ref === undefined
-              ? {}
-              : { discoveredFromRef: item.discovered_from_ref }),
-            title: item.title,
-            description: item.description,
-            type: item.type,
-            priority: item.priority,
-            status: item.status,
-            acceptance: item.acceptance,
-            checklist: item.checklist.map((check) => ({
-              title: check.title,
-              evidenceRequired: check.evidence_required,
-              weight: check.weight,
-            })),
-            weight: item.weight,
-            verificationRequired: item.verification_required,
-            ...(item.assignee_agent_id === undefined
-              ? {}
-              : { assigneeAgentId: item.assignee_agent_id }),
-            ...(item.objective_id === undefined ? {} : { objectiveId: item.objective_id }),
-            ...(item.milestone_id === undefined ? {} : { milestoneId: item.milestone_id }),
-            ...(item.parent_key === undefined ? {} : { parentKey: item.parent_key }),
-            ...(item.parent_ref === undefined ? {} : { parentRef: item.parent_ref }),
-            ...(item.target_date === undefined ? {} : { targetDate: item.target_date }),
-          };
-        }),
+        canonical.project,
+        canonical.session,
+        canonical.opId,
+        canonicalItems,
         { resolvePlanningRoot: true },
       );
       return result({
         ok: true,
-        ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
-        project: input.project.toUpperCase(),
+        ...mutationAck(canonical.opId, created as unknown as Record<string, unknown>),
+        project: canonical.project.toUpperCase(),
         seq: created.sequence,
         // 目标是机器补的就要说出来，否则事后没人分得清它是谁定的。
         ...(created.planningRootProvisioned ? { planning_root: "PROVISIONED" } : {}),
         created: created.items.map((item, index) => ({
-          client_ref: input.items[index]!.client_ref,
+          client_ref: canonical.items[index]!.clientRef,
           task_key: item.key,
           version: item.version,
-          ...(input.items[index]!.assignee_agent_id === undefined
+          ...(canonical.items[index]!.assigneeAgentId === undefined
             ? {}
-            : { assignee_agent_id: input.items[index]!.assignee_agent_id }),
+            : { assignee_agent_id: canonical.items[index]!.assigneeAgentId }),
         })),
       });
     },

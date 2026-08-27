@@ -268,6 +268,21 @@ function semanticConstraints(schema: JsonObject, runtime: boolean): Map<string, 
       simpleUnionTypes.includes("null");
     if (Array.isArray(node.enum)) constraints.set(`${path}#enum`, JSON.stringify(node.enum));
     if (node.const !== undefined) constraints.set(`${path}#const`, JSON.stringify(node.const));
+    for (const keyword of [
+      "default",
+      "minLength",
+      "maxLength",
+      "minimum",
+      "maximum",
+      "pattern",
+      "minItems",
+      "maxItems",
+      "format",
+    ] as const) {
+      if (node[keyword] !== undefined) {
+        constraints.set(`${path}#${keyword}`, JSON.stringify(node[keyword]));
+      }
+    }
     if (
       (node.type !== undefined || hasSimpleTypeUnion) &&
       node.enum === undefined &&
@@ -303,21 +318,68 @@ function semanticConstraints(schema: JsonObject, runtime: boolean): Map<string, 
         visit(branch, root, `${path}.anyOf[${index}]`),
       );
     }
+    for (const keyword of ["allOf", "oneOf"] as const) {
+      if (Array.isArray(node[keyword])) {
+        node[keyword].forEach((branch: JsonObject, index: number) =>
+          visit(branch, root, `${path}.${keyword}[${index}]`),
+        );
+      }
+    }
+    for (const keyword of ["dependentRequired", "dependentSchemas"] as const) {
+      if (node[keyword] !== undefined) {
+        constraints.set(`${path}#${keyword}`, JSON.stringify(node[keyword]));
+      }
+    }
   };
   visit(schema, schema, "$input");
   return constraints;
 }
 
-function assertRuntimeSemantics(runtimeSchemas: RuntimeSchemas, tools: ListedTool[]): void {
+function assertRuntimeSemantics(
+  runtimeSchemas: RuntimeSchemas,
+  tools: ListedTool[],
+  referenceTools?: ListedTool[],
+): void {
+  // T0184 moves these two business-heavy inputs onto protocol-owned canonical
+  // adapters first. Other tools retain the pre-existing compact publication
+  // until their command/query schemas migrate; missing keywords there are the
+  // explicit transition allowlist, while any published value must still match.
+  const canonicalAdapterTools = new Set(["atm_begin", "atm_task_create"]);
   for (const tool of tools) {
     const runtimeSchema = runtimeSchemas[tool.name];
     if (!runtimeSchema) throw new Error(`MISSING_RUNTIME_SCHEMA:${tool.name}`);
     const runtime = semanticConstraints(z.toJSONSchema(runtimeSchema) as JsonObject, true);
     const published = semanticConstraints(tool.inputSchema, false);
+    const reference = referenceTools?.find((candidate) => candidate.name === tool.name);
+    const referencePublished = reference
+      ? semanticConstraints(reference.inputSchema, false)
+      : undefined;
     for (const [path, expected] of runtime) {
       const actual = published.get(path);
+      if (
+        actual === undefined &&
+        !canonicalAdapterTools.has(tool.name) &&
+        referencePublished?.has(path) !== true
+      ) {
+        continue;
+      }
       if (actual !== expected) {
         throw new Error(`SCHEMA_SEMANTIC_MISMATCH:${tool.name}:${path}:${actual ?? "missing"}`);
+      }
+    }
+    for (const [path, actual] of published) {
+      const expected = runtime.get(path);
+      const publicationOnlyContract =
+        (tool.name === "atm_task_patch" &&
+          (path.startsWith("$input.items[]#dependentSchemas") ||
+            path.startsWith("$input.items[].allOf[") ||
+            path.startsWith("$input.allOf["))) ||
+        (tool.name === "atm_progress_add" && path.startsWith("$input.allOf[")) ||
+        (tool.name === "atm_search" &&
+          (path.startsWith("$input.anyOf[") || path === "$input#dependentRequired"));
+      if (publicationOnlyContract) continue;
+      if (actual !== expected) {
+        throw new Error(`SCHEMA_SEMANTIC_MISMATCH:${tool.name}:${path}:unexpected:${actual}`);
       }
     }
   }
@@ -661,7 +723,10 @@ describe("MCP public/runtime schema truth", () => {
       const invalidSchemaNodes: string[] = [];
       const inspect = (value: unknown, path: string): void => {
         if (typeof value === "boolean") {
-          if (!path.endsWith(".additionalProperties") || value !== false) {
+          if (
+            !path.endsWith(".default") &&
+            (!path.endsWith(".additionalProperties") || value !== false)
+          ) {
             invalidSchemaNodes.push(`${path}:boolean`);
           }
           return;
@@ -672,7 +737,9 @@ describe("MCP public/runtime schema truth", () => {
         }
         if (!value || typeof value !== "object") return;
         const object = value as JsonObject;
-        if (Object.keys(object).length === 0) invalidSchemaNodes.push(`${path}:empty`);
+        if (Object.keys(object).length === 0 && !path.endsWith(".default")) {
+          invalidSchemaNodes.push(`${path}:empty`);
+        }
         Object.entries(object).forEach(([key, entry]) => inspect(entry, `${path}.${key}`));
       };
       fixture.tools.forEach((tool) => inspect(tool.inputSchema, tool.name));
@@ -796,9 +863,9 @@ describe("MCP public/runtime schema truth", () => {
           const required = target as string[];
           required.splice(required.indexOf(mutation.field), 1);
         }
-        expect(() => assertRuntimeSemantics(fixture.runtimeSchemas, mutated)).toThrow(
-          `SCHEMA_SEMANTIC_MISMATCH:${mutation.tool}:${mutation.semanticPath}`,
-        );
+        expect(() =>
+          assertRuntimeSemantics(fixture.runtimeSchemas, mutated, fixture.tools),
+        ).toThrow(`SCHEMA_SEMANTIC_MISMATCH:${mutation.tool}:${mutation.semanticPath}`);
       }
       // `$ref` 节点不能靠上面的直接遍历命中；逐项破坏共享 evidence 定义，
       // 证明 required / enum / type / strictness 仍由 runtime parity 守卫真实覆盖。
@@ -812,9 +879,9 @@ describe("MCP public/runtime schema truth", () => {
         const schema = mutated.find((tool) => tool.name === "atm_task_patch")!.inputSchema;
         const parent = at(schema, location.slice(0, -1));
         delete parent[location.at(-1)!];
-        expect(() => assertRuntimeSemantics(fixture.runtimeSchemas, mutated)).toThrow(
-          /SCHEMA_SEMANTIC_MISMATCH:atm_task_patch/u,
-        );
+        expect(() =>
+          assertRuntimeSemantics(fixture.runtimeSchemas, mutated, fixture.tools),
+        ).toThrow(/SCHEMA_SEMANTIC_MISMATCH:atm_task_patch/u);
       }
 
       const patchBase = ["properties", "items", "items"] as const;

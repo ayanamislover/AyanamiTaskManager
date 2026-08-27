@@ -80,7 +80,7 @@ describe("MCP mutation contracts", () => {
       });
       expect(patched.structuredContent).toMatchObject({ op_id: "patch-ack-exact" });
 
-      const detail = await service.getWorkItem(project.code, taskKey, "context");
+      const detail = await service.getWorkItem(project.code, taskKey, "full");
       const checklist = await client.callTool({
         name: "atm_task_patch",
         arguments: {
