@@ -604,6 +604,16 @@ async function withMcpErrorDetails<T>(
     let details: Record<string, unknown> | null = null;
     try {
       if (code === "PROJECT_NOT_FOUND") details = projectSuggestionDetails(service, error);
+      if (
+        ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(code) &&
+        context.project
+      ) {
+        details = await service.notFoundSuggestionDetails(
+          context.project,
+          code,
+          error.message.slice(error.message.indexOf(":") + 1).trim(),
+        );
+      }
       if (code === "VERSION_CONFLICT") {
         details = await versionConflictDetails(service, error, context);
       }
@@ -2532,9 +2542,23 @@ export function createAyanamiMcpServer(
     },
     async (input) => {
       const needsPlanningRoot = input.items.some((item) => item.objective_id === undefined);
+      const existingContext = await service.planningContext(input.project);
+      const provisionsPlanningRoot =
+        needsPlanningRoot &&
+        (existingContext.objectiveId === null || existingContext.milestoneId === null);
+      if (
+        provisionsPlanningRoot &&
+        input.items.some((item) => typeof item.milestone_id === "string")
+      ) {
+        await service.assertSessionCanProvisionPlanningRoot(input.project, input.session);
+        await service.assertMilestonesExist(
+          input.project,
+          input.items.map((item) => item.milestone_id),
+        );
+      }
       const context = needsPlanningRoot
         ? await service.ensurePlanningRoot(input.project, input.session)
-        : { ...(await service.planningContext(input.project)), objectiveProvisioned: false };
+        : { ...existingContext, objectiveProvisioned: false };
       const created = await service.createWorkItems(
         input.project,
         input.session,

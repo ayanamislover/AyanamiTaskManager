@@ -2311,6 +2311,16 @@ export class ProjectRepository {
       request: items,
       action: () => {
         const code = this.meta.code;
+        for (const milestoneId of new Set(
+          items
+            .map((item) => item.milestoneId)
+            .filter((candidate): candidate is string => typeof candidate === "string"),
+        )) {
+          const milestone = this.#sqlite
+            .prepare("SELECT id FROM milestones WHERE id = ?")
+            .get(milestoneId);
+          if (!milestone) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+        }
         const references = new Map<string, { id: string; key: string }>();
         const pendingEvents: Array<{
           id: string;
