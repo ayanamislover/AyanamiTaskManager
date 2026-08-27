@@ -1621,6 +1621,11 @@ export class ProjectRepository {
             typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
           ),
         );
+        if (evidence.length > 0) {
+          for (const taskKey of linkedKeys) {
+            this.advanceWorkItemEvidenceAt(this.rowForTaskKey(taskKey).id, now);
+          }
+        }
         const openWorkItemSummary = this.openWorkItemSummary(linkedKeys, 20);
         return {
           ...this.listProjectUpdates(100).find((update) => update.id === id),
@@ -1818,6 +1823,39 @@ export class ProjectRepository {
       .prepare("SELECT local_no FROM work_items WHERE id = ?")
       .get(workItemId) as { local_no: number } | undefined;
     return row ? `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}` : null;
+  }
+
+  private recordWorkItemLifecycleAt(workItemId: string, at: string, started: boolean): void {
+    if (started) {
+      this.#sqlite
+        .prepare(
+          `UPDATE work_items
+           SET ever_claimed_at = COALESCE(ever_claimed_at, ?),
+               last_started_at = CASE
+                 WHEN last_started_at IS NULL OR last_started_at < ? THEN ?
+                 ELSE last_started_at
+               END
+           WHERE id = ?`,
+        )
+        .run(at, at, at, workItemId);
+      return;
+    }
+    this.#sqlite
+      .prepare("UPDATE work_items SET ever_claimed_at = COALESCE(ever_claimed_at, ?) WHERE id = ?")
+      .run(at, workItemId);
+  }
+
+  private advanceWorkItemEvidenceAt(workItemId: string, at: string): void {
+    this.#sqlite
+      .prepare(
+        `UPDATE work_items
+         SET last_evidence_at = CASE
+           WHEN last_evidence_at IS NULL OR last_evidence_at < ? THEN ?
+           ELSE last_evidence_at
+         END
+         WHERE id = ?`,
+      )
+      .run(at, at, workItemId);
   }
 
   private normalizeEvidence(evidence: unknown[], strictTyped = false): unknown[] {
@@ -2413,6 +2451,10 @@ export class ProjectRepository {
             now,
             opId,
           );
+        if (normalizedInput.evidence.length > 0) {
+          this.advanceWorkItemEvidenceAt(reviewTask.id, now);
+          this.advanceWorkItemEvidenceAt(request.parent_work_item_id, now);
+        }
         const sequence = this.appendEvent(
           "review.submitted",
           actor,
@@ -3488,6 +3530,9 @@ export class ProjectRepository {
           this.#sqlite
             .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
             .run(...values);
+          if (patch.operation === "claim" || patch.operation === "start") {
+            this.recordWorkItemLifecycleAt(row.id, now, targetStatus === "IN_PROGRESS");
+          }
           if (actor.sessionId) {
             if (workItemOperationHasEffect(patch.operation, "SESSION_WORKING")) {
               this.#sqlite
@@ -3748,12 +3793,16 @@ export class ProjectRepository {
             },
           });
         }
+        const now = nowIso();
         this.#sqlite
           .prepare(
             `UPDATE checklist_items SET status = ?, evidence_json = ?, version = version + 1,
              updated_at = ? WHERE id = ?`,
           )
-          .run(input.status, JSON.stringify(evidence), nowIso(), row.id);
+          .run(input.status, JSON.stringify(evidence), now, row.id);
+        if (normalizedInput.evidence && normalizedInput.evidence.length > 0) {
+          this.advanceWorkItemEvidenceAt(row.work_item_id, now);
+        }
         const taskProgress = this.recomputeWorkItem(row.work_item_id);
         const task = this.#sqlite
           .prepare("SELECT version FROM work_items WHERE id = ?")
@@ -3881,6 +3930,9 @@ export class ProjectRepository {
                updated_at = ? WHERE id = ?`,
             )
             .run(item.status, JSON.stringify(evidence), now, row.id);
+        }
+        if (rows.some(({ item }) => item.evidence !== undefined && item.evidence.length > 0)) {
+          this.advanceWorkItemEvidenceAt(task.id, now);
         }
         const taskProgress = this.recomputeWorkItem(task.id);
         const updatedTask = this.#sqlite
@@ -4069,6 +4121,7 @@ export class ProjectRepository {
           last &&
           last.progress_bucket === bucket &&
           last.summary_hash === hash &&
+          !normalizedInput.evidence?.length &&
           !normalizedInput.blocker
         ) {
           return {
@@ -4142,6 +4195,9 @@ export class ProjectRepository {
         this.#sqlite
           .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
           .run(...values);
+        if (normalizedInput.evidence && normalizedInput.evidence.length > 0) {
+          this.advanceWorkItemEvidenceAt(row.id, now);
+        }
         this.recomputeWorkItem(row.id);
         const updated = this.#sqlite
           .prepare("SELECT version FROM work_items WHERE id = ?")
