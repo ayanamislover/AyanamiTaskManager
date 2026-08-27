@@ -615,19 +615,93 @@ async function withMcpErrorDetails<T>(
   }
 }
 
-type FieldCursor = { v: 1; path: Array<string | number>; offset: number };
+type FieldCursor = {
+  v: 2;
+  project: string;
+  entity: string;
+  entityType: string;
+  maskHash: string;
+  path: Array<string | number>;
+  contentHash: string;
+  offset: number;
+};
+
+type FieldReadTarget = {
+  project: string;
+  entity: string;
+  entityType: string;
+  fieldMask: string[];
+};
+
+const fieldCursorSecret = randomBytes(32);
+
+function fieldContentHash(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest().subarray(0, 16).toString("base64url");
+}
+
+function fieldMaskHash(fieldMask: readonly string[]): string {
+  return createHash("sha256")
+    .update(JSON.stringify(fieldMask), "utf8")
+    .digest()
+    .subarray(0, 12)
+    .toString("base64url");
+}
+
+function normalizedFieldTarget(target: FieldReadTarget) {
+  return {
+    project: target.project.trim().toUpperCase(),
+    entity: target.entity.trim(),
+    entityType: target.entityType.trim().toUpperCase(),
+    maskHash: fieldMaskHash(target.fieldMask),
+  };
+}
 
 function encodeFieldCursor(cursor: FieldCursor): string {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+  const payload = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+  const signature = createHmac("sha256", fieldCursorSecret)
+    .update(payload, "utf8")
+    .digest()
+    .subarray(0, 16)
+    .toString("base64url");
+  return `${payload}.${signature}`;
 }
 
 function decodeFieldCursor(token: string): FieldCursor {
   try {
-    const value = JSON.parse(Buffer.from(token, "base64url").toString("utf8")) as FieldCursor;
+    const [payload, signature, extra] = token.split(".");
+    if (!payload || !signature || extra !== undefined) throw new Error("invalid token shape");
+    if (Buffer.from(payload, "base64url").toString("base64url") !== payload) {
+      throw new Error("invalid payload encoding");
+    }
+    const expected = createHmac("sha256", fieldCursorSecret)
+      .update(payload, "utf8")
+      .digest()
+      .subarray(0, 16);
+    const received = Buffer.from(signature, "base64url");
     if (
-      value.v !== 1 ||
+      received.toString("base64url") !== signature ||
+      received.length !== expected.length ||
+      !timingSafeEqual(received, expected)
+    ) {
+      throw new Error("invalid signature");
+    }
+    const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as FieldCursor;
+    if (
+      value.v !== 2 ||
+      typeof value.project !== "string" ||
+      !value.project ||
+      typeof value.entity !== "string" ||
+      !value.entity ||
+      typeof value.entityType !== "string" ||
+      !value.entityType ||
+      typeof value.maskHash !== "string" ||
+      !value.maskHash ||
       !Array.isArray(value.path) ||
+      value.path.length === 0 ||
+      value.path.length > 64 ||
       value.path.some((part) => typeof part !== "string" && !Number.isInteger(part)) ||
+      typeof value.contentHash !== "string" ||
+      !value.contentHash ||
       !Number.isInteger(value.offset) ||
       value.offset < 0
     ) {
@@ -670,11 +744,25 @@ function continueField(
   source: Record<string, unknown>,
   cursorToken: string,
   maxChars: number,
+  target: FieldReadTarget,
 ): Record<string, unknown> {
   const cursor = decodeFieldCursor(cursorToken);
+  const expectedTarget = normalizedFieldTarget(target);
+  if (
+    cursor.project !== expectedTarget.project ||
+    cursor.entity !== expectedTarget.entity ||
+    cursor.entityType !== expectedTarget.entityType ||
+    cursor.maskHash !== expectedTarget.maskHash
+  ) {
+    throw new Error("CONTINUATION_CONFLICT: TARGET_MISMATCH field continuation 请求身份已变化");
+  }
   const field = getAtPath(source, cursor.path);
-  if (typeof field !== "string" || cursor.offset > field.length) {
-    throw new Error("INVALID_CURSOR: cursor 指向的字段不存在或内容已变化");
+  if (
+    typeof field !== "string" ||
+    cursor.offset > field.length ||
+    fieldContentHash(field) !== cursor.contentHash
+  ) {
+    throw new Error("CONTINUATION_CONFLICT: CONTENT_CHANGED field continuation 内容已变化");
   }
   const identity = {
     ...(typeof source.key === "string" ? { key: source.key } : {}),
@@ -694,7 +782,7 @@ function continueField(
       value: field.slice(cursor.offset, nextOffset),
       returned_chars: length,
       done,
-      next_cursor: done ? null : encodeFieldCursor({ v: 1, path: cursor.path, offset: nextOffset }),
+      next_cursor: done ? null : encodeFieldCursor({ ...cursor, offset: nextOffset }),
     };
     if (JSON.stringify(candidate).length <= maxChars) {
       best = candidate;
@@ -713,10 +801,12 @@ function fitFieldRead(
   source: Record<string, unknown>,
   maxChars: number,
   tool: "atm_task_get" | "atm_search",
+  target: FieldReadTarget,
   cursor?: string,
 ): Record<string, unknown> {
-  if (cursor) return continueField(source, cursor, maxChars);
+  if (cursor) return continueField(source, cursor, maxChars, target);
   if (JSON.stringify(source).length <= maxChars) return source;
+  const normalizedTarget = normalizedFieldTarget(target);
 
   const shrink = (
     value: unknown,
@@ -737,7 +827,13 @@ function fitFieldRead(
         returned_chars: returned.length,
         continuation: {
           tool,
-          cursor: encodeFieldCursor({ v: 1, path, offset: returned.length }),
+          cursor: encodeFieldCursor({
+            v: 2,
+            ...normalizedTarget,
+            path,
+            contentHash: fieldContentHash(value),
+            offset: returned.length,
+          }),
         },
       });
       return returned;
@@ -1824,6 +1920,81 @@ function compactRecord(record: Record<string, unknown>): Record<string, unknown>
   };
 }
 
+function compactProgress(progress: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: progress.id,
+    task_key: progress.taskKey,
+    percent: progress.percent,
+    progress_bucket: progress.progressBucket,
+    summary: progress.summary,
+    completed: (Array.isArray(progress.completed) ? progress.completed : []).map((entry) =>
+      entry && typeof entry === "object" && !Array.isArray(entry)
+        ? {
+            text: (entry as Record<string, unknown>).text,
+            ...((entry as Record<string, unknown>).workItemKey === undefined
+              ? {}
+              : { work_item_key: (entry as Record<string, unknown>).workItemKey }),
+          }
+        : entry,
+    ),
+    next: Array.isArray(progress.next) ? progress.next : [],
+    blocker: progress.blocker ?? null,
+    actor: progress.actor,
+    session_id: progress.sessionId ?? null,
+    evidence: Array.isArray(progress.evidence) ? progress.evidence : [],
+    op_id: progress.opId ?? null,
+    created_at: progress.createdAt,
+  };
+}
+
+function compactSession(session: Record<string, unknown>): Record<string, unknown> {
+  const git = plain(session.git);
+  return {
+    id: session.id,
+    agent_id: session.agentId,
+    display_name: session.displayName,
+    client_kind: session.clientKind,
+    capabilities: Array.isArray(session.capabilities) ? session.capabilities : [],
+    parent_session_id: session.parentSessionId ?? null,
+    predecessor_session_id: session.predecessorSessionId ?? null,
+    thread_id: session.threadId ?? null,
+    role: session.role,
+    cwd: session.cwd ?? null,
+    work_state: session.workState,
+    connection_state: session.connectionState,
+    current_task_key: session.currentTaskKey ?? null,
+    heartbeat_at: session.heartbeatAt ?? null,
+    version: session.version,
+    started_at: session.startedAt,
+    updated_at: session.updatedAt,
+    closed_at: session.closedAt ?? null,
+    retirement_reason: session.retirementReason ?? null,
+    close_reason: session.closeReason ?? null,
+    git: {
+      available: git.available === true,
+      repo_root: git.repoRoot ?? null,
+      worktree_root: git.worktreeRoot ?? null,
+      common_dir: git.commonDir ?? null,
+      is_linked_worktree: git.isLinkedWorktree ?? null,
+      branch: git.branch ?? null,
+      head: git.head ?? null,
+      detached: git.detached ?? null,
+      dirty: git.dirty ?? null,
+      error: git.error ?? null,
+    },
+  };
+}
+
+function scopedUlidQuery(query: string): { kind: "PROGRESS" | "SESSION"; id: string } | null {
+  const match = /^(progress|session):(.*)$/iu.exec(query.trim());
+  if (!match) return null;
+  const id = match[2]!.trim().toUpperCase();
+  if (!/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(id)) {
+    throw new Error(`VALIDATION_ERROR: ${match[1]!.toLowerCase()}: 后必须提供 ULID`);
+  }
+  return { kind: match[1]!.toLowerCase() === "progress" ? "PROGRESS" : "SESSION", id };
+}
+
 function compactOperationTrace(trace: Record<string, any>): Record<string, unknown> {
   return {
     op_id: trace.opId,
@@ -1839,23 +2010,26 @@ function compactOperationTrace(trace: Record<string, any>): Record<string, unkno
       (record: Record<string, unknown>) => compactRecord(record),
     ),
     progress: (Array.isArray(trace.progress) ? trace.progress : []).map(
-      (progress: Record<string, unknown>) => ({
-        op_id: progress.opId,
-        task_key: progress.taskKey,
-        percent: progress.percent,
-        summary: progress.summary,
-        completed: progress.completed,
-        next: progress.next,
-        evidence: progress.evidence,
-        blocker: progress.blocker,
-        session_id: progress.sessionId,
-        created_at: progress.createdAt,
-      }),
+      (progress: Record<string, unknown>) => compactProgress(progress),
     ),
     project_updates: (Array.isArray(trace.projectUpdates) ? trace.projectUpdates : []).map(
       (update: Record<string, unknown>) => ({
-        ...update,
-        op_id: update.opId,
+        id: update.id,
+        health: update.health,
+        summary: update.summary,
+        completed: Array.isArray(update.completed) ? update.completed : [],
+        risks: Array.isArray(update.risks) ? update.risks : [],
+        next: Array.isArray(update.next) ? update.next : [],
+        evidence: Array.isArray(update.evidence) ? update.evidence : [],
+        from_sequence: update.fromSequence,
+        to_sequence: update.toSequence,
+        status: update.status,
+        actor: update.actor,
+        published_at: update.publishedAt ?? null,
+        created_at: update.createdAt,
+        updated_at: update.updatedAt,
+        op_id: update.opId ?? null,
+        session_id: update.sessionId ?? null,
       }),
     ),
     events: (Array.isArray(trace.events) ? trace.events : []).map(
@@ -2325,7 +2499,20 @@ export function createAyanamiMcpServer(
         input.view === "core"
           ? compactTask(item, input.field_mask)
           : selectFields({ ...plain(item), ...taskStateProjection(item) }, input.field_mask);
-      return wrap(fitFieldRead(projected, input.max_chars, "atm_task_get", input.cursor));
+      return wrap(
+        fitFieldRead(
+          projected,
+          input.max_chars,
+          "atm_task_get",
+          {
+            project: input.project,
+            entity: input.task_key,
+            entityType: "WORK_ITEM",
+            fieldMask: [`@view:${input.view}`, ...input.field_mask],
+          },
+          input.cursor,
+        ),
+      );
     },
   );
 
@@ -2851,6 +3038,12 @@ export function createAyanamiMcpServer(
           source,
           Math.max(300, input.max_chars - 80),
           "atm_search",
+          {
+            project: input.project,
+            entity: `${input.op_id}@${input.session ?? "*"}`,
+            entityType: "OPERATION",
+            fieldMask: input.field_mask,
+          },
           input.cursor,
         );
         return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
@@ -2868,9 +3061,43 @@ export function createAyanamiMcpServer(
           source,
           Math.max(300, input.max_chars - 80),
           "atm_search",
+          {
+            project: input.project,
+            entity: `${exactOpId}@*`,
+            entityType: "OPERATION",
+            fieldMask: input.field_mask,
+          },
           input.cursor,
         );
         return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
+      }
+      const scopedEntity = scopedUlidQuery(input.query);
+      if (scopedEntity) {
+        if (!input.project) {
+          throw new Error(
+            `PROJECT_REQUIRED: ${scopedEntity.kind.toLowerCase()} 精确读取要求 project`,
+          );
+        }
+        const entity =
+          scopedEntity.kind === "PROGRESS"
+            ? compactProgress(
+                plain(await service.getProgressUpdate(input.project, scopedEntity.id)),
+              )
+            : compactSession(plain(await service.getSession(input.project, scopedEntity.id)));
+        const source = selectFields(entity, input.field_mask);
+        const fitted = fitFieldRead(
+          source,
+          Math.max(300, input.max_chars - 80),
+          "atm_search",
+          {
+            project: input.project,
+            entity: scopedEntity.id,
+            entityType: scopedEntity.kind,
+            fieldMask: input.field_mask,
+          },
+          input.cursor,
+        );
+        return wrap({ exact: true, entity_type: scopedEntity.kind, entity: fitted });
       }
       const kind = publicKeyKind(input.query);
       const exactProject = input.project ?? projectFromPublicKey(input.query) ?? undefined;
@@ -2884,6 +3111,12 @@ export function createAyanamiMcpServer(
           source,
           Math.max(300, input.max_chars - 80),
           "atm_search",
+          {
+            project: exactProject,
+            entity: input.query.toUpperCase(),
+            entityType: kind,
+            fieldMask: input.field_mask,
+          },
           input.cursor,
         );
         return wrap({
