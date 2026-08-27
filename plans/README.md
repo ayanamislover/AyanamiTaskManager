@@ -12,12 +12,12 @@
 6. [005-keyboard-select-instant.md](./005-keyboard-select-instant.md) — 键盘打开自绘下拉保持即时。
 7. [006-notice-timer-lifecycle.md](./006-notice-timer-lifecycle.md) — 修正连续 Notice 的 timer 竞争与清理。
 
-| 计划 | 严重度 | 状态 | 依赖 |
-| --- | --- | --- | --- |
-| 000–002 | — | DONE | — |
-| 003 | — | PASS | 004–006 DONE |
-| 004 | MEDIUM | DONE | — |
-| 005 | HIGH | DONE | — |
-| 006 | MEDIUM | DONE | — |
+| 计划    | 严重度 | 状态 | 依赖         |
+| ------- | ------ | ---- | ------------ |
+| 000–002 | —      | DONE | —            |
+| 003     | —      | PASS | 004–006 DONE |
+| 004     | MEDIUM | DONE | —            |
+| 005     | HIGH   | DONE | —            |
+| 006     | MEDIUM | DONE | —            |
 
 每批完成后必须通过定向测试、全仓静态检查、真实浏览器与 packaged Electron 验收；最终产物才允许推送 GitHub。
