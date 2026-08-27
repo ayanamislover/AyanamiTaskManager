@@ -4,6 +4,7 @@ import { assertParentMove, assertAcyclicDependency, computeProgress } from "@aya
 import {
   assertWorkItemTransition,
   createUlid,
+  EvidenceInputSchema,
   EvidenceReferenceSchema,
   legalWorkItemOperations,
   normalizeReviewCandidateHashes,
@@ -12,6 +13,7 @@ import {
   type WorkItemPhase,
   type WorkItemStatus,
   type WorkItemWaitingOn,
+  type EvidenceInput,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
@@ -1028,9 +1030,11 @@ export class ProjectRepository {
       sessionId: row.session_id,
       createdAt: row.created_at,
     }));
-    const projectUpdates = this.listProjectUpdates(100).filter(
-      (update) => update.opId === normalized,
-    );
+    const projectUpdates = (
+      this.#sqlite
+        .prepare("SELECT * FROM project_updates WHERE op_id = ? ORDER BY created_at")
+        .all(normalized) as any[]
+    ).map((row) => this.projectUpdateView(row));
     const events = (
       this.#sqlite
         .prepare(
@@ -1062,23 +1066,15 @@ export class ProjectRepository {
     return { opId: normalized, mutations, records, progress, projectUpdates, events };
   }
 
-  listProjectUpdates(limit = 50): any[] {
-    return (
-      this.#sqlite
-        .prepare(
-          `SELECT id, health, summary, completed_json, risks_json, next_json,
-                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-                op_id
-         FROM project_updates ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(Math.min(100, Math.max(1, limit))) as any[]
-    ).map((row) => ({
+  private projectUpdateView(row: any): any {
+    return {
       id: row.id,
       health: row.health,
       summary: row.summary,
       completed: json(row.completed_json, []),
       risks: json(row.risks_json, []),
       next: json(row.next_json, []),
+      evidence: json(row.evidence_json, []),
       fromSequence: row.from_sequence,
       toSequence: row.to_sequence,
       status: row.status,
@@ -1087,7 +1083,27 @@ export class ProjectRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       opId: row.op_id ?? null,
-    }));
+    };
+  }
+
+  getProjectUpdate(id: string): any {
+    const normalized = id.trim();
+    const row = this.#sqlite.prepare("SELECT * FROM project_updates WHERE id = ?").get(normalized);
+    if (!row) throw new Error(`PROJECT_UPDATE_NOT_FOUND: ${normalized}`);
+    return this.projectUpdateView(row);
+  }
+
+  listProjectUpdates(limit = 50): any[] {
+    return (
+      this.#sqlite
+        .prepare(
+          `SELECT id, health, summary, completed_json, risks_json, next_json, evidence_json,
+                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
+                op_id
+         FROM project_updates ORDER BY created_at DESC LIMIT ?`,
+        )
+        .all(Math.min(100, Math.max(1, limit))) as any[]
+    ).map((row) => this.projectUpdateView(row));
   }
 
   draftProjectUpdate(actor: ProjectActor, opId: string): any {
@@ -1173,10 +1189,14 @@ export class ProjectRepository {
       completed?: Array<string | { text: string; workItemKey?: string }>;
       risks?: string[];
       next?: string[];
+      evidence?: EvidenceInput[];
     },
   ): any {
     const normalizedInput = {
       ...input,
+      ...(input.evidence === undefined
+        ? {}
+        : { evidence: this.normalizeEvidence(input.evidence, true) as EvidenceInput[] }),
       ...(input.completed === undefined
         ? {}
         : {
@@ -1206,6 +1226,7 @@ export class ProjectRepository {
         const completed = normalizedInput.completed ?? json(draft?.completed_json, []);
         const risks = normalizedInput.risks ?? json(draft?.risks_json, []);
         const next = normalizedInput.next ?? json(draft?.next_json, []);
+        const evidence = normalizedInput.evidence ?? json(draft?.evidence_json, []);
         const fromSequence =
           draft?.from_sequence ??
           (
@@ -1221,8 +1242,8 @@ export class ProjectRepository {
           this.#sqlite
             .prepare(
               `UPDATE project_updates SET health = ?, summary = ?, completed_json = ?, risks_json = ?,
-               next_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?, updated_at = ?,
-               op_id = ? WHERE id = ?`,
+               next_json = ?, evidence_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?,
+               updated_at = ?, op_id = ? WHERE id = ?`,
             )
             .run(
               normalizedInput.health,
@@ -1230,6 +1251,7 @@ export class ProjectRepository {
               JSON.stringify(completed),
               JSON.stringify(risks),
               JSON.stringify(next),
+              JSON.stringify(evidence),
               actor.id,
               now,
               now,
@@ -1240,10 +1262,10 @@ export class ProjectRepository {
           this.#sqlite
             .prepare(
               `INSERT INTO project_updates(
-                 id, health, summary, completed_json, risks_json, next_json,
+                 id, health, summary, completed_json, risks_json, next_json, evidence_json,
                  from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
                  op_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?)`,
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -1252,13 +1274,14 @@ export class ProjectRepository {
               JSON.stringify(completed),
               JSON.stringify(risks),
               JSON.stringify(next),
+              JSON.stringify(evidence),
               fromSequence,
               toSequence,
               actor.id,
               now,
+              now,
+              now,
               opId,
-              now,
-              now,
             );
         }
         this.#sqlite
@@ -1465,20 +1488,39 @@ export class ProjectRepository {
     return row ? `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}` : null;
   }
 
-  private normalizeEvidence(evidence: unknown[]): unknown[] {
+  private normalizeEvidence(evidence: unknown[], strictTyped = false): unknown[] {
     return evidence.map((entry) => {
-      if (typeof entry === "string") return entry;
-      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-      const reference = entry as Record<string, unknown>;
-      if (reference.kind !== "atm_record" && reference.kind !== "atm_task") return entry;
+      let reference: Record<string, unknown>;
+      if (strictTyped) {
+        const parsed = EvidenceInputSchema.parse(entry);
+        if (typeof parsed === "string") return parsed;
+        reference = parsed;
+      } else {
+        if (typeof entry === "string") return entry;
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+        reference = entry as Record<string, unknown>;
+      }
+      if (reference.kind !== "atm_record" && reference.kind !== "atm_task") {
+        return strictTyped ? reference : entry;
+      }
       if (typeof reference.value !== "string" || !reference.value.trim()) {
         throw new Error(`VALIDATION_ERROR: ${String(reference.kind)} evidence value required`);
       }
       if (reference.kind === "atm_record") {
-        return { ...reference, value: this.getRecord(reference.value).key };
+        const normalized = reference.value.trim();
+        const publicPrefix = `${this.meta.code}-`;
+        const publicSuffix = normalized.startsWith(publicPrefix)
+          ? normalized.slice(publicPrefix.length)
+          : "";
+        if (!/^(?:D|R)-\d{3,}$/u.test(publicSuffix)) {
+          throw new Error(`RECORD_NOT_FOUND: ${reference.value}`);
+        }
+        return { ...reference, value: this.getRecord(normalized).key };
       }
       const row = this.rowForTaskKey(reference.value);
-      return { ...reference, value: this.taskKeyForId(row.id) };
+      const taskKey = this.taskKeyForId(row.id);
+      if (!taskKey) throw new Error(`WORK_ITEM_NOT_FOUND: ${reference.value}`);
+      return { ...reference, value: taskKey };
     });
   }
 

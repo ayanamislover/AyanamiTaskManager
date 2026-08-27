@@ -46,10 +46,18 @@ describe("结构化证据与项目进度协议", () => {
       scope: "project",
       summary: "已完成",
       completed: ["历史文本", { text: "已完成子项", workItemKey: "ATM-T-0001" }],
+      evidence: [
+        { kind: "atm_task", value: "ATM-T-0001" },
+        { kind: "atm_record", value: "ATM-R-001" },
+      ],
     });
     expect(parsed.completed).toEqual([
       "历史文本",
       { text: "已完成子项", workItemKey: "ATM-T-0001" },
+    ]);
+    expect(parsed.evidence).toEqual([
+      { kind: "atm_task", value: "ATM-T-0001" },
+      { kind: "atm_record", value: "ATM-R-001" },
     ]);
   });
 
