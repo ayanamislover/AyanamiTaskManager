@@ -638,6 +638,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { limit } = request.query as { limit?: string };
     return options.service.listAgentSessions(code, Number(limit ?? 100));
   });
+  app.get("/api/v1/projects/:code/sessions/:sessionId", async (request) => {
+    const { code, sessionId } = request.params as { code: string; sessionId: string };
+    return options.service.getSession(code, sessionId);
+  });
   app.get("/api/v1/projects/:code/reconciliation", async (request) => {
     const { code } = request.params as { code: string };
     const { include_active: includeActive } = request.query as { include_active?: string };
@@ -653,6 +657,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.get("/api/v1/projects/:code/records/:recordKey", async (request) => {
     const { code, recordKey } = request.params as { code: string; recordKey: string };
     return options.service.getRecord(code, recordKey);
+  });
+  app.get("/api/v1/projects/:code/progress-updates/:progressId", async (request) => {
+    const { code, progressId } = request.params as { code: string; progressId: string };
+    return options.service.getProgressUpdate(code, progressId);
   });
   app.get("/api/v1/projects/:code/project-updates", async (request) => {
     const { code } = request.params as { code: string };
