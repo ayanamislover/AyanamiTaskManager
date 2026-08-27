@@ -151,4 +151,58 @@ describe("canonical WorkItem operation registry", () => {
       }
     }
   });
+
+  it("Session end 原子返回全部 521 个被释放 WorkItem，不受列表上限影响", async () => {
+    const { manager, repository, actor, objective } = await fixture("OPENDSCALE");
+    try {
+      const created = [];
+      for (let offset = 0; offset < 521; offset += 50) {
+        const batchSize = Math.min(50, 521 - offset);
+        created.push(
+          ...repository.createWorkItems(
+            actor,
+            `create-scale-${offset}`,
+            Array.from({ length: batchSize }, (_, index) => ({
+              clientRef: `scale-${offset + index}`,
+              objectiveId: objective.id,
+              title: `规模释放 ${offset + index + 1}`,
+              type: "TASK" as const,
+              priority: "NORMAL" as const,
+              status: "READY" as const,
+            })),
+          ).items,
+        );
+      }
+      for (let offset = 0; offset < created.length; offset += 50) {
+        repository.patchWorkItems(
+          actor,
+          `claim-scale-${offset}`,
+          created.slice(offset, offset + 50).map((task) => ({
+            taskKey: task.key,
+            expectedVersion: task.version,
+            operation: "claim" as const,
+          })),
+        );
+      }
+
+      const ended = repository.endSession(actor, "end-scale", {
+        outcome: "completed",
+        summary: "释放大规模 claims",
+        releaseClaims: true,
+      });
+
+      expect(ended.releasedItems).toHaveLength(521);
+      expect(ended.releasedItems.map((item) => item.key)).toEqual(created.map((item) => item.key));
+      expect(ended.releasedItems.every((item) => item.version === 3)).toBe(true);
+      for (const task of created) {
+        expect(repository.getWorkItem(task.key)).toMatchObject({
+          status: "READY",
+          claimedBySessionId: null,
+          version: 3,
+        });
+      }
+    } finally {
+      manager.close();
+    }
+  });
 });
