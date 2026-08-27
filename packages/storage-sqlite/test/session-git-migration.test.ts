@@ -25,6 +25,7 @@ describe("Session Git context migration", () => {
       "0010_review_workflow.sql",
       "0011_session_close_reason.sql",
       "0012_project_update_evidence.sql",
+      "0013_project_update_session.sql",
     ]) {
       rmSync(join(migrationsRoot, "project", name));
     }

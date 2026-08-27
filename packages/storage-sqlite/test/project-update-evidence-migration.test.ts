@@ -17,6 +17,7 @@ describe("v12 project update evidence migration", () => {
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
     rmSync(join(migrationsRoot, "project", "0012_project_update_evidence.sql"));
+    rmSync(join(migrationsRoot, "project", "0013_project_update_session.sql"));
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({
@@ -52,11 +53,22 @@ describe("v12 project update evidence migration", () => {
           .prepare("SELECT evidence_json FROM project_updates WHERE id = 'legacy-project-update'")
           .get(),
       ).toEqual({ evidence_json: "[]" });
+    } finally {
+      manager.close();
+    }
 
-      const repository = new ProjectRepository(upgraded);
+    copyFileSync(
+      resolve(process.cwd(), "migrations", "project", "0013_project_update_session.sql"),
+      join(migrationsRoot, "project", "0013_project_update_session.sql"),
+    );
+    manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
+    try {
+      const current = await manager.openProject(project.code);
+      const repository = new ProjectRepository(current);
       expect(repository.getProjectUpdate("legacy-project-update")).toMatchObject({
         opId: "legacy-progress",
         evidence: [],
+        sessionId: null,
       });
       const session = repository.createSession({
         agentId: "evidence-agent",
