@@ -10,7 +10,11 @@ import { createAyanamiMcpServer } from "../src/index.js";
 const roots: string[] = [];
 
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  // Windows 上 SQLite 句柄关闭后，防病毒/索引器仍可能短暂持有刚落盘的 WAL 文件。
+  // fs.rm 的 retry 只在 maxRetries > 0 时启用；没有它，全量并发测试会偶发 ENOTEMPTY。
+  for (const root of roots.splice(0)) {
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+  }
 });
 
 async function connect(service: AyanamiTaskService) {
