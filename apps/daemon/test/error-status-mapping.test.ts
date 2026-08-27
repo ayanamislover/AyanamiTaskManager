@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -344,7 +344,9 @@ describe("永久性前置条件失败不能伪装成服务端故障", () => {
         payload: { path: join(dataDir, "must-not-attach") },
       });
       expect(wrongWrite.statusCode).toBe(404);
-      expect(service.databases.getProject(alpha.code).sourcePaths).toEqual([alphaRoot]);
+      expect(service.databases.getProject(alpha.code).sourcePaths).toEqual([
+        realpathSync.native(alphaRoot),
+      ]);
     } finally {
       await app.close();
       service.close();
