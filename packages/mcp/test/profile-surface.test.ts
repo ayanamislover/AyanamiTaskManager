@@ -5,7 +5,7 @@ import type { AyanamiTaskService } from "@ayanami-task/application";
 import { createAyanamiMcpServer } from "../src/index.js";
 import { assertMcpSchemaBudget, mcpSchemaBytes } from "../src/schema-budget.js";
 
-async function listProfile(profile: "core" | "memory") {
+async function listProfile(profile: "core" | "memory" | "legacy") {
   const server = createAyanamiMcpServer({} as AyanamiTaskService, { profile });
   const client = new Client({ name: `profile-${profile}`, version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -21,6 +21,7 @@ describe("MCP static profiles", () => {
   it("publishes disjoint core and memory surfaces whose union is the full 11-tool capability", async () => {
     const core = await listProfile("core");
     const memory = await listProfile("memory");
+    const legacy = await listProfile("legacy");
     try {
       expect(core.tools.map((tool) => tool.name)).toEqual([
         "atm_begin",
@@ -47,6 +48,12 @@ describe("MCP static profiles", () => {
       expect(() => assertMcpSchemaBudget(memory.tools)).not.toThrow();
       expect(core.client.getInstructions()).toContain("core profile");
       expect(memory.client.getInstructions()).toContain("memory profile");
+      expect(new Set(legacy.tools.map((tool) => tool.name))).toEqual(
+        new Set([...core.tools.map((tool) => tool.name), ...memory.tools.map((tool) => tool.name)]),
+      );
+      expect(legacy.tools).toHaveLength(11);
+      expect(legacy.client.getInstructions()).toContain("兼容入口");
+      expect(legacy.client.getInstructions()).toContain("重启");
 
       expect(
         (
@@ -67,6 +74,7 @@ describe("MCP static profiles", () => {
     } finally {
       await Promise.all([core.client.close(), core.server.close()]);
       await Promise.all([memory.client.close(), memory.server.close()]);
+      await Promise.all([legacy.client.close(), legacy.server.close()]);
     }
   });
 });

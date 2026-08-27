@@ -20,6 +20,19 @@ export type McpProfile = "core" | "memory";
 export type McpProfileLaunches = Record<McpProfile, McpLaunch>;
 
 /**
+ * 新配置必须显式选择静态 Profile；无参数只属于升级前仍驻留在客户端内存里的旧配置，
+ * 因而走 `/mcp` 的完整兼容窗口，不能静默降成 core。
+ */
+export function mcpStdioHttpPath(args: readonly string[]): string {
+  const profileIndex = args.indexOf("--profile");
+  if (profileIndex < 0) return "/mcp";
+  const profile = args[profileIndex + 1];
+  if (profile !== "core" && profile !== "memory")
+    throw new Error("MCP_PROFILE_INVALID: expected core or memory");
+  return `/mcp/${profile}`;
+}
+
+/**
  * MCP 配置里的 `command` 必须是一个**会一直活着**的进程，且路径必须与版本号无关。
  *
  * 起因：原先 command 与 args 都带 `app-<version>`（execPath 与 resourcesPath），而 Squirrel

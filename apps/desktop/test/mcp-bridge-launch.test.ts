@@ -10,7 +10,7 @@ afterEach(() => {
 });
 
 describe("MCP bridge 内存诊断的真实配置选择", () => {
-  it("按指定 Profile 读取新双 key，legacy 只兼容 core", () => {
+  it("按指定 Profile 读取新双 key，legacy 完整入口可兼容两侧诊断", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-bridge-config-"));
     temporary.push(root);
     const configPath = join(root, ".claude.json");
@@ -59,8 +59,8 @@ describe("MCP bridge 内存诊断的真实配置选择", () => {
       source: "legacy",
     });
     expect(configuredBridgeLaunch({ profile: "memory", configPath, dataDir: root })).toMatchObject({
-      args: [join(root, "mcp-stdio.cjs"), "--profile", "memory"],
-      source: "fallback",
+      command: "legacy.exe",
+      source: "legacy",
     });
   });
 });

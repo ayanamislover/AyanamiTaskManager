@@ -25,7 +25,7 @@ describe("MCP Profile 用户切换事务", () => {
     expect(memoryProfileEnabledValue(false)).toBe(false);
   });
 
-  it("legacy 全功能入口按双 Profile 能力回滚，空配置不参与同步", () => {
+  it("legacy 完整兼容入口按双 Profile 能力回滚，空配置不参与同步", () => {
     const legacy = {
       legacy: { command: "legacy.exe", args: [] },
       core: null,

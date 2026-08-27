@@ -39,11 +39,27 @@ const recordSummary = RecordSummarySchema.superRefine((value, context) => {
   });
 }).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
 export const MCP_SURFACE_VERSION = 3;
-export type AyanamiMcpProfile = "core" | "memory";
+export type AyanamiMcpProfile = "core" | "memory" | "legacy";
 
+const coreMcpTools = [
+  "atm_begin",
+  "atm_brief",
+  "atm_task_list",
+  "atm_task_get",
+  "atm_task_create",
+  "atm_end",
+] as const;
+const memoryMcpTools = [
+  "atm_task_patch",
+  "atm_progress_add",
+  "atm_record",
+  "atm_search",
+  "atm_delta",
+] as const;
 const mcpProfileTools: Record<AyanamiMcpProfile, readonly string[]> = {
-  core: ["atm_begin", "atm_brief", "atm_task_list", "atm_task_get", "atm_task_create", "atm_end"],
-  memory: ["atm_task_patch", "atm_progress_add", "atm_record", "atm_search", "atm_delta"],
+  core: coreMcpTools,
+  memory: memoryMcpTools,
+  legacy: [...coreMcpTools, ...memoryMcpTools],
 };
 
 function compactJsonSchema(value: unknown): unknown {
@@ -2228,9 +2244,11 @@ export function createAyanamiMcpServer(
     { name: "ayanami-task-manager", version: "1.0.17" },
     {
       instructions:
-        profile === "core"
-          ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
-          : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
+        profile === "legacy"
+          ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory 双 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
+          : profile === "core"
+            ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
+            : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
     },
   );
 

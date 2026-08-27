@@ -1272,8 +1272,9 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
 
   const mcpRoutes: Array<{ url: string; profile: AyanamiMcpProfile }> = [
-    // 保留旧入口只为旧客户端有一次迁移窗口；它永远映射到静态 core，不能重新合并工具面。
-    { url: "/mcp", profile: "core" },
+    // 旧入口只为尚未重启、仍缓存单 server 配置的客户端保留完整工具面；新配置始终走
+    // 拆开的 core / memory。兼容入口不能静默缺掉 memory，否则升级中的活跃会话无法收尾。
+    { url: "/mcp", profile: "legacy" },
     { url: "/mcp/core", profile: "core" },
     { url: "/mcp/memory", profile: "memory" },
   ];

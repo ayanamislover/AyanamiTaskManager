@@ -72,6 +72,7 @@ import {
   mcpLaunch,
   mcpProfileLaunches,
   mcpProfileLaunchesStale,
+  mcpStdioHttpPath,
   shouldRepairMcpConfigs,
   type McpLaunch,
   type McpProfileLaunches,
@@ -145,12 +146,8 @@ async function runHeadlessModes(args: string[]): Promise<boolean> {
   if (args.includes("--mcp-stdio")) {
     smokeTrace("mcp-stdio.start", { argv: process.argv });
     const current = readRuntime();
-    const profileIndex = args.indexOf("--profile");
-    const profile = profileIndex < 0 ? "core" : args[profileIndex + 1];
-    if (profile !== "core" && profile !== "memory")
-      throw new Error("MCP_PROFILE_INVALID: expected core or memory");
     await runStdioMcpProxy({
-      endpoint: `${current.endpoint}/mcp/${profile}`,
+      endpoint: `${current.endpoint.replace(/\/$/u, "")}${mcpStdioHttpPath(args)}`,
       token: current.token,
     });
     smokeTrace("mcp-stdio.end");
