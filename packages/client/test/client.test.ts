@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "../../application/src/index.js";
 import { buildAyanamiServer } from "../../../apps/daemon/src/index.js";
-import { AyanamiClient, AyanamiClientError } from "../src/index.js";
+import {
+  AyanamiClient,
+  AyanamiClientError,
+  type RecordCreateReceipt,
+  type UserRecordCreateInput,
+} from "../src/index.js";
 
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -51,5 +56,26 @@ describe("typed client", () => {
     await expect(client.projects.reconciliation("CLI", true)).resolves.toMatchObject({
       counts: { ACTIVE: 0, LEASE_EXPIRED_ONLINE: 0, STALLED: 0, POSSIBLY_COMPLETE: 0 },
     });
+
+    const recordInput: UserRecordCreateInput = {
+      opId: "typed-ui-record",
+      kind: "FACT",
+      title: "Typed record",
+      summary: "Typed client retains record topic metadata.",
+      topic: "client/typed-record",
+      subjectKey: "candidate:not-a-work-item",
+    };
+    const record: RecordCreateReceipt = await client.recordAsUser("CLI", recordInput);
+    expect(record).toMatchObject({ ok: 1, relatedRecords: [] });
+    await expect(client.projects.records("CLI")).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: record.key,
+          topic: "client/typed-record",
+          subjectKey: "candidate:not-a-work-item",
+          relatedRecords: [],
+        }),
+      ]),
+    );
   });
 });

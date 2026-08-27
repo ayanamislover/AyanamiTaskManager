@@ -1,3 +1,5 @@
+import type { RecordInput } from "@ayanami-task/protocol";
+
 export type AyanamiClientOptions = {
   endpoint: string;
   token: string;
@@ -28,6 +30,31 @@ export type RegisteredProject = {
   sourcePaths: string[];
   databasePath: string;
   version: number;
+};
+
+export type AgentRecordCreateInput = Omit<RecordInput, "project">;
+export type UserRecordCreateInput = Omit<AgentRecordCreateInput, "session">;
+export type RecordCreateReceipt = {
+  ok: 1;
+  seq: number;
+  key: string;
+  v: number;
+  relatedRecords: string[];
+};
+export type ProjectRecord = {
+  id: string;
+  key: string;
+  kind: string;
+  title: string;
+  summary: string;
+  detail: string;
+  importance: string;
+  scope: string;
+  status: "ACTIVE" | "SUPERSEDED" | "RETRACTED";
+  topic: string | null;
+  subjectKey: string | null;
+  relatedRecords: string[];
+  opId: string | null;
 };
 
 export type ReconciliationClassification =
@@ -237,10 +264,7 @@ export class AyanamiClient {
         `/api/v1/projects/${encodeURIComponent(code)}/reconciliation${queryString({ include_active: includeActive ? 1 : undefined })}`,
       ),
     records: (code: string) =>
-      this.request<Array<Record<string, any>>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/records`,
-      ),
+      this.request<ProjectRecord[]>("GET", `/api/v1/projects/${encodeURIComponent(code)}/records`),
     updates: (code: string) =>
       this.request<Array<Record<string, any>>>(
         "GET",
@@ -391,15 +415,15 @@ export class AyanamiClient {
       input,
     );
 
-  record = (project: string, input: Record<string, unknown>) =>
-    this.request<Record<string, unknown>>(
+  record = (project: string, input: AgentRecordCreateInput) =>
+    this.request<RecordCreateReceipt>(
       "POST",
       `/api/v1/projects/${encodeURIComponent(project)}/records`,
       input,
     );
 
-  recordAsUser = (project: string, input: Record<string, unknown>) =>
-    this.request<Record<string, unknown>>(
+  recordAsUser = (project: string, input: UserRecordCreateInput) =>
+    this.request<RecordCreateReceipt>(
       "POST",
       `/api/v1/projects/${encodeURIComponent(project)}/ui/records`,
       input,

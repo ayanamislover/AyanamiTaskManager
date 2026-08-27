@@ -230,6 +230,8 @@ export const RECORD_KINDS = [
   "RISK",
   "REFERENCE",
   "LESSON",
+  "VERIFICATION",
+  "WAIVER",
 ] as const;
 export const RecordKindSchema = z.enum(RECORD_KINDS);
 export type RecordKind = z.infer<typeof RecordKindSchema>;
@@ -587,6 +589,14 @@ export const ProgressAddInputSchema = z.object({
   evidence: z.array(EvidenceInputSchema).max(20).default([]),
 });
 
+export const RecordTopicSchema = z.string().trim().min(1).max(200);
+export const RecordSubjectKeySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]*$/u, "subjectKey 必须是稳定、无空白的主题标识");
+
 export const RecordInputSchema = z.object({
   project: NonEmptyTextSchema,
   session: NonEmptyTextSchema,
@@ -599,6 +609,8 @@ export const RecordInputSchema = z.object({
   scope: z.string().max(100).default("PROJECT"),
   workItemKey: z.string().nullable().optional(),
   supersedes: z.string().nullable().optional(),
+  topic: RecordTopicSchema.nullable().optional(),
+  subjectKey: RecordSubjectKeySchema.nullable().optional(),
 });
 
 export const SearchInputSchema = z.object({
@@ -640,3 +652,4 @@ export type ChecklistBatchUpdateInput = z.infer<typeof ChecklistBatchUpdateInput
 export type VerifyAndCompleteInput = z.infer<typeof VerifyAndCompleteInputSchema>;
 export type ReviewRequestCreateInput = z.infer<typeof ReviewRequestCreateInputSchema>;
 export type ReviewSubmitInput = z.infer<typeof ReviewSubmitInputSchema>;
+export type RecordInput = z.input<typeof RecordInputSchema>;

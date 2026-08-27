@@ -1065,6 +1065,8 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         scope: input.scope,
         ...(input.workItemKey === undefined ? {} : { workItemKey: input.workItemKey }),
         ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+        ...(input.topic === undefined ? {} : { topic: input.topic }),
+        ...(input.subjectKey === undefined ? {} : { subjectKey: input.subjectKey }),
       }),
     );
   });
@@ -1082,6 +1084,8 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         scope: input.scope,
         ...(input.workItemKey === undefined ? {} : { workItemKey: input.workItemKey }),
         ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+        ...(input.topic === undefined ? {} : { topic: input.topic }),
+        ...(input.subjectKey === undefined ? {} : { subjectKey: input.subjectKey }),
       }),
     );
   });
