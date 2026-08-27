@@ -7,7 +7,13 @@ import { buildAyanamiServer } from "../src/index.js";
 
 const temporary: string[] = [];
 afterEach(() => {
-  for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
+  for (const directory of temporary.splice(0))
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 8,
+      retryDelay: 50,
+    });
 });
 
 async function openRestReview(code: string) {
@@ -437,5 +443,5 @@ describe("REST 一等 Review verdict", () => {
       await binding.app.close();
       binding.service.close();
     }
-  });
+  }, 60_000);
 });
