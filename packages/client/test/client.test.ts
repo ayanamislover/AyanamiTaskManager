@@ -77,5 +77,30 @@ describe("typed client", () => {
         }),
       ]),
     );
+
+    for (let index = 0; index < 3; index += 1) {
+      await client.recordAsUser("CLI", {
+        opId: `typed-search-record-${index}`,
+        kind: "FACT",
+        title: `客户端分页关键字 ${index}`,
+        summary: "真实 HTTP 与 typed client 往返 opaque cursor。",
+      });
+    }
+    const firstSearch = await client.search("客户端分页关键字", "CLI", 1);
+    expect(firstSearch).toMatchObject({
+      hits: [expect.objectContaining({ entityType: "RECORD" })],
+      hasMore: true,
+      nextCursor: expect.stringMatching(/^s1\./u),
+    });
+    const secondSearch = await client.search("客户端分页关键字", "CLI", 1, firstSearch.nextCursor!);
+    expect(secondSearch.hits[0]?.entityKey).not.toBe(firstSearch.hits[0]?.entityKey);
+    await expect(
+      client.search("错误查询", "CLI", 1, firstSearch.nextCursor!),
+    ).rejects.toMatchObject<AyanamiClientError>({ code: "INVALID_CURSOR", status: 422 });
+    await expect(client.search("客户端分页关键字", undefined, 1)).resolves.toMatchObject({
+      hits: [expect.objectContaining({ project: "CLI" })],
+      hasMore: true,
+      nextCursor: expect.stringMatching(/^s1\./u),
+    });
   });
 });

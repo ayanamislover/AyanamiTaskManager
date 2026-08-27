@@ -82,11 +82,11 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
     const detail = await call("atm_task_get", {
       project: project.code,
       task_key: taskKey,
-      view: "context",
+      view: "full",
       field_mask: [],
     });
     const item = detail.checklist[0];
-    expect(item.evidenceRequired).toBe(true);
+    expect(item.evidence_required).toBe(true);
 
     await call("atm_task_patch", {
       project: project.code,
@@ -207,7 +207,7 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
     const detail = await call("atm_task_get", {
       project: project.code,
       task_key: taskKey,
-      view: "context",
+      view: "full",
       field_mask: [],
     });
     await call("atm_task_patch", {

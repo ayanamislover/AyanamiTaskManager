@@ -1,7 +1,15 @@
 import { basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
-import { normalizeReviewCandidateHashes, type EvidenceInput } from "@ayanami-task/protocol";
+import {
+  normalizeReviewCandidateHashes,
+  type EvidenceInput,
+  type TaskContextView,
+  type TaskCoreView,
+  type TaskFullView,
+  type TaskView,
+  type TaskViewName,
+} from "@ayanami-task/protocol";
 import {
   gitHead,
   inspectGitContext,
@@ -18,9 +26,11 @@ import {
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
 import { reconcileWorkItems } from "./reconcile.js";
+import { projectTaskView } from "./queries/task-views.js";
 
 export * from "./agenttask-import.js";
 export * from "./reconcile.js";
+export * from "./queries/task-views.js";
 
 export type PublicNotFoundDetails = {
   entity: "WORK_ITEM" | "SESSION" | "MILESTONE";
@@ -888,14 +898,24 @@ export class AyanamiTaskService {
     sessionId: string,
     opId: string,
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
+    options: { resolvePlanningRoot?: boolean } = {},
   ) {
     const repository = await this.#repository(projectCode);
+    const planningRoot = options.resolvePlanningRoot
+      ? {
+          provisionIfMissing: items.some((item) => item.objectiveId === undefined),
+          objectiveTitle: `${this.databases.getProject(projectCode).name}（自动补建）`,
+          objectiveDescription:
+            "项目尚无目标时自动补建，用于承载任务。请按实际规划改写标题与验收，或另建目标后归档它。",
+          milestoneTitle: "执行",
+        }
+      : undefined;
     const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "work.create.batch",
       items,
-      (actor) => repository.createWorkItems(actor, opId, items),
+      (actor) => repository.createWorkItems(actor, opId, items, planningRoot),
     );
     await this.#flush(projectCode);
     return mutationAck(execution.result, opId, execution.resolution);
@@ -998,7 +1018,8 @@ export class AyanamiTaskService {
   async listWorkItems(
     projectCode: string,
     filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
-  ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
+    view: TaskViewName = "core",
+  ): Promise<TaskView[]> {
     const repository = await this.#repository(projectCode);
     if (
       filters?.milestoneId &&
@@ -1006,7 +1027,17 @@ export class AyanamiTaskService {
     ) {
       throw new Error(`MILESTONE_NOT_FOUND: ${filters.milestoneId}`);
     }
-    return repository.listWorkItems(filters);
+    return repository
+      .listTaskViewRows(filters, view)
+      .map((row) => projectTaskView(projectCode, row, view));
+  }
+
+  /** Desktop-only operational metadata kept outside the bounded Agent read views. */
+  async listWorkItemsForUi(
+    projectCode: string,
+    filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
+  ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
+    return (await this.#repository(projectCode)).listWorkItems(filters);
   }
 
   async assertMilestonesExist(
@@ -1087,7 +1118,44 @@ export class AyanamiTaskService {
   async getWorkItem(
     projectCode: string,
     taskKey: string,
-    _view: "core" | "context" | "full" = "core",
+  ): Promise<ReturnType<ProjectRepository["getWorkItem"]>>;
+  async getWorkItem(
+    projectCode: string,
+    taskKey: string,
+    view: "core",
+  ): Promise<TaskCoreView>;
+  async getWorkItem(
+    projectCode: string,
+    taskKey: string,
+    view: "context",
+  ): Promise<TaskContextView>;
+  async getWorkItem(
+    projectCode: string,
+    taskKey: string,
+    view: "full",
+  ): Promise<TaskFullView>;
+  async getWorkItem(
+    projectCode: string,
+    taskKey: string,
+    view: TaskViewName,
+  ): Promise<TaskView>;
+  async getWorkItem(
+    projectCode: string,
+    taskKey: string,
+    view?: TaskViewName,
+  ): Promise<TaskView | ReturnType<ProjectRepository["getWorkItem"]>> {
+    const repository = await this.#repository(projectCode);
+    // Internal mutation/test callers predating the bounded read contract can omit
+    // a view and retain the repository aggregate. Every REST/MCP/UI query passes
+    // an explicit canonical view and therefore cannot leak this legacy shape.
+    if (view === undefined) return repository.getWorkItem(taskKey);
+    return projectTaskView(projectCode, repository.getTaskViewRow(taskKey, view), view);
+  }
+
+  /** Desktop-only aggregate for operational controls such as lease release and tree layout. */
+  async getWorkItemForUi(
+    projectCode: string,
+    taskKey: string,
   ): Promise<ReturnType<ProjectRepository["getWorkItem"]>> {
     return (await this.#repository(projectCode)).getWorkItem(taskKey);
   }
@@ -1303,12 +1371,12 @@ export class AyanamiTaskService {
     return result;
   }
 
-  async search(projectCode: string, query: string, limit = 20) {
-    return (await this.#repository(projectCode)).search(query, limit);
+  async search(projectCode: string, query: string, limit = 20, cursor?: string) {
+    return (await this.#repository(projectCode)).search(query, limit, cursor);
   }
 
-  globalSearch(query: string, limit = 20) {
-    return this.databases.globalSearch(query, limit);
+  globalSearch(query: string, limit = 20, cursor?: string) {
+    return this.databases.globalSearch(query, limit, cursor);
   }
 
   globalDelta(sinceSequence: number, limit = 50) {

@@ -322,11 +322,19 @@ describe("REST 边界", () => {
       const [followUp, origin] = created.json().items as Array<{ key: string }>;
       const detail = await app.inject({
         method: "GET",
-        url: `/api/v1/projects/DREST/work-items/${followUp!.key}?view=context`,
+        url: `/api/v1/projects/DREST/work-items/${followUp!.key}?view=full`,
         headers,
       });
       expect(detail.statusCode).toBe(200);
-      expect(detail.json()).toMatchObject({ discoveredFrom: origin!.key });
+      expect(detail.json()).toMatchObject({
+        relations: [
+          expect.objectContaining({
+            type: "DISCOVERED_FROM",
+            direction: "OUTGOING",
+            taskKey: origin!.key,
+          }),
+        ],
+      });
     } finally {
       await app.close();
       service.close();
@@ -382,7 +390,7 @@ describe("REST 边界", () => {
 
       const stored = await app.inject({
         method: "GET",
-        url: `/api/v1/projects/RASSIGN/work-items/${created.json().items[0].key}`,
+        url: `/api/v1/projects/RASSIGN/work-items/${created.json().items[0].key}?view=context`,
         headers,
       });
       expect(stored.json()).toMatchObject({ assigneeAgentId: "claude-reviewer" });
@@ -512,7 +520,7 @@ describe("REST 边界", () => {
         headers: { authorization: "Bearer local-secret" },
       });
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ hits: [] });
+      expect(response.json()).toEqual({ hits: [], nextCursor: null, hasMore: false });
     } finally {
       await app.close();
       service.close();
@@ -678,7 +686,7 @@ describe("REST 边界", () => {
       expect(started.statusCode).toBe(200);
       const detail = await app.inject({
         method: "GET",
-        url: `/api/v1/projects/USER/work-items/${task.key}`,
+        url: `/api/v1/projects/USER/ui/work-items/${task.key}`,
         headers,
       });
       expect(detail.json()).toMatchObject({

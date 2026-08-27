@@ -273,14 +273,14 @@ describe("MCP read plane", () => {
       },
     ]);
     const task = created.items[0]!;
-    const before = await service.getWorkItem(project.code, task.key, "context");
+    const before = await service.getWorkItem(project.code, task.key);
     await service.updateChecklist(project.code, begun.session, "list-check-one", {
       checklistId: before.checklist[0]!.id,
       expectedVersion: before.checklist[0]!.version,
       status: "DONE",
       evidence: ["focused-test"],
     });
-    const truth = await service.getWorkItem(project.code, task.key, "context");
+    const truth = await service.getWorkItem(project.code, task.key);
 
     const server = createAyanamiMcpServer(service);
     const client = new Client({ name: "list-test", version: "1" });
@@ -302,7 +302,7 @@ describe("MCP read plane", () => {
         expect.objectContaining({
           key: task.key,
           progress: truth.progress,
-          checklist: {
+          checklist_summary: {
             total: 3,
             todo: 2,
             doing: 0,
@@ -367,14 +367,14 @@ describe("MCP read plane", () => {
       evidence: [],
     });
     for (const index of [0, 1]) {
-      const context = await service.getWorkItem(project.code, truth.key, "context");
+      const context = await service.getWorkItem(project.code, truth.key);
       await service.updateChecklist(project.code, begun.session, `phase-check-${index}`, {
         checklistId: context.checklist[index]!.id,
         expectedVersion: context.checklist[index]!.version,
         status: "DONE",
       });
     }
-    truth = await service.getWorkItem(project.code, truth.key, "context");
+    truth = await service.getWorkItem(project.code, truth.key);
     truth = (
       await service.patchWorkItems(project.code, begun.session, "phase-verify", [
         { taskKey: truth.key, expectedVersion: truth.version, operation: "verify" },
@@ -401,10 +401,8 @@ describe("MCP read plane", () => {
         "status",
         "phase",
         "waiting_on",
-        "phase_inferred",
         "progress",
-        "reported_progress",
-        "progress_breakdown",
+        "progress_source",
       ];
       const listed = await client.callTool({
         name: "atm_task_list",
@@ -419,19 +417,8 @@ describe("MCP read plane", () => {
         status: "WAITING_AGENT",
         phase: "VERIFYING",
         waiting_on: "AGENT",
-        phase_inferred: false,
         progress: 40,
-        reported_progress: 90,
-        progress_breakdown: {
-          computed: 40,
-          reported: 90,
-          source: "CHECKLIST",
-          done_weight: 2,
-          total_weight: 5,
-          done_stages: 2,
-          total_stages: 5,
-          blocker: null,
-        },
+        progress_source: "CHECKLIST",
       };
 
       expect(listed.structuredContent).toMatchObject({
@@ -811,7 +798,7 @@ describe("MCP read plane", () => {
         entity_key: expect.stringMatching(/^REK-R-/u),
         title: expect.stringContaining("中文检索共同词"),
       });
-      expect(chineseFirstBody.next_cursor).toBe("20");
+      expect(chineseFirstBody.next_cursor).toEqual(expect.stringMatching(/^s1\./u));
 
       const chineseSecond = await client.callTool({
         name: "atm_search",

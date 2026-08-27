@@ -1259,8 +1259,15 @@ function useAllProjectTasks(client: AyanamiClient, projects: RegisteredProject[]
     queries: projects
       .filter((project) => project.lifecycle === "ACTIVE")
       .map((project) => ({
-        queryKey: ["tasks", project.code],
-        queryFn: () => client.tasks.list(project.code, { limit: 100 }),
+        queryKey: ["tasks", project.code, "context"],
+        queryFn: async () => {
+          const [views, metadata] = await Promise.all([
+            client.tasks.list(project.code, { limit: 100, view: "context" }),
+            client.tasks.listForUi(project.code, { limit: 100 }),
+          ]);
+          const byKey = new Map(metadata.map((item) => [String(item.key), item]));
+          return views.map((view) => ({ ...byKey.get(view.key), ...view }));
+        },
         staleTime: 5000,
         select: (tasks: any[]) =>
           tasks.map((task) => ({ ...task, project: project.code, projectName: project.name })),
@@ -1322,7 +1329,7 @@ function TasksAcrossProjects({
         </thead>
         <tbody>
           {tasks.map((task: any) => (
-            <tr key={task.id} onClick={() => onTask(task.project, task.key)}>
+            <tr key={task.key} onClick={() => onTask(task.project, task.key)}>
               <td>
                 <div className="atm-row-title">{task.title}</div>
                 <span className="atm-key">{task.key}</span>
@@ -2385,8 +2392,14 @@ function TaskDrawer({
   // 正在为哪个检查项补证据；null 表示没有展开的输入框。
   const [evidenceDraft, setEvidenceDraft] = useState<{ id: string; text: string } | null>(null);
   const query = useQuery({
-    queryKey: ["task", project, taskKey],
-    queryFn: () => client.tasks.get(project, taskKey, "context"),
+    queryKey: ["task", project, taskKey, "full"],
+    queryFn: async () => {
+      const [view, metadata] = await Promise.all([
+        client.tasks.get(project, taskKey, "full"),
+        client.tasks.getForUi(project, taskKey),
+      ]);
+      return { ...metadata, ...view };
+    },
   });
   const engineering = useQuery({
     queryKey: ["engineering-metrics", project, taskKey],
@@ -2543,8 +2556,10 @@ function TaskDrawer({
               {actions(
                 String(query.data!.status),
                 Boolean(
-                  query.data!.claimLeaseUntil &&
-                    Date.parse(String(query.data!.claimLeaseUntil)) <= Date.now(),
+                  (query.data as Record<string, unknown>).claimLeaseUntil &&
+                    Date.parse(
+                      String((query.data as Record<string, unknown>).claimLeaseUntil),
+                    ) <= Date.now(),
                 ),
               ).map(([operation, label]) => (
                 <button
@@ -2714,63 +2729,40 @@ function TaskDrawer({
               )}
             </section>
             <section className="atm-section">
-              <h3>依赖</h3>
+              <h3>任务关系</h3>
               <div className="atm-actions">
-                {(query.data!.dependencies as string[]).length ? (
-                  (query.data!.dependencies as string[]).map((key) => (
-                    <span className="atm-badge" key={key}>
-                      {key}
-                    </span>
-                  ))
+                {query.data!.relations.length ? (
+                  query.data!.relations.map((relation) => {
+                    const label =
+                      relation.type === "PARENT"
+                        ? "父任务"
+                        : relation.type === "CHILD"
+                          ? "子任务"
+                          : relation.type === "BLOCKS"
+                            ? relation.direction === "INCOMING"
+                              ? "依赖"
+                              : "阻塞"
+                            : relation.type === "DISCOVERED_FROM"
+                              ? relation.direction === "OUTGOING"
+                                ? "发现于"
+                                : "发现"
+                              : relation.type === "DUPLICATES"
+                                ? "重复"
+                                : "相关";
+                    return (
+                      <span
+                        className={`atm-badge ${relation.type === "DISCOVERED_FROM" ? "primary" : ""}`}
+                        key={`${relation.type}-${relation.direction}-${relation.taskKey}`}
+                      >
+                        {label} {relation.taskKey}
+                      </span>
+                    );
+                  })
                 ) : (
-                  <span className="atm-row-sub">没有前置依赖</span>
+                  <span className="atm-row-sub">没有任务关系</span>
                 )}
               </div>
             </section>
-            <section className="atm-section">
-              <h3>工作中发现</h3>
-              <div className="atm-actions">
-                {query.data!.discoveredFrom ? (
-                  <span className="atm-badge primary">
-                    来源 {String(query.data!.discoveredFrom)}
-                  </span>
-                ) : null}
-                {(query.data!.discovered as string[]).map((key) => (
-                  <span className="atm-badge" key={key}>
-                    发现 {key}
-                  </span>
-                ))}
-                {!query.data!.discoveredFrom && !(query.data!.discovered as string[]).length ? (
-                  <span className="atm-row-sub">没有发现关系</span>
-                ) : null}
-              </div>
-            </section>
-            {query.data!.executionSession ? (
-              <section className="atm-section">
-                <h3>执行 Session</h3>
-                <div className="atm-row-title">
-                  {String((query.data!.executionSession as any).display_name)} ·{" "}
-                  {statusLabels[String((query.data!.executionSession as any).role)] ??
-                    String((query.data!.executionSession as any).role)}
-                </div>
-                <div className="atm-row-sub">
-                  Branch：{String((query.data!.executionSession as any).git_branch || "不可用")}
-                </div>
-                <div
-                  className="atm-row-sub"
-                  title={String((query.data!.executionSession as any).worktree_root || "")}
-                >
-                  Worktree：{compactPath((query.data!.executionSession as any).worktree_root)}
-                </div>
-                <div className="atm-row-sub">
-                  HEAD：
-                  {String((query.data!.executionSession as any).git_head || "不可用").slice(0, 10)}
-                  {Number((query.data!.executionSession as any).git_dirty) === 1
-                    ? " · dirty"
-                    : " · clean"}
-                </div>
-              </section>
-            ) : null}
             {engineering.data?.available && engineering.data.workItem?.metrics ? (
               <section className="atm-section">
                 <h3>工程变更</h3>
@@ -3806,8 +3798,15 @@ function ProjectPage({
   const [updateProject, setUpdateProject] = useState(false);
   const [reconciliationCollapsed, setReconciliationCollapsed] = useState(true);
   const tasks = useQuery({
-    queryKey: ["tasks", project.code],
-    queryFn: () => client.tasks.list(project.code, { limit: 100 }),
+    queryKey: ["tasks", project.code, "context"],
+    queryFn: async () => {
+      const [views, metadata] = await Promise.all([
+        client.tasks.list(project.code, { limit: 100, view: "context" }),
+        client.tasks.listForUi(project.code, { limit: 100 }),
+      ]);
+      const byKey = new Map(metadata.map((item) => [String(item.key), item]));
+      return views.map((view) => ({ ...byKey.get(view.key), ...view }));
+    },
   });
   const brief = useQuery({
     queryKey: ["brief", project.code],

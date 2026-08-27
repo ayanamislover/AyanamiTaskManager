@@ -114,7 +114,9 @@ const filteredList = await measure(
 const search = await measure(() => service.search(primary.code, "项目验证关键词", 20), 30, 300);
 const delta = await measure(() => service.delta(primary.code, 0, 100), 30, 100);
 
-let mutable = (await service.listWorkItems(primary.code, { limit: 1 }))[0]!;
+let mutable: { key: string; version: number } = (
+  await service.listWorkItems(primary.code, { limit: 1 })
+)[0]!;
 const writeSamples: number[] = [];
 for (let index = 0; index < 30; index += 1) {
   const start = performance.now();
@@ -127,7 +129,7 @@ for (let index = 0; index < 30; index += 1) {
     },
   ]);
   writeSamples.push(performance.now() - start);
-  mutable = result.items[0]!;
+  mutable = { key: result.items[0]!.key, version: result.items[0]!.version };
 }
 const writeP95 = p95(writeSamples);
 const statusWrite: Metric = {

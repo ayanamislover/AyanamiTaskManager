@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import Database from "better-sqlite3";
 import { strToU8, zipSync, type Zippable } from "fflate";
 import { allocateProjectCode } from "@ayanami-task/domain";
-import { createUlid, nowIso } from "@ayanami-task/protocol";
+import { createUlid, nowIso, type SearchHit, type SearchPage } from "@ayanami-task/protocol";
 import {
   foreignKeyCheck,
   openManagedDatabase,
@@ -31,6 +31,7 @@ import {
   type PresentedEvent,
 } from "./event-presentation.js";
 import { ProjectRepository } from "./project-repository.js";
+import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 
 const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
 const SETTING_KEY_PATTERN = /^[a-z0-9][A-Za-z0-9._-]{0,79}$/u;
@@ -1415,52 +1416,153 @@ export class AyanamiDatabaseManager {
     }
   }
 
-  globalSearch(query: string, limit = 20): Array<Record<string, unknown>> {
+  globalSearch(query: string, limit = 20, cursor?: string): SearchPage {
     const boundedLimit = Math.min(30, Math.max(1, limit));
-    const projectRows = (
-      query.length >= 3
+    const normalized = query.trim();
+    if (!normalized) return { hits: [], nextCursor: null, hasMore: false };
+    const scope = "*";
+    const decoded = cursor ? decodeSearchCursor(cursor, { scope, query: normalized }) : null;
+    const snapshot = decoded?.snapshot ?? {
+      documents: Number(
+        (
+          this.registry.sqlite
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM global_search_documents")
+            .get() as { value: number }
+        ).value,
+      ),
+      quickTasks: Number(
+        (
+          this.registry.sqlite
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM quick_tasks")
+            .get() as { value: number }
+        ).value,
+      ),
+    };
+    const keyset = decoded
+      ? `(
+          updated_at < ? OR
+          (updated_at = ? AND COALESCE(project, '') > ?) OR
+          (updated_at = ? AND COALESCE(project, '') = ? AND entity_type > ?) OR
+          (updated_at = ? AND COALESCE(project, '') = ? AND entity_type = ? AND entity_key > ?)
+        )`
+      : "1 = 1";
+    const keysetParams = decoded
+      ? [
+          decoded.last.updatedAt,
+          decoded.last.updatedAt,
+          decoded.last.project,
+          decoded.last.updatedAt,
+          decoded.last.project,
+          decoded.last.entityType,
+          decoded.last.updatedAt,
+          decoded.last.project,
+          decoded.last.entityType,
+          decoded.last.entityKey,
+        ]
+      : [];
+    const escaped = `%${normalized.replace(/[\\%_]/gu, "\\$&")}%`;
+    const rows = (
+      [...normalized].length >= 3
         ? this.registry.sqlite
             .prepare(
-              `SELECT documents.entity_type, documents.entity_key, documents.title,
-                    documents.summary, documents.updated_at, projects.code AS project
-             FROM global_search_documents_fts search
-             JOIN global_search_documents documents
-               ON documents.project_id = search.project_id
-              AND documents.entity_type = search.entity_type
-              AND documents.entity_key = search.entity_key
-             JOIN projects ON projects.id = documents.project_id
-             WHERE global_search_documents_fts MATCH ?
-             ORDER BY bm25(global_search_documents_fts), documents.updated_at DESC
-             LIMIT ?`,
-            )
-            .all(`"${query.replaceAll('"', '""')}"`, boundedLimit)
-        : this.registry.sqlite
-            .prepare(
-              `SELECT documents.entity_type, documents.entity_key, documents.title,
-                    documents.summary, documents.updated_at, projects.code AS project
-             FROM global_search_documents documents
-             JOIN projects ON projects.id = documents.project_id
-             WHERE documents.title LIKE ? ESCAPE '\\' OR documents.summary LIKE ? ESCAPE '\\'
-             ORDER BY documents.updated_at DESC LIMIT ?`,
+              `WITH candidates AS (
+                 SELECT documents.entity_type, documents.entity_key, documents.title,
+                        documents.summary, documents.updated_at, projects.code AS project
+                 FROM global_search_documents_fts search
+                 JOIN global_search_documents documents
+                   ON documents.project_id = search.project_id
+                  AND documents.entity_type = search.entity_type
+                  AND documents.entity_key = search.entity_key
+                 JOIN projects ON projects.id = documents.project_id
+                 WHERE global_search_documents_fts MATCH ? AND documents.rowid <= ?
+                 UNION ALL
+                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
+                        quick.note, quick.updated_at, NULL
+                 FROM quick_tasks quick
+                 WHERE quick.rowid <= ?
+                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
+               )
+               SELECT entity_type, entity_key, title, summary, updated_at, project
+               FROM candidates WHERE ${keyset}
+               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
+               LIMIT ?`,
             )
             .all(
-              `%${query.replace(/[\\%_]/gu, "\\$&")}%`,
-              `%${query.replace(/[\\%_]/gu, "\\$&")}%`,
-              boundedLimit,
+              `"${normalized.replaceAll('"', '""')}"`,
+              snapshot.documents,
+              snapshot.quickTasks,
+              escaped,
+              escaped,
+              ...keysetParams,
+              boundedLimit + 1,
             )
-    ) as Array<Record<string, unknown>>;
-    const remaining = Math.max(0, boundedLimit - projectRows.length);
-    if (remaining === 0) return projectRows;
-    const escaped = `%${query.replace(/[\\%_]/gu, "\\$&")}%`;
-    const quickRows = this.registry.sqlite
-      .prepare(
-        `SELECT 'QUICK_TASK' AS entity_type, 'Q-' || printf('%04d', local_no) AS entity_key,
-                title, note AS summary, updated_at, NULL AS project
-         FROM quick_tasks WHERE title LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\'
-         ORDER BY updated_at DESC LIMIT ?`,
-      )
-      .all(escaped, escaped, remaining) as Array<Record<string, unknown>>;
-    return [...projectRows, ...quickRows];
+        : this.registry.sqlite
+            .prepare(
+              `WITH candidates AS (
+                 SELECT documents.entity_type, documents.entity_key, documents.title,
+                        documents.summary, documents.updated_at, projects.code AS project
+                 FROM global_search_documents documents
+                 JOIN projects ON projects.id = documents.project_id
+                 WHERE documents.rowid <= ?
+                   AND (documents.title LIKE ? ESCAPE '\\' OR documents.summary LIKE ? ESCAPE '\\')
+                 UNION ALL
+                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
+                        quick.note, quick.updated_at, NULL
+                 FROM quick_tasks quick
+                 WHERE quick.rowid <= ?
+                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
+               )
+               SELECT entity_type, entity_key, title, summary, updated_at, project
+               FROM candidates WHERE ${keyset}
+               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
+               LIMIT ?`,
+            )
+            .all(
+              snapshot.documents,
+              escaped,
+              escaped,
+              snapshot.quickTasks,
+              escaped,
+              escaped,
+              ...keysetParams,
+              boundedLimit + 1,
+            )
+    ) as Array<{
+      entity_type: string;
+      entity_key: string;
+      title: string;
+      summary: string;
+      updated_at: string;
+      project: string | null;
+    }>;
+    const hits: SearchHit[] = rows.slice(0, boundedLimit).map((row) => ({
+      entityType: row.entity_type,
+      entityKey: row.entity_key,
+      title: row.title,
+      snippet: String(row.summary).slice(0, 240),
+      updatedAt: row.updated_at,
+      project: row.project,
+    }));
+    const hasMore = rows.length > boundedLimit;
+    const last = hits.at(-1);
+    return {
+      hits,
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? encodeSearchCursor({
+              scope,
+              query: normalized,
+              snapshot,
+              last: {
+                updatedAt: last.updatedAt,
+                project: last.project ?? "",
+                entityType: last.entityType,
+                entityKey: last.entityKey,
+              },
+            })
+          : null,
+    };
   }
 
   overview(): Record<string, unknown> {

@@ -73,8 +73,8 @@ describe("Registry 增量搜索投影", () => {
       percent: 20,
     });
 
-    expect(service.globalSearch("新的中文搜索标题")).toHaveLength(1);
-    expect(service.globalSearch("第二次进度摘要")).toHaveLength(1);
+    expect(service.globalSearch("新的中文搜索标题").hits).toHaveLength(1);
+    expect(service.globalSearch("第二次进度摘要").hits).toHaveLength(1);
     expect(
       service.overview().projects.find((entry: any) => entry.code === project.code)
         ?.project_sequence,

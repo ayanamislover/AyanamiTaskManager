@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./views/task.js";
+
 export const SESSION_CLOSE_REASONS = [
   "HEARTBEAT_TIMEOUT",
   "EXPLICIT_END",
@@ -570,6 +572,60 @@ export const ChecklistBatchUpdateInputSchema = z.object({
   items: z.array(ChecklistBatchItemInputSchema).min(1).max(100),
 });
 
+export const ChecklistBatchFailureReasonSchema = z.discriminatedUnion("code", [
+  z
+    .object({
+      task_key: NonEmptyTextSchema.max(100),
+      code: z.literal("VERSION_CONFLICT"),
+      expected: z.number().int().nonnegative(),
+      actual: z.number().int().nonnegative(),
+    })
+    .strict(),
+  z
+    .object({
+      checklist_id: NonEmptyTextSchema.max(128),
+      code: z.enum(["NOT_FOUND", "TASK_MISMATCH", "EVIDENCE_REQUIRED"]),
+    })
+    .strict(),
+]);
+
+export const ChecklistBatchFailureDetailsSchema = z
+  .object({ reasons: z.array(ChecklistBatchFailureReasonSchema).min(1).max(101) })
+  .strict();
+
+export type ChecklistBatchFailureReason = z.infer<typeof ChecklistBatchFailureReasonSchema>;
+export type ChecklistBatchFailureDetails = z.infer<typeof ChecklistBatchFailureDetailsSchema>;
+
+function checklistBatchFailureMessage(reasons: readonly ChecklistBatchFailureReason[]): string {
+  return reasons
+    .map((reason) => {
+      if (reason.code === "VERSION_CONFLICT") {
+        return `version conflict (${reason.task_key}: expected ${reason.expected}, actual ${reason.actual})`;
+      }
+      if (reason.code === "EVIDENCE_REQUIRED") {
+        return `evidence required (${reason.checklist_id})`;
+      }
+      if (reason.code === "TASK_MISMATCH") {
+        return `checklist task mismatch (${reason.checklist_id})`;
+      }
+      return `checklist not found (${reason.checklist_id})`;
+    })
+    .join("; ");
+}
+
+/** A preflight failure for an atomic checklist batch. No mutation has been applied. */
+export class ChecklistBatchFailureError extends Error {
+  readonly code = "COMPLETION_GATE_FAILED";
+  readonly details: ChecklistBatchFailureDetails;
+
+  constructor(reasons: readonly ChecklistBatchFailureReason[]) {
+    const details = ChecklistBatchFailureDetailsSchema.parse({ reasons });
+    super(`COMPLETION_GATE_FAILED: ${checklistBatchFailureMessage(details.reasons)}`);
+    this.name = "ChecklistBatchFailureError";
+    this.details = details;
+  }
+}
+
 export const VerifyAndCompleteInputSchema = z.object({
   project: NonEmptyTextSchema,
   session: NonEmptyTextSchema,
@@ -621,6 +677,22 @@ export const SearchInputSchema = z.object({
   project: z.string().optional(),
   query: NonEmptyTextSchema.max(500),
   limit: z.number().int().min(1).max(30).default(20),
+  cursor: z.string().min(1).max(4000).optional(),
+});
+
+export const SearchHitSchema = z.object({
+  entityType: z.string(),
+  entityKey: z.string(),
+  title: z.string(),
+  snippet: z.string(),
+  updatedAt: z.string(),
+  project: z.string().nullable().optional(),
+});
+
+export const SearchPageSchema = z.object({
+  hits: z.array(SearchHitSchema),
+  nextCursor: z.string().nullable(),
+  hasMore: z.boolean(),
 });
 
 export const DeltaInputSchema = z.object({
@@ -658,3 +730,6 @@ export type ReviewRequestCreateInput = z.infer<typeof ReviewRequestCreateInputSc
 export type ReviewSubmitInput = z.infer<typeof ReviewSubmitInputSchema>;
 export type RecordInput = z.input<typeof RecordInputSchema>;
 export type ProgressAddInput = z.infer<typeof ProgressAddInputSchema>;
+export type SearchInput = z.infer<typeof SearchInputSchema>;
+export type SearchHit = z.infer<typeof SearchHitSchema>;
+export type SearchPage = z.infer<typeof SearchPageSchema>;

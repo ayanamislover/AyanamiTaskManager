@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { assertParentMove, assertAcyclicDependency, computeProgress } from "@ayanami-task/domain";
 import {
   assertWorkItemTransition,
+  ChecklistBatchFailureError,
   createUlid,
   EvidenceInputSchema,
   EvidenceReferenceSchema,
@@ -14,9 +15,15 @@ import {
   type WorkItemStatus,
   type WorkItemWaitingOn,
   type EvidenceInput,
+  type ChecklistBatchFailureReason,
+  type SearchHit,
+  type SearchPage,
+  type TaskViewName,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
+import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
 
 function json<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -88,6 +95,54 @@ type MutationInput<T> = {
   action: () => T;
   idempotencyKey?: string;
   immediate?: boolean;
+};
+
+export type WorkItemCreateInput = {
+  clientRef: string;
+  objectiveId?: string;
+  milestoneId?: string | null;
+  parentKey?: string | null;
+  parentRef?: string | null;
+  dependsOn?: string[];
+  dependsOnRefs?: string[];
+  discoveredFrom?: string;
+  discoveredFromRef?: string;
+  title: string;
+  description?: string;
+  type: string;
+  priority: string;
+  status?: WorkItemStatus;
+  acceptance?: string[];
+  checklist?: Array<{ title: string; evidenceRequired?: boolean; weight?: number }>;
+  weight?: number;
+  targetDate?: string | null;
+  verificationRequired?: boolean;
+  sourceQuickId?: string | null;
+  assigneeAgentId?: string | null;
+};
+
+/**
+ * MCP-only planning policy. Supplying it makes omitted objective/milestone fields resolve from
+ * the active planning root, and can provision that root inside the same transaction as the batch.
+ * Direct repository callers retain the historical explicit-objective/null-milestone behaviour.
+ */
+export type WorkItemPlanningRoot = {
+  provisionIfMissing: boolean;
+  objectiveTitle: string;
+  objectiveDescription: string;
+  milestoneTitle: string;
+};
+
+export type WorkItemListFilters = {
+  status?: string;
+  assigneeAgentId?: string;
+  parentId?: string;
+  parentKey?: string;
+  milestoneId?: string;
+  readyOnly?: boolean;
+  query?: string;
+  limit?: number;
+  offset?: number;
 };
 
 export type WorkItemView = {
@@ -2199,19 +2254,90 @@ export class ProjectRepository {
     });
   }
 
-  listWorkItems(
-    filters: {
-      status?: string;
-      assigneeAgentId?: string;
-      parentId?: string;
-      parentKey?: string;
-      milestoneId?: string;
-      readyOnly?: boolean;
-      query?: string;
-      limit?: number;
-      offset?: number;
-    } = {},
-  ): WorkItemView[] {
+  private taskViewFilter(filters: WorkItemListFilters): {
+    clauses: string[];
+    params: unknown[];
+  } {
+    const clauses = ["archived_at IS NULL"];
+    const params: unknown[] = [];
+    if (filters.status) {
+      clauses.push("status = ?");
+      params.push(filters.status);
+    }
+    if (filters.assigneeAgentId) {
+      clauses.push("assignee_agent_id = ?");
+      params.push(filters.assigneeAgentId);
+    }
+    if (filters.parentId) {
+      clauses.push("parent_id = ?");
+      params.push(filters.parentId);
+    }
+    if (filters.parentKey) {
+      clauses.push("parent_id = ?");
+      params.push(this.rowForTaskKey(filters.parentKey).id);
+    }
+    if (filters.milestoneId) {
+      clauses.push("milestone_id = ?");
+      params.push(filters.milestoneId);
+    }
+    if (filters.query) {
+      clauses.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
+      const escaped = filters.query.replace(/[\\%_]/gu, "\\$&");
+      params.push(`%${escaped}%`, `%${escaped}%`);
+    }
+    if (filters.readyOnly) {
+      clauses.push(
+        `status = 'READY' AND NOT EXISTS (
+          SELECT 1 FROM work_item_relations relation
+          JOIN work_items dependency ON dependency.id = relation.source_id
+          WHERE relation.target_id = work_items.id AND relation.relation_type = 'BLOCKS'
+            AND dependency.status <> 'DONE'
+        )`,
+      );
+    }
+    return { clauses, params };
+  }
+
+  listTaskViewRows(
+    filters: WorkItemListFilters = {},
+    view: TaskViewName = "core",
+  ): TaskViewProjectionRow[] {
+    const { clauses, params } = this.taskViewFilter(filters);
+    params.push(Math.min(100, Math.max(1, filters.limit ?? 20)), Math.max(0, filters.offset ?? 0));
+    return this.#sqlite
+      .prepare(
+        taskViewProjectionSql({
+          whereSql: clauses.join(" AND "),
+          selectionTailSql: `ORDER BY CASE priority
+            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+            WHEN 'NORMAL' THEN 2 ELSE 3 END,
+            sort_key, created_at LIMIT ? OFFSET ?`,
+          view,
+        }),
+      )
+      .all(...params) as TaskViewProjectionRow[];
+  }
+
+  getTaskViewRow(taskKey: string, view: TaskViewName = "core"): TaskViewProjectionRow {
+    const code = this.meta.code;
+    const prefix = `${code}-T-`;
+    const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
+    const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
+    if (!Number.isSafeInteger(localNo)) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    const row = this.#sqlite
+      .prepare(
+        taskViewProjectionSql({
+          whereSql: "archived_at IS NULL AND local_no = ?",
+          selectionTailSql: "",
+          view,
+        }),
+      )
+      .get(localNo) as TaskViewProjectionRow | undefined;
+    if (!row) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    return row;
+  }
+
+  listWorkItems(filters: WorkItemListFilters = {}): WorkItemView[] {
     const clauses = ["archived_at IS NULL"];
     const params: unknown[] = [];
     if (filters.status) {
@@ -2276,87 +2402,286 @@ export class ProjectRepository {
   createWorkItems(
     actor: ProjectActor,
     opId: string,
-    items: Array<{
-      clientRef: string;
-      objectiveId: string;
-      milestoneId?: string | null;
-      parentKey?: string | null;
-      parentRef?: string | null;
-      dependsOn?: string[];
-      dependsOnRefs?: string[];
-      discoveredFrom?: string;
-      discoveredFromRef?: string;
-      title: string;
-      description?: string;
-      type: string;
-      priority: string;
-      status?: WorkItemStatus;
-      acceptance?: string[];
-      checklist?: Array<{ title: string; evidenceRequired?: boolean; weight?: number }>;
-      weight?: number;
-      targetDate?: string | null;
-      verificationRequired?: boolean;
-      sourceQuickId?: string | null;
-      assigneeAgentId?: string | null;
-    }>,
-  ): { items: WorkItemView[]; sequence: number } {
-    if (items.length === 0 || items.length > 50) throw new Error("VALIDATION_ERROR: items 1..50");
-    if (new Set(items.map((item) => item.clientRef)).size !== items.length) {
-      throw new Error("VALIDATION_ERROR: duplicate clientRef");
-    }
+    items: WorkItemCreateInput[],
+    planningRoot?: WorkItemPlanningRoot,
+  ): { items: WorkItemView[]; sequence: number; planningRootProvisioned: boolean } {
     return this.mutate({
       actor,
       opId,
       operation: "work.create.batch",
+      // Planning-root policy is server-derived; idempotency is bound to the caller's task batch.
       request: items,
+      immediate: true,
       action: () => {
-        const code = this.meta.code;
-        for (const milestoneId of new Set(
-          items
-            .map((item) => item.milestoneId)
-            .filter((candidate): candidate is string => typeof candidate === "string"),
-        )) {
-          const milestone = this.#sqlite
-            .prepare("SELECT id FROM milestones WHERE id = ?")
-            .get(milestoneId);
-          if (!milestone) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+        if (items.length === 0 || items.length > 50) {
+          throw new Error("VALIDATION_ERROR: items 1..50");
         }
-        const references = new Map<string, { id: string; key: string }>();
-        const pendingEvents: Array<{
+        if (new Set(items.map((item) => item.clientRef)).size !== items.length) {
+          throw new Error("VALIDATION_ERROR: duplicate clientRef");
+        }
+
+        /*
+         * Build and validate the complete prospective graph before incrementing a counter or
+         * inserting the optional planning root. This deliberately supports forward refs: the
+         * validation result must not depend on the order in which a caller serialized the batch.
+         */
+        const code = this.meta.code;
+        const activeObjective = planningRoot ? this.getActiveObjective() : null;
+        const needsDefaultObjective = items.some((item) => item.objectiveId === undefined);
+        const plannedObjective =
+          planningRoot?.provisionIfMissing && needsDefaultObjective && !activeObjective
+            ? { id: createUlid() }
+            : null;
+        const defaultObjectiveId = String(activeObjective?.id ?? plannedObjective?.id ?? "");
+        if (needsDefaultObjective && !defaultObjectiveId) {
+          throw new Error("OBJECTIVE_REQUIRED: 项目尚无活动目标");
+        }
+
+        const activeDefaultMilestone = defaultObjectiveId
+          ? this.getActiveMilestone(defaultObjectiveId)
+          : null;
+        const plannedMilestone =
+          planningRoot?.provisionIfMissing &&
+          needsDefaultObjective &&
+          defaultObjectiveId &&
+          !activeDefaultMilestone
+            ? { id: createUlid(), objectiveId: defaultObjectiveId }
+            : null;
+        const defaultMilestoneId = activeDefaultMilestone?.id ?? plannedMilestone?.id ?? null;
+
+        const objectiveRows = new Map<string, { id: string }>();
+        if (plannedObjective) objectiveRows.set(plannedObjective.id, plannedObjective);
+        const objective = (objectiveId: string): { id: string } => {
+          const cached = objectiveRows.get(objectiveId);
+          if (cached) return cached;
+          const row = this.#sqlite
+            .prepare("SELECT id FROM objectives WHERE id = ?")
+            .get(objectiveId) as { id: string } | undefined;
+          if (!row) throw new Error(`OBJECTIVE_NOT_FOUND: ${objectiveId}`);
+          objectiveRows.set(objectiveId, row);
+          return row;
+        };
+
+        const milestoneRows = new Map<string, { id: string; objectiveId: string }>();
+        if (plannedMilestone) milestoneRows.set(plannedMilestone.id, plannedMilestone);
+        const milestone = (milestoneId: string): { id: string; objectiveId: string } => {
+          const cached = milestoneRows.get(milestoneId);
+          if (cached) return cached;
+          const row = this.#sqlite
+            .prepare("SELECT id, objective_id FROM milestones WHERE id = ?")
+            .get(milestoneId) as { id: string; objective_id: string } | undefined;
+          if (!row) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+          const normalized = { id: row.id, objectiveId: row.objective_id };
+          milestoneRows.set(milestoneId, normalized);
+          return normalized;
+        };
+
+        type PlannedItem = {
+          input: WorkItemCreateInput;
           id: string;
           key: string;
-          title: string;
+          objectiveId: string;
+          milestoneId: string | null;
+          parentId: string | null;
+          dependencyIds: string[];
+          discoveredFromId: string | null;
+          discoveredFromKey: string | null;
           status: WorkItemStatus;
-          discoveredFrom?: string;
-          discoveredFromRef?: string;
           createdAt: string;
-        }> = [];
-        const result: WorkItemView[] = [];
-        let sequence = this.meta.sequence;
+        };
+
+        const plannedByRef = new Map<string, PlannedItem>();
+        const planned = items.map((item) => {
+          const itemObjectiveId = item.objectiveId ?? defaultObjectiveId;
+          objective(itemObjectiveId);
+          let itemMilestoneId: string | null;
+          if (item.milestoneId !== undefined) {
+            itemMilestoneId = item.milestoneId;
+          } else if (!planningRoot) {
+            itemMilestoneId = null;
+          } else if (item.objectiveId === undefined) {
+            itemMilestoneId = defaultMilestoneId;
+          } else {
+            itemMilestoneId = this.getActiveMilestone(itemObjectiveId)?.id ?? null;
+          }
+          if (itemMilestoneId) {
+            const selectedMilestone = milestone(itemMilestoneId);
+            if (selectedMilestone.objectiveId !== itemObjectiveId) {
+              throw new Error(
+                `MILESTONE_OBJECTIVE_MISMATCH: ${itemMilestoneId} does not belong to ${itemObjectiveId}`,
+              );
+            }
+          }
+          const entry: PlannedItem = {
+            input: item,
+            id: createUlid(),
+            key: "",
+            objectiveId: itemObjectiveId,
+            milestoneId: itemMilestoneId,
+            parentId: null,
+            dependencyIds: [],
+            discoveredFromId: null,
+            discoveredFromKey: null,
+            status: item.status ?? "BACKLOG",
+            createdAt: nowIso(),
+          };
+          plannedByRef.set(item.clientRef, entry);
+          return entry;
+        });
+
+        const existingByKey = new Map<string, any>();
+        const taskForKey = (taskKey: string): any => {
+          const cached = existingByKey.get(taskKey);
+          if (cached) return cached;
+          const row = this.rowForTaskKey(taskKey);
+          existingByKey.set(taskKey, row);
+          return row;
+        };
+
+        for (const entry of planned) {
+          const item = entry.input;
+          const hasParentRef = item.parentRef !== undefined && item.parentRef !== null;
+          const hasParentKey = item.parentKey !== undefined && item.parentKey !== null;
+          if (hasParentRef && hasParentKey) {
+            throw new Error("VALIDATION_ERROR: parentKey and parentRef are mutually exclusive");
+          }
+          if (hasParentRef) {
+            const parent = plannedByRef.get(String(item.parentRef));
+            if (!parent) throw new Error(`PARENT_REF_NOT_FOUND: ${item.parentRef}`);
+            entry.parentId = parent.id;
+          } else if (hasParentKey) {
+            entry.parentId = String(taskForKey(String(item.parentKey)).id);
+          }
+
+          const dependencyIds = [
+            ...(item.dependsOn ?? []).map((taskKey) => String(taskForKey(taskKey).id)),
+            ...(item.dependsOnRefs ?? []).map((reference) => {
+              const dependency = plannedByRef.get(reference);
+              if (!dependency) throw new Error(`DEPENDENCY_REF_NOT_FOUND: ${reference}`);
+              return dependency.id;
+            }),
+          ];
+          if (new Set(dependencyIds).size !== dependencyIds.length) {
+            throw new Error(`VALIDATION_ERROR: duplicate dependency for ${item.clientRef}`);
+          }
+          entry.dependencyIds = dependencyIds;
+
+          const hasDiscoveredRef = item.discoveredFromRef !== undefined;
+          const hasDiscoveredKey = item.discoveredFrom !== undefined;
+          if (hasDiscoveredRef && hasDiscoveredKey) {
+            throw new Error(
+              "VALIDATION_ERROR: discoveredFrom and discoveredFromRef are mutually exclusive",
+            );
+          }
+          if (hasDiscoveredRef) {
+            const source = plannedByRef.get(String(item.discoveredFromRef));
+            if (!source) {
+              throw new Error(`DISCOVERED_FROM_REF_NOT_FOUND: ${item.discoveredFromRef}`);
+            }
+            entry.discoveredFromId = source.id;
+            entry.discoveredFromKey = source.key;
+          } else if (hasDiscoveredKey) {
+            const source = taskForKey(String(item.discoveredFrom));
+            entry.discoveredFromId = String(source.id);
+            entry.discoveredFromKey = String(item.discoveredFrom);
+          }
+          if (entry.discoveredFromId === entry.id) {
+            throw new Error("VALIDATION_ERROR: task cannot discover itself");
+          }
+        }
+
+        const parents = new Map<string, string | null>(
+          (
+            this.#sqlite.prepare("SELECT id, parent_id FROM work_items").all() as Array<{
+              id: string;
+              parent_id: string | null;
+            }>
+          ).map((row) => [row.id, row.parent_id]),
+        );
+        for (const entry of planned) parents.set(entry.id, entry.parentId);
+        for (const entry of planned) assertParentMove(entry.id, entry.parentId, parents);
+
+        const dependencies = new Map<string, string[]>();
+        for (const row of this.#sqlite
+          .prepare(
+            "SELECT source_id, target_id FROM work_item_relations WHERE relation_type = 'BLOCKS'",
+          )
+          .all() as Array<{ source_id: string; target_id: string }>) {
+          dependencies.set(row.target_id, [
+            ...(dependencies.get(row.target_id) ?? []),
+            row.source_id,
+          ]);
+        }
+        for (const entry of planned) dependencies.set(entry.id, entry.dependencyIds);
+        for (const entry of planned) {
+          for (const dependencyId of entry.dependencyIds) {
+            assertAcyclicDependency(entry.id, dependencyId, dependencies);
+          }
+        }
+
+        // No persistent mutation occurs above this line.
+        let planningRootProvisioned = false;
+        if (plannedObjective) {
+          const now = nowIso();
+          const localNo = this.nextNumber("objective");
+          this.#sqlite
+            .prepare(
+              `INSERT INTO objectives(
+                 id, local_no, title, description, definition_of_done_json, status, weight,
+                 version, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, '[]', 'ACTIVE', 1, 0, ?, ?)`,
+            )
+            .run(
+              plannedObjective.id,
+              localNo,
+              planningRoot!.objectiveTitle,
+              planningRoot!.objectiveDescription,
+              now,
+              now,
+            );
+          this.appendEvent("objective.created", actor, "OBJECTIVE", plannedObjective.id, {
+            localNo,
+            title: planningRoot!.objectiveTitle,
+          });
+          planningRootProvisioned = true;
+        }
+        if (plannedMilestone) {
+          const now = nowIso();
+          const localNo = this.nextNumber("milestone");
+          const sortKey = (
+            this.#sqlite
+              .prepare("SELECT COALESCE(MAX(sort_key), 0) + 1000 AS value FROM milestones")
+              .get() as { value: number }
+          ).value;
+          this.#sqlite
+            .prepare(
+              `INSERT INTO milestones(
+                 id, local_no, objective_id, title, description, target_date, status, weight,
+                 sort_key, version, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, '', NULL, 'ACTIVE', 1, ?, 0, ?, ?)`,
+            )
+            .run(
+              plannedMilestone.id,
+              localNo,
+              plannedMilestone.objectiveId,
+              planningRoot!.milestoneTitle,
+              sortKey,
+              now,
+              now,
+            );
+          this.appendEvent("milestone.created", actor, "MILESTONE", plannedMilestone.id, {
+            localNo,
+            title: planningRoot!.milestoneTitle,
+          });
+        }
+
+        const references = new Map<string, { id: string; key: string }>();
         for (const item of items) {
-          const objective = this.#sqlite
-            .prepare("SELECT id FROM objectives WHERE id = ?")
-            .get(item.objectiveId);
-          if (!objective) throw new Error(`OBJECTIVE_NOT_FOUND: ${item.objectiveId}`);
-          const parentId = item.parentRef
-            ? references.get(item.parentRef)?.id
-            : item.parentKey
-              ? this.rowForTaskKey(item.parentKey).id
-              : null;
-          if (item.parentRef && !parentId)
-            throw new Error(`PARENT_REF_NOT_FOUND: ${item.parentRef}`);
-          const parents = new Map(
-            (this.#sqlite.prepare("SELECT id, parent_id FROM work_items").all() as any[]).map(
-              (row) => [row.id, row.parent_id],
-            ),
-          );
-          const id = createUlid();
-          parents.set(id, null);
-          assertParentMove(id, parentId, parents);
+          const entry = plannedByRef.get(item.clientRef)!;
           const localNo = this.nextNumber("work_item");
           const key = `${code}-T-${String(localNo).padStart(4, "0")}`;
-          const now = nowIso();
-          const status = item.status ?? "BACKLOG";
+          entry.key = key;
+          const status = entry.status;
           const phase =
             status === "WAITING_AGENT" || status === "WAITING_USER" ? "IN_PROGRESS" : status;
           const waitingOn =
@@ -2374,11 +2699,11 @@ export class ProjectRepository {
                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
-              id,
+              entry.id,
               localNo,
-              parentId,
-              item.objectiveId,
-              item.milestoneId ?? null,
+              null,
+              entry.objectiveId,
+              entry.milestoneId,
               item.type,
               item.title,
               item.description ?? "",
@@ -2393,8 +2718,8 @@ export class ProjectRepository {
               item.verificationRequired ? 1 : 0,
               actor.id,
               actor.sessionId,
-              now,
-              now,
+              entry.createdAt,
+              entry.createdAt,
               item.sourceQuickId ?? null,
               item.assigneeAgentId ?? null,
             );
@@ -2408,92 +2733,77 @@ export class ProjectRepository {
               )
               .run(
                 createUlid(),
-                id,
+                entry.id,
                 checklist.title,
                 checklist.weight ?? 1,
                 checklist.evidenceRequired ? 1 : 0,
-                now,
-                now,
+                entry.createdAt,
+                entry.createdAt,
               );
           }
-          const dependencyKeys = [
-            ...(item.dependsOn ?? []),
-            ...(item.dependsOnRefs ?? []).map((reference) => references.get(reference)?.key ?? ""),
-          ].filter(Boolean);
-          const dependencyMap = new Map<string, string[]>();
-          for (const row of this.#sqlite
-            .prepare(
-              "SELECT source_id, target_id FROM work_item_relations WHERE relation_type = 'BLOCKS'",
-            )
-            .all() as any[]) {
-            dependencyMap.set(row.target_id, [
-              ...(dependencyMap.get(row.target_id) ?? []),
-              row.source_id,
-            ]);
+          references.set(item.clientRef, { id: entry.id, key });
+        }
+
+        for (const entry of planned) {
+          if (entry.parentId) {
+            this.#sqlite
+              .prepare("UPDATE work_items SET parent_id = ? WHERE id = ?")
+              .run(entry.parentId, entry.id);
           }
-          for (const dependencyKey of dependencyKeys) {
-            const dependency = this.rowForTaskKey(dependencyKey);
-            assertAcyclicDependency(id, dependency.id, dependencyMap);
+          for (const dependencyId of entry.dependencyIds) {
             this.#sqlite
               .prepare(
                 `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
                  VALUES (?, ?, 'BLOCKS', ?)`,
               )
-              .run(dependency.id, id, now);
+              .run(dependencyId, entry.id, entry.createdAt);
           }
-          references.set(item.clientRef, { id, key });
-          this.upsertSearchDocument("WORK_ITEM", id, key, item.title, item.description ?? "");
-          this.recomputeWorkItem(id);
-          pendingEvents.push({
-            id,
-            key,
-            title: item.title,
-            status,
-            ...(item.discoveredFrom === undefined ? {} : { discoveredFrom: item.discoveredFrom }),
-            ...(item.discoveredFromRef === undefined
-              ? {}
-              : { discoveredFromRef: item.discoveredFromRef }),
-            createdAt: now,
-          });
-          result.push(
-            this.workItemViewFromRow(
-              this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(id),
-            ),
-          );
-        }
-        for (const pending of pendingEvents) {
-          const discoveredFrom = pending.discoveredFromRef
-            ? references.get(pending.discoveredFromRef)
-            : pending.discoveredFrom
-              ? (() => {
-                  const row = this.rowForTaskKey(pending.discoveredFrom);
-                  return { id: row.id as string, key: pending.discoveredFrom };
-                })()
-              : undefined;
-          if (pending.discoveredFromRef && !discoveredFrom) {
-            throw new Error(`DISCOVERED_FROM_REF_NOT_FOUND: ${pending.discoveredFromRef}`);
-          }
-          if (discoveredFrom) {
-            if (discoveredFrom.id === pending.id) {
-              throw new Error("VALIDATION_ERROR: task cannot discover itself");
-            }
+          if (entry.discoveredFromId) {
             this.#sqlite
               .prepare(
                 `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
                  VALUES (?, ?, 'DISCOVERED_FROM', ?)`,
               )
-              .run(pending.id, discoveredFrom.id, pending.createdAt);
-            this.refreshWorkItemSearchDocument(pending.id);
-            this.refreshWorkItemSearchDocument(discoveredFrom.id);
+              .run(entry.id, entry.discoveredFromId, entry.createdAt);
           }
-          sequence = this.appendEvent("work.created", actor, "WORK_ITEM", pending.id, {
-            key: pending.key,
-            title: pending.title,
-            status: pending.status,
-            ...(discoveredFrom ? { discoveredFrom: discoveredFrom.key } : {}),
+        }
+
+        for (const entry of planned) {
+          const reference = references.get(entry.input.clientRef)!;
+          this.upsertSearchDocument(
+            "WORK_ITEM",
+            entry.id,
+            reference.key,
+            entry.input.title,
+            entry.input.description ?? "",
+          );
+          this.recomputeWorkItem(entry.id);
+          if (entry.discoveredFromId) this.refreshWorkItemSearchDocument(entry.discoveredFromId);
+        }
+
+        let sequence = this.meta.sequence;
+        for (const entry of planned) {
+          const reference = references.get(entry.input.clientRef)!;
+          const discoveredFromKey = entry.input.discoveredFromRef
+            ? references.get(entry.input.discoveredFromRef)?.key
+            : entry.discoveredFromKey;
+          sequence = this.appendEvent("work.created", actor, "WORK_ITEM", entry.id, {
+            key: reference.key,
+            title: entry.input.title,
+            status: entry.status,
+            ...(discoveredFromKey ? { discoveredFrom: discoveredFromKey } : {}),
           });
         }
-        return { items: result, sequence };
+
+        return {
+          items: planned.map((entry) =>
+            this.workItemViewFromRow(
+              this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(entry.id),
+            ),
+          ),
+          sequence,
+          planningRootProvisioned,
+        };
       },
     });
   }
@@ -3149,16 +3459,31 @@ export class ProjectRepository {
       immediate: true,
       action: () => {
         const task = this.rowForTaskKey(input.taskKey);
+        const reasons: ChecklistBatchFailureReason[] = [];
         if (task.version !== input.expectedVersion) {
-          throw new Error(`VERSION_CONFLICT: ${input.taskKey}:${task.version}`);
+          reasons.push({
+            task_key: input.taskKey,
+            code: "VERSION_CONFLICT",
+            expected: input.expectedVersion,
+            actual: task.version,
+          });
         }
-        const rows = normalizedInput.items.map((item) => {
+        const rows: Array<{
+          row: any;
+          item: (typeof normalizedInput.items)[number];
+          evidence: unknown[];
+        }> = [];
+        for (const item of normalizedInput.items) {
           const row = this.#sqlite
             .prepare("SELECT * FROM checklist_items WHERE id = ?")
             .get(item.checklistId) as any;
-          if (!row) throw new Error(`NOT_FOUND: ${item.checklistId}`);
+          if (!row) {
+            reasons.push({ checklist_id: item.checklistId, code: "NOT_FOUND" });
+            continue;
+          }
           if (row.work_item_id !== task.id) {
-            throw new Error(`CHECKLIST_TASK_MISMATCH: ${item.checklistId}`);
+            reasons.push({ checklist_id: item.checklistId, code: "TASK_MISMATCH" });
+            continue;
           }
           const evidence = item.evidence ?? json(row.evidence_json, []);
           if (
@@ -3166,10 +3491,12 @@ export class ProjectRepository {
             Number(row.evidence_required) === 1 &&
             evidence.length === 0
           ) {
-            throw new Error(`COMPLETION_GATE_FAILED: evidence required (${item.checklistId})`);
+            reasons.push({ checklist_id: item.checklistId, code: "EVIDENCE_REQUIRED" });
+            continue;
           }
-          return { row, item, evidence };
-        });
+          rows.push({ row, item, evidence });
+        }
+        if (reasons.length > 0) throw new ChecklistBatchFailureError(reasons);
 
         const now = nowIso();
         for (const { row, item, evidence } of rows) {
@@ -3649,29 +3976,55 @@ export class ProjectRepository {
     });
   }
 
-  search(
-    query: string,
-    limit = 20,
-  ): Array<{
-    entityType: string;
-    entityKey: string;
-    title: string;
-    snippet: string;
-    updatedAt: string;
-  }> {
+  search(query: string, limit = 20, cursor?: string): SearchPage {
     const bounded = Math.max(1, Math.min(30, limit));
     const normalized = query.trim();
-    if (!normalized) return [];
+    if (!normalized) return { hits: [], nextCursor: null, hasMore: false };
+    const scope = this.meta.code;
+    const decoded = cursor ? decodeSearchCursor(cursor, { scope, query: normalized }) : null;
+    const snapshot = decoded?.snapshot ?? {
+      documents: Number(
+        (
+          this.#sqlite
+            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM search_documents")
+            .get() as {
+            value: number;
+          }
+        ).value,
+      ),
+      quickTasks: 0,
+    };
+    const clauses = ["documents.rowid <= ?"];
+    const params: unknown[] = [snapshot.documents];
+    if (decoded) {
+      clauses.push(`(
+        documents.updated_at < ? OR
+        (documents.updated_at = ? AND documents.entity_type > ?) OR
+        (documents.updated_at = ? AND documents.entity_type = ? AND documents.entity_key > ?)
+      )`);
+      params.push(
+        decoded.last.updatedAt,
+        decoded.last.updatedAt,
+        decoded.last.entityType,
+        decoded.last.updatedAt,
+        decoded.last.entityType,
+        decoded.last.entityKey,
+      );
+    }
     let rows: any[];
     if ([...normalized].length < 3) {
       const escaped = normalized.replace(/[\\%_]/gu, "\\$&");
       rows = this.#sqlite
         .prepare(
-          `SELECT entity_type, entity_key, title, body, updated_at FROM search_documents
-           WHERE title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\'
-           ORDER BY updated_at DESC LIMIT ?`,
+          `SELECT documents.entity_type, documents.entity_key, documents.title,
+                  documents.body, documents.updated_at
+           FROM search_documents documents
+           WHERE (documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\')
+             AND ${clauses.join(" AND ")}
+           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
+           LIMIT ?`,
         )
-        .all(`%${escaped}%`, `%${escaped}%`, bounded) as any[];
+        .all(`%${escaped}%`, `%${escaped}%`, ...params, bounded + 1) as any[];
     } else {
       const phrase = `"${normalized.replaceAll('"', '""')}"`;
       rows = this.#sqlite
@@ -3681,17 +4034,40 @@ export class ProjectRepository {
            FROM search_documents_fts fts
            JOIN search_documents documents
              ON documents.entity_type = fts.entity_type AND documents.entity_id = fts.entity_id
-           WHERE search_documents_fts MATCH ? LIMIT ?`,
+           WHERE search_documents_fts MATCH ?
+             AND ${clauses.join(" AND ")}
+           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
+           LIMIT ?`,
         )
-        .all(phrase, bounded) as any[];
+        .all(phrase, ...params, bounded + 1) as any[];
     }
-    return rows.map((row) => ({
+    const hits: SearchHit[] = rows.slice(0, bounded).map((row) => ({
       entityType: row.entity_type,
       entityKey: row.entity_key,
       title: row.title,
       snippet: String(row.body).slice(0, 240),
       updatedAt: row.updated_at,
     }));
+    const hasMore = rows.length > bounded;
+    const last = hits.at(-1);
+    return {
+      hits,
+      hasMore,
+      nextCursor:
+        hasMore && last
+          ? encodeSearchCursor({
+              scope,
+              query: normalized,
+              snapshot,
+              last: {
+                updatedAt: last.updatedAt,
+                project: "",
+                entityType: last.entityType,
+                entityKey: last.entityKey,
+              },
+            })
+          : null,
+    };
   }
 
   delta(
