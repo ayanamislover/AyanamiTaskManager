@@ -464,7 +464,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
         summary: progressSummary,
         completed: ["真实事件语义已落库"],
         next: [],
-        evidence: [{ kind: "E2E", ref: suffix }],
+        evidence: [{ kind: "test_result", value: `playwright:timeline:${suffix}` }],
       },
     });
     expect(progress.ok()).toBeTruthy();
