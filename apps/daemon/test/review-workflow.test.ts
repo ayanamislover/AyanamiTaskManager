@@ -63,7 +63,15 @@ async function openRestReview(code: string) {
   const parent = await service.getWorkItem(project.code, created.items[0]!.key, "full");
   const review = await service.getWorkItem(project.code, created.items[1]!.key, "full");
   const app = await buildAyanamiServer({ service, token: "local-secret" });
-  return { service, app, project, primary: primary.session, parent, review };
+  return {
+    service,
+    app,
+    project,
+    primary: primary.session,
+    objectiveId: objective.id,
+    parent,
+    review,
+  };
 }
 
 async function createRequestViaRest(ctx: Awaited<ReturnType<typeof openRestReview>>, opId: string) {
@@ -409,7 +417,7 @@ describe("REST 一等 Review verdict", () => {
         [
           {
             clientRef: "unrelated",
-            objectiveId: binding.parent.objectiveId,
+            objectiveId: binding.objectiveId,
             title: "Unrelated parent",
             type: "TASK",
             priority: "NORMAL",

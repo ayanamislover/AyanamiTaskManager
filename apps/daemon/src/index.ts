@@ -237,17 +237,24 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           ? body.checklistId
           : undefined;
     const expectedVersion = expectedVersionFromBody(request.body, taskKey);
-    const typed = validation
-      ? new AtmError("INVALID_ARGUMENT", {
-          message: "请求参数不合法",
-          details: validation,
-        })
-      : await options.service.enrichError(asAtmError(error), {
-          ...(typeof params.code === "string" ? { projectCode: params.code } : {}),
-          ...(taskKey === undefined ? {} : { taskKey }),
-          ...(checklistId === undefined ? {} : { checklistId }),
-          ...(expectedVersion === null ? {} : { expectedVersion }),
-        });
+    let typed: AtmError;
+    if (validation) {
+      typed = new AtmError("INVALID_ARGUMENT", {
+        message: "请求参数不合法",
+        details: validation,
+      });
+    } else {
+      const base = asAtmError(error);
+      typed =
+        typeof options.service.enrichError === "function"
+          ? await options.service.enrichError(base, {
+              ...(typeof params.code === "string" ? { projectCode: params.code } : {}),
+              ...(taskKey === undefined ? {} : { taskKey }),
+              ...(checklistId === undefined ? {} : { checklistId }),
+              ...(expectedVersion === null ? {} : { expectedVersion }),
+            })
+          : base;
+    }
     reply.code(typed.httpStatus).send({
       error: atmErrorDto(typed),
       request_id: request.id,
