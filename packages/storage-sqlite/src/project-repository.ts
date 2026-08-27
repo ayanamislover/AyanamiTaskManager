@@ -2507,12 +2507,14 @@ export class ProjectRepository {
       expectedFields?: {
         title?: string;
         description?: string;
+        acceptance?: string[];
         targetDate?: string | null;
         parentKey?: string | null;
       };
       operation: string;
       title?: string;
       description?: string;
+      acceptance?: string[];
       blockedReason?: string;
       waitingFor?: string;
       cancelReason?: string;
@@ -2561,11 +2563,12 @@ export class ProjectRepository {
             | undefined;
           if (row.version !== patch.expectedVersion) {
             const changedFields = (
-              ["title", "description", "targetDate", "parentKey"] as const
+              ["title", "description", "acceptance", "targetDate", "parentKey"] as const
             ).filter((field) => patch[field] !== undefined);
             const currentFields = {
               title: row.title as string,
               description: row.description as string,
+              acceptance: json<string[]>(row.acceptance_json, []),
               targetDate: (row.target_date ?? null) as string | null,
               parentKey: row.parent_id ? this.taskKeyForId(row.parent_id) : null,
             };
@@ -2581,9 +2584,10 @@ export class ProjectRepository {
               changedFields.every((field) =>
                 Object.prototype.hasOwnProperty.call(expectedFields, field),
               ) &&
-              Object.entries(expectedFields).every(
-                ([field, expected]) =>
-                  currentFields[field as keyof typeof currentFields] === expected,
+              Object.entries(expectedFields).every(([field, expected]) =>
+                field === "acceptance"
+                  ? JSON.stringify(currentFields.acceptance) === JSON.stringify(expected)
+                  : currentFields[field as keyof typeof currentFields] === expected,
               );
             if (!safeMerge) {
               throw new Error(`VERSION_CONFLICT: ${patch.taskKey}:${row.version}`);
@@ -2599,6 +2603,15 @@ export class ProjectRepository {
           const updates: string[] = [];
           const values: unknown[] = [];
           let eventType = "work.updated";
+          const acceptanceChange =
+            patch.operation === "edit" && patch.acceptance !== undefined
+              ? {
+                  acceptance: {
+                    before: json<string[]>(row.acceptance_json, []),
+                    after: patch.acceptance,
+                  },
+                }
+              : undefined;
           let targetStatus: WorkItemStatus = row.status;
           let targetPhase = (row.phase ??
             (row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
@@ -2796,6 +2809,10 @@ export class ProjectRepository {
                 values.push(value);
               }
             }
+            if (patch.acceptance !== undefined) {
+              updates.push("acceptance_json = ?");
+              values.push(JSON.stringify(patch.acceptance));
+            }
             if (patch.parentKey !== undefined) {
               const parentId = patch.parentKey ? this.rowForTaskKey(patch.parentKey).id : null;
               const parents = new Map(
@@ -2861,6 +2878,7 @@ export class ProjectRepository {
             status: targetStatus,
             phase: targetPhase,
             ...(mergeReceipt === undefined ? {} : { mergedAcrossVersion: mergeReceipt }),
+            ...(acceptanceChange === undefined ? {} : { changes: acceptanceChange }),
             ...(patch.operation === "cancel"
               ? {
                   cancelReason: patch.cancelReason?.trim() ?? null,
@@ -3689,6 +3707,7 @@ export class ProjectRepository {
       actor: string;
       title: string;
       detail: string;
+      changes?: Record<string, unknown>;
       project: { id: string; code: string; name: string };
       projectCode: string;
       projectName: string;
@@ -3737,6 +3756,9 @@ export class ProjectRepository {
           actor: presented.actor,
           title: presented.title,
           detail: presented.detail,
+          ...(payload.changes && typeof payload.changes === "object"
+            ? { changes: payload.changes as Record<string, unknown> }
+            : {}),
           project: presented.project!,
           projectCode: this.meta.code,
           projectName: this.meta.name,

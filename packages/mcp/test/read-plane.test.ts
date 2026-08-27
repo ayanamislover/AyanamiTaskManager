@@ -131,6 +131,54 @@ describe("MCP read plane", () => {
     }
   });
 
+  it("preserves structured acceptance audit changes in atm_delta", async () => {
+    const service = {
+      delta: async () => ({
+        events: [
+          {
+            seq: 9,
+            type: "work.updated",
+            key: "AUD-T-0001",
+            summary: "更新任务",
+            actor: "audit-agent",
+            title: "更新任务",
+            detail: "AUD-T-0001（edit）",
+            changes: {
+              acceptance: { before: ["旧验收"], after: ["新验收"] },
+            },
+            project: { code: "AUD", name: "Audit" },
+            opId: "acceptance-audit",
+            at: "2026-08-27T00:00:00.000Z",
+          },
+        ],
+        currentSequence: 9,
+        hasMore: false,
+      }),
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const client = new Client({ name: "acceptance-audit", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({
+        name: "atm_delta",
+        arguments: { project: "AUD", since_seq: 0 },
+      });
+      expect(response.structuredContent).toMatchObject({
+        events: [
+          {
+            op_id: "acceptance-audit",
+            changes: {
+              acceptance: { before: ["旧验收"], after: ["新验收"] },
+            },
+          },
+        ],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   it("projects the stored progress and an accurate checklist summary in task_list", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-task-list-"));
     roots.push(dataDir);

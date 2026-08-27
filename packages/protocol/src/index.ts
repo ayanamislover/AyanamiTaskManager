@@ -465,6 +465,7 @@ export const WorkItemExpectedFieldsSchema = z
   .object({
     title: z.string().trim().min(1).max(400).optional(),
     description: z.string().max(50_000).optional(),
+    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
     targetDate: NullableDateOnlySchema,
     parentKey: z.string().trim().min(1).max(100).nullable().optional(),
   })
@@ -491,6 +492,7 @@ export const WorkItemPatchInputSchema = z
     ]),
     title: z.string().trim().min(1).max(400).optional(),
     description: z.string().max(50_000).optional(),
+    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
     blockedReason: z.string().trim().min(1).max(2000).optional(),
     waitingFor: z.string().trim().min(1).max(1000).optional(),
     cancelReason: z.string().trim().min(1).max(2000).optional(),
@@ -518,9 +520,9 @@ export const WorkItemPatchInputSchema = z
         message: "assigneeAgentId 必须使用严格 expectedVersion",
       });
     }
-    const changedFields = (["title", "description", "targetDate", "parentKey"] as const).filter(
-      (field) => value[field] !== undefined,
-    );
+    const changedFields = (
+      ["title", "description", "acceptance", "targetDate", "parentKey"] as const
+    ).filter((field) => value[field] !== undefined);
     if (changedFields.length === 0) {
       context.addIssue({
         code: "custom",
