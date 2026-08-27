@@ -26,6 +26,17 @@ export type McpRuntime = {
 };
 export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
 export type InstallResult = { client: McpClient; path: string; backupPath: string | null };
+export type McpProfile = "core" | "memory";
+export const MCP_SERVER_NAMES = {
+  legacy: "ayanami-task-manager",
+  core: "ayanami-task-manager-core",
+  memory: "ayanami-task-manager-memory",
+} as const;
+const managedMcpServerNames = Object.values(MCP_SERVER_NAMES);
+
+function isManagedMcpServerName(name: string): boolean {
+  return managedMcpServerNames.some((managed) => managed === name);
+}
 export const ATM_SKILL_NAMES = ["atm-plan", "atm-task"] as const;
 const ATM_SKILL_RESOURCE_DIRECTORIES = ["_shared"] as const;
 export const ATM_INTEGRATION_VERSION = 1;
@@ -201,16 +212,59 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
+type McpInstallInput = {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+};
+
+function profileArgs(args: string[] | undefined, profile: McpProfile): string[] {
+  const source = [...(args ?? ["--mcp-stdio"])];
+  const marker = source.indexOf("--profile");
+  if (marker >= 0) source.splice(marker, Math.min(2, source.length - marker));
+  return [...source, "--profile", profile];
+}
+
+function profileLaunch(input: McpInstallInput, profile: McpProfile): McpInstallInput {
+  return {
+    command: input.command,
+    args: profileArgs(input.args, profile),
+    ...(input.env ? { env: input.env } : {}),
+  };
+}
+
+/** 默认提供完整工具面；用户可以显式传 ["core"] 进入低内存降级模式。 */
+export const DEFAULT_MCP_PROFILES: readonly McpProfile[] = ["core", "memory"];
+
+const ALL_MCP_PROFILES: readonly McpProfile[] = ["core", "memory"];
+
+/**
+ * 把请求的 profile 集合归一成稳定顺序的启用集合。
+ *
+ * core 不可关闭：关掉它就没有任何任务工具面了，ATM 等于没接入。传进来的集合里没有 core
+ * 只可能是调用方漏了，不是用户想要一个空的 ATM，所以这里补上而不是照做。
+ */
+export function enabledMcpProfiles(profiles?: readonly McpProfile[]): McpProfile[] {
+  const requested = new Set<McpProfile>(profiles ?? DEFAULT_MCP_PROFILES);
+  requested.add("core");
+  return ALL_MCP_PROFILES.filter((profile) => requested.has(profile));
+}
+
+function isManagedCodexSection(header: string): boolean {
+  return managedMcpServerNames.some((name) =>
+    [`mcp_servers.${name}`, `mcp_servers.${JSON.stringify(name)}`].some(
+      (root) => header === root || header.startsWith(`${root}.`),
+    ),
+  );
+}
+
 function withoutOwnCodexSection(content: string): string {
   const output: string[] = [];
   let skipping = false;
   for (const line of content.split(/\r?\n/u)) {
     const header = line.trim().match(/^\[([^\]]+)\]$/u)?.[1];
     if (header) {
-      skipping = new Set([
-        'mcp_servers."ayanami-task-manager"',
-        "mcp_servers.ayanami-task-manager",
-      ]).has(header);
+      skipping = isManagedCodexSection(header);
       if (skipping) continue;
     }
     if (!skipping) output.push(line);
@@ -431,23 +485,35 @@ export function uninstallAgentSkills(targetRoot: string): { backupPaths: string[
   return { backupPaths };
 }
 
-export function isCodexConfigInstalled(path = defaultCodexConfigPath()): boolean {
-  if (!existsSync(path)) return false;
-  return /\[mcp_servers\.(?:"ayanami-task-manager"|ayanami-task-manager)\]/u.test(
-    readFileSync(path, "utf8"),
+/**
+ * 「已安装」= 配置里出现的受管 server **恰好**等于启用集合。
+ *
+ * 不能只查「启用的都在」：用户关掉 memory 之后，那样会一直报已安装，界面上再没有任何
+ * 入口去掉多余的那个 server，开关看着就是失灵的。legacy 也走这条——它永远不在启用集合里。
+ */
+function installedProfileSetMatches(
+  installed: InstalledMcpProfileLaunches,
+  profiles?: readonly McpProfile[],
+): boolean {
+  const enabled = new Set(enabledMcpProfiles(profiles));
+  return (
+    installed.legacy === null &&
+    (installed.core !== null) === enabled.has("core") &&
+    (installed.memory !== null) === enabled.has("memory")
   );
 }
 
-export function isClaudeConfigInstalled(path?: string): boolean {
+export function isCodexConfigInstalled(
+  path = defaultCodexConfigPath(),
+  profiles?: readonly McpProfile[],
+): boolean {
+  return installedProfileSetMatches(installedCodexProfileLaunches(path), profiles);
+}
+
+export function isClaudeConfigInstalled(path?: string, profiles?: readonly McpProfile[]): boolean {
   if (path === undefined)
-    return claudeDesktopConfigPaths().some((each) => isClaudeConfigInstalled(each));
-  if (!existsSync(path)) return false;
-  try {
-    const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
-    return Boolean(content.mcpServers?.["ayanami-task-manager"]);
-  } catch {
-    return false;
-  }
+    return claudeDesktopConfigPaths().some((each) => isClaudeConfigInstalled(each, profiles));
+  return installedProfileSetMatches(installedClaudeProfileLaunches(path), profiles);
 }
 
 export function uninstallCodexConfig(path = defaultCodexConfigPath()): InstallResult {
@@ -472,25 +538,68 @@ export function uninstallClaudeConfig(path?: string): InstallResult {
     throw new Error("CLAUDE_CONFIG_INVALID_JSON");
   }
   const servers = { ...(existing.mcpServers ?? {}) };
-  delete servers["ayanami-task-manager"];
+  for (const name of managedMcpServerNames) delete servers[name];
   const content = `${JSON.stringify({ ...existing, mcpServers: servers }, null, 2)}\n`;
-  const backupPath = replaceFileWithBackup(path, content);
+  const current = readFileSync(path, "utf8");
+  const backupPath = current === content ? null : replaceFileWithBackup(path, content);
   return { client: "CLAUDE", path, backupPath };
 }
 
-export function isClaudeCodeConfigInstalled(path = defaultClaudeCodeConfigPath()): boolean {
-  return readClaudeCodeServerConfig(path) !== null;
+export function isClaudeCodeConfigInstalled(
+  path = defaultClaudeCodeConfigPath(),
+  profiles?: readonly McpProfile[],
+): boolean {
+  const servers = readJsonMcpServers(path);
+  const enabled = new Set<string>(
+    enabledMcpProfiles(profiles).map((profile) => MCP_SERVER_NAMES[profile]),
+  );
+  return managedMcpServerNames.every((name) => Boolean(servers?.[name]) === enabled.has(name));
 }
 
-function readClaudeCodeServerConfig(path: string): Record<string, unknown> | null {
+function readJsonMcpServers(path: string): Record<string, Record<string, unknown>> | null {
   if (!existsSync(path)) return null;
   try {
     const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
-    const server = content.mcpServers?.["ayanami-task-manager"];
-    return server && typeof server === "object" ? (server as Record<string, unknown>) : null;
+    if (!content.mcpServers || typeof content.mcpServers !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(content.mcpServers as Record<string, unknown>).filter(
+        (entry): entry is [string, Record<string, unknown>] =>
+          Boolean(entry[1] && typeof entry[1] === "object" && !Array.isArray(entry[1])),
+      ),
+    );
   } catch {
     return null;
   }
+}
+
+function readClaudeCodeManagedConfigs(path: string): Record<string, Record<string, unknown>> {
+  const servers = readJsonMcpServers(path) ?? {};
+  return Object.fromEntries(
+    Object.entries(servers).filter(([name]) => isManagedMcpServerName(name)),
+  );
+}
+
+function stringRecord(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const entries = Object.entries(value as Record<string, unknown>);
+  return entries.every((entry): entry is [string, string] => typeof entry[1] === "string")
+    ? Object.fromEntries(entries)
+    : null;
+}
+
+function serverConfigMatches(
+  current: Record<string, unknown> | undefined,
+  desired: McpInstallInput,
+) {
+  if (!current || current.command !== desired.command) return false;
+  const currentArgs = Array.isArray(current.args) ? current.args.map(String) : [];
+  if (JSON.stringify(currentArgs) !== JSON.stringify(desired.args ?? [])) return false;
+  const currentEnv = stringRecord(current.env) ?? {};
+  const desiredEnv = desired.env ?? {};
+  return (
+    JSON.stringify(Object.entries(currentEnv).sort()) ===
+    JSON.stringify(Object.entries(desiredEnv).sort())
+  );
 }
 
 export type ClaudeCodeCliRunner = (cli: string, args: string[]) => void;
@@ -524,51 +633,53 @@ export function installClaudeCodeConfig(input: {
   findCli?: () => string | null;
   configPath?: string;
   runCli?: ClaudeCodeCliRunner;
+  profiles?: readonly McpProfile[];
 }): InstallResult {
   const cli = claudeCodeCli(input);
   const run = input.runCli ?? runClaudeCodeCli;
   const path = input.configPath ?? defaultClaudeCodeConfigPath();
-  const previous = readClaudeCodeServerConfig(path);
-  let removed = false;
-  // add-json 遇到同名 server 会失败，先移除保证可重复安装；未安装时的移除失败要忽略。
-  if (previous) {
-    try {
-      run(cli, ["mcp", "remove", "ayanami-task-manager", "--scope", "user"]);
-      removed = true;
-    } catch {
-      /* 已不存在或 CLI 拒绝移除时继续尝试安装，由 add 的失败来报错 */
-    }
-  }
+  const previous = readClaudeCodeManagedConfigs(path);
+  const desired = Object.fromEntries(
+    enabledMcpProfiles(input.profiles).map((profile) => [
+      MCP_SERVER_NAMES[profile],
+      profileLaunch(input, profile),
+    ]),
+  );
+  // 「已经对了」必须两头都成立：该有的都在且一致，**不该有的一个都不能剩**。
+  // 只查前者的话，用户关掉 memory 之后这里会判定无需改动直接返回，已注册的 memory
+  // 就永远留在配置里——用户看到的就是「开关关不掉」。legacy 同理，它永远不在 desired 里。
+  const unchanged =
+    managedMcpServerNames.every(
+      (name) => desired[name] !== undefined || previous[name] === undefined,
+    ) &&
+    Object.entries(desired).every(([name, config]) => serverConfigMatches(previous[name], config));
+  if (unchanged) return { client: "CLAUDE_CODE", path, backupPath: null };
+  const removed: Array<[string, Record<string, unknown>]> = [];
+  const added: string[] = [];
   try {
-    run(cli, [
-      "mcp",
-      "add-json",
-      "ayanami-task-manager",
-      JSON.stringify({
-        command: input.command,
-        args: input.args ?? ["--mcp-stdio"],
-        ...(input.env ? { env: input.env } : {}),
-      }),
-      "--scope",
-      "user",
-    ]);
+    for (const name of managedMcpServerNames) {
+      const config = previous[name];
+      if (!config) continue;
+      run(cli, ["mcp", "remove", name, "--scope", "user"]);
+      removed.push([name, config]);
+    }
+    for (const [name, config] of Object.entries(desired)) {
+      run(cli, ["mcp", "add-json", name, JSON.stringify(config), "--scope", "user"]);
+      added.push(name);
+    }
   } catch (error) {
-    if (removed && previous) {
-      try {
-        run(cli, [
-          "mcp",
-          "add-json",
-          "ayanami-task-manager",
-          JSON.stringify(previous),
-          "--scope",
-          "user",
-        ]);
-      } catch (rollbackError) {
-        throw new Error(
-          `CLAUDE_CODE_INSTALL_AND_ROLLBACK_FAILED: ${error instanceof Error ? error.message : String(error)}; rollback: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
-          { cause: error },
-        );
+    try {
+      for (const name of added.reverse()) {
+        run(cli, ["mcp", "remove", name, "--scope", "user"]);
       }
+      for (const [name, config] of removed) {
+        run(cli, ["mcp", "add-json", name, JSON.stringify(config), "--scope", "user"]);
+      }
+    } catch (rollbackError) {
+      throw new Error(
+        `CLAUDE_CODE_INSTALL_AND_ROLLBACK_FAILED: ${error instanceof Error ? error.message : String(error)}; rollback: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        { cause: error },
+      );
     }
     throw error;
   }
@@ -584,15 +695,13 @@ export function uninstallClaudeCodeConfig(
   } = {},
 ): InstallResult {
   const path = input.configPath ?? defaultClaudeCodeConfigPath();
-  if (!isClaudeCodeConfigInstalled(path)) return { client: "CLAUDE_CODE", path, backupPath: null };
+  const installed = readClaudeCodeManagedConfigs(path);
+  if (Object.keys(installed).length === 0) return { client: "CLAUDE_CODE", path, backupPath: null };
   const cli = claudeCodeCli(input);
-  (input.runCli ?? runClaudeCodeCli)(cli, [
-    "mcp",
-    "remove",
-    "ayanami-task-manager",
-    "--scope",
-    "user",
-  ]);
+  for (const name of managedMcpServerNames) {
+    if (!installed[name]) continue;
+    (input.runCli ?? runClaudeCodeCli)(cli, ["mcp", "remove", name, "--scope", "user"]);
+  }
   return { client: "CLAUDE_CODE", path, backupPath: null };
 }
 
@@ -601,23 +710,30 @@ export function installCodexConfig(input: {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  profiles?: readonly McpProfile[];
 }): InstallResult {
   const path = input.path ?? defaultCodexConfigPath();
   const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  // withoutOwnCodexSection 会摘掉 legacy/core/memory 全部受管段落，所以关掉 memory 之后
+  // 重写这一次就把它带走了——不需要单独写一条删除逻辑。
   const base = withoutOwnCodexSection(existing);
-  const own = [
-    '[mcp_servers."ayanami-task-manager"]',
-    `command = ${tomlString(input.command)}`,
-    `args = [${(input.args ?? ["--mcp-stdio"]).map(tomlString).join(", ")}]`,
-    ...(input.env && Object.keys(input.env).length > 0
-      ? [
-          `env = { ${Object.entries(input.env)
-            .map(([key, value]) => `${tomlString(key)} = ${tomlString(value)}`)
-            .join(", ")} }`,
-        ]
-      : []),
-  ].join("\n");
-  const backupPath = replaceFileWithBackup(path, `${base}${base ? "\n\n" : ""}${own}\n`);
+  const sections = enabledMcpProfiles(input.profiles).map((profile) => {
+    const launch = profileLaunch(input, profile);
+    return [
+      `[mcp_servers.${tomlString(MCP_SERVER_NAMES[profile])}]`,
+      `command = ${tomlString(launch.command)}`,
+      `args = [${launch.args!.map(tomlString).join(", ")}]`,
+      ...(launch.env && Object.keys(launch.env).length > 0
+        ? [
+            `env = { ${Object.entries(launch.env)
+              .map(([key, value]) => `${tomlString(key)} = ${tomlString(value)}`)
+              .join(", ")} }`,
+          ]
+        : []),
+    ].join("\n");
+  });
+  const content = `${base}${base ? "\n\n" : ""}${sections.join("\n\n")}\n`;
+  const backupPath = existing === content ? null : replaceFileWithBackup(path, content);
   return { client: "CODEX", path, backupPath };
 }
 
@@ -626,6 +742,7 @@ export function installClaudeConfig(input: {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  profiles?: readonly McpProfile[];
 }): InstallResult {
   if (input.path === undefined) {
     // 两种安装形态各有一份配置，而「应用读哪一份」由安装形态决定，不是我们能挑的。
@@ -648,64 +765,119 @@ export function installClaudeConfig(input: {
     existing.mcpServers && typeof existing.mcpServers === "object"
       ? (existing.mcpServers as Record<string, unknown>)
       : {};
+  const preservedServers = Object.fromEntries(
+    Object.entries(currentServers).filter(([name]) => !isManagedMcpServerName(name)),
+  );
+  // preservedServers 已经滤掉全部受管名字，所以这里只写启用的那些，关掉的 memory
+  // 就在这一次重写里消失了。
+  const managedServers = Object.fromEntries(
+    enabledMcpProfiles(input.profiles).map((profile) => {
+      const launch = profileLaunch(input, profile);
+      return [
+        MCP_SERVER_NAMES[profile],
+        {
+          command: launch.command,
+          args: launch.args,
+          ...(launch.env ? { env: launch.env } : {}),
+        },
+      ];
+    }),
+  );
   const merged = {
     ...existing,
-    mcpServers: {
-      ...currentServers,
-      "ayanami-task-manager": {
-        command: input.command,
-        args: input.args ?? ["--mcp-stdio"],
-        ...(input.env ? { env: input.env } : {}),
-      },
-    },
+    mcpServers: { ...preservedServers, ...managedServers },
   };
-  const backupPath = replaceFileWithBackup(path, `${JSON.stringify(merged, null, 2)}\n`);
+  const content = `${JSON.stringify(merged, null, 2)}\n`;
+  const current = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const backupPath = current === content ? null : replaceFileWithBackup(path, content);
   return { client: "CLAUDE", path, backupPath };
 }
 
-export function renderMcpConfigs(runtime: McpRuntime): {
+export function renderMcpConfigs(
+  runtime: McpRuntime,
+  profiles?: readonly McpProfile[],
+): {
   streamableHttp: string;
   stdio: string;
   generic: string;
   agentRule: string;
 } {
-  const httpServer = {
-    type: "streamable-http",
-    url: `${runtime.endpoint.replace(/\/$/u, "")}/mcp`,
-    headers: { Authorization: `Bearer ${runtime.token}` },
-  };
-  const stdioServer = {
-    command: runtime.command,
-    args: runtime.args ?? ["--mcp-stdio"],
-    ...(runtime.env ? { env: runtime.env } : {}),
-  };
+  // 这里渲染的是给用户手动复制的配置文本。它必须和自动安装写出来的一致：
+  // 否则用户按界面提示复制一份，就把自己关掉的 memory 又贴了回去。
+  const rendered = enabledMcpProfiles(profiles);
+  const httpServers = Object.fromEntries(
+    rendered.map((profile) => [
+      MCP_SERVER_NAMES[profile],
+      {
+        type: "streamable-http",
+        url: `${runtime.endpoint.replace(/\/$/u, "")}/mcp/${profile}`,
+        headers: { Authorization: `Bearer ${runtime.token}` },
+      },
+    ]),
+  );
+  const stdioServers = Object.fromEntries(
+    rendered.map((profile) => {
+      const launch = profileLaunch(runtime, profile);
+      return [
+        MCP_SERVER_NAMES[profile],
+        {
+          command: launch.command,
+          args: launch.args,
+          ...(launch.env ? { env: launch.env } : {}),
+        },
+      ];
+    }),
+  );
   return {
-    streamableHttp: `${JSON.stringify({ mcpServers: { "ayanami-task-manager": httpServer } }, null, 2)}\n`,
-    stdio: `${JSON.stringify({ mcpServers: { "ayanami-task-manager": stdioServer } }, null, 2)}\n`,
-    generic: `${JSON.stringify({ mcpServers: { "ayanami-task-manager": httpServer } }, null, 2)}\n`,
+    streamableHttp: `${JSON.stringify({ mcpServers: httpServers }, null, 2)}\n`,
+    stdio: `${JSON.stringify({ mcpServers: stdioServers }, null, 2)}\n`,
+    generic: `${JSON.stringify({ mcpServers: httpServers }, null, 2)}\n`,
     agentRule: AGENT_RULE_SNIPPET,
   };
 }
 
-export type InstalledMcpLaunch = { command: string; args: string[] };
+export type InstalledMcpLaunch = {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+};
+export type InstalledMcpProfileLaunches = {
+  legacy: InstalledMcpLaunch | null;
+  core: InstalledMcpLaunch | null;
+  memory: InstalledMcpLaunch | null;
+};
 
 function launchFromServerConfig(server: Record<string, unknown> | null): InstalledMcpLaunch | null {
   if (!server || typeof server.command !== "string") return null;
   return {
     command: server.command,
     args: Array.isArray(server.args) ? server.args.map((value) => String(value)) : [],
+    env: stringRecord(server.env) ?? {},
   };
 }
 
-function readJsonServerConfig(path: string): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;
-  try {
-    const content = JSON.parse(readFileSync(path, "utf8")) as Record<string, any>;
-    const server = content.mcpServers?.["ayanami-task-manager"];
-    return server && typeof server === "object" ? (server as Record<string, unknown>) : null;
-  } catch {
-    return null;
+function tomlInlineStringTable(value: string): Record<string, string> | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  const inner = trimmed.slice(1, -1).trim();
+  if (!inner) return {};
+  const entries: Array<[string, string]> = [];
+  const pattern = /("(?:\\.|[^"\\])*")\s*=\s*("(?:\\.|[^"\\])*")/gu;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(inner)) !== null) {
+    entries.push([JSON.parse(match[1]!) as string, JSON.parse(match[2]!) as string]);
   }
+  const residue = inner.replace(pattern, "").replaceAll(",", "").trim();
+  return residue ? null : Object.fromEntries(entries);
+}
+
+function jsonProfileLaunches(path: string): InstalledMcpProfileLaunches {
+  const servers = readJsonMcpServers(path) ?? {};
+  return {
+    legacy: launchFromServerConfig(servers[MCP_SERVER_NAMES.legacy] ?? null),
+    core: launchFromServerConfig(servers[MCP_SERVER_NAMES.core] ?? null),
+    memory: launchFromServerConfig(servers[MCP_SERVER_NAMES.memory] ?? null),
+  };
 }
 
 /**
@@ -716,7 +888,14 @@ function readJsonServerConfig(path: string): Record<string, unknown> | null {
  * 先能读出登记的到底是什么。
  */
 export function installedClaudeLaunch(path = defaultClaudeConfigPath()): InstalledMcpLaunch | null {
-  return launchFromServerConfig(readJsonServerConfig(path));
+  const launches = installedClaudeProfileLaunches(path);
+  return launches.core ?? launches.legacy;
+}
+
+export function installedClaudeProfileLaunches(
+  path = defaultClaudeConfigPath(),
+): InstalledMcpProfileLaunches {
+  return jsonProfileLaunches(path);
 }
 
 /**
@@ -729,32 +908,68 @@ export function installedClaudeLaunches(): InstalledMcpLaunch[] {
     .filter((launch): launch is InstalledMcpLaunch => launch !== null);
 }
 
+export function installedClaudeProfileLaunchSets(): InstalledMcpProfileLaunches[] {
+  return claudeDesktopConfigPaths().map((path) => installedClaudeProfileLaunches(path));
+}
+
 export function installedClaudeCodeLaunch(
   path = defaultClaudeCodeConfigPath(),
 ): InstalledMcpLaunch | null {
-  return launchFromServerConfig(readClaudeCodeServerConfig(path));
+  const launches = installedClaudeCodeProfileLaunches(path);
+  return launches.core ?? launches.legacy;
 }
 
-export function installedCodexLaunch(path = defaultCodexConfigPath()): InstalledMcpLaunch | null {
-  if (!existsSync(path)) return null;
-  let inside = false;
+export function installedClaudeCodeProfileLaunches(
+  path = defaultClaudeCodeConfigPath(),
+): InstalledMcpProfileLaunches {
+  return jsonProfileLaunches(path);
+}
+
+function codexProfileLaunches(path: string): InstalledMcpProfileLaunches {
+  const found: Record<string, InstalledMcpLaunch> = {};
+  if (!existsSync(path)) return { legacy: null, core: null, memory: null };
+  let activeName: string | null = null;
   let command: string | null = null;
   let args: string[] = [];
+  let env: Record<string, string> = {};
+  const flush = () => {
+    if (activeName && command !== null) found[activeName] = { command, args, env };
+    command = null;
+    args = [];
+    env = {};
+  };
   for (const line of readFileSync(path, "utf8").split(/\r?\n/u)) {
     const header = line.trim().match(/^\[([^\]]+)\]$/u)?.[1];
     if (header !== undefined) {
-      inside = new Set([
-        'mcp_servers."ayanami-task-manager"',
-        "mcp_servers.ayanami-task-manager",
-      ]).has(header);
+      flush();
+      const match = /^mcp_servers\.(?:"([^"]+)"|(.+))$/u.exec(header);
+      const name = match?.[1] ?? match?.[2] ?? null;
+      activeName = name && isManagedMcpServerName(name) ? name : null;
       continue;
     }
-    if (!inside) continue;
-    // command/args 是本模块自己用 JSON.stringify 写出去的，反过来照样解得开。
+    if (!activeName) continue;
     const commandValue = line.trim().match(/^command\s*=\s*(".*")$/u)?.[1];
     if (commandValue) command = JSON.parse(commandValue) as string;
     const argsValue = line.trim().match(/^args\s*=\s*(\[.*\])$/u)?.[1];
     if (argsValue) args = (JSON.parse(argsValue) as unknown[]).map((value) => String(value));
+    const envValue = line.trim().match(/^env\s*=\s*(\{.*\})$/u)?.[1];
+    if (envValue) env = tomlInlineStringTable(envValue) ?? {};
   }
-  return command === null ? null : { command, args };
+  flush();
+  return {
+    legacy: found[MCP_SERVER_NAMES.legacy] ?? null,
+    core: found[MCP_SERVER_NAMES.core] ?? null,
+    memory: found[MCP_SERVER_NAMES.memory] ?? null,
+  };
+}
+
+export function installedCodexProfileLaunches(
+  path = defaultCodexConfigPath(),
+): InstalledMcpProfileLaunches {
+  return codexProfileLaunches(path);
+}
+
+export function installedCodexLaunch(path = defaultCodexConfigPath()): InstalledMcpLaunch | null {
+  const launches = installedCodexProfileLaunches(path);
+  return launches.core ?? launches.legacy;
 }

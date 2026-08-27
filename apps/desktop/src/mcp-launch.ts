@@ -1,4 +1,4 @@
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   copyFileSync,
   existsSync,
@@ -16,6 +16,8 @@ export const MCP_STDIO_FILENAME = "mcp-stdio.cjs";
 export const MCP_RUNTIME_LINK = "current";
 
 export type McpLaunch = { command: string; args: string[]; env: Record<string, string> };
+export type McpProfile = "core" | "memory";
+export type McpProfileLaunches = Record<McpProfile, McpLaunch>;
 
 /**
  * MCP 配置里的 `command` 必须是一个**会一直活着**的进程，且路径必须与版本号无关。
@@ -48,6 +50,21 @@ export function mcpLaunch(input: { execPath: string; dataDir: string }): McpLaun
     command: existsSync(linked) ? linked : input.execPath,
     args: [join(input.dataDir, MCP_STDIO_FILENAME)],
     env: { ELECTRON_RUN_AS_NODE: "1" },
+  };
+}
+
+/**
+ * 两个 MCP server 共用同一个长寿命 bridge 与数据根，只用显式参数选择静态工具面。
+ * Profile 不能交给客户端动态请求，否则 tools/list 又会在运行期膨胀回单一大列表。
+ */
+export function mcpProfileLaunches(input: {
+  execPath: string;
+  dataDir: string;
+}): McpProfileLaunches {
+  const base = mcpLaunch(input);
+  return {
+    core: { ...base, args: [...base.args, "--profile", "core"] },
+    memory: { ...base, args: [...base.args, "--profile", "memory"] },
   };
 }
 
@@ -108,7 +125,16 @@ export function installMcpStdioBridge(source: string, dataDir: string): string {
  * 用户手动点安装不受影响：那是明示的意图，写什么都是他自己选的。
  */
 export function shouldRepairMcpConfigs(env: NodeJS.ProcessEnv = process.env): boolean {
-  return !env.ATM_DATA_DIR;
+  if (!env.ATM_DATA_DIR) return true;
+  if (env.ATM_PACKAGED_SMOKE !== "1" || env.ATM_SMOKE_MCP_CONFIG_REPAIR !== "1") return false;
+  const root = env.ATM_SMOKE_AGENT_CONFIG_ROOT;
+  if (!root) return false;
+  const inside = (candidate: string | undefined) => {
+    if (!candidate) return false;
+    const path = relative(resolve(root), resolve(candidate));
+    return path === "" || (!path.startsWith("..") && !isAbsolute(path));
+  };
+  return [env.APPDATA, env.LOCALAPPDATA, env.USERPROFILE].every(inside);
 }
 
 /**
@@ -117,13 +143,51 @@ export function shouldRepairMcpConfigs(env: NodeJS.ProcessEnv = process.env): bo
  * 没装的不算过期——那是用户没装，不是坏了，不能借着「修复」替他装上。
  */
 export function mcpLaunchStale(
-  installed: { command: string; args: string[] } | null,
+  installed: { command: string; args: string[]; env?: Record<string, string> } | null,
   expected: McpLaunch,
 ): boolean {
   if (!installed) return false;
+  const sortedEntries = (value: Record<string, string>) =>
+    JSON.stringify(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
   return (
     installed.command !== expected.command ||
     installed.args.length !== expected.args.length ||
-    installed.args.some((value, index) => value !== expected.args[index])
+    installed.args.some((value, index) => value !== expected.args[index]) ||
+    sortedEntries(installed.env ?? {}) !== sortedEntries(expected.env)
   );
+}
+
+/**
+ * 过期 = 已登记的受管 server 集合与**当前启用集合**对不上，或对得上但启动方式变了。
+ *
+ * `profiles` 必须传进来，因为这个函数每次启动都跑一遍：它要是不认识「memory 已被关掉」，
+ * 就会年复一年地把用户刚关掉的 memory 判成「缺失」再补回去，表现是开关按下去没反应。
+ * 默认取 core + memory，与产品默认的完整工具面一致；低内存降级必须显式传 ["core"]。
+ */
+export function mcpProfileLaunchesStale(
+  installed: {
+    legacy: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
+    core: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
+    memory: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
+  },
+  expected: McpProfileLaunches,
+  profiles: readonly McpProfile[] = ["core", "memory"],
+): boolean {
+  const hasAny = installed.legacy !== null || installed.core !== null || installed.memory !== null;
+  // 一个都没装就是用户没装，不能借着「修复」替他装上。
+  if (!hasAny) return false;
+  if (installed.legacy !== null) return true;
+  const enabled = new Set<McpProfile>(profiles);
+  enabled.add("core");
+  for (const profile of ["core", "memory"] as const) {
+    const entry = installed[profile];
+    // 关掉了却还登记着 → 要移除；开着却缺 → 要补上。两边都算过期。
+    if (!enabled.has(profile)) {
+      if (entry !== null) return true;
+      continue;
+    }
+    if (entry === null) return true;
+    if (mcpLaunchStale(entry, expected[profile])) return true;
+  }
+  return false;
 }

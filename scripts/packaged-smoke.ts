@@ -5,10 +5,11 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { AyanamiClient } from "../packages/client/src/index.js";
-import { MCP_RUNTIME_LINK, mcpLaunch } from "../apps/desktop/src/mcp-launch.js";
+import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
 type RunningApp = { child: ChildProcess; stderr: string[] };
+type RecordedMcpLaunch = { command: string; args: string[]; env: Record<string, string> };
 
 const root = process.cwd();
 const executable = resolve(
@@ -23,6 +24,12 @@ const electronUserDataDir = resolve(
 const reportPath = resolve(
   process.env.ATM_SMOKE_REPORT ?? join(outputDir, "packaged-smoke-report.json"),
 );
+const agentConfigRoot = resolve(join(outputDir, "packaged-smoke-agent-config"));
+const smokeHome = join(agentConfigRoot, "Home");
+const smokeAppData = join(agentConfigRoot, "Roaming");
+const smokeLocalAppData = join(agentConfigRoot, "Local");
+const codexConfigPath = join(smokeHome, ".codex", "config.toml");
+const claudeConfigPath = join(smokeAppData, "Claude", "claude_desktop_config.json");
 const runtimePath = join(dataDir, "runtime", "daemon.json");
 const inheritedEnvironment = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -31,8 +38,15 @@ const smokeEnvironment = {
   ...inheritedEnvironment,
   ATM_DATA_DIR: dataDir,
   ATM_PACKAGED_SMOKE: "1",
+  ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
+  ATM_SMOKE_AGENT_CONFIG_ROOT: agentConfigRoot,
+  HOME: smokeHome,
+  USERPROFILE: smokeHome,
+  APPDATA: smokeAppData,
+  LOCALAPPDATA: smokeLocalAppData,
 };
 const checks: Array<{ name: string; passed: boolean; detail?: string }> = [];
+let recordedAgentProfiles: Record<McpProfile, RecordedMcpLaunch> | null = null;
 
 function check(name: string, condition: unknown, detail?: string): asserts condition {
   checks.push({ name, passed: Boolean(condition), ...(detail === undefined ? {} : { detail }) });
@@ -84,6 +98,60 @@ async function waitForRuntime(app: RunningApp): Promise<Runtime> {
     });
     return response.ok ? runtime : null;
   });
+}
+
+function recordedLaunch(value: unknown, label: string): RecordedMcpLaunch {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`${label} 不是对象`);
+  const object = value as Record<string, unknown>;
+  if (typeof object.command !== "string") throw new Error(`${label}.command 缺失`);
+  if (!Array.isArray(object.args) || object.args.some((entry) => typeof entry !== "string"))
+    throw new Error(`${label}.args 不是字符串数组`);
+  const envObject = object.env;
+  if (!envObject || typeof envObject !== "object" || Array.isArray(envObject))
+    throw new Error(`${label}.env 缺失`);
+  const env = Object.fromEntries(
+    Object.entries(envObject as Record<string, unknown>).map(([key, entry]) => {
+      if (typeof entry !== "string") throw new Error(`${label}.env.${key} 不是字符串`);
+      return [key, entry];
+    }),
+  );
+  return { command: object.command, args: object.args as string[], env };
+}
+
+async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, RecordedMcpLaunch>> {
+  return waitUntil(async () => {
+    if (!existsSync(codexConfigPath) || !existsSync(claudeConfigPath)) return null;
+    const codex = await readFile(codexConfigPath, "utf8");
+    const claude = JSON.parse(await readFile(claudeConfigPath, "utf8")) as Record<string, any>;
+    const servers = claude.mcpServers as Record<string, unknown> | undefined;
+    const core = servers?.["ayanami-task-manager-core"];
+    const memory = servers?.["ayanami-task-manager-memory"];
+    if (!core || !memory) return null;
+
+    check(
+      "打包应用迁移 Codex 旧单入口及子表",
+      !codex.includes('mcp_servers."ayanami-task-manager"') &&
+        !codex.includes("LEGACY_ENV_MUST_DISAPPEAR") &&
+        codex.includes('mcp_servers."ayanami-task-manager-core"') &&
+        codex.includes('mcp_servers."ayanami-task-manager-memory"'),
+      codex,
+    );
+    check(
+      "打包应用迁移 Claude Desktop 且保留无关 server",
+      Boolean(servers?.other) && !servers?.["ayanami-task-manager"],
+      JSON.stringify(servers),
+    );
+    return {
+      core: recordedLaunch(core, "Claude core"),
+      memory: recordedLaunch(memory, "Claude memory"),
+    };
+  });
+}
+
+function installedProfileLaunch(profile: McpProfile): RecordedMcpLaunch {
+  if (!recordedAgentProfiles) throw new Error("打包 Agent 配置尚未读回");
+  return recordedAgentProfiles[profile];
 }
 
 async function waitForExit(child: ChildProcess, timeoutMs = 15_000): Promise<number | null> {
@@ -166,7 +234,7 @@ async function withProjectEvent<T>(
  * 所以这条单独验寿命：保持 stdin 打开、什么都不发，看它到点还在不在。
  */
 async function checkMcpProcessOutlivesHandshake(): Promise<void> {
-  const launch = mcpLaunch({ execPath: executable, dataDir });
+  const launch = installedProfileLaunch("core");
   const child = spawn(launch.command, launch.args, {
     cwd: root,
     env: { ...smokeEnvironment, ...launch.env },
@@ -203,12 +271,12 @@ async function createThroughPackagedMcp(
   project: string,
   title: string,
   opId: string,
-): Promise<Record<string, unknown>> {
+): Promise<{ session: string; created: Record<string, unknown> }> {
   // 直接用应用写进 Agent 配置的那一份，不再自己拼。原先这里拼的是
   // dirname(executable)/resources/mcp-stdio.cjs——于是烟测证明的是「桥能跑」，
   // 从来没证明过「配置里写的那条路径能跑」。配置钉在 app-1.0.3 上一路留到 1.0.10，
   // 每一轮烟测都是绿的。
-  const launch = mcpLaunch({ execPath: executable, dataDir });
+  const launch = installedProfileLaunch("core");
   const transport = new StdioClientTransport({
     command: launch.command,
     args: launch.args,
@@ -245,7 +313,7 @@ async function createThroughPackagedMcp(
       (created.structuredContent as Record<string, unknown>).ok === true,
       stderr.join(""),
     );
-    return created.structuredContent as Record<string, unknown>;
+    return { session, created: created.structuredContent as Record<string, unknown> };
   } catch (error) {
     await delay(100);
     throw new Error(
@@ -257,15 +325,140 @@ async function createThroughPackagedMcp(
   }
 }
 
+async function packagedProfileTools(profile: McpProfile): Promise<string[]> {
+  const launch = installedProfileLaunch(profile);
+  const transport = new StdioClientTransport({
+    command: launch.command,
+    args: launch.args,
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    stderr: "pipe",
+  });
+  const client = new McpClient({ name: `packaged-smoke-${profile}`, version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    return (await client.listTools()).tools.map((tool) => tool.name);
+  } finally {
+    await client.close();
+  }
+}
+
+async function packagedDefaultProfileTools(): Promise<string[]> {
+  const launch = mcpLaunch({ execPath: executable, dataDir });
+  const transport = new StdioClientTransport({
+    command: launch.command,
+    args: launch.args,
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    stderr: "pipe",
+  });
+  const client = new McpClient({ name: "packaged-smoke-default-profile", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    return (await client.listTools()).tools.map((tool) => tool.name);
+  } finally {
+    await client.close();
+  }
+}
+
+async function checkInvalidPackagedProfileFails(): Promise<void> {
+  const launch = mcpLaunch({ execPath: executable, dataDir });
+  const child = spawn(launch.command, [...launch.args, "--profile", "merged"], {
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    stdio: ["ignore", "ignore", "pipe"],
+    windowsHide: true,
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      rejectExit(new Error("非法 MCP Profile 进程未按时退出"));
+    }, 10_000);
+    child.once("error", rejectExit);
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      resolveExit(code);
+    });
+  });
+  check("非法打包 Profile 非零退出", exitCode !== 0, `exit=${String(exitCode)}`);
+  check("非法打包 Profile 给出明确错误", stderr.includes("MCP_PROFILE_INVALID"), stderr);
+}
+
+async function claimThroughPackagedMemory(
+  project: string,
+  session: string,
+  taskKey: string,
+  expectedVersion: number,
+): Promise<void> {
+  const launch = installedProfileLaunch("memory");
+  const transport = new StdioClientTransport({
+    command: launch.command,
+    args: launch.args,
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    stderr: "pipe",
+  });
+  const client = new McpClient({ name: "packaged-smoke-memory", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const patched = await client.callTool({
+      name: "atm_task_patch",
+      arguments: {
+        project,
+        session,
+        op_id: "packaged-smoke-memory-claim",
+        items: [{ task_key: taskKey, expected_version: expectedVersion, operation: "claim" }],
+      },
+    });
+    check(
+      "memory Profile 修改 core 创建的任务",
+      (patched.structuredContent as Record<string, unknown>).ok === true,
+    );
+  } finally {
+    await client.close();
+  }
+}
+
 if (!existsSync(executable)) throw new Error(`找不到打包应用：${executable}`);
 await mkdir(outputDir, { recursive: true });
 await mkdir(dirname(reportPath), { recursive: true });
 await rm(dataDir, { recursive: true, force: true });
 await rm(electronUserDataDir, { recursive: true, force: true });
+await rm(agentConfigRoot, { recursive: true, force: true });
+await mkdir(dirname(codexConfigPath), { recursive: true });
+await mkdir(dirname(claudeConfigPath), { recursive: true });
+await writeFile(
+  codexConfigPath,
+  [
+    '[mcp_servers."ayanami-task-manager"]',
+    'command = "legacy.exe"',
+    '[mcp_servers."ayanami-task-manager".env]',
+    'LEGACY_ENV_MUST_DISAPPEAR = "1"',
+    "[mcp_servers.other]",
+    'command = "keep.exe"',
+    "",
+  ].join("\n"),
+  "utf8",
+);
+await writeFile(
+  claudeConfigPath,
+  `${JSON.stringify({
+    mcpServers: {
+      "ayanami-task-manager": { command: "legacy.exe", args: [] },
+      other: { command: "keep.exe", args: [] },
+    },
+  })}\n`,
+  "utf8",
+);
 
 let app = startApp();
 try {
   const runtime = await waitForRuntime(app);
+  recordedAgentProfiles = await waitForPackagedAgentProfiles();
   const client = new AyanamiClient(runtime);
   const status = await client.status();
   check("打包应用健康检查", status.ok === true);
@@ -316,7 +509,56 @@ try {
     !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
     launchPath,
   );
+  for (const [profile, launch] of Object.entries(recordedAgentProfiles)) {
+    check(`${profile} 配置使用版本无关启动路径`, launch.command === launchPath, launch.command);
+    check(
+      `${profile} 配置写入静态 Profile 参数与 Node bridge 环境`,
+      launch.args.slice(-2).join(" ") === `--profile ${profile}` &&
+        launch.env.ELECTRON_RUN_AS_NODE === "1",
+      JSON.stringify(launch),
+    );
+  }
   await checkMcpProcessOutlivesHandshake();
+
+  const coreTools = await packagedProfileTools("core");
+  const memoryTools = await packagedProfileTools("memory");
+  const defaultTools = await packagedDefaultProfileTools();
+  check(
+    "打包 core Profile 工具完整",
+    JSON.stringify(coreTools) ===
+      JSON.stringify([
+        "atm_begin",
+        "atm_brief",
+        "atm_task_list",
+        "atm_task_get",
+        "atm_task_create",
+        "atm_end",
+      ]),
+    coreTools.join(", "),
+  );
+  check(
+    "打包 memory Profile 工具完整",
+    JSON.stringify(memoryTools) ===
+      JSON.stringify([
+        "atm_task_patch",
+        "atm_progress_add",
+        "atm_record",
+        "atm_search",
+        "atm_delta",
+      ]),
+    memoryTools.join(", "),
+  );
+  check(
+    "打包双 Profile 工具无重叠且联合为 11 个",
+    coreTools.filter((name) => memoryTools.includes(name)).length === 0 &&
+      new Set([...coreTools, ...memoryTools]).size === 11,
+  );
+  check(
+    "打包 stdio 未指定 Profile 时固定为 core",
+    JSON.stringify(defaultTools) === JSON.stringify(coreTools),
+    defaultTools.join(", "),
+  );
+  await checkInvalidPackagedProfileFails();
 
   const live = await withProjectEvent(
     runtime,
@@ -325,6 +567,17 @@ try {
     () => createThroughPackagedMcp(project.code, "打包烟测任务", "packaged-smoke-create-1"),
   );
   check("UI WebSocket 收到 MCP 实时事件", live.event.type === "work.created");
+  const liveCreated = (live.value.created.created as Array<Record<string, unknown>>)[0]!;
+  await claimThroughPackagedMemory(
+    project.code,
+    live.value.session,
+    String(liveCreated.task_key),
+    Number(liveCreated.version),
+  );
+  const sharedTask = (await client.tasks.list(project.code)).find(
+    (task) => task.key === String(liveCreated.task_key),
+  );
+  check("core / memory Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
 
   const backup = await client.backups.create(project.code);
   await createThroughPackagedMcp(project.code, "恢复后应消失", "packaged-smoke-create-2");

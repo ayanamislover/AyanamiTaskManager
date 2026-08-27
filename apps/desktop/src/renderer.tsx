@@ -10,6 +10,17 @@ import brandLogoUrl from "../../../logo.png?url";
 import "./window-chrome.css";
 
 type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type McpProfileSwitchResult = {
+  enabled: boolean;
+  status: "APPLIED";
+  restartRequired: boolean;
+  clients: Array<{
+    client: McpClient;
+    target: string;
+    status: "SKIPPED" | "UPDATED" | "FAILED" | "ROLLED_BACK" | "ROLLBACK_FAILED";
+    error?: string;
+  }>;
+};
 type UpdateStatus = {
   phase: "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
   outcome: "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
@@ -33,6 +44,8 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
+  getMemoryProfile(): Promise<boolean>;
+  setMemoryProfile(enabled: boolean): Promise<McpProfileSwitchResult>;
   installMcp(client: McpClient): Promise<{ path: string; backupPath: string | null }>;
   getAgentIntegrations(): Promise<AgentIntegrationReport[]>;
   manageAgentIntegration(
@@ -54,6 +67,7 @@ type AgentRulePreview = { current: string; proposed: string };
 type AgentIntegrationReport = {
   client: McpClient;
   mcpInstalled: boolean;
+  repairError: string | null;
   sharesRuleAndSkillsWith: "CLAUDE" | null;
   cliAvailable: boolean;
   rule: { state: AgentIntegrationState; path: string; version: number | null };

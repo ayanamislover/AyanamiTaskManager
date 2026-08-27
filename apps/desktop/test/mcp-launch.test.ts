@@ -14,13 +14,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   installClaudeConfig,
   installCodexConfig,
-  installedClaudeLaunch,
-  installedCodexLaunch,
+  installedClaudeProfileLaunches,
+  installedCodexProfileLaunches,
 } from "@ayanami-task/agent-config";
 import {
   installMcpRuntimeLink,
   installMcpStdioBridge,
   mcpLaunch,
+  mcpProfileLaunchesStale,
+  mcpProfileLaunches,
   mcpLaunchStale,
   MCP_RUNTIME_LINK,
   MCP_STDIO_FILENAME,
@@ -158,6 +160,24 @@ describe("MCP 启动方式", () => {
     }).toEqual({ arg: launch.args[0], pinned: false });
   });
 
+  it("为同一份 bridge 生成固定 core / memory 启动参数", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const launches = mcpProfileLaunches({ execPath, dataDir });
+    const bridge = join(dataDir, MCP_STDIO_FILENAME);
+
+    expect(launches.core).toEqual({
+      command: execPath,
+      args: [bridge, "--profile", "core"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+    expect(launches.memory).toEqual({
+      command: execPath,
+      args: [bridge, "--profile", "memory"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+  });
+
   it("桥接脚本复制到数据根，源缺失时大声报错", () => {
     const source = join(scratch(), MCP_STDIO_FILENAME);
     writeFileSync(source, "// bridge\n", "utf8");
@@ -185,10 +205,42 @@ const PINNED = {
 };
 
 describe("过期判定", () => {
+  // 默认双入口；启用集合如何影响判定，由 mcp-profile-stale.test.ts 单独守着。
+  it("双 Profile 全部逐字一致才不修，旧单入口或任一缺失都迁移", () => {
+    const both = ["core", "memory"] as const;
+    const expected = {
+      core: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "core"] },
+      memory: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "memory"] },
+    };
+    expect(
+      mcpProfileLaunchesStale(
+        { legacy: null, core: expected.core, memory: expected.memory },
+        expected,
+        both,
+      ),
+    ).toBe(false);
+    expect(
+      mcpProfileLaunchesStale({ legacy: EXPECTED, core: null, memory: null }, expected, both),
+    ).toBe(true);
+    expect(
+      mcpProfileLaunchesStale({ legacy: null, core: expected.core, memory: null }, expected, both),
+    ).toBe(true);
+    expect(
+      mcpProfileLaunchesStale(
+        { legacy: null, core: PINNED, memory: expected.memory },
+        expected,
+        both,
+      ),
+    ).toBe(true);
+  });
+
   it("命令或参数对不上就算过期，一致就不动", () => {
-    expect(mcpLaunchStale({ command: EXPECTED.command, args: [...EXPECTED.args] }, EXPECTED)).toBe(
-      false,
-    );
+    expect(
+      mcpLaunchStale(
+        { command: EXPECTED.command, args: [...EXPECTED.args], env: { ...EXPECTED.env } },
+        EXPECTED,
+      ),
+    ).toBe(false);
     expect(mcpLaunchStale(PINNED, EXPECTED)).toBe(true);
     // 只有参数变了也要修——桥接脚本换位置时就是这种。
     expect(
@@ -211,12 +263,36 @@ describe("过期判定", () => {
       false,
     );
   });
+
+  it("打包烟测只能在全部 Agent 配置根都被隔离时显式开启修复", () => {
+    const isolated = {
+      ATM_DATA_DIR: "C:\\temp\\smoke\\data",
+      ATM_PACKAGED_SMOKE: "1",
+      ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
+      ATM_SMOKE_AGENT_CONFIG_ROOT: "C:\\temp\\smoke\\agents",
+      APPDATA: "C:\\temp\\smoke\\agents\\Roaming",
+      LOCALAPPDATA: "C:\\temp\\smoke\\agents\\Local",
+      USERPROFILE: "C:\\temp\\smoke\\agents\\Home",
+    } as NodeJS.ProcessEnv;
+    expect(shouldRepairMcpConfigs(isolated)).toBe(true);
+    expect(shouldRepairMcpConfigs({ ...isolated, APPDATA: "C:\\Users\\real\\AppData" })).toBe(
+      false,
+    );
+    expect(shouldRepairMcpConfigs({ ...isolated, ATM_SMOKE_MCP_CONFIG_REPAIR: undefined })).toBe(
+      false,
+    );
+  });
 });
 
 // 修复改成每次启动自动跑之后，「写进去 → 读回来 → 判定一致」必须严丝合缝。
 // 差一个字节就会每启动一次重写一次，而每次重写都留一份 .bak——实测 ~/.codex
 // 已经攒了 33 个，那还只是手动安装攒出来的。
 describe("修复的幂等性", () => {
+  const profileExpected = {
+    core: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "core"] },
+    memory: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "memory"] },
+  };
+
   it("Codex：修一次之后不再判为过期，别人的段不受影响", () => {
     const path = join(scratch(), "config.toml");
     writeFileSync(
@@ -232,10 +308,14 @@ describe("修复的幂等性", () => {
       ].join("\n"),
       "utf8",
     );
-    expect(mcpLaunchStale(installedCodexLaunch(path), EXPECTED)).toBe(true);
+    expect(mcpProfileLaunchesStale(installedCodexProfileLaunches(path), profileExpected)).toBe(
+      true,
+    );
 
     installCodexConfig({ path, ...EXPECTED });
-    expect(mcpLaunchStale(installedCodexLaunch(path), EXPECTED)).toBe(false);
+    expect(mcpProfileLaunchesStale(installedCodexProfileLaunches(path), profileExpected)).toBe(
+      false,
+    );
     expect(readFileSync(path, "utf8")).toContain('model = "gpt"');
   });
 
@@ -248,10 +328,14 @@ describe("修复的幂等性", () => {
       })}\n`,
       "utf8",
     );
-    expect(mcpLaunchStale(installedClaudeLaunch(path), EXPECTED)).toBe(true);
+    expect(mcpProfileLaunchesStale(installedClaudeProfileLaunches(path), profileExpected)).toBe(
+      true,
+    );
 
     installClaudeConfig({ path, ...EXPECTED });
-    expect(mcpLaunchStale(installedClaudeLaunch(path), EXPECTED)).toBe(false);
+    expect(mcpProfileLaunchesStale(installedClaudeProfileLaunches(path), profileExpected)).toBe(
+      false,
+    );
     expect(readFileSync(path, "utf8")).toContain("other.exe");
   });
 });
