@@ -204,6 +204,7 @@ export type ContinuationConflictDetails =
   | {
       readonly reason: "STALE" | "SNAPSHOT_CHANGED";
       readonly recovery: CursorRestartRecovery;
+      readonly record_key?: string;
     }
   | {
       readonly reason: "TARGET_MISMATCH";

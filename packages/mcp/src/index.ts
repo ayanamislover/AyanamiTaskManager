@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Readable, Writable } from "node:stream";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -547,8 +547,9 @@ const briefSections = {
 type BriefSection = keyof typeof briefSections;
 const briefSectionNames = Object.keys(briefSections) as [BriefSection, ...BriefSection[]];
 const briefAlwaysKeys: readonly string[] = ["truncated", "project", "seq"];
-const briefCursorSecret = randomBytes(32);
 const BRIEF_CURSOR_TTL_MS = 30 * 60 * 1000;
+const BRIEF_CURSOR_PREFIX = "b2";
+const BRIEF_CURSOR_HASH_DOMAIN = "AYANAMI_TASK_MANAGER_BRIEF_CURSOR_V2\0";
 
 // include 为空表示全要；非空时只保留被点名的分节。
 function pickBriefSections(
@@ -606,16 +607,18 @@ const briefDropOrder: readonly BriefSection[] = [
   "handoff",
 ];
 
+type BriefRecordSnapshot = readonly [key: string, version: string];
+
 type BriefCursor = {
-  v: 1;
+  v: 2;
   p: string;
   s: string;
   i: number;
-  b: number;
   q: string;
+  x: "records";
   o: number;
-  k: string;
-  c: string;
+  r: BriefRecordSnapshot[];
+  n: number;
   e: number;
 };
 
@@ -636,41 +639,106 @@ function briefQueryHash(taskKey: string | undefined, sinceSeq: number | undefine
   return briefHash([taskKey ?? null, sinceSeq ?? null], 8);
 }
 
-function briefSnapshotHash(payload: Record<string, unknown>): string {
-  const sectionKeys = new Set<string>(
-    briefSectionNames.flatMap((section) => [...briefSections[section]]),
-  );
-  return briefHash(
-    Object.fromEntries(Object.entries(payload).filter(([key]) => sectionKeys.has(key))),
-  );
+function briefCursorExpiry(now = Date.now()): number {
+  // Keep tokens deterministic inside a time bucket while guaranteeing that a
+  // cursor created just before the next boundary still receives a full TTL.
+  return (Math.floor(now / BRIEF_CURSOR_TTL_MS) + 2) * BRIEF_CURSOR_TTL_MS;
 }
 
-function briefRecordKeysHash(payload: Record<string, unknown>): string {
+function briefRecordEntries(payload: Record<string, unknown>): Array<Record<string, unknown>> {
   const records = Array.isArray(payload.records)
     ? (payload.records as Array<Record<string, unknown>>)
     : [];
-  return briefHash(
-    records.map((record) => record.key),
-    12,
+  return records.filter((record) => typeof record.key === "string" && record.key.length > 0);
+}
+
+function briefRecordVersion(record: Record<string, unknown>): string {
+  return briefHash(record, 12);
+}
+
+async function captureBriefRecordSnapshot(
+  service: AyanamiTaskService,
+  project: string,
+  payload: Record<string, unknown>,
+): Promise<BriefRecordSnapshot[]> {
+  return await Promise.all(
+    briefRecordEntries(payload).map(async (record) => {
+      const key = String(record.key);
+      const canonical = plain(await service.getRecord(project, key));
+      return [key, briefRecordVersion(canonical)] as const;
+    }),
   );
+}
+
+function staleBriefRecord(key: string): AtmError<"CONTINUATION_CONFLICT"> {
+  return new AtmError("CONTINUATION_CONFLICT", {
+    message: `brief continuation 选择的 Record 已变化：${key}`,
+    details: {
+      reason: "STALE",
+      recovery: { action: "restart_read", omit_cursor: true },
+      record_key: key,
+    },
+  });
+}
+
+function projectBriefRecord(record: Record<string, unknown>): Record<string, unknown> {
+  return {
+    key: record.key,
+    kind: record.kind,
+    summary: record.summary,
+    importance: record.importance,
+  };
+}
+
+async function resolveBriefRecordSnapshot(
+  service: AyanamiTaskService,
+  project: string,
+  cursor: BriefCursor,
+  payload: Record<string, unknown>,
+): Promise<Array<Record<string, unknown>>> {
+  const current = new Map(
+    briefRecordEntries(payload).map((record) => [String(record.key), record] as const),
+  );
+  const resolved: Array<Record<string, unknown>> = [];
+  for (const [key, expectedVersion] of cursor.r) {
+    let canonical: Record<string, unknown>;
+    try {
+      canonical = plain(await service.getRecord(project, key));
+    } catch (error) {
+      if (error instanceof AtmError && error.code === "RECORD_NOT_FOUND") {
+        throw staleBriefRecord(key);
+      }
+      throw error;
+    }
+    if (briefRecordVersion(canonical) !== expectedVersion) throw staleBriefRecord(key);
+    resolved.push(current.get(key) ?? projectBriefRecord(canonical));
+  }
+  return resolved;
 }
 
 function encodeBriefCursor(cursor: BriefCursor): string {
   const payload = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-  const signature = createHmac("sha256", briefCursorSecret)
+  const signature = createHash("sha256")
+    .update(BRIEF_CURSOR_HASH_DOMAIN, "utf8")
     .update(payload, "utf8")
     .digest()
     .subarray(0, 16)
     .toString("base64url");
-  return `${payload}.${signature}`;
+  return `${BRIEF_CURSOR_PREFIX}.${payload}.${signature}`;
 }
 
 function decodeBriefCursor(token: string): BriefCursor {
   const expired = Symbol("brief-cursor-expired");
   try {
-    const [payload, signature, extra] = token.split(".");
-    if (!payload || !signature || extra !== undefined) throw new Error("shape");
-    const expected = createHmac("sha256", briefCursorSecret)
+    const [prefix, payload, signature, extra] = token.split(".");
+    if (prefix !== BRIEF_CURSOR_PREFIX || !payload || !signature || extra !== undefined) {
+      throw new Error("shape");
+    }
+    if (Buffer.from(payload, "base64url").toString("base64url") !== payload) {
+      throw new Error("encoding");
+    }
+    const expected = createHash("sha256")
+      .update(BRIEF_CURSOR_HASH_DOMAIN, "utf8")
       .update(payload, "utf8")
       .digest()
       .subarray(0, 16);
@@ -684,17 +752,31 @@ function decodeBriefCursor(token: string): BriefCursor {
     }
     const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as BriefCursor;
     if (
-      value.v !== 1 ||
+      value.v !== 2 ||
       typeof value.p !== "string" ||
       typeof value.s !== "string" ||
       !Number.isInteger(value.i) ||
-      !Number.isInteger(value.b) ||
       typeof value.q !== "string" ||
+      value.x !== "records" ||
       !Number.isInteger(value.o) ||
       value.o < 0 ||
-      typeof value.k !== "string" ||
-      typeof value.c !== "string" ||
-      !Number.isInteger(value.e)
+      !Array.isArray(value.r) ||
+      value.r.length === 0 ||
+      value.r.length > 8 ||
+      value.r.some(
+        (record) =>
+          !Array.isArray(record) ||
+          record.length !== 2 ||
+          typeof record[0] !== "string" ||
+          !record[0] ||
+          typeof record[1] !== "string" ||
+          !record[1],
+      ) ||
+      value.o > value.r.length ||
+      !Number.isSafeInteger(value.n) ||
+      value.n < 0 ||
+      !Number.isSafeInteger(value.e) ||
+      value.e <= 0
     ) {
       throw new Error("shape");
     }
@@ -724,23 +806,23 @@ function makeBriefCursor(input: {
   project: string;
   sessionId?: string;
   include: readonly BriefSection[];
-  maxChars: number;
   taskKey?: string;
   sinceSeq?: number;
   offset: number;
-  payload: Record<string, unknown>;
+  recordSnapshot: BriefRecordSnapshot[];
+  snapshotSeq: number;
 }): string {
   return encodeBriefCursor({
-    v: 1,
+    v: 2,
     p: input.project.toUpperCase(),
     s: input.sessionId ?? "",
     i: briefIncludeMask(input.include),
-    b: input.maxChars,
     q: briefQueryHash(input.taskKey, input.sinceSeq),
+    x: "records",
     o: input.offset,
-    k: briefRecordKeysHash(input.payload),
-    c: briefSnapshotHash(input.payload),
-    e: Date.now() + BRIEF_CURSOR_TTL_MS,
+    r: input.recordSnapshot,
+    n: input.snapshotSeq,
+    e: briefCursorExpiry(),
   });
 }
 
@@ -750,7 +832,6 @@ function validateBriefCursorRequest(
     project: string;
     sessionId?: string;
     include: readonly BriefSection[];
-    maxChars: number;
     taskKey?: string;
     sinceSeq?: number;
   },
@@ -759,7 +840,6 @@ function validateBriefCursorRequest(
     cursor.p !== input.project.toUpperCase() ||
     cursor.s !== (input.sessionId ?? "") ||
     cursor.i !== briefIncludeMask(input.include) ||
-    cursor.b !== input.maxChars ||
     cursor.q !== briefQueryHash(input.taskKey, input.sinceSeq)
   ) {
     throw new AtmError("CONTINUATION_CONFLICT", {
@@ -767,23 +847,6 @@ function validateBriefCursorRequest(
       details: {
         reason: "TARGET_MISMATCH",
         recovery: { action: "retry_original_target", preserve_cursor: true },
-      },
-    });
-  }
-}
-
-function validateBriefCursorSnapshot(cursor: BriefCursor, payload: Record<string, unknown>): void {
-  const records = Array.isArray(payload.records) ? payload.records : [];
-  if (
-    cursor.o > records.length ||
-    cursor.k !== briefRecordKeysHash(payload) ||
-    cursor.c !== briefSnapshotHash(payload)
-  ) {
-    throw new AtmError("CONTINUATION_CONFLICT", {
-      message: "brief continuation 绑定内容已变化",
-      details: {
-        reason: "SNAPSHOT_CHANGED",
-        recovery: { action: "restart_read", omit_cursor: true },
       },
     });
   }
@@ -799,6 +862,7 @@ type BriefFitInput = {
   taskKey?: string;
   sinceSeq?: number;
   beginMode?: BeginBriefMode;
+  recordSnapshot?: BriefRecordSnapshot[];
 };
 
 function briefCandidate(input: {
@@ -871,6 +935,17 @@ function fitWholeBrief(input: BriefFitInput): Record<string, unknown> {
   const frozenSource = pickBriefSections(input.payload, input.include);
   let source = frozenSource;
   const records = Array.isArray(frozenSource.records) ? frozenSource.records : [];
+  const recordSnapshot = input.recordSnapshot ?? [];
+  const snapshotSeq =
+    typeof frozenSource.seq === "number" && Number.isSafeInteger(frozenSource.seq)
+      ? frozenSource.seq
+      : 0;
+  if (records.length !== recordSnapshot.length && records.length > 0) {
+    throw new AtmError("INVALID_RESPONSE", {
+      message: "brief Record snapshot 与返回集合不一致",
+      details: { records: records.length, versions: recordSnapshot.length },
+    });
+  }
   let recordCount = records.length;
   const dropped: BriefSection[] = [];
   const omittedFields: Array<{ section: BriefSection; fields: readonly string[] }> = [];
@@ -886,11 +961,11 @@ function fitWholeBrief(input: BriefFitInput): Record<string, unknown> {
             project: input.project,
             ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
             include: input.include,
-            maxChars: input.maxChars,
             ...(input.taskKey === undefined ? {} : { taskKey: input.taskKey }),
             ...(input.sinceSeq === undefined ? {} : { sinceSeq: input.sinceSeq }),
             offset: recordCount,
-            payload: frozenSource,
+            recordSnapshot,
+            snapshotSeq,
           })
         : undefined;
     const candidate = briefCandidate({
@@ -947,7 +1022,7 @@ function fitWholeBrief(input: BriefFitInput): Record<string, unknown> {
       continue;
     }
 
-    // 极窄预算可能连带 HMAC 的游标都放不下。身份回执仍逐字保留，不伪造一个
+    // 极窄预算可能连带 continuation cursor 都放不下。身份回执仍逐字保留，不伪造一个
     // 超预算或无法校验的 cursor；调用方可以扩大预算后重新发起首页。
     return briefCandidate({
       source,
@@ -964,26 +1039,16 @@ function fitWholeBrief(input: BriefFitInput): Record<string, unknown> {
 function continueWholeBrief(
   cursor: BriefCursor,
   input: Omit<BriefFitInput, "identity" | "beginMode">,
+  records: Array<Record<string, unknown>>,
 ): Record<string, unknown> {
   const source = pickBriefSections(input.payload, input.include);
-  validateBriefCursorSnapshot(cursor, source);
-  const records = Array.isArray(source.records) ? source.records : [];
   let returned = records.length - cursor.o;
+  const currentSeq =
+    typeof source.seq === "number" && Number.isSafeInteger(source.seq) ? source.seq : cursor.n;
   for (;;) {
     const nextOffset = cursor.o + returned;
     const nextCursor =
-      nextOffset < records.length
-        ? makeBriefCursor({
-            project: input.project,
-            ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
-            include: input.include,
-            maxChars: input.maxChars,
-            ...(input.taskKey === undefined ? {} : { taskKey: input.taskKey }),
-            ...(input.sinceSeq === undefined ? {} : { sinceSeq: input.sinceSeq }),
-            offset: nextOffset,
-            payload: source,
-          })
-        : undefined;
+      nextOffset < records.length ? encodeBriefCursor({ ...cursor, o: nextOffset }) : undefined;
     const candidate: Record<string, unknown> = {
       project: source.project,
       seq: source.seq,
@@ -993,6 +1058,9 @@ function continueWholeBrief(
       returned_items: returned,
       total_items: records.length,
       truncated: nextCursor !== undefined,
+      ...(currentSeq > cursor.n
+        ? { snapshot_advanced_from: cursor.n, snapshot_advanced_to: currentSeq }
+        : {}),
       ...(nextCursor === undefined
         ? {}
         : { continuation: { tool: "atm_brief", cursor: nextCursor } }),
@@ -1004,7 +1072,10 @@ function continueWholeBrief(
     }
     throw new AtmError("RESULT_TOO_LARGE", {
       message: `max_chars=${input.maxChars} 无法容纳一条完整 Record continuation`,
-      details: { max_chars: input.maxChars },
+      details: {
+        max_chars: input.maxChars,
+        recovery: { action: "increase_max_chars", preserve_cursor: true },
+      },
     });
   }
 }
@@ -1021,6 +1092,7 @@ function fitBegin(
   payload: Record<string, unknown>,
   mode: BeginBriefMode,
   maxChars: number,
+  recordSnapshot: BriefRecordSnapshot[],
 ): Record<string, unknown> {
   const atomicOperationId =
     payload.atomicBegin && typeof payload.atomicBegin === "object"
@@ -1048,6 +1120,7 @@ function fitBegin(
     project: String(payload.project),
     ...(typeof payload.session === "string" ? { sessionId: payload.session } : {}),
     beginMode: mode,
+    recordSnapshot,
   });
 }
 
@@ -1919,10 +1992,16 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         String(started.project),
         String(started.session),
       );
+      const recordSnapshot =
+        briefMode === "full"
+          ? await captureBriefRecordSnapshot(service, String(started.project), snapshot)
+          : [];
       const { score, truncated: _legacyTruncated, ...beginIdentity } = started;
       void score;
       void _legacyTruncated;
-      return wrap(fitBegin({ ...beginIdentity, ...snapshot }, briefMode, canonical.maxChars));
+      return wrap(
+        fitBegin({ ...beginIdentity, ...snapshot }, briefMode, canonical.maxChars, recordSnapshot),
+      );
     },
   );
 
@@ -1952,7 +2031,6 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           project: input.project_code,
           ...(input.session_id === undefined ? {} : { sessionId: input.session_id }),
           include: input.include,
-          maxChars: input.max_chars,
           ...(input.task_key === undefined ? {} : { taskKey: input.task_key }),
           ...(input.since_seq === undefined ? {} : { sinceSeq: input.since_seq }),
         });
@@ -1973,6 +2051,14 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         ? { delta: await service.delta(input.project_code, input.since_seq!, 20) }
         : {};
       const payload = { ...brief, ...detail, ...delta };
+      const frozenRecords = decodedCursor
+        ? await resolveBriefRecordSnapshot(service, input.project_code, decodedCursor, brief)
+        : null;
+      const recordSnapshot = decodedCursor
+        ? undefined
+        : wanted("records")
+          ? await captureBriefRecordSnapshot(service, input.project_code, brief)
+          : [];
       const fitInput = {
         payload,
         include: input.include,
@@ -1981,10 +2067,11 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         ...(input.session_id === undefined ? {} : { sessionId: input.session_id }),
         ...(input.task_key === undefined ? {} : { taskKey: input.task_key }),
         ...(input.since_seq === undefined ? {} : { sinceSeq: input.since_seq }),
+        ...(recordSnapshot === undefined ? {} : { recordSnapshot }),
       };
       return wrap(
         decodedCursor
-          ? continueWholeBrief(decodedCursor, fitInput)
+          ? continueWholeBrief(decodedCursor, fitInput, frozenRecords ?? [])
           : fitWholeBrief({
               ...fitInput,
               identity: input.session_id === undefined ? {} : { session_id: input.session_id },
