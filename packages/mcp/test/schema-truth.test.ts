@@ -707,6 +707,7 @@ describe("MCP public/runtime schema truth", () => {
         tool: string;
         location: Array<string | number>;
         field?: string;
+        arrayIndex?: number;
         semanticPath: string;
       };
       const semanticMutations: ConstraintMutation[] = [];
@@ -722,6 +723,14 @@ describe("MCP public/runtime schema truth", () => {
               tool: tool.name,
               location: [...location, "enum"],
               semanticPath: `${semanticPath}#enum`,
+            });
+            node.enum.forEach((_member: unknown, arrayIndex: number) => {
+              semanticMutations.push({
+                tool: tool.name,
+                location: [...location, "enum"],
+                arrayIndex,
+                semanticPath: `${semanticPath}#enum`,
+              });
             });
           }
           if (node.type !== undefined && node.enum === undefined && node.const === undefined) {
@@ -778,7 +787,9 @@ describe("MCP public/runtime schema truth", () => {
         const mutated = structuredClone(fixture.tools);
         const schema = mutated.find((tool) => tool.name === mutation.tool)!.inputSchema;
         const target = at(schema, mutation.location.map(String));
-        if (mutation.field === undefined) {
+        if (mutation.arrayIndex !== undefined) {
+          (target as unknown[]).splice(mutation.arrayIndex, 1);
+        } else if (mutation.field === undefined) {
           const parent = at(schema, mutation.location.slice(0, -1).map(String));
           delete parent[mutation.location.at(-1)!];
         } else {
@@ -844,6 +855,13 @@ describe("MCP public/runtime schema truth", () => {
           tool: "atm_task_patch",
           location: [...patchBase, "allOf", 1, "if", "properties", "operation", "enum"],
         },
+        ...["wait_user", "wait_agent"].map((field) => ({
+          tool: "atm_task_patch",
+          location: [...patchBase, "allOf", 1, "if", "properties", "operation", "enum"] as Array<
+            string | number
+          >,
+          field,
+        })),
         {
           tool: "atm_task_patch",
           location: [...patchBase, "allOf", 1, "then", "required"],
@@ -965,6 +983,27 @@ describe("MCP public/runtime schema truth", () => {
             "enum",
           ],
         },
+        ...[
+          "verify_and_complete",
+          "review_request",
+          "review_submit",
+          "checklist_single",
+          "checklist_batch",
+        ].map((field) => ({
+          tool: "atm_task_patch",
+          location: [
+            "allOf",
+            0,
+            "if",
+            "properties",
+            "items",
+            "contains",
+            "properties",
+            "operation",
+            "enum",
+          ] as Array<string | number>,
+          field,
+        })),
         {
           tool: "atm_task_patch",
           location: ["allOf", 0, "then", "properties", "items", "maxItems"],

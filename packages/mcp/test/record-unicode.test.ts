@@ -10,7 +10,8 @@ import { createAyanamiMcpServer } from "../src/index.js";
 const roots: string[] = [];
 
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 async function openFixture() {

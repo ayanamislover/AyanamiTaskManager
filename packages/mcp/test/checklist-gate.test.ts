@@ -12,7 +12,8 @@ const connections: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const close of connections.splice(0)) await close();
   for (const service of services.splice(0)) service.close();
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 async function connect() {

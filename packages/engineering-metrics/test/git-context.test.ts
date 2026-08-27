@@ -7,7 +7,8 @@ import { inspectGitContext } from "../src/index.js";
 
 const roots: string[] = [];
 afterEach(() => {
-  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    rmSync(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 function git(cwd: string, args: string[]): string {
@@ -73,7 +74,7 @@ describe("deterministic Git context", () => {
 
   it("工作树已删除时不抛异常", () => {
     const cwd = mkdtempSync(join(tmpdir(), "atm-missing-worktree-"));
-    rmSync(cwd, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
     expect(inspectGitContext(cwd)).toMatchObject({
       available: false,
       error: "WORKTREE_MISSING",
