@@ -296,6 +296,16 @@ export const CreateProjectInputSchema = z.object({
   creationSignals: z.record(z.string(), z.unknown()).default({}),
 });
 
+export const BeginSignalsSchema = z.object({
+  expectedMinutes: z.number().int().nonnegative().optional(),
+  subtaskCount: z.number().int().nonnegative().optional(),
+  multiSession: z.boolean().optional(),
+  multiAgent: z.boolean().optional(),
+  hasDependencies: z.boolean().optional(),
+  needsEvidence: z.boolean().optional(),
+  hasTargetDate: z.boolean().optional(),
+});
+
 export const BeginInputSchema = z.object({
   operationId: OpIdSchema.optional(),
   cwd: z.string().min(1).optional(),
@@ -311,17 +321,7 @@ export const BeginInputSchema = z.object({
   predecessorSessionId: z.string().max(128).nullable().optional(),
   maxChars: z.number().int().min(300).max(5000).default(1200),
   role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
-  signals: z
-    .object({
-      expectedMinutes: z.number().int().nonnegative().optional(),
-      subtaskCount: z.number().int().nonnegative().optional(),
-      multiSession: z.boolean().optional(),
-      multiAgent: z.boolean().optional(),
-      hasDependencies: z.boolean().optional(),
-      needsEvidence: z.boolean().optional(),
-      hasTargetDate: z.boolean().optional(),
-    })
-    .default({}),
+  signals: BeginSignalsSchema.default({}),
   allowProjectCreate: z.boolean().default(false),
   creationReason: z.string().max(500).optional(),
 });
@@ -431,7 +431,7 @@ export const ProgressCompletedInputSchema = z.union([
 export const WorkItemCreateInputSchema = z
   .object({
     clientRef: NonEmptyTextSchema.max(100),
-    objectiveId: NonEmptyTextSchema,
+    objectiveId: NonEmptyTextSchema.optional(),
     milestoneId: z.string().nullable().optional(),
     parentKey: z.string().nullable().optional(),
     parentRef: z.string().nullable().optional(),
@@ -720,6 +720,89 @@ export const QuickTaskCreateInputSchema = z.object({
   sourceCwd: z.string().nullable().optional(),
   actor: z.string().default("USER"),
 });
+
+type ExternalizableObjectSchema = z.ZodObject<z.ZodRawShape>;
+
+export type ExternalNameMap<Schema extends ExternalizableObjectSchema> = {
+  readonly [Key in Extract<keyof z.input<Schema>, string>]: string;
+};
+
+export type ExternalFieldAdapter = {
+  readonly schema: z.ZodType;
+  readonly decode: (value: unknown) => unknown;
+};
+
+/**
+ * Derive a strict wire object from one canonical camelCase Zod object.
+ *
+ * The public field schemas are the canonical schema's actual child schemas, not
+ * copies.  Object-level refinements are also delegated back to the canonical
+ * schema and their issue paths are translated to the wire names.  A nested
+ * object/array that needs its own naming boundary can supply a field adapter;
+ * its decoder runs before the canonical object is parsed.
+ */
+export function externalizeObjectSchema<
+  Schema extends ExternalizableObjectSchema,
+  Names extends ExternalNameMap<Schema>,
+>(
+  canonicalSchema: Schema,
+  names: Names,
+  fieldAdapters: Partial<Record<Extract<keyof z.input<Schema>, string>, ExternalFieldAdapter>> = {},
+): {
+  readonly inputSchema: z.ZodObject<z.ZodRawShape>;
+  readonly parse: (value: unknown) => z.output<Schema>;
+  readonly toCanonical: (value: Record<string, unknown>) => Record<string, unknown>;
+} {
+  const canonicalShape = canonicalSchema.shape;
+  const externalShape: Record<string, any> = {};
+  const canonicalKeys = Object.keys(canonicalShape);
+  for (const canonicalKey of canonicalKeys) {
+    const externalName = names[canonicalKey as keyof Names];
+    if (typeof externalName !== "string" || externalName.length === 0) {
+      throw new Error(`EXTERNAL_NAME_MISSING:${canonicalKey}`);
+    }
+    const fieldAdapter = fieldAdapters[canonicalKey as keyof typeof fieldAdapters];
+    externalShape[externalName] = fieldAdapter?.schema ?? canonicalShape[canonicalKey]!;
+  }
+
+  const toCanonical = (value: Record<string, unknown>): Record<string, unknown> => {
+    const canonical: Record<string, unknown> = {};
+    for (const canonicalKey of canonicalKeys) {
+      const externalName = names[canonicalKey as keyof Names] as string;
+      if (!Object.prototype.hasOwnProperty.call(value, externalName)) continue;
+      const fieldAdapter = fieldAdapters[canonicalKey as keyof typeof fieldAdapters];
+      canonical[canonicalKey] = fieldAdapter
+        ? fieldAdapter.decode(value[externalName])
+        : value[externalName];
+    }
+    return canonical;
+  };
+
+  const inputSchema = z
+    .object(externalShape)
+    .strict()
+    .superRefine((value, context) => {
+      const parsed = canonicalSchema.safeParse(toCanonical(value));
+      if (parsed.success) return;
+      for (const issue of parsed.error.issues) {
+        const [first, ...rest] = issue.path;
+        const externalFirst =
+          typeof first === "string" && Object.prototype.hasOwnProperty.call(names, first)
+            ? names[first as keyof Names]
+            : first;
+        context.addIssue({
+          ...issue,
+          path: first === undefined ? [] : [externalFirst as PropertyKey, ...rest],
+        } as Parameters<typeof context.addIssue>[0]);
+      }
+    });
+
+  return {
+    inputSchema,
+    parse: (value) => canonicalSchema.parse(toCanonical(inputSchema.parse(value))),
+    toCanonical,
+  };
+}
 
 export type BeginInput = z.infer<typeof BeginInputSchema>;
 export type WorkItemCreateInput = z.infer<typeof WorkItemCreateInputSchema>;

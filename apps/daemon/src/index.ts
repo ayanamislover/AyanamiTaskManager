@@ -792,7 +792,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         parsed.opId,
         parsed.items.map((item) => ({
           clientRef: item.clientRef,
-          objectiveId: item.objectiveId,
+          ...(item.objectiveId === undefined ? {} : { objectiveId: item.objectiveId }),
           dependsOn: item.dependsOn,
           dependsOnRefs: item.dependsOnRefs,
           ...(item.discoveredFrom === undefined ? {} : { discoveredFrom: item.discoveredFrom }),
@@ -952,7 +952,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         parsed.opId,
         parsed.items.map((item) => ({
           clientRef: item.clientRef,
-          objectiveId: item.objectiveId,
+          ...(item.objectiveId === undefined ? {} : { objectiveId: item.objectiveId }),
           dependsOn: item.dependsOn,
           dependsOnRefs: item.dependsOnRefs,
           ...(item.discoveredFrom === undefined ? {} : { discoveredFrom: item.discoveredFrom }),
@@ -974,6 +974,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
           ...(item.parentRef === undefined ? {} : { parentRef: item.parentRef }),
           ...(item.targetDate === undefined ? {} : { targetDate: item.targetDate }),
         })),
+        { resolvePlanningRoot: true },
       ),
     );
   });

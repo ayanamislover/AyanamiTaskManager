@@ -58,7 +58,7 @@ describe("Ayanami MCP", () => {
       required?: string[];
     };
     expect(beginSchema.required).toEqual(["agent_id"]);
-    expect(beginSchema.properties?.mode).toEqual({
+    expect(beginSchema.properties?.mode).toMatchObject({
       enum: ["auto", "quick", "project"],
     });
     const recordSchema = memoryListed.tools.find((tool) => tool.name === "atm_record")
@@ -89,7 +89,9 @@ describe("Ayanami MCP", () => {
       }
       if (!value || typeof value !== "object") return;
       const node = value as Record<string, unknown>;
-      if (Object.keys(node).length === 0) emptySchemaNodes.push(path);
+      if (Object.keys(node).length === 0 && !path.endsWith(".default")) {
+        emptySchemaNodes.push(path);
+      }
       Object.entries(node).forEach(([key, entry]) => collectEmptySchemas(entry, `${path}.${key}`));
     };
     allTools.forEach((tool) => collectEmptySchemas(tool.inputSchema, tool.name));
