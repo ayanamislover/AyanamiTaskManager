@@ -5,4 +5,5 @@ export * from "./manager.js";
 export * from "./migration-runner.js";
 export * from "./project-repository.js";
 export * from "./search-pagination.js";
+export * from "./task-list-pagination.js";
 export * from "./task-view-query.js";

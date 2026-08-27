@@ -2,6 +2,9 @@ import type { TaskViewName } from "@ayanami-task/protocol";
 
 export type TaskViewProjectionRow = {
   localNo: number;
+  priorityRank: number;
+  sortKey: number;
+  createdAt: string;
   status: string;
   phase: string;
   waitingOn: string | null;
@@ -159,6 +162,11 @@ export function taskViewProjectionSql(input: {
           ${contextCtes}
           ${fullCtes}
           SELECT selected.local_no AS localNo,
+                 CASE selected.priority
+                   WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+                   WHEN 'NORMAL' THEN 2 ELSE 3 END AS priorityRank,
+                 selected.sort_key AS sortKey,
+                 selected.created_at AS createdAt,
                  selected.status AS status,
                  selected.phase AS phase,
                  selected.waiting_on AS waitingOn,
@@ -174,5 +182,5 @@ export function taskViewProjectionSql(input: {
           ORDER BY CASE selected.priority
                      WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
                      WHEN 'NORMAL' THEN 2 ELSE 3 END,
-                   selected.sort_key, selected.created_at`;
+                   selected.sort_key, selected.created_at, selected.local_no`;
 }

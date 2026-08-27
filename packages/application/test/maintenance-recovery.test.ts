@@ -48,7 +48,7 @@ describe("自动维护与崩溃恢复", () => {
 
       service.restoreProject("LIFE");
       expect(service.databases.getProject("LIFE").lifecycle).toBe("ACTIVE");
-      expect((await service.databases.openProject("LIFE")).schemaVersion).toBe(15);
+      expect((await service.databases.openProject("LIFE")).schemaVersion).toBe(16);
     } finally {
       service.close();
     }

@@ -1984,17 +1984,22 @@ function compactOperationTrace(trace: Record<string, any>): Record<string, unkno
 function fitTaskPage(
   project: string,
   view: TaskListView,
-  offset: number,
-  requestedLimit: number,
   maxChars: number,
   items: Array<Record<string, unknown>>,
+  itemCursors: string[],
   sourceHasMore: boolean,
+  sourceNextCursor: string | null,
+  retryCursor: string,
 ): Record<string, unknown> {
   for (let count = items.length; count >= 0; count -= 1) {
     const returned = items.slice(0, count);
     const budgetTruncated = count < items.length;
     const hasMore = budgetTruncated || sourceHasMore;
-    const nextCursor = hasMore ? String(offset + returned.length) : null;
+    const nextCursor = hasMore
+      ? count > 0
+        ? (itemCursors[count - 1] ?? sourceNextCursor ?? retryCursor)
+        : retryCursor
+      : null;
     const candidate: Record<string, unknown> = {
       project: project.toUpperCase(),
       view,
@@ -2031,7 +2036,7 @@ function fitTaskPage(
     view,
     returned_count: 0,
     items: [],
-    next_cursor: String(offset),
+    next_cursor: retryCursor,
     has_more: items.length > 0 || sourceHasMore,
     truncated: items.length > 0,
   };
@@ -2277,8 +2282,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
-      const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
       if (input.view === "reconcile") {
+        const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
         const reconciliation = plain(
           await service.reconcileProject(input.project, { includeActive: input.include_active }),
         );
@@ -2304,39 +2309,27 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       const filters = {
         readyOnly: input.ready_only,
         limit: input.limit,
-        offset,
+        ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
         ...(input.status === undefined ? {} : { status: input.status }),
         ...(input.owner === undefined ? {} : { assigneeAgentId: input.owner }),
         ...(input.parent_key === undefined ? {} : { parentKey: input.parent_key }),
         ...(input.milestone_id === undefined ? {} : { milestoneId: input.milestone_id }),
         ...(input.query === undefined ? {} : { query: input.query }),
       };
-      const items = await service.listWorkItems(input.project, filters, projectionView);
-      const projectedItems = items.map((item) =>
+      const page = await service.listWorkItemPage(input.project, filters, projectionView);
+      const projectedItems = page.items.map((item) =>
         selectFields(externalizeTaskView(item) as Record<string, unknown>, input.field_mask),
       );
-      const sourceHasMore =
-        items.length === input.limit &&
-        (
-          await service.listWorkItems(
-            input.project,
-            {
-              ...filters,
-              limit: 1,
-              offset: offset + items.length,
-            },
-            "core",
-          )
-        ).length > 0;
       return wrap(
         fitTaskPage(
           input.project,
           projectionView,
-          offset,
-          input.limit,
           input.max_chars,
           projectedItems,
-          sourceHasMore,
+          page.itemCursors,
+          page.hasMore,
+          page.nextCursor,
+          page.retryCursor,
         ),
       );
     },

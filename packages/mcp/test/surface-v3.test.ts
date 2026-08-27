@@ -733,7 +733,6 @@ describe("MCP surface v3 parity", () => {
           milestone_id: milestone.id,
           query: "Restored child",
           limit: 1,
-          cursor: "0",
           view: "context",
           field_mask: ["key", "title", "description_preview"],
           max_chars: 4000,
