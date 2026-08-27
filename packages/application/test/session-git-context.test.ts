@@ -94,8 +94,8 @@ describe("Session Git context", () => {
       git(cwd, ["add", "tracked.txt"]);
       git(cwd, ["commit", "-m", "second"]);
       const refreshed = await service.refreshSessionGitContextAsUser(project.code, begun.session);
-      expect(refreshed.session).toMatchObject({ git_dirty: 0 });
-      expect(refreshed.session.git_head).not.toBe(initial.git_head);
+      expect(refreshed.session).toMatchObject({ git: { dirty: false } });
+      expect(refreshed.session.git.head).not.toBe(initial.git_head);
     } finally {
       service.close();
     }

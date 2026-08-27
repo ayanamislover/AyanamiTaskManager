@@ -31,6 +31,7 @@ import {
   type ProjectActor,
   type RecordPageFilters,
   type RegisteredProject,
+  type SessionPageFilters,
   type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
@@ -769,6 +770,14 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).listAgentSessions(limit);
   }
 
+  async agentPage(projectCode: string, filters: SessionPageFilters = {}) {
+    return (await this.#repository(projectCode)).listAgentSessionPage(filters);
+  }
+
+  async listAgentSessionPage(projectCode: string, filters: SessionPageFilters = {}) {
+    return this.agentPage(projectCode, filters);
+  }
+
   async getSession(projectCode: string, id: string) {
     return (await this.#repository(projectCode)).getSessionView(id);
   }
@@ -797,13 +806,30 @@ export class AyanamiTaskService {
     }
     if (code === "SESSION_NOT_FOUND") {
       const candidateCount = repository.countAgentSessions();
+      const candidates: Array<{
+        id: string;
+        connectionState: string;
+        workState: string;
+      }> = [];
+      let cursor: string | undefined;
+      while (candidates.length < 200) {
+        const page = repository.listAgentSessionPage({
+          limit: Math.min(100, 200 - candidates.length),
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        candidates.push(
+          ...page.items.map((session) => ({
+            id: session.id,
+            connectionState: session.connectionState,
+            workState: session.workState,
+          })),
+        );
+        if (!page.hasMore || !page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
       const ranked = rankPublicCandidates(
         reference,
-        repository.listAgentSessions(200).map((session) => ({
-          id: String(session.id),
-          connection_state: String(session.connection_state),
-          work_state: String(session.work_state),
-        })),
+        candidates,
         (candidate) => [candidate.id],
         candidateCount,
       );
@@ -1297,18 +1323,22 @@ export class AyanamiTaskService {
       sinceSequence = nextSequence;
     }
 
-    const sessions = repository.listAgentSessions(200);
+    const sessions: import("@ayanami-task/storage-sqlite").SessionView[] = [];
+    let sessionCursor: string | undefined;
+    do {
+      const page = repository.listAgentSessionPage({
+        limit: 100,
+        ...(sessionCursor === undefined ? {} : { cursor: sessionCursor }),
+      });
+      sessions.push(...page.items);
+      sessionCursor = page.hasMore ? (page.nextCursor ?? undefined) : undefined;
+    } while (sessionCursor);
     const knownSessionIds = new Set(sessions.map((session) => String(session.id)));
     for (const task of tasks) {
       const sessionId = task.claimedBySessionId;
       if (!sessionId || knownSessionIds.has(sessionId)) continue;
       try {
-        const session = repository.getSession(sessionId);
-        sessions.push({
-          ...session,
-          last_seen_at: session.heartbeat_at ?? session.updated_at ?? null,
-          ended_at: session.closed_at ?? null,
-        });
+        sessions.push(repository.getSessionView(sessionId));
         knownSessionIds.add(sessionId);
       } catch {
         // Missing claim owners remain visible as stalled rather than making reconciliation fail.
@@ -1629,7 +1659,7 @@ export class AyanamiTaskService {
   async refreshSessionGitContextAsUser(projectCode: string, sessionId: string) {
     const result = await this.#refreshSessionGitContext(projectCode, sessionId);
     await this.#flush(projectCode);
-    return { ...result, session: (await this.#repository(projectCode)).getSession(sessionId) };
+    return { ...result, session: (await this.#repository(projectCode)).getSessionView(sessionId) };
   }
 
   async doctor(): Promise<Awaited<ReturnType<AyanamiDatabaseManager["doctor"]>>> {

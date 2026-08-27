@@ -21,6 +21,7 @@ import {
   type SearchHit,
   type SearchPage,
   type RecordView,
+  type SessionView as ProtocolSessionView,
   type TaskViewName,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
@@ -28,6 +29,11 @@ import { assertCompletionGates } from "./completion-gates.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { decodeRecordListCursor, encodeRecordListCursor } from "./record-list-pagination.js";
+import {
+  decodeSessionListCursor,
+  encodeSessionListCursor,
+  type SessionListSelection,
+} from "./session-list-pagination.js";
 import {
   canonicalTaskListSelection,
   decodeTaskListCursor,
@@ -310,39 +316,16 @@ export type ProgressUpdateView = {
   createdAt: string;
 };
 
-export type SessionView = {
-  id: string;
-  agentId: string;
-  displayName: string;
-  clientKind: string;
-  capabilities: unknown[];
-  parentSessionId: string | null;
-  predecessorSessionId: string | null;
-  threadId: string | null;
-  role: string;
-  cwd: string | null;
-  workState: string;
-  connectionState: string;
-  currentTaskKey: string | null;
-  heartbeatAt: string | null;
-  version: number;
-  startedAt: string;
-  updatedAt: string;
-  closedAt: string | null;
-  retirementReason: string | null;
-  closeReason: string | null;
-  git: {
-    available: boolean;
-    repoRoot: string | null;
-    worktreeRoot: string | null;
-    commonDir: string | null;
-    isLinkedWorktree: boolean | null;
-    branch: string | null;
-    head: string | null;
-    detached: boolean | null;
-    dirty: boolean | null;
-    error: string | null;
-  };
+export type SessionView = ProtocolSessionView;
+
+export type SessionPageFilters = { limit?: number; cursor?: string };
+
+export type SessionProjectionPage = {
+  items: SessionView[];
+  itemCursors: string[];
+  nextCursor: string | null;
+  retryCursor: string;
+  hasMore: boolean;
 };
 
 export type ReviewCandidateHash = { name: string; value: string };
@@ -726,29 +709,37 @@ export class ProjectRepository {
   }
 
   getSessionView(id: string): SessionView {
-    const row = this.getSession(id);
+    return this.sessionViewFromRow(this.getSession(id));
+  }
+
+  private sessionViewFromRow(row: any): SessionView {
     const nullableBoolean = (value: unknown): boolean | null =>
       value == null ? null : Boolean(value);
+    const currentTaskKey =
+      row.current_task_local_no === null || row.current_task_local_no === undefined
+        ? row.current_work_item_id
+          ? this.taskKeyForId(String(row.current_work_item_id))
+          : null
+        : `${this.meta.code}-T-${String(row.current_task_local_no).padStart(4, "0")}`;
     return {
-      id: row.id,
-      agentId: row.agent_id,
-      displayName: row.display_name,
-      clientKind: row.client_kind,
+      id: String(row.id),
+      agentId: String(row.agent_id),
+      displayName: String(row.display_name),
+      clientKind: String(row.client_kind),
       capabilities: json(row.capabilities_json, []),
       parentSessionId: row.parent_session_id ?? null,
       predecessorSessionId: row.predecessor_session_id ?? null,
       threadId: row.thread_id ?? null,
-      role: row.role,
+      role: row.role as SessionView["role"],
       cwd: row.cwd ?? null,
-      workState: row.work_state,
-      connectionState: row.connection_state,
-      currentTaskKey: row.current_work_item_id
-        ? this.taskKeyForId(String(row.current_work_item_id))
-        : null,
+      workState: String(row.work_state),
+      connectionState: String(row.connection_state),
+      currentTaskKey,
       heartbeatAt: row.heartbeat_at ?? null,
+      lastSeenAt: String(row.heartbeat_at ?? row.updated_at),
       version: Number(row.version),
-      startedAt: row.started_at,
-      updatedAt: row.updated_at,
+      startedAt: String(row.started_at),
+      updatedAt: String(row.updated_at),
       closedAt: row.closed_at ?? null,
       retirementReason: row.retirement_reason ?? null,
       closeReason: row.close_reason ?? null,
@@ -1063,6 +1054,60 @@ export class ProjectRepository {
          ORDER BY sort_key, created_at`,
       )
       .all(objectiveId ?? null, objectiveId ?? null) as any[];
+  }
+
+  listAgentSessionPage(filters: SessionPageFilters = {}): SessionProjectionPage {
+    const project = this.meta.code;
+    const selection: SessionListSelection = { list: "sessions" };
+    const decoded = filters.cursor
+      ? decodeSessionListCursor(filters.cursor, { project, selection })
+      : { last: null };
+    const clauses: string[] = [];
+    const parameters: unknown[] = [];
+    if (decoded.last) {
+      clauses.push("(session.started_at, session.id) < (?, ?)");
+      parameters.push(decoded.last.startedAt, decoded.last.id);
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 100));
+    parameters.push(limit + 1);
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT session.id, session.agent_id, agent.display_name, agent.client_kind,
+                agent.capabilities_json, session.parent_session_id, session.predecessor_session_id,
+                session.thread_id, session.role, session.cwd, session.work_state,
+                session.connection_state, session.current_work_item_id,
+                task.local_no AS current_task_local_no, session.heartbeat_at,
+                session.version, session.started_at, session.updated_at, session.closed_at,
+                session.retirement_reason, session.close_reason,
+                session.git_repo_root, session.worktree_root, session.git_common_dir,
+                session.git_is_linked_worktree, session.git_branch, session.git_head,
+                session.git_detached, session.git_dirty, session.git_available, session.git_error
+         FROM agent_sessions session
+         JOIN agents agent ON agent.id = session.agent_id
+         LEFT JOIN work_items task ON task.id = session.current_work_item_id
+         ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
+         ORDER BY session.started_at DESC, session.id DESC
+         LIMIT ?`,
+      )
+      .all(...parameters) as any[];
+    const hasMore = rows.length > limit;
+    const selected = rows.slice(0, limit);
+    const items = selected.map((row) => this.sessionViewFromRow(row));
+    const itemCursors = selected.map((row) =>
+      encodeSessionListCursor({
+        project,
+        selection,
+        last: { startedAt: String(row.started_at), id: String(row.id) },
+      }),
+    );
+    const startCursor = encodeSessionListCursor({ project, selection, last: null });
+    return {
+      items,
+      itemCursors,
+      nextCursor: hasMore ? itemCursors.at(-1)! : null,
+      retryCursor: filters.cursor ?? startCursor,
+      hasMore,
+    };
   }
 
   listAgentSessions(limit = 100): any[] {

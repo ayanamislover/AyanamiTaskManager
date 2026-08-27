@@ -163,7 +163,7 @@ describe("dynamic NOT_FOUND candidates", () => {
         candidates_truncated: true,
       });
       for (const candidate of body.error.details?.candidates ?? []) {
-        expect(Object.keys(candidate).sort()).toEqual(["connection_state", "id", "work_state"]);
+        expect(Object.keys(candidate).sort()).toEqual(["connectionState", "id", "workState"]);
       }
       expect(JSON.stringify(body)).not.toContain(sourcePath);
       expect(JSON.stringify(body)).not.toContain("local-secret");

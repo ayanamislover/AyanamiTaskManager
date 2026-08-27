@@ -94,6 +94,7 @@ describe("exact entity service reads", () => {
           "connectionState",
           "currentTaskKey",
           "heartbeatAt",
+          "lastSeenAt",
           "version",
           "startedAt",
           "updatedAt",

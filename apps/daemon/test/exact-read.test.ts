@@ -137,6 +137,7 @@ describe("Progress and Session REST exact reads", () => {
           "connectionState",
           "currentTaskKey",
           "heartbeatAt",
+          "lastSeenAt",
           "version",
           "startedAt",
           "updatedAt",

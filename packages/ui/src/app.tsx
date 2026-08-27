@@ -1578,29 +1578,29 @@ function AgentsPage({
                   {group.agents.map((session: any) => (
                     <article
                       className="agent-session-card"
-                      data-agent-id={session.agent_id}
-                      key={`${session.project}:${session.agent_id}`}
+                      data-agent-id={session.agentId}
+                      key={`${session.project}:${session.agentId}`}
                     >
                       <header className="agent-session-card-header">
                         <div className="agent-session-identity">
                           <div className="atm-row-title">
-                            {session.display_name || session.agent_id || "未命名 Agent"}
+                            {session.displayName || session.agentId || "未命名 Agent"}
                           </div>
                           <div className="atm-row-sub">
-                            <span className="atm-key">{session.agent_id}</span> ·{" "}
+                            <span className="atm-key">{session.agentId}</span> ·{" "}
                             {session.sessionCount} 个 Session
                           </div>
                         </div>
                         <div className="agent-session-status">
-                          <Status value={String(session.connection_state || "UNKNOWN")} />
-                          <span className="atm-row-sub">{session.work_state || "空闲"}</span>
+                          <Status value={String(session.connectionState || "UNKNOWN")} />
+                          <span className="atm-row-sub">{session.workState || "空闲"}</span>
                         </div>
                       </header>
 
                       <div className="agent-session-primary-grid">
                         <div className="agent-session-field">
                           <span>当前任务</span>
-                          <strong>{session.current_task_key || "未领取"}</strong>
+                          <strong>{session.currentTaskKey || "未领取"}</strong>
                         </div>
                         <div className="agent-session-field">
                           <span>角色</span>
@@ -1608,14 +1608,14 @@ function AgentsPage({
                         </div>
                         <div className="agent-session-field">
                           <span>Git branch</span>
-                          <strong title={session.git_branch || ""}>
-                            {session.git_branch || "非 Git"}
+                          <strong title={session.git?.branch || ""}>
+                            {session.git?.branch || "非 Git"}
                           </strong>
                         </div>
                         <div className="agent-session-field">
                           <span>Worktree</span>
-                          <strong title={session.worktree_root || ""}>
-                            {compactPath(session.worktree_root)}
+                          <strong title={session.git?.worktreeRoot || ""}>
+                            {compactPath(session.git?.worktreeRoot)}
                           </strong>
                         </div>
                       </div>
@@ -1635,25 +1635,25 @@ function AgentsPage({
                           </div>
                           <div>
                             <span>HEAD</span>
-                            <strong>{String(session.git_head || "不可用").slice(0, 10)}</strong>
+                            <strong>{String(session.git?.head || "不可用").slice(0, 10)}</strong>
                           </div>
                           <div>
                             <span>Git 状态</span>
                             <strong>
-                              {Number(session.git_available) === 1 || session.git_available === true
-                                ? Number(session.git_dirty) === 1 || session.git_dirty === true
+                              {session.git?.available
+                                ? session.git.dirty
                                   ? "dirty"
                                   : "clean"
-                                : session.git_error || "未观察"}
+                                : session.git?.error || "未观察"}
                             </strong>
                           </div>
                           <div>
                             <span>最后活动</span>
-                            <strong>{formatTime(session.last_seen_at)}</strong>
+                            <strong>{formatTime(session.lastSeenAt)}</strong>
                           </div>
                           <div>
                             <span>持续时间</span>
-                            <strong>{formatDuration(session.started_at)}</strong>
+                            <strong>{formatDuration(session.startedAt)}</strong>
                           </div>
                         </div>
                         {session.sessionHistory.length > 1 ? (
@@ -1662,8 +1662,8 @@ function AgentsPage({
                             {session.sessionHistory.map((history: any) => (
                               <div className="agent-session-history-row" key={history.id}>
                                 <span className="atm-key">{history.id}</span>
-                                <Status value={String(history.connection_state || "UNKNOWN")} />
-                                <span>{formatTime(history.last_seen_at)}</span>
+                                <Status value={String(history.connectionState || "UNKNOWN")} />
+                                <span>{formatTime(history.lastSeenAt)}</span>
                                 {history.id === session.id ? (
                                   <span className="atm-row-sub">当前</span>
                                 ) : null}
@@ -1675,7 +1675,7 @@ function AgentsPage({
 
                       <footer className="agent-session-actions">
                         <span className="atm-row-sub">
-                          最近活动：{formatTime(session.last_seen_at)}
+                          最近活动：{formatTime(session.lastSeenAt)}
                         </span>
                         <span className="atm-actions">
                           <button
@@ -1685,7 +1685,7 @@ function AgentsPage({
                           >
                             刷新 Git
                           </button>
-                          {session.connection_state === "ONLINE" ? (
+                          {session.connectionState === "ONLINE" ? (
                             <button
                               className="atm-button danger"
                               disabled={forceClose.isPending}
@@ -3827,7 +3827,7 @@ function ProjectPage({
   const blockers = workItems.filter((task) =>
     ["BLOCKED", "WAITING_USER", "WAITING_AGENT"].includes(task.status),
   );
-  const onlineAgents = (agents.data ?? []).filter((agent) => agent.connection_state === "ONLINE");
+  const onlineAgents = (agents.data ?? []).filter((agent) => agent.connectionState === "ONLINE");
   const claimedCount = workItems.filter((task) => Boolean(task.claimedBySessionId)).length;
   const latestUpdate = (updates.data ?? []).find((update) => update.status === "PUBLISHED");
   const filtered = (tasks.data ?? []).filter((task: any) => {
@@ -4240,17 +4240,17 @@ function ProjectPage({
             <div className="atm-row-title">{claimedCount} 项任务已领取</div>
             <div className="atm-row-sub">
               {onlineAgents.length
-                ? onlineAgents.map((agent) => agent.display_name || agent.agent_id).join("、")
+                ? onlineAgents.map((agent) => agent.displayName || agent.agentId).join("、")
                 : "尚无在线 Agent 会话"}
             </div>
             {onlineAgents.map((agent: any) => (
               <div
                 className="atm-row-sub"
                 key={agent.id}
-                title={agent.worktree_root || agent.cwd || ""}
+                title={agent.git?.worktreeRoot || agent.cwd || ""}
               >
-                {agent.display_name || agent.agent_id} · {agent.current_task_key || "未领取"} ·{" "}
-                {agent.git_branch || "非 Git"} · {compactPath(agent.worktree_root)}
+                {agent.displayName || agent.agentId} · {agent.currentTaskKey || "未领取"} ·{" "}
+                {agent.git?.branch || "非 Git"} · {compactPath(agent.git?.worktreeRoot)}
               </div>
             ))}
           </div>

@@ -1,22 +1,24 @@
+import type { SessionView } from "@ayanami-task/protocol";
+
 export type AgentSessionLike = {
   id: string;
-  agent_id: string;
+  agentId: string;
   project: string;
-  display_name?: string | null;
+  displayName?: string | null;
+  clientKind?: string | null;
+  capabilities?: unknown[];
+  parentSessionId?: string | null;
+  predecessorSessionId?: string | null;
+  threadId?: string | null;
   role?: string | null;
-  connection_state: string;
-  last_seen_at?: string | null;
-  started_at?: string | null;
-  ended_at?: string | null;
-  current_task_key?: string | null;
-  work_state?: string | null;
+  connectionState: string;
+  lastSeenAt?: string | null;
+  startedAt?: string | null;
+  closedAt?: string | null;
+  currentTaskKey?: string | null;
+  workState?: string | null;
   cwd?: string | null;
-  git_head?: string | null;
-  git_available?: number | boolean | null;
-  git_dirty?: number | boolean | null;
-  git_error?: string | null;
-  worktree_root?: string | null;
-  git_branch?: string | null;
+  git?: Partial<SessionView["git"]> | null;
 };
 
 export type AgentSessionConflict = {
@@ -32,7 +34,7 @@ function duplicateContexts(
   select: (session: AgentSessionLike) => string | null | undefined,
 ): AgentSessionConflict[] {
   const groups = new Map<string, { value: string; ids: string[] }>();
-  for (const session of sessions.filter((item) => item.connection_state === "ONLINE")) {
+  for (const session of sessions.filter((item) => item.connectionState === "ONLINE")) {
     const value = select(session)?.trim();
     if (!value) continue;
     const key = value.toLowerCase();
@@ -52,8 +54,8 @@ function duplicateContexts(
 
 export function findAgentSessionConflicts(sessions: AgentSessionLike[]): AgentSessionConflict[] {
   return [
-    ...duplicateContexts(sessions, "SAME_WORKTREE", (session) => session.worktree_root),
-    ...duplicateContexts(sessions, "SAME_BRANCH", (session) => session.git_branch),
+    ...duplicateContexts(sessions, "SAME_WORKTREE", (session) => session.git?.worktreeRoot),
+    ...duplicateContexts(sessions, "SAME_BRANCH", (session) => session.git?.branch),
   ];
 }
 
@@ -72,13 +74,13 @@ export type AgentProjectGroup<T extends AgentSessionLike> = {
 };
 
 function activityTime(session: AgentSessionLike): number {
-  const parsed = Date.parse(session.last_seen_at ?? "");
+  const parsed = Date.parse(session.lastSeenAt ?? "");
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
 function shouldPrefer<T extends AgentSessionLike>(candidate: T, current: T): boolean {
-  const candidateOnline = candidate.connection_state === "ONLINE";
-  const currentOnline = current.connection_state === "ONLINE";
+  const candidateOnline = candidate.connectionState === "ONLINE";
+  const currentOnline = current.connectionState === "ONLINE";
   if (candidateOnline !== currentOnline) return candidateOnline;
   return activityTime(candidate) > activityTime(current);
 }
@@ -88,7 +90,7 @@ export function summarizeAgentSessions<T extends AgentSessionLike>(
 ): Array<AgentSessionSummary<T>> {
   const groups = new Map<string, { selected: T; sessions: T[] }>();
   for (const session of sessions) {
-    const key = `${session.project}\u0000${session.agent_id}`;
+    const key = `${session.project}\u0000${session.agentId}`;
     const group = groups.get(key);
     if (!group) {
       groups.set(key, { selected: session, sessions: [session] });
@@ -106,11 +108,11 @@ export function summarizeAgentSessions<T extends AgentSessionLike>(
     }))
     .sort((left, right) => {
       const online =
-        Number(right.connection_state === "ONLINE") - Number(left.connection_state === "ONLINE");
+        Number(right.connectionState === "ONLINE") - Number(left.connectionState === "ONLINE");
       if (online) return online;
       const activity = activityTime(right) - activityTime(left);
       if (activity) return activity;
-      return `${left.project}:${left.agent_id}`.localeCompare(`${right.project}:${right.agent_id}`);
+      return `${left.project}:${left.agentId}`.localeCompare(`${right.project}:${right.agentId}`);
     });
 }
 
@@ -135,13 +137,13 @@ export function groupAgentSessions<T extends AgentSessionLike>(
     .map(([project, agents]) => {
       const histories = agents.flatMap((agent) => agent.sessionHistory);
       const onlineCount = histories.filter(
-        (session) => session.connection_state === "ONLINE",
+        (session) => session.connectionState === "ONLINE",
       ).length;
       const latest = histories.reduce<string | null>((current, session) => {
-        if (!session.last_seen_at) return current;
+        if (!session.lastSeenAt) return current;
         const currentTime = current ? Date.parse(current) : 0;
         if (!current || activityTime(session) > (Number.isFinite(currentTime) ? currentTime : 0)) {
-          return session.last_seen_at;
+          return session.lastSeenAt;
         }
         return current;
       }, null);
