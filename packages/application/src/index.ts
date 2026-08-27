@@ -9,6 +9,7 @@ import {
 } from "@ayanami-task/errors";
 import {
   normalizeReviewCandidateHashes,
+  workItemOperationHasEffect,
   type EvidenceInput,
   type TaskContextView,
   type TaskCoreView,
@@ -1097,7 +1098,9 @@ export class AyanamiTaskService {
       patches,
       (actor) => repository.patchWorkItems(actor, opId, patches),
     );
-    if (patches.some((patch) => ["verify", "complete"].includes(String(patch.operation)))) {
+    if (
+      patches.some((patch) => workItemOperationHasEffect(patch.operation, "REFRESH_GIT_CONTEXT"))
+    ) {
       await this.#refreshSessionGitContext(
         projectCode,
         String(execution.resolution.actor.sessionId),
@@ -1105,10 +1108,12 @@ export class AyanamiTaskService {
     }
     await this.#flush(projectCode);
     const starts = patches
-      .filter((patch) => ["start", "claim"].includes(String(patch.operation)))
+      .filter((patch) =>
+        workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
+      )
       .map((patch) => patch.taskKey);
     const finishes = patches
-      .filter((patch) => ["complete", "cancel"].includes(String(patch.operation)))
+      .filter((patch) => workItemOperationHasEffect(patch.operation, "CAPTURE_ENGINEERING_METRICS"))
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
@@ -1124,10 +1129,12 @@ export class AyanamiTaskService {
     const result = repository.patchWorkItems(this.#userActor(), opId, patches);
     await this.#flush(projectCode);
     const starts = patches
-      .filter((patch) => ["start", "claim"].includes(String(patch.operation)))
+      .filter((patch) =>
+        workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
+      )
       .map((patch) => patch.taskKey);
     const finishes = patches
-      .filter((patch) => ["complete", "cancel"].includes(String(patch.operation)))
+      .filter((patch) => workItemOperationHasEffect(patch.operation, "CAPTURE_ENGINEERING_METRICS"))
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);

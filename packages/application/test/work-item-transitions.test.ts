@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { WORK_ITEM_TRANSITIONS, type WorkItemStatus } from "@ayanami-task/protocol";
+import {
+  legalWorkItemOperations,
+  WORK_ITEM_STATUSES,
+  type WorkItemStatus,
+} from "@ayanami-task/protocol";
 import { AyanamiTaskService } from "../src/index.js";
 
 const temporary: string[] = [];
@@ -33,7 +37,7 @@ const OPERATIONS = [
   { operation: "reopen" },
 ] as const;
 
-const STATUSES = Object.keys(WORK_ITEM_TRANSITIONS) as WorkItemStatus[];
+const STATUSES = [...WORK_ITEM_STATUSES];
 
 type Harness = Awaited<ReturnType<typeof openHarness>>;
 
@@ -105,7 +109,7 @@ async function openHarness() {
     return key;
   };
 
-  const read = (taskKey: string) => service.getWorkItem(project.code, taskKey, "core");
+  const read = (taskKey: string) => service.getWorkItem(project.code, taskKey, "full");
   openServices.push(service);
   return { service, patch, taskAt, read };
 }
@@ -131,7 +135,7 @@ async function sweep(harness: Harness) {
   return observed;
 }
 
-describe("WorkItem 状态机：转移表与操作必须双向吻合", () => {
+describe("WorkItem 状态机：Operation Registry 与仓储行为必须双向吻合", () => {
   let harness: Harness;
   let observed: Awaited<ReturnType<typeof sweep>>;
 
@@ -146,27 +150,64 @@ describe("WorkItem 状态机：转移表与操作必须双向吻合", () => {
     expect(total).toBeGreaterThanOrEqual(20);
   });
 
-  it("声明的每一条转移都必须有操作能真正执行", () => {
+  it("Registry 声明的每一条状态变化都必须有操作能真正执行", () => {
     const unreachable: string[] = [];
     for (const from of STATUSES) {
-      for (const to of WORK_ITEM_TRANSITIONS[from]) {
-        if (!observed.get(from)?.has(to)) unreachable.push(`${from} -> ${to}`);
+      for (const { operation, target } of legalWorkItemOperations(from)) {
+        // allowedFrom 表示操作可以进入其 precondition/gate。complete 在非执行态
+        // 会由 completion gate 聚合失败原因，并不承诺最终能落到 DONE。
+        if (operation === "complete" && !["IN_PROGRESS", "VERIFYING"].includes(from)) continue;
+        if (target !== from && !observed.get(from)?.get(target)?.includes(operation)) {
+          unreachable.push(`${from} --${operation}--> ${target}`);
+        }
       }
     }
     expect(unreachable).toEqual([]);
   });
 
-  it("没有操作能执行表里未声明的转移", () => {
+  it("没有操作能执行 Registry 未声明的状态变化", () => {
     const undeclared: string[] = [];
     for (const from of STATUSES) {
       for (const [to, ops] of observed.get(from) ?? []) {
-        if (!WORK_ITEM_TRANSITIONS[from].includes(to)) {
+        const declared = legalWorkItemOperations(from).some(
+          (entry) => entry.target === to && ops.includes(entry.operation),
+        );
+        if (!declared) {
           undeclared.push(`${from} -> ${to} (${ops.join("/")})`);
         }
       }
     }
     expect(undeclared).toEqual([]);
   });
+
+  it("按操作身份拒绝碰巧落在合法目标状态上的错误命令", async () => {
+    const isolated = await openHarness();
+    try {
+      for (const [from, operation, requested] of [
+        ["DONE", "start", "IN_PROGRESS"],
+        ["READY", "reopen", "IN_PROGRESS"],
+        ["DONE", "complete", "DONE"],
+      ] as const) {
+        const key = await isolated.taskAt(from);
+        const before = await isolated.read(key);
+        await expect(isolated.patch(key, { operation })).rejects.toMatchObject({
+          code: "INVALID_TRANSITION",
+          details: expect.objectContaining({
+            operation,
+            current_status: from,
+            requested_status: requested,
+            legal_operations: expect.any(Array),
+          }),
+        });
+        expect(await isolated.read(key)).toMatchObject({
+          status: before.status,
+          version: before.version,
+        });
+      }
+    } finally {
+      isolated.service.close();
+    }
+  }, 60_000);
 });
 
 describe("界面上那几个出口必须真的能走", () => {
@@ -210,14 +251,33 @@ describe("界面上那几个出口必须真的能走", () => {
     }
   }, 60_000);
 
+  it("等待态 reopen 按原 phase 回到 VERIFYING", async () => {
+    const harness = await openHarness();
+    try {
+      for (const operation of ["wait_user", "wait_agent"] as const) {
+        const key = await harness.taskAt("VERIFYING");
+        const waiting = await harness.patch(key, { operation, waitingFor: "等待复核" });
+        expect(waiting.status).toBe(operation === "wait_user" ? "WAITING_USER" : "WAITING_AGENT");
+        expect((await harness.patch(key, { operation: "reopen" })).status).toBe("VERIFYING");
+      }
+    } finally {
+      harness.service.close();
+    }
+  }, 60_000);
+
   it("release 不能把终态任务悄悄拉回 READY", async () => {
     const harness = await openHarness();
     try {
       for (const from of ["DONE", "CANCELLED"] as const) {
         const key = await harness.taskAt(from);
-        await expect(harness.patch(key, { operation: "release" })).rejects.toThrow(
-          /INVALID_TRANSITION|CLAIM_OWNER_REQUIRED/,
-        );
+        await expect(harness.patch(key, { operation: "release" })).rejects.toMatchObject({
+          code: "INVALID_TRANSITION",
+          details: expect.objectContaining({
+            operation: "release",
+            current_status: from,
+            requested_status: "READY",
+          }),
+        });
         expect((await harness.read(key)).status).toBe(from);
       }
     } finally {
