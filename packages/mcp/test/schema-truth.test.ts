@@ -4,6 +4,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { z } from "zod";
 import { createAyanamiMcpServer, createAyanamiToolRegistry } from "../src/index.js";
+import { normalizePublishedSchema } from "../src/tool-publication.js";
 
 type JsonObject = Record<string, any>;
 type ListedTool = { name: string; inputSchema: JsonObject };
@@ -305,7 +306,7 @@ function semanticConstraints(schema: JsonObject, runtime: boolean): Map<string, 
               !(
                 node.properties[field] &&
                 typeof node.properties[field] === "object" &&
-                "default" in node.properties[field]
+                "default" in dereference(node.properties[field], root)
               ),
           )
         : [];
@@ -333,7 +334,8 @@ function semanticConstraints(schema: JsonObject, runtime: boolean): Map<string, 
       }
     }
   };
-  visit(schema, schema, "$input");
+  const normalized = normalizePublishedSchema(schema);
+  visit(normalized, normalized, "$input");
   return constraints;
 }
 
@@ -439,22 +441,13 @@ describe("MCP public/runtime schema truth", () => {
       const semanticMutations = [
         {
           tool: "atm_begin",
-          location: ["properties", "thread_id", "anyOf", "0", "maxLength"],
-          semanticPath: "$input.thread_id.anyOf[0]#maxLength",
+          location: ["properties", "thread_id", "maxLength"],
+          semanticPath: "$input.thread_id#maxLength",
         },
         {
           tool: "atm_task_create",
-          location: [
-            "properties",
-            "items",
-            "items",
-            "properties",
-            "target_date",
-            "anyOf",
-            "0",
-            "pattern",
-          ],
-          semanticPath: "$input.items[].target_date.anyOf[0]#pattern",
+          location: ["properties", "items", "items", "properties", "target_date", "pattern"],
+          semanticPath: "$input.items[].target_date#pattern",
         },
         {
           tool: "atm_task_create",

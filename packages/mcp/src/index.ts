@@ -3,7 +3,8 @@ import { Buffer } from "node:buffer";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Readable, Writable } from "node:stream";
-import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
@@ -33,6 +34,7 @@ import {
   type AyanamiToolProfile,
   type DefineToolConfig,
 } from "./tool-registry.js";
+import { registerPublishedToolHandlers } from "./tool-publication.js";
 
 const outputSchema = z.object({}).catchall(z.unknown());
 const projectCode = z.string().trim().min(1).max(20);
@@ -1373,6 +1375,8 @@ const workItemPatch = z
     checklist_items: z.array(checklistBatchItem).min(1).max(100).optional(),
   })
   .strict()
+  // Transitional ATM-T-0188 boundary: operation-specific Review/checklist conditions are
+  // runtime-only until the canonical Operation Registry emits this discriminated union.
   .superRefine((value, context) => {
     if (
       value.operation === "review_request" ||
@@ -2048,6 +2052,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       description: "直接使用返回的 brief",
       inputSchema: beginToolInput,
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (input) => {
       const { brief, ...externalInput } = input;
@@ -2102,7 +2107,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
       const decodedCursor = input.cursor === undefined ? null : decodeBriefCursor(input.cursor);
@@ -2175,7 +2180,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
       const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
@@ -2259,7 +2264,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
       const item = await service.getWorkItem(input.project, input.task_key, input.view);
@@ -2291,6 +2296,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       description: "批量创建任务与关系。",
       inputSchema: taskCreateExternal.inputSchema,
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (input) => {
       const canonical = taskCreateExternal.parse(input);
@@ -2330,6 +2336,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       description: "批量变更任务。",
       inputSchema: taskPatchToolInput,
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async (input) => {
       const composite = input.items.filter((item) =>
@@ -2616,6 +2623,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           }
         }),
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (input) => {
       const completed = input.completed.map((entry) =>
@@ -2689,6 +2697,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (input) => {
       const created = await service.createRecord(input.project, input.session, input.op_id, {
@@ -2755,7 +2764,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           }
         }),
       outputSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
       if (input.op_id !== undefined) {
@@ -2890,7 +2899,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
       const delta = (await service.delta(
@@ -2921,6 +2930,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict(),
       outputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async (input) => {
       const ended = await service.end(input.project, input.session, input.op_id, {
@@ -2948,11 +2958,12 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
 export function createAyanamiMcpServer(
   service: AyanamiTaskService,
   options: { profile?: AyanamiMcpProfile } = {},
-): McpServer {
+): Server {
   const profile = options.profile ?? "core";
-  const server = new McpServer(
+  const server = new Server(
     { name: "ayanami-task-manager", version: "1.0.18" },
     {
+      capabilities: { tools: {} },
       instructions:
         profile === "legacy"
           ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory 双 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
@@ -2961,7 +2972,12 @@ export function createAyanamiMcpServer(
             : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
     },
   );
-  createAyanamiToolRegistry(service).register(server, profile);
+  registerPublishedToolHandlers(
+    server,
+    createAyanamiToolRegistry(service),
+    profile,
+    MCP_SURFACE_VERSION,
+  );
   return server;
 }
 

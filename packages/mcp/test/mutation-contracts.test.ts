@@ -10,6 +10,20 @@ import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
 
+function dereferenceSchema(schema: Record<string, any>, root: Record<string, any>) {
+  let current = schema;
+  const seen = new Set<string>();
+  while (typeof current?.$ref === "string" && current.$ref.startsWith("#/")) {
+    if (seen.has(current.$ref)) throw new Error(`CYCLIC_TEST_SCHEMA_REF:${current.$ref}`);
+    seen.add(current.$ref);
+    current = current.$ref
+      .slice(2)
+      .split("/")
+      .reduce((value: any, segment: string) => value?.[segment], root);
+  }
+  return current;
+}
+
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
@@ -717,26 +731,31 @@ describe("MCP mutation contracts", () => {
       const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
         properties?: Record<string, any>;
       };
-      const itemSchema = schema.properties?.items?.items;
-      expect(itemSchema.properties?.expected_fields).toMatchObject({
+      const itemSchema = dereferenceSchema(schema.properties?.items?.items, schema);
+      const expectedFields = dereferenceSchema(itemSchema.properties?.expected_fields, schema);
+      expect(expectedFields).toMatchObject({
         type: "object",
         properties: {
           title: { type: "string" },
           description: { type: "string" },
-          acceptance: { type: "array", items: { type: "string" } },
         },
       });
-      expect(itemSchema.properties).toMatchObject({
-        acceptance: { type: "array", items: { type: "string" } },
-        cancel_reason: { type: "string" },
+      expect(dereferenceSchema(expectedFields.properties.acceptance, schema)).toMatchObject({
+        type: "array",
+        items: { type: "string" },
+      });
+      expect(dereferenceSchema(itemSchema.properties.acceptance, schema)).toMatchObject({
+        type: "array",
+        items: { type: "string" },
+      });
+      expect(dereferenceSchema(itemSchema.properties.cancel_reason, schema)).toMatchObject({
+        type: "string",
       });
       for (const field of ["duplicate_of", "superseded_by"] as const) {
-        expect(itemSchema.properties[field].anyOf).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ type: "string" }),
-            expect.objectContaining({ type: "null" }),
-          ]),
-        );
+        expect(dereferenceSchema(itemSchema.properties[field], schema).type).toEqual([
+          "string",
+          "null",
+        ]);
       }
 
       const response = await client.callTool({

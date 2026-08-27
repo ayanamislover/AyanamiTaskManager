@@ -11,6 +11,26 @@ export function mcpSchemaBytes(tools: unknown): number {
   return Buffer.byteLength(JSON.stringify(tools), "utf8");
 }
 
+export function mcpSchemaBreakdown(tools: readonly unknown[]): {
+  bytes: number;
+  framingBytes: number;
+  descriptors: Array<{ name: string; bytes: number }>;
+} {
+  const descriptors = tools.map((tool, index) => ({
+    name:
+      tool && typeof tool === "object" && "name" in tool
+        ? String((tool as { name?: unknown }).name)
+        : `#${index}`,
+    bytes: mcpSchemaBytes(tool),
+  }));
+  const bytes = mcpSchemaBytes(tools);
+  return {
+    bytes,
+    framingBytes: bytes - descriptors.reduce((total, descriptor) => total + descriptor.bytes, 0),
+    descriptors,
+  };
+}
+
 export function assertMcpSchemaBudget(tools: unknown): {
   bytes: number;
   limitBytes: number;

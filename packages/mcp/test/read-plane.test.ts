@@ -485,7 +485,7 @@ describe("MCP read plane", () => {
         properties?: Record<string, { type?: string; enum?: string[] }>;
       };
       expect(listSchema.properties?.view?.enum).toContain("reconcile");
-      expect(listSchema.properties?.include_active).toEqual({ type: "boolean" });
+      expect(listSchema.properties?.include_active).toEqual({ default: false, type: "boolean" });
 
       const first = await client.callTool({
         name: "atm_task_list",

@@ -110,7 +110,16 @@ describe("Ayanami MCP", () => {
         { name: "oversized", inputSchema: { type: "object", padding: "x".repeat(8000) } },
       ]),
     ).toThrow(/MCP_SCHEMA_BUDGET_EXCEEDED/u);
-    expect(allTools.every((tool) => tool.description === undefined)).toBe(true);
+    expect(
+      allTools.every(
+        (tool) =>
+          /^\S[^\r\n]*$/u.test(tool.description ?? "") &&
+          typeof tool.annotations?.readOnlyHint === "boolean" &&
+          typeof tool.annotations?.destructiveHint === "boolean" &&
+          /^v\d+$/u.test(String(tool._meta?.surface_version ?? "")) &&
+          /^[a-f0-9]{64}$/u.test(String(tool._meta?.schema_hash ?? "")),
+      ),
+    ).toBe(true);
     expect(profiles.coreClient.getInstructions()).toContain("MCP surface v3");
     expect(profiles.coreClient.getInstructions()).toContain("直接使用返回的 brief");
     const invalidContract = await client.callTool({

@@ -9,3 +9,5 @@ playwright-report
 .playwright-cli
 pnpm-lock.yaml
 AyanamiTaskManager_Development_Spec_CN_v2.md
+packages/mcp/src/legacy-tools-list-v1.0.18.json
+docs/generated/mcp-tool-contracts.md
