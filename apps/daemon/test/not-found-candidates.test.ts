@@ -229,7 +229,10 @@ describe("dynamic NOT_FOUND candidates", () => {
       );
       await expect(
         service.getOperationTrace(project.code, opId, String(sessions[0]!.session)),
-      ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${opId}`);
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { reference: opId },
+      });
 
       const uiOpId = "ui-missing-milestone-write";
       const uiResponse = await app.inject({
@@ -261,9 +264,10 @@ describe("dynamic NOT_FOUND candidates", () => {
       expect(await service.listWorkItems(project.code, { limit: 100 })).toHaveLength(
         created.items.length,
       );
-      await expect(service.getOperationTrace(project.code, uiOpId)).rejects.toThrowError(
-        `OPERATION_NOT_FOUND: ${uiOpId}`,
-      );
+      await expect(service.getOperationTrace(project.code, uiOpId)).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { reference: uiOpId },
+      });
     } finally {
       await app.close();
       service.close();

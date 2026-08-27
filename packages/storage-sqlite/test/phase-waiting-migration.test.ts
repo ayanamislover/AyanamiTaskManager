@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, openManagedDatabase, ProjectRepository } from "../src/index.js";
+import { removeMigrationsAfter } from "./migration-test-helpers.js";
 
 const temporary: string[] = [];
 
@@ -19,12 +20,7 @@ describe("v8 工作阶段与等待对象迁移", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    rmSync(join(migrationsRoot, "project", "0008_work_item_phase_waiting.sql"));
-    rmSync(join(migrationsRoot, "project", "0009_structured_cancel.sql"));
-    rmSync(join(migrationsRoot, "project", "0010_review_workflow.sql"));
-    rmSync(join(migrationsRoot, "project", "0011_session_close_reason.sql"));
-    rmSync(join(migrationsRoot, "project", "0012_project_update_evidence.sql"));
-    rmSync(join(migrationsRoot, "project", "0013_project_update_session.sql"));
+    removeMigrationsAfter(migrationsRoot, "project", 7);
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({
@@ -109,6 +105,6 @@ describe("v8 工作阶段与等待对象迁移", () => {
         migrationDirectory: join(migrationsRoot, "project"),
         backupDirectory: join(root, "tampered-backups"),
       }),
-    ).rejects.toThrowError("MIGRATION_HASH_MISMATCH: 8");
+    ).rejects.toMatchObject({ code: "MIGRATION_HASH_MISMATCH", details: { version: 8 } });
   });
 });

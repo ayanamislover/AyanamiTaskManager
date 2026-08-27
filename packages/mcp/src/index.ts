@@ -9,10 +9,10 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
+import { asAtmError, AtmError } from "@ayanami-task/errors";
 import {
   BeginInputSchema,
   BeginSignalsSchema,
-  ChecklistBatchFailureDetailsSchema,
   ChecklistCreateInputSchema,
   EvidenceInputSchema,
   EvidenceReferenceSchema,
@@ -173,146 +173,6 @@ type McpErrorContext = {
   expectedVersions?: Record<string, number>;
 };
 
-function errorCode(error: unknown): string {
-  if (!(error instanceof Error)) return "INTERNAL_ERROR";
-  const candidate = error.message.split(":", 1)[0]!.trim();
-  return /^[A-Z][A-Z0-9_]+$/u.test(candidate) ? candidate : "INTERNAL_ERROR";
-}
-
-function normalizedSuggestionText(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z0-9]+/gu, "");
-}
-
-function editDistance(left: string, right: string): number {
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
-      );
-    }
-    previous.splice(0, previous.length, ...current);
-  }
-  return previous[right.length]!;
-}
-
-function projectSuggestionDetails(service: AyanamiTaskService, error: Error) {
-  const query = normalizedSuggestionText(
-    error.message
-      .slice(error.message.indexOf(":") + 1)
-      .trim()
-      .slice(0, 128),
-  );
-  if (!query) return { did_you_mean: null, candidates: [] };
-  const ranked = service
-    .listProjects()
-    .filter((project) => project.lifecycle !== "TRASHED")
-    .map((project) => {
-      const code = normalizedSuggestionText(project.code);
-      const name = normalizedSuggestionText(project.name);
-      const rawScore = Math.min(editDistance(query, code), editDistance(query, name));
-      const prefix = code.startsWith(query) || name.startsWith(query);
-      return { project, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
-    })
-    .sort(
-      (left, right) =>
-        left.score - right.score || left.project.code.localeCompare(right.project.code),
-    )
-    .slice(0, 5);
-  const first = ranked[0];
-  const plausible =
-    first !== undefined &&
-    (first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34)));
-  return {
-    did_you_mean: plausible ? first!.project.code : null,
-    candidates: ranked.map(({ project }) => ({ code: project.code, name: project.name })),
-  };
-}
-
-async function versionConflictDetails(
-  service: AyanamiTaskService,
-  error: Error,
-  context: McpErrorContext,
-) {
-  if (!context.project) return null;
-  const detail = error.message.slice(error.message.indexOf(":") + 1).trim();
-  const segments = detail.split(":");
-  const actual = Number(segments.at(-1));
-  if (!Number.isInteger(actual) || actual < 0) return null;
-  if (context.checklistId && segments.length === 1) {
-    const [current, recentChanges] = await Promise.all([
-      service.checklistConflictSnapshot(context.project, context.checklistId),
-      service.recentChecklistChanges(context.project, context.checklistId, 6),
-    ]);
-    return {
-      entity: "CHECKLIST",
-      key: context.checklistId,
-      expected: context.expectedVersion ?? null,
-      actual,
-      current: {
-        id: current.id,
-        task_key: current.taskKey,
-        task_version: current.taskVersion,
-        title: current.title,
-        status: current.status,
-        evidence_required: current.evidenceRequired,
-        evidence_count: current.evidenceCount,
-        version: current.version,
-        updated_at: current.updatedAt,
-      },
-      recent_changes: recentChanges.slice(0, 6).map((change) => ({
-        seq: change.seq,
-        type: change.type,
-        key: change.key,
-        summary: change.summary,
-        op_id: change.opId,
-        at: change.at,
-      })),
-      changes_complete: false,
-    };
-  }
-  const taskKey = (segments.length > 1 ? segments[0] : undefined) ?? context.taskKey;
-  if (!taskKey) return null;
-  const [current, recentChanges] = await Promise.all([
-    service.getWorkItemForUi(context.project, taskKey),
-    service.recentWorkItemChanges(context.project, taskKey, 6),
-  ]);
-  return {
-    entity: "WORK_ITEM",
-    key: taskKey,
-    expected: context.expectedVersions?.[taskKey] ?? context.expectedVersion ?? null,
-    actual,
-    current: {
-      key: current.key,
-      version: current.version,
-      status: current.status,
-      phase: current.phase,
-      title: current.title,
-      description: current.description,
-      assignee_agent_id: current.assigneeAgentId,
-      claimed_by_session_id: current.claimedBySessionId,
-      target_date: current.targetDate,
-      parent_key: current.parentKey,
-      cancel_reason: current.cancelReason,
-      duplicate_of: current.duplicateOf,
-      superseded_by: current.supersededBy,
-      updated_at: current.updatedAt,
-    },
-    recent_changes: recentChanges.slice(0, 6).map((change) => ({
-      seq: change.seq,
-      type: change.type,
-      key: change.key,
-      summary: change.summary,
-      op_id: change.opId,
-      at: change.at,
-    })),
-    changes_complete: false,
-  };
-}
-
 async function withMcpErrorDetails<T>(
   service: AyanamiTaskService,
   context: McpErrorContext,
@@ -321,36 +181,18 @@ async function withMcpErrorDetails<T>(
   try {
     return await action();
   } catch (error) {
-    if (!(error instanceof Error)) throw error;
-    const code = errorCode(error);
-    let details: Record<string, unknown> | null = null;
-    try {
-      if (code === "COMPLETION_GATE_FAILED") {
-        const parsed = ChecklistBatchFailureDetailsSchema.safeParse(
-          (error as Error & { details?: unknown }).details,
-        );
-        if (parsed.success) details = parsed.data;
-      }
-      if (code === "PROJECT_NOT_FOUND") details = projectSuggestionDetails(service, error);
-      if (
-        ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(code) &&
-        context.project
-      ) {
-        details = await service.notFoundSuggestionDetails(
-          context.project,
-          code,
-          error.message.slice(error.message.indexOf(":") + 1).trim(),
-        );
-      }
-      if (code === "VERSION_CONFLICT") {
-        details = await versionConflictDetails(service, error, context);
-      }
-    } catch {
-      details = null;
-    }
-    if (!details) throw error;
-    const publicDetails = code === "COMPLETION_GATE_FAILED" ? details : bounded(details, 6000);
-    throw new Error(`${error.message} MCP_DETAILS=${JSON.stringify(publicDetails)}`);
+    if (typeof service.enrichError !== "function") throw asAtmError(error);
+    throw await service.enrichError(error, {
+      ...(context.project === undefined ? {} : { projectCode: context.project }),
+      ...(context.taskKey === undefined ? {} : { taskKey: context.taskKey }),
+      ...(context.checklistId === undefined ? {} : { checklistId: context.checklistId }),
+      ...(context.expectedVersion === undefined
+        ? {}
+        : { expectedVersion: context.expectedVersion }),
+      ...(context.expectedVersions === undefined
+        ? {}
+        : { expectedVersions: context.expectedVersions }),
+    });
   }
 }
 
@@ -448,7 +290,10 @@ function decodeFieldCursor(token: string): FieldCursor {
     }
     return value;
   } catch {
-    throw new Error("INVALID_CURSOR: continuation cursor 无效或已损坏");
+    throw new AtmError("INVALID_CURSOR", {
+      message: "continuation cursor 无效或已损坏",
+      details: { reason: "INVALID_OR_TAMPERED" },
+    });
   }
 }
 
@@ -493,7 +338,10 @@ function continueField(
     cursor.entityType !== expectedTarget.entityType ||
     cursor.maskHash !== expectedTarget.maskHash
   ) {
-    throw new Error("CONTINUATION_CONFLICT: TARGET_MISMATCH field continuation 请求身份已变化");
+    throw new AtmError("CONTINUATION_CONFLICT", {
+      message: "field continuation 请求身份已变化",
+      details: { reason: "TARGET_MISMATCH" },
+    });
   }
   const field = getAtPath(source, cursor.path);
   if (
@@ -501,7 +349,10 @@ function continueField(
     cursor.offset > field.length ||
     fieldContentHash(field) !== cursor.contentHash
   ) {
-    throw new Error("CONTINUATION_CONFLICT: CONTENT_CHANGED field continuation 内容已变化");
+    throw new AtmError("CONTINUATION_CONFLICT", {
+      message: "field continuation 内容已变化",
+      details: { reason: "CONTENT_CHANGED" },
+    });
   }
   const identity = {
     ...(typeof source.key === "string" ? { key: source.key } : {}),
@@ -531,7 +382,10 @@ function continueField(
     }
   }
   if (!best || best.returned_chars === 0) {
-    throw new Error(`RESULT_TOO_LARGE: max_chars=${maxChars} 无法容纳 continuation 回执`);
+    throw new AtmError("RESULT_TOO_LARGE", {
+      message: `max_chars=${maxChars} 无法容纳 continuation 回执`,
+      details: { max_chars: maxChars },
+    });
   }
   return best;
 }
@@ -746,6 +600,7 @@ function encodeBriefCursor(cursor: BriefCursor): string {
 }
 
 function decodeBriefCursor(token: string): BriefCursor {
+  const expired = Symbol("brief-cursor-expired");
   try {
     const [payload, signature, extra] = token.split(".");
     if (!payload || !signature || extra !== undefined) throw new Error("shape");
@@ -777,13 +632,19 @@ function decodeBriefCursor(token: string): BriefCursor {
     ) {
       throw new Error("shape");
     }
-    if (Date.now() > value.e) throw new Error("expired");
+    if (Date.now() > value.e) throw expired;
     return value;
   } catch (error) {
-    if (error instanceof Error && error.message === "expired") {
-      throw new Error("INVALID_CURSOR: EXPIRED brief continuation 已过期，请重新读取");
+    if (error === expired) {
+      throw new AtmError("INVALID_CURSOR", {
+        message: "brief continuation 已过期，请重新读取",
+        details: { reason: "EXPIRED" },
+      });
     }
-    throw new Error("INVALID_CURSOR: brief continuation 无效或已被篡改");
+    throw new AtmError("INVALID_CURSOR", {
+      message: "brief continuation 无效或已被篡改",
+      details: { reason: "INVALID_OR_TAMPERED" },
+    });
   }
 }
 
@@ -829,7 +690,10 @@ function validateBriefCursorRequest(
     cursor.b !== input.maxChars ||
     cursor.q !== briefQueryHash(input.taskKey, input.sinceSeq)
   ) {
-    throw new Error("CONTINUATION_CONFLICT: TARGET_MISMATCH brief continuation 请求身份已变化");
+    throw new AtmError("CONTINUATION_CONFLICT", {
+      message: "brief continuation 请求身份已变化",
+      details: { reason: "TARGET_MISMATCH" },
+    });
   }
 }
 
@@ -840,7 +704,10 @@ function validateBriefCursorSnapshot(cursor: BriefCursor, payload: Record<string
     cursor.k !== briefRecordKeysHash(payload) ||
     cursor.c !== briefSnapshotHash(payload)
   ) {
-    throw new Error("CONTINUATION_CONFLICT: SNAPSHOT_CHANGED brief continuation 绑定内容已变化");
+    throw new AtmError("CONTINUATION_CONFLICT", {
+      message: "brief continuation 绑定内容已变化",
+      details: { reason: "SNAPSHOT_CHANGED" },
+    });
   }
 }
 
@@ -1057,9 +924,10 @@ function continueWholeBrief(
       returned -= 1;
       continue;
     }
-    throw new Error(
-      `RESULT_TOO_LARGE: max_chars=${input.maxChars} 无法容纳一条完整 Record continuation`,
-    );
+    throw new AtmError("RESULT_TOO_LARGE", {
+      message: `max_chars=${input.maxChars} 无法容纳一条完整 Record continuation`,
+      details: { max_chars: input.maxChars },
+    });
   }
 }
 
@@ -1842,7 +1710,9 @@ function scopedUlidQuery(query: string): { kind: "PROGRESS" | "SESSION"; id: str
   if (!match) return null;
   const id = match[2]!.trim().toUpperCase();
   if (!/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(id)) {
-    throw new Error(`VALIDATION_ERROR: ${match[1]!.toLowerCase()}: 后必须提供 ULID`);
+    throw new AtmError("VALIDATION_ERROR", {
+      message: `${match[1]!.toLowerCase()}: 后必须提供 ULID`,
+    });
   }
   return { kind: match[1]!.toLowerCase() === "progress" ? "PROGRESS" : "SESSION", id };
 }
@@ -2350,9 +2220,9 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       );
       if (composite.length > 0) {
         if (input.items.length !== 1) {
-          throw new Error(
-            `VALIDATION_ERROR: ${composite[0]!.operation} 必须作为 atm_task_patch 的唯一 item`,
-          );
+          throw new AtmError("VALIDATION_ERROR", {
+            message: `${composite[0]!.operation} 必须作为 atm_task_patch 的唯一 item`,
+          });
         }
       }
       if (composite[0]?.operation === "review_request") {
@@ -2399,7 +2269,10 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         const item = reviewSubmitPatchInput.parse(composite[0]);
         const request = await service.getReviewRequest(input.project, item.request_key);
         if (request.reviewTaskKey !== item.task_key) {
-          throw new Error(`REVIEW_BINDING_MISMATCH: ${item.task_key}`);
+          throw new AtmError("REVIEW_BINDING_MISMATCH", {
+            message: `Review 绑定不匹配：${item.task_key}`,
+            details: { task_key: item.task_key },
+          });
         }
         const submitted = await withMcpErrorDetails(
           service,
@@ -2653,7 +2526,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           seq: update.seq,
         });
       }
-      if (!input.task_key) throw new Error("VALIDATION_ERROR: task scope 要求 task_key");
+      if (!input.task_key)
+        throw new AtmError("VALIDATION_ERROR", { message: "task scope 要求 task_key" });
       const updated = await service.addProgress(input.project, input.session, input.op_id, {
         taskKey: input.task_key,
         summary: input.summary,
@@ -2768,7 +2642,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
     },
     async (input) => {
       if (input.op_id !== undefined) {
-        if (!input.project) throw new Error("PROJECT_REQUIRED: op_id 精确回查要求 project");
+        if (!input.project)
+          throw new AtmError("PROJECT_REQUIRED", { message: "op_id 精确回查要求 project" });
         const trace = compactOperationTrace(
           plain(await service.getOperationTrace(input.project, input.op_id, input.session)),
         );
@@ -2787,11 +2662,13 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         );
         return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
       }
-      if (!input.query) throw new Error("VALIDATION_ERROR: query 或 op_id 至少提供一个");
+      if (!input.query)
+        throw new AtmError("VALIDATION_ERROR", { message: "query 或 op_id 至少提供一个" });
       if (input.query.startsWith("op:")) {
-        if (!input.project) throw new Error("PROJECT_REQUIRED: op_id 精确回查要求 project");
+        if (!input.project)
+          throw new AtmError("PROJECT_REQUIRED", { message: "op_id 精确回查要求 project" });
         const exactOpId = input.query.slice(3).trim();
-        if (!exactOpId) throw new Error("VALIDATION_ERROR: op: 后必须提供 op_id");
+        if (!exactOpId) throw new AtmError("VALIDATION_ERROR", { message: "op: 后必须提供 op_id" });
         const trace = compactOperationTrace(
           plain(await service.getOperationTrace(input.project, opId.parse(exactOpId))),
         );
@@ -2813,9 +2690,9 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       const scopedEntity = scopedUlidQuery(input.query);
       if (scopedEntity) {
         if (!input.project) {
-          throw new Error(
-            `PROJECT_REQUIRED: ${scopedEntity.kind.toLowerCase()} 精确读取要求 project`,
-          );
+          throw new AtmError("PROJECT_REQUIRED", {
+            message: `${scopedEntity.kind.toLowerCase()} 精确读取要求 project`,
+          });
         }
         const entity =
           scopedEntity.kind === "PROGRESS"

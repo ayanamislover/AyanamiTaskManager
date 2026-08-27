@@ -117,8 +117,9 @@ describe("迁移完整性", () => {
     const manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     manager.close();
     appendFileSync(join(migrationsRoot, "registry", "0001_initial.sql"), "\n-- tampered\n");
-    await expect(AyanamiDatabaseManager.open({ dataDir, migrationsRoot })).rejects.toThrowError(
-      "MIGRATION_HASH_MISMATCH",
-    );
+    await expect(AyanamiDatabaseManager.open({ dataDir, migrationsRoot })).rejects.toMatchObject({
+      code: "MIGRATION_HASH_MISMATCH",
+      details: { version: 1 },
+    });
   });
 });

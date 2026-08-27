@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -64,14 +65,19 @@ describe("record 公开引用与主题关联", () => {
       expect(repository.getRecord(third.key).supersedes).toBe(second.key);
 
       for (const reference of ["RKEY-R-999", "OTHER-D-001", "RKEY-T-0001"]) {
-        expect(() =>
-          repository.createRecord(actor, `invalid-${reference}`, {
-            kind: "FACT",
-            title: "错误引用",
-            summary: "错误引用不应泄漏 SQLite 外键错误",
-            supersedes: reference,
-          }),
-        ).toThrowError(`RECORD_NOT_FOUND: ${reference}`);
+        expect(
+          captureAtmError(() =>
+            repository.createRecord(actor, `invalid-${reference}`, {
+              kind: "FACT",
+              title: "错误引用",
+              summary: "错误引用不应泄漏 SQLite 外键错误",
+              supersedes: reference,
+            }),
+          ),
+        ).toMatchObject({
+          code: "RECORD_NOT_FOUND",
+          details: { entity: "RECORD", reference },
+        });
       }
     } finally {
       manager.close();
@@ -171,15 +177,20 @@ describe("Session 写入连续性原语", () => {
 
       for (const target of [ended, retired, forced]) {
         const sequenceBefore = target.repository.delta(0, 100).currentSequence;
-        expect(() =>
-          target.repository.executeSessionMutation(
-            target.session.id,
-            "must-not-revive",
-            "record.create",
-            input,
-            (actor) => target.repository.createRecord(actor, "must-not-revive", input),
+        expect(
+          captureAtmError(() =>
+            target.repository.executeSessionMutation(
+              target.session.id,
+              "must-not-revive",
+              "record.create",
+              input,
+              (actor) => target.repository.createRecord(actor, "must-not-revive", input),
+            ),
           ),
-        ).toThrowError(`SESSION_CLOSED: ${target.session.id}`);
+        ).toMatchObject({
+          code: "SESSION_CLOSED",
+          details: { entity: "SESSION", reference: target.session.id },
+        });
         expect(target.repository.listRecords()).toHaveLength(0);
         expect(target.repository.listAgentSessions()).toHaveLength(1);
         expect(target.repository.delta(0, 100).currentSequence).toBe(sequenceBefore);
@@ -241,29 +252,39 @@ describe("Session 写入连续性原语", () => {
 
       for (const target of [threadMismatch, roleMismatch, agentMismatch]) {
         const sequenceBefore = target.repository.delta(0, 100).currentSequence;
-        expect(() =>
-          target.repository.executeSessionMutation(
-            target.session.id,
-            "identity-mismatch",
-            "record.create",
-            input,
-            (actor) => target.repository.createRecord(actor, "identity-mismatch", input),
+        expect(
+          captureAtmError(() =>
+            target.repository.executeSessionMutation(
+              target.session.id,
+              "identity-mismatch",
+              "record.create",
+              input,
+              (actor) => target.repository.createRecord(actor, "identity-mismatch", input),
+            ),
           ),
-        ).toThrowError(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${target.session.id}`);
+        ).toMatchObject({
+          code: "SESSION_SUCCESSOR_IDENTITY_MISMATCH",
+          details: { session_id: target.session.id },
+        });
         expect(target.repository.listRecords()).toHaveLength(0);
         expect(target.repository.delta(0, 100).currentSequence).toBe(sequenceBefore);
       }
 
       const ambiguousSequence = ambiguous.repository.delta(0, 100).currentSequence;
-      expect(() =>
-        ambiguous.repository.executeSessionMutation(
-          ambiguous.session.id,
-          "ambiguous-successor",
-          "record.create",
-          input,
-          (actor) => ambiguous.repository.createRecord(actor, "ambiguous-successor", input),
+      expect(
+        captureAtmError(() =>
+          ambiguous.repository.executeSessionMutation(
+            ambiguous.session.id,
+            "ambiguous-successor",
+            "record.create",
+            input,
+            (actor) => ambiguous.repository.createRecord(actor, "ambiguous-successor", input),
+          ),
         ),
-      ).toThrowError(`SESSION_SUCCESSOR_AMBIGUOUS: ${ambiguous.session.id}`);
+      ).toMatchObject({
+        code: "SESSION_SUCCESSOR_AMBIGUOUS",
+        details: { session_id: ambiguous.session.id },
+      });
       expect(ambiguous.repository.listRecords()).toHaveLength(0);
       expect(ambiguous.repository.delta(0, 100).currentSequence).toBe(ambiguousSequence);
     } finally {
@@ -289,12 +310,17 @@ describe("Session 写入连续性原语", () => {
       );
       expect(resolved).toMatchObject({ actor, disposition: "REPLAY" });
       expect(repository.createRecord(resolved.actor, "lost-response", input)).toEqual(created);
-      expect(() =>
-        repository.resolveMutationActor(session.id, "lost-response", "record.create", {
-          ...input,
-          summary: "不同 payload",
-        }),
-      ).toThrowError("IDEMPOTENCY_CONFLICT");
+      expect(
+        captureAtmError(() =>
+          repository.resolveMutationActor(session.id, "lost-response", "record.create", {
+            ...input,
+            summary: "不同 payload",
+          }),
+        ),
+      ).toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: expect.any(String), operation_id: "lost-response" },
+      });
     } finally {
       manager.close();
     }
@@ -331,14 +357,19 @@ describe("Session 写入连续性原语", () => {
         resume: true,
         predecessorSessionId: abnormal.session.id,
       });
-      expect(() =>
-        abnormal.repository.resolveMutationActor(
-          abnormal.session.id,
-          "ambiguous-write",
-          "record.create",
-          {},
+      expect(
+        captureAtmError(() =>
+          abnormal.repository.resolveMutationActor(
+            abnormal.session.id,
+            "ambiguous-write",
+            "record.create",
+            {},
+          ),
         ),
-      ).toThrowError("SESSION_SUCCESSOR_AMBIGUOUS");
+      ).toMatchObject({
+        code: "SESSION_SUCCESSOR_AMBIGUOUS",
+        details: { session_id: abnormal.session.id },
+      });
     } finally {
       abnormal.manager.close();
     }
@@ -359,14 +390,19 @@ describe("Session 写入连续性原语", () => {
         resume: true,
         predecessorSessionId: explicit.session.id,
       });
-      expect(() =>
-        explicit.repository.resolveMutationActor(
-          explicit.session.id,
-          "must-not-revive",
-          "record.create",
-          {},
+      expect(
+        captureAtmError(() =>
+          explicit.repository.resolveMutationActor(
+            explicit.session.id,
+            "must-not-revive",
+            "record.create",
+            {},
+          ),
         ),
-      ).toThrowError(`SESSION_CLOSED: ${explicit.session.id}`);
+      ).toMatchObject({
+        code: "SESSION_CLOSED",
+        details: { entity: "SESSION", reference: explicit.session.id },
+      });
     } finally {
       explicit.manager.close();
     }
@@ -394,12 +430,17 @@ describe("Session 写入连续性原语", () => {
       expect(
         repository.resolveMutationActor(successor.id, "lineage-op", "record.create", input),
       ).toMatchObject({ actor: { sessionId: session.id }, disposition: "REPLAY" });
-      expect(() =>
-        repository.resolveMutationActor(successor.id, "lineage-op", "record.create", {
-          ...input,
-          detail: "changed",
-        }),
-      ).toThrowError("IDEMPOTENCY_CONFLICT");
+      expect(
+        captureAtmError(() =>
+          repository.resolveMutationActor(successor.id, "lineage-op", "record.create", {
+            ...input,
+            detail: "changed",
+          }),
+        ),
+      ).toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: expect.any(String), operation_id: "lineage-op" },
+      });
     } finally {
       manager.close();
     }
@@ -477,13 +518,26 @@ describe("工作项原子基础与完成诊断", () => {
         blocker: "外部条件未满足",
       });
       const current = repository.getWorkItem(parent.key);
-      expect(() =>
-        repository.patchWorkItems(actor, "gate-complete", [
-          { taskKey: parent.key, expectedVersion: current.version, operation: "complete" },
-        ]),
-      ).toThrowError(
-        /COMPLETION_GATE_FAILED: .*checklist incomplete.*evidence missing.*child incomplete.*blocker active.*dependency incomplete.*verification required.*current-state .* cannot complete/u,
-      );
+      expect(
+        captureAtmError(() =>
+          repository.patchWorkItems(actor, "gate-complete", [
+            { taskKey: parent.key, expectedVersion: current.version, operation: "complete" },
+          ]),
+        ),
+      ).toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: expect.arrayContaining([
+            expect.objectContaining({ code: "CHECKLIST_INCOMPLETE" }),
+            expect.objectContaining({ code: "EVIDENCE_MISSING" }),
+            expect.objectContaining({ code: "CHILD_INCOMPLETE" }),
+            expect.objectContaining({ code: "BLOCKER_ACTIVE" }),
+            expect.objectContaining({ code: "DEPENDENCY_INCOMPLETE" }),
+            expect.objectContaining({ code: "VERIFICATION_REQUIRED" }),
+            expect.objectContaining({ code: "CURRENT_STATE_INVALID" }),
+          ]),
+        },
+      });
     } finally {
       manager.close();
     }
@@ -536,14 +590,19 @@ describe("证据解引用、项目进度回执与 op 追踪", () => {
 
       const before = repository.getWorkItem(task.key).checklist[0]!;
       const sequence = repository.meta.sequence;
-      expect(() =>
-        repository.updateChecklist(actor, "invalid-structured-evidence", {
-          checklistId: before.id,
-          expectedVersion: before.version,
-          status: "DONE",
-          evidence: [{ kind: "atm_record", value: "EVID-R-999" }],
-        }),
-      ).toThrowError("RECORD_NOT_FOUND: EVID-R-999");
+      expect(
+        captureAtmError(() =>
+          repository.updateChecklist(actor, "invalid-structured-evidence", {
+            checklistId: before.id,
+            expectedVersion: before.version,
+            status: "DONE",
+            evidence: [{ kind: "atm_record", value: "EVID-R-999" }],
+          }),
+        ),
+      ).toMatchObject({
+        code: "RECORD_NOT_FOUND",
+        details: { entity: "RECORD", reference: "EVID-R-999" },
+      });
       expect(repository.getWorkItem(task.key).checklist[0]).toMatchObject({
         version: before.version,
         evidence: before.evidence,
@@ -592,13 +651,18 @@ describe("证据解引用、项目进度回执与 op 追踪", () => {
       });
 
       const sequence = repository.meta.sequence;
-      expect(() =>
-        repository.publishProjectUpdate(actor, "bad-graph-progress", {
-          health: "ON_TRACK",
-          summary: "错项目 key",
-          completed: [{ text: "错误", workItemKey: "OTHER-T-0001" }],
-        }),
-      ).toThrowError("WORK_ITEM_NOT_FOUND: OTHER-T-0001");
+      expect(
+        captureAtmError(() =>
+          repository.publishProjectUpdate(actor, "bad-graph-progress", {
+            health: "ON_TRACK",
+            summary: "错项目 key",
+            completed: [{ text: "错误", workItemKey: "OTHER-T-0001" }],
+          }),
+        ),
+      ).toMatchObject({
+        code: "WORK_ITEM_NOT_FOUND",
+        details: { entity: "WORK_ITEM", reference: "OTHER-T-0001" },
+      });
       expect(repository.meta.sequence).toBe(sequence);
     } finally {
       manager.close();

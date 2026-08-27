@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager } from "../src/index.js";
+import { removeMigrationsAfter } from "./migration-test-helpers.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -16,19 +17,7 @@ describe("Session Git context migration", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    for (const name of [
-      "0005_session_git_context.sql",
-      "0006_record_topics.sql",
-      "0007_operation_trace.sql",
-      "0008_work_item_phase_waiting.sql",
-      "0009_structured_cancel.sql",
-      "0010_review_workflow.sql",
-      "0011_session_close_reason.sql",
-      "0012_project_update_evidence.sql",
-      "0013_project_update_session.sql",
-    ]) {
-      rmSync(join(migrationsRoot, "project", name));
-    }
+    removeMigrationsAfter(migrationsRoot, "project", 4);
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({

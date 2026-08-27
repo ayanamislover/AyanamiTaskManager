@@ -2,6 +2,12 @@ import { basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
 import {
+  asAtmError,
+  AtmError,
+  rankSuggestions,
+  type AtmBaseErrorDetails,
+} from "@ayanami-task/errors";
+import {
   normalizeReviewCandidateHashes,
   type EvidenceInput,
   type TaskContextView,
@@ -33,57 +39,20 @@ export * from "./reconcile.js";
 export * from "./queries/task-views.js";
 
 export type PublicNotFoundDetails = {
-  entity: "WORK_ITEM" | "SESSION" | "MILESTONE";
+  entity: "PROJECT" | "WORK_ITEM" | "SESSION" | "MILESTONE";
   did_you_mean: string | null;
   candidates: Array<Record<string, string>>;
 };
-
-function normalizedSuggestionText(value: string): string {
-  return value
-    .slice(0, 128)
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/gu, "");
-}
-
-function editDistance(left: string, right: string): number {
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
-      );
-    }
-    previous.splice(0, previous.length, ...current);
-  }
-  return previous[right.length]!;
-}
 
 function rankPublicCandidates<T extends Record<string, string>>(
   queryValue: string,
   candidates: T[],
   identity: (candidate: T) => string,
 ): { did_you_mean: string | null; candidates: T[] } {
-  const query = normalizedSuggestionText(queryValue);
-  if (!query) return { did_you_mean: null, candidates: [] };
-  const ranked = candidates
-    .map((candidate) => {
-      const value = normalizedSuggestionText(identity(candidate));
-      const rawScore = editDistance(query, value);
-      const prefix = value.startsWith(query) || query.startsWith(value);
-      return { candidate, value, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
-    })
-    .sort((left, right) => left.score - right.score || left.value.localeCompare(right.value))
-    .slice(0, 5);
-  const first = ranked[0];
-  const plausible =
-    first !== undefined &&
-    (first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34)));
+  const ranked = rankSuggestions(queryValue, candidates, (candidate) => [identity(candidate)]);
   return {
-    did_you_mean: plausible && first ? identity(first.candidate) : null,
-    candidates: ranked.map(({ candidate }) => candidate),
+    did_you_mean: ranked.didYouMean,
+    candidates: ranked.candidates,
   };
 }
 
@@ -99,7 +68,11 @@ function assertKnownMilestones(
   if (requested.size === 0) return;
   const known = new Set(repository.listMilestones().map((milestone) => String(milestone.id)));
   for (const milestoneId of requested) {
-    if (!known.has(milestoneId)) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+    if (!known.has(milestoneId))
+      throw new AtmError("MILESTONE_NOT_FOUND", {
+        message: `里程碑不存在：${milestoneId}`,
+        details: { entity: "MILESTONE", reference: milestoneId },
+      });
   }
 }
 
@@ -200,10 +173,11 @@ export class AyanamiTaskService {
       }
       return { available: true, root: sourcePath, project: projectMetrics, workItem };
     } catch (error) {
+      const typed = asAtmError(error);
       return {
         available: false,
-        reason: error instanceof Error ? error.message.split(":", 1)[0] : "METRICS_FAILED",
-        message: error instanceof Error ? error.message : String(error),
+        reason: typed.code === "INTERNAL_ERROR" ? "METRICS_FAILED" : typed.code,
+        message: typed.message,
         project: null,
         workItem: null,
       };
@@ -323,7 +297,10 @@ export class AyanamiTaskService {
     const project = this.databases.getProject(projectCode);
     const plan = parseAgentTaskMarkdown(content, sourceName);
     if (expectedSha256 && expectedSha256 !== plan.sha256) {
-      throw new Error("IMPORT_SOURCE_CHANGED: 源文件已在预览后发生变化");
+      throw new AtmError("IMPORT_SOURCE_CHANGED", {
+        message: "源文件已在预览后发生变化",
+        httpStatus: 409,
+      });
     }
     const existing = this.databases.getImportHistory(project.id, plan.sha256);
     if (existing) return { ...existing, alreadyImported: true };
@@ -346,7 +323,12 @@ export class AyanamiTaskService {
     const milestoneIds = new Map<string, string>();
     for (const milestone of plan.milestones) {
       const objectiveId = objectiveIds.get(milestone.objectiveRef);
-      if (!objectiveId) throw new Error(`IMPORT_OBJECTIVE_MISSING: ${milestone.objectiveRef}`);
+      if (!objectiveId)
+        throw new AtmError("IMPORT_OBJECTIVE_MISSING", {
+          message: `导入目标不存在：${milestone.objectiveRef}`,
+          details: { reference: milestone.objectiveRef },
+          httpStatus: 422,
+        });
       const created = repository.createMilestone(
         actor,
         {
@@ -364,7 +346,12 @@ export class AyanamiTaskService {
         `import-${plan.sha256}-tasks`,
         plan.tasks.map((task) => {
           const objectiveId = objectiveIds.get(task.objectiveRef);
-          if (!objectiveId) throw new Error(`IMPORT_OBJECTIVE_MISSING: ${task.objectiveRef}`);
+          if (!objectiveId)
+            throw new AtmError("IMPORT_OBJECTIVE_MISSING", {
+              message: `导入目标不存在：${task.objectiveRef}`,
+              details: { reference: task.objectiveRef },
+              httpStatus: 422,
+            });
           return {
             clientRef: task.ref,
             objectiveId,
@@ -422,7 +409,11 @@ export class AyanamiTaskService {
   async #actor(projectCode: string, sessionId: string): Promise<ProjectActor> {
     const repository = await this.#repository(projectCode);
     const session = repository.getSession(sessionId);
-    if (session.connection_state === "CLOSED") throw new Error(`SESSION_CLOSED: ${sessionId}`);
+    if (session.connection_state === "CLOSED")
+      throw new AtmError("SESSION_CLOSED", {
+        message: sessionId,
+        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
+      });
     return { type: "AGENT", id: session.agent_id, sessionId };
   }
 
@@ -521,12 +512,14 @@ export class AyanamiTaskService {
   }): Promise<any> {
     const operationId = input.operationId?.trim();
     if (input.operationId !== undefined && (!operationId || operationId.length > 128)) {
-      throw new Error("OPERATION_ID_INVALID");
+      throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
     }
     let project = input.projectCode ? this.databases.getProject(input.projectCode) : null;
     if (!project && input.cwd) project = this.databases.identifyProject(input.cwd);
     if (operationId && !project) {
-      throw new Error("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT");
+      throw new AtmError("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT", {
+        message: "原子恢复要求项目已存在",
+      });
     }
     const classification = classifyTaskScope({
       matchedProject: Boolean(project),
@@ -542,7 +535,8 @@ export class AyanamiTaskService {
       return { scope: "quick", quick, session: null, score: classification.score };
     }
     if (!project) {
-      if (!input.allowProjectCreate) throw new Error("PROJECT_REQUIRED");
+      if (!input.allowProjectCreate)
+        throw new AtmError("PROJECT_REQUIRED", { message: "需要明确的受管项目" });
       project = await this.createProject({
         name: input.title ?? (input.cwd ? basename(input.cwd) : "未命名项目"),
         sourcePath: input.cwd ?? null,
@@ -811,6 +805,163 @@ export class AyanamiTaskService {
     return null;
   }
 
+  projectSuggestionDetails(reference: string): PublicNotFoundDetails {
+    const candidates = this.databases
+      .listProjects()
+      .filter((project) => project.lifecycle !== "TRASHED")
+      .map((project) => ({ code: project.code, name: project.name }));
+    const ranked = rankSuggestions(reference, candidates, (candidate) => [
+      candidate.code,
+      candidate.name,
+    ]);
+    return {
+      entity: "PROJECT",
+      did_you_mean: ranked.didYouMean,
+      candidates: ranked.candidates,
+    };
+  }
+
+  async enrichError(
+    error: unknown,
+    context: {
+      projectCode?: string;
+      taskKey?: string;
+      checklistId?: string;
+      expectedVersion?: number;
+      expectedVersions?: Record<string, number>;
+    } = {},
+  ): Promise<AtmError> {
+    const typed = asAtmError(error);
+    const source = (typed.details ?? {}) as AtmBaseErrorDetails;
+    const reference = typeof source.reference === "string" ? source.reference : null;
+    if (typed.code === "PROJECT_NOT_FOUND" && reference) {
+      try {
+        const suggestion = this.projectSuggestionDetails(reference);
+        return typed.withDetails({
+          ...source,
+          entity: "PROJECT",
+          reference,
+          did_you_mean: suggestion.did_you_mean,
+          candidates: suggestion.candidates,
+        });
+      } catch {
+        return typed;
+      }
+    }
+    if (
+      reference &&
+      context.projectCode &&
+      ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(typed.code)
+    ) {
+      try {
+        const suggestion = await this.notFoundSuggestionDetails(
+          context.projectCode,
+          typed.code,
+          reference,
+        );
+        if (suggestion) return typed.withDetails({ ...source, ...suggestion, reference });
+      } catch {
+        return typed;
+      }
+    }
+    if (typed.code !== "VERSION_CONFLICT") return typed;
+    const expected =
+      typeof source.expected === "number"
+        ? source.expected
+        : context.taskKey
+          ? (context.expectedVersions?.[context.taskKey] ?? context.expectedVersion ?? null)
+          : (context.expectedVersion ?? null);
+    const actual = typeof source.actual === "number" ? source.actual : null;
+    if (actual === null) return typed;
+    const entity = typeof source.entity === "string" ? source.entity : null;
+    const key = typeof source.key === "string" ? source.key : null;
+    const base: Record<string, unknown> = {
+      ...source,
+      ...(expected === null ? {} : { expected, expected_version: expected }),
+      actual,
+      current_version: actual,
+      ...(expected === null ? {} : { version_gap: actual - expected }),
+    };
+    if (!context.projectCode) return typed.withDetails(base as AtmBaseErrorDetails);
+    try {
+      if ((entity === "CHECKLIST" || context.checklistId) && (key || context.checklistId)) {
+        const checklistId = String(key ?? context.checklistId);
+        const [current, recentChanges] = await Promise.all([
+          this.checklistConflictSnapshot(context.projectCode, checklistId),
+          this.recentChecklistChanges(context.projectCode, checklistId, 6),
+        ]);
+        return typed.withDetails({
+          ...base,
+          entity: "CHECKLIST",
+          key: checklistId,
+          checklist_id: checklistId,
+          task_key: current.taskKey,
+          current: {
+            id: current.id,
+            task_key: current.taskKey,
+            task_version: current.taskVersion,
+            title: current.title,
+            status: current.status,
+            evidence_required: current.evidenceRequired,
+            evidence_count: current.evidenceCount,
+            version: current.version,
+            updated_at: current.updatedAt,
+          },
+          recent_changes: recentChanges.slice(0, 6).map((change) => ({
+            seq: change.seq,
+            type: change.type,
+            key: change.key,
+            summary: change.summary,
+            op_id: change.opId,
+            at: change.at,
+          })),
+          changes_complete: false,
+        });
+      }
+      const taskKey = String(key ?? context.taskKey ?? "");
+      if ((entity === "WORK_ITEM" || context.taskKey) && taskKey) {
+        const [current, recentChanges] = await Promise.all([
+          this.getWorkItemForUi(context.projectCode, taskKey),
+          this.recentWorkItemChanges(context.projectCode, taskKey, 6),
+        ]);
+        return typed.withDetails({
+          ...base,
+          entity: "WORK_ITEM",
+          key: taskKey,
+          task_key: taskKey,
+          current: {
+            key: current.key,
+            version: current.version,
+            status: current.status,
+            phase: current.phase,
+            title: current.title,
+            description: current.description,
+            assignee_agent_id: current.assigneeAgentId,
+            claimed_by_session_id: current.claimedBySessionId,
+            target_date: current.targetDate,
+            parent_key: current.parentKey,
+            cancel_reason: current.cancelReason,
+            duplicate_of: current.duplicateOf,
+            superseded_by: current.supersededBy,
+            updated_at: current.updatedAt,
+          },
+          recent_changes: recentChanges.slice(0, 6).map((change) => ({
+            seq: change.seq,
+            type: change.type,
+            key: change.key,
+            summary: change.summary,
+            op_id: change.opId,
+            at: change.at,
+          })),
+          changes_complete: false,
+        });
+      }
+    } catch {
+      return typed.withDetails(base as AtmBaseErrorDetails);
+    }
+    return typed.withDetails(base as AtmBaseErrorDetails);
+  }
+
   async listRecords(projectCode: string, limit = 100) {
     return (await this.#repository(projectCode)).listRecords(limit);
   }
@@ -1025,7 +1176,10 @@ export class AyanamiTaskService {
       filters?.milestoneId &&
       !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
     ) {
-      throw new Error(`MILESTONE_NOT_FOUND: ${filters.milestoneId}`);
+      throw new AtmError("MILESTONE_NOT_FOUND", {
+        message: `里程碑不存在：${filters.milestoneId}`,
+        details: { entity: "MILESTONE", reference: filters.milestoneId },
+      });
     }
     return repository
       .listTaskViewRows(filters, view)
@@ -1053,7 +1207,10 @@ export class AyanamiTaskService {
   ): Promise<void> {
     const session = await this.getSession(projectCode, sessionId);
     if (session.connectionState !== "ONLINE" && session.closeReason !== "HEARTBEAT_TIMEOUT") {
-      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+      throw new AtmError("SESSION_CLOSED", {
+        message: sessionId,
+        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
+      });
     }
   }
 

@@ -17,6 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import Database from "better-sqlite3";
 import { strToU8, zipSync, type Zippable } from "fflate";
 import { allocateProjectCode } from "@ayanami-task/domain";
+import { AtmError, asAtmError } from "@ayanami-task/errors";
 import { createUlid, nowIso, type SearchHit, type SearchPage } from "@ayanami-task/protocol";
 import {
   foreignKeyCheck,
@@ -179,7 +180,10 @@ function workItemLocalNo(projectCode: string, taskKey: string): number {
     ? Number(normalized.slice(prefix.length))
     : Number.NaN;
   if (!Number.isInteger(localNo) || localNo <= 0)
-    throw new Error(`INVALID_WORK_ITEM_KEY: ${taskKey}`);
+    throw new AtmError("INVALID_WORK_ITEM_KEY", {
+      message: `WorkItem key 无效：${taskKey}`,
+      details: { reference: taskKey },
+    });
   return localNo;
 }
 
@@ -485,7 +489,8 @@ export class AyanamiDatabaseManager {
     sort: Record<string, unknown>;
   }): SavedView {
     const project = input.scope === "PROJECT" ? this.getProject(input.project ?? "") : null;
-    if (!input.name.trim()) throw new Error("SAVED_VIEW_NAME_REQUIRED");
+    if (!input.name.trim())
+      throw new AtmError("SAVED_VIEW_NAME_REQUIRED", { message: "保存视图名称不能为空" });
     const id = createUlid();
     const now = nowIso();
     this.registry.sqlite.transaction(() => {
@@ -520,11 +525,23 @@ export class AyanamiDatabaseManager {
     },
   ): SavedView {
     const current = this.listSavedViews().find((view) => view.id === id);
-    if (!current) throw new Error(`NOT_FOUND: ${id}`);
+    if (!current)
+      throw new AtmError("NOT_FOUND", {
+        message: `保存视图不存在：${id}`,
+        details: { entity: "SAVED_VIEW", reference: id },
+      });
     if (current.version !== input.expectedVersion)
-      throw new Error(`VERSION_CONFLICT: ${current.version}`);
+      throw new AtmError("VERSION_CONFLICT", {
+        message: "保存视图版本已变化",
+        details: {
+          entity: "SAVED_VIEW",
+          key: id,
+          expected: input.expectedVersion,
+          actual: current.version,
+        },
+      });
     const name = input.name?.trim() ?? current.name;
-    if (!name) throw new Error("SAVED_VIEW_NAME_REQUIRED");
+    if (!name) throw new AtmError("SAVED_VIEW_NAME_REQUIRED", { message: "保存视图名称不能为空" });
     this.registry.sqlite.transaction(() => {
       this.registry.sqlite
         .prepare(
@@ -546,9 +563,21 @@ export class AyanamiDatabaseManager {
 
   deleteSavedView(id: string, expectedVersion: number): { ok: 1; id: string } {
     const current = this.listSavedViews().find((view) => view.id === id);
-    if (!current) throw new Error(`NOT_FOUND: ${id}`);
+    if (!current)
+      throw new AtmError("NOT_FOUND", {
+        message: `保存视图不存在：${id}`,
+        details: { entity: "SAVED_VIEW", reference: id },
+      });
     if (current.version !== expectedVersion)
-      throw new Error(`VERSION_CONFLICT: ${current.version}`);
+      throw new AtmError("VERSION_CONFLICT", {
+        message: "保存视图版本已变化",
+        details: {
+          entity: "SAVED_VIEW",
+          key: id,
+          expected: expectedVersion,
+          actual: current.version,
+        },
+      });
     this.registry.sqlite.transaction(() => {
       this.registry.sqlite
         .prepare("DELETE FROM saved_views WHERE id = ? AND version = ?")
@@ -586,15 +615,25 @@ export class AyanamiDatabaseManager {
   }
 
   setSetting(key: string, value: unknown, expectedVersion?: number): SettingView {
-    if (!SETTING_KEY_PATTERN.test(key)) throw new Error("SETTING_KEY_INVALID");
+    if (!SETTING_KEY_PATTERN.test(key))
+      throw new AtmError("SETTING_KEY_INVALID", {
+        message: "设置项 key 无效",
+        details: { key },
+      });
     const current = this.registry.sqlite
       .prepare("SELECT version FROM settings WHERE key = ?")
       .get(key) as { version: number } | undefined;
     if (current && expectedVersion !== undefined && current.version !== expectedVersion) {
-      throw new Error(`VERSION_CONFLICT: ${current.version}`);
+      throw new AtmError("VERSION_CONFLICT", {
+        message: "设置项版本已变化",
+        details: { entity: "SETTING", key, expected: expectedVersion, actual: current.version },
+      });
     }
     if (!current && expectedVersion !== undefined && expectedVersion !== -1)
-      throw new Error("VERSION_CONFLICT: -1");
+      throw new AtmError("VERSION_CONFLICT", {
+        message: "设置项尚不存在",
+        details: { entity: "SETTING", key, expected: expectedVersion, actual: -1 },
+      });
     const now = nowIso();
     this.registry.sqlite.transaction(() => {
       if (current) {
@@ -627,7 +666,11 @@ export class AyanamiDatabaseManager {
     const row = Number.isSafeInteger(localNo)
       ? this.registry.sqlite.prepare("SELECT * FROM quick_tasks WHERE local_no = ?").get(localNo)
       : this.registry.sqlite.prepare("SELECT * FROM quick_tasks WHERE id = ?").get(idOrKey);
-    if (!row) throw new Error(`NOT_FOUND: ${idOrKey}`);
+    if (!row)
+      throw new AtmError("NOT_FOUND", {
+        message: `临时任务不存在：${idOrKey}`,
+        details: { entity: "QUICK_TASK", reference: idOrKey },
+      });
     return quickTaskFromRow(row);
   }
 
@@ -688,7 +731,15 @@ export class AyanamiDatabaseManager {
     return this.registry.sqlite.transaction(() => {
       const current = this.getQuickTask(idOrKey);
       if (current.version !== input.expectedVersion) {
-        throw new Error(`VERSION_CONFLICT: ${current.version}`);
+        throw new AtmError("VERSION_CONFLICT", {
+          message: "临时任务版本已变化",
+          details: {
+            entity: "QUICK_TASK",
+            key: current.key,
+            expected: input.expectedVersion,
+            actual: current.version,
+          },
+        });
       }
       const updates: string[] = [];
       const values: unknown[] = [];
@@ -755,10 +806,21 @@ export class AyanamiDatabaseManager {
         ) {
           return current;
         }
-        throw new Error("IDEMPOTENCY_CONFLICT: quick promotion target changed");
+        throw new AtmError("IDEMPOTENCY_CONFLICT", {
+          message: "临时任务提升目标已变化",
+          details: { entity: "QUICK_TASK", key: current.key },
+        });
       }
       if (current.version !== expectedVersion)
-        throw new Error(`VERSION_CONFLICT: ${current.version}`);
+        throw new AtmError("VERSION_CONFLICT", {
+          message: "临时任务版本已变化",
+          details: {
+            entity: "QUICK_TASK",
+            key: current.key,
+            expected: expectedVersion,
+            actual: current.version,
+          },
+        });
       this.registry.sqlite
         .prepare(
           `UPDATE quick_tasks SET status = 'PROMOTED', promoted_project_id = ?,
@@ -775,7 +837,11 @@ export class AyanamiDatabaseManager {
     const row = this.registry.sqlite
       .prepare("SELECT * FROM projects WHERE code = ? OR id = ?")
       .get(codeOrId.toUpperCase(), codeOrId) as any;
-    if (!row) throw new Error(`PROJECT_NOT_FOUND: ${codeOrId}`);
+    if (!row)
+      throw new AtmError("PROJECT_NOT_FOUND", {
+        message: `项目不存在：${codeOrId}`,
+        details: { entity: "PROJECT", reference: codeOrId },
+      });
     const paths = (
       this.registry.sqlite
         .prepare(
@@ -795,7 +861,10 @@ export class AyanamiDatabaseManager {
     const canonical = canonicalPath(path);
     const identified = this.identifyProject(canonical);
     if (identified && identified.id !== project.id) {
-      throw new Error(`PROJECT_PATH_CONFLICT: ${identified.code}`);
+      throw new AtmError("PROJECT_PATH_CONFLICT", {
+        message: `目录已属于项目：${identified.code}`,
+        details: { conflicting_project: identified.code },
+      });
     }
     const common = gitValue(canonical, ["rev-parse", "--git-common-dir"]);
     const commonPath = common
@@ -901,7 +970,10 @@ export class AyanamiDatabaseManager {
   }): Promise<RegisteredProject> {
     const sourcePath = input.sourcePath ? canonicalPath(input.sourcePath) : null;
     if (sourcePath && this.identifyProject(sourcePath)) {
-      throw new Error(`PROJECT_ALREADY_EXISTS: ${sourcePath}`);
+      throw new AtmError("PROJECT_ALREADY_EXISTS", {
+        message: "该目录已注册为项目",
+        details: { source_path: sourcePath },
+      });
     }
     const existingCodes = new Set(
       (
@@ -912,7 +984,11 @@ export class AyanamiDatabaseManager {
     const requestedCode = input.code?.toUpperCase();
     const code =
       requestedCode ?? allocateProjectCode(input.name, existingCodes, existingCodes.size + 1);
-    if (existingCodes.has(code)) throw new Error(`PROJECT_CODE_CONFLICT: ${code}`);
+    if (existingCodes.has(code))
+      throw new AtmError("PROJECT_CODE_CONFLICT", {
+        message: `项目代码已存在：${code}`,
+        details: { code },
+      });
     const now = nowIso();
     const actor = input.actor ?? "SYSTEM";
     this.registry.sqlite.transaction(() => {
@@ -973,7 +1049,10 @@ export class AyanamiDatabaseManager {
       for (const counter of ["objective", "milestone", "work_item", "blocker", "record"]) {
         counterInsert.run(counter);
       }
-      if (!quickCheck(projectDatabase.sqlite)) throw new Error("PROJECT_DB_QUICK_CHECK_FAILED");
+      if (!quickCheck(projectDatabase.sqlite))
+        throw new AtmError("PROJECT_DB_QUICK_CHECK_FAILED", {
+          message: "项目数据库 quick_check 失败",
+        });
       projectDatabase.sqlite.pragma("wal_checkpoint(TRUNCATE)");
       projectDatabase.sqlite.close();
       projectDatabase = null;
@@ -1050,7 +1129,10 @@ export class AyanamiDatabaseManager {
   async openProject(codeOrId: string): Promise<ManagedDatabase> {
     const project = this.getProject(codeOrId);
     if (project.lifecycle !== "ACTIVE" && project.lifecycle !== "ARCHIVED") {
-      throw new Error(`PROJECT_DB_UNAVAILABLE: ${project.lifecycle}`);
+      throw new AtmError("PROJECT_DB_UNAVAILABLE", {
+        message: `项目数据库当前不可用：${project.lifecycle}`,
+        details: { lifecycle: project.lifecycle },
+      });
     }
     const cached = this.#projects.get(project.id);
     if (cached) {
@@ -1144,7 +1226,11 @@ export class AyanamiDatabaseManager {
       )
       .run(baseline, capturedAt, capturedAt, localNo);
     const result = await this.workItemEngineeringMetrics(projectCode, taskKey);
-    if (!result) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    if (!result)
+      throw new AtmError("WORK_ITEM_NOT_FOUND", {
+        message: `WorkItem 不存在：${taskKey}`,
+        details: { entity: "WORK_ITEM", reference: taskKey },
+      });
     return result;
   }
 
@@ -1691,7 +1777,10 @@ export class AyanamiDatabaseManager {
     const project = this.getProject(codeOrId);
     if (project.lifecycle === lifecycle) return project;
     if (!["ACTIVE", "ARCHIVED", "TRASHED"].includes(project.lifecycle)) {
-      throw new Error(`PROJECT_LIFECYCLE_CONFLICT: ${project.lifecycle}`);
+      throw new AtmError("PROJECT_LIFECYCLE_CONFLICT", {
+        message: `项目生命周期不允许该操作：${project.lifecycle}`,
+        details: { lifecycle: project.lifecycle },
+      });
     }
     this.registry.sqlite.transaction(() => {
       this.registry.sqlite
@@ -1747,7 +1836,8 @@ export class AyanamiDatabaseManager {
     createdAt?: string;
   }): Promise<BackupView> {
     const project = input.scope === "PROJECT" ? this.getProject(input.project ?? "") : null;
-    if (input.scope === "PROJECT" && !project) throw new Error("PROJECT_REQUIRED");
+    if (input.scope === "PROJECT" && !project)
+      throw new AtmError("PROJECT_REQUIRED", { message: "项目备份必须指定项目" });
     const id = createUlid();
     const createdAt = input.createdAt ?? nowIso();
     const stamp = createdAt.replace(/[:.]/gu, "-");
@@ -1768,7 +1858,8 @@ export class AyanamiDatabaseManager {
       const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
       const healthy = quickCheck(snapshot);
       snapshot.close();
-      if (!healthy) throw new Error("BACKUP_INTEGRITY_FAILED");
+      if (!healthy)
+        throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
       await renameWithRetry(temporaryPath, finalPath);
       const sha256 = sha256File(finalPath);
       const sizeBytes = statSync(finalPath).size;
@@ -1816,13 +1907,14 @@ export class AyanamiDatabaseManager {
       this.pruneBackupRetention(project?.id ?? null, input.reason);
       return this.listBackups().find((candidate) => candidate.id === id)!;
     } catch (error) {
+      const typed = asAtmError(error);
       rmSync(temporaryPath, { force: true });
       this.registry.sqlite.transaction(() => {
         this.appendGlobalEvent("backup.failed", id, "SYSTEM", {
           scope: input.scope,
           projectId: project?.id ?? null,
           reason: input.reason,
-          code: error instanceof Error ? error.message.split(":", 1)[0] : "BACKUP_FAILED",
+          code: typed.code,
         });
       })();
       throw error;
@@ -1955,15 +2047,24 @@ export class AyanamiDatabaseManager {
          WHERE backup_catalog.id = ?`,
       )
       .get(backupId) as any;
-    if (!row) throw new Error(`BACKUP_NOT_FOUND: ${backupId}`);
+    if (!row)
+      throw new AtmError("BACKUP_NOT_FOUND", {
+        message: `备份不存在：${backupId}`,
+        details: { reference: backupId },
+      });
     const backup = backupFromRow(row);
     if (backup.scope !== "PROJECT" || !backup.projectId) {
-      throw new Error("BACKUP_RESTORE_SCOPE_UNSUPPORTED");
+      throw new AtmError("BACKUP_RESTORE_SCOPE_UNSUPPORTED", {
+        message: "该备份范围不支持恢复",
+      });
     }
-    if (!existsSync(backup.path)) throw new Error("BACKUP_FILE_MISSING");
-    if (sha256File(backup.path) !== backup.sha256) throw new Error("BACKUP_HASH_MISMATCH");
+    if (!existsSync(backup.path))
+      throw new AtmError("BACKUP_FILE_MISSING", { message: "备份文件不存在" });
+    if (sha256File(backup.path) !== backup.sha256)
+      throw new AtmError("BACKUP_HASH_MISMATCH", { message: "备份文件哈希不匹配" });
     const manifestPath = `${backup.path}.manifest.json`;
-    if (!existsSync(manifestPath)) throw new Error("BACKUP_MANIFEST_MISSING");
+    if (!existsSync(manifestPath))
+      throw new AtmError("BACKUP_MANIFEST_MISSING", { message: "备份清单不存在" });
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
       id?: string;
       projectId?: string;
@@ -1974,7 +2075,7 @@ export class AyanamiDatabaseManager {
       manifest.projectId !== backup.projectId ||
       manifest.sha256 !== backup.sha256
     ) {
-      throw new Error("BACKUP_MANIFEST_MISMATCH");
+      throw new AtmError("BACKUP_MANIFEST_MISMATCH", { message: "备份清单不匹配" });
     }
 
     const project = this.getProject(backup.projectId);
@@ -1998,9 +2099,12 @@ export class AyanamiDatabaseManager {
         identity.project_id !== project.id ||
         identity.project_code !== project.code
       ) {
-        throw new Error("BACKUP_PROJECT_IDENTITY_MISMATCH");
+        throw new AtmError("BACKUP_PROJECT_IDENTITY_MISMATCH", {
+          message: "备份项目身份不匹配",
+        });
       }
-      if (!quickCheck(candidate.sqlite)) throw new Error("BACKUP_INTEGRITY_FAILED");
+      if (!quickCheck(candidate.sqlite))
+        throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
       candidate.sqlite.pragma("wal_checkpoint(TRUNCATE)");
       candidate.sqlite.close();
       candidate = null;

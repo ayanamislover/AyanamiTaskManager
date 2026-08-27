@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager } from "../src/manager.js";
 import { ProjectRepository } from "../src/project-repository.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 
@@ -75,14 +76,18 @@ describe("search keyset pagination", () => {
       expect(received).toHaveLength(1001);
       expect(new Set(received)).toEqual(expected);
       expect(received).not.toContain("PS1001-R-LATE");
-      expect(() => repository.search("另一个查询", 30, firstCursor)).toThrow(/^INVALID_CURSOR:/u);
-      expect(() =>
-        repository.search(
-          "稳定分页关键字",
-          30,
-          `${firstCursor.slice(0, -1)}${firstCursor.endsWith("a") ? "b" : "a"}`,
+      expect(captureAtmError(() => repository.search("另一个查询", 30, firstCursor))).toMatchObject(
+        { code: "INVALID_CURSOR", details: null },
+      );
+      expect(
+        captureAtmError(() =>
+          repository.search(
+            "稳定分页关键字",
+            30,
+            `${firstCursor.slice(0, -1)}${firstCursor.endsWith("a") ? "b" : "a"}`,
+          ),
         ),
-      ).toThrow(/^INVALID_CURSOR:/u);
+      ).toMatchObject({ code: "INVALID_CURSOR", details: null });
     } finally {
       manager.close();
     }
@@ -154,13 +159,13 @@ describe("search keyset pagination", () => {
       expect(received).toHaveLength(1004);
       expect(new Set(received).size).toBe(1004);
       expect(received).not.toContain("QUICK:Q-9999");
-      expect(() => manager.globalSearch("全局稳定分页关键字", 30, firstCursor.slice(1))).toThrow(
-        /^INVALID_CURSOR:/u,
-      );
+      expect(
+        captureAtmError(() => manager.globalSearch("全局稳定分页关键字", 30, firstCursor.slice(1))),
+      ).toMatchObject({ code: "INVALID_CURSOR", details: null });
       const projectRepository = new ProjectRepository(await manager.openProject(first.code));
-      expect(() => projectRepository.search("全局稳定分页关键字", 30, firstCursor)).toThrow(
-        /^INVALID_CURSOR:/u,
-      );
+      expect(
+        captureAtmError(() => projectRepository.search("全局稳定分页关键字", 30, firstCursor)),
+      ).toMatchObject({ code: "INVALID_CURSOR", details: null });
     } finally {
       manager.close();
     }

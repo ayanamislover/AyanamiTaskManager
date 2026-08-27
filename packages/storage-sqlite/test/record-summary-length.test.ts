@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 describe("Record summary Unicode code point 存储边界", () => {
   it("接受 300 个 code point 与 200 个 emoji，并让 301 失败事务零落账", async () => {
@@ -45,15 +46,17 @@ describe("Record summary Unicode code point 存储边界", () => {
 
       expect(repository.getRecord(boundary.key).summary).toBe("界".repeat(300));
       expect(repository.getRecord(emoji.key).summary).toBe("😀".repeat(200));
-      expect(() =>
-        repository.createRecord(actor, "record-summary-301", {
-          kind: "FACT",
-          title: "301 code points",
-          summary: "😀".repeat(301),
-          detail: "d".repeat(100_000),
-          supersedes: boundary.key,
-        }),
-      ).toThrowError("VALIDATION_ERROR: summary max 300");
+      expect(
+        captureAtmError(() =>
+          repository.createRecord(actor, "record-summary-301", {
+            kind: "FACT",
+            title: "301 code points",
+            summary: "😀".repeat(301),
+            detail: "d".repeat(100_000),
+            supersedes: boundary.key,
+          }),
+        ),
+      ).toMatchObject({ code: "VALIDATION_ERROR", details: { field: "summary", max: 300 } });
       expect(repository.listRecords()).toEqual(recordsBefore);
       expect(repository.delta(0, 100).currentSequence).toBe(sequenceBefore);
       expect(repository.getRecord(boundary.key).status).toBe("ACTIVE");

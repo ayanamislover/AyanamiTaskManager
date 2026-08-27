@@ -1,9 +1,9 @@
 import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import { asAtmError, AtmError, atmErrorDto } from "@ayanami-task/errors";
 import {
   BeginInputSchema,
-  ChecklistBatchFailureDetailsSchema,
   ChecklistBatchUpdateInputSchema,
   ChecklistUpdateInputSchema,
   CreateMilestoneInputSchema,
@@ -135,278 +135,20 @@ function expectedVersionFromBody(body: unknown, taskKey?: string): number | null
   return item && Number.isInteger(item.expectedVersion) ? Number(item.expectedVersion) : null;
 }
 
-function domainErrorDetails(
-  code: string,
-  error: unknown,
-  requestBody?: unknown,
-): PublicErrorDetails | null {
-  if (!(error instanceof Error)) return null;
-  if (code === "COMPLETION_GATE_FAILED") {
-    const parsed = ChecklistBatchFailureDetailsSchema.safeParse(
-      (error as Error & { details?: unknown }).details,
-    );
-    if (parsed.success) return parsed.data;
-  }
-  const detailText = error.message.slice(error.message.indexOf(":") + 1).trim();
-  if (code === "VERSION_CONFLICT") {
-    const segments = detailText.split(":");
-    const currentVersion = Number(segments.at(-1));
-    if (!Number.isInteger(currentVersion) || currentVersion < -1) return null;
-    const taskKey = segments.length > 1 ? boundedText(segments[0], 128) : undefined;
-    const expectedVersion = expectedVersionFromBody(requestBody, taskKey);
-    return {
-      current_version: currentVersion,
-      ...(expectedVersion === null
-        ? {}
-        : {
-            expected_version: expectedVersion,
-            version_gap: currentVersion - expectedVersion,
-          }),
-      ...(taskKey ? { task_key: taskKey } : {}),
-    };
-  }
-  if (code === "SESSION_CLOSED" && detailText) {
-    return { session_id: boundedText(detailText, 128) };
-  }
-  if (code === "INVALID_TRANSITION") {
-    const transition = /^([A-Z_]+)\s*->\s*([A-Z_]+)(?:\s+\(|$)/u.exec(detailText);
-    if (transition) {
-      return { current_status: transition[1], requested_status: transition[2] };
-    }
-  }
-  return null;
-}
-
-async function enrichVersionConflictDetails(
-  service: AyanamiTaskService,
-  request: FastifyRequest,
-  details: PublicErrorDetails | null,
-): Promise<PublicErrorDetails | null> {
-  const taskKey = typeof details?.task_key === "string" ? details.task_key : null;
-  const expected = typeof details?.expected_version === "number" ? details.expected_version : null;
-  const actual = typeof details?.current_version === "number" ? details.current_version : null;
-  const projectCode =
-    request.params && typeof request.params === "object"
-      ? (request.params as { code?: unknown }).code
-      : null;
-  const checklistId =
-    request.params &&
-    typeof request.params === "object" &&
-    request.url.includes("/checklist/") &&
-    typeof (request.params as { id?: unknown }).id === "string"
-      ? ((request.params as { id: string }).id ?? null)
-      : null;
-  if (typeof projectCode !== "string" || expected === null || actual === null) {
-    return details;
-  }
-  if (checklistId) {
-    try {
-      const [current, recentChanges] = await Promise.all([
-        service.checklistConflictSnapshot(projectCode, checklistId),
-        service.recentChecklistChanges(projectCode, checklistId, 6),
-      ]);
-      return {
-        ...details,
-        entity: "CHECKLIST",
-        key: checklistId,
-        expected,
-        actual,
-        checklist_id: checklistId,
-        task_key: current.taskKey,
-        current: {
-          id: current.id,
-          task_key: current.taskKey,
-          task_version: current.taskVersion,
-          title: boundedText(current.title, 400),
-          status: current.status,
-          evidence_required: current.evidenceRequired,
-          evidence_count: current.evidenceCount,
-          version: current.version,
-          updated_at: current.updatedAt,
-        },
-        recent_changes: recentChanges.slice(0, 6).map((change) => ({
-          seq: change.seq,
-          type: boundedText(change.type, 100),
-          key: change.key,
-          summary: boundedText(change.summary, 500),
-          op_id: change.opId,
-          at: change.at,
-        })),
-        changes_complete: false,
-      };
-    } catch {
-      return details;
-    }
-  }
-  if (!taskKey) return details;
-  try {
-    const [current, recentChanges] = await Promise.all([
-      service.getWorkItemForUi(projectCode, taskKey),
-      service.recentWorkItemChanges(projectCode, taskKey, 6),
-    ]);
-    return {
-      ...details,
-      entity: "WORK_ITEM",
-      key: taskKey,
-      expected,
-      actual,
-      current: {
-        key: current.key,
-        version: current.version,
-        status: current.status,
-        phase: current.phase,
-        title: boundedText(current.title, 400),
-        description: boundedText(current.description, 1200),
-        assignee_agent_id: current.assigneeAgentId,
-        claimed_by_session_id: current.claimedBySessionId,
-        target_date: current.targetDate,
-        parent_key: current.parentKey,
-        cancel_reason:
-          current.cancelReason === null ? null : boundedText(current.cancelReason, 500),
-        duplicate_of: current.duplicateOf,
-        superseded_by: current.supersededBy,
-        updated_at: current.updatedAt,
-      },
-      recent_changes: recentChanges.slice(0, 6).map((change) => ({
-        seq: change.seq,
-        type: boundedText(change.type, 100),
-        key: change.key,
-        summary: boundedText(change.summary, 500),
-        op_id: change.opId,
-        at: change.at,
-      })),
-      changes_complete: false,
-    };
-  } catch {
-    // 冲突诊断是附加能力；实体在错误处理窗口消失时仍保留旧版稳定详情。
-    return details;
-  }
-}
-
-function normalizedSuggestionText(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z0-9]+/gu, "");
-}
-
-function editDistance(left: string, right: string): number {
-  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
-    const current = [leftIndex];
-    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
-      current[rightIndex] = Math.min(
-        current[rightIndex - 1]! + 1,
-        previous[rightIndex]! + 1,
-        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
-      );
-    }
-    previous.splice(0, previous.length, ...current);
-  }
-  return previous[right.length]!;
-}
-
-function projectSuggestionDetails(
-  service: AyanamiTaskService,
-  error: unknown,
-): PublicErrorDetails | null {
-  if (!(error instanceof Error)) return null;
-  const query = normalizedSuggestionText(
-    boundedText(error.message.slice(error.message.indexOf(":") + 1).trim(), 128),
-  );
-  if (!query) return null;
-  try {
-    const ranked = service
-      .listProjects()
-      .filter((project) => project.lifecycle !== "TRASHED")
-      .map((project) => {
-        const code = normalizedSuggestionText(project.code);
-        const name = normalizedSuggestionText(project.name);
-        const rawScore = Math.min(editDistance(query, code), editDistance(query, name));
-        const prefix = code.startsWith(query) || name.startsWith(query);
-        return { project, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
-      })
-      .sort(
-        (left, right) =>
-          left.score - right.score || left.project.code.localeCompare(right.project.code),
-      )
-      .slice(0, 5);
-    if (ranked.length === 0) return { did_you_mean: null, candidates: [] };
-    const first = ranked[0]!;
-    const plausible = first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34));
-    return {
-      did_you_mean: plausible ? first.project.code : null,
-      candidates: ranked.map(({ project }) => ({ code: project.code, name: project.name })),
-    };
-  } catch {
-    // 错误处理本身不能因候选索引不可用而覆盖原 PROJECT_NOT_FOUND。
-    return null;
-  }
-}
-
 function bearer(request: FastifyRequest): string | null {
   const value = request.headers.authorization;
   if (!value?.startsWith("Bearer ")) return null;
   return value.slice("Bearer ".length);
 }
 
-function errorCode(error: unknown): string {
-  if (isZodError(error)) return "INVALID_ARGUMENT";
-  if (!(error instanceof Error)) return "INTERNAL_ERROR";
-  const candidate = error.message.split(":", 1)[0]!.trim();
-  return /^[A-Z][A-Z0-9_]+$/u.test(candidate) ? candidate : "INTERNAL_ERROR";
-}
-
-function statusForCode(code: string): number {
-  if (code === "INVALID_ARGUMENT") return 400;
-  if (code === "NOT_FOUND" || code.endsWith("_NOT_FOUND")) return 404;
-  if (code === "REVIEWER_REQUIRED") return 403;
-  if (
-    code === "REVIEW_IDENTITY_MISMATCH" ||
-    code === "REVIEW_ALREADY_SUBMITTED" ||
-    code === "REVIEW_TASK_CLOSED" ||
-    code === "REVIEW_CHECKLIST_CLOSED" ||
-    code === "REVIEW_BINDING_MISMATCH" ||
-    code === "IMMUTABLE_RECORD"
-  )
-    return 409;
-  if (
-    code === "SESSION_CLOSED" ||
-    code.startsWith("SESSION_SUCCESSOR_") ||
-    code === "INVALID_TRANSITION"
-  )
-    return 409;
-  // 前置条件类错误一律 4xx：调用方重试多少次都不会变，回 500 会让崩溃重放
-  // 控制器把永久失败当成服务端抖动，无限重试下去。REQUIRED 和 REQUIRES 都要收，
-  // PROJECT_REQUIRED 与 ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT 都落在这一档。
-  if (
-    code === "VALIDATION_ERROR" ||
-    code.includes("REQUIRED") ||
-    code.includes("REQUIRES") ||
-    code.includes("INVALID") ||
-    code.includes("HASH_MISMATCH") ||
-    code.includes("MANIFEST_MISMATCH") ||
-    code.includes("INTEGRITY_FAILED")
-  )
-    return 422;
-  if (code === "UNAUTHORIZED") return 401;
-  if (code === "FORBIDDEN") return 403;
-  if (
-    code.includes("CONFLICT") ||
-    code.includes("CYCLE") ||
-    code.includes("CLAIMED") ||
-    code.includes("COMPLETION_GATE") ||
-    code.includes("DEPENDENCY_NOT_READY") ||
-    code.includes("MIGRATION")
-  )
-    return 409;
-  return 500;
-}
-
 function assertToken(request: FastifyRequest, token: string): void {
-  if (bearer(request) !== token) throw new Error("UNAUTHORIZED: 本地访问令牌无效");
+  if (bearer(request) !== token)
+    throw new AtmError("UNAUTHORIZED", { message: "本地访问令牌无效" });
 }
 
 function requestOpId(body: Record<string, unknown>): string {
   if (typeof body.opId !== "string" || !body.opId.trim() || body.opId.length > 128) {
-    throw new Error("VALIDATION_ERROR: opId 必填且不超过 128 字符");
+    throw new AtmError("VALIDATION_ERROR", { message: "opId 必填且不超过 128 字符" });
   }
   return body.opId.trim();
 }
@@ -423,54 +165,46 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         callback(null, true);
         return;
       }
-      callback(new Error("FORBIDDEN: 仅允许本机页面访问"), false);
+      callback(new AtmError("FORBIDDEN", { message: "仅允许本机页面访问" }), false);
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });
   app.setErrorHandler(async (error, request, reply) => {
-    const code = errorCode(error);
-    let details =
-      validationDetails(error, request.body) ??
-      domainErrorDetails(code, error, request.body) ??
-      (code === "PROJECT_NOT_FOUND" && bearer(request) === options.token
-        ? projectSuggestionDetails(options.service, error)
-        : null);
-    if (code === "VERSION_CONFLICT") {
-      details = await enrichVersionConflictDetails(options.service, request, details);
-    }
-    if (
-      !details &&
-      ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(code) &&
-      error instanceof Error &&
-      bearer(request) === options.token
-    ) {
-      const projectCode =
-        request.params && typeof request.params === "object"
-          ? (request.params as { code?: unknown }).code
-          : null;
-      if (typeof projectCode === "string") {
-        try {
-          details = await options.service.notFoundSuggestionDetails(
-            projectCode,
-            code,
-            error.message.slice(error.message.indexOf(":") + 1).trim(),
-          );
-        } catch {
-          details = null;
-        }
-      }
-    }
-    reply.code(statusForCode(code)).send({
-      error: {
-        code,
-        message:
-          code === "INVALID_ARGUMENT"
-            ? "请求参数不合法"
-            : error instanceof Error
-              ? error.message
-              : String(error),
-        ...(details ? { details } : {}),
-      },
+    const validation = validationDetails(error, request.body);
+    const params =
+      request.params && typeof request.params === "object"
+        ? (request.params as Record<string, unknown>)
+        : {};
+    const body =
+      request.body && typeof request.body === "object" && !Array.isArray(request.body)
+        ? (request.body as Record<string, unknown>)
+        : {};
+    const taskKey =
+      typeof params.taskKey === "string"
+        ? params.taskKey
+        : typeof body.taskKey === "string"
+          ? body.taskKey
+          : undefined;
+    const checklistId =
+      typeof params.id === "string"
+        ? params.id
+        : typeof body.checklistId === "string"
+          ? body.checklistId
+          : undefined;
+    const expectedVersion = expectedVersionFromBody(request.body, taskKey);
+    const typed = validation
+      ? new AtmError("INVALID_ARGUMENT", {
+          message: "请求参数不合法",
+          details: validation,
+        })
+      : await options.service.enrichError(asAtmError(error), {
+          ...(typeof params.code === "string" ? { projectCode: params.code } : {}),
+          ...(taskKey === undefined ? {} : { taskKey }),
+          ...(checklistId === undefined ? {} : { checklistId }),
+          ...(expectedVersion === null ? {} : { expectedVersion }),
+        });
+    reply.code(typed.httpStatus).send({
+      error: atmErrorDto(typed),
       request_id: request.id,
     });
   });
@@ -501,10 +235,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.post("/api/v1/saved-views", async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if ((body.scope !== "GLOBAL" && body.scope !== "PROJECT") || typeof body.name !== "string") {
-      throw new Error("VALIDATION_ERROR: scope 和 name 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "scope 和 name 必填" });
     }
     if (body.scope === "PROJECT" && typeof body.project !== "string") {
-      throw new Error("PROJECT_REQUIRED: 项目视图需要 project");
+      throw new AtmError("PROJECT_REQUIRED", { message: "项目视图需要 project" });
     }
     return reply.code(201).send(
       options.service.createSavedView({
@@ -524,7 +258,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (!Number.isInteger(body.expectedVersion))
-      throw new Error("VALIDATION_ERROR: expectedVersion 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "expectedVersion 必填" });
     return options.service.updateSavedView(id, {
       expectedVersion: Number(body.expectedVersion),
       ...(typeof body.name === "string" ? { name: body.name } : {}),
@@ -540,18 +274,18 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { id } = request.params as { id: string };
     const { expectedVersion } = request.query as { expectedVersion?: string };
     if (!expectedVersion || !Number.isInteger(Number(expectedVersion)))
-      throw new Error("VALIDATION_ERROR: expectedVersion 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "expectedVersion 必填" });
     return options.service.deleteSavedView(id, Number(expectedVersion));
   });
   app.get("/api/v1/settings", async () => options.service.listSettings());
   app.put("/api/v1/settings/:key", async (request) => {
     const { key } = request.params as { key: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
-    if (!("value" in body)) throw new Error("VALIDATION_ERROR: value 必填");
+    if (!("value" in body)) throw new AtmError("VALIDATION_ERROR", { message: "value 必填" });
     const expectedVersion =
       body.expectedVersion === undefined ? undefined : Number(body.expectedVersion);
     if (expectedVersion !== undefined && !Number.isInteger(expectedVersion))
-      throw new Error("VALIDATION_ERROR: expectedVersion 无效");
+      throw new AtmError("VALIDATION_ERROR", { message: "expectedVersion 无效" });
     return options.service.setSetting(key, body.value, expectedVersion);
   });
 
@@ -577,7 +311,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.path !== "string" || !body.path.trim()) {
-      throw new Error("VALIDATION_ERROR: path 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "path 必填" });
     }
     return options.service.attachProjectPath(code, body.path, body.primary !== false);
   });
@@ -609,7 +343,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const body = (request.body ?? {}) as Record<string, unknown>;
     const scope = body.scope === "REGISTRY" ? "REGISTRY" : "PROJECT";
     if (scope === "PROJECT" && typeof body.project !== "string") {
-      throw new Error("PROJECT_REQUIRED: 项目备份需要 project");
+      throw new AtmError("PROJECT_REQUIRED", { message: "项目备份需要 project" });
     }
     const backup = await options.service.createBackup({
       scope,
@@ -625,7 +359,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.post("/api/v1/imports/agenttask-md/preview", async (request) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.project !== "string" || typeof body.content !== "string") {
-      throw new Error("VALIDATION_ERROR: project 和 content 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "project 和 content 必填" });
     }
     return options.service.previewAgentTaskImport(
       body.project,
@@ -636,7 +370,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.post("/api/v1/imports/agenttask-md/apply", async (request) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.project !== "string" || typeof body.content !== "string") {
-      throw new Error("VALIDATION_ERROR: project 和 content 必填");
+      throw new AtmError("VALIDATION_ERROR", { message: "project 和 content 必填" });
     }
     return options.service.applyAgentTaskImport(
       body.project,
@@ -650,7 +384,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { format: rawFormat } = request.query as { format?: string };
     const format = rawFormat ?? "aytproj";
     if (!(["aytproj", "json", "csv"] as string[]).includes(format)) {
-      throw new Error("VALIDATION_ERROR: format 必须是 aytproj、json 或 csv");
+      throw new AtmError("VALIDATION_ERROR", { message: "format 必须是 aytproj、json 或 csv" });
     }
     return options.service.exportProject(projectCode, format as "aytproj" | "json" | "csv");
   });
@@ -722,7 +456,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       typeof body.summary !== "string" ||
       !body.summary.trim()
     ) {
-      throw new Error("VALIDATION_ERROR: health 和 summary 无效");
+      throw new AtmError("VALIDATION_ERROR", { message: "health 和 summary 无效" });
     }
     return reply.code(201).send(
       await options.service.publishProjectUpdateAsUser(code, requestOpId(body), {
@@ -1121,7 +855,8 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
       });
     }
-    if (!input.taskKey) throw new Error("VALIDATION_ERROR: task scope 要求 taskKey");
+    if (!input.taskKey)
+      throw new AtmError("VALIDATION_ERROR", { message: "task scope 要求 taskKey" });
     return options.service.addProgress(code, input.session, input.opId, {
       taskKey: input.taskKey,
       ...(input.percent === undefined ? {} : { percent: input.percent }),
@@ -1262,7 +997,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.project !== "string")
-      throw new Error("PROJECT_REQUIRED: 关闭 Session 需要 project");
+      throw new AtmError("PROJECT_REQUIRED", { message: "关闭 Session 需要 project" });
     return options.service.forceCloseSessionAsUser(body.project, id, body.releaseClaims !== false);
   });
   app.post("/api/v1/projects/:code/sessions/:id/git-context/refresh", async (request) => {

@@ -17,6 +17,7 @@
   "dependencies": {
     "@ayanami-task/domain": "workspace:*",
     "@ayanami-task/engineering-metrics": "workspace:*",
+    "@ayanami-task/errors": "workspace:*",
     "@ayanami-task/protocol": "workspace:*",
     "@ayanami-task/storage-sqlite": "workspace:*"
   }

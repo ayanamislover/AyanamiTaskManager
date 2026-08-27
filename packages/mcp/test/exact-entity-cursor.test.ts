@@ -271,9 +271,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(crossEntity.isError).toBe(true);
-      expect(JSON.stringify(crossEntity.content)).toMatch(
-        /CONTINUATION_CONFLICT.*TARGET_MISMATCH/u,
-      );
+      expect(crossEntity.structuredContent).toMatchObject({
+        code: "CONTINUATION_CONFLICT",
+        details: { reason: "TARGET_MISMATCH" },
+      });
 
       const typeProgress = await service.addProgress(
         project.code,
@@ -313,7 +314,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(crossType.isError).toBe(true);
-      expect(JSON.stringify(crossType.content)).toMatch(/CONTINUATION_CONFLICT.*TARGET_MISMATCH/u);
+      expect(crossType.structuredContent).toMatchObject({
+        code: "CONTINUATION_CONFLICT",
+        details: { reason: "TARGET_MISMATCH" },
+      });
 
       const crossMask = await profiles.memoryClient.callTool({
         name: "atm_search",
@@ -326,7 +330,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(crossMask.isError).toBe(true);
-      expect(JSON.stringify(crossMask.content)).toMatch(/CONTINUATION_CONFLICT.*TARGET_MISMATCH/u);
+      expect(crossMask.structuredContent).toMatchObject({
+        code: "CONTINUATION_CONFLICT",
+        details: { reason: "TARGET_MISMATCH" },
+      });
 
       const otherProject = await service.createProject({
         name: "Other cursor project",
@@ -385,9 +392,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(crossProject.isError).toBe(true);
-      expect(JSON.stringify(crossProject.content)).toMatch(
-        /CONTINUATION_CONFLICT.*TARGET_MISMATCH/u,
-      );
+      expect(crossProject.structuredContent).toMatchObject({
+        code: "CONTINUATION_CONFLICT",
+        details: { reason: "TARGET_MISMATCH" },
+      });
 
       currentDatabase.sqlite
         .prepare("UPDATE progress_updates SET next_json = ? WHERE id = ?")
@@ -403,7 +411,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(changed.isError).toBe(true);
-      expect(JSON.stringify(changed.content)).toMatch(/CONTINUATION_CONFLICT.*CONTENT_CHANGED/u);
+      expect(changed.structuredContent).toMatchObject({
+        code: "CONTINUATION_CONFLICT",
+        details: { reason: "CONTENT_CHANGED" },
+      });
     } finally {
       await profiles.close();
       service.close();
@@ -520,7 +531,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
         },
       });
       expect(missing.isError).toBe(true);
-      expect(JSON.stringify(missing.content)).toMatch(/OPERATION_NOT_FOUND: shared-record-op/u);
+      expect(missing.structuredContent).toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { reference: "shared-record-op" },
+      });
     } finally {
       await profiles.close();
       service.close();

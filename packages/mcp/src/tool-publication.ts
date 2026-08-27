@@ -8,6 +8,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { asAtmError, AtmError, atmErrorDto } from "@ayanami-task/errors";
 import legacyToolListArtifact from "./legacy-tools-list-v1.0.18.json" with { type: "json" };
 import type {
   AyanamiServerProfile,
@@ -358,9 +359,14 @@ export function generateMcpToolContractMarkdown(
   ].join("\n");
 }
 
-function toolError(message: string): CallToolResult {
+function toolError(error: unknown): CallToolResult {
+  const typed = asAtmError(error);
+  const structuredContent = atmErrorDto(typed);
+  const issueValue = typed.details && "issue" in typed.details ? typed.details.issue : undefined;
+  const issue = typeof issueValue === "string" ? `: ${issueValue}` : "";
   return {
-    content: [{ type: "text", text: message }],
+    content: [{ type: "text", text: `${typed.code}: ${typed.message}${issue}` }],
+    structuredContent,
     isError: true,
   };
 }
@@ -377,7 +383,13 @@ export function registerPublishedToolHandlers(
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [...tools] }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const definition = byName.get(request.params.name);
-    if (!definition) return toolError(`Tool ${request.params.name} not found`);
+    if (!definition)
+      return toolError(
+        new AtmError("NOT_FOUND", {
+          message: `Tool ${request.params.name} not found`,
+          details: { entity: "MCP_TOOL", reference: request.params.name },
+        }),
+      );
     let parsed: ReturnType<typeof definition.inputSchema.safeParse>;
     try {
       // Some adapter schemas use transforms that intentionally delegate to a
@@ -386,17 +398,25 @@ export function registerPublishedToolHandlers(
       parsed = definition.inputSchema.safeParse(request.params.arguments ?? {});
     } catch (error) {
       const detail = error instanceof z.ZodError ? z.prettifyError(error) : String(error);
-      return toolError(`Invalid arguments for tool ${definition.name}: ${detail}`);
+      return toolError(
+        new AtmError("INVALID_ARGUMENT", {
+          message: `Invalid arguments for tool ${definition.name}`,
+          details: { tool: definition.name, issue: detail },
+        }),
+      );
     }
     if (!parsed.success) {
       return toolError(
-        `Invalid arguments for tool ${definition.name}: ${z.prettifyError(parsed.error)}`,
+        new AtmError("INVALID_ARGUMENT", {
+          message: `Invalid arguments for tool ${definition.name}`,
+          details: { tool: definition.name, issue: z.prettifyError(parsed.error) },
+        }),
       );
     }
     try {
       return await definition.handler(parsed.data, extra as never);
     } catch (error) {
-      return toolError(error instanceof Error ? error.message : String(error));
+      return toolError(error);
     }
   });
 }
