@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import { Buffer } from "node:buffer";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Readable, Writable } from "node:stream";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -790,7 +791,9 @@ const briefSections = {
 } as const;
 type BriefSection = keyof typeof briefSections;
 const briefSectionNames = Object.keys(briefSections) as [BriefSection, ...BriefSection[]];
-const briefAlwaysKeys = ["truncated", "project", "seq"];
+const briefAlwaysKeys: readonly string[] = ["truncated", "project", "seq"];
+const briefCursorSecret = randomBytes(32);
+const BRIEF_CURSOR_TTL_MS = 30 * 60 * 1000;
 
 // include 为空表示全要；非空时只保留被点名的分节。
 function pickBriefSections(
@@ -848,26 +851,380 @@ const briefDropOrder: readonly BriefSection[] = [
   "handoff",
 ];
 
-// bounded() 只截字符串和数组、从不删字段，因此存在删不掉的下限；撞到下限时
-// 它会退化成 RESULT_TOO_LARGE 空回执，对调用方毫无用处。这里改为按价值逐级
-// 丢分节后重试，保证返回的是「装得下的最大子集」而不是什么都没有。
-function fitBrief(
-  payload: Record<string, unknown>,
-  include: readonly BriefSection[],
-  maxChars: number,
-): Record<string, unknown> {
-  let current = pickBriefSections(payload, include);
-  const droppable = briefDropOrder.filter((name) =>
-    briefSections[name].some((key) => key in current),
+type BriefCursor = {
+  v: 1;
+  p: string;
+  s: string;
+  i: number;
+  b: number;
+  q: string;
+  o: number;
+  k: string;
+  c: string;
+  e: number;
+};
+
+function briefHash(value: unknown, bytes = 16): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value), "utf8")
+    .digest()
+    .subarray(0, bytes)
+    .toString("base64url");
+}
+
+function briefIncludeMask(include: readonly BriefSection[]): number {
+  const selected = include.length === 0 ? briefSectionNames : include;
+  return selected.reduce((mask, name) => mask | (1 << briefSectionNames.indexOf(name)), 0);
+}
+
+function briefQueryHash(taskKey: string | undefined, sinceSeq: number | undefined): string {
+  return briefHash([taskKey ?? null, sinceSeq ?? null], 8);
+}
+
+function briefSnapshotHash(payload: Record<string, unknown>): string {
+  const sectionKeys = new Set<string>(
+    briefSectionNames.flatMap((section) => [...briefSections[section]]),
   );
+  return briefHash(
+    Object.fromEntries(Object.entries(payload).filter(([key]) => sectionKeys.has(key))),
+  );
+}
+
+function briefRecordKeysHash(payload: Record<string, unknown>): string {
+  const records = Array.isArray(payload.records)
+    ? (payload.records as Array<Record<string, unknown>>)
+    : [];
+  return briefHash(
+    records.map((record) => record.key),
+    12,
+  );
+}
+
+function encodeBriefCursor(cursor: BriefCursor): string {
+  const payload = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+  const signature = createHmac("sha256", briefCursorSecret)
+    .update(payload, "utf8")
+    .digest()
+    .subarray(0, 16)
+    .toString("base64url");
+  return `${payload}.${signature}`;
+}
+
+function decodeBriefCursor(token: string): BriefCursor {
+  try {
+    const [payload, signature, extra] = token.split(".");
+    if (!payload || !signature || extra !== undefined) throw new Error("shape");
+    const expected = createHmac("sha256", briefCursorSecret)
+      .update(payload, "utf8")
+      .digest()
+      .subarray(0, 16);
+    const received = Buffer.from(signature, "base64url");
+    if (
+      received.toString("base64url") !== signature ||
+      received.length !== expected.length ||
+      !timingSafeEqual(received, expected)
+    ) {
+      throw new Error("signature");
+    }
+    const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as BriefCursor;
+    if (
+      value.v !== 1 ||
+      typeof value.p !== "string" ||
+      typeof value.s !== "string" ||
+      !Number.isInteger(value.i) ||
+      !Number.isInteger(value.b) ||
+      typeof value.q !== "string" ||
+      !Number.isInteger(value.o) ||
+      value.o < 0 ||
+      typeof value.k !== "string" ||
+      typeof value.c !== "string" ||
+      !Number.isInteger(value.e)
+    ) {
+      throw new Error("shape");
+    }
+    if (Date.now() > value.e) throw new Error("expired");
+    return value;
+  } catch (error) {
+    if (error instanceof Error && error.message === "expired") {
+      throw new Error("INVALID_CURSOR: EXPIRED brief continuation 已过期，请重新读取");
+    }
+    throw new Error("INVALID_CURSOR: brief continuation 无效或已被篡改");
+  }
+}
+
+function makeBriefCursor(input: {
+  project: string;
+  sessionId?: string;
+  include: readonly BriefSection[];
+  maxChars: number;
+  taskKey?: string;
+  sinceSeq?: number;
+  offset: number;
+  payload: Record<string, unknown>;
+}): string {
+  return encodeBriefCursor({
+    v: 1,
+    p: input.project.toUpperCase(),
+    s: input.sessionId ?? "",
+    i: briefIncludeMask(input.include),
+    b: input.maxChars,
+    q: briefQueryHash(input.taskKey, input.sinceSeq),
+    o: input.offset,
+    k: briefRecordKeysHash(input.payload),
+    c: briefSnapshotHash(input.payload),
+    e: Date.now() + BRIEF_CURSOR_TTL_MS,
+  });
+}
+
+function validateBriefCursorRequest(
+  cursor: BriefCursor,
+  input: {
+    project: string;
+    sessionId?: string;
+    include: readonly BriefSection[];
+    maxChars: number;
+    taskKey?: string;
+    sinceSeq?: number;
+  },
+): void {
+  if (
+    cursor.p !== input.project.toUpperCase() ||
+    cursor.s !== (input.sessionId ?? "") ||
+    cursor.i !== briefIncludeMask(input.include) ||
+    cursor.b !== input.maxChars ||
+    cursor.q !== briefQueryHash(input.taskKey, input.sinceSeq)
+  ) {
+    throw new Error("CONTINUATION_CONFLICT: TARGET_MISMATCH brief continuation 请求身份已变化");
+  }
+}
+
+function validateBriefCursorSnapshot(cursor: BriefCursor, payload: Record<string, unknown>): void {
+  const records = Array.isArray(payload.records) ? payload.records : [];
+  if (
+    cursor.o > records.length ||
+    cursor.k !== briefRecordKeysHash(payload) ||
+    cursor.c !== briefSnapshotHash(payload)
+  ) {
+    throw new Error("CONTINUATION_CONFLICT: SNAPSHOT_CHANGED brief continuation 绑定内容已变化");
+  }
+}
+
+type BriefFitInput = {
+  payload: Record<string, unknown>;
+  include: readonly BriefSection[];
+  maxChars: number;
+  identity?: Record<string, unknown>;
+  project: string;
+  sessionId?: string;
+  taskKey?: string;
+  sinceSeq?: number;
+  beginMode?: BeginBriefMode;
+};
+
+function briefCandidate(input: {
+  source: Record<string, unknown>;
+  identity: Record<string, unknown>;
+  dropped: readonly BriefSection[];
+  omittedFields: readonly { section: BriefSection; fields: readonly string[] }[];
+  recordCount: number;
+  totalRecords: number;
+  cursor?: string;
+  beginMode?: BeginBriefMode;
+}): Record<string, unknown> {
+  const droppedKeys = new Set<string>(
+    input.dropped.flatMap((section) => [...briefSections[section]]),
+  );
+  const body = Object.fromEntries(
+    Object.entries(input.source)
+      .filter(
+        ([key]) =>
+          !briefAlwaysKeys.includes(key) &&
+          !droppedKeys.has(key) &&
+          !(key in input.identity) &&
+          key !== "score",
+      )
+      .map(([key, value]) =>
+        key === "records" && Array.isArray(value)
+          ? [key, value.slice(0, input.recordCount)]
+          : [key, value],
+      ),
+  );
+  const omittedRecords = input.recordCount < input.totalRecords;
+  const truncated =
+    input.dropped.length > 0 ||
+    input.omittedFields.length > 0 ||
+    omittedRecords ||
+    input.source.truncated === true;
+  return {
+    ...input.identity,
+    project: input.source.project,
+    seq: input.source.seq,
+    ...body,
+    truncated,
+    ...(input.beginMode === undefined
+      ? {}
+      : { brief_mode: input.beginMode, brief_truncated: truncated }),
+    ...(input.dropped.length === 0 ? {} : { omitted_sections: input.dropped }),
+    ...(input.omittedFields.length === 0 ? {} : { omitted_fields: input.omittedFields }),
+    ...(omittedRecords
+      ? {
+          omitted_collections: [
+            {
+              section: "records",
+              total_items: input.totalRecords,
+              returned_items: input.recordCount,
+              omitted_items: input.totalRecords - input.recordCount,
+            },
+          ],
+          ...(input.cursor === undefined
+            ? { continuation_omitted: true }
+            : { continuation: { tool: "atm_brief", cursor: input.cursor } }),
+        }
+      : {}),
+  };
+}
+
+// brief 不对 Record 或其他分节内部做字符串截断。预算不足时先按分节价值丢弃，
+// records 则仅在整条边界分页。这样恢复上下文的 Agent 要么读到完整事实，要么收到
+// 可续读的省略回执，不会再把半句话当成全部事实。
+function fitWholeBrief(input: BriefFitInput): Record<string, unknown> {
+  const frozenSource = pickBriefSections(input.payload, input.include);
+  let source = frozenSource;
+  const records = Array.isArray(frozenSource.records) ? frozenSource.records : [];
+  let recordCount = records.length;
+  const dropped: BriefSection[] = [];
+  const omittedFields: Array<{ section: BriefSection; fields: readonly string[] }> = [];
+  const actions = briefDropOrder.filter((section) =>
+    briefSections[section].some((key) => key in source),
+  );
+  const identity = input.identity ?? {};
+
   for (;;) {
-    const attempt = bounded(current, maxChars);
-    if (attempt.code !== "RESULT_TOO_LARGE") return attempt;
-    const victim = droppable.shift();
-    if (victim === undefined) return attempt;
-    const dropped = new Set<string>(briefSections[victim]);
-    current = Object.fromEntries(Object.entries(current).filter(([key]) => !dropped.has(key)));
-    current.truncated = true;
+    const cursor =
+      recordCount < records.length
+        ? makeBriefCursor({
+            project: input.project,
+            ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+            include: input.include,
+            maxChars: input.maxChars,
+            ...(input.taskKey === undefined ? {} : { taskKey: input.taskKey }),
+            ...(input.sinceSeq === undefined ? {} : { sinceSeq: input.sinceSeq }),
+            offset: recordCount,
+            payload: frozenSource,
+          })
+        : undefined;
+    const candidate = briefCandidate({
+      source,
+      identity,
+      dropped,
+      omittedFields,
+      recordCount,
+      totalRecords: records.length,
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(input.beginMode === undefined ? {} : { beginMode: input.beginMode }),
+    });
+    if (JSON.stringify(candidate).length <= input.maxChars) return candidate;
+
+    const victim = actions.shift();
+    if (victim !== undefined) {
+      if (victim === "records") {
+        if (recordCount > 0) {
+          recordCount -= 1;
+          actions.unshift("records");
+        }
+        continue;
+      }
+      if (victim === "task" && source.task && typeof source.task === "object") {
+        const task = source.task as Record<string, unknown>;
+        const essentialKeys = [
+          "key",
+          "title",
+          "type",
+          "status",
+          "priority",
+          "progress",
+          "version",
+          "blockedReason",
+          "waitingFor",
+          "dependencies",
+        ];
+        const compact = Object.fromEntries(
+          essentialKeys.filter((key) => task[key] !== undefined).map((key) => [key, task[key]]),
+        );
+        const omitted = Object.keys(task).filter((key) => !(key in compact));
+        if (omitted.length > 0) {
+          source = { ...source, task: compact };
+          omittedFields.push({ section: "task", fields: omitted });
+          actions.unshift("task");
+          continue;
+        }
+      }
+      dropped.push(victim);
+      continue;
+    }
+    if (recordCount > 0) {
+      recordCount -= 1;
+      continue;
+    }
+
+    // 极窄预算可能连带 HMAC 的游标都放不下。身份回执仍逐字保留，不伪造一个
+    // 超预算或无法校验的 cursor；调用方可以扩大预算后重新发起首页。
+    return briefCandidate({
+      source,
+      identity,
+      dropped,
+      omittedFields,
+      recordCount: 0,
+      totalRecords: records.length,
+      ...(input.beginMode === undefined ? {} : { beginMode: input.beginMode }),
+    });
+  }
+}
+
+function continueWholeBrief(
+  cursor: BriefCursor,
+  input: Omit<BriefFitInput, "identity" | "beginMode">,
+): Record<string, unknown> {
+  const source = pickBriefSections(input.payload, input.include);
+  validateBriefCursorSnapshot(cursor, source);
+  const records = Array.isArray(source.records) ? source.records : [];
+  let returned = records.length - cursor.o;
+  for (;;) {
+    const nextOffset = cursor.o + returned;
+    const nextCursor =
+      nextOffset < records.length
+        ? makeBriefCursor({
+            project: input.project,
+            ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+            include: input.include,
+            maxChars: input.maxChars,
+            ...(input.taskKey === undefined ? {} : { taskKey: input.taskKey }),
+            ...(input.sinceSeq === undefined ? {} : { sinceSeq: input.sinceSeq }),
+            offset: nextOffset,
+            payload: source,
+          })
+        : undefined;
+    const candidate: Record<string, unknown> = {
+      project: source.project,
+      seq: source.seq,
+      ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
+      records: records.slice(cursor.o, nextOffset),
+      offset: cursor.o,
+      returned_items: returned,
+      total_items: records.length,
+      truncated: nextCursor !== undefined,
+      ...(nextCursor === undefined
+        ? {}
+        : { continuation: { tool: "atm_brief", cursor: nextCursor } }),
+    };
+    if (JSON.stringify(candidate).length <= input.maxChars) return candidate;
+    if (returned > 0) {
+      returned -= 1;
+      continue;
+    }
+    throw new Error(
+      `RESULT_TOO_LARGE: max_chars=${input.maxChars} 无法容纳一条完整 Record continuation`,
+    );
   }
 }
 
@@ -902,49 +1259,15 @@ function fitBegin(
     mode === "minimal"
       ? pickBriefSections(payload, ["counts", "next", "current", "handoff"])
       : payload;
-  let current = Object.fromEntries(
-    Object.entries(selected).filter(
-      ([key]) =>
-        !["scope", "session", "project", "score", "atomicBegin", "truncated"].includes(key),
-    ),
-  );
-  const droppable = briefDropOrder.filter((name) =>
-    briefSections[name].some((key) => key in current),
-  );
-  const dropped: BriefSection[] = [];
-  const serviceTruncated = payload.truncated === true;
-
-  for (;;) {
-    const identityChars = JSON.stringify(identity).length;
-    const optionalBudget = Math.max(0, maxChars - identityChars - 1);
-    const attempt = bounded(current, optionalBudget);
-    if (attempt.code !== "RESULT_TOO_LARGE") {
-      const briefTruncated = serviceTruncated || dropped.length > 0;
-      const candidate: Record<string, unknown> = {
-        ...identity,
-        ...attempt,
-        brief_mode: mode,
-        truncated: briefTruncated,
-        brief_truncated: briefTruncated,
-        ...(dropped.length === 0 ? {} : { omitted_sections: dropped }),
-      };
-      if (JSON.stringify(candidate).length <= maxChars) return candidate;
-      delete candidate.omitted_sections;
-      if (JSON.stringify(candidate).length <= maxChars) return candidate;
-    }
-    const victim = droppable.shift();
-    if (victim === undefined) {
-      return {
-        ...identity,
-        brief_mode: mode,
-        truncated: true,
-        brief_truncated: true,
-      };
-    }
-    dropped.push(victim);
-    const keys = new Set<string>(briefSections[victim]);
-    current = Object.fromEntries(Object.entries(current).filter(([key]) => !keys.has(key)));
-  }
+  return fitWholeBrief({
+    payload: selected,
+    include: [],
+    maxChars,
+    identity,
+    project: String(payload.project),
+    ...(typeof payload.session === "string" ? { sessionId: payload.session } : {}),
+    beginMode: mode,
+  });
 }
 
 const workItemCreate = z
@@ -1791,9 +2114,14 @@ export function createAyanamiMcpServer(
           1200,
         );
       }
-      const { score, ...brief } = started;
+      const snapshot = await service.briefSnapshot(
+        String(started.project),
+        String(started.session),
+      );
+      const { score, truncated: _legacyTruncated, ...beginIdentity } = started;
       void score;
-      return wrap(fitBegin(brief, input.brief, input.max_chars));
+      void _legacyTruncated;
+      return wrap(fitBegin({ ...beginIdentity, ...snapshot }, input.brief, input.max_chars));
     },
   );
 
@@ -1807,6 +2135,7 @@ export function createAyanamiMcpServer(
           session_id: sessionId.optional(),
           task_key: taskKey.optional(),
           since_seq: z.number().int().nonnegative().optional(),
+          cursor: z.string().min(1).optional(),
           max_chars: z.number().int().min(300).max(5000).default(1200),
           include: z.array(z.enum(briefSectionNames)).max(briefSectionNames.length).default([]),
         })
@@ -1815,16 +2144,22 @@ export function createAyanamiMcpServer(
       annotations: { readOnlyHint: true },
     },
     async (input) => {
+      const decodedCursor = input.cursor === undefined ? null : decodeBriefCursor(input.cursor);
+      if (decodedCursor) {
+        validateBriefCursorRequest(decodedCursor, {
+          project: input.project_code,
+          ...(input.session_id === undefined ? {} : { sessionId: input.session_id }),
+          include: input.include,
+          maxChars: input.max_chars,
+          ...(input.task_key === undefined ? {} : { taskKey: input.task_key }),
+          ...(input.since_seq === undefined ? {} : { sinceSeq: input.since_seq }),
+        });
+      }
       const wanted = (section: BriefSection) =>
         input.include.length === 0 || input.include.includes(section);
       const withTask = input.task_key !== undefined && wanted("task");
       const withDelta = input.since_seq !== undefined && wanted("delta");
-      // 附加分节拼在 brief 之上，bounded() 只截字符串和数组、从不删字段，
-      // 所以 brief 不能独占全部预算，否则带 task_key 时必然撞上删不掉的下限。
-      const extras = (withTask ? 1 : 0) + (withDelta ? 1 : 0);
-      const briefBudget =
-        extras === 0 ? input.max_chars : Math.max(300, Math.floor(input.max_chars / (extras + 1)));
-      const brief = await service.brief(input.project_code, input.session_id, briefBudget);
+      const brief = await service.briefSnapshot(input.project_code, input.session_id);
       const detail = withTask
         ? {
             task: compactBriefTask(
@@ -1835,7 +2170,24 @@ export function createAyanamiMcpServer(
       const delta = withDelta
         ? { delta: await service.delta(input.project_code, input.since_seq!, 20) }
         : {};
-      return wrap(fitBrief({ ...brief, ...detail, ...delta }, input.include, input.max_chars));
+      const payload = { ...brief, ...detail, ...delta };
+      const fitInput = {
+        payload,
+        include: input.include,
+        maxChars: input.max_chars,
+        project: input.project_code,
+        ...(input.session_id === undefined ? {} : { sessionId: input.session_id }),
+        ...(input.task_key === undefined ? {} : { taskKey: input.task_key }),
+        ...(input.since_seq === undefined ? {} : { sinceSeq: input.since_seq }),
+      };
+      return wrap(
+        decodedCursor
+          ? continueWholeBrief(decodedCursor, fitInput)
+          : fitWholeBrief({
+              ...fitInput,
+              identity: input.session_id === undefined ? {} : { session_id: input.session_id },
+            }),
+      );
     },
   );
 

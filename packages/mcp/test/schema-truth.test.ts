@@ -31,7 +31,15 @@ const publicFields: Record<string, readonly string[]> = {
     "allow_project_create",
     "creation_reason",
   ],
-  atm_brief: ["project_code", "session_id", "task_key", "since_seq", "max_chars", "include"],
+  atm_brief: [
+    "project_code",
+    "session_id",
+    "task_key",
+    "since_seq",
+    "cursor",
+    "max_chars",
+    "include",
+  ],
   atm_task_list: [
     "project",
     "status",
