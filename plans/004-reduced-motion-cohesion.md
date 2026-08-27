@@ -17,15 +17,21 @@ modal、drawer、notice 和 select，遗漏同样会缩放、位移或旋转的 
 /* packages/ui/src/styles.css — current */
 .atm-nav button:active,
 .atm-nav-disclosure:active,
-.atm-sidebar-settings:active { transform: scale(0.97); }
+.atm-sidebar-settings:active {
+  transform: scale(0.97);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .atm-nav button:active,
-  .atm-button:active { transform: none; }
+  .atm-button:active {
+    transform: none;
+  }
 }
 
 /* apps/desktop/src/window-chrome.css — current */
-.atm-window-button:active { transform: scale(0.94); }
+.atm-window-button:active {
+  transform: scale(0.94);
+}
 ```
 
 另外 select 的 `160ms` 和部分常驻箭头旋转直接使用 `--atm-ease-out`，没有消费已经存在的
