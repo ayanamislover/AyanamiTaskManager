@@ -1017,6 +1017,10 @@ button.atm-row:hover {
 .atm-select[data-open="true"] .atm-select-trigger > svg {
   transform: rotate(180deg);
 }
+.atm-select[data-open-input="keyboard"] .atm-select-trigger > svg,
+.atm-select[data-open-input="keyboard"] .atm-select-popover {
+  transition: none;
+}
 .atm-select-trigger:active {
   transform: scale(0.98);
 }
