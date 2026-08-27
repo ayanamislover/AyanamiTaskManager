@@ -46,7 +46,7 @@ describe("迁移完整性", () => {
       try {
         expect(manager.registry.schemaVersion).toBe(4);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(15);
+        expect(upgraded.schemaVersion).toBe(16);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")
@@ -97,6 +97,13 @@ describe("迁移完整性", () => {
             "superseded_by_id",
           ]),
         );
+        expect(
+          upgraded.sqlite
+            .prepare(
+              "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_work_items_task_list_keyset'",
+            )
+            .get(),
+        ).toEqual({ name: "idx_work_items_task_list_keyset" });
         expect(
           (upgraded.sqlite.pragma("table_info(project_updates)") as Array<{ name: string }>).map(
             (column) => column.name,

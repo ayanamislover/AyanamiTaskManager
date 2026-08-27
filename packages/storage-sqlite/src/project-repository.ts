@@ -26,6 +26,12 @@ import type { ManagedDatabase } from "./database.js";
 import { assertCompletionGates } from "./completion-gates.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import {
+  canonicalTaskListSelection,
+  decodeTaskListCursor,
+  encodeTaskListCursor,
+  type TaskListSelection,
+} from "./task-list-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
 
 function storedWorkItemPhase(row: { status: WorkItemStatus; phase?: WorkItemPhase | null }) {
@@ -165,6 +171,18 @@ export type WorkItemListFilters = {
   query?: string;
   limit?: number;
   offset?: number;
+};
+
+export type WorkItemPageFilters = Omit<WorkItemListFilters, "offset"> & {
+  cursor?: string;
+};
+
+export type TaskViewProjectionPage = {
+  items: TaskViewProjectionRow[];
+  itemCursors: string[];
+  nextCursor: string | null;
+  retryCursor: string;
+  hasMore: boolean;
 };
 
 export type WorkItemView = {
@@ -2525,35 +2543,43 @@ export class ProjectRepository {
   private taskViewFilter(filters: WorkItemListFilters): {
     clauses: string[];
     params: unknown[];
+    selection: TaskListSelection;
   } {
     const clauses = ["archived_at IS NULL"];
     const params: unknown[] = [];
-    if (filters.status) {
+    const parentIds: string[] = [];
+    if (filters.parentId) parentIds.push(filters.parentId);
+    if (filters.parentKey) parentIds.push(this.rowForTaskKey(filters.parentKey).id);
+    const selection = canonicalTaskListSelection({
+      status: filters.status ?? null,
+      owner: filters.assigneeAgentId ?? null,
+      parent: [...new Set(parentIds)].sort().join("\u0000") || null,
+      milestone: filters.milestoneId ?? null,
+      ready: filters.readyOnly === true,
+      query: filters.query ?? null,
+    });
+    if (selection.status) {
       clauses.push("status = ?");
-      params.push(filters.status);
+      params.push(selection.status);
     }
-    if (filters.assigneeAgentId) {
+    if (selection.owner) {
       clauses.push("assignee_agent_id = ?");
-      params.push(filters.assigneeAgentId);
+      params.push(selection.owner);
     }
-    if (filters.parentId) {
+    for (const parentId of parentIds) {
       clauses.push("parent_id = ?");
-      params.push(filters.parentId);
+      params.push(parentId);
     }
-    if (filters.parentKey) {
-      clauses.push("parent_id = ?");
-      params.push(this.rowForTaskKey(filters.parentKey).id);
-    }
-    if (filters.milestoneId) {
+    if (selection.milestone) {
       clauses.push("milestone_id = ?");
-      params.push(filters.milestoneId);
+      params.push(selection.milestone);
     }
-    if (filters.query) {
+    if (selection.query) {
       clauses.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
-      const escaped = filters.query.replace(/[\\%_]/gu, "\\$&");
+      const escaped = selection.query.replace(/[\\%_]/gu, "\\$&");
       params.push(`%${escaped}%`, `%${escaped}%`);
     }
-    if (filters.readyOnly) {
+    if (selection.ready) {
       clauses.push(
         `status = 'READY' AND NOT EXISTS (
           SELECT 1 FROM work_item_relations relation
@@ -2563,7 +2589,66 @@ export class ProjectRepository {
         )`,
       );
     }
-    return { clauses, params };
+    return { clauses, params, selection };
+  }
+
+  listTaskViewPage(
+    filters: WorkItemPageFilters = {},
+    view: TaskViewName = "core",
+  ): TaskViewProjectionPage {
+    const { clauses, params, selection } = this.taskViewFilter(filters);
+    const project = this.meta.code;
+    const decoded = filters.cursor
+      ? decodeTaskListCursor(filters.cursor, { project, selection })
+      : { last: null };
+    if (decoded.last) {
+      clauses.push(
+        `(CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no) > (?, ?, ?, ?)`,
+      );
+      params.push(
+        decoded.last.priorityRank,
+        decoded.last.sortKey,
+        decoded.last.createdAt,
+        decoded.last.localNo,
+      );
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 20));
+    params.push(limit + 1);
+    const rows = this.#sqlite
+      .prepare(
+        taskViewProjectionSql({
+          whereSql: clauses.join(" AND "),
+          selectionTailSql: `ORDER BY CASE priority
+            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+            WHEN 'NORMAL' THEN 2 ELSE 3 END,
+            sort_key, created_at, local_no LIMIT ?`,
+          view,
+        }),
+      )
+      .all(...params) as TaskViewProjectionRow[];
+    const hasMore = rows.length > limit;
+    const items = rows.slice(0, limit);
+    const itemCursors = items.map((row) =>
+      encodeTaskListCursor({
+        project,
+        selection,
+        last: {
+          priorityRank: Number(row.priorityRank),
+          sortKey: Number(row.sortKey),
+          createdAt: row.createdAt,
+          localNo: Number(row.localNo),
+        },
+      }),
+    );
+    const startCursor = encodeTaskListCursor({ project, selection, last: null });
+    return {
+      items,
+      itemCursors,
+      nextCursor: hasMore ? itemCursors.at(-1)! : null,
+      retryCursor: filters.cursor ?? startCursor,
+      hasMore,
+    };
   }
 
   listTaskViewRows(
@@ -2579,7 +2664,7 @@ export class ProjectRepository {
           selectionTailSql: `ORDER BY CASE priority
             WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
             WHEN 'NORMAL' THEN 2 ELSE 3 END,
-            sort_key, created_at LIMIT ? OFFSET ?`,
+            sort_key, created_at, local_no LIMIT ? OFFSET ?`,
           view,
         }),
       )

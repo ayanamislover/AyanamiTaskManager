@@ -30,6 +30,7 @@ import {
   type MutationActorResolution,
   type ProjectActor,
   type RegisteredProject,
+  type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
 import { reconcileWorkItems } from "./reconcile.js";
@@ -1210,6 +1211,34 @@ export class AyanamiTaskService {
     return repository
       .listTaskViewRows(filters, view)
       .map((row) => projectTaskView(projectCode, row, view));
+  }
+
+  async listWorkItemPage(
+    projectCode: string,
+    filters: WorkItemPageFilters = {},
+    view: TaskViewName = "core",
+  ): Promise<{
+    items: TaskView[];
+    itemCursors: string[];
+    nextCursor: string | null;
+    retryCursor: string;
+    hasMore: boolean;
+  }> {
+    const repository = await this.#repository(projectCode);
+    if (
+      filters.milestoneId &&
+      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
+    ) {
+      throw new AtmError("MILESTONE_NOT_FOUND", {
+        message: `里程碑不存在：${filters.milestoneId}`,
+        details: { entity: "MILESTONE", reference: filters.milestoneId },
+      });
+    }
+    const page = repository.listTaskViewPage(filters, view);
+    return {
+      ...page,
+      items: page.items.map((row) => projectTaskView(projectCode, row, view)),
+    };
   }
 
   /** Desktop-only operational metadata kept outside the bounded Agent read views. */
