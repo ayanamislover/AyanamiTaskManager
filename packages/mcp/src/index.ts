@@ -11,8 +11,11 @@ import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   EvidenceInputSchema,
   EvidenceReferenceSchema,
+  RECORD_SUMMARY_CODE_POINT_LIMIT,
+  RecordSummarySchema,
   ReviewCandidateHashSchema,
   WorkItemPatchInputSchema,
+  unicodeCodePointLength,
 } from "@ayanami-task/protocol";
 
 const outputSchema = z.object({}).catchall(z.unknown());
@@ -20,6 +23,18 @@ const projectCode = z.string().trim().min(1).max(20);
 const taskKey = z.string().trim().min(1).max(40);
 const opId = z.string().trim().min(1).max(128);
 const sessionId = z.string().trim().min(1).max(128);
+const recordSummary = RecordSummarySchema.superRefine((value, context) => {
+  const actualLength = unicodeCodePointLength(value);
+  if (actualLength <= RECORD_SUMMARY_CODE_POINT_LIMIT) return;
+  context.addIssue({
+    code: "custom",
+    message: `INVALID_ARGUMENT ${JSON.stringify({
+      actual_length: actualLength,
+      limit: RECORD_SUMMARY_CODE_POINT_LIMIT,
+      path: "summary",
+    })}`,
+  });
+}).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
 export const MCP_SURFACE_VERSION = 2;
 
 function compactJsonSchema(value: unknown): unknown {
@@ -2057,7 +2072,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         op_id: opId,
         kind: z.enum(["DECISION", "CONSTRAINT", "FACT", "RISK", "REFERENCE", "LESSON"]),
         title: z.string().min(1).max(400),
-        summary: z.string().min(1).max(300),
+        summary: recordSummary,
         detail: z.string().max(100_000).default(""),
         importance: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
         scope: z.string().max(100).default("PROJECT"),
