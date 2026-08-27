@@ -963,18 +963,44 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page })
   await expect(page.locator(".atm-filterbar select")).toHaveCount(0);
   const statusFilter = page.getByRole("combobox", { name: "状态筛选" });
   await statusFilter.click();
+  const statusSelect = statusFilter.locator("..");
+  await expect(statusSelect).toHaveAttribute("data-open-input", "pointer");
+  expect(
+    await statusSelect.locator(".atm-select-popover").evaluate((element) =>
+      getComputedStyle(element)
+        .transitionDuration.split(",")
+        .some((duration) => duration.trim() !== "0s"),
+    ),
+  ).toBe(true);
   await page.getByRole("option", { name: "可开始" }).click();
   await expect(statusFilter).toContainText("可开始");
 
   const progressSourceFilter = page.getByRole("combobox", { name: "进度来源筛选" });
   await progressSourceFilter.focus();
-  await page.keyboard.press("Enter");
+  await page.keyboard.press("ArrowDown");
+  const progressSourceSelect = progressSourceFilter.locator("..");
+  await expect(progressSourceSelect).toHaveAttribute("data-open-input", "keyboard");
   await expect(page.getByRole("option", { name: "人工报告" })).toBeVisible();
+  await expect(page.getByRole("option", { selected: true })).toBeFocused();
+  expect(
+    await progressSourceSelect
+      .locator(".atm-select-popover")
+      .evaluate((element) => getComputedStyle(element).transitionDuration),
+  ).toBe("0s");
+  expect(
+    await progressSourceSelect
+      .locator(".atm-select-trigger > svg")
+      .evaluate((element) => getComputedStyle(element).transitionDuration),
+  ).toBe("0s");
   await page.waitForTimeout(250);
   await page.screenshot({
     path: resolve("output", "playwright", "e2e-custom-select-dark.png"),
     fullPage: true,
   });
+  await page.keyboard.press("Escape");
+  await expect(progressSourceFilter).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(progressSourceSelect).toHaveAttribute("data-open-input", "keyboard");
   await page.keyboard.press("Escape");
   await expect(progressSourceFilter).toBeFocused();
 

@@ -253,6 +253,7 @@ function AtmSelect({
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [openInput, setOpenInput] = useState<"pointer" | "keyboard">("pointer");
   const [placement, setPlacement] = useState<"top" | "bottom">("bottom");
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -265,8 +266,9 @@ function AtmSelect({
   );
   const selectedLabel = options[selectedIndex]?.label ?? options[0]?.label ?? "未选择";
 
-  const openAt = (index: number) => {
+  const openAt = (index: number, input: "pointer" | "keyboard") => {
     openingIndexRef.current = Math.max(0, Math.min(index, options.length - 1));
+    setOpenInput(input);
     const root = rootRef.current;
     if (root) {
       const bounds = root.getBoundingClientRect();
@@ -313,6 +315,7 @@ function AtmSelect({
       ref={rootRef}
       className={`atm-select atm-field-shell ${className}`.trim()}
       data-open={open ? "true" : "false"}
+      data-open-input={openInput}
       data-placement={placement}
     >
       <button
@@ -325,14 +328,18 @@ function AtmSelect({
         aria-controls={listboxId}
         aria-expanded={open}
         aria-haspopup="listbox"
-        onClick={() => (open ? closeAndFocusTrigger() : openAt(selectedIndex))}
+        onClick={(event) =>
+          open
+            ? closeAndFocusTrigger()
+            : openAt(selectedIndex, event.detail === 0 ? "keyboard" : "pointer")
+        }
         onKeyDown={(event) => {
           if (event.key === "ArrowDown") {
             event.preventDefault();
-            openAt(selectedIndex);
+            openAt(selectedIndex, "keyboard");
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
-            openAt(selectedIndex < 0 ? options.length - 1 : selectedIndex);
+            openAt(selectedIndex < 0 ? options.length - 1 : selectedIndex, "keyboard");
           }
         }}
       >
