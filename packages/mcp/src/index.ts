@@ -3,10 +3,9 @@ import { Buffer } from "node:buffer";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Readable, Writable } from "node:stream";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, type ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
@@ -28,6 +27,12 @@ import {
   externalizeObjectSchema,
   unicodeCodePointLength,
 } from "@ayanami-task/protocol";
+import {
+  ToolDefinitionRegistry,
+  type AyanamiServerProfile,
+  type AyanamiToolProfile,
+  type DefineToolConfig,
+} from "./tool-registry.js";
 
 const outputSchema = z.object({}).catchall(z.unknown());
 const projectCode = z.string().trim().min(1).max(20);
@@ -47,328 +52,7 @@ const recordSummary = RecordSummarySchema.superRefine((value, context) => {
   });
 }).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
 export const MCP_SURFACE_VERSION = 3;
-export type AyanamiMcpProfile = "core" | "memory" | "legacy";
-
-const coreMcpTools = [
-  "atm_begin",
-  "atm_brief",
-  "atm_task_list",
-  "atm_task_get",
-  "atm_task_create",
-  "atm_end",
-] as const;
-const memoryMcpTools = [
-  "atm_task_patch",
-  "atm_progress_add",
-  "atm_record",
-  "atm_search",
-  "atm_delta",
-] as const;
-const mcpProfileTools: Record<AyanamiMcpProfile, readonly string[]> = {
-  core: coreMcpTools,
-  memory: memoryMcpTools,
-  legacy: [...coreMcpTools, ...memoryMcpTools],
-};
-
-function compactJsonSchema(value: unknown, preserveBusinessSemantics = false): unknown {
-  if (Array.isArray(value))
-    return value.map((entry) => compactJsonSchema(entry, preserveBusinessSemantics));
-  if (!value || typeof value !== "object") return value;
-  const source = value as Record<string, unknown>;
-  if (Object.keys(source).length === 0) return {};
-  if (
-    Array.isArray(source.anyOf) &&
-    source.anyOf.length === 2 &&
-    source.anyOf.every(
-      (entry) =>
-        entry &&
-        typeof entry === "object" &&
-        !Array.isArray(entry) &&
-        !("enum" in entry) &&
-        !("const" in entry),
-    )
-  ) {
-    const types = source.anyOf.map((entry) => (entry as Record<string, unknown>)?.type);
-    if (types.every((type) => typeof type === "string") && types.includes("null"))
-      return { type: types };
-  }
-  if (
-    Array.isArray(source.anyOf) &&
-    source.anyOf.length > 0 &&
-    source.anyOf.every(
-      (entry) =>
-        entry &&
-        typeof entry === "object" &&
-        !Array.isArray(entry) &&
-        (entry as Record<string, unknown>).type === "object",
-    )
-  ) {
-    const { anyOf, ...rest } = source;
-    return compactJsonSchema(
-      {
-        ...rest,
-        type: "object",
-        anyOf: (anyOf as Array<Record<string, unknown>>).map(
-          ({ type: _type, ...branch }) => branch,
-        ),
-      },
-      preserveBusinessSemantics,
-    );
-  }
-  const omitted = preserveBusinessSemantics
-    ? new Set(["$schema"])
-    : new Set([
-        "$schema",
-        "default",
-        "minimum",
-        "maximum",
-        "exclusiveMinimum",
-        "exclusiveMaximum",
-        "minLength",
-        "minItems",
-        "maxItems",
-        "pattern",
-      ]);
-  // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
-  // Agent 需要看到 default 的完整语义，因此保留 default，只把这些键从 required 去掉。
-  const properties =
-    source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
-      ? (source.properties as Record<string, unknown>)
-      : null;
-  const defaulted = new Set(
-    properties
-      ? Object.entries(properties)
-          .filter(([, schema]) =>
-            Boolean(
-              schema && typeof schema === "object" && !Array.isArray(schema) && "default" in schema,
-            ),
-          )
-          .map(([key]) => key)
-      : [],
-  );
-  return Object.fromEntries(
-    Object.entries(source)
-      .filter(([key, entry]) => !omitted.has(key) && entry !== undefined)
-      .flatMap(([key, entry]) => {
-        if (key === "type" && entry === "string" && (source.enum || source.const !== undefined)) {
-          return [];
-        }
-        if (!preserveBusinessSemantics && key === "maxLength" && entry !== 300) return [];
-        if (key === "required" && Array.isArray(entry) && defaulted.size > 0) {
-          const required = entry.filter((field) => !defaulted.has(String(field)));
-          return required.length === 0
-            ? []
-            : [[key, compactJsonSchema(required, preserveBusinessSemantics)]];
-        }
-        return [[key, compactJsonSchema(entry, preserveBusinessSemantics)]];
-      }),
-  );
-}
-
-function publicToolJsonSchema(name: string, value: unknown): Record<string, unknown> {
-  const schema = compactJsonSchema(
-    value,
-    name === "atm_begin" || name === "atm_task_create",
-  ) as Record<string, any>;
-  if (name === "atm_task_patch") {
-    const item = schema.properties?.items?.items;
-    if (item) {
-      const evidenceDefinition = item.properties.evidence.items;
-      schema.$defs = { e: evidenceDefinition };
-      item.properties.evidence.items = { $ref: "#/$defs/e" };
-      const checklistItem = item.properties.checklist_items.items;
-      checklistItem.properties.evidence.items.anyOf[1] = { $ref: "#/$defs/e" };
-      item.properties.checklist_items.minItems = 1;
-      item.dependentSchemas = {
-        expected_fields: { properties: { operation: { const: "edit" } } },
-      };
-      item.properties.expected_fields.minProperties = 1;
-      for (const acceptance of [
-        item.properties.acceptance,
-        item.properties.expected_fields.properties.acceptance,
-      ]) {
-        acceptance.maxItems = 100;
-        acceptance.items.maxLength = 1000;
-      }
-      item.allOf = [
-        {
-          if: { properties: { operation: { const: "block" } } },
-          then: { required: ["blocked_reason"] },
-        },
-        {
-          if: { properties: { operation: { enum: ["wait_user", "wait_agent"] } } },
-          then: { required: ["waiting_for"] },
-        },
-        {
-          if: { properties: { operation: { const: "review_request" } } },
-          then: {
-            required: [
-              "parent_checklist_id",
-              "expected_parent_checklist_version",
-              "candidate_hashes",
-            ],
-            propertyNames: {
-              enum: [
-                "task_key",
-                "expected_version",
-                "takeover_stale",
-                "operation",
-                "parent_checklist_id",
-                "expected_parent_checklist_version",
-                "candidate_hashes",
-              ],
-            },
-          },
-        },
-        {
-          if: { properties: { operation: { const: "review_submit" } } },
-          then: {
-            required: ["request_key", "verdict", "candidate_hashes", "evidence"],
-            propertyNames: {
-              enum: [
-                "task_key",
-                "expected_version",
-                "takeover_stale",
-                "operation",
-                "request_key",
-                "verdict",
-                "candidate_hashes",
-                "evidence",
-              ],
-            },
-          },
-        },
-        {
-          if: { properties: { operation: { const: "checklist_single" } } },
-          then: {
-            required: ["checklist_items"],
-            properties: { checklist_items: { maxItems: 1 } },
-            propertyNames: {
-              enum: [
-                "task_key",
-                "expected_version",
-                "takeover_stale",
-                "operation",
-                "checklist_items",
-              ],
-            },
-          },
-        },
-        {
-          if: { properties: { operation: { const: "checklist_batch" } } },
-          then: {
-            required: ["checklist_items"],
-            propertyNames: {
-              enum: [
-                "task_key",
-                "expected_version",
-                "takeover_stale",
-                "operation",
-                "checklist_items",
-              ],
-            },
-          },
-        },
-        {
-          if: { properties: { operation: { const: "verify_and_complete" } } },
-          then: {
-            propertyNames: {
-              enum: ["task_key", "expected_version", "takeover_stale", "operation"],
-            },
-          },
-        },
-      ];
-    }
-    schema.allOf = [
-      {
-        if: {
-          properties: {
-            items: {
-              contains: {
-                properties: {
-                  operation: {
-                    enum: [
-                      "verify_and_complete",
-                      "review_request",
-                      "review_submit",
-                      "checklist_single",
-                      "checklist_batch",
-                    ],
-                  },
-                },
-              },
-            },
-          },
-        },
-        then: { properties: { items: { maxItems: 1 } } },
-      },
-    ];
-  }
-  if (name === "atm_progress_add") {
-    schema.allOf = [
-      {
-        if: { properties: { scope: { const: "task" } } },
-        then: { required: ["task_key"], not: { required: ["health"] } },
-      },
-      {
-        if: { properties: { scope: { const: "project" } } },
-        then: { not: { required: ["percent"] } },
-      },
-    ];
-  }
-  if (name === "atm_search") {
-    schema.anyOf = [{ required: ["query"] }, { required: ["op_id"] }];
-    schema.dependentRequired = { session: ["op_id"] };
-  }
-  return schema;
-}
-
-function installCompactToolList(server: McpServer): void {
-  type RegisteredTool = {
-    enabled: boolean;
-    title?: string;
-    description?: string;
-    inputSchema?: z.ZodType;
-    annotations?: Record<string, unknown>;
-    _meta?: Record<string, unknown>;
-  };
-  const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
-    ._registeredTools;
-  server.server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: Object.entries(registered)
-      .filter(([, tool]) => tool.enabled)
-      .map(([name, tool]) => ({
-        name,
-        ...(tool.title ? { title: tool.title } : {}),
-        inputSchema: publicToolJsonSchema(
-          name,
-          tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : { type: "object" },
-        ) as any,
-        ...(tool._meta ? { _meta: tool._meta } : {}),
-      })),
-  }));
-}
-
-function installProjectErrorDetails(server: McpServer, service: AyanamiTaskService): void {
-  type Handler = (input: Record<string, unknown>, ...rest: unknown[]) => unknown;
-  type RegisteredTool = { handler: Handler };
-  const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
-    ._registeredTools;
-  for (const tool of Object.values(registered)) {
-    const handler = tool.handler;
-    tool.handler = (input, ...rest) => {
-      const project =
-        typeof input.project === "string"
-          ? input.project
-          : typeof input.project_code === "string"
-            ? input.project_code
-            : undefined;
-      return withMcpErrorDetails(service, project === undefined ? {} : { project }, async () =>
-        handler(input, ...rest),
-      );
-    };
-  }
-}
+export type AyanamiMcpProfile = AyanamiServerProfile;
 
 function plain(value: unknown): Record<string, unknown> {
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -2332,24 +2016,33 @@ function fitReconciliationPage(
   };
 }
 
-export function createAyanamiMcpServer(
-  service: AyanamiTaskService,
-  options: { profile?: AyanamiMcpProfile } = {},
-): McpServer {
-  const profile = options.profile ?? "core";
-  const server = new McpServer(
-    { name: "ayanami-task-manager", version: "1.0.18" },
-    {
-      instructions:
-        profile === "legacy"
-          ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory 双 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
-          : profile === "core"
-            ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
-            : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
-    },
-  );
+export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefinitionRegistry {
+  const registry = new ToolDefinitionRegistry();
+  const defineTool = <Input extends z.ZodType>(
+    profile: AyanamiToolProfile,
+    name: string,
+    config: DefineToolConfig<Input>,
+    handler: ToolCallback<Input>,
+  ): void => {
+    const wrapped = (async (input: z.output<Input>, extra: Parameters<typeof handler>[1]) => {
+      const record = input as Record<string, unknown>;
+      const project =
+        typeof record.project === "string"
+          ? record.project
+          : typeof record.project_code === "string"
+            ? record.project_code
+            : undefined;
+      return await withMcpErrorDetails(
+        service,
+        project === undefined ? {} : { project },
+        async () => await handler(input, extra),
+      );
+    }) as ToolCallback<Input>;
+    registry.define(profile, name, config, wrapped);
+  };
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_begin",
     {
       description: "直接使用返回的 brief",
@@ -2392,7 +2085,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_brief",
     {
       description: "仅在上下文压缩、长时间离开或明确恢复 working set",
@@ -2458,7 +2152,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_task_list",
     {
       description: "分页列任务。",
@@ -2548,7 +2243,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_task_get",
     {
       description: "读单个任务。",
@@ -2588,7 +2284,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_task_create",
     {
       description: "批量创建任务与关系。",
@@ -2626,7 +2323,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "memory",
     "atm_task_patch",
     {
       description: "批量变更任务。",
@@ -2880,7 +2578,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "memory",
     "atm_progress_add",
     {
       description: "写任务或项目进度。",
@@ -2967,7 +2666,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "memory",
     "atm_record",
     {
       description: "保存关键记录。",
@@ -3016,7 +2716,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "memory",
     "atm_search",
     {
       description: "搜索事实。",
@@ -3174,7 +2875,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "memory",
     "atm_delta",
     {
       description: "读增量变化。",
@@ -3201,7 +2903,8 @@ export function createAyanamiMcpServer(
     },
   );
 
-  server.registerTool(
+  defineTool(
+    "core",
     "atm_end",
     {
       description: "结束会话并交接。",
@@ -3239,15 +2942,26 @@ export function createAyanamiMcpServer(
     },
   );
 
-  const activeTools = new Set(mcpProfileTools[profile]);
-  const registered = (
-    server as unknown as { _registeredTools: Record<string, { enabled: boolean }> }
-  )._registeredTools;
-  for (const [name, tool] of Object.entries(registered)) {
-    tool.enabled = activeTools.has(name);
-  }
-  installProjectErrorDetails(server, service);
-  installCompactToolList(server);
+  return registry;
+}
+
+export function createAyanamiMcpServer(
+  service: AyanamiTaskService,
+  options: { profile?: AyanamiMcpProfile } = {},
+): McpServer {
+  const profile = options.profile ?? "core";
+  const server = new McpServer(
+    { name: "ayanami-task-manager", version: "1.0.18" },
+    {
+      instructions:
+        profile === "legacy"
+          ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory 双 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
+          : profile === "core"
+            ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
+            : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
+    },
+  );
+  createAyanamiToolRegistry(service).register(server, profile);
   return server;
 }
 

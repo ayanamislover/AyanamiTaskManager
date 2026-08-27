@@ -341,12 +341,11 @@ describe("MCP mutation contracts", () => {
           expect.arrayContaining([
             expect.objectContaining({ type: "string" }),
             expect.objectContaining({
-              type: "object",
               required: ["kind", "value"],
               properties: expect.objectContaining({
-                kind: {
+                kind: expect.objectContaining({
                   enum: ["git_sha", "atm_record", "atm_task", "test_result", "url", "file"],
-                },
+                }),
                 value: expect.objectContaining({ type: "string" }),
                 note: expect.objectContaining({ type: "string" }),
               }),
@@ -730,9 +729,15 @@ describe("MCP mutation contracts", () => {
       expect(itemSchema.properties).toMatchObject({
         acceptance: { type: "array", items: { type: "string" } },
         cancel_reason: { type: "string" },
-        duplicate_of: { type: ["string", "null"] },
-        superseded_by: { type: ["string", "null"] },
       });
+      for (const field of ["duplicate_of", "superseded_by"] as const) {
+        expect(itemSchema.properties[field].anyOf).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ type: "string" }),
+            expect.objectContaining({ type: "null" }),
+          ]),
+        );
+      }
 
       const response = await client.callTool({
         name: "atm_task_patch",
