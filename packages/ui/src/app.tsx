@@ -39,7 +39,11 @@ import { SunIcon as Sun } from "@phosphor-icons/react/dist/icons/Sun";
 import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/UsersThree";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
-import { AyanamiClient, type RegisteredProject } from "@ayanami-task/client";
+import {
+  AyanamiClient,
+  type RegisteredProject,
+  type UserRecordCreateInput,
+} from "@ayanami-task/client";
 import {
   findAgentSessionConflicts,
   groupAgentSessions,
@@ -47,6 +51,7 @@ import {
 } from "./agent-sessions.js";
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
+import { recordDraftToUserInput } from "./record-input.js";
 import {
   formatReconciliationAge,
   reconciliationLabel,
@@ -2875,24 +2880,29 @@ function CreateRecordModal({
 }) {
   const queryClient = useQueryClient();
   const dialogRef = useDialogAccessibility(close);
-  const [kind, setKind] = useState("DECISION");
-  const [importance, setImportance] = useState("NORMAL");
+  const [kind, setKind] = useState<UserRecordCreateInput["kind"]>("DECISION");
+  const [importance, setImportance] =
+    useState<NonNullable<UserRecordCreateInput["importance"]>>("NORMAL");
   const [topic, setTopic] = useState("");
+  const [subjectKey, setSubjectKey] = useState("");
   const [title, setTitle] = useState("");
   const [summary, setSummary] = useState("");
   const [detail, setDetail] = useState("");
   const mutation = useMutation({
     mutationFn: () =>
-      client.recordAsUser(project, {
-        opId: `ui-record-${crypto.randomUUID()}`,
-        kind,
-        importance,
-        title,
-        summary,
-        detail,
-        ...(topic.trim() ? { topic: topic.trim() } : {}),
-        scope: "PROJECT",
-      }),
+      client.recordAsUser(
+        project,
+        recordDraftToUserInput({
+          opId: `ui-record-${crypto.randomUUID()}`,
+          kind,
+          importance,
+          title,
+          summary,
+          detail,
+          topic,
+          subjectKey,
+        }),
+      ),
     onSuccess: async () => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["records", project] }),
@@ -2936,7 +2946,7 @@ function CreateRecordModal({
                   { value: "VERIFICATION", label: "验证" },
                   { value: "WAIVER", label: "豁免" },
                 ]}
-                onChange={setKind}
+                onChange={(value) => setKind(value as UserRecordCreateInput["kind"])}
               />
             </div>
             <div className="atm-field">
@@ -2951,7 +2961,9 @@ function CreateRecordModal({
                   { value: "HIGH", label: "高" },
                   { value: "CRITICAL", label: "紧急" },
                 ]}
-                onChange={setImportance}
+                onChange={(value) =>
+                  setImportance(value as NonNullable<UserRecordCreateInput["importance"]>)
+                }
               />
             </div>
           </div>
@@ -2960,8 +2972,19 @@ function CreateRecordModal({
             <input
               id="record-topic"
               value={topic}
+              maxLength={200}
               placeholder="例如：release/1.0.16 或 review/candidate-a"
               onChange={(event) => setTopic(event.target.value)}
+            />
+          </div>
+          <div className="atm-field">
+            <label htmlFor="record-subject-key">主题标识（可选）</label>
+            <input
+              id="record-subject-key"
+              value={subjectKey}
+              maxLength={200}
+              placeholder="例如：candidate:release-v1"
+              onChange={(event) => setSubjectKey(event.target.value)}
             />
           </div>
           <div className="atm-field">
@@ -3821,6 +3844,9 @@ function ProjectPage({
               </div>
               <h3>{record.title}</h3>
               {record.topic ? <div className="atm-key">主题：{record.topic}</div> : null}
+              {record.subjectKey ? (
+                <div className="atm-key">主题标识：{record.subjectKey}</div>
+              ) : null}
               <p>{record.summary}</p>
               {(record.relatedRecords ?? record.related_records)?.length ? (
                 <div className="atm-row-sub">
