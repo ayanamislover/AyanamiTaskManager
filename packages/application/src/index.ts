@@ -679,12 +679,20 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).listAgentSessions(limit);
   }
 
+  async getSession(projectCode: string, id: string) {
+    return (await this.#repository(projectCode)).getSessionView(id);
+  }
+
   async listRecords(projectCode: string, limit = 100) {
     return (await this.#repository(projectCode)).listRecords(limit);
   }
 
   async getRecord(projectCode: string, reference: string) {
     return (await this.#repository(projectCode)).getRecord(reference);
+  }
+
+  async getProgressUpdate(projectCode: string, id: string) {
+    return (await this.#repository(projectCode)).getProgressUpdate(id);
   }
 
   async listProjectUpdates(projectCode: string, limit = 50) {

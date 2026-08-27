@@ -203,6 +203,57 @@ export type BriefSnapshot = {
   artifacts: Array<{ name: string; ref: string | null }>;
 };
 
+export type ProgressUpdateView = {
+  id: string;
+  taskKey: string;
+  percent: number | null;
+  progressBucket: number | null;
+  summary: string;
+  completed: Array<string | { text: string; workItemKey?: string }>;
+  next: string[];
+  blocker: string | null;
+  actor: string;
+  sessionId: string | null;
+  evidence: unknown[];
+  opId: string | null;
+  createdAt: string;
+};
+
+export type SessionView = {
+  id: string;
+  agentId: string;
+  displayName: string;
+  clientKind: string;
+  capabilities: unknown[];
+  parentSessionId: string | null;
+  predecessorSessionId: string | null;
+  threadId: string | null;
+  role: string;
+  cwd: string | null;
+  workState: string;
+  connectionState: string;
+  currentTaskKey: string | null;
+  heartbeatAt: string | null;
+  version: number;
+  startedAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  retirementReason: string | null;
+  closeReason: string | null;
+  git: {
+    available: boolean;
+    repoRoot: string | null;
+    worktreeRoot: string | null;
+    commonDir: string | null;
+    isLinkedWorktree: boolean | null;
+    branch: string | null;
+    head: string | null;
+    detached: boolean | null;
+    dirty: boolean | null;
+    error: string | null;
+  };
+};
+
 export type ReviewCandidateHash = { name: string; value: string };
 
 export type ReviewSubmissionView = {
@@ -550,9 +601,58 @@ export class ProjectRepository {
   }
 
   getSession(id: string): any {
-    const row = this.#sqlite.prepare("SELECT * FROM agent_sessions WHERE id = ?").get(id);
+    const row = this.#sqlite
+      .prepare(
+        `SELECT session.*, agent.display_name, agent.client_kind, agent.capabilities_json
+         FROM agent_sessions session
+         JOIN agents agent ON agent.id = session.agent_id
+         WHERE session.id = ?`,
+      )
+      .get(id);
     if (!row) throw new Error(`SESSION_NOT_FOUND: ${id}`);
     return row;
+  }
+
+  getSessionView(id: string): SessionView {
+    const row = this.getSession(id);
+    const nullableBoolean = (value: unknown): boolean | null =>
+      value == null ? null : Boolean(value);
+    return {
+      id: row.id,
+      agentId: row.agent_id,
+      displayName: row.display_name,
+      clientKind: row.client_kind,
+      capabilities: json(row.capabilities_json, []),
+      parentSessionId: row.parent_session_id ?? null,
+      predecessorSessionId: row.predecessor_session_id ?? null,
+      threadId: row.thread_id ?? null,
+      role: row.role,
+      cwd: row.cwd ?? null,
+      workState: row.work_state,
+      connectionState: row.connection_state,
+      currentTaskKey: row.current_work_item_id
+        ? this.taskKeyForId(String(row.current_work_item_id))
+        : null,
+      heartbeatAt: row.heartbeat_at ?? null,
+      version: Number(row.version),
+      startedAt: row.started_at,
+      updatedAt: row.updated_at,
+      closedAt: row.closed_at ?? null,
+      retirementReason: row.retirement_reason ?? null,
+      closeReason: row.close_reason ?? null,
+      git: {
+        available: Boolean(row.git_available),
+        repoRoot: row.git_repo_root ?? null,
+        worktreeRoot: row.worktree_root ?? null,
+        commonDir: row.git_common_dir ?? null,
+        isLinkedWorktree: nullableBoolean(row.git_is_linked_worktree),
+        branch: row.git_branch ?? null,
+        head: row.git_head ?? null,
+        detached: nullableBoolean(row.git_detached),
+        dirty: nullableBoolean(row.git_dirty),
+        error: row.git_error ?? null,
+      },
+    };
   }
 
   private normalizeMutationRequest(operation: string, request: unknown): unknown {
@@ -1023,16 +1123,49 @@ export class ProjectRepository {
     };
   }
 
+  private progressUpdateView(row: any): ProgressUpdateView {
+    return {
+      id: row.id,
+      taskKey: `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}`,
+      percent: row.percent,
+      progressBucket: row.progress_bucket,
+      summary: row.summary,
+      completed: json(row.completed_json, []),
+      next: json(row.next_json, []),
+      blocker: row.blocker_text,
+      actor: row.actor,
+      sessionId: row.session_id,
+      evidence: json(row.evidence_json, []),
+      opId: row.op_id ?? null,
+      createdAt: row.created_at,
+    };
+  }
+
+  getProgressUpdate(id: string): ProgressUpdateView {
+    const normalized = id.trim();
+    const row = this.#sqlite
+      .prepare(
+        `SELECT progress.*, item.local_no FROM progress_updates progress
+         JOIN work_items item ON item.id = progress.work_item_id
+         WHERE progress.id = ?`,
+      )
+      .get(normalized);
+    if (!row) throw new Error(`PROGRESS_NOT_FOUND: ${normalized}`);
+    return this.progressUpdateView(row);
+  }
+
   getOperationTrace(opId: string, sessionId?: string | null): any {
     const normalized = opId.trim();
     if (!normalized) throw new Error("OPERATION_ID_INVALID");
+    const normalizedSession = sessionId == null ? null : sessionId.trim();
+    if (normalizedSession !== null) this.getSession(normalizedSession);
     const mutations = this.#sqlite
       .prepare(
         `SELECT operation, response_json, actor_session_id, created_at
          FROM idempotency_keys WHERE op_id = ? AND (? IS NULL OR actor_session_id = ?)
          ORDER BY created_at`,
       )
-      .all(normalized, sessionId ?? null, sessionId ?? null)
+      .all(normalized, normalizedSession, normalizedSession)
       .map((row: any) => ({
         operation: row.operation,
         response: json(row.response_json, null),
@@ -1041,42 +1174,42 @@ export class ProjectRepository {
       }));
     const records = (
       this.#sqlite
-        .prepare("SELECT id FROM records WHERE op_id = ? ORDER BY created_at")
-        .all(normalized) as Array<{ id: string }>
+        .prepare(
+          `SELECT id FROM records
+           WHERE op_id = ? AND (? IS NULL OR source_session_id = ?)
+           ORDER BY created_at`,
+        )
+        .all(normalized, normalizedSession, normalizedSession) as Array<{ id: string }>
     ).map((row) => this.getRecord(row.id));
     const progress = (
       this.#sqlite
         .prepare(
           `SELECT progress.*, item.local_no FROM progress_updates progress
            JOIN work_items item ON item.id = progress.work_item_id
-           WHERE progress.op_id = ? ORDER BY progress.created_at`,
+           WHERE progress.op_id = ? AND (? IS NULL OR progress.session_id = ?)
+           ORDER BY progress.created_at`,
         )
-        .all(normalized) as any[]
-    ).map((row) => ({
-      opId: row.op_id,
-      taskKey: `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}`,
-      percent: row.percent,
-      summary: row.summary,
-      completed: json(row.completed_json, []),
-      next: json(row.next_json, []),
-      evidence: json(row.evidence_json, []),
-      blocker: row.blocker_text,
-      sessionId: row.session_id,
-      createdAt: row.created_at,
-    }));
+        .all(normalized, normalizedSession, normalizedSession) as any[]
+    ).map((row) => this.progressUpdateView(row));
     const projectUpdates = (
       this.#sqlite
-        .prepare("SELECT * FROM project_updates WHERE op_id = ? ORDER BY created_at")
-        .all(normalized) as any[]
+        .prepare(
+          `SELECT * FROM project_updates
+           WHERE op_id = ? AND (? IS NULL OR session_id = ?)
+           ORDER BY created_at`,
+        )
+        .all(normalized, normalizedSession, normalizedSession) as any[]
     ).map((row) => this.projectUpdateView(row));
     const events = (
       this.#sqlite
         .prepare(
           `SELECT sequence, type, aggregate_type, aggregate_id, actor_id, session_id,
                   payload_json, created_at, op_id
-           FROM events WHERE op_id = ? ORDER BY sequence`,
+           FROM events
+           WHERE op_id = ? AND (? IS NULL OR session_id = ?)
+           ORDER BY sequence`,
         )
-        .all(normalized) as any[]
+        .all(normalized, normalizedSession, normalizedSession) as any[]
     ).map((row) => ({
       seq: row.sequence,
       type: row.type,
@@ -1117,6 +1250,7 @@ export class ProjectRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       opId: row.op_id ?? null,
+      sessionId: row.session_id ?? null,
     };
   }
 
@@ -1133,7 +1267,7 @@ export class ProjectRepository {
         .prepare(
           `SELECT id, health, summary, completed_json, risks_json, next_json, evidence_json,
                 from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-                op_id
+                op_id, session_id
          FROM project_updates ORDER BY created_at DESC LIMIT ?`,
         )
         .all(Math.min(100, Math.max(1, limit))) as any[]
@@ -1187,8 +1321,8 @@ export class ProjectRepository {
             `INSERT INTO project_updates(
                id, health, summary, completed_json, risks_json, next_json,
                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-               op_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, NULL, ?, ?, ?)`,
+               op_id, session_id
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, NULL, ?, ?, ?, ?)`,
           )
           .run(
             id,
@@ -1203,6 +1337,7 @@ export class ProjectRepository {
             now,
             now,
             opId,
+            actor.sessionId,
           );
         const seq = this.appendEvent("project.update.drafted", actor, "PROJECT_UPDATE", id, {
           fromSequence,
@@ -1277,7 +1412,7 @@ export class ProjectRepository {
             .prepare(
               `UPDATE project_updates SET health = ?, summary = ?, completed_json = ?, risks_json = ?,
                next_json = ?, evidence_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?,
-               updated_at = ?, op_id = ? WHERE id = ?`,
+               updated_at = ?, op_id = ?, session_id = ? WHERE id = ?`,
             )
             .run(
               normalizedInput.health,
@@ -1290,6 +1425,7 @@ export class ProjectRepository {
               now,
               now,
               opId,
+              actor.sessionId,
               id,
             );
         } else {
@@ -1298,8 +1434,8 @@ export class ProjectRepository {
               `INSERT INTO project_updates(
                  id, health, summary, completed_json, risks_json, next_json, evidence_json,
                  from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-                 op_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?)`,
+                 op_id, session_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               id,
@@ -1316,6 +1452,7 @@ export class ProjectRepository {
               now,
               now,
               opId,
+              actor.sessionId,
             );
         }
         this.#sqlite
@@ -3214,7 +3351,15 @@ export class ProjectRepository {
       blocker?: string | null;
       evidence?: unknown[];
     },
-  ): { ok: 1; noop?: true; seq: number; key: string; v: number; opId: string } {
+  ): {
+    ok: 1;
+    noop?: true;
+    seq: number;
+    key: string;
+    v: number;
+    opId: string;
+    progressId: string;
+  } {
     const normalizedInput = {
       ...input,
       ...(input.evidence === undefined ? {} : { evidence: this.normalizeEvidence(input.evidence) }),
@@ -3233,10 +3378,12 @@ export class ProjectRepository {
         const hash = createHash("sha256").update(normalizedInput.summary.trim()).digest("hex");
         const last = this.#sqlite
           .prepare(
-            `SELECT progress_bucket, summary_hash FROM progress_updates
+            `SELECT id, progress_bucket, summary_hash FROM progress_updates
              WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`,
           )
-          .get(row.id) as { progress_bucket: number | null; summary_hash: string } | undefined;
+          .get(row.id) as
+          | { id: string; progress_bucket: number | null; summary_hash: string }
+          | undefined;
         if (
           last &&
           last.progress_bucket === bucket &&
@@ -3250,9 +3397,11 @@ export class ProjectRepository {
             key: normalizedInput.taskKey,
             v: row.version,
             opId,
+            progressId: last.id,
           };
         }
         const now = nowIso();
+        const progressId = createUlid();
         this.#sqlite
           .prepare(
             `INSERT INTO progress_updates(
@@ -3262,7 +3411,7 @@ export class ProjectRepository {
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
-            createUlid(),
+            progressId,
             row.id,
             normalizedInput.percent ?? null,
             bucket,
@@ -3334,12 +3483,19 @@ export class ProjectRepository {
         );
         this.upsertSearchDocument(
           "PROGRESS",
-          createUlid(),
+          progressId,
           normalizedInput.taskKey,
           normalizedInput.summary.trim(),
           normalizedInput.summary.trim(),
         );
-        return { ok: 1, seq, key: normalizedInput.taskKey, v: updated.version, opId };
+        return {
+          ok: 1,
+          seq,
+          key: normalizedInput.taskKey,
+          v: updated.version,
+          opId,
+          progressId,
+        };
       },
     });
   }
