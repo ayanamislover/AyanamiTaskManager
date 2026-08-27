@@ -630,6 +630,16 @@ describe("MCP public/runtime schema truth", () => {
         },
       ]);
       expect(patchItem.properties.expected_fields.minProperties).toBe(1);
+      expect(patchItem.properties.acceptance).toMatchObject({
+        type: "array",
+        maxItems: 100,
+        items: { type: "string", maxLength: 1000 },
+      });
+      expect(patchItem.properties.expected_fields.properties.acceptance).toMatchObject({
+        type: "array",
+        maxItems: 100,
+        items: { type: "string", maxLength: 1000 },
+      });
       expect(
         fixture.tools.find((tool) => tool.name === "atm_task_patch")!.inputSchema.allOf,
       ).toEqual(expectedManualConditions.patchRootAllOf);

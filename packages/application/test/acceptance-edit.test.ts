@@ -115,6 +115,49 @@ describe("WorkItem acceptance edit", () => {
     }
   });
 
+  it("公开 delta 完整读回最大合法 acceptance 审计值", async () => {
+    const ctx = await openFixture("ACMAXAUDIT");
+    try {
+      const before = Array.from(
+        { length: 100 },
+        (_, index) => `${String(index).padStart(3, "0")}:${"旧".repeat(996)}`,
+      );
+      const after = Array.from(
+        { length: 100 },
+        (_, index) => `${String(index).padStart(3, "0")}:${"新".repeat(996)}`,
+      );
+      const initial = await ctx.service.getWorkItem(ctx.project.code, ctx.parent.key);
+      const seeded = await ctx.service.patchWorkItems(
+        ctx.project.code,
+        ctx.session,
+        "seed-max-acceptance",
+        [
+          {
+            taskKey: initial.key,
+            expectedVersion: initial.version,
+            operation: "edit",
+            acceptance: before,
+          },
+        ],
+      );
+      await ctx.service.patchWorkItems(ctx.project.code, ctx.session, "audit-max-acceptance", [
+        {
+          taskKey: initial.key,
+          expectedVersion: seeded.items[0]!.version,
+          operation: "edit",
+          acceptance: after,
+        },
+      ]);
+
+      const delta = await ctx.service.delta(ctx.project.code, 0, 100, ["work.updated"]);
+      expect(delta.events.find((event) => event.opId === "audit-max-acceptance")?.changes).toEqual({
+        acceptance: { before, after },
+      });
+    } finally {
+      ctx.service.close();
+    }
+  });
+
   it("目标字段已被并发修改时拒绝 stale expected_fields 且零写入", async () => {
     const ctx = await openFixture("ACCONFLICT");
     try {
