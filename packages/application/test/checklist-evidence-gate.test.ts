@@ -41,7 +41,7 @@ async function taskWithRequiredEvidence(dataDir: string) {
   await service.patchWorkItems(project.code, begun.session, "start-1", [
     { taskKey: task.key, expectedVersion: task.version, operation: "start" },
   ]);
-  const detail = await service.getWorkItem(project.code, task.key, "context");
+  const detail = await service.getWorkItem(project.code, task.key, "full");
   return { service, project, session: begun.session, task, checklistId: detail.checklist[0]!.id };
 }
 
@@ -82,13 +82,25 @@ describe("检查项证据闸门", () => {
           status: "DONE",
           evidence: [],
         }),
-      ).rejects.toThrow("COMPLETION_GATE_FAILED: evidence required");
+      ).rejects.toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: [{ checklist_id: ctx.checklistId, code: "EVIDENCE_REQUIRED" }],
+        },
+      });
       const fresh = await ctx.service.getWorkItem(ctx.project.code, ctx.task.key, "core");
       await expect(
         ctx.service.patchWorkItems(ctx.project.code, ctx.session, "done-2", [
           { taskKey: ctx.task.key, expectedVersion: fresh.version, operation: "complete" },
         ]),
-      ).rejects.toThrow("COMPLETION_GATE_FAILED");
+      ).rejects.toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: expect.arrayContaining([
+            { checklist_id: ctx.checklistId, code: "CHECKLIST_INCOMPLETE" },
+          ]),
+        },
+      });
     } finally {
       ctx.service.close();
     }

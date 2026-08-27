@@ -52,7 +52,7 @@ describe("单 Agent 完整工作流", () => {
         { taskKey: task.key, expectedVersion: task.version, operation: "start" },
       ]);
       expect(claimed.items[0]?.status).toBe("IN_PROGRESS");
-      const detail = await service.getWorkItem(project.code, task.key, "context");
+      const detail = await service.getWorkItem(project.code, task.key, "full");
       const checked = await service.updateChecklist(project.code, begun.session, "check-1", {
         checklistId: detail.checklist[0]!.id,
         expectedVersion: 0,

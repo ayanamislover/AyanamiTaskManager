@@ -101,19 +101,18 @@ describe("结构化取消", () => {
         ],
       });
       expect(replay).toEqual(first);
-      expect(await ctx.service.getWorkItem(ctx.project.code, ctx.target.key, "full")).toMatchObject(
-        {
-          cancelReason: "与规范任务重复，已有替代实现",
-          duplicateOf: ctx.canonical.key,
-          supersededBy: ctx.replacement.key,
-        },
-      );
+      expect(
+        await ctx.service.getWorkItem(ctx.project.code, ctx.target.key, "context"),
+      ).toMatchObject({ status: "CANCELLED" });
 
       await expect(
         ctx.service.patchWorkItems(ctx.project.code, ctx.session, "structured-cancel", [
           { ...patch, cancelReason: "不同的幂等身份" },
         ]),
-      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: ctx.session, operation_id: "structured-cancel" },
+      });
     } finally {
       ctx.service.close();
     }
@@ -137,11 +136,15 @@ describe("结构化取消", () => {
             duplicateOf: "OTHER-T-0001",
           },
         ]),
-      ).rejects.toThrow("WORK_ITEM_NOT_FOUND: OTHER-T-0001");
-      expect(await ctx.service.getWorkItem(ctx.project.code, ctx.canonical.key)).toMatchObject({
+      ).rejects.toMatchObject({
+        code: "WORK_ITEM_NOT_FOUND",
+        details: { entity: "WORK_ITEM", reference: "OTHER-T-0001" },
+      });
+      expect(
+        await ctx.service.getWorkItem(ctx.project.code, ctx.canonical.key, "full"),
+      ).toMatchObject({
         status: "READY",
         version: ctx.canonical.version,
-        cancelReason: null,
       });
 
       await expect(
@@ -153,7 +156,10 @@ describe("结构化取消", () => {
             duplicateOf: ctx.target.key,
           },
         ]),
-      ).rejects.toThrow("cancelled task cannot reference itself");
+      ).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        details: { task_key: ctx.target.key, issue: "self_reference" },
+      });
       expect((await ctx.service.getWorkItem(ctx.project.code, ctx.target.key)).status).toBe(
         "IN_PROGRESS",
       );

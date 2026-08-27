@@ -149,13 +149,22 @@ describe("Session retirement 与低成本恢复", () => {
           ...input,
           summary: "相同 op 不同 payload",
         }),
-      ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { key: expect.stringMatching(/:startup-successor-record$/u) },
+      });
       await expect(
         service.createRecord(project.code, String(created.newSession), "startup-successor-record", {
           ...input,
           summary: "new Session 上的不同 payload",
         }),
-      ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: {
+          session_id: created.newSession,
+          operation_id: "startup-successor-record",
+        },
+      });
       expect(await service.listRecords(project.code)).toHaveLength(1);
     } finally {
       service.close();
@@ -319,7 +328,10 @@ describe("Session retirement 与低成本恢复", () => {
           summary: "successor 不能半落账",
           workItemKey: "SRROLL-T-9999",
         }),
-      ).rejects.toThrow(/WORK_ITEM_NOT_FOUND/u);
+      ).rejects.toMatchObject({
+        code: "WORK_ITEM_NOT_FOUND",
+        details: { entity: "WORK_ITEM", reference: "SRROLL-T-9999" },
+      });
       expect(await service.listAgentSessions(project.code, 20)).toHaveLength(1);
       expect(await service.listRecords(project.code, 20)).toHaveLength(0);
       expect((await service.delta(project.code, 0, 100)).currentSequence).toBe(sequenceBefore);
@@ -401,7 +413,10 @@ describe("Session retirement 与低成本恢复", () => {
           ...input,
           summary: "相同 op 的不同载荷必须冲突",
         }),
-      ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: first.session, operation_id: "lost-record" },
+      });
       expect(await service.listRecords("REPLAY")).toHaveLength(1);
     } finally {
       service.close();

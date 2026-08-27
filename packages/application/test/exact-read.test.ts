@@ -106,24 +106,38 @@ describe("exact entity service reads", () => {
       expect(session).not.toHaveProperty("agent_id");
       expect(session).not.toHaveProperty("current_work_item_id");
 
-      await expect(service.getProgressUpdate("XOTHER", progress.progressId)).rejects.toThrowError(
-        `PROGRESS_NOT_FOUND: ${progress.progressId}`,
-      );
-      await expect(service.getSession("XOTHER", sessionId)).rejects.toThrowError(
-        `SESSION_NOT_FOUND: ${sessionId}`,
-      );
+      await expect(service.getProgressUpdate("XOTHER", progress.progressId)).rejects.toMatchObject({
+        code: "PROGRESS_NOT_FOUND",
+        details: { entity: "PROGRESS", reference: progress.progressId },
+      });
+      await expect(service.getSession("XOTHER", sessionId)).rejects.toMatchObject({
+        code: "SESSION_NOT_FOUND",
+        details: { entity: "SESSION", reference: sessionId },
+      });
       await expect(
         service.getOperationTrace("XOTHER", "service-progress", sessionId),
-      ).rejects.toThrowError(`SESSION_NOT_FOUND: ${sessionId}`);
+      ).rejects.toMatchObject({
+        code: "SESSION_NOT_FOUND",
+        details: { entity: "SESSION", reference: sessionId },
+      });
       await expect(
         service.getOperationTrace("XREAD", "missing-operation", sessionId),
-      ).rejects.toThrowError("OPERATION_NOT_FOUND: missing-operation");
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { entity: "OPERATION", reference: "missing-operation" },
+      });
       await expect(
         service.getProgressUpdate("XREAD", "01UNKNOWNPROGRESSULID0000000"),
-      ).rejects.toThrowError("PROGRESS_NOT_FOUND: 01UNKNOWNPROGRESSULID0000000");
+      ).rejects.toMatchObject({
+        code: "PROGRESS_NOT_FOUND",
+        details: { entity: "PROGRESS", reference: "01UNKNOWNPROGRESSULID0000000" },
+      });
       await expect(
         service.getSession("XREAD", "01UNKNOWNSESSIONULID00000000"),
-      ).rejects.toThrowError("SESSION_NOT_FOUND: 01UNKNOWNSESSIONULID00000000");
+      ).rejects.toMatchObject({
+        code: "SESSION_NOT_FOUND",
+        details: { entity: "SESSION", reference: "01UNKNOWNSESSIONULID00000000" },
+      });
     } finally {
       service.close();
     }

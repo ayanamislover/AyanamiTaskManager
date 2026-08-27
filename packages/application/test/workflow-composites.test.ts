@@ -109,7 +109,12 @@ describe("高频工作流组合原语", () => {
             { checklistId: ctx.task.checklist[1]!.id, status: "DONE", evidence: [] },
           ],
         }),
-      ).rejects.toThrow(`COMPLETION_GATE_FAILED: evidence required (${ctx.task.checklist[1]!.id})`);
+      ).rejects.toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: [{ checklist_id: ctx.task.checklist[1]!.id, code: "EVIDENCE_REQUIRED" }],
+        },
+      });
 
       const unchanged = await ctx.service.getWorkItem(ctx.project.code, ctx.task.key, "full");
       expect(unchanged.version).toBe(beforeVersion);
@@ -200,7 +205,14 @@ describe("高频工作流组合原语", () => {
           "verify-and-complete-gate-failure",
           { taskKey: ctx.task.key, expectedVersion: before.version },
         ),
-      ).rejects.toThrow("COMPLETION_GATE_FAILED: checklist incomplete");
+      ).rejects.toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: expect.arrayContaining([
+            { checklist_id: ctx.task.checklist[0]!.id, code: "CHECKLIST_INCOMPLETE" },
+          ]),
+        },
+      });
 
       const unchanged = await ctx.service.getWorkItem(ctx.project.code, ctx.task.key, "full");
       expect(unchanged).toMatchObject({ status: "IN_PROGRESS", version: before.version });

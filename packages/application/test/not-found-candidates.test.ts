@@ -79,16 +79,25 @@ describe("dynamic NOT_FOUND application semantics", () => {
             milestoneId: "00000000000000000000000000",
           },
         ]),
-      ).rejects.toThrowError(/IDEMPOTENCY_CONFLICT/u);
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: session, operation_id: "committed-before-close" },
+      });
       await expect(
         service.createWorkItems(project.code, session, "closed-new-invalid", [
           { ...items[0]!, milestoneId: "00000000000000000000000000" },
         ]),
-      ).rejects.toThrowError(`SESSION_CLOSED: ${session}`);
+      ).rejects.toMatchObject({
+        code: "SESSION_CLOSED",
+        details: { entity: "SESSION", reference: session },
+      });
       expect(await service.listWorkItems(project.code, { limit: 100 })).toHaveLength(1);
       await expect(
         service.getOperationTrace(project.code, "closed-new-invalid", session),
-      ).rejects.toThrowError("OPERATION_NOT_FOUND: closed-new-invalid");
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { entity: "OPERATION", reference: "closed-new-invalid" },
+      });
     } finally {
       service.close();
     }

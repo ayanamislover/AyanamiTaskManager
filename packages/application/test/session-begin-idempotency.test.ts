@@ -134,7 +134,12 @@ describe("atomic Session recover-or-begin", () => {
           ...request,
           threadId: "thr_different",
         }),
-      ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/i);
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: {
+          key: `session-begin:${request.operationId.trim()}`,
+        },
+      });
     } finally {
       left.close();
       right.close();
@@ -173,7 +178,10 @@ describe("atomic Session recover-or-begin", () => {
           mode: "quick",
           agentId: "codex-primary",
         }),
-      ).rejects.toThrow(/ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT/i);
+      ).rejects.toMatchObject({
+        code: "ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT",
+        details: null,
+      });
       expect(service.listQuickTasks()).toHaveLength(0);
       expect(service.listProjects()).toHaveLength(0);
 
@@ -185,7 +193,10 @@ describe("atomic Session recover-or-begin", () => {
           agentId: "codex-primary",
           allowProjectCreate: true,
         }),
-      ).rejects.toThrow(/ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT/i);
+      ).rejects.toMatchObject({
+        code: "ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT",
+        details: null,
+      });
       expect(service.listProjects()).toHaveLength(0);
     } finally {
       service.close();

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "../src/index.js";
+import { removeMigrationsAfter } from "./migration-test-helpers.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -16,19 +17,7 @@ describe("DISCOVERED_FROM schema migration", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    const pendingMigrations = [
-      "0004_discovered_from.sql",
-      "0005_session_git_context.sql",
-      "0006_record_topics.sql",
-      "0007_operation_trace.sql",
-      "0008_work_item_phase_waiting.sql",
-      "0009_structured_cancel.sql",
-      "0010_review_workflow.sql",
-      "0011_session_close_reason.sql",
-      "0012_project_update_evidence.sql",
-      "0013_project_update_session.sql",
-    ];
-    for (const name of pendingMigrations) rmSync(join(migrationsRoot, "project", name));
+    const pendingMigrations = removeMigrationsAfter(migrationsRoot, "project", 3);
 
     let service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
     const project = await service.createProject({
@@ -81,8 +70,12 @@ describe("DISCOVERED_FROM schema migration", () => {
     try {
       const begun = await service.begin({ projectCode: project.code, agentId: "codex-v4" });
       expect(
-        (await service.getWorkItem(project.code, v3Tasks.items[1]!.key, "context")).dependencies,
-      ).toEqual([v3Tasks.items[0]!.key]);
+        (await service.getWorkItem(project.code, v3Tasks.items[1]!.key, "full")).relations,
+      ).toContainEqual({
+        direction: "INCOMING",
+        taskKey: v3Tasks.items[0]!.key,
+        type: "BLOCKS",
+      });
 
       const followUp = await service.createWorkItems(project.code, begun.session, "v4-discover", [
         {
@@ -96,8 +89,12 @@ describe("DISCOVERED_FROM schema migration", () => {
         },
       ]);
       expect(
-        (await service.getWorkItem(project.code, followUp.items[0]!.key, "context")).discoveredFrom,
-      ).toBe(v3Tasks.items[0]!.key);
+        (await service.getWorkItem(project.code, followUp.items[0]!.key, "full")).relations,
+      ).toContainEqual({
+        direction: "OUTGOING",
+        taskKey: v3Tasks.items[0]!.key,
+        type: "DISCOVERED_FROM",
+      });
 
       const database = await service.databases.openProject(project.code);
       database.sqlite.prepare("DELETE FROM work_items WHERE id = ?").run(v3Tasks.items[0]!.id);
@@ -109,10 +106,8 @@ describe("DISCOVERED_FROM schema migration", () => {
           .get(),
       ).toMatchObject({ count: 0 });
       expect(
-        await service.getWorkItem(project.code, followUp.items[0]!.key, "context"),
-      ).toMatchObject({
-        discoveredFrom: null,
-      });
+        (await service.getWorkItem(project.code, followUp.items[0]!.key, "full")).relations,
+      ).toEqual([]);
     } finally {
       service.close();
     }
