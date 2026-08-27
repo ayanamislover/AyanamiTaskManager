@@ -101,6 +101,10 @@ describe("MCP surface v3 parity", () => {
       expect(details).toMatchObject({
         entity: "WORK_ITEM",
         did_you_mean: created.items[0]!.key,
+        candidate_count: 7,
+        candidate_scan_count: 7,
+        candidate_scan_truncated: false,
+        candidates_truncated: true,
       });
       expect(details.candidates).toHaveLength(5);
       for (const candidate of details.candidates) {
@@ -262,6 +266,10 @@ describe("MCP surface v3 parity", () => {
         reference: missingId,
         did_you_mean: null,
         candidates: [],
+        candidate_count: 0,
+        candidate_scan_count: 0,
+        candidate_scan_truncated: false,
+        candidates_truncated: false,
       });
       expect(await fixture.service.listObjectives(fixture.project.code)).toEqual([]);
       expect(await fixture.service.listMilestones(fixture.project.code)).toEqual([]);

@@ -43,17 +43,26 @@ export type PublicNotFoundDetails = {
   entity: "PROJECT" | "WORK_ITEM" | "SESSION" | "MILESTONE";
   did_you_mean: string | null;
   candidates: Array<Record<string, string>>;
+  candidate_count: number;
+  candidate_scan_count: number;
+  candidate_scan_truncated: boolean;
+  candidates_truncated: boolean;
 };
 
 function rankPublicCandidates<T extends Record<string, string>>(
   queryValue: string,
   candidates: T[],
-  identity: (candidate: T) => string,
-): { did_you_mean: string | null; candidates: T[] } {
-  const ranked = rankSuggestions(queryValue, candidates, (candidate) => [identity(candidate)]);
+  identities: (candidate: T) => readonly string[],
+  candidateCount = candidates.length,
+): Omit<PublicNotFoundDetails, "entity"> & { candidates: T[] } {
+  const ranked = rankSuggestions(queryValue, candidates, identities);
   return {
     did_you_mean: ranked.didYouMean,
     candidates: ranked.candidates,
+    candidate_count: candidateCount,
+    candidate_scan_count: candidates.length,
+    candidate_scan_truncated: candidates.length < candidateCount,
+    candidates_truncated: ranked.candidates.length < candidateCount,
   };
 }
 
@@ -769,17 +778,23 @@ export class AyanamiTaskService {
   ): Promise<PublicNotFoundDetails | null> {
     const repository = await this.#repository(projectCode);
     if (code === "WORK_ITEM_NOT_FOUND") {
-      const ranked = rankPublicCandidates(
-        reference,
-        repository.listWorkItems({ limit: 500 }).map((item) => ({
-          key: item.key,
-          status: item.status,
-        })),
-        (candidate) => candidate.key,
-      );
-      return { entity: "WORK_ITEM", ...ranked };
+      const summary = repository.workItemSuggestionCandidates(reference, 50);
+      const candidates = summary.candidates.slice(0, 5);
+      const plausible = rankSuggestions(reference, summary.candidates, (candidate) => [
+        candidate.key,
+      ]).didYouMean;
+      return {
+        entity: "WORK_ITEM",
+        did_you_mean: plausible === null ? null : (candidates[0]?.key ?? null),
+        candidates,
+        candidate_count: summary.total,
+        candidate_scan_count: summary.candidates.length,
+        candidate_scan_truncated: summary.candidates.length < summary.total,
+        candidates_truncated: candidates.length < summary.total,
+      };
     }
     if (code === "SESSION_NOT_FOUND") {
+      const candidateCount = repository.countAgentSessions();
       const ranked = rankPublicCandidates(
         reference,
         repository.listAgentSessions(200).map((session) => ({
@@ -787,7 +802,8 @@ export class AyanamiTaskService {
           connection_state: String(session.connection_state),
           work_state: String(session.work_state),
         })),
-        (candidate) => candidate.id,
+        (candidate) => [candidate.id],
+        candidateCount,
       );
       return { entity: "SESSION", ...ranked };
     }
@@ -798,7 +814,7 @@ export class AyanamiTaskService {
           id: String(milestone.id),
           status: String(milestone.status),
         })),
-        (candidate) => candidate.id,
+        (candidate) => [candidate.id],
       );
       return { entity: "MILESTONE", ...ranked };
     }
@@ -810,14 +826,18 @@ export class AyanamiTaskService {
       .listProjects()
       .filter((project) => project.lifecycle !== "TRASHED")
       .map((project) => ({ code: project.code, name: project.name }));
-    const ranked = rankSuggestions(reference, candidates, (candidate) => [
+    const ranked = rankPublicCandidates(reference, candidates, (candidate) => [
       candidate.code,
       candidate.name,
     ]);
     return {
       entity: "PROJECT",
-      did_you_mean: ranked.didYouMean,
+      did_you_mean: ranked.did_you_mean,
       candidates: ranked.candidates,
+      candidate_count: ranked.candidate_count,
+      candidate_scan_count: ranked.candidate_scan_count,
+      candidate_scan_truncated: ranked.candidate_scan_truncated,
+      candidates_truncated: ranked.candidates_truncated,
     };
   }
 
@@ -1474,18 +1494,7 @@ export class AyanamiTaskService {
     );
     await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
     await this.#flush(projectCode);
-    const openWorkItems = repository
-      .listWorkItems({ limit: 500 })
-      .filter((item) => !["DONE", "CANCELLED"].includes(item.status) && !linkedKeys.has(item.key))
-      .slice(0, 20)
-      .map((item) => item.key);
-    return {
-      ...mutationAck(execution.result, opId, execution.resolution),
-      unlinked:
-        completed.length > 0 &&
-        completed.some((entry) => typeof entry === "string" || !entry.workItemKey),
-      openWorkItems,
-    };
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async createRecord(

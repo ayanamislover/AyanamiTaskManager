@@ -1075,6 +1075,13 @@ export class ProjectRepository {
       })) as any[];
   }
 
+  countAgentSessions(): number {
+    const row = this.#sqlite.prepare("SELECT COUNT(*) AS count FROM agent_sessions").get() as {
+      count: number;
+    };
+    return Number(row.count);
+  }
+
   recoverStaleSessions(cutoffIso: string): number {
     return this.#sqlite.transaction(() => {
       const rows = this.#sqlite
@@ -1606,18 +1613,15 @@ export class ProjectRepository {
             typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
           ),
         );
-        const openWorkItems = this.listWorkItems({ limit: 100 })
-          .filter(
-            (item) => !["DONE", "CANCELLED"].includes(item.status) && !linkedKeys.has(item.key),
-          )
-          .slice(0, 5)
-          .map((item) => item.key);
+        const openWorkItemSummary = this.openWorkItemSummary(linkedKeys, 20);
         return {
           ...this.listProjectUpdates(100).find((update) => update.id === id),
           seq,
           opId,
-          unlinked: completed.length > 0 && openWorkItems.length > 0,
-          openWorkItems: completed.length > 0 ? openWorkItems : [],
+          unlinked: completed.length > 0 && openWorkItemSummary.total > 0,
+          openWorkItemCount: openWorkItemSummary.total,
+          openWorkItems: openWorkItemSummary.keys,
+          openWorkItemsTruncated: openWorkItemSummary.truncated,
         };
       },
     });
@@ -2594,6 +2598,77 @@ export class ProjectRepository {
     return rows.map((row) =>
       this.workItemViewFromRow({ ...row, ...(relationStatement.get(row.id) as object) }),
     );
+  }
+
+  workItemSuggestionCandidates(
+    reference: string,
+    limit = 50,
+  ): { total: number; candidates: Array<{ key: string; status: string }> } {
+    const totalRow = this.#sqlite
+      .prepare("SELECT COUNT(*) AS count FROM work_items WHERE archived_at IS NULL")
+      .get() as { count: number };
+    const boundedLimit = Math.min(100, Math.max(1, limit));
+    const normalized = reference.trim().toUpperCase();
+    const prefix = `${this.meta.code}-T-`;
+    const suffix = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
+    const digits = suffix.match(/\d+/gu)?.join("") ?? "";
+    const approximateLocalNo = digits.length > 0 ? Number(digits) : null;
+    const safeLocalNo =
+      approximateLocalNo !== null && Number.isSafeInteger(approximateLocalNo)
+        ? approximateLocalNo
+        : null;
+    const rows = (
+      safeLocalNo === null
+        ? this.#sqlite
+            .prepare(
+              `SELECT local_no, status FROM work_items WHERE archived_at IS NULL
+             ORDER BY local_no LIMIT ?`,
+            )
+            .all(boundedLimit)
+        : this.#sqlite
+            .prepare(
+              `SELECT local_no, status FROM work_items WHERE archived_at IS NULL
+             ORDER BY ABS(local_no - ?), local_no LIMIT ?`,
+            )
+            .all(safeLocalNo, boundedLimit)
+    ) as Array<{ local_no: number; status: string }>;
+    const code = this.meta.code;
+    return {
+      total: Number(totalRow.count),
+      candidates: rows.map((row) => ({
+        key: `${code}-T-${String(row.local_no).padStart(4, "0")}`,
+        status: row.status,
+      })),
+    };
+  }
+
+  private openWorkItemSummary(
+    excludedTaskKeys: ReadonlySet<string>,
+    limit: number,
+  ): { keys: string[]; total: number; truncated: boolean } {
+    const excludedIds = [...excludedTaskKeys].map((key) => this.rowForTaskKey(key).id);
+    const clauses = ["archived_at IS NULL", "status NOT IN ('DONE','CANCELLED')"];
+    const parameters: unknown[] = [];
+    if (excludedIds.length > 0) {
+      clauses.push(`id NOT IN (${excludedIds.map(() => "?").join(", ")})`);
+      parameters.push(...excludedIds);
+    }
+    const where = clauses.join(" AND ");
+    const countRow = this.#sqlite
+      .prepare(`SELECT COUNT(*) AS count FROM work_items WHERE ${where}`)
+      .get(...parameters) as { count: number };
+    const boundedLimit = Math.min(100, Math.max(1, limit));
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT local_no FROM work_items WHERE ${where}
+         ORDER BY CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no LIMIT ?`,
+      )
+      .all(...parameters, boundedLimit) as Array<{ local_no: number }>;
+    const total = Number(countRow.count);
+    const code = this.meta.code;
+    const keys = rows.map((row) => `${code}-T-${String(row.local_no).padStart(4, "0")}`);
+    return { keys, total, truncated: keys.length < total };
   }
 
   createWorkItems(
