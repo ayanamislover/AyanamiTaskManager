@@ -95,6 +95,10 @@ describe("dynamic NOT_FOUND candidates", () => {
             entity?: string;
             did_you_mean?: string | null;
             candidates?: Array<Record<string, unknown>>;
+            candidate_count?: number;
+            candidate_scan_count?: number;
+            candidate_scan_truncated?: boolean;
+            candidates_truncated?: boolean;
           };
         };
       };
@@ -104,6 +108,12 @@ describe("dynamic NOT_FOUND candidates", () => {
       expect(body.error.details?.entity).toBe("WORK_ITEM");
       expect(body.error.details?.did_you_mean).toBe(created.items[0]!.key);
       expect(body.error.details?.candidates).toHaveLength(5);
+      expect(body.error.details).toMatchObject({
+        candidate_count: 7,
+        candidate_scan_count: 7,
+        candidate_scan_truncated: false,
+        candidates_truncated: true,
+      });
       for (const candidate of body.error.details?.candidates ?? []) {
         expect(Object.keys(candidate).sort()).toEqual(["key", "status"]);
       }
@@ -133,6 +143,10 @@ describe("dynamic NOT_FOUND candidates", () => {
             entity?: string;
             did_you_mean?: string | null;
             candidates?: Array<Record<string, unknown>>;
+            candidate_count?: number;
+            candidate_scan_count?: number;
+            candidate_scan_truncated?: boolean;
+            candidates_truncated?: boolean;
           };
         };
       };
@@ -142,6 +156,12 @@ describe("dynamic NOT_FOUND candidates", () => {
       expect(body.error.details?.entity).toBe("SESSION");
       expect(body.error.details?.did_you_mean).toBe(expected);
       expect(body.error.details?.candidates).toHaveLength(5);
+      expect(body.error.details).toMatchObject({
+        candidate_count: 7,
+        candidate_scan_count: 7,
+        candidate_scan_truncated: false,
+        candidates_truncated: true,
+      });
       for (const candidate of body.error.details?.candidates ?? []) {
         expect(Object.keys(candidate).sort()).toEqual(["connection_state", "id", "work_state"]);
       }
@@ -170,6 +190,10 @@ describe("dynamic NOT_FOUND candidates", () => {
             entity?: string;
             did_you_mean?: string | null;
             candidates?: Array<Record<string, unknown>>;
+            candidate_count?: number;
+            candidate_scan_count?: number;
+            candidate_scan_truncated?: boolean;
+            candidates_truncated?: boolean;
           };
         };
       };
@@ -179,6 +203,12 @@ describe("dynamic NOT_FOUND candidates", () => {
       expect(body.error.details?.entity).toBe("MILESTONE");
       expect(body.error.details?.did_you_mean).toBe(expected);
       expect(body.error.details?.candidates).toHaveLength(5);
+      expect(body.error.details).toMatchObject({
+        candidate_count: 7,
+        candidate_scan_count: 7,
+        candidate_scan_truncated: false,
+        candidates_truncated: true,
+      });
       for (const candidate of body.error.details?.candidates ?? []) {
         expect(Object.keys(candidate).sort()).toEqual(["id", "status"]);
       }
