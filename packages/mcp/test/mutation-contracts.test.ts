@@ -723,9 +723,11 @@ describe("MCP mutation contracts", () => {
         properties: {
           title: { type: "string" },
           description: { type: "string" },
+          acceptance: { type: "array", items: { type: "string" } },
         },
       });
       expect(itemSchema.properties).toMatchObject({
+        acceptance: { type: "array", items: { type: "string" } },
         cancel_reason: { type: "string" },
         duplicate_of: { type: ["string", "null"] },
         superseded_by: { type: ["string", "null"] },
@@ -744,8 +746,10 @@ describe("MCP mutation contracts", () => {
               operation: "edit",
               expected_fields: {
                 title: "Old title",
+                acceptance: ["Old acceptance"],
               },
               title: "New title",
+              acceptance: ["New acceptance"],
             },
             {
               task_key: "SAFE-T-0002",
@@ -768,10 +772,11 @@ describe("MCP mutation contracts", () => {
             {
               taskKey: "SAFE-T-0001",
               expectedVersion: 3,
-              expectedFields: { title: "Old title" },
+              expectedFields: { title: "Old title", acceptance: ["Old acceptance"] },
               operation: "edit",
               takeoverStale: false,
               title: "New title",
+              acceptance: ["New acceptance"],
             },
             {
               taskKey: "SAFE-T-0002",
@@ -856,6 +861,43 @@ describe("MCP mutation contracts", () => {
       for (const field of ["items", "title"]) {
         expect(compositeError).toContain(field);
       }
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("rejects an invalid acceptance edit before invoking the mutation service", async () => {
+    let calls = 0;
+    const service = {
+      patchWorkItems: async () => {
+        calls += 1;
+        throw new Error("must not be called");
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const client = new Client({ name: "invalid-acceptance", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "SAFE",
+          session: "session",
+          op_id: "invalid-acceptance",
+          items: [
+            {
+              task_key: "SAFE-T-0001",
+              expected_version: 3,
+              operation: "edit",
+              acceptance: [""],
+            },
+          ],
+        },
+      });
+      expect(response.isError).toBe(true);
+      expect(JSON.stringify(response.content)).toContain("acceptance");
+      expect(calls).toBe(0);
     } finally {
       await Promise.all([client.close(), server.close()]);
     }

@@ -140,6 +140,7 @@ const patchItemFields = [
   "operation",
   "title",
   "description",
+  "acceptance",
   "blocked_reason",
   "waiting_for",
   "cancel_reason",
@@ -185,7 +186,7 @@ const nestedFieldSets: Array<{
   {
     tool: "atm_task_patch",
     path: ["properties", "items", "items", "properties", "expected_fields"],
-    expected: ["title", "description", "target_date", "parent_key"],
+    expected: ["title", "description", "acceptance", "target_date", "parent_key"],
     label: "patch.items.expected_fields",
   },
   {

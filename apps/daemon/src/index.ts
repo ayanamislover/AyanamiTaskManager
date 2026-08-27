@@ -829,6 +829,9 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
                 ...(item.expectedFields.description === undefined
                   ? {}
                   : { description: item.expectedFields.description }),
+                ...(item.expectedFields.acceptance === undefined
+                  ? {}
+                  : { acceptance: item.expectedFields.acceptance }),
                 ...(item.expectedFields.targetDate === undefined
                   ? {}
                   : { targetDate: item.expectedFields.targetDate }),
@@ -841,6 +844,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         takeoverStale: item.takeoverStale,
         ...(item.title === undefined ? {} : { title: item.title }),
         ...(item.description === undefined ? {} : { description: item.description }),
+        ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
         ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
         ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
         ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),
@@ -963,6 +967,9 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
                 ...(item.expectedFields.description === undefined
                   ? {}
                   : { description: item.expectedFields.description }),
+                ...(item.expectedFields.acceptance === undefined
+                  ? {}
+                  : { acceptance: item.expectedFields.acceptance }),
                 ...(item.expectedFields.targetDate === undefined
                   ? {}
                   : { targetDate: item.expectedFields.targetDate }),
@@ -975,6 +982,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         takeoverStale: item.takeoverStale,
         ...(item.title === undefined ? {} : { title: item.title }),
         ...(item.description === undefined ? {} : { description: item.description }),
+        ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
         ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
         ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
         ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),

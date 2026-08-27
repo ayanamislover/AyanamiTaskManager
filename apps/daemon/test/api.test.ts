@@ -756,4 +756,92 @@ describe("REST 边界", () => {
       service.close();
     }
   });
+
+  it("REST 透传 acceptance edit，并在 stale expectedFields 冲突时零写入", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-acceptance-edit-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "REST acceptance edit",
+      sourcePath: null,
+      code: "RAEDIT",
+    });
+    const begun = await service.begin({ projectCode: project.code, agentId: "rest-editor" });
+    const objective = await service.createObjective(project.code, begun.session, {
+      title: "REST acceptance",
+      description: "",
+      definitionOfDone: [],
+    });
+    const task = (
+      await service.createWorkItems(project.code, begun.session, "create-rest-edit", [
+        {
+          clientRef: "task",
+          objectiveId: objective.id,
+          title: "可经 REST 修订验收标准",
+          description: "",
+          type: "TASK",
+          priority: "HIGH",
+          status: "READY",
+          acceptance: ["旧 REST 验收"],
+        },
+      ])
+    ).items[0]!;
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    try {
+      const edited = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/${project.code}/work-items/patch`,
+        headers,
+        payload: {
+          session: begun.session,
+          opId: "rest-acceptance-edit",
+          items: [
+            {
+              taskKey: task.key,
+              expectedVersion: task.version,
+              expectedFields: { acceptance: ["旧 REST 验收"] },
+              operation: "edit",
+              acceptance: ["新 REST 验收"],
+            },
+          ],
+        },
+      });
+      expect(edited.statusCode).toBe(200);
+      expect(edited.json().items[0]).toMatchObject({ acceptance: ["新 REST 验收"] });
+      const afterEdit = await service.getWorkItem(project.code, task.key);
+
+      const conflict = await app.inject({
+        method: "POST",
+        url: `/api/v1/projects/${project.code}/work-items/patch`,
+        headers,
+        payload: {
+          session: begun.session,
+          opId: "rest-acceptance-conflict",
+          items: [
+            {
+              taskKey: task.key,
+              expectedVersion: task.version,
+              expectedFields: { acceptance: ["旧 REST 验收"] },
+              operation: "edit",
+              acceptance: ["不得覆盖"],
+            },
+          ],
+        },
+      });
+      expect(conflict.statusCode).toBe(409);
+      expect(await service.getWorkItem(project.code, task.key)).toMatchObject({
+        acceptance: ["新 REST 验收"],
+        version: afterEdit.version,
+      });
+      const delta = await service.delta(project.code, 0, 100);
+      expect(delta.events.some((event) => event.opId === "rest-acceptance-conflict")).toBe(false);
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
 });

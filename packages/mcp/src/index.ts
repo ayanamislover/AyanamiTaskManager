@@ -1420,6 +1420,7 @@ const workItemExpectedFields = z
   .object({
     title: z.string().trim().min(1).max(400).optional(),
     description: z.string().max(50_000).optional(),
+    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
     target_date: z.string().nullable().optional(),
     parent_key: z.string().trim().min(1).max(100).nullable().optional(),
   })
@@ -1492,6 +1493,9 @@ function coreWorkItemPatch(item: Record<string, any>): Record<string, unknown> {
         ...(item.expected_fields.description === undefined
           ? {}
           : { description: item.expected_fields.description }),
+        ...(item.expected_fields.acceptance === undefined
+          ? {}
+          : { acceptance: item.expected_fields.acceptance }),
         ...(item.expected_fields.target_date === undefined
           ? {}
           : { targetDate: item.expected_fields.target_date }),
@@ -1508,6 +1512,7 @@ function coreWorkItemPatch(item: Record<string, any>): Record<string, unknown> {
     ...(expectedFields === undefined ? {} : { expectedFields }),
     ...(item.title === undefined ? {} : { title: item.title }),
     ...(item.description === undefined ? {} : { description: item.description }),
+    ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
     ...(item.blocked_reason === undefined ? {} : { blockedReason: item.blocked_reason }),
     ...(item.waiting_for === undefined ? {} : { waitingFor: item.waiting_for }),
     ...(item.cancel_reason === undefined ? {} : { cancelReason: item.cancel_reason }),
@@ -1544,6 +1549,7 @@ const workItemPatch = z
     ]),
     title: z.string().min(1).max(400).optional(),
     description: z.string().max(50_000).optional(),
+    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
     blocked_reason: z.string().min(1).max(2000).optional(),
     waiting_for: z.string().min(1).max(1000).optional(),
     cancel_reason: z.string().trim().min(1).max(2000).optional(),
@@ -1782,6 +1788,7 @@ type DeltaEvent = {
   actor: string;
   title: string;
   detail: string;
+  changes?: Record<string, unknown>;
   op_id: string | null;
   at: string;
 };
@@ -1802,6 +1809,7 @@ function fitDelta(
       actor: String(event.actor ?? ""),
       title: String(event.title ?? ""),
       detail: String(event.detail ?? ""),
+      ...(event.changes && typeof event.changes === "object" ? { changes: event.changes } : {}),
       op_id: event.opId === null || event.opId === undefined ? null : String(event.opId),
       at: String(event.at ?? ""),
     }),

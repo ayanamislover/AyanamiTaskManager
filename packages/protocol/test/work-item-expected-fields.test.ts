@@ -26,6 +26,28 @@ describe("WorkItem expectedFields 协议", () => {
     ).toBe(false);
   });
 
+  it("允许 acceptance 整体替换并要求提供对应字段 snapshot", () => {
+    expect(
+      WorkItemPatchInputSchema.safeParse({
+        taskKey: "ATM-T-0001",
+        expectedVersion: 1,
+        operation: "edit",
+        acceptance: ["新的验收标准"],
+        expectedFields: { acceptance: ["旧的验收标准"] },
+      }).success,
+    ).toBe(true);
+
+    expect(
+      WorkItemPatchInputSchema.safeParse({
+        taskKey: "ATM-T-0001",
+        expectedVersion: 1,
+        operation: "edit",
+        acceptance: ["新的验收标准"],
+        expectedFields: { title: "旧标题" },
+      }).success,
+    ).toBe(false);
+  });
+
   it("拒绝白名单外字段、非 edit 操作和 assignee 宽松合并", () => {
     const invalid = [
       {
