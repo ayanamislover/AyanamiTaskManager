@@ -825,6 +825,76 @@ button.atm-row:hover {
   margin: 0 0 8px;
   font-size: 13px;
 }
+.atm-mcp-bridges {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+.atm-mcp-bridge-body {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+.atm-mcp-bridge-kpis {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.atm-mcp-bridge-note,
+.atm-mcp-bridge-sampled,
+.atm-mcp-bridge-empty {
+  margin: 0;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+}
+.atm-mcp-bridge-list {
+  display: grid;
+  max-height: 420px;
+  border: 1px solid var(--atm-border);
+  border-radius: 10px;
+  overflow: auto;
+}
+.atm-mcp-bridge-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.7fr) minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--atm-border);
+  font-size: 12px;
+}
+.atm-mcp-bridge-row:last-child {
+  border-bottom: 0;
+}
+.atm-mcp-bridge-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-height: 34px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+.atm-mcp-bridge-header > span:last-child {
+  text-align: right;
+}
+.atm-mcp-bridge-row > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.atm-mcp-bridge-row > div strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-mcp-bridge-row > div span,
+.atm-mcp-bridge-row > span {
+  color: var(--atm-text-muted);
+}
+.atm-mcp-bridge-row > strong {
+  font: 650 12px var(--atm-mono);
+}
 .atm-metric-file {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1847,6 +1917,13 @@ button.atm-row:hover {
   .atm-engineering-kpis,
   .atm-engineering-kpis.compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-mcp-bridge-kpis,
+  .atm-mcp-bridge-row {
+    grid-template-columns: 1fr;
+  }
+  .atm-mcp-bridge-row {
+    gap: 5px;
   }
   .atm-drawer {
     width: calc(100vw - var(--atm-sidebar));

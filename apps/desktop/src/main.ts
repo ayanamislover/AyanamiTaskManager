@@ -83,6 +83,7 @@ import {
   runMcpProfileSwitch,
   type McpProfileSyncAdapter,
 } from "./mcp-profile-switch.js";
+import { observeMcpBridges } from "./mcp-bridge-observation.js";
 import {
   normalizeNotificationMode,
   notificationModes,
@@ -645,6 +646,7 @@ async function startApplication(background: boolean): Promise<void> {
   const stdioArgs = launch.args;
   const stdioEnv = launch.env;
   if (shouldRepairMcpConfigs()) repairStaleMcpConfigs(launch, profileLaunches);
+  ipcMain.handle("atm:get-mcp-bridges", () => observeMcpBridges({ bridgeCommand: stdioCommand }));
   ipcMain.handle("atm:get-mcp-configs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
     return renderMcpConfigs(

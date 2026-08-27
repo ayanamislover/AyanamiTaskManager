@@ -248,6 +248,122 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
   expect(engineeringRequests).toBe(1);
 });
 
+test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async ({ page }) => {
+  await page.addInitScript(
+    ({ endpoint, token }) => {
+      const observation = {
+        sampledAt: "2026-08-27T03:02:03.000Z",
+        metric: "PRIVATE_BYTES" as const,
+        totalPrivateBytes: 64 * 1024 * 1024,
+        bridges: [
+          {
+            pid: 4101,
+            ownerPid: 101,
+            ownerName: "codex",
+            startedAt: "2026-08-27T02:00:00.000Z",
+            privateBytes: 31 * 1024 * 1024,
+          },
+          {
+            pid: 4102,
+            ownerPid: 202,
+            ownerName: "claude",
+            startedAt: "2026-08-27T02:01:00.000Z",
+            privateBytes: 33 * 1024 * 1024,
+          },
+        ],
+      };
+      const state = window as typeof window & {
+        __mcpBridgeCalls?: number;
+        __mcpBridgeIntervals?: number[];
+        __runMcpBridgeTimers?: () => void;
+      };
+      state.__mcpBridgeCalls = 0;
+      state.__mcpBridgeIntervals = [];
+      const nativeSetInterval = window.setInterval.bind(window);
+      const nativeClearInterval = window.clearInterval.bind(window);
+      const nativeSetTimeout = window.setTimeout.bind(window);
+      const bridgeTimers = new Map<number, () => void>();
+      let nextBridgeTimer = 900_000;
+      window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        state.__mcpBridgeIntervals!.push(Number(timeout ?? 0));
+        if (timeout === 30_000 && typeof handler === "function") {
+          const timer = nextBridgeTimer;
+          nextBridgeTimer += 1;
+          bridgeTimers.set(timer, () => handler(...args));
+          return timer;
+        }
+        return nativeSetInterval(handler, timeout, ...args);
+      }) as typeof window.setInterval;
+      window.clearInterval = ((timer?: number) => {
+        if (timer !== undefined && bridgeTimers.delete(timer)) return;
+        nativeClearInterval(timer);
+      }) as typeof window.clearInterval;
+      state.__runMcpBridgeTimers = () => {
+        for (const tick of bridgeTimers.values()) tick();
+      };
+      Object.defineProperty(window, "ayanamiDesktop", {
+        configurable: true,
+        value: {
+          runtime: { endpoint, token },
+          getMcpBridges: async () => {
+            state.__mcpBridgeCalls! += 1;
+            await new Promise((resolve) => nativeSetTimeout(resolve, 100));
+            return observation;
+          },
+          minimizeWindow: async () => undefined,
+          toggleMaximizeWindow: async () => false,
+          isWindowMaximized: async () => false,
+          closeWindow: async () => undefined,
+          onWindowMaximizedChange: () => () => undefined,
+        },
+      });
+    },
+    { endpoint: "http://127.0.0.1:4394", token: "e2e-test-token" },
+  );
+  await page.goto("/#settings");
+
+  const region = page.getByRole("region", { name: "MCP bridge 观测" });
+  const expand = region.getByRole("button", { name: "展开 MCP bridge 观测" });
+  await expect(expand).toHaveAttribute("aria-expanded", "false");
+  await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(0);
+
+  await expand.focus();
+  await page.keyboard.press("Enter");
+  await expect(region.getByRole("button", { name: "折叠 MCP bridge 观测" })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(1);
+  await page.evaluate(() => (window as any).__runMcpBridgeTimers());
+  await page.waitForTimeout(20);
+  expect(await page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(1);
+  await expect(region.getByText("2 个连接")).toBeVisible();
+  await expect(region.getByText("64.00 MiB")).toBeVisible();
+  await expect(region.getByText("codex")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(1);
+  expect(
+    await page.evaluate(() => ((window as any).__mcpBridgeIntervals as number[]).includes(30_000)),
+  ).toBe(true);
+  await page.evaluate(() => (window as any).__runMcpBridgeTimers());
+  await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(2);
+  await region.getByRole("button", { name: "折叠 MCP bridge 观测" }).click();
+  await page.evaluate(() => (window as any).__runMcpBridgeTimers());
+  await page.waitForTimeout(20);
+  expect(await page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(2);
+  await region.getByRole("button", { name: "展开 MCP bridge 观测" }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(3);
+  await expect(region.getByRole("button", { name: "刷新观测" })).toBeEnabled();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-mcp-bridge-observation.png"),
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "切换至暗黑模式" }).click();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-mcp-bridge-observation-dark.png"),
+    fullPage: true,
+  });
+});
+
 test("全局与项目时间线展示真实任务、进度和记录语义", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   const suffix = Date.now().toString(36);

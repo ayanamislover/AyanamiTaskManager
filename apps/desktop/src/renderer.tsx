@@ -30,6 +30,18 @@ type UpdateStatus = {
   at: string;
   version: string | null;
 };
+type McpBridgeObservation = {
+  sampledAt: string;
+  metric: "PRIVATE_BYTES";
+  totalPrivateBytes: number;
+  bridges: Array<{
+    pid: number;
+    ownerPid: number | null;
+    ownerName: string;
+    startedAt: string;
+    privateBytes: number;
+  }>;
+};
 
 type DesktopBridge = {
   runtime: { endpoint: string; token: string };
@@ -44,6 +56,7 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
+  getMcpBridges(): Promise<McpBridgeObservation>;
   getMemoryProfile(): Promise<boolean>;
   setMemoryProfile(enabled: boolean): Promise<McpProfileSwitchResult>;
   installMcp(client: McpClient): Promise<{ path: string; backupPath: string | null }>;
