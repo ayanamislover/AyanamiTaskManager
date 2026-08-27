@@ -1,6 +1,6 @@
 # 发布清单
 
-本清单适用于 Windows x64 的 1.0.16 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
+本清单适用于 Windows x64 的 1.0.17 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
 
 勾选一律以 `release/test-report` 里可复核的证据为准：命令退出码、smoke 的逐项 JSON、benchmark 的阈值与实测、以及安装后对运行实例的实测。没有对应证据的条目保持未勾选，并在文末“非阻塞剩余项”里写明缺口。
 
@@ -40,7 +40,7 @@
 发布前必须用客户端配置中的稳定命令运行：
 
 ```powershell
-pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3000 --json output/release/mcp-bridge-memory-1.0.16.json
+pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3000 --json output/release/mcp-bridge-memory-1.0.17.json
 ```
 
 2026-08-27 实测 core Profile：1 个 bridge 为 27.78 MiB Private Bytes；10 个合计
@@ -54,7 +54,7 @@ pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3
 一条命令走完升版、十阶段、卸载、安装与实测：
 
 ```powershell
-pnpm exec tsx scripts/release-and-install.ts --version 1.0.16
+pnpm exec tsx scripts/release-and-install.ts --version 1.0.17
 ```
 
 它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
@@ -89,8 +89,8 @@ pnpm exec tsx scripts/assemble-release.ts
 
 ```text
 release/
-├─ AyanamiTaskManager-Setup-1.0.16-win-x64.exe
-├─ AyanamiTaskManager-1.0.16-win-x64-portable.zip
+├─ AyanamiTaskManager-Setup-1.0.17-win-x64.exe
+├─ AyanamiTaskManager-1.0.17-win-x64-portable.zip
 ├─ SHA256SUMS.txt
 ├─ release.json
 ├─ sbom.spdx.json
@@ -118,7 +118,7 @@ release/
 - [ ] README、用户指南、Agent 接入、备份恢复和排障文档已同步
 - [ ] 发布结论只引用 `release/test-report` 中可复核证据
 
-## 1.0.16 非阻塞剩余项
+## 1.0.17 非阻塞剩余项
 
 无。此前四条证据缺口已经分别由 v1/v2 迁移夹具、完整归档与垃圾箱恢复链、真实打包窗口生命周期烟测，以及默认 5 分钟边界测试补齐；这些用例均纳入全量测试与发布流水线。
 
@@ -128,6 +128,6 @@ release/
 
 后续复查发现原守卫用 JavaScript 字符数冒充字节数：当时是 8085 个 UTF-16 code unit，实际 UTF-8 序列化为 8311 bytes，已经越过 8192 bytes 目标。现改为 `Buffer.byteLength(..., "utf8")` 的真实字节守卫，并从 8192 bytes 中固定预留 512 bytes；默认字段不再误列为 required，enum 不再重复携带 type，外部校验语义保持不变。当前 12 个工具为 7660 bytes，可用阈值 7680 bytes；任何新增字段在吃掉预留余量前就会让测试失败。
 
-## 1.0.16 验收结果
+## 1.0.17 验收结果
 
 本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。
