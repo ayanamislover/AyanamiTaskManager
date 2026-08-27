@@ -522,7 +522,7 @@ try {
 
   const coreTools = await packagedProfileTools("core");
   const memoryTools = await packagedProfileTools("memory");
-  const defaultTools = await packagedDefaultProfileTools();
+  const legacyTools = await packagedDefaultProfileTools();
   check(
     "打包 core Profile 工具完整",
     JSON.stringify(coreTools) ===
@@ -554,9 +554,11 @@ try {
       new Set([...coreTools, ...memoryTools]).size === 11,
   );
   check(
-    "打包 stdio 未指定 Profile 时固定为 core",
-    JSON.stringify(defaultTools) === JSON.stringify(coreTools),
-    defaultTools.join(", "),
+    "打包 stdio 未指定 Profile 时保留完整 legacy 兼容能力",
+    legacyTools.length === 11 &&
+      new Set(legacyTools).size === 11 &&
+      [...coreTools, ...memoryTools].every((name) => legacyTools.includes(name)),
+    legacyTools.join(", "),
   );
   await checkInvalidPackagedProfileFails();
 
