@@ -20,7 +20,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 > 执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
 
-ATM 默认登记 `ayanami-task-manager-core` 与 `ayanami-task-manager-memory` 两个静态 Profile。两者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭 memory 是主动的低内存降级：会失去任务修改、进度、Record、搜索和 delta，且修改后需要重载 Agent 客户端。
+ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与 `ayanami-task-manager-actions` 三个静态 Profile。三者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭“完整工具面”是主动的低内存降级：memory 与 actions 会一起关闭，只保留 core，因此会失去任务修改、进度、Record、搜索和 delta，且修改后需要重载 Agent 客户端。
 
 ## Claude Desktop 怎么接入
 
@@ -35,6 +35,7 @@ Claude Code 与 Claude Desktop 是两条不同的路径：它**从不读** `clau
 ```powershell
 claude mcp add-json ayanami-task-manager-core '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","core"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
 claude mcp add-json ayanami-task-manager-memory '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","memory"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
+claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","actions"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
 ```
 
 用 stdio 而不是 streamable-http：后者要把 endpoint 和 token 写进配置，而两者每次 daemon 重启都会变，配置随即失效。
@@ -45,13 +46,13 @@ claude mcp add-json ayanami-task-manager-memory '{"command":"<ATM.exe>","args":[
 | ------- | ------------------------------ | -------------------------------------------------- |
 | core    | 开始、恢复 working set、结束   | `atm_begin`、`atm_brief`、`atm_end`                |
 | core    | 查找与创建任务                 | `atm_task_list`、`atm_task_get`、`atm_task_create` |
-| memory  | 领取、启动、检查项、验证、完成 | `atm_task_patch`                                   |
+| actions | 领取、启动、检查项、验证、完成 | `atm_task_patch`                                   |
 | memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`                   |
 | memory  | 精确读取、搜索历史与增量同步   | `atm_search`、`atm_delta`                          |
 
-两个 Profile 联合为 11 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
+三个 Profile 联合为 11 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
 
-正式 core / memory 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，当前安装器不会新增该入口。
+正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，当前安装器不会新增该入口。
 
 所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
 
@@ -60,6 +61,43 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 精确读取优先复用 `atm_search`：WorkItem/Record 直接传公开 key，Progress/Session 使用 `progress:<ULID>`、`session:<ULID>`，写回执可用 `op_id` 并按 `session` 收窄。长字段按响应给出的 cursor 续读；后续请求必须保持相同项目、实体和 `field_mask`，篡改、跨实体复用或内容变化会被拒绝。
 
 ## 最短工作流
+
+<!-- WORK_ITEM_OPERATIONS:BEGIN -->
+
+### 状态与操作（自动生成）
+
+> 本表由 canonical `WorkItemOperations` registry 生成；不要手工维护状态机副本。
+
+<!-- prettier-ignore -->
+| 状态 | 显示名 | 合法操作 |
+| --- | --- | --- |
+| `BACKLOG` | 待整理 | `claim`, `start`, `complete`, `cancel`, `edit` |
+| `READY` | 可开始 | `claim`, `start`, `complete`, `cancel`, `edit` |
+| `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
+| `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
+| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `complete`, `cancel`, `reopen`, `edit` |
+| `WAITING_USER` | 等待用户 | `start`, `release`, `block`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
+| `WAITING_AGENT` | 等待 Agent | `start`, `release`, `block`, `wait_agent`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
+| `VERIFYING` | 验收中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
+| `DONE` | 已完成 | `reopen`, `edit` |
+| `CANCELLED` | 已取消 | `reopen`, `edit` |
+
+<!-- prettier-ignore -->
+| 操作 | 显示名 | 可进入的当前状态 | 前置条件 |
+| --- | --- | --- | --- |
+| `claim` | 领取 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS` | DEPENDENCIES_READY, CLAIM_AVAILABLE, SAME_ASSIGNEE_WHEN_RUNNING |
+| `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
+| `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
+| `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
+| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `WAITING_AGENT` | WAITING_FOR |
+| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `WAITING_USER` | WAITING_FOR |
+| `verify` | 提交验收 | `IN_PROGRESS`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | - |
+| `complete` | 完成 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | COMPLETION_GATE |
+| `cancel` | 取消 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CANCEL_REFERENCES |
+| `reopen` | 重新打开 | `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
+| `edit` | 编辑 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
+
+<!-- WORK_ITEM_OPERATIONS:END -->
 
 1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。默认 `brief="full"`；低上下文客户端可用 `minimal`，只要 Session 回执则用 `none`。`max_chars` 只裁剪 brief，不会丢失 `session`、`project`、`scope` 或原子回执。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
@@ -111,4 +149,5 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - 发布验收：`%LOCALAPPDATA%\AyanamiTaskManager\docs\release-checklist.md`
 - ATM Feedback 逐项闭环矩阵：`%LOCALAPPDATA%\AyanamiTaskManager\docs\feedback-closeout.md`
 - MCP 工具契约与 Profile hash：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`
+- WorkItem 状态与操作表：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\work-item-operations.md`
 - 最新在线版本：`https://github.com/ayanamislover/AyanamiTaskManager`

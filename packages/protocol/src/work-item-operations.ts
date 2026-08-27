@@ -37,7 +37,29 @@ export type WorkItemOperationDefinition = {
   readonly resolveTarget: (context: WorkItemOperationContext) => WorkItemStatus;
   readonly preconditions: readonly WorkItemOperationPrecondition[];
   readonly effects: readonly WorkItemOperationEffect[];
+  readonly ui: {
+    readonly label: string;
+    readonly labelByStatus?: Partial<Record<WorkItemStatus, string>>;
+    readonly visibleFrom: readonly WorkItemStatus[];
+    readonly requiresStaleClaim?: boolean;
+  };
 };
+
+export const WORK_ITEM_STATUS_LABELS = {
+  BACKLOG: "待整理",
+  READY: "可开始",
+  CLAIMED: "已领取",
+  IN_PROGRESS: "进行中",
+  BLOCKED: "已阻塞",
+  WAITING_USER: "等待用户",
+  WAITING_AGENT: "等待 Agent",
+  VERIFYING: "验收中",
+  DONE: "已完成",
+  CANCELLED: "已取消",
+} as const satisfies Record<WorkItemStatus, string>;
+
+export const WORK_ITEM_OPERATION_TABLE_BEGIN = "<!-- WORK_ITEM_OPERATIONS:BEGIN -->";
+export const WORK_ITEM_OPERATION_TABLE_END = "<!-- WORK_ITEM_OPERATIONS:END -->";
 
 const fixedTarget =
   (target: WorkItemStatus) =>
@@ -53,6 +75,7 @@ export const WorkItemOperations = {
       currentStatus === "IN_PROGRESS" ? "IN_PROGRESS" : "CLAIMED",
     preconditions: ["DEPENDENCIES_READY", "CLAIM_AVAILABLE", "SAME_ASSIGNEE_WHEN_RUNNING"],
     effects: ["ASSIGN_CLAIM", "ESTABLISH_ENGINEERING_BASELINE", "SESSION_WORKING"],
+    ui: { label: "领取", visibleFrom: [] },
   },
   start: {
     allowedFrom: [
@@ -75,6 +98,7 @@ export const WorkItemOperations = {
       "ESTABLISH_ENGINEERING_BASELINE",
       "SESSION_WORKING",
     ],
+    ui: { label: "开始", visibleFrom: ["BACKLOG", "READY"] },
   },
   release: {
     allowedFrom: [
@@ -89,6 +113,11 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("READY"),
     preconditions: ["CLAIM_OWNER"],
     effects: ["CLEAR_CLAIM", "CLEAR_WAITING", "SESSION_IDLE"],
+    ui: {
+      label: "释放过期领取",
+      visibleFrom: ["CLAIMED", "IN_PROGRESS"],
+      requiresStaleClaim: true,
+    },
   },
   block: {
     allowedFrom: [
@@ -103,6 +132,7 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("BLOCKED"),
     preconditions: ["BLOCKED_REASON"],
     effects: ["SET_BLOCKER", "CLEAR_WAITING", "SESSION_WAITING"],
+    ui: { label: "阻塞", visibleFrom: ["IN_PROGRESS"] },
   },
   wait_agent: {
     allowedFrom: ["IN_PROGRESS", "VERIFYING", "WAITING_AGENT"],
@@ -110,6 +140,7 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("WAITING_AGENT"),
     preconditions: ["WAITING_FOR"],
     effects: ["SET_WAITING", "SESSION_WAITING"],
+    ui: { label: "等待 Agent", visibleFrom: ["IN_PROGRESS"] },
   },
   wait_user: {
     allowedFrom: ["IN_PROGRESS", "VERIFYING", "WAITING_USER"],
@@ -117,6 +148,7 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("WAITING_USER"),
     preconditions: ["WAITING_FOR"],
     effects: ["SET_WAITING", "SESSION_WAITING"],
+    ui: { label: "等待用户", visibleFrom: ["IN_PROGRESS"] },
   },
   verify: {
     allowedFrom: ["IN_PROGRESS", "WAITING_AGENT", "WAITING_USER", "VERIFYING"],
@@ -124,6 +156,7 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("VERIFYING"),
     preconditions: [],
     effects: ["CLEAR_WAITING", "REFRESH_GIT_CONTEXT", "SESSION_WORKING"],
+    ui: { label: "提交验收", visibleFrom: ["IN_PROGRESS"] },
   },
   complete: {
     allowedFrom: [
@@ -145,6 +178,7 @@ export const WorkItemOperations = {
       "CAPTURE_ENGINEERING_METRICS",
       "SESSION_IDLE",
     ],
+    ui: { label: "完成", visibleFrom: ["VERIFYING"] },
   },
   cancel: {
     allowedFrom: [
@@ -161,6 +195,18 @@ export const WorkItemOperations = {
     resolveTarget: fixedTarget("CANCELLED"),
     preconditions: ["CANCEL_REFERENCES"],
     effects: ["CLEAR_WAITING", "CAPTURE_ENGINEERING_METRICS", "SESSION_IDLE"],
+    ui: {
+      label: "取消",
+      visibleFrom: [
+        "BACKLOG",
+        "READY",
+        "CLAIMED",
+        "IN_PROGRESS",
+        "BLOCKED",
+        "WAITING_AGENT",
+        "WAITING_USER",
+      ],
+    },
   },
   reopen: {
     allowedFrom: ["BLOCKED", "WAITING_AGENT", "WAITING_USER", "VERIFYING", "DONE", "CANCELLED"],
@@ -174,6 +220,11 @@ export const WorkItemOperations = {
     },
     preconditions: [],
     effects: ["CLEAR_WAITING", "RESOLVE_BLOCKERS", "SESSION_WORKING"],
+    ui: {
+      label: "重新打开",
+      labelByStatus: { VERIFYING: "退回" },
+      visibleFrom: ["BLOCKED", "WAITING_AGENT", "WAITING_USER", "VERIFYING", "DONE", "CANCELLED"],
+    },
   },
   edit: {
     allowedFrom: [
@@ -203,6 +254,7 @@ export const WorkItemOperations = {
     resolveTarget: ({ currentStatus }) => currentStatus,
     preconditions: [],
     effects: [],
+    ui: { label: "编辑", visibleFrom: [] },
   },
 } as const satisfies Record<string, WorkItemOperationDefinition>;
 
@@ -272,4 +324,39 @@ export function workItemOperationHasEffect(
 ): boolean {
   const effects: readonly WorkItemOperationEffect[] = WorkItemOperations[operation].effects;
   return effects.includes(effect);
+}
+
+export function generateWorkItemOperationTable(): string {
+  const statuses = Object.keys(WORK_ITEM_STATUS_LABELS) as WorkItemStatus[];
+  const statusRows = statuses.map((status) => {
+    const operations = legalWorkItemOperations(status)
+      .map(({ operation }) => `\`${operation}\``)
+      .join(", ");
+    return `| \`${status}\` | ${WORK_ITEM_STATUS_LABELS[status]} | ${operations || "-"} |`;
+  });
+  const operationRows = WORK_ITEM_OPERATION_NAMES.map((operation) => {
+    const definition = WorkItemOperations[operation];
+    return `| \`${operation}\` | ${definition.ui.label} | ${definition.allowedFrom
+      .map((status) => `\`${status}\``)
+      .join(", ")} | ${definition.preconditions.join(", ") || "-"} |`;
+  });
+  return [
+    WORK_ITEM_OPERATION_TABLE_BEGIN,
+    "",
+    "### 状态与操作（自动生成）",
+    "",
+    "> 本表由 canonical `WorkItemOperations` registry 生成；不要手工维护状态机副本。",
+    "",
+    "<!-- prettier-ignore -->",
+    "| 状态 | 显示名 | 合法操作 |",
+    "| --- | --- | --- |",
+    ...statusRows,
+    "",
+    "<!-- prettier-ignore -->",
+    "| 操作 | 显示名 | 可进入的当前状态 | 前置条件 |",
+    "| --- | --- | --- | --- |",
+    ...operationRows,
+    "",
+    WORK_ITEM_OPERATION_TABLE_END,
+  ].join("\n");
 }

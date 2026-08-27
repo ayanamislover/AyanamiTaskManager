@@ -22,8 +22,8 @@ function profile(args = process.argv.slice(2)) {
   const index = args.indexOf("--profile");
   if (index < 0) return null;
   const selected = args[index + 1];
-  if (selected !== "core" && selected !== "memory")
-    throw new Error("MCP_PROFILE_INVALID: expected core or memory");
+  if (selected !== "core" && selected !== "memory" && selected !== "actions")
+    throw new Error("MCP_PROFILE_INVALID: expected core, memory or actions");
   return selected;
 }
 

@@ -16,7 +16,7 @@ export const MCP_STDIO_FILENAME = "mcp-stdio.cjs";
 export const MCP_RUNTIME_LINK = "current";
 
 export type McpLaunch = { command: string; args: string[]; env: Record<string, string> };
-export type McpProfile = "core" | "memory";
+export type McpProfile = "core" | "memory" | "actions";
 export type McpProfileLaunches = Record<McpProfile, McpLaunch>;
 
 /**
@@ -27,8 +27,8 @@ export function mcpStdioHttpPath(args: readonly string[]): string {
   const profileIndex = args.indexOf("--profile");
   if (profileIndex < 0) return "/mcp";
   const profile = args[profileIndex + 1];
-  if (profile !== "core" && profile !== "memory")
-    throw new Error("MCP_PROFILE_INVALID: expected core or memory");
+  if (profile !== "core" && profile !== "memory" && profile !== "actions")
+    throw new Error("MCP_PROFILE_INVALID: expected core, memory or actions");
   return `/mcp/${profile}`;
 }
 
@@ -78,6 +78,7 @@ export function mcpProfileLaunches(input: {
   return {
     core: { ...base, args: [...base.args, "--profile", "core"] },
     memory: { ...base, args: [...base.args, "--profile", "memory"] },
+    actions: { ...base, args: [...base.args, "--profile", "actions"] },
   };
 }
 
@@ -175,25 +176,30 @@ export function mcpLaunchStale(
  *
  * `profiles` 必须传进来，因为这个函数每次启动都跑一遍：它要是不认识「memory 已被关掉」，
  * 就会年复一年地把用户刚关掉的 memory 判成「缺失」再补回去，表现是开关按下去没反应。
- * 默认取 core + memory，与产品默认的完整工具面一致；低内存降级必须显式传 ["core"]。
+ * 默认取 core + memory + actions，与产品默认的完整工具面一致；低内存降级必须显式传 ["core"]。
  */
 export function mcpProfileLaunchesStale(
   installed: {
     legacy: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
     core: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
     memory: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
+    actions?: (Pick<McpLaunch, "command" | "args"> & { env?: Record<string, string> }) | null;
   },
   expected: McpProfileLaunches,
-  profiles: readonly McpProfile[] = ["core", "memory"],
+  profiles: readonly McpProfile[] = ["core", "memory", "actions"],
 ): boolean {
-  const hasAny = installed.legacy !== null || installed.core !== null || installed.memory !== null;
+  const hasAny =
+    installed.legacy !== null ||
+    installed.core !== null ||
+    installed.memory !== null ||
+    (installed.actions ?? null) !== null;
   // 一个都没装就是用户没装，不能借着「修复」替他装上。
   if (!hasAny) return false;
   if (installed.legacy !== null) return true;
   const enabled = new Set<McpProfile>(profiles);
   enabled.add("core");
-  for (const profile of ["core", "memory"] as const) {
-    const entry = installed[profile];
+  for (const profile of ["core", "memory", "actions"] as const) {
+    const entry = installed[profile] ?? null;
     // 关掉了却还登记着 → 要移除；开着却缺 → 要补上。两边都算过期。
     if (!enabled.has(profile)) {
       if (entry !== null) return true;

@@ -170,7 +170,7 @@ describe("MCP 启动方式", () => {
     }).toEqual({ arg: launch.args[0], pinned: false });
   });
 
-  it("为同一份 bridge 生成固定 core / memory 启动参数", () => {
+  it("为同一份 bridge 生成固定 core / memory / actions 启动参数", () => {
     const { execPath } = squirrelInstall(FIXTURE_VERSION);
     const dataDir = scratch();
     const launches = mcpProfileLaunches({ execPath, dataDir });
@@ -184,6 +184,11 @@ describe("MCP 启动方式", () => {
     expect(launches.memory).toEqual({
       command: execPath,
       args: [bridge, "--profile", "memory"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+    expect(launches.actions).toEqual({
+      command: execPath,
+      args: [bridge, "--profile", "actions"],
       env: { ELECTRON_RUN_AS_NODE: "1" },
     });
   });
@@ -301,6 +306,7 @@ describe("修复的幂等性", () => {
   const profileExpected = {
     core: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "core"] },
     memory: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "memory"] },
+    actions: { ...EXPECTED, args: [...EXPECTED.args, "--profile", "actions"] },
   };
 
   it("Codex：修一次之后不再判为过期，别人的段不受影响", () => {

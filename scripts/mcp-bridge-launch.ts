@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { MCP_RUNTIME_LINK, mcpLaunch } from "../apps/desktop/src/mcp-launch.js";
 
-export type McpProfile = "core" | "memory";
+export type McpProfile = "core" | "memory" | "actions";
 
 export type ConfiguredBridgeLaunch = {
   command: string;

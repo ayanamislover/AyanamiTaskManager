@@ -117,7 +117,7 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
           },
         ],
       }),
-    ).rejects.toThrow(/evidence required/u);
+    ).rejects.toThrow(/COMPLETION_GATE_FAILED/u);
 
     const ticked = await call("atm_task_patch", {
       project: project.code,

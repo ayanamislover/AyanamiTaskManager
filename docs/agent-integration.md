@@ -60,18 +60,21 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器代替人做出的规划决策，因此它是显式回执而不是静默行为：拿到它就应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
-MCP 使用两个默认同时登记、工具名不重叠的静态 Profile：
+MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
 - core：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_end`。
-- memory：`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`。
+- memory：`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`。
+- actions：`atm_task_patch`。
 
-两者共享同一 ATM 数据库。memory 默认启用；用户可在设置中主动关闭以减少每个客户端的一条 bridge 进程，但这会进入降级模式，无法修改任务、写进度/Record、搜索或增量同步，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
+三者共享同一 ATM 数据库。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record、搜索或增量同步，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
-不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 7,680-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core 与 memory 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 7,680-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
+不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 7,680-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core、memory 与 actions 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 7,680-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
 
-升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留完整 11 工具，避免旧会话在升级中途静默丢失 memory 能力；它不会写入任何新配置。ATM 启动后仍会把磁盘上的旧配置迁移为显式 core / memory，Agent 客户端重启后即回到拆分工具面。
+升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留完整 11 工具，避免旧会话在升级中途静默丢失 memory 能力；它不会写入任何新配置。ATM 启动后会把磁盘上的 legacy 或旧 core+memory 配置迁移为显式 core / memory / actions，补齐 `atm_task_patch` 所在的 actions，Agent 客户端重启后即回到完整拆分工具面。
 
 正式 Profile 的 descriptor bytes、Profile hash、逐工具安全注解与 schema hash 由 registry 生成到 `docs/generated/mcp-tool-contracts.md`；文档一致性测试会拒绝手工漂移。
+
+状态与 operation 的 canonical 表由同一 registry 生成到 [`docs/generated/work-item-operations.md`](./generated/work-item-operations.md)；本文不再维护第二份状态机。
 
 工作中发现新的独立事项时，用 `atm_task_create` 的 `discovered_from` 指向已有任务，或用 `discovered_from_ref` 指向同一批次的 `client_ref`。这是可追溯的发现关系，不会阻塞 ready queue，也不应替代 `depends_on`。
 

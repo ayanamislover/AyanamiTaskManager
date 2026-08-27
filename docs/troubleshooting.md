@@ -31,7 +31,7 @@ pnpm atm doctor
 ## 任务更新失败
 
 - `VERSION_CONFLICT`：重新读取任务，用新版本判断后重试；
-- `INVALID_TRANSITION`：按 READY→CLAIMED→IN_PROGRESS→VERIFYING/DONE 的状态机执行；
+- `INVALID_TRANSITION`：按错误 details 中的 `legal_operations` 选择操作；完整 canonical 状态/操作表见 [generated/work-item-operations.md](./generated/work-item-operations.md)；
 - `CLAIM_CONFLICT`：任务被其他 Session 领取；等待释放或确认 lease 已过期后显式接管；
 - `IDEMPOTENCY_CONFLICT`：同一 `op_id` 被用于不同请求，改用新的 `op_id`；
 - `PROJECT_DB_UNAVAILABLE`：项目正在迁移、恢复、已进垃圾箱或迁移失败。

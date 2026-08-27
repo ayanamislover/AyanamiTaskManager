@@ -65,9 +65,10 @@ describe("explicit ToolDefinition registry", () => {
     expect(all).toHaveLength(11);
     expect(new Set(all.map((definition) => definition.name))).toHaveLength(11);
     expect(registry.definitions("core")).toHaveLength(6);
-    expect(registry.definitions("memory")).toHaveLength(5);
+    expect(registry.definitions("memory")).toHaveLength(4);
+    expect(registry.definitions("actions")).toHaveLength(1);
 
-    for (const profile of ["core", "memory", "legacy"] as const) {
+    for (const profile of ["core", "memory", "actions", "legacy"] as const) {
       const server = createAyanamiMcpServer(service, { profile });
       const client = new Client({ name: `registry-${profile}`, version: "1" });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

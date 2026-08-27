@@ -62,16 +62,30 @@ export function memoryProfileEnabledValue(value: unknown): boolean {
 }
 
 export function hasManagedMcpProfile(launches: InstalledMcpProfileLaunches): boolean {
-  return launches.legacy !== null || launches.core !== null || launches.memory !== null;
+  return (
+    launches.legacy !== null ||
+    launches.core !== null ||
+    launches.memory !== null ||
+    launches.actions !== null
+  );
 }
 
-/** legacy 兼容入口包含完整工具面，所以失败回滚时按双 Profile 恢复它的能力。 */
+/**
+ * legacy 兼容入口包含完整工具面；正式入口则按实际能力集回滚。
+ *
+ * 受管正式配置必须含 core。若磁盘只残留 memory/actions，这里补 core 与安装器的
+ * canonicalization 保持一致，但绝不凭空补另一个扩展 Profile。
+ */
 export function profilesRepresentedBy(
   launches: InstalledMcpProfileLaunches,
 ): readonly McpProfile[] {
-  return launches.legacy !== null || launches.memory !== null
-    ? (["core", "memory"] as const)
-    : (["core"] as const);
+  if (launches.legacy !== null) return ["core", "memory", "actions"];
+  const represented: McpProfile[] = [];
+  if (launches.core !== null) represented.push("core");
+  if (launches.memory !== null) represented.push("memory");
+  if (launches.actions !== null) represented.push("actions");
+  if (represented.length > 0 && !represented.includes("core")) represented.unshift("core");
+  return represented;
 }
 
 function baseResults(adapters: readonly McpProfileSyncAdapter[]): McpProfileSyncResult[] {
@@ -105,7 +119,7 @@ export function runMcpProfileSwitch(input: {
   commit: () => void;
 }): McpProfileSwitchReport {
   const desired: readonly McpProfile[] = input.enabled
-    ? (["core", "memory"] as const)
+    ? (["core", "memory", "actions"] as const)
     : (["core"] as const);
   const results = baseResults(input.adapters);
   const applied: number[] = [];

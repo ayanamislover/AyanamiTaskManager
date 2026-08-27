@@ -127,14 +127,16 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
     const servers = claude.mcpServers as Record<string, unknown> | undefined;
     const core = servers?.["ayanami-task-manager-core"];
     const memory = servers?.["ayanami-task-manager-memory"];
-    if (!core || !memory) return null;
+    const actions = servers?.["ayanami-task-manager-actions"];
+    if (!core || !memory || !actions) return null;
 
     check(
       "打包应用迁移 Codex 旧单入口及子表",
       !codex.includes('mcp_servers."ayanami-task-manager"') &&
         !codex.includes("LEGACY_ENV_MUST_DISAPPEAR") &&
         codex.includes('mcp_servers."ayanami-task-manager-core"') &&
-        codex.includes('mcp_servers."ayanami-task-manager-memory"'),
+        codex.includes('mcp_servers."ayanami-task-manager-memory"') &&
+        codex.includes('mcp_servers."ayanami-task-manager-actions"'),
       codex,
     );
     check(
@@ -145,6 +147,7 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
     return {
       core: recordedLaunch(core, "Claude core"),
       memory: recordedLaunch(memory, "Claude memory"),
+      actions: recordedLaunch(actions, "Claude actions"),
     };
   });
 }
@@ -388,13 +391,13 @@ async function checkInvalidPackagedProfileFails(): Promise<void> {
   check("非法打包 Profile 给出明确错误", stderr.includes("MCP_PROFILE_INVALID"), stderr);
 }
 
-async function claimThroughPackagedMemory(
+async function claimThroughPackagedActions(
   project: string,
   session: string,
   taskKey: string,
   expectedVersion: number,
 ): Promise<void> {
-  const launch = installedProfileLaunch("memory");
+  const launch = installedProfileLaunch("actions");
   const transport = new StdioClientTransport({
     command: launch.command,
     args: launch.args,
@@ -402,7 +405,7 @@ async function claimThroughPackagedMemory(
     env: { ...smokeEnvironment, ...launch.env },
     stderr: "pipe",
   });
-  const client = new McpClient({ name: "packaged-smoke-memory", version: "1.0.0" });
+  const client = new McpClient({ name: "packaged-smoke-actions", version: "1.0.0" });
   try {
     await client.connect(transport);
     const patched = await client.callTool({
@@ -410,12 +413,12 @@ async function claimThroughPackagedMemory(
       arguments: {
         project,
         session,
-        op_id: "packaged-smoke-memory-claim",
+        op_id: "packaged-smoke-actions-claim",
         items: [{ task_key: taskKey, expected_version: expectedVersion, operation: "claim" }],
       },
     });
     check(
-      "memory Profile 修改 core 创建的任务",
+      "actions Profile 修改 core 创建的任务",
       (patched.structuredContent as Record<string, unknown>).ok === true,
     );
   } finally {
@@ -522,6 +525,7 @@ try {
 
   const coreTools = await packagedProfileTools("core");
   const memoryTools = await packagedProfileTools("memory");
+  const actionsTools = await packagedProfileTools("actions");
   const legacyTools = await packagedDefaultProfileTools();
   check(
     "打包 core Profile 工具完整",
@@ -539,25 +543,25 @@ try {
   check(
     "打包 memory Profile 工具完整",
     JSON.stringify(memoryTools) ===
-      JSON.stringify([
-        "atm_task_patch",
-        "atm_progress_add",
-        "atm_record",
-        "atm_search",
-        "atm_delta",
-      ]),
+      JSON.stringify(["atm_progress_add", "atm_record", "atm_search", "atm_delta"]),
     memoryTools.join(", "),
   );
   check(
-    "打包双 Profile 工具无重叠且联合为 11 个",
-    coreTools.filter((name) => memoryTools.includes(name)).length === 0 &&
-      new Set([...coreTools, ...memoryTools]).size === 11,
+    "打包 actions Profile 工具完整",
+    JSON.stringify(actionsTools) === JSON.stringify(["atm_task_patch"]),
+    actionsTools.join(", "),
+  );
+  check(
+    "打包三 Profile 工具无重叠且联合为 11 个",
+    coreTools.filter((name) => [...memoryTools, ...actionsTools].includes(name)).length === 0 &&
+      memoryTools.filter((name) => actionsTools.includes(name)).length === 0 &&
+      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 11,
   );
   check(
     "打包 stdio 未指定 Profile 时保留完整 legacy 兼容能力",
     legacyTools.length === 11 &&
       new Set(legacyTools).size === 11 &&
-      [...coreTools, ...memoryTools].every((name) => legacyTools.includes(name)),
+      [...coreTools, ...memoryTools, ...actionsTools].every((name) => legacyTools.includes(name)),
     legacyTools.join(", "),
   );
   await checkInvalidPackagedProfileFails();
@@ -570,7 +574,7 @@ try {
   );
   check("UI WebSocket 收到 MCP 实时事件", live.event.type === "work.created");
   const liveCreated = (live.value.created.created as Array<Record<string, unknown>>)[0]!;
-  await claimThroughPackagedMemory(
+  await claimThroughPackagedActions(
     project.code,
     live.value.session,
     String(liveCreated.task_key),
@@ -579,7 +583,7 @@ try {
   const sharedTask = (await client.tasks.list(project.code)).find(
     (task) => task.key === String(liveCreated.task_key),
   );
-  check("core / memory Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
+  check("core / actions Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
 
   const backup = await client.backups.create(project.code);
   await createThroughPackagedMcp(project.code, "恢复后应消失", "packaged-smoke-create-2");

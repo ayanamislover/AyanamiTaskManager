@@ -133,32 +133,6 @@ const createItemFields = [
   "assignee_agent_id",
 ] as const;
 
-const patchItemFields = [
-  "task_key",
-  "expected_version",
-  "expected_fields",
-  "operation",
-  "title",
-  "description",
-  "acceptance",
-  "blocked_reason",
-  "waiting_for",
-  "cancel_reason",
-  "duplicate_of",
-  "superseded_by",
-  "assignee_agent_id",
-  "target_date",
-  "parent_key",
-  "takeover_stale",
-  "parent_checklist_id",
-  "expected_parent_checklist_version",
-  "request_key",
-  "candidate_hashes",
-  "verdict",
-  "evidence",
-  "checklist_items",
-] as const;
-
 const nestedFieldSets: Array<{
   tool: string;
   path: string[];
@@ -176,30 +150,6 @@ const nestedFieldSets: Array<{
     path: ["properties", "items", "items", "properties", "checklist", "items"],
     expected: ["title", "evidence_required", "weight"],
     label: "create.items.checklist",
-  },
-  {
-    tool: "atm_task_patch",
-    path: ["properties", "items", "items"],
-    expected: patchItemFields,
-    label: "patch.items",
-  },
-  {
-    tool: "atm_task_patch",
-    path: ["properties", "items", "items", "properties", "expected_fields"],
-    expected: ["title", "description", "acceptance", "target_date", "parent_key"],
-    label: "patch.items.expected_fields",
-  },
-  {
-    tool: "atm_task_patch",
-    path: ["properties", "items", "items", "properties", "evidence", "items"],
-    expected: ["kind", "value", "note"],
-    label: "patch.items.evidence",
-  },
-  {
-    tool: "atm_task_patch",
-    path: ["properties", "items", "items", "properties", "checklist_items", "items"],
-    expected: ["id", "status", "evidence"],
-    label: "patch.items.checklist_items",
   },
   {
     tool: "atm_progress_add",
@@ -245,6 +195,7 @@ function assertPublicSurface(tools: ListedTool[]): void {
 }
 
 function dereference(schema: JsonObject, root: JsonObject): JsonObject {
+  if (!schema || typeof schema !== "object") return {};
   if (typeof schema.$ref !== "string" || !schema.$ref.startsWith("#/")) return schema;
   return schema.$ref
     .slice(2)
@@ -350,6 +301,9 @@ function assertRuntimeSemantics(
   // explicit transition allowlist, while any published value must still match.
   const canonicalAdapterTools = new Set(["atm_begin", "atm_task_create"]);
   for (const tool of tools) {
+    // atm_task_patch publishes a compact discriminated union whose per-operation
+    // field/required parity is exhaustively guarded by operation-schema.test.ts.
+    if (tool.name === "atm_task_patch") continue;
     const runtimeSchema = runtimeSchemas[tool.name];
     if (!runtimeSchema) throw new Error(`MISSING_RUNTIME_SCHEMA:${tool.name}`);
     const runtime = semanticConstraints(z.toJSONSchema(runtimeSchema) as JsonObject, true);
@@ -396,7 +350,7 @@ async function listedTools(): Promise<{
   close: () => Promise<void>;
 }> {
   const fixtures = await Promise.all(
-    (["core", "memory"] as const).map(async (profile) => {
+    (["core", "memory", "actions"] as const).map(async (profile) => {
       const service = {} as AyanamiTaskService;
       const registry = createAyanamiToolRegistry(service);
       const server = createAyanamiMcpServer(service, { profile });

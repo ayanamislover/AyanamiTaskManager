@@ -13,19 +13,23 @@ import { asAtmError, AtmError } from "@ayanami-task/errors";
 import {
   BeginInputSchema,
   BeginSignalsSchema,
+  ChecklistBatchItemInputSchema,
   ChecklistCreateInputSchema,
   EvidenceInputSchema,
-  EvidenceReferenceSchema,
   type ExternalNameMap,
   RECORD_SUMMARY_CODE_POINT_LIMIT,
   RecordSubjectKeySchema,
   RecordSummarySchema,
   RecordTopicSchema,
   ReviewCandidateHashSchema,
+  TASK_PATCH_OPERATION_NAMES,
   TaskCreateBatchInputSchema,
+  TaskPatchOperations,
   WorkItemCreateInputSchema,
-  WorkItemPatchInputSchema,
+  WorkItemExpectedFieldsSchema,
   externalizeObjectSchema,
+  type TaskPatchItem,
+  type TaskPatchOperation,
   unicodeCodePointLength,
 } from "@ayanami-task/protocol";
 import {
@@ -1091,22 +1095,13 @@ const taskCreateExternal = externalizeObjectSchema(TaskCreateBatchInputSchema, t
   },
 });
 
-const workItemExpectedFields = z
-  .object({
-    title: z.string().trim().min(1).max(400).optional(),
-    description: z.string().max(50_000).optional(),
-    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
-    target_date: z.string().nullable().optional(),
-    parent_key: z.string().trim().min(1).max(100).nullable().optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, "expected_fields 至少包含一个字段");
-
-const reviewPatchCommon = {
-  task_key: taskKey,
-  expected_version: z.number().int().nonnegative(),
-  takeover_stale: z.literal(false).default(false),
-};
+const workItemExpectedFieldsExternal = externalizeObjectSchema(WorkItemExpectedFieldsSchema, {
+  title: "title",
+  description: "description",
+  acceptance: "acceptance",
+  targetDate: "target_date",
+  parentKey: "parent_key",
+} as const);
 const reviewCandidateHashMap = z
   .record(ReviewCandidateHashSchema.shape.name, ReviewCandidateHashSchema.shape.value)
   .superRefine((hashes, context) => {
@@ -1118,231 +1113,128 @@ const reviewCandidateHashMap = z
       });
     }
   });
-const reviewRequestPatchInput = z
-  .object({
-    ...reviewPatchCommon,
-    operation: z.literal("review_request"),
-    parent_checklist_id: z.string().trim().min(1).max(128),
-    expected_parent_checklist_version: z.number().int().nonnegative(),
-    candidate_hashes: reviewCandidateHashMap,
-  })
-  .strict();
-const reviewSubmitPatchInput = z
-  .object({
-    ...reviewPatchCommon,
-    operation: z.literal("review_submit"),
-    request_key: z.string().trim().min(1).max(128),
-    verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]),
-    candidate_hashes: reviewCandidateHashMap,
-    evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
-  })
-  .strict();
+const checklistBatchItemExternal = externalizeObjectSchema(ChecklistBatchItemInputSchema, {
+  checklistId: "id",
+  status: "status",
+  evidence: "evidence",
+} as const);
 
-const checklistStatus = z.enum(["TODO", "DOING", "DONE", "SKIPPED"]);
-const checklistBatchItem = z
-  .object({
-    id: z.string().trim().min(1),
-    status: checklistStatus,
-    evidence: z.array(EvidenceInputSchema).max(100).optional(),
-  })
-  .strict();
-const checklistSinglePatchInput = z
-  .object({
-    ...reviewPatchCommon,
-    operation: z.literal("checklist_single"),
-    checklist_items: z.array(checklistBatchItem).length(1),
-  })
-  .strict();
-const checklistBatchPatchInput = z
-  .object({
-    ...reviewPatchCommon,
-    operation: z.literal("checklist_batch"),
-    checklist_items: z.array(checklistBatchItem).min(1).max(100),
-  })
-  .strict();
+const taskPatchExternalNames = {
+  taskKey: "task_key",
+  expectedVersion: "expected_version",
+  takeoverStale: "takeover_stale",
+  operation: "operation",
+  expectedFields: "expected_fields",
+  title: "title",
+  description: "description",
+  acceptance: "acceptance",
+  blockedReason: "blocked_reason",
+  waitingFor: "waiting_for",
+  cancelReason: "cancel_reason",
+  duplicateOf: "duplicate_of",
+  supersededBy: "superseded_by",
+  assigneeAgentId: "assignee_agent_id",
+  targetDate: "target_date",
+  parentKey: "parent_key",
+  parentChecklistId: "parent_checklist_id",
+  expectedParentChecklistVersion: "expected_parent_checklist_version",
+  requestKey: "request_key",
+  candidateHashes: "candidate_hashes",
+  verdict: "verdict",
+  evidence: "evidence",
+  checklistItems: "checklist_items",
+} as const;
 
-function coreWorkItemPatch(item: Record<string, any>): Record<string, unknown> {
-  const expectedFields = item.expected_fields
-    ? {
-        ...(item.expected_fields.title === undefined ? {} : { title: item.expected_fields.title }),
-        ...(item.expected_fields.description === undefined
-          ? {}
-          : { description: item.expected_fields.description }),
-        ...(item.expected_fields.acceptance === undefined
-          ? {}
-          : { acceptance: item.expected_fields.acceptance }),
-        ...(item.expected_fields.target_date === undefined
-          ? {}
-          : { targetDate: item.expected_fields.target_date }),
-        ...(item.expected_fields.parent_key === undefined
-          ? {}
-          : { parentKey: item.expected_fields.parent_key }),
-      }
-    : undefined;
-  return {
-    taskKey: item.task_key,
-    expectedVersion: item.expected_version,
-    operation: item.operation,
-    takeoverStale: item.takeover_stale,
-    ...(expectedFields === undefined ? {} : { expectedFields }),
-    ...(item.title === undefined ? {} : { title: item.title }),
-    ...(item.description === undefined ? {} : { description: item.description }),
-    ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
-    ...(item.blocked_reason === undefined ? {} : { blockedReason: item.blocked_reason }),
-    ...(item.waiting_for === undefined ? {} : { waitingFor: item.waiting_for }),
-    ...(item.cancel_reason === undefined ? {} : { cancelReason: item.cancel_reason }),
-    ...(item.duplicate_of === undefined ? {} : { duplicateOf: item.duplicate_of }),
-    ...(item.superseded_by === undefined ? {} : { supersededBy: item.superseded_by }),
-    ...(item.assignee_agent_id === undefined ? {} : { assigneeAgentId: item.assignee_agent_id }),
-    ...(item.target_date === undefined ? {} : { targetDate: item.target_date }),
-    ...(item.parent_key === undefined ? {} : { parentKey: item.parent_key }),
-  };
-}
+const taskPatchFieldAdapters = {
+  expectedFields: {
+    schema: workItemExpectedFieldsExternal.inputSchema.optional(),
+    decode: (value: unknown) => workItemExpectedFieldsExternal.parse(value),
+  },
+  candidateHashes: {
+    schema: reviewCandidateHashMap,
+    decode: (value: unknown) =>
+      Object.entries(value as Record<string, string>).map(([name, hash]) => ({
+        name,
+        value: hash,
+      })),
+  },
+  checklistItems: {
+    schema: z.array(checklistBatchItemExternal.inputSchema).min(1).max(100),
+    decode: (value: unknown) =>
+      (value as unknown[]).map((item) => checklistBatchItemExternal.parse(item)),
+  },
+} as const;
 
-const workItemPatch = z
-  .object({
-    task_key: taskKey,
-    expected_version: z.number().int().nonnegative(),
-    expected_fields: workItemExpectedFields.optional(),
-    operation: z.enum([
-      "claim",
-      "start",
-      "release",
-      "block",
-      "wait_user",
-      "wait_agent",
-      "verify",
-      "complete",
-      "verify_and_complete",
-      "review_request",
-      "review_submit",
-      "checklist_single",
-      "checklist_batch",
-      "cancel",
-      "reopen",
-      "edit",
-    ]),
-    title: z.string().min(1).max(400).optional(),
-    description: z.string().max(50_000).optional(),
-    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
-    blocked_reason: z.string().min(1).max(2000).optional(),
-    waiting_for: z.string().min(1).max(1000).optional(),
-    cancel_reason: z.string().trim().min(1).max(2000).optional(),
-    duplicate_of: z.string().trim().min(1).max(100).nullable().optional(),
-    superseded_by: z.string().trim().min(1).max(100).nullable().optional(),
-    assignee_agent_id: z.string().trim().min(1).max(128).nullable().optional(),
-    target_date: z.string().nullable().optional(),
-    parent_key: z.string().nullable().optional(),
-    takeover_stale: z.boolean().default(false),
-    parent_checklist_id: z.string().trim().min(1).max(128).optional(),
-    expected_parent_checklist_version: z.number().int().nonnegative().optional(),
-    request_key: z.string().trim().min(1).max(128).optional(),
-    candidate_hashes: reviewCandidateHashMap.optional(),
-    verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]).optional(),
-    evidence: z.array(EvidenceReferenceSchema).min(1).max(100).optional(),
-    checklist_items: z.array(checklistBatchItem).min(1).max(100).optional(),
-  })
-  .strict()
-  // Transitional ATM-T-0188 boundary: operation-specific Review/checklist conditions are
-  // runtime-only until the canonical Operation Registry emits this discriminated union.
-  .superRefine((value, context) => {
-    if (
-      value.operation === "review_request" ||
-      value.operation === "review_submit" ||
-      value.operation === "checklist_single" ||
-      value.operation === "checklist_batch"
-    ) {
-      const parser =
-        value.operation === "review_request"
-          ? reviewRequestPatchInput
-          : value.operation === "review_submit"
-            ? reviewSubmitPatchInput
-            : value.operation === "checklist_single"
-              ? checklistSinglePatchInput
-              : checklistBatchPatchInput;
-      const parsed = parser.safeParse(value);
-      if (parsed.success) return;
-      for (const issue of parsed.error.issues) {
-        if (issue.code === "unrecognized_keys") {
-          for (const key of issue.keys) {
-            context.addIssue({
-              code: "custom",
-              path: [key],
-              message: `${value.operation} 不接受 ${key}`,
-            });
+const taskPatchExternalAdapters = Object.fromEntries(
+  TASK_PATCH_OPERATION_NAMES.map((operation) => {
+    const definition = TaskPatchOperations[operation];
+    const fieldAdapters =
+      operation === "checklist_single"
+        ? {
+            ...taskPatchFieldAdapters,
+            checklistItems: {
+              ...taskPatchFieldAdapters.checklistItems,
+              schema: z.array(checklistBatchItemExternal.inputSchema).length(1),
+            },
           }
-          continue;
-        }
-        context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-      }
-      return;
-    }
-    if (value.operation === "verify_and_complete") {
-      const allowed = new Set(["task_key", "expected_version", "operation", "takeover_stale"]);
-      for (const [field, fieldValue] of Object.entries(value)) {
-        if (!allowed.has(field) && fieldValue !== undefined) {
-          context.addIssue({
-            code: "custom",
-            path: [field],
-            message: `verify_and_complete 不接受 ${field}`,
-          });
-        }
-      }
-      return;
-    }
-    const parsed = WorkItemPatchInputSchema.safeParse(coreWorkItemPatch(value));
-    if (parsed.success) return;
-    const pathNames: Record<string, string> = {
-      taskKey: "task_key",
-      expectedVersion: "expected_version",
-      expectedFields: "expected_fields",
-      targetDate: "target_date",
-      parentKey: "parent_key",
-      blockedReason: "blocked_reason",
-      waitingFor: "waiting_for",
-      cancelReason: "cancel_reason",
-      duplicateOf: "duplicate_of",
-      supersededBy: "superseded_by",
-      assigneeAgentId: "assignee_agent_id",
-      takeoverStale: "takeover_stale",
-    };
-    for (const issue of parsed.error.issues) {
-      context.addIssue({
-        code: "custom",
-        path: issue.path.map((part) =>
-          typeof part === "string" ? (pathNames[part] ?? part) : part,
-        ),
-        message: issue.message,
-      });
-    }
-  });
+        : taskPatchFieldAdapters;
+    return [
+      operation,
+      externalizeObjectSchema(
+        definition.schema as z.ZodObject<z.ZodRawShape>,
+        taskPatchExternalNames as any,
+        fieldAdapters as any,
+      ),
+    ];
+  }),
+) as Record<
+  TaskPatchOperation,
+  ReturnType<typeof externalizeObjectSchema<z.ZodObject<z.ZodRawShape>, any>>
+>;
+
+const coreTaskPatchOperations = TASK_PATCH_OPERATION_NAMES.filter(
+  (operation) => TaskPatchOperations[operation].batchable,
+);
+const compositeTaskPatchOperations = TASK_PATCH_OPERATION_NAMES.filter(
+  (operation) => !TaskPatchOperations[operation].batchable,
+);
+const coreWorkItemPatch = z.discriminatedUnion(
+  "operation",
+  coreTaskPatchOperations.map(
+    (operation) => taskPatchExternalAdapters[operation].inputSchema,
+  ) as any,
+);
+const compositeWorkItemPatch = z.discriminatedUnion(
+  "operation",
+  compositeTaskPatchOperations.map(
+    (operation) => taskPatchExternalAdapters[operation].inputSchema,
+  ) as any,
+);
+const workItemPatch = z.discriminatedUnion(
+  "operation",
+  TASK_PATCH_OPERATION_NAMES.map(
+    (operation) => taskPatchExternalAdapters[operation].inputSchema,
+  ) as any,
+);
+
+function canonicalTaskPatchItem(value: unknown): TaskPatchItem {
+  const parsed = workItemPatch.parse(value) as Record<string, unknown> & {
+    operation: TaskPatchOperation;
+  };
+  return taskPatchExternalAdapters[parsed.operation].parse(parsed) as TaskPatchItem;
+}
 
 const taskPatchToolInput = z
   .object({
     project: projectCode,
     session: sessionId,
     op_id: opId,
-    items: z.array(workItemPatch).min(1).max(50),
+    items: z.union([
+      z.array(coreWorkItemPatch).min(1).max(50),
+      z.array(compositeWorkItemPatch).length(1),
+    ]),
   })
-  .strict()
-  .superRefine((value, context) => {
-    const composite = value.items.filter((item) =>
-      [
-        "verify_and_complete",
-        "review_request",
-        "review_submit",
-        "checklist_single",
-        "checklist_batch",
-      ].includes(item.operation),
-    );
-    if (composite.length > 0 && value.items.length !== 1) {
-      context.addIssue({
-        code: "custom",
-        path: ["items"],
-        message: `${composite[0]!.operation} 必须作为唯一 item`,
-      });
-    }
-  });
+  .strict();
 
 const progressCompleted = z.union([
   z.string().max(500),
@@ -2200,7 +2092,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
   );
 
   defineTool(
-    "memory",
+    "actions",
     "atm_task_patch",
     {
       description: "批量变更任务。",
@@ -2209,42 +2101,28 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async (input) => {
-      const composite = input.items.filter((item) =>
-        [
-          "verify_and_complete",
-          "review_request",
-          "review_submit",
-          "checklist_single",
-          "checklist_batch",
-        ].includes(item.operation),
-      );
-      if (composite.length > 0) {
-        if (input.items.length !== 1) {
-          throw new AtmError("VALIDATION_ERROR", {
-            message: `${composite[0]!.operation} 必须作为 atm_task_patch 的唯一 item`,
-          });
-        }
-      }
-      if (composite[0]?.operation === "review_request") {
-        const item = reviewRequestPatchInput.parse(composite[0]);
+      const operation = input.items[0]!.operation as TaskPatchOperation;
+      if (operation === "review_request") {
+        const item = canonicalTaskPatchItem(input.items[0]) as Extract<
+          ReturnType<typeof canonicalTaskPatchItem>,
+          { operation: "review_request" }
+        >;
         const created = await withMcpErrorDetails(
           service,
           {
             project: input.project,
-            taskKey: item.task_key,
-            checklistId: item.parent_checklist_id,
-            expectedVersion: item.expected_parent_checklist_version,
-            expectedVersions: { [item.task_key]: item.expected_version },
+            taskKey: item.taskKey,
+            checklistId: item.parentChecklistId,
+            expectedVersion: item.expectedParentChecklistVersion,
+            expectedVersions: { [item.taskKey]: item.expectedVersion },
           },
           () =>
             service.createReviewRequest(input.project, input.session, input.op_id, {
-              reviewTaskKey: item.task_key,
-              expectedReviewTaskVersion: item.expected_version,
-              parentChecklistId: item.parent_checklist_id,
-              expectedParentChecklistVersion: item.expected_parent_checklist_version,
-              expectedCandidateHashes: Object.entries(item.candidate_hashes).map(
-                ([name, value]) => ({ name, value }),
-              ),
+              reviewTaskKey: item.taskKey,
+              expectedReviewTaskVersion: item.expectedVersion,
+              parentChecklistId: item.parentChecklistId,
+              expectedParentChecklistVersion: item.expectedParentChecklistVersion,
+              expectedCandidateHashes: item.candidateHashes,
             }),
         );
         return result({
@@ -2265,33 +2143,33 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           },
         });
       }
-      if (composite[0]?.operation === "review_submit") {
-        const item = reviewSubmitPatchInput.parse(composite[0]);
-        const request = await service.getReviewRequest(input.project, item.request_key);
-        if (request.reviewTaskKey !== item.task_key) {
+      if (operation === "review_submit") {
+        const item = canonicalTaskPatchItem(input.items[0]) as Extract<
+          ReturnType<typeof canonicalTaskPatchItem>,
+          { operation: "review_submit" }
+        >;
+        const request = await service.getReviewRequest(input.project, item.requestKey);
+        if (request.reviewTaskKey !== item.taskKey) {
           throw new AtmError("REVIEW_BINDING_MISMATCH", {
-            message: `Review 绑定不匹配：${item.task_key}`,
-            details: { task_key: item.task_key },
+            message: `Review 绑定不匹配：${item.taskKey}`,
+            details: { task_key: item.taskKey },
           });
         }
         const submitted = await withMcpErrorDetails(
           service,
           {
             project: input.project,
-            taskKey: item.task_key,
+            taskKey: item.taskKey,
             checklistId: request.parentChecklistId,
             expectedVersion: request.parentChecklistVersion,
-            expectedVersions: { [item.task_key]: item.expected_version },
+            expectedVersions: { [item.taskKey]: item.expectedVersion },
           },
           () =>
             service.submitReview(input.project, input.session, input.op_id, {
-              requestKey: item.request_key,
-              expectedReviewTaskVersion: item.expected_version,
+              requestKey: item.requestKey,
+              expectedReviewTaskVersion: item.expectedVersion,
               verdict: item.verdict,
-              reviewedHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
-                name,
-                value,
-              })),
+              reviewedHashes: item.candidateHashes,
               evidence: item.evidence,
             }),
         );
@@ -2319,19 +2197,22 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           },
         });
       }
-      if (composite[0]?.operation === "verify_and_complete") {
-        const item = composite[0];
+      if (operation === "verify_and_complete") {
+        const item = canonicalTaskPatchItem(input.items[0]) as Extract<
+          ReturnType<typeof canonicalTaskPatchItem>,
+          { operation: "verify_and_complete" }
+        >;
         const completed = await withMcpErrorDetails(
           service,
           {
             project: input.project,
-            taskKey: item.task_key,
-            expectedVersion: item.expected_version,
+            taskKey: item.taskKey,
+            expectedVersion: item.expectedVersion,
           },
           () =>
             service.verifyAndComplete(input.project, input.session, input.op_id, {
-              taskKey: item.task_key,
-              expectedVersion: item.expected_version,
+              taskKey: item.taskKey,
+              expectedVersion: item.expectedVersion,
             }),
         );
         return result({
@@ -2351,21 +2232,24 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           ],
         });
       }
-      if (composite[0]?.operation === "checklist_batch") {
-        const item = checklistBatchPatchInput.parse(composite[0]);
+      if (operation === "checklist_batch") {
+        const item = canonicalTaskPatchItem(input.items[0]) as Extract<
+          ReturnType<typeof canonicalTaskPatchItem>,
+          { operation: "checklist_batch" }
+        >;
         const updated = await withMcpErrorDetails(
           service,
           {
             project: input.project,
-            taskKey: item.task_key,
-            expectedVersion: item.expected_version,
+            taskKey: item.taskKey,
+            expectedVersion: item.expectedVersion,
           },
           () =>
             service.updateChecklistBatch(input.project, input.session, input.op_id, {
-              taskKey: item.task_key,
-              expectedVersion: item.expected_version,
-              items: item.checklist_items.map((checklistItem) => ({
-                checklistId: checklistItem.id,
+              taskKey: item.taskKey,
+              expectedVersion: item.expectedVersion,
+              items: item.checklistItems.map((checklistItem) => ({
+                checklistId: checklistItem.checklistId,
                 status: checklistItem.status,
                 ...(checklistItem.evidence === undefined
                   ? {}
@@ -2390,20 +2274,23 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           })),
         });
       }
-      if (composite[0]?.operation === "checklist_single") {
-        const item = checklistSinglePatchInput.parse(composite[0]);
-        const checklistItem = item.checklist_items[0]!;
+      if (operation === "checklist_single") {
+        const item = canonicalTaskPatchItem(input.items[0]) as Extract<
+          ReturnType<typeof canonicalTaskPatchItem>,
+          { operation: "checklist_single" }
+        >;
+        const checklistItem = item.checklistItems[0]!;
         const updated = await withMcpErrorDetails(
           service,
           {
             project: input.project,
-            checklistId: checklistItem.id,
-            expectedVersion: item.expected_version,
+            checklistId: checklistItem.checklistId,
+            expectedVersion: item.expectedVersion,
           },
           () =>
             service.updateChecklist(input.project, input.session, input.op_id, {
-              checklistId: checklistItem.id,
-              expectedVersion: item.expected_version,
+              checklistId: checklistItem.checklistId,
+              expectedVersion: item.expectedVersion,
               status: checklistItem.status,
               ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
             }),
@@ -2413,8 +2300,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
           project: input.project.toUpperCase(),
           seq: updated.sequence,
-          task_key: item.task_key,
-          id: checklistItem.id,
+          task_key: item.taskKey,
+          id: checklistItem.checklistId,
           status: updated.checklist.status,
           version: updated.checklist.version,
           evidence: updated.checklist.evidence.length,
@@ -2441,7 +2328,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             input.project,
             input.session,
             input.op_id,
-            input.items.map((item) => coreWorkItemPatch(item) as any),
+            input.items.map((item) => canonicalTaskPatchItem(item) as any),
           ),
       );
       return result({
@@ -2843,10 +2730,12 @@ export function createAyanamiMcpServer(
       capabilities: { tools: {} },
       instructions:
         profile === "legacy"
-          ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory 双 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
+          ? "MCP surface v3 · legacy 兼容入口为尚未重启的旧 Agent 会话保留完整 11 工具。请重启 Agent 客户端以重新加载已自动迁移的 core / memory / actions 三 Profile 配置；若仍只看到本入口，请在 ATM 设置中重新安装对应 Agent 集成。"
           : profile === "core"
             ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
-            : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
+            : profile === "memory"
+              ? "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。"
+              : "MCP surface v3 · actions profile。Session 由 core profile 建立；本 profile 只负责 atm_task_patch 的 16 类规范化任务操作。",
     },
   );
   registerPublishedToolHandlers(

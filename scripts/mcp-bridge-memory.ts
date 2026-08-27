@@ -225,8 +225,12 @@ async function main(): Promise<void> {
   const bridges = Number(argValue("bridges", "10"));
   if (!Number.isInteger(bridges) || bridges < 2) throw new Error("--bridges 至少为 2");
   const requestedProfile = argValue("profile", "core");
-  if (requestedProfile !== "core" && requestedProfile !== "memory")
-    throw new Error("--profile 只接受 core 或 memory");
+  if (
+    requestedProfile !== "core" &&
+    requestedProfile !== "memory" &&
+    requestedProfile !== "actions"
+  )
+    throw new Error("--profile 只接受 core、memory 或 actions");
   const profile: McpProfile = requestedProfile;
   const runtime = argValue("runtime", "configured");
   const base = runtime === "node" ? nodeLaunch(profile) : configuredLaunch(profile);

@@ -22,6 +22,7 @@ import {
   TaskPatchBatchInputSchema,
   unicodeCodePointLength,
   VerifyAndCompleteInputSchema,
+  type WorkItemPatchInput,
 } from "@ayanami-task/protocol";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { handleAyanamiMcpHttp, type AyanamiMcpProfile } from "@ayanami-task/mcp";
@@ -32,6 +33,50 @@ export type AyanamiServerOptions = {
 };
 
 type PublicErrorDetails = Record<string, unknown>;
+
+type RepositoryPatchInput = Parameters<AyanamiTaskService["patchWorkItems"]>[3][number];
+type OptionalPatchFields = Partial<{
+  expectedFields: {
+    title?: string;
+    description?: string;
+    acceptance?: string[];
+    targetDate?: string | null;
+    parentKey?: string | null;
+  };
+  title: string;
+  description: string;
+  acceptance: string[];
+  blockedReason: string;
+  waitingFor: string;
+  cancelReason: string;
+  duplicateOf: string;
+  supersededBy: string;
+  assigneeAgentId: string;
+  targetDate: string | null;
+  parentKey: string | null;
+}>;
+
+function repositoryPatchInput(item: WorkItemPatchInput): RepositoryPatchInput {
+  const fields = item as WorkItemPatchInput & OptionalPatchFields;
+  return {
+    taskKey: item.taskKey,
+    expectedVersion: item.expectedVersion,
+    ...(fields.expectedFields === undefined ? {} : { expectedFields: fields.expectedFields }),
+    operation: item.operation,
+    takeoverStale: item.takeoverStale,
+    ...(fields.title === undefined ? {} : { title: fields.title }),
+    ...(fields.description === undefined ? {} : { description: fields.description }),
+    ...(fields.acceptance === undefined ? {} : { acceptance: fields.acceptance }),
+    ...(fields.blockedReason === undefined ? {} : { blockedReason: fields.blockedReason }),
+    ...(fields.waitingFor === undefined ? {} : { waitingFor: fields.waitingFor }),
+    ...(fields.cancelReason === undefined ? {} : { cancelReason: fields.cancelReason }),
+    ...(fields.duplicateOf === undefined ? {} : { duplicateOf: fields.duplicateOf }),
+    ...(fields.supersededBy === undefined ? {} : { supersededBy: fields.supersededBy }),
+    ...(fields.assigneeAgentId === undefined ? {} : { assigneeAgentId: fields.assigneeAgentId }),
+    ...(fields.targetDate === undefined ? {} : { targetDate: fields.targetDate }),
+    ...(fields.parentKey === undefined ? {} : { parentKey: fields.parentKey }),
+  };
+}
 
 type ZodLikeIssue = {
   code?: unknown;
@@ -558,44 +603,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     return options.service.patchWorkItemsAsUser(
       code,
       parsed.opId,
-      parsed.items.map((item) => ({
-        taskKey: item.taskKey,
-        expectedVersion: item.expectedVersion,
-        ...(item.expectedFields === undefined
-          ? {}
-          : {
-              expectedFields: {
-                ...(item.expectedFields.title === undefined
-                  ? {}
-                  : { title: item.expectedFields.title }),
-                ...(item.expectedFields.description === undefined
-                  ? {}
-                  : { description: item.expectedFields.description }),
-                ...(item.expectedFields.acceptance === undefined
-                  ? {}
-                  : { acceptance: item.expectedFields.acceptance }),
-                ...(item.expectedFields.targetDate === undefined
-                  ? {}
-                  : { targetDate: item.expectedFields.targetDate }),
-                ...(item.expectedFields.parentKey === undefined
-                  ? {}
-                  : { parentKey: item.expectedFields.parentKey }),
-              },
-            }),
-        operation: item.operation,
-        takeoverStale: item.takeoverStale,
-        ...(item.title === undefined ? {} : { title: item.title }),
-        ...(item.description === undefined ? {} : { description: item.description }),
-        ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
-        ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
-        ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
-        ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),
-        ...(item.duplicateOf === undefined ? {} : { duplicateOf: item.duplicateOf }),
-        ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
-        ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
-        ...(item.targetDate === undefined ? {} : { targetDate: item.targetDate }),
-        ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
-      })),
+      parsed.items.map(repositoryPatchInput),
     );
   });
   app.post("/api/v1/projects/:code/ui/work-items/:taskKey/verify-and-complete", async (request) => {
@@ -719,44 +727,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       code,
       parsed.session,
       parsed.opId,
-      parsed.items.map((item) => ({
-        taskKey: item.taskKey,
-        expectedVersion: item.expectedVersion,
-        ...(item.expectedFields === undefined
-          ? {}
-          : {
-              expectedFields: {
-                ...(item.expectedFields.title === undefined
-                  ? {}
-                  : { title: item.expectedFields.title }),
-                ...(item.expectedFields.description === undefined
-                  ? {}
-                  : { description: item.expectedFields.description }),
-                ...(item.expectedFields.acceptance === undefined
-                  ? {}
-                  : { acceptance: item.expectedFields.acceptance }),
-                ...(item.expectedFields.targetDate === undefined
-                  ? {}
-                  : { targetDate: item.expectedFields.targetDate }),
-                ...(item.expectedFields.parentKey === undefined
-                  ? {}
-                  : { parentKey: item.expectedFields.parentKey }),
-              },
-            }),
-        operation: item.operation,
-        takeoverStale: item.takeoverStale,
-        ...(item.title === undefined ? {} : { title: item.title }),
-        ...(item.description === undefined ? {} : { description: item.description }),
-        ...(item.acceptance === undefined ? {} : { acceptance: item.acceptance }),
-        ...(item.blockedReason === undefined ? {} : { blockedReason: item.blockedReason }),
-        ...(item.waitingFor === undefined ? {} : { waitingFor: item.waitingFor }),
-        ...(item.cancelReason === undefined ? {} : { cancelReason: item.cancelReason }),
-        ...(item.duplicateOf === undefined ? {} : { duplicateOf: item.duplicateOf }),
-        ...(item.supersededBy === undefined ? {} : { supersededBy: item.supersededBy }),
-        ...(item.assigneeAgentId === undefined ? {} : { assigneeAgentId: item.assigneeAgentId }),
-        ...(item.targetDate === undefined ? {} : { targetDate: item.targetDate }),
-        ...(item.parentKey === undefined ? {} : { parentKey: item.parentKey }),
-      })),
+      parsed.items.map(repositoryPatchInput),
     );
   });
   app.post("/api/v1/projects/:code/work-items/:taskKey/verify-and-complete", async (request) => {
@@ -1040,10 +1011,11 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
 
   const mcpRoutes: Array<{ url: string; profile: AyanamiMcpProfile }> = [
     // 旧入口只为尚未重启、仍缓存单 server 配置的客户端保留完整工具面；新配置始终走
-    // 拆开的 core / memory。兼容入口不能静默缺掉 memory，否则升级中的活跃会话无法收尾。
+    // 拆开的 core / memory / actions。兼容入口不能静默缺掉任一能力，否则升级中的活跃会话无法收尾。
     { url: "/mcp", profile: "legacy" },
     { url: "/mcp/core", profile: "core" },
     { url: "/mcp/memory", profile: "memory" },
+    { url: "/mcp/actions", profile: "actions" },
   ];
   for (const route of mcpRoutes) {
     app.post(route.url, async (request, reply) => {

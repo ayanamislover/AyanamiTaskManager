@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
+import { publishedOperationVariant } from "./published-operation-schema.js";
 
 const roots: string[] = [];
 
@@ -64,7 +65,7 @@ async function openReviewFixture(code: string, reviewChecklist = false) {
   ]);
   const parent = await service.getWorkItem(project.code, created.items[0]!.key, "full");
   const review = await service.getWorkItem(project.code, created.items[1]!.key, "full");
-  const server = createAyanamiMcpServer(service, { profile: "memory" });
+  const server = createAyanamiMcpServer(service, { profile: "actions" });
   const client = new Client({ name: "mcp-review-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -187,34 +188,37 @@ describe("MCP first-class Review workflow", () => {
     const fixture = await openReviewFixture("MRVA");
     try {
       const listed = await fixture.client.listTools();
-      expect(listed.tools).toHaveLength(5);
+      expect(listed.tools).toHaveLength(1);
       const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
         properties?: Record<string, any>;
       };
-      const itemSchema = schema.properties?.items?.items;
-      expect(itemSchema.properties?.operation.enum).toEqual(
-        expect.arrayContaining(["review_request", "review_submit"]),
-      );
-      expect(dereferenceSchema(itemSchema.properties.parent_checklist_id, schema)).toMatchObject({
-        type: "string",
-      });
+      const requestVariant = publishedOperationVariant(schema, "review_request");
+      const submitVariant = publishedOperationVariant(schema, "review_submit");
+      expect(requestVariant.properties).toHaveProperty("candidate_hashes");
+      expect(submitVariant.properties).toHaveProperty("verdict");
       expect(
-        dereferenceSchema(itemSchema.properties.expected_parent_checklist_version, schema),
+        dereferenceSchema(requestVariant.properties.parent_checklist_id, schema),
+      ).toMatchObject({ type: "string" });
+      expect(
+        dereferenceSchema(requestVariant.properties.expected_parent_checklist_version, schema),
       ).toMatchObject({ type: "integer" });
-      expect(dereferenceSchema(itemSchema.properties.request_key, schema)).toMatchObject({
+      expect(dereferenceSchema(submitVariant.properties.request_key, schema)).toMatchObject({
         type: "string",
       });
-      expect(dereferenceSchema(itemSchema.properties.candidate_hashes, schema)).toMatchObject({
+      expect(dereferenceSchema(requestVariant.properties.candidate_hashes, schema)).toMatchObject({
         type: "object",
         additionalProperties: { type: "string" },
       });
-      expect(dereferenceSchema(itemSchema.properties.verdict, schema)).toMatchObject({
+      expect(dereferenceSchema(submitVariant.properties.verdict, schema)).toMatchObject({
         enum: ["APPROVED", "CHANGES_REQUESTED"],
       });
-      // ATM-T-0188 owns publication of these conditional requirements from the canonical
-      // Operation Registry. Until then, the canonical Zod superRefine below is intentionally
-      // runtime-only; T0186 must not recreate the former tool/path-specific schema patch.
-      expect(itemSchema.allOf).toBeUndefined();
+      expect(requestVariant.required).toEqual(
+        expect.arrayContaining([
+          "parent_checklist_id",
+          "expected_parent_checklist_version",
+          "candidate_hashes",
+        ]),
+      );
 
       const invalid = await fixture.client.callTool({
         name: "atm_task_patch",
@@ -234,14 +238,7 @@ describe("MCP first-class Review workflow", () => {
       });
       expect(invalid.isError).toBe(true);
       const invalidText = JSON.stringify(invalid.content);
-      for (const field of [
-        "parent_checklist_id",
-        "expected_parent_checklist_version",
-        "candidate_hashes",
-        "request_key",
-      ]) {
-        expect(invalidText).toContain(field);
-      }
+      expect(invalidText).toContain("items");
 
       const hashes = { WorkTree: "B".repeat(64), git_head: "A".repeat(40) };
       const requested = await requestReview(fixture, "mcp-review-request", hashes);

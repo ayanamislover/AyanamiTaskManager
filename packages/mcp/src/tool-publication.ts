@@ -23,7 +23,7 @@ export const LEGACY_TOOL_LIST_ARTIFACT_SHA256 =
   "8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7";
 // Captured from the unprofiled `/mcp` tools/list response of the released
 // v1.0.18 source commit. It is an auditable migration artifact, not a second
-// schema generator; current core/memory descriptors always come from Zod.
+// schema generator; current core/memory/actions descriptors always come from Zod.
 export const LEGACY_TOOL_LIST_SOURCE_COMMIT = "410969b7fed5f1837078f6731271bf6c18381faf";
 
 const schemaMapKeywords = new Set([
@@ -240,6 +240,148 @@ function canonicalRuntimeSchema(schema: z.ZodType): JsonObject {
   return normalized;
 }
 
+function compactDiscriminatedObjectUnions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(compactDiscriminatedObjectUnions);
+  if (!isJsonObject(value)) return value;
+
+  const compacted = Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [key, compactDiscriminatedObjectUnions(child)]),
+  ) as JsonObject;
+  const unionKey = Array.isArray(compacted.oneOf)
+    ? "oneOf"
+    : Array.isArray(compacted.anyOf)
+      ? "anyOf"
+      : null;
+  if (!unionKey) return compacted;
+  const branches = compacted[unionKey] as unknown[];
+  if (
+    branches.length < 2 ||
+    !branches.every(
+      (branch) =>
+        isJsonObject(branch) &&
+        branch.type === "object" &&
+        isJsonObject(branch.properties) &&
+        branch.additionalProperties === false &&
+        Object.keys(branch).every((key) =>
+          ["additionalProperties", "properties", "required", "type"].includes(key),
+        ),
+    )
+  ) {
+    return compacted;
+  }
+
+  const objects = branches as JsonObject[];
+  const discriminator = Object.keys(objects[0]!.properties as JsonObject)
+    .filter((property) =>
+      objects.every((branch) => {
+        const schema = (branch.properties as JsonObject)[property];
+        return isJsonObject(schema) && typeof schema.const === "string";
+      }),
+    )
+    .filter((property) => {
+      const values = objects.map(
+        (branch) => ((branch.properties as JsonObject)[property] as JsonObject).const,
+      );
+      return new Set(values).size === values.length;
+    })
+    .sort()[0];
+  if (!discriminator) return compacted;
+
+  const propertyNames = [
+    ...new Set(objects.flatMap((branch) => Object.keys(branch.properties as JsonObject))),
+  ];
+  const properties: JsonObject = {};
+  const commonProperties = new Set<string>();
+  for (const property of propertyNames) {
+    const schemas = objects
+      .map((branch) => (branch.properties as JsonObject)[property])
+      .filter((schema): schema is JsonObject => isJsonObject(schema));
+    const canonical = [...new Set(schemas.map(stableJson))];
+    if (schemas.length === objects.length && canonical.length === 1) {
+      properties[property] = structuredClone(schemas[0]!);
+      commonProperties.add(property);
+    }
+  }
+
+  const requiredSets = objects.map(
+    (branch) =>
+      new Set(
+        Array.isArray(branch.required)
+          ? branch.required.filter((field): field is string => typeof field === "string")
+          : [],
+      ),
+  );
+  const commonRequired = [...requiredSets[0]!].filter((field) =>
+    requiredSets.every((required) => required.has(field)),
+  );
+  const compactBranches = objects.map((branch, index) => {
+    const branchProperties = branch.properties as JsonObject;
+    const scopedProperties = Object.fromEntries(
+      Object.entries(branchProperties).filter(
+        ([property]) => property === discriminator || !commonProperties.has(property),
+      ),
+    );
+    const specificRequired = [...requiredSets[index]!].filter(
+      (field) => !commonRequired.includes(field),
+    );
+    return {
+      properties: scopedProperties,
+      ...(specificRequired.length === 0 ? {} : { required: specificRequired }),
+    };
+  });
+
+  const groupedBranches = new Map<
+    string,
+    { template: JsonObject; discriminatorValues: string[] }
+  >();
+  for (const branch of compactBranches) {
+    const branchProperties = branch.properties as JsonObject;
+    const discriminatorSchema = branchProperties[discriminator] as JsonObject;
+    const discriminatorValue = String(discriminatorSchema.const);
+    const otherProperties = Object.fromEntries(
+      Object.entries(branchProperties).filter(([property]) => property !== discriminator),
+    );
+    const signature = stableJson({
+      properties: otherProperties,
+      ...(branch.required === undefined ? {} : { required: branch.required }),
+    });
+    const group = groupedBranches.get(signature);
+    if (group) group.discriminatorValues.push(discriminatorValue);
+    else {
+      groupedBranches.set(signature, {
+        template: {
+          properties: otherProperties,
+          ...(branch.required === undefined ? {} : { required: branch.required }),
+        },
+        discriminatorValues: [discriminatorValue],
+      });
+    }
+  }
+
+  const grouped = [...groupedBranches.values()].map(({ template, discriminatorValues }) => ({
+    ...template,
+    properties: {
+      [discriminator]:
+        discriminatorValues.length === 1
+          ? { const: discriminatorValues[0] }
+          : { enum: discriminatorValues },
+      ...(template.properties as JsonObject),
+    },
+  }));
+
+  const remainder = Object.fromEntries(
+    Object.entries(compacted).filter(([key]) => key !== unionKey),
+  );
+  return {
+    ...remainder,
+    type: "object",
+    properties,
+    ...(commonRequired.length === 0 ? {} : { required: commonRequired }),
+    unevaluatedProperties: false,
+    [unionKey]: grouped,
+  };
+}
+
 export function semanticSchemaHash(schema: JsonObject): string {
   const normalized = normalizeSchemaNode(structuredClone(schema));
   return digest(normalized);
@@ -265,7 +407,9 @@ function isUninformativeObjectSchema(schema: JsonObject): boolean {
 
 function publishedTool(definition: ToolDefinition, surfaceVersion: number): Tool {
   const semanticInput = canonicalRuntimeSchema(definition.inputSchema);
-  const inputSchema = deduplicateSchema(structuredClone(semanticInput));
+  const compactInput = compactDiscriminatedObjectUnions(structuredClone(semanticInput));
+  if (!isJsonObject(compactInput)) throw new Error("PUBLIC_SCHEMA_MUST_BE_OBJECT");
+  const inputSchema = deduplicateSchema(compactInput);
   if (inputSchema.type !== "object")
     throw new Error(`PUBLIC_INPUT_MUST_BE_OBJECT:${definition.name}`);
   const semanticOutput = canonicalRuntimeSchema(definition.outputSchema);
@@ -317,7 +461,7 @@ export function generateMcpToolContractMarkdown(
   registry: ToolDefinitionRegistry,
   surfaceVersion: number,
 ): string {
-  const profiles = (["core", "memory"] as const).map((profile) => {
+  const profiles = (["core", "memory", "actions"] as const).map((profile) => {
     const tools = publishedTools(registry, profile, surfaceVersion);
     return {
       profile,
@@ -354,7 +498,7 @@ export function generateMcpToolContractMarkdown(
     "",
     "## Legacy compatibility artifact",
     "",
-    `The unprofiled migration endpoint publishes the frozen v1.0.18 artifact from commit \`${LEGACY_TOOL_LIST_SOURCE_COMMIT}\`: ${LEGACY_TOOL_LIST_ARTIFACT_BYTES} bytes, SHA-256 \`${LEGACY_TOOL_LIST_ARTIFACT_SHA256}\`. Current installers only create the formal core and memory profiles.`,
+    `The unprofiled migration endpoint publishes the frozen v1.0.18 artifact from commit \`${LEGACY_TOOL_LIST_SOURCE_COMMIT}\`: ${LEGACY_TOOL_LIST_ARTIFACT_BYTES} bytes, SHA-256 \`${LEGACY_TOOL_LIST_ARTIFACT_SHA256}\`. Current installers only create the formal core, memory and actions profiles.`,
     "",
   ].join("\n");
 }
