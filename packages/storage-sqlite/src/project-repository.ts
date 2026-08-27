@@ -4536,7 +4536,13 @@ export class ProjectRepository {
       releaseClaims: boolean;
       retirementReason?: string | null;
     },
-  ): { ok: 1; seq: number; session: string; handoffs: number } {
+  ): {
+    ok: 1;
+    seq: number;
+    session: string;
+    handoffs: number;
+    releasedItems: Array<{ key: string; version: number }>;
+  } {
     if (!actor.sessionId)
       throw new AtmError("SESSION_REQUIRED", { message: "结束 Session 需要 sessionId" });
     const sessionId = actor.sessionId;
@@ -4545,18 +4551,28 @@ export class ProjectRepository {
       opId,
       operation: "session.end",
       request: input,
+      immediate: true,
       action: () => {
         const now = nowIso();
         const claimed =
-          input.outcome === "retired"
+          input.outcome === "retired" || input.releaseClaims
             ? (this.#sqlite
                 .prepare(
-                  `SELECT id FROM work_items WHERE claimed_by_session_id = ?
-                 AND status NOT IN ('DONE','CANCELLED') ORDER BY updated_at DESC`,
+                  `SELECT id, local_no, status, version FROM work_items
+                   WHERE claimed_by_session_id = ? ORDER BY local_no`,
                 )
-                .all(sessionId) as Array<{ id: string }>)
+                .all(sessionId) as Array<{
+                id: string;
+                local_no: number;
+                status: string;
+                version: number;
+              }>)
             : [];
-        for (const task of claimed) {
+        const handoffItems =
+          input.outcome === "retired"
+            ? claimed.filter((task) => task.status !== "DONE" && task.status !== "CANCELLED")
+            : [];
+        for (const task of handoffItems) {
           this.#sqlite
             .prepare(
               `INSERT INTO handoffs(
@@ -4586,6 +4602,12 @@ export class ProjectRepository {
             )
             .run(now, sessionId);
         }
+        const releasedItems = input.releaseClaims
+          ? claimed.map((task) => ({
+              key: `${this.meta.code}-T-${String(task.local_no).padStart(4, "0")}`,
+              version: task.version + 1,
+            }))
+          : [];
         this.#sqlite
           .prepare(
             `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
@@ -4607,7 +4629,13 @@ export class ProjectRepository {
           summary: input.summary,
           next: input.next ?? [],
         });
-        return { ok: 1, seq, session: sessionId, handoffs: claimed.length };
+        return {
+          ok: 1,
+          seq,
+          session: sessionId,
+          handoffs: handoffItems.length,
+          releasedItems,
+        };
       },
     });
   }

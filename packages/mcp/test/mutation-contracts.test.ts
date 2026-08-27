@@ -1,10 +1,12 @@
+import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
 import { connectProfiledClients } from "./profile-client.js";
 import {
@@ -379,6 +381,133 @@ describe("MCP mutation contracts", () => {
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("ends 521 claims with complete metrics input and a durable paged mutation receipt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "atm-mcp-end-scale-"));
+    roots.push(root);
+    const dataDir = join(root, "data");
+    const sourcePath = join(root, "source");
+    mkdirSync(sourcePath, { recursive: true });
+    writeFileSync(join(sourcePath, "README.md"), "# scale fixture\n");
+    for (const args of [
+      ["init"],
+      ["config", "user.email", "atm@example.test"],
+      ["config", "user.name", "ATM Test"],
+      ["add", "-A"],
+      ["commit", "-m", "baseline"],
+    ]) {
+      execFileSync("git", args, { cwd: sourcePath, stdio: "ignore", windowsHide: true });
+    }
+
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "End scale",
+      sourcePath: null,
+      code: "ENDSCALE",
+    });
+    const objective = await service.createObjectiveAsUser(project.code, "end-scale-objective", {
+      title: "Release every claim",
+      description: "",
+      definitionOfDone: [],
+    });
+    const tasks = [];
+    for (let offset = 0; offset < 521; offset += 50) {
+      const batchSize = Math.min(50, 521 - offset);
+      tasks.push(
+        ...(
+          await service.createWorkItemsAsUser(
+            project.code,
+            `end-scale-create-${offset}`,
+            Array.from({ length: batchSize }, (_, index) => ({
+              clientRef: `end-scale-${offset + index}`,
+              objectiveId: objective.id,
+              title: `Release claim ${offset + index + 1}`,
+              description: "",
+              type: "TASK" as const,
+              priority: "NORMAL" as const,
+              status: "READY" as const,
+              acceptance: [],
+              checklist: [],
+              verificationRequired: false,
+            })),
+          )
+        ).items,
+      );
+    }
+    const begun = await service.begin({
+      projectCode: project.code,
+      mode: "project",
+      agentId: "end-scale-agent",
+      clientKind: "test",
+    });
+    const session = String(begun.session);
+    for (let offset = 0; offset < tasks.length; offset += 50) {
+      await service.patchWorkItems(
+        project.code,
+        session,
+        `end-scale-claim-${offset}`,
+        tasks.slice(offset, offset + 50).map((task) => ({
+          taskKey: task.key,
+          expectedVersion: task.version,
+          operation: "claim" as const,
+        })),
+      );
+    }
+    service.attachProjectPath(project.code, sourcePath);
+    const metricsSpy = vi.spyOn(service.databases, "workItemEngineeringMetrics");
+    const profiles = await connectProfiledClients(service, "end-scale-contract-test");
+    try {
+      const ended = await profiles.client.callTool({
+        name: "atm_end",
+        arguments: {
+          project: project.code,
+          session,
+          op_id: "end-scale-receipt",
+          outcome: "completed",
+          summary: "Release every claim",
+        },
+      });
+      expectFixedMutationAck(ended, {
+        project: project.code,
+        session,
+        opId: "end-scale-receipt",
+      });
+      expect(ended.structuredContent).toMatchObject({
+        entity_count: 522,
+        entities_truncated: true,
+      });
+
+      const capturedMetricKeys = new Set(metricsSpy.mock.calls.map((call) => String(call[1])));
+      expect(capturedMetricKeys).toEqual(new Set(tasks.map((task) => task.key)));
+
+      const details = await profiles.client.callTool({
+        name: "atm_search",
+        arguments: {
+          project: project.code,
+          session,
+          op_id: "end-scale-receipt",
+          field_mask: ["op_id", "entities"],
+          max_chars: 50_000,
+        },
+      });
+      const operation = (details.structuredContent as Record<string, any>).operation;
+      expect(operation.op_id).toBe("end-scale-receipt");
+      expect(operation.entities).toHaveLength(522);
+      expect(
+        new Set(
+          operation.entities
+            .filter((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+            .map((entity: Record<string, unknown>) => entity.key),
+        ),
+      ).toEqual(new Set(tasks.map((task) => task.key)));
+    } finally {
+      await profiles.close();
+      service.close();
     }
   });
 

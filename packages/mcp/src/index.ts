@@ -254,6 +254,7 @@ function mutationEntityReferences(
       break;
     case "session.end":
       add("SESSION", serviceResult.session, serviceResult.version);
+      addWorkItems(serviceResult.releasedItems);
       break;
   }
 

@@ -1563,16 +1563,16 @@ export class AyanamiTaskService {
     const repository = await this.#repository(projectCode);
     const resolution = repository.resolveMutationActor(sessionId, opId, "session.end", input);
     const effectiveSessionId = String(resolution.actor.sessionId);
-    const claimedTaskKeys = repository
-      .listWorkItems({ limit: 500 })
-      .filter((task) => task.claimedBySessionId === effectiveSessionId)
-      .map((task) => task.key);
     if (resolution.disposition !== "REPLAY") {
       await this.#refreshSessionGitContext(projectCode, effectiveSessionId);
     }
     const result = repository.endSession(resolution.actor, opId, input);
     await this.#flush(projectCode);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, claimedTaskKeys, false);
+    await this.#captureWorkItemEngineeringMetrics(
+      projectCode,
+      result.releasedItems.map((task) => task.key),
+      false,
+    );
     return mutationAck(result, opId, resolution);
   }
 
