@@ -6,34 +6,34 @@
 
 ## 代码与数据门禁
 
-- [ ] `pnpm lint`
-- [ ] `pnpm typecheck`
-- [ ] `pnpm test`
-- [ ] `pnpm build`
-- [ ] `pnpm test:e2e`
-- [ ] `pnpm benchmark`
-- [ ] 项目迁移从空库和 v1/v2 数据库均通过
-- [ ] Registry 与项目库 `quick_check` 通过
-- [ ] core 6 / memory 5 两个 MCP Profile 的 UTF-8 schema 各自不超过 7,680 bytes
+- [x] `pnpm lint`
+- [x] `pnpm typecheck`
+- [x] `pnpm test`
+- [x] `pnpm build`
+- [x] `pnpm test:e2e`
+- [x] `pnpm benchmark`
+- [x] 项目迁移从空库和 v1/v2 数据库均通过
+- [x] Registry 与项目库 `quick_check` 通过
+- [x] core 6 / memory 5 两个 MCP Profile 的 UTF-8 schema 各自不超过 7,680 bytes
 
 ## 桌面与可访问性
 
-- [ ] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
-- [ ] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
-- [ ] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
-- [ ] 归档→PRE_TRASH→垃圾箱→恢复通过
-- [ ] 工程统计项目级和 WorkItem 级展示通过
-- [ ] 托盘、二次启动唤起、自启动开关与三档通知策略通过
+- [x] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
+- [x] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
+- [x] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
+- [x] 归档→PRE_TRASH→垃圾箱→恢复通过
+- [x] 工程统计项目级和 WorkItem 级展示通过
+- [x] 托盘、二次启动唤起、自启动开关与三档通知策略通过
 
 ## 可靠性与性能
 
-- [ ] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
-- [ ] 100 项目总览 p95 ≤200 ms
-- [ ] 10,000 任务筛选 p95 ≤200 ms
-- [ ] 写入+事件 p95 ≤100 ms
-- [ ] 50,000 中文文档搜索 p95 ≤300 ms
-- [ ] 服务 RSS ≤150 MB
-- [ ] 空闲项目数据库 5 分钟 LRU 关闭
+- [x] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
+- [x] 100 项目总览 p95 ≤200 ms
+- [x] 10,000 任务筛选 p95 ≤200 ms
+- [x] 写入+事件 p95 ≤100 ms
+- [x] 50,000 中文文档搜索 p95 ≤300 ms
+- [x] 服务 RSS ≤150 MB
+- [x] 空闲项目数据库 5 分钟 LRU 关闭
 
 ### MCP bridge 内存验收
 
@@ -48,6 +48,14 @@ pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3
 可用内存差中位数为 236.29 MiB（23.63 MiB/bridge），但极差 292.38 MiB 已触发噪声拒绝
 门槛，因此本次发布结论只引用低噪声的 Private Bytes 边际。含共享映像重复计数的 Working
 Set 与本轮系统可用内存差只用于诊断，不作为 bridge 内存成本或运行时优劣结论。
+
+同日 15:42 UTC 使用安装版 `current\AyanamiTaskManager.exe` 和内置
+`observeMcpBridges()` 复核了 Peer Review 观察到的进程增长：精确路径下共有 42 个进程，
+观测器也返回 42 个由存活 Agent 直接持有的 bridge，二者一一对应，**未发现属主已退出的
+孤儿 bridge**。按直接属主聚合为 `codex:77116` 2 个、`codex:47704` 32 个、
+`claude:98276` 4 个、`claude:79140` 2 个、`claude:86564` 2 个；当前累计 Private Bytes
+为 1,220.06 MiB。高数量来自本轮同时运行的 Codex/Claude 任务及其 core+memory 连接，
+不是测试泄漏或后台无主自增；本次验收只做归属判定，没有终止任何用户或 Agent 进程。
 
 ## 构建与安装
 
@@ -76,12 +84,12 @@ pnpm smoke:packaged
 pnpm exec tsx scripts/assemble-release.ts
 ```
 
-- [ ] Squirrel Setup EXE 可安装到当前用户
-- [ ] 安装版可首次启动、退出、重启并保留数据
-- [ ] 卸载不误删用户项目数据
-- [ ] portable ZIP 解压后可启动
-- [ ] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
-- [ ] `docs/portable-usage.md` 随包存在
+- [x] Squirrel Setup EXE 可安装到当前用户
+- [x] 安装版可首次启动、退出、重启并保留数据
+- [x] 卸载不误删用户项目数据
+- [x] portable ZIP 解压后可启动
+- [x] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
+- [x] `docs/portable-usage.md` 随包存在
 
 `distribution-smoke` 要求机器上没有同名安装、没有运行中的同名进程、没有卸载注册项、没有产品快捷方式。注意 **MCP stdio 桥接进程用的是同一个 `AyanamiTaskManager.exe` 镜像名**：只要还有 Claude 会话连着 ATM，`appProcessIsRunning()` 就成立，验收会停在“没有运行中的应用进程”，而且这些桥还占着安装目录里的 exe 句柄，Squirrel 卸载只能留下 `.dead` 标记。发布前先断开所有连着 ATM 的会话。
 
@@ -113,10 +121,10 @@ release/
 
 ## 签发
 
-- [ ] 从干净的构建输入运行最终命令（不删除用户工作树变更）
-- [ ] 逐项复核哈希和产物可打开
-- [ ] README、用户指南、Agent 接入、备份恢复和排障文档已同步
-- [ ] 发布结论只引用 `release/test-report` 中可复核证据
+- [x] 从干净的构建输入运行最终命令（不删除用户工作树变更）
+- [x] 逐项复核哈希和产物可打开
+- [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
+- [x] 发布结论只引用 `release/test-report` 中可复核证据
 
 ## 1.0.18 非阻塞剩余项
 
@@ -130,4 +138,20 @@ release/
 
 ## 1.0.18 验收结果
 
-本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。
+1.0.18 已于 2026-08-27 完成十阶段、分发与安装版实测并签发。唯一事实源是
+`release/test-report` 与 `release/release.json`，本节只做可读索引：
+
+- 构建输入：Git HEAD `410969b7fed5f1837078f6731271bf6c18381faf`，`dirty=false`；
+  source hash `59DC0E3724840CF3757A5062AEE1A3D8BB9A64FDABBA8BB526CEF4BC70D12E27`，
+  lockfile hash `EDAB7E986CDA4570FB5B3CC80401E88C978172CE49500416C6AD2F69CE7CED5F`。
+- 十阶段：lint、format、typecheck、test、e2e、benchmark、build、forge-make、
+  packaged-smoke、distribution-smoke 全部 `exitCode=0`；单元/集成 452 项，E2E 14 项。
+- 分发实测：packaged、portable、installed smoke 各 33 项，distribution smoke 19 项，
+  全部通过；安装、首启、退出、重启、portable、卸载后用户数据保留均有逐项 JSON。
+- 性能实测：100 项目总览 1.041 ms、10,000 任务筛选 9.975 ms、写入+事件
+  90.717 ms、50,000 中文文档搜索 0.218 ms（均为 p95），服务 RSS 122.91 MB，
+  全部低于清单阈值。
+- Setup SHA-256：`BF5CCD87CC20B360DBBBBA579D9F2DE2794F4D7884E313B31C718C8F5D250513`；
+  portable ZIP SHA-256：`D30CC3A1C7A6DFB56EA06CB741374BEEED3E78342147BB376D3F662BBD60D080`。
+- `release/test-report/summary.json` 的 `passed=true`，`knownNonBlockingItems=[]`；
+  1.0.18 非阻塞剩余项为“无”。

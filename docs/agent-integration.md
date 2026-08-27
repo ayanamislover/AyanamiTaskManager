@@ -67,6 +67,8 @@ MCP 使用两个默认同时登记、工具名不重叠的静态 Profile：
 
 两者共享同一 ATM 数据库。memory 默认启用；用户可在设置中主动关闭以减少每个客户端的一条 bridge 进程，但这会进入降级模式，无法修改任务、写进度/Record、搜索或增量同步，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
+不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它在 1.0.18 为 11,064 UTF-8 bytes，超过正式 Profile 的 7,680-byte 可用预算；这是有意保留的过渡例外，并由 11,064-byte 非增长守卫约束。core 与 memory 仍各自严格执行 7,680-byte 预算，legacy 后续只允许缩小或移除，任何增长都必须先让守卫变红并重新评估兼容策略。
+
 升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留完整 11 工具，避免旧会话在升级中途静默丢失 memory 能力；它不会写入任何新配置。ATM 启动后仍会把磁盘上的旧配置迁移为显式 core / memory，Agent 客户端重启后即回到拆分工具面。
 
 工作中发现新的独立事项时，用 `atm_task_create` 的 `discovered_from` 指向已有任务，或用 `discovered_from_ref` 指向同一批次的 `client_ref`。这是可追溯的发现关系，不会阻塞 ready queue，也不应替代 `depends_on`。
