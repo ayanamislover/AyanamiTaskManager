@@ -33,6 +33,7 @@ import {
 import { ProjectRepository } from "./project-repository.js";
 
 const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+const SETTING_KEY_PATTERN = /^[a-z0-9][A-Za-z0-9._-]{0,79}$/u;
 
 async function renameWithRetry(source: string, destination: string): Promise<void> {
   const attempts = process.platform === "win32" ? 8 : 1;
@@ -584,7 +585,7 @@ export class AyanamiDatabaseManager {
   }
 
   setSetting(key: string, value: unknown, expectedVersion?: number): SettingView {
-    if (!/^[a-z0-9][a-z0-9._-]{0,79}$/u.test(key)) throw new Error("SETTING_KEY_INVALID");
+    if (!SETTING_KEY_PATTERN.test(key)) throw new Error("SETTING_KEY_INVALID");
     const current = this.registry.sqlite
       .prepare("SELECT version FROM settings WHERE key = ?")
       .get(key) as { version: number } | undefined;

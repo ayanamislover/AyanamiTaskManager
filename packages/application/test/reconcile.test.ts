@@ -57,7 +57,7 @@ describe("只读工作项对账", () => {
           claimLeaseUntil: "2026-08-26T11:40:00.000Z",
         }),
         task("REC-T-0004", {
-          acceptance: ["生成 `release/report.json`", "更新 README.md"],
+          acceptance: ["生成 `release/report.json`", "更新 `README.md`"],
         }),
         task("REC-T-0005", { acceptance: ["生成 `missing.json`"] }),
         task("REC-T-0006", { acceptance: ["更新 `release/report.json`"] }),
@@ -110,6 +110,34 @@ describe("只读工作项对账", () => {
       expect(item.suggestedAction.length).toBeGreaterThan(5);
     }
     expect(result.attentionCount).toBe(3);
+  });
+
+  it("忽略 Node.js 和 v1.5 这类散文 token，仍用明确产物路径提示可能已完成", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-reconcile-prose-token-"));
+    temporary.push(root);
+    mkdirSync(join(root, "release"));
+    writeFileSync(join(root, "release", "report.json"), "{}", "utf8");
+
+    const result = reconcileWorkItems({
+      now: new Date("2026-08-26T12:00:00.000Z"),
+      sourceRoot: root,
+      tasks: [
+        task("REC-T-0007", {
+          acceptance: ["支持 Node.js 24 与 v1.5 协议", "生成 `release/report.json`"],
+        }),
+      ],
+      sessions: [],
+      previouslyClaimedKeys: new Set(),
+    });
+
+    expect(result.items).toEqual([
+      expect.objectContaining({
+        taskKey: "REC-T-0007",
+        classification: "POSSIBLY_COMPLETE",
+        reason: "all_explicit_acceptance_paths_exist_and_never_claimed",
+        evidencePaths: ["release/report.json"],
+      }),
+    ]);
   });
 
   it("服务纵向切片读取历史领取和源码事实但不写项目事件", async () => {
