@@ -92,7 +92,11 @@ export function projectTaskView(
   if (view === "context") return contextual;
   const checklist = parseArray(row.checklistJson);
   const relations = parseArray(row.relationsJson).map((value) => {
-    const relation = value as { type: TaskRelationView["type"]; direction: TaskRelationView["direction"]; localNo: number };
+    const relation = value as {
+      type: TaskRelationView["type"];
+      direction: TaskRelationView["direction"];
+      localNo: number;
+    };
     return {
       type: relation.type,
       direction: relation.direction,

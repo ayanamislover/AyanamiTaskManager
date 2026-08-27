@@ -5,13 +5,7 @@ export const TASK_VIEW_NAMES = ["core", "context", "full"] as const;
 export const TaskViewNameSchema = z.enum(TASK_VIEW_NAMES);
 export type TaskViewName = z.infer<typeof TaskViewNameSchema>;
 
-export const ProgressSourceSchema = z.enum([
-  "NONE",
-  "CHECKLIST",
-  "CHILDREN",
-  "REPORTED",
-  "STATUS",
-]);
+export const ProgressSourceSchema = z.enum(["NONE", "CHECKLIST", "CHILDREN", "REPORTED", "STATUS"]);
 export type ProgressSource = z.infer<typeof ProgressSourceSchema>;
 
 export const ChecklistSummarySchema = z
@@ -43,14 +37,7 @@ export type TaskChecklistView = z.infer<typeof TaskChecklistViewSchema>;
 
 export const TaskRelationViewSchema = z
   .object({
-    type: z.enum([
-      "PARENT",
-      "CHILD",
-      "BLOCKS",
-      "RELATES",
-      "DUPLICATES",
-      "DISCOVERED_FROM",
-    ]),
+    type: z.enum(["PARENT", "CHILD", "BLOCKS", "RELATES", "DUPLICATES", "DISCOVERED_FROM"]),
     direction: z.enum(["INCOMING", "OUTGOING"]),
     taskKey: z.string(),
   })

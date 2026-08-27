@@ -1119,26 +1119,14 @@ export class AyanamiTaskService {
     projectCode: string,
     taskKey: string,
   ): Promise<ReturnType<ProjectRepository["getWorkItem"]>>;
-  async getWorkItem(
-    projectCode: string,
-    taskKey: string,
-    view: "core",
-  ): Promise<TaskCoreView>;
+  async getWorkItem(projectCode: string, taskKey: string, view: "core"): Promise<TaskCoreView>;
   async getWorkItem(
     projectCode: string,
     taskKey: string,
     view: "context",
   ): Promise<TaskContextView>;
-  async getWorkItem(
-    projectCode: string,
-    taskKey: string,
-    view: "full",
-  ): Promise<TaskFullView>;
-  async getWorkItem(
-    projectCode: string,
-    taskKey: string,
-    view: TaskViewName,
-  ): Promise<TaskView>;
+  async getWorkItem(projectCode: string, taskKey: string, view: "full"): Promise<TaskFullView>;
+  async getWorkItem(projectCode: string, taskKey: string, view: TaskViewName): Promise<TaskView>;
   async getWorkItem(
     projectCode: string,
     taskKey: string,

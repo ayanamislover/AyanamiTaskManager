@@ -2557,9 +2557,8 @@ function TaskDrawer({
                 String(query.data!.status),
                 Boolean(
                   (query.data as Record<string, unknown>).claimLeaseUntil &&
-                    Date.parse(
-                      String((query.data as Record<string, unknown>).claimLeaseUntil),
-                    ) <= Date.now(),
+                    Date.parse(String((query.data as Record<string, unknown>).claimLeaseUntil)) <=
+                      Date.now(),
                 ),
               ).map(([operation, label]) => (
                 <button
