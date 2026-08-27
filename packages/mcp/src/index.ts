@@ -334,18 +334,25 @@ async function withMcpErrorDetails<T>(
   try {
     return await action();
   } catch (error) {
-    if (typeof service.enrichError !== "function") throw asAtmError(error);
-    throw await service.enrichError(error, {
-      ...(context.project === undefined ? {} : { projectCode: context.project }),
-      ...(context.taskKey === undefined ? {} : { taskKey: context.taskKey }),
-      ...(context.checklistId === undefined ? {} : { checklistId: context.checklistId }),
-      ...(context.expectedVersion === undefined
-        ? {}
-        : { expectedVersion: context.expectedVersion }),
-      ...(context.expectedVersions === undefined
-        ? {}
-        : { expectedVersions: context.expectedVersions }),
-    });
+    const base = asAtmError(error);
+    if (typeof service.enrichError !== "function") throw base;
+    let enriched: AtmError;
+    try {
+      enriched = await service.enrichError(base, {
+        ...(context.project === undefined ? {} : { projectCode: context.project }),
+        ...(context.taskKey === undefined ? {} : { taskKey: context.taskKey }),
+        ...(context.checklistId === undefined ? {} : { checklistId: context.checklistId }),
+        ...(context.expectedVersion === undefined
+          ? {}
+          : { expectedVersion: context.expectedVersion }),
+        ...(context.expectedVersions === undefined
+          ? {}
+          : { expectedVersions: context.expectedVersions }),
+      });
+    } catch {
+      throw base;
+    }
+    throw enriched;
   }
 }
 
