@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -115,6 +115,7 @@ describe("只读工作项对账", () => {
   it("服务纵向切片读取历史领取和源码事实但不写项目事件", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-reconcile-service-"));
     temporary.push(root);
+    const canonicalRoot = realpathSync.native(root);
     mkdirSync(join(root, "release"));
     writeFileSync(join(root, "release", "done.txt"), "done", "utf8");
     const git = (args: string[]) =>
@@ -186,7 +187,7 @@ describe("只读工作项对账", () => {
       const result = await service.reconcileProject("RECS");
 
       expect(result).toMatchObject({
-        project: { code: "RECS", sourceRoot: root },
+        project: { code: "RECS", sourceRoot: canonicalRoot },
         attentionCount: 2,
       });
       expect(result.items).toEqual(

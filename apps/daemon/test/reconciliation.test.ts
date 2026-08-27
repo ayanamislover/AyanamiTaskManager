@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,7 @@ describe("只读项目对账 REST", () => {
   it("默认仅返回需对账项，include_active 才附带正常项", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-reconcile-api-"));
     temporary.push(root);
+    const canonicalRoot = realpathSync.native(root);
     mkdirSync(join(root, "dist"));
     writeFileSync(join(root, "dist", "ready.json"), "{}", "utf8");
     const service = await AyanamiTaskService.open({
@@ -61,7 +62,7 @@ describe("只读项目对账 REST", () => {
       });
       expect(attention.statusCode).toBe(200);
       expect(attention.json()).toMatchObject({
-        project: { code: "RAPI", sourceRoot: root },
+        project: { code: "RAPI", sourceRoot: canonicalRoot },
         attentionCount: 1,
         counts: { ACTIVE: 1, POSSIBLY_COMPLETE: 1 },
       });
