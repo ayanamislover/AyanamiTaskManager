@@ -2,10 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { createAyanamiMcpServer } from "../src/index.js";
+import { connectProfiledClients } from "./profile-client.js";
 import {
   assertMcpSchemaBudget,
   MCP_SCHEMA_LIMIT_BYTES,
@@ -19,7 +17,7 @@ afterEach(async () => {
 });
 
 describe("Ayanami MCP", () => {
-  it("公开恰好 12 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
+  it("公开恰好 11 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-"));
     roots.push(dataDir);
     const service = await AyanamiTaskService.open({
@@ -31,36 +29,39 @@ describe("Ayanami MCP", () => {
       sourcePath: null,
       code: "MCP",
     });
-    const server = createAyanamiMcpServer(service);
-    const client = new Client({ name: "mcp-test", version: "1.0.0" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const profiles = await connectProfiledClients(service, "mcp-test");
+    const { client } = profiles;
 
-    const listed = await client.listTools();
-    expect(listed.tools.map((tool) => tool.name)).toEqual([
+    const [coreListed, memoryListed] = await Promise.all([
+      profiles.coreClient.listTools(),
+      profiles.memoryClient.listTools(),
+    ]);
+    const allTools = [...coreListed.tools, ...memoryListed.tools];
+    expect(coreListed.tools.map((tool) => tool.name)).toEqual([
       "atm_begin",
       "atm_brief",
       "atm_task_list",
       "atm_task_get",
       "atm_task_create",
+      "atm_end",
+    ]);
+    expect(memoryListed.tools.map((tool) => tool.name)).toEqual([
       "atm_task_patch",
-      "atm_checklist",
       "atm_progress_add",
       "atm_record",
       "atm_search",
       "atm_delta",
-      "atm_end",
     ]);
-    const beginSchema = listed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
+    const beginSchema = coreListed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
       properties?: Record<string, unknown>;
       required?: string[];
     };
     expect(beginSchema.required).toEqual(["agent_id"]);
     expect(beginSchema.properties?.mode).toEqual({
-      type: "string",
       enum: ["auto", "quick", "project"],
     });
-    const recordSchema = listed.tools.find((tool) => tool.name === "atm_record")?.inputSchema as {
+    const recordSchema = memoryListed.tools.find((tool) => tool.name === "atm_record")
+      ?.inputSchema as {
       properties?: Record<string, { type?: unknown; enum?: unknown; maxLength?: number }>;
       required?: string[];
     };
@@ -73,7 +74,6 @@ describe("Ayanami MCP", () => {
       "summary",
     ]);
     expect(recordSchema.properties?.kind).toMatchObject({
-      type: "string",
       enum: ["DECISION", "CONSTRAINT", "FACT", "RISK", "REFERENCE", "LESSON"],
     });
     expect(recordSchema.properties?.summary).toMatchObject({
@@ -91,9 +91,9 @@ describe("Ayanami MCP", () => {
       if (Array.isArray(node.enum)) enumNodes.push(node);
       Object.values(node).forEach(collectEnums);
     };
-    listed.tools.forEach((tool) => collectEnums(tool.inputSchema));
+    allTools.forEach((tool) => collectEnums(tool.inputSchema));
     expect(enumNodes.length).toBeGreaterThan(10);
-    expect(enumNodes.every((node) => node.type === "string")).toBe(true);
+    expect(enumNodes.every((node) => node.type === undefined)).toBe(true);
     const emptySchemaNodes: string[] = [];
     const collectEmptySchemas = (value: unknown, path: string): void => {
       if (Array.isArray(value)) {
@@ -105,9 +105,9 @@ describe("Ayanami MCP", () => {
       if (Object.keys(node).length === 0) emptySchemaNodes.push(path);
       Object.entries(node).forEach(([key, entry]) => collectEmptySchemas(entry, `${path}.${key}`));
     };
-    listed.tools.forEach((tool) => collectEmptySchemas(tool.inputSchema, tool.name));
+    allTools.forEach((tool) => collectEmptySchemas(tool.inputSchema, tool.name));
     expect(emptySchemaNodes).toEqual([]);
-    const schemaBudget = assertMcpSchemaBudget(listed.tools);
+    const schemaBudget = assertMcpSchemaBudget(coreListed.tools);
     expect(schemaBudget).toEqual({
       bytes: expect.any(Number),
       limitBytes: MCP_SCHEMA_LIMIT_BYTES,
@@ -117,19 +117,16 @@ describe("Ayanami MCP", () => {
     // 阳性对照：守卫必须真的会在吃掉预留余量时变红，不能只量一个永远通过的数字。
     expect(() =>
       assertMcpSchemaBudget([
-        ...listed.tools,
-        { name: "oversized", inputSchema: { type: "object", padding: "x".repeat(800) } },
+        ...coreListed.tools,
+        { name: "oversized", inputSchema: { type: "object", padding: "x".repeat(8000) } },
       ]),
     ).toThrow(/MCP_SCHEMA_BUDGET_EXCEEDED/u);
-    expect(listed.tools.find((tool) => tool.name === "atm_begin")?.description).toContain(
-      "直接使用返回的 brief",
-    );
-    expect(listed.tools.find((tool) => tool.name === "atm_brief")?.description).toContain(
-      "仅在上下文压缩、长时间离开或明确恢复 working set",
-    );
+    expect(allTools.every((tool) => tool.description === undefined)).toBe(true);
+    expect(profiles.coreClient.getInstructions()).toContain("MCP surface v3");
+    expect(profiles.coreClient.getInstructions()).toContain("直接使用返回的 brief");
     expect(
-      JSON.stringify(listed.tools.find((tool) => tool.name === "atm_task_create")?.inputSchema),
-    ).toContain("discovered_from");
+      JSON.stringify(coreListed.tools.find((tool) => tool.name === "atm_task_create")?.inputSchema),
+    ).toContain("discovered_from_ref");
 
     const invalidContract = await client.callTool({
       name: "atm_record",
@@ -206,13 +203,11 @@ describe("Ayanami MCP", () => {
         op_id: "project-progress-1",
         scope: "project",
         summary: "进".repeat(300),
-        health: "ON_TRACK",
         completed: [],
-        next: ["继续烟测"],
         evidence: [],
       },
     });
-    expect(projectProgress.structuredContent).toMatchObject({ ok: true, health: "ON_TRACK" });
+    expect(projectProgress.structuredContent).toMatchObject({ ok: true, health: "UNKNOWN" });
     const boundaryProgress = await client.callTool({
       name: "atm_progress_add",
       arguments: {
@@ -222,7 +217,6 @@ describe("Ayanami MCP", () => {
         scope: "project",
         summary: "界".repeat(500),
         completed: [],
-        next: [],
         evidence: [],
       },
     });
@@ -236,7 +230,6 @@ describe("Ayanami MCP", () => {
         scope: "project",
         summary: "界".repeat(501),
         completed: [],
-        next: [],
         evidence: [],
       },
     });
@@ -249,8 +242,6 @@ describe("Ayanami MCP", () => {
         op_id: "retire-1",
         outcome: "retired",
         summary: "轮换上下文",
-        next: ["继续烟测"],
-        release_claims: true,
       },
     });
     expect(retired.structuredContent).toMatchObject({ ok: true, handoffs: 0 });
@@ -271,7 +262,7 @@ describe("Ayanami MCP", () => {
     });
     expect((resumed.content[0] as { text: string }).text.length).toBeLessThanOrEqual(1200);
 
-    await Promise.all([client.close(), server.close()]);
+    await profiles.close();
     service.close();
   });
 
@@ -287,10 +278,8 @@ describe("Ayanami MCP", () => {
       sourcePath: null,
       code: "BRF",
     });
-    const server = createAyanamiMcpServer(service);
-    const client = new Client({ name: "brief-test", version: "1.0.0" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const profiles = await connectProfiledClients(service, "brief-test");
+    const { client } = profiles;
 
     // 准备阶段一旦失败要立刻带着原因炸掉，否则后面会拿 undefined 继续断言。
     const call = async (name: string, args: Record<string, unknown>, expectOk = true) => {
@@ -325,7 +314,6 @@ describe("Ayanami MCP", () => {
           type: "TASK",
           priority: "HIGH",
           status: "READY",
-          weight: 1,
           verification_required: true,
           depends_on: [],
           depends_on_refs: [],
@@ -364,20 +352,17 @@ describe("Ayanami MCP", () => {
         // 再叠加 begin 自己的 session/atomicBegin 外壳后越界；这正是现场形状。
         summary: "要".repeat(87),
         detail: "详".repeat(400),
-        importance: "CRITICAL",
-        scope: "project",
       });
     }
 
     // 来自真实多项目恢复场景：begin 在服务端已经创建 Session 后，不能因为 brief
     // 超过 MCP 文本预算就把整个结果替换成 RESULT_TOO_LARGE，连 Session 号也丢掉。
-    // 当前 Agent 仍被分派到上面的长任务，且项目已有多条 CRITICAL Record，足以复现。
+    // 当前 Agent 仍被分派到上面的长任务，且项目已有多条长 Record，足以复现。
     const resumedBegin = await call("atm_begin", {
       op_id: "brief-rich-resume",
       project_code: "BRF",
       mode: "project",
       agent_id: "codex",
-      client_kind: "feedback-regression",
       resume: true,
     });
     const resumedBody = resumedBegin.structuredContent as Record<string, unknown>;
@@ -385,7 +370,7 @@ describe("Ayanami MCP", () => {
     expect(resumedBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 2,
+      surface_version: 3,
       brief_mode: "full",
     });
     expect(resumedBody.session).toEqual(expect.any(String));
@@ -404,7 +389,7 @@ describe("Ayanami MCP", () => {
     expect(identityBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 2,
+      surface_version: 3,
       brief_mode: "none",
       brief_truncated: false,
     });
@@ -425,7 +410,7 @@ describe("Ayanami MCP", () => {
     expect(minimalBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 2,
+      surface_version: 3,
       brief_mode: "minimal",
     });
     expect(minimalBody).not.toHaveProperty("records");
@@ -509,7 +494,7 @@ describe("Ayanami MCP", () => {
     expect(typeof atomicBody.session).toBe("string");
     expect(JSON.stringify(atomicBody).length).toBeLessThanOrEqual(1200);
 
-    await Promise.all([client.close(), server.close()]);
+    await profiles.close();
     service.close();
   });
 });

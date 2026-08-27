@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 async function connect(service: AyanamiTaskService) {
-  const server = createAyanamiMcpServer(service);
+  const server = createAyanamiMcpServer(service, { profile: "memory" });
   const client = new Client({ name: "mcp-startup-successor-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

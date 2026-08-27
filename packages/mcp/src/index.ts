@@ -12,7 +12,9 @@ import {
   EvidenceInputSchema,
   EvidenceReferenceSchema,
   RECORD_SUMMARY_CODE_POINT_LIMIT,
+  RecordSubjectKeySchema,
   RecordSummarySchema,
+  RecordTopicSchema,
   ReviewCandidateHashSchema,
   WorkItemPatchInputSchema,
   unicodeCodePointLength,
@@ -35,7 +37,13 @@ const recordSummary = RecordSummarySchema.superRefine((value, context) => {
     })}`,
   });
 }).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
-export const MCP_SURFACE_VERSION = 2;
+export const MCP_SURFACE_VERSION = 3;
+export type AyanamiMcpProfile = "core" | "memory";
+
+const mcpProfileTools: Record<AyanamiMcpProfile, readonly string[]> = {
+  core: ["atm_begin", "atm_brief", "atm_task_list", "atm_task_get", "atm_task_create", "atm_end"],
+  memory: ["atm_task_patch", "atm_progress_add", "atm_record", "atm_search", "atm_delta"],
+};
 
 function compactJsonSchema(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(compactJsonSchema);
@@ -86,7 +94,6 @@ function compactJsonSchema(value: unknown): unknown {
     "minLength",
     "minItems",
     "maxItems",
-    "additionalProperties",
     "pattern",
   ]);
   // Zod 的 default 会让运行时接受字段缺省，但 toJSONSchema 仍把它列进 required。
@@ -96,18 +103,6 @@ function compactJsonSchema(value: unknown): unknown {
     source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
       ? (source.properties as Record<string, unknown>)
       : null;
-  // `signals` are optional begin-time scheduling hints, not a public contract agents need to
-  // construct field-by-field. Keep the object type visible while leaving the detailed runtime
-  // validation to Zod so higher-value evidence schemas fit inside the fixed tools/list budget.
-  if (
-    source.type === "object" &&
-    properties &&
-    ["expected_minutes", "subtask_count", "multi_session", "multi_agent"].every((key) =>
-      Object.hasOwn(properties, key),
-    )
-  ) {
-    return { type: "object" };
-  }
   const defaulted = new Set(
     properties
       ? Object.entries(properties)
@@ -123,6 +118,9 @@ function compactJsonSchema(value: unknown): unknown {
     Object.entries(source)
       .filter(([key, entry]) => !omitted.has(key) && entry !== undefined)
       .flatMap(([key, entry]) => {
+        if (key === "type" && entry === "string" && (source.enum || source.const !== undefined)) {
+          return [];
+        }
         // Claude 的 tools/list 只有 8 KiB 总预算。保留反馈里会直接造成整次写入失败的
         // 300 字摘要边界；高频 identifier 的长度边界由同一份运行时 Zod 继续执行，
         // 其字符串类型、枚举与 required 仍完整公开。
@@ -136,60 +134,34 @@ function compactJsonSchema(value: unknown): unknown {
   );
 }
 
-function compactPublicToolSchema(name: string, value: unknown): Record<string, unknown> {
+function publicToolJsonSchema(name: string, value: unknown): Record<string, unknown> {
   const schema = compactJsonSchema(value) as Record<string, any>;
-  const omit = (properties: Record<string, unknown> | undefined, fields: readonly string[]) => {
-    if (!properties) return;
-    for (const field of fields) delete properties[field];
-  };
-
-  // tools/list has a hard shared 8 KiB ceiling. Runtime validation remains the full Zod schema;
-  // the public projection keeps the preferred/common workflow and omits only advanced aliases or
-  // filters whose absence does not prevent a tool from being called correctly.
-  if (name === "atm_begin") {
-    omit(schema.properties, [
-      "title",
-      "display_name",
-      "client_kind",
-      "thread_id",
-      "parent_session_id",
-      "predecessor_session_id",
-      "signals",
-      "creation_reason",
-      "resume",
-      "max_chars",
-      "allow_project_create",
-    ]);
-  }
-  if (name === "atm_task_list") {
-    omit(schema.properties, ["owner", "parent_key", "milestone_id", "query", "ready_only"]);
-  }
-  if (name === "atm_task_create") {
-    const item = schema.properties?.items?.items;
-    omit(item?.properties, [
-      "milestone_id",
-      "parent_key",
-      "depends_on",
-      "discovered_from",
-      "objective_id",
-      "description",
-      "weight",
-      "target_date",
-      "verification_required",
-    ]);
-    omit(item?.properties?.checklist?.items?.properties, ["weight"]);
-  }
   if (name === "atm_task_patch") {
     const item = schema.properties?.items?.items;
     if (item) {
-      omit(item.properties, ["assignee_agent_id", "target_date", "parent_key", "takeover_stale"]);
+      const evidenceDefinition = item.properties.evidence.items;
+      schema.$defs = { e: evidenceDefinition };
+      item.properties.evidence.items = { $ref: "#/$defs/e" };
+      const checklistItem = item.properties.checklist_items.items;
+      checklistItem.properties.evidence.items.anyOf[1] = { $ref: "#/$defs/e" };
+      item.properties.checklist_items.minItems = 1;
       item.properties.candidate_hashes = {
         type: "object",
-        propertyNames: { type: "string" },
         additionalProperties: { type: "string" },
       };
-      delete item.properties.evidence?.items?.properties?.note;
+      item.dependentSchemas = {
+        expected_fields: { properties: { operation: { const: "edit" } } },
+      };
+      item.properties.expected_fields.minProperties = 1;
       item.allOf = [
+        {
+          if: { properties: { operation: { const: "block" } } },
+          then: { required: ["blocked_reason"] },
+        },
+        {
+          if: { properties: { operation: { enum: ["wait_user", "wait_agent"] } } },
+          then: { required: ["waiting_for"] },
+        },
         {
           if: { properties: { operation: { const: "review_request" } } },
           then: {
@@ -198,20 +170,118 @@ function compactPublicToolSchema(name: string, value: unknown): Record<string, u
               "expected_parent_checklist_version",
               "candidate_hashes",
             ],
+            propertyNames: {
+              enum: [
+                "task_key",
+                "expected_version",
+                "takeover_stale",
+                "operation",
+                "parent_checklist_id",
+                "expected_parent_checklist_version",
+                "candidate_hashes",
+              ],
+            },
           },
         },
         {
           if: { properties: { operation: { const: "review_submit" } } },
-          then: { required: ["request_key", "verdict", "candidate_hashes", "evidence"] },
+          then: {
+            required: ["request_key", "verdict", "candidate_hashes", "evidence"],
+            propertyNames: {
+              enum: [
+                "task_key",
+                "expected_version",
+                "takeover_stale",
+                "operation",
+                "request_key",
+                "verdict",
+                "candidate_hashes",
+                "evidence",
+              ],
+            },
+          },
+        },
+        {
+          if: { properties: { operation: { const: "checklist_single" } } },
+          then: {
+            required: ["checklist_items"],
+            properties: { checklist_items: { maxItems: 1 } },
+            propertyNames: {
+              enum: [
+                "task_key",
+                "expected_version",
+                "takeover_stale",
+                "operation",
+                "checklist_items",
+              ],
+            },
+          },
+        },
+        {
+          if: { properties: { operation: { const: "checklist_batch" } } },
+          then: {
+            required: ["checklist_items"],
+            propertyNames: {
+              enum: [
+                "task_key",
+                "expected_version",
+                "takeover_stale",
+                "operation",
+                "checklist_items",
+              ],
+            },
+          },
+        },
+        {
+          if: { properties: { operation: { const: "verify_and_complete" } } },
+          then: {
+            propertyNames: {
+              enum: ["task_key", "expected_version", "takeover_stale", "operation"],
+            },
+          },
         },
       ];
     }
+    schema.allOf = [
+      {
+        if: {
+          properties: {
+            items: {
+              contains: {
+                properties: {
+                  operation: {
+                    enum: [
+                      "verify_and_complete",
+                      "review_request",
+                      "review_submit",
+                      "checklist_single",
+                      "checklist_batch",
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        },
+        then: { properties: { items: { maxItems: 1 } } },
+      },
+    ];
   }
   if (name === "atm_progress_add") {
-    omit(schema.properties, ["completed", "next", "blocker", "health"]);
+    schema.allOf = [
+      {
+        if: { properties: { scope: { const: "task" } } },
+        then: { required: ["task_key"], not: { required: ["health"] } },
+      },
+      {
+        if: { properties: { scope: { const: "project" } } },
+        then: { not: { required: ["percent"] } },
+      },
+    ];
   }
-  if (name === "atm_end") {
-    omit(schema.properties, ["next", "release_claims", "retirement_reason"]);
+  if (name === "atm_search") {
+    schema.anyOf = [{ required: ["query"] }, { required: ["op_id"] }];
+    schema.dependentRequired = { session: ["op_id"] };
   }
   return schema;
 }
@@ -233,20 +303,34 @@ function installCompactToolList(server: McpServer): void {
       .map(([name, tool]) => ({
         name,
         ...(tool.title ? { title: tool.title } : {}),
-        ...(["atm_begin", "atm_brief"].includes(name) && tool.description
-          ? { description: tool.description }
-          : {}),
-        inputSchema: compactPublicToolSchema(
+        inputSchema: publicToolJsonSchema(
           name,
-          name === "atm_checklist"
-            ? checklistPublicJsonSchema()
-            : tool.inputSchema
-              ? z.toJSONSchema(tool.inputSchema)
-              : { type: "object" },
+          tool.inputSchema ? z.toJSONSchema(tool.inputSchema) : { type: "object" },
         ) as any,
         ...(tool._meta ? { _meta: tool._meta } : {}),
       })),
   }));
+}
+
+function installProjectErrorDetails(server: McpServer, service: AyanamiTaskService): void {
+  type Handler = (input: Record<string, unknown>, ...rest: unknown[]) => unknown;
+  type RegisteredTool = { handler: Handler };
+  const registered = (server as unknown as { _registeredTools: Record<string, RegisteredTool> })
+    ._registeredTools;
+  for (const tool of Object.values(registered)) {
+    const handler = tool.handler;
+    tool.handler = (input, ...rest) => {
+      const project =
+        typeof input.project === "string"
+          ? input.project
+          : typeof input.project_code === "string"
+            ? input.project_code
+            : undefined;
+      return withMcpErrorDetails(service, project === undefined ? {} : { project }, async () =>
+        handler(input, ...rest),
+      );
+    };
+  }
 }
 
 function plain(value: unknown): Record<string, unknown> {
@@ -356,6 +440,178 @@ function mutationAck(opId: string, serviceResult: Record<string, unknown>) {
         }
       : {}),
   };
+}
+
+type McpErrorContext = {
+  project?: string;
+  taskKey?: string;
+  checklistId?: string;
+  expectedVersion?: number;
+  expectedVersions?: Record<string, number>;
+};
+
+function errorCode(error: unknown): string {
+  if (!(error instanceof Error)) return "INTERNAL_ERROR";
+  const candidate = error.message.split(":", 1)[0]!.trim();
+  return /^[A-Z][A-Z0-9_]+$/u.test(candidate) ? candidate : "INTERNAL_ERROR";
+}
+
+function normalizedSuggestionText(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]+/gu, "");
+}
+
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1]! + 1,
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length]!;
+}
+
+function projectSuggestionDetails(service: AyanamiTaskService, error: Error) {
+  const query = normalizedSuggestionText(
+    error.message
+      .slice(error.message.indexOf(":") + 1)
+      .trim()
+      .slice(0, 128),
+  );
+  if (!query) return { did_you_mean: null, candidates: [] };
+  const ranked = service
+    .listProjects()
+    .filter((project) => project.lifecycle !== "TRASHED")
+    .map((project) => {
+      const code = normalizedSuggestionText(project.code);
+      const name = normalizedSuggestionText(project.name);
+      const rawScore = Math.min(editDistance(query, code), editDistance(query, name));
+      const prefix = code.startsWith(query) || name.startsWith(query);
+      return { project, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
+    })
+    .sort(
+      (left, right) =>
+        left.score - right.score || left.project.code.localeCompare(right.project.code),
+    )
+    .slice(0, 5);
+  const first = ranked[0];
+  const plausible =
+    first !== undefined &&
+    (first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34)));
+  return {
+    did_you_mean: plausible ? first!.project.code : null,
+    candidates: ranked.map(({ project }) => ({ code: project.code, name: project.name })),
+  };
+}
+
+async function versionConflictDetails(
+  service: AyanamiTaskService,
+  error: Error,
+  context: McpErrorContext,
+) {
+  if (!context.project) return null;
+  const detail = error.message.slice(error.message.indexOf(":") + 1).trim();
+  const segments = detail.split(":");
+  const actual = Number(segments.at(-1));
+  if (!Number.isInteger(actual) || actual < 0) return null;
+  if (context.checklistId && segments.length === 1) {
+    const [current, recentChanges] = await Promise.all([
+      service.checklistConflictSnapshot(context.project, context.checklistId),
+      service.recentChecklistChanges(context.project, context.checklistId, 6),
+    ]);
+    return {
+      entity: "CHECKLIST",
+      key: context.checklistId,
+      expected: context.expectedVersion ?? null,
+      actual,
+      current: {
+        id: current.id,
+        task_key: current.taskKey,
+        task_version: current.taskVersion,
+        title: current.title,
+        status: current.status,
+        evidence_required: current.evidenceRequired,
+        evidence_count: current.evidenceCount,
+        version: current.version,
+        updated_at: current.updatedAt,
+      },
+      recent_changes: recentChanges.slice(0, 6).map((change) => ({
+        seq: change.seq,
+        type: change.type,
+        key: change.key,
+        summary: change.summary,
+        op_id: change.opId,
+        at: change.at,
+      })),
+      changes_complete: false,
+    };
+  }
+  const taskKey = (segments.length > 1 ? segments[0] : undefined) ?? context.taskKey;
+  if (!taskKey) return null;
+  const [current, recentChanges] = await Promise.all([
+    service.getWorkItem(context.project, taskKey, "core"),
+    service.recentWorkItemChanges(context.project, taskKey, 6),
+  ]);
+  return {
+    entity: "WORK_ITEM",
+    key: taskKey,
+    expected: context.expectedVersions?.[taskKey] ?? context.expectedVersion ?? null,
+    actual,
+    current: {
+      key: current.key,
+      version: current.version,
+      status: current.status,
+      phase: current.phase,
+      title: current.title,
+      description: current.description,
+      assignee_agent_id: current.assigneeAgentId,
+      claimed_by_session_id: current.claimedBySessionId,
+      target_date: current.targetDate,
+      parent_key: current.parentKey,
+      cancel_reason: current.cancelReason,
+      duplicate_of: current.duplicateOf,
+      superseded_by: current.supersededBy,
+      updated_at: current.updatedAt,
+    },
+    recent_changes: recentChanges.slice(0, 6).map((change) => ({
+      seq: change.seq,
+      type: change.type,
+      key: change.key,
+      summary: change.summary,
+      op_id: change.opId,
+      at: change.at,
+    })),
+    changes_complete: false,
+  };
+}
+
+async function withMcpErrorDetails<T>(
+  service: AyanamiTaskService,
+  context: McpErrorContext,
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const code = errorCode(error);
+    let details: Record<string, unknown> | null = null;
+    try {
+      if (code === "PROJECT_NOT_FOUND") details = projectSuggestionDetails(service, error);
+      if (code === "VERSION_CONFLICT") {
+        details = await versionConflictDetails(service, error, context);
+      }
+    } catch {
+      details = null;
+    }
+    if (!details) throw error;
+    throw new Error(`${error.message} MCP_DETAILS=${JSON.stringify(bounded(details, 6000))}`);
+  }
 }
 
 type FieldCursor = { v: 1; path: Array<string | number>; offset: number };
@@ -710,18 +966,22 @@ const workItemCreate = z
     acceptance: z.array(z.string().max(1000)).max(100).default([]),
     checklist: z
       .array(
-        z.object({
-          title: z.string().min(1).max(400),
-          evidence_required: z.boolean().default(false),
-          weight: z.number().positive().max(1000).default(1),
-        }),
+        z
+          .object({
+            title: z.string().min(1).max(400),
+            evidence_required: z.boolean().default(false),
+            weight: z.number().positive().max(1000).default(1),
+          })
+          .strict(),
       )
       .max(100)
       .default([]),
     weight: z.number().positive().max(1000).default(1),
     target_date: z.string().nullable().optional(),
     verification_required: z.boolean().default(false),
+    assignee_agent_id: z.string().trim().min(1).max(128).nullable().optional(),
   })
+  .strict()
   .refine((value) => !(value.discovered_from && value.discovered_from_ref), {
     message: "discovered_from 与 discovered_from_ref 只能指定一个",
     path: ["discovered_from_ref"],
@@ -770,6 +1030,29 @@ const reviewSubmitPatchInput = z
     verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]),
     candidate_hashes: reviewCandidateHashMap,
     evidence: z.array(EvidenceReferenceSchema).min(1).max(100),
+  })
+  .strict();
+
+const checklistStatus = z.enum(["TODO", "DOING", "DONE", "SKIPPED"]);
+const checklistBatchItem = z
+  .object({
+    id: z.string().trim().min(1),
+    status: checklistStatus,
+    evidence: z.array(EvidenceInputSchema).max(100).optional(),
+  })
+  .strict();
+const checklistSinglePatchInput = z
+  .object({
+    ...reviewPatchCommon,
+    operation: z.literal("checklist_single"),
+    checklist_items: z.array(checklistBatchItem).length(1),
+  })
+  .strict();
+const checklistBatchPatchInput = z
+  .object({
+    ...reviewPatchCommon,
+    operation: z.literal("checklist_batch"),
+    checklist_items: z.array(checklistBatchItem).min(1).max(100),
   })
   .strict();
 
@@ -824,6 +1107,8 @@ const workItemPatch = z
       "verify_and_complete",
       "review_request",
       "review_submit",
+      "checklist_single",
+      "checklist_batch",
       "cancel",
       "reopen",
       "edit",
@@ -835,7 +1120,7 @@ const workItemPatch = z
     cancel_reason: z.string().trim().min(1).max(2000).optional(),
     duplicate_of: z.string().trim().min(1).max(100).nullable().optional(),
     superseded_by: z.string().trim().min(1).max(100).nullable().optional(),
-    assignee_agent_id: z.string().nullable().optional(),
+    assignee_agent_id: z.string().trim().min(1).max(128).nullable().optional(),
     target_date: z.string().nullable().optional(),
     parent_key: z.string().nullable().optional(),
     takeover_stale: z.boolean().default(false),
@@ -845,12 +1130,25 @@ const workItemPatch = z
     candidate_hashes: reviewCandidateHashMap.optional(),
     verdict: z.enum(["APPROVED", "CHANGES_REQUESTED"]).optional(),
     evidence: z.array(EvidenceReferenceSchema).min(1).max(100).optional(),
+    checklist_items: z.array(checklistBatchItem).min(1).max(100).optional(),
   })
+  .strict()
   .superRefine((value, context) => {
-    if (value.operation === "review_request" || value.operation === "review_submit") {
-      const parsed = (
-        value.operation === "review_request" ? reviewRequestPatchInput : reviewSubmitPatchInput
-      ).safeParse(value);
+    if (
+      value.operation === "review_request" ||
+      value.operation === "review_submit" ||
+      value.operation === "checklist_single" ||
+      value.operation === "checklist_batch"
+    ) {
+      const parser =
+        value.operation === "review_request"
+          ? reviewRequestPatchInput
+          : value.operation === "review_submit"
+            ? reviewSubmitPatchInput
+            : value.operation === "checklist_single"
+              ? checklistSinglePatchInput
+              : checklistBatchPatchInput;
+      const parsed = parser.safeParse(value);
       if (parsed.success) return;
       for (const issue of parsed.error.issues) {
         if (issue.code === "unrecognized_keys") {
@@ -914,9 +1212,16 @@ const taskPatchToolInput = z
     op_id: opId,
     items: z.array(workItemPatch).min(1).max(50),
   })
+  .strict()
   .superRefine((value, context) => {
     const composite = value.items.filter((item) =>
-      ["verify_and_complete", "review_request", "review_submit"].includes(item.operation),
+      [
+        "verify_and_complete",
+        "review_request",
+        "review_submit",
+        "checklist_single",
+        "checklist_batch",
+      ].includes(item.operation),
     );
     if (composite.length > 0 && value.items.length !== 1) {
       context.addIssue({
@@ -927,93 +1232,15 @@ const taskPatchToolInput = z
     }
   });
 
-const checklistStatus = z.enum(["TODO", "DOING", "DONE", "SKIPPED"]);
-const checklistToolCommon = {
-  project: projectCode,
-  session: sessionId,
-  op_id: opId,
-  expected_version: z.number().int().nonnegative(),
-};
-const checklistBatchItem = z
-  .object({
-    id: z.string().trim().min(1),
-    status: checklistStatus,
-    evidence: z.array(EvidenceInputSchema).max(100).optional(),
-  })
-  .strict();
-const checklistSingleInput = z
-  .object({
-    ...checklistToolCommon,
-    mode: z.enum(["single"]).optional(),
-    id: z.string().trim().min(1),
-    status: checklistStatus,
-    evidence: z.array(EvidenceInputSchema).max(100).optional(),
-  })
-  .strict();
-const checklistBatchInput = z
-  .object({
-    ...checklistToolCommon,
-    mode: z.enum(["batch"]),
-    task_key: taskKey,
-    items: z.array(checklistBatchItem).min(1).max(100),
-  })
-  .strict();
-function checklistPublicJsonSchema(): Record<string, unknown> {
-  const single = z.toJSONSchema(checklistSingleInput) as Record<string, any>;
-  const batch = z.toJSONSchema(checklistBatchInput) as Record<string, any>;
-  const batchItems = batch.properties?.items?.items;
-  if (batchItems?.properties) {
-    batchItems.properties.evidence = { $ref: "#/properties/evidence" };
-    batchItems.properties.status = { $ref: "#/properties/status" };
-  }
-  return {
-    type: "object",
-    properties: {
-      ...(single.properties ?? {}),
-      ...(batch.properties ?? {}),
-      mode: { type: "string", enum: ["single", "batch"] },
-    },
-    required: ["project", "session", "op_id", "expected_version"],
-    anyOf: [
-      {
-        properties: { mode: { const: "single" } },
-        required: ["id", "status"],
-      },
-      {
-        properties: { mode: { const: "batch" } },
-        required: ["mode", "task_key", "items"],
-      },
-    ],
-  };
-}
-
-const checklistToolInput = z
-  .object({
-    ...checklistToolCommon,
-    mode: z.enum(["single", "batch"]).optional(),
-    id: z.string().optional(),
-    status: checklistStatus.optional(),
-    evidence: z.array(EvidenceInputSchema).max(100).optional(),
-    task_key: taskKey.optional(),
-    items: z.array(checklistBatchItem).max(100).optional(),
-  })
-  .passthrough()
-  .superRefine((value, context) => {
-    const parsed = (value.mode === "batch" ? checklistBatchInput : checklistSingleInput).safeParse(
-      value,
-    );
-    if (parsed.success) return;
-    for (const issue of parsed.error.issues) {
-      if (issue.code === "unrecognized_keys") {
-        for (const key of issue.keys) {
-          context.addIssue({ code: "custom", path: [key], message: `当前 mode 不接受 ${key}` });
-        }
-        continue;
-      }
-      context.addIssue({ code: "custom", path: issue.path, message: issue.message });
-    }
-  });
-
+const progressCompleted = z.union([
+  z.string().max(500),
+  z
+    .object({
+      text: z.string().trim().min(1).max(500),
+      work_item_key: taskKey.optional(),
+    })
+    .strict(),
+]);
 type TaskProjectionView = "core" | "context" | "full";
 type TaskListView = TaskProjectionView | "reconcile";
 
@@ -1444,12 +1671,18 @@ function fitReconciliationPage(
   };
 }
 
-export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
+export function createAyanamiMcpServer(
+  service: AyanamiTaskService,
+  options: { profile?: AyanamiMcpProfile } = {},
+): McpServer {
+  const profile = options.profile ?? "core";
   const server = new McpServer(
     { name: "ayanami-task-manager", version: "1.0.15" },
     {
       instructions:
-        "MCP surface v2。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。",
+        profile === "core"
+          ? "MCP surface v3 · core profile。开工调用一次 atm_begin 并直接使用返回的 brief；不要紧接 atm_brief。仅在上下文压缩、长时间离开或明确恢复 working set 时调用 atm_brief。task_list/task_get 按需，结束调用 atm_end。"
+          : "MCP surface v3 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、搜索与增量读取。",
     },
   );
 
@@ -1457,84 +1690,94 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_begin",
     {
       description: "直接使用返回的 brief",
-      inputSchema: {
-        op_id: opId.optional(),
-        cwd: z.string().min(1).optional(),
-        project_code: projectCode.optional(),
-        title: z.string().max(400).optional(),
-        mode: z.enum(["auto", "quick", "project"]).default("auto"),
-        agent_id: z.string().min(1).max(128),
-        display_name: z.string().max(200).optional(),
-        client_kind: z.string().max(100).default("generic"),
-        thread_id: z.string().nullable().optional(),
-        parent_session_id: z.string().nullable().optional(),
-        resume: z.boolean().default(false),
-        brief: z.enum(["none", "minimal", "full"]).default("full"),
-        max_chars: z.number().int().min(300).max(5000).default(1200),
-        predecessor_session_id: z.string().nullable().optional(),
-        role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
-        signals: z
-          .object({
-            expected_minutes: z.number().int().nonnegative().optional(),
-            subtask_count: z.number().int().nonnegative().optional(),
-            multi_session: z.boolean().optional(),
-            multi_agent: z.boolean().optional(),
-            has_dependencies: z.boolean().optional(),
-            needs_evidence: z.boolean().optional(),
-            has_target_date: z.boolean().optional(),
-          })
-          .default({}),
-        allow_project_create: z.boolean().default(false),
-        creation_reason: z.string().max(500).optional(),
-      },
+      inputSchema: z
+        .object({
+          op_id: opId.optional(),
+          cwd: z.string().min(1).optional(),
+          project_code: projectCode.optional(),
+          title: z.string().max(400).optional(),
+          mode: z.enum(["auto", "quick", "project"]).default("auto"),
+          agent_id: z.string().min(1).max(128),
+          display_name: z.string().max(200).optional(),
+          client_kind: z.string().max(100).default("generic"),
+          thread_id: z.string().nullable().optional(),
+          parent_session_id: z.string().nullable().optional(),
+          resume: z.boolean().default(false),
+          brief: z.enum(["none", "minimal", "full"]).default("full"),
+          max_chars: z.number().int().min(300).max(5000).default(1200),
+          predecessor_session_id: z.string().nullable().optional(),
+          role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
+          signals: z
+            .object({
+              expected_minutes: z.number().int().nonnegative().optional(),
+              subtask_count: z.number().int().nonnegative().optional(),
+              multi_session: z.boolean().optional(),
+              multi_agent: z.boolean().optional(),
+              has_dependencies: z.boolean().optional(),
+              needs_evidence: z.boolean().optional(),
+              has_target_date: z.boolean().optional(),
+            })
+            .strict()
+            .default({}),
+          allow_project_create: z.boolean().default(false),
+          creation_reason: z.string().max(500).optional(),
+        })
+        .strict(),
       outputSchema,
     },
     async (input) => {
-      const started = await service.begin({
-        ...(input.op_id === undefined ? {} : { operationId: input.op_id }),
-        mode: input.mode,
-        agentId: input.agent_id,
-        clientKind: input.client_kind,
-        role: input.role,
-        resume: input.resume,
-        maxChars: input.max_chars,
-        allowProjectCreate: input.allow_project_create,
-        signals: {
-          ...(input.signals.expected_minutes === undefined
-            ? {}
-            : { expectedMinutes: input.signals.expected_minutes }),
-          ...(input.signals.subtask_count === undefined
-            ? {}
-            : { subtaskCount: input.signals.subtask_count }),
-          ...(input.signals.multi_session === undefined
-            ? {}
-            : { multiSession: input.signals.multi_session }),
-          ...(input.signals.multi_agent === undefined
-            ? {}
-            : { multiAgent: input.signals.multi_agent }),
-          ...(input.signals.has_dependencies === undefined
-            ? {}
-            : { hasDependencies: input.signals.has_dependencies }),
-          ...(input.signals.needs_evidence === undefined
-            ? {}
-            : { needsEvidence: input.signals.needs_evidence }),
-          ...(input.signals.has_target_date === undefined
-            ? {}
-            : { hasTargetDate: input.signals.has_target_date }),
-        },
-        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-        ...(input.project_code === undefined ? {} : { projectCode: input.project_code }),
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(input.display_name === undefined ? {} : { displayName: input.display_name }),
-        ...(input.thread_id === undefined ? {} : { threadId: input.thread_id }),
-        ...(input.parent_session_id === undefined
-          ? {}
-          : { parentSessionId: input.parent_session_id }),
-        ...(input.predecessor_session_id === undefined
-          ? {}
-          : { predecessorSessionId: input.predecessor_session_id }),
-        ...(input.creation_reason === undefined ? {} : { creationReason: input.creation_reason }),
-      });
+      const started = await withMcpErrorDetails(
+        service,
+        input.project_code === undefined ? {} : { project: input.project_code },
+        () =>
+          service.begin({
+            ...(input.op_id === undefined ? {} : { operationId: input.op_id }),
+            mode: input.mode,
+            agentId: input.agent_id,
+            clientKind: input.client_kind,
+            role: input.role,
+            resume: input.resume,
+            maxChars: input.max_chars,
+            allowProjectCreate: input.allow_project_create,
+            signals: {
+              ...(input.signals.expected_minutes === undefined
+                ? {}
+                : { expectedMinutes: input.signals.expected_minutes }),
+              ...(input.signals.subtask_count === undefined
+                ? {}
+                : { subtaskCount: input.signals.subtask_count }),
+              ...(input.signals.multi_session === undefined
+                ? {}
+                : { multiSession: input.signals.multi_session }),
+              ...(input.signals.multi_agent === undefined
+                ? {}
+                : { multiAgent: input.signals.multi_agent }),
+              ...(input.signals.has_dependencies === undefined
+                ? {}
+                : { hasDependencies: input.signals.has_dependencies }),
+              ...(input.signals.needs_evidence === undefined
+                ? {}
+                : { needsEvidence: input.signals.needs_evidence }),
+              ...(input.signals.has_target_date === undefined
+                ? {}
+                : { hasTargetDate: input.signals.has_target_date }),
+            },
+            ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+            ...(input.project_code === undefined ? {} : { projectCode: input.project_code }),
+            ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.display_name === undefined ? {} : { displayName: input.display_name }),
+            ...(input.thread_id === undefined ? {} : { threadId: input.thread_id }),
+            ...(input.parent_session_id === undefined
+              ? {}
+              : { parentSessionId: input.parent_session_id }),
+            ...(input.predecessor_session_id === undefined
+              ? {}
+              : { predecessorSessionId: input.predecessor_session_id }),
+            ...(input.creation_reason === undefined
+              ? {}
+              : { creationReason: input.creation_reason }),
+          }),
+      );
       if (started.scope === "quick") {
         return result(
           {
@@ -1558,14 +1801,16 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_brief",
     {
       description: "仅在上下文压缩、长时间离开或明确恢复 working set",
-      inputSchema: {
-        project_code: projectCode,
-        session_id: sessionId.optional(),
-        task_key: taskKey.optional(),
-        since_seq: z.number().int().nonnegative().optional(),
-        max_chars: z.number().int().min(300).max(5000).default(1200),
-        include: z.array(z.enum(briefSectionNames)).max(briefSectionNames.length).default([]),
-      },
+      inputSchema: z
+        .object({
+          project_code: projectCode,
+          session_id: sessionId.optional(),
+          task_key: taskKey.optional(),
+          since_seq: z.number().int().nonnegative().optional(),
+          max_chars: z.number().int().min(300).max(5000).default(1200),
+          include: z.array(z.enum(briefSectionNames)).max(briefSectionNames.length).default([]),
+        })
+        .strict(),
       outputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -1598,21 +1843,23 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_task_list",
     {
       description: "分页列任务。",
-      inputSchema: {
-        project: projectCode,
-        status: z.string().optional(),
-        owner: z.string().optional(),
-        parent_key: taskKey.optional(),
-        milestone_id: z.string().optional(),
-        ready_only: z.boolean().default(false),
-        query: z.string().max(500).optional(),
-        limit: z.number().int().min(1).max(100).default(10),
-        cursor: z.string().optional(),
-        view: z.enum(["core", "context", "full", "reconcile"]).default("core"),
-        include_active: z.boolean().default(false),
-        field_mask: z.array(z.string()).max(20).default([]),
-        max_chars: z.number().int().min(500).max(50_000).default(12_000),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          status: z.string().optional(),
+          owner: z.string().optional(),
+          parent_key: taskKey.optional(),
+          milestone_id: z.string().optional(),
+          ready_only: z.boolean().default(false),
+          query: z.string().max(500).optional(),
+          limit: z.number().int().min(1).max(100).default(10),
+          cursor: z.string().optional(),
+          view: z.enum(["core", "context", "full", "reconcile"]).default("core"),
+          include_active: z.boolean().default(false),
+          field_mask: z.array(z.string()).max(20).default([]),
+          max_chars: z.number().int().min(500).max(50_000).default(12_000),
+        })
+        .strict(),
       outputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -1704,14 +1951,16 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_task_get",
     {
       description: "读单个任务。",
-      inputSchema: {
-        project: projectCode,
-        task_key: taskKey,
-        view: z.enum(["core", "context", "full"]).default("core"),
-        field_mask: z.array(z.string()).max(30).default([]),
-        cursor: z.string().max(2000).optional(),
-        max_chars: z.number().int().min(300).max(50_000).default(12_000),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          task_key: taskKey,
+          view: z.enum(["core", "context", "full"]).default("core"),
+          field_mask: z.array(z.string()).max(30).default([]),
+          cursor: z.string().max(2000).optional(),
+          max_chars: z.number().int().min(300).max(50_000).default(12_000),
+        })
+        .strict(),
       outputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -1732,17 +1981,17 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_task_create",
     {
       description: "批量创建任务与关系。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        items: z.array(workItemCreate).min(1).max(50),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          session: sessionId,
+          op_id: opId,
+          items: z.array(workItemCreate).min(1).max(50),
+        })
+        .strict(),
       outputSchema,
     },
     async (input) => {
-      // 只有在确实有条目没自带 objective_id 时才去确保规划根，否则会给一个已经
-      // 规划好的项目凭空多建一个目标。
       const needsPlanningRoot = input.items.some((item) => item.objective_id === undefined);
       const context = needsPlanningRoot
         ? await service.ensurePlanningRoot(input.project, input.session)
@@ -1752,8 +2001,6 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         input.session,
         input.op_id,
         input.items.map((item) => {
-          // 走到这里 objectiveId 一定有值：没自带的条目上面已经确保过规划根。
-          // 这条保留下来是给类型收窄用的（planningContext 返回 string | null）。
           const objectiveId = item.objective_id ?? context.objectiveId;
           if (!objectiveId) throw new Error("OBJECTIVE_REQUIRED: 项目尚无活动目标");
           return {
@@ -1778,6 +2025,9 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
             })),
             weight: item.weight,
             verificationRequired: item.verification_required,
+            ...(item.assignee_agent_id === undefined
+              ? {}
+              : { assigneeAgentId: item.assignee_agent_id }),
             ...(item.milestone_id === undefined
               ? context.milestoneId === null
                 ? {}
@@ -1800,6 +2050,9 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
           client_ref: input.items[index]!.client_ref,
           task_key: item.key,
           version: item.version,
+          ...(input.items[index]!.assignee_agent_id === undefined
+            ? {}
+            : { assignee_agent_id: input.items[index]!.assignee_agent_id }),
         })),
       });
     },
@@ -1814,7 +2067,13 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     },
     async (input) => {
       const composite = input.items.filter((item) =>
-        ["verify_and_complete", "review_request", "review_submit"].includes(item.operation),
+        [
+          "verify_and_complete",
+          "review_request",
+          "review_submit",
+          "checklist_single",
+          "checklist_batch",
+        ].includes(item.operation),
       );
       if (composite.length > 0) {
         if (input.items.length !== 1) {
@@ -1825,20 +2084,25 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       }
       if (composite[0]?.operation === "review_request") {
         const item = reviewRequestPatchInput.parse(composite[0]);
-        const created = await service.createReviewRequest(
-          input.project,
-          input.session,
-          input.op_id,
+        const created = await withMcpErrorDetails(
+          service,
           {
-            reviewTaskKey: item.task_key,
-            expectedReviewTaskVersion: item.expected_version,
-            parentChecklistId: item.parent_checklist_id,
-            expectedParentChecklistVersion: item.expected_parent_checklist_version,
-            expectedCandidateHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
-              name,
-              value,
-            })),
+            project: input.project,
+            taskKey: item.task_key,
+            checklistId: item.parent_checklist_id,
+            expectedVersion: item.expected_parent_checklist_version,
+            expectedVersions: { [item.task_key]: item.expected_version },
           },
+          () =>
+            service.createReviewRequest(input.project, input.session, input.op_id, {
+              reviewTaskKey: item.task_key,
+              expectedReviewTaskVersion: item.expected_version,
+              parentChecklistId: item.parent_checklist_id,
+              expectedParentChecklistVersion: item.expected_parent_checklist_version,
+              expectedCandidateHashes: Object.entries(item.candidate_hashes).map(
+                ([name, value]) => ({ name, value }),
+              ),
+            }),
         );
         return result({
           ok: true,
@@ -1864,16 +2128,27 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         if (request.reviewTaskKey !== item.task_key) {
           throw new Error(`REVIEW_BINDING_MISMATCH: ${item.task_key}`);
         }
-        const submitted = await service.submitReview(input.project, input.session, input.op_id, {
-          requestKey: item.request_key,
-          expectedReviewTaskVersion: item.expected_version,
-          verdict: item.verdict,
-          reviewedHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
-            name,
-            value,
-          })),
-          evidence: item.evidence,
-        });
+        const submitted = await withMcpErrorDetails(
+          service,
+          {
+            project: input.project,
+            taskKey: item.task_key,
+            checklistId: request.parentChecklistId,
+            expectedVersion: request.parentChecklistVersion,
+            expectedVersions: { [item.task_key]: item.expected_version },
+          },
+          () =>
+            service.submitReview(input.project, input.session, input.op_id, {
+              requestKey: item.request_key,
+              expectedReviewTaskVersion: item.expected_version,
+              verdict: item.verdict,
+              reviewedHashes: Object.entries(item.candidate_hashes).map(([name, value]) => ({
+                name,
+                value,
+              })),
+              evidence: item.evidence,
+            }),
+        );
         return result({
           ok: true,
           ...mutationAck(input.op_id, submitted as unknown as Record<string, unknown>),
@@ -1900,14 +2175,18 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       }
       if (composite[0]?.operation === "verify_and_complete") {
         const item = composite[0];
-        const completed = await service.verifyAndComplete(
-          input.project,
-          input.session,
-          input.op_id,
+        const completed = await withMcpErrorDetails(
+          service,
           {
+            project: input.project,
             taskKey: item.task_key,
             expectedVersion: item.expected_version,
           },
+          () =>
+            service.verifyAndComplete(input.project, input.session, input.op_id, {
+              taskKey: item.task_key,
+              expectedVersion: item.expected_version,
+            }),
         );
         return result({
           ok: true,
@@ -1926,11 +2205,98 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
           ],
         });
       }
-      const patched = await service.patchWorkItems(
-        input.project,
-        input.session,
-        input.op_id,
-        input.items.map((item) => coreWorkItemPatch(item) as any),
+      if (composite[0]?.operation === "checklist_batch") {
+        const item = checklistBatchPatchInput.parse(composite[0]);
+        const updated = await withMcpErrorDetails(
+          service,
+          {
+            project: input.project,
+            taskKey: item.task_key,
+            expectedVersion: item.expected_version,
+          },
+          () =>
+            service.updateChecklistBatch(input.project, input.session, input.op_id, {
+              taskKey: item.task_key,
+              expectedVersion: item.expected_version,
+              items: item.checklist_items.map((checklistItem) => ({
+                checklistId: checklistItem.id,
+                status: checklistItem.status,
+                ...(checklistItem.evidence === undefined
+                  ? {}
+                  : { evidence: checklistItem.evidence }),
+              })),
+            }),
+        );
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
+          project: input.project.toUpperCase(),
+          seq: updated.sequence,
+          task_key: updated.taskKey,
+          task_version: updated.taskVersion,
+          progress: updated.taskProgress,
+          updated_count: updated.updatedCount,
+          items: updated.checklist.map((checklistItem) => ({
+            id: checklistItem.id,
+            status: checklistItem.status,
+            version: checklistItem.version,
+            evidence: checklistItem.evidence.length,
+          })),
+        });
+      }
+      if (composite[0]?.operation === "checklist_single") {
+        const item = checklistSinglePatchInput.parse(composite[0]);
+        const checklistItem = item.checklist_items[0]!;
+        const updated = await withMcpErrorDetails(
+          service,
+          {
+            project: input.project,
+            checklistId: checklistItem.id,
+            expectedVersion: item.expected_version,
+          },
+          () =>
+            service.updateChecklist(input.project, input.session, input.op_id, {
+              checklistId: checklistItem.id,
+              expectedVersion: item.expected_version,
+              status: checklistItem.status,
+              ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
+            }),
+        );
+        return result({
+          ok: true,
+          ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
+          project: input.project.toUpperCase(),
+          seq: updated.sequence,
+          task_key: item.task_key,
+          id: checklistItem.id,
+          status: updated.checklist.status,
+          version: updated.checklist.version,
+          evidence: updated.checklist.evidence.length,
+          task_version: updated.taskVersion,
+        });
+      }
+      const conflictItem = input.items[0];
+      const patched = await withMcpErrorDetails(
+        service,
+        {
+          project: input.project,
+          ...(conflictItem === undefined
+            ? {}
+            : {
+                taskKey: conflictItem.task_key,
+                expectedVersion: conflictItem.expected_version,
+                expectedVersions: Object.fromEntries(
+                  input.items.map((item) => [item.task_key, item.expected_version]),
+                ),
+              }),
+        },
+        () =>
+          service.patchWorkItems(
+            input.project,
+            input.session,
+            input.op_id,
+            input.items.map((item) => coreWorkItemPatch(item) as any),
+          ),
       );
       return result({
         ok: true,
@@ -1947,105 +2313,68 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
   );
 
   server.registerTool(
-    "atm_checklist",
-    {
-      // 完成闸门的第一道就是检查项。没有这个工具，只用 MCP 的会话到不了 DONE，
-      // 而且从工具列表里看不出缺口在哪——只能一路撞到 checklist incomplete。
-      // id 与 expected_version 都取自 atm_task_get 的 context 视图（core 不返回 checklist），
-      // expected_version 是检查项自己的版本、新建为 0，不是任务的版本。
-      description: "改检查项状态并挂证据。",
-      inputSchema: checklistToolInput,
-      outputSchema,
-    },
-    async (input) => {
-      if (input.mode === "batch") {
-        const batch = checklistBatchInput.parse(input);
-        const updated = await service.updateChecklistBatch(
-          batch.project,
-          batch.session,
-          batch.op_id,
-          {
-            taskKey: batch.task_key,
-            expectedVersion: batch.expected_version,
-            items: batch.items.map((item) => ({
-              checklistId: item.id,
-              status: item.status,
-              ...(item.evidence === undefined ? {} : { evidence: item.evidence }),
-            })),
-          },
-        );
-        return result({
-          ok: true,
-          ...mutationAck(batch.op_id, updated as unknown as Record<string, unknown>),
-          project: batch.project.toUpperCase(),
-          seq: updated.sequence,
-          task_key: updated.taskKey,
-          task_version: updated.taskVersion,
-          progress: updated.taskProgress,
-          updated_count: updated.updatedCount,
-          items: updated.checklist.map((item) => ({
-            id: item.id,
-            status: item.status,
-            version: item.version,
-            evidence: item.evidence.length,
-          })),
-        });
-      }
-      const single = checklistSingleInput.parse(input);
-      const updated = await service.updateChecklist(single.project, single.session, single.op_id, {
-        checklistId: single.id,
-        expectedVersion: single.expected_version,
-        status: single.status,
-        ...(single.evidence === undefined ? {} : { evidence: single.evidence }),
-      });
-      return result({
-        ok: true,
-        ...mutationAck(single.op_id, updated as unknown as Record<string, unknown>),
-        project: single.project.toUpperCase(),
-        seq: updated.sequence,
-        id: single.id,
-        status: updated.checklist.status,
-        version: updated.checklist.version,
-        evidence: updated.checklist.evidence.length,
-        task_version: updated.taskVersion,
-      });
-    },
-  );
-
-  server.registerTool(
     "atm_progress_add",
     {
       description: "写任务或项目进度。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        scope: z.enum(["task", "project"]),
-        task_key: taskKey.optional(),
-        percent: z.number().min(0).max(100).optional(),
-        summary: z.string().min(1).max(500),
-        completed: z.array(z.string().max(500)).max(20).default([]),
-        next: z.array(z.string().max(500)).max(20).default([]),
-        blocker: z.string().max(1000).nullable().optional(),
-        health: z.enum(["ON_TRACK", "AT_RISK", "OFF_TRACK", "UNKNOWN"]).nullable().optional(),
-        evidence: z.array(EvidenceInputSchema).max(20).default([]),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          session: sessionId,
+          op_id: opId,
+          scope: z.enum(["task", "project"]),
+          task_key: taskKey.optional(),
+          summary: z.string().min(1).max(500),
+          percent: z.number().min(0).max(100).optional(),
+          completed: z.array(progressCompleted).max(20).default([]),
+          evidence: z.array(EvidenceInputSchema).max(20).default([]),
+          health: z.enum(["ON_TRACK", "AT_RISK", "OFF_TRACK", "UNKNOWN"]).nullable().optional(),
+          blocker: z.string().max(1000).nullable().optional(),
+          next: z.array(z.string().max(500)).max(20).default([]),
+        })
+        .strict()
+        .superRefine((value, context) => {
+          if (value.scope === "task" && value.health !== undefined) {
+            context.addIssue({
+              code: "custom",
+              path: ["health"],
+              message: "health 仅适用于 project scope",
+            });
+          }
+          if (value.scope === "project" && value.percent !== undefined) {
+            context.addIssue({
+              code: "custom",
+              path: ["percent"],
+              message: "percent 仅适用于 task scope",
+            });
+          }
+        }),
       outputSchema,
     },
     async (input) => {
+      const completed = input.completed.map((entry) =>
+        typeof entry === "string"
+          ? entry
+          : {
+              text: entry.text,
+              ...(entry.work_item_key === undefined ? {} : { workItemKey: entry.work_item_key }),
+            },
+      );
       if (input.scope === "project") {
         const update = await service.addProjectProgress(input.project, input.session, input.op_id, {
           summary: input.summary,
-          completed: input.completed,
+          completed,
           next: input.next,
           ...(input.health === undefined ? {} : { health: input.health }),
           ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
+          evidence: input.evidence,
         });
         return result({
           ok: true,
           ...mutationAck(input.op_id, update as unknown as Record<string, unknown>),
           update: update.id,
           health: update.health,
+          unlinked: update.unlinked,
+          open_work_items: update.openWorkItems,
           seq: update.seq,
         });
       }
@@ -2053,7 +2382,7 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
       const updated = await service.addProgress(input.project, input.session, input.op_id, {
         taskKey: input.task_key,
         summary: input.summary,
-        completed: input.completed,
+        completed,
         next: input.next,
         evidence: input.evidence,
         ...(input.percent === undefined ? {} : { percent: input.percent }),
@@ -2074,19 +2403,23 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_record",
     {
       description: "保存关键记录。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        kind: z.enum(["DECISION", "CONSTRAINT", "FACT", "RISK", "REFERENCE", "LESSON"]),
-        title: z.string().min(1).max(400),
-        summary: recordSummary,
-        detail: z.string().max(100_000).default(""),
-        importance: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
-        scope: z.string().max(100).default("PROJECT"),
-        work_item_key: taskKey.nullable().optional(),
-        supersedes: z.string().nullable().optional(),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          session: sessionId,
+          op_id: opId,
+          kind: z.enum(["DECISION", "CONSTRAINT", "FACT", "RISK", "REFERENCE", "LESSON"]),
+          title: z.string().min(1).max(400),
+          summary: recordSummary,
+          detail: z.string().max(100_000).default(""),
+          work_item_key: taskKey.nullable().optional(),
+          supersedes: z.string().nullable().optional(),
+          topic: RecordTopicSchema.nullable().optional(),
+          subject_key: RecordSubjectKeySchema.nullable().optional(),
+          importance: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
+          scope: z.string().max(100).default("PROJECT"),
+        })
+        .strict(),
       outputSchema,
     },
     async (input) => {
@@ -2099,6 +2432,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         scope: input.scope,
         ...(input.work_item_key === undefined ? {} : { workItemKey: input.work_item_key }),
         ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
+        ...(input.topic === undefined ? {} : { topic: input.topic }),
+        ...(input.subject_key === undefined ? {} : { subjectKey: input.subject_key }),
       });
       return result({
         ok: true,
@@ -2106,6 +2441,8 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         record: created.key,
         version: created.v,
         seq: created.seq,
+        topic: input.topic ?? null,
+        subject_key: input.subject_key ?? null,
         related_records: Array.isArray(created.relatedRecords) ? created.relatedRecords : [],
       });
     },
@@ -2115,21 +2452,44 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_search",
     {
       description: "搜索事实。",
-      inputSchema: {
-        project: projectCode.optional(),
-        query: z.string().trim().min(1).max(500).optional(),
-        op_id: opId.optional(),
-        session: sessionId.optional(),
-        limit: z.number().int().min(1).max(30).default(20),
-        cursor: z.string().optional(),
-        field_mask: z.array(z.string()).max(20).default([]),
-        max_chars: z.number().int().min(300).max(50_000).default(6000),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode.optional(),
+          query: z.string().trim().min(1).max(500).optional(),
+          op_id: opId.optional(),
+          session: sessionId.optional(),
+          limit: z.number().int().min(1).max(30).default(20),
+          cursor: z.string().optional(),
+          field_mask: z.array(z.string()).max(20).default([]),
+          max_chars: z.number().int().min(300).max(50_000).default(6000),
+        })
+        .strict()
+        .superRefine((value, context) => {
+          if (value.query === undefined && value.op_id === undefined) {
+            context.addIssue({
+              code: "custom",
+              path: ["query"],
+              message: "query 或 op_id 至少提供一个",
+            });
+            context.addIssue({
+              code: "custom",
+              path: ["op_id"],
+              message: "query 或 op_id 至少提供一个",
+            });
+          }
+          if (value.session !== undefined && value.op_id === undefined) {
+            context.addIssue({
+              code: "custom",
+              path: ["session"],
+              message: "session 仅可与 op_id 精确回查一起使用",
+            });
+          }
+        }),
       outputSchema,
       annotations: { readOnlyHint: true },
     },
     async (input) => {
-      if (input.op_id) {
+      if (input.op_id !== undefined) {
         if (!input.project) throw new Error("PROJECT_REQUIRED: op_id 精确回查要求 project");
         const trace = compactOperationTrace(
           plain(await service.getOperationTrace(input.project, input.op_id, input.session)),
@@ -2144,6 +2504,22 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
         return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
       }
       if (!input.query) throw new Error("VALIDATION_ERROR: query 或 op_id 至少提供一个");
+      if (input.query.startsWith("op:")) {
+        if (!input.project) throw new Error("PROJECT_REQUIRED: op_id 精确回查要求 project");
+        const exactOpId = input.query.slice(3).trim();
+        if (!exactOpId) throw new Error("VALIDATION_ERROR: op: 后必须提供 op_id");
+        const trace = compactOperationTrace(
+          plain(await service.getOperationTrace(input.project, opId.parse(exactOpId))),
+        );
+        const source = selectFields(trace, input.field_mask);
+        const fitted = fitFieldRead(
+          source,
+          Math.max(300, input.max_chars - 80),
+          "atm_search",
+          input.cursor,
+        );
+        return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
+      }
       const kind = publicKeyKind(input.query);
       const exactProject = input.project ?? projectFromPublicKey(input.query) ?? undefined;
       if (kind && exactProject) {
@@ -2188,13 +2564,15 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_delta",
     {
       description: "读增量变化。",
-      inputSchema: {
-        project: projectCode,
-        since_seq: z.number().int().nonnegative(),
-        limit: z.number().int().min(1).max(100).default(50),
-        types: z.array(z.string()).max(50).default([]),
-        max_chars: z.number().int().min(1000).max(50_000).default(12_000),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          since_seq: z.number().int().nonnegative(),
+          limit: z.number().int().min(1).max(100).default(50),
+          types: z.array(z.string()).max(50).default([]),
+          max_chars: z.number().int().min(1000).max(50_000).default(12_000),
+        })
+        .strict(),
       outputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -2213,16 +2591,18 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     "atm_end",
     {
       description: "结束会话并交接。",
-      inputSchema: {
-        project: projectCode,
-        session: sessionId,
-        op_id: opId,
-        outcome: z.enum(["completed", "paused", "blocked", "cancelled", "error", "retired"]),
-        summary: z.string().min(1).max(500),
-        next: z.array(z.string().max(500)).max(20).default([]),
-        release_claims: z.boolean().default(true),
-        retirement_reason: z.string().max(500).nullable().optional(),
-      },
+      inputSchema: z
+        .object({
+          project: projectCode,
+          session: sessionId,
+          op_id: opId,
+          outcome: z.enum(["completed", "paused", "blocked", "cancelled", "error", "retired"]),
+          summary: z.string().min(1).max(500),
+          next: z.array(z.string().max(500)).max(20).default([]),
+          release_claims: z.boolean().default(true),
+          retirement_reason: z.string().max(500).nullable().optional(),
+        })
+        .strict(),
       outputSchema,
     },
     async (input) => {
@@ -2245,6 +2625,14 @@ export function createAyanamiMcpServer(service: AyanamiTaskService): McpServer {
     },
   );
 
+  const activeTools = new Set(mcpProfileTools[profile]);
+  const registered = (
+    server as unknown as { _registeredTools: Record<string, { enabled: boolean }> }
+  )._registeredTools;
+  for (const [name, tool] of Object.entries(registered)) {
+    tool.enabled = activeTools.has(name);
+  }
+  installProjectErrorDetails(server, service);
   installCompactToolList(server);
   return server;
 }
@@ -2256,8 +2644,9 @@ export async function handleAyanamiMcpHttp(
   response: ServerResponse,
   body: unknown,
   service: AyanamiTaskService,
+  options: { profile?: AyanamiMcpProfile } = {},
 ): Promise<void> {
-  const server = createAyanamiMcpServer(service);
+  const server = createAyanamiMcpServer(service, options);
   const transport = new StreamableHTTPServerTransport();
   // SDK 1.30's accessor declaration is not assignable under exactOptionalPropertyTypes,
   // although this concrete class implements the same Transport contract at runtime.

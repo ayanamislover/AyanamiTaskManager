@@ -55,7 +55,7 @@ async function openReviewFixture(code: string, reviewChecklist = false) {
   ]);
   const parent = await service.getWorkItem(project.code, created.items[0]!.key, "full");
   const review = await service.getWorkItem(project.code, created.items[1]!.key, "full");
-  const server = createAyanamiMcpServer(service);
+  const server = createAyanamiMcpServer(service, { profile: "memory" });
   const client = new Client({ name: "mcp-review-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -137,11 +137,51 @@ async function claimAndStartReview(fixture: Awaited<ReturnType<typeof openReview
 }
 
 describe("MCP first-class Review workflow", () => {
+  it("returns rich conflict details when Review request races its parent checklist", async () => {
+    const fixture = await openReviewFixture("MRVX");
+    try {
+      const checklist = fixture.parent.checklist[0]!;
+      await fixture.service.updateChecklist(
+        fixture.project.code,
+        fixture.primary,
+        "review-conflict-checklist-bump",
+        {
+          checklistId: checklist.id,
+          expectedVersion: checklist.version,
+          status: "DOING",
+        },
+      );
+      const response = await requestReview(fixture, "review-request-version-conflict", {
+        git_head: "a".repeat(40),
+      });
+      expect(response.isError).toBe(true);
+      const text = String((response.content[0] as { text?: unknown } | undefined)?.text ?? "");
+      expect(text).toContain("VERSION_CONFLICT");
+      const marker = "MCP_DETAILS=";
+      const details = JSON.parse(text.slice(text.indexOf(marker) + marker.length)) as Record<
+        string,
+        any
+      >;
+      expect(details).toMatchObject({
+        entity: "CHECKLIST",
+        key: checklist.id,
+        expected: checklist.version,
+        actual: checklist.version + 1,
+        changes_complete: false,
+        current: { id: checklist.id, status: "DOING", version: checklist.version + 1 },
+      });
+      expect(details.recent_changes.length).toBeGreaterThan(0);
+      expect(details.recent_changes.length).toBeLessThanOrEqual(6);
+    } finally {
+      await closeReviewFixture(fixture);
+    }
+  });
+
   it("publishes the Review contract and atomically submits APPROVED", async () => {
     const fixture = await openReviewFixture("MRVA");
     try {
       const listed = await fixture.client.listTools();
-      expect(listed.tools).toHaveLength(12);
+      expect(listed.tools).toHaveLength(5);
       const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
         properties?: Record<string, any>;
       };
@@ -155,26 +195,27 @@ describe("MCP first-class Review workflow", () => {
         request_key: { type: "string" },
         candidate_hashes: {
           type: "object",
-          propertyNames: { type: "string" },
           additionalProperties: { type: "string" },
         },
-        verdict: { type: "string", enum: ["APPROVED", "CHANGES_REQUESTED"] },
+        verdict: { enum: ["APPROVED", "CHANGES_REQUESTED"] },
       });
       expect(itemSchema.allOf).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             if: { properties: { operation: { const: "review_request" } } },
-            then: {
+            then: expect.objectContaining({
               required: [
                 "parent_checklist_id",
                 "expected_parent_checklist_version",
                 "candidate_hashes",
               ],
-            },
+            }),
           }),
           expect.objectContaining({
             if: { properties: { operation: { const: "review_submit" } } },
-            then: { required: ["request_key", "verdict", "candidate_hashes", "evidence"] },
+            then: expect.objectContaining({
+              required: ["request_key", "verdict", "candidate_hashes", "evidence"],
+            }),
           }),
         ]),
       );
@@ -391,15 +432,25 @@ describe("MCP first-class Review workflow", () => {
         "full",
       );
       const checked = await fixture.client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: fixture.project.code,
           session: reviewer.session,
           op_id: "gate-checklist-repair",
-          id: review.checklist[0]!.id,
-          expected_version: review.checklist[0]!.version,
-          status: "DONE",
-          evidence: [{ kind: "test_result", value: "review self-check passed" }],
+          items: [
+            {
+              task_key: fixture.review.key,
+              operation: "checklist_single",
+              expected_version: review.checklist[0]!.version,
+              checklist_items: [
+                {
+                  id: review.checklist[0]!.id,
+                  status: "DONE",
+                  evidence: [{ kind: "test_result", value: "review self-check passed" }],
+                },
+              ],
+            },
+          ],
         },
       });
       const repairedVersion = (checked.structuredContent as { task_version: number }).task_version;

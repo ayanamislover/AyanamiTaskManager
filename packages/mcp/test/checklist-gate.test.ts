@@ -2,15 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { createAyanamiMcpServer } from "../src/index.js";
+import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
 const services: AyanamiTaskService[] = [];
+const connections: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  for (const close of connections.splice(0)) await close();
   for (const service of services.splice(0)) service.close();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -27,13 +27,11 @@ async function connect() {
   // 目标时 atm_task_create 会自己补规划根（见 planning-root.test.ts）。本用例要
   // 守的是「有了台子之后，检查项闸门能不能靠工具穿过去」。
   const project = await service.createProject({ name: "闸门", sourcePath: null, code: "GATE" });
-  const server = createAyanamiMcpServer(service);
-  const client = new Client({ name: "gate-test", version: "1.0.0" });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const profiles = await connectProfiledClients(service, "gate-test");
+  connections.push(profiles.close);
 
   const call = async (name: string, args: Record<string, unknown>) => {
-    const response = await client.callTool({ name, arguments: args });
+    const response = await profiles.client.callTool({ name, arguments: args });
     if (response.isError) {
       const text = (response.content as Array<{ text?: string }>)[0]?.text ?? "";
       throw new Error(text);
@@ -71,8 +69,7 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
           priority: "NORMAL",
           status: "READY",
           acceptance: ["做完"],
-          checklist: [{ title: "必须留证", evidence_required: true, weight: 1 }],
-          weight: 1,
+          checklist: [{ title: "必须留证", evidence_required: true }],
           verification_required: true,
           depends_on: [],
           depends_on_refs: [],
@@ -106,25 +103,33 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
 
     // 必证项没有证据时，闸门必须拦下——工具存在不等于闸门失效。
     await expect(
-      call("atm_checklist", {
+      call("atm_task_patch", {
         project: project.code,
         session,
         op_id: "tick-empty",
-        id: item.id,
-        expected_version: item.version,
-        status: "DONE",
-        evidence: [],
+        items: [
+          {
+            task_key: taskKey,
+            operation: "checklist_single",
+            expected_version: item.version,
+            checklist_items: [{ id: item.id, status: "DONE", evidence: [] }],
+          },
+        ],
       }),
     ).rejects.toThrow(/evidence required/u);
 
-    const ticked = await call("atm_checklist", {
+    const ticked = await call("atm_task_patch", {
       project: project.code,
       session,
       op_id: "tick-1",
-      id: item.id,
-      expected_version: item.version,
-      status: "DONE",
-      evidence: ["pnpm test 53 文件全绿"],
+      items: [
+        {
+          task_key: taskKey,
+          operation: "checklist_single",
+          expected_version: item.version,
+          checklist_items: [{ id: item.id, status: "DONE", evidence: ["pnpm test 53 文件全绿"] }],
+        },
+      ],
     });
     expect(ticked.status).toBe("DONE");
     expect(ticked.evidence).toBe(1);
@@ -190,8 +195,7 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
           priority: "NORMAL",
           status: "READY",
           acceptance: ["做完"],
-          checklist: [{ title: "不适用的必证项", evidence_required: true, weight: 1 }],
-          weight: 1,
+          checklist: [{ title: "不适用的必证项", evidence_required: true }],
           verification_required: false,
           depends_on: [],
           depends_on_refs: [],
@@ -218,13 +222,18 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    const skipped = await call("atm_checklist", {
+    const skipped = await call("atm_task_patch", {
       project: project.code,
       session,
       op_id: "skip-1",
-      id: detail.checklist[0].id,
-      expected_version: detail.checklist[0].version,
-      status: "SKIPPED",
+      items: [
+        {
+          task_key: taskKey,
+          operation: "checklist_single",
+          expected_version: detail.checklist[0].version,
+          checklist_items: [{ id: detail.checklist[0].id, status: "SKIPPED" }],
+        },
+      ],
     });
     expect(skipped.status).toBe("SKIPPED");
     const done = await call("atm_task_patch", {

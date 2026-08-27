@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
+import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
 
@@ -26,10 +27,8 @@ describe("MCP mutation contracts", () => {
       sourcePath: null,
       code: "MACK",
     });
-    const server = createAyanamiMcpServer(service);
-    const client = new Client({ name: "mutation-contract-test", version: "1" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const profiles = await connectProfiledClients(service, "mutation-contract-test");
+    const { client } = profiles;
     try {
       const response = await client.callTool({
         name: "atm_begin",
@@ -82,19 +81,23 @@ describe("MCP mutation contracts", () => {
 
       const detail = await service.getWorkItem(project.code, taskKey, "context");
       const checklist = await client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: project.code,
           session,
           op_id: "checklist-ack-exact",
-          mode: "batch",
-          task_key: taskKey,
-          expected_version: detail.version,
           items: [
             {
-              id: detail.checklist[0]!.id,
-              status: "DONE",
-              evidence: ["focused-test"],
+              task_key: taskKey,
+              expected_version: detail.version,
+              operation: "checklist_batch",
+              checklist_items: [
+                {
+                  id: detail.checklist[0]!.id,
+                  status: "DONE",
+                  evidence: ["focused-test"],
+                },
+              ],
             },
           ],
         },
@@ -113,7 +116,6 @@ describe("MCP mutation contracts", () => {
           op_id: "progress-ack-exact",
           scope: "task",
           task_key: taskKey,
-          percent: 50,
           summary: "Mutation ACK progress",
         },
       });
@@ -188,8 +190,7 @@ describe("MCP mutation contracts", () => {
         name: "atm_search",
         arguments: {
           project: project.code,
-          op_id: "record-ack-exact",
-          session,
+          query: "op:record-ack-exact",
         },
       });
       expect(trace.structuredContent).toMatchObject({
@@ -216,7 +217,7 @@ describe("MCP mutation contracts", () => {
 
       const delta = await client.callTool({
         name: "atm_delta",
-        arguments: { project: project.code, since_seq: 0, limit: 100 },
+        arguments: { project: project.code, since_seq: 0 },
       });
       expect(
         (delta.structuredContent as { events: Array<{ op_id: string | null }> }).events,
@@ -234,7 +235,7 @@ describe("MCP mutation contracts", () => {
       });
       expect(ended.structuredContent).toMatchObject({ op_id: "end-ack-exact" });
     } finally {
-      await Promise.all([client.close(), server.close()]);
+      await profiles.close();
       service.close();
     }
   });
@@ -250,7 +251,7 @@ describe("MCP mutation contracts", () => {
         session: "successor-session",
       }),
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "rebind-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -305,18 +306,36 @@ describe("MCP mutation contracts", () => {
         return { key: "EV-T-0001", v: 2, seq: 2, opId: "evidence-progress" };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
-    const client = new Client({ name: "evidence-test", version: "1" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const profiles = await connectProfiledClients(service, "evidence-test");
+    const { client } = profiles;
     try {
-      const listed = await client.listTools();
-      for (const toolName of ["atm_checklist", "atm_progress_add"]) {
-        const schema = listed.tools.find((tool) => tool.name === toolName)?.inputSchema as {
-          properties?: Record<string, { items?: { anyOf?: Array<Record<string, any>> } }>;
-        };
-        const evidenceSchema = schema.properties?.evidence;
-        const branches = evidenceSchema?.items?.anyOf ?? [];
+      const memoryListed = await profiles.memoryClient.listTools();
+      const evidenceSchemas = [
+        (() => {
+          const schema = memoryListed.tools.find((tool) => tool.name === "atm_task_patch")!
+            .inputSchema as any;
+          return {
+            root: schema,
+            branches:
+              schema.properties.items.items.properties.checklist_items.items.properties.evidence
+                .items.anyOf,
+          };
+        })(),
+        (() => {
+          const schema = memoryListed.tools.find((tool) => tool.name === "atm_progress_add")!
+            .inputSchema as any;
+          return { root: schema, branches: schema.properties.evidence.items.anyOf };
+        })(),
+      ];
+      for (const { root, branches: rawBranches } of evidenceSchemas) {
+        const branches = rawBranches.map((branch: Record<string, any>) =>
+          typeof branch.$ref === "string" && branch.$ref.startsWith("#/")
+            ? branch.$ref
+                .slice(2)
+                .split("/")
+                .reduce((value: any, segment: string) => value?.[segment], root)
+            : branch,
+        );
         expect(branches).toEqual(
           expect.arrayContaining([
             expect.objectContaining({ type: "string" }),
@@ -325,7 +344,6 @@ describe("MCP mutation contracts", () => {
               required: ["kind", "value"],
               properties: expect.objectContaining({
                 kind: {
-                  type: "string",
                   enum: ["git_sha", "atm_record", "atm_task", "test_result", "url", "file"],
                 },
                 value: expect.objectContaining({ type: "string" }),
@@ -341,15 +359,19 @@ describe("MCP mutation contracts", () => {
         { kind: "test_result", value: "14/14 passed", note: "focused MCP gate" },
       ];
       const checklist = await client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: "EV",
           session: "session",
           op_id: "evidence-check",
-          id: "check",
-          expected_version: 0,
-          status: "DONE",
-          evidence,
+          items: [
+            {
+              task_key: "EV-T-0001",
+              operation: "checklist_single",
+              expected_version: 0,
+              checklist_items: [{ id: "check", status: "DONE", evidence }],
+            },
+          ],
         },
       });
       const progress = await client.callTool({
@@ -382,11 +404,11 @@ describe("MCP mutation contracts", () => {
       });
       expect(invalid.isError).toBe(true);
     } finally {
-      await Promise.all([client.close(), server.close()]);
+      await profiles.close();
     }
   });
 
-  it("updates one task checklist atomically through the existing checklist tool", async () => {
+  it("updates one task checklist atomically through atm_task_patch", async () => {
     const captured: Array<Record<string, unknown>> = [];
     const service = {
       updateChecklistBatch: async (
@@ -412,50 +434,48 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "checklist-batch-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const listed = await client.listTools();
-      const schema = listed.tools.find((tool) => tool.name === "atm_checklist")?.inputSchema as {
-        anyOf?: Array<{ required?: string[]; properties?: Record<string, any> }>;
+      const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
+        allOf?: Array<{
+          if?: { required?: string[]; properties?: Record<string, any> };
+          then?: { required?: string[] };
+          else?: { required?: string[] };
+        }>;
         required?: string[];
         properties?: Record<string, any>;
       };
-      const single = schema.anyOf?.find((branch) => branch.required?.includes("id"));
-      const batch = schema.anyOf?.find((branch) => branch.required?.includes("task_key"));
-      expect(schema.required).toEqual(["project", "session", "op_id", "expected_version"]);
-      expect(single?.required).toEqual(["id", "status"]);
-      expect(single?.properties?.mode).toEqual({ const: "single" });
-      expect(batch?.required).toEqual(["mode", "task_key", "items"]);
-      expect(batch?.properties?.mode).toEqual({ const: "batch" });
-      expect(schema.properties?.status).toEqual({
-        type: "string",
-        enum: ["TODO", "DOING", "DONE", "SKIPPED"],
-      });
-      expect(schema.properties?.items?.items).toMatchObject({
+      const itemSchema = schema.properties?.items?.items;
+      expect(schema.required).toEqual(["project", "session", "op_id", "items"]);
+      expect(itemSchema.properties?.checklist_items?.items).toMatchObject({
         type: "object",
         required: ["id", "status"],
         properties: {
           id: { type: "string" },
-          status: { $ref: "#/properties/status" },
-          evidence: { $ref: "#/properties/evidence" },
+          status: { enum: ["TODO", "DOING", "DONE", "SKIPPED"] },
         },
       });
 
       const response = await client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: "BAT",
           session: "old-session",
           op_id: "batch-checklist-op",
-          mode: "batch",
-          task_key: "BAT-T-0001",
-          expected_version: 3,
           items: [
-            { id: "check-1", status: "DONE", evidence: ["proof"] },
-            { id: "check-2", status: "SKIPPED" },
+            {
+              task_key: "BAT-T-0001",
+              expected_version: 3,
+              operation: "checklist_batch",
+              checklist_items: [
+                { id: "check-1", status: "DONE", evidence: ["proof"] },
+                { id: "check-2", status: "SKIPPED" },
+              ],
+            },
           ],
         },
       });
@@ -492,47 +512,89 @@ describe("MCP mutation contracts", () => {
     }
   });
 
+  it("rejects project-only health on task progress before calling the service", async () => {
+    let calls = 0;
+    const service = {
+      addProgress: async () => {
+        calls += 1;
+        return { key: "PRG-T-0001", v: 1, seq: 1, opId: "task-health" };
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const client = new Client({ name: "task-health-contract", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({
+        name: "atm_progress_add",
+        arguments: {
+          project: "PRG",
+          session: "session",
+          op_id: "task-health",
+          scope: "task",
+          task_key: "PRG-T-0001",
+          summary: "Task progress",
+          health: "ON_TRACK",
+        },
+      });
+      expect(response.isError).toBe(true);
+      expect(JSON.stringify(response.content)).toContain("health");
+      expect(calls).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   it("aggregates invalid checklist fields for both single and batch modes", async () => {
     const service = {} as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "checklist-invalid-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const invalidBatch = await client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: "BAT",
           session: "session",
           op_id: "invalid-batch",
-          mode: "batch",
-          expected_version: 3,
-          id: "legacy-id",
-          status: "DONE",
-          items: [],
+          items: [
+            {
+              task_key: "BAT-T-0001",
+              operation: "checklist_batch",
+              expected_version: 3,
+              id: "legacy-id",
+              status: "DONE",
+              checklist_items: [],
+            },
+          ],
         },
       });
       expect(invalidBatch.isError).toBe(true);
       const batchError = JSON.stringify(invalidBatch.content);
-      for (const field of ["task_key", "items", "id", "status"]) {
+      for (const field of ["checklist_items", "id", "status"]) {
         expect(batchError).toContain(field);
       }
 
       const invalidSingle = await client.callTool({
-        name: "atm_checklist",
+        name: "atm_task_patch",
         arguments: {
           project: "BAT",
           session: "session",
           op_id: "invalid-single",
-          mode: "single",
-          expected_version: 0,
-          task_key: "BAT-T-0001",
-          items: [{ id: "check-1", status: "DONE" }],
+          items: [
+            {
+              operation: "checklist_single",
+              expected_version: 0,
+              task_key: "BAT-T-0001",
+              checklist_items: [{}, {}],
+            },
+          ],
         },
       });
       expect(invalidSingle.isError).toBe(true);
       const singleError = JSON.stringify(invalidSingle.content);
-      for (const field of ["id", "status", "task_key", "items"]) {
+      for (const field of ["id", "status", "checklist_items"]) {
         expect(singleError).toContain(field);
       }
     } finally {
@@ -565,7 +627,7 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "verify-complete-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -575,7 +637,6 @@ describe("MCP mutation contracts", () => {
         properties?: Record<string, any>;
       };
       expect(schema.properties?.items?.items?.properties?.operation).toMatchObject({
-        type: "string",
         enum: expect.arrayContaining(["verify_and_complete"]),
       });
 
@@ -647,7 +708,7 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "safe-edit-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -662,8 +723,6 @@ describe("MCP mutation contracts", () => {
         properties: {
           title: { type: "string" },
           description: { type: "string" },
-          target_date: { type: ["string", "null"] },
-          parent_key: { type: ["string", "null"] },
         },
       });
       expect(itemSchema.properties).toMatchObject({
@@ -685,10 +744,8 @@ describe("MCP mutation contracts", () => {
               operation: "edit",
               expected_fields: {
                 title: "Old title",
-                target_date: null,
               },
               title: "New title",
-              target_date: "2026-09-01",
             },
             {
               task_key: "SAFE-T-0002",
@@ -711,11 +768,10 @@ describe("MCP mutation contracts", () => {
             {
               taskKey: "SAFE-T-0001",
               expectedVersion: 3,
-              expectedFields: { title: "Old title", targetDate: null },
+              expectedFields: { title: "Old title" },
               operation: "edit",
               takeoverStale: false,
               title: "New title",
-              targetDate: "2026-09-01",
             },
             {
               taskKey: "SAFE-T-0002",
@@ -745,7 +801,7 @@ describe("MCP mutation contracts", () => {
 
   it("aggregates unsafe edit and composite workflow validation issues", async () => {
     const service = {} as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "task-patch-invalid-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -763,14 +819,13 @@ describe("MCP mutation contracts", () => {
               operation: "edit",
               expected_fields: { title: "Old title" },
               description: "New description",
-              assignee_agent_id: "other-agent",
             },
           ],
         },
       });
       expect(unsafeEdit.isError).toBe(true);
       const editError = JSON.stringify(unsafeEdit.content);
-      for (const field of ["expected_fields", "description", "assignee_agent_id"]) {
+      for (const field of ["expected_fields", "description"]) {
         expect(editError).toContain(field);
       }
 
