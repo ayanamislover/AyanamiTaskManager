@@ -144,9 +144,13 @@ describe("REST camelCase / MCP snake_case canonical input parity", () => {
         "canonical-success-op",
       );
       expect(accepted.isError).not.toBe(true);
-      const created = (accepted.structuredContent as { created: Array<{ task_key: string }> })
-        .created[0]!;
-      const stored = await service.getWorkItem("CPAR", created.task_key, "full");
+      const created = (
+        accepted.structuredContent as {
+          entities: Array<{ entity_type: string; key: string }>;
+        }
+      ).entities.find((entity) => entity.entity_type === "WORK_ITEM");
+      if (!created) throw new Error("WORK_ITEM_MUTATION_ENTITY_MISSING");
+      const stored = await service.getWorkItem("CPAR", created.key, "full");
       expect(stored).toMatchObject({
         acceptance: ["可验收"],
         checklist: [{ title: "留证", evidenceRequired: true }],

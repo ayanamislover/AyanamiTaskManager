@@ -190,20 +190,23 @@ describe("Streamable HTTP MCP", () => {
       op_id: "dual-profile-shared-create",
       items: [{ client_ref: "shared", title: "共享任务", status: "READY" }],
     });
-    const task = (created.created as Array<{ task_key: string; version: number }>)[0]!;
+    const task = (
+      created.entities as Array<{ entity_type: string; key: string; version: number | null }>
+    ).find((entity) => entity.entity_type === "WORK_ITEM");
+    if (!task || task.version === null) throw new Error("WORK_ITEM_MUTATION_ENTITY_MISSING");
 
     await call("/mcp/actions", "atm_task_patch", {
       project: project.code,
       session,
       op_id: "dual-profile-shared-claim",
-      items: [{ task_key: task.task_key, expected_version: task.version, operation: "claim" }],
+      items: [{ task_key: task.key, expected_version: task.version, operation: "claim" }],
     });
 
     const readBack = await call("/mcp/core", "atm_task_get", {
       project: project.code,
-      task_key: task.task_key,
+      task_key: task.key,
       view: "core",
     });
-    expect(readBack).toMatchObject({ key: task.task_key, status: "CLAIMED" });
+    expect(readBack).toMatchObject({ key: task.key, status: "CLAIMED" });
   });
 });
