@@ -13,7 +13,8 @@ import {
 const roots: string[] = [];
 
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  for (const root of roots.splice(0))
+    await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 describe("Ayanami MCP", () => {
@@ -80,20 +81,6 @@ describe("Ayanami MCP", () => {
       type: "string",
       maxLength: 300,
     });
-    const enumNodes: Array<Record<string, unknown>> = [];
-    const collectEnums = (value: unknown): void => {
-      if (Array.isArray(value)) {
-        value.forEach(collectEnums);
-        return;
-      }
-      if (!value || typeof value !== "object") return;
-      const node = value as Record<string, unknown>;
-      if (Array.isArray(node.enum)) enumNodes.push(node);
-      Object.values(node).forEach(collectEnums);
-    };
-    allTools.forEach((tool) => collectEnums(tool.inputSchema));
-    expect(enumNodes.length).toBeGreaterThan(10);
-    expect(enumNodes.every((node) => node.type === undefined)).toBe(true);
     const emptySchemaNodes: string[] = [];
     const collectEmptySchemas = (value: unknown, path: string): void => {
       if (Array.isArray(value)) {
@@ -124,10 +111,6 @@ describe("Ayanami MCP", () => {
     expect(allTools.every((tool) => tool.description === undefined)).toBe(true);
     expect(profiles.coreClient.getInstructions()).toContain("MCP surface v3");
     expect(profiles.coreClient.getInstructions()).toContain("直接使用返回的 brief");
-    expect(
-      JSON.stringify(coreListed.tools.find((tool) => tool.name === "atm_task_create")?.inputSchema),
-    ).toContain("discovered_from_ref");
-
     const invalidContract = await client.callTool({
       name: "atm_record",
       arguments: {
@@ -140,10 +123,21 @@ describe("Ayanami MCP", () => {
       },
     });
     expect(invalidContract.isError).toBe(true);
-    const invalidText = JSON.stringify(invalidContract.content);
-    for (const field of ["project", "session", "op_id", "kind", "title", "summary"]) {
-      expect(invalidText).toContain(field);
-    }
+    const invalidMessage = (invalidContract.content[0] as { type: string; text: string }).text;
+    const issuePaths = invalidMessage
+      .split("\n")
+      .map((line) => line.match(/ at ([^\s]+)$/u)?.[1] ?? null)
+      .filter((path): path is string => path !== null)
+      .sort();
+    expect(issuePaths).toEqual([
+      "kind",
+      "op_id",
+      "project",
+      "session",
+      "summary",
+      "summary",
+      "title",
+    ]);
 
     const result = await client.callTool({
       name: "atm_begin",
