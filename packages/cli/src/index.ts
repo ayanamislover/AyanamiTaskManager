@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Command } from "commander";
 import { AyanamiClient } from "@ayanami-task/client";
-import { createUlid } from "@ayanami-task/protocol";
+import { createUlid, RecordKindSchema } from "@ayanami-task/protocol";
 import { discoverDaemon } from "./runtime.js";
 
 type GlobalOptions = { json?: boolean; compact?: boolean; endpoint?: string; token?: string };
@@ -293,14 +293,15 @@ export function createCliProgram(
     .requiredOption("--summary <summary>")
     .option("--title <title>")
     .option("--detail <detail>", "", "")
-    .action(async (projectCode, options) =>
+    .action(async (projectCode, options) => {
+      const kind = RecordKindSchema.parse(String(options.kind).toUpperCase());
       show(
         await inSession(projectCode, options.summary, (session) =>
           client().then((api) =>
             api.record(projectCode, {
               session,
               opId: `cli-record-${createUlid()}`,
-              kind: String(options.kind).toUpperCase(),
+              kind,
               title: options.title ?? options.summary,
               summary: options.summary,
               detail: options.detail,
@@ -309,8 +310,8 @@ export function createCliProgram(
             }),
           ),
         ),
-      ),
-    );
+      );
+    });
 
   program
     .command("events <project>")
