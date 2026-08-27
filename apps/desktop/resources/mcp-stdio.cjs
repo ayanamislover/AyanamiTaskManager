@@ -20,7 +20,8 @@ function runtime() {
 
 function profile(args = process.argv.slice(2)) {
   const index = args.indexOf("--profile");
-  const selected = index < 0 ? "core" : args[index + 1];
+  if (index < 0) return null;
+  const selected = args[index + 1];
   if (selected !== "core" && selected !== "memory")
     throw new Error("MCP_PROFILE_INVALID: expected core or memory");
   return selected;
@@ -29,6 +30,7 @@ function profile(args = process.argv.slice(2)) {
 async function main() {
   const current = runtime();
   const selectedProfile = profile();
+  const mcpPath = selectedProfile === null ? "/mcp" : `/mcp/${selectedProfile}`;
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of lines) {
     if (!line.trim()) continue;
@@ -42,18 +44,15 @@ async function main() {
       continue;
     }
     try {
-      const response = await fetch(
-        `${current.endpoint.replace(/\/$/, "")}/mcp/${selectedProfile}`,
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${current.token}`,
-            accept: "application/json, text/event-stream",
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(message),
+      const response = await fetch(`${current.endpoint.replace(/\/$/, "")}${mcpPath}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${current.token}`,
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
         },
-      );
+        body: JSON.stringify(message),
+      });
       if (response.status === 202 || response.status === 204) continue;
       const text = await response.text();
       if (response.headers.get("content-type")?.includes("text/event-stream")) {

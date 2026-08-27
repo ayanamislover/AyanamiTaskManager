@@ -69,7 +69,7 @@ describe("打包 stdio bridge", () => {
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
   });
 
-  it("未提供 --profile 时固定转发到 core", async () => {
+  it("未提供 --profile 时转发到带迁移提示的 legacy 兼容入口", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-stdio-default-profile-"));
     temporary.push(dataDir);
     const runtimeDir = join(dataDir, "runtime");
@@ -115,7 +115,7 @@ describe("打包 stdio bridge", () => {
     );
 
     expect(JSON.parse((await output).trim())).toMatchObject({ id: 8, result: { ok: true } });
-    expect(requestedUrl).toBe("/mcp/core");
+    expect(requestedUrl).toBe("/mcp");
 
     child.kill();
     await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));

@@ -24,6 +24,7 @@ import {
   mcpProfileLaunchesStale,
   mcpProfileLaunches,
   mcpLaunchStale,
+  mcpStdioHttpPath,
   MCP_RUNTIME_LINK,
   MCP_STDIO_FILENAME,
   shouldRepairMcpConfigs,
@@ -56,6 +57,15 @@ function squirrelInstall(version: string): { installRoot: string; execPath: stri
 }
 
 describe("MCP 启动方式", () => {
+  it("无 Profile 的旧 Electron 入口走完整 legacy 路由，显式 Profile 保持拆分", () => {
+    expect(mcpStdioHttpPath(["--mcp-stdio"])).toBe("/mcp");
+    expect(mcpStdioHttpPath(["--mcp-stdio", "--profile", "core"])).toBe("/mcp/core");
+    expect(mcpStdioHttpPath(["--mcp-stdio", "--profile", "memory"])).toBe("/mcp/memory");
+    expect(() => mcpStdioHttpPath(["--mcp-stdio", "--profile", "merged"])).toThrow(
+      /MCP_PROFILE_INVALID/u,
+    );
+  });
+
   // 装了链接之后，command 与 args 都不认版本。这是这套东西唯一的目的：
   // 客户端在会话开始时把配置读进内存，之后 ATM 再怎么改盘上那份都影响不到它，
   // 所以路径本身必须永远有效，而不是靠别人重新读一遍配置。

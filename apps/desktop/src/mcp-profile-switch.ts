@@ -65,7 +65,7 @@ export function hasManagedMcpProfile(launches: InstalledMcpProfileLaunches): boo
   return launches.legacy !== null || launches.core !== null || launches.memory !== null;
 }
 
-/** legacy 原本包含完整工具面，所以失败回滚时按双 Profile 恢复它的能力。 */
+/** legacy 兼容入口包含完整工具面，所以失败回滚时按双 Profile 恢复它的能力。 */
 export function profilesRepresentedBy(
   launches: InstalledMcpProfileLaunches,
 ): readonly McpProfile[] {

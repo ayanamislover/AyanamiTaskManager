@@ -63,9 +63,11 @@ describe("Streamable HTTP MCP", () => {
       id: 1,
       result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.17" } },
     });
+    expect(body.result.instructions).toContain("legacy 兼容入口");
+    expect(body.result.instructions).toContain("重启 Agent 客户端");
   });
 
-  it("暴露固定 core / memory Profile，旧入口仅兼容 core", async () => {
+  it("暴露固定 core / memory Profile，旧入口保留完整兼容能力", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-profiles-"));
     const service = await AyanamiTaskService.open({
       dataDir,
@@ -121,7 +123,8 @@ describe("Streamable HTTP MCP", () => {
       "atm_search",
       "atm_delta",
     ]);
-    expect(compatibility).toEqual(core);
+    expect(new Set(compatibility)).toEqual(new Set([...core, ...memory]));
+    expect(compatibility).toHaveLength(11);
     expect(core.filter((name) => memory.includes(name))).toEqual([]);
   });
 

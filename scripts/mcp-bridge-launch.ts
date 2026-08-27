@@ -51,10 +51,10 @@ export function configuredBridgeLaunch(input: {
       "configured",
     );
     if (configured) return configured;
-    if (input.profile === "core") {
-      const legacy = normalizedEntry(servers?.["ayanami-task-manager"], "legacy");
-      if (legacy) return legacy;
-    }
+    // 旧单入口在当前版本保留完整 11 工具，因此 core / memory 两侧诊断都应测真实旧配置，
+    // 而不是 memory 悄悄换成另一个 fallback 进程后给出失真的资源结论。
+    const legacy = normalizedEntry(servers?.["ayanami-task-manager"], "legacy");
+    if (legacy) return legacy;
   }
   const launch = mcpLaunch({
     execPath: join(input.dataDir, MCP_RUNTIME_LINK, "AyanamiTaskManager.exe"),
