@@ -3,6 +3,7 @@ import { AtmError } from "@ayanami-task/errors";
 import { WORK_ITEM_OPERATION_NAMES } from "./work-item-operations.js";
 
 export * from "./views/task.js";
+export * from "./views/record.js";
 export * from "./work-item-operations.js";
 
 export const SESSION_CLOSE_REASONS = [

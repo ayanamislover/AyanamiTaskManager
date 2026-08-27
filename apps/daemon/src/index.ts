@@ -472,8 +472,12 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
   app.get("/api/v1/projects/:code/records", async (request) => {
     const { code } = request.params as { code: string };
-    const { limit } = request.query as { limit?: string };
-    return options.service.listRecords(code, Number(limit ?? 100));
+    const { limit, cursor } = request.query as { limit?: string; cursor?: string };
+    const page = await options.service.recordPage(code, {
+      limit: Number(limit ?? 100),
+      ...(cursor ? { cursor } : {}),
+    });
+    return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });
   app.get("/api/v1/projects/:code/records/:recordKey", async (request) => {
     const { code, recordKey } = request.params as { code: string; recordKey: string };

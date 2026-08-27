@@ -1829,8 +1829,57 @@ function compactRecord(record: Record<string, unknown>): Record<string, unknown>
     subject_key: record.subjectKey ?? null,
     related_records: Array.isArray(record.relatedRecords) ? record.relatedRecords : [],
     op_id: record.opId ?? null,
+    source_type: record.sourceType,
+    source_actor_id: record.sourceActorId ?? null,
+    source_session_id: record.sourceSessionId ?? null,
+    source_ref: record.sourceRef ?? null,
     created_at: record.createdAt,
     updated_at: record.updatedAt,
+  };
+}
+
+function fitRecordPage(
+  project: string,
+  requestedLimit: number,
+  maxChars: number,
+  items: Array<Record<string, unknown>>,
+  itemCursors: string[],
+  sourceHasMore: boolean,
+  sourceNextCursor: string | null,
+  retryCursor: string,
+): Record<string, unknown> {
+  for (let count = items.length; count >= 0; count -= 1) {
+    const returned = items.slice(0, count);
+    const budgetTruncated = count < items.length;
+    const hasMore = budgetTruncated || sourceHasMore;
+    const nextCursor = hasMore
+      ? count > 0
+        ? (itemCursors[count - 1] ?? sourceNextCursor ?? retryCursor)
+        : retryCursor
+      : null;
+    const candidate: Record<string, unknown> = {
+      exact: false,
+      project: project.toUpperCase(),
+      list: "records",
+      requested_limit: requestedLimit,
+      returned_count: returned.length,
+      items: returned,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+      truncated: budgetTruncated,
+    };
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+  return {
+    exact: false,
+    project: project.toUpperCase(),
+    list: "records",
+    requested_limit: requestedLimit,
+    returned_count: 0,
+    items: [],
+    next_cursor: retryCursor,
+    has_more: items.length > 0 || sourceHasMore,
+    truncated: items.length > 0,
   };
 }
 
@@ -2766,6 +2815,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       description: "搜索事实。",
       inputSchema: z
         .object({
+          list: z.literal("records").optional(),
           project: projectCode.optional(),
           query: z.string().trim().min(1).max(500).optional(),
           op_id: opId.optional(),
@@ -2777,6 +2827,25 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         })
         .strict()
         .superRefine((value, context) => {
+          if (value.list !== undefined) {
+            if (value.project === undefined) {
+              context.addIssue({
+                code: "custom",
+                path: ["project"],
+                message: "list=records 要求 project",
+              });
+            }
+            for (const field of ["query", "op_id", "session"] as const) {
+              if (value[field] !== undefined) {
+                context.addIssue({
+                  code: "custom",
+                  path: [field],
+                  message: `list=records 时 ${field} 必须省略`,
+                });
+              }
+            }
+            return;
+          }
           if (value.query === undefined && value.op_id === undefined) {
             context.addIssue({
               code: "custom",
@@ -2801,6 +2870,42 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       annotations: { readOnlyHint: true, destructiveHint: false },
     },
     async (input) => {
+      if (input.list === "records") {
+        const page = await service.recordPage(input.project!, {
+          limit: input.limit,
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        });
+        const listFieldMask =
+          input.field_mask.length > 0
+            ? input.field_mask
+            : [
+                "key",
+                "kind",
+                "title",
+                "summary",
+                "importance",
+                "status",
+                "topic",
+                "subject_key",
+                "source_type",
+                "updated_at",
+              ];
+        const projectedItems = page.items.map((record) =>
+          selectFields(compactRecord(plain(record)), listFieldMask),
+        );
+        return wrap(
+          fitRecordPage(
+            input.project!,
+            input.limit,
+            input.max_chars,
+            projectedItems,
+            page.itemCursors,
+            page.hasMore,
+            page.nextCursor,
+            page.retryCursor,
+          ),
+        );
+      }
       if (input.op_id !== undefined) {
         if (!input.project)
           throw new AtmError("PROJECT_REQUIRED", { message: "op_id 精确回查要求 project" });

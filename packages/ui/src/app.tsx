@@ -3873,14 +3873,14 @@ function ProjectPage({
                   )[record.kind] ?? record.kind}
                 </span>
                 <span className="atm-row-sub">
-                  {record.source_type === "USER"
+                  {record.sourceType === "USER"
                     ? "用户"
-                    : record.source_type === "AGENT"
+                    : record.sourceType === "AGENT"
                       ? "Agent"
-                      : record.source_type === "IMPORT"
+                      : record.sourceType === "IMPORT"
                         ? "导入"
                         : "系统"}{" "}
-                  · {formatTime(record.updated_at)}
+                  · {formatTime(record.updatedAt)}
                 </span>
               </div>
               <h3>{record.title}</h3>
@@ -3889,10 +3889,8 @@ function ProjectPage({
                 <div className="atm-key">主题标识：{record.subjectKey}</div>
               ) : null}
               <p>{record.summary}</p>
-              {(record.relatedRecords ?? record.related_records)?.length ? (
-                <div className="atm-row-sub">
-                  相关记录：{(record.relatedRecords ?? record.related_records).join("、")}
-                </div>
+              {record.relatedRecords.length ? (
+                <div className="atm-row-sub">相关记录：{record.relatedRecords.join("、")}</div>
               ) : null}
               {record.detail ? (
                 <details>

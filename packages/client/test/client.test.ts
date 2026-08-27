@@ -77,6 +77,11 @@ describe("typed client", () => {
         }),
       ]),
     );
+    await expect(client.projects.recordPage("CLI", 1)).resolves.toMatchObject({
+      items: [expect.objectContaining({ key: record.key, sourceType: "USER" })],
+      nextCursor: null,
+      hasMore: false,
+    });
 
     for (let index = 0; index < 3; index += 1) {
       await client.recordAsUser("CLI", {
