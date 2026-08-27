@@ -179,6 +179,63 @@ describe("MCP read plane", () => {
     }
   });
 
+  it("routes an oversized audit event to a reachable REST continuation without looping", async () => {
+    const huge = Array.from(
+      { length: 100 },
+      (_, index) => `${String(index).padStart(3, "0")}:${"审".repeat(996)}`,
+    );
+    const service = {
+      delta: async () => ({
+        events: [
+          {
+            seq: 9,
+            type: "work.updated",
+            key: "BIG-T-0001",
+            summary: "更新任务",
+            actor: "audit-agent",
+            title: "更新任务",
+            detail: "BIG-T-0001（edit）",
+            changes: { acceptance: { before: huge, after: huge } },
+            project: { code: "BIG", name: "Big audit" },
+            opId: "oversized-audit",
+            at: "2026-08-27T00:00:00.000Z",
+          },
+        ],
+        currentSequence: 12,
+        hasMore: true,
+      }),
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const client = new Client({ name: "oversized-audit", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({
+        name: "atm_delta",
+        arguments: { project: "BIG", since_seq: 0, max_chars: 1000 },
+      });
+      expect(response.structuredContent).toMatchObject({
+        returned_count: 0,
+        next_seq: 9,
+        has_more: true,
+        truncated: true,
+        oversized_event: {
+          seq: 9,
+          op_id: "oversized-audit",
+          continuation: {
+            transport: "REST",
+            method: "GET",
+            authentication: "daemon_bearer",
+            path: "/api/v1/projects/BIG/events?since=8&limit=1",
+          },
+        },
+      });
+      expect(JSON.stringify(response.structuredContent).length).toBeLessThanOrEqual(1000);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
   it("projects the stored progress and an accurate checklist summary in task_list", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-task-list-"));
     roots.push(dataDir);

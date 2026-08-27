@@ -154,6 +154,13 @@ function publicToolJsonSchema(name: string, value: unknown): Record<string, unkn
         expected_fields: { properties: { operation: { const: "edit" } } },
       };
       item.properties.expected_fields.minProperties = 1;
+      for (const acceptance of [
+        item.properties.acceptance,
+        item.properties.expected_fields.properties.acceptance,
+      ]) {
+        acceptance.maxItems = 100;
+        acceptance.items.maxLength = 1000;
+      }
       item.allOf = [
         {
           if: { properties: { operation: { const: "block" } } },
@@ -1867,21 +1874,34 @@ function fitDelta(
     if (count === 0 && events.length > 0) {
       const firstEvent = events[0]!;
       const firstEventChars = JSON.stringify(firstEvent).length;
+      const restPath = `/api/v1/projects/${project.toUpperCase()}/events?since=${Math.max(0, firstEvent.seq - 1)}&limit=1`;
+      candidate.next_seq = firstEvent.seq;
+      const hasFollowingEvents = events.length > 1 || serviceHasMore;
+      candidate.has_more = hasFollowingEvents;
       candidate.oversized_event = {
         seq: firstEvent.seq,
+        type: firstEvent.type,
+        key: firstEvent.key,
+        op_id: firstEvent.op_id,
         chars: firstEventChars,
-        suggested_max_chars: Math.min(50_000, Math.max(maxChars + 1, firstEventChars + 800)),
+        continuation: {
+          transport: "REST",
+          method: "GET",
+          authentication: "daemon_bearer",
+          path: restPath,
+        },
       };
       const continuation = candidate.continuation as Record<string, any> | undefined;
-      if (continuation) {
-        continuation.arguments.max_chars = (
-          candidate.oversized_event as Record<string, number>
-        ).suggested_max_chars;
+      if (continuation && hasFollowingEvents) {
+        continuation.arguments.since_seq = firstEvent.seq;
+      } else if (!hasFollowingEvents) {
+        delete candidate.continuation;
       }
     }
     if (JSON.stringify(candidate).length <= maxChars) return candidate;
   }
 
+  const firstEvent = events[0];
   return {
     project: projectInfo,
     since_seq: sinceSeq,
@@ -1889,9 +1909,22 @@ function fitDelta(
     returned_count: 0,
     events: [],
     current_sequence: currentSequence,
-    next_seq: sinceSeq,
-    has_more: events.length > 0 || serviceHasMore,
+    next_seq: firstEvent?.seq ?? sinceSeq,
+    has_more: firstEvent === undefined ? serviceHasMore : events.length > 1 || serviceHasMore,
     truncated: events.length > 0,
+    ...(firstEvent === undefined
+      ? {}
+      : {
+          oversized_event: {
+            seq: firstEvent.seq,
+            continuation: {
+              transport: "REST",
+              method: "GET",
+              authentication: "daemon_bearer",
+              path: `/api/v1/projects/${project.toUpperCase()}/events?since=${Math.max(0, firstEvent.seq - 1)}&limit=1`,
+            },
+          },
+        }),
   };
 }
 
