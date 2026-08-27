@@ -22,6 +22,77 @@ import { reconcileWorkItems } from "./reconcile.js";
 export * from "./agenttask-import.js";
 export * from "./reconcile.js";
 
+export type PublicNotFoundDetails = {
+  entity: "WORK_ITEM" | "SESSION" | "MILESTONE";
+  did_you_mean: string | null;
+  candidates: Array<Record<string, string>>;
+};
+
+function normalizedSuggestionText(value: string): string {
+  return value
+    .slice(0, 128)
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, "");
+}
+
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1]! + 1,
+        previous[rightIndex]! + 1,
+        previous[rightIndex - 1]! + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length]!;
+}
+
+function rankPublicCandidates<T extends Record<string, string>>(
+  queryValue: string,
+  candidates: T[],
+  identity: (candidate: T) => string,
+): { did_you_mean: string | null; candidates: T[] } {
+  const query = normalizedSuggestionText(queryValue);
+  if (!query) return { did_you_mean: null, candidates: [] };
+  const ranked = candidates
+    .map((candidate) => {
+      const value = normalizedSuggestionText(identity(candidate));
+      const rawScore = editDistance(query, value);
+      const prefix = value.startsWith(query) || query.startsWith(value);
+      return { candidate, value, rawScore, score: rawScore - (prefix ? 0.5 : 0), prefix };
+    })
+    .sort((left, right) => left.score - right.score || left.value.localeCompare(right.value))
+    .slice(0, 5);
+  const first = ranked[0];
+  const plausible =
+    first !== undefined &&
+    (first.prefix || first.rawScore <= Math.max(2, Math.ceil(query.length * 0.34)));
+  return {
+    did_you_mean: plausible && first ? identity(first.candidate) : null,
+    candidates: ranked.map(({ candidate }) => candidate),
+  };
+}
+
+function assertKnownMilestones(
+  repository: ProjectRepository,
+  milestoneIds: Iterable<string | null | undefined>,
+): void {
+  const requested = new Set(
+    Array.from(milestoneIds).filter(
+      (milestoneId): milestoneId is string => typeof milestoneId === "string",
+    ),
+  );
+  if (requested.size === 0) return;
+  const known = new Set(repository.listMilestones().map((milestone) => String(milestone.id)));
+  for (const milestoneId of requested) {
+    if (!known.has(milestoneId)) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+  }
+}
+
 function mutationAck<T extends Record<string, unknown>>(
   result: T,
   opId: string,
@@ -687,6 +758,49 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).getSessionView(id);
   }
 
+  async notFoundSuggestionDetails(
+    projectCode: string,
+    code: string,
+    reference: string,
+  ): Promise<PublicNotFoundDetails | null> {
+    const repository = await this.#repository(projectCode);
+    if (code === "WORK_ITEM_NOT_FOUND") {
+      const ranked = rankPublicCandidates(
+        reference,
+        repository.listWorkItems({ limit: 500 }).map((item) => ({
+          key: item.key,
+          status: item.status,
+        })),
+        (candidate) => candidate.key,
+      );
+      return { entity: "WORK_ITEM", ...ranked };
+    }
+    if (code === "SESSION_NOT_FOUND") {
+      const ranked = rankPublicCandidates(
+        reference,
+        repository.listAgentSessions(200).map((session) => ({
+          id: String(session.id),
+          connection_state: String(session.connection_state),
+          work_state: String(session.work_state),
+        })),
+        (candidate) => candidate.id,
+      );
+      return { entity: "SESSION", ...ranked };
+    }
+    if (code === "MILESTONE_NOT_FOUND") {
+      const ranked = rankPublicCandidates(
+        reference,
+        repository.listMilestones().map((milestone) => ({
+          id: String(milestone.id),
+          status: String(milestone.status),
+        })),
+        (candidate) => candidate.id,
+      );
+      return { entity: "MILESTONE", ...ranked };
+    }
+    return null;
+  }
+
   async listRecords(projectCode: string, limit = 100) {
     return (await this.#repository(projectCode)).listRecords(limit);
   }
@@ -885,7 +999,31 @@ export class AyanamiTaskService {
     projectCode: string,
     filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
   ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
-    return (await this.#repository(projectCode)).listWorkItems(filters);
+    const repository = await this.#repository(projectCode);
+    if (
+      filters?.milestoneId &&
+      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
+    ) {
+      throw new Error(`MILESTONE_NOT_FOUND: ${filters.milestoneId}`);
+    }
+    return repository.listWorkItems(filters);
+  }
+
+  async assertMilestonesExist(
+    projectCode: string,
+    milestoneIds: Array<string | null | undefined>,
+  ): Promise<void> {
+    assertKnownMilestones(await this.#repository(projectCode), milestoneIds);
+  }
+
+  async assertSessionCanProvisionPlanningRoot(
+    projectCode: string,
+    sessionId: string,
+  ): Promise<void> {
+    const session = await this.getSession(projectCode, sessionId);
+    if (session.connectionState !== "ONLINE" && session.closeReason !== "HEARTBEAT_TIMEOUT") {
+      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+    }
   }
 
   async reconcileProject(projectCode: string, input: { includeActive?: boolean } = {}) {

@@ -430,6 +430,28 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     if (code === "VERSION_CONFLICT") {
       details = await enrichVersionConflictDetails(options.service, request, details);
     }
+    if (
+      !details &&
+      ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(code) &&
+      error instanceof Error &&
+      bearer(request) === options.token
+    ) {
+      const projectCode =
+        request.params && typeof request.params === "object"
+          ? (request.params as { code?: unknown }).code
+          : null;
+      if (typeof projectCode === "string") {
+        try {
+          details = await options.service.notFoundSuggestionDetails(
+            projectCode,
+            code,
+            error.message.slice(error.message.indexOf(":") + 1).trim(),
+          );
+        } catch {
+          details = null;
+        }
+      }
+    }
     reply.code(statusForCode(code)).send({
       error: {
         code,

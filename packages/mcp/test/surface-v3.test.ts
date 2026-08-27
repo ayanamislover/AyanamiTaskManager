@@ -71,6 +71,242 @@ describe("MCP surface v3 parity", () => {
     }
   });
 
+  it("returns the same bounded public task_key candidates for WORK_ITEM_NOT_FOUND", async () => {
+    const fixture = await openFixture("NFSMCP");
+    try {
+      const objective = await fixture.service.createObjectiveAsUser(
+        fixture.project.code,
+        "not-found-objective",
+        { title: "NOT_FOUND candidates", description: "", definitionOfDone: [] },
+      );
+      const created = await fixture.service.createWorkItemsAsUser(
+        fixture.project.code,
+        "not-found-tasks",
+        Array.from({ length: 7 }, (_, index) => ({
+          clientRef: `task-${index + 1}`,
+          objectiveId: objective.id,
+          title: `Candidate task ${index + 1}`,
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY" as const,
+        })),
+      );
+      const response = await fixture.client.callTool({
+        name: "atm_task_get",
+        arguments: { project: fixture.project.code, task_key: `${fixture.project.code}-T-000I` },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain("WORK_ITEM_NOT_FOUND");
+      const details = errorDetails(response);
+      expect(details).toMatchObject({
+        entity: "WORK_ITEM",
+        did_you_mean: created.items[0]!.key,
+      });
+      expect(details.candidates).toHaveLength(5);
+      for (const candidate of details.candidates) {
+        expect(Object.keys(candidate).sort()).toEqual(["key", "status"]);
+      }
+      expect(JSON.stringify(details)).not.toContain(created.items[0]!.id);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("returns the same bounded public Session candidates for SESSION_NOT_FOUND", async () => {
+    const fixture = await openFixture("NFSESS");
+    try {
+      for (let index = 0; index < 6; index += 1) {
+        await fixture.service.begin({
+          projectCode: fixture.project.code,
+          mode: "project",
+          agentId: `session-candidate-${index + 1}`,
+          displayName: `Session Candidate ${index + 1}`,
+          clientKind: "test",
+        });
+      }
+      const missingId = `${fixture.session.slice(0, -1)}${fixture.session.endsWith("0") ? "1" : "0"}`;
+      const response = await fixture.client.callTool({
+        name: "atm_search",
+        arguments: { project: fixture.project.code, query: `session:${missingId}` },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain("SESSION_NOT_FOUND");
+      const details = errorDetails(response);
+      expect(details).toMatchObject({ entity: "SESSION", did_you_mean: fixture.session });
+      expect(details.candidates).toHaveLength(5);
+      for (const candidate of details.candidates) {
+        expect(Object.keys(candidate).sort()).toEqual(["connection_state", "id", "work_state"]);
+      }
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("returns the same bounded public milestone_id candidates for MILESTONE_NOT_FOUND", async () => {
+    const fixture = await openFixture("NFSMILE");
+    try {
+      const objective = await fixture.service.createObjectiveAsUser(
+        fixture.project.code,
+        "milestone-candidate-objective",
+        { title: "Milestone candidates", description: "", definitionOfDone: [] },
+      );
+      const milestones = [];
+      for (let index = 0; index < 7; index += 1) {
+        milestones.push(
+          await fixture.service.createMilestoneAsUser(
+            fixture.project.code,
+            `milestone-candidate-${index + 1}`,
+            { objectiveId: objective.id, title: `Milestone Candidate ${index + 1}` },
+          ),
+        );
+      }
+      const expected = String(milestones[0]!.id);
+      const missingId = `${expected.slice(0, -1)}${expected.endsWith("0") ? "1" : "0"}`;
+      const response = await fixture.client.callTool({
+        name: "atm_task_list",
+        arguments: { project: fixture.project.code, milestone_id: missingId },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain("MILESTONE_NOT_FOUND");
+      const details = errorDetails(response);
+      expect(details).toMatchObject({ entity: "MILESTONE", did_you_mean: expected });
+      expect(details.candidates).toHaveLength(5);
+      for (const candidate of details.candidates) {
+        expect(Object.keys(candidate).sort()).toEqual(["id", "status"]);
+      }
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("does not fuzzy-route or persist an MCP task create with a missing milestone_id", async () => {
+    const fixture = await openFixture("NFMWRITE");
+    try {
+      const objective = await fixture.service.createObjectiveAsUser(
+        fixture.project.code,
+        "write-candidate-objective",
+        { title: "Write candidate", description: "", definitionOfDone: [] },
+      );
+      const milestone = await fixture.service.createMilestoneAsUser(
+        fixture.project.code,
+        "write-candidate-milestone",
+        { objectiveId: objective.id, title: "Write Candidate Milestone" },
+      );
+      const expected = String(milestone.id);
+      const missingId = `${expected.slice(0, -1)}${expected.endsWith("0") ? "1" : "0"}`;
+      const opId = "mcp-missing-milestone-write";
+      const response = await fixture.client.callTool({
+        name: "atm_task_create",
+        arguments: {
+          project: fixture.project.code,
+          session: fixture.session,
+          op_id: opId,
+          items: [
+            {
+              client_ref: "must-not-create",
+              objective_id: objective.id,
+              milestone_id: missingId,
+              title: "Must not fuzzy route",
+              status: "READY",
+            },
+          ],
+        },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain("MILESTONE_NOT_FOUND");
+      expect(errorDetails(response)).toMatchObject({
+        entity: "MILESTONE",
+        did_you_mean: expected,
+      });
+      expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 100 })).toEqual([]);
+      await expect(
+        fixture.service.getOperationTrace(fixture.project.code, opId, fixture.session),
+      ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${opId}`);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("validates milestone_id before implicit planning-root provisioning", async () => {
+    const fixture = await openFixture("NFMROOT");
+    try {
+      const missingId = "00000000000000000000000000";
+      const opId = "missing-milestone-before-root";
+      const response = await fixture.client.callTool({
+        name: "atm_task_create",
+        arguments: {
+          project: fixture.project.code,
+          session: fixture.session,
+          op_id: opId,
+          items: [
+            {
+              client_ref: "must-not-provision",
+              milestone_id: missingId,
+              title: "Must fail before planning root",
+              status: "READY",
+            },
+          ],
+        },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain("MILESTONE_NOT_FOUND");
+      expect(errorDetails(response)).toEqual({
+        entity: "MILESTONE",
+        did_you_mean: null,
+        candidates: [],
+      });
+      expect(await fixture.service.listObjectives(fixture.project.code)).toEqual([]);
+      expect(await fixture.service.listMilestones(fixture.project.code)).toEqual([]);
+      expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 100 })).toEqual([]);
+      await expect(
+        fixture.service.getOperationTrace(fixture.project.code, opId, fixture.session),
+      ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${opId}`);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
+  it("preserves closed-Session error priority before an empty-project milestone preflight", async () => {
+    const fixture = await openFixture("NFCLOSE");
+    try {
+      await fixture.service.end(fixture.project.code, fixture.session, "close-before-preflight", {
+        outcome: "completed",
+        summary: "Close before invalid create",
+        next: [],
+        releaseClaims: true,
+      });
+      const response = await fixture.client.callTool({
+        name: "atm_task_create",
+        arguments: {
+          project: fixture.project.code,
+          session: fixture.session,
+          op_id: "closed-session-invalid-milestone",
+          items: [
+            {
+              client_ref: "must-not-provision",
+              milestone_id: "00000000000000000000000000",
+              title: "Closed Session wins",
+              status: "READY",
+            },
+          ],
+        },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(errorText(response)).toContain(`SESSION_CLOSED: ${fixture.session}`);
+      expect(await fixture.service.listObjectives(fixture.project.code)).toEqual([]);
+      expect(await fixture.service.listMilestones(fixture.project.code)).toEqual([]);
+      expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 100 })).toEqual([]);
+    } finally {
+      await closeFixture(fixture);
+    }
+  });
+
   it("returns current state and at most six recent changes for VERSION_CONFLICT", async () => {
     const fixture = await openFixture("MVERS");
     try {
