@@ -413,7 +413,10 @@ describe("MCP exact Progress/Session reads and field cursor v2", () => {
       expect(changed.isError).toBe(true);
       expect(changed.structuredContent).toMatchObject({
         code: "CONTINUATION_CONFLICT",
-        details: { reason: "CONTENT_CHANGED" },
+        details: {
+          reason: "STALE",
+          recovery: { action: "restart_read", omit_cursor: true },
+        },
       });
     } finally {
       await profiles.close();

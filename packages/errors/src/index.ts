@@ -185,11 +185,38 @@ export type InvalidTransitionDetails = {
   readonly legal_operations?: readonly string[];
 };
 
+export type CursorRestartRecovery = {
+  readonly action: "restart_read";
+  readonly omit_cursor: true;
+};
+
+export type CursorTargetRecovery = {
+  readonly action: "retry_original_target";
+  readonly preserve_cursor: true;
+};
+
+export type InvalidCursorDetails = {
+  readonly reason: "INVALID_OR_TAMPERED" | "EXPIRED";
+  readonly recovery: CursorRestartRecovery;
+};
+
+export type ContinuationConflictDetails =
+  | {
+      readonly reason: "STALE" | "SNAPSHOT_CHANGED";
+      readonly recovery: CursorRestartRecovery;
+    }
+  | {
+      readonly reason: "TARGET_MISMATCH";
+      readonly recovery: CursorTargetRecovery;
+    };
+
 type SpecificErrorDetails = {
   PROJECT_NOT_FOUND: ProjectNotFoundDetails;
   VERSION_CONFLICT: VersionConflictDetails;
   COMPLETION_GATE_FAILED: CompletionGateFailedDetails;
   INVALID_TRANSITION: InvalidTransitionDetails;
+  INVALID_CURSOR: InvalidCursorDetails;
+  CONTINUATION_CONFLICT: ContinuationConflictDetails;
 };
 
 export type ErrorDetailsByCode = {

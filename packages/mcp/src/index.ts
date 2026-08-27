@@ -208,6 +208,8 @@ type FieldCursor = {
   maskHash: string;
   path: Array<string | number>;
   contentHash: string;
+  targetVersion: string;
+  expiresAt: number;
   offset: number;
 };
 
@@ -216,9 +218,12 @@ type FieldReadTarget = {
   entity: string;
   entityType: string;
   fieldMask: string[];
+  targetVersion: string;
 };
 
-const fieldCursorSecret = randomBytes(32);
+const FIELD_CURSOR_PREFIX = "f2";
+const FIELD_CURSOR_HASH_DOMAIN = "AYANAMI_TASK_MANAGER_FIELD_CURSOR_V2\0";
+const FIELD_CURSOR_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function fieldContentHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest().subarray(0, 16).toString("base64url");
@@ -232,33 +237,54 @@ function fieldMaskHash(fieldMask: readonly string[]): string {
     .toString("base64url");
 }
 
+function fieldTargetVersion(value: Record<string, unknown>): string {
+  return createHash("sha256")
+    .update(JSON.stringify(value), "utf8")
+    .digest()
+    .subarray(0, 16)
+    .toString("base64url");
+}
+
+function fieldCursorExpiry(now = Date.now()): number {
+  // Bucketed expiry keeps an otherwise identical cursor deterministic across
+  // process restarts. Advancing two bucket edges guarantees at least one full
+  // TTL even when the cursor is created immediately before a boundary.
+  return (Math.floor(now / FIELD_CURSOR_TTL_MS) + 2) * FIELD_CURSOR_TTL_MS;
+}
+
 function normalizedFieldTarget(target: FieldReadTarget) {
   return {
     project: target.project.trim().toUpperCase(),
     entity: target.entity.trim(),
     entityType: target.entityType.trim().toUpperCase(),
     maskHash: fieldMaskHash(target.fieldMask),
+    targetVersion: target.targetVersion,
   };
 }
 
 function encodeFieldCursor(cursor: FieldCursor): string {
   const payload = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-  const signature = createHmac("sha256", fieldCursorSecret)
+  const signature = createHash("sha256")
+    .update(FIELD_CURSOR_HASH_DOMAIN, "utf8")
     .update(payload, "utf8")
     .digest()
     .subarray(0, 16)
     .toString("base64url");
-  return `${payload}.${signature}`;
+  return `${FIELD_CURSOR_PREFIX}.${payload}.${signature}`;
 }
 
 function decodeFieldCursor(token: string): FieldCursor {
+  let value: FieldCursor;
   try {
-    const [payload, signature, extra] = token.split(".");
-    if (!payload || !signature || extra !== undefined) throw new Error("invalid token shape");
+    const [prefix, payload, signature, extra] = token.split(".");
+    if (prefix !== FIELD_CURSOR_PREFIX || !payload || !signature || extra !== undefined) {
+      throw new Error("invalid token shape");
+    }
     if (Buffer.from(payload, "base64url").toString("base64url") !== payload) {
       throw new Error("invalid payload encoding");
     }
-    const expected = createHmac("sha256", fieldCursorSecret)
+    const expected = createHash("sha256")
+      .update(FIELD_CURSOR_HASH_DOMAIN, "utf8")
       .update(payload, "utf8")
       .digest()
       .subarray(0, 16);
@@ -270,7 +296,7 @@ function decodeFieldCursor(token: string): FieldCursor {
     ) {
       throw new Error("invalid signature");
     }
-    const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as FieldCursor;
+    value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as FieldCursor;
     if (
       value.v !== 2 ||
       typeof value.project !== "string" ||
@@ -287,18 +313,34 @@ function decodeFieldCursor(token: string): FieldCursor {
       value.path.some((part) => typeof part !== "string" && !Number.isInteger(part)) ||
       typeof value.contentHash !== "string" ||
       !value.contentHash ||
+      typeof value.targetVersion !== "string" ||
+      !value.targetVersion ||
+      !Number.isSafeInteger(value.expiresAt) ||
+      value.expiresAt <= 0 ||
       !Number.isInteger(value.offset) ||
       value.offset < 0
     ) {
       throw new Error("invalid shape");
     }
-    return value;
   } catch {
     throw new AtmError("INVALID_CURSOR", {
       message: "continuation cursor 无效或已损坏",
-      details: { reason: "INVALID_OR_TAMPERED" },
+      details: {
+        reason: "INVALID_OR_TAMPERED",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
     });
   }
+  if (value.expiresAt <= Date.now()) {
+    throw new AtmError("INVALID_CURSOR", {
+      message: "continuation cursor 已过期，请重新读取",
+      details: {
+        reason: "EXPIRED",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
+    });
+  }
+  return value;
 }
 
 function fieldPath(path: Array<string | number>): string {
@@ -344,7 +386,19 @@ function continueField(
   ) {
     throw new AtmError("CONTINUATION_CONFLICT", {
       message: "field continuation 请求身份已变化",
-      details: { reason: "TARGET_MISMATCH" },
+      details: {
+        reason: "TARGET_MISMATCH",
+        recovery: { action: "retry_original_target", preserve_cursor: true },
+      },
+    });
+  }
+  if (cursor.targetVersion !== expectedTarget.targetVersion) {
+    throw new AtmError("CONTINUATION_CONFLICT", {
+      message: "field continuation 目标版本已变化",
+      details: {
+        reason: "STALE",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
     });
   }
   const field = getAtPath(source, cursor.path);
@@ -355,7 +409,10 @@ function continueField(
   ) {
     throw new AtmError("CONTINUATION_CONFLICT", {
       message: "field continuation 内容已变化",
-      details: { reason: "CONTENT_CHANGED" },
+      details: {
+        reason: "STALE",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
     });
   }
   const identity = {
@@ -388,7 +445,10 @@ function continueField(
   if (!best || best.returned_chars === 0) {
     throw new AtmError("RESULT_TOO_LARGE", {
       message: `max_chars=${maxChars} 无法容纳 continuation 回执`,
-      details: { max_chars: maxChars },
+      details: {
+        max_chars: maxChars,
+        recovery: { action: "increase_max_chars", preserve_cursor: true },
+      },
     });
   }
   return best;
@@ -429,6 +489,8 @@ function fitFieldRead(
             ...normalizedTarget,
             path,
             contentHash: fieldContentHash(value),
+            targetVersion: normalizedTarget.targetVersion,
+            expiresAt: fieldCursorExpiry(),
             offset: returned.length,
           }),
         },
@@ -642,12 +704,18 @@ function decodeBriefCursor(token: string): BriefCursor {
     if (error === expired) {
       throw new AtmError("INVALID_CURSOR", {
         message: "brief continuation 已过期，请重新读取",
-        details: { reason: "EXPIRED" },
+        details: {
+          reason: "EXPIRED",
+          recovery: { action: "restart_read", omit_cursor: true },
+        },
       });
     }
     throw new AtmError("INVALID_CURSOR", {
       message: "brief continuation 无效或已被篡改",
-      details: { reason: "INVALID_OR_TAMPERED" },
+      details: {
+        reason: "INVALID_OR_TAMPERED",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
     });
   }
 }
@@ -696,7 +764,10 @@ function validateBriefCursorRequest(
   ) {
     throw new AtmError("CONTINUATION_CONFLICT", {
       message: "brief continuation 请求身份已变化",
-      details: { reason: "TARGET_MISMATCH" },
+      details: {
+        reason: "TARGET_MISMATCH",
+        recovery: { action: "retry_original_target", preserve_cursor: true },
+      },
     });
   }
 }
@@ -710,7 +781,10 @@ function validateBriefCursorSnapshot(cursor: BriefCursor, payload: Record<string
   ) {
     throw new AtmError("CONTINUATION_CONFLICT", {
       message: "brief continuation 绑定内容已变化",
-      details: { reason: "SNAPSHOT_CHANGED" },
+      details: {
+        reason: "SNAPSHOT_CHANGED",
+        recovery: { action: "restart_read", omit_cursor: true },
+      },
     });
   }
 }
@@ -2030,10 +2104,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
     },
     async (input) => {
       const item = await service.getWorkItem(input.project, input.task_key, input.view);
-      const projected = selectFields(
-        externalizeTaskView(item) as Record<string, unknown>,
-        input.field_mask,
-      );
+      const externalItem = externalizeTaskView(item) as Record<string, unknown>;
+      const projected = selectFields(externalItem, input.field_mask);
       return wrap(
         fitFieldRead(
           projected,
@@ -2044,6 +2116,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             entity: input.task_key,
             entityType: "WORK_ITEM",
             fieldMask: [`@view:${input.view}`, ...input.field_mask],
+            targetVersion: fieldTargetVersion(externalItem),
           },
           input.cursor,
         ),
@@ -2544,6 +2617,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             entity: `${input.op_id}@${input.session ?? "*"}`,
             entityType: "OPERATION",
             fieldMask: input.field_mask,
+            targetVersion: fieldTargetVersion(trace),
           },
           input.cursor,
         );
@@ -2569,6 +2643,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             entity: `${exactOpId}@*`,
             entityType: "OPERATION",
             fieldMask: input.field_mask,
+            targetVersion: fieldTargetVersion(trace),
           },
           input.cursor,
         );
@@ -2597,6 +2672,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             entity: scopedEntity.id,
             entityType: scopedEntity.kind,
             fieldMask: input.field_mask,
+            targetVersion: fieldTargetVersion(entity),
           },
           input.cursor,
         );
@@ -2605,11 +2681,12 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       const kind = publicKeyKind(input.query);
       const exactProject = input.project ?? projectFromPublicKey(input.query) ?? undefined;
       if (kind && exactProject) {
-        const entity =
+        const entity = plain(
           kind === "WORK_ITEM"
             ? await service.getWorkItem(exactProject, input.query, "full")
-            : compactRecord(plain(await service.getRecord(exactProject, input.query)));
-        const source = selectFields(plain(entity), input.field_mask);
+            : compactRecord(plain(await service.getRecord(exactProject, input.query))),
+        );
+        const source = selectFields(entity, input.field_mask);
         const fitted = fitFieldRead(
           source,
           Math.max(300, input.max_chars - 80),
@@ -2619,6 +2696,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             entity: input.query.toUpperCase(),
             entityType: kind,
             fieldMask: input.field_mask,
+            targetVersion: fieldTargetVersion(entity),
           },
           input.cursor,
         );
