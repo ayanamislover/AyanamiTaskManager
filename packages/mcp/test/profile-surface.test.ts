@@ -3,7 +3,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { createAyanamiMcpServer } from "../src/index.js";
-import { assertMcpSchemaBudget, mcpSchemaBytes } from "../src/schema-budget.js";
+import {
+  assertLegacyMcpSchemaTransitionBudget,
+  assertMcpSchemaBudget,
+  MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
+  mcpSchemaBytes,
+} from "../src/schema-budget.js";
 
 async function listProfile(profile: "core" | "memory" | "legacy") {
   const server = createAyanamiMcpServer({} as AyanamiTaskService, { profile });
@@ -54,6 +59,18 @@ describe("MCP static profiles", () => {
       expect(legacy.tools).toHaveLength(11);
       expect(legacy.client.getInstructions()).toContain("兼容入口");
       expect(legacy.client.getInstructions()).toContain("重启");
+      expect(assertLegacyMcpSchemaTransitionBudget(legacy.tools)).toEqual({
+        bytes: MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
+        maxBytes: MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
+        overUsableBytes: 3384,
+      });
+      // 阳性对照：legacy 是有审计记录的过渡例外，不是无上限的第三个 Profile。
+      expect(() =>
+        assertLegacyMcpSchemaTransitionBudget([
+          ...legacy.tools,
+          { name: "legacy-growth-must-fail", inputSchema: {} },
+        ]),
+      ).toThrow(/MCP_LEGACY_SCHEMA_TRANSITION_BUDGET_EXCEEDED/u);
 
       expect(
         (
