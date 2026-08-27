@@ -34,6 +34,7 @@
     "smoke:history": "tsx scripts/default-history-smoke.ts",
     "benchmark": "tsx scripts/benchmark.ts",
     "generate:mcp-contracts": "tsx scripts/generate-mcp-contracts.ts",
+    "generate:operation-contracts": "tsx scripts/generate-operation-contracts.ts",
     "migrate:data-root": "tsx scripts/migrate-data-root.ts"
   },
   "dependencies": {

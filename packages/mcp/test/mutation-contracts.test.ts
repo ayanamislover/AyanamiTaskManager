@@ -8,6 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
+import { MUTATION_ACK_CONTRACT } from "../src/mutation-ack-contract.js";
 import { connectProfiledClients } from "./profile-client.js";
 import {
   dereferencePublishedSchema,
@@ -15,24 +16,13 @@ import {
 } from "./published-operation-schema.js";
 
 const roots: string[] = [];
-const fixedMutationAckKeys = [
-  "details_cursor",
-  "entities",
-  "entities_truncated",
-  "entity_count",
-  "ok",
-  "op_id",
-  "project",
-  "session",
-  "session_rebound",
-] as const;
 
 function expectFixedMutationAck(
   response: { structuredContent?: unknown },
   expected: { project: string; session: string; opId: string; rebound?: boolean },
 ) {
   const acknowledgement = response.structuredContent as Record<string, any>;
-  expect(Object.keys(acknowledgement).sort()).toEqual([...fixedMutationAckKeys].sort());
+  expect(Object.keys(acknowledgement).sort()).toEqual([...MUTATION_ACK_CONTRACT.fields].sort());
   expect(acknowledgement).toMatchObject({
     ok: true,
     project: expected.project,
@@ -45,8 +35,8 @@ function expectFixedMutationAck(
         project: expected.project,
         session: expected.session,
         op_id: expected.opId,
-        field_mask: ["op_id", "entities"],
-        max_chars: 50_000,
+        field_mask: MUTATION_ACK_CONTRACT.detailsCursor.fieldMask,
+        max_chars: MUTATION_ACK_CONTRACT.detailsCursor.maxChars,
       },
     },
   });

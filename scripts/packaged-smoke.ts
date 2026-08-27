@@ -4,7 +4,13 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
+import {
+  generateMutationAcknowledgementDocumentation,
+  MUTATION_ACK_DOCUMENTATION_BEGIN,
+  MUTATION_ACK_DOCUMENTATION_END,
+} from "../packages/mcp/src/mutation-ack-contract.js";
 import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
 
 type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
@@ -55,6 +61,14 @@ function check(name: string, condition: unknown, detail?: string): asserts condi
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function mutationAcknowledgementSection(content: string): string | null {
+  const start = content.indexOf(MUTATION_ACK_DOCUMENTATION_BEGIN);
+  const end = content.indexOf(MUTATION_ACK_DOCUMENTATION_END);
+  return start < 0 || end < start
+    ? null
+    : content.slice(start, end + MUTATION_ACK_DOCUMENTATION_END.length);
 }
 
 async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): Promise<T> {
@@ -471,14 +485,44 @@ try {
   );
   const installedGuide = join(dataDir, "ATM_AGENT_GUIDE.md");
   const installedAgentDocs = join(dataDir, "docs", "agent-integration.md");
+  const installedMutationAckDocs = join(
+    dataDir,
+    "docs",
+    "generated",
+    "mutation-acknowledgement.md",
+  );
   check("Agent Guide 安装到正式数据根", existsSync(installedGuide), installedGuide);
   check("完整 docs 安装到正式数据根", existsSync(installedAgentDocs), installedAgentDocs);
+  check(
+    "Mutation ACK 生成文档安装到正式数据根",
+    existsSync(installedMutationAckDocs),
+    installedMutationAckDocs,
+  );
   const guideContent = await readFile(installedGuide, "utf8");
+  const agentDocsContent = await readFile(installedAgentDocs, "utf8");
+  const mutationAckDocsContent = await readFile(installedMutationAckDocs, "utf8");
+  const expectedMutationAck = (
+    await format(generateMutationAcknowledgementDocumentation(), { parser: "markdown" })
+  ).trim();
   check(
     "Agent Guide 使用设备无关路径",
     guideContent.includes("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md") &&
       !guideContent.includes("R:\\Project_All"),
   );
+  for (const [name, content] of [
+    ["Guide", guideContent],
+    ["Agent integration", agentDocsContent],
+    ["Mutation ACK generated", mutationAckDocsContent],
+  ] as const) {
+    check(
+      `${name} 与 canonical mutation ACK 契约逐字一致`,
+      mutationAcknowledgementSection(content) === expectedMutationAck,
+    );
+    check(
+      `${name} 不承诺旧 planning_root 顶层字段`,
+      !content.includes('planning_root: "PROVISIONED"'),
+    );
+  }
 
   const project = await client.projects.create({
     name: "打包烟测项目",

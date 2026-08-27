@@ -109,6 +109,58 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
 
+<!-- MUTATION_ACK_CONTRACT:BEGIN -->
+
+### 固定 mutation ACK
+
+所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
+
+| 字段                 | 语义                                                           |
+| -------------------- | -------------------------------------------------------------- |
+| `ok`                 | 写操作是否被 ATM 接受。                                        |
+| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                        |
+| `project`            | 规范化后的项目代码。                                           |
+| `session`            | 实际承载写操作的 Session。                                     |
+| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                     |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。 |
+| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                         |
+| `entities_truncated` | 实体预览是否被条数或字符预算截断。                             |
+| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。     |
+
+`entities` 最多预览 12 项且不超过 1800 个 JSON 字符。以 `entity_count` 判断精确总数；`entities_truncated=true` 时可直接执行返回的 `details_cursor` 做一次最多 50000 字符的 durable 回查：
+
+```json
+{
+  "name": "atm_search",
+  "arguments": {
+    "project": "ATM",
+    "op_id": "<same-op-id>",
+    "session": "<returned-session>",
+    "field_mask": ["op_id", "entities"],
+    "max_chars": 50000
+  }
+}
+```
+
+需要操作特有结果时，仍以同一 `project`、`op_id` 和返回的 `session` 精确读取 durable operation receipt，只把 `field_mask` 改为下例；不要重新执行 mutation：
+
+```json
+{
+  "name": "atm_search",
+  "arguments": {
+    "project": "ATM",
+    "op_id": "<same-op-id>",
+    "session": "<returned-session>",
+    "field_mask": ["op_id", "mutations"],
+    "max_chars": 50000
+  }
+}
+```
+
+例如自动补建规划根的事实位于 `operation.mutations[].response.planningRootProvisioned`；mutation ACK 顶层不再返回 `planning_root`。字段读取若返回 `done=false`，把 `next_cursor` 作为 `cursor` 加回同一个 `atm_search` 调用继续读，直到 `done=true`。
+
+<!-- MUTATION_ACK_CONTRACT:END -->
+
 `atm_begin(op_id=...)` 的原子键作用域是 `(project, op_id)`。它要求项目已经存在且可解析；不得把 quick task 或自动创建项目混入这次原子恢复。调用方必须验证返回的 `atomicBegin.operationId` 及 `CREATED|RECOVERED` disposition；缺失回执表示服务端没有证明原子能力。同一 `op_id` 的请求身份发生变化会得到 `IDEMPOTENCY_CONFLICT`，不能改 key 或退化为枚举 Session 后猜测。
 
 ### 完成闸门
@@ -128,7 +180,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 少数能力目前只有 REST 入口，例如**再建一个** Objective / Milestone（`POST /api/v1/projects/{code}/objectives`、`.../milestones`）。REST 与 MCP 用同一个 `endpoint` 和 token（见「ATM 服务如何发现」），写操作同样需要 `session` 与唯一 `op_id`。
 
-新项目**不需要**先建 Objective：项目还没有活动目标时，`atm_task_create` 会自动补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器替你做的规划决策，看到这个回执就该按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不会触发补建。
+新项目**不需要**先建 Objective：项目还没有活动目标时，`atm_task_create` 会自动补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑。这个规划决策保存在 durable operation receipt；按上方固定 mutation ACK 说明精确回查后，应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不会触发补建。
 
 方法用错会返回 **405** 并在 `allow` 头和错误信息里列出该路径接受的方法——看到 405 是「方法不对」，看到 404 才是「路径不存在」，不要因为 404 就去猜别的路径名。
 
@@ -149,5 +201,6 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - 发布验收：`%LOCALAPPDATA%\AyanamiTaskManager\docs\release-checklist.md`
 - ATM Feedback 逐项闭环矩阵：`%LOCALAPPDATA%\AyanamiTaskManager\docs\feedback-closeout.md`
 - MCP 工具契约与 Profile hash：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`
+- Mutation 固定回执契约：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mutation-acknowledgement.md`
 - WorkItem 状态与操作表：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\work-item-operations.md`
 - 最新在线版本：`https://github.com/ayanamislover/AyanamiTaskManager`
