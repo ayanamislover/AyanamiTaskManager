@@ -204,6 +204,11 @@ export type MutationActorResolution = {
   requestedSessionId: string;
 };
 
+export type SessionMutationExecution<T> = {
+  result: T;
+  resolution: MutationActorResolution;
+};
+
 function workItemFromRow(
   row: any,
   projectCode: string,
@@ -543,6 +548,37 @@ export class ProjectRepository {
     operation: string,
     request: unknown,
   ): MutationActorResolution {
+    return this.resolveMutationActorInternal(sessionId, opId, operation, request, false);
+  }
+
+  executeSessionMutation<T>(
+    sessionId: string,
+    opId: string,
+    operation: string,
+    request: unknown,
+    action: (actor: ProjectActor) => T,
+  ): SessionMutationExecution<T> {
+    return this.#sqlite
+      .transaction(() => {
+        const resolution = this.resolveMutationActorInternal(
+          sessionId,
+          opId,
+          operation,
+          request,
+          true,
+        );
+        return { result: action(resolution.actor), resolution };
+      })
+      .immediate();
+  }
+
+  private resolveMutationActorInternal(
+    sessionId: string,
+    opId: string,
+    operation: string,
+    request: unknown,
+    createRecoverySuccessor: boolean,
+  ): MutationActorResolution {
     const normalizedOpId = opId.trim();
     if (!normalizedOpId || normalizedOpId.length > 128) throw new Error("OPERATION_ID_INVALID");
     const fingerprint = requestFingerprint(this.normalizeMutationRequest(operation, request));
@@ -579,7 +615,7 @@ export class ProjectRepository {
         requestedSessionId: sessionId,
       };
     }
-    if (requested.retirement_reason !== "startup recovery: heartbeat expired") {
+    if (requested.close_reason !== "HEARTBEAT_TIMEOUT") {
       throw new Error(`SESSION_CLOSED: ${sessionId}`);
     }
     const successors = this.#sqlite
@@ -590,8 +626,46 @@ export class ProjectRepository {
       )
       .all(sessionId) as any[];
     if (successors.length > 1) throw new Error(`SESSION_SUCCESSOR_AMBIGUOUS: ${sessionId}`);
-    const successor = successors[0];
-    if (!successor || successor.agent_id !== requested.agent_id) {
+    let successor = successors[0];
+    if (successor && !this.isMatchingRecoverySuccessor(requested, successor)) {
+      throw new Error(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${sessionId}`);
+    }
+    if (!successor && createRecoverySuccessor) {
+      const agent = this.#sqlite
+        .prepare("SELECT display_name, client_kind FROM agents WHERE id = ?")
+        .get(requested.agent_id) as { display_name: string; client_kind: string } | undefined;
+      if (!agent) throw new Error(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${sessionId}`);
+      const created = this.createSession({
+        agentId: requested.agent_id,
+        displayName: agent.display_name,
+        clientKind: agent.client_kind,
+        parentSessionId: requested.parent_session_id ?? null,
+        threadId: requested.thread_id ?? null,
+        role: requested.role,
+        cwd: requested.cwd ?? null,
+        gitBranch: requested.git_branch ?? null,
+        gitHead: requested.git_head ?? null,
+        gitContext: {
+          available: Boolean(requested.git_available),
+          repoRoot: requested.git_repo_root ?? null,
+          worktreeRoot: requested.worktree_root ?? null,
+          gitCommonDir: requested.git_common_dir ?? null,
+          isLinkedWorktree:
+            requested.git_is_linked_worktree == null
+              ? null
+              : Boolean(requested.git_is_linked_worktree),
+          branch: requested.git_branch ?? null,
+          head: requested.git_head ?? null,
+          detached: requested.git_detached == null ? null : Boolean(requested.git_detached),
+          dirty: requested.git_dirty == null ? null : Boolean(requested.git_dirty),
+          error: requested.git_error ?? null,
+        },
+        resume: true,
+        predecessorSessionId: requested.id,
+      });
+      successor = this.getSession(created.id);
+    }
+    if (!successor) {
       throw new Error(`SESSION_CLOSED: ${sessionId}`);
     }
     return {
@@ -599,6 +673,15 @@ export class ProjectRepository {
       disposition: "REBOUND",
       requestedSessionId: sessionId,
     };
+  }
+
+  private isMatchingRecoverySuccessor(predecessor: any, successor: any): boolean {
+    return (
+      successor.agent_id === predecessor.agent_id &&
+      successor.thread_id === predecessor.thread_id &&
+      successor.parent_session_id === predecessor.parent_session_id &&
+      successor.role === predecessor.role
+    );
   }
 
   updateSessionGitContext(
@@ -755,7 +838,7 @@ export class ProjectRepository {
           .prepare(
             `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
              closed_at = ?, updated_at = ?, retirement_reason = 'startup recovery: heartbeat expired',
-             version = version + 1 WHERE id = ?`,
+             close_reason = 'HEARTBEAT_TIMEOUT', version = version + 1 WHERE id = ?`,
           )
           .run(now, now, row.id);
         this.appendEvent(
@@ -803,7 +886,7 @@ export class ProjectRepository {
         .prepare(
           `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
            closed_at = COALESCE(closed_at, ?), updated_at = ?,
-           retirement_reason = COALESCE(retirement_reason, 'closed by user'),
+           retirement_reason = 'closed by user', close_reason = 'FORCE_CLOSE',
            version = version + 1 WHERE id = ?`,
         )
         .run(now, now, sessionId);
@@ -3612,7 +3695,7 @@ export class ProjectRepository {
           .prepare(
             `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
              heartbeat_at = ?, closed_at = ?, updated_at = ?, retirement_reason = ?,
-             version = version + 1 WHERE id = ?`,
+             close_reason = ?, version = version + 1 WHERE id = ?`,
           )
           .run(
             now,
@@ -3621,6 +3704,7 @@ export class ProjectRepository {
             input.outcome === "retired"
               ? input.retirementReason?.trim() || "context rotation"
               : null,
+            input.outcome === "retired" ? "EXPLICIT_RETIRE" : "EXPLICIT_END",
             sessionId,
           );
         const seq = this.appendEvent("agent.left", actor, "SESSION", sessionId, {

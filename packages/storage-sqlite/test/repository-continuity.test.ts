@@ -106,6 +106,168 @@ describe("record 公开引用与主题关联", () => {
 });
 
 describe("Session 写入连续性原语", () => {
+  it("持久化可判定的 close reason，且显式 force-close 覆盖 recovery 资格", async () => {
+    const heartbeat = await fixture("SCLOSEHB");
+    const explicit = await fixture("SCLOSEEND");
+    const retired = await fixture("SCLOSERET");
+    const forced = await fixture("SCLOSEFORCE");
+    try {
+      heartbeat.repository.recoverStaleSessions("2999-01-01T00:00:00.000Z");
+      explicit.repository.endSession(explicit.actor, "explicit-end", {
+        outcome: "completed",
+        summary: "显式结束",
+        releaseClaims: true,
+      });
+      retired.repository.endSession(retired.actor, "explicit-retire", {
+        outcome: "retired",
+        summary: "显式退役",
+        releaseClaims: true,
+        retirementReason: "context rotation",
+      });
+      forced.repository.recoverStaleSessions("2999-01-01T00:00:00.000Z");
+      forced.repository.forceCloseSession(forced.session.id, true);
+
+      expect(heartbeat.repository.getSession(heartbeat.session.id).close_reason).toBe(
+        "HEARTBEAT_TIMEOUT",
+      );
+      expect(explicit.repository.getSession(explicit.session.id).close_reason).toBe("EXPLICIT_END");
+      expect(retired.repository.getSession(retired.session.id).close_reason).toBe(
+        "EXPLICIT_RETIRE",
+      );
+      expect(forced.repository.getSession(forced.session.id).close_reason).toBe("FORCE_CLOSE");
+    } finally {
+      heartbeat.manager.close();
+      explicit.manager.close();
+      retired.manager.close();
+      forced.manager.close();
+    }
+  });
+
+  it("显式 end、retire、force-close 都不能自动创建 successor", async () => {
+    const ended = await fixture("SNOREND");
+    const retired = await fixture("SNORRET");
+    const forced = await fixture("SNORFORCE");
+    const input = { kind: "FACT", title: "不应写入", summary: "显式关闭不能复活" };
+    try {
+      ended.repository.endSession(ended.actor, "explicit-end", {
+        outcome: "completed",
+        summary: "显式结束",
+        releaseClaims: true,
+      });
+      retired.repository.endSession(retired.actor, "explicit-retire", {
+        outcome: "retired",
+        summary: "显式退役",
+        releaseClaims: true,
+        retirementReason: "context rotation",
+      });
+      forced.repository.recoverStaleSessions("2999-01-01T00:00:00.000Z");
+      forced.repository.forceCloseSession(forced.session.id, true);
+
+      for (const target of [ended, retired, forced]) {
+        const sequenceBefore = target.repository.delta(0, 100).currentSequence;
+        expect(() =>
+          target.repository.executeSessionMutation(
+            target.session.id,
+            "must-not-revive",
+            "record.create",
+            input,
+            (actor) => target.repository.createRecord(actor, "must-not-revive", input),
+          ),
+        ).toThrowError(`SESSION_CLOSED: ${target.session.id}`);
+        expect(target.repository.listRecords()).toHaveLength(0);
+        expect(target.repository.listAgentSessions()).toHaveLength(1);
+        expect(target.repository.delta(0, 100).currentSequence).toBe(sequenceBefore);
+      }
+    } finally {
+      ended.manager.close();
+      retired.manager.close();
+      forced.manager.close();
+    }
+  });
+
+  it("多候选或 thread、role、agent 身份不符时 fail closed 且 action 零落账", async () => {
+    const threadMismatch = await fixture("SMISTHR");
+    const roleMismatch = await fixture("SMISROLE");
+    const agentMismatch = await fixture("SMISAGENT");
+    const ambiguous = await fixture("SAMBIG");
+    const input = { kind: "FACT", title: "不应写入", summary: "候选不可信" };
+    try {
+      for (const target of [threadMismatch, roleMismatch, agentMismatch, ambiguous]) {
+        target.repository.recoverStaleSessions("2999-01-01T00:00:00.000Z");
+      }
+      threadMismatch.repository.createSession({
+        agentId: "continuity-agent",
+        displayName: "Continuity Agent",
+        clientKind: "test",
+        role: "SUBAGENT",
+        threadId: "other-thread",
+        resume: true,
+        predecessorSessionId: threadMismatch.session.id,
+      });
+      roleMismatch.repository.createSession({
+        agentId: "continuity-agent",
+        displayName: "Continuity Agent",
+        clientKind: "test",
+        role: "REVIEWER",
+        resume: true,
+        predecessorSessionId: roleMismatch.session.id,
+      });
+      const wrongAgent = agentMismatch.repository.createSession({
+        agentId: "other-agent",
+        displayName: "Other Agent",
+        clientKind: "test",
+        role: "SUBAGENT",
+      });
+      const agentDatabase = await agentMismatch.manager.openProject("SMISAGENT");
+      agentDatabase.sqlite
+        .prepare("UPDATE agent_sessions SET predecessor_session_id = ? WHERE id = ?")
+        .run(agentMismatch.session.id, wrongAgent.id);
+      for (let index = 0; index < 2; index += 1) {
+        ambiguous.repository.createSession({
+          agentId: "continuity-agent",
+          displayName: "Continuity Agent",
+          clientKind: "test",
+          role: "SUBAGENT",
+          resume: true,
+          predecessorSessionId: ambiguous.session.id,
+        });
+      }
+
+      for (const target of [threadMismatch, roleMismatch, agentMismatch]) {
+        const sequenceBefore = target.repository.delta(0, 100).currentSequence;
+        expect(() =>
+          target.repository.executeSessionMutation(
+            target.session.id,
+            "identity-mismatch",
+            "record.create",
+            input,
+            (actor) => target.repository.createRecord(actor, "identity-mismatch", input),
+          ),
+        ).toThrowError(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${target.session.id}`);
+        expect(target.repository.listRecords()).toHaveLength(0);
+        expect(target.repository.delta(0, 100).currentSequence).toBe(sequenceBefore);
+      }
+
+      const ambiguousSequence = ambiguous.repository.delta(0, 100).currentSequence;
+      expect(() =>
+        ambiguous.repository.executeSessionMutation(
+          ambiguous.session.id,
+          "ambiguous-successor",
+          "record.create",
+          input,
+          (actor) => ambiguous.repository.createRecord(actor, "ambiguous-successor", input),
+        ),
+      ).toThrowError(`SESSION_SUCCESSOR_AMBIGUOUS: ${ambiguous.session.id}`);
+      expect(ambiguous.repository.listRecords()).toHaveLength(0);
+      expect(ambiguous.repository.delta(0, 100).currentSequence).toBe(ambiguousSequence);
+    } finally {
+      threadMismatch.manager.close();
+      roleMismatch.manager.close();
+      agentMismatch.manager.close();
+      ambiguous.manager.close();
+    }
+  });
+
   it("已关闭 Session 的已提交 session+op 可在 actor 拒绝前精确回放", async () => {
     const { manager, repository, session, actor } = await fixture("SREPLAY");
     try {

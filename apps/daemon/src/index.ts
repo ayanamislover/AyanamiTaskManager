@@ -359,7 +359,12 @@ function statusForCode(code: string): number {
     code === "IMMUTABLE_RECORD"
   )
     return 409;
-  if (code === "SESSION_CLOSED" || code === "INVALID_TRANSITION") return 409;
+  if (
+    code === "SESSION_CLOSED" ||
+    code.startsWith("SESSION_SUCCESSOR_") ||
+    code === "INVALID_TRANSITION"
+  )
+    return 409;
   // 前置条件类错误一律 4xx：调用方重试多少次都不会变，回 500 会让崩溃重放
   // 控制器把永久失败当成服务端抖动，无限重试下去。REQUIRED 和 REQUIRES 都要收，
   // PROJECT_REQUIRED 与 ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT 都落在这一档。

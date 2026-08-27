@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+export const SESSION_CLOSE_REASONS = [
+  "HEARTBEAT_TIMEOUT",
+  "EXPLICIT_END",
+  "EXPLICIT_RETIRE",
+  "FORCE_CLOSE",
+] as const;
+export const SessionCloseReasonSchema = z.enum(SESSION_CLOSE_REASONS);
+export type SessionCloseReason = z.infer<typeof SessionCloseReasonSchema>;
+
 export const WORK_ITEM_STATUSES = [
   "BACKLOG",
   "READY",
