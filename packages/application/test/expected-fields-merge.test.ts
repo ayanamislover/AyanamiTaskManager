@@ -91,7 +91,10 @@ describe("字段级 compare-and-swap 合并", () => {
         ctx.service.patchWorkItems(ctx.project.code, ctx.session, "merge-title", [
           { ...mergePatch, expectedFields: { title: "不同的幂等身份" } },
         ]),
-      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: ctx.session, operation_id: "merge-title" },
+      });
 
       await expect(
         ctx.service.patchWorkItems(ctx.project.code, ctx.session, "stale-title", [
@@ -103,7 +106,15 @@ describe("字段级 compare-and-swap 合并", () => {
             title: "不应覆盖新标题",
           },
         ]),
-      ).rejects.toThrow(`VERSION_CONFLICT: ${base.key}`);
+      ).rejects.toMatchObject({
+        code: "VERSION_CONFLICT",
+        details: {
+          entity: "WORK_ITEM",
+          key: base.key,
+          expected: base.version,
+          actual: merged.items[0]?.version,
+        },
+      });
       expect((await ctx.service.getWorkItem(ctx.project.code, base.key)).title).toBe(
         "安全合并后的标题",
       );
@@ -153,7 +164,15 @@ describe("字段级 compare-and-swap 合并", () => {
           ctx.service.patchWorkItems(ctx.project.code, ctx.session, `strict-stale-${index}`, [
             patch,
           ]),
-        ).rejects.toThrow(`VERSION_CONFLICT: ${base.key}`);
+        ).rejects.toMatchObject({
+          code: "VERSION_CONFLICT",
+          details: {
+            entity: "WORK_ITEM",
+            key: base.key,
+            expected: base.version,
+            actual: base.version + 1,
+          },
+        });
       }
 
       expect(await ctx.service.getWorkItem(ctx.project.code, base.key)).toMatchObject({

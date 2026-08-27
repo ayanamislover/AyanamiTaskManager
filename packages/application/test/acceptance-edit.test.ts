@@ -59,7 +59,7 @@ describe("WorkItem acceptance edit", () => {
   it("整体替换 acceptance，并保留原 checklist 与子任务", async () => {
     const ctx = await openFixture("ACCEPT");
     try {
-      const before = await ctx.service.getWorkItem(ctx.project.code, ctx.parent.key);
+      const before = await ctx.service.getWorkItem(ctx.project.code, ctx.parent.key, "full");
       const updated = await ctx.service.patchWorkItems(
         ctx.project.code,
         ctx.session,
@@ -76,7 +76,7 @@ describe("WorkItem acceptance edit", () => {
       );
 
       expect(updated.items[0]?.acceptance).toEqual(["新的验收标准", "新标准可独立验证"]);
-      const readBack = await ctx.service.getWorkItem(ctx.project.code, ctx.parent.key);
+      const readBack = await ctx.service.getWorkItem(ctx.project.code, ctx.parent.key, "full");
       expect(readBack.acceptance).toEqual(["新的验收标准", "新标准可独立验证"]);
       expect(readBack.checklist).toEqual(before.checklist);
       const childReadBack = await ctx.service.getWorkItem(ctx.project.code, ctx.child.key);
@@ -186,7 +186,15 @@ describe("WorkItem acceptance edit", () => {
             acceptance: ["不应覆盖并发值"],
           },
         ]),
-      ).rejects.toThrow(`VERSION_CONFLICT: ${base.key}`);
+      ).rejects.toMatchObject({
+        code: "VERSION_CONFLICT",
+        details: {
+          entity: "WORK_ITEM",
+          key: base.key,
+          expected: base.version,
+          actual: concurrent.items[0]?.version,
+        },
+      });
       expect(await ctx.service.getWorkItem(ctx.project.code, base.key)).toMatchObject({
         acceptance: ["并发写入的标准"],
         version: concurrent.items[0]?.version,
@@ -299,7 +307,10 @@ describe("WorkItem acceptance edit", () => {
         ctx.service.patchWorkItems(ctx.project.code, ctx.session, "same-op", [
           { ...patch, acceptance: ["改变幂等身份"] },
         ]),
-      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: ctx.session, operation_id: "same-op" },
+      });
       const delta = await ctx.service.delta(ctx.project.code, 0, 100);
       expect(delta.events.filter((event) => event.opId === "same-op")).toHaveLength(1);
     } finally {

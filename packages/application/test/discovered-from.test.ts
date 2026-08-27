@@ -51,20 +51,18 @@ describe("DISCOVERED_FROM 任务关系", () => {
       const followUp = created.items[0]!;
       const origin = created.items[1]!;
 
-      expect(await service.getWorkItem(project.code, followUp.key, "context")).toMatchObject({
-        discoveredFrom: origin.key,
-        discovered: [],
+      expect(await service.getWorkItem(project.code, followUp.key, "full")).toMatchObject({
+        relations: [{ direction: "OUTGOING", taskKey: origin.key, type: "DISCOVERED_FROM" }],
       });
-      expect(await service.getWorkItem(project.code, origin.key, "context")).toMatchObject({
-        discoveredFrom: null,
-        discovered: [followUp.key],
+      expect(await service.getWorkItem(project.code, origin.key, "full")).toMatchObject({
+        relations: [{ direction: "INCOMING", taskKey: followUp.key, type: "DISCOVERED_FROM" }],
       });
       expect(
         (await service.listWorkItems(project.code, { readyOnly: true })).map((item) => item.key),
       ).toEqual(expect.arrayContaining([followUp.key, origin.key]));
       expect(
         (await service.search(project.code, "跟进异常索引")).hits.map((item) => item.entityKey),
-      ).toEqual(expect.arrayContaining([followUp.key, origin.key]));
+      ).toEqual([followUp.key]);
 
       const exported = await service.exportProject(project.code, "json");
       const snapshot = JSON.parse(readFileSync(exported.path, "utf8")) as {

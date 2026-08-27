@@ -89,9 +89,12 @@ describe("一等 Review verdict 工作流", () => {
       expect(await ctx.service.getReviewRequest(ctx.project.code, created.request.key)).toEqual(
         created.request,
       );
-      await expect(ctx.service.getReviewRequest(ctx.project.code, "OTHER-RR-0001")).rejects.toThrow(
-        "REVIEW_REQUEST_NOT_FOUND",
-      );
+      await expect(
+        ctx.service.getReviewRequest(ctx.project.code, "OTHER-RR-0001"),
+      ).rejects.toMatchObject({
+        code: "REVIEW_REQUEST_NOT_FOUND",
+        details: { entity: "REVIEW_REQUEST", reference: "OTHER-RR-0001" },
+      });
       const replayed = await ctx.service.createReviewRequest(
         ctx.project.code,
         ctx.primary,
@@ -116,7 +119,10 @@ describe("一等 Review verdict 工作流", () => {
           expectedParentChecklistVersion: ctx.parent.checklist[0]!.version,
           expectedCandidateHashes: [{ name: "git_head", value: "f".repeat(40) }],
         }),
-      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: ctx.primary, operation_id: "request-create" },
+      });
     } finally {
       ctx.service.close();
     }
@@ -214,7 +220,10 @@ describe("一等 Review verdict 工作流", () => {
           summary: "Review verdict 必须保持不可变",
           supersedes: result.recordKey,
         }),
-      ).rejects.toThrow("IMMUTABLE_RECORD");
+      ).rejects.toMatchObject({
+        code: "IMMUTABLE_RECORD",
+        details: { record_key: result.recordKey },
+      });
       expect(await ctx.service.getRecord(ctx.project.code, result.recordKey)).toMatchObject({
         status: "ACTIVE",
       });
@@ -311,13 +320,19 @@ describe("一等 Review verdict 工作流", () => {
           ...submission,
           verdict: "APPROVED",
         }),
-      ).rejects.toThrow("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: { session_id: reviewer.session, operation_id: "review-changes" },
+      });
       await expect(
         ctx.service.submitReview(ctx.project.code, reviewer.session, "review-changes-again", {
           ...submission,
           expectedReviewTaskVersion: first.reviewTask.version,
         }),
-      ).rejects.toThrow("REVIEW_ALREADY_SUBMITTED");
+      ).rejects.toMatchObject({
+        code: "REVIEW_ALREADY_SUBMITTED",
+        details: { request_key: submission.requestKey },
+      });
       expect(await ctx.service.listRecords(ctx.project.code)).toHaveLength(1);
     } finally {
       ctx.service.close();
@@ -414,7 +429,14 @@ describe("一等 Review verdict 工作流", () => {
           reviewedHashes: [{ name: "git_head", value: "e".repeat(40) }],
           evidence: [{ kind: "test_result", value: "tests passed" }],
         }),
-      ).rejects.toThrow("CANDIDATE_HASH_MISMATCH");
+      ).rejects.toMatchObject({
+        code: "CANDIDATE_HASH_MISMATCH",
+        details: {
+          request_key: request.request.key,
+          expected: expectedHashes,
+          actual: [{ name: "git_head", value: "e".repeat(40) }],
+        },
+      });
       await expect(
         hashCtx.service.submitReview(hashCtx.project.code, reviewer.session, "plain-evidence", {
           requestKey: request.request.key,
@@ -471,7 +493,10 @@ describe("一等 Review verdict 工作流", () => {
             evidence: [{ kind: "test_result", value: "tests passed" }],
           },
         ),
-      ).rejects.toThrow("REVIEW_IDENTITY_MISMATCH");
+      ).rejects.toMatchObject({
+        code: "REVIEW_IDENTITY_MISMATCH",
+        details: { task_key: identityCtx.review.key, session_id: intruder.session },
+      });
       await assertPublicState(identityCtx, request.request.key, {
         review: { status: identityCtx.review.status, version: identityCtx.review.version },
         parent: {
@@ -547,7 +572,17 @@ describe("一等 Review verdict 工作流", () => {
           reviewedHashes: expectedHashes,
           evidence: [{ kind: "test_result", value: "tests passed" }],
         }),
-      ).rejects.toThrow("COMPLETION_GATE_FAILED: checklist incomplete");
+      ).rejects.toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reasons: expect.arrayContaining([
+            {
+              checklist_id: gateCtx.review.checklist[0]!.id,
+              code: "CHECKLIST_INCOMPLETE",
+            },
+          ]),
+        },
+      });
       await assertPublicState(gateCtx, request.request.key, {
         review: { status: beforeReview.status, version: beforeReview.version },
         parent: {

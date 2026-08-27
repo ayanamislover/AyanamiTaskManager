@@ -81,11 +81,9 @@ describe("Session Git context", () => {
       expect((await service.listAgentSessions(project.code))[0]).toMatchObject({
         current_task_key: started.items[0]!.key,
         work_state: "WORKING",
+        git_head: initial.git_head,
+        worktree_root: canonicalCwd,
       });
-      expect(
-        (await service.getWorkItem(project.code, started.items[0]!.key, "context"))
-          .executionSession,
-      ).toMatchObject({ git_head: initial.git_head, worktree_root: canonicalCwd });
 
       writeFileSync(join(cwd, "tracked.txt"), "dirty\n", "utf8");
       await service.addProjectProgress(project.code, begun.session, "git-progress", {

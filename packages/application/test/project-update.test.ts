@@ -194,11 +194,20 @@ describe("项目更新", () => {
             summary: "Invalid evidence reference",
             evidence: [{ kind: invalid.kind, value: invalid.value }],
           }),
-        ).rejects.toThrowError(/(?:RECORD|WORK_ITEM)_NOT_FOUND/u);
+        ).rejects.toMatchObject({
+          code: invalid.kind === "atm_record" ? "RECORD_NOT_FOUND" : "WORK_ITEM_NOT_FOUND",
+          details: {
+            entity: invalid.kind === "atm_record" ? "RECORD" : "WORK_ITEM",
+            reference: invalid.value,
+          },
+        });
         expect(await service.listProjectUpdates("PEVID")).toEqual(before);
         await expect(
           service.getOperationTrace("PEVID", invalid.opId, String(begun.session)),
-        ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${invalid.opId}`);
+        ).rejects.toMatchObject({
+          code: "OPERATION_NOT_FOUND",
+          details: { entity: "OPERATION", reference: invalid.opId },
+        });
       }
 
       const validInput = {
@@ -232,7 +241,13 @@ describe("项目更新", () => {
           ...validInput,
           evidence: [{ kind: "git_sha", value: "different" }],
         }),
-      ).rejects.toThrowError("IDEMPOTENCY_CONFLICT");
+      ).rejects.toMatchObject({
+        code: "IDEMPOTENCY_CONFLICT",
+        details: {
+          session_id: begun.session,
+          operation_id: "project-evidence-idempotent",
+        },
+      });
       expect(await service.listProjectUpdates("PEVID")).toHaveLength(1);
       expect(
         await service.getOperationTrace(

@@ -40,7 +40,7 @@ async function openHarness() {
   let counter = 0;
   const nextId = () => `op-${(counter += 1)}`;
 
-  const read = (taskKey: string) => service.getWorkItem(project.code, taskKey, "core");
+  const read = (taskKey: string) => service.getWorkItem(project.code, taskKey, "full");
   const patch = async (taskKey: string, input: Record<string, unknown>) => {
     const fresh = await read(taskKey);
     const result = await service.patchWorkItems(project.code, begun.session, nextId(), [
@@ -85,9 +85,12 @@ describe("blockers 记录必须能被关掉", () => {
   it("带 blocker 的 progress 会挡住完成，reopen 之后放行", async () => {
     const harness = await openHarness();
     const key = await harness.blockedTask();
-    await expect(harness.patch(key, { operation: "complete" })).rejects.toThrow(
-      /COMPLETION_GATE_FAILED/u,
-    );
+    await expect(harness.patch(key, { operation: "complete" })).rejects.toMatchObject({
+      code: "COMPLETION_GATE_FAILED",
+      details: {
+        reasons: expect.arrayContaining([expect.objectContaining({ code: "BLOCKER_ACTIVE" })]),
+      },
+    });
     const reopened = await harness.patch(key, { operation: "reopen" });
     expect(reopened.status).toBe("IN_PROGRESS");
     const done = await harness.patch(key, { operation: "complete" });
