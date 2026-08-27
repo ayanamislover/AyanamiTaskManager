@@ -83,6 +83,17 @@ type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
 type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type McpProfileSwitchResult = {
+  enabled: boolean;
+  status: "APPLIED";
+  restartRequired: boolean;
+  clients: Array<{
+    client: McpClient;
+    target: string;
+    status: "SKIPPED" | "UPDATED" | "FAILED" | "ROLLED_BACK" | "ROLLBACK_FAILED";
+    error?: string;
+  }>;
+};
 type UpdateStatus = {
   phase: "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
   outcome: "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
@@ -95,6 +106,7 @@ type UpdateStatus = {
 type AgentIntegrationReport = {
   client: McpClient;
   mcpInstalled: boolean;
+  repairError: string | null;
   sharesRuleAndSkillsWith: "CLAUDE" | null;
   cliAvailable: boolean;
   rule: { state: AgentIntegrationState; path: string; version: number | null };
@@ -116,6 +128,8 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
+  getMemoryProfile?: () => Promise<boolean>;
+  setMemoryProfile?: (enabled: boolean) => Promise<McpProfileSwitchResult>;
   installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;
   getAgentIntegrations?: () => Promise<AgentIntegrationReport[]>;
   manageAgentIntegration?: (
@@ -1796,6 +1810,10 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
     refetchInterval: 30_000,
   });
   const [autoLaunch, setAutoLaunch] = useState<boolean | null>(null);
+  const [memoryProfile, setMemoryProfile] = useState<boolean | null>(null);
+  const [memoryProfilePending, setMemoryProfilePending] = useState(false);
+  const [memoryProfileError, setMemoryProfileError] = useState("");
+  const [memoryProfileNotice, setMemoryProfileNotice] = useState("");
   const [dailyEnabled, setDailyEnabled] = useState(true);
   const [dailyKeep, setDailyKeep] = useState(7);
   const [weeklyKeep, setWeeklyKeep] = useState(4);
@@ -1808,6 +1826,14 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
   } | null>(null);
   useEffect(() => {
     void desktop?.getAutoLaunch?.().then(setAutoLaunch);
+  }, [desktop]);
+  useEffect(() => {
+    void desktop
+      ?.getMemoryProfile?.()
+      .then(setMemoryProfile)
+      .catch((error: unknown) => {
+        setMemoryProfileError(error instanceof Error ? error.message : String(error));
+      });
   }, [desktop]);
   useEffect(() => {
     if (!settings.data) return;
@@ -1945,6 +1971,61 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                     <div className="atm-row-sub">
                       只管理 ATM 的 MCP、全局规则 block 与两个 Skill；写入前备份，不覆盖其他内容。
                     </div>
+                    {desktop?.setMemoryProfile ? (
+                      <div className="atm-row" data-testid="memory-profile-toggle">
+                        <div>
+                          <div className="atm-row-title">memory 工具面</div>
+                          <div className="atm-row-sub">
+                            默认开启完整工具面。关闭可减少每个客户端一个常驻 bridge 进程（约 32
+                            MiB），但关闭后将失去
+                            atm_task_patch、atm_progress_add、atm_record、atm_search、atm_delta
+                            五个工具。切换后请重载或重启 Agent 客户端。
+                          </div>
+                          {memoryProfileError ? (
+                            <div className="atm-inline-error" role="alert">
+                              切换失败，偏好未保存：{memoryProfileError}
+                            </div>
+                          ) : memoryProfileNotice ? (
+                            <div className="atm-row-sub" role="status">
+                              {memoryProfileNotice}
+                            </div>
+                          ) : null}
+                        </div>
+                        <button
+                          className="atm-button"
+                          disabled={memoryProfile === null || memoryProfilePending}
+                          onClick={async () => {
+                            setMemoryProfilePending(true);
+                            setMemoryProfileError("");
+                            setMemoryProfileNotice("");
+                            try {
+                              const result = await desktop.setMemoryProfile!(!memoryProfile);
+                              setMemoryProfile(result.enabled);
+                              const updated = result.clients.filter(
+                                (entry) => entry.status === "UPDATED",
+                              ).length;
+                              setMemoryProfileNotice(
+                                `已同步 ${updated} 个 Agent 配置；请重载或重启客户端生效。`,
+                              );
+                              // 开关改的是「该装哪些 server」，已安装状态与可复制的配置文本
+                              // 都跟着变，两个都要重新取，否则界面停在改之前的样子。
+                              await queryClient.invalidateQueries({
+                                queryKey: ["agent-integrations"],
+                              });
+                              await queryClient.invalidateQueries({ queryKey: ["mcp-configs"] });
+                            } catch (error) {
+                              setMemoryProfileError(
+                                error instanceof Error ? error.message : String(error),
+                              );
+                            } finally {
+                              setMemoryProfilePending(false);
+                            }
+                          }}
+                        >
+                          {memoryProfilePending ? "正在同步" : memoryProfile ? "已开启" : "已关闭"}
+                        </button>
+                      </div>
+                    ) : null}
                     {integrations.isLoading ? (
                       <LoadingRows count={2} />
                     ) : integrations.data ? (
@@ -2001,6 +2082,11 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                                   </>
                                 ) : null}
                               </div>
+                              {report.repairError ? (
+                                <div className="atm-inline-error" role="alert">
+                                  自动修复失败：{report.repairError}
+                                </div>
+                              ) : null}
                               <div className="atm-actions">
                                 <button
                                   className="atm-button"

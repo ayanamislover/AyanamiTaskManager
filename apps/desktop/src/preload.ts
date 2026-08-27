@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   checkForUpdates: () => ipcRenderer.invoke("atm:check-for-updates"),
   showItemInFolder: (path: string) => ipcRenderer.invoke("atm:show-item", path),
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
+  getMemoryProfile: () => ipcRenderer.invoke("atm:get-memory-profile"),
+  setMemoryProfile: (enabled: boolean) => ipcRenderer.invoke("atm:set-memory-profile", enabled),
   installMcp: (client: McpClient) => ipcRenderer.invoke("atm:install-mcp", client),
   getAgentIntegrations: () => ipcRenderer.invoke("atm:get-agent-integrations"),
   manageAgentIntegration: (

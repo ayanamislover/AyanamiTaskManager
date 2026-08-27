@@ -17,9 +17,15 @@ import {
   installClaudeCodeConfig,
   installClaudeConfig,
   installCodexConfig,
+  isClaudeCodeConfigInstalled,
+  isClaudeConfigInstalled,
+  isCodexConfigInstalled,
   installedClaudeCodeLaunch,
+  installedClaudeCodeProfileLaunches,
   installedClaudeLaunch,
+  installedClaudeProfileLaunches,
   installedCodexLaunch,
+  installedCodexProfileLaunches,
   BACKUP_RETENTION,
   manageAgentRule,
   renderMcpConfigs,
@@ -34,7 +40,56 @@ afterEach(() => {
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
+/** 双 Profile 的迁移、幂等、回滚和读回；显式常量让每条断言的工具面一目了然。 */
+const BOTH = ["core", "memory"] as const;
+
 describe("Agent MCP 配置适配", () => {
+  it("Codex 原子迁移旧单入口为双 Profile，并保持幂等", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-codex-dual-config-"));
+    temporary.push(root);
+    const path = join(root, "config.toml");
+    writeFileSync(
+      path,
+      [
+        'model = "gpt"',
+        "",
+        "[mcp_servers.other]",
+        'command = "other.exe"',
+        "",
+        '[mcp_servers."ayanami-task-manager"]',
+        'command = "old.exe"',
+        'args = ["old-bridge.cjs"]',
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    expect(isCodexConfigInstalled(path)).toBe(false);
+
+    installCodexConfig({ path, command: "atm.exe", args: ["bridge.cjs"], profiles: BOTH });
+    expect(isCodexConfigInstalled(path, BOTH)).toBe(true);
+    const migrated = readFileSync(path, "utf8");
+    expect(migrated).toContain("[mcp_servers.other]");
+    expect(migrated).not.toContain('[mcp_servers."ayanami-task-manager"]');
+    expect(migrated).toContain('[mcp_servers."ayanami-task-manager-core"]');
+    expect(migrated).toContain('args = ["bridge.cjs", "--profile", "core"]');
+    expect(migrated).toContain('[mcp_servers."ayanami-task-manager-memory"]');
+    expect(migrated).toContain('args = ["bridge.cjs", "--profile", "memory"]');
+
+    const repeated = installCodexConfig({
+      path,
+      command: "atm.exe",
+      args: ["bridge.cjs"],
+      profiles: BOTH,
+    });
+    expect(repeated.backupPath).toBeNull();
+    expect(readFileSync(path, "utf8")).toBe(migrated);
+
+    uninstallCodexConfig(path);
+    const removed = readFileSync(path, "utf8");
+    expect(removed).toContain("[mcp_servers.other]");
+    expect(removed).not.toContain("ayanami-task-manager");
+  });
+
   it("Codex 只合并自己的 TOML 段并备份旧文件", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-codex-config-"));
     temporary.push(root);
@@ -43,19 +98,69 @@ describe("Agent MCP 配置适配", () => {
     const result = installCodexConfig({
       path,
       command: "C:\\Program Files\\ATM\\AyanamiTaskManager.exe",
+      profiles: BOTH,
     });
     const content = readFileSync(path, "utf8");
     expect(existsSync(result.backupPath!)).toBe(true);
     expect(content).toContain("[mcp_servers.other]");
-    expect(content).toContain('[mcp_servers."ayanami-task-manager"]');
-    expect(content).toContain('args = ["--mcp-stdio"]');
-    installCodexConfig({ path, command: "C:\\ATM\\new.exe" });
+    expect(content).toContain('[mcp_servers."ayanami-task-manager-core"]');
+    expect(content).toContain('args = ["--mcp-stdio", "--profile", "core"]');
+    expect(content).toContain('[mcp_servers."ayanami-task-manager-memory"]');
+    installCodexConfig({ path, command: "C:\\ATM\\new.exe", profiles: BOTH });
     expect(
-      readFileSync(path, "utf8").match(/\[mcp_servers\."ayanami-task-manager"\]/gu),
-    ).toHaveLength(1);
+      readFileSync(path, "utf8").match(/\[mcp_servers\."ayanami-task-manager-(?:core|memory)"\]/gu),
+    ).toHaveLength(2);
     uninstallCodexConfig(path);
     expect(readFileSync(path, "utf8")).toContain("[mcp_servers.other]");
     expect(readFileSync(path, "utf8")).not.toContain("ayanami-task-manager");
+  });
+
+  it("Claude Desktop 原子迁移旧单入口并保留其他 JSON", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-claude-dual-config-"));
+    temporary.push(root);
+    const path = join(root, "claude_desktop_config.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        theme: "dark",
+        mcpServers: {
+          other: { command: "other" },
+          "ayanami-task-manager": { command: "old.exe", args: ["old.cjs"] },
+        },
+      }),
+      "utf8",
+    );
+    expect(isClaudeConfigInstalled(path)).toBe(false);
+
+    installClaudeConfig({ path, command: "atm.exe", args: ["bridge.cjs"], profiles: BOTH });
+    expect(isClaudeConfigInstalled(path, BOTH)).toBe(true);
+    const migratedText = readFileSync(path, "utf8");
+    const migrated = JSON.parse(migratedText);
+    expect(migrated.theme).toBe("dark");
+    expect(migrated.mcpServers.other).toEqual({ command: "other" });
+    expect(migrated.mcpServers["ayanami-task-manager"]).toBeUndefined();
+    expect(migrated.mcpServers["ayanami-task-manager-core"]).toEqual({
+      command: "atm.exe",
+      args: ["bridge.cjs", "--profile", "core"],
+    });
+    expect(migrated.mcpServers["ayanami-task-manager-memory"]).toEqual({
+      command: "atm.exe",
+      args: ["bridge.cjs", "--profile", "memory"],
+    });
+
+    const repeated = installClaudeConfig({
+      path,
+      command: "atm.exe",
+      args: ["bridge.cjs"],
+      profiles: BOTH,
+    });
+    expect(repeated.backupPath).toBeNull();
+    expect(readFileSync(path, "utf8")).toBe(migratedText);
+
+    uninstallClaudeConfig(path);
+    const removed = JSON.parse(readFileSync(path, "utf8"));
+    expect(removed.theme).toBe("dark");
+    expect(removed.mcpServers).toEqual({ other: { command: "other" } });
   });
 
   it("Claude 保留其他 server 和顶层配置", () => {
@@ -67,20 +172,29 @@ describe("Agent MCP 配置适配", () => {
       JSON.stringify({ theme: "dark", mcpServers: { other: { command: "other" } } }),
       "utf8",
     );
-    const result = installClaudeConfig({ path, command: "C:\\ATM\\AyanamiTaskManager.exe" });
+    const result = installClaudeConfig({
+      path,
+      command: "C:\\ATM\\AyanamiTaskManager.exe",
+      profiles: BOTH,
+    });
     const content = JSON.parse(readFileSync(path, "utf8"));
     expect(existsSync(result.backupPath!)).toBe(true);
     expect(content.theme).toBe("dark");
     expect(content.mcpServers.other).toEqual({ command: "other" });
-    expect(content.mcpServers["ayanami-task-manager"]).toEqual({
+    expect(content.mcpServers["ayanami-task-manager-core"]).toEqual({
       command: "C:\\ATM\\AyanamiTaskManager.exe",
-      args: ["--mcp-stdio"],
+      args: ["--mcp-stdio", "--profile", "core"],
+    });
+    expect(content.mcpServers["ayanami-task-manager-memory"]).toEqual({
+      command: "C:\\ATM\\AyanamiTaskManager.exe",
+      args: ["--mcp-stdio", "--profile", "memory"],
     });
     uninstallClaudeConfig(path);
     const removed = JSON.parse(readFileSync(path, "utf8"));
     expect(removed.theme).toBe("dark");
     expect(removed.mcpServers.other).toEqual({ command: "other" });
-    expect(removed.mcpServers["ayanami-task-manager"]).toBeUndefined();
+    expect(removed.mcpServers["ayanami-task-manager-core"]).toBeUndefined();
+    expect(removed.mcpServers["ayanami-task-manager-memory"]).toBeUndefined();
   });
 
   it("Claude Code 经 CLI 写 user scope，绝不自行改写 ~/.claude.json", () => {
@@ -102,23 +216,28 @@ describe("Agent MCP 配置适配", () => {
       cliPath: "C:\\fake\\claude.exe",
       configPath: path,
       runCli: (cli, args) => calls.push({ cli, args }),
+      profiles: BOTH,
     });
 
     expect(result.client).toBe("CLAUDE_CODE");
     expect(readFileSync(path, "utf8")).toBe(original);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(calls[0]!.cli).toBe("C:\\fake\\claude.exe");
-    expect(calls[0]!.args.slice(0, 3)).toEqual(["mcp", "add-json", "ayanami-task-manager"]);
-    expect(calls[0]!.args.slice(-2)).toEqual(["--scope", "user"]);
-    const payload = JSON.parse(calls[0]!.args[3]!);
+    expect(calls.map((call) => call.args.slice(0, 3))).toEqual([
+      ["mcp", "add-json", "ayanami-task-manager-core"],
+      ["mcp", "add-json", "ayanami-task-manager-memory"],
+    ]);
+    expect(calls.every((call) => call.args.slice(-2).join(" ") === "--scope user")).toBe(true);
+    const payloads = calls.map((call) => JSON.parse(call.args[3]!));
     // stdio 传输：不能把每次重启都会变的 endpoint / token 写死进配置。
-    expect(payload).toEqual({
+    expect(payloads[0]).toEqual({
       command: "C:\\ATM\\AyanamiTaskManager.exe",
-      args: ["C:\\ATM\\resources\\mcp-stdio.cjs"],
+      args: ["C:\\ATM\\resources\\mcp-stdio.cjs", "--profile", "core"],
       env: { ELECTRON_RUN_AS_NODE: "1" },
     });
-    expect(JSON.stringify(payload)).not.toContain("Bearer");
-    expect(JSON.stringify(payload)).not.toContain("127.0.0.1");
+    expect(payloads[1].args.slice(-2)).toEqual(["--profile", "memory"]);
+    expect(JSON.stringify(payloads)).not.toContain("Bearer");
+    expect(JSON.stringify(payloads)).not.toContain("127.0.0.1");
 
     // 已安装时重复安装先移除再新增，保证幂等。
     writeFileSync(
@@ -132,8 +251,9 @@ describe("Agent MCP 配置适配", () => {
       cliPath: "C:\\fake\\claude.exe",
       configPath: path,
       runCli: (cli, args) => calls.push({ cli, args }),
+      profiles: BOTH,
     });
-    expect(calls.map((call) => call.args[1])).toEqual(["remove", "add-json"]);
+    expect(calls.map((call) => call.args[1])).toEqual(["remove", "add-json", "add-json"]);
 
     // 新配置注册失败时，必须仍通过 CLI 恢复旧 server，不能把现有接入删掉。
     calls.length = 0;
@@ -142,6 +262,7 @@ describe("Agent MCP 配置适配", () => {
         command: "C:\\ATM\\broken.exe",
         cliPath: "C:\\fake\\claude.exe",
         configPath: path,
+        profiles: BOTH,
         runCli: (cli, args) => {
           calls.push({ cli, args });
           if (args[1] === "add-json" && JSON.parse(args[3]!).command === "C:\\ATM\\broken.exe") {
@@ -162,6 +283,111 @@ describe("Agent MCP 配置适配", () => {
       runCli: (cli, args) => calls.push({ cli, args }),
     });
     expect(calls).toHaveLength(0);
+  });
+
+  it("Claude Code 双入口安装幂等，任一失败时经 CLI 回滚旧配置", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-claude-code-dual-"));
+    temporary.push(root);
+    const path = join(root, ".claude.json");
+    let state: Record<string, unknown> = {
+      projects: { demo: { history: ["keep"] } },
+      mcpServers: {
+        other: { command: "other" },
+        "ayanami-task-manager": { command: "old.exe", args: ["old.cjs"] },
+      },
+    };
+    const persist = () => writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    persist();
+    const calls: string[][] = [];
+    let rejectMemory = false;
+    const runCli = (_cli: string, args: string[]) => {
+      calls.push(args);
+      const servers = { ...((state.mcpServers ?? {}) as Record<string, unknown>) };
+      if (args[1] === "remove") {
+        delete servers[args[2]!];
+      } else if (args[1] === "add-json") {
+        if (rejectMemory && args[2] === "ayanami-task-manager-memory") {
+          throw new Error("memory registration failed");
+        }
+        servers[args[2]!] = JSON.parse(args[3]!);
+      }
+      state = { ...state, mcpServers: servers };
+      persist();
+    };
+
+    installClaudeCodeConfig({
+      command: "atm.exe",
+      args: ["bridge.cjs"],
+      cliPath: "claude.exe",
+      configPath: path,
+      runCli,
+      profiles: BOTH,
+    });
+    expect(isClaudeCodeConfigInstalled(path, BOTH)).toBe(true);
+    expect(calls.map((args) => args.slice(1, 3))).toEqual([
+      ["remove", "ayanami-task-manager"],
+      ["add-json", "ayanami-task-manager-core"],
+      ["add-json", "ayanami-task-manager-memory"],
+    ]);
+    expect(state.projects).toEqual({ demo: { history: ["keep"] } });
+    expect((state.mcpServers as Record<string, unknown>).other).toEqual({ command: "other" });
+
+    calls.length = 0;
+    installClaudeCodeConfig({
+      command: "atm.exe",
+      args: ["bridge.cjs"],
+      cliPath: "claude.exe",
+      configPath: path,
+      runCli,
+      profiles: BOTH,
+    });
+    expect(calls).toEqual([]);
+
+    uninstallClaudeCodeConfig({ cliPath: "claude.exe", configPath: path, runCli });
+    expect(calls.map((args) => args.slice(1, 3))).toEqual([
+      ["remove", "ayanami-task-manager-core"],
+      ["remove", "ayanami-task-manager-memory"],
+    ]);
+    expect(state.mcpServers).toEqual({ other: { command: "other" } });
+    calls.length = 0;
+    installClaudeCodeConfig({
+      command: "atm.exe",
+      args: ["bridge.cjs"],
+      cliPath: "claude.exe",
+      configPath: path,
+      runCli,
+      profiles: BOTH,
+    });
+    expect(calls.map((args) => args.slice(1, 3))).toEqual([
+      ["add-json", "ayanami-task-manager-core"],
+      ["add-json", "ayanami-task-manager-memory"],
+    ]);
+
+    state = {
+      ...state,
+      mcpServers: {
+        other: { command: "other" },
+        "ayanami-task-manager": { command: "old.exe", args: ["old.cjs"] },
+      },
+    };
+    persist();
+    calls.length = 0;
+    rejectMemory = true;
+    expect(() =>
+      installClaudeCodeConfig({
+        command: "atm.exe",
+        args: ["bridge.cjs"],
+        cliPath: "claude.exe",
+        configPath: path,
+        runCli,
+        profiles: BOTH,
+      }),
+    ).toThrow("memory registration failed");
+    expect(state.mcpServers).toEqual({
+      other: { command: "other" },
+      "ayanami-task-manager": { command: "old.exe", args: ["old.cjs"] },
+    });
+    expect(isClaudeCodeConfigInstalled(path)).toBe(false);
   });
 
   it("找不到 claude CLI 时报错，不退化成直接改写配置", () => {
@@ -186,18 +412,34 @@ describe("Agent MCP 配置适配", () => {
     expect(readFileSync(path, "utf8")).toBe(original);
   });
 
-  it("生成 Streamable HTTP、stdio 和通用 JSON 配置", () => {
-    const rendered = renderMcpConfigs({
-      endpoint: "http://127.0.0.1:43210",
-      token: "secret",
-      command: "atm.exe",
-      env: { ELECTRON_RUN_AS_NODE: "1" },
-    });
-    expect(rendered.streamableHttp).toContain("http://127.0.0.1:43210/mcp");
+  it("生成双 Profile 的 Streamable HTTP、stdio 和通用 JSON 配置", () => {
+    const rendered = renderMcpConfigs(
+      {
+        endpoint: "http://127.0.0.1:43210",
+        token: "secret",
+        command: "atm.exe",
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      },
+      BOTH,
+    );
+    const http = JSON.parse(rendered.streamableHttp).mcpServers;
+    const stdio = JSON.parse(rendered.stdio).mcpServers;
+    const generic = JSON.parse(rendered.generic).mcpServers;
+    expect(Object.keys(http).sort()).toEqual([
+      "ayanami-task-manager-core",
+      "ayanami-task-manager-memory",
+    ]);
+    expect(http["ayanami-task-manager-core"].url).toBe("http://127.0.0.1:43210/mcp/core");
+    expect(http["ayanami-task-manager-memory"].url).toBe("http://127.0.0.1:43210/mcp/memory");
     expect(rendered.streamableHttp).toContain("Bearer secret");
-    expect(rendered.stdio).toContain("--mcp-stdio");
+    expect(stdio["ayanami-task-manager-core"].args).toEqual(["--mcp-stdio", "--profile", "core"]);
+    expect(stdio["ayanami-task-manager-memory"].args).toEqual([
+      "--mcp-stdio",
+      "--profile",
+      "memory",
+    ]);
     expect(rendered.stdio).toContain("ELECTRON_RUN_AS_NODE");
-    expect(JSON.parse(rendered.generic).mcpServers["ayanami-task-manager"]).toBeTruthy();
+    expect(generic).toEqual(http);
     expect(rendered.agentRule).toContain("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md");
     expect(rendered.agentRule).not.toContain("R:\\Project_All");
     expect(rendered.agentRule).toContain("后续所有任务执行均依赖 ATM");
@@ -311,8 +553,20 @@ describe("读回已登记的 MCP 启动方式", () => {
     );
     expect(installedCodexLaunch(path)).toBeNull();
 
-    installCodexConfig({ path, ...launch });
-    expect(installedCodexLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+    installCodexConfig({ path, ...launch, profiles: BOTH });
+    expect(installedCodexProfileLaunches(path)).toEqual({
+      legacy: null,
+      core: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "core"],
+        env: launch.env,
+      },
+      memory: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "memory"],
+        env: launch.env,
+      },
+    });
   });
 
   it("Claude Desktop：写进去什么就读回什么", () => {
@@ -321,8 +575,20 @@ describe("读回已登记的 MCP 启动方式", () => {
     const path = join(root, "claude_desktop_config.json");
     expect(installedClaudeLaunch(path)).toBeNull();
 
-    installClaudeConfig({ path, ...launch });
-    expect(installedClaudeLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+    installClaudeConfig({ path, ...launch, profiles: BOTH });
+    expect(installedClaudeProfileLaunches(path)).toEqual({
+      legacy: null,
+      core: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "core"],
+        env: launch.env,
+      },
+      memory: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "memory"],
+        env: launch.env,
+      },
+    });
   });
 
   it("Claude Code：写进去什么就读回什么", () => {
@@ -334,20 +600,39 @@ describe("读回已登记的 MCP 启动方式", () => {
     installClaudeCodeConfig({
       configPath: path,
       ...launch,
+      profiles: BOTH,
       cliPath: "claude",
       runCli: (_cli, args) => {
+        const name = args[args.indexOf("add-json") + 1] as string;
         const payload = JSON.parse(args[args.indexOf("add-json") + 2] as string) as Record<
           string,
           unknown
         >;
+        const existing = existsSync(path)
+          ? (JSON.parse(readFileSync(path, "utf8")) as {
+              mcpServers?: Record<string, unknown>;
+            })
+          : {};
         writeFileSync(
           path,
-          `${JSON.stringify({ mcpServers: { "ayanami-task-manager": payload } }, null, 2)}\n`,
+          `${JSON.stringify({ ...existing, mcpServers: { ...existing.mcpServers, [name]: payload } }, null, 2)}\n`,
           "utf8",
         );
       },
     });
-    expect(installedClaudeCodeLaunch(path)).toEqual({ command: launch.command, args: launch.args });
+    expect(installedClaudeCodeProfileLaunches(path)).toEqual({
+      legacy: null,
+      core: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "core"],
+        env: launch.env,
+      },
+      memory: {
+        command: launch.command,
+        args: [...launch.args, "--profile", "memory"],
+        env: launch.env,
+      },
+    });
   });
 
   // 坏文件不能让启动挂掉，也不能被当成「已登记但不一致」而触发重写。

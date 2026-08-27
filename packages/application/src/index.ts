@@ -155,6 +155,10 @@ export class AyanamiTaskService {
     return this.databases.listSettings();
   }
 
+  getSetting<T = unknown>(key: string, fallback?: T) {
+    return this.databases.getSetting<T>(key, fallback);
+  }
+
   setSetting(key: string, value: unknown, expectedVersion?: number) {
     const result = this.databases.setSetting(key, value, expectedVersion);
     this.#events.emit("global");
