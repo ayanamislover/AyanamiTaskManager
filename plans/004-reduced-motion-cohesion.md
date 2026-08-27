@@ -1,7 +1,7 @@
 # 004 — 补齐减少动态并统一动效节奏
 
-- **Status**: TODO
-- **Commit**: 9e1f7c8
+- **Status**: DONE
+- **Commit**: db562e1
 - **Severity**: MEDIUM
 - **Category**: Accessibility / Cohesion
 - **Estimated scope**: 4 files, small
@@ -69,3 +69,9 @@ modal、drawer、notice 和 select，遗漏同样会缩放、位移或旋转的 
 - **Feel check**: 开启 DevTools `prefers-reduced-motion: reduce`，逐个点击工作区、设置、通知档位、
   工程统计、排序和窗口三键；确认无位移/缩放/旋转，但颜色和焦点反馈仍在。
 - **Done when**: 静态守卫验红有效，真实 reduced-motion 路径无遗漏，窗口按钮与通用按钮节奏一致。
+
+## Result
+
+- focused Vitest 5/5；四类 mutation（窗口 scale、遗漏 selector、硬编码时长、错误 easing）均验红。
+- Chromium `reducedMotion=reduce` 实测 9 类交互 transform 为 `none`，颜色反馈仍为 160ms；
+  普通模式窗口 scale 为 0.97，四类常驻 morph 使用 ease-in-out。

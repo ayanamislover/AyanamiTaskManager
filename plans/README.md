@@ -15,9 +15,9 @@
 | 计划 | 严重度 | 状态 | 依赖 |
 | --- | --- | --- | --- |
 | 000–002 | — | DONE | — |
-| 003 | — | CHANGES_REQUIRED | 004–006 |
-| 004 | MEDIUM | TODO | — |
-| 005 | HIGH | TODO | — |
-| 006 | MEDIUM | TODO | — |
+| 003 | — | PASS | 004–006 DONE |
+| 004 | MEDIUM | DONE | — |
+| 005 | HIGH | DONE | — |
+| 006 | MEDIUM | DONE | — |
 
 每批完成后必须通过定向测试、全仓静态检查、真实浏览器与 packaged Electron 验收；最终产物才允许推送 GitHub。

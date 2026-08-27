@@ -1,7 +1,7 @@
 # 005 — 让键盘下拉保持即时
 
-- **Status**: TODO
-- **Commit**: 9e1f7c8
+- **Status**: DONE
+- **Commit**: e19f227
 - **Severity**: HIGH
 - **Category**: Purpose & Frequency
 - **Estimated scope**: 3 files, small
@@ -55,3 +55,9 @@ onKeyDown={(event) => {
 - **Feel check**: 以 10% 动画速度分别点击和按 ArrowDown 打开同一筛选；鼠标路径有短空间提示，
   键盘路径立即出现且无闪跳。
 - **Done when**: RED→GREEN，六个工具栏下拉均复用同一组件并同时获得该行为。
+
+## Result
+
+- Playwright 初始因缺少 `data-open-input` 按预期变红，实施后 1/1 通过。
+- pointer 路径 computed transition 非零；ArrowDown/Enter 路径 popover 与 caret 为 0s；
+  selected option 获得焦点，Escape 回到 trigger。
