@@ -41,9 +41,11 @@ describe("checklist batch typed error details", () => {
       expect(response.json()).toMatchObject({
         error: {
           code: "COMPLETION_GATE_FAILED",
+          retryable: false,
           details: { reasons },
         },
       });
+      expect(response.json().error.details).toEqual({ reasons });
     } finally {
       await app.close();
     }

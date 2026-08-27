@@ -33,6 +33,14 @@ describe("AtmError registry", () => {
 
   it("keeps the registry and public union bound together", () => {
     expect(ERROR_POLICIES.INTERNAL_ERROR).toEqual({ httpStatus: 500, retryable: true });
+    expect(ERROR_POLICIES.CANDIDATE_HASH_MISMATCH).toEqual({
+      httpStatus: 422,
+      retryable: false,
+    });
+    expect(ERROR_POLICIES.COMPLETION_GATE_FAILED).toEqual({
+      httpStatus: 409,
+      retryable: false,
+    });
     expectTypeOf<keyof typeof ERROR_POLICIES>().toEqualTypeOf<AtmErrorCode>();
     expectTypeOf<ConstructorParameters<typeof AtmError>[0]>().toEqualTypeOf<AtmErrorCode>();
     expectTypeOf<ErrorDetailsByCode["INVALID_TRANSITION"]>().toMatchTypeOf<{
