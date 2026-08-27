@@ -3,7 +3,6 @@ import type Database from "better-sqlite3";
 import { assertParentMove, assertAcyclicDependency, computeProgress } from "@ayanami-task/domain";
 import { AtmError } from "@ayanami-task/errors";
 import {
-  assertWorkItemTransition,
   ChecklistBatchFailureError,
   createUlid,
   EvidenceInputSchema,
@@ -12,6 +11,9 @@ import {
   normalizeReviewCandidateHashes,
   nowIso,
   RecordSummarySchema,
+  resolveWorkItemOperation,
+  workItemOperationHasEffect,
+  type WorkItemOperation,
   type WorkItemPhase,
   type WorkItemStatus,
   type WorkItemWaitingOn,
@@ -26,20 +28,23 @@ import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
 
-function assertTypedWorkItemTransition(from: WorkItemStatus, to: WorkItemStatus): void {
-  try {
-    assertWorkItemTransition(from, to);
-  } catch (cause) {
-    throw new AtmError("INVALID_TRANSITION", {
-      message: `不能从 ${from} 变更到 ${to}`,
-      details: {
-        current_status: from,
-        requested_status: to,
-        legal_operations: legalWorkItemOperations(from).map((entry) => entry.operation),
-      },
-      cause,
-    });
-  }
+function storedWorkItemPhase(row: { status: WorkItemStatus; phase?: WorkItemPhase | null }) {
+  return (row.phase ??
+    (row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
+      ? "IN_PROGRESS"
+      : row.status)) as WorkItemPhase;
+}
+
+function resolveStoredWorkItemOperation(
+  operation: WorkItemOperation,
+  row: { status: WorkItemStatus; phase?: WorkItemPhase | null },
+  options: { successorReclaim?: boolean } = {},
+) {
+  return resolveWorkItemOperation(operation, {
+    currentStatus: row.status,
+    phase: storedWorkItemPhase(row),
+    ...options,
+  });
 }
 
 function json<T>(value: string | null | undefined, fallback: T): T {
@@ -2251,8 +2256,8 @@ export class ProjectRepository {
             },
           });
         }
+        resolveStoredWorkItemOperation("complete", reviewTask);
         this.assertCompletionGate(reviewTask);
-        assertTypedWorkItemTransition(reviewTask.status as WorkItemStatus, "DONE");
 
         const now = nowIso();
         const requestKey = this.reviewRequestKey(Number(request.local_no));
@@ -3056,7 +3061,7 @@ export class ProjectRepository {
         targetDate?: string | null;
         parentKey?: string | null;
       };
-      operation: string;
+      operation: WorkItemOperation;
       title?: string;
       description?: string;
       acceptance?: string[];
@@ -3168,11 +3173,16 @@ export class ProjectRepository {
                   },
                 }
               : undefined;
-          let targetStatus: WorkItemStatus = row.status;
-          let targetPhase = (row.phase ??
-            (row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
-              ? "IN_PROGRESS"
-              : row.status)) as WorkItemPhase;
+          const currentPhase = storedWorkItemPhase(row);
+          const successorReclaim =
+            patch.operation === "claim" &&
+            row.status === "IN_PROGRESS" &&
+            row.assignee_agent_id === actor.id;
+          const resolvedOperation = resolveStoredWorkItemOperation(patch.operation, row, {
+            successorReclaim,
+          });
+          const targetStatus = resolvedOperation.target;
+          let targetPhase = currentPhase;
           const now = nowIso();
           if (patch.operation === "claim" || patch.operation === "start") {
             const dependency = this.#sqlite
@@ -3201,16 +3211,7 @@ export class ProjectRepository {
                   },
                 });
             }
-            const successorReclaim =
-              patch.operation === "claim" &&
-              row.status === "IN_PROGRESS" &&
-              row.assignee_agent_id === actor.id;
-            targetStatus =
-              patch.operation === "start" || successorReclaim ? "IN_PROGRESS" : "CLAIMED";
-            targetPhase = targetStatus;
-            // 来源状态只认转移表。自带白名单会让「表说可以、接口不给」重新出现，
-            // 也会把 start 一个已在 IN_PROGRESS 的任务误判成非法转移。
-            assertTypedWorkItemTransition(row.status, targetStatus);
+            targetPhase = targetStatus as WorkItemPhase;
             updates.push(
               "status = ?",
               "phase = ?",
@@ -3252,9 +3253,7 @@ export class ProjectRepository {
                 },
               });
             }
-            targetStatus = "READY";
             targetPhase = "READY";
-            assertTypedWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = 'READY'",
               "phase = 'READY'",
@@ -3272,8 +3271,6 @@ export class ProjectRepository {
                 message: "阻塞 WorkItem 时必须提供 blockedReason",
                 details: { task_key: patch.taskKey, field: "blockedReason" },
               });
-            assertTypedWorkItemTransition(row.status, "BLOCKED");
-            targetStatus = "BLOCKED";
             targetPhase = "BLOCKED";
             updates.push(
               "status = 'BLOCKED'",
@@ -3291,8 +3288,6 @@ export class ProjectRepository {
                 message: "等待时必须提供 waitingFor",
                 details: { task_key: patch.taskKey, field: "waitingFor" },
               });
-            targetStatus = patch.operation === "wait_user" ? "WAITING_USER" : "WAITING_AGENT";
-            assertTypedWorkItemTransition(row.status, targetStatus);
             updates.push("status = ?", "waiting_on = ?", "waiting_for = ?");
             values.push(
               targetStatus,
@@ -3301,8 +3296,6 @@ export class ProjectRepository {
             );
             eventType = "work.waiting";
           } else if (patch.operation === "verify") {
-            assertTypedWorkItemTransition(row.status, "VERIFYING");
-            targetStatus = "VERIFYING";
             targetPhase = "VERIFYING";
             updates.push(
               "status = 'VERIFYING'",
@@ -3314,8 +3307,6 @@ export class ProjectRepository {
             eventType = "work.verification_requested";
           } else if (patch.operation === "complete") {
             this.assertCompletionGate(row);
-            assertTypedWorkItemTransition(row.status, "DONE");
-            targetStatus = "DONE";
             targetPhase = "DONE";
             updates.push(
               "status = 'DONE'",
@@ -3330,7 +3321,6 @@ export class ProjectRepository {
             values.push(now);
             eventType = "work.completed";
           } else if (patch.operation === "cancel") {
-            assertTypedWorkItemTransition(row.status, "CANCELLED");
             const duplicateOf = patch.duplicateOf ? this.rowForTaskKey(patch.duplicateOf) : null;
             const supersededBy = patch.supersededBy ? this.rowForTaskKey(patch.supersededBy) : null;
             if (duplicateOf?.id === row.id || supersededBy?.id === row.id) {
@@ -3339,7 +3329,6 @@ export class ProjectRepository {
                 details: { task_key: patch.taskKey, issue: "self_reference" },
               });
             }
-            targetStatus = "CANCELLED";
             targetPhase = "CANCELLED";
             updates.push(
               "status = 'CANCELLED'",
@@ -3358,18 +3347,7 @@ export class ProjectRepository {
             );
             eventType = "work.cancelled";
           } else if (patch.operation === "reopen") {
-            // reopen 的语义是「把停住的任务拉回来继续做」：界面在 BLOCKED /
-            // WAITING_USER / WAITING_AGENT 上把它叫「重新打开」、在 VERIFYING 上叫
-            // 「退回」，四处都指望回到 IN_PROGRESS。只有 CANCELLED 才该退回 BACKLOG
-            // 重新排期。原先一律指向 BACKLOG，那四个按钮点下去必然 INVALID_TRANSITION。
-            targetStatus =
-              row.status === "CANCELLED"
-                ? "BACKLOG"
-                : row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
-                  ? targetPhase
-                  : "IN_PROGRESS";
-            targetPhase = targetStatus;
-            assertTypedWorkItemTransition(row.status, targetStatus);
+            targetPhase = targetStatus as WorkItemPhase;
             // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
             this.resolveActiveBlockers(row.id, now);
             updates.push(
@@ -3428,21 +3406,21 @@ export class ProjectRepository {
             .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
             .run(...values);
           if (actor.sessionId) {
-            if (["claim", "start", "verify", "reopen"].includes(patch.operation)) {
+            if (workItemOperationHasEffect(patch.operation, "SESSION_WORKING")) {
               this.#sqlite
                 .prepare(
                   `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WORKING',
                    heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
                 )
                 .run(row.id, now, now, actor.sessionId);
-            } else if (["block", "wait_user", "wait_agent"].includes(patch.operation)) {
+            } else if (workItemOperationHasEffect(patch.operation, "SESSION_WAITING")) {
               this.#sqlite
                 .prepare(
                   `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WAITING',
                    heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
                 )
                 .run(row.id, now, now, actor.sessionId);
-            } else if (["release", "complete", "cancel"].includes(patch.operation)) {
+            } else if (workItemOperationHasEffect(patch.operation, "SESSION_IDLE")) {
               this.#sqlite
                 .prepare(
                   `UPDATE agent_sessions SET current_work_item_id = NULL, work_state = 'IDLE',
@@ -3537,7 +3515,7 @@ export class ProjectRepository {
         let verifying = initial;
 
         if (fromStatus !== "VERIFYING") {
-          assertTypedWorkItemTransition(fromStatus, "VERIFYING");
+          resolveStoredWorkItemOperation("verify", initial);
           this.#sqlite
             .prepare(
               `UPDATE work_items SET status = 'VERIFYING', phase = 'VERIFYING', phase_inferred = 0,
@@ -3574,8 +3552,8 @@ export class ProjectRepository {
             .get(initial.id) as any;
         }
 
+        resolveStoredWorkItemOperation("complete", verifying);
         this.assertCompletionGate(verifying);
-        assertTypedWorkItemTransition(verifying.status as WorkItemStatus, "DONE");
         this.#sqlite
           .prepare(
             `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
@@ -3960,7 +3938,7 @@ export class ProjectRepository {
       failures.push({ code: "VERIFICATION_REQUIRED" });
     }
     if (!(row.status === "DONE" || row.status === "IN_PROGRESS" || row.status === "VERIFYING")) {
-      const legal = legalWorkItemOperations(row.status as WorkItemStatus)
+      const legal = legalWorkItemOperations(row.status as WorkItemStatus, storedWorkItemPhase(row))
         .map((entry) => `${entry.operation} -> ${entry.target}`)
         .join(", ");
       failures.push({
@@ -4074,6 +4052,7 @@ export class ProjectRepository {
       request: normalizedInput,
       action: () => {
         const row = this.rowForTaskKey(normalizedInput.taskKey);
+        if (normalizedInput.blocker?.trim()) resolveStoredWorkItemOperation("block", row);
         const bucket =
           normalizedInput.percent === undefined
             ? null

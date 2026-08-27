@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { AtmError } from "@ayanami-task/errors";
+import { WORK_ITEM_OPERATION_NAMES } from "./work-item-operations.js";
 
 export * from "./views/task.js";
+export * from "./work-item-operations.js";
 
 export const SESSION_CLOSE_REASONS = [
   "HEARTBEAT_TIMEOUT",
@@ -58,122 +60,8 @@ export const WORK_ITEM_STATUS_LABELS: Record<WorkItemStatus, string> = {
   CANCELLED: "已取消",
 };
 
-// 这张表是状态机的唯一事实源，两条方向都必须成立：仓储层每个操作都要 assert 它，
-// 而它声明的每一条转移都必须真有操作能执行。一旦仓储层另写一份来源状态白名单，
-// 就会出现「表说可以、接口不给」的死结——界面照着表把出口画出来，点下去必然报错。
-// 守卫见 packages/application/test/work-item-transitions.test.ts。
-export const WORK_ITEM_TRANSITIONS: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
-  // BACKLOG 不直接进 READY：产品给的路径是「开始」(start) 或先 claim 再 release。
-  BACKLOG: ["CLAIMED", "IN_PROGRESS", "CANCELLED"],
-  READY: ["CLAIMED", "IN_PROGRESS", "CANCELLED"],
-  CLAIMED: ["IN_PROGRESS", "READY", "CANCELLED"],
-  // READY 来自 release：放弃领取后回到可开始队列。下面几个状态同理。
-  IN_PROGRESS: [
-    "BLOCKED",
-    "WAITING_AGENT",
-    "WAITING_USER",
-    "VERIFYING",
-    "DONE",
-    "READY",
-    "CANCELLED",
-  ],
-  BLOCKED: ["IN_PROGRESS", "READY", "CANCELLED"],
-  WAITING_AGENT: ["IN_PROGRESS", "READY", "VERIFYING", "CANCELLED"],
-  WAITING_USER: ["IN_PROGRESS", "READY", "VERIFYING", "CANCELLED"],
-  VERIFYING: ["WAITING_AGENT", "WAITING_USER", "DONE", "IN_PROGRESS", "READY", "CANCELLED"],
-  DONE: ["IN_PROGRESS"],
-  CANCELLED: ["BACKLOG"],
-};
-
-export type WorkItemOperation =
-  | "claim"
-  | "start"
-  | "release"
-  | "block"
-  | "wait_agent"
-  | "wait_user"
-  | "verify"
-  | "complete"
-  | "cancel"
-  | "reopen";
-
-const WORK_ITEM_LEGAL_OPERATIONS: Record<
-  WorkItemStatus,
-  ReadonlyArray<{ operation: WorkItemOperation; target: WorkItemStatus }>
-> = {
-  BACKLOG: [
-    { operation: "claim", target: "CLAIMED" },
-    { operation: "start", target: "IN_PROGRESS" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  READY: [
-    { operation: "claim", target: "CLAIMED" },
-    { operation: "start", target: "IN_PROGRESS" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  CLAIMED: [
-    { operation: "start", target: "IN_PROGRESS" },
-    { operation: "release", target: "READY" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  IN_PROGRESS: [
-    { operation: "block", target: "BLOCKED" },
-    { operation: "wait_agent", target: "WAITING_AGENT" },
-    { operation: "wait_user", target: "WAITING_USER" },
-    { operation: "verify", target: "VERIFYING" },
-    { operation: "complete", target: "DONE" },
-    { operation: "release", target: "READY" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  BLOCKED: [
-    { operation: "reopen", target: "IN_PROGRESS" },
-    { operation: "release", target: "READY" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  WAITING_AGENT: [
-    { operation: "reopen", target: "IN_PROGRESS" },
-    { operation: "release", target: "READY" },
-    { operation: "verify", target: "VERIFYING" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  WAITING_USER: [
-    { operation: "reopen", target: "IN_PROGRESS" },
-    { operation: "release", target: "READY" },
-    { operation: "verify", target: "VERIFYING" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  VERIFYING: [
-    { operation: "wait_agent", target: "WAITING_AGENT" },
-    { operation: "wait_user", target: "WAITING_USER" },
-    { operation: "complete", target: "DONE" },
-    { operation: "reopen", target: "IN_PROGRESS" },
-    { operation: "release", target: "READY" },
-    { operation: "cancel", target: "CANCELLED" },
-  ],
-  DONE: [{ operation: "reopen", target: "IN_PROGRESS" }],
-  CANCELLED: [{ operation: "reopen", target: "BACKLOG" }],
-};
-
-export function legalWorkItemOperations(
-  status: WorkItemStatus,
-): ReadonlyArray<{ operation: WorkItemOperation; target: WorkItemStatus }> {
-  return WORK_ITEM_LEGAL_OPERATIONS[status];
-}
-
 export function workItemStatusLabel(status: WorkItemStatus): string {
   return WORK_ITEM_STATUS_LABELS[status];
-}
-
-export function assertWorkItemTransition(from: WorkItemStatus, to: WorkItemStatus): void {
-  if (from === to) return;
-  if (!WORK_ITEM_TRANSITIONS[from].includes(to)) {
-    const legal = legalWorkItemOperations(from)
-      .map((entry) => `${entry.operation} -> ${entry.target}`)
-      .join(", ");
-    throw new Error(
-      `INVALID_TRANSITION: ${from} -> ${to} (legal operations from ${from}: ${legal || "none"})`,
-    );
-  }
 }
 
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -480,19 +368,7 @@ export const WorkItemPatchInputSchema = z
     taskKey: NonEmptyTextSchema,
     expectedVersion: z.number().int().nonnegative(),
     expectedFields: WorkItemExpectedFieldsSchema.optional(),
-    operation: z.enum([
-      "claim",
-      "start",
-      "release",
-      "block",
-      "wait_user",
-      "wait_agent",
-      "verify",
-      "complete",
-      "cancel",
-      "reopen",
-      "edit",
-    ]),
+    operation: z.enum(WORK_ITEM_OPERATION_NAMES),
     title: z.string().trim().min(1).max(400).optional(),
     description: z.string().max(50_000).optional(),
     acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
