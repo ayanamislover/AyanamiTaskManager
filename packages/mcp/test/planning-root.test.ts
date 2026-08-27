@@ -77,11 +77,20 @@ describe("纯 MCP 会话的规划根", () => {
         },
       ],
     });
-    // 补建是一次静默的规划决策，回执必须说出来。
-    expect(created.planning_root).toBe("PROVISIONED");
-    const taskKey = String(created.created[0].task_key);
+    // 固定 ACK 只保留实体预览；完整规划决策进入 durable operation receipt。
+    const creationTrace = await call("atm_search", {
+      project: project.code,
+      op_id: "planning-root-create",
+      session,
+      max_chars: 20_000,
+    });
+    expect(creationTrace.operation.mutations[0].response.planningRootProvisioned).toBe(true);
+    const taskEntity = created.entities.find(
+      (entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM",
+    );
+    const taskKey = String(taskEntity.key);
 
-    let version = Number(created.created[0].version);
+    let version = Number(taskEntity.version);
     for (const operation of ["claim", "start", "complete"]) {
       const patched = await call("atm_task_patch", {
         project: project.code,
@@ -89,7 +98,11 @@ describe("纯 MCP 会话的规划根", () => {
         op_id: `planning-root-${operation}`,
         items: [{ task_key: taskKey, expected_version: version, operation, takeover_stale: false }],
       });
-      version = Number(patched.items[0].version);
+      version = Number(
+        patched.entities.find(
+          (entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM",
+        ).version,
+      );
     }
     const done = await service.getWorkItem(project.code, taskKey, "core");
     expect((done as Record<string, unknown>).status).toBe("DONE");
@@ -120,7 +133,14 @@ describe("纯 MCP 会话的规划根", () => {
         },
       ],
     });
-    expect(again.planning_root).toBeUndefined();
+    const secondTrace = await call("atm_search", {
+      project: project.code,
+      op_id: "planning-root-create-again",
+      session,
+      max_chars: 20_000,
+    });
+    expect(again.entities).toHaveLength(1);
+    expect(secondTrace.operation.mutations[0].response.planningRootProvisioned).toBe(false);
     expect(await service.listObjectives(project.code)).toHaveLength(1);
   }, 30_000);
 
@@ -162,7 +182,7 @@ describe("纯 MCP 会话的规划根", () => {
         },
       ],
     });
-    expect(created.planning_root).toBeUndefined();
+    expect(created.entities).toHaveLength(1);
     const objectives = await service.listObjectives(project.code);
     expect(objectives).toHaveLength(1);
     expect(String((objectives[0] as Record<string, unknown>).id)).toBe(String(objective.id));

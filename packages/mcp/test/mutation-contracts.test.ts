@@ -13,6 +13,42 @@ import {
 } from "./published-operation-schema.js";
 
 const roots: string[] = [];
+const fixedMutationAckKeys = [
+  "details_cursor",
+  "entities",
+  "entities_truncated",
+  "entity_count",
+  "ok",
+  "op_id",
+  "project",
+  "session",
+  "session_rebound",
+] as const;
+
+function expectFixedMutationAck(
+  response: { structuredContent?: unknown },
+  expected: { project: string; session: string; opId: string; rebound?: boolean },
+) {
+  const acknowledgement = response.structuredContent as Record<string, any>;
+  expect(Object.keys(acknowledgement).sort()).toEqual([...fixedMutationAckKeys].sort());
+  expect(acknowledgement).toMatchObject({
+    ok: true,
+    project: expected.project,
+    session: expected.session,
+    session_rebound: expected.rebound ?? false,
+    op_id: expected.opId,
+    details_cursor: {
+      name: "atm_search",
+      arguments: {
+        project: expected.project,
+        session: expected.session,
+        op_id: expected.opId,
+        field_mask: ["op_id", "entities"],
+        max_chars: 50_000,
+      },
+    },
+  });
+}
 
 function dereferenceSchema(schema: Record<string, any>, root: Record<string, any>) {
   let current = schema;
@@ -81,10 +117,18 @@ describe("MCP mutation contracts", () => {
           ],
         },
       });
+      expectFixedMutationAck(created, {
+        project: project.code,
+        session,
+        opId: "create-ack-exact",
+      });
       expect(created.structuredContent).toMatchObject({ op_id: "create-ack-exact" });
       const taskKey = String(
-        (created.structuredContent as { created: Array<{ task_key: string }> }).created[0]!
-          .task_key,
+        (
+          created.structuredContent as {
+            entities: Array<{ entity_type: string; key: string }>;
+          }
+        ).entities.find((entity) => entity.entity_type === "WORK_ITEM")!.key,
       );
 
       const patched = await client.callTool({
@@ -95,6 +139,11 @@ describe("MCP mutation contracts", () => {
           op_id: "patch-ack-exact",
           items: [{ task_key: taskKey, expected_version: 1, operation: "start" }],
         },
+      });
+      expectFixedMutationAck(patched, {
+        project: project.code,
+        session,
+        opId: "patch-ack-exact",
       });
       expect(patched.structuredContent).toMatchObject({ op_id: "patch-ack-exact" });
 
@@ -121,10 +170,17 @@ describe("MCP mutation contracts", () => {
           ],
         },
       });
+      expectFixedMutationAck(checklist, {
+        project: project.code,
+        session,
+        opId: "checklist-ack-exact",
+      });
       expect(checklist.structuredContent).toMatchObject({
         op_id: "checklist-ack-exact",
-        task_key: taskKey,
-        updated_count: 1,
+        entities: expect.arrayContaining([
+          expect.objectContaining({ entity_type: "WORK_ITEM", key: taskKey }),
+          expect.objectContaining({ entity_type: "CHECKLIST", key: detail.checklist[0]!.id }),
+        ]),
       });
 
       const progress = await client.callTool({
@@ -138,6 +194,11 @@ describe("MCP mutation contracts", () => {
           summary: "Mutation ACK progress",
         },
       });
+      expectFixedMutationAck(progress, {
+        project: project.code,
+        session,
+        opId: "progress-ack-exact",
+      });
       expect(progress.structuredContent).toMatchObject({ op_id: "progress-ack-exact" });
 
       const completed = await client.callTool({
@@ -149,22 +210,24 @@ describe("MCP mutation contracts", () => {
           items: [
             {
               task_key: taskKey,
-              expected_version: (progress.structuredContent as { version: number }).version,
+              expected_version: (
+                progress.structuredContent as {
+                  entities: Array<{ entity_type: string; version: number }>;
+                }
+              ).entities.find((entity) => entity.entity_type === "WORK_ITEM")!.version,
               operation: "verify_and_complete",
             },
           ],
         },
       });
+      expectFixedMutationAck(completed, {
+        project: project.code,
+        session,
+        opId: "verify-complete-ack-exact",
+      });
       expect(completed.structuredContent).toMatchObject({
         op_id: "verify-complete-ack-exact",
-        items: [
-          {
-            task_key: taskKey,
-            from_status: "IN_PROGRESS",
-            status: "DONE",
-            transitions: ["VERIFYING", "DONE"],
-          },
-        ],
+        entities: [expect.objectContaining({ entity_type: "WORK_ITEM", key: taskKey })],
       });
       expect(await service.getWorkItem(project.code, taskKey)).toMatchObject({ status: "DONE" });
 
@@ -179,11 +242,22 @@ describe("MCP mutation contracts", () => {
           summary: "The acknowledgement binds the original operation.",
         },
       });
+      expectFixedMutationAck(record, {
+        project: project.code,
+        session,
+        opId: "record-ack-exact",
+      });
       expect(record.structuredContent).toMatchObject({
         op_id: "record-ack-exact",
-        related_records: [],
+        entities: [expect.objectContaining({ entity_type: "RECORD" })],
       });
-      const recordKey = String((record.structuredContent as { record: string }).record);
+      const recordKey = String(
+        (
+          record.structuredContent as {
+            entities: Array<{ entity_type: string; key: string }>;
+          }
+        ).entities.find((entity) => entity.entity_type === "RECORD")!.key,
+      );
 
       const publicKeyEvidence = await client.callTool({
         name: "atm_progress_add",
@@ -199,6 +273,11 @@ describe("MCP mutation contracts", () => {
             { kind: "atm_task", value: taskKey },
           ],
         },
+      });
+      expectFixedMutationAck(publicKeyEvidence, {
+        project: project.code,
+        session,
+        opId: "progress-public-key-evidence",
       });
       expect(publicKeyEvidence.isError, JSON.stringify(publicKeyEvidence.content)).not.toBe(true);
       expect(publicKeyEvidence.structuredContent).toMatchObject({
@@ -252,6 +331,11 @@ describe("MCP mutation contracts", () => {
           summary: "Mutation ACK test finished",
         },
       });
+      expectFixedMutationAck(ended, {
+        project: project.code,
+        session,
+        opId: "end-ack-exact",
+      });
       expect(ended.structuredContent).toMatchObject({ op_id: "end-ack-exact" });
     } finally {
       await profiles.close();
@@ -291,7 +375,7 @@ describe("MCP mutation contracts", () => {
         op_id: "rebound-op",
         session_rebound: true,
         session: "successor-session",
-        new_session: "successor-session",
+        entities: [{ entity_type: "RECORD", key: "RB-R-001", version: 0 }],
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -519,12 +603,12 @@ describe("MCP mutation contracts", () => {
         op_id: "batch-checklist-op",
         session_rebound: true,
         session: "successor-session",
-        new_session: "successor-session",
-        task_key: "BAT-T-0001",
-        task_version: 4,
-        progress: 100,
-        updated_count: 2,
-        seq: 9,
+        entity_count: 3,
+        entities: [
+          { entity_type: "WORK_ITEM", key: "BAT-T-0001", version: 4 },
+          { entity_type: "CHECKLIST", key: "check-1", version: 1 },
+          { entity_type: "CHECKLIST", key: "check-2", version: 1 },
+        ],
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -688,19 +772,8 @@ describe("MCP mutation contracts", () => {
         op_id: "verify-complete-op",
         session_rebound: true,
         session: "workflow-successor",
-        new_session: "workflow-successor",
         project: "WF",
-        seq: 18,
-        items: [
-          {
-            task_key: "WF-T-0001",
-            from_status: "IN_PROGRESS",
-            status: "DONE",
-            from_version: 7,
-            version: 9,
-            transitions: ["VERIFYING", "DONE"],
-          },
-        ],
+        entities: [{ entity_type: "WORK_ITEM", key: "WF-T-0001", version: 9 }],
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -824,10 +897,10 @@ describe("MCP mutation contracts", () => {
       expect(response.structuredContent).toMatchObject({
         ok: true,
         op_id: "safe-edit-cancel-op",
-        seq: 12,
-        items: [
-          { key: "SAFE-T-0001", status: "READY", version: 4 },
-          { key: "SAFE-T-0002", status: "CANCELLED", version: 8 },
+        entity_count: 2,
+        entities: [
+          { entity_type: "WORK_ITEM", key: "SAFE-T-0001", version: 4 },
+          { entity_type: "WORK_ITEM", key: "SAFE-T-0002", version: 8 },
         ],
       });
     } finally {

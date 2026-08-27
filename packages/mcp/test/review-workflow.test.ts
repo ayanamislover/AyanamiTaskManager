@@ -77,6 +77,20 @@ async function closeReviewFixture(fixture: Awaited<ReturnType<typeof openReviewF
   fixture.service.close();
 }
 
+function mutationEntity(
+  response: Awaited<ReturnType<Client["callTool"]>>,
+  entityType: string,
+  key?: string,
+) {
+  return (
+    response.structuredContent as {
+      entities: Array<{ entity_type: string; key: string; version: number | null }>;
+    }
+  ).entities.find(
+    (entity) => entity.entity_type === entityType && (key === undefined || entity.key === key),
+  )!;
+}
+
 async function requestReview(
   fixture: Awaited<ReturnType<typeof openReviewFixture>>,
   opId: string,
@@ -123,8 +137,7 @@ async function claimAndStartReview(fixture: Awaited<ReturnType<typeof openReview
       ],
     },
   });
-  const claimedVersion = (claimed.structuredContent as { items: Array<{ version: number }> })
-    .items[0]!.version;
+  const claimedVersion = mutationEntity(claimed, "WORK_ITEM", fixture.review.key).version!;
   const started = await fixture.client.callTool({
     name: "atm_task_patch",
     arguments: {
@@ -142,7 +155,7 @@ async function claimAndStartReview(fixture: Awaited<ReturnType<typeof openReview
   });
   return {
     session: reviewer.session,
-    version: (started.structuredContent as { items: Array<{ version: number }> }).items[0]!.version,
+    version: mutationEntity(started, "WORK_ITEM", fixture.review.key).version!,
   };
 }
 
@@ -245,15 +258,19 @@ describe("MCP first-class Review workflow", () => {
       expect(requested.isError, JSON.stringify(requested.content)).not.toBe(true);
       expect(requested.structuredContent).toMatchObject({
         op_id: "mcp-review-request",
-        review_request: {
-          request_key: "MRVA-RR-0001",
-          review_task_key: fixture.review.key,
-          parent_task_key: fixture.parent.key,
-          expected_candidate_hashes: [
-            { name: "git_head", value: "a".repeat(40) },
-            { name: "worktree", value: "b".repeat(64) },
-          ],
-        },
+        entities: expect.arrayContaining([
+          { entity_type: "REVIEW_REQUEST", key: "MRVA-RR-0001", version: null },
+          { entity_type: "WORK_ITEM", key: fixture.review.key, version: null },
+          { entity_type: "WORK_ITEM", key: fixture.parent.key, version: null },
+        ]),
+      });
+      expect(
+        await fixture.service.getReviewRequest(fixture.project.code, "MRVA-RR-0001"),
+      ).toMatchObject({
+        expectedCandidateHashes: [
+          { name: "git_head", value: "a".repeat(40) },
+          { name: "worktree", value: "b".repeat(64) },
+        ],
       });
       const reviewer = await claimAndStartReview(fixture);
       const submitted = await fixture.client.callTool({
@@ -278,15 +295,15 @@ describe("MCP first-class Review workflow", () => {
       expect(submitted.isError, JSON.stringify(submitted.content)).not.toBe(true);
       expect(submitted.structuredContent).toMatchObject({
         op_id: "mcp-review-approved",
-        review_submission: {
-          request_key: "MRVA-RR-0001",
-          submission_key: "MRVA-RS-0001",
-          record_key: "MRVA-R-001",
-          verdict: "APPROVED",
-          review_task: { task_key: fixture.review.key, status: "DONE" },
-          parent_checklist: { id: fixture.parent.checklist[0]!.id, status: "DONE" },
-          parent_task: { task_key: fixture.parent.key, status: "IN_PROGRESS" },
-        },
+        entities: expect.arrayContaining([
+          { entity_type: "REVIEW_SUBMISSION", key: "MRVA-RS-0001", version: null },
+          { entity_type: "RECORD", key: "MRVA-R-001", version: null },
+          expect.objectContaining({ entity_type: "WORK_ITEM", key: fixture.review.key }),
+          expect.objectContaining({
+            entity_type: "CHECKLIST",
+            key: fixture.parent.checklist[0]!.id,
+          }),
+        ]),
       });
       expect(await fixture.service.getRecord(fixture.project.code, "MRVA-R-001")).toMatchObject({
         scope: "REVIEW_AUDIT",
@@ -354,11 +371,11 @@ describe("MCP first-class Review workflow", () => {
       expect(submitted.isError, JSON.stringify(submitted.content)).not.toBe(true);
       expect(submitted.structuredContent).toMatchObject({
         op_id: "review-changes-retry",
-        review_submission: {
-          verdict: "CHANGES_REQUESTED",
-          parent_checklist: { status: "TODO", version: 0 },
-          review_task: { status: "DONE" },
-        },
+        entities: expect.arrayContaining([
+          { entity_type: "REVIEW_SUBMISSION", key: "MRVC-RS-0001", version: null },
+          expect.objectContaining({ entity_type: "WORK_ITEM", key: fixture.review.key }),
+          { entity_type: "CHECKLIST", key: fixture.parent.checklist[0]!.id, version: 0 },
+        ]),
       });
       const replayed = await fixture.client.callTool({
         name: "atm_task_patch",
@@ -446,7 +463,7 @@ describe("MCP first-class Review workflow", () => {
           ],
         },
       });
-      const repairedVersion = (checked.structuredContent as { task_version: number }).task_version;
+      const repairedVersion = mutationEntity(checked, "WORK_ITEM", fixture.review.key).version!;
       const repaired = await fixture.client.callTool({
         name: "atm_task_patch",
         arguments: {
@@ -457,11 +474,13 @@ describe("MCP first-class Review workflow", () => {
       expect(repaired.isError, JSON.stringify(repaired.content)).not.toBe(true);
       expect(repaired.structuredContent).toMatchObject({
         op_id: "gate-submit-retry",
-        review_submission: {
-          verdict: "APPROVED",
-          review_task: { status: "DONE" },
-          parent_checklist: { status: "DONE" },
-        },
+        entities: expect.arrayContaining([
+          expect.objectContaining({ entity_type: "WORK_ITEM", key: fixture.review.key }),
+          expect.objectContaining({
+            entity_type: "CHECKLIST",
+            key: fixture.parent.checklist[0]!.id,
+          }),
+        ]),
       });
     } finally {
       await closeReviewFixture(fixture);

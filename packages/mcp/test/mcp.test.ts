@@ -213,7 +213,10 @@ describe("Ayanami MCP", () => {
         evidence: [],
       },
     });
-    expect(projectProgress.structuredContent).toMatchObject({ ok: true, health: "UNKNOWN" });
+    expect(projectProgress.structuredContent).toMatchObject({
+      ok: true,
+      entities: [expect.objectContaining({ entity_type: "PROJECT_UPDATE" })],
+    });
     const boundaryProgress = await client.callTool({
       name: "atm_progress_add",
       arguments: {
@@ -250,7 +253,10 @@ describe("Ayanami MCP", () => {
         summary: "轮换上下文",
       },
     });
-    expect(retired.structuredContent).toMatchObject({ ok: true, handoffs: 0 });
+    expect(retired.structuredContent).toMatchObject({
+      ok: true,
+      entities: [{ entity_type: "SESSION", key: firstSession, version: null }],
+    });
     const resumed = await client.callTool({
       name: "atm_begin",
       arguments: {
@@ -329,7 +335,11 @@ describe("Ayanami MCP", () => {
       ],
     });
     const taskKey = String(
-      (created.structuredContent as { created: Array<{ task_key: string }> }).created[0].task_key,
+      (
+        created.structuredContent as {
+          entities: Array<{ entity_type: string; key: string }>;
+        }
+      ).entities.find((entity) => entity.entity_type === "WORK_ITEM")!.key,
     );
     await call("atm_task_patch", {
       project: "BRF",

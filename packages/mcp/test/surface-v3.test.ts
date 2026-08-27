@@ -441,33 +441,35 @@ describe("MCP surface v3 parity", () => {
         });
       const first = await write("surface-record-first", "First related record");
       expect(first.structuredContent).toMatchObject({
-        topic: "surface-v3",
-        subject_key: "mcp:surface-v3",
-        related_records: [],
+        entities: [expect.objectContaining({ entity_type: "RECORD" })],
       });
+      const firstKey = String(
+        (first.structuredContent as { entities: Array<{ key: string }> }).entities[0]!.key,
+      );
       const second = await write("surface-record-second", "Second related record");
       expect(second.structuredContent).toMatchObject({
-        topic: "surface-v3",
-        subject_key: "mcp:surface-v3",
-        related_records: [String((first.structuredContent as Record<string, unknown>).record)],
+        entities: [expect.objectContaining({ entity_type: "RECORD" })],
       });
+      const secondKey = String(
+        (second.structuredContent as { entities: Array<{ key: string }> }).entities[0]!.key,
+      );
 
       const exact = await fixture.client.callTool({
         name: "atm_search",
         arguments: {
           project: fixture.project.code,
-          query: String((second.structuredContent as Record<string, unknown>).record),
+          query: secondKey,
           field_mask: ["key", "importance", "topic", "subject_key", "related_records"],
         },
       });
       expect(exact.structuredContent).toMatchObject({
         exact: true,
         entity: {
-          key: (second.structuredContent as Record<string, unknown>).record,
+          key: secondKey,
           importance: "HIGH",
           topic: "surface-v3",
           subject_key: "mcp:surface-v3",
-          related_records: [String((first.structuredContent as Record<string, unknown>).record)],
+          related_records: [firstKey],
         },
       });
     } finally {
@@ -525,9 +527,7 @@ describe("MCP surface v3 parity", () => {
       });
       expect(response.isError).not.toBe(true);
       expect(response.structuredContent).toMatchObject({
-        health: "AT_RISK",
-        unlinked: true,
-        open_work_items: [created.items[1]!.key],
+        entities: [expect.objectContaining({ entity_type: "PROJECT_UPDATE" })],
       });
       const trace = await fixture.client.callTool({
         name: "atm_search",
@@ -582,16 +582,10 @@ describe("MCP surface v3 parity", () => {
       });
       expect(response.isError).not.toBe(true);
       expect(response.structuredContent).toMatchObject({
-        created: [
-          {
-            client_ref: "assigned-task",
-            assignee_agent_id: "surface-v3-agent",
-          },
-        ],
+        entities: [expect.objectContaining({ entity_type: "WORK_ITEM" })],
       });
       const key = String(
-        (response.structuredContent as { created: Array<{ task_key: string }> }).created[0]!
-          .task_key,
+        (response.structuredContent as { entities: Array<{ key: string }> }).entities[0]!.key,
       );
       expect(await fixture.service.getWorkItem(fixture.project.code, key, "context")).toMatchObject(
         {
@@ -698,10 +692,12 @@ describe("MCP surface v3 parity", () => {
       });
       expect(created.isError, JSON.stringify(created.content)).not.toBe(true);
       const createdItems = (
-        created.structuredContent as { created: Array<{ task_key: string; version: number }> }
-      ).created;
-      const sourceKey = createdItems[0]!.task_key;
-      const childKey = createdItems[1]!.task_key;
+        created.structuredContent as {
+          entities: Array<{ entity_type: string; key: string; version: number }>;
+        }
+      ).entities.filter((entity) => entity.entity_type === "WORK_ITEM");
+      const sourceKey = createdItems[0]!.key;
+      const childKey = createdItems[1]!.key;
       const source = await fixture.service.getWorkItem(fixture.project.code, sourceKey);
       const child = await fixture.service.getWorkItem(fixture.project.code, childKey);
       expect(source).toMatchObject({
@@ -898,7 +894,9 @@ describe("MCP surface v3 parity", () => {
       });
       expect(firstRecord.isError, JSON.stringify(firstRecord.content)).not.toBe(true);
       expect(secondRecord.isError, JSON.stringify(secondRecord.content)).not.toBe(true);
-      const firstKey = String((firstRecord.structuredContent as Record<string, unknown>).record);
+      const firstKey = String(
+        (firstRecord.structuredContent as { entities: Array<{ key: string }> }).entities[0]!.key,
+      );
       expect(await fixture.service.getRecord(fixture.project.code, firstKey)).toMatchObject({
         scope: "WORK_ITEM",
       });

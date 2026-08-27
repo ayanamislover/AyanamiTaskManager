@@ -76,14 +76,24 @@ describe("heartbeat successor + planning-root first task", () => {
     expect(created.isError, JSON.stringify(created.content)).not.toBe(true);
     expect(created.structuredContent).toMatchObject({
       op_id: payload.op_id,
-      planning_root: "PROVISIONED",
       session_rebound: true,
       session: expect.any(String),
-      new_session: expect.any(String),
-      created: [{ client_ref: "first-task", task_key: expect.any(String) }],
+      entities: [expect.objectContaining({ entity_type: "WORK_ITEM", key: expect.any(String) })],
     });
     const ack = created.structuredContent as Record<string, any>;
-    expect(ack.session).toBe(ack.new_session);
+    const successorSession = String(ack.session);
+    const receipt = await profiles.memoryClient.callTool({
+      name: "atm_search",
+      arguments: {
+        project: project.code,
+        op_id: payload.op_id,
+        session: successorSession,
+        max_chars: 20_000,
+      },
+    });
+    expect(
+      (receipt.structuredContent as Record<string, any>).operation.mutations[0].response,
+    ).toMatchObject({ planningRootProvisioned: true });
 
     expect(await service.listAgentSessions(project.code, 20)).toHaveLength(2);
     expect(await service.listObjectives(project.code)).toHaveLength(1);
@@ -98,19 +108,20 @@ describe("heartbeat successor + planning-root first task", () => {
     expect(replayedOld.structuredContent).toMatchObject({
       op_id: payload.op_id,
       session_rebound: true,
-      session: ack.new_session,
-      new_session: ack.new_session,
-      created: ack.created,
+      session: successorSession,
+      entities: ack.entities,
     });
 
     const replayedNew = await profiles.client.callTool({
       name: "atm_task_create",
-      arguments: { ...payload, session: ack.new_session },
+      arguments: { ...payload, session: successorSession },
     });
     expect(replayedNew.isError).not.toBe(true);
     expect(replayedNew.structuredContent).toMatchObject({
       op_id: payload.op_id,
-      created: ack.created,
+      session: successorSession,
+      session_rebound: false,
+      entities: ack.entities,
     });
 
     expect(await service.listAgentSessions(project.code, 20)).toHaveLength(2);
