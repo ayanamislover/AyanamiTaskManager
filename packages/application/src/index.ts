@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
-import { normalizeReviewCandidateHashes } from "@ayanami-task/protocol";
+import { normalizeReviewCandidateHashes, type EvidenceInput } from "@ayanami-task/protocol";
 import {
   gitHead,
   inspectGitContext,
@@ -687,6 +687,10 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).listProjectUpdates(limit);
   }
 
+  async getProjectUpdate(projectCode: string, id: string) {
+    return (await this.#repository(projectCode)).getProjectUpdate(id);
+  }
+
   async draftProjectUpdateAsUser(projectCode: string, opId: string) {
     const repository = await this.#repository(projectCode);
     const result = repository.draftProjectUpdate(this.#userActor(), opId);
@@ -1069,6 +1073,7 @@ export class AyanamiTaskService {
       completed?: Array<string | { text: string; workItemKey?: string }>;
       next?: string[];
       blocker?: string | null;
+      evidence?: EvidenceInput[];
     },
   ) {
     const repository = await this.#repository(projectCode);
@@ -1085,6 +1090,7 @@ export class AyanamiTaskService {
       completed,
       risks: input.blocker ? [input.blocker] : [],
       next: input.next ?? [],
+      evidence: input.evidence ?? [],
     };
     const execution = repository.executeSessionMutation(
       sessionId,

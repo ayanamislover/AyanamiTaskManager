@@ -85,6 +85,21 @@ describe("项目更新", () => {
         unlinked: true,
         openWorkItems: [open.items[0]!.key],
       });
+      const evidenceRecord = await service.createRecord(
+        "UPD",
+        String(begun.session),
+        "project-progress-evidence-record",
+        {
+          kind: "FACT",
+          title: "Project progress evidence",
+          summary: "Project progress must retain typed evidence.",
+        },
+      );
+      const evidence = [
+        { kind: "atm_task" as const, value: open.items[0]!.key, note: "completed task" },
+        { kind: "atm_record" as const, value: evidenceRecord.key },
+        { kind: "git_sha" as const, value: "abc123" },
+      ];
       const linked = await service.addProjectProgress(
         "UPD",
         String(begun.session),
@@ -93,15 +108,143 @@ describe("项目更新", () => {
           health: "AT_RISK",
           summary: "任务图已关联",
           completed: [{ text: "完成编译", workItemKey: open.items[0]!.key }],
+          evidence,
         },
       );
       expect(linked).toMatchObject({
         opId: "agent-update-linked",
+        evidence,
         unlinked: false,
         openWorkItems: [],
       });
+      expect(await service.getProjectUpdate("UPD", linked.id)).toMatchObject({
+        id: linked.id,
+        opId: "agent-update-linked",
+        evidence,
+      });
+      expect(
+        await service.getOperationTrace("UPD", "agent-update-linked", String(begun.session)),
+      ).toMatchObject({
+        projectUpdates: [expect.objectContaining({ id: linked.id, evidence })],
+      });
       expect(await service.listProjectUpdates("UPD")).toHaveLength(3);
       expect((service.overview().projects as any[])[0]).toMatchObject({ health: "AT_RISK" });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("project progress 严格校验 evidence 公开 key，并保持失败零写入与幂等", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-project-evidence-key-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "Evidence key", sourcePath: null, code: "PEVID" });
+      const begun = await service.begin({
+        projectCode: "PEVID",
+        mode: "project",
+        agentId: "project-evidence-agent",
+        clientKind: "test",
+      });
+      const created = await service.createRecord(
+        "PEVID",
+        String(begun.session),
+        "evidence-record",
+        {
+          kind: "FACT",
+          title: "Evidence record",
+          summary: "Only its public key is a valid evidence reference.",
+        },
+      );
+      const internalId = (await service.getRecord("PEVID", created.key)).id;
+      const objective = await service.createObjectiveAsUser("PEVID", "evidence-objective", {
+        title: "Evidence task",
+        description: "",
+        definitionOfDone: [],
+      });
+      const task = await service.createWorkItemsAsUser("PEVID", "evidence-task", [
+        {
+          clientRef: "evidence-task",
+          objectiveId: objective.id,
+          title: "Evidence task",
+          description: "",
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY",
+          acceptance: [],
+          checklist: [],
+          verificationRequired: false,
+        },
+      ]);
+      const before = await service.listProjectUpdates("PEVID");
+
+      const invalidEvidence = [
+        { opId: "invalid-internal-record", kind: "atm_record" as const, value: internalId },
+        { opId: "invalid-cross-record", kind: "atm_record" as const, value: "OTHER-R-001" },
+        { opId: "invalid-unknown-record", kind: "atm_record" as const, value: "PEVID-R-999" },
+        { opId: "invalid-cross-task", kind: "atm_task" as const, value: "OTHER-T-0001" },
+        { opId: "invalid-unknown-task", kind: "atm_task" as const, value: "PEVID-T-9999" },
+      ];
+      for (const invalid of invalidEvidence) {
+        await expect(
+          service.addProjectProgress("PEVID", String(begun.session), invalid.opId, {
+            summary: "Invalid evidence reference",
+            evidence: [{ kind: invalid.kind, value: invalid.value }],
+          }),
+        ).rejects.toThrowError(/(?:RECORD|WORK_ITEM)_NOT_FOUND/u);
+        expect(await service.listProjectUpdates("PEVID")).toEqual(before);
+        await expect(
+          service.getOperationTrace("PEVID", invalid.opId, String(begun.session)),
+        ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${invalid.opId}`);
+      }
+
+      const validInput = {
+        health: "ON_TRACK" as const,
+        summary: "Typed evidence is durable",
+        evidence: [
+          { kind: "atm_record" as const, value: created.key },
+          { kind: "atm_task" as const, value: task.items[0]!.key },
+          { kind: "git_sha" as const, value: "abc123" },
+        ],
+      };
+      const published = await service.addProjectProgress(
+        "PEVID",
+        String(begun.session),
+        "project-evidence-idempotent",
+        validInput,
+      );
+      const replayed = await service.addProjectProgress(
+        "PEVID",
+        String(begun.session),
+        "project-evidence-idempotent",
+        validInput,
+      );
+      expect(replayed).toMatchObject({
+        id: published.id,
+        seq: published.seq,
+        evidence: validInput.evidence,
+      });
+      await expect(
+        service.addProjectProgress("PEVID", String(begun.session), "project-evidence-idempotent", {
+          ...validInput,
+          evidence: [{ kind: "git_sha", value: "different" }],
+        }),
+      ).rejects.toThrowError("IDEMPOTENCY_CONFLICT");
+      expect(await service.listProjectUpdates("PEVID")).toHaveLength(1);
+      expect(
+        await service.getOperationTrace(
+          "PEVID",
+          "project-evidence-idempotent",
+          String(begun.session),
+        ),
+      ).toMatchObject({
+        projectUpdates: [
+          expect.objectContaining({ id: published.id, evidence: validInput.evidence }),
+        ],
+      });
     } finally {
       service.close();
     }

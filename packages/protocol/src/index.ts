@@ -350,6 +350,8 @@ export const EvidenceReferenceSchema = z.object({
 });
 
 export const EvidenceInputSchema = z.union([NonEmptyTextSchema.max(2000), EvidenceReferenceSchema]);
+export type EvidenceReference = z.infer<typeof EvidenceReferenceSchema>;
+export type EvidenceInput = z.infer<typeof EvidenceInputSchema>;
 
 export const ReviewCandidateHashSchema = z.object({
   name: z
@@ -653,3 +655,4 @@ export type VerifyAndCompleteInput = z.infer<typeof VerifyAndCompleteInputSchema
 export type ReviewRequestCreateInput = z.infer<typeof ReviewRequestCreateInputSchema>;
 export type ReviewSubmitInput = z.infer<typeof ReviewSubmitInputSchema>;
 export type RecordInput = z.input<typeof RecordInputSchema>;
+export type ProgressAddInput = z.infer<typeof ProgressAddInputSchema>;

@@ -19,6 +19,7 @@ describe("v9 structured cancel migration", () => {
     rmSync(join(migrationsRoot, "project", "0009_structured_cancel.sql"));
     rmSync(join(migrationsRoot, "project", "0010_review_workflow.sql"));
     rmSync(join(migrationsRoot, "project", "0011_session_close_reason.sql"));
+    rmSync(join(migrationsRoot, "project", "0012_project_update_evidence.sql"));
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({

@@ -659,6 +659,15 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { limit } = request.query as { limit?: string };
     return options.service.listProjectUpdates(code, Number(limit ?? 50));
   });
+  app.get("/api/v1/projects/:code/project-updates/:updateId", async (request) => {
+    const { code, updateId } = request.params as { code: string; updateId: string };
+    return options.service.getProjectUpdate(code, updateId);
+  });
+  app.get("/api/v1/projects/:code/operations/:opId", async (request) => {
+    const { code, opId } = request.params as { code: string; opId: string };
+    const { session } = (request.query ?? {}) as { session?: string };
+    return options.service.getOperationTrace(code, opId, session);
+  });
   app.post("/api/v1/projects/:code/project-updates/draft", async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
@@ -1037,6 +1046,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         summary: input.summary,
         completed: input.completed.map(completedEntryForProject),
         next: input.next,
+        evidence: input.evidence,
         ...(input.health === undefined ? {} : { health: input.health }),
         ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
       });
