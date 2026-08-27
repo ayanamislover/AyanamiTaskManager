@@ -501,7 +501,9 @@ describe("Session retirement 与低成本恢复", () => {
         predecessorSessionId: String(first.session),
         maxChars: 1200,
       });
-      expect(successor.currentTask).toMatchObject({
+      expect(successor).not.toHaveProperty("currentTask");
+      const successorBrief = await service.briefSnapshot("ROT", String(successor.session));
+      expect(successorBrief.currentTask).toMatchObject({
         key: task.key,
         status: "BLOCKED",
         version: expect.any(Number),
@@ -509,20 +511,19 @@ describe("Session retirement 与低成本恢复", () => {
         blockedReason: "等待恢复测试",
         claim: null,
       });
-      expect(successor.currentTask.version).toBeGreaterThan(blocked.items[0]!.version);
-      expect(successor.handoff).toMatchObject({
+      expect(successorBrief.currentTask.version).toBeGreaterThan(blocked.items[0]!.version);
+      expect(successorBrief.handoff).toMatchObject({
         summary: "上下文已退役，任务继续",
         nextAction: "完成验证",
       });
-      expect(successor.next).toContain("完成验证");
-      expect(successor.records).toContainEqual(
+      expect(successorBrief.next).toContain("完成验证");
+      expect(successorBrief.records).toContainEqual(
         expect.objectContaining({
           kind: "CONSTRAINT",
           summary: "禁止重新审计已完成阶段",
           source_type: "USER",
         }),
       );
-      expect(JSON.stringify(successor).length).toBeLessThanOrEqual(1200);
       expect((await service.getWorkItem("ROT", task.key)).status).toBe("BLOCKED");
     } finally {
       service.close();
