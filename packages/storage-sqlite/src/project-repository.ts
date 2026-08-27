@@ -4690,7 +4690,7 @@ export class ProjectRepository {
         `SELECT entity_type, entity_key, title, substr(body, 1, 500) AS summary, updated_at
          FROM (
            SELECT *, ROW_NUMBER() OVER (
-             PARTITION BY entity_type, entity_key ORDER BY updated_at DESC, entity_id DESC
+             PARTITION BY entity_type, entity_key ORDER BY updated_at DESC, rowid DESC
            ) AS recency
            FROM search_documents
          )
@@ -4713,7 +4713,7 @@ export class ProjectRepository {
     const latestProgress = this.#sqlite.prepare(
       `SELECT entity_type, entity_key, title, substr(body, 1, 500) AS summary, updated_at
        FROM search_documents WHERE entity_type = 'PROGRESS' AND entity_key = ?
-       ORDER BY updated_at DESC, entity_id DESC LIMIT 1`,
+       ORDER BY updated_at DESC, rowid DESC LIMIT 1`,
     );
     for (const change of changes) {
       if (change.aggregateType === "WORK_ITEM" || change.aggregateType === "RECORD") {

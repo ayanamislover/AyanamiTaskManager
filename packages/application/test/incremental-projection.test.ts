@@ -73,6 +73,50 @@ describe("Registry 增量搜索投影", () => {
       percent: 20,
     });
 
+    // 同一毫秒内生成的 ULID 含随机熵，不能把字典序当作提交顺序。
+    // 强制制造“旧记录 ID 更大”的并列时间戳，并重放最新 outbox；旧实现会
+    // 错把第一次进度投影回 Registry，使下面的第二次摘要搜索失败。
+    const projectDatabase = await service.databases.openProject(project.id);
+    const progressDocuments = projectDatabase.sqlite
+      .prepare(
+        `SELECT entity_id, title FROM search_documents
+         WHERE entity_type = 'PROGRESS' ORDER BY rowid`,
+      )
+      .all() as Array<{ entity_id: string; title: string }>;
+    expect(progressDocuments.map((document) => document.title)).toEqual([
+      "第一次进度摘要",
+      "第二次进度摘要",
+    ]);
+    projectDatabase.sqlite.transaction(() => {
+      projectDatabase.sqlite
+        .prepare(
+          `UPDATE search_documents
+           SET entity_id = CASE title
+             WHEN '第一次进度摘要' THEN 'ZZ-FIRST'
+             WHEN '第二次进度摘要' THEN 'AA-SECOND'
+           END,
+           updated_at = '2026-08-27T12:00:00.000Z'
+           WHERE entity_type = 'PROGRESS'`,
+        )
+        .run();
+      projectDatabase.sqlite
+        .prepare(
+          `UPDATE outbox SET delivered_at = NULL
+           WHERE project_sequence = (SELECT MAX(project_sequence) FROM outbox)`,
+        )
+        .run();
+    })();
+    await service.databases.dispatchProject(project.id);
+
+    expect(service.globalSearch("第二次进度摘要").hits).toHaveLength(1);
+    service.databases.registry.sqlite
+      .prepare(
+        `UPDATE project_summary_cache SET project_sequence = project_sequence - 1
+         WHERE project_id = ?`,
+      )
+      .run(project.id);
+    await service.databases.dispatchProject(project.id);
+
     expect(service.globalSearch("新的中文搜索标题").hits).toHaveLength(1);
     expect(service.globalSearch("第二次进度摘要").hits).toHaveLength(1);
     expect(
