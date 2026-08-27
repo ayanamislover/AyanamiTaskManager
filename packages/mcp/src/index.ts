@@ -149,23 +149,172 @@ function result(value: unknown, maxChars = 4000) {
   return wrap(bounded(value, maxChars));
 }
 
-function mutationAck(opId: string, serviceResult: Record<string, unknown>) {
+type MutationEntityReference = {
+  entity_type: string;
+  key: string;
+  version: number | null;
+};
+
+const MUTATION_ACK_ENTITY_LIMIT = 12;
+const MUTATION_ACK_ENTITY_CHARS = 1800;
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function uniqueMutationEntityReferences(
+  references: MutationEntityReference[],
+): MutationEntityReference[] {
+  const unique = new Map<string, MutationEntityReference>();
+  for (const reference of references) {
+    const identity = `${reference.entity_type}\0${reference.key}`;
+    const previous = unique.get(identity);
+    if (!previous || (previous.version === null && reference.version !== null)) {
+      unique.set(identity, reference);
+    }
+  }
+  return [...unique.values()];
+}
+
+function mutationEntityReferences(
+  operation: string,
+  serviceResult: Record<string, unknown>,
+): MutationEntityReference[] {
+  const references: MutationEntityReference[] = [];
+  const add = (entityType: string, key: unknown, version: unknown = null) => {
+    if (typeof key !== "string" || !key.trim()) return;
+    references.push({
+      entity_type: entityType,
+      key,
+      version: typeof version === "number" && Number.isSafeInteger(version) ? version : null,
+    });
+  };
+  const addWorkItems = (items: unknown) => {
+    if (!Array.isArray(items)) return;
+    for (const value of items) {
+      const item = objectValue(value);
+      add("WORK_ITEM", item.key ?? item.taskKey, item.version ?? item.taskVersion);
+    }
+  };
+
+  switch (operation) {
+    case "work.create.batch":
+    case "work.patch.batch":
+      addWorkItems(serviceResult.items);
+      break;
+    case "work.verify-and-complete":
+      add("WORK_ITEM", serviceResult.taskKey, serviceResult.taskVersion);
+      break;
+    case "review.request.create": {
+      const request = objectValue(serviceResult.request);
+      add("REVIEW_REQUEST", request.key);
+      add("WORK_ITEM", request.reviewTaskKey);
+      add("WORK_ITEM", request.parentTaskKey);
+      add("CHECKLIST", request.parentChecklistId, request.parentChecklistVersion);
+      break;
+    }
+    case "review.submit": {
+      add("REVIEW_REQUEST", serviceResult.requestKey);
+      add("REVIEW_SUBMISSION", serviceResult.submissionKey);
+      add("RECORD", serviceResult.recordKey);
+      const reviewTask = objectValue(serviceResult.reviewTask);
+      const parentChecklist = objectValue(serviceResult.parentChecklist);
+      const parentTask = objectValue(serviceResult.parentTask);
+      add("WORK_ITEM", reviewTask.key, reviewTask.version);
+      add("CHECKLIST", parentChecklist.id, parentChecklist.version);
+      add("WORK_ITEM", parentTask.key, parentTask.version);
+      break;
+    }
+    case "checklist.update": {
+      const checklist = objectValue(serviceResult.checklist);
+      add("WORK_ITEM", serviceResult.taskKey, serviceResult.taskVersion);
+      add("CHECKLIST", checklist.id, checklist.version);
+      break;
+    }
+    case "checklist.update.batch":
+      add("WORK_ITEM", serviceResult.taskKey, serviceResult.taskVersion);
+      if (Array.isArray(serviceResult.checklist)) {
+        for (const value of serviceResult.checklist) {
+          const checklist = objectValue(value);
+          add("CHECKLIST", checklist.id, checklist.version);
+        }
+      }
+      break;
+    case "work.progress":
+      add("WORK_ITEM", serviceResult.key, serviceResult.v);
+      add("PROGRESS", serviceResult.progressId);
+      break;
+    case "project-update.publish":
+      add("PROJECT_UPDATE", serviceResult.id, serviceResult.version);
+      break;
+    case "record.create":
+      add("RECORD", serviceResult.key, serviceResult.v);
+      break;
+    case "session.end":
+      add("SESSION", serviceResult.session, serviceResult.version);
+      break;
+  }
+
+  return uniqueMutationEntityReferences(references);
+}
+
+function mutationEntityPreview(entities: MutationEntityReference[]): MutationEntityReference[] {
+  const preview: MutationEntityReference[] = [];
+  let chars = 2;
+  for (const entity of entities) {
+    if (preview.length >= MUTATION_ACK_ENTITY_LIMIT) break;
+    const entityChars = JSON.stringify(entity).length + (preview.length === 0 ? 0 : 1);
+    if (chars + entityChars > MUTATION_ACK_ENTITY_CHARS) break;
+    preview.push(entity);
+    chars += entityChars;
+  }
+  return preview;
+}
+
+function mutationAck(
+  project: string,
+  requestedSession: string,
+  opId: string,
+  operation: string,
+  serviceResult: Record<string, unknown>,
+) {
   const reboundSession =
     typeof serviceResult.newSession === "string"
       ? serviceResult.newSession
       : typeof serviceResult.session === "string"
         ? serviceResult.session
         : undefined;
+  const session = serviceResult.sessionRebound === true ? reboundSession : requestedSession;
+  if (session === undefined) {
+    throw new AtmError("INTERNAL_ERROR", {
+      message: "mutation acknowledgement 缺少 Session",
+      details: { operation_id: opId },
+    });
+  }
+  const entities = mutationEntityReferences(operation, serviceResult);
+  const preview = mutationEntityPreview(entities);
+  const normalizedProject = project.toUpperCase();
   return {
+    ok: true,
     op_id: opId,
-    ...(serviceResult.sessionRebound === true
-      ? {
-          session_rebound: true,
-          ...(reboundSession === undefined
-            ? {}
-            : { session: reboundSession, new_session: reboundSession }),
-        }
-      : {}),
+    project: normalizedProject,
+    session,
+    session_rebound: serviceResult.sessionRebound === true,
+    entities: preview,
+    entity_count: entities.length,
+    entities_truncated: preview.length < entities.length,
+    details_cursor: {
+      name: "atm_search",
+      arguments: {
+        project: normalizedProject,
+        op_id: opId,
+        session,
+        field_mask: ["op_id", "entities"],
+        max_chars: 50_000,
+      },
+    },
   };
 }
 
@@ -1757,16 +1906,35 @@ function scopedUlidQuery(query: string): { kind: "PROGRESS" | "SESSION"; id: str
 }
 
 function compactOperationTrace(trace: Record<string, any>): Record<string, unknown> {
-  return {
-    op_id: trace.opId,
-    mutations: (Array.isArray(trace.mutations) ? trace.mutations : []).map(
-      (mutation: Record<string, unknown>) => ({
-        operation: mutation.operation,
-        response: mutation.response,
-        session_id: mutation.sessionId,
-        created_at: mutation.createdAt,
+  const mutations = (Array.isArray(trace.mutations) ? trace.mutations : []) as Array<
+    Record<string, unknown>
+  >;
+  const events = (Array.isArray(trace.events) ? trace.events : []) as Array<
+    Record<string, unknown>
+  >;
+  const entities = uniqueMutationEntityReferences(
+    mutations.flatMap((mutation) =>
+      mutationEntityReferences(typeof mutation.operation === "string" ? mutation.operation : "", {
+        ...objectValue(mutation.response),
+        ...(mutation.operation === "checklist.update"
+          ? {
+              taskKey: events
+                .map((event) => objectValue(event.payload).taskKey)
+                .find((key) => typeof key === "string"),
+            }
+          : {}),
       }),
     ),
+  );
+  return {
+    op_id: trace.opId,
+    entities,
+    mutations: mutations.map((mutation: Record<string, unknown>) => ({
+      operation: mutation.operation,
+      response: mutation.response,
+      session_id: mutation.sessionId,
+      created_at: mutation.createdAt,
+    })),
     records: (Array.isArray(trace.records) ? trace.records : []).map(
       (record: Record<string, unknown>) => compactRecord(record),
     ),
@@ -1793,19 +1961,17 @@ function compactOperationTrace(trace: Record<string, any>): Record<string, unkno
         session_id: update.sessionId ?? null,
       }),
     ),
-    events: (Array.isArray(trace.events) ? trace.events : []).map(
-      (event: Record<string, unknown>) => ({
-        seq: event.seq,
-        type: event.type,
-        aggregate_type: event.aggregateType,
-        aggregate_id: event.aggregateId,
-        actor: event.actor,
-        session_id: event.sessionId,
-        payload: event.payload,
-        at: event.at,
-        op_id: event.opId,
-      }),
-    ),
+    events: events.map((event: Record<string, unknown>) => ({
+      seq: event.seq,
+      type: event.type,
+      aggregate_type: event.aggregateType,
+      aggregate_id: event.aggregateId,
+      actor: event.actor,
+      session_id: event.sessionId,
+      payload: event.payload,
+      at: event.at,
+      op_id: event.opId,
+    })),
   };
 }
 
@@ -2232,22 +2398,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         canonicalItems,
         { resolvePlanningRoot: true },
       );
-      return result({
-        ok: true,
-        ...mutationAck(canonical.opId, created as unknown as Record<string, unknown>),
-        project: canonical.project.toUpperCase(),
-        seq: created.sequence,
-        // 目标是机器补的就要说出来，否则事后没人分得清它是谁定的。
-        ...(created.planningRootProvisioned ? { planning_root: "PROVISIONED" } : {}),
-        created: created.items.map((item, index) => ({
-          client_ref: canonical.items[index]!.clientRef,
-          task_key: item.key,
-          version: item.version,
-          ...(canonical.items[index]!.assigneeAgentId === undefined
-            ? {}
-            : { assignee_agent_id: canonical.items[index]!.assigneeAgentId }),
-        })),
-      });
+      return wrap(
+        mutationAck(
+          canonical.project,
+          canonical.session,
+          canonical.opId,
+          "work.create.batch",
+          created as unknown as Record<string, unknown>,
+        ),
+      );
     },
   );
 
@@ -2285,23 +2444,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               expectedCandidateHashes: item.candidateHashes,
             }),
         );
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
-          project: input.project.toUpperCase(),
-          seq: created.sequence,
-          review_request: {
-            request_key: created.request.key,
-            review_task_key: created.request.reviewTaskKey,
-            parent_task_key: created.request.parentTaskKey,
-            parent_checklist_id: created.request.parentChecklistId,
-            parent_checklist_version: created.request.parentChecklistVersion,
-            expected_candidate_hashes: created.request.expectedCandidateHashes,
-            created_by_agent_id: created.request.createdByAgentId,
-            created_by_session_id: created.request.createdBySessionId,
-            submission: created.request.submission,
-          },
-        });
+        return wrap(
+          mutationAck(
+            input.project,
+            input.session,
+            input.op_id,
+            "review.request.create",
+            created as unknown as Record<string, unknown>,
+          ),
+        );
       }
       if (operation === "review_submit") {
         const item = canonicalTaskPatchItem(input.items[0]) as Extract<
@@ -2333,29 +2484,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               evidence: item.evidence,
             }),
         );
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, submitted as unknown as Record<string, unknown>),
-          project: input.project.toUpperCase(),
-          seq: submitted.sequence,
-          review_submission: {
-            request_key: submitted.requestKey,
-            submission_key: submitted.submissionKey,
-            record_key: submitted.recordKey,
-            verdict: submitted.verdict,
-            review_task: {
-              task_key: submitted.reviewTask.key,
-              status: submitted.reviewTask.status,
-              version: submitted.reviewTask.version,
-            },
-            parent_checklist: submitted.parentChecklist,
-            parent_task: {
-              task_key: submitted.parentTask.key,
-              status: submitted.parentTask.status,
-              version: submitted.parentTask.version,
-            },
-          },
-        });
+        return wrap(
+          mutationAck(
+            input.project,
+            input.session,
+            input.op_id,
+            "review.submit",
+            submitted as unknown as Record<string, unknown>,
+          ),
+        );
       }
       if (operation === "verify_and_complete") {
         const item = canonicalTaskPatchItem(input.items[0]) as Extract<
@@ -2375,22 +2512,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               expectedVersion: item.expectedVersion,
             }),
         );
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, completed as unknown as Record<string, unknown>),
-          project: input.project.toUpperCase(),
-          seq: completed.sequence,
-          items: [
-            {
-              task_key: completed.taskKey,
-              from_status: completed.fromStatus,
-              status: completed.status,
-              from_version: completed.fromVersion,
-              version: completed.taskVersion,
-              transitions: completed.transitions,
-            },
-          ],
-        });
+        return wrap(
+          mutationAck(
+            input.project,
+            input.session,
+            input.op_id,
+            "work.verify-and-complete",
+            completed as unknown as Record<string, unknown>,
+          ),
+        );
       }
       if (operation === "checklist_batch") {
         const item = canonicalTaskPatchItem(input.items[0]) as Extract<
@@ -2417,22 +2547,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               })),
             }),
         );
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
-          project: input.project.toUpperCase(),
-          seq: updated.sequence,
-          task_key: updated.taskKey,
-          task_version: updated.taskVersion,
-          progress: updated.taskProgress,
-          updated_count: updated.updatedCount,
-          items: updated.checklist.map((checklistItem) => ({
-            id: checklistItem.id,
-            status: checklistItem.status,
-            version: checklistItem.version,
-            evidence: checklistItem.evidence.length,
-          })),
-        });
+        return wrap(
+          mutationAck(
+            input.project,
+            input.session,
+            input.op_id,
+            "checklist.update.batch",
+            updated as unknown as Record<string, unknown>,
+          ),
+        );
       }
       if (operation === "checklist_single") {
         const item = canonicalTaskPatchItem(input.items[0]) as Extract<
@@ -2455,18 +2578,12 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
             }),
         );
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
-          project: input.project.toUpperCase(),
-          seq: updated.sequence,
-          task_key: item.taskKey,
-          id: checklistItem.checklistId,
-          status: updated.checklist.status,
-          version: updated.checklist.version,
-          evidence: updated.checklist.evidence.length,
-          task_version: updated.taskVersion,
-        });
+        return wrap(
+          mutationAck(input.project, input.session, input.op_id, "checklist.update", {
+            ...(updated as unknown as Record<string, unknown>),
+            taskKey: item.taskKey,
+          }),
+        );
       }
       const conflictItem = input.items[0];
       const patched = await withMcpErrorDetails(
@@ -2491,17 +2608,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
             input.items.map((item) => canonicalTaskPatchItem(item) as any),
           ),
       );
-      return result({
-        ok: true,
-        ...mutationAck(input.op_id, patched as unknown as Record<string, unknown>),
-        project: input.project.toUpperCase(),
-        seq: patched.sequence,
-        items: patched.items.map((item) => ({
-          key: item.key,
-          status: item.status,
-          version: item.version,
-        })),
-      });
+      return wrap(
+        mutationAck(
+          input.project,
+          input.session,
+          input.op_id,
+          "work.patch.batch",
+          patched as unknown as Record<string, unknown>,
+        ),
+      );
     },
   );
 
@@ -2563,15 +2678,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
           evidence: input.evidence,
         });
-        return result({
-          ok: true,
-          ...mutationAck(input.op_id, update as unknown as Record<string, unknown>),
-          update: update.id,
-          health: update.health,
-          unlinked: update.unlinked,
-          open_work_items: update.openWorkItems,
-          seq: update.seq,
-        });
+        return wrap(
+          mutationAck(
+            input.project,
+            input.session,
+            input.op_id,
+            "project-update.publish",
+            update as unknown as Record<string, unknown>,
+          ),
+        );
       }
       if (!input.task_key)
         throw new AtmError("VALIDATION_ERROR", { message: "task scope 要求 task_key" });
@@ -2584,14 +2699,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         ...(input.percent === undefined ? {} : { percent: input.percent }),
         ...(input.blocker === undefined ? {} : { blocker: input.blocker }),
       });
-      return result({
-        ok: true,
-        ...mutationAck(input.op_id, updated as unknown as Record<string, unknown>),
-        task_key: updated.key,
-        version: updated.v,
-        seq: updated.seq,
-        noop: updated.noop ?? false,
-      });
+      return wrap(
+        mutationAck(
+          input.project,
+          input.session,
+          input.op_id,
+          "work.progress",
+          updated as unknown as Record<string, unknown>,
+        ),
+      );
     },
   );
 
@@ -2633,16 +2749,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         ...(input.topic === undefined ? {} : { topic: input.topic }),
         ...(input.subject_key === undefined ? {} : { subjectKey: input.subject_key }),
       });
-      return result({
-        ok: true,
-        ...mutationAck(input.op_id, created as unknown as Record<string, unknown>),
-        record: created.key,
-        version: created.v,
-        seq: created.seq,
-        topic: input.topic ?? null,
-        subject_key: input.subject_key ?? null,
-        related_records: Array.isArray(created.relatedRecords) ? created.relatedRecords : [],
-      });
+      return wrap(
+        mutationAck(
+          input.project,
+          input.session,
+          input.op_id,
+          "record.create",
+          created as unknown as Record<string, unknown>,
+        ),
+      );
     },
   );
 
@@ -2871,13 +2986,15 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
           ? {}
           : { retirementReason: input.retirement_reason }),
       });
-      return result({
-        ok: true,
-        ...mutationAck(input.op_id, ended as unknown as Record<string, unknown>),
-        session: ended.session,
-        seq: ended.seq,
-        handoffs: ended.handoffs,
-      });
+      return wrap(
+        mutationAck(
+          input.project,
+          input.session,
+          input.op_id,
+          "session.end",
+          ended as unknown as Record<string, unknown>,
+        ),
+      );
     },
   );
 

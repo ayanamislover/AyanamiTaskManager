@@ -66,28 +66,29 @@ describe("MCP startup-recovery successor contract", () => {
         op_id: payload.op_id,
         session_rebound: true,
         session: expect.any(String),
-        new_session: expect.any(String),
-        record: expect.any(String),
+        entities: [expect.objectContaining({ entity_type: "RECORD", key: expect.any(String) })],
       });
-      const createdAck = created.structuredContent as Record<string, unknown>;
-      expect(createdAck.new_session).toBe(createdAck.session);
+      const createdAck = created.structuredContent as Record<string, any>;
+      const successorSession = String(createdAck.session);
+      const recordKey = String(createdAck.entities[0].key);
 
       const replayedOld = await client.callTool({ name: "atm_record", arguments: payload });
       expect(replayedOld.structuredContent).toMatchObject({
         op_id: payload.op_id,
         session_rebound: true,
-        session: createdAck.new_session,
-        new_session: createdAck.new_session,
-        record: createdAck.record,
+        session: successorSession,
+        entities: [expect.objectContaining({ entity_type: "RECORD", key: recordKey })],
       });
 
       const replayedNew = await client.callTool({
         name: "atm_record",
-        arguments: { ...payload, session: createdAck.new_session },
+        arguments: { ...payload, session: successorSession },
       });
       expect(replayedNew.structuredContent).toMatchObject({
         op_id: payload.op_id,
-        record: createdAck.record,
+        session: successorSession,
+        session_rebound: false,
+        entities: [expect.objectContaining({ entity_type: "RECORD", key: recordKey })],
       });
 
       const conflict = await client.callTool({

@@ -77,7 +77,10 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    const taskKey = String(created.created[0].task_key);
+    const taskKey = String(
+      created.entities.find((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+        .key,
+    );
 
     const detail = await call("atm_task_get", {
       project: project.code,
@@ -132,8 +135,17 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    expect(ticked.status).toBe("DONE");
-    expect(ticked.evidence).toBe(1);
+    const tickedTask = ticked.entities.find(
+      (entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM",
+    );
+    const tickedChecklist = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      view: "full",
+      field_mask: [],
+    });
+    expect(tickedChecklist.checklist[0]).toMatchObject({ status: "DONE" });
+    expect(tickedChecklist.checklist[0].evidence).toHaveLength(1);
 
     await call("atm_task_patch", {
       project: project.code,
@@ -142,7 +154,7 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
       items: [
         {
           task_key: taskKey,
-          expected_version: ticked.task_version,
+          expected_version: tickedTask.version,
           operation: "verify",
           takeover_stale: false,
         },
@@ -167,7 +179,12 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    expect(done.items[0].status).toBe("DONE");
+    expect(done.entities).toContainEqual({
+      entity_type: "WORK_ITEM",
+      key: taskKey,
+      version: fresh.version + 1,
+    });
+    expect(await service.getWorkItem(project.code, taskKey)).toMatchObject({ status: "DONE" });
   }, 60_000);
 
   it("跳过必证项同样是一条出路，不必伪造证据", async () => {
@@ -203,7 +220,10 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    const taskKey = String(created.created[0].task_key);
+    const taskKey = String(
+      created.entities.find((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+        .key,
+    );
     const detail = await call("atm_task_get", {
       project: project.code,
       task_key: taskKey,
@@ -236,7 +256,16 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    expect(skipped.status).toBe("SKIPPED");
+    const skippedTask = skipped.entities.find(
+      (entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM",
+    );
+    const skippedChecklist = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      view: "full",
+      field_mask: [],
+    });
+    expect(skippedChecklist.checklist[0].status).toBe("SKIPPED");
     const done = await call("atm_task_patch", {
       project: project.code,
       session,
@@ -244,12 +273,15 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
       items: [
         {
           task_key: taskKey,
-          expected_version: skipped.task_version,
+          expected_version: skippedTask.version,
           operation: "complete",
           takeover_stale: false,
         },
       ],
     });
-    expect(done.items[0].status).toBe("DONE");
+    expect(done.entities).toContainEqual(
+      expect.objectContaining({ entity_type: "WORK_ITEM", key: taskKey }),
+    );
+    expect(await service.getWorkItem(project.code, taskKey)).toMatchObject({ status: "DONE" });
   }, 60_000);
 });

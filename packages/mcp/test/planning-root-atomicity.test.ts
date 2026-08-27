@@ -227,7 +227,18 @@ describe("planning-root + task-create atomicity", () => {
     });
     expect(created.isError, JSON.stringify(created.content)).not.toBe(true);
     const firstReceipt = created.structuredContent as Record<string, any>;
-    expect(firstReceipt.planning_root).toBe("PROVISIONED");
+    const trace = await fixture.profiles.memoryClient.callTool({
+      name: "atm_search",
+      arguments: {
+        project: fixture.project.code,
+        op_id: payload.op_id,
+        session: fixture.session,
+        max_chars: 50_000,
+      },
+    });
+    expect(
+      (trace.structuredContent as Record<string, any>).operation.mutations[0].response,
+    ).toMatchObject({ planningRootProvisioned: true });
 
     const replayed = await fixture.profiles.client.callTool({
       name: "atm_task_create",
@@ -236,9 +247,9 @@ describe("planning-root + task-create atomicity", () => {
     expect(replayed.structuredContent).toEqual(firstReceipt);
 
     const keys = new Map(
-      (firstReceipt.created as Array<Record<string, unknown>>).map((entry) => [
-        String(entry.client_ref),
-        String(entry.task_key),
+      ["dependent", "parent", "dependency", "source"].map((clientRef, index) => [
+        clientRef,
+        String(firstReceipt.entities[index]!.key),
       ]),
     );
     const localNo = (reference: string) => Number(reference.slice(reference.lastIndexOf("-") + 1));
@@ -300,10 +311,25 @@ describe("planning-root + task-create atomicity", () => {
       create(String(second.session), "concurrent-root-second", "second"),
     ]);
     expect(receipts.every((receipt) => receipt.isError !== true)).toBe(true);
+    const traces = await Promise.all(
+      receipts.map((receipt) => {
+        const acknowledgement = receipt.structuredContent as Record<string, any>;
+        return fixture.profiles.memoryClient.callTool({
+          name: "atm_search",
+          arguments: {
+            project: fixture.project.code,
+            op_id: acknowledgement.op_id,
+            session: acknowledgement.session,
+            max_chars: 20_000,
+          },
+        });
+      }),
+    );
     expect(
-      receipts.filter(
-        (receipt) =>
-          (receipt.structuredContent as Record<string, unknown>).planning_root === "PROVISIONED",
+      traces.filter(
+        (trace) =>
+          (trace.structuredContent as Record<string, any>).operation.mutations[0].response
+            .planningRootProvisioned === true,
       ),
     ).toHaveLength(1);
     expect(await fixture.service.listObjectives(fixture.project.code)).toHaveLength(1);
