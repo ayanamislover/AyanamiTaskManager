@@ -396,14 +396,7 @@ describe("MCP read plane", () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
-      const fieldMask = [
-        "key",
-        "status",
-        "phase",
-        "waiting_on",
-        "progress",
-        "progress_source",
-      ];
+      const fieldMask = ["key", "status", "phase", "waiting_on", "progress", "progress_source"];
       const listed = await client.callTool({
         name: "atm_task_list",
         arguments: { project: project.code },

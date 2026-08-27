@@ -590,9 +590,11 @@ describe("MCP surface v3 parity", () => {
         (response.structuredContent as { created: Array<{ task_key: string }> }).created[0]!
           .task_key,
       );
-      expect(await fixture.service.getWorkItem(fixture.project.code, key, "context")).toMatchObject({
-        assigneeAgentId: "surface-v3-agent",
-      });
+      expect(await fixture.service.getWorkItem(fixture.project.code, key, "context")).toMatchObject(
+        {
+          assigneeAgentId: "surface-v3-agent",
+        },
+      );
       expect(await fixture.service.listWorkItems(fixture.project.code, {})).toHaveLength(1);
     } finally {
       await closeFixture(fixture);
@@ -766,18 +768,13 @@ describe("MCP surface v3 parity", () => {
         },
       });
       expect(patched.isError, JSON.stringify(patched.content)).not.toBe(true);
-      expect(
-        await fixture.service.getWorkItem(fixture.project.code, childKey),
-      ).toMatchObject({
+      expect(await fixture.service.getWorkItem(fixture.project.code, childKey)).toMatchObject({
         assigneeAgentId: null,
         targetDate: "2026-09-02",
         parentKey: null,
       });
 
-      const sourceBeforeClaim = await fixture.service.getWorkItem(
-        fixture.project.code,
-        sourceKey,
-      );
+      const sourceBeforeClaim = await fixture.service.getWorkItem(fixture.project.code, sourceKey);
       const claimed = await fixture.client.callTool({
         name: "atm_task_patch",
         arguments: {
@@ -807,9 +804,7 @@ describe("MCP surface v3 parity", () => {
         },
       });
       expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
-      expect(
-        await fixture.service.getWorkItem(fixture.project.code, sourceKey),
-      ).toMatchObject({
+      expect(await fixture.service.getWorkItem(fixture.project.code, sourceKey)).toMatchObject({
         status: "CLAIMED",
         claimedBySessionId: restoredSession,
       });
@@ -854,9 +849,7 @@ describe("MCP surface v3 parity", () => {
         },
       });
       expect(progress.isError, JSON.stringify(progress.content)).not.toBe(true);
-      expect(
-        await fixture.service.getWorkItem(fixture.project.code, taskKey),
-      ).toMatchObject({
+      expect(await fixture.service.getWorkItem(fixture.project.code, taskKey)).toMatchObject({
         reportedProgress: 40,
       });
 

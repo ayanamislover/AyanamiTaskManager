@@ -48,9 +48,6 @@ export function assertLegacyMcpSchemaTransitionBudget(tools: unknown): {
   return {
     bytes,
     maxBytes: MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
-    overUsableBytes: Math.max(
-      0,
-      bytes - (MCP_SCHEMA_LIMIT_BYTES - MCP_SCHEMA_RESERVE_BYTES),
-    ),
+    overUsableBytes: Math.max(0, bytes - (MCP_SCHEMA_LIMIT_BYTES - MCP_SCHEMA_RESERVE_BYTES)),
   };
 }

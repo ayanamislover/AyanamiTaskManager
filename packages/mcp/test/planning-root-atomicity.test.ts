@@ -269,7 +269,9 @@ describe("planning-root + task-create atomicity", () => {
     expect(keyFor(discoveredRow.local_no)).toBe(keys.get("source"));
     expect(await fixture.service.listObjectives(fixture.project.code)).toHaveLength(1);
     expect(await fixture.service.listMilestones(fixture.project.code)).toHaveLength(1);
-    expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 20 })).toHaveLength(4);
+    expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 20 })).toHaveLength(
+      4,
+    );
     expect(rowCount(fixture.database, "idempotency_keys")).toBe(1);
   });
 
@@ -306,7 +308,9 @@ describe("planning-root + task-create atomicity", () => {
     ).toHaveLength(1);
     expect(await fixture.service.listObjectives(fixture.project.code)).toHaveLength(1);
     expect(await fixture.service.listMilestones(fixture.project.code)).toHaveLength(1);
-    expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 20 })).toHaveLength(2);
+    expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 20 })).toHaveLength(
+      2,
+    );
     expect(rowCount(fixture.database, "idempotency_keys")).toBe(2);
   });
 });
