@@ -88,6 +88,7 @@ const publicFields: Record<string, readonly string[]> = {
     "scope",
   ],
   atm_search: [
+    "list",
     "project",
     "query",
     "op_id",

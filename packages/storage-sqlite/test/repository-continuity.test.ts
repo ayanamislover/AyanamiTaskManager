@@ -108,7 +108,7 @@ describe("record 公开引用与主题关联", () => {
       });
       expect(repository.listRecords()).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ topic: "release-integrity", subject_key: "release:v2" }),
+          expect.objectContaining({ topic: "release-integrity", subjectKey: "release:v2" }),
         ]),
       );
     } finally {

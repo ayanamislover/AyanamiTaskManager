@@ -73,16 +73,44 @@ describe("Record REST 读取面", () => {
         url: `/api/v1/projects/${project.code}/records?limit=10`,
         headers: { authorization: "Bearer local-secret" },
       });
-      const listed = (listResponse.json() as Array<Record<string, unknown>>).find(
-        (record) => record.key === created.key,
-      );
+      const page = listResponse.json() as {
+        items: Array<Record<string, unknown>>;
+        nextCursor: string | null;
+        hasMore: boolean;
+      };
+      const listed = page.items.find((record) => record.key === created.key);
       expect(listResponse.statusCode).toBe(200);
+      expect(page).toMatchObject({ nextCursor: null, hasMore: false });
       expect(listed).toMatchObject({
         key: created.key,
         topic: "record-read-plane",
         relatedRecords: [related.key],
         opId: "create-exact-record",
+        sourceType: "AGENT",
+        sourceActorId: "record-read-test",
+        sourceSessionId: String(begin.session),
       });
+      expect(listed).not.toHaveProperty("source_type");
+      expect(listed).not.toHaveProperty("updated_at");
+
+      const firstPage = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/${project.code}/records?limit=1`,
+        headers: { authorization: "Bearer local-secret" },
+      });
+      expect(firstPage.json()).toMatchObject({
+        items: [expect.any(Object)],
+        nextCursor: expect.stringMatching(/^rl1\./u),
+        hasMore: true,
+      });
+      const invalidCursor = `${firstPage.json().nextCursor.slice(0, -1)}x`;
+      const invalid = await app.inject({
+        method: "GET",
+        url: `/api/v1/projects/${project.code}/records?limit=1&cursor=${encodeURIComponent(invalidCursor)}`,
+        headers: { authorization: "Bearer local-secret" },
+      });
+      expect(invalid.statusCode).toBe(422);
+      expect(invalid.json()).toMatchObject({ error: { code: "INVALID_CURSOR" } });
     } finally {
       await app.close();
       service.close();

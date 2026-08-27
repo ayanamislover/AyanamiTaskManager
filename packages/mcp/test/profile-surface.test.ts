@@ -59,7 +59,7 @@ describe("MCP static profiles", () => {
       expect(() => assertMcpSchemaBudget(memory.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(actions.tools)).not.toThrow();
       expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7576, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 4370, framingBytes: 5 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 4397, framingBytes: 5 });
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 4623, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(4);

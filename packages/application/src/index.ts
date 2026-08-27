@@ -29,6 +29,7 @@ import {
   type CreateSessionInput,
   type MutationActorResolution,
   type ProjectActor,
+  type RecordPageFilters,
   type RegisteredProject,
   type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
@@ -985,6 +986,10 @@ export class AyanamiTaskService {
 
   async listRecords(projectCode: string, limit = 100) {
     return (await this.#repository(projectCode)).listRecords(limit);
+  }
+
+  async recordPage(projectCode: string, filters: RecordPageFilters = {}) {
+    return (await this.#repository(projectCode)).listRecordPage(filters);
   }
 
   async getRecord(projectCode: string, reference: string) {

@@ -20,12 +20,14 @@ import {
   type ChecklistBatchFailureReason,
   type SearchHit,
   type SearchPage,
+  type RecordView,
   type TaskViewName,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { assertCompletionGates } from "./completion-gates.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import { decodeRecordListCursor, encodeRecordListCursor } from "./record-list-pagination.js";
 import {
   canonicalTaskListSelection,
   decodeTaskListCursor,
@@ -248,24 +250,14 @@ export type ChecklistView = {
   version: number;
 };
 
-export type RecordView = {
-  id: string;
-  key: string;
-  kind: string;
-  title: string;
-  summary: string;
-  detail: string;
-  importance: string;
-  scope: string;
-  workItemKey: string | null;
-  supersedes: string | null;
-  status: string;
-  topic: string | null;
-  subjectKey: string | null;
-  relatedRecords: string[];
-  opId: string | null;
-  createdAt: string;
-  updatedAt: string;
+export type RecordPageFilters = { limit?: number; cursor?: string };
+
+export type RecordProjectionPage = {
+  items: RecordView[];
+  itemCursors: string[];
+  nextCursor: string | null;
+  retryCursor: string;
+  hasMore: boolean;
 };
 
 export type BriefSnapshotRecord = {
@@ -1193,24 +1185,117 @@ export class ProjectRepository {
     })();
   }
 
-  listRecords(limit = 100): any[] {
-    return (
-      this.#sqlite
-        .prepare(
-          `SELECT id, local_no, kind, title, summary, detail, importance, scope, work_item_id,
-                supersedes_id, status, source_type, source_actor_id,
-                source_session_id, source_ref, topic, subject_key, op_id, created_at, updated_at
-         FROM records ORDER BY updated_at DESC LIMIT ?`,
-        )
-        .all(Math.min(200, Math.max(1, limit))) as any[]
-    ).map((row) => ({
-      ...row,
-      key: this.recordKey(row),
-      topic: row.topic ?? null,
-      subjectKey: row.subject_key ?? null,
-      opId: row.op_id ?? null,
-      relatedRecords: this.relatedRecordKeys(row),
-    }));
+  listRecordPage(filters: RecordPageFilters = {}): RecordProjectionPage {
+    const project = this.meta.code;
+    const selection = { list: "records" as const };
+    const decoded = filters.cursor
+      ? decodeRecordListCursor(filters.cursor, { project, selection })
+      : { last: null };
+    const clauses: string[] = [];
+    const parameters: unknown[] = [];
+    if (decoded.last) {
+      clauses.push("(records.updated_at, records.local_no) < (?, ?)");
+      parameters.push(decoded.last.updatedAt, decoded.last.localNo);
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 100));
+    parameters.push(limit + 1, project, project, project);
+    const rows = this.#sqlite
+      .prepare(
+        `WITH selected_records AS (
+           SELECT records.*
+           FROM records
+           ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
+           ORDER BY records.updated_at DESC, records.local_no DESC
+           LIMIT ?
+         ), related_candidates AS (
+           SELECT selected_records.id AS selected_id,
+                  related.updated_at AS related_updated_at,
+                  related.local_no AS related_local_no,
+                  ? || CASE WHEN related.kind = 'DECISION' THEN '-D-' ELSE '-R-' END ||
+                    printf('%03d', related.local_no) AS related_key,
+                  row_number() OVER (
+                    PARTITION BY selected_records.id
+                    ORDER BY related.updated_at DESC, related.local_no DESC
+                  ) AS related_rank
+           FROM selected_records
+           JOIN records related
+             ON related.id <> selected_records.id
+            AND related.status = 'ACTIVE'
+            AND ((selected_records.topic IS NOT NULL AND related.topic = selected_records.topic)
+              OR (selected_records.subject_key IS NOT NULL
+                AND related.subject_key = selected_records.subject_key))
+         ), related_aggregates AS (
+           SELECT selected_id, json_group_array(related_key) AS related_records_json
+           FROM (
+             SELECT selected_id, related_key
+             FROM related_candidates
+             WHERE related_rank <= 20
+             ORDER BY selected_id, related_updated_at DESC, related_local_no DESC
+           ) ordered_related
+           GROUP BY selected_id
+         ), projected_records AS (
+           SELECT selected_records.*,
+                  CASE WHEN work_item.local_no IS NULL THEN NULL
+                       ELSE ? || '-T-' || printf('%04d', work_item.local_no) END AS work_item_key,
+                  CASE WHEN superseded.local_no IS NULL THEN NULL
+                       ELSE ? || CASE WHEN superseded.kind = 'DECISION' THEN '-D-' ELSE '-R-' END ||
+                            printf('%03d', superseded.local_no) END AS supersedes_key,
+                  COALESCE(related_aggregates.related_records_json, '[]') AS related_records_json
+           FROM selected_records
+           LEFT JOIN work_items work_item ON work_item.id = selected_records.work_item_id
+           LEFT JOIN records superseded ON superseded.id = selected_records.supersedes_id
+           LEFT JOIN related_aggregates ON related_aggregates.selected_id = selected_records.id
+         )
+         SELECT * FROM projected_records
+         ORDER BY updated_at DESC, local_no DESC`,
+      )
+      .all(...parameters) as any[];
+    const hasMore = rows.length > limit;
+    const selected = rows.slice(0, limit);
+    const items = selected.map(
+      (row): RecordView => ({
+        id: String(row.id),
+        key: this.recordKey(row),
+        kind: String(row.kind),
+        title: String(row.title),
+        summary: String(row.summary),
+        detail: String(row.detail),
+        importance: String(row.importance),
+        scope: String(row.scope),
+        workItemKey: row.work_item_key ? String(row.work_item_key) : null,
+        supersedes: row.supersedes_key ? String(row.supersedes_key) : null,
+        status: row.status as RecordView["status"],
+        topic: row.topic === null ? null : String(row.topic),
+        subjectKey: row.subject_key === null ? null : String(row.subject_key),
+        relatedRecords: json<string[]>(row.related_records_json, []),
+        opId: row.op_id === null ? null : String(row.op_id),
+        sourceType: row.source_type as RecordView["sourceType"],
+        sourceActorId: row.source_actor_id === null ? null : String(row.source_actor_id),
+        sourceSessionId: row.source_session_id === null ? null : String(row.source_session_id),
+        sourceRef: row.source_ref === null ? null : String(row.source_ref),
+        createdAt: String(row.created_at),
+        updatedAt: String(row.updated_at),
+      }),
+    );
+    const itemCursors = selected.map((row) =>
+      encodeRecordListCursor({
+        project,
+        selection,
+        last: { updatedAt: String(row.updated_at), localNo: Number(row.local_no) },
+      }),
+    );
+    const startCursor = encodeRecordListCursor({ project, selection, last: null });
+    return {
+      items,
+      itemCursors,
+      nextCursor: hasMore ? itemCursors.at(-1)! : null,
+      retryCursor: filters.cursor ?? startCursor,
+      hasMore,
+    };
+  }
+
+  listRecords(limit = 100): RecordView[] {
+    return this.listRecordPage({ limit }).items;
   }
 
   private recordKey(row: { local_no: number; kind: string }): string {
@@ -1278,6 +1363,10 @@ export class ProjectRepository {
       subjectKey: row.subject_key ?? null,
       relatedRecords: this.relatedRecordKeys(row),
       opId: row.op_id ?? null,
+      sourceType: row.source_type,
+      sourceActorId: row.source_actor_id ?? null,
+      sourceSessionId: row.source_session_id ?? null,
+      sourceRef: row.source_ref ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

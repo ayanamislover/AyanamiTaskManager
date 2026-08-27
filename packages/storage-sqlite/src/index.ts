@@ -4,6 +4,7 @@ export * from "./event-presentation.js";
 export * from "./manager.js";
 export * from "./migration-runner.js";
 export * from "./project-repository.js";
+export * from "./record-list-pagination.js";
 export * from "./search-pagination.js";
 export * from "./task-list-pagination.js";
 export * from "./task-view-query.js";

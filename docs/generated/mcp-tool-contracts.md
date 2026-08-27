@@ -7,7 +7,7 @@ Surface: `v3`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7576 | `2e3f175dc5198e2d5609b67970c5ac08710c7eac16d66e70e3f6c3c7302da30d` |
-| memory | 4370 | `2f54629f73d93ef13faf3a3f4adceabe59ed962d8f44a7b45210d47aa2d50409` |
+| memory | 4397 | `1efb73dba1b440725e391f0dd00275237b8dbe34a47ac20d808bc09f96136be8` |
 | actions | 4623 | `9ebf3736d921cf884ff03e1d7a1f8c90c7098f17afaf17804821249d2c31c2f7` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -20,7 +20,7 @@ Surface: `v3`
 | core | `atm_end` | 结束会话并交接。 | false | false | `ed553337d131` |
 | memory | `atm_progress_add` | 写任务或项目进度。 | false | false | `a65dbceedb8a` |
 | memory | `atm_record` | 保存关键记录。 | false | false | `dc6b90fa4655` |
-| memory | `atm_search` | 搜索事实。 | true | false | `299484b05612` |
+| memory | `atm_search` | 搜索事实。 | true | false | `503efde82fb0` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
 | actions | `atm_task_patch` | 批量变更任务。 | false | true | `d4334d54a316` |
 

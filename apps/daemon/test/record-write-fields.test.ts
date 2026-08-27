@@ -162,6 +162,6 @@ describe("Record topic/subjectKey REST 写入链", () => {
       headers: auth,
     });
     expect(records.statusCode).toBe(200);
-    expect(records.json()).toEqual([]);
+    expect(records.json()).toEqual({ items: [], nextCursor: null, hasMore: false });
   });
 });
