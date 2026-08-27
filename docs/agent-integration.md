@@ -23,7 +23,7 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 ## 标准 Session 流程
 
 1. 开工调用 `atm_begin`，显式传入 `project_code`。普通交互式开工可在受管开发任务未注册时自动创建；需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`，不能把项目创建和 Session 原子恢复混为一次调用。只有无法可靠确定项目名称、代码或目录时才请求用户确认。
-2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。MCP 工具面当前为 v2，`atm_begin.surface_version` 是客户端检查缓存契约的锚点。
+2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。MCP 工具面当前为 v3，`atm_begin.surface_version` 是客户端检查缓存契约的锚点。
 3. 选择 `READY` 工作项后，以 `atm_task_patch` 执行 `claim` 和 `start`。
 4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
 5. 决策、约束、事实、风险、参考和经验写入 `atm_record`；长历史不要反复塞回上下文。
@@ -60,7 +60,12 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器代替人做出的规划决策，因此它是显式回执而不是静默行为：拿到它就应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
-可用的 12 个 MCP 工具为：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_checklist`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`、`atm_end`。
+MCP 使用两个默认同时登记、工具名不重叠的静态 Profile：
+
+- core：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_end`。
+- memory：`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_search`、`atm_delta`。
+
+两者共享同一 ATM 数据库。memory 默认启用；用户可在设置中主动关闭以减少每个客户端的一条 bridge 进程，但这会进入降级模式，无法修改任务、写进度/Record、搜索或增量同步，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
 工作中发现新的独立事项时，用 `atm_task_create` 的 `discovered_from` 指向已有任务，或用 `discovered_from_ref` 指向同一批次的 `client_ref`。这是可追溯的发现关系，不会阻塞 ready queue，也不应替代 `depends_on`。
 
@@ -73,6 +78,11 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - `claim` 只领取依赖已满足的任务；接管过期领取必须显式使用 `takeover_stale`。
 - 阻塞必须填写原因；等待用户和等待 Agent 必须写清所需条件。
 - mutation 返回短 ACK；需要新状态时再用 `atm_delta` 或单任务读取。
+- `complete` 的门禁错误会一次返回检查项、证据、子任务、阻塞、依赖、验收和当前状态中的全部已知缺口；调用方应一次性处理全部 reasons，不要按第一条错误循环试探。
+
+### 精确读取与长字段续读
+
+`atm_search` 会先处理公开精确标识，再进入全文搜索：WorkItem/Record 使用公开 key；Progress 与 Session 使用 `progress:<ULID>`、`session:<ULID>`；写操作可用 `op_id` 并按 `session` 收窄。`field_mask` 只返回点名字段；响应给出 continuation cursor 时，后续请求必须保持相同项目、实体、类型和字段集合。cursor 经过签名并绑定字段内容，篡改、跨实体复用或内容变化都会 fail closed，不能通过改 token 猜测续页。
 
 ### MCP 与 REST 字段名
 
