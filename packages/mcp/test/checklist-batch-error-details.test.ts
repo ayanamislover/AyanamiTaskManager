@@ -59,4 +59,48 @@ describe("checklist batch typed error details", () => {
       await Promise.all([client.close(), server.close()]);
     }
   });
+
+  it("keeps the original typed error when diagnostic enrichment fails", async () => {
+    const reasons = [{ checklist_id: "check-1", code: "EVIDENCE_REQUIRED" as const }];
+    const service = {
+      updateChecklistBatch: async () => {
+        throw new ChecklistBatchFailureError(reasons);
+      },
+      enrichError: async () => {
+        throw new Error("injected enrichment failure");
+      },
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
+    const client = new Client({ name: "checklist-enrichment-failure", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    try {
+      const response = await client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: "ATM",
+          session: "session-1",
+          op_id: "enrichment-failure",
+          items: [
+            {
+              task_key: "ATM-T-0001",
+              expected_version: 3,
+              operation: "checklist_batch",
+              checklist_items: [{ id: "check-1", status: "DONE" }],
+            },
+          ],
+        },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(response.structuredContent).toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        retryable: false,
+        details: { reasons },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
 });
