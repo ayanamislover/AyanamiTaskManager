@@ -1094,19 +1094,21 @@ export class ProjectRepository {
     return this.#sqlite.transaction(() => {
       const rows = this.#sqlite
         .prepare(
-          `SELECT id, agent_id FROM agent_sessions
+          `SELECT id, agent_id, closed_at FROM agent_sessions
            WHERE connection_state = 'ONLINE' AND COALESCE(heartbeat_at, updated_at) < ?`,
         )
-        .all(cutoffIso) as Array<{ id: string; agent_id: string }>;
+        .all(cutoffIso) as Array<{ id: string; agent_id: string; closed_at: string | null }>;
       const now = nowIso();
       for (const row of rows) {
+        const closedAt = row.closed_at ?? now;
         this.#sqlite
           .prepare(
             `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
-             closed_at = ?, updated_at = ?, retirement_reason = 'startup recovery: heartbeat expired',
+             closed_at = COALESCE(closed_at, ?), updated_at = ?, retirement_reason = 'startup recovery: heartbeat expired',
              close_reason = 'HEARTBEAT_TIMEOUT', version = version + 1 WHERE id = ?`,
           )
-          .run(now, now, row.id);
+          .run(closedAt, now, row.id);
+        this.recordSessionClosedAtForHandledWorkItems(row.id, closedAt);
         this.appendEvent(
           "agent.recovered_stale",
           { type: "SYSTEM", id: "SYSTEM", sessionId: null },
@@ -1125,14 +1127,15 @@ export class ProjectRepository {
   ): { ok: 1; session: string; released: number; seq: number } {
     return this.#sqlite.transaction(() => {
       const session = this.#sqlite
-        .prepare("SELECT id, agent_id FROM agent_sessions WHERE id = ?")
-        .get(sessionId) as { id: string; agent_id: string } | undefined;
+        .prepare("SELECT id, agent_id, closed_at FROM agent_sessions WHERE id = ?")
+        .get(sessionId) as { id: string; agent_id: string; closed_at: string | null } | undefined;
       if (!session)
         throw new AtmError("SESSION_NOT_FOUND", {
           message: `Session 不存在：${sessionId}`,
           details: { entity: "SESSION", reference: sessionId },
         });
       const now = nowIso();
+      const closedAt = session.closed_at ?? now;
       const released = releaseClaims
         ? (
             this.#sqlite
@@ -1159,7 +1162,8 @@ export class ProjectRepository {
            retirement_reason = 'closed by user', close_reason = 'FORCE_CLOSE',
            version = version + 1 WHERE id = ?`,
         )
-        .run(now, now, sessionId);
+        .run(closedAt, now, sessionId);
+      this.recordSessionClosedAtForHandledWorkItems(sessionId, closedAt);
       const seq = this.appendEvent(
         "agent.force_closed",
         { type: "USER", id: "USER", sessionId: null },
@@ -1856,6 +1860,27 @@ export class ProjectRepository {
          WHERE id = ?`,
       )
       .run(at, at, workItemId);
+  }
+
+  private recordSessionClosedAtForHandledWorkItems(sessionId: string, closedAt: string): void {
+    if (this.database.schemaVersion < 15) return;
+    this.#sqlite
+      .prepare(
+        `UPDATE work_items
+         SET last_session_closed_at = CASE
+           WHEN last_session_closed_at IS NULL OR last_session_closed_at < ? THEN ?
+           ELSE last_session_closed_at
+         END
+         WHERE id IN (
+           SELECT event.aggregate_id
+           FROM events AS event INDEXED BY idx_events_work_session_lifecycle
+           WHERE event.session_id = ?
+             AND event.aggregate_type = 'WORK_ITEM'
+             AND event.type IN ('work.claimed', 'work.started')
+           GROUP BY event.aggregate_id
+         )`,
+      )
+      .run(closedAt, closedAt, sessionId);
   }
 
   private normalizeEvidence(evidence: unknown[], strictTyped = false): unknown[] {
@@ -4693,6 +4718,10 @@ export class ProjectRepository {
       immediate: true,
       action: () => {
         const now = nowIso();
+        const session = this.#sqlite
+          .prepare("SELECT closed_at FROM agent_sessions WHERE id = ?")
+          .get(sessionId) as { closed_at: string | null } | undefined;
+        const closedAt = session?.closed_at ?? now;
         const claimed =
           input.outcome === "retired" || input.releaseClaims
             ? (this.#sqlite
@@ -4750,12 +4779,12 @@ export class ProjectRepository {
         this.#sqlite
           .prepare(
             `UPDATE agent_sessions SET connection_state = 'CLOSED', work_state = 'IDLE',
-             heartbeat_at = ?, closed_at = ?, updated_at = ?, retirement_reason = ?,
+             heartbeat_at = ?, closed_at = COALESCE(closed_at, ?), updated_at = ?, retirement_reason = ?,
              close_reason = ?, version = version + 1 WHERE id = ?`,
           )
           .run(
             now,
-            now,
+            closedAt,
             now,
             input.outcome === "retired"
               ? input.retirementReason?.trim() || "context rotation"
@@ -4763,6 +4792,7 @@ export class ProjectRepository {
             input.outcome === "retired" ? "EXPLICIT_RETIRE" : "EXPLICIT_END",
             sessionId,
           );
+        this.recordSessionClosedAtForHandledWorkItems(sessionId, closedAt);
         const seq = this.appendEvent("agent.left", actor, "SESSION", sessionId, {
           outcome: input.outcome,
           summary: input.summary,
