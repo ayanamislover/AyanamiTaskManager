@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ayanami-task/domain": "workspace:*",
+    "@ayanami-task/errors": "workspace:*",
     "@ayanami-task/protocol": "workspace:*",
     "better-sqlite3": "13.0.2",
     "fflate": "0.8.3"

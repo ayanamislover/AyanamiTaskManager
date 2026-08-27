@@ -93,7 +93,7 @@ describe("VERSION_CONFLICT 可操作详情", () => {
       expect(response.json()).toMatchObject({
         error: {
           code: "VERSION_CONFLICT",
-          message: expect.stringContaining(`VERSION_CONFLICT: ${conflict!.key}`),
+          message: "WorkItem 版本已变化",
           details: {
             entity: "WORK_ITEM",
             key: conflict!.key,
@@ -132,7 +132,7 @@ describe("VERSION_CONFLICT 可操作详情", () => {
     }
   });
 
-  it("单项 checklist 冲突保留旧消息并补充 checklist 与所属公开 task 快照", async () => {
+  it("单项 checklist 冲突返回 typed code 并补充 checklist 与所属公开 task 快照", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-checklist-version-details-"));
     temporary.push(dataDir);
     const service = await AyanamiTaskService.open({
@@ -186,7 +186,7 @@ describe("VERSION_CONFLICT 可操作详情", () => {
       expect(response.json()).toMatchObject({
         error: {
           code: "VERSION_CONFLICT",
-          message: "VERSION_CONFLICT: 1",
+          message: "检查项版本已变化",
           details: {
             entity: "CHECKLIST",
             key: checklist.id,

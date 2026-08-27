@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ayanami-task/application": "workspace:*",
+    "@ayanami-task/errors": "workspace:*",
     "@ayanami-task/protocol": "workspace:*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "4.4.3"

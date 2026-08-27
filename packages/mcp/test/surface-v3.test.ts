@@ -45,11 +45,9 @@ function errorText(response: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 function errorDetails(response: Awaited<ReturnType<Client["callTool"]>>): Record<string, any> {
-  const text = errorText(response);
-  const marker = "MCP_DETAILS=";
-  const offset = text.indexOf(marker);
-  expect(offset, text).toBeGreaterThanOrEqual(0);
-  return JSON.parse(text.slice(offset + marker.length)) as Record<string, any>;
+  const structured = response.structuredContent as { details?: Record<string, any> } | undefined;
+  expect(structured?.details, errorText(response)).toBeDefined();
+  return structured!.details!;
 }
 
 describe("MCP surface v3 parity", () => {
@@ -226,7 +224,10 @@ describe("MCP surface v3 parity", () => {
       expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 100 })).toEqual([]);
       await expect(
         fixture.service.getOperationTrace(fixture.project.code, opId, fixture.session),
-      ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${opId}`);
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { reference: opId },
+      });
     } finally {
       await closeFixture(fixture);
     }
@@ -258,6 +259,7 @@ describe("MCP surface v3 parity", () => {
       expect(errorText(response)).toContain("MILESTONE_NOT_FOUND");
       expect(errorDetails(response)).toEqual({
         entity: "MILESTONE",
+        reference: missingId,
         did_you_mean: null,
         candidates: [],
       });
@@ -266,7 +268,10 @@ describe("MCP surface v3 parity", () => {
       expect(await fixture.service.listWorkItems(fixture.project.code, { limit: 100 })).toEqual([]);
       await expect(
         fixture.service.getOperationTrace(fixture.project.code, opId, fixture.session),
-      ).rejects.toThrowError(`OPERATION_NOT_FOUND: ${opId}`);
+      ).rejects.toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { reference: opId },
+      });
     } finally {
       await closeFixture(fixture);
     }
@@ -368,10 +373,8 @@ describe("MCP surface v3 parity", () => {
       });
       expect(details.recent_changes.length).toBeGreaterThan(0);
       expect(details.recent_changes.length).toBeLessThanOrEqual(6);
-      expect(details.truncated).toBe(true);
-      expect(details.truncated_fields).toContainEqual(
-        expect.objectContaining({ path: "current.description", original_chars: 50_000 }),
-      );
+      expect(details).not.toHaveProperty("truncated");
+      expect(details.current.description).toHaveLength(50_000);
 
       const taskDetail = await fixture.service.getWorkItem(fixture.project.code, task.key);
       const checklist = taskDetail.checklist[0]!;

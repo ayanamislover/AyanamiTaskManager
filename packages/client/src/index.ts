@@ -6,6 +6,12 @@ import type {
   TaskFullView,
   TaskViewName,
 } from "@ayanami-task/protocol";
+import {
+  AtmError,
+  isAtmErrorCode,
+  type AtmBaseErrorDetails,
+  type AtmErrorCode,
+} from "@ayanami-task/errors";
 
 export type AyanamiClientOptions = {
   endpoint: string;
@@ -13,15 +19,25 @@ export type AyanamiClientOptions = {
   fetchImpl?: typeof fetch;
 };
 
-export class AyanamiClientError extends Error {
-  readonly code: string;
+export class AyanamiClientError extends AtmError<AtmErrorCode> {
   readonly status: number;
   readonly requestId: string | null;
 
-  constructor(input: { code: string; message: string; status: number; requestId?: string | null }) {
-    super(input.message);
+  constructor(input: {
+    code: AtmErrorCode;
+    message: string;
+    status: number;
+    requestId?: string | null;
+    details?: AtmBaseErrorDetails | null;
+    retryable?: boolean;
+  }) {
+    super(input.code, {
+      message: input.message,
+      httpStatus: input.status,
+      ...(input.details === undefined ? {} : { details: input.details }),
+      ...(input.retryable === undefined ? {} : { retryable: input.retryable }),
+    });
     this.name = "AyanamiClientError";
-    this.code = input.code;
     this.status = input.status;
     this.requestId = input.requestId ?? null;
   }
@@ -150,11 +166,18 @@ export class AyanamiClient {
       }
     }
     if (!response.ok) {
+      const rawCode = payload?.error?.code;
       throw new AyanamiClientError({
-        code: payload?.error?.code ?? "HTTP_ERROR",
+        code: isAtmErrorCode(rawCode) ? rawCode : "INVALID_RESPONSE",
         message: payload?.error?.message ?? `请求失败（HTTP ${response.status}）`,
         status: response.status,
         requestId: payload?.request_id ?? response.headers.get("x-request-id"),
+        ...(payload?.error?.details && typeof payload.error.details === "object"
+          ? { details: payload.error.details as AtmBaseErrorDetails }
+          : {}),
+        ...(typeof payload?.error?.retryable === "boolean"
+          ? { retryable: payload.error.retryable }
+          : {}),
       });
     }
     return payload as T;

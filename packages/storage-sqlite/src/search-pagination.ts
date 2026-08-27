@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { AtmError, isAtmError } from "@ayanami-task/errors";
 
 export type SearchPosition = {
   updatedAt: string;
@@ -46,7 +47,9 @@ function digest(body: string): string {
 }
 
 function invalidCursor(): never {
-  throw new Error("INVALID_CURSOR: search cursor 无效、已损坏或不属于当前查询");
+  throw new AtmError("INVALID_CURSOR", {
+    message: "search cursor 无效、已损坏或不属于当前查询",
+  });
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -112,7 +115,7 @@ export function decodeSearchCursor(
       },
     };
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("INVALID_CURSOR:")) throw error;
+    if (isAtmError(error) && error.code === "INVALID_CURSOR") throw error;
     return invalidCursor();
   }
 }

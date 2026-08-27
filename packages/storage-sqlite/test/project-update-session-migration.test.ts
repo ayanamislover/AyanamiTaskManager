@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, openManagedDatabase, ProjectRepository } from "../src/index.js";
+import { removeMigrationsAfter } from "./migration-test-helpers.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 
@@ -17,7 +19,7 @@ describe("v13 project update Session migration", () => {
     const dataDir = join(root, "data");
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
-    rmSync(join(migrationsRoot, "project", "0013_project_update_session.sql"), { force: true });
+    removeMigrationsAfter(migrationsRoot, "project", 12);
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({
@@ -58,7 +60,7 @@ describe("v13 project update Session migration", () => {
     manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     try {
       const upgraded = await manager.openProject(project.code);
-      expect(upgraded.schemaVersion).toBe(14);
+      expect(upgraded.schemaVersion).toBe(13);
       expect(upgraded.sqlite.pragma("quick_check")).toEqual([{ quick_check: "ok" }]);
       expect(upgraded.sqlite.pragma("foreign_key_check")).toEqual([]);
       expect(
@@ -68,9 +70,12 @@ describe("v13 project update Session migration", () => {
       ).toEqual({ session_id: null });
 
       const repository = new ProjectRepository(upgraded);
-      expect(() => repository.getOperationTrace("shared-project-op", session.id)).toThrowError(
-        "OPERATION_NOT_FOUND: shared-project-op",
-      );
+      expect(
+        captureAtmError(() => repository.getOperationTrace("shared-project-op", session.id)),
+      ).toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { entity: "OPERATION", reference: "shared-project-op" },
+      });
       const published = repository.publishProjectUpdate(
         { type: "AGENT", id: "project-session-agent", sessionId: session.id },
         "shared-project-op",
@@ -82,9 +87,12 @@ describe("v13 project update Session migration", () => {
       expect(repository.getOperationTrace("shared-project-op", session.id)).toMatchObject({
         projectUpdates: [{ id: published.id, sessionId: session.id }],
       });
-      expect(() => repository.getOperationTrace("shared-project-op", otherSession.id)).toThrowError(
-        "OPERATION_NOT_FOUND: shared-project-op",
-      );
+      expect(
+        captureAtmError(() => repository.getOperationTrace("shared-project-op", otherSession.id)),
+      ).toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { entity: "OPERATION", reference: "shared-project-op" },
+      });
     } finally {
       manager.close();
     }
@@ -99,6 +107,6 @@ describe("v13 project update Session migration", () => {
         migrationDirectory: join(migrationsRoot, "project"),
         backupDirectory: join(root, "tampered-backups"),
       }),
-    ).rejects.toThrowError("MIGRATION_HASH_MISMATCH: 13");
+    ).rejects.toMatchObject({ code: "MIGRATION_HASH_MISMATCH", details: { version: 13 } });
   });
 });

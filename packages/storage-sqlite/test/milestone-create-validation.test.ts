@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 
@@ -56,23 +57,31 @@ describe("milestone create validation", () => {
         status: "READY" as const,
       };
 
-      expect(() => repository.createWorkItems(actor, "invalid-milestone", [item])).toThrowError(
-        `MILESTONE_NOT_FOUND: ${missingMilestone}`,
-      );
+      expect(
+        captureAtmError(() => repository.createWorkItems(actor, "invalid-milestone", [item])),
+      ).toMatchObject({
+        code: "MILESTONE_NOT_FOUND",
+        details: { entity: "MILESTONE", reference: missingMilestone },
+      });
       expect(repository.listWorkItems({ limit: 100 })).toEqual([]);
-      expect(() => repository.getOperationTrace("invalid-milestone", session.id)).toThrowError(
-        "OPERATION_NOT_FOUND: invalid-milestone",
-      );
+      expect(
+        captureAtmError(() => repository.getOperationTrace("invalid-milestone", session.id)),
+      ).toMatchObject({
+        code: "OPERATION_NOT_FOUND",
+        details: { entity: "OPERATION", reference: "invalid-milestone" },
+      });
 
       const committed = repository.createWorkItems(actor, "replay-priority", [
         { ...item, milestoneId: milestone.id, title: "Committed once" },
       ]);
       expect(committed.items).toHaveLength(1);
-      expect(() =>
-        repository.createWorkItems(actor, "replay-priority", [
-          { ...item, clientRef: "changed-request" },
-        ]),
-      ).toThrowError(/IDEMPOTENCY_CONFLICT/u);
+      expect(
+        captureAtmError(() =>
+          repository.createWorkItems(actor, "replay-priority", [
+            { ...item, clientRef: "changed-request" },
+          ]),
+        ),
+      ).toMatchObject({ code: "IDEMPOTENCY_CONFLICT", details: { key: expect.any(String) } });
       expect(repository.listWorkItems({ limit: 100 })).toHaveLength(1);
     } finally {
       manager.close();

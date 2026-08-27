@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { assertParentMove, assertAcyclicDependency, computeProgress } from "@ayanami-task/domain";
+import { AtmError } from "@ayanami-task/errors";
 import {
   assertWorkItemTransition,
   ChecklistBatchFailureError,
@@ -24,6 +25,22 @@ import type { ManagedDatabase } from "./database.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
+
+function assertTypedWorkItemTransition(from: WorkItemStatus, to: WorkItemStatus): void {
+  try {
+    assertWorkItemTransition(from, to);
+  } catch (cause) {
+    throw new AtmError("INVALID_TRANSITION", {
+      message: `不能从 ${from} 变更到 ${to}`,
+      details: {
+        current_status: from,
+        requested_status: to,
+        legal_operations: legalWorkItemOperations(from).map((entry) => entry.operation),
+      },
+      cause,
+    });
+  }
+}
 
 function json<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -417,7 +434,7 @@ export class ProjectRepository {
 
   get meta(): { id: string; code: string; name: string; sequence: number; version: number } {
     const row = this.#sqlite.prepare("SELECT * FROM project_meta WHERE singleton = 1").get() as any;
-    if (!row) throw new Error("PROJECT_META_MISSING");
+    if (!row) throw new AtmError("PROJECT_META_MISSING", { message: "项目元数据缺失" });
     return {
       id: row.project_id,
       code: row.project_code,
@@ -433,7 +450,11 @@ export class ProjectRepository {
         "UPDATE counters SET next_value = next_value + 1 WHERE name = ? RETURNING next_value - 1 AS value",
       )
       .get(name) as { value: number } | undefined;
-    if (!row) throw new Error(`COUNTER_NOT_FOUND: ${name}`);
+    if (!row)
+      throw new AtmError("COUNTER_NOT_FOUND", {
+        message: `计数器不存在：${name}`,
+        details: { reference: name },
+      });
     return row.value;
   }
 
@@ -501,7 +522,10 @@ export class ProjectRepository {
         .get(key) as any;
       if (cached) {
         if (cached.operation !== input.operation || cached.request_fingerprint !== fingerprint) {
-          throw new Error(`IDEMPOTENCY_CONFLICT: ${key}`);
+          throw new AtmError("IDEMPOTENCY_CONFLICT", {
+            message: `幂等键冲突：${key}`,
+            details: { key },
+          });
         }
         return { value: JSON.parse(cached.response_json) as T, replayed: true };
       }
@@ -544,11 +568,17 @@ export class ProjectRepository {
           .get(input.predecessorSessionId) as
           | { agent_id: string; connection_state: string; retirement_reason: string | null }
           | undefined;
-        if (!predecessor) throw new Error(`SESSION_NOT_FOUND: ${input.predecessorSessionId}`);
+        if (!predecessor)
+          throw new AtmError("SESSION_NOT_FOUND", {
+            message: `Session 不存在：${input.predecessorSessionId}`,
+            details: { entity: "SESSION", reference: input.predecessorSessionId },
+          });
         if (predecessor.agent_id !== input.agentId)
-          throw new Error("SESSION_SUCCESSOR_AGENT_MISMATCH");
+          throw new AtmError("SESSION_SUCCESSOR_AGENT_MISMATCH", {
+            message: "Session successor Agent 不匹配",
+          });
         if (predecessor.connection_state !== "CLOSED" || !predecessor.retirement_reason) {
-          throw new Error("SESSION_NOT_RETIRED");
+          throw new AtmError("SESSION_NOT_RETIRED", { message: "前序 Session 尚未退休" });
         }
       }
       this.#sqlite
@@ -638,7 +668,7 @@ export class ProjectRepository {
   ): { id: string; sequence: number; disposition: "CREATED" | "RECOVERED" } {
     const normalizedOperationId = operationId.trim();
     if (!normalizedOperationId || normalizedOperationId.length > 128) {
-      throw new Error("OPERATION_ID_INVALID");
+      throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
     }
     const mutation = this.mutateWithReplay({
       actor: { type: "SYSTEM", id: "session-begin", sessionId: null },
@@ -664,7 +694,11 @@ export class ProjectRepository {
          WHERE session.id = ?`,
       )
       .get(id);
-    if (!row) throw new Error(`SESSION_NOT_FOUND: ${id}`);
+    if (!row)
+      throw new AtmError("SESSION_NOT_FOUND", {
+        message: `Session 不存在：${id}`,
+        details: { entity: "SESSION", reference: id },
+      });
     return row;
   }
 
@@ -771,7 +805,8 @@ export class ProjectRepository {
     createRecoverySuccessor: boolean,
   ): MutationActorResolution {
     const normalizedOpId = opId.trim();
-    if (!normalizedOpId || normalizedOpId.length > 128) throw new Error("OPERATION_ID_INVALID");
+    if (!normalizedOpId || normalizedOpId.length > 128)
+      throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
     const fingerprint = requestFingerprint(this.normalizeMutationRequest(operation, request));
     const requested = this.getSession(sessionId);
     const visited = new Set<string>();
@@ -785,7 +820,10 @@ export class ProjectRepository {
         | undefined;
       if (cached) {
         if (cached.operation !== operation || cached.request_fingerprint !== fingerprint) {
-          throw new Error(`IDEMPOTENCY_CONFLICT: ${candidate.id}:${normalizedOpId}`);
+          throw new AtmError("IDEMPOTENCY_CONFLICT", {
+            message: "幂等操作与现有 Session 不一致",
+            details: { session_id: candidate.id, operation_id: normalizedOpId },
+          });
         }
         return {
           actor: { type: "AGENT", id: candidate.agent_id, sessionId: candidate.id },
@@ -807,7 +845,10 @@ export class ProjectRepository {
       };
     }
     if (requested.close_reason !== "HEARTBEAT_TIMEOUT") {
-      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+      throw new AtmError("SESSION_CLOSED", {
+        message: sessionId,
+        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
+      });
     }
     const successors = this.#sqlite
       .prepare(
@@ -816,16 +857,27 @@ export class ProjectRepository {
          ORDER BY started_at DESC`,
       )
       .all(sessionId) as any[];
-    if (successors.length > 1) throw new Error(`SESSION_SUCCESSOR_AMBIGUOUS: ${sessionId}`);
+    if (successors.length > 1)
+      throw new AtmError("SESSION_SUCCESSOR_AMBIGUOUS", {
+        message: `Session successor 不唯一：${sessionId}`,
+        details: { session_id: sessionId },
+      });
     let successor = successors[0];
     if (successor && !this.isMatchingRecoverySuccessor(requested, successor)) {
-      throw new Error(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${sessionId}`);
+      throw new AtmError("SESSION_SUCCESSOR_IDENTITY_MISMATCH", {
+        message: `Session successor 身份不匹配：${sessionId}`,
+        details: { session_id: sessionId },
+      });
     }
     if (!successor && createRecoverySuccessor) {
       const agent = this.#sqlite
         .prepare("SELECT display_name, client_kind FROM agents WHERE id = ?")
         .get(requested.agent_id) as { display_name: string; client_kind: string } | undefined;
-      if (!agent) throw new Error(`SESSION_SUCCESSOR_IDENTITY_MISMATCH: ${sessionId}`);
+      if (!agent)
+        throw new AtmError("SESSION_SUCCESSOR_IDENTITY_MISMATCH", {
+          message: `Session successor 身份不匹配：${sessionId}`,
+          details: { session_id: sessionId },
+        });
       const created = this.createSession({
         agentId: requested.agent_id,
         displayName: agent.display_name,
@@ -857,7 +909,10 @@ export class ProjectRepository {
       successor = this.getSession(created.id);
     }
     if (!successor) {
-      throw new Error(`SESSION_CLOSED: ${sessionId}`);
+      throw new AtmError("SESSION_CLOSED", {
+        message: sessionId,
+        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
+      });
     }
     return {
       actor: { type: "AGENT", id: successor.agent_id, sessionId: successor.id },
@@ -1052,7 +1107,11 @@ export class ProjectRepository {
       const session = this.#sqlite
         .prepare("SELECT id, agent_id FROM agent_sessions WHERE id = ?")
         .get(sessionId) as { id: string; agent_id: string } | undefined;
-      if (!session) throw new Error(`SESSION_NOT_FOUND: ${sessionId}`);
+      if (!session)
+        throw new AtmError("SESSION_NOT_FOUND", {
+          message: `Session 不存在：${sessionId}`,
+          details: { entity: "SESSION", reference: sessionId },
+        });
       const now = nowIso();
       const released = releaseClaims
         ? (
@@ -1132,7 +1191,11 @@ export class ProjectRepository {
         }
       }
     }
-    if (!row) throw new Error(`RECORD_NOT_FOUND: ${reference}`);
+    if (!row)
+      throw new AtmError("RECORD_NOT_FOUND", {
+        message: `Record 不存在：${reference}`,
+        details: { entity: "RECORD", reference },
+      });
     return row;
   }
 
@@ -1205,13 +1268,17 @@ export class ProjectRepository {
          WHERE progress.id = ?`,
       )
       .get(normalized);
-    if (!row) throw new Error(`PROGRESS_NOT_FOUND: ${normalized}`);
+    if (!row)
+      throw new AtmError("PROGRESS_NOT_FOUND", {
+        message: `进度记录不存在：${normalized}`,
+        details: { entity: "PROGRESS", reference: normalized },
+      });
     return this.progressUpdateView(row);
   }
 
   getOperationTrace(opId: string, sessionId?: string | null): any {
     const normalized = opId.trim();
-    if (!normalized) throw new Error("OPERATION_ID_INVALID");
+    if (!normalized) throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
     const normalizedSession = sessionId == null ? null : sessionId.trim();
     if (normalizedSession !== null) this.getSession(normalizedSession);
     const mutations = this.#sqlite
@@ -1283,7 +1350,10 @@ export class ProjectRepository {
       projectUpdates.length === 0 &&
       events.length === 0
     ) {
-      throw new Error(`OPERATION_NOT_FOUND: ${normalized}`);
+      throw new AtmError("OPERATION_NOT_FOUND", {
+        message: `操作不存在：${normalized}`,
+        details: { entity: "OPERATION", reference: normalized },
+      });
     }
     return { opId: normalized, mutations, records, progress, projectUpdates, events };
   }
@@ -1312,7 +1382,11 @@ export class ProjectRepository {
   getProjectUpdate(id: string): any {
     const normalized = id.trim();
     const row = this.#sqlite.prepare("SELECT * FROM project_updates WHERE id = ?").get(normalized);
-    if (!row) throw new Error(`PROJECT_UPDATE_NOT_FOUND: ${normalized}`);
+    if (!row)
+      throw new AtmError("PROJECT_UPDATE_NOT_FOUND", {
+        message: `项目更新不存在：${normalized}`,
+        details: { entity: "PROJECT_UPDATE", reference: normalized },
+      });
     return this.projectUpdateView(row);
   }
 
@@ -1443,7 +1517,10 @@ export class ProjectRepository {
               .get(normalizedInput.draftId) as any)
           : null;
         if (normalizedInput.draftId && !draft)
-          throw new Error(`PROJECT_UPDATE_DRAFT_NOT_FOUND: ${normalizedInput.draftId}`);
+          throw new AtmError("PROJECT_UPDATE_DRAFT_NOT_FOUND", {
+            message: `项目更新草稿不存在：${normalizedInput.draftId}`,
+            details: { entity: "PROJECT_UPDATE_DRAFT", reference: normalizedInput.draftId },
+          });
         const id = draft?.id ?? createUlid();
         const now = nowIso();
         const meta = this.meta;
@@ -1599,7 +1676,11 @@ export class ProjectRepository {
         const objective = this.#sqlite
           .prepare("SELECT id FROM objectives WHERE id = ?")
           .get(input.objectiveId);
-        if (!objective) throw new Error(`OBJECTIVE_NOT_FOUND: ${input.objectiveId}`);
+        if (!objective)
+          throw new AtmError("OBJECTIVE_NOT_FOUND", {
+            message: `目标不存在：${input.objectiveId}`,
+            details: { entity: "OBJECTIVE", reference: input.objectiveId },
+          });
         const now = nowIso();
         const id = createUlid();
         const localNo = this.nextNumber("milestone");
@@ -1639,9 +1720,17 @@ export class ProjectRepository {
     const prefix = `${this.meta.code}-T-`;
     const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
     const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
-    if (!Number.isSafeInteger(localNo)) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    if (!Number.isSafeInteger(localNo))
+      throw new AtmError("WORK_ITEM_NOT_FOUND", {
+        message: `WorkItem 不存在：${taskKey}`,
+        details: { entity: "WORK_ITEM", reference: taskKey },
+      });
     const row = this.#sqlite.prepare("SELECT * FROM work_items WHERE local_no = ?").get(localNo);
-    if (!row) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    if (!row)
+      throw new AtmError("WORK_ITEM_NOT_FOUND", {
+        message: `WorkItem 不存在：${taskKey}`,
+        details: { entity: "WORK_ITEM", reference: taskKey },
+      });
     return row;
   }
 
@@ -1730,7 +1819,9 @@ export class ProjectRepository {
         return strictTyped ? reference : entry;
       }
       if (typeof reference.value !== "string" || !reference.value.trim()) {
-        throw new Error(`VALIDATION_ERROR: ${String(reference.kind)} evidence value required`);
+        throw new AtmError("VALIDATION_ERROR", {
+          message: `${String(reference.kind)} evidence value required`,
+        });
       }
       if (reference.kind === "atm_record") {
         const normalized = reference.value.trim();
@@ -1739,13 +1830,20 @@ export class ProjectRepository {
           ? normalized.slice(publicPrefix.length)
           : "";
         if (!/^(?:D|R)-\d{3,}$/u.test(publicSuffix)) {
-          throw new Error(`RECORD_NOT_FOUND: ${reference.value}`);
+          throw new AtmError("RECORD_NOT_FOUND", {
+            message: `Record 不存在：${reference.value}`,
+            details: { entity: "RECORD", reference: reference.value },
+          });
         }
         return { ...reference, value: this.getRecord(normalized).key };
       }
       const row = this.rowForTaskKey(reference.value);
       const taskKey = this.taskKeyForId(row.id);
-      if (!taskKey) throw new Error(`WORK_ITEM_NOT_FOUND: ${reference.value}`);
+      if (!taskKey)
+        throw new AtmError("WORK_ITEM_NOT_FOUND", {
+          message: `WorkItem 不存在：${reference.value}`,
+          details: { entity: "WORK_ITEM", reference: reference.value },
+        });
       return { ...reference, value: taskKey };
     });
   }
@@ -1830,11 +1928,19 @@ export class ProjectRepository {
   private reviewRequestRow(requestKey: string): any {
     const prefix = `${this.meta.code}-RR-`;
     const suffix = requestKey.startsWith(prefix) ? requestKey.slice(prefix.length) : "";
-    if (!/^\d+$/u.test(suffix)) throw new Error(`REVIEW_REQUEST_NOT_FOUND: ${requestKey}`);
+    if (!/^\d+$/u.test(suffix))
+      throw new AtmError("REVIEW_REQUEST_NOT_FOUND", {
+        message: `Review 请求不存在：${requestKey}`,
+        details: { entity: "REVIEW_REQUEST", reference: requestKey },
+      });
     const row = this.#sqlite
       .prepare("SELECT * FROM review_requests WHERE local_no = ?")
       .get(Number(suffix));
-    if (!row) throw new Error(`REVIEW_REQUEST_NOT_FOUND: ${requestKey}`);
+    if (!row)
+      throw new AtmError("REVIEW_REQUEST_NOT_FOUND", {
+        message: `Review 请求不存在：${requestKey}`,
+        details: { entity: "REVIEW_REQUEST", reference: requestKey },
+      });
     return row;
   }
 
@@ -1850,7 +1956,8 @@ export class ProjectRepository {
     const request = this.reviewRequestRow(requestKey);
     const reviewTaskKey = this.taskKeyForId(request.review_work_item_id);
     const parentTaskKey = this.taskKeyForId(request.parent_work_item_id);
-    if (!reviewTaskKey || !parentTaskKey) throw new Error("INTERNAL_ERROR: review binding invalid");
+    if (!reviewTaskKey || !parentTaskKey)
+      throw new AtmError("INTERNAL_ERROR", { message: "Review 绑定数据无效" });
     const submission = this.#sqlite
       .prepare("SELECT * FROM review_submissions WHERE request_id = ?")
       .get(request.id) as any;
@@ -1859,7 +1966,7 @@ export class ProjectRepository {
       const record = this.#sqlite
         .prepare("SELECT local_no, kind FROM records WHERE id = ?")
         .get(submission.record_id) as { local_no: number; kind: string } | undefined;
-      if (!record) throw new Error("INTERNAL_ERROR: review submission record missing");
+      if (!record) throw new AtmError("INTERNAL_ERROR", { message: "Review 提交记录缺失" });
       submissionView = {
         key: this.reviewSubmissionKey(Number(submission.local_no)),
         requestKey: this.reviewRequestKey(Number(request.local_no)),
@@ -1915,37 +2022,76 @@ export class ProjectRepository {
       request: normalizedInput,
       immediate: true,
       action: () => {
-        if (!actor.sessionId) throw new Error("REVIEW_REQUEST_REQUIRES_SESSION");
+        if (!actor.sessionId)
+          throw new AtmError("REVIEW_REQUEST_REQUIRES_SESSION", {
+            message: "创建 Review 请求需要活动 Session",
+          });
         const reviewTask = this.rowForTaskKey(normalizedInput.reviewTaskKey);
         if (reviewTask.type !== "REVIEW") {
-          throw new Error(`REVIEW_TASK_INVALID: ${normalizedInput.reviewTaskKey}`);
+          throw new AtmError("REVIEW_TASK_INVALID", {
+            message: `WorkItem 不是 Review 类型：${normalizedInput.reviewTaskKey}`,
+            details: { task_key: normalizedInput.reviewTaskKey },
+          });
         }
         if (reviewTask.version !== normalizedInput.expectedReviewTaskVersion) {
-          throw new Error(
-            `VERSION_CONFLICT: ${normalizedInput.reviewTaskKey}:${reviewTask.version}`,
-          );
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "Review WorkItem 版本已变化",
+            details: {
+              entity: "WORK_ITEM",
+              key: normalizedInput.reviewTaskKey,
+              expected: normalizedInput.expectedReviewTaskVersion,
+              actual: reviewTask.version,
+            },
+          });
         }
         if (reviewTask.status === "DONE" || reviewTask.status === "CANCELLED") {
-          throw new Error(`REVIEW_TASK_CLOSED: ${normalizedInput.reviewTaskKey}`);
+          throw new AtmError("REVIEW_TASK_CLOSED", {
+            message: `Review WorkItem 已关闭：${normalizedInput.reviewTaskKey}`,
+            details: { task_key: normalizedInput.reviewTaskKey },
+          });
         }
         const checklist = this.#sqlite
           .prepare("SELECT * FROM checklist_items WHERE id = ?")
           .get(normalizedInput.parentChecklistId) as any;
         if (!checklist)
-          throw new Error(`CHECKLIST_NOT_FOUND: ${normalizedInput.parentChecklistId}`);
+          throw new AtmError("CHECKLIST_NOT_FOUND", {
+            message: `检查项不存在：${normalizedInput.parentChecklistId}`,
+            details: { entity: "CHECKLIST", reference: normalizedInput.parentChecklistId },
+          });
         if (checklist.version !== normalizedInput.expectedParentChecklistVersion) {
-          throw new Error(`VERSION_CONFLICT: ${checklist.version}`);
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "检查项版本已变化",
+            details: {
+              entity: "CHECKLIST",
+              key: normalizedInput.parentChecklistId,
+              expected: normalizedInput.expectedParentChecklistVersion,
+              actual: checklist.version,
+            },
+          });
         }
         if (!reviewTask.parent_id || reviewTask.parent_id !== checklist.work_item_id) {
-          throw new Error(`REVIEW_BINDING_MISMATCH: ${normalizedInput.reviewTaskKey}`);
+          throw new AtmError("REVIEW_BINDING_MISMATCH", {
+            message: `Review WorkItem 与父检查项不匹配：${normalizedInput.reviewTaskKey}`,
+            details: {
+              task_key: normalizedInput.reviewTaskKey,
+              checklist_id: normalizedInput.parentChecklistId,
+            },
+          });
         }
         if (checklist.status === "DONE" || checklist.status === "SKIPPED") {
-          throw new Error(`REVIEW_CHECKLIST_CLOSED: ${normalizedInput.parentChecklistId}`);
+          throw new AtmError("REVIEW_CHECKLIST_CLOSED", {
+            message: `父检查项已关闭：${normalizedInput.parentChecklistId}`,
+            details: { checklist_id: normalizedInput.parentChecklistId },
+          });
         }
         const existing = this.#sqlite
           .prepare("SELECT id FROM review_requests WHERE review_work_item_id = ?")
           .get(reviewTask.id);
-        if (existing) throw new Error(`REVIEW_REQUEST_CONFLICT: ${normalizedInput.reviewTaskKey}`);
+        if (existing)
+          throw new AtmError("REVIEW_REQUEST_CONFLICT", {
+            message: `Review WorkItem 已绑定请求：${normalizedInput.reviewTaskKey}`,
+            details: { task_key: normalizedInput.reviewTaskKey },
+          });
         const id = createUlid();
         const localNo = this.nextNumber("review_request");
         const key = this.reviewRequestKey(localNo);
@@ -2017,43 +2163,72 @@ export class ProjectRepository {
       request: normalizedInput,
       immediate: true,
       action: () => {
-        if (!actor.sessionId) throw new Error("REVIEWER_SESSION_REQUIRED");
+        if (!actor.sessionId)
+          throw new AtmError("REVIEWER_SESSION_REQUIRED", {
+            message: "提交 Review 需要活动 Session",
+          });
         const session = this.getSession(actor.sessionId);
         if (
           session.role !== "REVIEWER" ||
           session.agent_id !== actor.id ||
           session.connection_state !== "ONLINE"
         ) {
-          throw new Error(`REVIEWER_REQUIRED: ${actor.sessionId}`);
+          throw new AtmError("REVIEWER_REQUIRED", {
+            message: `当前 Session 不具备 Reviewer 身份：${actor.sessionId}`,
+            details: { session_id: actor.sessionId },
+          });
         }
         const request = this.reviewRequestRow(normalizedInput.requestKey);
         const existing = this.#sqlite
           .prepare("SELECT id FROM review_submissions WHERE request_id = ?")
           .get(request.id);
-        if (existing) throw new Error(`REVIEW_ALREADY_SUBMITTED: ${normalizedInput.requestKey}`);
+        if (existing)
+          throw new AtmError("REVIEW_ALREADY_SUBMITTED", {
+            message: `Review 请求已提交：${normalizedInput.requestKey}`,
+            details: { request_key: normalizedInput.requestKey },
+          });
         const reviewTask = this.#sqlite
           .prepare("SELECT * FROM work_items WHERE id = ?")
           .get(request.review_work_item_id) as any;
         if (!reviewTask || reviewTask.type !== "REVIEW") {
-          throw new Error("INTERNAL_ERROR: review request points to invalid task");
+          throw new AtmError("INTERNAL_ERROR", { message: "Review 请求指向无效 WorkItem" });
         }
         const reviewTaskKey = this.taskKeyForId(reviewTask.id);
-        if (!reviewTaskKey) throw new Error("INTERNAL_ERROR: review task key missing");
+        if (!reviewTaskKey)
+          throw new AtmError("INTERNAL_ERROR", { message: "Review WorkItem key 缺失" });
         if (reviewTask.version !== normalizedInput.expectedReviewTaskVersion) {
-          throw new Error(`VERSION_CONFLICT: ${reviewTaskKey}:${reviewTask.version}`);
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "Review WorkItem 版本已变化",
+            details: {
+              entity: "WORK_ITEM",
+              key: reviewTaskKey,
+              expected: normalizedInput.expectedReviewTaskVersion,
+              actual: reviewTask.version,
+            },
+          });
         }
         if (
           reviewTask.assignee_agent_id !== actor.id ||
           reviewTask.claimed_by_session_id !== actor.sessionId
         ) {
-          throw new Error(`REVIEW_IDENTITY_MISMATCH: ${reviewTaskKey}`);
+          throw new AtmError("REVIEW_IDENTITY_MISMATCH", {
+            message: `Reviewer 身份与 Review WorkItem 领取者不匹配：${reviewTaskKey}`,
+            details: { task_key: reviewTaskKey, session_id: actor.sessionId },
+          });
         }
         const expectedHashes = json<ReviewCandidateHash[]>(
           request.expected_candidate_hashes_json,
           [],
         );
         if (JSON.stringify(expectedHashes) !== JSON.stringify(normalizedInput.reviewedHashes)) {
-          throw new Error(`CANDIDATE_HASH_MISMATCH: ${normalizedInput.requestKey}`);
+          throw new AtmError("CANDIDATE_HASH_MISMATCH", {
+            message: `Review 候选哈希不匹配：${normalizedInput.requestKey}`,
+            details: {
+              request_key: normalizedInput.requestKey,
+              expected: expectedHashes,
+              actual: normalizedInput.reviewedHashes,
+            },
+          });
         }
         const parentChecklist = this.#sqlite
           .prepare("SELECT * FROM checklist_items WHERE id = ?")
@@ -2063,13 +2238,21 @@ export class ProjectRepository {
           parentChecklist.work_item_id !== request.parent_work_item_id ||
           reviewTask.parent_id !== request.parent_work_item_id
         ) {
-          throw new Error("INTERNAL_ERROR: stored review binding invalid");
+          throw new AtmError("INTERNAL_ERROR", { message: "已存储的 Review 绑定无效" });
         }
         if (parentChecklist.version !== request.parent_checklist_version) {
-          throw new Error(`VERSION_CONFLICT: ${parentChecklist.version}`);
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "父检查项版本已变化",
+            details: {
+              entity: "CHECKLIST",
+              key: request.parent_checklist_id,
+              expected: request.parent_checklist_version,
+              actual: parentChecklist.version,
+            },
+          });
         }
         this.assertCompletionGate(reviewTask);
-        assertWorkItemTransition(reviewTask.status as WorkItemStatus, "DONE");
+        assertTypedWorkItemTransition(reviewTask.status as WorkItemStatus, "DONE");
 
         const now = nowIso();
         const requestKey = this.reviewRequestKey(Number(request.local_no));
@@ -2188,7 +2371,8 @@ export class ProjectRepository {
           .prepare("SELECT * FROM work_items WHERE id = ?")
           .get(request.parent_work_item_id) as any;
         const parentTaskKey = this.taskKeyForId(finalParent.id);
-        if (!parentTaskKey) throw new Error("INTERNAL_ERROR: parent task key missing");
+        if (!parentTaskKey)
+          throw new AtmError("INTERNAL_ERROR", { message: "父 WorkItem key 缺失" });
         this.#sqlite
           .prepare(
             `INSERT INTO review_submissions(
@@ -2323,7 +2507,11 @@ export class ProjectRepository {
     const prefix = `${code}-T-`;
     const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
     const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
-    if (!Number.isSafeInteger(localNo)) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    if (!Number.isSafeInteger(localNo))
+      throw new AtmError("WORK_ITEM_NOT_FOUND", {
+        message: `WorkItem 不存在：${taskKey}`,
+        details: { entity: "WORK_ITEM", reference: taskKey },
+      });
     const row = this.#sqlite
       .prepare(
         taskViewProjectionSql({
@@ -2333,7 +2521,11 @@ export class ProjectRepository {
         }),
       )
       .get(localNo) as TaskViewProjectionRow | undefined;
-    if (!row) throw new Error(`WORK_ITEM_NOT_FOUND: ${taskKey}`);
+    if (!row)
+      throw new AtmError("WORK_ITEM_NOT_FOUND", {
+        message: `WorkItem 不存在：${taskKey}`,
+        details: { entity: "WORK_ITEM", reference: taskKey },
+      });
     return row;
   }
 
@@ -2414,10 +2606,16 @@ export class ProjectRepository {
       immediate: true,
       action: () => {
         if (items.length === 0 || items.length > 50) {
-          throw new Error("VALIDATION_ERROR: items 1..50");
+          throw new AtmError("VALIDATION_ERROR", {
+            message: "WorkItem 批次数量必须为 1 至 50",
+            details: { field: "items", min: 1, max: 50, actual: items.length },
+          });
         }
         if (new Set(items.map((item) => item.clientRef)).size !== items.length) {
-          throw new Error("VALIDATION_ERROR: duplicate clientRef");
+          throw new AtmError("VALIDATION_ERROR", {
+            message: "WorkItem 批次包含重复 clientRef",
+            details: { field: "clientRef", issue: "duplicate" },
+          });
         }
 
         /*
@@ -2434,7 +2632,7 @@ export class ProjectRepository {
             : null;
         const defaultObjectiveId = String(activeObjective?.id ?? plannedObjective?.id ?? "");
         if (needsDefaultObjective && !defaultObjectiveId) {
-          throw new Error("OBJECTIVE_REQUIRED: 项目尚无活动目标");
+          throw new AtmError("OBJECTIVE_REQUIRED", { message: "项目尚无活动目标" });
         }
 
         const activeDefaultMilestone = defaultObjectiveId
@@ -2457,7 +2655,11 @@ export class ProjectRepository {
           const row = this.#sqlite
             .prepare("SELECT id FROM objectives WHERE id = ?")
             .get(objectiveId) as { id: string } | undefined;
-          if (!row) throw new Error(`OBJECTIVE_NOT_FOUND: ${objectiveId}`);
+          if (!row)
+            throw new AtmError("OBJECTIVE_NOT_FOUND", {
+              message: `目标不存在：${objectiveId}`,
+              details: { entity: "OBJECTIVE", reference: objectiveId },
+            });
           objectiveRows.set(objectiveId, row);
           return row;
         };
@@ -2470,7 +2672,11 @@ export class ProjectRepository {
           const row = this.#sqlite
             .prepare("SELECT id, objective_id FROM milestones WHERE id = ?")
             .get(milestoneId) as { id: string; objective_id: string } | undefined;
-          if (!row) throw new Error(`MILESTONE_NOT_FOUND: ${milestoneId}`);
+          if (!row)
+            throw new AtmError("MILESTONE_NOT_FOUND", {
+              message: `里程碑不存在：${milestoneId}`,
+              details: { entity: "MILESTONE", reference: milestoneId },
+            });
           const normalized = { id: row.id, objectiveId: row.objective_id };
           milestoneRows.set(milestoneId, normalized);
           return normalized;
@@ -2507,9 +2713,14 @@ export class ProjectRepository {
           if (itemMilestoneId) {
             const selectedMilestone = milestone(itemMilestoneId);
             if (selectedMilestone.objectiveId !== itemObjectiveId) {
-              throw new Error(
-                `MILESTONE_OBJECTIVE_MISMATCH: ${itemMilestoneId} does not belong to ${itemObjectiveId}`,
-              );
+              throw new AtmError("MILESTONE_OBJECTIVE_MISMATCH", {
+                message: `里程碑 ${itemMilestoneId} 不属于目标 ${itemObjectiveId}`,
+                details: {
+                  milestone_id: itemMilestoneId,
+                  objective_id: itemObjectiveId,
+                  actual_objective_id: selectedMilestone.objectiveId,
+                },
+              });
             }
           }
           const entry: PlannedItem = {
@@ -2543,11 +2754,18 @@ export class ProjectRepository {
           const hasParentRef = item.parentRef !== undefined && item.parentRef !== null;
           const hasParentKey = item.parentKey !== undefined && item.parentKey !== null;
           if (hasParentRef && hasParentKey) {
-            throw new Error("VALIDATION_ERROR: parentKey and parentRef are mutually exclusive");
+            throw new AtmError("VALIDATION_ERROR", {
+              message: "parentKey 与 parentRef 不能同时提供",
+              details: { fields: ["parentKey", "parentRef"], issue: "mutually_exclusive" },
+            });
           }
           if (hasParentRef) {
             const parent = plannedByRef.get(String(item.parentRef));
-            if (!parent) throw new Error(`PARENT_REF_NOT_FOUND: ${item.parentRef}`);
+            if (!parent)
+              throw new AtmError("PARENT_REF_NOT_FOUND", {
+                message: `父 WorkItem 引用不存在：${item.parentRef}`,
+                details: { reference: item.parentRef },
+              });
             entry.parentId = parent.id;
           } else if (hasParentKey) {
             entry.parentId = String(taskForKey(String(item.parentKey)).id);
@@ -2557,26 +2775,40 @@ export class ProjectRepository {
             ...(item.dependsOn ?? []).map((taskKey) => String(taskForKey(taskKey).id)),
             ...(item.dependsOnRefs ?? []).map((reference) => {
               const dependency = plannedByRef.get(reference);
-              if (!dependency) throw new Error(`DEPENDENCY_REF_NOT_FOUND: ${reference}`);
+              if (!dependency)
+                throw new AtmError("DEPENDENCY_REF_NOT_FOUND", {
+                  message: `依赖 WorkItem 引用不存在：${reference}`,
+                  details: { reference },
+                });
               return dependency.id;
             }),
           ];
           if (new Set(dependencyIds).size !== dependencyIds.length) {
-            throw new Error(`VALIDATION_ERROR: duplicate dependency for ${item.clientRef}`);
+            throw new AtmError("VALIDATION_ERROR", {
+              message: `WorkItem ${item.clientRef} 包含重复依赖`,
+              details: { client_ref: item.clientRef, field: "dependencies", issue: "duplicate" },
+            });
           }
           entry.dependencyIds = dependencyIds;
 
           const hasDiscoveredRef = item.discoveredFromRef !== undefined;
           const hasDiscoveredKey = item.discoveredFrom !== undefined;
           if (hasDiscoveredRef && hasDiscoveredKey) {
-            throw new Error(
-              "VALIDATION_ERROR: discoveredFrom and discoveredFromRef are mutually exclusive",
-            );
+            throw new AtmError("VALIDATION_ERROR", {
+              message: "discoveredFrom 与 discoveredFromRef 不能同时提供",
+              details: {
+                fields: ["discoveredFrom", "discoveredFromRef"],
+                issue: "mutually_exclusive",
+              },
+            });
           }
           if (hasDiscoveredRef) {
             const source = plannedByRef.get(String(item.discoveredFromRef));
             if (!source) {
-              throw new Error(`DISCOVERED_FROM_REF_NOT_FOUND: ${item.discoveredFromRef}`);
+              throw new AtmError("DISCOVERED_FROM_REF_NOT_FOUND", {
+                message: `发现来源引用不存在：${item.discoveredFromRef}`,
+                details: { reference: item.discoveredFromRef },
+              });
             }
             entry.discoveredFromId = source.id;
             entry.discoveredFromKey = source.key;
@@ -2586,7 +2818,10 @@ export class ProjectRepository {
             entry.discoveredFromKey = String(item.discoveredFrom);
           }
           if (entry.discoveredFromId === entry.id) {
-            throw new Error("VALIDATION_ERROR: task cannot discover itself");
+            throw new AtmError("VALIDATION_ERROR", {
+              message: "WorkItem 不能将自身设为发现来源",
+              details: { client_ref: item.clientRef, issue: "self_reference" },
+            });
           }
         }
 
@@ -2846,7 +3081,10 @@ export class ProjectRepository {
     }>;
   } {
     if (patches.length === 0 || patches.length > 50)
-      throw new Error("VALIDATION_ERROR: patches 1..50");
+      throw new AtmError("VALIDATION_ERROR", {
+        message: "WorkItem patch 批次数量必须为 1 至 50",
+        details: { field: "patches", min: 1, max: 50, actual: patches.length },
+      });
     return this.mutate({
       actor,
       opId,
@@ -2900,7 +3138,15 @@ export class ProjectRepository {
                   : currentFields[field as keyof typeof currentFields] === expected,
               );
             if (!safeMerge) {
-              throw new Error(`VERSION_CONFLICT: ${patch.taskKey}:${row.version}`);
+              throw new AtmError("VERSION_CONFLICT", {
+                message: "WorkItem 版本已变化",
+                details: {
+                  entity: "WORK_ITEM",
+                  key: patch.taskKey,
+                  expected: patch.expectedVersion,
+                  actual: row.version,
+                },
+              });
             }
             mergeReceipt = {
               taskKey: patch.taskKey,
@@ -2937,11 +3183,23 @@ export class ProjectRepository {
                    AND dependency.status <> 'DONE' LIMIT 1`,
               )
               .get(row.id) as { local_no: number } | undefined;
-            if (dependency) throw new Error(`DEPENDENCY_NOT_READY: ${dependency.local_no}`);
+            if (dependency)
+              throw new AtmError("DEPENDENCY_NOT_READY", {
+                message: `依赖 WorkItem 尚未完成：${dependency.local_no}`,
+                details: { dependency_local_no: dependency.local_no },
+              });
             if (row.claimed_by_session_id && row.claimed_by_session_id !== actor.sessionId) {
               const stale =
                 row.claim_lease_until && Date.parse(row.claim_lease_until) <= Date.now();
-              if (!stale || !patch.takeoverStale) throw new Error("TASK_ALREADY_CLAIMED");
+              if (!stale || !patch.takeoverStale)
+                throw new AtmError("TASK_ALREADY_CLAIMED", {
+                  message: `WorkItem 已被其他 Session 领取：${patch.taskKey}`,
+                  details: {
+                    task_key: patch.taskKey,
+                    claimed_by_session_id: row.claimed_by_session_id,
+                    claim_lease_until: row.claim_lease_until,
+                  },
+                });
             }
             const successorReclaim =
               patch.operation === "claim" &&
@@ -2952,7 +3210,7 @@ export class ProjectRepository {
             targetPhase = targetStatus;
             // 来源状态只认转移表。自带白名单会让「表说可以、接口不给」重新出现，
             // 也会把 start 一个已在 IN_PROGRESS 的任务误判成非法转移。
-            assertWorkItemTransition(row.status, targetStatus);
+            assertTypedWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = ?",
               "phase = ?",
@@ -2985,11 +3243,18 @@ export class ProjectRepository {
               row.claimed_by_session_id !== actor.sessionId &&
               !(actor.type === "USER" && stale)
             ) {
-              throw new Error("CLAIM_OWNER_REQUIRED");
+              throw new AtmError("CLAIM_OWNER_REQUIRED", {
+                message: `只有当前领取者可以释放 WorkItem：${patch.taskKey}`,
+                details: {
+                  task_key: patch.taskKey,
+                  claimed_by_session_id: row.claimed_by_session_id,
+                  actor_session_id: actor.sessionId ?? null,
+                },
+              });
             }
             targetStatus = "READY";
             targetPhase = "READY";
-            assertWorkItemTransition(row.status, targetStatus);
+            assertTypedWorkItemTransition(row.status, targetStatus);
             updates.push(
               "status = 'READY'",
               "phase = 'READY'",
@@ -3002,8 +3267,12 @@ export class ProjectRepository {
             );
             eventType = "work.released";
           } else if (patch.operation === "block") {
-            if (!patch.blockedReason?.trim()) throw new Error("BLOCKED_REASON_REQUIRED");
-            assertWorkItemTransition(row.status, "BLOCKED");
+            if (!patch.blockedReason?.trim())
+              throw new AtmError("BLOCKED_REASON_REQUIRED", {
+                message: "阻塞 WorkItem 时必须提供 blockedReason",
+                details: { task_key: patch.taskKey, field: "blockedReason" },
+              });
+            assertTypedWorkItemTransition(row.status, "BLOCKED");
             targetStatus = "BLOCKED";
             targetPhase = "BLOCKED";
             updates.push(
@@ -3017,9 +3286,13 @@ export class ProjectRepository {
             values.push(patch.blockedReason.trim());
             eventType = "work.blocked";
           } else if (patch.operation === "wait_user" || patch.operation === "wait_agent") {
-            if (!patch.waitingFor?.trim()) throw new Error("WAITING_FOR_REQUIRED");
+            if (!patch.waitingFor?.trim())
+              throw new AtmError("WAITING_FOR_REQUIRED", {
+                message: "等待时必须提供 waitingFor",
+                details: { task_key: patch.taskKey, field: "waitingFor" },
+              });
             targetStatus = patch.operation === "wait_user" ? "WAITING_USER" : "WAITING_AGENT";
-            assertWorkItemTransition(row.status, targetStatus);
+            assertTypedWorkItemTransition(row.status, targetStatus);
             updates.push("status = ?", "waiting_on = ?", "waiting_for = ?");
             values.push(
               targetStatus,
@@ -3028,7 +3301,7 @@ export class ProjectRepository {
             );
             eventType = "work.waiting";
           } else if (patch.operation === "verify") {
-            assertWorkItemTransition(row.status, "VERIFYING");
+            assertTypedWorkItemTransition(row.status, "VERIFYING");
             targetStatus = "VERIFYING";
             targetPhase = "VERIFYING";
             updates.push(
@@ -3041,7 +3314,7 @@ export class ProjectRepository {
             eventType = "work.verification_requested";
           } else if (patch.operation === "complete") {
             this.assertCompletionGate(row);
-            assertWorkItemTransition(row.status, "DONE");
+            assertTypedWorkItemTransition(row.status, "DONE");
             targetStatus = "DONE";
             targetPhase = "DONE";
             updates.push(
@@ -3057,11 +3330,14 @@ export class ProjectRepository {
             values.push(now);
             eventType = "work.completed";
           } else if (patch.operation === "cancel") {
-            assertWorkItemTransition(row.status, "CANCELLED");
+            assertTypedWorkItemTransition(row.status, "CANCELLED");
             const duplicateOf = patch.duplicateOf ? this.rowForTaskKey(patch.duplicateOf) : null;
             const supersededBy = patch.supersededBy ? this.rowForTaskKey(patch.supersededBy) : null;
             if (duplicateOf?.id === row.id || supersededBy?.id === row.id) {
-              throw new Error("VALIDATION_ERROR: cancelled task cannot reference itself");
+              throw new AtmError("VALIDATION_ERROR", {
+                message: "取消 WorkItem 时不能引用自身",
+                details: { task_key: patch.taskKey, issue: "self_reference" },
+              });
             }
             targetStatus = "CANCELLED";
             targetPhase = "CANCELLED";
@@ -3093,7 +3369,7 @@ export class ProjectRepository {
                   ? targetPhase
                   : "IN_PROGRESS";
             targetPhase = targetStatus;
-            assertWorkItemTransition(row.status, targetStatus);
+            assertTypedWorkItemTransition(row.status, targetStatus);
             // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
             this.resolveActiveBlockers(row.id, now);
             updates.push(
@@ -3136,9 +3412,16 @@ export class ProjectRepository {
               eventType = "work.moved";
             }
           } else {
-            throw new Error(`VALIDATION_ERROR: unknown operation ${patch.operation}`);
+            throw new AtmError("VALIDATION_ERROR", {
+              message: `未知 WorkItem 操作：${patch.operation}`,
+              details: { field: "operation", value: patch.operation, issue: "unknown" },
+            });
           }
-          if (updates.length === 0) throw new Error("VALIDATION_ERROR: empty patch");
+          if (updates.length === 0)
+            throw new AtmError("VALIDATION_ERROR", {
+              message: "WorkItem patch 未产生任何变更",
+              details: { task_key: patch.taskKey, issue: "empty_patch" },
+            });
           updates.push("version = version + 1", "updated_at = ?");
           values.push(now, row.id);
           this.#sqlite
@@ -3235,7 +3518,15 @@ export class ProjectRepository {
       action: () => {
         const initial = this.rowForTaskKey(input.taskKey);
         if (initial.version !== input.expectedVersion) {
-          throw new Error(`VERSION_CONFLICT: ${input.taskKey}:${initial.version}`);
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "WorkItem 版本已变化",
+            details: {
+              entity: "WORK_ITEM",
+              key: input.taskKey,
+              expected: input.expectedVersion,
+              actual: initial.version,
+            },
+          });
         }
         const fromStatus = initial.status as WorkItemStatus;
         const fromVersion = Number(initial.version);
@@ -3246,7 +3537,7 @@ export class ProjectRepository {
         let verifying = initial;
 
         if (fromStatus !== "VERIFYING") {
-          assertWorkItemTransition(fromStatus, "VERIFYING");
+          assertTypedWorkItemTransition(fromStatus, "VERIFYING");
           this.#sqlite
             .prepare(
               `UPDATE work_items SET status = 'VERIFYING', phase = 'VERIFYING', phase_inferred = 0,
@@ -3284,7 +3575,7 @@ export class ProjectRepository {
         }
 
         this.assertCompletionGate(verifying);
-        assertWorkItemTransition(verifying.status as WorkItemStatus, "DONE");
+        assertTypedWorkItemTransition(verifying.status as WorkItemStatus, "DONE");
         this.#sqlite
           .prepare(
             `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
@@ -3368,16 +3659,33 @@ export class ProjectRepository {
         const row = this.#sqlite
           .prepare("SELECT * FROM checklist_items WHERE id = ?")
           .get(input.checklistId) as any;
-        if (!row) throw new Error(`NOT_FOUND: ${input.checklistId}`);
+        if (!row)
+          throw new AtmError("CHECKLIST_NOT_FOUND", {
+            message: `检查项不存在：${input.checklistId}`,
+            details: { entity: "CHECKLIST", reference: input.checklistId },
+          });
         if (row.version !== input.expectedVersion)
-          throw new Error(`VERSION_CONFLICT: ${row.version}`);
+          throw new AtmError("VERSION_CONFLICT", {
+            message: "检查项版本已变化",
+            details: {
+              entity: "CHECKLIST",
+              key: input.checklistId,
+              expected: input.expectedVersion,
+              actual: row.version,
+            },
+          });
         const evidence = normalizedInput.evidence ?? json(row.evidence_json, []);
         if (
           input.status === "DONE" &&
           Number(row.evidence_required) === 1 &&
           evidence.length === 0
         ) {
-          throw new Error("COMPLETION_GATE_FAILED: evidence required");
+          throw new AtmError("COMPLETION_GATE_FAILED", {
+            message: "检查项要求提供证据",
+            details: {
+              reasons: [{ checklist_id: input.checklistId, code: "EVIDENCE_REQUIRED" }],
+            },
+          });
         }
         this.#sqlite
           .prepare(
@@ -3439,10 +3747,16 @@ export class ProjectRepository {
     sequence: number;
   } {
     if (input.items.length === 0 || input.items.length > 100) {
-      throw new Error("VALIDATION_ERROR: items 1..100");
+      throw new AtmError("VALIDATION_ERROR", {
+        message: "检查项批次数量必须为 1 至 100",
+        details: { field: "items", min: 1, max: 100, actual: input.items.length },
+      });
     }
     if (new Set(input.items.map((item) => item.checklistId)).size !== input.items.length) {
-      throw new Error("VALIDATION_ERROR: duplicate checklistId");
+      throw new AtmError("VALIDATION_ERROR", {
+        message: "检查项批次包含重复 checklistId",
+        details: { field: "checklistId", issue: "duplicate" },
+      });
     }
     const normalizedInput = {
       ...input,
@@ -3579,32 +3893,56 @@ export class ProjectRepository {
   }
 
   private assertCompletionGate(row: any): void {
-    const failures: string[] = [];
+    const failures: Array<
+      | { code: "CHECKLIST_INCOMPLETE"; checklist_id?: string }
+      | { code: "EVIDENCE_MISSING"; checklist_id?: string }
+      | { code: "CHILD_INCOMPLETE"; work_item_id?: string }
+      | { code: "BLOCKER_ACTIVE"; blocker_id?: string }
+      | { code: "DEPENDENCY_INCOMPLETE"; work_item_id?: string }
+      | { code: "VERIFICATION_REQUIRED" }
+      | { code: "CURRENT_STATE_INVALID"; current_status: string; legal_operations: string[] }
+    > = [];
     const checklistFailure = this.#sqlite
       .prepare(
         `SELECT id FROM checklist_items WHERE work_item_id = ? AND kind <> 'OPTIONAL'
          AND status NOT IN ('DONE','SKIPPED') LIMIT 1`,
       )
       .get(row.id);
-    if (checklistFailure) failures.push("checklist incomplete");
+    if (checklistFailure)
+      failures.push({
+        code: "CHECKLIST_INCOMPLETE",
+        checklist_id: String((checklistFailure as { id: unknown }).id),
+      });
     const evidenceFailure = this.#sqlite
       .prepare(
         `SELECT id FROM checklist_items WHERE work_item_id = ? AND evidence_required = 1
          AND status <> 'SKIPPED' AND (status <> 'DONE' OR evidence_json = '[]') LIMIT 1`,
       )
       .get(row.id);
-    if (evidenceFailure) failures.push("evidence missing");
+    if (evidenceFailure)
+      failures.push({
+        code: "EVIDENCE_MISSING",
+        checklist_id: String((evidenceFailure as { id: unknown }).id),
+      });
     const childFailure = this.#sqlite
       .prepare(
         `SELECT id FROM work_items WHERE parent_id = ? AND archived_at IS NULL
          AND status NOT IN ('DONE','CANCELLED') LIMIT 1`,
       )
       .get(row.id);
-    if (childFailure) failures.push("child incomplete");
+    if (childFailure)
+      failures.push({
+        code: "CHILD_INCOMPLETE",
+        work_item_id: String((childFailure as { id: unknown }).id),
+      });
     const blocker = this.#sqlite
       .prepare("SELECT id FROM blockers WHERE work_item_id = ? AND status = 'ACTIVE' LIMIT 1")
       .get(row.id);
-    if (blocker) failures.push("blocker active");
+    if (blocker)
+      failures.push({
+        code: "BLOCKER_ACTIVE",
+        blocker_id: String((blocker as { id: unknown }).id),
+      });
     const dependency = this.#sqlite
       .prepare(
         `SELECT source.id FROM work_item_relations relation
@@ -3613,19 +3951,29 @@ export class ProjectRepository {
            AND source.status <> 'DONE' LIMIT 1`,
       )
       .get(row.id);
-    if (dependency) failures.push("dependency incomplete");
+    if (dependency)
+      failures.push({
+        code: "DEPENDENCY_INCOMPLETE",
+        work_item_id: String((dependency as { id: unknown }).id),
+      });
     if (Number(row.verification_required) === 1 && row.status !== "VERIFYING") {
-      failures.push("verification required");
+      failures.push({ code: "VERIFICATION_REQUIRED" });
     }
     if (!(row.status === "DONE" || row.status === "IN_PROGRESS" || row.status === "VERIFYING")) {
       const legal = legalWorkItemOperations(row.status as WorkItemStatus)
         .map((entry) => `${entry.operation} -> ${entry.target}`)
         .join(", ");
-      failures.push(
-        `current-state ${row.status} cannot complete (legal operations: ${legal || "none"})`,
-      );
+      failures.push({
+        code: "CURRENT_STATE_INVALID",
+        current_status: String(row.status),
+        legal_operations: legal ? legal.split(", ") : [],
+      });
     }
-    if (failures.length > 0) throw new Error(`COMPLETION_GATE_FAILED: ${failures.join("; ")}`);
+    if (failures.length > 0)
+      throw new AtmError("COMPLETION_GATE_FAILED", {
+        message: "WorkItem 尚未满足完成条件",
+        details: { reasons: failures },
+      });
   }
 
   private upsertSearchDocument(
@@ -3883,7 +4231,10 @@ export class ProjectRepository {
       request: normalizedInput,
       action: () => {
         if (!RecordSummarySchema.safeParse(normalizedInput.summary).success)
-          throw new Error("VALIDATION_ERROR: summary max 300");
+          throw new AtmError("VALIDATION_ERROR", {
+            message: "记录摘要不能超过 300 字",
+            details: { field: "summary", max: 300 },
+          });
         const id = createUlid();
         const localNo = this.nextNumber("record");
         const code = this.meta.code;
@@ -3899,7 +4250,11 @@ export class ProjectRepository {
             | { local_no: number; kind: string; scope: string }
             | undefined;
           if (superseded?.scope === "REVIEW_AUDIT") {
-            throw new Error(`IMMUTABLE_RECORD: ${this.recordKey(superseded)}`);
+            const recordKey = this.recordKey(superseded);
+            throw new AtmError("IMMUTABLE_RECORD", {
+              message: `Review 审计记录不可替换：${recordKey}`,
+              details: { record_key: recordKey },
+            });
           }
           this.#sqlite
             .prepare(
@@ -4212,7 +4567,11 @@ export class ProjectRepository {
          WHERE checklist.id = ?`,
       )
       .get(checklistId) as any;
-    if (!row) throw new Error(`NOT_FOUND: ${checklistId}`);
+    if (!row)
+      throw new AtmError("CHECKLIST_NOT_FOUND", {
+        message: `检查项不存在：${checklistId}`,
+        details: { entity: "CHECKLIST", reference: checklistId },
+      });
     return {
       id: row.id,
       taskKey: `${this.meta.code}-T-${String(row.task_local_no).padStart(4, "0")}`,
@@ -4283,7 +4642,8 @@ export class ProjectRepository {
       retirementReason?: string | null;
     },
   ): { ok: 1; seq: number; session: string; handoffs: number } {
-    if (!actor.sessionId) throw new Error("SESSION_REQUIRED");
+    if (!actor.sessionId)
+      throw new AtmError("SESSION_REQUIRED", { message: "结束 Session 需要 sessionId" });
     const sessionId = actor.sessionId;
     return this.mutate({
       actor,

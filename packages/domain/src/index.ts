@@ -1,3 +1,5 @@
+import { AtmError } from "@ayanami-task/errors";
+
 export type TaskRoutingSignals = {
   multiAgent?: boolean;
   multiSession?: boolean;
@@ -93,12 +95,20 @@ export function assertAcyclicDependency(
   dependsOnId: string,
   dependencies: ReadonlyMap<string, readonly string[]>,
 ): void {
-  if (taskId === dependsOnId) throw new Error("DEPENDENCY_CYCLE: self dependency");
+  if (taskId === dependsOnId)
+    throw new AtmError("DEPENDENCY_CYCLE", {
+      message: "WorkItem 不能依赖自身",
+      details: { task_id: taskId, depends_on_id: dependsOnId, reason: "SELF_DEPENDENCY" },
+    });
   const pending = [dependsOnId];
   const visited = new Set<string>();
   while (pending.length > 0) {
     const current = pending.pop()!;
-    if (current === taskId) throw new Error("DEPENDENCY_CYCLE: dependency reaches task");
+    if (current === taskId)
+      throw new AtmError("DEPENDENCY_CYCLE", {
+        message: "依赖关系会形成环",
+        details: { task_id: taskId, depends_on_id: dependsOnId, reason: "REACHES_TASK" },
+      });
     if (visited.has(current)) continue;
     visited.add(current);
     pending.push(...(dependencies.get(current) ?? []));
@@ -110,7 +120,11 @@ function parentDepth(itemId: string, parents: ReadonlyMap<string, string | null>
   let cursor = parents.get(itemId) ?? null;
   const visited = new Set([itemId]);
   while (cursor) {
-    if (visited.has(cursor)) throw new Error("HIERARCHY_CYCLE: existing hierarchy is cyclic");
+    if (visited.has(cursor))
+      throw new AtmError("HIERARCHY_CYCLE", {
+        message: "现有 WorkItem 层级包含环",
+        details: { item_id: itemId, parent_id: cursor, reason: "EXISTING_CYCLE" },
+      });
     visited.add(cursor);
     depth += 1;
     cursor = parents.get(cursor) ?? null;
@@ -140,23 +154,47 @@ export function assertParentMove(
   parentId: string | null,
   parents: ReadonlyMap<string, string | null>,
 ): void {
-  if (parentId === itemId) throw new Error("HIERARCHY_CYCLE: self parent");
+  if (parentId === itemId)
+    throw new AtmError("HIERARCHY_CYCLE", {
+      message: "WorkItem 不能作为自身父项",
+      details: { item_id: itemId, parent_id: parentId, reason: "SELF_PARENT" },
+    });
   let cursor = parentId;
   const visited = new Set<string>();
   while (cursor) {
-    if (cursor === itemId) throw new Error("HIERARCHY_CYCLE: parent is a descendant");
-    if (visited.has(cursor)) throw new Error("HIERARCHY_CYCLE: existing hierarchy is cyclic");
+    if (cursor === itemId)
+      throw new AtmError("HIERARCHY_CYCLE", {
+        message: "父项不能是当前 WorkItem 的后代",
+        details: { item_id: itemId, parent_id: parentId, reason: "PARENT_IS_DESCENDANT" },
+      });
+    if (visited.has(cursor))
+      throw new AtmError("HIERARCHY_CYCLE", {
+        message: "现有 WorkItem 层级包含环",
+        details: { item_id: itemId, parent_id: parentId, reason: "EXISTING_CYCLE" },
+      });
     visited.add(cursor);
     cursor = parents.get(cursor) ?? null;
   }
   const prospectiveDepth =
     (parentId ? parentDepth(parentId, parents) : 0) + descendantDepth(itemId, parents);
-  if (prospectiveDepth > 8) throw new Error("HIERARCHY_DEPTH: maximum depth is 8");
+  if (prospectiveDepth > 8)
+    throw new AtmError("HIERARCHY_DEPTH", {
+      message: "WorkItem 层级深度不能超过 8",
+      details: {
+        item_id: itemId,
+        parent_id: parentId,
+        max_depth: 8,
+        prospective_depth: prospectiveDepth,
+      },
+    });
 }
 
 export function assertProjectCode(code: string): void {
   if (!/^[A-Z][A-Z0-9-]{1,11}$/u.test(code)) {
-    throw new Error("INVALID_PROJECT_CODE");
+    throw new AtmError("INVALID_PROJECT_CODE", {
+      message: `项目代码无效：${code}`,
+      details: { code, pattern: "^[A-Z][A-Z0-9-]{1,11}$" },
+    });
   }
 }
 
@@ -195,5 +233,8 @@ export function allocateProjectCode(
     const candidate = `${base.slice(0, 12 - suffixText.length)}${suffixText}`;
     if (!existing.has(candidate)) return candidate;
   }
-  throw new Error("PROJECT_CODE_EXHAUSTED");
+  throw new AtmError("PROJECT_CODE_EXHAUSTED", {
+    message: `无法为项目分配唯一代码：${name}`,
+    details: { name, base, attempts: 9_999 },
+  });
 }

@@ -166,11 +166,8 @@ describe("MCP first-class Review workflow", () => {
       expect(response.isError).toBe(true);
       const text = String((response.content[0] as { text?: unknown } | undefined)?.text ?? "");
       expect(text).toContain("VERSION_CONFLICT");
-      const marker = "MCP_DETAILS=";
-      const details = JSON.parse(text.slice(text.indexOf(marker) + marker.length)) as Record<
-        string,
-        any
-      >;
+      expect(text).not.toContain("MCP_DETAILS=");
+      const details = (response.structuredContent as { details: Record<string, any> }).details;
       expect(details).toMatchObject({
         entity: "CHECKLIST",
         key: checklist.id,

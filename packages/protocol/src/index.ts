@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AtmError } from "@ayanami-task/errors";
 
 export * from "./views/task.js";
 
@@ -614,15 +615,14 @@ function checklistBatchFailureMessage(reasons: readonly ChecklistBatchFailureRea
 }
 
 /** A preflight failure for an atomic checklist batch. No mutation has been applied. */
-export class ChecklistBatchFailureError extends Error {
-  readonly code = "COMPLETION_GATE_FAILED";
-  readonly details: ChecklistBatchFailureDetails;
-
+export class ChecklistBatchFailureError extends AtmError<"COMPLETION_GATE_FAILED"> {
   constructor(reasons: readonly ChecklistBatchFailureReason[]) {
     const details = ChecklistBatchFailureDetailsSchema.parse({ reasons });
-    super(`COMPLETION_GATE_FAILED: ${checklistBatchFailureMessage(details.reasons)}`);
+    super("COMPLETION_GATE_FAILED", {
+      message: checklistBatchFailureMessage(details.reasons),
+      details,
+    });
     this.name = "ChecklistBatchFailureError";
-    this.details = details;
   }
 }
 
@@ -759,7 +759,10 @@ export function externalizeObjectSchema<
   for (const canonicalKey of canonicalKeys) {
     const externalName = names[canonicalKey as keyof Names];
     if (typeof externalName !== "string" || externalName.length === 0) {
-      throw new Error(`EXTERNAL_NAME_MISSING:${canonicalKey}`);
+      throw new AtmError("EXTERNAL_NAME_MISSING", {
+        message: `外部字段名缺失：${canonicalKey}`,
+        details: { canonical_key: canonicalKey },
+      });
     }
     const fieldAdapter = fieldAdapters[canonicalKey as keyof typeof fieldAdapters];
     externalShape[externalName] = fieldAdapter?.schema ?? canonicalShape[canonicalKey]!;

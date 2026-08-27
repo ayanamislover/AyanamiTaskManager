@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
+import { AtmError } from "@ayanami-task/errors";
 
 export type Migration = {
   version: number;
@@ -29,10 +30,17 @@ export function loadMigrationPlan(directory: string): Migration[] {
   });
   for (let index = 0; index < plan.length; index += 1) {
     if (plan[index]!.version !== index + 1) {
-      throw new Error(`MIGRATION_GAP: expected ${index + 1}, found ${plan[index]!.version}`);
+      throw new AtmError("MIGRATION_GAP", {
+        message: `迁移序号断裂：expected ${index + 1}, found ${plan[index]!.version}`,
+        details: { expected: index + 1, actual: plan[index]!.version },
+      });
     }
   }
-  if (plan.length === 0) throw new Error(`MIGRATION_PLAN_EMPTY: ${directory}`);
+  if (plan.length === 0)
+    throw new AtmError("MIGRATION_PLAN_EMPTY", {
+      message: "迁移计划为空",
+      details: { directory },
+    });
   return plan;
 }
 
@@ -61,18 +69,35 @@ function assertAppliedPlan(applied: AppliedMigration[], plan: Migration[]): void
   const maximum = Math.max(0, ...appliedVersions);
   for (const migration of plan) {
     if (migration.version < maximum && !appliedVersions.has(migration.version)) {
-      throw new Error(`MIGRATION_HISTORY_GAP: ${migration.version}`);
+      throw new AtmError("MIGRATION_HISTORY_GAP", {
+        message: `迁移历史断裂：${migration.version}`,
+        details: { version: migration.version },
+      });
     }
   }
   for (const row of applied) {
     const local = byVersion.get(row.version);
-    if (!local) throw new Error(`MIGRATION_FILE_MISSING: ${row.version}`);
-    if (local.name !== row.name) throw new Error(`MIGRATION_NAME_MISMATCH: ${row.version}`);
+    if (!local)
+      throw new AtmError("MIGRATION_FILE_MISSING", {
+        message: `迁移文件缺失：${row.version}`,
+        details: { version: row.version },
+      });
+    if (local.name !== row.name)
+      throw new AtmError("MIGRATION_NAME_MISMATCH", {
+        message: `迁移名称不匹配：${row.version}`,
+        details: { version: row.version, expected: row.name, actual: local.name },
+      });
     if (local.sha256 !== row.content_sha256) {
-      throw new Error(`MIGRATION_HASH_MISMATCH: ${row.version}`);
+      throw new AtmError("MIGRATION_HASH_MISMATCH", {
+        message: `迁移哈希不匹配：${row.version}`,
+        details: { version: row.version },
+      });
     }
     if (!new Set(["APPLIED", "LEGACY_BASELINE_UNVERIFIED"]).has(row.hash_origin)) {
-      throw new Error(`MIGRATION_HASH_ORIGIN: ${row.version}`);
+      throw new AtmError("MIGRATION_HASH_ORIGIN", {
+        message: `迁移哈希来源无效：${row.version}`,
+        details: { version: row.version },
+      });
     }
   }
 }

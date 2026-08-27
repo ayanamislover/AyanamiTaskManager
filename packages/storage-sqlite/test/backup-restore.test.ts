@@ -69,7 +69,10 @@ describe("在线备份与可回滚恢复", () => {
       });
       appendFileSync(backup.path, "corrupted");
 
-      await expect(manager.restoreBackup(backup.id)).rejects.toThrow("BACKUP_HASH_MISMATCH");
+      await expect(manager.restoreBackup(backup.id)).rejects.toMatchObject({
+        code: "BACKUP_HASH_MISMATCH",
+        details: null,
+      });
       expect(
         (
           database.sqlite.prepare("SELECT description FROM project_meta").get() as {

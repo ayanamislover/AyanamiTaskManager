@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@ayanami-task/application": "workspace:*",
+    "@ayanami-task/errors": "workspace:*",
     "@ayanami-task/mcp": "workspace:*",
     "@ayanami-task/protocol": "workspace:*",
     "@ayanami-task/storage-sqlite": "workspace:*",

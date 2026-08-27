@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 
@@ -82,9 +83,12 @@ describe("exact entity reads", () => {
         opId: "exact-progress-op",
         createdAt: expect.any(String),
       });
-      expect(() => repository.getProgressUpdate("01UNKNOWNPROGRESSULID0000000")).toThrowError(
-        "PROGRESS_NOT_FOUND: 01UNKNOWNPROGRESSULID0000000",
-      );
+      expect(
+        captureAtmError(() => repository.getProgressUpdate("01UNKNOWNPROGRESSULID0000000")),
+      ).toMatchObject({
+        code: "PROGRESS_NOT_FOUND",
+        details: { entity: "PROGRESS", reference: "01UNKNOWNPROGRESSULID0000000" },
+      });
     } finally {
       manager.close();
     }
@@ -193,9 +197,14 @@ describe("exact entity reads", () => {
       expect(() =>
         repository.getOperationTrace("shared-record-op", secondSession.id),
       ).not.toThrow();
-      expect(() =>
-        repository.getOperationTrace("shared-record-op", "01UNKNOWNSESSIONULID00000000"),
-      ).toThrowError("SESSION_NOT_FOUND: 01UNKNOWNSESSIONULID00000000");
+      expect(
+        captureAtmError(() =>
+          repository.getOperationTrace("shared-record-op", "01UNKNOWNSESSIONULID00000000"),
+        ),
+      ).toMatchObject({
+        code: "SESSION_NOT_FOUND",
+        details: { entity: "SESSION", reference: "01UNKNOWNSESSIONULID00000000" },
+      });
     } finally {
       manager.close();
     }

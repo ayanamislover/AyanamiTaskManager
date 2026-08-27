@@ -126,6 +126,9 @@ importers:
       '@ayanami-task/application':
         specifier: workspace:*
         version: link:../../packages/application
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../../packages/errors
       '@ayanami-task/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
@@ -201,6 +204,9 @@ importers:
       '@ayanami-task/engineering-metrics':
         specifier: workspace:*
         version: link:../engineering-metrics
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -225,12 +231,18 @@ importers:
 
   packages/client:
     dependencies:
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
 
   packages/domain:
     dependencies:
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -241,11 +253,16 @@ importers:
         specifier: workspace:*
         version: link:../testing
 
+  packages/errors: {}
+
   packages/mcp:
     dependencies:
       '@ayanami-task/application':
         specifier: workspace:*
         version: link:../application
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -258,6 +275,9 @@ importers:
 
   packages/protocol:
     dependencies:
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -267,6 +287,9 @@ importers:
       '@ayanami-task/domain':
         specifier: workspace:*
         version: link:../domain
+      '@ayanami-task/errors':
+        specifier: workspace:*
+        version: link:../errors
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -1984,6 +2007,7 @@ packages:
   eslint@9.32.0:
     resolution: {integrity: sha512-LSehfdpgMeWcTZkWZVIJl+tkZ2nuSkyyB9C27MZqFWXuph7DvaowgcTvKqxvpLW1JZIk8PN7hFY3Rj9LQ7m7lg==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+    deprecated: This version is no longer supported. Please see https://eslint.org/version-support for other options.
     hasBin: true
     peerDependencies:
       jiti: '*'

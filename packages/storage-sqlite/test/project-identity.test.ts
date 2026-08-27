@@ -31,9 +31,12 @@ describe("项目身份", () => {
       const project = await manager.createProject({ name: "路径别名", sourcePath: alias });
       expect(project.sourcePaths).toEqual([canonicalSource]);
       expect(manager.identifyProject(source)?.id).toBe(project.id);
-      await expect(manager.createProject({ name: "重复路径", sourcePath: source })).rejects.toThrow(
-        "PROJECT_ALREADY_EXISTS",
-      );
+      await expect(
+        manager.createProject({ name: "重复路径", sourcePath: source }),
+      ).rejects.toMatchObject({
+        code: "PROJECT_ALREADY_EXISTS",
+        details: { source_path: canonicalSource },
+      });
 
       const distinct = await manager.createProject({ name: "不同目录", sourcePath: other });
       expect(distinct.id).not.toBe(project.id);

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
 
 describe("checklist batch typed error details", () => {
-  it("preserves the complete ordered reason list through MCP_DETAILS", async () => {
+  it("preserves the complete ordered reason list in structuredContent", async () => {
     const reasons = [
       {
         task_key: "ATM-T-0001",
@@ -48,12 +48,10 @@ describe("checklist batch typed error details", () => {
         },
       });
       const text = String((response.content[0] as { text?: unknown } | undefined)?.text ?? "");
-      const marker = "MCP_DETAILS=";
-
       expect(response.isError).toBe(true);
       expect(text).toContain("COMPLETION_GATE_FAILED");
-      expect(text).toContain(marker);
-      const details = JSON.parse(text.slice(text.indexOf(marker) + marker.length));
+      expect(text).not.toContain("MCP_DETAILS=");
+      const details = (response.structuredContent as { details: Record<string, unknown> }).details;
       expect(details).toEqual({ reasons });
       expect(details.reasons).toHaveLength(101);
       expect(details).not.toHaveProperty("truncated");

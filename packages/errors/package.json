@@ -1,5 +1,5 @@
 {
-  "name": "@ayanami-task/protocol",
+  "name": "@ayanami-task/errors",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -13,9 +13,5 @@
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@ayanami-task/errors": "workspace:*",
-    "zod": "4.4.3"
   }
 }

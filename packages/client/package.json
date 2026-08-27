@@ -15,6 +15,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ayanami-task/errors": "workspace:*",
     "@ayanami-task/protocol": "workspace:*"
   }
 }

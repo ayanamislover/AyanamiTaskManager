@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { AtmError } from "@ayanami-task/errors";
 import { runMigrations } from "./migration-runner.js";
 
 export type ManagedDatabase = {
@@ -53,9 +54,16 @@ export function sqliteCapabilities(sqlite: Database.Database): {
 export function assertSqliteCapabilities(sqlite: Database.Database): void {
   const capabilities = sqliteCapabilities(sqlite);
   if (compareVersions(capabilities.version, "3.51.3") < 0) {
-    throw new Error(`SQLITE_VERSION_UNSAFE: ${capabilities.version}`);
+    throw new AtmError("SQLITE_VERSION_UNSAFE", {
+      message: `SQLite 版本不安全：${capabilities.version}`,
+      details: { version: capabilities.version },
+    });
   }
-  if (!capabilities.fts5 || !capabilities.trigram) throw new Error("SQLITE_FTS5_TRIGRAM_REQUIRED");
+  if (!capabilities.fts5 || !capabilities.trigram)
+    throw new AtmError("SQLITE_FTS5_TRIGRAM_REQUIRED", {
+      message: "SQLite 需要 FTS5 trigram 支持",
+      details: { fts5: capabilities.fts5, trigram: capabilities.trigram },
+    });
 }
 
 export async function openManagedDatabase(input: {

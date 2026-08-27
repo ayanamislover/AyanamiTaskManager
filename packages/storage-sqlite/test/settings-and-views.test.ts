@@ -3,8 +3,10 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import ts from "typescript";
+import { isAtmError } from "@ayanami-task/errors";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager } from "../src/index.js";
+import { captureAtmError } from "./typed-error-test-helpers.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -53,7 +55,7 @@ function rejectedSettingKeys(keys: readonly string[], write: (key: string) => un
       write(key);
       return false;
     } catch (error) {
-      if (error instanceof Error && error.message === "SETTING_KEY_INVALID") return true;
+      if (isAtmError(error) && error.code === "SETTING_KEY_INVALID") return true;
       throw error;
     }
   });
@@ -87,9 +89,14 @@ describe("Registry 设置与保存视图", () => {
       expect(manager.listSavedViews("VIEW")).toEqual([
         expect.objectContaining({ id: created.id, version: 1 }),
       ]);
-      expect(() =>
-        manager.updateSavedView(created.id, { expectedVersion: 0, name: "过期写入" }),
-      ).toThrow("VERSION_CONFLICT");
+      expect(
+        captureAtmError(() =>
+          manager.updateSavedView(created.id, { expectedVersion: 0, name: "过期写入" }),
+        ),
+      ).toMatchObject({
+        code: "VERSION_CONFLICT",
+        details: { entity: "SAVED_VIEW", key: created.id, expected: 0, actual: 1 },
+      });
     } finally {
       manager.close();
     }
@@ -111,9 +118,12 @@ describe("Registry 设置与保存视图", () => {
       expect(created).toMatchObject({ key: "backup.policy", version: 0, value: { enabled: true } });
       const updated = manager.setSetting("backup.policy", { enabled: false }, 0);
       expect(updated).toMatchObject({ version: 1, value: { enabled: false } });
-      expect(() => manager.setSetting("backup.policy", { enabled: true }, 0)).toThrow(
-        "VERSION_CONFLICT",
-      );
+      expect(
+        captureAtmError(() => manager.setSetting("backup.policy", { enabled: true }, 0)),
+      ).toMatchObject({
+        code: "VERSION_CONFLICT",
+        details: { entity: "SETTING", key: "backup.policy", expected: 0, actual: 1 },
+      });
       expect(manager.listSettings()).toContainEqual(updated);
     } finally {
       manager.close();
@@ -153,10 +163,16 @@ describe("Registry 设置与保存视图", () => {
         key: "agent.maxRetryCount",
         value: 3,
       });
-      expect(() => manager.setSetting("Invalid.firstCharacter", true)).toThrow(
-        "SETTING_KEY_INVALID",
-      );
-      expect(() => manager.setSetting("invalid whitespace", true)).toThrow("SETTING_KEY_INVALID");
+      expect(
+        captureAtmError(() => manager.setSetting("Invalid.firstCharacter", true)),
+      ).toMatchObject({
+        code: "SETTING_KEY_INVALID",
+        details: { key: "Invalid.firstCharacter" },
+      });
+      expect(captureAtmError(() => manager.setSetting("invalid whitespace", true))).toMatchObject({
+        code: "SETTING_KEY_INVALID",
+        details: { key: "invalid whitespace" },
+      });
     } finally {
       manager.close();
     }
