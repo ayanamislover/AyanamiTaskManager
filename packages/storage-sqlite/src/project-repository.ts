@@ -200,6 +200,10 @@ export type WorkItemView = {
   targetDate: string | null;
   discoveredFrom: string | null;
   discoveredCount: number;
+  everClaimedAt: string | null;
+  lastStartedAt: string | null;
+  lastSessionClosedAt: string | null;
+  lastEvidenceAt: string | null;
   version: number;
   updatedAt: string;
 };
@@ -422,6 +426,10 @@ function workItemFromRow(
         ? `${projectCode}-T-${String(row.discovered_from_local_no).padStart(4, "0")}`
         : null,
     discoveredCount: Number(row.discovered_count ?? 0),
+    everClaimedAt: row.ever_claimed_at ?? null,
+    lastStartedAt: row.last_started_at ?? null,
+    lastSessionClosedAt: row.last_session_closed_at ?? null,
+    lastEvidenceAt: row.last_evidence_at ?? null,
     version: row.version,
     updatedAt: row.updated_at,
   };

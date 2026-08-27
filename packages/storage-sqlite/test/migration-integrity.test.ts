@@ -46,7 +46,7 @@ describe("迁移完整性", () => {
       try {
         expect(manager.registry.schemaVersion).toBe(4);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(14);
+        expect(upgraded.schemaVersion).toBe(15);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")
