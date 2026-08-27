@@ -75,7 +75,7 @@ function presentSession(session: ReconciliationSession | undefined): Reconciliat
   };
 }
 
-function looksLikeRelativePath(value: string): boolean {
+function looksLikeRelativePath(value: string, allowBareFile: boolean): boolean {
   const candidate = value.trim().replace(/^['"]|['"]$/gu, "");
   if (!candidate || candidate.includes(":")) return false;
   if (isAbsolute(candidate)) return false;
@@ -86,7 +86,7 @@ function looksLikeRelativePath(value: string): boolean {
     candidate.startsWith("..\\") ||
     candidate.includes("/") ||
     candidate.includes("\\") ||
-    /[A-Za-z0-9_@() -]+\.[A-Za-z0-9_-]{1,16}$/u.test(candidate)
+    (allowBareFile && /[A-Za-z0-9_@() -]+\.[A-Za-z0-9_-]{1,16}$/u.test(candidate))
   );
 }
 
@@ -99,14 +99,17 @@ export function explicitAcceptancePaths(acceptance: string[]): string[] {
   for (const statement of acceptance) {
     for (const match of statement.matchAll(/`([^`\r\n]+)`/gu)) {
       const candidate = match[1]!.trim();
-      if (looksLikeRelativePath(candidate)) result.add(candidate);
+      if (looksLikeRelativePath(candidate, true)) result.add(candidate);
     }
     const withoutCode = statement.replace(/`[^`\r\n]+`/gu, " ");
+    // Choice (b): prose needs a path separator; backticks may still identify a root-level file.
+    // Skipping nonexistent matches (choice a) would weaken the all-explicit-paths contract and
+    // could suggest completion while a real, explicitly named artifact is still missing.
     const candidates = withoutCode.match(
-      /(?:\.{1,2}[\\/])?(?:(?:[A-Za-z0-9_@()-]+)[\\/])+(?:[A-Za-z0-9_@().-]+)|(?:[A-Za-z0-9_@()-]+\.[A-Za-z0-9_-]{1,16})/gu,
+      /(?:\.{1,2}[\\/])?(?:(?:[A-Za-z0-9_@()-]+)[\\/])+(?:[A-Za-z0-9_@().-]+)/gu,
     );
     for (const candidate of candidates ?? []) {
-      if (looksLikeRelativePath(candidate)) result.add(candidate);
+      if (looksLikeRelativePath(candidate, false)) result.add(candidate);
     }
   }
   return [...result];
