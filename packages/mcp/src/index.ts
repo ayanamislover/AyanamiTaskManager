@@ -10,6 +10,7 @@ import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
+  ChecklistBatchFailureDetailsSchema,
   EvidenceInputSchema,
   EvidenceReferenceSchema,
   RECORD_SUMMARY_CODE_POINT_LIMIT,
@@ -578,7 +579,7 @@ async function versionConflictDetails(
   const taskKey = (segments.length > 1 ? segments[0] : undefined) ?? context.taskKey;
   if (!taskKey) return null;
   const [current, recentChanges] = await Promise.all([
-    service.getWorkItem(context.project, taskKey, "core"),
+    service.getWorkItemForUi(context.project, taskKey),
     service.recentWorkItemChanges(context.project, taskKey, 6),
   ]);
   return {
@@ -626,6 +627,12 @@ async function withMcpErrorDetails<T>(
     const code = errorCode(error);
     let details: Record<string, unknown> | null = null;
     try {
+      if (code === "COMPLETION_GATE_FAILED") {
+        const parsed = ChecklistBatchFailureDetailsSchema.safeParse(
+          (error as Error & { details?: unknown }).details,
+        );
+        if (parsed.success) details = parsed.data;
+      }
       if (code === "PROJECT_NOT_FOUND") details = projectSuggestionDetails(service, error);
       if (
         ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(code) &&
@@ -644,7 +651,8 @@ async function withMcpErrorDetails<T>(
       details = null;
     }
     if (!details) throw error;
-    throw new Error(`${error.message} MCP_DETAILS=${JSON.stringify(bounded(details, 6000))}`);
+    const publicDetails = code === "COMPLETION_GATE_FAILED" ? details : bounded(details, 6000);
+    throw new Error(`${error.message} MCP_DETAILS=${JSON.stringify(publicDetails)}`);
   }
 }
 
@@ -1702,80 +1710,19 @@ const progressCompleted = z.union([
 type TaskProjectionView = "core" | "context" | "full";
 type TaskListView = TaskProjectionView | "reconcile";
 
-function summarizeChecklist(value: unknown): Record<string, number> {
-  const checklist = Array.isArray(value) ? (value as Array<Record<string, any>>) : [];
-  const count = (status: string) => checklist.filter((item) => item.status === status).length;
-  return {
-    total: checklist.length,
-    todo: count("TODO"),
-    doing: count("DOING"),
-    done: count("DONE"),
-    skipped: count("SKIPPED"),
-    evidence_required: checklist.filter((item) => item.evidenceRequired === true).length,
-    evidence_missing: checklist.filter(
-      (item) =>
-        item.evidenceRequired === true &&
-        item.status !== "SKIPPED" &&
-        (!Array.isArray(item.evidence) || item.evidence.length === 0),
-    ).length,
-  };
+function snakeCaseKey(value: string): string {
+  return value.replace(/[A-Z]/gu, (letter) => `_${letter.toLowerCase()}`);
 }
 
-function taskStateProjection(item: Record<string, any>): Record<string, unknown> {
-  const breakdown = plain(item.progressBreakdown);
-  return {
-    phase: item.phase ?? item.status,
-    waiting_on: item.waitingOn ?? null,
-    phase_inferred: item.phaseInferred === true,
-    reported_progress: item.reportedProgress ?? null,
-    progress_source: item.progressSource ?? breakdown.source ?? "NONE",
-    progress_breakdown: {
-      computed: breakdown.computed ?? item.progress,
-      reported: breakdown.reported ?? item.reportedProgress ?? null,
-      source: breakdown.source ?? item.progressSource ?? "NONE",
-      done_weight: breakdown.doneWeight ?? 0,
-      total_weight: breakdown.totalWeight ?? 0,
-      done_stages: breakdown.doneStages ?? 0,
-      total_stages: breakdown.totalStages ?? 0,
-      blocker: breakdown.blocker ?? null,
-    },
-  };
-}
-
-function compactTask(
-  item: Record<string, any>,
-  fieldMask: string[] = [],
-  view: TaskProjectionView = "core",
-) {
-  const compact: Record<string, unknown> = {
-    key: item.key,
-    title: item.title,
-    type: item.type,
-    status: item.status,
-    priority: item.priority,
-    owner: item.assigneeAgentId ?? null,
-    progress: item.progress,
-    version: item.version,
-    due: item.targetDate ?? null,
-    blocked: item.blockedReason ?? null,
-    ...taskStateProjection(item),
-  };
-  if (view !== "core" || fieldMask.includes("checklist")) {
-    compact.description = item.description ?? "";
-    compact.acceptance = Array.isArray(item.acceptance) ? item.acceptance : [];
-    compact.checklist = summarizeChecklist(item.checklist);
-    compact.dependencies = Array.isArray(item.dependencies) ? item.dependencies : [];
-    compact.discovered_from = item.discoveredFrom ?? null;
-    compact.discovered_count = Number(item.discoveredCount ?? 0);
-  }
-  if (view === "full") {
-    compact.checklist_items = Array.isArray(item.checklist) ? item.checklist : [];
-    compact.discovered = Array.isArray(item.discovered) ? item.discovered : [];
-    compact.execution_session = item.executionSession ?? null;
-  }
-  if (fieldMask.length === 0 || fieldMask.includes("*")) return compact;
+/** MCP is the sole snake_case boundary; the canonical Application DTO remains camelCase. */
+function externalizeTaskView(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(externalizeTaskView);
+  if (!value || typeof value !== "object") return value;
   return Object.fromEntries(
-    fieldMask.filter((field) => field in compact).map((field) => [field, compact[field]]),
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      snakeCaseKey(key),
+      externalizeTaskView(entry),
+    ]),
   );
 }
 
@@ -1962,6 +1909,66 @@ function compactSearchHit(hit: Record<string, unknown>): Record<string, unknown>
     title: hit.title,
     snippet: hit.snippet,
     updated_at: hit.updatedAt,
+    ...(hit.project === undefined ? {} : { project: hit.project }),
+  };
+}
+
+type SearchServicePage = {
+  hits: any[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
+async function fitSearchPage(input: {
+  initial: SearchServicePage;
+  fetchPage: (limit: number) => Promise<SearchServicePage> | SearchServicePage;
+  requestedLimit: number;
+  inputCursor?: string;
+  fieldMask: string[];
+  maxChars: number;
+}): Promise<Record<string, unknown>> {
+  const maximum = Math.min(input.requestedLimit, input.initial.hits.length);
+  for (let count = maximum; count >= 1; count -= 1) {
+    const page = count === input.requestedLimit ? input.initial : await input.fetchPage(count);
+    const hits = page.hits
+      .slice(0, count)
+      .map((hit) => selectFields(compactSearchHit(plain(hit)), input.fieldMask));
+    const candidate: Record<string, unknown> = {
+      exact: false,
+      requested_limit: input.requestedLimit,
+      returned_count: hits.length,
+      hits,
+      next_cursor: page.hasMore ? page.nextCursor : null,
+      has_more: page.hasMore,
+      truncated: count < input.requestedLimit,
+    };
+    if (JSON.stringify(candidate).length <= input.maxChars) return candidate;
+  }
+  if (input.initial.hits.length === 0) {
+    return {
+      exact: false,
+      requested_limit: input.requestedLimit,
+      returned_count: 0,
+      hits: [],
+      next_cursor: null,
+      has_more: false,
+      truncated: false,
+    };
+  }
+  const retry: Record<string, unknown> = {
+    exact: false,
+    returned_count: 0,
+    hits: [],
+    next_cursor: input.inputCursor ?? null,
+    has_more: true,
+    truncated: true,
+  };
+  if (JSON.stringify(retry).length <= input.maxChars) return retry;
+  return {
+    code: "RESULT_TOO_LARGE",
+    next_cursor: input.inputCursor ?? null,
+    has_more: true,
+    truncated: true,
   };
 }
 
@@ -2493,40 +2500,22 @@ export function createAyanamiMcpServer(
         ...(input.milestone_id === undefined ? {} : { milestoneId: input.milestone_id }),
         ...(input.query === undefined ? {} : { query: input.query }),
       };
-      const items = await service.listWorkItems(input.project, filters);
-      const needsContext =
-        input.view !== "core" ||
-        input.field_mask.some((field) =>
-          [
-            "checklist",
-            "checklist_items",
-            "description",
-            "acceptance",
-            "dependencies",
-            "discovered",
-            "execution_session",
-          ].includes(field),
-        );
-      const projectedItems = await Promise.all(
-        items.map(async (item) => {
-          const source = needsContext
-            ? await service.getWorkItem(input.project, item.key, projectionView)
-            : item;
-          return compactTask(
-            source as unknown as Record<string, any>,
-            input.field_mask,
-            projectionView,
-          );
-        }),
+      const items = await service.listWorkItems(input.project, filters, projectionView);
+      const projectedItems = items.map((item) =>
+        selectFields(externalizeTaskView(item) as Record<string, unknown>, input.field_mask),
       );
       const sourceHasMore =
         items.length === input.limit &&
         (
-          await service.listWorkItems(input.project, {
-            ...filters,
-            limit: 1,
-            offset: offset + items.length,
-          })
+          await service.listWorkItems(
+            input.project,
+            {
+              ...filters,
+              limit: 1,
+              offset: offset + items.length,
+            },
+            "core",
+          )
         ).length > 0;
       return wrap(
         fitTaskPage(
@@ -2560,14 +2549,11 @@ export function createAyanamiMcpServer(
       annotations: { readOnlyHint: true },
     },
     async (input) => {
-      const item = (await service.getWorkItem(input.project, input.task_key, input.view)) as Record<
-        string,
-        any
-      >;
-      const projected =
-        input.view === "core"
-          ? compactTask(item, input.field_mask)
-          : selectFields({ ...plain(item), ...taskStateProjection(item) }, input.field_mask);
+      const item = await service.getWorkItem(input.project, input.task_key, input.view);
+      const projected = selectFields(
+        externalizeTaskView(item) as Record<string, unknown>,
+        input.field_mask,
+      );
       return wrap(
         fitFieldRead(
           projected,
@@ -2600,34 +2586,13 @@ export function createAyanamiMcpServer(
       outputSchema,
     },
     async (input) => {
-      const needsPlanningRoot = input.items.some((item) => item.objective_id === undefined);
-      const existingContext = await service.planningContext(input.project);
-      const provisionsPlanningRoot =
-        needsPlanningRoot &&
-        (existingContext.objectiveId === null || existingContext.milestoneId === null);
-      if (
-        provisionsPlanningRoot &&
-        input.items.some((item) => typeof item.milestone_id === "string")
-      ) {
-        await service.assertSessionCanProvisionPlanningRoot(input.project, input.session);
-        await service.assertMilestonesExist(
-          input.project,
-          input.items.map((item) => item.milestone_id),
-        );
-      }
-      const context = needsPlanningRoot
-        ? await service.ensurePlanningRoot(input.project, input.session)
-        : { ...existingContext, objectiveProvisioned: false };
       const created = await service.createWorkItems(
         input.project,
         input.session,
         input.op_id,
         input.items.map((item) => {
-          const objectiveId = item.objective_id ?? context.objectiveId;
-          if (!objectiveId) throw new Error("OBJECTIVE_REQUIRED: 项目尚无活动目标");
           return {
             clientRef: item.client_ref,
-            objectiveId,
             dependsOn: item.depends_on,
             dependsOnRefs: item.depends_on_refs,
             ...(item.discovered_from === undefined ? {} : { discoveredFrom: item.discovered_from }),
@@ -2650,16 +2615,14 @@ export function createAyanamiMcpServer(
             ...(item.assignee_agent_id === undefined
               ? {}
               : { assigneeAgentId: item.assignee_agent_id }),
-            ...(item.milestone_id === undefined
-              ? context.milestoneId === null
-                ? {}
-                : { milestoneId: context.milestoneId }
-              : { milestoneId: item.milestone_id }),
+            ...(item.objective_id === undefined ? {} : { objectiveId: item.objective_id }),
+            ...(item.milestone_id === undefined ? {} : { milestoneId: item.milestone_id }),
             ...(item.parent_key === undefined ? {} : { parentKey: item.parent_key }),
             ...(item.parent_ref === undefined ? {} : { parentRef: item.parent_ref }),
             ...(item.target_date === undefined ? {} : { targetDate: item.target_date }),
           };
         }),
+        { resolvePlanningRoot: true },
       );
       return result({
         ok: true,
@@ -2667,7 +2630,7 @@ export function createAyanamiMcpServer(
         project: input.project.toUpperCase(),
         seq: created.sequence,
         // 目标是机器补的就要说出来，否则事后没人分得清它是谁定的。
-        ...(context.objectiveProvisioned ? { planning_root: "PROVISIONED" } : {}),
+        ...(created.planningRootProvisioned ? { planning_root: "PROVISIONED" } : {}),
         created: created.items.map((item, index) => ({
           client_ref: input.items[index]!.client_ref,
           task_key: item.key,
@@ -3209,21 +3172,21 @@ export function createAyanamiMcpServer(
         });
       }
 
-      const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
-      const fetchLimit = Math.min(30, offset + input.limit + 1);
-      const allHits = input.project
-        ? await service.search(input.project, input.query, fetchLimit)
-        : service.globalSearch(input.query, fetchLimit);
-      const hits = allHits
-        .slice(offset, offset + input.limit)
-        .map((hit) => selectFields(compactSearchHit(plain(hit)), input.field_mask));
-      return result(
-        {
-          exact: false,
-          hits,
-          next_cursor: offset + hits.length < allHits.length ? String(offset + hits.length) : null,
-        },
-        input.max_chars,
+      const searchQuery = input.query;
+      const fetchPage = (limit: number) =>
+        input.project
+          ? service.search(input.project, searchQuery, limit, input.cursor)
+          : service.globalSearch(searchQuery, limit, input.cursor);
+      const initial = (await fetchPage(input.limit)) as SearchServicePage;
+      return wrap(
+        await fitSearchPage({
+          initial,
+          fetchPage,
+          requestedLimit: input.limit,
+          ...(input.cursor === undefined ? {} : { inputCursor: input.cursor }),
+          fieldMask: input.field_mask,
+          maxChars: input.max_chars,
+        }),
       );
     },
   );

@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import {
   BeginInputSchema,
+  ChecklistBatchFailureDetailsSchema,
   ChecklistBatchUpdateInputSchema,
   ChecklistUpdateInputSchema,
   CreateMilestoneInputSchema,
@@ -17,6 +18,7 @@ import {
   ReviewSubmitInputSchema,
   SearchInputSchema,
   TaskCreateBatchInputSchema,
+  TaskViewNameSchema,
   TaskPatchBatchInputSchema,
   unicodeCodePointLength,
   VerifyAndCompleteInputSchema,
@@ -139,6 +141,12 @@ function domainErrorDetails(
   requestBody?: unknown,
 ): PublicErrorDetails | null {
   if (!(error instanceof Error)) return null;
+  if (code === "COMPLETION_GATE_FAILED") {
+    const parsed = ChecklistBatchFailureDetailsSchema.safeParse(
+      (error as Error & { details?: unknown }).details,
+    );
+    if (parsed.success) return parsed.data;
+  }
   const detailText = error.message.slice(error.message.indexOf(":") + 1).trim();
   if (code === "VERSION_CONFLICT") {
     const segments = detailText.split(":");
@@ -233,7 +241,7 @@ async function enrichVersionConflictDetails(
   if (!taskKey) return details;
   try {
     const [current, recentChanges] = await Promise.all([
-      service.getWorkItem(projectCode, taskKey, "core"),
+      service.getWorkItemForUi(projectCode, taskKey),
       service.recentWorkItemChanges(projectCode, taskKey, 6),
     ]);
     return {
@@ -899,10 +907,10 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
     });
   });
-  app.get("/api/v1/projects/:code/work-items", async (request) => {
+  app.get("/api/v1/projects/:code/ui/work-items", async (request) => {
     const { code } = request.params as { code: string };
     const query = request.query as Record<string, string | undefined>;
-    return options.service.listWorkItems(code, {
+    return options.service.listWorkItemsForUi(code, {
       ...(query.status ? { status: query.status } : {}),
       ...(query.assignee ? { assigneeAgentId: query.assignee } : {}),
       ...(query.milestone ? { milestoneId: query.milestone } : {}),
@@ -911,6 +919,28 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       limit: Number(query.limit ?? 20),
       offset: Number(query.offset ?? 0),
     });
+  });
+  app.get("/api/v1/projects/:code/ui/work-items/:taskKey", async (request) => {
+    const { code, taskKey } = request.params as { code: string; taskKey: string };
+    return options.service.getWorkItemForUi(code, taskKey);
+  });
+  app.get("/api/v1/projects/:code/work-items", async (request) => {
+    const { code } = request.params as { code: string };
+    const query = request.query as Record<string, string | undefined>;
+    const view = TaskViewNameSchema.default("core").parse(query.view);
+    return options.service.listWorkItems(
+      code,
+      {
+        ...(query.status ? { status: query.status } : {}),
+        ...(query.assignee ? { assigneeAgentId: query.assignee } : {}),
+        ...(query.milestone ? { milestoneId: query.milestone } : {}),
+        ...(query.q ? { query: query.q } : {}),
+        readyOnly: query.ready === "1",
+        limit: Number(query.limit ?? 20),
+        offset: Number(query.offset ?? 0),
+      },
+      view,
+    );
   });
   app.post("/api/v1/projects/:code/work-items", async (request, reply) => {
     const { code } = request.params as { code: string };
@@ -1008,8 +1038,9 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
   app.get("/api/v1/projects/:code/work-items/:taskKey", async (request) => {
     const { code, taskKey } = request.params as { code: string; taskKey: string };
-    const { view } = request.query as { view?: "core" | "context" | "full" };
-    return options.service.getWorkItem(code, taskKey, view ?? "core");
+    const query = request.query as Record<string, unknown>;
+    const view = TaskViewNameSchema.default("core").parse(query.view);
+    return options.service.getWorkItem(code, taskKey, view);
   });
   app.post("/api/v1/projects/:code/reviews/requests", async (request, reply) => {
     const { code } = request.params as { code: string };
@@ -1145,7 +1176,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       project: code,
       ...(raw.limit === undefined ? {} : { limit: Number(raw.limit) }),
     });
-    return options.service.search(code, query.query, query.limit);
+    return options.service.search(code, query.query, query.limit, query.cursor);
   });
   app.get("/api/v1/search", async (request) => {
     const raw = request.query as Record<string, unknown>;
@@ -1153,7 +1184,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       ...raw,
       ...(raw.limit === undefined ? {} : { limit: Number(raw.limit) }),
     });
-    return { hits: options.service.globalSearch(query.query, query.limit) };
+    return options.service.globalSearch(query.query, query.limit, query.cursor);
   });
   app.get("/api/v1/projects/:code/events", async (request) => {
     const { code } = request.params as { code: string };

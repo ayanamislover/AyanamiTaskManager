@@ -63,7 +63,7 @@ describe("DISCOVERED_FROM 任务关系", () => {
         (await service.listWorkItems(project.code, { readyOnly: true })).map((item) => item.key),
       ).toEqual(expect.arrayContaining([followUp.key, origin.key]));
       expect(
-        (await service.search(project.code, "跟进异常索引")).map((item) => item.entityKey),
+        (await service.search(project.code, "跟进异常索引")).hits.map((item) => item.entityKey),
       ).toEqual(expect.arrayContaining([followUp.key, origin.key]));
 
       const exported = await service.exportProject(project.code, "json");

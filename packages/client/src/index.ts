@@ -1,4 +1,11 @@
-import type { RecordInput } from "@ayanami-task/protocol";
+import type {
+  RecordInput,
+  SearchPage,
+  TaskContextView,
+  TaskCoreView,
+  TaskFullView,
+  TaskViewName,
+} from "@ayanami-task/protocol";
 
 export type AyanamiClientOptions = {
   endpoint: string;
@@ -55,6 +62,16 @@ export type ProjectRecord = {
   subjectKey: string | null;
   relatedRecords: string[];
   opId: string | null;
+};
+
+export type TaskViewFor<TView extends TaskViewName> = TView extends "full"
+  ? TaskFullView
+  : TView extends "context"
+    ? TaskContextView
+    : TaskCoreView;
+
+export type TaskListFilters<TView extends TaskViewName = TaskViewName> = Record<string, unknown> & {
+  view?: TView;
 };
 
 export type ReconciliationClassification =
@@ -360,15 +377,32 @@ export class AyanamiClient {
   };
 
   readonly tasks = {
-    list: (project: string, filters: Record<string, unknown> = {}) =>
-      this.request<Array<Record<string, unknown>>>(
+    list: <TView extends TaskViewName = "core">(
+      project: string,
+      filters: TaskListFilters<TView> = {},
+    ) =>
+      this.request<Array<TaskViewFor<TView>>>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString(filters)}`,
       ),
-    get: (project: string, key: string, view: "core" | "context" | "full" = "core") =>
-      this.request<Record<string, unknown>>(
+    get: <TView extends TaskViewName = "core">(
+      project: string,
+      key: string,
+      view: TView = "core" as TView,
+    ) =>
+      this.request<TaskViewFor<TView>>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(key)}${queryString({ view })}`,
+      ),
+    listForUi: (project: string, filters: Record<string, unknown> = {}) =>
+      this.request<Array<Record<string, unknown>>>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString(filters)}`,
+      ),
+    getForUi: (project: string, key: string) =>
+      this.request<Record<string, unknown>>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items/${encodeURIComponent(key)}`,
       ),
     create: (project: string, input: Record<string, unknown>) =>
       this.request<Record<string, unknown>>(
@@ -429,15 +463,15 @@ export class AyanamiClient {
       input,
     );
 
-  search = (query: string, project?: string, limit = 20) => {
+  search = (query: string, project?: string, limit = 20, cursor?: string) => {
     if (!project)
-      return this.request<Record<string, unknown>>(
+      return this.request<SearchPage>(
         "GET",
-        `/api/v1/search${queryString({ query, limit })}`,
+        `/api/v1/search${queryString({ query, limit, cursor })}`,
       );
-    return this.request<Record<string, unknown>>(
+    return this.request<SearchPage>(
       "GET",
-      `/api/v1/projects/${encodeURIComponent(project)}/search${queryString({ query, limit })}`,
+      `/api/v1/projects/${encodeURIComponent(project)}/search${queryString({ query, limit, cursor })}`,
     );
   };
 

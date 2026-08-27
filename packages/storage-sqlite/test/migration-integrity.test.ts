@@ -44,9 +44,9 @@ describe("迁移完整性", () => {
       cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
       manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
       try {
-        expect(manager.registry.schemaVersion).toBe(3);
+        expect(manager.registry.schemaVersion).toBe(4);
         const upgraded = await manager.openProject(project.code);
-        expect(upgraded.schemaVersion).toBe(13);
+        expect(upgraded.schemaVersion).toBe(14);
         expect(
           upgraded.sqlite
             .prepare("SELECT title FROM objectives WHERE id = ?")

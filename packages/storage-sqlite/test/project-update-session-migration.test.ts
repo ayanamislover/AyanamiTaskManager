@@ -58,7 +58,7 @@ describe("v13 project update Session migration", () => {
     manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     try {
       const upgraded = await manager.openProject(project.code);
-      expect(upgraded.schemaVersion).toBe(13);
+      expect(upgraded.schemaVersion).toBe(14);
       expect(upgraded.sqlite.pragma("quick_check")).toEqual([{ quick_check: "ok" }]);
       expect(upgraded.sqlite.pragma("foreign_key_check")).toEqual([]);
       expect(

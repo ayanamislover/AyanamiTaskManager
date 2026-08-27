@@ -373,11 +373,7 @@ describe("MCP surface v3 parity", () => {
         expect.objectContaining({ path: "current.description", original_chars: 50_000 }),
       );
 
-      const taskDetail = await fixture.service.getWorkItem(
-        fixture.project.code,
-        task.key,
-        "context",
-      );
+      const taskDetail = await fixture.service.getWorkItem(fixture.project.code, task.key);
       const checklist = taskDetail.checklist[0]!;
       await fixture.service.updateChecklist(
         fixture.project.code,
@@ -594,7 +590,7 @@ describe("MCP surface v3 parity", () => {
         (response.structuredContent as { created: Array<{ task_key: string }> }).created[0]!
           .task_key,
       );
-      expect(await fixture.service.getWorkItem(fixture.project.code, key, "core")).toMatchObject({
+      expect(await fixture.service.getWorkItem(fixture.project.code, key, "context")).toMatchObject({
         assigneeAgentId: "surface-v3-agent",
       });
       expect(await fixture.service.listWorkItems(fixture.project.code, {})).toHaveLength(1);
@@ -701,8 +697,8 @@ describe("MCP surface v3 parity", () => {
       ).created;
       const sourceKey = createdItems[0]!.task_key;
       const childKey = createdItems[1]!.task_key;
-      const source = await fixture.service.getWorkItem(fixture.project.code, sourceKey, "context");
-      const child = await fixture.service.getWorkItem(fixture.project.code, childKey, "context");
+      const source = await fixture.service.getWorkItem(fixture.project.code, sourceKey);
+      const child = await fixture.service.getWorkItem(fixture.project.code, childKey);
       expect(source).toMatchObject({
         objectiveId: objective.id,
         milestoneId: milestone.id,
@@ -730,7 +726,7 @@ describe("MCP surface v3 parity", () => {
           limit: 1,
           cursor: "0",
           view: "context",
-          field_mask: ["key", "title", "description"],
+          field_mask: ["key", "title", "description_preview"],
           max_chars: 4000,
         },
       });
@@ -771,7 +767,7 @@ describe("MCP surface v3 parity", () => {
       });
       expect(patched.isError, JSON.stringify(patched.content)).not.toBe(true);
       expect(
-        await fixture.service.getWorkItem(fixture.project.code, childKey, "core"),
+        await fixture.service.getWorkItem(fixture.project.code, childKey),
       ).toMatchObject({
         assigneeAgentId: null,
         targetDate: "2026-09-02",
@@ -781,7 +777,6 @@ describe("MCP surface v3 parity", () => {
       const sourceBeforeClaim = await fixture.service.getWorkItem(
         fixture.project.code,
         sourceKey,
-        "core",
       );
       const claimed = await fixture.client.callTool({
         name: "atm_task_patch",
@@ -813,7 +808,7 @@ describe("MCP surface v3 parity", () => {
       });
       expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
       expect(
-        await fixture.service.getWorkItem(fixture.project.code, sourceKey, "core"),
+        await fixture.service.getWorkItem(fixture.project.code, sourceKey),
       ).toMatchObject({
         status: "CLAIMED",
         claimedBySessionId: restoredSession,
@@ -860,7 +855,7 @@ describe("MCP surface v3 parity", () => {
       });
       expect(progress.isError, JSON.stringify(progress.content)).not.toBe(true);
       expect(
-        await fixture.service.getWorkItem(fixture.project.code, taskKey, "core"),
+        await fixture.service.getWorkItem(fixture.project.code, taskKey),
       ).toMatchObject({
         reportedProgress: 40,
       });
@@ -940,7 +935,8 @@ describe("MCP surface v3 parity", () => {
       expect(limited.structuredContent).toMatchObject({
         exact: false,
         hits: [expect.any(Object)],
-        next_cursor: "1",
+        next_cursor: expect.stringMatching(/^s1\./u),
+        has_more: true,
       });
 
       const delta = await fixture.client.callTool({

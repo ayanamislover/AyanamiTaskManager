@@ -41,8 +41,8 @@ describe("中文搜索与增量事件", () => {
           status: "READY",
         },
       ]);
-      expect((await service.search(project.code, "数据库"))[0]?.title).toContain("数据库");
-      expect((await service.search(project.code, "迁移"))[0]?.title).toContain("迁移");
+      expect((await service.search(project.code, "数据库")).hits[0]?.title).toContain("数据库");
+      expect((await service.search(project.code, "迁移")).hits[0]?.title).toContain("迁移");
       const record = await service.createRecord(project.code, begun.session, "record-exact", {
         kind: "FACT",
         title: "精确记录读取",

@@ -585,7 +585,7 @@ try {
   await createThroughPackagedMcp(project.code, "恢复后应消失", "packaged-smoke-create-2");
   check("备份后写入第二项", (await client.tasks.list(project.code)).length === 2);
   await client.backups.restore(String(backup.id));
-  const restoredTasks = await client.tasks.list(project.code);
+  const restoredTasks = await client.tasks.list(project.code, { view: "context" });
   check(
     "在线备份恢复一致",
     restoredTasks.length === 1 && restoredTasks[0]?.title === "打包烟测任务",
