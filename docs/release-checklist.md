@@ -35,6 +35,20 @@
 - [x] 服务 RSS ≤150 MB
 - [x] 空闲项目数据库 5 分钟 LRU 关闭
 
+### MCP bridge 内存验收
+
+发布前必须用客户端配置中的稳定命令运行：
+
+```powershell
+pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3000 --json output/release/mcp-bridge-memory-1.0.16.json
+```
+
+2026-08-27 实测 core Profile：1 个 bridge 为 27.78 MiB Private Bytes；10 个合计
+323.45 MiB；每多 1 个 bridge 的边际为 **32.85 MiB Private Bytes**。三轮系统可用内存差
+中位数为 245.62 MiB（24.56 MiB/bridge），极差 61.94 MiB，未触发噪声拒绝门槛。
+发布结论只引用 Private Bytes 边际与系统可用内存差；含共享映像重复计数的进程物理页
+合计仅用于诊断，不作为 bridge 内存成本或运行时优劣结论。
+
 ## 构建与安装
 
 一条命令走完升版、十阶段、卸载、安装与实测：
