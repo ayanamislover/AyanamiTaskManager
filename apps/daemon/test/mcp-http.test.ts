@@ -64,4 +64,146 @@ describe("Streamable HTTP MCP", () => {
       result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.15" } },
     });
   });
+
+  it("暴露固定 core / memory Profile，旧入口仅兼容 core", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-profiles-"));
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-test-token" });
+    cleanup.push(async () => {
+      await app.close();
+      service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    });
+    const payload = { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} };
+    const list = async (url: string): Promise<string[]> => {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: {
+          authorization: "Bearer local-test-token",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        payload,
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.headers["content-type"]?.includes("text/event-stream")
+        ? JSON.parse(
+            response.body
+              .split(/\r?\n/u)
+              .find((line) => line.startsWith("data:"))!
+              .slice(5)
+              .trim(),
+          )
+        : response.json();
+      return (body.result.tools as Array<{ name: string }>).map((tool) => tool.name);
+    };
+
+    const core = await list("/mcp/core");
+    const memory = await list("/mcp/memory");
+    const compatibility = await list("/mcp");
+
+    expect(core).toEqual([
+      "atm_begin",
+      "atm_brief",
+      "atm_task_list",
+      "atm_task_get",
+      "atm_task_create",
+      "atm_end",
+    ]);
+    expect(memory).toEqual([
+      "atm_task_patch",
+      "atm_progress_add",
+      "atm_record",
+      "atm_search",
+      "atm_delta",
+    ]);
+    expect(compatibility).toEqual(core);
+    expect(core.filter((name) => memory.includes(name))).toEqual([]);
+  });
+
+  it("core 创建的任务可由 memory 修改，两个 Profile 共享同一状态", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-shared-state-"));
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const project = await service.createProject({
+      name: "MCP 双 Profile 共享状态",
+      sourcePath: null,
+      code: "DMP",
+    });
+    const app = await buildAyanamiServer({ service, token: "local-test-token" });
+    cleanup.push(async () => {
+      await app.close();
+      service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    });
+    let id = 10;
+    const call = async (
+      url: "/mcp/core" | "/mcp/memory",
+      name: string,
+      args: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> => {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: {
+          authorization: "Bearer local-test-token",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+        },
+        payload: {
+          jsonrpc: "2.0",
+          id: id++,
+          method: "tools/call",
+          params: { name, arguments: args },
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.headers["content-type"]?.includes("text/event-stream")
+        ? JSON.parse(
+            response.body
+              .split(/\r?\n/u)
+              .find((line) => line.startsWith("data:"))!
+              .slice(5)
+              .trim(),
+          )
+        : response.json();
+      expect(body.error).toBeUndefined();
+      return body.result.structuredContent as Record<string, unknown>;
+    };
+
+    const begun = await call("/mcp/core", "atm_begin", {
+      op_id: "dual-profile-shared-begin",
+      project_code: project.code,
+      mode: "project",
+      agent_id: "dual-profile-test",
+    });
+    const session = String(begun.session);
+    const created = await call("/mcp/core", "atm_task_create", {
+      project: project.code,
+      session,
+      op_id: "dual-profile-shared-create",
+      items: [{ client_ref: "shared", title: "共享任务", status: "READY" }],
+    });
+    const task = (created.created as Array<{ task_key: string; version: number }>)[0]!;
+
+    await call("/mcp/memory", "atm_task_patch", {
+      project: project.code,
+      session,
+      op_id: "dual-profile-shared-claim",
+      items: [{ task_key: task.task_key, expected_version: task.version, operation: "claim" }],
+    });
+
+    const readBack = await call("/mcp/core", "atm_task_get", {
+      project: project.code,
+      task_key: task.task_key,
+      view: "core",
+    });
+    expect(readBack).toMatchObject({ key: task.task_key, status: "CLAIMED" });
+  });
 });
