@@ -22,7 +22,7 @@ import {
   VerifyAndCompleteInputSchema,
 } from "@ayanami-task/protocol";
 import type { AyanamiTaskService } from "@ayanami-task/application";
-import { handleAyanamiMcpHttp } from "@ayanami-task/mcp";
+import { handleAyanamiMcpHttp, type AyanamiMcpProfile } from "@ayanami-task/mcp";
 
 export type AyanamiServerOptions = {
   service: AyanamiTaskService;
@@ -1233,21 +1233,31 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     });
   });
 
-  app.post("/mcp", async (request, reply) => {
-    reply.hijack();
-    await handleAyanamiMcpHttp(request.raw, reply.raw, request.body, options.service);
-  });
-  for (const method of ["GET", "DELETE"] as const) {
-    app.route({
-      method,
-      url: "/mcp",
-      handler: async (_request, reply) =>
-        reply.code(405).send({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Method not allowed for stateless MCP transport" },
-          id: null,
-        }),
+  const mcpRoutes: Array<{ url: string; profile: AyanamiMcpProfile }> = [
+    // 保留旧入口只为旧客户端有一次迁移窗口；它永远映射到静态 core，不能重新合并工具面。
+    { url: "/mcp", profile: "core" },
+    { url: "/mcp/core", profile: "core" },
+    { url: "/mcp/memory", profile: "memory" },
+  ];
+  for (const route of mcpRoutes) {
+    app.post(route.url, async (request, reply) => {
+      reply.hijack();
+      await handleAyanamiMcpHttp(request.raw, reply.raw, request.body, options.service, {
+        profile: route.profile,
+      });
     });
+    for (const method of ["GET", "DELETE"] as const) {
+      app.route({
+        method,
+        url: route.url,
+        handler: async (_request, reply) =>
+          reply.code(405).send({
+            jsonrpc: "2.0",
+            error: { code: -32000, message: "Method not allowed for stateless MCP transport" },
+            id: null,
+          }),
+      });
+    }
   }
 
   await app.register(websocket, {
