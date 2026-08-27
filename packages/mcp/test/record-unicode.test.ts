@@ -30,7 +30,7 @@ async function openFixture() {
     agentId: "mcp-unicode-test",
     role: "PRIMARY",
   });
-  const server = createAyanamiMcpServer(service);
+  const server = createAyanamiMcpServer(service, { profile: "memory" });
   const client = new Client({ name: "mcp-unicode-test", version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

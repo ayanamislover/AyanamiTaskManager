@@ -2,15 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { createAyanamiMcpServer } from "../src/index.js";
+import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
 const services: AyanamiTaskService[] = [];
+const connections: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
+  for (const close of connections.splice(0)) await close();
   for (const service of services.splice(0)) service.close();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -25,13 +25,11 @@ async function connect(name: string, code: string) {
   services.push(service);
   // 只建项目，不建 objective——这正是纯 MCP 会话拿到的起点。
   const project = await service.createProject({ name, sourcePath: null, code });
-  const server = createAyanamiMcpServer(service);
-  const client = new Client({ name: "planning-root-test", version: "1.0.0" });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const profiles = await connectProfiledClients(service, "planning-root-test");
+  connections.push(profiles.close);
 
   const call = async (tool: string, args: Record<string, unknown>) => {
-    const response = await client.callTool({ name: tool, arguments: args });
+    const response = await profiles.client.callTool({ name: tool, arguments: args });
     if (response.isError) {
       throw new Error((response.content as Array<{ text?: string }>)[0]?.text ?? "");
     }
@@ -52,11 +50,9 @@ describe("纯 MCP 会话的规划根", () => {
       project_code: project.code,
       mode: "project",
       agent_id: "codex",
-      client_kind: "test",
       role: "PRIMARY",
       resume: false,
       allow_project_create: false,
-      signals: {},
     });
     const session = String(begun.session);
 
@@ -76,7 +72,6 @@ describe("纯 MCP 会话的规划根", () => {
           depends_on_refs: [],
           acceptance: [],
           checklist: [],
-          weight: 1,
           verification_required: false,
         },
       ],
@@ -120,7 +115,6 @@ describe("纯 MCP 会话的规划根", () => {
           depends_on_refs: [],
           acceptance: [],
           checklist: [],
-          weight: 1,
           verification_required: false,
         },
       ],
@@ -143,11 +137,9 @@ describe("纯 MCP 会话的规划根", () => {
       project_code: project.code,
       mode: "project",
       agent_id: "codex",
-      client_kind: "test",
       role: "PRIMARY",
       resume: false,
       allow_project_create: false,
-      signals: {},
     });
     const created = await call("atm_task_create", {
       project: project.code,
@@ -165,7 +157,6 @@ describe("纯 MCP 会话的规划根", () => {
           depends_on_refs: [],
           acceptance: [],
           checklist: [],
-          weight: 1,
           verification_required: false,
         },
       ],

@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAyanamiMcpServer, mcpResult } from "../src/index.js";
+import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
 
@@ -73,25 +74,25 @@ describe("MCP read plane", () => {
       Array.from({ length: 30 }, (_, index) => ({
         clientRef: `delta-${index}`,
         objectiveId: objective.id,
-        title: `Delta event ${String(index).padStart(2, "0")}`,
+        title: `Delta event ${String(index).padStart(2, "0")} ${"x".repeat(340)}`,
         description: "",
         type: "TASK",
         priority: "NORMAL",
         status: "READY" as const,
       })),
     );
-    const raw = await service.delta(project.code, 0, 100);
+    const raw = await service.delta(project.code, 0, 50);
     expect(raw.events.length).toBeGreaterThan(20);
     expect(raw.hasMore).toBe(false);
 
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "delta-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const response = await client.callTool({
         name: "atm_delta",
-        arguments: { project: project.code, since_seq: 0, limit: 100 },
+        arguments: { project: project.code, since_seq: 0 },
       });
       const body = response.structuredContent as {
         events: Array<{ seq: number }>;
@@ -102,42 +103,28 @@ describe("MCP read plane", () => {
       };
 
       expect(response.isError).not.toBe(true);
-      expect(body.events).toHaveLength(raw.events.length);
-      expect(body.returned_count).toBe(raw.events.length);
-      expect(body.next_seq).toBe(raw.events.at(-1)?.seq);
-      expect(body.has_more).toBe(false);
-      expect(body.truncated).toBe(false);
+      expect(body.events.length).toBeGreaterThan(0);
+      expect(body.events.length).toBeLessThan(raw.events.length);
+      expect(body.returned_count).toBe(body.events.length);
+      expect(body.next_seq).toBe(body.events.at(-1)?.seq);
+      expect(body.has_more).toBe(true);
+      expect(body.truncated).toBe(true);
       expect(JSON.stringify(body).length).toBeLessThanOrEqual(12_000);
 
-      const firstPage = await client.callTool({
-        name: "atm_delta",
-        arguments: {
-          project: project.code,
-          since_seq: 0,
-          limit: 100,
-          max_chars: 2500,
-        },
-      });
-      const firstBody = firstPage.structuredContent as typeof body;
-      expect(firstBody.events.length).toBeGreaterThan(0);
-      expect(firstBody.events.length).toBeLessThan(raw.events.length);
-      expect(firstBody.next_seq).toBe(firstBody.events.at(-1)?.seq);
-      expect(firstBody.has_more).toBe(true);
-      expect(firstBody.truncated).toBe(true);
-
-      const restPage = await client.callTool({
-        name: "atm_delta",
-        arguments: {
-          project: project.code,
-          since_seq: firstBody.next_seq,
-          limit: 100,
-          max_chars: 12_000,
-        },
-      });
-      const restBody = restPage.structuredContent as typeof body;
-      expect([...firstBody.events, ...restBody.events].map((event) => event.seq)).toEqual(
-        raw.events.map((event) => event.seq),
-      );
+      const collected = [...body.events];
+      let cursor = body.next_seq;
+      let hasMore = body.has_more;
+      while (hasMore) {
+        const page = await client.callTool({
+          name: "atm_delta",
+          arguments: { project: project.code, since_seq: cursor },
+        });
+        const pageBody = page.structuredContent as typeof body;
+        collected.push(...pageBody.events);
+        cursor = pageBody.next_seq;
+        hasMore = pageBody.has_more;
+      }
+      expect(collected.map((event) => event.seq)).toEqual(raw.events.map((event) => event.seq));
     } finally {
       await Promise.all([client.close(), server.close()]);
       service.close();
@@ -199,8 +186,6 @@ describe("MCP read plane", () => {
         arguments: {
           project: project.code,
           view: "context",
-          field_mask: ["key", "progress", "checklist"],
-          limit: 10,
         },
       });
       const body = response.structuredContent as {
@@ -208,7 +193,7 @@ describe("MCP read plane", () => {
       };
 
       expect(body.items).toEqual([
-        {
+        expect.objectContaining({
           key: task.key,
           progress: truth.progress,
           checklist: {
@@ -220,7 +205,7 @@ describe("MCP read plane", () => {
             evidence_required: 1,
             evidence_missing: 0,
           },
-        },
+        }),
       ]);
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -317,7 +302,7 @@ describe("MCP read plane", () => {
       ];
       const listed = await client.callTool({
         name: "atm_task_list",
-        arguments: { project: project.code, field_mask: fieldMask },
+        arguments: { project: project.code },
       });
       const fetched = await client.callTool({
         name: "atm_task_get",
@@ -343,7 +328,9 @@ describe("MCP read plane", () => {
         },
       };
 
-      expect(listed.structuredContent).toMatchObject({ items: [expected] });
+      expect(listed.structuredContent).toMatchObject({
+        items: [expect.objectContaining(expected)],
+      });
       expect(fetched.structuredContent).toEqual(expected);
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -355,6 +342,9 @@ describe("MCP read plane", () => {
     const longTitle = `Stalled task ${"title".repeat(300)}`;
     const longDisplayName = `Agent One ${"display".repeat(250)}`;
     const longSuggestedAction = `Inspect evidence before takeover. ${"action".repeat(300)}`;
+    const oversizedTitle = `Stalled task ${"title".repeat(5000)}`;
+    const oversizedDisplayName = `Agent One ${"display".repeat(5000)}`;
+    const oversizedSuggestedAction = `Inspect evidence before takeover. ${"action".repeat(5000)}`;
     const calls: Array<{ project: string; includeActive?: boolean }> = [];
     const service = {
       reconcileProject: async (project: string, input: { includeActive?: boolean }) => {
@@ -367,7 +357,7 @@ describe("MCP read plane", () => {
           items: [
             {
               taskKey: "REC-T-0001",
-              title: longTitle,
+              title: calls.length >= 3 ? oversizedTitle : longTitle,
               status: "CLAIMED",
               classification: "STALLED",
               reason: "session_closed_and_lease_expired",
@@ -375,12 +365,12 @@ describe("MCP read plane", () => {
               session: {
                 id: "session-1",
                 agentId: "agent-1",
-                displayName: longDisplayName,
+                displayName: calls.length >= 3 ? oversizedDisplayName : longDisplayName,
                 connectionState: "CLOSED",
                 lastSeenAt: "2026-08-26T23:00:00.000Z",
                 endedAt: "2026-08-26T23:01:00.000Z",
               },
-              suggestedAction: longSuggestedAction,
+              suggestedAction: calls.length >= 3 ? oversizedSuggestedAction : longSuggestedAction,
               evidencePaths: [],
             },
             {
@@ -409,18 +399,16 @@ describe("MCP read plane", () => {
         properties?: Record<string, { type?: string; enum?: string[] }>;
       };
       expect(listSchema.properties?.view?.enum).toContain("reconcile");
-      expect(listSchema.properties?.include_active).toMatchObject({ type: "boolean" });
+      expect(listSchema.properties?.include_active).toEqual({ type: "boolean" });
 
       const first = await client.callTool({
         name: "atm_task_list",
         arguments: {
           project: "REC",
           view: "reconcile",
-          include_active: true,
-          limit: 1,
         },
       });
-      expect(calls).toEqual([{ project: "REC", includeActive: true }]);
+      expect(calls).toEqual([{ project: "REC", includeActive: false }]);
       expect(first.structuredContent).toMatchObject({
         project: "REC",
         project_name: "Reconcile",
@@ -428,9 +416,9 @@ describe("MCP read plane", () => {
         view: "reconcile",
         generated_at: "2026-08-27T00:00:00.000Z",
         attention_count: 2,
-        returned_count: 1,
-        has_more: true,
-        next_cursor: "1",
+        returned_count: 2,
+        has_more: false,
+        next_cursor: null,
         items: [
           {
             task_key: "REC-T-0001",
@@ -447,6 +435,11 @@ describe("MCP read plane", () => {
             suggested_action: longSuggestedAction,
             evidence_paths: [],
           },
+          {
+            task_key: "REC-T-0002",
+            classification: "POSSIBLY_COMPLETE",
+            evidence_paths: ["release/done.txt"],
+          },
         ],
       });
 
@@ -455,8 +448,6 @@ describe("MCP read plane", () => {
         arguments: {
           project: "REC",
           view: "reconcile",
-          include_active: true,
-          limit: 1,
           cursor: "1",
         },
       });
@@ -478,12 +469,9 @@ describe("MCP read plane", () => {
         arguments: {
           project: "REC",
           view: "reconcile",
-          include_active: true,
-          limit: 1,
-          max_chars: 500,
         },
       });
-      expect(JSON.stringify(budgeted.structuredContent).length).toBeLessThanOrEqual(500);
+      expect(JSON.stringify(budgeted.structuredContent).length).toBeLessThanOrEqual(12_000);
       expect(budgeted.structuredContent).toMatchObject({
         returned_count: 1,
         has_more: true,
@@ -535,10 +523,8 @@ describe("MCP read plane", () => {
     ]);
     const taskKey = created.items[0]!.key;
 
-    const server = createAyanamiMcpServer(service);
-    const client = new Client({ name: "field-test", version: "1" });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const profiles = await connectProfiledClients(service, "field-test");
+    const { client } = profiles;
     try {
       const exactTask = await client.callTool({
         name: "atm_search",
@@ -606,7 +592,7 @@ describe("MCP read plane", () => {
 
       expect(restored).toBe(description);
     } finally {
-      await Promise.all([client.close(), server.close()]);
+      await profiles.close();
       service.close();
     }
   });
@@ -635,7 +621,7 @@ describe("MCP read plane", () => {
       importance: "HIGH",
       scope: "PROJECT",
     });
-    for (const index of [1, 2, 3]) {
+    for (let index = 1; index <= 21; index += 1) {
       await service.createRecord(project.code, begun.session, `record-cn-${index}`, {
         kind: "FACT",
         title: `中文检索共同词 ${index}`,
@@ -646,7 +632,7 @@ describe("MCP read plane", () => {
       });
     }
 
-    const server = createAyanamiMcpServer(service);
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
     const client = new Client({ name: "record-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -705,7 +691,6 @@ describe("MCP read plane", () => {
         arguments: {
           project: project.code,
           query: "中文检索共同词",
-          limit: 1,
           field_mask: ["entity_key", "title"],
         },
       });
@@ -715,19 +700,18 @@ describe("MCP read plane", () => {
         next_cursor: string | null;
       };
       expect(chineseFirstBody.exact).toBe(false);
-      expect(chineseFirstBody.hits).toHaveLength(1);
+      expect(chineseFirstBody.hits).toHaveLength(20);
       expect(chineseFirstBody.hits[0]).toEqual({
         entity_key: expect.stringMatching(/^REK-R-/u),
         title: expect.stringContaining("中文检索共同词"),
       });
-      expect(chineseFirstBody.next_cursor).toBe("1");
+      expect(chineseFirstBody.next_cursor).toBe("20");
 
       const chineseSecond = await client.callTool({
         name: "atm_search",
         arguments: {
           project: project.code,
           query: "中文检索共同词",
-          limit: 1,
           cursor: chineseFirstBody.next_cursor,
           field_mask: ["entity_key", "title"],
         },
