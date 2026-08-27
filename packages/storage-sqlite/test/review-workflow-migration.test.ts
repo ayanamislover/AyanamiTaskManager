@@ -17,6 +17,7 @@ describe("v10 Review workflow migration", () => {
     const migrationsRoot = join(root, "migrations");
     cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
     rmSync(join(migrationsRoot, "project", "0010_review_workflow.sql"));
+    rmSync(join(migrationsRoot, "project", "0011_session_close_reason.sql"));
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({

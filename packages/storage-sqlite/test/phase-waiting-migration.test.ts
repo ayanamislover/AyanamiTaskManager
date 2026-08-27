@@ -22,6 +22,7 @@ describe("v8 工作阶段与等待对象迁移", () => {
     rmSync(join(migrationsRoot, "project", "0008_work_item_phase_waiting.sql"));
     rmSync(join(migrationsRoot, "project", "0009_structured_cancel.sql"));
     rmSync(join(migrationsRoot, "project", "0010_review_workflow.sql"));
+    rmSync(join(migrationsRoot, "project", "0011_session_close_reason.sql"));
 
     let manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
     const project = await manager.createProject({

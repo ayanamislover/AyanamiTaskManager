@@ -31,7 +31,11 @@ function mutationAck<T extends Record<string, unknown>>(
     ...result,
     opId,
     ...(resolution.disposition === "REBOUND"
-      ? { sessionRebound: true, session: resolution.actor.sessionId }
+      ? {
+          sessionRebound: true,
+          session: resolution.actor.sessionId,
+          newSession: resolution.actor.sessionId,
+        }
       : {}),
   };
 }
@@ -752,10 +756,15 @@ export class AyanamiTaskService {
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(sessionId, opId, "work.create.batch", items);
-    const result = repository.createWorkItems(resolution.actor, opId, items);
+    const execution = repository.executeSessionMutation(
+      sessionId,
+      opId,
+      "work.create.batch",
+      items,
+      (actor) => repository.createWorkItems(actor, opId, items),
+    );
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async createWorkItemsAsUser(
@@ -776,15 +785,18 @@ export class AyanamiTaskService {
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "work.patch.batch",
       patches,
+      (actor) => repository.patchWorkItems(actor, opId, patches),
     );
-    const result = repository.patchWorkItems(resolution.actor, opId, patches);
     if (patches.some((patch) => ["verify", "complete"].includes(String(patch.operation)))) {
-      await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
+      await this.#refreshSessionGitContext(
+        projectCode,
+        String(execution.resolution.actor.sessionId),
+      );
     }
     await this.#flush(projectCode);
     const starts = patches
@@ -795,7 +807,7 @@ export class AyanamiTaskService {
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async patchWorkItemsAsUser(
@@ -824,17 +836,17 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "work.verify-and-complete",
       input,
+      (actor) => repository.verifyAndComplete(actor, opId, input),
     );
-    const result = repository.verifyAndComplete(resolution.actor, opId, input);
-    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
+    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
     await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async verifyAndCompleteAsUser(
@@ -933,15 +945,15 @@ export class AyanamiTaskService {
       ...input,
       expectedCandidateHashes: normalizeReviewCandidateHashes(input.expectedCandidateHashes),
     };
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "review.request.create",
       normalizedInput,
+      (actor) => repository.createReviewRequest(actor, opId, normalizedInput),
     );
-    const result = repository.createReviewRequest(resolution.actor, opId, normalizedInput);
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async getReviewRequest(projectCode: string, requestKey: string) {
@@ -959,15 +971,15 @@ export class AyanamiTaskService {
       ...input,
       reviewedHashes: normalizeReviewCandidateHashes(input.reviewedHashes),
     };
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "review.submit",
       normalizedInput,
+      (actor) => repository.submitReview(actor, opId, normalizedInput),
     );
-    const result = repository.submitReview(resolution.actor, opId, normalizedInput);
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async updateChecklist(
@@ -977,10 +989,15 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(sessionId, opId, "checklist.update", input);
-    const result = repository.updateChecklist(resolution.actor, opId, input);
+    const execution = repository.executeSessionMutation(
+      sessionId,
+      opId,
+      "checklist.update",
+      input,
+      (actor) => repository.updateChecklist(actor, opId, input),
+    );
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async updateChecklistAsUser(
@@ -1001,15 +1018,15 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "checklist.update.batch",
       input,
+      (actor) => repository.updateChecklistBatch(actor, opId, input),
     );
-    const result = repository.updateChecklistBatch(resolution.actor, opId, input);
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async updateChecklistBatchAsUser(
@@ -1030,11 +1047,16 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["addProgress"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(sessionId, opId, "work.progress", input);
-    const result = repository.addProgress(resolution.actor, opId, input);
-    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
+    const execution = repository.executeSessionMutation(
+      sessionId,
+      opId,
+      "work.progress",
+      input,
+      (actor) => repository.addProgress(actor, opId, input),
+    );
+    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async addProjectProgress(
@@ -1064,14 +1086,14 @@ export class AyanamiTaskService {
       risks: input.blocker ? [input.blocker] : [],
       next: input.next ?? [],
     };
-    const resolution = repository.resolveMutationActor(
+    const execution = repository.executeSessionMutation(
       sessionId,
       opId,
       "project-update.publish",
       update,
+      (actor) => repository.publishProjectUpdate(actor, opId, update),
     );
-    const result = repository.publishProjectUpdate(resolution.actor, opId, update);
-    await this.#refreshSessionGitContext(projectCode, String(resolution.actor.sessionId));
+    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
     await this.#flush(projectCode);
     const openWorkItems = repository
       .listWorkItems({ limit: 500 })
@@ -1079,7 +1101,7 @@ export class AyanamiTaskService {
       .slice(0, 20)
       .map((item) => item.key);
     return {
-      ...mutationAck(result, opId, resolution),
+      ...mutationAck(execution.result, opId, execution.resolution),
       unlinked:
         completed.length > 0 &&
         completed.some((entry) => typeof entry === "string" || !entry.workItemKey),
@@ -1094,10 +1116,15 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["createRecord"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(sessionId, opId, "record.create", input);
-    const result = repository.createRecord(resolution.actor, opId, input);
+    const execution = repository.executeSessionMutation(
+      sessionId,
+      opId,
+      "record.create",
+      input,
+      (actor) => repository.createRecord(actor, opId, input),
+    );
     await this.#flush(projectCode);
-    return mutationAck(result, opId, resolution);
+    return mutationAck(execution.result, opId, execution.resolution);
   }
 
   async createRecordAsUser(
