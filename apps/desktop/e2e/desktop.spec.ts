@@ -346,6 +346,7 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
   ).toBe(true);
   await page.evaluate(() => (window as any).__runMcpBridgeTimers());
   await expect.poll(() => page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(2);
+  await expect(region.getByRole("button", { name: "刷新观测" })).toBeEnabled();
   await region.getByRole("button", { name: "折叠 MCP bridge 观测" }).click();
   await page.evaluate(() => (window as any).__runMcpBridgeTimers());
   await page.waitForTimeout(20);
@@ -921,7 +922,8 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   });
 });
 
-test("项目视图、全局搜索和保存视图走真实 API", async ({ page }) => {
+test("项目视图、全局搜索和保存视图走真实 API", async ({ page }, testInfo) => {
+  const savedViewName = `E2E 可开始 ${testInfo.repeatEachIndex}-${Date.now().toString(36)}`;
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/#project:E2E");
   await page.getByRole("button", { name: "看板" }).click();
@@ -1001,13 +1003,14 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page })
   await expect(progressSourceFilter).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(progressSourceSelect).toHaveAttribute("data-open-input", "keyboard");
+  await expect(page.getByRole("option", { selected: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(progressSourceFilter).toBeFocused();
 
-  page.once("dialog", (dialog) => dialog.accept("E2E 可开始"));
+  page.once("dialog", (dialog) => dialog.accept(savedViewName));
   await page.getByRole("button", { name: "保存当前" }).click();
   await page.getByRole("combobox", { name: "保存视图" }).click();
-  await expect(page.getByRole("option", { name: "E2E 可开始" })).toHaveCount(1);
+  await expect(page.getByRole("option", { name: savedViewName })).toHaveCount(1);
   await page.keyboard.press("Escape");
 
   await page.keyboard.press("Control+k");
