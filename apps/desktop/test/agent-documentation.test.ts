@@ -61,6 +61,26 @@ describe("Agent 文档正式数据根分发", () => {
     expect(guide).toContain("拆成多个可独立完成和验收的子 WorkItem");
   });
 
+  it("随包 Guide 与 surface v3、双 Profile 和真实发现文件保持一致", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-agent-contract-"));
+    temporary.push(root);
+    const dataDir = join(root, "data");
+
+    installAgentDocumentation(process.cwd(), dataDir);
+    const guide = readFileSync(join(dataDir, "ATM_AGENT_GUIDE.md"), "utf8");
+    const integration = readFileSync(join(dataDir, "docs", "agent-integration.md"), "utf8");
+
+    expect(guide).toContain("MCP Surface `v3`");
+    expect(guide).toContain("`endpoint`、`token`、`pid`");
+    expect(guide).toContain("ayanami-task-manager-core");
+    expect(guide).toContain("ayanami-task-manager-memory");
+    expect(guide).toContain('operation="checklist_batch"');
+    expect(guide).not.toContain("`atm_checklist`");
+    expect(integration).toContain("MCP 工具面当前为 v3");
+    expect(integration).toContain("两个默认同时登记、工具名不重叠的静态 Profile");
+    expect(integration).not.toContain("`atm_checklist`");
+  });
+
   it("把 atm-plan 与 atm-task Skills 发布到设备无关数据根", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-agent-skills-"));
     temporary.push(root);

@@ -1,6 +1,6 @@
 # ATM Agent 快速入门
 
-> MCP 工具面版本：`2`。`atm_begin` 的 `surface_version` 可用于检测客户端缓存或文档是否过期。
+> 契约锚点：MCP Surface `v3`，2026-08-27 校验。`atm_begin.surface_version` 可用于检测客户端缓存或文档是否过期。
 
 ## ATM 是什么
 
@@ -8,7 +8,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## ATM 服务如何发现
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`，并读取同目录 `local.token` 鉴权。服务只监听 `127.0.0.1`；不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。`output/` 下的数据只用于测试。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid` 和启动时间。服务只监听 `127.0.0.1`；不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。`output/` 下的数据只用于测试。
 
 ## ATM 未运行怎么办
 
@@ -19,6 +19,8 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 在 ATM 的“设置 → Agent 接入”选择“安装 Codex 配置”，ATM 会备份并最小合并 `%USERPROFILE%\.codex\config.toml`。配置变化后让 Codex 重新加载 MCP。项目规则应包含：
 
 > 执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
+
+ATM 默认登记 `ayanami-task-manager-core` 与 `ayanami-task-manager-memory` 两个静态 Profile。两者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭 memory 是主动的低内存降级：会失去任务修改、进度、Record、搜索和 delta，且修改后需要重载 Agent 客户端。
 
 ## Claude Desktop 怎么接入
 
@@ -31,25 +33,29 @@ Claude Code 与 Claude Desktop 是两条不同的路径：它**从不读** `clau
 在“设置 → Agent 接入”选择“安装 Claude Code 配置”。ATM 不会自己改写 `~/.claude.json`——该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会吞掉对方的更新；安装一律通过调用 `claude` CLI 完成，找不到 CLI 时明确报错而不是退化成直接改文件。等价的手工命令：
 
 ```powershell
-claude mcp add-json ayanami-task-manager '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
+claude mcp add-json ayanami-task-manager-core '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","core"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
+claude mcp add-json ayanami-task-manager-memory '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","memory"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
 ```
 
 用 stdio 而不是 streamable-http：后者要把 endpoint 和 token 写进配置，而两者每次 daemon 重启都会变，配置随即失效。
 
 ## atm\_\* 工具地图
 
-| 目的                             | 工具                                               |
-| -------------------------------- | -------------------------------------------------- |
-| 开始、恢复 working set、结束     | `atm_begin`、`atm_brief`、`atm_end`                |
-| 查找与创建任务                   | `atm_task_list`、`atm_task_get`、`atm_task_create` |
-| 领取、启动、阻塞、验证、完成任务 | `atm_task_patch`                                   |
-| 给检查项打勾并挂证据             | `atm_checklist`                                    |
-| 写阶段进度与关键证据             | `atm_progress_add`、`atm_record`                   |
-| 搜索历史与增量同步               | `atm_search`、`atm_delta`                          |
+| Profile | 目的                           | 工具                                               |
+| ------- | ------------------------------ | -------------------------------------------------- |
+| core    | 开始、恢复 working set、结束   | `atm_begin`、`atm_brief`、`atm_end`                |
+| core    | 查找与创建任务                 | `atm_task_list`、`atm_task_get`、`atm_task_create` |
+| memory  | 领取、启动、检查项、验证、完成 | `atm_task_patch`                                   |
+| memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`                   |
+| memory  | 精确读取、搜索历史与增量同步   | `atm_search`、`atm_delta`                          |
+
+两个 Profile 联合为 11 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
 
 所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
 
 MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCase`。不要把两套命名混用。
+
+精确读取优先复用 `atm_search`：WorkItem/Record 直接传公开 key，Progress/Session 使用 `progress:<ULID>`、`session:<ULID>`，写回执可用 `op_id` 并按 `session` 收窄。长字段按响应给出的 cursor 续读；后续请求必须保持相同项目、实体和 `field_mask`，篡改、跨实体复用或内容变化会被拒绝。
 
 ## 最短工作流
 
@@ -58,7 +64,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
 5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`。
-6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`。
+6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`；满足条件时也可用 `verify_and_complete` 原子完成。
 7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
@@ -67,11 +73,11 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 ### 完成闸门
 
-`complete` 依次检查：检查项 → 证据 → 子任务 → 阻塞 → 依赖 → 验收，任何一道不过都抛 `COMPLETION_GATE_FAILED: <原因>`。逐条的出路：
+`complete` 会同时检查：检查项、证据、子任务、阻塞、依赖、验收和当前状态。不通过时会在一个 `COMPLETION_GATE_FAILED` 响应中返回全部已知缺口；先一次性处理返回的所有 reasons，不要只修第一条后循环重试。各类缺口的出路：
 
 | 报错                                     | 含义与出路                                                                                                                                                                                                                                                                             |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `checklist incomplete`                   | 还有检查项停在 TODO/DOING。用 `atm_checklist` 逐条置 `DONE` 或 `SKIPPED`。`id` 与 `expected_version` 取自 `atm_task_get(view="context")`——`core` 视图不返回 `checklist`；`expected_version` 是**检查项自己**的版本、新建为 `0`，不是任务的版本。                                       |
+| `checklist incomplete`                   | 还有检查项停在 TODO/DOING。用 `atm_task_patch(operation="checklist_single")` 逐条置 `DONE` 或 `SKIPPED`；多项可用 `checklist_batch`。单项的 `expected_version` 是**检查项自己**的版本；批量只收任务的一个起始版本并整批回滚。                                                          |
 | `evidence required` / `evidence missing` | 该检查项标了「需要证据」。要么带 `evidence` 挂上真证据，要么置 `SKIPPED`——跳过的必证项不再要求证据。不要为了打勾而编证据。                                                                                                                                                             |
 | `child incomplete`                       | 还有子 WorkItem 不在 DONE/CANCELLED。                                                                                                                                                                                                                                                  |
 | `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。 |
