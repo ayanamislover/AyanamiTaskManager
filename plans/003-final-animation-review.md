@@ -1,5 +1,8 @@
 # 最终动效严格复核
 
+> 2026-08-27 reconcile：原结论绑定早期窗口修复批次。1.0.16 终审发现三处遗漏，
+> 由 004–006 计划收口；在这些计划完成并重新实测前，本文件的 PASS 暂停生效。
+
 ## Before / After / Why
 
 | Area                | Before                                                   | After                                                                                                              | Why                                      |
@@ -25,4 +28,6 @@
 
 ## Verdict
 
-**PASS**。动效只服务空间连续性、操作反馈与性能，不改变信息架构或高频路径速度；没有 review-animations 标准中的阻断项。
+**CHANGES REQUIRED**。既有空间与材质方向保持不变，但 reduced-motion 漏项、键盘打开
+下拉仍播放入场、Notice 旧计时器可能提前清除新消息必须先按 004–006 修复。抽屉/Notice
+立即安全关闭、不引入 exit presence 是 002 中已记录的有意复杂度取舍，不重新扩 scope。
