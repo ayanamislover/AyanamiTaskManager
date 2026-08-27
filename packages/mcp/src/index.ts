@@ -2225,7 +2225,7 @@ export function createAyanamiMcpServer(
 ): McpServer {
   const profile = options.profile ?? "core";
   const server = new McpServer(
-    { name: "ayanami-task-manager", version: "1.0.16" },
+    { name: "ayanami-task-manager", version: "1.0.17" },
     {
       instructions:
         profile === "core"

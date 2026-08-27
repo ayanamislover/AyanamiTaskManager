@@ -61,7 +61,7 @@ describe("Streamable HTTP MCP", () => {
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
-      result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.16" } },
+      result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.17" } },
     });
   });
 
