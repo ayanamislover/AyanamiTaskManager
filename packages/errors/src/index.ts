@@ -152,8 +152,30 @@ export type CompletionGateReason =
       readonly legal_operations: readonly string[];
     };
 
+export type CompletionGatePredicateName =
+  | "checklist"
+  | "evidence"
+  | "children"
+  | "blockers"
+  | "dependencies"
+  | "verification"
+  | "current_state";
+
+export type CompletionGateTruncation = {
+  readonly predicate: CompletionGatePredicateName;
+  readonly total: number;
+  readonly included: number;
+  readonly omitted: number;
+};
+
 export type CompletionGateFailedDetails = {
   readonly reasons: readonly CompletionGateReason[];
+  /** True when at least one predicate had more matching entities than could be returned safely. */
+  readonly truncated?: boolean;
+  /** Per-predicate cap applied by the completion runner. */
+  readonly reason_limit_per_predicate?: number;
+  /** Exact omitted counts, kept separate from reasons so consumers never infer truncation from text. */
+  readonly truncation?: readonly CompletionGateTruncation[];
 };
 
 export type InvalidTransitionDetails = {

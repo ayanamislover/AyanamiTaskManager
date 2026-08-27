@@ -7,7 +7,6 @@ import {
   createUlid,
   EvidenceInputSchema,
   EvidenceReferenceSchema,
-  legalWorkItemOperations,
   normalizeReviewCandidateHashes,
   nowIso,
   RecordSummarySchema,
@@ -24,6 +23,7 @@ import {
   type TaskViewName,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
+import { assertCompletionGates } from "./completion-gates.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
@@ -2257,7 +2257,7 @@ export class ProjectRepository {
           });
         }
         resolveStoredWorkItemOperation("complete", reviewTask);
-        this.assertCompletionGate(reviewTask);
+        assertCompletionGates(this.#sqlite, reviewTask);
 
         const now = nowIso();
         const requestKey = this.reviewRequestKey(Number(request.local_no));
@@ -3306,7 +3306,7 @@ export class ProjectRepository {
             );
             eventType = "work.verification_requested";
           } else if (patch.operation === "complete") {
-            this.assertCompletionGate(row);
+            assertCompletionGates(this.#sqlite, row);
             targetPhase = "DONE";
             updates.push(
               "status = 'DONE'",
@@ -3553,7 +3553,7 @@ export class ProjectRepository {
         }
 
         resolveStoredWorkItemOperation("complete", verifying);
-        this.assertCompletionGate(verifying);
+        assertCompletionGates(this.#sqlite, verifying);
         this.#sqlite
           .prepare(
             `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
@@ -3868,90 +3868,6 @@ export class ProjectRepository {
       .run(progress.value, progress.source, nowIso(), id);
     if (row.parent_id) this.recomputeWorkItem(row.parent_id);
     return progress.value;
-  }
-
-  private assertCompletionGate(row: any): void {
-    const failures: Array<
-      | { code: "CHECKLIST_INCOMPLETE"; checklist_id?: string }
-      | { code: "EVIDENCE_MISSING"; checklist_id?: string }
-      | { code: "CHILD_INCOMPLETE"; work_item_id?: string }
-      | { code: "BLOCKER_ACTIVE"; blocker_id?: string }
-      | { code: "DEPENDENCY_INCOMPLETE"; work_item_id?: string }
-      | { code: "VERIFICATION_REQUIRED" }
-      | { code: "CURRENT_STATE_INVALID"; current_status: string; legal_operations: string[] }
-    > = [];
-    const checklistFailure = this.#sqlite
-      .prepare(
-        `SELECT id FROM checklist_items WHERE work_item_id = ? AND kind <> 'OPTIONAL'
-         AND status NOT IN ('DONE','SKIPPED') LIMIT 1`,
-      )
-      .get(row.id);
-    if (checklistFailure)
-      failures.push({
-        code: "CHECKLIST_INCOMPLETE",
-        checklist_id: String((checklistFailure as { id: unknown }).id),
-      });
-    const evidenceFailure = this.#sqlite
-      .prepare(
-        `SELECT id FROM checklist_items WHERE work_item_id = ? AND evidence_required = 1
-         AND status <> 'SKIPPED' AND (status <> 'DONE' OR evidence_json = '[]') LIMIT 1`,
-      )
-      .get(row.id);
-    if (evidenceFailure)
-      failures.push({
-        code: "EVIDENCE_MISSING",
-        checklist_id: String((evidenceFailure as { id: unknown }).id),
-      });
-    const childFailure = this.#sqlite
-      .prepare(
-        `SELECT id FROM work_items WHERE parent_id = ? AND archived_at IS NULL
-         AND status NOT IN ('DONE','CANCELLED') LIMIT 1`,
-      )
-      .get(row.id);
-    if (childFailure)
-      failures.push({
-        code: "CHILD_INCOMPLETE",
-        work_item_id: String((childFailure as { id: unknown }).id),
-      });
-    const blocker = this.#sqlite
-      .prepare("SELECT id FROM blockers WHERE work_item_id = ? AND status = 'ACTIVE' LIMIT 1")
-      .get(row.id);
-    if (blocker)
-      failures.push({
-        code: "BLOCKER_ACTIVE",
-        blocker_id: String((blocker as { id: unknown }).id),
-      });
-    const dependency = this.#sqlite
-      .prepare(
-        `SELECT source.id FROM work_item_relations relation
-         JOIN work_items source ON source.id = relation.source_id
-         WHERE relation.target_id = ? AND relation.relation_type = 'BLOCKS'
-           AND source.status <> 'DONE' LIMIT 1`,
-      )
-      .get(row.id);
-    if (dependency)
-      failures.push({
-        code: "DEPENDENCY_INCOMPLETE",
-        work_item_id: String((dependency as { id: unknown }).id),
-      });
-    if (Number(row.verification_required) === 1 && row.status !== "VERIFYING") {
-      failures.push({ code: "VERIFICATION_REQUIRED" });
-    }
-    if (!(row.status === "DONE" || row.status === "IN_PROGRESS" || row.status === "VERIFYING")) {
-      const legal = legalWorkItemOperations(row.status as WorkItemStatus, storedWorkItemPhase(row))
-        .map((entry) => `${entry.operation} -> ${entry.target}`)
-        .join(", ");
-      failures.push({
-        code: "CURRENT_STATE_INVALID",
-        current_status: String(row.status),
-        legal_operations: legal ? legal.split(", ") : [],
-      });
-    }
-    if (failures.length > 0)
-      throw new AtmError("COMPLETION_GATE_FAILED", {
-        message: "WorkItem 尚未满足完成条件",
-        details: { reasons: failures },
-      });
   }
 
   private upsertSearchDocument(

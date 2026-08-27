@@ -1,4 +1,5 @@
 export * from "./database.js";
+export * from "./completion-gates.js";
 export * from "./event-presentation.js";
 export * from "./manager.js";
 export * from "./migration-runner.js";

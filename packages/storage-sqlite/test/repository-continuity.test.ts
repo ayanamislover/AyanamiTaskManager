@@ -473,7 +473,7 @@ describe("工作项原子基础与完成诊断", () => {
     }
   });
 
-  it("完成门禁一次聚合全部缺口并保留旧错误前缀", async () => {
+  it("完成门禁按固定类别顺序一次返回每类全部缺口", async () => {
     const { manager, repository, actor } = await fixture("GATES");
     try {
       const objective = repository.createObjective(actor, {
@@ -483,9 +483,17 @@ describe("工作项原子基础与完成诊断", () => {
       });
       const created = repository.createWorkItems(actor, "gate-items", [
         {
-          clientRef: "dependency",
+          clientRef: "dependency-a",
           objectiveId: objective.id,
-          title: "未完成依赖",
+          title: "未完成依赖 A",
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY",
+        },
+        {
+          clientRef: "dependency-b",
+          objectiveId: objective.id,
+          title: "未完成依赖 B",
           type: "TASK",
           priority: "NORMAL",
           status: "READY",
@@ -497,15 +505,27 @@ describe("工作项原子基础与完成诊断", () => {
           type: "TASK",
           priority: "HIGH",
           status: "CLAIMED",
-          dependsOnRefs: ["dependency"],
+          dependsOnRefs: ["dependency-a", "dependency-b"],
           verificationRequired: true,
-          checklist: [{ title: "必需证据", evidenceRequired: true }],
+          checklist: [
+            { title: "必需证据 A", evidenceRequired: true },
+            { title: "必需证据 B", evidenceRequired: true },
+          ],
         },
         {
-          clientRef: "child",
+          clientRef: "child-a",
           objectiveId: objective.id,
           parentRef: "parent",
-          title: "未完成子任务",
+          title: "未完成子任务 A",
+          type: "SUBTASK",
+          priority: "NORMAL",
+          status: "READY",
+        },
+        {
+          clientRef: "child-b",
+          objectiveId: objective.id,
+          parentRef: "parent",
+          title: "未完成子任务 B",
           type: "SUBTASK",
           priority: "NORMAL",
           status: "READY",
@@ -514,30 +534,128 @@ describe("工作项原子基础与完成诊断", () => {
       const parent = created.items.find((item) => item.title === "父任务")!;
       repository.addProgress(actor, "gate-blocker", {
         taskKey: parent.key,
-        summary: "发现阻塞",
-        blocker: "外部条件未满足",
+        summary: "发现阻塞 A",
+        blocker: "外部条件 A 未满足",
+      });
+      repository.addProgress(actor, "gate-blocker-b", {
+        taskKey: parent.key,
+        summary: "发现阻塞 B",
+        blocker: "外部条件 B 未满足",
       });
       const current = repository.getWorkItem(parent.key);
-      expect(
-        captureAtmError(() =>
-          repository.patchWorkItems(actor, "gate-complete", [
-            { taskKey: parent.key, expectedVersion: current.version, operation: "complete" },
-          ]),
-        ),
-      ).toMatchObject({
+      const first = captureAtmError(() =>
+        repository.patchWorkItems(actor, "gate-complete", [
+          { taskKey: parent.key, expectedVersion: current.version, operation: "complete" },
+        ]),
+      );
+      const second = captureAtmError(() =>
+        repository.patchWorkItems(actor, "gate-complete-repeat", [
+          { taskKey: parent.key, expectedVersion: current.version, operation: "complete" },
+        ]),
+      );
+      expect(first).toMatchObject({
         code: "COMPLETION_GATE_FAILED",
         details: {
-          reasons: expect.arrayContaining([
-            expect.objectContaining({ code: "CHECKLIST_INCOMPLETE" }),
-            expect.objectContaining({ code: "EVIDENCE_MISSING" }),
-            expect.objectContaining({ code: "CHILD_INCOMPLETE" }),
-            expect.objectContaining({ code: "BLOCKER_ACTIVE" }),
-            expect.objectContaining({ code: "DEPENDENCY_INCOMPLETE" }),
-            expect.objectContaining({ code: "VERIFICATION_REQUIRED" }),
-            expect.objectContaining({ code: "CURRENT_STATE_INVALID" }),
-          ]),
+          reasons: expect.any(Array),
+          truncated: false,
+          truncation: [],
         },
       });
+      expect(second.details).toEqual(first.details);
+      const reasons = first.details?.reasons ?? [];
+      expect(reasons.map((reason) => reason.code)).toEqual([
+        "CHECKLIST_INCOMPLETE",
+        "CHECKLIST_INCOMPLETE",
+        "EVIDENCE_MISSING",
+        "EVIDENCE_MISSING",
+        "CHILD_INCOMPLETE",
+        "CHILD_INCOMPLETE",
+        "BLOCKER_ACTIVE",
+        "BLOCKER_ACTIVE",
+        "DEPENDENCY_INCOMPLETE",
+        "DEPENDENCY_INCOMPLETE",
+        "VERIFICATION_REQUIRED",
+        "CURRENT_STATE_INVALID",
+      ]);
+      expect(
+        reasons
+          .filter((reason) => reason.code === "CHECKLIST_INCOMPLETE")
+          .map((reason) => reason.checklist_id),
+      ).toEqual(current.checklist.map((item) => item.id).sort());
+      expect(
+        reasons
+          .filter((reason) => reason.code === "CHILD_INCOMPLETE")
+          .map((reason) => reason.work_item_id),
+      ).toEqual(created.items.filter((item) => item.parentId === parent.id).map((item) => item.id));
+      expect(
+        reasons
+          .filter((reason) => reason.code === "DEPENDENCY_INCOMPLETE")
+          .map((reason) => reason.work_item_id),
+      ).toEqual(
+        created.items.filter((item) => item.title.startsWith("未完成依赖")).map((item) => item.id),
+      );
+      expect(
+        new Set(
+          reasons
+            .filter((reason) => reason.code === "BLOCKER_ACTIVE")
+            .map((reason) => reason.blocker_id),
+        ).size,
+      ).toBe(2);
+    } finally {
+      manager.close();
+    }
+  });
+
+  it("完成门禁对超量实体显式返回精确截断元数据", async () => {
+    const { manager, repository, actor } = await fixture("GATELIMIT");
+    try {
+      const objective = repository.createObjective(actor, {
+        title: "有界门禁",
+        description: "",
+        definitionOfDone: [],
+      });
+      const checklist = Array.from({ length: 55 }, (_, index) => ({
+        title: `验收项 ${String(index + 1).padStart(2, "0")}`,
+      }));
+      const created = repository.createWorkItems(actor, "gate-limit-item", [
+        {
+          clientRef: "bounded-parent",
+          objectiveId: objective.id,
+          title: "有界完成门",
+          type: "TASK",
+          priority: "HIGH",
+          status: "IN_PROGRESS",
+          checklist,
+        },
+      ]).items[0]!;
+      const current = repository.getWorkItem(created.key);
+      const error = captureAtmError(() =>
+        repository.patchWorkItems(actor, "gate-limit-complete", [
+          { taskKey: created.key, expectedVersion: current.version, operation: "complete" },
+        ]),
+      );
+
+      expect(error).toMatchObject({
+        code: "COMPLETION_GATE_FAILED",
+        details: {
+          reason_limit_per_predicate: 50,
+          truncated: true,
+          truncation: [{ predicate: "checklist", total: 55, included: 50, omitted: 5 }],
+        },
+      });
+      const reasons = error.details?.reasons ?? [];
+      expect(reasons).toHaveLength(50);
+      expect(reasons.every((reason) => reason.code === "CHECKLIST_INCOMPLETE")).toBe(true);
+      expect(
+        reasons.map((reason) =>
+          reason.code === "CHECKLIST_INCOMPLETE" ? reason.checklist_id : undefined,
+        ),
+      ).toEqual(
+        current.checklist
+          .map((item) => item.id)
+          .sort()
+          .slice(0, 50),
+      );
     } finally {
       manager.close();
     }
