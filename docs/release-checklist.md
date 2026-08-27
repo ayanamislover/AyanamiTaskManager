@@ -130,24 +130,25 @@ release/
 
 ## 1.0.17 验收结果
 
-最终候选绑定 Git `c5cb78d441677d31b56f9ba7187b610936b72e20`，release manifest 证明
-`dirty=false`，source hash 为 `6096D8A7701E0FE99A18736AA04322B96F113EE21C9B87F188693FF264F460F3`，
+最终候选绑定 Git `57438e27471d30f91dad0421acdaf4816980215f`，release manifest 证明
+`dirty=false`，source hash 为 `C545EF326AB9C9EC66C7BF1DF28AE6F01FF8DC56EEB00E7823B76B67796EE703`，
 lockfile hash 为 `EDAB7E986CDA4570FB5B3CC80401E88C978172CE49500416C6AD2F69CE7CED5F`。
 
-- Windows 8.3/长路径契约修复后，lint、format、typecheck、133 个测试文件 / 445 项测试、
-  build、forge make 与 packaged smoke 均重新执行；仅测试断言变化未触及生产输入，故
-  Playwright 14/14、benchmark 与 distribution 19/19 按阶段指纹复用紧邻候选的通过证据。
+- Windows 路径身份、status/phase 双写守卫、reconciliation 散文 token 与 settings 驼峰键
+  契约修复后，lint、format、typecheck、134 个测试文件 / 451 项测试、benchmark、build、
+  forge make 与 packaged smoke 均重新执行；Playwright 14/14 与 distribution 19/19 的输入
+  指纹未变，按阶段指纹复用紧邻候选的通过证据。
   portable/installed 各 33/33，安装后六个客户端 Profile 与真实窗口 smoke 另行重跑通过。
-- benchmark：冷启动 680.296 ms；100 项目总览 p95 1.039 ms；10,000 任务筛选 p95
-  9.935 ms；写入+事件 p95 27.154 ms；增量读取 p95 9.134 ms；50,000 中文搜索 p95
-  0.199 ms；服务 RSS 124.93 MB。
+- benchmark：冷启动 606.058 ms；100 项目总览 p95 1.041 ms；10,000 任务筛选 p95
+  9.975 ms；写入+事件 p95 90.717 ms；增量读取 p95 9.3 ms；50,000 中文搜索 p95
+  0.218 ms；服务 RSS 122.91 MB。
 - 已安装稳定入口 `%LOCALAPPDATA%\AyanamiTaskManager\current\AyanamiTaskManager.exe`
   自报 1.0.17，`system/status ok=true`，14 个项目库全部通过健康检查。
 - Codex、Claude Desktop、Claude Code 的 core 6 + memory 5 六个 Profile 均从稳定入口
   完成握手，工具面不重叠且共享同一安装版 daemon 状态。
 - 安装版窗口实测确认 frameless 拖动与控制按钮、抽屉安全区、关闭到托盘、后台启动、二次
   实例恢复；HKCU Run 使用稳定入口与 `--background --random-startup-delay`。
-- Setup SHA-256：`29AF7F3AA94335399EDBB14EECEC8AFB57090EA18BA39EA0EBAE0421E2AEDEF2`。
-- portable SHA-256：`FAACBD997B3E1934012CCB63194EEEDCF11DA85EA0D05335F3A8C06461789F9B`。
-- `release.json` SHA-256：`CA45F3BEA8D2385A1484E4B7945E41EB5C4B876782467626D37988F5CF543904`；
-  SBOM SHA-256：`9A74E8B961FCB9B812D815B89343AC22735EDD14A7744BB7626671277449DDAF`。
+- Setup SHA-256：`E9E002F1A9066B380028D9226DA2D3DC9638A94435133134816910C8E0A46CE3`。
+- portable SHA-256：`B7E99DABE43CC11DE54A08578399D3B741E0F7292DE528499CAA2B67E7229B8A`。
+- `release.json` SHA-256：`40B863C7B944C602F54D88784C48A28E33E8CB643B0D12B47EECFACF3E35C63A`；
+  SBOM SHA-256：`71AA2771E08A2C5D7C92935155CD18BFB704089A17A18CDB48746D7E884FB589`。
