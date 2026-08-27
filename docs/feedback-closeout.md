@@ -26,7 +26,7 @@
 | P2-5 | DONE | list/detail 对 checklist、progress、phase 与 waiting 投影一致；提交 `1ccc39a`、`a1f14d0`、`e7bcc5a`，回归 read-plane 与 phase/waiting 测试。                                                          |
 | P2-6 | DONE | MCP `snake_case`、REST `camelCase` 的转换边界已写入 Guide 与集成文档；提交 `7a9b631`、`02426ff`。                                                                                                     |
 | P2-7 | DONE | REST Zod 入参错误为 400 `INVALID_ARGUMENT`，真正内部故障仍为 500；提交 `ef8ccfa`、`2f12284`，回归 `apps/daemon/test/error-status-mapping.test.ts`。                                                   |
-| A-1  | DONE | project/task/session/milestone 动态标识返回有界安全候选，未授权请求不泄漏且写失败零副作用；ATM-T-0102、ATM-T-0127，回归 daemon NOT_FOUND candidates 与 MCP surface 测试。                             |
+| A-1  | DONE | project/task/session/milestone 动态标识返回有界安全候选，未授权请求不泄漏且写失败零副作用；提交 `ef8ccfa`、`4d3e6eb`，ATM-T-0102/0127，回归 daemon NOT_FOUND candidates 与 MCP surface 测试。         |
 | A-2  | DONE | 已提交 op 可在关闭 Session 后回放；仅启动恢复原因可原子创建唯一 successor，显式关闭不复活；提交 `8d2fbbd`、`3c1ba92`、`a809c39`，回归 `session-rotation`、`startup-successor`。                       |
 | A-3  | DONE | MCP Surface `v3`、schema hash 与生成日期在 initialize、begin 和 Guide 对齐；提交 `487a6a7`、`cac460c`、`02426ff`，回归 `surface-v3.test.ts`。                                                         |
 | A-4  | DONE | 字段级 `expected_fields` 允许无关字段安全合并，同字段竞争仍冲突；提交 `d0521b6`、`84caec1`，回归 application/MCP workflow composites。                                                                |
