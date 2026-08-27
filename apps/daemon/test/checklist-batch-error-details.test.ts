@@ -50,4 +50,43 @@ describe("checklist batch typed error details", () => {
       await app.close();
     }
   });
+
+  it("keeps the original typed error when diagnostic enrichment fails", async () => {
+    const reasons = [{ checklist_id: "check-1", code: "EVIDENCE_REQUIRED" as const }];
+    const service = {
+      updateChecklistBatch: async () => {
+        throw new ChecklistBatchFailureError(reasons);
+      },
+      enrichError: async () => {
+        throw new Error("injected enrichment failure");
+      },
+    } as unknown as AyanamiTaskService;
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+
+    try {
+      const response = await app.inject({
+        method: "PATCH",
+        url: "/api/v1/projects/ATM/checklist/batch",
+        headers: { authorization: "Bearer local-secret" },
+        payload: {
+          session: "session-1",
+          opId: "enrichment-failure",
+          taskKey: "ATM-T-0001",
+          expectedVersion: 3,
+          items: [{ checklistId: "check-1", status: "DONE" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: "COMPLETION_GATE_FAILED",
+          retryable: false,
+          details: { reasons },
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
 });
