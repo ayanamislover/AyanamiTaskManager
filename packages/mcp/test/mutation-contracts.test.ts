@@ -271,6 +271,7 @@ describe("MCP mutation contracts", () => {
         op_id: "rebound-op",
         session_rebound: true,
         session: "successor-session",
+        new_session: "successor-session",
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -479,6 +480,7 @@ describe("MCP mutation contracts", () => {
         op_id: "batch-checklist-op",
         session_rebound: true,
         session: "successor-session",
+        new_session: "successor-session",
         task_key: "BAT-T-0001",
         task_version: 4,
         progress: 100,
@@ -606,6 +608,7 @@ describe("MCP mutation contracts", () => {
         op_id: "verify-complete-op",
         session_rebound: true,
         session: "workflow-successor",
+        new_session: "workflow-successor",
         project: "WF",
         seq: 18,
         items: [

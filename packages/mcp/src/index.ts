@@ -339,12 +339,20 @@ function result(value: unknown, maxChars = 4000) {
 }
 
 function mutationAck(opId: string, serviceResult: Record<string, unknown>) {
+  const reboundSession =
+    typeof serviceResult.newSession === "string"
+      ? serviceResult.newSession
+      : typeof serviceResult.session === "string"
+        ? serviceResult.session
+        : undefined;
   return {
     op_id: opId,
     ...(serviceResult.sessionRebound === true
       ? {
           session_rebound: true,
-          ...(typeof serviceResult.session === "string" ? { session: serviceResult.session } : {}),
+          ...(reboundSession === undefined
+            ? {}
+            : { session: reboundSession, new_session: reboundSession }),
         }
       : {}),
   };
