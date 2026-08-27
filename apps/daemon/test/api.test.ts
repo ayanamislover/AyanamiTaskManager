@@ -234,17 +234,18 @@ describe("REST 边界", () => {
         headers,
       });
       expect(agents.statusCode).toBe(200);
-      const initial = (agents.json() as Array<Record<string, unknown>>).find(
+      const initial = (agents.json() as { items: Array<Record<string, unknown>> }).items.find(
         (item) => item.id === sessionId,
       );
       expect(initial).toMatchObject({
         cwd,
-        git_available: 1,
-        worktree_root: canonicalCwd,
-        git_dirty: 0,
+        lastSeenAt: expect.any(String),
+        git: { available: true, worktreeRoot: canonicalCwd, dirty: false },
       });
-      expect(initial?.git_head).toMatch(/^[0-9a-f]{40}$/u);
-      expect(typeof initial?.git_branch).toBe("string");
+      expect(initial?.git && (initial.git as Record<string, unknown>).head).toMatch(
+        /^[0-9a-f]{40}$/u,
+      );
+      expect(typeof (initial?.git as Record<string, unknown> | undefined)?.branch).toBe("string");
 
       writeFileSync(join(cwd, "tracked.txt"), "dirty\n", "utf8");
       const refreshed = await app.inject({
@@ -258,9 +259,8 @@ describe("REST 边界", () => {
         session: {
           id: sessionId,
           cwd,
-          git_available: 1,
-          worktree_root: canonicalCwd,
-          git_dirty: 1,
+          lastSeenAt: expect.any(String),
+          git: { available: true, worktreeRoot: canonicalCwd, dirty: true },
         },
       });
     } finally {
@@ -699,7 +699,7 @@ describe("REST 边界", () => {
         url: "/api/v1/projects/USER/agents",
         headers,
       });
-      expect(agents.json()).toEqual([]);
+      expect(agents.json()).toEqual({ items: [], nextCursor: null, hasMore: false });
     } finally {
       await app.close();
       service.close();

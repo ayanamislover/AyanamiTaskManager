@@ -733,14 +733,16 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
 
     const agents = await api.get(`${apiUrl}/projects/E2E/agents`);
     expect(agents.ok()).toBeTruthy();
-    const agentRows = (await agents.json()) as Array<Record<string, any>>;
+    const agentPage = (await agents.json()) as { items: Array<Record<string, any>> };
+    const agentRows = agentPage.items;
     const primaryAgent = agentRows.find((agent) => agent.id === primarySession);
     expect(primaryAgent).toBeTruthy();
-    expect(String(primaryAgent.git_branch || "")).not.toBe("");
-    expect(String(primaryAgent.worktree_root || "")).not.toBe("");
-    expect(String(primaryAgent.git_head || "")).not.toBe("");
-    await expect(primary).toContainText(String(primaryAgent.git_branch));
-    await expect(primary).toContainText(String(primaryAgent.worktree_root).split("\\").pop()!);
+    const primaryGit = primaryAgent.git as Record<string, any>;
+    expect(String(primaryGit.branch || "")).not.toBe("");
+    expect(String(primaryGit.worktreeRoot || "")).not.toBe("");
+    expect(String(primaryGit.head || "")).not.toBe("");
+    await expect(primary).toContainText(String(primaryGit.branch));
+    await expect(primary).toContainText(String(primaryGit.worktreeRoot).split("\\").pop()!);
 
     await primary.getByText(/详细上下文与历史/u).click();
     await expect(primary).toContainText("工作目录");
@@ -780,7 +782,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     await expect(drawer).toBeVisible();
     await expect(drawer.getByRole("heading", { name: "执行 Session" })).toBeVisible();
     await expect(drawer).toContainText(`E2E Git Context primary ${suffix}`);
-    await expect(drawer).toContainText(String(primaryAgent.git_branch));
+    await expect(drawer).toContainText(String(primaryGit.branch));
     await expect(drawer).toContainText("Worktree");
     await expect(drawer).toContainText("HEAD");
     expect(

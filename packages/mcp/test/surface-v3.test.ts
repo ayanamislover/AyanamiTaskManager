@@ -140,7 +140,7 @@ describe("MCP surface v3 parity", () => {
       expect(details).toMatchObject({ entity: "SESSION", did_you_mean: fixture.session });
       expect(details.candidates).toHaveLength(5);
       for (const candidate of details.candidates) {
-        expect(Object.keys(candidate).sort()).toEqual(["connection_state", "id", "work_state"]);
+        expect(Object.keys(candidate).sort()).toEqual(["connectionState", "id", "workState"]);
       }
     } finally {
       await closeFixture(fixture);

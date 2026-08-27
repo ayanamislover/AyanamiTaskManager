@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
+import type { SessionView } from "@ayanami-task/protocol";
 
 export type ReconciliationClassification =
   | "ACTIVE"
@@ -18,14 +19,10 @@ export type ReconciliationTask = {
   updatedAt: string;
 };
 
-export type ReconciliationSession = {
-  id: string;
-  agent_id: string;
-  display_name?: string | null;
-  connection_state: string;
-  last_seen_at?: string | null;
-  ended_at?: string | null;
-};
+export type ReconciliationSession = Pick<
+  SessionView,
+  "id" | "agentId" | "displayName" | "connectionState" | "lastSeenAt" | "closedAt"
+>;
 
 export type ReconciliationItem = {
   taskKey: string;
@@ -67,11 +64,11 @@ function presentSession(session: ReconciliationSession | undefined): Reconciliat
   if (!session) return null;
   return {
     id: session.id,
-    agentId: session.agent_id,
-    displayName: session.display_name || session.agent_id,
-    connectionState: session.connection_state,
-    lastSeenAt: session.last_seen_at ?? null,
-    endedAt: session.ended_at ?? null,
+    agentId: session.agentId,
+    displayName: session.displayName || session.agentId,
+    connectionState: session.connectionState,
+    lastSeenAt: session.lastSeenAt ?? null,
+    endedAt: session.closedAt ?? null,
   };
 }
 
@@ -166,7 +163,7 @@ export function reconcileWorkItems(input: {
       Boolean(task.claimLeaseUntil) &&
       Date.parse(task.claimLeaseUntil!) <= now.getTime();
 
-    if (leaseExpired && session?.connection_state === "ONLINE") {
+    if (leaseExpired && session?.connectionState === "ONLINE") {
       return {
         taskKey: task.key,
         title: task.title,
@@ -179,7 +176,7 @@ export function reconcileWorkItems(input: {
         evidencePaths: [],
       };
     }
-    if (leaseExpired && (!session || session.connection_state === "CLOSED")) {
+    if (leaseExpired && (!session || session.connectionState === "CLOSED")) {
       return {
         taskKey: task.key,
         title: task.title,

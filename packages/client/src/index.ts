@@ -3,6 +3,8 @@ import type {
   RecordPage,
   RecordView,
   SearchPage,
+  SessionPage,
+  SessionView,
   TaskContextView,
   TaskCoreView,
   TaskFullView,
@@ -67,6 +69,7 @@ export type RecordCreateReceipt = {
   relatedRecords: string[];
 };
 export type ProjectRecord = RecordView;
+export type AgentSession = SessionView;
 
 export type TaskViewFor<TView extends TaskViewName> = TView extends "full"
   ? TaskFullView
@@ -281,11 +284,46 @@ export class AyanamiClient {
         `/api/v1/projects/${encodeURIComponent(code)}/ui/milestones`,
         input,
       ),
-    agents: (code: string) =>
-      this.request<Array<Record<string, any>>>(
+    agentPage: (code: string, limit = 100, cursor?: string) =>
+      this.request<SessionPage>(
         "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/agents`,
+        `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit, cursor })}`,
       ),
+    agents: async (code: string): Promise<AgentSession[]> => {
+      const sessions: AgentSession[] = [];
+      let cursor: string | undefined;
+      const seenCursors = new Set<string>();
+      do {
+        const page = await this.request<SessionPage>(
+          "GET",
+          `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit: 100, cursor })}`,
+        );
+        sessions.push(...page.items);
+        if (!page.hasMore) {
+          cursor = undefined;
+          continue;
+        }
+        if (!page.nextCursor) {
+          throw new AyanamiClientError({
+            code: "INVALID_RESPONSE",
+            message: "Session 分页声明 hasMore=true 但未返回 nextCursor",
+            status: 502,
+            details: { entity: "SESSION_PAGE", reason: "MISSING_NEXT_CURSOR" },
+          });
+        }
+        if (seenCursors.has(page.nextCursor)) {
+          throw new AyanamiClientError({
+            code: "INVALID_RESPONSE",
+            message: "Session 分页返回了重复 cursor",
+            status: 502,
+            details: { entity: "SESSION_PAGE", reason: "REPEATED_CURSOR" },
+          });
+        }
+        seenCursors.add(page.nextCursor);
+        cursor = page.nextCursor;
+      } while (cursor);
+      return sessions;
+    },
     reconciliation: (code: string, includeActive = false) =>
       this.request<ReconciliationResult>(
         "GET",

@@ -1883,6 +1883,55 @@ function fitRecordPage(
   };
 }
 
+function compactSessionPageItem(session: Record<string, unknown>): Record<string, unknown> {
+  return compactSession(session);
+}
+
+function fitSessionPage(
+  project: string,
+  requestedLimit: number,
+  maxChars: number,
+  items: Array<Record<string, unknown>>,
+  itemCursors: string[],
+  sourceHasMore: boolean,
+  sourceNextCursor: string | null,
+  retryCursor: string,
+): Record<string, unknown> {
+  for (let count = items.length; count >= 0; count -= 1) {
+    const returned = items.slice(0, count);
+    const budgetTruncated = count < items.length;
+    const hasMore = budgetTruncated || sourceHasMore;
+    const nextCursor = hasMore
+      ? count > 0
+        ? (itemCursors[count - 1] ?? sourceNextCursor ?? retryCursor)
+        : retryCursor
+      : null;
+    const candidate: Record<string, unknown> = {
+      exact: false,
+      project: project.toUpperCase(),
+      list: "sessions",
+      requested_limit: requestedLimit,
+      returned_count: returned.length,
+      items: returned,
+      next_cursor: nextCursor,
+      has_more: hasMore,
+      truncated: budgetTruncated,
+    };
+    if (JSON.stringify(candidate).length <= maxChars) return candidate;
+  }
+  return {
+    exact: false,
+    project: project.toUpperCase(),
+    list: "sessions",
+    requested_limit: requestedLimit,
+    returned_count: 0,
+    items: [],
+    next_cursor: retryCursor,
+    has_more: items.length > 0 || sourceHasMore,
+    truncated: items.length > 0,
+  };
+}
+
 function compactProgress(progress: Record<string, unknown>): Record<string, unknown> {
   return {
     id: progress.id,
@@ -1927,6 +1976,7 @@ function compactSession(session: Record<string, unknown>): Record<string, unknow
     connection_state: session.connectionState,
     current_task_key: session.currentTaskKey ?? null,
     heartbeat_at: session.heartbeatAt ?? null,
+    last_seen_at: session.lastSeenAt ?? session.heartbeatAt ?? session.updatedAt,
     version: session.version,
     started_at: session.startedAt,
     updated_at: session.updatedAt,
@@ -2815,7 +2865,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
       description: "搜索事实。",
       inputSchema: z
         .object({
-          list: z.literal("records").optional(),
+          list: z.enum(["records", "sessions"]).optional(),
           project: projectCode.optional(),
           query: z.string().trim().min(1).max(500).optional(),
           op_id: opId.optional(),
@@ -2832,7 +2882,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
               context.addIssue({
                 code: "custom",
                 path: ["project"],
-                message: "list=records 要求 project",
+                message: `list=${value.list} 要求 project`,
               });
             }
             for (const field of ["query", "op_id", "session"] as const) {
@@ -2840,7 +2890,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
                 context.addIssue({
                   code: "custom",
                   path: [field],
-                  message: `list=records 时 ${field} 必须省略`,
+                  message: `list=${value.list} 时 ${field} 必须省略`,
                 });
               }
             }
@@ -2895,6 +2945,43 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         );
         return wrap(
           fitRecordPage(
+            input.project!,
+            input.limit,
+            input.max_chars,
+            projectedItems,
+            page.itemCursors,
+            page.hasMore,
+            page.nextCursor,
+            page.retryCursor,
+          ),
+        );
+      }
+      if (input.list === "sessions") {
+        const page = await service.agentPage(input.project!, {
+          limit: input.limit,
+          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+        });
+        const listFieldMask =
+          input.field_mask.length > 0
+            ? input.field_mask
+            : [
+                "id",
+                "agent_id",
+                "display_name",
+                "client_kind",
+                "role",
+                "work_state",
+                "connection_state",
+                "current_task_key",
+                "last_seen_at",
+                "started_at",
+                "updated_at",
+              ];
+        const projectedItems = page.items.map((session) =>
+          selectFields(compactSessionPageItem(plain(session)), listFieldMask),
+        );
+        return wrap(
+          fitSessionPage(
             input.project!,
             input.limit,
             input.max_chars,

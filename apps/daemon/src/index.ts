@@ -456,8 +456,12 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   });
   app.get("/api/v1/projects/:code/agents", async (request) => {
     const { code } = request.params as { code: string };
-    const { limit } = request.query as { limit?: string };
-    return options.service.listAgentSessions(code, Number(limit ?? 100));
+    const { limit, cursor } = request.query as { limit?: string; cursor?: string };
+    const page = await options.service.agentPage(code, {
+      limit: Number(limit ?? 100),
+      ...(cursor ? { cursor } : {}),
+    });
+    return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });
   app.get("/api/v1/projects/:code/sessions/:sessionId", async (request) => {
     const { code, sessionId } = request.params as { code: string; sessionId: string };

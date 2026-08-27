@@ -13,12 +13,12 @@ const session = (
   lastSeenAt: string,
 ) => ({
   id,
-  agent_id: agentId,
-  display_name: agentId,
+  agentId,
   project,
   role: "PRIMARY",
-  connection_state: state,
-  last_seen_at: lastSeenAt,
+  displayName: agentId,
+  connectionState: state,
+  lastSeenAt,
 });
 
 describe("Agent Git context conflicts", () => {
@@ -27,11 +27,11 @@ describe("Agent Git context conflicts", () => {
       findAgentSessionConflicts([
         {
           ...session("one", "codex", "ATM", "ONLINE", "2026-08-08T12:00:00Z"),
-          worktree_root: "R:\\repo",
+          git: { worktreeRoot: "R:\\repo" },
         },
         {
           ...session("two", "claude", "ATM", "ONLINE", "2026-08-08T12:01:00Z"),
-          worktree_root: "r:\\repo",
+          git: { worktreeRoot: "r:\\repo" },
         },
       ]),
     ).toContainEqual(expect.objectContaining({ kind: "SAME_WORKTREE", count: 2 }));
@@ -42,13 +42,11 @@ describe("Agent Git context conflicts", () => {
       findAgentSessionConflicts([
         {
           ...session("one", "codex", "ATM", "ONLINE", "2026-08-08T12:00:00Z"),
-          git_branch: "feature/shared",
-          worktree_root: "R:\\one",
+          git: { branch: "feature/shared", worktreeRoot: "R:\\one" },
         },
         {
           ...session("two", "claude", "ATM", "ONLINE", "2026-08-08T12:01:00Z"),
-          git_branch: "feature/shared",
-          worktree_root: "R:\\two",
+          git: { branch: "feature/shared", worktreeRoot: "R:\\two" },
         },
       ]),
     ).toContainEqual(expect.objectContaining({ kind: "SAME_BRANCH", count: 2 }));
@@ -94,12 +92,12 @@ describe("Agent Session 聚合", () => {
     expect(result.map((group) => group.project)).toEqual(["ATM", "AOT"]);
     expect(result[0]).toMatchObject({ project: "ATM", sessionCount: 3, onlineCount: 1 });
     expect(result[0]?.agents).toHaveLength(2);
-    expect(result[0]?.agents.find((item) => item.agent_id === "codex-root"))?.toMatchObject({
+    expect(result[0]?.agents.find((item) => item.agentId === "codex-root"))?.toMatchObject({
       id: "atm-online",
       sessionCount: 2,
     });
     expect(
-      result[0]?.agents.find((item) => item.agent_id === "codex-root")?.sessionHistory,
+      result[0]?.agents.find((item) => item.agentId === "codex-root")?.sessionHistory,
     ).toHaveLength(2);
   });
 });
