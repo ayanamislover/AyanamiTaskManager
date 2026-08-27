@@ -2162,9 +2162,8 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
         briefMode === "full"
           ? await captureBriefRecordSnapshot(service, String(started.project), snapshot)
           : [];
-      const { score, truncated: _legacyTruncated, ...beginIdentity } = started;
-      void score;
-      void _legacyTruncated;
+      const { score: _classificationScore, ...beginIdentity } = started;
+      void _classificationScore;
       return wrap(
         fitBegin({ ...beginIdentity, ...snapshot }, briefMode, canonical.maxChars, recordSnapshot),
       );

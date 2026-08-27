@@ -586,7 +586,6 @@ export class AyanamiTaskService {
           gitHead: input.gitHead ?? null,
           resume: input.resume ?? false,
           predecessorSessionId: input.predecessorSessionId ?? null,
-          maxChars: input.maxChars ?? 1200,
           signals: input.signals ?? {},
           allowProjectCreate: input.allowProjectCreate ?? false,
           creationReason: input.creationReason ?? null,
@@ -601,10 +600,10 @@ export class AyanamiTaskService {
     await this.#flush(project.code);
     return {
       scope: "project",
+      project: project.code,
       session: session.id,
       score: classification.score,
       ...(atomicBegin === null ? {} : { atomicBegin }),
-      ...repository.brief(session.id, input.maxChars ?? 1200),
     };
   }
 
