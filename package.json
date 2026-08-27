@@ -33,6 +33,7 @@
     "smoke:window": "tsx scripts/window-smoke.ts",
     "smoke:history": "tsx scripts/default-history-smoke.ts",
     "benchmark": "tsx scripts/benchmark.ts",
+    "generate:mcp-contracts": "tsx scripts/generate-mcp-contracts.ts",
     "migrate:data-root": "tsx scripts/migrate-data-root.ts"
   },
   "dependencies": {

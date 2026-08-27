@@ -1,15 +1,13 @@
-import type { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 
 export type AyanamiToolProfile = "core" | "memory";
 export type AyanamiServerProfile = AyanamiToolProfile | "legacy";
 
-export type ToolDefinitionMetadata = {
-  /** Reserved for the generated metadata pass (T0186). */
-  readonly surfaceVersion?: number;
-  /** Reserved for the generated metadata pass (T0186). */
-  readonly schemaHash?: string;
+export type CompleteToolAnnotations = ToolAnnotations & {
+  readonly readOnlyHint: boolean;
+  readonly destructiveHint: boolean;
 };
 
 export type ToolDefinition<Input extends z.ZodType = z.ZodType> = {
@@ -18,9 +16,8 @@ export type ToolDefinition<Input extends z.ZodType = z.ZodType> = {
   readonly description: string;
   readonly inputSchema: Input;
   readonly outputSchema: z.ZodType;
-  readonly annotations?: ToolAnnotations;
+  readonly annotations: CompleteToolAnnotations;
   readonly protocolMeta?: Record<string, unknown>;
-  readonly generatedMeta?: ToolDefinitionMetadata;
   readonly handler: ToolCallback<Input>;
 };
 
@@ -28,9 +25,8 @@ export type DefineToolConfig<Input extends z.ZodType> = {
   readonly description: string;
   readonly inputSchema: Input;
   readonly outputSchema: z.ZodType;
-  readonly annotations?: ToolAnnotations;
+  readonly annotations: CompleteToolAnnotations;
   readonly _meta?: Record<string, unknown>;
-  readonly generatedMeta?: ToolDefinitionMetadata;
 };
 
 /**
@@ -48,6 +44,9 @@ export class ToolDefinitionRegistry {
     handler: ToolCallback<Input>,
   ): void {
     if (this.#definitions.has(name)) throw new Error(`DUPLICATE_TOOL_DEFINITION:${name}`);
+    if (!/^\S[^\r\n]*$/u.test(config.description)) {
+      throw new Error(`INVALID_TOOL_DESCRIPTION:${name}`);
+    }
     this.#definitions.set(
       name,
       Object.freeze({
@@ -56,9 +55,8 @@ export class ToolDefinitionRegistry {
         description: config.description,
         inputSchema: config.inputSchema,
         outputSchema: config.outputSchema,
-        ...(config.annotations === undefined ? {} : { annotations: config.annotations }),
+        annotations: Object.freeze({ ...config.annotations }),
         ...(config._meta === undefined ? {} : { protocolMeta: config._meta }),
-        ...(config.generatedMeta === undefined ? {} : { generatedMeta: config.generatedMeta }),
         handler,
       }),
     );
@@ -70,21 +68,5 @@ export class ToolDefinitionRegistry {
         (definition) => profile === "legacy" || definition.profile === profile,
       ),
     );
-  }
-
-  register(server: McpServer, profile: AyanamiServerProfile): void {
-    for (const definition of this.definitions(profile)) {
-      server.registerTool(
-        definition.name,
-        {
-          description: definition.description,
-          inputSchema: definition.inputSchema,
-          outputSchema: definition.outputSchema,
-          ...(definition.annotations === undefined ? {} : { annotations: definition.annotations }),
-          ...(definition.protocolMeta === undefined ? {} : { _meta: definition.protocolMeta }),
-        },
-        definition.handler,
-      );
-    }
   }
 }

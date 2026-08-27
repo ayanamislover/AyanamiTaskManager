@@ -9,6 +9,14 @@ import { createAyanamiMcpServer } from "../src/index.js";
 
 const roots: string[] = [];
 
+function dereferenceSchema(schema: Record<string, any>, root: Record<string, any>) {
+  if (typeof schema?.$ref !== "string" || !schema.$ref.startsWith("#/")) return schema;
+  return schema.$ref
+    .slice(2)
+    .split("/")
+    .reduce((value: any, segment: string) => value?.[segment], root);
+}
+
 afterEach(async () => {
   for (const root of roots.splice(0))
     await rm(root, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
@@ -190,36 +198,26 @@ describe("MCP first-class Review workflow", () => {
       expect(itemSchema.properties?.operation.enum).toEqual(
         expect.arrayContaining(["review_request", "review_submit"]),
       );
-      expect(itemSchema.properties).toMatchObject({
-        parent_checklist_id: { type: "string" },
-        expected_parent_checklist_version: { type: "integer" },
-        request_key: { type: "string" },
-        candidate_hashes: {
-          type: "object",
-          additionalProperties: { type: "string" },
-        },
-        verdict: { enum: ["APPROVED", "CHANGES_REQUESTED"] },
+      expect(dereferenceSchema(itemSchema.properties.parent_checklist_id, schema)).toMatchObject({
+        type: "string",
       });
-      expect(itemSchema.allOf).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            if: { properties: { operation: { const: "review_request" } } },
-            then: expect.objectContaining({
-              required: [
-                "parent_checklist_id",
-                "expected_parent_checklist_version",
-                "candidate_hashes",
-              ],
-            }),
-          }),
-          expect.objectContaining({
-            if: { properties: { operation: { const: "review_submit" } } },
-            then: expect.objectContaining({
-              required: ["request_key", "verdict", "candidate_hashes", "evidence"],
-            }),
-          }),
-        ]),
-      );
+      expect(
+        dereferenceSchema(itemSchema.properties.expected_parent_checklist_version, schema),
+      ).toMatchObject({ type: "integer" });
+      expect(dereferenceSchema(itemSchema.properties.request_key, schema)).toMatchObject({
+        type: "string",
+      });
+      expect(dereferenceSchema(itemSchema.properties.candidate_hashes, schema)).toMatchObject({
+        type: "object",
+        additionalProperties: { type: "string" },
+      });
+      expect(dereferenceSchema(itemSchema.properties.verdict, schema)).toMatchObject({
+        enum: ["APPROVED", "CHANGES_REQUESTED"],
+      });
+      // ATM-T-0188 owns publication of these conditional requirements from the canonical
+      // Operation Registry. Until then, the canonical Zod superRefine below is intentionally
+      // runtime-only; T0186 must not recreate the former tool/path-specific schema patch.
+      expect(itemSchema.allOf).toBeUndefined();
 
       const invalid = await fixture.client.callTool({
         name: "atm_task_patch",

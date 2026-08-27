@@ -7,6 +7,7 @@ import {
   assertLegacyMcpSchemaTransitionBudget,
   assertMcpSchemaBudget,
   MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
+  mcpSchemaBreakdown,
   mcpSchemaBytes,
 } from "../src/schema-budget.js";
 
@@ -51,6 +52,20 @@ describe("MCP static profiles", () => {
       expect(mcpSchemaBytes(memory.tools)).toBeLessThanOrEqual(7680);
       expect(() => assertMcpSchemaBudget(core.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(memory.tools)).not.toThrow();
+      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7576, framingBytes: 7 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 7625, framingBytes: 6 });
+      expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
+      expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(5);
+      expect(() =>
+        assertMcpSchemaBudget([
+          ...memory.tools,
+          {
+            name: "formal-growth-must-fail",
+            description: "x".repeat(100),
+            inputSchema: { type: "object", properties: {} },
+          },
+        ]),
+      ).toThrow(/MCP_SCHEMA_BUDGET_EXCEEDED/u);
       expect(core.client.getInstructions()).toContain("core profile");
       expect(memory.client.getInstructions()).toContain("memory profile");
       expect(new Set(legacy.tools.map((tool) => tool.name))).toEqual(
