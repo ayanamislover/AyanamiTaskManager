@@ -107,4 +107,5 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - 故障排查：`%LOCALAPPDATA%\AyanamiTaskManager\docs\troubleshooting.md`
 - 架构与数据边界：`%LOCALAPPDATA%\AyanamiTaskManager\docs\architecture.md`、`%LOCALAPPDATA%\AyanamiTaskManager\docs\data-model.md`
 - 发布验收：`%LOCALAPPDATA%\AyanamiTaskManager\docs\release-checklist.md`
+- ATM Feedback 逐项闭环矩阵：`%LOCALAPPDATA%\AyanamiTaskManager\docs\feedback-closeout.md`
 - 最新在线版本：`https://github.com/ayanamislover/AyanamiTaskManager`
