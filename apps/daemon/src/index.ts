@@ -245,15 +245,20 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       });
     } else {
       const base = asAtmError(error);
-      typed =
-        typeof options.service.enrichError === "function"
-          ? await options.service.enrichError(base, {
-              ...(typeof params.code === "string" ? { projectCode: params.code } : {}),
-              ...(taskKey === undefined ? {} : { taskKey }),
-              ...(checklistId === undefined ? {} : { checklistId }),
-              ...(expectedVersion === null ? {} : { expectedVersion }),
-            })
-          : base;
+      typed = base;
+      if (typeof options.service.enrichError === "function") {
+        try {
+          typed = await options.service.enrichError(base, {
+            ...(typeof params.code === "string" ? { projectCode: params.code } : {}),
+            ...(taskKey === undefined ? {} : { taskKey }),
+            ...(checklistId === undefined ? {} : { checklistId }),
+            ...(expectedVersion === null ? {} : { expectedVersion }),
+          });
+        } catch {
+          // Error enrichment is diagnostic only. A failed lookup must never replace the
+          // original typed domain error with a secondary INTERNAL_ERROR response.
+        }
+      }
     }
     reply.code(typed.httpStatus).send({
       error: atmErrorDto(typed),
