@@ -44,6 +44,7 @@ import {
   type RegisteredProject,
   type UserRecordCreateInput,
 } from "@ayanami-task/client";
+import { WORK_ITEM_STATUS_LABELS, type WorkItemStatus } from "@ayanami-task/protocol";
 import {
   findAgentSessionConflicts,
   groupAgentSessions,
@@ -68,6 +69,7 @@ import {
   type ProjectTaskSort,
   type ProjectTaskSortField,
 } from "./task-sort.js";
+import { workItemUiActions } from "./task-actions.js";
 import "./styles.css";
 
 type Route =
@@ -180,16 +182,7 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 const statusLabels: Record<string, string> = {
-  BACKLOG: "待整理",
-  READY: "可开始",
-  CLAIMED: "已领取",
-  IN_PROGRESS: "进行中",
-  BLOCKED: "已阻塞",
-  WAITING_USER: "等待用户",
-  WAITING_AGENT: "等待 Agent",
-  VERIFYING: "验收中",
-  DONE: "已完成",
-  CANCELLED: "已取消",
+  ...WORK_ITEM_STATUS_LABELS,
   OPEN: "待处理",
   PROMOTED: "已晋升",
   ARCHIVED: "已归档",
@@ -1992,10 +1985,10 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
                     {desktop?.setMemoryProfile ? (
                       <div className="atm-row" data-testid="memory-profile-toggle">
                         <div>
-                          <div className="atm-row-title">memory 工具面</div>
+                          <div className="atm-row-title">完整工具面（memory + actions）</div>
                           <div className="atm-row-sub">
-                            默认开启完整工具面。关闭可减少每个客户端一个常驻 bridge 进程（约 32
-                            MiB），但关闭后将失去
+                            默认开启完整工具面。关闭会同时移除 memory 与 actions 两个静态
+                            Profile，只保留 core，但关闭后将失去
                             atm_task_patch、atm_progress_add、atm_record、atm_search、atm_delta
                             五个工具。切换后请重载或重启 Agent 客户端。
                           </div>
@@ -2449,49 +2442,6 @@ function TaskDrawer({
     onError: (error) =>
       notify(`检查项更新失败：${error instanceof Error ? error.message : String(error)}`),
   });
-  const actions = (status: string, stale: boolean): Array<[string, string]> => {
-    if (["BACKLOG", "READY"].includes(status))
-      return [
-        ["start", "开始"],
-        ["cancel", "取消"],
-      ];
-    if (status === "CLAIMED")
-      return stale
-        ? [
-            ["release", "释放过期领取"],
-            ["cancel", "取消"],
-          ]
-        : [["cancel", "取消"]];
-    if (status === "IN_PROGRESS")
-      return stale
-        ? [
-            ["release", "释放过期领取"],
-            ["verify", "提交验收"],
-            ["block", "阻塞"],
-            ["wait_user", "等待用户"],
-            ["wait_agent", "等待 Agent"],
-            ["cancel", "取消"],
-          ]
-        : [
-            ["verify", "提交验收"],
-            ["block", "阻塞"],
-            ["wait_user", "等待用户"],
-            ["wait_agent", "等待 Agent"],
-            ["cancel", "取消"],
-          ];
-    if (["BLOCKED", "WAITING_USER", "WAITING_AGENT"].includes(status))
-      return [
-        ["reopen", "重新打开"],
-        ["cancel", "取消"],
-      ];
-    if (status === "VERIFYING")
-      return [
-        ["complete", "完成"],
-        ["reopen", "退回"],
-      ];
-    if (["DONE", "CANCELLED"].includes(status)) return [["reopen", "重新打开"]];
-    return [];
-  };
   const runAction = (operation: string) => {
     const input: Record<string, unknown> = { operation };
     if (operation === "block") {
@@ -2553,14 +2503,19 @@ function TaskDrawer({
               {progress && progress.phaseLabel !== String(query.data!.status) ? (
                 <span className="atm-badge">{progress.phaseLabel}</span>
               ) : null}
-              {actions(
-                String(query.data!.status),
-                Boolean(
+              {workItemUiActions({
+                status: String(query.data!.status) as WorkItemStatus,
+                actor: "USER",
+                claimOwner:
+                  typeof (query.data as Record<string, unknown>).assigneeAgentId === "string"
+                    ? String((query.data as Record<string, unknown>).assigneeAgentId)
+                    : null,
+                claimStale: Boolean(
                   (query.data as Record<string, unknown>).claimLeaseUntil &&
                     Date.parse(String((query.data as Record<string, unknown>).claimLeaseUntil)) <=
                       Date.now(),
                 ),
-              ).map(([operation, label]) => (
+              }).map(({ operation, label }) => (
                 <button
                   className={`atm-button ${["start", "verify", "complete"].includes(operation) ? "primary" : operation === "cancel" ? "danger" : ""}`}
                   disabled={patch.isPending}

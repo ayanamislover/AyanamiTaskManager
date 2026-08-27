@@ -2,7 +2,7 @@ import type { ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 
-export type AyanamiToolProfile = "core" | "memory";
+export type AyanamiToolProfile = "core" | "memory" | "actions";
 export type AyanamiServerProfile = AyanamiToolProfile | "legacy";
 
 export type CompleteToolAnnotations = ToolAnnotations & {

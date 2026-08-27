@@ -67,7 +67,7 @@ describe("Streamable HTTP MCP", () => {
     expect(body.result.instructions).toContain("重启 Agent 客户端");
   });
 
-  it("暴露固定 core / memory Profile，旧入口保留完整兼容能力", async () => {
+  it("暴露固定 core / memory / actions Profile，旧入口保留完整兼容能力", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-profiles-"));
     const service = await AyanamiTaskService.open({
       dataDir,
@@ -106,6 +106,7 @@ describe("Streamable HTTP MCP", () => {
 
     const core = await list("/mcp/core");
     const memory = await list("/mcp/memory");
+    const actions = await list("/mcp/actions");
     const compatibility = await list("/mcp");
 
     expect(core).toEqual([
@@ -116,19 +117,15 @@ describe("Streamable HTTP MCP", () => {
       "atm_task_create",
       "atm_end",
     ]);
-    expect(memory).toEqual([
-      "atm_task_patch",
-      "atm_progress_add",
-      "atm_record",
-      "atm_search",
-      "atm_delta",
-    ]);
-    expect(new Set(compatibility)).toEqual(new Set([...core, ...memory]));
+    expect(memory).toEqual(["atm_progress_add", "atm_record", "atm_search", "atm_delta"]);
+    expect(actions).toEqual(["atm_task_patch"]);
+    expect(new Set(compatibility)).toEqual(new Set([...core, ...memory, ...actions]));
     expect(compatibility).toHaveLength(11);
     expect(core.filter((name) => memory.includes(name))).toEqual([]);
+    expect(actions.filter((name) => [...core, ...memory].includes(name))).toEqual([]);
   });
 
-  it("core 创建的任务可由 memory 修改，两个 Profile 共享同一状态", async () => {
+  it("core 创建的任务可由 actions 修改，三个 Profile 共享同一状态", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-shared-state-"));
     const service = await AyanamiTaskService.open({
       dataDir,
@@ -147,7 +144,7 @@ describe("Streamable HTTP MCP", () => {
     });
     let id = 10;
     const call = async (
-      url: "/mcp/core" | "/mcp/memory",
+      url: "/mcp/core" | "/mcp/memory" | "/mcp/actions",
       name: string,
       args: Record<string, unknown>,
     ): Promise<Record<string, unknown>> => {
@@ -195,7 +192,7 @@ describe("Streamable HTTP MCP", () => {
     });
     const task = (created.created as Array<{ task_key: string; version: number }>)[0]!;
 
-    await call("/mcp/memory", "atm_task_patch", {
+    await call("/mcp/actions", "atm_task_patch", {
       project: project.code,
       session,
       op_id: "dual-profile-shared-claim",

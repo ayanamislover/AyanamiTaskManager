@@ -7,7 +7,8 @@ Surface: `v3`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7576 | `2e3f175dc5198e2d5609b67970c5ac08710c7eac16d66e70e3f6c3c7302da30d` |
-| memory | 7625 | `1f8856d2cba2ef517a73e440e5b4cdcbde96556baf6bc72265baaf5c91b34b1c` |
+| memory | 4370 | `2f54629f73d93ef13faf3a3f4adceabe59ed962d8f44a7b45210d47aa2d50409` |
+| actions | 4623 | `9ebf3736d921cf884ff03e1d7a1f8c90c7098f17afaf17804821249d2c31c2f7` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
 | --- | --- | --- | --- | --- | --- |
@@ -17,12 +18,12 @@ Surface: `v3`
 | core | `atm_task_get` | 读单个任务。 | true | false | `39d377871891` |
 | core | `atm_task_create` | 批量创建任务与关系。 | false | false | `548dec5e0352` |
 | core | `atm_end` | 结束会话并交接。 | false | false | `ed553337d131` |
-| memory | `atm_task_patch` | 批量变更任务。 | false | true | `b4d963fe1998` |
 | memory | `atm_progress_add` | 写任务或项目进度。 | false | false | `a65dbceedb8a` |
 | memory | `atm_record` | 保存关键记录。 | false | false | `dc6b90fa4655` |
 | memory | `atm_search` | 搜索事实。 | true | false | `299484b05612` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
+| actions | `atm_task_patch` | 批量变更任务。 | false | true | `d4334d54a316` |
 
 ## Legacy compatibility artifact
 
-The unprofiled migration endpoint publishes the frozen v1.0.18 artifact from commit `410969b7fed5f1837078f6731271bf6c18381faf`: 11064 bytes, SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`. Current installers only create the formal core and memory profiles.
+The unprofiled migration endpoint publishes the frozen v1.0.18 artifact from commit `410969b7fed5f1837078f6731271bf6c18381faf`: 11064 bytes, SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`. Current installers only create the formal core, memory and actions profiles.

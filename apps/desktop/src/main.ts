@@ -184,7 +184,7 @@ function bundledMcpStdioPath(): string {
     : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs");
 }
 
-/** memory profile 的低内存降级开关；未设置时默认开启完整工具面。 */
+/** memory + actions 的低内存降级开关；未设置时默认开启完整工具面。 */
 const MEMORY_PROFILE_SETTING = "mcp.memory-profile-enabled";
 const mcpRepairFailures = new Map<McpClient, string>();
 
@@ -200,7 +200,7 @@ function memoryProfileEnabled(): boolean {
 }
 
 function enabledProfiles(): McpProfile[] {
-  return memoryProfileEnabled() ? ["core", "memory"] : ["core"];
+  return memoryProfileEnabled() ? ["core", "memory", "actions"] : ["core"];
 }
 
 function profileSyncAdapters(write: {

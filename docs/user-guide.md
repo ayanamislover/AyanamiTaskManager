@@ -42,6 +42,8 @@
 
 任务抽屉提供开始、阻塞、等待、验收、完成、取消、重开和释放过期领取。详情包含说明、进度来源、验收标准、检查项、依赖和 WorkItem 工程变更。
 
+按钮的可用性与显示名来自 canonical operation registry；完整状态/操作表见 [generated/work-item-operations.md](./generated/work-item-operations.md)，用户指南不另维护一份易漂移的状态机。
+
 Agent 页面按项目聚合在线与历史 Session。每个 Session 的 Git 区域显示 ATM 从 `cwd` 只读采集的 branch、HEAD、worktree 和 dirty 状态；采集失败会明确标记不可用，不会阻止任务执行。相同 branch/worktree 的多个在线 Session 只显示冲突警告。
 
 Git 上下文在开工、有意义的进度/项目更新、验收/完成、Session 结束或用户手动刷新时更新；打开页面或普通查询不会因为轮询而改写 Session。

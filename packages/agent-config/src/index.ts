@@ -26,11 +26,12 @@ export type McpRuntime = {
 };
 export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
 export type InstallResult = { client: McpClient; path: string; backupPath: string | null };
-export type McpProfile = "core" | "memory";
+export type McpProfile = "core" | "memory" | "actions";
 export const MCP_SERVER_NAMES = {
   legacy: "ayanami-task-manager",
   core: "ayanami-task-manager-core",
   memory: "ayanami-task-manager-memory",
+  actions: "ayanami-task-manager-actions",
 } as const;
 const managedMcpServerNames = Object.values(MCP_SERVER_NAMES);
 
@@ -234,9 +235,9 @@ function profileLaunch(input: McpInstallInput, profile: McpProfile): McpInstallI
 }
 
 /** 默认提供完整工具面；用户可以显式传 ["core"] 进入低内存降级模式。 */
-export const DEFAULT_MCP_PROFILES: readonly McpProfile[] = ["core", "memory"];
+export const DEFAULT_MCP_PROFILES: readonly McpProfile[] = ["core", "memory", "actions"];
 
-const ALL_MCP_PROFILES: readonly McpProfile[] = ["core", "memory"];
+const ALL_MCP_PROFILES: readonly McpProfile[] = ["core", "memory", "actions"];
 
 /**
  * 把请求的 profile 集合归一成稳定顺序的启用集合。
@@ -499,7 +500,8 @@ function installedProfileSetMatches(
   return (
     installed.legacy === null &&
     (installed.core !== null) === enabled.has("core") &&
-    (installed.memory !== null) === enabled.has("memory")
+    (installed.memory !== null) === enabled.has("memory") &&
+    (installed.actions !== null) === enabled.has("actions")
   );
 }
 
@@ -845,6 +847,7 @@ export type InstalledMcpProfileLaunches = {
   legacy: InstalledMcpLaunch | null;
   core: InstalledMcpLaunch | null;
   memory: InstalledMcpLaunch | null;
+  actions: InstalledMcpLaunch | null;
 };
 
 function launchFromServerConfig(server: Record<string, unknown> | null): InstalledMcpLaunch | null {
@@ -877,6 +880,7 @@ function jsonProfileLaunches(path: string): InstalledMcpProfileLaunches {
     legacy: launchFromServerConfig(servers[MCP_SERVER_NAMES.legacy] ?? null),
     core: launchFromServerConfig(servers[MCP_SERVER_NAMES.core] ?? null),
     memory: launchFromServerConfig(servers[MCP_SERVER_NAMES.memory] ?? null),
+    actions: launchFromServerConfig(servers[MCP_SERVER_NAMES.actions] ?? null),
   };
 }
 
@@ -927,7 +931,7 @@ export function installedClaudeCodeProfileLaunches(
 
 function codexProfileLaunches(path: string): InstalledMcpProfileLaunches {
   const found: Record<string, InstalledMcpLaunch> = {};
-  if (!existsSync(path)) return { legacy: null, core: null, memory: null };
+  if (!existsSync(path)) return { legacy: null, core: null, memory: null, actions: null };
   let activeName: string | null = null;
   let command: string | null = null;
   let args: string[] = [];
@@ -960,6 +964,7 @@ function codexProfileLaunches(path: string): InstalledMcpProfileLaunches {
     legacy: found[MCP_SERVER_NAMES.legacy] ?? null,
     core: found[MCP_SERVER_NAMES.core] ?? null,
     memory: found[MCP_SERVER_NAMES.memory] ?? null,
+    actions: found[MCP_SERVER_NAMES.actions] ?? null,
   };
 }
 

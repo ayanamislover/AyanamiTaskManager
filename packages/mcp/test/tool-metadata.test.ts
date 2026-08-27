@@ -54,7 +54,7 @@ function assertMetadataContract(tools: PublishedTool[]): void {
   }
 }
 
-async function list(profile: "core" | "memory" | "legacy") {
+async function list(profile: "core" | "memory" | "actions" | "legacy") {
   const server = createAyanamiMcpServer({} as AyanamiTaskService, { profile });
   const client = new Client({ name: `metadata-${profile}`, version: "1" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -69,7 +69,7 @@ async function list(profile: "core" | "memory" | "legacy") {
 }
 
 describe("MCP tools/list metadata contract", () => {
-  it.each(["core", "memory"] as const)(
+  it.each(["core", "memory", "actions"] as const)(
     "%s publishes descriptions, safety annotations and stable schema identity",
     async (profile) => {
       const fixture = await list(profile);

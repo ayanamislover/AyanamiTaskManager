@@ -6,7 +6,7 @@ const EXPECTED = mcpProfileLaunches({
   dataDir: "C:\\ATM\\data",
 });
 
-const NONE = { legacy: null, core: null, memory: null } as const;
+const NONE = { legacy: null, core: null, memory: null, actions: null } as const;
 const core = () => ({
   command: EXPECTED.core.command,
   args: [...EXPECTED.core.args],
@@ -17,12 +17,27 @@ const memory = () => ({
   args: [...EXPECTED.memory.args],
   env: { ...EXPECTED.memory.env },
 });
+const actions = () => ({
+  command: EXPECTED.actions.command,
+  args: [...EXPECTED.actions.args],
+  env: { ...EXPECTED.actions.env },
+});
 
-/** 默认双入口；显式 core-only 是用户主动选择的低内存降级，启动修复不得擅自反转。 */
+/** 默认三入口；显式 core-only 是用户主动选择的低内存降级，启动修复不得擅自反转。 */
 describe("MCP profile 过期判据跟随启用集合", () => {
   it("一个都没装就不算过期——没装是用户没装，不能借修复替他装上", () => {
     expect(mcpProfileLaunchesStale(NONE, EXPECTED, ["core"])).toBe(false);
     expect(mcpProfileLaunchesStale(NONE, EXPECTED, ["core", "memory"])).toBe(false);
+    expect(mcpProfileLaunchesStale(NONE, EXPECTED)).toBe(false);
+  });
+
+  it("只残留 actions 也属于已安装但过期，不能误判成从未安装", () => {
+    expect(
+      mcpProfileLaunchesStale(
+        { legacy: null, core: null, memory: null, actions: actions() },
+        EXPECTED,
+      ),
+    ).toBe(true);
   });
 
   it("只启用 core 且只装了 core 时不过期", () => {
@@ -100,9 +115,12 @@ describe("MCP profile 过期判据跟随启用集合", () => {
     ).toBe(true);
   });
 
-  it("漏传启用集合时按默认双入口处理", () => {
+  it("漏传启用集合时按默认三入口处理", () => {
     expect(
-      mcpProfileLaunchesStale({ legacy: null, core: core(), memory: memory() }, EXPECTED),
+      mcpProfileLaunchesStale(
+        { legacy: null, core: core(), memory: memory(), actions: actions() },
+        EXPECTED,
+      ),
     ).toBe(false);
     expect(mcpProfileLaunchesStale({ legacy: null, core: core(), memory: null }, EXPECTED)).toBe(
       true,

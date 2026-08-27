@@ -7,6 +7,10 @@ import { AyanamiTaskService } from "@ayanami-task/application";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
 import { connectProfiledClients } from "./profile-client.js";
+import {
+  dereferencePublishedSchema,
+  publishedOperationVariant,
+} from "./published-operation-schema.js";
 
 const roots: string[] = [];
 
@@ -325,16 +329,16 @@ describe("MCP mutation contracts", () => {
     const { client } = profiles;
     try {
       const memoryListed = await profiles.memoryClient.listTools();
+      const actionsListed = await profiles.actionsClient.listTools();
       const evidenceSchemas = [
         (() => {
-          const schema = memoryListed.tools.find((tool) => tool.name === "atm_task_patch")!
+          const schema = actionsListed.tools.find((tool) => tool.name === "atm_task_patch")!
             .inputSchema as any;
-          return {
-            root: schema,
-            branches:
-              schema.properties.items.items.properties.checklist_items.items.properties.evidence
-                .items.anyOf,
-          };
+          const variant = publishedOperationVariant(schema, "checklist_single");
+          const checklist = dereferencePublishedSchema(variant.properties.checklist_items, schema);
+          const checklistItem = dereferencePublishedSchema(checklist.items, schema);
+          const evidence = dereferencePublishedSchema(checklistItem.properties.evidence, schema);
+          return { root: schema, branches: evidence.items.anyOf };
         })(),
         (() => {
           const schema = memoryListed.tools.find((tool) => tool.name === "atm_progress_add")!
@@ -448,7 +452,7 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "checklist-batch-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -463,9 +467,10 @@ describe("MCP mutation contracts", () => {
         required?: string[];
         properties?: Record<string, any>;
       };
-      const itemSchema = schema.properties?.items?.items;
+      const itemSchema = publishedOperationVariant(schema, "checklist_batch");
       expect(schema.required).toEqual(["project", "session", "op_id", "items"]);
-      expect(itemSchema.properties?.checklist_items?.items).toMatchObject({
+      const checklist = dereferencePublishedSchema(itemSchema.properties.checklist_items, schema);
+      expect(dereferencePublishedSchema(checklist.items, schema)).toMatchObject({
         type: "object",
         required: ["id", "status"],
         properties: {
@@ -561,7 +566,7 @@ describe("MCP mutation contracts", () => {
 
   it("aggregates invalid checklist fields for both single and batch modes", async () => {
     const service = {} as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "checklist-invalid-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -586,7 +591,7 @@ describe("MCP mutation contracts", () => {
       });
       expect(invalidBatch.isError).toBe(true);
       const batchError = JSON.stringify(invalidBatch.content);
-      for (const field of ["checklist_items", "id", "status"]) {
+      for (const field of ["items"]) {
         expect(batchError).toContain(field);
       }
 
@@ -608,7 +613,7 @@ describe("MCP mutation contracts", () => {
       });
       expect(invalidSingle.isError).toBe(true);
       const singleError = JSON.stringify(invalidSingle.content);
-      for (const field of ["id", "status", "checklist_items"]) {
+      for (const field of ["items"]) {
         expect(singleError).toContain(field);
       }
     } finally {
@@ -641,7 +646,7 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "verify-complete-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -650,9 +655,9 @@ describe("MCP mutation contracts", () => {
       const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
         properties?: Record<string, any>;
       };
-      expect(schema.properties?.items?.items?.properties?.operation).toMatchObject({
-        enum: expect.arrayContaining(["verify_and_complete"]),
-      });
+      expect(publishedOperationVariant(schema, "verify_and_complete").properties).toHaveProperty(
+        "operation",
+      );
 
       const response = await client.callTool({
         name: "atm_task_patch",
@@ -722,7 +727,7 @@ describe("MCP mutation contracts", () => {
         };
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "safe-edit-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -731,7 +736,8 @@ describe("MCP mutation contracts", () => {
       const schema = listed.tools.find((tool) => tool.name === "atm_task_patch")?.inputSchema as {
         properties?: Record<string, any>;
       };
-      const itemSchema = dereferenceSchema(schema.properties?.items?.items, schema);
+      const itemSchema = publishedOperationVariant(schema, "edit");
+      const cancelSchema = publishedOperationVariant(schema, "cancel");
       const expectedFields = dereferenceSchema(itemSchema.properties?.expected_fields, schema);
       expect(expectedFields).toMatchObject({
         type: "object",
@@ -748,11 +754,11 @@ describe("MCP mutation contracts", () => {
         type: "array",
         items: { type: "string" },
       });
-      expect(dereferenceSchema(itemSchema.properties.cancel_reason, schema)).toMatchObject({
+      expect(dereferenceSchema(cancelSchema.properties.cancel_reason, schema)).toMatchObject({
         type: "string",
       });
       for (const field of ["duplicate_of", "superseded_by"] as const) {
-        expect(dereferenceSchema(itemSchema.properties[field], schema).type).toEqual([
+        expect(dereferenceSchema(cancelSchema.properties[field], schema).type).toEqual([
           "string",
           "null",
         ]);
@@ -831,7 +837,7 @@ describe("MCP mutation contracts", () => {
 
   it("aggregates unsafe edit and composite workflow validation issues", async () => {
     const service = {} as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "task-patch-invalid-test", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -883,7 +889,7 @@ describe("MCP mutation contracts", () => {
       });
       expect(mixedComposite.isError).toBe(true);
       const compositeError = JSON.stringify(mixedComposite.content);
-      for (const field of ["items", "title"]) {
+      for (const field of ["items"]) {
         expect(compositeError).toContain(field);
       }
     } finally {
@@ -899,7 +905,7 @@ describe("MCP mutation contracts", () => {
         throw new Error("must not be called");
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "invalid-acceptance", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

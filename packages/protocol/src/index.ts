@@ -363,35 +363,51 @@ export const WorkItemExpectedFieldsSchema = z
   .strict()
   .refine((value) => Object.keys(value).length > 0, "expectedFields 至少包含一个字段");
 
-export const WorkItemPatchInputSchema = z
-  .object({
-    taskKey: NonEmptyTextSchema,
-    expectedVersion: z.number().int().nonnegative(),
-    expectedFields: WorkItemExpectedFieldsSchema.optional(),
-    operation: z.enum(WORK_ITEM_OPERATION_NAMES),
-    title: z.string().trim().min(1).max(400).optional(),
-    description: z.string().max(50_000).optional(),
-    acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
-    blockedReason: z.string().trim().min(1).max(2000).optional(),
-    waitingFor: z.string().trim().min(1).max(1000).optional(),
-    cancelReason: z.string().trim().min(1).max(2000).optional(),
-    duplicateOf: z.string().trim().min(1).max(100).nullable().optional(),
-    supersededBy: z.string().trim().min(1).max(100).nullable().optional(),
-    assigneeAgentId: z.string().nullable().optional(),
-    targetDate: NullableDateOnlySchema,
-    parentKey: z.string().nullable().optional(),
-    takeoverStale: z.boolean().default(false),
-  })
-  .superRefine((value, context) => {
+export const ChecklistUpdateInputSchema = z.object({
+  checklistId: NonEmptyTextSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
+  evidence: z.array(EvidenceInputSchema).max(100).optional(),
+});
+
+export const ChecklistBatchItemInputSchema = z.object({
+  checklistId: NonEmptyTextSchema,
+  status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
+  evidence: z.array(EvidenceInputSchema).max(100).optional(),
+});
+
+const workItemPatchIdentityShape = {
+  taskKey: NonEmptyTextSchema,
+  expectedVersion: z.number().int().nonnegative(),
+  takeoverStale: z.boolean().default(false),
+};
+
+function coreWorkItemPatchSchema<
+  Operation extends (typeof WORK_ITEM_OPERATION_NAMES)[number],
+  const Fields extends z.ZodRawShape,
+>(operation: Operation, fields: Fields) {
+  return z
+    .object({
+      ...workItemPatchIdentityShape,
+      operation: z.literal(operation),
+      ...fields,
+    })
+    .strict();
+}
+
+const editPatchFields = {
+  expectedFields: WorkItemExpectedFieldsSchema.optional(),
+  title: z.string().trim().min(1).max(400).optional(),
+  description: z.string().max(50_000).optional(),
+  acceptance: z.array(z.string().trim().min(1).max(1000)).max(100).optional(),
+  assigneeAgentId: z.string().nullable().optional(),
+  targetDate: NullableDateOnlySchema,
+  parentKey: z.string().nullable().optional(),
+};
+
+const editWorkItemPatchSchema = coreWorkItemPatchSchema("edit", editPatchFields).superRefine(
+  (value, context) => {
     if (!value.expectedFields) return;
-    if (value.operation !== "edit") {
-      context.addIssue({
-        code: "custom",
-        path: ["expectedFields"],
-        message: "expectedFields 仅适用于 edit",
-      });
-      return;
-    }
     if (value.assigneeAgentId !== undefined) {
       context.addIssue({
         code: "custom",
@@ -418,26 +434,152 @@ export const WorkItemPatchInputSchema = z
         });
       }
     }
-  });
+  },
+);
+
+export const CoreWorkItemPatchSchemas = {
+  claim: coreWorkItemPatchSchema("claim", {}),
+  start: coreWorkItemPatchSchema("start", {}),
+  release: coreWorkItemPatchSchema("release", {}),
+  block: coreWorkItemPatchSchema("block", {
+    blockedReason: z.string().trim().min(1).max(2000),
+  }),
+  wait_user: coreWorkItemPatchSchema("wait_user", {
+    waitingFor: z.string().trim().min(1).max(1000),
+  }),
+  wait_agent: coreWorkItemPatchSchema("wait_agent", {
+    waitingFor: z.string().trim().min(1).max(1000),
+  }),
+  verify: coreWorkItemPatchSchema("verify", {}),
+  complete: coreWorkItemPatchSchema("complete", {}),
+  cancel: coreWorkItemPatchSchema("cancel", {
+    cancelReason: z.string().trim().min(1).max(2000).optional(),
+    duplicateOf: z.string().trim().min(1).max(100).nullable().optional(),
+    supersededBy: z.string().trim().min(1).max(100).nullable().optional(),
+  }),
+  reopen: coreWorkItemPatchSchema("reopen", {}),
+  edit: editWorkItemPatchSchema,
+} as const satisfies Record<(typeof WORK_ITEM_OPERATION_NAMES)[number], z.ZodType>;
+
+export type WorkItemPatchInput = z.output<
+  (typeof CoreWorkItemPatchSchemas)[keyof typeof CoreWorkItemPatchSchemas]
+>;
+
+export const WorkItemPatchInputSchema: z.ZodType<WorkItemPatchInput> = z.discriminatedUnion(
+  "operation",
+  Object.values(CoreWorkItemPatchSchemas) as any,
+);
+
+const compositeWorkItemPatchIdentityShape = {
+  ...workItemPatchIdentityShape,
+  takeoverStale: z.literal(false).default(false),
+};
+
+export const CompositeTaskPatchSchemas = {
+  verify_and_complete: z
+    .object({
+      ...compositeWorkItemPatchIdentityShape,
+      operation: z.literal("verify_and_complete"),
+    })
+    .strict(),
+  review_request: z
+    .object({
+      ...compositeWorkItemPatchIdentityShape,
+      operation: z.literal("review_request"),
+      parentChecklistId: ReviewRequestCreateInputSchema.shape.parentChecklistId,
+      expectedParentChecklistVersion:
+        ReviewRequestCreateInputSchema.shape.expectedParentChecklistVersion,
+      candidateHashes: ReviewCandidateHashesSchema,
+    })
+    .strict(),
+  review_submit: z
+    .object({
+      ...compositeWorkItemPatchIdentityShape,
+      operation: z.literal("review_submit"),
+      requestKey: ReviewSubmitInputSchema.shape.requestKey,
+      verdict: ReviewSubmitInputSchema.shape.verdict,
+      candidateHashes: ReviewCandidateHashesSchema,
+      evidence: ReviewSubmitInputSchema.shape.evidence,
+    })
+    .strict(),
+  checklist_single: z
+    .object({
+      ...compositeWorkItemPatchIdentityShape,
+      operation: z.literal("checklist_single"),
+      checklistItems: z.array(ChecklistBatchItemInputSchema).length(1),
+    })
+    .strict(),
+  checklist_batch: z
+    .object({
+      ...compositeWorkItemPatchIdentityShape,
+      operation: z.literal("checklist_batch"),
+      checklistItems: z.array(ChecklistBatchItemInputSchema).min(1).max(100),
+    })
+    .strict(),
+} as const;
+
+type CoreTaskPatchOperationDefinition = {
+  readonly kind: "core";
+  readonly batchable: true;
+  readonly schema: (typeof CoreWorkItemPatchSchemas)[keyof typeof CoreWorkItemPatchSchemas];
+};
+
+const CoreTaskPatchOperations = Object.fromEntries(
+  WORK_ITEM_OPERATION_NAMES.map((operation) => [
+    operation,
+    { kind: "core", batchable: true, schema: CoreWorkItemPatchSchemas[operation] },
+  ]),
+) as {
+  readonly [Operation in keyof typeof CoreWorkItemPatchSchemas]: CoreTaskPatchOperationDefinition;
+};
+
+export const TaskPatchOperations = {
+  ...CoreTaskPatchOperations,
+  verify_and_complete: {
+    kind: "verify_and_complete",
+    batchable: false,
+    schema: CompositeTaskPatchSchemas.verify_and_complete,
+  },
+  review_request: {
+    kind: "review_request",
+    batchable: false,
+    schema: CompositeTaskPatchSchemas.review_request,
+  },
+  review_submit: {
+    kind: "review_submit",
+    batchable: false,
+    schema: CompositeTaskPatchSchemas.review_submit,
+  },
+  checklist_single: {
+    kind: "checklist_single",
+    batchable: false,
+    schema: CompositeTaskPatchSchemas.checklist_single,
+  },
+  checklist_batch: {
+    kind: "checklist_batch",
+    batchable: false,
+    schema: CompositeTaskPatchSchemas.checklist_batch,
+  },
+} as const;
+
+export type TaskPatchOperation = keyof typeof TaskPatchOperations;
+export const TASK_PATCH_OPERATION_NAMES = Object.keys(TaskPatchOperations) as [
+  TaskPatchOperation,
+  ...TaskPatchOperation[],
+];
+
+export type TaskPatchItem = z.output<(typeof TaskPatchOperations)[TaskPatchOperation]["schema"]>;
+
+export const TaskPatchItemSchema: z.ZodType<TaskPatchItem> = z.discriminatedUnion(
+  "operation",
+  TASK_PATCH_OPERATION_NAMES.map((operation) => TaskPatchOperations[operation].schema) as any,
+);
 
 export const TaskPatchBatchInputSchema = z.object({
   project: NonEmptyTextSchema,
   session: NonEmptyTextSchema,
   opId: OpIdSchema,
   items: z.array(WorkItemPatchInputSchema).min(1).max(50),
-});
-
-export const ChecklistUpdateInputSchema = z.object({
-  checklistId: NonEmptyTextSchema,
-  expectedVersion: z.number().int().nonnegative(),
-  status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
-  evidence: z.array(EvidenceInputSchema).max(100).optional(),
-});
-
-export const ChecklistBatchItemInputSchema = z.object({
-  checklistId: NonEmptyTextSchema,
-  status: z.enum(["TODO", "DOING", "DONE", "SKIPPED"]),
-  evidence: z.array(EvidenceInputSchema).max(100).optional(),
 });
 
 export const ChecklistBatchUpdateInputSchema = z.object({
@@ -685,7 +827,6 @@ export function externalizeObjectSchema<
 
 export type BeginInput = z.infer<typeof BeginInputSchema>;
 export type WorkItemCreateInput = z.infer<typeof WorkItemCreateInputSchema>;
-export type WorkItemPatchInput = z.infer<typeof WorkItemPatchInputSchema>;
 export type ChecklistBatchUpdateInput = z.infer<typeof ChecklistBatchUpdateInputSchema>;
 export type VerifyAndCompleteInput = z.infer<typeof VerifyAndCompleteInputSchema>;
 export type ReviewRequestCreateInput = z.infer<typeof ReviewRequestCreateInputSchema>;

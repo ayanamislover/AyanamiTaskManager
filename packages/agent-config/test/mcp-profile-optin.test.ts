@@ -39,13 +39,13 @@ function claudeServers(path: string): Record<string, unknown> {
 }
 
 /**
- * 新版默认提供完整的 core + memory 工具面；用户仍可显式切到 core-only 作为低内存降级。
+ * 新版默认提供完整的 core + memory + actions 工具面；用户仍可显式切到 core-only。
  * core 永远不可关闭，显式关闭 memory 必须真正从客户端配置移除，而不是只改界面状态。
  */
-describe("MCP profile 默认双入口并支持显式 core-only", () => {
-  it("默认启用集合包含 core 与 memory，且 core 关不掉", () => {
-    expect([...DEFAULT_MCP_PROFILES]).toEqual(["core", "memory"]);
-    expect(enabledMcpProfiles()).toEqual(["core", "memory"]);
+describe("MCP profile 默认完整入口并支持显式 core-only", () => {
+  it("默认启用集合包含 core、memory 与 actions，且 core 关不掉", () => {
+    expect([...DEFAULT_MCP_PROFILES]).toEqual(["core", "memory", "actions"]);
+    expect(enabledMcpProfiles()).toEqual(["core", "memory", "actions"]);
     expect(enabledMcpProfiles([])).toEqual(["core"]);
     // 只传 memory 也要把 core 补回来：没有 core 的 ATM 没有任何入口，
     // 那只可能是调用方漏了，不是用户想要一个空壳。
@@ -112,6 +112,7 @@ describe("MCP profile 默认双入口并支持显式 core-only", () => {
 
     installClaudeConfig({ ...WRITE, path });
     expect(Object.keys(claudeServers(path)).sort()).toEqual([
+      MCP_SERVER_NAMES.actions,
       MCP_SERVER_NAMES.core,
       MCP_SERVER_NAMES.memory,
       "other",
@@ -176,14 +177,14 @@ describe("MCP profile 默认双入口并支持显式 core-only", () => {
 
   it("「已安装」是精确匹配：显式 core-only 时多一个 memory 也算没配好", () => {
     const codexPath = join(scratch("atm-optin-exact-codex-"), "config.toml");
-    installCodexConfig({ ...WRITE, path: codexPath, profiles: ["core", "memory"] });
+    installCodexConfig({ ...WRITE, path: codexPath });
     // 装了两个、但只启用 core —— 必须判为「没配好」，否则界面一直显示已安装，
     // 用户没有任何入口去掉多出来的那个 server。
     expect(isCodexConfigInstalled(codexPath)).toBe(true);
     expect(isCodexConfigInstalled(codexPath, ["core"])).toBe(false);
 
     const claudePath = join(scratch("atm-optin-exact-claude-"), "claude_desktop_config.json");
-    installClaudeConfig({ ...WRITE, path: claudePath, profiles: ["core", "memory"] });
+    installClaudeConfig({ ...WRITE, path: claudePath });
     expect(isClaudeConfigInstalled(claudePath)).toBe(true);
     expect(isClaudeConfigInstalled(claudePath, ["core"])).toBe(false);
 
@@ -194,6 +195,7 @@ describe("MCP profile 默认双入口并支持显式 core-only", () => {
         mcpServers: {
           [MCP_SERVER_NAMES.core]: { command: "x.exe" },
           [MCP_SERVER_NAMES.memory]: { command: "x.exe" },
+          [MCP_SERVER_NAMES.actions]: { command: "x.exe" },
         },
       })}\n`,
     );
@@ -207,9 +209,12 @@ describe("MCP profile 默认双入口并支持显式 core-only", () => {
     for (const rendered of [byDefault.streamableHttp, byDefault.stdio, byDefault.generic]) {
       expect(rendered).toContain(MCP_SERVER_NAMES.core);
       expect(rendered).toContain(MCP_SERVER_NAMES.memory);
+      expect(rendered).toContain(MCP_SERVER_NAMES.actions);
     }
     const reduced = renderMcpConfigs(runtime, ["core"]);
     expect(reduced.streamableHttp).not.toContain(MCP_SERVER_NAMES.memory);
     expect(reduced.stdio).not.toContain(MCP_SERVER_NAMES.memory);
+    expect(reduced.streamableHttp).not.toContain(MCP_SERVER_NAMES.actions);
+    expect(reduced.stdio).not.toContain(MCP_SERVER_NAMES.actions);
   });
 });

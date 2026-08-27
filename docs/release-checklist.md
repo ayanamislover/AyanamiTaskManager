@@ -14,7 +14,7 @@
 - [x] `pnpm benchmark`
 - [x] 项目迁移从空库和 v1/v2 数据库均通过
 - [x] Registry 与项目库 `quick_check` 通过
-- [x] core 6 / memory 5 两个 MCP Profile 的 UTF-8 schema 各自不超过 7,680 bytes
+- [x] core 6 / memory 4 / actions 1 三个 MCP Profile 的 UTF-8 schema 各自不超过 7,680 bytes
 
 ## 桌面与可访问性
 
@@ -134,7 +134,7 @@ release/
 
 初版本清单把「MCP schema 总长度不超过 8 KB」记为「仓库里没有任何守卫会量这个体积」，是错的：守卫一直在 `packages/mcp/test/mcp.test.ts` 里，只是写作 `8_000` 这个字面量，当时的搜索没命中。该条已改回已验证。
 
-后续复查发现原守卫用 JavaScript 字符数冒充字节数：当时是 8085 个 UTF-16 code unit，实际 UTF-8 序列化为 8311 bytes，已经越过 8192 bytes 目标。现改为 `Buffer.byteLength(..., "utf8")` 的真实字节守卫，并从 8192 bytes 中固定预留 512 bytes；默认字段不再误列为 required，enum 不再重复携带 type，外部校验语义保持不变。早期单 Profile 的“12 个工具、7660 bytes”已经被双 Profile 交付取代：当前 core 6 与 memory 5 名称不重叠，联合为 11 个工具，两个 Profile 分别受 7680-byte 守卫约束；任何一侧吃掉预留余量前就会让测试失败。
+后续复查发现原守卫用 JavaScript 字符数冒充字节数：当时是 8085 个 UTF-16 code unit，实际 UTF-8 序列化为 8311 bytes，已经越过 8192 bytes 目标。现改为 `Buffer.byteLength(..., "utf8")` 的真实字节守卫，并从 8192 bytes 中固定预留 512 bytes；默认字段不再误列为 required，enum 不再重复携带 type，外部校验语义保持不变。当前 core 6、memory 4、actions 1 名称不重叠，联合为 11 个工具，三个 Profile 分别受 7680-byte 守卫约束；任何一侧吃掉预留余量前就会让测试失败。
 
 ## 1.0.18 验收结果
 

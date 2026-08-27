@@ -33,11 +33,12 @@ describe("Ayanami MCP", () => {
     const profiles = await connectProfiledClients(service, "mcp-test");
     const { client } = profiles;
 
-    const [coreListed, memoryListed] = await Promise.all([
+    const [coreListed, memoryListed, actionsListed] = await Promise.all([
       profiles.coreClient.listTools(),
       profiles.memoryClient.listTools(),
+      profiles.actionsClient.listTools(),
     ]);
-    const allTools = [...coreListed.tools, ...memoryListed.tools];
+    const allTools = [...coreListed.tools, ...memoryListed.tools, ...actionsListed.tools];
     expect(coreListed.tools.map((tool) => tool.name)).toEqual([
       "atm_begin",
       "atm_brief",
@@ -47,12 +48,12 @@ describe("Ayanami MCP", () => {
       "atm_end",
     ]);
     expect(memoryListed.tools.map((tool) => tool.name)).toEqual([
-      "atm_task_patch",
       "atm_progress_add",
       "atm_record",
       "atm_search",
       "atm_delta",
     ]);
+    expect(actionsListed.tools.map((tool) => tool.name)).toEqual(["atm_task_patch"]);
     const beginSchema = coreListed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {
       properties?: Record<string, unknown>;
       required?: string[];

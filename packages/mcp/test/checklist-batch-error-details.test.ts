@@ -25,7 +25,7 @@ describe("checklist batch typed error details", () => {
         throw new ChecklistBatchFailureError(reasons);
       },
     } as unknown as AyanamiTaskService;
-    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const server = createAyanamiMcpServer(service, { profile: "actions" });
     const client = new Client({ name: "checklist-batch-error-details", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

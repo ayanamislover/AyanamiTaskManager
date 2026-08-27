@@ -566,6 +566,7 @@ describe("读回已登记的 MCP 启动方式", () => {
         args: [...launch.args, "--profile", "memory"],
         env: launch.env,
       },
+      actions: null,
     });
   });
 
@@ -588,6 +589,7 @@ describe("读回已登记的 MCP 启动方式", () => {
         args: [...launch.args, "--profile", "memory"],
         env: launch.env,
       },
+      actions: null,
     });
   });
 
@@ -632,6 +634,7 @@ describe("读回已登记的 MCP 启动方式", () => {
         args: [...launch.args, "--profile", "memory"],
         env: launch.env,
       },
+      actions: null,
     });
   });
 

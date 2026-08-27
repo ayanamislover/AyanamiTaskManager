@@ -19,21 +19,48 @@ function adapter(input: Partial<McpProfileSyncAdapter> & Pick<McpProfileSyncAdap
 }
 
 describe("MCP Profile 用户切换事务", () => {
-  it("只有明确 false 才进入低内存降级，未设置时默认完整双 Profile", () => {
+  it("只有明确 false 才进入低内存降级，未设置时默认完整三 Profile", () => {
     expect(memoryProfileEnabledValue(undefined)).toBe(true);
     expect(memoryProfileEnabledValue(true)).toBe(true);
     expect(memoryProfileEnabledValue(false)).toBe(false);
   });
 
-  it("legacy 完整兼容入口按双 Profile 能力回滚，空配置不参与同步", () => {
+  it("legacy 按完整能力回滚，正式入口按实际扩展集合回滚", () => {
     const legacy = {
       legacy: { command: "legacy.exe", args: [] },
       core: null,
       memory: null,
+      actions: null,
     };
     expect(hasManagedMcpProfile(legacy)).toBe(true);
-    expect(profilesRepresentedBy(legacy)).toEqual(["core", "memory"]);
-    expect(hasManagedMcpProfile({ legacy: null, core: null, memory: null })).toBe(false);
+    expect(profilesRepresentedBy(legacy)).toEqual(["core", "memory", "actions"]);
+    expect(
+      profilesRepresentedBy({
+        legacy: null,
+        core: { command: "core", args: [] },
+        memory: { command: "memory", args: [] },
+        actions: null,
+      }),
+    ).toEqual(["core", "memory"]);
+    expect(
+      profilesRepresentedBy({
+        legacy: null,
+        core: { command: "core", args: [] },
+        memory: null,
+        actions: { command: "actions", args: [] },
+      }),
+    ).toEqual(["core", "actions"]);
+    expect(
+      profilesRepresentedBy({
+        legacy: null,
+        core: null,
+        memory: null,
+        actions: { command: "actions", args: [] },
+      }),
+    ).toEqual(["core", "actions"]);
+    expect(hasManagedMcpProfile({ legacy: null, core: null, memory: null, actions: null })).toBe(
+      false,
+    );
   });
 
   it("先同步全部已安装客户端，全部成功后才提交偏好", () => {
@@ -55,7 +82,7 @@ describe("MCP Profile 用户切换事务", () => {
       commit: () => events.push("commit"),
     });
 
-    expect(events).toEqual(["codex:core+memory", "claude:core+memory", "commit"]);
+    expect(events).toEqual(["codex:core+memory+actions", "claude:core+memory+actions", "commit"]);
     expect(result).toMatchObject({ enabled: true, status: "APPLIED", restartRequired: true });
     expect(result.clients.map((entry) => entry.status)).toEqual(["UPDATED", "UPDATED", "SKIPPED"]);
   });
