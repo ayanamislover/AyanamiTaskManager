@@ -51,6 +51,7 @@ import {
 } from "./agent-sessions.js";
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { EngineeringMetricsPanel } from "./project-statistics-panel.js";
+import { McpBridgePanel, type McpBridgeObservation } from "./mcp-bridge-panel.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
 import {
@@ -129,6 +130,7 @@ type DesktopBridge = {
     generic: string;
     agentRule: string;
   }>;
+  getMcpBridges?: () => Promise<McpBridgeObservation>;
   getMemoryProfile?: () => Promise<boolean>;
   setMemoryProfile?: (enabled: boolean) => Promise<McpProfileSwitchResult>;
   installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;
@@ -2195,6 +2197,7 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
             ) : null}
           </div>
         </section>
+        {desktop?.getMcpBridges ? <McpBridgePanel load={desktop.getMcpBridges} /> : null}
         <section className="atm-panel">
           <div className="atm-panel-head">
             <h2>维护与 Windows</h2>
