@@ -606,6 +606,10 @@ export class AyanamiTaskService {
     return (await this.#repository(projectCode)).brief(sessionId, maxChars);
   }
 
+  async briefSnapshot(projectCode: string, sessionId?: string | null) {
+    return (await this.#repository(projectCode)).briefSnapshot(sessionId);
+  }
+
   async planningContext(
     projectCode: string,
   ): Promise<{ objectiveId: string | null; milestoneId: string | null }> {

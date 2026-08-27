@@ -169,6 +169,40 @@ export type RecordView = {
   updatedAt: string;
 };
 
+export type BriefSnapshotRecord = {
+  key: string;
+  kind: string;
+  summary: string;
+  importance: string;
+  source_type: string;
+  source_actor_id: string | null;
+  source_session_id: string | null;
+  source_ref: string | null;
+};
+
+export type BriefSnapshot = {
+  truncated: false;
+  project: string;
+  seq: number;
+  objective: string | null;
+  milestone: string | null;
+  active: number;
+  blocked: number;
+  waitingUser: number;
+  waitingAgent: number;
+  own: string[];
+  next: string[];
+  records: BriefSnapshotRecord[];
+  currentTask: Record<string, unknown> | null;
+  handoff: {
+    summary: string;
+    nextAction: string;
+    checkpointSequence: number;
+  } | null;
+  recentProgress: string | null;
+  artifacts: Array<{ name: string; ref: string | null }>;
+};
+
 export type ReviewCandidateHash = { name: string; value: string };
 
 export type ReviewSubmissionView = {
@@ -3947,7 +3981,7 @@ export class ProjectRepository {
     transaction();
   }
 
-  brief(sessionId?: string | null, maxChars = 1200): any {
+  briefSnapshot(sessionId?: string | null): BriefSnapshot {
     const objective = this.#sqlite
       .prepare("SELECT * FROM objectives WHERE status = 'ACTIVE' ORDER BY updated_at DESC LIMIT 1")
       .get() as any;
@@ -4005,9 +4039,11 @@ export class ProjectRepository {
             | { summary: string; next_action: string; checkpoint_sequence: number }
             | undefined)
         : undefined;
-    const records = this.#sqlite
-      .prepare(
-        `SELECT kind, summary, importance, source_type, source_actor_id, source_session_id, source_ref
+    const records = (
+      this.#sqlite
+        .prepare(
+          `SELECT local_no, kind, summary, importance, source_type, source_actor_id,
+                source_session_id, source_ref
          FROM records
          WHERE status = 'ACTIVE' AND (
            (kind = 'CONSTRAINT' AND source_type = 'USER') OR
@@ -4015,9 +4051,22 @@ export class ProjectRepository {
          )
          ORDER BY CASE WHEN source_type = 'USER' AND kind = 'CONSTRAINT' THEN 0 ELSE 1 END,
                   CASE importance WHEN 'CRITICAL' THEN 0 ELSE 1 END,
-                  updated_at DESC LIMIT 8`,
-      )
-      .all() as Array<Record<string, unknown>>;
+                  updated_at DESC, local_no DESC LIMIT 8`,
+        )
+        .all() as Array<{
+        local_no: number;
+        kind: string;
+        summary: string;
+        importance: string;
+        source_type: string;
+        source_actor_id: string | null;
+        source_session_id: string | null;
+        source_ref: string | null;
+      }>
+    ).map(({ local_no, ...record }) => ({
+      key: this.recordKey({ local_no, kind: record.kind }),
+      ...record,
+    }));
     const progress = currentRow
       ? (this.#sqlite
           .prepare(
@@ -4036,7 +4085,7 @@ export class ProjectRepository {
     const next = [
       ...new Set([...(handoff?.next_action ? [handoff.next_action] : []), ...ready]),
     ].slice(0, 3);
-    const result: Record<string, any> = {
+    return {
       truncated: false,
       project: code,
       seq: this.meta.sequence,
@@ -4076,6 +4125,20 @@ export class ProjectRepository {
       recentProgress: progress?.summary ?? null,
       artifacts,
     };
+  }
+
+  brief(sessionId?: string | null, maxChars = 1200): any {
+    const snapshot = this.briefSnapshot(sessionId);
+    const result: Record<string, any> = {
+      ...snapshot,
+      records: snapshot.records.map((record) => {
+        const legacyRecord: Partial<BriefSnapshotRecord> = { ...record };
+        delete legacyRecord.key;
+        return legacyRecord;
+      }),
+    };
+    const code = this.meta.code;
+    const next = result.next as string[];
     const cap = Math.max(300, Math.min(5000, maxChars));
     if (JSON.stringify(result).length <= cap) return result;
     result.truncated = true;
