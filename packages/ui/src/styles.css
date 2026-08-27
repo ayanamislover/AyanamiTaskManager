@@ -146,7 +146,7 @@ html[data-theme-switching="true"] *::after {
   font-weight: 650;
 }
 .atm-nav-disclosure svg {
-  transition: transform var(--atm-duration-hover) var(--atm-ease-out);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
 }
 .atm-nav-disclosure[aria-expanded="true"] svg {
   transform: rotate(90deg);
@@ -773,7 +773,7 @@ button.atm-row:hover {
 .atm-engineering-toggle > svg {
   flex: 0 0 auto;
   color: var(--atm-text-muted);
-  transition: transform var(--atm-duration-hover) var(--atm-ease-out);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
 }
 .atm-engineering.is-collapsed .atm-engineering-toggle > svg {
   transform: rotate(-90deg);
@@ -1006,7 +1006,7 @@ button.atm-row:hover {
 .atm-select-trigger > svg {
   flex: 0 0 auto;
   color: var(--atm-text-muted);
-  transition: transform 160ms var(--atm-ease-out);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
 }
 .atm-select.atm-field-shell[data-open="true"] {
   border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
@@ -1039,8 +1039,8 @@ button.atm-row:hover {
   transform: translateY(0) scale(1);
   transform-origin: top left;
   transition:
-    opacity 160ms var(--atm-ease-out),
-    transform 160ms var(--atm-ease-out);
+    opacity var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-hover) var(--atm-ease-out);
 }
 .atm-select[data-placement="top"] .atm-select-popover {
   top: auto;
@@ -1197,7 +1197,7 @@ button.atm-row:hover {
   transform: translateY(-1px);
   transition:
     opacity var(--atm-duration-hover) var(--atm-ease-out),
-    transform var(--atm-duration-hover) var(--atm-ease-out);
+    transform var(--atm-duration-hover) var(--atm-ease-in-out);
 }
 .atm-table-sort[data-active="true"] {
   color: var(--atm-primary-strong);
@@ -1932,24 +1932,40 @@ button.atm-row:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .atm-nav button,
+  .atm-nav-disclosure,
+  .atm-sidebar-settings,
   .atm-button,
-  .atm-project {
+  .atm-project,
+  .atm-notification-option {
     transition-property: color, background-color, border-color;
   }
 
   .atm-nav button:active,
+  .atm-nav-disclosure:active,
+  .atm-sidebar-settings:active,
+  .atm-nav-disclosure[aria-expanded="true"] svg,
   .atm-button:active,
   .atm-project:hover,
+  .atm-notification-option:active,
+  .atm-engineering.is-collapsed .atm-engineering-toggle > svg,
+  .atm-table-sort > svg,
+  .atm-table-sort[data-active="true"][data-direction="asc"] > svg,
   .atm-modal:not(.atm-command),
   .atm-drawer,
   .atm-notice {
     transform: none;
   }
 
+  .atm-nav-disclosure svg,
+  .atm-engineering-toggle > svg,
+  .atm-table-sort > svg {
+    transition-property: color, opacity;
+  }
+
   .atm-modal:not(.atm-command),
   .atm-drawer,
   .atm-notice {
-    transition: opacity 160ms var(--atm-ease-out);
+    transition: opacity var(--atm-duration-hover) var(--atm-ease-out);
   }
 
   .atm-skeleton::after {

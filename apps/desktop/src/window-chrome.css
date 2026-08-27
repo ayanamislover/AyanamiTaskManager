@@ -129,7 +129,7 @@ html[data-atm-desktop="true"] .atm-drawer-head {
 }
 
 .atm-window-button:active {
-  transform: scale(0.94);
+  transform: scale(0.97);
 }
 
 .atm-window-button:focus-visible {

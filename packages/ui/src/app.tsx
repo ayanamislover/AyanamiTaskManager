@@ -52,6 +52,7 @@ import {
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { EngineeringMetricsPanel } from "./project-statistics-panel.js";
 import { McpBridgePanel, type McpBridgeObservation } from "./mcp-bridge-panel.js";
+import { cancelNoticeTimer, restartNoticeTimer } from "./notice-lifecycle.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
 import {
@@ -4564,11 +4565,13 @@ function App({
   const [hasManualTheme, setHasManualTheme] = useState(() => readStoredTheme() !== null);
   const [palette, setPalette] = useState(false);
   const [notice, setNotice] = useState("");
+  const noticeTimerRef = useRef<number | null>(null);
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
   const notify = (message: string) => {
     setNotice(message);
-    window.setTimeout(() => setNotice(""), 2800);
+    restartNoticeTimer(noticeTimerRef, () => setNotice(""));
   };
+  useEffect(() => () => cancelNoticeTimer(noticeTimerRef), []);
   useEffect(() => {
     location.hash = route;
   }, [route]);
