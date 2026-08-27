@@ -61,7 +61,7 @@ describe("Streamable HTTP MCP", () => {
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
-      result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.17" } },
+      result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.18" } },
     });
     expect(body.result.instructions).toContain("legacy 兼容入口");
     expect(body.result.instructions).toContain("重启 Agent 客户端");
