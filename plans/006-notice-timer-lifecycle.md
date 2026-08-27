@@ -1,7 +1,7 @@
 # 006 — 修正 Notice 计时器生命周期
 
-- **Status**: TODO
-- **Commit**: 9e1f7c8
+- **Status**: DONE
+- **Commit**: db562e1
 - **Severity**: MEDIUM
 - **Category**: Interruptibility & Timing
 - **Estimated scope**: 2 files, small
@@ -49,3 +49,8 @@ const notify = (message: string) => {
 - **Feel check**: 1 秒内连续触发两次保存/复制反馈，第二条从自身出现起保持完整 2.8 秒，不被第一条
   timer 提前移除。
 - **Done when**: RED→GREEN，timer cleanup 可观察且 Notice 现有样式无回归。
+
+## Result
+
+- fake-timer 测试 2/2：替换消息拥有完整 2800ms，旧 timer 被取消，owner cleanup 后无回调。
+- 相关 Playwright、UI typecheck、ESLint、Prettier 与 diff-check 通过。

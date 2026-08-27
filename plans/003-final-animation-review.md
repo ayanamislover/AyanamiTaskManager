@@ -1,7 +1,7 @@
 # 最终动效严格复核
 
-> 2026-08-27 reconcile：原结论绑定早期窗口修复批次。1.0.16 终审发现三处遗漏，
-> 由 004–006 计划收口；在这些计划完成并重新实测前，本文件的 PASS 暂停生效。
+> 2026-08-27 final：1.0.16 终审发现的三处遗漏已由 004–006 收口并重新实测；
+> 本结论绑定 `db562e1`、`e19f227` 及下列证据。最终 1.0.17 安装包仍须通过发布总门禁。
 
 ## Before / After / Why
 
@@ -24,10 +24,19 @@
 - 无 height/width/top/left/margin/padding 布局动画。
 - 位移/缩放均有 `prefers-reduced-motion` 降级；hover 位移仅细指针启用。
 - Ctrl/Cmd+K、主导航、列表和空状态保持即时，无装饰性 stagger。
-- packaged Electron 已用真实鼠标坐标验证三键、scrollbar 轨道与 thumb；关闭后 daemon 健康并可恢复窗口。
+- 1.0.16 packaged Electron 基线已用真实鼠标坐标验证三键、scrollbar 轨道与 thumb；关闭后 daemon
+  健康并可恢复窗口。004–006 的源码候选另经完整 Playwright 14/14 复核，最终 1.0.17 会再跑安装版门禁。
+
+## Final evidence
+
+- `pnpm test:e2e`：14/14；含鼠标/ArrowDown/Enter 自绘下拉双路径、reduced motion、暗黑主题、
+  Agent 聚合、时间线、工程统计和 1366/1920/3440 密度。
+- `design-system-guards.test.ts` + `notice-lifecycle.test.ts`：7/7；关键 mutation 均先验红。
+- 严格扫描：`transition: all`、裸 `ease-in`、`scale(0)`、布局属性 transition、生产 `<select>` 均 0 命中。
+- 目视截图：`e2e-project-1920.png`、`e2e-theme-dark.png`、`e2e-custom-select-dark.png`。
 
 ## Verdict
 
-**CHANGES REQUIRED**。既有空间与材质方向保持不变，但 reduced-motion 漏项、键盘打开
-下拉仍播放入场、Notice 旧计时器可能提前清除新消息必须先按 004–006 修复。抽屉/Notice
-立即安全关闭、不引入 exit presence 是 002 中已记录的有意复杂度取舍，不重新扩 scope。
+**PASS（source candidate）**。reduced-motion 漏项、键盘打开下拉入场与 Notice 计时器竞争均已
+按 004–006 修复并通过真实浏览器复核。抽屉/Notice 立即安全关闭、不引入 exit presence 是 002
+中已记录的有意复杂度取舍；工程统计继续默认折叠且不为内容区增加动画，避免重新引入卡顿。
