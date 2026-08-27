@@ -1,10 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { freemem, homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { mcpLaunch, MCP_RUNTIME_LINK, MCP_STDIO_FILENAME } from "../apps/desktop/src/mcp-launch.js";
+import { MCP_STDIO_FILENAME } from "../apps/desktop/src/mcp-launch.js";
+import { configuredBridgeLaunch, type McpProfile } from "./mcp-bridge-launch.js";
 
 const run = promisify(execFile);
 
@@ -30,6 +31,7 @@ const run = promisify(execFile);
  * 用法：
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts                 按客户端实际配置量 1 与 10
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 15
+ *   pnpm exec tsx scripts/mcp-bridge-memory.ts --profile memory
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --runtime node  拿本机 node 当参照下限
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --json out.json
  *
@@ -63,30 +65,25 @@ function dataDir(): string {
  * 默认量的是**客户端配置里真正写着的那条命令**，不是我们自己拼的。
  * 之前吃过一次亏：烟测证明了"桥能跑"，却从没证明过"配置里写的那条路径能跑"。
  */
-function configuredLaunch(): { command: string; args: string[]; env: Record<string, string> } {
-  const claudeCode = join(homedir(), ".claude.json");
-  if (existsSync(claudeCode)) {
-    const entry = (
-      JSON.parse(readFileSync(claudeCode, "utf8")) as {
-        mcpServers?: Record<
-          string,
-          { command: string; args: string[]; env?: Record<string, string> }
-        >;
-      }
-    ).mcpServers?.["ayanami-task-manager"];
-    if (entry?.command)
-      return { command: entry.command, args: entry.args ?? [], env: entry.env ?? {} };
-  }
-  const root = dataDir();
-  return mcpLaunch({
-    execPath: join(root, MCP_RUNTIME_LINK, "AyanamiTaskManager.exe"),
-    dataDir: root,
-  });
+function configuredLaunch(profile: McpProfile): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+} {
+  return configuredBridgeLaunch({ profile, dataDir: dataDir() });
 }
 
 /** 参照下限：用本机的普通 node 跑同一份桥接脚本，看不带 Electron 能到多少。 */
-function nodeLaunch(): { command: string; args: string[]; env: Record<string, string> } {
-  return { command: process.execPath, args: [join(dataDir(), MCP_STDIO_FILENAME)], env: {} };
+function nodeLaunch(profile: McpProfile): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+} {
+  return {
+    command: process.execPath,
+    args: [join(dataDir(), MCP_STDIO_FILENAME), "--profile", profile],
+    env: {},
+  };
 }
 
 function delay(ms: number): Promise<void> {
@@ -227,8 +224,12 @@ function mib(bytes: number): string {
 async function main(): Promise<void> {
   const bridges = Number(argValue("bridges", "10"));
   if (!Number.isInteger(bridges) || bridges < 2) throw new Error("--bridges 至少为 2");
+  const requestedProfile = argValue("profile", "core");
+  if (requestedProfile !== "core" && requestedProfile !== "memory")
+    throw new Error("--profile 只接受 core 或 memory");
+  const profile: McpProfile = requestedProfile;
   const runtime = argValue("runtime", "configured");
-  const base = runtime === "node" ? nodeLaunch() : configuredLaunch();
+  const base = runtime === "node" ? nodeLaunch(profile) : configuredLaunch(profile);
   // --node-args 用来试 V8 调参：每个 bridge 的边际成本基本就是 Node 自己的堆与启动开销，
   // 换运行时省不掉，调堆参数才可能省。放在脚本参数里是为了让"省了多少"可复算。
   const nodeArgs = argValue("node-args", "")
@@ -238,7 +239,7 @@ async function main(): Promise<void> {
   const launch = { ...base, args: [...nodeArgs, ...base.args] };
   const settleMs = Number(argValue("settle-ms", "6000"));
 
-  console.log(`运行时 : ${runtime}`);
+  console.log(`运行时 : ${runtime} (${profile})`);
   console.log(`command: ${launch.command}`);
   console.log(`args   : ${launch.args.join(" ")}`);
   console.log("");
@@ -313,7 +314,7 @@ async function main(): Promise<void> {
   if (jsonPath) {
     writeFileSync(
       jsonPath,
-      `${JSON.stringify({ runtime, command: launch.command, bridges, single, rounds, marginal, systemMedian, systemSpread }, null, 2)}\n`,
+      `${JSON.stringify({ runtime, profile, command: launch.command, bridges, single, rounds, marginal, systemMedian, systemSpread }, null, 2)}\n`,
       "utf8",
     );
     console.log(`\n已写入 ${jsonPath}`);
