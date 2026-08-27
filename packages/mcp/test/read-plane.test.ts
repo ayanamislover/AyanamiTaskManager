@@ -576,7 +576,7 @@ describe("MCP read plane", () => {
             project: project.code,
             task_key: taskKey,
             view: "full",
-            field_mask: ["description"],
+            field_mask: ["key", "description"],
             max_chars: 700,
             cursor,
           },
@@ -671,7 +671,7 @@ describe("MCP read plane", () => {
           arguments: {
             project: project.code,
             query: created.key,
-            field_mask: ["detail"],
+            field_mask: ["key", "detail"],
             max_chars: 700,
             cursor,
           },
