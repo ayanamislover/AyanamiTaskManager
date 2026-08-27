@@ -80,6 +80,16 @@ describe("Agent 文档正式数据根分发", () => {
     expect(integration).toContain("MCP 工具面当前为 v3");
     expect(integration).toContain("三个默认同时登记、工具名不重叠的静态 Profile");
     expect(integration).not.toContain("`atm_checklist`");
+    for (const content of [guide, integration]) {
+      expect(content).toContain("### 固定 mutation ACK");
+      expect(content).toContain("`entities_truncated`");
+      expect(content).toContain('"name": "atm_search"');
+      expect(content).toContain("operation.mutations[].response.planningRootProvisioned");
+      expect(content).not.toContain('planning_root: "PROVISIONED"');
+    }
+    expect(
+      readFileSync(join(dataDir, "docs", "generated", "mutation-acknowledgement.md"), "utf8"),
+    ).toBe(readFileSync("docs/generated/mutation-acknowledgement.md", "utf8"));
   });
 
   it("把 atm-plan 与 atm-task Skills 发布到设备无关数据根", () => {

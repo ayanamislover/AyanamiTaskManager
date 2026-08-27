@@ -38,6 +38,7 @@ import {
   type AyanamiToolProfile,
   type DefineToolConfig,
 } from "./tool-registry.js";
+import { MUTATION_ACK_CONTRACT } from "./mutation-ack-contract.js";
 import { registerPublishedToolHandlers } from "./tool-publication.js";
 
 const outputSchema = z.object({}).catchall(z.unknown());
@@ -155,9 +156,6 @@ type MutationEntityReference = {
   version: number | null;
 };
 
-const MUTATION_ACK_ENTITY_LIMIT = 12;
-const MUTATION_ACK_ENTITY_CHARS = 1800;
-
 function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -265,9 +263,9 @@ function mutationEntityPreview(entities: MutationEntityReference[]): MutationEnt
   const preview: MutationEntityReference[] = [];
   let chars = 2;
   for (const entity of entities) {
-    if (preview.length >= MUTATION_ACK_ENTITY_LIMIT) break;
+    if (preview.length >= MUTATION_ACK_CONTRACT.entityPreview.maxItems) break;
     const entityChars = JSON.stringify(entity).length + (preview.length === 0 ? 0 : 1);
-    if (chars + entityChars > MUTATION_ACK_ENTITY_CHARS) break;
+    if (chars + entityChars > MUTATION_ACK_CONTRACT.entityPreview.maxChars) break;
     preview.push(entity);
     chars += entityChars;
   }
@@ -307,13 +305,13 @@ function mutationAck(
     entity_count: entities.length,
     entities_truncated: preview.length < entities.length,
     details_cursor: {
-      name: "atm_search",
+      name: MUTATION_ACK_CONTRACT.detailsCursor.name,
       arguments: {
         project: normalizedProject,
         op_id: opId,
         session,
-        field_mask: ["op_id", "entities"],
-        max_chars: 50_000,
+        field_mask: [...MUTATION_ACK_CONTRACT.detailsCursor.fieldMask],
+        max_chars: MUTATION_ACK_CONTRACT.detailsCursor.maxChars,
       },
     },
   };

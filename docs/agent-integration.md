@@ -57,8 +57,60 @@ ATM 从 `cwd` 确定性采集 Git 上下文，使用只读查询得到 branch、
 
 Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直接执行单元。
 
-新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑，并在回执里返回 `planning_root: "PROVISIONED"`。这是机器代替人做出的规划决策，因此它是显式回执而不是静默行为：拿到它就应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
+新项目不需要先建 Objective。项目还没有活动目标时，`atm_task_create` 会补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑。这个规划决策保存在 durable operation receipt；按下方固定 mutation ACK 说明精确回查后，应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不触发补建；需要在一个项目里再建目标或里程碑仍走 REST。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
+
+<!-- MUTATION_ACK_CONTRACT:BEGIN -->
+
+### 固定 mutation ACK
+
+所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
+
+| 字段                 | 语义                                                           |
+| -------------------- | -------------------------------------------------------------- |
+| `ok`                 | 写操作是否被 ATM 接受。                                        |
+| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                        |
+| `project`            | 规范化后的项目代码。                                           |
+| `session`            | 实际承载写操作的 Session。                                     |
+| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                     |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。 |
+| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                         |
+| `entities_truncated` | 实体预览是否被条数或字符预算截断。                             |
+| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。     |
+
+`entities` 最多预览 12 项且不超过 1800 个 JSON 字符。以 `entity_count` 判断精确总数；`entities_truncated=true` 时可直接执行返回的 `details_cursor` 做一次最多 50000 字符的 durable 回查：
+
+```json
+{
+  "name": "atm_search",
+  "arguments": {
+    "project": "ATM",
+    "op_id": "<same-op-id>",
+    "session": "<returned-session>",
+    "field_mask": ["op_id", "entities"],
+    "max_chars": 50000
+  }
+}
+```
+
+需要操作特有结果时，仍以同一 `project`、`op_id` 和返回的 `session` 精确读取 durable operation receipt，只把 `field_mask` 改为下例；不要重新执行 mutation：
+
+```json
+{
+  "name": "atm_search",
+  "arguments": {
+    "project": "ATM",
+    "op_id": "<same-op-id>",
+    "session": "<returned-session>",
+    "field_mask": ["op_id", "mutations"],
+    "max_chars": 50000
+  }
+}
+```
+
+例如自动补建规划根的事实位于 `operation.mutations[].response.planningRootProvisioned`；mutation ACK 顶层不再返回 `planning_root`。字段读取若返回 `done=false`，把 `next_cursor` 作为 `cursor` 加回同一个 `atm_search` 调用继续读，直到 `done=true`。
+
+<!-- MUTATION_ACK_CONTRACT:END -->
 
 MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
@@ -73,6 +125,8 @@ MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留完整 11 工具，避免旧会话在升级中途静默丢失 memory 能力；它不会写入任何新配置。ATM 启动后会把磁盘上的 legacy 或旧 core+memory 配置迁移为显式 core / memory / actions，补齐 `atm_task_patch` 所在的 actions，Agent 客户端重启后即回到完整拆分工具面。
 
 正式 Profile 的 descriptor bytes、Profile hash、逐工具安全注解与 schema hash 由 registry 生成到 `docs/generated/mcp-tool-contracts.md`；文档一致性测试会拒绝手工漂移。
+
+Mutation 固定回执、实体预览预算和 operation receipt 回查示例由 `MUTATION_ACK_CONTRACT` 生成到 `docs/generated/mutation-acknowledgement.md`；Guide 与本文的同名章节必须逐字同步。
 
 状态与 operation 的 canonical 表由同一 registry 生成到 [`docs/generated/work-item-operations.md`](./generated/work-item-operations.md)；本文不再维护第二份状态机。
 
