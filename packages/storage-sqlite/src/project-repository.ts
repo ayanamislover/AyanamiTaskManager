@@ -15,32 +15,56 @@ import {
   type WorkItemOperation,
   type WorkItemPhase,
   type WorkItemStatus,
-  type WorkItemWaitingOn,
   type EvidenceInput,
   type ChecklistBatchFailureReason,
   type SearchHit,
   type SearchPage,
   type RecordView,
-  type SessionView as ProtocolSessionView,
   type TaskViewName,
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { assertCompletionGates } from "./completion-gates.js";
+import { ContextReadModel } from "./context-read-model.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
+import { OutboxReadModel } from "./outbox-read-model.js";
+import type {
+  BriefSnapshot,
+  ChecklistView,
+  ProgressUpdateView,
+  RecordPageFilters,
+  RecordProjectionPage,
+  SessionPageFilters,
+  SessionProjectionPage,
+  SessionView,
+  TaskViewProjectionPage,
+  WorkItemListFilters,
+  WorkItemPageFilters,
+  WorkItemProjectionPage,
+  WorkItemView,
+} from "./read-model-types.js";
+import { RecordReadModel } from "./record-read-model.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
-import { decodeRecordListCursor, encodeRecordListCursor } from "./record-list-pagination.js";
-import {
-  decodeSessionListCursor,
-  encodeSessionListCursor,
-  type SessionListSelection,
-} from "./session-list-pagination.js";
-import {
-  canonicalTaskListSelection,
-  decodeTaskListCursor,
-  encodeTaskListCursor,
-  type TaskListSelection,
-} from "./task-list-pagination.js";
-import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
+import { SessionReadModel } from "./session-read-model.js";
+import { TaskReadModel } from "./task-read-model.js";
+import type { TaskViewProjectionRow } from "./task-view-query.js";
+
+export type {
+  BriefSnapshot,
+  BriefSnapshotRecord,
+  ChecklistView,
+  ProgressUpdateView,
+  RecordPageFilters,
+  RecordProjectionPage,
+  SessionPageFilters,
+  SessionProjectionPage,
+  SessionView,
+  TaskViewProjectionPage,
+  WorkItemListFilters,
+  WorkItemPageFilters,
+  WorkItemProgressBreakdown,
+  WorkItemProjectionPage,
+  WorkItemView,
+} from "./read-model-types.js";
 
 function storedWorkItemPhase(row: { status: WorkItemStatus; phase?: WorkItemPhase | null }) {
   return (row.phase ??
@@ -169,173 +193,6 @@ export type WorkItemPlanningRoot = {
   milestoneTitle: string;
 };
 
-export type WorkItemListFilters = {
-  status?: string;
-  assigneeAgentId?: string;
-  parentId?: string;
-  parentKey?: string;
-  milestoneId?: string;
-  readyOnly?: boolean;
-  query?: string;
-  limit?: number;
-  offset?: number;
-};
-
-export type WorkItemPageFilters = Omit<WorkItemListFilters, "offset"> & {
-  cursor?: string;
-};
-
-export type TaskViewProjectionPage = {
-  items: TaskViewProjectionRow[];
-  itemCursors: string[];
-  nextCursor: string | null;
-  retryCursor: string;
-  hasMore: boolean;
-};
-
-export type WorkItemProjectionPage = {
-  items: WorkItemView[];
-  itemCursors: string[];
-  nextCursor: string | null;
-  retryCursor: string;
-  hasMore: boolean;
-};
-
-export type WorkItemView = {
-  id: string;
-  key: string;
-  localNo: number;
-  parentId: string | null;
-  parentKey: string | null;
-  objectiveId: string;
-  milestoneId: string | null;
-  type: string;
-  title: string;
-  description: string;
-  acceptance: string[];
-  status: WorkItemStatus;
-  phase: WorkItemPhase;
-  waitingOn: WorkItemWaitingOn | null;
-  phaseInferred: boolean;
-  priority: string;
-  assigneeAgentId: string | null;
-  claimedBySessionId: string | null;
-  claimLeaseUntil: string | null;
-  progress: number;
-  reportedProgress: number | null;
-  progressSource: string;
-  progressBreakdown: WorkItemProgressBreakdown;
-  weight: number;
-  blockedReason: string | null;
-  waitingFor: string | null;
-  cancelReason: string | null;
-  duplicateOf: string | null;
-  supersededBy: string | null;
-  targetDate: string | null;
-  discoveredFrom: string | null;
-  discoveredCount: number;
-  everClaimedAt: string | null;
-  lastStartedAt: string | null;
-  lastSessionClosedAt: string | null;
-  lastEvidenceAt: string | null;
-  version: number;
-  updatedAt: string;
-};
-
-export type WorkItemProgressBreakdown = {
-  computed: number;
-  reported: number | null;
-  source: string;
-  doneWeight: number;
-  totalWeight: number;
-  doneStages: number;
-  totalStages: number;
-  blocker: string | null;
-};
-
-export type ChecklistView = {
-  id: string;
-  title: string;
-  kind: string;
-  status: string;
-  weight: number;
-  evidenceRequired: boolean;
-  evidence: unknown[];
-  version: number;
-};
-
-export type RecordPageFilters = { limit?: number; cursor?: string };
-
-export type RecordProjectionPage = {
-  items: RecordView[];
-  itemCursors: string[];
-  nextCursor: string | null;
-  retryCursor: string;
-  hasMore: boolean;
-};
-
-export type BriefSnapshotRecord = {
-  key: string;
-  kind: string;
-  summary: string;
-  importance: string;
-  source_type: string;
-  source_actor_id: string | null;
-  source_session_id: string | null;
-  source_ref: string | null;
-};
-
-export type BriefSnapshot = {
-  truncated: false;
-  project: string;
-  seq: number;
-  objective: string | null;
-  milestone: string | null;
-  active: number;
-  blocked: number;
-  waitingUser: number;
-  waitingAgent: number;
-  own: string[];
-  next: string[];
-  records: BriefSnapshotRecord[];
-  currentTask: Record<string, unknown> | null;
-  handoff: {
-    summary: string;
-    nextAction: string;
-    checkpointSequence: number;
-  } | null;
-  recentProgress: string | null;
-  artifacts: Array<{ name: string; ref: string | null }>;
-};
-
-export type ProgressUpdateView = {
-  id: string;
-  taskKey: string;
-  percent: number | null;
-  progressBucket: number | null;
-  summary: string;
-  completed: Array<string | { text: string; workItemKey?: string }>;
-  next: string[];
-  blocker: string | null;
-  actor: string;
-  sessionId: string | null;
-  evidence: unknown[];
-  opId: string | null;
-  createdAt: string;
-};
-
-export type SessionView = ProtocolSessionView;
-
-export type SessionPageFilters = { limit?: number; cursor?: string };
-
-export type SessionProjectionPage = {
-  items: SessionView[];
-  itemCursors: string[];
-  nextCursor: string | null;
-  retryCursor: string;
-  hasMore: boolean;
-};
-
 export type ReviewCandidateHash = { name: string; value: string };
 
 export type ReviewSubmissionView = {
@@ -378,72 +235,35 @@ export type SessionMutationExecution<T> = {
   resolution: MutationActorResolution;
 };
 
-function workItemFromRow(
-  row: any,
-  projectCode: string,
-  progressBreakdown: WorkItemProgressBreakdown,
-): WorkItemView {
-  const status = row.status as WorkItemStatus;
-  const phase = (row.phase ??
-    (status === "WAITING_AGENT" || status === "WAITING_USER"
-      ? "IN_PROGRESS"
-      : status)) as WorkItemPhase;
-  return {
-    id: row.id,
-    key: `${projectCode}-T-${String(row.local_no).padStart(4, "0")}`,
-    localNo: row.local_no,
-    parentId: row.parent_id,
-    parentKey: row.parent_key ?? null,
-    objectiveId: row.objective_id,
-    milestoneId: row.milestone_id,
-    type: row.type,
-    title: row.title,
-    description: row.description,
-    acceptance: json(row.acceptance_json, []),
-    status,
-    phase,
-    waitingOn:
-      row.waiting_on ??
-      (status === "WAITING_AGENT" ? "AGENT" : status === "WAITING_USER" ? "USER" : null),
-    phaseInferred:
-      Number(row.phase_inferred ?? (status === "WAITING_AGENT" || status === "WAITING_USER")) === 1,
-    priority: row.priority,
-    assigneeAgentId: row.assignee_agent_id,
-    claimedBySessionId: row.claimed_by_session_id,
-    claimLeaseUntil: row.claim_lease_until,
-    progress: row.computed_progress,
-    reportedProgress: row.reported_progress,
-    progressSource: row.progress_source,
-    progressBreakdown,
-    weight: row.weight,
-    blockedReason: row.blocked_reason,
-    waitingFor: row.waiting_for,
-    cancelReason: row.cancel_reason ?? null,
-    duplicateOf: row.duplicate_of_key ?? null,
-    supersededBy: row.superseded_by_key ?? null,
-    targetDate: row.target_date,
-    discoveredFrom:
-      typeof row.discovered_from_local_no === "number"
-        ? `${projectCode}-T-${String(row.discovered_from_local_no).padStart(4, "0")}`
-        : null,
-    discoveredCount: Number(row.discovered_count ?? 0),
-    everClaimedAt: row.ever_claimed_at ?? null,
-    lastStartedAt: row.last_started_at ?? null,
-    lastSessionClosedAt: row.last_session_closed_at ?? null,
-    lastEvidenceAt: row.last_evidence_at ?? null,
-    version: row.version,
-    updatedAt: row.updated_at,
-  };
-}
-
 export class ProjectRepository {
   readonly database: ManagedDatabase;
   readonly #sqlite: Database.Database;
+  readonly #contextReads: ContextReadModel;
+  readonly #outboxReads: OutboxReadModel;
+  readonly #recordReads: RecordReadModel;
+  readonly #sessionReads: SessionReadModel;
+  readonly #taskReads: TaskReadModel;
   #activeOperationId: string | null = null;
 
   constructor(database: ManagedDatabase) {
     this.database = database;
     this.#sqlite = database.sqlite;
+    const projectCode = () => this.meta.code;
+    this.#taskReads = new TaskReadModel(this.#sqlite, projectCode);
+    this.#sessionReads = new SessionReadModel(this.#sqlite, projectCode, (workItemId) =>
+      this.#taskReads.taskKeyForId(workItemId),
+    );
+    this.#outboxReads = new OutboxReadModel(this.#sqlite);
+    this.#recordReads = new RecordReadModel(this.#sqlite, projectCode, (workItemId) =>
+      this.#taskReads.taskKeyForId(workItemId),
+    );
+    this.#contextReads = new ContextReadModel(
+      this.#sqlite,
+      () => ({ code: this.meta.code, sequence: this.meta.sequence }),
+      () => this.listWorkItems({ readyOnly: true, limit: 3 }),
+      (key) => this.getWorkItem(key),
+      (row) => this.#recordReads.recordKey(row),
+    );
   }
 
   get meta(): { id: string; code: string; name: string; sequence: number; version: number } {
@@ -700,70 +520,11 @@ export class ProjectRepository {
   }
 
   getSession(id: string): any {
-    const row = this.#sqlite
-      .prepare(
-        `SELECT session.*, agent.display_name, agent.client_kind, agent.capabilities_json
-         FROM agent_sessions session
-         JOIN agents agent ON agent.id = session.agent_id
-         WHERE session.id = ?`,
-      )
-      .get(id);
-    if (!row)
-      throw new AtmError("SESSION_NOT_FOUND", {
-        message: `Session 不存在：${id}`,
-        details: { entity: "SESSION", reference: id },
-      });
-    return row;
+    return this.#sessionReads.getSession(id);
   }
 
   getSessionView(id: string): SessionView {
-    return this.sessionViewFromRow(this.getSession(id));
-  }
-
-  private sessionViewFromRow(row: any): SessionView {
-    const nullableBoolean = (value: unknown): boolean | null =>
-      value == null ? null : Boolean(value);
-    const currentTaskKey =
-      row.current_task_local_no === null || row.current_task_local_no === undefined
-        ? row.current_work_item_id
-          ? this.taskKeyForId(String(row.current_work_item_id))
-          : null
-        : `${this.meta.code}-T-${String(row.current_task_local_no).padStart(4, "0")}`;
-    return {
-      id: String(row.id),
-      agentId: String(row.agent_id),
-      displayName: String(row.display_name),
-      clientKind: String(row.client_kind),
-      capabilities: json(row.capabilities_json, []),
-      parentSessionId: row.parent_session_id ?? null,
-      predecessorSessionId: row.predecessor_session_id ?? null,
-      threadId: row.thread_id ?? null,
-      role: row.role as SessionView["role"],
-      cwd: row.cwd ?? null,
-      workState: String(row.work_state),
-      connectionState: String(row.connection_state),
-      currentTaskKey,
-      heartbeatAt: row.heartbeat_at ?? null,
-      lastSeenAt: String(row.heartbeat_at ?? row.updated_at),
-      version: Number(row.version),
-      startedAt: String(row.started_at),
-      updatedAt: String(row.updated_at),
-      closedAt: row.closed_at ?? null,
-      retirementReason: row.retirement_reason ?? null,
-      closeReason: row.close_reason ?? null,
-      git: {
-        available: Boolean(row.git_available),
-        repoRoot: row.git_repo_root ?? null,
-        worktreeRoot: row.worktree_root ?? null,
-        commonDir: row.git_common_dir ?? null,
-        isLinkedWorktree: nullableBoolean(row.git_is_linked_worktree),
-        branch: row.git_branch ?? null,
-        head: row.git_head ?? null,
-        detached: nullableBoolean(row.git_detached),
-        dirty: nullableBoolean(row.git_dirty),
-        error: row.git_error ?? null,
-      },
-    };
+    return this.#sessionReads.sessionViewFromRow(this.getSession(id));
   }
 
   private normalizeMutationRequest(operation: string, request: unknown): unknown {
@@ -1065,92 +826,15 @@ export class ProjectRepository {
   }
 
   listAgentSessionPage(filters: SessionPageFilters = {}): SessionProjectionPage {
-    const project = this.meta.code;
-    const selection: SessionListSelection = { list: "sessions" };
-    const decoded = filters.cursor
-      ? decodeSessionListCursor(filters.cursor, { project, selection })
-      : { last: null };
-    const clauses: string[] = [];
-    const parameters: unknown[] = [];
-    if (decoded.last) {
-      clauses.push("(session.started_at, session.id) < (?, ?)");
-      parameters.push(decoded.last.startedAt, decoded.last.id);
-    }
-    const limit = Math.min(100, Math.max(1, filters.limit ?? 100));
-    parameters.push(limit + 1);
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT session.id, session.agent_id, agent.display_name, agent.client_kind,
-                agent.capabilities_json, session.parent_session_id, session.predecessor_session_id,
-                session.thread_id, session.role, session.cwd, session.work_state,
-                session.connection_state, session.current_work_item_id,
-                task.local_no AS current_task_local_no, session.heartbeat_at,
-                session.version, session.started_at, session.updated_at, session.closed_at,
-                session.retirement_reason, session.close_reason,
-                session.git_repo_root, session.worktree_root, session.git_common_dir,
-                session.git_is_linked_worktree, session.git_branch, session.git_head,
-                session.git_detached, session.git_dirty, session.git_available, session.git_error
-         FROM agent_sessions session
-         JOIN agents agent ON agent.id = session.agent_id
-         LEFT JOIN work_items task ON task.id = session.current_work_item_id
-         ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
-         ORDER BY session.started_at DESC, session.id DESC
-         LIMIT ?`,
-      )
-      .all(...parameters) as any[];
-    const hasMore = rows.length > limit;
-    const selected = rows.slice(0, limit);
-    const items = selected.map((row) => this.sessionViewFromRow(row));
-    const itemCursors = selected.map((row) =>
-      encodeSessionListCursor({
-        project,
-        selection,
-        last: { startedAt: String(row.started_at), id: String(row.id) },
-      }),
-    );
-    const startCursor = encodeSessionListCursor({ project, selection, last: null });
-    return {
-      items,
-      itemCursors,
-      nextCursor: hasMore ? itemCursors.at(-1)! : null,
-      retryCursor: filters.cursor ?? startCursor,
-      hasMore,
-    };
+    return this.#sessionReads.listAgentSessionPage(filters);
   }
 
   listAgentSessions(limit = 100): any[] {
-    return this.#sqlite
-      .prepare(
-        `SELECT session.id, session.agent_id, agent.display_name, agent.client_kind,
-                session.role, session.connection_state, session.work_state,
-                session.current_work_item_id AS current_task_id,
-                session.parent_session_id, session.thread_id, session.started_at,
-                session.cwd, session.git_branch, session.git_head, session.git_repo_root,
-                session.worktree_root, session.git_common_dir, session.git_is_linked_worktree,
-                session.git_detached, session.git_dirty, session.git_available, session.git_error,
-                task.local_no AS current_task_local_no,
-                COALESCE(session.heartbeat_at, session.updated_at) AS last_seen_at,
-                session.closed_at AS ended_at, NULL AS outcome, NULL AS summary
-         FROM agent_sessions session
-         JOIN agents agent ON agent.id = session.agent_id
-         LEFT JOIN work_items task ON task.id = session.current_work_item_id
-         ORDER BY COALESCE(session.heartbeat_at, session.updated_at) DESC LIMIT ?`,
-      )
-      .all(Math.min(200, Math.max(1, limit)))
-      .map((row: any) => ({
-        ...row,
-        current_task_key:
-          typeof row.current_task_local_no === "number"
-            ? `${this.meta.code}-T-${String(row.current_task_local_no).padStart(4, "0")}`
-            : null,
-      })) as any[];
+    return this.#sessionReads.listAgentSessions(limit);
   }
 
   countAgentSessions(): number {
-    const row = this.#sqlite.prepare("SELECT COUNT(*) AS count FROM agent_sessions").get() as {
-      count: number;
-    };
-    return Number(row.count);
+    return this.#sessionReads.countAgentSessions();
   }
 
   recoverStaleSessions(cutoffIso: string): number {
@@ -1239,112 +923,7 @@ export class ProjectRepository {
   }
 
   listRecordPage(filters: RecordPageFilters = {}): RecordProjectionPage {
-    const project = this.meta.code;
-    const selection = { list: "records" as const };
-    const decoded = filters.cursor
-      ? decodeRecordListCursor(filters.cursor, { project, selection })
-      : { last: null };
-    const clauses: string[] = [];
-    const parameters: unknown[] = [];
-    if (decoded.last) {
-      clauses.push("(records.updated_at, records.local_no) < (?, ?)");
-      parameters.push(decoded.last.updatedAt, decoded.last.localNo);
-    }
-    const limit = Math.min(100, Math.max(1, filters.limit ?? 100));
-    parameters.push(limit + 1, project, project, project);
-    const rows = this.#sqlite
-      .prepare(
-        `WITH selected_records AS (
-           SELECT records.*
-           FROM records
-           ${clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""}
-           ORDER BY records.updated_at DESC, records.local_no DESC
-           LIMIT ?
-         ), related_candidates AS (
-           SELECT selected_records.id AS selected_id,
-                  related.updated_at AS related_updated_at,
-                  related.local_no AS related_local_no,
-                  ? || CASE WHEN related.kind = 'DECISION' THEN '-D-' ELSE '-R-' END ||
-                    printf('%03d', related.local_no) AS related_key,
-                  row_number() OVER (
-                    PARTITION BY selected_records.id
-                    ORDER BY related.updated_at DESC, related.local_no DESC
-                  ) AS related_rank
-           FROM selected_records
-           JOIN records related
-             ON related.id <> selected_records.id
-            AND related.status = 'ACTIVE'
-            AND ((selected_records.topic IS NOT NULL AND related.topic = selected_records.topic)
-              OR (selected_records.subject_key IS NOT NULL
-                AND related.subject_key = selected_records.subject_key))
-         ), related_aggregates AS (
-           SELECT selected_id, json_group_array(related_key) AS related_records_json
-           FROM (
-             SELECT selected_id, related_key
-             FROM related_candidates
-             WHERE related_rank <= 20
-             ORDER BY selected_id, related_updated_at DESC, related_local_no DESC
-           ) ordered_related
-           GROUP BY selected_id
-         ), projected_records AS (
-           SELECT selected_records.*,
-                  CASE WHEN work_item.local_no IS NULL THEN NULL
-                       ELSE ? || '-T-' || printf('%04d', work_item.local_no) END AS work_item_key,
-                  CASE WHEN superseded.local_no IS NULL THEN NULL
-                       ELSE ? || CASE WHEN superseded.kind = 'DECISION' THEN '-D-' ELSE '-R-' END ||
-                            printf('%03d', superseded.local_no) END AS supersedes_key,
-                  COALESCE(related_aggregates.related_records_json, '[]') AS related_records_json
-           FROM selected_records
-           LEFT JOIN work_items work_item ON work_item.id = selected_records.work_item_id
-           LEFT JOIN records superseded ON superseded.id = selected_records.supersedes_id
-           LEFT JOIN related_aggregates ON related_aggregates.selected_id = selected_records.id
-         )
-         SELECT * FROM projected_records
-         ORDER BY updated_at DESC, local_no DESC`,
-      )
-      .all(...parameters) as any[];
-    const hasMore = rows.length > limit;
-    const selected = rows.slice(0, limit);
-    const items = selected.map(
-      (row): RecordView => ({
-        id: String(row.id),
-        key: this.recordKey(row),
-        kind: String(row.kind),
-        title: String(row.title),
-        summary: String(row.summary),
-        detail: String(row.detail),
-        importance: String(row.importance),
-        scope: String(row.scope),
-        workItemKey: row.work_item_key ? String(row.work_item_key) : null,
-        supersedes: row.supersedes_key ? String(row.supersedes_key) : null,
-        status: row.status as RecordView["status"],
-        topic: row.topic === null ? null : String(row.topic),
-        subjectKey: row.subject_key === null ? null : String(row.subject_key),
-        relatedRecords: json<string[]>(row.related_records_json, []),
-        opId: row.op_id === null ? null : String(row.op_id),
-        sourceType: row.source_type as RecordView["sourceType"],
-        sourceActorId: row.source_actor_id === null ? null : String(row.source_actor_id),
-        sourceSessionId: row.source_session_id === null ? null : String(row.source_session_id),
-        sourceRef: row.source_ref === null ? null : String(row.source_ref),
-        createdAt: String(row.created_at),
-        updatedAt: String(row.updated_at),
-      }),
-    );
-    const itemCursors = selected.map((row) =>
-      encodeRecordListCursor({
-        project,
-        selection,
-        last: { updatedAt: String(row.updated_at), localNo: Number(row.local_no) },
-      }),
-    );
-    const startCursor = encodeRecordListCursor({ project, selection, last: null });
-    return {
-      items,
-      itemCursors,
-      nextCursor: hasMore ? itemCursors.at(-1)! : null,
-      retryCursor: filters.cursor ?? startCursor,
-      hasMore,
-    };
+    return this.#recordReads.listRecordPage(filters);
   }
 
   listRecords(limit = 100): RecordView[] {
@@ -1352,112 +931,23 @@ export class ProjectRepository {
   }
 
   private recordKey(row: { local_no: number; kind: string }): string {
-    return `${this.meta.code}-${row.kind === "DECISION" ? "D" : "R"}-${String(row.local_no).padStart(3, "0")}`;
+    return this.#recordReads.recordKey(row);
   }
 
   private recordRow(reference: string): any {
-    const normalized = reference.trim();
-    let row = this.#sqlite.prepare("SELECT * FROM records WHERE id = ?").get(normalized) as any;
-    if (!row) {
-      const publicPrefix = `${this.meta.code}-`;
-      if (normalized.startsWith(publicPrefix)) {
-        const suffix = normalized.slice(publicPrefix.length);
-        const match = /^(D|R)-(\d{3,})$/u.exec(suffix);
-        if (match) {
-          row = this.#sqlite
-            .prepare("SELECT * FROM records WHERE local_no = ?")
-            .get(Number(match[2])) as any;
-          if (row && (match[1] === "D") !== (row.kind === "DECISION")) row = undefined;
-        }
-      }
-    }
-    if (!row)
-      throw new AtmError("RECORD_NOT_FOUND", {
-        message: `Record 不存在：${reference}`,
-        details: { entity: "RECORD", reference },
-      });
-    return row;
-  }
-
-  private relatedRecordKeys(row: any): string[] {
-    if (!row.topic && !row.subject_key) return [];
-    return (
-      this.#sqlite
-        .prepare(
-          `SELECT local_no, kind FROM records
-           WHERE id <> ? AND status = 'ACTIVE' AND (
-             (? IS NOT NULL AND topic = ?) OR (? IS NOT NULL AND subject_key = ?)
-           ) ORDER BY updated_at DESC LIMIT 20`,
-        )
-        .all(row.id, row.topic, row.topic, row.subject_key, row.subject_key) as Array<{
-        local_no: number;
-        kind: string;
-      }>
-    ).map((candidate) => this.recordKey(candidate));
+    return this.#recordReads.recordRow(reference);
   }
 
   getRecord(reference: string): RecordView {
-    const row = this.recordRow(reference);
-    return {
-      id: row.id,
-      key: this.recordKey(row),
-      kind: row.kind,
-      title: row.title,
-      summary: row.summary,
-      detail: row.detail,
-      importance: row.importance,
-      scope: row.scope,
-      workItemKey: row.work_item_id ? this.taskKeyForId(row.work_item_id) : null,
-      supersedes: row.supersedes_id
-        ? this.recordKey(this.recordRow(String(row.supersedes_id)))
-        : null,
-      status: row.status,
-      topic: row.topic ?? null,
-      subjectKey: row.subject_key ?? null,
-      relatedRecords: this.relatedRecordKeys(row),
-      opId: row.op_id ?? null,
-      sourceType: row.source_type,
-      sourceActorId: row.source_actor_id ?? null,
-      sourceSessionId: row.source_session_id ?? null,
-      sourceRef: row.source_ref ?? null,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return this.#recordReads.getRecord(reference);
   }
 
   private progressUpdateView(row: any): ProgressUpdateView {
-    return {
-      id: row.id,
-      taskKey: `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}`,
-      percent: row.percent,
-      progressBucket: row.progress_bucket,
-      summary: row.summary,
-      completed: json(row.completed_json, []),
-      next: json(row.next_json, []),
-      blocker: row.blocker_text,
-      actor: row.actor,
-      sessionId: row.session_id,
-      evidence: json(row.evidence_json, []),
-      opId: row.op_id ?? null,
-      createdAt: row.created_at,
-    };
+    return this.#recordReads.progressUpdateView(row);
   }
 
   getProgressUpdate(id: string): ProgressUpdateView {
-    const normalized = id.trim();
-    const row = this.#sqlite
-      .prepare(
-        `SELECT progress.*, item.local_no FROM progress_updates progress
-         JOIN work_items item ON item.id = progress.work_item_id
-         WHERE progress.id = ?`,
-      )
-      .get(normalized);
-    if (!row)
-      throw new AtmError("PROGRESS_NOT_FOUND", {
-        message: `进度记录不存在：${normalized}`,
-        details: { entity: "PROGRESS", reference: normalized },
-      });
-    return this.progressUpdateView(row);
+    return this.#recordReads.getProgressUpdate(id);
   }
 
   getOperationTrace(opId: string, sessionId?: string | null): any {
@@ -1903,90 +1393,15 @@ export class ProjectRepository {
   }
 
   private rowForTaskKey(taskKey: string): any {
-    const prefix = `${this.meta.code}-T-`;
-    const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
-    const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
-    if (!Number.isSafeInteger(localNo))
-      throw new AtmError("WORK_ITEM_NOT_FOUND", {
-        message: `WorkItem 不存在：${taskKey}`,
-        details: { entity: "WORK_ITEM", reference: taskKey },
-      });
-    const row = this.#sqlite.prepare("SELECT * FROM work_items WHERE local_no = ?").get(localNo);
-    if (!row)
-      throw new AtmError("WORK_ITEM_NOT_FOUND", {
-        message: `WorkItem 不存在：${taskKey}`,
-        details: { entity: "WORK_ITEM", reference: taskKey },
-      });
-    return row;
-  }
-
-  private progressBreakdownForRow(row: any): WorkItemProgressBreakdown {
-    type Denominator = {
-      done_weight: number;
-      total_weight: number;
-      done_stages: number;
-      total_stages: number;
-    };
-    const children = this.#sqlite
-      .prepare(
-        `SELECT
-           COALESCE(SUM(CASE WHEN status = 'DONE' THEN weight ELSE 0 END), 0) AS done_weight,
-           COALESCE(SUM(weight), 0) AS total_weight,
-           SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
-           COUNT(*) AS total_stages
-         FROM work_items
-         WHERE parent_id = ? AND archived_at IS NULL AND status <> 'CANCELLED'`,
-      )
-      .get(row.id) as Denominator;
-    const checklist = this.#sqlite
-      .prepare(
-        `SELECT
-           COALESCE(SUM(CASE WHEN status = 'DONE' THEN weight ELSE 0 END), 0) AS done_weight,
-           COALESCE(SUM(weight), 0) AS total_weight,
-           SUM(CASE WHEN status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
-           COUNT(*) AS total_stages
-         FROM checklist_items
-         WHERE work_item_id = ? AND status <> 'SKIPPED'`,
-      )
-      .get(row.id) as Denominator;
-    const denominator = children.total_stages > 0 ? children : checklist;
-    const activeBlocker = this.#sqlite
-      .prepare(
-        `SELECT COALESCE(NULLIF(detail, ''), NULLIF(waiting_for, ''), title) AS reason
-         FROM blockers WHERE work_item_id = ? AND status = 'ACTIVE'
-         ORDER BY created_at DESC LIMIT 1`,
-      )
-      .get(row.id) as { reason: string } | undefined;
-    return {
-      computed: Number(row.computed_progress),
-      reported: row.reported_progress === null ? null : Number(row.reported_progress),
-      source: String(row.progress_source),
-      doneWeight: Number(denominator.done_weight),
-      totalWeight: Number(denominator.total_weight),
-      doneStages: Number(denominator.done_stages),
-      totalStages: Number(denominator.total_stages),
-      blocker: row.blocked_reason ?? activeBlocker?.reason ?? null,
-    };
+    return this.#taskReads.rowForTaskKey(taskKey);
   }
 
   private workItemViewFromRow(row: any): WorkItemView {
-    return workItemFromRow(
-      {
-        ...row,
-        parent_key: row.parent_id ? this.taskKeyForId(row.parent_id) : null,
-        duplicate_of_key: row.duplicate_of_id ? this.taskKeyForId(row.duplicate_of_id) : null,
-        superseded_by_key: row.superseded_by_id ? this.taskKeyForId(row.superseded_by_id) : null,
-      },
-      this.meta.code,
-      this.progressBreakdownForRow(row),
-    );
+    return this.#taskReads.workItemViewFromRow(row);
   }
 
   private taskKeyForId(workItemId: string): string | null {
-    const row = this.#sqlite
-      .prepare("SELECT local_no FROM work_items WHERE id = ?")
-      .get(workItemId) as { local_no: number } | undefined;
-    return row ? `${this.meta.code}-T-${String(row.local_no).padStart(4, "0")}` : null;
+    return this.#taskReads.taskKeyForId(workItemId);
   }
 
   private recordWorkItemLifecycleAt(workItemId: string, at: string, started: boolean): void {
@@ -2095,74 +1510,7 @@ export class ProjectRepository {
     discovered: string[];
     executionSession: Record<string, unknown> | null;
   } {
-    const row = this.rowForTaskKey(taskKey);
-    const code = this.meta.code;
-    const checklist = (
-      this.#sqlite
-        .prepare("SELECT * FROM checklist_items WHERE work_item_id = ? ORDER BY created_at")
-        .all(row.id) as any[]
-    ).map((item) => ({
-      id: item.id,
-      title: item.title,
-      kind: item.kind,
-      status: item.status,
-      weight: item.weight,
-      evidenceRequired: Number(item.evidence_required) === 1,
-      evidence: json(item.evidence_json, []),
-      version: item.version,
-    }));
-    const dependencies = (
-      this.#sqlite
-        .prepare(
-          `SELECT source.local_no FROM work_item_relations relation
-           JOIN work_items source ON source.id = relation.source_id
-           WHERE relation.target_id = ? AND relation.relation_type = 'BLOCKS'`,
-        )
-        .all(row.id) as Array<{ local_no: number }>
-    ).map((dependency) => `${code}-T-${String(dependency.local_no).padStart(4, "0")}`);
-    const discoveredFromRow = this.#sqlite
-      .prepare(
-        `SELECT target.local_no FROM work_item_relations relation
-         JOIN work_items target ON target.id = relation.target_id
-         WHERE relation.source_id = ? AND relation.relation_type = 'DISCOVERED_FROM'
-         ORDER BY relation.created_at LIMIT 1`,
-      )
-      .get(row.id) as { local_no: number } | undefined;
-    const discovered = (
-      this.#sqlite
-        .prepare(
-          `SELECT source.local_no FROM work_item_relations relation
-           JOIN work_items source ON source.id = relation.source_id
-           WHERE relation.target_id = ? AND relation.relation_type = 'DISCOVERED_FROM'
-           ORDER BY relation.created_at, source.local_no`,
-        )
-        .all(row.id) as Array<{ local_no: number }>
-    ).map((entry) => `${code}-T-${String(entry.local_no).padStart(4, "0")}`);
-    const discoveredFrom = discoveredFromRow
-      ? `${code}-T-${String(discoveredFromRow.local_no).padStart(4, "0")}`
-      : null;
-    const executionSession = row.claimed_by_session_id
-      ? ((this.#sqlite
-          .prepare(
-            `SELECT session.id, session.agent_id, agent.display_name, session.role,
-                    session.connection_state, session.work_state, session.cwd,
-                    session.git_branch, session.git_head, session.git_repo_root,
-                    session.worktree_root, session.git_is_linked_worktree,
-                    session.git_detached, session.git_dirty, session.git_available, session.git_error
-             FROM agent_sessions session
-             JOIN agents agent ON agent.id = session.agent_id
-             WHERE session.id = ?`,
-          )
-          .get(row.claimed_by_session_id) as Record<string, unknown> | undefined) ?? null)
-      : null;
-    return {
-      ...this.workItemViewFromRow(row),
-      checklist,
-      dependencies,
-      discoveredFrom,
-      discovered,
-      executionSession,
-    };
+    return this.#taskReads.getWorkItem(taskKey);
   }
 
   private reviewRequestRow(requestKey: string): any {
@@ -2696,115 +2044,11 @@ export class ProjectRepository {
     });
   }
 
-  private taskViewFilter(filters: WorkItemListFilters): {
-    clauses: string[];
-    params: unknown[];
-    selection: TaskListSelection;
-  } {
-    const clauses = ["archived_at IS NULL"];
-    const params: unknown[] = [];
-    const parentIds: string[] = [];
-    if (filters.parentId) parentIds.push(filters.parentId);
-    if (filters.parentKey) parentIds.push(this.rowForTaskKey(filters.parentKey).id);
-    const selection = canonicalTaskListSelection({
-      status: filters.status ?? null,
-      owner: filters.assigneeAgentId ?? null,
-      parent: [...new Set(parentIds)].sort().join("\u0000") || null,
-      milestone: filters.milestoneId ?? null,
-      ready: filters.readyOnly === true,
-      query: filters.query ?? null,
-    });
-    if (selection.status) {
-      clauses.push("status = ?");
-      params.push(selection.status);
-    }
-    if (selection.owner) {
-      clauses.push("assignee_agent_id = ?");
-      params.push(selection.owner);
-    }
-    for (const parentId of parentIds) {
-      clauses.push("parent_id = ?");
-      params.push(parentId);
-    }
-    if (selection.milestone) {
-      clauses.push("milestone_id = ?");
-      params.push(selection.milestone);
-    }
-    if (selection.query) {
-      clauses.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
-      const escaped = selection.query.replace(/[\\%_]/gu, "\\$&");
-      params.push(`%${escaped}%`, `%${escaped}%`);
-    }
-    if (selection.ready) {
-      clauses.push(
-        `status = 'READY' AND NOT EXISTS (
-          SELECT 1 FROM work_item_relations relation
-          JOIN work_items dependency ON dependency.id = relation.source_id
-          WHERE relation.target_id = work_items.id AND relation.relation_type = 'BLOCKS'
-            AND dependency.status <> 'DONE'
-        )`,
-      );
-    }
-    return { clauses, params, selection };
-  }
-
   listTaskViewPage(
     filters: WorkItemPageFilters = {},
     view: TaskViewName = "core",
   ): TaskViewProjectionPage {
-    const { clauses, params, selection } = this.taskViewFilter(filters);
-    const project = this.meta.code;
-    const decoded = filters.cursor
-      ? decodeTaskListCursor(filters.cursor, { project, selection })
-      : { last: null };
-    if (decoded.last) {
-      clauses.push(
-        `(CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no) > (?, ?, ?, ?)`,
-      );
-      params.push(
-        decoded.last.priorityRank,
-        decoded.last.sortKey,
-        decoded.last.createdAt,
-        decoded.last.localNo,
-      );
-    }
-    const limit = Math.min(100, Math.max(1, filters.limit ?? 20));
-    params.push(limit + 1);
-    const rows = this.#sqlite
-      .prepare(
-        taskViewProjectionSql({
-          whereSql: clauses.join(" AND "),
-          selectionTailSql: `ORDER BY CASE priority
-            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-            WHEN 'NORMAL' THEN 2 ELSE 3 END,
-            sort_key, created_at, local_no LIMIT ?`,
-          view,
-        }),
-      )
-      .all(...params) as TaskViewProjectionRow[];
-    const hasMore = rows.length > limit;
-    const items = rows.slice(0, limit);
-    const itemCursors = items.map((row) =>
-      encodeTaskListCursor({
-        project,
-        selection,
-        last: {
-          priorityRank: Number(row.priorityRank),
-          sortKey: Number(row.sortKey),
-          createdAt: row.createdAt,
-          localNo: Number(row.localNo),
-        },
-      }),
-    );
-    const startCursor = encodeTaskListCursor({ project, selection, last: null });
-    return {
-      items,
-      itemCursors,
-      nextCursor: hasMore ? itemCursors.at(-1)! : null,
-      retryCursor: filters.cursor ?? startCursor,
-      hasMore,
-    };
+    return this.#taskReads.listTaskViewPage(filters, view);
   }
 
   /**
@@ -2813,227 +2057,29 @@ export class ProjectRepository {
    * no second offset-based query is allowed to drift from the task page.
    */
   listWorkItemPage(filters: WorkItemPageFilters = {}): WorkItemProjectionPage {
-    const { clauses, params, selection } = this.taskViewFilter(filters);
-    const project = this.meta.code;
-    const decoded = filters.cursor
-      ? decodeTaskListCursor(filters.cursor, { project, selection })
-      : { last: null };
-    if (decoded.last) {
-      clauses.push(
-        `(CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no) > (?, ?, ?, ?)`,
-      );
-      params.push(
-        decoded.last.priorityRank,
-        decoded.last.sortKey,
-        decoded.last.createdAt,
-        decoded.last.localNo,
-      );
-    }
-    const limit = Math.min(100, Math.max(1, filters.limit ?? 20));
-    params.push(limit + 1);
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT work_items.*,
-                (SELECT target.local_no
-                   FROM work_item_relations relation
-                   JOIN work_items target ON target.id = relation.target_id
-                  WHERE relation.source_id = work_items.id
-                    AND relation.relation_type = 'DISCOVERED_FROM'
-                  LIMIT 1) AS discovered_from_local_no,
-                (SELECT COUNT(*)
-                   FROM work_item_relations relation
-                  WHERE relation.target_id = work_items.id
-                    AND relation.relation_type = 'DISCOVERED_FROM') AS discovered_count
-           FROM work_items
-          WHERE ${clauses.join(" AND ")}
-          ORDER BY CASE priority
-            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-            WHEN 'NORMAL' THEN 2 ELSE 3 END,
-            sort_key, created_at, local_no
-          LIMIT ?`,
-      )
-      .all(...params) as any[];
-    const hasMore = rows.length > limit;
-    const selected = rows.slice(0, limit);
-    const itemCursors = selected.map((row) =>
-      encodeTaskListCursor({
-        project,
-        selection,
-        last: {
-          priorityRank:
-            row.priority === "CRITICAL"
-              ? 0
-              : row.priority === "HIGH"
-                ? 1
-                : row.priority === "NORMAL"
-                  ? 2
-                  : 3,
-          sortKey: Number(row.sort_key),
-          createdAt: row.created_at,
-          localNo: Number(row.local_no),
-        },
-      }),
-    );
-    const startCursor = encodeTaskListCursor({ project, selection, last: null });
-    return {
-      items: selected.map((row) => this.workItemViewFromRow(row)),
-      itemCursors,
-      nextCursor: hasMore ? itemCursors.at(-1)! : null,
-      retryCursor: filters.cursor ?? startCursor,
-      hasMore,
-    };
+    return this.#taskReads.listWorkItemPage(filters);
   }
 
   listTaskViewRows(
     filters: WorkItemListFilters = {},
     view: TaskViewName = "core",
   ): TaskViewProjectionRow[] {
-    const { clauses, params } = this.taskViewFilter(filters);
-    params.push(Math.min(100, Math.max(1, filters.limit ?? 20)), Math.max(0, filters.offset ?? 0));
-    return this.#sqlite
-      .prepare(
-        taskViewProjectionSql({
-          whereSql: clauses.join(" AND "),
-          selectionTailSql: `ORDER BY CASE priority
-            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-            WHEN 'NORMAL' THEN 2 ELSE 3 END,
-            sort_key, created_at, local_no LIMIT ? OFFSET ?`,
-          view,
-        }),
-      )
-      .all(...params) as TaskViewProjectionRow[];
+    return this.#taskReads.listTaskViewRows(filters, view);
   }
 
   getTaskViewRow(taskKey: string, view: TaskViewName = "core"): TaskViewProjectionRow {
-    const code = this.meta.code;
-    const prefix = `${code}-T-`;
-    const suffix = taskKey.startsWith(prefix) ? taskKey.slice(prefix.length) : "";
-    const localNo = /^\d+$/u.test(suffix) ? Number(suffix) : Number.NaN;
-    if (!Number.isSafeInteger(localNo))
-      throw new AtmError("WORK_ITEM_NOT_FOUND", {
-        message: `WorkItem 不存在：${taskKey}`,
-        details: { entity: "WORK_ITEM", reference: taskKey },
-      });
-    const row = this.#sqlite
-      .prepare(
-        taskViewProjectionSql({
-          whereSql: "archived_at IS NULL AND local_no = ?",
-          selectionTailSql: "",
-          view,
-        }),
-      )
-      .get(localNo) as TaskViewProjectionRow | undefined;
-    if (!row)
-      throw new AtmError("WORK_ITEM_NOT_FOUND", {
-        message: `WorkItem 不存在：${taskKey}`,
-        details: { entity: "WORK_ITEM", reference: taskKey },
-      });
-    return row;
+    return this.#taskReads.getTaskViewRow(taskKey, view);
   }
 
   listWorkItems(filters: WorkItemListFilters = {}): WorkItemView[] {
-    const clauses = ["archived_at IS NULL"];
-    const params: unknown[] = [];
-    if (filters.status) {
-      clauses.push("status = ?");
-      params.push(filters.status);
-    }
-    if (filters.assigneeAgentId) {
-      clauses.push("assignee_agent_id = ?");
-      params.push(filters.assigneeAgentId);
-    }
-    if (filters.parentId) {
-      clauses.push("parent_id = ?");
-      params.push(filters.parentId);
-    }
-    if (filters.parentKey) {
-      clauses.push("parent_id = ?");
-      params.push(this.rowForTaskKey(filters.parentKey).id);
-    }
-    if (filters.milestoneId) {
-      clauses.push("milestone_id = ?");
-      params.push(filters.milestoneId);
-    }
-    if (filters.query) {
-      clauses.push("(title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')");
-      const escaped = filters.query.replace(/[\\%_]/gu, "\\$&");
-      params.push(`%${escaped}%`, `%${escaped}%`);
-    }
-    if (filters.readyOnly) {
-      clauses.push(
-        `status = 'READY' AND NOT EXISTS (
-          SELECT 1 FROM work_item_relations relation
-          JOIN work_items dependency ON dependency.id = relation.source_id
-          WHERE relation.target_id = work_items.id AND relation.relation_type = 'BLOCKS'
-            AND dependency.status <> 'DONE'
-        )`,
-      );
-    }
-    params.push(Math.min(100, Math.max(1, filters.limit ?? 20)), Math.max(0, filters.offset ?? 0));
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT * FROM work_items WHERE ${clauses.join(" AND ")}
-         ORDER BY CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END,
-           sort_key, created_at LIMIT ? OFFSET ?`,
-      )
-      .all(...params) as any[];
-    const relationStatement = this.#sqlite.prepare(
-      `SELECT
-         (SELECT target.local_no FROM work_item_relations relation
-          JOIN work_items target ON target.id = relation.target_id
-          WHERE relation.source_id = work_items.id
-            AND relation.relation_type = 'DISCOVERED_FROM' LIMIT 1) AS discovered_from_local_no,
-         (SELECT COUNT(*) FROM work_item_relations relation
-          WHERE relation.target_id = work_items.id
-            AND relation.relation_type = 'DISCOVERED_FROM') AS discovered_count
-       FROM work_items WHERE id = ?`,
-    );
-    return rows.map((row) =>
-      this.workItemViewFromRow({ ...row, ...(relationStatement.get(row.id) as object) }),
-    );
+    return this.#taskReads.listWorkItems(filters);
   }
 
   workItemSuggestionCandidates(
     reference: string,
     limit = 50,
   ): { total: number; candidates: Array<{ key: string; status: string }> } {
-    const totalRow = this.#sqlite
-      .prepare("SELECT COUNT(*) AS count FROM work_items WHERE archived_at IS NULL")
-      .get() as { count: number };
-    const boundedLimit = Math.min(100, Math.max(1, limit));
-    const normalized = reference.trim().toUpperCase();
-    const prefix = `${this.meta.code}-T-`;
-    const suffix = normalized.startsWith(prefix) ? normalized.slice(prefix.length) : normalized;
-    const digits = suffix.match(/\d+/gu)?.join("") ?? "";
-    const approximateLocalNo = digits.length > 0 ? Number(digits) : null;
-    const safeLocalNo =
-      approximateLocalNo !== null && Number.isSafeInteger(approximateLocalNo)
-        ? approximateLocalNo
-        : null;
-    const rows = (
-      safeLocalNo === null
-        ? this.#sqlite
-            .prepare(
-              `SELECT local_no, status FROM work_items WHERE archived_at IS NULL
-             ORDER BY local_no LIMIT ?`,
-            )
-            .all(boundedLimit)
-        : this.#sqlite
-            .prepare(
-              `SELECT local_no, status FROM work_items WHERE archived_at IS NULL
-             ORDER BY ABS(local_no - ?), local_no LIMIT ?`,
-            )
-            .all(safeLocalNo, boundedLimit)
-    ) as Array<{ local_no: number; status: string }>;
-    const code = this.meta.code;
-    return {
-      total: Number(totalRow.count),
-      candidates: rows.map((row) => ({
-        key: `${code}-T-${String(row.local_no).padStart(4, "0")}`,
-        status: row.status,
-      })),
-    };
+    return this.#taskReads.workItemSuggestionCandidates(reference, limit);
   }
 
   private openWorkItemSummary(
@@ -5257,51 +4303,7 @@ export class ProjectRepository {
     eventSequence: number;
     eventAt: string | null;
   }> {
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT id, project_sequence, payload_json FROM outbox WHERE delivered_at IS NULL
-         ORDER BY project_sequence, id LIMIT ?`,
-      )
-      .all(limit) as Array<{ id: string; project_sequence: number; payload_json: string }>;
-    const eventStatement = this.#sqlite.prepare(
-      `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
-              payload_json, created_at FROM events WHERE id = ?`,
-    );
-    return rows.map((row) => {
-      const payload = json<{
-        eventId?: string;
-        type?: string;
-        aggregateType?: string;
-        aggregateId?: string;
-      }>(row.payload_json, {});
-      const eventId = typeof payload.eventId === "string" ? payload.eventId : null;
-      const event = eventId
-        ? (eventStatement.get(eventId) as
-            | {
-                sequence: number;
-                type: string;
-                aggregate_type: string;
-                aggregate_id: string;
-                actor_type: string;
-                actor_id: string;
-                payload_json: string;
-                created_at: string;
-              }
-            | undefined)
-        : undefined;
-      return {
-        id: row.id,
-        project_sequence: row.project_sequence,
-        eventId,
-        eventType: event?.type ?? payload.type ?? "",
-        aggregateType: event?.aggregate_type ?? payload.aggregateType ?? "",
-        aggregateId: event?.aggregate_id ?? payload.aggregateId ?? "",
-        actor: event?.actor_id ?? event?.actor_type ?? "SYSTEM",
-        eventPayload: event ? json<Record<string, unknown>>(event.payload_json, {}) : {},
-        eventSequence: event?.sequence ?? row.project_sequence,
-        eventAt: event?.created_at ?? null,
-      };
-    });
+    return this.#outboxReads.pendingOutbox(limit);
   }
 
   markOutboxDelivered(ids: string[]): void {
@@ -5330,192 +4332,10 @@ export class ProjectRepository {
   }
 
   briefSnapshot(sessionId?: string | null): BriefSnapshot {
-    const objective = this.#sqlite
-      .prepare("SELECT * FROM objectives WHERE status = 'ACTIVE' ORDER BY updated_at DESC LIMIT 1")
-      .get() as any;
-    const milestone = this.#sqlite
-      .prepare("SELECT * FROM milestones WHERE status = 'ACTIVE' ORDER BY sort_key LIMIT 1")
-      .get() as any;
-    const counts = this.#sqlite
-      .prepare(
-        `SELECT
-           SUM(CASE WHEN status IN ('CLAIMED','IN_PROGRESS','VERIFYING') THEN 1 ELSE 0 END) AS active,
-           SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked,
-           SUM(CASE WHEN status = 'WAITING_USER' THEN 1 ELSE 0 END) AS waiting_user,
-           SUM(CASE WHEN status = 'WAITING_AGENT' THEN 1 ELSE 0 END) AS waiting_agent
-         FROM work_items WHERE archived_at IS NULL`,
-      )
-      .get() as any;
-    const ready = this.listWorkItems({ readyOnly: true, limit: 3 }).map((task) => task.key);
-    const own = sessionId
-      ? this.#sqlite
-          .prepare(
-            `SELECT local_no FROM work_items WHERE claimed_by_session_id = ?
-             AND status NOT IN ('DONE','CANCELLED') ORDER BY updated_at DESC LIMIT 5`,
-          )
-          .all(sessionId)
-      : [];
-    const code = this.meta.code;
-    const session = sessionId
-      ? (this.#sqlite.prepare("SELECT agent_id FROM agent_sessions WHERE id = ?").get(sessionId) as
-          | { agent_id: string }
-          | undefined)
-      : undefined;
-    const currentRow = sessionId
-      ? (this.#sqlite
-          .prepare(
-            `SELECT * FROM work_items
-             WHERE archived_at IS NULL AND status NOT IN ('DONE','CANCELLED')
-               AND (claimed_by_session_id = ? OR assignee_agent_id = ?)
-             ORDER BY CASE WHEN claimed_by_session_id = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`,
-          )
-          .get(sessionId, session?.agent_id ?? "", sessionId) as any)
-      : undefined;
-    const current = currentRow
-      ? this.getWorkItem(`${code}-T-${String(currentRow.local_no).padStart(4, "0")}`)
-      : null;
-    const handoff =
-      currentRow && session
-        ? (this.#sqlite
-            .prepare(
-              `SELECT summary, next_action, checkpoint_sequence
-             FROM handoffs WHERE work_item_id = ?
-               AND (to_session_id = ? OR (to_session_id IS NULL AND to_agent_id = ?))
-             ORDER BY checkpoint_sequence DESC, created_at DESC LIMIT 1`,
-            )
-            .get(currentRow.id, sessionId ?? null, session.agent_id) as
-            | { summary: string; next_action: string; checkpoint_sequence: number }
-            | undefined)
-        : undefined;
-    const records = (
-      this.#sqlite
-        .prepare(
-          `SELECT local_no, kind, summary, importance, source_type, source_actor_id,
-                source_session_id, source_ref
-         FROM records
-         WHERE status = 'ACTIVE' AND (
-           (kind = 'CONSTRAINT' AND source_type = 'USER') OR
-           (kind IN ('DECISION','CONSTRAINT','FACT','RISK') AND importance IN ('HIGH','CRITICAL'))
-         )
-         ORDER BY CASE WHEN source_type = 'USER' AND kind = 'CONSTRAINT' THEN 0 ELSE 1 END,
-                  CASE importance WHEN 'CRITICAL' THEN 0 ELSE 1 END,
-                  updated_at DESC, local_no DESC LIMIT 8`,
-        )
-        .all() as Array<{
-        local_no: number;
-        kind: string;
-        summary: string;
-        importance: string;
-        source_type: string;
-        source_actor_id: string | null;
-        source_session_id: string | null;
-        source_ref: string | null;
-      }>
-    ).map(({ local_no, ...record }) => ({
-      key: this.recordKey({ local_no, kind: record.kind }),
-      ...record,
-    }));
-    const progress = currentRow
-      ? (this.#sqlite
-          .prepare(
-            "SELECT summary FROM progress_updates WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1",
-          )
-          .get(currentRow.id) as { summary: string } | undefined)
-      : undefined;
-    const artifacts = currentRow
-      ? (this.#sqlite
-          .prepare(
-            `SELECT name, COALESCE(local_path, external_ref) AS ref
-             FROM artifacts WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 3`,
-          )
-          .all(currentRow.id) as Array<{ name: string; ref: string | null }>)
-      : [];
-    const next = [
-      ...new Set([...(handoff?.next_action ? [handoff.next_action] : []), ...ready]),
-    ].slice(0, 3);
-    return {
-      truncated: false,
-      project: code,
-      seq: this.meta.sequence,
-      objective: objective?.title ?? null,
-      milestone: milestone?.title ?? null,
-      active: Number(counts.active ?? 0),
-      blocked: Number(counts.blocked ?? 0),
-      waitingUser: Number(counts.waiting_user ?? 0),
-      waitingAgent: Number(counts.waiting_agent ?? 0),
-      own: (own as Array<{ local_no: number }>).map(
-        (row) => `${code}-T-${String(row.local_no).padStart(4, "0")}`,
-      ),
-      next,
-      records,
-      currentTask: current
-        ? {
-            key: current.key,
-            title: current.title,
-            status: current.status,
-            version: current.version,
-            acceptance: current.acceptance,
-            blockedReason: current.blockedReason,
-            waitingFor: current.waitingFor,
-            dependencies: current.dependencies,
-            claim: current.claimedBySessionId
-              ? { session: current.claimedBySessionId, leaseUntil: current.claimLeaseUntil }
-              : null,
-          }
-        : null,
-      handoff: handoff
-        ? {
-            summary: handoff.summary,
-            nextAction: handoff.next_action,
-            checkpointSequence: handoff.checkpoint_sequence,
-          }
-        : null,
-      recentProgress: progress?.summary ?? null,
-      artifacts,
-    };
+    return this.#contextReads.briefSnapshot(sessionId);
   }
 
   brief(sessionId?: string | null, maxChars = 1200): any {
-    const snapshot = this.briefSnapshot(sessionId);
-    const result: Record<string, any> = {
-      ...snapshot,
-      records: snapshot.records.map((record) => {
-        const legacyRecord: Partial<BriefSnapshotRecord> = { ...record };
-        delete legacyRecord.key;
-        return legacyRecord;
-      }),
-    };
-    const code = this.meta.code;
-    const next = result.next as string[];
-    const cap = Math.max(300, Math.min(5000, maxChars));
-    if (JSON.stringify(result).length <= cap) return result;
-    result.truncated = true;
-    result.artifacts = [];
-    result.recentProgress = null;
-    while (result.records.length > 3 && JSON.stringify(result).length > cap) result.records.pop();
-    if (result.currentTask && JSON.stringify(result).length > cap) {
-      result.currentTask.acceptance = result.currentTask.acceptance.slice(0, 3);
-    }
-    if (result.handoff && JSON.stringify(result).length > cap)
-      result.handoff.summary = String(result.handoff.summary).slice(0, 120);
-    while (result.records.length > 1 && JSON.stringify(result).length > cap) result.records.pop();
-    if (JSON.stringify(result).length <= cap) return result;
-    return {
-      truncated: true,
-      project: code,
-      seq: this.meta.sequence,
-      currentTask: result.currentTask
-        ? {
-            key: result.currentTask.key,
-            status: result.currentTask.status,
-            version: result.currentTask.version,
-            acceptance: result.currentTask.acceptance.slice(0, 2),
-            blockedReason: result.currentTask.blockedReason,
-            waitingFor: result.currentTask.waitingFor,
-          }
-        : null,
-      next: next.slice(0, 2),
-      records: result.records.slice(0, 1),
-    };
+    return this.#contextReads.formatBrief(this.briefSnapshot(sessionId), maxChars);
   }
 }
