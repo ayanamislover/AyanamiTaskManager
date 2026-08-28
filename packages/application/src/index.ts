@@ -1,9 +1,5 @@
-import { basename } from "node:path";
-import { classifyTaskScope } from "@ayanami-task/domain";
-import { asAtmError, AtmError } from "@ayanami-task/errors";
+import type { AtmError } from "@ayanami-task/errors";
 import {
-  normalizeReviewCandidateHashes,
-  workItemOperationHasEffect,
   type EvidenceInput,
   type ProjectionBatchReceipt,
   type ProjectionReconcileReceipt,
@@ -16,17 +12,8 @@ import {
   type TaskViewName,
 } from "@ayanami-task/protocol";
 import {
-  gitHead,
-  inspectGitContext,
-  scanProjectMetrics,
-  scanWorkItemChanges,
-} from "@ayanami-task/engineering-metrics";
-import {
   AyanamiDatabaseManager,
   ProjectRepository,
-  type CreateSessionInput,
-  type MutationActorResolution,
-  type ProjectActor,
   type ProjectionReceipt,
   type RecordPageFilters,
   type RegisteredProject,
@@ -34,9 +21,15 @@ import {
   type WorkItemListFilters,
   type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
-import { parseAgentTaskMarkdown } from "./agenttask-import.js";
+import { ProjectCommands } from "./commands/project-commands.js";
+import { RecordCommands } from "./commands/record-commands.js";
+import { ReviewCommands } from "./commands/review-commands.js";
+import { SessionCommands } from "./commands/session-commands.js";
+import { WorkItemCommands } from "./commands/work-item-commands.js";
+import { ProjectionCoordinator } from "./coordinators/projection-coordinator.js";
 import * as errorEnrichment from "./errors/error-enrichment.js";
 import type { PublicNotFoundDetails } from "./errors/error-enrichment.js";
+import { EngineeringMetricsObserver } from "./observers/engineering-metrics-observer.js";
 import * as projectQueries from "./queries/project-queries.js";
 import * as readQueries from "./queries/read-queries.js";
 import * as reconciliationQueries from "./queries/reconciliation-queries.js";
@@ -48,40 +41,45 @@ export * from "./reconcile.js";
 export * from "./queries/task-views.js";
 export type { PublicNotFoundDetails } from "./errors/error-enrichment.js";
 
-function mutationAck<T extends Record<string, unknown>>(
-  result: T,
-  opId: string,
-  resolution: MutationActorResolution,
-  projection: ProjectionReceipt,
-) {
-  return {
-    ...result,
-    opId,
-    projection,
-    ...(resolution.disposition === "REBOUND"
-      ? {
-          sessionRebound: true,
-          session: resolution.actor.sessionId,
-          newSession: resolution.actor.sessionId,
-        }
-      : {}),
-  };
-}
-
-function projectMutationReceipt<T extends Record<string, unknown>>(
-  result: T,
-  projection: ProjectionReceipt,
-): T & { projection: ProjectionReceipt } {
-  return { ...result, projection };
-}
-
 export class AyanamiTaskService {
   readonly databases: AyanamiDatabaseManager;
   readonly #runtime: ApplicationServiceRuntime;
+  readonly #projectionCoordinator: ProjectionCoordinator;
+  readonly #metricsObserver: EngineeringMetricsObserver;
+  readonly #projectCommands: ProjectCommands;
+  readonly #sessionCommands: SessionCommands;
+  readonly #workItemCommands: WorkItemCommands;
+  readonly #reviewCommands: ReviewCommands;
+  readonly #recordCommands: RecordCommands;
 
   private constructor(databases: AyanamiDatabaseManager) {
     this.databases = databases;
     this.#runtime = new ApplicationServiceRuntime(databases);
+    this.#projectionCoordinator = new ProjectionCoordinator(this.#runtime);
+    this.#metricsObserver = new EngineeringMetricsObserver(this.#runtime);
+    this.#projectCommands = new ProjectCommands(this.#runtime, this.#projectionCoordinator);
+    this.#sessionCommands = new SessionCommands(
+      this.#runtime,
+      this.#projectionCoordinator,
+      this.#metricsObserver,
+    );
+    this.#workItemCommands = new WorkItemCommands(
+      this.#runtime,
+      this.#projectionCoordinator,
+      this.#metricsObserver,
+      this.#sessionCommands,
+      (error, context) => this.enrichError(error, context),
+    );
+    this.#reviewCommands = new ReviewCommands(
+      this.#runtime,
+      this.#projectionCoordinator,
+      (error, context) => this.enrichError(error, context),
+    );
+    this.#recordCommands = new RecordCommands(
+      this.#runtime,
+      this.#projectionCoordinator,
+      this.#sessionCommands,
+    );
   }
 
   static async open(input: {
@@ -100,9 +98,7 @@ export class AyanamiTaskService {
     creationReason?: string;
     creationSignals?: Record<string, unknown>;
   }): Promise<RegisteredProject> {
-    const project = await this.databases.createProject(input);
-    this.#runtime.emitGlobal();
-    return project;
+    return this.#projectCommands.createProject(input);
   }
 
   listProjects(): RegisteredProject[] {
@@ -110,9 +106,7 @@ export class AyanamiTaskService {
   }
 
   attachProjectPath(projectCode: string, path: string, primary = true) {
-    const project = this.databases.attachProjectPath(projectCode, path, { primary, actor: "USER" });
-    this.#runtime.emitGlobal();
-    return project;
+    return this.#projectCommands.attachProjectPath(projectCode, path, primary);
   }
 
   overview() {
@@ -132,108 +126,20 @@ export class AyanamiTaskService {
   }
 
   async reconcileProjection(projectCode: string): Promise<ProjectionReconcileReceipt> {
-    const project = this.databases.getProject(projectCode);
-    const attemptedAt = new Date().toISOString();
-    const result = await this.databases.dispatchProject(project.id);
-    this.#runtime.emitProject(project.code);
-    this.#runtime.emitGlobal();
-    return {
-      ok: true,
-      project: {
-        id: project.id,
-        code: project.code,
-        name: project.name,
-        lifecycle: project.lifecycle,
-      },
-      delivered: result.delivered,
-      sequence: result.sequence,
-      attemptedAt,
-      projection: result.projection,
-    };
+    return this.#projectionCoordinator.reconcileProjection(projectCode);
   }
 
   async reconcileProjections(): Promise<ProjectionBatchReceipt> {
-    const attemptedAt = new Date().toISOString();
-    const projects = this.databases
-      .listProjects()
-      .filter((project) => ["ACTIVE", "ARCHIVED"].includes(project.lifecycle))
-      .sort((left, right) => left.code.localeCompare(right.code));
-    const results: ProjectionReconcileReceipt[] = [];
-    const failures: ProjectionBatchReceipt["failures"] = [];
-    for (const project of projects) {
-      try {
-        results.push(await this.reconcileProjection(project.code));
-      } catch (error) {
-        const typed = asAtmError(error);
-        failures.push({
-          project: {
-            id: project.id,
-            code: project.code,
-            name: project.name,
-            lifecycle: project.lifecycle,
-          },
-          code: typed.code,
-          message: typed.message.slice(0, 2_000),
-        });
-      }
-    }
-    return {
-      ok: true,
-      attempted: projects.length,
-      applied: results.filter((result) => result.projection.status === "APPLIED").length,
-      deferred: results.filter((result) => result.projection.status === "DEFERRED").length,
-      failed: failures.length,
-      attemptedAt,
-      finishedAt: new Date().toISOString(),
-      results,
-      failures,
-    };
+    return this.#projectionCoordinator.reconcileProjections((projectCode) =>
+      this.reconcileProjection(projectCode),
+    );
   }
 
   async engineeringMetrics(
     projectCode: string,
     input: { taskKey?: string; refresh?: boolean } = {},
   ): Promise<Record<string, unknown>> {
-    const project = this.databases.getProject(projectCode);
-    const sourcePath = project.sourcePaths[0];
-    if (!sourcePath)
-      return { available: false, reason: "NO_SOURCE_PATH", project: null, workItem: null };
-    try {
-      const latest = await this.databases.latestProjectEngineeringMetrics(projectCode);
-      const latestAt = typeof latest?.capturedAt === "string" ? Date.parse(latest.capturedAt) : 0;
-      const projectMetrics =
-        !input.refresh && latest && Date.now() - latestAt < 5 * 60_000
-          ? latest
-          : await this.databases.saveProjectEngineeringMetrics(
-              projectCode,
-              scanProjectMetrics(sourcePath),
-            );
-      let workItem: Record<string, unknown> | null = null;
-      if (input.taskKey) {
-        const baseline = await this.databases.ensureWorkItemEngineeringBaseline(
-          projectCode,
-          input.taskKey,
-          gitHead(sourcePath),
-        );
-        const metrics = scanWorkItemChanges(sourcePath, baseline.baseline);
-        workItem = await this.databases.saveWorkItemEngineeringMetrics(
-          projectCode,
-          input.taskKey,
-          baseline.baseline,
-          metrics,
-        );
-      }
-      return { available: true, root: sourcePath, project: projectMetrics, workItem };
-    } catch (error) {
-      const typed = asAtmError(error);
-      return {
-        available: false,
-        reason: typed.code === "INTERNAL_ERROR" ? "METRICS_FAILED" : typed.code,
-        message: typed.message,
-        project: null,
-        workItem: null,
-      };
-    }
+    return this.#metricsObserver.engineeringMetrics(projectCode, input);
   }
 
   listSavedViews(projectCode?: string) {
@@ -241,21 +147,15 @@ export class AyanamiTaskService {
   }
 
   createSavedView(input: Parameters<AyanamiDatabaseManager["createSavedView"]>[0]) {
-    const result = this.databases.createSavedView(input);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.createSavedView(input);
   }
 
   updateSavedView(id: string, input: Parameters<AyanamiDatabaseManager["updateSavedView"]>[1]) {
-    const result = this.databases.updateSavedView(id, input);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.updateSavedView(id, input);
   }
 
   deleteSavedView(id: string, expectedVersion: number) {
-    const result = this.databases.deleteSavedView(id, expectedVersion);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.deleteSavedView(id, expectedVersion);
   }
 
   listSettings() {
@@ -267,41 +167,23 @@ export class AyanamiTaskService {
   }
 
   setSetting(key: string, value: unknown, expectedVersion?: number) {
-    const result = this.databases.setSetting(key, value, expectedVersion);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.setSetting(key, value, expectedVersion);
   }
 
   runMaintenance(at?: Date) {
-    return this.databases.runMaintenance(at);
+    return this.#projectCommands.runMaintenance(at);
   }
 
   async archiveProject(projectCode: string, actor = "USER") {
-    await this.databases.createBackup({
-      scope: "PROJECT",
-      project: projectCode,
-      reason: "PRE_ARCHIVE",
-    });
-    const result = this.databases.setProjectLifecycle(projectCode, "ARCHIVED", actor);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.archiveProject(projectCode, actor);
   }
 
   restoreProject(projectCode: string, actor = "USER") {
-    const result = this.databases.setProjectLifecycle(projectCode, "ACTIVE", actor);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.restoreProject(projectCode, actor);
   }
 
   async trashProject(projectCode: string, actor = "USER") {
-    await this.databases.createBackup({
-      scope: "PROJECT",
-      project: projectCode,
-      reason: "PRE_TRASH",
-    });
-    const result = this.databases.setProjectLifecycle(projectCode, "TRASHED", actor);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.trashProject(projectCode, actor);
   }
 
   listBackups(projectCode?: string) {
@@ -309,35 +191,19 @@ export class AyanamiTaskService {
   }
 
   async createBackup(input: Parameters<AyanamiDatabaseManager["createBackup"]>[0]) {
-    const result = await this.databases.createBackup(input);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.createBackup(input);
   }
 
   async restoreBackup(backupId: string) {
-    const result = await this.databases.restoreBackup(backupId);
-    this.#runtime.dropRepository(result.project.id);
-    this.#runtime.emitProject(result.project.code);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.restoreBackup(backupId);
   }
 
   exportProject(projectCode: string, format: "aytproj" | "json" | "csv" = "aytproj") {
-    return this.databases.exportProject(projectCode, format);
+    return this.#projectCommands.exportProject(projectCode, format);
   }
 
   previewAgentTaskImport(projectCode: string, content: string, sourceName = "agenttask.md") {
-    const project = this.databases.getProject(projectCode);
-    const plan = parseAgentTaskMarkdown(content, sourceName);
-    return {
-      ...plan,
-      project: { id: project.id, code: project.code, name: project.name },
-      alreadyImported: Boolean(this.databases.getImportHistory(project.id, plan.sha256)),
-      objectiveCount: plan.objectives.length,
-      milestoneCount: plan.milestones.length,
-      taskCount: plan.tasks.length,
-      recordCount: plan.records.length,
-    };
+    return this.#projectCommands.previewAgentTaskImport(projectCode, content, sourceName);
   }
 
   async applyAgentTaskImport(
@@ -346,162 +212,12 @@ export class AyanamiTaskService {
     sourceName = "agenttask.md",
     expectedSha256?: string,
   ): Promise<Record<string, unknown>> {
-    const project = this.databases.getProject(projectCode);
-    const plan = parseAgentTaskMarkdown(content, sourceName);
-    if (expectedSha256 && expectedSha256 !== plan.sha256) {
-      throw new AtmError("IMPORT_SOURCE_CHANGED", {
-        message: "源文件已在预览后发生变化",
-        httpStatus: 409,
-      });
-    }
-    const existing = this.databases.getImportHistory(project.id, plan.sha256);
-    if (existing) return { ...existing, alreadyImported: true };
-
-    const repository = await this.#repository(project.code);
-    const actor: ProjectActor = { type: "USER", id: "USER", sessionId: null };
-    const objectiveIds = new Map<string, string>();
-    for (const objective of plan.objectives) {
-      const created = repository.createObjective(
-        actor,
-        {
-          title: objective.title,
-          description: `从 ${sourceName} 第 ${objective.line} 行导入`,
-          definitionOfDone: [],
-        },
-        `import-${plan.sha256}-objective-${objective.ref}`,
-      );
-      objectiveIds.set(objective.ref, created.id);
-    }
-    const milestoneIds = new Map<string, string>();
-    for (const milestone of plan.milestones) {
-      const objectiveId = objectiveIds.get(milestone.objectiveRef);
-      if (!objectiveId)
-        throw new AtmError("IMPORT_OBJECTIVE_MISSING", {
-          message: `导入目标不存在：${milestone.objectiveRef}`,
-          details: { reference: milestone.objectiveRef },
-          httpStatus: 422,
-        });
-      const created = repository.createMilestone(
-        actor,
-        {
-          objectiveId,
-          title: milestone.title,
-          description: `从 ${sourceName} 第 ${milestone.line} 行导入`,
-        },
-        `import-${plan.sha256}-milestone-${milestone.ref}`,
-      );
-      milestoneIds.set(milestone.ref, created.id);
-    }
-    if (plan.tasks.length > 0) {
-      repository.createWorkItems(
-        actor,
-        `import-${plan.sha256}-tasks`,
-        plan.tasks.map((task) => {
-          const objectiveId = objectiveIds.get(task.objectiveRef);
-          if (!objectiveId)
-            throw new AtmError("IMPORT_OBJECTIVE_MISSING", {
-              message: `导入目标不存在：${task.objectiveRef}`,
-              details: { reference: task.objectiveRef },
-              httpStatus: 422,
-            });
-          return {
-            clientRef: task.ref,
-            objectiveId,
-            milestoneId: task.milestoneRef ? (milestoneIds.get(task.milestoneRef) ?? null) : null,
-            title: task.title,
-            description: `从 ${sourceName} 第 ${task.line} 行导入`,
-            type: "TASK",
-            priority: "NORMAL",
-            status: task.completed ? ("DONE" as const) : ("READY" as const),
-            acceptance: [],
-            checklist: [],
-            verificationRequired: false,
-          };
-        }),
-      );
-    }
-    for (const [index, record] of plan.records.entries()) {
-      repository.createRecord(actor, `import-${plan.sha256}-record-${index}`, {
-        kind: "REFERENCE",
-        title: record.title,
-        summary: record.title,
-        detail: `${record.detail}\n来源：${sourceName}`,
-        importance: "NORMAL",
-        scope: "PROJECT",
-        sourceType: "IMPORT",
-        sourceActorId: "USER",
-        sourceSessionId: null,
-        sourceRef: sourceName,
-      });
-    }
-    const projection = await this.#flush(project.code);
-    const result = {
+    return this.#projectCommands.applyAgentTaskImport(
+      projectCode,
+      content,
       sourceName,
-      sha256: plan.sha256,
-      importedObjectives: plan.objectives.length,
-      importedMilestones: plan.milestones.length,
-      importedTasks: plan.tasks.length,
-      importedRecords: plan.records.length,
-      warnings: plan.warnings,
-      alreadyImported: false,
-    };
-    this.databases.recordImport(project.id, plan.sha256, result);
-    return projectMutationReceipt(result, projection);
-  }
-
-  async #repository(projectCode: string): Promise<ProjectRepository> {
-    return this.#runtime.repository(projectCode);
-  }
-
-  async #actor(projectCode: string, sessionId: string): Promise<ProjectActor> {
-    return this.#runtime.actor(projectCode, sessionId);
-  }
-
-  async #refreshSessionGitContext(projectCode: string, sessionId: string) {
-    return this.#runtime.refreshSessionGitContext(projectCode, sessionId);
-  }
-
-  #userActor(): ProjectActor {
-    return this.#runtime.userActor();
-  }
-
-  async #captureWorkItemEngineeringMetrics(
-    projectCode: string,
-    taskKeys: string[],
-    establishBaseline: boolean,
-  ): Promise<void> {
-    const sourcePath = this.databases.getProject(projectCode).sourcePaths[0];
-    if (!sourcePath) return;
-    try {
-      const head = gitHead(sourcePath);
-      for (const taskKey of [...new Set(taskKeys)]) {
-        let stored = await this.databases.workItemEngineeringMetrics(projectCode, taskKey);
-        if (!stored && establishBaseline) {
-          stored = await this.databases.ensureWorkItemEngineeringBaseline(
-            projectCode,
-            taskKey,
-            head,
-          );
-        }
-        if (!stored) continue;
-        const metrics = scanWorkItemChanges(sourcePath, stored.baseline);
-        await this.databases.saveWorkItemEngineeringMetrics(
-          projectCode,
-          taskKey,
-          stored.baseline,
-          metrics,
-        );
-      }
-    } catch {
-      // Engineering metrics are observational and never roll back a committed task transition.
-    }
-  }
-
-  async #flush(projectCode: string): Promise<ProjectionReceipt> {
-    const result = await this.databases.dispatchProject(projectCode);
-    this.#runtime.emitProject(projectCode);
-    this.#runtime.emitGlobal();
-    return result.projection;
+      expectedSha256,
+    );
   }
 
   subscribeProject(projectCode: string, listener: () => void): () => void {
@@ -541,101 +257,7 @@ export class AyanamiTaskService {
     allowProjectCreate?: boolean;
     creationReason?: string;
   }): Promise<any> {
-    const operationId = input.operationId?.trim();
-    if (input.operationId !== undefined && (!operationId || operationId.length > 128)) {
-      throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
-    }
-    let project = input.projectCode ? this.databases.getProject(input.projectCode) : null;
-    if (!project && input.cwd) project = this.databases.identifyProject(input.cwd);
-    if (operationId && !project) {
-      throw new AtmError("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT", {
-        message: "原子恢复要求项目已存在",
-      });
-    }
-    const classification = classifyTaskScope({
-      matchedProject: Boolean(project),
-      explicitMode: input.mode ?? "auto",
-      signals: input.signals ?? {},
-    });
-    if (!project && classification.scope === "quick") {
-      const quick = this.databases.createQuickTask({
-        title: input.title ?? "未命名临时任务",
-        sourceCwd: input.cwd ?? null,
-        actor: input.agentId,
-      });
-      return { scope: "quick", quick, session: null, score: classification.score };
-    }
-    if (!project) {
-      if (!input.allowProjectCreate)
-        throw new AtmError("PROJECT_REQUIRED", { message: "需要明确的受管项目" });
-      project = await this.createProject({
-        name: input.title ?? (input.cwd ? basename(input.cwd) : "未命名项目"),
-        sourcePath: input.cwd ?? null,
-        ...(input.creationReason === undefined ? {} : { creationReason: input.creationReason }),
-        ...(input.signals === undefined ? {} : { creationSignals: input.signals }),
-      });
-    }
-    const repository = await this.#repository(project.code);
-    const gitContext = input.cwd ? inspectGitContext(input.cwd) : null;
-    const sessionInput: CreateSessionInput = {
-      agentId: input.agentId,
-      displayName: input.displayName ?? input.agentId,
-      clientKind: input.clientKind ?? "generic",
-      role: input.role ?? "PRIMARY",
-      ...(input.parentSessionId === undefined ? {} : { parentSessionId: input.parentSessionId }),
-      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-      ...(input.gitBranch === undefined ? {} : { gitBranch: input.gitBranch }),
-      ...(input.gitHead === undefined ? {} : { gitHead: input.gitHead }),
-      gitContext,
-      ...(input.resume === undefined ? {} : { resume: input.resume }),
-      ...(input.predecessorSessionId === undefined
-        ? {}
-        : { predecessorSessionId: input.predecessorSessionId }),
-    };
-    let session: { id: string; sequence: number };
-    let atomicBegin: {
-      operationId: string;
-      disposition: "CREATED" | "RECOVERED";
-    } | null = null;
-    if (operationId) {
-      const recovered = repository.recoverOrCreateSession(
-        operationId,
-        {
-          projectCode: project.code,
-          cwd: input.cwd ?? null,
-          title: input.title ?? null,
-          mode: input.mode ?? "auto",
-          agentId: input.agentId,
-          displayName: input.displayName ?? input.agentId,
-          clientKind: input.clientKind ?? "generic",
-          parentSessionId: input.parentSessionId ?? null,
-          threadId: input.threadId ?? null,
-          role: input.role ?? "PRIMARY",
-          gitBranch: input.gitBranch ?? null,
-          gitHead: input.gitHead ?? null,
-          resume: input.resume ?? false,
-          predecessorSessionId: input.predecessorSessionId ?? null,
-          signals: input.signals ?? {},
-          allowProjectCreate: input.allowProjectCreate ?? false,
-          creationReason: input.creationReason ?? null,
-        },
-        sessionInput,
-      );
-      session = recovered;
-      atomicBegin = { operationId, disposition: recovered.disposition };
-    } else {
-      session = repository.createSession(sessionInput);
-    }
-    const projection = await this.#flush(project.code);
-    return {
-      scope: "project",
-      project: project.code,
-      session: session.id,
-      score: classification.score,
-      projection,
-      ...(atomicBegin === null ? {} : { atomicBegin }),
-    };
+    return this.#sessionCommands.begin(input, (projectInput) => this.createProject(projectInput));
   }
 
   listQuickTasks(status?: string) {
@@ -643,18 +265,14 @@ export class AyanamiTaskService {
   }
 
   createQuickTask(input: Parameters<AyanamiDatabaseManager["createQuickTask"]>[0]) {
-    const result = this.databases.createQuickTask(input);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.createQuickTask(input);
   }
 
   updateQuickTask(
     idOrKey: string,
     input: Parameters<AyanamiDatabaseManager["updateQuickTask"]>[1],
   ) {
-    const result = this.databases.updateQuickTask(idOrKey, input);
-    this.#runtime.emitGlobal();
-    return result;
+    return this.#projectCommands.updateQuickTask(idOrKey, input);
   }
 
   async promoteQuickTask(input: {
@@ -663,53 +281,9 @@ export class AyanamiTaskService {
     targetProjectCode?: string;
     actor?: string;
   }): Promise<any> {
-    const quick = this.databases.getQuickTask(input.quickTask);
-    if (quick.status === "PROMOTED") return quick;
-    const project = input.targetProjectCode
-      ? this.databases.getProject(input.targetProjectCode)
-      : await this.createProject({
-          name: quick.title,
-          sourcePath: null,
-          description: quick.note,
-          creationReason: `Quick Task ${quick.key} 晋升`,
-          creationSignals: { sourceQuickTask: quick.id },
-        });
-    const repository = await this.#repository(project.code);
-    const actor: ProjectActor = { type: "SYSTEM", id: input.actor ?? "SYSTEM", sessionId: null };
-    const objective =
-      repository.getActiveObjective() ??
-      repository.createObjective(actor, {
-        title: quick.title,
-        description: quick.note,
-        definitionOfDone: [],
-      });
-    const milestone =
-      repository.getActiveMilestone(objective.id) ??
-      repository.createMilestone(actor, { objectiveId: objective.id, title: "执行" });
-    const created = repository.createWorkItems(actor, `promote-${quick.id}`, [
-      {
-        clientRef: "quick-root",
-        objectiveId: objective.id,
-        milestoneId: milestone.id,
-        title: quick.title,
-        description: quick.note,
-        type: "TASK",
-        priority: "NORMAL",
-        status: quick.status === "IN_PROGRESS" ? "IN_PROGRESS" : "READY",
-        acceptance: [],
-        checklist: [],
-        sourceQuickId: quick.id,
-      },
-    ]);
-    const result = this.databases.markQuickPromoted(
-      quick.id,
-      input.expectedVersion,
-      project.id,
-      created.items[0]!.key,
-      input.actor,
+    return this.#projectCommands.promoteQuickTask(input, (projectInput) =>
+      this.createProject(projectInput),
     );
-    const projection = await this.#flush(project.code);
-    return projectMutationReceipt(result, projection);
   }
 
   async brief(
@@ -750,38 +324,7 @@ export class AyanamiTaskService {
     objectiveProvisioned: boolean;
     projection?: ProjectionReceipt;
   }> {
-    const repository = await this.#repository(projectCode);
-    const activeObjective = repository.getActiveObjective();
-    const activeMilestone = repository.getActiveMilestone(activeObjective?.id);
-    if (activeObjective && activeMilestone) {
-      return {
-        objectiveId: activeObjective.id,
-        milestoneId: activeMilestone.id,
-        objectiveProvisioned: false,
-      };
-    }
-    const actor: ProjectActor = sessionId
-      ? await this.#actor(projectCode, sessionId)
-      : { type: "SYSTEM", id: "planning-root", sessionId: null };
-    const project = this.databases.getProject(projectCode);
-    const objective =
-      activeObjective ??
-      repository.createObjective(actor, {
-        title: `${project?.name ?? projectCode.toUpperCase()}（自动补建）`,
-        description:
-          "项目尚无目标时自动补建，用于承载任务。请按实际规划改写标题与验收，或另建目标后归档它。",
-        definitionOfDone: [],
-      });
-    const milestone =
-      repository.getActiveMilestone(objective.id) ??
-      repository.createMilestone(actor, { objectiveId: objective.id, title: "执行" });
-    const projection = await this.#flush(projectCode);
-    return {
-      objectiveId: objective.id,
-      milestoneId: milestone.id,
-      objectiveProvisioned: !activeObjective,
-      projection,
-    };
+    return this.#projectCommands.ensurePlanningRoot(projectCode, sessionId);
   }
 
   async listObjectives(projectCode: string) {
@@ -848,30 +391,6 @@ export class AyanamiTaskService {
     );
   }
 
-  async #withMutationErrorDetails<T>(
-    projectCode: string,
-    context: {
-      taskKey?: string;
-      checklistId?: string;
-      expectedVersion?: number;
-      expectedVersions?: Record<string, number>;
-    },
-    action: () => T | Promise<T>,
-  ): Promise<T> {
-    try {
-      return await action();
-    } catch (error) {
-      const base = asAtmError(error);
-      let enriched = base;
-      try {
-        enriched = await this.enrichError(base, { projectCode, ...context });
-      } catch {
-        // Error reporting must never hide the authoritative mutation failure.
-      }
-      throw enriched;
-    }
-  }
-
   async listRecords(projectCode: string, limit = 100) {
     return readQueries.listRecords(this.#runtime, projectCode, limit);
   }
@@ -897,10 +416,7 @@ export class AyanamiTaskService {
   }
 
   async draftProjectUpdateAsUser(projectCode: string, opId: string) {
-    const repository = await this.#repository(projectCode);
-    const result = repository.draftProjectUpdate(this.#userActor(), opId);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#recordCommands.draftProjectUpdateAsUser(projectCode, opId);
   }
 
   async publishProjectUpdateAsUser(
@@ -908,10 +424,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["publishProjectUpdate"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const result = repository.publishProjectUpdate(this.#userActor(), opId, input);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#recordCommands.publishProjectUpdateAsUser(projectCode, opId, input);
   }
 
   async createObjective(
@@ -919,10 +432,7 @@ export class AyanamiTaskService {
     sessionId: string,
     input: { title: string; description: string; definitionOfDone: string[] },
   ): Promise<any> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createObjective(await this.#actor(projectCode, sessionId), input);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.createObjective(projectCode, sessionId, input);
   }
 
   async createObjectiveAsUser(
@@ -930,10 +440,7 @@ export class AyanamiTaskService {
     opId: string,
     input: { title: string; description: string; definitionOfDone: string[] },
   ): Promise<any> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createObjective(this.#userActor(), input, opId);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.createObjectiveAsUser(projectCode, opId, input);
   }
 
   async createMilestone(
@@ -941,10 +448,7 @@ export class AyanamiTaskService {
     sessionId: string,
     input: { objectiveId: string; title: string; description?: string; targetDate?: string | null },
   ): Promise<any> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createMilestone(await this.#actor(projectCode, sessionId), input);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.createMilestone(projectCode, sessionId, input);
   }
 
   async createMilestoneAsUser(
@@ -952,10 +456,7 @@ export class AyanamiTaskService {
     opId: string,
     input: { objectiveId: string; title: string; description?: string; targetDate?: string | null },
   ): Promise<any> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createMilestone(this.#userActor(), input, opId);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.createMilestoneAsUser(projectCode, opId, input);
   }
 
   async createWorkItems(
@@ -965,25 +466,7 @@ export class AyanamiTaskService {
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
     options: { resolvePlanningRoot?: boolean } = {},
   ) {
-    const repository = await this.#repository(projectCode);
-    const planningRoot = options.resolvePlanningRoot
-      ? {
-          provisionIfMissing: items.some((item) => item.objectiveId === undefined),
-          objectiveTitle: `${this.databases.getProject(projectCode).name}（自动补建）`,
-          objectiveDescription:
-            "项目尚无目标时自动补建，用于承载任务。请按实际规划改写标题与验收，或另建目标后归档它。",
-          milestoneTitle: "执行",
-        }
-      : undefined;
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "work.create.batch",
-      items,
-      (actor) => repository.createWorkItems(actor, opId, items, planningRoot),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#workItemCommands.createWorkItems(projectCode, sessionId, opId, items, options);
   }
 
   async createWorkItemsAsUser(
@@ -991,10 +474,7 @@ export class AyanamiTaskService {
     opId: string,
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
   ): Promise<ReturnType<ProjectRepository["createWorkItems"]> & { projection: ProjectionReceipt }> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createWorkItems(this.#userActor(), opId, items);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.createWorkItemsAsUser(projectCode, opId, items);
   }
 
   async patchWorkItems(
@@ -1003,44 +483,7 @@ export class AyanamiTaskService {
     opId: string,
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const firstPatch = patches[0];
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      firstPatch === undefined
-        ? {}
-        : {
-            taskKey: firstPatch.taskKey,
-            expectedVersion: firstPatch.expectedVersion,
-            expectedVersions: Object.fromEntries(
-              patches.map((patch) => [patch.taskKey, patch.expectedVersion]),
-            ),
-          },
-      () =>
-        repository.executeSessionMutation(sessionId, opId, "work.patch.batch", patches, (actor) =>
-          repository.patchWorkItems(actor, opId, patches),
-        ),
-    );
-    if (
-      patches.some((patch) => workItemOperationHasEffect(patch.operation, "REFRESH_GIT_CONTEXT"))
-    ) {
-      await this.#refreshSessionGitContext(
-        projectCode,
-        String(execution.resolution.actor.sessionId),
-      );
-    }
-    const projection = await this.#flush(projectCode);
-    const starts = patches
-      .filter((patch) =>
-        workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
-      )
-      .map((patch) => patch.taskKey);
-    const finishes = patches
-      .filter((patch) => workItemOperationHasEffect(patch.operation, "CAPTURE_ENGINEERING_METRICS"))
-      .map((patch) => patch.taskKey);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#workItemCommands.patchWorkItems(projectCode, sessionId, opId, patches);
   }
 
   async patchWorkItemsAsUser(
@@ -1048,20 +491,7 @@ export class AyanamiTaskService {
     opId: string,
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
   ): Promise<ReturnType<ProjectRepository["patchWorkItems"]> & { projection: ProjectionReceipt }> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.patchWorkItems(this.#userActor(), opId, patches);
-    const projection = await this.#flush(projectCode);
-    const starts = patches
-      .filter((patch) =>
-        workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
-      )
-      .map((patch) => patch.taskKey);
-    const finishes = patches
-      .filter((patch) => workItemOperationHasEffect(patch.operation, "CAPTURE_ENGINEERING_METRICS"))
-      .map((patch) => patch.taskKey);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.patchWorkItemsAsUser(projectCode, opId, patches);
   }
 
   async verifyAndComplete(
@@ -1070,23 +500,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      { taskKey: input.taskKey, expectedVersion: input.expectedVersion },
-      () =>
-        repository.executeSessionMutation(
-          sessionId,
-          opId,
-          "work.verify-and-complete",
-          input,
-          (actor) => repository.verifyAndComplete(actor, opId, input),
-        ),
-    );
-    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    const projection = await this.#flush(projectCode);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#workItemCommands.verifyAndComplete(projectCode, sessionId, opId, input);
   }
 
   async verifyAndCompleteAsUser(
@@ -1096,11 +510,7 @@ export class AyanamiTaskService {
   ): Promise<
     ReturnType<ProjectRepository["verifyAndComplete"]> & { projection: ProjectionReceipt }
   > {
-    const repository = await this.#repository(projectCode);
-    const result = repository.verifyAndComplete(this.#userActor(), opId, input);
-    const projection = await this.#flush(projectCode);
-    await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.verifyAndCompleteAsUser(projectCode, opId, input);
   }
 
   async listWorkItems(
@@ -1153,13 +563,11 @@ export class AyanamiTaskService {
     projectCode: string,
     sessionId: string,
   ): Promise<void> {
-    const session = await this.getSession(projectCode, sessionId);
-    if (session.connectionState !== "ONLINE" && session.closeReason !== "HEARTBEAT_TIMEOUT") {
-      throw new AtmError("SESSION_CLOSED", {
-        message: sessionId,
-        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
-      });
-    }
+    return this.#sessionCommands.assertSessionCanProvisionPlanningRoot(
+      projectCode,
+      sessionId,
+      (code, id) => this.getSession(code, id),
+    );
   }
 
   async reconcileProject(projectCode: string, input: { includeActive?: boolean } = {}) {
@@ -1209,36 +617,11 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["createReviewRequest"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const normalizedInput = {
-      ...input,
-      expectedCandidateHashes: normalizeReviewCandidateHashes(input.expectedCandidateHashes),
-    };
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      {
-        taskKey: normalizedInput.reviewTaskKey,
-        checklistId: normalizedInput.parentChecklistId,
-        expectedVersion: normalizedInput.expectedParentChecklistVersion,
-        expectedVersions: {
-          [normalizedInput.reviewTaskKey]: normalizedInput.expectedReviewTaskVersion,
-        },
-      },
-      () =>
-        repository.executeSessionMutation(
-          sessionId,
-          opId,
-          "review.request.create",
-          normalizedInput,
-          (actor) => repository.createReviewRequest(actor, opId, normalizedInput),
-        ),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#reviewCommands.createReviewRequest(projectCode, sessionId, opId, input);
   }
 
   async getReviewRequest(projectCode: string, requestKey: string) {
-    return (await this.#repository(projectCode)).getReviewRequest(requestKey);
+    return readQueries.getReviewRequest(this.#runtime, projectCode, requestKey);
   }
 
   async submitReview(
@@ -1247,30 +630,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["submitReview"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const normalizedInput = {
-      ...input,
-      reviewedHashes: normalizeReviewCandidateHashes(input.reviewedHashes),
-    };
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      {
-        ...(normalizedInput.reviewTaskKey === undefined
-          ? {}
-          : { taskKey: normalizedInput.reviewTaskKey }),
-        expectedVersion: normalizedInput.expectedReviewTaskVersion,
-      },
-      () =>
-        repository.executeSessionMutation(
-          sessionId,
-          opId,
-          "review.submit",
-          normalizedInput,
-          (actor) => repository.submitReview(actor, opId, normalizedInput),
-        ),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#reviewCommands.submitReview(projectCode, sessionId, opId, input);
   }
 
   async updateChecklist(
@@ -1279,17 +639,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      { checklistId: input.checklistId, expectedVersion: input.expectedVersion },
-      () =>
-        repository.executeSessionMutation(sessionId, opId, "checklist.update", input, (actor) =>
-          repository.updateChecklist(actor, opId, input),
-        ),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#workItemCommands.updateChecklist(projectCode, sessionId, opId, input);
   }
 
   async updateChecklistAsUser(
@@ -1297,10 +647,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
   ): Promise<ReturnType<ProjectRepository["updateChecklist"]> & { projection: ProjectionReceipt }> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.updateChecklist(this.#userActor(), opId, input);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.updateChecklistAsUser(projectCode, opId, input);
   }
 
   async updateChecklistBatch(
@@ -1309,21 +656,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const execution = await this.#withMutationErrorDetails(
-      projectCode,
-      { taskKey: input.taskKey, expectedVersion: input.expectedVersion },
-      () =>
-        repository.executeSessionMutation(
-          sessionId,
-          opId,
-          "checklist.update.batch",
-          input,
-          (actor) => repository.updateChecklistBatch(actor, opId, input),
-        ),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#workItemCommands.updateChecklistBatch(projectCode, sessionId, opId, input);
   }
 
   async updateChecklistBatchAsUser(
@@ -1333,10 +666,7 @@ export class AyanamiTaskService {
   ): Promise<
     ReturnType<ProjectRepository["updateChecklistBatch"]> & { projection: ProjectionReceipt }
   > {
-    const repository = await this.#repository(projectCode);
-    const result = repository.updateChecklistBatch(this.#userActor(), opId, input);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#workItemCommands.updateChecklistBatchAsUser(projectCode, opId, input);
   }
 
   async addProgress(
@@ -1345,17 +675,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["addProgress"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "work.progress",
-      input,
-      (actor) => repository.addProgress(actor, opId, input),
-    );
-    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#recordCommands.addProgress(projectCode, sessionId, opId, input);
   }
 
   async addProjectProgress(
@@ -1371,32 +691,7 @@ export class AyanamiTaskService {
       evidence?: EvidenceInput[];
     },
   ) {
-    const repository = await this.#repository(projectCode);
-    const completed = input.completed ?? [];
-    const linkedKeys = new Set(
-      completed.flatMap((entry) =>
-        typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
-      ),
-    );
-    for (const taskKey of linkedKeys) repository.getWorkItem(taskKey);
-    const update = {
-      health: input.health ?? (input.blocker ? "AT_RISK" : "UNKNOWN"),
-      summary: input.summary,
-      completed,
-      risks: input.blocker ? [input.blocker] : [],
-      next: input.next ?? [],
-      evidence: input.evidence ?? [],
-    };
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "project-update.publish",
-      update,
-      (actor) => repository.publishProjectUpdate(actor, opId, update),
-    );
-    await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#recordCommands.addProjectProgress(projectCode, sessionId, opId, input);
   }
 
   async createRecord(
@@ -1405,16 +700,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["createRecord"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "record.create",
-      input,
-      (actor) => repository.createRecord(actor, opId, input),
-    );
-    const projection = await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution, projection);
+    return this.#recordCommands.createRecord(projectCode, sessionId, opId, input);
   }
 
   async createRecordAsUser(
@@ -1422,15 +708,7 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["createRecord"]>[2],
   ): Promise<ReturnType<ProjectRepository["createRecord"]> & { projection: ProjectionReceipt }> {
-    const repository = await this.#repository(projectCode);
-    const result = repository.createRecord(this.#userActor(), opId, {
-      ...input,
-      sourceType: "USER",
-      sourceActorId: "USER",
-      sourceSessionId: null,
-    });
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#recordCommands.createRecordAsUser(projectCode, opId, input);
   }
 
   async search(projectCode: string, query: string, limit = 20, cursor?: string) {
@@ -1471,37 +749,15 @@ export class AyanamiTaskService {
     opId: string,
     input: Parameters<ProjectRepository["endSession"]>[2],
   ) {
-    const repository = await this.#repository(projectCode);
-    const resolution = repository.resolveMutationActor(sessionId, opId, "session.end", input);
-    const effectiveSessionId = String(resolution.actor.sessionId);
-    if (resolution.disposition !== "REPLAY") {
-      await this.#refreshSessionGitContext(projectCode, effectiveSessionId);
-    }
-    const result = repository.endSession(resolution.actor, opId, input);
-    const projection = await this.#flush(projectCode);
-    await this.#captureWorkItemEngineeringMetrics(
-      projectCode,
-      result.releasedItems.map((task) => task.key),
-      false,
-    );
-    return mutationAck(result, opId, resolution, projection);
+    return this.#sessionCommands.end(projectCode, sessionId, opId, input);
   }
 
   async forceCloseSessionAsUser(projectCode: string, sessionId: string, releaseClaims = true) {
-    const repository = await this.#repository(projectCode);
-    const result = repository.forceCloseSession(sessionId, releaseClaims);
-    const projection = await this.#flush(projectCode);
-    return projectMutationReceipt(result, projection);
+    return this.#sessionCommands.forceCloseSessionAsUser(projectCode, sessionId, releaseClaims);
   }
 
   async refreshSessionGitContextAsUser(projectCode: string, sessionId: string) {
-    const result = await this.#refreshSessionGitContext(projectCode, sessionId);
-    const projection = await this.#flush(projectCode);
-    return {
-      ...result,
-      projection,
-      session: (await this.#repository(projectCode)).getSessionView(sessionId),
-    };
+    return this.#sessionCommands.refreshSessionGitContextAsUser(projectCode, sessionId);
   }
 
   async doctor(): Promise<Awaited<ReturnType<AyanamiDatabaseManager["doctor"]>>> {
