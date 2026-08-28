@@ -26,7 +26,7 @@ export function ProjectReconcile({
 
   return (
     <section
-      className={`atm-panel atm-engineering${collapsed ? " is-collapsed" : ""}`}
+      className={`atm-panel atm-engineering atm-project-reconcile${collapsed ? " is-collapsed" : ""}`}
       aria-label="任务对账"
     >
       <div className="atm-panel-head">

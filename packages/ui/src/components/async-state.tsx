@@ -97,7 +97,7 @@ export function CursorLoadStatus({
     );
   }
   return (
-    <div className="atm-row-sub" role="status" aria-live="polite">
+    <div className="atm-row-sub atm-cursor-load-status" role="status" aria-live="polite">
       {loading
         ? `已加载 ${loadedCount} 项，正在加载后续…`
         : hasMore

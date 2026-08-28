@@ -55,7 +55,7 @@ describe("async state primitives", () => {
         createElement(CursorLoadStatus, { loadedCount: 4, hasMore: true, loading: true }),
       ),
     ).toBe(
-      '<div class="atm-row-sub" role="status" aria-live="polite">已加载 4 项，正在加载后续…</div>',
+      '<div class="atm-row-sub atm-cursor-load-status" role="status" aria-live="polite">已加载 4 项，正在加载后续…</div>',
     );
     expect(
       renderToStaticMarkup(createElement(CursorLoadStatus, { loadedCount: 4, hasMore: false })),
