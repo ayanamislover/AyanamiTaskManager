@@ -104,10 +104,11 @@ describe("UI foundation boundaries", () => {
     }
   });
 
-  it("app 使用提取后的 select/async primitives，而不是保留重复组件", () => {
+  it("production features 使用提取后的 select/async primitives，而 app 不保留重复组件", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./components/atm-select.js"');
-    expect(app).toContain('from "./components/async-state.js"');
+    const sources = productionSources(sourceRoot);
+    expect(sources.some((file) => file.source.includes("components/atm-select.js"))).toBe(true);
+    expect(sources.some((file) => file.source.includes("components/async-state.js"))).toBe(true);
     for (const declaration of [
       "type AtmSelectOption =",
       "function AtmSelect(",
@@ -253,7 +254,7 @@ describe("UI foundation boundaries", () => {
     }
   });
 
-  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图/Modal 留在原边界", () => {
+  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图查询留在编排边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./features/project-summary.js"');
     expect(app).toContain("<ProjectSummary");
@@ -269,19 +270,12 @@ describe("UI foundation boundaries", () => {
     ]) {
       expect(app).not.toContain(duplicate);
     }
-    for (const retained of [
-      'queryKey: ["events", project.code]',
-      '["records", project.code]',
-      "function CreateTaskModal(",
-      "function CreateRecordModal(",
-      "function ProjectUpdateModal(",
-      "function ProjectDataModal(",
-    ]) {
+    for (const retained of ['queryKey: ["events", project.code]', '["records", project.code]']) {
       expect(app).toContain(retained);
     }
   });
 
-  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调、Modal 留在原边界", () => {
+  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调留在原边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./features/project-task-controls.js"');
     expect(app).toContain('from "./features/project-task-views.js"');
@@ -299,19 +293,12 @@ describe("UI foundation boundaries", () => {
     ]) {
       expect(app).not.toContain(duplicate);
     }
-    for (const retained of [
-      'queryKey: ["events", project.code]',
-      '["records", project.code]',
-      "function CreateTaskModal(",
-      "function CreateRecordModal(",
-      "function ProjectUpdateModal(",
-      "function ProjectDataModal(",
-    ]) {
+    for (const retained of ['queryKey: ["events", project.code]', '["records", project.code]']) {
       expect(app).toContain(retained);
     }
   });
 
-  it("app 使用提取后的 TaskDrawer，四类 Modal 与 ProjectPage orchestration 留在原边界", () => {
+  it("app 使用提取后的 TaskDrawer，ProjectPage orchestration 留在原边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./features/task-drawer.js"');
     expect(app).toContain("<TaskDrawer");
@@ -324,14 +311,28 @@ describe("UI foundation boundaries", () => {
     ]) {
       expect(app).not.toContain(duplicate);
     }
-    for (const retained of [
-      "function ProjectPage(",
+    for (const retained of ["function ProjectPage("]) {
+      expect(app).toContain(retained);
+    }
+  });
+
+  it("app 使用四个彼此独立的 Modal features，而不是保留重复实现", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    for (const name of [
+      "create-task-modal",
+      "create-record-modal",
+      "project-update-modal",
+      "project-data-modal",
+    ]) {
+      expect(app).toContain(`from "./features/${name}.js"`);
+    }
+    for (const duplicate of [
       "function CreateTaskModal(",
       "function CreateRecordModal(",
       "function ProjectUpdateModal(",
       "function ProjectDataModal(",
     ]) {
-      expect(app).toContain(retained);
+      expect(app).not.toContain(duplicate);
     }
   });
 });
