@@ -51,6 +51,11 @@ export class ProjectMutationKernel {
     this.#sqlite = sqlite;
   }
 
+  transaction<T>(action: () => T, immediate = false): T {
+    const transaction = this.#sqlite.transaction(action);
+    return immediate ? transaction.immediate() : transaction();
+  }
+
   nextNumber(name: string): number {
     const row = this.#sqlite
       .prepare(
@@ -123,7 +128,7 @@ export class ProjectMutationKernel {
   mutateWithReplay<T>(input: MutationInput<T>): { value: T; replayed: boolean } {
     const key = input.idempotencyKey ?? `${input.actor.sessionId ?? input.actor.id}:${input.opId}`;
     const fingerprint = requestFingerprint(input.request);
-    const transaction = this.#sqlite.transaction(() => {
+    return this.transaction(() => {
       const cached = this.#sqlite
         .prepare("SELECT * FROM idempotency_keys WHERE key = ?")
         .get(key) as
@@ -162,7 +167,6 @@ export class ProjectMutationKernel {
           input.actor.sessionId,
         );
       return { value: result, replayed: false };
-    });
-    return input.immediate ? transaction.immediate() : transaction();
+    }, input.immediate);
   }
 }
