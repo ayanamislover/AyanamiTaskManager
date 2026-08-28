@@ -1,5 +1,4 @@
 import { EventEmitter } from "node:events";
-import { inspectGitContext } from "@ayanami-task/engineering-metrics";
 import { AtmError } from "@ayanami-task/errors";
 import {
   AyanamiDatabaseManager,
@@ -43,13 +42,6 @@ export class ApplicationServiceRuntime {
       });
     }
     return { type: "AGENT", id: session.agent_id, sessionId };
-  }
-
-  async refreshSessionGitContext(projectCode: string, sessionId: string) {
-    const repository = await this.repository(projectCode);
-    const session = repository.getSession(sessionId);
-    if (!session.cwd) return { updated: false, sequence: repository.meta.sequence };
-    return repository.updateSessionGitContext(sessionId, inspectGitContext(String(session.cwd)));
   }
 
   userActor(): ProjectActor {

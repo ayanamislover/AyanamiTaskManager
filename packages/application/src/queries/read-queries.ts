@@ -112,6 +112,14 @@ export async function getProjectUpdate(
   return (await runtime.repository(projectCode)).getProjectUpdate(id);
 }
 
+export async function getReviewRequest(
+  runtime: ApplicationServiceRuntime,
+  projectCode: string,
+  requestKey: string,
+) {
+  return (await runtime.repository(projectCode)).getReviewRequest(requestKey);
+}
+
 export async function search(
   runtime: ApplicationServiceRuntime,
   projectCode: string,

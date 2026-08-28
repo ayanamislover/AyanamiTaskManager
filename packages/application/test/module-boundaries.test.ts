@@ -40,12 +40,47 @@ function moduleBoundaryViolations(files: SourceFile[]): string[] {
         file.path.startsWith("runtime/") &&
         (specifier.includes("/queries/") ||
           specifier.includes("/errors/") ||
+          specifier.includes("/commands/") ||
+          specifier.includes("/coordinators/") ||
+          specifier.includes("/observers/") ||
           specifier.endsWith("/reconcile.js"))
       ) {
         violations.push(`${file.path}: runtime imports a higher application layer`);
       }
-      if (file.path.startsWith("errors/") && specifier.includes("/queries/")) {
+      if (
+        file.path.startsWith("queries/") &&
+        ["/commands/", "/coordinators/", "/observers/", "/errors/"].some((segment) =>
+          specifier.includes(segment),
+        )
+      ) {
+        violations.push(`${file.path}: query imports command-side orchestration`);
+      }
+      if (
+        file.path.startsWith("errors/") &&
+        ["/queries/", "/commands/", "/coordinators/", "/observers/"].some((segment) =>
+          specifier.includes(segment),
+        )
+      ) {
         violations.push(`${file.path}: error enrichment imports query orchestration`);
+      }
+      if (
+        file.path.startsWith("coordinators/") &&
+        ["/queries/", "/commands/", "/errors/", "/observers/"].some((segment) =>
+          specifier.includes(segment),
+        )
+      ) {
+        violations.push(`${file.path}: projection coordinator imports a peer orchestration layer`);
+      }
+      if (
+        file.path.startsWith("observers/") &&
+        ["/queries/", "/commands/", "/errors/", "/coordinators/"].some((segment) =>
+          specifier.includes(segment),
+        )
+      ) {
+        violations.push(`${file.path}: metrics observer imports a peer orchestration layer`);
+      }
+      if (file.path.startsWith("commands/") && specifier.includes("/queries/")) {
+        violations.push(`${file.path}: command imports a read-query orchestrator`);
       }
       if (specifier.startsWith(".")) {
         const dependency = posix
@@ -86,11 +121,25 @@ function moduleBoundaryViolations(files: SourceFile[]): string[] {
   return violations;
 }
 
+function moduleSizeViolations(
+  files: SourceFile[],
+  maximumLines: number,
+  maximumFacadeLines: number,
+): string[] {
+  return files.flatMap((file) => {
+    const lines = file.source.split(/\r?\n/).length;
+    const maximum = file.path === "index.ts" ? maximumFacadeLines : maximumLines;
+    return lines > maximum ? [`${file.path}: ${lines} lines exceeds ${maximum}`] : [];
+  });
+}
+
 describe("Application internal module boundaries", () => {
-  it("keeps Runtime below Error/Queries and prevents barrel back-imports", () => {
+  it("keeps Runtime below Queries/Commands/Coordinators/Observers and prevents cycles", () => {
     const root = resolve(process.cwd(), "packages/application/src");
     const files = sourceFiles(root).filter((file) =>
-      ["runtime/", "errors/", "queries/"].some((prefix) => file.path.startsWith(prefix)),
+      ["runtime/", "errors/", "queries/", "commands/", "coordinators/", "observers/"].some(
+        (prefix) => file.path.startsWith(prefix),
+      ),
     );
     expect(moduleBoundaryViolations(files)).toEqual([]);
   });
@@ -101,9 +150,29 @@ describe("Application internal module boundaries", () => {
       { path: "queries/bad.ts", source: 'import "x" from "../index.js";' },
       { path: "runtime/side-effect.ts", source: 'import "../queries/task-queries.js";' },
       { path: "queries/re-export.ts", source: 'export * from "../index.js";' },
+      {
+        path: "queries/reverse.ts",
+        source: 'import { WorkItemCommands } from "../commands/work-item-commands.js";',
+      },
+      {
+        path: "coordinators/reverse.ts",
+        source: 'import { SessionCommands } from "../commands/session-commands.js";',
+      },
+      {
+        path: "observers/reverse.ts",
+        source: 'export { ProjectQueries } from "../queries/project-queries.js";',
+      },
+      {
+        path: "commands/reverse.ts",
+        source: 'import "../queries/read-queries.js";',
+      },
       { path: "queries/a.ts", source: 'import "x" from "./b.js";' },
       { path: "queries/b.ts", source: 'import "x" from "./a.js";' },
       { path: "queries/task-queries.ts", source: "export {};" },
+      { path: "commands/work-item-commands.ts", source: "export {};" },
+      { path: "commands/session-commands.ts", source: "export {};" },
+      { path: "queries/project-queries.ts", source: "export {};" },
+      { path: "queries/read-queries.ts", source: "export {};" },
     ]);
     expect(violations).toContain("runtime/bad.ts: runtime imports a higher application layer");
     expect(violations).toContain("queries/bad.ts: internal module imports the public barrel");
@@ -111,6 +180,46 @@ describe("Application internal module boundaries", () => {
       "runtime/side-effect.ts: runtime imports a higher application layer",
     );
     expect(violations).toContain("queries/re-export.ts: internal module imports the public barrel");
+    expect(violations).toContain("queries/reverse.ts: query imports command-side orchestration");
+    expect(violations).toContain(
+      "coordinators/reverse.ts: projection coordinator imports a peer orchestration layer",
+    );
+    expect(violations).toContain(
+      "observers/reverse.ts: metrics observer imports a peer orchestration layer",
+    );
+    expect(violations).toContain("commands/reverse.ts: command imports a read-query orchestrator");
     expect(violations).toContain("cycle: queries/a.ts -> queries/b.ts -> queries/a.ts");
+  });
+
+  it("keeps internal modules bounded while acknowledging the facade compatibility surface", () => {
+    const root = resolve(process.cwd(), "packages/application/src");
+    const files = sourceFiles(root).filter(
+      (file) =>
+        file.path === "index.ts" ||
+        ["runtime/", "errors/", "queries/", "commands/", "coordinators/", "observers/"].some(
+          (prefix) => file.path.startsWith(prefix),
+        ),
+    );
+    // Facade owner: AyanamiTaskService. Its 99 stable prototype methods and overloads must remain
+    // own descriptors for downstream spies; 850 is a facade-only ceiling, never an internal budget.
+    expect(moduleSizeViolations(files, 400, 850)).toEqual([]);
+  });
+
+  it("proves the module-size guard rejects oversized internal and facade modules", () => {
+    const violations = moduleSizeViolations(
+      [
+        {
+          path: "commands/oversized.ts",
+          source: Array.from({ length: 402 }, () => "x").join("\n"),
+        },
+        { path: "index.ts", source: Array.from({ length: 852 }, () => "x").join("\n") },
+      ],
+      400,
+      850,
+    );
+    expect(violations).toEqual([
+      "commands/oversized.ts: 402 lines exceeds 400",
+      "index.ts: 852 lines exceeds 850",
+    ]);
   });
 });
