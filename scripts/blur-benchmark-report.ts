@@ -1,5 +1,7 @@
 export type FrameSummary = {
   sampleCount: number;
+  baselineFrameMs: number;
+  droppedThresholdMs: number;
   p50Ms: number;
   p95Ms: number;
   maxMs: number;
@@ -81,13 +83,16 @@ export function percentile(values: readonly number[], quantile: number): number 
 
 export function summarizeFrameTimes(
   samples: readonly number[],
-  droppedThresholdMs = (1_000 / 60) * 1.5,
+  droppedThresholdMs?: number,
 ): FrameSummary {
+  const baselineFrameMs = percentile(samples, 0.5);
+  const effectiveDroppedThresholdMs =
+    droppedThresholdMs ?? (baselineFrameMs > 0 ? baselineFrameMs * 1.5 : 0);
   let droppedFrames = 0;
   let consecutive = 0;
   let maxConsecutiveDroppedFrames = 0;
   for (const sample of samples) {
-    if (sample > droppedThresholdMs) {
+    if (sample > effectiveDroppedThresholdMs) {
       droppedFrames += 1;
       consecutive += 1;
       maxConsecutiveDroppedFrames = Math.max(maxConsecutiveDroppedFrames, consecutive);
@@ -97,7 +102,9 @@ export function summarizeFrameTimes(
   }
   return {
     sampleCount: samples.length,
-    p50Ms: percentile(samples, 0.5),
+    baselineFrameMs,
+    droppedThresholdMs: rounded(effectiveDroppedThresholdMs),
+    p50Ms: baselineFrameMs,
     p95Ms: percentile(samples, 0.95),
     maxMs: rounded(Math.max(0, ...samples)),
     droppedFrames,
