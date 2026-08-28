@@ -11,9 +11,20 @@ import {
   MUTATION_ACK_DOCUMENTATION_BEGIN,
   MUTATION_ACK_DOCUMENTATION_END,
 } from "../packages/mcp/src/mutation-ack-contract.js";
+import {
+  buildAgentDocumentationManifest,
+  compareAgentDocumentationManifests,
+} from "../apps/desktop/src/agent-documentation.js";
 import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
 
-type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
+type Runtime = {
+  endpoint: string;
+  token: string;
+  pid: number;
+  instanceId: string;
+  version: string;
+  startedAt: string;
+};
 type RunningApp = { child: ChildProcess; stderr: string[] };
 type RecordedMcpLaunch = { command: string; args: string[]; env: Record<string, string> };
 
@@ -22,6 +33,7 @@ const executable = resolve(
   process.env.ATM_PACKAGED_EXE ??
     join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe"),
 );
+const packagedResourcesRoot = join(dirname(executable), "resources");
 const outputDir = join(root, "output");
 const dataDir = resolve(process.env.ATM_SMOKE_DATA_DIR ?? join(outputDir, "packaged-smoke-data"));
 const electronUserDataDir = resolve(
@@ -37,12 +49,14 @@ const smokeLocalAppData = join(agentConfigRoot, "Local");
 const codexConfigPath = join(smokeHome, ".codex", "config.toml");
 const claudeConfigPath = join(smokeAppData, "Claude", "claude_desktop_config.json");
 const runtimePath = join(dataDir, "runtime", "daemon.json");
+const hostileInheritedTokenOverride = "packaged-smoke-inherited-token-must-be-ignored";
 const inheritedEnvironment = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 );
 const smokeEnvironment = {
   ...inheritedEnvironment,
   ATM_DATA_DIR: dataDir,
+  AYANAMI_TASK_TOKEN: hostileInheritedTokenOverride,
   ATM_PACKAGED_SMOKE: "1",
   ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
   ATM_SMOKE_AGENT_CONFIG_ROOT: agentConfigRoot,
@@ -479,12 +493,15 @@ try {
   const client = new AyanamiClient(runtime);
   const status = await client.status();
   check("打包应用健康检查", status.ok === true);
+  check("正式桌面忽略继承的固定 token override", runtime.token !== hostileInheritedTokenOverride);
+  check("live runtime 不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
   check(
     "打包 native SQLite 可用",
     Boolean((status.sqlite as Record<string, unknown>)?.sqliteVersion),
   );
   const installedGuide = join(dataDir, "ATM_AGENT_GUIDE.md");
   const installedAgentDocs = join(dataDir, "docs", "agent-integration.md");
+  const installedSecurityModel = join(dataDir, "docs", "security-model.md");
   const installedMutationAckDocs = join(
     dataDir,
     "docs",
@@ -493,10 +510,35 @@ try {
   );
   check("Agent Guide 安装到正式数据根", existsSync(installedGuide), installedGuide);
   check("完整 docs 安装到正式数据根", existsSync(installedAgentDocs), installedAgentDocs);
+  check("本地安全模型安装到正式数据根", existsSync(installedSecurityModel), installedSecurityModel);
   check(
     "Mutation ACK 生成文档安装到正式数据根",
     existsSync(installedMutationAckDocs),
     installedMutationAckDocs,
+  );
+  const sourceDocumentationManifest = buildAgentDocumentationManifest(root, "bundled");
+  const packagedDocumentationManifest = buildAgentDocumentationManifest(
+    packagedResourcesRoot,
+    "bundled",
+  );
+  const installedDocumentationManifest = buildAgentDocumentationManifest(dataDir, "installed");
+  const sourcePackageMismatches = compareAgentDocumentationManifests(
+    sourceDocumentationManifest,
+    packagedDocumentationManifest,
+  );
+  check(
+    "package resources 与 source Agent 文档 manifest 完全一致",
+    sourcePackageMismatches.length === 0,
+    JSON.stringify(sourcePackageMismatches.slice(0, 8)),
+  );
+  const packageInstallMismatches = compareAgentDocumentationManifests(
+    packagedDocumentationManifest,
+    installedDocumentationManifest,
+  );
+  check(
+    "安装态 Guide/docs/skills 与 package resources manifest 完全一致",
+    packageInstallMismatches.length === 0,
+    JSON.stringify(packageInstallMismatches.slice(0, 8)),
   );
   const guideContent = await readFile(installedGuide, "utf8");
   const agentDocsContent = await readFile(installedAgentDocs, "utf8");
@@ -617,15 +659,19 @@ try {
     () => createThroughPackagedMcp(project.code, "打包烟测任务", "packaged-smoke-create-1"),
   );
   check("UI WebSocket 收到 MCP 实时事件", live.event.type === "work.created");
-  const liveCreated = (live.value.created.created as Array<Record<string, unknown>>)[0]!;
+  const liveTaskKey = String(live.event.key ?? "");
+  const liveCreated = (await client.tasks.list(project.code)).find(
+    (task) => task.key === liveTaskKey,
+  );
+  check("固定 mutation ACK 后按事件 key 读回 durable task", liveCreated !== undefined, liveTaskKey);
   await claimThroughPackagedActions(
     project.code,
     live.value.session,
-    String(liveCreated.task_key),
-    Number(liveCreated.version),
+    liveCreated.key,
+    liveCreated.version,
   );
   const sharedTask = (await client.tasks.list(project.code)).find(
-    (task) => task.key === String(liveCreated.task_key),
+    (task) => task.key === liveCreated.key,
   );
   check("core / actions Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
 
@@ -653,9 +699,28 @@ try {
 
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));
+  check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
 
   app = startApp();
   const restartedRuntime = await waitForRuntime(app);
+  check(
+    "daemon 重启后 token 与 instanceId 均轮换",
+    restartedRuntime.token !== runtime.token && restartedRuntime.instanceId !== runtime.instanceId,
+  );
+  const staleCredentialResponse = await fetch(`${restartedRuntime.endpoint}/api/v1/system/status`, {
+    headers: { authorization: `Bearer ${runtime.token}` },
+  });
+  const staleCredentialBody = await staleCredentialResponse.text();
+  check(
+    "旧 token 在新 daemon 上返回 401 且不回显新旧 secret",
+    staleCredentialResponse.status === 401 &&
+      !staleCredentialBody.includes(runtime.token) &&
+      !staleCredentialBody.includes(restartedRuntime.token),
+  );
+  check(
+    "restart live runtime 不存在旧 local.token",
+    !existsSync(join(dataDir, "runtime", "local.token")),
+  );
   const restartedClient = new AyanamiClient(restartedRuntime);
   const projects = await restartedClient.projects.list();
   const persistedTasks = await restartedClient.tasks.list(project.code);
@@ -664,6 +729,10 @@ try {
     projects.some((entry) => entry.code === project.code) && persistedTasks.length === 1,
   );
   await stopApp(app);
+  check(
+    "restart 完全退出后不存在旧 local.token",
+    !existsSync(join(dataDir, "runtime", "local.token")),
+  );
 
   const report = {
     passed: true,

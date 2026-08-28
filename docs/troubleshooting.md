@@ -7,7 +7,7 @@ pnpm atm status
 pnpm atm doctor
 ```
 
-`status` 检查本地服务和 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram，以及磁盘上所有受管项目数据库（含 `ACTIVE`、`ARCHIVED`、`TRASHED`）的 `quick_check`、外键完整性和双库分离。输出按 lifecycle 给出总数与失败数，并列出失败项目；归档或移入垃圾箱不会让数据库退出健康检查。开发态可显式传入 `--endpoint` 和 `--token`，但不要把 token 粘贴到 issue 或日志。
+`status` 会从 `runtime/daemon.json` 发现并校验当前服务，再检查 SQLite 能力；`doctor` 进一步验证 Registry、FTS5/trigram，以及磁盘上所有受管项目数据库（含 `ACTIVE`、`ARCHIVED`、`TRASHED`）的 `quick_check`、外键完整性和双库分离。输出按 lifecycle 给出总数与失败数，并列出失败项目；归档或移入垃圾箱不会让数据库退出健康检查。CLI 不接受持久化 endpoint/token 参数，也不要把 token 粘贴到 issue、日志或命令行。
 
 ## 应用无法启动
 
@@ -22,9 +22,9 @@ pnpm atm doctor
 ## MCP 无法连接
 
 - 桌面设置中重新运行“连接测试”；
-- 确认配置指向当前运行时 endpoint/token 或 packaged stdio 代理；
+- 确认配置使用 packaged stdio bridge；手工复制的 Streamable HTTP 配置只对当前运行实例有效；
 - Windows packaged stdio 必须使用 `resources/mcp-stdio.cjs` 配合 `ELECTRON_RUN_AS_NODE=1`，不能直接把 GUI EXE 当 stdio；
-- `401` 表示 token 错误或过期；重新从设置复制配置；
+- `401` 表示 token 错误或已随 daemon 重启过期；优先重载 stdio bridge，手工 HTTP 配置需从设置重新复制；
 - `SESSION_CLOSED` 表示旧 Session 已结束，应重新 `atm_begin`；
 - `SESSION_NOT_RETIRED` 表示 predecessor 没有显式退休，不可 resume。
 

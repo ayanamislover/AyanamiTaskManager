@@ -187,12 +187,131 @@ describe("正式数据根迁移", () => {
     await expect(first).resolves.toMatchObject({ executed: true, projects: 1 });
   });
 
+  it("backup runtime scrub 被 EPERM 打断后重试仍清除旧 token，completed 也检查 backup", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-backup-scrub-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "备份 scrub", code: "SCRUB", sourcePath: null });
+    sourceService.close();
+    const destinationService = await AyanamiTaskService.open({
+      dataDir: destination,
+      migrationsRoot,
+    });
+    destinationService.close();
+    mkdirSync(join(destination, "runtime"), { recursive: true });
+    writeFileSync(join(destination, "runtime", "local.token"), "backup-sentinel-secret", "utf8");
+    const timestamp = "2026-08-28T00:00:00.000Z";
+    let injected = false;
+    let failure = "";
+    try {
+      await migrateDataRoot({
+        source,
+        destination,
+        execute: true,
+        timestamp,
+        onStage(stage) {
+          if (stage === "BEFORE_BACKUP_RUNTIME_SCRUB" && !injected) {
+            injected = true;
+            const error = new Error("SIMULATED_BACKUP_SCRUB_EPERM") as NodeJS.ErrnoException;
+            error.code = "EPERM";
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+    expect(failure).toBe("SIMULATED_BACKUP_SCRUB_EPERM");
+    expect(failure).not.toContain("backup-sentinel-secret");
+
+    const retried = await migrateDataRoot({ source, destination, execute: true });
+    expect(retried.destinationBackup).not.toBeNull();
+    expect(existsSync(join(retried.destinationBackup!, "runtime", "local.token"))).toBe(false);
+    expect(existsSync(join(retried.destinationBackup!, "runtime", "daemon.json"))).toBe(false);
+
+    writeFileSync(
+      join(retried.destinationBackup!, "runtime", "local.token"),
+      "late-backup-sentinel",
+      "utf8",
+    );
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "MIGRATION_RUNTIME_STATE_PRESENT",
+    );
+    rmSync(join(retried.destinationBackup!, "runtime", "local.token"));
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toEqual(retried);
+  });
+
   it("拒绝互相嵌套的数据根", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-data-nested-"));
     roots.push(root);
     await expect(
       migrateDataRoot({ source: root, destination: join(root, "nested"), execute: false }),
     ).rejects.toThrow("DATA_ROOTS_MUST_NOT_NEST");
+  });
+
+  it("拒绝把 junction 或 symlink 作为数据根，避免别名绕过 containment", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-root-link-"));
+    roots.push(root);
+    const realSource = join(root, "real-source");
+    const sourceAlias = join(root, "source-alias");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: realSource, migrationsRoot });
+    await sourceService.createProject({ name: "别名源", code: "ALIAS", sourcePath: null });
+    sourceService.close();
+    symlinkSync(realSource, sourceAlias, "junction");
+
+    await expect(
+      migrateDataRoot({ source: sourceAlias, destination, execute: false }),
+    ).rejects.toThrow("DATA_ROOT_LINK_NOT_ALLOWED");
+
+    mkdirSync(destination, { recursive: true });
+    const destinationAlias = join(root, "destination-alias");
+    symlinkSync(destination, destinationAlias, "junction");
+    await expect(
+      migrateDataRoot({ source: realSource, destination: destinationAlias, execute: false }),
+    ).rejects.toThrow("DATA_ROOT_LINK_NOT_ALLOWED");
+
+    const danglingAlias = join(root, "dangling-alias");
+    symlinkSync(join(root, "missing-target"), danglingAlias, "junction");
+    await expect(
+      migrateDataRoot({ source: danglingAlias, destination, execute: false }),
+    ).rejects.toThrow("DATA_ROOT_LINK_NOT_ALLOWED");
+  });
+
+  it("拒绝目标数据根内部的 runtime junction，绝不跟随删除外部密钥", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-runtime-link-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const outsideRuntime = join(root, "outside-runtime");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "runtime link", code: "RTL", sourcePath: null });
+    sourceService.close();
+    const destinationService = await AyanamiTaskService.open({
+      dataDir: destination,
+      migrationsRoot,
+    });
+    destinationService.close();
+    mkdirSync(outsideRuntime, { recursive: true });
+    writeFileSync(join(outsideRuntime, "local.token"), "outside-token-must-survive", "utf8");
+    writeFileSync(join(outsideRuntime, "daemon.json"), "outside-runtime-must-survive", "utf8");
+    rmSync(join(destination, "runtime"), { recursive: true, force: true });
+    symlinkSync(outsideRuntime, join(destination, "runtime"), "junction");
+
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "DATA_ROOT_RUNTIME_LINK_NOT_ALLOWED",
+    );
+    expect(readFileSync(join(outsideRuntime, "local.token"), "utf8")).toBe(
+      "outside-token-must-survive",
+    );
+    expect(readFileSync(join(outsideRuntime, "daemon.json"), "utf8")).toBe(
+      "outside-runtime-must-survive",
+    );
   });
 
   it("迁移数据根时跳过 current junction，不复制或展开安装目录", async () => {

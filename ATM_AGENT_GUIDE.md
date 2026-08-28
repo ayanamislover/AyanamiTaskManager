@@ -8,7 +8,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## ATM 服务如何发现
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid` 和启动时间。服务只监听 `127.0.0.1`；不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。`output/` 下的数据只用于测试。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid`、`version`、`startedAt` 和 `instanceId`。服务只监听 `127.0.0.1`；正式桌面 daemon 每次启动都会生成新的 token，旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。`output/` 下的数据只用于测试。完整边界见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`。
 
 ## ATM 未运行怎么办
 
@@ -199,6 +199,7 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 - 用户操作：`%LOCALAPPDATA%\AyanamiTaskManager\docs\user-guide.md`
 - 故障排查：`%LOCALAPPDATA%\AyanamiTaskManager\docs\troubleshooting.md`
 - 架构与数据边界：`%LOCALAPPDATA%\AyanamiTaskManager\docs\architecture.md`、`%LOCALAPPDATA%\AyanamiTaskManager\docs\data-model.md`
+- 本地认证、cursor、路径与事务安全边界：`%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`
 - 发布验收：`%LOCALAPPDATA%\AyanamiTaskManager\docs\release-checklist.md`
 - ATM Feedback 逐项闭环矩阵：`%LOCALAPPDATA%\AyanamiTaskManager\docs\feedback-closeout.md`
 - MCP 工具契约与 Profile hash：`%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`

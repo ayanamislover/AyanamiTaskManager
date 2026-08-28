@@ -9,7 +9,7 @@ if (Test-Path -LiteralPath $runtimePath) {
     Stop-Process -Id $runtime.pid -ErrorAction SilentlyContinue
   }
 }
-$env:AYANAMI_TASK_DATA_DIR = $data
+$env:ATM_DATA_DIR = $data
 $env:AYANAMI_TASK_TOKEN = "visual-test-token"
 $env:AYANAMI_TASK_PORT = "4393"
 $daemon = Start-Process -FilePath (Get-Command node).Source `

@@ -40,4 +40,10 @@ describe("runtime secret safety guards", () => {
     expect(preload).not.toContain("atm:get-runtime");
     expect(preload).not.toContain("sendSync");
   });
+
+  it("always rotates the packaged desktop token even when the parent environment has an override", () => {
+    const runtimeHost = readFileSync(join(root, "apps/desktop/src/runtime-host.ts"), "utf8");
+    expect(runtimeHost).toContain("createDaemonToken({})");
+    expect(runtimeHost).not.toMatch(/createDaemonToken\(\s*\)/u);
+  });
 });

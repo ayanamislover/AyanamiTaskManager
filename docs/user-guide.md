@@ -4,7 +4,7 @@
 
 运行 `AyanamiTaskManager-Setup-1.0.18-win-x64.exe` 完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。应用在本机启动内置服务，不需要云端账号。
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。portable 包默认仍使用正式数据目录；如需完全隔离，启动前设置 `AYANAMI_TASK_DATA_DIR`。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。portable 包默认仍使用正式数据目录；如需完全隔离，启动前设置 `ATM_DATA_DIR`。旧版 `AYANAMI_TASK_DATA_DIR` 仅作为迁移兼容 fallback，不应写入新配置。
 
 源码开发时，Web 界面固定使用 `http://127.0.0.1:9999`。该端口只服务前端；daemon API 继续使用运行时发现文件声明的独立本机端口。
 

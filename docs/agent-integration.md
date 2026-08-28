@@ -16,7 +16,7 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 
 Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~/.claude.json`：该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会丢失对方更新。找不到 CLI 时安装会以 `CLAUDE_CODE_CLI_NOT_FOUND` 失败，不会退化成直接改文件。由于规则与技能同 Desktop 共用，卸载其中一个客户端时，只要另一个仍装着 MCP，共用的规则和技能会被保留。
 
-本地服务只监听 `127.0.0.1`，每次启动生成或加载本地 token。运行时发现文件位于数据目录的 `runtime/daemon.json`。不要把 token 写进仓库、任务记录或日志。
+本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token，并原子发布数据目录下的 `runtime/daemon.json`；旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。自动安装配置使用会动态重读发现文件的 stdio bridge；完整威胁边界见 [security-model.md](./security-model.md)。
 
 便携包的 stdio MCP 通过随包的 `resources/mcp-stdio.cjs` 启动；Windows GUI EXE 本身没有可用 stdin，因此不要把桌面 EXE 直接当 stdio 程序。
 
@@ -146,7 +146,7 @@ Mutation 固定回执、实体预览预算和 operation receipt 回查示例由 
 
 ### 精确读取与长字段续读
 
-`atm_search` 会先处理公开精确标识，再进入全文搜索：WorkItem/Record 使用公开 key；Progress 与 Session 使用 `progress:<ULID>`、`session:<ULID>`；写操作可用 `op_id` 并按 `session` 收窄。`field_mask` 只返回点名字段；响应给出 continuation cursor 时，后续请求必须保持相同项目、实体、类型和字段集合。cursor 经过签名并绑定字段内容，篡改、跨实体复用或内容变化都会 fail closed，不能通过改 token 猜测续页。
+`atm_search` 会先处理公开精确标识，再进入全文搜索：WorkItem/Record 使用公开 key；Progress 与 Session 使用 `progress:<ULID>`、`session:<ULID>`；写操作可用 `op_id` 并按 `session` 收窄。`field_mask` 只返回点名字段；响应给出 continuation cursor 时，后续请求必须保持相同项目、实体、类型和字段集合。cursor 的确定性 SHA-256 摘要绑定项目、实体、字段集合和字段内容，篡改、跨实体复用或内容变化都会 fail closed；它用于损坏检测与作用域绑定，不是认证签名或授权凭据。
 
 ### MCP 与 REST 字段名
 

@@ -47,7 +47,66 @@ async function websocketFrames(
   });
 }
 
+async function websocketClose(
+  url: string,
+  token?: string,
+): Promise<{ code: number; reason: string; frames: unknown[] }> {
+  return new Promise((resolvePromise, reject) => {
+    const frames: unknown[] = [];
+    const socket = new WebSocket(url);
+    const timeout = setTimeout(() => {
+      socket.close();
+      reject(new Error(`WS_CLOSE_TIMEOUT: ${JSON.stringify(frames)}`));
+    }, 5000);
+    socket.addEventListener("open", () => {
+      if (token !== undefined) socket.send(JSON.stringify({ type: "authenticate", token }));
+    });
+    socket.addEventListener("message", (event) => {
+      frames.push(JSON.parse(String(event.data)));
+    });
+    socket.addEventListener("error", () => {
+      // Authentication rejection can emit an error before the close event in some runtimes.
+    });
+    socket.addEventListener("close", (event) => {
+      clearTimeout(timeout);
+      resolvePromise({ code: event.code, reason: event.reason, frames });
+    });
+  });
+}
+
 describe("WebSocket gap replay", () => {
+  it("错误 token 与认证超时均 fail closed，认证前不发送业务帧", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-ws-auth-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    await service.createProject({ name: "WebSocket 认证", sourcePath: null, code: "WSA" });
+    const app = await buildAyanamiServer({ service, token: "ws-current-secret" });
+    try {
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      if (!address || typeof address === "string") throw new Error("ADDRESS_MISSING");
+      const url = `ws://127.0.0.1:${address.port}/api/v1/ws?scope=project:WSA&since=0`;
+
+      const rejected = await websocketClose(url, "ws-stale-secret");
+      expect(rejected).toMatchObject({ code: 1008, reason: "Authentication failed", frames: [] });
+      expect(JSON.stringify(rejected)).not.toContain("ws-current-secret");
+
+      const timedOut = await websocketClose(url);
+      expect(timedOut).toMatchObject({
+        code: 1008,
+        reason: "Authentication required",
+        frames: [],
+      });
+      expect(JSON.stringify(timedOut)).not.toContain("ws-current-secret");
+    } finally {
+      await app.close();
+      service.close();
+    }
+  }, 10_000);
+
   it("项目流和全局流按 since 补齐，无重复与跳号", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-ws-"));
     temporary.push(dataDir);
