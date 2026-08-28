@@ -672,15 +672,16 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
   app.get("/api/v1/projects/:code/ui/work-items", async (request) => {
     const { code } = request.params as { code: string };
     const query = request.query as Record<string, string | undefined>;
-    return options.service.listWorkItemsForUi(code, {
+    const page = await options.service.listWorkItemPageForUi(code, {
       ...(query.status ? { status: query.status } : {}),
       ...(query.assignee ? { assigneeAgentId: query.assignee } : {}),
       ...(query.milestone ? { milestoneId: query.milestone } : {}),
       ...(query.q ? { query: query.q } : {}),
       readyOnly: query.ready === "1",
       limit: Number(query.limit ?? 20),
-      offset: Number(query.offset ?? 0),
+      ...(query.cursor ? { cursor: query.cursor } : {}),
     });
+    return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });
   app.get("/api/v1/projects/:code/ui/work-items/:taskKey", async (request) => {
     const { code, taskKey } = request.params as { code: string; taskKey: string };
@@ -690,7 +691,7 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
     const { code } = request.params as { code: string };
     const query = request.query as Record<string, string | undefined>;
     const view = TaskViewNameSchema.default("core").parse(query.view);
-    return options.service.listWorkItems(
+    const page = await options.service.listWorkItemPage(
       code,
       {
         ...(query.status ? { status: query.status } : {}),
@@ -699,10 +700,11 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
         ...(query.q ? { query: query.q } : {}),
         readyOnly: query.ready === "1",
         limit: Number(query.limit ?? 20),
-        offset: Number(query.offset ?? 0),
+        ...(query.cursor ? { cursor: query.cursor } : {}),
       },
       view,
     );
+    return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });
   app.post("/api/v1/projects/:code/work-items", async (request, reply) => {
     const { code } = request.params as { code: string };

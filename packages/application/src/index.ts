@@ -32,6 +32,7 @@ import {
   type RecordPageFilters,
   type RegisteredProject,
   type SessionPageFilters,
+  type WorkItemListFilters,
   type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
@@ -1272,12 +1273,67 @@ export class AyanamiTaskService {
     };
   }
 
+  async listWorkItemPageForUi(
+    projectCode: string,
+    filters: WorkItemPageFilters = {},
+  ): Promise<ReturnType<ProjectRepository["listWorkItemPage"]>> {
+    const repository = await this.#repository(projectCode);
+    if (
+      filters.milestoneId &&
+      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
+    ) {
+      throw new AtmError("MILESTONE_NOT_FOUND", {
+        message: `里程碑不存在：${filters.milestoneId}`,
+        details: { entity: "MILESTONE", reference: filters.milestoneId },
+      });
+    }
+    return repository.listWorkItemPage(filters);
+  }
+
   /** Desktop-only operational metadata kept outside the bounded Agent read views. */
   async listWorkItemsForUi(
     projectCode: string,
-    filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
+    filters: WorkItemListFilters = {},
   ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
-    return (await this.#repository(projectCode)).listWorkItems(filters);
+    const { offset = 0, ...pageFilters } = filters;
+    const items: ReturnType<ProjectRepository["listWorkItems"]> = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    for (let pageCount = 0; ; pageCount += 1) {
+      if (pageCount >= 100 || items.length >= 10_000) {
+        throw new AtmError("RESULT_TOO_LARGE", {
+          message: "UI WorkItem 读取达到安全上限，请使用分页接口继续",
+          details: {
+            entity: "TASK_UI_PAGE",
+            reason: "DRAIN_LIMIT_REACHED",
+            maxPages: 100,
+            maxItems: 10_000,
+            resumeCursor: cursor ?? null,
+          },
+        });
+      }
+      const page = await this.listWorkItemPageForUi(projectCode, {
+        ...pageFilters,
+        limit: 100,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      items.push(...page.items);
+      if (!page.hasMore) return items.slice(Math.max(0, offset));
+      if (!page.nextCursor) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "TASK_UI_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
+          details: { entity: "TASK_UI_PAGE", reason: "MISSING_NEXT_CURSOR" },
+        });
+      }
+      if (seenCursors.has(page.nextCursor)) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "TASK_UI_PAGE 分页返回了重复 cursor",
+          details: { entity: "TASK_UI_PAGE", reason: "REPEATED_CURSOR" },
+        });
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
   }
 
   async assertMilestonesExist(

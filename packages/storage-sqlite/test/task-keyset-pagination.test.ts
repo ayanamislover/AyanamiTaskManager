@@ -114,6 +114,22 @@ describe("WorkItem keyset pagination", () => {
     expect(new Set(localNumbers).size).toBe(521);
   });
 
+  it("uses the same tl1 selection for the desktop metadata projection", async () => {
+    const { repository, database, objectiveId } = await fixture("TKUI521");
+    insertTiedTasks(database, objectiveId, 521);
+
+    const localNumbers: number[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = repository.listWorkItemPage({ limit: 41, cursor });
+      localNumbers.push(...page.items.map((item) => item.localNo));
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+
+    expect(localNumbers).toEqual(Array.from({ length: 521 }, (_, index) => index + 1));
+    expect(new Set(localNumbers).size).toBe(521);
+  });
+
   it("binds tl1 cursors to project and the canonical selection, but not page presentation", async () => {
     const first = await fixture("TKBIND");
     const second = await fixture("TKOTHR");

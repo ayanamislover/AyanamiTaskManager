@@ -8,13 +8,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import {
-  QueryClientProvider,
-  useMutation,
-  useQueries,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveIcon as Archive } from "@phosphor-icons/react/dist/icons/Archive";
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
@@ -56,6 +50,7 @@ import { McpBridgePanel, type McpBridgeObservation } from "./mcp-bridge-panel.js
 import { cancelNoticeTimer, restartNoticeTimer } from "./notice-lifecycle.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
+import { useCursorCollection, useCursorCollections } from "./cursor-collection.js";
 import {
   formatReconciliationAge,
   reconciliationLabel,
@@ -439,6 +434,42 @@ function ErrorState({ error }: { error: unknown }) {
         <strong>载入失败</strong>
         <div>{error instanceof Error ? error.message : String(error)}</div>
       </div>
+    </div>
+  );
+}
+
+function CursorLoadStatus({
+  loadedCount,
+  hasMore,
+  loading,
+  error,
+  onRetry,
+}: {
+  loadedCount: number;
+  hasMore: boolean;
+  loading?: boolean;
+  error?: unknown;
+  onRetry?: () => void;
+}) {
+  if (error) {
+    return (
+      <div className="atm-inline-error" role="alert">
+        已加载 {loadedCount} 项，后续分页加载失败。
+        {onRetry ? (
+          <button className="atm-button" style={{ marginLeft: 8 }} onClick={onRetry}>
+            重试
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <div className="atm-row-sub" role="status" aria-live="polite">
+      {loading
+        ? `已加载 ${loadedCount} 项，正在加载后续…`
+        : hasMore
+          ? `已加载 ${loadedCount} 项`
+          : `已加载 ${loadedCount} 项，已全部加载`}
     </div>
   );
 }
@@ -1248,24 +1279,20 @@ function ProjectsPage({
 }
 
 function useAllProjectTasks(client: AyanamiClient, projects: RegisteredProject[]) {
-  return useQueries({
-    queries: projects
-      .filter((project) => project.lifecycle === "ACTIVE")
-      .map((project) => ({
-        queryKey: ["tasks", project.code, "context"],
-        queryFn: async () => {
-          const [views, metadata] = await Promise.all([
-            client.tasks.list(project.code, { limit: 100, view: "context" }),
-            client.tasks.listForUi(project.code, { limit: 100 }),
-          ]);
-          const byKey = new Map(metadata.map((item) => [String(item.key), item]));
-          return views.map((view) => ({ ...byKey.get(view.key), ...view }));
-        },
-        staleTime: 5000,
-        select: (tasks: any[]) =>
-          tasks.map((task) => ({ ...task, project: project.code, projectName: project.name })),
-      })),
-  });
+  const sources = projects
+    .filter((project) => project.lifecycle === "ACTIVE")
+    .map((project) => ({
+      key: project.code,
+      loadPage: (cursor?: string) =>
+        client.tasks.pageForUi(project.code, {
+          limit: 100,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
+    }));
+  return useCursorCollections(
+    ["tasks", "all", "ui", ...sources.map((source) => source.key)],
+    sources,
+  );
 }
 
 function TasksAcrossProjects({
@@ -1279,65 +1306,112 @@ function TasksAcrossProjects({
   mode: "active" | "blocked";
   onTask: (project: string, key: string) => void;
 }) {
-  const queries = useAllProjectTasks(client, projects);
-  if (queries.some((query) => query.isLoading)) return <LoadingRows count={6} />;
-  const error = queries.find((query) => query.error)?.error;
-  if (error) return <ErrorState error={error} />;
+  const collection = useAllProjectTasks(client, projects);
+  const entries = Object.values(collection.entries);
+  const isLoading = entries.some((entry) => entry.isLoading);
+  const errorEntry = entries.find((entry) => entry.error);
+  const error = errorEntry?.error;
+  const loadedCount = entries.reduce((total, entry) => total + entry.loadedCount, 0);
+  if (isLoading && loadedCount === 0) return <LoadingRows count={6} />;
+  if (error && loadedCount === 0)
+    return (
+      <>
+        <CursorLoadStatus
+          loadedCount={loadedCount}
+          hasMore={false}
+          error={error}
+          onRetry={() => (errorEntry ? void collection.retry(errorEntry.key) : undefined)}
+        />
+        <ErrorState error={error} />
+      </>
+    );
   const statuses =
     mode === "active"
       ? ["CLAIMED", "IN_PROGRESS", "VERIFYING"]
       : ["BLOCKED", "WAITING_USER", "WAITING_AGENT"];
-  const tasks = queries
-    .flatMap((query) => query.data ?? [])
+  const tasks = entries
+    .flatMap((entry) => entry.items.map((task: any) => ({ ...task, project: entry.key })))
+    .map((task: any) => ({
+      ...task,
+      projectName: projects.find((project) => project.code === task.project)?.name ?? task.project,
+    }))
     .filter((task: any) => statuses.includes(task.status));
   if (!tasks.length)
     return (
-      <section className="atm-panel">
-        <Empty
-          title={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
-          text={
-            mode === "active" ? "任务被领取或开始后会出现在这里。" : "当前没有需要外部处理的任务。"
-          }
+      <>
+        <CursorLoadStatus
+          loadedCount={loadedCount}
+          hasMore={entries.some((entry) => entry.hasMore)}
+          loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
+          error={error}
+          onRetry={() => {
+            for (const entry of entries) {
+              if (entry.error) void collection.retry(entry.key);
+            }
+          }}
         />
-      </section>
+        <section className="atm-panel">
+          <Empty
+            title={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
+            text={
+              mode === "active"
+                ? "任务被领取或开始后会出现在这里。"
+                : "当前没有需要外部处理的任务。"
+            }
+          />
+        </section>
+      </>
     );
   return (
-    <section className="atm-panel">
-      <table className="atm-table">
-        <colgroup>
-          <col style={{ width: "38%" }} />
-          <col style={{ width: "20%" }} />
-          <col style={{ width: "12%" }} />
-          <col style={{ width: "20%" }} />
-          <col style={{ width: "10%" }} />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>任务</th>
-            <th>项目</th>
-            <th>状态</th>
-            <th>负责人</th>
-            <th>进度</th>
-          </tr>
-        </thead>
-        <tbody>
-          {tasks.map((task: any) => (
-            <tr key={task.key} onClick={() => onTask(task.project, task.key)}>
-              <td>
-                <div className="atm-row-title">{task.title}</div>
-                <span className="atm-key">{task.key}</span>
-              </td>
-              <td>{task.projectName}</td>
-              <td>
-                <Status value={task.status} />
-              </td>
-              <td>{task.assigneeAgentId ?? "未分配"}</td>
-              <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
+    <>
+      <CursorLoadStatus
+        loadedCount={loadedCount}
+        hasMore={entries.some((entry) => entry.hasMore)}
+        loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
+        error={error}
+        onRetry={() => {
+          for (const entry of entries) {
+            if (entry.error) void collection.retry(entry.key);
+          }
+        }}
+      />
+      <section className="atm-panel">
+        <table className="atm-table">
+          <colgroup>
+            <col style={{ width: "38%" }} />
+            <col style={{ width: "20%" }} />
+            <col style={{ width: "12%" }} />
+            <col style={{ width: "20%" }} />
+            <col style={{ width: "10%" }} />
+          </colgroup>
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>项目</th>
+              <th>状态</th>
+              <th>负责人</th>
+              <th>进度</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </section>
+          </thead>
+          <tbody>
+            {tasks.map((task: any) => (
+              <tr key={task.key} onClick={() => onTask(task.project, task.key)}>
+                <td>
+                  <div className="atm-row-title">{task.title}</div>
+                  <span className="atm-key">{task.key}</span>
+                </td>
+                <td>{task.projectName}</td>
+                <td>
+                  <Status value={task.status} />
+                </td>
+                <td>{task.assigneeAgentId ?? "未分配"}</td>
+                <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </>
   );
 }
 
@@ -1495,18 +1569,21 @@ function AgentsPage({
   projects: RegisteredProject[];
 }) {
   const queryClient = useQueryClient();
-  const queries = useQueries({
-    queries: projects
-      .filter((project) => project.lifecycle === "ACTIVE")
-      .map((project) => ({
-        queryKey: ["agents", project.code],
-        queryFn: async () =>
-          (await client.projects.agents(project.code)).map((agent) => ({
-            ...agent,
-            project: project.code,
-          })),
-      })),
-  });
+  const agentSources = projects
+    .filter((project) => project.lifecycle === "ACTIVE")
+    .map((project) => ({
+      key: project.code,
+      loadPage: (cursor?: string) => client.projects.agentPage(project.code, 100, cursor),
+    }));
+  const collection = useCursorCollections(
+    ["agents", "all", ...agentSources.map((source) => source.key)],
+    agentSources,
+  );
+  const entries = Object.values(collection.entries);
+  const loadedSessionCount = entries.reduce((total, entry) => total + entry.loadedCount, 0);
+  const isLoading = entries.some((entry) => entry.isLoading);
+  const errorEntry = entries.find((entry) => entry.error);
+  const error = errorEntry?.error;
   const forceClose = useMutation({
     mutationFn: (session: any) =>
       client.sessions.forceClose(String(session.id), String(session.project), true),
@@ -1524,14 +1601,29 @@ function AgentsPage({
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
-  if (queries.some((query) => query.isLoading))
+  if (isLoading && loadedSessionCount === 0)
     return (
       <>
         <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
         <LoadingRows />
       </>
     );
-  const allSessions = queries.flatMap((query) => query.data ?? []) as AgentSessionLike[];
+  if (error && loadedSessionCount === 0)
+    return (
+      <>
+        <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
+        <CursorLoadStatus
+          loadedCount={loadedSessionCount}
+          hasMore={false}
+          error={error}
+          onRetry={() => (errorEntry ? void collection.retry(errorEntry.key) : undefined)}
+        />
+        <ErrorState error={error} />
+      </>
+    );
+  const allSessions = entries.flatMap((entry) =>
+    entry.items.map((session) => ({ ...session, project: entry.key })),
+  ) as AgentSessionLike[];
   const projectGroups = groupAgentSessions(allSessions);
   const conflicts = findAgentSessionConflicts(allSessions);
   return (
@@ -1551,6 +1643,17 @@ function AgentsPage({
           ))}
         </div>
       ) : null}
+      <CursorLoadStatus
+        loadedCount={loadedSessionCount}
+        hasMore={entries.some((entry) => entry.hasMore)}
+        loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
+        error={error}
+        onRetry={() => {
+          for (const entry of entries) {
+            if (entry.error) void collection.retry(entry.key);
+          }
+        }}
+      />
       <section className="atm-panel">
         {projectGroups.length === 0 ? (
           <Empty title="没有 Agent 会话" text="Agent 调用 atm_begin 后会在这里出现。" />
@@ -3751,17 +3854,12 @@ function ProjectPage({
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
   const [reconciliationCollapsed, setReconciliationCollapsed] = useState(true);
-  const tasks = useQuery({
-    queryKey: ["tasks", project.code, "context"],
-    queryFn: async () => {
-      const [views, metadata] = await Promise.all([
-        client.tasks.list(project.code, { limit: 100, view: "context" }),
-        client.tasks.listForUi(project.code, { limit: 100 }),
-      ]);
-      const byKey = new Map(metadata.map((item) => [String(item.key), item]));
-      return views.map((view) => ({ ...byKey.get(view.key), ...view }));
-    },
-  });
+  const tasks = useCursorCollection(["tasks", project.code, "ui"], (cursor) =>
+    client.tasks.pageForUi(project.code, {
+      limit: 100,
+      ...(cursor === undefined ? {} : { cursor }),
+    }),
+  );
   const brief = useQuery({
     queryKey: ["brief", project.code],
     queryFn: () => client.projects.brief(project.code),
@@ -3787,11 +3885,11 @@ function ProjectPage({
     queryFn: () => client.events(project.code, 0, 100),
     enabled: view === "timeline",
   });
-  const records = useQuery({
-    queryKey: ["records", project.code],
-    queryFn: () => client.projects.records(project.code),
-    enabled: view === "records",
-  });
+  const records = useCursorCollection(
+    ["records", project.code],
+    (cursor) => client.projects.recordPage(project.code, 100, cursor),
+    view === "records",
+  );
   const lifecycle = useMutation({
     mutationFn: () =>
       project.lifecycle === "ARCHIVED"
@@ -3816,7 +3914,7 @@ function ProjectPage({
     window.addEventListener("atm:new-project-task", listener);
     return () => window.removeEventListener("atm:new-project-task", listener);
   }, []);
-  const workItems = (tasks.data ?? []) as any[];
+  const workItems = tasks.items as any[];
   const projectSummary = ((overview.data?.projects ?? []) as any[]).find(
     (candidate) => candidate.code === project.code,
   );
@@ -3830,7 +3928,7 @@ function ProjectPage({
   const onlineAgents = (agents.data ?? []).filter((agent) => agent.connectionState === "ONLINE");
   const claimedCount = workItems.filter((task) => Boolean(task.claimedBySessionId)).length;
   const latestUpdate = (updates.data ?? []).find((update) => update.status === "PUBLISHED");
-  const filtered = (tasks.data ?? []).filter((task: any) => {
+  const filtered = tasks.items.filter((task: any) => {
     if (filters.status && task.status !== filters.status) return false;
     if (filters.assignee && task.assigneeAgentId !== filters.assignee) return false;
     if (filters.milestone && task.milestoneId !== filters.milestone) return false;
@@ -3848,61 +3946,92 @@ function ProjectPage({
   });
   const sortedFiltered = sortProjectTasks(filtered, taskSort);
   const content = () => {
-    if (tasks.isLoading) return <LoadingRows count={6} />;
-    if (tasks.error) return <ErrorState error={tasks.error} />;
+    if (tasks.isLoading && tasks.items.length === 0) return <LoadingRows count={6} />;
+    if (tasks.error && tasks.items.length === 0)
+      return (
+        <>
+          <ErrorState error={tasks.error} />
+          <button className="atm-button" onClick={() => void tasks.retry()}>
+            重试加载
+          </button>
+        </>
+      );
     if (view === "records") {
-      if (records.isLoading) return <LoadingRows />;
-      if (records.error) return <ErrorState error={records.error} />;
-      return records.data?.length ? (
-        <div className="atm-list">
-          {records.data.map((record: any) => (
-            <article className="atm-record" key={record.id}>
-              <div className="atm-actions" style={{ justifyContent: "space-between" }}>
-                <span className="atm-badge">
-                  {(
-                    {
-                      DECISION: "决策",
-                      CONSTRAINT: "约束",
-                      FACT: "事实",
-                      RISK: "风险",
-                      REFERENCE: "参考",
-                      LESSON: "经验",
-                      VERIFICATION: "验证",
-                      WAIVER: "豁免",
-                    } as Record<string, string>
-                  )[record.kind] ?? record.kind}
-                </span>
-                <span className="atm-row-sub">
-                  {record.sourceType === "USER"
-                    ? "用户"
-                    : record.sourceType === "AGENT"
-                      ? "Agent"
-                      : record.sourceType === "IMPORT"
-                        ? "导入"
-                        : "系统"}{" "}
-                  · {formatTime(record.updatedAt)}
-                </span>
-              </div>
-              <h3>{record.title}</h3>
-              {record.topic ? <div className="atm-key">主题：{record.topic}</div> : null}
-              {record.subjectKey ? (
-                <div className="atm-key">主题标识：{record.subjectKey}</div>
-              ) : null}
-              <p>{record.summary}</p>
-              {record.relatedRecords.length ? (
-                <div className="atm-row-sub">相关记录：{record.relatedRecords.join("、")}</div>
-              ) : null}
-              {record.detail ? (
-                <details>
-                  <summary>查看详情</summary>
-                  <div className="atm-description">{record.detail}</div>
-                </details>
-              ) : null}
-            </article>
-          ))}
-        </div>
+      if (records.isLoading && records.items.length === 0) return <LoadingRows />;
+      if (records.error && records.items.length === 0)
+        return (
+          <>
+            <CursorLoadStatus
+              loadedCount={records.items.length}
+              hasMore={false}
+              error={records.error}
+              onRetry={() => void records.retry()}
+            />
+            <ErrorState error={records.error} />
+          </>
+        );
+      return records.items.length ? (
+        <>
+          <CursorLoadStatus
+            loadedCount={records.items.length}
+            hasMore={records.hasMore}
+            loading={records.isFetchingNextPage}
+            error={records.error}
+            onRetry={() => void records.retry()}
+          />
+          <div className="atm-list">
+            {records.items.map((record: any) => (
+              <article className="atm-record" key={record.id}>
+                <div className="atm-actions" style={{ justifyContent: "space-between" }}>
+                  <span className="atm-badge">
+                    {(
+                      {
+                        DECISION: "决策",
+                        CONSTRAINT: "约束",
+                        FACT: "事实",
+                        RISK: "风险",
+                        REFERENCE: "参考",
+                        LESSON: "经验",
+                        VERIFICATION: "验证",
+                        WAIVER: "豁免",
+                      } as Record<string, string>
+                    )[record.kind] ?? record.kind}
+                  </span>
+                  <span className="atm-row-sub">
+                    {record.sourceType === "USER"
+                      ? "用户"
+                      : record.sourceType === "AGENT"
+                        ? "Agent"
+                        : record.sourceType === "IMPORT"
+                          ? "导入"
+                          : "系统"}{" "}
+                    · {formatTime(record.updatedAt)}
+                  </span>
+                </div>
+                <h3>{record.title}</h3>
+                {record.topic ? <div className="atm-key">主题：{record.topic}</div> : null}
+                {record.subjectKey ? (
+                  <div className="atm-key">主题标识：{record.subjectKey}</div>
+                ) : null}
+                <p>{record.summary}</p>
+                {record.relatedRecords.length ? (
+                  <div className="atm-row-sub">相关记录：{record.relatedRecords.join("、")}</div>
+                ) : null}
+                {record.detail ? (
+                  <details>
+                    <summary>查看详情</summary>
+                    <div className="atm-description">{record.detail}</div>
+                  </details>
+                ) : null}
+              </article>
+            ))}
+          </div>
+        </>
       ) : (
-        <Empty title="还没有项目记录" text="把决策、约束、风险和验证保存为持久上下文。" />
+        <>
+          <CursorLoadStatus loadedCount={0} hasMore={false} />
+          <Empty title="还没有项目记录" text="把决策、约束、风险和验证保存为持久上下文。" />
+        </>
       );
     }
     if (view === "timeline") {
@@ -4389,10 +4518,19 @@ function ProjectPage({
         <ProjectTaskFilterBar
           client={client}
           project={project.code}
-          tasks={tasks.data ?? []}
+          tasks={tasks.items}
           value={filters}
           onChange={setFilters}
           notify={notify}
+        />
+      ) : null}
+      {tasks.items.length || tasks.error ? (
+        <CursorLoadStatus
+          loadedCount={tasks.loadedCount}
+          hasMore={tasks.hasMore}
+          loading={tasks.isFetchingNextPage}
+          error={tasks.error}
+          onRetry={() => void tasks.retry()}
         />
       ) : null}
       <section className="atm-panel">{content()}</section>
