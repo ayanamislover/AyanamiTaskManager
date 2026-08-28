@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, statSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -239,18 +239,26 @@ async function assertSourceStopped(source: string): Promise<void> {
 }
 
 function rewritePath(value: string, source: string, destination: string): string {
-  let existing = resolve(value);
-  const missingSegments: string[] = [];
-  while (!existsSync(existing)) {
-    const parent = dirname(existing);
-    if (parent === existing) break;
-    missingSegments.unshift(basename(existing));
-    existing = parent;
+  if (!existsSync(source)) {
+    const relativePath = relative(source, resolve(value));
+    if (relativePath.startsWith("..") || isAbsolute(relativePath)) return value;
+    return join(destination, relativePath);
   }
-  const candidate = resolve(realpathSync(existing), ...missingSegments);
-  const relativePath = relative(source, candidate);
-  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return value;
-  return join(destination, relativePath);
+  const sourceIdentity = statSync(source, { bigint: true });
+  let current = resolve(value);
+  const segments: string[] = [];
+  for (;;) {
+    if (existsSync(current)) {
+      const identity = statSync(current, { bigint: true });
+      if (identity.dev === sourceIdentity.dev && identity.ino === sourceIdentity.ino)
+        return join(destination, ...segments);
+      if (lstatSync(current).isSymbolicLink()) return value;
+    }
+    const parent = dirname(current);
+    if (parent === current) return value;
+    segments.unshift(basename(current));
+    current = parent;
+  }
 }
 
 function rewriteRegistryPaths(registryPath: string, source: string, destination: string): number {
