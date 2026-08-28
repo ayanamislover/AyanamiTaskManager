@@ -81,14 +81,19 @@ describe("keyboard accessibility primitives", () => {
   });
 
   it("跨项目任务表格原地打开 Drawer，避免路由卸载触发器破坏焦点恢复", () => {
-    const source = readFileSync(join(process.cwd(), "packages", "ui", "src", "app.tsx"), "utf8");
-    const inPlaceBindings = source.match(/onTask=\{openTaskInPlace\}/gu) ?? [];
-    expect(source).toMatch(
+    const app = readFileSync(join(process.cwd(), "packages", "ui", "src", "app.tsx"), "utf8");
+    const router = readFileSync(
+      join(process.cwd(), "packages", "ui", "src", "routes", "app-router.tsx"),
+      "utf8",
+    );
+    const inPlaceBindings = router.match(/onTask=\{onTask\}/gu) ?? [];
+    expect(app).toMatch(
       /const openTaskInPlace = \(project: string, key: string\) => setDrawer\(\{ project, key \}\)/u,
     );
+    expect(app).toContain("onTask={openTaskInPlace}");
     expect(inPlaceBindings).toHaveLength(2);
-    expect(source.replace("onTask={openTaskInPlace}", "onTask={openTask}")).not.toMatch(
-      /onTask=\{openTaskInPlace\}[\s\S]*onTask=\{openTaskInPlace\}/u,
+    expect(router.replace("onTask={onTask}", "onTask={() => undefined}")).not.toMatch(
+      /onTask=\{onTask\}[\s\S]*onTask=\{onTask\}/u,
     );
   });
 
