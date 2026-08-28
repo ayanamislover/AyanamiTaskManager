@@ -51,6 +51,29 @@ type AppliedMigration = {
   hash_origin: string;
 };
 
+// v15 originally reparsed legacy string[] project-update entries as JSON objects.
+// The corrected SQL is semantics-preserving for structured entries and safely ignores legacy
+// strings. Databases that already applied the original, exact file remain valid; no other hash is
+// accepted. New or still-v14 databases apply and record the corrected file hash.
+const MIGRATION_HASH_REPLACEMENTS = new Map<
+  string,
+  Readonly<{ current: string; historical: ReadonlySet<string> }>
+>([
+  [
+    "15:0015_reconciliation_projection.sql",
+    {
+      current: "4739d2ab1f36994ba82888094a894c080f3d8c9a018d38a48eff1c81e19adf47",
+      historical: new Set(["046381e8fdfef46a32e0babe85aa49ac0ac2168eb324aaf34d3ce714ad331205"]),
+    },
+  ],
+]);
+
+function migrationHashMatches(row: AppliedMigration, local: Migration): boolean {
+  if (local.sha256 === row.content_sha256) return true;
+  const replacement = MIGRATION_HASH_REPLACEMENTS.get(`${row.version}:${row.name}`);
+  return replacement?.current === local.sha256 && replacement.historical.has(row.content_sha256);
+}
+
 function ensureMigrationTable(sqlite: Database.Database): void {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -87,7 +110,7 @@ function assertAppliedPlan(applied: AppliedMigration[], plan: Migration[]): void
         message: `迁移名称不匹配：${row.version}`,
         details: { version: row.version, expected: row.name, actual: local.name },
       });
-    if (local.sha256 !== row.content_sha256) {
+    if (!migrationHashMatches(row, local)) {
       throw new AtmError("MIGRATION_HASH_MISMATCH", {
         message: `迁移哈希不匹配：${row.version}`,
         details: { version: row.version },

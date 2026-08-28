@@ -1,6 +1,7 @@
 import { appendFileSync, copyFileSync, cpSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiDatabaseManager, openManagedDatabase, ProjectRepository } from "../src/index.js";
 import { removeMigrationsAfter } from "./migration-test-helpers.js";
@@ -195,6 +196,23 @@ describe("v15 reconciliation projection migration", () => {
         "2026-08-27T10:00:00.000Z",
         firstSession.id,
       );
+    legacy.sqlite
+      .prepare(
+        `INSERT INTO project_updates(
+           id, health, summary, completed_json, risks_json, next_json, evidence_json,
+           from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
+           op_id, session_id
+         ) VALUES ('reconcile-legacy-project-update', 'ON_TRACK', 'legacy done', ?, '[]', '[]',
+                   '["legacy-project-proof"]', 0, 0, 'PUBLISHED', 'migration-author', ?, ?, ?,
+                   'reconcile-legacy-project-update', ?)`,
+      )
+      .run(
+        JSON.stringify([fallback.key, "legacy completion text"]),
+        "2026-08-27T10:30:00.000Z",
+        "2026-08-27T10:30:00.000Z",
+        "2026-08-27T10:30:00.000Z",
+        firstSession.id,
+      );
     manager.close();
 
     copyFileSync(
@@ -244,6 +262,19 @@ describe("v15 reconciliation projection migration", () => {
     } finally {
       manager.close();
     }
+
+    const historical = new Database(project.databasePath);
+    historical
+      .prepare("UPDATE schema_migrations SET content_sha256 = ? WHERE version = 15")
+      .run("046381e8fdfef46a32e0babe85aa49ac0ac2168eb324aaf34d3ce714ad331205");
+    historical.close();
+    const acceptedHistorical = await openManagedDatabase({
+      path: project.databasePath,
+      migrationDirectory: join(migrationsRoot, "project"),
+      backupDirectory: join(root, "historical-hash-backups"),
+    });
+    expect(acceptedHistorical.schemaVersion).toBe(15);
+    acceptedHistorical.sqlite.close();
 
     appendFileSync(
       join(migrationsRoot, "project", "0015_reconciliation_projection.sql"),
