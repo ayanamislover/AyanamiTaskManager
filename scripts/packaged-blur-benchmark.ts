@@ -137,7 +137,10 @@ try {
       },
       body: JSON.stringify(body),
     });
-    if (!response.ok) throw new Error(`${path} 创建性能数据失败：${response.status}`);
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 500);
+      throw new Error(`${path} 创建性能数据失败：${response.status} ${detail}`);
+    }
     return response.json();
   };
 
@@ -153,11 +156,11 @@ try {
     description: "",
     definitionOfDone: [],
   });
-  for (let batch = 0; batch < 4; batch += 1) {
+  for (let batch = 0; batch < 6; batch += 1) {
     await post("/api/v1/projects/BLUR/ui/work-items", {
       opId: `blur-benchmark-tasks-${batch}`,
-      items: Array.from({ length: 60 }, (_, index) => {
-        const ordinal = batch * 60 + index + 1;
+      items: Array.from({ length: 40 }, (_, index) => {
+        const ordinal = batch * 40 + index + 1;
         return {
           clientRef: `blur-${ordinal}`,
           objectiveId: objective.id,
