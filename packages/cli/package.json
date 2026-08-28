@@ -19,7 +19,6 @@
   },
   "dependencies": {
     "@ayanami-task/client": "workspace:*",
-    "@ayanami-task/mcp": "workspace:*",
     "@ayanami-task/protocol": "workspace:*",
     "commander": "14.0.0"
   }

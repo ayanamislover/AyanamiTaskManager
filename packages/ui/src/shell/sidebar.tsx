@@ -8,8 +8,7 @@ import { HouseIcon as House } from "@phosphor-icons/react/dist/icons/House";
 import { LightningIcon as Lightning } from "@phosphor-icons/react/dist/icons/Lightning";
 import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/UsersThree";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
-import type { RegisteredProject } from "@ayanami-task/client";
-import type { Route } from "../contracts.js";
+import type { Route, SidebarProject } from "../contracts.js";
 import { sidebarProjectHint } from "../presentation.js";
 
 export function Sidebar({
@@ -20,7 +19,7 @@ export function Sidebar({
 }: {
   route: Route;
   setRoute: (route: Route) => void;
-  projects: RegisteredProject[];
+  projects: SidebarProject[];
   brandLogoSrc?: string;
 }) {
   const primary = [

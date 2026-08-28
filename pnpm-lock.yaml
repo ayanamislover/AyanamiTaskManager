@@ -135,9 +135,6 @@ importers:
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@ayanami-task/storage-sqlite':
-        specifier: workspace:*
-        version: link:../../packages/storage-sqlite
       '@fastify/cors':
         specifier: 11.0.1
         version: 11.0.1
@@ -147,6 +144,10 @@ importers:
       fastify:
         specifier: 5.11.2
         version: 5.11.2
+    devDependencies:
+      '@ayanami-task/storage-sqlite':
+        specifier: workspace:*
+        version: link:../../packages/storage-sqlite
 
   apps/desktop:
     dependencies:
@@ -168,9 +169,6 @@ importers:
       '@ayanami-task/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
-      '@ayanami-task/protocol':
-        specifier: workspace:*
-        version: link:../../packages/protocol
       '@ayanami-task/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -219,9 +217,6 @@ importers:
       '@ayanami-task/client':
         specifier: workspace:*
         version: link:../client
-      '@ayanami-task/mcp':
-        specifier: workspace:*
-        version: link:../mcp
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -243,9 +238,6 @@ importers:
       '@ayanami-task/errors':
         specifier: workspace:*
         version: link:../errors
-      '@ayanami-task/protocol':
-        specifier: workspace:*
-        version: link:../protocol
 
   packages/engineering-metrics:
     devDependencies:
