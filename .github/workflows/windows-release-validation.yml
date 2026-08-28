@@ -36,7 +36,7 @@ jobs:
         run: pnpm exec playwright install chromium
 
       - name: Run full E2E, benchmark, make, and distribution validation
-        run: pnpm release -- --full
+        run: pnpm release --full
 
       - name: Upload release validation evidence
         if: always()
