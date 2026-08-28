@@ -111,4 +111,23 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(declaration);
     }
   });
+
+  it("app 使用提取后的 dialog/theme/notice hooks，而不是保留重复生命周期", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    for (const module of ["use-dialog-accessibility", "use-notice", "use-theme"]) {
+      expect(app).toContain(`from "./hooks/${module}.js"`);
+    }
+    for (const declaration of [
+      'const themeStorageKey = "atm.theme"',
+      "function readStoredTheme(",
+      "function readSystemTheme(",
+      "function persistTheme(",
+      "function useDialogAccessibility(",
+      "const noticeTimerRef = useRef<number | null>(null)",
+    ]) {
+      expect(app).not.toContain(declaration);
+    }
+    expect(app).toContain("const { notice, notify } = useNotice();");
+    expect(app).toContain("const { theme, toggleTheme } = useTheme();");
+  });
 });
