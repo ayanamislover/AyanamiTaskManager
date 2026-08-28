@@ -160,11 +160,10 @@ export function useCursorCollection<T>(
 
   const commit = useCallback(
     (next: InternalEntry<T> | ((current: InternalEntry<T>) => InternalEntry<T>)) => {
-      setEntry((current) => {
-        const resolved = typeof next === "function" ? next(current) : next;
-        entryRef.current = resolved;
-        return resolved;
-      });
+      const current = entryRef.current;
+      const resolved = typeof next === "function" ? next(current) : next;
+      entryRef.current = resolved;
+      setEntry(resolved);
     },
     [],
   );
@@ -248,7 +247,7 @@ export function useCursorCollection<T>(
     [commit],
   );
 
-  useQuery({
+  const query = useQuery<InternalEntry<T>>({
     queryKey,
     enabled,
     queryFn: async () => {
@@ -268,9 +267,15 @@ export function useCursorCollection<T>(
         resume ? current.seenCursors : [],
         generation,
       );
-      return generation;
+      return entryRef.current;
     },
   });
+
+  useEffect(() => {
+    if (!query.data || query.data === entryRef.current) return;
+    entryRef.current = query.data;
+    setEntry(query.data);
+  }, [key, query.data]);
 
   useEffect(() => {
     if (enabled) return () => undefined;
@@ -322,13 +327,12 @@ export function useCursorCollections<T>(
       projectKey: string,
       next: InternalEntry<T> | ((current: InternalEntry<T>) => InternalEntry<T>),
     ) => {
-      setEntries((current) => {
-        const previous = current[projectKey] ?? emptyEntry<T>();
-        const resolved = typeof next === "function" ? next(previous) : next;
-        const updated = { ...current, [projectKey]: resolved };
-        entriesRef.current = updated;
-        return updated;
-      });
+      const current = entriesRef.current;
+      const previous = current[projectKey] ?? emptyEntry<T>();
+      const resolved = typeof next === "function" ? next(previous) : next;
+      const updated = { ...current, [projectKey]: resolved };
+      entriesRef.current = updated;
+      setEntries(updated);
     },
     [],
   );
@@ -425,7 +429,7 @@ export function useCursorCollections<T>(
     [commit],
   );
 
-  useQuery({
+  const query = useQuery<Record<string, InternalEntry<T>>>({
     queryKey: [...queryKey, key],
     queryFn: async () => {
       const generation = generationRef.current + 1;
@@ -446,9 +450,15 @@ export function useCursorCollections<T>(
           return consume(source.key, entry.cursor, entry.items, entry.seenCursors, generation);
         }),
       );
-      return generation;
+      return entriesRef.current;
     },
   });
+
+  useEffect(() => {
+    if (!query.data || query.data === entriesRef.current) return;
+    entriesRef.current = query.data;
+    setEntries(query.data);
+  }, [key, query.data]);
 
   const retry = useCallback(
     async (projectKey: string) => {
