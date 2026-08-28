@@ -252,4 +252,33 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(duplicate);
     }
   });
+
+  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图/Drawer/Modal 留在原边界", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/project-summary.js"');
+    expect(app).toContain("<ProjectSummary");
+    for (const duplicate of [
+      'queryKey: ["brief", project.code]',
+      'queryKey: ["agents", project.code]',
+      'queryKey: ["project-updates", project.code]',
+      'queryKey: ["reconciliation", project.code]',
+      "reconciliationCollapsed",
+      "<ProjectProjectionPanel",
+      "<EngineeringMetricsPanel",
+      'aria-label="项目管理摘要"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+    for (const retained of [
+      'queryKey: ["events", project.code]',
+      '["records", project.code]',
+      "function TaskDrawer(",
+      "function CreateTaskModal(",
+      "function CreateRecordModal(",
+      "function ProjectUpdateModal(",
+      "function ProjectDataModal(",
+    ]) {
+      expect(app).toContain(retained);
+    }
+  });
 });
