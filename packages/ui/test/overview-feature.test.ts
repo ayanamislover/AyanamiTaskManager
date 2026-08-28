@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OverviewPage, TasksAcrossProjects } from "../src/features/overview.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "overview.tsx");
+const stylesPath = join(process.cwd(), "packages", "ui", "src", "styles.css");
 
 function client(): AyanamiClient {
   return {
@@ -109,6 +110,37 @@ describe("Overview feature", () => {
     expect(markup).toContain("seq 42");
     expect(markup).toContain('data-testid="timeline-row"');
     expect(markup).toContain("临时检查");
+  });
+
+  it("总览项目卡长名称最多两行并保留全称提示", () => {
+    const longName = "Codex Agent Permission Preflight And Deployment Readiness Verification";
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["overview"], {
+      sequence: 43,
+      projects: [{ ...project(), name: longName }],
+      quick: { blocked: 0 },
+      projectionFailures: [],
+      recentEvents: [],
+    });
+    queryClient.setQueryData(["quick"], []);
+
+    const markup = renderWithClient(
+      queryClient,
+      createElement(OverviewPage, {
+        client: client(),
+        onProject: vi.fn(),
+        onQuick: vi.fn(),
+        notify: vi.fn(),
+        TimelineEventRow: () => createElement("div"),
+      }),
+    );
+    const styles = readFileSync(stylesPath, "utf8");
+
+    expect(markup).toContain('class="atm-overview-project-name"');
+    expect(markup).toContain(`title="${longName}\n名称较长，建议改用简洁中文名称。"`);
+    expect(styles).toMatch(
+      /\.atm-overview-project-name\s*\{[\s\S]*-webkit-box-orient:\s*vertical;[\s\S]*-webkit-line-clamp:\s*2;[\s\S]*overflow:\s*hidden;/u,
+    );
   });
 
   it("保持跨项目 active/blocked 空态与局部分页入口", () => {

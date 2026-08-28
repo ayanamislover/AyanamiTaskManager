@@ -573,6 +573,18 @@ button.atm-row:hover {
 .atm-overview-project {
   min-height: 226px;
 }
+.atm-overview-project-name {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
 .atm-project-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

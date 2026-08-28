@@ -176,6 +176,79 @@ test("长项目名称保持在侧栏项目按钮内", async ({ page }) => {
   });
 });
 
+test("总览项目卡长名称最多两行并保留全称提示", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  const viewports = [
+    { width: 1366, height: 768 },
+    { width: 1920, height: 1080 },
+    { width: 3440, height: 1440 },
+  ];
+
+  for (const [index, viewport] of viewports.entries()) {
+    await page.setViewportSize(viewport);
+    if (index === 0) await page.goto("/#overview");
+    else await page.getByRole("button", { name: "总览", exact: true }).click();
+
+    const project = page
+      .locator(".atm-overview-project")
+      .filter({ hasText: longSidebarProjectName })
+      .first();
+    await expect(project).toHaveCount(1);
+    await expect(project).toHaveAttribute(
+      "title",
+      `${longSidebarProjectName}\n名称较长，建议改用简洁中文名称。`,
+    );
+
+    const layout = await project.evaluate((card) => {
+      const name = card.querySelector<HTMLElement>(".atm-overview-project-name");
+      if (!name) throw new Error("总览项目名称缺失");
+      const cardRect = card.getBoundingClientRect();
+      const nameRect = name.getBoundingClientRect();
+      const nameStyle = getComputedStyle(name);
+      const naturalName = name.cloneNode(true) as HTMLElement;
+      naturalName.style.display = "block";
+      naturalName.style.position = "absolute";
+      naturalName.style.visibility = "hidden";
+      naturalName.style.width = `${name.clientWidth}px`;
+      naturalName.style.height = "auto";
+      naturalName.style.maxHeight = "none";
+      naturalName.style.overflow = "visible";
+      naturalName.style.webkitLineClamp = "unset";
+      naturalName.style.setProperty("line-clamp", "unset");
+      naturalName.style.margin = "0";
+      document.body.append(naturalName);
+      const naturalNameHeight = naturalName.getBoundingClientRect().height;
+      naturalName.remove();
+      const lineHeight = Number.parseFloat(nameStyle.lineHeight);
+      return {
+        cardFits: card.scrollWidth <= card.clientWidth,
+        nameFits: nameRect.right <= cardRect.right,
+        nameIsTruncated: naturalNameHeight > lineHeight * 2 + 1,
+        lineClamp: nameStyle.webkitLineClamp,
+        lineCount: Math.round(nameRect.height / lineHeight),
+        naturalLineCount: naturalNameHeight / lineHeight,
+        overflow: nameStyle.overflow,
+        textOverflow: nameStyle.textOverflow,
+        whiteSpace: nameStyle.whiteSpace,
+      };
+    });
+
+    expect(layout.cardFits).toBe(true);
+    expect(layout.nameFits).toBe(true);
+    expect(layout.lineClamp).toBe("2");
+    expect(layout.lineCount).toBeLessThanOrEqual(2);
+    expect(layout.naturalLineCount).toBeGreaterThanOrEqual(layout.lineCount);
+    expect(layout.nameIsTruncated).toBe(layout.naturalLineCount > 2 + 1 / 24);
+    expect(layout.overflow).toBe("hidden");
+    expect(layout.textOverflow).toBe("ellipsis");
+    expect(layout.whiteSpace).toBe("normal");
+    await page.screenshot({
+      path: resolve("output", "playwright", `e2e-overview-project-${viewport.width}-dark.png`),
+      fullPage: true,
+    });
+  }
+});
+
 test("侧栏默认精简、工作区可折叠且设置固定在底部", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/#overview");

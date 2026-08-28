@@ -13,7 +13,7 @@ import {
 import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
-import { Status, formatTime, progressSourceLabels } from "../presentation.js";
+import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
 
 export function OverviewPage({
@@ -158,13 +158,14 @@ export function OverviewPage({
                 <button
                   className="atm-project atm-overview-project"
                   key={project.id}
+                  title={sidebarProjectHint(project.name)}
                   onClick={() => onProject(project.code)}
                 >
                   <div className="atm-actions" style={{ justifyContent: "space-between" }}>
                     <span className="atm-project-code">{project.code}</span>
                     <Status value={project.health ?? "UNKNOWN"} />
                   </div>
-                  <h2>{project.name}</h2>
+                  <h2 className="atm-overview-project-name">{project.name}</h2>
                   <div className="atm-row-sub">
                     {project.current_milestone ?? "尚未设置里程碑"} ·{" "}
                     {project.next_target_date ?? "无目标日期"}
