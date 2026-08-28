@@ -107,6 +107,14 @@ describe("GitHub Actions runtime policy", () => {
     expect(ci).toContain("run: pnpm install --frozen-lockfile");
   });
 
+  it("keeps the full test gate bounded on Windows runners", () => {
+    const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageJson.scripts?.test).toBe("vitest run --maxWorkers=1 --no-file-parallelism");
+  });
+
   it("runs every release-only gate on a clean Windows runner", () => {
     const sources: ReleaseValidationSources = {
       workflow: readFileSync(releaseWorkflowPath, "utf8"),

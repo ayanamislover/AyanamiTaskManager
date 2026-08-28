@@ -17,7 +17,7 @@
     "build": "pnpm -r --workspace-concurrency=1 build",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit && pnpm -r --workspace-concurrency=1 typecheck",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1 --no-file-parallelism",
     "test:unit": "vitest run packages/protocol packages/domain",
     "test:integration": "vitest run packages/storage-sqlite packages/application apps/daemon",
     "test:e2e": "playwright test",
