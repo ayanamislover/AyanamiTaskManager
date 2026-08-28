@@ -223,4 +223,10 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(duplicate);
     }
   });
+
+  it("app 使用提取后的 Agents feature", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/agents.js"');
+    expect(app).not.toContain("function AgentsPage(");
+  });
 });
