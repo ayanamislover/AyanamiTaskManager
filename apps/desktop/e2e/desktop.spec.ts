@@ -697,6 +697,73 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
   await expect(createDialog).toBeHidden();
 });
 
+test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto("/#project:E2E");
+
+  const createTask = page.getByRole("button", { name: "新建任务", exact: true });
+  await createTask.click();
+  const taskDialog = page.getByRole("dialog", { name: "新建任务" });
+  await expect(taskDialog).toBeVisible();
+  await expect(taskDialog.locator("#task-title")).toBeFocused();
+  await expect(taskDialog.locator("select")).toHaveCount(0);
+  const priority = taskDialog.getByRole("combobox", { name: "优先级" });
+  await priority.click();
+  await expect(page.getByRole("option", { name: "普通", exact: true })).toBeVisible();
+  await page.getByRole("option", { name: "低", exact: true }).click();
+  await expect(priority).toContainText("低");
+  await page.keyboard.press("Escape");
+  await expect(taskDialog).toBeHidden();
+  await expect(createTask).toBeFocused();
+
+  await page.getByRole("button", { name: "记录", exact: true }).click();
+  const createRecord = page.getByRole("button", { name: "新建记录", exact: true });
+  await createRecord.click();
+  const recordDialog = page.getByRole("dialog", { name: "新建项目记录" });
+  await expect(recordDialog).toBeVisible();
+  await expect(recordDialog.locator("#record-title")).toBeFocused();
+  await expect(recordDialog.locator("select")).toHaveCount(0);
+  const recordKind = recordDialog.getByRole("combobox", { name: "记录类型" });
+  await recordKind.click();
+  await expect(page.getByRole("option", { name: "决策", exact: true })).toBeVisible();
+  await page.getByRole("option", { name: "约束", exact: true }).click();
+  await expect(recordKind).toContainText("约束");
+  await page.keyboard.press("Escape");
+  await expect(recordDialog).toBeHidden();
+  await expect(createRecord).toBeFocused();
+
+  const openUpdate = page.getByRole("button", { name: "发布项目更新", exact: true });
+  await openUpdate.click();
+  const updateDialog = page.getByRole("dialog", { name: "发布项目更新" });
+  await expect(updateDialog).toBeVisible();
+  await expect(updateDialog.getByRole("button", { name: "关闭" })).toBeFocused();
+  await expect(updateDialog.getByText("生成确定性草稿", { exact: true })).toBeVisible();
+  await expect(updateDialog.getByRole("button", { name: "生成更新草稿" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(updateDialog).toBeHidden();
+  await expect(openUpdate).toBeFocused();
+
+  const openData = page.getByRole("button", { name: "数据工具", exact: true });
+  await openData.click();
+  const dataDialog = page.getByRole("dialog", { name: "备份、恢复与数据交换" });
+  await expect(dataDialog).toBeVisible();
+  await expect(dataDialog.getByRole("button", { name: "关闭" }).first()).toBeFocused();
+  await expect(dataDialog.getByRole("button", { name: "立即备份" })).toBeVisible();
+  await expect(dataDialog.getByRole("button", { name: "导出 .aytproj" })).toBeVisible();
+  await expect(dataDialog.getByRole("button", { name: "导出 JSON" })).toBeVisible();
+  await expect(dataDialog.getByRole("button", { name: "导出 CSV" })).toBeVisible();
+  await expect(dataDialog.locator('input[type="file"][accept*=".md"]')).toBeVisible();
+  await expect(dataDialog.getByRole("button", { name: "生成预览" })).toBeDisabled();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-project-data-modal-dark.png"),
+    fullPage: true,
+  });
+  await page.keyboard.press("Escape");
+  await expect(dataDialog).toBeHidden();
+  await expect(openData).toBeFocused();
+});
+
 test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   const suffix = Date.now().toString(36);
