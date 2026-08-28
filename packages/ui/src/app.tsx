@@ -38,7 +38,7 @@ import {
   type RegisteredProject,
   type UserRecordCreateInput,
 } from "@ayanami-task/client";
-import { WORK_ITEM_STATUS_LABELS, type WorkItemStatus } from "@ayanami-task/protocol";
+import { type WorkItemStatus } from "@ayanami-task/protocol";
 import {
   findAgentSessionConflicts,
   groupAgentSessions,
@@ -51,7 +51,7 @@ import {
   ProjectionStatusBadge,
   SystemProjectionPanel,
 } from "./projection-health-panel.js";
-import { McpBridgePanel, type McpBridgeObservation } from "./mcp-bridge-panel.js";
+import { McpBridgePanel } from "./mcp-bridge-panel.js";
 import { cancelNoticeTimer, restartNoticeTimer } from "./notice-lifecycle.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
@@ -70,84 +70,30 @@ import {
   type ProjectTaskSortField,
 } from "./task-sort.js";
 import { workItemUiActions } from "./task-actions.js";
+import type {
+  AgentIntegrationAction,
+  AyanamiTaskManagerProps,
+  DesktopBridge,
+  McpClient,
+  NotificationMode,
+  Notify,
+  Route,
+  Theme,
+} from "./contracts.js";
+import {
+  AgentIntegrationBadge,
+  Status,
+  agentClientLabel,
+  compactPath,
+  formatDuration,
+  formatTime,
+  integrationState,
+  priorityLabels,
+  progressSourceLabels,
+  sidebarProjectHint,
+  statusLabels,
+} from "./presentation.js";
 import "./styles.css";
-
-type Route =
-  | "overview"
-  | "projects"
-  | "my"
-  | "quick"
-  | "blockers"
-  | "agents"
-  | "timeline"
-  | "settings"
-  | `project:${string}`;
-type Notify = (message: string) => void;
-type Theme = "light" | "dark";
-type NotificationMode = "ALL" | "CRITICAL" | "OFF";
-type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
-type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
-type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
-type McpProfileSwitchResult = {
-  enabled: boolean;
-  status: "APPLIED";
-  restartRequired: boolean;
-  clients: Array<{
-    client: McpClient;
-    target: string;
-    status: "SKIPPED" | "UPDATED" | "FAILED" | "ROLLED_BACK" | "ROLLBACK_FAILED";
-    error?: string;
-  }>;
-};
-type UpdateStatus = {
-  phase: "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
-  outcome: "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
-  code: string;
-  message: string;
-  action: string;
-  at: string;
-  version: string | null;
-};
-type AgentIntegrationReport = {
-  client: McpClient;
-  mcpInstalled: boolean;
-  repairError: string | null;
-  sharesRuleAndSkillsWith: "CLAUDE" | null;
-  cliAvailable: boolean;
-  rule: { state: AgentIntegrationState; path: string; version: number | null };
-  skills: {
-    state: AgentIntegrationState;
-    skills: Array<{ name: string; state: AgentIntegrationState; version: number | null }>;
-  };
-};
-type DesktopBridge = {
-  runtime?: { endpoint: string; token: string };
-  setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
-  getAutoLaunch?: () => Promise<boolean>;
-  getUpdateStatus?: () => Promise<UpdateStatus | null>;
-  checkForUpdates?: () => Promise<UpdateStatus | null>;
-  showItemInFolder?: (path: string) => Promise<void>;
-  getMcpConfigs?: () => Promise<{
-    streamableHttp: string;
-    stdio: string;
-    generic: string;
-    agentRule: string;
-  }>;
-  getMcpBridges?: () => Promise<McpBridgeObservation>;
-  getMemoryProfile?: () => Promise<boolean>;
-  setMemoryProfile?: (enabled: boolean) => Promise<McpProfileSwitchResult>;
-  installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;
-  getAgentIntegrations?: () => Promise<AgentIntegrationReport[]>;
-  manageAgentIntegration?: (
-    client: McpClient,
-    action: AgentIntegrationAction,
-  ) => Promise<{
-    report: AgentIntegrationReport;
-    preview: { current: string; proposed: string } | null;
-  }>;
-  copyText?: (text: string) => Promise<boolean>;
-  onNavigate?: (listener: (route: string) => void) => () => void;
-};
 
 const themeStorageKey = "atm.theme";
 
@@ -179,53 +125,6 @@ function isEditableTarget(target: EventTarget | null): boolean {
     ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
     Boolean(target.closest('[contenteditable="true"]'))
   );
-}
-
-const statusLabels: Record<string, string> = {
-  ...WORK_ITEM_STATUS_LABELS,
-  OPEN: "待处理",
-  PROMOTED: "已晋升",
-  ARCHIVED: "已归档",
-  TRASHED: "垃圾箱",
-  ACTIVE: "活动",
-  ON_TRACK: "正常",
-  AT_RISK: "有风险",
-  OFF_TRACK: "偏离计划",
-  UNKNOWN: "未知",
-  ONLINE: "在线",
-  CLOSED: "已关闭",
-  PRIMARY: "主 Agent",
-  SUBAGENT: "子 Agent",
-  REVIEWER: "审阅者",
-  OBSERVER: "观察者",
-  SOLO: "单 Agent",
-  AUTO: "自动判断",
-  MULTI: "多 Agent",
-};
-
-const priorityLabels: Record<string, string> = {
-  LOW: "低",
-  NORMAL: "普通",
-  HIGH: "高",
-  CRITICAL: "紧急",
-};
-const progressSourceLabels: Record<string, string> = {
-  NONE: "尚无进度",
-  CHECKLIST: "检查项计算",
-  CHILDREN: "子任务汇总",
-  REPORTED: "人工报告",
-  STATUS: "状态计算",
-};
-function statusClass(status: string): string {
-  if (["DONE", "ACTIVE", "ON_TRACK"].includes(status)) return "success";
-  if (["BLOCKED", "OFF_TRACK", "MIGRATION_FAILED"].includes(status)) return "danger";
-  if (["WAITING_USER", "WAITING_AGENT", "AT_RISK"].includes(status)) return "warning";
-  if (["IN_PROGRESS", "CLAIMED", "READY", "VERIFYING"].includes(status)) return "primary";
-  return "";
-}
-
-function Status({ value }: { value: string }) {
-  return <span className={`atm-badge ${statusClass(value)}`}>{statusLabels[value] ?? value}</span>;
 }
 
 type AtmSelectOption = { value: string; label: string };
@@ -384,32 +283,6 @@ function AtmSelect({
   );
 }
 
-function formatTime(value?: string | null): string {
-  if (!value) return "暂无";
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
-
-function compactPath(value?: unknown): string {
-  if (typeof value !== "string" || !value.trim()) return "不可用";
-  const parts = value.replaceAll("/", "\\").split("\\").filter(Boolean);
-  return parts.length > 2 ? `…\\${parts.slice(-2).join("\\")}` : value;
-}
-
-function formatDuration(value?: string | null): string {
-  const started = Date.parse(value ?? "");
-  if (!Number.isFinite(started)) return "未知";
-  const minutes = Math.max(0, Math.floor((Date.now() - started) / 60_000));
-  const hours = Math.floor(minutes / 60);
-  return hours ? `${hours}h ${minutes % 60}m` : `${minutes}m`;
-}
-
 function LoadingRows({ count = 4 }: { count?: number }) {
   return (
     <div className="atm-panel-body" style={{ display: "grid", gap: 9 }}>
@@ -548,14 +421,6 @@ function useDialogAccessibility(close: () => void) {
     };
   }, []);
   return dialogRef;
-}
-
-function sidebarProjectHint(name: string): string {
-  const isLongAsciiName =
-    name.length > 28 &&
-    /[A-Za-z]/u.test(name) &&
-    Array.from(name).every((character) => (character.codePointAt(0) ?? 0) <= 0x7f);
-  return isLongAsciiName ? `${name}\n名称较长，建议改用简洁中文名称。` : name;
 }
 
 function Sidebar({
@@ -1886,35 +1751,6 @@ function TimelinePage({ client }: { client: AyanamiClient }) {
       </section>
     </>
   );
-}
-
-const integrationStateLabels: Record<AgentIntegrationState, string> = {
-  NOT_INSTALLED: "未安装",
-  INSTALLED: "已安装",
-  NEEDS_UPDATE: "需要更新",
-  MODIFIED: "内容被修改",
-};
-
-function AgentIntegrationBadge({ state }: { state: AgentIntegrationState }) {
-  return (
-    <span className="atm-integration-status" data-state={state}>
-      {integrationStateLabels[state]}
-    </span>
-  );
-}
-
-function integrationState(report: AgentIntegrationReport): AgentIntegrationState {
-  const states = [report.rule.state, report.skills.state];
-  if (states.includes("MODIFIED")) return "MODIFIED";
-  if (states.includes("NEEDS_UPDATE")) return "NEEDS_UPDATE";
-  if (report.mcpInstalled && states.every((state) => state === "INSTALLED")) return "INSTALLED";
-  return "NOT_INSTALLED";
-}
-
-function agentClientLabel(client: McpClient): string {
-  if (client === "CODEX") return "Codex";
-  if (client === "CLAUDE_CODE") return "Claude Code";
-  return "Claude Desktop";
 }
 
 function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: DesktopBridge }) {
@@ -4902,15 +4738,7 @@ function App({
   );
 }
 
-export function AyanamiTaskManager({
-  client,
-  desktop,
-  brandLogoSrc,
-}: {
-  client: AyanamiClient;
-  desktop?: DesktopBridge;
-  brandLogoSrc?: string;
-}) {
+export function AyanamiTaskManager({ client, desktop, brandLogoSrc }: AyanamiTaskManagerProps) {
   const [queryClient] = useState(() => createAyanamiQueryClient());
   return (
     <QueryClientProvider client={queryClient}>
