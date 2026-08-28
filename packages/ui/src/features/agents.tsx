@@ -11,6 +11,7 @@ import {
   Empty,
   ErrorState,
   LoadingRows,
+  MutationErrorAlert,
   PageHead,
 } from "../components/async-state.js";
 import { useCursorCollections } from "../cursor-collection.js";
@@ -265,11 +266,7 @@ export function AgentsPage({
           </div>
         )}
       </section>
-      {forceClose.error ? (
-        <div className="atm-inline-error" style={{ marginTop: 12 }}>
-          {forceClose.error instanceof Error ? forceClose.error.message : String(forceClose.error)}
-        </div>
-      ) : null}
+      <MutationErrorAlert errors={[forceClose.error, refreshGit.error]} style={{ marginTop: 12 }} />
     </>
   );
 }

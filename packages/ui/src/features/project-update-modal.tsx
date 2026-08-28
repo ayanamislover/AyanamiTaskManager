@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
-import { Empty } from "../components/async-state.js";
+import { Empty, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { formatTime, statusLabels } from "../presentation.js";
@@ -57,7 +57,6 @@ export function ProjectUpdateModal({
       close();
     },
   });
-  const error = generate.error ?? publish.error;
   return (
     <div className="atm-modal-backdrop">
       <section
@@ -170,11 +169,7 @@ export function ProjectUpdateModal({
                 ))}
             </section>
           ) : null}
-          {error ? (
-            <div className="atm-inline-error">
-              {error instanceof Error ? error.message : String(error)}
-            </div>
-          ) : null}
+          <MutationErrorAlert errors={[generate.error, publish.error]} />
         </div>
         <footer className="atm-modal-foot">
           <button className="atm-button" onClick={close}>

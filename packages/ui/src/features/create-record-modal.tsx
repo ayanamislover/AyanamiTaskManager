@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient, UserRecordCreateInput } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
+import { MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { recordDraftToUserInput } from "../record-input.js";
@@ -153,11 +154,7 @@ export function CreateRecordModal({
               onChange={(event) => setDetail(event.target.value)}
             />
           </div>
-          {mutation.error ? (
-            <div className="atm-inline-error">
-              {mutation.error instanceof Error ? mutation.error.message : String(mutation.error)}
-            </div>
-          ) : null}
+          <MutationErrorAlert error={mutation.error} />
         </div>
         <footer className="atm-modal-foot">
           <button className="atm-button" onClick={close}>

@@ -5,7 +5,7 @@ import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/C
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
 import type { WorkItemStatus } from "@ayanami-task/protocol";
 import { checklistToggleIntent, evidenceText } from "../checklist-evidence.js";
-import { ErrorState, LoadingRows } from "../components/async-state.js";
+import { ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
@@ -179,11 +179,7 @@ export function TaskDrawer({
                 </button>
               ))}
             </div>
-            {patch.error ? (
-              <div className="atm-inline-error">
-                {patch.error instanceof Error ? patch.error.message : String(patch.error)}
-              </div>
-            ) : null}
+            <MutationErrorAlert errors={[patch.error, check.error]} />
             <section className="atm-section">
               <h3>说明</h3>
               <div className="atm-description">

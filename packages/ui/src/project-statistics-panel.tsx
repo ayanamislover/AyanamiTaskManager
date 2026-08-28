@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import type { AyanamiClient } from "@ayanami-task/client";
+import { MutationErrorAlert } from "./components/async-state.js";
 
 export function EngineeringMetricsPanel({
   client,
@@ -55,6 +56,7 @@ export function EngineeringMetricsPanel({
         ) : null}
       </div>
       <div id="engineering-metrics-content" hidden={collapsed}>
+        <MutationErrorAlert error={refresh.error} />
         {engineering.isLoading ? (
           <div className="atm-panel-body" style={{ display: "grid", gap: 9 }}>
             {Array.from({ length: 2 }, (_, index) => (

@@ -6,7 +6,13 @@ import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
-import { Empty, ErrorState, LoadingRows, PageHead } from "../components/async-state.js";
+import {
+  Empty,
+  ErrorState,
+  LoadingRows,
+  MutationErrorAlert,
+  PageHead,
+} from "../components/async-state.js";
 import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { Status, statusLabels } from "../presentation.js";
@@ -249,15 +255,7 @@ export function ProjectWizard({
               )}
             </div>
           )}
-          {mutation.error || install.error ? (
-            <div className="atm-inline-error" style={{ marginTop: 14 }}>
-              {mutation.error instanceof Error
-                ? mutation.error.message
-                : install.error instanceof Error
-                  ? install.error.message
-                  : String(mutation.error ?? install.error)}
-            </div>
-          ) : null}
+          <MutationErrorAlert errors={[mutation.error, install.error]} style={{ marginTop: 14 }} />
         </div>
         <footer className="atm-modal-foot">
           {step > 0 ? (
@@ -371,6 +369,7 @@ export function ProjectsPage({
           ))}
         </section>
       )}
+      <MutationErrorAlert error={restore.error} />
       {wizard ? (
         <ProjectWizard
           client={client}

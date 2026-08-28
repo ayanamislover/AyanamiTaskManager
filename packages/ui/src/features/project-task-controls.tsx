@@ -8,6 +8,8 @@ import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
 import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
 import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
 import { AtmSelect } from "../components/atm-select.js";
+import { MutationErrorAlert } from "../components/async-state.js";
+import { moveRovingFocus } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
 import { progressSourceLabels, statusLabels } from "../presentation.js";
 import {
@@ -18,6 +20,14 @@ import {
 } from "../task-sort.js";
 
 export type ProjectTaskView = "list" | "board" | "timeline" | "tree" | "records";
+
+const PROJECT_TASK_VIEWS = [
+  { value: "list", label: "列表", Icon: ListBullets },
+  { value: "board", label: "看板", Icon: Kanban },
+  { value: "timeline", label: "时间线", Icon: ClockCounterClockwise },
+  { value: "tree", label: "层级", Icon: Rows },
+  { value: "records", label: "记录", Icon: CheckSquare },
+] as const;
 
 export type ProjectTaskFilters = {
   status: string;
@@ -256,6 +266,7 @@ function ProjectTaskFilterBar({
           清除筛选
         </button>
       ) : null}
+      <MutationErrorAlert errors={[create.error, remove.error]} />
     </div>
   );
 }
@@ -282,22 +293,28 @@ export function ProjectTaskControls({
   return (
     <>
       <div className="atm-toolbar">
-        <div className="atm-tabs" role="tablist">
-          <button aria-selected={view === "list"} onClick={() => onViewChange("list")}>
-            <ListBullets size={15} /> 列表
-          </button>
-          <button aria-selected={view === "board"} onClick={() => onViewChange("board")}>
-            <Kanban size={15} /> 看板
-          </button>
-          <button aria-selected={view === "timeline"} onClick={() => onViewChange("timeline")}>
-            <ClockCounterClockwise size={15} /> 时间线
-          </button>
-          <button aria-selected={view === "tree"} onClick={() => onViewChange("tree")}>
-            <Rows size={15} /> 层级
-          </button>
-          <button aria-selected={view === "records"} onClick={() => onViewChange("records")}>
-            <CheckSquare size={15} /> 记录
-          </button>
+        <div className="atm-tabs" role="tablist" aria-label="项目任务视图">
+          {PROJECT_TASK_VIEWS.map(({ value, label, Icon }, index) => (
+            <button
+              key={value}
+              id={`project-task-tab-${value}`}
+              role="tab"
+              aria-selected={view === value}
+              aria-controls="project-task-panel"
+              tabIndex={view === value ? 0 : -1}
+              onClick={() => onViewChange(value)}
+              onKeyDown={(event) =>
+                moveRovingFocus(event, {
+                  selector: '[role="tab"]',
+                  index,
+                  count: PROJECT_TASK_VIEWS.length,
+                  onMove: (next) => onViewChange(PROJECT_TASK_VIEWS[next]!.value),
+                })
+              }
+            >
+              <Icon size={15} /> {label}
+            </button>
+          ))}
         </div>
       </div>
       {!new Set(["timeline", "records"]).has(view) ? (

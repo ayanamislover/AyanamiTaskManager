@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 export function LoadingRows({ count = 4 }: { count?: number }) {
   return (
@@ -37,6 +37,36 @@ export function ErrorState({ error }: { error: unknown }) {
         <strong>载入失败</strong>
         <div>{error instanceof Error ? error.message : String(error)}</div>
       </div>
+    </div>
+  );
+}
+
+export function MutationErrorAlert({
+  error,
+  errors,
+  prefix = "",
+  className = "",
+  style,
+}: {
+  error?: unknown;
+  errors?: readonly unknown[];
+  prefix?: string;
+  className?: string;
+  style?: CSSProperties;
+}) {
+  const current =
+    error ?? errors?.find((candidate) => candidate !== null && candidate !== undefined);
+  if (current === null || current === undefined) return null;
+  const rawMessage = current instanceof Error ? current.message : String(current);
+  const message = rawMessage.length > 500 ? `${rawMessage.slice(0, 499)}…` : rawMessage;
+  return (
+    <div
+      className={`atm-inline-error${className ? ` ${className}` : ""}`}
+      role="alert"
+      style={style}
+    >
+      {prefix}
+      {message}
     </div>
   );
 }

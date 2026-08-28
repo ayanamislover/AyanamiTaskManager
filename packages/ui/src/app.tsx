@@ -129,6 +129,7 @@ function App({
     setRoute(`project:${project}`);
     setDrawer({ project, key });
   };
+  const openTaskInPlace = (project: string, key: string) => setDrawer({ project, key });
   const title = appRouteTitle(route, selectedProject?.name);
   let page: ReactNode;
   if (route === "overview")
@@ -158,7 +159,7 @@ function App({
           client={client}
           projects={projectList}
           mode="active"
-          onTask={openTask}
+          onTask={openTaskInPlace}
         />
       </>
     );
@@ -174,7 +175,7 @@ function App({
           client={client}
           projects={projectList}
           mode="blocked"
-          onTask={openTask}
+          onTask={openTaskInPlace}
         />
       </>
     );

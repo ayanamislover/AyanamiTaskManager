@@ -1,7 +1,13 @@
 import { Fragment, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { Empty, ErrorState, LoadingRows, PageHead } from "../components/async-state.js";
+import {
+  Empty,
+  ErrorState,
+  LoadingRows,
+  MutationErrorAlert,
+  PageHead,
+} from "../components/async-state.js";
 import type {
   AgentIntegrationAction,
   DesktopBridge,
@@ -429,13 +435,7 @@ export function SettingsPage({
             ) : (
               <Empty title="浏览器预览模式" text="Agent 自动安装仅在桌面应用内可用。" />
             )}
-            {manageIntegration.error ? (
-              <div className="atm-inline-error">
-                {manageIntegration.error instanceof Error
-                  ? manageIntegration.error.message
-                  : String(manageIntegration.error)}
-              </div>
-            ) : null}
+            <MutationErrorAlert error={manageIntegration.error} />
           </div>
         </section>
         {desktop?.getMcpBridges ? <McpBridgePanel load={desktop.getMcpBridges} /> : null}
@@ -542,6 +542,7 @@ export function SettingsPage({
                 </div>
               </div>
             ) : null}
+            <MutationErrorAlert error={checkUpdate.error} />
             <button
               className="atm-button primary"
               disabled={savePolicy.isPending || settings.isLoading}
@@ -549,13 +550,7 @@ export function SettingsPage({
             >
               保存设置
             </button>
-            {savePolicy.error ? (
-              <div className="atm-inline-error">
-                {savePolicy.error instanceof Error
-                  ? savePolicy.error.message
-                  : String(savePolicy.error)}
-              </div>
-            ) : null}
+            <MutationErrorAlert error={savePolicy.error} />
           </div>
         </section>
       </div>

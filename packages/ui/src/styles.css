@@ -1291,6 +1291,10 @@ button.atm-row:hover {
 .atm-table tbody tr:hover {
   background: var(--atm-surface-muted);
 }
+.atm-table tbody tr[tabindex]:focus-visible {
+  background: var(--atm-surface-muted);
+  outline-offset: -2px;
+}
 .agent-project-groups {
   display: grid;
   gap: 14px;
