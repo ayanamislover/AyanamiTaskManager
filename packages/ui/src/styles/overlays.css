@@ -1,0 +1,292 @@
+.atm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--atm-overlay);
+  backdrop-filter: blur(3px);
+  opacity: 1;
+  transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
+}
+.atm-modal {
+  width: min(640px, 100%);
+  max-height: calc(100dvh - 48px);
+  border: 1px solid var(--atm-border);
+  border-radius: 15px;
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow);
+  overflow: auto;
+}
+.atm-modal:not(.atm-command) {
+  opacity: 1;
+  transform: scale(1);
+  transform-origin: center;
+  transition:
+    opacity var(--atm-duration-surface) var(--atm-ease-out),
+    transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+.atm-modal-backdrop:has(.atm-command),
+.atm-command {
+  transition: none;
+}
+@starting-style {
+  .atm-modal-backdrop:not(:has(.atm-command)) {
+    opacity: 0;
+  }
+
+  .atm-modal:not(.atm-command) {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+.atm-modal.wide {
+  width: min(920px, 100%);
+}
+.atm-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--atm-border);
+}
+.atm-modal-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+.atm-modal-body {
+  padding: 20px;
+}
+.atm-modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--atm-border);
+}
+.atm-form {
+  display: grid;
+  gap: 15px;
+}
+.atm-field {
+  display: grid;
+  gap: 7px;
+}
+.atm-field label {
+  font-size: 12px;
+  font-weight: 650;
+}
+.atm-field input,
+.atm-field textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid var(--atm-border);
+  border-radius: 9px;
+  background: var(--atm-bg);
+}
+.atm-field .atm-select.atm-field-shell {
+  width: 100%;
+  min-height: 40px;
+  background: var(--atm-bg);
+}
+.atm-field .atm-select-trigger {
+  min-height: 38px;
+}
+.atm-field textarea {
+  min-height: 90px;
+  resize: vertical;
+}
+.atm-field small {
+  color: var(--atm-text-muted);
+}
+.atm-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.atm-inline-error {
+  padding: 10px 12px;
+  border-radius: 9px;
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 10%, transparent);
+}
+.atm-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 14;
+  background: color-mix(in srgb, var(--atm-overlay) 68%, transparent);
+  opacity: 1;
+  overscroll-behavior: contain;
+  transition: opacity 180ms var(--atm-ease-out);
+}
+.atm-shell:has(.atm-drawer-backdrop) > .atm-main,
+.atm-shell:has(.atm-drawer-backdrop) > .atm-sidebar {
+  overflow: hidden;
+}
+.atm-drawer {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: min(540px, calc(100vw - var(--atm-sidebar)));
+  border-left: 1px solid var(--atm-border);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-drawer-shadow);
+  overflow-y: auto;
+  transform: translateX(0);
+  transition: transform var(--atm-duration-surface) var(--atm-ease-drawer);
+}
+@starting-style {
+  .atm-drawer-backdrop {
+    opacity: 0;
+  }
+
+  .atm-drawer {
+    transform: translateX(100%);
+  }
+}
+.atm-drawer-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  justify-content: flex-start;
+  gap: 16px;
+  min-height: 68px;
+  padding: 19px 20px 19px 60px;
+  border-bottom: 1px solid var(--atm-border);
+  background: var(--atm-surface);
+}
+.atm-drawer-head > div {
+  min-width: 0;
+}
+.atm-drawer-collapse {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: grid;
+  width: 44px;
+  min-height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--atm-border);
+  border-radius: 0;
+  color: var(--atm-text-muted);
+  background: color-mix(in srgb, var(--atm-surface-muted) 58%, transparent);
+  transition:
+    color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-drawer-collapse:hover {
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+}
+.atm-drawer-collapse > svg {
+  transition: transform var(--atm-duration-press) var(--atm-ease-out);
+}
+.atm-drawer-collapse:active > svg {
+  transform: translateX(2px);
+}
+.atm-drawer-body {
+  display: grid;
+  gap: 22px;
+  padding: 20px;
+}
+.atm-section h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+.atm-description {
+  color: var(--atm-text-muted);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+.atm-check {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 9px 0;
+}
+.atm-check input {
+  margin-top: 3px;
+}
+.atm-checkline {
+  padding: 2px 0;
+}
+.atm-checkline .atm-check {
+  padding-bottom: 3px;
+}
+.atm-evidence {
+  margin: 0 0 6px;
+  padding-left: 29px;
+  display: grid;
+  gap: 4px;
+  list-style: none;
+}
+.atm-evidence li {
+  font-size: 12px;
+  color: var(--atm-text-muted);
+  line-height: 1.6;
+  word-break: break-word;
+}
+.atm-evidence li::before {
+  content: "· ";
+}
+.atm-evidence-form {
+  padding: 0 0 10px 29px;
+}
+.atm-evidence-actions {
+  padding: 0 0 8px 29px;
+}
+.atm-execution-session {
+  align-items: flex-start;
+}
+.atm-execution-session-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+.atm-execution-session-copy .atm-row-sub {
+  overflow-wrap: anywhere;
+}
+.atm-command {
+  width: min(720px, 100%);
+  align-self: start;
+  margin-top: min(16vh, 140px);
+}
+.atm-command input {
+  width: 100%;
+  min-height: 55px;
+  padding: 0 18px;
+  border: 0;
+  border-bottom: 1px solid var(--atm-border);
+  background: transparent;
+  font-size: 16px;
+}
+.atm-command-results {
+  max-height: 420px;
+  overflow-y: auto;
+}
+.atm-notice {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 30;
+  max-width: 420px;
+  padding: 12px 14px;
+  border: 1px solid var(--atm-border);
+  border-radius: 10px;
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow);
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--atm-duration-surface) var(--atm-ease-out),
+    transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+@starting-style {
+  .atm-notice {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+

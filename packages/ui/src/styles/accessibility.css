@@ -1,0 +1,111 @@
+@media (prefers-reduced-motion: reduce) {
+  .atm-nav button,
+  .atm-nav-disclosure,
+  .atm-sidebar-settings,
+  .atm-button,
+  .atm-project,
+  .atm-notification-option {
+    transition-property: color, background-color, border-color;
+  }
+
+  .atm-nav button:active,
+  .atm-nav-disclosure:active,
+  .atm-sidebar-settings:active,
+  .atm-nav-disclosure[aria-expanded="true"] svg,
+  .atm-button:active,
+  .atm-project:hover,
+  .atm-notification-option:active,
+  .atm-engineering.is-collapsed .atm-engineering-toggle > svg,
+  .atm-table-sort > svg,
+  .atm-table-sort[data-active="true"][data-direction="asc"] > svg,
+  .atm-modal:not(.atm-command),
+  .atm-drawer,
+  .atm-notice {
+    transform: none;
+  }
+
+  .atm-nav-disclosure svg,
+  .atm-engineering-toggle > svg,
+  .atm-table-sort > svg {
+    transition-property: color, opacity;
+  }
+
+  .atm-modal:not(.atm-command),
+  .atm-drawer,
+  .atm-notice {
+    transition: opacity var(--atm-duration-hover) var(--atm-ease-out);
+  }
+
+  .atm-skeleton::after {
+    animation: none;
+    content: none;
+  }
+
+  .atm-select-trigger,
+  .atm-select-trigger > svg,
+  .atm-select-popover {
+    transition-property: color, background-color, border-color, opacity;
+  }
+
+  .atm-select-trigger:active,
+  .atm-select[data-open="true"] .atm-select-trigger > svg,
+  .atm-select-popover {
+    transform: none;
+  }
+
+  .atm-drawer-collapse > svg {
+    transition: none;
+  }
+
+  .atm-drawer-collapse:active > svg {
+    transform: none;
+  }
+
+  @starting-style {
+    .atm-modal:not(.atm-command),
+    .atm-drawer,
+    .atm-notice {
+      opacity: 0;
+      transform: none;
+    }
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .atm-sidebar,
+  .atm-topbar,
+  .atm-modal-backdrop {
+    backdrop-filter: none;
+  }
+
+  .atm-sidebar,
+  .atm-topbar {
+    background: var(--atm-bg);
+  }
+}
+
+@media (forced-colors: active) {
+  :focus-visible {
+    outline-color: Highlight;
+  }
+
+  .atm-field-shell > .atm-select-trigger:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+
+  .atm-sidebar,
+  .atm-topbar,
+  .atm-modal-backdrop {
+    backdrop-filter: none;
+  }
+
+  .atm-button,
+  .atm-panel,
+  .atm-project,
+  .atm-task-card,
+  .atm-modal,
+  .atm-drawer {
+    border-color: ButtonText;
+  }
+}

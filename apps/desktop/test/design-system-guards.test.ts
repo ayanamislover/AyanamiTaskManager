@@ -1,22 +1,17 @@
-import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  productionCssText,
+  productionFiles,
+  uiComponentCssText,
+  uiCssText,
+} from "../../../packages/ui/test/css-source-graph.js";
 
 const root = process.cwd();
 
 function productionSources(): string[] {
-  return execFileSync("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
-    cwd: root,
-    encoding: "utf8",
-  })
-    .split("\0")
-    .filter(
-      (file) =>
-        /^(?:apps|packages)\/[^/]+\/src\/.*\.(?:ts|tsx|html)$/u.test(file) &&
-        !file.endsWith(".test.ts") &&
-        !file.endsWith(".test.tsx"),
-    );
+  return [".ts", ".tsx", ".html"].flatMap((extension) => productionFiles(extension));
 }
 
 function focusRingViolations(css: string): string[] {
@@ -49,13 +44,21 @@ function selectorsWithoutTransformNone(css: string, selectors: readonly string[]
 describe("设计系统静态守卫", () => {
   it("生产代码禁止原生 select", () => {
     const offenders = productionSources().filter((file) =>
-      /<select(?:\s|>)/u.test(readFileSync(join(root, file), "utf8")),
+      /<select(?:\s|>)/u.test(readFileSync(file, "utf8")),
     );
     expect(offenders).toEqual([]);
+
+    const realTsx = productionFiles(".tsx").find((file) =>
+      readFileSync(file, "utf8").includes("<AtmSelect"),
+    )!;
+    const mutated = readFileSync(realTsx, "utf8").replace("<AtmSelect", "<select");
+    expect(/<select(?:\s|>)/u.test(mutated)).toBe(true);
+    expect(/<select(?:\s|>)/u.test("export const Bad = () => <select />;")).toBe(true);
   });
 
   it("自绘下拉由 field-shell 独占边框和焦点环", () => {
-    const css = readFileSync(join(root, "packages", "ui", "src", "styles.css"), "utf8");
+    const css = uiCssText();
+    expect(focusRingViolations(productionCssText())).toEqual([]);
     expect(focusRingViolations(css)).toEqual([]);
     expect(css).toMatch(/\.atm-field-shell:has\(> \.atm-select-trigger:focus-visible\)/u);
     expect(css).toMatch(
@@ -72,6 +75,13 @@ describe("设计系统静态守卫", () => {
         ".atm-select.atm-field-shell { border: 1px solid red; } .atm-field-shell > .atm-select-trigger { border: 0; }",
       ),
     ).toEqual([]);
+
+    const mutated = css
+      .replace(".atm-select.atm-field-shell {", ".atm-select {")
+      .replace(".atm-field-shell > .atm-select-trigger {", ".atm-select-trigger {");
+    expect(focusRingViolations(mutated)).toEqual(
+      expect.arrayContaining([".atm-select", ".atm-select-trigger"]),
+    );
   });
 
   it("窗口按钮沿用全局按压尺度", () => {
@@ -80,7 +90,7 @@ describe("设计系统静态守卫", () => {
   });
 
   it("减少动态覆盖所有按压、展开和排序位移", () => {
-    const css = readFileSync(join(root, "packages", "ui", "src", "styles.css"), "utf8");
+    const css = uiCssText();
     const start = css.indexOf("@media (prefers-reduced-motion: reduce)");
     const end = css.indexOf("@media (prefers-reduced-transparency: reduce)", start);
     const reducedMotion = css.slice(start, end);
@@ -107,13 +117,19 @@ describe("设计系统静态守卫", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
     expect(selectorsWithoutTransformNone(reducedMotion, movingSelectors)).toEqual([]);
+    expect(
+      selectorsWithoutTransformNone(
+        reducedMotion.replace("transform: none;", "transform: scale(1);"),
+        movingSelectors,
+      ).length,
+    ).toBeGreaterThan(0);
     expect(selectorsWithoutTransformNone(".moves { transform: scale(.9); }", [".moves"])).toEqual([
       ".moves",
     ]);
   });
 
   it("常驻箭头使用对称 easing 且动效时长全部来自 token", () => {
-    const css = readFileSync(join(root, "packages", "ui", "src", "styles.css"), "utf8");
+    const css = uiComponentCssText();
     const morphRules = [
       /\.atm-nav-disclosure svg\s*\{[^}]*transition:\s*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
       /\.atm-engineering-toggle > svg\s*\{[^}]*transition:\s*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
@@ -123,5 +139,7 @@ describe("设计系统静态守卫", () => {
 
     expect(morphRules.filter((rule) => !rule.test(css))).toEqual([]);
     expect(css).not.toMatch(/\b160ms\b/u);
+    const mutated = css.replace("var(--atm-duration-hover)", "160ms");
+    expect(mutated).toMatch(/\b160ms\b/u);
   });
 });

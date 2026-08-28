@@ -1,0 +1,232 @@
+.atm-page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 26px;
+}
+.atm-page-head h1 {
+  margin: 0;
+  font-size: clamp(25px, 2vw, 34px);
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+}
+.atm-page-head p {
+  max-width: 62ch;
+  margin: 7px 0 0;
+  color: var(--atm-text-muted);
+  line-height: 1.55;
+}
+.atm-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.atm-button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 13px;
+  border: 1px solid var(--atm-border);
+  border-radius: 9px;
+  color: var(--atm-text);
+  background: var(--atm-surface);
+  font-weight: 620;
+  white-space: nowrap;
+  transition:
+    transform var(--atm-duration-press) var(--atm-ease-out),
+    border-color var(--atm-duration-hover) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-out);
+}
+.atm-button:hover {
+  border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
+}
+.atm-button:active {
+  transform: scale(0.97);
+}
+.atm-button.primary {
+  border-color: var(--atm-primary-fill);
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
+}
+.atm-button.danger {
+  color: var(--atm-danger);
+}
+.atm-icon-button {
+  width: 38px;
+  padding: 0;
+}
+
+.atm-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.atm-metrics.five {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.atm-metric {
+  min-height: 112px;
+  padding: 17px 18px;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--atm-radius);
+  background: var(--atm-surface);
+}
+.atm-metric .label {
+  color: var(--atm-text-muted);
+  font-size: 12px;
+}
+.atm-metric .value {
+  margin-top: 12px;
+  font: 650 28px/1 var(--atm-mono);
+  letter-spacing: -0.04em;
+}
+.atm-metric .detail {
+  margin-top: 10px;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+}
+.atm-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(320px, 0.8fr);
+  gap: 18px;
+}
+.atm-panel {
+  min-width: 0;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--atm-radius);
+  background: var(--atm-surface);
+  overflow: hidden;
+}
+.atm-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 51px;
+  padding: 11px 15px;
+  border-bottom: 1px solid var(--atm-border);
+}
+.atm-panel-head h2 {
+  margin: 0;
+  font-size: 14px;
+}
+.atm-panel-body {
+  padding: 14px 15px;
+}
+.atm-list {
+  display: grid;
+}
+.atm-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  min-height: 58px;
+  padding: 10px 15px;
+  border: 0;
+  border-bottom: 1px solid var(--atm-border);
+  background: transparent;
+  text-align: left;
+}
+.atm-row:last-child {
+  border-bottom: 0;
+}
+button.atm-row:hover {
+  background: var(--atm-surface-muted);
+}
+.atm-row-title {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-row-sub {
+  margin-top: 4px;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+}
+.atm-key {
+  color: var(--atm-text-muted);
+  font: 12px var(--atm-mono);
+}
+.atm-badge {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 7px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+.atm-badge.primary {
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+}
+.atm-badge.success {
+  color: var(--atm-success);
+  background: color-mix(in srgb, var(--atm-success) 12%, transparent);
+}
+.atm-badge.warning {
+  color: var(--atm-warning);
+  background: color-mix(in srgb, var(--atm-warning) 12%, transparent);
+}
+.atm-badge.danger {
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 12%, transparent);
+}
+.atm-empty,
+.atm-error {
+  display: grid;
+  min-height: 230px;
+  place-items: center;
+  padding: 36px;
+  color: var(--atm-text-muted);
+  text-align: center;
+}
+.atm-empty strong,
+.atm-error strong {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--atm-text);
+  font-size: 15px;
+}
+.atm-error {
+  color: var(--atm-danger);
+}
+.atm-skeleton {
+  position: relative;
+  min-height: 54px;
+  border-radius: 9px;
+  background: var(--atm-surface-muted);
+  overflow: hidden;
+}
+.atm-skeleton::after {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--atm-surface) 68%, transparent),
+    transparent
+  );
+  content: "";
+  transform: translateX(-100%);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .atm-skeleton::after {
+    animation: atm-shimmer 1.35s linear infinite;
+  }
+}
+@keyframes atm-shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+

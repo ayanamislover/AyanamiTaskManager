@@ -6,9 +6,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
 import { OverviewPage, TasksAcrossProjects } from "../src/features/overview.js";
+import { uiCssText } from "./css-source-graph.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "overview.tsx");
-const stylesPath = join(process.cwd(), "packages", "ui", "src", "styles.css");
 
 function client(): AyanamiClient {
   return {
@@ -134,7 +134,7 @@ describe("Overview feature", () => {
         TimelineEventRow: () => createElement("div"),
       }),
     );
-    const styles = readFileSync(stylesPath, "utf8");
+    const styles = uiCssText();
 
     expect(markup).toContain('class="atm-overview-project-name"');
     expect(markup).toContain(`title="${longName}\n名称较长，建议改用简洁中文名称。"`);

@@ -1,23 +1,14 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { productionCssText, productionFiles } from "../../../packages/ui/test/css-source-graph.js";
 
-const uiRoot = join(process.cwd(), "packages", "ui", "src");
-const styles = readFileSync(join(uiRoot, "styles.css"), "utf8");
-
-function productionTsxSources(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) return productionTsxSources(path);
-    return entry.isFile() && entry.name.endsWith(".tsx") ? [readFileSync(path, "utf8")] : [];
-  });
-}
+const styles = productionCssText();
 
 function tableBodies(sources: readonly string[]): string[] {
   return sources.flatMap((source) => [...source.matchAll(tableOpen)].map((match) => match[1]!));
 }
 
-const productionTsx = productionTsxSources(uiRoot);
+const productionTsx = productionFiles(".tsx").map((path) => readFileSync(path, "utf8"));
 
 // 默认的 auto 布局按内容分配列宽：任务标题那一列的 max-content 会把表撑开，
 // 其余列被压到 min-content——中文的 min-content 是一个字宽，于是表头和单元格
@@ -34,6 +25,10 @@ describe("任务表列宽", () => {
     const body = tableRule.exec(styles)?.[1];
     expect(body).toBeTruthy();
     expect(body).toMatch(/table-layout:\s*fixed/u);
+    const mutatedBody = tableRule.exec(
+      styles.replace("table-layout: fixed", "table-layout: auto"),
+    )?.[1];
+    expect(mutatedBody).not.toMatch(/table-layout:\s*fixed/u);
     // 阳性对照：正则写错就会一直取不到规则体而误判。
     expect(tableRule.exec(".atm-table { table-layout: auto; }")?.[1]).toContain("auto");
   });

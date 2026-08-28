@@ -1,0 +1,110 @@
+@media (max-width: 1100px) {
+  :root {
+    --atm-sidebar: 220px;
+  }
+  .atm-content {
+    padding-inline: 22px;
+  }
+  .atm-topbar {
+    grid-template-columns: minmax(130px, 0.6fr) minmax(240px, 1fr) auto;
+    padding-inline: 22px;
+  }
+  .atm-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-metrics.five {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-grid {
+    grid-template-columns: 1fr;
+  }
+  .atm-project-grid,
+  .atm-overview-projects {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-attention-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .atm-management-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-engineering-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1101px) and (max-width: 1540px) {
+  .atm-metrics.five {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .atm-project-grid,
+  .atm-overview-projects {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (max-width: 760px) {
+  :root {
+    --atm-sidebar: 68px;
+  }
+  .atm-sidebar {
+    padding-inline: 8px;
+  }
+  .atm-brand span,
+  .atm-nav-title,
+  .atm-nav button span,
+  .atm-sidebar-footer {
+    display: none;
+  }
+  .atm-brand {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .atm-nav button {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .atm-topbar {
+    grid-template-columns: 1fr auto;
+    padding-inline: 14px;
+  }
+  .atm-breadcrumb {
+    display: none;
+  }
+  .atm-content {
+    padding: 22px 14px 36px;
+  }
+  .atm-page-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .atm-metrics,
+  .atm-metrics.five,
+  .atm-form-grid {
+    grid-template-columns: 1fr;
+  }
+  .atm-project-grid,
+  .atm-overview-projects,
+  .atm-attention-grid {
+    grid-template-columns: 1fr;
+  }
+  .atm-management-grid {
+    grid-template-columns: 1fr;
+  }
+  .atm-engineering-kpis,
+  .atm-engineering-kpis.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-mcp-bridge-kpis,
+  .atm-mcp-bridge-row {
+    grid-template-columns: 1fr;
+  }
+  .atm-mcp-bridge-row {
+    gap: 5px;
+  }
+  .atm-drawer {
+    width: calc(100vw - var(--atm-sidebar));
+  }
+}
+
