@@ -1,5 +1,5 @@
 import { AtmError } from "@ayanami-task/errors";
-import type { WorkItemPhase, WorkItemStatus } from "./index.js";
+import type { WorkItemPhase, WorkItemStatus } from "./work-item.js";
 
 export type WorkItemOperationPrecondition =
   | "DEPENDENCIES_READY"

@@ -2,11 +2,9 @@ import type Database from "better-sqlite3";
 import { AtmError } from "@ayanami-task/errors";
 import {
   createUlid,
-  nowIso,
   type WorkItemOperation,
   type WorkItemStatus,
   type EvidenceInput,
-  type SearchHit,
   type SearchPage,
   type RecordView,
   type TaskViewName,
@@ -15,10 +13,11 @@ import type { ManagedDatabase } from "./database.js";
 import { ChecklistCommands } from "./checklist-commands.js";
 import { ContextReadModel } from "./context-read-model.js";
 import { EvidenceNormalizer } from "./evidence-normalizer.js";
-import { presentEvent, type PresentedEvent } from "./event-presentation.js";
+import { ProjectActivityReadModel } from "./project-activity-read-model.js";
 import { OutboxReadModel } from "./outbox-read-model.js";
 import { ProjectProjectionSource } from "./project-projection-source.js";
 import { ProjectMutationKernel, type MutationInput } from "./project-mutation-kernel.js";
+import { ProjectUpdateCommands } from "./project-update-commands.js";
 import { MutationRequestNormalizer } from "./mutation-request-normalizer.js";
 import { PlanningCommands } from "./planning-commands.js";
 import { ProgressCommands } from "./progress-commands.js";
@@ -52,7 +51,6 @@ import {
   type SubmitReviewInput,
   type SubmitReviewResult,
 } from "./review-commands.js";
-import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { SessionReadModel } from "./session-read-model.js";
 import { SessionCommands } from "./session-commands.js";
 import { TaskReadModel } from "./task-read-model.js";
@@ -78,15 +76,6 @@ export type {
   WorkItemProjectionPage,
   WorkItemView,
 } from "./read-model-types.js";
-
-function json<T>(value: string | null | undefined, fallback: T): T {
-  if (!value) return fallback;
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
-  }
-}
 
 export type ProjectActor = {
   type: "AGENT" | "USER" | "SYSTEM";
@@ -183,10 +172,12 @@ export class ProjectRepository {
   readonly database: ManagedDatabase;
   readonly #sqlite: Database.Database;
   readonly #contextReads: ContextReadModel;
+  readonly #activityReads: ProjectActivityReadModel;
   readonly #checklistCommands: ChecklistCommands;
   readonly #evidenceNormalizer: EvidenceNormalizer;
   readonly #planningCommands: PlanningCommands;
   readonly #progressCommands: ProgressCommands;
+  readonly #projectUpdates: ProjectUpdateCommands;
   readonly #projectionSource: ProjectProjectionSource;
   readonly #recordCommands: RecordCommands;
   readonly #recordReads: RecordReadModel;
@@ -292,6 +283,29 @@ export class ProjectRepository {
       (key) => this.getWorkItem(key),
       (row) => this.#recordReads.recordKey(row),
     );
+    this.#projectUpdates = new ProjectUpdateCommands({
+      sqlite: this.#sqlite,
+      meta: () => this.meta,
+      mutate: (input) => this.mutate(input),
+      appendEvent: (type, actor, aggregateType, aggregateId, payload) =>
+        this.appendEvent(type, actor, aggregateType, aggregateId, payload),
+      listWorkItems: (filters) => this.listWorkItems(filters),
+      listProjectUpdates: (limit) => this.listProjectUpdates(limit),
+      normalizeEvidence: (evidence, strictTyped) => this.normalizeEvidence(evidence, strictTyped),
+      rowForTaskKey: (taskKey) => this.rowForTaskKey(taskKey),
+      taskKeyForId: (workItemId) => this.taskKeyForId(workItemId),
+      advanceWorkItemEvidenceAt: (workItemId, at) => this.advanceWorkItemEvidenceAt(workItemId, at),
+    });
+    this.#activityReads = new ProjectActivityReadModel({
+      sqlite: this.#sqlite,
+      meta: () => this.meta,
+      getSession: (id) => this.getSession(id),
+      getRecord: (reference) => this.getRecord(reference),
+      progressUpdateView: (row) => this.progressUpdateView(row),
+      projectUpdateView: (row) => this.projectUpdateView(row),
+      rowForTaskKey: (taskKey) => this.rowForTaskKey(taskKey),
+      checklistConflictSnapshot: (checklistId) => this.checklistConflictSnapshot(checklistId),
+    });
   }
 
   get meta(): { id: string; code: string; name: string; sequence: number; version: number } {
@@ -461,204 +475,23 @@ export class ProjectRepository {
   }
 
   getOperationTrace(opId: string, sessionId?: string | null): any {
-    const normalized = opId.trim();
-    if (!normalized) throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
-    const normalizedSession = sessionId == null ? null : sessionId.trim();
-    if (normalizedSession !== null) this.getSession(normalizedSession);
-    const mutations = this.#sqlite
-      .prepare(
-        `SELECT operation, response_json, actor_session_id, created_at
-         FROM idempotency_keys WHERE op_id = ? AND (? IS NULL OR actor_session_id = ?)
-         ORDER BY created_at`,
-      )
-      .all(normalized, normalizedSession, normalizedSession)
-      .map((row: any) => ({
-        operation: row.operation,
-        response: json(row.response_json, null),
-        sessionId: row.actor_session_id,
-        createdAt: row.created_at,
-      }));
-    const records = (
-      this.#sqlite
-        .prepare(
-          `SELECT id FROM records
-           WHERE op_id = ? AND (? IS NULL OR source_session_id = ?)
-           ORDER BY created_at`,
-        )
-        .all(normalized, normalizedSession, normalizedSession) as Array<{ id: string }>
-    ).map((row) => this.getRecord(row.id));
-    const progress = (
-      this.#sqlite
-        .prepare(
-          `SELECT progress.*, item.local_no FROM progress_updates progress
-           JOIN work_items item ON item.id = progress.work_item_id
-           WHERE progress.op_id = ? AND (? IS NULL OR progress.session_id = ?)
-           ORDER BY progress.created_at`,
-        )
-        .all(normalized, normalizedSession, normalizedSession) as any[]
-    ).map((row) => this.progressUpdateView(row));
-    const projectUpdates = (
-      this.#sqlite
-        .prepare(
-          `SELECT * FROM project_updates
-           WHERE op_id = ? AND (? IS NULL OR session_id = ?)
-           ORDER BY created_at`,
-        )
-        .all(normalized, normalizedSession, normalizedSession) as any[]
-    ).map((row) => this.projectUpdateView(row));
-    const events = (
-      this.#sqlite
-        .prepare(
-          `SELECT sequence, type, aggregate_type, aggregate_id, actor_id, session_id,
-                  payload_json, created_at, op_id
-           FROM events
-           WHERE op_id = ? AND (? IS NULL OR session_id = ?)
-           ORDER BY sequence`,
-        )
-        .all(normalized, normalizedSession, normalizedSession) as any[]
-    ).map((row) => ({
-      seq: row.sequence,
-      type: row.type,
-      aggregateType: row.aggregate_type,
-      aggregateId: row.aggregate_id,
-      actor: row.actor_id,
-      sessionId: row.session_id,
-      payload: json(row.payload_json, {}),
-      at: row.created_at,
-      opId: row.op_id,
-    }));
-    if (
-      mutations.length === 0 &&
-      records.length === 0 &&
-      progress.length === 0 &&
-      projectUpdates.length === 0 &&
-      events.length === 0
-    ) {
-      throw new AtmError("OPERATION_NOT_FOUND", {
-        message: `操作不存在：${normalized}`,
-        details: { entity: "OPERATION", reference: normalized },
-      });
-    }
-    return { opId: normalized, mutations, records, progress, projectUpdates, events };
+    return this.#activityReads.getOperationTrace(opId, sessionId);
   }
 
   private projectUpdateView(row: any): any {
-    return {
-      id: row.id,
-      health: row.health,
-      summary: row.summary,
-      completed: json(row.completed_json, []),
-      risks: json(row.risks_json, []),
-      next: json(row.next_json, []),
-      evidence: json(row.evidence_json, []),
-      fromSequence: row.from_sequence,
-      toSequence: row.to_sequence,
-      status: row.status,
-      actor: row.actor,
-      publishedAt: row.published_at,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      opId: row.op_id ?? null,
-      sessionId: row.session_id ?? null,
-    };
+    return this.#projectUpdates.projectUpdateView(row);
   }
 
   getProjectUpdate(id: string): any {
-    const normalized = id.trim();
-    const row = this.#sqlite.prepare("SELECT * FROM project_updates WHERE id = ?").get(normalized);
-    if (!row)
-      throw new AtmError("PROJECT_UPDATE_NOT_FOUND", {
-        message: `项目更新不存在：${normalized}`,
-        details: { entity: "PROJECT_UPDATE", reference: normalized },
-      });
-    return this.projectUpdateView(row);
+    return this.#projectUpdates.getProjectUpdate(id);
   }
 
   listProjectUpdates(limit = 50): any[] {
-    return (
-      this.#sqlite
-        .prepare(
-          `SELECT id, health, summary, completed_json, risks_json, next_json, evidence_json,
-                from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-                op_id, session_id
-         FROM project_updates ORDER BY created_at DESC LIMIT ?`,
-        )
-        .all(Math.min(100, Math.max(1, limit))) as any[]
-    ).map((row) => this.projectUpdateView(row));
+    return this.#projectUpdates.listProjectUpdates(limit);
   }
 
   draftProjectUpdate(actor: ProjectActor, opId: string): any {
-    return this.mutate({
-      actor,
-      opId,
-      operation: "project-update.draft",
-      request: {},
-      action: () => {
-        const meta = this.#sqlite
-          .prepare("SELECT * FROM project_meta WHERE singleton = 1")
-          .get() as any;
-        const last = this.#sqlite
-          .prepare(
-            "SELECT to_sequence FROM project_updates WHERE status = 'PUBLISHED' ORDER BY published_at DESC LIMIT 1",
-          )
-          .get() as { to_sequence: number } | undefined;
-        const fromSequence = last?.to_sequence ?? 0;
-        const toSequence = meta.current_sequence;
-        const completed = (
-          this.#sqlite
-            .prepare(
-              `SELECT item.title FROM events event
-             JOIN work_items item ON item.id = event.aggregate_id
-             WHERE event.sequence > ? AND event.sequence <= ? AND event.type = 'work.completed'
-             ORDER BY event.sequence DESC LIMIT 10`,
-            )
-            .all(fromSequence, toSequence) as Array<{ title: string }>
-        ).map((row) => row.title);
-        const risks = (
-          this.#sqlite
-            .prepare(
-              `SELECT COALESCE(blocked_reason, waiting_for, title) AS value FROM work_items
-             WHERE status IN ('BLOCKED','WAITING_USER','WAITING_AGENT') AND archived_at IS NULL
-             ORDER BY updated_at DESC LIMIT 10`,
-            )
-            .all() as Array<{ value: string }>
-        ).map((row) => row.value);
-        const next = this.listWorkItems({ limit: 5 })
-          .filter((item) => ["READY", "CLAIMED", "IN_PROGRESS"].includes(item.status))
-          .map((item) => item.title);
-        const summary = `${completed.length ? `完成 ${completed.length} 项` : "暂无新增完成项"}；${risks.length ? `存在 ${risks.length} 项风险` : "当前无阻塞风险"}`;
-        const id = createUlid();
-        const now = nowIso();
-        this.#sqlite
-          .prepare(
-            `INSERT INTO project_updates(
-               id, health, summary, completed_json, risks_json, next_json,
-               from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-               op_id, session_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, NULL, ?, ?, ?, ?)`,
-          )
-          .run(
-            id,
-            meta.health,
-            summary,
-            JSON.stringify(completed),
-            JSON.stringify(risks),
-            JSON.stringify(next),
-            fromSequence,
-            toSequence,
-            actor.id,
-            now,
-            now,
-            opId,
-            actor.sessionId,
-          );
-        const seq = this.appendEvent("project.update.drafted", actor, "PROJECT_UPDATE", id, {
-          fromSequence,
-          toSequence,
-        });
-        return { ...this.listProjectUpdates(100).find((update) => update.id === id), seq };
-      },
-    });
+    return this.#projectUpdates.draftProjectUpdate(actor, opId);
   }
 
   publishProjectUpdate(
@@ -674,134 +507,7 @@ export class ProjectRepository {
       evidence?: EvidenceInput[];
     },
   ): any {
-    const normalizedInput = {
-      ...input,
-      ...(input.evidence === undefined
-        ? {}
-        : { evidence: this.normalizeEvidence(input.evidence, true) as EvidenceInput[] }),
-      ...(input.completed === undefined
-        ? {}
-        : {
-            completed: input.completed.map((entry) => {
-              if (typeof entry === "string" || entry.workItemKey === undefined) return entry;
-              const row = this.rowForTaskKey(entry.workItemKey);
-              return { ...entry, workItemKey: this.taskKeyForId(row.id)! };
-            }),
-          }),
-    };
-    return this.mutate({
-      actor,
-      opId,
-      operation: "project-update.publish",
-      request: normalizedInput,
-      action: () => {
-        const draft = normalizedInput.draftId
-          ? (this.#sqlite
-              .prepare("SELECT * FROM project_updates WHERE id = ? AND status = 'DRAFT'")
-              .get(normalizedInput.draftId) as any)
-          : null;
-        if (normalizedInput.draftId && !draft)
-          throw new AtmError("PROJECT_UPDATE_DRAFT_NOT_FOUND", {
-            message: `项目更新草稿不存在：${normalizedInput.draftId}`,
-            details: { entity: "PROJECT_UPDATE_DRAFT", reference: normalizedInput.draftId },
-          });
-        const id = draft?.id ?? createUlid();
-        const now = nowIso();
-        const meta = this.meta;
-        const completed = normalizedInput.completed ?? json(draft?.completed_json, []);
-        const risks = normalizedInput.risks ?? json(draft?.risks_json, []);
-        const next = normalizedInput.next ?? json(draft?.next_json, []);
-        const evidence = normalizedInput.evidence ?? json(draft?.evidence_json, []);
-        const fromSequence =
-          draft?.from_sequence ??
-          (
-            this.#sqlite
-              .prepare(
-                "SELECT MAX(to_sequence) AS value FROM project_updates WHERE status = 'PUBLISHED'",
-              )
-              .get() as { value: number | null }
-          ).value ??
-          0;
-        const toSequence = draft?.to_sequence ?? meta.sequence;
-        if (draft) {
-          this.#sqlite
-            .prepare(
-              `UPDATE project_updates SET health = ?, summary = ?, completed_json = ?, risks_json = ?,
-               next_json = ?, evidence_json = ?, status = 'PUBLISHED', actor = ?, published_at = ?,
-               updated_at = ?, op_id = ?, session_id = ? WHERE id = ?`,
-            )
-            .run(
-              normalizedInput.health,
-              normalizedInput.summary.trim(),
-              JSON.stringify(completed),
-              JSON.stringify(risks),
-              JSON.stringify(next),
-              JSON.stringify(evidence),
-              actor.id,
-              now,
-              now,
-              opId,
-              actor.sessionId,
-              id,
-            );
-        } else {
-          this.#sqlite
-            .prepare(
-              `INSERT INTO project_updates(
-                 id, health, summary, completed_json, risks_json, next_json, evidence_json,
-                 from_sequence, to_sequence, status, actor, published_at, created_at, updated_at,
-                 op_id, session_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              id,
-              normalizedInput.health,
-              normalizedInput.summary.trim(),
-              JSON.stringify(completed),
-              JSON.stringify(risks),
-              JSON.stringify(next),
-              JSON.stringify(evidence),
-              fromSequence,
-              toSequence,
-              actor.id,
-              now,
-              now,
-              now,
-              opId,
-              actor.sessionId,
-            );
-        }
-        this.#sqlite
-          .prepare(
-            "UPDATE project_meta SET health = ?, version = version + 1, updated_at = ? WHERE singleton = 1",
-          )
-          .run(normalizedInput.health, now);
-        const seq = this.appendEvent("project.update.published", actor, "PROJECT_UPDATE", id, {
-          health: normalizedInput.health,
-          summary: normalizedInput.summary.trim(),
-        });
-        const linkedKeys = new Set(
-          completed.flatMap((entry: string | { text: string; workItemKey?: string }) =>
-            typeof entry === "string" || !entry.workItemKey ? [] : [entry.workItemKey],
-          ),
-        );
-        if (evidence.length > 0) {
-          for (const taskKey of linkedKeys) {
-            this.advanceWorkItemEvidenceAt(this.rowForTaskKey(taskKey).id, now);
-          }
-        }
-        const openWorkItemSummary = this.openWorkItemSummary(linkedKeys, 20);
-        return {
-          ...this.listProjectUpdates(100).find((update) => update.id === id),
-          seq,
-          opId,
-          unlinked: completed.length > 0 && openWorkItemSummary.total > 0,
-          openWorkItemCount: openWorkItemSummary.total,
-          openWorkItems: openWorkItemSummary.keys,
-          openWorkItemsTruncated: openWorkItemSummary.truncated,
-        };
-      },
-    });
+    return this.#projectUpdates.publishProjectUpdate(actor, opId, input);
   }
 
   createObjective(
@@ -918,35 +624,6 @@ export class ProjectRepository {
     limit = 50,
   ): { total: number; candidates: Array<{ key: string; status: string }> } {
     return this.#taskReads.workItemSuggestionCandidates(reference, limit);
-  }
-
-  private openWorkItemSummary(
-    excludedTaskKeys: ReadonlySet<string>,
-    limit: number,
-  ): { keys: string[]; total: number; truncated: boolean } {
-    const excludedIds = [...excludedTaskKeys].map((key) => this.rowForTaskKey(key).id);
-    const clauses = ["archived_at IS NULL", "status NOT IN ('DONE','CANCELLED')"];
-    const parameters: unknown[] = [];
-    if (excludedIds.length > 0) {
-      clauses.push(`id NOT IN (${excludedIds.map(() => "?").join(", ")})`);
-      parameters.push(...excludedIds);
-    }
-    const where = clauses.join(" AND ");
-    const countRow = this.#sqlite
-      .prepare(`SELECT COUNT(*) AS count FROM work_items WHERE ${where}`)
-      .get(...parameters) as { count: number };
-    const boundedLimit = Math.min(100, Math.max(1, limit));
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT local_no FROM work_items WHERE ${where}
-         ORDER BY CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
-           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no LIMIT ?`,
-      )
-      .all(...parameters, boundedLimit) as Array<{ local_no: number }>;
-    const total = Number(countRow.count);
-    const code = this.meta.code;
-    const keys = rows.map((row) => `${code}-T-${String(row.local_no).padStart(4, "0")}`);
-    return { keys, total, truncated: keys.length < total };
   }
 
   createWorkItems(
@@ -1108,97 +785,7 @@ export class ProjectRepository {
   }
 
   search(query: string, limit = 20, cursor?: string): SearchPage {
-    const bounded = Math.max(1, Math.min(30, limit));
-    const normalized = query.trim();
-    if (!normalized) return { hits: [], nextCursor: null, hasMore: false };
-    const scope = this.meta.code;
-    const decoded = cursor ? decodeSearchCursor(cursor, { scope, query: normalized }) : null;
-    const snapshot = decoded?.snapshot ?? {
-      documents: Number(
-        (
-          this.#sqlite
-            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM search_documents")
-            .get() as {
-            value: number;
-          }
-        ).value,
-      ),
-      quickTasks: 0,
-    };
-    const clauses = ["documents.rowid <= ?"];
-    const params: unknown[] = [snapshot.documents];
-    if (decoded) {
-      clauses.push(`(
-        documents.updated_at < ? OR
-        (documents.updated_at = ? AND documents.entity_type > ?) OR
-        (documents.updated_at = ? AND documents.entity_type = ? AND documents.entity_key > ?)
-      )`);
-      params.push(
-        decoded.last.updatedAt,
-        decoded.last.updatedAt,
-        decoded.last.entityType,
-        decoded.last.updatedAt,
-        decoded.last.entityType,
-        decoded.last.entityKey,
-      );
-    }
-    let rows: any[];
-    if ([...normalized].length < 3) {
-      const escaped = normalized.replace(/[\\%_]/gu, "\\$&");
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title,
-                  documents.body, documents.updated_at
-           FROM search_documents documents
-           WHERE (documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\')
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(`%${escaped}%`, `%${escaped}%`, ...params, bounded + 1) as any[];
-    } else {
-      const phrase = `"${normalized.replaceAll('"', '""')}"`;
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title, documents.body,
-             documents.updated_at
-           FROM search_documents_fts fts
-           JOIN search_documents documents
-             ON documents.entity_type = fts.entity_type AND documents.entity_id = fts.entity_id
-           WHERE search_documents_fts MATCH ?
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(phrase, ...params, bounded + 1) as any[];
-    }
-    const hits: SearchHit[] = rows.slice(0, bounded).map((row) => ({
-      entityType: row.entity_type,
-      entityKey: row.entity_key,
-      title: row.title,
-      snippet: String(row.body).slice(0, 240),
-      updatedAt: row.updated_at,
-    }));
-    const hasMore = rows.length > bounded;
-    const last = hits.at(-1);
-    return {
-      hits,
-      hasMore,
-      nextCursor:
-        hasMore && last
-          ? encodeSearchCursor({
-              scope,
-              query: normalized,
-              snapshot,
-              last: {
-                updatedAt: last.updatedAt,
-                project: "",
-                entityType: last.entityType,
-                entityKey: last.entityKey,
-              },
-            })
-          : null,
-    };
+    return this.#activityReads.search(query, limit, cursor);
   }
 
   delta(
@@ -1224,58 +811,7 @@ export class ProjectRepository {
     currentSequence: number;
     hasMore: boolean;
   } {
-    const clauses = ["sequence > ?"];
-    const params: unknown[] = [sinceSequence];
-    if (types.length > 0) {
-      clauses.push(`type IN (${types.map(() => "?").join(",")})`);
-      params.push(...types);
-    }
-    const bounded = Math.max(1, Math.min(100, limit));
-    params.push(bounded + 1);
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
-                payload_json, created_at, op_id FROM events
-         WHERE ${clauses.join(" AND ")} ORDER BY sequence LIMIT ?`,
-      )
-      .all(...params) as any[];
-    const hasMore = rows.length > bounded;
-    return {
-      events: rows.slice(0, bounded).map((row) => {
-        const payload = json<Record<string, unknown>>(row.payload_json, {});
-        const presented: PresentedEvent = presentEvent({
-          type: row.type,
-          aggregateType: row.aggregate_type,
-          aggregateId: row.aggregate_id,
-          actor: row.actor_id ?? row.actor_type,
-          payload,
-          project: {
-            id: this.meta.id,
-            code: this.meta.code,
-            name: this.meta.name,
-          },
-        });
-        return {
-          seq: row.sequence,
-          type: row.type,
-          key: presented.key,
-          summary: presented.summary,
-          actor: presented.actor,
-          title: presented.title,
-          detail: presented.detail,
-          ...(payload.changes && typeof payload.changes === "object"
-            ? { changes: payload.changes as Record<string, unknown> }
-            : {}),
-          project: presented.project!,
-          projectCode: this.meta.code,
-          projectName: this.meta.name,
-          opId: row.op_id ?? null,
-          at: row.created_at,
-        };
-      }),
-      currentSequence: this.meta.sequence,
-      hasMore,
-    };
+    return this.#activityReads.delta(sinceSequence, limit, types);
   }
 
   recentWorkItemChanges(
@@ -1289,39 +825,7 @@ export class ProjectRepository {
     opId: string | null;
     at: string;
   }> {
-    const task = this.rowForTaskKey(taskKey);
-    const bounded = Math.max(1, Math.min(6, limit));
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
-                payload_json, created_at, op_id
-         FROM events
-         WHERE aggregate_type = 'WORK_ITEM' AND aggregate_id = ?
-         ORDER BY sequence DESC LIMIT ?`,
-      )
-      .all(task.id, bounded) as any[];
-    return rows.map((row) => {
-      const presented = presentEvent({
-        type: row.type,
-        aggregateType: row.aggregate_type,
-        aggregateId: row.aggregate_id,
-        actor: row.actor_id ?? row.actor_type,
-        payload: json<Record<string, unknown>>(row.payload_json, {}),
-        project: {
-          id: this.meta.id,
-          code: this.meta.code,
-          name: this.meta.name,
-        },
-      });
-      return {
-        seq: Number(row.sequence),
-        type: String(row.type),
-        key: taskKey,
-        summary: presented.summary,
-        opId: row.op_id ?? null,
-        at: String(row.created_at),
-      };
-    });
+    return this.#activityReads.recentWorkItemChanges(taskKey, limit);
   }
 
   checklistConflictSnapshot(checklistId: string): {
@@ -1335,30 +839,7 @@ export class ProjectRepository {
     version: number;
     updatedAt: string;
   } {
-    const row = this.#sqlite
-      .prepare(
-        `SELECT checklist.*, task.local_no AS task_local_no, task.version AS task_version
-         FROM checklist_items checklist
-         JOIN work_items task ON task.id = checklist.work_item_id
-         WHERE checklist.id = ?`,
-      )
-      .get(checklistId) as any;
-    if (!row)
-      throw new AtmError("CHECKLIST_NOT_FOUND", {
-        message: `检查项不存在：${checklistId}`,
-        details: { entity: "CHECKLIST", reference: checklistId },
-      });
-    return {
-      id: row.id,
-      taskKey: `${this.meta.code}-T-${String(row.task_local_no).padStart(4, "0")}`,
-      taskVersion: Number(row.task_version),
-      title: String(row.title),
-      status: String(row.status),
-      evidenceRequired: Number(row.evidence_required) === 1,
-      evidenceCount: json<unknown[]>(row.evidence_json, []).length,
-      version: Number(row.version),
-      updatedAt: String(row.updated_at),
-    };
+    return this.#activityReads.checklistConflictSnapshot(checklistId);
   }
 
   recentChecklistChanges(
@@ -1372,39 +853,7 @@ export class ProjectRepository {
     opId: string | null;
     at: string;
   }> {
-    this.checklistConflictSnapshot(checklistId);
-    const bounded = Math.max(1, Math.min(6, limit));
-    const rows = this.#sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
-                payload_json, created_at, op_id
-         FROM events
-         WHERE aggregate_type = 'CHECKLIST' AND aggregate_id = ?
-         ORDER BY sequence DESC LIMIT ?`,
-      )
-      .all(checklistId, bounded) as any[];
-    return rows.map((row) => {
-      const presented = presentEvent({
-        type: row.type,
-        aggregateType: row.aggregate_type,
-        aggregateId: row.aggregate_id,
-        actor: row.actor_id ?? row.actor_type,
-        payload: json<Record<string, unknown>>(row.payload_json, {}),
-        project: {
-          id: this.meta.id,
-          code: this.meta.code,
-          name: this.meta.name,
-        },
-      });
-      return {
-        seq: Number(row.sequence),
-        type: String(row.type),
-        key: checklistId,
-        summary: presented.summary,
-        opId: row.op_id ?? null,
-        at: String(row.created_at),
-      };
-    });
+    return this.#activityReads.recentChecklistChanges(checklistId, limit);
   }
 
   endSession(

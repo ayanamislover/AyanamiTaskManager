@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkItemPhase, WorkItemStatus, WorkItemWaitingOn } from "../index.js";
+import type { WorkItemPhase, WorkItemStatus, WorkItemWaitingOn } from "../work-item.js";
 
 export const TASK_VIEW_NAMES = ["core", "context", "full"] as const;
 export const TaskViewNameSchema = z.enum(TASK_VIEW_NAMES);

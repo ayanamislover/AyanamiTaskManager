@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, posix, relative, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AyanamiDatabaseManager } from "../src/index.js";
+import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
 
 const temporary: string[] = [];
 const managers: AyanamiDatabaseManager[] = [];
@@ -501,7 +501,80 @@ function sqlHeavyBudgetViolations(
   });
 }
 
+function facadeBudgetViolations(
+  files: Array<{ path: string; source: string }>,
+  maximum = 1_000,
+): string[] {
+  const facadeNames = new Set(["manager.ts", "project-repository.ts"]);
+  return files.flatMap((file) => {
+    const lines = file.source.split(/\r?\n/u).length;
+    return facadeNames.has(file.path) && lines > maximum
+      ? [`${file.path}: ${lines} lines exceeds ${maximum}`]
+      : [];
+  });
+}
+
+function internalModuleBudgetViolations(
+  files: Array<{ path: string; source: string }>,
+  maximum = 1_000,
+): string[] {
+  const nonModules = new Set(["index.ts", "manager.ts", "project-repository.ts"]);
+  return files.flatMap((file) => {
+    const lines = file.source.split(/\r?\n/u).length;
+    return !nonModules.has(file.path) && lines > maximum
+      ? [`${file.path}: ${lines} lines exceeds ${maximum}`]
+      : [];
+  });
+}
+
 describe("Manager maintenance architecture guards", () => {
+  it("keeps moved implementations observable through public facade calls", async () => {
+    const { manager } = await openManager("moved-facades");
+    const getProjectSpy = vi.spyOn(manager, "getProject");
+    const project = await manager.createProject({
+      name: "Moved facade parity",
+      sourcePath: null,
+      code: "MFAC",
+    });
+    expect(getProjectSpy).toHaveBeenCalledWith(project.id);
+    getProjectSpy.mockRestore();
+
+    const getQuickTaskSpy = vi.spyOn(manager, "getQuickTask");
+    manager.createQuickTask({ title: "Facade quick task" });
+    expect(getQuickTaskSpy).toHaveBeenCalledOnce();
+    getQuickTaskSpy.mockRestore();
+
+    const projectionSummarySpy = vi.spyOn(manager, "projectionSummary");
+    const projectionFailuresSpy = vi.spyOn(manager, "projectionFailures");
+    manager.overview();
+    expect(projectionSummarySpy).toHaveBeenCalledOnce();
+    expect(projectionFailuresSpy).toHaveBeenCalledOnce();
+    projectionSummarySpy.mockRestore();
+    projectionFailuresSpy.mockRestore();
+
+    const repository = new ProjectRepository(await manager.openProject(project.id));
+    const actor = { type: "USER" as const, id: "USER", sessionId: null };
+    const objective = repository.createObjective(
+      actor,
+      { title: "Facade objective", description: "", definitionOfDone: [] },
+      "moved-facade-objective",
+    );
+    repository.createWorkItems(actor, "moved-facade-task", [
+      {
+        clientRef: "task",
+        objectiveId: objective.id,
+        title: "Facade task",
+        type: "TASK",
+        priority: "NORMAL",
+      },
+    ]);
+    const listWorkItemsSpy = vi.spyOn(repository, "listWorkItems");
+    const listProjectUpdatesSpy = vi.spyOn(repository, "listProjectUpdates");
+    repository.draftProjectUpdate(actor, "moved-facade-draft");
+    expect(listWorkItemsSpy).toHaveBeenCalledWith({ limit: 5 });
+    expect(listProjectUpdatesSpy).toHaveBeenCalledWith(100);
+  });
+
   it("keeps facade prototypes/private seams and rejects reverse imports with a positive fixture", () => {
     for (const method of [
       "openProject",
@@ -511,10 +584,54 @@ describe("Manager maintenance architecture guards", () => {
       "runMaintenance",
       "restoreBackup",
       "close",
+      "listSavedViews",
+      "createSavedView",
+      "updateSavedView",
+      "deleteSavedView",
+      "listSettings",
+      "getSetting",
+      "setSetting",
+      "listQuickTasks",
+      "getQuickTask",
+      "createQuickTask",
+      "updateQuickTask",
+      "markQuickPromoted",
+      "attachProjectPath",
+      "identifyProject",
+      "createProject",
+      "saveProjectEngineeringMetrics",
+      "latestProjectEngineeringMetrics",
+      "ensureWorkItemEngineeringBaseline",
+      "saveWorkItemEngineeringMetrics",
+      "workItemEngineeringMetrics",
+      "doctor",
+      "projectionState",
+      "listProjectionStates",
+      "projectionSummary",
+      "projectionFailures",
+      "globalSearch",
+      "overview",
+      "globalDelta",
     ]) {
       expect(
         Object.getOwnPropertyDescriptor(AyanamiDatabaseManager.prototype, method)?.value,
       ).toEqual(expect.any(Function));
+    }
+    for (const method of [
+      "getOperationTrace",
+      "getProjectUpdate",
+      "listProjectUpdates",
+      "draftProjectUpdate",
+      "publishProjectUpdate",
+      "search",
+      "delta",
+      "recentWorkItemChanges",
+      "checklistConflictSnapshot",
+      "recentChecklistChanges",
+    ]) {
+      expect(Object.getOwnPropertyDescriptor(ProjectRepository.prototype, method)?.value).toEqual(
+        expect.any(Function),
+      );
     }
     const managerSource = readFileSync(
       resolve(process.cwd(), "packages/storage-sqlite/src/manager.ts"),
@@ -565,5 +682,27 @@ describe("Manager maintenance architecture guards", () => {
     expect(
       sqlHeavyBudgetViolations([{ path: "oversized-commands.ts", source: oversized }]),
     ).toEqual(["oversized-commands.ts: 1002 lines exceeds 1000"]);
+  });
+
+  it("keeps storage facades within 1000 lines and proves the guard can fail", () => {
+    const directory = resolve(process.cwd(), "packages/storage-sqlite/src");
+    const files = productionSourceFiles(directory);
+    expect(facadeBudgetViolations(files)).toEqual([]);
+    const oversized = `${"// line\n".repeat(1_000)}export {};`;
+    expect(facadeBudgetViolations([{ path: "manager.ts", source: oversized }])).toEqual([
+      "manager.ts: 1001 lines exceeds 1000",
+    ]);
+    expect(facadeBudgetViolations([{ path: "ordinary-module.ts", source: oversized }])).toEqual([]);
+  });
+
+  it("keeps every internal storage module within 1000 lines with a positive fixture", () => {
+    const directory = resolve(process.cwd(), "packages/storage-sqlite/src");
+    const files = productionSourceFiles(directory);
+    expect(internalModuleBudgetViolations(files)).toEqual([]);
+    const oversized = `${"// line\n".repeat(1_000)}export {};`;
+    expect(
+      internalModuleBudgetViolations([{ path: "registry-observability.ts", source: oversized }]),
+    ).toEqual(["registry-observability.ts: 1001 lines exceeds 1000"]);
+    expect(internalModuleBudgetViolations([{ path: "manager.ts", source: oversized }])).toEqual([]);
   });
 });
