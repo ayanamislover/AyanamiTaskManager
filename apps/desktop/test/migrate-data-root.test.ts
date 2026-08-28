@@ -3,13 +3,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "../../../packages/application/src/index.js";
 import { migrateDataRoot } from "../../../scripts/migrate-data-root.js";
@@ -18,6 +18,18 @@ const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+function isWithinDirectory(rootPath: string, candidatePath: string): boolean {
+  const root = statSync(rootPath, { bigint: true });
+  let current = dirname(candidatePath);
+  for (;;) {
+    const candidate = statSync(current, { bigint: true });
+    if (candidate.dev === root.dev && candidate.ino === root.ino) return true;
+    const parent = dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+}
 
 describe("正式数据根迁移", () => {
   it("保留空目标备份、清理两套旧运行时发现文件并重写项目数据库路径", async () => {
@@ -70,10 +82,7 @@ describe("正式数据根迁移", () => {
     const migrated = await AyanamiTaskService.open({ dataDir: destination, migrationsRoot });
     try {
       const project = migrated.databases.getProject("HIS");
-      const canonicalRoot = realpathSync.native(destination);
-      const canonicalDatabase = realpathSync.native(project.databasePath);
-      const offset = relative(canonicalRoot, canonicalDatabase);
-      expect(offset === "" || (!offset.startsWith("..") && !isAbsolute(offset))).toBe(true);
+      expect(isWithinDirectory(destination, project.databasePath)).toBe(true);
       expect(migrated.databases.listProjects()).toHaveLength(1);
     } finally {
       migrated.close();
