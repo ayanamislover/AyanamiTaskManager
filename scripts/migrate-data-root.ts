@@ -152,9 +152,9 @@ export async function migrateDataRoot(input: {
   rewriteRegistryPaths(stagedRegistry, source, destination);
   await mkdir(join(staging, "runtime"), { recursive: true });
   await rm(join(staging, "runtime", "daemon.json"), { force: true });
-  const destinationToken = join(destination, "runtime", "local.token");
-  if (existsSync(destinationToken))
-    await cp(destinationToken, join(staging, "runtime", "local.token"), { force: true });
+  // Runtime discovery is ephemeral and daemon.json is now the only token
+  // source. Never carry the obsolete local.token into the migrated root.
+  await rm(join(staging, "runtime", "local.token"), { force: true });
   quickCheck(stagedRegistry);
   const stagedDatabase = new Database(stagedRegistry, { readonly: true, fileMustExist: true });
   const projectPaths = stagedDatabase.prepare("SELECT db_path FROM projects").all() as Array<{

@@ -8,6 +8,7 @@ const modules = [
   "http-boundary.ts",
   "project-routes.ts",
   "rest-route-helpers.ts",
+  "runtime-discovery.ts",
   "server-options.ts",
   "session-routes.ts",
   "transport-routes.ts",

@@ -3,6 +3,11 @@ import { join } from "node:path";
 export const STARTUP_DELAY_MIN_MS = 8_000;
 export const STARTUP_DELAY_MAX_MS = 45_000;
 export const LOGIN_ITEM_ARGS = ["--background", "--random-startup-delay"] as const;
+export const AGENT_WAKE_ARGS = ["--background", "--agent-wake"] as const;
+
+export function isAgentWakeRequest(args: readonly string[]): boolean {
+  return AGENT_WAKE_ARGS.every((argument) => args.includes(argument));
+}
 
 export function loginItemExecutable(dataDir: string): string {
   return join(dataDir, "current", "AyanamiTaskManager.exe");

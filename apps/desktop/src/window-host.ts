@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import {
+  app,
   BrowserWindow,
   ipcMain,
   Menu,
@@ -17,6 +18,7 @@ import {
   type NotificationMode,
 } from "./notification-policy.js";
 import { createWindowOptions } from "./window-options.js";
+import { rendererEntryUrl, rendererNavigationAllowed } from "./renderer-security.js";
 
 type ProjectEvent = {
   seq: number;
@@ -87,11 +89,16 @@ export class WindowHost {
     this.mainWindow.on("closed", () => {
       this.mainWindow = null;
     });
-    if (process.env.ATM_RENDERER_URL) {
-      void this.mainWindow.loadURL(process.env.ATM_RENDERER_URL);
-    } else {
-      void this.mainWindow.loadFile(join(__dirname, "../renderer/index.html"));
-    }
+    const entry = rendererEntryUrl({
+      packaged: app.isPackaged,
+      ...(process.env.ATM_RENDERER_URL ? { rendererUrl: process.env.ATM_RENDERER_URL } : {}),
+      rendererFile: join(__dirname, "../renderer/index.html"),
+    });
+    this.mainWindow.webContents.on("will-navigate", (event, target) => {
+      if (!rendererNavigationAllowed(entry, target)) event.preventDefault();
+    });
+    this.mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    void this.mainWindow.loadURL(entry);
   }
 
   start(background: boolean): void {

@@ -5,7 +5,7 @@ import { AyanamiClient } from "@ayanami-task/client";
 import { createUlid, RecordKindSchema } from "@ayanami-task/protocol";
 import { discoverDaemon } from "./runtime.js";
 
-type GlobalOptions = { json?: boolean; compact?: boolean; endpoint?: string; token?: string };
+type GlobalOptions = { json?: boolean; compact?: boolean };
 
 function display(value: unknown, options: GlobalOptions, write: (text: string) => void): void {
   if (options.json) {
@@ -60,11 +60,7 @@ export function createCliProgram(
   const client = async () => {
     if (dependencies.client) return dependencies.client;
     clientPromise ??= (async () => {
-      const options = program.opts<GlobalOptions>();
-      const runtime = await discoverDaemon({
-        ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
-        ...(options.token === undefined ? {} : { token: options.token }),
-      });
+      const runtime = await discoverDaemon();
       return new AyanamiClient(runtime);
     })();
     return clientPromise;
@@ -114,9 +110,7 @@ export function createCliProgram(
     .name("atm")
     .description("AyanamiTaskManager 命令行")
     .option("--json", "输出单行 JSON")
-    .option("--compact", "省略说明字段")
-    .option("--endpoint <url>", "本地服务地址")
-    .option("--token <token>", "本地访问令牌");
+    .option("--compact", "省略说明字段");
 
   program
     .command("status")

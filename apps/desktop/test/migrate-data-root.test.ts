@@ -1,12 +1,4 @@
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,7 +11,7 @@ afterEach(() => {
 });
 
 describe("正式数据根迁移", () => {
-  it("保留空目标备份、目标 token 并重写项目数据库路径", async () => {
+  it("保留空目标备份、清理两套旧运行时发现文件并重写项目数据库路径", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-data-migration-"));
     roots.push(root);
     const source = join(root, "visual-data");
@@ -46,9 +38,8 @@ describe("正式数据根迁移", () => {
     });
     expect(result.executed).toBe(true);
     expect(result.destinationBackup && existsSync(result.destinationBackup)).toBe(true);
-    expect(readFileSync(join(destination, "runtime", "local.token"), "utf8")).toBe(
-      "destination-token",
-    );
+    expect(existsSync(join(destination, "runtime", "local.token"))).toBe(false);
+    expect(existsSync(join(destination, "runtime", "daemon.json"))).toBe(false);
     const migrated = await AyanamiTaskService.open({ dataDir: destination, migrationsRoot });
     const project = migrated.databases.getProject("HIS");
     expect(project.databasePath.startsWith(destination)).toBe(true);

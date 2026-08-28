@@ -439,7 +439,7 @@ describe("Agent MCP 配置适配", () => {
       "memory",
     ]);
     expect(rendered.stdio).toContain("ELECTRON_RUN_AS_NODE");
-    expect(generic).toEqual(http);
+    expect(generic).toEqual(stdio);
     expect(rendered.agentRule).toContain("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md");
     expect(rendered.agentRule).not.toContain("R:\\Project_All");
     expect(rendered.agentRule).toContain("后续所有任务执行均依赖 ATM");

@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  AGENT_WAKE_ARGS,
+  isAgentWakeRequest,
   LOGIN_ITEM_ARGS,
   loginItemExecutable,
   randomStartupDelayMs,
@@ -29,6 +31,14 @@ describe("Windows 随机延迟自启动", () => {
     expect(shouldStartInBackground([...LOGIN_ITEM_ARGS], false)).toBe(true);
     expect(shouldStartInBackground([], false)).toBe(false);
     expect(shouldStartInBackground([...LOGIN_ITEM_ARGS], true)).toBe(false);
+  });
+
+  it("Agent 唤醒使用独立后台意图，不会把随机延迟中的窗口拉到前台", () => {
+    expect(AGENT_WAKE_ARGS).toEqual(["--background", "--agent-wake"]);
+    expect(isAgentWakeRequest([...AGENT_WAKE_ARGS])).toBe(true);
+    expect(isAgentWakeRequest(["--background"])).toBe(false);
+    expect(shouldDelayStartup([...AGENT_WAKE_ARGS], false)).toBe(false);
+    expect(shouldStartInBackground([...AGENT_WAKE_ARGS], false)).toBe(true);
   });
 
   it("登录项使用数据根下的版本无关入口，升级后不会钉死旧 app 目录", () => {

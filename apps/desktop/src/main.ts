@@ -11,6 +11,7 @@ import {
 } from "./runtime-host.js";
 import { handleSquirrelStartup } from "./squirrel.js";
 import {
+  isAgentWakeRequest,
   randomStartupDelayMs,
   shouldDelayStartup,
   shouldStartInBackground,
@@ -91,6 +92,11 @@ async function bootstrap(): Promise<void> {
       windowHost?.markQuitting();
       startupDelayController.abort();
       app.quit();
+      return;
+    }
+    if (isAgentWakeRequest(commandLine)) {
+      // An MCP/CLI wake-up cancels randomized login delay but remains hidden.
+      startupDelayController.abort();
       return;
     }
     foregroundRequested = true;
