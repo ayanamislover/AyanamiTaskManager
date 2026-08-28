@@ -1,12 +1,4 @@
-import {
-  Fragment,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type FormEvent,
-  type ReactNode,
-} from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveIcon as Archive } from "@phosphor-icons/react/dist/icons/Archive";
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
@@ -51,7 +43,6 @@ import {
   SystemProjectionPanel,
 } from "./projection-health-panel.js";
 import { McpBridgePanel } from "./mcp-bridge-panel.js";
-import { cancelNoticeTimer, restartNoticeTimer } from "./notice-lifecycle.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
 import { useCursorCollection, useCursorCollections } from "./cursor-collection.js";
@@ -77,6 +68,9 @@ import {
   LoadingRows,
   PageHead,
 } from "./components/async-state.js";
+import { useDialogAccessibility } from "./hooks/use-dialog-accessibility.js";
+import { useNotice } from "./hooks/use-notice.js";
+import { useTheme } from "./hooks/use-theme.js";
 import type {
   AgentIntegrationAction,
   AyanamiTaskManagerProps,
@@ -85,7 +79,6 @@ import type {
   NotificationMode,
   Notify,
   Route,
-  Theme,
 } from "./contracts.js";
 import {
   AgentIntegrationBadge,
@@ -102,29 +95,6 @@ import {
 } from "./presentation.js";
 import "./styles.css";
 
-const themeStorageKey = "atm.theme";
-
-function readStoredTheme(): Theme | null {
-  try {
-    const value = window.localStorage.getItem(themeStorageKey);
-    return value === "light" || value === "dark" ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function readSystemTheme(): Theme {
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
-function persistTheme(theme: Theme) {
-  try {
-    window.localStorage.setItem(themeStorageKey, theme);
-  } catch {
-    // 本地存储不可用时仍保留当前窗口的主题切换能力。
-  }
-}
-
 function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   return (
@@ -132,57 +102,6 @@ function isEditableTarget(target: EventTarget | null): boolean {
     ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
     Boolean(target.closest('[contenteditable="true"]'))
   );
-}
-
-function useDialogAccessibility(close: () => void) {
-  const dialogRef = useRef<HTMLElement>(null);
-  const closeRef = useRef(close);
-  closeRef.current = close;
-  useEffect(() => {
-    const previousFocus =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const dialog = dialogRef.current;
-    const focusableSelector =
-      "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])";
-    const frame = window.requestAnimationFrame(() => {
-      const preferred = dialog?.querySelector<HTMLElement>("[data-dialog-autofocus]");
-      if (preferred) preferred.focus();
-      else if (!dialog?.contains(document.activeElement))
-        dialog?.querySelector<HTMLElement>(focusableSelector)?.focus();
-    });
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !dialog) return;
-      const focusable = [...dialog.querySelectorAll<HTMLElement>(focusableSelector)].filter(
-        (element) => !element.hidden && element.getClientRects().length > 0,
-      );
-      if (!focusable.length) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-      const first = focusable[0]!;
-      const last = focusable.at(-1)!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKey);
-      if (previousFocus?.isConnected) previousFocus.focus();
-    };
-  }, []);
-  return dialogRef;
 }
 
 function Sidebar({
@@ -4283,42 +4202,13 @@ function App({
 }) {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
   const [route, setRoute] = useState<Route>(() => (location.hash.slice(1) as Route) || "overview");
-  const [theme, setTheme] = useState<Theme>(() => readStoredTheme() ?? readSystemTheme());
-  const [hasManualTheme, setHasManualTheme] = useState(() => readStoredTheme() !== null);
   const [palette, setPalette] = useState(false);
-  const [notice, setNotice] = useState("");
-  const noticeTimerRef = useRef<number | null>(null);
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
-  const notify = (message: string) => {
-    setNotice(message);
-    restartNoticeTimer(noticeTimerRef, () => setNotice(""));
-  };
-  useEffect(() => () => cancelNoticeTimer(noticeTimerRef), []);
+  const { notice, notify } = useNotice();
   useEffect(() => {
     location.hash = route;
   }, [route]);
-  useLayoutEffect(() => {
-    const root = document.documentElement;
-    root.dataset.themeSwitching = "true";
-    root.dataset.theme = theme;
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => delete root.dataset.themeSwitching);
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-      delete root.dataset.themeSwitching;
-    };
-  }, [theme]);
-  useEffect(() => {
-    if (hasManualTheme) return;
-    const preference = window.matchMedia("(prefers-color-scheme: dark)");
-    const syncSystemTheme = (event: MediaQueryListEvent) =>
-      setTheme(event.matches ? "dark" : "light");
-    preference.addEventListener("change", syncSystemTheme);
-    return () => preference.removeEventListener("change", syncSystemTheme);
-  }, [hasManualTheme]);
+  const { theme, toggleTheme } = useTheme();
   useEffect(() => desktop?.onNavigate?.((next) => setRoute(next as Route)), [desktop]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -4448,12 +4338,7 @@ function App({
               className="atm-button atm-icon-button atm-theme-toggle"
               aria-label={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
               title={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
-              onClick={() => {
-                const nextTheme = theme === "light" ? "dark" : "light";
-                setHasManualTheme(true);
-                setTheme(nextTheme);
-                persistTheme(nextTheme);
-              }}
+              onClick={toggleTheme}
             >
               {theme === "light" ? <Moon size={17} /> : <Sun size={17} />}
             </button>
