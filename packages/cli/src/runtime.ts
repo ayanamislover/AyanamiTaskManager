@@ -117,5 +117,7 @@ export async function discoverDaemon(
       if (runtime && (await runtimeAvailable(runtime))) return runtime;
     }
   }
-  throw new Error("AyanamiTaskManager 服务未运行；请先启动桌面应用或设置 --endpoint 与 --token");
+  throw new Error(
+    "AyanamiTaskManager 服务未运行；请先启动桌面应用，测试隔离环境可设置 ATM_DATA_DIR",
+  );
 }

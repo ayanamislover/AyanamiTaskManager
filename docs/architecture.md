@@ -2,7 +2,7 @@
 
 ## 运行边界
 
-Electron Main 是生产常驻宿主，负责单实例、托盘、登录自启动、Fastify 服务与数据库生命周期。Renderer 开启 `contextIsolation`、关闭 Node Integration，通过 Preload 窄接口获得本地服务地址和系统操作。`apps/daemon` 可独立启动，只用于测试与开发。
+Electron Main 是生产常驻宿主，负责单实例、托盘、登录自启动、Fastify 服务与数据库生命周期。Renderer 开启 `contextIsolation`、关闭 Node Integration，不接收原始 endpoint/token；它只通过 Preload 的窄 capability 让 Main process 代理有界 `/api/v1/*` 请求和系统操作。`apps/daemon` 可独立启动，只用于测试与开发。完整威胁边界见 [security-model.md](./security-model.md)。
 
 ```text
 Renderer / MCP stdio / atm CLI

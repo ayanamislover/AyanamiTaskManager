@@ -67,20 +67,28 @@ describe("single-source daemon runtime discovery", () => {
   it("rejects non-loopback or malformed descriptors without echoing token or path", () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-invalid-"));
     temporary.push(runtimeDir);
-    writeFileSync(
-      join(runtimeDir, "daemon.json"),
-      JSON.stringify({ ...fixture("must-not-leak"), endpoint: "https://example.test" }),
-      "utf8",
-    );
-    let message = "";
-    try {
-      readDaemonRuntime(runtimeDir);
-    } catch (error) {
-      message = error instanceof Error ? error.message : String(error);
+    const invalidDescriptors: unknown[] = [
+      { ...fixture("must-not-leak"), endpoint: "https://example.test" },
+      { ...fixture("must-not-leak"), endpoint: "http://localhost:9999" },
+      { ...fixture("must-not-leak"), endpoint: "http://127.0.0.1:9999/api" },
+      { ...fixture(""), token: "" },
+      { ...fixture("x".repeat(513)) },
+      { ...fixture("must-not-leak"), pid: 0 },
+      { ...fixture("must-not-leak"), instanceId: "not-an-instance" },
+      { ...fixture("must-not-leak"), startedAt: "not-a-date" },
+    ];
+    for (const descriptor of invalidDescriptors) {
+      writeFileSync(join(runtimeDir, "daemon.json"), JSON.stringify(descriptor), "utf8");
+      let message = "";
+      try {
+        readDaemonRuntime(runtimeDir);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe("ATM_RUNTIME_UNAVAILABLE");
+      expect(message).not.toContain("must-not-leak");
+      expect(message).not.toContain(runtimeDir);
     }
-    expect(message).toBe("ATM_RUNTIME_UNAVAILABLE");
-    expect(message).not.toContain("must-not-leak");
-    expect(message).not.toContain(runtimeDir);
   });
 
   it("uses an explicit development token or creates a fresh bounded token", () => {

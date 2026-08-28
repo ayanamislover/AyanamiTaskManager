@@ -486,6 +486,40 @@ describe("REST 边界", () => {
     const app = await buildAyanamiServer({ service, token: "local-secret" });
     try {
       expect((await app.inject({ method: "GET", url: "/api/v1/projects" })).statusCode).toBe(401);
+      const suppliedToken = "attacker-supplied-secret";
+      const unauthorized = await app.inject({
+        method: "GET",
+        url: "/api/v1/projects",
+        headers: { authorization: `Bearer ${suppliedToken}` },
+      });
+      expect(unauthorized.statusCode).toBe(401);
+      expect(unauthorized.body).not.toContain(suppliedToken);
+      expect(unauthorized.body).not.toContain("local-secret");
+
+      const foreignPreflight = await app.inject({
+        method: "OPTIONS",
+        url: "/api/v1/projects",
+        headers: {
+          origin: "https://evil.example",
+          "access-control-request-method": "GET",
+          "access-control-request-headers": "authorization",
+        },
+      });
+      expect(foreignPreflight.statusCode).toBe(403);
+      expect(foreignPreflight.headers["access-control-allow-origin"]).toBeUndefined();
+      expect(foreignPreflight.body).not.toContain("local-secret");
+
+      const foreignActual = await app.inject({
+        method: "GET",
+        url: "/api/v1/projects",
+        headers: {
+          authorization: "Bearer local-secret",
+          origin: "https://evil.example",
+        },
+      });
+      expect(foreignActual.statusCode).toBe(403);
+      expect(foreignActual.headers["access-control-allow-origin"]).toBeUndefined();
+      expect(foreignActual.body).not.toContain("local-secret");
       const created = await app.inject({
         method: "POST",
         url: "/api/v1/projects",

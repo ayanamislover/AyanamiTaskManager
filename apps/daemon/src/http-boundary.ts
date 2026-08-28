@@ -105,19 +105,30 @@ function assertToken(request: FastifyRequest, token: string): void {
     throw new AtmError("UNAUTHORIZED", { message: "本地访问令牌无效" });
 }
 
+function isAllowedBrowserOrigin(origin: string | undefined): boolean {
+  return !origin || /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/iu.test(origin);
+}
+
 export async function createHttpServer(options: AyanamiServerOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
     bodyLimit: 10 * 1024 * 1024,
     requestIdHeader: "x-request-id",
   });
+  app.addHook("onRequest", (request, reply, done) => {
+    if (!isAllowedBrowserOrigin(request.headers.origin)) {
+      const forbidden = new AtmError("FORBIDDEN", { message: "仅允许本机页面访问" });
+      void reply.code(forbidden.httpStatus).send({
+        error: atmErrorDto(forbidden),
+        request_id: request.id,
+      });
+      return;
+    }
+    done();
+  });
   await app.register(cors, {
     origin(origin, callback) {
-      if (!origin || /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/iu.test(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new AtmError("FORBIDDEN", { message: "仅允许本机页面访问" }), false);
+      callback(null, isAllowedBrowserOrigin(origin));
     },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   });

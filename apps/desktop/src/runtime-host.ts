@@ -96,7 +96,10 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   const runtimeDir = join(dataDir, "runtime");
   mkdirSync(runtimeDir, { recursive: true });
   const lease = acquireDaemonRuntime(runtimeDir);
-  const token = createDaemonToken();
+  // The production desktop must rotate credentials on every host start. The
+  // standalone daemon keeps an explicit development override, but inherited
+  // environment cannot pin an installed desktop token across restarts.
+  const token = createDaemonToken({});
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
   try {

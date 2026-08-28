@@ -1,6 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  cp,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
@@ -18,11 +28,14 @@ type MigrationManifest = Omit<MigrationResult, "executed"> & {
   migratedAt: string;
 };
 
-export type MigrationStage = "AFTER_COPY" | "AFTER_MANIFEST" | "AFTER_BACKUP" | "AFTER_COMMIT";
+export type MigrationStage =
+  | "AFTER_COPY"
+  | "AFTER_MANIFEST"
+  | "BEFORE_BACKUP_RUNTIME_SCRUB"
+  | "AFTER_BACKUP"
+  | "AFTER_COMMIT";
 
 function assertSafeRoots(source: string, destination: string): void {
-  if (!isAbsolute(source) || !isAbsolute(destination))
-    throw new Error("DATA_ROOT_MUST_BE_ABSOLUTE");
   if (source.toLowerCase() === destination.toLowerCase()) throw new Error("DATA_ROOTS_MUST_DIFFER");
   if ([source, destination].some((candidate) => dirname(candidate) === candidate))
     throw new Error("DATA_ROOT_TOO_BROAD");
@@ -37,6 +50,56 @@ function assertSafeRoots(source: string, destination: string): void {
       !isAbsolute(destinationToSource))
   )
     throw new Error("DATA_ROOTS_MUST_NOT_NEST");
+}
+
+async function canonicalDataRoot(path: string): Promise<string> {
+  let existing = path;
+  const missingSegments: string[] = [];
+  let entry: Awaited<ReturnType<typeof lstat>> | null = null;
+  while (!entry) {
+    try {
+      entry = await lstat(existing);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (entry) break;
+    const parent = dirname(existing);
+    if (parent === existing) throw new Error("DATA_ROOT_PARENT_MISSING");
+    missingSegments.unshift(basename(existing));
+    existing = parent;
+  }
+  if (existing === path && entry.isSymbolicLink()) throw new Error("DATA_ROOT_LINK_NOT_ALLOWED");
+  return resolve(await realpath(existing), ...missingSegments);
+}
+
+function runtimeStatePresent(root: string): boolean {
+  return (
+    existsSync(join(root, "runtime", "daemon.json")) ||
+    existsSync(join(root, "runtime", "local.token"))
+  );
+}
+
+async function assertRuntimeDirectorySafe(root: string): Promise<void> {
+  const runtimePath = join(root, "runtime");
+  let entry: Awaited<ReturnType<typeof lstat>>;
+  try {
+    entry = await lstat(runtimePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (entry.isSymbolicLink()) throw new Error("DATA_ROOT_RUNTIME_LINK_NOT_ALLOWED");
+  if (!entry.isDirectory()) throw new Error("DATA_ROOT_RUNTIME_INVALID");
+}
+
+async function scrubRuntimeState(
+  root: string,
+  onStage?: (stage: MigrationStage) => void | Promise<void>,
+): Promise<void> {
+  await onStage?.("BEFORE_BACKUP_RUNTIME_SCRUB");
+  await assertRuntimeDirectorySafe(root);
+  await rm(join(root, "runtime", "daemon.json"), { force: true });
+  await rm(join(root, "runtime", "local.token"), { force: true });
 }
 
 function quickCheck(path: string): void {
@@ -147,11 +210,12 @@ async function completedMigration(
   const projects = projectPaths(registryPath);
   if (projects.length !== manifest.projects) throw new Error("MIGRATION_MANIFEST_MISMATCH");
   for (const project of projects) if (project.db_path) quickCheck(project.db_path);
-  if (
-    existsSync(join(destination, "runtime", "daemon.json")) ||
-    existsSync(join(destination, "runtime", "local.token"))
-  )
-    throw new Error("MIGRATION_RUNTIME_STATE_PRESENT");
+  for (const root of [destination, manifest.destinationBackup])
+    if (root && existsSync(root)) {
+      await assertRuntimeDirectorySafe(root);
+      if (!runtimeStatePresent(root)) continue;
+      throw new Error("MIGRATION_RUNTIME_STATE_PRESENT");
+    }
   return {
     source,
     destination,
@@ -219,9 +283,13 @@ export async function migrateDataRoot(input: {
   timestamp?: string;
   onStage?: (stage: MigrationStage) => void | Promise<void>;
 }): Promise<MigrationResult> {
-  const source = resolve(input.source);
-  const destination = resolve(input.destination);
+  if (!isAbsolute(input.source) || !isAbsolute(input.destination))
+    throw new Error("DATA_ROOT_MUST_BE_ABSOLUTE");
+  const source = await canonicalDataRoot(resolve(input.source));
+  const destination = await canonicalDataRoot(resolve(input.destination));
   assertSafeRoots(source, destination);
+  await assertRuntimeDirectorySafe(source);
+  if (existsSync(destination)) await assertRuntimeDirectorySafe(destination);
   const alreadyCompleted = await completedMigration(source, destination);
   if (alreadyCompleted) return alreadyCompleted;
   const sourceRegistry = join(source, "registry", "registry.sqlite");
@@ -302,11 +370,13 @@ export async function migrateDataRoot(input: {
     await input.onStage?.("AFTER_MANIFEST");
 
     const destinationBackup = stagedManifest.destinationBackup;
+    if (destinationBackup && existsSync(destinationBackup) && !existsSync(destination)) {
+      await scrubRuntimeState(destinationBackup, input.onStage);
+    }
     if (destinationBackup && existsSync(destination)) {
       if (existsSync(destinationBackup)) throw new Error("MIGRATION_TARGET_ALREADY_EXISTS");
       await rename(destination, destinationBackup);
-      await rm(join(destinationBackup, "runtime", "daemon.json"), { force: true });
-      await rm(join(destinationBackup, "runtime", "local.token"), { force: true });
+      await scrubRuntimeState(destinationBackup, input.onStage);
       await input.onStage?.("AFTER_BACKUP");
     }
     try {

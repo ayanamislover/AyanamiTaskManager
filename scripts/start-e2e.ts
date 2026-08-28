@@ -19,7 +19,7 @@ const daemon = spawn(node, ["node_modules/tsx/dist/cli.mjs", "apps/daemon/src/ma
   windowsHide: true,
   env: {
     ...process.env,
-    AYANAMI_TASK_DATA_DIR: dataDir,
+    ATM_DATA_DIR: dataDir,
     AYANAMI_TASK_TOKEN: "e2e-test-token",
     AYANAMI_TASK_PORT: "4394",
   },
