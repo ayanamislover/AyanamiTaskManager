@@ -219,28 +219,23 @@ try {
       const samples = await page.locator(".atm-main").evaluate(async (element, runDurationMs) => {
         element.scrollTop = 0;
         const frameTimes: number[] = [];
-        await new Promise<void>((resolveRun) => {
-          let startedAt = 0;
-          let previousAt = 0;
-          let direction = 1;
-          const step = (now: number) => {
-            if (startedAt === 0) {
-              startedAt = now;
-              previousAt = now;
-            } else {
-              const delta = now - previousAt;
-              previousAt = now;
-              if (delta > 0 && delta < 250) frameTimes.push(delta);
-              const maxScroll = element.scrollHeight - element.clientHeight;
-              element.scrollTop += direction * delta * 0.42;
-              if (element.scrollTop >= maxScroll - 1) direction = -1;
-              else if (element.scrollTop <= 1) direction = 1;
-            }
-            if (now - startedAt >= runDurationMs) resolveRun();
-            else requestAnimationFrame(step);
-          };
-          requestAnimationFrame(step);
-        });
+        const startedAt = performance.now();
+        let previousAt = await new Promise<number>((resolveFrame) =>
+          requestAnimationFrame(resolveFrame),
+        );
+        let direction = 1;
+        while (previousAt - startedAt < runDurationMs) {
+          const now = await new Promise<number>((resolveFrame) =>
+            requestAnimationFrame(resolveFrame),
+          );
+          const delta = now - previousAt;
+          previousAt = now;
+          if (delta > 0 && delta < 250) frameTimes.push(delta);
+          const maxScroll = element.scrollHeight - element.clientHeight;
+          element.scrollTop += direction * delta * 0.42;
+          if (element.scrollTop >= maxScroll - 1) direction = -1;
+          else if (element.scrollTop <= 1) direction = 1;
+        }
         return frameTimes;
       }, durationMs);
       const after = scalarMetrics((await cdp.send("Performance.getMetrics")).metrics);
