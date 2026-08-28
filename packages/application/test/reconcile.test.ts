@@ -314,6 +314,20 @@ describe("只读工作项对账", () => {
         POSSIBLY_COMPLETE: 0,
       });
       expect(result.attentionCount).toBe(0);
+
+      const tail = await service.reconcileProjectPage("MASS", {
+        includeActive: true,
+        limit: 50,
+        cursor: "500",
+      });
+      expect(tail).toMatchObject({
+        offset: 500,
+        returnedCount: 21,
+        retryCursor: "500",
+        nextCursor: null,
+        hasMore: false,
+      });
+      expect(tail.items).toHaveLength(21);
     } finally {
       service.close();
     }

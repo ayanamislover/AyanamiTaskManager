@@ -43,25 +43,25 @@ export function registerCoreTaskTools(
     },
     async (input) => {
       if (input.view === "reconcile") {
-        const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
-        const reconciliation = plain(
-          await service.reconcileProject(input.project, { includeActive: input.include_active }),
+        const page = plain(
+          await service.reconcileProjectPage(input.project, {
+            includeActive: input.include_active,
+            limit: input.limit,
+            ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+          }),
         );
-        const allItems = Array.isArray(reconciliation.items)
-          ? (reconciliation.items as Array<Record<string, any>>)
-          : [];
-        const page = allItems.slice(offset, offset + input.limit);
-        const projected = page.map((item) =>
+        const items = Array.isArray(page.items) ? (page.items as Array<Record<string, any>>) : [];
+        const projected = items.map((item) =>
           selectFields(compactReconciliationItem(item), input.field_mask),
         );
         return wrap(
           fitReconciliationPage(
             input.project,
-            reconciliation,
-            offset,
+            page,
+            Number(page.offset ?? 0),
             input.max_chars,
             projected,
-            offset + page.length < allItems.length,
+            page.hasMore === true,
           ),
         );
       }

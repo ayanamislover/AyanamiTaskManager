@@ -431,46 +431,64 @@ describe("MCP read plane", () => {
     const oversizedTitle = `Stalled task ${"title".repeat(5000)}`;
     const oversizedDisplayName = `Agent One ${"display".repeat(5000)}`;
     const oversizedSuggestedAction = `Inspect evidence before takeover. ${"action".repeat(5000)}`;
-    const calls: Array<{ project: string; includeActive?: boolean }> = [];
+    const calls: Array<{
+      project: string;
+      includeActive?: boolean;
+      limit?: number;
+      cursor?: string;
+    }> = [];
     const service = {
-      reconcileProject: async (project: string, input: { includeActive?: boolean }) => {
+      reconcileProjectPage: async (
+        project: string,
+        input: { includeActive?: boolean; limit?: number; cursor?: string },
+      ) => {
         calls.push({ project, ...input });
+        const allItems = [
+          {
+            taskKey: "REC-T-0001",
+            title: calls.length >= 3 ? oversizedTitle : longTitle,
+            status: "CLAIMED",
+            classification: "STALLED",
+            reason: "session_closed_and_lease_expired",
+            ageSeconds: 120,
+            session: {
+              id: "session-1",
+              agentId: "agent-1",
+              displayName: calls.length >= 3 ? oversizedDisplayName : longDisplayName,
+              connectionState: "CLOSED",
+              lastSeenAt: "2026-08-26T23:00:00.000Z",
+              endedAt: "2026-08-26T23:01:00.000Z",
+            },
+            suggestedAction: calls.length >= 3 ? oversizedSuggestedAction : longSuggestedAction,
+            evidencePaths: [],
+          },
+          {
+            taskKey: "REC-T-0002",
+            title: "Existing artifact",
+            status: "READY",
+            classification: "POSSIBLY_COMPLETE",
+            reason: "all_explicit_acceptance_paths_exist_and_never_claimed",
+            ageSeconds: 60,
+            session: null,
+            suggestedAction: "Verify the artifact before completion.",
+            evidencePaths: ["release/done.txt"],
+          },
+        ];
+        const offset = Number.parseInt(input.cursor ?? "0", 10) || 0;
+        const limit = input.limit ?? 10;
+        const items = allItems.slice(offset, offset + limit);
         return {
           project: { code: "REC", name: "Reconcile", sourceRoot: "R:\\Project" },
           generatedAt: "2026-08-27T00:00:00.000Z",
           attentionCount: 2,
           counts: { ACTIVE: 0, LEASE_EXPIRED_ONLINE: 0, STALLED: 1, POSSIBLY_COMPLETE: 1 },
-          items: [
-            {
-              taskKey: "REC-T-0001",
-              title: calls.length >= 3 ? oversizedTitle : longTitle,
-              status: "CLAIMED",
-              classification: "STALLED",
-              reason: "session_closed_and_lease_expired",
-              ageSeconds: 120,
-              session: {
-                id: "session-1",
-                agentId: "agent-1",
-                displayName: calls.length >= 3 ? oversizedDisplayName : longDisplayName,
-                connectionState: "CLOSED",
-                lastSeenAt: "2026-08-26T23:00:00.000Z",
-                endedAt: "2026-08-26T23:01:00.000Z",
-              },
-              suggestedAction: calls.length >= 3 ? oversizedSuggestedAction : longSuggestedAction,
-              evidencePaths: [],
-            },
-            {
-              taskKey: "REC-T-0002",
-              title: "Existing artifact",
-              status: "READY",
-              classification: "POSSIBLY_COMPLETE",
-              reason: "all_explicit_acceptance_paths_exist_and_never_claimed",
-              ageSeconds: 60,
-              session: null,
-              suggestedAction: "Verify the artifact before completion.",
-              evidencePaths: ["release/done.txt"],
-            },
-          ],
+          offset,
+          returnedCount: items.length,
+          items,
+          retryCursor: String(offset),
+          nextCursor:
+            offset + items.length < allItems.length ? String(offset + items.length) : null,
+          hasMore: offset + items.length < allItems.length,
         };
       },
     } as unknown as AyanamiTaskService;
@@ -494,7 +512,7 @@ describe("MCP read plane", () => {
           view: "reconcile",
         },
       });
-      expect(calls).toEqual([{ project: "REC", includeActive: false }]);
+      expect(calls).toEqual([{ project: "REC", includeActive: false, limit: 10 }]);
       expect(first.structuredContent).toMatchObject({
         project: "REC",
         project_name: "Reconcile",

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAyanamiMcpServer } from "../src/index.js";
 import { publishedOperationVariant } from "./published-operation-schema.js";
 
@@ -273,6 +273,7 @@ describe("MCP first-class Review workflow", () => {
         ],
       });
       const reviewer = await claimAndStartReview(fixture);
+      const preflightSpy = vi.spyOn(fixture.service, "getReviewRequest");
       const submitted = await fixture.client.callTool({
         name: "atm_task_patch",
         arguments: {
@@ -292,6 +293,7 @@ describe("MCP first-class Review workflow", () => {
           ],
         },
       });
+      expect(preflightSpy).not.toHaveBeenCalled();
       expect(submitted.isError, JSON.stringify(submitted.content)).not.toBe(true);
       expect(submitted.structuredContent).toMatchObject({
         op_id: "mcp-review-approved",

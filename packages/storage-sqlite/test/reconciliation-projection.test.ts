@@ -392,6 +392,31 @@ describe("incremental reconciliation projections", () => {
       { taskKey: review.key, expectedVersion: claimed.version, operation: "start" },
     ]).items[0]!;
 
+    const beforeBindingFailure = repository.delta(0, 100).currentSequence;
+    let bindingError: unknown;
+    try {
+      repository.submitReview(reviewer, "review-binding-failed", {
+        requestKey: request.request.key,
+        reviewTaskKey: parent.key,
+        expectedReviewTaskVersion: started.version,
+        verdict: "CHANGES_REQUESTED",
+        reviewedHashes: candidateHashes,
+        evidence: [{ kind: "test_result", value: "must-not-be-written" }],
+      });
+    } catch (error) {
+      bindingError = error;
+    }
+    expect(bindingError).toMatchObject({
+      code: "REVIEW_BINDING_MISMATCH",
+      details: {
+        request_key: request.request.key,
+        task_key: parent.key,
+        expected_task_key: review.key,
+      },
+    });
+    expect(repository.delta(0, 100).currentSequence).toBe(beforeBindingFailure);
+    expect(repository.getReviewRequest(request.request.key).submission).toBeNull();
+
     at("2026-08-27T02:00:00.000Z");
     expect(() =>
       repository.submitReview(reviewer, "review-evidence-failed", {

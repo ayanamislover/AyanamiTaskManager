@@ -304,10 +304,6 @@ export function mutationAck(
 
 type McpErrorContext = {
   project?: string;
-  taskKey?: string;
-  checklistId?: string;
-  expectedVersion?: number;
-  expectedVersions?: Record<string, number>;
 };
 
 export async function withMcpErrorDetails<T>(
@@ -324,14 +320,6 @@ export async function withMcpErrorDetails<T>(
     try {
       enriched = await service.enrichError(base, {
         ...(context.project === undefined ? {} : { projectCode: context.project }),
-        ...(context.taskKey === undefined ? {} : { taskKey: context.taskKey }),
-        ...(context.checklistId === undefined ? {} : { checklistId: context.checklistId }),
-        ...(context.expectedVersion === undefined
-          ? {}
-          : { expectedVersion: context.expectedVersion }),
-        ...(context.expectedVersions === undefined
-          ? {}
-          : { expectedVersions: context.expectedVersions }),
       });
     } catch {
       throw base;
