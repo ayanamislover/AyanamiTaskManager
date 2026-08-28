@@ -272,6 +272,45 @@ function mutationEntityPreview(entities: MutationEntityReference[]): MutationEnt
   return preview;
 }
 
+function projectionAcknowledgement(value: unknown, operationId: string): Record<string, unknown> {
+  const projection = objectValue(value);
+  const status = projection.status;
+  const sourceSeq = projection.sourceSeq;
+  const projectedSeq = projection.projectedSeq;
+  const retryScheduled = projection.retryScheduled;
+  const retryCount = projection.retryCount;
+  const lastError = projection.lastError;
+  if (
+    (status !== "APPLIED" && status !== "DEFERRED") ||
+    typeof sourceSeq !== "number" ||
+    !Number.isSafeInteger(sourceSeq) ||
+    sourceSeq < 0 ||
+    typeof projectedSeq !== "number" ||
+    !Number.isSafeInteger(projectedSeq) ||
+    projectedSeq < 0 ||
+    projectedSeq > sourceSeq ||
+    typeof retryScheduled !== "boolean" ||
+    typeof retryCount !== "number" ||
+    !Number.isSafeInteger(retryCount) ||
+    retryCount < 0 ||
+    (status === "APPLIED" && projectedSeq !== sourceSeq) ||
+    (lastError !== null && typeof lastError !== "string")
+  ) {
+    throw new AtmError("INTERNAL_ERROR", {
+      message: "mutation acknowledgement 缺少有效的持久 projection receipt",
+      details: { operation_id: operationId },
+    });
+  }
+  return {
+    status,
+    source_seq: sourceSeq,
+    projected_seq: projectedSeq,
+    retry_scheduled: retryScheduled,
+    last_error: lastError,
+    retry_count: retryCount,
+  };
+}
+
 function mutationAck(
   project: string,
   requestedSession: string,
@@ -279,6 +318,7 @@ function mutationAck(
   operation: string,
   serviceResult: Record<string, unknown>,
 ) {
+  const projection = projectionAcknowledgement(serviceResult.projection, opId);
   const reboundSession =
     typeof serviceResult.newSession === "string"
       ? serviceResult.newSession
@@ -301,6 +341,7 @@ function mutationAck(
     project: normalizedProject,
     session,
     session_rebound: serviceResult.sessionRebound === true,
+    projection,
     entities: preview,
     entity_count: entities.length,
     entities_truncated: preview.length < entities.length,
@@ -1253,6 +1294,10 @@ function fitBegin(
     payload.atomicBegin && typeof payload.atomicBegin === "object"
       ? (payload.atomicBegin as Record<string, unknown>).operationId
       : undefined;
+  const projection =
+    payload.projection === undefined
+      ? undefined
+      : projectionAcknowledgement(payload.projection, String(atomicOperationId ?? "atm_begin"));
   const identity: Record<string, unknown> = {
     scope: payload.scope,
     session: payload.session,
@@ -1260,6 +1305,7 @@ function fitBegin(
     surface_version: MCP_SURFACE_VERSION,
     ...(typeof atomicOperationId === "string" ? { op_id: atomicOperationId } : {}),
     ...(payload.atomicBegin === undefined ? {} : { atomicBegin: payload.atomicBegin }),
+    ...(projection === undefined ? {} : { projection }),
   };
   if (mode === "none") return { ...identity, brief_mode: mode, brief_truncated: false };
 

@@ -6,13 +6,13 @@ Surface: `v3`
 
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
-| core | 7576 | `2e3f175dc5198e2d5609b67970c5ac08710c7eac16d66e70e3f6c3c7302da30d` |
+| core | 7576 | `a958934e4fd1445dfaec3552ad74e6e3f12c788397a4c533a38bc4c844c08bf4` |
 | memory | 4409 | `9b51e2fc76507f6ee610de4c1e5b4acb9bcaef38ca4144adf0d5cdb4cc21bd86` |
 | actions | 4623 | `9ebf3736d921cf884ff03e1d7a1f8c90c7098f17afaf17804821249d2c31c2f7` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
 | --- | --- | --- | --- | --- | --- |
-| core | `atm_begin` | 直接使用返回的 brief | false | false | `82058715266c` |
+| core | `atm_begin` | 直接使用返回的 brief | false | false | `fa11c96bc28c` |
 | core | `atm_brief` | 仅在上下文压缩、长时间离开或明确恢复 working set | true | false | `9d1011547e2b` |
 | core | `atm_task_list` | 分页列任务。 | true | false | `6092bbe6ff9a` |
 | core | `atm_task_get` | 读单个任务。 | true | false | `39d377871891` |

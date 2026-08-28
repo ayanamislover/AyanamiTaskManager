@@ -16,6 +16,14 @@ import {
 } from "./published-operation-schema.js";
 
 const roots: string[] = [];
+const APPLIED_PROJECTION = Object.freeze({
+  status: "APPLIED" as const,
+  sourceSeq: 1,
+  projectedSeq: 1,
+  retryScheduled: false,
+  lastError: null,
+  retryCount: 0,
+});
 
 function expectFixedMutationAck(
   response: { structuredContent?: unknown },
@@ -29,6 +37,14 @@ function expectFixedMutationAck(
     session: expected.session,
     session_rebound: expected.rebound ?? false,
     op_id: expected.opId,
+    projection: {
+      status: "APPLIED",
+      source_seq: expect.any(Number),
+      projected_seq: expect.any(Number),
+      retry_scheduled: false,
+      last_error: null,
+      retry_count: expect.any(Number),
+    },
     details_cursor: {
       name: "atm_search",
       arguments: {
@@ -90,6 +106,12 @@ describe("MCP mutation contracts", () => {
       expect(response.structuredContent).toMatchObject({
         op_id: "begin-ack-exact",
         atomicBegin: { operationId: "begin-ack-exact" },
+        projection: {
+          status: "APPLIED",
+          source_seq: expect.any(Number),
+          projected_seq: expect.any(Number),
+          retry_scheduled: false,
+        },
       });
       const session = String((response.structuredContent as Record<string, unknown>).session);
 
@@ -344,6 +366,7 @@ describe("MCP mutation contracts", () => {
         opId: "rebound-op",
         sessionRebound: true,
         session: "successor-session",
+        projection: APPLIED_PROJECTION,
       }),
     } as unknown as AyanamiTaskService;
     const server = createAyanamiMcpServer(service, { profile: "memory" });
@@ -368,6 +391,46 @@ describe("MCP mutation contracts", () => {
         session_rebound: true,
         session: "successor-session",
         entities: [{ entity_type: "RECORD", key: "RB-R-001", version: 0 }],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  it("fails closed when a service returns an impossible projection receipt", async () => {
+    const service = {
+      createRecord: async () => ({
+        key: "BAD-R-001",
+        v: 0,
+        seq: 2,
+        opId: "invalid-projection-op",
+        projection: {
+          ...APPLIED_PROJECTION,
+          sourceSeq: 2,
+          projectedSeq: 1,
+        },
+      }),
+    } as unknown as AyanamiTaskService;
+    const server = createAyanamiMcpServer(service, { profile: "memory" });
+    const client = new Client({ name: "invalid-projection-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const response = await client.callTool({
+        name: "atm_record",
+        arguments: {
+          project: "BAD",
+          session: "session",
+          op_id: "invalid-projection-op",
+          kind: "FACT",
+          title: "Invalid projection",
+          summary: "An APPLIED receipt cannot lag its source sequence.",
+        },
+      });
+      expect(response.isError).toBe(true);
+      expect(response.structuredContent).toMatchObject({
+        code: "INTERNAL_ERROR",
+        details: { operation_id: "invalid-projection-op" },
       });
     } finally {
       await Promise.all([client.close(), server.close()]);
@@ -516,6 +579,7 @@ describe("MCP mutation contracts", () => {
           checklist: { status: "DONE", version: 1, evidence: input.evidence ?? [] },
           taskVersion: 2,
           opId: "evidence-check",
+          projection: APPLIED_PROJECTION,
         };
       },
       addProgress: async (
@@ -525,7 +589,13 @@ describe("MCP mutation contracts", () => {
         input: { evidence?: unknown[] },
       ) => {
         captured.progress = input.evidence;
-        return { key: "EV-T-0001", v: 2, seq: 2, opId: "evidence-progress" };
+        return {
+          key: "EV-T-0001",
+          v: 2,
+          seq: 2,
+          opId: "evidence-progress",
+          projection: APPLIED_PROJECTION,
+        };
       },
     } as unknown as AyanamiTaskService;
     const profiles = await connectProfiledClients(service, "evidence-test");
@@ -652,6 +722,7 @@ describe("MCP mutation contracts", () => {
           opId,
           sessionRebound: true,
           session: "successor-session",
+          projection: APPLIED_PROJECTION,
         };
       },
     } as unknown as AyanamiTaskService;
@@ -846,6 +917,7 @@ describe("MCP mutation contracts", () => {
           opId,
           sessionRebound: true,
           session: "workflow-successor",
+          projection: APPLIED_PROJECTION,
         };
       },
     } as unknown as AyanamiTaskService;
@@ -916,6 +988,7 @@ describe("MCP mutation contracts", () => {
             { key: "SAFE-T-0002", status: "CANCELLED", version: 8 },
           ],
           opId,
+          projection: APPLIED_PROJECTION,
         };
       },
     } as unknown as AyanamiTaskService;

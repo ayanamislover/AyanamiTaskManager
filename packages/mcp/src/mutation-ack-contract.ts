@@ -5,6 +5,7 @@ export const MUTATION_ACK_CONTRACT = Object.freeze({
     "project",
     "session",
     "session_rebound",
+    "projection",
     "entities",
     "entity_count",
     "entities_truncated",
@@ -29,6 +30,8 @@ const FIELD_DESCRIPTIONS: Readonly<Record<(typeof MUTATION_ACK_CONTRACT.fields)[
     project: "规范化后的项目代码。",
     session: "实际承载写操作的 Session。",
     session_rebound: "Session 过期并由 ATM 安全接续时为 `true`。",
+    projection:
+      "Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。",
     entities: "受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。",
     entity_count: "完整受影响实体数量，不受预览截断影响。",
     entities_truncated: "实体预览是否被条数或字符预算截断。",

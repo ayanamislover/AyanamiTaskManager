@@ -29,6 +29,7 @@ import {
   type CreateSessionInput,
   type MutationActorResolution,
   type ProjectActor,
+  type ProjectionReceipt,
   type RecordPageFilters,
   type RegisteredProject,
   type SessionPageFilters,
@@ -94,10 +95,12 @@ function mutationAck<T extends Record<string, unknown>>(
   result: T,
   opId: string,
   resolution: MutationActorResolution,
+  projection: ProjectionReceipt,
 ) {
   return {
     ...result,
     opId,
+    projection,
     ...(resolution.disposition === "REBOUND"
       ? {
           sessionRebound: true,
@@ -106,6 +109,13 @@ function mutationAck<T extends Record<string, unknown>>(
         }
       : {}),
   };
+}
+
+function projectMutationReceipt<T extends Record<string, unknown>>(
+  result: T,
+  projection: ProjectionReceipt,
+): T & { projection: ProjectionReceipt } {
+  return { ...result, projection };
 }
 
 export class AyanamiTaskService {
@@ -396,7 +406,7 @@ export class AyanamiTaskService {
         sourceRef: sourceName,
       });
     }
-    await this.#flush(project.code);
+    const projection = await this.#flush(project.code);
     const result = {
       sourceName,
       sha256: plan.sha256,
@@ -408,7 +418,7 @@ export class AyanamiTaskService {
       alreadyImported: false,
     };
     this.databases.recordImport(project.id, plan.sha256, result);
-    return result;
+    return projectMutationReceipt(result, projection);
   }
 
   async #repository(projectCode: string): Promise<ProjectRepository> {
@@ -474,14 +484,11 @@ export class AyanamiTaskService {
     }
   }
 
-  async #flush(projectCode: string): Promise<void> {
-    try {
-      await this.databases.dispatchProject(projectCode);
-    } catch {
-      // Registry is a rebuildable projection. The committed project mutation remains successful.
-    }
+  async #flush(projectCode: string): Promise<ProjectionReceipt> {
+    const result = await this.databases.dispatchProject(projectCode);
     this.#events.emit(`project:${projectCode.toUpperCase()}`);
     this.#events.emit("global");
+    return result.projection;
   }
 
   subscribeProject(projectCode: string, listener: () => void): () => void {
@@ -610,12 +617,13 @@ export class AyanamiTaskService {
     } else {
       session = repository.createSession(sessionInput);
     }
-    await this.#flush(project.code);
+    const projection = await this.#flush(project.code);
     return {
       scope: "project",
       project: project.code,
       session: session.id,
       score: classification.score,
+      projection,
       ...(atomicBegin === null ? {} : { atomicBegin }),
     };
   }
@@ -690,8 +698,8 @@ export class AyanamiTaskService {
       created.items[0]!.key,
       input.actor,
     );
-    await this.#flush(project.code);
-    return result;
+    const projection = await this.#flush(project.code);
+    return projectMutationReceipt(result, projection);
   }
 
   async brief(projectCode: string, sessionId?: string | null, maxChars = 1200): Promise<any> {
@@ -725,7 +733,12 @@ export class AyanamiTaskService {
   async ensurePlanningRoot(
     projectCode: string,
     sessionId?: string,
-  ): Promise<{ objectiveId: string; milestoneId: string; objectiveProvisioned: boolean }> {
+  ): Promise<{
+    objectiveId: string;
+    milestoneId: string;
+    objectiveProvisioned: boolean;
+    projection?: ProjectionReceipt;
+  }> {
     const repository = await this.#repository(projectCode);
     const activeObjective = repository.getActiveObjective();
     const activeMilestone = repository.getActiveMilestone(activeObjective?.id);
@@ -751,11 +764,12 @@ export class AyanamiTaskService {
     const milestone =
       repository.getActiveMilestone(objective.id) ??
       repository.createMilestone(actor, { objectiveId: objective.id, title: "执行" });
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     return {
       objectiveId: objective.id,
       milestoneId: milestone.id,
       objectiveProvisioned: !activeObjective,
+      projection,
     };
   }
 
@@ -1038,8 +1052,8 @@ export class AyanamiTaskService {
   async draftProjectUpdateAsUser(projectCode: string, opId: string) {
     const repository = await this.#repository(projectCode);
     const result = repository.draftProjectUpdate(this.#userActor(), opId);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async publishProjectUpdateAsUser(
@@ -1049,8 +1063,8 @@ export class AyanamiTaskService {
   ) {
     const repository = await this.#repository(projectCode);
     const result = repository.publishProjectUpdate(this.#userActor(), opId, input);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async createObjective(
@@ -1060,8 +1074,8 @@ export class AyanamiTaskService {
   ): Promise<any> {
     const repository = await this.#repository(projectCode);
     const result = repository.createObjective(await this.#actor(projectCode, sessionId), input);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async createObjectiveAsUser(
@@ -1071,8 +1085,8 @@ export class AyanamiTaskService {
   ): Promise<any> {
     const repository = await this.#repository(projectCode);
     const result = repository.createObjective(this.#userActor(), input, opId);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async createMilestone(
@@ -1082,8 +1096,8 @@ export class AyanamiTaskService {
   ): Promise<any> {
     const repository = await this.#repository(projectCode);
     const result = repository.createMilestone(await this.#actor(projectCode, sessionId), input);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async createMilestoneAsUser(
@@ -1093,8 +1107,8 @@ export class AyanamiTaskService {
   ): Promise<any> {
     const repository = await this.#repository(projectCode);
     const result = repository.createMilestone(this.#userActor(), input, opId);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async createWorkItems(
@@ -1121,19 +1135,19 @@ export class AyanamiTaskService {
       items,
       (actor) => repository.createWorkItems(actor, opId, items, planningRoot),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async createWorkItemsAsUser(
     projectCode: string,
     opId: string,
     items: Parameters<ProjectRepository["createWorkItems"]>[2],
-  ): Promise<ReturnType<ProjectRepository["createWorkItems"]>> {
+  ): Promise<ReturnType<ProjectRepository["createWorkItems"]> & { projection: ProjectionReceipt }> {
     const repository = await this.#repository(projectCode);
     const result = repository.createWorkItems(this.#userActor(), opId, items);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async patchWorkItems(
@@ -1158,7 +1172,7 @@ export class AyanamiTaskService {
         String(execution.resolution.actor.sessionId),
       );
     }
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     const starts = patches
       .filter((patch) =>
         workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
@@ -1169,17 +1183,17 @@ export class AyanamiTaskService {
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return mutationAck(execution.result, opId, execution.resolution);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async patchWorkItemsAsUser(
     projectCode: string,
     opId: string,
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
-  ): Promise<ReturnType<ProjectRepository["patchWorkItems"]>> {
+  ): Promise<ReturnType<ProjectRepository["patchWorkItems"]> & { projection: ProjectionReceipt }> {
     const repository = await this.#repository(projectCode);
     const result = repository.patchWorkItems(this.#userActor(), opId, patches);
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     const starts = patches
       .filter((patch) =>
         workItemOperationHasEffect(patch.operation, "ESTABLISH_ENGINEERING_BASELINE"),
@@ -1190,7 +1204,7 @@ export class AyanamiTaskService {
       .map((patch) => patch.taskKey);
     await this.#captureWorkItemEngineeringMetrics(projectCode, starts, true);
     await this.#captureWorkItemEngineeringMetrics(projectCode, finishes, false);
-    return result;
+    return projectMutationReceipt(result, projection);
   }
 
   async verifyAndComplete(
@@ -1208,21 +1222,23 @@ export class AyanamiTaskService {
       (actor) => repository.verifyAndComplete(actor, opId, input),
     );
     await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
-    return mutationAck(execution.result, opId, execution.resolution);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async verifyAndCompleteAsUser(
     projectCode: string,
     opId: string,
     input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
-  ): Promise<ReturnType<ProjectRepository["verifyAndComplete"]>> {
+  ): Promise<
+    ReturnType<ProjectRepository["verifyAndComplete"]> & { projection: ProjectionReceipt }
+  > {
     const repository = await this.#repository(projectCode);
     const result = repository.verifyAndComplete(this.#userActor(), opId, input);
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(projectCode, [input.taskKey], false);
-    return result;
+    return projectMutationReceipt(result, projection);
   }
 
   async listWorkItems(
@@ -1489,8 +1505,8 @@ export class AyanamiTaskService {
       normalizedInput,
       (actor) => repository.createReviewRequest(actor, opId, normalizedInput),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async getReviewRequest(projectCode: string, requestKey: string) {
@@ -1515,8 +1531,8 @@ export class AyanamiTaskService {
       normalizedInput,
       (actor) => repository.submitReview(actor, opId, normalizedInput),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async updateChecklist(
@@ -1533,19 +1549,19 @@ export class AyanamiTaskService {
       input,
       (actor) => repository.updateChecklist(actor, opId, input),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async updateChecklistAsUser(
     projectCode: string,
     opId: string,
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
-  ): Promise<ReturnType<ProjectRepository["updateChecklist"]>> {
+  ): Promise<ReturnType<ProjectRepository["updateChecklist"]> & { projection: ProjectionReceipt }> {
     const repository = await this.#repository(projectCode);
     const result = repository.updateChecklist(this.#userActor(), opId, input);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async updateChecklistBatch(
@@ -1562,19 +1578,21 @@ export class AyanamiTaskService {
       input,
       (actor) => repository.updateChecklistBatch(actor, opId, input),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async updateChecklistBatchAsUser(
     projectCode: string,
     opId: string,
     input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
-  ): Promise<ReturnType<ProjectRepository["updateChecklistBatch"]>> {
+  ): Promise<
+    ReturnType<ProjectRepository["updateChecklistBatch"]> & { projection: ProjectionReceipt }
+  > {
     const repository = await this.#repository(projectCode);
     const result = repository.updateChecklistBatch(this.#userActor(), opId, input);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async addProgress(
@@ -1592,8 +1610,8 @@ export class AyanamiTaskService {
       (actor) => repository.addProgress(actor, opId, input),
     );
     await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async addProjectProgress(
@@ -1633,8 +1651,8 @@ export class AyanamiTaskService {
       (actor) => repository.publishProjectUpdate(actor, opId, update),
     );
     await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async createRecord(
@@ -1651,15 +1669,15 @@ export class AyanamiTaskService {
       input,
       (actor) => repository.createRecord(actor, opId, input),
     );
-    await this.#flush(projectCode);
-    return mutationAck(execution.result, opId, execution.resolution);
+    const projection = await this.#flush(projectCode);
+    return mutationAck(execution.result, opId, execution.resolution, projection);
   }
 
   async createRecordAsUser(
     projectCode: string,
     opId: string,
     input: Parameters<ProjectRepository["createRecord"]>[2],
-  ): Promise<ReturnType<ProjectRepository["createRecord"]>> {
+  ): Promise<ReturnType<ProjectRepository["createRecord"]> & { projection: ProjectionReceipt }> {
     const repository = await this.#repository(projectCode);
     const result = repository.createRecord(this.#userActor(), opId, {
       ...input,
@@ -1667,8 +1685,8 @@ export class AyanamiTaskService {
       sourceActorId: "USER",
       sourceSessionId: null,
     });
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async search(projectCode: string, query: string, limit = 20, cursor?: string) {
@@ -1716,26 +1734,30 @@ export class AyanamiTaskService {
       await this.#refreshSessionGitContext(projectCode, effectiveSessionId);
     }
     const result = repository.endSession(resolution.actor, opId, input);
-    await this.#flush(projectCode);
+    const projection = await this.#flush(projectCode);
     await this.#captureWorkItemEngineeringMetrics(
       projectCode,
       result.releasedItems.map((task) => task.key),
       false,
     );
-    return mutationAck(result, opId, resolution);
+    return mutationAck(result, opId, resolution, projection);
   }
 
   async forceCloseSessionAsUser(projectCode: string, sessionId: string, releaseClaims = true) {
     const repository = await this.#repository(projectCode);
     const result = repository.forceCloseSession(sessionId, releaseClaims);
-    await this.#flush(projectCode);
-    return result;
+    const projection = await this.#flush(projectCode);
+    return projectMutationReceipt(result, projection);
   }
 
   async refreshSessionGitContextAsUser(projectCode: string, sessionId: string) {
     const result = await this.#refreshSessionGitContext(projectCode, sessionId);
-    await this.#flush(projectCode);
-    return { ...result, session: (await this.#repository(projectCode)).getSessionView(sessionId) };
+    const projection = await this.#flush(projectCode);
+    return {
+      ...result,
+      projection,
+      session: (await this.#repository(projectCode)).getSessionView(sessionId),
+    };
   }
 
   async doctor(): Promise<Awaited<ReturnType<AyanamiDatabaseManager["doctor"]>>> {
