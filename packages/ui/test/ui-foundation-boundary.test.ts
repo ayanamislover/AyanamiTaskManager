@@ -210,4 +210,17 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(duplicate);
     }
   });
+
+  it("app 使用提取后的 Projects/Wizard 与 Quick features", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/projects.js"');
+    expect(app).toContain('from "./features/quick.js"');
+    for (const duplicate of [
+      "function ProjectWizard(",
+      "function ProjectsPage(",
+      "function QuickPage(",
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+  });
 });
