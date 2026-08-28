@@ -3,12 +3,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "../../../packages/application/src/index.js";
 import { migrateDataRoot } from "../../../scripts/migrate-data-root.js";
@@ -67,10 +68,16 @@ describe("正式数据根迁移", () => {
         existsSync(join(result.destinationBackup, "runtime", "daemon.json")),
     ).toBe(false);
     const migrated = await AyanamiTaskService.open({ dataDir: destination, migrationsRoot });
-    const project = migrated.databases.getProject("HIS");
-    expect(project.databasePath.startsWith(destination)).toBe(true);
-    expect(migrated.databases.listProjects()).toHaveLength(1);
-    migrated.close();
+    try {
+      const project = migrated.databases.getProject("HIS");
+      const canonicalRoot = realpathSync.native(destination);
+      const canonicalDatabase = realpathSync.native(project.databasePath);
+      const offset = relative(canonicalRoot, canonicalDatabase);
+      expect(offset === "" || (!offset.startsWith("..") && !isAbsolute(offset))).toBe(true);
+      expect(migrated.databases.listProjects()).toHaveLength(1);
+    } finally {
+      migrated.close();
+    }
     expect(existsSync(join(destination, "migration-manifest.json"))).toBe(true);
     await expect(
       migrateDataRoot({
