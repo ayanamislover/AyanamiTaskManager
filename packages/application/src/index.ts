@@ -1100,6 +1100,30 @@ export class AyanamiTaskService {
     return typed.withDetails(base as AtmBaseErrorDetails);
   }
 
+  async #withMutationErrorDetails<T>(
+    projectCode: string,
+    context: {
+      taskKey?: string;
+      checklistId?: string;
+      expectedVersion?: number;
+      expectedVersions?: Record<string, number>;
+    },
+    action: () => T | Promise<T>,
+  ): Promise<T> {
+    try {
+      return await action();
+    } catch (error) {
+      const base = asAtmError(error);
+      let enriched = base;
+      try {
+        enriched = await this.enrichError(base, { projectCode, ...context });
+      } catch {
+        // Error reporting must never hide the authoritative mutation failure.
+      }
+      throw enriched;
+    }
+  }
+
   async listRecords(projectCode: string, limit = 100) {
     return (await this.#repository(projectCode)).listRecords(limit);
   }
@@ -1232,12 +1256,22 @@ export class AyanamiTaskService {
     patches: Parameters<ProjectRepository["patchWorkItems"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "work.patch.batch",
-      patches,
-      (actor) => repository.patchWorkItems(actor, opId, patches),
+    const firstPatch = patches[0];
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      firstPatch === undefined
+        ? {}
+        : {
+            taskKey: firstPatch.taskKey,
+            expectedVersion: firstPatch.expectedVersion,
+            expectedVersions: Object.fromEntries(
+              patches.map((patch) => [patch.taskKey, patch.expectedVersion]),
+            ),
+          },
+      () =>
+        repository.executeSessionMutation(sessionId, opId, "work.patch.batch", patches, (actor) =>
+          repository.patchWorkItems(actor, opId, patches),
+        ),
     );
     if (
       patches.some((patch) => workItemOperationHasEffect(patch.operation, "REFRESH_GIT_CONTEXT"))
@@ -1289,12 +1323,17 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["verifyAndComplete"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "work.verify-and-complete",
-      input,
-      (actor) => repository.verifyAndComplete(actor, opId, input),
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      { taskKey: input.taskKey, expectedVersion: input.expectedVersion },
+      () =>
+        repository.executeSessionMutation(
+          sessionId,
+          opId,
+          "work.verify-and-complete",
+          input,
+          (actor) => repository.verifyAndComplete(actor, opId, input),
+        ),
     );
     await this.#refreshSessionGitContext(projectCode, String(execution.resolution.actor.sessionId));
     const projection = await this.#flush(projectCode);
@@ -1529,6 +1568,28 @@ export class AyanamiTaskService {
     };
   }
 
+  async reconcileProjectPage(
+    projectCode: string,
+    input: { includeActive?: boolean; limit?: number; cursor?: string } = {},
+  ) {
+    const limit = Math.min(100, Math.max(1, input.limit ?? 10));
+    const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
+    const reconciliation = await this.reconcileProject(projectCode, {
+      includeActive: input.includeActive ?? false,
+    });
+    const items = reconciliation.items.slice(offset, offset + limit);
+    const hasMore = offset + items.length < reconciliation.items.length;
+    return {
+      ...reconciliation,
+      offset,
+      returnedCount: items.length,
+      items,
+      retryCursor: String(offset),
+      nextCursor: hasMore ? String(offset + items.length) : null,
+      hasMore,
+    };
+  }
+
   async getWorkItem(
     projectCode: string,
     taskKey: string,
@@ -1573,12 +1634,24 @@ export class AyanamiTaskService {
       ...input,
       expectedCandidateHashes: normalizeReviewCandidateHashes(input.expectedCandidateHashes),
     };
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "review.request.create",
-      normalizedInput,
-      (actor) => repository.createReviewRequest(actor, opId, normalizedInput),
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      {
+        taskKey: normalizedInput.reviewTaskKey,
+        checklistId: normalizedInput.parentChecklistId,
+        expectedVersion: normalizedInput.expectedParentChecklistVersion,
+        expectedVersions: {
+          [normalizedInput.reviewTaskKey]: normalizedInput.expectedReviewTaskVersion,
+        },
+      },
+      () =>
+        repository.executeSessionMutation(
+          sessionId,
+          opId,
+          "review.request.create",
+          normalizedInput,
+          (actor) => repository.createReviewRequest(actor, opId, normalizedInput),
+        ),
     );
     const projection = await this.#flush(projectCode);
     return mutationAck(execution.result, opId, execution.resolution, projection);
@@ -1599,12 +1672,22 @@ export class AyanamiTaskService {
       ...input,
       reviewedHashes: normalizeReviewCandidateHashes(input.reviewedHashes),
     };
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "review.submit",
-      normalizedInput,
-      (actor) => repository.submitReview(actor, opId, normalizedInput),
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      {
+        ...(normalizedInput.reviewTaskKey === undefined
+          ? {}
+          : { taskKey: normalizedInput.reviewTaskKey }),
+        expectedVersion: normalizedInput.expectedReviewTaskVersion,
+      },
+      () =>
+        repository.executeSessionMutation(
+          sessionId,
+          opId,
+          "review.submit",
+          normalizedInput,
+          (actor) => repository.submitReview(actor, opId, normalizedInput),
+        ),
     );
     const projection = await this.#flush(projectCode);
     return mutationAck(execution.result, opId, execution.resolution, projection);
@@ -1617,12 +1700,13 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "checklist.update",
-      input,
-      (actor) => repository.updateChecklist(actor, opId, input),
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      { checklistId: input.checklistId, expectedVersion: input.expectedVersion },
+      () =>
+        repository.executeSessionMutation(sessionId, opId, "checklist.update", input, (actor) =>
+          repository.updateChecklist(actor, opId, input),
+        ),
     );
     const projection = await this.#flush(projectCode);
     return mutationAck(execution.result, opId, execution.resolution, projection);
@@ -1646,12 +1730,17 @@ export class AyanamiTaskService {
     input: Parameters<ProjectRepository["updateChecklistBatch"]>[2],
   ) {
     const repository = await this.#repository(projectCode);
-    const execution = repository.executeSessionMutation(
-      sessionId,
-      opId,
-      "checklist.update.batch",
-      input,
-      (actor) => repository.updateChecklistBatch(actor, opId, input),
+    const execution = await this.#withMutationErrorDetails(
+      projectCode,
+      { taskKey: input.taskKey, expectedVersion: input.expectedVersion },
+      () =>
+        repository.executeSessionMutation(
+          sessionId,
+          opId,
+          "checklist.update.batch",
+          input,
+          (actor) => repository.updateChecklistBatch(actor, opId, input),
+        ),
     );
     const projection = await this.#flush(projectCode);
     return mutationAck(execution.result, opId, execution.resolution, projection);

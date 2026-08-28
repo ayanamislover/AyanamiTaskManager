@@ -1,7 +1,6 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
-import { AtmError } from "@ayanami-task/errors";
 import type { TaskPatchOperation } from "@ayanami-task/protocol";
-import { mutationAck, withMcpErrorDetails, wrap } from "../result.js";
+import { mutationAck, wrap } from "../result.js";
 import type { DefineProfileTool } from "./registrar.js";
 import { canonicalTaskPatchItem, outputSchema, taskPatchToolInput } from "./schemas.js";
 
@@ -25,23 +24,17 @@ export function registerActionTools(
           ReturnType<typeof canonicalTaskPatchItem>,
           { operation: "review_request" }
         >;
-        const created = await withMcpErrorDetails(
-          service,
+        const created = await service.createReviewRequest(
+          input.project,
+          input.session,
+          input.op_id,
           {
-            project: input.project,
-            taskKey: item.taskKey,
-            checklistId: item.parentChecklistId,
-            expectedVersion: item.expectedParentChecklistVersion,
-            expectedVersions: { [item.taskKey]: item.expectedVersion },
+            reviewTaskKey: item.taskKey,
+            expectedReviewTaskVersion: item.expectedVersion,
+            parentChecklistId: item.parentChecklistId,
+            expectedParentChecklistVersion: item.expectedParentChecklistVersion,
+            expectedCandidateHashes: item.candidateHashes,
           },
-          () =>
-            service.createReviewRequest(input.project, input.session, input.op_id, {
-              reviewTaskKey: item.taskKey,
-              expectedReviewTaskVersion: item.expectedVersion,
-              parentChecklistId: item.parentChecklistId,
-              expectedParentChecklistVersion: item.expectedParentChecklistVersion,
-              expectedCandidateHashes: item.candidateHashes,
-            }),
         );
         return wrap(
           mutationAck(
@@ -58,31 +51,14 @@ export function registerActionTools(
           ReturnType<typeof canonicalTaskPatchItem>,
           { operation: "review_submit" }
         >;
-        const request = await service.getReviewRequest(input.project, item.requestKey);
-        if (request.reviewTaskKey !== item.taskKey) {
-          throw new AtmError("REVIEW_BINDING_MISMATCH", {
-            message: `Review 绑定不匹配：${item.taskKey}`,
-            details: { task_key: item.taskKey },
-          });
-        }
-        const submitted = await withMcpErrorDetails(
-          service,
-          {
-            project: input.project,
-            taskKey: item.taskKey,
-            checklistId: request.parentChecklistId,
-            expectedVersion: request.parentChecklistVersion,
-            expectedVersions: { [item.taskKey]: item.expectedVersion },
-          },
-          () =>
-            service.submitReview(input.project, input.session, input.op_id, {
-              requestKey: item.requestKey,
-              expectedReviewTaskVersion: item.expectedVersion,
-              verdict: item.verdict,
-              reviewedHashes: item.candidateHashes,
-              evidence: item.evidence,
-            }),
-        );
+        const submitted = await service.submitReview(input.project, input.session, input.op_id, {
+          requestKey: item.requestKey,
+          reviewTaskKey: item.taskKey,
+          expectedReviewTaskVersion: item.expectedVersion,
+          verdict: item.verdict,
+          reviewedHashes: item.candidateHashes,
+          evidence: item.evidence,
+        });
         return wrap(
           mutationAck(
             input.project,
@@ -98,18 +74,14 @@ export function registerActionTools(
           ReturnType<typeof canonicalTaskPatchItem>,
           { operation: "verify_and_complete" }
         >;
-        const completed = await withMcpErrorDetails(
-          service,
+        const completed = await service.verifyAndComplete(
+          input.project,
+          input.session,
+          input.op_id,
           {
-            project: input.project,
             taskKey: item.taskKey,
             expectedVersion: item.expectedVersion,
           },
-          () =>
-            service.verifyAndComplete(input.project, input.session, input.op_id, {
-              taskKey: item.taskKey,
-              expectedVersion: item.expectedVersion,
-            }),
         );
         return wrap(
           mutationAck(
@@ -126,25 +98,19 @@ export function registerActionTools(
           ReturnType<typeof canonicalTaskPatchItem>,
           { operation: "checklist_batch" }
         >;
-        const updated = await withMcpErrorDetails(
-          service,
+        const updated = await service.updateChecklistBatch(
+          input.project,
+          input.session,
+          input.op_id,
           {
-            project: input.project,
             taskKey: item.taskKey,
             expectedVersion: item.expectedVersion,
+            items: item.checklistItems.map((checklistItem) => ({
+              checklistId: checklistItem.checklistId,
+              status: checklistItem.status,
+              ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
+            })),
           },
-          () =>
-            service.updateChecklistBatch(input.project, input.session, input.op_id, {
-              taskKey: item.taskKey,
-              expectedVersion: item.expectedVersion,
-              items: item.checklistItems.map((checklistItem) => ({
-                checklistId: checklistItem.checklistId,
-                status: checklistItem.status,
-                ...(checklistItem.evidence === undefined
-                  ? {}
-                  : { evidence: checklistItem.evidence }),
-              })),
-            }),
         );
         return wrap(
           mutationAck(
@@ -162,21 +128,12 @@ export function registerActionTools(
           { operation: "checklist_single" }
         >;
         const checklistItem = item.checklistItems[0]!;
-        const updated = await withMcpErrorDetails(
-          service,
-          {
-            project: input.project,
-            checklistId: checklistItem.checklistId,
-            expectedVersion: item.expectedVersion,
-          },
-          () =>
-            service.updateChecklist(input.project, input.session, input.op_id, {
-              checklistId: checklistItem.checklistId,
-              expectedVersion: item.expectedVersion,
-              status: checklistItem.status,
-              ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
-            }),
-        );
+        const updated = await service.updateChecklist(input.project, input.session, input.op_id, {
+          checklistId: checklistItem.checklistId,
+          expectedVersion: item.expectedVersion,
+          status: checklistItem.status,
+          ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),
+        });
         return wrap(
           mutationAck(input.project, input.session, input.op_id, "checklist.update", {
             ...(updated as unknown as Record<string, unknown>),
@@ -184,28 +141,11 @@ export function registerActionTools(
           }),
         );
       }
-      const conflictItem = input.items[0];
-      const patched = await withMcpErrorDetails(
-        service,
-        {
-          project: input.project,
-          ...(conflictItem === undefined
-            ? {}
-            : {
-                taskKey: conflictItem.task_key,
-                expectedVersion: conflictItem.expected_version,
-                expectedVersions: Object.fromEntries(
-                  input.items.map((item) => [item.task_key, item.expected_version]),
-                ),
-              }),
-        },
-        () =>
-          service.patchWorkItems(
-            input.project,
-            input.session,
-            input.op_id,
-            input.items.map((item) => canonicalTaskPatchItem(item) as any),
-          ),
+      const patched = await service.patchWorkItems(
+        input.project,
+        input.session,
+        input.op_id,
+        input.items.map((item) => canonicalTaskPatchItem(item) as any),
       );
       return wrap(
         mutationAck(

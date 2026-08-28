@@ -344,14 +344,29 @@ describe("MCP surface v3 parity", () => {
             status: "READY",
             checklist: [{ title: "Versioned checklist", evidenceRequired: false }],
           },
+          {
+            clientRef: "later-version-task",
+            objectiveId: objective.id,
+            title: "Later versioned task",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+          },
         ],
       );
       const task = created.items[0]!;
+      const laterTask = created.items[1]!;
       await fixture.service.patchWorkItems(
         fixture.project.code,
         fixture.session,
         "surface-version-bump",
         [{ taskKey: task.key, expectedVersion: task.version, operation: "claim" }],
+      );
+      await fixture.service.patchWorkItems(
+        fixture.project.code,
+        fixture.session,
+        "surface-version-later-bump",
+        [{ taskKey: laterTask.key, expectedVersion: laterTask.version, operation: "claim" }],
       );
 
       const response = await fixture.client.callTool({
@@ -383,6 +398,49 @@ describe("MCP surface v3 parity", () => {
       expect(details.recent_changes.length).toBeLessThanOrEqual(6);
       expect(details).not.toHaveProperty("truncated");
       expect(details.current.description).toHaveLength(50_000);
+
+      const laterItemConflict = await fixture.client.callTool({
+        name: "atm_task_patch",
+        arguments: {
+          project: fixture.project.code,
+          session: fixture.session,
+          op_id: "surface-version-later-conflict",
+          items: [
+            {
+              task_key: task.key,
+              expected_version: task.version + 1,
+              operation: "edit",
+              title: "Must roll back",
+            },
+            {
+              task_key: laterTask.key,
+              expected_version: laterTask.version,
+              operation: "start",
+            },
+          ],
+        },
+      });
+      expect(laterItemConflict.isError).toBe(true);
+      const laterDetails = errorDetails(laterItemConflict);
+      expect(laterDetails).toMatchObject({
+        entity: "WORK_ITEM",
+        key: laterTask.key,
+        expected: laterTask.version,
+        expected_version: laterTask.version,
+        actual: laterTask.version + 1,
+        current_version: laterTask.version + 1,
+        changes_complete: false,
+        current: {
+          key: laterTask.key,
+          version: laterTask.version + 1,
+          status: "CLAIMED",
+        },
+        recent_changes: expect.any(Array),
+      });
+      expect(laterDetails.recent_changes.length).toBeGreaterThan(0);
+      expect((await fixture.service.getWorkItem(fixture.project.code, task.key)).title).toBe(
+        "Versioned task",
+      );
 
       const taskDetail = await fixture.service.getWorkItem(fixture.project.code, task.key);
       const checklist = taskDetail.checklist[0]!;

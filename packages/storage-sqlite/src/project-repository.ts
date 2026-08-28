@@ -2374,6 +2374,7 @@ export class ProjectRepository {
     opId: string,
     input: {
       requestKey: string;
+      reviewTaskKey?: string;
       expectedReviewTaskVersion: number;
       verdict: "APPROVED" | "CHANGES_REQUESTED";
       reviewedHashes: ReviewCandidateHash[];
@@ -2436,6 +2437,19 @@ export class ProjectRepository {
         const reviewTaskKey = this.taskKeyForId(reviewTask.id);
         if (!reviewTaskKey)
           throw new AtmError("INTERNAL_ERROR", { message: "Review WorkItem key 缺失" });
+        if (
+          normalizedInput.reviewTaskKey !== undefined &&
+          normalizedInput.reviewTaskKey !== reviewTaskKey
+        ) {
+          throw new AtmError("REVIEW_BINDING_MISMATCH", {
+            message: `Review 请求与 WorkItem 不匹配：${normalizedInput.reviewTaskKey}`,
+            details: {
+              request_key: normalizedInput.requestKey,
+              task_key: normalizedInput.reviewTaskKey,
+              expected_task_key: reviewTaskKey,
+            },
+          });
+        }
         if (reviewTask.version !== normalizedInput.expectedReviewTaskVersion) {
           throw new AtmError("VERSION_CONFLICT", {
             message: "Review WorkItem 版本已变化",
