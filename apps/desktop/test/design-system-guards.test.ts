@@ -239,18 +239,31 @@ describe("设计系统静态守卫", () => {
     ]);
   });
 
-  it("常驻箭头使用对称 easing 且动效时长全部来自 token", () => {
+  it("低频常驻箭头使用 token 动效，高频导航与排序保持即时", () => {
     const css = uiComponentCssText();
-    const morphRules = [
-      /\.atm-nav-disclosure svg\s*\{[^}]*transition:\s*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
+    const animatedRules = [
       /\.atm-engineering-toggle > svg\s*\{[^}]*transition:\s*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
       /\.atm-select-trigger > svg\s*\{[^}]*transition:\s*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
-      /\.atm-table-sort > svg\s*\{[^}]*transform var\(--atm-duration-hover\) var\(--atm-ease-in-out\)/su,
+    ];
+    const immediateRules = [
+      /\.atm-nav-disclosure svg\s*\{[^}]*transition:\s*none;/su,
+      /\.atm-table-sort > svg\s*\{[^}]*transition:\s*none;/su,
     ];
 
-    expect(morphRules.filter((rule) => !rule.test(css))).toEqual([]);
+    expect(animatedRules.filter((rule) => !rule.test(css))).toEqual([]);
+    expect(immediateRules.filter((rule) => !rule.test(css))).toEqual([]);
     expect(css).not.toMatch(/\b160ms\b/u);
     const mutated = css.replace("var(--atm-duration-hover)", "160ms");
     expect(mutated).toMatch(/\b160ms\b/u);
+    const animatedNav = css.replace(
+      ".atm-nav-disclosure svg {\n  transition: none;",
+      ".atm-nav-disclosure svg {\n  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);",
+    );
+    expect(immediateRules[0]!.test(animatedNav)).toBe(false);
+    const animatedSort = css.replace(
+      ".atm-table-sort > svg {\n  opacity: 0;\n  transform: translateY(-1px);\n  transition: none;",
+      ".atm-table-sort > svg {\n  opacity: 0;\n  transform: translateY(-1px);\n  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);",
+    );
+    expect(immediateRules[1]!.test(animatedSort)).toBe(false);
   });
 });
