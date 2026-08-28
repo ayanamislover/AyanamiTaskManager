@@ -84,7 +84,9 @@ describe("AppShell", () => {
     expect(markup).toContain('<div class="atm-breadcrumb">总览</div>');
     expect(markup).toContain('class="atm-top-actions" data-testid="window-drag-actions"');
     expect(markup).toContain('<div class="atm-content"><section data-testid="content-slot">');
-    expect(markup).toContain('<div class="atm-notice" role="status">操作完成</div>');
+    expect(markup).toContain(
+      '<div class="atm-notice" role="status" data-presence="open">操作完成</div>',
+    );
     for (const [before, after] of [
       ["atm-sidebar", "atm-main"],
       ["content-slot", "palette-slot"],

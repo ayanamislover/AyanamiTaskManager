@@ -31,6 +31,14 @@
 .atm-command {
   transition: none;
 }
+.atm-modal-backdrop[data-presence="closing"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.atm-modal-backdrop[data-presence="closing"] .atm-modal:not(.atm-command) {
+  opacity: 0;
+  transform: scale(0.96);
+}
 @starting-style {
   .atm-modal-backdrop:not(:has(.atm-command)) {
     opacity: 0;
@@ -125,6 +133,10 @@
 .atm-shell:has(.atm-drawer-backdrop) > .atm-sidebar {
   overflow: hidden;
 }
+.atm-drawer-backdrop[data-presence="closing"] {
+  opacity: 0;
+  pointer-events: none;
+}
 .atm-drawer {
   position: absolute;
   inset: 0 0 0 auto;
@@ -135,6 +147,9 @@
   overflow-y: auto;
   transform: translateX(0);
   transition: transform var(--atm-duration-surface) var(--atm-ease-drawer);
+}
+.atm-drawer-backdrop[data-presence="closing"] .atm-drawer {
+  transform: translateX(100%);
 }
 @starting-style {
   .atm-drawer-backdrop {
@@ -282,6 +297,11 @@
   transition:
     opacity var(--atm-duration-surface) var(--atm-ease-out),
     transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+.atm-notice[data-presence="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(16px);
 }
 @starting-style {
   .atm-notice {

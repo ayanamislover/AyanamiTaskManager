@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { appRouteTitle } from "../src/routes/use-app-route.js";
-import { isEditableTarget } from "../src/hooks/use-app-shortcuts.js";
+import { hasActiveDialog, isEditableTarget } from "../src/hooks/use-app-shortcuts.js";
 
 const sourceRoot = join(process.cwd(), "packages", "ui", "src");
 
@@ -18,7 +18,7 @@ const shortcutContracts = {
     /target\.isContentEditable[\s\S]*?\["INPUT", "TEXTAREA", "SELECT"\]\.includes\(target\.tagName\)[\s\S]*?target\.closest\('\[contenteditable="true"\]'\)/u,
   modifiers: /event\.defaultPrevented[\s\S]*?!\(event\.ctrlKey \|\| event\.metaKey\)/u,
   suppressEditable: /isEditableTarget\(event\.target\)/u,
-  suppressDialog: /document\.querySelector\('\[role="dialog"\]'\)/u,
+  suppressDialog: /hasActiveDialog\(\)/u,
   palette:
     /event\.key\.toLowerCase\(\) === "k"[\s\S]*?event\.preventDefault\(\);[\s\S]*?setPalette\(true\)/u,
   projectTask:
@@ -67,6 +67,17 @@ describe("app routing and shortcuts", () => {
     );
     expect(isEditableTarget(new FakeElement("BUTTON") as unknown as EventTarget)).toBe(false);
     expect(isEditableTarget(null)).toBe(false);
+  });
+
+  it("仅由可交互 dialog 抑制快捷键，Presence 退出节点不会制造死区", () => {
+    const root = (dialogs: Array<{ closest: () => object | null }>) =>
+      ({ querySelectorAll: () => dialogs }) as unknown as ParentNode;
+    expect(hasActiveDialog(root([{ closest: () => null }]))).toBe(true);
+    expect(hasActiveDialog(root([{ closest: () => ({ inert: true }) }]))).toBe(false);
+    expect(
+      hasActiveDialog(root([{ closest: () => ({ inert: true }) }, { closest: () => null }])),
+    ).toBe(true);
+    expect(hasActiveDialog(root([]))).toBe(false);
   });
 
   it("route state/hash/desktop navigation 保持原始契约且不新增监听或校验", () => {

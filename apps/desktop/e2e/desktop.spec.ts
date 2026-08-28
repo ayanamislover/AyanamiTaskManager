@@ -697,6 +697,148 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
   await expect(createDialog).toBeHidden();
 });
 
+test("transient surfaces 可退出和快速反转，command palette 保持即时卸载", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto("/#project:E2E");
+
+  const task = page.getByRole("button", { name: /验证键盘与焦点/u }).first();
+  await task.click();
+  const drawerBackdrop = page.locator(".atm-drawer-backdrop");
+  const drawer = page.getByRole("dialog", { name: "任务详情" });
+  await expect(drawerBackdrop).toHaveAttribute("data-presence", "open");
+  await page.keyboard.press("Escape");
+  await expect(drawerBackdrop).toHaveAttribute("data-presence", "closing");
+  await expect(drawerBackdrop).toHaveAttribute("inert", "");
+  await expect(drawerBackdrop).toHaveAttribute("aria-hidden", "true");
+  await expect(task).toBeFocused();
+  expect(await drawerBackdrop.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe(
+    "none",
+  );
+  await task.click();
+  await expect(drawerBackdrop).toHaveAttribute("data-presence", "open");
+  await page.waitForTimeout(360);
+  await expect(drawer).toBeVisible();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-presence-drawer-reopened-dark.png"),
+    fullPage: true,
+  });
+  await page.keyboard.press("Escape");
+  await expect(drawerBackdrop).toHaveAttribute("data-presence", "closing");
+  await expect(drawerBackdrop).toHaveCount(0);
+  await expect(task).toBeFocused();
+
+  const createTask = page.getByRole("button", { name: "新建任务", exact: true });
+  await createTask.click();
+  const modal = page.getByRole("dialog", { name: "新建任务" });
+  const modalBackdrop = page
+    .locator(".atm-modal-backdrop")
+    .filter({ has: page.locator("#create-task-title") });
+  const priority = page.getByRole("combobox", { name: "优先级" });
+  await priority.click();
+  await expect(page.getByRole("listbox", { name: "优先级" })).toBeVisible();
+  const listbox = modal.locator(".atm-select-popover");
+  await expect(listbox).toHaveAttribute("data-presence", "open");
+  await page.keyboard.press("Escape");
+  await expect(listbox).toHaveAttribute("data-presence", "closing");
+  await expect(listbox).toHaveAttribute("inert", "");
+  await expect(listbox).toHaveAttribute("aria-hidden", "true");
+  await expect(priority).toBeFocused();
+  await expect(modal).toBeVisible();
+  await expect(listbox).toHaveCount(0);
+  await priority.click();
+  await expect(listbox).toHaveAttribute("data-presence", "open");
+  await priority.click();
+  await expect(priority).toHaveAttribute("aria-expanded", "false");
+  await expect(listbox).toHaveAttribute("data-presence", "closing");
+  await expect(listbox).toHaveAttribute("inert", "");
+  await expect(listbox).toHaveAttribute("aria-hidden", "true");
+  await priority.click();
+  await expect(priority).toHaveAttribute("aria-expanded", "true");
+  await expect(listbox).toHaveAttribute("data-presence", "open");
+  await page.waitForTimeout(280);
+  await expect(listbox).toHaveCount(1);
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-presence-select-reopened-dark.png"),
+    fullPage: true,
+  });
+  await priority.click();
+  await expect(listbox).toHaveCount(0);
+
+  await modal.getByRole("button", { name: "取消" }).click();
+  await expect(modalBackdrop).toHaveAttribute("data-presence", "closing");
+  await expect(modalBackdrop).toHaveAttribute("inert", "");
+  await expect(modalBackdrop).toHaveAttribute("aria-hidden", "true");
+  await expect(createTask).toBeFocused();
+  await createTask.click();
+  await expect(modalBackdrop).toHaveAttribute("data-presence", "open");
+  await page.waitForTimeout(360);
+  await expect(modal).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(modalBackdrop).toHaveCount(0);
+  await expect(createTask).toBeFocused();
+
+  const notify = page.getByRole("button", { name: "启动 Agent 会话" });
+  await notify.click();
+  const notice = page.locator(".atm-notice");
+  await expect(notice).toHaveAttribute("data-presence", "open");
+  await page.waitForFunction(
+    () => document.querySelector(".atm-notice")?.getAttribute("data-presence") === "closing",
+    undefined,
+    { timeout: 3_500, polling: 25 },
+  );
+  await notify.click();
+  await expect(notice).toHaveAttribute("data-presence", "open");
+  await page.waitForTimeout(360);
+  await expect(notice).toBeVisible();
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-presence-notice-reopened-dark.png"),
+    fullPage: true,
+  });
+
+  const searchButton = page.getByRole("button", { name: /搜索任务、记录和项目/u });
+  await searchButton.click();
+  const command = page.locator(".atm-command");
+  await expect(command).toBeVisible();
+  expect(await command.evaluate((element) => getComputedStyle(element).transitionDuration)).toBe(
+    "0s",
+  );
+  await page.keyboard.press("Escape");
+  expect(await command.count()).toBe(0);
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await createTask.click();
+  await expect(page.getByRole("dialog", { name: "新建任务" })).toBeVisible();
+  const reducedBackdrop = page
+    .locator(".atm-modal-backdrop")
+    .filter({ has: page.locator("#create-task-title") });
+  const reducedDialog = reducedBackdrop.locator(".atm-modal");
+  const reducedPriority = page.getByRole("combobox", { name: "优先级" });
+  await reducedPriority.click();
+  const reducedSelect = reducedBackdrop.locator(".atm-select");
+  const reducedPopover = reducedBackdrop.locator(".atm-select-popover");
+  await reducedSelect.evaluate((element) => {
+    element.dataset.placement = "top";
+  });
+  await reducedPriority.click();
+  await expect(reducedPopover).toHaveAttribute("data-presence", "closing");
+  await expect(reducedPopover).toHaveAttribute("aria-hidden", "true");
+  expect(await reducedPopover.evaluate((element) => getComputedStyle(element).transform)).toBe(
+    "none",
+  );
+  await expect(reducedPopover).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(reducedBackdrop).toHaveAttribute("data-presence", "closing");
+  await expect(reducedBackdrop).toHaveAttribute("aria-hidden", "true");
+  expect(await reducedDialog.evaluate((element) => getComputedStyle(element).transform)).toBe(
+    "none",
+  );
+  expect(
+    await reducedDialog.evaluate((element) => getComputedStyle(element).transitionProperty),
+  ).toBe("opacity");
+  await expect(reducedBackdrop).toHaveCount(0);
+});
+
 test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   const suffix = Date.now().toString(36);

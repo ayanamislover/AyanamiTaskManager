@@ -101,7 +101,7 @@ function missingDrawerContracts(source: string): string[] {
     "workItemUiActions",
     "checklistToggleIntent",
     "evidenceText",
-    "useDialogAccessibility(close)",
+    "useDialogAccessibility(",
     'aria-label="收起任务详情"',
     'className="atm-drawer"',
   ];
@@ -150,7 +150,7 @@ describe("TaskDrawer feature", () => {
       'queryKey: ["task", project, taskKey, "full"]',
       "client.tasks.patchAsUser",
       "client.tasks.checklistAsUser",
-      "useDialogAccessibility(close)",
+      "useDialogAccessibility(",
       'aria-label="收起任务详情"',
     ]) {
       expect(missingDrawerContracts(source.replaceAll(contract, "MUTATED"))).toContain(contract);

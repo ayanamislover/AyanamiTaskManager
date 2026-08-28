@@ -6,6 +6,7 @@ import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons
 import type { WorkItemStatus } from "@ayanami-task/protocol";
 import { checklistToggleIntent, evidenceText } from "../checklist-evidence.js";
 import { ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
+import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
@@ -19,15 +20,16 @@ export function TaskDrawer({
   taskKey,
   close,
   notify,
+  ...presenceRootProps
 }: {
   client: AyanamiClient;
   project: string;
   taskKey: string;
   close: () => void;
   notify: Notify;
-}) {
+} & PresenceRootProps) {
   const queryClient = useQueryClient();
-  const dialogRef = useDialogAccessibility(close);
+  const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   // 正在为哪个检查项补证据；null 表示没有展开的输入框。
   const [evidenceDraft, setEvidenceDraft] = useState<{ id: string; text: string } | null>(null);
   const query = useQuery({
@@ -114,7 +116,12 @@ export function TaskDrawer({
   };
   const progress = query.data ? taskProgressPresentation(query.data) : null;
   return (
-    <div className="atm-drawer-backdrop" role="presentation" onMouseDown={close}>
+    <div
+      {...presenceRootProps}
+      className="atm-drawer-backdrop"
+      role="presentation"
+      onMouseDown={close}
+    >
       <aside
         ref={dialogRef}
         className="atm-drawer"

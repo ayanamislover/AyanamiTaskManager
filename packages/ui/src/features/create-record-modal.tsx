@@ -4,6 +4,7 @@ import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient, UserRecordCreateInput } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
 import { MutationErrorAlert } from "../components/async-state.js";
+import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { recordDraftToUserInput } from "../record-input.js";
@@ -13,14 +14,15 @@ export function CreateRecordModal({
   project,
   close,
   notify,
+  ...presenceRootProps
 }: {
   client: AyanamiClient;
   project: string;
   close: () => void;
   notify: Notify;
-}) {
+} & PresenceRootProps) {
   const queryClient = useQueryClient();
-  const dialogRef = useDialogAccessibility(close);
+  const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   const [kind, setKind] = useState<UserRecordCreateInput["kind"]>("DECISION");
   const [importance, setImportance] =
     useState<NonNullable<UserRecordCreateInput["importance"]>>("NORMAL");
@@ -54,7 +56,7 @@ export function CreateRecordModal({
     },
   });
   return (
-    <div className="atm-modal-backdrop">
+    <div {...presenceRootProps} className="atm-modal-backdrop">
       <section
         ref={dialogRef}
         className="atm-modal"

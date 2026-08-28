@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 
-export function useDialogAccessibility(close: () => void) {
+export function useDialogAccessibility(close: () => void, active = true) {
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef(close);
   closeRef.current = close;
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!active) return;
     const previousFocus =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
@@ -47,6 +48,6 @@ export function useDialogAccessibility(close: () => void) {
       document.removeEventListener("keydown", handleKey);
       if (previousFocus?.isConnected) previousFocus.focus();
     };
-  }, []);
+  }, [active]);
   return dialogRef;
 }

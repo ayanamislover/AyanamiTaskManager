@@ -18,6 +18,14 @@
     transform: none;
   }
 
+  .atm-modal-backdrop[data-presence="closing"] .atm-modal:not(.atm-command),
+  .atm-drawer-backdrop[data-presence="closing"] .atm-drawer,
+  .atm-notice[data-presence="closing"],
+  .atm-select-popover[data-presence="closing"],
+  .atm-select[data-placement="top"] .atm-select-popover[data-presence="closing"] {
+    transform: none;
+  }
+
   .atm-nav-disclosure svg,
   .atm-engineering-toggle > svg,
   .atm-table-sort > svg {
@@ -25,6 +33,8 @@
   }
 
   .atm-modal:not(.atm-command),
+  .atm-modal-backdrop:not(:has(.atm-command)),
+  .atm-drawer-backdrop,
   .atm-drawer,
   .atm-notice {
     transition: opacity var(--atm-duration-hover) var(--atm-ease-out);

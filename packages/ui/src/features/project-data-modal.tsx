@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { Empty, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
+import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { formatTime } from "../presentation.js";
@@ -12,14 +13,15 @@ export function ProjectDataModal({
   project,
   close,
   notify,
+  ...presenceRootProps
 }: {
   client: AyanamiClient;
   project: string;
   close: () => void;
   notify: Notify;
-}) {
+} & PresenceRootProps) {
   const queryClient = useQueryClient();
-  const dialogRef = useDialogAccessibility(close);
+  const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   const backups = useQuery({
     queryKey: ["backups", project],
     queryFn: () => client.backups.list(project),
@@ -71,7 +73,7 @@ export function ProjectDataModal({
     },
   });
   return (
-    <div className="atm-modal-backdrop">
+    <div {...presenceRootProps} className="atm-modal-backdrop">
       <section
         ref={dialogRef}
         className="atm-modal wide"
