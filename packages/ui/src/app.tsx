@@ -22,16 +22,9 @@ import {
 } from "@ayanami-task/client";
 import { type WorkItemStatus } from "@ayanami-task/protocol";
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
-import { EngineeringMetricsPanel } from "./project-statistics-panel.js";
-import { ProjectProjectionPanel } from "./projection-health-panel.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
 import { useCursorCollection } from "./cursor-collection.js";
-import {
-  formatReconciliationAge,
-  reconciliationLabel,
-  reconciliationSummary,
-} from "./reconciliation.js";
 import { presentTimelineEvent } from "./timeline-events.js";
 import { taskProgressPresentation } from "./task-progress.js";
 import {
@@ -56,6 +49,7 @@ import { useTheme } from "./hooks/use-theme.js";
 import { AppShell } from "./shell/app-shell.js";
 import { AgentsPage } from "./features/agents.js";
 import { OverviewPage, TasksAcrossProjects } from "./features/overview.js";
+import { ProjectSummary } from "./features/project-summary.js";
 import { ProjectsPage } from "./features/projects.js";
 import { QuickPage } from "./features/quick.js";
 import { SettingsPage } from "./features/settings.js";
@@ -1503,33 +1497,12 @@ function ProjectPage({
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
-  const [reconciliationCollapsed, setReconciliationCollapsed] = useState(true);
   const tasks = useCursorCollection(["tasks", project.code, "ui"], (cursor) =>
     client.tasks.pageForUi(project.code, {
       limit: 100,
       ...(cursor === undefined ? {} : { cursor }),
     }),
   );
-  const brief = useQuery({
-    queryKey: ["brief", project.code],
-    queryFn: () => client.projects.brief(project.code),
-  });
-  const overview = useQuery({
-    queryKey: ["overview"],
-    queryFn: () => client.overview(),
-  });
-  const agents = useQuery({
-    queryKey: ["agents", project.code],
-    queryFn: () => client.projects.agents(project.code),
-  });
-  const updates = useQuery({
-    queryKey: ["project-updates", project.code],
-    queryFn: () => client.projects.updates(project.code),
-  });
-  const reconciliation = useQuery({
-    queryKey: ["reconciliation", project.code],
-    queryFn: () => client.projects.reconciliation(project.code),
-  });
   const events = useQuery({
     queryKey: ["events", project.code],
     queryFn: () => client.events(project.code, 0, 100),
@@ -1565,19 +1538,6 @@ function ProjectPage({
     return () => window.removeEventListener("atm:new-project-task", listener);
   }, []);
   const workItems = tasks.items as any[];
-  const projectSummary = ((overview.data?.projects ?? []) as any[]).find(
-    (candidate) => candidate.code === project.code,
-  );
-  const inProgress = workItems.filter((task) =>
-    ["CLAIMED", "IN_PROGRESS", "VERIFYING"].includes(task.status),
-  );
-  const ready = workItems.filter((task) => task.status === "READY");
-  const blockers = workItems.filter((task) =>
-    ["BLOCKED", "WAITING_USER", "WAITING_AGENT"].includes(task.status),
-  );
-  const onlineAgents = (agents.data ?? []).filter((agent) => agent.connectionState === "ONLINE");
-  const claimedCount = workItems.filter((task) => Boolean(task.claimedBySessionId)).length;
-  const latestUpdate = (updates.data ?? []).find((update) => update.status === "PUBLISHED");
   const filtered = tasks.items.filter((task: any) => {
     if (filters.status && task.status !== filters.status) return false;
     if (filters.assignee && task.assigneeAgentId !== filters.assignee) return false;
@@ -1924,232 +1884,12 @@ function ProjectPage({
           </>
         }
       />
-      <section className="atm-metrics five">
-        <div className="atm-metric">
-          <div className="label">当前目标</div>
-          <div style={{ marginTop: 12, fontWeight: 650 }}>
-            {String(brief.data?.objective ?? "尚未设置")}
-          </div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">当前里程碑</div>
-          <div style={{ marginTop: 12, fontWeight: 650 }}>
-            {String(brief.data?.milestone ?? "尚未设置")}
-          </div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">健康度</div>
-          <div style={{ marginTop: 12 }}>
-            <Status value={String(projectSummary?.health ?? "UNKNOWN")} />
-          </div>
-          <div className="detail">最近活动 {formatTime(projectSummary?.last_activity_at)}</div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">项目进度</div>
-          <div className="value">{Math.round(Number(projectSummary?.progress ?? 0))}%</div>
-          <div className="detail">
-            {progressSourceLabels[String(projectSummary?.progress_source ?? "NONE")] ?? "尚无进度"}
-          </div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">下一目标日期</div>
-          <div style={{ marginTop: 12, fontWeight: 650 }}>
-            {String(projectSummary?.next_target_date ?? "尚未设置")}
-          </div>
-          <div className="detail">
-            项目更新 {formatTime(projectSummary?.last_project_update_at)}
-          </div>
-        </div>
-      </section>
-      <section className="atm-management-grid" aria-label="项目管理摘要">
-        <article className="atm-panel atm-management-card">
-          <div className="atm-panel-head">
-            <h2>当前进行</h2>
-            <span className="atm-badge primary">{inProgress.length}</span>
-          </div>
-          {inProgress.length ? (
-            <div className="atm-list">
-              {inProgress.slice(0, 4).map((task) => (
-                <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
-                  <div>
-                    <div className="atm-row-title">{task.title}</div>
-                    <div className="atm-row-sub">
-                      {task.key} · {Math.round(task.progress ?? 0)}%
-                    </div>
-                  </div>
-                  <Status value={task.status} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <Empty title="没有进行中任务" text="从可开始任务中选择下一项。" />
-          )}
-        </article>
-        <article className="atm-panel atm-management-card">
-          <div className="atm-panel-head">
-            <h2>阻塞与等待</h2>
-            <span className={`atm-badge ${blockers.length ? "danger" : "success"}`}>
-              {blockers.length}
-            </span>
-          </div>
-          {blockers.length ? (
-            <div className="atm-list">
-              {blockers.slice(0, 4).map((task) => (
-                <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
-                  <div>
-                    <div className="atm-row-title">{task.title}</div>
-                    <div className="atm-row-sub">
-                      {task.blockedReason || task.waitingFor || "等待条件未说明"}
-                    </div>
-                  </div>
-                  <Status value={task.status} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <Empty title="没有阻塞" text="当前没有需要外部处理的条件。" />
-          )}
-        </article>
-        <article className="atm-panel atm-management-card">
-          <div className="atm-panel-head">
-            <h2>Agent 与领取</h2>
-            <span className="atm-badge">在线 {onlineAgents.length}</span>
-          </div>
-          <div className="atm-panel-body">
-            <div className="atm-row-title">{claimedCount} 项任务已领取</div>
-            <div className="atm-row-sub">
-              {onlineAgents.length
-                ? onlineAgents.map((agent) => agent.displayName || agent.agentId).join("、")
-                : "尚无在线 Agent 会话"}
-            </div>
-            {onlineAgents.map((agent: any) => (
-              <div
-                className="atm-row-sub"
-                key={agent.id}
-                title={agent.git?.worktreeRoot || agent.cwd || ""}
-              >
-                {agent.displayName || agent.agentId} · {agent.currentTaskKey || "未领取"} ·{" "}
-                {agent.git?.branch || "非 Git"} · {compactPath(agent.git?.worktreeRoot)}
-              </div>
-            ))}
-          </div>
-          <div className="atm-panel-head">
-            <h2>最近项目更新</h2>
-          </div>
-          <div className="atm-panel-body">
-            <div className="atm-row-title">{latestUpdate?.summary ?? "尚未发布项目更新"}</div>
-            <div className="atm-row-sub">
-              {latestUpdate
-                ? `${statusLabels[latestUpdate.health] ?? latestUpdate.health} · ${formatTime(latestUpdate.publishedAt)}`
-                : "发布后会形成可追溯的项目判断"}
-            </div>
-          </div>
-        </article>
-        <article className="atm-panel atm-management-card">
-          <div className="atm-panel-head">
-            <h2>下一步</h2>
-            <span className="atm-badge">可开始 {ready.length}</span>
-          </div>
-          {ready.length ? (
-            <div className="atm-list">
-              {ready.slice(0, 5).map((task) => (
-                <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
-                  <div>
-                    <div className="atm-row-title">{task.title}</div>
-                    <div className="atm-row-sub">
-                      {task.key} · {priorityLabels[task.priority] ?? task.priority}
-                    </div>
-                  </div>
-                  <ArrowRight size={16} />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <Empty title="没有 READY 任务" text="拆解并创建下一项可执行工作。" />
-          )}
-        </article>
-      </section>
-      <ProjectProjectionPanel
+      <ProjectSummary
         client={client}
         projectCode={project.code}
-        state={projectSummary?.projection ?? null}
+        workItems={workItems}
         notify={notify}
-      />
-      <section
-        className={`atm-panel atm-engineering${reconciliationCollapsed ? " is-collapsed" : ""}`}
-        aria-label="任务对账"
-      >
-        <div className="atm-panel-head">
-          <button
-            type="button"
-            className="atm-engineering-toggle"
-            aria-label={reconciliationCollapsed ? "展开任务对账" : "折叠任务对账"}
-            aria-expanded={!reconciliationCollapsed}
-            aria-controls="task-reconciliation-content"
-            onClick={() => setReconciliationCollapsed((collapsed) => !collapsed)}
-          >
-            <CaretDown size={17} aria-hidden="true" />
-            <span>
-              <strong>
-                {reconciliation.error ? "对账检查失败" : reconciliationSummary(reconciliation.data)}
-              </strong>
-            </span>
-          </button>
-        </div>
-        <div id="task-reconciliation-content" hidden={reconciliationCollapsed}>
-          {reconciliation.isLoading ? (
-            <LoadingRows count={2} />
-          ) : reconciliation.error ? (
-            <ErrorState error={reconciliation.error} />
-          ) : reconciliation.data?.items.length ? (
-            <div className="atm-list">
-              {reconciliation.data.items.map((item) => (
-                <button
-                  className="atm-row"
-                  key={`${item.taskKey}:${item.classification}`}
-                  onClick={() => openTask(item.taskKey)}
-                >
-                  <div>
-                    <div className="atm-row-title">{item.title}</div>
-                    <div className="atm-row-sub">
-                      {item.taskKey} · {reconciliationLabel(item.classification)} · 已持续{" "}
-                      {formatReconciliationAge(item.ageSeconds)}
-                    </div>
-                    {item.session ? (
-                      <div className="atm-row-sub">
-                        Session：{item.session.displayName} · {item.session.connectionState}
-                      </div>
-                    ) : null}
-                    {item.evidencePaths.length ? (
-                      <div className="atm-row-sub">已发现产物：{item.evidencePaths.join("、")}</div>
-                    ) : null}
-                    <div className="atm-row-sub">建议：{item.suggestedAction}</div>
-                  </div>
-                  <span
-                    className={`atm-badge ${
-                      item.classification === "STALLED"
-                        ? "danger"
-                        : item.classification === "LEASE_EXPIRED_ONLINE"
-                          ? "warning"
-                          : "primary"
-                    }`}
-                  >
-                    {reconciliationLabel(item.classification)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="atm-panel-body">
-              <div className="atm-row-title">当前没有需对账项</div>
-            </div>
-          )}
-        </div>
-      </section>
-      <EngineeringMetricsPanel
-        client={client}
-        projectCode={project.code}
-        formatCapturedAt={formatTime}
+        openTask={openTask}
       />
       <div className="atm-toolbar">
         <div className="atm-tabs" role="tablist">
