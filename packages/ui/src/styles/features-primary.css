@@ -11,9 +11,7 @@
   border-radius: var(--atm-radius);
   background: var(--atm-surface);
   text-align: left;
-  transition:
-    transform var(--atm-duration-hover) var(--atm-ease-out),
-    border-color var(--atm-duration-hover) var(--atm-ease-out);
+  transition: border-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
 .atm-project-main {
   display: grid;
@@ -40,7 +38,6 @@
 @media (hover: hover) and (pointer: fine) {
   .atm-project:hover {
     border-color: color-mix(in srgb, var(--atm-primary) 44%, var(--atm-border));
-    transform: translateY(-1px);
   }
 }
 .atm-project-code {
@@ -265,8 +262,8 @@
   background: var(--atm-surface);
   text-align: left;
   transition:
-    border-color var(--atm-duration-hover) var(--atm-ease-out),
-    background-color var(--atm-duration-hover) var(--atm-ease-out),
+    border-color var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover),
     transform var(--atm-duration-press) var(--atm-ease-out);
 }
 .atm-notification-option[data-selected="true"] {
@@ -487,4 +484,3 @@
   color: var(--atm-warning);
   background: color-mix(in srgb, var(--atm-warning) 10%, transparent);
 }
-

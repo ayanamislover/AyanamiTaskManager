@@ -1,19 +1,13 @@
 @media (prefers-reduced-motion: reduce) {
-  .atm-nav button,
   .atm-nav-disclosure,
-  .atm-sidebar-settings,
   .atm-button,
-  .atm-project,
   .atm-notification-option {
     transition-property: color, background-color, border-color;
   }
 
-  .atm-nav button:active,
   .atm-nav-disclosure:active,
-  .atm-sidebar-settings:active,
   .atm-nav-disclosure[aria-expanded="true"] svg,
   .atm-button:active,
-  .atm-project:hover,
   .atm-notification-option:active,
   .atm-engineering.is-collapsed .atm-engineering-toggle > svg,
   .atm-table-sort > svg,
