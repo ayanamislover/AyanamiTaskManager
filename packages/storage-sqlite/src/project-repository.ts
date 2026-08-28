@@ -27,6 +27,11 @@ import { assertCompletionGates } from "./completion-gates.js";
 import { ContextReadModel } from "./context-read-model.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { OutboxReadModel } from "./outbox-read-model.js";
+import {
+  ProjectMutationKernel,
+  requestFingerprint,
+  type MutationInput,
+} from "./project-mutation-kernel.js";
 import type {
   BriefSnapshot,
   ChecklistView,
@@ -42,6 +47,8 @@ import type {
   WorkItemProjectionPage,
   WorkItemView,
 } from "./read-model-types.js";
+
+export { requestFingerprint } from "./project-mutation-kernel.js";
 import { RecordReadModel } from "./record-read-model.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 import { SessionReadModel } from "./session-read-model.js";
@@ -94,25 +101,6 @@ function json<T>(value: string | null | undefined, fallback: T): T {
   }
 }
 
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, canonicalize(entry)]),
-    );
-  }
-  return value;
-}
-
-export function requestFingerprint(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalize(value)) ?? "null")
-    .digest("hex");
-}
-
 export type ProjectActor = {
   type: "AGENT" | "USER" | "SYSTEM";
   id: string;
@@ -145,16 +133,6 @@ export type CreateSessionInput = {
   gitContext?: SessionGitContext | null;
   resume?: boolean;
   predecessorSessionId?: string | null;
-};
-
-type MutationInput<T> = {
-  actor: ProjectActor;
-  opId: string;
-  operation: string;
-  request: unknown;
-  action: () => T;
-  idempotencyKey?: string;
-  immediate?: boolean;
 };
 
 export type WorkItemCreateInput = {
@@ -243,11 +221,12 @@ export class ProjectRepository {
   readonly #recordReads: RecordReadModel;
   readonly #sessionReads: SessionReadModel;
   readonly #taskReads: TaskReadModel;
-  #activeOperationId: string | null = null;
+  readonly #mutation: ProjectMutationKernel;
 
   constructor(database: ManagedDatabase) {
     this.database = database;
     this.#sqlite = database.sqlite;
+    this.#mutation = new ProjectMutationKernel(this.#sqlite);
     const projectCode = () => this.meta.code;
     this.#taskReads = new TaskReadModel(this.#sqlite, projectCode);
     this.#sessionReads = new SessionReadModel(this.#sqlite, projectCode, (workItemId) =>
@@ -279,17 +258,7 @@ export class ProjectRepository {
   }
 
   private nextNumber(name: string): number {
-    const row = this.#sqlite
-      .prepare(
-        "UPDATE counters SET next_value = next_value + 1 WHERE name = ? RETURNING next_value - 1 AS value",
-      )
-      .get(name) as { value: number } | undefined;
-    if (!row)
-      throw new AtmError("COUNTER_NOT_FOUND", {
-        message: `计数器不存在：${name}`,
-        details: { reference: name },
-      });
-    return row.value;
+    return this.#mutation.nextNumber(name);
   }
 
   private appendEvent(
@@ -300,95 +269,22 @@ export class ProjectRepository {
     payload: unknown,
     correlationId: string | null = null,
   ): number {
-    const at = nowIso();
-    const sequenceRow = this.#sqlite
-      .prepare(
-        `UPDATE project_meta SET current_sequence = current_sequence + 1, updated_at = ?
-         WHERE singleton = 1 RETURNING current_sequence`,
-      )
-      .get(at) as { current_sequence: number };
-    const eventId = createUlid();
-    this.#sqlite
-      .prepare(
-        `INSERT INTO events(
-           id, sequence, type, actor_type, actor_id, session_id, aggregate_type, aggregate_id,
-           causation_id, correlation_id, payload_json, created_at, op_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-      )
-      .run(
-        eventId,
-        sequenceRow.current_sequence,
-        type,
-        actor.type,
-        actor.id,
-        actor.sessionId,
-        aggregateType,
-        aggregateId,
-        correlationId,
-        JSON.stringify(payload),
-        at,
-        this.#activeOperationId,
-      );
-    this.#sqlite
-      .prepare(
-        `INSERT INTO outbox(id, project_sequence, type, payload_json, created_at)
-         VALUES (?, ?, 'registry.project_changed', ?, ?)`,
-      )
-      .run(
-        createUlid(),
-        sequenceRow.current_sequence,
-        JSON.stringify({ eventId, type, aggregateType, aggregateId }),
-        at,
-      );
-    return sequenceRow.current_sequence;
+    return this.#mutation.appendEvent(
+      type,
+      actor,
+      aggregateType,
+      aggregateId,
+      payload,
+      correlationId,
+    );
   }
 
   private mutate<T>(input: MutationInput<T>): T {
-    return this.mutateWithReplay(input).value;
+    return this.#mutation.mutate(input);
   }
 
   private mutateWithReplay<T>(input: MutationInput<T>): { value: T; replayed: boolean } {
-    const key = input.idempotencyKey ?? `${input.actor.sessionId ?? input.actor.id}:${input.opId}`;
-    const fingerprint = requestFingerprint(input.request);
-    const transaction = this.#sqlite.transaction(() => {
-      const cached = this.#sqlite
-        .prepare("SELECT * FROM idempotency_keys WHERE key = ?")
-        .get(key) as any;
-      if (cached) {
-        if (cached.operation !== input.operation || cached.request_fingerprint !== fingerprint) {
-          throw new AtmError("IDEMPOTENCY_CONFLICT", {
-            message: `幂等键冲突：${key}`,
-            details: { key },
-          });
-        }
-        return { value: JSON.parse(cached.response_json) as T, replayed: true };
-      }
-      const previousOperationId = this.#activeOperationId;
-      this.#activeOperationId = input.opId;
-      let result: T;
-      try {
-        result = input.action();
-      } finally {
-        this.#activeOperationId = previousOperationId;
-      }
-      this.#sqlite
-        .prepare(
-          `INSERT INTO idempotency_keys(
-             key, operation, request_fingerprint, response_json, created_at, op_id, actor_session_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          key,
-          input.operation,
-          fingerprint,
-          JSON.stringify(result),
-          nowIso(),
-          input.opId,
-          input.actor.sessionId,
-        );
-      return { value: result, replayed: false };
-    });
-    return input.immediate ? transaction.immediate() : transaction();
+    return this.#mutation.mutateWithReplay(input);
   }
 
   createSession(input: CreateSessionInput): { id: string; sequence: number } {
