@@ -41,6 +41,7 @@ import {
   type PresentedEvent,
 } from "./event-presentation.js";
 import { ProjectRepository } from "./project-repository.js";
+import { RegistryReadModel } from "./registry-read-model.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
 
 const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
@@ -194,20 +195,6 @@ function gitValue(cwd: string, args: string[]): string | null {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
-function projectFromRow(row: any, paths: string[] = []): RegisteredProject {
-  return {
-    id: row.id,
-    code: row.code,
-    name: row.name,
-    description: row.description,
-    databasePath: row.db_path,
-    lifecycle: row.lifecycle,
-    coordinationMode: row.coordination_mode,
-    sourcePaths: paths,
-    version: row.version,
-  };
-}
-
 function quickTaskFromRow(row: any): QuickTaskView {
   return {
     id: row.id,
@@ -291,6 +278,7 @@ export class AyanamiDatabaseManager {
   readonly registry: ManagedDatabase;
   readonly #projects = new Map<string, { database: ManagedDatabase; lastUsed: number }>();
   readonly #maxOpenProjects = 8;
+  readonly #registryReads: RegistryReadModel;
 
   private constructor(input: {
     dataDir: string;
@@ -300,6 +288,7 @@ export class AyanamiDatabaseManager {
     this.dataDir = input.dataDir;
     this.migrationsRoot = input.migrationsRoot;
     this.registry = input.registry;
+    this.#registryReads = new RegistryReadModel(input.registry.sqlite);
   }
 
   static async open(input: {
@@ -517,23 +506,7 @@ export class AyanamiDatabaseManager {
   }
 
   listProjects(includeArchived = false): RegisteredProject[] {
-    const rows = this.registry.sqlite
-      .prepare(
-        `SELECT * FROM projects ${includeArchived ? "" : "WHERE lifecycle <> 'TRASHED'"}
-         ORDER BY updated_at DESC`,
-      )
-      .all() as any[];
-    const pathQuery = this.registry.sqlite.prepare(
-      "SELECT canonical_path FROM project_paths WHERE project_id = ? ORDER BY is_primary DESC, last_seen_at DESC",
-    );
-    return rows.map((row) =>
-      projectFromRow(
-        row,
-        (pathQuery.all(row.id) as Array<{ canonical_path: string }>).map(
-          (path) => path.canonical_path,
-        ),
-      ),
-    );
+    return this.#registryReads.listProjects(includeArchived);
   }
 
   listSavedViews(projectCodeOrId?: string): SavedView[] {
@@ -913,22 +886,7 @@ export class AyanamiDatabaseManager {
   }
 
   getProject(codeOrId: string): RegisteredProject {
-    const row = this.registry.sqlite
-      .prepare("SELECT * FROM projects WHERE code = ? OR id = ?")
-      .get(codeOrId.toUpperCase(), codeOrId) as any;
-    if (!row)
-      throw new AtmError("PROJECT_NOT_FOUND", {
-        message: `项目不存在：${codeOrId}`,
-        details: { entity: "PROJECT", reference: codeOrId },
-      });
-    const paths = (
-      this.registry.sqlite
-        .prepare(
-          "SELECT canonical_path FROM project_paths WHERE project_id = ? ORDER BY is_primary DESC",
-        )
-        .all(row.id) as Array<{ canonical_path: string }>
-    ).map((path) => path.canonical_path);
-    return projectFromRow(row, paths);
+    return this.#registryReads.getProject(codeOrId);
   }
 
   attachProjectPath(
