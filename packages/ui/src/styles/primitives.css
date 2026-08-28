@@ -41,9 +41,6 @@
     border-color var(--atm-duration-hover) var(--atm-ease-hover),
     background-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
-.atm-button:hover {
-  border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
-}
 .atm-button:active {
   transform: scale(0.97);
 }
@@ -58,6 +55,11 @@
 .atm-icon-button {
   width: 38px;
   padding: 0;
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-button:hover {
+    border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
+  }
 }
 
 .atm-metrics {

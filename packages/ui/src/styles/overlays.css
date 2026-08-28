@@ -192,15 +192,17 @@
     color var(--atm-duration-hover) var(--atm-ease-hover),
     background-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
-.atm-drawer-collapse:hover {
-  color: var(--atm-primary-strong);
-  background: var(--atm-primary-soft);
-}
 .atm-drawer-collapse > svg {
   transition: transform var(--atm-duration-press) var(--atm-ease-out);
 }
 .atm-drawer-collapse:active > svg {
   transform: translateX(2px);
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-drawer-collapse:hover {
+    color: var(--atm-primary-strong);
+    background: var(--atm-primary-soft);
+  }
 }
 .atm-drawer-body {
   display: grid;
