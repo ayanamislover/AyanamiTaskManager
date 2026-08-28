@@ -279,16 +279,12 @@
   font: inherit;
   letter-spacing: inherit;
   cursor: pointer;
-  transition:
-    color var(--atm-duration-hover) var(--atm-ease-hover),
-    background-color var(--atm-duration-hover) var(--atm-ease-hover);
+  transition: none;
 }
 .atm-table-sort > svg {
   opacity: 0;
   transform: translateY(-1px);
-  transition:
-    opacity var(--atm-duration-hover) var(--atm-ease-hover),
-    transform var(--atm-duration-hover) var(--atm-ease-in-out);
+  transition: none;
 }
 .atm-table-sort[data-active="true"] {
   color: var(--atm-primary-strong);

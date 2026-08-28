@@ -70,19 +70,7 @@
   text-align: left;
 }
 .atm-nav-disclosure {
-  transition:
-    background-color var(--atm-duration-hover) var(--atm-ease-hover),
-    color var(--atm-duration-hover) var(--atm-ease-hover),
-    transform var(--atm-duration-press) var(--atm-ease-out);
-}
-.atm-nav button:hover,
-.atm-nav-disclosure:hover,
-.atm-sidebar-settings:hover {
-  color: var(--atm-text);
-  background: var(--atm-surface-muted);
-}
-.atm-nav-disclosure:active {
-  transform: scale(0.97);
+  transition: none;
 }
 .atm-nav button[aria-current="page"],
 .atm-sidebar-settings[aria-current="page"] {
@@ -103,10 +91,18 @@
   font-weight: 650;
 }
 .atm-nav-disclosure svg {
-  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
+  transition: none;
 }
 .atm-nav-disclosure[aria-expanded="true"] svg {
   transform: rotate(90deg);
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-nav button:hover,
+  .atm-nav-disclosure:hover,
+  .atm-sidebar-settings:hover {
+    color: var(--atm-text);
+    background: var(--atm-surface-muted);
+  }
 }
 .atm-nav-secondary {
   padding-left: 8px;
