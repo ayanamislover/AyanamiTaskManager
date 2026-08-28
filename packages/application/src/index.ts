@@ -1,12 +1,6 @@
 import { basename } from "node:path";
-import { EventEmitter } from "node:events";
 import { classifyTaskScope } from "@ayanami-task/domain";
-import {
-  asAtmError,
-  AtmError,
-  rankSuggestions,
-  type AtmBaseErrorDetails,
-} from "@ayanami-task/errors";
+import { asAtmError, AtmError } from "@ayanami-task/errors";
 import {
   normalizeReviewCandidateHashes,
   workItemOperationHasEffect,
@@ -41,59 +35,18 @@ import {
   type WorkItemPageFilters,
 } from "@ayanami-task/storage-sqlite";
 import { parseAgentTaskMarkdown } from "./agenttask-import.js";
-import { reconcileWorkItems } from "./reconcile.js";
-import { projectTaskView } from "./queries/task-views.js";
+import * as errorEnrichment from "./errors/error-enrichment.js";
+import type { PublicNotFoundDetails } from "./errors/error-enrichment.js";
+import * as projectQueries from "./queries/project-queries.js";
+import * as readQueries from "./queries/read-queries.js";
+import * as reconciliationQueries from "./queries/reconciliation-queries.js";
+import * as taskQueries from "./queries/task-queries.js";
+import { ApplicationServiceRuntime } from "./runtime/service-runtime.js";
 
 export * from "./agenttask-import.js";
 export * from "./reconcile.js";
 export * from "./queries/task-views.js";
-
-export type PublicNotFoundDetails = {
-  entity: "PROJECT" | "WORK_ITEM" | "SESSION" | "MILESTONE";
-  did_you_mean: string | null;
-  candidates: Array<Record<string, string>>;
-  candidate_count: number;
-  candidate_scan_count: number;
-  candidate_scan_truncated: boolean;
-  candidates_truncated: boolean;
-};
-
-function rankPublicCandidates<T extends Record<string, string>>(
-  queryValue: string,
-  candidates: T[],
-  identities: (candidate: T) => readonly string[],
-  candidateCount = candidates.length,
-): Omit<PublicNotFoundDetails, "entity"> & { candidates: T[] } {
-  const ranked = rankSuggestions(queryValue, candidates, identities);
-  return {
-    did_you_mean: ranked.didYouMean,
-    candidates: ranked.candidates,
-    candidate_count: candidateCount,
-    candidate_scan_count: candidates.length,
-    candidate_scan_truncated: candidates.length < candidateCount,
-    candidates_truncated: ranked.candidates.length < candidateCount,
-  };
-}
-
-function assertKnownMilestones(
-  repository: ProjectRepository,
-  milestoneIds: Iterable<string | null | undefined>,
-): void {
-  const requested = new Set(
-    Array.from(milestoneIds).filter(
-      (milestoneId): milestoneId is string => typeof milestoneId === "string",
-    ),
-  );
-  if (requested.size === 0) return;
-  const known = new Set(repository.listMilestones().map((milestone) => String(milestone.id)));
-  for (const milestoneId of requested) {
-    if (!known.has(milestoneId))
-      throw new AtmError("MILESTONE_NOT_FOUND", {
-        message: `里程碑不存在：${milestoneId}`,
-        details: { entity: "MILESTONE", reference: milestoneId },
-      });
-  }
-}
+export type { PublicNotFoundDetails } from "./errors/error-enrichment.js";
 
 function mutationAck<T extends Record<string, unknown>>(
   result: T,
@@ -124,11 +77,11 @@ function projectMutationReceipt<T extends Record<string, unknown>>(
 
 export class AyanamiTaskService {
   readonly databases: AyanamiDatabaseManager;
-  readonly #repositories = new Map<string, ProjectRepository>();
-  readonly #events = new EventEmitter();
+  readonly #runtime: ApplicationServiceRuntime;
 
   private constructor(databases: AyanamiDatabaseManager) {
     this.databases = databases;
+    this.#runtime = new ApplicationServiceRuntime(databases);
   }
 
   static async open(input: {
@@ -148,42 +101,42 @@ export class AyanamiTaskService {
     creationSignals?: Record<string, unknown>;
   }): Promise<RegisteredProject> {
     const project = await this.databases.createProject(input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return project;
   }
 
   listProjects(): RegisteredProject[] {
-    return this.databases.listProjects();
+    return projectQueries.listProjects(this.#runtime);
   }
 
   attachProjectPath(projectCode: string, path: string, primary = true) {
     const project = this.databases.attachProjectPath(projectCode, path, { primary, actor: "USER" });
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return project;
   }
 
   overview() {
-    return this.databases.overview();
+    return projectQueries.overview(this.#runtime);
   }
 
   projectionState(projectCode: string): ProjectionStateView {
-    return this.databases.projectionState(projectCode);
+    return projectQueries.projectionState(this.#runtime, projectCode);
   }
 
   projectionStates(): ProjectionStateView[] {
-    return this.databases.listProjectionStates();
+    return projectQueries.projectionStates(this.#runtime);
   }
 
   projectionSummary(): ProjectionSummary {
-    return this.databases.projectionSummary();
+    return projectQueries.projectionSummary(this.#runtime);
   }
 
   async reconcileProjection(projectCode: string): Promise<ProjectionReconcileReceipt> {
     const project = this.databases.getProject(projectCode);
     const attemptedAt = new Date().toISOString();
     const result = await this.databases.dispatchProject(project.id);
-    this.#events.emit(`project:${project.code}`);
-    this.#events.emit("global");
+    this.#runtime.emitProject(project.code);
+    this.#runtime.emitGlobal();
     return {
       ok: true,
       project: {
@@ -284,38 +237,38 @@ export class AyanamiTaskService {
   }
 
   listSavedViews(projectCode?: string) {
-    return this.databases.listSavedViews(projectCode);
+    return projectQueries.listSavedViews(this.#runtime, projectCode);
   }
 
   createSavedView(input: Parameters<AyanamiDatabaseManager["createSavedView"]>[0]) {
     const result = this.databases.createSavedView(input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   updateSavedView(id: string, input: Parameters<AyanamiDatabaseManager["updateSavedView"]>[1]) {
     const result = this.databases.updateSavedView(id, input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   deleteSavedView(id: string, expectedVersion: number) {
     const result = this.databases.deleteSavedView(id, expectedVersion);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   listSettings() {
-    return this.databases.listSettings();
+    return projectQueries.listSettings(this.#runtime);
   }
 
   getSetting<T = unknown>(key: string, fallback?: T) {
-    return this.databases.getSetting<T>(key, fallback);
+    return projectQueries.getSetting(this.#runtime, key, fallback);
   }
 
   setSetting(key: string, value: unknown, expectedVersion?: number) {
     const result = this.databases.setSetting(key, value, expectedVersion);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
@@ -330,13 +283,13 @@ export class AyanamiTaskService {
       reason: "PRE_ARCHIVE",
     });
     const result = this.databases.setProjectLifecycle(projectCode, "ARCHIVED", actor);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   restoreProject(projectCode: string, actor = "USER") {
     const result = this.databases.setProjectLifecycle(projectCode, "ACTIVE", actor);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
@@ -347,25 +300,25 @@ export class AyanamiTaskService {
       reason: "PRE_TRASH",
     });
     const result = this.databases.setProjectLifecycle(projectCode, "TRASHED", actor);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   listBackups(projectCode?: string) {
-    return this.databases.listBackups(projectCode);
+    return projectQueries.listBackups(this.#runtime, projectCode);
   }
 
   async createBackup(input: Parameters<AyanamiDatabaseManager["createBackup"]>[0]) {
     const result = await this.databases.createBackup(input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
   async restoreBackup(backupId: string) {
     const result = await this.databases.restoreBackup(backupId);
-    this.#repositories.delete(result.project.id);
-    this.#events.emit(`project:${result.project.code}`);
-    this.#events.emit("global");
+    this.#runtime.dropRepository(result.project.id);
+    this.#runtime.emitProject(result.project.code);
+    this.#runtime.emitGlobal();
     return result;
   }
 
@@ -497,34 +450,19 @@ export class AyanamiTaskService {
   }
 
   async #repository(projectCode: string): Promise<ProjectRepository> {
-    const project = this.databases.getProject(projectCode);
-    const existing = this.#repositories.get(project.id);
-    if (existing && existing.database.sqlite.open) return existing;
-    const repository = new ProjectRepository(await this.databases.openProject(project.id));
-    this.#repositories.set(project.id, repository);
-    return repository;
+    return this.#runtime.repository(projectCode);
   }
 
   async #actor(projectCode: string, sessionId: string): Promise<ProjectActor> {
-    const repository = await this.#repository(projectCode);
-    const session = repository.getSession(sessionId);
-    if (session.connection_state === "CLOSED")
-      throw new AtmError("SESSION_CLOSED", {
-        message: sessionId,
-        details: { entity: "SESSION", session_id: sessionId, reference: sessionId },
-      });
-    return { type: "AGENT", id: session.agent_id, sessionId };
+    return this.#runtime.actor(projectCode, sessionId);
   }
 
   async #refreshSessionGitContext(projectCode: string, sessionId: string) {
-    const repository = await this.#repository(projectCode);
-    const session = repository.getSession(sessionId);
-    if (!session.cwd) return { updated: false, sequence: repository.meta.sequence };
-    return repository.updateSessionGitContext(sessionId, inspectGitContext(String(session.cwd)));
+    return this.#runtime.refreshSessionGitContext(projectCode, sessionId);
   }
 
   #userActor(): ProjectActor {
-    return { type: "USER", id: "USER", sessionId: null };
+    return this.#runtime.userActor();
   }
 
   async #captureWorkItemEngineeringMetrics(
@@ -561,20 +499,17 @@ export class AyanamiTaskService {
 
   async #flush(projectCode: string): Promise<ProjectionReceipt> {
     const result = await this.databases.dispatchProject(projectCode);
-    this.#events.emit(`project:${projectCode.toUpperCase()}`);
-    this.#events.emit("global");
+    this.#runtime.emitProject(projectCode);
+    this.#runtime.emitGlobal();
     return result.projection;
   }
 
   subscribeProject(projectCode: string, listener: () => void): () => void {
-    const channel = `project:${projectCode.toUpperCase()}`;
-    this.#events.on(channel, listener);
-    return () => this.#events.off(channel, listener);
+    return this.#runtime.subscribeProject(projectCode, listener);
   }
 
   subscribeGlobal(listener: () => void): () => void {
-    this.#events.on("global", listener);
-    return () => this.#events.off("global", listener);
+    return this.#runtime.subscribeGlobal(listener);
   }
 
   async begin(input: {
@@ -704,12 +639,12 @@ export class AyanamiTaskService {
   }
 
   listQuickTasks(status?: string) {
-    return this.databases.listQuickTasks(status);
+    return projectQueries.listQuickTasks(this.#runtime, status);
   }
 
   createQuickTask(input: Parameters<AyanamiDatabaseManager["createQuickTask"]>[0]) {
     const result = this.databases.createQuickTask(input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
@@ -718,7 +653,7 @@ export class AyanamiTaskService {
     input: Parameters<AyanamiDatabaseManager["updateQuickTask"]>[1],
   ) {
     const result = this.databases.updateQuickTask(idOrKey, input);
-    this.#events.emit("global");
+    this.#runtime.emitGlobal();
     return result;
   }
 
@@ -777,21 +712,22 @@ export class AyanamiTaskService {
     return projectMutationReceipt(result, projection);
   }
 
-  async brief(projectCode: string, sessionId?: string | null, maxChars = 1200): Promise<any> {
-    return (await this.#repository(projectCode)).brief(sessionId, maxChars);
+  async brief(
+    projectCode: string,
+    sessionId?: string | null,
+    maxChars = 1200,
+  ): Promise<Awaited<ReturnType<ProjectRepository["brief"]>>> {
+    return readQueries.brief(this.#runtime, projectCode, sessionId, maxChars);
   }
 
   async briefSnapshot(projectCode: string, sessionId?: string | null) {
-    return (await this.#repository(projectCode)).briefSnapshot(sessionId);
+    return readQueries.briefSnapshot(this.#runtime, projectCode, sessionId);
   }
 
   async planningContext(
     projectCode: string,
   ): Promise<{ objectiveId: string | null; milestoneId: string | null }> {
-    const repository = await this.#repository(projectCode);
-    const objective = repository.getActiveObjective();
-    const milestone = repository.getActiveMilestone(objective?.id);
-    return { objectiveId: objective?.id ?? null, milestoneId: milestone?.id ?? null };
+    return readQueries.planningContext(this.#runtime, projectCode);
   }
 
   // 项目还没有目标时任务无处落位。这不是「必须先规划」的领域约束——promote 路径
@@ -849,19 +785,19 @@ export class AyanamiTaskService {
   }
 
   async listObjectives(projectCode: string) {
-    return (await this.#repository(projectCode)).listObjectives();
+    return readQueries.listObjectives(this.#runtime, projectCode);
   }
 
   async listMilestones(projectCode: string, objectiveId?: string) {
-    return (await this.#repository(projectCode)).listMilestones(objectiveId);
+    return readQueries.listMilestones(this.#runtime, projectCode, objectiveId);
   }
 
   async listAgentSessions(projectCode: string, limit = 100) {
-    return (await this.#repository(projectCode)).listAgentSessions(limit);
+    return readQueries.listAgentSessions(this.#runtime, projectCode, limit);
   }
 
   async agentPage(projectCode: string, filters: SessionPageFilters = {}) {
-    return (await this.#repository(projectCode)).listAgentSessionPage(filters);
+    return readQueries.agentPage(this.#runtime, projectCode, filters);
   }
 
   async listAgentSessionPage(projectCode: string, filters: SessionPageFilters = {}) {
@@ -869,7 +805,7 @@ export class AyanamiTaskService {
   }
 
   async getSession(projectCode: string, id: string) {
-    return (await this.#repository(projectCode)).getSessionView(id);
+    return readQueries.getSession(this.#runtime, projectCode, id);
   }
 
   async notFoundSuggestionDetails(
@@ -877,86 +813,11 @@ export class AyanamiTaskService {
     code: string,
     reference: string,
   ): Promise<PublicNotFoundDetails | null> {
-    const repository = await this.#repository(projectCode);
-    if (code === "WORK_ITEM_NOT_FOUND") {
-      const summary = repository.workItemSuggestionCandidates(reference, 50);
-      const candidates = summary.candidates.slice(0, 5);
-      const plausible = rankSuggestions(reference, summary.candidates, (candidate) => [
-        candidate.key,
-      ]).didYouMean;
-      return {
-        entity: "WORK_ITEM",
-        did_you_mean: plausible === null ? null : (candidates[0]?.key ?? null),
-        candidates,
-        candidate_count: summary.total,
-        candidate_scan_count: summary.candidates.length,
-        candidate_scan_truncated: summary.candidates.length < summary.total,
-        candidates_truncated: candidates.length < summary.total,
-      };
-    }
-    if (code === "SESSION_NOT_FOUND") {
-      const candidateCount = repository.countAgentSessions();
-      const candidates: Array<{
-        id: string;
-        connectionState: string;
-        workState: string;
-      }> = [];
-      let cursor: string | undefined;
-      while (candidates.length < 200) {
-        const page = repository.listAgentSessionPage({
-          limit: Math.min(100, 200 - candidates.length),
-          ...(cursor === undefined ? {} : { cursor }),
-        });
-        candidates.push(
-          ...page.items.map((session) => ({
-            id: session.id,
-            connectionState: session.connectionState,
-            workState: session.workState,
-          })),
-        );
-        if (!page.hasMore || !page.nextCursor) break;
-        cursor = page.nextCursor;
-      }
-      const ranked = rankPublicCandidates(
-        reference,
-        candidates,
-        (candidate) => [candidate.id],
-        candidateCount,
-      );
-      return { entity: "SESSION", ...ranked };
-    }
-    if (code === "MILESTONE_NOT_FOUND") {
-      const ranked = rankPublicCandidates(
-        reference,
-        repository.listMilestones().map((milestone) => ({
-          id: String(milestone.id),
-          status: String(milestone.status),
-        })),
-        (candidate) => [candidate.id],
-      );
-      return { entity: "MILESTONE", ...ranked };
-    }
-    return null;
+    return errorEnrichment.notFoundSuggestionDetails(this.#runtime, projectCode, code, reference);
   }
 
   projectSuggestionDetails(reference: string): PublicNotFoundDetails {
-    const candidates = this.databases
-      .listProjects()
-      .filter((project) => project.lifecycle !== "TRASHED")
-      .map((project) => ({ code: project.code, name: project.name }));
-    const ranked = rankPublicCandidates(reference, candidates, (candidate) => [
-      candidate.code,
-      candidate.name,
-    ]);
-    return {
-      entity: "PROJECT",
-      did_you_mean: ranked.did_you_mean,
-      candidates: ranked.candidates,
-      candidate_count: ranked.candidate_count,
-      candidate_scan_count: ranked.candidate_scan_count,
-      candidate_scan_truncated: ranked.candidate_scan_truncated,
-      candidates_truncated: ranked.candidates_truncated,
-    };
+    return errorEnrichment.projectSuggestionDetails(this.#runtime, reference);
   }
 
   async enrichError(
@@ -969,135 +830,22 @@ export class AyanamiTaskService {
       expectedVersions?: Record<string, number>;
     } = {},
   ): Promise<AtmError> {
-    const typed = asAtmError(error);
-    const source = (typed.details ?? {}) as AtmBaseErrorDetails;
-    const reference = typeof source.reference === "string" ? source.reference : null;
-    if (typed.code === "PROJECT_NOT_FOUND" && reference) {
-      try {
-        const suggestion = this.projectSuggestionDetails(reference);
-        return typed.withDetails({
-          ...source,
-          entity: "PROJECT",
-          reference,
-          did_you_mean: suggestion.did_you_mean,
-          candidates: suggestion.candidates,
-        });
-      } catch {
-        return typed;
-      }
-    }
-    if (
-      reference &&
-      context.projectCode &&
-      ["WORK_ITEM_NOT_FOUND", "SESSION_NOT_FOUND", "MILESTONE_NOT_FOUND"].includes(typed.code)
-    ) {
-      try {
-        const suggestion = await this.notFoundSuggestionDetails(
-          context.projectCode,
-          typed.code,
-          reference,
-        );
-        if (suggestion) return typed.withDetails({ ...source, ...suggestion, reference });
-      } catch {
-        return typed;
-      }
-    }
-    if (typed.code !== "VERSION_CONFLICT") return typed;
-    const expected =
-      typeof source.expected === "number"
-        ? source.expected
-        : context.taskKey
-          ? (context.expectedVersions?.[context.taskKey] ?? context.expectedVersion ?? null)
-          : (context.expectedVersion ?? null);
-    const actual = typeof source.actual === "number" ? source.actual : null;
-    if (actual === null) return typed;
-    const entity = typeof source.entity === "string" ? source.entity : null;
-    const key = typeof source.key === "string" ? source.key : null;
-    const base: Record<string, unknown> = {
-      ...source,
-      ...(expected === null ? {} : { expected, expected_version: expected }),
-      actual,
-      current_version: actual,
-      ...(expected === null ? {} : { version_gap: actual - expected }),
-    };
-    if (!context.projectCode) return typed.withDetails(base as AtmBaseErrorDetails);
-    try {
-      if ((entity === "CHECKLIST" || context.checklistId) && (key || context.checklistId)) {
-        const checklistId = String(key ?? context.checklistId);
-        const [current, recentChanges] = await Promise.all([
-          this.checklistConflictSnapshot(context.projectCode, checklistId),
-          this.recentChecklistChanges(context.projectCode, checklistId, 6),
-        ]);
-        return typed.withDetails({
-          ...base,
-          entity: "CHECKLIST",
-          key: checklistId,
-          checklist_id: checklistId,
-          task_key: current.taskKey,
-          current: {
-            id: current.id,
-            task_key: current.taskKey,
-            task_version: current.taskVersion,
-            title: current.title,
-            status: current.status,
-            evidence_required: current.evidenceRequired,
-            evidence_count: current.evidenceCount,
-            version: current.version,
-            updated_at: current.updatedAt,
-          },
-          recent_changes: recentChanges.slice(0, 6).map((change) => ({
-            seq: change.seq,
-            type: change.type,
-            key: change.key,
-            summary: change.summary,
-            op_id: change.opId,
-            at: change.at,
-          })),
-          changes_complete: false,
-        });
-      }
-      const taskKey = String(key ?? context.taskKey ?? "");
-      if ((entity === "WORK_ITEM" || context.taskKey) && taskKey) {
-        const [current, recentChanges] = await Promise.all([
-          this.getWorkItemForUi(context.projectCode, taskKey),
-          this.recentWorkItemChanges(context.projectCode, taskKey, 6),
-        ]);
-        return typed.withDetails({
-          ...base,
-          entity: "WORK_ITEM",
-          key: taskKey,
-          task_key: taskKey,
-          current: {
-            key: current.key,
-            version: current.version,
-            status: current.status,
-            phase: current.phase,
-            title: current.title,
-            description: current.description,
-            assignee_agent_id: current.assigneeAgentId,
-            claimed_by_session_id: current.claimedBySessionId,
-            target_date: current.targetDate,
-            parent_key: current.parentKey,
-            cancel_reason: current.cancelReason,
-            duplicate_of: current.duplicateOf,
-            superseded_by: current.supersededBy,
-            updated_at: current.updatedAt,
-          },
-          recent_changes: recentChanges.slice(0, 6).map((change) => ({
-            seq: change.seq,
-            type: change.type,
-            key: change.key,
-            summary: change.summary,
-            op_id: change.opId,
-            at: change.at,
-          })),
-          changes_complete: false,
-        });
-      }
-    } catch {
-      return typed.withDetails(base as AtmBaseErrorDetails);
-    }
-    return typed.withDetails(base as AtmBaseErrorDetails);
+    return errorEnrichment.enrichApplicationError(
+      {
+        notFoundSuggestionDetails: (projectCode, code, reference) =>
+          this.notFoundSuggestionDetails(projectCode, code, reference),
+        projectSuggestionDetails: (reference) => this.projectSuggestionDetails(reference),
+        checklistConflictSnapshot: (projectCode, checklistId) =>
+          this.checklistConflictSnapshot(projectCode, checklistId),
+        recentChecklistChanges: (projectCode, checklistId, limit) =>
+          this.recentChecklistChanges(projectCode, checklistId, limit),
+        getWorkItemForUi: (projectCode, taskKey) => this.getWorkItemForUi(projectCode, taskKey),
+        recentWorkItemChanges: (projectCode, taskKey, limit) =>
+          this.recentWorkItemChanges(projectCode, taskKey, limit),
+      },
+      error,
+      context,
+    );
   }
 
   async #withMutationErrorDetails<T>(
@@ -1125,27 +873,27 @@ export class AyanamiTaskService {
   }
 
   async listRecords(projectCode: string, limit = 100) {
-    return (await this.#repository(projectCode)).listRecords(limit);
+    return readQueries.listRecords(this.#runtime, projectCode, limit);
   }
 
   async recordPage(projectCode: string, filters: RecordPageFilters = {}) {
-    return (await this.#repository(projectCode)).listRecordPage(filters);
+    return readQueries.recordPage(this.#runtime, projectCode, filters);
   }
 
   async getRecord(projectCode: string, reference: string) {
-    return (await this.#repository(projectCode)).getRecord(reference);
+    return readQueries.getRecord(this.#runtime, projectCode, reference);
   }
 
   async getProgressUpdate(projectCode: string, id: string) {
-    return (await this.#repository(projectCode)).getProgressUpdate(id);
+    return readQueries.getProgressUpdate(this.#runtime, projectCode, id);
   }
 
   async listProjectUpdates(projectCode: string, limit = 50) {
-    return (await this.#repository(projectCode)).listProjectUpdates(limit);
+    return readQueries.listProjectUpdates(this.#runtime, projectCode, limit);
   }
 
   async getProjectUpdate(projectCode: string, id: string) {
-    return (await this.#repository(projectCode)).getProjectUpdate(id);
+    return readQueries.getProjectUpdate(this.#runtime, projectCode, id);
   }
 
   async draftProjectUpdateAsUser(projectCode: string, opId: string) {
@@ -1360,19 +1108,7 @@ export class AyanamiTaskService {
     filters?: Parameters<ProjectRepository["listWorkItems"]>[0],
     view: TaskViewName = "core",
   ): Promise<TaskView[]> {
-    const repository = await this.#repository(projectCode);
-    if (
-      filters?.milestoneId &&
-      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
-    ) {
-      throw new AtmError("MILESTONE_NOT_FOUND", {
-        message: `里程碑不存在：${filters.milestoneId}`,
-        details: { entity: "MILESTONE", reference: filters.milestoneId },
-      });
-    }
-    return repository
-      .listTaskViewRows(filters, view)
-      .map((row) => projectTaskView(projectCode, row, view));
+    return taskQueries.listWorkItems(this.#runtime, projectCode, filters, view);
   }
 
   async listWorkItemPage(
@@ -1386,38 +1122,14 @@ export class AyanamiTaskService {
     retryCursor: string;
     hasMore: boolean;
   }> {
-    const repository = await this.#repository(projectCode);
-    if (
-      filters.milestoneId &&
-      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
-    ) {
-      throw new AtmError("MILESTONE_NOT_FOUND", {
-        message: `里程碑不存在：${filters.milestoneId}`,
-        details: { entity: "MILESTONE", reference: filters.milestoneId },
-      });
-    }
-    const page = repository.listTaskViewPage(filters, view);
-    return {
-      ...page,
-      items: page.items.map((row) => projectTaskView(projectCode, row, view)),
-    };
+    return taskQueries.listWorkItemPage(this.#runtime, projectCode, filters, view);
   }
 
   async listWorkItemPageForUi(
     projectCode: string,
     filters: WorkItemPageFilters = {},
   ): Promise<ReturnType<ProjectRepository["listWorkItemPage"]>> {
-    const repository = await this.#repository(projectCode);
-    if (
-      filters.milestoneId &&
-      !repository.listMilestones().some((milestone) => milestone.id === filters.milestoneId)
-    ) {
-      throw new AtmError("MILESTONE_NOT_FOUND", {
-        message: `里程碑不存在：${filters.milestoneId}`,
-        details: { entity: "MILESTONE", reference: filters.milestoneId },
-      });
-    }
-    return repository.listWorkItemPage(filters);
+    return taskQueries.listWorkItemPageForUi(this.#runtime, projectCode, filters);
   }
 
   /** Desktop-only operational metadata kept outside the bounded Agent read views. */
@@ -1425,52 +1137,16 @@ export class AyanamiTaskService {
     projectCode: string,
     filters: WorkItemListFilters = {},
   ): Promise<ReturnType<ProjectRepository["listWorkItems"]>> {
-    const { offset = 0, ...pageFilters } = filters;
-    const items: ReturnType<ProjectRepository["listWorkItems"]> = [];
-    let cursor: string | undefined;
-    const seenCursors = new Set<string>();
-    for (let pageCount = 0; ; pageCount += 1) {
-      if (pageCount >= 100 || items.length >= 10_000) {
-        throw new AtmError("RESULT_TOO_LARGE", {
-          message: "UI WorkItem 读取达到安全上限，请使用分页接口继续",
-          details: {
-            entity: "TASK_UI_PAGE",
-            reason: "DRAIN_LIMIT_REACHED",
-            maxPages: 100,
-            maxItems: 10_000,
-            resumeCursor: cursor ?? null,
-          },
-        });
-      }
-      const page = await this.listWorkItemPageForUi(projectCode, {
-        ...pageFilters,
-        limit: 100,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      items.push(...page.items);
-      if (!page.hasMore) return items.slice(Math.max(0, offset));
-      if (!page.nextCursor) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "TASK_UI_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
-          details: { entity: "TASK_UI_PAGE", reason: "MISSING_NEXT_CURSOR" },
-        });
-      }
-      if (seenCursors.has(page.nextCursor)) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "TASK_UI_PAGE 分页返回了重复 cursor",
-          details: { entity: "TASK_UI_PAGE", reason: "REPEATED_CURSOR" },
-        });
-      }
-      seenCursors.add(page.nextCursor);
-      cursor = page.nextCursor;
-    }
+    return taskQueries.listWorkItemsForUi(projectCode, filters, (code, pageFilters) =>
+      this.listWorkItemPageForUi(code, pageFilters),
+    );
   }
 
   async assertMilestonesExist(
     projectCode: string,
     milestoneIds: Array<string | null | undefined>,
   ): Promise<void> {
-    assertKnownMilestones(await this.#repository(projectCode), milestoneIds);
+    return taskQueries.assertMilestonesExist(this.#runtime, projectCode, milestoneIds);
   }
 
   async assertSessionCanProvisionPlanningRoot(
@@ -1487,107 +1163,16 @@ export class AyanamiTaskService {
   }
 
   async reconcileProject(projectCode: string, input: { includeActive?: boolean } = {}) {
-    const project = this.databases.getProject(projectCode);
-    const repository = await this.#repository(project.code);
-    const tasks: ReturnType<ProjectRepository["listWorkItems"]> = [];
-    let taskCursor: string | undefined;
-    const seenTaskCursors = new Set<string>();
-    for (;;) {
-      const page = repository.listWorkItemPage({
-        limit: 100,
-        ...(taskCursor === undefined ? {} : { cursor: taskCursor }),
-      });
-      tasks.push(...page.items);
-      if (!page.hasMore) break;
-      if (!page.nextCursor) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "RECONCILE_TASK_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
-          details: { entity: "RECONCILE_TASK_PAGE", reason: "MISSING_NEXT_CURSOR" },
-        });
-      }
-      if (seenTaskCursors.has(page.nextCursor)) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "RECONCILE_TASK_PAGE 分页返回了重复 cursor",
-          details: { entity: "RECONCILE_TASK_PAGE", reason: "REPEATED_CURSOR" },
-        });
-      }
-      seenTaskCursors.add(page.nextCursor);
-      taskCursor = page.nextCursor;
-    }
-
-    const sessions: import("@ayanami-task/storage-sqlite").SessionView[] = [];
-    let sessionCursor: string | undefined;
-    const seenSessionCursors = new Set<string>();
-    for (;;) {
-      const page = repository.listAgentSessionPage({
-        limit: 100,
-        ...(sessionCursor === undefined ? {} : { cursor: sessionCursor }),
-      });
-      sessions.push(...page.items);
-      if (!page.hasMore) break;
-      if (!page.nextCursor) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "RECONCILE_SESSION_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
-          details: { entity: "RECONCILE_SESSION_PAGE", reason: "MISSING_NEXT_CURSOR" },
-        });
-      }
-      if (seenSessionCursors.has(page.nextCursor)) {
-        throw new AtmError("INVALID_RESPONSE", {
-          message: "RECONCILE_SESSION_PAGE 分页返回了重复 cursor",
-          details: { entity: "RECONCILE_SESSION_PAGE", reason: "REPEATED_CURSOR" },
-        });
-      }
-      seenSessionCursors.add(page.nextCursor);
-      sessionCursor = page.nextCursor;
-    }
-    const knownSessionIds = new Set(sessions.map((session) => String(session.id)));
-    for (const task of tasks) {
-      const sessionId = task.claimedBySessionId;
-      if (!sessionId || knownSessionIds.has(sessionId)) continue;
-      try {
-        sessions.push(repository.getSessionView(sessionId));
-        knownSessionIds.add(sessionId);
-      } catch {
-        // Missing claim owners remain visible as stalled rather than making reconciliation fail.
-      }
-    }
-
-    const result = reconcileWorkItems({
-      sourceRoot: project.sourcePaths[0] ?? null,
-      tasks,
-      sessions,
-      includeActive: input.includeActive ?? false,
-    });
-    return {
-      project: {
-        code: project.code,
-        name: project.name,
-        sourceRoot: project.sourcePaths[0] ?? null,
-      },
-      ...result,
-    };
+    return reconciliationQueries.reconcileProject(this.#runtime, projectCode, input);
   }
 
   async reconcileProjectPage(
     projectCode: string,
     input: { includeActive?: boolean; limit?: number; cursor?: string } = {},
   ) {
-    const limit = Math.min(100, Math.max(1, input.limit ?? 10));
-    const offset = Math.max(0, Number.parseInt(input.cursor ?? "0", 10) || 0);
-    const reconciliation = await this.reconcileProject(projectCode, {
-      includeActive: input.includeActive ?? false,
-    });
-    const items = reconciliation.items.slice(offset, offset + limit);
-    const hasMore = offset + items.length < reconciliation.items.length;
-    return {
-      ...reconciliation,
-      offset,
-      returnedCount: items.length,
-      items,
-      retryCursor: String(offset),
-      nextCursor: hasMore ? String(offset + items.length) : null,
-      hasMore,
-    };
+    return reconciliationQueries.reconcileProjectPage(projectCode, input, (code, options) =>
+      this.reconcileProject(code, options),
+    );
   }
 
   async getWorkItem(
@@ -1607,12 +1192,7 @@ export class AyanamiTaskService {
     taskKey: string,
     view?: TaskViewName,
   ): Promise<TaskView | ReturnType<ProjectRepository["getWorkItem"]>> {
-    const repository = await this.#repository(projectCode);
-    // Internal mutation/test callers predating the bounded read contract can omit
-    // a view and retain the repository aggregate. Every REST/MCP/UI query passes
-    // an explicit canonical view and therefore cannot leak this legacy shape.
-    if (view === undefined) return repository.getWorkItem(taskKey);
-    return projectTaskView(projectCode, repository.getTaskViewRow(taskKey, view), view);
+    return taskQueries.getWorkItem(this.#runtime, projectCode, taskKey, view);
   }
 
   /** Desktop-only aggregate for operational controls such as lease release and tree layout. */
@@ -1620,7 +1200,7 @@ export class AyanamiTaskService {
     projectCode: string,
     taskKey: string,
   ): Promise<ReturnType<ProjectRepository["getWorkItem"]>> {
-    return (await this.#repository(projectCode)).getWorkItem(taskKey);
+    return taskQueries.getWorkItemForUi(this.#runtime, projectCode, taskKey);
   }
 
   async createReviewRequest(
@@ -1854,35 +1434,35 @@ export class AyanamiTaskService {
   }
 
   async search(projectCode: string, query: string, limit = 20, cursor?: string) {
-    return (await this.#repository(projectCode)).search(query, limit, cursor);
+    return readQueries.search(this.#runtime, projectCode, query, limit, cursor);
   }
 
   globalSearch(query: string, limit = 20, cursor?: string) {
-    return this.databases.globalSearch(query, limit, cursor);
+    return readQueries.globalSearch(this.#runtime, query, limit, cursor);
   }
 
   globalDelta(sinceSequence: number, limit = 50) {
-    return this.databases.globalDelta(sinceSequence, limit);
+    return readQueries.globalDelta(this.#runtime, sinceSequence, limit);
   }
 
   async delta(projectCode: string, sinceSequence: number, limit = 50, types: string[] = []) {
-    return (await this.#repository(projectCode)).delta(sinceSequence, limit, types);
+    return readQueries.delta(this.#runtime, projectCode, sinceSequence, limit, types);
   }
 
   async recentWorkItemChanges(projectCode: string, taskKey: string, limit = 6) {
-    return (await this.#repository(projectCode)).recentWorkItemChanges(taskKey, limit);
+    return readQueries.recentWorkItemChanges(this.#runtime, projectCode, taskKey, limit);
   }
 
   async checklistConflictSnapshot(projectCode: string, checklistId: string) {
-    return (await this.#repository(projectCode)).checklistConflictSnapshot(checklistId);
+    return readQueries.checklistConflictSnapshot(this.#runtime, projectCode, checklistId);
   }
 
   async recentChecklistChanges(projectCode: string, checklistId: string, limit = 6) {
-    return (await this.#repository(projectCode)).recentChecklistChanges(checklistId, limit);
+    return readQueries.recentChecklistChanges(this.#runtime, projectCode, checklistId, limit);
   }
 
   async getOperationTrace(projectCode: string, opId: string, sessionId?: string | null) {
-    return (await this.#repository(projectCode)).getOperationTrace(opId, sessionId);
+    return readQueries.getOperationTrace(this.#runtime, projectCode, opId, sessionId);
   }
 
   async end(
@@ -1925,11 +1505,10 @@ export class AyanamiTaskService {
   }
 
   async doctor(): Promise<Awaited<ReturnType<AyanamiDatabaseManager["doctor"]>>> {
-    return this.databases.doctor();
+    return projectQueries.doctor(this.#runtime);
   }
 
   close(): void {
-    this.#repositories.clear();
-    this.databases.close();
+    this.#runtime.close();
   }
 }
