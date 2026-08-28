@@ -130,4 +130,29 @@ describe("UI foundation boundaries", () => {
     expect(app).toContain("const { notice, notify } = useNotice();");
     expect(app).toContain("const { theme, toggleTheme } = useTheme();");
   });
+
+  it("app 使用提取后的 route lifecycle 与 shortcuts，而不是保留重复监听", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./routes/use-app-route.js"');
+    expect(app).toContain('from "./hooks/use-app-shortcuts.js"');
+    for (const call of [
+      "const [route, setRoute] = useAppRouteState();",
+      "useRouteHash(route);",
+      "useDesktopRouteNavigation(desktop, setRoute);",
+      "useAppShortcuts(route, setRoute, setPalette);",
+      "appRouteTitle(route, selectedProject?.name)",
+    ]) {
+      expect(app).toContain(call);
+    }
+    for (const duplicate of [
+      "useState<Route>(() => (location.hash.slice(1) as Route)",
+      "location.hash = route",
+      "desktop?.onNavigate?.",
+      "function isEditableTarget(",
+      "const onKey = (event: KeyboardEvent)",
+      'overview: "总览"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+  });
 });
