@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, request as createRequest, test } from "@playwright/test";
+import Database from "better-sqlite3";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 const headers = { authorization: "Bearer e2e-test-token" };
@@ -1091,4 +1092,90 @@ test("新品牌、抽屉空间层与 reduced motion 降级可用", async ({ page
     "opacity",
   );
   await page.keyboard.press("Escape");
+});
+
+test("投影健康状态可在总览、项目和设置中查看并安全重试", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/#overview");
+  const overviewProject = page.locator(".atm-overview-project").filter({ hasText: "E2E 验收项目" });
+  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("已追平");
+  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 0");
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const projectResponse = await api.get(`${apiUrl}/projects/E2E`);
+  expect(projectResponse.ok()).toBeTruthy();
+  const project = (await projectResponse.json()) as { id: string };
+  const escapedProjectId = project.id.replaceAll("'", "''");
+  const registry = new Database(resolve("output", "e2e", "data", "registry", "registry.sqlite"));
+  const trigger = "fail_e2e_projection_health";
+
+  try {
+    registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    registry.exec(`
+      CREATE TRIGGER ${trigger}
+      BEFORE UPDATE OF project_sequence ON project_summary_cache
+      WHEN NEW.project_id = '${escapedProjectId}'
+      BEGIN
+        SELECT RAISE(ABORT, 'injected E2E projection failure');
+      END;
+    `);
+    const record = await api.post(`${apiUrl}/projects/E2E/ui/records`, {
+      data: {
+        opId: "e2e-projection-deferred",
+        kind: "FACT",
+        title: "Projection E2E failure injection",
+        summary: "A committed project write remains durable while Registry projection is deferred.",
+      },
+    });
+    expect(record.status()).toBe(201);
+    expect(await record.json()).toMatchObject({
+      projection: {
+        status: "DEFERRED",
+        retryScheduled: true,
+        lastError: expect.stringContaining("injected E2E projection failure"),
+      },
+    });
+
+    await page.reload();
+    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("等待重试");
+    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 1");
+    await expect(page.getByText("E2E 数据投影等待重试（lag 1）", { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-projection-deferred-overview-dark.png"),
+      fullPage: true,
+    });
+
+    await page.locator(".atm-sidebar").getByRole("button", { name: "E2E 验收项目" }).click();
+    const projectPanel = page.getByRole("region", { name: "数据投影" });
+    await expect(projectPanel).toBeVisible();
+    await expect(projectPanel.getByText("等待重试", { exact: true })).toBeVisible();
+    await expect(projectPanel.getByText("lag 1", { exact: true })).toBeVisible();
+    await expect(projectPanel.getByText(/injected E2E projection failure/u)).toBeVisible();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-projection-deferred-project-dark.png"),
+      fullPage: true,
+    });
+
+    registry.exec(`DROP TRIGGER ${trigger}`);
+    await projectPanel.getByRole("button", { name: "立即重试" }).click();
+    await expect(page.getByText("E2E 数据投影已追平", { exact: true })).toBeVisible();
+    await expect(projectPanel.getByText("已追平", { exact: true })).toBeVisible();
+    await expect(projectPanel.getByText("lag 0", { exact: true })).toBeVisible();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-projection-recovered-project-dark.png"),
+      fullPage: true,
+    });
+
+    await page.locator(".atm-sidebar").getByRole("button", { name: "设置" }).click();
+    const systemPanel = page.getByRole("region", { name: "全局投影状态" });
+    await expect(systemPanel).toBeVisible();
+    await expect(systemPanel.getByText("已追平", { exact: true })).toBeVisible();
+    await expect(systemPanel.getByText("待重试 0", { exact: true })).toBeVisible();
+  } finally {
+    try {
+      registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+    } finally {
+      registry.close();
+      await api.dispose();
+    }
+  }
 });

@@ -18,7 +18,16 @@ import Database from "better-sqlite3";
 import { strToU8, zipSync, type Zippable } from "fflate";
 import { allocateProjectCode } from "@ayanami-task/domain";
 import { AtmError, asAtmError } from "@ayanami-task/errors";
-import { createUlid, nowIso, type SearchHit, type SearchPage } from "@ayanami-task/protocol";
+import {
+  createUlid,
+  nowIso,
+  type ProjectionReceipt,
+  type ProjectionFailureView,
+  type ProjectionStateView,
+  type ProjectionSummary,
+  type SearchHit,
+  type SearchPage,
+} from "@ayanami-task/protocol";
 import {
   foreignKeyCheck,
   openManagedDatabase,
@@ -131,15 +140,6 @@ export type SettingView = {
   updatedAt: string;
 };
 
-export type ProjectionReceipt = {
-  status: "APPLIED" | "DEFERRED";
-  sourceSeq: number;
-  projectedSeq: number;
-  retryScheduled: boolean;
-  lastError: string | null;
-  retryCount: number;
-};
-
 export type ProjectionDispatchResult = {
   delivered: number;
   sequence: number;
@@ -153,6 +153,40 @@ function canonicalPath(path: string): string {
 
 function projectionErrorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+}
+
+type ProjectionStateRow = {
+  project_id: string;
+  code: string;
+  name: string;
+  lifecycle: string;
+  source_sequence: number;
+  projected_sequence: number;
+  status: "APPLIED" | "DEFERRED";
+  last_error: string | null;
+  retry_count: number;
+  updated_at: string;
+};
+
+function projectionStateFromRow(row: ProjectionStateRow): ProjectionStateView {
+  const sourceSeq = Number(row.source_sequence);
+  const projectedSeq = Number(row.projected_sequence);
+  return {
+    project: {
+      id: row.project_id,
+      code: row.code,
+      name: row.name,
+      lifecycle: row.lifecycle,
+    },
+    status: row.status,
+    sourceSeq,
+    projectedSeq,
+    lag: sourceSeq - projectedSeq,
+    retryScheduled: row.status === "DEFERRED",
+    lastError: row.last_error?.slice(0, 2_000) ?? null,
+    retryCount: Number(row.retry_count),
+    updatedAt: row.updated_at,
+  };
 }
 
 function gitValue(cwd: string, args: string[]): string | null {
@@ -1358,6 +1392,8 @@ export class AyanamiDatabaseManager {
   async doctor(): Promise<{
     registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
     projectCounts: Record<string, { total: number; failed: number }>;
+    projectionSummary: ProjectionSummary;
+    projectionFailures: ProjectionFailureView[];
     projects: Array<{
       code: string;
       lifecycle: string;
@@ -1365,6 +1401,7 @@ export class AyanamiDatabaseManager {
       quickCheck: boolean;
       foreignKeys: boolean;
       separateDatabase: boolean;
+      projection: ProjectionStateView | null;
     }>;
   }> {
     const registryCapabilities = sqliteCapabilities(this.registry.sqlite);
@@ -1375,6 +1412,10 @@ export class AyanamiDatabaseManager {
       trigram: registryCapabilities.trigram,
     };
     const registryPath = resolve(this.registry.path).toLowerCase();
+    const projectionStates = this.listProjectionStates(true);
+    const projectionByProject = new Map(
+      projectionStates.map((state) => [state.project.id, state] as const),
+    );
     const projects = this.listProjects(true).map((project) => {
       let sqlite: Database.Database | null = null;
       try {
@@ -1391,6 +1432,7 @@ export class AyanamiDatabaseManager {
           quickCheck: projectQuickCheck,
           foreignKeys: projectForeignKeys,
           separateDatabase: resolve(project.databasePath).toLowerCase() !== registryPath,
+          projection: projectionByProject.get(project.id) ?? null,
         };
       } catch {
         return {
@@ -1400,6 +1442,7 @@ export class AyanamiDatabaseManager {
           quickCheck: false,
           foreignKeys: false,
           separateDatabase: true,
+          projection: projectionByProject.get(project.id) ?? null,
         };
       } finally {
         sqlite?.close();
@@ -1412,7 +1455,127 @@ export class AyanamiDatabaseManager {
       if (!project.ok) current.failed += 1;
       projectCounts[project.lifecycle] = current;
     }
-    return { registry, projects, projectCounts };
+    return {
+      registry,
+      projects,
+      projectCounts,
+      projectionSummary: this.projectionSummary(),
+      projectionFailures: this.projectionFailures(),
+    };
+  }
+
+  projectionState(projectCodeOrId: string): ProjectionStateView {
+    const project = this.getProject(projectCodeOrId);
+    const row = this.registry.sqlite
+      .prepare(
+        `SELECT projects.id AS project_id, projects.code, projects.name, projects.lifecycle,
+                state.source_sequence, state.projected_sequence, state.status,
+                state.last_error, state.retry_count, state.updated_at
+         FROM projects
+         JOIN project_projection_state state ON state.project_id = projects.id
+         WHERE projects.id = ?`,
+      )
+      .get(project.id) as ProjectionStateRow | undefined;
+    if (!row) {
+      throw new AtmError("INTERNAL_ERROR", {
+        message: `项目缺少 Projection 状态：${project.code}`,
+        details: { entity: "PROJECTION_STATE", project: project.code },
+      });
+    }
+    return projectionStateFromRow(row);
+  }
+
+  listProjectionStates(includeTrashed = false): ProjectionStateView[] {
+    const rows = this.registry.sqlite
+      .prepare(
+        `SELECT projects.id AS project_id, projects.code, projects.name, projects.lifecycle,
+                state.source_sequence, state.projected_sequence, state.status,
+                state.last_error, state.retry_count, state.updated_at
+         FROM projects
+         JOIN project_projection_state state ON state.project_id = projects.id
+         ${includeTrashed ? "" : "WHERE projects.lifecycle <> 'TRASHED'"}
+         ORDER BY projects.code`,
+      )
+      .all() as ProjectionStateRow[];
+    return rows.map(projectionStateFromRow);
+  }
+
+  projectionSummary(includeTrashed = false): ProjectionSummary {
+    const projects = this.listProjects(true).filter(
+      (project) => includeTrashed || project.lifecycle !== "TRASHED",
+    );
+    const states = this.listProjectionStates(includeTrashed);
+    const missingCount = projects.length - states.length;
+    const appliedCount = states.filter(
+      (state) => state.status === "APPLIED" && state.lag === 0,
+    ).length;
+    const deferredCount = states.filter((state) => state.status === "DEFERRED").length;
+    const lags = states.map((state) => state.lag);
+    const maxLag = lags.reduce(
+      (selected, lag) =>
+        Math.abs(lag) > Math.abs(selected) ||
+        (Math.abs(lag) === Math.abs(selected) && lag > selected)
+          ? lag
+          : selected,
+      0,
+    );
+    return {
+      status:
+        missingCount > 0 || states.some((state) => state.status === "DEFERRED" || state.lag !== 0)
+          ? "DEFERRED"
+          : "APPLIED",
+      total: projects.length,
+      appliedCount,
+      deferredCount,
+      missingCount,
+      retryScheduledCount: states.filter((state) => state.retryScheduled).length,
+      lagging: states.filter((state) => state.lag !== 0).length,
+      maxLag,
+      totalLag: lags.reduce((total, lag) => total + lag, 0),
+    };
+  }
+
+  projectionFailures(includeTrashed = false): ProjectionFailureView[] {
+    const states = this.listProjectionStates(includeTrashed);
+    const stateByProject = new Map(states.map((state) => [state.project.id, state] as const));
+    const failures: ProjectionFailureView[] = [];
+    for (const project of this.listProjects(true).filter(
+      (candidate) => includeTrashed || candidate.lifecycle !== "TRASHED",
+    )) {
+      const identity = {
+        id: project.id,
+        code: project.code,
+        name: project.name,
+        lifecycle: project.lifecycle,
+      };
+      const state = stateByProject.get(project.id) ?? null;
+      if (!state) {
+        failures.push({
+          project: identity,
+          reason: "MISSING",
+          lag: null,
+          lastError: "Projection 状态缺失",
+          state: null,
+        });
+      } else if (state.lag < 0) {
+        failures.push({
+          project: identity,
+          reason: "INVERTED",
+          lag: state.lag,
+          lastError: state.lastError,
+          state,
+        });
+      } else if (state.status === "DEFERRED" || state.lag > 0) {
+        failures.push({
+          project: identity,
+          reason: "DEFERRED",
+          lag: state.lag,
+          lastError: state.lastError,
+          state,
+        });
+      }
+    }
+    return failures;
   }
 
   async dispatchProject(projectCodeOrId: string): Promise<ProjectionDispatchResult> {
@@ -1671,6 +1834,7 @@ export class AyanamiDatabaseManager {
         status: retryScheduled ? "DEFERRED" : "APPLIED",
         sourceSeq: sourceSequence,
         projectedSeq: retryScheduled ? 0 : sourceSequence,
+        lag: retryScheduled ? sourceSequence : 0,
         retryScheduled,
         lastError: fallbackError,
         retryCount: retryScheduled ? 1 : 0,
@@ -1692,8 +1856,9 @@ export class AyanamiDatabaseManager {
       status: row.status,
       sourceSeq: row.source_sequence,
       projectedSeq: row.projected_sequence,
+      lag: row.source_sequence - row.projected_sequence,
       retryScheduled,
-      lastError: row.last_error,
+      lastError: row.last_error?.slice(0, 2_000) ?? null,
       retryCount: row.retry_count,
     };
   }
@@ -1887,13 +2052,49 @@ export class AyanamiDatabaseManager {
                 summaries.active_count, summaries.ready_count, summaries.blocked_count,
                 summaries.waiting_user_count, summaries.waiting_agent_count,
                 summaries.stale_claim_count, summaries.active_agent_count, summaries.overdue_count,
-                summaries.last_project_update_at, summaries.last_activity_at, summaries.next_target_date
+                summaries.last_project_update_at, summaries.last_activity_at, summaries.next_target_date,
+                projection.source_sequence AS _projection_source_sequence,
+                projection.projected_sequence AS _projection_projected_sequence,
+                projection.status AS _projection_status,
+                projection.last_error AS _projection_last_error,
+                projection.retry_count AS _projection_retry_count,
+                projection.updated_at AS _projection_updated_at
          FROM projects
          LEFT JOIN project_summary_cache summaries ON summaries.project_id = projects.id
+         LEFT JOIN project_projection_state projection ON projection.project_id = projects.id
          WHERE projects.lifecycle <> 'TRASHED'
          ORDER BY COALESCE(summaries.last_activity_at, projects.updated_at) DESC`,
       )
       .all() as Array<Record<string, unknown>>;
+    const projectViews = projects.map((row) => {
+      const {
+        _projection_source_sequence: sourceSequence,
+        _projection_projected_sequence: projectedSequence,
+        _projection_status: projectionStatus,
+        _projection_last_error: projectionLastError,
+        _projection_retry_count: projectionRetryCount,
+        _projection_updated_at: projectionUpdatedAt,
+        ...project
+      } = row;
+      return {
+        ...project,
+        projection:
+          typeof projectionStatus === "string"
+            ? projectionStateFromRow({
+                project_id: String(row.id),
+                code: String(row.code),
+                name: String(row.name),
+                lifecycle: String(row.lifecycle),
+                source_sequence: Number(sourceSequence),
+                projected_sequence: Number(projectedSequence),
+                status: projectionStatus as "APPLIED" | "DEFERRED",
+                last_error: projectionLastError === null ? null : String(projectionLastError),
+                retry_count: Number(projectionRetryCount),
+                updated_at: String(projectionUpdatedAt),
+              })
+            : null,
+      };
+    });
     const totals = this.registry.sqlite
       .prepare(
         `SELECT COUNT(*) AS total,
@@ -1923,7 +2124,14 @@ export class AyanamiDatabaseManager {
         created_at: String(row.created_at),
       }),
     );
-    return { sequence: sequence.current_sequence, projects, quick: totals, recentEvents };
+    return {
+      sequence: sequence.current_sequence,
+      projects: projectViews,
+      quick: totals,
+      recentEvents,
+      projectionSummary: this.projectionSummary(),
+      projectionFailures: this.projectionFailures(),
+    };
   }
 
   globalDelta(

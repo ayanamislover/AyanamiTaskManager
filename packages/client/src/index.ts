@@ -1,4 +1,9 @@
 import type {
+  ProjectionBatchReceipt,
+  ProjectionFailureView,
+  ProjectionReconcileReceipt,
+  ProjectionStateView,
+  ProjectionSummary,
   RecordInput,
   RecordPage,
   RecordView,
@@ -20,6 +25,13 @@ import { drainCursorPages, type CursorDrainOptions, type CursorPage } from "./cu
 
 export { drainCursorPages } from "./cursor-drain.js";
 export type { CursorDrainOptions, CursorPage } from "./cursor-drain.js";
+export type {
+  ProjectionBatchReceipt,
+  ProjectionFailureView,
+  ProjectionReconcileReceipt,
+  ProjectionStateView,
+  ProjectionSummary,
+} from "@ayanami-task/protocol";
 
 export type AyanamiClientOptions = {
   endpoint: string;
@@ -74,6 +86,43 @@ export type RecordCreateReceipt = {
 };
 export type ProjectRecord = RecordView;
 export type AgentSession = SessionView;
+
+export type SystemStatus = Record<string, unknown> & {
+  ok: boolean;
+  projectionSummary: ProjectionSummary;
+  projectionFailures: ProjectionFailureView[];
+};
+
+export type OverviewProject = Record<string, unknown> & {
+  id: string;
+  code: string;
+  name: string;
+  lifecycle: string;
+  projection: ProjectionStateView | null;
+  health: string | null;
+  current_milestone: string | null;
+  next_target_date: string | null;
+  progress: number | null;
+  progress_source: string | null;
+  active_count: number | null;
+  blocked_count: number | null;
+  waiting_user_count: number | null;
+  waiting_agent_count: number | null;
+  overdue_count: number | null;
+  stale_claim_count: number | null;
+  active_agent_count: number | null;
+  last_activity_at: string | null;
+  last_project_update_at: string | null;
+};
+
+export type OverviewResponse = Record<string, unknown> & {
+  sequence: number;
+  projects: OverviewProject[];
+  projectionSummary: ProjectionSummary;
+  projectionFailures: ProjectionFailureView[];
+  quick: Record<string, unknown>;
+  recentEvents: Array<Record<string, unknown>>;
+};
 
 export type TaskViewFor<TView extends TaskViewName> = TView extends "full"
   ? TaskFullView
@@ -181,8 +230,8 @@ export class AyanamiClient {
     return payload as T;
   }
 
-  status = () => this.request<Record<string, unknown>>("GET", "/api/v1/system/status");
-  overview = () => this.request<Record<string, any>>("GET", "/api/v1/overview");
+  status = () => this.request<SystemStatus>("GET", "/api/v1/system/status");
+  overview = () => this.request<OverviewResponse>("GET", "/api/v1/overview");
 
   readonly savedViews = {
     list: (project?: string) =>
@@ -307,6 +356,11 @@ export class AyanamiClient {
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/reconciliation${queryString({ include_active: includeActive ? 1 : undefined })}`,
       ),
+    reconcileProjection: (code: string) =>
+      this.request<ProjectionReconcileReceipt>(
+        "POST",
+        `/api/v1/projects/${encodeURIComponent(code)}/projection/reconcile`,
+      ),
     recordPage: (code: string, limit = 100, cursor?: string) =>
       this.request<RecordPage>(
         "GET",
@@ -335,6 +389,11 @@ export class AyanamiClient {
         `/api/v1/projects/${encodeURIComponent(code)}/project-updates`,
         input,
       ),
+  };
+
+  readonly projections = {
+    reconcileAll: () =>
+      this.request<ProjectionBatchReceipt>("POST", "/api/v1/system/projections/reconcile"),
   };
 
   readonly sessions = {
@@ -579,5 +638,5 @@ export class AyanamiClient {
       `/api/v1/projects/${encodeURIComponent(project)}/events${queryString({ since, limit, types: types.join(",") })}`,
     );
 
-  doctor = () => this.request<Record<string, unknown>>("GET", "/api/v1/system/status");
+  doctor = () => this.request<SystemStatus>("GET", "/api/v1/system/status");
 }

@@ -280,10 +280,21 @@ export async function buildAyanamiServer(options: AyanamiServerOptions): Promise
       projectCount: doctor.projects.length,
       projectCounts: doctor.projectCounts,
       projectFailures: doctor.projects.filter((project) => !project.ok),
+      projectionSummary: doctor.projectionSummary,
+      projectionFailures: doctor.projectionFailures,
       at: new Date().toISOString(),
     };
   });
   app.get("/api/v1/overview", async () => options.service.overview());
+
+  app.post("/api/v1/projects/:code/projection/reconcile", async (request) => {
+    const { code } = request.params as { code: string };
+    return options.service.reconcileProjection(code);
+  });
+
+  app.post("/api/v1/system/projections/reconcile", async () =>
+    options.service.reconcileProjections(),
+  );
 
   app.get("/api/v1/saved-views", async (request) => {
     const { project } = request.query as { project?: string };

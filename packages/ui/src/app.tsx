@@ -46,6 +46,11 @@ import {
 } from "./agent-sessions.js";
 import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { EngineeringMetricsPanel } from "./project-statistics-panel.js";
+import {
+  ProjectProjectionPanel,
+  ProjectionStatusBadge,
+  SystemProjectionPanel,
+} from "./projection-health-panel.js";
 import { McpBridgePanel, type McpBridgeObservation } from "./mcp-bridge-panel.js";
 import { cancelNoticeTimer, restartNoticeTimer } from "./notice-lifecycle.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
@@ -724,9 +729,7 @@ function OverviewPage({
     );
   if (query.error) return <ErrorState error={query.error} />;
   const data = query.data!;
-  const projects = ((data.projects ?? []) as any[]).filter(
-    (project) => project.lifecycle !== "TRASHED",
-  );
+  const projects = data.projects.filter((project) => project.lifecycle !== "TRASHED");
   const quickTasks = ((quickQuery.data ?? []) as any[])
     .filter((task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status))
     .slice(0, 5);
@@ -757,6 +760,13 @@ function OverviewPage({
     if (project.lifecycle === "MIGRATION_FAILED") items.push(`${project.code} 数据库迁移失败`);
     return items;
   });
+  for (const failure of data.projectionFailures ?? []) {
+    const code = failure.project.code;
+    if (failure.reason === "MISSING") attention.push(`${code} 缺少数据投影状态`);
+    else if (failure.reason === "INVERTED")
+      attention.push(`${code} 数据投影序列倒挂（lag ${failure.lag}）`);
+    else attention.push(`${code} 数据投影等待重试（lag ${failure.lag}）`);
+  }
   if ((data.recentEvents as any[] | undefined)?.some((event) => event.type === "backup.failed"))
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");
   return (
@@ -831,7 +841,7 @@ function OverviewPage({
                   </div>
                   <div className="atm-row-sub">
                     {Math.round(Number(project.progress ?? 0))}% ·{" "}
-                    {progressSourceLabels[project.progress_source] ?? "尚无进度"}
+                    {progressSourceLabels[String(project.progress_source ?? "NONE")] ?? "尚无进度"}
                   </div>
                   <div className="atm-project-stats">
                     <span>活动 {Number(project.active_count ?? 0)}</span>
@@ -844,6 +854,10 @@ function OverviewPage({
                     <span>Agent {Number(project.active_agent_count ?? 0)}</span>
                   </div>
                   <div className="atm-row-sub">最近活动 {formatTime(project.last_activity_at)}</div>
+                  <div className="atm-projection-summary">
+                    <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
+                    <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
+                  </div>
                 </button>
               ))}
             </div>
@@ -2069,6 +2083,14 @@ function SettingsPage({ client, desktop }: { client: AyanamiClient; desktop?: De
             </div>
           )}
         </section>
+        {query.data ? (
+          <SystemProjectionPanel
+            client={client}
+            summary={query.data.projectionSummary}
+            failures={query.data.projectionFailures}
+            notify={setFeedback}
+          />
+        ) : null}
         <section className="atm-panel">
           <div className="atm-panel-head">
             <h2>Agent 接入</h2>
@@ -4419,6 +4441,12 @@ function ProjectPage({
           )}
         </article>
       </section>
+      <ProjectProjectionPanel
+        client={client}
+        projectCode={project.code}
+        state={projectSummary?.projection ?? null}
+        notify={notify}
+      />
       <section
         className={`atm-panel atm-engineering${reconciliationCollapsed ? " is-collapsed" : ""}`}
         aria-label="任务对账"

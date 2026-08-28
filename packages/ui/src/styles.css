@@ -587,6 +587,48 @@ button.atm-row:hover {
   font-size: 11px;
   text-align: center;
 }
+.atm-projection-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 10px;
+}
+.atm-projection-panel {
+  margin-top: 18px;
+}
+.atm-settings-grid > .atm-projection-panel {
+  margin-top: 0;
+}
+.atm-projection-panel .atm-panel-head > div:first-child {
+  min-width: 0;
+}
+.atm-projection-body {
+  display: grid;
+  gap: 10px;
+}
+.atm-projection-body > .atm-project-stats {
+  margin-top: 0;
+}
+.atm-projection-failure {
+  min-width: 0;
+  border: 1px solid var(--atm-border);
+  border-radius: 9px;
+  overflow: hidden;
+}
+.atm-projection-failure .atm-row {
+  border: 0;
+}
+.atm-projection-failure .atm-projection-error {
+  margin: 0 12px 12px;
+}
+.atm-projection-error {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
 .atm-attention-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
