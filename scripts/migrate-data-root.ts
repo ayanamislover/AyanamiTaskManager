@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
@@ -12,12 +13,30 @@ type MigrationResult = {
   executed: boolean;
 };
 
+type MigrationManifest = Omit<MigrationResult, "executed"> & {
+  format: 1;
+  migratedAt: string;
+};
+
+export type MigrationStage = "AFTER_COPY" | "AFTER_MANIFEST" | "AFTER_BACKUP" | "AFTER_COMMIT";
+
 function assertSafeRoots(source: string, destination: string): void {
   if (!isAbsolute(source) || !isAbsolute(destination))
     throw new Error("DATA_ROOT_MUST_BE_ABSOLUTE");
   if (source.toLowerCase() === destination.toLowerCase()) throw new Error("DATA_ROOTS_MUST_DIFFER");
   if ([source, destination].some((candidate) => dirname(candidate) === candidate))
     throw new Error("DATA_ROOT_TOO_BROAD");
+  const sourceToDestination = relative(source, destination);
+  const destinationToSource = relative(destination, source);
+  if (
+    (sourceToDestination &&
+      !sourceToDestination.startsWith("..") &&
+      !isAbsolute(sourceToDestination)) ||
+    (destinationToSource &&
+      !destinationToSource.startsWith("..") &&
+      !isAbsolute(destinationToSource))
+  )
+    throw new Error("DATA_ROOTS_MUST_NOT_NEST");
 }
 
 function quickCheck(path: string): void {
@@ -38,6 +57,108 @@ function processAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function acquireMigrationLock(destination: string): Promise<() => Promise<void>> {
+  const lockPath = join(dirname(destination), `.${basename(destination)}.migration.lock`);
+  const nonce = randomBytes(16).toString("hex");
+  const content = `${JSON.stringify({ pid: process.pid, nonce })}\n`;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      try {
+        await handle.writeFile(content, "utf8");
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        try {
+          if ((await readFile(lockPath, "utf8")) === content) await rm(lockPath, { force: true });
+        } catch {
+          // A successor or prior cleanup owns the path; never unlink blindly.
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST")
+        throw new Error("MIGRATION_LOCK_FAILED");
+    }
+    let ownerPid = 0;
+    try {
+      const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+      if (Number.isSafeInteger(owner.pid)) ownerPid = Number(owner.pid);
+    } catch {
+      // Malformed lock content is stale and is quarantined below.
+    }
+    if (ownerPid > 0 && processAlive(ownerPid)) throw new Error("MIGRATION_IN_PROGRESS");
+    const stalePath = `${lockPath}.stale-${process.pid}-${nonce}-${attempt}`;
+    try {
+      await rename(lockPath, stalePath);
+      await rm(stalePath, { force: true });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EEXIST") throw new Error("MIGRATION_LOCK_FAILED");
+    }
+  }
+  throw new Error("MIGRATION_LOCK_FAILED");
+}
+
+async function readMigrationManifest(root: string): Promise<MigrationManifest | null> {
+  try {
+    const value = JSON.parse(
+      await readFile(join(root, "migration-manifest.json"), "utf8"),
+    ) as Partial<MigrationManifest> | null;
+    if (
+      value?.format !== 1 ||
+      typeof value.migratedAt !== "string" ||
+      typeof value.source !== "string" ||
+      typeof value.destination !== "string" ||
+      (value.destinationBackup !== null && typeof value.destinationBackup !== "string") ||
+      !Number.isSafeInteger(value.projects) ||
+      Number(value.projects) <= 0
+    )
+      return null;
+    return value as MigrationManifest;
+  } catch {
+    return null;
+  }
+}
+
+function projectPaths(registryPath: string): Array<{ db_path: string | null }> {
+  const database = new Database(registryPath, { readonly: true, fileMustExist: true });
+  try {
+    return database.prepare("SELECT db_path FROM projects").all() as Array<{
+      db_path: string | null;
+    }>;
+  } finally {
+    database.close();
+  }
+}
+
+async function completedMigration(
+  source: string,
+  destination: string,
+): Promise<MigrationResult | null> {
+  const manifest = await readMigrationManifest(destination);
+  if (!manifest) return null;
+  if (resolve(manifest.source) !== source || resolve(manifest.destination) !== destination)
+    throw new Error("MIGRATION_MANIFEST_MISMATCH");
+  const registryPath = join(destination, "registry", "registry.sqlite");
+  quickCheck(registryPath);
+  const projects = projectPaths(registryPath);
+  if (projects.length !== manifest.projects) throw new Error("MIGRATION_MANIFEST_MISMATCH");
+  for (const project of projects) if (project.db_path) quickCheck(project.db_path);
+  if (
+    existsSync(join(destination, "runtime", "daemon.json")) ||
+    existsSync(join(destination, "runtime", "local.token"))
+  )
+    throw new Error("MIGRATION_RUNTIME_STATE_PRESENT");
+  return {
+    source,
+    destination,
+    destinationBackup: manifest.destinationBackup,
+    projects: manifest.projects,
+    executed: true,
+  };
 }
 
 async function assertSourceStopped(source: string): Promise<void> {
@@ -96,10 +217,13 @@ export async function migrateDataRoot(input: {
   destination: string;
   execute?: boolean;
   timestamp?: string;
+  onStage?: (stage: MigrationStage) => void | Promise<void>;
 }): Promise<MigrationResult> {
   const source = resolve(input.source);
   const destination = resolve(input.destination);
   assertSafeRoots(source, destination);
+  const alreadyCompleted = await completedMigration(source, destination);
+  if (alreadyCompleted) return alreadyCompleted;
   const sourceRegistry = join(source, "registry", "registry.sqlite");
   if (!existsSync(sourceRegistry)) throw new Error("SOURCE_REGISTRY_MISSING");
   quickCheck(sourceRegistry);
@@ -110,90 +234,95 @@ export async function migrateDataRoot(input: {
   sourceDb.close();
   if (sourceProjects === 0) throw new Error("SOURCE_HAS_NO_PROJECTS");
 
-  const destinationRegistry = join(destination, "registry", "registry.sqlite");
-  if (existsSync(destinationRegistry)) {
-    quickCheck(destinationRegistry);
-    const destinationDb = new Database(destinationRegistry, {
-      readonly: true,
-      fileMustExist: true,
-    });
-    const destinationProjects = Number(
-      (destinationDb.prepare("SELECT count(*) AS count FROM projects").get() as { count: number })
-        .count,
-    );
-    destinationDb.close();
-    if (destinationProjects > 0) throw new Error("DESTINATION_ALREADY_HAS_PROJECTS");
-  }
-
   const stamp = (input.timestamp ?? new Date().toISOString()).replace(/[:.]/gu, "-");
-  const destinationBackup = existsSync(destination)
+  const proposedBackup = existsSync(destination)
     ? join(dirname(destination), `${basename(destination)}-before-migration-${stamp}`)
     : null;
   if (!input.execute)
     return {
       source,
       destination,
-      destinationBackup,
+      destinationBackup: proposedBackup,
       projects: sourceProjects,
       executed: false,
     };
 
-  await assertSourceStopped(source);
-  const staging = join(dirname(destination), `${basename(destination)}-migrating-${stamp}`);
-  if (existsSync(staging) || (destinationBackup && existsSync(destinationBackup)))
-    throw new Error("MIGRATION_TARGET_ALREADY_EXISTS");
-  await cp(source, staging, {
-    recursive: true,
-    errorOnExist: true,
-    force: false,
-    filter: (sourcePath) => copyableDataRootEntry(sourcePath, source),
-  });
-  const stagedRegistry = join(staging, "registry", "registry.sqlite");
-  rewriteRegistryPaths(stagedRegistry, source, destination);
-  await mkdir(join(staging, "runtime"), { recursive: true });
-  await rm(join(staging, "runtime", "daemon.json"), { force: true });
-  // Runtime discovery is ephemeral and daemon.json is now the only token
-  // source. Never carry the obsolete local.token into the migrated root.
-  await rm(join(staging, "runtime", "local.token"), { force: true });
-  quickCheck(stagedRegistry);
-  const stagedDatabase = new Database(stagedRegistry, { readonly: true, fileMustExist: true });
-  const projectPaths = stagedDatabase.prepare("SELECT db_path FROM projects").all() as Array<{
-    db_path: string | null;
-  }>;
-  stagedDatabase.close();
-  for (const project of projectPaths)
-    if (project.db_path) quickCheck(rewritePath(project.db_path, destination, staging));
-
-  if (destinationBackup) await rename(destination, destinationBackup);
+  const releaseLock = await acquireMigrationLock(destination);
   try {
-    await rename(staging, destination);
-  } catch (error) {
-    if (destinationBackup && !existsSync(destination) && existsSync(destinationBackup))
-      await rename(destinationBackup, destination);
-    throw error;
+    const completedInsideLock = await completedMigration(source, destination);
+    if (completedInsideLock) return completedInsideLock;
+    await assertSourceStopped(source);
+    const destinationRegistry = join(destination, "registry", "registry.sqlite");
+    if (existsSync(destinationRegistry)) {
+      quickCheck(destinationRegistry);
+      if (projectPaths(destinationRegistry).length > 0)
+        throw new Error("DESTINATION_ALREADY_HAS_PROJECTS");
+    }
+
+    const staging = join(dirname(destination), `${basename(destination)}-migrating`);
+    let stagedManifest = existsSync(staging) ? await readMigrationManifest(staging) : null;
+    if (
+      stagedManifest &&
+      (resolve(stagedManifest.source) !== source ||
+        resolve(stagedManifest.destination) !== destination ||
+        stagedManifest.projects !== sourceProjects)
+    )
+      stagedManifest = null;
+    if (!stagedManifest) {
+      if (existsSync(staging)) await rm(staging, { recursive: true, force: true });
+      await cp(source, staging, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        filter: (sourcePath) => copyableDataRootEntry(sourcePath, source),
+      });
+      await input.onStage?.("AFTER_COPY");
+      const stagedRegistry = join(staging, "registry", "registry.sqlite");
+      rewriteRegistryPaths(stagedRegistry, source, destination);
+      await mkdir(join(staging, "runtime"), { recursive: true });
+      await rm(join(staging, "runtime", "daemon.json"), { force: true });
+      await rm(join(staging, "runtime", "local.token"), { force: true });
+      quickCheck(stagedRegistry);
+      for (const project of projectPaths(stagedRegistry))
+        if (project.db_path) quickCheck(rewritePath(project.db_path, destination, staging));
+      stagedManifest = {
+        format: 1,
+        migratedAt: new Date().toISOString(),
+        source,
+        destination,
+        destinationBackup: proposedBackup,
+        projects: sourceProjects,
+      };
+      await writeFile(
+        join(staging, "migration-manifest.json"),
+        `${JSON.stringify(stagedManifest, null, 2)}\n`,
+        "utf8",
+      );
+    }
+    await input.onStage?.("AFTER_MANIFEST");
+
+    const destinationBackup = stagedManifest.destinationBackup;
+    if (destinationBackup && existsSync(destination)) {
+      if (existsSync(destinationBackup)) throw new Error("MIGRATION_TARGET_ALREADY_EXISTS");
+      await rename(destination, destinationBackup);
+      await rm(join(destinationBackup, "runtime", "daemon.json"), { force: true });
+      await rm(join(destinationBackup, "runtime", "local.token"), { force: true });
+      await input.onStage?.("AFTER_BACKUP");
+    }
+    try {
+      await rename(staging, destination);
+    } catch (error) {
+      if (destinationBackup && !existsSync(destination) && existsSync(destinationBackup))
+        await rename(destinationBackup, destination);
+      throw error;
+    }
+    await input.onStage?.("AFTER_COMMIT");
+    const committed = await completedMigration(source, destination);
+    if (!committed) throw new Error("MIGRATION_COMMIT_INCOMPLETE");
+    return committed;
+  } finally {
+    await releaseLock();
   }
-  const manifest = {
-    format: 1,
-    migratedAt: new Date().toISOString(),
-    source,
-    destination,
-    destinationBackup,
-    projects: sourceProjects,
-  };
-  await writeFile(
-    join(destination, "migration-manifest.json"),
-    `${JSON.stringify(manifest, null, 2)}\n`,
-    "utf8",
-  );
-  quickCheck(join(destination, "registry", "registry.sqlite"));
-  for (const project of projectPaths) if (project.db_path) quickCheck(project.db_path);
-  return {
-    source,
-    destination,
-    destinationBackup,
-    projects: sourceProjects,
-    executed: true,
-  };
 }
 
 function argument(name: string): string | undefined {
