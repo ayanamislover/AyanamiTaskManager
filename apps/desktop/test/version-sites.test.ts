@@ -58,6 +58,13 @@ describe("版本号站点清单", () => {
 });
 
 describe("升版后的残留检查", () => {
+  it("测试夹具不得硬编码当前真实版本号", () => {
+    const outsideVersionSites = findVersionLeftovers(currentVersion).filter(
+      (line) => !VERSIONED_FILES.some((file) => line.startsWith(`${file}:`)),
+    );
+    expect(outsideVersionSites).toEqual([]);
+  });
+
   // git grep 拿退出码当结果：0 有匹配，1 没有匹配。把非零一律当失败，这条检查
   // 就会在旧版本号被清得最干净时恰好挂掉——发布链因此在升版第一步就中止。
   it("没有匹配是通过，不是失败", () => {
