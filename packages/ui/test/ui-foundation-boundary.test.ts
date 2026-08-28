@@ -94,4 +94,21 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(declaration);
     }
   });
+
+  it("app 使用提取后的 select/async primitives，而不是保留重复组件", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./components/atm-select.js"');
+    expect(app).toContain('from "./components/async-state.js"');
+    for (const declaration of [
+      "type AtmSelectOption =",
+      "function AtmSelect(",
+      "function LoadingRows(",
+      "function Empty(",
+      "function ErrorState(",
+      "function CursorLoadStatus(",
+      "function PageHead(",
+    ]) {
+      expect(app).not.toContain(declaration);
+    }
+  });
 });
