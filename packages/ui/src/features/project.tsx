@@ -5,7 +5,7 @@ import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-ic
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
-import { PageHead } from "../components/async-state.js";
+import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
 import { CreateRecordModal } from "./create-record-modal.js";
@@ -179,6 +179,7 @@ export function ProjectPage({
         onTaskSort={onTaskSort}
         onOpenTask={openTask}
       />
+      <MutationErrorAlert errors={[lifecycle.error, trash.error]} />
       {create ? (
         <CreateTaskModal
           client={client}

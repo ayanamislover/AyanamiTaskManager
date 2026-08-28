@@ -593,7 +593,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto(`/#project:${projectCode}`);
-    await page.getByRole("tablist").getByRole("button", { name: "时间线" }).click();
+    await page.getByRole("tablist").getByRole("tab", { name: "时间线" }).click();
     await expect(page.getByText(progressSummary)).toBeVisible();
     await expect(page.getByText(recordTitle)).toBeVisible();
     await expect(page.getByText("任务进度已更新", { exact: true })).toBeVisible();
@@ -697,6 +697,136 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
   await expect(createDialog).toBeHidden();
 });
 
+test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const title = `表格键盘验收 ${suffix}`;
+  let sessionId = "";
+  try {
+    const objectivesResponse = await api.get(`${apiUrl}/projects/E2E/objectives`);
+    expect(objectivesResponse.ok()).toBeTruthy();
+    const objectives = (await objectivesResponse.json()) as Array<{ id: string }>;
+    expect(objectives.length).toBeGreaterThan(0);
+
+    const begin = await api.post(`${apiUrl}/sessions`, {
+      data: {
+        cwd: process.cwd(),
+        projectCode: "E2E",
+        mode: "project",
+        agentId: `e2e-table-keyboard-${suffix}`,
+        displayName: `E2E Table Keyboard ${suffix}`,
+        clientKind: "playwright",
+        role: "SUBAGENT",
+        resume: false,
+        allowProjectCreate: false,
+      },
+    });
+    expect(begin.ok()).toBeTruthy();
+    sessionId = String((await begin.json()).session);
+
+    const created = await api.post(`${apiUrl}/projects/E2E/work-items`, {
+      data: {
+        session: sessionId,
+        opId: `e2e-table-keyboard-create-${suffix}`,
+        items: [
+          {
+            clientRef: `table-keyboard-${suffix}`,
+            objectiveId: objectives[0]!.id,
+            title,
+            description: "验证项目与跨项目任务表格键盘入口",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+            acceptance: ["Enter 与 Space 可打开，Escape 恢复焦点"],
+            checklist: [],
+            verificationRequired: false,
+          },
+        ],
+      },
+    });
+    expect(created.ok()).toBeTruthy();
+    const taskKey = String(((await created.json()) as any).items[0].key);
+    const patchTask = async (operation: "claim" | "start") => {
+      const currentResponse = await api.get(`${apiUrl}/projects/E2E/work-items/${taskKey}`);
+      expect(currentResponse.ok()).toBeTruthy();
+      const current = (await currentResponse.json()) as { version: number };
+      const response = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+        data: {
+          session: sessionId,
+          opId: `e2e-table-keyboard-${operation}-${suffix}`,
+          items: [{ taskKey, expectedVersion: current.version, operation }],
+        },
+      });
+      expect(response.ok()).toBeTruthy();
+    };
+    await patchTask("claim");
+    await patchTask("start");
+
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("/#project:E2E");
+    const tabs = page.getByRole("tablist", { name: "项目任务视图" });
+    for (const tab of await tabs.getByRole("tab").all()) {
+      await expect(tab).toHaveAttribute("aria-controls", "project-task-panel");
+    }
+    const listTab = tabs.getByRole("tab", { name: "列表" });
+    await expect(listTab).toHaveAttribute("tabindex", "0");
+    await listTab.focus();
+    await page.keyboard.press("ArrowRight");
+    const boardTab = tabs.getByRole("tab", { name: "看板" });
+    await expect(boardTab).toBeFocused();
+    await expect(boardTab).toHaveAttribute("aria-selected", "true");
+    await page.keyboard.press("End");
+    const recordsTab = tabs.getByRole("tab", { name: "记录" });
+    await expect(recordsTab).toBeFocused();
+    await page.keyboard.press("Home");
+    await expect(listTab).toBeFocused();
+    await expect(page.getByRole("tabpanel")).toHaveAttribute("id", "project-task-panel");
+    await expect(page.getByRole("tabpanel")).toHaveAttribute(
+      "aria-labelledby",
+      "project-task-tab-list",
+    );
+
+    const projectRow = page.getByRole("row", { name: new RegExp(`打开任务 ${taskKey}`) });
+    await projectRow.focus();
+    await page.keyboard.press(" ");
+    const projectDrawer = page.getByRole("dialog", { name: "任务详情" });
+    await expect(projectDrawer).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(projectDrawer).toBeHidden();
+    await expect(projectRow).toBeFocused();
+
+    await page.getByRole("button", { name: "工作区", exact: true }).click();
+    await page.getByRole("button", { name: "活动任务", exact: true }).click();
+    const globalRow = page.getByRole("row", { name: new RegExp(`打开任务 ${taskKey}`) });
+    await globalRow.focus();
+    await page.keyboard.press("Enter");
+    const globalDrawer = page.getByRole("dialog", { name: "任务详情" });
+    await expect(globalDrawer).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(globalDrawer).toBeHidden();
+    await expect(globalRow).toBeFocused();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-task-table-keyboard-dark.png"),
+      fullPage: true,
+    });
+  } finally {
+    if (sessionId) {
+      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+        data: {
+          project: "E2E",
+          opId: `e2e-table-keyboard-close-${suffix}`,
+          outcome: "completed",
+          summary: "任务表格键盘 E2E 清理",
+          next: [],
+          releaseClaims: true,
+        },
+      });
+      expect(close.ok()).toBeTruthy();
+    }
+    await api.dispose();
+  }
+});
+
 test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.setViewportSize({ width: 1366, height: 768 });
@@ -717,7 +847,7 @@ test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口"
   await expect(taskDialog).toBeHidden();
   await expect(createTask).toBeFocused();
 
-  await page.getByRole("button", { name: "记录", exact: true }).click();
+  await page.getByRole("tab", { name: "记录", exact: true }).click();
   const createRecord = page.getByRole("button", { name: "新建记录", exact: true });
   await createRecord.click();
   const recordDialog = page.getByRole("dialog", { name: "新建项目记录" });
@@ -1104,13 +1234,13 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
   const savedViewName = `E2E 可开始 ${testInfo.repeatEachIndex}-${Date.now().toString(36)}`;
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/#project:E2E");
-  await page.getByRole("button", { name: "看板" }).click();
+  await page.getByRole("tab", { name: "看板" }).click();
   await expect(page.getByText("待开始", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "时间线", exact: true }).click();
+  await page.getByRole("tab", { name: "时间线", exact: true }).click();
   await expect(page.getByText(/任务已创建/u).first()).toBeVisible();
-  await page.getByRole("button", { name: "记录", exact: true }).click();
+  await page.getByRole("tab", { name: "记录", exact: true }).click();
   await expect(page.getByText("还没有项目记录")).toBeVisible();
-  await page.getByRole("button", { name: "列表" }).click();
+  await page.getByRole("tab", { name: "列表" }).click();
 
   const prioritySort = page.getByRole("button", { name: "按优先级排序" });
   const statusSort = page.getByRole("button", { name: "按状态排序" });
@@ -1227,10 +1357,19 @@ test("系统通知可在全部、仅严重和不通知三档间持久化切换",
   const critical = page.getByRole("radio", { name: /仅严重事件/u });
   const off = page.getByRole("radio", { name: /不通知/u });
   await expect(all).toHaveAttribute("aria-checked", "true");
-  await critical.click();
+  await expect(all).toHaveAttribute("tabindex", "0");
+  await all.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(critical).toBeFocused();
   await expect(critical).toHaveAttribute("aria-checked", "true");
   await expect(all).toHaveAttribute("aria-checked", "false");
   await expect(off).toHaveAttribute("aria-checked", "false");
+  await page.keyboard.press("End");
+  await expect(off).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(all).toBeFocused();
+  await page.keyboard.press("ArrowDown");
+  await expect(critical).toBeFocused();
   await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
 
   await page.getByRole("button", { name: "保存设置" }).click();

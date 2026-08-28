@@ -8,8 +8,10 @@ import {
   Empty,
   ErrorState,
   LoadingRows,
+  MutationErrorAlert,
   PageHead,
 } from "../components/async-state.js";
+import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
@@ -249,6 +251,7 @@ export function OverviewPage({
           </div>
         )}
       </section>
+      <MutationErrorAlert error={completeQuick.error} />
     </>
   );
 }
@@ -370,7 +373,12 @@ export function TasksAcrossProjects({
           </thead>
           <tbody>
             {tasks.map((task: any) => (
-              <tr key={task.key} onClick={() => onTask(task.project, task.key)}>
+              <tr
+                key={task.key}
+                {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
+                  onTask(task.project, task.key),
+                )}
+              >
                 <td>
                   <div className="atm-row-title">{task.title}</div>
                   <span className="atm-key">{task.key}</span>

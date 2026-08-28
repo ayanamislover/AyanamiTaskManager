@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { GitBranchIcon as GitBranch } from "@phosphor-icons/react/dist/icons/GitBranch";
 import type { CursorCollection } from "../cursor-collection.js";
 import { CursorLoadStatus, Empty, ErrorState, LoadingRows } from "../components/async-state.js";
+import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import { formatTime, priorityLabels, Status } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
 import type { ProjectTaskSort, ProjectTaskSortField } from "../task-sort.js";
@@ -267,7 +268,12 @@ export function ProjectTaskViews({
         </thead>
         <tbody>
           {sortedTasks.map((task: any) => (
-            <tr key={task.id} onClick={() => onOpenTask(task.key)}>
+            <tr
+              key={task.id}
+              {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
+                onOpenTask(task.key),
+              )}
+            >
               <td>
                 <div className="atm-row-title">{task.title}</div>
                 <span className="atm-key">{task.key}</span>
@@ -305,7 +311,14 @@ export function ProjectTaskViews({
           onRetry={() => void tasks.retry()}
         />
       ) : null}
-      <section className="atm-panel">{content()}</section>
+      <section
+        className="atm-panel"
+        role="tabpanel"
+        id="project-task-panel"
+        aria-labelledby={`project-task-tab-${view}`}
+      >
+        {content()}
+      </section>
     </>
   );
 }

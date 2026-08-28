@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { Empty, LoadingRows } from "../components/async-state.js";
+import { Empty, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { formatTime } from "../presentation.js";
@@ -70,12 +70,6 @@ export function ProjectDataModal({
       notify(result.alreadyImported ? "该文件已经导入过" : "旧任务账本已导入");
     },
   });
-  const busyError =
-    createBackup.error ??
-    restore.error ??
-    exportData.error ??
-    previewImport.error ??
-    applyImport.error;
   return (
     <div className="atm-modal-backdrop">
       <section
@@ -220,11 +214,15 @@ export function ProjectDataModal({
               </div>
             ) : null}
           </section>
-          {busyError ? (
-            <div className="atm-inline-error">
-              {busyError instanceof Error ? busyError.message : String(busyError)}
-            </div>
-          ) : null}
+          <MutationErrorAlert
+            errors={[
+              createBackup.error,
+              restore.error,
+              exportData.error,
+              previewImport.error,
+              applyImport.error,
+            ]}
+          />
         </div>
         <footer className="atm-modal-foot">
           <button className="atm-button" onClick={close}>

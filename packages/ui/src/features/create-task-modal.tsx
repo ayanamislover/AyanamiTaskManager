@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
+import { MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 
@@ -125,11 +126,7 @@ export function CreateTaskModal({
                 placeholder="每行一条"
               />
             </div>
-            {mutation.error ? (
-              <div className="atm-inline-error">
-                {mutation.error instanceof Error ? mutation.error.message : String(mutation.error)}
-              </div>
-            ) : null}
+            <MutationErrorAlert error={mutation.error} />
           </div>
         </div>
         <footer className="atm-modal-foot">

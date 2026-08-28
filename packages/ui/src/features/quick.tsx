@@ -5,7 +5,13 @@ import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
-import { Empty, ErrorState, LoadingRows, PageHead } from "../components/async-state.js";
+import {
+  Empty,
+  ErrorState,
+  LoadingRows,
+  MutationErrorAlert,
+  PageHead,
+} from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { Status, formatTime } from "../presentation.js";
 
@@ -146,11 +152,10 @@ export function QuickPage({ client, notify }: { client: AyanamiClient; notify: N
           </div>
         )}
       </section>
-      {promote.error ? (
-        <div className="atm-inline-error" style={{ marginTop: 12 }}>
-          {promote.error instanceof Error ? promote.error.message : String(promote.error)}
-        </div>
-      ) : null}
+      <MutationErrorAlert
+        errors={[create.error, patch.error, promote.error]}
+        style={{ marginTop: 12 }}
+      />
     </>
   );
 }

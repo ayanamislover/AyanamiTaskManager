@@ -5,6 +5,7 @@ import type {
   ProjectionStateView,
   ProjectionSummary,
 } from "@ayanami-task/protocol";
+import { MutationErrorAlert } from "./components/async-state.js";
 
 export async function invalidateProjectionQueries(
   queryClient: Pick<QueryClient, "invalidateQueries">,
@@ -27,20 +28,10 @@ export function ProjectionStatusBadge({ status }: { status: "APPLIED" | "DEFERRE
   );
 }
 
-function ProjectionError({
-  error,
-  announce = false,
-}: {
-  error: string | null | undefined;
-  announce?: boolean;
-}) {
+function ProjectionError({ error }: { error: string | null | undefined }) {
   if (!error) return null;
   return (
-    <div
-      className="atm-inline-error atm-projection-error"
-      role={announce ? "alert" : "status"}
-      title={error}
-    >
+    <div className="atm-inline-error atm-projection-error" role="status" title={error}>
       {error}
     </div>
   );
@@ -69,7 +60,7 @@ export function ProjectProjectionPanel({
       );
     },
   });
-  const error = reconcile.error instanceof Error ? reconcile.error.message : null;
+  const mutationError = reconcile.error;
   const latest = reconcile.data?.projection ?? state;
 
   return (
@@ -114,8 +105,8 @@ export function ProjectProjectionPanel({
             </span>
           ) : null}
         </div>
-        <ProjectionError error={error} announce />
-        {!error ? <ProjectionError error={latest?.lastError} /> : null}
+        <MutationErrorAlert error={mutationError} className="atm-projection-error" />
+        {!mutationError ? <ProjectionError error={latest?.lastError} /> : null}
       </div>
     </section>
   );
@@ -144,8 +135,6 @@ export function SystemProjectionPanel({
       );
     },
   });
-  const error = reconcile.error instanceof Error ? reconcile.error.message : null;
-
   return (
     <section className="atm-panel atm-projection-panel" aria-label="全局投影状态">
       <div className="atm-panel-head">
@@ -194,7 +183,7 @@ export function SystemProjectionPanel({
             {failure.lastError ? <ProjectionError error={failure.lastError} /> : null}
           </div>
         ))}
-        <ProjectionError error={error} announce />
+        <MutationErrorAlert error={reconcile.error} className="atm-projection-error" />
       </div>
     </section>
   );
