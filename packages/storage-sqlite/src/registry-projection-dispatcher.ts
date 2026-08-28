@@ -29,6 +29,26 @@ export function projectionErrorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
 }
 
+export function markProjectionDeferred(
+  registry: ManagedDatabase,
+  projectId: string,
+  error: string,
+): void {
+  if (registry.schemaVersion < 5) return;
+  registry.sqlite
+    .prepare(
+      `INSERT INTO project_projection_state(
+         project_id, source_sequence, projected_sequence, status,
+         last_error, retry_count, updated_at
+       ) VALUES (?, 0, 0, 'DEFERRED', ?, 1, ?)
+       ON CONFLICT(project_id) DO UPDATE SET
+         status = 'DEFERRED', last_error = excluded.last_error,
+         retry_count = project_projection_state.retry_count + 1,
+         updated_at = excluded.updated_at`,
+    )
+    .run(projectId, error.slice(0, 2_000), nowIso());
+}
+
 export class RegistryProjectionDispatcher {
   readonly #registry: ManagedDatabase;
   readonly #getProject: (codeOrId: string) => ProjectionProject;

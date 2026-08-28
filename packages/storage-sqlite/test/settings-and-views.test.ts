@@ -36,7 +36,7 @@ function getSettingLiteralKeys(file: string, source: string): string[] {
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === "getSetting"
+      node.expression.name.text.replace(/^#/u, "") === "getSetting"
     ) {
       const key = node.arguments[0];
       if (key && (ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key))) {
@@ -200,6 +200,12 @@ describe("Registry 设置与保存视图", () => {
         'service.getSetting("contains whitespace", null);',
       );
       expect(invalidFixture).toEqual(["contains whitespace"]);
+      expect(
+        getSettingLiteralKeys(
+          "invalid-private-setting.ts",
+          'class Fixture { #getSetting() {} read() { this.#getSetting("private whitespace", null); } }',
+        ),
+      ).toEqual(["private whitespace"]);
       expect(rejectedSettingKeys(invalidFixture, (key) => manager.setSetting(key, null))).toEqual([
         "contains whitespace",
       ]);
