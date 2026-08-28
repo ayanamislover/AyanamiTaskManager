@@ -1,7 +1,7 @@
 # 010 — 实测 sticky 与 frameless blur 再决定降级
 
-- **Status**: TODO
-- **Commit**: b85aeea
+- **Status**: DONE — measured; keep blur
+- **Commit**: b327dec47617a8048c26675a110f93fbfeb4cf43
 - **Severity**: MEDIUM
 - **Category**: Performance
 - **Estimated scope**: measurement first; at most 3 files if evidence is red
@@ -52,3 +52,18 @@
 - **Mechanical**: packaged candidate hash 与测量报告一致；浅层报告 schema test；若改 CSS，运行 desktop design guard、UI/desktop typecheck 与单 worker E2E。
 - **Feel check**: 10%/100% 缩放观察 sticky topbar 与三键胶囊，滚动时无闪烁、拖影或材质断层；reduced-transparency 立即成为不透明表面。
 - **Done when**: 三视口同候选 A/B 证据完成，并按明确阈值作出“保留”或“降级”决定。
+
+## Result
+
+2026-08-28 在干净的 packaged Electron 候选
+`b327dec47617a8048c26675a110f93fbfeb4cf43` 上完成实测；可执行文件、asar 与组合候选
+SHA-256 已写入 [packaged-blur-benchmark.json](../output/performance/packaged-blur-benchmark.json)。
+
+- 1366×768、1920×1080、3440×1440 均完成 blur-on/off 各约 10 秒采样；每组保留
+  1266–1271 个原始 `requestAnimationFrame` 间隔，并记录 CDP compositor/GPU/raster 活动。
+- 三个视口的 blur-on 相对 blur-off 的 p95 增幅均为 0%，没有连续三帧可见掉帧；未触发
+  20% 降级阈值。
+- forced-colors 与 reduced-transparency 实测均匹配，topbar/window chrome 的计算
+  `backdrop-filter` 均为 `none`，背景为非透明色。
+- 结论为 `KEEP_BLUR`。按本计划边界不修改生产 CSS；1366 与 3440 两组 on/off 截图已经人工检查，
+  sticky topbar、窗口控件、长列表与滚动条没有闪烁、拖影或材质断层。

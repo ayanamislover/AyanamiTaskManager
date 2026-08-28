@@ -84,6 +84,23 @@ const report = (rows: BlurBenchmarkRow[]): BlurBenchmarkReport => {
 };
 
 describe("packaged blur benchmark report", () => {
+  it("已发布的 b327dec packaged 报告保持可重算并绑定候选", () => {
+    const published = JSON.parse(
+      readFileSync(
+        join(process.cwd(), "output", "performance", "packaged-blur-benchmark.json"),
+        "utf8",
+      ),
+    ) as BlurBenchmarkReport;
+
+    expect(() => assertBlurBenchmarkReport(published)).not.toThrow();
+    expect(published.candidate).toMatchObject({
+      gitHead: "b327dec47617a8048c26675a110f93fbfeb4cf43",
+      candidateSha256: "0c8f3722a91e0d9a590443fa8058edcd406ceb3a3c58aaa18d5f5226360d736a",
+      gitDirty: false,
+    });
+    expect(published.decision).toBe("KEEP_BLUR");
+  });
+
   it("计算 p50/p95、掉帧与连续掉帧", () => {
     expect(percentile([10, 20, 30, 40], 0.5)).toBe(25);
     expect(summarizeFrameTimes([16, 16, 30, 31, 32, 16], 25)).toMatchObject({
