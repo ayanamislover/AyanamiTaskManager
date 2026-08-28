@@ -11,6 +11,10 @@ import {
   normalizeReviewCandidateHashes,
   workItemOperationHasEffect,
   type EvidenceInput,
+  type ProjectionBatchReceipt,
+  type ProjectionReconcileReceipt,
+  type ProjectionStateView,
+  type ProjectionSummary,
   type TaskContextView,
   type TaskCoreView,
   type TaskFullView,
@@ -160,6 +164,77 @@ export class AyanamiTaskService {
 
   overview() {
     return this.databases.overview();
+  }
+
+  projectionState(projectCode: string): ProjectionStateView {
+    return this.databases.projectionState(projectCode);
+  }
+
+  projectionStates(): ProjectionStateView[] {
+    return this.databases.listProjectionStates();
+  }
+
+  projectionSummary(): ProjectionSummary {
+    return this.databases.projectionSummary();
+  }
+
+  async reconcileProjection(projectCode: string): Promise<ProjectionReconcileReceipt> {
+    const project = this.databases.getProject(projectCode);
+    const attemptedAt = new Date().toISOString();
+    const result = await this.databases.dispatchProject(project.id);
+    this.#events.emit(`project:${project.code}`);
+    this.#events.emit("global");
+    return {
+      ok: true,
+      project: {
+        id: project.id,
+        code: project.code,
+        name: project.name,
+        lifecycle: project.lifecycle,
+      },
+      delivered: result.delivered,
+      sequence: result.sequence,
+      attemptedAt,
+      projection: result.projection,
+    };
+  }
+
+  async reconcileProjections(): Promise<ProjectionBatchReceipt> {
+    const attemptedAt = new Date().toISOString();
+    const projects = this.databases
+      .listProjects()
+      .filter((project) => ["ACTIVE", "ARCHIVED"].includes(project.lifecycle))
+      .sort((left, right) => left.code.localeCompare(right.code));
+    const results: ProjectionReconcileReceipt[] = [];
+    const failures: ProjectionBatchReceipt["failures"] = [];
+    for (const project of projects) {
+      try {
+        results.push(await this.reconcileProjection(project.code));
+      } catch (error) {
+        const typed = asAtmError(error);
+        failures.push({
+          project: {
+            id: project.id,
+            code: project.code,
+            name: project.name,
+            lifecycle: project.lifecycle,
+          },
+          code: typed.code,
+          message: typed.message.slice(0, 2_000),
+        });
+      }
+    }
+    return {
+      ok: true,
+      attempted: projects.length,
+      applied: results.filter((result) => result.projection.status === "APPLIED").length,
+      deferred: results.filter((result) => result.projection.status === "DEFERRED").length,
+      failed: failures.length,
+      attemptedAt,
+      finishedAt: new Date().toISOString(),
+      results,
+      failures,
+    };
   }
 
   async engineeringMetrics(

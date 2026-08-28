@@ -9,3 +9,9 @@ export * from "./search-pagination.js";
 export * from "./session-list-pagination.js";
 export * from "./task-list-pagination.js";
 export * from "./task-view-query.js";
+export type {
+  ProjectionFailureView,
+  ProjectionReceipt,
+  ProjectionStateView,
+  ProjectionSummary,
+} from "@ayanami-task/protocol";
