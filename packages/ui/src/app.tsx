@@ -12,12 +12,9 @@ import { FolderOpenIcon as FolderOpen } from "@phosphor-icons/react/dist/icons/F
 import { GitBranchIcon as GitBranch } from "@phosphor-icons/react/dist/icons/GitBranch";
 import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
 import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
-import { MagnifyingGlassIcon as MagnifyingGlass } from "@phosphor-icons/react/dist/icons/MagnifyingGlass";
-import { MoonIcon as Moon } from "@phosphor-icons/react/dist/icons/Moon";
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
-import { SunIcon as Sun } from "@phosphor-icons/react/dist/icons/Sun";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import {
@@ -68,7 +65,7 @@ import { useDialogAccessibility } from "./hooks/use-dialog-accessibility.js";
 import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
 import { useTheme } from "./hooks/use-theme.js";
-import { Sidebar } from "./shell/sidebar.js";
+import { AppShell } from "./shell/app-shell.js";
 import {
   appRouteTitle,
   useAppRouteState,
@@ -4148,69 +4145,44 @@ function App({
     );
   else page = <ErrorState error="找不到这个项目，可能已被移除或路径发生变化。" />;
   return (
-    <div className="atm-shell">
-      <Sidebar
-        route={route}
-        setRoute={setRoute}
-        projects={projectList}
-        {...(brandLogoSrc ? { brandLogoSrc } : {})}
-      />
-      <main className="atm-main">
-        <header className="atm-topbar">
-          <div className="atm-breadcrumb">{title}</div>
-          <button className="atm-search-button" onClick={() => setPalette(true)}>
-            <MagnifyingGlass size={17} />
-            搜索任务、记录和项目<kbd>Ctrl K</kbd>
-          </button>
-          <div className="atm-top-actions" data-testid="window-drag-actions">
-            <button
-              className="atm-button atm-icon-button atm-theme-toggle"
-              aria-label={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
-              title={theme === "light" ? "切换至暗黑模式" : "切换至亮色模式"}
-              onClick={toggleTheme}
-            >
-              {theme === "light" ? <Moon size={17} /> : <Sun size={17} />}
-            </button>
-            <button
-              className="atm-button"
-              onClick={() => {
-                if (route.startsWith("project:"))
-                  window.dispatchEvent(new Event("atm:new-project-task"));
-                else setRoute("quick");
-              }}
-            >
-              <Plus size={16} />
-              {route.startsWith("project:") ? "新建任务" : "临时任务"}
-              <kbd>Ctrl N</kbd>
-            </button>
-            <Status value={projects.error ? "MIGRATION_FAILED" : "ACTIVE"} />
-          </div>
-        </header>
-        <div className="atm-content">{page}</div>
-      </main>
-      {palette ? (
-        <CommandPalette
-          client={client}
-          close={() => setPalette(false)}
-          onProject={(code) => setRoute(`project:${code}`)}
-          onTask={openTask}
-        />
-      ) : null}
-      {drawer ? (
-        <TaskDrawer
-          client={client}
-          project={drawer.project}
-          taskKey={drawer.key}
-          close={() => setDrawer(null)}
-          notify={notify}
-        />
-      ) : null}
-      {notice ? (
-        <div className="atm-notice" role="status">
-          {notice}
-        </div>
-      ) : null}
-    </div>
+    <AppShell
+      route={route}
+      onRoute={setRoute}
+      projects={projectList}
+      {...(brandLogoSrc ? { brandLogoSrc } : {})}
+      title={title}
+      theme={theme}
+      statusSlot={<Status value={projects.error ? "MIGRATION_FAILED" : "ACTIVE"} />}
+      content={page}
+      paletteSlot={
+        palette ? (
+          <CommandPalette
+            client={client}
+            close={() => setPalette(false)}
+            onProject={(code) => setRoute(`project:${code}`)}
+            onTask={openTask}
+          />
+        ) : null
+      }
+      drawerSlot={
+        drawer ? (
+          <TaskDrawer
+            client={client}
+            project={drawer.project}
+            taskKey={drawer.key}
+            close={() => setDrawer(null)}
+            notify={notify}
+          />
+        ) : null
+      }
+      noticeSlot={notice}
+      onSearch={() => setPalette(true)}
+      onToggleTheme={toggleTheme}
+      onCreate={() => {
+        if (route.startsWith("project:")) window.dispatchEvent(new Event("atm:new-project-task"));
+        else setRoute("quick");
+      }}
+    />
   );
 }
 
