@@ -93,7 +93,7 @@
     outline-color: Highlight;
   }
 
-  .atm-field-shell > .atm-select-trigger:focus-visible {
+  .atm-field-shell > .atm-select-trigger:is(:focus-visible):not(:disabled) {
     outline: 2px solid Highlight;
     outline-offset: -3px;
   }

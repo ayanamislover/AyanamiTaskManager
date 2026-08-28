@@ -108,6 +108,10 @@ export function AtmSelect({
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
             openAt(selectedIndex < 0 ? options.length - 1 : selectedIndex, "keyboard");
+          } else if (event.key === "Escape" && open) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeAndFocusTrigger();
           }
         }}
       >
