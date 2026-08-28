@@ -229,4 +229,14 @@ describe("UI foundation boundaries", () => {
     expect(app).toContain('from "./features/agents.js"');
     expect(app).not.toContain("function AgentsPage(");
   });
+
+  it("app 使用提取后的 Timeline feature", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/timeline.js"');
+    for (const duplicate of ["function TimelineEventRow(", "function TimelinePage("]) {
+      expect(app).not.toContain(duplicate);
+    }
+    expect(app).toContain('queryKey: ["events", project.code]');
+    expect(app).toContain("client.events(project.code, 0, 100)");
+  });
 });
