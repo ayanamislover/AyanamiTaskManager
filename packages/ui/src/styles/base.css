@@ -38,4 +38,3 @@ html[data-theme-switching="true"] *::before,
 html[data-theme-switching="true"] *::after {
   transition: none !important;
 }
-
