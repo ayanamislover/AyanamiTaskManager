@@ -253,7 +253,7 @@ describe("UI foundation boundaries", () => {
     }
   });
 
-  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图/Drawer/Modal 留在原边界", () => {
+  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图/Modal 留在原边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./features/project-summary.js"');
     expect(app).toContain("<ProjectSummary");
@@ -272,7 +272,6 @@ describe("UI foundation boundaries", () => {
     for (const retained of [
       'queryKey: ["events", project.code]',
       '["records", project.code]',
-      "function TaskDrawer(",
       "function CreateTaskModal(",
       "function CreateRecordModal(",
       "function ProjectUpdateModal(",
@@ -282,7 +281,7 @@ describe("UI foundation boundaries", () => {
     }
   });
 
-  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调、Drawer/Modal 留在原边界", () => {
+  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调、Modal 留在原边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./features/project-task-controls.js"');
     expect(app).toContain('from "./features/project-task-views.js"');
@@ -303,7 +302,30 @@ describe("UI foundation boundaries", () => {
     for (const retained of [
       'queryKey: ["events", project.code]',
       '["records", project.code]',
+      "function CreateTaskModal(",
+      "function CreateRecordModal(",
+      "function ProjectUpdateModal(",
+      "function ProjectDataModal(",
+    ]) {
+      expect(app).toContain(retained);
+    }
+  });
+
+  it("app 使用提取后的 TaskDrawer，四类 Modal 与 ProjectPage orchestration 留在原边界", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/task-drawer.js"');
+    expect(app).toContain("<TaskDrawer");
+    for (const duplicate of [
       "function TaskDrawer(",
+      '["task", project, taskKey, "execution-sessions"]',
+      "client.tasks.patchAsUser",
+      "client.tasks.checklistAsUser",
+      'className="atm-drawer"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+    for (const retained of [
+      "function ProjectPage(",
       "function CreateTaskModal(",
       "function CreateRecordModal(",
       "function ProjectUpdateModal(",

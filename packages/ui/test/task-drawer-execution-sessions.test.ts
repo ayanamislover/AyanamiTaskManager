@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appPath = join(process.cwd(), "packages", "ui", "src", "app.tsx");
+const drawerPath = join(process.cwd(), "packages", "ui", "src", "features", "task-drawer.tsx");
 
 function missingExecutionSessionContracts(source: string): string[] {
   const contracts = [
@@ -20,7 +20,7 @@ function missingExecutionSessionContracts(source: string): string[] {
 
 describe("TaskDrawer execution sessions", () => {
   it("按当前任务读取并展示 Agent 与 Git 上下文", () => {
-    const source = readFileSync(appPath, "utf8");
+    const source = readFileSync(drawerPath, "utf8");
     expect(missingExecutionSessionContracts(source)).toEqual([]);
 
     for (const contract of [
