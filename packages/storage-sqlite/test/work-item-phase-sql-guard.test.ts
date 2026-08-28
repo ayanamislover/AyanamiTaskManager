@@ -54,6 +54,14 @@ function inspectWorkItemUpdates(source: string): WorkItemUpdateInspection {
   };
 }
 
+function productionTypeScriptFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return productionTypeScriptFiles(path);
+    return entry.isFile() && entry.name.endsWith(".ts") ? [path] : [];
+  });
+}
+
 describe("work_items 状态与阶段 SQL 守卫", () => {
   it("能识别故意遗漏 phase 的坏 SQL 阳性对照", () => {
     const inspection = inspectWorkItemUpdates(`
@@ -68,9 +76,9 @@ describe("work_items 状态与阶段 SQL 守卫", () => {
 
   it("扫描全部 UPDATE work_items SQL，status 赋值必须同时写 phase", () => {
     const sourceDirectory = fileURLToPath(new URL("../src/", import.meta.url));
-    const inspections = readdirSync(sourceDirectory)
-      .filter((name) => name.endsWith(".ts"))
-      .map((name) => inspectWorkItemUpdates(readFileSync(join(sourceDirectory, name), "utf8")));
+    const inspections = productionTypeScriptFiles(sourceDirectory).map((path) =>
+      inspectWorkItemUpdates(readFileSync(path, "utf8")),
+    );
     const lexicalUpdateCount = inspections.reduce(
       (total, inspection) => total + inspection.lexicalUpdateCount,
       0,

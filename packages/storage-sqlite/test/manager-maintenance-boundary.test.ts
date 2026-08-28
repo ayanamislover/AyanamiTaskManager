@@ -10,12 +10,32 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, relative, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AyanamiDatabaseManager } from "../src/index.js";
 
 const temporary: string[] = [];
 const managers: AyanamiDatabaseManager[] = [];
+
+type SourceFile = { path: string; source: string };
+
+function productionSourceFiles(root: string): SourceFile[] {
+  const files: SourceFile[] = [];
+  const visit = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.endsWith(".ts")) {
+        files.push({
+          path: relative(root, path).replaceAll("\\", "/"),
+          source: readFileSync(path, "utf8"),
+        });
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -417,6 +437,56 @@ function forbiddenFacadeImports(source: string): string[] {
   );
 }
 
+function storageArchitectureViolations(files: SourceFile[]): string[] {
+  const violations: string[] = [];
+  const knownPaths = new Set(files.map((file) => file.path));
+  const graph = new Map<string, string[]>(files.map((file) => [file.path, []]));
+  const facades = new Set(["index.ts", "manager.ts", "project-repository.ts"]);
+  for (const file of files) {
+    const imports = [
+      ...file.source.matchAll(/from\s+["']([^"']+)["']/gu),
+      ...file.source.matchAll(/import\s+["']([^"']+)["']/gu),
+    ].map((match) => match[1]!);
+    for (const specifier of imports) {
+      if (!specifier.startsWith(".")) continue;
+      const dependency = posix
+        .normalize(posix.join(posix.dirname(file.path), specifier))
+        .replace(/\.js$/u, ".ts");
+      if (!knownPaths.has(dependency)) continue;
+      graph.get(file.path)!.push(dependency);
+      if (!facades.has(file.path) && facades.has(dependency)) {
+        violations.push(`${file.path}: internal module imports facade ${dependency}`);
+      }
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const stack: string[] = [];
+  const reported = new Set<string>();
+  const visit = (path: string): void => {
+    if (visited.has(path)) return;
+    visiting.add(path);
+    stack.push(path);
+    for (const dependency of graph.get(path) ?? []) {
+      if (visiting.has(dependency)) {
+        const cycle = [...stack.slice(stack.indexOf(dependency)), dependency].join(" -> ");
+        if (!reported.has(cycle)) {
+          reported.add(cycle);
+          violations.push(`cycle: ${cycle}`);
+        }
+      } else {
+        visit(dependency);
+      }
+    }
+    stack.pop();
+    visiting.delete(path);
+    visited.add(path);
+  };
+  for (const path of [...graph.keys()].sort()) visit(path);
+  return violations;
+}
+
 function sqlHeavyBudgetViolations(
   files: Array<{ path: string; source: string }>,
   maximum = 1_000,
@@ -459,31 +529,37 @@ describe("Manager maintenance architecture guards", () => {
     ]) {
       expect(managerSource).toMatch(new RegExp(`private ${seam}\\(`, "u"));
     }
-    for (const file of [
-      "project-database-pool.ts",
-      "startup-recovery.ts",
-      "backup-maintenance.ts",
-      "storage-file-operations.ts",
-    ]) {
-      const source = readFileSync(
-        resolve(process.cwd(), "packages/storage-sqlite/src", file),
-        "utf8",
-      );
-      expect(forbiddenFacadeImports(source)).toEqual([]);
-    }
+    const storageSources = productionSourceFiles(
+      resolve(process.cwd(), "packages/storage-sqlite/src"),
+    );
+    expect(storageArchitectureViolations(storageSources)).toEqual([]);
     expect(
       forbiddenFacadeImports('import { AyanamiDatabaseManager } from "./manager.js";'),
     ).toHaveLength(1);
     expect(
       forbiddenFacadeImports('import { ProjectRepository } from "./project-repository.js";'),
     ).toHaveLength(1);
+    expect(
+      storageArchitectureViolations([
+        { path: "index.ts", source: "export {};" },
+        { path: "manager.ts", source: "export {};" },
+        { path: "project-repository.ts", source: "export {};" },
+        {
+          path: "commands/reverse.ts",
+          source: 'import { ProjectRepository } from "../project-repository.js";',
+        },
+        { path: "commands/a.ts", source: 'import "./b.js";' },
+        { path: "commands/b.ts", source: 'import "./a.js";' },
+      ]),
+    ).toEqual([
+      "commands/reverse.ts: internal module imports facade project-repository.ts",
+      "cycle: commands/a.ts -> commands/b.ts -> commands/a.ts",
+    ]);
   });
 
   it("enforces the SQL-heavy 1000-line budget and proves the guard can fail", () => {
     const directory = resolve(process.cwd(), "packages/storage-sqlite/src");
-    const files = readdirSync(directory)
-      .filter((name) => name.endsWith(".ts"))
-      .map((name) => ({ path: name, source: readFileSync(join(directory, name), "utf8") }));
+    const files = productionSourceFiles(directory);
     expect(sqlHeavyBudgetViolations(files)).toEqual([]);
     const oversized = `const sqlite = { prepare() {} };\n${"// line\n".repeat(1_000)}`;
     expect(
