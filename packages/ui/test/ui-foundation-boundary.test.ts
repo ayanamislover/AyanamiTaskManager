@@ -124,9 +124,14 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 dialog/theme/notice hooks，而不是保留重复生命周期", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    for (const module of ["use-dialog-accessibility", "use-notice", "use-theme"]) {
+    const commandPalette = readFileSync(
+      join(sourceRoot, "features", "command-palette.tsx"),
+      "utf8",
+    );
+    for (const module of ["use-notice", "use-theme"]) {
       expect(app).toContain(`from "./hooks/${module}.js"`);
     }
+    expect(commandPalette).toContain('from "../hooks/use-dialog-accessibility.js"');
     for (const declaration of [
       'const themeStorageKey = "atm.theme"',
       "function readStoredTheme(",
@@ -201,7 +206,9 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Overview 与跨项目任务 feature", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/overview.js"');
+    const router = readFileSync(join(sourceRoot, "routes", "app-router.tsx"), "utf8");
+    expect(app).toContain('from "./routes/app-router.js"');
+    expect(router).toContain('from "../features/overview.js"');
     for (const duplicate of [
       "function OverviewPage(",
       "function useAllProjectTasks(",
@@ -214,8 +221,10 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Projects/Wizard 与 Quick features", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/projects.js"');
-    expect(app).toContain('from "./features/quick.js"');
+    const router = readFileSync(join(sourceRoot, "routes", "app-router.tsx"), "utf8");
+    expect(app).toContain('from "./routes/app-router.js"');
+    expect(router).toContain('from "../features/projects.js"');
+    expect(router).toContain('from "../features/quick.js"');
     for (const duplicate of [
       "function ProjectWizard(",
       "function ProjectsPage(",
@@ -227,14 +236,18 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Agents feature", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/agents.js"');
+    const router = readFileSync(join(sourceRoot, "routes", "app-router.tsx"), "utf8");
+    expect(app).toContain('from "./routes/app-router.js"');
+    expect(router).toContain('from "../features/agents.js"');
     expect(app).not.toContain("function AgentsPage(");
   });
 
   it("app 使用提取后的 Timeline feature", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    const router = readFileSync(join(sourceRoot, "routes", "app-router.tsx"), "utf8");
     const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
-    expect(app).toContain('from "./features/timeline.js"');
+    expect(app).toContain('from "./routes/app-router.js"');
+    expect(router).toContain('from "../features/timeline.js"');
     for (const duplicate of ["function TimelineEventRow(", "function TimelinePage("]) {
       expect(app).not.toContain(duplicate);
     }
@@ -244,7 +257,9 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Settings feature，而不是保留业务查询与策略面板", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/settings.js"');
+    const router = readFileSync(join(sourceRoot, "routes", "app-router.tsx"), "utf8");
+    expect(app).toContain('from "./routes/app-router.js"');
+    expect(router).toContain('from "../features/settings.js"');
     for (const duplicate of [
       "function SettingsPage(",
       'queryKey: ["settings"]',
