@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertReleaseChecklistIsDynamic as assertDynamicChecklistContent } from "./release-checklist-contract.js";
 
 // 版本号散落的全部位置。漏改一处，Squirrel 会拿同名不同哈希的包当升级处理，
 // 装出来的还是旧版——1.0.1 那次就是这么撞上的。
@@ -28,20 +29,12 @@ export function bumpVersion(root: string, from: string, to: string): string[] {
   return changed;
 }
 
-// 发布清单不能只换版本号：勾选必须清零（1.0.2 那份 32 个勾里有 6 条从来没有
-// 对应用例），验收结果一节也必须清空——否则上一版的数字会顶着新版本号留在
-// 文档里，变成看起来像本轮实测的假账。
-export function resetReleaseChecklist(root: string, from: string, to: string): void {
+// 发布清单现在只保存稳定规则与证据入口；候选状态、测试数量和哈希都由 assembler
+// 动态生成。升版时不能再“重置”出版本化待填小节，只验证静态文档没有退化成手填账本。
+export function assertReleaseChecklistIsDynamic(root: string): void {
   const path = join(root, "docs", "release-checklist.md");
-  const source = readFileSync(path, "utf8").split(from).join(to);
-  const lines = source
-    .split("\n")
-    .map((line) => (line.startsWith("- [x]") ? `- [ ]${line.slice(5)}` : line));
-  const heading = `## ${to} 验收结果`;
-  const index = lines.indexOf(heading);
-  const head = (index >= 0 ? lines.slice(0, index) : lines).join("\n").replace(/\n+$/u, "");
-  const pending = "本轮尚未完成，结果待填。在十阶段跑完并对安装版实测之前，此处不得写入任何数字。";
-  writeFileSync(path, `${head}\n\n${heading}\n\n${pending}\n`, "utf8");
+  const source = readFileSync(path, "utf8");
+  assertDynamicChecklistContent(source);
 }
 
 export type GrepRunner = (args: string[]) => { status: number | null; stdout: string };

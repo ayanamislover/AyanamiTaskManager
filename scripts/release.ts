@@ -3,14 +3,19 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  assertReleaseResumeEvidence,
+  releaseResumeEvidencePaths,
+  type ReleaseResumeEvidenceManifest,
+} from "./release-artifact-evidence.js";
+import {
   assertStageInputsResolve,
   computeReleaseFingerprint,
   decideReleaseResume,
-  decideStageReuse,
+  parseReleaseRunMode,
+  selectReusableReleaseCommands,
   verifyReleaseSource,
   type ReleaseFingerprint,
   type ReleaseResumeDecision,
-  type StageDecision,
 } from "./release-fingerprint.js";
 
 type CommandResult = {
@@ -25,6 +30,7 @@ const root = process.cwd();
 const output = join(root, "output");
 const logDir = join(output, "release-logs");
 const reportPath = join(output, "release-verification.json");
+const resumeEvidencePath = join(output, "release-resume-evidence.json");
 const pnpm = "pnpm";
 const commands: Array<{ name: string; args: string[] }> = [
   { name: "lint", args: ["lint"] },
@@ -49,35 +55,46 @@ assertStageInputsResolve(
     .split("\0")
     .filter(Boolean),
 );
-const resume = process.argv.includes("--resume");
+const releaseMode = parseReleaseRunMode(process.argv.slice(2));
 const fingerprint = await computeReleaseFingerprint(root);
 // 在十阶段开始前就拒绝脏工作树或「HEAD 还是旧版本」的升版输入，避免花完流水线
 // 时间后才由 assembler 发现产物无法从声明 commit 重建。
 await verifyReleaseSource(root, fingerprint);
-// 按阶段复用不依赖 --resume：它就是「本地早就测过的东西不要再全量跑一遍」这句
-// 话本身。--full 强制全部重跑。
-const forceFull = process.argv.includes("--full");
 const previous = existsSync(reportPath)
   ? (JSON.parse(await readFile(reportPath, "utf8")) as {
       fingerprint?: ReleaseFingerprint;
       commands?: CommandResult[];
     })
   : null;
-const resumeDecision: ReleaseResumeDecision = decideReleaseResume(
-  resume,
-  previous?.fingerprint,
-  fingerprint,
-);
+let resumeDecision: ReleaseResumeDecision =
+  releaseMode === "full"
+    ? { reuse: false, reason: "full-run-requested" }
+    : decideReleaseResume(releaseMode === "resume", previous?.fingerprint, fingerprint);
+if (resumeDecision.reuse) {
+  try {
+    if (!existsSync(resumeEvidencePath)) throw new Error("RELEASE_RESUME_EVIDENCE_MISSING");
+    const evidenceManifest = JSON.parse(
+      await readFile(resumeEvidencePath, "utf8"),
+    ) as ReleaseResumeEvidenceManifest;
+    await assertReleaseResumeEvidence(
+      root,
+      evidenceManifest,
+      fingerprint,
+      releaseResumeEvidencePaths(evidenceManifest.candidate, previous?.commands ?? []),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[release] resume 证据失效，转为全量执行：${message.slice(0, 300)}\n`);
+    resumeDecision = { reuse: false, reason: "candidate-evidence-mismatch" };
+  }
+}
 process.stdout.write(
   `[release] resume: ${resumeDecision.reuse ? "允许复用" : "重新执行"} (${resumeDecision.reason})\n`,
 );
-const reusable = new Map(
-  (resumeDecision.reuse ? (previous?.commands ?? []) : [])
-    .filter((result) => result.exitCode === 0)
-    .map((result) => [result.name, result]),
-);
-const previousByName = new Map((previous?.commands ?? []).map((result) => [result.name, result]));
-const stageDecisions: Record<string, StageDecision> = {};
+// 稳定签发只有这一条复用入口：完整 fingerprint 不匹配时 Map 必为空。局部
+// stageHash 只用于 fingerprint 完整性与非签发诊断，不得在这里兜底。
+const reusable = selectReusableReleaseCommands(resumeDecision, previous?.commands);
+const stageDecisions: Record<string, { reuse: boolean; reason: string }> = {};
 const results: CommandResult[] = [];
 
 async function run(name: string, args: string[]): Promise<CommandResult> {
@@ -118,20 +135,16 @@ async function run(name: string, args: string[]): Promise<CommandResult> {
 }
 
 for (const command of commands) {
-  const stage = decideStageReuse(
-    command.name,
-    previous?.fingerprint,
-    fingerprint,
-    previousByName.get(command.name)?.exitCode,
-  );
-  stageDecisions[command.name] = stage;
-  const globallyReusable = reusable.get(command.name);
-  const stageReusable = !forceFull && stage.reuse ? previousByName.get(command.name) : undefined;
-  const saved = globallyReusable ?? stageReusable;
+  const saved = reusable.get(command.name);
+  stageDecisions[command.name] = {
+    reuse: Boolean(saved),
+    reason: saved ? resumeDecision.reason : "executed-current-run",
+  };
   const result = saved ?? (await run(command.name, command.args));
   if (saved) {
-    const why = globallyReusable ? resumeDecision.reason : stage.reason;
-    process.stdout.write(`[release] ${command.name}: 复用已通过证据（${why}）\n`);
+    process.stdout.write(
+      `[release] ${command.name}: 复用完整 fingerprint 已绑定的通过证据（${resumeDecision.reason}）\n`,
+    );
   }
   results.push(result);
   if (result.exitCode !== 0) break;

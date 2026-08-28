@@ -1,13 +1,28 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
-import { nonBlockingItems, stageProvenance, type StageDecisions } from "./release-report.js";
+import {
+  createReleaseResumeEvidence,
+  identifyReleaseArtifact,
+  releaseResumeEvidencePaths,
+} from "./release-artifact-evidence.js";
+import {
+  appendReleaseEvidenceLayer,
+  assertReleaseChecklistIsDynamic,
+  createReleaseCandidateIdentity,
+  highestReleaseEvidenceLevel,
+  nonBlockingItems,
+  stageProvenance,
+  type ReleaseArtifactIdentity,
+  type ReleaseEvidenceLayer,
+  type ReleaseEvidenceReference,
+  type StageDecisions,
+} from "./release-report.js";
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
 
-type Artifact = { name: string; bytes: number; sha256: string };
+type Artifact = ReleaseArtifactIdentity;
 type Verification = {
   passed: boolean;
   completedAt: string;
@@ -20,6 +35,12 @@ type Verification = {
     durationMs: number;
     log: string;
   }>;
+};
+
+type SmokeReport = {
+  passed: boolean;
+  completedAt: string;
+  checks: Array<{ passed: boolean }>;
 };
 
 const root = resolve(process.cwd());
@@ -47,14 +68,25 @@ async function filesBelow(directory: string): Promise<string[]> {
 }
 
 async function digest(path: string): Promise<string> {
-  return createHash("sha256")
-    .update(await readFile(path))
-    .digest("hex")
-    .toUpperCase();
+  return (await identifyReleaseArtifact(path)).sha256;
 }
 
 async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
+}
+
+function assertSmokeReport(name: string, report: SmokeReport): void {
+  if (
+    report.passed !== true ||
+    report.checks.length === 0 ||
+    report.checks.some((check) => check.passed !== true)
+  ) {
+    throw new Error(`SMOKE_REPORT_INPUT_FAILED: ${name}`);
+  }
+}
+
+async function evidence(path: string, reportPath: string): Promise<ReleaseEvidenceReference> {
+  return { path: reportPath, sha256: await digest(path) };
 }
 
 function latestSchema(directory: string): number {
@@ -83,21 +115,36 @@ function spdxId(name: string): string {
 const output = join(root, "output");
 const verification = await readJson<Verification>(join(output, "release-verification.json"));
 if (!verification.passed) throw new Error("RELEASE_VERIFICATION_FAILED");
+const requiredCommands = [
+  "lint",
+  "format",
+  "typecheck",
+  "test",
+  "e2e",
+  "benchmark",
+  "build",
+  "forge-make",
+  "packaged-smoke",
+  "distribution-smoke",
+] as const;
+const commandNames = verification.commands.map((command) => command.name);
+if (
+  new Set(commandNames).size !== commandNames.length ||
+  requiredCommands.some(
+    (name) => verification.commands.find((command) => command.name === name)?.exitCode !== 0,
+  )
+) {
+  throw new Error("RELEASE_VERIFICATION_COMMANDS_INVALID");
+}
 const source = await verifyReleaseSource(root, verification.fingerprint);
 const e2e = await readJson<{ stats: Record<string, number> }>(join(output, "e2e", "results.json"));
 const benchmark = await readJson<{ passed: boolean; metrics: Record<string, unknown> }>(
   join(output, "benchmark-report.json"),
 );
-const packagedSmoke = await readJson<{ passed: boolean; checks: Array<{ passed: boolean }> }>(
-  join(output, "packaged-smoke-report.json"),
-);
-const portableSmoke = await readJson<{ passed: boolean; checks: Array<{ passed: boolean }> }>(
-  join(output, "portable-smoke-report.json"),
-);
-const installedSmoke = await readJson<{ passed: boolean; checks: Array<{ passed: boolean }> }>(
-  join(output, "installed-smoke-report.json"),
-);
-const distributionSmoke = await readJson<{ passed: boolean; checks: Array<{ passed: boolean }> }>(
+const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
+const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));
+const installedSmoke = await readJson<SmokeReport>(join(output, "installed-smoke-report.json"));
+const distributionSmoke = await readJson<SmokeReport>(
   join(output, "distribution-smoke-report.json"),
 );
 if (
@@ -110,14 +157,30 @@ if (
 ) {
   throw new Error("TEST_REPORT_INPUT_FAILED");
 }
+assertSmokeReport("packaged", packagedSmoke);
+assertSmokeReport("portable", portableSmoke);
+assertSmokeReport("installed", installedSmoke);
+assertSmokeReport("distribution", distributionSmoke);
 
 const makeFiles = await filesBelow(join(root, "out", "make"));
 const expectedSetupName =
   `AyanamiTaskManager-Setup-${packageJson.version}-win-x64.exe`.toLowerCase();
 const expectedZipName = `AyanamiTaskManager-win32-x64-${packageJson.version}.zip`.toLowerCase();
+const nupkgName = `AyanamiTaskManagerDesktop-${packageJson.version}-full.nupkg`;
+const releasesName = "RELEASES";
 const setupSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedSetupName);
 const zipSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedZipName);
-if (!setupSource || !zipSource) throw new Error("Forge make 产物不完整：缺少安装包或 zip");
+const squirrelDirectory = join(root, "out", "make", "squirrel.windows", "x64");
+const nupkgSource = join(squirrelDirectory, nupkgName);
+const releasesSource = join(squirrelDirectory, releasesName);
+if (
+  !setupSource ||
+  !zipSource ||
+  !makeFiles.includes(nupkgSource) ||
+  !makeFiles.includes(releasesSource)
+) {
+  throw new Error("Forge make 产物不完整：缺少安装包、portable、NUPKG 或 RELEASES");
+}
 
 await rm(releaseDir, { recursive: true, force: true });
 await mkdir(releaseDir, { recursive: true });
@@ -128,6 +191,35 @@ const setupName = `AyanamiTaskManager-Setup-${packageJson.version}-win-x64.exe`;
 const portableName = `AyanamiTaskManager-${packageJson.version}-win-x64-portable.zip`;
 await copyFile(setupSource, join(releaseDir, setupName));
 await copyFile(zipSource, join(releaseDir, portableName));
+await copyFile(nupkgSource, join(releaseDir, nupkgName));
+await copyFile(releasesSource, join(releaseDir, releasesName));
+
+const artifacts: Artifact[] = [];
+for (const name of [setupName, portableName, nupkgName, releasesName]) {
+  const path = join(releaseDir, name);
+  artifacts.push(await identifyReleaseArtifact(path, name));
+}
+const setupArtifact = artifacts.find((artifact) => artifact.name === setupName);
+const portableArtifact = artifacts.find((artifact) => artifact.name === portableName);
+const upgradePackageArtifact = artifacts.find((artifact) => artifact.name === nupkgName);
+const releasesArtifact = artifacts.find((artifact) => artifact.name === releasesName);
+if (!setupArtifact || !portableArtifact || !upgradePackageArtifact || !releasesArtifact) {
+  throw new Error("RELEASE_ARTIFACT_IDENTITY_MISSING");
+}
+const candidate = createReleaseCandidateIdentity({
+  version: packageJson.version,
+  fingerprint: verification.fingerprint,
+  artifacts: {
+    setup: setupArtifact,
+    portable: portableArtifact,
+    upgradePackage: upgradePackageArtifact,
+    releases: releasesArtifact,
+  },
+});
+const githubActionsRun = process.env.GITHUB_ACTIONS === "true";
+if (githubActionsRun && process.env.GITHUB_SHA?.toLowerCase() !== candidate.gitHead.toLowerCase()) {
+  throw new Error("GITHUB_CANDIDATE_SHA_MISMATCH");
+}
 
 const reportInputs = [
   ["e2e/results.json", "e2e-results.json"],
@@ -153,35 +245,90 @@ for (const screenshot of screenshots) {
 
 const testLog = await readFile(join(output, "release-logs", "test.log"), "utf8");
 const vitestCount = Number(/Tests\s+(\d+) passed/u.exec(testLog)?.[1] ?? 0);
+if (!Number.isSafeInteger(vitestCount) || vitestCount <= 0 || Number(e2e.stats.expected) <= 0) {
+  throw new Error("TEST_REPORT_COUNT_INVALID");
+}
 const provenance = (stage: string) => stageProvenance(verification.stages, stage);
 const reused = (stage: string) => verification.stages?.[stage]?.reuse === true;
-const remaining = nonBlockingItems(
-  await readFile(join(root, "docs", "release-checklist.md"), "utf8"),
-  packageJson.version,
-);
+const releaseChecklist = await readFile(join(root, "docs", "release-checklist.md"), "utf8");
+assertReleaseChecklistIsDynamic(releaseChecklist);
+const remaining = nonBlockingItems(releaseChecklist);
+const reportEvidence = async (name: string): Promise<ReleaseEvidenceReference> =>
+  await evidence(join(testReportDir, name), `test-report/${name}`);
+const artifactEvidence = (artifact: Artifact): ReleaseEvidenceReference => ({
+  path: artifact.name,
+  sha256: artifact.sha256,
+});
+let evidenceLayers: ReleaseEvidenceLayer[] = [];
+evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
+  level: "SOURCE_DONE",
+  verifiedAt: verification.completedAt,
+  origin: "source-checkout",
+  evidence: [await reportEvidence("release-verification.json")],
+});
+const ciEvidence = await Promise.all([
+  reportEvidence("release-verification.json"),
+  ...verification.commands.map(
+    async (command): Promise<ReleaseEvidenceReference> =>
+      await evidence(join(output, command.log), `test-report/${command.log}`),
+  ),
+]);
+evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
+  level: "CI_VERIFIED",
+  verifiedAt: verification.completedAt,
+  origin: githubActionsRun ? "github-actions" : "local-ci-equivalent",
+  evidence: ciEvidence,
+});
+evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
+  level: "PACKAGED_VERIFIED",
+  verifiedAt: packagedSmoke.completedAt,
+  origin: "packaged-smoke",
+  evidence: [
+    await reportEvidence("packaged-smoke-report.json"),
+    await reportEvidence("portable-smoke-report.json"),
+    ...artifacts.map(artifactEvidence),
+  ],
+});
+evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
+  level: "INSTALLED_VERIFIED",
+  verifiedAt: distributionSmoke.completedAt,
+  origin: "installed-smoke",
+  evidence: [
+    await reportEvidence("installed-smoke-report.json"),
+    await reportEvidence("distribution-smoke-report.json"),
+    artifactEvidence(setupArtifact),
+    artifactEvidence(upgradePackageArtifact),
+    artifactEvidence(releasesArtifact),
+  ],
+});
+const highestVerifiedLevel = highestReleaseEvidenceLevel(evidenceLayers);
 const summary = {
-  passed: true,
+  schemaVersion: 2,
+  candidate,
+  highestVerifiedLevel,
+  evidenceLayers,
   completedAt: verification.completedAt,
-  unitAndIntegration: {
-    exitCode: verification.commands.find((entry) => entry.name === "test")?.exitCode,
-    passed: vitestCount,
+  results: {
+    unitAndIntegration: {
+      exitCode: verification.commands.find((entry) => entry.name === "test")?.exitCode,
+      passed: vitestCount,
+    },
+    e2e: {
+      exitCode: verification.commands.find((entry) => entry.name === "e2e")?.exitCode,
+      passed: e2e.stats.expected,
+      failed: e2e.stats.unexpected,
+      flaky: e2e.stats.flaky,
+      reused: reused("e2e"),
+    },
+    packagedSmoke: { checks: packagedSmoke.checks.length },
+    portableSmoke: { checks: portableSmoke.checks.length },
+    installedSmoke: { checks: installedSmoke.checks.length },
+    distributionSmoke: {
+      checks: distributionSmoke.checks.length,
+      reused: reused("distribution-smoke"),
+    },
+    benchmark: { metrics: benchmark.metrics, reused: reused("benchmark") },
   },
-  e2e: {
-    exitCode: verification.commands.find((entry) => entry.name === "e2e")?.exitCode,
-    passed: e2e.stats.expected,
-    failed: e2e.stats.unexpected,
-    flaky: e2e.stats.flaky,
-    reused: reused("e2e"),
-  },
-  packagedSmoke: { passed: true, checks: packagedSmoke.checks.length },
-  portableSmoke: { passed: true, checks: portableSmoke.checks.length },
-  installedSmoke: { passed: true, checks: installedSmoke.checks.length },
-  distributionSmoke: {
-    passed: true,
-    checks: distributionSmoke.checks.length,
-    reused: reused("distribution-smoke"),
-  },
-  benchmark: { passed: true, metrics: benchmark.metrics, reused: reused("benchmark") },
   screenshots: screenshots.map((name) => `screenshots/${name}`),
   stages: verification.stages ?? {},
   commands: verification.commands,
@@ -195,7 +342,15 @@ await writeFile(
 await writeFile(
   join(testReportDir, "summary.md"),
   `# AyanamiTaskManager ${packageJson.version} 测试报告\n\n` +
-    `- 结论：通过\n` +
+    `- 候选：${candidate.candidateSha256}\n` +
+    `- 最高证据层：${String(highestVerifiedLevel)}\n` +
+    `- CI 证据来源：${evidenceLayers[1]?.origin ?? "缺失"}\n\n` +
+    `## 证据层\n\n` +
+    `| 层级 | 时间 | 证据数 |\n| --- | --- | ---: |\n` +
+    evidenceLayers
+      .map((layer) => `| ${layer.level} | ${layer.verifiedAt} | ${layer.evidence.length} |`)
+      .join("\n") +
+    `\n\n## 动态结果\n\n` +
     `- 单元/集成：${vitestCount} 项通过，退出码 0\n` +
     `- 桌面 E2E：${e2e.stats.expected} 项通过，失败 ${e2e.stats.unexpected}${provenance("e2e")}\n` +
     `- packaged smoke：${packagedSmoke.checks.length} 项通过\n` +
@@ -207,12 +362,6 @@ await writeFile(
     `原始 JSON、命令日志和 1366/1920/3440 截图均位于本目录。\n`,
   "utf8",
 );
-
-const artifacts: Artifact[] = [];
-for (const name of [setupName, portableName]) {
-  const path = join(releaseDir, name);
-  artifacts.push({ name, bytes: (await stat(path)).size, sha256: await digest(path) });
-}
 
 const versions = electronVersions();
 const sqlite = new Database(":memory:");
@@ -236,8 +385,13 @@ const release = {
   commit: source.gitHead,
   source,
   builtAt: new Date().toISOString(),
+  candidate,
   artifacts,
-  testReport: { path: "test-report/summary.json", passed: true },
+  testReport: {
+    path: "test-report/summary.json",
+    highestVerifiedLevel,
+    candidateSha256: candidate.candidateSha256,
+  },
 };
 await writeFile(join(releaseDir, "release.json"), `${JSON.stringify(release, null, 2)}\n`, "utf8");
 
@@ -287,11 +441,29 @@ const sbom = {
 };
 await writeFile(join(releaseDir, "sbom.spdx.json"), `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
 
-const checksumNames = [setupName, portableName, "release.json", "sbom.spdx.json"];
+const checksumNames = [
+  setupName,
+  portableName,
+  nupkgName,
+  releasesName,
+  "release.json",
+  "sbom.spdx.json",
+];
 const checksums = await Promise.all(
   checksumNames.map(async (name) => `${await digest(join(releaseDir, name))}  ${name}`),
 );
 await writeFile(join(releaseDir, "SHA256SUMS.txt"), `${checksums.join("\n")}\n`, "utf8");
+
+const resumeEvidence = await createReleaseResumeEvidence(
+  root,
+  candidate,
+  releaseResumeEvidencePaths(candidate, verification.commands),
+);
+await writeFile(
+  join(output, "release-resume-evidence.json"),
+  `${JSON.stringify(resumeEvidence, null, 2)}\n`,
+  "utf8",
+);
 
 process.stdout.write(
   `${JSON.stringify({ releaseDir: relative(root, releaseDir), artifacts: checksumNames, testReport: "test-report/summary.json" }, null, 2)}\n`,

@@ -1,7 +1,13 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertReleaseChecklistIsDynamic as assertDynamicChecklistContent,
+  releaseChecklistViolations,
+} from "../../../scripts/release-checklist-contract.js";
+import {
+  assertReleaseChecklistIsDynamic,
   findVersionLeftovers,
   isVersionSiteLine,
   VERSIONED_FILES,
@@ -96,5 +102,81 @@ describe("升版后的残留检查", () => {
   it("版本号里的点不能当正则通配", () => {
     expect(isVersionSiteLine('x.ts:1: version: "9X9X9",', "9.9.9")).toBe(false);
     expect(isVersionSiteLine('x.ts:1: version: "9.9.9",', "9.9.9")).toBe(true);
+  });
+});
+
+describe("动态发布清单", () => {
+  it("升版只验证动态清单，不写回版本化待填结果", () => {
+    const fixture = mkdtempSync(join(tmpdir(), "atm-release-checklist-"));
+    try {
+      mkdirSync(join(fixture, "docs"));
+      const checklist = [
+        "# 发布清单",
+        "",
+        "候选状态与数字由 assembler 动态生成。",
+        "",
+        "## 证据入口",
+        "",
+        "- `release/test-report/summary.json`",
+        "",
+      ].join("\n");
+      const path = join(fixture, "docs", "release-checklist.md");
+      writeFileSync(path, checklist, "utf8");
+
+      assertReleaseChecklistIsDynamic(fixture);
+      expect(readFileSync(path, "utf8")).toBe(checklist);
+
+      for (const legacy of ["- [x] pnpm test", "## 1.2.3 验收结果", "本轮尚未完成，结果待填。"]) {
+        writeFileSync(path, `${checklist}${legacy}\n`, "utf8");
+        expect(() => assertReleaseChecklistIsDynamic(fixture)).toThrow(
+          "RELEASE_CHECKLIST_STATIC_EVIDENCE_NOT_ALLOWED",
+        );
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("逐条拒绝历史静态验收句式", () => {
+    const cases = [
+      ["- [x] pnpm test", "MANUAL_CHECKMARK"],
+      ["单元/集成：999 项通过", "MANUAL_TEST_COUNT"],
+      ["smoke：33 项通过", "MANUAL_TEST_COUNT"],
+      ["E2E：33 项通过", "MANUAL_TEST_COUNT"],
+      ["packaged smoke：33 项通过", "MANUAL_TEST_COUNT"],
+      ["portable smoke：33 项通过", "MANUAL_TEST_COUNT"],
+      ["installed smoke：33 项通过", "MANUAL_TEST_COUNT"],
+      ["服务 RSS <= 150 MB", "MANUAL_PERFORMANCE_NUMBER"],
+      [`Git HEAD: ${"A".repeat(40)}`, "MANUAL_CANDIDATE_HASH"],
+      ["## 1.2.3 验收结果", "VERSIONED_ACCEPTANCE_HEADING"],
+      ["本轮尚未完成，结果待填。", "PENDING_ACCEPTANCE_RESULT"],
+    ] as const;
+
+    for (const [text, code] of cases) {
+      expect(releaseChecklistViolations(text), text).toEqual([code]);
+      expect(() => assertDynamicChecklistContent(text), text).toThrow(
+        new RegExp(`RELEASE_CHECKLIST_STATIC_EVIDENCE_NOT_ALLOWED: ${code}`, "u"),
+      );
+    }
+  });
+
+  it("动态规则与证据入口不被误报", () => {
+    const legal = [
+      "# 发布清单",
+      "",
+      "候选 fingerprint、测试数量、性能实测与 SHA-256 均由 release assembler 动态生成。",
+      "不得手填到这里，也不得沿用上一候选结果。",
+      "",
+      "## 证据层",
+      "",
+      "SOURCE_DONE → CI_VERIFIED → PACKAGED_VERIFIED → INSTALLED_VERIFIED。",
+      "",
+      "## 证据入口",
+      "",
+      "- `release/test-report/summary.json`",
+      "- `release/SHA256SUMS.txt`",
+    ].join("\n");
+    expect(releaseChecklistViolations(legal)).toEqual([]);
+    expect(() => assertDynamicChecklistContent(legal)).not.toThrow();
   });
 });

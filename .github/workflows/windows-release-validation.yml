@@ -1,0 +1,59 @@
+name: Windows release validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-validation:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CI: "1"
+      NO_COLOR: "1"
+    steps:
+      - name: Check out clean source
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/setup@v2
+        with:
+          version: 11.16.0
+          install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.14.1
+          cache: pnpm
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the Playwright browser
+        run: pnpm exec playwright install chromium
+
+      - name: Run full E2E, benchmark, make, and distribution validation
+        run: pnpm release -- --full
+
+      - name: Upload release validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-validation-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            release/
+            output/release-verification.json
+            output/release-logs/
+            output/e2e/results.json
+            output/benchmark-report.json
+            output/packaged-smoke-report.json
+            output/portable-smoke-report.json
+            output/installed-smoke-report.json
+            output/distribution-smoke-report.json
+            playwright-report/
+            test-results/

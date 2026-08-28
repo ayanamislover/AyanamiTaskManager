@@ -5,7 +5,7 @@ import {
   assertStageInputsResolve,
   computeReleaseFingerprint,
   computeStageHashes,
-  decideStageReuse,
+  decideNonReleaseStageReuse,
   STAGE_INPUTS,
   type ReleaseFingerprint,
 } from "../../../scripts/release-fingerprint.js";
@@ -56,16 +56,46 @@ function fingerprintWith(stageHashes: Record<string, string>): ReleaseFingerprin
   };
 }
 
-describe("按阶段依赖复用", () => {
+describe("非签发按阶段依赖复用", () => {
+  it("稳定签发入口不接阶段级复用，只接受完整 fingerprint 门", () => {
+    for (const path of ["scripts/release.ts", "scripts/release-and-install.ts"]) {
+      const source = readFileSync(`${root}/${path}`, "utf8");
+      expect(source, path).not.toContain("decideNonReleaseStageReuse");
+      expect(source, path).toContain("selectReusableReleaseCommands");
+    }
+    const releaseSource = readFileSync(`${root}/scripts/release.ts`, "utf8");
+    expect(releaseSource).toContain("parseReleaseRunMode(process.argv.slice(2))");
+    expect(releaseSource).toContain('releaseMode === "full"');
+    const installSource = readFileSync(`${root}/scripts/release-and-install.ts`, "utf8");
+    expect(installSource).toContain('flag("resume")');
+    expect(installSource).toContain("previousRun?.passed === true");
+    expect(installSource).not.toContain("stage-inputs-unchanged");
+    expect(releaseSource).toContain("assertReleaseResumeEvidence");
+    expect(installSource).toContain("assertReleaseResumeEvidence");
+    expect(installSource).toContain("assertReleaseCandidateIdentity");
+    expect(installSource).toContain("assertReleaseArtifact");
+    expect(installSource).toContain(
+      "releaseFingerprintsMatch(releaseFingerprint, finalFingerprint)",
+    );
+    expect(installSource).toContain("status.ok !== true");
+    expect(installSource).toContain("candidateSha256: candidate.candidateSha256");
+    expect(installSource).not.toMatch(/^\s*status,\s*$/mu);
+    const receiptBody = /const summary = \{(?<body>[\s\S]*?)\n\};/u.exec(installSource)?.groups
+      ?.body;
+    expect(receiptBody).toBeDefined();
+    expect(receiptBody).not.toMatch(/^\s*(?:status|token|authorization|secret)\s*:/imu);
+    expect(receiptBody).not.toContain("candidate,");
+  });
+
   // 便宜的阶段一律照跑：lint/format/typecheck/test 合计 26 秒就跑完全部用例，
   // 省它们没收益还要担风险。build/forge-make/packaged-smoke 要产出并验证本
   // 版本的产物，也不能跳。
   it("只有三个昂贵且作用域明确的阶段声明了依赖", () => {
     expect(Object.keys(STAGE_INPUTS).sort()).toEqual(["benchmark", "distribution-smoke", "e2e"]);
     for (const cheap of ["lint", "format", "typecheck", "test", "build", "forge-make"]) {
-      expect(decideStageReuse(cheap, fingerprintWith({}), fingerprintWith({}), 0).reuse).toBe(
-        false,
-      );
+      expect(
+        decideNonReleaseStageReuse(cheap, fingerprintWith({}), fingerprintWith({}), 0).reuse,
+      ).toBe(false);
     }
   });
 
@@ -74,25 +104,25 @@ describe("按阶段依赖复用", () => {
     const same = fingerprintWith({ e2e: "AAA", benchmark: "BBB", "distribution-smoke": "CCC" });
     const changed = fingerprintWith({ e2e: "ZZZ", benchmark: "BBB", "distribution-smoke": "CCC" });
 
-    expect(decideStageReuse("e2e", before, same, 0)).toEqual({
+    expect(decideNonReleaseStageReuse("e2e", before, same, 0)).toEqual({
       reuse: true,
       reason: "stage-inputs-unchanged",
     });
-    expect(decideStageReuse("e2e", before, changed, 0)).toEqual({
+    expect(decideNonReleaseStageReuse("e2e", before, changed, 0)).toEqual({
       reuse: false,
       reason: "stage-inputs-changed",
     });
     // 上次是红的就不能复用——否则一次失败会被永久继承。
-    expect(decideStageReuse("e2e", before, same, 1)).toEqual({
+    expect(decideNonReleaseStageReuse("e2e", before, same, 1)).toEqual({
       reuse: false,
       reason: "previous-stage-missing-or-failed",
     });
-    expect(decideStageReuse("e2e", before, same, undefined)).toEqual({
+    expect(decideNonReleaseStageReuse("e2e", before, same, undefined)).toEqual({
       reuse: false,
       reason: "previous-stage-missing-or-failed",
     });
     // 没有上一轮指纹（比如报告是旧版本格式）也不能复用。
-    expect(decideStageReuse("e2e", null, same, 0).reuse).toBe(false);
+    expect(decideNonReleaseStageReuse("e2e", null, same, 0).reuse).toBe(false);
   });
 
   it("改界面时 benchmark 与 distribution-smoke 复用，改 scripts 时后者必定重跑", async () => {

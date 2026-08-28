@@ -1,157 +1,65 @@
 # 发布清单
 
-本清单适用于 Windows x64 的 1.0.18 发布。任何红项都必须修复或在 release notes 中明确列为非阻塞剩余项；不得把缺失产物写成“已完成”。
+本清单只保存稳定发布规则、证据入口和已知非阻塞项。测试数量、性能实测、提交、
+候选 fingerprint、产物大小与哈希均由 `scripts/assemble-release.ts` 从本轮原始报告生成，
+不得手填到这里，也不得沿用上一候选的结果。
 
-勾选一律以 `release/test-report` 里可复核的证据为准：命令退出码、smoke 的逐项 JSON、benchmark 的阈值与实测、以及安装后对运行实例的实测。没有对应证据的条目保持未勾选，并在文末“非阻塞剩余项”里写明缺口。
+## 证据层
 
-## 代码与数据门禁
+发布证据只能按以下顺序单调推进：
 
-- [x] `pnpm lint`
-- [x] `pnpm typecheck`
-- [x] `pnpm test`
-- [x] `pnpm build`
-- [x] `pnpm test:e2e`
-- [x] `pnpm benchmark`
-- [x] 项目迁移从空库和 v1/v2 数据库均通过
-- [x] Registry 与项目库 `quick_check` 通过
-- [x] core 6 / memory 4 / actions 1 三个 MCP Profile 的 UTF-8 schema 各自不超过 7,680 bytes
+1. `SOURCE_DONE`：源码与文档实现完成，完整源码 fingerprint 已冻结；
+2. `CI_VERIFIED`：同一 fingerprint 的 CI 或明确标注的本地 CI 等价门禁通过；
+3. `PACKAGED_VERIFIED`：同一候选 Setup 的 packaged 与 portable 验收通过；
+4. `INSTALLED_VERIFIED`：同一候选 Setup 的安装、运行、重启、数据连续性和卸载验收通过。
 
-## 桌面与可访问性
+不得跳级。任一层的 fingerprint、Git HEAD、source/lockfile hash、stage hash 或 Setup
+字节身份不一致时，后续层必须拒绝推进。`SOURCE_DONE` 不能写成发布完成；本地 CI 等价证据
+也不能冒充 GitHub Actions 运行记录。
 
-- [x] 1366×768、1920×1080、3440×1440 无关键遮挡或横向截断
-- [x] 总览、项目详情、任务抽屉、搜索、保存视图、设置均使用真实 API
-- [x] `Ctrl+K`、`Ctrl+N`、`Esc`、Tab/Shift+Tab 焦点圈定与焦点恢复通过
-- [x] 归档→PRE_TRASH→垃圾箱→恢复通过
-- [x] 工程统计项目级和 WorkItem 级展示通过
-- [x] 托盘、二次启动唤起、自启动开关与三档通知策略通过
+## 稳定签发规则
 
-## 可靠性与性能
+- 输入必须是可由声明 HEAD 直接检出的干净工作树；发布校验后源码变化即作废。
+- `--resume` 只允许完整 fingerprint 一致时复用，不能用局部 stage hash 绕过稳定签发门禁。
+- CI 门禁覆盖格式、lint、类型、单元/集成、构建；Windows 发布验证覆盖 E2E、benchmark、
+  Forge make、packaged、portable、distribution 与 installed smoke。
+- packaged 与 installed 层必须读取逐项报告；顶层布尔值不能替代逐项检查。
+- Setup 和 portable ZIP 都进入发布 manifest 与 checksum 文件；installed receipt 必须绑定
+  实际安装的 Setup 身份和运行实例自报版本。
+- 正式安装验收必须从真实 `%LOCALAPPDATA%` 运行；不得使用只对单个 Agent 可见的覆盖层。
+- 发布前处理占用安装目录的桌面实例与 MCP stdio bridge；不得结束无关进程。
+- 用户数据目录不属于卸载产物，安装、升级和卸载均不得误删。
 
-- [x] packaged smoke 的健康、native SQLite、项目库、MCP、WebSocket、备份恢复、自启动、退出和重启持久化全部通过
-- [x] 100 项目总览 p95 ≤200 ms
-- [x] 10,000 任务筛选 p95 ≤200 ms
-- [x] 写入+事件 p95 ≤100 ms
-- [x] 50,000 中文文档搜索 p95 ≤300 ms
-- [x] 服务 RSS ≤150 MB
-- [x] 空闲项目数据库 5 分钟 LRU 关闭
+## 执行入口
 
-### MCP bridge 内存验收
-
-发布前必须用客户端配置中的稳定命令运行：
+完整本地发布与安装验收：
 
 ```powershell
-pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 10 --repeat 3 --settle-ms 3000 --json output/release/mcp-bridge-memory-1.0.18.json
+pnpm exec tsx scripts/release-and-install.ts --version <target-version>
 ```
 
-2026-08-27 对最终 1.0.18 安装版实测 core Profile：1 个 bridge 为 27.77 MiB Private Bytes；
-10 个合计 319.74 MiB；每多 1 个 bridge 的边际为 **32.44 MiB Private Bytes**。三轮系统
-可用内存差中位数为 236.29 MiB（23.63 MiB/bridge），但极差 292.38 MiB 已触发噪声拒绝
-门槛，因此本次发布结论只引用低噪声的 Private Bytes 边际。含共享映像重复计数的 Working
-Set 与本轮系统可用内存差只用于诊断，不作为 bridge 内存成本或运行时优劣结论。
+只生成候选制品时使用 `--skip-install`。底层入口仍是 `pnpm release -- --full`；稳定签发不得
+依靠局部复用。独立 Windows workflow 的原始报告与制品必须上传，供 GitHub 侧复核。
 
-同日 15:42 UTC 使用安装版 `current\AyanamiTaskManager.exe` 和内置
-`observeMcpBridges()` 复核了 Peer Review 观察到的进程增长：精确路径下共有 42 个进程，
-观测器也返回 42 个由存活 Agent 直接持有的 bridge，二者一一对应，**未发现属主已退出的
-孤儿 bridge**。按直接属主聚合为 `codex:77116` 2 个、`codex:47704` 32 个、
-`claude:98276` 4 个、`claude:79140` 2 个、`claude:86564` 2 个；当前累计 Private Bytes
-为 1,220.06 MiB。高数量来自本轮同时运行的 Codex/Claude 任务及其 core+memory 连接，
-不是测试泄漏或后台无主自增；本次验收只做归属判定，没有终止任何用户或 Agent 进程。
+## 证据入口
 
-## 构建与安装
+- `release/test-report/summary.json`：候选身份、最高证据层、逐层来源与原始证据哈希；
+- `release/test-report/summary.md`：从同一数据动态生成的人类可读报告；
+- `release/test-report/release-verification.json` 与 `logs/`：源码/CI 等价门禁；
+- `release/test-report/*-smoke-report.json`：packaged、portable、installed、distribution 逐项验收；
+- `release/release.json`、`release/SHA256SUMS.txt`：候选与制品身份；
+- `output/release-and-install.json`：最终当前安装实例回执；
+- GitHub Actions 的 Windows release-validation run 与上传 artifact：远程 CI 证据。
 
-一条命令走完升版、十阶段、卸载、安装与实测：
+## 非阻塞项
 
-```powershell
-pnpm exec tsx scripts/release-and-install.ts --version 1.0.18
-```
+| 条目 | 说明 | 证据入口 |
+| ---- | ---- | -------- |
 
-它会先拒绝脏工作树（发布是从工作树打包的，别人未提交的改动会被一起打进产物），
-升版本号并校验没有遗漏站点后，先把版本站点与重置后的发布清单提交为
-`chore: prepare release <version>`；后续十阶段只接受这个可直接检出同版本的 clean HEAD。
-随后清掉同名进程（**包括 MCP stdio 桥**，它们用同一个
-exe 名且占着安装目录句柄），跑完十阶段，静默安装，最后启动并核对运行实例自报的
-版本号。加 `--skip-install` 只跑到产出 `release/`。
+空表表示当前没有已知非阻塞项；这不代表候选已经通过任何证据层。发现缺口时在表内登记，
+并由生成报告原样带入。阻塞项不得降级写入本表。
 
-必须在能真实写入 `%LOCALAPPDATA%` 的终端里跑——Agent 的 Bash 通道对该路径的
-创建会落进只有它自己看得见的覆盖层，安装看起来成功、实际没落盘；PowerShell
-通道与真实磁盘一致（ATM-R-067）。
+## 历史说明
 
-分步执行时：
-
-```powershell
-pnpm make
-pnpm smoke:packaged
-pnpm exec tsx scripts/assemble-release.ts
-```
-
-- [x] Squirrel Setup EXE 可安装到当前用户
-- [x] 安装版可首次启动、退出、重启并保留数据
-- [x] 卸载不误删用户项目数据
-- [x] portable ZIP 解压后可启动
-- [x] packaged stdio MCP 可完成 initialize、tools/list 和一次只读调用
-- [x] `docs/portable-usage.md` 随包存在
-
-`distribution-smoke` 要求机器上没有同名安装、没有运行中的同名进程、没有卸载注册项、没有产品快捷方式。注意 **MCP stdio 桥接进程用的是同一个 `AyanamiTaskManager.exe` 镜像名**：只要还有 Claude 会话连着 ATM，`appProcessIsRunning()` 就成立，验收会停在“没有运行中的应用进程”，而且这些桥还占着安装目录里的 exe 句柄，Squirrel 卸载只能留下 `.dead` 标记。发布前先断开所有连着 ATM 的会话。
-
-## 最终目录
-
-```text
-release/
-├─ AyanamiTaskManager-Setup-1.0.18-win-x64.exe
-├─ AyanamiTaskManager-1.0.18-win-x64-portable.zip
-├─ SHA256SUMS.txt
-├─ release.json
-├─ sbom.spdx.json
-└─ test-report/
-```
-
-`SHA256SUMS.txt` 必须覆盖 Setup、portable ZIP、release manifest 和 SBOM。`release.json`
-记录版本、平台、构建时间、产物名/大小/哈希和测试报告索引；`source` 节同时固化可检出
-同版本的 `gitHead`、`dirty=false`、工作树状态哈希、源码哈希与 lockfile 哈希。assembler
-会重新计算这些值，验证报告之后发生任何源码变化都会拒绝组装。SBOM 使用 SPDX JSON。
-
-## test-report 最小内容
-
-- 单元/集成/E2E 总结与退出码；
-- packaged、portable、installed smoke 各 33 项结果，以及 distribution smoke 19 项结果；
-- benchmark 原始阈值与实测；
-- 1366/1920/3440 截图；
-- installer 与 portable 启动证据；
-- 已知非阻塞剩余项，或明确写“无”。
-
-## 签发
-
-- [x] 从干净的构建输入运行最终命令（不删除用户工作树变更）
-- [x] 逐项复核哈希和产物可打开
-- [x] README、用户指南、Agent 接入、备份恢复和排障文档已同步
-- [x] 发布结论只引用 `release/test-report` 中可复核证据
-
-## 1.0.18 非阻塞剩余项
-
-无。此前四条证据缺口已经分别由 v1/v2 迁移夹具、完整归档与垃圾箱恢复链、真实打包窗口生命周期烟测，以及默认 5 分钟边界测试补齐；这些用例均纳入全量测试与发布流水线。
-
-## 勘误
-
-初版本清单把「MCP schema 总长度不超过 8 KB」记为「仓库里没有任何守卫会量这个体积」，是错的：守卫一直在 `packages/mcp/test/mcp.test.ts` 里，只是写作 `8_000` 这个字面量，当时的搜索没命中。该条已改回已验证。
-
-后续复查发现原守卫用 JavaScript 字符数冒充字节数：当时是 8085 个 UTF-16 code unit，实际 UTF-8 序列化为 8311 bytes，已经越过 8192 bytes 目标。现改为 `Buffer.byteLength(..., "utf8")` 的真实字节守卫，并从 8192 bytes 中固定预留 512 bytes；默认字段不再误列为 required，enum 不再重复携带 type，外部校验语义保持不变。当前 core 6、memory 4、actions 1 名称不重叠，联合为 11 个工具，三个 Profile 分别受 7680-byte 守卫约束；任何一侧吃掉预留余量前就会让测试失败。
-
-## 1.0.18 验收结果
-
-1.0.18 已于 2026-08-27 完成十阶段、分发与安装版实测并签发。唯一事实源是
-`release/test-report` 与 `release/release.json`，本节只做可读索引：
-
-- 构建输入：Git HEAD `410969b7fed5f1837078f6731271bf6c18381faf`，`dirty=false`；
-  source hash `59DC0E3724840CF3757A5062AEE1A3D8BB9A64FDABBA8BB526CEF4BC70D12E27`，
-  lockfile hash `EDAB7E986CDA4570FB5B3CC80401E88C978172CE49500416C6AD2F69CE7CED5F`。
-- 十阶段：lint、format、typecheck、test、e2e、benchmark、build、forge-make、
-  packaged-smoke、distribution-smoke 全部 `exitCode=0`；单元/集成 452 项，E2E 14 项。
-- 分发实测：packaged、portable、installed smoke 各 33 项，distribution smoke 19 项，
-  全部通过；安装、首启、退出、重启、portable、卸载后用户数据保留均有逐项 JSON。
-- 性能实测：100 项目总览 1.041 ms、10,000 任务筛选 9.975 ms、写入+事件
-  90.717 ms、50,000 中文文档搜索 0.218 ms（均为 p95），服务 RSS 122.91 MB，
-  全部低于清单阈值。
-- Setup SHA-256：`BF5CCD87CC20B360DBBBBA579D9F2DE2794F4D7884E313B31C718C8F5D250513`；
-  portable ZIP SHA-256：`D30CC3A1C7A6DFB56EA06CB741374BEEED3E78342147BB376D3F662BBD60D080`。
-- `release/test-report/summary.json` 的 `passed=true`，`knownNonBlockingItems=[]`；
-  1.0.18 非阻塞剩余项为“无”。
+旧候选的手填验收数字和哈希仅保留在 Git 历史及其不可变发布制品中。它们不得出现在当前
+动态清单，也不得被新候选的 assembler 读取为当前证据。
