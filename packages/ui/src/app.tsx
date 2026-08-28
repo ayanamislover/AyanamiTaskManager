@@ -747,6 +747,13 @@ function TaskDrawer({
     queryKey: ["engineering-metrics", project, taskKey],
     queryFn: () => client.projects.engineeringMetrics(project, taskKey),
   });
+  const executionSessionCollection = useCursorCollection(
+    ["task", project, taskKey, "execution-sessions"],
+    (cursor) => client.projects.agentPage(project, 100, cursor),
+  );
+  const executionSessions = (executionSessionCollection.items as any[]).filter(
+    (session) => session.currentTaskKey === taskKey,
+  );
   const patch = useMutation({
     mutationFn: async (input: Record<string, unknown>) =>
       client.tasks.patchAsUser(project, {
@@ -904,6 +911,42 @@ function TaskDrawer({
               {progress!.blocker ? (
                 <div className="atm-inline-error">当前门禁：{progress!.blocker}</div>
               ) : null}
+            </section>
+            <section className="atm-section">
+              <h3>执行 Session</h3>
+              {executionSessionCollection.isLoading &&
+              executionSessionCollection.loadedCount === 0 ? (
+                <LoadingRows count={1} />
+              ) : executionSessions.length ? (
+                <div className="atm-list">
+                  {executionSessions.map((session) => (
+                    <article className="atm-row atm-execution-session" key={session.id}>
+                      <div className="atm-execution-session-copy">
+                        <div className="atm-row-title">
+                          {session.displayName || session.agentId || "未命名 Agent"}
+                        </div>
+                        <div className="atm-row-sub">
+                          <Status value={String(session.connectionState || "UNKNOWN")} /> · Git
+                          branch：
+                          <span title={session.git?.branch || ""}>
+                            {session.git?.branch || "非 Git"}
+                          </span>
+                        </div>
+                        <div className="atm-row-sub" title={session.git?.worktreeRoot || ""}>
+                          Worktree：{compactPath(session.git?.worktreeRoot)}
+                        </div>
+                        <div className="atm-row-sub" title={session.git?.head || ""}>
+                          HEAD：{String(session.git?.head || "不可用").slice(0, 12)}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : executionSessionCollection.error ? (
+                <div className="atm-row-sub">执行 Session 暂时不可用，任务详情仍可继续使用。</div>
+              ) : (
+                <div className="atm-row-sub">当前没有领取此任务的 Session。</div>
+              )}
             </section>
             <section className="atm-section">
               <h3>验收标准</h3>
