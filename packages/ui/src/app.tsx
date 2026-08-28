@@ -69,8 +69,15 @@ import {
   PageHead,
 } from "./components/async-state.js";
 import { useDialogAccessibility } from "./hooks/use-dialog-accessibility.js";
+import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
 import { useTheme } from "./hooks/use-theme.js";
+import {
+  appRouteTitle,
+  useAppRouteState,
+  useDesktopRouteNavigation,
+  useRouteHash,
+} from "./routes/use-app-route.js";
 import type {
   AgentIntegrationAction,
   AyanamiTaskManagerProps,
@@ -94,15 +101,6 @@ import {
   statusLabels,
 } from "./presentation.js";
 import "./styles.css";
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target.isContentEditable ||
-    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) ||
-    Boolean(target.closest('[contenteditable="true"]'))
-  );
-}
 
 function Sidebar({
   route,
@@ -4201,37 +4199,14 @@ function App({
   brandLogoSrc?: string;
 }) {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
-  const [route, setRoute] = useState<Route>(() => (location.hash.slice(1) as Route) || "overview");
+  const [route, setRoute] = useAppRouteState();
   const [palette, setPalette] = useState(false);
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
   const { notice, notify } = useNotice();
-  useEffect(() => {
-    location.hash = route;
-  }, [route]);
+  useRouteHash(route);
   const { theme, toggleTheme } = useTheme();
-  useEffect(() => desktop?.onNavigate?.((next) => setRoute(next as Route)), [desktop]);
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        !(event.ctrlKey || event.metaKey) ||
-        isEditableTarget(event.target) ||
-        document.querySelector('[role="dialog"]')
-      )
-        return;
-      if (event.key.toLowerCase() === "k") {
-        event.preventDefault();
-        setPalette(true);
-      }
-      if (event.key.toLowerCase() === "n") {
-        event.preventDefault();
-        if (route.startsWith("project:")) window.dispatchEvent(new Event("atm:new-project-task"));
-        else setRoute("quick");
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [route]);
+  useDesktopRouteNavigation(desktop, setRoute);
+  useAppShortcuts(route, setRoute, setPalette);
   const projectList = projects.data ?? [];
   const selectedProject = route.startsWith("project:")
     ? projectList.find((project) => project.code === route.slice(8))
@@ -4240,21 +4215,7 @@ function App({
     setRoute(`project:${project}`);
     setDrawer({ project, key });
   };
-  const title =
-    selectedProject?.name ??
-    (
-      {
-        overview: "总览",
-        projects: "项目",
-        my: "活动任务",
-        quick: "临时任务",
-        blockers: "阻塞与等待",
-        agents: "Agent",
-        timeline: "全局时间线",
-        settings: "设置",
-      } as Record<string, string>
-    )[route] ??
-    "工作区";
+  const title = appRouteTitle(route, selectedProject?.name);
   let page: ReactNode;
   if (route === "overview")
     page = (
