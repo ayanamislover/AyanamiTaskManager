@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertBlurBenchmarkReport,
@@ -16,6 +18,8 @@ const row = (
 ): BlurBenchmarkRow => ({
   viewport: { width, height },
   blur,
+  measurementDurationMs: 10_000,
+  rawFrameTimesMs: samples,
   computedTopbarFilter: blur === "on" ? "blur(14px)" : "none",
   computedWindowFilter: blur === "on" ? "blur(16px)" : "none",
   frames: summarizeFrameTimes(samples),
@@ -27,6 +31,10 @@ const row = (
     recalcStyleDurationMs: 0,
     scriptDurationMs: 1,
     taskDurationMs: 2,
+    compositorEventCount: 1,
+    gpuEventCount: 1,
+    rasterEventCount: 1,
+    tracedDurationMs: 1,
   },
 });
 
@@ -37,6 +45,8 @@ const report = (rows: BlurBenchmarkRow[]): BlurBenchmarkReport => {
     generatedAt: "2026-08-28T00:00:00.000Z",
     durationMs: 10_000,
     thresholdPercent: 20,
+    aggregationMethod:
+      "Raw requestAnimationFrame deltas; p50/p95 use linear interpolation; dropped threshold is 1.5x measured median.",
     candidate: {
       gitHead: "a".repeat(40),
       gitDirty: false,
@@ -61,9 +71,13 @@ const report = (rows: BlurBenchmarkRow[]): BlurBenchmarkReport => {
       forcedColorsMatched: true,
       forcedColorsTopbarFilter: "none",
       forcedColorsWindowFilter: "none",
+      forcedColorsTopbarBackground: "rgb(255, 255, 255)",
+      forcedColorsWindowBackground: "rgb(255, 255, 255)",
       reducedTransparencyMatched: true,
       reducedTransparencyTopbarFilter: "none",
       reducedTransparencyWindowFilter: "none",
+      reducedTransparencyTopbarBackground: "rgb(255, 255, 255)",
+      reducedTransparencyWindowBackground: "rgb(255, 255, 255)",
     },
     decision: comparisons.some((entry) => entry.thresholdExceeded) ? "DISABLE_BLUR" : "KEEP_BLUR",
   };
@@ -122,5 +136,35 @@ describe("packaged blur benchmark report", () => {
         fallbacks: { ...valid.fallbacks, forcedColorsMatched: false },
       }),
     ).toThrow(/fallback/u);
+    expect(() =>
+      assertBlurBenchmarkReport({
+        ...valid,
+        rows: [{ ...rows[0]!, measurementDurationMs: 9_999 }, ...rows.slice(1)],
+      }),
+    ).toThrow(/未测满/u);
+    expect(() =>
+      assertBlurBenchmarkReport({
+        ...valid,
+        rows: [
+          { ...rows[0]!, rawFrameTimesMs: [...rows[0]!.rawFrameTimesMs, 300] },
+          ...rows.slice(1),
+        ],
+      }),
+    ).toThrow(/原始帧/u);
+    expect(() =>
+      assertBlurBenchmarkReport({
+        ...valid,
+        fallbacks: { ...valid.fallbacks, forcedColorsTopbarFilter: "blur(14px)" },
+      }),
+    ).toThrow(/fallback/u);
+  });
+
+  it("renderer 采样不得丢弃 >=250ms 的严重长帧", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "packaged-blur-benchmark.ts"),
+      "utf8",
+    );
+    expect(source).toContain("if (delta > 0) frameTimes.push(delta);");
+    expect(source).not.toMatch(/delta\s*<\s*250/u);
   });
 });

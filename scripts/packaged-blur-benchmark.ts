@@ -4,7 +4,7 @@ import { createReadStream, existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { join, resolve } from "node:path";
-import { expect, _electron as electron, type Page } from "@playwright/test";
+import { expect, _electron as electron, type CDPSession, type Page } from "@playwright/test";
 import {
   assertBlurBenchmarkReport,
   compareBlurRows,
@@ -107,6 +107,49 @@ const activityDelta = (
   scriptDurationMs: Math.max(0, Math.round((after.scriptDuration - before.scriptDuration) * 1_000)),
   taskDurationMs: Math.max(0, Math.round((after.taskDuration - before.taskDuration) * 1_000)),
 });
+
+const startTraceActivity = async (cdp: CDPSession) => {
+  const activity = {
+    compositorEventCount: 0,
+    gpuEventCount: 0,
+    rasterEventCount: 0,
+    tracedDurationMs: 0,
+  };
+  const onTraceData = (event: { value: Array<{ cat?: string; name?: string; dur?: number }> }) => {
+    for (const entry of event.value) {
+      const categories = entry.cat ?? "";
+      const name = entry.name ?? "";
+      if (
+        /\b(?:cc|viz|benchmark)\b/u.test(categories) ||
+        /Composite|DrawFrame|BeginFrame/u.test(name)
+      ) {
+        activity.compositorEventCount += 1;
+      }
+      if (/\b(?:gpu|viz)\b/u.test(categories) || /Gpu/u.test(name)) activity.gpuEventCount += 1;
+      if (/Raster|Paint/u.test(name)) activity.rasterEventCount += 1;
+      if (typeof entry.dur === "number" && Number.isFinite(entry.dur) && entry.dur > 0) {
+        activity.tracedDurationMs += entry.dur / 1_000;
+      }
+    }
+  };
+  cdp.on("Tracing.dataCollected", onTraceData);
+  await cdp.send("Tracing.start", {
+    categories: "cc,gpu,viz,benchmark,disabled-by-default-devtools.timeline.frame",
+    transferMode: "ReportEvents",
+  });
+  return async () => {
+    const completed = new Promise<void>((resolveTrace) => {
+      cdp.once("Tracing.tracingComplete", () => resolveTrace());
+    });
+    await cdp.send("Tracing.end");
+    await completed;
+    cdp.off("Tracing.dataCollected", onTraceData);
+    return {
+      ...activity,
+      tracedDurationMs: Math.round(activity.tracedDurationMs),
+    };
+  };
+};
 
 const setBlur = async (page: Page, blur: "on" | "off") => {
   await page.evaluate((mode) => {
@@ -216,36 +259,48 @@ try {
         throw new Error(`blur-off 未关闭真实材质：${JSON.stringify(computed)}`);
       }
       const before = scalarMetrics((await cdp.send("Performance.getMetrics")).metrics);
-      const samples = await page.locator(".atm-main").evaluate(async (element, runDurationMs) => {
-        element.scrollTop = 0;
-        const frameTimes: number[] = [];
-        const startedAt = performance.now();
-        let previousAt = await new Promise<number>((resolveFrame) =>
-          requestAnimationFrame(resolveFrame),
-        );
-        let direction = 1;
-        while (previousAt - startedAt < runDurationMs) {
-          const now = await new Promise<number>((resolveFrame) =>
+      const stopTraceActivity = await startTraceActivity(cdp);
+      let measurement: { elapsedMs: number; frameTimes: number[] };
+      let traceActivity: Awaited<ReturnType<typeof stopTraceActivity>>;
+      try {
+        measurement = await page.locator(".atm-main").evaluate(async (element, runDurationMs) => {
+          element.scrollTop = 0;
+          const frameTimes: number[] = [];
+          const startedAt = performance.now();
+          let previousAt = await new Promise<number>((resolveFrame) =>
             requestAnimationFrame(resolveFrame),
           );
-          const delta = now - previousAt;
-          previousAt = now;
-          if (delta > 0 && delta < 250) frameTimes.push(delta);
-          const maxScroll = element.scrollHeight - element.clientHeight;
-          element.scrollTop += direction * delta * 0.42;
-          if (element.scrollTop >= maxScroll - 1) direction = -1;
-          else if (element.scrollTop <= 1) direction = 1;
-        }
-        return frameTimes;
-      }, durationMs);
+          let direction = 1;
+          while (previousAt - startedAt < runDurationMs) {
+            const now = await new Promise<number>((resolveFrame) =>
+              requestAnimationFrame(resolveFrame),
+            );
+            const delta = now - previousAt;
+            previousAt = now;
+            if (delta > 0) frameTimes.push(delta);
+            const maxScroll = element.scrollHeight - element.clientHeight;
+            element.scrollTop += direction * delta * 0.42;
+            if (element.scrollTop >= maxScroll - 1) direction = -1;
+            else if (element.scrollTop <= 1) direction = 1;
+          }
+          return { elapsedMs: previousAt - startedAt, frameTimes };
+        }, durationMs);
+      } finally {
+        traceActivity = await stopTraceActivity();
+      }
       const after = scalarMetrics((await cdp.send("Performance.getMetrics")).metrics);
+      const rawFrameTimesMs = measurement.frameTimes.map(
+        (sample) => Math.round(sample * 1_000) / 1_000,
+      );
       rows.push({
         viewport,
         blur,
+        measurementDurationMs: Math.round(measurement.elapsedMs * 1_000) / 1_000,
+        rawFrameTimesMs,
         computedTopbarFilter: computed.topbar,
         computedWindowFilter: computed.window,
-        frames: summarizeFrameTimes(samples),
-        activity: activityDelta(before, after),
+        frames: summarizeFrameTimes(rawFrameTimesMs),
+        activity: { ...activityDelta(before, after), ...traceActivity },
       });
       await page.screenshot({
         path: join(screenshotDir, `packaged-blur-${viewport.width}x${viewport.height}-${blur}.png`),
@@ -259,6 +314,9 @@ try {
     matched: matchMedia("(forced-colors: active)").matches,
     topbar: getComputedStyle(document.querySelector(".atm-topbar")!).backdropFilter,
     window: getComputedStyle(document.querySelector(".atm-window-chrome")!).backdropFilter,
+    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!).backgroundColor,
+    windowBackground: getComputedStyle(document.querySelector(".atm-window-chrome")!)
+      .backgroundColor,
   }));
   await page.emulateMedia({ forcedColors: "none" });
   await cdp.send("Emulation.setEmulatedMedia", {
@@ -268,6 +326,9 @@ try {
     matched: matchMedia("(prefers-reduced-transparency: reduce)").matches,
     topbar: getComputedStyle(document.querySelector(".atm-topbar")!).backdropFilter,
     window: getComputedStyle(document.querySelector(".atm-window-chrome")!).backdropFilter,
+    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!).backgroundColor,
+    windowBackground: getComputedStyle(document.querySelector(".atm-window-chrome")!)
+      .backgroundColor,
   }));
   const device = await page.evaluate(() => {
     const canvas = document.createElement("canvas");
@@ -287,6 +348,8 @@ try {
     generatedAt: new Date().toISOString(),
     durationMs,
     thresholdPercent,
+    aggregationMethod:
+      "Raw requestAnimationFrame deltas; p50/p95 use linear interpolation; a dropped frame exceeds 1.5x the measured median; visible drop means at least 3 consecutive dropped frames.",
     candidate: {
       gitHead,
       gitDirty: false,
@@ -308,9 +371,13 @@ try {
       forcedColorsMatched: forcedColors.matched,
       forcedColorsTopbarFilter: forcedColors.topbar,
       forcedColorsWindowFilter: forcedColors.window,
+      forcedColorsTopbarBackground: forcedColors.topbarBackground,
+      forcedColorsWindowBackground: forcedColors.windowBackground,
       reducedTransparencyMatched: reducedTransparency.matched,
       reducedTransparencyTopbarFilter: reducedTransparency.topbar,
       reducedTransparencyWindowFilter: reducedTransparency.window,
+      reducedTransparencyTopbarBackground: reducedTransparency.topbarBackground,
+      reducedTransparencyWindowBackground: reducedTransparency.windowBackground,
     },
     decision: comparisons.some((entry) => entry.thresholdExceeded) ? "DISABLE_BLUR" : "KEEP_BLUR",
   };
