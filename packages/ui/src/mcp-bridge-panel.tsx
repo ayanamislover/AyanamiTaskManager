@@ -1,18 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
+import type { McpBridgeObservation } from "./contracts.js";
 
-export type McpBridgeObservation = {
-  sampledAt: string;
-  metric: "PRIVATE_BYTES";
-  totalPrivateBytes: number;
-  bridges: Array<{
-    pid: number;
-    ownerPid: number | null;
-    ownerName: string;
-    startedAt: string;
-    privateBytes: number;
-  }>;
-};
+export type { McpBridgeObservation } from "./contracts.js";
 
 const REFRESH_INTERVAL_MS = 30_000;
 const MIB = 1024 * 1024;
