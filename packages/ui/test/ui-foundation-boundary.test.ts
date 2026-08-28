@@ -239,4 +239,17 @@ describe("UI foundation boundaries", () => {
     expect(app).toContain('queryKey: ["events", project.code]');
     expect(app).toContain("client.events(project.code, 0, 100)");
   });
+
+  it("app 使用提取后的 Settings feature，而不是保留业务查询与策略面板", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/settings.js"');
+    for (const duplicate of [
+      "function SettingsPage(",
+      'queryKey: ["settings"]',
+      'queryKey: ["agent-integrations"]',
+      'data-testid="update-diagnostics"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+  });
 });

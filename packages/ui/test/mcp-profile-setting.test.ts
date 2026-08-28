@@ -4,7 +4,10 @@ import { describe, expect, it } from "vitest";
 
 describe("memory Profile 设置说明", () => {
   it("默认完整工具面，并明确低内存降级损失与客户端重载要求", () => {
-    const source = readFileSync(join(process.cwd(), "packages", "ui", "src", "app.tsx"), "utf8");
+    const source = readFileSync(
+      join(process.cwd(), "packages", "ui", "src", "features", "settings.tsx"),
+      "utf8",
+    );
     expect(source).toContain("默认开启");
     expect(source).toContain("关闭后将失去");
     expect(source).toMatch(/重载或重启.*Agent 客户端/u);
