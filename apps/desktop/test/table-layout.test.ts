@@ -1,10 +1,23 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const uiRoot = join(process.cwd(), "packages", "ui", "src");
 const styles = readFileSync(join(uiRoot, "styles.css"), "utf8");
-const app = readFileSync(join(uiRoot, "app.tsx"), "utf8");
+
+function productionTsxSources(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return productionTsxSources(path);
+    return entry.isFile() && entry.name.endsWith(".tsx") ? [readFileSync(path, "utf8")] : [];
+  });
+}
+
+function tableBodies(sources: readonly string[]): string[] {
+  return sources.flatMap((source) => [...source.matchAll(tableOpen)].map((match) => match[1]!));
+}
+
+const productionTsx = productionTsxSources(uiRoot);
 
 // 默认的 auto 布局按内容分配列宽：任务标题那一列的 max-content 会把表撑开，
 // 其余列被压到 min-content——中文的 min-content 是一个字宽，于是表头和单元格
@@ -41,13 +54,19 @@ describe("任务表列宽", () => {
   });
 
   it("每一张 .atm-table 都必须自带 colgroup", () => {
-    const between = [...app.matchAll(tableOpen)].map((match) => match[1]!);
+    const between = tableBodies(productionTsx);
     // 扫不到表格同样会让断言空转成绿，先把扫描面本身钉住。
     expect(between.length).toBeGreaterThanOrEqual(2);
     expect(between.filter((chunk) => !chunk.includes("<colgroup>"))).toEqual([]);
-    // 阳性对照：没有 colgroup 的表格必须被这条正则抓出来。
-    const bad = [...'<table className="atm-table">\n  <thead>'.matchAll(tableOpen)];
-    expect(bad).toHaveLength(1);
-    expect(bad[0]![1]).not.toContain("<colgroup>");
+    // 真实生产变异：逐条移除一张表的 colgroup，守卫必须抓到恰好一张坏表。
+    const sourceWithTable = productionTsx.find((source) => source.includes("<colgroup>"))!;
+    const mutated = productionTsx.map((source) =>
+      source === sourceWithTable ? source.replace("<colgroup>", "<div>") : source,
+    );
+    expect(tableBodies(mutated).filter((chunk) => !chunk.includes("<colgroup>"))).toHaveLength(1);
+    // 独立坏 fixture 同样必须验红，避免递归扫描恰好漏掉未来移动后的文件。
+    const badFixture = ['<table className="atm-table">\n  <thead>'];
+    expect(tableBodies(badFixture)).toHaveLength(1);
+    expect(tableBodies(badFixture)[0]).not.toContain("<colgroup>");
   });
 });

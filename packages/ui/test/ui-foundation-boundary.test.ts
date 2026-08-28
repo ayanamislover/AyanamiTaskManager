@@ -281,4 +281,35 @@ describe("UI foundation boundaries", () => {
       expect(app).toContain(retained);
     }
   });
+
+  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调、Drawer/Modal 留在原边界", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/project-task-controls.js"');
+    expect(app).toContain('from "./features/project-task-views.js"');
+    expect(app).toContain("useProjectTaskViewState(tasks.items)");
+    expect(app).toContain("<ProjectTaskControls");
+    expect(app).toContain("<ProjectTaskViews");
+    for (const duplicate of [
+      "type ProjectTaskFilters =",
+      "function ProjectTaskFilterBar(",
+      "function ProjectTaskSortHeader(",
+      'const [view, setView] = useState<"list"',
+      '<div className="atm-board">',
+      '<div className="atm-tree">',
+      '<table className="atm-table">',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+    for (const retained of [
+      'queryKey: ["events", project.code]',
+      '["records", project.code]',
+      "function TaskDrawer(",
+      "function CreateTaskModal(",
+      "function CreateRecordModal(",
+      "function ProjectUpdateModal(",
+      "function ProjectDataModal(",
+    ]) {
+      expect(app).toContain(retained);
+    }
+  });
 });
