@@ -1,15 +1,21 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { describe, expect, it } from "vitest";
 import { createAyanamiMcpServer, createAyanamiToolRegistry } from "../src/index.js";
 
-const productionFiles = [
-  "packages/mcp/src/index.ts",
-  "packages/mcp/src/tool-registry.ts",
-  "packages/mcp/src/tool-publication.ts",
-] as const;
+function listProductionFiles(directory = resolve("packages/mcp/src")): string[] {
+  return readdirSync(directory)
+    .flatMap((entry) => {
+      const path = resolve(directory, entry);
+      return statSync(path).isDirectory() ? listProductionFiles(path) : [path];
+    })
+    .filter((path) => path.endsWith(".ts"));
+}
+
+const productionFiles = listProductionFiles();
 
 const forbiddenPrivatePatterns = [
   { label: "SDK private registry", pattern: /_registeredTools/u },
