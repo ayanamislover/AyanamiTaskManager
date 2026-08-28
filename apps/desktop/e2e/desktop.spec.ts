@@ -1,12 +1,87 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { expect, request as createRequest, test } from "@playwright/test";
+import { expect, request as createRequest, test, type APIRequestContext } from "@playwright/test";
 import Database from "better-sqlite3";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 const headers = { authorization: "Bearer e2e-test-token" };
 const longSidebarProjectName =
   "Codex Agent Permission Preflight And Deployment Readiness Verification";
+
+async function ensureE2eProjectFixture(api: APIRequestContext): Promise<string[]> {
+  const projectsResponse = await api.get(`${apiUrl}/projects`);
+  expect(projectsResponse.ok()).toBeTruthy();
+  const projects = (await projectsResponse.json()) as Array<{ code: string }>;
+  if (!projects.some((project) => project.code === "E2E")) {
+    const project = await api.post(`${apiUrl}/projects`, {
+      data: {
+        name: "E2E 验收项目",
+        sourcePath: null,
+        code: "E2E",
+        description: "真实浏览器验收",
+      },
+    });
+    expect(project.ok()).toBeTruthy();
+  }
+
+  const objectivesResponse = await api.get(`${apiUrl}/projects/E2E/objectives`);
+  expect(objectivesResponse.ok()).toBeTruthy();
+  const objectives = (await objectivesResponse.json()) as Array<{ id: string; title: string }>;
+  let objectiveId = objectives.find((objective) => objective.title === "交付桌面体验")?.id;
+  if (!objectiveId) {
+    const objective = await api.post(`${apiUrl}/projects/E2E/ui/objectives`, {
+      data: {
+        opId: "e2e-objective-v2",
+        title: "交付桌面体验",
+        description: "",
+        definitionOfDone: [],
+      },
+    });
+    expect(objective.ok()).toBeTruthy();
+    objectiveId = ((await objective.json()) as { id: string }).id;
+  }
+
+  const expectedTasks = [
+    { clientRef: "ready", title: "验证宽屏项目密度", priority: "HIGH" },
+    { clientRef: "focus", title: "验证键盘与焦点", priority: "CRITICAL" },
+    { clientRef: "search", title: "验证搜索与保存视图", priority: "NORMAL" },
+  ] as const;
+  const tasksResponse = await api.get(`${apiUrl}/projects/E2E/ui/work-items?limit=100`);
+  expect(tasksResponse.ok()).toBeTruthy();
+  const taskPage = (await tasksResponse.json()) as {
+    items: Array<{ key: string; title: string }>;
+  };
+  const existingTitles = new Set(taskPage.items.map((task) => task.title));
+  const missingTasks = expectedTasks.filter((task) => !existingTitles.has(task.title));
+  if (missingTasks.length) {
+    const tasks = await api.post(`${apiUrl}/projects/E2E/ui/work-items`, {
+      data: {
+        opId: `e2e-tasks-${missingTasks.map((task) => task.clientRef).join("-")}-v2`,
+        items: missingTasks.map((task) => ({
+          ...task,
+          objectiveId,
+          status: "READY",
+          acceptance: [],
+          checklist: [],
+        })),
+      },
+    });
+    expect(tasks.ok()).toBeTruthy();
+  }
+
+  const verifiedResponse = await api.get(`${apiUrl}/projects/E2E/ui/work-items?limit=100`);
+  expect(verifiedResponse.ok()).toBeTruthy();
+  const verified = (await verifiedResponse.json()) as {
+    items: Array<{ key: string; title: string }>;
+  };
+  return expectedTasks
+    .map((expected) => {
+      const matches = verified.items.filter((task) => task.title === expected.title);
+      expect(matches).toHaveLength(1);
+      return matches[0]!.key;
+    })
+    .sort();
+}
 
 test.beforeAll(async () => {
   mkdirSync(resolve("output", "playwright"), { recursive: true });
@@ -48,53 +123,9 @@ test.beforeAll(async () => {
     });
     expect(veryLongProject.ok()).toBeTruthy();
   }
-  if (projects.some((project) => project.code === "E2E")) {
-    await api.dispose();
-    return;
-  }
-  const project = await api.post(`${apiUrl}/projects`, {
-    data: { name: "E2E 验收项目", sourcePath: null, code: "E2E", description: "真实浏览器验收" },
-  });
-  expect(project.ok()).toBeTruthy();
-  const objective = await api.post(`${apiUrl}/projects/E2E/ui/objectives`, {
-    data: { opId: "e2e-objective", title: "交付桌面体验", description: "", definitionOfDone: [] },
-  });
-  const objectiveId = (await objective.json()).id as string;
-  const tasks = await api.post(`${apiUrl}/projects/E2E/ui/work-items`, {
-    data: {
-      opId: "e2e-tasks",
-      items: [
-        {
-          clientRef: "ready",
-          objectiveId,
-          title: "验证宽屏项目密度",
-          status: "READY",
-          priority: "HIGH",
-          acceptance: [],
-          checklist: [],
-        },
-        {
-          clientRef: "focus",
-          objectiveId,
-          title: "验证键盘与焦点",
-          status: "READY",
-          priority: "CRITICAL",
-          acceptance: [],
-          checklist: [],
-        },
-        {
-          clientRef: "search",
-          objectiveId,
-          title: "验证搜索与保存视图",
-          status: "READY",
-          priority: "NORMAL",
-          acceptance: [],
-          checklist: [],
-        },
-      ],
-    },
-  });
-  expect(tasks.ok()).toBeTruthy();
+  const firstFixture = await ensureE2eProjectFixture(api);
+  const replayedFixture = await ensureE2eProjectFixture(api);
+  expect(replayedFixture).toEqual(firstFixture);
   await api.dispose();
 });
 
