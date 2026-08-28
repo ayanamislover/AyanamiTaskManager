@@ -4,6 +4,7 @@ import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/A
 import { AyanamiClient } from "@ayanami-task/client";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { Empty, ErrorState, LoadingRows, PageHead } from "./components/async-state.js";
+import { Presence } from "./components/presence.js";
 import { useDialogAccessibility } from "./hooks/use-dialog-accessibility.js";
 import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
@@ -216,15 +217,17 @@ function App({
         ) : null
       }
       drawerSlot={
-        drawer ? (
-          <TaskDrawer
-            client={client}
-            project={drawer.project}
-            taskKey={drawer.key}
-            close={() => setDrawer(null)}
-            notify={notify}
-          />
-        ) : null
+        <Presence present={Boolean(drawer)} inertWhenClosing>
+          {drawer ? (
+            <TaskDrawer
+              client={client}
+              project={drawer.project}
+              taskKey={drawer.key}
+              close={() => setDrawer(null)}
+              notify={notify}
+            />
+          ) : null}
+        </Presence>
       }
       noticeSlot={notice}
       onSearch={() => setPalette(true)}

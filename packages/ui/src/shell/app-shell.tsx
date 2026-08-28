@@ -3,6 +3,7 @@ import { MagnifyingGlassIcon as MagnifyingGlass } from "@phosphor-icons/react/di
 import { MoonIcon as Moon } from "@phosphor-icons/react/dist/icons/Moon";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { SunIcon as Sun } from "@phosphor-icons/react/dist/icons/Sun";
+import { Presence } from "../components/presence.js";
 import type { Route, Theme } from "../contracts.js";
 import { Sidebar } from "./sidebar.js";
 
@@ -73,11 +74,13 @@ export function AppShell({
       </main>
       {paletteSlot}
       {drawerSlot}
-      {noticeSlot ? (
-        <div className="atm-notice" role="status">
-          {noticeSlot}
-        </div>
-      ) : null}
+      <Presence present={Boolean(noticeSlot)}>
+        {noticeSlot ? (
+          <div className="atm-notice" role="status">
+            {noticeSlot}
+          </div>
+        ) : null}
+      </Presence>
     </div>
   );
 }

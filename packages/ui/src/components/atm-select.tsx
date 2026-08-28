@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
+import { Presence } from "./presence.js";
 
 export type AtmSelectOption = { value: string; label: string };
 
@@ -113,47 +114,50 @@ export function AtmSelect({
         <span>{selectedLabel}</span>
         <CaretDown size={14} aria-hidden="true" />
       </button>
-      {open ? (
-        <div className="atm-select-popover" id={listboxId} role="listbox" aria-label={ariaLabel}>
-          {options.map((option, index) => (
-            <button
-              ref={(element) => {
-                optionRefs.current[index] = element;
-              }}
-              type="button"
-              className="atm-select-option"
-              role="option"
-              aria-selected={option.value === value}
-              data-selected={option.value === value ? "true" : "false"}
-              key={option.value || "__empty"}
-              onClick={() => choose(index)}
-              onKeyDown={(event) => {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  focusOption(index + 1);
-                } else if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  focusOption(index - 1);
-                } else if (event.key === "Home") {
-                  event.preventDefault();
-                  focusOption(0);
-                } else if (event.key === "End") {
-                  event.preventDefault();
-                  focusOption(options.length - 1);
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeAndFocusTrigger();
-                } else if (event.key === "Tab") {
-                  setOpen(false);
-                }
-              }}
-            >
-              <span>{option.label}</span>
-              {option.value === value ? <CheckCircle size={15} weight="fill" /> : null}
-            </button>
-          ))}
-        </div>
-      ) : null}
+      <Presence present={open} inertWhenClosing fallbackMs={240}>
+        {open ? (
+          <div className="atm-select-popover" id={listboxId} role="listbox" aria-label={ariaLabel}>
+            {options.map((option, index) => (
+              <button
+                ref={(element) => {
+                  optionRefs.current[index] = element;
+                }}
+                type="button"
+                className="atm-select-option"
+                role="option"
+                aria-selected={option.value === value}
+                data-selected={option.value === value ? "true" : "false"}
+                key={option.value || "__empty"}
+                onClick={() => choose(index)}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowDown") {
+                    event.preventDefault();
+                    focusOption(index + 1);
+                  } else if (event.key === "ArrowUp") {
+                    event.preventDefault();
+                    focusOption(index - 1);
+                  } else if (event.key === "Home") {
+                    event.preventDefault();
+                    focusOption(0);
+                  } else if (event.key === "End") {
+                    event.preventDefault();
+                    focusOption(options.length - 1);
+                  } else if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    closeAndFocusTrigger();
+                  } else if (event.key === "Tab") {
+                    setOpen(false);
+                  }
+                }}
+              >
+                <span>{option.label}</span>
+                {option.value === value ? <CheckCircle size={15} weight="fill" /> : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </Presence>
     </div>
   );
 }

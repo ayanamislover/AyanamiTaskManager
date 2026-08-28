@@ -13,6 +13,7 @@ import {
   MutationErrorAlert,
   PageHead,
 } from "../components/async-state.js";
+import { Presence, type PresenceRootProps } from "../components/presence.js";
 import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { Status, statusLabels } from "../presentation.js";
@@ -23,15 +24,16 @@ export function ProjectWizard({
   notify,
   onCreated,
   desktop,
+  ...presenceRootProps
 }: {
   client: AyanamiClient;
   close: () => void;
   notify: Notify;
   onCreated: (code: string) => void;
   desktop?: DesktopBridge;
-}) {
+} & PresenceRootProps) {
   const queryClient = useQueryClient();
-  const dialogRef = useDialogAccessibility(close);
+  const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   const [step, setStep] = useState(0);
   const [connection, setConnection] = useState<"" | "正在测试" | "连接正常">("");
   const [form, setForm] = useState({
@@ -90,7 +92,7 @@ export function ProjectWizard({
   const field = (key: keyof typeof form, value: string) =>
     setForm((current) => ({ ...current, [key]: value }));
   return (
-    <div className="atm-modal-backdrop" role="presentation">
+    <div {...presenceRootProps} className="atm-modal-backdrop" role="presentation">
       <section
         ref={dialogRef}
         className="atm-modal"
@@ -370,15 +372,17 @@ export function ProjectsPage({
         </section>
       )}
       <MutationErrorAlert error={restore.error} />
-      {wizard ? (
-        <ProjectWizard
-          client={client}
-          close={() => setWizard(false)}
-          notify={notify}
-          onCreated={onProject}
-          {...(desktop ? { desktop } : {})}
-        />
-      ) : null}
+      <Presence present={wizard} inertWhenClosing>
+        {wizard ? (
+          <ProjectWizard
+            client={client}
+            close={() => setWizard(false)}
+            notify={notify}
+            onCreated={onProject}
+            {...(desktop ? { desktop } : {})}
+          />
+        ) : null}
+      </Presence>
     </>
   );
 }

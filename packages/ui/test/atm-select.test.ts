@@ -15,7 +15,8 @@ const keyboardContracts = {
   optionUp: /event\.key === "ArrowUp"[\s\S]*?focusOption\(index - 1\)/u,
   home: /event\.key === "Home"[\s\S]*?focusOption\(0\)/u,
   end: /event\.key === "End"[\s\S]*?focusOption\(options\.length - 1\)/u,
-  escape: /event\.key === "Escape"[\s\S]*?closeAndFocusTrigger\(\)/u,
+  escape:
+    /event\.key === "Escape"[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?closeAndFocusTrigger\(\)/u,
   tab: /event\.key === "Tab"[\s\S]*?setOpen\(false\)/u,
   wrap: /\(index \+ options\.length\) % options\.length/u,
   focusReturn: /requestAnimationFrame\(\(\) => triggerRef\.current\?\.focus\(\)\)/u,

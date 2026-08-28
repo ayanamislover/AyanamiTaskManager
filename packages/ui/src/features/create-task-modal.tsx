@@ -4,6 +4,7 @@ import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
 import { MutationErrorAlert } from "../components/async-state.js";
+import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 
@@ -12,14 +13,15 @@ export function CreateTaskModal({
   project,
   close,
   notify,
+  ...presenceRootProps
 }: {
   client: AyanamiClient;
   project: string;
   close: () => void;
   notify: Notify;
-}) {
+} & PresenceRootProps) {
   const queryClient = useQueryClient();
-  const dialogRef = useDialogAccessibility(close);
+  const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   const context = useQuery({
     queryKey: ["objectives", project],
     queryFn: () => client.projects.objectives(project),
@@ -68,7 +70,7 @@ export function CreateTaskModal({
     },
   });
   return (
-    <div className="atm-modal-backdrop">
+    <div {...presenceRootProps} className="atm-modal-backdrop">
       <section
         ref={dialogRef}
         className="atm-modal"

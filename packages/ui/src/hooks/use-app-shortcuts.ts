@@ -10,6 +10,12 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
+export function hasActiveDialog(root: ParentNode = document): boolean {
+  return [...root.querySelectorAll<HTMLElement>('[role="dialog"]')].some(
+    (dialog) => !dialog.closest('[inert], [aria-hidden="true"]'),
+  );
+}
+
 export function useAppShortcuts(
   route: Route,
   setRoute: Dispatch<SetStateAction<Route>>,
@@ -21,7 +27,7 @@ export function useAppShortcuts(
         event.defaultPrevented ||
         !(event.ctrlKey || event.metaKey) ||
         isEditableTarget(event.target) ||
-        document.querySelector('[role="dialog"]')
+        hasActiveDialog()
       )
         return;
       if (event.key.toLowerCase() === "k") {

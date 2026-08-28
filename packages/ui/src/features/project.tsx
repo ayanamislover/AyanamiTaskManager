@@ -6,6 +6,7 @@ import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { MutationErrorAlert, PageHead } from "../components/async-state.js";
+import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
 import { CreateRecordModal } from "./create-record-modal.js";
@@ -180,38 +181,46 @@ export function ProjectPage({
         onOpenTask={openTask}
       />
       <MutationErrorAlert errors={[lifecycle.error, trash.error]} />
-      {create ? (
-        <CreateTaskModal
-          client={client}
-          project={project.code}
-          close={() => setCreate(false)}
-          notify={notify}
-        />
-      ) : null}
-      {createRecord ? (
-        <CreateRecordModal
-          client={client}
-          project={project.code}
-          close={() => setCreateRecord(false)}
-          notify={notify}
-        />
-      ) : null}
-      {updateProject ? (
-        <ProjectUpdateModal
-          client={client}
-          project={project.code}
-          close={() => setUpdateProject(false)}
-          notify={notify}
-        />
-      ) : null}
-      {dataTools ? (
-        <ProjectDataModal
-          client={client}
-          project={project.code}
-          close={() => setDataTools(false)}
-          notify={notify}
-        />
-      ) : null}
+      <Presence present={create} inertWhenClosing>
+        {create ? (
+          <CreateTaskModal
+            client={client}
+            project={project.code}
+            close={() => setCreate(false)}
+            notify={notify}
+          />
+        ) : null}
+      </Presence>
+      <Presence present={createRecord} inertWhenClosing>
+        {createRecord ? (
+          <CreateRecordModal
+            client={client}
+            project={project.code}
+            close={() => setCreateRecord(false)}
+            notify={notify}
+          />
+        ) : null}
+      </Presence>
+      <Presence present={updateProject} inertWhenClosing>
+        {updateProject ? (
+          <ProjectUpdateModal
+            client={client}
+            project={project.code}
+            close={() => setUpdateProject(false)}
+            notify={notify}
+          />
+        ) : null}
+      </Presence>
+      <Presence present={dataTools} inertWhenClosing>
+        {dataTools ? (
+          <ProjectDataModal
+            client={client}
+            project={project.code}
+            close={() => setDataTools(false)}
+            notify={notify}
+          />
+        ) : null}
+      </Presence>
     </>
   );
 }
