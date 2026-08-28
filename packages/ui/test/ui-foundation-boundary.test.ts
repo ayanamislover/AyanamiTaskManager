@@ -197,4 +197,17 @@ describe("UI foundation boundaries", () => {
     const badFixture = 'import type { AyanamiClient } from "@ayanami-task/client";';
     expect(appShellForbiddenImports(badFixture)).toEqual(["@ayanami-task/client"]);
   });
+
+  it("app 使用提取后的 Overview 与跨项目任务 feature", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./features/overview.js"');
+    for (const duplicate of [
+      "function OverviewPage(",
+      "function useAllProjectTasks(",
+      "function TasksAcrossProjects(",
+      '["tasks", "all", "ui"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+  });
 });
