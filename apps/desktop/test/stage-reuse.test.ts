@@ -25,6 +25,9 @@ const FIXTURE_FILES = [
   "apps/desktop/src/main.ts",
   "apps/desktop/src/preload.ts",
   "apps/daemon/src/index.ts",
+  // The daemon version moved into the single-source runtime-discovery module;
+  // keep the e2e fixture representative of the files that carry the version.
+  "apps/daemon/src/runtime-discovery.ts",
   "packages/client/src/index.ts",
   "packages/protocol/src/index.ts",
   "playwright.config.ts",

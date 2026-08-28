@@ -6,8 +6,9 @@ import { join } from "node:path";
 // 装出来的还是旧版——1.0.1 那次就是这么撞上的。
 export const VERSIONED_FILES = [
   "package.json",
-  "apps/daemon/src/index.ts",
-  "apps/daemon/src/main.ts",
+  // The daemon entrypoints consume this single source of truth rather than
+  // carrying duplicate literals themselves.
+  "apps/daemon/src/runtime-discovery.ts",
   "apps/daemon/test/mcp-http.test.ts",
   "packages/mcp/src/server.ts",
   "packages/storage-sqlite/src/manager.ts",
