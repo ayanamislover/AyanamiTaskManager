@@ -12,6 +12,8 @@ export type FrameSummary = {
 export type BlurBenchmarkRow = {
   viewport: { width: number; height: number };
   blur: "on" | "off";
+  measurementDurationMs: number;
+  rawFrameTimesMs: number[];
   computedTopbarFilter: string;
   computedWindowFilter: string;
   frames: FrameSummary;
@@ -23,6 +25,10 @@ export type BlurBenchmarkRow = {
     recalcStyleDurationMs: number;
     scriptDurationMs: number;
     taskDurationMs: number;
+    compositorEventCount: number;
+    gpuEventCount: number;
+    rasterEventCount: number;
+    tracedDurationMs: number;
   };
 };
 
@@ -38,6 +44,7 @@ export type BlurBenchmarkReport = {
   generatedAt: string;
   durationMs: number;
   thresholdPercent: number;
+  aggregationMethod: string;
   candidate: {
     gitHead: string;
     gitDirty: false;
@@ -62,9 +69,13 @@ export type BlurBenchmarkReport = {
     forcedColorsMatched: boolean;
     forcedColorsTopbarFilter: string;
     forcedColorsWindowFilter: string;
+    forcedColorsTopbarBackground: string;
+    forcedColorsWindowBackground: string;
     reducedTransparencyMatched: boolean;
     reducedTransparencyTopbarFilter: string;
     reducedTransparencyWindowFilter: string;
+    reducedTransparencyTopbarBackground: string;
+    reducedTransparencyWindowBackground: string;
   };
   decision: "KEEP_BLUR" | "DISABLE_BLUR";
 };
@@ -144,6 +155,9 @@ export function compareBlurRows(
 export function assertBlurBenchmarkReport(report: BlurBenchmarkReport): void {
   if (report.schemaVersion !== 1) throw new Error("blur benchmark schemaVersion 必须为 1");
   if (report.durationMs < 10_000) throw new Error("每种模式必须至少连续测量 10 秒");
+  if (!report.aggregationMethod.includes("requestAnimationFrame")) {
+    throw new Error("性能报告缺少可审计聚合方法");
+  }
   if (report.candidate.gitDirty !== false) throw new Error("性能候选必须来自 clean Git tree");
   for (const hash of [
     report.candidate.executableSha256,
@@ -162,13 +176,66 @@ export function assertBlurBenchmarkReport(report: BlurBenchmarkReport): void {
   if (report.rows.length !== 6 || report.comparisons.length !== 3) {
     throw new Error("性能报告必须包含三视口各一组 blur-on/off");
   }
-  if (report.rows.some((row) => row.frames.sampleCount < 300)) {
-    throw new Error("性能报告帧样本不足");
+  for (const row of report.rows) {
+    if (row.measurementDurationMs < report.durationMs) {
+      throw new Error("性能报告存在未测满时长的 A/B 组");
+    }
+    if (row.rawFrameTimesMs.length !== row.frames.sampleCount || row.frames.sampleCount < 300) {
+      throw new Error("性能报告原始帧样本缺失或不足");
+    }
+    if (row.rawFrameTimesMs.some((sample) => !Number.isFinite(sample) || sample <= 0)) {
+      throw new Error("性能报告包含非法帧样本");
+    }
+    const recomputed = summarizeFrameTimes(row.rawFrameTimesMs);
+    if (JSON.stringify(recomputed) !== JSON.stringify(row.frames)) {
+      throw new Error("性能报告帧聚合与原始样本不一致");
+    }
+    if (row.blur === "on") {
+      if (
+        !row.computedTopbarFilter.includes("blur") ||
+        !row.computedWindowFilter.includes("blur")
+      ) {
+        throw new Error("blur-on 组未命中真实材质");
+      }
+    } else if (row.computedTopbarFilter !== "none" || row.computedWindowFilter !== "none") {
+      throw new Error("blur-off 组未关闭真实材质");
+    }
+    if (
+      row.activity.compositorEventCount +
+        row.activity.gpuEventCount +
+        row.activity.rasterEventCount <=
+      0
+    ) {
+      throw new Error("性能报告缺少 GPU/compositor trace activity");
+    }
   }
-  if (!report.fallbacks.forcedColorsMatched || !report.fallbacks.reducedTransparencyMatched) {
+  const fallbackFilters = [
+    report.fallbacks.forcedColorsTopbarFilter,
+    report.fallbacks.forcedColorsWindowFilter,
+    report.fallbacks.reducedTransparencyTopbarFilter,
+    report.fallbacks.reducedTransparencyWindowFilter,
+  ];
+  const fallbackBackgrounds = [
+    report.fallbacks.forcedColorsTopbarBackground,
+    report.fallbacks.forcedColorsWindowBackground,
+    report.fallbacks.reducedTransparencyTopbarBackground,
+    report.fallbacks.reducedTransparencyWindowBackground,
+  ];
+  if (
+    !report.fallbacks.forcedColorsMatched ||
+    !report.fallbacks.reducedTransparencyMatched ||
+    fallbackFilters.some((filter) => filter !== "none") ||
+    fallbackBackgrounds.some(
+      (background) => background === "transparent" || background === "rgba(0, 0, 0, 0)",
+    )
+  ) {
     throw new Error("forced-colors/reduced-transparency 运行时 fallback 未命中");
   }
-  const expectedDecision = report.comparisons.some((entry) => entry.thresholdExceeded)
+  const recomputedComparisons = compareBlurRows(report.rows, report.thresholdPercent);
+  if (JSON.stringify(recomputedComparisons) !== JSON.stringify(report.comparisons)) {
+    throw new Error("性能报告 A/B 比较与原始数据不一致");
+  }
+  const expectedDecision = recomputedComparisons.some((entry) => entry.thresholdExceeded)
     ? "DISABLE_BLUR"
     : "KEEP_BLUR";
   if (report.decision !== expectedDecision) throw new Error("性能决定与阈值结果不一致");
