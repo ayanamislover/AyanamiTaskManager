@@ -16,6 +16,11 @@ export type ReconciliationTask = {
   acceptance: string[];
   claimedBySessionId: string | null;
   claimLeaseUntil: string | null;
+  /** Monotonic lifecycle projection; null means no claim/start has ever persisted. */
+  everClaimedAt: string | null;
+  lastStartedAt: string | null;
+  lastSessionClosedAt: string | null;
+  lastEvidenceAt: string | null;
   updatedAt: string;
 };
 
@@ -145,7 +150,6 @@ export function reconcileWorkItems(input: {
   sourceRoot: string | null;
   tasks: ReconciliationTask[];
   sessions: ReconciliationSession[];
-  previouslyClaimedKeys: ReadonlySet<string>;
   includeActive?: boolean;
 }): {
   generatedAt: string;
@@ -194,7 +198,7 @@ export function reconcileWorkItems(input: {
     if (
       POSSIBLY_COMPLETE_STATES.has(task.status) &&
       !task.claimedBySessionId &&
-      !input.previouslyClaimedKeys.has(task.key)
+      task.everClaimedAt === null
     ) {
       const evidencePaths = verifiedAcceptancePaths(input.sourceRoot, task.acceptance);
       if (evidencePaths) {

@@ -1360,35 +1360,56 @@ export class AyanamiTaskService {
     const project = this.databases.getProject(projectCode);
     const repository = await this.#repository(project.code);
     const tasks: ReturnType<ProjectRepository["listWorkItems"]> = [];
-    for (let offset = 0; ; offset += 100) {
-      const page = repository.listWorkItems({ limit: 100, offset });
-      tasks.push(...page);
-      if (page.length < 100) break;
-    }
-
-    const previouslyClaimedKeys = new Set<string>();
-    let sinceSequence = 0;
+    let taskCursor: string | undefined;
+    const seenTaskCursors = new Set<string>();
     for (;;) {
-      const page = repository.delta(sinceSequence, 100, ["work.claimed", "work.started"]);
-      for (const event of page.events) {
-        if (event.key) previouslyClaimedKeys.add(event.key);
-      }
+      const page = repository.listWorkItemPage({
+        limit: 100,
+        ...(taskCursor === undefined ? {} : { cursor: taskCursor }),
+      });
+      tasks.push(...page.items);
       if (!page.hasMore) break;
-      const nextSequence = page.events.at(-1)?.seq ?? sinceSequence;
-      if (nextSequence <= sinceSequence) break;
-      sinceSequence = nextSequence;
+      if (!page.nextCursor) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "RECONCILE_TASK_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
+          details: { entity: "RECONCILE_TASK_PAGE", reason: "MISSING_NEXT_CURSOR" },
+        });
+      }
+      if (seenTaskCursors.has(page.nextCursor)) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "RECONCILE_TASK_PAGE 分页返回了重复 cursor",
+          details: { entity: "RECONCILE_TASK_PAGE", reason: "REPEATED_CURSOR" },
+        });
+      }
+      seenTaskCursors.add(page.nextCursor);
+      taskCursor = page.nextCursor;
     }
 
     const sessions: import("@ayanami-task/storage-sqlite").SessionView[] = [];
     let sessionCursor: string | undefined;
-    do {
+    const seenSessionCursors = new Set<string>();
+    for (;;) {
       const page = repository.listAgentSessionPage({
         limit: 100,
         ...(sessionCursor === undefined ? {} : { cursor: sessionCursor }),
       });
       sessions.push(...page.items);
-      sessionCursor = page.hasMore ? (page.nextCursor ?? undefined) : undefined;
-    } while (sessionCursor);
+      if (!page.hasMore) break;
+      if (!page.nextCursor) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "RECONCILE_SESSION_PAGE 分页声明 hasMore=true 但未返回 nextCursor",
+          details: { entity: "RECONCILE_SESSION_PAGE", reason: "MISSING_NEXT_CURSOR" },
+        });
+      }
+      if (seenSessionCursors.has(page.nextCursor)) {
+        throw new AtmError("INVALID_RESPONSE", {
+          message: "RECONCILE_SESSION_PAGE 分页返回了重复 cursor",
+          details: { entity: "RECONCILE_SESSION_PAGE", reason: "REPEATED_CURSOR" },
+        });
+      }
+      seenSessionCursors.add(page.nextCursor);
+      sessionCursor = page.nextCursor;
+    }
     const knownSessionIds = new Set(sessions.map((session) => String(session.id)));
     for (const task of tasks) {
       const sessionId = task.claimedBySessionId;
@@ -1405,7 +1426,6 @@ export class AyanamiTaskService {
       sourceRoot: project.sourcePaths[0] ?? null,
       tasks,
       sessions,
-      previouslyClaimedKeys,
       includeActive: input.includeActive ?? false,
     });
     return {

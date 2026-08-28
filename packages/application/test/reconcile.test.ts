@@ -2,13 +2,15 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AyanamiTaskService } from "../src/index.js";
 import { reconcileWorkItems } from "../src/reconcile.js";
+import { ProjectRepository } from "@ayanami-task/storage-sqlite";
 
 const temporary: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -24,6 +26,10 @@ function task(
     acceptance: [] as string[],
     claimedBySessionId: null,
     claimLeaseUntil: null,
+    everClaimedAt: null,
+    lastStartedAt: null,
+    lastSessionClosedAt: null,
+    lastEvidenceAt: null,
     updatedAt: "2026-08-26T11:45:00.000Z",
     ...overrides,
   };
@@ -60,7 +66,10 @@ describe("只读工作项对账", () => {
           acceptance: ["生成 `release/report.json`", "更新 `README.md`"],
         }),
         task("REC-T-0005", { acceptance: ["生成 `missing.json`"] }),
-        task("REC-T-0006", { acceptance: ["更新 `release/report.json`"] }),
+        task("REC-T-0006", {
+          acceptance: ["更新 `release/report.json`"],
+          everClaimedAt: "2026-08-26T11:40:00.000Z",
+        }),
       ],
       sessions: [
         {
@@ -80,7 +89,6 @@ describe("只读工作项对账", () => {
           closedAt: "2026-08-26T11:36:00.000Z",
         },
       ],
-      previouslyClaimedKeys: new Set(["REC-T-0006"]),
       includeActive: true,
     });
 
@@ -127,7 +135,6 @@ describe("只读工作项对账", () => {
         }),
       ],
       sessions: [],
-      previouslyClaimedKeys: new Set(),
     });
 
     expect(result.items).toEqual([
@@ -211,8 +218,13 @@ describe("只读工作项对账", () => {
         )
         .run(created.items[0]!.id);
       const sequenceBefore = (await service.delta("RECS", 0, 1)).currentSequence;
+      const deltaSpy = vi.spyOn(ProjectRepository.prototype, "delta").mockImplementation(() => {
+        throw new Error("reconcile must not replay the event history");
+      });
 
       const result = await service.reconcileProject("RECS");
+      expect(deltaSpy).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
 
       expect(result).toMatchObject({
         project: { code: "RECS", sourceRoot: canonicalRoot },
@@ -232,6 +244,76 @@ describe("只读工作项对账", () => {
         status: "CLAIMED",
         claimedBySessionId: String(begun.session),
       });
+    } finally {
+      service.close();
+    }
+  });
+
+  it("在大量历史和 521 个任务/Session 下只读完整分页投影", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-reconcile-large-"));
+    temporary.push(root);
+    const service = await AyanamiTaskService.open({
+      dataDir: join(root, "data"),
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "大规模对账", sourcePath: null, code: "MASS" });
+      const objective = await service.createObjectiveAsUser("MASS", "large-reconcile-objective", {
+        title: "大规模对账",
+        description: "",
+        definitionOfDone: [],
+      });
+      const database = await service.databases.openProject("MASS");
+      const repository = new ProjectRepository(database);
+      const actor = { type: "SYSTEM" as const, id: "large-reconcile-fixture", sessionId: null };
+
+      for (let start = 0; start < 521; start += 50) {
+        const items = Array.from({ length: Math.min(50, 521 - start) }, (_, index) => ({
+          clientRef: `large-task-${start + index}`,
+          objectiveId: objective.id,
+          title: `大规模任务 ${start + index}`,
+          description: "",
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY" as const,
+          acceptance: [],
+          checklist: [],
+          verificationRequired: false,
+        }));
+        repository.createWorkItems(actor, `large-work-${start}`, items);
+      }
+      for (let index = 0; index < 521; index += 1) {
+        repository.createSession({
+          agentId: `large-agent-${index}`,
+          displayName: `大规模 Agent ${index}`,
+          clientKind: "test",
+          role: "SUBAGENT",
+        });
+      }
+
+      const deltaSpy = vi.spyOn(ProjectRepository.prototype, "delta").mockImplementation(() => {
+        throw new Error("reconcile must not replay the event history");
+      });
+      const taskPageSpy = vi.spyOn(ProjectRepository.prototype, "listWorkItemPage");
+      const sessionPageSpy = vi.spyOn(ProjectRepository.prototype, "listAgentSessionPage");
+      const legacyListSpy = vi.spyOn(ProjectRepository.prototype, "listWorkItems");
+
+      const result = await service.reconcileProject("MASS", { includeActive: true });
+
+      expect(deltaSpy).not.toHaveBeenCalled();
+      expect(legacyListSpy).not.toHaveBeenCalled();
+      expect(taskPageSpy).toHaveBeenCalledTimes(6);
+      expect(sessionPageSpy).toHaveBeenCalledTimes(6);
+      expect(taskPageSpy.mock.calls.every(([filters]) => filters?.limit === 100)).toBe(true);
+      expect(sessionPageSpy.mock.calls.every(([filters]) => filters?.limit === 100)).toBe(true);
+      expect(result.items).toHaveLength(521);
+      expect(result.counts).toEqual({
+        ACTIVE: 521,
+        LEASE_EXPIRED_ONLINE: 0,
+        STALLED: 0,
+        POSSIBLY_COMPLETE: 0,
+      });
+      expect(result.attentionCount).toBe(0);
     } finally {
       service.close();
     }
@@ -261,7 +343,6 @@ describe("只读工作项对账", () => {
         task("REC-T-0014", { acceptance: ["不包含显式路径，仅描述行为"] }),
       ],
       sessions: [],
-      previouslyClaimedKeys: new Set(),
     });
 
     expect(result.items).toHaveLength(1);
