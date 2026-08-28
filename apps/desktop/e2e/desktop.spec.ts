@@ -802,7 +802,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
 
   const primarySession = await begin("primary");
   await begin("conflict");
-  const listedTasks = await api.get(`${apiUrl}/projects/E2E/work-items?limit=100`);
+  const listedTasks = await api.get(`${apiUrl}/projects/E2E/ui/work-items?limit=100`);
   expect(listedTasks.ok()).toBeTruthy();
   const taskList = ((await listedTasks.json()) as { items: Array<Record<string, any>> }).items;
   const task = taskList.find((item) => item.title === "验证键盘与焦点");
@@ -855,7 +855,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     await expect(primary).toContainText("持续时间");
     await expect(primary).toContainText(/clean|dirty|未观察/u);
 
-    const warning = page.getByRole("status");
+    const warning = page.locator('.atm-notice[role="status"]');
     await expect(warning).toContainText("同一 Worktree");
     await expect(warning).toContainText("同一 Git branch");
 
