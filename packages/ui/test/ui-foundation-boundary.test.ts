@@ -51,6 +51,15 @@ function reverseFacadeImports(files: readonly ProductionSource[]): ImportEdge[] 
   );
 }
 
+function appShellForbiddenImports(source: string): string[] {
+  const forbidden = ["@ayanami-task/client", "@tanstack/react-query", "../app.js", "../index.js"];
+  return forbidden.filter((specifier) =>
+    new RegExp(`(?:from\\s+|import\\s*)["']${specifier.replaceAll("/", "\\/")}["']`, "u").test(
+      source,
+    ),
+  );
+}
+
 describe("UI foundation boundaries", () => {
   it("公共入口仍只导出 AyanamiTaskManager", () => {
     expect(readFileSync(join(sourceRoot, "index.ts"), "utf8").trim()).toBe(
@@ -158,7 +167,8 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Sidebar，而不是保留重复 DOM 与 disclosure 状态", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./shell/sidebar.js"');
+    const appShell = readFileSync(join(sourceRoot, "shell", "app-shell.tsx"), "utf8");
+    expect(appShell).toContain('from "./sidebar.js"');
     for (const duplicate of [
       "function Sidebar(",
       'data-testid="window-drag-brand"',
@@ -167,5 +177,24 @@ describe("UI foundation boundaries", () => {
     ]) {
       expect(app).not.toContain(duplicate);
     }
+  });
+
+  it("app 使用提取后的 AppShell，而不是保留重复 shell 与 topbar DOM", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    const appShell = readFileSync(join(sourceRoot, "shell", "app-shell.tsx"), "utf8");
+    expect(app).toContain('from "./shell/app-shell.js"');
+    for (const duplicate of [
+      '<div className="atm-shell">',
+      '<main className="atm-main">',
+      '<header className="atm-topbar">',
+      'data-testid="window-drag-actions"',
+      "搜索任务、记录和项目<kbd>Ctrl K</kbd>",
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+    expect(appShellForbiddenImports(appShell)).toEqual([]);
+
+    const badFixture = 'import type { AyanamiClient } from "@ayanami-task/client";';
+    expect(appShellForbiddenImports(badFixture)).toEqual(["@ayanami-task/client"]);
   });
 });
