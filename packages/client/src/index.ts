@@ -16,6 +16,10 @@ import {
   type AtmBaseErrorDetails,
   type AtmErrorCode,
 } from "@ayanami-task/errors";
+import { drainCursorPages, type CursorDrainOptions, type CursorPage } from "./cursor-drain.js";
+
+export { drainCursorPages } from "./cursor-drain.js";
+export type { CursorDrainOptions, CursorPage } from "./cursor-drain.js";
 
 export type AyanamiClientOptions = {
   endpoint: string;
@@ -79,7 +83,10 @@ export type TaskViewFor<TView extends TaskViewName> = TView extends "full"
 
 export type TaskListFilters<TView extends TaskViewName = TaskViewName> = Record<string, unknown> & {
   view?: TView;
+  cursor?: string;
 };
+
+export type TaskPage<TView extends TaskViewName = TaskViewName> = CursorPage<TaskViewFor<TView>>;
 
 export type ReconciliationClassification =
   | "ACTIVE"
@@ -289,41 +296,12 @@ export class AyanamiClient {
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit, cursor })}`,
       ),
-    agents: async (code: string): Promise<AgentSession[]> => {
-      const sessions: AgentSession[] = [];
-      let cursor: string | undefined;
-      const seenCursors = new Set<string>();
-      do {
-        const page = await this.request<SessionPage>(
-          "GET",
-          `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit: 100, cursor })}`,
-        );
-        sessions.push(...page.items);
-        if (!page.hasMore) {
-          cursor = undefined;
-          continue;
-        }
-        if (!page.nextCursor) {
-          throw new AyanamiClientError({
-            code: "INVALID_RESPONSE",
-            message: "Session 分页声明 hasMore=true 但未返回 nextCursor",
-            status: 502,
-            details: { entity: "SESSION_PAGE", reason: "MISSING_NEXT_CURSOR" },
-          });
-        }
-        if (seenCursors.has(page.nextCursor)) {
-          throw new AyanamiClientError({
-            code: "INVALID_RESPONSE",
-            message: "Session 分页返回了重复 cursor",
-            status: 502,
-            details: { entity: "SESSION_PAGE", reason: "REPEATED_CURSOR" },
-          });
-        }
-        seenCursors.add(page.nextCursor);
-        cursor = page.nextCursor;
-      } while (cursor);
-      return sessions;
-    },
+    agents: (code: string, options: CursorDrainOptions = {}): Promise<AgentSession[]> =>
+      drainCursorPages((cursor) => this.projects.agentPage(code, 100, cursor), {
+        ...options,
+        entity: "SESSION_PAGE",
+        errorClass: AyanamiClientError,
+      }),
     reconciliation: (code: string, includeActive = false) =>
       this.request<ReconciliationResult>(
         "GET",
@@ -334,41 +312,12 @@ export class AyanamiClient {
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/records${queryString({ limit, cursor })}`,
       ),
-    records: async (code: string): Promise<ProjectRecord[]> => {
-      const records: ProjectRecord[] = [];
-      let cursor: string | undefined;
-      const seenCursors = new Set<string>();
-      do {
-        const page = await this.request<RecordPage>(
-          "GET",
-          `/api/v1/projects/${encodeURIComponent(code)}/records${queryString({ limit: 100, cursor })}`,
-        );
-        records.push(...page.items);
-        if (!page.hasMore) {
-          cursor = undefined;
-          continue;
-        }
-        if (!page.nextCursor) {
-          throw new AyanamiClientError({
-            code: "INVALID_RESPONSE",
-            message: "Record 分页声明 hasMore=true 但未返回 nextCursor",
-            status: 502,
-            details: { entity: "RECORD_PAGE", reason: "MISSING_NEXT_CURSOR" },
-          });
-        }
-        if (seenCursors.has(page.nextCursor)) {
-          throw new AyanamiClientError({
-            code: "INVALID_RESPONSE",
-            message: "Record 分页返回了重复 cursor",
-            status: 502,
-            details: { entity: "RECORD_PAGE", reason: "REPEATED_CURSOR" },
-          });
-        }
-        seenCursors.add(page.nextCursor);
-        cursor = page.nextCursor;
-      } while (cursor);
-      return records;
-    },
+    records: (code: string, options: CursorDrainOptions = {}): Promise<ProjectRecord[]> =>
+      drainCursorPages((cursor) => this.projects.recordPage(code, 100, cursor), {
+        ...options,
+        entity: "RECORD_PAGE",
+        errorClass: AyanamiClientError,
+      }),
     updates: (code: string) =>
       this.request<Array<Record<string, any>>>(
         "GET",
@@ -464,14 +413,47 @@ export class AyanamiClient {
   };
 
   readonly tasks = {
-    list: <TView extends TaskViewName = "core">(
+    page: <TView extends TaskViewName = "core">(
       project: string,
       filters: TaskListFilters<TView> = {},
     ) =>
-      this.request<Array<TaskViewFor<TView>>>(
+      this.request<TaskPage<TView>>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString(filters)}`,
       ),
+    taskPage: <TView extends TaskViewName = "core">(
+      project: string,
+      filters: TaskListFilters<TView> = {},
+    ) =>
+      this.request<TaskPage<TView>>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString(filters)}`,
+      ),
+    list: <TView extends TaskViewName = "core">(
+      project: string,
+      filters: TaskListFilters<TView> = {},
+      options: CursorDrainOptions = {},
+    ): Promise<Array<TaskViewFor<TView>>> => {
+      const { cursor: initialCursor, ...pageFilters } = filters;
+      return drainCursorPages(
+        (cursor) =>
+          this.request<TaskPage<TView>>(
+            "GET",
+            `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString({
+              ...pageFilters,
+              cursor,
+            })}`,
+          ),
+        {
+          ...options,
+          ...((options.initialCursor ?? initialCursor)
+            ? { initialCursor: options.initialCursor ?? initialCursor }
+            : {}),
+          entity: "TASK_PAGE",
+          errorClass: AyanamiClientError,
+        },
+      );
+    },
     get: <TView extends TaskViewName = "core">(
       project: string,
       key: string,
@@ -481,11 +463,40 @@ export class AyanamiClient {
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(key)}${queryString({ view })}`,
       ),
-    listForUi: (project: string, filters: Record<string, unknown> = {}) =>
-      this.request<Array<Record<string, unknown>>>(
+    pageForUi: (project: string, filters: Record<string, unknown> = {}) =>
+      this.request<CursorPage<Record<string, unknown>>>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString(filters)}`,
       ),
+    listForUi: (
+      project: string,
+      filters: Record<string, unknown> = {},
+      options: CursorDrainOptions = {},
+    ): Promise<Array<Record<string, unknown>>> => {
+      const { cursor: initialCursor, ...pageFilters } = filters;
+      return drainCursorPages(
+        (cursor) =>
+          this.request<CursorPage<Record<string, unknown>>>(
+            "GET",
+            `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString({
+              ...pageFilters,
+              cursor,
+            })}`,
+          ),
+        {
+          ...options,
+          ...((options.initialCursor ??
+          (typeof initialCursor === "string" ? initialCursor : undefined))
+            ? {
+                initialCursor:
+                  options.initialCursor ?? (typeof initialCursor === "string" ? initialCursor : ""),
+              }
+            : {}),
+          entity: "TASK_UI_PAGE",
+          errorClass: AyanamiClientError,
+        },
+      );
+    },
     getForUi: (project: string, key: string) =>
       this.request<Record<string, unknown>>(
         "GET",

@@ -193,6 +193,14 @@ export type TaskViewProjectionPage = {
   hasMore: boolean;
 };
 
+export type WorkItemProjectionPage = {
+  items: WorkItemView[];
+  itemCursors: string[];
+  nextCursor: string | null;
+  retryCursor: string;
+  hasMore: boolean;
+};
+
 export type WorkItemView = {
   id: string;
   key: string;
@@ -2778,6 +2786,84 @@ export class ProjectRepository {
     const startCursor = encodeTaskListCursor({ project, selection, last: null });
     return {
       items,
+      itemCursors,
+      nextCursor: hasMore ? itemCursors.at(-1)! : null,
+      retryCursor: filters.cursor ?? startCursor,
+      hasMore,
+    };
+  }
+
+  /**
+   * Desktop projection with the same tl1 selection/order as the bounded task
+   * view. The raw fields are retained for filters, board/tree rows and actions;
+   * no second offset-based query is allowed to drift from the task page.
+   */
+  listWorkItemPage(filters: WorkItemPageFilters = {}): WorkItemProjectionPage {
+    const { clauses, params, selection } = this.taskViewFilter(filters);
+    const project = this.meta.code;
+    const decoded = filters.cursor
+      ? decodeTaskListCursor(filters.cursor, { project, selection })
+      : { last: null };
+    if (decoded.last) {
+      clauses.push(
+        `(CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+           WHEN 'NORMAL' THEN 2 ELSE 3 END, sort_key, created_at, local_no) > (?, ?, ?, ?)`,
+      );
+      params.push(
+        decoded.last.priorityRank,
+        decoded.last.sortKey,
+        decoded.last.createdAt,
+        decoded.last.localNo,
+      );
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 20));
+    params.push(limit + 1);
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT work_items.*,
+                (SELECT target.local_no
+                   FROM work_item_relations relation
+                   JOIN work_items target ON target.id = relation.target_id
+                  WHERE relation.source_id = work_items.id
+                    AND relation.relation_type = 'DISCOVERED_FROM'
+                  LIMIT 1) AS discovered_from_local_no,
+                (SELECT COUNT(*)
+                   FROM work_item_relations relation
+                  WHERE relation.target_id = work_items.id
+                    AND relation.relation_type = 'DISCOVERED_FROM') AS discovered_count
+           FROM work_items
+          WHERE ${clauses.join(" AND ")}
+          ORDER BY CASE priority
+            WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1
+            WHEN 'NORMAL' THEN 2 ELSE 3 END,
+            sort_key, created_at, local_no
+          LIMIT ?`,
+      )
+      .all(...params) as any[];
+    const hasMore = rows.length > limit;
+    const selected = rows.slice(0, limit);
+    const itemCursors = selected.map((row) =>
+      encodeTaskListCursor({
+        project,
+        selection,
+        last: {
+          priorityRank:
+            row.priority === "CRITICAL"
+              ? 0
+              : row.priority === "HIGH"
+                ? 1
+                : row.priority === "NORMAL"
+                  ? 2
+                  : 3,
+          sortKey: Number(row.sort_key),
+          createdAt: row.created_at,
+          localNo: Number(row.local_no),
+        },
+      }),
+    );
+    const startCursor = encodeTaskListCursor({ project, selection, last: null });
+    return {
+      items: selected.map((row) => this.workItemViewFromRow(row)),
       itemCursors,
       nextCursor: hasMore ? itemCursors.at(-1)! : null,
       retryCursor: filters.cursor ?? startCursor,

@@ -699,7 +699,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
   await begin("conflict");
   const listedTasks = await api.get(`${apiUrl}/projects/E2E/work-items?limit=100`);
   expect(listedTasks.ok()).toBeTruthy();
-  const taskList = (await listedTasks.json()) as Array<Record<string, any>>;
+  const taskList = ((await listedTasks.json()) as { items: Array<Record<string, any>> }).items;
   const task = taskList.find((item) => item.title === "验证键盘与焦点");
   expect(task).toBeTruthy();
   const claim = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
