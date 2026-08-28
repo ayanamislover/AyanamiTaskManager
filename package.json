@@ -31,6 +31,7 @@
     "release": "tsx scripts/release.ts",
     "smoke:packaged": "tsx scripts/packaged-smoke.ts",
     "smoke:window": "tsx scripts/window-smoke.ts",
+    "benchmark:blur-packaged": "tsx scripts/packaged-blur-benchmark.ts",
     "smoke:history": "tsx scripts/default-history-smoke.ts",
     "benchmark": "tsx scripts/benchmark.ts",
     "generate:mcp-contracts": "tsx scripts/generate-mcp-contracts.ts",
