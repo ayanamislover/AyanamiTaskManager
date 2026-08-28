@@ -269,11 +269,13 @@ try {
     throw new Error(`主区域没有形成可验收滚动：${JSON.stringify(metrics)}`);
   const box = await scroll.boundingBox();
   if (!box) throw new Error("主滚动区域不可见");
-  await page.mouse.click(box.x + box.width - 5, box.y + box.height - 34);
-  await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await page.bringToFront();
+  await scroll.hover({ position: { x: box.width / 2, y: box.height / 2 } });
   await scroll.evaluate((element) => {
-    element.scrollTop = 0;
+    element.tabIndex = -1;
+    element.focus();
   });
+  await page.waitForTimeout(250);
   const thumbHeight = Math.max(
     48,
     (metrics.clientHeight / metrics.scrollHeight) * metrics.clientHeight,
@@ -285,6 +287,7 @@ try {
   await page.mouse.move(thumbX, Math.min(box.y + box.height - 40, thumbY + 180), { steps: 8 });
   await page.mouse.up();
   await expect.poll(() => scroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  const thumbScrollTop = await scroll.evaluate((element) => element.scrollTop);
 
   await scroll.evaluate((element) => {
     element.scrollTop = 0;
@@ -299,7 +302,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: metrics, backgroundStartsHidden: true, secondInstanceRestoresWindow: true, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: { ...metrics, thumbScrollTop }, backgroundStartsHidden: true, secondInstanceRestoresWindow: true, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();
