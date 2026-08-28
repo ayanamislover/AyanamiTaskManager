@@ -1,4 +1,9 @@
-import type { AyanamiClient } from "@ayanami-task/client";
+import type {
+  AyanamiClient,
+  RegisteredProject as ClientRegisteredProject,
+} from "@ayanami-task/client";
+
+export type SidebarProject = Pick<ClientRegisteredProject, "id" | "code" | "name" | "lifecycle">;
 
 export type Route =
   | "overview"

@@ -1,0 +1,50 @@
+[
+  {
+    "path": "packages/application/src/index.ts",
+    "limit": 850,
+    "owner": "application/facade",
+    "reason": "AyanamiTaskService 的稳定 prototype 方法和 overload 必须保持 own descriptors，现有 facade contract 已锁定该兼容 Interface。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/manager.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/registry-facade",
+    "reason": "Registry 公共 Adapter 保留稳定 prototype Interface；查询、维护和投影 Implementation 必须继续位于已提取的深 Module。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/project-repository.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/project-facade",
+    "reason": "ProjectRepository 公共 Adapter 保留事务与测试可观察的 prototype Interface；业务 Implementation 必须位于内部命令和读模型 Module。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/registry-observability.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/registry-observability",
+    "reason": "SQL-heavy Registry 可观测性 Module 集中工程指标快照读写、投影健康、doctor、全局搜索和时间线 Read Model，在同一 Seam 保持 SQLite 语义的 Locality。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/registry-workspace.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/registry-workspace",
+    "reason": "SQL-heavy Registry workspace Module 集中 saved view、设置、临时任务、项目注册、路径和创建事务，在单一写入 Seam 保持幂等与回滚语义。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/session-commands.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/sessions",
+    "reason": "SQL-heavy Session 事务 Module 将幂等、Git context 与生命周期写入集中在同一 Seam，保持事务知识的 Locality。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/review-commands.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/reviews",
+    "reason": "SQL-heavy Review 事务 Module 将请求、裁决、证据和完成门禁集中在同一事务 Seam，避免跨调用方复制规则。"
+  },
+  {
+    "path": "packages/storage-sqlite/src/work-item-lifecycle-commands.ts",
+    "limit": 1000,
+    "owner": "storage-sqlite/work-items",
+    "reason": "SQL-heavy WorkItem 生命周期 Module 将状态迁移、完成门禁和审计写入维持在同一事务 Seam，保留 Locality。"
+  }
+]
