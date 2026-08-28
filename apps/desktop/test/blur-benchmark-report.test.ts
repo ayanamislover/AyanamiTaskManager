@@ -72,10 +72,16 @@ const report = (rows: BlurBenchmarkRow[]): BlurBenchmarkReport => {
 describe("packaged blur benchmark report", () => {
   it("计算 p50/p95、掉帧与连续掉帧", () => {
     expect(percentile([10, 20, 30, 40], 0.5)).toBe(25);
-    expect(summarizeFrameTimes([16, 16, 30, 31, 32, 16])).toMatchObject({
+    expect(summarizeFrameTimes([16, 16, 30, 31, 32, 16], 25)).toMatchObject({
       sampleCount: 6,
+      droppedThresholdMs: 25,
       droppedFrames: 3,
       maxConsecutiveDroppedFrames: 3,
+    });
+    expect(summarizeFrameTimes([8, 8, 8, 13])).toMatchObject({
+      baselineFrameMs: 8,
+      droppedThresholdMs: 12,
+      droppedFrames: 1,
     });
   });
 
