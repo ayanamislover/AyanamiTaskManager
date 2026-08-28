@@ -10,5 +10,6 @@ output/
 *.log
 .vite/
 .playwright-cli/
+.crossagent/
 .ayanami-task/
 .atm-test-data/
