@@ -44,3 +44,18 @@ AyanamiTaskManager 已接近适合专业控制台的克制程度。保留即时�
 ## 验收基线
 
 真实浏览器覆盖 light/dark/reduced-motion/forced-colors 可行项；packaged Electron 实测三键、拖动、双击最大化、四边 resize、滚动条点击和拖拽、关闭到托盘。严格复核禁止 `transition: all`、`ease-in`、`scale(0)`、布局属性动画以及无 reduced-motion 降级。
+
+## 2026-08-28 HEAD 复核（`b85aeea`）
+
+本轮按 Purpose/Frequency、Easing/Duration、Physicality、Interruptibility、Performance、Accessibility 与 Cohesion 重新扫描。静态扫描继续为：生产代码无 `transition: all`、裸 UI `ease-in`、`scale(0)` 或布局属性动画；自绘下拉的鼠标/键盘输入模态与 reduced-motion 降级仍在。
+
+选入后续计划的四项是：两处任务表格缺少键盘入口（007）、tabs 与自绘 radio 缺少 roving focus（008）、多处异步错误未向辅助技术播报（009），以及 sticky topbar/frameless chrome 的 blur 需要真实滚动性能测量（010）。前三项直接影响可达性，第四项先测后改，不能凭静态猜测破坏既有材质。
+
+再次拒绝以下候选：
+
+- 主导航、设置入口与项目卡的 120–160ms color/press/hover 反馈：004 已明确统一其节奏与 reduced-motion 行为；它们不是 route/content transition，删除会重新推翻已验收的触控反馈。
+- modal、drawer、select 与 Notice 的 exit presence：002/003 已明确选择“进入有空间提示、关闭立即安全卸载”，在没有可证明问题前不为退出延迟引入状态机。
+- 把 hover/color 从共享 `--atm-ease-out` 改成裸 `ease`：会破坏现有 token vocabulary，且没有可观察缺陷。
+- 工程统计/MCP 诊断内容区入场：用户要求这些重内容默认折叠以避免卡顿；不增加内容高度或 presence 动画。
+- 设置预览、命令面板、筛选、排序、tab 内容和列表 stagger：前者收益低，其余均是高频功能数据，保持即时。
+- drawer backdrop 的 `180ms`：这是 000/002 中原始 recipe 的有意值，不把“没有 token”本身当作用户可感知缺陷。
