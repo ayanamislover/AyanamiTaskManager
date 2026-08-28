@@ -3,17 +3,10 @@ import { QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tan
 import { ArchiveIcon as Archive } from "@phosphor-icons/react/dist/icons/Archive";
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
-import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/CaretRight";
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
-import { CheckSquareIcon as CheckSquare } from "@phosphor-icons/react/dist/icons/CheckSquare";
-import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-icons/react/dist/icons/ClockCounterClockwise";
-import { GitBranchIcon as GitBranch } from "@phosphor-icons/react/dist/icons/GitBranch";
-import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
-import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
-import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import {
   AyanamiClient,
@@ -25,23 +18,10 @@ import { checklistToggleIntent, evidenceText } from "./checklist-evidence.js";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { recordDraftToUserInput } from "./record-input.js";
 import { useCursorCollection } from "./cursor-collection.js";
-import { presentTimelineEvent } from "./timeline-events.js";
 import { taskProgressPresentation } from "./task-progress.js";
-import {
-  sortProjectTasks,
-  toggleProjectTaskSort,
-  type ProjectTaskSort,
-  type ProjectTaskSortField,
-} from "./task-sort.js";
 import { workItemUiActions } from "./task-actions.js";
 import { AtmSelect } from "./components/atm-select.js";
-import {
-  CursorLoadStatus,
-  Empty,
-  ErrorState,
-  LoadingRows,
-  PageHead,
-} from "./components/async-state.js";
+import { Empty, ErrorState, LoadingRows, PageHead } from "./components/async-state.js";
 import { useDialogAccessibility } from "./hooks/use-dialog-accessibility.js";
 import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
@@ -50,6 +30,8 @@ import { AppShell } from "./shell/app-shell.js";
 import { AgentsPage } from "./features/agents.js";
 import { OverviewPage, TasksAcrossProjects } from "./features/overview.js";
 import { ProjectSummary } from "./features/project-summary.js";
+import { ProjectTaskControls, useProjectTaskViewState } from "./features/project-task-controls.js";
+import { ProjectTaskViews } from "./features/project-task-views.js";
 import { ProjectsPage } from "./features/projects.js";
 import { QuickPage } from "./features/quick.js";
 import { SettingsPage } from "./features/settings.js";
@@ -65,7 +47,6 @@ import {
   Status,
   compactPath,
   formatTime,
-  priorityLabels,
   progressSourceLabels,
   statusLabels,
 } from "./presentation.js";
@@ -1243,237 +1224,6 @@ function ProjectDataModal({
   );
 }
 
-type ProjectTaskFilters = {
-  status: string;
-  assignee: string;
-  milestone: string;
-  due: "" | "OVERDUE" | "DATED";
-  blockedOnly: boolean;
-  progressSource: string;
-};
-
-const emptyTaskFilters: ProjectTaskFilters = {
-  status: "",
-  assignee: "",
-  milestone: "",
-  due: "",
-  blockedOnly: false,
-  progressSource: "",
-};
-
-function ProjectTaskFilterBar({
-  client,
-  project,
-  tasks,
-  value,
-  onChange,
-  notify,
-}: {
-  client: AyanamiClient;
-  project: string;
-  tasks: any[];
-  value: ProjectTaskFilters;
-  onChange: (value: ProjectTaskFilters) => void;
-  notify: Notify;
-}) {
-  const queryClient = useQueryClient();
-  const [selected, setSelected] = useState("");
-  const views = useQuery({
-    queryKey: ["saved-views", project],
-    queryFn: () => client.savedViews.list(project),
-  });
-  const milestones = useQuery({
-    queryKey: ["milestones", project],
-    queryFn: () => client.projects.milestones(project),
-  });
-  const create = useMutation({
-    mutationFn: (name: string) =>
-      client.savedViews.create({
-        scope: "PROJECT",
-        project,
-        name,
-        query: value,
-        sort: { field: "priority", direction: "desc" },
-      }),
-    onSuccess: async (created) => {
-      await queryClient.invalidateQueries({ queryKey: ["saved-views", project] });
-      setSelected(String(created.id));
-      notify("已保存当前视图");
-    },
-  });
-  const remove = useMutation({
-    mutationFn: (view: any) => client.savedViews.remove(String(view.id), Number(view.version)),
-    onSuccess: async () => {
-      setSelected("");
-      await queryClient.invalidateQueries({ queryKey: ["saved-views", project] });
-      notify("已删除保存视图");
-    },
-  });
-  const chosen = views.data?.find((view) => view.id === selected);
-  const patch = (next: Partial<ProjectTaskFilters>) => onChange({ ...value, ...next });
-  const assignees = [
-    ...new Set(
-      tasks.map((task) => task.assigneeAgentId).filter((entry): entry is string => Boolean(entry)),
-    ),
-  ];
-  return (
-    <div className="atm-filterbar">
-      <AtmSelect
-        ariaLabel="保存视图"
-        value={selected}
-        options={[
-          { value: "", label: "保存视图" },
-          ...(views.data ?? []).map((view) => ({ value: String(view.id), label: view.name })),
-        ]}
-        onChange={(id) => {
-          setSelected(id);
-          const view = views.data?.find((candidate) => candidate.id === id);
-          if (view)
-            onChange({ ...emptyTaskFilters, ...(view.query as Partial<ProjectTaskFilters>) });
-        }}
-      />
-      <AtmSelect
-        ariaLabel="状态筛选"
-        value={value.status}
-        options={[
-          { value: "", label: "全部状态" },
-          ...Object.entries(statusLabels)
-            .filter(([key]) =>
-              [
-                "BACKLOG",
-                "READY",
-                "CLAIMED",
-                "IN_PROGRESS",
-                "BLOCKED",
-                "WAITING_USER",
-                "WAITING_AGENT",
-                "VERIFYING",
-                "DONE",
-                "CANCELLED",
-              ].includes(key),
-            )
-            .map(([key, label]) => ({ value: key, label })),
-        ]}
-        onChange={(status) => patch({ status })}
-      />
-      <AtmSelect
-        ariaLabel="Agent 筛选"
-        className="wide"
-        value={value.assignee}
-        options={[
-          { value: "", label: "全部负责人" },
-          ...assignees.map((agent) => ({
-            value: agent,
-            label: agent === "USER" ? "桌面用户" : agent,
-          })),
-        ]}
-        onChange={(assignee) => patch({ assignee })}
-      />
-      <AtmSelect
-        ariaLabel="里程碑筛选"
-        className="medium"
-        value={value.milestone}
-        options={[
-          { value: "", label: "全部里程碑" },
-          ...(milestones.data ?? []).map((milestone) => ({
-            value: String(milestone.id),
-            label: milestone.title,
-          })),
-        ]}
-        onChange={(milestone) => patch({ milestone })}
-      />
-      <AtmSelect
-        ariaLabel="截止日期筛选"
-        value={value.due}
-        options={[
-          { value: "", label: "全部日期" },
-          { value: "OVERDUE", label: "已超期" },
-          { value: "DATED", label: "已设目标日" },
-        ]}
-        onChange={(due) => patch({ due: due as ProjectTaskFilters["due"] })}
-      />
-      <AtmSelect
-        ariaLabel="进度来源筛选"
-        className="medium"
-        value={value.progressSource}
-        options={[
-          { value: "", label: "全部进度来源" },
-          ...Object.entries(progressSourceLabels).map(([key, label]) => ({ value: key, label })),
-        ]}
-        onChange={(progressSource) => patch({ progressSource })}
-      />
-      <label className="atm-filter atm-filter-check">
-        <input
-          type="checkbox"
-          checked={value.blockedOnly}
-          onChange={(event) => patch({ blockedOnly: event.target.checked })}
-        />
-        仅阻塞
-      </label>
-      <button
-        className="atm-button"
-        onClick={() => {
-          const name = window.prompt("保存视图名称");
-          if (name?.trim()) create.mutate(name.trim());
-        }}
-      >
-        保存当前
-      </button>
-      {chosen ? (
-        <button
-          className="atm-button danger"
-          disabled={remove.isPending}
-          onClick={() => remove.mutate(chosen)}
-        >
-          删除视图
-        </button>
-      ) : null}
-      {Object.values(value).some(Boolean) ? (
-        <button
-          className="atm-button"
-          onClick={() => {
-            setSelected("");
-            onChange(emptyTaskFilters);
-          }}
-        >
-          清除筛选
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
-function ProjectTaskSortHeader({
-  field,
-  label,
-  sort,
-  onSort,
-}: {
-  field: ProjectTaskSortField;
-  label: string;
-  sort: ProjectTaskSort | null;
-  onSort: (field: ProjectTaskSortField) => void;
-}) {
-  const active = sort?.field === field;
-  return (
-    <th aria-sort={active ? (sort.direction === "asc" ? "ascending" : "descending") : undefined}>
-      <button
-        className="atm-table-sort"
-        data-active={active ? "true" : "false"}
-        data-direction={active ? sort.direction : undefined}
-        aria-label={`按${label}排序`}
-        title={
-          active ? `当前${sort.direction === "asc" ? "正序" : "倒序"}，点击切换` : "点击倒序排列"
-        }
-        onClick={() => onSort(field)}
-      >
-        <span>{label}</span>
-        <CaretDown size={13} weight="bold" aria-hidden="true" />
-      </button>
-    </th>
-  );
-}
-
 function ProjectPage({
   client,
   project,
@@ -1490,9 +1240,6 @@ function ProjectPage({
   desktop?: DesktopBridge;
 }) {
   const queryClient = useQueryClient();
-  const [view, setView] = useState<"list" | "board" | "timeline" | "tree" | "records">("list");
-  const [filters, setFilters] = useState<ProjectTaskFilters>(emptyTaskFilters);
-  const [taskSort, setTaskSort] = useState<ProjectTaskSort | null>(null);
   const [create, setCreate] = useState(false);
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
@@ -1503,6 +1250,8 @@ function ProjectPage({
       ...(cursor === undefined ? {} : { cursor }),
     }),
   );
+  const { view, setView, filters, setFilters, taskSort, filteredTasks, sortedTasks, onTaskSort } =
+    useProjectTaskViewState(tasks.items);
   const events = useQuery({
     queryKey: ["events", project.code],
     queryFn: () => client.events(project.code, 0, 100),
@@ -1538,280 +1287,6 @@ function ProjectPage({
     return () => window.removeEventListener("atm:new-project-task", listener);
   }, []);
   const workItems = tasks.items as any[];
-  const filtered = tasks.items.filter((task: any) => {
-    if (filters.status && task.status !== filters.status) return false;
-    if (filters.assignee && task.assigneeAgentId !== filters.assignee) return false;
-    if (filters.milestone && task.milestoneId !== filters.milestone) return false;
-    if (filters.blockedOnly && !task.blockedReason && task.status !== "BLOCKED") return false;
-    if (filters.progressSource && task.progressSource !== filters.progressSource) return false;
-    if (filters.due === "DATED" && !task.targetDate) return false;
-    if (
-      filters.due === "OVERDUE" &&
-      (!task.targetDate ||
-        task.targetDate >= new Date().toISOString().slice(0, 10) ||
-        ["DONE", "CANCELLED"].includes(task.status))
-    )
-      return false;
-    return true;
-  });
-  const sortedFiltered = sortProjectTasks(filtered, taskSort);
-  const content = () => {
-    if (tasks.isLoading && tasks.items.length === 0) return <LoadingRows count={6} />;
-    if (tasks.error && tasks.items.length === 0)
-      return (
-        <>
-          <ErrorState error={tasks.error} />
-          <button className="atm-button" onClick={() => void tasks.retry()}>
-            重试加载
-          </button>
-        </>
-      );
-    if (view === "records") {
-      if (records.isLoading && records.items.length === 0) return <LoadingRows />;
-      if (records.error && records.items.length === 0)
-        return (
-          <>
-            <CursorLoadStatus
-              loadedCount={records.items.length}
-              hasMore={false}
-              error={records.error}
-              onRetry={() => void records.retry()}
-            />
-            <ErrorState error={records.error} />
-          </>
-        );
-      return records.items.length ? (
-        <>
-          <CursorLoadStatus
-            loadedCount={records.items.length}
-            hasMore={records.hasMore}
-            loading={records.isFetchingNextPage}
-            error={records.error}
-            onRetry={() => void records.retry()}
-          />
-          <div className="atm-list">
-            {records.items.map((record: any) => (
-              <article className="atm-record" key={record.id}>
-                <div className="atm-actions" style={{ justifyContent: "space-between" }}>
-                  <span className="atm-badge">
-                    {(
-                      {
-                        DECISION: "决策",
-                        CONSTRAINT: "约束",
-                        FACT: "事实",
-                        RISK: "风险",
-                        REFERENCE: "参考",
-                        LESSON: "经验",
-                        VERIFICATION: "验证",
-                        WAIVER: "豁免",
-                      } as Record<string, string>
-                    )[record.kind] ?? record.kind}
-                  </span>
-                  <span className="atm-row-sub">
-                    {record.sourceType === "USER"
-                      ? "用户"
-                      : record.sourceType === "AGENT"
-                        ? "Agent"
-                        : record.sourceType === "IMPORT"
-                          ? "导入"
-                          : "系统"}{" "}
-                    · {formatTime(record.updatedAt)}
-                  </span>
-                </div>
-                <h3>{record.title}</h3>
-                {record.topic ? <div className="atm-key">主题：{record.topic}</div> : null}
-                {record.subjectKey ? (
-                  <div className="atm-key">主题标识：{record.subjectKey}</div>
-                ) : null}
-                <p>{record.summary}</p>
-                {record.relatedRecords.length ? (
-                  <div className="atm-row-sub">相关记录：{record.relatedRecords.join("、")}</div>
-                ) : null}
-                {record.detail ? (
-                  <details>
-                    <summary>查看详情</summary>
-                    <div className="atm-description">{record.detail}</div>
-                  </details>
-                ) : null}
-              </article>
-            ))}
-          </div>
-        </>
-      ) : (
-        <>
-          <CursorLoadStatus loadedCount={0} hasMore={false} />
-          <Empty title="还没有项目记录" text="把决策、约束、风险和验证保存为持久上下文。" />
-        </>
-      );
-    }
-    if (view === "timeline") {
-      if (events.isLoading) return <LoadingRows />;
-      const rows = (events.data?.events ?? []) as any[];
-      return rows.length ? (
-        <div className="atm-timeline">
-          {rows
-            .slice()
-            .reverse()
-            .map((event) => {
-              const item = presentTimelineEvent(event);
-              return <TimelineEventRow event={event} key={item.id} />;
-            })}
-        </div>
-      ) : (
-        <Empty title="没有项目事件" text="任务发生变化后会显示在这里。" />
-      );
-    }
-    if (!filtered.length) return <Empty title="没有匹配任务" text="调整筛选或创建任务。" />;
-    if (view === "board") {
-      const columns = [
-        ["待开始", ["BACKLOG", "READY"]],
-        ["进行中", ["CLAIMED", "IN_PROGRESS"]],
-        ["受阻", ["BLOCKED", "WAITING_USER", "WAITING_AGENT"]],
-        ["验收与完成", ["VERIFYING", "DONE"]],
-      ] as const;
-      return (
-        <div className="atm-board">
-          {columns.map(([label, states]) => (
-            <section className="atm-column" key={label}>
-              <div className="atm-column-head">
-                <span>{label}</span>
-                <span className="atm-key">
-                  {filtered.filter((task: any) => states.includes(task.status as never)).length}
-                </span>
-              </div>
-              {filtered
-                .filter((task: any) => states.includes(task.status as never))
-                .map((task: any) => (
-                  <button
-                    className="atm-task-card"
-                    key={task.id}
-                    onClick={() => openTask(task.key)}
-                  >
-                    <div className="atm-row-title">{task.title}</div>
-                    <div className="atm-row-sub">
-                      {task.key} · {Math.round(task.progress ?? 0)}%
-                    </div>
-                  </button>
-                ))}
-            </section>
-          ))}
-        </div>
-      );
-    }
-    if (view === "tree") {
-      const render = (parentId: string | null, depth: number): ReactNode =>
-        filtered
-          .filter((task: any) => (task.parentId ?? null) === parentId)
-          .map((task: any) => (
-            <div key={task.id}>
-              <button
-                className="atm-tree-row"
-                style={{
-                  width: "100%",
-                  paddingLeft: 12 + depth * 22,
-                  borderTop: 0,
-                  borderRight: 0,
-                  borderLeft: 0,
-                  background: "transparent",
-                  textAlign: "left",
-                }}
-                onClick={() => openTask(task.key)}
-              >
-                <GitBranch size={15} />
-                <span className="atm-key">{task.key}</span>
-                <span className="atm-row-title" style={{ flex: 1 }}>
-                  {task.title}
-                </span>
-                {task.discoveredFrom ? (
-                  <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
-                    发现于 {task.discoveredFrom}
-                  </span>
-                ) : null}
-                {task.discoveredCount ? (
-                  <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
-                    发现 {task.discoveredCount}
-                  </span>
-                ) : null}
-                <Status value={task.status} />
-              </button>
-              {render(task.id, depth + 1)}
-            </div>
-          ));
-      return <div className="atm-tree">{render(null, 0)}</div>;
-    }
-    return (
-      <table className="atm-table">
-        {/* 比例定死，窗口变窄时一起等比缩，而不是让任务列把别人挤没。
-            数值按 1366 宽下的实测下限定：可排序表头自带图标，「更新时间」表头
-            本身就要 76px、「优先级」要 65px，比单元格文本更吃宽度。 */}
-        <colgroup>
-          <col style={{ width: "27%" }} />
-          <col style={{ width: "9%" }} />
-          <col style={{ width: "9%" }} />
-          <col style={{ width: "11%" }} />
-          <col style={{ width: "7%" }} />
-          <col style={{ width: "9%" }} />
-          <col style={{ width: "12%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "11%" }} />
-        </colgroup>
-        <thead>
-          <tr>
-            <th>任务</th>
-            <ProjectTaskSortHeader
-              field="status"
-              label="状态"
-              sort={taskSort}
-              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
-            />
-            <ProjectTaskSortHeader
-              field="priority"
-              label="优先级"
-              sort={taskSort}
-              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
-            />
-            <th>负责人</th>
-            <th>层级</th>
-            <th>计划日</th>
-            <th>阻塞 / 等待</th>
-            <th>进度</th>
-            <ProjectTaskSortHeader
-              field="updatedAt"
-              label="更新时间"
-              sort={taskSort}
-              onSort={(field) => setTaskSort((current) => toggleProjectTaskSort(current, field))}
-            />
-          </tr>
-        </thead>
-        <tbody>
-          {sortedFiltered.map((task: any) => (
-            <tr key={task.id} onClick={() => openTask(task.key)}>
-              <td>
-                <div className="atm-row-title">{task.title}</div>
-                <span className="atm-key">{task.key}</span>
-              </td>
-              <td>
-                <Status value={task.status} />
-              </td>
-              <td>{priorityLabels[task.priority] ?? task.priority}</td>
-              <td>
-                {task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}
-              </td>
-              <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
-              <td>{task.targetDate ?? "—"}</td>
-              <td>
-                <span className="atm-cell-wrap">
-                  {task.blockedReason || task.waitingFor || "—"}
-                </span>
-              </td>
-              <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
-              <td>{formatTime(task.updatedAt)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    );
-  };
   return (
     <>
       <PageHead
@@ -1891,45 +1366,27 @@ function ProjectPage({
         notify={notify}
         openTask={openTask}
       />
-      <div className="atm-toolbar">
-        <div className="atm-tabs" role="tablist">
-          <button aria-selected={view === "list"} onClick={() => setView("list")}>
-            <ListBullets size={15} /> 列表
-          </button>
-          <button aria-selected={view === "board"} onClick={() => setView("board")}>
-            <Kanban size={15} /> 看板
-          </button>
-          <button aria-selected={view === "timeline"} onClick={() => setView("timeline")}>
-            <ClockCounterClockwise size={15} /> 时间线
-          </button>
-          <button aria-selected={view === "tree"} onClick={() => setView("tree")}>
-            <Rows size={15} /> 层级
-          </button>
-          <button aria-selected={view === "records"} onClick={() => setView("records")}>
-            <CheckSquare size={15} /> 记录
-          </button>
-        </div>
-      </div>
-      {!new Set(["timeline", "records"]).has(view) ? (
-        <ProjectTaskFilterBar
-          client={client}
-          project={project.code}
-          tasks={tasks.items}
-          value={filters}
-          onChange={setFilters}
-          notify={notify}
-        />
-      ) : null}
-      {tasks.items.length || tasks.error ? (
-        <CursorLoadStatus
-          loadedCount={tasks.loadedCount}
-          hasMore={tasks.hasMore}
-          loading={tasks.isFetchingNextPage}
-          error={tasks.error}
-          onRetry={() => void tasks.retry()}
-        />
-      ) : null}
-      <section className="atm-panel">{content()}</section>
+      <ProjectTaskControls
+        client={client}
+        project={project.code}
+        tasks={tasks.items}
+        view={view}
+        onViewChange={setView}
+        filters={filters}
+        onFiltersChange={setFilters}
+        notify={notify}
+      />
+      <ProjectTaskViews
+        view={view}
+        tasks={tasks}
+        records={records}
+        events={events}
+        filteredTasks={filteredTasks}
+        sortedTasks={sortedTasks}
+        taskSort={taskSort}
+        onTaskSort={onTaskSort}
+        onOpenTask={openTask}
+      />
       {create ? (
         <CreateTaskModal
           client={client}
