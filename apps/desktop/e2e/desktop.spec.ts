@@ -890,6 +890,10 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     await expect(drawer).toContainText(String(primaryGit.branch));
     await expect(drawer).toContainText("Worktree");
     await expect(drawer).toContainText("HEAD");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-task-drawer-execution-session-dark.png"),
+      fullPage: true,
+    });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,

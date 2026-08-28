@@ -1836,6 +1836,16 @@ button.atm-row:hover {
 .atm-evidence-actions {
   padding: 0 0 8px 29px;
 }
+.atm-execution-session {
+  align-items: flex-start;
+}
+.atm-execution-session-copy {
+  min-width: 0;
+  max-width: 100%;
+}
+.atm-execution-session-copy .atm-row-sub {
+  overflow-wrap: anywhere;
+}
 .atm-command {
   width: min(720px, 100%);
   align-self: start;
