@@ -5246,7 +5246,7 @@ export class ProjectRepository {
     const rows = this.#sqlite
       .prepare(
         `SELECT id, project_sequence, payload_json FROM outbox WHERE delivered_at IS NULL
-         ORDER BY project_sequence LIMIT ?`,
+         ORDER BY project_sequence, id LIMIT ?`,
       )
       .all(limit) as Array<{ id: string; project_sequence: number; payload_json: string }>;
     const eventStatement = this.#sqlite.prepare(
@@ -5293,11 +5293,24 @@ export class ProjectRepository {
   markOutboxDelivered(ids: string[]): void {
     if (ids.length === 0) return;
     const statement = this.#sqlite.prepare(
-      "UPDATE outbox SET delivered_at = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?",
+      `UPDATE outbox SET delivered_at = ?, attempts = attempts + 1, last_error = NULL
+       WHERE id = ? AND delivered_at IS NULL`,
     );
     const transaction = this.#sqlite.transaction(() => {
       const now = nowIso();
       for (const id of ids) statement.run(now, id);
+    });
+    transaction();
+  }
+
+  markOutboxFailed(ids: string[], error: string): void {
+    if (ids.length === 0) return;
+    const boundedError = error.slice(0, 2_000);
+    const statement = this.#sqlite.prepare(
+      "UPDATE outbox SET attempts = attempts + 1, last_error = ? WHERE id = ? AND delivered_at IS NULL",
+    );
+    const transaction = this.#sqlite.transaction(() => {
+      for (const id of ids) statement.run(boundedError, id);
     });
     transaction();
   }

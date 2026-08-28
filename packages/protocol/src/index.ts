@@ -210,7 +210,7 @@ export const BeginInputSchema = z.object({
   parentSessionId: z.string().max(128).nullable().optional(),
   resume: z.boolean().default(false),
   predecessorSessionId: z.string().max(128).nullable().optional(),
-  maxChars: z.number().int().min(300).max(5000).default(1200),
+  maxChars: z.number().int().min(400).max(5000).default(1200),
   role: z.enum(["PRIMARY", "SUBAGENT", "REVIEWER", "OBSERVER"]).default("PRIMARY"),
   signals: BeginSignalsSchema.default({}),
   allowProjectCreate: z.boolean().default(false),

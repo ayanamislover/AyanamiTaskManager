@@ -62,6 +62,7 @@ describe("Ayanami MCP", () => {
     expect(beginSchema.properties?.mode).toMatchObject({
       enum: ["auto", "quick", "project"],
     });
+    expect(beginSchema.properties?.max_chars).toMatchObject({ minimum: 400 });
     const recordSchema = memoryListed.tools.find((tool) => tool.name === "atm_record")
       ?.inputSchema as {
       properties?: Record<string, { type?: unknown; enum?: unknown; maxLength?: number }>;
@@ -399,7 +400,7 @@ describe("Ayanami MCP", () => {
       agent_id: "codex-none",
       role: "OBSERVER",
       brief: "none",
-      max_chars: 300,
+      max_chars: 400,
     });
     const identityBody = identityOnly.structuredContent as Record<string, unknown>;
     expect(identityBody).toMatchObject({
@@ -411,7 +412,7 @@ describe("Ayanami MCP", () => {
     });
     expect(identityBody.session).toEqual(expect.any(String));
     expect(identityBody).not.toHaveProperty("records");
-    expect(JSON.stringify(identityBody).length).toBeLessThanOrEqual(300);
+    expect(JSON.stringify(identityBody).length).toBeLessThanOrEqual(400);
 
     const minimal = await call("atm_begin", {
       op_id: "brief-minimal",

@@ -44,7 +44,7 @@ describe("迁移完整性", () => {
       cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
       manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
       try {
-        expect(manager.registry.schemaVersion).toBe(4);
+        expect(manager.registry.schemaVersion).toBe(5);
         const upgraded = await manager.openProject(project.code);
         expect(upgraded.schemaVersion).toBe(18);
         expect(

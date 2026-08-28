@@ -37,6 +37,7 @@ describe("generated mutation acknowledgement documentation", () => {
       "project",
       "session",
       "session_rebound",
+      "projection",
       "entities",
       "entity_count",
       "entities_truncated",
