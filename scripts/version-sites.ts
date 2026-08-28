@@ -9,7 +9,7 @@ export const VERSIONED_FILES = [
   "apps/daemon/src/index.ts",
   "apps/daemon/src/main.ts",
   "apps/daemon/test/mcp-http.test.ts",
-  "packages/mcp/src/index.ts",
+  "packages/mcp/src/server.ts",
   "packages/storage-sqlite/src/manager.ts",
   "docs/user-guide.md",
 ] as const;

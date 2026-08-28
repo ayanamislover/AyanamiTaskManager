@@ -14,10 +14,10 @@ describe("memory Profile 设置说明", () => {
     expect(source).toContain("memoryProfileError");
     expect(source).toContain("自动修复失败：");
 
-    const mainSource = readFileSync(
-      join(process.cwd(), "apps", "desktop", "src", "main.ts"),
+    const integrationHostSource = readFileSync(
+      join(process.cwd(), "apps", "desktop", "src", "main-agent-integrations.ts"),
       "utf8",
     );
-    expect(mainSource.match(/mcpRepairFailures\.delete\(client\)/gu)).toHaveLength(2);
+    expect(integrationHostSource.match(/mcpRepairFailures\.delete\(client\)/gu)).toHaveLength(2);
   });
 });

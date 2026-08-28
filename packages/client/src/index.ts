@@ -1,182 +1,20 @@
+import type { ProjectionBatchReceipt, SearchPage } from "@ayanami-task/protocol";
+import { queryString, requestJson } from "./http.js";
+import { createProjectsSurface } from "./surfaces/projects.js";
+import { createTasksSurface } from "./surfaces/tasks.js";
 import type {
-  ProjectionBatchReceipt,
-  ProjectionFailureView,
-  ProjectionReconcileReceipt,
-  ProjectionStateView,
-  ProjectionSummary,
-  RecordInput,
-  RecordPage,
-  RecordView,
-  SearchPage,
-  SessionPage,
-  SessionView,
-  TaskContextView,
-  TaskCoreView,
-  TaskFullView,
-  TaskViewName,
-} from "@ayanami-task/protocol";
-import {
-  AtmError,
-  isAtmErrorCode,
-  type AtmBaseErrorDetails,
-  type AtmErrorCode,
-} from "@ayanami-task/errors";
-import { drainCursorPages, type CursorDrainOptions, type CursorPage } from "./cursor-drain.js";
+  AgentRecordCreateInput,
+  AyanamiClientOptions,
+  OverviewResponse,
+  RecordCreateReceipt,
+  SystemStatus,
+  UserRecordCreateInput,
+} from "./types.js";
 
 export { drainCursorPages } from "./cursor-drain.js";
 export type { CursorDrainOptions, CursorPage } from "./cursor-drain.js";
-export type {
-  ProjectionBatchReceipt,
-  ProjectionFailureView,
-  ProjectionReconcileReceipt,
-  ProjectionStateView,
-  ProjectionSummary,
-} from "@ayanami-task/protocol";
-
-export type AyanamiClientOptions = {
-  endpoint: string;
-  token: string;
-  fetchImpl?: typeof fetch;
-};
-
-export class AyanamiClientError extends AtmError<AtmErrorCode> {
-  readonly status: number;
-  readonly requestId: string | null;
-
-  constructor(input: {
-    code: AtmErrorCode;
-    message: string;
-    status: number;
-    requestId?: string | null;
-    details?: AtmBaseErrorDetails | null;
-    retryable?: boolean;
-  }) {
-    super(input.code, {
-      message: input.message,
-      httpStatus: input.status,
-      ...(input.details === undefined ? {} : { details: input.details }),
-      ...(input.retryable === undefined ? {} : { retryable: input.retryable }),
-    });
-    this.name = "AyanamiClientError";
-    this.status = input.status;
-    this.requestId = input.requestId ?? null;
-  }
-}
-
-export type RegisteredProject = {
-  id: string;
-  code: string;
-  name: string;
-  description: string;
-  lifecycle: string;
-  coordinationMode: string;
-  sourcePaths: string[];
-  databasePath: string;
-  version: number;
-};
-
-export type AgentRecordCreateInput = Omit<RecordInput, "project">;
-export type UserRecordCreateInput = Omit<AgentRecordCreateInput, "session">;
-export type RecordCreateReceipt = {
-  ok: 1;
-  seq: number;
-  key: string;
-  v: number;
-  relatedRecords: string[];
-};
-export type ProjectRecord = RecordView;
-export type AgentSession = SessionView;
-
-export type SystemStatus = Record<string, unknown> & {
-  ok: boolean;
-  projectionSummary: ProjectionSummary;
-  projectionFailures: ProjectionFailureView[];
-};
-
-export type OverviewProject = Record<string, unknown> & {
-  id: string;
-  code: string;
-  name: string;
-  lifecycle: string;
-  projection: ProjectionStateView | null;
-  health: string | null;
-  current_milestone: string | null;
-  next_target_date: string | null;
-  progress: number | null;
-  progress_source: string | null;
-  active_count: number | null;
-  blocked_count: number | null;
-  waiting_user_count: number | null;
-  waiting_agent_count: number | null;
-  overdue_count: number | null;
-  stale_claim_count: number | null;
-  active_agent_count: number | null;
-  last_activity_at: string | null;
-  last_project_update_at: string | null;
-};
-
-export type OverviewResponse = Record<string, unknown> & {
-  sequence: number;
-  projects: OverviewProject[];
-  projectionSummary: ProjectionSummary;
-  projectionFailures: ProjectionFailureView[];
-  quick: Record<string, unknown>;
-  recentEvents: Array<Record<string, unknown>>;
-};
-
-export type TaskViewFor<TView extends TaskViewName> = TView extends "full"
-  ? TaskFullView
-  : TView extends "context"
-    ? TaskContextView
-    : TaskCoreView;
-
-export type TaskListFilters<TView extends TaskViewName = TaskViewName> = Record<string, unknown> & {
-  view?: TView;
-  cursor?: string;
-};
-
-export type TaskPage<TView extends TaskViewName = TaskViewName> = CursorPage<TaskViewFor<TView>>;
-
-export type ReconciliationClassification =
-  | "ACTIVE"
-  | "LEASE_EXPIRED_ONLINE"
-  | "STALLED"
-  | "POSSIBLY_COMPLETE";
-
-export type ReconciliationResult = {
-  project: { code: string; name: string; sourceRoot: string | null };
-  generatedAt: string;
-  attentionCount: number;
-  counts: Record<ReconciliationClassification, number>;
-  items: Array<{
-    taskKey: string;
-    title: string;
-    status: string;
-    classification: ReconciliationClassification;
-    reason: string;
-    ageSeconds: number;
-    session: {
-      id: string;
-      agentId: string;
-      displayName: string;
-      connectionState: string;
-      lastSeenAt: string | null;
-      endedAt: string | null;
-    } | null;
-    suggestedAction: string;
-    evidencePaths: string[];
-  }>;
-};
-
-function queryString(values: Record<string, unknown>): string {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) {
-    if (value === undefined || value === null || value === "") continue;
-    query.set(key, String(value));
-  }
-  const encoded = query.toString();
-  return encoded ? `?${encoded}` : "";
-}
+export { AyanamiClientError } from "./http.js";
+export type * from "./types.js";
 
 export class AyanamiClient {
   readonly #endpoint: string;
@@ -189,45 +27,15 @@ export class AyanamiClient {
     this.#fetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   }
 
-  async request<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const response = await this.#fetch(`${this.#endpoint}${path}`, {
+  request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    return requestJson<T>({
+      endpoint: this.#endpoint,
+      token: this.#token,
+      fetchImpl: this.#fetch,
       method,
-      headers: {
-        authorization: `Bearer ${this.#token}`,
-        accept: "application/json",
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      path,
+      ...(body === undefined ? {} : { body }),
     });
-    const text = await response.text();
-    let payload: any = null;
-    if (text) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        throw new AyanamiClientError({
-          code: "INVALID_RESPONSE",
-          message: `服务返回了非 JSON 响应（HTTP ${response.status}）`,
-          status: response.status,
-        });
-      }
-    }
-    if (!response.ok) {
-      const rawCode = payload?.error?.code;
-      throw new AyanamiClientError({
-        code: isAtmErrorCode(rawCode) ? rawCode : "INVALID_RESPONSE",
-        message: payload?.error?.message ?? `请求失败（HTTP ${response.status}）`,
-        status: response.status,
-        requestId: payload?.request_id ?? response.headers.get("x-request-id"),
-        ...(payload?.error?.details && typeof payload.error.details === "object"
-          ? { details: payload.error.details as AtmBaseErrorDetails }
-          : {}),
-        ...(typeof payload?.error?.retryable === "boolean"
-          ? { retryable: payload.error.retryable }
-          : {}),
-      });
-    }
-    return payload as T;
   }
 
   status = () => this.request<SystemStatus>("GET", "/api/v1/system/status");
@@ -263,133 +71,7 @@ export class AyanamiClient {
       }),
   };
 
-  readonly projects = {
-    list: () => this.request<RegisteredProject[]>("GET", "/api/v1/projects"),
-    get: (code: string) =>
-      this.request<RegisteredProject>("GET", `/api/v1/projects/${encodeURIComponent(code)}`),
-    attachPath: (code: string, path: string, primary = true) =>
-      this.request<RegisteredProject>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/paths`,
-        {
-          path,
-          primary,
-        },
-      ),
-    create: (input: {
-      name: string;
-      sourcePath: string | null;
-      code?: string;
-      description?: string;
-      coordinationMode?: "SOLO" | "AUTO" | "MULTI";
-      creationReason?: string;
-    }) => this.request<RegisteredProject>("POST", "/api/v1/projects", input),
-    brief: (code: string, session?: string) =>
-      this.request<Record<string, unknown>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/brief${queryString({ session })}`,
-      ),
-    engineeringMetrics: (code: string, task?: string, refresh = false) =>
-      this.request<Record<string, any>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/engineering-metrics${queryString({ task, refresh: refresh || undefined })}`,
-      ),
-    archive: (code: string) =>
-      this.request<RegisteredProject>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/archive`,
-      ),
-    restore: (code: string) =>
-      this.request<RegisteredProject>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/restore`,
-      ),
-    trash: (code: string) =>
-      this.request<RegisteredProject>("POST", `/api/v1/projects/${encodeURIComponent(code)}/trash`),
-    objectives: (code: string) =>
-      this.request<Array<Record<string, any>>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/objectives`,
-      ),
-    createObjective: (code: string, input: Record<string, unknown>) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/objectives`,
-        input,
-      ),
-    createObjectiveAsUser: (code: string, input: Record<string, unknown>) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/ui/objectives`,
-        input,
-      ),
-    milestones: (code: string, objective?: string) =>
-      this.request<Array<Record<string, any>>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/milestones${queryString({ objective })}`,
-      ),
-    createMilestone: (code: string, input: Record<string, unknown>) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/milestones`,
-        input,
-      ),
-    createMilestoneAsUser: (code: string, input: Record<string, unknown>) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/ui/milestones`,
-        input,
-      ),
-    agentPage: (code: string, limit = 100, cursor?: string) =>
-      this.request<SessionPage>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit, cursor })}`,
-      ),
-    agents: (code: string, options: CursorDrainOptions = {}): Promise<AgentSession[]> =>
-      drainCursorPages((cursor) => this.projects.agentPage(code, 100, cursor), {
-        ...options,
-        entity: "SESSION_PAGE",
-        errorClass: AyanamiClientError,
-      }),
-    reconciliation: (code: string, includeActive = false) =>
-      this.request<ReconciliationResult>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/reconciliation${queryString({ include_active: includeActive ? 1 : undefined })}`,
-      ),
-    reconcileProjection: (code: string) =>
-      this.request<ProjectionReconcileReceipt>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/projection/reconcile`,
-      ),
-    recordPage: (code: string, limit = 100, cursor?: string) =>
-      this.request<RecordPage>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/records${queryString({ limit, cursor })}`,
-      ),
-    records: (code: string, options: CursorDrainOptions = {}): Promise<ProjectRecord[]> =>
-      drainCursorPages((cursor) => this.projects.recordPage(code, 100, cursor), {
-        ...options,
-        entity: "RECORD_PAGE",
-        errorClass: AyanamiClientError,
-      }),
-    updates: (code: string) =>
-      this.request<Array<Record<string, any>>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/project-updates`,
-      ),
-    draftUpdate: (code: string, opId: string) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/project-updates/draft`,
-        { opId },
-      ),
-    publishUpdate: (code: string, input: Record<string, unknown>) =>
-      this.request<Record<string, any>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/project-updates`,
-        input,
-      ),
-  };
+  readonly projects = createProjectsSurface(this.request.bind(this));
 
   readonly projections = {
     reconcileAll: () =>
@@ -471,133 +153,7 @@ export class AyanamiClient {
       ),
   };
 
-  readonly tasks = {
-    page: <TView extends TaskViewName = "core">(
-      project: string,
-      filters: TaskListFilters<TView> = {},
-    ) =>
-      this.request<TaskPage<TView>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString(filters)}`,
-      ),
-    taskPage: <TView extends TaskViewName = "core">(
-      project: string,
-      filters: TaskListFilters<TView> = {},
-    ) =>
-      this.request<TaskPage<TView>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString(filters)}`,
-      ),
-    list: <TView extends TaskViewName = "core">(
-      project: string,
-      filters: TaskListFilters<TView> = {},
-      options: CursorDrainOptions = {},
-    ): Promise<Array<TaskViewFor<TView>>> => {
-      const { cursor: initialCursor, ...pageFilters } = filters;
-      return drainCursorPages(
-        (cursor) =>
-          this.request<TaskPage<TView>>(
-            "GET",
-            `/api/v1/projects/${encodeURIComponent(project)}/work-items${queryString({
-              ...pageFilters,
-              cursor,
-            })}`,
-          ),
-        {
-          ...options,
-          ...((options.initialCursor ?? initialCursor)
-            ? { initialCursor: options.initialCursor ?? initialCursor }
-            : {}),
-          entity: "TASK_PAGE",
-          errorClass: AyanamiClientError,
-        },
-      );
-    },
-    get: <TView extends TaskViewName = "core">(
-      project: string,
-      key: string,
-      view: TView = "core" as TView,
-    ) =>
-      this.request<TaskViewFor<TView>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(project)}/work-items/${encodeURIComponent(key)}${queryString({ view })}`,
-      ),
-    pageForUi: (project: string, filters: Record<string, unknown> = {}) =>
-      this.request<CursorPage<Record<string, unknown>>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString(filters)}`,
-      ),
-    listForUi: (
-      project: string,
-      filters: Record<string, unknown> = {},
-      options: CursorDrainOptions = {},
-    ): Promise<Array<Record<string, unknown>>> => {
-      const { cursor: initialCursor, ...pageFilters } = filters;
-      return drainCursorPages(
-        (cursor) =>
-          this.request<CursorPage<Record<string, unknown>>>(
-            "GET",
-            `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString({
-              ...pageFilters,
-              cursor,
-            })}`,
-          ),
-        {
-          ...options,
-          ...((options.initialCursor ??
-          (typeof initialCursor === "string" ? initialCursor : undefined))
-            ? {
-                initialCursor:
-                  options.initialCursor ?? (typeof initialCursor === "string" ? initialCursor : ""),
-              }
-            : {}),
-          entity: "TASK_UI_PAGE",
-          errorClass: AyanamiClientError,
-        },
-      );
-    },
-    getForUi: (project: string, key: string) =>
-      this.request<Record<string, unknown>>(
-        "GET",
-        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items/${encodeURIComponent(key)}`,
-      ),
-    create: (project: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(project)}/work-items`,
-        input,
-      ),
-    patch: (project: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(project)}/work-items/patch`,
-        input,
-      ),
-    checklist: (project: string, id: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "PATCH",
-        `/api/v1/projects/${encodeURIComponent(project)}/checklist/${encodeURIComponent(id)}`,
-        input,
-      ),
-    createAsUser: (project: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items`,
-        input,
-      ),
-    patchAsUser: (project: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items/patch`,
-        input,
-      ),
-    checklistAsUser: (project: string, id: string, input: Record<string, unknown>) =>
-      this.request<Record<string, unknown>>(
-        "PATCH",
-        `/api/v1/projects/${encodeURIComponent(project)}/ui/checklist/${encodeURIComponent(id)}`,
-        input,
-      ),
-  };
+  readonly tasks = createTasksSurface(this.request.bind(this));
 
   progress = (project: string, input: Record<string, unknown>) =>
     this.request<Record<string, unknown>>(
@@ -621,11 +177,12 @@ export class AyanamiClient {
     );
 
   search = (query: string, project?: string, limit = 20, cursor?: string) => {
-    if (!project)
+    if (!project) {
       return this.request<SearchPage>(
         "GET",
         `/api/v1/search${queryString({ query, limit, cursor })}`,
       );
+    }
     return this.request<SearchPage>(
       "GET",
       `/api/v1/projects/${encodeURIComponent(project)}/search${queryString({ query, limit, cursor })}`,

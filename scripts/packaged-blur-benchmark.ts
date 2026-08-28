@@ -95,7 +95,10 @@ const scalarMetrics = (metrics: Array<{ name: string; value: number }>) => {
 const activityDelta = (
   before: ReturnType<typeof scalarMetrics>,
   after: ReturnType<typeof scalarMetrics>,
-): BlurBenchmarkRow["activity"] => ({
+): Omit<
+  BlurBenchmarkRow["activity"],
+  "compositorEventCount" | "gpuEventCount" | "rasterEventCount" | "tracedDurationMs"
+> => ({
   frameCount: Math.max(0, Math.round(after.frames - before.frames)),
   layoutCount: Math.max(0, Math.round(after.layoutCount - before.layoutCount)),
   layoutDurationMs: Math.max(0, Math.round((after.layoutDuration - before.layoutDuration) * 1_000)),

@@ -1,42 +1,17 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import Database from "better-sqlite3";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { strToU8, zipSync, type Zippable } from "fflate";
-import { allocateProjectCode } from "@ayanami-task/domain";
 import { AtmError } from "@ayanami-task/errors";
 import {
-  createUlid,
   nowIso,
   type ProjectionReceipt,
   type ProjectionFailureView,
   type ProjectionStateView,
   type ProjectionSummary,
-  type SearchHit,
   type SearchPage,
 } from "@ayanami-task/protocol";
-import {
-  foreignKeyCheck,
-  openManagedDatabase,
-  quickCheck,
-  sqliteCapabilities,
-  type ManagedDatabase,
-} from "./database.js";
-import {
-  presentEvent,
-  type EventProjectContext,
-  type PresentedEvent,
-} from "./event-presentation.js";
+import { openManagedDatabase, type ManagedDatabase } from "./database.js";
 import {
   BackupMaintenance,
   type BackupView,
@@ -51,50 +26,30 @@ import {
   type ProjectionDispatchResult,
 } from "./registry-projection-dispatcher.js";
 import { RegistryReadModel } from "./registry-read-model.js";
-import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import {
+  RegistryObservability,
+  type StoredWorkItemEngineeringMetrics,
+} from "./registry-observability.js";
+import {
+  RegistryWorkspace,
+  type QuickTaskView,
+  type RegisteredProject,
+  type SavedView,
+  type SettingView,
+} from "./registry-workspace.js";
 import { StartupRecovery } from "./startup-recovery.js";
-import { renameWithRetry, sha256File } from "./storage-file-operations.js";
+import { sha256File } from "./storage-file-operations.js";
 
-const SETTING_KEY_PATTERN = /^[a-z0-9][A-Za-z0-9._-]{0,79}$/u;
-
-export type RegisteredProject = {
-  id: string;
-  code: string;
-  name: string;
-  description: string;
-  databasePath: string;
-  lifecycle: string;
-  coordinationMode: string;
-  sourcePaths: string[];
-  version: number;
-};
-
-export type QuickTaskView = {
-  id: string;
-  key: string;
-  title: string;
-  note: string;
-  status: string;
-  dueDate: string | null;
-  percent: number | null;
-  latestSummary: string | null;
-  sourceCwd: string | null;
-  version: number;
-  updatedAt: string;
-  promotedProjectId: string | null;
-  promotedWorkItemKey: string | null;
-};
+export type {
+  QuickTaskView,
+  RegisteredProject,
+  SavedView,
+  SettingView,
+} from "./registry-workspace.js";
 
 export type { BackupView, CreateBackupInput, MaintenanceResult } from "./backup-maintenance.js";
 
-export type StoredWorkItemEngineeringMetrics = {
-  taskKey: string;
-  baseline: string;
-  baselineCapturedAt: string;
-  metrics: Record<string, unknown> | null;
-  capturedAt: string | null;
-  updatedAt: string;
-};
+export type { StoredWorkItemEngineeringMetrics } from "./registry-observability.js";
 
 export type ProjectExportView = {
   format: "aytproj" | "json" | "csv";
@@ -105,103 +60,7 @@ export type ProjectExportView = {
   createdAt: string;
 };
 
-export type SavedView = {
-  id: string;
-  scope: "GLOBAL" | "PROJECT";
-  projectId: string | null;
-  projectCode: string | null;
-  name: string;
-  query: Record<string, unknown>;
-  sort: Record<string, unknown>;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-};
-
-export type SettingView = {
-  key: string;
-  value: unknown;
-  version: number;
-  updatedAt: string;
-};
-
 export type { ProjectionDispatchResult } from "./registry-projection-dispatcher.js";
-
-function canonicalPath(path: string): string {
-  const absolute = resolve(path);
-  return realpathSync.native(absolute).replace(/[\\/]+$/u, "");
-}
-
-type ProjectionStateRow = {
-  project_id: string;
-  code: string;
-  name: string;
-  lifecycle: string;
-  source_sequence: number;
-  projected_sequence: number;
-  status: "APPLIED" | "DEFERRED";
-  last_error: string | null;
-  retry_count: number;
-  updated_at: string;
-};
-
-function projectionStateFromRow(row: ProjectionStateRow): ProjectionStateView {
-  const sourceSeq = Number(row.source_sequence);
-  const projectedSeq = Number(row.projected_sequence);
-  return {
-    project: {
-      id: row.project_id,
-      code: row.code,
-      name: row.name,
-      lifecycle: row.lifecycle,
-    },
-    status: row.status,
-    sourceSeq,
-    projectedSeq,
-    lag: sourceSeq - projectedSeq,
-    retryScheduled: row.status === "DEFERRED",
-    lastError: row.last_error?.slice(0, 2_000) ?? null,
-    retryCount: Number(row.retry_count),
-    updatedAt: row.updated_at,
-  };
-}
-
-function gitValue(cwd: string, args: string[]): string | null {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
-  return result.status === 0 ? result.stdout.trim() : null;
-}
-
-function quickTaskFromRow(row: any): QuickTaskView {
-  return {
-    id: row.id,
-    key: `Q-${String(row.local_no).padStart(4, "0")}`,
-    title: row.title,
-    note: row.note,
-    status: row.status,
-    dueDate: row.due_date,
-    percent: row.percent,
-    latestSummary: row.latest_summary,
-    sourceCwd: row.source_cwd,
-    version: row.version,
-    updatedAt: row.updated_at,
-    promotedProjectId: row.promoted_project_id,
-    promotedWorkItemKey: row.promoted_work_item_key,
-  };
-}
-
-function workItemLocalNo(projectCode: string, taskKey: string): number {
-  const prefix = `${projectCode.toUpperCase()}-T-`;
-  const normalized = taskKey.toUpperCase();
-  const localNo = normalized.startsWith(prefix)
-    ? Number(normalized.slice(prefix.length))
-    : Number.NaN;
-  if (!Number.isInteger(localNo) || localNo <= 0)
-    throw new AtmError("INVALID_WORK_ITEM_KEY", {
-      message: `WorkItem key 无效：${taskKey}`,
-      details: { reference: taskKey },
-    });
-  return localNo;
-}
 
 function csvCell(value: unknown): string {
   if (value === null || value === undefined) return "";
@@ -236,6 +95,8 @@ export class AyanamiDatabaseManager {
   readonly #projectPool: ProjectDatabasePool;
   readonly #projectionDispatcher: RegistryProjectionDispatcher;
   readonly #registryReads: RegistryReadModel;
+  readonly #registryObservability: RegistryObservability;
+  readonly #registryWorkspace: RegistryWorkspace;
   readonly #startupRecovery: StartupRecovery;
 
   private constructor(input: {
@@ -247,6 +108,31 @@ export class AyanamiDatabaseManager {
     this.migrationsRoot = input.migrationsRoot;
     this.registry = input.registry;
     this.#registryReads = new RegistryReadModel(input.registry.sqlite);
+    this.#registryWorkspace = new RegistryWorkspace({
+      dataDir: input.dataDir,
+      migrationsRoot: input.migrationsRoot,
+      registry: input.registry,
+      dependencies: {
+        appendGlobalEvent: (type, aggregateId, actor, payload) =>
+          this.appendGlobalEvent(type, aggregateId, actor, payload),
+        getProject: (codeOrId) => this.getProject(codeOrId),
+        identifyProject: (path) => this.identifyProject(path),
+        listSavedViews: (projectCodeOrId) => this.listSavedViews(projectCodeOrId),
+        getQuickTask: (idOrKey) => this.getQuickTask(idOrKey),
+      },
+    });
+    this.#registryObservability = new RegistryObservability(input.registry, {
+      openProject: (codeOrId) => this.openProject(codeOrId),
+      getProject: (codeOrId) => this.getProject(codeOrId),
+      ensureWorkItemEngineeringBaseline: (projectCode, taskKey, baseline, capturedAt) =>
+        this.ensureWorkItemEngineeringBaseline(projectCode, taskKey, baseline, capturedAt),
+      workItemEngineeringMetrics: (projectCode, taskKey) =>
+        this.workItemEngineeringMetrics(projectCode, taskKey),
+      listProjects: (includeArchived) => this.listProjects(includeArchived),
+      listProjectionStates: (includeTrashed) => this.listProjectionStates(includeTrashed),
+      projectionSummary: (includeTrashed) => this.projectionSummary(includeTrashed),
+      projectionFailures: (includeTrashed) => this.projectionFailures(includeTrashed),
+    });
     this.#projectPool = new ProjectDatabasePool({
       migrationsRoot: input.migrationsRoot,
       getProject: (codeOrId) => this.getProject(codeOrId),
@@ -384,63 +270,6 @@ export class AyanamiDatabaseManager {
     return row.current_sequence;
   }
 
-  private projectContextForGlobalEvent(
-    payload: Record<string, unknown>,
-    aggregateId: string | null,
-  ): EventProjectContext | null {
-    const projectId =
-      typeof payload.projectId === "string"
-        ? payload.projectId
-        : typeof payload.project_id === "string"
-          ? payload.project_id
-          : null;
-    const row = this.registry.sqlite
-      .prepare(
-        `SELECT id, code, name FROM projects
-         WHERE (? IS NOT NULL AND id = ?) OR (? IS NOT NULL AND code = ?)
-            OR (? IS NOT NULL AND id = ?)
-         LIMIT 1`,
-      )
-      .get(projectId, projectId, projectId, projectId, aggregateId, aggregateId) as
-      | { id: string; code: string; name: string }
-      | undefined;
-    return row ?? null;
-  }
-
-  private presentGlobalRow(row: {
-    sequence: number;
-    type: string;
-    aggregate_id: string;
-    actor: string;
-    payload_json: string;
-    created_at: string;
-  }): PresentedEvent & {
-    seq: number;
-    sequence: number;
-    at: string;
-    payload_json: string;
-    projectCode: string | null;
-    projectName: string | null;
-  } {
-    const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
-    const presented = presentEvent({
-      type: row.type,
-      aggregateId: row.aggregate_id,
-      actor: row.actor,
-      payload,
-      project: this.projectContextForGlobalEvent(payload, row.aggregate_id),
-    });
-    return {
-      ...presented,
-      seq: row.sequence,
-      sequence: row.sequence,
-      at: row.created_at,
-      payload_json: row.payload_json,
-      projectCode: presented.project?.code ?? null,
-      projectName: presented.project?.name ?? null,
-    };
-  }
-
   private recoverCreatingProjects(): void {
     this.#startupRecovery.recoverCreatingProjects();
   }
@@ -458,27 +287,7 @@ export class AyanamiDatabaseManager {
   }
 
   listSavedViews(projectCodeOrId?: string): SavedView[] {
-    const project = projectCodeOrId ? this.getProject(projectCodeOrId) : null;
-    const rows = this.registry.sqlite
-      .prepare(
-        `SELECT saved_views.*, projects.code AS project_code
-         FROM saved_views LEFT JOIN projects ON projects.id = saved_views.project_id
-         ${project ? "WHERE saved_views.project_id = ?" : ""}
-         ORDER BY saved_views.updated_at DESC`,
-      )
-      .all(...(project ? [project.id] : [])) as any[];
-    return rows.map((row) => ({
-      id: row.id,
-      scope: row.scope,
-      projectId: row.project_id,
-      projectCode: row.project_code,
-      name: row.name,
-      query: JSON.parse(row.query_json),
-      sort: JSON.parse(row.sort_json),
-      version: row.version,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return this.#registryWorkspace.listSavedViews(projectCodeOrId);
   }
 
   createSavedView(input: {
@@ -488,31 +297,7 @@ export class AyanamiDatabaseManager {
     query: Record<string, unknown>;
     sort: Record<string, unknown>;
   }): SavedView {
-    const project = input.scope === "PROJECT" ? this.getProject(input.project ?? "") : null;
-    if (!input.name.trim())
-      throw new AtmError("SAVED_VIEW_NAME_REQUIRED", { message: "保存视图名称不能为空" });
-    const id = createUlid();
-    const now = nowIso();
-    this.registry.sqlite.transaction(() => {
-      this.registry.sqlite
-        .prepare(
-          `INSERT INTO saved_views(
-             id, scope, project_id, name, query_json, sort_json, version, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-        )
-        .run(
-          id,
-          input.scope,
-          project?.id ?? null,
-          input.name.trim(),
-          JSON.stringify(input.query),
-          JSON.stringify(input.sort),
-          now,
-          now,
-        );
-      this.appendGlobalEvent("saved_view.created", id, "USER", { projectId: project?.id ?? null });
-    })();
-    return this.listSavedViews(project?.id).find((view) => view.id === id)!;
+    return this.#registryWorkspace.createSavedView(input);
   }
 
   updateSavedView(
@@ -524,154 +309,34 @@ export class AyanamiDatabaseManager {
       sort?: Record<string, unknown>;
     },
   ): SavedView {
-    const current = this.listSavedViews().find((view) => view.id === id);
-    if (!current)
-      throw new AtmError("NOT_FOUND", {
-        message: `保存视图不存在：${id}`,
-        details: { entity: "SAVED_VIEW", reference: id },
-      });
-    if (current.version !== input.expectedVersion)
-      throw new AtmError("VERSION_CONFLICT", {
-        message: "保存视图版本已变化",
-        details: {
-          entity: "SAVED_VIEW",
-          key: id,
-          expected: input.expectedVersion,
-          actual: current.version,
-        },
-      });
-    const name = input.name?.trim() ?? current.name;
-    if (!name) throw new AtmError("SAVED_VIEW_NAME_REQUIRED", { message: "保存视图名称不能为空" });
-    this.registry.sqlite.transaction(() => {
-      this.registry.sqlite
-        .prepare(
-          `UPDATE saved_views SET name = ?, query_json = ?, sort_json = ?,
-           version = version + 1, updated_at = ? WHERE id = ? AND version = ?`,
-        )
-        .run(
-          name,
-          JSON.stringify(input.query ?? current.query),
-          JSON.stringify(input.sort ?? current.sort),
-          nowIso(),
-          id,
-          input.expectedVersion,
-        );
-      this.appendGlobalEvent("saved_view.updated", id, "USER", { projectId: current.projectId });
-    })();
-    return this.listSavedViews().find((view) => view.id === id)!;
+    return this.#registryWorkspace.updateSavedView(id, input);
   }
 
   deleteSavedView(id: string, expectedVersion: number): { ok: 1; id: string } {
-    const current = this.listSavedViews().find((view) => view.id === id);
-    if (!current)
-      throw new AtmError("NOT_FOUND", {
-        message: `保存视图不存在：${id}`,
-        details: { entity: "SAVED_VIEW", reference: id },
-      });
-    if (current.version !== expectedVersion)
-      throw new AtmError("VERSION_CONFLICT", {
-        message: "保存视图版本已变化",
-        details: {
-          entity: "SAVED_VIEW",
-          key: id,
-          expected: expectedVersion,
-          actual: current.version,
-        },
-      });
-    this.registry.sqlite.transaction(() => {
-      this.registry.sqlite
-        .prepare("DELETE FROM saved_views WHERE id = ? AND version = ?")
-        .run(id, expectedVersion);
-      this.appendGlobalEvent("saved_view.deleted", id, "USER", { projectId: current.projectId });
-    })();
-    return { ok: 1, id };
+    return this.#registryWorkspace.deleteSavedView(id, expectedVersion);
   }
 
   listSettings(): SettingView[] {
-    return (this.registry.sqlite.prepare("SELECT * FROM settings ORDER BY key").all() as any[]).map(
-      (row) => ({
-        key: row.key,
-        value: JSON.parse(row.value_json),
-        version: row.version,
-        updatedAt: row.updated_at,
-      }),
-    );
+    return this.#registryWorkspace.listSettings();
   }
 
   getSetting<T = unknown>(
     key: string,
     fallback?: T,
   ): { key: string; value: T; version: number; updatedAt: string | null } {
-    const row = this.registry.sqlite
-      .prepare("SELECT * FROM settings WHERE key = ?")
-      .get(key) as any;
-    if (!row) return { key, value: fallback as T, version: -1, updatedAt: null };
-    return {
-      key: row.key,
-      value: JSON.parse(row.value_json) as T,
-      version: row.version,
-      updatedAt: row.updated_at,
-    };
+    return this.#registryWorkspace.getSetting(key, fallback);
   }
 
   setSetting(key: string, value: unknown, expectedVersion?: number): SettingView {
-    if (!SETTING_KEY_PATTERN.test(key))
-      throw new AtmError("SETTING_KEY_INVALID", {
-        message: "设置项 key 无效",
-        details: { key },
-      });
-    const current = this.registry.sqlite
-      .prepare("SELECT version FROM settings WHERE key = ?")
-      .get(key) as { version: number } | undefined;
-    if (current && expectedVersion !== undefined && current.version !== expectedVersion) {
-      throw new AtmError("VERSION_CONFLICT", {
-        message: "设置项版本已变化",
-        details: { entity: "SETTING", key, expected: expectedVersion, actual: current.version },
-      });
-    }
-    if (!current && expectedVersion !== undefined && expectedVersion !== -1)
-      throw new AtmError("VERSION_CONFLICT", {
-        message: "设置项尚不存在",
-        details: { entity: "SETTING", key, expected: expectedVersion, actual: -1 },
-      });
-    const now = nowIso();
-    this.registry.sqlite.transaction(() => {
-      if (current) {
-        this.registry.sqlite
-          .prepare(
-            "UPDATE settings SET value_json = ?, version = version + 1, updated_at = ? WHERE key = ?",
-          )
-          .run(JSON.stringify(value), now, key);
-      } else {
-        this.registry.sqlite
-          .prepare("INSERT INTO settings(key, value_json, version, updated_at) VALUES (?, ?, 0, ?)")
-          .run(key, JSON.stringify(value), now);
-      }
-      this.appendGlobalEvent("setting.updated", key, "USER", {});
-    })();
-    return this.getSetting(key) as SettingView;
+    return this.#registryWorkspace.setSetting(key, value, expectedVersion);
   }
 
   listQuickTasks(status?: string): QuickTaskView[] {
-    const rows = status
-      ? this.registry.sqlite
-          .prepare("SELECT * FROM quick_tasks WHERE status = ? ORDER BY updated_at DESC")
-          .all(status)
-      : this.registry.sqlite.prepare("SELECT * FROM quick_tasks ORDER BY updated_at DESC").all();
-    return (rows as any[]).map(quickTaskFromRow);
+    return this.#registryWorkspace.listQuickTasks(status);
   }
 
   getQuickTask(idOrKey: string): QuickTaskView {
-    const localNo = Number(idOrKey.match(/^Q-(\d+)$/u)?.[1]);
-    const row = Number.isSafeInteger(localNo)
-      ? this.registry.sqlite.prepare("SELECT * FROM quick_tasks WHERE local_no = ?").get(localNo)
-      : this.registry.sqlite.prepare("SELECT * FROM quick_tasks WHERE id = ?").get(idOrKey);
-    if (!row)
-      throw new AtmError("NOT_FOUND", {
-        message: `临时任务不存在：${idOrKey}`,
-        details: { entity: "QUICK_TASK", reference: idOrKey },
-      });
-    return quickTaskFromRow(row);
+    return this.#registryWorkspace.getQuickTask(idOrKey);
   }
 
   createQuickTask(input: {
@@ -681,38 +346,7 @@ export class AyanamiDatabaseManager {
     sourceCwd?: string | null;
     actor?: string;
   }): QuickTaskView {
-    return this.registry.sqlite.transaction(() => {
-      const now = nowIso();
-      const localNo = (
-        this.registry.sqlite
-          .prepare("SELECT COALESCE(MAX(local_no), 0) + 1 AS value FROM quick_tasks")
-          .get() as { value: number }
-      ).value;
-      const id = createUlid();
-      this.registry.sqlite
-        .prepare(
-          `INSERT INTO quick_tasks(
-             id, local_no, title, note, status, due_date, source_cwd, actor,
-             version, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, 0, ?, ?)`,
-        )
-        .run(
-          id,
-          localNo,
-          input.title,
-          input.note ?? "",
-          input.dueDate ?? null,
-          input.sourceCwd ?? null,
-          input.actor ?? "USER",
-          now,
-          now,
-        );
-      this.appendGlobalEvent("quick.created", id, input.actor ?? "USER", {
-        localNo,
-        title: input.title,
-      });
-      return this.getQuickTask(id);
-    })();
+    return this.#registryWorkspace.createQuickTask(input);
   }
 
   updateQuickTask(
@@ -728,66 +362,7 @@ export class AyanamiDatabaseManager {
       actor?: string;
     },
   ): QuickTaskView {
-    return this.registry.sqlite.transaction(() => {
-      const current = this.getQuickTask(idOrKey);
-      if (current.version !== input.expectedVersion) {
-        throw new AtmError("VERSION_CONFLICT", {
-          message: "临时任务版本已变化",
-          details: {
-            entity: "QUICK_TASK",
-            key: current.key,
-            expected: input.expectedVersion,
-            actual: current.version,
-          },
-        });
-      }
-      const updates: string[] = [];
-      const values: unknown[] = [];
-      for (const [value, column] of [
-        [input.status, "status"],
-        [input.title, "title"],
-        [input.note, "note"],
-        [input.dueDate, "due_date"],
-        [input.percent, "percent"],
-        [input.summary, "latest_summary"],
-      ] as const) {
-        if (value !== undefined) {
-          updates.push(`${column} = ?`);
-          values.push(value);
-        }
-      }
-      if (updates.length === 0) return current;
-      const now = nowIso();
-      updates.push("version = version + 1", "updated_at = ?");
-      values.push(now);
-      if (input.status === "DONE") {
-        updates.push("completed_at = ?", "percent = 100");
-        values.push(now);
-      }
-      values.push(current.id);
-      this.registry.sqlite
-        .prepare(`UPDATE quick_tasks SET ${updates.join(", ")} WHERE id = ?`)
-        .run(...values);
-      if (input.summary?.trim()) {
-        this.registry.sqlite
-          .prepare(
-            `INSERT INTO quick_task_updates(id, quick_task_id, summary, percent, actor, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            createUlid(),
-            current.id,
-            input.summary.trim(),
-            input.percent ?? null,
-            input.actor ?? "USER",
-            now,
-          );
-      }
-      this.appendGlobalEvent("quick.updated", current.id, input.actor ?? "USER", {
-        status: input.status ?? current.status,
-      });
-      return this.getQuickTask(current.id);
-    })();
+    return this.#registryWorkspace.updateQuickTask(idOrKey, input);
   }
 
   markQuickPromoted(
@@ -797,40 +372,13 @@ export class AyanamiDatabaseManager {
     workItemKey: string,
     actor = "SYSTEM",
   ): QuickTaskView {
-    return this.registry.sqlite.transaction(() => {
-      const current = this.getQuickTask(idOrKey);
-      if (current.status === "PROMOTED") {
-        if (
-          current.promotedProjectId === projectId &&
-          current.promotedWorkItemKey === workItemKey
-        ) {
-          return current;
-        }
-        throw new AtmError("IDEMPOTENCY_CONFLICT", {
-          message: "临时任务提升目标已变化",
-          details: { entity: "QUICK_TASK", key: current.key },
-        });
-      }
-      if (current.version !== expectedVersion)
-        throw new AtmError("VERSION_CONFLICT", {
-          message: "临时任务版本已变化",
-          details: {
-            entity: "QUICK_TASK",
-            key: current.key,
-            expected: expectedVersion,
-            actual: current.version,
-          },
-        });
-      this.registry.sqlite
-        .prepare(
-          `UPDATE quick_tasks SET status = 'PROMOTED', promoted_project_id = ?,
-           promoted_work_item_key = ?, percent = 100, version = version + 1,
-           completed_at = ?, updated_at = ? WHERE id = ?`,
-        )
-        .run(projectId, workItemKey, nowIso(), nowIso(), current.id);
-      this.appendGlobalEvent("quick.promoted", current.id, actor, { projectId, workItemKey });
-      return this.getQuickTask(current.id);
-    })();
+    return this.#registryWorkspace.markQuickPromoted(
+      idOrKey,
+      expectedVersion,
+      projectId,
+      workItemKey,
+      actor,
+    );
   }
 
   getProject(codeOrId: string): RegisteredProject {
@@ -842,105 +390,11 @@ export class AyanamiDatabaseManager {
     path: string,
     input: { primary?: boolean; actor?: string } = {},
   ): RegisteredProject {
-    const project = this.getProject(codeOrId);
-    const canonical = canonicalPath(path);
-    const identified = this.identifyProject(canonical);
-    if (identified && identified.id !== project.id) {
-      throw new AtmError("PROJECT_PATH_CONFLICT", {
-        message: `目录已属于项目：${identified.code}`,
-        details: { conflicting_project: identified.code },
-      });
-    }
-    const common = gitValue(canonical, ["rev-parse", "--git-common-dir"]);
-    const commonPath = common
-      ? canonicalPath(isAbsolute(common) ? common : resolve(canonical, common))
-      : null;
-    const primary = input.primary ?? project.sourcePaths.length === 0;
-    this.registry.sqlite.transaction(() => {
-      if (primary) {
-        this.registry.sqlite
-          .prepare("UPDATE project_paths SET is_primary = 0 WHERE project_id = ?")
-          .run(project.id);
-      }
-      this.registry.sqlite
-        .prepare(
-          `INSERT INTO project_paths(id, project_id, canonical_path, git_common_dir, is_primary, last_seen_at)
-           VALUES (?, ?, ?, ?, ?, ?)
-           ON CONFLICT(canonical_path) DO UPDATE SET git_common_dir = excluded.git_common_dir,
-             is_primary = excluded.is_primary, last_seen_at = excluded.last_seen_at`,
-        )
-        .run(createUlid(), project.id, canonical, commonPath, primary ? 1 : 0, nowIso());
-      this.registry.sqlite
-        .prepare("UPDATE projects SET version = version + 1, updated_at = ? WHERE id = ?")
-        .run(nowIso(), project.id);
-      this.appendGlobalEvent("project.path.attached", project.id, input.actor ?? "USER", {
-        path: canonical,
-        primary,
-      });
-    })();
-    const markerDirectory = join(canonical, ".ayanami-task");
-    mkdirSync(markerDirectory, { recursive: true });
-    writeFileSync(
-      join(markerDirectory, "project.json"),
-      `${JSON.stringify({ schema_version: 1, project_id: project.id, project_code: project.code, name: project.name }, null, 2)}\n`,
-      "utf8",
-    );
-    const exclude = gitValue(canonical, ["rev-parse", "--git-path", "info/exclude"]);
-    if (exclude) {
-      const excludePath = isAbsolute(exclude) ? exclude : resolve(canonical, exclude);
-      mkdirSync(dirname(excludePath), { recursive: true });
-      const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
-      if (!existing.split(/\r?\n/u).includes(".ayanami-task/")) {
-        writeFileSync(
-          excludePath,
-          `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}.ayanami-task/\n`,
-          "utf8",
-        );
-      }
-    }
-    return this.getProject(project.id);
+    return this.#registryWorkspace.attachProjectPath(codeOrId, path, input);
   }
 
   identifyProject(path: string): RegisteredProject | null {
-    const canonical = canonicalPath(path);
-    const direct = this.registry.sqlite
-      .prepare(
-        `SELECT p.* FROM projects p JOIN project_paths pp ON pp.project_id = p.id
-         WHERE pp.canonical_path = ?`,
-      )
-      .get(canonical) as any;
-    if (direct) return this.getProject(direct.id);
-    const marker = join(canonical, ".ayanami-task", "project.json");
-    if (existsSync(marker)) {
-      const identity = JSON.parse(readFileSync(marker, "utf8")) as { project_id?: string };
-      if (identity.project_id) {
-        const project = this.getProject(identity.project_id);
-        const common = gitValue(canonical, ["rev-parse", "--git-common-dir"]);
-        const commonPath = common
-          ? canonicalPath(isAbsolute(common) ? common : resolve(canonical, common))
-          : null;
-        this.registry.sqlite
-          .prepare(
-            `INSERT INTO project_paths(
-               id, project_id, canonical_path, git_common_dir, is_primary, last_seen_at
-             ) VALUES (?, ?, ?, ?, 0, ?)
-             ON CONFLICT(canonical_path) DO UPDATE SET project_id = excluded.project_id,
-               git_common_dir = excluded.git_common_dir, last_seen_at = excluded.last_seen_at`,
-          )
-          .run(createUlid(), project.id, canonical, commonPath, nowIso());
-        return this.getProject(project.id);
-      }
-    }
-    const common = gitValue(canonical, ["rev-parse", "--git-common-dir"]);
-    if (!common) return null;
-    const commonPath = canonicalPath(isAbsolute(common) ? common : resolve(canonical, common));
-    const byCommon = this.registry.sqlite
-      .prepare(
-        `SELECT p.* FROM projects p JOIN project_paths pp ON pp.project_id = p.id
-         WHERE pp.git_common_dir = ? LIMIT 1`,
-      )
-      .get(commonPath) as any;
-    return byCommon ? this.getProject(byCommon.id) : null;
+    return this.#registryWorkspace.identifyProject(path);
   }
 
   async createProject(input: {
@@ -953,172 +407,7 @@ export class AyanamiDatabaseManager {
     creationSignals?: Record<string, unknown>;
     actor?: string;
   }): Promise<RegisteredProject> {
-    const sourcePath = input.sourcePath ? canonicalPath(input.sourcePath) : null;
-    if (sourcePath && this.identifyProject(sourcePath)) {
-      throw new AtmError("PROJECT_ALREADY_EXISTS", {
-        message: "该目录已注册为项目",
-        details: { source_path: sourcePath },
-      });
-    }
-    const existingCodes = new Set(
-      (
-        this.registry.sqlite.prepare("SELECT code FROM projects").all() as Array<{ code: string }>
-      ).map((row) => row.code),
-    );
-    const id = createUlid();
-    const requestedCode = input.code?.toUpperCase();
-    const code =
-      requestedCode ?? allocateProjectCode(input.name, existingCodes, existingCodes.size + 1);
-    if (existingCodes.has(code))
-      throw new AtmError("PROJECT_CODE_CONFLICT", {
-        message: `项目代码已存在：${code}`,
-        details: { code },
-      });
-    const now = nowIso();
-    const actor = input.actor ?? "SYSTEM";
-    this.registry.sqlite.transaction(() => {
-      this.registry.sqlite
-        .prepare(
-          `INSERT INTO projects(
-             id, code, name, description, lifecycle, coordination_mode, creation_reason,
-             creation_signals_json, version, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, 'CREATING', ?, ?, ?, 0, ?, ?)`,
-        )
-        .run(
-          id,
-          code,
-          input.name,
-          input.description ?? "",
-          input.coordinationMode ?? "AUTO",
-          input.creationReason ?? null,
-          JSON.stringify(input.creationSignals ?? {}),
-          now,
-          now,
-        );
-      this.appendGlobalEvent("project.creating", id, actor, { code, sourcePath });
-    })();
-
-    const temporaryDirectory = join(this.dataDir, "projects", `.creating-${id}`);
-    const finalDirectory = join(this.dataDir, "projects", id);
-    rmSync(temporaryDirectory, { recursive: true, force: true });
-    mkdirSync(join(temporaryDirectory, "artifacts"), { recursive: true });
-    mkdirSync(join(temporaryDirectory, "backups"), { recursive: true });
-    const temporaryDatabasePath = join(temporaryDirectory, "project.sqlite");
-    let projectDatabase: ManagedDatabase | null = null;
-    try {
-      projectDatabase = await openManagedDatabase({
-        path: temporaryDatabasePath,
-        migrationDirectory: join(this.migrationsRoot, "project"),
-        backupDirectory: join(temporaryDirectory, "backups"),
-      });
-      projectDatabase.sqlite
-        .prepare(
-          `INSERT INTO project_meta(
-             singleton, project_id, project_code, name, description, lifecycle,
-             coordination_mode, health, current_sequence, schema_version, version, created_at, updated_at
-           ) VALUES (1, ?, ?, ?, ?, 'ACTIVE', ?, 'UNKNOWN', 0, ?, 0, ?, ?)`,
-        )
-        .run(
-          id,
-          code,
-          input.name,
-          input.description ?? "",
-          input.coordinationMode ?? "AUTO",
-          projectDatabase.schemaVersion,
-          now,
-          now,
-        );
-      const counterInsert = projectDatabase.sqlite.prepare(
-        "INSERT INTO counters(name, next_value) VALUES (?, 1)",
-      );
-      for (const counter of ["objective", "milestone", "work_item", "blocker", "record"]) {
-        counterInsert.run(counter);
-      }
-      if (!quickCheck(projectDatabase.sqlite))
-        throw new AtmError("PROJECT_DB_QUICK_CHECK_FAILED", {
-          message: "项目数据库 quick_check 失败",
-        });
-      projectDatabase.sqlite.pragma("wal_checkpoint(TRUNCATE)");
-      projectDatabase.sqlite.close();
-      projectDatabase = null;
-      await renameWithRetry(temporaryDirectory, finalDirectory);
-      const databasePath = join(finalDirectory, "project.sqlite");
-      writeFileSync(
-        join(finalDirectory, "manifest.json"),
-        `${JSON.stringify({ schema_version: 1, project_id: id, project_code: code, name: input.name }, null, 2)}\n`,
-        "utf8",
-      );
-      let gitCommonDir: string | null = null;
-      if (sourcePath) {
-        const markerDirectory = join(sourcePath, ".ayanami-task");
-        mkdirSync(markerDirectory, { recursive: true });
-        writeFileSync(
-          join(markerDirectory, "project.json"),
-          `${JSON.stringify({ schema_version: 1, project_id: id, project_code: code, name: input.name }, null, 2)}\n`,
-          "utf8",
-        );
-        const common = gitValue(sourcePath, ["rev-parse", "--git-common-dir"]);
-        gitCommonDir = common
-          ? canonicalPath(isAbsolute(common) ? common : resolve(sourcePath, common))
-          : null;
-        const exclude = gitValue(sourcePath, ["rev-parse", "--git-path", "info/exclude"]);
-        if (exclude) {
-          const excludePath = isAbsolute(exclude) ? exclude : resolve(sourcePath, exclude);
-          mkdirSync(dirname(excludePath), { recursive: true });
-          const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
-          if (!existing.split(/\r?\n/u).includes(".ayanami-task/")) {
-            writeFileSync(
-              excludePath,
-              `${existing}${existing && !existing.endsWith("\n") ? "\n" : ""}.ayanami-task/\n`,
-              "utf8",
-            );
-          }
-        }
-      }
-      this.registry.sqlite.transaction(() => {
-        this.registry.sqlite
-          .prepare(
-            `UPDATE projects SET db_path = ?, lifecycle = 'ACTIVE', version = version + 1,
-             updated_at = ? WHERE id = ?`,
-          )
-          .run(databasePath, nowIso(), id);
-        if (sourcePath) {
-          this.registry.sqlite
-            .prepare(
-              `INSERT INTO project_paths(
-                 id, project_id, canonical_path, git_common_dir, is_primary, last_seen_at
-               ) VALUES (?, ?, ?, ?, 1, ?)`,
-            )
-            .run(createUlid(), id, sourcePath, gitCommonDir, nowIso());
-        }
-        this.registry.sqlite
-          .prepare(
-            `INSERT INTO project_summary_cache(
-               project_id, project_sequence, progress, progress_source, health, lifecycle, updated_at
-             ) VALUES (?, 0, 0, 'NONE', 'UNKNOWN', 'ACTIVE', ?)`,
-          )
-          .run(id, nowIso());
-        if (this.registry.schemaVersion >= 5) {
-          this.registry.sqlite
-            .prepare(
-              `INSERT INTO project_projection_state(
-                 project_id, source_sequence, projected_sequence, status,
-                 last_error, retry_count, updated_at
-               ) VALUES (?, 0, 0, 'APPLIED', NULL, 0, ?)`,
-            )
-            .run(id, nowIso());
-        }
-        this.appendGlobalEvent("project.created", id, actor, { code, databasePath, sourcePath });
-      })();
-      return this.getProject(id);
-    } catch (error) {
-      if (projectDatabase?.sqlite.open) projectDatabase.sqlite.close();
-      rmSync(temporaryDirectory, { recursive: true, force: true });
-      this.registry.sqlite
-        .prepare("UPDATE projects SET lifecycle = 'MIGRATION_FAILED', updated_at = ? WHERE id = ?")
-        .run(nowIso(), id);
-      throw error;
-    }
+    return this.#registryWorkspace.createProject(input);
   }
 
   async openProject(codeOrId: string): Promise<ManagedDatabase> {
@@ -1133,35 +422,13 @@ export class AyanamiDatabaseManager {
     projectCode: string,
     metrics: Record<string, unknown> & { head: string; capturedAt: string },
   ): Promise<Record<string, unknown>> {
-    const database = await this.openProject(projectCode);
-    database.sqlite.transaction(() => {
-      database.sqlite
-        .prepare(
-          `INSERT INTO engineering_project_metrics(id, git_head, captured_at, payload_json)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(createUlid(), metrics.head, metrics.capturedAt, JSON.stringify(metrics));
-      database.sqlite
-        .prepare(
-          `DELETE FROM engineering_project_metrics WHERE id IN (
-             SELECT id FROM engineering_project_metrics ORDER BY captured_at DESC LIMIT -1 OFFSET 120
-           )`,
-        )
-        .run();
-    })();
-    return metrics;
+    return this.#registryObservability.saveProjectEngineeringMetrics(projectCode, metrics);
   }
 
   async latestProjectEngineeringMetrics(
     projectCode: string,
   ): Promise<Record<string, unknown> | null> {
-    const database = await this.openProject(projectCode);
-    const row = database.sqlite
-      .prepare(
-        "SELECT payload_json FROM engineering_project_metrics ORDER BY captured_at DESC LIMIT 1",
-      )
-      .get() as { payload_json: string } | undefined;
-    return row ? (JSON.parse(row.payload_json) as Record<string, unknown>) : null;
+    return this.#registryObservability.latestProjectEngineeringMetrics(projectCode);
   }
 
   async ensureWorkItemEngineeringBaseline(
@@ -1170,25 +437,12 @@ export class AyanamiDatabaseManager {
     baseline: string,
     capturedAt = nowIso(),
   ): Promise<StoredWorkItemEngineeringMetrics> {
-    const project = this.getProject(projectCode);
-    const localNo = workItemLocalNo(project.code, taskKey);
-    const database = await this.openProject(projectCode);
-    database.sqlite
-      .prepare(
-        `INSERT INTO engineering_work_item_metrics(
-           work_item_id, baseline_ref, baseline_captured_at, payload_json, captured_at, updated_at
-         )
-         SELECT id, ?, ?, NULL, NULL, ? FROM work_items WHERE local_no = ?
-         ON CONFLICT(work_item_id) DO NOTHING`,
-      )
-      .run(baseline, capturedAt, capturedAt, localNo);
-    const result = await this.workItemEngineeringMetrics(projectCode, taskKey);
-    if (!result)
-      throw new AtmError("WORK_ITEM_NOT_FOUND", {
-        message: `WorkItem 不存在：${taskKey}`,
-        details: { entity: "WORK_ITEM", reference: taskKey },
-      });
-    return result;
+    return this.#registryObservability.ensureWorkItemEngineeringBaseline(
+      projectCode,
+      taskKey,
+      baseline,
+      capturedAt,
+    );
   }
 
   async saveWorkItemEngineeringMetrics(
@@ -1197,64 +451,19 @@ export class AyanamiDatabaseManager {
     baseline: string,
     metrics: Record<string, unknown> & { capturedAt: string },
   ): Promise<StoredWorkItemEngineeringMetrics> {
-    const project = this.getProject(projectCode);
-    const localNo = workItemLocalNo(project.code, taskKey);
-    const database = await this.openProject(projectCode);
-    await this.ensureWorkItemEngineeringBaseline(
+    return this.#registryObservability.saveWorkItemEngineeringMetrics(
       projectCode,
       taskKey,
       baseline,
-      metrics.capturedAt,
+      metrics,
     );
-    database.sqlite
-      .prepare(
-        `UPDATE engineering_work_item_metrics
-         SET payload_json = ?, captured_at = ?, updated_at = ?
-         WHERE work_item_id = (SELECT id FROM work_items WHERE local_no = ?)`,
-      )
-      .run(JSON.stringify(metrics), metrics.capturedAt, metrics.capturedAt, localNo);
-    return (await this.workItemEngineeringMetrics(projectCode, taskKey))!;
   }
 
   async workItemEngineeringMetrics(
     projectCode: string,
     taskKey: string,
   ): Promise<StoredWorkItemEngineeringMetrics | null> {
-    const project = this.getProject(projectCode);
-    const localNo = workItemLocalNo(project.code, taskKey);
-    const database = await this.openProject(projectCode);
-    const row = database.sqlite
-      .prepare(
-        `SELECT meta.project_code || '-T-' || printf('%04d', work_items.local_no) AS task_key,
-                metrics.baseline_ref, metrics.baseline_captured_at,
-                metrics.payload_json, metrics.captured_at, metrics.updated_at
-         FROM engineering_work_item_metrics AS metrics
-         JOIN work_items ON work_items.id = metrics.work_item_id
-         JOIN project_meta AS meta ON meta.singleton = 1
-         WHERE work_items.local_no = ?`,
-      )
-      .get(localNo) as
-      | {
-          task_key: string;
-          baseline_ref: string;
-          baseline_captured_at: string;
-          payload_json: string | null;
-          captured_at: string | null;
-          updated_at: string;
-        }
-      | undefined;
-    return row
-      ? {
-          taskKey: row.task_key,
-          baseline: row.baseline_ref,
-          baselineCapturedAt: row.baseline_captured_at,
-          metrics: row.payload_json
-            ? (JSON.parse(row.payload_json) as Record<string, unknown>)
-            : null,
-          capturedAt: row.captured_at,
-          updatedAt: row.updated_at,
-        }
-      : null;
+    return this.#registryObservability.workItemEngineeringMetrics(projectCode, taskKey);
   }
 
   async doctor(): Promise<{
@@ -1272,178 +481,23 @@ export class AyanamiDatabaseManager {
       projection: ProjectionStateView | null;
     }>;
   }> {
-    const registryCapabilities = sqliteCapabilities(this.registry.sqlite);
-    const registry = {
-      ok: quickCheck(this.registry.sqlite),
-      sqliteVersion: registryCapabilities.version,
-      fts5: registryCapabilities.fts5,
-      trigram: registryCapabilities.trigram,
-    };
-    const registryPath = resolve(this.registry.path).toLowerCase();
-    const projectionStates = this.listProjectionStates(true);
-    const projectionByProject = new Map(
-      projectionStates.map((state) => [state.project.id, state] as const),
-    );
-    const projects = this.listProjects(true).map((project) => {
-      let sqlite: Database.Database | null = null;
-      try {
-        sqlite = new Database(project.databasePath, {
-          readonly: true,
-          fileMustExist: true,
-        });
-        const projectQuickCheck = quickCheck(sqlite);
-        const projectForeignKeys = foreignKeyCheck(sqlite);
-        return {
-          code: project.code,
-          lifecycle: project.lifecycle,
-          ok: projectQuickCheck && projectForeignKeys,
-          quickCheck: projectQuickCheck,
-          foreignKeys: projectForeignKeys,
-          separateDatabase: resolve(project.databasePath).toLowerCase() !== registryPath,
-          projection: projectionByProject.get(project.id) ?? null,
-        };
-      } catch {
-        return {
-          code: project.code,
-          lifecycle: project.lifecycle,
-          ok: false,
-          quickCheck: false,
-          foreignKeys: false,
-          separateDatabase: true,
-          projection: projectionByProject.get(project.id) ?? null,
-        };
-      } finally {
-        sqlite?.close();
-      }
-    });
-    const projectCounts: Record<string, { total: number; failed: number }> = {};
-    for (const project of projects) {
-      const current = projectCounts[project.lifecycle] ?? { total: 0, failed: 0 };
-      current.total += 1;
-      if (!project.ok) current.failed += 1;
-      projectCounts[project.lifecycle] = current;
-    }
-    return {
-      registry,
-      projects,
-      projectCounts,
-      projectionSummary: this.projectionSummary(),
-      projectionFailures: this.projectionFailures(),
-    };
+    return this.#registryObservability.doctor();
   }
 
   projectionState(projectCodeOrId: string): ProjectionStateView {
-    const project = this.getProject(projectCodeOrId);
-    const row = this.registry.sqlite
-      .prepare(
-        `SELECT projects.id AS project_id, projects.code, projects.name, projects.lifecycle,
-                state.source_sequence, state.projected_sequence, state.status,
-                state.last_error, state.retry_count, state.updated_at
-         FROM projects
-         JOIN project_projection_state state ON state.project_id = projects.id
-         WHERE projects.id = ?`,
-      )
-      .get(project.id) as ProjectionStateRow | undefined;
-    if (!row) {
-      throw new AtmError("INTERNAL_ERROR", {
-        message: `项目缺少 Projection 状态：${project.code}`,
-        details: { entity: "PROJECTION_STATE", project: project.code },
-      });
-    }
-    return projectionStateFromRow(row);
+    return this.#registryObservability.projectionState(projectCodeOrId);
   }
 
   listProjectionStates(includeTrashed = false): ProjectionStateView[] {
-    const rows = this.registry.sqlite
-      .prepare(
-        `SELECT projects.id AS project_id, projects.code, projects.name, projects.lifecycle,
-                state.source_sequence, state.projected_sequence, state.status,
-                state.last_error, state.retry_count, state.updated_at
-         FROM projects
-         JOIN project_projection_state state ON state.project_id = projects.id
-         ${includeTrashed ? "" : "WHERE projects.lifecycle <> 'TRASHED'"}
-         ORDER BY projects.code`,
-      )
-      .all() as ProjectionStateRow[];
-    return rows.map(projectionStateFromRow);
+    return this.#registryObservability.listProjectionStates(includeTrashed);
   }
 
   projectionSummary(includeTrashed = false): ProjectionSummary {
-    const projects = this.listProjects(true).filter(
-      (project) => includeTrashed || project.lifecycle !== "TRASHED",
-    );
-    const states = this.listProjectionStates(includeTrashed);
-    const missingCount = projects.length - states.length;
-    const appliedCount = states.filter(
-      (state) => state.status === "APPLIED" && state.lag === 0,
-    ).length;
-    const deferredCount = states.filter((state) => state.status === "DEFERRED").length;
-    const lags = states.map((state) => state.lag);
-    const maxLag = lags.reduce(
-      (selected, lag) =>
-        Math.abs(lag) > Math.abs(selected) ||
-        (Math.abs(lag) === Math.abs(selected) && lag > selected)
-          ? lag
-          : selected,
-      0,
-    );
-    return {
-      status:
-        missingCount > 0 || states.some((state) => state.status === "DEFERRED" || state.lag !== 0)
-          ? "DEFERRED"
-          : "APPLIED",
-      total: projects.length,
-      appliedCount,
-      deferredCount,
-      missingCount,
-      retryScheduledCount: states.filter((state) => state.retryScheduled).length,
-      lagging: states.filter((state) => state.lag !== 0).length,
-      maxLag,
-      totalLag: lags.reduce((total, lag) => total + lag, 0),
-    };
+    return this.#registryObservability.projectionSummary(includeTrashed);
   }
 
   projectionFailures(includeTrashed = false): ProjectionFailureView[] {
-    const states = this.listProjectionStates(includeTrashed);
-    const stateByProject = new Map(states.map((state) => [state.project.id, state] as const));
-    const failures: ProjectionFailureView[] = [];
-    for (const project of this.listProjects(true).filter(
-      (candidate) => includeTrashed || candidate.lifecycle !== "TRASHED",
-    )) {
-      const identity = {
-        id: project.id,
-        code: project.code,
-        name: project.name,
-        lifecycle: project.lifecycle,
-      };
-      const state = stateByProject.get(project.id) ?? null;
-      if (!state) {
-        failures.push({
-          project: identity,
-          reason: "MISSING",
-          lag: null,
-          lastError: "Projection 状态缺失",
-          state: null,
-        });
-      } else if (state.lag < 0) {
-        failures.push({
-          project: identity,
-          reason: "INVERTED",
-          lag: state.lag,
-          lastError: state.lastError,
-          state,
-        });
-      } else if (state.status === "DEFERRED" || state.lag > 0) {
-        failures.push({
-          project: identity,
-          reason: "DEFERRED",
-          lag: state.lag,
-          lastError: state.lastError,
-          state,
-        });
-      }
-    }
-    return failures;
+    return this.#registryObservability.projectionFailures(includeTrashed);
   }
 
   async dispatchProject(projectCodeOrId: string): Promise<ProjectionDispatchResult> {
@@ -1496,243 +550,11 @@ export class AyanamiDatabaseManager {
   }
 
   globalSearch(query: string, limit = 20, cursor?: string): SearchPage {
-    const boundedLimit = Math.min(30, Math.max(1, limit));
-    const normalized = query.trim();
-    if (!normalized) return { hits: [], nextCursor: null, hasMore: false };
-    const scope = "*";
-    const decoded = cursor ? decodeSearchCursor(cursor, { scope, query: normalized }) : null;
-    const snapshot = decoded?.snapshot ?? {
-      documents: Number(
-        (
-          this.registry.sqlite
-            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM global_search_documents")
-            .get() as { value: number }
-        ).value,
-      ),
-      quickTasks: Number(
-        (
-          this.registry.sqlite
-            .prepare("SELECT COALESCE(MAX(rowid), 0) AS value FROM quick_tasks")
-            .get() as { value: number }
-        ).value,
-      ),
-    };
-    const keyset = decoded
-      ? `(
-          updated_at < ? OR
-          (updated_at = ? AND COALESCE(project, '') > ?) OR
-          (updated_at = ? AND COALESCE(project, '') = ? AND entity_type > ?) OR
-          (updated_at = ? AND COALESCE(project, '') = ? AND entity_type = ? AND entity_key > ?)
-        )`
-      : "1 = 1";
-    const keysetParams = decoded
-      ? [
-          decoded.last.updatedAt,
-          decoded.last.updatedAt,
-          decoded.last.project,
-          decoded.last.updatedAt,
-          decoded.last.project,
-          decoded.last.entityType,
-          decoded.last.updatedAt,
-          decoded.last.project,
-          decoded.last.entityType,
-          decoded.last.entityKey,
-        ]
-      : [];
-    const escaped = `%${normalized.replace(/[\\%_]/gu, "\\$&")}%`;
-    const rows = (
-      [...normalized].length >= 3
-        ? this.registry.sqlite
-            .prepare(
-              `WITH candidates AS (
-                 SELECT documents.entity_type, documents.entity_key, documents.title,
-                        documents.summary, documents.updated_at, projects.code AS project
-                 FROM global_search_documents_fts search
-                 JOIN global_search_documents documents
-                   ON documents.project_id = search.project_id
-                  AND documents.entity_type = search.entity_type
-                  AND documents.entity_key = search.entity_key
-                 JOIN projects ON projects.id = documents.project_id
-                 WHERE global_search_documents_fts MATCH ? AND documents.rowid <= ?
-                 UNION ALL
-                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
-                        quick.note, quick.updated_at, NULL
-                 FROM quick_tasks quick
-                 WHERE quick.rowid <= ?
-                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
-               )
-               SELECT entity_type, entity_key, title, summary, updated_at, project
-               FROM candidates WHERE ${keyset}
-               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
-               LIMIT ?`,
-            )
-            .all(
-              `"${normalized.replaceAll('"', '""')}"`,
-              snapshot.documents,
-              snapshot.quickTasks,
-              escaped,
-              escaped,
-              ...keysetParams,
-              boundedLimit + 1,
-            )
-        : this.registry.sqlite
-            .prepare(
-              `WITH candidates AS (
-                 SELECT documents.entity_type, documents.entity_key, documents.title,
-                        documents.summary, documents.updated_at, projects.code AS project
-                 FROM global_search_documents documents
-                 JOIN projects ON projects.id = documents.project_id
-                 WHERE documents.rowid <= ?
-                   AND (documents.title LIKE ? ESCAPE '\\' OR documents.summary LIKE ? ESCAPE '\\')
-                 UNION ALL
-                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
-                        quick.note, quick.updated_at, NULL
-                 FROM quick_tasks quick
-                 WHERE quick.rowid <= ?
-                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
-               )
-               SELECT entity_type, entity_key, title, summary, updated_at, project
-               FROM candidates WHERE ${keyset}
-               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
-               LIMIT ?`,
-            )
-            .all(
-              snapshot.documents,
-              escaped,
-              escaped,
-              snapshot.quickTasks,
-              escaped,
-              escaped,
-              ...keysetParams,
-              boundedLimit + 1,
-            )
-    ) as Array<{
-      entity_type: string;
-      entity_key: string;
-      title: string;
-      summary: string;
-      updated_at: string;
-      project: string | null;
-    }>;
-    const hits: SearchHit[] = rows.slice(0, boundedLimit).map((row) => ({
-      entityType: row.entity_type,
-      entityKey: row.entity_key,
-      title: row.title,
-      snippet: String(row.summary).slice(0, 240),
-      updatedAt: row.updated_at,
-      project: row.project,
-    }));
-    const hasMore = rows.length > boundedLimit;
-    const last = hits.at(-1);
-    return {
-      hits,
-      hasMore,
-      nextCursor:
-        hasMore && last
-          ? encodeSearchCursor({
-              scope,
-              query: normalized,
-              snapshot,
-              last: {
-                updatedAt: last.updatedAt,
-                project: last.project ?? "",
-                entityType: last.entityType,
-                entityKey: last.entityKey,
-              },
-            })
-          : null,
-    };
+    return this.#registryObservability.globalSearch(query, limit, cursor);
   }
 
   overview(): Record<string, unknown> {
-    const projects = this.registry.sqlite
-      .prepare(
-        `SELECT projects.id, projects.code, projects.name, projects.lifecycle,
-                summaries.project_sequence, summaries.progress, summaries.progress_source, summaries.health,
-                summaries.current_objective, summaries.current_milestone,
-                summaries.active_count, summaries.ready_count, summaries.blocked_count,
-                summaries.waiting_user_count, summaries.waiting_agent_count,
-                summaries.stale_claim_count, summaries.active_agent_count, summaries.overdue_count,
-                summaries.last_project_update_at, summaries.last_activity_at, summaries.next_target_date,
-                projection.source_sequence AS _projection_source_sequence,
-                projection.projected_sequence AS _projection_projected_sequence,
-                projection.status AS _projection_status,
-                projection.last_error AS _projection_last_error,
-                projection.retry_count AS _projection_retry_count,
-                projection.updated_at AS _projection_updated_at
-         FROM projects
-         LEFT JOIN project_summary_cache summaries ON summaries.project_id = projects.id
-         LEFT JOIN project_projection_state projection ON projection.project_id = projects.id
-         WHERE projects.lifecycle <> 'TRASHED'
-         ORDER BY COALESCE(summaries.last_activity_at, projects.updated_at) DESC`,
-      )
-      .all() as Array<Record<string, unknown>>;
-    const projectViews = projects.map((row) => {
-      const {
-        _projection_source_sequence: sourceSequence,
-        _projection_projected_sequence: projectedSequence,
-        _projection_status: projectionStatus,
-        _projection_last_error: projectionLastError,
-        _projection_retry_count: projectionRetryCount,
-        _projection_updated_at: projectionUpdatedAt,
-        ...project
-      } = row;
-      return {
-        ...project,
-        projection:
-          typeof projectionStatus === "string"
-            ? projectionStateFromRow({
-                project_id: String(row.id),
-                code: String(row.code),
-                name: String(row.name),
-                lifecycle: String(row.lifecycle),
-                source_sequence: Number(sourceSequence),
-                projected_sequence: Number(projectedSequence),
-                status: projectionStatus as "APPLIED" | "DEFERRED",
-                last_error: projectionLastError === null ? null : String(projectionLastError),
-                retry_count: Number(projectionRetryCount),
-                updated_at: String(projectionUpdatedAt),
-              })
-            : null,
-      };
-    });
-    const totals = this.registry.sqlite
-      .prepare(
-        `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status IN ('OPEN','IN_PROGRESS','BLOCKED') THEN 1 ELSE 0 END) AS open,
-                SUM(CASE WHEN status = 'BLOCKED' THEN 1 ELSE 0 END) AS blocked
-         FROM quick_tasks`,
-      )
-      .get() as Record<string, unknown>;
-    const sequence = this.registry.sqlite
-      .prepare("SELECT current_sequence FROM app_meta WHERE singleton = 1")
-      .get() as { current_sequence: number };
-    const recentEventRows = this.registry.sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events
-         WHERE type <> 'project.summary.updated'
-         ORDER BY sequence DESC LIMIT 40`,
-      )
-      .all() as Array<Record<string, unknown>>;
-    const recentEvents = recentEventRows.map((row) =>
-      this.presentGlobalRow({
-        sequence: Number(row.sequence),
-        type: String(row.type),
-        aggregate_id: String(row.aggregate_id ?? ""),
-        actor: String(row.actor ?? "SYSTEM"),
-        payload_json: String(row.payload_json ?? "{}"),
-        created_at: String(row.created_at),
-      }),
-    );
-    return {
-      sequence: sequence.current_sequence,
-      projects: projectViews,
-      quick: totals,
-      recentEvents,
-      projectionSummary: this.projectionSummary(),
-      projectionFailures: this.projectionFailures(),
-    };
+    return this.#registryObservability.overview();
   }
 
   globalDelta(
@@ -1747,27 +569,13 @@ export class AyanamiDatabaseManager {
       actor: string;
       title: string;
       detail: string;
-      project: EventProjectContext | null;
+      project: { id: string; code: string; name: string } | null;
       at: string;
     }>;
     nextSequence: number;
     hasMore: boolean;
   } {
-    const bounded = Math.min(100, Math.max(1, limit));
-    const rows = this.registry.sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events
-         WHERE sequence > ? AND type <> 'project.summary.updated'
-         ORDER BY sequence LIMIT ?`,
-      )
-      .all(Math.max(0, sinceSequence), bounded + 1) as any[];
-    const page = rows.slice(0, bounded).map((row) => this.presentGlobalRow(row));
-    return {
-      events: page,
-      nextSequence: page.at(-1)?.seq ?? Math.max(0, sinceSequence),
-      hasMore: rows.length > bounded,
-    };
+    return this.#registryObservability.globalDelta(sinceSequence, limit);
   }
 
   getImportHistory(projectCodeOrId: string, sourceSha256: string): Record<string, unknown> | null {
