@@ -10,6 +10,7 @@ import {
 import { ProjectTaskControls } from "../src/features/project-task-controls.js";
 import { ProjectTaskViews } from "../src/features/project-task-views.js";
 import { NotificationPolicy } from "../src/features/settings-panels.js";
+import { uiCssText } from "./css-source-graph.js";
 
 function renderControls() {
   const queryClient = new QueryClient();
@@ -92,7 +93,7 @@ describe("keyboard accessibility primitives", () => {
   });
 
   it("任务行焦点沿用现有设计 token，并由 forced-colors 保留系统指示", () => {
-    const styles = readFileSync(join(process.cwd(), "packages", "ui", "src", "styles.css"), "utf8");
+    const styles = uiCssText();
     const hasRowFocusGuard = (source: string) =>
       source.includes(".atm-table tbody tr[tabindex]:focus-visible") &&
       /@media \(forced-colors: active\)[\s\S]*?:focus-visible[\s\S]*?outline-color: Highlight/u.test(
@@ -100,6 +101,14 @@ describe("keyboard accessibility primitives", () => {
       );
     expect(hasRowFocusGuard(styles)).toBe(true);
     expect(hasRowFocusGuard(styles.replace("tr[tabindex]:focus-visible", "tr"))).toBe(false);
+    expect(
+      hasRowFocusGuard(styles.replace("outline-color: Highlight", "outline-color: Canvas")),
+    ).toBe(false);
+    expect(
+      hasRowFocusGuard(
+        ".atm-table tbody tr { outline: none; } @media (forced-colors: active) { :focus-visible { outline-color: Canvas; } }",
+      ),
+    ).toBe(false);
   });
 
   it("Project 五 tabs 具备完整关联与单一 roving tab stop", () => {

@@ -1,6 +1,4 @@
 import { createElement } from "react";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +12,7 @@ import {
   SystemProjectionPanel,
   invalidateProjectionQueries,
 } from "../src/projection-health-panel.js";
+import { uiCssText } from "./css-source-graph.js";
 
 const project = {
   id: "project-id",
@@ -56,7 +55,7 @@ describe("projection health panels", () => {
     expect(markup).toContain('class="atm-inline-error atm-projection-error"');
     expect(markup).toContain(`title="${deferred.lastError}`);
     expect(markup).toContain("立即重试");
-    const styles = readFileSync(resolve("packages/ui/src/styles.css"), "utf8");
+    const styles = uiCssText();
     expect(styles).toMatch(
       /\.atm-projection-error\s*\{[^}]*display:\s*-webkit-box;[^}]*overflow:\s*hidden;[^}]*-webkit-line-clamp:\s*2;/su,
     );

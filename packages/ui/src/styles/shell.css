@@ -1,0 +1,210 @@
+.atm-shell {
+  display: grid;
+  grid-template-columns: var(--atm-sidebar) minmax(0, 1fr);
+  min-height: 100dvh;
+}
+.atm-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100dvh;
+  padding: 18px 14px;
+  border-right: 1px solid var(--atm-border);
+  background: color-mix(in srgb, var(--atm-surface) 86%, transparent);
+  overflow-y: auto;
+}
+.atm-brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 42px;
+  padding: 4px 8px 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.atm-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
+  box-shadow: 0 5px 15px color-mix(in srgb, var(--atm-primary) 24%, transparent);
+  overflow: hidden;
+}
+.atm-brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.atm-nav-group {
+  margin: 10px 0 18px;
+}
+.atm-nav-title {
+  margin: 0 10px 7px;
+  color: var(--atm-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+}
+.atm-nav {
+  display: grid;
+  gap: 3px;
+}
+.atm-nav[hidden] {
+  display: none;
+}
+.atm-nav button,
+.atm-nav-disclosure,
+.atm-sidebar-settings {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--atm-text-muted);
+  background: transparent;
+  text-align: left;
+  transition:
+    background-color var(--atm-duration-hover) var(--atm-ease-out),
+    color var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-press) var(--atm-ease-out);
+}
+.atm-nav button:hover,
+.atm-nav-disclosure:hover,
+.atm-sidebar-settings:hover {
+  color: var(--atm-text);
+  background: var(--atm-surface-muted);
+}
+.atm-nav button:active,
+.atm-nav-disclosure:active,
+.atm-sidebar-settings:active {
+  transform: scale(0.97);
+}
+.atm-nav button[aria-current="page"],
+.atm-sidebar-settings[aria-current="page"] {
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+  font-weight: 650;
+}
+.atm-primary-navigation {
+  margin-bottom: 8px;
+}
+.atm-workspace-navigation {
+  margin-top: 0;
+}
+.atm-nav-disclosure {
+  justify-content: flex-start;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.atm-nav-disclosure svg {
+  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
+}
+.atm-nav-disclosure[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.atm-nav-secondary {
+  padding-left: 8px;
+}
+.atm-nav-project {
+  min-width: 0;
+  overflow: hidden;
+}
+.atm-nav-project-name {
+  display: -webkit-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+.atm-sidebar-footer {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--atm-border);
+}
+.atm-sidebar-settings {
+  justify-content: flex-start;
+}
+.atm-sidebar-inner {
+  display: flex;
+  min-height: calc(100dvh - 36px);
+  flex-direction: column;
+}
+
+.atm-main {
+  min-width: 0;
+}
+.atm-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(280px, 520px) minmax(200px, 1fr);
+  align-items: center;
+  min-height: 64px;
+  padding: 10px 28px;
+  border-bottom: 1px solid var(--atm-border);
+  background: color-mix(in srgb, var(--atm-bg) 88%, transparent);
+  backdrop-filter: blur(14px);
+}
+.atm-breadcrumb {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-search-button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 13px;
+  border: 1px solid var(--atm-border);
+  border-radius: 10px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface);
+  text-align: left;
+  box-shadow: var(--atm-shadow-subtle);
+}
+.atm-search-button kbd {
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid var(--atm-border);
+  border-radius: 5px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+  font: 11px var(--atm-mono);
+}
+.atm-top-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.atm-theme-toggle {
+  flex: 0 0 38px;
+}
+.atm-top-actions kbd {
+  padding: 2px 5px;
+  border: 1px solid var(--atm-border);
+  border-radius: 5px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+  font: 10px var(--atm-mono);
+}
+.atm-content {
+  width: min(100%, 2280px);
+  margin: 0 auto;
+  padding: 30px 32px 48px;
+}
