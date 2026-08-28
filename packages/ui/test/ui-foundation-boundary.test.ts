@@ -233,12 +233,13 @@ describe("UI foundation boundaries", () => {
 
   it("app 使用提取后的 Timeline feature", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
     expect(app).toContain('from "./features/timeline.js"');
     for (const duplicate of ["function TimelineEventRow(", "function TimelinePage("]) {
       expect(app).not.toContain(duplicate);
     }
-    expect(app).toContain('queryKey: ["events", project.code]');
-    expect(app).toContain("client.events(project.code, 0, 100)");
+    expect(project).toContain('queryKey: ["events", project.code]');
+    expect(project).toContain("client.events(project.code, 0, 100)");
   });
 
   it("app 使用提取后的 Settings feature，而不是保留业务查询与策略面板", () => {
@@ -254,10 +255,11 @@ describe("UI foundation boundaries", () => {
     }
   });
 
-  it("ProjectPage 使用提取后的 Summary/Reconcile/Metrics feature，且五视图查询留在编排边界", () => {
+  it("Project feature 使用提取后的 Summary/Reconcile/Metrics，且五视图查询留在编排边界", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/project-summary.js"');
-    expect(app).toContain("<ProjectSummary");
+    const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
+    expect(project).toContain('from "./project-summary.js"');
+    expect(project).toContain("<ProjectSummary");
     for (const duplicate of [
       'queryKey: ["brief", project.code]',
       'queryKey: ["agents", project.code]',
@@ -268,20 +270,21 @@ describe("UI foundation boundaries", () => {
       "<EngineeringMetricsPanel",
       'aria-label="项目管理摘要"',
     ]) {
-      expect(app).not.toContain(duplicate);
+      expect(project).not.toContain(duplicate);
     }
     for (const retained of ['queryKey: ["events", project.code]', '["records", project.code]']) {
-      expect(app).toContain(retained);
+      expect(project).toContain(retained);
     }
+    expect(app).not.toContain("function ProjectPage(");
   });
 
-  it("ProjectPage 使用提取后的任务 controls 与五视图，且查询协调留在原边界", () => {
-    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
-    expect(app).toContain('from "./features/project-task-controls.js"');
-    expect(app).toContain('from "./features/project-task-views.js"');
-    expect(app).toContain("useProjectTaskViewState(tasks.items)");
-    expect(app).toContain("<ProjectTaskControls");
-    expect(app).toContain("<ProjectTaskViews");
+  it("Project feature 使用提取后的任务 controls 与五视图，且查询协调留在编排边界", () => {
+    const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
+    expect(project).toContain('from "./project-task-controls.js"');
+    expect(project).toContain('from "./project-task-views.js"');
+    expect(project).toContain("useProjectTaskViewState(tasks.items)");
+    expect(project).toContain("<ProjectTaskControls");
+    expect(project).toContain("<ProjectTaskViews");
     for (const duplicate of [
       "type ProjectTaskFilters =",
       "function ProjectTaskFilterBar(",
@@ -291,15 +294,16 @@ describe("UI foundation boundaries", () => {
       '<div className="atm-tree">',
       '<table className="atm-table">',
     ]) {
-      expect(app).not.toContain(duplicate);
+      expect(project).not.toContain(duplicate);
     }
     for (const retained of ['queryKey: ["events", project.code]', '["records", project.code]']) {
-      expect(app).toContain(retained);
+      expect(project).toContain(retained);
     }
   });
 
-  it("app 使用提取后的 TaskDrawer，ProjectPage orchestration 留在原边界", () => {
+  it("app 使用提取后的 TaskDrawer，ProjectPage orchestration 位于 project feature", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
     expect(app).toContain('from "./features/task-drawer.js"');
     expect(app).toContain("<TaskDrawer");
     for (const duplicate of [
@@ -311,20 +315,21 @@ describe("UI foundation boundaries", () => {
     ]) {
       expect(app).not.toContain(duplicate);
     }
-    for (const retained of ["function ProjectPage("]) {
-      expect(app).toContain(retained);
-    }
+    expect(project).toContain("export function ProjectPage(");
+    expect(app).not.toContain("function ProjectPage(");
   });
 
-  it("app 使用四个彼此独立的 Modal features，而不是保留重复实现", () => {
+  it("Project feature 使用四个彼此独立的 Modal features，而 app 不反向装配", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
     for (const name of [
       "create-task-modal",
       "create-record-modal",
       "project-update-modal",
       "project-data-modal",
     ]) {
-      expect(app).toContain(`from "./features/${name}.js"`);
+      expect(project).toContain(`from "./${name}.js"`);
+      expect(app).not.toContain(`from "./features/${name}.js"`);
     }
     for (const duplicate of [
       "function CreateTaskModal(",
