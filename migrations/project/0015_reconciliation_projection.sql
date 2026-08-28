@@ -58,11 +58,22 @@ SET ever_claimed_at = COALESCE(
         UNION ALL
         SELECT project_update.created_at AS at
         FROM project_updates project_update
-        JOIN json_each(project_update.completed_json) completed
+        JOIN json_each(
+          CASE
+            WHEN json_valid(project_update.completed_json) THEN project_update.completed_json
+            ELSE '[]'
+          END
+        ) completed
         WHERE project_update.status = 'PUBLISHED'
           AND COALESCE(json_array_length(project_update.evidence_json), 0) > 0
-          AND json_type(completed.value, '$.workItemKey') = 'text'
-          AND json_extract(completed.value, '$.workItemKey') = (
+          AND json_type(
+            CASE WHEN completed.type = 'object' THEN completed.value ELSE '{}' END,
+            '$.workItemKey'
+          ) = 'text'
+          AND json_extract(
+            CASE WHEN completed.type = 'object' THEN completed.value ELSE '{}' END,
+            '$.workItemKey'
+          ) = (
             SELECT meta.project_code || '-T-' || printf('%04d', work_items.local_no)
             FROM project_meta meta
             WHERE meta.singleton = 1

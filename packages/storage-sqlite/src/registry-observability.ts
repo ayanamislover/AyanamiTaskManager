@@ -330,10 +330,11 @@ export class RegistryObservability {
         });
         const projectQuickCheck = quickCheck(sqlite);
         const projectForeignKeys = foreignKeyCheck(sqlite);
+        const lifecycleAvailable = project.lifecycle !== "MIGRATION_FAILED";
         return {
           code: project.code,
           lifecycle: project.lifecycle,
-          ok: projectQuickCheck && projectForeignKeys,
+          ok: lifecycleAvailable && projectQuickCheck && projectForeignKeys,
           quickCheck: projectQuickCheck,
           foreignKeys: projectForeignKeys,
           separateDatabase: resolve(project.databasePath).toLowerCase() !== registryPath,

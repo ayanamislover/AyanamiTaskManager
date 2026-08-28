@@ -217,6 +217,7 @@ export class AyanamiDatabaseManager {
     const manager = new AyanamiDatabaseManager({ dataDir, migrationsRoot, registry });
     manager.recoverCreatingProjects();
     await manager.cleanupInterruptedFiles();
+    await manager.recoverFailedProjectMigrations();
     await manager.recoverProjectSessions();
     await manager.repairSummaries();
     return manager;
@@ -276,6 +277,49 @@ export class AyanamiDatabaseManager {
 
   private cleanupInterruptedFiles(): Promise<void> {
     return this.#startupRecovery.recoverInterruptedFiles();
+  }
+
+  private async recoverFailedProjectMigrations(): Promise<void> {
+    const rows = this.registry.sqlite
+      .prepare(
+        "SELECT id, code, db_path FROM projects WHERE lifecycle = 'MIGRATION_FAILED' ORDER BY code",
+      )
+      .all() as Array<{ id: string; code: string; db_path: string }>;
+    for (const row of rows) {
+      if (!existsSync(row.db_path) || statSync(row.db_path).size === 0) continue;
+      let database: ManagedDatabase | null = null;
+      try {
+        database = await openManagedDatabase({
+          path: row.db_path,
+          migrationDirectory: join(this.migrationsRoot, "project"),
+          backupDirectory: join(dirname(row.db_path), "backups"),
+        });
+        const meta = database.sqlite
+          .prepare("SELECT project_id, project_code FROM project_meta WHERE singleton = 1")
+          .get() as { project_id: string; project_code: string } | undefined;
+        if (meta?.project_id !== row.id || meta.project_code !== row.code) {
+          throw new Error(`PROJECT_DATABASE_IDENTITY_MISMATCH: ${row.code}`);
+        }
+        database.sqlite.close();
+        database = null;
+        this.registry.sqlite.transaction(() => {
+          this.registry.sqlite
+            .prepare("UPDATE projects SET lifecycle = 'ACTIVE', updated_at = ? WHERE id = ?")
+            .run(nowIso(), row.id);
+          this.appendGlobalEvent(
+            "project.migration_recovered",
+            row.id,
+            "SYSTEM",
+            { code: row.code },
+            `project-migration-recovered:${row.id}`,
+          );
+        })();
+      } catch {
+        if (database?.sqlite.open) database.sqlite.close();
+        // MIGRATION_FAILED is the durable, user-visible signal. Startup remains available so
+        // doctor/export/restore can still diagnose or recover other projects independently.
+      }
+    }
   }
 
   private recoverProjectSessions(): Promise<void> {
