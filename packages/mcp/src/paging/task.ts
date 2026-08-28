@@ -19,7 +19,7 @@ export function externalizeTaskView(value: unknown): unknown {
   );
 }
 
-export function compactReconciliationItem(item: Record<string, any>): Record<string, unknown> {
+export function compactReconciliationItem(item: Record<string, unknown>): Record<string, unknown> {
   const session = item.session && typeof item.session === "object" ? plain(item.session) : null;
   return {
     task_key: item.taskKey,

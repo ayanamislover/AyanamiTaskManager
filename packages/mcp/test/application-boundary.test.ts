@@ -11,8 +11,8 @@ type AdapterSources = {
 function productionSources(): AdapterSources {
   const read = (path: string): string => readFileSync(resolve("packages/mcp/src", path), "utf8");
   return {
-    actions: read("profiles/actions.ts"),
-    coreTasks: read("profiles/core-tasks.ts"),
+    actions: read("tools/actions/task-patch.ts"),
+    coreTasks: read("tools/core/task-list.ts"),
     result: read("result.ts"),
   };
 }
