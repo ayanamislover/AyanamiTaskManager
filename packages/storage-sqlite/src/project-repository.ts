@@ -1,22 +1,14 @@
-import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import { assertParentMove, assertAcyclicDependency, computeProgress } from "@ayanami-task/domain";
 import { AtmError } from "@ayanami-task/errors";
 import {
-  ChecklistBatchFailureError,
   createUlid,
-  EvidenceInputSchema,
   EvidenceReferenceSchema,
   normalizeReviewCandidateHashes,
   nowIso,
   RecordSummarySchema,
-  resolveWorkItemOperation,
-  workItemOperationHasEffect,
   type WorkItemOperation,
-  type WorkItemPhase,
   type WorkItemStatus,
   type EvidenceInput,
-  type ChecklistBatchFailureReason,
   type SearchHit,
   type SearchPage,
   type RecordView,
@@ -24,11 +16,15 @@ import {
 } from "@ayanami-task/protocol";
 import type { ManagedDatabase } from "./database.js";
 import { assertCompletionGates } from "./completion-gates.js";
+import { ChecklistCommands } from "./checklist-commands.js";
 import { ContextReadModel } from "./context-read-model.js";
+import { EvidenceNormalizer } from "./evidence-normalizer.js";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import { OutboxReadModel } from "./outbox-read-model.js";
 import { ProjectMutationKernel, type MutationInput } from "./project-mutation-kernel.js";
 import { MutationRequestNormalizer } from "./mutation-request-normalizer.js";
+import { PlanningCommands } from "./planning-commands.js";
+import { ProgressCommands } from "./progress-commands.js";
 import type {
   BriefSnapshot,
   ChecklistView,
@@ -52,6 +48,10 @@ import { SessionReadModel } from "./session-read-model.js";
 import { SessionCommands } from "./session-commands.js";
 import { TaskReadModel } from "./task-read-model.js";
 import type { TaskViewProjectionRow } from "./task-view-query.js";
+import { WorkItemCreateCommands } from "./work-item-create-commands.js";
+import { WorkItemLifecycleCommands } from "./work-item-lifecycle-commands.js";
+import { WorkItemMaintenance } from "./work-item-maintenance.js";
+import { resolveStoredWorkItemOperation } from "./work-item-operation.js";
 
 export type {
   BriefSnapshot,
@@ -70,25 +70,6 @@ export type {
   WorkItemProjectionPage,
   WorkItemView,
 } from "./read-model-types.js";
-
-function storedWorkItemPhase(row: { status: WorkItemStatus; phase?: WorkItemPhase | null }) {
-  return (row.phase ??
-    (row.status === "WAITING_AGENT" || row.status === "WAITING_USER"
-      ? "IN_PROGRESS"
-      : row.status)) as WorkItemPhase;
-}
-
-function resolveStoredWorkItemOperation(
-  operation: WorkItemOperation,
-  row: { status: WorkItemStatus; phase?: WorkItemPhase | null },
-  options: { successorReclaim?: boolean } = {},
-) {
-  return resolveWorkItemOperation(operation, {
-    currentStatus: row.status,
-    phase: storedWorkItemPhase(row),
-    ...options,
-  });
-}
 
 function json<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -215,6 +196,10 @@ export class ProjectRepository {
   readonly database: ManagedDatabase;
   readonly #sqlite: Database.Database;
   readonly #contextReads: ContextReadModel;
+  readonly #checklistCommands: ChecklistCommands;
+  readonly #evidenceNormalizer: EvidenceNormalizer;
+  readonly #planningCommands: PlanningCommands;
+  readonly #progressCommands: ProgressCommands;
   readonly #outboxReads: OutboxReadModel;
   readonly #recordReads: RecordReadModel;
   readonly #requestNormalizer: MutationRequestNormalizer;
@@ -222,11 +207,15 @@ export class ProjectRepository {
   readonly #sessionReads: SessionReadModel;
   readonly #taskReads: TaskReadModel;
   readonly #mutation: ProjectMutationKernel;
+  readonly #workItemCreates: WorkItemCreateCommands;
+  readonly #workItemLifecycle: WorkItemLifecycleCommands;
+  readonly #workItemMaintenance: WorkItemMaintenance;
 
   constructor(database: ManagedDatabase) {
     this.database = database;
     this.#sqlite = database.sqlite;
     this.#mutation = new ProjectMutationKernel(this.#sqlite);
+    this.#planningCommands = new PlanningCommands(this.#sqlite, this.#mutation);
     const projectCode = () => this.meta.code;
     this.#taskReads = new TaskReadModel(this.#sqlite, projectCode);
     this.#sessionReads = new SessionReadModel(this.#sqlite, projectCode, (workItemId) =>
@@ -235,6 +224,39 @@ export class ProjectRepository {
     this.#outboxReads = new OutboxReadModel(this.#sqlite);
     this.#recordReads = new RecordReadModel(this.#sqlite, projectCode, (workItemId) =>
       this.#taskReads.taskKeyForId(workItemId),
+    );
+    this.#evidenceNormalizer = new EvidenceNormalizer(
+      this.#sqlite,
+      this.#recordReads,
+      this.#taskReads,
+    );
+    this.#workItemMaintenance = new WorkItemMaintenance(this.#sqlite);
+    this.#workItemCreates = new WorkItemCreateCommands(
+      this.#sqlite,
+      this.#mutation,
+      this.#planningCommands,
+      this.#taskReads,
+      this.#workItemMaintenance,
+    );
+    this.#workItemLifecycle = new WorkItemLifecycleCommands(
+      this.#sqlite,
+      this.#mutation,
+      this.#taskReads,
+      this.#workItemMaintenance,
+    );
+    this.#checklistCommands = new ChecklistCommands(
+      this.#sqlite,
+      this.#mutation,
+      this.#taskReads,
+      this.#workItemMaintenance,
+      this.#evidenceNormalizer,
+    );
+    this.#progressCommands = new ProgressCommands(
+      this.#sqlite,
+      this.#mutation,
+      this.#taskReads,
+      this.#workItemMaintenance,
+      this.#evidenceNormalizer,
     );
     this.#requestNormalizer = new MutationRequestNormalizer(
       (reference) => this.#recordReads.recordRow(reference).id,
@@ -357,37 +379,19 @@ export class ProjectRepository {
   }
 
   getActiveObjective(): any | null {
-    return (
-      this.#sqlite
-        .prepare(
-          "SELECT * FROM objectives WHERE status = 'ACTIVE' ORDER BY updated_at DESC LIMIT 1",
-        )
-        .get() ?? null
-    );
+    return this.#planningCommands.getActiveObjective();
   }
 
   getActiveMilestone(objectiveId?: string): any | null {
-    return (
-      this.#sqlite
-        .prepare(
-          `SELECT * FROM milestones WHERE status = 'ACTIVE'
-           AND (? IS NULL OR objective_id = ?) ORDER BY sort_key LIMIT 1`,
-        )
-        .get(objectiveId ?? null, objectiveId ?? null) ?? null
-    );
+    return this.#planningCommands.getActiveMilestone(objectiveId);
   }
 
   listObjectives(): any[] {
-    return this.#sqlite.prepare("SELECT * FROM objectives ORDER BY created_at").all() as any[];
+    return this.#planningCommands.listObjectives();
   }
 
   listMilestones(objectiveId?: string): any[] {
-    return this.#sqlite
-      .prepare(
-        `SELECT * FROM milestones WHERE (? IS NULL OR objective_id = ?)
-         ORDER BY sort_key, created_at`,
-      )
-      .all(objectiveId ?? null, objectiveId ?? null) as any[];
+    return this.#planningCommands.listMilestones(objectiveId);
   }
 
   listAgentSessionPage(filters: SessionPageFilters = {}): SessionProjectionPage {
@@ -790,43 +794,7 @@ export class ProjectRepository {
     input: { title: string; description: string; definitionOfDone: string[] },
     opId = `objective-${createUlid()}`,
   ): any {
-    return this.mutate({
-      actor,
-      opId,
-      operation: "objective.create",
-      request: input,
-      action: () => {
-        const now = nowIso();
-        this.#sqlite
-          .prepare(
-            "UPDATE objectives SET status = 'PLANNED', version = version + 1, updated_at = ? WHERE status = 'ACTIVE'",
-          )
-          .run(now);
-        const id = createUlid();
-        const localNo = this.nextNumber("objective");
-        this.#sqlite
-          .prepare(
-            `INSERT INTO objectives(
-               id, local_no, title, description, definition_of_done_json, status, weight,
-               version, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', 1, 0, ?, ?)`,
-          )
-          .run(
-            id,
-            localNo,
-            input.title,
-            input.description,
-            JSON.stringify(input.definitionOfDone),
-            now,
-            now,
-          );
-        const sequence = this.appendEvent("objective.created", actor, "OBJECTIVE", id, {
-          localNo,
-          title: input.title,
-        });
-        return { id, localNo, title: input.title, status: "ACTIVE", version: 0, sequence };
-      },
-    });
+    return this.#planningCommands.createObjective(actor, input, opId);
   }
 
   createMilestone(
@@ -834,53 +802,7 @@ export class ProjectRepository {
     input: { objectiveId: string; title: string; description?: string; targetDate?: string | null },
     opId = `milestone-${createUlid()}`,
   ): any {
-    return this.mutate({
-      actor,
-      opId,
-      operation: "milestone.create",
-      request: input,
-      action: () => {
-        const objective = this.#sqlite
-          .prepare("SELECT id FROM objectives WHERE id = ?")
-          .get(input.objectiveId);
-        if (!objective)
-          throw new AtmError("OBJECTIVE_NOT_FOUND", {
-            message: `目标不存在：${input.objectiveId}`,
-            details: { entity: "OBJECTIVE", reference: input.objectiveId },
-          });
-        const now = nowIso();
-        const id = createUlid();
-        const localNo = this.nextNumber("milestone");
-        const sortKey = (
-          this.#sqlite
-            .prepare("SELECT COALESCE(MAX(sort_key), 0) + 1000 AS value FROM milestones")
-            .get() as { value: number }
-        ).value;
-        this.#sqlite
-          .prepare(
-            `INSERT INTO milestones(
-               id, local_no, objective_id, title, description, target_date, status, weight,
-               sort_key, version, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', 1, ?, 0, ?, ?)`,
-          )
-          .run(
-            id,
-            localNo,
-            input.objectiveId,
-            input.title,
-            input.description ?? "",
-            input.targetDate ?? null,
-            sortKey,
-            now,
-            now,
-          );
-        const sequence = this.appendEvent("milestone.created", actor, "MILESTONE", id, {
-          localNo,
-          title: input.title,
-        });
-        return { id, localNo, title: input.title, status: "ACTIVE", version: 0, sequence };
-      },
-    });
+    return this.#planningCommands.createMilestone(actor, input, opId);
   }
 
   private rowForTaskKey(taskKey: string): any {
@@ -896,81 +818,15 @@ export class ProjectRepository {
   }
 
   private recordWorkItemLifecycleAt(workItemId: string, at: string, started: boolean): void {
-    if (started) {
-      this.#sqlite
-        .prepare(
-          `UPDATE work_items
-           SET ever_claimed_at = COALESCE(ever_claimed_at, ?),
-               last_started_at = CASE
-                 WHEN last_started_at IS NULL OR last_started_at < ? THEN ?
-                 ELSE last_started_at
-               END
-           WHERE id = ?`,
-        )
-        .run(at, at, at, workItemId);
-      return;
-    }
-    this.#sqlite
-      .prepare("UPDATE work_items SET ever_claimed_at = COALESCE(ever_claimed_at, ?) WHERE id = ?")
-      .run(at, workItemId);
+    this.#workItemMaintenance.recordWorkItemLifecycleAt(workItemId, at, started);
   }
 
   private advanceWorkItemEvidenceAt(workItemId: string, at: string): void {
-    this.#sqlite
-      .prepare(
-        `UPDATE work_items
-         SET last_evidence_at = CASE
-           WHEN last_evidence_at IS NULL OR last_evidence_at < ? THEN ?
-           ELSE last_evidence_at
-         END
-         WHERE id = ?`,
-      )
-      .run(at, at, workItemId);
+    this.#workItemMaintenance.advanceWorkItemEvidenceAt(workItemId, at);
   }
 
   private normalizeEvidence(evidence: unknown[], strictTyped = false): unknown[] {
-    return evidence.map((entry) => {
-      let reference: Record<string, unknown>;
-      if (strictTyped) {
-        const parsed = EvidenceInputSchema.parse(entry);
-        if (typeof parsed === "string") return parsed;
-        reference = parsed;
-      } else {
-        if (typeof entry === "string") return entry;
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-        reference = entry as Record<string, unknown>;
-      }
-      if (reference.kind !== "atm_record" && reference.kind !== "atm_task") {
-        return strictTyped ? reference : entry;
-      }
-      if (typeof reference.value !== "string" || !reference.value.trim()) {
-        throw new AtmError("VALIDATION_ERROR", {
-          message: `${String(reference.kind)} evidence value required`,
-        });
-      }
-      if (reference.kind === "atm_record") {
-        const normalized = reference.value.trim();
-        const publicPrefix = `${this.meta.code}-`;
-        const publicSuffix = normalized.startsWith(publicPrefix)
-          ? normalized.slice(publicPrefix.length)
-          : "";
-        if (!/^(?:D|R)-\d{3,}$/u.test(publicSuffix)) {
-          throw new AtmError("RECORD_NOT_FOUND", {
-            message: `Record 不存在：${reference.value}`,
-            details: { entity: "RECORD", reference: reference.value },
-          });
-        }
-        return { ...reference, value: this.getRecord(normalized).key };
-      }
-      const row = this.rowForTaskKey(reference.value);
-      const taskKey = this.taskKeyForId(row.id);
-      if (!taskKey)
-        throw new AtmError("WORK_ITEM_NOT_FOUND", {
-          message: `WorkItem 不存在：${reference.value}`,
-          details: { entity: "WORK_ITEM", reference: reference.value },
-        });
-      return { ...reference, value: taskKey };
-    });
+    return this.#evidenceNormalizer.normalize(evidence, strictTyped);
   }
 
   getWorkItem(taskKey: string): WorkItemView & {
@@ -1587,450 +1443,7 @@ export class ProjectRepository {
     items: WorkItemCreateInput[],
     planningRoot?: WorkItemPlanningRoot,
   ): { items: WorkItemView[]; sequence: number; planningRootProvisioned: boolean } {
-    return this.mutate({
-      actor,
-      opId,
-      operation: "work.create.batch",
-      // Planning-root policy is server-derived; idempotency is bound to the caller's task batch.
-      request: items,
-      immediate: true,
-      action: () => {
-        if (items.length === 0 || items.length > 50) {
-          throw new AtmError("VALIDATION_ERROR", {
-            message: "WorkItem 批次数量必须为 1 至 50",
-            details: { field: "items", min: 1, max: 50, actual: items.length },
-          });
-        }
-        if (new Set(items.map((item) => item.clientRef)).size !== items.length) {
-          throw new AtmError("VALIDATION_ERROR", {
-            message: "WorkItem 批次包含重复 clientRef",
-            details: { field: "clientRef", issue: "duplicate" },
-          });
-        }
-
-        /*
-         * Build and validate the complete prospective graph before incrementing a counter or
-         * inserting the optional planning root. This deliberately supports forward refs: the
-         * validation result must not depend on the order in which a caller serialized the batch.
-         */
-        const code = this.meta.code;
-        const activeObjective = planningRoot ? this.getActiveObjective() : null;
-        const needsDefaultObjective = items.some((item) => item.objectiveId === undefined);
-        const plannedObjective =
-          planningRoot?.provisionIfMissing && needsDefaultObjective && !activeObjective
-            ? { id: createUlid() }
-            : null;
-        const defaultObjectiveId = String(activeObjective?.id ?? plannedObjective?.id ?? "");
-        if (needsDefaultObjective && !defaultObjectiveId) {
-          throw new AtmError("OBJECTIVE_REQUIRED", { message: "项目尚无活动目标" });
-        }
-
-        const activeDefaultMilestone = defaultObjectiveId
-          ? this.getActiveMilestone(defaultObjectiveId)
-          : null;
-        const plannedMilestone =
-          planningRoot?.provisionIfMissing &&
-          needsDefaultObjective &&
-          defaultObjectiveId &&
-          !activeDefaultMilestone
-            ? { id: createUlid(), objectiveId: defaultObjectiveId }
-            : null;
-        const defaultMilestoneId = activeDefaultMilestone?.id ?? plannedMilestone?.id ?? null;
-
-        const objectiveRows = new Map<string, { id: string }>();
-        if (plannedObjective) objectiveRows.set(plannedObjective.id, plannedObjective);
-        const objective = (objectiveId: string): { id: string } => {
-          const cached = objectiveRows.get(objectiveId);
-          if (cached) return cached;
-          const row = this.#sqlite
-            .prepare("SELECT id FROM objectives WHERE id = ?")
-            .get(objectiveId) as { id: string } | undefined;
-          if (!row)
-            throw new AtmError("OBJECTIVE_NOT_FOUND", {
-              message: `目标不存在：${objectiveId}`,
-              details: { entity: "OBJECTIVE", reference: objectiveId },
-            });
-          objectiveRows.set(objectiveId, row);
-          return row;
-        };
-
-        const milestoneRows = new Map<string, { id: string; objectiveId: string }>();
-        if (plannedMilestone) milestoneRows.set(plannedMilestone.id, plannedMilestone);
-        const milestone = (milestoneId: string): { id: string; objectiveId: string } => {
-          const cached = milestoneRows.get(milestoneId);
-          if (cached) return cached;
-          const row = this.#sqlite
-            .prepare("SELECT id, objective_id FROM milestones WHERE id = ?")
-            .get(milestoneId) as { id: string; objective_id: string } | undefined;
-          if (!row)
-            throw new AtmError("MILESTONE_NOT_FOUND", {
-              message: `里程碑不存在：${milestoneId}`,
-              details: { entity: "MILESTONE", reference: milestoneId },
-            });
-          const normalized = { id: row.id, objectiveId: row.objective_id };
-          milestoneRows.set(milestoneId, normalized);
-          return normalized;
-        };
-
-        type PlannedItem = {
-          input: WorkItemCreateInput;
-          id: string;
-          key: string;
-          objectiveId: string;
-          milestoneId: string | null;
-          parentId: string | null;
-          dependencyIds: string[];
-          discoveredFromId: string | null;
-          discoveredFromKey: string | null;
-          status: WorkItemStatus;
-          createdAt: string;
-        };
-
-        const plannedByRef = new Map<string, PlannedItem>();
-        const planned = items.map((item) => {
-          const itemObjectiveId = item.objectiveId ?? defaultObjectiveId;
-          objective(itemObjectiveId);
-          let itemMilestoneId: string | null;
-          if (item.milestoneId !== undefined) {
-            itemMilestoneId = item.milestoneId;
-          } else if (!planningRoot) {
-            itemMilestoneId = null;
-          } else if (item.objectiveId === undefined) {
-            itemMilestoneId = defaultMilestoneId;
-          } else {
-            itemMilestoneId = this.getActiveMilestone(itemObjectiveId)?.id ?? null;
-          }
-          if (itemMilestoneId) {
-            const selectedMilestone = milestone(itemMilestoneId);
-            if (selectedMilestone.objectiveId !== itemObjectiveId) {
-              throw new AtmError("MILESTONE_OBJECTIVE_MISMATCH", {
-                message: `里程碑 ${itemMilestoneId} 不属于目标 ${itemObjectiveId}`,
-                details: {
-                  milestone_id: itemMilestoneId,
-                  objective_id: itemObjectiveId,
-                  actual_objective_id: selectedMilestone.objectiveId,
-                },
-              });
-            }
-          }
-          const entry: PlannedItem = {
-            input: item,
-            id: createUlid(),
-            key: "",
-            objectiveId: itemObjectiveId,
-            milestoneId: itemMilestoneId,
-            parentId: null,
-            dependencyIds: [],
-            discoveredFromId: null,
-            discoveredFromKey: null,
-            status: item.status ?? "BACKLOG",
-            createdAt: nowIso(),
-          };
-          plannedByRef.set(item.clientRef, entry);
-          return entry;
-        });
-
-        const existingByKey = new Map<string, any>();
-        const taskForKey = (taskKey: string): any => {
-          const cached = existingByKey.get(taskKey);
-          if (cached) return cached;
-          const row = this.rowForTaskKey(taskKey);
-          existingByKey.set(taskKey, row);
-          return row;
-        };
-
-        for (const entry of planned) {
-          const item = entry.input;
-          const hasParentRef = item.parentRef !== undefined && item.parentRef !== null;
-          const hasParentKey = item.parentKey !== undefined && item.parentKey !== null;
-          if (hasParentRef && hasParentKey) {
-            throw new AtmError("VALIDATION_ERROR", {
-              message: "parentKey 与 parentRef 不能同时提供",
-              details: { fields: ["parentKey", "parentRef"], issue: "mutually_exclusive" },
-            });
-          }
-          if (hasParentRef) {
-            const parent = plannedByRef.get(String(item.parentRef));
-            if (!parent)
-              throw new AtmError("PARENT_REF_NOT_FOUND", {
-                message: `父 WorkItem 引用不存在：${item.parentRef}`,
-                details: { reference: item.parentRef },
-              });
-            entry.parentId = parent.id;
-          } else if (hasParentKey) {
-            entry.parentId = String(taskForKey(String(item.parentKey)).id);
-          }
-
-          const dependencyIds = [
-            ...(item.dependsOn ?? []).map((taskKey) => String(taskForKey(taskKey).id)),
-            ...(item.dependsOnRefs ?? []).map((reference) => {
-              const dependency = plannedByRef.get(reference);
-              if (!dependency)
-                throw new AtmError("DEPENDENCY_REF_NOT_FOUND", {
-                  message: `依赖 WorkItem 引用不存在：${reference}`,
-                  details: { reference },
-                });
-              return dependency.id;
-            }),
-          ];
-          if (new Set(dependencyIds).size !== dependencyIds.length) {
-            throw new AtmError("VALIDATION_ERROR", {
-              message: `WorkItem ${item.clientRef} 包含重复依赖`,
-              details: { client_ref: item.clientRef, field: "dependencies", issue: "duplicate" },
-            });
-          }
-          entry.dependencyIds = dependencyIds;
-
-          const hasDiscoveredRef = item.discoveredFromRef !== undefined;
-          const hasDiscoveredKey = item.discoveredFrom !== undefined;
-          if (hasDiscoveredRef && hasDiscoveredKey) {
-            throw new AtmError("VALIDATION_ERROR", {
-              message: "discoveredFrom 与 discoveredFromRef 不能同时提供",
-              details: {
-                fields: ["discoveredFrom", "discoveredFromRef"],
-                issue: "mutually_exclusive",
-              },
-            });
-          }
-          if (hasDiscoveredRef) {
-            const source = plannedByRef.get(String(item.discoveredFromRef));
-            if (!source) {
-              throw new AtmError("DISCOVERED_FROM_REF_NOT_FOUND", {
-                message: `发现来源引用不存在：${item.discoveredFromRef}`,
-                details: { reference: item.discoveredFromRef },
-              });
-            }
-            entry.discoveredFromId = source.id;
-            entry.discoveredFromKey = source.key;
-          } else if (hasDiscoveredKey) {
-            const source = taskForKey(String(item.discoveredFrom));
-            entry.discoveredFromId = String(source.id);
-            entry.discoveredFromKey = String(item.discoveredFrom);
-          }
-          if (entry.discoveredFromId === entry.id) {
-            throw new AtmError("VALIDATION_ERROR", {
-              message: "WorkItem 不能将自身设为发现来源",
-              details: { client_ref: item.clientRef, issue: "self_reference" },
-            });
-          }
-        }
-
-        const parents = new Map<string, string | null>(
-          (
-            this.#sqlite.prepare("SELECT id, parent_id FROM work_items").all() as Array<{
-              id: string;
-              parent_id: string | null;
-            }>
-          ).map((row) => [row.id, row.parent_id]),
-        );
-        for (const entry of planned) parents.set(entry.id, entry.parentId);
-        for (const entry of planned) assertParentMove(entry.id, entry.parentId, parents);
-
-        const dependencies = new Map<string, string[]>();
-        for (const row of this.#sqlite
-          .prepare(
-            "SELECT source_id, target_id FROM work_item_relations WHERE relation_type = 'BLOCKS'",
-          )
-          .all() as Array<{ source_id: string; target_id: string }>) {
-          dependencies.set(row.target_id, [
-            ...(dependencies.get(row.target_id) ?? []),
-            row.source_id,
-          ]);
-        }
-        for (const entry of planned) dependencies.set(entry.id, entry.dependencyIds);
-        for (const entry of planned) {
-          for (const dependencyId of entry.dependencyIds) {
-            assertAcyclicDependency(entry.id, dependencyId, dependencies);
-          }
-        }
-
-        // No persistent mutation occurs above this line.
-        let planningRootProvisioned = false;
-        if (plannedObjective) {
-          const now = nowIso();
-          const localNo = this.nextNumber("objective");
-          this.#sqlite
-            .prepare(
-              `INSERT INTO objectives(
-                 id, local_no, title, description, definition_of_done_json, status, weight,
-                 version, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, '[]', 'ACTIVE', 1, 0, ?, ?)`,
-            )
-            .run(
-              plannedObjective.id,
-              localNo,
-              planningRoot!.objectiveTitle,
-              planningRoot!.objectiveDescription,
-              now,
-              now,
-            );
-          this.appendEvent("objective.created", actor, "OBJECTIVE", plannedObjective.id, {
-            localNo,
-            title: planningRoot!.objectiveTitle,
-          });
-          planningRootProvisioned = true;
-        }
-        if (plannedMilestone) {
-          const now = nowIso();
-          const localNo = this.nextNumber("milestone");
-          const sortKey = (
-            this.#sqlite
-              .prepare("SELECT COALESCE(MAX(sort_key), 0) + 1000 AS value FROM milestones")
-              .get() as { value: number }
-          ).value;
-          this.#sqlite
-            .prepare(
-              `INSERT INTO milestones(
-                 id, local_no, objective_id, title, description, target_date, status, weight,
-                 sort_key, version, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, '', NULL, 'ACTIVE', 1, ?, 0, ?, ?)`,
-            )
-            .run(
-              plannedMilestone.id,
-              localNo,
-              plannedMilestone.objectiveId,
-              planningRoot!.milestoneTitle,
-              sortKey,
-              now,
-              now,
-            );
-          this.appendEvent("milestone.created", actor, "MILESTONE", plannedMilestone.id, {
-            localNo,
-            title: planningRoot!.milestoneTitle,
-          });
-        }
-
-        const references = new Map<string, { id: string; key: string }>();
-        for (const item of items) {
-          const entry = plannedByRef.get(item.clientRef)!;
-          const localNo = this.nextNumber("work_item");
-          const key = `${code}-T-${String(localNo).padStart(4, "0")}`;
-          entry.key = key;
-          const status = entry.status;
-          const phase =
-            status === "WAITING_AGENT" || status === "WAITING_USER" ? "IN_PROGRESS" : status;
-          const waitingOn =
-            status === "WAITING_AGENT" ? "AGENT" : status === "WAITING_USER" ? "USER" : null;
-          const sortKey = localNo * 1000;
-          this.#sqlite
-            .prepare(
-              `INSERT INTO work_items(
-                 id, local_no, parent_id, objective_id, milestone_id, type, title, description,
-                 acceptance_json, status, phase, waiting_on, phase_inferred,
-                 priority, sort_key, target_date, reported_progress,
-                 computed_progress, progress_source, weight, verification_required, version,
-                 created_by_agent_id, created_by_session_id, created_at, updated_at, source_quick_id,
-                 assignee_agent_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(
-              entry.id,
-              localNo,
-              null,
-              entry.objectiveId,
-              entry.milestoneId,
-              item.type,
-              item.title,
-              item.description ?? "",
-              JSON.stringify(item.acceptance ?? []),
-              status,
-              phase,
-              waitingOn,
-              item.priority,
-              sortKey,
-              item.targetDate ?? null,
-              item.weight ?? 1,
-              item.verificationRequired ? 1 : 0,
-              actor.id,
-              actor.sessionId,
-              entry.createdAt,
-              entry.createdAt,
-              item.sourceQuickId ?? null,
-              item.assigneeAgentId ?? null,
-            );
-          for (const checklist of item.checklist ?? []) {
-            this.#sqlite
-              .prepare(
-                `INSERT INTO checklist_items(
-                   id, work_item_id, title, kind, status, weight, evidence_required,
-                   evidence_json, version, created_at, updated_at
-                 ) VALUES (?, ?, ?, 'ACCEPTANCE', 'TODO', ?, ?, '[]', 0, ?, ?)`,
-              )
-              .run(
-                createUlid(),
-                entry.id,
-                checklist.title,
-                checklist.weight ?? 1,
-                checklist.evidenceRequired ? 1 : 0,
-                entry.createdAt,
-                entry.createdAt,
-              );
-          }
-          references.set(item.clientRef, { id: entry.id, key });
-        }
-
-        for (const entry of planned) {
-          if (entry.parentId) {
-            this.#sqlite
-              .prepare("UPDATE work_items SET parent_id = ? WHERE id = ?")
-              .run(entry.parentId, entry.id);
-          }
-          for (const dependencyId of entry.dependencyIds) {
-            this.#sqlite
-              .prepare(
-                `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
-                 VALUES (?, ?, 'BLOCKS', ?)`,
-              )
-              .run(dependencyId, entry.id, entry.createdAt);
-          }
-          if (entry.discoveredFromId) {
-            this.#sqlite
-              .prepare(
-                `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
-                 VALUES (?, ?, 'DISCOVERED_FROM', ?)`,
-              )
-              .run(entry.id, entry.discoveredFromId, entry.createdAt);
-          }
-        }
-
-        for (const entry of planned) {
-          const reference = references.get(entry.input.clientRef)!;
-          this.upsertSearchDocument(
-            "WORK_ITEM",
-            entry.id,
-            reference.key,
-            entry.input.title,
-            entry.input.description ?? "",
-          );
-          this.recomputeWorkItem(entry.id);
-          if (entry.discoveredFromId) this.refreshWorkItemSearchDocument(entry.discoveredFromId);
-        }
-
-        let sequence = this.meta.sequence;
-        for (const entry of planned) {
-          const reference = references.get(entry.input.clientRef)!;
-          const discoveredFromKey = entry.input.discoveredFromRef
-            ? references.get(entry.input.discoveredFromRef)?.key
-            : entry.discoveredFromKey;
-          sequence = this.appendEvent("work.created", actor, "WORK_ITEM", entry.id, {
-            key: reference.key,
-            title: entry.input.title,
-            status: entry.status,
-            ...(discoveredFromKey ? { discoveredFrom: discoveredFromKey } : {}),
-          });
-        }
-
-        return {
-          items: planned.map((entry) =>
-            this.workItemViewFromRow(
-              this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(entry.id),
-            ),
-          ),
-          sequence,
-          planningRootProvisioned,
-        };
-      },
-    });
+    return this.#workItemCreates.createWorkItems(actor, opId, items, planningRoot);
   }
 
   patchWorkItems(
@@ -2070,395 +1483,7 @@ export class ProjectRepository {
       fields: string[];
     }>;
   } {
-    if (patches.length === 0 || patches.length > 50)
-      throw new AtmError("VALIDATION_ERROR", {
-        message: "WorkItem patch 批次数量必须为 1 至 50",
-        details: { field: "patches", min: 1, max: 50, actual: patches.length },
-      });
-    return this.mutate({
-      actor,
-      opId,
-      operation: "work.patch.batch",
-      request: patches,
-      action: () => {
-        const result: WorkItemView[] = [];
-        const merges: Array<{
-          taskKey: string;
-          expectedVersion: number;
-          actualVersion: number;
-          fields: string[];
-        }> = [];
-        let sequence = this.meta.sequence;
-        for (const patch of patches) {
-          const row = this.rowForTaskKey(patch.taskKey);
-          let mergeReceipt:
-            | {
-                taskKey: string;
-                expectedVersion: number;
-                actualVersion: number;
-                fields: string[];
-              }
-            | undefined;
-          if (row.version !== patch.expectedVersion) {
-            const changedFields = (
-              ["title", "description", "acceptance", "targetDate", "parentKey"] as const
-            ).filter((field) => patch[field] !== undefined);
-            const currentFields = {
-              title: row.title as string,
-              description: row.description as string,
-              acceptance: json<string[]>(row.acceptance_json, []),
-              targetDate: (row.target_date ?? null) as string | null,
-              parentKey: row.parent_id ? this.taskKeyForId(row.parent_id) : null,
-            };
-            const expectedFields = patch.expectedFields;
-            const safeMerge =
-              patch.operation === "edit" &&
-              patch.assigneeAgentId === undefined &&
-              patch.cancelReason === undefined &&
-              patch.duplicateOf === undefined &&
-              patch.supersededBy === undefined &&
-              changedFields.length > 0 &&
-              expectedFields !== undefined &&
-              changedFields.every((field) =>
-                Object.prototype.hasOwnProperty.call(expectedFields, field),
-              ) &&
-              Object.entries(expectedFields).every(([field, expected]) =>
-                field === "acceptance"
-                  ? JSON.stringify(currentFields.acceptance) === JSON.stringify(expected)
-                  : currentFields[field as keyof typeof currentFields] === expected,
-              );
-            if (!safeMerge) {
-              throw new AtmError("VERSION_CONFLICT", {
-                message: "WorkItem 版本已变化",
-                details: {
-                  entity: "WORK_ITEM",
-                  key: patch.taskKey,
-                  expected: patch.expectedVersion,
-                  actual: row.version,
-                },
-              });
-            }
-            mergeReceipt = {
-              taskKey: patch.taskKey,
-              expectedVersion: patch.expectedVersion,
-              actualVersion: row.version,
-              fields: changedFields,
-            };
-            merges.push(mergeReceipt);
-          }
-          const updates: string[] = [];
-          const values: unknown[] = [];
-          let eventType = "work.updated";
-          const acceptanceChange =
-            patch.operation === "edit" && patch.acceptance !== undefined
-              ? {
-                  acceptance: {
-                    before: json<string[]>(row.acceptance_json, []),
-                    after: patch.acceptance,
-                  },
-                }
-              : undefined;
-          const currentPhase = storedWorkItemPhase(row);
-          const successorReclaim =
-            patch.operation === "claim" &&
-            row.status === "IN_PROGRESS" &&
-            row.assignee_agent_id === actor.id;
-          const resolvedOperation = resolveStoredWorkItemOperation(patch.operation, row, {
-            successorReclaim,
-          });
-          const targetStatus = resolvedOperation.target;
-          let targetPhase = currentPhase;
-          const now = nowIso();
-          if (patch.operation === "claim" || patch.operation === "start") {
-            const dependency = this.#sqlite
-              .prepare(
-                `SELECT dependency.local_no FROM work_item_relations relation
-                 JOIN work_items dependency ON dependency.id = relation.source_id
-                 WHERE relation.target_id = ? AND relation.relation_type = 'BLOCKS'
-                   AND dependency.status <> 'DONE' LIMIT 1`,
-              )
-              .get(row.id) as { local_no: number } | undefined;
-            if (dependency)
-              throw new AtmError("DEPENDENCY_NOT_READY", {
-                message: `依赖 WorkItem 尚未完成：${dependency.local_no}`,
-                details: { dependency_local_no: dependency.local_no },
-              });
-            if (row.claimed_by_session_id && row.claimed_by_session_id !== actor.sessionId) {
-              const stale =
-                row.claim_lease_until && Date.parse(row.claim_lease_until) <= Date.now();
-              if (!stale || !patch.takeoverStale)
-                throw new AtmError("TASK_ALREADY_CLAIMED", {
-                  message: `WorkItem 已被其他 Session 领取：${patch.taskKey}`,
-                  details: {
-                    task_key: patch.taskKey,
-                    claimed_by_session_id: row.claimed_by_session_id,
-                    claim_lease_until: row.claim_lease_until,
-                  },
-                });
-            }
-            targetPhase = targetStatus as WorkItemPhase;
-            updates.push(
-              "status = ?",
-              "phase = ?",
-              "phase_inferred = 0",
-              "assignee_agent_id = ?",
-              "claimed_by_session_id = ?",
-              "claim_lease_until = ?",
-            );
-            values.push(
-              targetStatus,
-              targetPhase,
-              actor.id,
-              actor.sessionId,
-              actor.sessionId ? new Date(Date.now() + 10 * 60_000).toISOString() : null,
-            );
-            if (targetStatus === "IN_PROGRESS" && !row.started_at) {
-              updates.push("started_at = ?");
-              values.push(now);
-            }
-            if (targetStatus === "IN_PROGRESS") {
-              // 「接着做」意味着阻塞与等待都已不成立。只清任务行上的列而不关
-              // blockers 记录，任务会看起来一切正常、却永远完成不了。
-              updates.push("blocked_reason = NULL", "waiting_on = NULL", "waiting_for = NULL");
-              this.resolveActiveBlockers(row.id, now);
-            }
-            eventType = targetStatus === "IN_PROGRESS" ? "work.started" : "work.claimed";
-          } else if (patch.operation === "release") {
-            const stale = row.claim_lease_until && Date.parse(row.claim_lease_until) <= Date.now();
-            if (
-              row.claimed_by_session_id !== actor.sessionId &&
-              !(actor.type === "USER" && stale)
-            ) {
-              throw new AtmError("CLAIM_OWNER_REQUIRED", {
-                message: `只有当前领取者可以释放 WorkItem：${patch.taskKey}`,
-                details: {
-                  task_key: patch.taskKey,
-                  claimed_by_session_id: row.claimed_by_session_id,
-                  actor_session_id: actor.sessionId ?? null,
-                },
-              });
-            }
-            targetPhase = "READY";
-            updates.push(
-              "status = 'READY'",
-              "phase = 'READY'",
-              "phase_inferred = 0",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-              "assignee_agent_id = NULL",
-              "claimed_by_session_id = NULL",
-              "claim_lease_until = NULL",
-            );
-            eventType = "work.released";
-          } else if (patch.operation === "block") {
-            if (!patch.blockedReason?.trim())
-              throw new AtmError("BLOCKED_REASON_REQUIRED", {
-                message: "阻塞 WorkItem 时必须提供 blockedReason",
-                details: { task_key: patch.taskKey, field: "blockedReason" },
-              });
-            targetPhase = "BLOCKED";
-            updates.push(
-              "status = 'BLOCKED'",
-              "phase = 'BLOCKED'",
-              "phase_inferred = 0",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-              "blocked_reason = ?",
-            );
-            values.push(patch.blockedReason.trim());
-            eventType = "work.blocked";
-          } else if (patch.operation === "wait_user" || patch.operation === "wait_agent") {
-            if (!patch.waitingFor?.trim())
-              throw new AtmError("WAITING_FOR_REQUIRED", {
-                message: "等待时必须提供 waitingFor",
-                details: { task_key: patch.taskKey, field: "waitingFor" },
-              });
-            updates.push("status = ?", "waiting_on = ?", "waiting_for = ?");
-            values.push(
-              targetStatus,
-              patch.operation === "wait_user" ? "USER" : "AGENT",
-              patch.waitingFor.trim(),
-            );
-            eventType = "work.waiting";
-          } else if (patch.operation === "verify") {
-            targetPhase = "VERIFYING";
-            updates.push(
-              "status = 'VERIFYING'",
-              "phase = 'VERIFYING'",
-              "phase_inferred = 0",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-            );
-            eventType = "work.verification_requested";
-          } else if (patch.operation === "complete") {
-            assertCompletionGates(this.#sqlite, row);
-            targetPhase = "DONE";
-            updates.push(
-              "status = 'DONE'",
-              "phase = 'DONE'",
-              "phase_inferred = 0",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-              "completed_at = ?",
-              "computed_progress = 100",
-              "reported_progress = 100",
-            );
-            values.push(now);
-            eventType = "work.completed";
-          } else if (patch.operation === "cancel") {
-            const duplicateOf = patch.duplicateOf ? this.rowForTaskKey(patch.duplicateOf) : null;
-            const supersededBy = patch.supersededBy ? this.rowForTaskKey(patch.supersededBy) : null;
-            if (duplicateOf?.id === row.id || supersededBy?.id === row.id) {
-              throw new AtmError("VALIDATION_ERROR", {
-                message: "取消 WorkItem 时不能引用自身",
-                details: { task_key: patch.taskKey, issue: "self_reference" },
-              });
-            }
-            targetPhase = "CANCELLED";
-            updates.push(
-              "status = 'CANCELLED'",
-              "phase = 'CANCELLED'",
-              "phase_inferred = 0",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-              "cancel_reason = ?",
-              "duplicate_of_id = ?",
-              "superseded_by_id = ?",
-            );
-            values.push(
-              patch.cancelReason?.trim() ?? null,
-              duplicateOf?.id ?? null,
-              supersededBy?.id ?? null,
-            );
-            eventType = "work.cancelled";
-          } else if (patch.operation === "reopen") {
-            targetPhase = targetStatus as WorkItemPhase;
-            // 拉回来之后，阻塞原因和等待条件已经不成立，留着会让界面继续显示旧理由。
-            this.resolveActiveBlockers(row.id, now);
-            updates.push(
-              "status = ?",
-              "phase = ?",
-              "phase_inferred = 0",
-              "completed_at = NULL",
-              "blocked_reason = NULL",
-              "waiting_on = NULL",
-              "waiting_for = NULL",
-            );
-            values.push(targetStatus, targetPhase);
-            eventType = "work.reopened";
-          } else if (patch.operation === "edit") {
-            for (const [value, column] of [
-              [patch.title, "title"],
-              [patch.description, "description"],
-              [patch.assigneeAgentId, "assignee_agent_id"],
-              [patch.targetDate, "target_date"],
-            ] as const) {
-              if (value !== undefined) {
-                updates.push(`${column} = ?`);
-                values.push(value);
-              }
-            }
-            if (patch.acceptance !== undefined) {
-              updates.push("acceptance_json = ?");
-              values.push(JSON.stringify(patch.acceptance));
-            }
-            if (patch.parentKey !== undefined) {
-              const parentId = patch.parentKey ? this.rowForTaskKey(patch.parentKey).id : null;
-              const parents = new Map(
-                (this.#sqlite.prepare("SELECT id, parent_id FROM work_items").all() as any[]).map(
-                  (candidate) => [candidate.id, candidate.parent_id],
-                ),
-              );
-              assertParentMove(row.id, parentId, parents);
-              updates.push("parent_id = ?");
-              values.push(parentId);
-              eventType = "work.moved";
-            }
-          } else {
-            throw new AtmError("VALIDATION_ERROR", {
-              message: `未知 WorkItem 操作：${patch.operation}`,
-              details: { field: "operation", value: patch.operation, issue: "unknown" },
-            });
-          }
-          if (updates.length === 0)
-            throw new AtmError("VALIDATION_ERROR", {
-              message: "WorkItem patch 未产生任何变更",
-              details: { task_key: patch.taskKey, issue: "empty_patch" },
-            });
-          updates.push("version = version + 1", "updated_at = ?");
-          values.push(now, row.id);
-          this.#sqlite
-            .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
-            .run(...values);
-          if (patch.operation === "claim" || patch.operation === "start") {
-            this.recordWorkItemLifecycleAt(row.id, now, targetStatus === "IN_PROGRESS");
-          }
-          if (actor.sessionId) {
-            if (workItemOperationHasEffect(patch.operation, "SESSION_WORKING")) {
-              this.#sqlite
-                .prepare(
-                  `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WORKING',
-                   heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
-                )
-                .run(row.id, now, now, actor.sessionId);
-            } else if (workItemOperationHasEffect(patch.operation, "SESSION_WAITING")) {
-              this.#sqlite
-                .prepare(
-                  `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WAITING',
-                   heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
-                )
-                .run(row.id, now, now, actor.sessionId);
-            } else if (workItemOperationHasEffect(patch.operation, "SESSION_IDLE")) {
-              this.#sqlite
-                .prepare(
-                  `UPDATE agent_sessions SET current_work_item_id = NULL, work_state = 'IDLE',
-                   heartbeat_at = ?, updated_at = ?, version = version + 1
-                   WHERE id = ? AND current_work_item_id = ?`,
-                )
-                .run(now, now, actor.sessionId, row.id);
-            }
-          }
-          if (patch.operation === "edit") {
-            const searchRow = this.#sqlite
-              .prepare("SELECT title, description FROM work_items WHERE id = ?")
-              .get(row.id) as { title: string; description: string };
-            this.upsertSearchDocument(
-              "WORK_ITEM",
-              row.id,
-              patch.taskKey,
-              searchRow.title,
-              searchRow.description,
-            );
-          }
-          sequence = this.appendEvent(eventType, actor, "WORK_ITEM", row.id, {
-            key: patch.taskKey,
-            title: row.title,
-            operation: patch.operation,
-            status: targetStatus,
-            phase: targetPhase,
-            ...(mergeReceipt === undefined ? {} : { mergedAcrossVersion: mergeReceipt }),
-            ...(acceptanceChange === undefined ? {} : { changes: acceptanceChange }),
-            ...(patch.operation === "cancel"
-              ? {
-                  cancelReason: patch.cancelReason?.trim() ?? null,
-                  duplicateOf: patch.duplicateOf ?? null,
-                  supersededBy: patch.supersededBy ?? null,
-                }
-              : {}),
-            waitingOn:
-              patch.operation === "wait_agent"
-                ? "AGENT"
-                : patch.operation === "wait_user"
-                  ? "USER"
-                  : null,
-          });
-          if (row.parent_id) this.recomputeWorkItem(row.parent_id);
-          const updated = this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(row.id);
-          result.push(this.workItemViewFromRow(updated));
-        }
-        return { items: result, sequence, ...(merges.length === 0 ? {} : { merges }) };
-      },
-    });
+    return this.#workItemLifecycle.patchWorkItems(actor, opId, patches);
   }
 
   verifyAndComplete(
@@ -2475,116 +1500,7 @@ export class ProjectRepository {
     item: WorkItemView;
     sequence: number;
   } {
-    return this.mutate({
-      actor,
-      opId,
-      operation: "work.verify-and-complete",
-      request: input,
-      immediate: true,
-      action: () => {
-        const initial = this.rowForTaskKey(input.taskKey);
-        if (initial.version !== input.expectedVersion) {
-          throw new AtmError("VERSION_CONFLICT", {
-            message: "WorkItem 版本已变化",
-            details: {
-              entity: "WORK_ITEM",
-              key: input.taskKey,
-              expected: input.expectedVersion,
-              actual: initial.version,
-            },
-          });
-        }
-        const fromStatus = initial.status as WorkItemStatus;
-        const fromVersion = Number(initial.version);
-        const transitions: Array<"VERIFYING" | "DONE"> = [];
-        const now = nowIso();
-        let sequence = this.meta.sequence;
-        let verificationSequence: number | null = null;
-        let verifying = initial;
-
-        if (fromStatus !== "VERIFYING") {
-          resolveStoredWorkItemOperation("verify", initial);
-          this.#sqlite
-            .prepare(
-              `UPDATE work_items SET status = 'VERIFYING', phase = 'VERIFYING', phase_inferred = 0,
-               waiting_on = NULL, waiting_for = NULL, version = version + 1, updated_at = ?
-               WHERE id = ?`,
-            )
-            .run(now, initial.id);
-          if (actor.sessionId) {
-            this.#sqlite
-              .prepare(
-                `UPDATE agent_sessions SET current_work_item_id = ?, work_state = 'WORKING',
-                 heartbeat_at = ?, updated_at = ?, version = version + 1 WHERE id = ?`,
-              )
-              .run(initial.id, now, now, actor.sessionId);
-          }
-          sequence = this.appendEvent(
-            "work.verification_requested",
-            actor,
-            "WORK_ITEM",
-            initial.id,
-            {
-              key: input.taskKey,
-              title: initial.title,
-              operation: "verify_and_complete",
-              status: "VERIFYING",
-              phase: "VERIFYING",
-              composite: true,
-            },
-          );
-          verificationSequence = sequence;
-          transitions.push("VERIFYING");
-          verifying = this.#sqlite
-            .prepare("SELECT * FROM work_items WHERE id = ?")
-            .get(initial.id) as any;
-        }
-
-        resolveStoredWorkItemOperation("complete", verifying);
-        assertCompletionGates(this.#sqlite, verifying);
-        this.#sqlite
-          .prepare(
-            `UPDATE work_items SET status = 'DONE', phase = 'DONE', phase_inferred = 0,
-             waiting_on = NULL, waiting_for = NULL, completed_at = ?, computed_progress = 100,
-             reported_progress = 100, version = version + 1, updated_at = ? WHERE id = ?`,
-          )
-          .run(now, now, initial.id);
-        if (actor.sessionId) {
-          this.#sqlite
-            .prepare(
-              `UPDATE agent_sessions SET current_work_item_id = NULL, work_state = 'IDLE',
-               heartbeat_at = ?, updated_at = ?, version = version + 1
-               WHERE id = ? AND current_work_item_id = ?`,
-            )
-            .run(now, now, actor.sessionId, initial.id);
-        }
-        sequence = this.appendEvent("work.completed", actor, "WORK_ITEM", initial.id, {
-          key: input.taskKey,
-          title: initial.title,
-          operation: "verify_and_complete",
-          status: "DONE",
-          phase: "DONE",
-          composite: true,
-          ...(verificationSequence === null ? {} : { verificationSequence }),
-        });
-        transitions.push("DONE");
-        if (initial.parent_id) this.recomputeWorkItem(initial.parent_id);
-        const updated = this.#sqlite
-          .prepare("SELECT * FROM work_items WHERE id = ?")
-          .get(initial.id);
-        const item = this.workItemViewFromRow(updated);
-        return {
-          taskKey: input.taskKey,
-          fromStatus,
-          status: "DONE",
-          fromVersion,
-          taskVersion: item.version,
-          transitions,
-          item,
-          sequence,
-        };
-      },
-    });
+    return this.#workItemLifecycle.verifyAndComplete(actor, opId, input);
   }
 
   // blockers 是独立记录，work_items.blocked_reason 只是它在任务行上的影子。
@@ -2594,12 +1510,7 @@ export class ProjectRepository {
   // 只要被带 blocker 的 progress 写过一次，就永远过不了完成闸门（blocker active），
   // 而且清掉 blocked_reason 之后界面上看不出任何异常。
   resolveActiveBlockers(workItemId: string, now: string): number {
-    return this.#sqlite
-      .prepare(
-        `UPDATE blockers SET status = ?, resolved_at = ?, updated_at = ?, version = version + 1
-         WHERE work_item_id = ? AND status = 'ACTIVE'`,
-      )
-      .run("RESOLVED", now, now, workItemId).changes;
+    return this.#workItemMaintenance.resolveActiveBlockers(workItemId, now);
   }
 
   updateChecklist(
@@ -2612,88 +1523,7 @@ export class ProjectRepository {
       evidence?: unknown[];
     },
   ): { checklist: ChecklistView; taskProgress: number; taskVersion: number; sequence: number } {
-    const normalizedInput = {
-      ...input,
-      ...(input.evidence === undefined ? {} : { evidence: this.normalizeEvidence(input.evidence) }),
-    };
-    return this.mutate({
-      actor,
-      opId,
-      operation: "checklist.update",
-      request: normalizedInput,
-      action: () => {
-        const row = this.#sqlite
-          .prepare("SELECT * FROM checklist_items WHERE id = ?")
-          .get(input.checklistId) as any;
-        if (!row)
-          throw new AtmError("CHECKLIST_NOT_FOUND", {
-            message: `检查项不存在：${input.checklistId}`,
-            details: { entity: "CHECKLIST", reference: input.checklistId },
-          });
-        if (row.version !== input.expectedVersion)
-          throw new AtmError("VERSION_CONFLICT", {
-            message: "检查项版本已变化",
-            details: {
-              entity: "CHECKLIST",
-              key: input.checklistId,
-              expected: input.expectedVersion,
-              actual: row.version,
-            },
-          });
-        const evidence = normalizedInput.evidence ?? json(row.evidence_json, []);
-        if (
-          input.status === "DONE" &&
-          Number(row.evidence_required) === 1 &&
-          evidence.length === 0
-        ) {
-          throw new AtmError("COMPLETION_GATE_FAILED", {
-            message: "检查项要求提供证据",
-            details: {
-              reasons: [{ checklist_id: input.checklistId, code: "EVIDENCE_REQUIRED" }],
-            },
-          });
-        }
-        const now = nowIso();
-        this.#sqlite
-          .prepare(
-            `UPDATE checklist_items SET status = ?, evidence_json = ?, version = version + 1,
-             updated_at = ? WHERE id = ?`,
-          )
-          .run(input.status, JSON.stringify(evidence), now, row.id);
-        if (normalizedInput.evidence && normalizedInput.evidence.length > 0) {
-          this.advanceWorkItemEvidenceAt(row.work_item_id, now);
-        }
-        const taskProgress = this.recomputeWorkItem(row.work_item_id);
-        const task = this.#sqlite
-          .prepare("SELECT version FROM work_items WHERE id = ?")
-          .get(row.work_item_id) as {
-          version: number;
-        };
-        const sequence = this.appendEvent("checklist.updated", actor, "CHECKLIST", row.id, {
-          workItemId: row.work_item_id,
-          taskKey: this.taskKeyForId(row.work_item_id),
-          status: input.status,
-        });
-        const updated = this.#sqlite
-          .prepare("SELECT * FROM checklist_items WHERE id = ?")
-          .get(row.id) as any;
-        return {
-          checklist: {
-            id: updated.id,
-            title: updated.title,
-            kind: updated.kind,
-            status: updated.status,
-            weight: updated.weight,
-            evidenceRequired: Number(updated.evidence_required) === 1,
-            evidence: json(updated.evidence_json, []),
-            version: updated.version,
-          },
-          taskProgress,
-          taskVersion: task.version,
-          sequence,
-        };
-      },
-    });
+    return this.#checklistCommands.updateChecklist(actor, opId, input);
   }
 
   updateChecklistBatch(
@@ -2716,153 +1546,11 @@ export class ProjectRepository {
     updatedCount: number;
     sequence: number;
   } {
-    if (input.items.length === 0 || input.items.length > 100) {
-      throw new AtmError("VALIDATION_ERROR", {
-        message: "检查项批次数量必须为 1 至 100",
-        details: { field: "items", min: 1, max: 100, actual: input.items.length },
-      });
-    }
-    if (new Set(input.items.map((item) => item.checklistId)).size !== input.items.length) {
-      throw new AtmError("VALIDATION_ERROR", {
-        message: "检查项批次包含重复 checklistId",
-        details: { field: "checklistId", issue: "duplicate" },
-      });
-    }
-    const normalizedInput = {
-      ...input,
-      items: input.items.map((item) => ({
-        ...item,
-        ...(item.evidence === undefined ? {} : { evidence: this.normalizeEvidence(item.evidence) }),
-      })),
-    };
-    return this.mutate({
-      actor,
-      opId,
-      operation: "checklist.update.batch",
-      request: normalizedInput,
-      immediate: true,
-      action: () => {
-        const task = this.rowForTaskKey(input.taskKey);
-        const reasons: ChecklistBatchFailureReason[] = [];
-        if (task.version !== input.expectedVersion) {
-          reasons.push({
-            task_key: input.taskKey,
-            code: "VERSION_CONFLICT",
-            expected: input.expectedVersion,
-            actual: task.version,
-          });
-        }
-        const rows: Array<{
-          row: any;
-          item: (typeof normalizedInput.items)[number];
-          evidence: unknown[];
-        }> = [];
-        for (const item of normalizedInput.items) {
-          const row = this.#sqlite
-            .prepare("SELECT * FROM checklist_items WHERE id = ?")
-            .get(item.checklistId) as any;
-          if (!row) {
-            reasons.push({ checklist_id: item.checklistId, code: "NOT_FOUND" });
-            continue;
-          }
-          if (row.work_item_id !== task.id) {
-            reasons.push({ checklist_id: item.checklistId, code: "TASK_MISMATCH" });
-            continue;
-          }
-          const evidence = item.evidence ?? json(row.evidence_json, []);
-          if (
-            item.status === "DONE" &&
-            Number(row.evidence_required) === 1 &&
-            evidence.length === 0
-          ) {
-            reasons.push({ checklist_id: item.checklistId, code: "EVIDENCE_REQUIRED" });
-            continue;
-          }
-          rows.push({ row, item, evidence });
-        }
-        if (reasons.length > 0) throw new ChecklistBatchFailureError(reasons);
-
-        const now = nowIso();
-        for (const { row, item, evidence } of rows) {
-          this.#sqlite
-            .prepare(
-              `UPDATE checklist_items SET status = ?, evidence_json = ?, version = version + 1,
-               updated_at = ? WHERE id = ?`,
-            )
-            .run(item.status, JSON.stringify(evidence), now, row.id);
-        }
-        if (rows.some(({ item }) => item.evidence !== undefined && item.evidence.length > 0)) {
-          this.advanceWorkItemEvidenceAt(task.id, now);
-        }
-        const taskProgress = this.recomputeWorkItem(task.id);
-        const updatedTask = this.#sqlite
-          .prepare("SELECT version FROM work_items WHERE id = ?")
-          .get(task.id) as { version: number };
-        const sequence = this.appendEvent("checklist.batch_updated", actor, "WORK_ITEM", task.id, {
-          key: input.taskKey,
-          taskKey: input.taskKey,
-          expectedVersion: input.expectedVersion,
-          taskVersion: updatedTask.version,
-          items: rows.map(({ row, item }) => ({ checklistId: row.id, status: item.status })),
-        });
-        const checklist = rows.map(({ row }) => {
-          const updated = this.#sqlite
-            .prepare("SELECT * FROM checklist_items WHERE id = ?")
-            .get(row.id) as any;
-          return {
-            id: updated.id,
-            title: updated.title,
-            kind: updated.kind,
-            status: updated.status,
-            weight: updated.weight,
-            evidenceRequired: Number(updated.evidence_required) === 1,
-            evidence: json(updated.evidence_json, []),
-            version: updated.version,
-          };
-        });
-        return {
-          taskKey: input.taskKey,
-          checklist,
-          taskProgress,
-          taskVersion: updatedTask.version,
-          updatedCount: checklist.length,
-          sequence,
-        };
-      },
-    });
+    return this.#checklistCommands.updateChecklistBatch(actor, opId, input);
   }
 
   private recomputeWorkItem(id: string): number {
-    const row = this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(id) as any;
-    if (!row) return 0;
-    const children = this.#sqlite
-      .prepare(
-        "SELECT computed_progress, weight, status FROM work_items WHERE parent_id = ? AND archived_at IS NULL",
-      )
-      .all(id) as any[];
-    const checklist = this.#sqlite
-      .prepare("SELECT status, weight FROM checklist_items WHERE work_item_id = ?")
-      .all(id) as any[];
-    const progress = computeProgress({
-      status: row.status,
-      children: children.map((child) => ({
-        progress: child.computed_progress,
-        weight: child.weight,
-        cancelled: child.status === "CANCELLED",
-      })),
-      checklist: checklist
-        .filter((item) => item.status !== "SKIPPED")
-        .map((item) => ({ done: item.status === "DONE", weight: item.weight })),
-      reported: row.reported_progress,
-    });
-    this.#sqlite
-      .prepare(
-        `UPDATE work_items SET computed_progress = ?, progress_source = ?,
-         version = version + 1, updated_at = ? WHERE id = ?`,
-      )
-      .run(progress.value, progress.source, nowIso(), id);
-    if (row.parent_id) this.recomputeWorkItem(row.parent_id);
-    return progress.value;
+    return this.#workItemMaintenance.recomputeWorkItem(id);
   }
 
   private upsertSearchDocument(
@@ -2872,63 +1560,11 @@ export class ProjectRepository {
     title: string,
     body: string,
   ): void {
-    const now = nowIso();
-    this.#sqlite
-      .prepare(
-        `INSERT INTO search_documents(entity_type, entity_id, entity_key, title, body, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON CONFLICT(entity_type, entity_id) DO UPDATE SET entity_key = excluded.entity_key,
-           title = excluded.title, body = excluded.body, updated_at = excluded.updated_at`,
-      )
-      .run(entityType, entityId, entityKey, title, body, now);
-    this.#sqlite
-      .prepare("DELETE FROM search_documents_fts WHERE entity_type = ? AND entity_id = ?")
-      .run(entityType, entityId);
-    this.#sqlite
-      .prepare(
-        "INSERT INTO search_documents_fts(entity_type, entity_id, entity_key, title, body) VALUES (?, ?, ?, ?, ?)",
-      )
-      .run(entityType, entityId, entityKey, title, body);
+    this.#workItemMaintenance.upsertSearchDocument(entityType, entityId, entityKey, title, body);
   }
 
   private refreshWorkItemSearchDocument(workItemId: string): void {
-    const row = this.#sqlite
-      .prepare("SELECT * FROM work_items WHERE id = ?")
-      .get(workItemId) as any;
-    if (!row) return;
-    const code = this.meta.code;
-    const relationRows = this.#sqlite
-      .prepare(
-        `SELECT relation.source_id, source.local_no AS source_local_no, source.title AS source_title,
-                relation.target_id, target.local_no AS target_local_no, target.title AS target_title
-         FROM work_item_relations relation
-         JOIN work_items source ON source.id = relation.source_id
-         JOIN work_items target ON target.id = relation.target_id
-         WHERE relation.relation_type = 'DISCOVERED_FROM'
-           AND (relation.source_id = ? OR relation.target_id = ?)
-         ORDER BY relation.created_at`,
-      )
-      .all(workItemId, workItemId) as Array<{
-      source_id: string;
-      source_local_no: number;
-      source_title: string;
-      target_id: string;
-      target_local_no: number;
-      target_title: string;
-    }>;
-    const relationText = relationRows.map((relation) => {
-      if (relation.source_id === workItemId) {
-        return `工作中发现于 ${code}-T-${String(relation.target_local_no).padStart(4, "0")} ${relation.target_title}`;
-      }
-      return `工作中发现 ${code}-T-${String(relation.source_local_no).padStart(4, "0")} ${relation.source_title}`;
-    });
-    this.upsertSearchDocument(
-      "WORK_ITEM",
-      row.id,
-      `${code}-T-${String(row.local_no).padStart(4, "0")}`,
-      row.title,
-      [row.description, ...relationText].filter(Boolean).join("\n"),
-    );
+    this.#workItemMaintenance.refreshWorkItemSearchDocument(workItemId);
   }
 
   addProgress(
@@ -2952,149 +1588,7 @@ export class ProjectRepository {
     opId: string;
     progressId: string;
   } {
-    const normalizedInput = {
-      ...input,
-      ...(input.evidence === undefined ? {} : { evidence: this.normalizeEvidence(input.evidence) }),
-    };
-    return this.mutate({
-      actor,
-      opId,
-      operation: "work.progress",
-      request: normalizedInput,
-      action: () => {
-        const row = this.rowForTaskKey(normalizedInput.taskKey);
-        if (normalizedInput.blocker?.trim()) resolveStoredWorkItemOperation("block", row);
-        const bucket =
-          normalizedInput.percent === undefined
-            ? null
-            : Math.round(Math.max(0, Math.min(100, normalizedInput.percent)) / 10) * 10;
-        const hash = createHash("sha256").update(normalizedInput.summary.trim()).digest("hex");
-        const last = this.#sqlite
-          .prepare(
-            `SELECT id, progress_bucket, summary_hash FROM progress_updates
-             WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`,
-          )
-          .get(row.id) as
-          | { id: string; progress_bucket: number | null; summary_hash: string }
-          | undefined;
-        if (
-          last &&
-          last.progress_bucket === bucket &&
-          last.summary_hash === hash &&
-          !normalizedInput.evidence?.length &&
-          !normalizedInput.blocker
-        ) {
-          return {
-            ok: 1,
-            noop: true,
-            seq: this.meta.sequence,
-            key: normalizedInput.taskKey,
-            v: row.version,
-            opId,
-            progressId: last.id,
-          };
-        }
-        const now = nowIso();
-        const progressId = createUlid();
-        this.#sqlite
-          .prepare(
-            `INSERT INTO progress_updates(
-               id, work_item_id, percent, progress_bucket, summary, summary_hash,
-               completed_json, next_json, blocker_text, actor, session_id, created_at,
-               evidence_json, op_id
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            progressId,
-            row.id,
-            normalizedInput.percent ?? null,
-            bucket,
-            normalizedInput.summary.trim(),
-            hash,
-            JSON.stringify(normalizedInput.completed ?? []),
-            JSON.stringify(normalizedInput.next ?? []),
-            normalizedInput.blocker ?? null,
-            actor.id,
-            actor.sessionId,
-            now,
-            JSON.stringify(normalizedInput.evidence ?? []),
-            opId,
-          );
-        const updates = ["reported_progress = ?", "version = version + 1", "updated_at = ?"];
-        const values: unknown[] = [bucket, now];
-        if (normalizedInput.blocker?.trim()) {
-          updates.push(
-            "status = 'BLOCKED'",
-            "phase = 'BLOCKED'",
-            "phase_inferred = 0",
-            "waiting_on = NULL",
-            "waiting_for = NULL",
-            "blocked_reason = ?",
-          );
-          values.push(normalizedInput.blocker.trim());
-          const blockerId = createUlid();
-          this.#sqlite
-            .prepare(
-              `INSERT INTO blockers(
-                 id, local_no, work_item_id, severity, title, detail, status, actor,
-                 version, created_at, updated_at
-               ) VALUES (?, ?, ?, 'HIGH', ?, ?, 'ACTIVE', ?, 0, ?, ?)`,
-            )
-            .run(
-              blockerId,
-              this.nextNumber("blocker"),
-              row.id,
-              normalizedInput.blocker.trim(),
-              normalizedInput.blocker.trim(),
-              actor.id,
-              now,
-              now,
-            );
-        }
-        values.push(row.id);
-        this.#sqlite
-          .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
-          .run(...values);
-        if (normalizedInput.evidence && normalizedInput.evidence.length > 0) {
-          this.advanceWorkItemEvidenceAt(row.id, now);
-        }
-        this.recomputeWorkItem(row.id);
-        const updated = this.#sqlite
-          .prepare("SELECT version FROM work_items WHERE id = ?")
-          .get(row.id) as {
-          version: number;
-        };
-        const seq = this.appendEvent(
-          normalizedInput.blocker ? "work.blocked" : "work.progressed",
-          actor,
-          "WORK_ITEM",
-          row.id,
-          {
-            key: normalizedInput.taskKey,
-            title: row.title,
-            from: row.computed_progress,
-            to: bucket,
-            summary: normalizedInput.summary.trim(),
-            evidence: normalizedInput.evidence ?? [],
-          },
-        );
-        this.upsertSearchDocument(
-          "PROGRESS",
-          progressId,
-          normalizedInput.taskKey,
-          normalizedInput.summary.trim(),
-          normalizedInput.summary.trim(),
-        );
-        return {
-          ok: 1,
-          seq,
-          key: normalizedInput.taskKey,
-          v: updated.version,
-          opId,
-          progressId,
-        };
-      },
-    });
+    return this.#progressCommands.addProgress(actor, opId, input);
   }
 
   createRecord(
