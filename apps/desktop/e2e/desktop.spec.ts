@@ -1435,9 +1435,47 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
   await expect(page.getByText("还没有项目记录")).toBeVisible();
   await page.getByRole("tab", { name: "列表" }).click();
 
+  const taskSort = page.getByRole("button", { name: "按任务排序" });
   const prioritySort = page.getByRole("button", { name: "按优先级排序" });
   const statusSort = page.getByRole("button", { name: "按状态排序" });
   const updatedSort = page.getByRole("button", { name: "按更新时间排序" });
+  await expect(page.getByRole("columnheader", { name: /任务/u })).toHaveAttribute(
+    "aria-sort",
+    "descending",
+  );
+  const taskNumbers = async () =>
+    (await page.locator(".atm-table tbody tr td:first-child .atm-key").allTextContents()).map(
+      (key) => Number(/-T-(\d+)$/u.exec(key.trim())?.[1] ?? -1),
+    );
+  const descendingTaskNumbers = await taskNumbers();
+  expect(descendingTaskNumbers).toEqual(
+    [...descendingTaskNumbers].sort((left, right) => right - left),
+  );
+  await taskSort.click();
+  await expect(page.getByRole("columnheader", { name: /任务/u })).toHaveAttribute(
+    "aria-sort",
+    "ascending",
+  );
+  const ascendingTaskNumbers = await taskNumbers();
+  expect(ascendingTaskNumbers).toEqual(
+    [...ascendingTaskNumbers].sort((left, right) => left - right),
+  );
+  await taskSort.click();
+  const spacing = await page.evaluate(() => {
+    const projection = document.querySelector(".atm-projection-panel")?.getBoundingClientRect();
+    const reconcile = document.querySelector(".atm-project-reconcile")?.getBoundingClientRect();
+    const loadStatus = document.querySelector(".atm-cursor-load-status")?.getBoundingClientRect();
+    const taskPanel = document.querySelector("#project-task-panel")?.getBoundingClientRect();
+    return {
+      reconcileGap: projection && reconcile ? reconcile.top - projection.bottom : -1,
+      taskPanelGap: loadStatus && taskPanel ? taskPanel.top - loadStatus.bottom : -1,
+    };
+  });
+  expect(spacing.reconcileGap).toBeGreaterThanOrEqual(16);
+  expect(spacing.taskPanelGap).toBeGreaterThanOrEqual(10);
+  await page.locator(".atm-content").screenshot({
+    path: resolve("output", "playwright", "project-task-spacing-number-sort.png"),
+  });
   await prioritySort.click();
   await expect(page.getByRole("columnheader", { name: /优先级/u })).toHaveAttribute(
     "aria-sort",

@@ -162,6 +162,7 @@ describe("Project task controls and five views", () => {
       renderToStaticMarkup(createElement(ProjectTaskViews, { ...common, view }));
 
     expect(renderView("list")).toContain('class="atm-table"');
+    expect(renderView("list")).toContain('aria-label="按任务排序"');
     expect(renderView("list")).toContain('aria-label="按优先级排序"');
     expect(renderView("board")).toContain('class="atm-board"');
     expect(renderView("tree")).toContain('class="atm-tree"');

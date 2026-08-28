@@ -13,6 +13,7 @@ import { moveRovingFocus } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
 import { progressSourceLabels, statusLabels } from "../presentation.js";
 import {
+  DEFAULT_PROJECT_TASK_SORT,
   sortProjectTasks,
   toggleProjectTaskSort,
   type ProjectTaskSort,
@@ -69,7 +70,7 @@ export function filterProjectTasks(tasks: any[], filters: ProjectTaskFilters): a
 export function useProjectTaskViewState(tasks: any[]) {
   const [view, setView] = useState<ProjectTaskView>("list");
   const [filters, setFilters] = useState<ProjectTaskFilters>(EMPTY_PROJECT_TASK_FILTERS);
-  const [taskSort, setTaskSort] = useState<ProjectTaskSort | null>(null);
+  const [taskSort, setTaskSort] = useState<ProjectTaskSort>(DEFAULT_PROJECT_TASK_SORT);
   const filteredTasks = filterProjectTasks(tasks, filters);
   const sortedTasks = sortProjectTasks(filteredTasks, taskSort);
   return {

@@ -240,7 +240,7 @@ export function ProjectTaskViews({
         </colgroup>
         <thead>
           <tr>
-            <th>任务</th>
+            <ProjectTaskSortHeader field="task" label="任务" sort={taskSort} onSort={onTaskSort} />
             <ProjectTaskSortHeader
               field="status"
               label="状态"

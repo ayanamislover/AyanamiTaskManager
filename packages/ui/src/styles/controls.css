@@ -180,6 +180,9 @@
   margin: -3px 0 14px;
   flex-wrap: wrap;
 }
+.atm-cursor-load-status {
+  margin-bottom: 12px;
+}
 .atm-filter-check {
   display: inline-flex;
   align-items: center;
