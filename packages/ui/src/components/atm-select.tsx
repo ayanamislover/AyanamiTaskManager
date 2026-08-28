@@ -27,6 +27,7 @@ export function AtmSelect({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const openingIndexRef = useRef(0);
+  const openPhaseRef = useRef(false);
   const listboxId = `atm-select-${useId().replaceAll(":", "")}`;
   const selectedIndex = Math.max(
     0,
@@ -46,9 +47,11 @@ export function AtmSelect({
       const spaceAbove = bounds.top - (boundary?.top ?? 0) - 12;
       setPlacement(spaceBelow < desired && spaceAbove > spaceBelow ? "top" : "bottom");
     }
+    openPhaseRef.current = true;
     setOpen(true);
   };
   const closeAndFocusTrigger = () => {
+    openPhaseRef.current = false;
     setOpen(false);
     window.requestAnimationFrame(() => triggerRef.current?.focus());
   };
@@ -69,7 +72,10 @@ export function AtmSelect({
       optionRefs.current[openingIndexRef.current]?.focus(),
     );
     const handleOutsidePress = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) {
+        openPhaseRef.current = false;
+        setOpen(false);
+      }
     };
     document.addEventListener("pointerdown", handleOutsidePress, true);
     return () => {
@@ -97,7 +103,7 @@ export function AtmSelect({
         aria-expanded={open}
         aria-haspopup="listbox"
         onClick={(event) =>
-          open
+          openPhaseRef.current
             ? closeAndFocusTrigger()
             : openAt(selectedIndex, event.detail === 0 ? "keyboard" : "pointer")
         }
@@ -108,7 +114,7 @@ export function AtmSelect({
           } else if (event.key === "ArrowUp") {
             event.preventDefault();
             openAt(selectedIndex < 0 ? options.length - 1 : selectedIndex, "keyboard");
-          } else if (event.key === "Escape" && open) {
+          } else if (event.key === "Escape" && openPhaseRef.current) {
             event.preventDefault();
             event.stopPropagation();
             closeAndFocusTrigger();
@@ -146,11 +152,12 @@ export function AtmSelect({
                   } else if (event.key === "End") {
                     event.preventDefault();
                     focusOption(options.length - 1);
-                  } else if (event.key === "Escape") {
+                  } else if (event.key === "Escape" && openPhaseRef.current) {
                     event.preventDefault();
                     event.stopPropagation();
                     closeAndFocusTrigger();
                   } else if (event.key === "Tab") {
+                    openPhaseRef.current = false;
                     setOpen(false);
                   }
                 }}

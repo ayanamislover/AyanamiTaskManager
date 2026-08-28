@@ -16,12 +16,14 @@ const keyboardContracts = {
   home: /event\.key === "Home"[\s\S]*?focusOption\(0\)/u,
   end: /event\.key === "End"[\s\S]*?focusOption\(options\.length - 1\)/u,
   triggerEscape:
-    /event\.key === "Escape" && open[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?closeAndFocusTrigger\(\)/u,
+    /aria-haspopup="listbox"[\s\S]*?onKeyDown=[\s\S]*?event\.key === "Escape" && openPhaseRef\.current[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?closeAndFocusTrigger\(\)/u,
   optionEscape:
-    /else if \(event\.key === "Escape"\) \{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*closeAndFocusTrigger\(\);\s*\} else if \(event\.key === "Tab"\)/u,
-  tab: /event\.key === "Tab"[\s\S]*?setOpen\(false\)/u,
+    /else if \(event\.key === "Escape" && openPhaseRef\.current\) \{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*closeAndFocusTrigger\(\);\s*\} else if \(event\.key === "Tab"\)/u,
+  tab: /event\.key === "Tab"[\s\S]*?openPhaseRef\.current = false[\s\S]*?setOpen\(false\)/u,
   wrap: /\(index \+ options\.length\) % options\.length/u,
   focusReturn: /requestAnimationFrame\(\(\) => triggerRef\.current\?\.focus\(\)\)/u,
+  synchronousOpenPhase:
+    /openPhaseRef\.current = true;\s*setOpen\(true\)[\s\S]*?openPhaseRef\.current = false;\s*setOpen\(false\)/u,
 } as const;
 
 function missingKeyboardContracts(source: string): string[] {
@@ -78,6 +80,14 @@ describe("AtmSelect", () => {
         missingKeyboardContracts(source.replace(pattern, "/* removed by positive fixture */")),
       ).toContain(name);
     }
+  });
+
+  it("选项进入退出动效后不再吞掉属于外层 Dialog 的 Escape", () => {
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toMatch(
+      /else if \(event\.key === "Escape" && openPhaseRef\.current\)[\s\S]*?event\.stopPropagation\(\)/u,
+    );
+    expect(source).not.toMatch(/else if \(event\.key === "Escape"\) \{\s*event\.preventDefault/u);
   });
 
   it("保持弹层定位、首次焦点与外部点击关闭算法", () => {
