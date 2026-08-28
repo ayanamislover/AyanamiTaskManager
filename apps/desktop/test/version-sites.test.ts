@@ -14,7 +14,9 @@ const currentVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8
 describe("版本号站点清单", () => {
   // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
   it("清单里每个文件都确实含有当前版本号", () => {
-    expect(VERSIONED_FILES.length).toBeGreaterThanOrEqual(7);
+    // Six current sites remain after daemon entrypoints switched to the
+    // single runtime-discovery version source.
+    expect(VERSIONED_FILES.length).toBeGreaterThanOrEqual(6);
     expect(currentVersion).toMatch(/^\d+\.\d+\.\d+$/u);
     const missing = VERSIONED_FILES.filter(
       (file) => !readFileSync(join(root, file), "utf8").includes(currentVersion),
@@ -43,8 +45,9 @@ describe("版本号站点清单", () => {
     );
     const outside = hardcoded.filter((file) => !VERSIONED_FILES.includes(file as never));
     expect(outside).toEqual([]);
-    // 阳性对照：扫描确实找得到已知的那几处，否则上面的断言只是在对空集成立。
-    expect(hardcoded.length).toBeGreaterThanOrEqual(4);
+    // 阳性对照：扫描确实找得到当前三个源码版本站点（daemon runtime discovery、
+    // MCP server、SQLite manager），否则上面的断言只是在对空集成立。
+    expect(hardcoded.length).toBeGreaterThanOrEqual(3);
   });
 });
 
