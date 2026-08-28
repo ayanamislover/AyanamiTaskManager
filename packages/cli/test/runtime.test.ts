@@ -20,7 +20,7 @@ function writeRuntime(dataDir: string, endpoint: string, token: string): void {
       token,
       pid: process.pid,
       instanceId: "0123456789abcdef0123456789abcdef",
-      version: "1.0.18",
+      version: "9.9.9",
       startedAt: "2026-08-28T12:00:00.000Z",
     }),
     "utf8",
@@ -47,7 +47,7 @@ describe("CLI daemon discovery", () => {
       token: "healthy-token",
       pid: process.pid,
       instanceId: "0123456789abcdef0123456789abcdef",
-      version: "1.0.18",
+      version: "9.9.9",
       startedAt: "2026-08-28T12:00:00.000Z",
     });
     await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
