@@ -18,7 +18,7 @@ const releaseGateContracts = [
   {
     name: "full release orchestration",
     source: "workflow",
-    needle: "run: pnpm release -- --full",
+    needle: "run: pnpm release --full",
   },
   { name: "lint", source: "releaseRunner", needle: '{ name: "lint", args: ["lint"] },' },
   {
@@ -116,6 +116,7 @@ describe("GitHub Actions runtime policy", () => {
 
     expect(sources.workflow).toContain("runs-on: windows-latest");
     expect(sources.workflow).toContain("run: pnpm install --frozen-lockfile");
+    expect(sources.workflow).not.toContain("pnpm release -- --full");
     expect(sources.workflow).toContain("output/release-verification.json");
     expect(sources.workflow).toContain("release/");
     expect(missingReleaseGates(sources)).toEqual([]);
