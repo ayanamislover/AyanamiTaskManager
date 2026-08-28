@@ -839,6 +839,57 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
   await expect(reducedBackdrop).toHaveCount(0);
 });
 
+test("forced-colors 与 reduced-transparency 保留焦点并关闭透明材质", async ({ context, page }) => {
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto("/#project:E2E");
+  expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+
+  await page.getByRole("button", { name: "新建任务", exact: true }).click();
+  const modal = page.getByRole("dialog", { name: "新建任务" });
+  const priority = page.getByRole("combobox", { name: "优先级" });
+  await priority.click();
+  await page.keyboard.press("Escape");
+  await expect(modal).toBeVisible();
+  await expect(page.getByRole("listbox", { name: "优先级" })).toHaveCount(0);
+  await expect(priority).toBeFocused();
+  const focusStyle = await priority.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      color: style.outlineColor,
+      style: style.outlineStyle,
+      width: style.outlineWidth,
+    };
+  });
+  expect(focusStyle.style).toBe("solid");
+  expect(focusStyle.width).toBe("2px");
+  expect(focusStyle.color).not.toBe("rgba(0, 0, 0, 0)");
+  expect(
+    await page
+      .locator(".atm-modal-backdrop")
+      .evaluate((element) => getComputedStyle(element).backdropFilter),
+  ).toBe("none");
+  await page.screenshot({
+    path: resolve("output", "playwright", "e2e-forced-colors-focus.png"),
+    fullPage: true,
+  });
+
+  await page.keyboard.press("Escape");
+  await page.emulateMedia({ forcedColors: "none" });
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Emulation.setEmulatedMedia", {
+    features: [{ name: "prefers-reduced-transparency", value: "reduce" }],
+  });
+  expect(
+    await page.evaluate(() => matchMedia("(prefers-reduced-transparency: reduce)").matches),
+  ).toBe(true);
+  for (const selector of [".atm-sidebar", ".atm-topbar"]) {
+    expect(
+      await page.locator(selector).evaluate((element) => getComputedStyle(element).backdropFilter),
+    ).toBe("none");
+  }
+});
+
 test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   const suffix = Date.now().toString(36);

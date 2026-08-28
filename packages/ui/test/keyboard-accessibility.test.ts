@@ -111,6 +111,19 @@ describe("keyboard accessibility primitives", () => {
     ).toBe(false);
   });
 
+  it("forced-colors 用等特指度规则恢复自绘 Select 的系统焦点环", () => {
+    const styles = uiCssText();
+    const forcedColorsSelect =
+      /@media \(forced-colors: active\)[\s\S]*?\.atm-field-shell > \.atm-select-trigger:is\(:focus-visible\):not\(:disabled\)\s*\{[\s\S]*?outline:\s*2px solid Highlight;/u;
+    expect(styles).toMatch(forcedColorsSelect);
+    expect(
+      styles.replace(
+        ".atm-field-shell > .atm-select-trigger:is(:focus-visible):not(:disabled) {",
+        ".atm-field-shell > .atm-select-trigger:focus-visible {",
+      ),
+    ).not.toMatch(forcedColorsSelect);
+  });
+
   it("Project 五 tabs 具备完整关联与单一 roving tab stop", () => {
     const markup = renderControls();
     expect(markup).toContain('role="tablist" aria-label="项目任务视图"');
