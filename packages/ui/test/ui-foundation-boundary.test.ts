@@ -155,4 +155,17 @@ describe("UI foundation boundaries", () => {
       expect(app).not.toContain(duplicate);
     }
   });
+
+  it("app 使用提取后的 Sidebar，而不是保留重复 DOM 与 disclosure 状态", () => {
+    const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
+    expect(app).toContain('from "./shell/sidebar.js"');
+    for (const duplicate of [
+      "function Sidebar(",
+      'data-testid="window-drag-brand"',
+      'window.localStorage.getItem("atm.workspace.expanded")',
+      'className="atm-sidebar-footer"',
+    ]) {
+      expect(app).not.toContain(duplicate);
+    }
+  });
 });
