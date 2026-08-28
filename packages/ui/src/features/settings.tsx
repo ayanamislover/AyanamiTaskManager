@@ -392,6 +392,10 @@ export function SettingsPage({
                         <pre>{integrationPreview.proposed}</pre>
                       </details>
                     ) : null}
+                    <p className="atm-muted">
+                      Streamable HTTP 含本次运行的临时 endpoint/token；长期接入请使用 stdio
+                      或通用配置。
+                    </p>
                     <div className="atm-actions">
                       <button
                         className="atm-button"
@@ -399,7 +403,7 @@ export function SettingsPage({
                           void copy(configs.data!.streamableHttp, "Streamable HTTP 配置")
                         }
                       >
-                        复制 Streamable HTTP
+                        复制本次运行 HTTP
                       </button>
                       <button
                         className="atm-button"

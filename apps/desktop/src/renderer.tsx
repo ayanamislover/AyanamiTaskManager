@@ -44,7 +44,17 @@ type McpBridgeObservation = {
 };
 
 type DesktopBridge = {
-  runtime: { endpoint: string; token: string };
+  runtimeRequest(input: {
+    path: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }): Promise<{
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    body: string;
+  }>;
   setAutoLaunch(enabled: boolean): Promise<boolean>;
   getAutoLaunch(): Promise<boolean>;
   getUpdateStatus(): Promise<UpdateStatus | null>;
@@ -153,11 +163,29 @@ const desktop = window.ayanamiDesktop;
 if (desktop) document.documentElement.dataset.atmDesktop = "true";
 const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
 if (favicon) favicon.href = brandLogoUrl;
-const runtime = desktop?.runtime ?? {
-  endpoint: browserEndpoint ?? "http://127.0.0.1:43127",
-  token: browserToken ?? "browser-preview-token",
-};
-const client = new AyanamiClient(runtime);
+const client = desktop
+  ? new AyanamiClient({
+      endpoint: "http://atm.renderer.invalid",
+      token: "ipc-capability",
+      fetchImpl: async (input, init) => {
+        const url = new URL(String(input));
+        const response = await desktop.runtimeRequest({
+          path: `${url.pathname}${url.search}`,
+          ...(init?.method ? { method: init.method } : {}),
+          headers: Object.fromEntries(new Headers(init?.headers).entries()),
+          ...(typeof init?.body === "string" ? { body: init.body } : {}),
+        });
+        return new Response(response.body, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      },
+    })
+  : new AyanamiClient({
+      endpoint: browserEndpoint ?? "http://127.0.0.1:43127",
+      token: browserToken ?? "browser-preview-token",
+    });
 const root = document.getElementById("root");
 if (!root) throw new Error("ROOT_ELEMENT_MISSING");
 

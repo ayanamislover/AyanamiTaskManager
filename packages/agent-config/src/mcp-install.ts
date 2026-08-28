@@ -291,7 +291,7 @@ export function renderMcpConfigs(
   return {
     streamableHttp: `${JSON.stringify({ mcpServers: httpServers }, null, 2)}\n`,
     stdio: `${JSON.stringify({ mcpServers: stdioServers }, null, 2)}\n`,
-    generic: `${JSON.stringify({ mcpServers: httpServers }, null, 2)}\n`,
+    generic: `${JSON.stringify({ mcpServers: stdioServers }, null, 2)}\n`,
     agentRule: AGENT_RULE_SNIPPET,
   };
 }

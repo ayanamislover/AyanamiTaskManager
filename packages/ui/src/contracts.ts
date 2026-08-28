@@ -72,7 +72,6 @@ export type McpBridgeObservation = {
 };
 
 export type DesktopBridge = {
-  runtime?: { endpoint: string; token: string };
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
   getAutoLaunch?: () => Promise<boolean>;
   getUpdateStatus?: () => Promise<UpdateStatus | null>;

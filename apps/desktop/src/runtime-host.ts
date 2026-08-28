@@ -1,24 +1,25 @@
-import { randomBytes } from "node:crypto";
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { app, ipcMain } from "electron";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
-import { buildAyanamiServer } from "@ayanami-task/daemon";
+import {
+  buildAyanamiServer,
+  acquireDaemonRuntime,
+  createDaemonToken,
+  DAEMON_VERSION,
+  readDaemonRuntime,
+  resolveDaemonDataDirectory,
+  type DaemonRuntimeDescriptor,
+} from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
 import { installMcpRuntimeLink, installMcpStdioBridge, mcpStdioHttpPath } from "./mcp-launch.js";
 import { LOGIN_ITEM_ARGS, loginItemExecutable } from "./startup.js";
+import { proxyRuntimeRequest, type RuntimeRequestInput } from "./runtime-request.js";
 
-export type Runtime = { endpoint: string; token: string; pid: number; startedAt: string };
+export type Runtime = DaemonRuntimeDescriptor;
 
 export type RuntimeHost = {
   dataDir: string;
@@ -29,14 +30,11 @@ export type RuntimeHost = {
 };
 
 export function dataDirBeforeReady(): string {
-  if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
-  return join(process.env.LOCALAPPDATA ?? process.cwd(), "AyanamiTaskManager");
+  return resolveDaemonDataDirectory();
 }
 
 export function readRuntime(): Runtime {
-  const path = join(dataDirBeforeReady(), "runtime", "daemon.json");
-  if (!existsSync(path)) throw new Error("AyanamiTaskManager 服务未运行");
-  return JSON.parse(readFileSync(path, "utf8")) as Runtime;
+  return readDaemonRuntime(join(dataDirBeforeReady(), "runtime"));
 }
 
 export function smokeTrace(stage: string, detail: unknown = null): void {
@@ -95,35 +93,41 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   installAgentDocumentation(bundledDocumentationRoot(), dataDir);
   installMcpStdioBridge(bundledMcpStdioPath(), dataDir);
   installMcpRuntimeLink(process.execPath, dataDir);
-  const service = await AyanamiTaskService.open({
-    dataDir,
-    migrationsRoot: join(app.getAppPath(), "migrations"),
-  });
   const runtimeDir = join(dataDir, "runtime");
-  const tokenPath = join(runtimeDir, "local.token");
   mkdirSync(runtimeDir, { recursive: true });
-  const token = existsSync(tokenPath)
-    ? readFileSync(tokenPath, "utf8").trim()
-    : randomBytes(32).toString("base64url");
-  if (!existsSync(tokenPath)) {
-    writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  const lease = acquireDaemonRuntime(runtimeDir);
+  const token = createDaemonToken();
+  let service: AyanamiTaskService | null = null;
+  let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+  try {
+    service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(app.getAppPath(), "migrations"),
+    });
+    server = await buildAyanamiServer({ service, token });
+    await server.listen({ host: "127.0.0.1", port: 0 });
+  } catch (error) {
+    if (server) await server.close().catch(() => undefined);
+    service?.close();
+    lease.release();
+    throw error;
   }
-  const server = await buildAyanamiServer({ service, token });
-  await server.listen({ host: "127.0.0.1", port: 0 });
   const address = server.server.address();
   if (!address || typeof address === "string") {
     await server.close();
     service.close();
+    lease.release();
     throw new Error("DAEMON_TCP_ADDRESS_MISSING");
   }
   const runtime: Runtime = {
     endpoint: `http://127.0.0.1:${address.port}`,
     token,
     pid: process.pid,
+    instanceId: lease.instanceId,
+    version: DAEMON_VERSION,
     startedAt: new Date().toISOString(),
   };
-  const runtimePath = join(runtimeDir, "daemon.json");
-  writeFileSync(runtimePath, JSON.stringify(runtime), { encoding: "utf8", mode: 0o600 });
+  lease.publish(runtime);
   let closed = false;
   return {
     dataDir,
@@ -135,7 +139,8 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
       closed = true;
       await server.close();
       service.close();
-      rmSync(runtimePath, { force: true });
+      lease.clear();
+      lease.release();
     },
   };
 }
@@ -174,9 +179,9 @@ export function installRuntimeIpc(host: RuntimeHost): void {
       "utf8",
     );
   }
-  ipcMain.on("atm:get-runtime", (event) => {
-    event.returnValue = host.runtime;
-  });
+  ipcMain.handle("atm:runtime-request", (_event, input: RuntimeRequestInput) =>
+    proxyRuntimeRequest(host.runtime, input),
+  );
   ipcMain.handle("atm:get-auto-launch", () => autoLaunchEnabled(host.dataDir));
   ipcMain.handle("atm:set-auto-launch", (_event, enabled: boolean) =>
     setAutoLaunch(host.dataDir, enabled),

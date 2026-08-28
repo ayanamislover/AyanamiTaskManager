@@ -2,9 +2,13 @@ import { contextBridge, ipcRenderer } from "electron";
 
 type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
 
-const runtime = ipcRenderer.sendSync("atm:get-runtime") as { endpoint: string; token: string };
 contextBridge.exposeInMainWorld("ayanamiDesktop", {
-  runtime,
+  runtimeRequest: (input: {
+    path: string;
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string;
+  }) => ipcRenderer.invoke("atm:runtime-request", input),
   setAutoLaunch: (enabled: boolean) => ipcRenderer.invoke("atm:set-auto-launch", enabled),
   getAutoLaunch: () => ipcRenderer.invoke("atm:get-auto-launch"),
   getUpdateStatus: () => ipcRenderer.invoke("atm:get-update-status"),
