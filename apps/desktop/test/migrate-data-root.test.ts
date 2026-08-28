@@ -36,9 +36,12 @@ describe("正式数据根迁移", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-data-migration-"));
     roots.push(root);
     const source = join(root, "visual-data");
+    const sourceAlias = join(root, "visual-data-alias");
     const destination = join(root, "AyanamiTaskManager");
     const migrationsRoot = join(process.cwd(), "migrations");
-    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    mkdirSync(source, { recursive: true });
+    symlinkSync(source, sourceAlias, process.platform === "win32" ? "junction" : "dir");
+    const sourceService = await AyanamiTaskService.open({ dataDir: sourceAlias, migrationsRoot });
     await sourceService.createProject({ name: "历史项目", code: "HIS", sourcePath: null });
     sourceService.close();
     const destinationService = await AyanamiTaskService.open({

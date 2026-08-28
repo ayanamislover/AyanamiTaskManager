@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -239,7 +239,15 @@ async function assertSourceStopped(source: string): Promise<void> {
 }
 
 function rewritePath(value: string, source: string, destination: string): string {
-  const candidate = resolve(value);
+  let existing = resolve(value);
+  const missingSegments: string[] = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missingSegments.unshift(basename(existing));
+    existing = parent;
+  }
+  const candidate = resolve(realpathSync(existing), ...missingSegments);
   const relativePath = relative(source, candidate);
   if (relativePath.startsWith("..") || isAbsolute(relativePath)) return value;
   return join(destination, relativePath);
