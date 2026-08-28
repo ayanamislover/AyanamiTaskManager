@@ -38,8 +38,8 @@
   white-space: nowrap;
   transition:
     transform var(--atm-duration-press) var(--atm-ease-out),
-    border-color var(--atm-duration-hover) var(--atm-ease-out),
-    background-color var(--atm-duration-hover) var(--atm-ease-out);
+    border-color var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
 .atm-button:hover {
   border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
@@ -229,4 +229,3 @@ button.atm-row:hover {
     transform: translateX(100%);
   }
 }
-

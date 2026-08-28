@@ -123,8 +123,8 @@ html[data-atm-desktop="true"] .atm-drawer-head {
   place-items: center;
   pointer-events: auto;
   transition:
-    color var(--atm-duration-hover) var(--atm-ease-out),
-    background-color var(--atm-duration-hover) var(--atm-ease-out),
+    color var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover),
     transform var(--atm-duration-press) var(--atm-ease-out);
 }
 

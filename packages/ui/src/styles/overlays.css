@@ -119,7 +119,7 @@
   background: color-mix(in srgb, var(--atm-overlay) 68%, transparent);
   opacity: 1;
   overscroll-behavior: contain;
-  transition: opacity 180ms var(--atm-ease-out);
+  transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
 }
 .atm-shell:has(.atm-drawer-backdrop) > .atm-main,
 .atm-shell:has(.atm-drawer-backdrop) > .atm-sidebar {
@@ -174,8 +174,8 @@
   color: var(--atm-text-muted);
   background: color-mix(in srgb, var(--atm-surface-muted) 58%, transparent);
   transition:
-    color var(--atm-duration-hover) var(--atm-ease-out),
-    background-color var(--atm-duration-hover) var(--atm-ease-out);
+    color var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
 .atm-drawer-collapse:hover {
   color: var(--atm-primary-strong);
@@ -289,4 +289,3 @@
     transform: translateY(16px);
   }
 }
-
