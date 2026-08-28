@@ -1,9 +1,9 @@
 /**
  * 一条命令走完：升版本号 → 十阶段流水线 → 投递更新 → 就地应用 → 对运行实例实测。
  *
- * 常规改动不再卸载重装：distribution-smoke 验的是安装器本身，它的依赖没变时会被
- * 复用，于是整套清场可以跳过，Squirrel 直接把新版本铺到 app-<version>。只有碰了
- * 打包配置、发布脚本、原生依赖或迁移，才会退回「清场 + 全量验收」。
+ * 默认走清场和全量验收。只有显式 --resume 且上一轮完整 release fingerprint
+ * （含 stageHashes 完整键集和值）逐字段相同时，才允许沿用已通过的旧证据并跳过
+ * distribution-smoke 清场；局部阶段哈希绝不构成稳定签发授权。
  *
  * 必须在能真实写入 %LOCALAPPDATA% 的终端里跑。Agent 的 Bash 工具对该路径的
  * 创建会落进只有它自己看得见的覆盖层（删除却是穿透的），安装看起来成功、实际
@@ -11,6 +11,7 @@
  *
  *   pnpm exec tsx scripts/release-and-install.ts --version 1.0.6
  *   pnpm exec tsx scripts/release-and-install.ts            # 不升版，重打当前版本
+ *   ... --resume                                             # 仅完整指纹命中时复用
  *   ... --skip-install                                      # 只跑到产出 release/
  */
 import { spawn, spawnSync } from "node:child_process";
@@ -18,6 +19,12 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import {
+  assertReleaseArtifact,
+  assertReleaseResumeEvidence,
+  releaseResumeEvidencePaths,
+  type ReleaseResumeEvidenceManifest,
+} from "./release-artifact-evidence.js";
 import {
   assertSafeInstallRoot,
   clearStaleDeadMarker,
@@ -27,13 +34,16 @@ import { pruneUpdateFeed, updateFeedDir } from "./update-feed.js";
 import {
   commitReleasePreparation,
   computeReleaseFingerprint,
-  decideStageReuse,
+  decideReleaseResume,
+  releaseFingerprintsMatch,
+  selectReusableReleaseCommands,
   type ReleaseFingerprint,
 } from "./release-fingerprint.js";
+import { assertReleaseCandidateIdentity, type ReleaseCandidateIdentity } from "./release-report.js";
 import {
+  assertReleaseChecklistIsDynamic,
   bumpVersion,
   findVersionLeftovers,
-  resetReleaseChecklist,
   VERSIONED_FILES,
 } from "./version-sites.js";
 
@@ -101,12 +111,9 @@ if (target !== currentVersion) {
     bumpVersion(root, target, currentVersion);
     throw error;
   }
-  resetReleaseChecklist(root, currentVersion, target);
-  process.stdout.write(`  docs/release-checklist.md：勾选已重置、验收结果已清空待填\n`);
-  const releaseHead = commitReleasePreparation(root, target, [
-    ...VERSIONED_FILES,
-    "docs/release-checklist.md",
-  ]);
+  assertReleaseChecklistIsDynamic(root);
+  process.stdout.write(`  docs/release-checklist.md：动态证据清单契约通过\n`);
+  const releaseHead = commitReleasePreparation(root, target, [...VERSIONED_FILES]);
   process.stdout.write(`  发布准备已提交到 clean HEAD：${releaseHead}\n`);
 }
 
@@ -130,28 +137,51 @@ function appProcesses(): number[] {
     .map(Number);
 }
 
-// distribution-smoke 的前置条件要求「没有已安装版本、没有同名进程」，所以只有
-// 它真要跑时才需要清场。它的依赖没变（没碰打包配置、发布脚本、原生依赖、迁移）
-// 时会被复用，这一整套卸载重装就可以整个跳过——应用全程活着，靠 feed 自更新。
+// distribution-smoke 的前置条件要求「没有已安装版本、没有同名进程」。稳定签发
+// 只有显式 --resume 且完整 fingerprint 命中已通过报告时才能沿用这份证据；局部
+// stageHash 相同不构成跳过清场或稳定签发验证的授权。
 const previousReport = join(root, "output", "release-verification.json");
 const previousRun = existsSync(previousReport)
   ? (JSON.parse(readFileSync(previousReport, "utf8")) as {
+      passed?: boolean;
       fingerprint?: ReleaseFingerprint;
-      commands?: Array<{ name: string; exitCode: number }>;
+      commands?: Array<{ name: string; exitCode: number; log: string }>;
     })
   : null;
-const distributionSmoke = decideStageReuse(
-  "distribution-smoke",
+const releaseFingerprint = await computeReleaseFingerprint(root);
+const releaseResume = decideReleaseResume(
+  flag("resume"),
   previousRun?.fingerprint,
-  await computeReleaseFingerprint(root),
-  previousRun?.commands?.find((command) => command.name === "distribution-smoke")?.exitCode,
+  releaseFingerprint,
 );
-const needsCleanRoom = !distributionSmoke.reuse;
+const reusableReleaseCommands = selectReusableReleaseCommands(releaseResume, previousRun?.commands);
+let resumeEvidenceValid = false;
+if (releaseResume.reuse) {
+  try {
+    const resumeManifest = JSON.parse(
+      readFileSync(join(root, "output", "release-resume-evidence.json"), "utf8"),
+    ) as ReleaseResumeEvidenceManifest;
+    await assertReleaseResumeEvidence(
+      root,
+      resumeManifest,
+      releaseFingerprint,
+      releaseResumeEvidencePaths(resumeManifest.candidate, previousRun?.commands ?? []),
+    );
+    resumeEvidenceValid = true;
+  } catch {
+    // release.ts 会输出具体的有界拒绝原因；这里保守清场，避免先跳过再被迫全跑。
+  }
+}
+const canReuseDistributionSmoke =
+  resumeEvidenceValid &&
+  previousRun?.passed === true &&
+  reusableReleaseCommands.has("distribution-smoke");
+const needsCleanRoom = !canReuseDistributionSmoke;
 
 if (!needsCleanRoom) {
   step("跳过清场");
   process.stdout.write(
-    `  distribution-smoke 的输入没变（${distributionSmoke.reason}），本轮复用上次结果。\n` +
+    `  完整 fingerprint 命中（${releaseResume.reason}），复用已通过的 distribution-smoke 稳定签发证据。\n` +
       `  不卸载、不杀进程：应用保持运行，更新通过 feed 生效。\n`,
   );
 }
@@ -200,14 +230,51 @@ async function clearInstallation(): Promise<void> {
 if (needsCleanRoom) await clearInstallation();
 
 step("十阶段流水线");
-const releaseExit = run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "pnpm release"]);
+const releaseCommand = flag("resume")
+  ? "pnpm exec tsx scripts/release.ts --resume"
+  : "pnpm exec tsx scripts/release.ts";
+const releaseExit = run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", releaseCommand]);
 if (releaseExit !== 0) {
   process.stderr.write(`\npnpm release 退出码 ${releaseExit}，中止。\n`);
   process.exit(releaseExit);
 }
 
-const setup = join(root, "release", setupName);
-if (!existsSync(setup)) throw new Error(`SETUP_MISSING: ${setup}`);
+const releaseManifestPath = join(root, "release", "release.json");
+const releaseManifest = JSON.parse(readFileSync(releaseManifestPath, "utf8")) as {
+  version?: string;
+  candidate: ReleaseCandidateIdentity;
+};
+assertReleaseCandidateIdentity(releaseManifest.candidate);
+if (
+  releaseManifest.version !== target ||
+  releaseManifest.candidate.version !== target ||
+  !releaseFingerprintsMatch(releaseManifest.candidate.fingerprint, releaseFingerprint)
+) {
+  throw new Error("RELEASE_MANIFEST_CANDIDATE_MISMATCH");
+}
+const candidate = releaseManifest.candidate;
+const setup = join(root, "release", candidate.artifacts.setup.name);
+const portable = join(root, "release", candidate.artifacts.portable.name);
+const upgradePackage = join(root, "release", candidate.artifacts.upgradePackage.name);
+const releases = join(root, "release", candidate.artifacts.releases.name);
+if (candidate.artifacts.setup.name !== setupName) {
+  throw new Error(`SETUP_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.setup.name}`);
+}
+if (candidate.artifacts.portable.name !== `AyanamiTaskManager-${target}-win-x64-portable.zip`) {
+  throw new Error(`PORTABLE_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.portable.name}`);
+}
+if (candidate.artifacts.upgradePackage.name !== `AyanamiTaskManagerDesktop-${target}-full.nupkg`) {
+  throw new Error(`NUPKG_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.upgradePackage.name}`);
+}
+if (candidate.artifacts.releases.name !== "RELEASES") {
+  throw new Error(`RELEASES_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.releases.name}`);
+}
+await Promise.all([
+  assertReleaseArtifact(setup, candidate.artifacts.setup),
+  assertReleaseArtifact(portable, candidate.artifacts.portable),
+  assertReleaseArtifact(upgradePackage, candidate.artifacts.upgradePackage),
+  assertReleaseArtifact(releases, candidate.artifacts.releases),
+]);
 if (flag("skip-install")) {
   process.stdout.write(`\n产物就绪：${setup}\n（--skip-install，未安装）\n`);
   process.exit(0);
@@ -218,12 +285,12 @@ if (flag("skip-install")) {
 step("投递更新到本地 feed");
 const feed = updateFeedDir(join(localAppData, "AyanamiTaskManager"));
 mkdirSync(feed, { recursive: true });
-const squirrelOut = join(root, "out", "make", "squirrel.windows", "x64");
-for (const name of ["RELEASES", `AyanamiTaskManagerDesktop-${target}-full.nupkg`]) {
-  const source = join(squirrelOut, name);
-  if (!existsSync(source)) throw new Error(`FEED_SOURCE_MISSING: ${source}`);
-  copyFileSync(source, join(feed, name));
-  process.stdout.write(`  ${name}\n`);
+for (const artifact of [candidate.artifacts.releases, candidate.artifacts.upgradePackage]) {
+  const source = join(root, "release", artifact.name);
+  const destination = join(feed, artifact.name);
+  copyFileSync(source, destination);
+  await assertReleaseArtifact(destination, artifact);
+  process.stdout.write(`  ${artifact.name}\n`);
 }
 // 投递之后才清：RELEASES 这时已经换成新的，旧包到这一刻才真正没人要了。
 const staleFeedPackages = pruneUpdateFeed(feed);
@@ -288,15 +355,35 @@ for (let i = 0; i < 60; i += 1) {
   }
 }
 if (!status) throw new Error("DAEMON_UNREACHABLE");
+if (status.ok !== true) throw new Error(`DAEMON_STATUS_NOT_OK: ${String(status.ok)}`);
 if (status.version !== target)
   throw new Error(`VERSION_MISMATCH: 运行实例报 ${String(status.version)}，期望 ${target}`);
 
+const finalFingerprint = await computeReleaseFingerprint(root);
+if (
+  !releaseFingerprintsMatch(releaseFingerprint, finalFingerprint) ||
+  !releaseFingerprintsMatch(candidate.fingerprint, finalFingerprint)
+) {
+  throw new Error("RELEASE_SOURCE_CHANGED_DURING_INSTALLATION");
+}
+const verifiedAt = new Date().toISOString();
+const projectCount =
+  typeof status.projectCount === "number" && Number.isSafeInteger(status.projectCount)
+    ? status.projectCount
+    : null;
 const summary = {
+  schemaVersion: 3,
+  candidateSha256: candidate.candidateSha256,
   version: target,
-  commit: git(["rev-parse", "HEAD"]).trim(),
-  setup,
-  status,
-  completedAt: new Date().toISOString(),
+  gitHead: candidate.gitHead,
+  setupSha256: candidate.artifacts.setup.sha256,
+  portableSha256: candidate.artifacts.portable.sha256,
+  upgradePackageSha256: candidate.artifacts.upgradePackage.sha256,
+  releasesSha256: candidate.artifacts.releases.sha256,
+  installedVersion: String(status.version),
+  installedOk: true,
+  projectCount,
+  verifiedAt,
 };
 writeFileSync(
   join(root, "output", "release-and-install.json"),

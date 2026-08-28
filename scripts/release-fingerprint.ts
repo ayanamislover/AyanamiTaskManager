@@ -110,9 +110,29 @@ export type ReleaseResumeDecision = {
   reuse: boolean;
   reason:
     | "resume-not-requested"
+    | "full-run-requested"
     | "previous-report-missing-fingerprint"
     | "fingerprint-match"
-    | "fingerprint-mismatch";
+    | "fingerprint-mismatch"
+    | "candidate-evidence-mismatch";
+};
+
+export type ReleaseRunMode = "standard" | "resume" | "full";
+
+export function parseReleaseRunMode(args: readonly string[]): ReleaseRunMode {
+  const unknown = args.filter((argument) => argument !== "--resume" && argument !== "--full");
+  if (unknown.length > 0) throw new Error(`RELEASE_ARGUMENT_UNKNOWN: ${unknown.join(", ")}`);
+  if (args.includes("--resume") && args.includes("--full")) {
+    throw new Error("RELEASE_ARGUMENT_CONFLICT: --resume 与 --full 不能同时使用");
+  }
+  if (args.includes("--full")) return "full";
+  if (args.includes("--resume")) return "resume";
+  return "standard";
+}
+
+export type ReleaseCommandEvidence = {
+  name: string;
+  exitCode: number;
 };
 
 function sha256(value: string | Buffer): string {
@@ -311,10 +331,13 @@ export type StageDecision = {
 };
 
 /**
- * 单个阶段是否可以复用上次的绿。和全局 --resume 不同，这条是自动的：它正是
- * 「本地早就测过的东西不要再全量跑一遍」这句话的实现。
+ * 非签发工作流中，单个昂贵阶段是否可以复用上次的绿。
+ *
+ * 这不是 release / release-and-install 的授权判定。稳定签发只能通过
+ * decideReleaseResume 的完整 fingerprint 门；把本函数接进签发路径会让顶层
+ * fingerprint mismatch 被局部 stageHash 绕过。
  */
-export function decideStageReuse(
+export function decideNonReleaseStageReuse(
   stage: string,
   previousFingerprint: ReleaseFingerprint | null | undefined,
   current: ReleaseFingerprint,
@@ -333,6 +356,33 @@ export function releaseFingerprintsMatch(
   current: ReleaseFingerprint,
 ): boolean {
   if (!previous) return false;
+  const expectedStageKeys = Object.keys(STAGE_INPUTS).sort();
+  const previousStageHashes = previous.stageHashes;
+  const currentStageHashes = current.stageHashes;
+  if (
+    !previousStageHashes ||
+    typeof previousStageHashes !== "object" ||
+    !currentStageHashes ||
+    typeof currentStageHashes !== "object"
+  ) {
+    return false;
+  }
+  const previousStageKeys = Object.keys(previousStageHashes).sort();
+  const currentStageKeys = Object.keys(currentStageHashes).sort();
+  if (
+    previousStageKeys.length !== expectedStageKeys.length ||
+    currentStageKeys.length !== expectedStageKeys.length ||
+    previousStageKeys.some((key, index) => key !== expectedStageKeys[index]) ||
+    currentStageKeys.some((key, index) => key !== expectedStageKeys[index]) ||
+    expectedStageKeys.some(
+      (key) =>
+        typeof previousStageHashes[key] !== "string" ||
+        previousStageHashes[key].length === 0 ||
+        previousStageHashes[key] !== currentStageHashes[key],
+    )
+  ) {
+    return false;
+  }
   return (
     previous.version === current.version &&
     previous.gitHead === current.gitHead &&
@@ -353,4 +403,20 @@ export function decideReleaseResume(
   return releaseFingerprintsMatch(previous, current)
     ? { reuse: true, reason: "fingerprint-match" }
     : { reuse: false, reason: "fingerprint-mismatch" };
+}
+
+/**
+ * 签发流水线唯一的旧结果复用入口。调用者不得再把本函数的空结果与阶段级缓存
+ * 合并；完整 fingerprint 不匹配时必须得到零复用。
+ */
+export function selectReusableReleaseCommands<T extends ReleaseCommandEvidence>(
+  resumeDecision: ReleaseResumeDecision,
+  previousCommands: readonly T[] | null | undefined,
+): Map<string, T> {
+  if (!resumeDecision.reuse) return new Map();
+  return new Map(
+    (previousCommands ?? [])
+      .filter((result) => result.exitCode === 0)
+      .map((result) => [result.name, result]),
+  );
 }
