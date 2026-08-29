@@ -1,12 +1,86 @@
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { expect, request as createRequest, test, type APIRequestContext } from "@playwright/test";
+import {
+  expect,
+  request as createRequest,
+  test,
+  type APIRequestContext,
+  type Page,
+} from "@playwright/test";
 import Database from "better-sqlite3";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 const headers = { authorization: "Bearer e2e-test-token" };
 const longSidebarProjectName =
   "Codex Agent Permission Preflight And Deployment Readiness Verification";
+
+type ClosingSnapshot = {
+  presence: string | null;
+  inert: boolean;
+  ariaHidden: string | null;
+  pointerEvents: string;
+  transform: string;
+  transitionProperty: string;
+  triggerExpanded: string | null;
+  triggerFocused: boolean;
+};
+
+async function captureClosingState(
+  page: Page,
+  close: () => Promise<unknown>,
+  selector: string,
+  options: { inspectSelector?: string; reopenSelector?: string } = {},
+): Promise<ClosingSnapshot> {
+  const [snapshot] = await Promise.all([
+    page.evaluate(
+      ({ rootSelector, inspectSelector, reopenSelector }) =>
+        new Promise<ClosingSnapshot>((resolveSnapshot, rejectSnapshot) => {
+          const timeout = window.setTimeout(() => {
+            observer.disconnect();
+            rejectSnapshot(new Error(`closing state was not observed for ${rootSelector}`));
+          }, 2_500);
+          const observe = () => {
+            const root = document.querySelector<HTMLElement>(rootSelector);
+            if (root?.dataset.presence !== "closing") return;
+            const inspected = root.querySelector<HTMLElement>(inspectSelector) ?? root;
+            const style = getComputedStyle(inspected);
+            const reopen = reopenSelector
+              ? document.querySelector<HTMLElement>(reopenSelector)
+              : null;
+            const result: ClosingSnapshot = {
+              presence: root.dataset.presence ?? null,
+              inert: root.hasAttribute("inert"),
+              ariaHidden: root.getAttribute("aria-hidden"),
+              pointerEvents: getComputedStyle(root).pointerEvents,
+              transform: style.transform,
+              transitionProperty: style.transitionProperty,
+              triggerExpanded: reopen?.getAttribute("aria-expanded") ?? null,
+              triggerFocused: document.activeElement === reopen,
+            };
+            reopen?.click();
+            window.clearTimeout(timeout);
+            observer.disconnect();
+            resolveSnapshot(result);
+          };
+          const observer = new MutationObserver(observe);
+          observer.observe(document.documentElement, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+            attributeFilter: ["data-presence"],
+          });
+          observe();
+        }),
+      {
+        rootSelector: selector,
+        inspectSelector: options.inspectSelector ?? ":scope",
+        reopenSelector: options.reopenSelector ?? null,
+      },
+    ),
+    close(),
+  ]);
+  return snapshot;
+}
 
 async function ensureE2eProjectFixture(api: APIRequestContext): Promise<string[]> {
   const projectsResponse = await api.get(`${apiUrl}/projects`);
@@ -703,19 +777,24 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
   await page.goto("/#project:E2E");
 
   const task = page.getByRole("button", { name: /验证键盘与焦点/u }).first();
+  await task.evaluate((element) => element.setAttribute("data-e2e-presence-trigger", "task"));
   await task.click();
   const drawerBackdrop = page.locator(".atm-drawer-backdrop");
   const drawer = page.getByRole("dialog", { name: "任务详情" });
   await expect(drawerBackdrop).toHaveAttribute("data-presence", "open");
-  await page.keyboard.press("Escape");
-  await expect(drawerBackdrop).toHaveAttribute("data-presence", "closing");
-  await expect(drawerBackdrop).toHaveAttribute("inert", "");
-  await expect(drawerBackdrop).toHaveAttribute("aria-hidden", "true");
-  await expect(task).toBeFocused();
-  expect(await drawerBackdrop.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe(
-    "none",
+  const drawerClosing = await captureClosingState(
+    page,
+    () => page.keyboard.press("Escape"),
+    ".atm-drawer-backdrop",
+    { reopenSelector: '[data-e2e-presence-trigger="task"]' },
   );
-  await task.click();
+  expect(drawerClosing).toMatchObject({
+    presence: "closing",
+    inert: true,
+    ariaHidden: "true",
+    pointerEvents: "none",
+    triggerFocused: true,
+  });
   await expect(drawerBackdrop).toHaveAttribute("data-presence", "open");
   await page.waitForTimeout(360);
   await expect(drawer).toBeVisible();
@@ -723,37 +802,60 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
     path: resolve("output", "playwright", "e2e-presence-drawer-reopened-dark.png"),
     fullPage: true,
   });
-  await page.keyboard.press("Escape");
-  await expect(drawerBackdrop).toHaveAttribute("data-presence", "closing");
+  const finalDrawerClosing = await captureClosingState(
+    page,
+    () => page.keyboard.press("Escape"),
+    ".atm-drawer-backdrop",
+  );
+  expect(finalDrawerClosing.presence).toBe("closing");
   await expect(drawerBackdrop).toHaveCount(0);
   await expect(task).toBeFocused();
 
   const createTask = page.getByRole("button", { name: "新建任务", exact: true });
+  await createTask.evaluate((element) =>
+    element.setAttribute("data-e2e-presence-trigger", "create-task"),
+  );
   await createTask.click();
   const modal = page.getByRole("dialog", { name: "新建任务" });
   const modalBackdrop = page
     .locator(".atm-modal-backdrop")
     .filter({ has: page.locator("#create-task-title") });
   const priority = page.getByRole("combobox", { name: "优先级" });
+  await priority.evaluate((element) =>
+    element.setAttribute("data-e2e-presence-trigger", "priority"),
+  );
   await priority.click();
   await expect(page.getByRole("listbox", { name: "优先级" })).toBeVisible();
   const listbox = modal.locator(".atm-select-popover");
   await expect(listbox).toHaveAttribute("data-presence", "open");
-  await page.keyboard.press("Escape");
-  await expect(listbox).toHaveAttribute("data-presence", "closing");
-  await expect(listbox).toHaveAttribute("inert", "");
-  await expect(listbox).toHaveAttribute("aria-hidden", "true");
+  const listboxClosing = await captureClosingState(
+    page,
+    () => page.keyboard.press("Escape"),
+    ".atm-select-popover",
+  );
+  expect(listboxClosing).toMatchObject({
+    presence: "closing",
+    inert: true,
+    ariaHidden: "true",
+  });
   await expect(priority).toBeFocused();
   await expect(modal).toBeVisible();
   await expect(listbox).toHaveCount(0);
   await priority.click();
   await expect(listbox).toHaveAttribute("data-presence", "open");
-  await priority.click();
-  await expect(priority).toHaveAttribute("aria-expanded", "false");
-  await expect(listbox).toHaveAttribute("data-presence", "closing");
-  await expect(listbox).toHaveAttribute("inert", "");
-  await expect(listbox).toHaveAttribute("aria-hidden", "true");
-  await priority.click();
+  const reversingListboxClosing = await captureClosingState(
+    page,
+    () => priority.click(),
+    ".atm-select-popover",
+    { reopenSelector: '[data-e2e-presence-trigger="priority"]' },
+  );
+  expect(reversingListboxClosing).toMatchObject({
+    presence: "closing",
+    inert: true,
+    ariaHidden: "true",
+    triggerExpanded: "false",
+    triggerFocused: true,
+  });
   await expect(priority).toHaveAttribute("aria-expanded", "true");
   await expect(listbox).toHaveAttribute("data-presence", "open");
   await page.waitForTimeout(280);
@@ -765,16 +867,27 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
   await priority.click();
   await expect(listbox).toHaveCount(0);
 
-  await modal.getByRole("button", { name: "取消" }).click();
-  await expect(modalBackdrop).toHaveAttribute("data-presence", "closing");
-  await expect(modalBackdrop).toHaveAttribute("inert", "");
-  await expect(modalBackdrop).toHaveAttribute("aria-hidden", "true");
-  await expect(createTask).toBeFocused();
-  await createTask.click();
+  const modalClosing = await captureClosingState(
+    page,
+    () => modal.getByRole("button", { name: "取消" }).click(),
+    ".atm-modal-backdrop",
+    { reopenSelector: '[data-e2e-presence-trigger="create-task"]' },
+  );
+  expect(modalClosing).toMatchObject({
+    presence: "closing",
+    inert: true,
+    ariaHidden: "true",
+    triggerFocused: true,
+  });
   await expect(modalBackdrop).toHaveAttribute("data-presence", "open");
   await page.waitForTimeout(360);
   await expect(modal).toBeVisible();
-  await page.keyboard.press("Escape");
+  const finalModalClosing = await captureClosingState(
+    page,
+    () => page.keyboard.press("Escape"),
+    ".atm-modal-backdrop",
+  );
+  expect(finalModalClosing.presence).toBe("closing");
   await expect(modalBackdrop).toHaveCount(0);
   await expect(createTask).toBeFocused();
 
@@ -812,7 +925,6 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
   const reducedBackdrop = page
     .locator(".atm-modal-backdrop")
     .filter({ has: page.locator("#create-task-title") });
-  const reducedDialog = reducedBackdrop.locator(".atm-modal");
   const reducedPriority = page.getByRole("combobox", { name: "优先级" });
   await reducedPriority.click();
   const reducedSelect = reducedBackdrop.locator(".atm-select");
@@ -820,22 +932,29 @@ test("transient surfaces 可退出和快速反转，command palette 保持即时
   await reducedSelect.evaluate((element) => {
     element.dataset.placement = "top";
   });
-  await reducedPriority.click();
-  await expect(reducedPopover).toHaveAttribute("data-presence", "closing");
-  await expect(reducedPopover).toHaveAttribute("aria-hidden", "true");
-  expect(await reducedPopover.evaluate((element) => getComputedStyle(element).transform)).toBe(
-    "none",
+  const reducedPopoverClosing = await captureClosingState(
+    page,
+    () => reducedPriority.click(),
+    ".atm-select-popover",
   );
+  expect(reducedPopoverClosing).toMatchObject({
+    presence: "closing",
+    ariaHidden: "true",
+    transform: "none",
+  });
   await expect(reducedPopover).toHaveCount(0);
-  await page.keyboard.press("Escape");
-  await expect(reducedBackdrop).toHaveAttribute("data-presence", "closing");
-  await expect(reducedBackdrop).toHaveAttribute("aria-hidden", "true");
-  expect(await reducedDialog.evaluate((element) => getComputedStyle(element).transform)).toBe(
-    "none",
+  const reducedBackdropClosing = await captureClosingState(
+    page,
+    () => page.keyboard.press("Escape"),
+    ".atm-modal-backdrop",
+    { inspectSelector: ".atm-modal" },
   );
-  expect(
-    await reducedDialog.evaluate((element) => getComputedStyle(element).transitionProperty),
-  ).toBe("opacity");
+  expect(reducedBackdropClosing).toMatchObject({
+    presence: "closing",
+    ariaHidden: "true",
+    transform: "none",
+    transitionProperty: "opacity",
+  });
   await expect(reducedBackdrop).toHaveCount(0);
 });
 
