@@ -130,6 +130,16 @@ describe("GitHub Actions runtime policy", () => {
     expect(missingReleaseGates(sources)).toEqual([]);
   });
 
+  it("launches nested packaged smoke without assuming a global pnpm.cmd shim", () => {
+    const source = readFileSync(distributionSmokePath, "utf8");
+
+    expect(source).not.toContain("pnpm.cmd");
+    expect(source).toContain(
+      'const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");',
+    );
+    expect(source).toContain("run(process.execPath, [tsxCli, packagedSmokeScript]");
+  });
+
   it("detects each release gate independently when its contract is removed", () => {
     const sources: ReleaseValidationSources = {
       workflow: readFileSync(releaseWorkflowPath, "utf8"),

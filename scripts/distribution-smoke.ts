@@ -13,6 +13,8 @@ import {
 type Check = { name: string; passed: boolean; detail?: string };
 
 const root = process.cwd();
+const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");
+const packagedSmokeScript = join(root, "scripts", "packaged-smoke.ts");
 const outputRoot = join(root, "output", "distribution-smoke");
 const reportPath = join(root, "output", "distribution-smoke-report.json");
 const packageVersion = (
@@ -119,7 +121,7 @@ async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
 
 function runPackagedSmoke(label: string, executable: string): void {
   const slug = label === "portable" ? "portable" : "installed";
-  run(process.platform === "win32" ? "pnpm.cmd" : "pnpm", ["smoke:packaged"], {
+  run(process.execPath, [tsxCli, packagedSmokeScript], {
     ATM_PACKAGED_EXE: executable,
     ATM_SMOKE_DATA_DIR: join(outputRoot, `${slug}-data`),
     ATM_SMOKE_REPORT: join(root, "output", `${slug}-smoke-report.json`),
