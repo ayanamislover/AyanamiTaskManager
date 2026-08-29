@@ -1,6 +1,6 @@
 # CrossAgent Hub 复用审计
 
-参考仓库：`R:\Project_All\ayanamiAgent Hub`，审计基线 `6a28ddd`，工作树干净。参考仓库许可证为 `AGPL-3.0-only`。
+参考仓库：维护期间使用的本地 ayanamiAgent Hub 工作树，审计基线 `6a28ddd`，当时工作树干净。参考仓库许可证为 `AGPL-3.0-only`。
 
 本项目不在运行时依赖 Hub，也不直接复制 Hub 源文件；采用兼容 AGPL 的仓库许可证，并重新实现下列已验证设计。若后续直接复制文件，必须在本表补充源路径、commit、修改和版权信息。
 

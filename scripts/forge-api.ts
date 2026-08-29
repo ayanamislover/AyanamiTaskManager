@@ -1,7 +1,72 @@
 import { api } from "@electron-forge/core";
+import { listPackage } from "@electron/asar";
 import type { Dirent } from "node:fs";
+import { createReadStream } from "node:fs";
 import { readdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  findForbiddenPackagedEntries,
+  missingRequiredPackagedEntries,
+} from "./package-content-policy.js";
+
+const forbiddenAsarContent = [
+  Buffer.from("C:\\Users\\ayanami", "utf8"),
+  Buffer.from("C:/Users/ayanami", "utf8"),
+  Buffer.from("R:\\Project_All", "utf8"),
+  Buffer.from("R:/Project_All", "utf8"),
+] as const;
+
+async function containsAnyBytes(path: string, needles: readonly Buffer[]): Promise<boolean> {
+  return new Promise((resolveContains, rejectContains) => {
+    const stream = createReadStream(path, { highWaterMark: 1024 * 1024 });
+    let carry = Buffer.alloc(0);
+    let settled = false;
+    stream.on("data", (chunk: string | Buffer) => {
+      if (settled) return;
+      const data = Buffer.concat([carry, typeof chunk === "string" ? Buffer.from(chunk) : chunk]);
+      if (needles.some((needle) => data.includes(needle))) {
+        settled = true;
+        stream.destroy();
+        resolveContains(true);
+        return;
+      }
+      carry = data.subarray(Math.max(0, data.length - 128));
+    });
+    stream.once("end", () => {
+      if (!settled) resolveContains(false);
+    });
+    stream.once("close", () => {
+      if (!settled) resolveContains(false);
+    });
+    stream.once("error", (error) => {
+      if (!settled) rejectContains(error);
+    });
+  });
+}
+
+export async function assertPackagedApplicationContents(dir: string): Promise<void> {
+  const out = join(dir, "out");
+  const packages = await readdir(out, { withFileTypes: true });
+  const candidates = packages.filter(
+    (entry) => entry.isDirectory() && entry.name.startsWith("AyanamiTaskManager-"),
+  );
+  if (candidates.length === 0) throw new Error("PACKAGED_APPLICATION_NOT_FOUND");
+  for (const candidate of candidates) {
+    const asarPath = join(out, candidate.name, "resources", "app.asar");
+    const entries = listPackage(asarPath, { isPack: false });
+    const forbidden = findForbiddenPackagedEntries(entries);
+    if (forbidden.length > 0) {
+      throw new Error(`PACKAGED_CONTENT_FORBIDDEN: ${forbidden.slice(0, 20).join(", ")}`);
+    }
+    const missing = missingRequiredPackagedEntries(entries);
+    if (missing.length > 0) {
+      throw new Error(`PACKAGED_CONTENT_MISSING: ${missing.join(", ")}`);
+    }
+    if (await containsAnyBytes(asarPath, forbiddenAsarContent)) {
+      throw new Error("PACKAGED_CONTENT_MAINTAINER_PATH");
+    }
+  }
+}
 
 async function removeEmptyDescendants(directory: string): Promise<boolean> {
   let entries: Dirent[];
@@ -39,6 +104,7 @@ export async function prunePackagedAgentResourcePlaceholders(dir: string): Promi
 export async function packageApplication(dir: string): Promise<void> {
   await api.package({ dir, interactive: false });
   await prunePackagedAgentResourcePlaceholders(dir);
+  await assertPackagedApplicationContents(dir);
 }
 
 export async function makeApplication(dir: string) {

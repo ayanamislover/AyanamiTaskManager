@@ -4,7 +4,18 @@ import globals from "globals";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["**/dist/**", "**/out/**", "release/**", "node_modules/**"] },
+  {
+    ignores: [
+      "**/dist/**",
+      "**/out/**",
+      "coverage/**",
+      "output/**",
+      "playwright-report/**",
+      "release/**",
+      "test-results/**",
+      "node_modules/**",
+    ],
+  },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   prettier,

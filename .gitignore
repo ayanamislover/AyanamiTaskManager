@@ -13,3 +13,24 @@ output/
 .crossagent/
 .ayanami-task/
 .atm-test-data/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.sig
+
+# ATM runtime state and local databases
+**/runtime/local.token
+**/runtime/daemon.json
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
