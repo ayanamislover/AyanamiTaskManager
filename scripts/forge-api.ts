@@ -1,10 +1,11 @@
 import { api } from "@electron-forge/core";
-import { listPackage } from "@electron/asar";
+import { extractFile, listPackage } from "@electron/asar";
 import type { Dirent } from "node:fs";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import { readdir, rmdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  assertPublishedLogoBytes,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
 } from "./package-content-policy.js";
@@ -52,7 +53,11 @@ export async function assertPackagedApplicationContents(dir: string): Promise<vo
   );
   if (candidates.length === 0) throw new Error("PACKAGED_APPLICATION_NOT_FOUND");
   for (const candidate of candidates) {
-    const asarPath = join(out, candidate.name, "resources", "app.asar");
+    const resourcesPath = join(out, candidate.name, "resources");
+    const asarPath = join(resourcesPath, "app.asar");
+    if (existsSync(join(resourcesPath, "logo.png"))) {
+      throw new Error("PACKAGED_CONTENT_LOOSE_BRAND_ASSET");
+    }
     const entries = listPackage(asarPath, { isPack: false });
     const forbidden = findForbiddenPackagedEntries(entries);
     if (forbidden.length > 0) {
@@ -61,6 +66,18 @@ export async function assertPackagedApplicationContents(dir: string): Promise<vo
     const missing = missingRequiredPackagedEntries(entries);
     if (missing.length > 0) {
       throw new Error(`PACKAGED_CONTENT_MISSING: ${missing.join(", ")}`);
+    }
+    const packagedLogos = entries
+      .map((entry) => entry.replaceAll("\\", "/").replace(/^\/+|\/+$/gu, ""))
+      .filter(
+        (normalized) =>
+          normalized === "logo.png" ||
+          /^apps\/desktop\/dist\/renderer\/assets\/logo-[^/]+\.png$/u.test(normalized),
+      );
+    if (packagedLogos.length < 2) throw new Error("PACKAGED_BRAND_ASSET_MISSING");
+    for (const logo of packagedLogos) {
+      const archiveEntry = process.platform === "win32" ? logo.replaceAll("/", "\\") : logo;
+      assertPublishedLogoBytes(extractFile(asarPath, archiveEntry), logo);
     }
     if (await containsAnyBytes(asarPath, forbiddenAsarContent)) {
       throw new Error("PACKAGED_CONTENT_MAINTAINER_PATH");

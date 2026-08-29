@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertPublishedLogoBytes,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
   REQUIRED_PACKAGED_ENTRIES,
 } from "../../../scripts/package-content-policy.js";
+
+function pngHeader(width: number, height: number, bytes = 24): Buffer {
+  const header = Buffer.alloc(bytes);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
+  header.writeUInt32BE(width, 16);
+  header.writeUInt32BE(height, 20);
+  return header;
+}
 
 describe("packaged application content policy", () => {
   it("accepts the minimal runtime image", () => {
@@ -38,6 +47,17 @@ describe("packaged application content policy", () => {
   it("reports missing runtime anchors", () => {
     expect(missingRequiredPackagedEntries(["package.json"])).toContain(
       "apps/desktop/dist/main/main.cjs",
+    );
+    expect(missingRequiredPackagedEntries(["package.json"])).toContain("logo.png");
+  });
+
+  it("rejects a high-resolution or oversized published logo", () => {
+    expect(() => assertPublishedLogoBytes(pngHeader(256, 256), "logo.png")).not.toThrow();
+    expect(() => assertPublishedLogoBytes(pngHeader(684, 684), "logo.png")).toThrow(
+      /PACKAGED_BRAND_ASSET_TOO_LARGE/u,
+    );
+    expect(() => assertPublishedLogoBytes(pngHeader(256, 256, 256 * 1024 + 1), "logo.png")).toThrow(
+      /PACKAGED_BRAND_ASSET_TOO_LARGE/u,
     );
   });
 });

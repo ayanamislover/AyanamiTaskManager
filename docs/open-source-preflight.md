@@ -14,7 +14,7 @@ This document records the repository hygiene review completed before AyanamiTask
 
 ## Distribution hardening
 
-The packaged `app.asar` now uses an explicit runtime allowlist. It retains compiled desktop code, migrations, production dependencies, package metadata and the license; repository sources, tests, scripts, caches and native build intermediates are rejected.
+The packaged `app.asar` now uses an explicit runtime allowlist. It retains compiled desktop code, migrations, production dependencies, package metadata, the license and the runtime brand image; repository sources, tests, scripts, caches and native build intermediates are rejected. The brand PNG is sealed inside `app.asar` and is not installed as a loose file; the executable and installer icon resources are embedded by the Windows packager.
 
 Every Forge package is checked twice:
 

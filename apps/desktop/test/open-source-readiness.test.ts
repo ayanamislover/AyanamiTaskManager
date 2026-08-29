@@ -68,7 +68,10 @@ describe("open-source repository guardrails", () => {
 
   it("uses the public default branch for installer icon retrieval", () => {
     const forge = read("forge.config.ts");
+    const extraResource = /extraResource:\s*\[([\s\S]*?)\]/u.exec(forge)?.[1] ?? "";
     expect(forge).toContain("refs/heads/main/logo.ico");
     expect(forge).not.toContain("refs/heads/ayanamislover/complete-implementation");
+    expect(extraResource).not.toContain('"logo.png"');
+    expect(forge).toContain("logo\\.png$");
   });
 });

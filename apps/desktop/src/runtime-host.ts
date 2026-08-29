@@ -73,9 +73,10 @@ export async function runHeadlessModes(args: string[]): Promise<boolean> {
 }
 
 export function applicationLogoPath(): string {
-  return app.isPackaged
-    ? join(process.resourcesPath, "logo.png")
-    : join(app.getAppPath(), "logo.png");
+  // Electron resolves app.asar paths through its virtual filesystem. Keeping
+  // this path under app.getAppPath() seals the production PNG into app.asar;
+  // no standalone logo file is placed beside the executable or resources.
+  return join(app.getAppPath(), "logo.png");
 }
 
 function bundledDocumentationRoot(): string {

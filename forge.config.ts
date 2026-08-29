@@ -14,7 +14,6 @@ const config: ForgeConfig = {
     name: "AyanamiTaskManager",
     icon: "logo.ico",
     extraResource: [
-      "logo.png",
       "ATM_AGENT_GUIDE.md",
       "docs",
       "integrations",
@@ -22,10 +21,11 @@ const config: ForgeConfig = {
     ],
     // app.asar is a runtime image, not a repository archive. Keep only the
     // compiled desktop entry, migrations, production dependencies, package
-    // metadata and the project license. Guide/docs/integrations are copied as
-    // explicit extra resources so they remain available without duplication.
+    // metadata, the project license and the runtime brand image. The brand
+    // image stays inside app.asar instead of being exposed as a loose installed
+    // file. Guide/docs/integrations remain explicit resources for Agent access.
     ignore: [
-      /^\/(?!apps(?:\/|$)|migrations(?:\/|$)|node_modules(?:\/|$)|package\.json$|LICENSE$).+/,
+      /^\/(?!apps(?:\/|$)|migrations(?:\/|$)|node_modules(?:\/|$)|package\.json$|LICENSE$|logo\.png$).+/,
       /^\/apps\/(?!desktop(?:\/|$)).+/,
       /^\/apps\/desktop\/(?!dist(?:\/|$)).+/,
       /^\/node_modules\/(?:\.cache(?:\/|$)|\.modules\.yaml$|\.package-map\.json$)/,
