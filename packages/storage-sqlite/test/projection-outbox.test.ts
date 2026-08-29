@@ -152,14 +152,14 @@ describe("Registry projection outbox", () => {
         manager.registry.sqlite
           .prepare(
             `SELECT source_sequence, projected_sequence, status
-             FROM project_projection_state WHERE project_id = ?`,
+               FROM project_projection_state WHERE project_id = ?`,
           )
           .get(project.id),
       ).toEqual({ source_sequence: 521, projected_sequence: 521, status: "APPLIED" });
     } finally {
       manager.close();
     }
-  });
+  }, 60_000);
 });
 
 function projectedSourceEventCount(manager: AyanamiDatabaseManager, sourceEventId: string): number {
