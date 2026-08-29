@@ -454,13 +454,21 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
       const state = window as typeof window & {
         __mcpBridgeCalls?: number;
         __mcpBridgeIntervals?: number[];
+        __releaseMcpBridgeRequest?: () => void;
         __runMcpBridgeTimers?: () => void;
       };
       state.__mcpBridgeCalls = 0;
       state.__mcpBridgeIntervals = [];
       const nativeSetInterval = window.setInterval.bind(window);
       const nativeClearInterval = window.clearInterval.bind(window);
-      const nativeSetTimeout = window.setTimeout.bind(window);
+      let releaseFirstRequest: (() => void) | undefined;
+      const firstRequest = new Promise<void>((resolve) => {
+        releaseFirstRequest = resolve;
+      });
+      state.__releaseMcpBridgeRequest = () => {
+        releaseFirstRequest?.();
+        releaseFirstRequest = undefined;
+      };
       const bridgeTimers = new Map<number, () => void>();
       let nextBridgeTimer = 900_000;
       window.setInterval = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
@@ -486,7 +494,7 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
           runtime: { endpoint, token },
           getMcpBridges: async () => {
             state.__mcpBridgeCalls! += 1;
-            await new Promise((resolve) => nativeSetTimeout(resolve, 100));
+            if (state.__mcpBridgeCalls === 1) await firstRequest;
             return observation;
           },
           minimizeWindow: async () => undefined,
@@ -516,6 +524,7 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
   await page.evaluate(() => (window as any).__runMcpBridgeTimers());
   await page.waitForTimeout(20);
   expect(await page.evaluate(() => (window as any).__mcpBridgeCalls as number)).toBe(1);
+  await page.evaluate(() => (window as any).__releaseMcpBridgeRequest());
   await expect(region.getByText("2 个连接")).toBeVisible();
   await expect(region.getByText("64.00 MiB")).toBeVisible();
   await expect(region.getByText("codex")).toBeVisible();
