@@ -12,3 +12,16 @@ allowBuilds:
   electron: true
   electron-winstaller: true
   esbuild: true
+
+minimumReleaseAgeExclude:
+  # Security releases pinned below may be newer than a contributor's global
+  # minimum-release-age window; these exact versions are intentionally allowed.
+  - tmp@0.2.7
+  - tar@7.5.21
+  - nanoid@3.3.18
+
+overrides:
+  extract-zip@<=2.0.1: npm:@electron-internal/extract-zip@1.0.1
+  nanoid@<3.3.18: 3.3.18
+  tar@<=7.5.20: 7.5.21
+  tmp@<0.2.7: 0.2.7
