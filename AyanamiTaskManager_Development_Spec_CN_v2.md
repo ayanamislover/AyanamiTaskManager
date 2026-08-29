@@ -5,8 +5,8 @@
 > 产品英文名：AyanamiTaskManager  
 > 产品中文名：绫波任务管理器  
 > 命令行短名：`atm`  
-> 预期开发目录：`R:\Project_All\AyanamiTaskManager`  
-> 参考代码库：`R:\Project_All\ayanamiAgent Hub`（本地仓库为最终依据）
+> 预期开发目录：`<workspace>\AyanamiTaskManager`
+> 参考代码库：`<reference-workspace>\ayanamiAgent Hub`（本地仓库为最终依据）
 
 ---
 
@@ -14,8 +14,8 @@
 
 本任务要求交付可长期使用的完整成品。分阶段仅代表施工顺序，所有阶段均为必做项，不得把中间可运行状态当作最终交付。
 
-1. 开始编码前，完整审计 `R:\Project_All\ayanamiAgent Hub`。重点阅读协议层、SQLite 初始化与迁移、事务封装、任务状态机、进度计算、项目身份、WebSocket 事件重放、CLI、Dashboard、发布脚本和测试。GitHub 主分支只能作为补充参考，本地仓库中的未推送代码优先。
-2. 在新目录 `R:\Project_All\AyanamiTaskManager` 建立独立仓库。不得把本产品硬塞进 CrossAgent Hub，也不得让 TaskManager 在运行时依赖 Hub。两者职责明确分开：TaskManager 负责计划、进度与项目记录；Hub 继续负责通信、写入冲突和代码评审。
+1. 开始编码前，完整审计 `<reference-workspace>\ayanamiAgent Hub`。重点阅读协议层、SQLite 初始化与迁移、事务封装、任务状态机、进度计算、项目身份、WebSocket 事件重放、CLI、Dashboard、发布脚本和测试。GitHub 主分支只能作为补充参考，本地仓库中的未推送代码优先。
+2. 在新目录 `<workspace>\AyanamiTaskManager` 建立独立仓库。不得把本产品硬塞进 CrossAgent Hub，也不得让 TaskManager 在运行时依赖 Hub。两者职责明确分开：TaskManager 负责计划、进度与项目记录；Hub 继续负责通信、写入冲突和代码评审。
 3. 从第一天就采用最终架构：桌面应用、全局注册库、每项目独立 SQLite、MCP/CLI、实时事件流、系统自启动。禁止先做浏览器网页、单库、JSON 文件或 Markdown 任务账本，再承诺后续迁移。
 4. 不允许使用 `agenttask.md`、`localStorage`、内存对象或临时 JSON 作为产品事实源。项目任务数据只能写入对应项目数据库；简单临时任务写入全局注册库中的 Quick Task 表。
 5. UI 全部使用中文。内部枚举、API 字段和数据库列使用稳定英文标识，通过映射显示中文，界面不得直接暴露 `IN_PROGRESS`、`BLOCKED` 等英文枚举。
@@ -2008,9 +2008,9 @@ release/
 ## 25. 交给 Goal 模式 Agent 的最终执行提示
 
 ```text
-你负责在 R:\Project_All\AyanamiTaskManager 完整实现《AyanamiTaskManager（绫波任务管理器）完整开发设计文档》。
+你负责在 <workspace>\AyanamiTaskManager 完整实现《AyanamiTaskManager（绫波任务管理器）完整开发设计文档》。
 
-先审计 R:\Project_All\ayanamiAgent Hub，本地代码是最终依据，输出 docs/reuse-map.md 和全部 ADR。随后按文档阶段连续实施，不停在中间可运行版本，不把任何阶段称为 MVP。除外部权限、缺失文件或环境损坏等真实硬阻塞外，自行按文档决策继续，不反复询问用户。
+先审计 <reference-workspace>\ayanamiAgent Hub，本地代码是最终依据，输出 docs/reuse-map.md 和全部 ADR。随后按文档阶段连续实施，不停在中间可运行版本，不把任何阶段称为 MVP。除外部权限、缺失文件或环境损坏等真实硬阻塞外，自行按文档决策继续，不反复询问用户。
 
 所有项目任务必须使用最终的 Registry + 每项目独立 SQLite 架构；禁止用 agenttask.md、JSON、localStorage 或单库作为产品事实源。UI 全中文，桌面应用随系统启动并常驻托盘。MCP、CLI、UI 必须调用同一应用服务。实现过程中运行针对性测试，阶段完成时运行对应完整测试，最终运行全量测试和打包烟测。
 
@@ -2024,7 +2024,7 @@ release/
 ### 现有仓库
 
 - `ayanamislover/ayanamiAgent-Hub`：README、架构、初始迁移、任务服务、协议常量、数据库初始化、迁移运行器、StoreContext、MCP Server、项目初始化、Dashboard Tasks、发布脚本。
-- 本地 `R:\Project_All\ayanamiAgent Hub` 中的当前版本为实现时最终参考。
+- 本地 `<reference-workspace>\ayanamiAgent Hub` 中的当前版本为实现时最终参考。
 
 ### 成熟产品官方资料
 

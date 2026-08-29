@@ -20,21 +20,16 @@ const config: ForgeConfig = {
       "integrations",
       "apps/desktop/resources/mcp-stdio.cjs",
     ],
+    // app.asar is a runtime image, not a repository archive. Keep only the
+    // compiled desktop entry, migrations, production dependencies, package
+    // metadata and the project license. Guide/docs/integrations are copied as
+    // explicit extra resources so they remain available without duplication.
     ignore: [
-      /^\/.git(?:\/|$)/,
-      /^\/.ayanami-task(?:\/|$)/,
-      /^\/.playwright-cli(?:\/|$)/,
-      /^\/docs(?:\/|$)/,
-      /^\/release(?:\/|$)/,
-      /^\/coverage(?:\/|$)/,
-      /^\/out(?:\/|$)/,
-      /^\/output(?:\/|$)/,
-      /^\/playwright-report(?:\/|$)/,
-      /^\/test-results(?:\/|$)/,
-      /^\/plans(?:\/|$)/,
-      /^\/apps\/desktop\/e2e(?:\/|$)/,
-      /^\/AyanamiTaskManager_Development_Spec_CN_v2\.md$/,
-      /^\/agents_task\.md$/,
+      /^\/(?!apps(?:\/|$)|migrations(?:\/|$)|node_modules(?:\/|$)|package\.json$|LICENSE$).+/,
+      /^\/apps\/(?!desktop(?:\/|$)).+/,
+      /^\/apps\/desktop\/(?!dist(?:\/|$)).+/,
+      /^\/node_modules\/(?:\.cache(?:\/|$)|\.modules\.yaml$|\.package-map\.json$)/,
+      /^\/node_modules\/(?:\.pnpm\/better-sqlite3@[^/]+\/node_modules\/)?better-sqlite3\/build\/(?!(?:Release(?:\/better_sqlite3\.node)?$)).+/,
     ],
   },
   // better-sqlite3 13 ships a Node-API prebuild that is verified under the
@@ -46,7 +41,7 @@ const config: ForgeConfig = {
       setupExe: `AyanamiTaskManager-Setup-${packageVersion}-win-x64.exe`,
       setupIcon: "logo.ico",
       iconUrl:
-        "https://raw.githubusercontent.com/ayanamislover/AyanamiTaskManager/refs/heads/ayanamislover/complete-implementation/logo.ico",
+        "https://raw.githubusercontent.com/ayanamislover/AyanamiTaskManager/refs/heads/main/logo.ico",
     }),
     new MakerZIP({}, ["win32"]),
   ],
