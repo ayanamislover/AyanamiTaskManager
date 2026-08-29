@@ -141,11 +141,15 @@ const statusWrite: Metric = {
 service.close();
 const memoryProbe = spawnSync(
   process.execPath,
-  ["--import", "tsx", join(root, "scripts", "benchmark-memory.ts"), dataDir],
+  ["--expose-gc", "--import", "tsx", join(root, "scripts", "benchmark-memory.ts"), dataDir],
   { cwd: root, encoding: "utf8", maxBuffer: 1024 * 1024 * 4 },
 );
 if (memoryProbe.status !== 0) throw new Error(`空闲内存探针失败：${memoryProbe.stderr}`);
-const rssMb = Number((JSON.parse(memoryProbe.stdout.trim()) as { rssMb: number }).rssMb);
+const memoryResult = JSON.parse(memoryProbe.stdout.trim()) as {
+  rssMb: number;
+  rssSamplesMb: number[];
+};
+const rssMb = Number(memoryResult.rssMb);
 const report = {
   generatedAt: new Date().toISOString(),
   data: {
@@ -165,7 +169,12 @@ const report = {
     singleWriteAndEvent: statusWrite,
     delta100Events: delta,
     chineseSearch50000Documents: search,
-    serviceRss: { megabytes: Number(rssMb.toFixed(2)), targetMb: 150, passed: rssMb <= 150 },
+    serviceRss: {
+      megabytes: Number(rssMb.toFixed(2)),
+      targetMb: 150,
+      passed: rssMb <= 150,
+      samples: memoryResult.rssSamplesMb.map((sample) => Number(sample.toFixed(2))),
+    },
   },
 };
 const passed = Object.values(report.metrics).every((metric) => metric.passed);
