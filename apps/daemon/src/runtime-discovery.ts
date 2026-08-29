@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-export const DAEMON_VERSION = "1.0.21";
+export const DAEMON_VERSION = "1.0.22";
 export const DAEMON_RUNTIME_FILENAME = "daemon.json";
 export const LEGACY_TOKEN_FILENAME = "local.token";
 export const DAEMON_LOCK_FILENAME = "daemon.lock";
