@@ -271,6 +271,14 @@ describe("发布报告的证据出处", () => {
       expect(ASSEMBLER).toContain(`level: "${level}"`);
     }
   });
+
+  it("assembler 从已通过烟测的发行程序读取 Electron ABI", () => {
+    expect(ASSEMBLER).toMatch(
+      /join\(\s*root,\s*"out",\s*"AyanamiTaskManager-win32-x64",\s*"AyanamiTaskManager\.exe"/u,
+    );
+    expect(ASSEMBLER).not.toContain('join(root, "node_modules", "electron", "dist"');
+    expect(ASSEMBLER).toContain("if (probe.error)");
+  });
 });
 
 describe("动态发布文档守卫", () => {

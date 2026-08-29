@@ -99,12 +99,19 @@ function latestSchema(directory: string): number {
 }
 
 function electronVersions(): Record<string, string> {
-  const executable = join(root, "node_modules", "electron", "dist", "electron.exe");
+  // 发布清单描述的是实际交付的运行时，所以直接探测已经通过 packaged / distribution
+  // smoke 的发行程序。依赖缓存里的 electron.exe 不是交付物，在 hosted runner 上还可能
+  // 被安装/卸载阶段的进程治理暂时阻断。
+  const executable = join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe");
   const probe = spawnSync(executable, ["-p", "JSON.stringify(process.versions)"], {
     encoding: "utf8",
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    windowsHide: true,
   });
-  if (probe.status !== 0) throw new Error(`无法读取 Electron ABI：${probe.stderr}`);
+  if (probe.error) throw new Error(`无法启动发行程序读取 Electron ABI：${probe.error.message}`);
+  if (probe.status !== 0) {
+    throw new Error(`无法读取 Electron ABI：${String(probe.stderr ?? "").slice(0, 500)}`);
+  }
   return JSON.parse(probe.stdout.trim()) as Record<string, string>;
 }
 
