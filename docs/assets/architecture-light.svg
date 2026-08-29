@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 952 386" width="952" height="386" role="img" aria-label="AyanamiTaskManager 产品结构：AI Agents 经 MCP 连接本地动态 bridge，与 Electron 桌面 UI、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite">
+  <defs>
+    <marker id="atm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#cdc2b4" />
+    </marker>
+  </defs>
+  <rect width="952" height="386" rx="18" fill="#f7f5f0" />
+  <g>
+    <text x="28" y="34" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="15" font-weight="600" fill="#24212b">AI Agents</text>
+    <text x="28" y="56" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#77717f">领取 · 推进 · 交接</text>
+    <rect x="28" y="80" width="176" height="176" rx="14" fill="#fffcf8" stroke="#e6ded3" stroke-width="1" />
+    <rect x="46" y="96" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="116" y="121" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">Codex</text>
+    <rect x="46" y="148" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="116" y="173" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">Claude Desktop</text>
+    <rect x="46" y="200" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="116" y="225" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">Claude Code</text>
+  </g>
+  <g>
+    <text x="268" y="34" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="15" font-weight="600" fill="#24212b">本地动态 Bridge</text>
+    <text x="268" y="56" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#77717f">每次启动轮换令牌</text>
+    <rect x="268" y="80" width="176" height="176" rx="14" fill="#fffcf8" stroke="#7257d6" stroke-width="1.5" />
+    <rect x="286" y="96" width="140" height="40" rx="9" fill="#f0ebff" stroke="#7257d6" stroke-width="1" />
+    <text x="356" y="121" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="14" fill="#7257d6">core</text>
+    <rect x="286" y="148" width="140" height="40" rx="9" fill="#f0ebff" stroke="#7257d6" stroke-width="1" />
+    <text x="356" y="173" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="14" fill="#7257d6">memory</text>
+    <rect x="286" y="200" width="140" height="40" rx="9" fill="#f0ebff" stroke="#7257d6" stroke-width="1" />
+    <text x="356" y="225" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="14" fill="#7257d6">actions</text>
+  </g>
+  <g>
+    <text x="508" y="34" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="15" font-weight="600" fill="#24212b">共享应用服务</text>
+    <text x="508" y="56" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#77717f">唯一写入入口</text>
+    <rect x="508" y="80" width="176" height="176" rx="14" fill="#fffcf8" stroke="#e6ded3" stroke-width="1" />
+    <rect x="526" y="96" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="596" y="121" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">命令与事务</text>
+    <rect x="526" y="148" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="596" y="173" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">查询与读模型</text>
+    <rect x="526" y="200" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="596" y="225" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">幂等与投影</text>
+  </g>
+  <g>
+    <text x="748" y="34" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="15" font-weight="600" fill="#24212b">本地存储</text>
+    <text x="748" y="56" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#77717f">loopback · 无云端账号</text>
+    <rect x="748" y="80" width="176" height="176" rx="14" fill="#fffcf8" stroke="#e6ded3" stroke-width="1" />
+    <rect x="766" y="122" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="836" y="147" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">全局 Registry</text>
+    <rect x="766" y="174" width="140" height="40" rx="9" fill="#f3efe8" stroke="#e6ded3" stroke-width="1" />
+    <text x="836" y="199" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="14" fill="#24212b">每项目 SQLite</text>
+  </g>
+  <g>
+    <line x1="214" y1="168" x2="262" y2="168" stroke="#cdc2b4" stroke-width="1.5" marker-end="url(#atm-arrow)" />
+    <text x="236" y="155" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="11" fill="#77717f">MCP stdio</text>
+  </g>
+  <g>
+    <line x1="454" y1="168" x2="502" y2="168" stroke="#cdc2b4" stroke-width="1.5" marker-end="url(#atm-arrow)" />
+    <text x="476" y="155" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="11" fill="#77717f">本地回环</text>
+  </g>
+  <g>
+    <line x1="694" y1="168" x2="742" y2="168" stroke="#cdc2b4" stroke-width="1.5" marker-end="url(#atm-arrow)" />
+    <text x="716" y="155" text-anchor="middle" font-family="'Cascadia Mono','SFMono-Regular',Consolas,monospace" font-size="11" fill="#77717f">事务写入</text>
+  </g>
+  <g>
+    <line x1="28" y1="278" x2="924" y2="278" stroke="#e6ded3" stroke-width="1" stroke-dasharray="3 5" />
+    <text x="28" y="300" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#77717f">同机直连，不经 MCP</text>
+    <rect x="28" y="310" width="150" height="40" rx="9" fill="#fffcf8" stroke="#e6ded3" stroke-width="1" />
+    <text x="103" y="335" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="13" fill="#24212b">Electron 桌面 UI</text>
+    <rect x="194" y="310" width="150" height="40" rx="9" fill="#fffcf8" stroke="#e6ded3" stroke-width="1" />
+    <text x="269" y="335" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="13" fill="#24212b">CLI</text>
+    <path d="M 344 330 H 596 V 262" fill="none" stroke="#cdc2b4" stroke-width="1.5" marker-end="url(#atm-arrow)" />
+  </g>
+</svg>
