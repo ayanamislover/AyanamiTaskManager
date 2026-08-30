@@ -390,6 +390,7 @@ export class ProjectRepository {
     operation: string,
     request: unknown,
     action: (actor: ProjectActor) => T,
+    compatibleRequests: readonly unknown[] = [],
   ): SessionMutationExecution<T> {
     return this.#sessionCommands.executeSessionMutation(
       sessionId,
@@ -397,6 +398,7 @@ export class ProjectRepository {
       operation,
       request,
       action,
+      compatibleRequests,
     );
   }
 

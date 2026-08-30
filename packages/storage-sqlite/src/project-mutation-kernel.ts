@@ -14,6 +14,8 @@ export type MutationInput<T> = {
   opId: string;
   operation: string;
   request: unknown;
+  compatibleRequests?: readonly unknown[];
+  validateCompatibleReplay?: () => void;
   action: () => T;
   idempotencyKey?: string;
   immediate?: boolean;
@@ -128,6 +130,9 @@ export class ProjectMutationKernel {
   mutateWithReplay<T>(input: MutationInput<T>): { value: T; replayed: boolean } {
     const key = input.idempotencyKey ?? `${input.actor.sessionId ?? input.actor.id}:${input.opId}`;
     const fingerprint = requestFingerprint(input.request);
+    const compatibleFingerprints = new Set(
+      (input.compatibleRequests ?? []).map((request) => requestFingerprint(request)),
+    );
     return this.transaction(() => {
       const cached = this.#sqlite
         .prepare("SELECT * FROM idempotency_keys WHERE key = ?")
@@ -135,11 +140,26 @@ export class ProjectMutationKernel {
         | { operation: string; request_fingerprint: string; response_json: string }
         | undefined;
       if (cached) {
-        if (cached.operation !== input.operation || cached.request_fingerprint !== fingerprint) {
+        if (cached.operation !== input.operation) {
           throw new AtmError("IDEMPOTENCY_CONFLICT", {
             message: `幂等键冲突：${key}`,
             details: { key },
           });
+        }
+        if (cached.request_fingerprint !== fingerprint) {
+          if (!compatibleFingerprints.has(cached.request_fingerprint)) {
+            throw new AtmError("IDEMPOTENCY_CONFLICT", {
+              message: `幂等键冲突：${key}`,
+              details: { key },
+            });
+          }
+          if (!input.validateCompatibleReplay) {
+            throw new AtmError("IDEMPOTENCY_CONFLICT", {
+              message: `幂等键冲突：${key}`,
+              details: { key },
+            });
+          }
+          input.validateCompatibleReplay();
         }
         return { value: JSON.parse(cached.response_json) as T, replayed: true };
       }

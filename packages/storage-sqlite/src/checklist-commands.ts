@@ -54,35 +54,50 @@ export class ChecklistCommands {
         ? {}
         : { evidence: this.#evidence.normalize(input.evidence) }),
     };
+    const legacyRequest = {
+      checklistId: normalizedInput.checklistId,
+      expectedVersion: normalizedInput.expectedVersion,
+      status: normalizedInput.status,
+      ...(normalizedInput.evidence === undefined ? {} : { evidence: normalizedInput.evidence }),
+    };
+    const compatibleRequests = normalizedInput.taskKey === undefined ? [] : [legacyRequest];
+    const loadChecklist = () => {
+      const row = this.#sqlite
+        .prepare("SELECT * FROM checklist_items WHERE id = ?")
+        .get(input.checklistId) as any;
+      if (!row)
+        throw new AtmError("CHECKLIST_NOT_FOUND", {
+          message: `检查项不存在：${input.checklistId}`,
+          details: { entity: "CHECKLIST", reference: input.checklistId },
+        });
+      return row;
+    };
+    const validateTaskOwnership = (row: any) => {
+      if (input.taskKey === undefined) return;
+      const task = this.#taskReads.rowForTaskKey(input.taskKey);
+      if (row.work_item_id !== task.id)
+        throw new AtmError("CHECKLIST_TASK_MISMATCH", {
+          message: `检查项不属于 ${input.taskKey}`,
+          details: {
+            entity: "CHECKLIST",
+            key: input.checklistId,
+            expected_task: input.taskKey,
+            actual_task: this.#taskReads.taskKeyForId(row.work_item_id),
+          },
+        });
+    };
     return this.#mutation.mutate({
       actor,
       opId,
       operation: "checklist.update",
       request: normalizedInput,
+      compatibleRequests,
+      validateCompatibleReplay: () => validateTaskOwnership(loadChecklist()),
       action: () => {
-        const row = this.#sqlite
-          .prepare("SELECT * FROM checklist_items WHERE id = ?")
-          .get(input.checklistId) as any;
-        if (!row)
-          throw new AtmError("CHECKLIST_NOT_FOUND", {
-            message: `检查项不存在：${input.checklistId}`,
-            details: { entity: "CHECKLIST", reference: input.checklistId },
-          });
+        const row = loadChecklist();
         // 归属校验要排在版本校验之前：task_key 写错时先说清楚改错了对象，
         // 而不是让调用方去追一个「版本对不上」的假线索。batch 在 186-212 做的是同一件事。
-        if (input.taskKey !== undefined) {
-          const task = this.#taskReads.rowForTaskKey(input.taskKey);
-          if (row.work_item_id !== task.id)
-            throw new AtmError("CHECKLIST_TASK_MISMATCH", {
-              message: `检查项不属于 ${input.taskKey}`,
-              details: {
-                entity: "CHECKLIST",
-                key: input.checklistId,
-                expected_task: input.taskKey,
-                actual_task: this.#taskReads.taskKeyForId(row.work_item_id),
-              },
-            });
-        }
+        validateTaskOwnership(row);
         if (row.version !== input.expectedVersion)
           throw new AtmError("VERSION_CONFLICT", {
             message: "检查项版本已变化",

@@ -219,6 +219,7 @@ export class SessionCommands {
     operation: string,
     request: unknown,
     action: (actor: MutationActor) => T,
+    compatibleRequests: readonly unknown[] = [],
   ): SessionMutationResult<T> {
     return this.#mutation.transaction(() => {
       const resolution = this.#resolveMutationActorInternal(
@@ -227,6 +228,7 @@ export class SessionCommands {
         operation,
         request,
         true,
+        compatibleRequests,
       );
       return { result: action(resolution.actor), resolution };
     }, true);
@@ -238,11 +240,17 @@ export class SessionCommands {
     operation: string,
     request: unknown,
     createRecoverySuccessor: boolean,
+    compatibleRequests: readonly unknown[] = [],
   ): SessionActorResolution {
     const normalizedOpId = opId.trim();
     if (!normalizedOpId || normalizedOpId.length > 128)
       throw new AtmError("OPERATION_ID_INVALID", { message: "operationId 无效" });
     const fingerprint = requestFingerprint(this.#requestNormalizer.normalize(operation, request));
+    const compatibleFingerprints = new Set(
+      compatibleRequests.map((compatibleRequest) =>
+        requestFingerprint(this.#requestNormalizer.normalize(operation, compatibleRequest)),
+      ),
+    );
     const requested = this.#getSession(sessionId);
     const visited = new Set<string>();
     let candidate: any | undefined = requested;
@@ -254,7 +262,11 @@ export class SessionCommands {
         | { operation: string; request_fingerprint: string }
         | undefined;
       if (cached) {
-        if (cached.operation !== operation || cached.request_fingerprint !== fingerprint) {
+        if (
+          cached.operation !== operation ||
+          (cached.request_fingerprint !== fingerprint &&
+            !compatibleFingerprints.has(cached.request_fingerprint))
+        ) {
           throw new AtmError("IDEMPOTENCY_CONFLICT", {
             message: "幂等操作与现有 Session 不一致",
             details: { session_id: candidate.id, operation_id: normalizedOpId },

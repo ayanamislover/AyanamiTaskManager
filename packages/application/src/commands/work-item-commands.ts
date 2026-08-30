@@ -241,13 +241,25 @@ export class WorkItemCommands {
     input: Parameters<ProjectRepository["updateChecklist"]>[2],
   ) {
     const repository = await this.#runtime.repository(projectCode);
+    const legacyRequest = {
+      checklistId: input.checklistId,
+      expectedVersion: input.expectedVersion,
+      status: input.status,
+      ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+    };
+    const compatibleRequests = input.taskKey === undefined ? [] : [legacyRequest];
     const execution = await withMutationErrorDetails(
       projectCode,
       { checklistId: input.checklistId, expectedVersion: input.expectedVersion },
       this.#enrichError,
       () =>
-        repository.executeSessionMutation(sessionId, opId, "checklist.update", input, (actor) =>
-          repository.updateChecklist(actor, opId, input),
+        repository.executeSessionMutation(
+          sessionId,
+          opId,
+          "checklist.update",
+          input,
+          (actor) => repository.updateChecklist(actor, opId, input),
+          compatibleRequests,
         ),
     );
     const projection = await this.#projection.flush(projectCode);

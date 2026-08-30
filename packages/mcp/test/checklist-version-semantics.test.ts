@@ -28,6 +28,7 @@ type Call = (name: string, args: Record<string, unknown>) => Promise<Record<stri
 
 async function scenario(): Promise<{
   call: Call;
+  service: AyanamiTaskService;
   project: string;
   session: string;
   taskKey: string;
@@ -119,6 +120,7 @@ async function scenario(): Promise<{
   expect(detail.version).not.toBe(checklistItem.version);
   return {
     call,
+    service,
     project: project.code,
     session,
     taskKey,
@@ -126,6 +128,42 @@ async function scenario(): Promise<{
     checklistId: String(checklistItem.id),
     checklistVersion: Number(checklistItem.version),
   };
+}
+
+async function createOtherTask(
+  s: Awaited<ReturnType<typeof scenario>>,
+  opId: string,
+): Promise<{ taskKey: string; checklistId: string }> {
+  const other = await s.call("atm_task_create", {
+    project: s.project,
+    session: s.session,
+    op_id: opId,
+    items: [
+      {
+        client_ref: opId,
+        title: "另一个任务",
+        description: "",
+        type: "TASK",
+        priority: "NORMAL",
+        status: "READY",
+        acceptance: ["做完"],
+        checklist: [{ title: "另一条检查项" }],
+        depends_on: [],
+        depends_on_refs: [],
+      },
+    ],
+  });
+  const taskKey = String(
+    other.entities.find((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+      .key,
+  );
+  const detail = await s.call("atm_task_get", {
+    project: s.project,
+    task_key: taskKey,
+    view: "full",
+    field_mask: [],
+  });
+  return { taskKey, checklistId: String(detail.checklist[0].id) };
 }
 
 describe("checklist 操作的 expected_version 语义", () => {
@@ -227,5 +265,137 @@ describe("checklist 操作的 expected_version 语义", () => {
     await expect(patch(s.checklistVersion, "batch-wrong")).rejects.toThrow(/version conflict/iu);
     const ok = await patch(s.taskVersion, "batch-right");
     expect(ok.ok).toBe(true);
+  });
+
+  it("旧版不含 taskKey 的 durable receipt 可由相同公开请求跨版本重放", async () => {
+    const s = await scenario();
+    const opId = "legacy-single-replay";
+
+    // 模拟旧 handler：公开请求原本带 task_key，但进入 application/storage 前会丢掉它。
+    const committed = await s.service.updateChecklist(s.project, s.session, opId, {
+      checklistId: s.checklistId,
+      expectedVersion: s.checklistVersion,
+      status: "DONE",
+    });
+
+    const replayed = await s.call("atm_task_patch", {
+      project: s.project,
+      session: s.session,
+      op_id: opId,
+      items: [
+        {
+          operation: "checklist_single",
+          task_key: s.taskKey,
+          expected_version: s.checklistVersion,
+          checklist_items: [{ id: s.checklistId, status: "DONE" }],
+        },
+      ],
+    });
+    expect(replayed.ok).toBe(true);
+
+    const after = await s.call("atm_task_get", {
+      project: s.project,
+      task_key: s.taskKey,
+      view: "full",
+      field_mask: [],
+    });
+    expect(after.checklist[0]).toMatchObject({
+      id: s.checklistId,
+      status: "DONE",
+      version: committed.checklist.version,
+    });
+  });
+
+  it("旧 fingerprint 兼容只接受同一业务请求，taskKey 归属仍 fail closed", async () => {
+    const s = await scenario();
+    const other = await createOtherTask(s, "legacy-other-task");
+    const opId = "legacy-single-strict";
+    await s.service.updateChecklist(s.project, s.session, opId, {
+      checklistId: s.checklistId,
+      expectedVersion: s.checklistVersion,
+      status: "DONE",
+    });
+
+    const patch = (
+      taskKey: string,
+      checklistId: string,
+      expectedVersion: number,
+      status: "DONE" | "SKIPPED",
+      evidence?: unknown[],
+    ) =>
+      s.call("atm_task_patch", {
+        project: s.project,
+        session: s.session,
+        op_id: opId,
+        items: [
+          {
+            operation: "checklist_single",
+            task_key: taskKey,
+            expected_version: expectedVersion,
+            checklist_items: [
+              {
+                id: checklistId,
+                status,
+                ...(evidence === undefined ? {} : { evidence }),
+              },
+            ],
+          },
+        ],
+      });
+
+    await expect(patch(other.taskKey, s.checklistId, s.checklistVersion, "DONE")).rejects.toThrow(
+      /CHECKLIST_TASK_MISMATCH/u,
+    );
+    await expect(patch(s.taskKey, other.checklistId, s.checklistVersion, "DONE")).rejects.toThrow(
+      /IDEMPOTENCY_CONFLICT/u,
+    );
+    await expect(patch(s.taskKey, s.checklistId, s.checklistVersion + 1, "DONE")).rejects.toThrow(
+      /IDEMPOTENCY_CONFLICT/u,
+    );
+    await expect(patch(s.taskKey, s.checklistId, s.checklistVersion, "SKIPPED")).rejects.toThrow(
+      /IDEMPOTENCY_CONFLICT/u,
+    );
+    await expect(
+      patch(s.taskKey, s.checklistId, s.checklistVersion, "DONE", ["different proof"]),
+    ).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+  });
+
+  it("新版 receipt 将 taskKey 纳入 fingerprint，不能用同一 op 跨任务重放", async () => {
+    const s = await scenario();
+    const other = await createOtherTask(s, "current-other-task");
+    const opId = "current-task-bound";
+    const patch = (taskKey: string) =>
+      s.call("atm_task_patch", {
+        project: s.project,
+        session: s.session,
+        op_id: opId,
+        items: [
+          {
+            operation: "checklist_single",
+            task_key: taskKey,
+            expected_version: s.checklistVersion,
+            checklist_items: [{ id: s.checklistId, status: "DONE" }],
+          },
+        ],
+      });
+
+    await expect(patch(s.taskKey)).resolves.toMatchObject({ ok: true });
+    const committed = await s.call("atm_task_get", {
+      project: s.project,
+      task_key: s.taskKey,
+      view: "full",
+      field_mask: [],
+    });
+    await expect(patch(other.taskKey)).rejects.toThrow(/IDEMPOTENCY_CONFLICT/u);
+    const after = await s.call("atm_task_get", {
+      project: s.project,
+      task_key: s.taskKey,
+      view: "full",
+      field_mask: [],
+    });
+    expect(after.checklist[0]).toMatchObject({
+      status: "DONE",
+      version: committed.checklist[0].version,
+    });
   });
 });
