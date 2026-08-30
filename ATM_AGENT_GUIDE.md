@@ -99,6 +99,119 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 <!-- WORK_ITEM_OPERATIONS:END -->
 
+<!-- TASK_PATCH_COMPOSITE:BEGIN -->
+
+### composite 任务操作（自动生成）
+
+上一张表只列状态机操作。`atm_task_patch` 还接受下列 composite 操作，它们**不可与其他操作同批**：
+`items` 只允许一个元素。
+
+所有条目共用 `task_key` + `expected_version` 骨架。**`expected_version` 的语义按操作而异**：
+`checklist_single` 比的是那条检查项自己的版本，其余操作都比任务版本。字段名相同不代表语义相同。
+
+#### `verify_and_complete`
+
+一次调用完成 verify 与 complete，省掉中间那次版本读取。
+
+```json
+{
+  "operation": "verify_and_complete",
+  "task_key": "ATM-T-0001",
+  "expected_version": 7
+}
+```
+
+#### `checklist_single`
+
+改一条检查项。`checklist_items` 必须恰好一个元素，不是把 id 放到条目顶层。**`expected_version` 是检查项自己的版本，不是任务版本**（`atm_task_get(view="full")` 的 `checklist[].version`）。`task_key` 会校验归属，检查项不属于它就报 `CHECKLIST_TASK_MISMATCH`。
+
+```json
+{
+  "operation": "checklist_single",
+  "task_key": "ATM-T-0001",
+  "expected_version": 0,
+  "checklist_items": [
+    {
+      "id": "01M0W8440REDVKEFXQ9TW54HQX",
+      "status": "DONE",
+      "evidence": [
+        {
+          "kind": "test_result",
+          "value": "186 passed",
+          "note": "聚焦回归"
+        }
+      ]
+    }
+  ]
+}
+```
+
+#### `checklist_batch`
+
+整批改检查项，任一条失败则整批回滚。`expected_version` 是**任务**的版本，并会校验每条检查项确实属于该任务，否则报 `TASK_MISMATCH`。
+
+```json
+{
+  "operation": "checklist_batch",
+  "task_key": "ATM-T-0001",
+  "expected_version": 7,
+  "checklist_items": [
+    {
+      "id": "01M0W8440REDVKEFXQ9TW54HQX",
+      "status": "DONE",
+      "evidence": ["docs/report.md"]
+    },
+    {
+      "id": "01M0W8440REDVKEFXQ9TW54HQY",
+      "status": "SKIPPED"
+    }
+  ]
+}
+```
+
+#### `review_request`
+
+对 REVIEW 任务发起复核请求，并钉住候选哈希。
+
+```json
+{
+  "operation": "review_request",
+  "task_key": "ATM-T-0002",
+  "expected_version": 3,
+  "parent_checklist_id": "01M0W8440REDVKEFXQ9TW54HQX",
+  "expected_parent_checklist_version": 0,
+  "candidate_hashes": {
+    "source": "695feabb8d32f02c"
+  }
+}
+```
+
+#### `review_submit`
+
+提交复核结论；`evidence` 至少一条。
+
+```json
+{
+  "operation": "review_submit",
+  "task_key": "ATM-T-0002",
+  "expected_version": 4,
+  "request_key": "ATM-RR-0001",
+  "verdict": "APPROVED",
+  "candidate_hashes": {
+    "source": "695feabb8d32f02c"
+  },
+  "evidence": [
+    {
+      "kind": "git_sha",
+      "value": "695feabb8d32f02c",
+      "note": "复核基线"
+    }
+  ]
+}
+```
+
+<!-- TASK_PATCH_COMPOSITE:END -->
+
 1. `atm_begin(project_code, agent_id, role)`，正常开工只发起一个语义请求，并直接使用返回的 brief。默认 `brief="full"`；低上下文客户端可用 `minimal`，只要 Session 回执则用 `none`。`max_chars` 只裁剪 brief，不会丢失 `session`、`project`、`scope` 或原子回执。需要崩溃恢复的控制器必须额外传稳定 `op_id`；响应未知或冷启动时以完全相同的请求重试，ATM 会在现有项目内返回同一 Session。
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
 3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
@@ -168,14 +281,14 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 `complete` 会同时检查：检查项、证据、子任务、阻塞、依赖、验收和当前状态。不通过时会在一个 `COMPLETION_GATE_FAILED` 响应中返回全部已知缺口；先一次性处理返回的所有 reasons，不要只修第一条后循环重试。各类缺口的出路：
 
-| 报错                                     | 含义与出路                                                                                                                                                                                                                                                                             |
-| ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `checklist incomplete`                   | 还有检查项停在 TODO/DOING。用 `atm_task_patch(operation="checklist_single")` 逐条置 `DONE` 或 `SKIPPED`；多项可用 `checklist_batch`。单项的 `expected_version` 是**检查项自己**的版本；批量只收任务的一个起始版本并整批回滚。                                                          |
-| `evidence required` / `evidence missing` | 该检查项标了「需要证据」。要么带 `evidence` 挂上真证据，要么置 `SKIPPED`——跳过的必证项不再要求证据。不要为了打勾而编证据。                                                                                                                                                             |
-| `child incomplete`                       | 还有子 WorkItem 不在 DONE/CANCELLED。                                                                                                                                                                                                                                                  |
-| `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。 |
-| `dependency not ready`                   | 有 BLOCKS 关系的前置任务尚未 DONE。                                                                                                                                                                                                                                                    |
-| `verification required`                  | 任务要求验收，先 `verify` 再 `complete`。                                                                                                                                                                                                                                              |
+| 报错                                     | 含义与出路                                                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `checklist incomplete`                   | 还有检查项停在 TODO/DOING。用 `atm_task_patch(operation="checklist_single")` 逐条置 `DONE` 或 `SKIPPED`；多项可用 `checklist_batch`。两者的 `expected_version` 语义不同：单项比的是**检查项自己**的版本，批量比的是**任务**的版本并整批回滚。字段名相同不代表语义相同，取版本前先确认走的是哪条。两者都校验检查项归属：单项报 `CHECKLIST_TASK_MISMATCH`，批量报 `TASK_MISMATCH`。 |
+| `evidence required` / `evidence missing` | 该检查项标了「需要证据」。要么带 `evidence` 挂上真证据，要么置 `SKIPPED`——跳过的必证项不再要求证据。不要为了打勾而编证据。                                                                                                                                                                                                                                                        |
+| `child incomplete`                       | 还有子 WorkItem 不在 DONE/CANCELLED。                                                                                                                                                                                                                                                                                                                                             |
+| `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。                                                                                            |
+| `dependency not ready`                   | 有 BLOCKS 关系的前置任务尚未 DONE。                                                                                                                                                                                                                                                                                                                                               |
+| `verification required`                  | 任务要求验收，先 `verify` 再 `complete`。                                                                                                                                                                                                                                                                                                                                         |
 
 ### MCP 没有的能力走 REST
 

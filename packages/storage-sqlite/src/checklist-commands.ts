@@ -38,6 +38,11 @@ export class ChecklistCommands {
     opId: string,
     input: {
       checklistId: string;
+      /**
+       * 传了才校验归属。REST 的 `PATCH /checklist/:id` 只有路径里的检查项 id，拿不到任务；
+       * MCP 的 checklist_single 则恒有 task_key，所以那条路径永远会校验。
+       */
+      taskKey?: string;
       expectedVersion: number;
       status: "TODO" | "DOING" | "DONE" | "SKIPPED";
       evidence?: unknown[];
@@ -63,6 +68,21 @@ export class ChecklistCommands {
             message: `检查项不存在：${input.checklistId}`,
             details: { entity: "CHECKLIST", reference: input.checklistId },
           });
+        // 归属校验要排在版本校验之前：task_key 写错时先说清楚改错了对象，
+        // 而不是让调用方去追一个「版本对不上」的假线索。batch 在 186-212 做的是同一件事。
+        if (input.taskKey !== undefined) {
+          const task = this.#taskReads.rowForTaskKey(input.taskKey);
+          if (row.work_item_id !== task.id)
+            throw new AtmError("CHECKLIST_TASK_MISMATCH", {
+              message: `检查项不属于 ${input.taskKey}`,
+              details: {
+                entity: "CHECKLIST",
+                key: input.checklistId,
+                expected_task: input.taskKey,
+                actual_task: this.#taskReads.taskKeyForId(row.work_item_id),
+              },
+            });
+        }
         if (row.version !== input.expectedVersion)
           throw new AtmError("VERSION_CONFLICT", {
             message: "检查项版本已变化",

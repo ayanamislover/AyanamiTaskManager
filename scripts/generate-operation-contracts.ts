@@ -11,6 +11,11 @@ import {
   MUTATION_ACK_DOCUMENTATION_BEGIN,
   MUTATION_ACK_DOCUMENTATION_END,
 } from "../packages/mcp/src/mutation-ack-contract.js";
+import {
+  generateCompositeTaskPatchDocumentation,
+  TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN,
+  TASK_PATCH_COMPOSITE_DOCUMENTATION_END,
+} from "../packages/mcp/src/task-patch-composite-contract.js";
 
 const root = process.cwd();
 const guidePath = join(root, "ATM_AGENT_GUIDE.md");
@@ -20,6 +25,9 @@ const generatedMutationAckPath = join(root, "docs", "generated", "mutation-ackno
 const table = generateWorkItemOperationTable();
 const mutationAcknowledgement = (
   await format(generateMutationAcknowledgementDocumentation(), { parser: "markdown" })
+).trim();
+const compositeOperations = (
+  await format(generateCompositeTaskPatchDocumentation(), { parser: "markdown" })
 ).trim();
 
 function replaceMarkedSection(
@@ -41,11 +49,17 @@ const [guide, agentIntegration] = await Promise.all([
 ]);
 const nextGuide = replaceMarkedSection(
   replaceMarkedSection(
-    guide,
-    WORK_ITEM_OPERATION_TABLE_BEGIN,
-    WORK_ITEM_OPERATION_TABLE_END,
-    table,
-    "WORK_ITEM_OPERATION_MARKERS_MISSING",
+    replaceMarkedSection(
+      guide,
+      WORK_ITEM_OPERATION_TABLE_BEGIN,
+      WORK_ITEM_OPERATION_TABLE_END,
+      table,
+      "WORK_ITEM_OPERATION_MARKERS_MISSING",
+    ),
+    TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN,
+    TASK_PATCH_COMPOSITE_DOCUMENTATION_END,
+    compositeOperations,
+    "GUIDE_TASK_PATCH_COMPOSITE_MARKERS_MISSING",
   ),
   MUTATION_ACK_DOCUMENTATION_BEGIN,
   MUTATION_ACK_DOCUMENTATION_END,
@@ -64,7 +78,7 @@ await Promise.all([
   writeFile(agentIntegrationPath, nextAgentIntegration, "utf8"),
   writeFile(
     generatedPath,
-    `# WorkItem Operation Contracts\n\n> Generated from \`WorkItemOperations\`; do not edit by hand.\n\n${table}\n`,
+    `# WorkItem Operation Contracts\n\n> Generated from \`WorkItemOperations\` and \`TaskPatchOperations\`; do not edit by hand.\n\n${table}\n\n${compositeOperations}\n`,
     "utf8",
   ),
   writeFile(

@@ -111,23 +111,8 @@ const taskPatchExternalAdapters = Object.fromEntries(
   ReturnType<typeof externalizeObjectSchema<z.ZodObject<z.ZodRawShape>, any>>
 >;
 
-const coreTaskPatchOperations = TASK_PATCH_OPERATION_NAMES.filter(
-  (operation) => TaskPatchOperations[operation].batchable,
-);
 const compositeTaskPatchOperations = TASK_PATCH_OPERATION_NAMES.filter(
   (operation) => !TaskPatchOperations[operation].batchable,
-);
-const coreWorkItemPatch = z.discriminatedUnion(
-  "operation",
-  coreTaskPatchOperations.map(
-    (operation) => taskPatchExternalAdapters[operation].inputSchema,
-  ) as any,
-);
-const compositeWorkItemPatch = z.discriminatedUnion(
-  "operation",
-  compositeTaskPatchOperations.map(
-    (operation) => taskPatchExternalAdapters[operation].inputSchema,
-  ) as any,
 );
 const workItemPatch = z.discriminatedUnion(
   "operation",
@@ -148,10 +133,26 @@ const inputSchema = z
     project: projectCode,
     session: sessionId,
     op_id: opId,
-    items: z.union([
-      z.array(coreWorkItemPatch).min(1).max(50),
-      z.array(compositeWorkItemPatch).length(1),
-    ]),
+    // 先按 16 个 operation 整体判别，成批规则单独校验。
+    // 若写成「core 数组 | composite 数组」的 union，composite 条目里某个叶子写错时，
+    // core 分支会先报 "No matching discriminator: operation" 并盖住真正的叶子错误——
+    // 等于指着唯一写对的字段报错，调用方只能穷举形状。
+    items: z
+      .array(workItemPatch)
+      .min(1)
+      .max(50)
+      .superRefine((items, context) => {
+        const composite = items.filter((item) =>
+          (compositeTaskPatchOperations as readonly string[]).includes(
+            (item as { operation: string }).operation,
+          ),
+        );
+        if (composite.length === 0 || items.length === 1) return;
+        context.addIssue({
+          code: "custom",
+          message: `${(composite[0] as { operation: string }).operation} 不能与其他操作同批：items 只允许一个元素`,
+        });
+      }),
   })
   .strict();
 
@@ -285,6 +286,9 @@ export function createAtmTaskPatchTool(
           decoded.op_id,
           {
             checklistId: checklistItem.checklistId,
+            // task_key 在 schema 里就是必填，此前却只被回显进 ACK：写错时会静默改到
+            // 别的任务的检查项上，回执还回显那个错的 key，看起来像成功。
+            taskKey: item.taskKey,
             expectedVersion: item.expectedVersion,
             status: checklistItem.status,
             ...(checklistItem.evidence === undefined ? {} : { evidence: checklistItem.evidence }),

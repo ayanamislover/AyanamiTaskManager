@@ -58,9 +58,12 @@ describe("MCP static profiles", () => {
       expect(() => assertMcpSchemaBudget(core.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(memory.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(actions.tools)).not.toThrow();
-      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7576, framingBytes: 7 });
+      // core 与 actions 改为完全内联后各涨了一些：$defs 去重虽然更省字节，但客户端
+      // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
+      // 详见 published-schema-readability.test.ts。
+      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7629, framingBytes: 7 });
       expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 4409, framingBytes: 5 });
-      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 4623, framingBytes: 2 });
+      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 5540, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(4);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);

@@ -707,6 +707,8 @@ export class ProjectRepository {
     opId: string,
     input: {
       checklistId: string;
+      /** 传了才校验归属；REST 的 `PATCH /checklist/:id` 拿不到任务，所以是可选的。 */
+      taskKey?: string;
       expectedVersion: number;
       status: "TODO" | "DOING" | "DONE" | "SKIPPED";
       evidence?: unknown[];

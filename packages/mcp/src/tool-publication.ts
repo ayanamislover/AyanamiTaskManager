@@ -10,6 +10,11 @@ import {
 import { z } from "zod";
 import { asAtmError, AtmError, atmErrorDto } from "@ayanami-task/errors";
 import legacyToolListArtifact from "./legacy-tools-list-v1.0.18.json" with { type: "json" };
+import {
+  MCP_SCHEMA_LIMIT_BYTES,
+  MCP_SCHEMA_RESERVE_BYTES,
+  mcpSchemaBytes,
+} from "./schema-budget.js";
 import type {
   AyanamiServerProfile,
   ToolDefinition,
@@ -405,17 +410,23 @@ function isUninformativeObjectSchema(schema: JsonObject): boolean {
   );
 }
 
-function publishedTool(definition: ToolDefinition, surfaceVersion: number): Tool {
+function publishedTool(
+  definition: ToolDefinition,
+  surfaceVersion: number,
+  deduplicate: boolean,
+): Tool {
   const semanticInput = canonicalRuntimeSchema(definition.inputSchema);
   const compactInput = compactDiscriminatedObjectUnions(structuredClone(semanticInput));
   if (!isJsonObject(compactInput)) throw new Error("PUBLIC_SCHEMA_MUST_BE_OBJECT");
-  const inputSchema = deduplicateSchema(compactInput);
+  const inputSchema = deduplicate ? deduplicateSchema(compactInput) : compactInput;
   if (inputSchema.type !== "object")
     throw new Error(`PUBLIC_INPUT_MUST_BE_OBJECT:${definition.name}`);
   const semanticOutput = canonicalRuntimeSchema(definition.outputSchema);
   const outputSchema = isUninformativeObjectSchema(semanticOutput)
     ? undefined
-    : deduplicateSchema(structuredClone(semanticOutput));
+    : deduplicate
+      ? deduplicateSchema(structuredClone(semanticOutput))
+      : structuredClone(semanticOutput);
   return {
     name: definition.name,
     description: definition.description,
@@ -444,8 +455,16 @@ export function publishedTools(
     }
     return Object.freeze(structuredClone(legacyToolListArtifact) as unknown as Tool[]);
   }
+  const definitions = registry.definitions(profile);
+  // $defs 去重能省字节，但客户端解析 $ref 时会把被抽走的类型渲染成 {}：枚举和联合类型
+  // 就此对 agent 不可见，只能靠试错。实测这正是 atm_record.kind、atm_progress_add.scope
+  // 被猜错、atm_task_patch.items 被穷举的原因。所以只在预算真的装不下时才付这个代价。
+  const inlined = definitions.map((definition) => publishedTool(definition, surfaceVersion, false));
+  if (mcpSchemaBytes(inlined) <= MCP_SCHEMA_LIMIT_BYTES - MCP_SCHEMA_RESERVE_BYTES) {
+    return Object.freeze(inlined);
+  }
   return Object.freeze(
-    registry.definitions(profile).map((definition) => publishedTool(definition, surfaceVersion)),
+    definitions.map((definition) => publishedTool(definition, surfaceVersion, true)),
   );
 }
 
