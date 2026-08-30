@@ -629,7 +629,7 @@ try {
   check(
     "打包 memory Profile 工具完整",
     JSON.stringify(memoryTools) ===
-      JSON.stringify(["atm_progress_add", "atm_record", "atm_search", "atm_delta"]),
+      JSON.stringify(["atm_progress_add", "atm_record", "atm_feedback", "atm_search", "atm_delta"]),
     memoryTools.join(", "),
   );
   check(
@@ -638,16 +638,19 @@ try {
     actionsTools.join(", "),
   );
   check(
-    "打包三 Profile 工具无重叠且联合为 11 个",
+    "打包三 Profile 工具无重叠且联合为 12 个",
     coreTools.filter((name) => [...memoryTools, ...actionsTools].includes(name)).length === 0 &&
       memoryTools.filter((name) => actionsTools.includes(name)).length === 0 &&
-      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 11,
+      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 12,
   );
   check(
     "打包 stdio 未指定 Profile 时保留完整 legacy 兼容能力",
     legacyTools.length === 11 &&
       new Set(legacyTools).size === 11 &&
-      [...coreTools, ...memoryTools, ...actionsTools].every((name) => legacyTools.includes(name)),
+      [...coreTools, ...memoryTools, ...actionsTools]
+        .filter((name) => name !== "atm_feedback")
+        .every((name) => legacyTools.includes(name)) &&
+      !legacyTools.includes("atm_feedback"),
     legacyTools.join(", "),
   );
   await checkInvalidPackagedProfileFails();
