@@ -41,6 +41,7 @@ describe("MCP static profiles", () => {
       expect(memory.tools.map((tool) => tool.name)).toEqual([
         "atm_progress_add",
         "atm_record",
+        "atm_feedback",
         "atm_search",
         "atm_delta",
       ]);
@@ -51,7 +52,8 @@ describe("MCP static profiles", () => {
       expect([...coreNames].filter((name) => memoryNames.has(name))).toEqual([]);
       expect([...coreNames].filter((name) => actionNames.has(name))).toEqual([]);
       expect([...memoryNames].filter((name) => actionNames.has(name))).toEqual([]);
-      expect(new Set([...coreNames, ...memoryNames, ...actionNames])).toHaveLength(11);
+      const formalNames = new Set([...coreNames, ...memoryNames, ...actionNames]);
+      expect(formalNames).toHaveLength(12);
       expect(mcpSchemaBytes(core.tools)).toBeLessThanOrEqual(7680);
       expect(mcpSchemaBytes(memory.tools)).toBeLessThanOrEqual(7680);
       expect(mcpSchemaBytes(actions.tools)).toBeLessThanOrEqual(7680);
@@ -62,10 +64,10 @@ describe("MCP static profiles", () => {
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
       expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7629, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 4409, framingBytes: 5 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 5267, framingBytes: 6 });
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 5540, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
-      expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(4);
+      expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(5);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);
       expect(() =>
         assertMcpSchemaBudget([
@@ -81,13 +83,10 @@ describe("MCP static profiles", () => {
       expect(memory.client.getInstructions()).toContain("memory profile");
       expect(actions.client.getInstructions()).toContain("actions profile");
       expect(new Set(legacy.tools.map((tool) => tool.name))).toEqual(
-        new Set([
-          ...core.tools.map((tool) => tool.name),
-          ...memory.tools.map((tool) => tool.name),
-          ...actions.tools.map((tool) => tool.name),
-        ]),
+        new Set([...formalNames].filter((name) => name !== "atm_feedback")),
       );
       expect(legacy.tools).toHaveLength(11);
+      expect(legacy.tools.map((tool) => tool.name)).not.toContain("atm_feedback");
       expect(legacy.client.getInstructions()).toContain("兼容入口");
       expect(legacy.client.getInstructions()).toContain("重启");
       expect(assertLegacyMcpSchemaTransitionBudget(legacy.tools)).toEqual({

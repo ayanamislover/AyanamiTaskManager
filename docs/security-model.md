@@ -31,6 +31,7 @@ Task、Record、Session、Search 和长字段 cursor 包含版本、选择条件
 ### 数据库事务与投影
 
 - 一个正式 mutation 只在单个 Project SQLite 事务内同时提交领域状态、单调事件、幂等回执和 outbox；失败全部回滚。
+- `atm_feedback` 复用同一套 Project Record mutation：只在当前本机项目数据库写入 `ATM_FEEDBACK` Record，不包含网络上传、遥测或自动创建外部 Issue 的路径。
 - 生产 SQL 禁止 `ATTACH DATABASE` 跨 Registry/Project 写入。项目提交后由 outbox 更新 Registry 摘要和全局搜索投影；投影失败保留待重试项，不回滚已经提交的项目事实。
 - Registry 投影是可重建读模型，不是项目事实源；跨数据库不承诺原子可见。
 

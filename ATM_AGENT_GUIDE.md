@@ -1,6 +1,6 @@
 # ATM Agent 快速入门
 
-> 契约锚点：MCP Surface `v3`，2026-08-27 校验。`atm_begin.surface_version` 可用于检测客户端缓存或文档是否过期。
+> 契约锚点：MCP Surface `v4`，2026-08-30 校验。`atm_begin.surface_version` 可用于检测客户端缓存或文档是否过期。
 
 ## ATM 是什么
 
@@ -20,7 +20,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 > 执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
 
-ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与 `ayanami-task-manager-actions` 三个静态 Profile。三者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭“完整工具面”是主动的低内存降级：memory 与 actions 会一起关闭，只保留 core，因此会失去任务修改、进度、Record、搜索和 delta，且修改后需要重载 Agent 客户端。
+ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与 `ayanami-task-manager-actions` 三个静态 Profile。三者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭“完整工具面”是主动的低内存降级：memory 与 actions 会一起关闭，只保留 core，因此会失去任务修改、进度、Record、本机反馈、搜索和 delta，且修改后需要重载 Agent 客户端。
 
 ## Claude Desktop 怎么接入
 
@@ -47,12 +47,16 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 | core    | 开始、恢复 working set、结束   | `atm_begin`、`atm_brief`、`atm_end`                |
 | core    | 查找与创建任务                 | `atm_task_list`、`atm_task_get`、`atm_task_create` |
 | actions | 领取、启动、检查项、验证、完成 | `atm_task_patch`                                   |
-| memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`                   |
+| memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`、`atm_feedback`   |
 | memory  | 精确读取、搜索历史与增量同步   | `atm_search`、`atm_delta`                          |
 
-三个 Profile 联合为 11 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
+三个正式 Profile 联合为 12 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
 
-正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，当前安装器不会新增该入口。
+正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，因此仍是 11 个旧工具且不含 `atm_feedback`；当前安装器不会新增该入口。
+
+### 遇到 ATM 问题时反馈
+
+已通过 `atm_begin` 建立 Session 后，可调用 `atm_feedback(project, session, op_id, summary, detail, severity, tool, task_key)`。它把问题保存为当前项目内 topic 固定为 `atm-agent-feedback` 的 Agent Record，便于在项目“记录”页直接查看、检索和关联任务。反馈只写本机 ATM 项目数据库，不会自动上传到 GitHub 或任何外部服务；相同请求重试必须复用原 `op_id`。`tool` 与 `task_key` 均为可选上下文。
 
 所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
 
@@ -216,7 +220,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 2. 根据 brief 按需调用 `atm_task_list`；只有需要单项完整上下文时才调用 `atm_task_get`。
 3. 开始实现前按下方“任务拆分”规则确认 WorkItem 粒度，再领取具体任务。
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
-5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`。
+5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`；使用 ATM 时遇到产品问题写 `atm_feedback`。
 6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`；满足条件时也可用 `verify_and_complete` 原子完成。
 7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
 

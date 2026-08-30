@@ -3,7 +3,13 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { createAyanamiMcpServer } from "../src/index.js";
 
-const memoryToolNames = new Set(["atm_progress_add", "atm_record", "atm_search", "atm_delta"]);
+const memoryToolNames = new Set([
+  "atm_progress_add",
+  "atm_record",
+  "atm_feedback",
+  "atm_search",
+  "atm_delta",
+]);
 
 export async function connectProfiledClients(service: AyanamiTaskService, name: string) {
   const coreServer = createAyanamiMcpServer(service, { profile: "core" });

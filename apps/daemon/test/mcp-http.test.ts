@@ -117,10 +117,19 @@ describe("Streamable HTTP MCP", () => {
       "atm_task_create",
       "atm_end",
     ]);
-    expect(memory).toEqual(["atm_progress_add", "atm_record", "atm_search", "atm_delta"]);
+    expect(memory).toEqual([
+      "atm_progress_add",
+      "atm_record",
+      "atm_feedback",
+      "atm_search",
+      "atm_delta",
+    ]);
     expect(actions).toEqual(["atm_task_patch"]);
-    expect(new Set(compatibility)).toEqual(new Set([...core, ...memory, ...actions]));
+    expect(new Set(compatibility)).toEqual(
+      new Set([...core, ...memory, ...actions].filter((name) => name !== "atm_feedback")),
+    );
     expect(compatibility).toHaveLength(11);
+    expect(compatibility).not.toContain("atm_feedback");
     expect(core.filter((name) => memory.includes(name))).toEqual([]);
     expect(actions.filter((name) => [...core, ...memory].includes(name))).toEqual([]);
   });

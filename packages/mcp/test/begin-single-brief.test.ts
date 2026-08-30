@@ -47,7 +47,7 @@ describe("atm_begin brief ownership", () => {
         scope: "project",
         project: project.code,
         session: expect.stringMatching(/^01/u),
-        surface_version: 3,
+        surface_version: 4,
         brief_mode: "full",
         brief_truncated: false,
         atomicBegin: { operationId: "single-brief-begin", disposition: "CREATED" },
@@ -96,7 +96,7 @@ describe("atm_begin brief ownership", () => {
         scope: "project",
         project: project.code,
         session: expect.stringMatching(/^01/u),
-        surface_version: 3,
+        surface_version: 4,
         brief_mode: "full",
         atomicBegin: { operationId: common.op_id, disposition: "CREATED" },
       });
@@ -104,7 +104,7 @@ describe("atm_begin brief ownership", () => {
         scope: "project",
         project: project.code,
         session: first.structuredContent?.session,
-        surface_version: 3,
+        surface_version: 4,
         brief_mode: "full",
         atomicBegin: { operationId: common.op_id, disposition: "RECOVERED" },
       });

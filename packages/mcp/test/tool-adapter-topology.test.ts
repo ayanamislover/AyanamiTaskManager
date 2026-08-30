@@ -56,6 +56,12 @@ const manifest = [
     factory: "createAtmRecordTool",
   },
   {
+    path: "tools/memory/feedback.ts",
+    profile: "memory",
+    name: "atm_feedback",
+    factory: "createAtmFeedbackTool",
+  },
+  {
     path: "tools/memory/search.ts",
     profile: "memory",
     name: "atm_search",

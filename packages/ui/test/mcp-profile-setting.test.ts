@@ -10,6 +10,8 @@ describe("memory Profile 设置说明", () => {
     );
     expect(source).toContain("默认开启");
     expect(source).toContain("关闭后将失去");
+    expect(source).toContain("atm_feedback");
+    expect(source).toContain("六个工具");
     expect(source).toMatch(/重载或重启.*Agent 客户端/u);
     expect(source).toContain("memoryProfileError");
     expect(source).toContain("自动修复失败：");

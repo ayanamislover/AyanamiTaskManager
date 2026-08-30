@@ -87,6 +87,16 @@ const publicFields: Record<string, readonly string[]> = {
     "importance",
     "scope",
   ],
+  atm_feedback: [
+    "project",
+    "session",
+    "op_id",
+    "summary",
+    "detail",
+    "severity",
+    "tool",
+    "task_key",
+  ],
   atm_search: [
     "list",
     "project",
@@ -388,7 +398,7 @@ describe("MCP public/runtime schema truth", () => {
     try {
       expect(() => assertPublicSurface(fixture.tools)).not.toThrow();
       expect(() => assertRuntimeSemantics(fixture.runtimeSchemas, fixture.tools)).not.toThrow();
-      expect(fixture.tools).toHaveLength(11);
+      expect(fixture.tools).toHaveLength(12);
       for (const tool of fixture.tools) {
         expect(tool.inputSchema.additionalProperties, tool.name).toBe(false);
       }

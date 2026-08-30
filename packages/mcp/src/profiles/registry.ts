@@ -45,7 +45,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
   const registry = new ToolDefinitionRegistry();
   const [begin, brief, taskList, taskGet, taskCreate, end] = coreToolDefinitions(service);
   const [taskPatch] = actionToolDefinitions(service);
-  const [progressAdd, record, search, delta] = memoryToolDefinitions(service);
+  const [progressAdd, record, feedback, search, delta] = memoryToolDefinitions(service);
   installDefinition(registry, service, begin);
   installDefinition(registry, service, brief);
   installDefinition(registry, service, taskList);
@@ -54,6 +54,7 @@ export function createAyanamiToolRegistry(service: AyanamiTaskService): ToolDefi
   installDefinition(registry, service, taskPatch);
   installDefinition(registry, service, progressAdd);
   installDefinition(registry, service, record);
+  installDefinition(registry, service, feedback);
   installDefinition(registry, service, search);
   installDefinition(registry, service, delta);
   installDefinition(registry, service, end);

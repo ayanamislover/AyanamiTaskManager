@@ -2,13 +2,13 @@
 
 > Generated from `ToolDefinitionRegistry`; do not edit by hand.
 
-Surface: `v3`
+Surface: `v4`
 
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
-| core | 7629 | `6976add811c21234f48650494005a6dab2c640dd95f591c1a0104b5282508ea4` |
-| memory | 4409 | `9b51e2fc76507f6ee610de4c1e5b4acb9bcaef38ca4144adf0d5cdb4cc21bd86` |
-| actions | 5540 | `3118447dc17eb8f2e5b1e0b7e3beaa9d87f7d8da37c2e324b25275fcbad6e47c` |
+| core | 7629 | `c533f5bca8e29e357e4f65f44e80fee2a9dd67968e026c3ded8b4cedd2cb30ba` |
+| memory | 5267 | `af64a90c191c440313e697f266d7627db6780f9c117ec923ad2cb9ee8e4fd2f7` |
+| actions | 5540 | `b99c31e93d3a819c114c5386ac83fd88017826e87bdd0e9c66ebdc2a9533f46a` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
 | --- | --- | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ Surface: `v3`
 | core | `atm_end` | 结束会话并交接。 | false | false | `ed553337d131` |
 | memory | `atm_progress_add` | 写任务或项目进度。 | false | false | `a65dbceedb8a` |
 | memory | `atm_record` | 保存关键记录。 | false | false | `dc6b90fa4655` |
+| memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。 | false | false | `b7785a7e8408` |
 | memory | `atm_search` | 搜索事实。 | true | false | `2dab21182cf9` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
 | actions | `atm_task_patch` | 批量变更任务。 | false | true | `c95bd1e34656` |

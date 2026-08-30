@@ -228,8 +228,8 @@ export function SettingsPage({
                           <div className="atm-row-sub">
                             默认开启完整工具面。关闭会同时移除 memory 与 actions 两个静态
                             Profile，只保留 core，但关闭后将失去
-                            atm_task_patch、atm_progress_add、atm_record、atm_search、atm_delta
-                            五个工具。切换后请重载或重启 Agent 客户端。
+                            atm_task_patch、atm_progress_add、atm_record、atm_feedback、atm_search、atm_delta
+                            六个工具。切换后请重载或重启 Agent 客户端。
                           </div>
                           {memoryProfileError ? (
                             <div className="atm-inline-error" role="alert">

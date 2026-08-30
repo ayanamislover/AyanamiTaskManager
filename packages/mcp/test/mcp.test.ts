@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("Ayanami MCP", () => {
-  it("公开恰好 11 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
+  it("公开恰好 12 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-"));
     roots.push(dataDir);
     const service = await AyanamiTaskService.open({
@@ -50,6 +50,7 @@ describe("Ayanami MCP", () => {
     expect(memoryListed.tools.map((tool) => tool.name)).toEqual([
       "atm_progress_add",
       "atm_record",
+      "atm_feedback",
       "atm_search",
       "atm_delta",
     ]);
@@ -122,7 +123,7 @@ describe("Ayanami MCP", () => {
           /^[a-f0-9]{64}$/u.test(String(tool._meta?.schema_hash ?? "")),
       ),
     ).toBe(true);
-    expect(profiles.coreClient.getInstructions()).toContain("MCP surface v3");
+    expect(profiles.coreClient.getInstructions()).toContain("MCP surface v4");
     expect(profiles.coreClient.getInstructions()).toContain("直接使用返回的 brief");
     const invalidContract = await client.callTool({
       name: "atm_record",
@@ -387,7 +388,7 @@ describe("Ayanami MCP", () => {
     expect(resumedBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 3,
+      surface_version: 4,
       brief_mode: "full",
     });
     expect(resumedBody.session).toEqual(expect.any(String));
@@ -406,7 +407,7 @@ describe("Ayanami MCP", () => {
     expect(identityBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 3,
+      surface_version: 4,
       brief_mode: "none",
       brief_truncated: false,
     });
@@ -427,7 +428,7 @@ describe("Ayanami MCP", () => {
     expect(minimalBody).toMatchObject({
       scope: "project",
       project: "BRF",
-      surface_version: 3,
+      surface_version: 4,
       brief_mode: "minimal",
     });
     expect(minimalBody).not.toHaveProperty("records");
