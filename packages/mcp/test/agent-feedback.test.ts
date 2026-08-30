@@ -144,4 +144,43 @@ describe("local Agent feedback MCP entry", () => {
       s.service.close();
     }
   });
+
+  it("CRITICAL 反馈不会挤进 brief，同项目真实风险照常出现", async () => {
+    const s = await fixture();
+    try {
+      await s.service.createRecord(s.project.code, s.session, "real-risk", {
+        kind: "RISK",
+        title: "真实项目风险",
+        summary: "打包产物在 Windows 上偶发缺 native 模块",
+        importance: "CRITICAL",
+      });
+      const created = await s.client.callTool({
+        name: "atm_feedback",
+        arguments: {
+          project: s.project.code,
+          session: s.session,
+          op_id: "feedback-brief-scope",
+          summary: "atm_task_patch 的报错看不出哪个字段写错了",
+          detail: "希望错误指到具体字段。",
+          severity: "CRITICAL",
+        },
+      });
+      expect(created.isError).not.toBe(true);
+      const feedbackKey = String((created.structuredContent as any).entities[0].key);
+
+      const snapshot = await s.service.briefSnapshot(s.project.code, s.session);
+      const summaries = snapshot.records.map((record) => record.summary);
+      expect(summaries).toContain("打包产物在 Windows 上偶发缺 native 模块");
+      expect(summaries).not.toContain("atm_task_patch 的报错看不出哪个字段写错了");
+
+      // 反馈本身照常存在，只是不进 brief。
+      await expect(s.service.getRecord(s.project.code, feedbackKey)).resolves.toMatchObject({
+        key: feedbackKey,
+        scope: "ATM_FEEDBACK",
+      });
+    } finally {
+      await Promise.all([s.client.close(), s.server.close()]);
+      s.service.close();
+    }
+  });
 });

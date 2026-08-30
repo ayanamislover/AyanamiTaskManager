@@ -64,6 +64,18 @@ export const RECORD_KINDS = [
 export const RecordKindSchema = z.enum(RECORD_KINDS);
 export type RecordKind = z.infer<typeof RecordKindSchema>;
 
+export const ATM_FEEDBACK_RECORD_SCOPE = "ATM_FEEDBACK";
+
+/**
+ * 这些 scope 的 Record 讲的是 ATM 这个产品，不是所在项目的事实，因此不进 brief。
+ *
+ * brief 只按 kind + importance 选取（context-read-model.ts），而 atm_feedback 落的是
+ * RISK：severity=HIGH/CRITICAL 的产品反馈会被后续每个 Session 当成项目风险读到，
+ * 还会按更新时间把更早的真实 CONSTRAINT 挤出名额。写在这里而不是 SQL 里，
+ * 是为了让写入端（atm_feedback）和过滤端指向同一个常量。
+ */
+export const BRIEF_EXCLUDED_RECORD_SCOPES = [ATM_FEEDBACK_RECORD_SCOPE] as const;
+
 export const PROJECT_HEALTH_LABELS: Record<ProjectHealth, string> = {
   ON_TRACK: "进展正常",
   AT_RISK: "存在风险",

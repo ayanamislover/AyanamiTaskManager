@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { BRIEF_EXCLUDED_RECORD_SCOPES } from "@ayanami-task/protocol";
 import type { BriefSnapshot, BriefSnapshotRecord, WorkItemView } from "./read-model-types.js";
 
 type DetailedWorkItem = WorkItemView & { dependencies: string[] };
@@ -76,15 +77,19 @@ export class ContextReadModel {
           `SELECT local_no, kind, summary, importance, source_type, source_actor_id,
                   source_session_id, source_ref
            FROM records
-           WHERE status = 'ACTIVE' AND (
-             (kind = 'CONSTRAINT' AND source_type = 'USER') OR
-             (kind IN ('DECISION','CONSTRAINT','FACT','RISK') AND importance IN ('HIGH','CRITICAL'))
-           )
+           WHERE status = 'ACTIVE'
+             -- 排在 kind/importance 之外单独一条：讲 ATM 自己的 Record 不该进 brief，
+             -- 无论它用的是哪个 kind。scope 是 NOT NULL DEFAULT 'PROJECT'，不必考虑 NULL。
+             AND scope NOT IN (${BRIEF_EXCLUDED_RECORD_SCOPES.map(() => "?").join(",")})
+             AND (
+               (kind = 'CONSTRAINT' AND source_type = 'USER') OR
+               (kind IN ('DECISION','CONSTRAINT','FACT','RISK') AND importance IN ('HIGH','CRITICAL'))
+             )
            ORDER BY CASE WHEN source_type = 'USER' AND kind = 'CONSTRAINT' THEN 0 ELSE 1 END,
                     CASE importance WHEN 'CRITICAL' THEN 0 ELSE 1 END,
                     updated_at DESC, local_no DESC LIMIT 8`,
         )
-        .all() as Array<{
+        .all(...BRIEF_EXCLUDED_RECORD_SCOPES) as Array<{
         local_no: number;
         kind: string;
         summary: string;

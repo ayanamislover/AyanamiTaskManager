@@ -1,5 +1,6 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
+  ATM_FEEDBACK_RECORD_SCOPE,
   RECORD_SUMMARY_CODE_POINT_LIMIT,
   RecordSummarySchema,
   unicodeCodePointLength,
@@ -62,7 +63,7 @@ export function createAtmFeedbackTool(
         summary: decoded.summary,
         detail: localFeedbackDetail(decoded),
         importance: decoded.severity,
-        scope: "ATM_FEEDBACK",
+        scope: ATM_FEEDBACK_RECORD_SCOPE,
         topic: "atm-agent-feedback",
         ...(decoded.task_key === undefined ? {} : { workItemKey: decoded.task_key }),
       });

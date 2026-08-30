@@ -127,7 +127,7 @@ MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
 ### 本机 Agent 反馈入口
 
-Agent 已建立 Session 后，可调用 `atm_feedback` 提交使用 ATM 时遇到的问题。必填字段为 `project`、`session`、唯一 `op_id` 与不超过 300 个 Unicode code point 的 `summary`；`detail`、`severity`、`tool` 和 `task_key` 用于补充复现上下文。ATM 将它保存为当前项目内 `scope=ATM_FEEDBACK`、`topic=atm-agent-feedback` 的 Agent Record，项目“记录”页可直接查看来源、严重度、摘要与正文。该入口只写本机项目数据库，不会自动上传到 GitHub 或任何外部服务。
+Agent 已建立 Session 后，可调用 `atm_feedback` 提交使用 ATM 时遇到的问题。必填字段为 `project`、`session`、唯一 `op_id` 与不超过 300 个 Unicode code point 的 `summary`；`detail`、`severity`、`tool` 和 `task_key` 用于补充复现上下文。ATM 将它保存为当前项目内 `scope=ATM_FEEDBACK`、`topic=atm-agent-feedback` 的 Agent Record，项目“记录”页可直接查看来源、严重度、摘要与正文。该入口只写本机项目数据库，不会自动上传到 GitHub 或任何外部服务。`ATM_FEEDBACK` 在 `BRIEF_EXCLUDED_RECORD_SCOPES` 里，因此无论 `severity` 多高都不会进入 `atm_begin` / `atm_brief` 的 records：brief 只承载所在项目的事实，讲 ATM 自己的记录不占它的名额。
 
 正式 Profile 的 descriptor bytes、Profile hash、逐工具安全注解与 schema hash 由 registry 生成到 `docs/generated/mcp-tool-contracts.md`；文档一致性测试会拒绝手工漂移。
 

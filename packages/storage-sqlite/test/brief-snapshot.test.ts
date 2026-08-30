@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { ATM_FEEDBACK_RECORD_SCOPE } from "@ayanami-task/protocol";
 import { AyanamiDatabaseManager, ProjectRepository } from "../src/index.js";
 
 const temporary: string[] = [];
@@ -120,6 +121,59 @@ describe("brief snapshot", () => {
       expect(legacy).toMatchObject({ project: "BCOMP", truncated: true });
       expect(legacy.records).toHaveLength(1);
       expect(legacy.records[0]).not.toHaveProperty("key");
+    } finally {
+      manager.close();
+    }
+  });
+
+  it("讲 ATM 自己的 Record 不进 brief，同项目的真实风险照常进", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-brief-scope-"));
+    temporary.push(dataDir);
+    const manager = await AyanamiDatabaseManager.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      const project = await manager.createProject({
+        name: "Brief scope",
+        sourcePath: null,
+        code: "BSCOPE",
+      });
+      const repository = new ProjectRepository(await manager.openProject(project.id));
+      const session = repository.createSession({
+        agentId: "scope-agent",
+        displayName: "Scope Agent",
+        clientKind: "test",
+        role: "SUBAGENT",
+      });
+      const actor = { type: "AGENT" as const, id: "scope-agent", sessionId: session.id };
+
+      // 对照：同 kind、同 importance、只是 scope 不同。两条都留在库里，
+      // 用例才能区分「过滤生效」和「查询整个塌掉」。
+      const real = repository.createRecord(actor, "scope-real", {
+        kind: "RISK",
+        title: "真实项目风险",
+        summary: "打包产物在 Windows 上偶发缺 native 模块",
+        importance: "CRITICAL",
+      });
+      const feedback = repository.createRecord(actor, "scope-feedback", {
+        kind: "RISK",
+        title: "ATM Agent 反馈：报错定位不到字段",
+        summary: "atm_task_patch 的报错看不出哪个字段写错了",
+        importance: "CRITICAL",
+        scope: ATM_FEEDBACK_RECORD_SCOPE,
+      });
+
+      const snapshot = repository.briefSnapshot(session.id);
+      const keys = snapshot.records.map((record) => record.key);
+      expect(keys).toContain(real.key);
+      expect(keys).not.toContain(feedback.key);
+
+      // 过滤只针对 brief：Record 本身照常存在、可读、可搜。
+      expect(repository.getRecord(feedback.key)).toMatchObject({
+        key: feedback.key,
+        scope: ATM_FEEDBACK_RECORD_SCOPE,
+      });
     } finally {
       manager.close();
     }
