@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { expect, _electron as electron } from "@playwright/test";
+import { expectedInitialWindowSize, windowSizeMatches } from "./window-smoke-sizing.js";
 
 const root = process.cwd();
 const executable = resolve(
@@ -86,12 +87,26 @@ try {
   });
   await expect(page.locator(".atm-brand img")).toBeVisible();
   await expect(page.getByRole("toolbar", { name: "窗口控制" })).toBeVisible();
-  await expect
-    .poll(() => nativeWindow.evaluate((window) => window.getBounds()))
-    .toMatchObject({
-      width: 1920,
-      height: 1080,
-    });
+  const primaryDisplay = await application.evaluate(({ screen }) => {
+    const display = screen.getPrimaryDisplay();
+    return {
+      bounds: { width: display.bounds.width, height: display.bounds.height },
+      workArea: { width: display.workArea.width, height: display.workArea.height },
+    };
+  });
+  const initialBounds = await nativeWindow.evaluate((window) => window.getBounds());
+  const expectedInitialBounds = expectedInitialWindowSize(
+    primaryDisplay.bounds,
+    primaryDisplay.workArea,
+  );
+  expect(
+    windowSizeMatches(initialBounds, expectedInitialBounds),
+    `初始窗口尺寸不符合默认、最小尺寸与当前工作区约束：${JSON.stringify({
+      initialBounds,
+      expectedInitialBounds,
+      primaryDisplay,
+    })}`,
+  ).toBe(true);
   await expect
     .poll(() =>
       page
@@ -259,8 +274,13 @@ try {
 
   await nativeWindow.evaluate((window) => window.setSize(1440, 900));
   await expect
-    .poll(() => nativeWindow.evaluate((window) => window.getBounds()))
-    .toMatchObject({ width: 1440, height: 900 });
+    .poll(async () =>
+      windowSizeMatches(await nativeWindow.evaluate((window) => window.getBounds()), {
+        width: 1440,
+        height: 900,
+      }),
+    )
+    .toBe(true);
 
   const scroll = page.locator(".atm-main");
   const metrics = await scroll.evaluate((element) => ({
