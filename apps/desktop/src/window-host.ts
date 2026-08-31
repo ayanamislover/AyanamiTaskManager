@@ -18,7 +18,11 @@ import {
   type NotificationMode,
 } from "./notification-policy.js";
 import { createWindowOptions } from "./window-options.js";
-import { WindowReadinessGate, type WindowReadinessAction } from "./window-readiness.js";
+import {
+  RENDERER_READY_TIMEOUT_MS,
+  WindowReadinessGate,
+  type WindowReadinessAction,
+} from "./window-readiness.js";
 import { rendererEntryUrl, rendererNavigationAllowed } from "./renderer-security.js";
 
 type ProjectEvent = {
@@ -44,6 +48,7 @@ export class WindowHost {
   private readonly projectSequences = new Map<string, number>();
   private readonly notificationDedup = new Map<string, number>();
   private readonly readiness = new WindowReadinessGate();
+  private rendererReadyTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: WindowHostOptions) {}
 
@@ -71,6 +76,20 @@ export class WindowHost {
     this.mainWindow.on("ready-to-show", () => {
       this.applyReadinessAction(this.readiness.markWindowReady());
     });
+    this.armRendererReadyTimeout(this.mainWindow);
+    // 渲染器加载失败或渲染进程退出时，就绪信号永远不会来了。不放行的话托盘、
+    // 第二实例、activate 会一起变成空操作，应用再也打不开。
+    this.mainWindow.webContents.on(
+      "did-fail-load",
+      (_event, errorCode, _description, _url, isMainFrame) => {
+        // -3 是 ABORTED，正常导航打断也会报，不能当成加载失败。
+        if (!isMainFrame || errorCode === -3) return;
+        this.abandonRendererWait();
+      },
+    );
+    this.mainWindow.webContents.on("render-process-gone", () => {
+      this.abandonRendererWait();
+    });
     const publishMaximizedState = () => {
       if (!this.mainWindow) return;
       this.mainWindow.webContents.send(
@@ -88,6 +107,7 @@ export class WindowHost {
     });
     this.mainWindow.on("closed", () => {
       this.mainWindow = null;
+      this.clearRendererReadyTimeout();
       this.readiness.reset(false);
     });
     const entry = rendererEntryUrl({
@@ -140,6 +160,9 @@ export class WindowHost {
     ipcMain.on("atm:renderer-ready", (event) => {
       const window = this.mainWindow;
       if (!window || event.sender !== window.webContents) return;
+      // 信号已经到了，兜底计时器就没有存在意义了。在人为的 smoke 延迟之前清，
+      // 免得那段延迟把计时器顶到超时。
+      this.clearRendererReadyTimeout();
       const acceptRendererReady = () => {
         if (this.mainWindow !== window || window.isDestroyed()) return;
         this.applyReadinessAction(this.readiness.markRendererReady());
@@ -172,6 +195,26 @@ export class WindowHost {
 
   private navigate(route: string): void {
     this.applyReadinessAction(this.readiness.requestNavigation(route));
+  }
+
+  private armRendererReadyTimeout(window: BrowserWindow): void {
+    this.clearRendererReadyTimeout();
+    this.rendererReadyTimer = setTimeout(() => {
+      this.rendererReadyTimer = null;
+      if (this.mainWindow !== window || window.isDestroyed()) return;
+      this.abandonRendererWait();
+    }, RENDERER_READY_TIMEOUT_MS);
+  }
+
+  private clearRendererReadyTimeout(): void {
+    if (!this.rendererReadyTimer) return;
+    clearTimeout(this.rendererReadyTimer);
+    this.rendererReadyTimer = null;
+  }
+
+  private abandonRendererWait(): void {
+    this.clearRendererReadyTimeout();
+    this.applyReadinessAction(this.readiness.markRendererUnavailable());
   }
 
   private applyReadinessAction(action: WindowReadinessAction | null): void {

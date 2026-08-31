@@ -87,21 +87,21 @@ type DesktopBridge = {
 
 function RendererReadySignal({ desktop }: { desktop: DesktopBridge }) {
   useEffect(() => {
-    let cancelled = false;
-    let frame = 0;
+    // 不能用 requestAnimationFrame 等：窗口是 show:false 建的，backgroundThrottling
+    // 默认开着，隐藏页面的帧回调不保证被派发——而这里恰恰是要在窗口还隐藏时报到。
+    // effect 在整棵树 commit 之后才跑，所以直接查一次通常就命中；剩下的交给
+    // MutationObserver，它按 DOM 变更触发，不依赖帧也不受节流影响。
     const announceWhenMounted = () => {
-      if (cancelled) return;
-      if (document.querySelector(".atm-shell")) {
-        desktop.notifyRendererReady();
-        return;
-      }
-      frame = requestAnimationFrame(announceWhenMounted);
+      if (!document.querySelector(".atm-shell")) return false;
+      desktop.notifyRendererReady();
+      return true;
     };
-    frame = requestAnimationFrame(announceWhenMounted);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(frame);
-    };
+    if (announceWhenMounted()) return;
+    const observer = new MutationObserver(() => {
+      if (announceWhenMounted()) observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
   }, [desktop]);
   return null;
 }
