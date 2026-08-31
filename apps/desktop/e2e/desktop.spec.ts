@@ -491,6 +491,7 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
       Object.defineProperty(window, "ayanamiDesktop", {
         configurable: true,
         value: {
+          notifyRendererReady: () => undefined,
           runtime: { endpoint, token },
           getMcpBridges: async () => {
             state.__mcpBridgeCalls! += 1;
@@ -1429,6 +1430,7 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
     ({ endpoint, token }) => {
       const installed = { state: "INSTALLED", version: 1 };
       (window as any).ayanamiDesktop = {
+        notifyRendererReady: () => undefined,
         runtime: { endpoint, token },
         getAgentIntegrations: async () => [
           {
