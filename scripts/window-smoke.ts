@@ -40,12 +40,28 @@ const application = await electron.launch({
     ...inheritedEnvironment,
     ATM_DATA_DIR: dataDir,
     ATM_PACKAGED_SMOKE: "1",
+    ATM_RENDERER_READY_DELAY_MS: "1500",
   },
 });
 
 try {
   const page = await application.firstWindow();
+  const nativeWindow = await application.browserWindow(page);
+  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(false);
+  execFileSync(executable, [`--user-data-dir=${electronUserDataDir}`], {
+    cwd: root,
+    env: {
+      ...inheritedEnvironment,
+      ATM_DATA_DIR: dataDir,
+      ATM_PACKAGED_SMOKE: "1",
+    },
+    windowsHide: true,
+    timeout: 10_000,
+  });
   await page.waitForSelector(".atm-shell");
+  await page.waitForTimeout(250);
+  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(false);
+  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   const runtime = JSON.parse(await readFile(join(dataDir, "runtime", "daemon.json"), "utf8")) as {
     endpoint: string;
     token: string;
@@ -62,19 +78,6 @@ try {
     if (!response.ok) throw new Error(`${path} 创建验收数据失败：${response.status}`);
     return response.json();
   };
-  const nativeWindow = await application.browserWindow(page);
-  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(false);
-  execFileSync(executable, [`--user-data-dir=${electronUserDataDir}`], {
-    cwd: root,
-    env: {
-      ...inheritedEnvironment,
-      ATM_DATA_DIR: dataDir,
-      ATM_PACKAGED_SMOKE: "1",
-    },
-    windowsHide: true,
-    timeout: 10_000,
-  });
-  await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   const nativeWindowHandle = await nativeWindow.evaluate((window) => {
     const handle = window.getNativeWindowHandle();
     return handle.length === 8
@@ -302,7 +305,7 @@ try {
   await nativeWindow.evaluate((window) => window.show());
   await expect.poll(() => nativeWindow.evaluate((window) => window.isVisible())).toBe(true);
   process.stdout.write(
-    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: { ...metrics, thumbScrollTop }, backgroundStartsHidden: true, secondInstanceRestoresWindow: true, closeToTray: true })}\n`,
+    `${JSON.stringify({ ok: true, screenshot, drawerScreenshot, drawerCollapse: { drawerBox, drawerCollapseBox, drawerLayout, leftOffset }, notificationMode: storedNotificationMode, scrollbar: { ...metrics, thumbScrollTop }, backgroundStartsHidden: true, earlyWakeStayedHiddenUntilRendererReady: true, secondInstanceRestoresWindow: true, closeToTray: true })}\n`,
   );
 } finally {
   await application.close();

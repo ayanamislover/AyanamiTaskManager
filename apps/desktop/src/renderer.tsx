@@ -44,6 +44,7 @@ type McpBridgeObservation = {
 };
 
 type DesktopBridge = {
+  notifyRendererReady(): void;
   runtimeRequest(input: {
     path: string;
     method?: string;
@@ -83,6 +84,27 @@ type DesktopBridge = {
   onWindowMaximizedChange(listener: (maximized: boolean) => void): () => void;
   onNavigate(listener: (route: string) => void): () => void;
 };
+
+function RendererReadySignal({ desktop }: { desktop: DesktopBridge }) {
+  useEffect(() => {
+    let cancelled = false;
+    let frame = 0;
+    const announceWhenMounted = () => {
+      if (cancelled) return;
+      if (document.querySelector(".atm-shell")) {
+        desktop.notifyRendererReady();
+        return;
+      }
+      frame = requestAnimationFrame(announceWhenMounted);
+    };
+    frame = requestAnimationFrame(announceWhenMounted);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(frame);
+    };
+  }, [desktop]);
+  return null;
+}
 
 type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
@@ -197,5 +219,6 @@ createRoot(root).render(
       brandLogoSrc={brandLogoUrl}
       {...(desktop === undefined ? {} : { desktop })}
     />
+    {desktop ? <RendererReadySignal desktop={desktop} /> : null}
   </StrictMode>,
 );

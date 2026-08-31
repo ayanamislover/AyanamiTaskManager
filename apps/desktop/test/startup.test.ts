@@ -13,6 +13,11 @@ import {
 } from "../src/startup.js";
 
 describe("Windows 随机延迟自启动", () => {
+  it("把登录随机延迟限制在用户可感知的 5 秒内", () => {
+    expect(STARTUP_DELAY_MIN_MS).toBe(0);
+    expect(STARTUP_DELAY_MAX_MS).toBeLessThanOrEqual(5_000);
+  });
+
   it("生成包含首尾的有界延迟", () => {
     expect(randomStartupDelayMs(() => 0)).toBe(STARTUP_DELAY_MIN_MS);
     expect(randomStartupDelayMs(() => 1)).toBe(STARTUP_DELAY_MAX_MS);

@@ -88,7 +88,10 @@ async function bootstrap(): Promise<void> {
   let foregroundRequested = false;
   const startupDelayController = new AbortController();
   app.on("second-instance", (_event, commandLine) => {
-    if (process.env.ATM_PACKAGED_SMOKE === "1" && commandLine.includes("--smoke-quit")) {
+    if (
+      (process.env.ATM_PACKAGED_SMOKE === "1" || process.env.ATM_STARTUP_SMOKE === "1") &&
+      commandLine.includes("--smoke-quit")
+    ) {
       windowHost?.markQuitting();
       startupDelayController.abort();
       app.quit();

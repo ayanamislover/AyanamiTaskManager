@@ -1,7 +1,7 @@
 {
   "name": "ayanami-task-manager",
   "productName": "AyanamiTaskManager",
-  "version": "1.0.23",
+  "version": "1.0.24",
   "description": "Local-first Windows project progress control plane for AI agents.",
   "author": "ayanami",
   "private": true,
@@ -38,6 +38,7 @@
     "make": "pnpm build && tsx scripts/forge-make.ts",
     "release": "tsx scripts/release.ts",
     "smoke:packaged": "tsx scripts/packaged-smoke.ts",
+    "smoke:startup": "tsx scripts/login-startup-smoke.ts",
     "smoke:window": "tsx scripts/window-smoke.ts",
     "benchmark:blur-packaged": "tsx scripts/packaged-blur-benchmark.ts",
     "smoke:history": "tsx scripts/default-history-smoke.ts",

@@ -18,6 +18,7 @@ import {
   type NotificationMode,
 } from "./notification-policy.js";
 import { createWindowOptions } from "./window-options.js";
+import { WindowReadinessGate, type WindowReadinessAction } from "./window-readiness.js";
 import { rendererEntryUrl, rendererNavigationAllowed } from "./renderer-security.js";
 
 type ProjectEvent = {
@@ -42,6 +43,7 @@ export class WindowHost {
   private readonly unsubscribeProjects = new Map<string, () => void>();
   private readonly projectSequences = new Map<string, number>();
   private readonly notificationDedup = new Map<string, number>();
+  private readonly readiness = new WindowReadinessGate();
 
   constructor(private readonly options: WindowHostOptions) {}
 
@@ -54,13 +56,11 @@ export class WindowHost {
   }
 
   showWindow(): void {
-    if (!this.mainWindow) return;
-    if (this.mainWindow.isMinimized()) this.mainWindow.restore();
-    this.mainWindow.show();
-    this.mainWindow.focus();
+    this.applyReadinessAction(this.readiness.requestShow());
   }
 
   createWindow(showWhenReady = true): void {
+    this.readiness.reset(showWhenReady);
     this.mainWindow = new BrowserWindow(
       createWindowOptions(
         join(__dirname, "preload.cjs"),
@@ -69,7 +69,7 @@ export class WindowHost {
       ),
     );
     this.mainWindow.on("ready-to-show", () => {
-      if (showWhenReady) this.showWindow();
+      this.applyReadinessAction(this.readiness.markWindowReady());
     });
     const publishMaximizedState = () => {
       if (!this.mainWindow) return;
@@ -88,6 +88,7 @@ export class WindowHost {
     });
     this.mainWindow.on("closed", () => {
       this.mainWindow = null;
+      this.readiness.reset(false);
     });
     const entry = rendererEntryUrl({
       packaged: app.isPackaged,
@@ -136,6 +137,23 @@ export class WindowHost {
   }
 
   private installWindowIpc(): void {
+    ipcMain.on("atm:renderer-ready", (event) => {
+      const window = this.mainWindow;
+      if (!window || event.sender !== window.webContents) return;
+      const acceptRendererReady = () => {
+        if (this.mainWindow !== window || window.isDestroyed()) return;
+        this.applyReadinessAction(this.readiness.markRendererReady());
+      };
+      const smokeDelay =
+        process.env.ATM_PACKAGED_SMOKE === "1"
+          ? Math.min(
+              10_000,
+              Math.max(0, Number.parseInt(process.env.ATM_RENDERER_READY_DELAY_MS ?? "0", 10) || 0),
+            )
+          : 0;
+      if (smokeDelay > 0) setTimeout(acceptRendererReady, smokeDelay);
+      else acceptRendererReady();
+    });
     ipcMain.handle("atm:window-minimize", () => {
       this.mainWindow?.minimize();
     });
@@ -153,8 +171,15 @@ export class WindowHost {
   }
 
   private navigate(route: string): void {
-    this.showWindow();
-    this.mainWindow?.webContents.send("atm:navigate", route);
+    this.applyReadinessAction(this.readiness.requestNavigation(route));
+  }
+
+  private applyReadinessAction(action: WindowReadinessAction | null): void {
+    if (!action || !this.mainWindow) return;
+    if (this.mainWindow.isMinimized()) this.mainWindow.restore();
+    this.mainWindow.show();
+    this.mainWindow.focus();
+    if (action.route !== null) this.mainWindow.webContents.send("atm:navigate", action.route);
   }
 
   private notificationMode(): NotificationMode {
