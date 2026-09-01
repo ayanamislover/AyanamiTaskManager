@@ -6,6 +6,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -126,6 +127,29 @@ describe("MCP 启动方式", () => {
 
     expect(installMcpRuntimeLink(execPath, dataDir)).toBe(link);
     expect(lstatSync(link).ctimeMs).toBe(created);
+  });
+
+  it("应用经 current 启动时仍保留指向真实版本目录的链接", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const link = installMcpRuntimeLink(execPath, dataDir)!;
+    const linkedExecPath = join(link, "AyanamiTaskManager.exe");
+
+    expect(installMcpRuntimeLink(linkedExecPath, dataDir)).toBe(link);
+    expect(readlinkSync(link)).toBe(dirname(execPath));
+    expect(readFileSync(linkedExecPath, "utf8")).toBe("real");
+  });
+
+  it("发现遗留的自引用 current junction 时能恢复到真实版本目录", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    const link = join(dataDir, MCP_RUNTIME_LINK);
+    symlinkSync(link, link, "junction");
+
+    expect(readlinkSync(link)).toBe(link);
+    expect(installMcpRuntimeLink(execPath, dataDir)).toBe(link);
+    expect(readlinkSync(link)).toBe(dirname(execPath));
+    expect(readFileSync(join(link, "AyanamiTaskManager.exe"), "utf8")).toBe("real");
   });
 
   // 这条链接指向的是**安装根**。数据根被递归删除的场合到处都是（烟测的临时数据根、

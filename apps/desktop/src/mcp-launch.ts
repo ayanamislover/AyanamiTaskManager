@@ -4,6 +4,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  realpathSync,
   readlinkSync,
   rmdirSync,
   symlinkSync,
@@ -91,8 +92,25 @@ export function mcpProfileLaunches(input: {
  * 万一哪天这里换成递归删除，删掉的就是用户装好的应用。这不是洁癖：链接指向安装根。
  */
 export function installMcpRuntimeLink(execPath: string, dataDir: string): string | null {
-  const target = dirname(execPath);
   const link = join(dataDir, MCP_RUNTIME_LINK);
+  // Electron 保留进程的启动路径：若登录项从 `current\\AyanamiTaskManager.exe` 启动，
+  // process.execPath 仍然落在 current 下面。直接 dirname(execPath) 会把 current 重建成
+  // 指向自身的 junction，下一次 MCP spawn 就只剩 Transport closed。先穿透链接取得真实
+  // app-<version> 目录；解析失败时也必须靠下面的自引用守卫 fail closed。
+  let target: string;
+  try {
+    target = dirname(realpathSync.native(execPath));
+  } catch {
+    target = dirname(resolve(execPath));
+  }
+  const samePath = (left: string, right: string): boolean => {
+    const resolvedLeft = resolve(left);
+    const resolvedRight = resolve(right);
+    return process.platform === "win32"
+      ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+      : resolvedLeft === resolvedRight;
+  };
+  if (samePath(target, link)) return null;
   try {
     mkdirSync(dataDir, { recursive: true });
     // existsSync 会沿着 junction 看目标：旧 app-<version> 已删时它返回 false，
@@ -101,7 +119,7 @@ export function installMcpRuntimeLink(execPath: string, dataDir: string): string
     const stat = lstatSync(link, { throwIfNoEntry: false });
     if (stat) {
       if (!stat.isSymbolicLink()) return null; // 有人拿真目录占了位，不替他做主删掉
-      if (readlinkSync(link) === target) return link;
+      if (samePath(readlinkSync(link), target)) return link;
       // rmdir 删 Windows 的 junction，unlink 删 POSIX 的目录符号链接。两个都只作用在
       // 链接本身；这里绝不能出现任何 recursive 删除。
       try {
