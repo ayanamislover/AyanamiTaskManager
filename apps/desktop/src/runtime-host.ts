@@ -15,7 +15,12 @@ import {
 } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
 import { installAgentDocumentation } from "./agent-documentation.js";
-import { installMcpRuntimeLink, installMcpStdioBridge, mcpStdioHttpPath } from "./mcp-launch.js";
+import {
+  installMcpRuntimeLink,
+  installMcpStdioBridge,
+  mcpStdioHttpPath,
+  shouldManageMcpRuntime,
+} from "./mcp-launch.js";
 import { LOGIN_ITEM_ARGS, loginItemExecutable } from "./startup.js";
 import { proxyRuntimeRequest, type RuntimeRequestInput } from "./runtime-request.js";
 
@@ -91,9 +96,11 @@ function bundledMcpStdioPath(): string {
 
 export async function startRuntimeHost(): Promise<RuntimeHost> {
   const dataDir = dataDirBeforeReady();
-  installAgentDocumentation(bundledDocumentationRoot(), dataDir);
-  installMcpStdioBridge(bundledMcpStdioPath(), dataDir);
-  installMcpRuntimeLink(process.execPath, dataDir);
+  if (shouldManageMcpRuntime(app.isPackaged)) {
+    installAgentDocumentation(bundledDocumentationRoot(), dataDir);
+    installMcpStdioBridge(bundledMcpStdioPath(), dataDir);
+    installMcpRuntimeLink(process.execPath, dataDir);
+  }
   const runtimeDir = join(dataDir, "runtime");
   mkdirSync(runtimeDir, { recursive: true });
   const lease = acquireDaemonRuntime(runtimeDir);

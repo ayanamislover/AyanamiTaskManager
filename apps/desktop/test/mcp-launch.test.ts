@@ -28,6 +28,7 @@ import {
   mcpStdioHttpPath,
   MCP_RUNTIME_LINK,
   MCP_STDIO_FILENAME,
+  shouldManageMcpRuntime,
   shouldRepairMcpConfigs,
 } from "../src/mcp-launch.js";
 
@@ -301,6 +302,17 @@ describe("过期判定", () => {
     expect(shouldRepairMcpConfigs({ ATM_DATA_DIR: "C:\\temp\\smoke" } as NodeJS.ProcessEnv)).toBe(
       false,
     );
+  });
+
+  it("开发态默认数据根不覆盖正式 current 与 Agent 配置", () => {
+    const normal = {} as NodeJS.ProcessEnv;
+    const isolated = { ATM_DATA_DIR: "C:\\temp\\dev-data" } as NodeJS.ProcessEnv;
+
+    expect(shouldManageMcpRuntime(false, normal)).toBe(false);
+    expect(shouldRepairMcpConfigs(normal, false)).toBe(false);
+    expect(shouldManageMcpRuntime(false, isolated)).toBe(true);
+    expect(shouldManageMcpRuntime(true, normal)).toBe(true);
+    expect(shouldRepairMcpConfigs(normal, true)).toBe(true);
   });
 
   it("打包烟测只能在全部 Agent 配置根都被隔离时显式开启修复", () => {

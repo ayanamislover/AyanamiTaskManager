@@ -148,6 +148,18 @@ export function installMcpStdioBridge(source: string, dataDir: string): string {
 }
 
 /**
+ * 正式安装版可以维护稳定 MCP 入口；开发态只有显式隔离了数据根才允许写入。
+ * 否则 `pnpm dev` 会把正式 current 指向 node_modules/electron，并同步污染全局
+ * Codex/Claude 配置，导致已安装版本和所有新 Agent 会话同时失联。
+ */
+export function shouldManageMcpRuntime(
+  packaged: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return packaged || Boolean(env.ATM_DATA_DIR);
+}
+
+/**
  * 自动修复只在应用跑在自己的正常数据根上时做。
  *
  * 烟测、e2e 与并排安装都会用 ATM_DATA_DIR 指到临时目录。那时算出来的启动方式指向
@@ -156,7 +168,11 @@ export function installMcpStdioBridge(source: string, dataDir: string): string {
  *
  * 用户手动点安装不受影响：那是明示的意图，写什么都是他自己选的。
  */
-export function shouldRepairMcpConfigs(env: NodeJS.ProcessEnv = process.env): boolean {
+export function shouldRepairMcpConfigs(
+  env: NodeJS.ProcessEnv = process.env,
+  packaged = true,
+): boolean {
+  if (!shouldManageMcpRuntime(packaged, env)) return false;
   if (!env.ATM_DATA_DIR) return true;
   if (env.ATM_PACKAGED_SMOKE !== "1" || env.ATM_SMOKE_MCP_CONFIG_REPAIR !== "1") return false;
   const root = env.ATM_SMOKE_AGENT_CONFIG_ROOT;

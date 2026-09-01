@@ -54,6 +54,7 @@ export type AgentIntegrationHostOptions = {
   runtime: Runtime;
   dataDir: string;
   execPath: string;
+  packaged: boolean;
   smokeTrace(stage: string, detail?: unknown): void;
 };
 
@@ -223,7 +224,8 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
   const stdioCommand = launch.command;
   const stdioArgs = launch.args;
   const stdioEnv = launch.env;
-  if (shouldRepairMcpConfigs()) repairStaleMcpConfigs(launch, profileLaunches);
+  if (shouldRepairMcpConfigs(process.env, options.packaged))
+    repairStaleMcpConfigs(launch, profileLaunches);
   ipcMain.handle("atm:get-mcp-bridges", () => observeMcpBridges({ bridgeCommand: stdioCommand }));
   ipcMain.handle("atm:get-mcp-configs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
@@ -240,7 +242,9 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     const result = runMcpProfileSwitch({
       enabled: enabled === true,
       // ATM_DATA_DIR 是烟测/隔离环境，绝不能借设置开关改用户全局 Agent 配置。
-      adapters: shouldRepairMcpConfigs() ? profileSyncAdapters(write) : [],
+      adapters: shouldRepairMcpConfigs(process.env, options.packaged)
+        ? profileSyncAdapters(write)
+        : [],
       // 客户端全部同步成功后才提交偏好；失败由 runMcpProfileSwitch 逆序回滚。
       commit: () => {
         service!.setSetting(

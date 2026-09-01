@@ -43,6 +43,7 @@ async function startApplication(background: boolean): Promise<void> {
     runtime,
     dataDir,
     execPath: process.execPath,
+    packaged: app.isPackaged,
     smokeTrace,
   });
 
