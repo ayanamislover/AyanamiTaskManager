@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
@@ -42,7 +43,9 @@ const electronUserDataDir = resolve(
 const reportPath = resolve(
   process.env.ATM_SMOKE_REPORT ?? join(outputDir, "packaged-smoke-report.json"),
 );
-const agentConfigRoot = resolve(join(outputDir, "packaged-smoke-agent-config"));
+// IME helpers may outlive Electron and retain log handles under the synthetic USERPROFILE.
+// Each invocation needs a fresh home; never delete a previous run's still-open helper files.
+const agentConfigRoot = resolve(join(outputDir, `packaged-smoke-agent-config-${randomUUID()}`));
 const smokeHome = join(agentConfigRoot, "Home");
 const smokeAppData = join(agentConfigRoot, "Roaming");
 const smokeLocalAppData = join(agentConfigRoot, "Local");
@@ -459,7 +462,6 @@ await mkdir(outputDir, { recursive: true });
 await mkdir(dirname(reportPath), { recursive: true });
 await rm(dataDir, { recursive: true, force: true });
 await rm(electronUserDataDir, { recursive: true, force: true });
-await rm(agentConfigRoot, { recursive: true, force: true });
 await mkdir(dirname(codexConfigPath), { recursive: true });
 await mkdir(dirname(claudeConfigPath), { recursive: true });
 await writeFile(
