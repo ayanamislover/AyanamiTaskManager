@@ -5,6 +5,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +38,48 @@ function fixture(token: string, pid = 4321): DaemonRuntimeDescriptor {
 }
 
 describe("single-source daemon runtime discovery", () => {
+  it.runIf(process.platform === "win32")(
+    "reclaims a legacy lock whose live PID was created after the lock",
+    () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-reused-pid-"));
+      temporary.push(runtimeDir);
+      const lockPath = join(runtimeDir, "daemon.lock");
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-boot" }));
+      const previousBoot = new Date("2020-01-01T00:00:00Z");
+      utimesSync(lockPath, previousBoot, previousBoot);
+      const lease = acquireDaemonRuntime(runtimeDir);
+      expect(lease.instanceId).not.toBe("previous-boot");
+      lease.release();
+    },
+  );
+
+  it.runIf(process.platform === "win32")(
+    "reclaims a reused PID even when the stale lock has a fresh file timestamp",
+    () => {
+      const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-birth-"));
+      temporary.push(runtimeDir);
+      const first = acquireDaemonRuntime(runtimeDir);
+      const lockPath = join(runtimeDir, "daemon.lock");
+      const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+      lock.processIdentity = { createdAtTicks: "637134336000000000", startedAtMs: 1577836800000 };
+      writeFileSync(lockPath, JSON.stringify(lock));
+      const successor = acquireDaemonRuntime(runtimeDir);
+      first.release();
+      expect(existsSync(lockPath)).toBe(true);
+      successor.release();
+    },
+  );
+
+  it("keeps a legacy lock when the recorded PID really predates it", () => {
+    const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-legacy-live-"));
+    temporary.push(runtimeDir);
+    writeFileSync(
+      join(runtimeDir, "daemon.lock"),
+      JSON.stringify({ pid: process.pid, nonce: "live" }),
+    );
+    expect(() => acquireDaemonRuntime(runtimeDir)).toThrow("ATM_RUNTIME_ALREADY_ACTIVE");
+  });
+
   it("publishes daemon.json atomically and removes the legacy token only after success", () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-source-"));
     temporary.push(runtimeDir);
