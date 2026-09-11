@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
@@ -486,9 +486,24 @@ await writeFile(
   "utf8",
 );
 
+// Keep this parent PID alive: a PID-only lock implementation must fail this real EXE probe.
+const lockPath = join(dataDir, "runtime", "daemon.lock");
+await mkdir(dirname(lockPath), { recursive: true });
+await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-boot" }));
+const previousBoot = new Date("2020-01-01T00:00:00Z");
+await utimes(lockPath, previousBoot, previousBoot);
 let app = startApp();
 try {
   const runtime = await waitForRuntime(app);
+  const recoveredLock = JSON.parse(await readFile(lockPath, "utf8"));
+  check(
+    "安装产物自动恢复旧格式 PID 复用锁",
+    recoveredLock.pid === runtime.pid && recoveredLock.nonce !== "previous-boot",
+  );
+  check(
+    "运行锁绑定进程创建时间",
+    /^\d{17,19}$/u.test(recoveredLock.processIdentity?.createdAtTicks ?? ""),
+  );
   recordedAgentProfiles = await waitForPackagedAgentProfiles();
   const client = new AyanamiClient(runtime);
   const status = await client.status();
@@ -704,8 +719,17 @@ try {
   check("完全退出清理运行时文件", !existsSync(runtimePath));
   check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
 
+  await writeFile(
+    lockPath,
+    JSON.stringify({
+      pid: process.pid,
+      nonce: "reused-pid",
+      processIdentity: { createdAtTicks: "637134336000000000", startedAtMs: 1577836800000 },
+    }),
+  );
   app = startApp();
   const restartedRuntime = await waitForRuntime(app);
+  check("安装产物自动恢复新格式 PID 复用锁", restartedRuntime.pid !== process.pid);
   check(
     "daemon 重启后 token 与 instanceId 均轮换",
     restartedRuntime.token !== runtime.token && restartedRuntime.instanceId !== runtime.instanceId,

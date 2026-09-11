@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isDifferentProcess, readProcessIdentity } from "./process-identity.js";
 
 export const DAEMON_VERSION = "1.0.26";
 export const DAEMON_RUNTIME_FILENAME = "daemon.json";
@@ -78,8 +79,8 @@ function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -87,7 +88,8 @@ export function acquireDaemonRuntime(runtimeDir: string, pid = process.pid): Dae
   mkdirSync(runtimeDir, { recursive: true });
   const lockPath = join(runtimeDir, DAEMON_LOCK_FILENAME);
   const nonce = randomBytes(16).toString("hex");
-  const content = `${JSON.stringify({ pid, nonce })}\n`;
+  const processIdentity = readProcessIdentity(pid);
+  const content = `${JSON.stringify({ pid, nonce, processIdentity })}\n`;
   const ownsLease = () => {
     try {
       return readFileSync(lockPath, "utf8") === content;
@@ -119,15 +121,28 @@ export function acquireDaemonRuntime(runtimeDir: string, pid = process.pid): Dae
         throw new Error("ATM_RUNTIME_LOCK_FAILED");
     }
     let ownerPid = 0;
+    let ownerIdentity: unknown;
+    let modifiedAt = Number.NaN;
+    let observedLock = "";
     try {
-      const owner = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown };
+      observedLock = readFileSync(lockPath, "utf8");
+      modifiedAt = statSync(lockPath).mtimeMs;
+      const owner = JSON.parse(observedLock) as { pid?: unknown; processIdentity?: unknown };
       if (Number.isSafeInteger(owner.pid)) ownerPid = Number(owner.pid);
+      ownerIdentity = owner.processIdentity;
     } catch {
       // Malformed locks are stale and are quarantined below.
     }
-    if (ownerPid > 0 && processAlive(ownerPid)) throw new Error("ATM_RUNTIME_ALREADY_ACTIVE");
+    if (
+      ownerPid > 0 &&
+      processAlive(ownerPid) &&
+      !isDifferentProcess(ownerIdentity, readProcessIdentity(ownerPid), modifiedAt)
+    )
+      throw new Error("ATM_RUNTIME_ALREADY_ACTIVE");
     const stalePath = `${lockPath}.stale-${pid}-${nonce}-${attempt}`;
     try {
+      // Identity lookup can take time. A changed owner must be reconsidered, not quarantined.
+      if (readFileSync(lockPath, "utf8") !== observedLock) continue;
       // Atomic rename lets only one contender quarantine a stale lock. No
       // contender can accidentally unlink a fresh successor lock.
       renameSync(lockPath, stalePath);
