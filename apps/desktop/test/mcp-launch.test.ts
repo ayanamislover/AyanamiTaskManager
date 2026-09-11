@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -103,7 +104,9 @@ describe("MCP 启动方式", () => {
     expect(after).toEqual(before);
     expect(mcpLaunchStale(before, after)).toBe(false);
     // 而链接确实换指了：拿到的是新版本那个 exe。
-    expect(readlinkSync(join(dataDir, MCP_RUNTIME_LINK))).toBe(dirname(second));
+    expect(realpathSync.native(join(dataDir, MCP_RUNTIME_LINK))).toBe(
+      realpathSync.native(dirname(second)),
+    );
   });
 
   it("旧版本目录已删除导致 junction 悬空时仍能换指到新版本", () => {
@@ -116,7 +119,7 @@ describe("MCP 启动方式", () => {
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
 
     expect(installMcpRuntimeLink(second, dataDir)).toBe(link);
-    expect(readlinkSync(link)).toBe(dirname(second));
+    expect(realpathSync.native(link)).toBe(realpathSync.native(dirname(second)));
     expect(readFileSync(join(link, "AyanamiTaskManager.exe"), "utf8")).toBe("real");
   });
 
@@ -137,7 +140,7 @@ describe("MCP 启动方式", () => {
     const linkedExecPath = join(link, "AyanamiTaskManager.exe");
 
     expect(installMcpRuntimeLink(linkedExecPath, dataDir)).toBe(link);
-    expect(readlinkSync(link)).toBe(dirname(execPath));
+    expect(realpathSync.native(link)).toBe(realpathSync.native(dirname(execPath)));
     expect(readFileSync(linkedExecPath, "utf8")).toBe("real");
   });
 
@@ -149,7 +152,7 @@ describe("MCP 启动方式", () => {
 
     expect(readlinkSync(link)).toBe(link);
     expect(installMcpRuntimeLink(execPath, dataDir)).toBe(link);
-    expect(readlinkSync(link)).toBe(dirname(execPath));
+    expect(realpathSync.native(link)).toBe(realpathSync.native(dirname(execPath)));
     expect(readFileSync(join(link, "AyanamiTaskManager.exe"), "utf8")).toBe("real");
   });
 
