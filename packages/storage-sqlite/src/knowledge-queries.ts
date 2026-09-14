@@ -304,24 +304,44 @@ function readKnowledgePage<T>(
         body.length;
       body = body.slice(heading.start, end);
     }
-    const points = Array.from(body);
+    // 游标位置按 UTF-16 码元计，直接在字符串上切。早先这里是 Array.from(body)，
+    // 500KB 正文会摊成 50 万个单字符串、几十 MB 瞬时堆，而下面的二分还要反复投影，
+    // 峰值就压在这上面。ATM 的 RSS 预算只有 150MB，这条读取路径不该按正文长度分配。
+    const total = body.length;
     const offset = cursor?.position ?? 0;
-    if (offset > points.length) invalid();
-    const page = (count: number): T =>
-      project(
+    if (offset > total) invalid();
+    // 唯一不能落的切点是代理对中间——劈开就成了两个孤立代理。组合记号是独立码点，
+    // 本来就允许分到两页，不用管。
+    //
+    // 这一步目前够不到，变异实测过：下面按 JSON 长度二分，而劈开一对要写成两个
+    // 转义序列（+6 字符），整对原样输出只要 +2。所以「多切一个码元」既让 count 更大
+    // 又让 JSON 更短，二分永远不会选中切在对中间的那一格。留着是因为那个不等式属于
+    // JSON.stringify 的转义规则，不属于这里的分页逻辑：预算口径一旦改成按码元算，
+    // 切点立刻就能落进对中间。
+    const boundary = (index: number): number =>
+      index > offset &&
+      index < total &&
+      (body.charCodeAt(index) & 0xfc00) === 0xdc00 &&
+      (body.charCodeAt(index - 1) & 0xfc00) === 0xd800
+        ? index - 1
+        : index;
+    const endOf = (count: number): number => boundary(Math.min(offset + count, total));
+    const page = (count: number): T => {
+      const end = endOf(count);
+      return project(
         {
           ...entry,
           version: editVersion,
-          bodyMarkdown: points.slice(offset, offset + count).join(""),
+          bodyMarkdown: body.slice(offset, end),
           toc,
-          truncated: offset + count < points.length,
+          truncated: end < total,
           nextCursor:
-            offset + count < points.length
+            end < total
               ? makeCursor(
                   repository,
                   "get",
                   scope,
-                  offset + count,
+                  end,
                   entry.revision,
                   editVersion,
                   entry.revisionId,
@@ -330,18 +350,21 @@ function readKnowledgePage<T>(
         },
         Boolean(cursor),
       );
-    const complete = page(points.length - offset);
+    };
+    const complete = page(total - offset);
     if (JSON.stringify(complete).length <= parsed.maxChars) return complete;
     let low = 0,
-      high = Math.max(0, points.length - offset - 1);
+      high = Math.max(0, total - offset - 1);
     while (low < high) {
       const middle = Math.ceil((low + high) / 2);
       if (JSON.stringify(page(middle)).length <= parsed.maxChars) low = middle;
       else high = middle - 1;
     }
     const result = page(low);
-    if ((!low && offset < points.length) || JSON.stringify(result).length > parsed.maxChars)
-      tooSmall();
+    // 切点被退回起点时这一页是空的，再发游标就指回原处，续读会死循环。
+    // 起点正好是高位代理、预算又只够一个码元时会走到这里，不只是 low 为 0 的情况。
+    if (endOf(low) === offset && offset < total) tooSmall();
+    if (JSON.stringify(result).length > parsed.maxChars) tooSmall();
     return result;
   })();
 }
