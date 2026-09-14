@@ -7,7 +7,7 @@ Surface: `v5`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7629 | `6b500172d3de47bccbae592cf80d282fd87385d9f15133009a2e56dae254841e` |
-| memory | 6657 | `2ef066f130af1cffcfacdcdaa18ad63e23520bd055b0fb0dad2d1849a420b61d` |
+| memory | 6812 | `d3b4ff6c3497b1f90dfe7762ddd7e62b50d81dcf94dc3d1fc986d747148375c4` |
 | actions | 5540 | `c88d683554c3552f4a3d147b20a67f707306624dd2427f3062d78aa963c07c4c` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -18,9 +18,9 @@ Surface: `v5`
 | core | `atm_task_get` | 读单个任务。 | true | false | `39d377871891` |
 | core | `atm_task_create` | 批量创建任务与关系。 | false | false | `548dec5e0352` |
 | core | `atm_end` | 结束会话并交接。 | false | false | `ed553337d131` |
-| memory | `atm_progress_add` | 写任务或项目进度。 | false | false | `a65dbceedb8a` |
-| memory | `atm_record` | 保存关键记录。 | false | false | `dc6b90fa4655` |
-| memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。 | false | false | `b7785a7e8408` |
+| memory | `atm_progress_add` | 写任务或项目进度。scope=task|project；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN。 | false | false | `a65dbceedb8a` |
+| memory | `atm_record` | 保存关键记录。kind=DECISION|CONSTRAINT|FACT|RISK|REFERENCE|LESSON。 | false | false | `dc6b90fa4655` |
+| memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。severity=LOW|NORMAL|HIGH|CRITICAL。 | false | false | `b7785a7e8408` |
 | memory | `atm_search` | 搜索事实。 | true | false | `2dab21182cf9` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `cf72d4ae5bfe` |

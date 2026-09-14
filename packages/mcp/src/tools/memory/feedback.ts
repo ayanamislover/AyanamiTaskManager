@@ -51,7 +51,7 @@ export function createAtmFeedbackTool(
   return {
     profile: "memory",
     name: "atm_feedback",
-    description: "提交仅存本机的 ATM 使用反馈。",
+    description: "提交仅存本机的 ATM 使用反馈。severity=LOW|NORMAL|HIGH|CRITICAL。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

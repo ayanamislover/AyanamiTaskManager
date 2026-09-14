@@ -86,3 +86,46 @@ describe("published schema readability", () => {
     expect(serialized).toContain('"git_sha","atm_record","atm_task","test_result","url","file"');
   });
 });
+
+/**
+ * 即便 schema 里枚举完整发布了，客户端仍可能把枚举字段渲染成 {}——值到不了 agent 手里，
+ * 只能靠试错。实例：本会话调 atm_begin 传 brief="delta"，报 expected one of
+ * none|minimal|full，白花一个来回。description 是客户端必定渲染的字段，把值写进去能绕过
+ * 渲染差异。合法值从已发布 schema 派生，所以枚举一改这条就红，不会和文案漂移。
+ *
+ * 只覆盖 memory：core 余量只剩 51 字节，付不起 atm_begin 的 brief/mode/role，
+ * 那一批留给 ATM-T-0344 连同 profile 预算一起决策。
+ */
+const DISCOVERABLE_ENUMS = [
+  { profile: "memory", tool: "atm_progress_add", field: "scope" },
+  { profile: "memory", tool: "atm_progress_add", field: "health" },
+  { profile: "memory", tool: "atm_record", field: "kind" },
+  { profile: "memory", tool: "atm_feedback", field: "severity" },
+] as const;
+
+describe("枚举值必须能从 description 读到", () => {
+  it.each(DISCOVERABLE_ENUMS)(
+    "$tool.$field 的全部合法值出现在工具说明里",
+    async ({ profile, tool: toolName, field }) => {
+      const tools = await listProfile(profile);
+      const published = tools.find((candidate) => candidate.name === toolName);
+      if (!published) throw new Error(`TOOL_NOT_PUBLISHED:${toolName}`);
+      const values = enumValues(property(published.inputSchema as any, field));
+      // 阳性对照：字段确实还是闭合枚举。退化成自由字符串时这里先红，
+      // 免得下面那条断言在一个空数组上永远通过。
+      expect(values.length).toBeGreaterThan(1);
+      for (const value of values)
+        expect(published.description ?? "", `${toolName}.${field} 缺 ${value}`).toContain(value);
+    },
+  );
+});
+
+function enumValues(schema: Record<string, unknown>): string[] {
+  const direct = schema.enum;
+  if (Array.isArray(direct)) return direct.map(String);
+  // nullable/optional 会被 zod 展开成 anyOf，枚举躲在其中一支里。
+  for (const branch of (schema.anyOf ?? []) as Record<string, unknown>[]) {
+    if (Array.isArray(branch?.enum)) return branch.enum.map(String);
+  }
+  throw new Error(`NOT_AN_ENUM:${JSON.stringify(schema).slice(0, 120)}`);
+}
