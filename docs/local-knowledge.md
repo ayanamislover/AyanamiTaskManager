@@ -8,9 +8,9 @@ ATM 的本地共享知识库为同一数据根下的多个项目提供可版本�
 
 知识只通过 memory Profile 的两个只读 MCP 工具按需读取：
 
-1. `atm_knowledge_search` 先返回候选元数据（标题、摘要、使用场景、标签、适用范围和当前修订号），不返回正文。
+1. `atm_knowledge_search` 先返回候选元数据（标题、摘要、使用场景、标签、适用范围和不可变 `revisionId`），不返回正文。
 2. 根据适用范围选择条目，再用 `atm_knowledge_get` 读取条目正文或 Markdown 章节。
-3. 采用重要结论时记录稳定引用 `id@revisionId`；响应中的数字 `revision` 仅用于展示。正文续读沿用返回的 `cursor`，并保持同一 `id` 和实际 `revisionId`。
+3. 采用重要结论时记录稳定引用 `id@revisionId`；仅 REST 管理视图中的数字 `revision` 用于展示，MCP 不返回它。正文续读沿用返回的 `cursor`，并保持同一 `id` 和实际 `revisionId`。
 
 工具不要求 `project` 或 Session；知识是同一 ATM 数据根内的共享参考资料，不构成项目权限边界。
 
