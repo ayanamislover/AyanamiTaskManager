@@ -99,6 +99,18 @@ test("知识库可在真实界面创建、重试、载入历史并归档恢复",
   await expect(archivedHit).toHaveCount(1);
   await expect(archivedHit).toContainText("已归档");
 
+  await archivedHit.click();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.type()).toBe("confirm");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "恢复条目", exact: true }).click();
+  await expect(page.getByRole("button", { name: "归档条目", exact: true })).toBeVisible();
+  await page.getByLabel("包括已归档").uncheck();
+  await expect(page.locator(".atm-knowledge-list-item").filter({ hasText: title })).toHaveCount(1);
+  await page.reload();
+  await expect(page.locator(".atm-knowledge-list-item").filter({ hasText: title })).toHaveCount(1);
+
   await page.screenshot({
     path: resolve("output", "playwright", "e2e-knowledge-dark.png"),
     fullPage: true,
