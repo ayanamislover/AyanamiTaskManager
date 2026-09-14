@@ -76,7 +76,13 @@ describe("MCP tools/list metadata contract", () => {
       try {
         expect(fixture.first.length).toBeGreaterThan(0);
         expect(() => assertMetadataContract(fixture.first)).not.toThrow();
-        expect(fixture.first.every((tool) => tool.outputSchema === undefined)).toBe(true);
+        expect(
+          fixture.first.every(
+            (tool) =>
+              tool.outputSchema === undefined ||
+              ["atm_knowledge_search", "atm_knowledge_get"].includes(tool.name),
+          ),
+        ).toBe(true);
         expect(fixture.first.every((tool) => tool.execution === undefined)).toBe(true);
         expect(
           fixture.second.map((tool) => ({

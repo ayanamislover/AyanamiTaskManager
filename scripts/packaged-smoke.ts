@@ -377,6 +377,63 @@ async function packagedProfileTools(profile: McpProfile): Promise<string[]> {
   }
 }
 
+async function readKnowledgeThroughPackagedMemory(id: string, revisionId: string): Promise<void> {
+  const launch = installedProfileLaunch("memory");
+  const transport = new StdioClientTransport({
+    command: launch.command,
+    args: launch.args,
+    cwd: root,
+    env: { ...smokeEnvironment, ...launch.env },
+    stderr: "pipe",
+  });
+  const client = new McpClient({ name: "packaged-smoke-knowledge", version: "1.0.0" });
+  try {
+    await client.connect(transport);
+    const searched = await client.callTool({
+      name: "atm_knowledge_search",
+      arguments: { query: "packaged-smoke-knowledge", limit: 5, max_chars: 2400 },
+    });
+    const searchBody = (searched.structuredContent ?? {}) as {
+      hits?: Array<Record<string, unknown>>;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+    };
+    check(
+      "打包 memory stdio 搜索知识元数据",
+      searched.isError !== true &&
+        searchBody.hits?.some(
+          (hit) =>
+            hit.id === id &&
+            hit.revisionId === revisionId &&
+            !Object.prototype.hasOwnProperty.call(hit, "bodyMarkdown"),
+        ) === true,
+      JSON.stringify(searched.structuredContent),
+    );
+
+    const fetched = await client.callTool({
+      name: "atm_knowledge_get",
+      arguments: { id, revision_id: revisionId, max_chars: 6000 },
+    });
+    const getBody = (fetched.structuredContent ?? {}) as Record<string, unknown>;
+    check(
+      "打包 memory stdio 读取知识固定修订正文",
+      fetched.isError !== true &&
+        getBody.id === id &&
+        getBody.revisionId === revisionId &&
+        typeof getBody.bodyMarkdown === "string" &&
+        getBody.bodyMarkdown.includes("packaged smoke knowledge body"),
+      JSON.stringify(fetched.structuredContent),
+    );
+    check(
+      "打包 knowledge get 遵守 max_chars",
+      JSON.stringify(getBody).length <= 6000,
+      String(JSON.stringify(getBody).length),
+    );
+  } finally {
+    await client.close();
+  }
+}
+
 async function packagedDefaultProfileTools(): Promise<string[]> {
   const launch = mcpLaunch({ execPath: executable, dataDir });
   const transport = new StdioClientTransport({
@@ -519,6 +576,7 @@ try {
   const installedGuide = join(dataDir, "ATM_AGENT_GUIDE.md");
   const installedAgentDocs = join(dataDir, "docs", "agent-integration.md");
   const installedSecurityModel = join(dataDir, "docs", "security-model.md");
+  const installedKnowledgeSkill = join(dataDir, "skills", "atm-knowledge", "SKILL.md");
   const installedMutationAckDocs = join(
     dataDir,
     "docs",
@@ -528,6 +586,11 @@ try {
   check("Agent Guide 安装到正式数据根", existsSync(installedGuide), installedGuide);
   check("完整 docs 安装到正式数据根", existsSync(installedAgentDocs), installedAgentDocs);
   check("本地安全模型安装到正式数据根", existsSync(installedSecurityModel), installedSecurityModel);
+  check(
+    "本地知识 Skill 安装到正式数据根",
+    existsSync(installedKnowledgeSkill),
+    installedKnowledgeSkill,
+  );
   check(
     "Mutation ACK 生成文档安装到正式数据根",
     existsSync(installedMutationAckDocs),
@@ -588,6 +651,35 @@ try {
     sourcePath: null,
     code: "PSM",
   });
+  const knowledge = await client.knowledge.save({
+    opId: "packaged-smoke-knowledge-create",
+    expectedVersion: 0,
+    slug: "packaged-smoke-knowledge",
+    title: "Packaged smoke knowledge",
+    summary: "Knowledge fixture for packaged MCP smoke",
+    useWhen: "验证打包 memory 入口",
+    tags: ["packaged", "smoke"],
+    appliesTo: ["packaged-smoke"],
+    bodyMarkdown: "# Packaged smoke\n\npackaged smoke knowledge body",
+    sourceRefs: [],
+    aliases: [],
+  });
+  check(
+    "HTTP knowledge service 创建隔离烟测条目",
+    knowledge.revision === 1 && knowledge.version === 1,
+    JSON.stringify(knowledge),
+  );
+  const httpKnowledge = await client.knowledge.get(knowledge.id, {
+    revisionId: knowledge.revisionId,
+  });
+  check(
+    "HTTP knowledge service 读取烟测条目",
+    httpKnowledge.id === knowledge.id &&
+      httpKnowledge.revision === knowledge.revision &&
+      httpKnowledge.bodyMarkdown.includes("packaged smoke knowledge body"),
+    JSON.stringify(httpKnowledge),
+  );
+  await readKnowledgeThroughPackagedMemory(knowledge.id, knowledge.revisionId);
   await client.projects.createObjectiveAsUser(project.code, {
     opId: "packaged-smoke-objective",
     title: "验证打包产物",
@@ -646,7 +738,15 @@ try {
   check(
     "打包 memory Profile 工具完整",
     JSON.stringify(memoryTools) ===
-      JSON.stringify(["atm_progress_add", "atm_record", "atm_feedback", "atm_search", "atm_delta"]),
+      JSON.stringify([
+        "atm_progress_add",
+        "atm_record",
+        "atm_feedback",
+        "atm_search",
+        "atm_delta",
+        "atm_knowledge_search",
+        "atm_knowledge_get",
+      ]),
     memoryTools.join(", "),
   );
   check(
@@ -655,10 +755,10 @@ try {
     actionsTools.join(", "),
   );
   check(
-    "打包三 Profile 工具无重叠且联合为 12 个",
+    "打包三 Profile 工具无重叠且联合为 14 个",
     coreTools.filter((name) => [...memoryTools, ...actionsTools].includes(name)).length === 0 &&
       memoryTools.filter((name) => actionsTools.includes(name)).length === 0 &&
-      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 12,
+      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 14,
   );
   check(
     "打包 stdio 未指定 Profile 时保留完整 legacy 兼容能力",

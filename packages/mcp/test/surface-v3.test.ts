@@ -50,7 +50,7 @@ function errorDetails(response: Awaited<ReturnType<Client["callTool"]>>): Record
   return structured!.details!;
 }
 
-describe("MCP surface v4 parity", () => {
+describe("MCP surface v5 parity", () => {
   it("returns bounded safe project candidates for PROJECT_NOT_FOUND", async () => {
     const fixture = await openFixture("CAH", "CrossAgent Hub");
     try {

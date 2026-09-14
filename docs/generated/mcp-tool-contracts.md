@@ -2,13 +2,13 @@
 
 > Generated from `ToolDefinitionRegistry`; do not edit by hand.
 
-Surface: `v4`
+Surface: `v5`
 
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
-| core | 7629 | `c533f5bca8e29e357e4f65f44e80fee2a9dd67968e026c3ded8b4cedd2cb30ba` |
-| memory | 5267 | `af64a90c191c440313e697f266d7627db6780f9c117ec923ad2cb9ee8e4fd2f7` |
-| actions | 5540 | `b99c31e93d3a819c114c5386ac83fd88017826e87bdd0e9c66ebdc2a9533f46a` |
+| core | 7629 | `6b500172d3de47bccbae592cf80d282fd87385d9f15133009a2e56dae254841e` |
+| memory | 6657 | `2ef066f130af1cffcfacdcdaa18ad63e23520bd055b0fb0dad2d1849a420b61d` |
+| actions | 5540 | `c88d683554c3552f4a3d147b20a67f707306624dd2427f3062d78aa963c07c4c` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
 | --- | --- | --- | --- | --- | --- |
@@ -23,6 +23,8 @@ Surface: `v4`
 | memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。 | false | false | `b7785a7e8408` |
 | memory | `atm_search` | 搜索事实。 | true | false | `2dab21182cf9` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
+| memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `cf72d4ae5bfe` |
+| memory | `atm_knowledge_get` | 按 ID 读取固定修订的本地共享知识正文。 | true | false | `241a49dce32f` |
 | actions | `atm_task_patch` | 批量变更任务。 | false | true | `c95bd1e34656` |
 
 ## Legacy compatibility artifact

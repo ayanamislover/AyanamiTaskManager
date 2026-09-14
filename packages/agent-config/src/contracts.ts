@@ -18,7 +18,7 @@ export const MCP_SERVER_NAMES = {
   actions: "ayanami-task-manager-actions",
 } as const;
 
-export const ATM_SKILL_NAMES = ["atm-plan", "atm-task"] as const;
+export const ATM_SKILL_NAMES = ["atm-plan", "atm-task", "atm-knowledge"] as const;
 export const ATM_SKILL_RESOURCE_DIRECTORIES = ["_shared"] as const;
 export const ATM_INTEGRATION_VERSION = 1;
 

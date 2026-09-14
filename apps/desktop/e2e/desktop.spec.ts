@@ -1444,6 +1444,7 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
               skills: [
                 { name: "atm-plan", ...installed },
                 { name: "atm-task", ...installed },
+                { name: "atm-knowledge", ...installed },
               ],
             },
           },
@@ -1458,6 +1459,7 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
               skills: [
                 { name: "atm-plan", ...installed },
                 { name: "atm-task", ...installed },
+                { name: "atm-knowledge", ...installed },
               ],
             },
           },
@@ -1472,6 +1474,7 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
               skills: [
                 { name: "atm-plan", ...installed },
                 { name: "atm-task", ...installed },
+                { name: "atm-knowledge", ...installed },
               ],
             },
           },
@@ -1538,6 +1541,7 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await expect(codex).toContainText("全局 ATM 规则");
   await expect(codex).toContainText("atm-plan");
   await expect(codex).toContainText("atm-task");
+  await expect(codex).toContainText("atm-knowledge");
   await codex.getByRole("button", { name: "预览修改" }).click();
   await expect(page.getByText("Codex 规则修改预览")).toBeVisible();
   await expect(page.locator(".atm-integration-preview pre")).toContainText(

@@ -44,6 +44,8 @@ describe("MCP static profiles", () => {
         "atm_feedback",
         "atm_search",
         "atm_delta",
+        "atm_knowledge_search",
+        "atm_knowledge_get",
       ]);
       expect(actions.tools.map((tool) => tool.name)).toEqual(["atm_task_patch"]);
       const coreNames = new Set(core.tools.map((tool) => tool.name));
@@ -53,7 +55,7 @@ describe("MCP static profiles", () => {
       expect([...coreNames].filter((name) => actionNames.has(name))).toEqual([]);
       expect([...memoryNames].filter((name) => actionNames.has(name))).toEqual([]);
       const formalNames = new Set([...coreNames, ...memoryNames, ...actionNames]);
-      expect(formalNames).toHaveLength(12);
+      expect(formalNames).toHaveLength(14);
       expect(mcpSchemaBytes(core.tools)).toBeLessThanOrEqual(7680);
       expect(mcpSchemaBytes(memory.tools)).toBeLessThanOrEqual(7680);
       expect(mcpSchemaBytes(actions.tools)).toBeLessThanOrEqual(7680);
@@ -64,10 +66,10 @@ describe("MCP static profiles", () => {
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
       expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7629, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 5267, framingBytes: 6 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6657, framingBytes: 8 });
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 5540, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
-      expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(5);
+      expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(7);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);
       expect(() =>
         assertMcpSchemaBudget([
@@ -83,7 +85,11 @@ describe("MCP static profiles", () => {
       expect(memory.client.getInstructions()).toContain("memory profile");
       expect(actions.client.getInstructions()).toContain("actions profile");
       expect(new Set(legacy.tools.map((tool) => tool.name))).toEqual(
-        new Set([...formalNames].filter((name) => name !== "atm_feedback")),
+        new Set(
+          [...formalNames].filter(
+            (name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_"),
+          ),
+        ),
       );
       expect(legacy.tools).toHaveLength(11);
       expect(legacy.tools.map((tool) => tool.name)).not.toContain("atm_feedback");

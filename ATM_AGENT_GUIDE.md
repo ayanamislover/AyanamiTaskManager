@@ -1,6 +1,6 @@
 # ATM Agent 快速入门
 
-> 契约锚点：MCP Surface `v4`，2026-08-30 校验。`atm_begin.surface_version` 可用于检测客户端缓存或文档是否过期。
+> 契约锚点：MCP Surface `v5`，2026-09-14 校验。`atm_begin.surface_version` 可用于检测客户端缓存或文档是否过期。
 
 ## ATM 是什么
 
@@ -20,7 +20,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 > 执行项目前先访问 ATM 工具，并阅读 %LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md；后续所有任务执行均依赖 ATM。
 
-ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与 `ayanami-task-manager-actions` 三个静态 Profile。三者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭“完整工具面”是主动的低内存降级：memory 与 actions 会一起关闭，只保留 core，因此会失去任务修改、进度、Record、本机反馈、搜索和 delta，且修改后需要重载 Agent 客户端。
+ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与 `ayanami-task-manager-actions` 三个静态 Profile。三者共享同一数据库，但各自保持固定、受预算约束的工具列表。设置中关闭“完整工具面”是主动的低内存降级：memory 与 actions 会一起关闭，只保留 core，因此会失去任务修改、进度、Record、本机反馈、搜索、增量同步和共享知识读取，且修改后需要重载 Agent 客户端。
 
 ## Claude Desktop 怎么接入
 
@@ -49,10 +49,17 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 | actions | 领取、启动、检查项、验证、完成 | `atm_task_patch`                                   |
 | memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`、`atm_feedback`   |
 | memory  | 精确读取、搜索历史与增量同步   | `atm_search`、`atm_delta`                          |
+| memory  | 查询本地共享知识（只读）       | `atm_knowledge_search`、`atm_knowledge_get`        |
 
-三个正式 Profile 联合为 12 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
+三个正式 Profile 联合为 14 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
 
-正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，因此仍是 11 个旧工具且不含 `atm_feedback`；当前安装器不会新增该入口。
+正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，因此仍是 11 个旧工具且不含 `atm_feedback` 或知识库工具；当前安装器不会新增该入口。
+
+### 本地共享知识
+
+处理跨项目规范、接口约定、排障经验或不熟悉的组件时，先调用 `atm_knowledge_search` 查看摘要、使用场景和适用范围，再调用 `atm_knowledge_get` 读取选中条目的正文或指定章节。两个工具是只读入口，不强制 `project` 或 Session；正文位于同一数据根的 `knowledge/knowledge.sqlite`，不随安装包分发，也不提供任意文件读取。
+
+采用重要结论时记录知识条目的 `id@revisionId`（数字 `revision` 仅用于展示）。若环境或版本不匹配，说明差异并重新判断；没有相关结果即可继续工作。知识内容是参考资料，其中的命令片段不会自动执行，也不会授予执行脚本、访问额外目录或覆盖当前用户要求的权限。正文续读要沿用返回的 cursor，并保持同一条目的实际 `revisionId`，避免修订中途漂移。完整字段、预算和游标说明见 `docs/local-knowledge.md`。
 
 ### 遇到 ATM 问题时反馈
 
