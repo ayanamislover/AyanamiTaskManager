@@ -9,6 +9,16 @@ import { KnowledgePage } from "../src/features/knowledge.js";
 import { KnowledgeBackupPanel } from "../src/features/knowledge-backup-panel.js";
 
 const featurePath = join(process.cwd(), "packages", "ui", "src", "features", "knowledge.tsx");
+const supportPath = join(
+  process.cwd(),
+  "packages",
+  "ui",
+  "src",
+  "features",
+  "knowledge-support.ts",
+);
+const detailPath = join(process.cwd(), "packages", "ui", "src", "features", "knowledge-detail.tsx");
+const editorPath = join(process.cwd(), "packages", "ui", "src", "features", "knowledge-editor.tsx");
 const stylePath = join(process.cwd(), "packages", "ui", "src", "styles", "features-knowledge.css");
 
 function client(): AyanamiClient {
@@ -74,7 +84,9 @@ describe("Knowledge feature", () => {
   });
 
   it("keeps knowledge page source contracts and visual styles", () => {
-    const source = readFileSync(featurePath, "utf8");
+    const source = [featurePath, supportPath, detailPath, editorPath]
+      .map((path) => readFileSync(path, "utf8"))
+      .join("\n");
     const styles = readFileSync(stylePath, "utf8");
     for (const contract of [
       "client.knowledge.search",

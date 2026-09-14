@@ -123,10 +123,16 @@ describe("Streamable HTTP MCP", () => {
       "atm_feedback",
       "atm_search",
       "atm_delta",
+      "atm_knowledge_search",
+      "atm_knowledge_get",
     ]);
     expect(actions).toEqual(["atm_task_patch"]);
     expect(new Set(compatibility)).toEqual(
-      new Set([...core, ...memory, ...actions].filter((name) => name !== "atm_feedback")),
+      new Set(
+        [...core, ...memory, ...actions].filter(
+          (name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_"),
+        ),
+      ),
     );
     expect(compatibility).toHaveLength(11);
     expect(compatibility).not.toContain("atm_feedback");

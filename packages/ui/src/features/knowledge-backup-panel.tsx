@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { Empty, ErrorState, LoadingRows } from "../components/async-state.js";
+import { Empty, ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { formatTime } from "../presentation.js";
 
@@ -35,6 +35,7 @@ export function KnowledgeBackupPanel({
   const knowledgeBackups = (backups.data ?? []).filter((backup) => backup.scope === "KNOWLEDGE");
   return (
     <section className="atm-panel" data-testid="knowledge-backup-panel">
+      <MutationErrorAlert errors={[create.error, restore.error]} />
       <div className="atm-panel-head">
         <div>
           <h2>知识库备份</h2>
