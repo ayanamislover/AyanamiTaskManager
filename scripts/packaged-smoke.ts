@@ -17,6 +17,7 @@ import {
   compareAgentDocumentationManifests,
 } from "../apps/desktop/src/agent-documentation.js";
 import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
+import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
 
 type Runtime = {
   endpoint: string;
@@ -45,7 +46,9 @@ const reportPath = resolve(
 );
 // IME helpers may outlive Electron and retain log handles under the synthetic USERPROFILE.
 // Each invocation needs a fresh home; never delete a previous run's still-open helper files.
-const agentConfigRoot = resolve(join(outputDir, `packaged-smoke-agent-config-${randomUUID()}`));
+// Older homes are reclaimed on startup instead: see reclaimSmokeWorkspaces.
+const agentConfigPrefix = "packaged-smoke-agent-config-";
+const agentConfigRoot = resolve(join(outputDir, `${agentConfigPrefix}${randomUUID()}`));
 const smokeHome = join(agentConfigRoot, "Home");
 const smokeAppData = join(agentConfigRoot, "Roaming");
 const smokeLocalAppData = join(agentConfigRoot, "Local");
@@ -516,6 +519,12 @@ async function claimThroughPackagedActions(
 
 if (!existsSync(executable)) throw new Error(`找不到打包应用：${executable}`);
 await mkdir(outputDir, { recursive: true });
+// 每跑一次就留一个合成 home，不清的话最后是打包流程去遍历它们并撞上 EPERM。
+await reclaimSmokeWorkspaces({
+  directory: outputDir,
+  prefix: agentConfigPrefix,
+  keep: [agentConfigRoot],
+});
 await mkdir(dirname(reportPath), { recursive: true });
 await rm(dataDir, { recursive: true, force: true });
 await rm(electronUserDataDir, { recursive: true, force: true });
