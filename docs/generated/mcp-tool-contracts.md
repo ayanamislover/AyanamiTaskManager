@@ -7,7 +7,7 @@ Surface: `v5`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7629 | `6b500172d3de47bccbae592cf80d282fd87385d9f15133009a2e56dae254841e` |
-| memory | 6812 | `d3b4ff6c3497b1f90dfe7762ddd7e62b50d81dcf94dc3d1fc986d747148375c4` |
+| memory | 6811 | `569c639a96c4864aa53d50cbdd5c04e5f0e3de1a3ddbaf94679c06e12c497049` |
 | actions | 5540 | `c88d683554c3552f4a3d147b20a67f707306624dd2427f3062d78aa963c07c4c` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -24,7 +24,7 @@ Surface: `v5`
 | memory | `atm_search` | 搜索事实。 | true | false | `2dab21182cf9` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b` |
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `cf72d4ae5bfe` |
-| memory | `atm_knowledge_get` | 按 ID 读取固定修订的本地共享知识正文。 | true | false | `241a49dce32f` |
+| memory | `atm_knowledge_get` | 按 ID 读取固定修订的本地共享知识正文。 | true | false | `e8c34c68ad7a` |
 | actions | `atm_task_patch` | 批量变更任务。 | false | true | `c95bd1e34656` |
 
 ## Legacy compatibility artifact

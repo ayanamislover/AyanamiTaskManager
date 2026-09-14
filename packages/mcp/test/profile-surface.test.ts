@@ -66,7 +66,7 @@ describe("MCP static profiles", () => {
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
       expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7629, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6812, framingBytes: 8 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6811, framingBytes: 8 });
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 5540, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(7);
