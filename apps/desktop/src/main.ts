@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { prefetchSelfProcessIdentity } from "@ayanami-task/daemon";
 import { installAgentIntegrationHost } from "./main-agent-integrations.js";
 import {
   applicationLogoPath,
@@ -86,6 +87,10 @@ async function bootstrap(): Promise<void> {
     app.quit();
     return;
   }
+  // 锁文件要记自身进程的出生时间，而取它是一次 spawnSync(powershell.exe)（实测 p50 约
+  // 175ms）。那一步在 startApplication 里同步发生，窗口显示排在它后面。这里先把它踢出去，
+  // 让它和下面的 whenReady、随机登录延迟重叠；没赶上也只是退回原来的同步路径。
+  void prefetchSelfProcessIdentity();
   let foregroundRequested = false;
   const startupDelayController = new AbortController();
   app.on("second-instance", (_event, commandLine) => {
