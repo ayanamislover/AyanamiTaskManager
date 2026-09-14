@@ -142,12 +142,20 @@ function searchKnowledgePage<T>(
     if (cursor && cursor.revision !== sequence)
       invalid("知识目录已更新，请重新搜索；已固定的正文修订仍可继续读取");
     const offset = cursor?.position ?? 0;
-    // A quoted phrase makes FTS syntax literal; short Chinese queries use instr,
-    // where %, _, quotes and backslashes are ordinary characters, not SQL patterns.
+    // A quoted phrase makes FTS syntax literal; trigram FTS cannot serve queries
+    // shorter than three characters, so those still scan.
+    //
+    // 正文那一支用 LIKE 而不是 instr(lower(f.body), lower(@q))：后者要为扫到的每一行
+    // 再造一份整篇正文的小写副本，条目一多就是成百 MB 的瞬时分配。语义没变——SQLite
+    // 的 lower() 和 LIKE 的大小写折叠都只作用于 ASCII，对中文两边都不折叠。
+    // 元数据字段留着 instr，它们都很短，换成 LIKE 只是徒增一处转义要维护。
+    //
+    // @like 里的 %、_ 和反斜杠必须转义：它们在 instr 里是普通字符，在 LIKE 里不是。
+    const codePoints = [...query].length;
     const bodyMatch =
-      [...query].length >= 3
+      codePoints >= 3
         ? "e.id IN (SELECT entry_id FROM knowledge_fts WHERE knowledge_fts MATCH @match)"
-        : "instr(lower(f.body), lower(@q)) > 0";
+        : "f.body LIKE @like ESCAPE '\\'";
     const metadataMatch = ["title", "summary", "use_when", "aliases", "tags", "applies_to"]
       .map((field) => `instr(lower(f.${field}), lower(@q)) > 0`)
       .join(" OR ");
@@ -157,7 +165,9 @@ function searchKnowledgePage<T>(
       archived: Number(includeArchived),
       limit: limit + 1,
       offset,
-      ...([...query].length >= 3 ? { match: `"${query.replaceAll('"', '""')}"` } : {}),
+      ...(codePoints >= 3
+        ? { match: `"${query.replaceAll('"', '""')}"` }
+        : { like: `%${query.replace(/[\\%_]/gu, (character) => `\\${character}`)}%` }),
     };
     const rows = repository.database.sqlite
       .prepare(
