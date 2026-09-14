@@ -2,7 +2,7 @@ import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   externalizeObjectSchema,
   KnowledgeSearchInputSchema,
-  KnowledgeSearchPageSchema,
+  KnowledgeAgentSearchPageSchema,
   type ExternalNameMap,
 } from "@ayanami-task/protocol";
 import { wrap } from "../../result.js";
@@ -33,17 +33,15 @@ export function createAtmKnowledgeSearchTool(
     name: "atm_knowledge_search",
     description: "搜索本地共享知识的摘要与适用范围。",
     inputSchema,
-    // Application/REST knowledge views are canonical camelCase. MCP accepts
-    // snake_case inputs, but keeps this typed read result unchanged so the
-    // service's maxChars budget remains valid at the wire boundary. The
-    // parsed canonical schema is enforced in the handler; the uninformative
-    // public output schema is omitted by publication to stay within memory's
-    // descriptor budget, as do the existing read tools.
+    // Compact Agent metadata is budgeted by the shared application, not
+    // clipped from a larger REST response after paging has already happened.
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
     handler: async (input) => {
       const decoded = knowledgeSearchExternal.parse(inputSchema.parse(input));
-      const page = KnowledgeSearchPageSchema.parse(await service.knowledge.search(decoded));
+      const page = KnowledgeAgentSearchPageSchema.parse(
+        await service.knowledge.searchForAgent(decoded),
+      );
       return wrap(page as unknown as Record<string, unknown>);
     },
   };

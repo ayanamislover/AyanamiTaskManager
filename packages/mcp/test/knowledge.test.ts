@@ -71,6 +71,12 @@ describe("MCP 本地共享知识工具", () => {
         expect(JSON.stringify(body).length).toBeLessThanOrEqual(2400);
         expect(body.hits.every((hit) => !Object.hasOwn(hit, "bodyMarkdown"))).toBe(true);
         expect(body.hits.every((hit) => Object.hasOwn(hit, "useWhen"))).toBe(true);
+        expect(
+          body.hits.every(
+            (hit) =>
+              !["version", "revision", "slug", "createdAt"].some((key) => Object.hasOwn(hit, key)),
+          ),
+        ).toBe(true);
         ids.push(...body.hits.map((hit) => String(hit.id)));
         cursor = body.nextCursor ?? undefined;
         expect(body.hasMore).toBe(cursor !== undefined);
@@ -101,14 +107,15 @@ describe("MCP 本地共享知识工具", () => {
       expect(firstResponse.isError).not.toBe(true);
       let page = firstResponse.structuredContent as {
         id: string;
-        revision: number;
         revisionId: string;
         bodyMarkdown: string;
         nextCursor: string | null;
         truncated: boolean;
       };
       expect(page.id).toBe(entry.id);
-      expect(page.revision).toBe(1);
+      expect(firstResponse.structuredContent).not.toHaveProperty("version");
+      expect(firstResponse.structuredContent).not.toHaveProperty("revision");
+      expect(firstResponse.structuredContent).toHaveProperty("toc");
       expect(page.revisionId).toEqual(expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/u));
       expect(page.truncated).toBe(true);
       expect(JSON.stringify(page).length).toBeLessThanOrEqual(1800);
@@ -135,7 +142,9 @@ describe("MCP 本地共享知识工具", () => {
         expect(response.isError).not.toBe(true);
         page = response.structuredContent as typeof page;
         expect(JSON.stringify(page).length).toBeLessThanOrEqual(1800);
-        expect(page.revision).toBe(1);
+        expect(Object.keys(page).sort()).toEqual(
+          ["id", "revisionId", "archived", "bodyMarkdown", "truncated", "nextCursor"].sort(),
+        );
         expect(page.bodyMarkdown).not.toContain("REVISION_TWO");
         collected += page.bodyMarkdown;
         const next = page.nextCursor;
@@ -152,7 +161,7 @@ describe("MCP 本地共享知识工具", () => {
       expect(latest.isError).not.toBe(true);
       expect(latest.structuredContent).toMatchObject({
         id: entry.id,
-        revision: 2,
+        revisionId: second.revisionId,
         bodyMarkdown: expect.stringContaining("REVISION_TWO"),
       });
     } finally {

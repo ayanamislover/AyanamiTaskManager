@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, statSync } from "node:fs";
+import { existsSync, lstatSync, statSync, readdirSync } from "node:fs";
 import {
   cp,
   lstat,
@@ -20,6 +20,8 @@ type MigrationResult = {
   destination: string;
   destinationBackup: string | null;
   projects: number;
+  knowledgeEntries: number;
+  knowledgePresent: boolean;
   executed: boolean;
 };
 
@@ -177,10 +179,18 @@ async function readMigrationManifest(root: string): Promise<MigrationManifest | 
       typeof value.destination !== "string" ||
       (value.destinationBackup !== null && typeof value.destinationBackup !== "string") ||
       !Number.isSafeInteger(value.projects) ||
-      Number(value.projects) <= 0
+      Number(value.projects) < 0 ||
+      (value.knowledgeEntries !== undefined &&
+        (!Number.isSafeInteger(value.knowledgeEntries) || Number(value.knowledgeEntries) < 0)) ||
+      (value.knowledgePresent !== undefined && typeof value.knowledgePresent !== "boolean") ||
+      (Number(value.projects) === 0 && !value.knowledgeEntries)
     )
       return null;
-    return value as MigrationManifest;
+    return {
+      ...value,
+      knowledgeEntries: value.knowledgeEntries ?? 0,
+      knowledgePresent: value.knowledgePresent ?? false,
+    } as MigrationManifest;
   } catch {
     return null;
   }
@@ -197,6 +207,35 @@ function projectPaths(registryPath: string): Array<{ db_path: string | null }> {
   }
 }
 
+function knowledgeEntries(root: string): number {
+  const path = join(root, "knowledge", "knowledge.sqlite");
+  if (!existsSync(path)) return 0;
+  if (lstatSync(path).isSymbolicLink() || lstatSync(dirname(path)).isSymbolicLink())
+    throw new Error("KNOWLEDGE_LINK_NOT_ALLOWED");
+  quickCheck(path);
+  const database = new Database(path, { readonly: true, fileMustExist: true });
+  try {
+    return (
+      database.prepare("SELECT count(*) AS count FROM knowledge_entries").get() as { count: number }
+    ).count;
+  } finally {
+    database.close();
+  }
+}
+
+function hasKnowledgeState(root: string): boolean {
+  return [join(root, "knowledge"), join(root, "backups", "knowledge")].some((path) => {
+    if (!existsSync(path)) return false;
+    const entry = lstatSync(path);
+    return !entry.isDirectory() || entry.isSymbolicLink() || readdirSync(path).length > 0;
+  });
+}
+
+function assertKnowledgeRestoreSettled(root: string): void {
+  if (existsSync(join(root, "knowledge", "restore.json")))
+    throw new Error("MIGRATION_KNOWLEDGE_RESTORE_PENDING");
+}
+
 async function completedMigration(
   source: string,
   destination: string,
@@ -206,9 +245,14 @@ async function completedMigration(
   if (resolve(manifest.source) !== source || resolve(manifest.destination) !== destination)
     throw new Error("MIGRATION_MANIFEST_MISMATCH");
   const registryPath = join(destination, "registry", "registry.sqlite");
+  assertKnowledgeRestoreSettled(destination);
   quickCheck(registryPath);
   const projects = projectPaths(registryPath);
   if (projects.length !== manifest.projects) throw new Error("MIGRATION_MANIFEST_MISMATCH");
+  if (knowledgeEntries(destination) !== manifest.knowledgeEntries)
+    throw new Error("MIGRATION_MANIFEST_MISMATCH");
+  if (existsSync(join(destination, "knowledge", "knowledge.sqlite")) !== manifest.knowledgePresent)
+    throw new Error("MIGRATION_MANIFEST_MISMATCH");
   for (const project of projects) if (project.db_path) quickCheck(project.db_path);
   for (const root of [destination, manifest.destinationBackup])
     if (root && existsSync(root)) {
@@ -221,6 +265,8 @@ async function completedMigration(
     destination,
     destinationBackup: manifest.destinationBackup,
     projects: manifest.projects,
+    knowledgeEntries: manifest.knowledgeEntries,
+    knowledgePresent: manifest.knowledgePresent,
     executed: true,
   };
 }
@@ -309,6 +355,7 @@ export async function migrateDataRoot(input: {
   const alreadyCompleted = await completedMigration(source, destination);
   if (alreadyCompleted) return alreadyCompleted;
   const sourceRegistry = join(source, "registry", "registry.sqlite");
+  assertKnowledgeRestoreSettled(source);
   if (!existsSync(sourceRegistry)) throw new Error("SOURCE_REGISTRY_MISSING");
   quickCheck(sourceRegistry);
   const sourceDb = new Database(sourceRegistry, { readonly: true, fileMustExist: true });
@@ -316,7 +363,10 @@ export async function migrateDataRoot(input: {
     (sourceDb.prepare("SELECT count(*) AS count FROM projects").get() as { count: number }).count,
   );
   sourceDb.close();
-  if (sourceProjects === 0) throw new Error("SOURCE_HAS_NO_PROJECTS");
+  const sourceKnowledgeEntries = knowledgeEntries(source);
+  const sourceKnowledgePresent = existsSync(join(source, "knowledge", "knowledge.sqlite"));
+  if (sourceProjects === 0 && sourceKnowledgeEntries === 0)
+    throw new Error("SOURCE_HAS_NO_PROJECTS");
 
   const stamp = (input.timestamp ?? new Date().toISOString()).replace(/[:.]/gu, "-");
   const proposedBackup = existsSync(destination)
@@ -328,6 +378,8 @@ export async function migrateDataRoot(input: {
       destination,
       destinationBackup: proposedBackup,
       projects: sourceProjects,
+      knowledgeEntries: sourceKnowledgeEntries,
+      knowledgePresent: sourceKnowledgePresent,
       executed: false,
     };
 
@@ -336,6 +388,8 @@ export async function migrateDataRoot(input: {
     const completedInsideLock = await completedMigration(source, destination);
     if (completedInsideLock) return completedInsideLock;
     await assertSourceStopped(source);
+    await assertSourceStopped(destination);
+    if (hasKnowledgeState(destination)) throw new Error("DESTINATION_ALREADY_HAS_KNOWLEDGE");
     const destinationRegistry = join(destination, "registry", "registry.sqlite");
     if (existsSync(destinationRegistry)) {
       quickCheck(destinationRegistry);
@@ -349,7 +403,9 @@ export async function migrateDataRoot(input: {
       stagedManifest &&
       (resolve(stagedManifest.source) !== source ||
         resolve(stagedManifest.destination) !== destination ||
-        stagedManifest.projects !== sourceProjects)
+        stagedManifest.projects !== sourceProjects ||
+        stagedManifest.knowledgeEntries !== sourceKnowledgeEntries ||
+        stagedManifest.knowledgePresent !== sourceKnowledgePresent)
     )
       stagedManifest = null;
     if (!stagedManifest) {
@@ -367,8 +423,13 @@ export async function migrateDataRoot(input: {
       await rm(join(staging, "runtime", "daemon.json"), { force: true });
       await rm(join(staging, "runtime", "local.token"), { force: true });
       quickCheck(stagedRegistry);
+      assertKnowledgeRestoreSettled(staging);
       for (const project of projectPaths(stagedRegistry))
         if (project.db_path) quickCheck(rewritePath(project.db_path, destination, staging));
+      if (knowledgeEntries(staging) !== sourceKnowledgeEntries)
+        throw new Error("MIGRATION_KNOWLEDGE_MISMATCH");
+      if (existsSync(join(staging, "knowledge", "knowledge.sqlite")) !== sourceKnowledgePresent)
+        throw new Error("MIGRATION_KNOWLEDGE_MISMATCH");
       stagedManifest = {
         format: 1,
         migratedAt: new Date().toISOString(),
@@ -376,6 +437,8 @@ export async function migrateDataRoot(input: {
         destination,
         destinationBackup: proposedBackup,
         projects: sourceProjects,
+        knowledgeEntries: sourceKnowledgeEntries,
+        knowledgePresent: sourceKnowledgePresent,
       };
       await writeFile(
         join(staging, "migration-manifest.json"),

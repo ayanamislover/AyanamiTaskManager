@@ -13,6 +13,7 @@ export type Route =
   | "blockers"
   | "agents"
   | "timeline"
+  | "knowledge"
   | "settings"
   | `project:${string}`;
 

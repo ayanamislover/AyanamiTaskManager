@@ -317,6 +317,10 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直接执行单元。
 拆分应按“可交付结果 + 可验证验收”划分，而不是机械按文件拆分。
 
+### 知识与记录的效率
+
+知识首先供 Agent 决策：先看候选摘要，确需细节才按固定 `revision_id` 读正文/章节，够用即停，不注入整库。摘要优先结论和适用条件；正文保留最短操作、验证、失败边界与必要来源，不写执行流水账。先查重，同主题更新修订；项目 Record 只保存项目事实并引用 `id@revisionId`，不要复制整篇知识。不机械压字数，不能省掉影响正确性的前提。
+
 ## 完整文档在哪
 
 - Agent 协议与协作细节：`%LOCALAPPDATA%\AyanamiTaskManager\docs\agent-integration.md`

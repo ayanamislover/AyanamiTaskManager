@@ -468,6 +468,10 @@ export class ProjectRepository {
     return this.#recordReads.getRecord(reference);
   }
 
+  getRecordSnapshot(reference: string): { record: RecordView; version: number } {
+    return this.#recordReads.getRecordSnapshot(reference);
+  }
+
   private progressUpdateView(row: any): ProgressUpdateView {
     return this.#recordReads.progressUpdateView(row);
   }

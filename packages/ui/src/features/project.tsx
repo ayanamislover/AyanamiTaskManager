@@ -24,6 +24,7 @@ export function ProjectPage({
   openTask,
   onExit,
   desktop,
+  onKnowledgeDraft,
 }: {
   client: AyanamiClient;
   project: RegisteredProject;
@@ -31,6 +32,7 @@ export function ProjectPage({
   openTask: (key: string) => void;
   onExit: () => void;
   desktop?: DesktopBridge;
+  onKnowledgeDraft?: (recordKey: string) => void | Promise<void>;
 }) {
   const queryClient = useQueryClient();
   const [create, setCreate] = useState(false);
@@ -179,6 +181,7 @@ export function ProjectPage({
         taskSort={taskSort}
         onTaskSort={onTaskSort}
         onOpenTask={openTask}
+        {...(onKnowledgeDraft === undefined ? {} : { onExtractKnowledge: onKnowledgeDraft })}
       />
       <MutationErrorAlert errors={[lifecycle.error, trash.error]} />
       <Presence present={create} inertWhenClosing>

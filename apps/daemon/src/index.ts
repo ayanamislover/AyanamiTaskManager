@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { createHttpServer, installNotFoundHandler } from "./http-boundary.js";
+import { registerKnowledgeRoutes } from "./knowledge-routes.js";
 import { registerProjectRoutes } from "./project-routes.js";
 import type { AyanamiServerOptions } from "./server-options.js";
 import { registerSessionRoutes } from "./session-routes.js";
@@ -24,6 +25,7 @@ import { DAEMON_VERSION } from "./runtime-discovery.js";
 export async function buildAyanamiServer(options: AyanamiServerOptions): Promise<FastifyInstance> {
   const app = await createHttpServer(options);
   registerProjectRoutes(app, options, DAEMON_VERSION);
+  registerKnowledgeRoutes(app, options);
   registerWorkRoutes(app, options);
   registerSessionRoutes(app, options);
   await registerTransportRoutes(app, options);

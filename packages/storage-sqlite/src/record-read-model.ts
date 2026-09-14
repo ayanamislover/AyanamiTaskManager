@@ -166,6 +166,13 @@ export class RecordReadModel {
     };
   }
 
+  getRecordSnapshot(reference: string): { record: RecordView; version: number } {
+    return this.sqlite.transaction(() => ({
+      record: this.getRecord(reference),
+      version: Number(this.recordRow(reference).version),
+    }))();
+  }
+
   progressUpdateView(row: any): ProgressUpdateView {
     return progressUpdateViewFromRow(row, this.projectCode());
   }

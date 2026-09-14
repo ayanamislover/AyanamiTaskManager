@@ -24,6 +24,7 @@ export function ProjectTaskViews({
   taskSort,
   onTaskSort,
   onOpenTask,
+  onExtractKnowledge,
 }: {
   view: ProjectTaskView;
   tasks: CursorCollection<any>;
@@ -34,6 +35,7 @@ export function ProjectTaskViews({
   taskSort: ProjectTaskSort | null;
   onTaskSort: (field: ProjectTaskSortField) => void;
   onOpenTask: (key: string) => void;
+  onExtractKnowledge?: (recordKey: string) => void | Promise<void>;
 }) {
   const content = () => {
     if (tasks.isLoading && tasks.items.length === 0) return <LoadingRows count={6} />;
@@ -112,6 +114,17 @@ export function ProjectTaskViews({
                     <summary>查看详情</summary>
                     <div className="atm-description">{record.detail}</div>
                   </details>
+                ) : null}
+                {onExtractKnowledge ? (
+                  <div className="atm-actions" style={{ marginTop: 10 }}>
+                    <button
+                      className="atm-button"
+                      type="button"
+                      onClick={() => void onExtractKnowledge(record.key)}
+                    >
+                      提炼为共享知识草稿
+                    </button>
+                  </div>
                 ) : null}
               </article>
             ))}

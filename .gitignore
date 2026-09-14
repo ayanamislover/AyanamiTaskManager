@@ -30,7 +30,12 @@ output/
 **/runtime/local.token
 **/runtime/daemon.json
 *.sqlite
+*.sqlite-wal
+*.sqlite-shm
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+/knowledge/
 *.db
 *.db-wal
 *.db-shm

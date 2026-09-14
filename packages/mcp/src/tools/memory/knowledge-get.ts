@@ -2,7 +2,7 @@ import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   externalizeObjectSchema,
   KnowledgeGetInputSchema,
-  KnowledgeGetPageSchema,
+  KnowledgeAgentGetPageSchema,
   type ExternalNameMap,
 } from "@ayanami-task/protocol";
 import { wrap } from "../../result.js";
@@ -29,16 +29,13 @@ export function createAtmKnowledgeGetTool(
     name: "atm_knowledge_get",
     description: "按 ID 读取固定修订的本地共享知识正文。",
     inputSchema,
-    // Keep the canonical typed view and its camelCase fields. The service
-    // applies maxChars before this result is serialized by the MCP adapter;
-    // handler parsing enforces the canonical schema while the public
-    // descriptor's uninformative output schema is omitted by publication to
-    // stay within memory's budget.
+    // The application budgets the actual Agent projection. Continuations do
+    // not repeat metadata; REST retains the complete management view.
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
     handler: async (input) => {
       const decoded = knowledgeGetExternal.parse(inputSchema.parse(input));
-      const page = KnowledgeGetPageSchema.parse(await service.knowledge.get(decoded));
+      const page = KnowledgeAgentGetPageSchema.parse(await service.knowledge.getForAgent(decoded));
       return wrap(page as unknown as Record<string, unknown>);
     },
   };

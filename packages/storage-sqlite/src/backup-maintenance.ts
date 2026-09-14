@@ -11,7 +11,13 @@ import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { asAtmError, AtmError } from "@ayanami-task/errors";
 import { createUlid, nowIso } from "@ayanami-task/protocol";
-import { openManagedDatabase, quickCheck, type ManagedDatabase } from "./database.js";
+import {
+  openManagedDatabase,
+  quickCheck,
+  foreignKeyCheck,
+  type ManagedDatabase,
+} from "./database.js";
+import type { KnowledgeDatabase } from "./knowledge-database.js";
 import {
   markProjectionDeferred,
   projectionErrorMessage,
@@ -21,7 +27,7 @@ import { removeSqliteSidecars, renameWithRetry, sha256File } from "./storage-fil
 
 export type BackupView = {
   id: string;
-  scope: "REGISTRY" | "PROJECT";
+  scope: "REGISTRY" | "PROJECT" | "KNOWLEDGE";
   projectId: string | null;
   projectCode: string | null;
   path: string;
@@ -46,7 +52,7 @@ export type BackupProject = {
 };
 
 export type CreateBackupInput = {
-  scope: "REGISTRY" | "PROJECT";
+  scope: "REGISTRY" | "PROJECT" | "KNOWLEDGE";
   project?: string;
   reason:
     | "MANUAL"
@@ -85,9 +91,11 @@ function backupFromRow(row: any): BackupView {
 }
 
 export class BackupMaintenance {
+  #maintenanceInFlight: Promise<MaintenanceResult> | null = null;
   readonly #dataDir: string;
   readonly #migrationsRoot: string;
   readonly #registry: ManagedDatabase;
+  readonly #knowledge: KnowledgeDatabase;
   readonly #getProject: (codeOrId: string) => BackupProject;
   readonly #openProject: (codeOrId: string) => Promise<ManagedDatabase>;
   readonly #closeIdleProjects: (maxIdleMs: number, at: number) => number;
@@ -96,7 +104,11 @@ export class BackupMaintenance {
   readonly #listProjects: () => BackupProject[];
   readonly #listBackups: (projectCodeOrId?: string) => BackupView[];
   readonly #createBackup: (input: CreateBackupInput) => Promise<BackupView>;
-  readonly #pruneBackupRetention: (projectId: string | null, reason: string) => void;
+  readonly #pruneBackupRetention: (
+    projectId: string | null,
+    reason: string,
+    scope?: BackupView["scope"],
+  ) => void;
   readonly #repairSummaries: () => Promise<{
     recoveredProjects: number;
     errors: Array<{ scope: string; project: string | null; message: string }>;
@@ -113,6 +125,7 @@ export class BackupMaintenance {
     dataDir: string;
     migrationsRoot: string;
     registry: ManagedDatabase;
+    knowledge: KnowledgeDatabase;
     getProject: (codeOrId: string) => BackupProject;
     openProject: (codeOrId: string) => Promise<ManagedDatabase>;
     closeIdleProjects: (maxIdleMs: number, at: number) => number;
@@ -121,7 +134,11 @@ export class BackupMaintenance {
     listProjects: () => BackupProject[];
     listBackups: (projectCodeOrId?: string) => BackupView[];
     createBackup: (input: CreateBackupInput) => Promise<BackupView>;
-    pruneBackupRetention: (projectId: string | null, reason: string) => void;
+    pruneBackupRetention: (
+      projectId: string | null,
+      reason: string,
+      scope?: BackupView["scope"],
+    ) => void;
     repairSummaries: () => Promise<{
       recoveredProjects: number;
       errors: Array<{ scope: string; project: string | null; message: string }>;
@@ -137,6 +154,7 @@ export class BackupMaintenance {
     this.#dataDir = input.dataDir;
     this.#migrationsRoot = input.migrationsRoot;
     this.#registry = input.registry;
+    this.#knowledge = input.knowledge;
     this.#getProject = input.getProject;
     this.#openProject = input.openProject;
     this.#closeIdleProjects = input.closeIdleProjects;
@@ -166,6 +184,8 @@ export class BackupMaintenance {
   }
 
   async createBackup(input: CreateBackupInput): Promise<BackupView> {
+    if (!["PROJECT", "REGISTRY", "KNOWLEDGE"].includes(input.scope))
+      throw new AtmError("INVALID_ARGUMENT");
     const project = input.scope === "PROJECT" ? this.#getProject(input.project ?? "") : null;
     if (input.scope === "PROJECT" && !project) {
       throw new AtmError("PROJECT_REQUIRED", { message: "项目备份必须指定项目" });
@@ -175,9 +195,9 @@ export class BackupMaintenance {
     const stamp = createdAt.replace(/[:.]/gu, "-");
     const directory = project
       ? join(dirname(project.databasePath), "backups")
-      : join(this.#dataDir, "backups", "registry");
+      : join(this.#dataDir, "backups", input.scope === "KNOWLEDGE" ? "knowledge" : "registry");
     mkdirSync(directory, { recursive: true });
-    const prefix = project?.code ?? "registry";
+    const prefix = project?.code ?? input.scope.toLowerCase();
     const finalPath = join(
       directory,
       `${prefix}-${input.reason.toLowerCase()}-${stamp}-${id}.sqlite`,
@@ -186,14 +206,23 @@ export class BackupMaintenance {
     const manifestPath = `${finalPath}.manifest.json`;
     const pendingPath = `${finalPath}.pending`;
     rmSync(temporaryPath, { force: true });
-    const database = project ? await this.#openProject(project.id) : this.#registry;
+    const database = project
+      ? await this.#openProject(project.id)
+      : input.scope === "KNOWLEDGE"
+        ? (await this.#knowledge.open()).database
+        : this.#registry;
     let createdBackup: BackupView | null = null;
     try {
       writeFileSync(pendingPath, `${JSON.stringify({ id, finalPath })}\n`, "utf8");
       await database.sqlite.backup(temporaryPath);
       const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
-      const healthy = quickCheck(snapshot);
-      snapshot.close();
+      let healthy: boolean;
+      try {
+        healthy =
+          quickCheck(snapshot) && (input.scope !== "KNOWLEDGE" || foreignKeyCheck(snapshot));
+      } finally {
+        snapshot.close();
+      }
       removeSqliteSidecars(temporaryPath);
       if (!healthy) {
         throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
@@ -285,7 +314,7 @@ export class BackupMaintenance {
       // Startup recovery removes committed pending markers without touching their artifacts.
     }
     try {
-      this.#pruneBackupRetention(project?.id ?? null, input.reason);
+      this.#pruneBackupRetention(project?.id ?? null, input.reason, input.scope);
     } catch (error) {
       try {
         this.#appendGlobalEvent("backup.retention_failed", id, "SYSTEM", {
@@ -305,7 +334,11 @@ export class BackupMaintenance {
     }
   }
 
-  pruneBackupRetention(projectId: string | null, reason: string): void {
+  pruneBackupRetention(
+    projectId: string | null,
+    reason: string,
+    scope: BackupView["scope"] = projectId ? "PROJECT" : "REGISTRY",
+  ): void {
     const policy = this.#getSetting("backup.policy", { dailyKeep: 7, weeklyKeep: 4 }).value as {
       dailyKeep?: number;
       weeklyKeep?: number;
@@ -323,7 +356,7 @@ export class BackupMaintenance {
          WHERE scope = ? AND project_id IS ? AND reason = ?
          ORDER BY created_at DESC`,
       )
-      .all(projectId ? "PROJECT" : "REGISTRY", projectId, reason) as Array<{
+      .all(scope, projectId, reason) as Array<{
       id: string;
       path: string;
     }>;
@@ -341,6 +374,17 @@ export class BackupMaintenance {
   }
 
   async runMaintenance(at = new Date()): Promise<MaintenanceResult> {
+    if (this.#maintenanceInFlight) return this.#maintenanceInFlight;
+    const pending = this.performMaintenance(at);
+    this.#maintenanceInFlight = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.#maintenanceInFlight === pending) this.#maintenanceInFlight = null;
+    }
+  }
+
+  private async performMaintenance(at: Date): Promise<MaintenanceResult> {
     this.#closeIdleProjects(5 * 60_000, at.valueOf());
     const repair = await this.#repairSummaries();
     const policy = this.#getSetting("backup.policy", { enabled: true }).value as {
@@ -358,6 +402,7 @@ export class BackupMaintenance {
     const day = at.toISOString().slice(0, 10);
     const targets = [
       { scope: "REGISTRY" as const, project: null as BackupProject | null },
+      ...(existsSync(this.#knowledge.path) ? [{ scope: "KNOWLEDGE" as const, project: null }] : []),
       ...this.#listProjects()
         .filter((project) => project.lifecycle === "ACTIVE")
         .map((project) => ({ scope: "PROJECT" as const, project })),
@@ -365,7 +410,7 @@ export class BackupMaintenance {
     let dailyCreated = 0;
     let weeklyCreated = 0;
     const errors = [...repair.errors];
-    const hasOnDay = (scope: "REGISTRY" | "PROJECT", projectId: string | null, reason: string) =>
+    const hasOnDay = (scope: BackupView["scope"], projectId: string | null, reason: string) =>
       Boolean(
         this.#registry.sqlite
           .prepare(
@@ -374,7 +419,7 @@ export class BackupMaintenance {
           )
           .get(scope, projectId, reason, day),
       );
-    const needsWeekly = (scope: "REGISTRY" | "PROJECT", projectId: string | null) => {
+    const needsWeekly = (scope: BackupView["scope"], projectId: string | null) => {
       const row = this.#registry.sqlite
         .prepare(
           "SELECT created_at FROM backup_catalog WHERE scope = ? AND project_id IS ? AND reason = 'WEEKLY' ORDER BY created_at DESC LIMIT 1",
@@ -419,7 +464,9 @@ export class BackupMaintenance {
     };
   }
 
-  async restoreBackup(backupId: string): Promise<{ backup: BackupView; project: BackupProject }> {
+  async restoreBackup(
+    backupId: string,
+  ): Promise<{ backup: BackupView; project: BackupProject | null }> {
     const row = this.#registry.sqlite
       .prepare(
         `SELECT backup_catalog.*, projects.code AS project_code
@@ -434,7 +481,7 @@ export class BackupMaintenance {
       });
     }
     const backup = backupFromRow(row);
-    if (backup.scope !== "PROJECT" || !backup.projectId) {
+    if ((backup.scope !== "PROJECT" || !backup.projectId) && backup.scope !== "KNOWLEDGE") {
       throw new AtmError("BACKUP_RESTORE_SCOPE_UNSUPPORTED", {
         message: "该备份范围不支持恢复",
       });
@@ -453,16 +500,34 @@ export class BackupMaintenance {
       id?: string;
       projectId?: string;
       sha256?: string;
+      scope?: string;
     };
     if (
       manifest.id !== backup.id ||
       manifest.projectId !== backup.projectId ||
-      manifest.sha256 !== backup.sha256
+      manifest.sha256 !== backup.sha256 ||
+      manifest.scope !== backup.scope
     ) {
       throw new AtmError("BACKUP_MANIFEST_MISMATCH", { message: "备份清单不匹配" });
     }
 
-    const project = this.#getProject(backup.projectId);
+    if (backup.scope === "KNOWLEDGE") {
+      try {
+        await this.#createBackup({ scope: "KNOWLEDGE", reason: "PRE_RESTORE" });
+      } catch (error) {
+        // Corrupt sources cannot produce a SQLite backup. restoreFrom retains their
+        // exact original file as a recovery artifact instead of destroying it.
+        if (!(error instanceof AtmError) || error.code !== "KNOWLEDGE_UNAVAILABLE") throw error;
+      }
+      await this.#knowledge.restoreFrom(backup.path);
+      try {
+        this.#appendGlobalEvent("backup.restored", backup.id, "USER", { scope: "KNOWLEDGE" });
+      } catch {
+        /* The knowledge commit is durable even when the Registry event is unavailable. */
+      }
+      return { backup, project: null };
+    }
+    const project = this.#getProject(backup.projectId!);
     const restoreDirectory = join(this.#dataDir, "projects", `.restore-${backup.id}`);
     const candidatePath = join(restoreDirectory, "project.sqlite");
     const rollbackPath = `${project.databasePath}.restore-old-${backup.id}`;

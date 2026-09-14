@@ -146,6 +146,10 @@ export class StartupRecovery {
     this.#recoverPendingRetentionArtifacts(registryBackups);
     this.#recoverPendingBackupArtifacts(registryBackups);
     this.#removeTemporaryFiles(registryBackups);
+    const knowledgeBackups = join(this.#dataDir, "backups", "knowledge");
+    this.#recoverPendingRetentionArtifacts(knowledgeBackups);
+    this.#recoverPendingBackupArtifacts(knowledgeBackups);
+    this.#removeTemporaryFiles(knowledgeBackups);
     this.#removeTemporaryFiles(join(this.#dataDir, "exports"));
   }
 

@@ -96,6 +96,11 @@ export function createProjectsSurface(request: ClientRequest) {
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/records${queryString({ limit, cursor })}`,
       ),
+    getRecord: (code: string, reference: string) =>
+      request<ProjectRecord>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(code)}/records/${encodeURIComponent(reference)}`,
+      ),
     updates: (code: string) =>
       request<Array<Record<string, any>>>(
         "GET",

@@ -32,6 +32,137 @@ function isWithinDirectory(rootPath: string, candidatePath: string): boolean {
 }
 
 describe("正式数据根迁移", () => {
+  it("知识恢复日志尚未处理的源不能被报告为迁移成功", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-pending-knowledge-source-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const service = await AyanamiTaskService.open({
+      dataDir: source,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    await service.knowledge.save({
+      opId: "create",
+      expectedVersion: 0,
+      slug: "example",
+      title: "源知识",
+      summary: "测试",
+      bodyMarkdown: "不能被坏journal阻止迁移后才发现",
+    });
+    service.close();
+    writeFileSync(join(source, "knowledge", "restore.json"), "invalid journal");
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "MIGRATION_KNOWLEDGE_RESTORE_PENDING",
+    );
+    expect(existsSync(destination)).toBe(false);
+  });
+  it("拒绝覆盖空知识库和待恢复知识状态，不只检查条目数量", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-empty-knowledge-target-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const service = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await service.createProject({ name: "迁移源", code: "SOURCE", sourcePath: null });
+    service.close();
+    for (const name of ["empty", "pending"]) {
+      const destination = join(root, name);
+      const target = await AyanamiTaskService.open({ dataDir: destination, migrationsRoot });
+      if (name === "empty") await target.knowledge.search({});
+      target.close();
+      if (name === "pending") {
+        mkdirSync(join(destination, "knowledge"), { recursive: true });
+        writeFileSync(join(destination, "knowledge", "restore.json"), "pending sentinel");
+      }
+      await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+        "DESTINATION_ALREADY_HAS_KNOWLEDGE",
+      );
+      expect(existsSync(join(destination, "registry", "registry.sqlite"))).toBe(true);
+    }
+  });
+  it("零项目知识库可迁移，空项目目标中的知识不可覆盖", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-knowledge-migration-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const occupied = join(root, "occupied");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const service = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    const entry = await service.knowledge.save({
+      opId: "create",
+      expectedVersion: 0,
+      slug: "shared",
+      title: "共享",
+      summary: "跨项目",
+      bodyMarkdown: "内容保留",
+    });
+    service.close();
+    const target = await AyanamiTaskService.open({ dataDir: occupied, migrationsRoot });
+    await target.knowledge.save({
+      opId: "target",
+      expectedVersion: 0,
+      slug: "must-keep",
+      title: "不能覆盖",
+      summary: "目标已有数据",
+      bodyMarkdown: "不能丢",
+    });
+    target.close();
+    await expect(migrateDataRoot({ source, destination: occupied, execute: true })).rejects.toThrow(
+      "DESTINATION_ALREADY_HAS_KNOWLEDGE",
+    );
+    const result = await migrateDataRoot({ source, destination, execute: true });
+    expect(result).toMatchObject({
+      projects: 0,
+      knowledgeEntries: 1,
+      knowledgePresent: true,
+      executed: true,
+    });
+    const migrated = await AyanamiTaskService.open({ dataDir: destination, migrationsRoot });
+    try {
+      expect(await migrated.knowledge.get({ id: entry.id })).toMatchObject({
+        bodyMarkdown: "内容保留",
+        revision: 1,
+      });
+      expect(migrated.databases.listProjects()).toEqual([]);
+    } finally {
+      migrated.close();
+    }
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toEqual(result);
+  });
+
+  it("迁移副本中的知识库损坏时不会提交到目标目录", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-knowledge-migration-corrupt-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const service = await AyanamiTaskService.open({
+      dataDir: source,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    await service.knowledge.save({
+      opId: "create",
+      expectedVersion: 0,
+      slug: "shared",
+      title: "共享",
+      summary: "跨项目",
+      bodyMarkdown: "内容",
+    });
+    service.close();
+    await expect(
+      migrateDataRoot({
+        source,
+        destination,
+        execute: true,
+        onStage: (stage) => {
+          if (stage === "AFTER_COPY")
+            writeFileSync(
+              join(root, "destination-migrating", "knowledge", "knowledge.sqlite"),
+              "broken copy",
+            );
+        },
+      }),
+    ).rejects.toThrow();
+    expect(existsSync(destination)).toBe(false);
+  });
   it("保留空目标备份、清理两套旧运行时发现文件并重写项目数据库路径", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-data-migration-"));
     roots.push(root);

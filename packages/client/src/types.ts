@@ -1,4 +1,6 @@
 import type {
+  KnowledgeRevision,
+  KnowledgeSource,
   ProjectionFailureView,
   ProjectionStateView,
   ProjectionSummary,
@@ -13,12 +15,40 @@ import type {
 import type { CursorPage } from "./cursor-drain.js";
 
 export type {
+  KnowledgeArchiveInput,
+  KnowledgeContent,
+  KnowledgeEntry,
+  KnowledgeGetInput,
+  KnowledgeGetPage,
+  KnowledgeHit,
+  KnowledgeRevision,
+  KnowledgeSaveInput,
+  KnowledgeSearchInput,
+  KnowledgeSearchPage,
+  KnowledgeSource,
   ProjectionBatchReceipt,
   ProjectionFailureView,
   ProjectionReconcileReceipt,
   ProjectionStateView,
   ProjectionSummary,
 } from "@ayanami-task/protocol";
+
+export type KnowledgeHistoryPage = {
+  revisions: Array<Omit<KnowledgeRevision, "bodyMarkdown">>;
+  nextRevision: number | null;
+};
+
+export type KnowledgeRecordPreview = {
+  title: string;
+  summary: string;
+  bodyMarkdown: string;
+  sourceRef: KnowledgeSource & {
+    type: "project_record";
+    projectId: string;
+    recordId: string;
+    sourceVersion: number;
+  };
+};
 
 export type AyanamiClientOptions = {
   endpoint: string;

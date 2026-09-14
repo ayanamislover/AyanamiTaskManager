@@ -27,12 +27,16 @@ MCP 参数统一使用 `snake_case`：
 }
 ```
 
-`atm_knowledge_get` 的输入为 `id`，可选不可变 `revision_id`、`section`、`max_chars` 和 `cursor`。
+`atm_knowledge_get` 的输入为 `id`，可选不可变 `revision_id`、`section`、`max_chars` 和 `cursor`。`section` 可用目录中的章节 ID，或唯一的章节标题；重名时明确返回候选 ID，不猜测。
 输入由 `packages/protocol/src/inputs/knowledge.ts` 的 canonical Zod 契约校验。
 
-知识读取响应保留 canonical application view 的 camelCase 字段（例如 `hasMore`、`nextCursor`、
-`bodyMarkdown`、`useWhen`、`sourceRefs`）。这是有意的 typed view：服务端在相同形状上计算并验证
-`maxChars`，避免外层字段转换造成响应越界；不要把响应字段名与 MCP 输入字段名混用。
+知识读取响应使用应用层 canonical Agent view 的 camelCase 字段（例如 `hasMore`、`nextCursor`、
+`bodyMarkdown`、`useWhen`、`sourceRefs`），不要和 MCP 的 snake_case 输入混用。REST 保留完整管理视图；
+MCP 搜索不返回 slug、显示序号、编辑 version、时间等管理字段。首次正文读取保留适用条件、来源和目录；
+续页只返回 `id`、`revisionId`、`archived`、`bodyMarkdown`、`truncated`、`nextCursor`，不重复元数据。
+字符预算直接作用于最终 Agent 投影，而不是先裁完整 REST 页再删除字段；相同预算可以容纳更多有效正文。
+
+Agent 首屏目录也是摘要：最多 40 项、每个标题最多 120 字符，并随预算收缩；`tocTotal` 和 `tocTruncated` 明示省略。全文不被截掉，仍可沿正文 cursor 读取，或直接用唯一章节标题定位，不必先把整份目录送进上下文。
 
 搜索游标绑定当时的知识目录序列。条目发生变更后，搜索分页会明确要求重新搜索；正文游标绑定
 不可变的数据库身份、恢复代次、条目 ID 和 revisionId，与无关条目变更及正常重启无关。找不到原修订时
@@ -40,6 +44,12 @@ MCP 参数统一使用 `snake_case`：
 
 默认搜索隐藏归档条目；需要目录维护时才显式传 `include_archived: true`。字符预算不足会返回
 明确的 `RESULT_TOO_LARGE`，不得用空结果和原 cursor 自循环。
+
+## 高信息密度写作
+
+先搜索已有主题，避免重复条目；摘要写可用于筛选的结论与使用场景。正文按“结论、最短操作、验收/失败边界、必要依据”组织，保留版本、前提和例外，不保存冗长的开发流水账。同一主题新增修订，项目专属事实留在 Record；跨项目使用时记录 `id@revisionId`，不把全文复制到各项目。未知与未验证应明示，不能为了省字丢关键约束，也不为填满预算凑字。
+
+MCP 知识工具保持只读；这项效率约定不会自动发布 Record 或赋予知识写入权限。
 
 ## 权限与分发边界
 

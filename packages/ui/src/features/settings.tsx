@@ -23,6 +23,7 @@ import {
   integrationState,
 } from "../presentation.js";
 import { SystemProjectionPanel } from "../projection-health-panel.js";
+import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
 
 export function SettingsPage({
@@ -205,6 +206,7 @@ export function SettingsPage({
             notify={setFeedback}
           />
         ) : null}
+        <KnowledgeBackupPanel client={client} notify={setFeedback} />
         <section className="atm-panel">
           <div className="atm-panel-head">
             <h2>Agent 接入</h2>

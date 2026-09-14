@@ -2,6 +2,7 @@ import type { ProjectionBatchReceipt, SearchPage } from "@ayanami-task/protocol"
 import { queryString, requestJson } from "./http.js";
 import { createProjectsSurface } from "./surfaces/projects.js";
 import { createTasksSurface } from "./surfaces/tasks.js";
+import { createKnowledgeSurface } from "./surfaces/knowledge.js";
 import type {
   AgentRecordCreateInput,
   AyanamiClientOptions,
@@ -72,6 +73,7 @@ export class AyanamiClient {
   };
 
   readonly projects = createProjectsSurface(this.request.bind(this));
+  readonly knowledge = createKnowledgeSurface(this.request.bind(this));
 
   readonly projections = {
     reconcileAll: () =>
@@ -129,6 +131,10 @@ export class AyanamiClient {
       this.request<Record<string, any>>("POST", "/api/v1/backups", {
         scope: project ? "PROJECT" : "REGISTRY",
         ...(project ? { project } : {}),
+      }),
+    createKnowledge: () =>
+      this.request<Record<string, any>>("POST", "/api/v1/backups", {
+        scope: "KNOWLEDGE",
       }),
     restore: (id: string) =>
       this.request<Record<string, any>>(
