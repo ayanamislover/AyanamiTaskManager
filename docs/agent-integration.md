@@ -168,6 +168,8 @@ MCP 工具参数统一使用 `snake_case`，例如 `project_code`、`session_id`
 
 普通 `completed` Session 不是可恢复前任；只有显式退休且已关闭的 Session 可作为 predecessor。这可以防止误把一次正常完成伪装成上下文换代。
 
+上下文被压缩后 `predecessor_session_id` 往往正是调用方丢掉的那个值。此时只传 `resume=true` 即可：ATM 会按 `agent_id`、`cwd`、`thread_id` 三项全等去接回你自己那条尚未关闭的 Session，回执里的 `session` 就是原来那条，事件流记一条 `agent.resumed`。找不到候选时照旧新建；候选多于一条时以 `SESSION_SUCCESSOR_AMBIGUOUS` 拒绝，请显式传 `predecessor_session_id` 消歧。注意这一层依赖 `cwd` 与 `thread_id` 作为身份的一部分：两者都不传时它退化成只按 `agent_id` 匹配，同一 `agent_id` 在同一目录下并行开多条会话仍可能接错，并发场景应当传 `thread_id`。
+
 ## CLI 等价入口
 
 ```powershell

@@ -25,6 +25,7 @@ export type PresentedEvent = {
 
 const EVENT_TITLES: Record<string, string> = {
   "agent.joined": "Agent 加入",
+  "agent.resumed": "Agent 接回会话",
   "agent.left": "Agent 离开",
   "agent.force_closed": "Agent 会话关闭",
   "agent.recovered_stale": "回收过期 Agent 声明",

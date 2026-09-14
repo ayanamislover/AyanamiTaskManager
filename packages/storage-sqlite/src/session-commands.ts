@@ -108,6 +108,10 @@ export class SessionCommands {
              client_kind = excluded.client_kind, updated_at = excluded.updated_at`,
         )
         .run(input.agentId, input.displayName, input.clientKind, now, now);
+      if (input.resume && !input.predecessorSessionId) {
+        const resumed = this.#resumeOpenSession(input, now);
+        if (resumed) return resumed;
+      }
       const id = createUlid();
       this.#sqlite
         .prepare(
@@ -178,6 +182,69 @@ export class SessionCommands {
       );
       return { id, sequence };
     });
+  }
+
+  /**
+   * resume:true 不带 predecessor 时，接回同一身份自己那条还开着的 Session。
+   *
+   * 原来这里只有 `if (input.resume && input.predecessorSessionId)`，条件不成立就静默
+   * 新建。而上下文压缩之后，predecessorSessionId 恰恰是 agent 丢掉的那个东西——调用方
+   * 传了 resume:true 却拿到一条全新 Session，还看不出区别。后果是一段连续工作散成好几条
+   * Session，归属、交接和统计跟着碎。
+   *
+   * 身份按 (agent_id, cwd, thread_id) 三项全等匹配，NULL 与 NULL 也算相等。只按
+   * agent_id 匹配不够：同一个 agent_id 在一个项目里并发开多条会话是实际发生过的
+   * （实测 codex-root 历史上同时开着 3 条），那时「最近一条未关闭的」很可能是别人的活
+   * 会话，接上去就是两个 agent 往同一条 Session 里写。
+   *
+   * 候选多于一条时 fail closed，不猜，与既有 successor rebind 的处理一致。
+   *
+   * 残余风险说明白：cwd 与 thread_id 都缺省时，这一层退化成只按 agent_id 匹配。同一个
+   * agent_id 在同一个 cwd 下并行开两条都不带 thread_id 的会话，仍可能接错。要彻底堵住
+   * 得让调用方带上 thread_id。
+   */
+  #resumeOpenSession(
+    input: CreateSessionCommandInput,
+    now: string,
+  ): { id: string; sequence: number } | null {
+    const candidates = this.#sqlite
+      .prepare(
+        `SELECT id FROM agent_sessions
+         WHERE agent_id = ? AND connection_state <> 'CLOSED'
+           AND cwd IS ? AND thread_id IS ?
+         ORDER BY started_at DESC, id DESC LIMIT 2`,
+      )
+      .all(input.agentId, input.cwd ?? null, input.threadId ?? null) as { id: string }[];
+    if (candidates.length === 0) return null;
+    if (candidates.length > 1)
+      throw new AtmError("SESSION_SUCCESSOR_AMBIGUOUS", {
+        message: "同一身份存在多条未关闭 Session，无法确定接回哪一条；请显式传 predecessor",
+        details: { agent_id: input.agentId, candidates: candidates.map((row) => row.id) },
+      });
+    const id = candidates[0]!.id;
+    this.#sqlite
+      .prepare("UPDATE agent_sessions SET heartbeat_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, id);
+    this.#sqlite
+      .prepare(
+        `UPDATE handoffs SET to_session_id = ?, acknowledged_at = ?
+         WHERE to_agent_id = ? AND to_session_id IS NULL`,
+      )
+      .run(id, now, input.agentId);
+    const sequence = this.#mutation.appendEvent(
+      "agent.resumed",
+      { type: "AGENT", id: input.agentId, sessionId: id },
+      "SESSION",
+      id,
+      {
+        agentId: input.agentId,
+        displayName: input.displayName,
+        role: input.role,
+        cwd: input.cwd ?? null,
+        threadId: input.threadId ?? null,
+      },
+    );
+    return { id, sequence };
   }
 
   recoverOrCreateSession(
