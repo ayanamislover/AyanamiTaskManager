@@ -247,7 +247,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `session`            | 实际承载写操作的 Session。                                                                                                                                         |
 | `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                         |
 | `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。 |
-| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。                                                                                                     |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。`version` 即该实体当前版本，下一次写同一实体时直接作为 `expected_version` 传回，不要自行加一。       |
 | `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                             |
 | `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                 |
 | `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                         |
