@@ -2,7 +2,7 @@
   <img src="./logo.png" width="128" alt="AyanamiTaskManager logo" />
   <h1>绫波任务管理器</h1>
   <p><strong>让 Codex、Claude 与每一次开发 Session，共享同一份可信项目事实。</strong></p>
-  <p>Local-first project control plane for AI agents on Windows.</p>
+  <p>Local-first tasks, handoffs and shared knowledge for AI agents on Windows.</p>
 
   <p>
     <a href="https://github.com/ayanamislover/AyanamiTaskManager/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/ayanamislover/AyanamiTaskManager?style=flat-square&label=stable&color=7c5ce7" /></a>
@@ -20,7 +20,7 @@
     ·
     <a href="./docs/security-model.md">安全模型</a>
     ·
-    <a href="./docs/open-source-preflight.md">开源预检</a>
+    <a href="./docs/local-knowledge.md">共享知识库</a>
   </p>
 </div>
 
@@ -40,6 +40,18 @@ Agent 写代码不难，难的是**换一次 Session 就忘了项目到哪儿了
 
 AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录、证据和 Session 交接收进一个稳定的事实源，Agent 开工时读一份 brief 就能接着干。它不是另一份待办清单，也不保存整段对话，只保留真正会影响项目推进的结构化事实。桌面 UI、MCP、CLI 与本地 HTTP 共用同一套事务应用服务——你在界面上看到的，和 Agent 读到的，永远是同一份数据。
 
+## 1.1.0 · 让经验跨项目复用
+
+**项目事实留在项目里，通用知识按需读取。** 本地共享知识库独立于项目数据库；项目归档后，已经发布的知识修订仍可引用。
+
+- **先筛选，再读正文。** `atm_knowledge_search` 返回摘要、使用场景和适用范围；`atm_knowledge_get` 再读取选中条目或指定章节。不把整库塞进开工 brief。
+- **引用不随编辑漂移。** 使用不可变的 `id@revisionId`，正文可按字符预算分页读取；条目修改后，旧修订仍有自己的身份。
+- **管理在本地，读取给 Agent。** 桌面端维护知识、修订、归档和 Markdown 导入／导出；MCP 提供只读入口，不把参考资料变成新的执行权限。
+
+同时改进了 Session 身份与角色恢复、批量操作 ACK 的最终版本回执、幂等请求一致性，以及启动和长正文读取的开销。安装包携带更新后的 Agent Guide、完整文档与 `atm-knowledge` Skill。
+
+查看[知识库使用说明](./docs/local-knowledge.md) · [版本与下载](https://github.com/ayanamislover/AyanamiTaskManager/releases)。正式发布状态以 Release 页面为准。
+
 ## 为什么需要 ATM
 
 | 能力             | ATM 提供的结果                                                                       |
@@ -52,7 +64,12 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 | **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现          |
 | **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号             |
 
-## 实战数据
+## 用 ATM 开发 ATM
+
+这个项目自己的规划、任务拆分、跨 Agent 交接与验收，也由 ATM 管理。我们在日常开发中验证的，不只是能不能记下一条任务，而是**换一个 Session 后，能否准确接着做**。
+
+<details>
+<summary>展开历史实战快照 · 2026-08-29（不是当前版本统计）</summary>
 
 ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截至 2026-08-29：
 
@@ -69,27 +86,29 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 
 支撑这个节奏的不是更长的上下文，是每次开工都能拿到一份可信的 brief。
 
+</details>
+
 ## 性能与交付证据
 
-事实源慢一点就没人用，所以性能是硬门禁，不是“以后再优化”。以下是 1.0.22 的实测值，超过门禁上限直接拒绝发布：
+事实源必须足够轻，才能成为每次开工的习惯。[性能基准](./scripts/benchmark.ts) 使用真实 SQLite，以下是验收上限，不是当前设备上的实测承诺：
 
-| 场景                    | 实测        | 门禁上限 |
-| ----------------------- | ----------- | -------- |
-| 冷启动到可交互          | 764 ms      | 3,000 ms |
-| 100 个项目的总览        | p95 2.0 ms  | 200 ms   |
-| 10,000 条任务的筛选列表 | p95 4.0 ms  | 200 ms   |
-| 50,000 篇文档的中文检索 | p95 36.5 ms | 300 ms   |
-| 单次写入并落事件        | p95 25.7 ms | 100 ms   |
-| 增量拉取 100 条事件     | p95 2.1 ms  | 100 ms   |
-| 常驻内存                | 144.9 MB    | 150 MB   |
+| 场景                        | 门禁上限   |
+| --------------------------- | ---------- |
+| 应用服务打开数据库          | 3,000 ms   |
+| 100 个项目的总览            | p95 200 ms |
+| 10,000 条任务的筛选列表     | p95 200 ms |
+| 50,000 篇项目文档的中文检索 | p95 300 ms |
+| 单次写入并落事件            | p95 100 ms |
+| 增量拉取 100 条事件         | p95 100 ms |
+| 隔离服务探针的空闲 RSS      | 150 MB     |
+
+服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个 Electron 应用的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
 
 每个版本还带一份可核对的证据包：候选先算指纹（gitHead、工作区脏状态哈希、源码哈希、lockfile 哈希、各阶段哈希），再逐层验证，每层记录产物的 SHA-256——
 
 **SOURCE_DONE → CI_VERIFIED → PACKAGED_VERIFIED → INSTALLED_VERIFIED**
 
-1.0.22 走完四层的实际结果：862 个单元与集成用例、20 个 Playwright e2e（0 失败、0 flaky）、packaged / portable / installed 三套 smoke 各 54 项、分发 smoke 19 项。任一层哈希对不上，流水线就停在那一层。
-
-顺带一个能说明取向的数字：**47,184 行生产代码，对 45,314 行测试代码**，分布在 247 个测试文件里。
+任一层哈希对不上，流水线就停在那一层。源码测试、打包运行、安装／升级／卸载和本机部署是不同证据，不能互相代替。测试数量与实测值由当轮报告生成，不把旧版本的绿灯贴到新候选上。完整规则见[发布检查表](./docs/release-checklist.md)。
 
 ## 产品结构
 
@@ -113,6 +132,8 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 
 应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。安装版会把精简 Agent Guide 与完整文档同步到该目录，换设备后仍能从同一路径发现使用说明。
 
+下载后可用 Release 附带的 `SHA256SUMS.txt` 核对文件。Setup 与 portable 是两种分发方式，使用差异见[便携版说明](./docs/portable-usage.md)；`NUPKG` 和 `RELEASES` 是安装版更新文件，不是另一个需要手动安装的应用。
+
 > [!IMPORTANT]
 > 不要把 `%LOCALAPPDATA%\AyanamiTaskManager\runtime\daemon.json`、Bearer token、项目数据库或备份提交到仓库。ATM 的运行时发现文件只服务当前 Windows 用户和当前 daemon 实例。
 
@@ -133,7 +154,22 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 3. 只在状态真正变化时写 progress；长期事实、决策、风险和证据写 record。
 4. 验证后完成 WorkItem，Session 结束调用 `atm_end`。
 
-只有上下文压缩、长时间离开或明确恢复 working set 时才调用 `atm_brief`。任务过大时，应先按“可交付结果 + 可验证验收”拆成独立叶子 WorkItem。完整规则和字段约定见 [Agent 接入指南](./docs/agent-integration.md) 与仓库根目录的 [ATM_AGENT_GUIDE.md](./ATM_AGENT_GUIDE.md)。
+只有上下文压缩、长时间离开或明确恢复 working set 时才调用 `atm_brief`。任务过大时，应先按“可交付结果 + 可验证验收”拆成独立叶子 WorkItem。
+
+安装后让 Agent 从这里开始，无需记住源码仓库在哪：
+
+> 执行项目前先访问 ATM 工具，并阅读 `%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md`；受管开发任务的计划、进度、证据和交接均通过 ATM 管理。
+
+完整规则和字段约定见 [Agent 接入指南](./docs/agent-integration.md) 与 [Agent Guide 在线版](./ATM_AGENT_GUIDE.md)。受管项目未注册时自动创建；只有无法可靠确定项目名称、代码或目录时才请求确认。
+
+| Profile   | 做什么                             | 主要入口                                                                                |
+| --------- | ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `core`    | 开工、找任务、拆任务、恢复与交接   | `atm_begin`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_brief`、`atm_end` |
+| `actions` | 领取、开始、检查项、验证与完成     | `atm_task_patch`                                                                        |
+| `memory`  | 阶段进度、长期记录、反馈与按需检索 | `atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`             |
+| `memory`  | 跨项目知识，只读且按需             | `atm_knowledge_search` → `atm_knowledge_get`                                            |
+
+需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。项目 Record 只存项目事实，不复制整篇知识。三个正式 Profile 共 14 个工具；若升级后看不到新工具，请重新安装接入配置并重载客户端 MCP。
 
 工具表拆成 `core` / `memory` / `actions` 三个 profile，不是为了分类好看：单个 profile 的工具 schema 只有 **7,680 字节**预算（8 KB 上限扣掉 512 字节保留），塞不下就注册不进去。这条预算由用例守着，加字段前先算账。
 
@@ -153,6 +189,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 - Agent 按项目聚合、Session Git 上下文、claim 与交接；
 - 临时任务晋升、保存视图、中文搜索和实时事件；
 - 在线备份恢复、导入导出、工程统计与托盘通知；
+- 本地共享知识库、修订历史、归档与 Markdown 导入／导出；
 - 开机随机延迟后台启动，以及关闭到托盘的常驻模式。
 
 更完整的操作说明见[用户指南](./docs/user-guide.md)，故障定位见[排障指南](./docs/troubleshooting.md)，便携版差异见[便携版说明](./docs/portable-usage.md)。
