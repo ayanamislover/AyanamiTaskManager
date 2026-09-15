@@ -30,6 +30,8 @@ MCP 参数统一使用 `snake_case`：
 `atm_knowledge_get` 的输入为 `id`，可选不可变 `revision_id`、`section`、`max_chars` 和 `cursor`。`section` 可用目录中的章节 ID，或唯一的章节标题；重名时明确返回候选 ID，不猜测。
 输入由 `packages/protocol/src/inputs/knowledge.ts` 的 canonical Zod 契约校验。
 
+`bodyMarkdown` 与搜索 `query` 不接受 U+0000（NUL）。短于三字的查询用不了 trigram FTS，只能用 LIKE 扫正文，而 SQLite 的 LIKE 把 NUL 当作字符串终点——含 NUL 的正文会保存成功、读回逐字相等、三字以上的 FTS 查询照常命中，唯独短查询搜不到 NUL 之后的内容。与其让一条存进去的知识有一半搜不着，契约在入口就拒绝它；NUL 在 Markdown 里不承载任何内容。
+
 知识读取响应使用应用层 canonical Agent view 的 camelCase 字段（例如 `hasMore`、`nextCursor`、
 `bodyMarkdown`、`useWhen`、`sourceRefs`），不要和 MCP 的 snake_case 输入混用。REST 保留完整管理视图；
 MCP 搜索不返回 slug、显示序号、编辑 version、时间等管理字段。首次正文读取保留适用条件、来源和目录；

@@ -1,6 +1,22 @@
 import { z } from "zod";
 
 const Text = z.string().trim().min(1);
+
+/**
+ * 正文与查询里禁止 U+0000。
+ *
+ * 短于三字的查询走不了 trigram FTS，只能用 LIKE 扫正文，而 SQLite 的 LIKE 把 NUL 当成
+ * 字符串终点——正文里 NUL 之后的内容会静默检索不到。实测：`before` + NUL + `XY` 保存成功、
+ * 读回逐字相等、FTS 查 `needle` 正常命中，唯独 LIKE 查 `XY` 零命中。
+ *
+ * 与其让一条保存成功的知识有一半搜不着，不如在入口就拒掉：NUL 在 Markdown 里不承载
+ * 任何内容，而它造成的是「存进去了但查不出来」这类最难排查的缺陷。
+ *
+ * 只管正文和查询：元数据字段走的是 instr，它按字节长度比对，本来就不怕 NUL。
+ */
+const NO_NUL = /^[^\0]*$/u;
+const nulFree = (schema: z.ZodString) =>
+  schema.regex(NO_NUL, { message: "不能包含 U+0000（NUL）" });
 export const KnowledgeSourceSchema = z
   .object({
     type: z.enum(["project_record", "file", "url", "manual"]),
@@ -29,7 +45,7 @@ export const KnowledgeContentSchema = z.object({
   tags: z.array(Text.max(80)).max(30).default([]),
   aliases: z.array(Text.max(160)).max(30).default([]),
   appliesTo: z.array(Text.max(200)).max(30).default([]),
-  bodyMarkdown: z.string().max(500_000),
+  bodyMarkdown: nulFree(z.string().max(500_000)),
   sourceRefs: z.array(KnowledgeSourceSchema).max(30).default([]),
 });
 export type KnowledgeContent = z.input<typeof KnowledgeContentSchema>;
@@ -54,7 +70,7 @@ export const KnowledgeArchiveInputSchema = z.object({
   archived: z.boolean(),
 });
 export const KnowledgeSearchInputSchema = z.object({
-  query: z.string().trim().max(500).default(""),
+  query: nulFree(z.string().trim().max(500)).default(""),
   tag: Text.max(80).optional(),
   includeArchived: z.boolean().default(false),
   limit: z.number().int().min(1).max(50).default(5),

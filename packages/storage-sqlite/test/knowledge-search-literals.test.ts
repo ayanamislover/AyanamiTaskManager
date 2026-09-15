@@ -66,4 +66,38 @@ describe("知识搜索里的模式字符", () => {
     expect(slugsFor("条目").length).toBe(5);
     expect(slugsFor("不存在的词")).toEqual([]);
   });
+
+  // ATM-T-0355：SQLite 的 LIKE 把 NUL 当字符串终点，正文里 NUL 之后的内容短查询搜不到。
+  // 实测保存成功、读回逐字相等、FTS（三字以上）照常命中，唯独 LIKE 那支零命中——
+  // 「存进去了但查不出来」是最难排查的那类缺陷，所以在入口就拒掉。
+  it("正文与查询都不接受 NUL，拒在入口而不是存进去再漏检", async () => {
+    const repository = await open();
+    const nul = String.fromCharCode(0);
+
+    expect(() =>
+      repository.save({
+        opId: "with-nul",
+        expectedVersion: 0,
+        slug: "nul",
+        title: "NUL",
+        summary: "NUL",
+        bodyMarkdown: `before${nul}XY`,
+      }),
+    ).toThrow();
+
+    // 阳性对照：去掉 NUL 后同一份正文存得进去，且 NUL 原位置之后的两字查询确实能召回。
+    // 少了这一条，上面那句只能证明「save 会抛错」，证明不了抛的是 NUL 这件事。
+    const saved = repository.save({
+      opId: "without-nul",
+      expectedVersion: 0,
+      slug: "nul",
+      title: "NUL",
+      summary: "NUL",
+      bodyMarkdown: "beforeXY",
+    });
+    expect(saved.bodyMarkdown).toBe("beforeXY");
+    expect(searchKnowledge(repository, { query: "XY", limit: 5 }).hits).toHaveLength(1);
+
+    expect(() => searchKnowledge(repository, { query: `X${nul}Y`, limit: 5 })).toThrow();
+  });
 });
