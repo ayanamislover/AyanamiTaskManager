@@ -41,9 +41,44 @@ const base = {
   threadId: "thread-1",
 };
 
-function sessionCount(managed: { sqlite: { prepare: (sql: string) => { get: () => unknown } } }) {
+type Managed = {
+  sqlite: {
+    prepare: (sql: string) => {
+      get: (...a: unknown[]) => unknown;
+      all: (...a: unknown[]) => unknown[];
+    };
+  };
+};
+
+function sessionCount(managed: Managed) {
   return (managed.sqlite.prepare("SELECT count(*) AS n FROM agent_sessions").get() as { n: number })
     .n;
+}
+
+function storedRole(managed: Managed, id: string) {
+  return (
+    managed.sqlite.prepare("SELECT role FROM agent_sessions WHERE id = ?").get(id) as {
+      role: string;
+    }
+  ).role;
+}
+
+function connectionState(managed: Managed, id: string) {
+  return (
+    managed.sqlite
+      .prepare("SELECT connection_state AS s FROM agent_sessions WHERE id = ?")
+      .get(id) as {
+      s: string;
+    }
+  ).s;
+}
+
+function resumedEvents(managed: Managed): Array<Record<string, unknown>> {
+  return (
+    managed.sqlite
+      .prepare("SELECT payload_json FROM events WHERE type = 'agent.resumed' ORDER BY id")
+      .all() as Array<{ payload_json: string }>
+  ).map((row) => JSON.parse(row.payload_json) as Record<string, unknown>);
 }
 
 describe("resume 不带 predecessor 时的接回", () => {
@@ -109,5 +144,73 @@ describe("resume 不带 predecessor 时的接回", () => {
 
     expect(second.id).not.toBe(first.id);
     expect(sessionCount(managed)).toBe(2);
+  });
+
+  // ATM-T-0353：role 也算身份。少了它会出现「回执说接回成功、事件里记着 REVIEWER，
+  // 而返回的那条 Session 实际还是 PRIMARY」，随后 submitReview 报 REVIEWER_REQUIRED，
+  // 调用方对着一条自称 REVIEWER 的会话查不出原因。
+  it("请求角色与在线会话不同就不接回，另起一条；事件里的 role 与库里一致", async () => {
+    const { repository, managed } = await fixture("RSF");
+    const primary = repository.createSession(base);
+
+    const reviewer = repository.createSession({ ...base, resume: true, role: "REVIEWER" });
+    expect(reviewer.id).not.toBe(primary.id);
+    expect(storedRole(managed, reviewer.id)).toBe("REVIEWER");
+    expect(storedRole(managed, primary.id)).toBe("PRIMARY");
+    // 角色不同走的是新建，不该留下接回痕迹。
+    expect(resumedEvents(managed)).toHaveLength(0);
+
+    // 同角色才接回，且事件记的 role 必须等于库里那条 Session 的真实角色。
+    const resumed = repository.createSession({ ...base, resume: true, role: "REVIEWER" });
+    expect(resumed.id).toBe(reviewer.id);
+    const events = resumedEvents(managed);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.role).toBe(storedRole(managed, reviewer.id));
+  });
+
+  // ATM-T-0354：歧义提示必须是可执行的。原来它让调用方传 predecessor，可一传就撞
+  // SESSION_NOT_RETIRED——候选按定义就是还开着的，永远退不了休。
+  it("多候选时按错误里给的 id 传 predecessor 能真的接回，且不动另一条活会话", async () => {
+    const { repository, managed } = await fixture("RSG");
+    const first = repository.createSession(base);
+    const second = repository.createSession(base);
+
+    let candidates: string[] = [];
+    try {
+      repository.createSession({ ...base, resume: true });
+      throw new Error("应当因多候选而拒绝");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "SESSION_SUCCESSOR_AMBIGUOUS" });
+      candidates = (error as { details?: { candidates?: string[] } }).details?.candidates ?? [];
+    }
+    // 阳性对照：提示里真的把两条候选都报出来了，否则下面只是在用测试自己知道的 id。
+    expect(new Set(candidates)).toEqual(new Set([first.id, second.id]));
+
+    const resumed = repository.createSession({
+      ...base,
+      resume: true,
+      predecessorSessionId: candidates[0]!,
+    });
+    expect(resumed.id).toBe(candidates[0]!);
+    expect(sessionCount(managed)).toBe(2);
+    // 另一条活会话不能被顺手关掉。
+    expect(connectionState(managed, first.id)).not.toBe("CLOSED");
+    expect(connectionState(managed, second.id)).not.toBe("CLOSED");
+  });
+
+  it("指名的会话身份对不上时拒绝接回，不静默换成另一种身份", async () => {
+    const { repository, managed } = await fixture("RSH");
+    const primary = repository.createSession(base);
+
+    expect(() =>
+      repository.createSession({
+        ...base,
+        resume: true,
+        role: "REVIEWER",
+        predecessorSessionId: primary.id,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "SESSION_SUCCESSOR_IDENTITY_MISMATCH" }));
+    expect(sessionCount(managed)).toBe(1);
+    expect(storedRole(managed, primary.id)).toBe("PRIMARY");
   });
 });
