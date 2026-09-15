@@ -10,6 +10,7 @@ import { AppShell } from "./shell/app-shell.js";
 import { CommandPalette } from "./features/command-palette.js";
 import { TaskDrawer } from "./features/task-drawer.js";
 import { AppRouter } from "./routes/app-router.js";
+import type { KnowledgeDraftSeed } from "./features/knowledge.js";
 import {
   appRouteTitle,
   useAppRouteState,
@@ -33,6 +34,7 @@ function App({
   const [route, setRoute] = useAppRouteState();
   const [palette, setPalette] = useState(false);
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
+  const [knowledgeDraft, setKnowledgeDraft] = useState<KnowledgeDraftSeed | null>(null);
   const { notice, notify } = useNotice();
   useRouteHash(route);
   const { theme, toggleTheme } = useTheme();
@@ -67,6 +69,9 @@ function App({
           notify={notify}
           onRoute={setRoute}
           onTask={openTaskInPlace}
+          knowledgeDraft={knowledgeDraft}
+          onKnowledgeDraft={setKnowledgeDraft}
+          onKnowledgeDraftConsumed={() => setKnowledgeDraft(null)}
         />
       }
       paletteSlot={

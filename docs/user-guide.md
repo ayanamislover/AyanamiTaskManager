@@ -2,7 +2,7 @@
 
 ## 安装与首次启动
 
-运行 `AyanamiTaskManager-Setup-1.0.27-win-x64.exe` 完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。应用在本机启动内置服务，不需要云端账号。
+运行 `AyanamiTaskManager-Setup-1.1.0-win-x64.exe` 完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。应用在本机启动内置服务，不需要云端账号。
 
 正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。portable 包默认仍使用正式数据目录；如需完全隔离，启动前设置 `ATM_DATA_DIR`。旧版 `AYANAMI_TASK_DATA_DIR` 仅作为迁移兼容 fallback，不应写入新配置。
 
@@ -47,6 +47,14 @@
 Agent 页面按项目聚合在线与历史 Session。每个 Session 的 Git 区域显示 ATM 从 `cwd` 只读采集的 branch、HEAD、worktree 和 dirty 状态；采集失败会明确标记不可用，不会阻止任务执行。相同 branch/worktree 的多个在线 Session 只显示冲突警告。
 
 Git 上下文在开工、有意义的进度/项目更新、验收/完成、Session 结束或用户手动刷新时更新；打开页面或普通查询不会因为轮询而改写 Session。
+
+## 共享知识库
+
+从侧栏打开“知识库”，没有任何项目也可创建、检索和阅读。标题、适用条件、标签、别名与正文一起保存；编辑冲突时保留草稿，请重新读取后合并，不要盲目覆盖。历史版本可回看，也可用旧内容另存为新修订。归档会隐藏默认搜索结果，但已有 `entryId@revisionId` 引用仍可读。界面上的数字修订号只供阅读，Agent 固定引用应使用不可变修订 ID。
+
+Markdown 导入会创建待确认草稿；导出得到普通 Markdown 文件，不会建立后台文件同步。在项目 Record 中选择提炼入口后，先检查并去除项目专属路径、账号、密钥等内容，再确认发布。修改原 Record 不会自动改动已经发布的知识。
+
+知识库位于当前数据目录的 `knowledge/knowledge.sqlite`，与每个项目库独立；备份和恢复请选择“知识库”范围。知识库恢复会使旧续读游标失效，需要从指定 `entryId@revisionId` 重新读取。升级到此版本会升级 Registry schema；回退旧程序不能直接打开新 schema，需先使用升级前备份恢复相应数据，切勿只替换 exe。
 
 ## 工程统计
 

@@ -29,3 +29,11 @@ Renderer / MCP stdio / atm CLI
 - `desktop`：Electron 生命周期与安全边界。
 
 正式项目写入只触碰一个项目库。Registry 摘要由项目 outbox 在提交后更新；失败不回滚项目事实，启动时按项目序列补投。任何客户端都不能直接写 SQLite。
+
+## 本地共享知识库
+
+同一个 ApplicationService 通过 `knowledge` 用例访问独立的 `<dataDir>/knowledge/knowledge.sqlite`。它不属于某个项目，不借用 `Record.scope`，也不另起常驻进程。数据库按需打开；损坏只影响知识功能，不阻止任务和 Session。`doctor` 单独报告知识库健康。
+
+SQLite 是唯一事实源；Markdown 文件只用于显式导入/导出。知识元数据和正文一起形成不可变修订；保存以一笔 SQLite 事务提交 head、revision、FTS、catalog sequence 和幂等回执。只读 MCP 先检索元数据，再按永久条目 ID 和 `revisionId` 读取正文，不自动进入 `begin/brief`。
+
+Record 提炼先读出同一快照下的来源 ID/版本和预览，用户编辑确认后另行保存知识；这不是跨库事务，也不自动传播源 Record 的后续修改。存储在本机不意味着内容不会进入云端模型上下文：调用知识读取工具时，返回的正文会发送给当前 Agent。

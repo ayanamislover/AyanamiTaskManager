@@ -147,7 +147,10 @@ export function registerProjectRoutes(
   });
   app.post("/api/v1/backups", async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
-    const scope = body.scope === "REGISTRY" ? "REGISTRY" : "PROJECT";
+    const scope = body.scope ?? "PROJECT";
+    if (scope !== "REGISTRY" && scope !== "PROJECT" && scope !== "KNOWLEDGE") {
+      throw new AtmError("INVALID_ARGUMENT", { message: "未知备份范围" });
+    }
     if (scope === "PROJECT" && typeof body.project !== "string") {
       throw new AtmError("PROJECT_REQUIRED", { message: "项目备份需要 project" });
     }

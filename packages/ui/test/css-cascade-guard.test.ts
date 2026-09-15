@@ -17,6 +17,7 @@ const expectedImports = [
   "./styles/shell.css",
   "./styles/primitives.css",
   "./styles/features-primary.css",
+  "./styles/features-knowledge.css",
   "./styles/controls.css",
   "./styles/features-secondary.css",
   "./styles/overlays.css",

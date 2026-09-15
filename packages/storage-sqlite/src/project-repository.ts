@@ -246,6 +246,7 @@ export class ProjectRepository {
     });
     this.#requestNormalizer = new MutationRequestNormalizer(
       (reference) => this.#recordReads.recordRow(reference).id,
+      (evidence) => this.#evidenceNormalizer.normalize(evidence),
     );
     this.#recordCommands = new RecordCommands({
       sqlite: this.#sqlite,
@@ -466,6 +467,10 @@ export class ProjectRepository {
 
   getRecord(reference: string): RecordView {
     return this.#recordReads.getRecord(reference);
+  }
+
+  getRecordSnapshot(reference: string): { record: RecordView; version: number } {
+    return this.#recordReads.getRecordSnapshot(reference);
   }
 
   private progressUpdateView(row: any): ProgressUpdateView {

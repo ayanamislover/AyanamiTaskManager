@@ -49,6 +49,20 @@ describe("packaged application content policy", () => {
       "apps/desktop/dist/main/main.cjs",
     );
     expect(missingRequiredPackagedEntries(["package.json"])).toContain("logo.png");
+    expect(missingRequiredPackagedEntries(["package.json"])).toContain(
+      "migrations/knowledge/0001_initial.sql",
+    );
+  });
+
+  it("rejects user knowledge while requiring its schema migration", () => {
+    expect(
+      findForbiddenPackagedEntries([
+        "knowledge/private.md",
+        "knowledge/knowledge.sqlite",
+        "data/knowledge.sqlite-wal",
+        "migrations/knowledge/0001_initial.sql",
+      ]),
+    ).toEqual(["data/knowledge.sqlite-wal", "knowledge/knowledge.sqlite", "knowledge/private.md"]);
   });
 
   it("rejects a high-resolution or oversized published logo", () => {

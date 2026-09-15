@@ -21,6 +21,17 @@ export type SessionGitContextCommand = {
   error: string | null;
 };
 
+/** 接回候选：判定身份是否全等所需的全部字段，别的一律不取。 */
+type ResumeCandidate = {
+  id: string;
+  agent_id: string;
+  connection_state: string;
+  retirement_reason: string | null;
+  cwd: string | null;
+  thread_id: string | null;
+  role: string;
+};
+
 export type CreateSessionCommandInput = {
   agentId: string;
   displayName: string;
@@ -82,11 +93,10 @@ export class SessionCommands {
       if (input.resume && input.predecessorSessionId) {
         const predecessor = this.#sqlite
           .prepare(
-            "SELECT agent_id, connection_state, retirement_reason FROM agent_sessions WHERE id = ?",
+            `SELECT id, agent_id, connection_state, retirement_reason, cwd, thread_id, role
+             FROM agent_sessions WHERE id = ?`,
           )
-          .get(input.predecessorSessionId) as
-          | { agent_id: string; connection_state: string; retirement_reason: string | null }
-          | undefined;
+          .get(input.predecessorSessionId) as ResumeCandidate | undefined;
         if (!predecessor)
           throw new AtmError("SESSION_NOT_FOUND", {
             message: `Session 不存在：${input.predecessorSessionId}`,
@@ -96,18 +106,27 @@ export class SessionCommands {
           throw new AtmError("SESSION_SUCCESSOR_AGENT_MISMATCH", {
             message: "Session successor Agent 不匹配",
           });
-        if (predecessor.connection_state !== "CLOSED" || !predecessor.retirement_reason) {
+        if (predecessor.connection_state !== "CLOSED") {
+          // 指名的是自己那条还开着的会话，这是自接回，不是换代交接，不该要求前任已退休。
+          //
+          // 否则「多候选时请显式传 predecessor」那条提示就是不可执行的：照着传任意一条
+          // 候选都会立刻撞上 SESSION_NOT_RETIRED，而候选按定义就是还开着的，永远退不了休，
+          // Agent 只能反复试一条不可能成功的调用。
+          //
+          // 身份仍须全等：指名一条别人的活会话同样是接错，这里 fail closed。
+          this.#requireResumableIdentity(predecessor, input);
+          this.#upsertAgent(input, now);
+          return this.#resumeSession(predecessor.id, input, now);
+        }
+        if (!predecessor.retirement_reason) {
           throw new AtmError("SESSION_NOT_RETIRED", { message: "前序 Session 尚未退休" });
         }
       }
-      this.#sqlite
-        .prepare(
-          `INSERT INTO agents(id, display_name, client_kind, capabilities_json, created_at, updated_at)
-           VALUES (?, ?, ?, '[]', ?, ?)
-           ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name,
-             client_kind = excluded.client_kind, updated_at = excluded.updated_at`,
-        )
-        .run(input.agentId, input.displayName, input.clientKind, now, now);
+      this.#upsertAgent(input, now);
+      if (input.resume && !input.predecessorSessionId) {
+        const resumed = this.#resumeOpenSession(input, now);
+        if (resumed) return resumed;
+      }
       const id = createUlid();
       this.#sqlite
         .prepare(
@@ -178,6 +197,135 @@ export class SessionCommands {
       );
       return { id, sequence };
     });
+  }
+
+  /**
+   * resume:true 不带 predecessor 时，接回同一身份自己那条还开着的 Session。
+   *
+   * 原来这里只有 `if (input.resume && input.predecessorSessionId)`，条件不成立就静默
+   * 新建。而上下文压缩之后，predecessorSessionId 恰恰是 agent 丢掉的那个东西——调用方
+   * 传了 resume:true 却拿到一条全新 Session，还看不出区别。后果是一段连续工作散成好几条
+   * Session，归属、交接和统计跟着碎。
+   *
+   * 身份按 (agent_id, cwd, thread_id, role) 四项全等匹配，NULL 与 NULL 也算相等。只按
+   * agent_id 匹配不够：同一个 agent_id 在一个项目里并发开多条会话是实际发生过的
+   * （实测 codex-root 历史上同时开着 3 条），那时「最近一条未关闭的」很可能是别人的活
+   * 会话，接上去就是两个 agent 往同一条 Session 里写。
+   *
+   * 候选多于一条时 fail closed，不猜，与既有 successor rebind 的处理一致。
+   *
+   * 残余风险说明白：cwd 与 thread_id 都缺省时，这一层退化成只按 agent_id 匹配。同一个
+   * agent_id 在同一个 cwd 下并行开两条都不带 thread_id 的会话，仍可能接错。要彻底堵住
+   * 得让调用方带上 thread_id。
+   */
+  #resumeOpenSession(
+    input: CreateSessionCommandInput,
+    now: string,
+  ): { id: string; sequence: number } | null {
+    const candidates = this.#sqlite
+      .prepare(
+        `SELECT id, agent_id, connection_state, retirement_reason, cwd, thread_id, role
+         FROM agent_sessions
+         WHERE agent_id = ? AND connection_state <> 'CLOSED'
+           AND cwd IS ? AND thread_id IS ? AND role = ?
+         ORDER BY started_at DESC, id DESC LIMIT 2`,
+      )
+      .all(
+        input.agentId,
+        input.cwd ?? null,
+        input.threadId ?? null,
+        input.role,
+      ) as ResumeCandidate[];
+    if (candidates.length === 0) return null;
+    if (candidates.length > 1)
+      throw new AtmError("SESSION_SUCCESSOR_AMBIGUOUS", {
+        message:
+          "同一身份存在多条未关闭 Session。把其中一条的 id 作为 predecessor_session_id 再调一次即可接回那一条；" +
+          "要另起一条就把 resume 去掉。",
+        details: {
+          agent_id: input.agentId,
+          candidates: candidates.map((row) => row.id),
+          resolution: "predecessor_session_id",
+        },
+      });
+    return this.#resumeSession(candidates[0]!.id, input, now);
+  }
+
+  /**
+   * 身份要全等才能接回，role 也算身份的一部分。
+   *
+   * 少了这一条会出现「回执说接回成功、事件里记着 REVIEWER，而返回的那条 Session 实际
+   * 还是 PRIMARY」——随后 submitReview 报 REVIEWER_REQUIRED，调用方对着一条自称
+   * REVIEWER 的会话查不出原因。要换角色就该另起一条，不能靠接回悄悄改。
+   */
+  #requireResumableIdentity(candidate: ResumeCandidate, input: CreateSessionCommandInput): void {
+    const mismatch =
+      candidate.cwd !== (input.cwd ?? null) ||
+      candidate.thread_id !== (input.threadId ?? null) ||
+      candidate.role !== input.role;
+    if (!mismatch) return;
+    throw new AtmError("SESSION_SUCCESSOR_IDENTITY_MISMATCH", {
+      message: "指名的 Session 身份与本次请求不一致，无法接回；去掉 resume 另起一条。",
+      details: {
+        session_id: candidate.id,
+        expected: { cwd: candidate.cwd, thread_id: candidate.thread_id, role: candidate.role },
+        requested: { cwd: input.cwd ?? null, thread_id: input.threadId ?? null, role: input.role },
+      },
+    });
+  }
+
+  #upsertAgent(input: CreateSessionCommandInput, now: string): void {
+    this.#sqlite
+      .prepare(
+        `INSERT INTO agents(id, display_name, client_kind, capabilities_json, created_at, updated_at)
+         VALUES (?, ?, ?, '[]', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET display_name = excluded.display_name,
+           client_kind = excluded.client_kind, updated_at = excluded.updated_at`,
+      )
+      .run(input.agentId, input.displayName, input.clientKind, now, now);
+  }
+
+  #resumeSession(
+    id: string,
+    input: CreateSessionCommandInput,
+    now: string,
+  ): { id: string; sequence: number } {
+    this.#sqlite
+      .prepare(
+        `UPDATE agent_sessions SET heartbeat_at = ?, updated_at = ?, connection_state = 'ONLINE'
+         WHERE id = ?`,
+      )
+      .run(now, now, id);
+    this.#sqlite
+      .prepare(
+        `UPDATE handoffs SET to_session_id = ?, acknowledged_at = ?
+         WHERE to_agent_id = ? AND to_session_id IS NULL`,
+      )
+      .run(id, now, input.agentId);
+    // 从库里回读，不取请求里的那份。
+    //
+    // 这一步目前够不到，变异实测过：两条接回路径都先校验过身份全等，所以此刻
+    // stored 与 input 必然相同，改成用 input 也全绿。留着是因为「事件必须记这条
+    // Session 的真实身份」不该依赖于上游恰好校验过——peer 打回的正是这个形状：
+    // 角色没进匹配条件时，事件记着 REVIEWER 而库里还是 PRIMARY。匹配条件哪天被
+    // 放宽，这里仍然说实话。
+    const stored = this.#sqlite
+      .prepare("SELECT role, cwd, thread_id FROM agent_sessions WHERE id = ?")
+      .get(id) as { role: string; cwd: string | null; thread_id: string | null };
+    const sequence = this.#mutation.appendEvent(
+      "agent.resumed",
+      { type: "AGENT", id: input.agentId, sessionId: id },
+      "SESSION",
+      id,
+      {
+        agentId: input.agentId,
+        displayName: input.displayName,
+        role: stored.role,
+        cwd: stored.cwd,
+        threadId: stored.thread_id,
+      },
+    );
+    return { id, sequence };
   }
 
   recoverOrCreateSession(

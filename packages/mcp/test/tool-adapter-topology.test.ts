@@ -73,6 +73,18 @@ const manifest = [
     name: "atm_delta",
     factory: "createAtmDeltaTool",
   },
+  {
+    path: "tools/memory/knowledge-search.ts",
+    profile: "memory",
+    name: "atm_knowledge_search",
+    factory: "createAtmKnowledgeSearchTool",
+  },
+  {
+    path: "tools/memory/knowledge-get.ts",
+    profile: "memory",
+    name: "atm_knowledge_get",
+    factory: "createAtmKnowledgeGetTool",
+  },
   { path: "tools/core/end.ts", profile: "core", name: "atm_end", factory: "createAtmEndTool" },
 ] as const;
 

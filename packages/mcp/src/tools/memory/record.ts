@@ -48,7 +48,7 @@ export function createAtmRecordTool(
   return {
     profile: "memory",
     name: "atm_record",
-    description: "保存关键记录。",
+    description: "保存关键记录。kind=DECISION|CONSTRAINT|FACT|RISK|REFERENCE|LESSON。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

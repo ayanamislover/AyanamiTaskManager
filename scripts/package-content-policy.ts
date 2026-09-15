@@ -10,6 +10,8 @@ export const REQUIRED_PACKAGED_ENTRIES = [
   "apps/desktop/dist/renderer/index.html",
   "migrations/registry/0001_initial.sql",
   "migrations/project/0001_initial.sql",
+  "migrations/knowledge/0001_initial.sql",
+  "migrations/registry/0006_knowledge_backups.sql",
 ] as const;
 
 export const PUBLISHED_LOGO_MAX_EDGE = 256;
@@ -32,6 +34,8 @@ export function assertPublishedLogoBytes(bytes: Buffer, entry: string): void {
 }
 
 const forbiddenEntryPatterns = [
+  /^knowledge(?:\/|$)/u,
+  /(?:^|\/)knowledge\.sqlite(?:-(?:wal|shm))?$/u,
   /^(?:\.claude|\.crossagent|\.github)(?:\/|$)/u,
   /^(?:packages|scripts|integrations)(?:\/|$)/u,
   /^apps\/(?!desktop(?:$|\/dist(?:\/|$)))/u,

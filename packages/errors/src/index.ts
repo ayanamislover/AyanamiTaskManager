@@ -4,6 +4,7 @@ const policy = (httpStatus: number, retryable = false) => ({ httpStatus, retryab
 
 /** The compile-time and runtime truth source for every typed ATM error code. */
 export const ERROR_POLICIES = Object.freeze({
+  KNOWLEDGE_UNAVAILABLE: policy(503, true),
   AGENT_DOCS_MISSING: policy(500, true),
   AGENT_GUIDE_MISSING: policy(500, true),
   AGENT_RULE_MODIFIED_REQUIRES_REPAIR: policy(409),

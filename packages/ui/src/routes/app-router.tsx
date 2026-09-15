@@ -9,6 +9,7 @@ import { ProjectsPage } from "../features/projects.js";
 import { QuickPage } from "../features/quick.js";
 import { SettingsPage } from "../features/settings.js";
 import { GlobalTimelinePage, TimelineEventRow } from "../features/timeline.js";
+import { KnowledgePage, type KnowledgeDraftSeed } from "../features/knowledge.js";
 
 export function AppRouter({
   client,
@@ -19,6 +20,9 @@ export function AppRouter({
   notify,
   onRoute,
   onTask,
+  knowledgeDraft,
+  onKnowledgeDraft,
+  onKnowledgeDraftConsumed,
 }: {
   client: AyanamiClient;
   desktop: DesktopBridge | undefined;
@@ -28,6 +32,9 @@ export function AppRouter({
   notify: Notify;
   onRoute: (route: Route) => void;
   onTask: (project: string, key: string) => void;
+  knowledgeDraft: KnowledgeDraftSeed | null;
+  onKnowledgeDraft: (draft: KnowledgeDraftSeed) => void;
+  onKnowledgeDraftConsumed: () => void;
 }): ReactNode {
   if (route === "overview")
     return (
@@ -68,6 +75,15 @@ export function AppRouter({
     );
   if (route === "agents") return <AgentsPage client={client} projects={projects} />;
   if (route === "timeline") return <GlobalTimelinePage client={client} />;
+  if (route === "knowledge")
+    return (
+      <KnowledgePage
+        client={client}
+        notify={notify}
+        draft={knowledgeDraft}
+        onDraftConsumed={onKnowledgeDraftConsumed}
+      />
+    );
   if (route === "settings")
     return <SettingsPage client={client} {...(desktop === undefined ? {} : { desktop })} />;
   if (selectedProject)
@@ -78,6 +94,22 @@ export function AppRouter({
         notify={notify}
         openTask={(key) => onTask(selectedProject.code, key)}
         onExit={() => onRoute("projects")}
+        onKnowledgeDraft={async (recordKey) => {
+          try {
+            const preview = await client.knowledge.previewRecord(selectedProject.code, recordKey);
+            onKnowledgeDraft({
+              title: preview.title,
+              summary: preview.summary,
+              bodyMarkdown: preview.bodyMarkdown,
+              sourceRefs: [preview.sourceRef],
+            });
+            onRoute("knowledge");
+          } catch (error) {
+            notify(
+              `无法载入 Record 来源：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }}
         {...(desktop ? { desktop } : {})}
       />
     );

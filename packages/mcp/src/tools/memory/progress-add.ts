@@ -55,7 +55,8 @@ export function createAtmProgressAddTool(
   return {
     profile: "memory",
     name: "atm_progress_add",
-    description: "写任务或项目进度。",
+    description:
+      "写任务或项目进度。scope=task|project；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

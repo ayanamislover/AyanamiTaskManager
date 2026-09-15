@@ -110,9 +110,14 @@ export function uniqueMutationEntityReferences(
   for (const reference of references) {
     const identity = `${reference.entity_type}\0${reference.key}`;
     const previous = unique.get(identity);
-    if (!previous || (previous.version === null && reference.version !== null)) {
-      unique.set(identity, reference);
-    }
+    // 同一实体在一批里被连续操作时（claim 把 v1 推到 v2，start 再推到 v3），回执要报
+    // 批次结束时的版本。原来这里保留首次出现，报出去的是 v2——而 ACK 契约承诺
+    // version 可以直接当下一次的 expected_version，调用方照做必然撞版本冲突，
+    // 它并没有做错任何事。所以后来的非 null 版本要覆盖先前的。
+    //
+    // null 不覆盖已有的非 null：有些操作只报 key 不带版本，那不代表版本被清空。
+    // Map.set 命中已有键时不改插入次序，预览顺序不受影响。
+    if (!previous || reference.version !== null) unique.set(identity, reference);
   }
   return [...unique.values()];
 }

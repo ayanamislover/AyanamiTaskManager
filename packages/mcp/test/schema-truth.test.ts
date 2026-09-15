@@ -109,6 +109,8 @@ const publicFields: Record<string, readonly string[]> = {
     "max_chars",
   ],
   atm_delta: ["project", "since_seq", "limit", "types", "max_chars"],
+  atm_knowledge_search: ["query", "tag", "include_archived", "limit", "max_chars", "cursor"],
+  atm_knowledge_get: ["id", "revision_id", "section", "max_chars", "cursor"],
   atm_end: [
     "project",
     "session",
@@ -398,7 +400,7 @@ describe("MCP public/runtime schema truth", () => {
     try {
       expect(() => assertPublicSurface(fixture.tools)).not.toThrow();
       expect(() => assertRuntimeSemantics(fixture.runtimeSchemas, fixture.tools)).not.toThrow();
-      expect(fixture.tools).toHaveLength(12);
+      expect(fixture.tools).toHaveLength(14);
       for (const tool of fixture.tools) {
         expect(tool.inputSchema.additionalProperties, tool.name).toBe(false);
       }

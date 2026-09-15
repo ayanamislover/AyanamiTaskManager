@@ -6,6 +6,7 @@ import { FolderOpenIcon as FolderOpen } from "@phosphor-icons/react/dist/icons/F
 import { GearSixIcon as GearSix } from "@phosphor-icons/react/dist/icons/GearSix";
 import { HouseIcon as House } from "@phosphor-icons/react/dist/icons/House";
 import { LightningIcon as Lightning } from "@phosphor-icons/react/dist/icons/Lightning";
+import { NotebookIcon as Notebook } from "@phosphor-icons/react/dist/icons/Notebook";
 import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/UsersThree";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import type { Route, SidebarProject } from "../contracts.js";
@@ -27,6 +28,7 @@ export function Sidebar({
     ["projects", "项目", FolderOpen],
   ] as const;
   const workspace = [
+    ["knowledge", "知识库", Notebook],
     ["my", "活动任务", CheckSquare],
     ["quick", "临时任务", Lightning],
     ["blockers", "阻塞与等待", WarningCircle],

@@ -3,6 +3,7 @@
 @import "./styles/shell.css";
 @import "./styles/primitives.css";
 @import "./styles/features-primary.css";
+@import "./styles/features-knowledge.css";
 @import "./styles/controls.css";
 @import "./styles/features-secondary.css";
 @import "./styles/overlays.css";

@@ -108,8 +108,10 @@ export class ProjectCommands {
 
   async restoreBackup(backupId: string) {
     const result = await this.#runtime.databases.restoreBackup(backupId);
-    this.#runtime.dropRepository(result.project.id);
-    this.#runtime.emitProject(result.project.code);
+    if (result.project) {
+      this.#runtime.dropRepository(result.project.id);
+      this.#runtime.emitProject(result.project.code);
+    }
     this.#runtime.emitGlobal();
     return result;
   }

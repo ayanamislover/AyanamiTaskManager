@@ -1,6 +1,7 @@
 export * from "./domain.js";
 export * from "./external-schema.js";
 export * from "./inputs/memory.js";
+export * from "./inputs/knowledge.js";
 export * from "./inputs/planning.js";
 export * from "./inputs/task-patch.js";
 export {

@@ -12,6 +12,7 @@ import {
   type SearchPage,
 } from "@ayanami-task/protocol";
 import { openManagedDatabase, type ManagedDatabase } from "./database.js";
+import { KnowledgeDatabase } from "./knowledge-database.js";
 import {
   BackupMaintenance,
   type BackupView,
@@ -91,6 +92,7 @@ export class AyanamiDatabaseManager {
   readonly dataDir: string;
   readonly migrationsRoot: string;
   readonly registry: ManagedDatabase;
+  readonly knowledge: KnowledgeDatabase;
   readonly #backupMaintenance: BackupMaintenance;
   readonly #projectPool: ProjectDatabasePool;
   readonly #projectionDispatcher: RegistryProjectionDispatcher;
@@ -107,6 +109,7 @@ export class AyanamiDatabaseManager {
     this.dataDir = input.dataDir;
     this.migrationsRoot = input.migrationsRoot;
     this.registry = input.registry;
+    this.knowledge = new KnowledgeDatabase(input.dataDir, input.migrationsRoot);
     this.#registryReads = new RegistryReadModel(input.registry.sqlite);
     this.#registryWorkspace = new RegistryWorkspace({
       dataDir: input.dataDir,
@@ -168,6 +171,7 @@ export class AyanamiDatabaseManager {
       dataDir: input.dataDir,
       migrationsRoot: input.migrationsRoot,
       registry: input.registry,
+      knowledge: this.knowledge,
       getProject: (codeOrId) => this.getProject(codeOrId),
       openProject: (codeOrId) => this.openProject(codeOrId),
       closeIdleProjects: (maxIdleMs, at) => this.closeIdleProjects(maxIdleMs, at),
@@ -177,7 +181,8 @@ export class AyanamiDatabaseManager {
       listBackups: (codeOrId) =>
         codeOrId === undefined ? this.listBackups() : this.listBackups(codeOrId),
       createBackup: (backupInput) => this.createBackup(backupInput),
-      pruneBackupRetention: (projectId, reason) => this.pruneBackupRetention(projectId, reason),
+      pruneBackupRetention: (projectId, reason, scope) =>
+        this.pruneBackupRetention(projectId, reason, scope),
       repairSummaries: () => this.repairSummaries(),
       dispatchProject: (projectId) => this.dispatchProject(projectId),
       appendGlobalEvent: (type, aggregateId, actor, payload) =>
@@ -511,6 +516,7 @@ export class AyanamiDatabaseManager {
   }
 
   async doctor(): Promise<{
+    knowledge: { present: boolean; ok: boolean; error: string | null };
     registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
     projectCounts: Record<string, { total: number; failed: number }>;
     projectionSummary: ProjectionSummary;
@@ -525,7 +531,10 @@ export class AyanamiDatabaseManager {
       projection: ProjectionStateView | null;
     }>;
   }> {
-    return this.#registryObservability.doctor();
+    return {
+      ...(await this.#registryObservability.doctor()),
+      knowledge: await this.knowledge.status(),
+    };
   }
 
   projectionState(projectCodeOrId: string): ProjectionStateView {
@@ -703,8 +712,12 @@ export class AyanamiDatabaseManager {
     return this.#backupMaintenance.createBackup(input);
   }
 
-  private pruneBackupRetention(projectId: string | null, reason: string): void {
-    this.#backupMaintenance.pruneBackupRetention(projectId, reason);
+  private pruneBackupRetention(
+    projectId: string | null,
+    reason: string,
+    scope?: BackupView["scope"],
+  ): void {
+    this.#backupMaintenance.pruneBackupRetention(projectId, reason, scope);
   }
 
   async runMaintenance(at = new Date()): Promise<MaintenanceResult> {
@@ -717,7 +730,7 @@ export class AyanamiDatabaseManager {
 
   async restoreBackup(
     backupId: string,
-  ): Promise<{ backup: BackupView; project: RegisteredProject }> {
+  ): Promise<{ backup: BackupView; project: RegisteredProject | null }> {
     return this.#backupMaintenance.restoreBackup(backupId);
   }
 
@@ -752,7 +765,7 @@ export class AyanamiDatabaseManager {
       const manifest = {
         format: "ayanami-task-project",
         formatVersion: 1,
-        applicationVersion: "1.0.27",
+        applicationVersion: "1.1.0",
         project: { id: project.id, code: project.code, name: project.name },
         schemaVersion: database.schemaVersion,
         createdAt,
@@ -837,6 +850,7 @@ export class AyanamiDatabaseManager {
   }
 
   close(): void {
+    this.knowledge.close();
     this.#projectPool.closeAll();
     if (this.registry.sqlite.open) {
       this.registry.sqlite.pragma("wal_checkpoint(PASSIVE)");

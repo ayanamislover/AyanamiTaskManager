@@ -30,6 +30,7 @@ export function appRouteTitle(route: Route, projectName?: string | null): string
         blockers: "阻塞与等待",
         agents: "Agent",
         timeline: "全局时间线",
+        knowledge: "知识库",
         settings: "设置",
       } as Record<string, string>
     )[route] ??

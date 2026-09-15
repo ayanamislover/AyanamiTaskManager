@@ -27,6 +27,7 @@ const eventLabels: Record<string, string> = {
   "checklist.updated": "检查项已更新",
   "record.created": "项目记录已创建",
   "agent.joined": "Agent 已加入",
+  "agent.resumed": "Agent 已接回会话",
   "agent.left": "Agent 已离开",
   "agent.git_context.updated": "Agent Git 上下文已刷新",
   "backup.created": "备份已创建",

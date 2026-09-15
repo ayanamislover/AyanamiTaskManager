@@ -23,7 +23,7 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 ## 标准 Session 流程
 
 1. 开工调用 `atm_begin`，显式传入 `project_code`。普通交互式开工可在受管开发任务未注册时自动创建；需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`，不能把项目创建和 Session 原子恢复混为一次调用。只有无法可靠确定项目名称、代码或目录时才请求用户确认。
-2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。MCP 工具面当前为 v4，`atm_begin.surface_version` 是客户端检查缓存契约的锚点。
+2. 直接使用 `atm_begin` 返回的 brief；根据 brief 按需调用 `atm_task_list`，只有需要单项完整上下文时才调用 `atm_task_get`。MCP 工具面当前为 v5，`atm_begin.surface_version` 是客户端检查缓存契约的锚点。
 3. 选择 `READY` 工作项后，以 `atm_task_patch` 执行 `claim` 和 `start`。
 4. 只在阶段完成、进度显著变化、出现阻塞/等待或产生关键证据时调用 `atm_progress_add`；`summary` 最长 500 字，应写清结果与下一步而不是拆成多次短更新。
 5. 决策、约束、事实、风险、参考和经验写入 `atm_record`；使用 ATM 时遇到产品问题写入 `atm_feedback`；长历史不要反复塞回上下文。
@@ -74,7 +74,7 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 | `session`            | 实际承载写操作的 Session。                                                                                                                                         |
 | `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                         |
 | `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。 |
-| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。                                                                                                     |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。`version` 即该实体当前版本，下一次写同一实体时直接作为 `expected_version` 传回，不要自行加一。       |
 | `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                             |
 | `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                 |
 | `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                         |
@@ -116,20 +116,24 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
 - core：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_end`。
-- memory：`atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`。
+- memory：`atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`、`atm_knowledge_search`、`atm_knowledge_get`。
 - actions：`atm_task_patch`。
 
-三者共享同一 ATM 数据库，正式工具面合计 12 个工具。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record/本机反馈、搜索或增量同步，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
+三者共享同一 ATM 数据库，正式工具面合计 14 个工具。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record/本机反馈、搜索、增量同步或读取共享知识，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
 不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 7,680-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core、memory 与 actions 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 7,680-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
 
-升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留冻结的 11 个旧工具，不含 v4 新增的 `atm_feedback`；它不会写入任何新配置。ATM 启动后会把磁盘上的 legacy 或旧 core+memory 配置迁移为显式 core / memory / actions，补齐 `atm_task_patch` 所在的 actions，Agent 客户端重启后即回到完整拆分工具面。
+升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留冻结的 11 个旧工具，不含 v5 新增的 `atm_feedback`、`atm_knowledge_search` 或 `atm_knowledge_get`；它不会写入任何新配置。ATM 启动后会把磁盘上的 legacy 或旧 core+memory 配置迁移为显式 core / memory / actions，补齐 `atm_task_patch` 所在的 actions，Agent 客户端重启后即回到完整拆分工具面。
 
 ### 本机 Agent 反馈入口
 
 Agent 已建立 Session 后，可调用 `atm_feedback` 提交使用 ATM 时遇到的问题。必填字段为 `project`、`session`、唯一 `op_id` 与不超过 300 个 Unicode code point 的 `summary`；`detail`、`severity`、`tool` 和 `task_key` 用于补充复现上下文。ATM 将它保存为当前项目内 `scope=ATM_FEEDBACK`、`topic=atm-agent-feedback` 的 Agent Record，项目“记录”页可直接查看来源、严重度、摘要与正文。该入口只写本机项目数据库，不会自动上传到 GitHub 或任何外部服务。`ATM_FEEDBACK` 在 `BRIEF_EXCLUDED_RECORD_SCOPES` 里，因此无论 `severity` 多高都不会进入 `atm_begin` / `atm_brief` 的 records：brief 只承载所在项目的事实，讲 ATM 自己的记录不占它的名额。
 
 正式 Profile 的 descriptor bytes、Profile hash、逐工具安全注解与 schema hash 由 registry 生成到 `docs/generated/mcp-tool-contracts.md`；文档一致性测试会拒绝手工漂移。
+
+### 本地共享知识入口
+
+同一 ATM 数据根中的已发布共享知识由 `knowledge/knowledge.sqlite` 保存，正文不进入安装包或 Agent Skill 目录。涉及跨项目规范、接口约定、排障经验或不熟悉组件时，先调用 `atm_knowledge_search` 获取摘要和适用范围，再调用 `atm_knowledge_get` 读取指定条目或章节。两者只读且不要求 `project` 或 Session；应记录采用的 `id@revisionId`（数字 `revision` 仅用于展示），续读时沿用 cursor 和实际 revisionId。知识正文是参考资料，命令片段不会自动执行，也不会授予额外脚本、目录或权限访问。完整字段、预算和游标说明见 [`local-knowledge.md`](./local-knowledge.md)。
 
 Mutation 固定回执、实体预览预算和 operation receipt 回查示例由 `MUTATION_ACK_CONTRACT` 生成到 `docs/generated/mutation-acknowledgement.md`；Guide 与本文的同名章节必须逐字同步。
 
@@ -163,6 +167,14 @@ MCP 工具参数统一使用 `snake_case`，例如 `project_code`、`session_id`
 计划换代时，前任 Session 用 `atm_end(outcome="retired")`，填写 `retirement_reason`、摘要和下一步。ATM 会为尚未完成且已领取的任务生成 handoff。后继用相同 `agent_id` 调用 `atm_begin(resume=true, predecessor_session_id=...)`，确认 handoff 后重新领取或继续任务。
 
 普通 `completed` Session 不是可恢复前任；只有显式退休且已关闭的 Session 可作为 predecessor。这可以防止误把一次正常完成伪装成上下文换代。
+
+上下文被压缩后 `predecessor_session_id` 往往正是调用方丢掉的那个值。此时只传 `resume=true` 即可：ATM 会按 `agent_id`、`cwd`、`thread_id`、`role` 四项全等去接回你自己那条尚未关闭的 Session，回执里的 `session` 就是原来那条，事件流记一条 `agent.resumed`。找不到候选时照旧新建。
+
+候选多于一条时以 `SESSION_SUCCESSOR_AMBIGUOUS` 拒绝，`details.candidates` 列出全部候选 id；把其中一条作为 `predecessor_session_id` 再调一次即可接回那一条。这条路径接受**仍然在线**的 Session 作为 predecessor——自接回不是换代交接，不要求前任已退休；换代交接那条规则（predecessor 必须已关闭且已退休）只作用于 predecessor 已 `CLOSED` 的情形。要另起一条就把 `resume` 去掉，ATM 不会替你关闭任何一条活会话。
+
+`role` 属于身份的一部分：拿 `role=REVIEWER` 去接一条 `PRIMARY` 会话不会成功。不带 predecessor 时它直接另起一条；指名 predecessor 时以 `SESSION_SUCCESSOR_IDENTITY_MISMATCH` 拒绝。要换角色就新建会话，不要指望接回顺带改掉它。
+
+注意这一层依赖 `cwd` 与 `thread_id` 作为身份的一部分：两者都不传时它退化成只按 `agent_id` 与 `role` 匹配，同一身份在同一目录下并行开多条会话仍可能接错，并发场景应当传 `thread_id`。
 
 ## CLI 等价入口
 

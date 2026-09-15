@@ -68,10 +68,10 @@ describe("explicit ToolDefinition registry", () => {
     const all = registry.definitions();
     expect(Object.isFrozen(all)).toBe(true);
     expect(all.every((definition) => Object.isFrozen(definition))).toBe(true);
-    expect(all).toHaveLength(12);
-    expect(new Set(all.map((definition) => definition.name))).toHaveLength(12);
+    expect(all).toHaveLength(14);
+    expect(new Set(all.map((definition) => definition.name))).toHaveLength(14);
     expect(registry.definitions("core")).toHaveLength(6);
-    expect(registry.definitions("memory")).toHaveLength(5);
+    expect(registry.definitions("memory")).toHaveLength(7);
     expect(registry.definitions("actions")).toHaveLength(1);
 
     for (const profile of ["core", "memory", "actions"] as const) {
@@ -101,7 +101,11 @@ describe("explicit ToolDefinition registry", () => {
       expect(listed.tools).toHaveLength(11);
       expect(listed.tools.map((tool) => tool.name)).not.toContain("atm_feedback");
       expect(new Set(listed.tools.map((tool) => tool.name))).toEqual(
-        new Set(all.map((definition) => definition.name).filter((name) => name !== "atm_feedback")),
+        new Set(
+          all
+            .map((definition) => definition.name)
+            .filter((name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_")),
+        ),
       );
     } finally {
       await Promise.all([legacyClient.close(), legacyServer.close()]);

@@ -446,12 +446,12 @@ describe("Agent MCP 配置适配", () => {
     expect(rendered.agentRule).toContain("拆分成可独立验收的工作项");
   });
 
-  it("只安装 ATM 管理的两个 Skill 并备份已有目录", () => {
+  it("只安装 ATM 管理的三个 Skill 并备份已有目录", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-agent-skills-"));
     temporary.push(root);
     const sourceRoot = join(root, "published");
     const targetRoot = join(root, "host-skills");
-    for (const name of ["atm-plan", "atm-task"]) {
+    for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) {
       const directory = join(sourceRoot, name);
       mkdirSync(directory, { recursive: true });
       writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\n---\n`, "utf8");
@@ -463,9 +463,12 @@ describe("Agent MCP 配置适配", () => {
 
     const installed = installAgentSkills({ sourceRoot, targetRoot });
 
-    expect(installed.skills).toEqual(["atm-plan", "atm-task"]);
+    expect(installed.skills).toEqual(["atm-plan", "atm-task", "atm-knowledge"]);
     expect(readFileSync(join(targetRoot, "atm-task", "SKILL.md"), "utf8")).toContain(
       "name: atm-task",
+    );
+    expect(readFileSync(join(targetRoot, "atm-knowledge", "SKILL.md"), "utf8")).toContain(
+      "name: atm-knowledge",
     );
     expect(readFileSync(join(targetRoot, "_shared", "planning-playbooks.md"), "utf8")).toContain(
       "Playbooks",
@@ -482,7 +485,7 @@ describe("Agent MCP 配置适配", () => {
     writeFileSync(join(targetRoot, "atm-task", "SKILL.md"), "user modified", "utf8");
     expect(inspectAgentSkills({ sourceRoot, targetRoot }).state).toBe("MODIFIED");
     const removed = uninstallAgentSkills(targetRoot);
-    expect(removed.backupPaths).toHaveLength(3);
+    expect(removed.backupPaths).toHaveLength(4);
     expect(existsSync(join(targetRoot, "atm-plan"))).toBe(false);
   });
 

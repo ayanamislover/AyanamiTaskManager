@@ -1,4 +1,5 @@
 import type { AtmError } from "@ayanami-task/errors";
+import { KnowledgeService } from "./knowledge-service.js";
 import {
   type EvidenceInput,
   type ProjectionBatchReceipt,
@@ -43,6 +44,7 @@ export type { PublicNotFoundDetails } from "./errors/error-enrichment.js";
 
 export class AyanamiTaskService {
   readonly databases: AyanamiDatabaseManager;
+  readonly knowledge: KnowledgeService;
   readonly #runtime: ApplicationServiceRuntime;
   readonly #projectionCoordinator: ProjectionCoordinator;
   readonly #metricsObserver: EngineeringMetricsObserver;
@@ -54,6 +56,7 @@ export class AyanamiTaskService {
 
   private constructor(databases: AyanamiDatabaseManager) {
     this.databases = databases;
+    this.knowledge = new KnowledgeService(databases);
     this.#runtime = new ApplicationServiceRuntime(databases);
     this.#projectionCoordinator = new ProjectionCoordinator(this.#runtime);
     this.#metricsObserver = new EngineeringMetricsObserver(this.#runtime);

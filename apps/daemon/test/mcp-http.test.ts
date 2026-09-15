@@ -61,7 +61,7 @@ describe("Streamable HTTP MCP", () => {
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
-      result: { serverInfo: { name: "ayanami-task-manager", version: "1.0.27" } },
+      result: { serverInfo: { name: "ayanami-task-manager", version: "1.1.0" } },
     });
     expect(body.result.instructions).toContain("legacy 兼容入口");
     expect(body.result.instructions).toContain("重启 Agent 客户端");
@@ -123,10 +123,16 @@ describe("Streamable HTTP MCP", () => {
       "atm_feedback",
       "atm_search",
       "atm_delta",
+      "atm_knowledge_search",
+      "atm_knowledge_get",
     ]);
     expect(actions).toEqual(["atm_task_patch"]);
     expect(new Set(compatibility)).toEqual(
-      new Set([...core, ...memory, ...actions].filter((name) => name !== "atm_feedback")),
+      new Set(
+        [...core, ...memory, ...actions].filter(
+          (name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_"),
+        ),
+      ),
     );
     expect(compatibility).toHaveLength(11);
     expect(compatibility).not.toContain("atm_feedback");
