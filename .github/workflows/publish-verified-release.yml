@@ -1,0 +1,49 @@
+name: Publish verified release
+
+on:
+  workflow_dispatch:
+    inputs:
+      validation_run:
+        description: Successful Windows release validation run ID
+        required: true
+        type: string
+      tag:
+        description: Existing draft tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      candidate_sha:
+        description: Exact validated 40-character source commit
+        required: true
+        type: string
+      report_sha256:
+        description: SHA-256 of the test-report ZIP already attached to the draft
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-verified-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ATM_RELEASE_RUN: ${{ inputs.validation_run }}
+      ATM_RELEASE_TAG: ${{ inputs.tag }}
+      ATM_RELEASE_SHA: ${{ inputs.candidate_sha }}
+      ATM_REPORT_SHA256: ${{ inputs.report_sha256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify immutable candidate, upload missing assets, and publish
+        run: node .github/scripts/publish-verified-release.mjs
