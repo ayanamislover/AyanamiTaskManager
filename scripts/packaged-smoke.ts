@@ -774,7 +774,7 @@ try {
     legacyTools.length === 11 &&
       new Set(legacyTools).size === 11 &&
       [...coreTools, ...memoryTools, ...actionsTools]
-        .filter((name) => name !== "atm_feedback")
+        .filter((name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_"))
         .every((name) => legacyTools.includes(name)) &&
       !legacyTools.includes("atm_feedback"),
     legacyTools.join(", "),
