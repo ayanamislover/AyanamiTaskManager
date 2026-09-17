@@ -85,7 +85,7 @@ export function Sidebar({
             <span>工作区</span>
           </button>
           <nav
-            className="atm-nav atm-nav-secondary"
+            className="atm-nav atm-nav-secondary atm-disclosure-body"
             id="atm-workspace-navigation"
             aria-label="工作区"
             hidden={!workspaceExpanded}

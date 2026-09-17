@@ -340,7 +340,8 @@
 }
 .atm-diagnostics-body:not([hidden]) {
   display: grid;
-  gap: 12px;
+  /* 面板之间沿用全局节奏，不因为收进诊断区就挤到一起。 */
+  gap: 16px;
   margin-top: 12px;
 }
 .atm-diagnostics-body .atm-engineering,

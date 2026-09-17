@@ -302,7 +302,7 @@ export function AgentsPage({
             </span>
           </summary>
           {historyOpen ? (
-            <div className="agent-history-list" aria-label="历史 Agent">
+            <div className="agent-history-list atm-disclosure-body" aria-label="历史 Agent">
               {history.map((agent) => (
                 <div className="agent-history-row" key={`${agent.project}:${agent.agentId}`}>
                   <span className="agent-history-name">

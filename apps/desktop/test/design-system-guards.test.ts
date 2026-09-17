@@ -202,6 +202,7 @@ describe("设计系统静态守卫", () => {
     const end = css.indexOf("@media (prefers-reduced-transparency: reduce)", start);
     const reducedMotion = css.slice(start, end);
     const movingSelectors = [
+      ".atm-disclosure-body",
       ".atm-nav-disclosure:active",
       '.atm-nav-disclosure[aria-expanded="true"] svg',
       ".atm-button:active",

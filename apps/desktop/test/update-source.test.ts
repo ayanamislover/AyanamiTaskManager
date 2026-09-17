@@ -32,42 +32,42 @@ function dataDirWithFeed(version: string): string {
 describe("本地更新源与 Squirrel 运行器", () => {
   it("RELEASES 里解析出包名和版本号，逐段比数字", () => {
     expect(
-      releaseFeedEntries("AAA AyanamiTaskManagerDesktop-1.0.27-full.nupkg 164693885\r\n\n"),
-    ).toEqual([{ name: "AyanamiTaskManagerDesktop-1.0.27-full.nupkg", version: "1.0.27" }]);
-    // 字符串比较会把 1.0.27 判成比 1.1.0 新。
-    expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
-    expect(compareVersions("1.0.27", "1.1.0")).toBe(-1);
-    expect(compareVersions("1.1", "1.1.0")).toBe(0);
+      releaseFeedEntries("AAA AyanamiTaskManagerDesktop-2.3.27-full.nupkg 164693885\r\n\n"),
+    ).toEqual([{ name: "AyanamiTaskManagerDesktop-2.3.27-full.nupkg", version: "2.3.27" }]);
+    // 字符串比较会把 2.3.27 判成比 2.4.0 新。
+    expect(compareVersions("2.4.0", "2.3.27")).toBe(1);
+    expect(compareVersions("2.3.27", "2.4.0")).toBe(-1);
+    expect(compareVersions("2.4", "2.4.0")).toBe(0);
     // 字符串比较在这两对上直接反向：'2' < '9'、'1' < '9'。
-    expect(compareVersions("1.0.27", "1.0.9")).toBe(1);
-    expect(compareVersions("1.10.0", "1.9.0")).toBe(1);
+    expect(compareVersions("2.3.27", "2.3.9")).toBe(1);
+    expect(compareVersions("2.10.0", "2.9.0")).toBe(1);
   });
 
   it("装完的本地更新自动清掉；还没装的和版本号认不出来的都留着", () => {
-    const consumed = dataDirWithFeed("1.0.27");
-    expect(pruneConsumedUpdateFeed(consumed, "1.1.0").sort()).toEqual([
-      "AyanamiTaskManagerDesktop-1.0.27-full.nupkg",
+    const consumed = dataDirWithFeed("2.3.27");
+    expect(pruneConsumedUpdateFeed(consumed, "2.4.0").sort()).toEqual([
+      "AyanamiTaskManagerDesktop-2.3.27-full.nupkg",
       "RELEASES",
     ]);
     expect(updateFeedReady(consumed)).toBe(false);
 
-    const pending = dataDirWithFeed("1.2.0");
-    expect(pruneConsumedUpdateFeed(pending, "1.1.0")).toEqual([]);
+    const pending = dataDirWithFeed("2.5.0");
+    expect(pruneConsumedUpdateFeed(pending, "2.4.0")).toEqual([]);
     expect(updateFeedReady(pending)).toBe(true);
 
-    const unknown = dataDirWithFeed("1.0.27");
+    const unknown = dataDirWithFeed("2.3.27");
     writeFileSync(join(unknown, "updates", "RELEASES"), "AAA weird-package.nupkg 7\n", "utf8");
-    expect(pruneConsumedUpdateFeed(unknown, "1.1.0")).toEqual([]);
+    expect(pruneConsumedUpdateFeed(unknown, "2.4.0")).toEqual([]);
 
     const empty = mkdtempSync(join(tmpdir(), "atm-update-source-empty-"));
     temporary.push(empty);
-    expect(pruneConsumedUpdateFeed(empty, "1.1.0")).toEqual([]);
+    expect(pruneConsumedUpdateFeed(empty, "2.4.0")).toEqual([]);
   });
 
   it("穿透 current 链接找到真正的 Update.exe；两个位置都没有时返回 null", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-update-exe-"));
     temporary.push(root);
-    const install = join(root, "AyanamiTaskManagerDesktop", "app-1.1.0");
+    const install = join(root, "AyanamiTaskManagerDesktop", "app-2.4.0");
     mkdirSync(install, { recursive: true });
     const realExe = join(install, "AyanamiTaskManager.exe");
     const realUpdate = join(root, "AyanamiTaskManagerDesktop", "Update.exe");
@@ -113,16 +113,16 @@ describe("本地更新源与 Squirrel 运行器", () => {
   it("Update.exe --checkForUpdate 的输出取最后一行 JSON，噪声和坏 JSON 都不当成结果", () => {
     expect(
       parseSquirrelCheck(
-        '33\r\n66\r\n100\r\n{"currentVersion":"1.1.0","futureVersion":"1.2.0","releasesToApply":[{"version":"1.2.0"}]}\r\n',
+        '33\r\n66\r\n100\r\n{"currentVersion":"2.4.0","futureVersion":"2.5.0","releasesToApply":[{"version":"2.5.0"}]}\r\n',
       ),
     ).toEqual({
-      currentVersion: "1.1.0",
-      futureVersion: "1.2.0",
-      releasesToApply: [{ version: "1.2.0" }],
+      currentVersion: "2.4.0",
+      futureVersion: "2.5.0",
+      releasesToApply: [{ version: "2.5.0" }],
     });
     expect(parseSquirrelCheck("no json here")).toBeNull();
     expect(parseSquirrelCheck("{oops}")).toBeNull();
-    expect(parseSquirrelCheck('{"currentVersion":"1.1.0"}')).toBeNull();
+    expect(parseSquirrelCheck('{"currentVersion":"2.4.0"}')).toBeNull();
   });
 
   it("更新主机按计划走：先清消费完的 feed，再决定 autoUpdater 还是自己跑 Update.exe", () => {

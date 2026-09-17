@@ -108,7 +108,11 @@ export function ProjectDiagnostics({
           </span>
         </div>
       </div>
-      <div id="project-diagnostics-content" className="atm-diagnostics-body" hidden={!open}>
+      <div
+        id="project-diagnostics-content"
+        className="atm-diagnostics-body atm-disclosure-body"
+        hidden={!open}
+      >
         {/* 折叠时不挂载子面板：工程统计、投影面板都不该在没人看的时候取数和渲染。 */}
         {open ? (
           <>

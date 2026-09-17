@@ -41,7 +41,7 @@ function missingSidebarContracts(source: string): string[] {
     'className="atm-sidebar"',
     'className="atm-sidebar-inner"',
     'className="atm-brand" data-testid="window-drag-brand"',
-    'className="atm-nav atm-nav-secondary"',
+    'className="atm-nav atm-nav-secondary atm-disclosure-body"',
     'className="atm-nav-project"',
     'className="atm-sidebar-footer"',
     'window.localStorage.getItem("atm.workspace.expanded")',
