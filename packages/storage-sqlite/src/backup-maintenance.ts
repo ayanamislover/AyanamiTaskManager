@@ -23,6 +23,12 @@ import {
   projectionErrorMessage,
   type ProjectionDispatchResult,
 } from "./registry-projection-dispatcher.js";
+import {
+  BACKUP_RETENTION_DEFAULTS,
+  backupKeepCount,
+  pruneMigrationBackupFiles,
+  type BackupPolicy,
+} from "./backup-retention.js";
 import { removeSqliteSidecars, renameWithRetry, sha256File } from "./storage-file-operations.js";
 
 import type {
@@ -193,6 +199,17 @@ export class BackupMaintenance {
       }
       await renameWithRetry(temporaryPath, finalPath);
       const sha256 = sha256File(finalPath);
+      const reusable = this.#reusableBackup(input, project?.id ?? null, sha256);
+      if (reusable) {
+        // 内容和上一份一模一样：删掉新快照，把旧的重新盖上今天的时间戳。
+        // 空闲项目以前每天都留一份字节完全相同的副本。
+        rmSync(finalPath, { force: true });
+        rmSync(pendingPath, { force: true });
+        this.#registry.sqlite
+          .prepare("UPDATE backup_catalog SET created_at = ?, verified_at = ? WHERE id = ?")
+          .run(createdAt, nowIso(), reusable.id);
+        return this.#listBackups().find((candidate) => candidate.id === reusable.id) ?? reusable;
+      }
       const sizeBytes = statSync(finalPath).size;
       const verifiedAt = nowIso();
       const manifest = {
@@ -298,22 +315,39 @@ export class BackupMaintenance {
     }
   }
 
+  /** 按保留策略删掉同一范围/项目/原因下多余的备份，返回删除份数。 */
+  /** 自动备份（每日/每周）若与同类上一份字节一致，直接沿用旧文件，不再多存一份。 */
+  #reusableBackup(
+    input: CreateBackupInput,
+    projectId: string | null,
+    sha256: string,
+  ): BackupView | null {
+    if (input.reason !== "DAILY" && input.reason !== "WEEKLY") return null;
+    const row = this.#registry.sqlite
+      .prepare(
+        `SELECT backup_catalog.*, projects.code AS project_code
+         FROM backup_catalog LEFT JOIN projects ON projects.id = backup_catalog.project_id
+         WHERE backup_catalog.scope = ? AND backup_catalog.project_id IS ?
+           AND backup_catalog.reason = ? AND backup_catalog.sha256 = ?
+         ORDER BY backup_catalog.created_at DESC LIMIT 1`,
+      )
+      .get(input.scope, projectId, input.reason, sha256) as any;
+    if (!row) return null;
+    const backup = backupFromRow(row);
+    // 旧文件被手工删掉时不能沿用，否则目录表会指向不存在的备份。
+    return existsSync(backup.path) ? backup : null;
+  }
+
   pruneBackupRetention(
     projectId: string | null,
     reason: string,
     scope: BackupView["scope"] = projectId ? "PROJECT" : "REGISTRY",
-  ): void {
-    const policy = this.#getSetting("backup.policy", { dailyKeep: 7, weeklyKeep: 4 }).value as {
-      dailyKeep?: number;
-      weeklyKeep?: number;
-    };
-    const keep =
-      reason === "DAILY"
-        ? Math.min(90, Math.max(1, Number(policy?.dailyKeep ?? 7)))
-        : reason === "WEEKLY"
-          ? Math.min(52, Math.max(1, Number(policy?.weeklyKeep ?? 4)))
-          : null;
-    if (!keep) return;
+  ): number {
+    // 手动与 PRE_* 备份以前没有上限，一直堆到用户投诉「为什么有这么多份」。
+    const keep = backupKeepCount(
+      this.#getSetting("backup.policy", BACKUP_RETENTION_DEFAULTS).value as BackupPolicy,
+      reason,
+    );
     const rows = this.#registry.sqlite
       .prepare(
         `SELECT id, path FROM backup_catalog
@@ -324,6 +358,7 @@ export class BackupMaintenance {
       id: string;
       path: string;
     }>;
+    let removed = 0;
     for (const row of rows.slice(keep)) {
       const deletionMarker = `${row.path}.delete-pending`;
       writeFileSync(deletionMarker, `${JSON.stringify({ id: row.id, path: row.path })}\n`, "utf8");
@@ -334,7 +369,45 @@ export class BackupMaintenance {
       rmSync(`${row.path}.manifest.json`, { force: true });
       rmSync(`${row.path}.pending`, { force: true });
       rmSync(deletionMarker, { force: true });
+      removed += 1;
     }
+    return removed;
+  }
+
+  /**
+   * 历史遗留的备份一并按当前策略收敛：保留策略以前只在「刚建了同类备份」时才跑，
+   * 所以调小保留数或从没再建过同类备份的项目，旧文件会一直留着。
+   */
+  pruneAllRetention(): number {
+    const groups = this.#registry.sqlite
+      .prepare(
+        "SELECT scope, project_id, reason FROM backup_catalog GROUP BY scope, project_id, reason",
+      )
+      .all() as Array<{ scope: BackupView["scope"]; project_id: string | null; reason: string }>;
+    let removed = 0;
+    for (const group of groups) {
+      try {
+        removed += this.pruneBackupRetention(group.project_id, group.reason, group.scope);
+      } catch {
+        // 单个分组清不掉不影响其他分组，也不该让整次维护失败。
+      }
+    }
+    for (const directory of this.#backupDirectories()) {
+      removed += pruneMigrationBackupFiles(directory);
+    }
+    return removed;
+  }
+
+  /** 所有可能存放备份的目录：注册表、知识库和每个项目各一个。 */
+  #backupDirectories(): string[] {
+    const directories = [
+      join(this.#dataDir, "backups", "registry"),
+      join(this.#dataDir, "backups", "knowledge"),
+    ];
+    for (const project of this.#listProjects()) {
+      directories.push(join(dirname(project.databasePath), "backups"));
+    }
+    return directories;
   }
 
   async runMaintenance(at = new Date()): Promise<MaintenanceResult> {
@@ -359,6 +432,8 @@ export class BackupMaintenance {
         skipped: true,
         dailyCreated: 0,
         weeklyCreated: 0,
+        reusedBackups: 0,
+        prunedBackups: 0,
         recoveredProjects: repair.recoveredProjects,
         errors: repair.errors,
       };
@@ -373,7 +448,18 @@ export class BackupMaintenance {
     ];
     let dailyCreated = 0;
     let weeklyCreated = 0;
+    let reusedBackups = 0;
     const errors = [...repair.errors];
+    // 沿用旧备份时目录表里仍是那一行，靠 id 有没有变来区分「新建」和「沿用」。
+    const latestBackupId = (scope: BackupView["scope"], projectId: string | null, reason: string) =>
+      (
+        this.#registry.sqlite
+          .prepare(
+            `SELECT id FROM backup_catalog WHERE scope = ? AND project_id IS ? AND reason = ?
+             ORDER BY created_at DESC LIMIT 1`,
+          )
+          .get(scope, projectId, reason) as { id: string } | undefined
+      )?.id ?? null;
     const hasOnDay = (scope: BackupView["scope"], projectId: string | null, reason: string) =>
       Boolean(
         this.#registry.sqlite
@@ -393,23 +479,28 @@ export class BackupMaintenance {
     };
     for (const target of targets) {
       try {
-        if (!hasOnDay(target.scope, target.project?.id ?? null, "DAILY")) {
-          await this.#createBackup({
+        const projectId = target.project?.id ?? null;
+        if (!hasOnDay(target.scope, projectId, "DAILY")) {
+          const previous = latestBackupId(target.scope, projectId, "DAILY");
+          const backup = await this.#createBackup({
             scope: target.scope,
             ...(target.project ? { project: target.project.id } : {}),
             reason: "DAILY",
             createdAt: at.toISOString(),
           });
-          dailyCreated += 1;
+          if (backup.id === previous) reusedBackups += 1;
+          else dailyCreated += 1;
         }
-        if (needsWeekly(target.scope, target.project?.id ?? null)) {
-          await this.#createBackup({
+        if (needsWeekly(target.scope, projectId)) {
+          const previous = latestBackupId(target.scope, projectId, "WEEKLY");
+          const backup = await this.#createBackup({
             scope: target.scope,
             ...(target.project ? { project: target.project.id } : {}),
             reason: "WEEKLY",
             createdAt: at.toISOString(),
           });
-          weeklyCreated += 1;
+          if (backup.id === previous) reusedBackups += 1;
+          else weeklyCreated += 1;
         }
       } catch (error) {
         errors.push({
@@ -419,10 +510,22 @@ export class BackupMaintenance {
         });
       }
     }
+    let prunedBackups = 0;
+    try {
+      prunedBackups = this.pruneAllRetention();
+    } catch (error) {
+      errors.push({
+        scope: "BACKUP_RETENTION",
+        project: null,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
     return {
       skipped: false,
       dailyCreated,
       weeklyCreated,
+      reusedBackups,
+      prunedBackups,
       recoveredProjects: repair.recoveredProjects,
       errors,
     };

@@ -247,7 +247,9 @@ describe("独立知识库存储", () => {
     for (const day of [1, 2, 3]) {
       const result = await manager.runMaintenance(new Date(`2026-09-0${day}T10:00:00Z`));
       expect(result.errors).toEqual([]);
-      expect(result.dailyCreated).toBe(2);
+      // 注册表每天都在变（备份目录表本身就记在里面），知识库没动过就沿用上一份。
+      expect(result.dailyCreated + result.reusedBackups).toBe(2);
+      expect(result.dailyCreated).toBe(day === 1 ? 2 : 1);
     }
     const daily = manager.listBackups().filter((item) => item.reason === "DAILY");
     expect(daily.map((item) => item.scope).sort()).toEqual(["KNOWLEDGE", "REGISTRY"]);

@@ -73,6 +73,7 @@ const EXPECTED_PROTOTYPE_METHODS = [
   "listProjectUpdates",
   "listProjects",
   "listQuickTasks",
+  "listRecentClosedWorkItemPageForUi",
   "listRecords",
   "listSavedViews",
   "listSettings",

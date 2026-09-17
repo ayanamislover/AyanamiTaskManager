@@ -62,8 +62,9 @@ export function SettingsPage({
   const [memoryProfileError, setMemoryProfileError] = useState("");
   const [memoryProfileNotice, setMemoryProfileNotice] = useState("");
   const [dailyEnabled, setDailyEnabled] = useState(true);
-  const [dailyKeep, setDailyKeep] = useState(7);
-  const [weeklyKeep, setWeeklyKeep] = useState(4);
+  const [dailyKeep, setDailyKeep] = useState(2);
+  const [weeklyKeep, setWeeklyKeep] = useState(2);
+  const [otherKeep, setOtherKeep] = useState(2);
   const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
   const [integrationPreview, setIntegrationPreview] = useState<{
     client: McpClient;
@@ -90,8 +91,9 @@ export function SettingsPage({
     )?.value;
     if (backup) {
       setDailyEnabled(backup.enabled !== false);
-      setDailyKeep(Number(backup.dailyKeep ?? 7));
-      setWeeklyKeep(Number(backup.weeklyKeep ?? 4));
+      setDailyKeep(Number(backup.dailyKeep ?? 2));
+      setWeeklyKeep(Number(backup.weeklyKeep ?? 2));
+      setOtherKeep(Number(backup.otherKeep ?? 2));
     }
     if (["ALL", "CRITICAL", "OFF"].includes(String(notification))) {
       setNotificationMode(notification as NotificationMode);
@@ -108,7 +110,7 @@ export function SettingsPage({
       );
       await client.settings.put(
         "backup.policy",
-        { enabled: dailyEnabled, dailyKeep, weeklyKeep },
+        { enabled: dailyEnabled, dailyKeep, weeklyKeep, otherKeep },
         Number(backup?.version ?? -1),
       );
       await client.settings.put(
@@ -461,6 +463,9 @@ export function SettingsPage({
               />
               <span>每日首次空闲时自动备份活动项目</span>
             </label>
+            <div className="atm-row-sub">
+              内容与上一份完全一致时沿用旧备份，不会多占空间；超出保留份数的旧备份在维护时删除。
+            </div>
             <div className="atm-form-grid">
               <div className="atm-field">
                 <label htmlFor="daily-keep">每日备份保留数</label>
@@ -482,6 +487,17 @@ export function SettingsPage({
                   max="52"
                   value={weeklyKeep}
                   onChange={(event) => setWeeklyKeep(Number(event.target.value))}
+                />
+              </div>
+              <div className="atm-field">
+                <label htmlFor="other-keep">手动与操作前备份保留数</label>
+                <input
+                  id="other-keep"
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={otherKeep}
+                  onChange={(event) => setOtherKeep(Number(event.target.value))}
                 />
               </div>
             </div>
