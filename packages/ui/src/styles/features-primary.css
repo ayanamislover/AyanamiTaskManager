@@ -324,6 +324,29 @@
 .atm-project-reconcile {
   margin-top: 18px;
 }
+/* 诊断区：折叠条沿用工程统计的样式；展开后三块面板依次排开。 */
+.atm-diagnostics {
+  margin-top: 18px;
+}
+.atm-diagnostics.is-top {
+  margin-top: 0;
+  margin-bottom: 18px;
+}
+.atm-diagnostics > .atm-engineering {
+  margin-bottom: 0;
+}
+.atm-diagnostics[data-attention="true"] > .atm-engineering {
+  border-color: color-mix(in srgb, var(--atm-warning) 45%, var(--atm-border));
+}
+.atm-diagnostics-body:not([hidden]) {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+.atm-diagnostics-body .atm-engineering,
+.atm-diagnostics-body .atm-project-reconcile {
+  margin: 0;
+}
 .atm-engineering.is-collapsed .atm-panel-head {
   border-bottom-color: transparent;
 }

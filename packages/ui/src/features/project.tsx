@@ -13,6 +13,7 @@ import { useCursorCollection } from "../cursor-collection.js";
 import { CreateRecordModal } from "./create-record-modal.js";
 import { CreateTaskModal } from "./create-task-modal.js";
 import { ProjectDataModal } from "./project-data-modal.js";
+import { ProjectDiagnostics, useProjectDiagnostics } from "./project-diagnostics.js";
 import { ProjectSummary } from "./project-summary.js";
 import { ProjectTaskControls, useProjectTaskViewState } from "./project-task-controls.js";
 import { ProjectTaskViews } from "./project-task-views.js";
@@ -91,6 +92,16 @@ export function ProjectPage({
     return () => window.removeEventListener("atm:new-project-task", listener);
   }, []);
   const workItems = tasks.items as any[];
+  const diagnostics = useProjectDiagnostics(client, project.code);
+  const diagnosticsPanel = (
+    <ProjectDiagnostics
+      client={client}
+      projectCode={project.code}
+      notify={notify}
+      openTask={openTask}
+      diagnostics={diagnostics}
+    />
+  );
   return (
     <>
       <PageHead
@@ -170,37 +181,40 @@ export function ProjectPage({
           </>
         }
       />
+      {/* 出错时诊断区自动展开并排到页首；平时折叠在页尾。 */}
+      {diagnostics.atTop ? diagnosticsPanel : null}
       <ProjectSummary
         client={client}
         projectCode={project.code}
         workItems={workItems}
-        notify={notify}
         openTask={openTask}
-      />
-      <ProjectTaskControls
-        client={client}
-        project={project.code}
-        tasks={taskView.allTasks}
-        view={view}
-        onViewChange={setView}
-        filters={filters}
-        onFiltersChange={setFilters}
-        notify={notify}
-      />
-      <ProjectTaskViews
-        view={view}
-        tasks={tasks}
-        records={records}
-        events={events}
-        filteredTasks={filteredTasks}
-        sortedTasks={sortedTasks}
-        closedRows={taskView.closedRows}
-        closedTasks={closedTasks}
-        taskSort={taskSort}
-        onTaskSort={onTaskSort}
-        onOpenTask={openTask}
-        {...(onKnowledgeDraft === undefined ? {} : { onExtractKnowledge: onKnowledgeDraft })}
-      />
+      >
+        <ProjectTaskControls
+          client={client}
+          project={project.code}
+          tasks={taskView.allTasks}
+          view={view}
+          onViewChange={setView}
+          filters={filters}
+          onFiltersChange={setFilters}
+          notify={notify}
+        />
+        <ProjectTaskViews
+          view={view}
+          tasks={tasks}
+          records={records}
+          events={events}
+          filteredTasks={filteredTasks}
+          sortedTasks={sortedTasks}
+          closedRows={taskView.closedRows}
+          closedTasks={closedTasks}
+          taskSort={taskSort}
+          onTaskSort={onTaskSort}
+          onOpenTask={openTask}
+          {...(onKnowledgeDraft === undefined ? {} : { onExtractKnowledge: onKnowledgeDraft })}
+        />
+      </ProjectSummary>
+      {diagnostics.atTop ? null : diagnosticsPanel}
       <MutationErrorAlert errors={[lifecycle.error, trash.error]} />
       <Presence present={create} inertWhenClosing>
         {create ? (

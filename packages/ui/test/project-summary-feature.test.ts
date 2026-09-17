@@ -8,6 +8,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectSummary } from "../src/features/project-summary.js";
 
 const summaryPath = join(process.cwd(), "packages", "ui", "src", "features", "project-summary.tsx");
+const diagnosticsPath = join(
+  process.cwd(),
+  "packages",
+  "ui",
+  "src",
+  "features",
+  "project-diagnostics.tsx",
+);
 const reconcilePath = join(
   process.cwd(),
   "packages",
@@ -125,7 +133,6 @@ function renderSummary() {
         client: client(),
         projectCode: "ATM",
         workItems,
-        notify: vi.fn(),
         openTask: vi.fn(),
       }),
     ),
@@ -133,7 +140,9 @@ function renderSummary() {
 }
 
 function projectFeatureSource() {
-  return `${readFileSync(summaryPath, "utf8")}\n${readFileSync(reconcilePath, "utf8")}`;
+  return [summaryPath, diagnosticsPath, reconcilePath]
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
 }
 
 function missingProjectContracts(source: string): string[] {
@@ -154,7 +163,7 @@ function missingProjectContracts(source: string): string[] {
 }
 
 describe("Project summary feature", () => {
-  it("保持项目指标、管理卡、Projection、Reconcile 与 Metrics DOM", () => {
+  it("保持项目指标与管理卡 DOM；排障面板不再平铺在项目摘要里", () => {
     const markup = renderSummary();
 
     for (const text of [
@@ -170,17 +179,12 @@ describe("Project summary feature", () => {
       "Codex UI",
       "最近项目更新",
       "UI 模块化按计划推进",
-      "数据投影",
-      "工程统计",
-      "需对账 1 项",
     ]) {
       expect(markup).toContain(text);
     }
     expect(markup).toContain('aria-label="项目管理摘要"');
-    expect(markup).toContain('aria-label="任务对账"');
-    expect(markup).toContain('aria-label="工程统计"');
-    expect(markup).toContain('aria-expanded="false"');
-    expect(markup).toContain('id="engineering-metrics-content" hidden=""');
+    for (const moved of ["数据投影", 'aria-label="任务对账"', 'aria-label="工程统计"'])
+      expect(markup).not.toContain(moved);
   });
 
   it("保持摘要/Reconcile 查询、Projection/Metrics 组合与模块边界", () => {

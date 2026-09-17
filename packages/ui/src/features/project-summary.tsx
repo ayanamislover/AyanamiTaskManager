@@ -1,8 +1,8 @@
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { Empty } from "../components/async-state.js";
-import type { Notify } from "../contracts.js";
 import {
   Status,
   compactPath,
@@ -11,22 +11,24 @@ import {
   progressSourceLabels,
   statusLabels,
 } from "../presentation.js";
-import { ProjectProjectionPanel } from "../projection-health-panel.js";
-import { EngineeringMetricsPanel } from "../project-statistics-panel.js";
-import { ProjectReconcile } from "./project-reconcile.js";
 
+/**
+ * 项目页主体：指标卡在上，任务列表（children）紧跟其后，管理摘要卡放在列表下面。
+ * 以前任务列表排在指标卡、四张管理卡、数据投影、对账、工程统计之后，1280 宽要往下滚
+ * 约 1300px 才看得到；排障面板已移到 ProjectDiagnostics。
+ */
 export function ProjectSummary({
   client,
   projectCode,
   workItems,
-  notify,
   openTask,
+  children,
 }: {
   client: AyanamiClient;
   projectCode: string;
   workItems: any[];
-  notify: Notify;
   openTask: (key: string) => void;
+  children?: ReactNode;
 }) {
   const brief = useQuery({
     queryKey: ["brief", projectCode],
@@ -97,6 +99,7 @@ export function ProjectSummary({
           </div>
         </div>
       </section>
+      {children}
       <section className="atm-management-grid" aria-label="项目管理摘要">
         <article className="atm-panel atm-management-card">
           <div className="atm-panel-head">
@@ -205,18 +208,6 @@ export function ProjectSummary({
           )}
         </article>
       </section>
-      <ProjectProjectionPanel
-        client={client}
-        projectCode={projectCode}
-        state={projectSummary?.projection ?? null}
-        notify={notify}
-      />
-      <ProjectReconcile client={client} projectCode={projectCode} openTask={openTask} />
-      <EngineeringMetricsPanel
-        client={client}
-        projectCode={projectCode}
-        formatCapturedAt={formatTime}
-      />
     </>
   );
 }

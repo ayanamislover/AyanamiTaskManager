@@ -386,7 +386,7 @@ test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ p
       .first()
       .click();
     await expect(page.getByRole("region", { name: "项目管理摘要" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "项目诊断" })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "阻塞 / 等待" })).toBeVisible();
     await page.screenshot({
       path: resolve("output", "playwright", `e2e-project-${viewport.width}.png`),
@@ -401,6 +401,14 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
     if (request.url().includes("/engineering-metrics")) engineeringRequests += 1;
   });
   await page.goto("/#project:E2E");
+  // 工程统计收在默认折叠的诊断区里；诊断区折叠时子面板不挂载，更不会取数。
+  const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await expect(diagnostics.getByRole("button", { name: "展开项目诊断" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(page.getByRole("region", { name: "工程统计" })).toHaveCount(0);
+  await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
   const region = page.getByRole("region", { name: "工程统计" });
   const expand = region.getByRole("button", { name: "展开工程统计" });
   await expect(expand).toHaveAttribute("aria-expanded", "false");
