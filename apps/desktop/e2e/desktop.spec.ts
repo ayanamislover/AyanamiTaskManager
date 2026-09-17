@@ -688,7 +688,9 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     await page.getByRole("tablist").getByRole("tab", { name: "时间线" }).click();
     await expect(page.getByText(progressSummary)).toBeVisible();
     await expect(page.getByText(recordTitle)).toBeVisible();
-    await expect(page.getByText("任务进度已更新", { exact: true })).toBeVisible();
+    // 类别标签不再重复显示；正文里的「更新进度」就是事件语义。
+    await expect(page.getByText(/更新进度/u).first()).toBeVisible();
+    await expect(page.getByText("任务进度已更新", { exact: true })).toHaveCount(0);
     await expect(page.getByText(key, { exact: true }).first()).toBeVisible();
     await page.screenshot({
       path: resolve("output", "playwright", "e2e-project-timeline-readable-dark.png"),

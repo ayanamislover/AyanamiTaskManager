@@ -6,7 +6,7 @@ import { taskRowInteractionProps } from "../components/keyboard-interactions.js"
 import { formatTime, priorityLabels, Status } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
 import type { ProjectTaskSort, ProjectTaskSortField } from "../task-sort.js";
-import { TimelineEventRow } from "./timeline.js";
+import { SystemEventsToggle, TimelineEventRow, useTimelineEvents } from "./timeline.js";
 import { ProjectTaskSortHeader, type ProjectTaskView } from "./project-task-controls.js";
 import type { RecentClosedTasks } from "./recent-closed-tasks.js";
 
@@ -42,6 +42,7 @@ export function ProjectTaskViews({
   onOpenTask: (key: string) => void;
   onExtractKnowledge?: (recordKey: string) => void | Promise<void>;
 }) {
+  const timeline = useTimelineEvents((events.data?.events ?? []) as Record<string, unknown>[]);
   const content = () => {
     if (tasks.isLoading && tasks.items.length === 0) return <LoadingRows count={6} />;
     if (tasks.error && tasks.items.length === 0)
@@ -144,19 +145,33 @@ export function ProjectTaskViews({
     }
     if (view === "timeline") {
       if (events.isLoading) return <LoadingRows />;
-      const rows = (events.data?.events ?? []) as Record<string, unknown>[];
-      return rows.length ? (
-        <div className="atm-timeline">
-          {rows
-            .slice()
-            .reverse()
-            .map((event) => {
-              const item = presentTimelineEvent(event);
-              return <TimelineEventRow event={event} key={item.id} />;
-            })}
-        </div>
-      ) : (
-        <Empty title="没有项目事件" text="任务发生变化后会显示在这里。" />
+      const rows = timeline.visible;
+      return (
+        <>
+          <div className="atm-timeline-toolbar">
+            <SystemEventsToggle checked={timeline.showSystem} onChange={timeline.setShowSystem} />
+          </div>
+          {rows.length ? (
+            <div className="atm-timeline">
+              {rows
+                .slice()
+                .reverse()
+                .map((event) => {
+                  const item = presentTimelineEvent(event);
+                  return <TimelineEventRow event={event} key={item.id} />;
+                })}
+            </div>
+          ) : (
+            <Empty
+              title="没有项目事件"
+              text={
+                timeline.hiddenCount
+                  ? `只有 ${timeline.hiddenCount} 条系统事件，勾选「显示系统事件」查看。`
+                  : "任务发生变化后会显示在这里。"
+              }
+            />
+          )}
+        </>
       );
     }
     if (!filteredTasks.length) return <Empty title="没有匹配任务" text="调整筛选或创建任务。" />;

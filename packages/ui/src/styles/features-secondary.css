@@ -259,7 +259,7 @@
 .atm-event {
   position: relative;
   min-width: 0;
-  padding: 11px 12px 16px 22px;
+  padding: 9px 12px 12px 22px;
   border-left: 1px solid var(--atm-border);
 }
 .atm-event::before {
@@ -276,31 +276,26 @@
   color: var(--atm-text-muted);
   font: 11px var(--atm-mono);
 }
-.atm-event-context,
 .atm-event-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
+  gap: 4px 12px;
+  margin-top: 4px;
 }
-.atm-event-context {
-  margin-bottom: 5px;
-  color: var(--atm-text-muted);
-  font: 11px var(--atm-mono);
-}
-.atm-event-context strong {
+.atm-event-meta strong {
   color: var(--atm-primary-strong);
-  font-weight: 650;
+  font: 650 11px var(--atm-mono);
 }
-.atm-event-detail {
-  max-width: 78ch;
-  margin: 5px 0 7px;
-  color: var(--atm-text-muted);
+.atm-event-summary {
+  max-width: 88ch;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
-.atm-event-meta {
-  margin-top: 5px;
+.atm-timeline-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px 0;
 }
 
 .agent-conflicts {
