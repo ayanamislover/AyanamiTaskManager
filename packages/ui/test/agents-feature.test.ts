@@ -48,7 +48,7 @@ describe("Agents feature", () => {
       ),
     );
 
-    expect(markup).toContain("按项目与 Agent 身份聚合正式 Session");
+    expect(markup).toContain("默认只显示在线和 7 天内活跃的 Agent");
     expect(markup).toContain("没有 Agent 会话");
     expect(markup).toContain("Agent 调用 atm_begin 后会在这里出现。");
   });

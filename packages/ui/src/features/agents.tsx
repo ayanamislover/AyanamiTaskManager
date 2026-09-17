@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderOpenIcon as FolderOpen } from "@phosphor-icons/react/dist/icons/FolderOpen";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import {
   findAgentSessionConflicts,
   groupAgentSessions,
+  partitionAgentGroupsByActivity,
   type AgentSessionLike,
 } from "../agent-sessions.js";
 import {
@@ -27,6 +29,8 @@ export function AgentsPage({
 }) {
   const queryClient = useQueryClient();
   const dialogs = useDialogs();
+  // 历史清单只在展开时渲染，几百个身份不进 DOM。
+  const [historyOpen, setHistoryOpen] = useState(false);
   const agentSources = projects
     .filter((project) => project.lifecycle === "ACTIVE")
     .map((project) => ({
@@ -83,15 +87,20 @@ export function AgentsPage({
     entry.items.map((session) => ({ ...session, project: entry.key })),
   ) as AgentSessionLike[];
   const projectGroups = groupAgentSessions(allSessions);
+  const { active: activeGroups, history } = partitionAgentGroupsByActivity(
+    projectGroups,
+    Date.now(),
+  );
   const conflicts = findAgentSessionConflicts(allSessions);
   return (
     <>
       <PageHead
         title="Agent"
-        description="按项目与 Agent 身份聚合正式 Session；保留历史数量，并可关闭异常在线会话。"
+        description="按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。"
       />
       {conflicts.length ? (
-        <div className="atm-notice" role="status">
+        // 页内警告，不能用 atm-notice：那是右下角浮层提示条，会盖在卡片上。
+        <div className="atm-inline-warning agent-conflicts" role="status">
           {conflicts.map((conflict) => (
             <div key={`${conflict.kind}:${conflict.value}`}>
               ⚠ {conflict.count} 个活动 Session 正在使用同一
@@ -101,23 +110,27 @@ export function AgentsPage({
           ))}
         </div>
       ) : null}
-      <CursorLoadStatus
-        loadedCount={loadedSessionCount}
-        hasMore={entries.some((entry) => entry.hasMore)}
-        loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
-        error={error}
-        onRetry={() => {
-          for (const entry of entries) {
-            if (entry.error) void collection.retry(entry.key);
-          }
-        }}
-      />
+      {error || entries.some((entry) => entry.isFetchingNextPage) ? (
+        <CursorLoadStatus
+          loadedCount={loadedSessionCount}
+          hasMore={entries.some((entry) => entry.hasMore)}
+          loading={entries.some((entry) => entry.isFetchingNextPage)}
+          error={error}
+          onRetry={() => {
+            for (const entry of entries) {
+              if (entry.error) void collection.retry(entry.key);
+            }
+          }}
+        />
+      ) : null}
       <section className="atm-panel">
         {projectGroups.length === 0 ? (
           <Empty title="没有 Agent 会话" text="Agent 调用 atm_begin 后会在这里出现。" />
+        ) : activeGroups.length === 0 ? (
+          <Empty title="最近 7 天没有活跃的 Agent" text="更早的 Agent 在下方历史里。" />
         ) : (
           <div className="agent-project-groups">
-            {projectGroups.map((group) => (
+            {activeGroups.map((group) => (
               <details
                 className="agent-project-group"
                 data-agent-project={group.project}
@@ -275,6 +288,36 @@ export function AgentsPage({
           </div>
         )}
       </section>
+      {history.length ? (
+        <details
+          className="agent-history"
+          onToggle={(event) => setHistoryOpen(event.currentTarget.open)}
+        >
+          <summary className="agent-project-heading">
+            <span className="agent-project-title">
+              <span>历史 Agent</span>
+            </span>
+            <span className="agent-project-stats">
+              <span>{history.length} 个，7 天以上没有活动</span>
+            </span>
+          </summary>
+          {historyOpen ? (
+            <div className="agent-history-list" aria-label="历史 Agent">
+              {history.map((agent) => (
+                <div className="agent-history-row" key={`${agent.project}:${agent.agentId}`}>
+                  <span className="agent-history-name">
+                    <span className="atm-row-title">{agent.displayName || agent.agentId}</span>
+                    <span className="atm-key">{agent.agentId}</span>
+                  </span>
+                  <span className="atm-badge">{agent.project}</span>
+                  <span className="atm-row-sub">{agent.sessionCount} 个 Session</span>
+                  <span className="atm-row-sub">{formatTime(agent.lastSeenAt)}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </details>
+      ) : null}
       <MutationErrorAlert errors={[forceClose.error, refreshGit.error]} style={{ marginTop: 12 }} />
     </>
   );

@@ -85,7 +85,7 @@ function renderSettings() {
     createElement(
       QueryClientProvider,
       { client: queryClient },
-      createElement(SettingsPage, { client: client(), desktop: desktop() }),
+      createElement(SettingsPage, { client: client(), desktop: desktop(), notify: vi.fn() }),
     ),
   );
 }

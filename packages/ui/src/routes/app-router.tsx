@@ -85,7 +85,13 @@ export function AppRouter({
       />
     );
   if (route === "settings")
-    return <SettingsPage client={client} {...(desktop === undefined ? {} : { desktop })} />;
+    return (
+      <SettingsPage
+        client={client}
+        notify={notify}
+        {...(desktop === undefined ? {} : { desktop })}
+      />
+    );
   if (selectedProject)
     return (
       <ProjectPage

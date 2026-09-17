@@ -9,6 +9,7 @@ import {
   PageHead,
 } from "../components/async-state.js";
 import type {
+  Notify,
   AgentIntegrationAction,
   DesktopBridge,
   McpClient,
@@ -29,9 +30,12 @@ import { NotificationPolicy } from "./settings-panels.js";
 export function SettingsPage({
   client,
   desktop,
+  notify,
 }: {
   client: AyanamiClient;
   desktop?: DesktopBridge;
+  /** 走应用统一的提示条：带进出场动效、会自动消失，不和全局提示叠在同一个角落。 */
+  notify: Notify;
 }) {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["status"], queryFn: () => client.status() });
@@ -61,7 +65,6 @@ export function SettingsPage({
   const [dailyKeep, setDailyKeep] = useState(7);
   const [weeklyKeep, setWeeklyKeep] = useState(4);
   const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
-  const [feedback, setFeedback] = useState("");
   const [integrationPreview, setIntegrationPreview] = useState<{
     client: McpClient;
     current: string;
@@ -121,7 +124,7 @@ export function SettingsPage({
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setFeedback("设置已保存");
+      notify("设置已保存");
     },
   });
   const manageIntegration = useMutation({
@@ -130,12 +133,12 @@ export function SettingsPage({
     onSuccess: async (result, variables) => {
       if (result.preview) {
         setIntegrationPreview({ client: variables.client, ...result.preview });
-        setFeedback(`${agentClientLabel(variables.client)} 修改预览已生成`);
+        notify(`${agentClientLabel(variables.client)} 修改预览已生成`);
         return;
       }
       setIntegrationPreview(null);
       await queryClient.invalidateQueries({ queryKey: ["agent-integrations"] });
-      setFeedback(
+      notify(
         `${agentClientLabel(variables.client)} Agent 接入已${
           variables.action === "UNINSTALL" ? "卸载" : "更新"
         }`,
@@ -146,13 +149,13 @@ export function SettingsPage({
     mutationFn: () => desktop!.checkForUpdates!(),
     onSuccess: (status) => {
       queryClient.setQueryData(["desktop-update-status"], status);
-      setFeedback(status?.message ?? "更新检查已启动");
+      notify(status?.message ?? "更新检查已启动");
     },
   });
   const copy = async (text: string, label: string) => {
     if (desktop?.copyText) await desktop.copyText(text);
     else await navigator.clipboard.writeText(text);
-    setFeedback(`${label}已复制`);
+    notify(`${label}已复制`);
   };
   return (
     <>
@@ -203,10 +206,10 @@ export function SettingsPage({
             client={client}
             summary={query.data.projectionSummary}
             failures={query.data.projectionFailures}
-            notify={setFeedback}
+            notify={notify}
           />
         ) : null}
-        <KnowledgeBackupPanel client={client} notify={setFeedback} />
+        <KnowledgeBackupPanel client={client} notify={notify} />
         <section className="atm-panel">
           <div className="atm-panel-head">
             <h2>Agent 接入</h2>
@@ -423,7 +426,7 @@ export function SettingsPage({
                         className="atm-button"
                         onClick={async () => {
                           await client.status();
-                          setFeedback("连接测试通过");
+                          notify("连接测试通过");
                         }}
                       >
                         运行连接测试
@@ -560,11 +563,6 @@ export function SettingsPage({
           </div>
         </section>
       </div>
-      {feedback ? (
-        <div className="atm-notice" role="status">
-          {feedback}
-        </div>
-      ) : null}
     </>
   );
 }
