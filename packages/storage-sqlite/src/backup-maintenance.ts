@@ -1,28 +1,11 @@
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { asAtmError, AtmError } from "@ayanami-task/errors";
 import { createUlid, nowIso } from "@ayanami-task/protocol";
-import {
-  openManagedDatabase,
-  quickCheck,
-  foreignKeyCheck,
-  type ManagedDatabase,
-} from "./database.js";
+import { quickCheck, foreignKeyCheck, type ManagedDatabase } from "./database.js";
 import type { KnowledgeDatabase } from "./knowledge-database.js";
-import {
-  markProjectionDeferred,
-  projectionErrorMessage,
-  type ProjectionDispatchResult,
-} from "./registry-projection-dispatcher.js";
+import type { ProjectionDispatchResult } from "./registry-projection-dispatcher.js";
 import {
   BACKUP_RETENTION_DEFAULTS,
   backupKeepCount,
@@ -30,6 +13,8 @@ import {
   type BackupPolicy,
 } from "./backup-retention.js";
 import { removeSqliteSidecars, renameWithRetry, sha256File } from "./storage-file-operations.js";
+import { backupFromRow } from "./backup-catalog.js";
+import { restoreBackupWithContext } from "./backup-restore.js";
 
 import type {
   BackupView,
@@ -43,22 +28,6 @@ export type {
   CreateBackupInput,
   MaintenanceResult,
 } from "./backup-contracts.js";
-
-function backupFromRow(row: any): BackupView {
-  return {
-    id: row.id,
-    scope: row.scope,
-    projectId: row.project_id,
-    projectCode: row.project_code ?? null,
-    path: row.path,
-    sha256: row.sha256,
-    sizeBytes: row.size_bytes,
-    reason: row.reason,
-    schemaVersion: row.schema_version,
-    createdAt: row.created_at,
-    verifiedAt: row.verified_at,
-  };
-}
 
 export class BackupMaintenance {
   #maintenanceInFlight: Promise<MaintenanceResult> | null = null;
@@ -531,160 +500,20 @@ export class BackupMaintenance {
     };
   }
 
-  async restoreBackup(
-    backupId: string,
-  ): Promise<{ backup: BackupView; project: BackupProject | null }> {
-    const row = this.#registry.sqlite
-      .prepare(
-        `SELECT backup_catalog.*, projects.code AS project_code
-         FROM backup_catalog LEFT JOIN projects ON projects.id = backup_catalog.project_id
-         WHERE backup_catalog.id = ?`,
-      )
-      .get(backupId) as any;
-    if (!row) {
-      throw new AtmError("BACKUP_NOT_FOUND", {
-        message: `备份不存在：${backupId}`,
-        details: { reference: backupId },
-      });
-    }
-    const backup = backupFromRow(row);
-    if ((backup.scope !== "PROJECT" || !backup.projectId) && backup.scope !== "KNOWLEDGE") {
-      throw new AtmError("BACKUP_RESTORE_SCOPE_UNSUPPORTED", {
-        message: "该备份范围不支持恢复",
-      });
-    }
-    if (!existsSync(backup.path)) {
-      throw new AtmError("BACKUP_FILE_MISSING", { message: "备份文件不存在" });
-    }
-    if (sha256File(backup.path) !== backup.sha256) {
-      throw new AtmError("BACKUP_HASH_MISMATCH", { message: "备份文件哈希不匹配" });
-    }
-    const manifestPath = `${backup.path}.manifest.json`;
-    if (!existsSync(manifestPath)) {
-      throw new AtmError("BACKUP_MANIFEST_MISSING", { message: "备份清单不存在" });
-    }
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-      id?: string;
-      projectId?: string;
-      sha256?: string;
-      scope?: string;
-    };
-    if (
-      manifest.id !== backup.id ||
-      manifest.projectId !== backup.projectId ||
-      manifest.sha256 !== backup.sha256 ||
-      manifest.scope !== backup.scope
-    ) {
-      throw new AtmError("BACKUP_MANIFEST_MISMATCH", { message: "备份清单不匹配" });
-    }
-
-    if (backup.scope === "KNOWLEDGE") {
-      try {
-        await this.#createBackup({ scope: "KNOWLEDGE", reason: "PRE_RESTORE" });
-      } catch (error) {
-        // Corrupt sources cannot produce a SQLite backup. restoreFrom retains their
-        // exact original file as a recovery artifact instead of destroying it.
-        if (!(error instanceof AtmError) || error.code !== "KNOWLEDGE_UNAVAILABLE") throw error;
-      }
-      await this.#knowledge.restoreFrom(backup.path);
-      try {
-        this.#appendGlobalEvent("backup.restored", backup.id, "USER", { scope: "KNOWLEDGE" });
-      } catch {
-        /* The knowledge commit is durable even when the Registry event is unavailable. */
-      }
-      return { backup, project: null };
-    }
-    const project = this.#getProject(backup.projectId!);
-    const restoreDirectory = join(this.#dataDir, "projects", `.restore-${backup.id}`);
-    const candidatePath = join(restoreDirectory, "project.sqlite");
-    const rollbackPath = `${project.databasePath}.restore-old-${backup.id}`;
-    rmSync(restoreDirectory, { recursive: true, force: true });
-    mkdirSync(join(restoreDirectory, "backups"), { recursive: true });
-    copyFileSync(backup.path, candidatePath);
-    let candidate: ManagedDatabase | null = null;
-    let currentRenamed = false;
-    let restoreCommitted = false;
-    try {
-      candidate = await openManagedDatabase({
-        path: candidatePath,
-        migrationDirectory: join(this.#migrationsRoot, "project"),
-        backupDirectory: join(restoreDirectory, "backups"),
-      });
-      const identity = candidate.sqlite
-        .prepare("SELECT project_id, project_code FROM project_meta WHERE singleton = 1")
-        .get() as { project_id: string; project_code: string } | undefined;
-      if (
-        !identity ||
-        identity.project_id !== project.id ||
-        identity.project_code !== project.code
-      ) {
-        throw new AtmError("BACKUP_PROJECT_IDENTITY_MISMATCH", {
-          message: "备份项目身份不匹配",
-        });
-      }
-      if (!quickCheck(candidate.sqlite)) {
-        throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
-      }
-      candidate.sqlite.pragma("wal_checkpoint(TRUNCATE)");
-      candidate.sqlite.close();
-      candidate = null;
-
-      await this.#createBackup({ scope: "PROJECT", project: project.id, reason: "PRE_RESTORE" });
-      this.#registry.sqlite
-        .prepare("UPDATE projects SET lifecycle = 'RESTORING', updated_at = ? WHERE id = ?")
-        .run(nowIso(), project.id);
-      this.#closeProject(project.id);
-
-      rmSync(rollbackPath, { force: true });
-      for (const suffix of ["-wal", "-shm"]) {
-        rmSync(`${project.databasePath}${suffix}`, { force: true });
-      }
-      await renameWithRetry(project.databasePath, rollbackPath);
-      currentRenamed = true;
-      await renameWithRetry(candidatePath, project.databasePath);
-      this.#registry.sqlite.transaction(() => {
-        this.#registry.sqlite
-          .prepare(
-            "UPDATE projects SET lifecycle = 'ACTIVE', version = version + 1, updated_at = ? WHERE id = ?",
-          )
-          .run(nowIso(), project.id);
-        this.#appendGlobalEvent("backup.restored", backup.id, "USER", {
-          projectId: project.id,
-          projectCode: project.code,
-        });
-      })();
-      restoreCommitted = true;
-
-      try {
-        await this.#dispatchProject(project.id);
-      } catch (error) {
-        markProjectionDeferred(this.#registry, project.id, projectionErrorMessage(error));
-      }
-      try {
-        rmSync(rollbackPath, { force: true });
-      } catch {
-        // Registry ACTIVE is already committed; startup recovery safely removes this rollback.
-      }
-      return { backup, project: this.#getProject(project.id) };
-    } catch (error) {
-      if (!restoreCommitted) {
-        this.#closeProject(project.id);
-        if (currentRenamed && existsSync(rollbackPath)) {
-          rmSync(project.databasePath, { force: true });
-          await renameWithRetry(rollbackPath, project.databasePath);
-        }
-        this.#registry.sqlite
-          .prepare("UPDATE projects SET lifecycle = 'ACTIVE', updated_at = ? WHERE id = ?")
-          .run(nowIso(), project.id);
-      }
-      throw error;
-    } finally {
-      if (candidate?.sqlite.open) candidate.sqlite.close();
-      try {
-        rmSync(restoreDirectory, { recursive: true, force: true });
-      } catch {
-        // Startup recovery removes stale restore candidates without changing a committed result.
-      }
-    }
+  restoreBackup(backupId: string): Promise<{ backup: BackupView; project: BackupProject | null }> {
+    return restoreBackupWithContext(
+      {
+        dataDir: this.#dataDir,
+        migrationsRoot: this.#migrationsRoot,
+        registry: this.#registry,
+        knowledge: this.#knowledge,
+        getProject: this.#getProject,
+        closeProject: this.#closeProject,
+        createBackup: this.#createBackup,
+        dispatchProject: this.#dispatchProject,
+        appendGlobalEvent: this.#appendGlobalEvent,
+      },
+      backupId,
+    );
   }
 }

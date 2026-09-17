@@ -3,6 +3,7 @@ export * from "./knowledge-database.js";
 export * from "./knowledge-repository.js";
 export * from "./knowledge-queries.js";
 export * from "./backup-retention.js";
+export * from "./backup-restore.js";
 export * from "./completion-gates.js";
 export * from "./event-presentation.js";
 export * from "./manager.js";
