@@ -297,7 +297,7 @@ describe("UI foundation boundaries", () => {
     const project = readFileSync(join(sourceRoot, "features", "project.tsx"), "utf8");
     expect(project).toContain('from "./project-task-controls.js"');
     expect(project).toContain('from "./project-task-views.js"');
-    expect(project).toContain("useProjectTaskViewState(tasks.items)");
+    expect(project).toContain("useProjectTaskViewState(tasks.items, closedTasks.items)");
     expect(project).toContain("<ProjectTaskControls");
     expect(project).toContain("<ProjectTaskViews");
     for (const duplicate of [

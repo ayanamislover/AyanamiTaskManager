@@ -68,20 +68,45 @@ export function filterProjectTasks(tasks: any[], filters: ProjectTaskFilters): a
   });
 }
 
-export function useProjectTaskViewState(tasks: any[]) {
+/**
+ * 未结束任务按表头排序；已结束任务单独成组，保持「最近结束在前」的顺序，不参与表头排序，
+ * 否则按状态或优先级一排，几百个已完成任务会和进行中的任务交错在一起。
+ */
+export function projectTaskGroups(
+  openTasks: any[],
+  closedTasks: any[],
+  filters: ProjectTaskFilters,
+  taskSort: ProjectTaskSort,
+) {
+  // 两次读取之间刚结束的任务可能同时出现在两边，以已结束那边为准。
+  const closedKeys = new Set(closedTasks.map((task: any) => task.key));
+  const allTasks = [...openTasks.filter((task: any) => !closedKeys.has(task.key)), ...closedTasks];
+  const filteredTasks = filterProjectTasks(allTasks, filters);
+  return {
+    allTasks,
+    filteredTasks,
+    sortedTasks: sortProjectTasks(
+      filteredTasks.filter((task: any) => !closedKeys.has(task.key)),
+      taskSort,
+    ),
+    closedRows: filteredTasks.filter((task: any) => closedKeys.has(task.key)),
+  };
+}
+
+export function useProjectTaskViewState(openTasks: any[], closedTasks: any[] = []) {
   const [view, setView] = useState<ProjectTaskView>("list");
   const [filters, setFilters] = useState<ProjectTaskFilters>(EMPTY_PROJECT_TASK_FILTERS);
   const [taskSort, setTaskSort] = useState<ProjectTaskSort>(DEFAULT_PROJECT_TASK_SORT);
-  const filteredTasks = filterProjectTasks(tasks, filters);
-  const sortedTasks = sortProjectTasks(filteredTasks, taskSort);
+  const groups = projectTaskGroups(openTasks, closedTasks, filters, taskSort);
   return {
     view,
     setView,
     filters,
     setFilters,
     taskSort,
-    filteredTasks,
-    sortedTasks,
+    ...groups,
+    /** 用户明确要看已完成或已取消时，已结束任务必须全部取回。 */
+    wantsAllClosed: filters.status === "DONE" || filters.status === "CANCELLED",
     onTaskSort: (field: ProjectTaskSortField) =>
       setTaskSort((current) => toggleProjectTaskSort(current, field)),
   };

@@ -17,6 +17,7 @@ import { ProjectSummary } from "./project-summary.js";
 import { ProjectTaskControls, useProjectTaskViewState } from "./project-task-controls.js";
 import { ProjectTaskViews } from "./project-task-views.js";
 import { ProjectUpdateModal } from "./project-update-modal.js";
+import { useRecentClosedTasks } from "./recent-closed-tasks.js";
 
 export function ProjectPage({
   client,
@@ -41,14 +42,20 @@ export function ProjectPage({
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
-  const tasks = useCursorCollection(["tasks", project.code, "ui"], (cursor) =>
+  // 默认只拉未结束的任务；已结束的由 useRecentClosedTasks 按结束时间倒序按需加载。
+  const tasks = useCursorCollection(["tasks", project.code, "ui", "open"], (cursor) =>
     client.tasks.pageForUi(project.code, {
+      closed: "0",
       limit: 100,
       ...(cursor === undefined ? {} : { cursor }),
     }),
   );
+  const [wantsAllClosed, setWantsAllClosed] = useState(false);
+  const closedTasks = useRecentClosedTasks(client, project.code, wantsAllClosed);
+  const taskView = useProjectTaskViewState(tasks.items, closedTasks.items);
   const { view, setView, filters, setFilters, taskSort, filteredTasks, sortedTasks, onTaskSort } =
-    useProjectTaskViewState(tasks.items);
+    taskView;
+  useEffect(() => setWantsAllClosed(taskView.wantsAllClosed), [taskView.wantsAllClosed]);
   const events = useQuery({
     queryKey: ["events", project.code],
     queryFn: () => client.events(project.code, 0, 100),
@@ -173,7 +180,7 @@ export function ProjectPage({
       <ProjectTaskControls
         client={client}
         project={project.code}
-        tasks={tasks.items}
+        tasks={taskView.allTasks}
         view={view}
         onViewChange={setView}
         filters={filters}
@@ -187,6 +194,8 @@ export function ProjectPage({
         events={events}
         filteredTasks={filteredTasks}
         sortedTasks={sortedTasks}
+        closedRows={taskView.closedRows}
+        closedTasks={closedTasks}
         taskSort={taskSort}
         onTaskSort={onTaskSort}
         onOpenTask={openTask}

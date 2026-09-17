@@ -8,6 +8,7 @@ import { presentTimelineEvent } from "../timeline-events.js";
 import type { ProjectTaskSort, ProjectTaskSortField } from "../task-sort.js";
 import { TimelineEventRow } from "./timeline.js";
 import { ProjectTaskSortHeader, type ProjectTaskView } from "./project-task-controls.js";
+import type { RecentClosedTasks } from "./recent-closed-tasks.js";
 
 type ProjectEventsState = {
   isLoading: boolean;
@@ -21,6 +22,8 @@ export function ProjectTaskViews({
   events,
   filteredTasks,
   sortedTasks,
+  closedRows = [],
+  closedTasks,
   taskSort,
   onTaskSort,
   onOpenTask,
@@ -32,6 +35,8 @@ export function ProjectTaskViews({
   events: ProjectEventsState;
   filteredTasks: any[];
   sortedTasks: any[];
+  closedRows?: any[];
+  closedTasks?: RecentClosedTasks;
   taskSort: ProjectTaskSort | null;
   onTaskSort: (field: ProjectTaskSortField) => void;
   onOpenTask: (key: string) => void;
@@ -279,43 +284,58 @@ export function ProjectTaskViews({
             />
           </tr>
         </thead>
-        <tbody>
-          {sortedTasks.map((task: any) => (
-            <tr
-              key={task.id}
-              {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
-                onOpenTask(task.key),
-              )}
-            >
-              <td>
-                <div className="atm-row-title">{task.title}</div>
-                <span className="atm-key">{task.key}</span>
-              </td>
-              <td>
-                <Status value={task.status} />
-              </td>
-              <td>{priorityLabels[task.priority] ?? task.priority}</td>
-              <td>
-                {task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}
-              </td>
-              <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
-              <td>{task.targetDate ?? "—"}</td>
-              <td>
-                <span className="atm-cell-wrap">
-                  {task.blockedReason || task.waitingFor || "—"}
-                </span>
-              </td>
-              <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
-              <td>{formatTime(task.updatedAt)}</td>
+        <tbody>{sortedTasks.map(taskRow)}</tbody>
+        {closedRows.length ? (
+          <tbody className="atm-closed-tasks">
+            <tr className="atm-table-section">
+              <th colSpan={9} scope="rowgroup">
+                最近结束
+                {closedTasks ? (
+                  <span className="atm-row-sub">
+                    显示 {closedRows.length} / {closedTasks.total} 项
+                  </span>
+                ) : null}
+              </th>
             </tr>
-          ))}
-        </tbody>
+            {closedRows.map(taskRow)}
+          </tbody>
+        ) : null}
       </table>
     );
   };
+  const taskRow = (task: any) => (
+    <tr
+      key={task.id}
+      {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
+        onOpenTask(task.key),
+      )}
+    >
+      <td>
+        <div className="atm-row-title">{task.title}</div>
+        <span className="atm-key">{task.key}</span>
+      </td>
+      <td>
+        <Status value={task.status} />
+      </td>
+      <td>{priorityLabels[task.priority] ?? task.priority}</td>
+      <td>{task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}</td>
+      <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
+      <td>{task.targetDate ?? "—"}</td>
+      <td>
+        <span className="atm-cell-wrap">{task.blockedReason || task.waitingFor || "—"}</span>
+      </td>
+      <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
+      <td>{formatTime(task.updatedAt)}</td>
+    </tr>
+  );
+  const showsTasks = view === "list" || view === "board" || view === "tree";
+  const remainingClosed = closedTasks
+    ? Math.max(0, closedTasks.total - closedTasks.items.length)
+    : 0;
   return (
     <>
-      {tasks.items.length || tasks.error ? (
+      {/* 全部读完且没出错时不再显示「已加载 N 项，已全部加载」：那是噪声，不是信息。 */}
+      {tasks.error || tasks.isFetchingNextPage ? (
         <CursorLoadStatus
           loadedCount={tasks.loadedCount}
           hasMore={tasks.hasMore}
@@ -331,6 +351,29 @@ export function ProjectTaskViews({
         aria-labelledby={`project-task-tab-${view}`}
       >
         {content()}
+        {showsTasks && closedTasks && (closedTasks.hasMore || closedTasks.error) ? (
+          <div className="atm-closed-more">
+            {closedTasks.error ? (
+              <span className="atm-inline-error" role="alert">
+                已结束任务加载失败
+              </span>
+            ) : (
+              <span className="atm-row-sub">还有 {remainingClosed} 项已结束任务未加载</span>
+            )}
+            <button
+              className="atm-button"
+              type="button"
+              disabled={closedTasks.isFetchingMore}
+              onClick={closedTasks.loadMore}
+            >
+              {closedTasks.isFetchingMore
+                ? "正在加载…"
+                : closedTasks.error
+                  ? "重试"
+                  : "加载更多已结束任务"}
+            </button>
+          </div>
+        ) : null}
       </section>
     </>
   );

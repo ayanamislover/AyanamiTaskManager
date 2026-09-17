@@ -62,14 +62,16 @@ function renderProject() {
 
 function missingProjectContracts(source: string): string[] {
   const contracts = [
-    'useCursorCollection(["tasks", project.code, "ui"]',
+    'useCursorCollection(["tasks", project.code, "ui", "open"]',
+    'closed: "0"',
+    "useRecentClosedTasks(client, project.code, wantsAllClosed)",
     "client.tasks.pageForUi(project.code",
     'queryKey: ["events", project.code]',
     'enabled: view === "timeline"',
     '["records", project.code]',
     "client.projects.recordPage(project.code, 100, cursor)",
     'view === "records"',
-    "useProjectTaskViewState(tasks.items)",
+    "useProjectTaskViewState(tasks.items, closedTasks.items)",
     "client.projects.restore(project.code)",
     "client.projects.archive(project.code)",
     "client.projects.trash(project.code)",
@@ -125,7 +127,7 @@ describe("ProjectPage orchestrator feature", () => {
       'queryKey: ["events", project.code]',
       'enabled: view === "timeline"',
       "client.projects.recordPage(project.code, 100, cursor)",
-      "useProjectTaskViewState(tasks.items)",
+      "useProjectTaskViewState(tasks.items, closedTasks.items)",
       "client.projects.trash(project.code)",
       'window.addEventListener("atm:new-project-task", listener)',
       "<ProjectTaskViews",
