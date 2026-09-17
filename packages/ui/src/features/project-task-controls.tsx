@@ -7,6 +7,7 @@ import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-ic
 import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
 import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
 import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { AtmSelect } from "../components/atm-select.js";
 import { MutationErrorAlert } from "../components/async-state.js";
 import { moveRovingFocus } from "../components/keyboard-interactions.js";
@@ -102,6 +103,7 @@ function ProjectTaskFilterBar({
   notify: Notify;
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const [selected, setSelected] = useState("");
   const views = useQuery({
     queryKey: ["saved-views", project],
@@ -240,9 +242,15 @@ function ProjectTaskFilterBar({
       </label>
       <button
         className="atm-button"
-        onClick={() => {
-          const name = window.prompt("保存视图名称");
-          if (name?.trim()) create.mutate(name.trim());
+        onClick={async () => {
+          const name = await dialogs.prompt({
+            title: "保存当前视图",
+            label: "视图名称",
+            placeholder: "例如：本周阻塞",
+            confirmLabel: "保存",
+            maxLength: 80,
+          });
+          if (name !== null) create.mutate(name);
         }}
       >
         保存当前

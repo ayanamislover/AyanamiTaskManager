@@ -14,6 +14,7 @@ import {
   MutationErrorAlert,
   PageHead,
 } from "../components/async-state.js";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { Status, compactPath, formatDuration, formatTime, statusLabels } from "../presentation.js";
 
@@ -25,6 +26,7 @@ export function AgentsPage({
   projects: RegisteredProject[];
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const agentSources = projects
     .filter((project) => project.lifecycle === "ACTIVE")
     .map((project) => ({
@@ -248,8 +250,15 @@ export function AgentsPage({
                             <button
                               className="atm-button danger"
                               disabled={forceClose.isPending}
-                              onClick={() => {
-                                if (window.confirm("关闭该异常 Session 并释放其任务领取？"))
+                              onClick={async () => {
+                                if (
+                                  await dialogs.confirm({
+                                    title: "关闭并释放",
+                                    message: "关闭该异常 Session 并释放其任务领取？",
+                                    confirmLabel: "关闭并释放",
+                                    tone: "danger",
+                                  })
+                                )
                                   forceClose.mutate(session);
                               }}
                             >

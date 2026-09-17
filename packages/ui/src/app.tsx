@@ -2,6 +2,7 @@ import { useState } from "react";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { createAyanamiQueryClient } from "./query-policy.js";
+import { DialogProvider } from "./components/atm-dialogs.js";
 import { Presence } from "./components/presence.js";
 import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
@@ -112,11 +113,13 @@ export function AyanamiTaskManager({ client, desktop, brandLogoSrc }: AyanamiTas
   const [queryClient] = useState(() => createAyanamiQueryClient());
   return (
     <QueryClientProvider client={queryClient}>
-      <App
-        client={client}
-        {...(desktop === undefined ? {} : { desktop })}
-        {...(brandLogoSrc ? { brandLogoSrc } : {})}
-      />
+      <DialogProvider>
+        <App
+          client={client}
+          {...(desktop === undefined ? {} : { desktop })}
+          {...(brandLogoSrc ? { brandLogoSrc } : {})}
+        />
+      </DialogProvider>
     </QueryClientProvider>
   );
 }

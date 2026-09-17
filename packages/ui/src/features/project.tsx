@@ -5,6 +5,7 @@ import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-ic
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
@@ -35,6 +36,7 @@ export function ProjectPage({
   onKnowledgeDraft?: (recordKey: string) => void | Promise<void>;
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const [create, setCreate] = useState(false);
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
@@ -124,8 +126,15 @@ export function ProjectPage({
               <button
                 className="atm-button danger"
                 disabled={trash.isPending}
-                onClick={() => {
-                  if (window.confirm("移入垃圾箱前会创建备份，之后可从项目页恢复。继续吗？"))
+                onClick={async () => {
+                  if (
+                    await dialogs.confirm({
+                      title: "移入垃圾箱",
+                      message: "移入垃圾箱前会创建备份，之后可从项目页恢复。继续吗？",
+                      confirmLabel: "移入垃圾箱",
+                      tone: "danger",
+                    })
+                  )
                     trash.mutate();
                 }}
               >

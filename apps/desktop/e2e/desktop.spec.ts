@@ -1680,8 +1680,12 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
   await page.keyboard.press("Escape");
   await expect(progressSourceFilter).toBeFocused();
 
-  page.once("dialog", (dialog) => dialog.accept(savedViewName));
+  // 桌面端不支持 window.prompt，保存视图走应用内输入框；原生弹窗一旦回来，这里等不到输入框。
   await page.getByRole("button", { name: "保存当前" }).click();
+  const saveViewDialog = page.getByRole("dialog", { name: "保存当前视图" });
+  await saveViewDialog.getByLabel("视图名称").fill(savedViewName);
+  await saveViewDialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(saveViewDialog).toHaveCount(0);
   await page.getByRole("combobox", { name: "保存视图" }).click();
   await expect(page.getByRole("option", { name: savedViewName })).toHaveCount(1);
   await page.keyboard.press("Escape");

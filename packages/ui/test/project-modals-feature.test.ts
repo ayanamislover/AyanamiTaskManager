@@ -134,7 +134,7 @@ describe("project modal features", () => {
           "client.data.previewAgentTask",
           "client.data.applyAgentTask",
           "queryClient.invalidateQueries()",
-          "window.confirm(",
+          "dialogs.confirm(",
           "useDialogAccessibility(",
         ],
       ],

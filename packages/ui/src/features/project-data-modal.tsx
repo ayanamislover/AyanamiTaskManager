@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { Empty, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
@@ -21,6 +22,7 @@ export function ProjectDataModal({
   notify: Notify;
 } & PresenceRootProps) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
   const backups = useQuery({
     queryKey: ["backups", project],
@@ -123,11 +125,14 @@ export function ProjectDataModal({
                       <button
                         className="atm-button danger"
                         disabled={restore.isPending}
-                        onClick={() => {
+                        onClick={async () => {
                           if (
-                            window.confirm(
-                              "恢复会先备份当前项目，然后以所选快照替换项目数据。继续吗？",
-                            )
+                            await dialogs.confirm({
+                              title: "恢复项目",
+                              message: "恢复会先备份当前项目，然后以所选快照替换项目数据。继续吗？",
+                              confirmLabel: "恢复",
+                              tone: "danger",
+                            })
                           )
                             restore.mutate(String(backup.id));
                         }}

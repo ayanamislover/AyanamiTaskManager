@@ -1,5 +1,10 @@
 import { useLayoutEffect, useRef } from "react";
 
+// 对话框可以叠放（抽屉或数据工具上再弹确认框）。键盘监听都挂在 document 上，
+// 先注册的先执行，所以不能靠 preventDefault 让下层让路：只有栈顶那一层处理 Esc 和 Tab，
+// 否则一次 Esc 会把确认框和它下面的抽屉一起关掉。
+const openDialogs: symbol[] = [];
+
 export function useDialogAccessibility(close: () => void, active = true) {
   const dialogRef = useRef<HTMLElement>(null);
   const closeRef = useRef(close);
@@ -17,7 +22,10 @@ export function useDialogAccessibility(close: () => void, active = true) {
       else if (!dialog?.contains(document.activeElement))
         dialog?.querySelector<HTMLElement>(focusableSelector)?.focus();
     });
+    const layer = Symbol("dialog");
+    openDialogs.push(layer);
     const handleKey = (event: KeyboardEvent) => {
+      if (openDialogs.at(-1) !== layer) return;
       if (event.key === "Escape") {
         event.preventDefault();
         closeRef.current();
@@ -44,6 +52,7 @@ export function useDialogAccessibility(close: () => void, active = true) {
     };
     document.addEventListener("keydown", handleKey);
     return () => {
+      openDialogs.splice(openDialogs.indexOf(layer), 1);
       window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKey);
       if (previousFocus?.isConnected) previousFocus.focus();

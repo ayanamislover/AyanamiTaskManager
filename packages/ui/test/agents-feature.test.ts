@@ -27,7 +27,7 @@ function missingAgentContracts(source: string): string[] {
     'queryClient.invalidateQueries({ queryKey: ["overview"] })',
     "groupAgentSessions(allSessions)",
     "findAgentSessionConflicts(allSessions)",
-    'window.confirm("关闭该异常 Session 并释放其任务领取？")',
+    'message: "关闭该异常 Session 并释放其任务领取？"',
     "data-agent-project={group.project}",
     "data-agent-id={session.agentId}",
     'aria-label="历史 Session"',
@@ -61,7 +61,7 @@ describe("Agents feature", () => {
       "client.projects.agentPage(project.code, 100, cursor)",
       "client.sessions.refreshGitContext(String(session.id), String(session.project))",
       "groupAgentSessions(allSessions)",
-      'window.confirm("关闭该异常 Session 并释放其任务领取？")',
+      'message: "关闭该异常 Session 并释放其任务领取？"',
     ]) {
       expect(missingAgentContracts(source.replaceAll(contract, "MUTATED"))).toContain(contract);
     }
