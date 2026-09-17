@@ -145,7 +145,9 @@
   top: 0;
   z-index: 4;
   display: grid;
-  grid-template-columns: minmax(200px, 1fr) minmax(280px, 520px) minmax(200px, 1fr);
+  /* 右栏至少容纳全部按钮：固定最小宽度时按钮组会向左溢出，压住搜索框。宽屏下两侧仍等分，搜索框居中。 */
+  grid-template-columns: minmax(200px, 1fr) minmax(280px, 520px) minmax(max-content, 1fr);
+  column-gap: 16px;
   align-items: center;
   min-height: 64px;
   padding: 10px 28px;
@@ -185,6 +187,7 @@
 }
 .atm-top-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
   gap: 8px;
 }

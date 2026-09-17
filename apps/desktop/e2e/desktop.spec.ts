@@ -323,6 +323,60 @@ test("总览项目卡长名称最多两行并保留全称提示", async ({ page 
   }
 });
 
+test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({ page }) => {
+  // 桌面窗口最小宽度 1100；1280 是以前「活动」被挤成一字一行、月亮按钮压住 Ctrl K 的宽度。
+  for (const width of [1101, 1280, 1920]) {
+    await page.setViewportSize({ width, height: 800 });
+    if (width === 1101) await page.goto("/#project:E2E");
+    const status = page.locator(".atm-topbar .atm-service-status");
+    await expect(status).toHaveText("服务正常");
+    const layout = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const element = document.querySelector<HTMLElement>(selector);
+        if (!element) throw new Error(`缺少 ${selector}`);
+        return element.getBoundingClientRect();
+      };
+      const bar = document.querySelector<HTMLElement>(".atm-topbar")!;
+      const actions = [...document.querySelectorAll<HTMLElement>(".atm-top-actions > *")].map(
+        (element) => element.getBoundingClientRect(),
+      );
+      const statusElement = document.querySelector<HTMLElement>(
+        ".atm-top-actions .atm-service-status",
+      );
+      if (!statusElement) throw new Error("缺少 .atm-service-status");
+      const status = statusElement.getBoundingClientRect();
+      // 文字每折一行就多一个不同 top 的矩形。
+      const range = document.createRange();
+      range.selectNodeContents(statusElement);
+      const lineTops = new Set([...range.getClientRects()].map((line) => Math.round(line.top)));
+      const barRect = bar.getBoundingClientRect();
+      const barPadding = Number.parseFloat(getComputedStyle(bar).paddingRight);
+      return {
+        statusLines: lineTops.size,
+        statusHeight: status.height,
+        searchRight: rect(".atm-search-button").right,
+        firstActionLeft: Math.min(...actions.map((action) => action.left)),
+        lastActionRight: Math.max(...actions.map((action) => action.right)),
+        barContentRight: barRect.right - barPadding,
+      };
+    });
+    expect(layout.statusHeight, `${width}px 状态标签高度`).toBeLessThanOrEqual(28);
+    expect(layout.statusLines, `${width}px 状态标签行数`).toBe(1);
+    // 不只是不重叠：搜索框和第一个按钮之间要留得出间距。
+    expect(
+      layout.firstActionLeft - layout.searchRight,
+      `${width}px 搜索框与按钮组间距`,
+    ).toBeGreaterThanOrEqual(12);
+    expect(layout.lastActionRight, `${width}px 按钮组不溢出顶栏`).toBeLessThanOrEqual(
+      layout.barContentRight + 0.5,
+    );
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator(".atm-topbar").screenshot({
+    path: resolve("output", "playwright", "e2e-topbar-service-status-1280.png"),
+  });
+});
+
 test("侧栏默认精简、工作区可折叠且设置固定在底部", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/#overview");

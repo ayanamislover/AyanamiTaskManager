@@ -93,7 +93,13 @@ describe("UI foundation boundaries", () => {
   it("app 使用提取后的 contracts 与 presentation，而不是保留重复声明", () => {
     const app = readFileSync(join(sourceRoot, "app.tsx"), "utf8");
     expect(app).toContain('from "./contracts.js"');
-    expect(app).toContain('from "./presentation.js"');
+    // app 自己已经不需要 presentation 里的东西了，但那些声明必须留在 presentation 里供各页面共用。
+    expect(
+      productionSources(sourceRoot).some(
+        (file) =>
+          file.path !== "presentation.tsx" && /from "\.[./]*presentation\.js"/u.test(file.source),
+      ),
+    ).toBe(true);
     for (const declaration of [
       "type DesktopBridge =",
       "const statusLabels",

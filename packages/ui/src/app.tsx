@@ -8,6 +8,7 @@ import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
 import { useTheme } from "./hooks/use-theme.js";
 import { AppShell } from "./shell/app-shell.js";
+import { ServiceStatus } from "./shell/service-status.js";
 import { CommandPalette } from "./features/command-palette.js";
 import { TaskDrawer } from "./features/task-drawer.js";
 import { AppRouter } from "./routes/app-router.js";
@@ -19,7 +20,6 @@ import {
   useRouteHash,
 } from "./routes/use-app-route.js";
 import type { AyanamiTaskManagerProps, DesktopBridge } from "./contracts.js";
-import { Status } from "./presentation.js";
 import "./styles.css";
 
 function App({
@@ -59,7 +59,7 @@ function App({
       {...(brandLogoSrc ? { brandLogoSrc } : {})}
       title={title}
       theme={theme}
-      statusSlot={<Status value={projects.error ? "MIGRATION_FAILED" : "ACTIVE"} />}
+      statusSlot={<ServiceStatus error={projects.error} loading={projects.isPending} />}
       content={
         <AppRouter
           client={client}
