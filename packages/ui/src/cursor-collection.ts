@@ -141,10 +141,99 @@ function isActive(generationRef: { current: number }, generation: number): boole
   return generationRef.current === generation;
 }
 
+type DrainOutcome<T> =
+  | { ok: true; state: CursorCollectionState<T> }
+  | { ok: false; state: CursorCollectionState<T>; error: unknown }
+  | { ok: "stale" };
+
 /**
- * Read a cursor collection incrementally. Each successful page is committed
- * before the next request, so a later failure keeps the loaded rows and the
- * exact cursor that can be retried.
+ * 把剩余分页全部读完，读完之前不碰界面。
+ *
+ * 以前每读完一页就提交一次：首屏表格按 100→200→300… 分几次长高，而刷新时更糟——
+ * 先把已显示的列表清空成骨架屏再一页页重填。全局查询策略每 30 秒、每次窗口聚焦、
+ * 每次改完任务都会刷新，列表就周期性地塌下去再长回来，滚动位置也跟着被顶走。
+ */
+async function drainCursorPages<T>(
+  start: CursorCollectionState<T>,
+  loadPage: (cursor?: string) => Promise<CursorPage<T>>,
+  active: () => boolean,
+): Promise<DrainOutcome<T>> {
+  let state = start;
+  for (;;) {
+    if (!active()) return { ok: "stale" };
+    if (state.pageCount >= MAX_PAGES) {
+      return {
+        ok: false,
+        state,
+        error: errorFor("DRAIN_LIMIT_REACHED", "分页读取达到安全上限，请使用 resume cursor 继续", {
+          maxPages: MAX_PAGES,
+          maxItems: MAX_ITEMS,
+          pageCount: state.pageCount,
+          itemCount: state.items.length,
+          resumeCursor: state.cursor ?? null,
+        }),
+      };
+    }
+    let page: CursorPage<T>;
+    try {
+      page = await loadPage(state.cursor);
+    } catch (error) {
+      if (!active()) return { ok: "stale" };
+      return { ok: false, state, error };
+    }
+    if (!active()) return { ok: "stale" };
+    const advanced = advanceCursorPage(state, page);
+    if (!advanced.ok) return { ok: false, state, error: advanced.error };
+    state = advanced.state;
+    if (!state.hasMore) return { ok: true, state };
+  }
+}
+
+function startState<T>(entry: InternalEntry<T> | null): CursorCollectionState<T> {
+  return entry
+    ? {
+        items: [...entry.items],
+        hasMore: true,
+        cursor: entry.cursor,
+        seenCursors: [...entry.seenCursors],
+        pageCount: entry.seenCursors.length,
+      }
+    : { items: [], hasMore: true, cursor: undefined, seenCursors: [], pageCount: 0 };
+}
+
+function settledEntry<T>(
+  outcome: Exclude<DrainOutcome<T>, { ok: "stale" }>,
+  previous: InternalEntry<T>,
+  refreshing: boolean,
+): InternalEntry<T> {
+  if (outcome.ok === true) {
+    return {
+      items: outcome.state.items,
+      hasMore: false,
+      loading: false,
+      error: null,
+      cursor: undefined,
+      seenCursors: outcome.state.seenCursors,
+    };
+  }
+  // 刷新失败时保留上一份完整列表，只报错；重试走整次刷新（见 retry）。
+  // 首次读取或续读失败时提交已读到的部分和出错的 cursor，重试从断点续读。
+  if (refreshing) return { ...previous, loading: false, error: outcome.error };
+  return {
+    items: outcome.state.items,
+    hasMore: true,
+    loading: false,
+    error: outcome.error,
+    cursor: outcome.state.cursor,
+    seenCursors: outcome.state.seenCursors,
+  };
+}
+
+/**
+ * Read a cursor collection. The first read shows a skeleton until every page is
+ * in; later refreshes keep the current rows on screen and swap in the new list
+ * once, so periodic refetches never collapse the view. A failed first read keeps
+ * the committed rows and the exact cursor that can be retried.
  */
 export function useCursorCollection<T>(
   queryKey: readonly unknown[],
@@ -156,96 +245,14 @@ export function useCursorCollection<T>(
   loadRef.current = loadPage;
   const generationRef = useRef(0);
   const entryRef = useRef<InternalEntry<T>>(emptyEntry<T>());
+  // 当前显示的数据属于哪个 key。切换项目时不能拿上一个项目的列表「保留着」刷新。
+  const ownerRef = useRef(key);
   const [entry, setEntry] = useState<InternalEntry<T>>(entryRef.current);
 
-  const commit = useCallback(
-    (next: InternalEntry<T> | ((current: InternalEntry<T>) => InternalEntry<T>)) => {
-      const current = entryRef.current;
-      const resolved = typeof next === "function" ? next(current) : next;
-      entryRef.current = resolved;
-      setEntry(resolved);
-    },
-    [],
-  );
-
-  const consume = useCallback(
-    async (
-      startCursor: string | undefined,
-      startItems: T[],
-      startSeenCursors: string[],
-      generation: number,
-    ): Promise<void> => {
-      let state: CursorCollectionState<T> = {
-        items: [...startItems],
-        hasMore: true,
-        cursor: startCursor,
-        seenCursors: [...startSeenCursors],
-        pageCount: startSeenCursors.length,
-      };
-      commit((current) => ({ ...current, loading: true, error: null, cursor: state.cursor }));
-      for (;;) {
-        if (!isActive(generationRef, generation)) return;
-        if (state.pageCount >= MAX_PAGES) {
-          commit((current) => ({
-            ...current,
-            loading: false,
-            error: errorFor(
-              "DRAIN_LIMIT_REACHED",
-              "分页读取达到安全上限，请使用 resume cursor 继续",
-              {
-                maxPages: MAX_PAGES,
-                maxItems: MAX_ITEMS,
-                pageCount: state.pageCount,
-                itemCount: state.items.length,
-                resumeCursor: state.cursor ?? null,
-              },
-            ),
-            cursor: state.cursor,
-          }));
-          return;
-        }
-        let page: CursorPage<T>;
-        try {
-          page = await loadRef.current(state.cursor);
-        } catch (error) {
-          if (!isActive(generationRef, generation)) return;
-          commit((current) => ({ ...current, loading: false, error, cursor: state.cursor }));
-          return;
-        }
-        const advanced = advanceCursorPage(state, page);
-        if (!advanced.ok) {
-          commit((current) => ({
-            ...current,
-            loading: false,
-            error: advanced.error,
-            cursor: state.cursor,
-          }));
-          return;
-        }
-        state = advanced.state;
-        if (!state.hasMore) {
-          commit({
-            items: state.items,
-            hasMore: false,
-            loading: false,
-            error: null,
-            cursor: undefined,
-            seenCursors: state.seenCursors,
-          });
-          return;
-        }
-        commit({
-          items: state.items,
-          hasMore: true,
-          loading: true,
-          error: null,
-          cursor: state.cursor,
-          seenCursors: state.seenCursors,
-        });
-      }
-    },
-    [commit],
-  );
+  const commit = useCallback((next: InternalEntry<T>) => {
+    entryRef.current = next;
+    setEntry(next);
+  }, []);
 
   const query = useQuery<InternalEntry<T>>({
     queryKey,
@@ -253,26 +260,27 @@ export function useCursorCollection<T>(
     queryFn: async () => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
-      const current = entryRef.current;
-      const resume = Boolean(current.error && current.hasMore);
-      if (!resume) {
-        const initial = emptyEntry<T>();
-        initial.loading = true;
-        entryRef.current = initial;
-        setEntry(initial);
+      if (ownerRef.current !== key) {
+        ownerRef.current = key;
+        commit(emptyEntry<T>());
       }
-      await consume(
-        resume ? current.cursor : undefined,
-        resume ? current.items : [],
-        resume ? current.seenCursors : [],
-        generation,
+      const current = entryRef.current;
+      const resume = Boolean(current.error && current.hasMore && current.items.length);
+      const refreshing = !resume && current.items.length > 0;
+      if (resume) commit({ ...current, loading: true, error: null });
+      else if (!refreshing) commit({ ...emptyEntry<T>(), loading: true });
+      const outcome = await drainCursorPages(
+        startState(resume ? current : null),
+        (cursor) => loadRef.current(cursor),
+        () => isActive(generationRef, generation),
       );
+      if (outcome.ok !== "stale") commit(settledEntry(outcome, current, refreshing));
       return entryRef.current;
     },
   });
 
   useEffect(() => {
-    if (!query.data || query.data === entryRef.current) return;
+    if (!query.data || query.data === entryRef.current || ownerRef.current !== key) return;
     entryRef.current = query.data;
     setEntry(query.data);
   }, [key, query.data]);
@@ -280,6 +288,7 @@ export function useCursorCollection<T>(
   useEffect(() => {
     if (enabled) return () => undefined;
     generationRef.current += 1;
+    ownerRef.current = key;
     const next = emptyEntry<T>();
     next.hasMore = false;
     entryRef.current = next;
@@ -289,25 +298,36 @@ export function useCursorCollection<T>(
     };
   }, [enabled, key]);
 
+  const { refetch } = query;
   const retry = useCallback(async () => {
     const current = entryRef.current;
     if (!current.error) return;
+    // 没有可续读的 cursor（刷新失败、保留旧列表）时重新整次刷新。
+    if (!current.hasMore) return refetch();
     const generation = generationRef.current;
-    await consume(current.cursor, current.items, current.seenCursors, generation);
-  }, [consume]);
+    commit({ ...current, loading: true, error: null });
+    const outcome = await drainCursorPages(
+      startState(current),
+      (cursor) => loadRef.current(cursor),
+      () => isActive(generationRef, generation),
+    );
+    if (outcome.ok !== "stale") commit(settledEntry(outcome, current, false));
+  }, [commit, refetch]);
 
+  // key 刚变、新一轮读取还没开始的那一帧，不把上一个 key 的数据当成当前数据显示。
+  const visible = ownerRef.current === key ? entry : { ...emptyEntry<T>(), loading: enabled };
   return {
-    items: entry.items,
-    loadedCount: entry.items.length,
-    hasMore: entry.hasMore,
-    isLoading: entry.loading && entry.items.length === 0,
-    isFetchingNextPage: entry.loading && entry.items.length > 0,
-    error: entry.error,
+    items: visible.items,
+    loadedCount: visible.items.length,
+    hasMore: visible.hasMore,
+    isLoading: visible.loading && visible.items.length === 0,
+    isFetchingNextPage: visible.loading && visible.items.length > 0,
+    error: visible.error,
     retry,
   };
 }
 
-/** The same incremental reader for a dynamic set of project collections. */
+/** The same reader for a dynamic set of project collections. */
 export function useCursorCollections<T>(
   queryKey: readonly unknown[],
   sources: CursorCollectionSource<T>[],
@@ -322,109 +342,29 @@ export function useCursorCollections<T>(
   const entriesRef = useRef<Record<string, InternalEntry<T>>>({});
   const [entries, setEntries] = useState<Record<string, InternalEntry<T>>>({});
 
-  const commit = useCallback(
-    (
-      projectKey: string,
-      next: InternalEntry<T> | ((current: InternalEntry<T>) => InternalEntry<T>),
-    ) => {
-      const current = entriesRef.current;
-      const previous = current[projectKey] ?? emptyEntry<T>();
-      const resolved = typeof next === "function" ? next(previous) : next;
-      const updated = { ...current, [projectKey]: resolved };
-      entriesRef.current = updated;
-      setEntries(updated);
-    },
-    [],
-  );
+  const commit = useCallback((projectKey: string, next: InternalEntry<T>) => {
+    const updated = { ...entriesRef.current, [projectKey]: next };
+    entriesRef.current = updated;
+    setEntries(updated);
+  }, []);
 
-  const consume = useCallback(
-    async (
-      projectKey: string,
-      startCursor: string | undefined,
-      startItems: T[],
-      startSeenCursors: string[],
-      generation: number,
-    ): Promise<void> => {
+  const read = useCallback(
+    async (projectKey: string, generation: number, resumeOnly: boolean): Promise<void> => {
       const source = sourcesRef.current.get(projectKey);
       if (!source) return;
-      let state: CursorCollectionState<T> = {
-        items: [...startItems],
-        hasMore: true,
-        cursor: startCursor,
-        seenCursors: [...startSeenCursors],
-        pageCount: startSeenCursors.length,
-      };
-      commit(projectKey, (current) => ({
-        ...current,
-        loading: true,
-        error: null,
-        cursor: state.cursor,
-      }));
-      for (;;) {
-        if (generationRef.current !== generation) return;
-        if (state.pageCount >= MAX_PAGES) {
-          commit(projectKey, (current) => ({
-            ...current,
-            loading: false,
-            error: errorFor(
-              "DRAIN_LIMIT_REACHED",
-              "分页读取达到安全上限，请使用 resume cursor 继续",
-              {
-                maxPages: MAX_PAGES,
-                maxItems: MAX_ITEMS,
-                pageCount: state.pageCount,
-                itemCount: state.items.length,
-                resumeCursor: state.cursor ?? null,
-              },
-            ),
-            cursor: state.cursor,
-          }));
-          return;
-        }
-        let page: CursorPage<T>;
-        try {
-          page = await source.loadPage(state.cursor);
-        } catch (error) {
-          if (generationRef.current !== generation) return;
-          commit(projectKey, (current) => ({
-            ...current,
-            loading: false,
-            error,
-            cursor: state.cursor,
-          }));
-          return;
-        }
-        const advanced = advanceCursorPage(state, page);
-        if (!advanced.ok) {
-          commit(projectKey, (current) => ({
-            ...current,
-            loading: false,
-            error: advanced.error,
-            cursor: state.cursor,
-          }));
-          return;
-        }
-        state = advanced.state;
-        if (!state.hasMore) {
-          commit(projectKey, {
-            items: state.items,
-            hasMore: false,
-            loading: false,
-            error: null,
-            cursor: undefined,
-            seenCursors: state.seenCursors,
-          });
-          return;
-        }
-        commit(projectKey, {
-          items: state.items,
-          hasMore: true,
-          loading: true,
-          error: null,
-          cursor: state.cursor,
-          seenCursors: state.seenCursors,
-        });
-      }
+      const current = entriesRef.current[projectKey] ?? null;
+      const resume = Boolean(current?.error && current.hasMore && current.items.length);
+      if (resumeOnly && !resume) return;
+      const refreshing = !resume && Boolean(current?.items.length);
+      if (resume) commit(projectKey, { ...current!, loading: true, error: null });
+      else if (!refreshing) commit(projectKey, { ...emptyEntry<T>(), loading: true });
+      const outcome = await drainCursorPages(
+        startState(resume ? current : null),
+        (cursor) => source.loadPage(cursor),
+        () => generationRef.current === generation,
+      );
+      if (outcome.ok !== "stale")
+        commit(projectKey, settledEntry(outcome, current ?? emptyEntry<T>(), refreshing));
     },
     [commit],
   );
@@ -434,22 +374,15 @@ export function useCursorCollections<T>(
     queryFn: async () => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
-      const initial: Record<string, InternalEntry<T>> = {};
-      for (const source of sources) {
-        const previous = entriesRef.current[source.key];
-        initial[source.key] =
-          previous?.error && previous.hasMore
-            ? { ...previous, loading: true, error: null }
-            : { ...emptyEntry<T>(), loading: true };
-      }
-      entriesRef.current = initial;
-      setEntries(initial);
-      await Promise.all(
-        sources.map((source) => {
-          const entry = initial[source.key]!;
-          return consume(source.key, entry.cursor, entry.items, entry.seenCursors, generation);
-        }),
+      // 已不在来源里的项目（归档、删除）从结果里去掉。
+      const kept = Object.fromEntries(
+        Object.entries(entriesRef.current).filter(([projectKey]) =>
+          sourcesRef.current.has(projectKey),
+        ),
       );
+      entriesRef.current = kept;
+      setEntries(kept);
+      await Promise.all(sources.map((source) => read(source.key, generation, false)));
       return entriesRef.current;
     },
   });
@@ -460,19 +393,15 @@ export function useCursorCollections<T>(
     setEntries(query.data);
   }, [key, query.data]);
 
+  const { refetch } = query;
   const retry = useCallback(
     async (projectKey: string) => {
       const current = entriesRef.current[projectKey];
       if (!current?.error) return;
-      await consume(
-        projectKey,
-        current.cursor,
-        current.items,
-        current.seenCursors,
-        generationRef.current,
-      );
+      if (!current.hasMore) return refetch();
+      await read(projectKey, generationRef.current, true);
     },
-    [consume],
+    [read, refetch],
   );
 
   const projected = Object.fromEntries(
