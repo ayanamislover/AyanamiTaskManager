@@ -545,6 +545,14 @@ export class AyanamiTaskService {
     return taskQueries.listWorkItemPageForUi(this.#runtime, projectCode, filters);
   }
 
+  /** Desktop-only: closed WorkItems newest first, loaded a few at a time on demand. */
+  async listRecentClosedWorkItemPageForUi(
+    projectCode: string,
+    filters: { limit?: number; cursor?: string } = {},
+  ): Promise<ReturnType<ProjectRepository["listRecentClosedWorkItemPage"]>> {
+    return taskQueries.listRecentClosedWorkItemPageForUi(this.#runtime, projectCode, filters);
+  }
+
   /** Desktop-only operational metadata kept outside the bounded Agent read views. */
   async listWorkItemsForUi(
     projectCode: string,

@@ -9,6 +9,7 @@ import {
 } from "./read-model-mappers.js";
 import type {
   ChecklistView,
+  RecentClosedWorkItemPage,
   TaskViewProjectionPage,
   WorkItemListFilters,
   WorkItemPageFilters,
@@ -18,11 +19,16 @@ import type {
 } from "./read-model-types.js";
 import {
   canonicalTaskListSelection,
+  decodeRecentClosedCursor,
   decodeTaskListCursor,
+  encodeRecentClosedCursor,
   encodeTaskListCursor,
   type TaskListSelection,
 } from "./task-list-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
+
+const CLOSED_STATUS_SQL = "status IN ('DONE', 'CANCELLED')";
+const FINISHED_AT_SQL = "COALESCE(completed_at, updated_at)";
 
 function hydratedWorkItemSql(
   whereSql: string,
@@ -248,6 +254,60 @@ export class TaskReadModel {
     return this.taskViewPage(rows, limit, filters.cursor, project, selection);
   }
 
+  /**
+   * 已结束任务按结束时间倒序分页。界面默认只显示最近几项，其余按需往下加载；
+   * 取消的任务没有 completed_at，用最后更新时间代替。
+   */
+  listRecentClosedWorkItemPage(
+    filters: { limit?: number; cursor?: string } = {},
+  ): RecentClosedWorkItemPage {
+    const project = this.projectCode();
+    const clauses = ["archived_at IS NULL", CLOSED_STATUS_SQL];
+    const params: unknown[] = [];
+    if (filters.cursor) {
+      const last = decodeRecentClosedCursor(filters.cursor, project);
+      clauses.push(`(${FINISHED_AT_SQL} < ? OR (${FINISHED_AT_SQL} = ? AND local_no < ?))`);
+      params.push(last.finishedAt, last.finishedAt, last.localNo);
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 5));
+    const rows = this.sqlite
+      .prepare(
+        hydratedWorkItemSql(
+          clauses.join(" AND "),
+          `ORDER BY ${FINISHED_AT_SQL} DESC, local_no DESC LIMIT ?`,
+          "ORDER BY COALESCE(selected.completed_at, selected.updated_at) DESC, selected.local_no DESC",
+        ),
+      )
+      .all(...params, limit + 1) as any[];
+    const total = Number(
+      (
+        this.sqlite
+          .prepare(
+            `SELECT COUNT(*) AS count FROM work_items WHERE archived_at IS NULL AND ${CLOSED_STATUS_SQL}`,
+          )
+          .get() as { count: number }
+      ).count,
+    );
+    const hasMore = rows.length > limit;
+    const selected = rows.slice(0, limit);
+    const last = selected.at(-1);
+    return {
+      items: selected.map((row) => this.hydratedWorkItem(row, project)),
+      nextCursor:
+        hasMore && last
+          ? encodeRecentClosedCursor({
+              project,
+              last: {
+                finishedAt: String(last.completed_at ?? last.updated_at),
+                localNo: last.local_no,
+              },
+            })
+          : null,
+      hasMore,
+      total,
+    };
+  }
+
   listWorkItemPage(filters: WorkItemPageFilters = {}): WorkItemProjectionPage {
     const { clauses, params, selection } = this.taskViewFilter(filters);
     const project = this.projectCode();
@@ -399,11 +459,14 @@ export class TaskReadModel {
       milestone: filters.milestoneId ?? null,
       ready: filters.readyOnly === true,
       query: filters.query ?? null,
+      closed: filters.closed ?? null,
     });
     if (selection.status) {
       clauses.push("status = ?");
       params.push(selection.status);
     }
+    if (selection.closed === true) clauses.push(CLOSED_STATUS_SQL);
+    if (selection.closed === false) clauses.push(`NOT ${CLOSED_STATUS_SQL}`);
     if (selection.owner) {
       clauses.push("assignee_agent_id = ?");
       params.push(selection.owner);

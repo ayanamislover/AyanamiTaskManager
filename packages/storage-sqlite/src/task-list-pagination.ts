@@ -8,6 +8,7 @@ export type TaskListSelection = {
   milestone: string | null;
   ready: boolean;
   query: string | null;
+  closed?: boolean | null;
 };
 
 export type TaskListPosition = {
@@ -40,6 +41,7 @@ export function canonicalTaskListSelection(input: TaskListSelection): TaskListSe
     milestone: normalizeText(input.milestone),
     ready: input.ready,
     query: normalizeText(input.query),
+    closed: input.closed ?? null,
   };
 }
 
@@ -54,6 +56,10 @@ function selectionHash(input: TaskListSelection): string {
         selection.milestone,
         selection.ready,
         selection.query,
+        // 只在按结束状态分组时参与哈希，升级前发出的 cursor 仍然有效。
+        ...(selection.closed === null || selection.closed === undefined
+          ? []
+          : [selection.closed ? "closed" : "open"]),
       ]),
       "utf8",
     )
@@ -154,6 +160,62 @@ export function decodeTaskListCursor(
               localNo: payload.l!.n,
             },
     };
+  } catch (error) {
+    if (isAtmError(error) && error.code === "INVALID_CURSOR") throw error;
+    return invalidCursor();
+  }
+}
+
+const RECENT_CLOSED_PREFIX = "rc1";
+
+export type RecentClosedPosition = { finishedAt: string; localNo: number };
+
+function recentClosedDigest(body: string): string {
+  return createHash("sha256")
+    .update(`${RECENT_CLOSED_PREFIX}:${body}:ayanami-recent-closed`, "utf8")
+    .digest("base64url")
+    .slice(0, 22);
+}
+
+/** 「最近结束」分页按结束时间倒序，和按优先级排序的任务列表游标互不通用。 */
+export function encodeRecentClosedCursor(input: {
+  project: string;
+  last: RecentClosedPosition;
+}): string {
+  const body = Buffer.from(
+    JSON.stringify({
+      v: 1,
+      p: input.project.toUpperCase(),
+      t: input.last.finishedAt,
+      n: input.last.localNo,
+    }),
+    "utf8",
+  ).toString("base64url");
+  return `${RECENT_CLOSED_PREFIX}.${body}.${recentClosedDigest(body)}`;
+}
+
+export function decodeRecentClosedCursor(token: string, project: string): RecentClosedPosition {
+  try {
+    const [prefix, body, signature, extra] = token.split(".");
+    if (prefix !== RECENT_CLOSED_PREFIX || !body || !signature || extra !== undefined)
+      invalidCursor();
+    if (!safeEqual(signature, recentClosedDigest(body))) invalidCursor();
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Record<
+      string,
+      unknown
+    >;
+    if (
+      Object.keys(payload).sort().join(",") !== "n,p,t,v" ||
+      payload.v !== 1 ||
+      payload.p !== project.toUpperCase() ||
+      typeof payload.t !== "string" ||
+      !payload.t ||
+      !Number.isSafeInteger(payload.n) ||
+      Number(payload.n) <= 0
+    ) {
+      invalidCursor();
+    }
+    return { finishedAt: payload.t as string, localNo: payload.n as number };
   } catch (error) {
     if (isAtmError(error) && error.code === "INVALID_CURSOR") throw error;
     return invalidCursor();

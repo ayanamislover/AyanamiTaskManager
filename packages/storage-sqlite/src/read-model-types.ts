@@ -15,6 +15,8 @@ export type WorkItemListFilters = {
   milestoneId?: string;
   readyOnly?: boolean;
   query?: string;
+  /** true 只要已结束（DONE / CANCELLED），false 只要未结束；省略表示不分组。 */
+  closed?: boolean;
   limit?: number;
   offset?: number;
 };
@@ -27,6 +29,14 @@ export type TaskViewProjectionPage = {
   nextCursor: string | null;
   retryCursor: string;
   hasMore: boolean;
+};
+
+export type RecentClosedWorkItemPage = {
+  items: WorkItemView[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  /** 已结束任务的总数，界面用来显示「还有多少没加载」。 */
+  total: number;
 };
 
 export type WorkItemProjectionPage = {
