@@ -7,7 +7,11 @@ import { formatTime, priorityLabels, Status } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
 import type { ProjectTaskSort, ProjectTaskSortField } from "../task-sort.js";
 import { SystemEventsToggle, TimelineEventRow, useTimelineEvents } from "./timeline.js";
-import { ProjectTaskSortHeader, type ProjectTaskView } from "./project-task-controls.js";
+import {
+  ProjectTaskSortHeader,
+  taskTreeRows,
+  type ProjectTaskView,
+} from "./project-task-controls.js";
 import type { RecentClosedTasks } from "./recent-closed-tasks.js";
 
 type ProjectEventsState = {
@@ -215,45 +219,44 @@ export function ProjectTaskViews({
       );
     }
     if (view === "tree") {
-      const render = (parentId: string | null, depth: number): ReactNode =>
-        filteredTasks
-          .filter((task: any) => (task.parentId ?? null) === parentId)
-          .map((task: any) => (
-            <div key={task.id}>
-              <button
-                className="atm-tree-row"
-                style={{
-                  width: "100%",
-                  paddingLeft: 12 + depth * 22,
-                  borderTop: 0,
-                  borderRight: 0,
-                  borderLeft: 0,
-                  background: "transparent",
-                  textAlign: "left",
-                }}
-                onClick={() => onOpenTask(task.key)}
-              >
-                <GitBranch size={15} />
-                <span className="atm-key">{task.key}</span>
-                <span className="atm-row-title" style={{ flex: 1 }}>
-                  {task.title}
-                </span>
-                {task.discoveredFrom ? (
-                  <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
-                    发现于 {task.discoveredFrom}
-                  </span>
-                ) : null}
-                {task.discoveredCount ? (
-                  <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
-                    发现 {task.discoveredCount}
-                  </span>
-                ) : null}
-                <Status value={task.status} />
-              </button>
-              {render(task.id, depth + 1)}
-            </div>
-          ));
-      return <div className="atm-tree">{render(null, 0)}</div>;
+      const row = (task: any, depth: number): ReactNode => (
+        <button
+          key={task.id}
+          className="atm-tree-row"
+          style={{
+            width: "100%",
+            paddingLeft: 12 + depth * 22,
+            borderTop: 0,
+            borderRight: 0,
+            borderLeft: 0,
+            background: "transparent",
+            textAlign: "left",
+          }}
+          onClick={() => onOpenTask(task.key)}
+        >
+          <GitBranch size={15} />
+          <span className="atm-key">{task.key}</span>
+          <span className="atm-row-title" style={{ flex: 1 }}>
+            {task.title}
+          </span>
+          {task.discoveredFrom ? (
+            <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
+              发现于 {task.discoveredFrom}
+            </span>
+          ) : null}
+          {task.discoveredCount ? (
+            <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
+              发现 {task.discoveredCount}
+            </span>
+          ) : null}
+          <Status value={task.status} />
+        </button>
+      );
+      return (
+        <div className="atm-tree">
+          {taskTreeRows(filteredTasks).map(({ task, depth }) => row(task, depth))}
+        </div>
+      );
     }
     return (
       <table className="atm-table">
