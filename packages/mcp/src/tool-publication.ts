@@ -44,6 +44,20 @@ function markdownCell(value: string): string {
   return value.replaceAll("|", "\\|");
 }
 
+/**
+ * `_meta.schema_hash` 只用来发现 schema 漂移，没人需要读完整 64 位十六进制。
+ *
+ * 它按工具收费：每个描述符 64 个字符，core 六个工具就是 288 字节，而 core 的预算
+ * 也就那么多——这些字节挤掉的是工具描述，而描述是所有客户端都会显示、agent 真正
+ * 拿来判断怎么调用的那一行。16 位十六进制有 64 bit，对十来个工具的漂移检测绰绰有余；
+ * 生成的 contract 页本来也只显示前 12 位。
+ *
+ * 它只是漂移探针：用来判断「这份 schema 和我上次见到的是不是同一份」，以及做缓存失效键。
+ * 不要拿它当 schema 身份的证明——64 bit 不是为对抗刻意构造的碰撞准备的。需要强身份时用
+ * publishedProfileSchemaHash，那个仍是完整 256 bit。
+ */
+export const PUBLISHED_SCHEMA_HASH_LENGTH = 16;
+
 function publishedTool(
   definition: ToolDefinition,
   surfaceVersion: number,
@@ -70,7 +84,7 @@ function publishedTool(
     _meta: {
       ...(definition.protocolMeta ?? {}),
       surface_version: `v${surfaceVersion}`,
-      schema_hash: digest(semanticInput),
+      schema_hash: digest(semanticInput).slice(0, PUBLISHED_SCHEMA_HASH_LENGTH),
     },
   };
 }
@@ -128,10 +142,7 @@ export function generateMcpToolContractMarkdown(
       const metadata = tool._meta as { schema_hash?: unknown } | undefined;
       return `| ${profile} | \`${tool.name}\` | ${markdownCell(tool.description ?? "")} | ${String(
         tool.annotations?.readOnlyHint,
-      )} | ${String(tool.annotations?.destructiveHint)} | \`${String(metadata?.schema_hash).slice(
-        0,
-        12,
-      )}\` |`;
+      )} | ${String(tool.annotations?.destructiveHint)} | \`${String(metadata?.schema_hash)}\` |`;
     }),
   );
   return [

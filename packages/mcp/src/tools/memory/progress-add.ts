@@ -56,7 +56,7 @@ export function createAtmProgressAddTool(
     profile: "memory",
     name: "atm_progress_add",
     description:
-      "写任务或项目进度。scope=task|project；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN。",
+      "写任务或项目进度。scope=task|project；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN。summary 上限 500 个 code point。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

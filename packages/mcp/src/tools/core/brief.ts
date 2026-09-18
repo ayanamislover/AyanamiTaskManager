@@ -32,7 +32,7 @@ export function createAtmBriefTool(
   return {
     profile: "core",
     name: "atm_brief",
-    description: "仅在上下文压缩、长时间离开或明确恢复 working set",
+    description: "重新取回 working set。仅在上下文压缩、长时间离开或明确恢复时调用。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },

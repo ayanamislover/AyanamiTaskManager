@@ -65,7 +65,22 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 
 已通过 `atm_begin` 建立 Session 后，可调用 `atm_feedback(project, session, op_id, summary, detail, severity, tool, task_key)`。它把问题保存为当前项目内 topic 固定为 `atm-agent-feedback` 的 Agent Record，便于在项目“记录”页直接查看、检索和关联任务。反馈只写本机 ATM 项目数据库，不会自动上传到 GitHub 或任何外部服务；相同请求重试必须复用原 `op_id`。`tool` 与 `task_key` 均为可选上下文。`severity` 填 `CRITICAL` 也不会进入 brief——`ATM_FEEDBACK` 讲的是 ATM 这个产品，不是所在项目的事实，所以按需填写真实严重度，不必担心占用后续 Session 的上下文。
 
-所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
+所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要应一次写清结果、证据和下一步，不贴原始日志。
+
+### 字段约束速查
+
+**以本节为准，不要以眼前渲染出来的 schema 为准。** published schema 里这些约束都在，但实测有 MCP 客户端在渲染 `tools/list` 时把 `enum` / `oneOf` / `maxLength` 丢成 `{}`，尚有客户端连 `required` 也一并删短（实测：`atm_record` 发布的 `required` 是 `project` / `session` / `op_id` / `kind` / `title` / `summary` 六项，渲染到调用方眼前只剩 `kind`）。能稳定传到调用方眼前的只有 description 和属性名。撞上限的代价不对称：被拒之后整个请求要原样重发，而 `detail` 这类正文可能有好几 KB。**先写 detail，`summary` 最后写，提交前量一遍。**
+
+<!-- prettier-ignore -->
+| 工具 | 约束 |
+| --- | --- |
+| 全部写操作 | `project`、`session`、`op_id` 三项均必填（渲染出来的 `required` 可能看不到它们，以本表为准）；`op_id` 须唯一，重试同一请求时复用原值。`atm_record` 另需 `kind`、`title`、`summary`。 |
+| `atm_record` | `summary` ≤ 300 个 Unicode code point（中文按字数算）；`title` ≤ 400；`detail` ≤ 100,000，长内容放这里。`kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON`，`importance=LOW\|NORMAL\|HIGH\|CRITICAL`。 |
+| `atm_progress_add` | `summary` ≤ 500 code point；`completed` / `evidence` / `next` 各 ≤ 20 项。`scope=task\|project`（`health` 只用于 project，`percent` 只用于 task）。 |
+| `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**，这是 ATM 里唯一的小写枚举，其余枚举都是大写。 |
+| `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。 |
+| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
+| `atm_search` | `session` 只能与 `op_id` 精确回查一起传。 |
 
 MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCase`。不要把两套命名混用。
 

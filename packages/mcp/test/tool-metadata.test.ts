@@ -39,6 +39,13 @@ function assertMetadataContract(tools: PublishedTool[]): void {
     if (!tool.description || !/^\S[^\r\n]*$/u.test(tool.description)) {
       throw new Error(`TOOL_DESCRIPTION_REQUIRED:${tool.name}`);
     }
+    // 描述被预算挤成半句话是真发生过的：atm_begin 曾经只有「直接使用返回的 brief」，
+    // atm_brief 只有「仅在上下文压缩、长时间离开或明确恢复 working set」——两句都没说
+    // 这个工具本身做什么。描述是所有 MCP 客户端都会显示、Agent 判断怎么调用的唯一依据，
+    // 挤掉它省下的字节会以试错往返的形式加倍还回来。要求是完整的一句话。
+    if (!tool.description.endsWith("。")) {
+      throw new Error(`TOOL_DESCRIPTION_INCOMPLETE:${tool.name}`);
+    }
     if (typeof tool.annotations?.readOnlyHint !== "boolean") {
       throw new Error(`TOOL_READ_ONLY_HINT_REQUIRED:${tool.name}`);
     }
@@ -48,7 +55,7 @@ function assertMetadataContract(tools: PublishedTool[]): void {
     if (!/^v\d+$/u.test(tool._meta?.surface_version ?? "")) {
       throw new Error(`TOOL_SURFACE_VERSION_REQUIRED:${tool.name}`);
     }
-    if (!/^[a-f0-9]{64}$/u.test(tool._meta?.schema_hash ?? "")) {
+    if (!/^[a-f0-9]{16}$/u.test(tool._meta?.schema_hash ?? "")) {
       throw new Error(`TOOL_SCHEMA_HASH_REQUIRED:${tool.name}`);
     }
   }
@@ -103,6 +110,35 @@ describe("MCP tools/list metadata contract", () => {
     },
   );
 
+  /**
+   * 描述里写 `prop=a|b|c` 就必须和 schema 里的 enum 对得上。
+   *
+   * 枚举取值现在必须写进描述——实测有客户端把 `enum` 渲染成 `{}`，描述是唯一稳定的通道
+   * （ATM-R-186）。但手抄一份取值就会漂：schema 加了一个取值、描述没跟上，调用方照着
+   * 描述调就被拒，而且会以为是自己写错了。这条用例把两份钉在一起。
+   */
+  it("描述里点名的枚举取值与 schema 一致", async () => {
+    let checked = 0;
+    for (const profile of ["core", "memory", "actions"] as const) {
+      const fixture = await list(profile);
+      try {
+        for (const tool of fixture.first) {
+          const properties = (tool.inputSchema.properties ?? {}) as Record<string, unknown>;
+          for (const match of (tool.description ?? "").matchAll(/([a-z_]+)=([A-Za-z_|]{3,})/gu)) {
+            const property = properties[match[1]!] as { enum?: unknown } | undefined;
+            if (!Array.isArray(property?.enum)) continue;
+            expect(match[2]!.split("|"), `${tool.name}.${match[1]}`).toEqual(property.enum);
+            checked += 1;
+          }
+        }
+      } finally {
+        await fixture.close();
+      }
+    }
+    // 正则写错就永远查不到东西、永远绿，所以确认真的比对过几处。
+    expect(checked).toBeGreaterThanOrEqual(4);
+  });
+
   it("keeps legacy on the byte-for-byte v1.0.18 compatibility artifact", async () => {
     const fixture = await list("legacy");
     try {
@@ -124,6 +160,7 @@ describe("MCP tools/list metadata contract", () => {
     try {
       const mutations: Array<[string, (tool: PublishedTool) => void]> = [
         ["TOOL_DESCRIPTION_REQUIRED", (tool) => delete tool.description],
+        ["TOOL_DESCRIPTION_INCOMPLETE", (tool) => (tool.description = "直接使用返回的 brief")],
         ["TOOL_READ_ONLY_HINT_REQUIRED", (tool) => delete tool.annotations!.readOnlyHint],
         ["TOOL_DESTRUCTIVE_HINT_REQUIRED", (tool) => delete tool.annotations!.destructiveHint],
         ["TOOL_SURFACE_VERSION_REQUIRED", (tool) => delete tool._meta!.surface_version],

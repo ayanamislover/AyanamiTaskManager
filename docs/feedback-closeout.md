@@ -48,7 +48,7 @@
 
 | 补充项                           | 闭环位置                                                                                 |
 | -------------------------------- | ---------------------------------------------------------------------------------------- |
-| 补 P1-1：空 schema 定量          | strict schema 与 7,680-byte Profile 预算由 `schema-truth` / `profile-surface` 自动守卫。 |
+| 补 P1-1：空 schema 定量          | strict schema 与 Profile 描述符预算由 `schema-truth` / `profile-surface` 自动守卫。      |
 | 补 P2-3：summary 上限不在 schema | `maxLength` 已进入 public schema；Unicode code-point 边界有阳性/阴性测试。               |
 | 补 P2-4：冲突诊断另一半          | current snapshot、recent changes 与 `changes_complete` 共同避免把近似事件冒充精确 diff。 |
 | 补 P1-1：五个字段名与首调失败率  | public required/enum/conditional rules 与 runtime 同源；Guide 列明 Profile 工具面。      |

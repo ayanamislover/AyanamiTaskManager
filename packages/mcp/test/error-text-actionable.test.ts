@@ -38,7 +38,14 @@ async function connect() {
     if (response.isError) throw new Error(String((response.content as any)[0]?.text ?? ""));
     return response.structuredContent as Record<string, any>;
   };
-  return { project, call, raw, service, actionsClient: profiles.actionsClient };
+  return {
+    project,
+    call,
+    raw,
+    service,
+    actionsClient: profiles.actionsClient,
+    coreClient: profiles.coreClient,
+  };
 }
 
 const textOf = (response: { content: unknown }) =>
@@ -131,6 +138,73 @@ describe("工具报错的正文要能照着做", () => {
       items: [{ task_key: taskKey, expected_version: version, operation: "complete" }],
     });
     expect(done.ok).toBe(true);
+  });
+
+  /**
+   * atm_end 的 outcome 是整个 ATM 里唯一的小写枚举（kind / importance / status / priority
+   * 全是大写）。两个用 ATM 的 Agent 会话各自在同一处栽过：上一个调用刚教会它们大写枚举，
+   * 下一个调用因为大写被拒。取值列在描述里，因为描述是所有客户端都会显示的那一行。
+   */
+  it("atm_end 的描述点名 outcome 的每一个取值", async () => {
+    const { coreClient } = await connect();
+    const listed = await coreClient.listTools();
+    const tool = listed.tools.find((each) => each.name === "atm_end");
+    const values = ((tool?.inputSchema as any)?.properties?.outcome?.enum ?? []) as string[];
+    expect(values).toContain("completed");
+    for (const value of values) expect(tool?.description ?? "").toContain(value);
+  });
+
+  /**
+   * field_mask 是「在 view 已有的字段内过滤」，不是「我要这些字段」。越界字段以前被静默丢掉，
+   * 调用方看到的是「这个任务没有 title」，于是换 view 再 get 一次才发现是自己的 mask 越界。
+   */
+  it("field_mask 越界时回显 ignored_fields，而不是静默少给", async () => {
+    const { project, call, service } = await connect();
+    const begun = await call("atm_begin", {
+      project_code: project.code,
+      mode: "project",
+      agent_id: "codex",
+      op_id: "mask-begin",
+    });
+    const session = String(begun.session);
+    await service.createObjective(project.code, session, {
+      title: "目标",
+      description: "",
+      definitionOfDone: ["完成"],
+    });
+    const created = await call("atm_task_create", {
+      project: project.code,
+      session,
+      op_id: "mask-plan",
+      items: [{ client_ref: "t1", title: "任务" }],
+    });
+    const taskKey = String(
+      created.entities.find((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+        .key,
+    );
+
+    // core view 有 status / version，没有 title / description。
+    const got = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      field_mask: ["status", "version", "title", "description"],
+    });
+    expect(got).toMatchObject({ status: "BACKLOG" });
+    expect(got.ignored_fields).toEqual(["title", "description"]);
+
+    const listed = await call("atm_task_list", {
+      project: project.code,
+      field_mask: ["key", "status", "assignee_agent_id"],
+    });
+    expect(listed.ignored_fields).toEqual(["assignee_agent_id"]);
+
+    // 没有越界时不该多出这个字段，免得每次响应都带一段噪音。
+    const clean = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      field_mask: ["status", "version"],
+    });
+    expect(clean.ignored_fields).toBeUndefined();
   });
 
   /**

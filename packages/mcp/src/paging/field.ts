@@ -163,6 +163,27 @@ function getAtPath(value: unknown, path: Array<string | number>): unknown {
   return current;
 }
 
+/**
+ * field_mask 里这个 view 根本给不出的字段。
+ *
+ * selectFields 会把它们静默丢掉，于是 `field_mask: ["status","title"]` 在 core view 下
+ * 只回 status，调用方看到的是「这个任务没有 title」，而不是「你要的字段这个 view 没有」。
+ * 实测代价是换 view 再 get 一次。field_mask 是「在 view 已有的字段内过滤」，不是「我要这些字段」，
+ * 这件事得由响应自己讲出来。
+ */
+export function ignoredFields(
+  value: Record<string, unknown>,
+  fieldMask: readonly string[],
+): string[] {
+  if (fieldMask.length === 0 || fieldMask.includes("*")) return [];
+  return fieldMask.filter((field) => !(field in value));
+}
+
+/** 回显 ignored_fields 要占的字符数，用来从调用方给的 max_chars 里先扣掉。 */
+export function ignoredFieldsCost(ignored: readonly string[]): number {
+  return ignored.length === 0 ? 0 : JSON.stringify({ ignored_fields: ignored }).length;
+}
+
 export function selectFields(
   value: Record<string, unknown>,
   fieldMask: string[],

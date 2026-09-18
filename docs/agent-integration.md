@@ -121,7 +121,7 @@ MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
 三者共享同一 ATM 数据库，正式工具面合计 14 个工具。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record/本机反馈、搜索、增量同步或读取共享知识，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
-不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 7,680-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core、memory 与 actions 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 7,680-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
+不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 9,728-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core、memory 与 actions 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 9,728-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
 
 升级前已被 Agent 缓存在内存里的无 Profile 单入口会继续访问 `/mcp`。该 legacy 入口仅作为迁移窗口保留冻结的 11 个旧工具，不含 v5 新增的 `atm_feedback`、`atm_knowledge_search` 或 `atm_knowledge_get`；它不会写入任何新配置。ATM 启动后会把磁盘上的 legacy 或旧 core+memory 配置迁移为显式 core / memory / actions，补齐 `atm_task_patch` 所在的 actions，Agent 客户端重启后即回到完整拆分工具面。
 

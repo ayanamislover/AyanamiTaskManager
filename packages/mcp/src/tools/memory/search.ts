@@ -82,7 +82,7 @@ export function createAtmSearchTool(
   return {
     profile: "memory",
     name: "atm_search",
-    description: "搜索事实。",
+    description: "搜索事实。session 只能与 op_id 精确回查一起传。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },

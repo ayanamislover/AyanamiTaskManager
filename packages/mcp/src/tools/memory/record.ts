@@ -48,7 +48,8 @@ export function createAtmRecordTool(
   return {
     profile: "memory",
     name: "atm_record",
-    description: "保存关键记录。kind=DECISION|CONSTRAINT|FACT|RISK|REFERENCE|LESSON。",
+    description:
+      "保存关键记录。kind=DECISION|CONSTRAINT|FACT|RISK|REFERENCE|LESSON；importance=LOW|NORMAL|HIGH|CRITICAL。summary 上限 300 个 code point，长内容放 detail。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },
