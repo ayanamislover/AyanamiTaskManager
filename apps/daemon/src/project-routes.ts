@@ -208,10 +208,15 @@ export function registerProjectRoutes(
   });
   app.get("/api/v1/projects/:code/agents", async (request) => {
     const { code } = request.params as { code: string };
-    const { limit, cursor } = request.query as { limit?: string; cursor?: string };
+    const { limit, cursor, task } = request.query as {
+      limit?: string;
+      cursor?: string;
+      task?: string;
+    };
     const page = await options.service.agentPage(code, {
       limit: Number(limit ?? 100),
       ...(cursor ? { cursor } : {}),
+      ...(task ? { taskKey: task } : {}),
     });
     return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });

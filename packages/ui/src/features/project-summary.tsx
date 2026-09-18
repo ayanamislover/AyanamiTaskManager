@@ -108,7 +108,7 @@ export function ProjectSummary({
           </div>
           {inProgress.length ? (
             <div className="atm-list">
-              {inProgress.slice(0, 4).map((task) => (
+              {inProgress.map((task) => (
                 <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
                   <div>
                     <div className="atm-row-title">{task.title}</div>
@@ -133,7 +133,7 @@ export function ProjectSummary({
           </div>
           {blockers.length ? (
             <div className="atm-list">
-              {blockers.slice(0, 4).map((task) => (
+              {blockers.map((task) => (
                 <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
                   <div>
                     <div className="atm-row-title">{task.title}</div>
@@ -191,7 +191,7 @@ export function ProjectSummary({
           </div>
           {ready.length ? (
             <div className="atm-list">
-              {ready.slice(0, 5).map((task) => (
+              {ready.map((task) => (
                 <button className="atm-row" key={task.id} onClick={() => openTask(task.key)}>
                   <div>
                     <div className="atm-row-title">{task.title}</div>

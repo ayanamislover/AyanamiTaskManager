@@ -39,7 +39,7 @@ describe("EngineeringMetricsPanel", () => {
     expect(engineeringMetrics).not.toHaveBeenCalled();
   });
 
-  it("展示缓存中的项目指标、规模警告并限制热点文件数量", () => {
+  it("展示缓存中的项目指标、规模警告与服务端给出的全部热点文件", () => {
     const engineeringMetrics = vi.fn(async () => ({ available: false }));
     const largestFiles = Array.from({ length: 7 }, (_, index) => ({
       path: `src/file-${index + 1}.ts`,
@@ -68,10 +68,9 @@ describe("EngineeringMetricsPanel", () => {
 
     expect(markup).toContain("12,345");
     expect(markup).toContain("最近 7 日实现规模偏大");
-    expect(markup).toContain("src/file-6.ts");
-    expect(markup).not.toContain("src/file-7.ts");
-    expect(markup).toContain("src/churn-6.ts");
-    expect(markup).not.toContain("src/churn-7.ts");
+    // 服务端 scanProjectMetrics 已按 topN 截过一次，界面再砍一刀只会白丢两条。
+    expect(markup).toContain("src/file-7.ts");
+    expect(markup).toContain("src/churn-7.ts");
     expect(markup).toContain("HEAD 1234567890");
     expect(markup).toContain("2026-08-27T00:00:00.000Z");
   });

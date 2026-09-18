@@ -41,20 +41,22 @@ export function TaskDrawer({
         client.tasks.get(project, taskKey, "full"),
         client.tasks.getForUi(project, taskKey),
       ]);
-      return { ...metadata, ...view };
+      // 计划日只在 UI 读模型里，full 视图没有；抽屉要显示就得自己带上。
+      return { ...metadata, ...view, targetDate: metadata.targetDate ?? null };
     },
   });
+  // 工程变更那一路要跑 git，重且慢；先让正文出来，别跟正文抢同一个 daemon。
   const engineering = useQuery({
     queryKey: ["engineering-metrics", project, taskKey],
     queryFn: () => client.projects.engineeringMetrics(project, taskKey),
+    enabled: Boolean(query.data),
   });
   const executionSessionCollection = useCursorCollection(
     ["task", project, taskKey, "execution-sessions"],
-    (cursor) => client.projects.agentPage(project, 100, cursor),
+    (cursor) => client.projects.agentPage(project, 100, cursor, taskKey),
+    Boolean(query.data),
   );
-  const executionSessions = (executionSessionCollection.items as any[]).filter(
-    (session) => session.currentTaskKey === taskKey,
-  );
+  const executionSessions = executionSessionCollection.items as any[];
   const patch = useMutation({
     mutationFn: async (input: Record<string, unknown>) =>
       client.tasks.patchAsUser(project, {
@@ -215,6 +217,16 @@ export function TaskDrawer({
                 {String(query.data!.description || "尚未填写说明")}
               </div>
             </section>
+            {/*
+              计划日只有真设了才出现。任务列表里原来常驻一整列，可实际上一条都没设过，
+              整列全是「—」，白占一列宽度。字段本身 MCP 还能写，所以留在这里。
+            */}
+            {query.data!.targetDate ? (
+              <section className="atm-section">
+                <h3>计划日</h3>
+                <div className="atm-row-sub">{String(query.data!.targetDate)}</div>
+              </section>
+            ) : null}
             <section className="atm-section">
               <h3>进度</h3>
               <div className="atm-progress">

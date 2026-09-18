@@ -99,7 +99,7 @@ export function EngineeringMetricsPanel({
             <div className="atm-form-grid">
               <div>
                 <h3>最大文件</h3>
-                {(engineering.data.project.largestFiles as any[]).slice(0, 6).map((item) => (
+                {(engineering.data.project.largestFiles as any[]).map((item) => (
                   <div className="atm-metric-file" key={item.path}>
                     <span>{item.path}</span>
                     <strong>{item.loc} LOC</strong>
@@ -108,7 +108,7 @@ export function EngineeringMetricsPanel({
               </div>
               <div>
                 <h3>高 churn（30 日）</h3>
-                {(engineering.data.project.highChurnFiles as any[]).slice(0, 6).map((item) => (
+                {(engineering.data.project.highChurnFiles as any[]).map((item) => (
                   <div className="atm-metric-file" key={item.path}>
                     <span>{item.path}</span>
                     <strong>{item.churn}</strong>

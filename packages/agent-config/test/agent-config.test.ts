@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   inspectManagedAgentRule,
+  agentSkillsToRepair,
   inspectAgentSkills,
   installAgentSkills,
   installClaudeCodeConfig,
@@ -444,6 +445,55 @@ describe("Agent MCP 配置适配", () => {
     expect(rendered.agentRule).not.toContain("R:\\Project_All");
     expect(rendered.agentRule).toContain("后续所有任务执行均依赖 ATM");
     expect(rendered.agentRule).toContain("拆分成可独立验收的工作项");
+  });
+
+  /**
+   * 装过一次就再也不校正，是 atm-knowledge 那次的成因：它是后加的，已接入的客户端里
+   * 一直显示未安装，要用户自己想起来点一次「安装」。缺的和版本落后的自动补，
+   * 用户自己改过的一律不碰。
+   */
+  it("只补缺失和版本落后的 Skill，用户改过的不动", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-agent-skills-repair-"));
+    temporary.push(root);
+    const sourceRoot = join(root, "published");
+    const targetRoot = join(root, "host-skills");
+    const write = (base: string, name: string, version: number, body = "") => {
+      const directory = join(base, name);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(
+        join(directory, "SKILL.md"),
+        `---\nname: ${name}\natm-integration-version: ${version}\n---\n${body}`,
+        "utf8",
+      );
+    };
+    for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) write(sourceRoot, name, 2);
+    mkdirSync(join(sourceRoot, "_shared"), { recursive: true });
+    writeFileSync(join(sourceRoot, "_shared", "playbooks.md"), "# Playbooks\n", "utf8");
+
+    // 已接入的现状：atm-plan 装好且被用户改过，atm-task 是旧版本，atm-knowledge 压根没有。
+    installAgentSkills({ sourceRoot, targetRoot });
+    writeFileSync(
+      join(targetRoot, "atm-plan", "SKILL.md"),
+      `---\nname: atm-plan\natm-integration-version: 2\n---\n我自己加的`,
+      "utf8",
+    );
+    write(targetRoot, "atm-task", 1);
+    rmSync(join(targetRoot, "atm-knowledge"), { recursive: true, force: true });
+
+    const names = agentSkillsToRepair({ sourceRoot, targetRoot });
+    expect([...names].sort()).toEqual(["atm-knowledge", "atm-task"]);
+
+    installAgentSkills({ sourceRoot, targetRoot, names });
+
+    // 缺的补上了，旧的更新了。
+    expect(existsSync(join(targetRoot, "atm-knowledge", "SKILL.md"))).toBe(true);
+    expect(readFileSync(join(targetRoot, "atm-task", "SKILL.md"), "utf8")).toContain(
+      "atm-integration-version: 2",
+    );
+    // 用户改过的那一份原封不动。
+    expect(readFileSync(join(targetRoot, "atm-plan", "SKILL.md"), "utf8")).toContain("我自己加的");
+    // 补完之后就没什么要补的了。
+    expect(agentSkillsToRepair({ sourceRoot, targetRoot })).toEqual([]);
   });
 
   it("只安装 ATM 管理的三个 Skill 并备份已有目录", () => {

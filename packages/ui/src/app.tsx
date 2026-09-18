@@ -8,6 +8,7 @@ import { useAppShortcuts } from "./hooks/use-app-shortcuts.js";
 import { useNotice } from "./hooks/use-notice.js";
 import { useTheme } from "./hooks/use-theme.js";
 import { AppShell } from "./shell/app-shell.js";
+import { useProjectOrder } from "./project-order.js";
 import { ServiceStatus } from "./shell/service-status.js";
 import { CommandPalette } from "./features/command-palette.js";
 import { TaskDrawer } from "./features/task-drawer.js";
@@ -41,7 +42,9 @@ function App({
   const { theme, toggleTheme } = useTheme();
   useDesktopRouteNavigation(desktop, setRoute);
   useAppShortcuts(route, setRoute, setPalette);
-  const projectList = projects.data ?? [];
+  // 手动顺序在这里统一应用一次：侧栏、项目页、总览拿到的是同一份排序结果。
+  const projectOrder = useProjectOrder(client);
+  const projectList = projectOrder.apply(projects.data ?? []);
   const selectedProject = route.startsWith("project:")
     ? projectList.find((project) => project.code === route.slice(8))
     : null;
@@ -56,6 +59,7 @@ function App({
       route={route}
       onRoute={setRoute}
       projects={projectList}
+      projectOrder={projectOrder}
       {...(brandLogoSrc ? { brandLogoSrc } : {})}
       title={title}
       theme={theme}

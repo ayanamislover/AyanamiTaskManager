@@ -17,6 +17,7 @@ import { Presence, type PresenceRootProps } from "../components/presence.js";
 import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { Status, statusLabels } from "../presentation.js";
+import { useProjectOrder, useProjectReorder } from "../project-order.js";
 
 export function ProjectWizard({
   client,
@@ -302,6 +303,14 @@ export function ProjectsPage({
   const [wizard, setWizard] = useState(false);
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
+  // 卡片和侧栏读同一份手动顺序，两处永远一致。
+  const projectOrder = useProjectOrder(client);
+  const projects = projectOrder.apply(query.data ?? []);
+  const reorder = useProjectReorder(
+    projects.map((project) => project.id),
+    projectOrder,
+    "horizontal",
+  );
   const restore = useMutation({
     mutationFn: (code: string) => client.projects.restore(code),
     onSuccess: async (project) => {
@@ -325,7 +334,7 @@ export function ProjectsPage({
         <LoadingRows count={5} />
       ) : query.error ? (
         <ErrorState error={query.error} />
-      ) : query.data!.length === 0 ? (
+      ) : projects.length === 0 ? (
         <section className="atm-panel">
           <Empty
             title="还没有项目"
@@ -339,8 +348,8 @@ export function ProjectsPage({
         </section>
       ) : (
         <section className="atm-project-grid">
-          {query.data!.map((project) => (
-            <article className="atm-project" key={project.id}>
+          {projects.map((project) => (
+            <article className="atm-project" key={project.id} {...reorder(project.id)}>
               <button
                 className="atm-project-main"
                 disabled={project.lifecycle === "TRASHED"}

@@ -35,7 +35,6 @@ export type ProjectTaskFilters = {
   status: string;
   assignee: string;
   milestone: string;
-  due: "" | "OVERDUE" | "DATED";
   blockedOnly: boolean;
   progressSource: string;
 };
@@ -44,7 +43,6 @@ export const EMPTY_PROJECT_TASK_FILTERS: ProjectTaskFilters = {
   status: "",
   assignee: "",
   milestone: "",
-  due: "",
   blockedOnly: false,
   progressSource: "",
 };
@@ -56,14 +54,6 @@ export function filterProjectTasks(tasks: any[], filters: ProjectTaskFilters): a
     if (filters.milestone && task.milestoneId !== filters.milestone) return false;
     if (filters.blockedOnly && !task.blockedReason && task.status !== "BLOCKED") return false;
     if (filters.progressSource && task.progressSource !== filters.progressSource) return false;
-    if (filters.due === "DATED" && !task.targetDate) return false;
-    if (
-      filters.due === "OVERDUE" &&
-      (!task.targetDate ||
-        task.targetDate >= new Date().toISOString().slice(0, 10) ||
-        ["DONE", "CANCELLED"].includes(task.status))
-    )
-      return false;
     return true;
   });
 }
@@ -277,16 +267,6 @@ function ProjectTaskFilterBar({
           })),
         ]}
         onChange={(milestone) => patch({ milestone })}
-      />
-      <AtmSelect
-        ariaLabel="截止日期筛选"
-        value={value.due}
-        options={[
-          { value: "", label: "全部日期" },
-          { value: "OVERDUE", label: "已超期" },
-          { value: "DATED", label: "已设目标日" },
-        ]}
-        onChange={(due) => patch({ due: due as ProjectTaskFilters["due"] })}
       />
       <AtmSelect
         ariaLabel="进度来源筛选"

@@ -88,7 +88,17 @@ html[data-atm-desktop="true"] .atm-topbar a *,
 
 html[data-atm-desktop="true"] .atm-drawer-head {
   min-height: 68px;
-  padding-right: 158px;
+}
+
+/*
+ * 抽屉打开时，窗口按钮退到抽屉下面被盖住。
+ *
+ * 它们就悬在抽屉标题栏正上方，伸手去点抽屉里的东西很容易先碰到关闭。抽屉是右侧到底
+ * 的一整块不透明面板（z-index 14），把这里降到 13 就是实打实地被遮住，进出还跟着抽屉
+ * 自己的滑动动效走。抽屉一关就立刻恢复。居中的模态框盖不到右上角，不受影响。
+ */
+html[data-atm-desktop="true"]:has(.atm-drawer-backdrop) .atm-window-chrome {
+  z-index: 13;
 }
 
 .atm-window-chrome {

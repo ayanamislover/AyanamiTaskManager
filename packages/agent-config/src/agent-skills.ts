@@ -17,15 +17,22 @@ import {
   type AgentIntegrationState,
 } from "./contracts.js";
 
-export function installAgentSkills(input: { sourceRoot: string; targetRoot: string }): {
+export function installAgentSkills(input: {
+  sourceRoot: string;
+  targetRoot: string;
+  /** 只装这几个；不传就是全装。补缺时用得上——用户自己改过的那几个不该被覆盖。 */
+  names?: readonly string[];
+}): {
   skills: string[];
   paths: string[];
   backupPaths: string[];
 } {
+  const wanted = input.names ?? [...ATM_SKILL_NAMES, ...ATM_SKILL_RESOURCE_DIRECTORIES];
+  if (wanted.length === 0) return { skills: [], paths: [], backupPaths: [] };
   mkdirSync(input.targetRoot, { recursive: true });
   const paths: string[] = [];
   const backupPaths: string[] = [];
-  for (const name of [...ATM_SKILL_NAMES, ...ATM_SKILL_RESOURCE_DIRECTORIES]) {
+  for (const name of wanted) {
     const source = join(input.sourceRoot, name);
     const target = join(input.targetRoot, name);
     if (!existsSync(source)) throw new Error(`AGENT_SKILL_MISSING: ${name}`);
@@ -53,7 +60,31 @@ export function installAgentSkills(input: { sourceRoot: string; targetRoot: stri
       throw error;
     }
   }
-  return { skills: [...ATM_SKILL_NAMES], paths, backupPaths };
+  return {
+    skills: ATM_SKILL_NAMES.filter((name) => wanted.includes(name)),
+    paths,
+    backupPaths,
+  };
+}
+
+/**
+ * 该自动补齐哪几个 Skill。
+ *
+ * 装过一次之后就再也不校正，是 atm-knowledge 那次的成因：它是后加的，已经接入的客户端
+ * 里一直显示未安装，要用户自己想起来点一次「安装」。缺的和版本落后的都归 ATM 管，补上；
+ * 用户自己改过的（MODIFIED）一律不碰，那是他的东西。
+ */
+export function agentSkillsToRepair(input: { sourceRoot: string; targetRoot: string }): string[] {
+  const report = inspectAgentSkills(input);
+  const names = report.skills
+    .filter((skill) => skill.state === "NOT_INSTALLED" || skill.state === "NEEDS_UPDATE")
+    .map((skill) => skill.name);
+  if (names.length === 0) return [];
+  // 补任何一个 Skill 都要保证它依赖的共享资源在位。
+  for (const shared of ATM_SKILL_RESOURCE_DIRECTORIES) {
+    if (!existsSync(join(input.targetRoot, shared))) names.push(shared);
+  }
+  return names;
 }
 
 function directoryFingerprint(path: string): string | null {

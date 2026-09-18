@@ -76,10 +76,11 @@ export function createProjectsSurface(request: ClientRequest) {
         `/api/v1/projects/${encodeURIComponent(code)}/ui/milestones`,
         input,
       ),
-    agentPage: (code: string, limit = 100, cursor?: string) =>
+    /** task 传了就只取领过这个任务的 Session；过滤在 SQL 里做，不要整表拉回来再筛。 */
+    agentPage: (code: string, limit = 100, cursor?: string, task?: string) =>
       request<SessionPage>(
         "GET",
-        `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit, cursor })}`,
+        `/api/v1/projects/${encodeURIComponent(code)}/agents${queryString({ limit, cursor, task })}`,
       ),
     reconciliation: (code: string, includeActive = false) =>
       request<ReconciliationResult>(

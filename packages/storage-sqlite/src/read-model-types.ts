@@ -171,7 +171,7 @@ export type ProgressUpdateView = {
 };
 
 export type SessionView = ProtocolSessionView;
-export type SessionPageFilters = { limit?: number; cursor?: string };
+export type SessionPageFilters = { limit?: number; cursor?: string; taskKey?: string };
 
 export type SessionProjectionPage = {
   items: SessionView[];

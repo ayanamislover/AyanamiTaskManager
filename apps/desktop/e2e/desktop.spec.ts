@@ -976,10 +976,36 @@ test("任务抽屉、搜索和新建任务具有 Esc、焦点圈定与焦点恢�
     path: resolve("output", "playwright", "e2e-drawer-left-collapse.png"),
     fullPage: true,
   });
-  const reservedWindowControlsWidth = await drawer
-    .locator(".atm-drawer-head")
-    .evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingRight));
-  expect(reservedWindowControlsWidth).toBeGreaterThanOrEqual(158);
+  /*
+   * 抽屉打开时窗口按钮要被盖住。
+   *
+   * 它们就悬在抽屉标题栏正上方：以前靠给标题栏留 158px 右边距躲开，可按钮仍然是可点的，
+   * 伸手去点抽屉里的东西很容易先碰到关闭。现在按钮退到抽屉下面，标题也把那块宽度拿回来。
+   */
+  const windowChromeCovered = await page.evaluate(() => {
+    const chrome = document.createElement("div");
+    chrome.className = "atm-window-chrome";
+    chrome.dataset.testid = "window-chrome-probe";
+    document.body.append(chrome);
+    const box = chrome.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    const layer = (element: Element | null) =>
+      element ? Number.parseInt(getComputedStyle(element).zIndex, 10) : Number.NaN;
+    const result = {
+      chromeLayer: layer(chrome),
+      backdropLayer: layer(document.querySelector(".atm-drawer-backdrop")),
+      hitsDrawer: Boolean(hit?.closest(".atm-drawer-backdrop")),
+      headPaddingRight: Number.parseFloat(
+        getComputedStyle(document.querySelector(".atm-drawer-head")!).paddingRight,
+      ),
+    };
+    chrome.remove();
+    return result;
+  });
+  expect(windowChromeCovered.chromeLayer).toBeLessThan(windowChromeCovered.backdropLayer);
+  expect(windowChromeCovered.hitsDrawer).toBe(true);
+  // 不用再为按钮让出右边那一条，标题能用满整行。
+  expect(windowChromeCovered.headPaddingRight).toBeLessThan(158);
   await page.keyboard.press("Shift+Tab");
   expect(await page.evaluate(() => Boolean(document.activeElement?.closest("[role=dialog]")))).toBe(
     true,

@@ -5,6 +5,7 @@ import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { SunIcon as Sun } from "@phosphor-icons/react/dist/icons/Sun";
 import { Presence } from "../components/presence.js";
 import type { Route, Theme } from "../contracts.js";
+import type { ProjectOrder } from "../hooks/use-project-reorder.js";
 import { Sidebar } from "./sidebar.js";
 
 export function AppShell({
@@ -12,6 +13,7 @@ export function AppShell({
   onRoute,
   projects,
   brandLogoSrc,
+  projectOrder,
   title,
   theme,
   statusSlot,
@@ -27,6 +29,7 @@ export function AppShell({
   onRoute: (route: Route) => void;
   projects: ComponentProps<typeof Sidebar>["projects"];
   brandLogoSrc?: string;
+  projectOrder?: ProjectOrder;
   title: string;
   theme: Theme;
   statusSlot: ReactNode;
@@ -45,6 +48,7 @@ export function AppShell({
         setRoute={onRoute}
         projects={projects}
         {...(brandLogoSrc ? { brandLogoSrc } : {})}
+        {...(projectOrder ? { projectOrder } : {})}
       />
       <main className="atm-main">
         <header className="atm-topbar">

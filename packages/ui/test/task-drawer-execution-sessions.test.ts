@@ -7,8 +7,8 @@ const drawerPath = join(process.cwd(), "packages", "ui", "src", "features", "tas
 function missingExecutionSessionContracts(source: string): string[] {
   const contracts = [
     '["task", project, taskKey, "execution-sessions"]',
-    "client.projects.agentPage(project, 100, cursor)",
-    "session.currentTaskKey === taskKey",
+    // 过滤在 SQL 里做：整表拉回来再前端筛，项目里三百多条 session 就是四个来回。
+    "client.projects.agentPage(project, 100, cursor, taskKey)",
     "<h3>执行 Session</h3>",
     "session.displayName || session.agentId",
     "session.git?.branch",
@@ -24,8 +24,7 @@ describe("TaskDrawer execution sessions", () => {
     expect(missingExecutionSessionContracts(source)).toEqual([]);
 
     for (const contract of [
-      "client.projects.agentPage(project, 100, cursor)",
-      "session.currentTaskKey === taskKey",
+      "client.projects.agentPage(project, 100, cursor, taskKey)",
       "session.git?.worktreeRoot",
     ]) {
       expect(missingExecutionSessionContracts(source.replaceAll(contract, "MUTATED"))).toContain(

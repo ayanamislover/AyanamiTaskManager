@@ -11,18 +11,34 @@ import { UsersThreeIcon as UsersThree } from "@phosphor-icons/react/dist/icons/U
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
 import type { Route, SidebarProject } from "../contracts.js";
 import { sidebarProjectHint } from "../presentation.js";
+import { useProjectReorder, type ProjectOrder } from "../hooks/use-project-reorder.js";
+
+/** 没接排序时的空实现：Sidebar 在用例里会被单独渲染。 */
+const NO_REORDER: ProjectOrder = {
+  order: [],
+  apply: (projects) => projects,
+  drop: () => undefined,
+  nudge: () => undefined,
+};
 
 export function Sidebar({
   route,
   setRoute,
   projects,
   brandLogoSrc,
+  projectOrder,
 }: {
   route: Route;
   setRoute: (route: Route) => void;
   projects: SidebarProject[];
   brandLogoSrc?: string;
+  projectOrder?: ProjectOrder;
 }) {
+  const activeProjects = projects.filter((project) => project.lifecycle === "ACTIVE");
+  const reorder = useProjectReorder(
+    activeProjects.map((project) => project.id),
+    projectOrder ?? NO_REORDER,
+  );
   const primary = [
     ["overview", "总览", House],
     ["projects", "项目", FolderOpen],
@@ -106,21 +122,19 @@ export function Sidebar({
           <div className="atm-nav-group atm-sidebar-projects">
             <div className="atm-nav-title">活动项目</div>
             <nav className="atm-nav atm-sidebar-project-list" aria-label="活动项目">
-              {projects
-                .filter((project) => project.lifecycle === "ACTIVE")
-                .slice(0, 12)
-                .map((project) => (
-                  <button
-                    key={project.id}
-                    className="atm-nav-project"
-                    aria-current={route === `project:${project.code}` ? "page" : undefined}
-                    aria-label={project.name}
-                    title={sidebarProjectHint(project.name)}
-                    onClick={() => setRoute(`project:${project.code}`)}
-                  >
-                    <span className="atm-nav-project-name">{project.name}</span>
-                  </button>
-                ))}
+              {activeProjects.map((project) => (
+                <button
+                  key={project.id}
+                  className="atm-nav-project"
+                  aria-current={route === `project:${project.code}` ? "page" : undefined}
+                  aria-label={project.name}
+                  title={sidebarProjectHint(project.name)}
+                  onClick={() => setRoute(`project:${project.code}`)}
+                  {...(projectOrder ? reorder(project.id) : {})}
+                >
+                  <span className="atm-nav-project-name">{project.name}</span>
+                </button>
+              ))}
             </nav>
           </div>
         ) : null}

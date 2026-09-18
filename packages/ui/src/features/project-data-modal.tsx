@@ -112,7 +112,7 @@ export function ProjectDataModal({
                 <LoadingRows count={2} />
               ) : backups.data?.length ? (
                 <div className="atm-list">
-                  {backups.data.slice(0, 8).map((backup) => (
+                  {backups.data.map((backup) => (
                     <div className="atm-row" key={backup.id}>
                       <div>
                         <div className="atm-row-title">
