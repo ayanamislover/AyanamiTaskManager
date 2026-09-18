@@ -69,7 +69,7 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 
 ### 字段约束速查
 
-**以本节为准，不要以眼前渲染出来的 schema 为准。** published schema 里这些约束都在，但实测有 MCP 客户端在渲染 `tools/list` 时把 `enum` / `oneOf` / `maxLength` 丢成 `{}`，尚有客户端连 `required` 也一并删短（实测：`atm_record` 发布的 `required` 是 `project` / `session` / `op_id` / `kind` / `title` / `summary` 六项，渲染到调用方眼前只剩 `kind`）。能稳定传到调用方眼前的只有 description 和属性名。撞上限的代价不对称：被拒之后整个请求要原样重发，而 `detail` 这类正文可能有好几 KB。**先写 detail，`summary` 最后写，提交前量一遍。**
+**以本节为准，不要以眼前渲染出来的 schema 为准。** published schema 里这些约束都在，但实测有 MCP 客户端在渲染 `tools/list` 时把 `enum` / `oneOf` / `maxLength` 丢成 `{}`，尚有客户端连 `required` 也一并删短（实测：`atm_record` 发布的 `required` 是 `project` / `session` / `op_id` / `kind` / `title` / `summary` 六项，渲染到调用方眼前只剩 `kind`）。能稳定传到调用方眼前的只有 description 和属性名。反方向也有：有客户端的校验器把带 `default` 的字段当成必填（实测：`atm_record.scope` 有 `default: "PROJECT"`，服务端不传照样接受，却在客户端就被拦下）。两头都对不上时，**照本节把该传的一次传全**，包括那些本来有默认值的字段。撞上限的代价不对称：被拒之后整个请求要原样重发，而 `detail` 这类正文可能有好几 KB。**先写 detail，`summary` 最后写，提交前量一遍。**
 
 <!-- prettier-ignore -->
 | 工具 | 约束 |
