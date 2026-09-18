@@ -323,6 +323,67 @@ test("总览项目卡长名称最多两行并保留全称提示", async ({ page 
   }
 });
 
+test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ page }) => {
+  // staleTime 3 秒内切回来会命中新鲜缓存、queryFn 不执行；归属如果跟着「请求是否跑过」
+  // 走，列表就会卡在空白加载态直到下一次网络刷新。
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const projectCode = `SW${suffix.slice(-4).toUpperCase()}`;
+  try {
+    const project = await api.post(`${apiUrl}/projects`, {
+      data: { name: `切换验收 ${suffix}`, sourcePath: null, code: projectCode, description: "" },
+    });
+    expect(project.ok()).toBeTruthy();
+    const objective = await api.post(`${apiUrl}/projects/${projectCode}/ui/objectives`, {
+      data: {
+        opId: `e2e-switch-objective-${suffix}`,
+        title: "验证缓存新鲜期切换",
+        description: "",
+        definitionOfDone: [],
+      },
+    });
+    expect(objective.ok()).toBeTruthy();
+    const objectiveId = String(((await objective.json()) as Record<string, unknown>).id);
+    const created = await api.post(`${apiUrl}/projects/${projectCode}/ui/work-items`, {
+      data: {
+        opId: `e2e-switch-create-${suffix}`,
+        items: [
+          {
+            clientRef: `switch-${suffix}`,
+            objectiveId,
+            title: `切换验收任务 ${suffix}`,
+            description: "",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+            acceptance: ["切回项目后列表仍在"],
+            checklist: [],
+            verificationRequired: false,
+          },
+        ],
+      },
+    });
+    expect([200, 201]).toContain(created.status());
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/#project:E2E");
+    const rows = page.locator("#project-task-panel .atm-table tbody tr");
+    await expect(rows.first()).toBeVisible();
+    const before = await rows.count();
+    expect(before).toBeGreaterThan(0);
+
+    const sidebar = page.locator(".atm-sidebar");
+    await sidebar.getByRole("button", { name: `切换验收 ${suffix}`, exact: true }).click();
+    await expect(page.getByText(`切换验收任务 ${suffix}`).first()).toBeVisible();
+    // 立刻切回：这一步必须落在 staleTime 之内。
+    await sidebar.getByRole("button", { name: "E2E 验收项目", exact: true }).click();
+    await expect(rows.first()).toBeVisible({ timeout: 1000 });
+    expect(await rows.count()).toBe(before);
+  } finally {
+    await api.dispose();
+  }
+});
+
 test("折叠区展开有入场过渡，项目页不因分批返回而抖动", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.addInitScript(() => {
@@ -369,6 +430,57 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
     new Set([160]),
   );
   await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
+});
+
+test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const workspace = page.getByRole("button", { name: "工作区", exact: true });
+  const collapse = async () => {
+    if ((await workspace.getAttribute("aria-expanded")) === "true") {
+      await workspace.click();
+      await expect(workspace).toHaveAttribute("aria-expanded", "false");
+    }
+  };
+  const bodyMotion = () =>
+    page.evaluate(() => {
+      const body = document.querySelector("#atm-workspace-navigation");
+      if (!body) throw new Error("缺少工作区折叠内容");
+      return {
+        animations: body.getAnimations().length,
+        transitionProperty: getComputedStyle(body).transitionProperty,
+        opacity: Number(getComputedStyle(body).opacity),
+        focusVisible: Boolean(document.querySelector(".atm-nav-disclosure:focus-visible")),
+      };
+    });
+
+  // 鼠标展开：页面刚打开、没有任何键盘交互，:focus-visible 不成立，过渡照旧。
+  await page.goto("/#overview");
+  await collapse();
+  await workspace.click();
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+  const mouse = await bodyMotion();
+  expect(mouse.focusVisible, "鼠标点击不进入键盘焦点态").toBe(false);
+  expect(mouse.animations, "鼠标展开保留过渡").toBeGreaterThan(0);
+
+  // 键盘展开：必须是真键盘，程序 focus() 不一定成立 :focus-visible。
+  await page.reload();
+  await collapse();
+  await page.locator(".atm-sidebar").getByRole("button", { name: "总览", exact: true }).click();
+  let reached = false;
+  for (let index = 0; index < 12 && !reached; index += 1) {
+    await page.keyboard.press("Tab");
+    reached = await page.evaluate(() =>
+      Boolean(document.activeElement?.classList.contains("atm-nav-disclosure")),
+    );
+  }
+  expect(reached, "键盘能走到工作区折叠按钮").toBe(true);
+  await page.keyboard.press("Enter");
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+  const keyboard = await bodyMotion();
+  expect(keyboard.focusVisible, "触发器处于键盘焦点").toBe(true);
+  expect(keyboard.animations, "键盘展开不播动效").toBe(0);
+  expect(keyboard.transitionProperty).toBe("none");
+  expect(keyboard.opacity, "内容立刻就位").toBe(1);
 });
 
 test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({ page }) => {

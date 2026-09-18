@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   compareVersions,
+  feedFilePath,
   electronUpdateExe,
   parseSquirrelCheck,
   planUpdateCheck,
@@ -62,6 +63,57 @@ describe("本地更新源与 Squirrel 运行器", () => {
     const empty = mkdtempSync(join(tmpdir(), "atm-update-source-empty-"));
     temporary.push(empty);
     expect(pruneConsumedUpdateFeed(empty, "2.4.0")).toEqual([]);
+  });
+
+  it("RELEASES 里的包名只接受合法单层文件名，异常 feed 不得删到目录外", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-update-source-escape-"));
+    temporary.push(dataDir);
+    const feed = join(dataDir, "updates");
+    mkdirSync(feed, { recursive: true });
+    const outsider = join(dataDir, "retained-1.0.0-full.nupkg");
+    writeFileSync(outsider, "不该被删", "utf8");
+    const innocent = join(feed, "AyanamiTaskManagerDesktop-2.3.27-full.nupkg");
+    writeFileSync(innocent, "package", "utf8");
+    // 版本号照样解析得出，路径却指到更新目录外面。
+    writeFileSync(
+      join(feed, "RELEASES"),
+      `AAA ../retained-1.0.0-full.nupkg 7
+BBB AyanamiTaskManagerDesktop-2.3.27-full.nupkg 7
+`,
+      "utf8",
+    );
+
+    expect(pruneConsumedUpdateFeed(dataDir, "2.4.0")).toEqual([]);
+    expect(existsSync(outsider)).toBe(true);
+    // 有非法项时整份 feed 都不处理，不能先删掉合法的那一半再发现越界。
+    expect(existsSync(innocent)).toBe(true);
+    expect(updateFeedReady(dataDir)).toBe(true);
+
+    // feedFilePath 是唯一出口：名字合法才给路径。
+    expect(feedFilePath(feed, "AyanamiTaskManagerDesktop-2.3.27-full.nupkg")).toBe(innocent);
+    expect(feedFilePath(feed, "../retained-1.0.0-full.nupkg")).toBeNull();
+    expect(feedFilePath(feed, "..")).toBeNull();
+    // 名字校验之外还有一道「解析后必须就在更新目录里」。当前正则已经挡掉了所有带
+    // 分隔符的名字，这一道在行为上够不到，所以用源码契约钉住，避免被顺手删掉。
+    const source = readFileSync(
+      resolve(process.cwd(), "apps", "desktop", "src", "updater.ts"),
+      "utf8",
+    );
+    expect(source).toContain("return dirname(target) === root ? target : null;");
+
+    for (const bad of [
+      "..\\escape-1.0.0-full.nupkg",
+      "sub/dir-1.0.0-full.nupkg",
+      "C:/abs-1.0.0-full.nupkg",
+    ]) {
+      writeFileSync(
+        join(feed, "RELEASES"),
+        `AAA ${bad} 7
+`,
+        "utf8",
+      );
+      expect(pruneConsumedUpdateFeed(dataDir, "2.4.0"), bad).toEqual([]);
+    }
   });
 
   it("穿透 current 链接找到真正的 Update.exe；两个位置都没有时返回 null", () => {

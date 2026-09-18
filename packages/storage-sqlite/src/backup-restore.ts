@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { AtmError } from "@ayanami-task/errors";
 import { nowIso } from "@ayanami-task/protocol";
@@ -10,8 +10,15 @@ import {
   type ProjectionDispatchResult,
 } from "./registry-projection-dispatcher.js";
 import { renameWithRetry, sha256File } from "./storage-file-operations.js";
-import { backupFromRow } from "./backup-catalog.js";
+import { backupArtifactProblem, backupFromRow } from "./backup-catalog.js";
 import type { BackupProject, BackupView, CreateBackupInput } from "./backup-contracts.js";
+
+const BACKUP_ARTIFACT_MESSAGES = {
+  BACKUP_FILE_MISSING: "备份文件不存在",
+  BACKUP_HASH_MISMATCH: "备份文件哈希不匹配",
+  BACKUP_MANIFEST_MISSING: "备份清单不存在",
+  BACKUP_MANIFEST_MISMATCH: "备份清单不匹配",
+} as const;
 
 /** 恢复一份备份需要的协作方；由 BackupMaintenance 注入，语义与它自己的私有成员一致。 */
 export type BackupRestoreContext = {
@@ -53,40 +60,33 @@ export async function restoreBackupWithContext(
       message: "该备份范围不支持恢复",
     });
   }
-  if (!existsSync(backup.path)) {
-    throw new AtmError("BACKUP_FILE_MISSING", { message: "备份文件不存在" });
-  }
-  if (sha256File(backup.path) !== backup.sha256) {
-    throw new AtmError("BACKUP_HASH_MISMATCH", { message: "备份文件哈希不匹配" });
-  }
-  const manifestPath = `${backup.path}.manifest.json`;
-  if (!existsSync(manifestPath)) {
-    throw new AtmError("BACKUP_MANIFEST_MISSING", { message: "备份清单不存在" });
-  }
-  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
-    id?: string;
-    projectId?: string;
-    sha256?: string;
-    scope?: string;
-  };
-  if (
-    manifest.id !== backup.id ||
-    manifest.projectId !== backup.projectId ||
-    manifest.sha256 !== backup.sha256 ||
-    manifest.scope !== backup.scope
-  ) {
-    throw new AtmError("BACKUP_MANIFEST_MISMATCH", { message: "备份清单不匹配" });
-  }
+  const problem = backupArtifactProblem(backup);
+  if (problem) throw new AtmError(problem, { message: BACKUP_ARTIFACT_MESSAGES[problem] });
 
   if (backup.scope === "KNOWLEDGE") {
+    // 先把选中的快照复制成独立候选再动别的：接下来新建的 PRE_RESTORE 会触发同类修剪，
+    // 而被挤掉的最旧一份可能正是用户选中要恢复的这一份（PRE_RESTORE 有上限之后才出现）。
+    // 项目分支本来就是先复制候选再建 PRE_RESTORE，这里对齐同样的顺序。
+    const stagingDirectory = join(context.dataDir, "knowledge", `.restore-${backup.id}`);
+    const candidatePath = join(stagingDirectory, "knowledge.sqlite");
+    rmSync(stagingDirectory, { recursive: true, force: true });
+    mkdirSync(stagingDirectory, { recursive: true });
     try {
-      await context.createBackup({ scope: "KNOWLEDGE", reason: "PRE_RESTORE" });
-    } catch (error) {
-      // Corrupt sources cannot produce a SQLite backup. restoreFrom retains their
-      // exact original file as a recovery artifact instead of destroying it.
-      if (!(error instanceof AtmError) || error.code !== "KNOWLEDGE_UNAVAILABLE") throw error;
+      copyFileSync(backup.path, candidatePath);
+      if (sha256File(candidatePath) !== backup.sha256) {
+        throw new AtmError("BACKUP_HASH_MISMATCH", { message: "备份文件哈希不匹配" });
+      }
+      try {
+        await context.createBackup({ scope: "KNOWLEDGE", reason: "PRE_RESTORE" });
+      } catch (error) {
+        // Corrupt sources cannot produce a SQLite backup. restoreFrom retains their
+        // exact original file as a recovery artifact instead of destroying it.
+        if (!(error instanceof AtmError) || error.code !== "KNOWLEDGE_UNAVAILABLE") throw error;
+      }
+      await context.knowledge.restoreFrom(candidatePath);
+    } finally {
+      rmSync(stagingDirectory, { recursive: true, force: true });
     }
-    await context.knowledge.restoreFrom(backup.path);
     try {
       context.appendGlobalEvent("backup.restored", backup.id, "USER", { scope: "KNOWLEDGE" });
     } catch {

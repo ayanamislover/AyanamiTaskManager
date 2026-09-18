@@ -8,7 +8,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export type UpdatePhase = "CHECK" | "DOWNLOAD" | "VERIFY" | "INSTALL" | "READY";
 export type UpdateOutcome = "IN_PROGRESS" | "SUCCESS" | "ERROR" | "SKIPPED";
@@ -229,13 +229,19 @@ export function pruneConsumedUpdateFeed(dataDir: string, currentVersion: string)
   // 版本号解析不出来时按「可能更新」处理，宁可留着。
   if (entries.some((entry) => !entry.version || compareVersions(entry.version, currentVersion) > 0))
     return [];
+  // 包名来自磁盘上的 RELEASES，异常或被改过的 feed 里它可以是 `../x-1.0.0-full.nupkg`。
+  // 先整份校验：只要有一项落在更新目录外，整份 feed 都不处理，绝不先删一半再发现越界。
+  const targets = entries.map((entry) => ({
+    name: entry.name,
+    path: feedFilePath(feed, entry.name),
+  }));
+  if (targets.some((target) => !target.path)) return [];
   const removed: string[] = [];
-  for (const entry of entries) {
-    const path = join(feed, entry.name);
-    if (!existsSync(path)) continue;
+  for (const target of targets) {
+    if (!existsSync(target.path!)) continue;
     try {
-      rmSync(path, { force: true });
-      removed.push(entry.name);
+      rmSync(target.path!, { force: true });
+      removed.push(target.name);
     } catch {
       // 删不掉就留着：清理失败不该变成一次更新失败。
     }
@@ -247,6 +253,17 @@ export function pruneConsumedUpdateFeed(dataDir: string, currentVersion: string)
     // 同上。
   }
   return removed;
+}
+
+/** 合法包名只能是更新目录里的单层文件名：没有分隔符、没有上级、也不是绝对路径。 */
+const FEED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*\.nupkg$/u;
+
+/** 包名对应的绝对路径；名字不合法或解析后跑到更新目录外时返回 null。 */
+export function feedFilePath(feed: string, name: string): string | null {
+  if (!FEED_FILE_NAME.test(name) || name === "." || name === "..") return null;
+  const root = resolve(feed);
+  const target = resolve(root, name);
+  return dirname(target) === root ? target : null;
 }
 
 /**

@@ -252,3 +252,10 @@ button.atm-row:hover {
     transform: translateY(-4px);
   }
 }
+/*
+ * 键盘展开时即时呈现：焦点还停在触发器上，紧接着的内容不该再从别处滑进来；
+ * 键盘用户靠焦点和阅读顺序定位，位移只会让目标跳动。鼠标展开保留上面的过渡。
+ */
+:where(.atm-nav-group, .atm-diagnostics, .agent-history):has(:focus-visible) .atm-disclosure-body {
+  transition: none;
+}

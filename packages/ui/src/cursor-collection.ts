@@ -26,6 +26,8 @@ export type CursorCollectionSource<T> = {
 };
 
 type InternalEntry<T> = {
+  /** 这份数据属于哪个 query key。归属写在数据上，不靠「哪次请求跑过」推断。 */
+  owner: string;
   items: T[];
   hasMore: boolean;
   loading: boolean;
@@ -126,8 +128,9 @@ export function advanceCursorPage<T>(
   return { ok: true, state: nextState };
 }
 
-function emptyEntry<T>(): InternalEntry<T> {
+function emptyEntry<T>(owner: string): InternalEntry<T> {
   return {
+    owner,
     items: [],
     hasMore: true,
     loading: false,
@@ -208,6 +211,7 @@ function settledEntry<T>(
 ): InternalEntry<T> {
   if (outcome.ok === true) {
     return {
+      owner: previous.owner,
       items: outcome.state.items,
       hasMore: false,
       loading: false,
@@ -220,6 +224,7 @@ function settledEntry<T>(
   // 首次读取或续读失败时提交已读到的部分和出错的 cursor，重试从断点续读。
   if (refreshing) return { ...previous, loading: false, error: outcome.error };
   return {
+    owner: previous.owner,
     items: outcome.state.items,
     hasMore: true,
     loading: false,
@@ -227,6 +232,21 @@ function settledEntry<T>(
     cursor: outcome.state.cursor,
     seenCursors: outcome.state.seenCursors,
   };
+}
+
+/**
+ * 挑出属于当前 key 的那一份数据：本地提交的优先，其次是 React Query 缓存里的。
+ *
+ * 归属以前记在一个 ref 上，只在 queryFn 真的执行时才切换。而全局策略 staleTime 是
+ * 3 秒：项目 A→B→A 在这段时间内切回来会命中新鲜缓存、根本不跑 queryFn，于是归属
+ * 停在 B，连 A 自己的缓存都被拒之门外——列表卡在空白加载态，直到下一次网络刷新。
+ */
+export function pickOwnedEntry<T>(
+  key: string,
+  ...candidates: (InternalEntry<T> | null | undefined)[]
+): InternalEntry<T> | null {
+  for (const candidate of candidates) if (candidate && candidate.owner === key) return candidate;
+  return null;
 }
 
 /**
@@ -244,12 +264,15 @@ export function useCursorCollection<T>(
   const loadRef = useRef(loadPage);
   loadRef.current = loadPage;
   const generationRef = useRef(0);
-  const entryRef = useRef<InternalEntry<T>>(emptyEntry<T>());
-  // 当前显示的数据属于哪个 key。切换项目时不能拿上一个项目的列表「保留着」刷新。
-  const ownerRef = useRef(key);
+  const entryRef = useRef<InternalEntry<T>>(emptyEntry<T>(key));
+  // 当前正在显示哪个 key。切换项目时不能拿上一个项目的列表「保留着」刷新，
+  // 也不能让上一个 key 迟到的请求写进当前视图。
+  const keyRef = useRef(key);
+  keyRef.current = key;
   const [entry, setEntry] = useState<InternalEntry<T>>(entryRef.current);
 
   const commit = useCallback((next: InternalEntry<T>) => {
+    if (next.owner !== keyRef.current) return;
     entryRef.current = next;
     setEntry(next);
   }, []);
@@ -260,36 +283,40 @@ export function useCursorCollection<T>(
     queryFn: async () => {
       const generation = generationRef.current + 1;
       generationRef.current = generation;
-      if (ownerRef.current !== key) {
-        ownerRef.current = key;
-        commit(emptyEntry<T>());
-      }
-      const current = entryRef.current;
+      const current = pickOwnedEntry(key, entryRef.current) ?? emptyEntry<T>(key);
       const resume = Boolean(current.error && current.hasMore && current.items.length);
       const refreshing = !resume && current.items.length > 0;
-      if (resume) commit({ ...current, loading: true, error: null });
-      else if (!refreshing) commit({ ...emptyEntry<T>(), loading: true });
+      // 返回值要独立于当前显示的那一份：切走之后这次结果仍然要写进本 key 的缓存，
+      // 好让下次切回来立刻有数据，但不能写进别的 key 的视图。
+      let result = current;
+      const advance = (next: InternalEntry<T>) => {
+        result = next;
+        commit(next);
+      };
+      if (resume) advance({ ...current, loading: true, error: null });
+      else if (!refreshing) advance({ ...emptyEntry<T>(key), loading: true });
       const outcome = await drainCursorPages(
         startState(resume ? current : null),
         (cursor) => loadRef.current(cursor),
         () => isActive(generationRef, generation),
       );
-      if (outcome.ok !== "stale") commit(settledEntry(outcome, current, refreshing));
-      return entryRef.current;
+      if (outcome.ok !== "stale") advance(settledEntry(outcome, current, refreshing));
+      return result;
     },
   });
 
+  // 命中新鲜缓存时 queryFn 不会执行，数据只能从这里接管。
   useEffect(() => {
-    if (!query.data || query.data === entryRef.current || ownerRef.current !== key) return;
-    entryRef.current = query.data;
-    setEntry(query.data);
+    const owned = pickOwnedEntry(key, query.data);
+    if (!owned || owned === entryRef.current) return;
+    entryRef.current = owned;
+    setEntry(owned);
   }, [key, query.data]);
 
   useEffect(() => {
     if (enabled) return () => undefined;
     generationRef.current += 1;
-    ownerRef.current = key;
-    const next = emptyEntry<T>();
+    const next = emptyEntry<T>(key);
     next.hasMore = false;
     entryRef.current = next;
     setEntry(next);
@@ -314,8 +341,12 @@ export function useCursorCollection<T>(
     if (outcome.ok !== "stale") commit(settledEntry(outcome, current, false));
   }, [commit, refetch]);
 
-  // key 刚变、新一轮读取还没开始的那一帧，不把上一个 key 的数据当成当前数据显示。
-  const visible = ownerRef.current === key ? entry : { ...emptyEntry<T>(), loading: enabled };
+  // key 刚变、新一轮读取还没开始的那一帧，不把上一个 key 的数据当成当前数据显示；
+  // 但属于这个 key 的缓存要立刻用上，不必等 queryFn 跑。
+  const visible = pickOwnedEntry(key, entry, query.data) ?? {
+    ...emptyEntry<T>(key),
+    loading: enabled,
+  };
   return {
     items: visible.items,
     loadedCount: visible.items.length,
@@ -357,14 +388,14 @@ export function useCursorCollections<T>(
       if (resumeOnly && !resume) return;
       const refreshing = !resume && Boolean(current?.items.length);
       if (resume) commit(projectKey, { ...current!, loading: true, error: null });
-      else if (!refreshing) commit(projectKey, { ...emptyEntry<T>(), loading: true });
+      else if (!refreshing) commit(projectKey, { ...emptyEntry<T>(projectKey), loading: true });
       const outcome = await drainCursorPages(
         startState(resume ? current : null),
         (cursor) => source.loadPage(cursor),
         () => generationRef.current === generation,
       );
       if (outcome.ok !== "stale")
-        commit(projectKey, settledEntry(outcome, current ?? emptyEntry<T>(), refreshing));
+        commit(projectKey, settledEntry(outcome, current ?? emptyEntry<T>(projectKey), refreshing));
     },
     [commit],
   );
@@ -405,20 +436,23 @@ export function useCursorCollections<T>(
   );
 
   const projected = Object.fromEntries(
-    Object.entries(entries).map(([projectKey, entry]) => [
-      projectKey,
-      {
-        key: projectKey,
-        items: entry.items,
-        loadedCount: entry.items.length,
-        hasMore: entry.hasMore,
-        isLoading: entry.loading && entry.items.length === 0,
-        isFetchingNextPage: entry.loading && entry.items.length > 0,
-        error: entry.error,
-        resumeCursor: entry.cursor ?? null,
-        retry: () => retry(projectKey),
-      },
-    ]),
+    Object.entries(entries)
+      // 已不在来源里的项目（归档、删除）不再显示，不必等下一次 queryFn 清理。
+      .filter(([projectKey]) => sourcesRef.current.has(projectKey))
+      .map(([projectKey, entry]) => [
+        projectKey,
+        {
+          key: projectKey,
+          items: entry.items,
+          loadedCount: entry.items.length,
+          hasMore: entry.hasMore,
+          isLoading: entry.loading && entry.items.length === 0,
+          isFetchingNextPage: entry.loading && entry.items.length > 0,
+          error: entry.error,
+          resumeCursor: entry.cursor ?? null,
+          retry: () => retry(projectKey),
+        },
+      ]),
   ) as Record<string, CursorCollectionEntry<T>>;
   return { entries: projected, retry };
 }

@@ -13,7 +13,7 @@ import {
   type BackupPolicy,
 } from "./backup-retention.js";
 import { removeSqliteSidecars, renameWithRetry, sha256File } from "./storage-file-operations.js";
-import { backupFromRow } from "./backup-catalog.js";
+import { backupArtifactProblem, backupFromRow } from "./backup-catalog.js";
 import { restoreBackupWithContext } from "./backup-restore.js";
 
 import type {
@@ -303,8 +303,9 @@ export class BackupMaintenance {
       .get(input.scope, projectId, input.reason, sha256) as any;
     if (!row) return null;
     const backup = backupFromRow(row);
-    // 旧文件被手工删掉时不能沿用，否则目录表会指向不存在的备份。
-    return existsSync(backup.path) ? backup : null;
+    // 旧的那一份自己必须还完好：文件在、内容哈希对得上、清单也在。
+    // 只看文件在不在的话，损坏或缺清单的旧备份会顶掉刚通过完整性检查的新快照。
+    return backupArtifactProblem(backup) ? null : backup;
   }
 
   pruneBackupRetention(
