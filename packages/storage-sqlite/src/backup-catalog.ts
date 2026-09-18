@@ -34,15 +34,32 @@ export type BackupArtifactProblem =
  */
 export function backupArtifactProblem(backup: BackupView): BackupArtifactProblem | null {
   if (!existsSync(backup.path)) return "BACKUP_FILE_MISSING";
-  if (sha256File(backup.path) !== backup.sha256) return "BACKUP_HASH_MISMATCH";
+  // 这个判断是在「新备份已经做好」之后跑的：从这里抛出去的任何异常都会把那份健康的
+  // 新备份一起回滚掉。所以它必须是全函数——旧备份读不出来（路径被占成了目录、权限
+  // 没了）只说明它不能复用，不说明这次备份失败了。
+  let digest: string;
+  try {
+    digest = sha256File(backup.path);
+  } catch {
+    return "BACKUP_FILE_MISSING";
+  }
+  if (digest !== backup.sha256) return "BACKUP_HASH_MISMATCH";
   const manifestPath = `${backup.path}.manifest.json`;
   if (!existsSync(manifestPath)) return "BACKUP_MANIFEST_MISSING";
-  let manifest: { id?: string; projectId?: string | null; sha256?: string; scope?: string };
+  let parsed: unknown;
   try {
-    manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    parsed = JSON.parse(readFileSync(manifestPath, "utf8"));
   } catch {
     return "BACKUP_MANIFEST_MISMATCH";
   }
+  // JSON.parse("null") 不抛错，返回的就是 null；再读属性才抛 TypeError。数组、数字同理。
+  if (!parsed || typeof parsed !== "object") return "BACKUP_MANIFEST_MISMATCH";
+  const manifest = parsed as {
+    id?: string;
+    projectId?: string | null;
+    sha256?: string;
+    scope?: string;
+  };
   if (
     manifest.id !== backup.id ||
     manifest.projectId !== backup.projectId ||

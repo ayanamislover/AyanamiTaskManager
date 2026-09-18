@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { AtmError } from "@ayanami-task/errors";
-import { nowIso } from "@ayanami-task/protocol";
+import { createUlid, nowIso } from "@ayanami-task/protocol";
 import { openManagedDatabase, quickCheck, type ManagedDatabase } from "./database.js";
 import type { KnowledgeDatabase } from "./knowledge-database.js";
 import {
@@ -9,7 +9,7 @@ import {
   projectionErrorMessage,
   type ProjectionDispatchResult,
 } from "./registry-projection-dispatcher.js";
-import { renameWithRetry, sha256File } from "./storage-file-operations.js";
+import { discardDirectory, renameWithRetry, sha256File } from "./storage-file-operations.js";
 import { backupArtifactProblem, backupFromRow } from "./backup-catalog.js";
 import type { BackupProject, BackupView, CreateBackupInput } from "./backup-contracts.js";
 
@@ -67,9 +67,12 @@ export async function restoreBackupWithContext(
     // 先把选中的快照复制成独立候选再动别的：接下来新建的 PRE_RESTORE 会触发同类修剪，
     // 而被挤掉的最旧一份可能正是用户选中要恢复的这一份（PRE_RESTORE 有上限之后才出现）。
     // 项目分支本来就是先复制候选再建 PRE_RESTORE，这里对齐同样的顺序。
-    const stagingDirectory = join(context.dataDir, "knowledge", `.restore-${backup.id}`);
+    // 上一次留下的同名暂存删不掉（句柄还被占着）时换一个目录，不要卡在这里。
+    const preferred = join(context.dataDir, "knowledge", `.restore-${backup.id}`);
+    const stagingDirectory = discardDirectory(preferred)
+      ? preferred
+      : `${preferred}-${createUlid()}`;
     const candidatePath = join(stagingDirectory, "knowledge.sqlite");
-    rmSync(stagingDirectory, { recursive: true, force: true });
     mkdirSync(stagingDirectory, { recursive: true });
     try {
       copyFileSync(backup.path, candidatePath);
@@ -85,7 +88,8 @@ export async function restoreBackupWithContext(
       }
       await context.knowledge.restoreFrom(candidatePath);
     } finally {
-      rmSync(stagingDirectory, { recursive: true, force: true });
+      // 数据已经恢复完成，收尾删不掉暂存目录也不能把这次恢复报成失败。
+      discardDirectory(stagingDirectory);
     }
     try {
       context.appendGlobalEvent("backup.restored", backup.id, "USER", { scope: "KNOWLEDGE" });

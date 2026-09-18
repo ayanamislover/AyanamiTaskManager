@@ -140,8 +140,27 @@ function emptyEntry<T>(owner: string): InternalEntry<T> {
   };
 }
 
-function isActive(generationRef: { current: number }, generation: number): boolean {
-  return generationRef.current === generation;
+/**
+ * 一个 key 一个代数。
+ *
+ * 以前整个 hook 共用一个计数器：切到别的项目时，上一个项目还没读完的那一轮会被判成
+ * 作废，半途收工。它既写不进界面，又占着 React Query 里那个 key 的成功结果位——
+ * 缓存下来的是一份 items=[]、loading=true 的假成功，3 秒新鲜期内切回去就是一片空白。
+ * 切换 key 本来就不该作废另一个 key 的读取：让它读完，缓存里留下的才是真数据。
+ * 界面不会被它污染，commit 只认归属于当前 key 的那一份。
+ */
+export function nextGeneration(generations: Map<string, number>, key: string): number {
+  const generation = (generations.get(key) ?? 0) + 1;
+  generations.set(key, generation);
+  return generation;
+}
+
+export function isActive(
+  generations: Map<string, number>,
+  key: string,
+  generation: number,
+): boolean {
+  return (generations.get(key) ?? 0) === generation;
 }
 
 type DrainOutcome<T> =
@@ -235,6 +254,22 @@ function settledEntry<T>(
 }
 
 /**
+ * 一轮读取交给缓存的结果。
+ *
+ * 真被同一个 key 的新一轮取代时（续读被重读顶掉、hook 被停用），交回上一份已结算的
+ * 数据，绝不能把加载中的占位当成结果：React Query 会把它当成功数据缓存起来，
+ * 下次命中的就是一份「空列表 + 正在加载」的假结果。
+ */
+export function cursorFetchResult<T>(
+  outcome: DrainOutcome<T>,
+  previous: InternalEntry<T>,
+  refreshing: boolean,
+): InternalEntry<T> {
+  if (outcome.ok === "stale") return { ...previous, loading: false };
+  return settledEntry(outcome, previous, refreshing);
+}
+
+/**
  * 挑出属于当前 key 的那一份数据：本地提交的优先，其次是 React Query 缓存里的。
  *
  * 归属以前记在一个 ref 上，只在 queryFn 真的执行时才切换。而全局策略 staleTime 是
@@ -263,7 +298,7 @@ export function useCursorCollection<T>(
   const key = queryKey.map((part) => String(part)).join("\u0000");
   const loadRef = useRef(loadPage);
   loadRef.current = loadPage;
-  const generationRef = useRef(0);
+  const generationsRef = useRef(new Map<string, number>());
   const entryRef = useRef<InternalEntry<T>>(emptyEntry<T>(key));
   // 当前正在显示哪个 key。切换项目时不能拿上一个项目的列表「保留着」刷新，
   // 也不能让上一个 key 迟到的请求写进当前视图。
@@ -281,27 +316,23 @@ export function useCursorCollection<T>(
     queryKey,
     enabled,
     queryFn: async () => {
-      const generation = generationRef.current + 1;
-      generationRef.current = generation;
+      const generation = nextGeneration(generationsRef.current, key);
+      // 这一轮读谁，开跑时就定死：它可能跨过一次项目切换才读完，而 loadRef 每次渲染
+      // 都会指向当前项目的读取函数——翻下一页时再去取，取到的是别人的列表。
+      const load = loadRef.current;
       const current = pickOwnedEntry(key, entryRef.current) ?? emptyEntry<T>(key);
       const resume = Boolean(current.error && current.hasMore && current.items.length);
       const refreshing = !resume && current.items.length > 0;
-      // 返回值要独立于当前显示的那一份：切走之后这次结果仍然要写进本 key 的缓存，
-      // 好让下次切回来立刻有数据，但不能写进别的 key 的视图。
-      let result = current;
-      const advance = (next: InternalEntry<T>) => {
-        result = next;
-        commit(next);
-      };
-      if (resume) advance({ ...current, loading: true, error: null });
-      else if (!refreshing) advance({ ...emptyEntry<T>(key), loading: true });
-      const outcome = await drainCursorPages(
-        startState(resume ? current : null),
-        (cursor) => loadRef.current(cursor),
-        () => isActive(generationRef, generation),
+      // 加载中的占位只发给界面，不作为这一轮的返回值：切走之后这次结果仍然要写进
+      // 本 key 的缓存，好让下次切回来立刻有数据，但不能写进别的 key 的视图。
+      if (resume) commit({ ...current, loading: true, error: null });
+      else if (!refreshing) commit({ ...emptyEntry<T>(key), loading: true });
+      const outcome = await drainCursorPages(startState(resume ? current : null), load, () =>
+        isActive(generationsRef.current, key, generation),
       );
-      if (outcome.ok !== "stale") advance(settledEntry(outcome, current, refreshing));
-      return result;
+      const settled = cursorFetchResult(outcome, current, refreshing);
+      commit(settled);
+      return settled;
     },
   });
 
@@ -315,13 +346,14 @@ export function useCursorCollection<T>(
 
   useEffect(() => {
     if (enabled) return () => undefined;
-    generationRef.current += 1;
+    const generations = generationsRef.current;
+    nextGeneration(generations, key);
     const next = emptyEntry<T>(key);
     next.hasMore = false;
     entryRef.current = next;
     setEntry(next);
     return () => {
-      generationRef.current += 1;
+      nextGeneration(generations, key);
     };
   }, [enabled, key]);
 
@@ -331,15 +363,15 @@ export function useCursorCollection<T>(
     if (!current.error) return;
     // 没有可续读的 cursor（刷新失败、保留旧列表）时重新整次刷新。
     if (!current.hasMore) return refetch();
-    const generation = generationRef.current;
+    // 续读不推进代数：它接着当前这一轮往下读，不该把正在跑的那一轮作废。
+    const generation = generationsRef.current.get(key) ?? 0;
+    const load = loadRef.current;
     commit({ ...current, loading: true, error: null });
-    const outcome = await drainCursorPages(
-      startState(current),
-      (cursor) => loadRef.current(cursor),
-      () => isActive(generationRef, generation),
+    const outcome = await drainCursorPages(startState(current), load, () =>
+      isActive(generationsRef.current, key, generation),
     );
-    if (outcome.ok !== "stale") commit(settledEntry(outcome, current, false));
-  }, [commit, refetch]);
+    commit(cursorFetchResult(outcome, current, false));
+  }, [commit, key, refetch]);
 
   // key 刚变、新一轮读取还没开始的那一帧，不把上一个 key 的数据当成当前数据显示；
   // 但属于这个 key 的缓存要立刻用上，不必等 queryFn 跑。
@@ -394,8 +426,12 @@ export function useCursorCollections<T>(
         (cursor) => source.loadPage(cursor),
         () => generationRef.current === generation,
       );
-      if (outcome.ok !== "stale")
-        commit(projectKey, settledEntry(outcome, current ?? emptyEntry<T>(projectKey), refreshing));
+      // 这一轮作废时也要落回已结算的那一份：queryFn 返回的就是这张表，
+      // 留着 loading 占位同样会被缓存成一次「空列表」的成功结果。
+      commit(
+        projectKey,
+        cursorFetchResult(outcome, current ?? emptyEntry<T>(projectKey), refreshing),
+      );
     },
     [commit],
   );
