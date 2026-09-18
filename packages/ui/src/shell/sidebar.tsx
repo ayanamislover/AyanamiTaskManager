@@ -103,9 +103,9 @@ export function Sidebar({
           </nav>
         </div>
         {projects.length ? (
-          <div className="atm-nav-group">
+          <div className="atm-nav-group atm-sidebar-projects">
             <div className="atm-nav-title">活动项目</div>
-            <nav className="atm-nav">
+            <nav className="atm-nav atm-sidebar-project-list" aria-label="活动项目">
               {projects
                 .filter((project) => project.lifecycle === "ACTIVE")
                 .slice(0, 12)
@@ -128,6 +128,7 @@ export function Sidebar({
           <button
             type="button"
             className="atm-sidebar-settings"
+            aria-label="设置"
             aria-current={route === "settings" ? "page" : undefined}
             onClick={() => setRoute("settings")}
           >

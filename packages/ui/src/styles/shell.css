@@ -10,7 +10,7 @@
   padding: 18px 14px;
   border-right: 1px solid var(--atm-border);
   background: color-mix(in srgb, var(--atm-surface) 86%, transparent);
-  overflow-y: auto;
+  overflow: hidden;
 }
 .atm-brand {
   display: flex;
@@ -124,6 +124,7 @@
   line-height: 1.35;
 }
 .atm-sidebar-footer {
+  flex: none;
   margin-top: auto;
   padding-top: 10px;
   border-top: 1px solid var(--atm-border);
@@ -133,8 +134,29 @@
 }
 .atm-sidebar-inner {
   display: flex;
-  min-height: calc(100dvh - 36px);
+  height: 100%;
+  min-height: 0;
   flex-direction: column;
+}
+.atm-sidebar-inner > .atm-brand,
+.atm-sidebar-inner > .atm-nav-group:not(.atm-sidebar-projects) {
+  flex: none;
+}
+.atm-sidebar-projects {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.atm-sidebar-projects > .atm-nav-title {
+  flex: none;
+}
+.atm-sidebar-project-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .atm-main {

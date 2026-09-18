@@ -28,6 +28,13 @@
   .atm-settings-grid {
     grid-template-columns: 1fr;
   }
+  .atm-settings-grid > .atm-settings-integrations,
+  .atm-settings-grid > .atm-settings-mcp {
+    grid-column: auto;
+  }
+  .atm-settings-maintenance-grid {
+    grid-template-columns: 1fr;
+  }
   .atm-management-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -54,7 +61,7 @@
   .atm-brand span,
   .atm-nav-title,
   .atm-nav button span,
-  .atm-sidebar-footer {
+  .atm-sidebar-settings span {
     display: none;
   }
   .atm-brand {
@@ -62,6 +69,10 @@
     padding-inline: 0;
   }
   .atm-nav button {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .atm-sidebar-settings {
     justify-content: center;
     padding-inline: 0;
   }

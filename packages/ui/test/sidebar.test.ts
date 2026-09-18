@@ -91,6 +91,21 @@ describe("Sidebar", () => {
     expect(markup).toMatch(/aria-current="page"[^>]*>.*?<span>全局时间线<\/span>/u);
   });
 
+  it("仅项目列表位于滚动容器，标题、主导航和设置保留在容器之外", () => {
+    const markup = renderSidebar("timeline", [project("1", "测试项目")]);
+    const list = markup.match(
+      /<nav class="atm-nav atm-sidebar-project-list"[^>]*>(.*?)<\/nav>/u,
+    )?.[1];
+    expect(list).toContain("测试项目");
+    expect(list).not.toContain("atm-nav-title");
+    expect(list).not.toContain("atm-sidebar-settings");
+    expect(list).not.toContain("atm-primary-navigation");
+    expect(markup).toContain('class="atm-sidebar-settings" aria-label="设置"');
+    const css = readFileSync(join(process.cwd(), "packages/ui/src/styles/shell.css"), "utf8");
+    expect(css).toMatch(/\.atm-sidebar-project-list\s*\{[^}]*overflow-y: auto/su);
+    expect(css).toMatch(/\.atm-sidebar\s*\{[^}]*overflow: hidden/su);
+  });
+
   it("保持品牌 logo 与 fallback 行为", () => {
     expect(renderSidebar("overview", [], "/logo.png")).toContain(
       '<img src="/logo.png" alt="" aria-hidden="true"/>',

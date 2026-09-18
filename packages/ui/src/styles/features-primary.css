@@ -169,13 +169,55 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
+  align-items: stretch;
+}
+.atm-settings-grid > .atm-panel {
+  min-width: 0;
+}
+.atm-settings-grid > .atm-panel > .atm-panel-head {
+  min-height: 66px;
+}
+.atm-settings-integrations .atm-integration-card {
+  grid-template-rows: auto 1fr auto;
+}
+.atm-settings-integrations .atm-integration-checks {
+  align-content: start;
+}
+.atm-settings-maintenance .atm-form-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.atm-settings-maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 18px;
+}
+.atm-settings-maintenance-save {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.atm-settings-grid > .atm-settings-integrations,
+.atm-settings-grid > .atm-settings-maintenance {
+  grid-column: 1 / -1;
+}
+.atm-settings-grid > .atm-settings-mcp {
+  grid-column: span 2;
+}
+.atm-settings-grid > .atm-mcp-bridges {
+  grid-column: auto;
+  margin-top: 0;
 }
 .atm-integration-list {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 10px;
 }
 .atm-integration-card {
   display: grid;
+  align-content: start;
+  min-width: 0;
   gap: 12px;
   padding: 13px;
   border: 1px solid var(--atm-border);

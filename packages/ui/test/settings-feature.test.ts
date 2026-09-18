@@ -161,6 +161,17 @@ describe("Settings feature", () => {
     expect(readFileSync(panelsPath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
   });
 
+  it("Agent 卡片横向区域和维护位于独立 MCP 配置卡片之前", () => {
+    const markup = renderSettings();
+    expect(markup).toContain('class="atm-panel atm-settings-integrations"');
+    expect(markup).toContain('class="atm-panel atm-settings-maintenance"');
+    expect(markup).toContain('class="atm-panel atm-settings-mcp"');
+    expect(markup.indexOf("维护与 Windows")).toBeLessThan(markup.indexOf("MCP 连接配置"));
+    expect(markup.indexOf("MCP 连接配置")).toBeLessThan(markup.indexOf("复制本次运行 HTTP"));
+    const source = readFileSync(featurePath, "utf8");
+    expect(source.indexOf("MCP 连接配置")).toBeLessThan(source.indexOf("<McpBridgePanel"));
+  });
+
   it("关键 Settings 契约有阳性变异红灯", () => {
     const source = settingsSource();
     for (const contract of [
