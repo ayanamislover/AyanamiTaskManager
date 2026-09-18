@@ -3,6 +3,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 import { AtmError } from "@ayanami-task/errors";
+import { pruneMigrationBackupFiles } from "./backup-retention.js";
 
 export type Migration = {
   version: number;
@@ -150,6 +151,8 @@ export async function runMigrations(input: {
       `pre-migration-v${applied.at(-1)?.version ?? 0}-${stamp}.sqlite`,
     );
     await input.sqlite.backup(target);
+    // 升级前备份不进目录表，只能在这里按份数收敛，否则升级一次留一份、永不清理。
+    pruneMigrationBackupFiles(input.backupDirectory);
   }
   const apply = input.sqlite.transaction((migration: Migration) => {
     input.sqlite.exec(migration.sql);

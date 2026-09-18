@@ -169,13 +169,55 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
+  align-items: stretch;
+}
+.atm-settings-grid > .atm-panel {
+  min-width: 0;
+}
+.atm-settings-grid > .atm-panel > .atm-panel-head {
+  min-height: 66px;
+}
+.atm-settings-integrations .atm-integration-card {
+  grid-template-rows: auto 1fr auto;
+}
+.atm-settings-integrations .atm-integration-checks {
+  align-content: start;
+}
+.atm-settings-maintenance .atm-form-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.atm-settings-maintenance-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 18px;
+}
+.atm-settings-maintenance-save {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.atm-settings-grid > .atm-settings-integrations,
+.atm-settings-grid > .atm-settings-maintenance {
+  grid-column: 1 / -1;
+}
+.atm-settings-grid > .atm-settings-mcp {
+  grid-column: span 2;
+}
+.atm-settings-grid > .atm-mcp-bridges {
+  grid-column: auto;
+  margin-top: 0;
 }
 .atm-integration-list {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 10px;
 }
 .atm-integration-card {
   display: grid;
+  align-content: start;
+  min-width: 0;
   gap: 12px;
   padding: 13px;
   border: 1px solid var(--atm-border);
@@ -323,6 +365,30 @@
 }
 .atm-project-reconcile {
   margin-top: 18px;
+}
+/* 诊断区：折叠条沿用工程统计的样式；展开后三块面板依次排开。 */
+.atm-diagnostics {
+  margin-top: 18px;
+}
+.atm-diagnostics.is-top {
+  margin-top: 0;
+  margin-bottom: 18px;
+}
+.atm-diagnostics > .atm-engineering {
+  margin-bottom: 0;
+}
+.atm-diagnostics[data-attention="true"] > .atm-engineering {
+  border-color: color-mix(in srgb, var(--atm-warning) 45%, var(--atm-border));
+}
+.atm-diagnostics-body:not([hidden]) {
+  display: grid;
+  /* 面板之间沿用全局节奏，不因为收进诊断区就挤到一起。 */
+  gap: 16px;
+  margin-top: 12px;
+}
+.atm-diagnostics-body .atm-engineering,
+.atm-diagnostics-body .atm-project-reconcile {
+  margin: 0;
 }
 .atm-engineering.is-collapsed .atm-panel-head {
   border-bottom-color: transparent;

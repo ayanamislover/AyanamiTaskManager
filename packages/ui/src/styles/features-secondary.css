@@ -259,7 +259,7 @@
 .atm-event {
   position: relative;
   min-width: 0;
-  padding: 11px 12px 16px 22px;
+  padding: 9px 12px 12px 22px;
   border-left: 1px solid var(--atm-border);
 }
 .atm-event::before {
@@ -276,29 +276,73 @@
   color: var(--atm-text-muted);
   font: 11px var(--atm-mono);
 }
-.atm-event-context,
 .atm-event-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
+  gap: 4px 12px;
+  margin-top: 4px;
 }
-.atm-event-context {
-  margin-bottom: 5px;
-  color: var(--atm-text-muted);
-  font: 11px var(--atm-mono);
-}
-.atm-event-context strong {
+.atm-event-meta strong {
   color: var(--atm-primary-strong);
-  font-weight: 650;
+  font: 650 11px var(--atm-mono);
 }
-.atm-event-detail {
-  max-width: 78ch;
-  margin: 5px 0 7px;
-  color: var(--atm-text-muted);
+.atm-event-summary {
+  max-width: 88ch;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
-.atm-event-meta {
-  margin-top: 5px;
+.atm-timeline-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px 12px 0;
+}
+
+.agent-conflicts {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.agent-history {
+  margin-top: 14px;
+  overflow: hidden;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--atm-radius);
+  background: var(--atm-surface);
+}
+.agent-history > .agent-project-heading::after {
+  content: "＋";
+}
+.agent-history[open] > .agent-project-heading::after {
+  content: "－";
+}
+.agent-history-list {
+  display: grid;
+  border-top: 1px solid var(--atm-border);
+}
+.agent-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 110px 110px;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 15px;
+  border-bottom: 1px solid var(--atm-border);
+}
+.agent-history-row:last-child {
+  border-bottom: 0;
+}
+.agent-history-name {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+.agent-history-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-history-name .atm-row-title {
+  flex: 0 1 auto;
 }

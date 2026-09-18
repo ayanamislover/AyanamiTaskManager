@@ -44,6 +44,10 @@ export type MaintenanceResult = {
   skipped: boolean;
   dailyCreated: number;
   weeklyCreated: number;
+  /** 内容与上一份完全一致、直接沿用旧文件的次数。 */
+  reusedBackups: number;
+  /** 本次维护按保留策略删掉的备份份数，含不进目录表的升级前备份。 */
+  prunedBackups: number;
   recoveredProjects: number;
   errors: Array<{ scope: string; project: string | null; message: string }>;
 };

@@ -162,3 +162,33 @@ export function groupAgentSessions<T extends AgentSessionLike>(
       return left.project.localeCompare(right.project);
     });
 }
+
+/** 在线，或最近活动在这个窗口内，才算「活跃」。 */
+export const AGENT_ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * 把 Agent 分成活跃与历史两组。
+ *
+ * 实测全部活动项目共 376 个 Agent 身份，在线的只有 2 个、超过 7 天没有活动的 339 个；
+ * 全部展开成卡片，真正要看的那几个会被淹没。活跃的仍按项目分组显示，历史的收成一个
+ * 按最近活动倒序的清单，默认折叠。
+ */
+export function partitionAgentGroupsByActivity<T extends AgentSessionLike>(
+  groups: Array<AgentProjectGroup<T>>,
+  now: number,
+  windowMs = AGENT_ACTIVE_WINDOW_MS,
+): { active: Array<AgentProjectGroup<T>>; history: Array<AgentSessionSummary<T>> } {
+  const active: Array<AgentProjectGroup<T>> = [];
+  const history: Array<AgentSessionSummary<T>> = [];
+  for (const group of groups) {
+    const recent: Array<AgentSessionSummary<T>> = [];
+    for (const agent of group.agents) {
+      const online = agent.connectionState === "ONLINE";
+      if (online || now - activityTime(agent) <= windowMs) recent.push(agent);
+      else history.push(agent);
+    }
+    if (recent.length) active.push({ ...group, agents: recent });
+  }
+  history.sort((left, right) => activityTime(right) - activityTime(left));
+  return { active, history };
+}

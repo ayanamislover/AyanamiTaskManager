@@ -9,6 +9,7 @@ import {
 } from "./read-model-mappers.js";
 import type {
   ChecklistView,
+  RecentClosedWorkItemPage,
   TaskViewProjectionPage,
   WorkItemListFilters,
   WorkItemPageFilters,
@@ -18,96 +19,14 @@ import type {
 } from "./read-model-types.js";
 import {
   canonicalTaskListSelection,
+  decodeRecentClosedCursor,
   decodeTaskListCursor,
+  encodeRecentClosedCursor,
   encodeTaskListCursor,
   type TaskListSelection,
 } from "./task-list-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
-
-function hydratedWorkItemSql(
-  whereSql: string,
-  selectionTailSql: string,
-  resultOrderSql: string,
-): string {
-  return `WITH selected AS (
-            SELECT work_items.*
-            FROM work_items
-            WHERE ${whereSql}
-            ${selectionTailSql}
-          ), child_summary AS (
-            SELECT child.parent_id AS work_item_id,
-                   COALESCE(SUM(CASE WHEN child.status = 'DONE' THEN child.weight ELSE 0 END), 0) AS done_weight,
-                   COALESCE(SUM(child.weight), 0) AS total_weight,
-                   SUM(CASE WHEN child.status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
-                   COUNT(*) AS total_stages
-            FROM work_items child
-            JOIN selected ON selected.id = child.parent_id
-            WHERE child.archived_at IS NULL AND child.status <> 'CANCELLED'
-            GROUP BY child.parent_id
-          ), checklist_summary AS (
-            SELECT checklist.work_item_id,
-                   COALESCE(SUM(CASE WHEN checklist.status = 'DONE' THEN checklist.weight ELSE 0 END), 0) AS done_weight,
-                   COALESCE(SUM(checklist.weight), 0) AS total_weight,
-                   SUM(CASE WHEN checklist.status = 'DONE' THEN 1 ELSE 0 END) AS done_stages,
-                   COUNT(*) AS total_stages
-            FROM checklist_items checklist
-            JOIN selected ON selected.id = checklist.work_item_id
-            WHERE checklist.status <> 'SKIPPED'
-            GROUP BY checklist.work_item_id
-          ), blocker_ranked AS (
-            SELECT blocker.work_item_id,
-                   COALESCE(NULLIF(blocker.detail, ''), NULLIF(blocker.waiting_for, ''), blocker.title) AS reason,
-                    row_number() OVER (
-                      PARTITION BY blocker.work_item_id
-                      ORDER BY blocker.created_at DESC
-                   ) AS blocker_rank
-            FROM blockers blocker
-            JOIN selected ON selected.id = blocker.work_item_id
-            WHERE blocker.status = 'ACTIVE'
-          ), discovered_from_ranked AS (
-            SELECT relation.source_id AS work_item_id, target.local_no,
-                   row_number() OVER (
-                      PARTITION BY relation.source_id
-                   ) AS relation_rank
-            FROM work_item_relations relation
-            JOIN selected ON selected.id = relation.source_id
-            JOIN work_items target ON target.id = relation.target_id
-            WHERE relation.relation_type = 'DISCOVERED_FROM'
-          ), discovered_counts AS (
-            SELECT relation.target_id AS work_item_id, COUNT(*) AS discovered_count
-            FROM work_item_relations relation
-            JOIN selected ON selected.id = relation.target_id
-            WHERE relation.relation_type = 'DISCOVERED_FROM'
-            GROUP BY relation.target_id
-          )
-          SELECT selected.*,
-                 parent.local_no AS parent_local_no,
-                 duplicate.local_no AS duplicate_of_local_no,
-                 superseded.local_no AS superseded_by_local_no,
-                 discovered_from.local_no AS discovered_from_local_no,
-                 COALESCE(discovered_counts.discovered_count, 0) AS discovered_count,
-                 COALESCE(child_summary.done_weight, 0) AS child_done_weight,
-                 COALESCE(child_summary.total_weight, 0) AS child_total_weight,
-                 COALESCE(child_summary.done_stages, 0) AS child_done_stages,
-                 COALESCE(child_summary.total_stages, 0) AS child_total_stages,
-                 COALESCE(checklist_summary.done_weight, 0) AS checklist_done_weight,
-                 COALESCE(checklist_summary.total_weight, 0) AS checklist_total_weight,
-                 COALESCE(checklist_summary.done_stages, 0) AS checklist_done_stages,
-                 COALESCE(checklist_summary.total_stages, 0) AS checklist_total_stages,
-                 blocker.reason AS active_blocker_reason
-          FROM selected
-          LEFT JOIN work_items parent ON parent.id = selected.parent_id
-          LEFT JOIN work_items duplicate ON duplicate.id = selected.duplicate_of_id
-          LEFT JOIN work_items superseded ON superseded.id = selected.superseded_by_id
-          LEFT JOIN child_summary ON child_summary.work_item_id = selected.id
-          LEFT JOIN checklist_summary ON checklist_summary.work_item_id = selected.id
-          LEFT JOIN blocker_ranked blocker
-            ON blocker.work_item_id = selected.id AND blocker.blocker_rank = 1
-          LEFT JOIN discovered_from_ranked discovered_from
-            ON discovered_from.work_item_id = selected.id AND discovered_from.relation_rank = 1
-          LEFT JOIN discovered_counts ON discovered_counts.work_item_id = selected.id
-          ${resultOrderSql}`;
-}
+import { CLOSED_STATUS_SQL, FINISHED_AT_SQL, hydratedWorkItemSql } from "./work-item-sql.js";
 
 export class TaskReadModel {
   constructor(
@@ -246,6 +165,60 @@ export class TaskReadModel {
       )
       .all(...params) as TaskViewProjectionRow[];
     return this.taskViewPage(rows, limit, filters.cursor, project, selection);
+  }
+
+  /**
+   * 已结束任务按结束时间倒序分页。界面默认只显示最近几项，其余按需往下加载；
+   * 取消的任务没有 completed_at，用最后更新时间代替。
+   */
+  listRecentClosedWorkItemPage(
+    filters: { limit?: number; cursor?: string } = {},
+  ): RecentClosedWorkItemPage {
+    const project = this.projectCode();
+    const clauses = ["archived_at IS NULL", CLOSED_STATUS_SQL];
+    const params: unknown[] = [];
+    if (filters.cursor) {
+      const last = decodeRecentClosedCursor(filters.cursor, project);
+      clauses.push(`(${FINISHED_AT_SQL} < ? OR (${FINISHED_AT_SQL} = ? AND local_no < ?))`);
+      params.push(last.finishedAt, last.finishedAt, last.localNo);
+    }
+    const limit = Math.min(100, Math.max(1, filters.limit ?? 5));
+    const rows = this.sqlite
+      .prepare(
+        hydratedWorkItemSql(
+          clauses.join(" AND "),
+          `ORDER BY ${FINISHED_AT_SQL} DESC, local_no DESC LIMIT ?`,
+          "ORDER BY COALESCE(selected.completed_at, selected.updated_at) DESC, selected.local_no DESC",
+        ),
+      )
+      .all(...params, limit + 1) as any[];
+    const total = Number(
+      (
+        this.sqlite
+          .prepare(
+            `SELECT COUNT(*) AS count FROM work_items WHERE archived_at IS NULL AND ${CLOSED_STATUS_SQL}`,
+          )
+          .get() as { count: number }
+      ).count,
+    );
+    const hasMore = rows.length > limit;
+    const selected = rows.slice(0, limit);
+    const last = selected.at(-1);
+    return {
+      items: selected.map((row) => this.hydratedWorkItem(row, project)),
+      nextCursor:
+        hasMore && last
+          ? encodeRecentClosedCursor({
+              project,
+              last: {
+                finishedAt: String(last.completed_at ?? last.updated_at),
+                localNo: last.local_no,
+              },
+            })
+          : null,
+      hasMore,
+      total,
+    };
   }
 
   listWorkItemPage(filters: WorkItemPageFilters = {}): WorkItemProjectionPage {
@@ -399,11 +372,14 @@ export class TaskReadModel {
       milestone: filters.milestoneId ?? null,
       ready: filters.readyOnly === true,
       query: filters.query ?? null,
+      closed: filters.closed ?? null,
     });
     if (selection.status) {
       clauses.push("status = ?");
       params.push(selection.status);
     }
+    if (selection.closed === true) clauses.push(CLOSED_STATUS_SQL);
+    if (selection.closed === false) clauses.push(`NOT ${CLOSED_STATUS_SQL}`);
     if (selection.owner) {
       clauses.push("assignee_agent_id = ?");
       params.push(selection.owner);

@@ -5,6 +5,7 @@
     transition-property: color, background-color, border-color;
   }
 
+  .atm-disclosure-body,
   .atm-nav-disclosure:active,
   .atm-nav-disclosure[aria-expanded="true"] svg,
   .atm-button:active,
@@ -65,10 +66,15 @@
     transform: none;
   }
 
+  .atm-disclosure-body {
+    transition-property: opacity;
+  }
+
   @starting-style {
     .atm-modal:not(.atm-command),
     .atm-drawer,
-    .atm-notice {
+    .atm-notice,
+    .atm-disclosure-body {
       opacity: 0;
       transform: none;
     }

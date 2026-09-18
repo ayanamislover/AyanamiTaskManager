@@ -186,6 +186,10 @@ describe("Backup and restore failure atomicity", () => {
       END;
     `);
 
+    // 内容一样的自动备份会沿用旧文件；这里要的是真产生第二份，先让项目内容变一下。
+    (await manager.openProject(project.id)).sqlite
+      .prepare("UPDATE project_meta SET description = ? WHERE singleton = 1")
+      .run("retention failure");
     const second = await manager.createBackup({
       scope: "PROJECT",
       project: project.id,

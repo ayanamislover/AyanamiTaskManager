@@ -323,6 +323,220 @@ test("总览项目卡长名称最多两行并保留全称提示", async ({ page 
   }
 });
 
+test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ page }) => {
+  // staleTime 3 秒内切回来会命中新鲜缓存、queryFn 不执行；归属如果跟着「请求是否跑过」
+  // 走，列表就会卡在空白加载态直到下一次网络刷新。
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const projectCode = `SW${suffix.slice(-4).toUpperCase()}`;
+  try {
+    const project = await api.post(`${apiUrl}/projects`, {
+      data: { name: `切换验收 ${suffix}`, sourcePath: null, code: projectCode, description: "" },
+    });
+    expect(project.ok()).toBeTruthy();
+    const objective = await api.post(`${apiUrl}/projects/${projectCode}/ui/objectives`, {
+      data: {
+        opId: `e2e-switch-objective-${suffix}`,
+        title: "验证缓存新鲜期切换",
+        description: "",
+        definitionOfDone: [],
+      },
+    });
+    expect(objective.ok()).toBeTruthy();
+    const objectiveId = String(((await objective.json()) as Record<string, unknown>).id);
+    const created = await api.post(`${apiUrl}/projects/${projectCode}/ui/work-items`, {
+      data: {
+        opId: `e2e-switch-create-${suffix}`,
+        items: [
+          {
+            clientRef: `switch-${suffix}`,
+            objectiveId,
+            title: `切换验收任务 ${suffix}`,
+            description: "",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+            acceptance: ["切回项目后列表仍在"],
+            checklist: [],
+            verificationRequired: false,
+          },
+        ],
+      },
+    });
+    expect([200, 201]).toContain(created.status());
+
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/#project:E2E");
+    const rows = page.locator("#project-task-panel .atm-table tbody tr");
+    await expect(rows.first()).toBeVisible();
+    const before = await rows.count();
+    expect(before).toBeGreaterThan(0);
+
+    const sidebar = page.locator(".atm-sidebar");
+    await sidebar.getByRole("button", { name: `切换验收 ${suffix}`, exact: true }).click();
+    await expect(page.getByText(`切换验收任务 ${suffix}`).first()).toBeVisible();
+    // 立刻切回：这一步必须落在 staleTime 之内。
+    await sidebar.getByRole("button", { name: "E2E 验收项目", exact: true }).click();
+    await expect(rows.first()).toBeVisible({ timeout: 1000 });
+    expect(await rows.count()).toBe(before);
+  } finally {
+    await api.dispose();
+  }
+});
+
+test("折叠区展开有入场过渡，项目页不因分批返回而抖动", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.addInitScript(() => {
+    const store = window as unknown as { __shift: number };
+    store.__shift = 0;
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries() as unknown as Array<
+        PerformanceEntry & { value: number; hadRecentInput: boolean }
+      >) {
+        if (!entry.hadRecentInput) store.__shift += entry.value;
+      }
+    }).observe({ type: "layout-shift", buffered: true });
+  });
+  await page.goto("/#project:E2E");
+  await page.waitForSelector(".atm-table tbody tr, .atm-task-card");
+  await page.waitForTimeout(2000);
+
+  // 各个请求先后返回时内容不应该把下面的东西顶走。0.1 是 Web Vitals 的「良好」线。
+  const shift = await page.evaluate(() => (window as unknown as { __shift: number }).__shift);
+  expect(shift, `项目页累计布局偏移 ${shift}`).toBeLessThan(0.1);
+
+  // 折叠区展开：以前是硬切，现在与弹层同一套 token 时长的淡入。
+  const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
+  const motion = await page.evaluate(() => {
+    const body = document.querySelector("#project-diagnostics-content");
+    if (!body) return null;
+    return {
+      opacity: Number(getComputedStyle(body).opacity),
+      transitions: body.getAnimations().map((animation) => ({
+        property:
+          (animation as unknown as { transitionProperty?: string }).transitionProperty ?? "",
+        duration: Number(animation.effect?.getComputedTiming().duration ?? 0),
+      })),
+    };
+  });
+  expect(motion).not.toBeNull();
+  expect(motion!.opacity).toBeLessThan(1);
+  expect(motion!.transitions.map((transition) => transition.property).sort()).toEqual([
+    "opacity",
+    "transform",
+  ]);
+  expect(new Set(motion!.transitions.map((transition) => transition.duration))).toEqual(
+    new Set([160]),
+  );
+  await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
+});
+
+test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const workspace = page.getByRole("button", { name: "工作区", exact: true });
+  const collapse = async () => {
+    if ((await workspace.getAttribute("aria-expanded")) === "true") {
+      await workspace.click();
+      await expect(workspace).toHaveAttribute("aria-expanded", "false");
+    }
+  };
+  const bodyMotion = () =>
+    page.evaluate(() => {
+      const body = document.querySelector("#atm-workspace-navigation");
+      if (!body) throw new Error("缺少工作区折叠内容");
+      return {
+        animations: body.getAnimations().length,
+        transitionProperty: getComputedStyle(body).transitionProperty,
+        opacity: Number(getComputedStyle(body).opacity),
+        focusVisible: Boolean(document.querySelector(".atm-nav-disclosure:focus-visible")),
+      };
+    });
+
+  // 鼠标展开：页面刚打开、没有任何键盘交互，:focus-visible 不成立，过渡照旧。
+  await page.goto("/#overview");
+  await collapse();
+  await workspace.click();
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+  const mouse = await bodyMotion();
+  expect(mouse.focusVisible, "鼠标点击不进入键盘焦点态").toBe(false);
+  expect(mouse.animations, "鼠标展开保留过渡").toBeGreaterThan(0);
+
+  // 键盘展开：必须是真键盘，程序 focus() 不一定成立 :focus-visible。
+  await page.reload();
+  await collapse();
+  await page.locator(".atm-sidebar").getByRole("button", { name: "总览", exact: true }).click();
+  let reached = false;
+  for (let index = 0; index < 12 && !reached; index += 1) {
+    await page.keyboard.press("Tab");
+    reached = await page.evaluate(() =>
+      Boolean(document.activeElement?.classList.contains("atm-nav-disclosure")),
+    );
+  }
+  expect(reached, "键盘能走到工作区折叠按钮").toBe(true);
+  await page.keyboard.press("Enter");
+  await expect(workspace).toHaveAttribute("aria-expanded", "true");
+  const keyboard = await bodyMotion();
+  expect(keyboard.focusVisible, "触发器处于键盘焦点").toBe(true);
+  expect(keyboard.animations, "键盘展开不播动效").toBe(0);
+  expect(keyboard.transitionProperty).toBe("none");
+  expect(keyboard.opacity, "内容立刻就位").toBe(1);
+});
+
+test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({ page }) => {
+  // 桌面窗口最小宽度 1100；1280 是以前「活动」被挤成一字一行、月亮按钮压住 Ctrl K 的宽度。
+  for (const width of [1101, 1280, 1920]) {
+    await page.setViewportSize({ width, height: 800 });
+    if (width === 1101) await page.goto("/#project:E2E");
+    const status = page.locator(".atm-topbar .atm-service-status");
+    await expect(status).toHaveText("服务正常");
+    const layout = await page.evaluate(() => {
+      const rect = (selector: string) => {
+        const element = document.querySelector<HTMLElement>(selector);
+        if (!element) throw new Error(`缺少 ${selector}`);
+        return element.getBoundingClientRect();
+      };
+      const bar = document.querySelector<HTMLElement>(".atm-topbar")!;
+      const actions = [...document.querySelectorAll<HTMLElement>(".atm-top-actions > *")].map(
+        (element) => element.getBoundingClientRect(),
+      );
+      const statusElement = document.querySelector<HTMLElement>(
+        ".atm-top-actions .atm-service-status",
+      );
+      if (!statusElement) throw new Error("缺少 .atm-service-status");
+      const status = statusElement.getBoundingClientRect();
+      // 文字每折一行就多一个不同 top 的矩形。
+      const range = document.createRange();
+      range.selectNodeContents(statusElement);
+      const lineTops = new Set([...range.getClientRects()].map((line) => Math.round(line.top)));
+      const barRect = bar.getBoundingClientRect();
+      const barPadding = Number.parseFloat(getComputedStyle(bar).paddingRight);
+      return {
+        statusLines: lineTops.size,
+        statusHeight: status.height,
+        searchRight: rect(".atm-search-button").right,
+        firstActionLeft: Math.min(...actions.map((action) => action.left)),
+        lastActionRight: Math.max(...actions.map((action) => action.right)),
+        barContentRight: barRect.right - barPadding,
+      };
+    });
+    expect(layout.statusHeight, `${width}px 状态标签高度`).toBeLessThanOrEqual(28);
+    expect(layout.statusLines, `${width}px 状态标签行数`).toBe(1);
+    // 不只是不重叠：搜索框和第一个按钮之间要留得出间距。
+    expect(
+      layout.firstActionLeft - layout.searchRight,
+      `${width}px 搜索框与按钮组间距`,
+    ).toBeGreaterThanOrEqual(12);
+    expect(layout.lastActionRight, `${width}px 按钮组不溢出顶栏`).toBeLessThanOrEqual(
+      layout.barContentRight + 0.5,
+    );
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.locator(".atm-topbar").screenshot({
+    path: resolve("output", "playwright", "e2e-topbar-service-status-1280.png"),
+  });
+});
+
 test("侧栏默认精简、工作区可折叠且设置固定在底部", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/#overview");
@@ -386,7 +600,7 @@ test("1366、1920、3440 桌面密度和项目管理信息均可用", async ({ p
       .first()
       .click();
     await expect(page.getByRole("region", { name: "项目管理摘要" })).toBeVisible();
-    await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "项目诊断" })).toBeVisible();
     await expect(page.getByRole("columnheader", { name: "阻塞 / 等待" })).toBeVisible();
     await page.screenshot({
       path: resolve("output", "playwright", `e2e-project-${viewport.width}.png`),
@@ -401,6 +615,14 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
     if (request.url().includes("/engineering-metrics")) engineeringRequests += 1;
   });
   await page.goto("/#project:E2E");
+  // 工程统计收在默认折叠的诊断区里；诊断区折叠时子面板不挂载，更不会取数。
+  const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await expect(diagnostics.getByRole("button", { name: "展开项目诊断" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(page.getByRole("region", { name: "工程统计" })).toHaveCount(0);
+  await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
   const region = page.getByRole("region", { name: "工程统计" });
   const expand = region.getByRole("button", { name: "展开工程统计" });
   await expect(expand).toHaveAttribute("aria-expanded", "false");
@@ -680,8 +902,10 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     await page.getByRole("tablist").getByRole("tab", { name: "时间线" }).click();
     await expect(page.getByText(progressSummary)).toBeVisible();
     await expect(page.getByText(recordTitle)).toBeVisible();
-    await expect(page.getByText("任务进度已更新", { exact: true })).toBeVisible();
-    await expect(page.getByText(key, { exact: true }).first()).toBeVisible();
+    // 类别标签不再重复显示；正文里的「更新进度」就是事件语义。
+    await expect(page.getByText(/更新进度/u).first()).toBeVisible();
+    await expect(page.getByText("任务进度已更新", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".atm-timeline").first()).toContainText(key);
     await page.screenshot({
       path: resolve("output", "playwright", "e2e-project-timeline-readable-dark.png"),
       fullPage: true,
@@ -690,7 +914,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     await page.getByRole("button", { name: "工作区", exact: true }).click();
     await page.getByRole("button", { name: "全局时间线", exact: true }).click();
     await expect(page.getByText(progressSummary)).toBeVisible();
-    await expect(page.getByText(key, { exact: true }).first()).toBeVisible();
+    await expect(page.locator(".atm-timeline").first()).toContainText(key);
     await expect(page.getByText("项目摘要已更新", { exact: true })).toHaveCount(0);
     expect(
       await page.evaluate(
@@ -1374,7 +1598,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     await expect(primary).toContainText("持续时间");
     await expect(primary).toContainText(/clean|dirty|未观察/u);
 
-    const warning = page.locator('.atm-notice[role="status"]');
+    const warning = page.locator('.agent-conflicts[role="status"]');
     await expect(warning).toContainText("同一 Worktree");
     await expect(warning).toContainText("同一 Git branch");
 
@@ -1564,7 +1788,7 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
   await page.getByRole("tab", { name: "看板" }).click();
   await expect(page.getByText("待开始", { exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "时间线", exact: true }).click();
-  await expect(page.getByText(/任务已创建/u).first()).toBeVisible();
+  await expect(page.getByText(/创建任务/u).first()).toBeVisible();
   await page.getByRole("tab", { name: "记录", exact: true }).click();
   await expect(page.getByText("还没有项目记录")).toBeVisible();
   await page.getByRole("tab", { name: "列表" }).click();
@@ -1595,14 +1819,21 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
     [...ascendingTaskNumbers].sort((left, right) => left - right),
   );
   await taskSort.click();
+  // 投影与对账面板收在默认折叠的诊断区里，量间距前先展开。
+  await page
+    .getByRole("region", { name: "项目诊断" })
+    .getByRole("button", { name: "展开项目诊断" })
+    .click();
+  await expect(page.locator(".atm-project-reconcile")).toBeVisible();
   const spacing = await page.evaluate(() => {
     const projection = document.querySelector(".atm-projection-panel")?.getBoundingClientRect();
     const reconcile = document.querySelector(".atm-project-reconcile")?.getBoundingClientRect();
-    const loadStatus = document.querySelector(".atm-cursor-load-status")?.getBoundingClientRect();
+    const metrics = document.querySelector(".atm-metrics")?.getBoundingClientRect();
     const taskPanel = document.querySelector("#project-task-panel")?.getBoundingClientRect();
     return {
       reconcileGap: projection && reconcile ? reconcile.top - projection.bottom : -1,
-      taskPanelGap: loadStatus && taskPanel ? taskPanel.top - loadStatus.bottom : -1,
+      // 加载状态条只在出错或续读时出现，改用指标卡与任务面板之间的间距。
+      taskPanelGap: metrics && taskPanel ? taskPanel.top - metrics.bottom : -1,
     };
   });
   expect(spacing.reconcileGap).toBeGreaterThanOrEqual(16);
@@ -1680,8 +1911,12 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
   await page.keyboard.press("Escape");
   await expect(progressSourceFilter).toBeFocused();
 
-  page.once("dialog", (dialog) => dialog.accept(savedViewName));
+  // 桌面端不支持 window.prompt，保存视图走应用内输入框；原生弹窗一旦回来，这里等不到输入框。
   await page.getByRole("button", { name: "保存当前" }).click();
+  const saveViewDialog = page.getByRole("dialog", { name: "保存当前视图" });
+  await saveViewDialog.getByLabel("视图名称").fill(savedViewName);
+  await saveViewDialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(saveViewDialog).toHaveCount(0);
   await page.getByRole("combobox", { name: "保存视图" }).click();
   await expect(page.getByRole("option", { name: savedViewName })).toHaveCount(1);
   await page.keyboard.press("Escape");

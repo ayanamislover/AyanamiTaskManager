@@ -73,6 +73,15 @@ export async function listWorkItemPageForUi(
   return repository.listWorkItemPage(filters);
 }
 
+export async function listRecentClosedWorkItemPageForUi(
+  runtime: ApplicationServiceRuntime,
+  projectCode: string,
+  filters: { limit?: number; cursor?: string },
+): Promise<ReturnType<ProjectRepository["listRecentClosedWorkItemPage"]>> {
+  const repository = await runtime.repository(projectCode);
+  return repository.listRecentClosedWorkItemPage(filters);
+}
+
 export async function listWorkItemsForUi(
   projectCode: string,
   filters: WorkItemListFilters,

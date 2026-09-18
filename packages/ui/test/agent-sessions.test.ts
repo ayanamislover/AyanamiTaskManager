@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_ACTIVE_WINDOW_MS,
   findAgentSessionConflicts,
   groupAgentSessions,
+  partitionAgentGroupsByActivity,
   summarizeAgentSessions,
 } from "../src/agent-sessions.js";
 
@@ -99,5 +101,39 @@ describe("Agent Session 聚合", () => {
     expect(
       result[0]?.agents.find((item) => item.agentId === "codex-root")?.sessionHistory,
     ).toHaveLength(2);
+  });
+});
+
+describe("Agent 活跃与历史分组", () => {
+  const now = Date.parse("2026-09-17T12:00:00Z");
+  const daysAgo = (days: number) => new Date(now - days * 24 * 60 * 60 * 1000).toISOString();
+
+  it("在线或 7 天内有活动的留在项目分组里，其余进历史并按最近活动倒序", () => {
+    const groups = groupAgentSessions([
+      session("online-old", "codex-root", "ATM", "ONLINE", daysAgo(30)),
+      session("recent", "claude", "ATM", "CLOSED", daysAgo(2)),
+      session("edge", "reviewer", "ATM", "CLOSED", daysAgo(7)),
+      session("stale-a", "peer-0830", "ATM", "CLOSED", daysAgo(18)),
+      session("stale-b", "peer-0901", "CAH", "CLOSED", daysAgo(16)),
+    ]);
+    const { active, history } = partitionAgentGroupsByActivity(groups, now);
+
+    expect(active.map((group) => group.project)).toEqual(["ATM"]);
+    expect(active[0]!.agents.map((agent) => agent.agentId).sort()).toEqual(
+      ["claude", "codex-root", "reviewer"].sort(),
+    );
+    // 历史里只剩没有活跃 Agent 的项目，项目分组不再为它们占位。
+    expect(history.map((agent) => agent.agentId)).toEqual(["peer-0901", "peer-0830"]);
+  });
+
+  it("窗口边界按毫秒判断，刚好 7 天算活跃，多 1 毫秒进历史", () => {
+    const at = (offset: number) => new Date(now - AGENT_ACTIVE_WINDOW_MS - offset).toISOString();
+    const groups = groupAgentSessions([
+      session("inside", "inside", "ATM", "CLOSED", at(0)),
+      session("outside", "outside", "ATM", "CLOSED", at(1)),
+    ]);
+    const { active, history } = partitionAgentGroupsByActivity(groups, now);
+    expect(active[0]!.agents.map((agent) => agent.agentId)).toEqual(["inside"]);
+    expect(history.map((agent) => agent.agentId)).toEqual(["outside"]);
   });
 });

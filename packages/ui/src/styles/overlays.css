@@ -52,6 +52,22 @@
 .atm-modal.wide {
   width: min(920px, 100%);
 }
+/* 确认框与输入框会叠在抽屉（14）和普通模态框（20）之上，但要让位给提示条（30）。 */
+.atm-modal-backdrop.atm-dialog-layer {
+  z-index: 25;
+}
+.atm-modal.atm-dialog {
+  width: min(460px, 100%);
+}
+.atm-dialog-form {
+  display: contents;
+}
+.atm-dialog-message {
+  margin: 0;
+  color: var(--atm-text-muted);
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
 .atm-modal-head {
   display: flex;
   align-items: center;

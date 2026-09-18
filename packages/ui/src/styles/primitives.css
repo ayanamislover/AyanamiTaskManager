@@ -231,3 +231,31 @@ button.atm-row:hover {
     transform: translateX(100%);
   }
 }
+
+/*
+ * 折叠区展开的入场：和弹层用同一套语言（@starting-style + token 时长/缓动），
+ * 只做淡入和 4px 位移。收起仍然是即时的——内容直接从 DOM 撤掉，没有退场可言。
+ *
+ * 这不推翻「高频状态保持即时」：那条针对的是导航按钮的 hover/按压和排序箭头，
+ * 这里是用户显式展开一块内容的那一下，原来是硬切。
+ */
+.atm-disclosure-body {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-hover) var(--atm-ease-out);
+}
+@starting-style {
+  .atm-disclosure-body {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+/*
+ * 键盘展开时即时呈现：焦点还停在触发器上，紧接着的内容不该再从别处滑进来；
+ * 键盘用户靠焦点和阅读顺序定位，位移只会让目标跳动。鼠标展开保留上面的过渡。
+ */
+:where(.atm-nav-group, .atm-diagnostics, .agent-history):has(:focus-visible) .atm-disclosure-body {
+  transition: none;
+}

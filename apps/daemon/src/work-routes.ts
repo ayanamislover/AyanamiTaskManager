@@ -164,10 +164,26 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       ...(query.milestone ? { milestoneId: query.milestone } : {}),
       ...(query.q ? { query: query.q } : {}),
       readyOnly: query.ready === "1",
+      ...(query.closed === "1" ? { closed: true } : query.closed === "0" ? { closed: false } : {}),
       limit: Number(query.limit ?? 20),
       ...(query.cursor ? { cursor: query.cursor } : {}),
     });
     return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
+  });
+  // 静态段优先于 /:taskKey 匹配；任务键不会是 closed。
+  app.get("/api/v1/projects/:code/ui/work-items/closed", async (request) => {
+    const { code } = request.params as { code: string };
+    const query = request.query as Record<string, string | undefined>;
+    const page = await options.service.listRecentClosedWorkItemPageForUi(code, {
+      limit: Number(query.limit ?? 5),
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+    });
+    return {
+      items: page.items,
+      nextCursor: page.nextCursor,
+      hasMore: page.hasMore,
+      total: page.total,
+    };
   });
   app.get("/api/v1/projects/:code/ui/work-items/:taskKey", async (request) => {
     const { code, taskKey } = request.params as { code: string; taskKey: string };

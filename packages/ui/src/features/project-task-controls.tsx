@@ -7,6 +7,7 @@ import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-ic
 import { KanbanIcon as Kanban } from "@phosphor-icons/react/dist/icons/Kanban";
 import { ListBulletsIcon as ListBullets } from "@phosphor-icons/react/dist/icons/ListBullets";
 import { RowsIcon as Rows } from "@phosphor-icons/react/dist/icons/Rows";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { AtmSelect } from "../components/atm-select.js";
 import { MutationErrorAlert } from "../components/async-state.js";
 import { moveRovingFocus } from "../components/keyboard-interactions.js";
@@ -67,20 +68,86 @@ export function filterProjectTasks(tasks: any[], filters: ProjectTaskFilters): a
   });
 }
 
-export function useProjectTaskViewState(tasks: any[]) {
+/**
+ * 未结束任务按表头排序；已结束任务单独成组，保持「最近结束在前」的顺序，不参与表头排序，
+ * 否则按状态或优先级一排，几百个已完成任务会和进行中的任务交错在一起。
+ */
+/**
+ * 层级视图要显示的行，按父子顺序排开。
+ *
+ * 列表默认只取未结束任务加最近结束的几项，所以父任务可能不在当前数据里。
+ * 「从 parentId === null 往下递归」会让这些子任务整个消失——数据还在，界面上没有。
+ * 找不到父节点的一律当根节点显示；成环时靠 visited 兜底，不无限递归。
+ */
+export function taskTreeRows(tasks: any[]): Array<{ task: any; depth: number }> {
+  const byParent = new Map<string | null, any[]>();
+  const ids = new Set(tasks.map((task: any) => task.id));
+  for (const task of tasks) {
+    const parentId = task.parentId ?? null;
+    const anchor = parentId !== null && ids.has(parentId) ? parentId : null;
+    const siblings = byParent.get(anchor);
+    if (siblings) siblings.push(task);
+    else byParent.set(anchor, [task]);
+  }
+  const rows: Array<{ task: any; depth: number }> = [];
+  const visited = new Set<string>();
+  const walk = (parentId: string | null, depth: number): void => {
+    // 每个任务只挂在一个父节点下，递归不会重复到达；成环的那些从 null 根本走不到，
+    // 由下面的兜底补齐，所以这里不需要再判一次 visited。
+    for (const task of byParent.get(parentId) ?? []) {
+      visited.add(task.id);
+      rows.push({ task, depth });
+      walk(task.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  // 只在环里的任务谁都到不了，补在末尾，仍然不丢。
+  for (const task of tasks) {
+    if (visited.has(task.id)) continue;
+    visited.add(task.id);
+    rows.push({ task, depth: 0 });
+  }
+  return rows;
+}
+
+export function projectTaskGroups(
+  openTasks: any[],
+  closedTasks: any[],
+  filters: ProjectTaskFilters,
+  taskSort: ProjectTaskSort,
+) {
+  // 两次读取之间刚结束的任务可能同时出现在两边，以已结束那边为准。
+  const closedKeys = new Set(closedTasks.map((task: any) => task.key));
+  const allTasks = [...openTasks.filter((task: any) => !closedKeys.has(task.key)), ...closedTasks];
+  const filteredTasks = filterProjectTasks(allTasks, filters);
+  return {
+    allTasks,
+    filteredTasks,
+    sortedTasks: sortProjectTasks(
+      filteredTasks.filter((task: any) => !closedKeys.has(task.key)),
+      taskSort,
+    ),
+    closedRows: filteredTasks.filter((task: any) => closedKeys.has(task.key)),
+  };
+}
+
+export function useProjectTaskViewState(openTasks: any[], closedTasks: any[] = []) {
   const [view, setView] = useState<ProjectTaskView>("list");
   const [filters, setFilters] = useState<ProjectTaskFilters>(EMPTY_PROJECT_TASK_FILTERS);
   const [taskSort, setTaskSort] = useState<ProjectTaskSort>(DEFAULT_PROJECT_TASK_SORT);
-  const filteredTasks = filterProjectTasks(tasks, filters);
-  const sortedTasks = sortProjectTasks(filteredTasks, taskSort);
+  const groups = projectTaskGroups(openTasks, closedTasks, filters, taskSort);
   return {
     view,
     setView,
     filters,
     setFilters,
     taskSort,
-    filteredTasks,
-    sortedTasks,
+    ...groups,
+    /**
+     * 已结束任务必须全部取回的两种情况：用户明确要看已完成/已取消，
+     * 以及层级视图——父任务缺一个，它下面整棵子树就没了。
+     */
+    wantsAllClosed: filters.status === "DONE" || filters.status === "CANCELLED" || view === "tree",
     onTaskSort: (field: ProjectTaskSortField) =>
       setTaskSort((current) => toggleProjectTaskSort(current, field)),
   };
@@ -102,6 +169,7 @@ function ProjectTaskFilterBar({
   notify: Notify;
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const [selected, setSelected] = useState("");
   const views = useQuery({
     queryKey: ["saved-views", project],
@@ -240,9 +308,15 @@ function ProjectTaskFilterBar({
       </label>
       <button
         className="atm-button"
-        onClick={() => {
-          const name = window.prompt("保存视图名称");
-          if (name?.trim()) create.mutate(name.trim());
+        onClick={async () => {
+          const name = await dialogs.prompt({
+            title: "保存当前视图",
+            label: "视图名称",
+            placeholder: "例如：本周阻塞",
+            confirmLabel: "保存",
+            maxLength: 80,
+          });
+          if (name !== null) create.mutate(name);
         }}
       >
         保存当前

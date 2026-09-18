@@ -9,6 +9,7 @@ import {
   PageHead,
 } from "../components/async-state.js";
 import type {
+  Notify,
   AgentIntegrationAction,
   DesktopBridge,
   McpClient,
@@ -29,9 +30,12 @@ import { NotificationPolicy } from "./settings-panels.js";
 export function SettingsPage({
   client,
   desktop,
+  notify,
 }: {
   client: AyanamiClient;
   desktop?: DesktopBridge;
+  /** 走应用统一的提示条：带进出场动效、会自动消失，不和全局提示叠在同一个角落。 */
+  notify: Notify;
 }) {
   const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["status"], queryFn: () => client.status() });
@@ -58,10 +62,10 @@ export function SettingsPage({
   const [memoryProfileError, setMemoryProfileError] = useState("");
   const [memoryProfileNotice, setMemoryProfileNotice] = useState("");
   const [dailyEnabled, setDailyEnabled] = useState(true);
-  const [dailyKeep, setDailyKeep] = useState(7);
-  const [weeklyKeep, setWeeklyKeep] = useState(4);
+  const [dailyKeep, setDailyKeep] = useState(2);
+  const [weeklyKeep, setWeeklyKeep] = useState(2);
+  const [otherKeep, setOtherKeep] = useState(2);
   const [notificationMode, setNotificationMode] = useState<NotificationMode>("ALL");
-  const [feedback, setFeedback] = useState("");
   const [integrationPreview, setIntegrationPreview] = useState<{
     client: McpClient;
     current: string;
@@ -87,8 +91,9 @@ export function SettingsPage({
     )?.value;
     if (backup) {
       setDailyEnabled(backup.enabled !== false);
-      setDailyKeep(Number(backup.dailyKeep ?? 7));
-      setWeeklyKeep(Number(backup.weeklyKeep ?? 4));
+      setDailyKeep(Number(backup.dailyKeep ?? 2));
+      setWeeklyKeep(Number(backup.weeklyKeep ?? 2));
+      setOtherKeep(Number(backup.otherKeep ?? 2));
     }
     if (["ALL", "CRITICAL", "OFF"].includes(String(notification))) {
       setNotificationMode(notification as NotificationMode);
@@ -105,7 +110,7 @@ export function SettingsPage({
       );
       await client.settings.put(
         "backup.policy",
-        { enabled: dailyEnabled, dailyKeep, weeklyKeep },
+        { enabled: dailyEnabled, dailyKeep, weeklyKeep, otherKeep },
         Number(backup?.version ?? -1),
       );
       await client.settings.put(
@@ -121,7 +126,7 @@ export function SettingsPage({
     },
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setFeedback("设置已保存");
+      notify("设置已保存");
     },
   });
   const manageIntegration = useMutation({
@@ -130,12 +135,12 @@ export function SettingsPage({
     onSuccess: async (result, variables) => {
       if (result.preview) {
         setIntegrationPreview({ client: variables.client, ...result.preview });
-        setFeedback(`${agentClientLabel(variables.client)} 修改预览已生成`);
+        notify(`${agentClientLabel(variables.client)} 修改预览已生成`);
         return;
       }
       setIntegrationPreview(null);
       await queryClient.invalidateQueries({ queryKey: ["agent-integrations"] });
-      setFeedback(
+      notify(
         `${agentClientLabel(variables.client)} Agent 接入已${
           variables.action === "UNINSTALL" ? "卸载" : "更新"
         }`,
@@ -146,13 +151,13 @@ export function SettingsPage({
     mutationFn: () => desktop!.checkForUpdates!(),
     onSuccess: (status) => {
       queryClient.setQueryData(["desktop-update-status"], status);
-      setFeedback(status?.message ?? "更新检查已启动");
+      notify(status?.message ?? "更新检查已启动");
     },
   });
   const copy = async (text: string, label: string) => {
     if (desktop?.copyText) await desktop.copyText(text);
     else await navigator.clipboard.writeText(text);
-    setFeedback(`${label}已复制`);
+    notify(`${label}已复制`);
   };
   return (
     <>
@@ -203,11 +208,11 @@ export function SettingsPage({
             client={client}
             summary={query.data.projectionSummary}
             failures={query.data.projectionFailures}
-            notify={setFeedback}
+            notify={notify}
           />
         ) : null}
-        <KnowledgeBackupPanel client={client} notify={setFeedback} />
-        <section className="atm-panel">
+        <KnowledgeBackupPanel client={client} notify={notify} />
+        <section className="atm-panel atm-settings-integrations">
           <div className="atm-panel-head">
             <h2>Agent 接入</h2>
           </div>
@@ -394,47 +399,6 @@ export function SettingsPage({
                         <pre>{integrationPreview.proposed}</pre>
                       </details>
                     ) : null}
-                    <p className="atm-muted">
-                      Streamable HTTP 含本次运行的临时 endpoint/token；长期接入请使用 stdio
-                      或通用配置。
-                    </p>
-                    <div className="atm-actions">
-                      <button
-                        className="atm-button"
-                        onClick={() =>
-                          void copy(configs.data!.streamableHttp, "Streamable HTTP 配置")
-                        }
-                      >
-                        复制本次运行 HTTP
-                      </button>
-                      <button
-                        className="atm-button"
-                        onClick={() => void copy(configs.data!.stdio, "stdio 配置")}
-                      >
-                        复制 stdio
-                      </button>
-                      <button
-                        className="atm-button"
-                        onClick={() => void copy(configs.data!.generic, "通用 MCP 配置")}
-                      >
-                        生成通用配置
-                      </button>
-                      <button
-                        className="atm-button"
-                        onClick={async () => {
-                          await client.status();
-                          setFeedback("连接测试通过");
-                        }}
-                      >
-                        运行连接测试
-                      </button>
-                    </div>
-                    <button
-                      className="atm-button"
-                      onClick={() => void copy(configs.data!.agentRule, "Agent 最短规则")}
-                    >
-                      复制 Agent 最短规则
-                    </button>
                   </>
                 )}
               </>
@@ -444,127 +408,189 @@ export function SettingsPage({
             <MutationErrorAlert error={manageIntegration.error} />
           </div>
         </section>
-        {desktop?.getMcpBridges ? <McpBridgePanel load={desktop.getMcpBridges} /> : null}
-        <section className="atm-panel">
+        <section className="atm-panel atm-settings-maintenance">
           <div className="atm-panel-head">
             <h2>维护与 Windows</h2>
           </div>
-          <div className="atm-panel-body atm-form">
-            <label className="atm-check">
-              <input
-                type="checkbox"
-                checked={dailyEnabled}
-                onChange={(event) => setDailyEnabled(event.target.checked)}
-              />
-              <span>每日首次空闲时自动备份活动项目</span>
-            </label>
-            <div className="atm-form-grid">
-              <div className="atm-field">
-                <label htmlFor="daily-keep">每日备份保留数</label>
+          <div className="atm-panel-body atm-settings-maintenance-grid">
+            <div className="atm-form">
+              <label className="atm-check">
                 <input
-                  id="daily-keep"
-                  type="number"
-                  min="1"
-                  max="90"
-                  value={dailyKeep}
-                  onChange={(event) => setDailyKeep(Number(event.target.value))}
+                  type="checkbox"
+                  checked={dailyEnabled}
+                  onChange={(event) => setDailyEnabled(event.target.checked)}
                 />
+                <span>每日首次空闲时自动备份活动项目</span>
+              </label>
+              <div className="atm-row-sub">
+                内容与上一份完全一致时沿用旧备份，不会多占空间；超出保留份数的旧备份在维护时删除。
               </div>
-              <div className="atm-field">
-                <label htmlFor="weekly-keep">每周备份保留数</label>
-                <input
-                  id="weekly-keep"
-                  type="number"
-                  min="1"
-                  max="52"
-                  value={weeklyKeep}
-                  onChange={(event) => setWeeklyKeep(Number(event.target.value))}
-                />
+              <div className="atm-form-grid">
+                <div className="atm-field">
+                  <label htmlFor="daily-keep">每日备份保留数</label>
+                  <input
+                    id="daily-keep"
+                    type="number"
+                    min="1"
+                    max="90"
+                    value={dailyKeep}
+                    onChange={(event) => setDailyKeep(Number(event.target.value))}
+                  />
+                </div>
+                <div className="atm-field">
+                  <label htmlFor="weekly-keep">每周备份保留数</label>
+                  <input
+                    id="weekly-keep"
+                    type="number"
+                    min="1"
+                    max="52"
+                    value={weeklyKeep}
+                    onChange={(event) => setWeeklyKeep(Number(event.target.value))}
+                  />
+                </div>
+                <div className="atm-field">
+                  <label htmlFor="other-keep">手动与操作前备份保留数</label>
+                  <input
+                    id="other-keep"
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={otherKeep}
+                    onChange={(event) => setOtherKeep(Number(event.target.value))}
+                  />
+                </div>
               </div>
             </div>
             <NotificationPolicy value={notificationMode} onChange={setNotificationMode} />
-            {desktop?.setAutoLaunch ? (
-              <div className="atm-row">
-                <div>
-                  <div className="atm-row-title">登录时启动</div>
-                  <div className="atm-row-sub">登录后随机延迟 8–45 秒启动，并常驻托盘</div>
+            <div className="atm-form">
+              {desktop?.setAutoLaunch ? (
+                <div className="atm-row">
+                  <div>
+                    <div className="atm-row-title">登录时启动</div>
+                    <div className="atm-row-sub">登录后随机延迟 8–45 秒启动，并常驻托盘</div>
+                  </div>
+                  <button
+                    className="atm-button"
+                    disabled={autoLaunch === null}
+                    onClick={async () => setAutoLaunch(await desktop.setAutoLaunch!(!autoLaunch))}
+                  >
+                    {autoLaunch ? "已开启" : "已关闭"}
+                  </button>
                 </div>
-                <button
-                  className="atm-button"
-                  disabled={autoLaunch === null}
-                  onClick={async () => setAutoLaunch(await desktop.setAutoLaunch!(!autoLaunch))}
-                >
-                  {autoLaunch ? "已开启" : "已关闭"}
-                </button>
-              </div>
-            ) : null}
-            {desktop?.getUpdateStatus ? (
-              <div className="atm-row" data-testid="update-diagnostics">
-                <div>
-                  <div className="atm-row-title">自动更新</div>
-                  <div className="atm-row-sub">
-                    {updateStatus.isLoading
-                      ? "正在读取最近结果…"
-                      : updateStatus.data
-                        ? `${updateStatus.data.message} · ${formatTime(updateStatus.data.at)}${
-                            updateStatus.data.outcome === "ERROR"
-                              ? `；${updateStatus.data.action}`
-                              : ""
-                          }`
-                        : "尚无更新检查记录"}
+              ) : null}
+              {desktop?.getUpdateStatus ? (
+                <div className="atm-row" data-testid="update-diagnostics">
+                  <div>
+                    <div className="atm-row-title">自动更新</div>
+                    <div className="atm-row-sub">
+                      {updateStatus.isLoading
+                        ? "正在读取最近结果…"
+                        : updateStatus.data
+                          ? `${updateStatus.data.message} · ${formatTime(updateStatus.data.at)}${
+                              updateStatus.data.outcome === "ERROR"
+                                ? `；${updateStatus.data.action}`
+                                : ""
+                            }`
+                          : "尚无更新检查记录"}
+                    </div>
+                  </div>
+                  <div className="atm-actions">
+                    {updateStatus.data ? (
+                      <span
+                        className={`atm-badge ${
+                          updateStatus.data.outcome === "ERROR"
+                            ? "danger"
+                            : updateStatus.data.outcome === "SUCCESS"
+                              ? "success"
+                              : updateStatus.data.outcome === "IN_PROGRESS"
+                                ? "primary"
+                                : ""
+                        }`}
+                      >
+                        {updateStatus.data.outcome === "ERROR"
+                          ? "失败"
+                          : updateStatus.data.outcome === "SUCCESS"
+                            ? "已完成"
+                            : updateStatus.data.outcome === "IN_PROGRESS"
+                              ? "检查中"
+                              : "无更新"}
+                      </span>
+                    ) : null}
+                    {desktop.checkForUpdates ? (
+                      <button
+                        className="atm-button"
+                        disabled={checkUpdate.isPending}
+                        onClick={() => checkUpdate.mutate()}
+                      >
+                        立即检查
+                      </button>
+                    ) : null}
                   </div>
                 </div>
-                <div className="atm-actions">
-                  {updateStatus.data ? (
-                    <span
-                      className={`atm-badge ${
-                        updateStatus.data.outcome === "ERROR"
-                          ? "danger"
-                          : updateStatus.data.outcome === "SUCCESS"
-                            ? "success"
-                            : updateStatus.data.outcome === "IN_PROGRESS"
-                              ? "primary"
-                              : ""
-                      }`}
-                    >
-                      {updateStatus.data.outcome === "ERROR"
-                        ? "失败"
-                        : updateStatus.data.outcome === "SUCCESS"
-                          ? "已完成"
-                          : updateStatus.data.outcome === "IN_PROGRESS"
-                            ? "检查中"
-                            : "无更新"}
-                    </span>
-                  ) : null}
-                  {desktop.checkForUpdates ? (
-                    <button
-                      className="atm-button"
-                      disabled={checkUpdate.isPending}
-                      onClick={() => checkUpdate.mutate()}
-                    >
-                      立即检查
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-            <MutationErrorAlert error={checkUpdate.error} />
-            <button
-              className="atm-button primary"
-              disabled={savePolicy.isPending || settings.isLoading}
-              onClick={() => savePolicy.mutate()}
-            >
-              保存设置
-            </button>
-            <MutationErrorAlert error={savePolicy.error} />
+              ) : null}
+              <MutationErrorAlert error={checkUpdate.error} />
+            </div>
+            <div className="atm-settings-maintenance-save">
+              <button
+                className="atm-button primary"
+                disabled={savePolicy.isPending || settings.isLoading}
+                onClick={() => savePolicy.mutate()}
+              >
+                保存设置
+              </button>
+              <MutationErrorAlert error={savePolicy.error} />
+            </div>
           </div>
         </section>
+        <section className="atm-panel atm-settings-mcp">
+          <div className="atm-panel-head">
+            <h2>MCP 连接配置</h2>
+          </div>
+          <div className="atm-panel-body atm-form">
+            {configs.isLoading && desktop?.getMcpConfigs ? (
+              <LoadingRows count={2} />
+            ) : configs.error ? (
+              <ErrorState error={configs.error} />
+            ) : configs.data ? (
+              <>
+                <p className="atm-muted">
+                  Streamable HTTP 含本次运行的临时 endpoint/token；长期接入请使用 stdio 或通用配置。
+                </p>
+                <div className="atm-actions">
+                  {(
+                    [
+                      ["streamableHttp", "Streamable HTTP 配置", "复制本次运行 HTTP"],
+                      ["stdio", "stdio 配置", "复制 stdio"],
+                      ["generic", "通用 MCP 配置", "生成通用配置"],
+                      ["agentRule", "Agent 最短规则", "复制 Agent 最短规则"],
+                    ] as const
+                  ).map(([key, label, text]) => (
+                    <button
+                      className="atm-button"
+                      key={key}
+                      onClick={() => void copy(configs.data![key], label)}
+                    >
+                      {text}
+                    </button>
+                  ))}
+                  <button
+                    className="atm-button"
+                    onClick={async () => {
+                      await client.status();
+                      notify("连接测试通过");
+                    }}
+                  >
+                    运行连接测试
+                  </button>
+                </div>
+              </>
+            ) : (
+              <Empty title="浏览器预览模式" text="MCP 配置仅在桌面应用内可用。" />
+            )}
+          </div>
+        </section>
+        {desktop?.getMcpBridges ? <McpBridgePanel load={desktop.getMcpBridges} /> : null}
       </div>
-      {feedback ? (
-        <div className="atm-notice" role="status">
-          {feedback}
-        </div>
-      ) : null}
     </>
   );
 }

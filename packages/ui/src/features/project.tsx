@@ -5,6 +5,7 @@ import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-ic
 import { PlayIcon as Play } from "@phosphor-icons/react/dist/icons/Play";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
@@ -12,10 +13,12 @@ import { useCursorCollection } from "../cursor-collection.js";
 import { CreateRecordModal } from "./create-record-modal.js";
 import { CreateTaskModal } from "./create-task-modal.js";
 import { ProjectDataModal } from "./project-data-modal.js";
+import { ProjectDiagnostics, useProjectDiagnostics } from "./project-diagnostics.js";
 import { ProjectSummary } from "./project-summary.js";
 import { ProjectTaskControls, useProjectTaskViewState } from "./project-task-controls.js";
 import { ProjectTaskViews } from "./project-task-views.js";
 import { ProjectUpdateModal } from "./project-update-modal.js";
+import { useRecentClosedTasks } from "./recent-closed-tasks.js";
 
 export function ProjectPage({
   client,
@@ -35,18 +38,25 @@ export function ProjectPage({
   onKnowledgeDraft?: (recordKey: string) => void | Promise<void>;
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const [create, setCreate] = useState(false);
   const [createRecord, setCreateRecord] = useState(false);
   const [dataTools, setDataTools] = useState(false);
   const [updateProject, setUpdateProject] = useState(false);
-  const tasks = useCursorCollection(["tasks", project.code, "ui"], (cursor) =>
+  // 默认只拉未结束的任务；已结束的由 useRecentClosedTasks 按结束时间倒序按需加载。
+  const tasks = useCursorCollection(["tasks", project.code, "ui", "open"], (cursor) =>
     client.tasks.pageForUi(project.code, {
+      closed: "0",
       limit: 100,
       ...(cursor === undefined ? {} : { cursor }),
     }),
   );
+  const [wantsAllClosed, setWantsAllClosed] = useState(false);
+  const closedTasks = useRecentClosedTasks(client, project.code, wantsAllClosed);
+  const taskView = useProjectTaskViewState(tasks.items, closedTasks.items);
   const { view, setView, filters, setFilters, taskSort, filteredTasks, sortedTasks, onTaskSort } =
-    useProjectTaskViewState(tasks.items);
+    taskView;
+  useEffect(() => setWantsAllClosed(taskView.wantsAllClosed), [taskView.wantsAllClosed]);
   const events = useQuery({
     queryKey: ["events", project.code],
     queryFn: () => client.events(project.code, 0, 100),
@@ -82,6 +92,16 @@ export function ProjectPage({
     return () => window.removeEventListener("atm:new-project-task", listener);
   }, []);
   const workItems = tasks.items as any[];
+  const diagnostics = useProjectDiagnostics(client, project.code);
+  const diagnosticsPanel = (
+    <ProjectDiagnostics
+      client={client}
+      projectCode={project.code}
+      notify={notify}
+      openTask={openTask}
+      diagnostics={diagnostics}
+    />
+  );
   return (
     <>
       <PageHead
@@ -124,8 +144,15 @@ export function ProjectPage({
               <button
                 className="atm-button danger"
                 disabled={trash.isPending}
-                onClick={() => {
-                  if (window.confirm("移入垃圾箱前会创建备份，之后可从项目页恢复。继续吗？"))
+                onClick={async () => {
+                  if (
+                    await dialogs.confirm({
+                      title: "移入垃圾箱",
+                      message: "移入垃圾箱前会创建备份，之后可从项目页恢复。继续吗？",
+                      confirmLabel: "移入垃圾箱",
+                      tone: "danger",
+                    })
+                  )
                     trash.mutate();
                 }}
               >
@@ -154,35 +181,40 @@ export function ProjectPage({
           </>
         }
       />
+      {/* 出错时诊断区自动展开并排到页首；平时折叠在页尾。 */}
+      {diagnostics.atTop ? diagnosticsPanel : null}
       <ProjectSummary
         client={client}
         projectCode={project.code}
         workItems={workItems}
-        notify={notify}
         openTask={openTask}
-      />
-      <ProjectTaskControls
-        client={client}
-        project={project.code}
-        tasks={tasks.items}
-        view={view}
-        onViewChange={setView}
-        filters={filters}
-        onFiltersChange={setFilters}
-        notify={notify}
-      />
-      <ProjectTaskViews
-        view={view}
-        tasks={tasks}
-        records={records}
-        events={events}
-        filteredTasks={filteredTasks}
-        sortedTasks={sortedTasks}
-        taskSort={taskSort}
-        onTaskSort={onTaskSort}
-        onOpenTask={openTask}
-        {...(onKnowledgeDraft === undefined ? {} : { onExtractKnowledge: onKnowledgeDraft })}
-      />
+      >
+        <ProjectTaskControls
+          client={client}
+          project={project.code}
+          tasks={taskView.allTasks}
+          view={view}
+          onViewChange={setView}
+          filters={filters}
+          onFiltersChange={setFilters}
+          notify={notify}
+        />
+        <ProjectTaskViews
+          view={view}
+          tasks={tasks}
+          records={records}
+          events={events}
+          filteredTasks={filteredTasks}
+          sortedTasks={sortedTasks}
+          closedRows={taskView.closedRows}
+          closedTasks={closedTasks}
+          taskSort={taskSort}
+          onTaskSort={onTaskSort}
+          onOpenTask={openTask}
+          {...(onKnowledgeDraft === undefined ? {} : { onExtractKnowledge: onKnowledgeDraft })}
+        />
+      </ProjectSummary>
+      {diagnostics.atTop ? null : diagnosticsPanel}
       <MutationErrorAlert errors={[lifecycle.error, trash.error]} />
       <Presence present={create} inertWhenClosing>
         {create ? (

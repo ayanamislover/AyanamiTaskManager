@@ -64,6 +64,7 @@ export type {
   BriefSnapshotRecord,
   ChecklistView,
   ProgressUpdateView,
+  RecentClosedWorkItemPage,
   RecordPageFilters,
   RecordProjectionPage,
   SessionPageFilters,
@@ -607,6 +608,10 @@ export class ProjectRepository {
    * view. The raw fields are retained for filters, board/tree rows and actions;
    * no second offset-based query is allowed to drift from the task page.
    */
+  listRecentClosedWorkItemPage(filters: { limit?: number; cursor?: string } = {}) {
+    return this.#taskReads.listRecentClosedWorkItemPage(filters);
+  }
+
   listWorkItemPage(filters: WorkItemPageFilters = {}): WorkItemProjectionPage {
     return this.#taskReads.listWorkItemPage(filters);
   }

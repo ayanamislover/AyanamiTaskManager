@@ -85,7 +85,7 @@ function renderSettings() {
     createElement(
       QueryClientProvider,
       { client: queryClient },
-      createElement(SettingsPage, { client: client(), desktop: desktop() }),
+      createElement(SettingsPage, { client: client(), desktop: desktop(), notify: vi.fn() }),
     ),
   );
 }
@@ -103,6 +103,11 @@ function missingSettingsContracts(source: string): string[] {
     'queryKey: ["desktop-update-status"]',
     "refetchInterval: 30_000",
     '"backup.policy"',
+    "{ enabled: dailyEnabled, dailyKeep, weeklyKeep, otherKeep }",
+    // 默认每类留两份，和 storage 侧的 BACKUP_RETENTION_DEFAULTS 一致。
+    "const [dailyKeep, setDailyKeep] = useState(2)",
+    "const [weeklyKeep, setWeeklyKeep] = useState(2)",
+    "const [otherKeep, setOtherKeep] = useState(2)",
     '"notification.mode"',
     '"notification.enabled"',
     "getAutoLaunch",
@@ -130,6 +135,8 @@ describe("Settings feature", () => {
       "atm-task",
       "维护与 Windows",
       "每日备份保留数",
+      "每周备份保留数",
+      "手动与操作前备份保留数",
       "全部通知",
       "仅严重事件",
       "不通知",
@@ -152,6 +159,17 @@ describe("Settings feature", () => {
     expect(source).not.toMatch(/from\s+["']\.\.\/app\.js["']/u);
     expect(readFileSync(featurePath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
     expect(readFileSync(panelsPath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
+  });
+
+  it("Agent 卡片横向区域和维护位于独立 MCP 配置卡片之前", () => {
+    const markup = renderSettings();
+    expect(markup).toContain('class="atm-panel atm-settings-integrations"');
+    expect(markup).toContain('class="atm-panel atm-settings-maintenance"');
+    expect(markup).toContain('class="atm-panel atm-settings-mcp"');
+    expect(markup.indexOf("维护与 Windows")).toBeLessThan(markup.indexOf("MCP 连接配置"));
+    expect(markup.indexOf("MCP 连接配置")).toBeLessThan(markup.indexOf("复制本次运行 HTTP"));
+    const source = readFileSync(featurePath, "utf8");
+    expect(source.indexOf("MCP 连接配置")).toBeLessThan(source.indexOf("<McpBridgePanel"));
   });
 
   it("关键 Settings 契约有阳性变异红灯", () => {

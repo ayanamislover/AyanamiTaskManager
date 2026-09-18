@@ -88,3 +88,38 @@ export function presentTimelineEvent(event: Record<string, unknown>): TimelineEv
     occurredAt,
   };
 }
+
+const SYSTEM_EVENT_TYPES = new Set([
+  "project.creating",
+  "project.summary.updated",
+  "agent.git_context.updated",
+  "database.recovered",
+]);
+
+/**
+ * 系统自己产生的簿记事件：自动备份、项目创建的中间步骤、摘要重算、Git 上下文刷新。
+ * 近 7 天 1392 条全局事件里光 backup.created 就占 11.3%，混在任务变化中间是噪声，
+ * 时间线默认隐藏，勾选「显示系统事件」才出现。
+ */
+export function isSystemTimelineEvent(event: Record<string, unknown>): boolean {
+  const type = text(event.type) ?? "";
+  const actor = text(event.actor ?? event.actor_id);
+  return actor === "SYSTEM" || type.startsWith("backup.") || SYSTEM_EVENT_TYPES.has(type);
+}
+
+// 26 位 Crockford Base32 的 ULID：项目、目标等内部 id，对人没有意义。
+const INTERNAL_ID = /^[0-9A-HJKMNP-TV-Z]{26}$/u;
+
+/** 时间线上要显示的业务键；内部 id 和已经写在正文里的键都不再单独重复一遍。 */
+export function visibleSubjectKey(item: TimelineEventPresentation): string | null {
+  if (!item.subjectKey || INTERNAL_ID.test(item.subjectKey)) return null;
+  if (item.detail?.includes(item.subjectKey)) return null;
+  return item.subjectKey;
+}
+
+export function timelineActorLabel(actor: string | null): string | null {
+  if (!actor) return null;
+  if (actor === "SYSTEM") return "系统";
+  if (actor === "USER") return "桌面用户";
+  return actor;
+}

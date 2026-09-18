@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { Empty, ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { formatTime } from "../presentation.js";
@@ -13,6 +14,7 @@ export function KnowledgeBackupPanel({
   notify: Notify;
 }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   const [visibleLimit, setVisibleLimit] = useState(8);
   const backups = useQuery({
     queryKey: ["backups", "knowledge"],
@@ -75,8 +77,15 @@ export function KnowledgeBackupPanel({
                   className="atm-button danger"
                   type="button"
                   disabled={restore.isPending}
-                  onClick={() => {
-                    if (window.confirm("恢复会先备份当前知识库，然后替换为所选快照。继续吗？"))
+                  onClick={async () => {
+                    if (
+                      await dialogs.confirm({
+                        title: "恢复知识库",
+                        message: "恢复会先备份当前知识库，然后替换为所选快照。继续吗？",
+                        confirmLabel: "恢复",
+                        tone: "danger",
+                      })
+                    )
                       restore.mutate(String(backup.id));
                   }}
                 >

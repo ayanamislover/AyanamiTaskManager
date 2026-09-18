@@ -327,3 +327,32 @@
   background: var(--atm-surface-muted);
   outline-offset: -2px;
 }
+/* 已结束任务单独成组放在表尾。分组行只是标题，不可点。 */
+.atm-table .atm-table-section th {
+  height: 34px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--atm-border);
+  background: var(--atm-surface-muted);
+  font-size: 12px;
+}
+.atm-table .atm-table-section th .atm-row-sub {
+  margin-left: 8px;
+  font-weight: 500;
+}
+.atm-table tbody tr.atm-table-section {
+  cursor: default;
+}
+.atm-table tbody tr.atm-table-section:hover {
+  background: transparent;
+}
+.atm-closed-tasks .atm-row-title {
+  color: var(--atm-text-muted);
+}
+.atm-closed-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--atm-border);
+}

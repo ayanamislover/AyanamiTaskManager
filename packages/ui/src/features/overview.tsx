@@ -16,7 +16,7 @@ import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
-import { presentTimelineEvent } from "../timeline-events.js";
+import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
 
 export function OverviewPage({
   client,
@@ -64,6 +64,9 @@ export function OverviewPage({
     );
   if (query.error) return <ErrorState error={query.error} />;
   const data = query.data!;
+  const recentBusinessEvents = ((data.recentEvents ?? []) as Record<string, unknown>[]).filter(
+    (event) => !isSystemTimelineEvent(event),
+  );
   const projects = data.projects.filter((project) => project.lifecycle !== "TRASHED");
   const quickTasks = ((quickQuery.data ?? []) as any[])
     .filter((task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status))
@@ -203,11 +206,12 @@ export function OverviewPage({
           <div className="atm-panel-head">
             <h2>最近变化</h2>
           </div>
-          {(data.recentEvents ?? []).length === 0 ? (
+          {/* 总览只看业务变化；自动备份等系统事件在全局时间线里勾选后查看。 */}
+          {recentBusinessEvents.length === 0 ? (
             <Empty title="暂无事件" text="创建或更新任务后，变化会出现在这里。" />
           ) : (
             <div className="atm-timeline">
-              {(data.recentEvents as Record<string, unknown>[]).slice(0, 8).map((event) => {
+              {recentBusinessEvents.slice(0, 8).map((event) => {
                 const item = presentTimelineEvent(event);
                 return <TimelineEventRow event={event} key={item.id} />;
               })}

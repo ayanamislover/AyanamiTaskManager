@@ -5,6 +5,7 @@ import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/C
 import { CheckCircleIcon as CheckCircle } from "@phosphor-icons/react/dist/icons/CheckCircle";
 import type { WorkItemStatus } from "@ayanami-task/protocol";
 import { checklistToggleIntent, evidenceText } from "../checklist-evidence.js";
+import { useDialogs } from "../components/atm-dialogs.js";
 import { ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { PresenceRootProps } from "../components/presence.js";
 import type { Notify } from "../contracts.js";
@@ -30,6 +31,7 @@ export function TaskDrawer({
 } & PresenceRootProps) {
   const queryClient = useQueryClient();
   const dialogRef = useDialogAccessibility(close, presenceRootProps["data-presence"] !== "closing");
+  const dialogs = useDialogs();
   // 正在为哪个检查项补证据；null 表示没有展开的输入框。
   const [evidenceDraft, setEvidenceDraft] = useState<{ id: string; text: string } | null>(null);
   const query = useQuery({
@@ -97,21 +99,41 @@ export function TaskDrawer({
     onError: (error) =>
       notify(`检查项更新失败：${error instanceof Error ? error.message : String(error)}`),
   });
-  const runAction = (operation: string) => {
+  const runAction = async (operation: string) => {
     const input: Record<string, unknown> = { operation };
     if (operation === "block") {
-      const reason = window.prompt("请填写阻塞原因");
-      if (!reason?.trim()) return;
-      input.blockedReason = reason.trim();
+      const reason = await dialogs.prompt({
+        title: "标记阻塞",
+        label: "阻塞原因",
+        placeholder: "例如：等待上游接口发布",
+        confirmLabel: "标记阻塞",
+        multiline: true,
+        maxLength: 2000,
+      });
+      if (reason === null) return;
+      input.blockedReason = reason;
     }
     if (operation === "wait_user" || operation === "wait_agent") {
-      const waitingFor = window.prompt(
-        operation === "wait_user" ? "请填写等待用户提供的内容" : "请填写等待 Agent 完成的内容",
-      );
-      if (!waitingFor?.trim()) return;
-      input.waitingFor = waitingFor.trim();
+      const waitingFor = await dialogs.prompt({
+        title: operation === "wait_user" ? "等待用户" : "等待 Agent",
+        label: operation === "wait_user" ? "需要用户提供什么" : "需要 Agent 完成什么",
+        confirmLabel: "确认等待",
+        multiline: true,
+        maxLength: 2000,
+      });
+      if (waitingFor === null) return;
+      input.waitingFor = waitingFor;
     }
-    if (operation === "cancel" && !window.confirm("确认取消这个任务？")) return;
+    if (
+      operation === "cancel" &&
+      !(await dialogs.confirm({
+        title: "取消任务",
+        message: "确认取消这个任务？",
+        confirmLabel: "取消任务",
+        tone: "danger",
+      }))
+    )
+      return;
     patch.mutate(input);
   };
   const progress = query.data ? taskProgressPresentation(query.data) : null;
@@ -180,7 +202,7 @@ export function TaskDrawer({
                   className={`atm-button ${["start", "verify", "complete"].includes(operation) ? "primary" : operation === "cancel" ? "danger" : ""}`}
                   disabled={patch.isPending}
                   key={operation}
-                  onClick={() => runAction(operation)}
+                  onClick={() => void runAction(operation)}
                 >
                   {label}
                 </button>

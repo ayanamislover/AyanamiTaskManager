@@ -6,8 +6,13 @@ import { taskRowInteractionProps } from "../components/keyboard-interactions.js"
 import { formatTime, priorityLabels, Status } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
 import type { ProjectTaskSort, ProjectTaskSortField } from "../task-sort.js";
-import { TimelineEventRow } from "./timeline.js";
-import { ProjectTaskSortHeader, type ProjectTaskView } from "./project-task-controls.js";
+import { SystemEventsToggle, TimelineEventRow, useTimelineEvents } from "./timeline.js";
+import {
+  ProjectTaskSortHeader,
+  taskTreeRows,
+  type ProjectTaskView,
+} from "./project-task-controls.js";
+import type { RecentClosedTasks } from "./recent-closed-tasks.js";
 
 type ProjectEventsState = {
   isLoading: boolean;
@@ -21,6 +26,8 @@ export function ProjectTaskViews({
   events,
   filteredTasks,
   sortedTasks,
+  closedRows = [],
+  closedTasks,
   taskSort,
   onTaskSort,
   onOpenTask,
@@ -32,11 +39,14 @@ export function ProjectTaskViews({
   events: ProjectEventsState;
   filteredTasks: any[];
   sortedTasks: any[];
+  closedRows?: any[];
+  closedTasks?: RecentClosedTasks;
   taskSort: ProjectTaskSort | null;
   onTaskSort: (field: ProjectTaskSortField) => void;
   onOpenTask: (key: string) => void;
   onExtractKnowledge?: (recordKey: string) => void | Promise<void>;
 }) {
+  const timeline = useTimelineEvents((events.data?.events ?? []) as Record<string, unknown>[]);
   const content = () => {
     if (tasks.isLoading && tasks.items.length === 0) return <LoadingRows count={6} />;
     if (tasks.error && tasks.items.length === 0)
@@ -139,19 +149,33 @@ export function ProjectTaskViews({
     }
     if (view === "timeline") {
       if (events.isLoading) return <LoadingRows />;
-      const rows = (events.data?.events ?? []) as Record<string, unknown>[];
-      return rows.length ? (
-        <div className="atm-timeline">
-          {rows
-            .slice()
-            .reverse()
-            .map((event) => {
-              const item = presentTimelineEvent(event);
-              return <TimelineEventRow event={event} key={item.id} />;
-            })}
-        </div>
-      ) : (
-        <Empty title="没有项目事件" text="任务发生变化后会显示在这里。" />
+      const rows = timeline.visible;
+      return (
+        <>
+          <div className="atm-timeline-toolbar">
+            <SystemEventsToggle checked={timeline.showSystem} onChange={timeline.setShowSystem} />
+          </div>
+          {rows.length ? (
+            <div className="atm-timeline">
+              {rows
+                .slice()
+                .reverse()
+                .map((event) => {
+                  const item = presentTimelineEvent(event);
+                  return <TimelineEventRow event={event} key={item.id} />;
+                })}
+            </div>
+          ) : (
+            <Empty
+              title="没有项目事件"
+              text={
+                timeline.hiddenCount
+                  ? `只有 ${timeline.hiddenCount} 条系统事件，勾选「显示系统事件」查看。`
+                  : "任务发生变化后会显示在这里。"
+              }
+            />
+          )}
+        </>
       );
     }
     if (!filteredTasks.length) return <Empty title="没有匹配任务" text="调整筛选或创建任务。" />;
@@ -195,45 +219,44 @@ export function ProjectTaskViews({
       );
     }
     if (view === "tree") {
-      const render = (parentId: string | null, depth: number): ReactNode =>
-        filteredTasks
-          .filter((task: any) => (task.parentId ?? null) === parentId)
-          .map((task: any) => (
-            <div key={task.id}>
-              <button
-                className="atm-tree-row"
-                style={{
-                  width: "100%",
-                  paddingLeft: 12 + depth * 22,
-                  borderTop: 0,
-                  borderRight: 0,
-                  borderLeft: 0,
-                  background: "transparent",
-                  textAlign: "left",
-                }}
-                onClick={() => onOpenTask(task.key)}
-              >
-                <GitBranch size={15} />
-                <span className="atm-key">{task.key}</span>
-                <span className="atm-row-title" style={{ flex: 1 }}>
-                  {task.title}
-                </span>
-                {task.discoveredFrom ? (
-                  <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
-                    发现于 {task.discoveredFrom}
-                  </span>
-                ) : null}
-                {task.discoveredCount ? (
-                  <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
-                    发现 {task.discoveredCount}
-                  </span>
-                ) : null}
-                <Status value={task.status} />
-              </button>
-              {render(task.id, depth + 1)}
-            </div>
-          ));
-      return <div className="atm-tree">{render(null, 0)}</div>;
+      const row = (task: any, depth: number): ReactNode => (
+        <button
+          key={task.id}
+          className="atm-tree-row"
+          style={{
+            width: "100%",
+            paddingLeft: 12 + depth * 22,
+            borderTop: 0,
+            borderRight: 0,
+            borderLeft: 0,
+            background: "transparent",
+            textAlign: "left",
+          }}
+          onClick={() => onOpenTask(task.key)}
+        >
+          <GitBranch size={15} />
+          <span className="atm-key">{task.key}</span>
+          <span className="atm-row-title" style={{ flex: 1 }}>
+            {task.title}
+          </span>
+          {task.discoveredFrom ? (
+            <span className="atm-badge" title={`工作中发现于 ${task.discoveredFrom}`}>
+              发现于 {task.discoveredFrom}
+            </span>
+          ) : null}
+          {task.discoveredCount ? (
+            <span className="atm-badge" title={`工作中发现 ${task.discoveredCount} 项`}>
+              发现 {task.discoveredCount}
+            </span>
+          ) : null}
+          <Status value={task.status} />
+        </button>
+      );
+      return (
+        <div className="atm-tree">
+          {taskTreeRows(filteredTasks).map(({ task, depth }) => row(task, depth))}
+        </div>
+      );
     }
     return (
       <table className="atm-table">
@@ -279,43 +302,58 @@ export function ProjectTaskViews({
             />
           </tr>
         </thead>
-        <tbody>
-          {sortedTasks.map((task: any) => (
-            <tr
-              key={task.id}
-              {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
-                onOpenTask(task.key),
-              )}
-            >
-              <td>
-                <div className="atm-row-title">{task.title}</div>
-                <span className="atm-key">{task.key}</span>
-              </td>
-              <td>
-                <Status value={task.status} />
-              </td>
-              <td>{priorityLabels[task.priority] ?? task.priority}</td>
-              <td>
-                {task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}
-              </td>
-              <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
-              <td>{task.targetDate ?? "—"}</td>
-              <td>
-                <span className="atm-cell-wrap">
-                  {task.blockedReason || task.waitingFor || "—"}
-                </span>
-              </td>
-              <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
-              <td>{formatTime(task.updatedAt)}</td>
+        <tbody>{sortedTasks.map(taskRow)}</tbody>
+        {closedRows.length ? (
+          <tbody className="atm-closed-tasks">
+            <tr className="atm-table-section">
+              <th colSpan={9} scope="rowgroup">
+                最近结束
+                {closedTasks ? (
+                  <span className="atm-row-sub">
+                    显示 {closedRows.length} / {closedTasks.total} 项
+                  </span>
+                ) : null}
+              </th>
             </tr>
-          ))}
-        </tbody>
+            {closedRows.map(taskRow)}
+          </tbody>
+        ) : null}
       </table>
     );
   };
+  const taskRow = (task: any) => (
+    <tr
+      key={task.id}
+      {...taskRowInteractionProps(`打开任务 ${task.key}：${task.title}`, () =>
+        onOpenTask(task.key),
+      )}
+    >
+      <td>
+        <div className="atm-row-title">{task.title}</div>
+        <span className="atm-key">{task.key}</span>
+      </td>
+      <td>
+        <Status value={task.status} />
+      </td>
+      <td>{priorityLabels[task.priority] ?? task.priority}</td>
+      <td>{task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}</td>
+      <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
+      <td>{task.targetDate ?? "—"}</td>
+      <td>
+        <span className="atm-cell-wrap">{task.blockedReason || task.waitingFor || "—"}</span>
+      </td>
+      <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
+      <td>{formatTime(task.updatedAt)}</td>
+    </tr>
+  );
+  const showsTasks = view === "list" || view === "board" || view === "tree";
+  const remainingClosed = closedTasks
+    ? Math.max(0, closedTasks.total - closedTasks.items.length)
+    : 0;
   return (
     <>
-      {tasks.items.length || tasks.error ? (
+      {/* 全部读完且没出错时不再显示「已加载 N 项，已全部加载」：那是噪声，不是信息。 */}
+      {tasks.error || tasks.isFetchingNextPage ? (
         <CursorLoadStatus
           loadedCount={tasks.loadedCount}
           hasMore={tasks.hasMore}
@@ -331,6 +369,29 @@ export function ProjectTaskViews({
         aria-labelledby={`project-task-tab-${view}`}
       >
         {content()}
+        {showsTasks && closedTasks && (closedTasks.hasMore || closedTasks.error) ? (
+          <div className="atm-closed-more">
+            {closedTasks.error ? (
+              <span className="atm-inline-error" role="alert">
+                已结束任务加载失败
+              </span>
+            ) : (
+              <span className="atm-row-sub">还有 {remainingClosed} 项已结束任务未加载</span>
+            )}
+            <button
+              className="atm-button"
+              type="button"
+              disabled={closedTasks.isFetchingMore}
+              onClick={closedTasks.loadMore}
+            >
+              {closedTasks.isFetchingMore
+                ? "正在加载…"
+                : closedTasks.error
+                  ? "重试"
+                  : "加载更多已结束任务"}
+            </button>
+          </div>
+        ) : null}
       </section>
     </>
   );

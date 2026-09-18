@@ -60,6 +60,12 @@ export function createTasksSurface(request: ClientRequest) {
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString(filters)}`,
       ),
+    /** 已结束任务按结束时间倒序，附带总数；界面默认只取最近几项。 */
+    recentClosedPageForUi: (project: string, filters: { limit?: number; cursor?: string } = {}) =>
+      request<CursorPage<Record<string, unknown>> & { total: number }>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items/closed${queryString(filters)}`,
+      ),
     listForUi: (
       project: string,
       filters: Record<string, unknown> = {},
