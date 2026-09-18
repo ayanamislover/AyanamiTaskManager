@@ -29,10 +29,10 @@ function repository(name: string): string {
 }
 
 describe("deterministic Git context", () => {
-  it("识别普通主工作树", () => {
+  it("识别普通主工作树", async () => {
     const cwd = repository("atm-git-main");
     const canonicalCwd = realpathSync.native(cwd);
-    expect(inspectGitContext(cwd)).toMatchObject({
+    expect(await inspectGitContext(cwd)).toMatchObject({
       available: true,
       repoRoot: canonicalCwd,
       worktreeRoot: canonicalCwd,
@@ -42,11 +42,11 @@ describe("deterministic Git context", () => {
     });
   });
 
-  it("识别 linked worktree", () => {
+  it("识别 linked worktree", async () => {
     const cwd = repository("atm-git-linked");
     const linked = join(cwd, "..", "linked");
     git(cwd, ["worktree", "add", "--detach", linked, "HEAD"]);
-    expect(inspectGitContext(linked)).toMatchObject({
+    expect(await inspectGitContext(linked)).toMatchObject({
       available: true,
       repoRoot: realpathSync.native(cwd),
       worktreeRoot: realpathSync.native(linked),
@@ -54,51 +54,55 @@ describe("deterministic Git context", () => {
     });
   });
 
-  it("识别 detached HEAD", () => {
+  it("识别 detached HEAD", async () => {
     const cwd = repository("atm-git-detached");
     git(cwd, ["checkout", "--detach", "HEAD"]);
-    expect(inspectGitContext(cwd)).toMatchObject({ available: true, branch: null, detached: true });
+    expect(await inspectGitContext(cwd)).toMatchObject({
+      available: true,
+      branch: null,
+      detached: true,
+    });
   });
 
-  it("识别 dirty working tree", () => {
+  it("识别 dirty working tree", async () => {
     const cwd = repository("atm-git-dirty");
     writeFileSync(join(cwd, "tracked.txt"), "changed\n", "utf8");
-    expect(inspectGitContext(cwd)).toMatchObject({ available: true, dirty: true });
+    expect(await inspectGitContext(cwd)).toMatchObject({ available: true, dirty: true });
   });
 
-  it("把非 Git 项目作为正常 unavailable 返回", () => {
+  it("把非 Git 项目作为正常 unavailable 返回", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "atm-not-git-"));
     roots.push(cwd);
-    expect(inspectGitContext(cwd)).toMatchObject({ available: false, error: "NOT_GIT" });
+    expect(await inspectGitContext(cwd)).toMatchObject({ available: false, error: "NOT_GIT" });
   });
 
-  it("工作树已删除时不抛异常", () => {
+  it("工作树已删除时不抛异常", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "atm-missing-worktree-"));
     rmSync(cwd, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
-    expect(inspectGitContext(cwd)).toMatchObject({
+    expect(await inspectGitContext(cwd)).toMatchObject({
       available: false,
       error: "WORKTREE_MISSING",
     });
   });
 
-  it("Session 中途 branch/head 变化可被下一次观察捕获", () => {
+  it("Session 中途 branch/head 变化可被下一次观察捕获", async () => {
     const cwd = repository("atm-git-refresh");
-    const first = inspectGitContext(cwd);
+    const first = await inspectGitContext(cwd);
     git(cwd, ["checkout", "--detach", "HEAD"]);
     writeFileSync(join(cwd, "second.txt"), "second\n", "utf8");
     git(cwd, ["add", "second.txt"]);
     git(cwd, ["commit", "-m", "second"]);
-    const second = inspectGitContext(cwd);
+    const second = await inspectGitContext(cwd);
     expect(second.head).not.toBe(first.head);
     expect(second).toMatchObject({ branch: null, detached: true });
   });
 
-  it("Git command 超时只返回错误状态", () => {
+  it("Git command 超时只返回错误状态", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "atm-git-timeout-"));
     roots.push(cwd);
     expect(
-      inspectGitContext(cwd, {
-        runner: () => ({
+      await inspectGitContext(cwd, {
+        runner: async () => ({
           status: null,
           stdout: "",
           stderr: "",

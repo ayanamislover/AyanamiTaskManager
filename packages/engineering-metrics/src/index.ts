@@ -1,188 +1,19 @@
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import {
+  codeKind,
+  createScanContext,
+  dependencyNamesFromJson,
+  EMPTY_TREE,
+  included,
+  lineCount,
+  mapLimited,
+  normalizePath,
+  READ_CONCURRENCY,
+  type ScanContext,
+} from "./scan-context.js";
 
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-const CODE_EXTENSIONS = new Set([
-  ".c",
-  ".cc",
-  ".cpp",
-  ".cs",
-  ".css",
-  ".go",
-  ".h",
-  ".hpp",
-  ".html",
-  ".java",
-  ".js",
-  ".jsx",
-  ".kt",
-  ".kts",
-  ".lua",
-  ".mjs",
-  ".php",
-  ".ps1",
-  ".py",
-  ".rb",
-  ".rs",
-  ".scss",
-  ".sh",
-  ".sql",
-  ".svelte",
-  ".swift",
-  ".ts",
-  ".tsx",
-  ".vue",
-]);
-const EXCLUDED_SEGMENTS = new Set([
-  ".git",
-  ".next",
-  ".nuxt",
-  ".output",
-  ".turbo",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "output",
-  "release",
-  "target",
-  "vendor",
-]);
-const LOCK_FILES = new Set([
-  "bun.lock",
-  "bun.lockb",
-  "composer.lock",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "poetry.lock",
-  "uv.lock",
-  "yarn.lock",
-]);
-
-export type GitContextError = "NOT_GIT" | "WORKTREE_MISSING" | "COMMAND_TIMEOUT" | "COMMAND_FAILED";
-
-export type GitContext = {
-  available: boolean;
-  repoRoot: string | null;
-  worktreeRoot: string | null;
-  gitCommonDir: string | null;
-  isLinkedWorktree: boolean | null;
-  branch: string | null;
-  head: string | null;
-  detached: boolean | null;
-  dirty: boolean | null;
-  error: GitContextError | null;
-};
-
-export type GitCommandResult = {
-  status: number | null;
-  stdout: string;
-  stderr: string;
-  signal?: string | null;
-  error?: Error & { code?: string };
-};
-
-export type GitCommandRunner = (args: string[], cwd: string, timeoutMs: number) => GitCommandResult;
-
-function defaultGitCommandRunner(args: string[], cwd: string, timeoutMs: number): GitCommandResult {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    timeout: timeoutMs,
-    windowsHide: true,
-  });
-  return {
-    status: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    signal: result.signal,
-    ...(result.error ? { error: result.error } : {}),
-  };
-}
-
-function unavailable(error: GitContextError): GitContext {
-  return {
-    available: false,
-    repoRoot: null,
-    worktreeRoot: null,
-    gitCommonDir: null,
-    isLinkedWorktree: null,
-    branch: null,
-    head: null,
-    detached: null,
-    dirty: null,
-    error,
-  };
-}
-
-function gitContextFailure(result: GitCommandResult): GitContextError {
-  if (result.error?.code === "ETIMEDOUT" || result.signal === "SIGTERM") return "COMMAND_TIMEOUT";
-  return /not a git repository/iu.test(`${result.stderr}\n${result.stdout}`)
-    ? "NOT_GIT"
-    : "COMMAND_FAILED";
-}
-
-function absoluteGitPath(cwd: string, value: string): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const absolute = resolve(cwd, trimmed);
-  try {
-    // Windows may expose cwd through an 8.3 alias while Git returns the long path.
-    // Canonicalize every observed Git path so identity and linked-worktree checks
-    // compare the same filesystem object instead of two textual spellings.
-    return realpathSync.native(absolute);
-  } catch {
-    return absolute;
-  }
-}
-
-export function inspectGitContext(
-  cwd: string,
-  options: { timeoutMs?: number; runner?: GitCommandRunner } = {},
-): GitContext {
-  if (!existsSync(cwd)) return unavailable("WORKTREE_MISSING");
-  const timeoutMs = Math.max(100, Math.min(10_000, options.timeoutMs ?? 1500));
-  const runner = options.runner ?? defaultGitCommandRunner;
-  const run = (args: string[]) => runner(args, cwd, timeoutMs);
-  const rootResult = run(["rev-parse", "--show-toplevel"]);
-  if (rootResult.status !== 0) return unavailable(gitContextFailure(rootResult));
-
-  const worktreeRoot = absoluteGitPath(cwd, rootResult.stdout);
-  if (!worktreeRoot) return unavailable("COMMAND_FAILED");
-  const gitDirResult = run(["rev-parse", "--absolute-git-dir"]);
-  const commonDirResult = run(["rev-parse", "--git-common-dir"]);
-  const headResult = run(["rev-parse", "HEAD"]);
-  const branchResult = run(["branch", "--show-current"]);
-  const statusResult = run(["status", "--porcelain", "--untracked-files=normal"]);
-  const worktreesResult = run(["worktree", "list", "--porcelain"]);
-  const gitDir = gitDirResult.status === 0 ? absoluteGitPath(cwd, gitDirResult.stdout) : null;
-  const gitCommonDir =
-    commonDirResult.status === 0 ? absoluteGitPath(cwd, commonDirResult.stdout) : null;
-  const worktrees =
-    worktreesResult.status === 0
-      ? worktreesResult.stdout
-          .split(/\r?\n/gu)
-          .filter((line) => line.startsWith("worktree "))
-          .map((line) => absoluteGitPath(cwd, line.slice("worktree ".length)))
-          .filter((path): path is string => Boolean(path))
-      : [];
-  const branch = branchResult.status === 0 ? branchResult.stdout.trim() || null : null;
-  const head = headResult.status === 0 ? headResult.stdout.trim() || null : null;
-  return {
-    available: true,
-    repoRoot: worktrees[0] ?? worktreeRoot,
-    worktreeRoot,
-    gitCommonDir,
-    isLinkedWorktree:
-      gitDir && gitCommonDir ? gitDir.toLowerCase() !== gitCommonDir.toLowerCase() : null,
-    branch,
-    head,
-    detached: head ? branch === null : null,
-    dirty: statusResult.status === 0 ? statusResult.stdout.trim().length > 0 : null,
-    error: null,
-  };
-}
+export type { GitCommandResult, GitCommandRunner } from "./git-command.js";
+export { defaultGitCommandRunner } from "./git-command.js";
+export { inspectGitContext, type GitContext, type GitContextError } from "./git-context.js";
 
 export type FileMetric = { path: string; loc: number };
 export type ChurnMetric = { path: string; added: number; deleted: number; churn: number };
@@ -215,83 +46,11 @@ export type WorkItemEngineeringMetrics = {
   capturedAt: string;
 };
 
-function git(directory: string, args: string[]): string {
-  try {
-    return execFileSync("git", args, {
-      cwd: directory,
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: 30_000,
-      windowsHide: true,
-    }).trim();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`GIT_METRICS_FAILED: ${message}`);
-  }
-}
-
-function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/^\.\//u, "");
-}
-
-function extension(path: string): string {
-  const name = normalizePath(path).split("/").at(-1) ?? "";
-  const index = name.lastIndexOf(".");
-  return index < 0 ? "" : name.slice(index).toLowerCase();
-}
-
-function included(path: string): boolean {
-  const normalized = normalizePath(path);
-  if (!normalized || LOCK_FILES.has(normalized.split("/").at(-1) ?? "")) return false;
-  return !normalized.split("/").some((segment) => EXCLUDED_SEGMENTS.has(segment));
-}
-
-function codeKind(path: string): "source" | "test" | null {
-  const normalized = normalizePath(path).toLowerCase();
-  if (
-    !included(normalized) ||
-    !CODE_EXTENSIONS.has(extension(normalized)) ||
-    normalized.endsWith(".d.ts")
-  )
-    return null;
-  const fileName = normalized.split("/").at(-1) ?? "";
-  return normalized
-    .split("/")
-    .some((segment) => ["test", "tests", "__tests__", "spec", "specs"].includes(segment)) ||
-    /(?:^|\.)(?:test|spec)\.[^.]+$/u.test(fileName)
-    ? "test"
-    : "source";
-}
-
-function lineCount(content: string): number {
-  if (!content) return 0;
-  const lines = content.replaceAll("\r\n", "\n").split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines.length;
-}
-
-function readText(directory: string, relativePath: string): string | null {
-  const absolute = resolve(directory, ...normalizePath(relativePath).split("/"));
-  const root = `${resolve(directory)}${sep}`.toLowerCase();
-  if (!absolute.toLowerCase().startsWith(root) || !existsSync(absolute)) return null;
-  const buffer = readFileSync(absolute);
-  if (buffer.includes(0)) return null;
-  return buffer.toString("utf8");
-}
-
-function files(directory: string): string[] {
-  const output = git(directory, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
-  return output
-    .split("\0")
-    .map(normalizePath)
-    .filter((path) => path && included(path));
-}
-
-function numstat(
-  directory: string,
+async function numstat(
+  scan: ScanContext,
   baseline: string,
-): Array<{ path: string; added: number; deleted: number }> {
-  const output = git(directory, ["diff", "--numstat", "--no-renames", baseline, "--"]);
+): Promise<Array<{ path: string; added: number; deleted: number }>> {
+  const output = await scan.run(["diff", "--numstat", "--no-renames", baseline, "--"]);
   return output
     .split(/\r?\n/u)
     .filter(Boolean)
@@ -303,104 +62,99 @@ function numstat(
     });
 }
 
-function baselineBefore(directory: string, cutoff: Date): string {
-  if (gitHead(directory) === EMPTY_TREE) return EMPTY_TREE;
+async function baselineBefore(scan: ScanContext, cutoff: Date): Promise<string> {
+  if ((await scan.head()) === EMPTY_TREE) return EMPTY_TREE;
   return (
-    git(directory, ["rev-list", "-1", `--before=${cutoff.toISOString()}`, "HEAD"]) || EMPTY_TREE
+    (await scan.run(["rev-list", "-1", `--before=${cutoff.toISOString()}`, "HEAD"])) || EMPTY_TREE
   );
 }
 
-function netCodeLines(directory: string, baseline: string): number {
-  return numstat(directory, baseline).reduce(
+async function netCodeLines(scan: ScanContext, cutoff: Date): Promise<number> {
+  const changes = await numstat(scan, await baselineBefore(scan, cutoff));
+  return changes.reduce(
     (sum, item) => (codeKind(item.path) ? sum + item.added - item.deleted : sum),
     0,
   );
 }
 
-function dependencyNamesFromJson(content: string): string[] {
-  try {
-    const parsed = JSON.parse(content) as Record<string, unknown>;
-    return ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].flatMap(
-      (key) =>
-        parsed[key] && typeof parsed[key] === "object"
-          ? Object.keys(parsed[key] as Record<string, unknown>)
-          : [],
-    );
-  } catch {
-    return [];
-  }
-}
-
-function currentDependencies(directory: string): Set<string> {
-  const result = new Set<string>();
-  for (const path of files(directory).filter((path) => path.endsWith("package.json"))) {
-    const content = readText(directory, path);
-    if (content) for (const dependency of dependencyNamesFromJson(content)) result.add(dependency);
-  }
-  return result;
-}
-
-function baselineDependencies(directory: string, baseline: string): Set<string> {
-  const result = new Set<string>();
-  const paths = git(directory, ["ls-tree", "-r", "--name-only", baseline])
+async function baselineDependencies(scan: ScanContext, baseline: string): Promise<Set<string>> {
+  const paths = (await scan.run(["ls-tree", "-r", "--name-only", baseline]))
     .split(/\r?\n/u)
     .filter((path) => path.endsWith("package.json") && included(path));
-  for (const path of paths) {
+  const result = new Set<string>();
+  // 每个清单一个 `git show`，monorepo 里可能有上百个：要并发，但不能一口气全放出去。
+  await mapLimited(paths, READ_CONCURRENCY, async (path) => {
     let content = "";
     try {
-      content = git(directory, ["show", `${baseline}:${normalizePath(path)}`]);
+      content = await scan.run(["show", `${baseline}:${normalizePath(path)}`]);
     } catch {
-      continue;
+      return;
     }
     for (const dependency of dependencyNamesFromJson(content)) result.add(dependency);
-  }
+  });
   return result;
 }
 
-function untrackedCode(directory: string): Array<{ path: string; added: number }> {
-  const tracked = new Set(
-    git(directory, ["ls-files", "--cached", "-z"]).split("\0").map(normalizePath),
+async function untrackedCode(scan: ScanContext): Promise<Array<{ path: string; added: number }>> {
+  const tracked = await scan.trackedPaths();
+  const candidates = (await scan.files()).filter(
+    (path) => !tracked.has(path) && codeKind(path) !== null,
   );
-  return files(directory).flatMap((path) => {
-    if (tracked.has(path) || !codeKind(path)) return [];
-    const content = readText(directory, path);
-    return content === null ? [] : [{ path, added: lineCount(content) }];
+  const measured = await mapLimited(candidates, READ_CONCURRENCY, async (path) => {
+    const content = await scan.readText(path);
+    return content === null ? null : { path, added: lineCount(content) };
   });
+  return measured.filter((item): item is NonNullable<typeof item> => item !== null);
 }
 
-export function gitHead(directory: string): string {
-  try {
-    return git(directory, ["rev-parse", "HEAD"]);
-  } catch (error) {
-    if (git(directory, ["rev-parse", "--is-inside-work-tree"]) === "true") return EMPTY_TREE;
-    throw error;
-  }
+export async function gitHead(directory: string): Promise<string> {
+  return createScanContext(directory).head();
 }
 
-export function scanProjectMetrics(
+export async function scanProjectMetrics(
   directory: string,
   options: { now?: Date; topN?: number } = {},
-): ProjectEngineeringMetrics {
+): Promise<ProjectEngineeringMetrics> {
+  const scan = createScanContext(directory);
   const now = options.now ?? new Date();
   const topN = Math.min(20, Math.max(1, options.topN ?? 8));
-  const head = gitHead(directory);
-  const locFiles = files(directory).flatMap((path) => {
+  const head = await scan.head();
+  const paths = await scan.files();
+  // 只留行数：全文读一个丢一个，别为了统计几个数字把整个仓库攥在内存里。
+  const measured = await mapLimited(paths, READ_CONCURRENCY, async (path) => {
     const kind = codeKind(path);
-    if (!kind) return [];
-    const content = readText(directory, path);
-    return content === null ? [] : [{ path, kind, loc: lineCount(content) }];
+    if (!kind) return null;
+    const content = await scan.readText(path);
+    return content === null ? null : { path, kind, loc: lineCount(content) };
   });
-  const churn = new Map<string, { added: number; deleted: number }>();
-  const log =
+  const locFiles = measured.filter((item): item is NonNullable<typeof item> => item !== null);
+  const sourceLoc = locFiles
+    .filter((item) => item.kind === "source")
+    .reduce((sum, item) => sum + item.loc, 0);
+  const testLoc = locFiles
+    .filter((item) => item.kind === "test")
+    .reduce((sum, item) => sum + item.loc, 0);
+
+  const [log, dependencies, netLoc7d, netLoc30d] = await Promise.all([
     head === EMPTY_TREE
       ? ""
-      : git(directory, [
+      : scan.run([
           "log",
           `--since=${new Date(now.valueOf() - 30 * 86_400_000).toISOString()}`,
           "--numstat",
           "--format=",
           "--no-renames",
-        ]);
+        ]),
+    scan.dependencies(),
+    head === EMPTY_TREE
+      ? sourceLoc + testLoc
+      : netCodeLines(scan, new Date(now.valueOf() - 7 * 86_400_000)),
+    head === EMPTY_TREE
+      ? sourceLoc + testLoc
+      : netCodeLines(scan, new Date(now.valueOf() - 30 * 86_400_000)),
+  ]);
+
+  const churn = new Map<string, { added: number; deleted: number }>();
   for (const line of log.split(/\r?\n/u).filter(Boolean)) {
     const [added, deleted, ...pathParts] = line.split("\t");
     const path = normalizePath(pathParts.join("\t"));
@@ -410,31 +164,14 @@ export function scanProjectMetrics(
     current.deleted += Number(deleted);
     churn.set(path, current);
   }
-  const sourceLoc = locFiles
-    .filter((item) => item.kind === "source")
-    .reduce((sum, item) => sum + item.loc, 0);
-  const testLoc = locFiles
-    .filter((item) => item.kind === "test")
-    .reduce((sum, item) => sum + item.loc, 0);
+
   return {
     sourceLoc,
     testLoc,
-    fileCount: files(directory).length,
-    dependencyCount: currentDependencies(directory).size,
-    netLoc7d:
-      head === EMPTY_TREE
-        ? sourceLoc + testLoc
-        : netCodeLines(
-            directory,
-            baselineBefore(directory, new Date(now.valueOf() - 7 * 86_400_000)),
-          ),
-    netLoc30d:
-      head === EMPTY_TREE
-        ? sourceLoc + testLoc
-        : netCodeLines(
-            directory,
-            baselineBefore(directory, new Date(now.valueOf() - 30 * 86_400_000)),
-          ),
+    fileCount: paths.length,
+    dependencyCount: dependencies.size,
+    netLoc7d,
+    netLoc30d,
     largestFiles: locFiles
       .sort((left, right) => right.loc - left.loc || left.path.localeCompare(right.path))
       .slice(0, topN)
@@ -448,13 +185,22 @@ export function scanProjectMetrics(
   };
 }
 
-export function scanWorkItemChanges(
+export async function scanWorkItemChanges(
   directory: string,
   baseline: string,
-): WorkItemEngineeringMetrics {
-  const trackedChanges = numstat(directory, baseline);
-  const untracked = untrackedCode(directory);
-  const statuses = git(directory, ["diff", "--name-status", "--no-renames", baseline, "--"])
+): Promise<WorkItemEngineeringMetrics> {
+  const scan = createScanContext(directory);
+  const [trackedChanges, untracked, statusOutput, tracked, paths, baselineDependenciesSet, head] =
+    await Promise.all([
+      numstat(scan, baseline),
+      untrackedCode(scan),
+      scan.run(["diff", "--name-status", "--no-renames", baseline, "--"]),
+      scan.trackedPaths(),
+      scan.files(),
+      baselineDependencies(scan, baseline),
+      scan.head(),
+    ]);
+  const statuses = statusOutput
     .split(/\r?\n/u)
     .filter(Boolean)
     .flatMap((line) => {
@@ -462,11 +208,8 @@ export function scanWorkItemChanges(
       const path = normalizePath(parts.join("\t"));
       return status && path && included(path) ? [{ status, path }] : [];
     });
-  const trackedPaths = new Set(
-    git(directory, ["ls-files", "--cached", "-z"]).split("\0").map(normalizePath),
-  );
-  const untrackedPaths = files(directory)
-    .filter((path) => !trackedPaths.has(path))
+  const untrackedPaths = paths
+    .filter((path) => !tracked.has(path))
     .map((path) => ({ status: "A", path }));
   const unique = new Map<string, string>();
   for (const item of [...statuses, ...untrackedPaths]) unique.set(item.path, item.status);
@@ -476,13 +219,12 @@ export function scanWorkItemChanges(
   ];
   const linesAdded = codeChanges.reduce((sum, item) => sum + item.added, 0);
   const linesDeleted = codeChanges.reduce((sum, item) => sum + item.deleted, 0);
-  const baselineDependenciesSet = baselineDependencies(directory, baseline);
-  const dependenciesAdded = [...currentDependencies(directory)]
+  const dependenciesAdded = [...(await scan.dependencies())]
     .filter((dependency) => !baselineDependenciesSet.has(dependency))
     .sort();
   return {
     baseline,
-    head: gitHead(directory),
+    head,
     filesChanged: [...unique.values()].filter(
       (status) => status.startsWith("M") || status.startsWith("T"),
     ).length,

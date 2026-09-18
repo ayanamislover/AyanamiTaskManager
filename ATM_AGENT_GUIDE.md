@@ -108,6 +108,8 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `reopen` | 重新打开 | `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
 | `edit` | 编辑 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
 
+> `COMPLETION_GATE` 在上表之外还要求当前状态属于 `IN_PROGRESS` 或 `VERIFYING`：没开工过的任务不能直接 `complete`，先 `start`。
+
 <!-- WORK_ITEM_OPERATIONS:END -->
 
 <!-- TASK_PATCH_COMPOSITE:BEGIN -->
@@ -300,6 +302,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。                                                                                            |
 | `dependency not ready`                   | 有 BLOCKS 关系的前置任务尚未 DONE。                                                                                                                                                                                                                                                                                                                                               |
 | `verification required`                  | 任务要求验收，先 `verify` 再 `complete`。                                                                                                                                                                                                                                                                                                                                         |
+| `current state invalid`                  | 任务还没开工。闸门只认 `IN_PROGRESS` 与 `VERIFYING`（reason 里的 `required_status` 写着），BACKLOG / READY / CLAIMED / BLOCKED / WAITING\_\* 都要先 `atm_task_patch(start)` 再 `complete`。reason 里的 `legal_operations` 是当前状态下真正可用的操作，照着挑一个；上面那张状态表列的是状态机允许尝试的操作，闸门在那之后还要再拦一道。                                            |
 
 ### MCP 没有的能力走 REST
 

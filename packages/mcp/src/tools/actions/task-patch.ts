@@ -1,6 +1,7 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   ChecklistBatchItemInputSchema,
+  COMPLETION_GATE_REQUIRED_STATUSES,
   externalizeObjectSchema,
   ReviewCandidateHashSchema,
   TASK_PATCH_OPERATION_NAMES,
@@ -128,6 +129,19 @@ function canonicalTaskPatchItem(value: unknown): TaskPatchItem {
   return taskPatchExternalAdapters[parsed.operation].parse(parsed) as TaskPatchItem;
 }
 
+/**
+ * 16 个 operation 的形状只在 schema 的 oneOf 里，而不少 MCP 客户端渲染 tools/list 时
+ * 会把 oneOf/$defs 直接丢掉——调用方看到的 items 只剩 task_key 与 expected_version，
+ * 连有哪些 operation 都不知道，只能试。描述是所有客户端都会显示的那一行，
+ * 所以清单写在这里，并且从 registry 派生，新增操作不会漏。
+ */
+const description = [
+  `批量变更任务。items 每条都要 task_key 与 expected_version，operation 取值：`,
+  `${TASK_PATCH_OPERATION_NAMES.join("|")}。`,
+  `${compositeTaskPatchOperations.join("|")} 不可与其他操作同批，items 只允许一个元素。`,
+  `complete 还要求任务当前处于 ${COMPLETION_GATE_REQUIRED_STATUSES.join(" 或 ")}，没开工过的先 start。`,
+].join("");
+
 const inputSchema = z
   .object({
     project: projectCode,
@@ -162,7 +176,7 @@ export function createAtmTaskPatchTool(
   return {
     profile: "actions",
     name: "atm_task_patch",
-    description: "批量变更任务。",
+    description,
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: true },

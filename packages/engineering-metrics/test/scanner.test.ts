@@ -24,7 +24,7 @@ function commit(directory: string, message: string, at: Date): void {
 
 describe("轻量工程统计扫描器", () => {
   it("尚无首个 commit 的 Git 工作树仍可使用空树 baseline 统计", async () => {
-    await withTemporaryDirectory("metrics-unborn", (directory) => {
+    await withTemporaryDirectory("metrics-unborn", async (directory) => {
       git(directory, ["init"]);
       mkdirSync(join(directory, "src"));
       writeFileSync(
@@ -32,10 +32,10 @@ describe("轻量工程统计扫描器", () => {
         JSON.stringify({ dependencies: { react: "1" } }),
       );
       writeFileSync(join(directory, "src", "main.ts"), "export const main = true;\n");
-      const metrics = scanProjectMetrics(directory);
+      const metrics = await scanProjectMetrics(directory);
       expect(metrics).toMatchObject({ sourceLoc: 1, testLoc: 0, netLoc7d: 1, netLoc30d: 1 });
       expect(metrics.head).toBe("4b825dc642cb6eb9a060e54bf8d69288fbee4904");
-      expect(scanWorkItemChanges(directory, metrics.head)).toMatchObject({
+      expect(await scanWorkItemChanges(directory, metrics.head)).toMatchObject({
         filesCreated: 2,
         sourceLinesAdded: 1,
         dependenciesAdded: ["react"],
@@ -44,7 +44,7 @@ describe("轻量工程统计扫描器", () => {
   });
 
   it("从真实 Git 仓库计算项目规模、近期净 LOC、最大文件和 churn", async () => {
-    await withTemporaryDirectory("metrics-project", (directory) => {
+    await withTemporaryDirectory("metrics-project", async (directory) => {
       git(directory, ["init"]);
       git(directory, ["config", "user.email", "atm@example.test"]);
       git(directory, ["config", "user.name", "ATM Test"]);
@@ -77,7 +77,7 @@ describe("轻量工程统计扫描器", () => {
       );
       commit(directory, "recent growth", new Date(now.valueOf() - 2 * 86_400_000));
 
-      const metrics = scanProjectMetrics(directory, { now, topN: 3 });
+      const metrics = await scanProjectMetrics(directory, { now, topN: 3 });
       expect(metrics).toMatchObject({ sourceLoc: 4, testLoc: 2, dependencyCount: 2, netLoc7d: 3 });
       expect(metrics.fileCount).toBeGreaterThanOrEqual(4);
       expect(metrics.netLoc30d).toBeGreaterThanOrEqual(6);
@@ -88,7 +88,7 @@ describe("轻量工程统计扫描器", () => {
   });
 
   it("相对任务 baseline 统计修改、新建、删除、行数和新增依赖", async () => {
-    await withTemporaryDirectory("metrics-work-item", (directory) => {
+    await withTemporaryDirectory("metrics-work-item", async (directory) => {
       git(directory, ["init"]);
       git(directory, ["config", "user.email", "atm@example.test"]);
       git(directory, ["config", "user.name", "ATM Test"]);
@@ -101,7 +101,7 @@ describe("轻量工程统计扫描器", () => {
       writeFileSync(join(directory, "src", "main.ts"), "export const main = 1;\n");
       writeFileSync(join(directory, "test", "main.test.ts"), "it('main', () => {});\n");
       commit(directory, "baseline", new Date());
-      const baseline = gitHead(directory);
+      const baseline = await gitHead(directory);
 
       writeFileSync(
         join(directory, "package.json"),
@@ -114,7 +114,7 @@ describe("轻量工程统计扫描器", () => {
       writeFileSync(join(directory, "src", "new.ts"), "export const created = true;\n");
       rmSync(join(directory, "test", "main.test.ts"));
 
-      expect(scanWorkItemChanges(directory, baseline)).toMatchObject({
+      expect(await scanWorkItemChanges(directory, baseline)).toMatchObject({
         filesChanged: 2,
         filesCreated: 1,
         filesDeleted: 1,

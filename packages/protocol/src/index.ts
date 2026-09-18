@@ -14,6 +14,7 @@ export * from "./views/record.js";
 export * from "./views/session.js";
 export * from "./views/task.js";
 export {
+  COMPLETION_GATE_REQUIRED_STATUSES,
   generateWorkItemOperationTable,
   legalWorkItemOperations,
   resolveWorkItemOperation,

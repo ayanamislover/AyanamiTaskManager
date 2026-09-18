@@ -58,6 +58,18 @@ export const WORK_ITEM_STATUS_LABELS = {
   CANCELLED: "已取消",
 } as const satisfies Record<WorkItemStatus, string>;
 
+/**
+ * COMPLETION_GATE 对当前状态的额外要求：完成之前任务必须已经开工。
+ *
+ * `complete.allowedFrom` 列的是状态机层面允许尝试的状态，闸门在那之后还要再拦一道。
+ * 两处以前各写各的，于是生成的操作表宣称 READY 可以直接 complete，真调用却回一句
+ * 「WorkItem 尚未满足完成条件」，看不出差在哪。现在两边读同一个常量。
+ */
+export const COMPLETION_GATE_REQUIRED_STATUSES = [
+  "IN_PROGRESS",
+  "VERIFYING",
+] as const satisfies readonly WorkItemStatus[];
+
 export const WORK_ITEM_OPERATION_TABLE_BEGIN = "<!-- WORK_ITEM_OPERATIONS:BEGIN -->";
 export const WORK_ITEM_OPERATION_TABLE_END = "<!-- WORK_ITEM_OPERATIONS:END -->";
 
@@ -356,6 +368,10 @@ export function generateWorkItemOperationTable(): string {
     "| 操作 | 显示名 | 可进入的当前状态 | 前置条件 |",
     "| --- | --- | --- | --- |",
     ...operationRows,
+    "",
+    `> \`COMPLETION_GATE\` 在上表之外还要求当前状态属于 ${COMPLETION_GATE_REQUIRED_STATUSES.map(
+      (status) => `\`${status}\``,
+    ).join(" 或 ")}：没开工过的任务不能直接 \`complete\`，先 \`start\`。`,
     "",
     WORK_ITEM_OPERATION_TABLE_END,
   ].join("\n");
