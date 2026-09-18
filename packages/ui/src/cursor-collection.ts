@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { CancelledError, useQuery } from "@tanstack/react-query";
 import { AyanamiClientError, type CursorPage } from "@ayanami-task/client";
 
 const MAX_PAGES = 100;
@@ -254,18 +254,19 @@ function settledEntry<T>(
 }
 
 /**
- * 一轮读取交给缓存的结果。
+ * 一轮读取交给缓存的结果。被同一个 key 的新一轮取代时，这一轮必须彻底作废。
  *
- * 真被同一个 key 的新一轮取代时（续读被重读顶掉、hook 被停用），交回上一份已结算的
- * 数据，绝不能把加载中的占位当成结果：React Query 会把它当成功数据缓存起来，
- * 下次命中的就是一份「空列表 + 正在加载」的假结果。
+ * 「交回上一份已结算的数据」看着稳妥，其实两头都会出事：它是这一轮开跑时拍下的快照，
+ * 提交回去会把界面上更新的那一份顶掉；而首轮被取代时那份快照就是空列表，
+ * 交给 React Query 就成了一次「成功读到 0 条」，3 秒新鲜期内谁来读都是空白。
+ * 作废就是作废——CancelledError 让这一轮不留下任何痕迹。
  */
 export function cursorFetchResult<T>(
   outcome: DrainOutcome<T>,
   previous: InternalEntry<T>,
   refreshing: boolean,
 ): InternalEntry<T> {
-  if (outcome.ok === "stale") return { ...previous, loading: false };
+  if (outcome.ok === "stale") throw new CancelledError({ silent: true });
   return settledEntry(outcome, previous, refreshing);
 }
 
@@ -344,19 +345,6 @@ export function useCursorCollection<T>(
     setEntry(owned);
   }, [key, query.data]);
 
-  useEffect(() => {
-    if (enabled) return () => undefined;
-    const generations = generationsRef.current;
-    nextGeneration(generations, key);
-    const next = emptyEntry<T>(key);
-    next.hasMore = false;
-    entryRef.current = next;
-    setEntry(next);
-    return () => {
-      nextGeneration(generations, key);
-    };
-  }, [enabled, key]);
-
   const { refetch } = query;
   const retry = useCallback(async () => {
     const current = entryRef.current;
@@ -370,15 +358,20 @@ export function useCursorCollection<T>(
     const outcome = await drainCursorPages(startState(current), load, () =>
       isActive(generationsRef.current, key, generation),
     );
-    commit(cursorFetchResult(outcome, current, false));
+    // 续读被整轮重读顶掉了：手里这份是开跑时的旧快照，提交回去会把新的顶没。
+    if (outcome.ok === "stale") return;
+    commit(settledEntry(outcome, current, false));
   }, [commit, key, refetch]);
 
   // key 刚变、新一轮读取还没开始的那一帧，不把上一个 key 的数据当成当前数据显示；
   // 但属于这个 key 的缓存要立刻用上，不必等 queryFn 跑。
-  const visible = pickOwnedEntry(key, entry, query.data) ?? {
-    ...emptyEntry<T>(key),
-    loading: enabled,
-  };
+  //
+  // 停用只是「这一块现在不显示」，不动手里和缓存里的数据：在途那一轮照样读完存进缓存，
+  // 重新打开时立刻就有。以前是反过来做的——停用时把本地那份改写成空的占位，
+  // 于是重新打开先看到的是自己写下的空白。
+  const visible = !enabled
+    ? { ...emptyEntry<T>(key), hasMore: false }
+    : (pickOwnedEntry(key, entry, query.data) ?? { ...emptyEntry<T>(key), loading: true });
   return {
     items: visible.items,
     loadedCount: visible.items.length,
@@ -401,7 +394,10 @@ export function useCursorCollections<T>(
   const key = sources.map((source) => source.key).join("\u0000");
   const sourcesRef = useRef(new Map<string, CursorCollectionSource<T>>());
   sourcesRef.current = new Map(sources.map((source) => [source.key, source]));
-  const generationRef = useRef(0);
+  // 代数按项目记，不按来源集合记：谁作废谁，说的是「同一个项目的读取被新的一次接手」。
+  // 按来源集合记会漏掉最要命的那一种——集合从 [X] 变成 [X, Y] 时两轮都在读 X，
+  // 慢的那一轮回来会把新读到的 X 清空。
+  const generationsRef = useRef(new Map<string, number>());
   const entriesRef = useRef<Record<string, InternalEntry<T>>>({});
   const [entries, setEntries] = useState<Record<string, InternalEntry<T>>>({});
 
@@ -411,27 +407,30 @@ export function useCursorCollections<T>(
     setEntries(updated);
   }, []);
 
+  /** 读一个项目；回报这一轮有没有真的结算，没结算说明它已经被新的一次读取接手了。 */
   const read = useCallback(
-    async (projectKey: string, generation: number, resumeOnly: boolean): Promise<void> => {
+    async (projectKey: string, resumeOnly: boolean): Promise<boolean> => {
       const source = sourcesRef.current.get(projectKey);
-      if (!source) return;
+      if (!source) return true;
       const current = entriesRef.current[projectKey] ?? null;
       const resume = Boolean(current?.error && current.hasMore && current.items.length);
-      if (resumeOnly && !resume) return;
+      if (resumeOnly && !resume) return true;
       const refreshing = !resume && Boolean(current?.items.length);
+      // 续读接着当前这一次往下读，不推进代数；整轮重读才推进。
+      const generation = resumeOnly
+        ? (generationsRef.current.get(projectKey) ?? 0)
+        : nextGeneration(generationsRef.current, projectKey);
       if (resume) commit(projectKey, { ...current!, loading: true, error: null });
       else if (!refreshing) commit(projectKey, { ...emptyEntry<T>(projectKey), loading: true });
       const outcome = await drainCursorPages(
         startState(resume ? current : null),
         (cursor) => source.loadPage(cursor),
-        () => generationRef.current === generation,
+        () => isActive(generationsRef.current, projectKey, generation),
       );
-      // 这一轮作废时也要落回已结算的那一份：queryFn 返回的就是这张表，
-      // 留着 loading 占位同样会被缓存成一次「空列表」的成功结果。
-      commit(
-        projectKey,
-        cursorFetchResult(outcome, current ?? emptyEntry<T>(projectKey), refreshing),
-      );
+      // 这个项目已经被新一轮读取接手了：手里这份是旧快照，写回去会把新读到的清空。
+      if (outcome.ok === "stale") return false;
+      commit(projectKey, settledEntry(outcome, current ?? emptyEntry<T>(projectKey), refreshing));
+      return true;
     },
     [commit],
   );
@@ -439,8 +438,6 @@ export function useCursorCollections<T>(
   const query = useQuery<Record<string, InternalEntry<T>>>({
     queryKey: [...queryKey, key],
     queryFn: async () => {
-      const generation = generationRef.current + 1;
-      generationRef.current = generation;
       // 已不在来源里的项目（归档、删除）从结果里去掉。
       const kept = Object.fromEntries(
         Object.entries(entriesRef.current).filter(([projectKey]) =>
@@ -449,7 +446,10 @@ export function useCursorCollections<T>(
       );
       entriesRef.current = kept;
       setEntries(kept);
-      await Promise.all(sources.map((source) => read(source.key, generation, false)));
+      const settled = await Promise.all(sources.map((source) => read(source.key, false)));
+      // 有项目被新一轮接手了：这张表里那一格还是没结算的加载占位，
+      // 交出去就会被缓存成「成功读到 0 条」，回到这个来源集合时只剩一片空白。
+      if (settled.includes(false)) throw new CancelledError({ silent: true });
       return entriesRef.current;
     },
   });
@@ -466,7 +466,7 @@ export function useCursorCollections<T>(
       const current = entriesRef.current[projectKey];
       if (!current?.error) return;
       if (!current.hasMore) return refetch();
-      await read(projectKey, generationRef.current, true);
+      await read(projectKey, true);
     },
     [read, refetch],
   );

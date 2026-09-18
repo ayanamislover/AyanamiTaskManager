@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { isCancelledError } from "@tanstack/react-query";
 import {
   cursorFetchResult,
   isActive,
@@ -39,7 +40,7 @@ describe("列表数据的归属", () => {
   it("归属写在数据上，渲染与缓存接管都走同一判据", () => {
     const source = readFileSync(sourcePath, "utf8");
     for (const contract of [
-      "const visible = pickOwnedEntry(key, entry, query.data)",
+      "pickOwnedEntry(key, entry, query.data)",
       "const owned = pickOwnedEntry(key, query.data);",
       "const current = pickOwnedEntry(key, entryRef.current) ?? emptyEntry<T>(key);",
       "if (next.owner !== keyRef.current) return;",
@@ -54,16 +55,22 @@ describe("列表数据的归属", () => {
 describe("被取代的那一轮读取", () => {
   const previous = entry("tasks\u0000A", ["A-1"]);
 
-  it("作废时交回上一份已结算的数据，绝不把加载占位当结果", () => {
-    // 这一份正是 queryFn 发给界面的加载占位：空列表 + loading。
-    const placeholder = { ...previous, items: [] as string[], loading: true };
-
-    const result = cursorFetchResult({ ok: "stale" }, placeholder, false);
-
-    // React Query 会把返回值当成功数据缓存起来，loading 为真就等于缓存了一次假成功：
-    // 新鲜期内切回这个 key 命中的是空列表，界面白着，要等下一轮刷新才回来。
-    expect(result.loading).toBe(false);
-    expect(result.owner).toBe("tasks\u0000A");
+  it("作废时什么都不交，抛 CancelledError 让这一轮不留痕迹", () => {
+    // 手里这份是开跑时拍下的快照：首轮被取代时它是空列表，刷新时它是上一版数据。
+    // 两种都不能交出去——React Query 会把返回值当成功结果缓存，
+    // 于是要么「成功读到 0 条」白屏，要么把界面上更新的那一份顶回旧版本。
+    for (const snapshot of [
+      { ...previous, items: [] as string[], loading: true },
+      { ...previous, items: ["A-0"], loading: false },
+    ]) {
+      let thrown: unknown = null;
+      try {
+        cursorFetchResult({ ok: "stale" }, snapshot, false);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(isCancelledError(thrown)).toBe(true);
+    }
   });
 
   it("读完了照常结算", () => {
@@ -108,10 +115,20 @@ describe("被取代的那一轮读取", () => {
     // 作废判据必须带上 key（换行由 Prettier 决定，这里不较真排版）。
     expect(source).toMatch(/isActive\(\s*generationsRef\.current,\s*key,\s*generation,?\s*\)/u);
     expect(source).not.toContain("loadRef.current(cursor)");
+    // 作废的一轮一律不写界面：手里那份是开跑时的旧快照，提交回去会把新的顶没。
+    expect(source).not.toMatch(/commit\([^)]*cursorFetchResult\(/u);
+    expect(source).toContain('if (outcome.ok === "stale") return;');
+    // 停用只挡显示，不改手里和缓存里的数据，重新打开才能立刻拿到完整结果。
+    expect(source).toContain("const visible = !enabled");
     // 共用一个计数器时，切到别的 key 会把上一个 key 没读完的那一轮判成作废。
     expect(source).not.toMatch(/isActive\(generationRef/u);
-    // 每一条出口都得过 cursorFetchResult，不能再有「作废就不管了」的分支
-    // ——手里剩下的正是那份加载占位。
-    expect(source).not.toContain('outcome.ok !== "stale"');
+    // 多项目版的 queryFn 返回的是共用的那张表，被接手的那一格还留着加载占位。
+    expect(source).toContain(
+      "if (settled.includes(false)) throw new CancelledError({ silent: true });",
+    );
+    // 多项目版按项目记代数：[X] 变成 [X, Y] 时两轮都在读 X，慢的那一轮不能清掉新的。
+    expect(source).toMatch(
+      /isActive\(\s*generationsRef\.current,\s*projectKey,\s*generation,?\s*\)/u,
+    );
   });
 });
