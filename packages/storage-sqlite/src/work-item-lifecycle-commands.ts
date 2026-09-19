@@ -284,6 +284,13 @@ export class WorkItemLifecycleCommands {
                 message: "等待时必须提供 waitingFor",
                 details: { task_key: patch.taskKey, field: "waitingFor" },
               });
+            if (row.status === "BLOCKED") {
+              // Explicit reclassification, not a synthetic start: keep ownership and
+              // started_at, resolve the old blocker, and emit only work.waiting.
+              targetPhase = "IN_PROGRESS";
+              updates.push("phase = 'IN_PROGRESS'", "phase_inferred = 0", "blocked_reason = NULL");
+              this.#maintenance.resolveActiveBlockers(row.id, now);
+            }
             updates.push("status = ?", "waiting_on = ?", "waiting_for = ?");
             values.push(
               targetStatus,

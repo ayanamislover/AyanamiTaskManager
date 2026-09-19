@@ -67,6 +67,14 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 
 所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要应一次写清结果、证据和下一步，不贴原始日志。
 
+进度、检查项、子任务聚合与 `atm_end` 都可能改变任务版本。下一次写入使用本次 ACK 的 `version`，不自行加一。验收已经完成时优先单独一批 `verify_and_complete`，不需要为了流程拆成 verify、complete 两次；该操作仍检查证据和完成条件。
+
+task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等待对象，普通补充说明请放 `summary`。明确将阻塞重新归类为外部等待时，可直接 `wait_agent` / `wait_user`，它会解除原阻塞并记录等待，不制造开始事件。任务 context/full 和有状态快照的写回执包含 claim owner/lease；重开不代表已释放旧 claim，过期接手仍须明确 `takeover_stale:true`，不得抢占活 owner。
+
+编排工具结果时只输出一份业务载荷：`result.structuredContent ?? result.content`。MCP 同时保留两种载荷是为兼容不同客户端，不要把整个对象重复展开；失败时也必须保留错误正文。写回执是该次操作的快照，重放旧 `op_id` 不等于查询当前状态。
+
+候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`quick` 不会自动绕过；先由用户在项目管理中恢复，重复 `begin` 不会修复生命周期。
+
 ### 字段约束速查
 
 **以本节为准，不要以眼前渲染出来的 schema 为准。** ATM 发出的 `tools/list` 字节里这些约束都在（实测过安装版的 wire JSON），但到调用方眼前会被中间某一层删短：`enum` / `oneOf` / `maxLength` 丢成 `{}`，`required` 也会被删得只剩几项（实测：`atm_record` 发布的 `required` 是 `project` / `session` / `op_id` / `kind` / `title` / `summary` 六项，渲染到调用方眼前只剩 `kind`）。能稳定传到调用方眼前的只有 description 和属性名。反方向也有：有客户端的校验器把带 `default` 的字段当成必填（实测：`atm_record.scope` 有 `default: "PROJECT"`，服务端不传照样接受，却在到达 ATM 之前就被拦下）。两头都对不上时，**照本节把该传的一次传全**，包括那些本来有默认值的字段。撞上限的代价不对称：被拒之后整个请求要原样重发，而 `detail` 这类正文可能有好几 KB。**先写 detail，`summary` 最后写，提交前量一遍。**
@@ -101,7 +109,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `READY` | 可开始 | `claim`, `start`, `complete`, `cancel`, `edit` |
 | `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
 | `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
-| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `complete`, `cancel`, `reopen`, `edit` |
+| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `complete`, `cancel`, `reopen`, `edit` |
 | `WAITING_USER` | 等待用户 | `start`, `release`, `block`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
 | `WAITING_AGENT` | 等待 Agent | `start`, `release`, `block`, `wait_agent`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
 | `VERIFYING` | 验收中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
@@ -115,8 +123,8 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
 | `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
 | `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
-| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `WAITING_AGENT` | WAITING_FOR |
-| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `WAITING_USER` | WAITING_FOR |
+| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_AGENT` | WAITING_FOR |
+| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_USER` | WAITING_FOR |
 | `verify` | 提交验收 | `IN_PROGRESS`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | - |
 | `complete` | 完成 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | COMPLETION_GATE |
 | `cancel` | 取消 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CANCEL_REFERENCES |
@@ -256,18 +264,18 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
 
-| 字段                 | 语义                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ok`                 | 写操作是否被 ATM 接受。                                                                                                                                            |
-| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                                                                                                                            |
-| `project`            | 规范化后的项目代码。                                                                                                                                               |
-| `session`            | 实际承载写操作的 Session。                                                                                                                                         |
-| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                         |
-| `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。 |
-| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。`version` 即该实体当前版本，下一次写同一实体时直接作为 `expected_version` 传回，不要自行加一。       |
-| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                             |
-| `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                 |
-| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                         |
+| 字段                 | 语义                                                                                                                                                                                                                                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`                 | 写操作是否被 ATM 接受。                                                                                                                                                                                                                                                                             |
+| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                                                                                                                                                                                                                                                             |
+| `project`            | 规范化后的项目代码。                                                                                                                                                                                                                                                                                |
+| `session`            | 实际承载写操作的 Session。                                                                                                                                                                                                                                                                          |
+| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                                                                                                                                                          |
+| `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。                                                                                                                                  |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。任务写入有状态快照时还含 `status`、`waiting_on`、`claimed_by_session_id`、`claim_lease_until`；旧回执可能无这些字段。它们是该次写入的结果，幂等重放不是当前状态查询。下一次写同一实体使用返回版本，不要自行加一；并发变更仍可能冲突。 |
+| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                                                                                                                                                              |
+| `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                                                                                                                                                  |
+| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                                                                                                                                                          |
 
 `entities` 最多预览 12 项且不超过 1800 个 JSON 字符。以 `entity_count` 判断精确总数；`entities_truncated=true` 时可直接执行返回的 `details_cursor` 做一次最多 50000 字符的 durable 回查：
 

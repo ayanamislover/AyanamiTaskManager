@@ -64,6 +64,8 @@ export const TaskContextViewSchema = TaskCoreViewSchema.extend({
   acceptance: z.array(z.string()),
   checklistSummary: ChecklistSummarySchema,
   assigneeAgentId: z.string().nullable(),
+  claimedBySessionId: z.string().nullable(),
+  claimLeaseUntil: z.string().nullable(),
   waitingFor: z.string().nullable(),
   blockedReason: z.string().nullable(),
 }).strict();

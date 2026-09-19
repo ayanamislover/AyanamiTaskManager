@@ -248,7 +248,8 @@ describe("Backup and restore failure atomicity", () => {
       manager.createBackup({ scope: "PROJECT", project: project.id, reason: "MANUAL" }),
     ).rejects.toThrow("injected backup catalog event failure");
     expect(manager.listBackups(project.id)).toHaveLength(beforeCatalog);
-    expect(readdirSync(backupDirectory).sort()).toEqual(beforeFiles);
+    const afterFiles = readdirSync(backupDirectory).sort();
+    expect(afterFiles, JSON.stringify({ beforeFiles, afterFiles })).toEqual(beforeFiles);
     expect(
       manager.registry.sqlite
         .prepare("SELECT COUNT(*) AS count FROM global_events WHERE type = 'backup.created'")

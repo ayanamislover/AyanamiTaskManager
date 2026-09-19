@@ -4,6 +4,7 @@ import { openManagedDatabase, type ManagedDatabase } from "./database.js";
 
 export type PoolProject = {
   id: string;
+  code: string;
   databasePath: string;
   lifecycle: string;
 };
@@ -30,9 +31,30 @@ export class ProjectDatabasePool {
   async openProject(codeOrId: string): Promise<ManagedDatabase> {
     const project = this.#getProject(codeOrId);
     if (project.lifecycle !== "ACTIVE" && project.lifecycle !== "ARCHIVED") {
+      const isTrashed = project.lifecycle === "TRASHED";
       throw new AtmError("PROJECT_DB_UNAVAILABLE", {
-        message: `项目数据库当前不可用：${project.lifecycle}`,
-        details: { lifecycle: project.lifecycle },
+        message: isTrashed
+          ? `项目数据库当前不可用：${project.code}（${project.id}）已在垃圾箱中；请先从项目管理入口恢复项目后再重试。quick 模式不会绕过已匹配项目。`
+          : `项目数据库当前不可用：${project.code}（${project.id}），生命周期为 ${project.lifecycle}`,
+        retryable: !isTrashed,
+        details: {
+          lifecycle: project.lifecycle,
+          project_code: project.code,
+          project_id: project.id,
+          recovery: isTrashed
+            ? {
+                action: "restore_project",
+                message: "请从项目管理入口恢复该项目；不会自动恢复或新建项目。",
+              }
+            : null,
+          quick: isTrashed
+            ? {
+                matched_project: true,
+                action: "do_not_bypass",
+                message: "quick 入口保持匹配项目优先，不会静默绕过垃圾箱项目。",
+              }
+            : null,
+        },
       });
     }
     const cached = this.#projects.get(project.id);

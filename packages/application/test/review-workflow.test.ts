@@ -54,6 +54,42 @@ async function openReviewFixture(code: string, reviewChecklist = false) {
   return { service, project, primary: primary.session, parent, review };
 }
 
+async function startReviewer(
+  ctx: Awaited<ReturnType<typeof openReviewFixture>>,
+  agentId = "review-agent",
+) {
+  const reviewer = await ctx.service.begin({
+    projectCode: ctx.project.code,
+    agentId,
+    role: "REVIEWER",
+  });
+  const claimed = await ctx.service.patchWorkItems(
+    ctx.project.code,
+    reviewer.session,
+    `${agentId}-claim`,
+    [
+      {
+        taskKey: ctx.review.key,
+        expectedVersion: ctx.review.version,
+        operation: "claim",
+      },
+    ],
+  );
+  const started = await ctx.service.patchWorkItems(
+    ctx.project.code,
+    reviewer.session,
+    `${agentId}-start`,
+    [
+      {
+        taskKey: ctx.review.key,
+        expectedVersion: claimed.items[0]!.version,
+        operation: "start",
+      },
+    ],
+  );
+  return { session: String(reviewer.session), version: started.items[0]!.version };
+}
+
 describe("一等 Review verdict 工作流", () => {
   it("创建并读回绑定 REVIEW WorkItem、父 checklist 和规范化候选 hashes 的请求", async () => {
     const ctx = await openReviewFixture("RVREQ");
@@ -435,6 +471,32 @@ describe("一等 Review verdict 工作流", () => {
           request_key: request.request.key,
           expected: expectedHashes,
           actual: [{ name: "git_head", value: "e".repeat(40) }],
+          request: {
+            key: request.request.key,
+            review_task_key: hashCtx.review.key,
+            expected_review_task_version: started.items[0]!.version,
+            parent_checklist_id: hashCtx.parent.checklist[0]!.id,
+            parent_checklist_version: hashCtx.parent.checklist[0]!.version,
+          },
+          bound: expectedHashes,
+          submitted: [{ name: "git_head", value: "e".repeat(40) }],
+          missing: [],
+          extra: [],
+          mismatch: [
+            {
+              name: "git_head",
+              bound: "d".repeat(40),
+              submitted: "e".repeat(40),
+            },
+          ],
+          request_lookup: {
+            project: hashCtx.project.code,
+            request_key: request.request.key,
+            transport: "REST",
+            method: "GET",
+            path: `/api/v1/projects/${hashCtx.project.code}/reviews/requests/${request.request.key}`,
+            authentication: "daemon_bearer",
+          },
         },
       });
       await expect(
@@ -594,6 +656,93 @@ describe("一等 Review verdict 工作流", () => {
       });
     } finally {
       gateCtx.service.close();
+    }
+  });
+
+  it("一次返回多键 missing/extra/mismatch，并继续拒绝过时候选", async () => {
+    const ctx = await openReviewFixture("RVDIFF");
+    try {
+      const bound = [
+        { name: "base", value: "a".repeat(40) },
+        { name: "parent", value: "b".repeat(40) },
+      ];
+      const request = await ctx.service.createReviewRequest(
+        ctx.project.code,
+        ctx.primary,
+        "diff-request",
+        {
+          reviewTaskKey: ctx.review.key,
+          expectedReviewTaskVersion: ctx.review.version,
+          parentChecklistId: ctx.parent.checklist[0]!.id,
+          expectedParentChecklistVersion: ctx.parent.checklist[0]!.version,
+          expectedCandidateHashes: bound,
+        },
+      );
+      const reviewer = await startReviewer(ctx, "diff-reviewer");
+      const submitted = [
+        { name: "base", value: "c".repeat(40) },
+        { name: "tree", value: "d".repeat(40) },
+      ];
+
+      await expect(
+        ctx.service.submitReview(ctx.project.code, reviewer.session, "diff-mismatch", {
+          requestKey: request.request.key,
+          expectedReviewTaskVersion: reviewer.version,
+          verdict: "APPROVED",
+          reviewedHashes: submitted,
+          evidence: [{ kind: "test_result", value: "tests passed" }],
+        }),
+      ).rejects.toMatchObject({
+        code: "CANDIDATE_HASH_MISMATCH",
+        details: {
+          bound,
+          submitted,
+          missing: [{ name: "parent", value: "b".repeat(40) }],
+          extra: [{ name: "tree", value: "d".repeat(40) }],
+          mismatch: [
+            {
+              name: "base",
+              bound: "a".repeat(40),
+              submitted: "c".repeat(40),
+            },
+          ],
+        },
+      });
+
+      const database = await ctx.service.databases.openProject(ctx.project.code);
+      const updatedBound = [{ name: "base", value: "e".repeat(40) }];
+      // The request view intentionally does not expose its storage id; use its local number
+      // to update the fixture's one request without weakening the public binding contract.
+      database.sqlite
+        .prepare("UPDATE review_requests SET expected_candidate_hashes_json = ? WHERE local_no = ?")
+        .run(JSON.stringify(updatedBound), Number(request.request.key.split("-").at(-1)));
+
+      await expect(
+        ctx.service.submitReview(ctx.project.code, reviewer.session, "stale-mismatch", {
+          requestKey: request.request.key,
+          expectedReviewTaskVersion: reviewer.version,
+          verdict: "APPROVED",
+          reviewedHashes: [{ name: "base", value: "a".repeat(40) }],
+          evidence: [{ kind: "test_result", value: "old candidate" }],
+        }),
+      ).rejects.toMatchObject({
+        code: "CANDIDATE_HASH_MISMATCH",
+        details: {
+          bound: updatedBound,
+          submitted: [{ name: "base", value: "a".repeat(40) }],
+          missing: [],
+          extra: [],
+          mismatch: [
+            {
+              name: "base",
+              bound: "e".repeat(40),
+              submitted: "a".repeat(40),
+            },
+          ],
+        },
+      });
+    } finally {
+      ctx.service.close();
     }
   });
 });

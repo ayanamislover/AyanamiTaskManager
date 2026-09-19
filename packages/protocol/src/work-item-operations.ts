@@ -147,19 +147,19 @@ export const WorkItemOperations = {
     ui: { label: "阻塞", visibleFrom: ["IN_PROGRESS"] },
   },
   wait_agent: {
-    allowedFrom: ["IN_PROGRESS", "VERIFYING", "WAITING_AGENT"],
+    allowedFrom: ["IN_PROGRESS", "VERIFYING", "BLOCKED", "WAITING_AGENT"],
     homomorphicFrom: ["WAITING_AGENT"],
     resolveTarget: fixedTarget("WAITING_AGENT"),
     preconditions: ["WAITING_FOR"],
-    effects: ["SET_WAITING", "SESSION_WAITING"],
+    effects: ["SET_WAITING", "RESOLVE_BLOCKERS", "SESSION_WAITING"],
     ui: { label: "等待 Agent", visibleFrom: ["IN_PROGRESS"] },
   },
   wait_user: {
-    allowedFrom: ["IN_PROGRESS", "VERIFYING", "WAITING_USER"],
+    allowedFrom: ["IN_PROGRESS", "VERIFYING", "BLOCKED", "WAITING_USER"],
     homomorphicFrom: ["WAITING_USER"],
     resolveTarget: fixedTarget("WAITING_USER"),
     preconditions: ["WAITING_FOR"],
-    effects: ["SET_WAITING", "SESSION_WAITING"],
+    effects: ["SET_WAITING", "RESOLVE_BLOCKERS", "SESSION_WAITING"],
     ui: { label: "等待用户", visibleFrom: ["IN_PROGRESS"] },
   },
   verify: {

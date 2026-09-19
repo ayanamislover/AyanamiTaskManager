@@ -1,3 +1,4 @@
+import { AtmError } from "@ayanami-task/errors";
 import { plain } from "../result.js";
 
 export type TaskProjectionView = "core" | "context" | "full";
@@ -93,7 +94,7 @@ export function fitTaskPage(
     }
     if (JSON.stringify(candidate).length <= maxChars) return candidate;
   }
-  return {
+  const fallback = {
     project: project.toUpperCase(),
     view,
     returned_count: 0,
@@ -101,7 +102,13 @@ export function fitTaskPage(
     next_cursor: retryCursor,
     has_more: items.length > 0 || sourceHasMore,
     truncated: items.length > 0,
+    hint: "提高 max_chars 或缩小 field_mask，使用相同 cursor 重试",
   };
+  if (JSON.stringify(fallback).length <= maxChars) return fallback;
+  throw new AtmError("RESULT_TOO_LARGE", {
+    message: "预算无法容纳列表游标和回执",
+    details: { recovery: { action: "increase_max_chars", preserve_cursor: true } },
+  });
 }
 
 export function fitReconciliationPage(

@@ -106,9 +106,11 @@ function normalizeSchemaNode(value: unknown): unknown {
     }
   }
 
-  // enum and const already determine the complete accepted value set. Keeping
-  // their inferred type repeats validation information without changing it.
-  if (normalized.enum !== undefined || normalized.const !== undefined) delete normalized.type;
+  // Keep the scalar type beside enum. Some MCP hosts retain enum only when its
+  // sibling type is present; dropping it turns a useful closed value set into
+  // an empty object in the host-visible schema. Zod already supplied this type
+  // and it does not widen the accepted set.
+  if (normalized.const !== undefined) delete normalized.type;
 
   return mergeNullableAnyOf(normalized);
 }
@@ -297,6 +299,9 @@ export function compactDiscriminatedObjectUnions(value: unknown): unknown {
   const commonRequired = [...requiredSets[0]!].filter((field) =>
     requiredSets.every((required) => required.has(field)),
   );
+  const sharedProperties = Object.fromEntries(
+    [...commonProperties].map((property) => [property, structuredClone(properties[property])]),
+  );
   const compactBranches = objects.map((branch, index) => {
     const branchProperties = branch.properties as JsonObject;
     const scopedProperties = Object.fromEntries(
@@ -307,9 +312,15 @@ export function compactDiscriminatedObjectUnions(value: unknown): unknown {
     const specificRequired = [...requiredSets[index]!].filter(
       (field) => !commonRequired.includes(field),
     );
+    const branchRequired = [...new Set([...commonRequired, ...specificRequired])];
     return {
-      properties: scopedProperties,
-      ...(specificRequired.length === 0 ? {} : { required: specificRequired }),
+      // Keep the shared identity fields in every branch as well as in the
+      // compact envelope. A host that renders only a oneOf/anyOf branch must
+      // still show task_key/expected_version and the required discriminator;
+      // duplicating identical constraints is representation-only and keeps the
+      // branch independently actionable without changing validation semantics.
+      properties: { ...sharedProperties, ...scopedProperties },
+      ...(branchRequired.length === 0 ? {} : { required: branchRequired }),
     };
   });
 
@@ -347,7 +358,7 @@ export function compactDiscriminatedObjectUnions(value: unknown): unknown {
       [discriminator]:
         discriminatorValues.length === 1
           ? { const: discriminatorValues[0] }
-          : { enum: discriminatorValues },
+          : { type: "string", enum: discriminatorValues },
       ...(template.properties as JsonObject),
     },
   }));

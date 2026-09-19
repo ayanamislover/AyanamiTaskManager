@@ -33,7 +33,7 @@ const FIELD_DESCRIPTIONS: Readonly<Record<(typeof MUTATION_ACK_CONTRACT.fields)[
     projection:
       "Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。",
     entities:
-      "受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。`version` 即该实体当前版本，下一次写同一实体时直接作为 `expected_version` 传回，不要自行加一。",
+      "受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。任务写入有状态快照时还含 `status`、`waiting_on`、`claimed_by_session_id`、`claim_lease_until`；旧回执可能无这些字段。它们是该次写入的结果，幂等重放不是当前状态查询。下一次写同一实体使用返回版本，不要自行加一；并发变更仍可能冲突。",
     entity_count: "完整受影响实体数量，不受预览截断影响。",
     entities_truncated: "实体预览是否被条数或字符预算截断。",
     details_cursor: "可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。",

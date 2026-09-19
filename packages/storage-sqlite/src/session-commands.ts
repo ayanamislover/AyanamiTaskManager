@@ -32,6 +32,10 @@ type ResumeCandidate = {
   role: string;
 };
 
+type ResumeHandoffCandidate = {
+  from_session_id: string;
+};
+
 export type CreateSessionCommandInput = {
   agentId: string;
   displayName: string;
@@ -118,7 +122,9 @@ export class SessionCommands {
           this.#upsertAgent(input, now);
           return this.#resumeSession(predecessor.id, input, now);
         }
-        if (!predecessor.retirement_reason) {
+        const hasPendingHandoff = this.#hasPendingResumeHandoff(predecessor.id, input.agentId);
+        if (hasPendingHandoff) this.#requireResumableIdentity(predecessor, input);
+        if (!predecessor.retirement_reason && !hasPendingHandoff) {
           throw new AtmError("SESSION_NOT_RETIRED", { message: "前序 Session 尚未退休" });
         }
       }
@@ -127,6 +133,10 @@ export class SessionCommands {
         const resumed = this.#resumeOpenSession(input, now);
         if (resumed) return resumed;
       }
+      const resumeHandoffPredecessorId = input.resume
+        ? (input.predecessorSessionId ?? this.#findUniqueResumeHandoffPredecessor(input))
+        : null;
+      const sessionPredecessorId = input.predecessorSessionId ?? resumeHandoffPredecessorId;
       const id = createUlid();
       this.#sqlite
         .prepare(
@@ -149,7 +159,7 @@ export class SessionCommands {
           now,
           now,
           now,
-          input.predecessorSessionId ?? null,
+          sessionPredecessorId,
           input.gitContext?.repoRoot ?? null,
           input.gitContext?.worktreeRoot ?? null,
           input.gitContext?.gitCommonDir ?? null,
@@ -172,13 +182,7 @@ export class SessionCommands {
           input.gitContext?.error ?? null,
         );
       if (input.resume) {
-        this.#sqlite
-          .prepare(
-            `UPDATE handoffs SET to_session_id = ?, acknowledged_at = ?
-             WHERE to_agent_id = ? AND to_session_id IS NULL
-               AND from_session_id = COALESCE(?, from_session_id)`,
-          )
-          .run(id, now, input.agentId, input.predecessorSessionId ?? null);
+        this.#acknowledgeResumeHandoffs(id, input, resumeHandoffPredecessorId, now);
       }
       const sequence = this.#mutation.appendEvent(
         "agent.joined",
@@ -191,7 +195,7 @@ export class SessionCommands {
           role: input.role,
           parentSessionId: input.parentSessionId ?? null,
           resume: input.resume ?? false,
-          predecessorSessionId: input.predecessorSessionId ?? null,
+          predecessorSessionId: sessionPredecessorId,
           git: input.gitContext ?? null,
         },
       );
@@ -252,6 +256,68 @@ export class SessionCommands {
   }
 
   /**
+   * 只在交接的来源 Session 唯一且身份完全相同时，才把它绑定给无 predecessor 的 resume。
+   * 多个前驱或 thread/cwd/role 不一致都保留为未确认，交给调用方显式指名，不能猜。
+   */
+  #findUniqueResumeHandoffPredecessor(input: CreateSessionCommandInput): string | null {
+    const candidates = this.#sqlite
+      .prepare(
+        `SELECT DISTINCT handoff.from_session_id
+         FROM handoffs AS handoff
+         JOIN agent_sessions AS source ON source.id = handoff.from_session_id
+         WHERE handoff.to_agent_id = ? AND handoff.to_session_id IS NULL
+           AND source.agent_id = ? AND source.connection_state = 'CLOSED'
+           AND source.cwd IS ? AND source.thread_id IS ? AND source.role = ?
+         ORDER BY source.started_at DESC, source.id DESC LIMIT 2`,
+      )
+      .all(
+        input.agentId,
+        input.agentId,
+        input.cwd ?? null,
+        input.threadId ?? null,
+        input.role,
+      ) as ResumeHandoffCandidate[];
+    if (candidates.length > 1)
+      throw new AtmError("SESSION_SUCCESSOR_AMBIGUOUS", {
+        message:
+          "同一身份存在多个待确认交接。请显式传 predecessor_session_id 选择一个前序 Session；" +
+          "未绑定的 handoff 和 claim 保持不变。",
+        details: {
+          agent_id: input.agentId,
+          candidates: candidates.map((row) => row.from_session_id),
+          resolution: "predecessor_session_id",
+          pending_handoff: true,
+        },
+      });
+    return candidates.length === 1 ? candidates[0]!.from_session_id : null;
+  }
+
+  #hasPendingResumeHandoff(sessionId: string, agentId: string): boolean {
+    const row = this.#sqlite
+      .prepare(
+        `SELECT 1 AS present FROM handoffs
+         WHERE from_session_id = ? AND to_agent_id = ? AND to_session_id IS NULL LIMIT 1`,
+      )
+      .get(sessionId, agentId) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
+  #acknowledgeResumeHandoffs(
+    sessionId: string,
+    input: CreateSessionCommandInput,
+    predecessorSessionId: string | null,
+    now: string,
+  ): void {
+    if (!predecessorSessionId) return;
+    this.#sqlite
+      .prepare(
+        `UPDATE handoffs SET to_session_id = ?, acknowledged_at = ?
+         WHERE to_agent_id = ? AND to_session_id IS NULL AND from_session_id = ?`,
+      )
+      .run(sessionId, now, input.agentId, predecessorSessionId);
+  }
+
+  /**
    * 身份要全等才能接回，role 也算身份的一部分。
    *
    * 少了这一条会出现「回执说接回成功、事件里记着 REVIEWER，而返回的那条 Session 实际
@@ -299,9 +365,9 @@ export class SessionCommands {
     this.#sqlite
       .prepare(
         `UPDATE handoffs SET to_session_id = ?, acknowledged_at = ?
-         WHERE to_agent_id = ? AND to_session_id IS NULL`,
+         WHERE to_agent_id = ? AND to_session_id IS NULL AND from_session_id = ?`,
       )
-      .run(id, now, input.agentId);
+      .run(id, now, input.agentId, id);
     // 从库里回读，不取请求里的那份。
     //
     // 这一步目前够不到，变异实测过：两条接回路径都先校验过身份全等，所以此刻
@@ -723,8 +789,11 @@ export class SessionCommands {
           .prepare("SELECT closed_at FROM agent_sessions WHERE id = ?")
           .get(sessionId) as { closed_at: string | null } | undefined;
         const closedAt = session?.closed_at ?? now;
+        // paused 保留 claim 但仍是一次可恢复的 checkpoint；不写 handoff 会让下一轮
+        // resume 只能看到旧 claim，拿不到 summary/next。其他显式结束结果不自动制造交接。
+        const shouldCaptureHandoff = input.outcome === "retired" || input.outcome === "paused";
         const claimed =
-          input.outcome === "retired" || input.releaseClaims
+          shouldCaptureHandoff || input.releaseClaims
             ? (this.#sqlite
                 .prepare(
                   `SELECT id, local_no, status, version FROM work_items
@@ -737,10 +806,9 @@ export class SessionCommands {
                 version: number;
               }>)
             : [];
-        const handoffItems =
-          input.outcome === "retired"
-            ? claimed.filter((task) => task.status !== "DONE" && task.status !== "CANCELLED")
-            : [];
+        const handoffItems = shouldCaptureHandoff
+          ? claimed.filter((task) => task.status !== "DONE" && task.status !== "CANCELLED")
+          : [];
         for (const task of handoffItems) {
           this.#sqlite
             .prepare(

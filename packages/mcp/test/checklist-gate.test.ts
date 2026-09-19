@@ -179,11 +179,14 @@ describe("只用 MCP 工具就能穿过检查项闸门", () => {
         },
       ],
     });
-    expect(done.entities).toContainEqual({
-      entity_type: "WORK_ITEM",
-      key: taskKey,
-      version: fresh.version + 1,
-    });
+    expect(done.entities).toContainEqual(
+      expect.objectContaining({
+        entity_type: "WORK_ITEM",
+        key: taskKey,
+        version: fresh.version + 1,
+        status: "DONE",
+      }),
+    );
     expect(await service.getWorkItem(project.code, taskKey)).toMatchObject({ status: "DONE" });
   }, 60_000);
 

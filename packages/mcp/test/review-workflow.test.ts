@@ -361,6 +361,7 @@ describe("MCP first-class Review workflow", () => {
       });
       expect(wrongHash.isError).toBe(true);
       expect(JSON.stringify(wrongHash.content)).toContain("CANDIDATE_HASH_MISMATCH");
+      expect((wrongHash.content[0] as { text?: string }).text).toContain('"mismatch"');
       expect(await fixture.service.listRecords(fixture.project.code)).toHaveLength(0);
       expect(
         (await fixture.service.getReviewRequest(fixture.project.code, "MRVC-RR-0001")).submission,

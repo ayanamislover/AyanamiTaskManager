@@ -290,16 +290,22 @@ describe("工具报错的正文要能照着做", () => {
       ).toBeLessThanOrEqual(maxChars);
       // atm_task_list 的下限是 500，比 atm_task_get 高一档。
       const listMaxChars = Math.max(maxChars, 500);
-      const sweptList = await call("atm_task_list", {
+      const sweptList = await raw("atm_task_list", {
         project: project.code,
         view: "full",
         max_chars: listMaxChars,
         field_mask: ["description", ...unknown(19)],
       });
-      expect(
-        JSON.stringify(sweptList).length,
-        `atm_task_list max_chars=${listMaxChars}`,
-      ).toBeLessThanOrEqual(listMaxChars);
+      if (sweptList.isError) {
+        expect(textOf(sweptList)).toContain("RESULT_TOO_LARGE");
+        expect(textOf(sweptList)).toContain("increase_max_chars");
+        expect(textOf(sweptList).length).toBeLessThanOrEqual(listMaxChars);
+      } else {
+        expect(
+          JSON.stringify(sweptList.structuredContent).length,
+          `atm_task_list max_chars=${listMaxChars}`,
+        ).toBeLessThanOrEqual(listMaxChars);
+      }
     }
 
     // continuation 这条路单独走 continueField，预算同样要算上回显。

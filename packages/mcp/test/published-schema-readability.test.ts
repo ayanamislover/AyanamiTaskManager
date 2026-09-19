@@ -36,6 +36,74 @@ function property(schema: Record<string, unknown>, name: string): Record<string,
   return value as Record<string, unknown>;
 }
 
+function walkSchema(
+  value: unknown,
+  visit: (node: Record<string, unknown>, path: string) => void,
+  path = "$input",
+): void {
+  if (Array.isArray(value)) {
+    value.forEach((child, index) => walkSchema(child, visit, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const node = value as Record<string, unknown>;
+  visit(node, path);
+  for (const [key, child] of Object.entries(node)) walkSchema(child, visit, `${path}.${key}`);
+}
+
+function assertPublishedEnumTypes(tools: Tool[]): void {
+  const enumPaths: string[] = [];
+  const missingTypes: string[] = [];
+  for (const published of tools) {
+    walkSchema(published.inputSchema, (node, path) => {
+      if (!Array.isArray(node.enum)) return;
+      enumPaths.push(`${published.name}${path}`);
+      if (node.type !== "string") missingTypes.push(`${published.name}${path}`);
+    });
+  }
+  if (enumPaths.length === 0) throw new Error("NO_ENUMS_TO_GUARD");
+  if (missingTypes.length > 0) throw new Error(`ENUM_TYPE_MISSING:${missingTypes.join(",")}`);
+}
+
+function assertTaskPatchBranchContext(schema: Record<string, unknown>): void {
+  const items = property(schema, "items");
+  const itemSchema = items.items;
+  if (!itemSchema || typeof itemSchema !== "object" || Array.isArray(itemSchema)) {
+    throw new Error("TASK_PATCH_ITEMS_SCHEMA_MISSING");
+  }
+  const item = itemSchema as Record<string, unknown>;
+  const branches = item.oneOf ?? item.anyOf;
+  if (!Array.isArray(branches) || branches.length < 2) {
+    throw new Error("TASK_PATCH_DISCRIMINATED_BRANCHES_MISSING");
+  }
+  for (const [index, candidate] of branches.entries()) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      throw new Error(`TASK_PATCH_BRANCH_INVALID:${index}`);
+    }
+    const branch = candidate as Record<string, unknown>;
+    const properties = branch.properties;
+    const required = branch.required;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+      throw new Error(`TASK_PATCH_BRANCH_PROPERTIES_MISSING:${index}`);
+    }
+    if (!required || !Array.isArray(required)) {
+      throw new Error(`TASK_PATCH_BRANCH_REQUIRED_MISSING:${index}`);
+    }
+    for (const field of ["task_key", "expected_version", "operation"]) {
+      if (!(field in (properties as Record<string, unknown>))) {
+        throw new Error(`TASK_PATCH_BRANCH_FIELD_MISSING:${index}:${field}`);
+      }
+    }
+    if (
+      !required.includes("task_key") ||
+      !required.includes("expected_version") ||
+      !required.includes("operation")
+    ) {
+      throw new Error(`TASK_PATCH_BRANCH_REQUIRED_FIELD_MISSING:${index}`);
+    }
+  }
+}
+
 describe("published schema readability", () => {
   it.each(SUPPORTED_PROFILES)(
     "%s 的工具 schema 不含 $ref，客户端能直接读到类型",
@@ -77,6 +145,20 @@ describe("published schema readability", () => {
     expect(property(tool(memory, "atm_progress_add"), "scope").enum).toEqual(["task", "project"]);
   });
 
+  it.each(SUPPORTED_PROFILES)("%s 的每处 enum 都保留显式 string type", async (profile) => {
+    assertPublishedEnumTypes(await listProfile(profile));
+  });
+
+  it("enum type 守卫在删掉兄弟 type 时验红", async () => {
+    const memory = await listProfile("memory");
+    const mutated = structuredClone(memory);
+    const record = mutated.find((candidate) => candidate.name === "atm_record");
+    if (!record) throw new Error("TOOL_NOT_PUBLISHED:atm_record");
+    const kind = property(record.inputSchema as unknown as Record<string, unknown>, "kind");
+    delete kind.type;
+    expect(() => assertPublishedEnumTypes(mutated)).toThrow(/ENUM_TYPE_MISSING/u);
+  });
+
   it("atm_task_patch 的检查项形状可从 schema 读出，不必靠试错", async () => {
     const actions = await listProfile("actions");
     const serialized = JSON.stringify(property(tool(actions, "atm_task_patch"), "items"));
@@ -84,6 +166,19 @@ describe("published schema readability", () => {
     expect(serialized).toContain('"checklist_items"');
     expect(serialized).toContain('"TODO","DOING","DONE","SKIPPED"');
     expect(serialized).toContain('"git_sha","atm_record","atm_task","test_result","url","file"');
+  });
+
+  it("atm_task_patch 的每个判别分支都带定位骨架和必填 operation", async () => {
+    const actions = await listProfile("actions");
+    const patch = tool(actions, "atm_task_patch");
+    assertTaskPatchBranchContext(patch);
+
+    const mutated = structuredClone(patch);
+    const items = property(mutated, "items");
+    const branches = ((items.items as Record<string, unknown>).oneOf ??
+      (items.items as Record<string, unknown>).anyOf) as Record<string, unknown>[];
+    delete (branches[0]!.properties as Record<string, unknown>).task_key;
+    expect(() => assertTaskPatchBranchContext(mutated)).toThrow(/TASK_PATCH_BRANCH_FIELD_MISSING/u);
   });
 });
 

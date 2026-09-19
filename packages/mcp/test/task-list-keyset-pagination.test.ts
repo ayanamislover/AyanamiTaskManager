@@ -66,6 +66,66 @@ function body(response: Awaited<ReturnType<Client["callTool"]>>): Record<string,
 }
 
 describe("MCP WorkItem keyset pagination", () => {
+  it("bounds ignored fields on signed-cursor continuation and makes an oversized page actionable", async () => {
+    const fixture = await setup("TLBUDG");
+    try {
+      const fieldMask = [
+        "status",
+        ...Array.from({ length: 19 }, (_, index) => `unknown_${index}${"x".repeat(50)}`),
+      ];
+      const first = body(
+        await fixture.client.callTool({
+          name: "atm_task_list",
+          arguments: {
+            project: "TLBUDG",
+            view: "core",
+            limit: 1,
+            field_mask: fieldMask,
+            max_chars: 1000,
+          },
+        }),
+      );
+      expect(first.returned_count).toBe(1);
+      const response = await fixture.client.callTool({
+        name: "atm_task_list",
+        arguments: {
+          project: "TLBUDG",
+          view: "core",
+          limit: 1,
+          field_mask: fieldMask,
+          max_chars: 500,
+          cursor: first.next_cursor,
+        },
+      });
+      if (response.isError) {
+        expect(body(response).code).toBe("RESULT_TOO_LARGE");
+        expect(JSON.stringify(response.content)).toContain("increase_max_chars");
+        expect(JSON.stringify(response.content).length).toBeLessThanOrEqual(500);
+      } else {
+        const page = body(response);
+        expect(JSON.stringify(page).length).toBeLessThanOrEqual(500);
+        if (page.returned_count === 0) expect(page.hint ?? page.oversized_item?.hint).toBeTruthy();
+      }
+      const recovered = body(
+        await fixture.client.callTool({
+          name: "atm_task_list",
+          arguments: {
+            project: "TLBUDG",
+            view: "core",
+            limit: 1,
+            field_mask: ["key"],
+            max_chars: 1000,
+            cursor: first.next_cursor,
+          },
+        }),
+      );
+      expect(recovered.items[0].key).toBe(fixture.keys[1]);
+      expect(recovered.next_cursor).not.toBe(first.next_cursor);
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("continues across limit, view, field mask and budget changes", async () => {
     const fixture = await setup("TLCHG");
     try {
