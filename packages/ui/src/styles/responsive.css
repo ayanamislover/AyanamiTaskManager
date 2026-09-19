@@ -80,7 +80,7 @@
     grid-template-columns: 1fr auto;
     padding-inline: 14px;
   }
-  .atm-breadcrumb {
+  .atm-titlebar-drag {
     display: none;
   }
   .atm-content {

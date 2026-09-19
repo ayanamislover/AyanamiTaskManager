@@ -177,12 +177,9 @@
   background: color-mix(in srgb, var(--atm-bg) 88%, transparent);
   backdrop-filter: blur(14px);
 }
-.atm-breadcrumb {
+.atm-titlebar-drag {
   min-width: 0;
-  overflow: hidden;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-height: 44px;
 }
 .atm-search-button {
   display: flex;

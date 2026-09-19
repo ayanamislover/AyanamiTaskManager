@@ -269,10 +269,9 @@ export function ProjectTaskViews({
           <col style={{ width: "9%" }} />
           <col style={{ width: "11%" }} />
           <col style={{ width: "7%" }} />
-          <col style={{ width: "9%" }} />
-          <col style={{ width: "12%" }} />
-          <col style={{ width: "5%" }} />
-          <col style={{ width: "11%" }} />
+          <col style={{ width: "16%" }} />
+          <col style={{ width: "7%" }} />
+          <col style={{ width: "14%" }} />
         </colgroup>
         <thead>
           <tr>
@@ -341,7 +340,7 @@ export function ProjectTaskViews({
         <span className="atm-cell-wrap">{task.blockedReason || task.waitingFor || "—"}</span>
       </td>
       <td className="atm-key">{Math.round(task.progress ?? 0)}%</td>
-      <td>{formatTime(task.updatedAt)}</td>
+      <td title={formatTime(task.updatedAt)}>{formatTime(task.updatedAt)}</td>
     </tr>
   );
   const showsTasks = view === "list" || view === "board" || view === "tree";

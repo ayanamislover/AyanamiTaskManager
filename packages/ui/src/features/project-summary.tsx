@@ -100,7 +100,7 @@ export function ProjectSummary({
         </div>
       </section>
       {children}
-      <section className="atm-management-grid" aria-label="项目管理摘要">
+      <section className="atm-management-grid atm-project-management" aria-label="项目管理摘要">
         <article className="atm-panel atm-management-card">
           <div className="atm-panel-head">
             <h2>当前进行</h2>

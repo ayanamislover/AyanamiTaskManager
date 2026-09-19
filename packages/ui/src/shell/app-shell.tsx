@@ -50,9 +50,9 @@ export function AppShell({
         {...(brandLogoSrc ? { brandLogoSrc } : {})}
         {...(projectOrder ? { projectOrder } : {})}
       />
-      <main className="atm-main">
+      <main className="atm-main" aria-label={title}>
         <header className="atm-topbar">
-          <div className="atm-breadcrumb">{title}</div>
+          <div className="atm-titlebar-drag" aria-hidden="true" />
           <button className="atm-search-button" onClick={onSearch}>
             <MagnifyingGlass size={17} />
             搜索任务、记录和项目<kbd>Ctrl K</kbd>

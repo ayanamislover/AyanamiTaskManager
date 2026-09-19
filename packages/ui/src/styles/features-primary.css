@@ -356,6 +356,9 @@
 .atm-management-card {
   min-height: 238px;
 }
+.atm-project-management {
+  margin-top: 18px;
+}
 /*
  * 列表一律列全，不用固定条数去截断；需要封顶的地方让它自己滚。
  *
