@@ -80,8 +80,13 @@ describe("AppShell", () => {
 
     expect(markup).toContain('<div class="atm-shell">');
     expect(markup).toContain('class="atm-sidebar"');
-    expect(markup).toContain('<main class="atm-main"><header class="atm-topbar">');
-    expect(markup).toContain('<div class="atm-breadcrumb">总览</div>');
+    expect(markup).toContain(
+      '<main class="atm-main" aria-label="总览"><header class="atm-topbar">',
+    );
+    expect(markup).toContain('<div class="atm-titlebar-drag" aria-hidden="true"></div>');
+    const header = markup.slice(markup.indexOf("<header"), markup.indexOf("</header>"));
+    expect(header).not.toContain("总览");
+    expect(header).not.toContain("atm-breadcrumb");
     expect(markup).toContain('class="atm-top-actions" data-testid="window-drag-actions"');
     expect(markup).toContain('<div class="atm-content"><section data-testid="content-slot">');
     expect(markup).toContain(
@@ -119,5 +124,12 @@ describe("AppShell", () => {
     ]) {
       expect(missingShellContracts(source.replace(contract, "MUTATED"))).toContain(contract);
     }
+  });
+
+  it("空白标题区保留桌面拖动，右侧动作列按内容保留空间", () => {
+    const css = readFileSync(join(process.cwd(), "apps/desktop/src/window-chrome.css"), "utf8");
+    const dragRule = css.match(/\.atm-titlebar-drag\s*\{([^}]+)\}/u)?.[1] ?? "";
+    expect(dragRule).toContain("-webkit-app-region: drag");
+    expect(css).toContain("minmax(max-content, 1fr)");
   });
 });

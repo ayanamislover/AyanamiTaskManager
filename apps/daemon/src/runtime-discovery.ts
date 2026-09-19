@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } 
 import { join, resolve } from "node:path";
 import { isDifferentProcess, readProcessIdentity } from "./process-identity.js";
 
-export const DAEMON_VERSION = "1.1.2";
+export const DAEMON_VERSION = "1.1.3";
 export const DAEMON_RUNTIME_FILENAME = "daemon.json";
 export const LEGACY_TOKEN_FILENAME = "local.token";
 export const DAEMON_LOCK_FILENAME = "daemon.lock";

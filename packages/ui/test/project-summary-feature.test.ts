@@ -8,6 +8,16 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectSummary } from "../src/features/project-summary.js";
 
 const summaryPath = join(process.cwd(), "packages", "ui", "src", "features", "project-summary.tsx");
+
+it("管理摘要与上方任务区保留统一模块间距", () => {
+  const source = readFileSync(summaryPath, "utf8");
+  const css = readFileSync(
+    join(process.cwd(), "packages/ui/src/styles/features-primary.css"),
+    "utf8",
+  );
+  expect(source).toContain("atm-management-grid atm-project-management");
+  expect(css.match(/\.atm-project-management\s*\{([^}]+)\}/u)?.[1]).toContain("margin-top: 18px");
+});
 const diagnosticsPath = join(
   process.cwd(),
   "packages",

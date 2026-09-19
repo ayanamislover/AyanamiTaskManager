@@ -49,7 +49,7 @@ html[data-atm-desktop="true"] .atm-sidebar-inner {
 }
 
 html[data-atm-desktop="true"] .atm-topbar {
-  grid-template-columns: minmax(140px, 1fr) minmax(260px, 520px) minmax(150px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 520px) minmax(max-content, 1fr);
   padding-right: 166px;
   -webkit-app-region: no-drag;
   user-select: none;
@@ -67,7 +67,7 @@ html[data-atm-desktop="true"] .atm-brand img {
   -webkit-user-drag: none;
 }
 
-html[data-atm-desktop="true"] .atm-breadcrumb {
+html[data-atm-desktop="true"] .atm-titlebar-drag {
   display: flex;
   min-height: 44px;
   align-items: center;

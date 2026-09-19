@@ -24,6 +24,20 @@ const open = [task("P-T-1", "READY", "LOW"), task("P-T-2", "IN_PROGRESS", "CRITI
 // 服务端给的顺序：最近结束的在前。
 const closed = [task("P-T-3", "DONE"), task("P-T-5", "CANCELLED"), task("P-T-4", "DONE")];
 
+function assertTableColumns(markup: string) {
+  const widths = [...markup.matchAll(/<col style="width:(\d+)%"\/?\s*>/gu)].map((m) =>
+    Number(m[1]),
+  );
+  const head = markup.match(/<thead>(.*?)<\/thead>/u)?.[1] ?? "";
+  const headers = [...head.matchAll(/<th[ >]/gu)].length;
+  if (headers !== 8 || widths.length !== headers || widths.reduce((a, b) => a + b, 0) !== 100)
+    throw new Error("TABLE_COLUMN_MISMATCH");
+  for (const row of markup.matchAll(/<tr\b[^>]*>(.*?)<\/tr>/gu)) {
+    const cells = [...row[1]!.matchAll(/<td[ >]/gu)];
+    if (cells.length && cells.length !== headers) throw new Error("TABLE_ROW_MISMATCH");
+  }
+}
+
 describe("项目任务分组", () => {
   it("表头排序只作用于未结束任务，已结束任务保持最近结束在前", () => {
     const groups = projectTaskGroups(open, closed, EMPTY_PROJECT_TASK_FILTERS, {
@@ -94,6 +108,10 @@ describe("项目任务分组", () => {
       }),
     );
     const closedGroup = markup.slice(markup.indexOf('class="atm-closed-tasks"'));
+    assertTableColumns(markup);
+    expect(() =>
+      assertTableColumns(markup.replace("</colgroup>", '<col style="width:11%"/></colgroup>')),
+    ).toThrow("TABLE_COLUMN_MISMATCH");
     expect(closedGroup).toContain("最近结束");
     expect(closedGroup).toContain("显示 3 / 40 项");
     for (const key of ["P-T-3", "P-T-4", "P-T-5"]) expect(closedGroup).toContain(key);
