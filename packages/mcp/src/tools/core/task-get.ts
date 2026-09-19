@@ -3,8 +3,8 @@ import { z } from "zod";
 import {
   fieldTargetVersion,
   fitFieldRead,
+  fitIgnoredFields,
   ignoredFields,
-  ignoredFieldsCost,
   selectFields,
 } from "../../paging/field.js";
 import { externalizeTaskView } from "../../paging/task.js";
@@ -12,7 +12,7 @@ import { wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
 import { outputSchema, projectCode, taskKey } from "../primitives.js";
 
-/** max_chars 的下限，与 schema 同源：扣掉回显开销后也不降到它以下。 */
+/** max_chars 的下限，只管住入参；回显与正文如何分这份额度由 fitIgnoredFields 决定。 */
 const TASK_GET_MIN_CHARS = 300;
 
 const inputSchema = z
@@ -45,9 +45,10 @@ export function createAtmTaskGetTool(
       const ignored = ignoredFields(externalItem, decoded.field_mask);
       // max_chars 是整个响应的上限，回显的越界字段也得从这个额度里出，
       // 否则「说清楚少了什么」会把响应顶出调用方给的预算。
+      const { echo, cost } = fitIgnoredFields(ignored, decoded.max_chars);
       const fitted = fitFieldRead(
         projected,
-        Math.max(decoded.max_chars - ignoredFieldsCost(ignored), TASK_GET_MIN_CHARS),
+        decoded.max_chars - cost,
         "atm_task_get",
         {
           project: decoded.project,
@@ -58,7 +59,7 @@ export function createAtmTaskGetTool(
         },
         decoded.cursor,
       );
-      return wrap(ignored.length === 0 ? fitted : { ...fitted, ignored_fields: ignored });
+      return wrap({ ...fitted, ...echo });
     },
   };
 }

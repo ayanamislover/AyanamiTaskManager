@@ -141,9 +141,10 @@ describe("工具报错的正文要能照着做", () => {
   });
 
   /**
-   * atm_end 的 outcome 是整个 ATM 里唯一的小写枚举（kind / importance / status / priority
-   * 全是大写）。两个用 ATM 的 Agent 会话各自在同一处栽过：上一个调用刚教会它们大写枚举，
-   * 下一个调用因为大写被拒。取值列在描述里，因为描述是所有客户端都会显示的那一行。
+   * atm_end 的 outcome 必须全小写，而旁边的 kind / importance / status / priority 全是大写。
+   * 两个用 ATM 的 Agent 会话各自在同一处栽过：上一个调用刚教会它们大写枚举，下一个调用
+   * 因为大写被拒。（别往回写成「唯一的小写枚举」：scope / view / operation 也是小写。）
+   * 取值列在描述里，因为描述是所有客户端都会显示的那一行。
    */
   it("atm_end 的描述点名 outcome 的每一个取值", async () => {
     const { coreClient } = await connect();
@@ -205,6 +206,126 @@ describe("工具报错的正文要能照着做", () => {
       field_mask: ["status", "version"],
     });
     expect(clean.ignored_fields).toBeUndefined();
+  });
+
+  /**
+   * 回显本身也得从 max_chars 里出。头一版先扣掉回显开销、又把正文预算夹回下限，最后无条件
+   * 把完整回显贴回响应：`max_chars=300` 配 30 个合法长度的越界字段，实际返回 1910 字符。
+   * 靠 max_chars 控上下文的调用方没做错任何事，却拿回六倍于它要的量。
+   */
+  it("回显 ignored_fields 之后整个响应仍在调用方给的 max_chars 之内", async () => {
+    const { project, call, raw, service } = await connect();
+    const begun = await call("atm_begin", {
+      project_code: project.code,
+      mode: "project",
+      agent_id: "codex",
+      op_id: "budget-begin",
+    });
+    const session = String(begun.session);
+    await service.createObjective(project.code, session, {
+      title: "目标",
+      description: "",
+      definitionOfDone: ["完成"],
+    });
+    const created = await call("atm_task_create", {
+      project: project.code,
+      session,
+      op_id: "budget-plan",
+      items: [{ client_ref: "t1", title: "任务", description: "长".repeat(4000) }],
+    });
+    const taskKey = String(
+      created.entities.find((entity: Record<string, unknown>) => entity.entity_type === "WORK_ITEM")
+        .key,
+    );
+    // 每个名字都在 schema 允许的 64 字符之内，条数也在上限之内——完全合法的请求。
+    const unknown = (count: number) =>
+      Array.from(
+        { length: count },
+        (_, index) => `unknown_${String(index).padStart(2, "0")}${"x".repeat(50)}`,
+      );
+
+    const got = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      max_chars: 300,
+      field_mask: unknown(30),
+    });
+    expect(JSON.stringify(got).length).toBeLessThanOrEqual(300);
+    // 列不下的名字换成计数，而不是默默少列几个。
+    expect(got.ignored_fields_omitted).toBeGreaterThan(0);
+    expect(got.ignored_fields.length + got.ignored_fields_omitted).toBe(30);
+
+    const listed = await call("atm_task_list", {
+      project: project.code,
+      max_chars: 500,
+      field_mask: unknown(20),
+    });
+    expect(JSON.stringify(listed).length).toBeLessThanOrEqual(500);
+    expect(listed.ignored_fields.length + listed.ignored_fields_omitted).toBe(20);
+
+    // 混着已知字段时，已知的那部分不能因为回显被挤掉。
+    const mixed = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      max_chars: 300,
+      field_mask: ["status", "version", ...unknown(28)],
+    });
+    expect(JSON.stringify(mixed).length).toBeLessThanOrEqual(300);
+    expect(mixed.status).toBe("BACKLOG");
+
+    // 只测最小预算不够：那时正文本来就小，离上限还远，「忘了从正文预算里扣掉回显」这种
+    // 写法照样绿。要抓住它，得让正文真的顶到预算——full view 的长 description 会把
+    // fitFieldRead 的档位一路撑满，此时多贴一段回显就必然溢出。
+    for (const maxChars of [300, 700, 1200, 2000, 4000]) {
+      const swept = await call("atm_task_get", {
+        project: project.code,
+        task_key: taskKey,
+        view: "full",
+        max_chars: maxChars,
+        field_mask: ["description", ...unknown(20)],
+      });
+      expect(
+        JSON.stringify(swept).length,
+        `atm_task_get max_chars=${maxChars}`,
+      ).toBeLessThanOrEqual(maxChars);
+      // atm_task_list 的下限是 500，比 atm_task_get 高一档。
+      const listMaxChars = Math.max(maxChars, 500);
+      const sweptList = await call("atm_task_list", {
+        project: project.code,
+        view: "full",
+        max_chars: listMaxChars,
+        field_mask: ["description", ...unknown(19)],
+      });
+      expect(
+        JSON.stringify(sweptList).length,
+        `atm_task_list max_chars=${listMaxChars}`,
+      ).toBeLessThanOrEqual(listMaxChars);
+    }
+
+    // continuation 这条路单独走 continueField，预算同样要算上回显。
+    const fieldMask = ["description", ...unknown(20)];
+    const first = await call("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      view: "full",
+      field_mask: fieldMask,
+      max_chars: 2000,
+    });
+    const cursor = String(first.truncated_fields[0].continuation.cursor);
+    const continued = await raw("atm_task_get", {
+      project: project.code,
+      task_key: taskKey,
+      view: "full",
+      field_mask: fieldMask,
+      cursor,
+      max_chars: 300,
+    });
+    if (continued.isError) {
+      // 有界且照着做得了的报错也算合格；含糊地超发不算。
+      expect(textOf(continued)).toContain("RESULT_TOO_LARGE");
+    } else {
+      expect(JSON.stringify(continued.structuredContent).length).toBeLessThanOrEqual(300);
+    }
   });
 
   /**

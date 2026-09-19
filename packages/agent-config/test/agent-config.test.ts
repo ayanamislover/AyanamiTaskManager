@@ -466,18 +466,21 @@ describe("Agent MCP 配置适配", () => {
         "utf8",
       );
     };
-    for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) write(sourceRoot, name, 2);
+    for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) write(sourceRoot, name, 1);
     mkdirSync(join(sourceRoot, "_shared"), { recursive: true });
     writeFileSync(join(sourceRoot, "_shared", "playbooks.md"), "# Playbooks\n", "utf8");
 
-    // 已接入的现状：atm-plan 装好且被用户改过，atm-task 是旧版本，atm-knowledge 压根没有。
+    // 「旧版本」得按它真实的产生方式来：先由 ATM 装好 v1（安装基线随之记下），之后发行版升到 v2。
+    // 直接把目标目录改写成 v1，和用户手改是同一件事，谁也分不出来。
     installAgentSkills({ sourceRoot, targetRoot });
+    for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) write(sourceRoot, name, 2);
+
+    // 已接入的现状：atm-plan 被用户改过，atm-task 还是 ATM 装的 v1，atm-knowledge 压根没有。
     writeFileSync(
       join(targetRoot, "atm-plan", "SKILL.md"),
       `---\nname: atm-plan\natm-integration-version: 2\n---\n我自己加的`,
       "utf8",
     );
-    write(targetRoot, "atm-task", 1);
     rmSync(join(targetRoot, "atm-knowledge"), { recursive: true, force: true });
 
     const names = agentSkillsToRepair({ sourceRoot, targetRoot });
@@ -494,6 +497,66 @@ describe("Agent MCP 配置适配", () => {
     expect(readFileSync(join(targetRoot, "atm-plan", "SKILL.md"), "utf8")).toContain("我自己加的");
     // 补完之后就没什么要补的了。
     expect(agentSkillsToRepair({ sourceRoot, targetRoot })).toEqual([]);
+  });
+
+  /**
+   * 启动时的自动修复是无人值守的，它改的是用户手里正在生效的规则。两个反例都来自
+   * peer review 的独立探针，当时两例都是 userContentPreserved=false：有备份可恢复，
+   * 不等于可以擅自替换。
+   */
+  it("自动修复不碰用户改过的 Skill：共享资源缺失、以及改过的旧版本", () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-agent-skills-guard-"));
+    temporary.push(root);
+    const write = (base: string, name: string, version: number, body = "") => {
+      const directory = join(base, name);
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(
+        join(directory, "SKILL.md"),
+        `---\nname: ${name}\natm-integration-version: ${version}\n---\n${body}`,
+        "utf8",
+      );
+    };
+    const setup = (label: string, sourceVersion: number) => {
+      const sourceRoot = join(root, label, "published");
+      const targetRoot = join(root, label, "host-skills");
+      for (const name of ["atm-plan", "atm-task", "atm-knowledge"]) write(sourceRoot, name, 1);
+      mkdirSync(join(sourceRoot, "_shared"), { recursive: true });
+      writeFileSync(join(sourceRoot, "_shared", "playbooks.md"), "# Playbooks\n", "utf8");
+      installAgentSkills({ sourceRoot, targetRoot });
+      if (sourceVersion !== 1) {
+        for (const name of ["atm-plan", "atm-task", "atm-knowledge"])
+          write(sourceRoot, name, sourceVersion);
+      }
+      // 用户自己改了 atm-plan 的正文，版本号照旧。
+      writeFileSync(
+        join(targetRoot, "atm-plan", "SKILL.md"),
+        `---\nname: atm-plan\natm-integration-version: 1\n---\n我自己的规则`,
+        "utf8",
+      );
+      return { sourceRoot, targetRoot };
+    };
+
+    // 反例一：_shared 没了。缺的是共享资源，被覆盖的却是 atm-plan。
+    const missingShared = setup("missing-shared", 1);
+    rmSync(join(missingShared.targetRoot, "_shared"), { recursive: true, force: true });
+    expect(agentSkillsToRepair(missingShared)).toEqual(["_shared"]);
+    installAgentSkills({ ...missingShared, names: agentSkillsToRepair(missingShared) });
+    expect(readFileSync(join(missingShared.targetRoot, "atm-plan", "SKILL.md"), "utf8")).toContain(
+      "我自己的规则",
+    );
+    expect(existsSync(join(missingShared.targetRoot, "_shared", "playbooks.md"))).toBe(true);
+
+    // 反例二：用户改的是旧版本。版本号一比就是 NEEDS_UPDATE，但它并不是未改动的发行内容。
+    const olderModified = setup("older-modified", 2);
+    expect(agentSkillsToRepair(olderModified)).not.toContain("atm-plan");
+    installAgentSkills({ ...olderModified, names: agentSkillsToRepair(olderModified) });
+    expect(readFileSync(join(olderModified.targetRoot, "atm-plan", "SKILL.md"), "utf8")).toContain(
+      "我自己的规则",
+    );
+    // 没被动过的那两个照常升级——这条守卫不能靠「什么都不修」来通过。
+    expect(readFileSync(join(olderModified.targetRoot, "atm-task", "SKILL.md"), "utf8")).toContain(
+      "atm-integration-version: 2",
+    );
   });
 
   it("只安装 ATM 管理的三个 Skill 并备份已有目录", () => {
@@ -529,14 +592,20 @@ describe("Agent MCP 配置适配", () => {
     );
     expect(inspectAgentSkills({ sourceRoot, targetRoot }).state).toBe("INSTALLED");
     writeFileSync(join(targetRoot, "_shared", "planning-playbooks.md"), "user modified", "utf8");
-    expect(inspectAgentSkills({ sourceRoot, targetRoot }).skills).toContainEqual(
-      expect.objectContaining({ name: "atm-plan", state: "MODIFIED" }),
+    // 共享资源被改，总状态要报出来；但 atm-plan 自己没被动过，不该因此被说成有问题——
+    // 原来那句「把 _shared 的状态盖到 atm-plan 头上」正是启动时覆盖用户内容的入口。
+    const shared = inspectAgentSkills({ sourceRoot, targetRoot });
+    expect(shared.state).toBe("MODIFIED");
+    expect(shared.skills).toContainEqual(
+      expect.objectContaining({ name: "atm-plan", state: "INSTALLED" }),
     );
     writeFileSync(join(targetRoot, "atm-task", "SKILL.md"), "user modified", "utf8");
     expect(inspectAgentSkills({ sourceRoot, targetRoot }).state).toBe("MODIFIED");
     const removed = uninstallAgentSkills(targetRoot);
     expect(removed.backupPaths).toHaveLength(4);
     expect(existsSync(join(targetRoot, "atm-plan"))).toBe(false);
+    // 安装基线也是 ATM 写进用户目录的，卸载要带走。
+    expect(existsSync(join(targetRoot, ".atm-skills.json"))).toBe(false);
   });
 
   it("以 managed block 幂等安装规则并保留用户内容", () => {

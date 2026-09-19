@@ -2,15 +2,18 @@ import { useCallback } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import {
-  moveProjectId,
   orderProjects,
-  reorderProjectIds,
+  projectOrderAfterDrop,
+  projectOrderAfterNudge,
   type ProjectOrder,
 } from "./hooks/use-project-reorder.js";
 
 export {
+  mergeProjectOrder,
   moveProjectId,
   orderProjects,
+  projectOrderAfterDrop,
+  projectOrderAfterNudge,
   reorderProjectIds,
   useProjectReorder,
   type ProjectOrder,
@@ -62,17 +65,19 @@ export function useProjectOrder(client: AyanamiClient): ProjectOrder {
     <T extends { id: string }>(projects: T[]) => orderProjects(projects, order),
     [order],
   );
+  // visible 可能只是全部项目的一个子集（侧栏只列 ACTIVE），存盘前先合回完整表，
+  // 否则没在这一屏出现的项目会被这次重排顺手抹掉。
   const drop = useCallback(
     (visible: string[], id: string, beforeId: string | null) => {
-      save.mutate(reorderProjectIds(visible, id, beforeId));
+      save.mutate(projectOrderAfterDrop(order, visible, id, beforeId));
     },
-    [save],
+    [order, save],
   );
   const nudge = useCallback(
     (visible: string[], id: string, delta: number) => {
-      save.mutate(moveProjectId(visible, id, delta));
+      save.mutate(projectOrderAfterNudge(order, visible, id, delta));
     },
-    [save],
+    [order, save],
   );
   return { order, apply, drop, nudge };
 }

@@ -139,6 +139,40 @@ describe("MCP tools/list metadata contract", () => {
     expect(checked).toBeGreaterThanOrEqual(4);
   });
 
+  /**
+   * guide 曾经写着「outcome 是 ATM 里唯一的小写枚举，其余枚举都是大写」。这句话是错的：
+   * scope / view / operation 全是小写。而 guide 本轮又要求调用方优先信它，于是这个
+   * 泛化会直接制造新的参数重试——调用方照着推断，把小写的 scope 写成大写。
+   *
+   * 前提从 schema 里数出来，不是手写的：只要小写枚举不止一个，那句话就不能出现。
+   */
+  it("guide 不把 outcome 说成唯一的小写枚举", async () => {
+    const lowercase: string[] = [];
+    for (const profile of ["core", "memory", "actions"] as const) {
+      const fixture = await list(profile);
+      try {
+        const walk = (node: unknown, path: string): void => {
+          if (!node || typeof node !== "object") return;
+          const value = node as Record<string, unknown>;
+          if (
+            Array.isArray(value.enum) &&
+            value.enum.length > 0 &&
+            value.enum.every((each) => typeof each === "string" && /^[a-z][a-z_]*$/u.test(each))
+          ) {
+            lowercase.push(path);
+          }
+          for (const [key, child] of Object.entries(value)) walk(child, `${path}.${key}`);
+        };
+        for (const tool of fixture.first) walk(tool.inputSchema, tool.name);
+      } finally {
+        await fixture.close();
+      }
+    }
+    // 小写枚举不止一个，所以「唯一」这个说法本身就不成立。
+    expect(lowercase.length).toBeGreaterThan(1);
+    expect(readFileSync("ATM_AGENT_GUIDE.md", "utf8")).not.toContain("唯一的小写枚举");
+  });
+
   it("keeps legacy on the byte-for-byte v1.0.18 compatibility artifact", async () => {
     const fixture = await list("legacy");
     try {

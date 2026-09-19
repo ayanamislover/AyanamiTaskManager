@@ -1,6 +1,6 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { z } from "zod";
-import { ignoredFields, ignoredFieldsCost, selectFields } from "../../paging/field.js";
+import { fitIgnoredFields, ignoredFields, selectFields } from "../../paging/field.js";
 import {
   compactReconciliationItem,
   externalizeTaskView,
@@ -12,7 +12,7 @@ import { plain, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
 import { outputSchema, projectCode, taskKey } from "../primitives.js";
 
-/** max_chars 的下限，与 schema 同源：扣掉回显开销后也不降到它以下。 */
+/** max_chars 的下限，只管住入参；回显与正文如何分这份额度由 fitIgnoredFields 决定。 */
 const TASK_LIST_MIN_CHARS = 500;
 
 const inputSchema = z
@@ -89,17 +89,18 @@ export function createAtmTaskListTool(
       // 这一页所有条目共用一个 view 形状，用第一条判断就够；空页没有形状可判。
       const ignored =
         externalItems[0] === undefined ? [] : ignoredFields(externalItems[0], decoded.field_mask);
+      const { echo, cost } = fitIgnoredFields(ignored, decoded.max_chars);
       const fitted = fitTaskPage(
         decoded.project,
         projectionView,
-        Math.max(decoded.max_chars - ignoredFieldsCost(ignored), TASK_LIST_MIN_CHARS),
+        decoded.max_chars - cost,
         projectedItems,
         page.itemCursors,
         page.hasMore,
         page.nextCursor,
         page.retryCursor,
       );
-      return wrap(ignored.length === 0 ? fitted : { ...fitted, ignored_fields: ignored });
+      return wrap({ ...fitted, ...echo });
     },
   };
 }

@@ -33,10 +33,39 @@ export function orderProjects<T extends { id: string }>(projects: T[], order: st
 }
 
 /**
+ * 把这一屏重排后的顺序合回完整的顺序表。
+ *
+ * 侧栏只列 ACTIVE 项目，重排后却把这一屏整份存成 projects.order，归档项目的手动位置就此
+ * 消失：全局顺序 `[c(归档), b, a]`，在侧栏把 a 往上挪一格，存下去变成 `[a, b]`，c 掉到末尾。
+ * 用户只想调换两个项目，被动的却是没在这一屏出现过的第三个。
+ *
+ * 合并规则：完整表里属于这一屏的槽位按新顺序依次填回，不在这一屏的条目留在原位；
+ * 这一屏里完整表还没有的（新建项目）补在末尾。
+ *
+ * 不在这一屏的 id 一律保留，包括已经删掉的项目——这里分不出「被筛掉」和「已经没了」，
+ * 而认错的代价不对称：留着一个陈旧 id 只是多几十字节，orderProjects 本来就忽略认不出的 id；
+ * 删错一个归档项目的位置，用户得手动排回去。
+ */
+export function mergeProjectOrder(stored: string[], nextVisible: string[]): string[] {
+  const visible = new Set(nextVisible);
+  const queue = [...nextVisible];
+  const merged: string[] = [];
+  for (const id of stored) {
+    if (!visible.has(id)) {
+      merged.push(id);
+      continue;
+    }
+    const next = queue.shift();
+    if (next !== undefined) merged.push(next);
+  }
+  return [...merged, ...queue];
+}
+
+/**
  * 把 `id` 挪到 `beforeId` 前面；`beforeId` 为 null 表示挪到末尾。
  *
- * 入参是当前看到的完整顺序（含没排过的），所以结果总是一份完整的顺序表——
- * 只存「排过的那几个」会让没排过的项目在下次渲染时又跳回前面。
+ * 入参是当前这一屏的完整顺序（含没排过的）；这一屏可能只是全部项目的一个子集，
+ * 存盘前要先经 mergeProjectOrder 合回完整表。
  */
 export function reorderProjectIds(
   visible: string[],
@@ -59,6 +88,31 @@ export function moveProjectId(visible: string[], id: string, delta: number): str
   if (to < 0 || to >= visible.length) return [...visible];
   const rest = visible.filter((each) => each !== id);
   return [...rest.slice(0, to), id, ...rest.slice(to)];
+}
+
+/**
+ * 拖放落定后要存的完整顺序表。
+ *
+ * 与下面的键盘版一起从 hook 里提出来，是因为错的就是这一步：原来 hook 直接把这一屏
+ * 的顺序存了下去。留在 hook 里就只能靠 e2e 抓，而仓里没有 React 单元测试设施。
+ */
+export function projectOrderAfterDrop(
+  stored: string[],
+  visible: string[],
+  id: string,
+  beforeId: string | null,
+): string[] {
+  return mergeProjectOrder(stored, reorderProjectIds(visible, id, beforeId));
+}
+
+/** 键盘挪一格后要存的完整顺序表。 */
+export function projectOrderAfterNudge(
+  stored: string[],
+  visible: string[],
+  id: string,
+  delta: number,
+): string[] {
+  return mergeProjectOrder(stored, moveProjectId(visible, id, delta));
 }
 
 /** 落点：放在 `id` 前面还是后面。按指针落在目标的哪一半算，不然排到最末尾就没法表达。 */

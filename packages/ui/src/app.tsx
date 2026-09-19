@@ -42,7 +42,8 @@ function App({
   const { theme, toggleTheme } = useTheme();
   useDesktopRouteNavigation(desktop, setRoute);
   useAppShortcuts(route, setRoute, setPalette);
-  // 手动顺序在这里统一应用一次：侧栏、项目页、总览拿到的是同一份排序结果。
+  // 手动顺序在这里统一应用一次，侧栏和项目页拿到的是同一份排序结果。
+  // 总览不在其中：它的项目卡片来自 client.overview 自己的数组，没过这一层（ATM-T-0421）。
   const projectOrder = useProjectOrder(client);
   const projectList = projectOrder.apply(projects.data ?? []);
   const selectedProject = route.startsWith("project:")

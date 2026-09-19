@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  mergeProjectOrder,
   moveProjectId,
   orderProjects,
+  projectOrderAfterDrop,
+  projectOrderAfterNudge,
   projectOrderFromSetting,
   reorderProjectIds,
 } from "../src/project-order.js";
@@ -50,5 +53,36 @@ describe("项目手动顺序", () => {
     expect(moveProjectId(visible, "a", -1)).toEqual(visible);
     expect(moveProjectId(visible, "c", 1)).toEqual(visible);
     expect(moveProjectId(visible, "zz", 1)).toEqual(visible);
+  });
+
+  /**
+   * 侧栏只列 ACTIVE 项目，重排后却把这一屏整份存成了 projects.order——归档项目的手动位置
+   * 就此消失。原来的用例全都假设「visible 就是全量列表」，所以这条路一直没人走过。
+   */
+  it("这一屏只是子集时，没显示的项目留在原位", () => {
+    // 全局 [c(归档), b, a]；侧栏只看得到 b、a。
+    expect(mergeProjectOrder(["c", "b", "a"], ["a", "b"])).toEqual(["c", "a", "b"]);
+    // 没排过的项目第一次排序：完整表是空的，这一屏就是全部。
+    expect(mergeProjectOrder([], ["b", "a"])).toEqual(["b", "a"]);
+    // 这一屏出现了完整表还没有的新项目，补在末尾而不是插队。
+    expect(mergeProjectOrder(["c", "a"], ["a", "zz"])).toEqual(["c", "a", "zz"]);
+    // 归档项目夹在中间时也守住自己的槽位。
+    expect(mergeProjectOrder(["a", "c", "b"], ["b", "a"])).toEqual(["b", "c", "a"]);
+  });
+
+  it("存盘前算出来的是完整顺序表，不是这一屏", () => {
+    // codex 在真实 Chromium 里复现的那一步：侧栏选中甲，按 Alt+↑，只想和乙调换。
+    const stored = ["c", "b", "a"];
+    const visible = ["b", "a"];
+    expect(projectOrderAfterNudge(stored, visible, "a", -1)).toEqual(["c", "a", "b"]);
+    expect(projectOrderAfterDrop(stored, visible, "a", "b")).toEqual(["c", "a", "b"]);
+    // 拖到末尾同样不能把 c 甩掉。
+    expect(projectOrderAfterDrop(stored, visible, "b", null)).toEqual(["c", "a", "b"]);
+    // 这一屏就是全量时，行为和以前一致。
+    expect(projectOrderAfterNudge(["a", "b", "c"], ["a", "b", "c"], "c", -1)).toEqual([
+      "a",
+      "c",
+      "b",
+    ]);
   });
 });

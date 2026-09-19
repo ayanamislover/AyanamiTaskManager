@@ -77,7 +77,7 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 | 全部写操作 | `project`、`session`、`op_id` 三项均必填（渲染出来的 `required` 可能看不到它们，以本表为准）；`op_id` 须唯一，重试同一请求时复用原值。`atm_record` 另需 `kind`、`title`、`summary`。 |
 | `atm_record` | `summary` ≤ 300 个 Unicode code point（中文按字数算）；`title` ≤ 400；`detail` ≤ 100,000，长内容放这里。`kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON`，`importance=LOW\|NORMAL\|HIGH\|CRITICAL`。 |
 | `atm_progress_add` | `summary` ≤ 500 code point；`completed` / `evidence` / `next` 各 ≤ 20 项。`scope=task\|project`（`health` 只用于 project，`percent` 只用于 task）。 |
-| `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**，这是 ATM 里唯一的小写枚举，其余枚举都是大写。 |
+| `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**。大小写没有通用规律（同一张表里 `kind` / `importance` 是大写，`scope` / `view` / `operation` 是小写），逐个字段照本表写，不要从上一个调用类推。 |
 | `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。 |
 | `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
 | `atm_search` | `session` 只能与 `op_id` 精确回查一起传。 |
