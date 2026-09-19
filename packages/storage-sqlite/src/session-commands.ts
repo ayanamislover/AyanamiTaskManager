@@ -789,8 +789,8 @@ export class SessionCommands {
           .prepare("SELECT closed_at FROM agent_sessions WHERE id = ?")
           .get(sessionId) as { closed_at: string | null } | undefined;
         const closedAt = session?.closed_at ?? now;
-        // paused 保留 claim 但仍是一次可恢复的 checkpoint；不写 handoff 会让下一轮
-        // resume 只能看到旧 claim，拿不到 summary/next。其他显式结束结果不自动制造交接。
+        // paused/retired 都保存 checkpoint；是否释放 claim 由 releaseClaims 决定。
+        // 即使保留旧 claim，下一轮仍应能读取 summary/next；其他结束结果不自动制造交接。
         const shouldCaptureHandoff = input.outcome === "retired" || input.outcome === "paused";
         const claimed =
           shouldCaptureHandoff || input.releaseClaims

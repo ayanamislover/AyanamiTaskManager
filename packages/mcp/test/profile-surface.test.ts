@@ -69,7 +69,7 @@ describe("MCP static profiles", () => {
       // 详见 published-schema-readability.test.ts。
       expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7913, framingBytes: 7 });
       expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6937, framingBytes: 8 });
-      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 7762, framingBytes: 2 });
+      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 7975, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(7);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);

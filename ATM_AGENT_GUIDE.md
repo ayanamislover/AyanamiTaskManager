@@ -254,7 +254,9 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
 5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`；使用 ATM 时遇到产品问题写 `atm_feedback`。
 6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`；满足条件时也可用 `verify_and_complete` 原子完成。
-7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
+7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。`paused` / `retired` 都会保存未完成任务的交接，是否释放领取由 `release_claims` 决定（默认释放）。
+
+恢复时使用 `atm_begin(resume=true)`，保持 `agent_id` / `cwd` / `thread_id` / `role` 一致；存在多个前驱时显式传 `predecessor_session_id`，不要猜。普通开工未传 `resume` 也可只读看到唯一同身份前驱的待确认交接，但不会确认交接或接管旧 claim；多个前驱或身份不一致时不展示未绑定交接。看到 summary/next 不等于已经领取任务，仍按版本与租约规则操作。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
 

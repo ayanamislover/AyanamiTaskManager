@@ -65,6 +65,19 @@ function assertPublishedEnumTypes(tools: Tool[]): void {
   if (missingTypes.length > 0) throw new Error(`ENUM_TYPE_MISSING:${missingTypes.join(",")}`);
 }
 
+function assertPublishedConstTypes(tools: Tool[]): void {
+  let count = 0;
+  for (const published of tools) {
+    walkSchema(published.inputSchema, (node, path) => {
+      if (!("const" in node)) return;
+      count += 1;
+      const expected = node.const === null ? "null" : typeof node.const;
+      if (node.type !== expected) throw new Error(`CONST_TYPE_INVALID:${published.name}${path}`);
+    });
+  }
+  if (count === 0) throw new Error("NO_CONSTS_TO_GUARD");
+}
+
 function assertTaskPatchBranchContext(schema: Record<string, unknown>): void {
   const items = property(schema, "items");
   const itemSchema = items.items;
@@ -157,6 +170,27 @@ describe("published schema readability", () => {
     const kind = property(record.inputSchema as unknown as Record<string, unknown>, "kind");
     delete kind.type;
     expect(() => assertPublishedEnumTypes(mutated)).toThrow(/ENUM_TYPE_MISSING/u);
+  });
+
+  it("全部 profile 的 const 保留真实标量类型，缺失或类型错误时验红", async () => {
+    const tools = (await Promise.all(SUPPORTED_PROFILES.map(listProfile))).flat();
+    assertPublishedConstTypes(tools);
+    for (const kind of ["string", "boolean"]) {
+      for (const wrongType of [undefined, kind === "string" ? "boolean" : "string"]) {
+        const mutated = structuredClone(tools);
+        let changed = 0;
+        for (const published of mutated) {
+          walkSchema(published.inputSchema, (node) => {
+            if (typeof node.const !== kind) return;
+            if (wrongType === undefined) delete node.type;
+            else node.type = wrongType;
+            changed += 1;
+          });
+        }
+        expect(changed).toBeGreaterThan(0);
+        expect(() => assertPublishedConstTypes(mutated)).toThrow(/CONST_TYPE_INVALID/u);
+      }
+    }
   });
 
   it("atm_task_patch 的检查项形状可从 schema 读出，不必靠试错", async () => {

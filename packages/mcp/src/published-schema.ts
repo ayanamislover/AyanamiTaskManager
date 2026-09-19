@@ -106,11 +106,9 @@ function normalizeSchemaNode(value: unknown): unknown {
     }
   }
 
-  // Keep the scalar type beside enum. Some MCP hosts retain enum only when its
-  // sibling type is present; dropping it turns a useful closed value set into
-  // an empty object in the host-visible schema. Zod already supplied this type
-  // and it does not widen the accepted set.
-  if (normalized.const !== undefined) delete normalized.type;
+  // Keep Zod's scalar type beside both enum and const, including boolean
+  // constants. This preserves a self-contained descriptor for host renderers
+  // without widening the accepted set; actual host display needs its own check.
 
   return mergeNullableAnyOf(normalized);
 }
@@ -357,7 +355,7 @@ export function compactDiscriminatedObjectUnions(value: unknown): unknown {
     properties: {
       [discriminator]:
         discriminatorValues.length === 1
-          ? { const: discriminatorValues[0] }
+          ? { type: "string", const: discriminatorValues[0] }
           : { type: "string", enum: discriminatorValues },
       ...(template.properties as JsonObject),
     },

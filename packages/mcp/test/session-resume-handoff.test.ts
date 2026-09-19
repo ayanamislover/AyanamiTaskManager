@@ -15,119 +15,139 @@ afterEach(async () => {
 });
 
 describe("same-thread resume handoff", () => {
-  it("returns a paused checkpoint in a minimal resume brief", async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), "atm-session-resume-handoff-"));
-    roots.push(dataDir);
-    const service = await AyanamiTaskService.open({
-      dataDir,
-      migrationsRoot: join(process.cwd(), "migrations"),
-    });
-    services.push(service);
-    const project = await service.createProject({
-      name: "Resume handoff",
-      sourcePath: null,
-      code: "RHAND",
-    });
-    const objective = await service.createObjectiveAsUser(project.code, "resume-objective", {
-      title: "Resume handoff",
-      description: "",
-      definitionOfDone: [],
-    });
-    const created = await service.createWorkItemsAsUser(project.code, "resume-task", [
-      {
-        clientRef: "resume-task",
-        objectiveId: objective.id,
-        title: "Continue from checkpoint",
-        type: "TASK",
-        priority: "HIGH",
-        status: "READY",
-        acceptance: ["resume the exact task"],
-        checklist: [],
-        verificationRequired: false,
-      },
-    ]);
-    const task = created.items[0]!;
-    const profiles = await connectProfiledClients(service, "session-resume-handoff");
-
-    try {
-      const first = await profiles.coreClient.callTool({
-        name: "atm_begin",
-        arguments: {
-          project_code: project.code,
-          mode: "project",
-          agent_id: "resume-agent",
-          client_kind: "test",
-          thread_id: "same-thread",
-          brief: "none",
-        },
+  it.each(
+    (["paused", "retired"] as const).flatMap((outcome) =>
+      [false, true].flatMap((resume) =>
+        [false, true].map((releaseClaims) => ({ outcome, resume, releaseClaims })),
+      ),
+    ),
+  )(
+    "$outcome resume=$resume release=$releaseClaims preserves checkpoint",
+    async ({ outcome, resume, releaseClaims }) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "atm-session-resume-handoff-"));
+      roots.push(dataDir);
+      const service = await AyanamiTaskService.open({
+        dataDir,
+        migrationsRoot: join(process.cwd(), "migrations"),
       });
-      expect(first.isError, JSON.stringify(first.content)).not.toBe(true);
-      const firstBody = first.structuredContent as { session: string };
-
-      const claimed = await profiles.actionsClient.callTool({
-        name: "atm_task_patch",
-        arguments: {
-          project: project.code,
-          session: firstBody.session,
-          op_id: "resume-claim",
-          items: [
-            {
-              task_key: task.key,
-              expected_version: task.version,
-              operation: "claim",
-            },
-          ],
-        },
+      services.push(service);
+      const project = await service.createProject({
+        name: "Resume handoff",
+        sourcePath: null,
+        code: "RHAND",
       });
-      expect(claimed.isError, JSON.stringify(claimed.content)).not.toBe(true);
+      const objective = await service.createObjectiveAsUser(project.code, "resume-objective", {
+        title: "Resume handoff",
+        description: "",
+        definitionOfDone: [],
+      });
+      const created = await service.createWorkItemsAsUser(project.code, "resume-task", [
+        {
+          clientRef: "resume-task",
+          objectiveId: objective.id,
+          title: "Continue from checkpoint",
+          type: "TASK",
+          priority: "HIGH",
+          status: "READY",
+          acceptance: ["resume the exact task"],
+          checklist: [],
+          verificationRequired: false,
+        },
+      ]);
+      const task = created.items[0]!;
+      const profiles = await connectProfiledClients(service, "session-resume-handoff");
 
-      const ended = await profiles.coreClient.callTool({
-        name: "atm_end",
-        arguments: {
-          project: project.code,
-          session: firstBody.session,
-          op_id: "resume-paused-end",
-          outcome: "paused",
+      try {
+        const first = await profiles.coreClient.callTool({
+          name: "atm_begin",
+          arguments: {
+            project_code: project.code,
+            mode: "project",
+            agent_id: "resume-agent",
+            client_kind: "test",
+            thread_id: "same-thread",
+            brief: "none",
+          },
+        });
+        expect(first.isError, JSON.stringify(first.content)).not.toBe(true);
+        const firstBody = first.structuredContent as { session: string };
+
+        const claimed = await profiles.actionsClient.callTool({
+          name: "atm_task_patch",
+          arguments: {
+            project: project.code,
+            session: firstBody.session,
+            op_id: "resume-claim",
+            items: [
+              {
+                task_key: task.key,
+                expected_version: task.version,
+                operation: "claim",
+              },
+            ],
+          },
+        });
+        expect(claimed.isError, JSON.stringify(claimed.content)).not.toBe(true);
+
+        const ended = await profiles.coreClient.callTool({
+          name: "atm_end",
+          arguments: {
+            project: project.code,
+            session: firstBody.session,
+            op_id: "resume-paused-end",
+            outcome,
+            summary: "checkpoint summary",
+            next: ["continue from checkpoint"],
+            release_claims: releaseClaims,
+          },
+        });
+        expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
+        const before = await service.getWorkItem(project.code, task.key);
+
+        const resumed = await profiles.coreClient.callTool({
+          name: "atm_begin",
+          arguments: {
+            project_code: project.code,
+            mode: "project",
+            agent_id: "resume-agent",
+            client_kind: "test",
+            thread_id: "same-thread",
+            ...(resume ? { resume: true } : {}),
+            brief: "minimal",
+            max_chars: 1200,
+          },
+        });
+        expect(resumed.isError, JSON.stringify(resumed.content)).not.toBe(true);
+        const body = resumed.structuredContent as {
+          session: string;
+          currentTask?: { key: string; claim?: { session: string } | null } | null;
+          handoff?: { summary: string; nextAction: string } | null;
+        };
+
+        expect(body.session).not.toBe(firstBody.session);
+        expect(body.currentTask).toMatchObject({
+          key: task.key,
+          claim: releaseClaims ? null : { session: firstBody.session },
+        });
+        expect(body.handoff).toMatchObject({
           summary: "checkpoint summary",
-          next: ["continue from checkpoint"],
-          release_claims: false,
-        },
-      });
-      expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
-
-      const resumed = await profiles.coreClient.callTool({
-        name: "atm_begin",
-        arguments: {
-          project_code: project.code,
-          mode: "project",
-          agent_id: "resume-agent",
-          client_kind: "test",
-          thread_id: "same-thread",
-          resume: true,
-          brief: "minimal",
-          max_chars: 1200,
-        },
-      });
-      expect(resumed.isError, JSON.stringify(resumed.content)).not.toBe(true);
-      const body = resumed.structuredContent as {
-        session: string;
-        currentTask?: { key: string; claim?: { session: string } | null } | null;
-        handoff?: { summary: string; nextAction: string } | null;
-      };
-
-      expect(body.session).not.toBe(firstBody.session);
-      expect(body.currentTask).toMatchObject({
-        key: task.key,
-        claim: { session: firstBody.session },
-      });
-      expect(body.handoff).toMatchObject({
-        summary: "checkpoint summary",
-        nextAction: "continue from checkpoint",
-      });
-    } finally {
-      await profiles.close();
-    }
-  });
+          nextAction: "continue from checkpoint",
+        });
+        expect(await service.getWorkItem(project.code, task.key)).toEqual(before);
+        const database = await service.databases.openProject(project.code);
+        const row = database.sqlite
+          .prepare("SELECT to_session_id, acknowledged_at FROM handoffs WHERE from_session_id = ?")
+          .get(firstBody.session) as {
+          to_session_id: string | null;
+          acknowledged_at: string | null;
+        };
+        expect(row.to_session_id).toBe(resume ? body.session : null);
+        expect(row.acknowledged_at === null).toBe(!resume);
+      } finally {
+        await profiles.close();
+      }
+    },
+  );
 
   it("returns actionable ambiguity when two same-thread predecessors have pending handoffs", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-session-resume-ambiguous-"));
@@ -230,6 +250,32 @@ describe("same-thread resume handoff", () => {
         expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
       }
 
+      const defaultBegin = await profiles.coreClient.callTool({
+        name: "atm_begin",
+        arguments: {
+          project_code: project.code,
+          mode: "project",
+          agent_id: "ambiguous-agent",
+          client_kind: "test",
+          thread_id: "same-thread",
+          brief: "minimal",
+        },
+      });
+      expect(defaultBegin.isError, JSON.stringify(defaultBegin.content)).not.toBe(true);
+      const defaultBody = defaultBegin.structuredContent as { session: string; handoff: unknown };
+      expect(defaultBody.handoff).toBeNull();
+      const defaultEnd = await profiles.coreClient.callTool({
+        name: "atm_end",
+        arguments: {
+          project: project.code,
+          session: defaultBody.session,
+          op_id: "ambiguous-default-end",
+          outcome: "completed",
+          summary: "read only",
+          release_claims: false,
+        },
+      });
+      expect(defaultEnd.isError, JSON.stringify(defaultEnd.content)).not.toBe(true);
       const resumed = await profiles.coreClient.callTool({
         name: "atm_begin",
         arguments: {
@@ -274,7 +320,9 @@ describe("same-thread resume handoff", () => {
       expect(handoffs.every((handoff) => handoff.to_session_id === null)).toBe(true);
       expect(handoffs.every((handoff) => handoff.acknowledged_at === null)).toBe(true);
       expect(database.sqlite.prepare("SELECT count(*) AS count FROM agent_sessions").get()).toEqual(
-        { count: 2 },
+        // Two closed predecessors plus the explicit read-only default begin;
+        // the rejected resume must not create a fourth Session.
+        { count: 3 },
       );
       expect((await service.getWorkItem(project.code, firstTask.key)).claimedBySessionId).toBe(
         firstSession,
@@ -312,107 +360,117 @@ describe("same-thread resume handoff", () => {
     }
   });
 
-  it("does not attach a handoff from another thread", async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), "atm-session-resume-thread-"));
-    roots.push(dataDir);
-    const service = await AyanamiTaskService.open({
-      dataDir,
-      migrationsRoot: join(process.cwd(), "migrations"),
-    });
-    services.push(service);
-    const project = await service.createProject({
-      name: "Thread-isolated resume handoff",
-      sourcePath: null,
-      code: "RTHRD",
-    });
-    const objective = await service.createObjectiveAsUser(project.code, "thread-objective", {
-      title: "Thread-isolated resume handoff",
-      description: "",
-      definitionOfDone: [],
-    });
-    const created = await service.createWorkItemsAsUser(project.code, "thread-task", [
-      {
-        clientRef: "thread-task",
-        objectiveId: objective.id,
-        title: "Thread-isolated task",
-        type: "TASK",
-        priority: "NORMAL",
-        status: "READY",
-        acceptance: [],
-        checklist: [],
-        verificationRequired: false,
-      },
-    ]);
-    const task = created.items[0]!;
-    const profiles = await connectProfiledClients(service, "session-resume-thread");
+  it.each(
+    [false, true].flatMap((resume) =>
+      (["thread", "cwd", "role", "agent"] as const).map((mismatch) => ({ resume, mismatch })),
+    ),
+  )(
+    "does not expose $mismatch mismatch handoff with resume=$resume",
+    async ({ resume, mismatch }) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "atm-session-resume-thread-"));
+      roots.push(dataDir);
+      const service = await AyanamiTaskService.open({
+        dataDir,
+        migrationsRoot: join(process.cwd(), "migrations"),
+      });
+      services.push(service);
+      const project = await service.createProject({
+        name: "Thread-isolated resume handoff",
+        sourcePath: null,
+        code: "RTHRD",
+      });
+      const objective = await service.createObjectiveAsUser(project.code, "thread-objective", {
+        title: "Thread-isolated resume handoff",
+        description: "",
+        definitionOfDone: [],
+      });
+      const created = await service.createWorkItemsAsUser(project.code, "thread-task", [
+        {
+          clientRef: "thread-task",
+          objectiveId: objective.id,
+          title: "Thread-isolated task",
+          type: "TASK",
+          priority: "NORMAL",
+          status: "READY",
+          acceptance: [],
+          checklist: [],
+          verificationRequired: false,
+        },
+      ]);
+      const task = created.items[0]!;
+      const profiles = await connectProfiledClients(service, "session-resume-thread");
 
-    try {
-      const first = await profiles.coreClient.callTool({
-        name: "atm_begin",
-        arguments: {
-          project_code: project.code,
-          mode: "project",
-          agent_id: "thread-agent",
-          client_kind: "test",
-          thread_id: "source-thread",
-          brief: "none",
-        },
-      });
-      expect(first.isError, JSON.stringify(first.content)).not.toBe(true);
-      const firstSession = (first.structuredContent as { session: string }).session;
-      const claimed = await profiles.actionsClient.callTool({
-        name: "atm_task_patch",
-        arguments: {
-          project: project.code,
-          session: firstSession,
-          op_id: "thread-claim",
-          items: [{ task_key: task.key, expected_version: task.version, operation: "claim" }],
-        },
-      });
-      expect(claimed.isError, JSON.stringify(claimed.content)).not.toBe(true);
-      const ended = await profiles.coreClient.callTool({
-        name: "atm_end",
-        arguments: {
-          project: project.code,
-          session: firstSession,
-          op_id: "thread-end",
-          outcome: "paused",
-          summary: "source-thread checkpoint",
-          next: ["continue source-thread"],
-          release_claims: false,
-        },
-      });
-      expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
+      try {
+        const first = await profiles.coreClient.callTool({
+          name: "atm_begin",
+          arguments: {
+            project_code: project.code,
+            mode: "project",
+            agent_id: "thread-agent",
+            client_kind: "test",
+            thread_id: "source-thread",
+            cwd: dataDir,
+            brief: "none",
+          },
+        });
+        expect(first.isError, JSON.stringify(first.content)).not.toBe(true);
+        const firstSession = (first.structuredContent as { session: string }).session;
+        const claimed = await profiles.actionsClient.callTool({
+          name: "atm_task_patch",
+          arguments: {
+            project: project.code,
+            session: firstSession,
+            op_id: "thread-claim",
+            items: [{ task_key: task.key, expected_version: task.version, operation: "claim" }],
+          },
+        });
+        expect(claimed.isError, JSON.stringify(claimed.content)).not.toBe(true);
+        const ended = await profiles.coreClient.callTool({
+          name: "atm_end",
+          arguments: {
+            project: project.code,
+            session: firstSession,
+            op_id: "thread-end",
+            outcome: "paused",
+            summary: "source-thread checkpoint",
+            next: ["continue source-thread"],
+            release_claims: false,
+          },
+        });
+        expect(ended.isError, JSON.stringify(ended.content)).not.toBe(true);
 
-      const resumed = await profiles.coreClient.callTool({
-        name: "atm_begin",
-        arguments: {
-          project_code: project.code,
-          mode: "project",
-          agent_id: "thread-agent",
-          client_kind: "test",
-          thread_id: "other-thread",
-          resume: true,
-          brief: "minimal",
-          max_chars: 1200,
-        },
-      });
-      expect(resumed.isError, JSON.stringify(resumed.content)).not.toBe(true);
-      const body = resumed.structuredContent as {
-        handoff?: unknown;
-      };
-      expect(body.handoff).toBeNull();
-      const database = await service.databases.openProject(project.code);
-      expect(
-        database.sqlite
-          .prepare("SELECT to_session_id FROM handoffs WHERE from_session_id = ?")
-          .get(firstSession),
-      ).toEqual({ to_session_id: null });
-      expect((await service.getWorkItem(project.code, task.key)).claimedBySessionId).toBe(
-        firstSession,
-      );
-    } finally {
-      await profiles.close();
-    }
-  });
+        const resumed = await profiles.coreClient.callTool({
+          name: "atm_begin",
+          arguments: {
+            project_code: project.code,
+            mode: "project",
+            agent_id: mismatch === "agent" ? "other-agent" : "thread-agent",
+            client_kind: "test",
+            thread_id: mismatch === "thread" ? "other-thread" : "source-thread",
+            cwd: mismatch === "cwd" ? tmpdir() : dataDir,
+            role: mismatch === "role" ? "REVIEWER" : "PRIMARY",
+            ...(resume ? { resume: true } : {}),
+            brief: "minimal",
+            max_chars: 1200,
+          },
+        });
+        expect(resumed.isError, JSON.stringify(resumed.content)).not.toBe(true);
+        const body = resumed.structuredContent as {
+          handoff?: unknown;
+        };
+        expect(body.handoff).toBeNull();
+        const database = await service.databases.openProject(project.code);
+        expect(
+          database.sqlite
+            .prepare("SELECT to_session_id FROM handoffs WHERE from_session_id = ?")
+            .get(firstSession),
+        ).toEqual({ to_session_id: null });
+        expect((await service.getWorkItem(project.code, task.key)).claimedBySessionId).toBe(
+          firstSession,
+        );
+      } finally {
+        await profiles.close();
+      }
+    },
+  );
 });
