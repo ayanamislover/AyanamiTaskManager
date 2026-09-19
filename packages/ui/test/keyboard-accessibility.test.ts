@@ -30,7 +30,6 @@ function renderControls() {
           status: "",
           assignee: "",
           milestone: "",
-          due: "",
           blockedOnly: false,
           progressSource: "",
         },

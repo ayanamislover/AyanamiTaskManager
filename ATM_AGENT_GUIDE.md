@@ -65,7 +65,30 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 
 已通过 `atm_begin` 建立 Session 后，可调用 `atm_feedback(project, session, op_id, summary, detail, severity, tool, task_key)`。它把问题保存为当前项目内 topic 固定为 `atm-agent-feedback` 的 Agent Record，便于在项目“记录”页直接查看、检索和关联任务。反馈只写本机 ATM 项目数据库，不会自动上传到 GitHub 或任何外部服务；相同请求重试必须复用原 `op_id`。`tool` 与 `task_key` 均为可选上下文。`severity` 填 `CRITICAL` 也不会进入 brief——`ATM_FEEDBACK` 讲的是 ATM 这个产品，不是所在项目的事实，所以按需填写真实严重度，不必担心占用后续 Session 的上下文。
 
-所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要上限 500 字，应一次写清结果、证据和下一步，不贴原始日志。
+所有写操作使用唯一 `op_id`；重试同一写请求时复用原 `op_id`。任务变更携带最新 `expected_version`，发生版本冲突后先重新读取。进度摘要应一次写清结果、证据和下一步，不贴原始日志。
+
+进度、检查项、子任务聚合与 `atm_end` 都可能改变任务版本。下一次写入使用本次 ACK 的 `version`，不自行加一。验收已经完成时优先单独一批 `verify_and_complete`，不需要为了流程拆成 verify、complete 两次；该操作仍检查证据和完成条件。
+
+task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等待对象，普通补充说明请放 `summary`。明确将阻塞重新归类为外部等待时，可直接 `wait_agent` / `wait_user`，它会解除原阻塞并记录等待，不制造开始事件。任务 context/full 和有状态快照的写回执包含 claim owner/lease；重开不代表已释放旧 claim，过期接手仍须明确 `takeover_stale:true`，不得抢占活 owner。
+
+编排工具结果时只输出一份业务载荷：`result.structuredContent ?? result.content`。MCP 同时保留两种载荷是为兼容不同客户端，不要把整个对象重复展开；失败时也必须保留错误正文。写回执是该次操作的快照，重放旧 `op_id` 不等于查询当前状态。
+
+候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`quick` 不会自动绕过；先由用户在项目管理中恢复，重复 `begin` 不会修复生命周期。
+
+### 字段约束速查
+
+**以本节为准，不要以眼前渲染出来的 schema 为准。** ATM 发出的 `tools/list` 字节里这些约束都在（实测过安装版的 wire JSON），但到调用方眼前会被中间某一层删短：`enum` / `oneOf` / `maxLength` 丢成 `{}`，`required` 也会被删得只剩几项（实测：`atm_record` 发布的 `required` 是 `project` / `session` / `op_id` / `kind` / `title` / `summary` 六项，渲染到调用方眼前只剩 `kind`）。能稳定传到调用方眼前的只有 description 和属性名。反方向也有：有客户端的校验器把带 `default` 的字段当成必填（实测：`atm_record.scope` 有 `default: "PROJECT"`，服务端不传照样接受，却在到达 ATM 之前就被拦下）。两头都对不上时，**照本节把该传的一次传全**，包括那些本来有默认值的字段。撞上限的代价不对称：被拒之后整个请求要原样重发，而 `detail` 这类正文可能有好几 KB。**先写 detail，`summary` 最后写，提交前量一遍。**
+
+<!-- prettier-ignore -->
+| 工具 | 约束 |
+| --- | --- |
+| 全部写操作 | `project`、`session`、`op_id` 三项均必填（渲染出来的 `required` 可能看不到它们，以本表为准）；`op_id` 须唯一，重试同一请求时复用原值。`atm_record` 另需 `kind`、`title`、`summary`。 |
+| `atm_record` | `summary` ≤ 300 个 Unicode code point（中文按字数算）；`title` ≤ 400；`detail` ≤ 100,000，长内容放这里。`kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON`，`importance=LOW\|NORMAL\|HIGH\|CRITICAL`。 |
+| `atm_progress_add` | `summary` ≤ 500 code point；`completed` / `evidence` / `next` 各 ≤ 20 项。`scope=task\|project`（`health` 只用于 project，`percent` 只用于 task）。 |
+| `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**。大小写没有通用规律（同一张表里 `kind` / `importance` 是大写，`scope` / `view` / `operation` 是小写），逐个字段照本表写，不要从上一个调用类推。 |
+| `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。 |
+| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
+| `atm_search` | `session` 只能与 `op_id` 精确回查一起传。 |
 
 MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCase`。不要把两套命名混用。
 
@@ -86,7 +109,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `READY` | 可开始 | `claim`, `start`, `complete`, `cancel`, `edit` |
 | `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
 | `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
-| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `complete`, `cancel`, `reopen`, `edit` |
+| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `complete`, `cancel`, `reopen`, `edit` |
 | `WAITING_USER` | 等待用户 | `start`, `release`, `block`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
 | `WAITING_AGENT` | 等待 Agent | `start`, `release`, `block`, `wait_agent`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
 | `VERIFYING` | 验收中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
@@ -100,13 +123,15 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
 | `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
 | `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
-| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `WAITING_AGENT` | WAITING_FOR |
-| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `WAITING_USER` | WAITING_FOR |
+| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_AGENT` | WAITING_FOR |
+| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_USER` | WAITING_FOR |
 | `verify` | 提交验收 | `IN_PROGRESS`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | - |
 | `complete` | 完成 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | COMPLETION_GATE |
 | `cancel` | 取消 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CANCEL_REFERENCES |
 | `reopen` | 重新打开 | `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
 | `edit` | 编辑 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
+
+> `COMPLETION_GATE` 在上表之外还要求当前状态属于 `IN_PROGRESS` 或 `VERIFYING`：没开工过的任务不能直接 `complete`，先 `start`。
 
 <!-- WORK_ITEM_OPERATIONS:END -->
 
@@ -229,7 +254,9 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 4. `atm_task_patch(claim)` → `atm_task_patch(start)`；并行 Agent 各领不同任务。
 5. 完成一个有意义阶段后写 `atm_progress_add`；事实、决策、风险写 `atm_record`；使用 ATM 时遇到产品问题写 `atm_feedback`。
 6. 验收后 `atm_task_patch(verify)` → `atm_task_patch(complete)`；满足条件时也可用 `verify_and_complete` 原子完成。
-7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。
+7. 无论成功、暂停或阻塞，最后都调用 `atm_end`；计划换代使用 `retired` 和 predecessor/handoff。`paused` / `retired` 都会保存未完成任务的交接，是否释放领取由 `release_claims` 决定（默认释放）。
+
+恢复时使用 `atm_begin(resume=true)`，保持 `agent_id` / `cwd` / `thread_id` / `role` 一致；存在多个前驱时显式传 `predecessor_session_id`，不要猜。普通开工未传 `resume` 也可只读看到唯一同身份前驱的待确认交接，但不会确认交接或接管旧 claim；多个前驱或身份不一致时不展示未绑定交接。看到 summary/next 不等于已经领取任务，仍按版本与租约规则操作。
 
 正常开工不要在 `atm_begin` 后紧接 `atm_brief`。只有发生上下文压缩（compaction）、长时间离开，或明确需要恢复 working set 时才调用 `atm_brief`。
 
@@ -239,18 +266,18 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
 
-| 字段                 | 语义                                                                                                                                                               |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ok`                 | 写操作是否被 ATM 接受。                                                                                                                                            |
-| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                                                                                                                            |
-| `project`            | 规范化后的项目代码。                                                                                                                                               |
-| `session`            | 实际承载写操作的 Session。                                                                                                                                         |
-| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                         |
-| `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。 |
-| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。`version` 即该实体当前版本，下一次写同一实体时直接作为 `expected_version` 传回，不要自行加一。       |
-| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                             |
-| `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                 |
-| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                         |
+| 字段                 | 语义                                                                                                                                                                                                                                                                                                |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ok`                 | 写操作是否被 ATM 接受。                                                                                                                                                                                                                                                                             |
+| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                                                                                                                                                                                                                                                             |
+| `project`            | 规范化后的项目代码。                                                                                                                                                                                                                                                                                |
+| `session`            | 实际承载写操作的 Session。                                                                                                                                                                                                                                                                          |
+| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                                                                                                                                                          |
+| `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。                                                                                                                                  |
+| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。任务写入有状态快照时还含 `status`、`waiting_on`、`claimed_by_session_id`、`claim_lease_until`；旧回执可能无这些字段。它们是该次写入的结果，幂等重放不是当前状态查询。下一次写同一实体使用返回版本，不要自行加一；并发变更仍可能冲突。 |
+| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                                                                                                                                                              |
+| `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                                                                                                                                                  |
+| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                                                                                                                                                          |
 
 `entities` 最多预览 12 项且不超过 1800 个 JSON 字符。以 `entity_count` 判断精确总数；`entities_truncated=true` 时可直接执行返回的 `details_cursor` 做一次最多 50000 字符的 durable 回查：
 
@@ -300,6 +327,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `blocker active`                         | 这条来自**独立的 blocker 记录**，由带非空 `blocker` 的 `atm_progress_add` 写入，和任务行上的 `blocked_reason` 不是一回事。`blocker: null` 只表示「这次不新写」，不会关掉已有的那条。用 `atm_task_patch(reopen)`，或对已在进行中的任务再 `start` 一次——「接着做」即意味着阻塞不再成立。                                                                                            |
 | `dependency not ready`                   | 有 BLOCKS 关系的前置任务尚未 DONE。                                                                                                                                                                                                                                                                                                                                               |
 | `verification required`                  | 任务要求验收，先 `verify` 再 `complete`。                                                                                                                                                                                                                                                                                                                                         |
+| `current state invalid`                  | 任务还没开工。闸门只认 `IN_PROGRESS` 与 `VERIFYING`（reason 里的 `required_status` 写着），BACKLOG / READY / CLAIMED / BLOCKED / WAITING\_\* 都要先 `atm_task_patch(start)` 再 `complete`。reason 里的 `legal_operations` 是当前状态下真正可用的操作，照着挑一个；上面那张状态表列的是状态机允许尝试的操作，闸门在那之后还要再拦一道。                                            |
 
 ### MCP 没有的能力走 REST
 

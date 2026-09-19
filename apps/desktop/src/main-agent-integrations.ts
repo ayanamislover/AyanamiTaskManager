@@ -16,6 +16,7 @@ import {
   installedClaudeProfileLaunches,
   installedClaudeProfileLaunchSets,
   installedCodexProfileLaunches,
+  agentSkillsToRepair,
   installAgentSkills,
   isClaudeCodeConfigInstalled,
   isClaudeConfigInstalled,
@@ -216,6 +217,34 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
       }),
     };
   }
+  /**
+   * 已经接入的客户端，缺掉的 Skill 自己补上。
+   *
+   * atm-knowledge 是后加的：装过一次之后就再也不校正，于是它在已接入的客户端里一直显示
+   * 未安装，要用户自己想起来点一次「安装」。补齐只针对「还留着 ATM 的 MCP server」的客户端
+   * ——没接入过的一个都不动；用户自己改过的 Skill 也不碰。任何一个客户端出错都不能影响启动。
+   */
+  function repairMissingAgentSkills(): void {
+    for (const client of ["CODEX", "CLAUDE"] as const) {
+      try {
+        if (!mcpPresentFor(client)) continue;
+        const roots = {
+          sourceRoot: join(dataDirBeforeReady(), "skills"),
+          targetRoot: agentIntegrationPaths(client).skillsPath,
+        };
+        const names = agentSkillsToRepair(roots);
+        if (names.length === 0) continue;
+        installAgentSkills({ ...roots, names });
+        smokeTrace("agent.skills-repaired", { client, names });
+      } catch (error) {
+        smokeTrace("agent.skills-repair-failed", {
+          client,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   const launch = mcpLaunch({ execPath: options.execPath, dataDir: dataDirBeforeReady() });
   const profileLaunches = mcpProfileLaunches({
     execPath: options.execPath,
@@ -224,8 +253,10 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
   const stdioCommand = launch.command;
   const stdioArgs = launch.args;
   const stdioEnv = launch.env;
-  if (shouldRepairMcpConfigs(process.env, options.packaged))
+  if (shouldRepairMcpConfigs(process.env, options.packaged)) {
     repairStaleMcpConfigs(launch, profileLaunches);
+    repairMissingAgentSkills();
+  }
   ipcMain.handle("atm:get-mcp-bridges", () => observeMcpBridges({ bridgeCommand: stdioCommand }));
   ipcMain.handle("atm:get-mcp-configs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");

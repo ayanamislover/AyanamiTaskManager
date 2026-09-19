@@ -7,6 +7,8 @@ import {
   assertLegacyMcpSchemaTransitionBudget,
   assertMcpSchemaBudget,
   MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
+  MCP_SCHEMA_LIMIT_BYTES,
+  MCP_SCHEMA_RESERVE_BYTES,
   mcpSchemaBreakdown,
   mcpSchemaBytes,
 } from "../src/schema-budget.js";
@@ -56,18 +58,18 @@ describe("MCP static profiles", () => {
       expect([...memoryNames].filter((name) => actionNames.has(name))).toEqual([]);
       const formalNames = new Set([...coreNames, ...memoryNames, ...actionNames]);
       expect(formalNames).toHaveLength(14);
-      expect(mcpSchemaBytes(core.tools)).toBeLessThanOrEqual(7680);
-      expect(mcpSchemaBytes(memory.tools)).toBeLessThanOrEqual(7680);
-      expect(mcpSchemaBytes(actions.tools)).toBeLessThanOrEqual(7680);
+      expect(mcpSchemaBytes(core.tools)).toBeLessThanOrEqual(9728);
+      expect(mcpSchemaBytes(memory.tools)).toBeLessThanOrEqual(9728);
+      expect(mcpSchemaBytes(actions.tools)).toBeLessThanOrEqual(9728);
       expect(() => assertMcpSchemaBudget(core.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(memory.tools)).not.toThrow();
       expect(() => assertMcpSchemaBudget(actions.tools)).not.toThrow();
       // core 与 actions 改为完全内联后各涨了一些：$defs 去重虽然更省字节，但客户端
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
-      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7629, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6833, framingBytes: 8 });
-      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 5540, framingBytes: 2 });
+      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7913, framingBytes: 7 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 6937, framingBytes: 8 });
+      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 7975, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(7);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);
@@ -76,7 +78,8 @@ describe("MCP static profiles", () => {
           ...core.tools,
           {
             name: "formal-growth-must-fail",
-            description: "x".repeat(100),
+            // 从上限派生，别写死：上限一调这条阳性对照就会悄悄失效。
+            description: "x".repeat(MCP_SCHEMA_LIMIT_BYTES),
             inputSchema: { type: "object", properties: {} },
           },
         ]),
@@ -98,7 +101,10 @@ describe("MCP static profiles", () => {
       expect(assertLegacyMcpSchemaTransitionBudget(legacy.tools)).toEqual({
         bytes: MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
         maxBytes: MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES,
-        overUsableBytes: 3384,
+        // 派生：legacy 超出正式可用预算多少，随上限一起走。
+        overUsableBytes:
+          MCP_LEGACY_SCHEMA_TRANSITION_MAX_BYTES -
+          (MCP_SCHEMA_LIMIT_BYTES - MCP_SCHEMA_RESERVE_BYTES),
       });
       // 阳性对照：legacy 是有审计记录的过渡例外，不是无上限的第三个 Profile。
       expect(() =>

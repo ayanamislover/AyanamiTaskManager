@@ -47,7 +47,6 @@ function missingSidebarContracts(source: string): string[] {
     'window.localStorage.getItem("atm.workspace.expanded")',
     'window.localStorage.setItem("atm.workspace.expanded"',
     '.filter((project) => project.lifecycle === "ACTIVE")',
-    ".slice(0, 12)",
   ];
   return contracts.filter((contract) => !source.includes(contract));
 }
@@ -113,21 +112,28 @@ describe("Sidebar", () => {
     expect(renderSidebar("overview")).not.toContain("<img");
   });
 
-  it("只显示前十二个活动项目，并保留全称和长英文提示", () => {
+  /**
+   * 以前这里写的是「只显示前十二个活动项目」——列表被 .slice(0, 12) 截断，
+   * 用例把这个截断当成规格钉住了。可列表本来就是滚动容器，项目一多就凭空少几个，
+   * 界面上没有任何提示。活动项目要一个不落地列出来，容不下就滚。
+   */
+  it("列出全部活动项目，归档的不列，长名保留全称和提示", () => {
     const longName = "Codex Agent Permission Preflight Project";
     const projects = [
       project("0", longName),
-      ...Array.from({ length: 12 }, (_, index) => project(String(index + 1), `项目 ${index + 1}`)),
+      ...Array.from({ length: 14 }, (_, index) => project(String(index + 1), `项目 ${index + 1}`)),
       project("archived", "已归档项目", "ARCHIVED"),
     ];
     const markup = renderSidebar("project:P0", projects);
 
-    expect(markup.match(/class="atm-nav-project"/gu)).toHaveLength(12);
+    expect(markup.match(/class="atm-nav-project"/gu)).toHaveLength(15);
     expect(markup).toContain(`aria-label="${longName}"`);
     expect(markup).toContain(`title="${longName}\n名称较长，建议改用简洁中文名称。"`);
     expect(markup).toContain(`<span class="atm-nav-project-name">${longName}</span>`);
     expect(markup).not.toContain("已归档项目");
-    expect(markup).not.toContain("项目 12");
+    // 第 13 个往后正是以前被吞掉的那几个。
+    expect(markup).toContain("项目 12");
+    expect(markup).toContain("项目 14");
   });
 
   it("源码契约守卫有阳性变异红灯", () => {

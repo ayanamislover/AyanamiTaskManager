@@ -41,19 +41,79 @@ export class ContextReadModel {
       : [];
     const meta = this.projectMeta();
     const session = sessionId
-      ? (this.sqlite.prepare("SELECT agent_id FROM agent_sessions WHERE id = ?").get(sessionId) as
-          | { agent_id: string }
+      ? (this.sqlite
+          .prepare(
+            `SELECT agent_id, thread_id, cwd, role
+             FROM agent_sessions WHERE id = ?`,
+          )
+          .get(sessionId) as
+          | {
+              agent_id: string;
+              thread_id: string | null;
+              cwd: string | null;
+              role: string;
+            }
           | undefined)
       : undefined;
+    // Default begin is still allowed to read an unbound checkpoint. Only one
+    // closed predecessor with the exact identity may supply it; displaying it
+    // never acknowledges the handoff or transfers the old task claim.
+    const pendingSources = session
+      ? (this.sqlite
+          .prepare(
+            `SELECT DISTINCT source.id
+           FROM handoffs AS handoff
+           JOIN agent_sessions AS source ON source.id = handoff.from_session_id
+           JOIN work_items AS item ON item.id = handoff.work_item_id
+           WHERE handoff.to_session_id IS NULL AND handoff.acknowledged_at IS NULL
+             AND handoff.to_agent_id = ? AND source.agent_id = ?
+             AND source.connection_state = 'CLOSED'
+             AND source.cwd IS ? AND source.thread_id IS ? AND source.role = ?
+             AND item.archived_at IS NULL AND item.status NOT IN ('DONE','CANCELLED')
+           LIMIT 2`,
+          )
+          .all(
+            session.agent_id,
+            session.agent_id,
+            session.cwd,
+            session.thread_id,
+            session.role,
+          ) as Array<{ id: string }>)
+      : [];
+    const pendingSourceId = pendingSources.length === 1 ? pendingSources[0]!.id : null;
     const currentRow = sessionId
       ? (this.sqlite
           .prepare(
             `SELECT * FROM work_items
              WHERE archived_at IS NULL AND status NOT IN ('DONE','CANCELLED')
                AND (claimed_by_session_id = ? OR assignee_agent_id = ?)
-             ORDER BY CASE WHEN claimed_by_session_id = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 1`,
+              ORDER BY CASE
+                         WHEN claimed_by_session_id = ? THEN 0
+                         WHEN EXISTS (
+                           SELECT 1 FROM handoffs
+                           WHERE handoffs.work_item_id = work_items.id
+                             AND handoffs.to_session_id = ?
+                         ) THEN 1
+                         WHEN EXISTS (
+                           SELECT 1 FROM handoffs
+                           WHERE handoffs.work_item_id = work_items.id
+                             AND handoffs.from_session_id = ?
+                             AND handoffs.to_session_id IS NULL
+                             AND handoffs.acknowledged_at IS NULL
+                             AND handoffs.to_agent_id = ?
+                         ) THEN 2
+                         ELSE 3
+                       END,
+                       updated_at DESC LIMIT 1`,
           )
-          .get(sessionId, session?.agent_id ?? "", sessionId) as any)
+          .get(
+            sessionId,
+            session?.agent_id ?? "",
+            sessionId,
+            sessionId,
+            pendingSourceId,
+            session?.agent_id ?? "",
+          ) as any)
       : undefined;
     const current = currentRow
       ? this.getWorkItem(`${meta.code}-T-${String(currentRow.local_no).padStart(4, "0")}`)
@@ -62,14 +122,30 @@ export class ContextReadModel {
       currentRow && session
         ? (this.sqlite
             .prepare(
-              `SELECT summary, next_action, checkpoint_sequence
-               FROM handoffs WHERE work_item_id = ?
-                 AND (to_session_id = ? OR (to_session_id IS NULL AND to_agent_id = ?))
-               ORDER BY checkpoint_sequence DESC, created_at DESC LIMIT 1`,
+              `SELECT handoff.summary, handoff.next_action, handoff.checkpoint_sequence
+               FROM handoffs AS handoff
+               JOIN agent_sessions AS source ON source.id = handoff.from_session_id
+               WHERE handoff.work_item_id = ? AND (
+                 handoff.to_session_id = ? OR (
+                   handoff.to_session_id IS NULL AND handoff.acknowledged_at IS NULL
+                   AND handoff.from_session_id = ? AND handoff.to_agent_id = ?
+                 )
+               )
+                 AND source.agent_id = ? AND source.cwd IS ?
+                 AND source.thread_id IS ? AND source.role = ?
+               ORDER BY CASE WHEN handoff.to_session_id IS NOT NULL THEN 0 ELSE 1 END,
+                        checkpoint_sequence DESC, created_at DESC LIMIT 1`,
             )
-            .get(currentRow.id, sessionId ?? null, session.agent_id) as
-            | { summary: string; next_action: string; checkpoint_sequence: number }
-            | undefined)
+            .get(
+              currentRow.id,
+              sessionId,
+              pendingSourceId,
+              session.agent_id,
+              session.agent_id,
+              session.cwd,
+              session.thread_id,
+              session.role,
+            ) as { summary: string; next_action: string; checkpoint_sequence: number } | undefined)
         : undefined;
     const records = (
       this.sqlite

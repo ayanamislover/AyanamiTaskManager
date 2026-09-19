@@ -2,6 +2,12 @@ import type Database from "better-sqlite3";
 import { AtmError } from "@ayanami-task/errors";
 import { sessionViewFromRow } from "./read-model-mappers.js";
 import type { SessionPageFilters, SessionProjectionPage, SessionView } from "./read-model-types.js";
+
+/** 从 `<项目码>-T-0540` 取出 540；读模型本来就只连一个项目的库，前缀不用再校验。 */
+function workItemLocalNo(taskKey: string): number | null {
+  const match = /-T-(\d+)$/u.exec(taskKey);
+  return match ? Number(match[1]) : null;
+}
 import {
   decodeSessionListCursor,
   encodeSessionListCursor,
@@ -44,6 +50,12 @@ export class SessionReadModel {
     );
   }
 
+  /**
+   * 任务抽屉只要某一个任务的 Session，过滤必须在 SQL 里做。
+   *
+   * 以前是把整个项目的 Session 分页全拉回前端再按 currentTaskKey 筛：ATM 自己有 335 条，
+   * 每页 100 就是四个来回，只为找出其中几条。
+   */
   listAgentSessionPage(filters: SessionPageFilters = {}): SessionProjectionPage {
     const project = this.projectCode();
     const selection: SessionListSelection = { list: "sessions" };
@@ -55,6 +67,12 @@ export class SessionReadModel {
     if (decoded.last) {
       clauses.push("(session.started_at, session.id) < (?, ?)");
       parameters.push(decoded.last.startedAt, decoded.last.id);
+    }
+    if (filters.taskKey !== undefined) {
+      const localNo = workItemLocalNo(filters.taskKey);
+      // 认不出来的任务键就是没有任何 Session，别退化成「不过滤」。
+      clauses.push("task.local_no = ?");
+      parameters.push(localNo ?? -1);
     }
     const limit = Math.min(100, Math.max(1, filters.limit ?? 100));
     parameters.push(limit + 1);

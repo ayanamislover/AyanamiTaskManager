@@ -291,7 +291,6 @@ export function ProjectTaskViews({
             />
             <th>负责人</th>
             <th>层级</th>
-            <th>计划日</th>
             <th>阻塞 / 等待</th>
             <th>进度</th>
             <ProjectTaskSortHeader
@@ -306,7 +305,7 @@ export function ProjectTaskViews({
         {closedRows.length ? (
           <tbody className="atm-closed-tasks">
             <tr className="atm-table-section">
-              <th colSpan={9} scope="rowgroup">
+              <th colSpan={8} scope="rowgroup">
                 最近结束
                 {closedTasks ? (
                   <span className="atm-row-sub">
@@ -338,7 +337,6 @@ export function ProjectTaskViews({
       <td>{priorityLabels[task.priority] ?? task.priority}</td>
       <td>{task.assigneeAgentId === "USER" ? "桌面用户" : (task.assigneeAgentId ?? "未分配")}</td>
       <td className="atm-key">{task.parentId ? "子任务" : "根任务"}</td>
-      <td>{task.targetDate ?? "—"}</td>
       <td>
         <span className="atm-cell-wrap">{task.blockedReason || task.waitingFor || "—"}</span>
       </td>

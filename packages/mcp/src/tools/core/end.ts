@@ -21,7 +21,8 @@ export function createAtmEndTool(service: AyanamiTaskService): ToolDefinition<ty
   return {
     profile: "core",
     name: "atm_end",
-    description: "结束会话并交接。",
+    description:
+      "结束会话并交接。outcome=completed|paused|blocked|cancelled|error|retired，全小写。summary 上限 500 个 code point。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

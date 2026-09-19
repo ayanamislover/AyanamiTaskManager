@@ -117,7 +117,6 @@ describe("Project task controls and five views", () => {
       "全部状态",
       "全部负责人",
       "全部里程碑",
-      "全部日期",
       "全部进度来源",
       "仅阻塞",
       "保存当前",
@@ -129,7 +128,7 @@ describe("Project task controls and five views", () => {
     expect(markup).not.toContain("<select");
   });
 
-  it("保持筛选条件的组合与逾期完成项排除语义", () => {
+  it("保持筛选条件的组合语义", () => {
     expect(filterProjectTasks(tasks, { ...EMPTY_PROJECT_TASK_FILTERS, status: "READY" })).toEqual([
       tasks[0],
     ]);
@@ -138,13 +137,12 @@ describe("Project task controls and five views", () => {
         ...EMPTY_PROJECT_TASK_FILTERS,
         assignee: "Codex",
         milestone: "m-1",
-        due: "OVERDUE",
         progressSource: "REPORTED",
       }),
     ).toEqual([tasks[0]]);
     expect(
-      filterProjectTasks(tasks, { ...EMPTY_PROJECT_TASK_FILTERS, due: "OVERDUE" }),
-    ).not.toContain(tasks[1]);
+      filterProjectTasks(tasks, { ...EMPTY_PROJECT_TASK_FILTERS, blockedOnly: true }),
+    ).not.toContain(tasks[0]);
   });
 
   it("保持 list/board/timeline/tree/records 的关键 DOM 与空态", () => {

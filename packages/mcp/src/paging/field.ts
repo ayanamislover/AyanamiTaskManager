@@ -163,6 +163,53 @@ function getAtPath(value: unknown, path: Array<string | number>): unknown {
   return current;
 }
 
+/**
+ * field_mask 里这个 view 根本给不出的字段。
+ *
+ * selectFields 会把它们静默丢掉，于是 `field_mask: ["status","title"]` 在 core view 下
+ * 只回 status，调用方看到的是「这个任务没有 title」，而不是「你要的字段这个 view 没有」。
+ * 实测代价是换 view 再 get 一次。field_mask 是「在 view 已有的字段内过滤」，不是「我要这些字段」，
+ * 这件事得由响应自己讲出来。
+ */
+export function ignoredFields(
+  value: Record<string, unknown>,
+  fieldMask: readonly string[],
+): string[] {
+  if (fieldMask.length === 0 || fieldMask.includes("*")) return [];
+  return fieldMask.filter((field) => !(field in value));
+}
+
+/**
+ * 把 ignored_fields 回显裁到调用方给的预算之内，并报出它实际要占的字符数。
+ *
+ * 头一版两头都放宽：先从 max_chars 里扣掉回显开销，又用 Math.max 把正文预算夹回 300/500，
+ * 最后无条件把完整回显贴回响应。于是 `max_chars=300` 配 30 个合法长度的越界字段，实际返回
+ * 1910 字符——对靠 max_chars 控上下文的调用方，这是可观察的契约违背，而且它并没有做错什么。
+ *
+ * 现在回显自己先按预算裁剪：列不下的名字换成一个计数，调用方仍然知道还有多少没列出来。
+ * 回显最多占一半预算，另一半留给正文，正文的兜底回执再小也装得下——不依赖各个 fitter
+ * 内部的最小尺寸，那些数字会随实现漂。
+ */
+export function fitIgnoredFields(
+  ignored: readonly string[],
+  maxChars: number,
+): { echo: Record<string, unknown>; cost: number } {
+  if (ignored.length === 0) return { echo: {}, cost: 0 };
+  const budget = Math.floor(maxChars / 2);
+  for (let kept = ignored.length; kept >= 0; kept -= 1) {
+    const omitted = ignored.length - kept;
+    const echo: Record<string, unknown> = {
+      ignored_fields: ignored.slice(0, kept),
+      ...(omitted === 0 ? {} : { ignored_fields_omitted: omitted }),
+    };
+    // JSON.stringify 单独算这个对象会把两个花括号也算进去，而合并进正文时只多一个逗号，
+    // 所以这里恒多留 1 个字符。宁可多留，不可少留。
+    const cost = JSON.stringify(echo).length;
+    if (cost <= budget) return { echo, cost };
+  }
+  return { echo: {}, cost: 0 };
+}
+
 export function selectFields(
   value: Record<string, unknown>,
   fieldMask: string[],

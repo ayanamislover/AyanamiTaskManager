@@ -259,3 +259,26 @@ button.atm-row:hover {
 :where(.atm-nav-group, .atm-diagnostics, .agent-history):has(:focus-visible) .atm-disclosure-body {
   transition: none;
 }
+
+/*
+ * 拖动排序：被拖起来的那一项淡下去，落点画一条线。
+ *
+ * 侧栏是竖着一列，线画在上下；项目卡是网格，线画在左右。
+ * 顺序默认按 updated_at 倒序，动过谁谁往前窜，找项目只能每次重新看一遍——
+ * 所以要能自己排，而且排完两处一致。
+ */
+[data-dragging="true"] {
+  opacity: 0.45;
+}
+.atm-nav-project[data-drop="before"] {
+  box-shadow: inset 0 2px 0 0 var(--atm-primary);
+}
+.atm-nav-project[data-drop="after"] {
+  box-shadow: inset 0 -2px 0 0 var(--atm-primary);
+}
+.atm-project[data-drop="before"] {
+  box-shadow: inset 2px 0 0 0 var(--atm-primary);
+}
+.atm-project[data-drop="after"] {
+  box-shadow: inset -2px 0 0 0 var(--atm-primary);
+}

@@ -12,7 +12,7 @@ export function projectFromPublicKey(value: string): string | null {
   return match?.[1]?.toUpperCase() ?? null;
 }
 
-function compactSearchHit(hit: Record<string, unknown>): Record<string, unknown> {
+export function compactSearchHit(hit: Record<string, unknown>): Record<string, unknown> {
   return {
     entity_type: hit.entityType,
     entity_key: hit.entityKey,

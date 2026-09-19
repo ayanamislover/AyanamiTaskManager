@@ -154,11 +154,10 @@ export function ProjectUpdateModal({
             </>
           )}
           {history.data?.some((item) => item.status === "PUBLISHED") ? (
-            <section className="atm-section">
+            <section className="atm-section atm-scroll-list">
               <h3>最近发布</h3>
               {history.data
                 .filter((item) => item.status === "PUBLISHED")
-                .slice(0, 3)
                 .map((item) => (
                   <div className="atm-row" key={item.id}>
                     <div>

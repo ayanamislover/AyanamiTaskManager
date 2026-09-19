@@ -25,6 +25,8 @@ const CONTEXT_KEYS = [
   ...CORE_KEYS,
   "acceptance",
   "assigneeAgentId",
+  "claimedBySessionId",
+  "claimLeaseUntil",
   "blockedReason",
   "checklistSummary",
   "descriptionPreview",

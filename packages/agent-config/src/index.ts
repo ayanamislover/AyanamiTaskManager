@@ -30,7 +30,12 @@ export {
   manageAgentRule,
   renderManagedAgentRule,
 } from "./agent-rules.js";
-export { installAgentSkills, inspectAgentSkills, uninstallAgentSkills } from "./agent-skills.js";
+export {
+  agentSkillsToRepair,
+  installAgentSkills,
+  inspectAgentSkills,
+  uninstallAgentSkills,
+} from "./agent-skills.js";
 export {
   claudeDesktopConfigPaths,
   defaultClaudeCodeConfigPath,

@@ -6,6 +6,7 @@ import {
   type CompletionGateReason,
 } from "@ayanami-task/errors";
 import {
+  COMPLETION_GATE_REQUIRED_STATUSES,
   legalWorkItemOperations,
   type WorkItemPhase,
   type WorkItemStatus,
@@ -163,21 +164,22 @@ export const CompletionGates = [
   {
     name: "current_state",
     evaluate: ({ workItem }) => {
-      if (
-        workItem.status === "DONE" ||
-        workItem.status === "IN_PROGRESS" ||
-        workItem.status === "VERIFYING"
-      ) {
+      const required: readonly string[] = COMPLETION_GATE_REQUIRED_STATUSES;
+      // 已经 DONE 的任务没有「还差什么」可言，闸门对它无话可说。
+      if (workItem.status === "DONE" || required.includes(workItem.status)) {
         return { reasons: [], total: 0 };
       }
-      const legalOperations = legalWorkItemOperations(workItem.status, phaseFor(workItem)).map(
-        (entry) => `${entry.operation} -> ${entry.target}`,
-      );
+      // 这条 reason 说的就是「complete 现在不行」，再把 complete 列进可用操作里
+      // 等于自相矛盾——READY 任务过去拿到的正是这样一份提示。
+      const legalOperations = legalWorkItemOperations(workItem.status, phaseFor(workItem))
+        .filter((entry) => entry.operation !== "complete")
+        .map((entry) => `${entry.operation} -> ${entry.target}`);
       return {
         reasons: [
           {
             code: "CURRENT_STATE_INVALID",
             current_status: workItem.status,
+            required_status: [...COMPLETION_GATE_REQUIRED_STATUSES],
             legal_operations: legalOperations,
           },
         ],

@@ -1,6 +1,6 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { z } from "zod";
-import { selectFields } from "../../paging/field.js";
+import { fitIgnoredFields, ignoredFields, selectFields } from "../../paging/field.js";
 import {
   compactReconciliationItem,
   externalizeTaskView,
@@ -11,6 +11,9 @@ import {
 import { plain, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
 import { outputSchema, projectCode, taskKey } from "../primitives.js";
+
+/** max_chars 的下限，只管住入参；回显与正文如何分这份额度由 fitIgnoredFields 决定。 */
+const TASK_LIST_MIN_CHARS = 500;
 
 const inputSchema = z
   .object({
@@ -25,8 +28,8 @@ const inputSchema = z
     cursor: z.string().optional(),
     view: z.enum(["core", "context", "full", "reconcile"]).default("core"),
     include_active: z.boolean().default(false),
-    field_mask: z.array(z.string()).max(20).default([]),
-    max_chars: z.number().int().min(500).max(50_000).default(12_000),
+    field_mask: z.array(z.string().max(64)).max(20).default([]),
+    max_chars: z.number().int().min(TASK_LIST_MIN_CHARS).max(50_000).default(12_000),
   })
   .strict();
 
@@ -36,7 +39,7 @@ export function createAtmTaskListTool(
   return {
     profile: "core",
     name: "atm_task_list",
-    description: "分页列任务。",
+    description: "分页列任务。view=core|context|full|reconcile。field_mask 语义同 atm_task_get。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
@@ -79,21 +82,25 @@ export function createAtmTaskListTool(
         ...(decoded.query === undefined ? {} : { query: decoded.query }),
       };
       const page = await service.listWorkItemPage(decoded.project, filters, projectionView);
-      const projectedItems = page.items.map((item) =>
-        selectFields(externalizeTaskView(item) as Record<string, unknown>, decoded.field_mask),
+      const externalItems = page.items.map(
+        (item) => externalizeTaskView(item) as Record<string, unknown>,
       );
-      return wrap(
-        fitTaskPage(
-          decoded.project,
-          projectionView,
-          decoded.max_chars,
-          projectedItems,
-          page.itemCursors,
-          page.hasMore,
-          page.nextCursor,
-          page.retryCursor,
-        ),
+      const projectedItems = externalItems.map((item) => selectFields(item, decoded.field_mask));
+      // 这一页所有条目共用一个 view 形状，用第一条判断就够；空页没有形状可判。
+      const ignored =
+        externalItems[0] === undefined ? [] : ignoredFields(externalItems[0], decoded.field_mask);
+      const { echo, cost } = fitIgnoredFields(ignored, decoded.max_chars);
+      const fitted = fitTaskPage(
+        decoded.project,
+        projectionView,
+        decoded.max_chars - cost,
+        projectedItems,
+        page.itemCursors,
+        page.hasMore,
+        page.nextCursor,
+        page.retryCursor,
       );
+      return wrap({ ...fitted, ...echo });
     },
   };
 }

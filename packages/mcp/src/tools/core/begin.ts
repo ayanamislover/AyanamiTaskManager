@@ -79,7 +79,7 @@ export function createAtmBeginTool(
   return {
     profile: "core",
     name: "atm_begin",
-    description: "直接使用返回的 brief",
+    description: "开始或恢复会话并返回 brief。开工只调这一次，直接用返回的 brief。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: false, destructiveHint: false },

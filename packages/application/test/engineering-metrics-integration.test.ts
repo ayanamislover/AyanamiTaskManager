@@ -14,6 +14,19 @@ function git(directory: string, args: string[]): void {
   execFileSync("git", args, { cwd: directory, stdio: "ignore", windowsHide: true });
 }
 
+/** 等后台补扫落库。间隔短、上限宽：这里要的是「最终会写进去」，不是「多快写进去」。 */
+async function eventually<T extends { metrics?: unknown } | null>(
+  read: () => Promise<T>,
+): Promise<T> {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const value = await read();
+    if (value?.metrics) return value;
+    if (Date.now() > deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
 describe("工程统计应用集成", () => {
   it("任务开始建立 baseline，当前变更和项目快照写入独立项目库并可重启读取", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-metrics-integration-"));
@@ -95,6 +108,150 @@ describe("工程统计应用集成", () => {
         baseline: expect.stringMatching(/^[0-9a-f]{40}$/u),
         metrics: { filesCreated: 1, sourceLinesAdded: 2 },
       });
+    } finally {
+      service.close();
+    }
+  });
+
+  /**
+   * 打开任务详情不该等 git。
+   *
+   * scanWorkItemChanges 要跑一串 git 子进程（ATM 自己的仓库实测 1.7 秒）而且是同步的：
+   * 它一跑，daemon 这一整段时间什么请求都答不了——点开任务之所以慢，慢的不是任务本身，
+   * 是它排在这次扫描后面。所以手里有一份就先给手里那份，新的放到这次响应之后再补。
+   */
+  it("已经有一份工程变更时不再当场重扫，只有 refresh 才重新扫", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-metrics-reuse-"));
+    temporary.push(root);
+    const sourcePath = join(root, "source");
+    const dataDir = join(root, "data");
+    mkdirSync(join(sourcePath, "src"), { recursive: true });
+    writeFileSync(join(sourcePath, "package.json"), JSON.stringify({ dependencies: {} }));
+    writeFileSync(join(sourcePath, "src", "main.ts"), "export const main = 1;\n");
+    git(sourcePath, ["init"]);
+    git(sourcePath, ["config", "user.email", "atm@example.test"]);
+    git(sourcePath, ["config", "user.name", "ATM Test"]);
+    git(sourcePath, ["add", "-A"]);
+    git(sourcePath, ["commit", "-m", "baseline"]);
+
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "复用", sourcePath, code: "REUSE" });
+      const objective = await service.createObjectiveAsUser("REUSE", "objective", {
+        title: "目标",
+        description: "",
+        definitionOfDone: [],
+      });
+      const task = (
+        await service.createWorkItemsAsUser("REUSE", "task", [
+          {
+            clientRef: "reuse",
+            objectiveId: objective.id,
+            title: "任务",
+            description: "",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+            acceptance: [],
+            checklist: [],
+            verificationRequired: false,
+          },
+        ])
+      ).items[0]!;
+
+      writeFileSync(join(sourcePath, "src", "one.ts"), "export const one = 1;\n");
+      const first = await service.engineeringMetrics("REUSE", {
+        taskKey: task.key,
+        refresh: true,
+      });
+      expect(first.workItem).toMatchObject({ metrics: { filesCreated: 1 } });
+
+      // 盘上又多了一个文件，但这一次不许再扫：拿到的还是刚才存下的那一份。
+      writeFileSync(join(sourcePath, "src", "two.ts"), "export const two = 2;\n");
+      const reused = await service.engineeringMetrics("REUSE", { taskKey: task.key });
+      expect(reused.workItem).toMatchObject({ metrics: { filesCreated: 1 } });
+
+      // 明确要求刷新时才重新扫，这时才看得到第二个文件。
+      const refreshed = await service.engineeringMetrics("REUSE", {
+        taskKey: task.key,
+        refresh: true,
+      });
+      expect(refreshed.workItem).toMatchObject({ metrics: { filesCreated: 2 } });
+    } finally {
+      service.close();
+    }
+  });
+
+  /**
+   * 改任务状态不该等 git。
+   *
+   * 采集是观察性的：它对这次状态迁移没有任何决定权，失败也从不回滚。可它以前是当场同步跑的，
+   * 一个任务 1.6 秒，一批六个就是十秒——而调用方只是想把状态改掉。
+   *
+   * baseline 例外，必须当场记：它锚的是「这个任务从哪个 commit 开始」，晚一步就锚错了。
+   */
+  it("start 当场只记 baseline，真正的 diff 排到这次调用之后", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-metrics-deferred-"));
+    temporary.push(root);
+    const sourcePath = join(root, "source");
+    const dataDir = join(root, "data");
+    mkdirSync(join(sourcePath, "src"), { recursive: true });
+    writeFileSync(join(sourcePath, "package.json"), JSON.stringify({ dependencies: {} }));
+    writeFileSync(join(sourcePath, "src", "main.ts"), "export const main = 1;\n");
+    git(sourcePath, ["init"]);
+    git(sourcePath, ["config", "user.email", "atm@example.test"]);
+    git(sourcePath, ["config", "user.name", "ATM Test"]);
+    git(sourcePath, ["add", "-A"]);
+    git(sourcePath, ["commit", "-m", "baseline"]);
+
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      await service.createProject({ name: "延后采集", sourcePath, code: "DEFER" });
+      const objective = await service.createObjectiveAsUser("DEFER", "objective", {
+        title: "目标",
+        description: "",
+        definitionOfDone: [],
+      });
+      const task = (
+        await service.createWorkItemsAsUser("DEFER", "task", [
+          {
+            clientRef: "defer",
+            objectiveId: objective.id,
+            title: "任务",
+            description: "",
+            type: "TASK",
+            priority: "NORMAL",
+            status: "READY",
+            acceptance: [],
+            checklist: [],
+            verificationRequired: false,
+          },
+        ])
+      ).items[0]!;
+
+      await service.patchWorkItemsAsUser("DEFER", "defer-start", [
+        { taskKey: task.key, expectedVersion: task.version, operation: "start" },
+      ]);
+
+      // 刚回来这一刻：baseline 已经落库，diff 还没跑。扫描至少要过一个 git 子进程，
+      // 不可能在这几个微任务之内完成——除非又被改回当场同步扫。
+      const immediate = await service.databases.workItemEngineeringMetrics("DEFER", task.key);
+      expect(immediate).toMatchObject({ baseline: expect.stringMatching(/^[0-9a-f]{40}$/u) });
+      expect(immediate?.metrics).toBeNull();
+
+      const baselineRef = immediate!.baseline;
+      const settled = await eventually(() =>
+        service.databases.workItemEngineeringMetrics("DEFER", task.key),
+      );
+      // 补扫锚的还是 start 当时那个 commit，不是补扫自己跑的时候的 HEAD。
+      expect(settled).toMatchObject({ baseline: baselineRef });
+      expect(settled?.metrics).toMatchObject({ filesChanged: 0, filesCreated: 0 });
     } finally {
       service.close();
     }

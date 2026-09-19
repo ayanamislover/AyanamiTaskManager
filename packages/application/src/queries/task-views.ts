@@ -57,6 +57,8 @@ function context(projectCode: string, row: TaskViewProjectionRow): TaskContextVi
       evidenceMissing: Number(row.checklistEvidenceMissing ?? 0),
     },
     assigneeAgentId: row.assigneeAgentId ?? null,
+    claimedBySessionId: row.claimedBySessionId ?? null,
+    claimLeaseUntil: row.claimLeaseUntil ?? null,
     waitingFor: row.waitingFor ?? null,
     blockedReason: row.blockedReason ?? null,
   });

@@ -122,7 +122,7 @@ describe("Ayanami MCP", () => {
           typeof tool.annotations?.readOnlyHint === "boolean" &&
           typeof tool.annotations?.destructiveHint === "boolean" &&
           /^v\d+$/u.test(String(tool._meta?.surface_version ?? "")) &&
-          /^[a-f0-9]{64}$/u.test(String(tool._meta?.schema_hash ?? "")),
+          /^[a-f0-9]{16}$/u.test(String(tool._meta?.schema_hash ?? "")),
       ),
     ).toBe(true);
     expect(profiles.coreClient.getInstructions()).toContain("MCP surface v5");

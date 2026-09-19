@@ -181,8 +181,22 @@ describe("durable MCP mutation receipts", () => {
       expect(patchOperation.entities).toHaveLength(20);
       expect(patchOperation.entities).toEqual(
         expect.arrayContaining([
-          { entity_type: "WORK_ITEM", key: "RCPT-T-0001", version: 2 },
-          { entity_type: "WORK_ITEM", key: "RCPT-T-0020", version: 2 },
+          expect.objectContaining({
+            entity_type: "WORK_ITEM",
+            key: "RCPT-T-0001",
+            version: 2,
+            status: "IN_PROGRESS",
+            waiting_on: null,
+            claimed_by_session_id: session,
+          }),
+          expect.objectContaining({
+            entity_type: "WORK_ITEM",
+            key: "RCPT-T-0020",
+            version: 2,
+            status: "IN_PROGRESS",
+            waiting_on: null,
+            claimed_by_session_id: session,
+          }),
         ]),
       );
     } finally {

@@ -83,6 +83,33 @@ function json<T>(value: string | null | undefined, fallback: T): T {
   }
 }
 
+type CandidateHashMismatch = {
+  name: string;
+  bound: string;
+  submitted: string;
+};
+
+function candidateHashDifferences(
+  bound: ReviewCandidateHash[],
+  submitted: ReviewCandidateHash[],
+): {
+  missing: ReviewCandidateHash[];
+  extra: ReviewCandidateHash[];
+  mismatch: CandidateHashMismatch[];
+} {
+  const submittedByName = new Map(submitted.map((hash) => [hash.name, hash.value]));
+  const boundByName = new Map(bound.map((hash) => [hash.name, hash.value]));
+  const missing = bound.filter((hash) => !submittedByName.has(hash.name));
+  const extra = submitted.filter((hash) => !boundByName.has(hash.name));
+  const mismatch = bound.flatMap((hash) => {
+    const submittedValue = submittedByName.get(hash.name);
+    return submittedValue !== undefined && submittedValue !== hash.value
+      ? [{ name: hash.name, bound: hash.value, submitted: submittedValue }]
+      : [];
+  });
+  return { missing, extra, mismatch };
+}
+
 export class ReviewCommands {
   readonly #sqlite: Database.Database;
   readonly #mutation: ProjectMutationKernel;
@@ -415,10 +442,34 @@ export class ReviewCommands {
           [],
         );
         if (JSON.stringify(expectedHashes) !== JSON.stringify(normalizedInput.reviewedHashes)) {
+          const differences = candidateHashDifferences(
+            expectedHashes,
+            normalizedInput.reviewedHashes,
+          );
           throw new AtmError("CANDIDATE_HASH_MISMATCH", {
             message: `Review 候选哈希不匹配：${normalizedInput.requestKey}`,
             details: {
               request_key: normalizedInput.requestKey,
+              ...differences,
+              request: {
+                key: normalizedInput.requestKey,
+                review_task_key: reviewTaskKey,
+                expected_review_task_version: normalizedInput.expectedReviewTaskVersion,
+                parent_checklist_id: String(request.parent_checklist_id),
+                parent_checklist_version: Number(request.parent_checklist_version),
+              },
+              request_lookup: {
+                project: this.#projectCode(),
+                request_key: normalizedInput.requestKey,
+                transport: "REST",
+                method: "GET",
+                path: `/api/v1/projects/${encodeURIComponent(this.#projectCode())}/reviews/requests/${encodeURIComponent(normalizedInput.requestKey)}`,
+                authentication: "daemon_bearer",
+              },
+              bound: expectedHashes,
+              submitted: normalizedInput.reviewedHashes,
+              // Keep the legacy aliases last so the 500-character MCP error text
+              // retains the actionable field-level differences before full maps.
               expected: expectedHashes,
               actual: normalizedInput.reviewedHashes,
             },

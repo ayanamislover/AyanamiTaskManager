@@ -102,7 +102,7 @@ export class SessionCommands {
       });
     }
     const repository = await this.#runtime.repository(project.code);
-    const gitContext = input.cwd ? inspectGitContext(input.cwd) : null;
+    const gitContext = input.cwd ? await inspectGitContext(input.cwd) : null;
     const sessionInput: CreateSessionInput = {
       agentId: input.agentId,
       displayName: input.displayName ?? input.agentId,
@@ -227,6 +227,9 @@ export class SessionCommands {
     const repository = await this.#runtime.repository(projectCode);
     const session = repository.getSession(sessionId);
     if (!session.cwd) return { updated: false, sequence: repository.meta.sequence };
-    return repository.updateSessionGitContext(sessionId, inspectGitContext(String(session.cwd)));
+    return repository.updateSessionGitContext(
+      sessionId,
+      await inspectGitContext(String(session.cwd)),
+    );
   }
 }

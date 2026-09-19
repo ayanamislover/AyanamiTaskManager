@@ -356,6 +356,19 @@
 .atm-management-card {
   min-height: 238px;
 }
+/*
+ * 列表一律列全，不用固定条数去截断；需要封顶的地方让它自己滚。
+ *
+ * 之前这三张卡只画前 4/4/5 条，而卡头的徽章写的是真实条数——两边对不上，
+ * 剩下的既看不见，也没有任何提示说还有。侧栏的活动项目是同一个毛病的极端版：
+ * 写死 12 条，项目多了就凭空少几个。
+ */
+.atm-management-card .atm-list,
+.atm-scroll-list {
+  max-height: 264px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 .atm-management-card .atm-empty {
   min-height: 170px;
   padding: 24px 16px;

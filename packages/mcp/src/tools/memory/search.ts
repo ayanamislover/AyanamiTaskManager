@@ -11,8 +11,15 @@ import {
   fitSessionPage,
   scopedUlidQuery,
 } from "../../paging/entities.js";
-import { fieldTargetVersion, fitFieldRead, selectFields } from "../../paging/field.js";
 import {
+  fieldTargetVersion,
+  fitFieldRead,
+  fitIgnoredFields,
+  ignoredFields,
+  selectFields,
+} from "../../paging/field.js";
+import {
+  compactSearchHit,
   fitSearchPage,
   projectFromPublicKey,
   publicKeyKind,
@@ -21,6 +28,53 @@ import {
 import { plain, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
 import { opId, outputSchema, projectCode, sessionId } from "../primitives.js";
+import { externalizeTaskView } from "../../paging/task.js";
+
+function maskEcho(items: Record<string, unknown>[], mask: string[], maxChars: number) {
+  const shape = Object.assign({}, ...items);
+  return fitIgnoredFields(items.length ? ignoredFields(shape, mask) : [], maxChars);
+}
+
+function checkedPage(
+  result: Record<string, unknown>,
+  echo: Record<string, unknown>,
+  maxChars: number,
+) {
+  const combined = { ...result, ...echo };
+  if (JSON.stringify(combined).length > maxChars) {
+    throw new AtmError("RESULT_TOO_LARGE", {
+      message: "预算无法容纳搜索回执",
+      details: { recovery: { action: "increase_max_chars", preserve_cursor: true } },
+    });
+  }
+  return wrap(combined);
+}
+
+function maskedExact(
+  value: Record<string, unknown>,
+  decoded: { field_mask: string[]; max_chars: number; cursor?: string | undefined },
+  target: Parameters<typeof fitFieldRead>[3],
+  slot: "entity" | "operation",
+) {
+  const { echo } = fitIgnoredFields(ignoredFields(value, decoded.field_mask), decoded.max_chars);
+  const envelope = { exact: true, entity_type: target.entityType };
+  const overhead = JSON.stringify({ ...envelope, [slot]: {}, ...echo }).length - 2;
+  const fitted = fitFieldRead(
+    selectFields(value, decoded.field_mask),
+    decoded.max_chars - overhead,
+    "atm_search",
+    target,
+    decoded.cursor,
+  );
+  const result = { ...envelope, [slot]: fitted, ...echo };
+  if (JSON.stringify(result).length > decoded.max_chars) {
+    throw new AtmError("RESULT_TOO_LARGE", {
+      message: "预算无法容纳字段回执",
+      details: { recovery: { action: "increase_max_chars", preserve_cursor: true } },
+    });
+  }
+  return wrap(result);
+}
 
 const inputSchema = z
   .object({
@@ -31,7 +85,7 @@ const inputSchema = z
     session: sessionId.optional(),
     limit: z.number().int().min(1).max(30).default(20),
     cursor: z.string().optional(),
-    field_mask: z.array(z.string()).max(20).default([]),
+    field_mask: z.array(z.string().max(64)).max(20).default([]),
     max_chars: z.number().int().min(300).max(50_000).default(6000),
   })
   .strict()
@@ -82,7 +136,7 @@ export function createAtmSearchTool(
   return {
     profile: "memory",
     name: "atm_search",
-    description: "搜索事实。",
+    description: "搜索事实。session 只能与 op_id 精确回查一起传。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
@@ -108,20 +162,22 @@ export function createAtmSearchTool(
                 "source_type",
                 "updated_at",
               ];
-        const projectedItems = page.items.map((record) =>
-          selectFields(compactRecord(plain(record)), listFieldMask),
-        );
-        return wrap(
+        const externalItems = page.items.map((record) => compactRecord(plain(record)));
+        const { echo, cost } = maskEcho(externalItems, decoded.field_mask, decoded.max_chars);
+        const projectedItems = externalItems.map((record) => selectFields(record, listFieldMask));
+        return checkedPage(
           fitRecordPage(
             decoded.project!,
             decoded.limit,
-            decoded.max_chars,
+            decoded.max_chars - cost,
             projectedItems,
             page.itemCursors,
             page.hasMore,
             page.nextCursor,
             page.retryCursor,
           ),
+          echo,
+          decoded.max_chars,
         );
       }
       if (decoded.list === "sessions") {
@@ -145,20 +201,22 @@ export function createAtmSearchTool(
                 "started_at",
                 "updated_at",
               ];
-        const projectedItems = page.items.map((session) =>
-          selectFields(compactSessionPageItem(plain(session)), listFieldMask),
-        );
-        return wrap(
+        const externalItems = page.items.map((session) => compactSessionPageItem(plain(session)));
+        const { echo, cost } = maskEcho(externalItems, decoded.field_mask, decoded.max_chars);
+        const projectedItems = externalItems.map((session) => selectFields(session, listFieldMask));
+        return checkedPage(
           fitSessionPage(
             decoded.project!,
             decoded.limit,
-            decoded.max_chars,
+            decoded.max_chars - cost,
             projectedItems,
             page.itemCursors,
             page.hasMore,
             page.nextCursor,
             page.retryCursor,
           ),
+          echo,
+          decoded.max_chars,
         );
       }
       if (decoded.op_id !== undefined) {
@@ -168,11 +226,9 @@ export function createAtmSearchTool(
         const trace = compactOperationTrace(
           plain(await service.getOperationTrace(decoded.project, decoded.op_id, decoded.session)),
         );
-        const source = selectFields(trace, decoded.field_mask);
-        const fitted = fitFieldRead(
-          source,
-          Math.max(300, decoded.max_chars - 80),
-          "atm_search",
+        return maskedExact(
+          trace,
+          decoded,
           {
             project: decoded.project,
             entity: `${decoded.op_id}@${decoded.session ?? "*"}`,
@@ -180,9 +236,8 @@ export function createAtmSearchTool(
             fieldMask: decoded.field_mask,
             targetVersion: fieldTargetVersion(trace),
           },
-          decoded.cursor,
+          "operation",
         );
-        return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
       }
       if (!decoded.query) {
         throw new AtmError("VALIDATION_ERROR", { message: "query 或 op_id 至少提供一个" });
@@ -198,11 +253,9 @@ export function createAtmSearchTool(
         const trace = compactOperationTrace(
           plain(await service.getOperationTrace(decoded.project, opId.parse(exactOpId))),
         );
-        const source = selectFields(trace, decoded.field_mask);
-        const fitted = fitFieldRead(
-          source,
-          Math.max(300, decoded.max_chars - 80),
-          "atm_search",
+        return maskedExact(
+          trace,
+          decoded,
           {
             project: decoded.project,
             entity: `${exactOpId}@*`,
@@ -210,9 +263,8 @@ export function createAtmSearchTool(
             fieldMask: decoded.field_mask,
             targetVersion: fieldTargetVersion(trace),
           },
-          decoded.cursor,
+          "operation",
         );
-        return wrap({ exact: true, entity_type: "OPERATION", operation: fitted });
       }
       const scopedEntity = scopedUlidQuery(decoded.query);
       if (scopedEntity) {
@@ -227,11 +279,9 @@ export function createAtmSearchTool(
                 plain(await service.getProgressUpdate(decoded.project, scopedEntity.id)),
               )
             : compactSession(plain(await service.getSession(decoded.project, scopedEntity.id)));
-        const source = selectFields(entity, decoded.field_mask);
-        const fitted = fitFieldRead(
-          source,
-          Math.max(300, decoded.max_chars - 80),
-          "atm_search",
+        return maskedExact(
+          entity,
+          decoded,
           {
             project: decoded.project,
             entity: scopedEntity.id,
@@ -239,23 +289,20 @@ export function createAtmSearchTool(
             fieldMask: decoded.field_mask,
             targetVersion: fieldTargetVersion(entity),
           },
-          decoded.cursor,
+          "entity",
         );
-        return wrap({ exact: true, entity_type: scopedEntity.kind, entity: fitted });
       }
       const kind = publicKeyKind(decoded.query);
       const exactProject = decoded.project ?? projectFromPublicKey(decoded.query) ?? undefined;
       if (kind && exactProject) {
         const entity = plain(
           kind === "WORK_ITEM"
-            ? await service.getWorkItem(exactProject, decoded.query, "full")
+            ? externalizeTaskView(await service.getWorkItem(exactProject, decoded.query, "full"))
             : compactRecord(plain(await service.getRecord(exactProject, decoded.query))),
         );
-        const source = selectFields(entity, decoded.field_mask);
-        const fitted = fitFieldRead(
-          source,
-          Math.max(300, decoded.max_chars - 80),
-          "atm_search",
+        return maskedExact(
+          entity,
+          decoded,
           {
             project: exactProject,
             entity: decoded.query.toUpperCase(),
@@ -263,9 +310,8 @@ export function createAtmSearchTool(
             fieldMask: decoded.field_mask,
             targetVersion: fieldTargetVersion(entity),
           },
-          decoded.cursor,
+          "entity",
         );
-        return wrap({ exact: true, entity_type: kind, entity: fitted });
       }
 
       const searchQuery = decoded.query;
@@ -274,15 +320,22 @@ export function createAtmSearchTool(
           ? service.search(decoded.project, searchQuery, limit, decoded.cursor)
           : service.globalSearch(searchQuery, limit, decoded.cursor);
       const initial = (await fetchPage(decoded.limit)) as SearchServicePage;
-      return wrap(
+      const { echo, cost } = maskEcho(
+        initial.hits.map((hit) => compactSearchHit(plain(hit))),
+        decoded.field_mask,
+        decoded.max_chars,
+      );
+      return checkedPage(
         await fitSearchPage({
           initial,
           fetchPage,
           requestedLimit: decoded.limit,
           ...(decoded.cursor === undefined ? {} : { inputCursor: decoded.cursor }),
           fieldMask: decoded.field_mask,
-          maxChars: decoded.max_chars,
+          maxChars: decoded.max_chars - cost,
         }),
+        echo,
+        decoded.max_chars,
       );
     },
   };

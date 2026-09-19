@@ -16,6 +16,8 @@ export type TaskViewProjectionRow = {
   description?: string;
   acceptanceJson?: string;
   assigneeAgentId?: string | null;
+  claimedBySessionId?: string | null;
+  claimLeaseUntil?: string | null;
   waitingFor?: string | null;
   blockedReason?: string | null;
   checklistTotal?: number;
@@ -130,6 +132,8 @@ export function taskViewProjectionSql(input: {
        selected.description AS description,
        selected.acceptance_json AS acceptanceJson,
        selected.assignee_agent_id AS assigneeAgentId,
+       selected.claimed_by_session_id AS claimedBySessionId,
+       selected.claim_lease_until AS claimLeaseUntil,
        selected.waiting_for AS waitingFor,
        selected.blocked_reason AS blockedReason,
        COALESCE(checklist_summary.total, 0) AS checklistTotal,

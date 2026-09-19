@@ -151,6 +151,8 @@ export type CompletionGateReason =
   | {
       readonly code: "CURRENT_STATE_INVALID";
       readonly current_status: string;
+      /** 完成闸门接受的当前状态；调用方据此知道还差哪一步，而不是只知道「不满足」。 */
+      readonly required_status: readonly string[];
       readonly legal_operations: readonly string[];
     };
 

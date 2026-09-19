@@ -95,6 +95,10 @@ type MutationEntityReference = {
   entity_type: string;
   key: string;
   version: number | null;
+  status?: string;
+  waiting_on?: string | null;
+  claimed_by_session_id?: string | null;
+  claim_lease_until?: string | null;
 };
 
 export function objectValue(value: unknown): Record<string, unknown> {
@@ -127,19 +131,34 @@ export function mutationEntityReferences(
   serviceResult: Record<string, unknown>,
 ): MutationEntityReference[] {
   const references: MutationEntityReference[] = [];
-  const add = (entityType: string, key: unknown, version: unknown = null) => {
+  const add = (
+    entityType: string,
+    key: unknown,
+    version: unknown = null,
+    state: Record<string, unknown> = {},
+  ) => {
     if (typeof key !== "string" || !key.trim()) return;
     references.push({
       entity_type: entityType,
       key,
       version: typeof version === "number" && Number.isSafeInteger(version) ? version : null,
+      ...(typeof state.status === "string" ? { status: state.status } : {}),
+      ...Object.fromEntries(
+        [
+          ["waitingOn", "waiting_on"],
+          ["claimedBySessionId", "claimed_by_session_id"],
+          ["claimLeaseUntil", "claim_lease_until"],
+        ]
+          .filter(([source]) => state[source!] === null || typeof state[source!] === "string")
+          .map(([source, target]) => [target, state[source!]]),
+      ),
     });
   };
   const addWorkItems = (items: unknown) => {
     if (!Array.isArray(items)) return;
     for (const value of items) {
       const item = objectValue(value);
-      add("WORK_ITEM", item.key ?? item.taskKey, item.version ?? item.taskVersion);
+      add("WORK_ITEM", item.key ?? item.taskKey, item.version ?? item.taskVersion, item);
     }
   };
 
@@ -149,7 +168,12 @@ export function mutationEntityReferences(
       addWorkItems(serviceResult.items);
       break;
     case "work.verify-and-complete":
-      add("WORK_ITEM", serviceResult.taskKey, serviceResult.taskVersion);
+      add(
+        "WORK_ITEM",
+        serviceResult.taskKey,
+        serviceResult.taskVersion,
+        objectValue(serviceResult.item),
+      );
       break;
     case "review.request.create": {
       const request = objectValue(serviceResult.request);
@@ -187,7 +211,7 @@ export function mutationEntityReferences(
       }
       break;
     case "work.progress":
-      add("WORK_ITEM", serviceResult.key, serviceResult.v);
+      add("WORK_ITEM", serviceResult.key, serviceResult.v, objectValue(serviceResult.state));
       add("PROGRESS", serviceResult.progressId);
       break;
     case "project-update.publish":

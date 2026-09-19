@@ -68,9 +68,9 @@ export function OverviewPage({
     (event) => !isSystemTimelineEvent(event),
   );
   const projects = data.projects.filter((project) => project.lifecycle !== "TRASHED");
-  const quickTasks = ((quickQuery.data ?? []) as any[])
-    .filter((task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status))
-    .slice(0, 5);
+  const quickTasks = ((quickQuery.data ?? []) as any[]).filter(
+    (task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status),
+  );
   const active = projects.reduce((sum, project) => sum + Number(project.active_count ?? 0), 0);
   const blocked =
     projects.reduce((sum, project) => sum + Number(project.blocked_count ?? 0), 0) +
@@ -141,7 +141,7 @@ export function OverviewPage({
             <span className="atm-badge warning">{attention.length}</span>
           </div>
           <div className="atm-panel-body atm-attention-grid">
-            {attention.slice(0, 12).map((item) => (
+            {attention.map((item) => (
               <div className="atm-row-sub" key={item}>
                 <WarningCircle size={15} /> {item}
               </div>
@@ -159,7 +159,7 @@ export function OverviewPage({
             <Empty title="还没有正式项目" text="从项目页创建第一个项目。" />
           ) : (
             <div className="atm-overview-projects">
-              {projects.slice(0, 12).map((project) => (
+              {projects.map((project) => (
                 <button
                   className="atm-project atm-overview-project"
                   key={project.id}
@@ -210,8 +210,8 @@ export function OverviewPage({
           {recentBusinessEvents.length === 0 ? (
             <Empty title="暂无事件" text="创建或更新任务后，变化会出现在这里。" />
           ) : (
-            <div className="atm-timeline">
-              {recentBusinessEvents.slice(0, 8).map((event) => {
+            <div className="atm-timeline atm-scroll-list">
+              {recentBusinessEvents.map((event) => {
                 const item = presentTimelineEvent(event);
                 return <TimelineEventRow event={event} key={item.id} />;
               })}
@@ -232,7 +232,7 @@ export function OverviewPage({
         ) : quickTasks.length === 0 ? (
           <Empty title="没有待处理临时任务" text="适合几分钟内完成、无需拆分的工作。" />
         ) : (
-          <div className="atm-list">
+          <div className="atm-list atm-scroll-list">
             {quickTasks.map((task) => (
               <div className="atm-row" key={task.id}>
                 <label className="atm-check">

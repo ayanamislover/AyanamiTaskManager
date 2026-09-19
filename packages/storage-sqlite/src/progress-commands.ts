@@ -7,6 +7,20 @@ import { TaskReadModel } from "./task-read-model.js";
 import { WorkItemMaintenance } from "./work-item-maintenance.js";
 import { resolveStoredWorkItemOperation } from "./work-item-operation.js";
 
+function progressState(row: {
+  status: string;
+  waiting_on: string | null;
+  claimed_by_session_id: string | null;
+  claim_lease_until: string | null;
+}) {
+  return {
+    status: row.status,
+    waitingOn: row.waiting_on,
+    claimedBySessionId: row.claimed_by_session_id,
+    claimLeaseUntil: row.claim_lease_until,
+  };
+}
+
 export class ProgressCommands {
   readonly #sqlite: Database.Database;
   readonly #mutation: ProjectMutationKernel;
@@ -58,6 +72,7 @@ export class ProgressCommands {
     v: number;
     opId: string;
     progressId: string;
+    state: ReturnType<typeof progressState>;
   } {
     const normalizedInput = {
       ...input,
@@ -101,6 +116,7 @@ export class ProgressCommands {
             v: row.version,
             opId,
             progressId: last.id,
+            state: progressState(row),
           };
         }
         const now = nowIso();
@@ -201,6 +217,7 @@ export class ProgressCommands {
           v: updated.version,
           opId,
           progressId,
+          state: progressState(this.#taskReads.rowForTaskKey(normalizedInput.taskKey)),
         };
       },
     });
