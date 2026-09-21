@@ -120,6 +120,11 @@ export const KnowledgeRevisionSchema = KnowledgeContentSchema.extend({
   createdAt: Text,
   publishedBy: KnowledgeAuthorSchema.optional(),
 });
+// Metadata text paging is an Agent view; REST keeps its complete management DTO.
+export const KnowledgeAgentGetInputSchema = KnowledgeGetInputSchema.extend({
+  part: z.enum(["body", "metadata"]).default("body"),
+});
+export type KnowledgeAgentGetInput = z.input<typeof KnowledgeAgentGetInputSchema>;
 export const KnowledgeEntrySchema = KnowledgeRevisionSchema.extend({
   version: z.number().int().positive(),
   archived: z.boolean(),
@@ -180,10 +185,25 @@ export const KnowledgeAgentFirstPageSchema = KnowledgeGetPageSchema.pick({
     tags: true,
     aliases: true,
   }).optional(),
+  metadataTruncated: z.boolean().optional(),
+  sourceRefsTotal: z.number().int().nonnegative().optional(),
+  appliesToTotal: z.number().int().nonnegative().optional(),
+  metadataRead: z.object({ id: Text, revision_id: Text, part: z.literal("metadata") }).optional(),
+});
+export const KnowledgeAgentMetadataPageSchema = z.object({
+  id: Text,
+  revisionId: Text,
+  part: z.literal("metadata"),
+  metadataJson: z.string(),
+  offset: z.number().int().nonnegative(),
+  totalChars: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  nextCursor: z.string().nullable(),
 });
 export const KnowledgeAgentGetPageSchema = z.union([
   KnowledgeAgentFirstPageSchema,
   KnowledgeAgentContinuationSchema,
+  KnowledgeAgentMetadataPageSchema,
 ]);
 export type KnowledgeAgentSearchPage = z.infer<typeof KnowledgeAgentSearchPageSchema>;
 export type KnowledgeAgentGetPage = z.infer<typeof KnowledgeAgentGetPageSchema>;

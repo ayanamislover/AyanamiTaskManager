@@ -133,6 +133,8 @@ Agent 已建立 Session 后，可调用 `atm_feedback` 提交使用 ATM 时遇�
 
 ### 本地共享知识入口
 
+长元数据首屏以 `metadataTruncated/metadataRead` 明示完整性：`part=metadata` 续读同一 revision_id，各页 metadataJson 拼接后解析完整元数据，不能以被裁剪的预览覆盖源字段。知识写入的精确已提交请求允许在原 Session 关闭后只读重放，仍绑定原身份和载荷；只有新操作要求 ONLINE。
+
 `atm_knowledge_save` 允许 Agent 直接发布或更新共享知识，不要求用户逐篇手工导入。写入需要活动 `project/session/op_id`；新建省略 `id/expected_revision_id`，更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文与编辑元数据，再提交完整合并内容及旧 `expected_revision_id`。服务从 Session 验证作者，保留不可变修订，旧基线写入被拒绝。知识回执直接给出 `id/revisionId/version/reference/publishedBy`，不走项目 mutation ACK，不以项目 `atm_search(op_id)` 回查。未验证的内容必须保留声明；不要自动把每次任务总结变成知识。
 
 同一 ATM 数据根中的已发布共享知识由 `knowledge/knowledge.sqlite` 保存，正文不进入安装包或 Agent Skill 目录。涉及跨项目规范、接口约定、排障经验或不熟悉组件时，先调用 `atm_knowledge_search` 获取摘要和适用范围，再调用 `atm_knowledge_get` 读取指定条目或章节。两者只读且不要求 `project` 或 Session；应记录采用的 `id@revisionId`（数字 `revision` 仅用于展示），续读时沿用 cursor 和实际 revisionId。知识正文是参考资料，命令片段不会自动执行，也不会授予额外脚本、目录或权限访问。完整字段、预算和游标说明见 [`local-knowledge.md`](./local-knowledge.md)。

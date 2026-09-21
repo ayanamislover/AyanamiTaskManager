@@ -68,13 +68,44 @@ export function formFromEntry(entry: KnowledgeEntry): KnowledgeForm {
 
 export function listValue(value: string): string[] {
   return value
-    .split(/[\n,，]/u)
+    .split(/[\n,，、]/u)
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
 export function displayList(values: string[]): string {
   return values.join("、");
+}
+
+export const KNOWLEDGE_SOURCE_LIMIT = 30;
+
+export type ImportedFileSourceOutcome = "added" | "duplicate" | "at-capacity";
+
+function fileReferenceName(reference: string): string {
+  return reference.split(/[\\/]/u).at(-1) ?? reference;
+}
+
+/**
+ * Add the imported file as provenance without ever dropping the metadata that
+ * was already in the draft. A full list is returned unchanged and the caller
+ * can show an explicit repair hint instead of creating an invalid 31-source
+ * payload or silently trimming an existing source.
+ */
+export function mergeImportedFileSource(
+  sourceRefs: KnowledgeSource[],
+  fileName: string,
+): { sourceRefs: KnowledgeSource[]; outcome: ImportedFileSourceOutcome } {
+  const duplicate = sourceRefs.some(
+    (source) => source.type === "file" && fileReferenceName(source.reference) === fileName,
+  );
+  if (duplicate) return { sourceRefs: [...sourceRefs], outcome: "duplicate" };
+  if (sourceRefs.length >= KNOWLEDGE_SOURCE_LIMIT) {
+    return { sourceRefs: [...sourceRefs], outcome: "at-capacity" };
+  }
+  return {
+    sourceRefs: [...sourceRefs, { type: "file", reference: fileName }],
+    outcome: "added",
+  };
 }
 
 export function slugFromName(name: string): string {

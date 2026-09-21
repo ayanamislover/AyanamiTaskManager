@@ -110,7 +110,7 @@ const publicFields: Record<string, readonly string[]> = {
   ],
   atm_delta: ["project", "since_seq", "limit", "types", "max_chars"],
   atm_knowledge_search: ["query", "tag", "include_archived", "limit", "max_chars", "cursor"],
-  atm_knowledge_get: ["id", "for_edit", "revision_id", "section", "max_chars", "cursor"],
+  atm_knowledge_get: ["id", "for_edit", "revision_id", "section", "max_chars", "cursor", "part"],
   atm_knowledge_save: [
     "slug",
     "title",

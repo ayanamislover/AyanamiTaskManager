@@ -1,7 +1,7 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   externalizeObjectSchema,
-  KnowledgeGetInputSchema,
+  KnowledgeAgentGetInputSchema,
   KnowledgeAgentGetPageSchema,
   type ExternalNameMap,
 } from "@ayanami-task/protocol";
@@ -12,12 +12,13 @@ import { outputSchema } from "../primitives.js";
 
 const knowledgeGetNames = {
   id: "id",
+  part: "part",
   forEdit: "for_edit",
   revisionId: "revision_id",
   section: "section",
   maxChars: "max_chars",
   cursor: "cursor",
-} as const satisfies ExternalNameMap<typeof KnowledgeGetInputSchema>;
+} as const satisfies ExternalNameMap<typeof KnowledgeAgentGetInputSchema>;
 
 /**
  * MCP 侧单独收紧 max_chars，不动协议层。
@@ -29,12 +30,16 @@ const knowledgeGetNames = {
  */
 export const MCP_KNOWLEDGE_GET_MAX_CHARS = 50_000;
 
-const knowledgeGetExternal = externalizeObjectSchema(KnowledgeGetInputSchema, knowledgeGetNames, {
-  maxChars: {
-    schema: z.number().int().min(1).max(MCP_KNOWLEDGE_GET_MAX_CHARS).default(6000),
-    decode: (value) => value,
+const knowledgeGetExternal = externalizeObjectSchema(
+  KnowledgeAgentGetInputSchema,
+  knowledgeGetNames,
+  {
+    maxChars: {
+      schema: z.number().int().min(1).max(MCP_KNOWLEDGE_GET_MAX_CHARS).default(6000),
+      decode: (value) => value,
+    },
   },
-});
+);
 const inputSchema = knowledgeGetExternal.inputSchema;
 
 /** Read one immutable knowledge revisionId, optionally constrained to a section. */
@@ -45,7 +50,7 @@ export function createAtmKnowledgeGetTool(
     profile: "memory",
     name: "atm_knowledge_get",
     description:
-      "按 ID 读取固定修订的知识正文。更新前传 for_edit=true 取编辑元数据，沿 cursor 读完整篇再保存。",
+      "读取固定修订，part=body|metadata（默认 body）。编辑用 for_edit=true；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。沿 cursor 读完整再保存。",
     inputSchema,
     // The application budgets the actual Agent projection. Continuations do
     // not repeat metadata; REST retains the complete management view.

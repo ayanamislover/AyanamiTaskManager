@@ -30,6 +30,17 @@ Renderer / MCP stdio / atm CLI
 
 正式项目写入只触碰一个项目库。Registry 摘要由项目 outbox 在提交后更新；失败不回滚项目事实，启动时按项目序列补投。任何客户端都不能直接写 SQLite。
 
+## WebSocket 断流与恢复契约
+
+`/api/v1/ws?scope=global|project:CODE&since=N` 在认证后按序补发事件；每个连接只有一个发送泵，先订阅再补齐历史。`since` 是客户端已处理的最后序号，不是服务端已写入 socket 的最后序号。
+
+- 发送泵逐帧等待 flush 回调。慢客户端不读取时，通常先触发 **5 秒发送超时**，服务端释放订阅、停止泵并以 **1011** 发起关闭；错误帧也可能无法送达，不能依赖一定收到 `STREAM_FAILED`。
+- 用户态发送缓冲超过 1 MiB 时，尝试发送 `resync_required`，随后以 **1013** 发起关闭。这主要是并发 ping/错误回复等堆积的保护，不是逐帧发送泵的主要慢客户端路径。
+- 接入消费端时，对 1011、1013 和传输异常断开采用有界退避并重新认证，从**已成功处理**的 `since` 续读；不要因未收到 `resync_required` 就认为没有漏读。缓冲阻塞或网络断开可能让客户端只观察到异常断开而非关闭码。
+- 认证拒绝/超时的 1008 不应使用同一个无效凭据无限重试；重新发现当前运行实例后再连接。事件序号不属于跨数据库恢复的永久标识，恢复或数据根变化后应重新同步状态。
+
+正式回归 `apps/daemon/test/websocket-slow-consumer.test.ts` 使用真实 TCP 握手、认证后暂停读取、256 KiB 有界事件供应，验证实际线上关闭帧为 1011、订阅恰好释放一次、泵停止，并用原 `since` 重连补齐。它不模拟 socket 的 send/flush，也不替代长期压力测试。
+
 ## 本地共享知识库
 
 同一个 ApplicationService 通过 `knowledge` 用例访问独立的 `<dataDir>/knowledge/knowledge.sqlite`。它不属于某个项目，不借用 `Record.scope`，也不另起常驻进程。数据库按需打开；损坏只影响知识功能，不阻止任务和 Session。`doctor` 单独报告知识库健康。

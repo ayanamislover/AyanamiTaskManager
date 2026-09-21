@@ -186,6 +186,32 @@
   max-height: calc(100dvh - 245px);
   overflow: auto;
 }
+.atm-knowledge-editor-form {
+  min-width: 0;
+  margin: 0;
+  padding: 14px 15px;
+  border: 0;
+}
+.atm-knowledge-source-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.atm-knowledge-source-row .atm-row-sub {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.atm-knowledge-source-row .atm-button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.atm-knowledge-import-button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.58;
+  pointer-events: none;
+}
 .atm-knowledge-discard-prompt {
   display: grid;
   gap: 7px;

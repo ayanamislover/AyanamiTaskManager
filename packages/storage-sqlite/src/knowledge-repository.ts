@@ -92,7 +92,7 @@ export class KnowledgeRepository {
       throw new AtmError("INVALID_ARGUMENT");
     const rows = this.database.sqlite
       .prepare(
-        `SELECT snapshot FROM knowledge_revisions WHERE entry_id=? AND revision < ? ORDER BY revision DESC LIMIT ?`,
+        `SELECT json_remove(snapshot, '$.bodyMarkdown') AS snapshot FROM knowledge_revisions WHERE entry_id=? AND revision < ? ORDER BY revision DESC LIMIT ?`,
       )
       .all(id, beforeRevision ?? Number.MAX_SAFE_INTEGER, limit + 1) as { snapshot: string }[];
     const revisions = rows
@@ -108,24 +108,72 @@ export class KnowledgeRepository {
     const fingerprint = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
     return db
       .transaction(() => {
-        const previous = db
-          .prepare("SELECT fingerprint, receipt FROM knowledge_operations WHERE op_id=?")
-          .get(opId) as { fingerprint: string; receipt: string } | undefined;
         // Retry wins over optimistic locking: the original response may have been lost.
-        if (previous) {
-          if (previous.fingerprint !== fingerprint) throw new AtmError("IDEMPOTENCY_CONFLICT");
-          return KnowledgeEntrySchema.parse(JSON.parse(previous.receipt));
-        }
+        const previous = this.replay(opId, payload);
+        if (previous) return previous;
         const result = action();
         db.prepare("UPDATE knowledge_meta SET sequence=sequence+1 WHERE singleton=1").run();
         db.prepare("INSERT INTO knowledge_operations VALUES(?, ?, ?)").run(
           opId,
           fingerprint,
-          JSON.stringify(result),
+          JSON.stringify({
+            format: "knowledge-receipt-v2",
+            id: result.id,
+            revisionId: result.revisionId,
+            version: result.version,
+            archived: result.archived,
+          }),
         );
         return result;
       })
       .immediate();
+  }
+
+  private replay(opId: string, payload: unknown): KnowledgeEntry | null {
+    const previous = this.database.sqlite
+      .prepare("SELECT fingerprint, receipt FROM knowledge_operations WHERE op_id=?")
+      .get(opId) as { fingerprint: string; receipt: string } | undefined;
+    if (!previous) return null;
+    const fingerprint = createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+    if (previous.fingerprint !== fingerprint) throw new AtmError("IDEMPOTENCY_CONFLICT");
+    const receipt = JSON.parse(previous.receipt) as Record<string, unknown>;
+    if (receipt.format === "knowledge-receipt-v2") {
+      const identity = KnowledgeEntrySchema.pick({
+        id: true,
+        revisionId: true,
+        version: true,
+        archived: true,
+      }).parse(receipt);
+      // Body/author belong to the immutable revision, but version/archive are
+      // the original operation's result, NOT today's mutable head state.
+      return {
+        ...this.get(identity.id, identity.revisionId),
+        version: identity.version,
+        archived: identity.archived,
+      };
+    }
+    return KnowledgeEntrySchema.parse(receipt);
+  }
+
+  private agentOperation(input: KnowledgeAgentSaveInput, author: KnowledgeAuthor) {
+    const parsed = KnowledgeAgentSaveInputSchema.parse(input);
+    const verifiedAuthor = KnowledgeAuthorSchema.parse(author);
+    const operationKey =
+      "agent:" +
+      createHash("sha256")
+        .update(JSON.stringify([verifiedAuthor.projectId, verifiedAuthor.sessionId, parsed.opId]))
+        .digest("hex");
+    return {
+      parsed,
+      verifiedAuthor,
+      operationKey,
+      payload: { operation: "agent.save", ...parsed, author: verifiedAuthor },
+    };
+  }
+
+  replayForAgent(input: KnowledgeAgentSaveInput, author: KnowledgeAuthor): KnowledgeEntry | null {
+    const operation = this.agentOperation(input, author);
+    return this.replay(operation.operationKey, operation.payload);
   }
 
   save(input: KnowledgeSaveInput): KnowledgeEntry {
@@ -136,30 +184,17 @@ export class KnowledgeRepository {
   }
 
   saveForAgent(input: KnowledgeAgentSaveInput, author: KnowledgeAuthor): KnowledgeEntry {
-    const parsed = KnowledgeAgentSaveInputSchema.parse(input);
-    const verifiedAuthor = KnowledgeAuthorSchema.parse(author);
+    const { parsed, verifiedAuthor, operationKey, payload } = this.agentOperation(input, author);
     // Separate receipt namespace; retries bind the caller and original revision,
     // never a newly read head/version. Receipt and publication share one transaction.
-    const operationKey =
-      "agent:" +
-      createHash("sha256")
-        .update(JSON.stringify([verifiedAuthor.projectId, verifiedAuthor.sessionId, parsed.opId]))
-        .digest("hex");
-    return this.mutate(
-      operationKey,
-      { operation: "agent.save", ...parsed, author: verifiedAuthor },
-      () => {
-        const head = parsed.id ? this.head(parsed.id) : null;
-        if (head?.archived)
-          throw new AtmError("INVALID_ARGUMENT", {
-            message: "归档知识不能直接更新；请先由管理界面恢复",
-          });
-        return this.saveRevision(
-          { ...parsed, expectedVersion: head?.version ?? 0 },
-          verifiedAuthor,
-        );
-      },
-    );
+    return this.mutate(operationKey, payload, () => {
+      const head = parsed.id ? this.head(parsed.id) : null;
+      if (head?.archived)
+        throw new AtmError("INVALID_ARGUMENT", {
+          message: "归档知识不能直接更新；请先由管理界面恢复",
+        });
+      return this.saveRevision({ ...parsed, expectedVersion: head?.version ?? 0 }, verifiedAuthor);
+    });
   }
 
   private saveRevision(input: KnowledgeSaveInput, publishedBy?: KnowledgeAuthor): KnowledgeEntry {

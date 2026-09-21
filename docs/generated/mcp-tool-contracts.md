@@ -7,7 +7,7 @@ Surface: `v5`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7913 | `d2cef6a6c9b4a6346371f12e24d644b08b10c28be603ce413f6d1f8133831645` |
-| memory | 8942 | `0d6a34d9b282ac04f7c1f14ed224a63bde3bb2ee869b5fd0576ac1dd6cd10297` |
+| memory | 9087 | `f9a27099670d5dc6506d08e5e2be8da6f6255bc5641f5b118166549490ed526c` |
 | actions | 7975 | `2e20175aabf65c942d374929db2758018cc804155bba4b72069064b444aed2b9` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -24,7 +24,7 @@ Surface: `v5`
 | memory | `atm_search` | 搜索事实。session 只能与 op_id 精确回查一起传。 | true | false | `1ad9185e31d74bf9` |
 | memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b0bbb` |
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `8e25620829d4e8dc` |
-| memory | `atm_knowledge_get` | 按 ID 读取固定修订的知识正文。更新前传 for_edit=true 取编辑元数据，沿 cursor 读完整篇再保存。 | true | false | `198a8ea2fe321fbc` |
+| memory | `atm_knowledge_get` | 读取固定修订，part=body\|metadata（默认 body）。编辑用 for_edit=true；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。沿 cursor 读完整再保存。 | true | false | `fdfec61a2bf88c95` |
 | memory | `atm_knowledge_save` | 直接发布共享知识，无需手工导入。先查重；更新须带 id 和 expected_revision_id，并提交完整内容；新建省略二者。重试复用 op_id。 | false | false | `700dd274ffe76554` |
 | actions | `atm_task_patch` | 批量变更任务。items 每条都要 task_key 与 expected_version，operation 取值：claim\|start\|release\|block\|wait_agent\|wait_user\|verify\|complete\|cancel\|reopen\|edit\|verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch。verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch 不可与其他操作同批，items 只允许一个元素。complete 还要求任务当前处于 IN_PROGRESS 或 VERIFYING，没开工过的先 start。 | false | true | `e14425f3858e5f7a` |
 
