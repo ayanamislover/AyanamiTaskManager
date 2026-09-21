@@ -64,6 +64,8 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 
 共享知识写入使用 `atm_knowledge_save`，无需用户逐篇手动导入或发布：先查重，携带活动会话 `project/session/op_id`。新建提交 `slug/title/summary/body_markdown` 与适用条件、来源等；更新前 `atm_knowledge_get(id, for_edit=true)` 读取完整正文（沿 cursor 续读，不传 section），保留首屏 `edit` 元数据，合并后提交完整内容及 `id/expected_revision_id`。可选字段省略会重置。重试复用原 op_id 和内容；冲突重读合并。回执直接给出 `id/revisionId/version/reference/publishedBy`，这是知识库独立事务的回执，不走项目 mutation ACK 或 atm_search 的 op_id 回查。来源内部键用 `type/reference/sourceVersion/projectId/recordId`；type 为 `file/url/manual/project_record`。保留未经验证的声明，不写入秘密，不把项目流水账灌入知识库。详细流程见 `docs/local-knowledge.md`。
 
+知识首屏出现 `metadataTruncated=true` 时，按 `metadataRead` 使用同一个 get 工具的 `part=metadata`；沿元数据 cursor 收集并拼接 `metadataJson`，JSON.parse 后得到完整字段。不得把预览中的空来源/适用范围当成原值回写。正文和元数据页均保持同一 revision_id，cursor 不能混用。知识原写请求的 project/session/op_id 与完整内容不变时，即使原 Session 已关闭也能只读回放，不复活会话；新写入才需活动 Session。
+
 ### 遇到 ATM 问题时反馈
 
 已通过 `atm_begin` 建立 Session 后，可调用 `atm_feedback(project, session, op_id, summary, detail, severity, tool, task_key)`。它把问题保存为当前项目内 topic 固定为 `atm-agent-feedback` 的 Agent Record，便于在项目“记录”页直接查看、检索和关联任务。反馈只写本机 ATM 项目数据库，不会自动上传到 GitHub 或任何外部服务；相同请求重试必须复用原 `op_id`。`tool` 与 `task_key` 均为可选上下文。`severity` 填 `CRITICAL` 也不会进入 brief——`ATM_FEEDBACK` 讲的是 ATM 这个产品，不是所在项目的事实，所以按需填写真实严重度，不必担心占用后续 Session 的上下文。

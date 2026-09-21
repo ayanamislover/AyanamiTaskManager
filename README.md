@@ -181,9 +181,34 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 | `memory`  | 跨项目知识，只读且按需             | `atm_knowledge_search` → `atm_knowledge_get`                                            |
 | `memory`  | 直接发布、更新共享知识             | `atm_knowledge_save`（先查重，更新带旧修订 ID）                                         |
 
-需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。有可复用结论时由 Agent 直接发布，不要求用户逐篇导入。更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文和编辑元数据。项目 Record 只存项目事实，不复制整篇知识。三个正式 Profile 共 15 个工具；若升级后看不到新工具，请重载客户端 MCP。
+需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。有可复用结论时由 Agent 直接发布，不要求用户逐篇导入。更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文和编辑元数据。项目 Record 只存项目事实，不复制整篇知识。若升级后看不到新工具，请重载客户端 MCP。
 
-工具表拆成 `core` / `memory` / `actions` 三个 profile，不是为了分类好看：单个 profile 的工具 schema 只有 **7,680 字节**预算（8 KB 上限扣掉 512 字节保留），塞不下就注册不进去。这条预算由用例守着，加字段前先算账。
+工具表拆成 `core` / `memory` / `actions` 三个 profile。工具数量、每个 profile 的 descriptor 字节数、预算与余量由 registry 和预算常量生成，避免文档数字漂移。
+
+<!-- MCP_TOOL_STATS:BEGIN -->
+
+### MCP 工具面统计（生成）
+
+> 以下数字由 `ToolDefinitionRegistry` 的已发布工具和 `schema-budget.ts` 生成；运行 `pnpm generate:mcp-contracts` 更新。
+
+<!-- prettier-ignore -->
+| 指标 | 当前值 |
+| --- | ---: |
+| MCP surface | v5 |
+| 正式 Profile 数 | 3 |
+| 正式工具总数 | 15 |
+| 每个 Profile schema 上限 | 10,240 bytes |
+| 每个 Profile 预留 | 512 bytes |
+| 每个 Profile 可用预算 | 9,728 bytes |
+
+<!-- prettier-ignore -->
+| Profile | 工具数 | Descriptor bytes | 可用预算 | 余量 |
+| --- | ---: | ---: | ---: | ---: |
+| core | 6 | 7,913 bytes | 9,728 bytes | 1,815 bytes |
+| memory | 8 | 9,087 bytes | 9,728 bytes | 641 bytes |
+| actions | 1 | 7,975 bytes | 9,728 bytes | 1,753 bytes |
+
+<!-- MCP_TOOL_STATS:END -->
 
 ## 日常使用
 

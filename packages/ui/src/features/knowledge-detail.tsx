@@ -12,11 +12,14 @@ export function KnowledgeDetail({
   showHistory,
   history,
   historyLoading,
+  historyLoadingMore,
+  historyHasMore,
   historyError,
   onEdit,
   onArchive,
   onCopyReference,
   onToggleHistory,
+  onLoadMoreHistory,
   onLoadRevision,
   archivePending,
   archiveError,
@@ -26,11 +29,14 @@ export function KnowledgeDetail({
   showHistory: boolean;
   history: Array<Omit<KnowledgeRevision, "bodyMarkdown">>;
   historyLoading: boolean;
+  historyLoadingMore: boolean;
+  historyHasMore: boolean;
   historyError: unknown;
   onEdit: () => void;
   onArchive: () => void;
   onCopyReference: () => void | Promise<void>;
   onToggleHistory: () => void;
+  onLoadMoreHistory: () => void | Promise<void>;
   onLoadRevision: (revisionId: string) => void | Promise<void>;
   archivePending: boolean;
   archiveError: unknown;
@@ -154,6 +160,16 @@ export function KnowledgeDetail({
                 </button>
               </div>
             ))}
+            {historyHasMore ? (
+              <button
+                className="atm-button"
+                type="button"
+                disabled={historyLoadingMore}
+                onClick={() => void onLoadMoreHistory()}
+              >
+                {historyLoadingMore ? "加载更早修订中…" : "加载更早修订"}
+              </button>
+            ) : null}
           </section>
         ) : null}
         <MutationErrorAlert error={archiveError} />

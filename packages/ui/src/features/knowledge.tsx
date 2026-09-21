@@ -1,24 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DownloadSimpleIcon as Download } from "@phosphor-icons/react/dist/icons/DownloadSimple";
-import { FileArrowUpIcon as FileArrowUp } from "@phosphor-icons/react/dist/icons/FileArrowUp";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import type { AyanamiClient, KnowledgeSaveInput } from "@ayanami-task/client";
-import {
-  Empty,
-  ErrorState,
-  LoadingRows,
-  MutationErrorAlert,
-  PageHead,
-} from "../components/async-state.js";
+import { Empty, ErrorState, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import { KnowledgeDetail } from "./knowledge-detail.js";
 import { KnowledgeEditor } from "./knowledge-editor.js";
+import { KnowledgeActions } from "./knowledge-actions.js";
 import {
   emptyForm,
-  exportMarkdown,
   formFromEntry,
   importedMarkdown,
+  KNOWLEDGE_SOURCE_LIMIT,
+  mergeImportedFileSource,
   readFullEntry,
   displayList,
   slugFromName,
@@ -26,6 +20,7 @@ import {
   type KnowledgeForm,
   type PendingNavigation,
 } from "./knowledge-support.js";
+import type { KnowledgeSaveOverrides } from "./knowledge-editor.js";
 
 export type { KnowledgeDraftSeed } from "./knowledge-support.js";
 
@@ -50,12 +45,18 @@ export function KnowledgePage({
   const [form, setForm] = useState<KnowledgeForm>(() => emptyForm());
   const [showHistory, setShowHistory] = useState(false);
   const [historyNotice, setHistoryNotice] = useState("");
+  const [pendingImportedFileSource, setPendingImportedFileSource] = useState<string | null>(null);
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation | null>(null);
   const [searchGeneration, setSearchGeneration] = useState(0);
   const saveOperation = useRef<{ fingerprint: string; opId: string } | null>(null);
   const archiveOperation = useRef<{ fingerprint: string; opId: string } | null>(null);
+  const navigationEpoch = useRef(0);
   const search = client.knowledge.search;
   const entries = client.knowledge;
+  const invalidateNavigation = () => {
+    navigationEpoch.current += 1;
+    return navigationEpoch.current;
+  };
   const searchQuery = useMemo(
     () => ({
       query: queryText,
@@ -78,31 +79,17 @@ export function KnowledgePage({
     queryFn: () => readFullEntry(entries, selectedId!),
     enabled: Boolean(selectedId),
   });
-  const history = useQuery({
+  const history = useInfiniteQuery({
     queryKey: ["knowledge", "history", selectedId],
-    queryFn: () => entries.history(selectedId!, undefined, 50),
+    initialPageParam: undefined as number | undefined,
+    queryFn: ({ pageParam }) => entries.history(selectedId!, pageParam, 50),
+    getNextPageParam: (lastPage) => lastPage.nextRevision ?? undefined,
     enabled: Boolean(selectedId && showHistory),
   });
   const hits = results.data?.pages.flatMap((page) => page.hits) ?? [];
   const hasSearchError = Boolean(results.error);
   const currentEntry = detail.data;
-
-  useEffect(() => {
-    if (!draft) return;
-    setSelectedId(null);
-    setEditing(true);
-    setDirty(false);
-    setHistoryNotice("来源已固定为 Record 版本；请编辑并确认后再保存。");
-    setForm({
-      ...emptyForm(),
-      title: draft.title,
-      slug: slugFromName(draft.title),
-      summary: draft.summary,
-      bodyMarkdown: draft.bodyMarkdown,
-      sourceRefs: draft.sourceRefs,
-    });
-    onDraftConsumed?.();
-  }, [draft, onDraftConsumed]);
+  const historyRevisions = history.data?.pages.flatMap((page) => page.revisions) ?? [];
 
   useEffect(() => {
     if (!selectedId || !detail.data || editing || dirty) return;
@@ -115,40 +102,42 @@ export function KnowledgePage({
   }, [editing, hits, selectedId]);
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: (overrides: KnowledgeSaveOverrides = {}) => {
+      invalidateNavigation();
+      const saveForm: KnowledgeForm = { ...form, ...overrides };
       const fingerprint = JSON.stringify({
-        id: form.id ?? null,
-        expectedVersion: form.id ? form.version : 0,
-        expectedRevisionId: form.id ? (form.revisionId ?? null) : null,
-        slug: form.slug,
-        title: form.title,
-        summary: form.summary,
-        useWhen: form.useWhen,
-        tags: form.tags,
-        aliases: form.aliases,
-        appliesTo: form.appliesTo,
-        bodyMarkdown: form.bodyMarkdown,
-        sourceRefs: form.sourceRefs,
+        id: saveForm.id ?? null,
+        expectedVersion: saveForm.id ? saveForm.version : 0,
+        expectedRevisionId: saveForm.id ? (saveForm.revisionId ?? null) : null,
+        slug: saveForm.slug,
+        title: saveForm.title,
+        summary: saveForm.summary,
+        useWhen: saveForm.useWhen,
+        tags: saveForm.tags,
+        aliases: saveForm.aliases,
+        appliesTo: saveForm.appliesTo,
+        bodyMarkdown: saveForm.bodyMarkdown,
+        sourceRefs: saveForm.sourceRefs,
       });
       if (!saveOperation.current || saveOperation.current.fingerprint !== fingerprint) {
         saveOperation.current = { fingerprint, opId: `ui-knowledge-${crypto.randomUUID()}` };
       }
       const input: KnowledgeSaveInput = {
         opId: saveOperation.current.opId,
-        expectedVersion: form.id ? form.version : 0,
-        ...(form.id === undefined || form.revisionId === undefined
+        expectedVersion: saveForm.id ? saveForm.version : 0,
+        ...(saveForm.id === undefined || saveForm.revisionId === undefined
           ? {}
-          : { expectedRevisionId: form.revisionId }),
-        ...(form.id === undefined ? {} : { id: form.id }),
-        slug: form.slug,
-        title: form.title,
-        summary: form.summary,
-        useWhen: form.useWhen,
-        tags: form.tags,
-        aliases: form.aliases,
-        appliesTo: form.appliesTo,
-        bodyMarkdown: form.bodyMarkdown,
-        sourceRefs: form.sourceRefs,
+          : { expectedRevisionId: saveForm.revisionId }),
+        ...(saveForm.id === undefined ? {} : { id: saveForm.id }),
+        slug: saveForm.slug,
+        title: saveForm.title,
+        summary: saveForm.summary,
+        useWhen: saveForm.useWhen,
+        tags: saveForm.tags,
+        aliases: saveForm.aliases,
+        appliesTo: saveForm.appliesTo,
+        bodyMarkdown: saveForm.bodyMarkdown,
+        sourceRefs: saveForm.sourceRefs,
       };
       return entries.save(input);
     },
@@ -161,6 +150,7 @@ export function KnowledgePage({
       setSelectedId(entry.id);
       setForm(formFromEntry(entry));
       setDirty(false);
+      setPendingImportedFileSource(null);
       setEditing(false);
       setHistoryNotice("");
       saveOperation.current = null;
@@ -169,6 +159,7 @@ export function KnowledgePage({
   });
   const archive = useMutation({
     mutationFn: () => {
+      invalidateNavigation();
       if (!form.id || !form.revisionId) throw new Error("当前知识缺少不可变修订标识，请重新读取");
       const fingerprint = JSON.stringify({
         id: form.id,
@@ -202,11 +193,34 @@ export function KnowledgePage({
     },
   });
 
+  useEffect(() => {
+    if (!draft || save.isPending) return;
+    navigationEpoch.current += 1;
+    setSelectedId(null);
+    setEditing(true);
+    setDirty(false);
+    setPendingImportedFileSource(null);
+    setHistoryNotice("来源已固定为 Record 版本；请编辑并确认后再保存。");
+    setForm({
+      ...emptyForm(),
+      title: draft.title,
+      slug: slugFromName(draft.title),
+      summary: draft.summary,
+      bodyMarkdown: draft.bodyMarkdown,
+      sourceRefs: draft.sourceRefs,
+    });
+    onDraftConsumed?.();
+  }, [draft, onDraftConsumed, save.isPending]);
+
   const updateField = <K extends keyof KnowledgeForm>(key: K, value: KnowledgeForm[K]) => {
+    if (save.isPending) return;
+    invalidateNavigation();
     setDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
   };
   const selectEntryNow = (id: string) => {
+    if (save.isPending) return;
+    invalidateNavigation();
     setSelectedId(id);
     setEditing(false);
     setDirty(false);
@@ -214,6 +228,7 @@ export function KnowledgePage({
     setHistoryNotice("");
   };
   const selectEntry = (id: string) => {
+    if (save.isPending) return;
     if (editing && (dirty || !form.id)) {
       setPendingNavigation({ kind: "select", id });
       setHistoryNotice("当前草稿尚未保存；请选择继续编辑或放弃草稿后切换。");
@@ -222,14 +237,18 @@ export function KnowledgePage({
     selectEntryNow(id);
   };
   const createDraft = () => {
+    if (save.isPending) return;
+    invalidateNavigation();
     setSelectedId(null);
     setForm(emptyForm());
     setEditing(true);
     setDirty(false);
+    setPendingImportedFileSource(null);
     setShowHistory(false);
     setHistoryNotice("新条目尚未保存；关闭或切换前请先保存草稿。");
   };
   const startCreate = () => {
+    if (save.isPending) return;
     if (editing && (dirty || !form.id)) {
       setPendingNavigation({ kind: "create" });
       setHistoryNotice("当前草稿尚未保存；请选择继续编辑或放弃草稿后新建。");
@@ -238,13 +257,26 @@ export function KnowledgePage({
     createDraft();
   };
   const loadImportedFile = async (file: File) => {
+    if (save.isPending) return;
+    const operation = invalidateNavigation();
     const imported = importedMarkdown(await file.text());
+    if (operation !== navigationEpoch.current || save.isPending) return;
     const metadata = imported.metadata;
+    const sourceMerge = mergeImportedFileSource(metadata.sourceRefs ?? [], file.name);
     setSelectedId(null);
     setEditing(true);
     setDirty(false);
     setShowHistory(false);
-    setHistoryNotice("Markdown 已载入草稿；请补充元数据并确认保存。");
+    setPendingImportedFileSource(sourceMerge.outcome === "at-capacity" ? file.name : null);
+    setHistoryNotice(
+      sourceMerge.outcome === "added"
+        ? "Markdown 已载入草稿；请补充元数据并确认保存。"
+        : sourceMerge.outcome === "duplicate"
+          ? "Markdown 已载入草稿；文件来源已存在，重复导入不会增加来源。"
+          : sourceMerge.sourceRefs.length > KNOWLEDGE_SOURCE_LIMIT
+            ? `Markdown 已载入草稿；当前有 ${sourceMerge.sourceRefs.length} 条来源，超过 ${KNOWLEDGE_SOURCE_LIMIT} 条上限，请先删除超额来源。本次导入文件仅作提示，未加入来源。`
+            : `Markdown 已载入草稿；原有 ${sourceMerge.sourceRefs.length} 条来源已完整保留，可直接保存。本次导入文件仅作提示，未加入来源。`,
+    );
     setForm({
       ...emptyForm(),
       slug: metadata.slug ?? slugFromName(file.name),
@@ -255,10 +287,11 @@ export function KnowledgePage({
       aliases: metadata.aliases ?? [],
       appliesTo: metadata.appliesTo ?? [],
       bodyMarkdown: imported.bodyMarkdown,
-      sourceRefs: [...(metadata.sourceRefs ?? []), { type: "file", reference: file.name }],
+      sourceRefs: sourceMerge.sourceRefs,
     });
   };
   const importFile = async (file: File) => {
+    if (save.isPending) return;
     if (editing && (dirty || !form.id)) {
       setPendingNavigation({ kind: "import", file });
       setHistoryNotice("当前草稿尚未保存；请选择继续编辑或放弃草稿后导入。");
@@ -267,9 +300,12 @@ export function KnowledgePage({
     await loadImportedFile(file);
   };
   const loadRevision = async (revisionId: string) => {
+    if (save.isPending) return;
     if (!currentEntry) return;
+    const operation = invalidateNavigation();
     try {
       const old = await readFullEntry(entries, currentEntry.id, revisionId);
+      if (operation !== navigationEpoch.current || save.isPending) return;
       setForm({
         ...formFromEntry(old),
         // Historical content is a draft, but its save must target the head that
@@ -282,6 +318,7 @@ export function KnowledgePage({
       setEditing(true);
       setDirty(false);
       setShowHistory(false);
+      setPendingImportedFileSource(null);
       setPendingNavigation(null);
       setHistoryNotice(
         `已载入修订 v${old.revision} 的草稿；保存会创建新的当前修订，不会覆盖历史。`,
@@ -291,6 +328,7 @@ export function KnowledgePage({
     }
   };
   const requestLoadRevision = (revisionId: string) => {
+    if (save.isPending) return;
     if (editing && (dirty || !form.id)) {
       setPendingNavigation({ kind: "revision", revisionId });
       setHistoryNotice("当前草稿尚未保存；请选择继续编辑或放弃草稿后载入历史。");
@@ -299,10 +337,12 @@ export function KnowledgePage({
     void loadRevision(revisionId);
   };
   const discardAndContinue = () => {
+    invalidateNavigation();
     const pending = pendingNavigation;
     setPendingNavigation(null);
     setEditing(false);
     setDirty(false);
+    setPendingImportedFileSource(null);
     setHistoryNotice("");
     if (!pending) {
       setForm(emptyForm());
@@ -313,43 +353,26 @@ export function KnowledgePage({
     else if (pending.kind === "import") void loadImportedFile(pending.file);
     else void loadRevision(pending.revisionId);
   };
+  const addPendingImportedFileSource = () => {
+    if (save.isPending || !pendingImportedFileSource) return;
+    const merged = mergeImportedFileSource(form.sourceRefs, pendingImportedFileSource);
+    if (merged.outcome === "added") {
+      updateField("sourceRefs", merged.sourceRefs);
+      setPendingImportedFileSource(null);
+      setHistoryNotice("导入文件来源已加入；请确认保存草稿。");
+    } else if (merged.outcome === "duplicate") {
+      setPendingImportedFileSource(null);
+      setHistoryNotice("导入文件来源已存在，未重复添加。");
+    }
+  };
 
   return (
     <>
-      <PageHead
-        title="知识库"
-        description="跨项目共享的本地 Markdown 知识。正文按需读取，归档条目不会出现在默认搜索中。"
-        actions={
-          <>
-            <button className="atm-button primary" type="button" onClick={startCreate}>
-              <Plus size={16} />
-              新建
-            </button>
-            <label className="atm-button" title="从本地 Markdown 文件创建可编辑草稿">
-              <FileArrowUp size={16} />
-              导入 Markdown
-              <input
-                type="file"
-                accept=".md,.markdown,.txt,text/markdown,text/plain"
-                className="atm-visually-hidden"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) void importFile(file);
-                  event.currentTarget.value = "";
-                }}
-              />
-            </label>
-            <button
-              className="atm-button"
-              type="button"
-              disabled={!form.title.trim() || !form.bodyMarkdown || save.isPending}
-              onClick={() => exportMarkdown(form)}
-            >
-              <Download size={16} />
-              导出 Markdown
-            </button>
-          </>
-        }
+      <KnowledgeActions
+        form={form}
+        pending={save.isPending}
+        onCreate={startCreate}
+        onImport={importFile}
       />
       <div className="atm-knowledge-layout">
         <section className="atm-panel atm-knowledge-catalog" aria-label="知识目录">
@@ -411,6 +434,7 @@ export function KnowledgePage({
                   type="button"
                   data-selected={selectedId === hit.id ? "true" : "false"}
                   key={hit.id}
+                  disabled={save.isPending}
                   onClick={() => selectEntry(hit.id)}
                 >
                   <span className="atm-row-title">{hit.title}</span>
@@ -468,7 +492,21 @@ export function KnowledgePage({
               form={form}
               pending={save.isPending}
               onChange={updateField}
-              onSave={() => save.mutate()}
+              onDirty={() => {
+                if (!save.isPending) {
+                  invalidateNavigation();
+                  setDirty(true);
+                }
+              }}
+              onSave={(overrides) => save.mutate(overrides)}
+              onRemoveSource={(index) => {
+                updateField(
+                  "sourceRefs",
+                  form.sourceRefs.filter((_, sourceIndex) => sourceIndex !== index),
+                );
+              }}
+              pendingFileSource={pendingImportedFileSource}
+              onAddFileSource={addPendingImportedFileSource}
               onCancel={() => {
                 if (pendingNavigation) {
                   discardAndContinue();
@@ -478,11 +516,13 @@ export function KnowledgePage({
                   setForm(formFromEntry(detail.data));
                   setEditing(false);
                   setDirty(false);
+                  setPendingImportedFileSource(null);
                   setHistoryNotice("");
                 } else {
                   setForm(emptyForm());
                   setEditing(false);
                   setDirty(false);
+                  setPendingImportedFileSource(null);
                   setHistoryNotice("");
                 }
               }}
@@ -499,10 +539,13 @@ export function KnowledgePage({
             <KnowledgeDetail
               entry={currentEntry}
               showHistory={showHistory}
-              history={history.data?.revisions ?? []}
+              history={historyRevisions}
               historyLoading={history.isLoading}
+              historyLoadingMore={history.isFetchingNextPage}
+              historyHasMore={history.hasNextPage}
               historyError={history.error}
               onEdit={() => {
+                invalidateNavigation();
                 setEditing(true);
                 setDirty(false);
                 setHistoryNotice("");
@@ -518,7 +561,12 @@ export function KnowledgePage({
                   notify(`复制引用失败：${error instanceof Error ? error.message : String(error)}`);
                 }
               }}
-              onToggleHistory={() => setShowHistory((value) => !value)}
+              onToggleHistory={() => {
+                if (!save.isPending) setShowHistory((value) => !value);
+              }}
+              onLoadMoreHistory={() => {
+                void history.fetchNextPage();
+              }}
               onLoadRevision={requestLoadRevision}
               archivePending={archive.isPending}
               archiveError={archive.error}

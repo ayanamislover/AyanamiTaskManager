@@ -53,6 +53,12 @@ Agent 首屏目录也是摘要：最多 40 项、每个标题最多 120 字符�
 
 ## Agent 直接发布与更新
 
+### 超预算元数据的完整读取
+
+首屏无法在预算中容纳完整元数据时，正文仍正常分页，但返回 `metadataTruncated=true`、来源/适用范围总数及 `metadataRead`（含固定 id/revision_id 与 `part="metadata"`）。此时空的 sourceRefs/appliesTo 和省略的 edit 不代表原字段为空，不能据此保存。
+
+用 `metadataRead` 调用同一 `atm_knowledge_get`，沿其 cursor 收集每页 `metadataJson`，按顺序拼接后 JSON.parse。结果为完整的 slug/title/summary/useWhen/tags/aliases/appliesTo/sourceRefs。offset/totalChars 按 UTF-16 字符位置计数；每页长度预算包含 JSON 转义和游标，不会切开代理对。正文与元数据游标严格区分，并绑定库身份、恢复代次、条目及不可变 revisionId；元数据模式不接受 section。普通短条目保留现有首屏形状，不额外增加调用。
+
 `atm_knowledge_save` 是 memory Profile 的写入口。Agent 可直接沉淀受管工作中的可复用结论，不需要用户逐篇手工导入或点发布；不在每次 complete/end 自动生成知识，不把未验证推断表述为事实。
 
 先查重。新建传活动会话 `project`、`session`、唯一 `op_id`，以及 `slug/title/summary/body_markdown`；`use_when/tags/aliases/applies_to/source_refs` 按需提供。来源内部使用 `type/reference/sourceVersion/projectId/recordId`，type 仅支持 `file/url/manual/project_record`，git 提交可记录为 manual 来源。
@@ -61,7 +67,9 @@ Agent 首屏目录也是摘要：最多 40 项、每个标题最多 120 字符�
 
 保存生成不可变修订，旧引用仍然有效。服务验证 project 下的活动 Session，作者 `publishedBy` 从数据库读取，不能声明自己为 USER。知识库事务原子提交正文、索引和幂等回执，不伪称同时提交项目库。相同会话相同 op_id 的完全相同请求返回原结果；改内容复用 op_id 被拒绝。更新基线过期返回 VERSION_CONFLICT，必须重读合并；归档条目不能通过此工具静默恢复。
 
-回执为 `ok/op_id/id/revisionId/version/reference/publishedBy`，不回传正文，不走项目 mutation ACK。`reference` 可直接记为长期引用。会话已结束时重新 atm_begin 并先查询确认原发布结果，不能换 op_id 盲目重建。只读 search/get 仍然不需要会话。旧客户端看不到工具时升级 ATM 并重载 MCP。
+回执为 `ok/op_id/id/revisionId/version/reference/publishedBy`，不回传正文，不走项目 mutation ACK。`reference` 可直接记为长期引用。会话已关闭时仍可用原 project/session/op_id 与原规范化载荷只读重放已提交结果；不改变会话状态，异内容仍报幂等冲突。只有确需新写入、没有原回执时才要求活动会话。只读 search/get 仍然不需要会话。旧客户端看不到工具时升级 ATM 并重载 MCP。
+
+新持久回执采用带格式标识的紧凑引用，原操作 version/archive 状态单独保留，正文与作者从不可变 revisionId 读取；旧完整回执仍可重放，不批量改写生产旧数据。历史列表用 SQLite JSON 投影去掉 bodyMarkdown 后再传入 JS。升级前备份照常保留；不要将新版本产生的回执交给不支持该格式的旧版本重放，回退需恢复对应备份。
 
 知识正文不因发布自动执行，不授予额外权限；不写入密钥或无关隐私。未验证的部分必须保留适用前提与不确定性。Markdown 导入当前支持 `---json` 元数据头；YAML 头不会被解析为元数据，Agent 应直接传结构化字段，不再依赖文件搬运。
 

@@ -7,6 +7,11 @@ import type { AyanamiClient } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
 import { KnowledgePage } from "../src/features/knowledge.js";
 import { KnowledgeBackupPanel } from "../src/features/knowledge-backup-panel.js";
+import {
+  displayList,
+  listValue,
+  mergeImportedFileSource,
+} from "../src/features/knowledge-support.js";
 
 const featurePath = join(process.cwd(), "packages", "ui", "src", "features", "knowledge.tsx");
 const supportPath = join(
@@ -72,6 +77,53 @@ function renderCatalog(): string {
 }
 
 describe("Knowledge feature", () => {
+  it("round-trips list separators without consuming the editor's raw input", () => {
+    expect(listValue("sqlite、windows\nportable, desktop，server")).toEqual([
+      "sqlite",
+      "windows",
+      "portable",
+      "desktop",
+      "server",
+    ]);
+    expect(listValue(displayList(["sqlite", "windows"]))).toEqual(["sqlite", "windows"]);
+    expect(listValue("sqlite,")).toEqual(["sqlite"]);
+  });
+
+  it("preserves full source metadata and reports duplicate imports", () => {
+    const empty = mergeImportedFileSource([], "guide.md");
+    expect(empty.outcome).toBe("added");
+    expect(empty.sourceRefs).toEqual([{ type: "file", reference: "guide.md" }]);
+
+    const sources = Array.from({ length: 30 }, (_, index) => ({
+      type: "manual" as const,
+      reference: `source-${index}`,
+    }));
+    const full = mergeImportedFileSource(sources, "guide.md");
+    expect(full.outcome).toBe("at-capacity");
+    expect(full.sourceRefs).toEqual(sources);
+
+    const twentyNine = mergeImportedFileSource(sources.slice(0, 29), "guide.md");
+    expect(twentyNine.outcome).toBe("added");
+    expect(twentyNine.sourceRefs).toHaveLength(30);
+    expect(twentyNine.sourceRefs.at(-1)).toEqual({ type: "file", reference: "guide.md" });
+
+    const duplicate = mergeImportedFileSource(twentyNine.sourceRefs, "guide.md");
+    expect(duplicate.outcome).toBe("duplicate");
+    expect(duplicate.sourceRefs).toEqual(twentyNine.sourceRefs);
+  });
+
+  it("keeps save-time navigation and history pagination contracts explicit", () => {
+    const pageSource = readFileSync(featurePath, "utf8");
+    const editorSource = readFileSync(editorPath, "utf8");
+    const detailSource = readFileSync(detailPath, "utf8");
+    expect(editorSource).toContain("<fieldset disabled={pending}");
+    expect(pageSource).toContain("navigationEpoch");
+    expect(pageSource).toContain("operation !== navigationEpoch.current");
+    expect(pageSource).toContain("nextRevision");
+    expect(pageSource).toContain("fetchNextPage()");
+    expect(detailSource).toContain("加载更早修订");
+  });
+
   it("renders a global catalog with Markdown actions and no native select or HTML injection", () => {
     const markup = renderCatalog();
     expect(markup).toContain("知识库");

@@ -2,6 +2,7 @@ import type {
   KnowledgeSaveInput,
   KnowledgeArchiveInput,
   KnowledgeGetInput,
+  KnowledgeAgentGetInput,
   KnowledgeSearchInput,
 } from "@ayanami-task/protocol";
 import {
@@ -35,19 +36,21 @@ export class KnowledgeService {
     // interleave session closure between validation and the publication transaction.
     const knowledge = await this.database.open();
     const session = repository.getSession(parsed.session);
-    if (session.connection_state !== "ONLINE")
+    const canonical = { ...parsed, project: project.id };
+    const author = {
+      type: "AGENT" as const,
+      agentId: String(session.agent_id),
+      sessionId: String(session.id),
+      projectId: project.id,
+    };
+    // Exact durable replay is a read. It neither revives the old Session nor
+    // authorizes a new mutation, and still checks the original payload/author.
+    const replay = knowledge.replayForAgent(canonical, author);
+    if (!replay && session.connection_state !== "ONLINE")
       throw new AtmError("SESSION_CLOSED", {
         message: "知识写入需要活动 Session；请先 atm_begin 恢复会话",
       });
-    const entry = knowledge.saveForAgent(
-      { ...parsed, project: project.id },
-      {
-        type: "AGENT",
-        agentId: String(session.agent_id),
-        sessionId: String(session.id),
-        projectId: project.id,
-      },
-    );
+    const entry = replay ?? knowledge.saveForAgent(canonical, author);
     // Knowledge is global: no project projection or cross-database operation receipt.
     return {
       ok: true,
@@ -71,7 +74,7 @@ export class KnowledgeService {
   async searchForAgent(input: KnowledgeSearchInput = {}) {
     return searchKnowledgeForAgent(await this.database.open(), input);
   }
-  async getForAgent(input: KnowledgeGetInput) {
+  async getForAgent(input: KnowledgeAgentGetInput) {
     return getKnowledgeForAgent(await this.database.open(), input);
   }
   async history(id: string, beforeRevision?: number, limit?: number) {

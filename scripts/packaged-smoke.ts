@@ -499,6 +499,69 @@ async function readKnowledgeThroughPackagedMemory(
       "打包知识写入重试返回原回执",
       !replay.isError && JSON.stringify(replay.structuredContent) === JSON.stringify(receipt),
     );
+    const largeMetadata = await client.callTool({
+      name: "atm_knowledge_save",
+      arguments: {
+        ...args,
+        op_id: "knowledge-large-metadata",
+        slug: "packaged-large-metadata",
+        source_refs: Array.from({ length: 30 }, () => ({
+          type: "manual",
+          reference: "x".repeat(2000),
+        })),
+      },
+    });
+    const largeReceipt = largeMetadata.structuredContent as Record<string, unknown>;
+    check(
+      "安装产物保存最大来源知识",
+      !largeMetadata.isError && typeof largeReceipt.id === "string",
+    );
+    const largeRead = await client.callTool({
+      name: "atm_knowledge_get",
+      arguments: { id: largeReceipt.id, for_edit: true, max_chars: 2000 },
+    });
+    const largeFirst = largeRead.structuredContent as Record<string, unknown>;
+    check(
+      "安装产物长元数据首屏可读且明示续读",
+      !largeRead.isError &&
+        largeFirst.metadataTruncated === true &&
+        JSON.stringify(largeFirst).length <= 2000,
+    );
+    let metadataText = "";
+    let metadataCursor: string | null = null;
+    let metadataPages = 0;
+    do {
+      const response = await client.callTool({
+        name: "atm_knowledge_get",
+        arguments: {
+          id: largeReceipt.id,
+          revision_id: largeReceipt.revisionId,
+          part: "metadata",
+          max_chars: 5000,
+          ...(metadataCursor ? { cursor: metadataCursor } : {}),
+        },
+      });
+      const page = response.structuredContent as {
+        metadataJson: string;
+        nextCursor: string | null;
+        revisionId: string;
+      };
+      check(
+        `安装产物元数据分页 ${++metadataPages}`,
+        !response.isError &&
+          page.revisionId === largeReceipt.revisionId &&
+          JSON.stringify(page).length <= 5000,
+      );
+      metadataText += page.metadataJson;
+      metadataCursor = page.nextCursor;
+      if (metadataPages > 100) throw Error("Metadata paging did not terminate");
+    } while (metadataCursor);
+    const metadata = JSON.parse(metadataText) as { sourceRefs: Array<{ reference: string }> };
+    check(
+      "安装产物完整恢复30条来源",
+      metadata.sourceRefs.length === 30 &&
+        metadata.sourceRefs.every((source) => source.reference === "x".repeat(2000)),
+    );
     const ended = await core.callTool({
       name: "atm_end",
       arguments: {
@@ -510,6 +573,12 @@ async function readKnowledgeThroughPackagedMemory(
       },
     });
     check("知识烟测 Session 正常结束", !ended.isError);
+    const closedReplay = await client.callTool({ name: "atm_knowledge_save", arguments: args });
+    check(
+      "安装产物关闭Session后只读重放原知识回执",
+      !closedReplay.isError &&
+        JSON.stringify(closedReplay.structuredContent) === JSON.stringify(receipt),
+    );
   } finally {
     await client.close();
     await core.close();

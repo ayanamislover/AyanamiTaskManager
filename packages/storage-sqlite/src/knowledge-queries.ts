@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 import { AtmError } from "@ayanami-task/errors";
 import {
   KnowledgeGetInputSchema,
+  KnowledgeAgentGetInputSchema,
+  type KnowledgeAgentGetInput,
   KnowledgeSearchInputSchema,
   KnowledgeHitSchema,
   KnowledgeAgentSearchPageSchema,
   KnowledgeAgentFirstPageSchema,
   KnowledgeAgentContinuationSchema,
+  KnowledgeContentSchema,
+  KnowledgeAgentMetadataPageSchema,
   type KnowledgeAgentSearchPage,
   type KnowledgeAgentGetPage,
   type KnowledgeGetInput,
@@ -17,7 +21,7 @@ import {
 import type { KnowledgeRepository } from "./knowledge-repository.js";
 
 type Cursor = {
-  kind: "search" | "get";
+  kind: "search" | "get" | "metadata";
   database: string;
   generation: string;
   scope: string;
@@ -47,7 +51,7 @@ function decode(token: string): Cursor {
     const value = JSON.parse(Buffer.from(body, "base64url").toString()) as Cursor;
     if (
       !value ||
-      !["search", "get"].includes(value.kind) ||
+      !["search", "get", "metadata"].includes(value.kind) ||
       typeof value.database !== "string" ||
       typeof value.generation !== "string" ||
       typeof value.scope !== "string" ||
@@ -57,9 +61,9 @@ function decode(token: string): Cursor {
       value.revision < 0 ||
       !Number.isSafeInteger(value.editVersion) ||
       value.editVersion < 0 ||
-      (value.kind === "get" && value.editVersion === 0) ||
+      (value.kind !== "search" && value.editVersion === 0) ||
       typeof value.snapshotId !== "string" ||
-      (value.kind === "get" && !/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.snapshotId))
+      (value.kind !== "search" && !/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(value.snapshotId))
     )
       invalid();
     return value;
@@ -244,8 +248,9 @@ export function getKnowledge(
 
 export function getKnowledgeForAgent(
   repository: KnowledgeRepository,
-  input: KnowledgeGetInput,
+  input: KnowledgeAgentGetInput,
 ): KnowledgeAgentGetPage {
+  if (input.part === "metadata") return readMetadataPage(repository, input);
   return readKnowledgePage(
     repository,
     input,
@@ -260,7 +265,7 @@ export function getKnowledgeForAgent(
       });
       const budget = Math.min(1600, Math.floor((input.maxChars ?? 6000) / 3));
       while (toc.length && JSON.stringify(toc).length > budget) toc.pop();
-      return KnowledgeAgentFirstPageSchema.parse({
+      const candidate = KnowledgeAgentFirstPageSchema.parse({
         ...page,
         toc,
         tocTotal: page.toc.length,
@@ -276,9 +281,92 @@ export function getKnowledgeForAgent(
             }
           : {}),
       });
+      if (
+        JSON.stringify({ ...candidate, bodyMarkdown: "" }).length <=
+        (input.maxChars ?? 6000) - 32
+      )
+        return candidate;
+      // Never present a trimmed metadata set as an editable complete value.
+      // The same tool exposes a lossless, revision-bound JSON text stream.
+      return KnowledgeAgentFirstPageSchema.parse({
+        ...page,
+        title: Array.from(page.title).slice(0, 80).join(""),
+        useWhen: "",
+        appliesTo: [],
+        sourceRefs: [],
+        toc: [],
+        tocTotal: page.toc.length,
+        tocTruncated: page.toc.length > 0,
+        metadataTruncated: true,
+        sourceRefsTotal: page.sourceRefs.length,
+        appliesToTotal: page.appliesTo.length,
+        metadataRead: { id: page.id, revision_id: page.revisionId, part: "metadata" },
+      });
     },
     !input.cursor,
   );
+}
+
+function readMetadataPage(
+  repository: KnowledgeRepository,
+  input: KnowledgeAgentGetInput,
+): KnowledgeAgentGetPage {
+  const parsed = KnowledgeAgentGetInputSchema.parse(input);
+  if (parsed.section)
+    throw new AtmError("INVALID_ARGUMENT", { message: "元数据分页不能与 section 混用" });
+  return repository.database.sqlite.transaction(() => {
+    const scope = hash(JSON.stringify([parsed.id, "metadata"]));
+    const cursor = readCursor(repository, parsed.cursor, "metadata", scope);
+    if (cursor && parsed.revisionId !== undefined && parsed.revisionId !== cursor.snapshotId)
+      invalid();
+    const entry = repository.get(parsed.id, cursor?.snapshotId ?? parsed.revisionId);
+    const text = JSON.stringify(KnowledgeContentSchema.omit({ bodyMarkdown: true }).parse(entry));
+    const offset = cursor?.position ?? 0;
+    if (offset > text.length) invalid();
+    const page = (count: number) => {
+      let end = Math.min(text.length, offset + count);
+      if (
+        end > offset &&
+        end < text.length &&
+        (text.charCodeAt(end) & 0xfc00) === 0xdc00 &&
+        (text.charCodeAt(end - 1) & 0xfc00) === 0xd800
+      )
+        end--;
+      return KnowledgeAgentMetadataPageSchema.parse({
+        id: entry.id,
+        revisionId: entry.revisionId,
+        part: "metadata",
+        metadataJson: text.slice(offset, end),
+        offset,
+        totalChars: text.length,
+        truncated: end < text.length,
+        nextCursor:
+          end < text.length
+            ? makeCursor(
+                repository,
+                "metadata",
+                scope,
+                end,
+                entry.revision,
+                cursor?.editVersion ?? entry.version,
+                entry.revisionId,
+              )
+            : null,
+      });
+    };
+    const full = page(text.length - offset);
+    if (JSON.stringify(full).length <= parsed.maxChars) return full;
+    let low = 0,
+      high = text.length - offset;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (JSON.stringify(page(mid)).length <= parsed.maxChars) low = mid;
+      else high = mid - 1;
+    }
+    const result = page(low);
+    if (!result.metadataJson.length || JSON.stringify(result).length > parsed.maxChars) tooSmall();
+    return result;
+  })();
 }
 
 function readKnowledgePage<T>(

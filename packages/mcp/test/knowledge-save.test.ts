@@ -165,6 +165,33 @@ it("同一修订并发更新只允许一个成功，不覆盖胜者", async () =
   expect((await f.service.knowledge.history(String(entry.id))).revisions).toHaveLength(2);
 });
 
+it("关闭会话后仅允许原载荷回放，不复活Session或增加修订", async () => {
+  const f = await fixture();
+  const saved = (await f.call(f.input)).structuredContent!;
+  await f.clients.client.callTool({
+    name: "atm_end",
+    arguments: {
+      project: "KW",
+      session: f.session,
+      op_id: "close-before-replay",
+      outcome: "completed",
+      summary: "done",
+    },
+  });
+  const before = await f.service.knowledge.history(String(saved.id));
+  const replay = await f.call(f.input);
+  expect(replay.isError).not.toBe(true);
+  expect(replay.structuredContent).toEqual(saved);
+  expect(JSON.stringify(await f.call({ ...f.input, title: "different payload" }))).toContain(
+    "IDEMPOTENCY_CONFLICT",
+  );
+  expect((await f.call({ ...f.input, op_id: "new-closed-operation", slug: "new" })).isError).toBe(
+    true,
+  );
+  expect(await f.service.knowledge.history(String(saved.id))).toEqual(before);
+  expect((await f.service.getSession("KW", f.session)).connectionState).toBe("CLOSED");
+});
+
 it("知识事务提交回执失败时连同正文与索引一起回滚，修复后可重试", async () => {
   const f = await fixture();
   const db = (await f.service.databases.knowledge.open()).database.sqlite;
@@ -184,6 +211,16 @@ it("知识事务提交回执失败时连同正文与索引一起回滚，修复�
 it("重启后原会话的发布回执与作者仍可恢复，其他会话同 op_id 不会重放旧作者结果", async () => {
   const f = await fixture();
   const saved = (await f.call(f.input)).structuredContent!;
+  await f.clients.client.callTool({
+    name: "atm_end",
+    arguments: {
+      project: "KW",
+      session: f.session,
+      op_id: "close-before-restart",
+      outcome: "completed",
+      summary: "closed",
+    },
+  });
   await f.clients.close();
   f.service.close();
   const reopened = await AyanamiTaskService.open({
