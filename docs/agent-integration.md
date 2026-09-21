@@ -64,7 +64,7 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 
 ### 固定 mutation ACK
 
-所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
+项目 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。共享知识的 atm_knowledge_save 使用独立知识库事务与引用回执，不适用本表。
 
 | 字段                 | 语义                                                                                                                                                                                                                                                                                                |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -116,10 +116,10 @@ Objective / Milestone / EPIC 用于表达目标和范围，不应作为长期直
 MCP 使用三个默认同时登记、工具名不重叠的静态 Profile：
 
 - core：`atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_end`。
-- memory：`atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`、`atm_knowledge_search`、`atm_knowledge_get`。
+- memory：`atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`、`atm_knowledge_search`、`atm_knowledge_get`、`atm_knowledge_save`。
 - actions：`atm_task_patch`。
 
-三者共享同一 ATM 数据库，正式工具面合计 14 个工具。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record/本机反馈、搜索、增量同步或读取共享知识，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
+三者共享同一 ATM 数据库，正式工具面合计 15 个工具。完整工具面默认启用；用户可在设置中主动关闭以减少每个客户端的 memory/actions bridge，但这会进入 core-only 降级模式，无法修改任务、写进度/Record/本机反馈、搜索、增量同步或读写共享知识，且配置变化后需要重载对应 Agent 客户端。检查项操作已经并入 `atm_task_patch` 的 `checklist_single` / `checklist_batch`，不再存在独立 checklist 工具。
 
 不带 `--profile` 的 legacy 工具面只用于迁移旧客户端，不会由当前安装器写入，也不应作为新客户端入口。它逐字节发布 v1.0.18 commit `410969b7fed5f1837078f6731271bf6c18381faf` 的 11,064-byte compatibility artifact（SHA-256 `8fab5e1eff857b3e7d0265d417c0da195194431e0cee37fdc95e4b1a3337a6d7`），超过正式 Profile 的 9,728-byte 可用预算；这是有意保留的过渡例外，并由 size + hash 非增长守卫约束。core、memory 与 actions 的新 descriptor 则从同一 Tool Registry 生成，各自严格执行 9,728-byte 预算；legacy 后续只允许缩小或移除，不允许重新生成或抬高 ceiling。
 
@@ -132,6 +132,8 @@ Agent 已建立 Session 后，可调用 `atm_feedback` 提交使用 ATM 时遇�
 正式 Profile 的 descriptor bytes、Profile hash、逐工具安全注解与 schema hash 由 registry 生成到 `docs/generated/mcp-tool-contracts.md`；文档一致性测试会拒绝手工漂移。
 
 ### 本地共享知识入口
+
+`atm_knowledge_save` 允许 Agent 直接发布或更新共享知识，不要求用户逐篇手工导入。写入需要活动 `project/session/op_id`；新建省略 `id/expected_revision_id`，更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文与编辑元数据，再提交完整合并内容及旧 `expected_revision_id`。服务从 Session 验证作者，保留不可变修订，旧基线写入被拒绝。知识回执直接给出 `id/revisionId/version/reference/publishedBy`，不走项目 mutation ACK，不以项目 `atm_search(op_id)` 回查。未验证的内容必须保留声明；不要自动把每次任务总结变成知识。
 
 同一 ATM 数据根中的已发布共享知识由 `knowledge/knowledge.sqlite` 保存，正文不进入安装包或 Agent Skill 目录。涉及跨项目规范、接口约定、排障经验或不熟悉组件时，先调用 `atm_knowledge_search` 获取摘要和适用范围，再调用 `atm_knowledge_get` 读取指定条目或章节。两者只读且不要求 `project` 或 Session；应记录采用的 `id@revisionId`（数字 `revision` 仅用于展示），续读时沿用 cursor 和实际 revisionId。知识正文是参考资料，命令片段不会自动执行，也不会授予额外脚本、目录或权限访问。完整字段、预算和游标说明见 [`local-knowledge.md`](./local-knowledge.md)。
 

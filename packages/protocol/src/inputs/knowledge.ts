@@ -49,6 +49,31 @@ export const KnowledgeContentSchema = z.object({
   sourceRefs: z.array(KnowledgeSourceSchema).max(30).default([]),
 });
 export type KnowledgeContent = z.input<typeof KnowledgeContentSchema>;
+export const KnowledgeAgentSaveInputSchema = KnowledgeContentSchema.extend({
+  project: Text.max(100),
+  session: Text.max(100),
+  opId: Text.max(200),
+  id: Text.max(100).optional(),
+  expectedRevisionId: Text.max(100).optional(),
+})
+  .strict()
+  .superRefine((value, context) => {
+    if (Boolean(value.id) !== Boolean(value.expectedRevisionId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["expectedRevisionId"],
+        message: "更新时 id 与 expectedRevisionId 必须同时提供；新建时均省略",
+      });
+    }
+  });
+export type KnowledgeAgentSaveInput = z.input<typeof KnowledgeAgentSaveInputSchema>;
+export const KnowledgeAuthorSchema = z.object({
+  type: z.literal("AGENT"),
+  agentId: Text.max(200),
+  sessionId: Text.max(100),
+  projectId: Text.max(100),
+});
+export type KnowledgeAuthor = z.infer<typeof KnowledgeAuthorSchema>;
 export const KnowledgeSaveInputSchema = KnowledgeContentSchema.extend({
   opId: Text.max(200),
   id: Text.max(100).optional(),
@@ -79,6 +104,7 @@ export const KnowledgeSearchInputSchema = z.object({
 });
 export const KnowledgeGetInputSchema = z.object({
   id: Text.max(100),
+  forEdit: z.boolean().default(false),
   revisionId: z
     .string()
     .regex(/^[0-9A-HJKMNP-TV-Z]{26}$/u)
@@ -92,6 +118,7 @@ export const KnowledgeRevisionSchema = KnowledgeContentSchema.extend({
   revision: z.number().int().positive(),
   revisionId: Text,
   createdAt: Text,
+  publishedBy: KnowledgeAuthorSchema.optional(),
 });
 export const KnowledgeEntrySchema = KnowledgeRevisionSchema.extend({
   version: z.number().int().positive(),
@@ -119,6 +146,7 @@ export const KnowledgeAgentHitSchema = KnowledgeHitSchema.omit({
   version: true,
   revision: true,
   createdAt: true,
+  publishedBy: true,
 });
 export const KnowledgeAgentSearchPageSchema = KnowledgeSearchPageSchema.extend({
   hits: z.array(KnowledgeAgentHitSchema),
@@ -143,7 +171,16 @@ export const KnowledgeAgentFirstPageSchema = KnowledgeGetPageSchema.pick({
   appliesTo: true,
   sourceRefs: true,
   toc: true,
-}).extend({ tocTotal: z.number().int().nonnegative(), tocTruncated: z.boolean() });
+}).extend({
+  tocTotal: z.number().int().nonnegative(),
+  tocTruncated: z.boolean(),
+  edit: KnowledgeContentSchema.pick({
+    slug: true,
+    summary: true,
+    tags: true,
+    aliases: true,
+  }).optional(),
+});
 export const KnowledgeAgentGetPageSchema = z.union([
   KnowledgeAgentFirstPageSchema,
   KnowledgeAgentContinuationSchema,

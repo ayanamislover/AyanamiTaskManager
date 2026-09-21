@@ -9,6 +9,10 @@ import {
   KnowledgeContentSchema,
   KnowledgeHitSchema,
   KnowledgeSaveInputSchema,
+  KnowledgeAgentSaveInputSchema,
+  KnowledgeAuthorSchema,
+  type KnowledgeAgentSaveInput,
+  type KnowledgeAuthor,
   type KnowledgeArchiveInput,
   type KnowledgeEntry,
   type KnowledgeRevision,
@@ -126,59 +130,90 @@ export class KnowledgeRepository {
 
   save(input: KnowledgeSaveInput): KnowledgeEntry {
     const parsed = KnowledgeSaveInputSchema.parse(input);
-    return this.mutate(parsed.opId, { operation: "save", ...parsed }, () => {
-      const { expectedVersion, id: requestedId } = parsed;
-      const content = KnowledgeContentSchema.parse(parsed);
-      const db = this.database.sqlite;
-      const head = requestedId ? this.head(requestedId) : null;
-      if (
-        (head?.version ?? 0) !== expectedVersion ||
-        (head && head.revision_id !== parsed.expectedRevisionId)
-      )
-        throw new AtmError("VERSION_CONFLICT", {
-          message: "知识已被其他编辑者更新，请重新读取并合并",
-        });
-      const id = requestedId ?? createUlid();
-      if (
-        db.prepare("SELECT id FROM knowledge_entries WHERE slug=? AND id<>?").get(content.slug, id)
-      )
-        throw new AtmError("INVALID_ARGUMENT", { message: "知识 slug 已被使用" });
-      const snapshot: KnowledgeRevision = {
-        ...content,
-        id,
-        revision: (head?.head_revision ?? 0) + 1,
-        revisionId: createUlid(),
-        createdAt: nowIso(),
-      };
-      db.prepare(
-        `INSERT INTO knowledge_entries(id, slug, head_revision, version) VALUES(?, ?, ?, 1)
+    return this.mutate(parsed.opId, { operation: "save", ...parsed }, () =>
+      this.saveRevision(parsed),
+    );
+  }
+
+  saveForAgent(input: KnowledgeAgentSaveInput, author: KnowledgeAuthor): KnowledgeEntry {
+    const parsed = KnowledgeAgentSaveInputSchema.parse(input);
+    const verifiedAuthor = KnowledgeAuthorSchema.parse(author);
+    // Separate receipt namespace; retries bind the caller and original revision,
+    // never a newly read head/version. Receipt and publication share one transaction.
+    const operationKey =
+      "agent:" +
+      createHash("sha256")
+        .update(JSON.stringify([verifiedAuthor.projectId, verifiedAuthor.sessionId, parsed.opId]))
+        .digest("hex");
+    return this.mutate(
+      operationKey,
+      { operation: "agent.save", ...parsed, author: verifiedAuthor },
+      () => {
+        const head = parsed.id ? this.head(parsed.id) : null;
+        if (head?.archived)
+          throw new AtmError("INVALID_ARGUMENT", {
+            message: "归档知识不能直接更新；请先由管理界面恢复",
+          });
+        return this.saveRevision(
+          { ...parsed, expectedVersion: head?.version ?? 0 },
+          verifiedAuthor,
+        );
+      },
+    );
+  }
+
+  private saveRevision(input: KnowledgeSaveInput, publishedBy?: KnowledgeAuthor): KnowledgeEntry {
+    const parsed = KnowledgeSaveInputSchema.parse(input);
+    const { expectedVersion, id: requestedId } = parsed;
+    const content = KnowledgeContentSchema.parse(parsed);
+    const db = this.database.sqlite;
+    const head = requestedId ? this.head(requestedId) : null;
+    if (
+      (head?.version ?? 0) !== expectedVersion ||
+      (head && head.revision_id !== parsed.expectedRevisionId)
+    )
+      throw new AtmError("VERSION_CONFLICT", {
+        message: "知识已被其他编辑者更新，请重新读取并合并",
+      });
+    const id = requestedId ?? createUlid();
+    if (db.prepare("SELECT id FROM knowledge_entries WHERE slug=? AND id<>?").get(content.slug, id))
+      throw new AtmError("INVALID_ARGUMENT", { message: "知识 slug 已被使用" });
+    const snapshot: KnowledgeRevision = {
+      ...content,
+      id,
+      revision: (head?.head_revision ?? 0) + 1,
+      revisionId: createUlid(),
+      createdAt: nowIso(),
+      ...(publishedBy === undefined ? {} : { publishedBy }),
+    };
+    db.prepare(
+      `INSERT INTO knowledge_entries(id, slug, head_revision, version) VALUES(?, ?, ?, 1)
         ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, head_revision=excluded.head_revision, version=knowledge_entries.version+1`,
-      ).run(id, content.slug, snapshot.revision);
-      db.prepare(
-        "INSERT INTO knowledge_revisions(entry_id, revision, revision_id, snapshot) VALUES(?, ?, ?, ?)",
-      ).run(id, snapshot.revision, snapshot.revisionId, JSON.stringify(snapshot));
-      db.prepare("DELETE FROM knowledge_fts WHERE entry_id=?").run(id);
-      db.prepare(
-        "INSERT INTO knowledge_fts(entry_id,metadata,title,aliases,tags,summary,use_when,applies_to,body) VALUES(?,?,?,?,?,?,?,?,?)",
-      ).run(
-        id,
-        JSON.stringify(
-          KnowledgeHitSchema.parse({
-            ...snapshot,
-            version: (head?.version ?? 0) + 1,
-            archived: head?.archived === 1,
-          }),
-        ),
-        content.title,
-        content.aliases.join("\n"),
-        content.tags.join("\n"),
-        content.summary,
-        content.useWhen,
-        content.appliesTo.join("\n"),
-        content.bodyMarkdown,
-      );
-      return this.get(id);
-    });
+    ).run(id, content.slug, snapshot.revision);
+    db.prepare(
+      "INSERT INTO knowledge_revisions(entry_id, revision, revision_id, snapshot) VALUES(?, ?, ?, ?)",
+    ).run(id, snapshot.revision, snapshot.revisionId, JSON.stringify(snapshot));
+    db.prepare("DELETE FROM knowledge_fts WHERE entry_id=?").run(id);
+    db.prepare(
+      "INSERT INTO knowledge_fts(entry_id,metadata,title,aliases,tags,summary,use_when,applies_to,body) VALUES(?,?,?,?,?,?,?,?,?)",
+    ).run(
+      id,
+      JSON.stringify(
+        KnowledgeHitSchema.parse({
+          ...snapshot,
+          version: (head?.version ?? 0) + 1,
+          archived: head?.archived === 1,
+        }),
+      ),
+      content.title,
+      content.aliases.join("\n"),
+      content.tags.join("\n"),
+      content.summary,
+      content.useWhen,
+      content.appliesTo.join("\n"),
+      content.bodyMarkdown,
+    );
+    return this.get(id);
   }
 
   archive(input: KnowledgeArchiveInput): KnowledgeEntry {

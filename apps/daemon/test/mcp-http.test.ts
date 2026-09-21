@@ -61,7 +61,7 @@ describe("Streamable HTTP MCP", () => {
     expect(body).toMatchObject({
       jsonrpc: "2.0",
       id: 1,
-      result: { serverInfo: { name: "ayanami-task-manager", version: "1.1.3" } },
+      result: { serverInfo: { name: "ayanami-task-manager", version: "1.1.4" } },
     });
     expect(body.result.instructions).toContain("legacy 兼容入口");
     expect(body.result.instructions).toContain("重启 Agent 客户端");
@@ -125,6 +125,7 @@ describe("Streamable HTTP MCP", () => {
       "atm_delta",
       "atm_knowledge_search",
       "atm_knowledge_get",
+      "atm_knowledge_save",
     ]);
     expect(actions).toEqual(["atm_task_patch"]);
     expect(new Set(compatibility)).toEqual(

@@ -50,8 +50,9 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 | memory  | 写阶段进度、长期事实与证据     | `atm_progress_add`、`atm_record`、`atm_feedback`   |
 | memory  | 精确读取、搜索历史与增量同步   | `atm_search`、`atm_delta`                          |
 | memory  | 查询本地共享知识（只读）       | `atm_knowledge_search`、`atm_knowledge_get`        |
+| memory  | 直接发布或更新共享知识         | `atm_knowledge_save`                               |
 
-三个正式 Profile 联合为 14 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
+三个正式 Profile 联合为 15 个工具且名称不重叠。检查项已经合并进 `atm_task_patch`：单项使用 `operation="checklist_single"`，批量使用 `operation="checklist_batch"`，内容放在 `checklist_items`。
 
 正式 core / memory / actions 工具的单行说明、安全注解和 schema hash 全部由同一 Tool Registry 生成；完整可核对表见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\generated\mcp-tool-contracts.md`。无 Profile 的 legacy 入口只发布冻结的 v1.0.18 兼容 artifact，因此仍是 11 个旧工具且不含 `atm_feedback` 或知识库工具；当前安装器不会新增该入口。
 
@@ -60,6 +61,8 @@ claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":
 处理跨项目规范、接口约定、排障经验或不熟悉的组件时，先调用 `atm_knowledge_search` 查看摘要、使用场景和适用范围，再调用 `atm_knowledge_get` 读取选中条目的正文或指定章节。两个工具是只读入口，不强制 `project` 或 Session；正文位于同一数据根的 `knowledge/knowledge.sqlite`，不随安装包分发，也不提供任意文件读取。
 
 采用重要结论时记录知识条目的 `id@revisionId`（数字 `revision` 仅用于展示）。若环境或版本不匹配，说明差异并重新判断；没有相关结果即可继续工作。知识内容是参考资料，其中的命令片段不会自动执行，也不会授予执行脚本、访问额外目录或覆盖当前用户要求的权限。正文续读要沿用返回的 cursor，并保持同一条目的实际 `revisionId`，避免修订中途漂移。完整字段、预算和游标说明见 `docs/local-knowledge.md`。
+
+共享知识写入使用 `atm_knowledge_save`，无需用户逐篇手动导入或发布：先查重，携带活动会话 `project/session/op_id`。新建提交 `slug/title/summary/body_markdown` 与适用条件、来源等；更新前 `atm_knowledge_get(id, for_edit=true)` 读取完整正文（沿 cursor 续读，不传 section），保留首屏 `edit` 元数据，合并后提交完整内容及 `id/expected_revision_id`。可选字段省略会重置。重试复用原 op_id 和内容；冲突重读合并。回执直接给出 `id/revisionId/version/reference/publishedBy`，这是知识库独立事务的回执，不走项目 mutation ACK 或 atm_search 的 op_id 回查。来源内部键用 `type/reference/sourceVersion/projectId/recordId`；type 为 `file/url/manual/project_record`。保留未经验证的声明，不写入秘密，不把项目流水账灌入知识库。详细流程见 `docs/local-knowledge.md`。
 
 ### 遇到 ATM 问题时反馈
 
@@ -264,7 +267,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 ### 固定 mutation ACK
 
-所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。
+项目 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。共享知识的 atm_knowledge_save 使用独立知识库事务与引用回执，不适用本表。
 
 | 字段                 | 语义                                                                                                                                                                                                                                                                                                |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
