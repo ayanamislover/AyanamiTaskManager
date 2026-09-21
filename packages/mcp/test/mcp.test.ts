@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("Ayanami MCP", () => {
-  it("公开恰好 14 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
+  it("公开恰好 15 个紧凑工具，并让 begin 同时返回结构化与单行结果", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-mcp-"));
     roots.push(dataDir);
     const service = await AyanamiTaskService.open({
@@ -55,6 +55,7 @@ describe("Ayanami MCP", () => {
       "atm_delta",
       "atm_knowledge_search",
       "atm_knowledge_get",
+      "atm_knowledge_save",
     ]);
     expect(actionsListed.tools.map((tool) => tool.name)).toEqual(["atm_task_patch"]);
     const beginSchema = coreListed.tools.find((tool) => tool.name === "atm_begin")?.inputSchema as {

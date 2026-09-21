@@ -12,6 +12,7 @@ import { outputSchema } from "../primitives.js";
 
 const knowledgeGetNames = {
   id: "id",
+  forEdit: "for_edit",
   revisionId: "revision_id",
   section: "section",
   maxChars: "max_chars",
@@ -43,7 +44,8 @@ export function createAtmKnowledgeGetTool(
   return {
     profile: "memory",
     name: "atm_knowledge_get",
-    description: "按 ID 读取固定修订的本地共享知识正文。",
+    description:
+      "按 ID 读取固定修订的知识正文。更新前传 for_edit=true 取编辑元数据，沿 cursor 读完整篇再保存。",
     inputSchema,
     // The application budgets the actual Agent projection. Continuations do
     // not repeat metadata; REST retains the complete management view.

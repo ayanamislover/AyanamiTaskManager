@@ -64,7 +64,7 @@ export function generateMutationAcknowledgementDocumentation(): string {
     MUTATION_ACK_DOCUMENTATION_BEGIN,
     "### 固定 mutation ACK",
     "",
-    "所有 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。",
+    "项目 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。共享知识的 atm_knowledge_save 使用独立知识库事务与引用回执，不适用本表。",
     "",
     "| 字段 | 语义 |",
     "| --- | --- |",

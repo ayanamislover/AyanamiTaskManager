@@ -85,6 +85,12 @@ const manifest = [
     name: "atm_knowledge_get",
     factory: "createAtmKnowledgeGetTool",
   },
+  {
+    path: "tools/memory/knowledge-save.ts",
+    profile: "memory",
+    name: "atm_knowledge_save",
+    factory: "createAtmKnowledgeSaveTool",
+  },
   { path: "tools/core/end.ts", profile: "core", name: "atm_end", factory: "createAtmEndTool" },
 ] as const;
 

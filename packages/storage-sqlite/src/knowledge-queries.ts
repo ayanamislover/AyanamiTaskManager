@@ -265,6 +265,16 @@ export function getKnowledgeForAgent(
         toc,
         tocTotal: page.toc.length,
         tocTruncated: toc.length < page.toc.length,
+        ...(input.forEdit
+          ? {
+              edit: {
+                slug: page.slug,
+                summary: page.summary,
+                tags: page.tags,
+                aliases: page.aliases,
+              },
+            }
+          : {}),
       });
     },
     !input.cursor,

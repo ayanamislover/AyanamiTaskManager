@@ -5,6 +5,11 @@ import type {
   KnowledgeSearchInput,
 } from "@ayanami-task/protocol";
 import {
+  KnowledgeAgentSaveInputSchema,
+  type KnowledgeAgentSaveInput,
+} from "@ayanami-task/protocol";
+import { AtmError } from "@ayanami-task/errors";
+import {
   getKnowledge,
   searchKnowledge,
   searchKnowledgeForAgent,
@@ -21,6 +26,38 @@ export class KnowledgeService {
   }
   async save(input: KnowledgeSaveInput) {
     return (await this.database.open()).save(input);
+  }
+  async saveForAgent(input: KnowledgeAgentSaveInput) {
+    const parsed = KnowledgeAgentSaveInputSchema.parse(input);
+    const project = this.databases.getProject(parsed.project);
+    const repository = new ProjectRepository(await this.databases.openProject(project.id));
+    // Open the knowledge store before the final identity check so no await can
+    // interleave session closure between validation and the publication transaction.
+    const knowledge = await this.database.open();
+    const session = repository.getSession(parsed.session);
+    if (session.connection_state !== "ONLINE")
+      throw new AtmError("SESSION_CLOSED", {
+        message: "知识写入需要活动 Session；请先 atm_begin 恢复会话",
+      });
+    const entry = knowledge.saveForAgent(
+      { ...parsed, project: project.id },
+      {
+        type: "AGENT",
+        agentId: String(session.agent_id),
+        sessionId: String(session.id),
+        projectId: project.id,
+      },
+    );
+    // Knowledge is global: no project projection or cross-database operation receipt.
+    return {
+      ok: true,
+      op_id: parsed.opId,
+      id: entry.id,
+      revisionId: entry.revisionId,
+      version: entry.version,
+      reference: `${entry.id}@${entry.revisionId}`,
+      publishedBy: entry.publishedBy,
+    };
   }
   async archive(input: KnowledgeArchiveInput) {
     return (await this.database.open()).archive(input);

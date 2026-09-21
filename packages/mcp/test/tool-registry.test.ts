@@ -68,10 +68,10 @@ describe("explicit ToolDefinition registry", () => {
     const all = registry.definitions();
     expect(Object.isFrozen(all)).toBe(true);
     expect(all.every((definition) => Object.isFrozen(definition))).toBe(true);
-    expect(all).toHaveLength(14);
-    expect(new Set(all.map((definition) => definition.name))).toHaveLength(14);
+    expect(all).toHaveLength(15);
+    expect(new Set(all.map((definition) => definition.name))).toHaveLength(15);
     expect(registry.definitions("core")).toHaveLength(6);
-    expect(registry.definitions("memory")).toHaveLength(7);
+    expect(registry.definitions("memory")).toHaveLength(8);
     expect(registry.definitions("actions")).toHaveLength(1);
 
     for (const profile of ["core", "memory", "actions"] as const) {

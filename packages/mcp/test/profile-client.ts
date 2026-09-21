@@ -11,6 +11,7 @@ const memoryToolNames = new Set([
   "atm_delta",
   "atm_knowledge_search",
   "atm_knowledge_get",
+  "atm_knowledge_save",
 ]);
 
 export async function connectProfiledClients(service: AyanamiTaskService, name: string) {

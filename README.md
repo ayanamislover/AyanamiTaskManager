@@ -57,7 +57,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 - **先筛选，再读正文。** `atm_knowledge_search` 返回摘要、使用场景和适用范围；`atm_knowledge_get` 再读取选中条目或指定章节。不把整库塞进开工 brief。
 - **引用不随编辑漂移。** 使用不可变的 `id@revisionId`，正文可按字符预算分页读取；条目修改后，旧修订仍有自己的身份。
-- **管理在本地，读取给 Agent。** 桌面端维护知识、修订、归档和 Markdown 导入／导出；MCP 提供只读入口，不把参考资料变成新的执行权限。
+- **Agent 直接沉淀，不用手工搬运。** MCP 可检索、读取、发布和更新共享知识，自动记录会话作者、固定修订与防覆盖基线；桌面端仍可管理、归档和导入／导出。参考资料不授予新的执行权限。
 
 同时改进了 Session 身份与角色恢复、批量操作 ACK 的最终版本回执、幂等请求一致性，以及启动和长正文读取的开销。安装包携带更新后的 Agent Guide、完整文档与 `atm-knowledge` Skill。
 
@@ -179,8 +179,9 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 | `actions` | 领取、开始、检查项、验证与完成     | `atm_task_patch`                                                                        |
 | `memory`  | 阶段进度、长期记录、反馈与按需检索 | `atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`             |
 | `memory`  | 跨项目知识，只读且按需             | `atm_knowledge_search` → `atm_knowledge_get`                                            |
+| `memory`  | 直接发布、更新共享知识             | `atm_knowledge_save`（先查重，更新带旧修订 ID）                                         |
 
-需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。项目 Record 只存项目事实，不复制整篇知识。三个正式 Profile 共 14 个工具；若升级后看不到新工具，请重新安装接入配置并重载客户端 MCP。
+需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。有可复用结论时由 Agent 直接发布，不要求用户逐篇导入。更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文和编辑元数据。项目 Record 只存项目事实，不复制整篇知识。三个正式 Profile 共 15 个工具；若升级后看不到新工具，请重载客户端 MCP。
 
 工具表拆成 `core` / `memory` / `actions` 三个 profile，不是为了分类好看：单个 profile 的工具 schema 只有 **7,680 字节**预算（8 KB 上限扣掉 512 字节保留），塞不下就注册不进去。这条预算由用例守着，加字段前先算账。
 

@@ -34,6 +34,6 @@ Renderer / MCP stdio / atm CLI
 
 同一个 ApplicationService 通过 `knowledge` 用例访问独立的 `<dataDir>/knowledge/knowledge.sqlite`。它不属于某个项目，不借用 `Record.scope`，也不另起常驻进程。数据库按需打开；损坏只影响知识功能，不阻止任务和 Session。`doctor` 单独报告知识库健康。
 
-SQLite 是唯一事实源；Markdown 文件只用于显式导入/导出。知识元数据和正文一起形成不可变修订；保存以一笔 SQLite 事务提交 head、revision、FTS、catalog sequence 和幂等回执。只读 MCP 先检索元数据，再按永久条目 ID 和 `revisionId` 读取正文，不自动进入 `begin/brief`。
+SQLite 是唯一事实源；Markdown 文件只用于显式导入/导出。知识元数据和正文一起形成不可变修订；保存以一笔 SQLite 事务提交 head、revision、FTS、catalog sequence 和幂等回执。只读 MCP 先检索元数据，再按永久条目 ID 和 `revisionId` 读取正文，不自动进入 `begin/brief`。`atm_knowledge_save` 从活动 Session 验证作者后直接发布，更新以不可变旧 revisionId 做乐观锁；知识事务不同时写入项目库，不需要用户逐篇手工批准。
 
 Record 提炼先读出同一快照下的来源 ID/版本和预览，用户编辑确认后另行保存知识；这不是跨库事务，也不自动传播源 Record 的后续修改。存储在本机不意味着内容不会进入云端模型上下文：调用知识读取工具时，返回的正文会发送给当前 Agent。
