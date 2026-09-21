@@ -125,6 +125,7 @@ describe("Streamable HTTP MCP", () => {
       "atm_delta",
       "atm_knowledge_search",
       "atm_knowledge_get",
+      "atm_knowledge_save",
     ]);
     expect(actions).toEqual(["atm_task_patch"]);
     expect(new Set(compatibility)).toEqual(
