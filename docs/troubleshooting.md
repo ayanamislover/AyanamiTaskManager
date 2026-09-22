@@ -19,6 +19,20 @@ pnpm atm doctor
 
 开发态 Web 界面固定使用 `127.0.0.1:9999`。若 Vite 报端口占用，先关闭占用 9999 的旧开发进程；不要把 daemon 的 4393/4394 或生产动态端口改成 9999。
 
+## 窗口或托盘意外消失
+
+先区分窗口隐藏到托盘与整个进程结束，托盘图标可能延迟刷新，不能据此确定退出时刻或关联另一个应用。
+
+桌面主实例在 `%LOCALAPPDATA%\AyanamiTaskManager\logs` 保存 `lifecycle.ndjson`（含轮转文件，最多 3 × 256 KiB）和 `lifecycle-state.json`：
+
+- `startup` / `ready`：本次进程及启动方式；每分钟 `heartbeat` 记录主进程 RSS/JS heap 数值与最后存活时间。
+- `shutdown.begin` / `shutdown.complete` / `exit`：正常退出链。退出码为 0 且服务关闭成功，才记录 `clean=true`。
+- `exception` / `bootstrap.failed`：异常类型、错误码与消息指纹；不保存原始异常消息、堆栈、令牌或任务正文，也不吞掉未捕获异常。
+- `renderer.gone` / `child.gone` / `renderer.load-failed`：Electron 的原因类别和退出码；不保存加载 URL。
+- `previous.unclean`：下一次启动发现上个主实例缺少正常退出记录。可能是外部终止、断电或崩溃，**它本身不是根因**。日志不可写或磁盘已满时也可能缺少证据。
+
+提供版本、故障的大致时刻和上述日志即可；不要附带 `runtime/daemon.json`（包含本地令牌）或项目数据库。诊断文件写入失败不会阻止应用运行。此记录功能不能倒推安装前的退出原因，也不等于修复了导致退出的问题。
+
 ## MCP 无法连接
 
 - 桌面设置中重新运行“连接测试”；
