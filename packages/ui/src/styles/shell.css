@@ -155,8 +155,18 @@
   flex: 1 1 auto;
   min-height: 0;
   align-content: start;
+  /* Auto tracks can shrink two-line labels down to the button's minimum height.
+     Keep each row content-sized; the list, not its buttons, absorbs overflow. */
+  grid-auto-rows: max-content;
+  gap: 6px;
+  /* Leave room for the keyboard focus outline inside the scroll clipping edge. */
+  padding: 4px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+.atm-sidebar-project-list .atm-nav-project {
+  min-height: 42px;
+  padding: 9px 10px;
 }
 
 .atm-main {

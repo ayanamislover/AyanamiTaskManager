@@ -112,6 +112,21 @@ describe("Sidebar", () => {
     expect(renderSidebar("overview")).not.toContain("<img");
   });
 
+  it("项目行按内容撑开，拥挤时滚动而不压掉双行文字的留白", () => {
+    const css = readFileSync(join(process.cwd(), "packages/ui/src/styles/shell.css"), "utf8");
+    const hasContentSizedRows = (source: string) =>
+      /\.atm-sidebar-project-list\s*\{[^}]*grid-auto-rows:\s*max-content/su.test(source);
+    expect(hasContentSizedRows(css)).toBe(true);
+    // Positive mutation control: restoring the original auto rows must fail.
+    expect(
+      hasContentSizedRows(css.replace("grid-auto-rows: max-content", "grid-auto-rows: auto")),
+    ).toBe(false);
+    expect(css).toMatch(/\.atm-sidebar-project-list\s*\{[^}]*gap: 6px/su);
+    expect(css).toMatch(
+      /\.atm-sidebar-project-list \.atm-nav-project\s*\{[^}]*padding: 9px 10px/su,
+    );
+  });
+
   /**
    * 以前这里写的是「只显示前十二个活动项目」——列表被 .slice(0, 12) 截断，
    * 用例把这个截断当成规格钉住了。可列表本来就是滚动容器，项目一多就凭空少几个，
