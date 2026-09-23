@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { discoverDaemon } from "../src/runtime.js";
+import { discoverDaemon, wakeBridgePath } from "../src/runtime.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -71,6 +71,25 @@ describe("CLI daemon discovery", () => {
       expect(message).not.toContain(token);
       expect(message).not.toContain(endpoint);
     }
+  });
+
+  it("wakes through the bridge shipped with this executable, not the data-root copy", () => {
+    // The data root is refreshed only when the desktop starts; after an update it can
+    // still hold an old bridge whose stdio loop runs as soon as it is required.
+    const exe =
+      "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\app-9.9.9\\AyanamiTaskManager.exe";
+    expect(wakeBridgePath(exe)).toBe(
+      join(
+        "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\app-9.9.9",
+        "resources",
+        "mcp-stdio.cjs",
+      ),
+    );
+    expect(wakeBridgePath(exe, "D:\\packaged\\resources")).toBe(
+      join("D:\\packaged\\resources", "mcp-stdio.cjs"),
+    );
+    const source = readFileSync(join(process.cwd(), "packages/cli/src/runtime.ts"), "utf8");
+    expect(source).not.toMatch(/join\(\s*dataDir\s*,\s*"mcp-stdio\.cjs"\s*\)/u);
   });
 
   it("rejects a non-loopback explicit override before any request", async () => {

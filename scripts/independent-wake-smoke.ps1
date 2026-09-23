@@ -51,7 +51,10 @@ try {
  $runtime=Get-Content -LiteralPath (Join-Path $result.data 'runtime/daemon.json') -Raw | ConvertFrom-Json
  $status=Invoke-RestMethod -Uri ($runtime.endpoint+'/api/v1/system/status') -Headers @{Authorization=('Bearer '+$runtime.token)} -TimeoutSec 5
  if(-not $status.version){throw 'Runtime unhealthy after host termination'}
- $evidence=[ordered]@{mode=$Mode;pid=[int]$result.pid;inHostJob=$inOwnedJob;survivedHostClose=(-not $endedWithHost);healthy=$true;version=[string]$status.version;data=[string]$result.data}
+ # Task Scheduler's default priority 7 would run the whole ATM tree below normal.
+ $priorityClass=[string](Get-Process -Id $result.pid).PriorityClass
+ if($priorityClass -ne 'Normal'){throw ('Woken ATM runs at '+$priorityClass+' priority')}
+ $evidence=[ordered]@{mode=$Mode;pid=[int]$result.pid;inHostJob=$inOwnedJob;survivedHostClose=(-not $endedWithHost);healthy=$true;priorityClass=$priorityClass;version=[string]$status.version;data=[string]$result.data}
  $evidence | ConvertTo-Json -Depth 2
 } finally {
  if($job -ne [IntPtr]::Zero){[void][AtmIndependentJobProbe]::CloseHandle($job)}

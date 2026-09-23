@@ -107,8 +107,18 @@ async function startApplication(background: boolean): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   if (
-    handleSquirrelStartup(process.argv, process.execPath, undefined, (detail) =>
-      updateHost.recordInstallFailure(detail),
+    handleSquirrelStartup(
+      process.argv,
+      process.execPath,
+      undefined,
+      (detail) => updateHost.recordInstallFailure(detail),
+      () => {
+        const bridgePath = bundledMcpStdioPath();
+        const bridge = createRequire(bridgePath)(bridgePath) as {
+          removeWakeTaskSync(input: { dataDir: string }): unknown;
+        };
+        bridge.removeWakeTaskSync({ dataDir: dataDirBeforeReady() });
+      },
     )
   ) {
     app.quit();

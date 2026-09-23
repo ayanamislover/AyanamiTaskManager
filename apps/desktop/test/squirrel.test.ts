@@ -39,6 +39,47 @@ describe("Squirrel 生命周期事件", () => {
     expect(removal.calls).toEqual([{ exe: updateExe, args: ["--removeShortcut", "ATM.exe"] }]);
   });
 
+  it("卸载时删除 Agent 唤醒用的计划任务；删除失败只报告，不拦住卸载", () => {
+    let removed = 0;
+    const noTask = capture();
+    handleSquirrelStartup(
+      [execPath, "--squirrel-install", "9.9.9"],
+      execPath,
+      noTask.run,
+      undefined,
+      () => {
+        removed += 1;
+      },
+    );
+    expect(removed).toBe(0);
+    handleSquirrelStartup(
+      [execPath, "--squirrel-uninstall", "9.9.9"],
+      execPath,
+      noTask.run,
+      undefined,
+      () => {
+        removed += 1;
+      },
+    );
+    expect(removed).toBe(1);
+
+    const failures: string[] = [];
+    const failing = capture();
+    expect(
+      handleSquirrelStartup(
+        [execPath, "--squirrel-uninstall", "9.9.9"],
+        execPath,
+        failing.run,
+        (detail) => failures.push(detail),
+        () => {
+          throw new Error("Task Scheduler unavailable");
+        },
+      ),
+    ).toBe(true);
+    expect(failing.calls).toEqual([{ exe: updateExe, args: ["--removeShortcut", "ATM.exe"] }]);
+    expect(failures).toEqual(["wake task removal failed: Task Scheduler unavailable"]);
+  });
+
   it("obsolete 安静退出，不动快捷方式", () => {
     const { calls, run } = capture();
     // 夹具用永不发布的版本号：写真版本号会被升版时的残留检查当成漏改的站点。

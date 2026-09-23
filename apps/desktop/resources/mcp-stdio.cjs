@@ -2,7 +2,7 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const { existsSync, readFileSync } = require("node:fs");
-const { spawn, execFile } = require("node:child_process");
+const { spawn, execFile, execFileSync } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const { createInterface } = require("node:readline");
 const { join, resolve } = require("node:path");
@@ -48,6 +48,24 @@ function runtime() {
   return current;
 }
 
+// PowerShell also ends single-quoted strings at typographic quotes (U+2018-U+201B),
+// so escaping ASCII quotes is not enough for a user-profile path. Base64 has no
+// quote characters at all; the script decodes it back to the exact text.
+function powershellText(value) {
+  const encoded = Buffer.from(String(value), "utf8").toString("base64");
+  return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`;
+}
+
+// One task per data root and Windows user. Registration and uninstall must agree.
+function wakeTaskNameScript(dataDir) {
+  const suffix = createHash("sha256")
+    .update(resolve(dataDir).toLowerCase())
+    .digest("hex")
+    .slice(0, 16);
+  return `$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$name='AyanamiTaskManager-Wake-${suffix}-'+$identity.User.Value`;
+}
+
 function scheduledWakeScript(execPath, dataDir, environment = process.env) {
   const launchEnv = { ATM_DATA_DIR: resolve(dataDir) };
   // Explicit paths/flags only. Never persist the caller's credentials, token,
@@ -71,17 +89,11 @@ function scheduledWakeScript(execPath, dataDir, environment = process.env) {
     if (/["\r\n\0]/.test(profile)) throw new Error("ATM_WAKE_PROFILE_INVALID");
     args += ` --user-data-dir="${profile.replace(/\\$/u, "\\\\")}"`;
   }
-  const literal = (value) => `'${value.replace(/'/g, "''")}'`;
-  const suffix = createHash("sha256")
-    .update(resolve(dataDir).toLowerCase())
-    .digest("hex")
-    .slice(0, 16);
   return `$ErrorActionPreference='Stop'
 $svc=New-Object -ComObject 'Schedule.Service'
 $svc.Connect()
 $root=$svc.GetFolder('\\')
-$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-$name='AyanamiTaskManager-Wake-${suffix}-'+$identity.User.Value
+${wakeTaskNameScript(dataDir)}
 $definition=$svc.NewTask(0)
 $definition.RegistrationInfo.Description='ATM current-user on-demand background launch; no automatic triggers'
 $definition.Principal.UserId=$identity.Name
@@ -93,13 +105,63 @@ $definition.Settings.DisallowStartIfOnBatteries=$false
 $definition.Settings.StopIfGoingOnBatteries=$false
 $definition.Settings.ExecutionTimeLimit='PT0S'
 $definition.Settings.MultipleInstances=2
+$definition.Settings.Priority=4
 $action=$definition.Actions.Create(0)
-$action.Path=${literal(execPath)}
-$action.Arguments=${literal(args)}
+$action.Path=${powershellText(execPath)}
+$action.Arguments=${powershellText(args)}
 $task=$root.RegisterTaskDefinition($name,$definition,6,$null,$null,3)
 [void]$task.Run($null)
 [Console]::Out.Write($name)
 `;
+}
+
+// Uninstall removes the on-demand task it created; the task has no triggers, so
+// leaving it would only keep a dead entry pointing at a deleted executable.
+function wakeTaskRemovalScript(dataDir) {
+  return `$ErrorActionPreference='Stop'
+$svc=New-Object -ComObject 'Schedule.Service'
+$svc.Connect()
+$root=$svc.GetFolder('\\')
+${wakeTaskNameScript(dataDir)}
+try { [void]$root.GetTask($name) } catch { [Console]::Out.Write('absent'); return }
+$root.DeleteTask($name,0)
+[Console]::Out.Write('removed')
+`;
+}
+
+function powershellPath() {
+  return join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+}
+
+function powershellArgs(script) {
+  return [
+    "-NoProfile",
+    "-NonInteractive",
+    "-WindowStyle",
+    "Hidden",
+    "-EncodedCommand",
+    Buffer.from(script, "utf16le").toString("base64"),
+  ];
+}
+
+function removeWakeTaskSync(options = {}) {
+  if (process.platform !== "win32") return { outcome: "unsupported" };
+  const dataDir = options.dataDir ?? dataDirectory();
+  const output = execFileSync(powershellPath(), powershellArgs(wakeTaskRemovalScript(dataDir)), {
+    // PowerShell writes module-loading progress as CLIXML on stderr; only stdout matters.
+    stdio: ["ignore", "pipe", "ignore"],
+    windowsHide: true,
+    timeout: 15_000,
+    maxBuffer: 16_384,
+    encoding: "utf8",
+  });
+  return { outcome: output.trim() };
 }
 
 async function wakeDesktop(options = {}) {
@@ -110,24 +172,10 @@ async function wakeDesktop(options = {}) {
   delete env.ELECTRON_RUN_AS_NODE;
   if (process.platform === "win32") {
     const script = scheduledWakeScript(execPath, dataDir, env);
-    const powershell = join(
-      process.env.SystemRoot ?? "C:\\Windows",
-      "System32",
-      "WindowsPowerShell",
-      "v1.0",
-      "powershell.exe",
-    );
     return new Promise((resolveWake, rejectWake) => {
       execFile(
-        powershell,
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-WindowStyle",
-          "Hidden",
-          "-EncodedCommand",
-          Buffer.from(script, "utf16le").toString("base64"),
-        ],
+        powershellPath(),
+        powershellArgs(script),
         { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 },
         (error, stdout) => {
           if (error)
@@ -150,12 +198,16 @@ async function wakeDesktop(options = {}) {
   child.unref();
 }
 
-async function waitForRuntime(waitMs = 45_000) {
+async function waitForRuntime(waitMs = 45_000, stale = null) {
   const deadline = Date.now() + waitMs;
   let wakeRequested = false;
   while (true) {
     try {
       const current = runtime();
+      // The caller already saw this instance refuse connections. Its PID may now
+      // belong to an unrelated process, so only a newly published instance counts.
+      if (stale && current.instanceId === stale.instanceId)
+        throw new Error("ATM_RUNTIME_UNAVAILABLE");
       // A forced host termination leaves the descriptor behind. Do not treat
       // its mere presence as a live service, or the next Agent cannot wake ATM.
       try {
@@ -174,6 +226,19 @@ async function waitForRuntime(waitMs = 45_000) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+}
+
+// Only a refused connection proves the request never reached a daemon, so only
+// that case may be retried. Resets or timeouts could follow a delivered request.
+function connectionRefused(error) {
+  const cause = error && typeof error === "object" ? error.cause : undefined;
+  if (!cause || typeof cause !== "object") return false;
+  if (cause.code === "ECONNREFUSED") return true;
+  return (
+    Array.isArray(cause.errors) &&
+    cause.errors.length > 0 &&
+    cause.errors.every((item) => item && item.code === "ECONNREFUSED")
+  );
 }
 
 function profile(args = process.argv.slice(2)) {
@@ -204,16 +269,26 @@ async function main() {
       // Re-read the single discovery source for every request. A long-lived
       // bridge therefore follows an app restart instead of retaining a stale
       // endpoint/token pair from process startup.
+      const forward = (current) =>
+        fetch(`${current.endpoint.replace(/\/$/, "")}${mcpPath}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${current.token}`,
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(message),
+        });
       const current = await waitForRuntime();
-      const response = await fetch(`${current.endpoint.replace(/\/$/, "")}${mcpPath}`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${current.token}`,
-          accept: "application/json, text/event-stream",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(message),
-      });
+      let response;
+      try {
+        response = await forward(current);
+      } catch (error) {
+        if (!connectionRefused(error)) throw error;
+        // Nothing listens on the recorded endpoint: the descriptor outlived its
+        // daemon even if the PID looks alive. Wake ATM and retry exactly once.
+        response = await forward(await waitForRuntime(45_000, current));
+      }
       if (response.status === 202 || response.status === 204) continue;
       const text = await response.text();
       if (response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -240,7 +315,7 @@ async function main() {
   }
 }
 
-module.exports = { wakeDesktop, scheduledWakeScript };
+module.exports = { wakeDesktop, scheduledWakeScript, wakeTaskRemovalScript, removeWakeTaskSync };
 
 if (require.main === module)
   main().catch((error) => {

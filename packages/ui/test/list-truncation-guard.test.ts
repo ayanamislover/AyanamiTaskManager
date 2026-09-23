@@ -46,6 +46,14 @@ const STRING_CLAMPS = new Map<string, string>([
     "apps/desktop/src/agent-documentation.ts|.slice(0, 4)",
     "回滚失败信息只列前 4 条，前面已经给出 failed 总数",
   ],
+  [
+    'apps/desktop/src/lifecycle-diagnostics.ts|errorFingerprint: createHash("sha256").update(error.message.slice(0, 4096)).digest("hex"),',
+    "错误消息只取前 4096 字算指纹，日志里不落原文",
+  ],
+  [
+    "apps/desktop/src/lifecycle-diagnostics.ts|const line = `${JSON.stringify({ at, event, runId, pid: process.pid, ppid: process.ppid, version: version.slice(0, 40), ...detail })}\\n`;",
+    "版本号夹到 40 字，防止异常版本串撑大诊断日志行",
+  ],
 ]);
 
 function sourceFiles(root: string): string[] {

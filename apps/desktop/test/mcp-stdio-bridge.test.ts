@@ -303,4 +303,115 @@ describe("打包 stdio bridge", () => {
     expect(exitCode).not.toBe(0);
     expect(stderr).toContain("MCP_PROFILE_INVALID");
   });
+
+  it("残留 descriptor 的 PID 被别的进程复用时，连接被拒也会等新实例并重试一次", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-stdio-reused-pid-"));
+    temporary.push(dataDir);
+    const runtimeDir = join(dataDir, "runtime");
+    mkdirSync(runtimeDir, { recursive: true });
+    // A port that was just released: connecting to it is refused.
+    const closed = createServer();
+    await new Promise<void>((resolveListen) => closed.listen(0, "127.0.0.1", resolveListen));
+    const closedAddress = closed.address();
+    if (!closedAddress || typeof closedAddress === "string")
+      throw new Error("TEST_ADDRESS_MISSING");
+    await new Promise<void>((resolveClose) => closed.close(() => resolveClose()));
+    // process.pid is alive but is not ATM: exactly the reused-PID situation.
+    writeFileSync(
+      join(runtimeDir, "daemon.json"),
+      JSON.stringify(runtimeDescriptor(`http://127.0.0.1:${closedAddress.port}`, "stale-token")),
+      "utf8",
+    );
+    let delivered = 0;
+    const server = createServer((request, response) => {
+      delivered += 1;
+      expect(request.headers.authorization).toBe("Bearer fresh-token");
+      request.resume();
+      request.once("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ jsonrpc: "2.0", id: 21, result: { revived: true } }));
+      });
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("TEST_ADDRESS_MISSING");
+
+    const bridge = join(process.cwd(), "apps", "desktop", "resources", "mcp-stdio.cjs");
+    const child = spawn(process.execPath, [bridge, "--profile", "core"], {
+      env: { ...process.env, ATM_DATA_DIR: dataDir },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const output = new Promise<string>((resolveOutput, rejectOutput) => {
+      const timer = setTimeout(() => rejectOutput(new Error("reused pid timeout")), 5000);
+      child.stdout.once("data", (chunk: Buffer) => {
+        clearTimeout(timer);
+        resolveOutput(chunk.toString("utf8"));
+      });
+    });
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 21, method: "tools/list", params: {} })}\n`,
+    );
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 300));
+    // The woken desktop publishes a new instance.
+    writeFileSync(
+      join(runtimeDir, "daemon.json"),
+      JSON.stringify({
+        ...runtimeDescriptor(`http://127.0.0.1:${address.port}`, "fresh-token"),
+        instanceId: "fedcba9876543210fedcba9876543210",
+      }),
+      "utf8",
+    );
+
+    expect(JSON.parse((await output).trim())).toMatchObject({ id: 21, result: { revived: true } });
+    expect(delivered).toBe(1);
+    child.kill();
+    await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  });
+
+  it("请求已送达后连接断开不重试，避免同一请求投递两次", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-stdio-no-replay-"));
+    temporary.push(dataDir);
+    const runtimeDir = join(dataDir, "runtime");
+    mkdirSync(runtimeDir, { recursive: true });
+    let delivered = 0;
+    const server = createServer((request) => {
+      delivered += 1;
+      request.resume();
+      request.once("end", () => request.socket.destroy());
+    });
+    await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("TEST_ADDRESS_MISSING");
+    writeFileSync(
+      join(runtimeDir, "daemon.json"),
+      JSON.stringify(runtimeDescriptor(`http://127.0.0.1:${address.port}`, "reset-token")),
+      "utf8",
+    );
+
+    const bridge = join(process.cwd(), "apps", "desktop", "resources", "mcp-stdio.cjs");
+    const child = spawn(process.execPath, [bridge, "--profile", "core"], {
+      env: { ...process.env, ATM_DATA_DIR: dataDir },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const output = new Promise<string>((resolveOutput, rejectOutput) => {
+      const timer = setTimeout(() => rejectOutput(new Error("reset timeout")), 5000);
+      child.stdout.once("data", (chunk: Buffer) => {
+        clearTimeout(timer);
+        resolveOutput(chunk.toString("utf8"));
+      });
+    });
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 22, method: "tools/call", params: {} })}\n`,
+    );
+
+    expect(JSON.parse((await output).trim())).toMatchObject({ id: 22, error: { code: -32000 } });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 200));
+    expect(delivered).toBe(1);
+    child.kill();
+    await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()));
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  });
 });

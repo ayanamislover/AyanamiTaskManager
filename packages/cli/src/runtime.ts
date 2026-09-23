@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export type DaemonRuntime = {
   endpoint: string;
@@ -72,6 +72,16 @@ async function runtimeAvailable(runtime: DaemonRuntime): Promise<boolean> {
   }
 }
 
+/**
+ * The launcher that ships with this executable, never the data-root copy. The data
+ * root is only refreshed when the desktop starts, so right after an update it can
+ * still hold an older bridge — and bridges up to the v1.1.5 release run their stdio
+ * loop as soon as they are required, which would take over this CLI's stdin/stdout.
+ */
+export function wakeBridgePath(execPath: string, resourcesPath?: string): string {
+  return join(resourcesPath ?? join(dirname(execPath), "resources"), "mcp-stdio.cjs");
+}
+
 export async function discoverDaemon(
   input: {
     endpoint?: string;
@@ -101,13 +111,18 @@ export async function discoverDaemon(
   if (existing && (await runtimeAvailable(existing))) return existing;
 
   if (/AyanamiTaskManager\.exe$/iu.test(process.execPath)) {
-    // Both the CLI and stdio use the installed bridge's independent Windows
-    // launcher. A detached child still belongs to a host's kill-on-close Job.
-    const bridgePath = join(dataDir, "mcp-stdio.cjs");
-    const bridge = createRequire(bridgePath)(bridgePath) as {
-      wakeDesktop(input: { execPath: string; dataDir: string }): Promise<unknown>;
-    };
-    await bridge.wakeDesktop({ execPath: process.execPath, dataDir });
+    // Both the CLI and stdio use the bridge's independent Windows launcher. A
+    // detached child still belongs to a host's kill-on-close Job.
+    const bridgePath = wakeBridgePath(
+      process.execPath,
+      (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+    );
+    const bridge = createRequire(bridgePath)(bridgePath) as { wakeDesktop?: unknown };
+    if (typeof bridge.wakeDesktop !== "function")
+      throw new Error(`ATM_WAKE_LAUNCHER_MISSING: ${bridgePath}`);
+    await (
+      bridge.wakeDesktop as (input: { execPath: string; dataDir: string }) => Promise<unknown>
+    )({ execPath: process.execPath, dataDir });
     const deadline = Date.now() + (input.waitMs ?? 45_000);
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));
