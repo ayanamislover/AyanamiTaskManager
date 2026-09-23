@@ -33,6 +33,27 @@ pnpm atm doctor
 
 提供版本、故障的大致时刻和上述日志即可；不要附带 `runtime/daemon.json`（包含本地令牌）或项目数据库。诊断文件写入失败不会阻止应用运行。此记录功能不能倒推安装前的退出原因，也不等于修复了导致退出的问题。
 
+### 关闭 Agent 后 ATM 也消失
+
+Windows 的 `detached` / `unref` 不保证子进程脱离宿主的 kill-on-close Job。
+MCP 与 CLI 的后台唤醒现在共用当前用户的按需计划任务入口；旧桥接直接发起的
+`--background --agent-wake` 请求也由桌面转交此入口。任务名为
+`AyanamiTaskManager-Wake-<数据根摘要>-<用户 SID>`，仅普通交互用户权限，无密码、无定时/登录触发器，
+不受电池切换或默认任务时限终止；这与设置里的“登录时启动”是两个不同机制。
+
+如果出现 `ATM_INDEPENDENT_WAKE_FAILED`，检查 Windows Task Scheduler 服务及当前用户权限，
+或从开始菜单手动启动 ATM。应用不会自动提权、修改宿主 Job 策略或退回不可靠的直接 spawn。
+卸载/停止使用 ATM 后，可在任务计划程序中删除对应数据根的上述按需任务；不要删除其他任务。
+
+开发者本地部署后使用 `node scripts/start-installed-desktop.mjs` 拉起已安装程序，
+不要再从 Agent 终端直接 `Start-Process` 后台主进程。验收命令：
+`powershell -NoProfile -File scripts/independent-wake-smoke.ps1 -Mode stdio`，
+另用 `-Mode cli` 和 `-Mode legacy` 覆盖 CLI 与旧桥接；测试只关闭自己创建的宿主 Job，
+确认真实打包程序仍存活并响应，再清理该测试专属计划任务。
+
+离线打包可将 `ATM_ELECTRON_ZIP_DIR` 指向已下载、可信且版本匹配的 Electron ZIP 缓存目录，
+不改变运行时版本；仍需通过打包内容检查及真实程序烟测。
+
 ## MCP 无法连接
 
 - 桌面设置中重新运行“连接测试”；

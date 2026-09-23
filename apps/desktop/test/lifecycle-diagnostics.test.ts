@@ -71,7 +71,7 @@ describe("bounded desktop lifecycle diagnostics", () => {
 
   it("only activates for the primary desktop and records clean shutdown once", () => {
     const dir = fixture();
-    const log = createLifecycleDiagnostics(dir, "1.1.5");
+    const log = createLifecycleDiagnostics(dir, "9.9.9");
     log.record("shutdown.begin");
     expect(readdirSync(dir)).toEqual([]);
     log.start({ background: true, agentWake: false });
@@ -79,17 +79,17 @@ describe("bounded desktop lifecycle diagnostics", () => {
     log.finish(0, true);
     log.finish(0, true);
     expect(lines(dir).map((line) => line.event)).toEqual(["startup", "shutdown.begin", "exit"]);
-    const next = createLifecycleDiagnostics(dir, "1.1.5");
+    const next = createLifecycleDiagnostics(dir, "9.9.9");
     next.start({ background: false, agentWake: false });
     expect(lines(dir).some((line) => line.event === "previous.unclean")).toBe(false);
   });
 
   it("reports unfinished previous run without asserting a crash cause", () => {
     const dir = fixture();
-    const first = createLifecycleDiagnostics(dir, "1.1.5");
+    const first = createLifecycleDiagnostics(dir, "9.9.9");
     first.start({ background: true, agentWake: true });
     first.record("heartbeat", { rss: 123456 });
-    const next = createLifecycleDiagnostics(dir, "1.1.5");
+    const next = createLifecycleDiagnostics(dir, "9.9.9");
     next.start({ background: true, agentWake: false });
     const record = lines(dir).find((line) => line.event === "previous.unclean");
     expect(record.previousEvent).toBe("heartbeat");
@@ -100,7 +100,7 @@ describe("bounded desktop lifecycle diagnostics", () => {
   it("bounds rotation including a single retained file", () => {
     for (const files of [1, 3]) {
       const dir = fixture();
-      const log = createLifecycleDiagnostics(dir, "1.1.5", {
+      const log = createLifecycleDiagnostics(dir, "9.9.9", {
         maxLogBytes: 4096,
         maxLogFiles: files,
       });
@@ -116,7 +116,7 @@ describe("bounded desktop lifecycle diagnostics", () => {
   it("diagnostics failure never interrupts the desktop", () => {
     const dir = fixture();
     writeFileSync(join(dir, "logs"), "not a directory");
-    const log = createLifecycleDiagnostics(dir, "1.1.5");
+    const log = createLifecycleDiagnostics(dir, "9.9.9");
     expect(() => {
       log.start({ background: false, agentWake: false });
       log.record("ready");
@@ -133,7 +133,7 @@ describe("bounded desktop lifecycle diagnostics", () => {
     const detail = lifecycleError(error);
     expect(detail.errorCode).toBe("EPIPE");
     expect(detail.errorName).toBe("Error");
-    const log = createLifecycleDiagnostics(dir, "1.1.5");
+    const log = createLifecycleDiagnostics(dir, "9.9.9");
     log.start({ background: false, agentWake: false });
     log.record("exception", { ...detail, token: "secret-token-value" } as never);
     const output = JSON.stringify(lines(dir));
@@ -151,11 +151,11 @@ describe("bounded desktop lifecycle diagnostics", () => {
 
   it("ignores oversized or malformed prior markers", () => {
     const dir = fixture();
-    const log = createLifecycleDiagnostics(dir, "1.1.5");
+    const log = createLifecycleDiagnostics(dir, "9.9.9");
     log.start({ background: false, agentWake: false });
     writeFileSync(join(dir, "logs", "lifecycle-state.json"), "x".repeat(4097));
     expect(() =>
-      createLifecycleDiagnostics(dir, "1.1.5").start({ background: false, agentWake: false }),
+      createLifecycleDiagnostics(dir, "9.9.9").start({ background: false, agentWake: false }),
     ).not.toThrow();
     expect(lines(dir).filter((line) => line.event === "previous.unclean")).toHaveLength(0);
   });

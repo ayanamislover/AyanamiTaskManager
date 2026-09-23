@@ -2,9 +2,10 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const { existsSync, readFileSync } = require("node:fs");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const { createInterface } = require("node:readline");
-const { join } = require("node:path");
+const { join, resolve } = require("node:path");
 
 function dataDirectory() {
   if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
@@ -47,11 +48,100 @@ function runtime() {
   return current;
 }
 
-function wakeDesktop() {
-  if (!/AyanamiTaskManager\.exe$/i.test(process.execPath)) return;
-  const env = { ...process.env };
+function scheduledWakeScript(execPath, dataDir, environment = process.env) {
+  const launchEnv = { ATM_DATA_DIR: resolve(dataDir) };
+  // Explicit paths/flags only. Never persist the caller's credentials, token,
+  // ELECTRON_RUN_AS_NODE or the rest of its environment in a scheduled task.
+  for (const key of ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
+    if (environment[key]) launchEnv[key] = environment[key];
+  }
+  if (environment.ATM_PACKAGED_SMOKE === "1") {
+    for (const key of [
+      "ATM_PACKAGED_SMOKE",
+      "ATM_SMOKE_AGENT_CONFIG_ROOT",
+      "ATM_SMOKE_MCP_CONFIG_REPAIR",
+    ]) {
+      if (environment[key]) launchEnv[key] = environment[key];
+    }
+  }
+  const context = Buffer.from(JSON.stringify(launchEnv), "utf8").toString("base64");
+  let args = `--background --agent-wake --atm-launch-context=${context}`;
+  if (environment.ATM_PACKAGED_SMOKE === "1" && environment.ATM_WAKE_USER_DATA_DIR) {
+    const profile = resolve(environment.ATM_WAKE_USER_DATA_DIR);
+    if (/["\r\n\0]/.test(profile)) throw new Error("ATM_WAKE_PROFILE_INVALID");
+    args += ` --user-data-dir="${profile.replace(/\\$/u, "\\\\")}"`;
+  }
+  const literal = (value) => `'${value.replace(/'/g, "''")}'`;
+  const suffix = createHash("sha256")
+    .update(resolve(dataDir).toLowerCase())
+    .digest("hex")
+    .slice(0, 16);
+  return `$ErrorActionPreference='Stop'
+$svc=New-Object -ComObject 'Schedule.Service'
+$svc.Connect()
+$root=$svc.GetFolder('\\')
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+$name='AyanamiTaskManager-Wake-${suffix}-'+$identity.User.Value
+$definition=$svc.NewTask(0)
+$definition.RegistrationInfo.Description='ATM current-user on-demand background launch; no automatic triggers'
+$definition.Principal.UserId=$identity.Name
+$definition.Principal.LogonType=3
+$definition.Principal.RunLevel=0
+$definition.Settings.Enabled=$true
+$definition.Settings.AllowDemandStart=$true
+$definition.Settings.DisallowStartIfOnBatteries=$false
+$definition.Settings.StopIfGoingOnBatteries=$false
+$definition.Settings.ExecutionTimeLimit='PT0S'
+$definition.Settings.MultipleInstances=2
+$action=$definition.Actions.Create(0)
+$action.Path=${literal(execPath)}
+$action.Arguments=${literal(args)}
+$task=$root.RegisterTaskDefinition($name,$definition,6,$null,$null,3)
+[void]$task.Run($null)
+[Console]::Out.Write($name)
+`;
+}
+
+async function wakeDesktop(options = {}) {
+  const execPath = options.execPath ?? process.execPath;
+  const dataDir = options.dataDir ?? dataDirectory();
+  const env = { ...(options.env ?? process.env) };
+  if (!/AyanamiTaskManager\.exe$/i.test(execPath)) return;
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(process.execPath, ["--background", "--agent-wake"], {
+  if (process.platform === "win32") {
+    const script = scheduledWakeScript(execPath, dataDir, env);
+    const powershell = join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    return new Promise((resolveWake, rejectWake) => {
+      execFile(
+        powershell,
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-WindowStyle",
+          "Hidden",
+          "-EncodedCommand",
+          Buffer.from(script, "utf16le").toString("base64"),
+        ],
+        { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 },
+        (error, stdout) => {
+          if (error)
+            rejectWake(
+              new Error(
+                "ATM_INDEPENDENT_WAKE_FAILED: Windows Task Scheduler rejected the current-user launch; start ATM from the Start menu and check Task Scheduler permissions. No unsafe fallback was used.",
+              ),
+            );
+          else resolveWake({ taskName: stdout.trim() });
+        },
+      );
+    });
+  }
+  const child = spawn(execPath, ["--background", "--agent-wake"], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -65,12 +155,20 @@ async function waitForRuntime(waitMs = 45_000) {
   let wakeRequested = false;
   while (true) {
     try {
-      return runtime();
+      const current = runtime();
+      // A forced host termination leaves the descriptor behind. Do not treat
+      // its mere presence as a live service, or the next Agent cannot wake ATM.
+      try {
+        process.kill(current.pid, 0);
+      } catch (error) {
+        if (error.code !== "EPERM") throw new Error("ATM_RUNTIME_UNAVAILABLE");
+      }
+      return current;
     } catch (error) {
       if (error instanceof Error && error.message === "ATM_RUNTIME_DESCRIPTOR_INVALID") throw error;
       if (!wakeRequested) {
         wakeRequested = true;
-        wakeDesktop();
+        await wakeDesktop();
       }
       if (Date.now() >= deadline) throw new Error("ATM_RUNTIME_UNAVAILABLE");
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -142,9 +240,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(
-    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
-  );
-  process.exitCode = 1;
-});
+module.exports = { wakeDesktop, scheduledWakeScript };
+
+if (require.main === module)
+  main().catch((error) => {
+    process.stderr.write(
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  });

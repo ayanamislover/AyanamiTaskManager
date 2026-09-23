@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 
 export type DaemonRuntime = {
@@ -101,15 +101,13 @@ export async function discoverDaemon(
   if (existing && (await runtimeAvailable(existing))) return existing;
 
   if (/AyanamiTaskManager\.exe$/iu.test(process.execPath)) {
-    const env = { ...process.env };
-    delete env.ELECTRON_RUN_AS_NODE;
-    const child = spawn(process.execPath, ["--background", "--agent-wake"], {
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-      env,
-    });
-    child.unref();
+    // Both the CLI and stdio use the installed bridge's independent Windows
+    // launcher. A detached child still belongs to a host's kill-on-close Job.
+    const bridgePath = join(dataDir, "mcp-stdio.cjs");
+    const bridge = createRequire(bridgePath)(bridgePath) as {
+      wakeDesktop(input: { execPath: string; dataDir: string }): Promise<unknown>;
+    };
+    await bridge.wakeDesktop({ execPath: process.execPath, dataDir });
     const deadline = Date.now() + (input.waitMs ?? 45_000);
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));

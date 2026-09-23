@@ -9,6 +9,9 @@ const packageVersion = JSON.parse(readFileSync(new URL("./package.json", import.
 
 const config: ForgeConfig = {
   packagerConfig: {
+    ...(process.env.ATM_ELECTRON_ZIP_DIR
+      ? { electronZipDir: process.env.ATM_ELECTRON_ZIP_DIR }
+      : {}),
     asar: true,
     executableName: "AyanamiTaskManager",
     name: "AyanamiTaskManager",
