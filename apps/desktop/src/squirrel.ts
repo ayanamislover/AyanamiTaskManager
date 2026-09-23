@@ -35,7 +35,6 @@ export function handleSquirrelStartup(
   execPath: string,
   run: UpdateRunner = defaultRunner,
   onFailure?: (detail: string) => void,
-  removeWakeTask?: () => void,
 ): boolean {
   const event = argv[1];
   if (!event || !LIFECYCLE_EVENTS.has(event)) return false;
@@ -48,15 +47,6 @@ export function handleSquirrelStartup(
   } else if (event === "--squirrel-uninstall") {
     const result = run(updateExe, ["--removeShortcut", target]);
     if (result && !result.ok) onFailure?.(result.detail ?? "Update.exe failed");
-    // Agent wake-ups register a current-user on-demand task. Uninstall owns its removal;
-    // a failure is reported but must not block Squirrel from finishing.
-    try {
-      removeWakeTask?.();
-    } catch (error) {
-      onFailure?.(
-        `wake task removal failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
   }
   // --squirrel-obsolete 只需要安静退出。
   return true;

@@ -35,29 +35,23 @@ pnpm atm doctor
 
 ### 关闭 Agent 后 ATM 也消失
 
-Windows 的 `detached` / `unref` 不保证子进程脱离宿主的 kill-on-close Job。
-MCP 与 CLI 的后台唤醒现在共用当前用户的按需计划任务入口；旧桥接直接发起的
-`--background --agent-wake` 请求也由桌面转交此入口。任务名为
-`AyanamiTaskManager-Wake-<数据根摘要>-<用户 SID>`，仅普通交互用户权限，无密码、无定时/登录触发器，
-不受电池切换或默认任务时限终止；这与设置里的“登录时启动”是两个不同机制。
-任务显式使用正常优先级（`Priority=4`）：计划任务默认的 7 会让整棵 ATM 进程树以“低于正常”运行。
+Windows 的 `detached` / `unref` **不**保证子进程脱离宿主的 kill-on-close Job。由 Agent 唤醒、
+或由 Agent 终端直接启动的 ATM，都可能随宿主一起结束。从开始菜单或登录自启启动的 ATM 不受影响。
 
-如果出现 `ATM_INDEPENDENT_WAKE_FAILED`，检查 Windows Task Scheduler 服务及当前用户权限，
-或从开始菜单手动启动 ATM。应用不会自动提权、修改宿主 Job 策略或退回不可靠的直接 spawn。
-安全软件拦截任务注册时（例如卡巴斯基），请在安全软件里把已安装的 `AyanamiTaskManager.exe`
-设为受信任程序，而不是整体关闭防护；设置前可先从开始菜单手动启动 ATM。
-卸载时会删除当前数据根对应的上述按需任务；删除失败只记入安装失败日志，不阻断卸载，
-此时可在任务计划程序中手动删除该任务，不要删除其他任务。
+曾经用「注册当前用户按需计划任务」来绕开这一点，已撤回：那串行为（程序启动带编码命令的
+PowerShell 去注册并运行计划任务）与恶意软件的持久化手法无法区分，卡巴斯基按行为检测报
+`PDM:Trojan.Win32.Generic`。不为了躲过检测而改写实现。
+
+**因此：不要从 Agent 终端启动生产 ATM**，部署后请由用户从开始菜单启动，或等它被正常唤醒。
+已知的一次实例消失（2026-09-23 05:18 本地）就是这样来的：该实例是 09-22 由 Agent 部署时
+从自己的终端启动的，宿主关闭时被连带终止。更早的几次没有诊断日志，原因仍未确定。
+
+诊断日志 `logs/lifecycle.ndjson` 的 `startup` 事件记录了每次启动的 `background` 与 `agentWake`，
+`previous.unclean` 记录上一次是否非正常结束。排查实例消失时先看这两项，再下结论。
 
 运行描述符（`runtime/daemon.json`）在 ATM 被强制结束后会残留，其中的 PID 可能已被别的进程复用。
 桥接因此不只看 PID：向记录的端点连接被拒时，视为该实例已失效，唤醒一次并等待新实例发布后重试
 这一次请求；请求已送达后才断开的情况不会重试，避免重复投递。
-
-开发者本地部署后使用 `node scripts/start-installed-desktop.mjs` 拉起已安装程序，
-不要再从 Agent 终端直接 `Start-Process` 后台主进程。验收命令：
-`powershell -NoProfile -File scripts/independent-wake-smoke.ps1 -Mode stdio`，
-另用 `-Mode cli` 和 `-Mode legacy` 覆盖 CLI 与旧桥接；测试只关闭自己创建的宿主 Job，
-确认真实打包程序仍存活并响应，再清理该测试专属计划任务。
 
 离线打包可将 `ATM_ELECTRON_ZIP_DIR` 指向已下载、可信且版本匹配的 Electron ZIP 缓存目录，
 不改变运行时版本；仍需通过打包内容检查及真实程序烟测。

@@ -1,10 +1,8 @@
 import { app } from "electron";
-import { createRequire } from "node:module";
 import { prefetchSelfProcessIdentity } from "@ayanami-task/daemon";
 import { installAgentIntegrationHost } from "./main-agent-integrations.js";
 import {
   applicationLogoPath,
-  bundledMcpStdioPath,
   dataDirBeforeReady,
   installRuntimeIpc,
   runHeadlessModes,
@@ -23,9 +21,7 @@ import {
 import { UpdateHost } from "./update-host.js";
 import { WindowHost } from "./window-host.js";
 import { createLifecycleDiagnostics, lifecycleError } from "./lifecycle-diagnostics.js";
-import { applyLaunchContext } from "./launch-context.js";
 
-applyLaunchContext(process.argv, process.env);
 const lifecycle = createLifecycleDiagnostics(dataDirBeforeReady(), app.getVersion());
 // Monitor only: adding an uncaughtException/unhandledRejection handler would change
 // Node's fatal-error semantics and could leave a damaged process alive.
@@ -107,18 +103,8 @@ async function startApplication(background: boolean): Promise<void> {
 
 async function bootstrap(): Promise<void> {
   if (
-    handleSquirrelStartup(
-      process.argv,
-      process.execPath,
-      undefined,
-      (detail) => updateHost.recordInstallFailure(detail),
-      () => {
-        const bridgePath = bundledMcpStdioPath();
-        const bridge = createRequire(bridgePath)(bridgePath) as {
-          removeWakeTaskSync(input: { dataDir: string }): unknown;
-        };
-        bridge.removeWakeTaskSync({ dataDir: dataDirBeforeReady() });
-      },
+    handleSquirrelStartup(process.argv, process.execPath, undefined, (detail) =>
+      updateHost.recordInstallFailure(detail),
     )
   ) {
     app.quit();
@@ -127,34 +113,6 @@ async function bootstrap(): Promise<void> {
   const args = process.argv.slice(1);
   smokeTrace("bootstrap", { argv: process.argv, args });
   if (await runHeadlessModes(args)) {
-    app.exit(0);
-    return;
-  }
-  // Old long-lived bridges still spawn the GUI directly. Redirect those wake
-  // requests before taking the desktop lock; scheduled launches carry context
-  // and must not recurse. No primary daemon is opened in this short-lived hop.
-  if (
-    app.isPackaged &&
-    process.platform === "win32" &&
-    isAgentWakeRequest(args) &&
-    !args.some((arg) => arg.startsWith("--atm-launch-context="))
-  ) {
-    const bridgePath = bundledMcpStdioPath();
-    const bridge = createRequire(bridgePath)(bridgePath) as {
-      wakeDesktop(input: {
-        execPath: string;
-        dataDir: string;
-        env: NodeJS.ProcessEnv;
-      }): Promise<unknown>;
-    };
-    const userData = args
-      .find((arg) => arg.startsWith("--user-data-dir="))
-      ?.slice("--user-data-dir=".length);
-    await bridge.wakeDesktop({
-      execPath: process.execPath,
-      dataDir: dataDirBeforeReady(),
-      env: { ...process.env, ...(userData ? { ATM_WAKE_USER_DATA_DIR: userData } : {}) },
-    });
     app.exit(0);
     return;
   }

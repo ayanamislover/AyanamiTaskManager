@@ -2,10 +2,9 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const { existsSync, readFileSync } = require("node:fs");
-const { spawn, execFile, execFileSync } = require("node:child_process");
-const { createHash } = require("node:crypto");
+const { spawn } = require("node:child_process");
 const { createInterface } = require("node:readline");
-const { join, resolve } = require("node:path");
+const { join } = require("node:path");
 
 function dataDirectory() {
   if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
@@ -48,147 +47,19 @@ function runtime() {
   return current;
 }
 
-// PowerShell also ends single-quoted strings at typographic quotes (U+2018-U+201B),
-// so escaping ASCII quotes is not enough for a user-profile path. Base64 has no
-// quote characters at all; the script decodes it back to the exact text.
-function powershellText(value) {
-  const encoded = Buffer.from(String(value), "utf8").toString("base64");
-  return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`;
-}
-
-// One task per data root and Windows user. Registration and uninstall must agree.
-function wakeTaskNameScript(dataDir) {
-  const suffix = createHash("sha256")
-    .update(resolve(dataDir).toLowerCase())
-    .digest("hex")
-    .slice(0, 16);
-  return `$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-$name='AyanamiTaskManager-Wake-${suffix}-'+$identity.User.Value`;
-}
-
-function scheduledWakeScript(execPath, dataDir, environment = process.env) {
-  const launchEnv = { ATM_DATA_DIR: resolve(dataDir) };
-  // Explicit paths/flags only. Never persist the caller's credentials, token,
-  // ELECTRON_RUN_AS_NODE or the rest of its environment in a scheduled task.
-  for (const key of ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
-    if (environment[key]) launchEnv[key] = environment[key];
-  }
-  if (environment.ATM_PACKAGED_SMOKE === "1") {
-    for (const key of [
-      "ATM_PACKAGED_SMOKE",
-      "ATM_SMOKE_AGENT_CONFIG_ROOT",
-      "ATM_SMOKE_MCP_CONFIG_REPAIR",
-    ]) {
-      if (environment[key]) launchEnv[key] = environment[key];
-    }
-  }
-  const context = Buffer.from(JSON.stringify(launchEnv), "utf8").toString("base64");
-  let args = `--background --agent-wake --atm-launch-context=${context}`;
-  if (environment.ATM_PACKAGED_SMOKE === "1" && environment.ATM_WAKE_USER_DATA_DIR) {
-    const profile = resolve(environment.ATM_WAKE_USER_DATA_DIR);
-    if (/["\r\n\0]/.test(profile)) throw new Error("ATM_WAKE_PROFILE_INVALID");
-    args += ` --user-data-dir="${profile.replace(/\\$/u, "\\\\")}"`;
-  }
-  return `$ErrorActionPreference='Stop'
-$svc=New-Object -ComObject 'Schedule.Service'
-$svc.Connect()
-$root=$svc.GetFolder('\\')
-${wakeTaskNameScript(dataDir)}
-$definition=$svc.NewTask(0)
-$definition.RegistrationInfo.Description='ATM current-user on-demand background launch; no automatic triggers'
-$definition.Principal.UserId=$identity.Name
-$definition.Principal.LogonType=3
-$definition.Principal.RunLevel=0
-$definition.Settings.Enabled=$true
-$definition.Settings.AllowDemandStart=$true
-$definition.Settings.DisallowStartIfOnBatteries=$false
-$definition.Settings.StopIfGoingOnBatteries=$false
-$definition.Settings.ExecutionTimeLimit='PT0S'
-$definition.Settings.MultipleInstances=2
-$definition.Settings.Priority=4
-$action=$definition.Actions.Create(0)
-$action.Path=${powershellText(execPath)}
-$action.Arguments=${powershellText(args)}
-$task=$root.RegisterTaskDefinition($name,$definition,6,$null,$null,3)
-[void]$task.Run($null)
-[Console]::Out.Write($name)
-`;
-}
-
-// Uninstall removes the on-demand task it created; the task has no triggers, so
-// leaving it would only keep a dead entry pointing at a deleted executable.
-function wakeTaskRemovalScript(dataDir) {
-  return `$ErrorActionPreference='Stop'
-$svc=New-Object -ComObject 'Schedule.Service'
-$svc.Connect()
-$root=$svc.GetFolder('\\')
-${wakeTaskNameScript(dataDir)}
-try { [void]$root.GetTask($name) } catch { [Console]::Out.Write('absent'); return }
-$root.DeleteTask($name,0)
-[Console]::Out.Write('removed')
-`;
-}
-
-function powershellPath() {
-  return join(
-    process.env.SystemRoot ?? "C:\\Windows",
-    "System32",
-    "WindowsPowerShell",
-    "v1.0",
-    "powershell.exe",
-  );
-}
-
-function powershellArgs(script) {
-  return [
-    "-NoProfile",
-    "-NonInteractive",
-    "-WindowStyle",
-    "Hidden",
-    "-EncodedCommand",
-    Buffer.from(script, "utf16le").toString("base64"),
-  ];
-}
-
-function removeWakeTaskSync(options = {}) {
-  if (process.platform !== "win32") return { outcome: "unsupported" };
-  const dataDir = options.dataDir ?? dataDirectory();
-  const output = execFileSync(powershellPath(), powershellArgs(wakeTaskRemovalScript(dataDir)), {
-    // PowerShell writes module-loading progress as CLIXML on stderr; only stdout matters.
-    stdio: ["ignore", "pipe", "ignore"],
-    windowsHide: true,
-    timeout: 15_000,
-    maxBuffer: 16_384,
-    encoding: "utf8",
-  });
-  return { outcome: output.trim() };
-}
-
-async function wakeDesktop(options = {}) {
+/**
+ * Starting the desktop as a detached child does NOT guarantee it outlives an Agent
+ * host that closes a kill-on-close Job: on Windows the child stays in the host's Job.
+ * A woken ATM can therefore end with the Agent that woke it. Registering a Task
+ * Scheduler entry avoids that, but it is indistinguishable from malware persistence
+ * (Kaspersky flags it as PDM:Trojan.Win32.Generic), so this launcher stays direct.
+ * A desktop started at login or from the Start menu is not affected either way.
+ */
+function wakeDesktop(options = {}) {
   const execPath = options.execPath ?? process.execPath;
-  const dataDir = options.dataDir ?? dataDirectory();
   const env = { ...(options.env ?? process.env) };
   if (!/AyanamiTaskManager\.exe$/i.test(execPath)) return;
   delete env.ELECTRON_RUN_AS_NODE;
-  if (process.platform === "win32") {
-    const script = scheduledWakeScript(execPath, dataDir, env);
-    return new Promise((resolveWake, rejectWake) => {
-      execFile(
-        powershellPath(),
-        powershellArgs(script),
-        { windowsHide: true, timeout: 15_000, maxBuffer: 16_384 },
-        (error, stdout) => {
-          if (error)
-            rejectWake(
-              new Error(
-                "ATM_INDEPENDENT_WAKE_FAILED: Windows Task Scheduler rejected the current-user launch; start ATM from the Start menu and check Task Scheduler permissions. No unsafe fallback was used.",
-              ),
-            );
-          else resolveWake({ taskName: stdout.trim() });
-        },
-      );
-    });
-  }
   const child = spawn(execPath, ["--background", "--agent-wake"], {
     detached: true,
     stdio: "ignore",
@@ -220,7 +91,7 @@ async function waitForRuntime(waitMs = 45_000, stale = null) {
       if (error instanceof Error && error.message === "ATM_RUNTIME_DESCRIPTOR_INVALID") throw error;
       if (!wakeRequested) {
         wakeRequested = true;
-        await wakeDesktop();
+        wakeDesktop();
       }
       if (Date.now() >= deadline) throw new Error("ATM_RUNTIME_UNAVAILABLE");
       await new Promise((resolve) => setTimeout(resolve, 100));
@@ -315,7 +186,9 @@ async function main() {
   }
 }
 
-module.exports = { wakeDesktop, scheduledWakeScript, wakeTaskRemovalScript, removeWakeTaskSync };
+// Exported so the CLI can share one launcher. The require.main guard keeps the
+// stdio loop from stealing a requiring process's stdin/stdout.
+module.exports = { wakeDesktop };
 
 if (require.main === module)
   main().catch((error) => {

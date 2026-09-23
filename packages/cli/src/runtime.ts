@@ -1,6 +1,6 @@
+import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
-import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 export type DaemonRuntime = {
   endpoint: string;
@@ -72,16 +72,6 @@ async function runtimeAvailable(runtime: DaemonRuntime): Promise<boolean> {
   }
 }
 
-/**
- * The launcher that ships with this executable, never the data-root copy. The data
- * root is only refreshed when the desktop starts, so right after an update it can
- * still hold an older bridge — and bridges up to the v1.1.5 release run their stdio
- * loop as soon as they are required, which would take over this CLI's stdin/stdout.
- */
-export function wakeBridgePath(execPath: string, resourcesPath?: string): string {
-  return join(resourcesPath ?? join(dirname(execPath), "resources"), "mcp-stdio.cjs");
-}
-
 export async function discoverDaemon(
   input: {
     endpoint?: string;
@@ -111,18 +101,17 @@ export async function discoverDaemon(
   if (existing && (await runtimeAvailable(existing))) return existing;
 
   if (/AyanamiTaskManager\.exe$/iu.test(process.execPath)) {
-    // Both the CLI and stdio use the bridge's independent Windows launcher. A
-    // detached child still belongs to a host's kill-on-close Job.
-    const bridgePath = wakeBridgePath(
-      process.execPath,
-      (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
-    );
-    const bridge = createRequire(bridgePath)(bridgePath) as { wakeDesktop?: unknown };
-    if (typeof bridge.wakeDesktop !== "function")
-      throw new Error(`ATM_WAKE_LAUNCHER_MISSING: ${bridgePath}`);
-    await (
-      bridge.wakeDesktop as (input: { execPath: string; dataDir: string }) => Promise<unknown>
-    )({ execPath: process.execPath, dataDir });
+    // Detached is not Job isolation on Windows: a desktop woken from an Agent host
+    // can still end with that host. See docs/troubleshooting.md.
+    const env = { ...process.env };
+    delete env.ELECTRON_RUN_AS_NODE;
+    const child = spawn(process.execPath, ["--background", "--agent-wake"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env,
+    });
+    child.unref();
     const deadline = Date.now() + (input.waitMs ?? 45_000);
     while (Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100));

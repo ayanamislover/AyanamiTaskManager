@@ -7,6 +7,7 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
+import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
 import {
   generateMutationAcknowledgementDocumentation,
   MUTATION_ACK_DOCUMENTATION_BEGIN,
@@ -709,6 +710,9 @@ await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-bo
 const previousBoot = new Date("2020-01-01T00:00:00Z");
 await utimes(lockPath, previousBoot, previousBoot);
 let app = startApp();
+// The app's own autostart self-check writes the shared HKCU Run value (Electron gives
+// no way to namespace it), so a smoke run would otherwise delete the user's real entry.
+const runEntriesBeforeSmoke = readRunEntries();
 try {
   const runtime = await waitForRuntime(app);
   const recoveredLock = JSON.parse(await readFile(lockPath, "utf8"));
@@ -1043,4 +1047,6 @@ try {
   };
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   throw error;
+} finally {
+  applyRunRestore(loginItemRestorePlan(runEntriesBeforeSmoke, readRunEntries()));
 }
