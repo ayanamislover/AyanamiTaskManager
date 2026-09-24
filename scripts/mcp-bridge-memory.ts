@@ -1,11 +1,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { freemem, homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { MCP_STDIO_FILENAME } from "../apps/desktop/src/mcp-launch.js";
+import {
+  MCP_RUNTIME_LINK,
+  MCP_SHIM_FILENAME,
+  MCP_STDIO_FILENAME,
+  mcpNodeBridgeLaunch,
+} from "../apps/desktop/src/mcp-launch.js";
 import { configuredBridgeLaunch, type McpProfile } from "./mcp-bridge-launch.js";
+import { MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
 
 const run = promisify(execFile);
 
@@ -32,6 +38,8 @@ const run = promisify(execFile);
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts                 按客户端实际配置量 1 与 10
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --bridges 15
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --profile memory
+ *   pnpm exec tsx scripts/mcp-bridge-memory.ts --runtime electron  旧方式：Electron-as-node
+ *   pnpm exec tsx scripts/mcp-bridge-memory.ts --runtime shim      原生 atm-mcp.exe
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --runtime node  拿本机 node 当参照下限
  *   pnpm exec tsx scripts/mcp-bridge-memory.ts --json out.json
  *
@@ -71,6 +79,33 @@ function configuredLaunch(profile: McpProfile): {
   env: Record<string, string>;
 } {
   return configuredBridgeLaunch({ profile, dataDir: dataDir() });
+}
+
+/** 旧方式：Electron-as-node 跑桥接脚本，不管客户端配置现在写的是什么。 */
+function electronLaunch(profile: McpProfile): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+} {
+  const launch = mcpNodeBridgeLaunch({
+    execPath: join(dataDir(), MCP_RUNTIME_LINK, "AyanamiTaskManager.exe"),
+    dataDir: dataDir(),
+  });
+  return { ...launch, args: [...launch.args, "--profile", profile] };
+}
+
+/**
+ * 原生 shim：优先已安装的那份，没装时用仓库里刚构建的 release 产物，便于部署前对比。
+ */
+function shimLaunch(profile: McpProfile): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+} {
+  const installed = join(dataDir(), MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME);
+  const command = existsSync(installed) ? installed : join(process.cwd(), MCP_SHIM_RELEASE_EXE);
+  if (!existsSync(command)) throw new Error(`找不到 ${MCP_SHIM_FILENAME}：先构建或安装`);
+  return { command, args: ["--profile", profile], env: {} };
 }
 
 /** 参照下限：用本机的普通 node 跑同一份桥接脚本，看不带 Electron 能到多少。 */
@@ -233,7 +268,15 @@ async function main(): Promise<void> {
     throw new Error("--profile 只接受 core、memory 或 actions");
   const profile: McpProfile = requestedProfile;
   const runtime = argValue("runtime", "configured");
-  const base = runtime === "node" ? nodeLaunch(profile) : configuredLaunch(profile);
+  const launchers: Record<string, (profile: McpProfile) => ReturnType<typeof configuredLaunch>> = {
+    configured: configuredLaunch,
+    electron: electronLaunch,
+    shim: shimLaunch,
+    node: nodeLaunch,
+  };
+  const launcher = launchers[runtime];
+  if (!launcher) throw new Error(`--runtime 只接受 ${Object.keys(launchers).join("、")}`);
+  const base = launcher(profile);
   // --node-args 用来试 V8 调参：每个 bridge 的边际成本基本就是 Node 自己的堆与启动开销，
   // 换运行时省不掉，调堆参数才可能省。放在脚本参数里是为了让"省了多少"可复算。
   const nodeArgs = argValue("node-args", "")
