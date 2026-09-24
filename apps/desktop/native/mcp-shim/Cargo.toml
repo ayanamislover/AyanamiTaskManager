@@ -18,6 +18,8 @@ path = "src/main.rs"
 # arbitrary_precision keeps a request id's numeric literal verbatim when it is echoed
 # back in an error response, instead of re-formatting it through f64.
 serde_json = { version = "1", default-features = false, features = ["std", "arbitrary_precision"] }
+# An unconnected socket, so SIO_TCP_INITIAL_RTO can be set before connecting (see http.rs).
+socket2 = "0.6"
 
 [build-dependencies]
 serde_json = "1"

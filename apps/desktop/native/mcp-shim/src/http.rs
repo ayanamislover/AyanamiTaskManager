@@ -31,9 +31,74 @@ pub enum Error {
     Body,
 }
 
-pub fn post(port: u16, path: &str, token: &str, body: &str) -> Result<Response, Error> {
+/// Connects to 127.0.0.1 the way libuv does.
+///
+/// After a RST, Windows retransmits the SYN twice at 500 ms intervals before it reports
+/// the refusal, so a plain connect to a closed loopback port takes about two seconds
+/// (measured: 2010 ms, against 0-1 ms for Node). libuv turns SYN retransmissions off for
+/// loopback connects with SIO_TCP_INITIAL_RTO; doing the same keeps the stale-descriptor
+/// retry as fast as it was in the JavaScript bridge.
+fn connect_loopback(port: u16) -> io::Result<TcpStream> {
+    use socket2::{Domain, Protocol, Socket, Type};
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    #[cfg(windows)]
+    disable_syn_retransmissions(&socket);
+    socket.connect_timeout(&address.into(), CONNECT_TIMEOUT)?;
+    Ok(socket.into())
+}
+
+#[cfg(windows)]
+fn disable_syn_retransmissions(socket: &socket2::Socket) {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawSocket;
+    // mstcpip.h: SIO_TCP_INITIAL_RTO = _WSAIOW(IOC_VENDOR, 17).
+    const SIO_TCP_INITIAL_RTO: u32 = 0x9800_0011;
+    const TCP_INITIAL_RTO_UNSPECIFIED_RTT: u16 = 0xFFFF;
+    const TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS: u8 = 0xFE;
+    #[repr(C)]
+    struct TcpInitialRtoParameters {
+        rtt: u16,
+        max_syn_retransmissions: u8,
+    }
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAIoctl(
+            socket: usize,
+            code: u32,
+            input: *const c_void,
+            input_len: u32,
+            output: *mut c_void,
+            output_len: u32,
+            returned: *mut u32,
+            overlapped: *mut c_void,
+            completion: *const c_void,
+        ) -> i32;
+    }
+    let parameters = TcpInitialRtoParameters {
+        rtt: TCP_INITIAL_RTO_UNSPECIFIED_RTT,
+        max_syn_retransmissions: TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS,
+    };
+    let mut returned = 0u32;
+    // SAFETY: a valid socket, an input buffer of the declared size, no output buffer, and
+    // a synchronous call (no OVERLAPPED). A failure only means the slow default path.
+    unsafe {
+        WSAIoctl(
+            socket.as_raw_socket() as usize,
+            SIO_TCP_INITIAL_RTO,
+            std::ptr::from_ref(&parameters).cast(),
+            std::mem::size_of::<TcpInitialRtoParameters>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        );
+    }
+}
+
+pub fn post(port: u16, path: &str, token: &str, body: &str) -> Result<Response, Error> {
+    let stream = connect_loopback(port).map_err(|error| {
         if error.kind() == io::ErrorKind::ConnectionRefused {
             Error::Refused
         } else {
@@ -274,6 +339,13 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
+        let started = std::time::Instant::now();
         assert!(matches!(post(port, "/mcp", "t", "{}"), Err(Error::Refused)));
+        // Without SIO_TCP_INITIAL_RTO this takes about two seconds on Windows.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "refusal took {elapsed:?}"
+        );
     }
 }
