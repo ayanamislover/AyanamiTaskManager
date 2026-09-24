@@ -13,6 +13,9 @@ output/
 .crossagent/
 .ayanami-task/
 .atm-test-data/
+# Cargo build output of native helpers. Kept here, not in a nested .gitignore:
+# prettier and eslint only honour the root file.
+/apps/desktop/native/*/target/
 
 # Local configuration and credentials
 .env

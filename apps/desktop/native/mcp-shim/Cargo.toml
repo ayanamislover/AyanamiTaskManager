@@ -1,0 +1,30 @@
+[package]
+name = "atm-mcp"
+# Placeholder. The product version embedded in the exe comes from the repository's
+# package.json (see build.rs), so release bumps never touch this file or Cargo.lock.
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+description = "AyanamiTaskManager MCP stdio bridge"
+license = "AGPL-3.0-only"
+authors = ["ayanami"]
+publish = false
+
+[[bin]]
+name = "atm-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# arbitrary_precision keeps a request id's numeric literal verbatim when it is echoed
+# back in an error response, instead of re-formatting it through f64.
+serde_json = { version = "1", default-features = false, features = ["std", "arbitrary_precision"] }
+
+[build-dependencies]
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
