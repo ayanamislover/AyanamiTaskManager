@@ -534,4 +534,21 @@ describe("原生 shim 优先", () => {
       expect(server.env ?? {}).toEqual({});
     }
   });
+
+  // Agent 读着 Guide 手工配置时，写出来的东西必须和 ATM 自己安装的一模一样。
+  it("Guide 与便携说明里的手工配置就是 mcpLaunch 在装了 shim 时的产出", () => {
+    const shimPath = `%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\resources\\${MCP_SHIM_FILENAME}`;
+    const guide = readFileSync("ATM_AGENT_GUIDE.md", "utf8");
+    const commands = guide.match(/^claude mcp add-json .*$/gmu) ?? [];
+    expect(commands).toHaveLength(3);
+    for (const [index, profile] of ["core", "memory", "actions"].entries()) {
+      const json = /'(\{.*\})'/u.exec(commands[index] ?? "")?.[1] ?? "{}";
+      expect(JSON.parse(json)).toEqual({ command: "<atm-mcp.exe>", args: ["--profile", profile] });
+    }
+    expect(guide).toContain(`\`<atm-mcp.exe>\` 是 \`${shimPath}\``);
+    expect(readFileSync("docs/portable-usage.md", "utf8")).toContain(`\`${shimPath}\``);
+    expect(readFileSync("docs/troubleshooting.md", "utf8")).toContain(
+      `使用 \`${shimPath}\`，参数只有 \`--profile <name>\`，不带环境变量`,
+    );
+  });
 });

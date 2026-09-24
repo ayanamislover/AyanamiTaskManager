@@ -68,7 +68,10 @@ ATM 的最后一条心跳在 28 秒前，退出链没走完，下次启动就记
 
 - 桌面设置中重新运行“连接测试”；
 - 确认配置使用 packaged stdio bridge；手工复制的 Streamable HTTP 配置只对当前运行实例有效；
-- Windows packaged stdio 必须使用 `resources/mcp-stdio.cjs` 配合 `ELECTRON_RUN_AS_NODE=1`，不能直接把 GUI EXE 当 stdio；
+- Windows packaged stdio 使用 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe`，参数只有 `--profile <name>`，不带环境变量；不能直接把 GUI EXE 当 stdio；
+- 若 `atm-mcp.exe` 不见了（常见于被杀毒软件隔离），先从隔离区还原，再重启 ATM；ATM 启动时发现它缺失会把 Agent 配置改回 `AyanamiTaskManager.exe` + `mcp-stdio.cjs` + `ELECTRON_RUN_AS_NODE=1` 的旧方式，还原后下次启动再改回来。改完配置需要重启 Agent 客户端；
+- bridge 的 stderr 里 `ATM_RUNTIME_UNAVAILABLE` 表示 45 秒内没等到 daemon 发布，`ATM_RUNTIME_DESCRIPTOR_INVALID` 表示 `runtime/daemon.json` 内容不合法（不会等待），`MCP_PROFILE_INVALID` 表示 `--profile` 写错；
+- 设置了 `ATM_DATA_DIR` 时，bridge 读取的是该目录下的 `runtime/daemon.json`，须与桌面端一致；
 - `401` 表示 token 错误或已随 daemon 重启过期；优先重载 stdio bridge，手工 HTTP 配置需从设置重新复制；
 - `SESSION_CLOSED` 表示旧 Session 已结束，应重新 `atm_begin`；
 - `SESSION_NOT_RETIRED` 表示 predecessor 没有显式退休，不可 resume。

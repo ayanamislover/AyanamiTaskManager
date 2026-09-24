@@ -18,7 +18,9 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 
 本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token，并原子发布数据目录下的 `runtime/daemon.json`；旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。自动安装配置使用会动态重读发现文件的 stdio bridge；完整威胁边界见 [security-model.md](./security-model.md)。
 
-便携包的 stdio MCP 通过随包的 `resources/mcp-stdio.cjs` 启动；Windows GUI EXE 本身没有可用 stdin，因此不要把桌面 EXE 直接当 stdio 程序。
+stdio MCP 由随包的原生转发程序 `resources\atm-mcp.exe` 承担：它只读 `runtime/daemon.json`、把每行 JSON-RPC 转发到本机 daemon，每个进程私有内存不到 1 MB，不需要任何环境变量。写进 Agent 配置的路径是数据目录下的版本无关链接 `current\resources\atm-mcp.exe`，升级后旧配置依然有效；三个 Profile 各起一个进程，参数只有 `--profile core|memory|actions`。daemon 未运行时它会唤醒一次同目录的桌面程序并等待发布。
+
+`atm-mcp.exe` 缺失时（开发态、旧安装、被杀毒软件隔离），ATM 回落到旧方式：用 `ELECTRON_RUN_AS_NODE=1` 把桌面 EXE 当 Node 运行 `mcp-stdio.cjs`，协议完全相同，只是每个进程约 30 MB。启动时的配置修复会在两种方式之间自动迁移。Windows GUI EXE 本身没有可用 stdin，因此不要把桌面 EXE 直接当 stdio 程序。
 
 ## 标准 Session 流程
 
