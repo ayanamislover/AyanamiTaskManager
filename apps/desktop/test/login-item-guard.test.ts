@@ -9,9 +9,11 @@ const smoke = "R:\\repo\\output\\packaged-smoke-data\\current\\AyanamiTaskManage
 
 describe("packaged smoke must not damage the real autostart entry", () => {
   /**
-   * Observed 2026-09-23: the Run value was gone while StartupApproved still listed the
-   * app. The smoke's app instance toggles autostart on (overwriting the real value with
-   * its isolated path) and restores "off" (deleting the value outright).
+   * The smoke's app instance toggles autostart on (overwriting the real value with its
+   * isolated path) and restores "off" (deleting the value outright); the value name is
+   * shared with the real install. The entry found missing on 2026-09-23 was at least
+   * partly removed by Kaspersky remediating a PDM detection, not by the smoke alone
+   * (ATM-R-228). The mechanism follows from the shared value name and stands on its own.
    */
   it("puts back an entry the smoke overwrote and then deleted", () => {
     expect(loginItemRestorePlan({ AyanamiTaskManager: production }, {})).toEqual([
