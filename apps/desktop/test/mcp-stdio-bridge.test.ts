@@ -77,8 +77,40 @@ afterEach(async () => {
       .splice(0)
       .map((server) => new Promise<void>((resolveClose) => server.close(() => resolveClose()))),
   ]);
-  for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
+  // A woken recorder may still be running from its fixture directory for a moment after it
+  // wrote its record; on Windows deleting it is EPERM. Retry, and never let one directory
+  // abort the loop: that is how a data directory once leaked into %TEMP%.
+  const failures: unknown[] = [];
+  for (const directory of temporary.splice(0)) {
+    try {
+      await removeFixture(directory);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0)
+    throw new AggregateError(
+      failures,
+      `fixture cleanup failed: ${failures.map(String).join("; ")}`,
+    );
 });
+
+/**
+ * rmSync with retries done here: Node 24's native recursive rm reports a busy file as
+ * EPERM and does not honour maxRetries for it, so the option alone gives up at once.
+ */
+async function removeFixture(directory: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const { code, message } = error as NodeJS.ErrnoException;
+      if (attempt >= 50 || !/\b(?:EPERM|EBUSY|ENOTEMPTY)\b/u.test(code ?? message)) throw error;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+  }
+}
 
 function runtimeDescriptor(endpoint: string, token: string): Record<string, unknown> {
   return {
