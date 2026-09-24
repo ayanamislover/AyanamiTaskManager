@@ -236,3 +236,39 @@ export async function observeMcpBridges(input: {
     bridges: observations,
   };
 }
+
+/**
+ * 同时观测多种 bridge 可执行文件并合并。
+ *
+ * 换成原生 shim 之后，已经开着的 Agent 会话仍握着旧配置（Electron-as-node），直到它们
+ * 重启；只看新 command 会把这些进程漏掉，统计看起来「省了」其实是没数到。同一路径只查一次。
+ */
+export async function observeMcpBridgeCommands(input: {
+  bridgeCommands: readonly string[];
+  now?: () => Date;
+  execute?: Execute;
+}): Promise<McpBridgeObservation> {
+  const seen = new Set<string>();
+  const commands = input.bridgeCommands.filter((command) => {
+    const key = command.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const observations = await Promise.all(
+    commands.map((bridgeCommand) =>
+      observeMcpBridges({
+        bridgeCommand,
+        ...(input.now ? { now: input.now } : {}),
+        ...(input.execute ? { execute: input.execute } : {}),
+      }),
+    ),
+  );
+  const bridges = observations.flatMap((observation) => observation.bridges);
+  return {
+    sampledAt: observations[0]?.sampledAt ?? (input.now ?? (() => new Date()))().toISOString(),
+    metric: "PRIVATE_BYTES",
+    totalPrivateBytes: bridges.reduce((total, bridge) => total + bridge.privateBytes, 0),
+    bridges,
+  };
+}

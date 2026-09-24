@@ -13,6 +13,9 @@ import {
 
 export const MCP_STDIO_FILENAME = "mcp-stdio.cjs";
 
+/** 原生 stdio shim，随安装目录的 resources 一起发布（apps/desktop/native/mcp-shim）。 */
+export const MCP_SHIM_FILENAME = "atm-mcp.exe";
+
 /** 数据根下这个目录链接始终指向当前版本的安装目录，名字永远不变。 */
 export const MCP_RUNTIME_LINK = "current";
 
@@ -57,8 +60,31 @@ export function mcpStdioHttpPath(args: readonly string[]): string {
  * `process.execPath` 就是链接路径。
  *
  * 建不出链接时回落到真实 exe——那就退回 1.0.12 的行为（靠启动时修复），是下限不是缺陷。
+ *
+ * **优先用原生 shim。** 旧写法每个 MCP server 都把 215 MB 的 Electron 当 Node 跑一份
+ * （实测私有内存约 30 MB、首包约 115 ms），而它只做逐行转发；每个 Agent 会话起三个。
+ * shim 协议与 `mcp-stdio.cjs` 完全一致（共享契约测试钉住），私有内存不到 1 MB。它走同一个
+ * 版本无关链接：`current\resources\atm-mcp.exe`，并由链接下的 `..\AyanamiTaskManager.exe`
+ * 唤醒桌面。不需要任何环境变量；`args` 必须是空数组而不是省略——agent-config 在缺省时会补
+ * `--mcp-stdio`，那是给桌面 exe 的旧开关。
+ *
+ * shim 不在（开发态、旧安装、或被杀毒软件隔离）就回落到 Electron-as-node 的 JS 桥：
+ * 下次启动时的过期修复会把 Agent 配置自动改过去，不会降级成连不上。
  */
 export function mcpLaunch(input: { execPath: string; dataDir: string }): McpLaunch {
+  const linkedRoot = join(input.dataDir, MCP_RUNTIME_LINK);
+  const linked = join(linkedRoot, basename(input.execPath));
+  const installRoot = existsSync(linked) ? linkedRoot : dirname(input.execPath);
+  const shim = join(installRoot, "resources", MCP_SHIM_FILENAME);
+  if (existsSync(shim)) return { command: shim, args: [], env: {} };
+  return mcpNodeBridgeLaunch(input);
+}
+
+/**
+ * Electron-as-node 跑 `mcp-stdio.cjs` 的旧启动方式。shim 缺失时的回落，也是桥进程观测
+ * 在切换期间要一并认出的另一种进程：已开着的会话仍握着旧配置，直到它们重启。
+ */
+export function mcpNodeBridgeLaunch(input: { execPath: string; dataDir: string }): McpLaunch {
   const linked = join(input.dataDir, MCP_RUNTIME_LINK, basename(input.execPath));
   return {
     command: existsSync(linked) ? linked : input.execPath,
