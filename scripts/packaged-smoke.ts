@@ -17,7 +17,12 @@ import {
   buildAgentDocumentationManifest,
   compareAgentDocumentationManifests,
 } from "../apps/desktop/src/agent-documentation.js";
-import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
+import {
+  MCP_RUNTIME_LINK,
+  MCP_SHIM_FILENAME,
+  mcpLaunch,
+  type McpProfile,
+} from "../apps/desktop/src/mcp-launch.js";
 import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
 
 type Runtime = {
@@ -868,12 +873,19 @@ try {
     !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
     launchPath,
   );
+  // 包里带着原生 shim，配置就必须指向它。回落到 Electron-as-node 也能连通，下面的 MCP
+  // 用例照样全绿——所以只能在这里按路径与参数钉死，否则 shim 没生效也看不出来。
+  check(
+    "MCP 启动路径是链接下的原生 shim",
+    launchPath === join(dataDir, MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME),
+    launchPath,
+  );
   for (const [profile, launch] of Object.entries(recordedAgentProfiles)) {
     check(`${profile} 配置使用版本无关启动路径`, launch.command === launchPath, launch.command);
     check(
-      `${profile} 配置写入静态 Profile 参数与 Node bridge 环境`,
-      launch.args.slice(-2).join(" ") === `--profile ${profile}` &&
-        launch.env.ELECTRON_RUN_AS_NODE === "1",
+      `${profile} 配置只带静态 Profile 参数、不带 Node bridge 环境`,
+      launch.args.join(" ") === `--profile ${profile}` &&
+        launch.env.ELECTRON_RUN_AS_NODE === undefined,
       JSON.stringify(launch),
     );
   }

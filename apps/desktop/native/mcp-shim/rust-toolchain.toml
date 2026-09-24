@@ -1,0 +1,6 @@
+# Pinned so that CI, the release validation run and a developer machine build the same
+# binary. rustup installs this toolchain on first use in this directory.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

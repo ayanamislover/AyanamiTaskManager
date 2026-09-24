@@ -107,6 +107,25 @@ describe("GitHub Actions runtime policy", () => {
     expect(ci).toContain("run: pnpm install --frozen-lockfile");
   });
 
+  // pnpm test 构建并检查原生 shim，打包也要构建它；两条 Windows 流水线都得先装上固定的工具链。
+  it("installs the pinned Rust toolchain before the native shim is built", () => {
+    for (const name of ["ci.yml", "windows-release-validation.yml"]) {
+      const source = readFileSync(resolve(workflowDirectory, name), "utf8");
+      expect(source, name).toMatch(
+        /working-directory: apps\/desktop\/native\/mcp-shim\s+run: rustup toolchain install/u,
+      );
+      expect(source.indexOf("rustup toolchain install"), name).toBeLessThan(
+        source.indexOf(name === "ci.yml" ? "run: pnpm test" : "run: pnpm release --full"),
+      );
+    }
+    const toolchain = readFileSync(
+      resolve(root, "apps/desktop/native/mcp-shim/rust-toolchain.toml"),
+      "utf8",
+    );
+    expect(toolchain).toMatch(/^channel = "\d+\.\d+\.\d+"$/mu);
+    expect(toolchain).toContain('components = ["clippy", "rustfmt"]');
+  });
+
   it("keeps the full test gate bounded on Windows runners", () => {
     const packageJson = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
       scripts?: Record<string, string>;

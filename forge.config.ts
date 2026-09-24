@@ -21,6 +21,8 @@ const config: ForgeConfig = {
       "docs",
       "integrations",
       "apps/desktop/resources/mcp-stdio.cjs",
+      // Native MCP stdio shim, built by scripts/mcp-shim-build.ts before packaging.
+      "apps/desktop/native/mcp-shim/target/release/atm-mcp.exe",
     ],
     // app.asar is a runtime image, not a repository archive. Keep only the
     // compiled desktop entry, migrations, production dependencies, package

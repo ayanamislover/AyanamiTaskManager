@@ -32,6 +32,11 @@ jobs:
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
 
+      # Packaging builds the native MCP shim; the version comes from its rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        working-directory: apps/desktop/native/mcp-shim
+        run: rustup toolchain install
+
       - name: Install the Playwright browser
         run: pnpm exec playwright install chromium
 

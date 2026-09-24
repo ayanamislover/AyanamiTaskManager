@@ -2,9 +2,11 @@ import { api } from "@electron-forge/core";
 import { extractFile, listPackage } from "@electron/asar";
 import type { Dirent } from "node:fs";
 import { createReadStream, existsSync } from "node:fs";
-import { readdir, rmdir } from "node:fs/promises";
+import { readdir, readFile, rmdir } from "node:fs/promises";
 import { join } from "node:path";
+import { buildMcpShim } from "./mcp-shim-build.js";
 import {
+  assertMcpShimVersionResource,
   assertPublishedLogoBytes,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
@@ -52,12 +54,18 @@ export async function assertPackagedApplicationContents(dir: string): Promise<vo
     (entry) => entry.isDirectory() && entry.name.startsWith("AyanamiTaskManager-"),
   );
   if (candidates.length === 0) throw new Error("PACKAGED_APPLICATION_NOT_FOUND");
+  const { version } = JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as {
+    version: string;
+  };
   for (const candidate of candidates) {
     const resourcesPath = join(out, candidate.name, "resources");
     const asarPath = join(resourcesPath, "app.asar");
     if (existsSync(join(resourcesPath, "logo.png"))) {
       throw new Error("PACKAGED_CONTENT_LOOSE_BRAND_ASSET");
     }
+    const shim = join(resourcesPath, "atm-mcp.exe");
+    if (!existsSync(shim)) throw new Error("PACKAGED_MCP_SHIM_MISSING");
+    assertMcpShimVersionResource(await readFile(shim), version);
     const entries = listPackage(asarPath, { isPack: false });
     const forbidden = findForbiddenPackagedEntries(entries);
     if (forbidden.length > 0) {
@@ -119,6 +127,7 @@ export async function prunePackagedAgentResourcePlaceholders(dir: string): Promi
 }
 
 export async function packageApplication(dir: string): Promise<void> {
+  buildMcpShim(dir);
   await api.package({ dir, interactive: false });
   await prunePackagedAgentResourcePlaceholders(dir);
   await assertPackagedApplicationContents(dir);

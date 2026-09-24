@@ -92,6 +92,8 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "package.json",
       "pnpm-lock.yaml",
       "apps/desktop/src/",
+      // 原生 MCP shim 随包安装，Agent 配置指向的就是它。
+      "apps/desktop/native/",
       "migrations/",
     ],
   },
