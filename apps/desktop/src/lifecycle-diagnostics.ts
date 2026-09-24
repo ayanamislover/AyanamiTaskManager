@@ -14,10 +14,12 @@ import { join } from "node:path";
 type LifecycleEvent =
   | "startup"
   | "previous.unclean"
+  | "previous.session-end"
   | "ready"
   | "heartbeat"
   | "exception"
   | "bootstrap.failed"
+  | "session-end"
   | "shutdown.begin"
   | "shutdown.complete"
   | "shutdown.failed"
@@ -142,7 +144,12 @@ export function createLifecycleDiagnostics(
       if (statSync(statePath).size <= 4096) {
         const previous = JSON.parse(readFileSync(statePath, "utf8")) as Partial<State> | null;
         if (previous && previous.clean === false && typeof previous.runId === "string") {
-          record("previous.unclean", {
+          // Windows ends the session before the quit chain can finish, so the last
+          // marker a shutdown leaves is "session-end", not "exit". That is an explained
+          // termination; calling it unclean once sent an investigation after a killer
+          // that never existed. Every later record overwrites the marker (the heartbeat
+          // does so within a minute), so a kill after a cancelled shutdown still counts.
+          record(previous.event === "session-end" ? "previous.session-end" : "previous.unclean", {
             previousRunId: previous.runId,
             ...(typeof previous.pid === "number" ? { previousPid: previous.pid } : {}),
             ...(typeof previous.event === "string" ? { previousEvent: previous.event } : {}),

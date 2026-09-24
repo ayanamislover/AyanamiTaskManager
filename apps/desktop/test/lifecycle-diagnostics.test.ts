@@ -97,6 +97,70 @@ describe("bounded desktop lifecycle diagnostics", () => {
     expect(record).not.toHaveProperty("cause");
   });
 
+  /**
+   * Observed 2026-09-23 18:15 local: the user powered the machine off normally, the last
+   * heartbeat landed 28s earlier, and the next start called that previous.unclean — which
+   * reads as "something killed ATM" and misdirected the disappearance investigation.
+   */
+  it("treats a Windows session end as an explained termination, not an unclean one", () => {
+    const dir = fixture();
+    const first = createLifecycleDiagnostics(dir, "9.9.9");
+    first.start({ background: true, agentWake: false });
+    first.record("heartbeat", { rss: 123456 });
+    first.record("session-end");
+    createLifecycleDiagnostics(dir, "9.9.9").start({ background: false, agentWake: false });
+    const events = lines(dir).map((line) => line.event);
+    expect(events).not.toContain("previous.unclean");
+    const record = lines(dir).find((line) => line.event === "previous.session-end");
+    // The evidence still has to be there, only the verdict changes.
+    expect(record.previousEvent).toBe("session-end");
+    expect(record.previousRunId).toBe(lines(dir)[0].runId);
+    expect(record.previousPid).toBe(process.pid);
+    expect(typeof record.previousAt).toBe("string");
+  });
+
+  it("stops excusing the run once anything happens after the session-end marker", () => {
+    const dir = fixture();
+    const first = createLifecycleDiagnostics(dir, "9.9.9");
+    first.start({ background: true, agentWake: false });
+    first.record("session-end");
+    // Shutdown was cancelled, the process kept running — and was then killed for real.
+    first.record("heartbeat", { rss: 1 });
+    createLifecycleDiagnostics(dir, "9.9.9").start({ background: false, agentWake: false });
+    const events = lines(dir).map((line) => line.event);
+    expect(events).toContain("previous.unclean");
+    expect(events).not.toContain("previous.session-end");
+  });
+
+  it("the desktop subscribes every window to session-end and writes it synchronously", () => {
+    const source = readFileSync(join(process.cwd(), "apps/desktop/src/main.ts"), "utf8");
+    // Electron puts session-end on the window, so the subscription has to ride on window
+    // creation — app.on("session-end") silently never fires. And because Windows kills the
+    // process right after the notification, anything deferred to a microtask, a timer or an
+    // await would never reach the disk: pin the whole handler body, not just its presence.
+    expect(source).toMatch(
+      /app\.on\("browser-window-created", \(_event, window\) => \{\s*window\.on\("session-end", \(\) => lifecycle\.record\("session-end"\)\);\s*\}\);/u,
+    );
+  });
+
+  it("session-end is a window event in this Electron, not an app event", () => {
+    // If a future Electron moves it onto app, the wiring above stops firing without any
+    // type error, so the assumption it rests on is pinned here rather than in a comment.
+    const typings = readFileSync(
+      join(process.cwd(), "node_modules/electron/electron.d.ts"),
+      "utf8",
+    );
+    const appInterface = typings.slice(
+      typings.indexOf("interface App extends"),
+      typings.indexOf("class BaseWindow extends"),
+    );
+    expect(appInterface).toContain("'browser-window-created'");
+    expect(appInterface).not.toContain("'session-end'");
+    expect(typings.slice(typings.indexOf("class BaseWindow extends"))).toContain(
+      "on(event: 'session-end'",
+    );
+  });
+
   it("bounds rotation including a single retained file", () => {
     for (const files of [1, 3]) {
       const dir = fixture();

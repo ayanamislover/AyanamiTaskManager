@@ -27,9 +27,11 @@ pnpm atm doctor
 
 - `startup` / `ready`：本次进程及启动方式；每分钟 `heartbeat` 记录主进程 RSS/JS heap 数值与最后存活时间。
 - `shutdown.begin` / `shutdown.complete` / `exit`：正常退出链。退出码为 0 且服务关闭成功，才记录 `clean=true`。
+- `session-end`：Windows 正在结束会话（关机、重启或注销）。系统随后很快终止进程，退出链往往来不及走完，所以这一条是收到通知时同步写下的最后标记。
 - `exception` / `bootstrap.failed`：异常类型、错误码与消息指纹；不保存原始异常消息、堆栈、令牌或任务正文，也不吞掉未捕获异常。
 - `renderer.gone` / `child.gone` / `renderer.load-failed`：Electron 的原因类别和退出码；不保存加载 URL。
 - `previous.unclean`：下一次启动发现上个主实例缺少正常退出记录。可能是外部终止、断电或崩溃，**它本身不是根因**。日志不可写或磁盘已满时也可能缺少证据。
+- `previous.session-end`：上个主实例的最后标记是 `session-end`，即它是随 Windows 关机/注销结束的。这是**已解释**的终止，不记 `previous.unclean`；证据字段（`previousRunId`、`previousPid`、`previousAt`）保持一致，只是结论不同。若关机被取消、进程继续运行，之后任何一条记录（最迟一分钟后的 `heartbeat`）都会覆盖该标记，真正的外部终止仍然记 `previous.unclean`。
 
 提供版本、故障的大致时刻和上述日志即可；不要附带 `runtime/daemon.json`（包含本地令牌）或项目数据库。诊断文件写入失败不会阻止应用运行。此记录功能不能倒推安装前的退出原因，也不等于修复了导致退出的问题。
 
@@ -48,6 +50,12 @@ PowerShell 去注册并运行计划任务）与恶意软件的持久化手法无
 
 诊断日志 `logs/lifecycle.ndjson` 的 `startup` 事件记录了每次启动的 `background` 与 `agentWake`，
 `previous.unclean` 记录上一次是否非正常结束。排查实例消失时先看这两项，再下结论。
+
+注意 `previous.unclean` 曾经把**正常关机**也算在内：2026-09-23 18:15 本地用户正常关机，
+ATM 的最后一条心跳在 28 秒前，退出链没走完，下次启动就记成了 `previous.unclean`——
+读起来像"有东西杀了它"，实际上没有。现已改为在收到 Windows 会话结束通知时同步写下
+`session-end`，下次启动据此记 `previous.session-end`。因此**早于该修复的历史日志里，
+`previous.unclean` 不能直接当作异常终止的证据**，要另行核对系统日志的关机事件（1074 / 6006）。
 
 运行描述符（`runtime/daemon.json`）在 ATM 被强制结束后会残留，其中的 PID 可能已被别的进程复用。
 桥接因此不只看 PID：向记录的端点连接被拒时，视为该实例已失效，唤醒一次并等待新实例发布后重试

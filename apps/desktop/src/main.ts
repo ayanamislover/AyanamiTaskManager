@@ -30,6 +30,14 @@ process.on("uncaughtExceptionMonitor", (error, origin) => {
 });
 process.on("exit", (code) => lifecycle.finish(code, cleanShutdown && code === 0));
 app.on("quit", (_event, code) => lifecycle.finish(code, cleanShutdown && code === 0));
+// Electron surfaces the Windows session-end notification on the window, not on app, and
+// powerMonitor's "shutdown" is linux/darwin only. Windows kills the process right after
+// the notification and does not guarantee before-quit, so the marker is written here and
+// synchronously; without it the next start reports a normal shutdown as previous.unclean.
+// The window exists even when ATM starts hidden into the tray, and closing it only hides.
+app.on("browser-window-created", (_event, window) => {
+  window.on("session-end", () => lifecycle.record("session-end"));
+});
 app.on("child-process-gone", (_event, details) => {
   lifecycle.record("child.gone", {
     reason: details.reason,
