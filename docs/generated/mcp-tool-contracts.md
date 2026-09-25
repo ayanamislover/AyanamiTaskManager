@@ -6,7 +6,7 @@ Surface: `v5`
 
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
-| core | 7913 | `d2cef6a6c9b4a6346371f12e24d644b08b10c28be603ce413f6d1f8133831645` |
+| core | 8016 | `ce2bce04ec26f73aad31acde87dfe8de49950e6df5d073daa0597ecab270ddf9` |
 | memory | 9180 | `aba2e761a67f8b1a96dcdc8af6aa9c3cc6ef89544c115b559d63b270f5eec1f9` |
 | actions | 7975 | `2e20175aabf65c942d374929db2758018cc804155bba4b72069064b444aed2b9` |
 
@@ -15,7 +15,7 @@ Surface: `v5`
 | core | `atm_begin` | 开始或恢复会话并返回 brief。开工只调这一次，直接用返回的 brief。 | false | false | `021d4467dcbd346b` |
 | core | `atm_brief` | 重新取回 working set。仅在上下文压缩、长时间离开或明确恢复时调用。 | true | false | `7422e81af5f92132` |
 | core | `atm_task_list` | 分页列任务。view=core\|context\|full\|reconcile。field_mask 语义同 atm_task_get。 | true | false | `a7bec8288383d879` |
-| core | `atm_task_get` | 读单个任务。view=core\|context\|full。field_mask 在 view 已有的字段内过滤，越界字段会回显在 ignored_fields。 | true | false | `705783aac353593c` |
+| core | `atm_task_get` | 读单个任务。view=core\|context\|full。field_mask 在 view 已有的字段内过滤，越界字段会回显在 ignored_fields。last_progress=N 附带最近 N 条进度。 | true | false | `00c8c6eaef381b1b` |
 | core | `atm_task_create` | 批量创建任务与关系。 | false | false | `a952231938cc2768` |
 | core | `atm_end` | 结束会话并交接。outcome=completed\|paused\|blocked\|cancelled\|error\|retired，全小写。summary 上限 500 个 code point。 | false | false | `a5e10baa5437bb15` |
 | memory | `atm_progress_add` | 写任务或项目进度。scope=task\|project；health=ON_TRACK\|AT_RISK\|OFF_TRACK\|UNKNOWN，仅限 project；percent 仅限 task。task 的非空 blocker 会转为 BLOCKED 并清除等待对象；普通说明请写 summary。summary 上限 500 个 code point。 | false | false | `65a68de06d4cfcc8` |

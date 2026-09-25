@@ -68,7 +68,7 @@ describe("MCP static profiles", () => {
       // core 与 actions 改为完全内联后各涨了一些：$defs 去重虽然更省字节，但客户端
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
-      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7913, framingBytes: 7 });
+      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 8016, framingBytes: 7 });
       expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 9180, framingBytes: 9 });
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 7975, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);

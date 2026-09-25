@@ -406,6 +406,9 @@ export class AyanamiTaskService {
     return readQueries.getRecord(this.#runtime, projectCode, reference);
   }
 
+  async recentTaskProgress(projectCode: string, taskKey: string, limit: number) {
+    return readQueries.recentTaskProgress(this.#runtime, projectCode, taskKey, limit);
+  }
   async getProgressUpdate(projectCode: string, id: string) {
     return readQueries.getProgressUpdate(this.#runtime, projectCode, id);
   }

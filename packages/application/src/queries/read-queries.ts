@@ -88,6 +88,14 @@ export async function getRecord(
   return (await runtime.repository(projectCode)).getRecord(reference);
 }
 
+export async function recentTaskProgress(
+  runtime: ApplicationServiceRuntime,
+  projectCode: string,
+  taskKey: string,
+  limit: number,
+) {
+  return (await runtime.repository(projectCode)).recentProgressForTask(taskKey, limit);
+}
 export async function getProgressUpdate(
   runtime: ApplicationServiceRuntime,
   projectCode: string,

@@ -94,7 +94,7 @@ task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等�
 | `atm_progress_add` | `summary` ≤ 500 code point；`completed` / `evidence` / `next` 各 ≤ 20 项。`scope=task\|project`（`health` 只用于 project，`percent` 只用于 task）。 |
 | `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**。大小写没有通用规律（同一张表里 `kind` / `importance` 是大写，`scope` / `view` / `operation` 是小写），逐个字段照本表写，不要从上一个调用类推。 |
 | `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。 |
-| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
+| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`atm_task_get` 传 `last_progress=N`（1–10）可一次附带本任务最近 N 条进度（新的在前），不传时响应不变。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
 | `atm_delta` | 恢复时手里没有上次的 seq，就省略 `since_seq`：返回最近 `limit` 条（`window: "latest"`），响应里的 `since_seq` 可直接用于之后的增量读取。 |
 | `atm_search` | `session` 只能与 `op_id` 精确回查一起传。`query` 按空白拆词，每个词都须命中（AND），ID 片段如 `D-398` 按 key 匹配；双引号括起的一段按相邻短语匹配。0 命中时看响应里的 `next_step`。 |
 

@@ -194,6 +194,20 @@ export class RecordReadModel {
     return this.progressUpdateView(row);
   }
 
+  /** 某任务最近的 limit 条进度，新的在前。ULID id 在同一毫秒内也保持写入顺序。 */
+  recentProgressForWorkItem(workItemId: string, limit: number): ProgressUpdateView[] {
+    return (
+      this.sqlite
+        .prepare(
+          `SELECT progress.*, item.local_no FROM progress_updates progress
+           JOIN work_items item ON item.id = progress.work_item_id
+           WHERE progress.work_item_id = ?
+           ORDER BY progress.created_at DESC, progress.id DESC
+           LIMIT ?`,
+        )
+        .all(workItemId, limit) as any[]
+    ).map((row) => this.progressUpdateView(row));
+  }
   private relatedRecordKeys(row: any): string[] {
     if (!row.topic && !row.subject_key) return [];
     return (

@@ -482,6 +482,9 @@ export class ProjectRepository {
     return this.#recordReads.getProgressUpdate(id);
   }
 
+  recentProgressForTask(taskKey: string, limit: number): ProgressUpdateView[] {
+    return this.#recordReads.recentProgressForWorkItem(this.rowForTaskKey(taskKey).id, limit);
+  }
   getOperationTrace(opId: string, sessionId?: string | null): any {
     return this.#activityReads.getOperationTrace(opId, sessionId);
   }
