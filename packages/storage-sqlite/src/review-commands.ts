@@ -15,6 +15,95 @@ import { TaskReadModel } from "./task-read-model.js";
 import { WorkItemMaintenance } from "./work-item-maintenance.js";
 import { resolveStoredWorkItemOperation } from "./work-item-operation.js";
 
+// 这两个错误的恢复动作是「换一个 Session 身份」：重新 atm_begin 带 role=REVIEWER，
+// 或先由原领取者 release 再从 reviewer Session claim。调用方猜不出来，只能试，
+// 所以 details 直接写出失败的是哪一条、下一步调哪个工具（ATM-T-0411）。
+
+function reviewerRequiredRecovery(
+  session: { role: string; agent_id: string; connection_state: string },
+  actorId: string,
+) {
+  if (session.role !== "REVIEWER") {
+    return {
+      reason: "ROLE_NOT_REVIEWER",
+      session_role: session.role,
+      recovery: {
+        action: "begin_reviewer_session",
+        steps: [
+          "atm_begin 以 role=REVIEWER 开一个新 Session（agent_id 用评审方自己的，不要沿用作者的）",
+          "用新 Session 对 Review 任务 atm_task_patch claim、start",
+          "用新 Session 重新提交 review_submit",
+        ],
+        begin_arguments: { role: "REVIEWER" },
+      },
+    };
+  }
+  // 角色对了却仍失败，只剩 agent 不符或 Session 不在线。经 MCP 调用时两者都会在更早的
+  // Session 校验里被拦下，这里只兜底 REST 等直连路径，给出事实与统一的恢复方向。
+  return {
+    reason: "SESSION_IDENTITY_INVALID",
+    session_agent_id: session.agent_id,
+    actor_agent_id: actorId,
+    connection_state: session.connection_state,
+    recovery: {
+      action: "begin_reviewer_session",
+      steps: ["atm_begin 以 role=REVIEWER、评审方自己的 agent_id 开启或恢复 Session", "重新提交"],
+      begin_arguments: { role: "REVIEWER" },
+    },
+  };
+}
+
+function reviewIdentityRecovery(
+  reviewTask: {
+    assignee_agent_id: string | null;
+    claimed_by_session_id: string | null;
+    claim_lease_until?: string | null;
+  },
+  reviewTaskKey: string,
+  sessionId: string,
+) {
+  const owner = reviewTask.claimed_by_session_id;
+  const facts = {
+    claimed_by_session_id: owner,
+    assignee_agent_id: reviewTask.assignee_agent_id,
+    claim_lease_until: reviewTask.claim_lease_until ?? null,
+  };
+  if (!owner) {
+    return {
+      ...facts,
+      reason: "REVIEW_TASK_UNCLAIMED",
+      recovery: {
+        action: "claim_review_task",
+        steps: [
+          `当前 Session（${sessionId}）对 ${reviewTaskKey} 执行 atm_task_patch claim、start`,
+          "重新提交 review_submit",
+        ],
+      },
+    };
+  }
+  const leaseExpired =
+    typeof reviewTask.claim_lease_until === "string" && reviewTask.claim_lease_until < nowIso();
+  return {
+    ...facts,
+    reason: "REVIEW_TASK_CLAIMED_BY_OTHER_SESSION",
+    recovery: leaseExpired
+      ? {
+          action: "take_over_stale_claim",
+          steps: [
+            `原领取 Session 的租约已过期：当前 Session 对 ${reviewTaskKey} 执行 claim，并带 takeover_stale:true`,
+            "start 后重新提交 review_submit",
+          ],
+        }
+      : {
+          action: "transfer_review_claim",
+          steps: [
+            `由原领取 Session（${owner}）对 ${reviewTaskKey} 执行 atm_task_patch release`,
+            `当前 Session（${sessionId}）claim、start 后重新提交 review_submit`,
+          ],
+        },
+  };
+}
+
 export type ReviewCandidateHash = { name: string; value: string };
 
 export type ReviewSubmissionView = {
@@ -381,7 +470,10 @@ export class ReviewCommands {
         ) {
           throw new AtmError("REVIEWER_REQUIRED", {
             message: `当前 Session 不具备 Reviewer 身份：${actor.sessionId}`,
-            details: { session_id: actor.sessionId },
+            details: {
+              session_id: actor.sessionId,
+              ...reviewerRequiredRecovery(session, actor.id),
+            },
           });
         }
         const request = this.reviewRequestRow(normalizedInput.requestKey);
@@ -434,7 +526,11 @@ export class ReviewCommands {
         ) {
           throw new AtmError("REVIEW_IDENTITY_MISMATCH", {
             message: `Reviewer 身份与 Review WorkItem 领取者不匹配：${reviewTaskKey}`,
-            details: { task_key: reviewTaskKey, session_id: actor.sessionId },
+            details: {
+              task_key: reviewTaskKey,
+              session_id: actor.sessionId,
+              ...reviewIdentityRecovery(reviewTask, reviewTaskKey, actor.sessionId),
+            },
           });
         }
         const expectedHashes = json<ReviewCandidateHash[]>(
