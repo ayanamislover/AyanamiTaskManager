@@ -21,8 +21,7 @@ export function createAtmDeltaTool(
   return {
     profile: "memory",
     name: "atm_delta",
-    description:
-      "读增量变化。省略 since_seq 时返回最近 limit 条。",
+    description: "读增量变化。省略 since_seq 时返回最近 limit 条。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
