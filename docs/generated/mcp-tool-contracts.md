@@ -8,7 +8,7 @@ Surface: `v5`
 | --- | ---: | --- |
 | core | 8016 | `ce2bce04ec26f73aad31acde87dfe8de49950e6df5d073daa0597ecab270ddf9` |
 | memory | 9180 | `aba2e761a67f8b1a96dcdc8af6aa9c3cc6ef89544c115b559d63b270f5eec1f9` |
-| actions | 7975 | `2e20175aabf65c942d374929db2758018cc804155bba4b72069064b444aed2b9` |
+| actions | 8164 | `2f515d6e9df128bf293218542aee927137f983f43420595d22cd569ae6850466` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
 | --- | --- | --- | --- | --- | --- |
@@ -26,7 +26,7 @@ Surface: `v5`
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `8e25620829d4e8dc` |
 | memory | `atm_knowledge_get` | 读取固定修订，part=body\|metadata（默认 body）。编辑用 for_edit=true；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。沿 cursor 读完整再保存。 | true | false | `fdfec61a2bf88c95` |
 | memory | `atm_knowledge_save` | 直接发布共享知识，无需手工导入。先查重；更新须带 id 和 expected_revision_id，并提交完整内容；新建省略二者。重试复用 op_id。 | false | false | `700dd274ffe76554` |
-| actions | `atm_task_patch` | 批量变更任务。items 每条都要 task_key 与 expected_version，operation 取值：claim\|start\|release\|block\|wait_agent\|wait_user\|verify\|complete\|cancel\|reopen\|edit\|verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch。verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch 不可与其他操作同批，items 只允许一个元素。complete 还要求任务当前处于 IN_PROGRESS 或 VERIFYING，没开工过的先 start。 | false | true | `e14425f3858e5f7a` |
+| actions | `atm_task_patch` | 批量变更任务。items 每条都要 task_key 与 expected_version，operation 取值：claim\|start\|release\|ready\|block\|wait_agent\|wait_user\|verify\|complete\|cancel\|reopen\|edit\|verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch。verify_and_complete\|review_request\|review_submit\|checklist_single\|checklist_batch 不可与其他操作同批，items 只允许一个元素。complete 还要求任务当前处于 IN_PROGRESS 或 VERIFYING，没开工过的先 start。 | false | true | `8335325c28dde701` |
 
 ## Legacy compatibility artifact
 

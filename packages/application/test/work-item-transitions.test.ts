@@ -28,6 +28,7 @@ const OPERATIONS = [
   { operation: "claim" },
   { operation: "start" },
   { operation: "release" },
+  { operation: "ready" },
   { operation: "block", blockedReason: "等外部依赖" },
   { operation: "wait_user", waitingFor: "等用户确认口径" },
   { operation: "wait_agent", waitingFor: "等 reviewer" },

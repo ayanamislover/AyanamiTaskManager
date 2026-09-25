@@ -675,6 +675,8 @@ export class ProjectRepository {
       assigneeAgentId?: string | null;
       targetDate?: string | null;
       parentKey?: string | null;
+      dependsOn?: string[];
+      discoveredFrom?: string | null;
       takeoverStale?: boolean;
     }>,
   ): {

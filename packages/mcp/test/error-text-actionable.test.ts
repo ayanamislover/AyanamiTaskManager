@@ -335,7 +335,7 @@ describe("工具报错的正文要能照着做", () => {
   });
 
   /**
-   * 16 个 operation 的形状只活在 schema 的 oneOf 里，而不少客户端渲染 tools/list 时
+   * 17 个 operation 的形状只活在 schema 的 oneOf 里，而不少客户端渲染 tools/list 时
    * 把 oneOf/$defs 整段丢掉——调用方看到的 items 只剩 task_key 和 expected_version。
    * 描述是所有客户端都会显示的那行字，操作清单得写在那里。
    */

@@ -56,6 +56,8 @@ const taskPatchExternalNames = {
   assigneeAgentId: "assignee_agent_id",
   targetDate: "target_date",
   parentKey: "parent_key",
+  dependsOn: "depends_on",
+  discoveredFrom: "discovered_from",
   parentChecklistId: "parent_checklist_id",
   expectedParentChecklistVersion: "expected_parent_checklist_version",
   requestKey: "request_key",
@@ -130,7 +132,7 @@ function canonicalTaskPatchItem(value: unknown): TaskPatchItem {
 }
 
 /**
- * 16 个 operation 的形状只在 schema 的 oneOf 里，而不少 MCP 客户端渲染 tools/list 时
+ * 17 个 operation 的形状只在 schema 的 oneOf 里，而不少 MCP 客户端渲染 tools/list 时
  * 会把 oneOf/$defs 直接丢掉——调用方看到的 items 只剩 task_key 与 expected_version，
  * 连有哪些 operation 都不知道，只能试。描述是所有客户端都会显示的那一行，
  * 所以清单写在这里，并且从 registry 派生，新增操作不会漏。
@@ -147,7 +149,7 @@ const inputSchema = z
     project: projectCode,
     session: sessionId,
     op_id: opId,
-    // 先按 16 个 operation 整体判别，成批规则单独校验。
+    // 先按 17 个 operation 整体判别，成批规则单独校验。
     // 若写成「core 数组 | composite 数组」的 union，composite 条目里某个叶子写错时，
     // core 分支会先报 "No matching discriminator: operation" 并盖住真正的叶子错误——
     // 等于指着唯一写对的字段报错，调用方只能穷举形状。

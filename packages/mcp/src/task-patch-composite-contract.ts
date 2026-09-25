@@ -1,7 +1,7 @@
 /**
  * composite 任务操作的文档契约。
  *
- * docs/generated/work-item-operations.md 由 `WorkItemOperations` 生成，只覆盖 11 个状态操作；
+ * docs/generated/work-item-operations.md 由 `WorkItemOperations` 生成，只覆盖 12 个状态操作；
  * `TaskPatchOperations` 里另外 5 个 composite 操作此前没有任何生成物，agent 查不到条目字段形状，
  * 只能对着 `atm_task_patch` 试错。这里补上，并且：
  *

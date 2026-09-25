@@ -57,6 +57,8 @@ const EVENT_TITLES: Record<string, string> = {
   "work.created": "创建任务",
   "work.moved": "移动任务",
   "work.progressed": "更新任务进度",
+  "work.readied": "任务就绪",
+  "work.relations_changed": "调整任务关系",
   "work.released": "释放任务",
   "work.reopened": "重新打开任务",
   "work.started": "开始任务",
@@ -128,6 +130,23 @@ function workDetail(type: string, key: string, payload: Record<string, unknown>)
       return `重新打开 ${label}`;
     case "work.moved":
       return `移动任务 ${label}`;
+    case "work.readied":
+      return `${label} 从待办转为就绪`;
+    case "work.relations_changed": {
+      const relations =
+        payload.relations && typeof payload.relations === "object"
+          ? (payload.relations as { dependsOn?: unknown; discoveredFrom?: unknown })
+          : {};
+      const parts = [
+        Array.isArray(relations.dependsOn)
+          ? `前置依赖 ${relations.dependsOn.length ? relations.dependsOn.join("、") : "清空"}`
+          : null,
+        relations.discoveredFrom === undefined
+          ? null
+          : `来源 ${asText(relations.discoveredFrom) ?? "解除"}`,
+      ].filter(Boolean);
+      return `调整 ${label} 的关系${parts.length ? `：${parts.join("；")}` : ""}`;
+    }
     default:
       return `${label}${operation ? `（${operation}）` : ""}${status ? `，状态 ${status}` : ""}${summary ? `：${summary}` : ""}`;
   }

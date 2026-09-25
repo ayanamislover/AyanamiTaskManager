@@ -207,7 +207,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 | --- | ---: | ---: | ---: | ---: |
 | core | 6 | 8,016 bytes | 9,728 bytes | 1,712 bytes |
 | memory | 8 | 9,180 bytes | 9,728 bytes | 548 bytes |
-| actions | 1 | 7,975 bytes | 9,728 bytes | 1,753 bytes |
+| actions | 1 | 8,164 bytes | 9,728 bytes | 1,564 bytes |
 
 <!-- MCP_TOOL_STATS:END -->
 

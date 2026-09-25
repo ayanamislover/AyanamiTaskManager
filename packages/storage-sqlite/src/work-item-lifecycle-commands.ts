@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import { assertParentMove } from "@ayanami-task/domain";
+import { assertAcyclicDependency, assertParentMove } from "@ayanami-task/domain";
 import { AtmError } from "@ayanami-task/errors";
 import {
   nowIso,
@@ -15,6 +15,12 @@ import { ProjectMutationKernel, type MutationActor } from "./project-mutation-ke
 import { TaskReadModel } from "./task-read-model.js";
 import { WorkItemMaintenance } from "./work-item-maintenance.js";
 import { resolveStoredWorkItemOperation, storedWorkItemPhase } from "./work-item-operation.js";
+
+type RelationChange = {
+  dependencyIds?: string[];
+  discoveredFromId?: string | null;
+  receipt: { dependsOn?: string[]; discoveredFrom?: string | null };
+};
 
 export class WorkItemLifecycleCommands {
   readonly #sqlite: Database.Database;
@@ -44,6 +50,80 @@ export class WorkItemLifecycleCommands {
     );
   }
 
+  /**
+   * 校验并规划 edit 里的关系替换，不落任何写入。dependsOn 整组替换本任务的 BLOCKS 前置，
+   * discoveredFrom 替换来源任务；规则与创建时一致：不能指向自身、不能重复、依赖不能成环。
+   */
+  #planRelationChange(
+    taskId: string,
+    patch: { taskKey: string; dependsOn?: string[]; discoveredFrom?: string | null },
+  ): RelationChange | null {
+    if (patch.dependsOn === undefined && patch.discoveredFrom === undefined) return null;
+    const change: RelationChange = { receipt: {} };
+    if (patch.dependsOn !== undefined) {
+      const keys = patch.dependsOn.map((key) => key.trim().toUpperCase());
+      const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
+      if (duplicate)
+        throw new AtmError("VALIDATION_ERROR", {
+          message: `dependsOn 重复引用：${duplicate}`,
+          details: { task_key: patch.taskKey, field: "dependsOn", value: duplicate },
+        });
+      const ids = keys.map((key) => this.#taskReads.rowForTaskKey(key).id as string);
+      const dependencies = new Map<string, string[]>();
+      for (const edge of this.#sqlite
+        .prepare(
+          "SELECT source_id, target_id FROM work_item_relations WHERE relation_type = 'BLOCKS'",
+        )
+        .all() as Array<{ source_id: string; target_id: string }>) {
+        dependencies.set(edge.target_id, [
+          ...(dependencies.get(edge.target_id) ?? []),
+          edge.source_id,
+        ]);
+      }
+      dependencies.set(taskId, ids);
+      for (const id of ids) assertAcyclicDependency(taskId, id, dependencies);
+      change.dependencyIds = ids;
+      change.receipt.dependsOn = keys;
+    }
+    if (patch.discoveredFrom !== undefined) {
+      const originId =
+        patch.discoveredFrom === null
+          ? null
+          : (this.#taskReads.rowForTaskKey(patch.discoveredFrom).id as string);
+      if (originId === taskId)
+        throw new AtmError("VALIDATION_ERROR", {
+          message: "discoveredFrom 不能引用自身",
+          details: { task_key: patch.taskKey, field: "discoveredFrom", issue: "self_reference" },
+        });
+      change.discoveredFromId = originId;
+      change.receipt.discoveredFrom = patch.discoveredFrom?.trim().toUpperCase() ?? null;
+    }
+    return change;
+  }
+
+  #applyRelationChange(taskId: string, change: RelationChange, now: string): void {
+    const insert = this.#sqlite.prepare(
+      `INSERT INTO work_item_relations(source_id, target_id, relation_type, created_at)
+       VALUES (?, ?, ?, ?)`,
+    );
+    if (change.dependencyIds !== undefined) {
+      this.#sqlite
+        .prepare("DELETE FROM work_item_relations WHERE target_id = ? AND relation_type = 'BLOCKS'")
+        .run(taskId);
+      for (const dependencyId of change.dependencyIds)
+        insert.run(dependencyId, taskId, "BLOCKS", now);
+    }
+    if (change.discoveredFromId !== undefined) {
+      this.#sqlite
+        .prepare(
+          "DELETE FROM work_item_relations WHERE source_id = ? AND relation_type = 'DISCOVERED_FROM'",
+        )
+        .run(taskId);
+      if (change.discoveredFromId !== null)
+        insert.run(taskId, change.discoveredFromId, "DISCOVERED_FROM", now);
+    }
+  }
+
   patchWorkItems(
     actor: MutationActor,
     opId: string,
@@ -69,6 +149,8 @@ export class WorkItemLifecycleCommands {
       assigneeAgentId?: string | null;
       targetDate?: string | null;
       parentKey?: string | null;
+      dependsOn?: string[];
+      discoveredFrom?: string | null;
       takeoverStale?: boolean;
     }>,
   ): {
@@ -125,6 +207,8 @@ export class WorkItemLifecycleCommands {
             const safeMerge =
               patch.operation === "edit" &&
               patch.assigneeAgentId === undefined &&
+              patch.dependsOn === undefined &&
+              patch.discoveredFrom === undefined &&
               patch.cancelReason === undefined &&
               patch.duplicateOf === undefined &&
               patch.supersededBy === undefined &&
@@ -160,6 +244,8 @@ export class WorkItemLifecycleCommands {
           const updates: string[] = [];
           const values: unknown[] = [];
           let eventType = "work.updated";
+          let relationChange: RelationChange | null = null;
+          let movedToParentId: string | null | undefined;
           const acceptanceChange =
             patch.operation === "edit" && patch.acceptance !== undefined
               ? {
@@ -261,6 +347,10 @@ export class WorkItemLifecycleCommands {
               "claim_lease_until = NULL",
             );
             eventType = "work.released";
+          } else if (patch.operation === "ready") {
+            targetPhase = "READY";
+            updates.push("status = 'READY'", "phase = 'READY'", "phase_inferred = 0");
+            eventType = "work.readied";
           } else if (patch.operation === "block") {
             if (!patch.blockedReason?.trim())
               throw new AtmError("BLOCKED_REASON_REQUIRED", {
@@ -396,7 +486,13 @@ export class WorkItemLifecycleCommands {
               assertParentMove(row.id, parentId, parents);
               updates.push("parent_id = ?");
               values.push(parentId);
+              movedToParentId = parentId;
               eventType = "work.moved";
+            }
+            relationChange = this.#planRelationChange(row.id, patch);
+            if (relationChange) {
+              // 关系不在 work_items 行上，但仍要走版本号：并发改关系的两方必须有一方撞 VERSION_CONFLICT。
+              if (eventType === "work.updated") eventType = "work.relations_changed";
             }
           } else {
             throw new AtmError("VALIDATION_ERROR", {
@@ -404,7 +500,7 @@ export class WorkItemLifecycleCommands {
               details: { field: "operation", value: patch.operation, issue: "unknown" },
             });
           }
-          if (updates.length === 0)
+          if (updates.length === 0 && !relationChange)
             throw new AtmError("VALIDATION_ERROR", {
               message: "WorkItem patch 未产生任何变更",
               details: { task_key: patch.taskKey, issue: "empty_patch" },
@@ -414,6 +510,7 @@ export class WorkItemLifecycleCommands {
           this.#sqlite
             .prepare(`UPDATE work_items SET ${updates.join(", ")} WHERE id = ?`)
             .run(...values);
+          if (relationChange) this.#applyRelationChange(row.id, relationChange, now);
           if (patch.operation === "claim" || patch.operation === "start") {
             this.#maintenance.recordWorkItemLifecycleAt(
               row.id,
@@ -466,6 +563,7 @@ export class WorkItemLifecycleCommands {
             phase: targetPhase,
             ...(mergeReceipt === undefined ? {} : { mergedAcrossVersion: mergeReceipt }),
             ...(acceptanceChange === undefined ? {} : { changes: acceptanceChange }),
+            ...(relationChange === null ? {} : { relations: relationChange.receipt }),
             ...(patch.operation === "cancel"
               ? {
                   cancelReason: patch.cancelReason?.trim() ?? null,
@@ -481,6 +579,9 @@ export class WorkItemLifecycleCommands {
                   : null,
           });
           if (row.parent_id) this.#maintenance.recomputeWorkItem(row.parent_id);
+          // 挪到新父任务下之后，新父任务的聚合进度同样要重算，否则要等下一次无关写入才对上。
+          if (movedToParentId && movedToParentId !== row.parent_id)
+            this.#maintenance.recomputeWorkItem(movedToParentId);
           const updated = this.#sqlite.prepare("SELECT * FROM work_items WHERE id = ?").get(row.id);
           result.push(this.#taskReads.workItemViewFromRow(updated));
         }

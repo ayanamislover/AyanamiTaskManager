@@ -11,8 +11,8 @@
 <!-- prettier-ignore -->
 | 状态 | 显示名 | 合法操作 |
 | --- | --- | --- |
-| `BACKLOG` | 待整理 | `claim`, `start`, `complete`, `cancel`, `edit` |
-| `READY` | 可开始 | `claim`, `start`, `complete`, `cancel`, `edit` |
+| `BACKLOG` | 待整理 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
+| `READY` | 可开始 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
 | `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
 | `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
 | `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `complete`, `cancel`, `reopen`, `edit` |
@@ -28,6 +28,7 @@
 | `claim` | 领取 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS` | DEPENDENCIES_READY, CLAIM_AVAILABLE, SAME_ASSIGNEE_WHEN_RUNNING |
 | `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
 | `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
+| `ready` | 设为就绪 | `BACKLOG`, `READY` | - |
 | `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
 | `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_AGENT` | WAITING_FOR |
 | `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_USER` | WAITING_FOR |
