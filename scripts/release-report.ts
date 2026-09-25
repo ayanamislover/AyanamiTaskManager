@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { STAGE_INPUTS, type ReleaseFingerprint } from "./release-fingerprint.js";
 
 export {
@@ -140,6 +141,8 @@ function assertEvidenceReference(item: ReleaseEvidenceReference): void {
   if (
     !item.path ||
     /^(?:[A-Za-z]:[\\/]|[\\/])/u.test(item.path) ||
+    // 报告里的路径要在任何平台上都能直接解析：Windows 上 join 出来的反斜杠不算（ATM-T-0361）。
+    item.path.includes("\\") ||
     pathSegments.includes("..") ||
     !/^[A-F0-9]{64}$/u.test(item.sha256.toUpperCase())
   ) {
@@ -266,6 +269,46 @@ export function appendReleaseEvidenceLayer(
   };
   assertEvidenceLayer(appended, candidate, current.length);
   return [...current, appended];
+}
+
+/** 发行目录里命令日志所在的子目录；assembler 把 output/release-logs 整个复制到这里。 */
+export const RELEASE_REPORT_LOG_DIR = "test-report/logs";
+
+/**
+ * release.ts 记下的日志路径（相对 output，Windows 上是 `release-logs\test.log`）
+ * 换成发行目录里真实存在的相对路径（ATM-T-0361）。
+ *
+ * 原来 assembler 直接拼成 `test-report/${log}`，得到 `test-report/release-logs\test.log`：
+ * 目录名不对（实际复制到了 logs/），分隔符也不可移植，报告里的 CI 证据一条都解析不到。
+ */
+export function releaseLogReportPath(log: string): string {
+  const match = /^release-logs[\\/]([A-Za-z0-9][A-Za-z0-9._-]*\.log)$/u.exec(log);
+  if (!match) throw new Error(`RELEASE_LOG_PATH_INVALID: ${log}`);
+  return `${RELEASE_REPORT_LOG_DIR}/${match[1]}`;
+}
+
+/**
+ * 报告写完后逐条核对：每个证据路径相对发行目录能直接打开，且字节与记下的 SHA256 一致。
+ * 路径或复制目录再和生成器对不上，组装当场失败，而不是等签发时才发现。
+ */
+export async function assertReleaseEvidenceResolves(
+  releaseDir: string,
+  layers: readonly ReleaseEvidenceLayer[],
+  digest: (path: string) => Promise<string>,
+): Promise<void> {
+  for (const layer of layers) {
+    for (const item of layer.evidence) {
+      assertEvidenceReference(item);
+      let actual: string;
+      try {
+        actual = await digest(join(releaseDir, ...item.path.split("/")));
+      } catch {
+        throw new Error(`RELEASE_EVIDENCE_UNRESOLVED: ${layer.level} ${item.path}`);
+      }
+      if (actual.toUpperCase() !== item.sha256.toUpperCase())
+        throw new Error(`RELEASE_EVIDENCE_DIGEST_MISMATCH: ${layer.level} ${item.path}`);
+    }
+  }
 }
 
 export function highestReleaseEvidenceLevel(

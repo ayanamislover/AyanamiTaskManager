@@ -11,9 +11,12 @@ import {
 import {
   appendReleaseEvidenceLayer,
   assertReleaseChecklistIsDynamic,
+  assertReleaseEvidenceResolves,
   createReleaseCandidateIdentity,
   highestReleaseEvidenceLevel,
   nonBlockingItems,
+  RELEASE_REPORT_LOG_DIR,
+  releaseLogReportPath,
   stageProvenance,
   type ReleaseArtifactIdentity,
   type ReleaseEvidenceLayer,
@@ -240,7 +243,9 @@ const reportInputs = [
 for (const [source, target] of reportInputs) {
   await copyFile(join(output, source), join(testReportDir, target));
 }
-await cp(join(output, "release-logs"), join(testReportDir, "logs"), { recursive: true });
+await cp(join(output, "release-logs"), join(releaseDir, ...RELEASE_REPORT_LOG_DIR.split("/")), {
+  recursive: true,
+});
 const screenshots = [1366, 1920, 3440].map((width) => `e2e-project-${width}.png`);
 await mkdir(join(testReportDir, "screenshots"), { recursive: true });
 for (const screenshot of screenshots) {
@@ -275,10 +280,11 @@ evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
 });
 const ciEvidence = await Promise.all([
   reportEvidence("release-verification.json"),
-  ...verification.commands.map(
-    async (command): Promise<ReleaseEvidenceReference> =>
-      await evidence(join(output, command.log), `test-report/${command.log}`),
-  ),
+  // 摘要取发行目录里那份副本：报告里写的路径和被哈希的字节必须是同一个文件。
+  ...verification.commands.map(async (command): Promise<ReleaseEvidenceReference> => {
+    const reportPath = releaseLogReportPath(command.log);
+    return await evidence(join(releaseDir, ...reportPath.split("/")), reportPath);
+  }),
 ]);
 evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
   level: "CI_VERIFIED",
@@ -308,6 +314,7 @@ evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
     artifactEvidence(releasesArtifact),
   ],
 });
+await assertReleaseEvidenceResolves(releaseDir, evidenceLayers, digest);
 const highestVerifiedLevel = highestReleaseEvidenceLevel(evidenceLayers);
 const summary = {
   schemaVersion: 2,
