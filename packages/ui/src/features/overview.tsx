@@ -14,6 +14,7 @@ import {
 import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
+import { useProjectOrder } from "../project-order.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
@@ -32,6 +33,9 @@ export function OverviewPage({
   TimelineEventRow: ComponentType<{ event: Record<string, unknown> }>;
 }) {
   const queryClient = useQueryClient();
+  // 总览卡片和侧栏、项目页用同一份手动顺序（ATM-T-0421）：client.overview 按 updated_at 排，
+  // 不接这一层的话，首屏的项目位置随每次改动乱跳，手动排序在这里等于没做。
+  const projectOrder = useProjectOrder(client);
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => client.overview(),
@@ -67,7 +71,9 @@ export function OverviewPage({
   const recentBusinessEvents = ((data.recentEvents ?? []) as Record<string, unknown>[]).filter(
     (event) => !isSystemTimelineEvent(event),
   );
-  const projects = data.projects.filter((project) => project.lifecycle !== "TRASHED");
+  const projects = projectOrder.apply(
+    data.projects.filter((project) => project.lifecycle !== "TRASHED"),
+  );
   const quickTasks = ((quickQuery.data ?? []) as any[]).filter(
     (task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status),
   );

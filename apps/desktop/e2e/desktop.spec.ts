@@ -323,6 +323,48 @@ test("总览项目卡长名称最多两行并保留全称提示", async ({ page 
   }
 });
 
+// ATM-T-0421：总览卡片原先直接用 client.overview 的 updated_at 顺序，侧栏排好的顺序到首屏就乱了。
+test("总览项目卡片与侧栏使用同一份手动顺序", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const settingsResponse = await api.get(`${apiUrl}/settings`);
+  expect(settingsResponse.ok()).toBeTruthy();
+  const previous = ((await settingsResponse.json()) as Array<{ key: string; value: unknown }>).find(
+    (row) => row.key === "projects.order",
+  )?.value;
+  const projectsResponse = await api.get(`${apiUrl}/projects`);
+  expect(projectsResponse.ok()).toBeTruthy();
+  const projects = (
+    (await projectsResponse.json()) as Array<{ id: string; name: string; lifecycle: string }>
+  ).filter((project) => project.lifecycle === "ACTIVE");
+  expect(projects.length).toBeGreaterThanOrEqual(3);
+  // 倒过来存：和默认的 updated_at 顺序必然不同，总览若没接手动顺序就对不上。
+  const ordered = [...projects].reverse();
+  const saved = await api.put(`${apiUrl}/settings/projects.order`, {
+    data: { value: { ids: ordered.map((project) => project.id) } },
+  });
+  expect(saved.ok()).toBeTruthy();
+
+  try {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto("/#overview");
+    const expected = ordered.map((project) => project.name);
+    await expect(page.locator(".atm-overview-project .atm-overview-project-name")).toHaveText(
+      expected,
+    );
+    await expect(page.locator(".atm-sidebar .atm-nav-project-name")).toHaveText(expected);
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-overview-project-order.png"),
+      fullPage: true,
+    });
+  } finally {
+    const restored = await api.put(`${apiUrl}/settings/projects.order`, {
+      data: { value: previous ?? { ids: [] } },
+    });
+    expect(restored.ok()).toBeTruthy();
+    await api.dispose();
+  }
+});
+
 test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ page }) => {
   // staleTime 3 秒内切回来会命中新鲜缓存、queryFn 不执行；归属如果跟着「请求是否跑过」
   // 走，列表就会卡在空白加载态直到下一次网络刷新。
