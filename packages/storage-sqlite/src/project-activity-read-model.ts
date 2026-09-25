@@ -4,6 +4,7 @@ import type { SearchHit, SearchPage } from "@ayanami-task/protocol";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import type { ProgressUpdateView } from "./read-model-types.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import { allTerms, ftsPhrase, likePattern, searchTerms, usesFts } from "./search-terms.js";
 
 function json<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -154,36 +155,32 @@ export class ProjectActivityReadModel {
         decoded.last.entityKey,
       );
     }
-    let rows: any[];
-    if ([...normalized].length < 3) {
-      const escaped = normalized.replace(/[\\%_]/gu, "\\$&");
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title,
-                  documents.body, documents.updated_at
-           FROM search_documents documents
-           WHERE (documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\')
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(`%${escaped}%`, `%${escaped}%`, ...params, bounded + 1) as any[];
-    } else {
-      const phrase = `"${normalized.replaceAll('"', '""')}"`;
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title, documents.body,
-             documents.updated_at
-           FROM search_documents_fts fts
-           JOIN search_documents documents
-             ON documents.entity_type = fts.entity_type AND documents.entity_id = fts.entity_id
-           WHERE search_documents_fts MATCH ?
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(phrase, ...params, bounded + 1) as any[];
-    }
+    // entity_key 在 FTS 表里是 UNINDEXED，打 `D-398` 这类 key 片段只能靠 LIKE 补上。
+    const matched = allTerms(searchTerms(normalized), (term) =>
+      usesFts(term)
+        ? {
+            sql: `(documents.entity_type, documents.entity_id) IN (
+                    SELECT entity_type, entity_id FROM search_documents_fts
+                    WHERE search_documents_fts MATCH ?)
+                  OR documents.entity_key LIKE ? ESCAPE '\\'`,
+            params: [ftsPhrase(term), likePattern(term)],
+          }
+        : {
+            sql: `documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\'`,
+            params: [likePattern(term), likePattern(term)],
+          },
+    );
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT documents.entity_type, documents.entity_key, documents.title,
+                documents.body, documents.updated_at
+         FROM search_documents documents
+         WHERE ${matched.sql}
+           AND ${clauses.join(" AND ")}
+         ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
+         LIMIT ?`,
+      )
+      .all(...matched.params, ...params, bounded + 1) as any[];
     const hits: SearchHit[] = rows.slice(0, bounded).map((row) => ({
       entityType: row.entity_type,
       entityKey: row.entity_key,

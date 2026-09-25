@@ -19,6 +19,7 @@ import {
   type KnowledgeSearchPage,
 } from "@ayanami-task/protocol";
 import type { KnowledgeRepository } from "./knowledge-repository.js";
+import { ftsPhrase, likePattern, searchTerms, usesFts } from "./search-terms.js";
 
 type Cursor = {
   kind: "search" | "get" | "metadata";
@@ -155,23 +156,28 @@ function searchKnowledgePage<T>(
     // 元数据字段留着 instr，它们都很短，换成 LIKE 只是徒增一处转义要维护。
     //
     // @like 里的 %、_ 和反斜杠必须转义：它们在 instr 里是普通字符，在 LIKE 里不是。
-    const codePoints = [...query].length;
-    const bodyMatch =
-      codePoints >= 3
-        ? "e.id IN (SELECT entry_id FROM knowledge_fts WHERE knowledge_fts MATCH @match)"
-        : "f.body LIKE @like ESCAPE '\\'";
-    const metadataMatch = ["title", "summary", "use_when", "aliases", "tags", "applies_to"]
-      .map((field) => `instr(lower(f.${field}), lower(@q)) > 0`)
-      .join(" OR ");
+    //
+    // 多个词各自匹配、彼此 AND（见 search-terms.ts）；排名仍按整条 query 算，
+    // 整条命中标题或 slug 的条目照旧排在最前。
+    const metadataFields = ["title", "summary", "use_when", "aliases", "tags", "applies_to"];
+    const metadataMatch = (name: string) =>
+      metadataFields.map((field) => `instr(lower(f.${field}), lower(@${name})) > 0`).join(" OR ");
+    const termParameters: Record<string, string> = {};
+    const termMatches = searchTerms(query).map((term, index) => {
+      termParameters[`t${index}`] = term;
+      const bodyMatch = usesFts(term)
+        ? `e.id IN (SELECT entry_id FROM knowledge_fts WHERE knowledge_fts MATCH @m${index})`
+        : `f.body LIKE @m${index} ESCAPE '\\'`;
+      termParameters[`m${index}`] = usesFts(term) ? ftsPhrase(term) : likePattern(term);
+      return `(e.id=@t${index} OR instr(lower(e.slug),lower(@t${index}))>0 OR ${metadataMatch(`t${index}`)} OR ${bodyMatch})`;
+    });
     const parameters = {
       q: query,
       tag: tag ?? null,
       archived: Number(includeArchived),
       limit: limit + 1,
       offset,
-      ...(codePoints >= 3
-        ? { match: `"${query.replaceAll('"', '""')}"` }
-        : { like: `%${query.replace(/[\\%_]/gu, (character) => `\\${character}`)}%` }),
+      ...termParameters,
     };
     const rows = repository.database.sqlite
       .prepare(
@@ -179,11 +185,11 @@ function searchKnowledgePage<T>(
       CASE WHEN e.id=@q OR lower(e.slug)=lower(@q) OR lower(f.title)=lower(@q) THEN 0
         WHEN instr(lower(f.title),lower(@q))>0 THEN 1
         WHEN instr(lower(f.aliases),lower(@q))>0 OR instr(lower(f.tags),lower(@q))>0 THEN 2
-        WHEN ${metadataMatch} THEN 3 ELSE 4 END AS rank
+        WHEN ${metadataMatch("q")} THEN 3 ELSE 4 END AS rank
       FROM knowledge_fts f JOIN knowledge_entries e ON e.id=f.entry_id
       WHERE (@archived=1 OR e.archived=0)
         AND (@tag IS NULL OR EXISTS(SELECT 1 FROM json_each(f.metadata, '$.tags') WHERE value=@tag))
-        AND (@q='' OR e.id=@q OR instr(lower(e.slug),lower(@q))>0 OR ${metadataMatch} OR ${bodyMatch})
+        AND ${termMatches.length ? termMatches.join(" AND ") : "1=1"}
       ORDER BY rank, e.id DESC LIMIT @limit OFFSET @offset`,
       )
       .all(parameters) as { id: string; version: number; archived: number; metadata: string }[];
