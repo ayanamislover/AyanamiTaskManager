@@ -24,7 +24,7 @@ ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与
 
 ## Claude Desktop 怎么接入
 
-在“设置 → Agent 接入”选择“安装 Claude 配置”，ATM 会备份并最小合并 `%APPDATA%\Claude\claude_desktop_config.json`，然后重启 Claude Desktop。打包版 stdio 使用 `resources/mcp-stdio.cjs`；不要把 Windows GUI EXE 直接当作 stdio 命令。
+在“设置 → Agent 接入”选择“安装 Claude 配置”，ATM 会备份并最小合并 `%APPDATA%\Claude\claude_desktop_config.json`，然后重启 Claude Desktop。打包版 stdio 使用原生转发程序 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe`（无环境变量，参数只有 `--profile`）；它缺失时 ATM 自动回落到 `resources/mcp-stdio.cjs`。不要把 Windows GUI EXE 直接当作 stdio 命令。
 
 ## Claude Code 怎么接入
 
@@ -33,10 +33,12 @@ Claude Code 与 Claude Desktop 是两条不同的路径：它**从不读** `clau
 在“设置 → Agent 接入”选择“安装 Claude Code 配置”。ATM 不会自己改写 `~/.claude.json`——该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会吞掉对方的更新；安装一律通过调用 `claude` CLI 完成，找不到 CLI 时明确报错而不是退化成直接改文件。等价的手工命令：
 
 ```powershell
-claude mcp add-json ayanami-task-manager-core '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","core"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
-claude mcp add-json ayanami-task-manager-memory '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","memory"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
-claude mcp add-json ayanami-task-manager-actions '{"command":"<ATM.exe>","args":["<resources\\mcp-stdio.cjs>","--profile","actions"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}' --scope user
+claude mcp add-json ayanami-task-manager-core '{"command":"<atm-mcp.exe>","args":["--profile","core"]}' --scope user
+claude mcp add-json ayanami-task-manager-memory '{"command":"<atm-mcp.exe>","args":["--profile","memory"]}' --scope user
+claude mcp add-json ayanami-task-manager-actions '{"command":"<atm-mcp.exe>","args":["--profile","actions"]}' --scope user
 ```
+
+`<atm-mcp.exe>` 是 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe` 的完整展开路径（JSON 里反斜杠写成 `\\`）。该文件缺失时改用 `{"command":"<ATM.exe>","args":["<数据目录>\\mcp-stdio.cjs","--profile","core"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}`。
 
 用 stdio 而不是 streamable-http：后者要把 endpoint 和 token 写进配置，而两者每次 daemon 重启都会变，配置随即失效。
 

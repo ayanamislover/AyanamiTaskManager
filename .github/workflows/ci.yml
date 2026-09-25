@@ -18,6 +18,11 @@ jobs:
           node-version: 24.14.1
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The native MCP shim is built, linted and tested from pnpm test; the version comes
+      # from its rust-toolchain.toml.
+      - name: Install the pinned Rust toolchain
+        working-directory: apps/desktop/native/mcp-shim
+        run: rustup toolchain install
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck

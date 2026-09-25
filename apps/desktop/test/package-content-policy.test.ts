@@ -1,10 +1,28 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { MCP_SHIM_RELEASE_EXE } from "../../../scripts/mcp-shim-build.js";
 import {
+  assertMcpShimVersionResource,
   assertPublishedLogoBytes,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
   REQUIRED_PACKAGED_ENTRIES,
 } from "../../../scripts/package-content-policy.js";
+import { ensureNativeShim } from "./native-shim.js";
+
+const packageVersion = (JSON.parse(readFileSync("package.json", "utf8")) as { version: string })
+  .version;
+
+/** VS_VERSIONINFO 的一条 String：键、NUL、padding 个零字节、值、NUL。 */
+function versionString(value: string, padding: 0 | 2): Buffer {
+  const nul = String.fromCharCode(0);
+  return Buffer.concat([
+    Buffer.from("AyanamiTaskManager MCP stdio bridge", "utf16le"),
+    Buffer.from(`ProductVersion${nul}`, "utf16le"),
+    Buffer.alloc(padding),
+    Buffer.from(`${value}${nul}`, "utf16le"),
+  ]);
+}
 
 function pngHeader(width: number, height: number, bytes = 24): Buffer {
   const header = Buffer.alloc(bytes);
@@ -73,5 +91,48 @@ describe("packaged application content policy", () => {
     expect(() => assertPublishedLogoBytes(pngHeader(256, 256, 256 * 1024 + 1), "logo.png")).toThrow(
       /PACKAGED_BRAND_ASSET_TOO_LARGE/u,
     );
+  });
+});
+
+describe("packaged MCP shim", () => {
+  it("真实构建的 atm-mcp.exe 带版本资源，ProductVersion 就是 package.json 的版本", () => {
+    const bytes = readFileSync(ensureNativeShim());
+    expect(() => assertMcpShimVersionResource(bytes, packageVersion)).not.toThrow();
+    // 阳性对照：换一个版本号必须报不一致，否则上一条什么都没验。
+    expect(() => assertMcpShimVersionResource(bytes, "123.456.789")).toThrow(
+      new RegExp(
+        `PACKAGED_MCP_SHIM_VERSION_MISMATCH: expected 123\\.456\\.789, found ${packageVersion.replaceAll(".", "\\.")}`,
+        "u",
+      ),
+    );
+  });
+
+  it("值前有无补齐字节都能读到；前缀相同的版本不算一致", () => {
+    for (const padding of [0, 2] as const) {
+      expect(() =>
+        assertMcpShimVersionResource(versionString("1.2.3", padding), "1.2.3"),
+      ).not.toThrow();
+      expect(() => assertMcpShimVersionResource(versionString("1.2.30", padding), "1.2.3")).toThrow(
+        /PACKAGED_MCP_SHIM_VERSION_MISMATCH/u,
+      );
+    }
+  });
+
+  it("没有版本资源的 exe 被拒", () => {
+    expect(() => assertMcpShimVersionResource(Buffer.alloc(4096), "1.2.3")).toThrow(
+      /PACKAGED_MCP_SHIM_VERSION_RESOURCE_MISSING/u,
+    );
+  });
+
+  it("forge 把 cargo 的 release 产物作为 extraResource 拷进 resources", () => {
+    const forge = readFileSync("forge.config.ts", "utf8");
+    const extraResource = /extraResource:\s*\[([\s\S]*?)\]/u.exec(forge)?.[1] ?? "";
+    expect(extraResource).toContain(`"${MCP_SHIM_RELEASE_EXE}"`);
+    // 打包入口先构建 shim 再打包、打完校验：顺序反了拷进去的就是上一次的构建。
+    const api = readFileSync("scripts/forge-api.ts", "utf8");
+    expect(api).toMatch(
+      /packageApplication\(dir: string\): Promise<void> \{\s*buildMcpShim\(dir\);\s*await api\.package\(/u,
+    );
+    expect(api).toContain("assertMcpShimVersionResource(await readFile(shim), version)");
   });
 });

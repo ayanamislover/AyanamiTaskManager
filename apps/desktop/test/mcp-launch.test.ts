@@ -23,11 +23,13 @@ import {
   installMcpRuntimeLink,
   installMcpStdioBridge,
   mcpLaunch,
+  mcpNodeBridgeLaunch,
   mcpProfileLaunchesStale,
   mcpProfileLaunches,
   mcpLaunchStale,
   mcpStdioHttpPath,
   MCP_RUNTIME_LINK,
+  MCP_SHIM_FILENAME,
   MCP_STDIO_FILENAME,
   shouldManageMcpRuntime,
   shouldRepairMcpConfigs,
@@ -48,14 +50,26 @@ function scratch(): string {
 // 漏改站点，用真实版本会把这个文件误报成版本站点，而它根本不是。
 const FIXTURE_VERSION = "9.9.9";
 
-/** Squirrel 安装：安装根有启动壳与 Update.exe，真实 exe 在 app-<version> 里。 */
-function squirrelInstall(version: string): { installRoot: string; execPath: string } {
+/**
+ * Squirrel 安装：安装根有启动壳与 Update.exe，真实 exe 在 app-<version> 里。
+ * `shim` 为真时在 app-<version>\resources 下放原生 shim；默认不放，对应旧安装与回落路径。
+ */
+function squirrelInstall(
+  version: string,
+  { shim = false }: { shim?: boolean } = {},
+): { installRoot: string; execPath: string } {
   const installRoot = scratch();
   writeFileSync(join(installRoot, "AyanamiTaskManager.exe"), "stub", "utf8");
   writeFileSync(join(installRoot, "Update.exe"), "updater", "utf8");
-  mkdirSync(join(installRoot, `app-${version}`), { recursive: true });
+  mkdirSync(join(installRoot, `app-${version}`, "resources"), { recursive: true });
   const execPath = join(installRoot, `app-${version}`, "AyanamiTaskManager.exe");
   writeFileSync(execPath, "real", "utf8");
+  if (shim)
+    writeFileSync(
+      join(installRoot, `app-${version}`, "resources", MCP_SHIM_FILENAME),
+      "shim",
+      "utf8",
+    );
   return { installRoot, execPath };
 }
 
@@ -392,5 +406,149 @@ describe("修复的幂等性", () => {
       false,
     );
     expect(readFileSync(path, "utf8")).toContain("other.exe");
+  });
+});
+
+// 原生 shim 取代 Electron-as-node 做 stdio 转发。它必须走同一个版本无关链接、不带任何
+// 环境变量，缺失时回落到 JS 桥；两个方向的切换都必须被启动时的过期修复识别出来。
+describe("原生 shim 优先", () => {
+  const profiles = (launch: { command: string; args: string[]; env: Record<string, string> }) => ({
+    core: { ...launch, args: [...launch.args, "--profile", "core"] },
+    memory: { ...launch, args: [...launch.args, "--profile", "memory"] },
+    actions: { ...launch, args: [...launch.args, "--profile", "actions"] },
+  });
+
+  it("装了 shim：command 走链接下的 current\\resources\\atm-mcp.exe，args 为空，无 env", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION, { shim: true });
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+
+    const launch = mcpLaunch({ execPath, dataDir });
+    expect(launch).toEqual({
+      command: join(dataDir, MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME),
+      args: [],
+      env: {},
+    });
+    expect(launch.command).not.toContain(`app-${FIXTURE_VERSION}`);
+    expect(readFileSync(launch.command, "utf8")).toBe("shim");
+  });
+
+  // agent-config 在 args 缺省时补 `--mcp-stdio`（桌面 exe 的旧开关）。shim 不认识它，
+  // 所以 args 必须是空数组；写入器最终拼出来的参数由下面的幂等用例经真实写入钉住。
+  it("三个 Profile 的参数只有 --profile，不带桥脚本路径与环境变量", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION, { shim: true });
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+    expect(mcpLaunch({ execPath, dataDir }).args).toEqual([]);
+    const launches = mcpProfileLaunches({ execPath, dataDir });
+
+    for (const profile of ["core", "memory", "actions"] as const) {
+      expect(launches[profile].args).toEqual(["--profile", profile]);
+      expect(launches[profile].env).toEqual({});
+    }
+  });
+
+  it("链接建不出来时用真实安装目录里的 shim，与旧回落行为一致", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION, { shim: true });
+    const dataDir = scratch();
+    // 位置被真目录占住：链接建不出来。
+    mkdirSync(join(dataDir, MCP_RUNTIME_LINK), { recursive: true });
+
+    expect(mcpLaunch({ execPath, dataDir })).toEqual({
+      command: join(dirname(execPath), "resources", MCP_SHIM_FILENAME),
+      args: [],
+      env: {},
+    });
+  });
+
+  it("shim 不在（旧安装、开发态、被杀毒软件隔离）时回落到 Electron-as-node 的 JS 桥", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION);
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+
+    const launch = mcpLaunch({ execPath, dataDir });
+    expect(launch).toEqual(mcpNodeBridgeLaunch({ execPath, dataDir }));
+    expect(launch).toEqual({
+      command: join(dataDir, MCP_RUNTIME_LINK, "AyanamiTaskManager.exe"),
+      args: [join(dataDir, MCP_STDIO_FILENAME)],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    });
+  });
+
+  // 存量迁移靠的就是这条：升级后第一次启动，旧 JS 桥配置判为过期、被改写成 shim；
+  // shim 被删之后再启动，shim 配置判为过期、被改回 JS 桥。
+  it("两个方向的切换都判为过期，写完之后都不再过期", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION, { shim: true });
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+    const shimLaunch = mcpLaunch({ execPath, dataDir });
+    const nodeLaunch = mcpNodeBridgeLaunch({ execPath, dataDir });
+    const path = join(scratch(), "config.toml");
+
+    installCodexConfig({ path, ...nodeLaunch });
+    expect(mcpProfileLaunchesStale(installedCodexProfileLaunches(path), profiles(shimLaunch))).toBe(
+      true,
+    );
+    installCodexConfig({ path, ...shimLaunch });
+    expect(mcpProfileLaunchesStale(installedCodexProfileLaunches(path), profiles(shimLaunch))).toBe(
+      false,
+    );
+
+    rmSync(join(dirname(execPath), "resources", MCP_SHIM_FILENAME));
+    const fallback = mcpLaunch({ execPath, dataDir });
+    expect(fallback).toEqual(nodeLaunch);
+    expect(mcpProfileLaunchesStale(installedCodexProfileLaunches(path), profiles(fallback))).toBe(
+      true,
+    );
+  });
+
+  // 空 env 最容易在「写进去 → 读回来」之间差一个字节：TOML 不写 env 行、JSON 写成 {}，
+  // 读回来要都等于 {}。差了就是每次启动都重写一次、每次留一份 .bak。
+  it("shim 配置写入后读回逐字一致：Codex 与 Claude Desktop 都不会被反复重写", () => {
+    const { execPath } = squirrelInstall(FIXTURE_VERSION, { shim: true });
+    const dataDir = scratch();
+    installMcpRuntimeLink(execPath, dataDir);
+    const shimLaunch = mcpLaunch({ execPath, dataDir });
+
+    const codex = join(scratch(), "config.toml");
+    installCodexConfig({ path: codex, ...shimLaunch });
+    expect(
+      mcpProfileLaunchesStale(installedCodexProfileLaunches(codex), profiles(shimLaunch)),
+    ).toBe(false);
+    const toml = readFileSync(codex, "utf8");
+    expect(toml).not.toContain("ELECTRON_RUN_AS_NODE");
+    expect(toml).not.toContain("--mcp-stdio");
+    expect(toml).not.toContain(MCP_STDIO_FILENAME);
+
+    const claude = join(scratch(), "claude_desktop_config.json");
+    installClaudeConfig({ path: claude, ...shimLaunch });
+    expect(
+      mcpProfileLaunchesStale(installedClaudeProfileLaunches(claude), profiles(shimLaunch)),
+    ).toBe(false);
+    const json = JSON.parse(readFileSync(claude, "utf8")) as {
+      mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }>;
+    };
+    for (const server of Object.values(json.mcpServers)) {
+      expect(server.command).toBe(shimLaunch.command);
+      expect(server.args[0]).toBe("--profile");
+      expect(server.env ?? {}).toEqual({});
+    }
+  });
+
+  // Agent 读着 Guide 手工配置时，写出来的东西必须和 ATM 自己安装的一模一样。
+  it("Guide 与便携说明里的手工配置就是 mcpLaunch 在装了 shim 时的产出", () => {
+    const shimPath = `%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\resources\\${MCP_SHIM_FILENAME}`;
+    const guide = readFileSync("ATM_AGENT_GUIDE.md", "utf8");
+    const commands = guide.match(/^claude mcp add-json .*$/gmu) ?? [];
+    expect(commands).toHaveLength(3);
+    for (const [index, profile] of ["core", "memory", "actions"].entries()) {
+      const json = /'(\{.*\})'/u.exec(commands[index] ?? "")?.[1] ?? "{}";
+      expect(JSON.parse(json)).toEqual({ command: "<atm-mcp.exe>", args: ["--profile", profile] });
+    }
+    expect(guide).toContain(`\`<atm-mcp.exe>\` 是 \`${shimPath}\``);
+    expect(readFileSync("docs/portable-usage.md", "utf8")).toContain(`\`${shimPath}\``);
+    expect(readFileSync("docs/troubleshooting.md", "utf8")).toContain(
+      `使用 \`${shimPath}\`，参数只有 \`--profile <name>\`，不带环境变量`,
+    );
   });
 });

@@ -24,6 +24,8 @@ const FIXTURE_FILES = [
   "packages/ui/src/app.tsx",
   "apps/desktop/src/main.ts",
   "apps/desktop/src/preload.ts",
+  "apps/desktop/native/mcp-shim/src/main.rs",
+  "apps/desktop/native/mcp-shim/src/http.rs",
   "apps/daemon/src/index.ts",
   // The daemon version moved into the single-source runtime-discovery module;
   // keep the e2e fixture representative of the files that carry the version.
@@ -147,6 +149,15 @@ describe("非签发按阶段依赖复用", () => {
     expect(withoutUi["e2e"]).not.toBe(base["e2e"]);
     expect(withoutUi["benchmark"]).toBe(base["benchmark"]);
     expect(withoutUi["distribution-smoke"]).toBe(base["distribution-smoke"]);
+
+    // 原生 shim 随包安装：改它必须重跑安装烟测，与存储性能无关。
+    const withoutShimSource = await computeStageHashes(
+      root,
+      FIXTURE_FILES.filter((file) => file !== "apps/desktop/native/mcp-shim/src/main.rs"),
+      currentVersion,
+    );
+    expect(withoutShimSource["distribution-smoke"]).not.toBe(base["distribution-smoke"]);
+    expect(withoutShimSource["benchmark"]).toBe(base["benchmark"]);
   });
 
   // 版本号散落在 package.json 和多个 src 文件里，而这些正好落在三个阶段的

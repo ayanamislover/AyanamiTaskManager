@@ -33,6 +33,31 @@ export function assertPublishedLogoBytes(bytes: Buffer, entry: string): void {
   }
 }
 
+/**
+ * 包里的 atm-mcp.exe 必须带版本资源，而且 ProductVersion 就是本次发布的版本。
+ *
+ * 缺版本资源说明 rc.exe 那一步没跑；版本对不上说明拷进包的是一份旧构建。两种都能正常
+ * 转发 MCP，功能测试发现不了，只能在这里拦。VS_VERSIONINFO 的 String 结构是
+ * UTF-16LE 的键、NUL、补齐到 4 字节边界的 0～2 个字节，然后是 UTF-16LE 的值和 NUL。
+ */
+export function assertMcpShimVersionResource(bytes: Buffer, version: string): void {
+  const nul = String.fromCharCode(0);
+  const key = Buffer.from(`ProductVersion${nul}`, "utf16le");
+  const expected = Buffer.from(`${version}${nul}`, "utf16le");
+  const at = bytes.indexOf(key);
+  if (at < 0 || !bytes.includes(Buffer.from("AyanamiTaskManager MCP stdio bridge", "utf16le")))
+    throw new Error("PACKAGED_MCP_SHIM_VERSION_RESOURCE_MISSING");
+  let value = at + key.length;
+  // 补齐是相对资源结构对齐的，不是相对文件偏移；值的首字符不会是 NUL，见零就跳。
+  if (value + 2 <= bytes.length && bytes.readUInt16LE(value) === 0) value += 2;
+  if (!bytes.subarray(value, value + expected.length).equals(expected)) {
+    let end = value;
+    while (end + 2 <= bytes.length && end < value + 64 && bytes.readUInt16LE(end) !== 0) end += 2;
+    const found = bytes.subarray(value, end).toString("utf16le");
+    throw new Error(`PACKAGED_MCP_SHIM_VERSION_MISMATCH: expected ${version}, found ${found}`);
+  }
+}
+
 const forbiddenEntryPatterns = [
   /^knowledge(?:\/|$)/u,
   /(?:^|\/)knowledge\.sqlite(?:-(?:wal|shm))?$/u,

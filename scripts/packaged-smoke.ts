@@ -7,6 +7,7 @@ import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
+import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
 import {
   generateMutationAcknowledgementDocumentation,
   MUTATION_ACK_DOCUMENTATION_BEGIN,
@@ -16,7 +17,12 @@ import {
   buildAgentDocumentationManifest,
   compareAgentDocumentationManifests,
 } from "../apps/desktop/src/agent-documentation.js";
-import { MCP_RUNTIME_LINK, mcpLaunch, type McpProfile } from "../apps/desktop/src/mcp-launch.js";
+import {
+  MCP_RUNTIME_LINK,
+  MCP_SHIM_FILENAME,
+  mcpLaunch,
+  type McpProfile,
+} from "../apps/desktop/src/mcp-launch.js";
 import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
 
 type Runtime = {
@@ -709,6 +715,9 @@ await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-bo
 const previousBoot = new Date("2020-01-01T00:00:00Z");
 await utimes(lockPath, previousBoot, previousBoot);
 let app = startApp();
+// The app's own autostart self-check writes the shared HKCU Run value (Electron gives
+// no way to namespace it), so a smoke run would otherwise delete the user's real entry.
+const runEntriesBeforeSmoke = readRunEntries();
 try {
   const runtime = await waitForRuntime(app);
   const recoveredLock = JSON.parse(await readFile(lockPath, "utf8"));
@@ -864,12 +873,19 @@ try {
     !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
     launchPath,
   );
+  // 包里带着原生 shim，配置就必须指向它。回落到 Electron-as-node 也能连通，下面的 MCP
+  // 用例照样全绿——所以只能在这里按路径与参数钉死，否则 shim 没生效也看不出来。
+  check(
+    "MCP 启动路径是链接下的原生 shim",
+    launchPath === join(dataDir, MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME),
+    launchPath,
+  );
   for (const [profile, launch] of Object.entries(recordedAgentProfiles)) {
     check(`${profile} 配置使用版本无关启动路径`, launch.command === launchPath, launch.command);
     check(
-      `${profile} 配置写入静态 Profile 参数与 Node bridge 环境`,
-      launch.args.slice(-2).join(" ") === `--profile ${profile}` &&
-        launch.env.ELECTRON_RUN_AS_NODE === "1",
+      `${profile} 配置只带静态 Profile 参数、不带 Node bridge 环境`,
+      launch.args.join(" ") === `--profile ${profile}` &&
+        launch.env.ELECTRON_RUN_AS_NODE === undefined,
       JSON.stringify(launch),
     );
   }
@@ -1043,4 +1059,6 @@ try {
   };
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   throw error;
+} finally {
+  applyRunRestore(loginItemRestorePlan(runEntriesBeforeSmoke, readRunEntries()));
 }

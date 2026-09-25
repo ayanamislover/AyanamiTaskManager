@@ -19,11 +19,59 @@ pnpm atm doctor
 
 开发态 Web 界面固定使用 `127.0.0.1:9999`。若 Vite 报端口占用，先关闭占用 9999 的旧开发进程；不要把 daemon 的 4393/4394 或生产动态端口改成 9999。
 
+## 窗口或托盘意外消失
+
+先区分窗口隐藏到托盘与整个进程结束，托盘图标可能延迟刷新，不能据此确定退出时刻或关联另一个应用。
+
+桌面主实例在 `%LOCALAPPDATA%\AyanamiTaskManager\logs` 保存 `lifecycle.ndjson`（含轮转文件，最多 3 × 256 KiB）和 `lifecycle-state.json`：
+
+- `startup` / `ready`：本次进程及启动方式；每分钟 `heartbeat` 记录主进程 RSS/JS heap 数值与最后存活时间。
+- `shutdown.begin` / `shutdown.complete` / `exit`：正常退出链。退出码为 0 且服务关闭成功，才记录 `clean=true`。
+- `session-end`：Windows 正在结束会话（关机、重启或注销）。系统随后很快终止进程，退出链往往来不及走完，所以这一条是收到通知时同步写下的最后标记。
+- `exception` / `bootstrap.failed`：异常类型、错误码与消息指纹；不保存原始异常消息、堆栈、令牌或任务正文，也不吞掉未捕获异常。
+- `renderer.gone` / `child.gone` / `renderer.load-failed`：Electron 的原因类别和退出码；不保存加载 URL。
+- `previous.unclean`：下一次启动发现上个主实例缺少正常退出记录。可能是外部终止、断电或崩溃，**它本身不是根因**。日志不可写或磁盘已满时也可能缺少证据。
+- `previous.session-end`：上个主实例的最后标记是 `session-end`，即它是随 Windows 关机/注销结束的。这是**已解释**的终止，不记 `previous.unclean`；证据字段（`previousRunId`、`previousPid`、`previousAt`）保持一致，只是结论不同。若关机被取消、进程继续运行，之后任何一条记录（最迟一分钟后的 `heartbeat`）都会覆盖该标记，真正的外部终止仍然记 `previous.unclean`。
+
+提供版本、故障的大致时刻和上述日志即可；不要附带 `runtime/daemon.json`（包含本地令牌）或项目数据库。诊断文件写入失败不会阻止应用运行。此记录功能不能倒推安装前的退出原因，也不等于修复了导致退出的问题。
+
+### 关闭 Agent 后 ATM 也消失
+
+Windows 的 `detached` / `unref` **不**保证子进程脱离宿主的 kill-on-close Job。由 Agent 唤醒、
+或由 Agent 终端直接启动的 ATM，都可能随宿主一起结束。从开始菜单或登录自启启动的 ATM 不受影响。
+
+曾经用「注册当前用户按需计划任务」来绕开这一点，已撤回：那串行为（程序启动带编码命令的
+PowerShell 去注册并运行计划任务）与恶意软件的持久化手法无法区分，卡巴斯基按行为检测报
+`PDM:Trojan.Win32.Generic`。不为了躲过检测而改写实现。
+
+**因此：不要从 Agent 终端启动生产 ATM**，部署后请由用户从开始菜单启动，或等它被正常唤醒。
+已知的一次实例消失（2026-09-23 05:18 本地）就是这样来的：该实例是 09-22 由 Agent 部署时
+从自己的终端启动的，宿主关闭时被连带终止。更早的几次没有诊断日志，原因仍未确定。
+
+诊断日志 `logs/lifecycle.ndjson` 的 `startup` 事件记录了每次启动的 `background` 与 `agentWake`，
+`previous.unclean` 记录上一次是否非正常结束。排查实例消失时先看这两项，再下结论。
+
+注意 `previous.unclean` 曾经把**正常关机**也算在内：2026-09-23 18:15 本地用户正常关机，
+ATM 的最后一条心跳在 28 秒前，退出链没走完，下次启动就记成了 `previous.unclean`——
+读起来像"有东西杀了它"，实际上没有。现已改为在收到 Windows 会话结束通知时同步写下
+`session-end`，下次启动据此记 `previous.session-end`。因此**早于该修复的历史日志里，
+`previous.unclean` 不能直接当作异常终止的证据**，要另行核对系统日志的关机事件（1074 / 6006）。
+
+运行描述符（`runtime/daemon.json`）在 ATM 被强制结束后会残留，其中的 PID 可能已被别的进程复用。
+桥接因此不只看 PID：向记录的端点连接被拒时，视为该实例已失效，唤醒一次并等待新实例发布后重试
+这一次请求；请求已送达后才断开的情况不会重试，避免重复投递。
+
+离线打包可将 `ATM_ELECTRON_ZIP_DIR` 指向已下载、可信且版本匹配的 Electron ZIP 缓存目录，
+不改变运行时版本；仍需通过打包内容检查及真实程序烟测。
+
 ## MCP 无法连接
 
 - 桌面设置中重新运行“连接测试”；
 - 确认配置使用 packaged stdio bridge；手工复制的 Streamable HTTP 配置只对当前运行实例有效；
-- Windows packaged stdio 必须使用 `resources/mcp-stdio.cjs` 配合 `ELECTRON_RUN_AS_NODE=1`，不能直接把 GUI EXE 当 stdio；
+- Windows packaged stdio 使用 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe`，参数只有 `--profile <name>`，不带环境变量；不能直接把 GUI EXE 当 stdio；
+- 若 `atm-mcp.exe` 不见了（常见于被杀毒软件隔离），先从隔离区还原，再重启 ATM；ATM 启动时发现它缺失会把 Agent 配置改回 `AyanamiTaskManager.exe` + `mcp-stdio.cjs` + `ELECTRON_RUN_AS_NODE=1` 的旧方式，还原后下次启动再改回来。改完配置需要重启 Agent 客户端；
+- bridge 的 stderr 里 `ATM_RUNTIME_UNAVAILABLE` 表示 45 秒内没等到 daemon 发布，`ATM_RUNTIME_DESCRIPTOR_INVALID` 表示 `runtime/daemon.json` 内容不合法（不会等待），`MCP_PROFILE_INVALID` 表示 `--profile` 写错；
+- 设置了 `ATM_DATA_DIR` 时，bridge 读取的是该目录下的 `runtime/daemon.json`，须与桌面端一致；
 - `401` 表示 token 错误或已随 daemon 重启过期；优先重载 stdio bridge，手工 HTTP 配置需从设置重新复制；
 - `SESSION_CLOSED` 表示旧 Session 已结束，应重新 `atm_begin`；
 - `SESSION_NOT_RETIRED` 表示 predecessor 没有显式退休，不可 resume。

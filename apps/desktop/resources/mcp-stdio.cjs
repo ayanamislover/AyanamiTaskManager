@@ -47,11 +47,20 @@ function runtime() {
   return current;
 }
 
-function wakeDesktop() {
-  if (!/AyanamiTaskManager\.exe$/i.test(process.execPath)) return;
-  const env = { ...process.env };
+/**
+ * Starting the desktop as a detached child does NOT guarantee it outlives an Agent
+ * host that closes a kill-on-close Job: on Windows the child stays in the host's Job.
+ * A woken ATM can therefore end with the Agent that woke it. Registering a Task
+ * Scheduler entry avoids that, but it is indistinguishable from malware persistence
+ * (Kaspersky flags it as PDM:Trojan.Win32.Generic), so this launcher stays direct.
+ * A desktop started at login or from the Start menu is not affected either way.
+ */
+function wakeDesktop(options = {}) {
+  const execPath = options.execPath ?? process.execPath;
+  const env = { ...(options.env ?? process.env) };
+  if (!/AyanamiTaskManager\.exe$/i.test(execPath)) return;
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(process.execPath, ["--background", "--agent-wake"], {
+  const child = spawn(execPath, ["--background", "--agent-wake"], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -60,12 +69,24 @@ function wakeDesktop() {
   child.unref();
 }
 
-async function waitForRuntime(waitMs = 45_000) {
+async function waitForRuntime(waitMs = 45_000, stale = null) {
   const deadline = Date.now() + waitMs;
   let wakeRequested = false;
   while (true) {
     try {
-      return runtime();
+      const current = runtime();
+      // The caller already saw this instance refuse connections. Its PID may now
+      // belong to an unrelated process, so only a newly published instance counts.
+      if (stale && current.instanceId === stale.instanceId)
+        throw new Error("ATM_RUNTIME_UNAVAILABLE");
+      // A forced host termination leaves the descriptor behind. Do not treat
+      // its mere presence as a live service, or the next Agent cannot wake ATM.
+      try {
+        process.kill(current.pid, 0);
+      } catch (error) {
+        if (error.code !== "EPERM") throw new Error("ATM_RUNTIME_UNAVAILABLE");
+      }
+      return current;
     } catch (error) {
       if (error instanceof Error && error.message === "ATM_RUNTIME_DESCRIPTOR_INVALID") throw error;
       if (!wakeRequested) {
@@ -76,6 +97,19 @@ async function waitForRuntime(waitMs = 45_000) {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
+}
+
+// Only a refused connection proves the request never reached a daemon, so only
+// that case may be retried. Resets or timeouts could follow a delivered request.
+function connectionRefused(error) {
+  const cause = error && typeof error === "object" ? error.cause : undefined;
+  if (!cause || typeof cause !== "object") return false;
+  if (cause.code === "ECONNREFUSED") return true;
+  return (
+    Array.isArray(cause.errors) &&
+    cause.errors.length > 0 &&
+    cause.errors.every((item) => item && item.code === "ECONNREFUSED")
+  );
 }
 
 function profile(args = process.argv.slice(2)) {
@@ -106,16 +140,26 @@ async function main() {
       // Re-read the single discovery source for every request. A long-lived
       // bridge therefore follows an app restart instead of retaining a stale
       // endpoint/token pair from process startup.
+      const forward = (current) =>
+        fetch(`${current.endpoint.replace(/\/$/, "")}${mcpPath}`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${current.token}`,
+            accept: "application/json, text/event-stream",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(message),
+        });
       const current = await waitForRuntime();
-      const response = await fetch(`${current.endpoint.replace(/\/$/, "")}${mcpPath}`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${current.token}`,
-          accept: "application/json, text/event-stream",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(message),
-      });
+      let response;
+      try {
+        response = await forward(current);
+      } catch (error) {
+        if (!connectionRefused(error)) throw error;
+        // Nothing listens on the recorded endpoint: the descriptor outlived its
+        // daemon even if the PID looks alive. Wake ATM and retry exactly once.
+        response = await forward(await waitForRuntime(45_000, current));
+      }
       if (response.status === 202 || response.status === 204) continue;
       const text = await response.text();
       if (response.headers.get("content-type")?.includes("text/event-stream")) {
@@ -142,9 +186,14 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(
-    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
-  );
-  process.exitCode = 1;
-});
+// Exported so the CLI can share one launcher. The require.main guard keeps the
+// stdio loop from stealing a requiring process's stdin/stdout.
+module.exports = { wakeDesktop };
+
+if (require.main === module)
+  main().catch((error) => {
+    process.stderr.write(
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  });

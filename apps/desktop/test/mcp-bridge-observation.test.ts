@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
-import { assertPrivateBytesOnly, observeMcpBridges } from "../src/mcp-bridge-observation.js";
+import {
+  assertPrivateBytesOnly,
+  observeMcpBridgeCommands,
+  observeMcpBridges,
+} from "../src/mcp-bridge-observation.js";
 
 const MIB = 1024 * 1024;
 
@@ -156,5 +160,58 @@ describe("MCP bridge 只读观测", () => {
     );
     expect(() => assertPrivateBytesOnly(source)).not.toThrow();
     expect(source).not.toMatch(/Get-(?:CimInstance|WmiObject)/u);
+  });
+
+  // 切到原生 shim 之后，已开着的会话仍握着 Electron-as-node 旧配置直到重启。两种都要数，
+  // 只数新的会把省下来的量算多。两次观测是并发的，所以按参数分派而不是按调用顺序。
+  it("同时统计 shim 与旧 Electron 桥，同一路径只查一次", async () => {
+    const shim = "C:\\ATM\\current\\resources\\atm-mcp.exe";
+    const electron = "C:\\ATM\\current\\AyanamiTaskManager.exe";
+    const csv = (instance: string, pid: number, parent: number) =>
+      [
+        `"(PDH-CSV 4.0)","\\\\HOST\\Process(${instance})\\ID Process","\\\\HOST\\Process(${instance})\\Creating Process ID"`,
+        `"08/27/2026 03:02:00.000","${pid}.000000","${parent}.000000"`,
+      ].join("\r\n");
+    const execute = vi.fn(async (file: string, args: string[]) => {
+      const text = args.join(" ");
+      if (file === "powershell.exe" && text.includes("Get-Process -Name 'atm-mcp'"))
+        return {
+          stdout: JSON.stringify([
+            { pid: 5101, startedAt: "2026-08-27T02:00:00.000Z", privateBytes: 1 * MIB },
+          ]),
+        };
+      if (file === "powershell.exe" && text.includes("Get-Process -Name 'AyanamiTaskManager'"))
+        return {
+          stdout: JSON.stringify([
+            { pid: 4101, startedAt: "2026-08-27T01:00:00.000Z", privateBytes: 30 * MIB },
+          ]),
+        };
+      if (file === "typeperf.exe" && text.includes("Process(atm-mcp*)"))
+        return { stdout: csv("atm-mcp", 5101, 202) };
+      if (file === "typeperf.exe" && text.includes("Process(AyanamiTaskManager*)"))
+        return { stdout: csv("AyanamiTaskManager", 4101, 101) };
+      if (file === "powershell.exe" && text.includes("$ids"))
+        return {
+          stdout: JSON.stringify([
+            { pid: 101, name: "codex" },
+            { pid: 202, name: "claude" },
+          ]),
+        };
+      throw new Error(`unexpected call: ${file} ${text.slice(0, 80)}`);
+    });
+
+    const observation = await observeMcpBridgeCommands({
+      bridgeCommands: [shim, electron, shim.toUpperCase()],
+      now: () => new Date("2026-08-27T03:02:03.000Z"),
+      execute,
+    });
+
+    expect(observation.bridges.map(({ pid, ownerName }) => ({ pid, ownerName }))).toEqual([
+      { pid: 5101, ownerName: "claude" },
+      { pid: 4101, ownerName: "codex" },
+    ]);
+    expect(observation.totalPrivateBytes).toBe(31 * MIB);
+    // 两条不同路径各三次调用；大小写不同的重复路径不再查询。
+    expect(execute).toHaveBeenCalledTimes(6);
   });
 });

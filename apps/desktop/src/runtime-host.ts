@@ -88,7 +88,7 @@ function bundledDocumentationRoot(): string {
   return app.isPackaged ? process.resourcesPath : app.getAppPath();
 }
 
-function bundledMcpStdioPath(): string {
+export function bundledMcpStdioPath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, "mcp-stdio.cjs")
     : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs");

@@ -14,11 +14,12 @@
  *   ... --resume                                             # 仅完整指纹命中时复用
  *   ... --skip-install                                      # 只跑到产出 release/
  */
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { launchDirect, launchThroughShell } from "./launch-installed-app.js";
 import {
   assertReleaseArtifact,
   assertReleaseResumeEvidence,
@@ -333,28 +334,68 @@ if (stale.length > 0) {
 }
 
 step("启动并对运行实例实测");
-spawn(join(installRoot, "AyanamiTaskManager.exe"), [], { detached: true, stdio: "ignore" }).unref();
+const installedLauncher = join(installRoot, "AyanamiTaskManager.exe");
 const runtimePath = join(localAppData, "AyanamiTaskManager", "runtime", "daemon.json");
-let status: Record<string, unknown> | null = null;
-for (let i = 0; i < 60; i += 1) {
-  await sleep(1000);
-  if (!existsSync(runtimePath)) continue;
-  try {
-    const runtime = JSON.parse(readFileSync(runtimePath, "utf8")) as {
-      endpoint: string;
-      token: string;
-    };
-    const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
-      headers: { authorization: `Bearer ${runtime.token}` },
-    });
-    if (!response.ok) continue;
-    status = (await response.json()) as Record<string, unknown>;
-    break;
-  } catch {
-    // daemon 还没起来
+
+async function waitForStatus(seconds: number): Promise<Record<string, unknown> | null> {
+  for (let i = 0; i < seconds; i += 1) {
+    await sleep(1000);
+    if (!existsSync(runtimePath)) continue;
+    try {
+      const runtime = JSON.parse(readFileSync(runtimePath, "utf8")) as {
+        endpoint: string;
+        token: string;
+      };
+      const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+        headers: { authorization: `Bearer ${runtime.token}` },
+      });
+      if (!response.ok) continue;
+      return (await response.json()) as Record<string, unknown>;
+    } catch {
+      // daemon 还没起来
+    }
   }
+  return null;
 }
+
+// 交给桌面 shell 启动：这条命令跑在 Agent 终端里，直接拉起的正式版会留在宿主的 Job
+// 里、随宿主一起结束，还会带着宿主的环境变量。见 launch-installed-app.ts。
+launchThroughShell(installedLauncher);
+let status = await waitForStatus(20);
+if (!status) {
+  // 没有桌面 shell（服务会话、explorer 未运行）时 explorer 起不来任何东西。不按进程名
+  // 判断：旧会话的 JS 桥与桌面同名，杀掉后会被各 Agent 重新拉起。若 explorer 那边只是慢，
+  // 两个实例里后到的会被单实例锁挡回去，最坏只是多打一条提示。
+  process.stdout.write(
+    "  ⚠ explorer 未能拉起 ATM，改为直接启动。该实例在当前 Agent 宿主内、带着它的环境变量，\n" +
+      "    关闭宿主会连带结束它：验收后请从托盘完全退出，再从开始菜单启动。\n",
+  );
+  launchDirect(installedLauncher);
+}
+status ??= await waitForStatus(45);
 if (!status) throw new Error("DAEMON_UNREACHABLE");
+// 旧会话的桥被杀后会被 Agent 重新拉起，收到请求就会自己唤醒桌面——那也是从 Agent
+// 宿主里直接拉起的。生命周期日志记着最近一次启动是不是这样来的。
+const lifecycleLog = join(localAppData, "AyanamiTaskManager", "logs", "lifecycle.ndjson");
+const lastStartup = existsSync(lifecycleLog)
+  ? readFileSync(lifecycleLog, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line) as { event?: string; version?: string; agentWake?: boolean };
+        } catch {
+          return {};
+        }
+      })
+      .findLast((entry) => entry.event === "startup" && entry.version === target)
+  : undefined;
+if (lastStartup?.agentWake === true) {
+  process.stdout.write(
+    "  ⚠ 运行实例是被 Agent 的 MCP 桥唤醒的，不是本次经 explorer 启动的那个：它在 Agent 宿主内，\n" +
+      "    关闭宿主会连带结束它。验收后请从托盘完全退出，再从开始菜单启动。\n",
+  );
+}
 if (status.ok !== true) throw new Error(`DAEMON_STATUS_NOT_OK: ${String(status.ok)}`);
 if (status.version !== target)
   throw new Error(`VERSION_MISMATCH: 运行实例报 ${String(status.version)}，期望 ${target}`);

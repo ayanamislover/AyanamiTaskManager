@@ -20,13 +20,48 @@ import {
 } from "./startup.js";
 import { UpdateHost } from "./update-host.js";
 import { WindowHost } from "./window-host.js";
+import { createLifecycleDiagnostics, lifecycleError } from "./lifecycle-diagnostics.js";
+
+const lifecycle = createLifecycleDiagnostics(dataDirBeforeReady(), app.getVersion());
+// Monitor only: adding an uncaughtException/unhandledRejection handler would change
+// Node's fatal-error semantics and could leave a damaged process alive.
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  lifecycle.record("exception", { ...lifecycleError(error), origin });
+});
+process.on("exit", (code) => lifecycle.finish(code, cleanShutdown && code === 0));
+app.on("quit", (_event, code) => lifecycle.finish(code, cleanShutdown && code === 0));
+// Electron surfaces the Windows session-end notification on the window, not on app, and
+// powerMonitor's "shutdown" is linux/darwin only. Windows kills the process right after
+// the notification and does not guarantee before-quit, so the marker is written here and
+// synchronously; without it the next start reports a normal shutdown as previous.unclean.
+// The window exists even when ATM starts hidden into the tray, and closing it only hides.
+app.on("browser-window-created", (_event, window) => {
+  window.on("session-end", () => lifecycle.record("session-end"));
+});
+app.on("child-process-gone", (_event, details) => {
+  lifecycle.record("child.gone", {
+    reason: details.reason,
+    exitCode: details.exitCode,
+    processType: details.type,
+  });
+});
+app.on("web-contents-created", (_event, contents) => {
+  contents.on("render-process-gone", (_goneEvent, details) => {
+    lifecycle.record("renderer.gone", { reason: details.reason, exitCode: details.exitCode });
+  });
+  contents.on("did-fail-load", (_loadEvent, code, _description, _url, isMainFrame) => {
+    if (isMainFrame && code !== -3) lifecycle.record("renderer.load-failed", { exitCode: code });
+  });
+});
 
 let runtimeHost: RuntimeHost | null = null;
 let windowHost: WindowHost | null = null;
 let maintenanceTimer: NodeJS.Timeout | null = null;
 let initialMaintenanceTimer: NodeJS.Timeout | null = null;
+let lifecycleTimer: NodeJS.Timeout | null = null;
 let shutdownStarted = false;
 let shutdownComplete = false;
+let cleanShutdown = false;
 const updateHost = new UpdateHost({
   dataDir: dataDirBeforeReady(),
   smokeTrace,
@@ -66,6 +101,12 @@ async function startApplication(background: boolean): Promise<void> {
   maintenanceTimer.unref();
   windowHost.start(background);
   updateHost.start();
+  lifecycle.record("ready");
+  lifecycleTimer = setInterval(() => {
+    const memory = process.memoryUsage();
+    lifecycle.record("heartbeat", { rss: memory.rss, heapUsed: memory.heapUsed });
+  }, 60_000);
+  lifecycleTimer.unref();
 }
 
 async function bootstrap(): Promise<void> {
@@ -87,6 +128,10 @@ async function bootstrap(): Promise<void> {
     app.quit();
     return;
   }
+  lifecycle.start({
+    background: shouldStartInBackground(args, false),
+    agentWake: isAgentWakeRequest(args),
+  });
   // 锁文件要记自身进程的出生时间，而取它是一次 spawnSync(powershell.exe)（实测 p50 约
   // 175ms）。那一步在 startApplication 里同步发生，窗口显示排在它后面。这里先把它踢出去，
   // 让它和下面的 whenReady、随机登录延迟重叠；没赶上也只是退回原来的同步路径。
@@ -124,6 +169,8 @@ async function bootstrap(): Promise<void> {
 }
 
 async function shutdown(): Promise<void> {
+  if (lifecycleTimer) clearInterval(lifecycleTimer);
+  lifecycleTimer = null;
   if (initialMaintenanceTimer) clearTimeout(initialMaintenanceTimer);
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   initialMaintenanceTimer = null;
@@ -131,6 +178,7 @@ async function shutdown(): Promise<void> {
   windowHost?.stopObservers();
   if (runtimeHost) await runtimeHost.close();
   runtimeHost = null;
+  cleanShutdown = true;
 }
 
 app.on("before-quit", (event) => {
@@ -139,8 +187,10 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
+  lifecycle.record("shutdown.begin");
   void shutdown().finally(() => {
     shutdownComplete = true;
+    lifecycle.record(cleanShutdown ? "shutdown.complete" : "shutdown.failed");
     app.quit();
   });
 });
@@ -151,6 +201,7 @@ app.on("will-quit", () => {
 });
 
 void bootstrap().catch((error) => {
+  lifecycle.record("bootstrap.failed", lifecycleError(error));
   smokeTrace(
     "bootstrap.error",
     error instanceof Error ? (error.stack ?? error.message) : String(error),

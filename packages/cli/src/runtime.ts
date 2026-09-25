@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type DaemonRuntime = {
@@ -101,6 +101,8 @@ export async function discoverDaemon(
   if (existing && (await runtimeAvailable(existing))) return existing;
 
   if (/AyanamiTaskManager\.exe$/iu.test(process.execPath)) {
+    // Detached is not Job isolation on Windows: a desktop woken from an Agent host
+    // can still end with that host. See docs/troubleshooting.md.
     const env = { ...process.env };
     delete env.ELECTRON_RUN_AS_NODE;
     const child = spawn(process.execPath, ["--background", "--agent-wake"], {

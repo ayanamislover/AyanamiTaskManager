@@ -34,13 +34,14 @@ import {
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import {
   mcpLaunch,
+  mcpNodeBridgeLaunch,
   mcpProfileLaunches,
   mcpProfileLaunchesStale,
   shouldRepairMcpConfigs,
   type McpLaunch,
   type McpProfileLaunches,
 } from "./mcp-launch.js";
-import { observeMcpBridges } from "./mcp-bridge-observation.js";
+import { observeMcpBridgeCommands } from "./mcp-bridge-observation.js";
 import {
   hasManagedMcpProfile,
   memoryProfileEnabledValue,
@@ -257,7 +258,15 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     repairStaleMcpConfigs(launch, profileLaunches);
     repairMissingAgentSkills();
   }
-  ipcMain.handle("atm:get-mcp-bridges", () => observeMcpBridges({ bridgeCommand: stdioCommand }));
+  // 切到原生 shim 之前开的会话会一直用 Electron-as-node 桥到重启为止；两种都要数，
+  // 否则省下的量会被算多。
+  const nodeBridgeCommand = mcpNodeBridgeLaunch({
+    execPath: options.execPath,
+    dataDir: dataDirBeforeReady(),
+  }).command;
+  ipcMain.handle("atm:get-mcp-bridges", () =>
+    observeMcpBridgeCommands({ bridgeCommands: [stdioCommand, nodeBridgeCommand] }),
+  );
   ipcMain.handle("atm:get-mcp-configs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
     return renderMcpConfigs(
