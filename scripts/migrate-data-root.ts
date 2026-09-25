@@ -119,8 +119,9 @@ function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // EPERM 是「进程在，但无权给它发信号」（比如另一个用户、提权运行的服务），只有 ESRCH 才证明已退出。
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -271,17 +272,36 @@ async function completedMigration(
   };
 }
 
-async function assertSourceStopped(source: string): Promise<void> {
-  const runtimePath = join(source, "runtime", "daemon.json");
-  if (!existsSync(runtimePath)) return;
+const RUNTIME_STATE_RECOVERY =
+  "先退出 ATM 桌面端并确认没有 atm 服务进程仍在使用这个数据根，再删除该 daemon.json 后重试";
+
+/**
+ * 迁移前确认服务已停（ATM-T-0340）。
+ *
+ * 没有 daemon.json 才算「没在运行」：服务正常退出时会删掉它。文件在但读不了、JSON 损坏、
+ * pid 缺失或不合法，都只说明「判定不了」，不能当成已停——原来这几种一律放行，
+ * 迁移会在服务还开着数据库时复制、改名数据根。这里不去杀进程，也不查 WMI：
+ * 未知的进程不归迁移脚本处置，交给人确认。
+ */
+async function assertSourceStopped(root: string): Promise<void> {
+  const runtimePath = join(root, "runtime", "daemon.json");
+  let text: string;
   try {
-    const runtime = JSON.parse(await readFile(runtimePath, "utf8")) as { pid?: unknown };
-    if (typeof runtime.pid === "number" && processAlive(runtime.pid))
-      throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${runtime.pid}`);
+    text = await readFile(runtimePath, "utf8");
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("SOURCE_DAEMON_STILL_RUNNING"))
-      throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(`RUNTIME_STATE_UNREADABLE:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
   }
+  let runtime: unknown;
+  try {
+    runtime = JSON.parse(text);
+  } catch {
+    throw new Error(`RUNTIME_STATE_CORRUPT:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
+  }
+  const pid = (runtime as { pid?: unknown } | null)?.pid;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0)
+    throw new Error(`RUNTIME_STATE_PID_INVALID:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
+  if (processAlive(pid)) throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${pid}`);
 }
 
 function rewritePath(value: string, source: string, destination: string): string {
