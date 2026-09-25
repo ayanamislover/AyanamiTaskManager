@@ -98,16 +98,36 @@ export class ChecklistCommands {
         // 归属校验要排在版本校验之前：task_key 写错时先说清楚改错了对象，
         // 而不是让调用方去追一个「版本对不上」的假线索。batch 在 186-212 做的是同一件事。
         validateTaskOwnership(row);
-        if (row.version !== input.expectedVersion)
+        if (row.version !== input.expectedVersion) {
+          // single 比检查项版本、batch 比任务版本，字段名却一样（ATM-R-240）。传进来的恰好等于
+          // 任务版本时，多半是拿错了那一种：直接说破，省得调用方重读任务后再撞一次。
+          const taskVersion = (
+            this.#sqlite
+              .prepare("SELECT version FROM work_items WHERE id = ?")
+              .get(row.work_item_id) as { version: number }
+          ).version;
           throw new AtmError("VERSION_CONFLICT", {
-            message: "检查项版本已变化",
+            message:
+              taskVersion === input.expectedVersion
+                ? "检查项版本已变化：传入的像是任务版本，checklist_single 要传这条检查项自己的 version"
+                : "检查项版本已变化",
             details: {
               entity: "CHECKLIST",
               key: input.checklistId,
               expected: input.expectedVersion,
               actual: row.version,
+              ...(taskVersion === input.expectedVersion
+                ? {
+                    hint: "TASK_VERSION_PASSED",
+                    task_version: taskVersion,
+                    checklist_version: row.version,
+                    usage:
+                      "checklist_single 的 expected_version 取 atm_task_get(view=full) 的 checklist[].version",
+                  }
+                : {}),
             },
           });
+        }
         const evidence = normalizedInput.evidence ?? readJson(row.evidence_json, []);
         if (
           input.status === "DONE" &&
@@ -255,6 +275,14 @@ export class ChecklistCommands {
             continue;
           }
           rows.push({ row, item, evidence });
+        }
+        // 反方向的拿错：batch 比任务版本，传进来的却等于某条检查项的版本（ATM-R-240）。
+        const conflict = reasons.find(
+          (reason): reason is Extract<ChecklistBatchFailureReason, { code: "VERSION_CONFLICT" }> =>
+            reason.code === "VERSION_CONFLICT",
+        );
+        if (conflict && rows.some(({ row }) => row.version === input.expectedVersion)) {
+          conflict.hint = "CHECKLIST_VERSION_PASSED";
         }
         if (reasons.length > 0) throw new ChecklistBatchFailureError(reasons);
 

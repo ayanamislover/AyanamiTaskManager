@@ -248,6 +248,8 @@ export const ChecklistBatchFailureReasonSchema = z.discriminatedUnion("code", [
       code: z.literal("VERSION_CONFLICT"),
       expected: z.number().int().nonnegative(),
       actual: z.number().int().nonnegative(),
+      // expected 恰好等于批内某条检查项的版本：多半把检查项版本当成了任务版本。
+      hint: z.literal("CHECKLIST_VERSION_PASSED").optional(),
     })
     .strict(),
   z
@@ -267,7 +269,11 @@ function checklistBatchFailureMessage(reasons: readonly ChecklistBatchFailureRea
   return reasons
     .map((reason) => {
       if (reason.code === "VERSION_CONFLICT") {
-        return `version conflict (${reason.task_key}: expected ${reason.expected}, actual ${reason.actual})`;
+        const hint =
+          reason.hint === "CHECKLIST_VERSION_PASSED"
+            ? "; checklist_batch expects the task version, not a checklist item version"
+            : "";
+        return `version conflict (${reason.task_key}: expected ${reason.expected}, actual ${reason.actual}${hint})`;
       }
       if (reason.code === "EVIDENCE_REQUIRED") return `evidence required (${reason.checklist_id})`;
       if (reason.code === "TASK_MISMATCH") {
