@@ -22,8 +22,8 @@ export type BriefSection = keyof typeof briefSections;
 export const briefSectionNames = Object.keys(briefSections) as [BriefSection, ...BriefSection[]];
 export const briefAlwaysKeys: readonly string[] = ["truncated", "project", "seq"];
 const BRIEF_CURSOR_TTL_MS = 30 * 60 * 1000;
-const BRIEF_CURSOR_PREFIX = "b2";
-const BRIEF_CURSOR_HASH_DOMAIN = "AYANAMI_TASK_MANAGER_BRIEF_CURSOR_V2\0";
+const BRIEF_CURSOR_PREFIX = "b3";
+const BRIEF_CURSOR_HASH_DOMAIN = "AYANAMI_TASK_MANAGER_BRIEF_CURSOR_V3\0";
 
 // include 为空表示全要；非空时只保留被点名的分节。
 export function pickBriefSections(
@@ -67,13 +67,17 @@ export function compactBriefTask(value: unknown): Record<string, unknown> {
 // handoff / currentTask / task 放在最后，宁可只剩它们也不要退化成空回执。
 // task 与 delta 只在调用方显式传了 task_key / since_seq 时才存在，
 // 属于点名要的内容，因此排在泛泛的 records / progress 之后。
+//
+// records 排在 own / counts / objective / next 之前：它是唯一能沿 continuation 续读的分节，
+// 让位之后一条不丢；那几个分节加起来才几十到一两百字符，丢了却再也拿不回来。
+// 旧顺序在默认预算下先把它们全丢光，只剩一条 Record 和一个放不下的游标（ATM-T-0405）。
 export const briefDropOrder: readonly BriefSection[] = [
   "artifacts",
+  "records",
   "own",
   "counts",
   "objective",
   "next",
-  "records",
   "progress",
   "delta",
   "task",
@@ -84,12 +88,8 @@ export const briefDropOrder: readonly BriefSection[] = [
 export type BriefRecordSnapshot = readonly [key: string, version: string];
 
 export type BriefCursor = {
-  v: 2;
-  p: string;
-  s: string;
-  i: number;
-  q: string;
-  x: "records";
+  v: 3;
+  t: string;
   o: number;
   r: BriefRecordSnapshot[];
   n: number;
@@ -109,10 +109,6 @@ function briefIncludeMask(include: readonly BriefSection[]): number {
   return selected.reduce((mask, name) => mask | (1 << briefSectionNames.indexOf(name)), 0);
 }
 
-function briefQueryHash(taskKey: string | undefined, sinceSeq: number | undefined): string {
-  return briefHash([taskKey ?? null, sinceSeq ?? null], 8);
-}
-
 function briefCursorExpiry(now = Date.now()): number {
   // Keep tokens deterministic inside a time bucket while guaranteeing that a
   // cursor created just before the next boundary still receives a full TTL.
@@ -127,7 +123,7 @@ function briefRecordEntries(payload: Record<string, unknown>): Array<Record<stri
 }
 
 function briefRecordVersion(record: Record<string, unknown>): string {
-  return briefHash(record, 12);
+  return briefHash(record, 6);
 }
 
 export async function captureBriefRecordSnapshot(
@@ -161,6 +157,7 @@ function projectBriefRecord(record: Record<string, unknown>): Record<string, unk
     kind: record.kind,
     summary: record.summary,
     importance: record.importance,
+    source_type: record.sourceType ?? record.source_type,
   };
 }
 
@@ -174,7 +171,8 @@ export async function resolveBriefRecordSnapshot(
     briefRecordEntries(payload).map((record) => [String(record.key), record] as const),
   );
   const resolved: Array<Record<string, unknown>> = [];
-  for (const [key, expectedVersion] of cursor.r) {
+  for (const [shortKey, expectedVersion] of cursor.r) {
+    const key = fullRecordKey(project, shortKey);
     let canonical: Record<string, unknown>;
     try {
       canonical = plain(await service.getRecord(project, key));
@@ -190,32 +188,51 @@ export async function resolveBriefRecordSnapshot(
   return resolved;
 }
 
-export function encodeBriefCursor(cursor: BriefCursor): string {
-  const payload = Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-  const signature = createHash("sha256")
+// v3 线格式：`b3.<target>.<offset>.<seq>.<expiry>.<records>.<signature>`，全部是
+// base64url / 十进制 / key 字符，不再整体 JSON + base64。v2 在 8 条 Record 时约 560 字符，
+// 默认预算下连游标都放不下，brief 只好退化成 continuation_omitted（ATM-T-0405）。
+// 项目、Session、include 与查询参数只以一个 target 哈希出现：续读请求本来就要重传它们，
+// 游标只需证明两次请求指向同一目标。Record key 省去 `<项目>-` 前缀，版本取 6 字节摘要。
+const RECORD_KEY_PATTERN = /^[A-Z0-9][A-Z0-9-]*$/u;
+const RECORD_VERSION_PATTERN = /^[A-Za-z0-9_-]{8}$/u;
+const DECIMAL_PATTERN = /^(?:0|[1-9]\d{0,15})$/u;
+
+function briefSignature(body: string): Buffer {
+  return createHash("sha256")
     .update(BRIEF_CURSOR_HASH_DOMAIN, "utf8")
-    .update(payload, "utf8")
+    .update(body, "utf8")
     .digest()
-    .subarray(0, 16)
-    .toString("base64url");
-  return `${BRIEF_CURSOR_PREFIX}.${payload}.${signature}`;
+    .subarray(0, 16);
+}
+
+export function encodeBriefCursor(cursor: BriefCursor): string {
+  const records = cursor.r.map(([key, version]) => `${key}:${version}`).join(",");
+  const body = [BRIEF_CURSOR_PREFIX, cursor.t, cursor.o, cursor.n, cursor.e, records].join(".");
+  return `${body}.${briefSignature(body).toString("base64url")}`;
+}
+
+function decimal(value: string | undefined): number {
+  if (value === undefined || !DECIMAL_PATTERN.test(value)) throw new Error("shape");
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) throw new Error("shape");
+  return parsed;
 }
 
 export function decodeBriefCursor(token: string): BriefCursor {
   const expired = Symbol("brief-cursor-expired");
   try {
-    const [prefix, payload, signature, extra] = token.split(".");
-    if (prefix !== BRIEF_CURSOR_PREFIX || !payload || !signature || extra !== undefined) {
-      throw new Error("shape");
-    }
-    if (Buffer.from(payload, "base64url").toString("base64url") !== payload) {
-      throw new Error("encoding");
-    }
-    const expected = createHash("sha256")
-      .update(BRIEF_CURSOR_HASH_DOMAIN, "utf8")
-      .update(payload, "utf8")
-      .digest()
-      .subarray(0, 16);
+    const parts = token.split(".");
+    if (parts.length !== 7 || parts[0] !== BRIEF_CURSOR_PREFIX) throw new Error("shape");
+    const [, target, offset, seq, expiry, records, signature] = parts as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    const expected = briefSignature(parts.slice(0, 6).join("."));
     const received = Buffer.from(signature, "base64url");
     if (
       received.toString("base64url") !== signature ||
@@ -224,32 +241,31 @@ export function decodeBriefCursor(token: string): BriefCursor {
     ) {
       throw new Error("signature");
     }
-    const value = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as BriefCursor;
+    const r = records.split(",").map((entry) => {
+      const [key, version, extra] = entry.split(":");
+      if (
+        extra !== undefined ||
+        !key ||
+        !version ||
+        !RECORD_KEY_PATTERN.test(key) ||
+        !RECORD_VERSION_PATTERN.test(version)
+      ) {
+        throw new Error("shape");
+      }
+      return [key, version] as const;
+    });
+    const value: BriefCursor = {
+      v: 3,
+      t: target,
+      o: decimal(offset),
+      r,
+      n: decimal(seq),
+      e: decimal(expiry),
+    };
     if (
-      value.v !== 2 ||
-      typeof value.p !== "string" ||
-      typeof value.s !== "string" ||
-      !Number.isInteger(value.i) ||
-      typeof value.q !== "string" ||
-      value.x !== "records" ||
-      !Number.isInteger(value.o) ||
-      value.o < 0 ||
-      !Array.isArray(value.r) ||
-      value.r.length === 0 ||
-      value.r.length > 8 ||
-      value.r.some(
-        (record) =>
-          !Array.isArray(record) ||
-          record.length !== 2 ||
-          typeof record[0] !== "string" ||
-          !record[0] ||
-          typeof record[1] !== "string" ||
-          !record[1],
-      ) ||
-      value.o > value.r.length ||
-      !Number.isSafeInteger(value.n) ||
-      value.n < 0 ||
-      !Number.isSafeInteger(value.e) ||
+      !/^[A-Za-z0-9_-]{11}$/u.test(value.t) ||
+      r.length > 8 ||
+      value.o > r.length ||
       value.e <= 0
     ) {
       throw new Error("shape");
@@ -276,46 +292,56 @@ export function decodeBriefCursor(token: string): BriefCursor {
   }
 }
 
-export function makeBriefCursor(input: {
+type BriefTarget = {
   project: string;
   sessionId?: string;
   include: readonly BriefSection[];
   taskKey?: string;
   sinceSeq?: number;
-  offset: number;
-  recordSnapshot: BriefRecordSnapshot[];
-  snapshotSeq: number;
-}): string {
+};
+
+function briefTargetHash(input: BriefTarget): string {
+  return briefHash(
+    [
+      input.project.toUpperCase(),
+      input.sessionId ?? "",
+      briefIncludeMask(input.include),
+      input.taskKey ?? null,
+      input.sinceSeq ?? null,
+    ],
+    8,
+  );
+}
+
+function shortRecordKey(project: string, key: string): string {
+  const prefix = `${project.toUpperCase()}-`;
+  return key.startsWith(prefix) ? key.slice(prefix.length) : key;
+}
+
+/** 游标里的 key 省去了项目前缀；`R-12` 这种形状只可能是省略过的。 */
+export function fullRecordKey(project: string, key: string): string {
+  return /^[A-Z]-\d+$/u.test(key) ? `${project.toUpperCase()}-${key}` : key;
+}
+
+export function makeBriefCursor(
+  input: BriefTarget & {
+    offset: number;
+    recordSnapshot: BriefRecordSnapshot[];
+    snapshotSeq: number;
+  },
+): string {
   return encodeBriefCursor({
-    v: 2,
-    p: input.project.toUpperCase(),
-    s: input.sessionId ?? "",
-    i: briefIncludeMask(input.include),
-    q: briefQueryHash(input.taskKey, input.sinceSeq),
-    x: "records",
+    v: 3,
+    t: briefTargetHash(input),
     o: input.offset,
-    r: input.recordSnapshot,
+    r: input.recordSnapshot.map(([key, version]) => [shortRecordKey(input.project, key), version]),
     n: input.snapshotSeq,
     e: briefCursorExpiry(),
   });
 }
 
-export function validateBriefCursorRequest(
-  cursor: BriefCursor,
-  input: {
-    project: string;
-    sessionId?: string;
-    include: readonly BriefSection[];
-    taskKey?: string;
-    sinceSeq?: number;
-  },
-): void {
-  if (
-    cursor.p !== input.project.toUpperCase() ||
-    cursor.s !== (input.sessionId ?? "") ||
-    cursor.i !== briefIncludeMask(input.include) ||
-    cursor.q !== briefQueryHash(input.taskKey, input.sinceSeq)
-  ) {
+export function validateBriefCursorRequest(cursor: BriefCursor, input: BriefTarget): void {
+  if (cursor.t !== briefTargetHash(input)) {
     throw new AtmError("CONTINUATION_CONFLICT", {
       message: "brief continuation 请求身份已变化",
       details: {
