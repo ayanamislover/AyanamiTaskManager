@@ -7,6 +7,8 @@ export default defineConfig({
     // 测试库不 fsync：见 packages/storage-sqlite/src/database.ts 的 sqliteSynchronousMode。
     // 本地 NVMe 实测全量用例耗时 165s→88s；CI runner 磁盘慢时差距按 fsync 延迟线性放大。
     env: { ATM_TEST_SQLITE_SYNCHRONOUS: "OFF" },
+    // 临时目录清理遇到 Windows 暂时性占用时有界重试：见 scripts/test-setup/retrying-temp-removal.ts。
+    setupFiles: ["scripts/test-setup/vitest-setup.ts"],
     testTimeout: 30_000,
     hookTimeout: 30_000,
     // Windows 上大量并行 Git/SQLite 夹具会争抢临时目录与子进程，导致业务断言之外的
