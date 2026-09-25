@@ -2,6 +2,8 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, relative, resolve, sep } from "node:path";
 
+import { stampAgentGuide, type AgentGuideBuild } from "./agent-guide-stamp.js";
+
 export const AGENT_GUIDE_FILENAME = "ATM_AGENT_GUIDE.md";
 
 export type AgentDocumentationManifestEntry = Readonly<{
@@ -130,6 +132,33 @@ export function buildAgentDocumentationManifest(
     docsPath: join(root, "docs"),
     skillsPath: join(root, ...(layout === "bundled" ? ["integrations", "skills"] : ["skills"])),
   });
+}
+
+/**
+ * 源仓文档打包之后应有的 manifest：guide 换成盖了构建戳的版本，其余逐字不变。
+ * 打包校验与 smoke 用它替代「和源仓逐字相同」，其余文件仍按逐字比对。
+ */
+export function buildStampedSourceManifest(
+  root: string,
+  build: AgentGuideBuild,
+): AgentDocumentationManifest {
+  const source = buildAgentDocumentationManifest(root, "bundled");
+  const stamped = Buffer.from(
+    stampAgentGuide(readFileSync(join(root, AGENT_GUIDE_FILENAME), "utf8"), build),
+    "utf8",
+  );
+  return {
+    version: 1,
+    entries: source.entries.map((entry) =>
+      entry.path === AGENT_GUIDE_FILENAME
+        ? {
+            path: entry.path,
+            bytes: stamped.byteLength,
+            sha256: createHash("sha256").update(stamped).digest("hex"),
+          }
+        : entry,
+    ),
+  };
 }
 
 export function compareAgentDocumentationManifests(
