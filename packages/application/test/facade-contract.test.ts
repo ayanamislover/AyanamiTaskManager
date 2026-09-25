@@ -94,6 +94,7 @@ const EXPECTED_PROTOTYPE_METHODS = [
   "promoteQuickTask",
   "publishProjectUpdateAsUser",
   "recentChecklistChanges",
+  "recentTaskProgress",
   "recentWorkItemChanges",
   "reconcileProject",
   "reconcileProjectPage",
