@@ -73,6 +73,12 @@ describe("MCP static profiles", () => {
       expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 8164, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(8);
+      // ATM-R-238：memory 贴着预算跑，知识库三件套（约 3.5 KB）是拆独立 profile 的现成候选。
+      // 余量掉到 300 以下就不要再改上面钉住的字节数了事，按那条记录把知识库拆出去。
+      expect(
+        9728 - mcpSchemaBytes(memory.tools),
+        "memory profile 余量不足 300 字节：按 ATM-R-238 把知识库工具拆成独立 profile",
+      ).toBeGreaterThanOrEqual(300);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);
       expect(() =>
         assertMcpSchemaBudget([
