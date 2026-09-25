@@ -66,6 +66,15 @@ export function assertSqliteCapabilities(sqlite: Database.Database): void {
     });
 }
 
+// synchronous=FULL 让 WAL 每次提交都 fsync，这是生产数据的持久性底线，不能放松。
+// 测试进程里它只剩代价：断电才看得出的差别，用例观测不到；而每个用例新建库、几十次提交，
+// fsync 占了 SQLite 用例七成耗时，CI runner 磁盘一抖就被放大成 30s 超时，且同步 I/O
+// 期间连超时计时器都跑不了。所以只在 Vitest 进程（及其子进程）且显式声明时关掉 fsync；
+// 缺任何一个条件都回到 FULL，单独一个环境变量漏进生产也放松不了持久性。
+export function sqliteSynchronousMode(env: NodeJS.ProcessEnv = process.env): "FULL" | "OFF" {
+  return env.VITEST === "true" && env.ATM_TEST_SQLITE_SYNCHRONOUS === "OFF" ? "OFF" : "FULL";
+}
+
 export async function openManagedDatabase(input: {
   path: string;
   migrationDirectory: string;
@@ -75,8 +84,9 @@ export async function openManagedDatabase(input: {
   mkdirSync(dirname(input.path), { recursive: true });
   const sqlite = new Database(input.path);
   try {
+    // 先定 synchronous：新库切 WAL 要写库头，按连接默认的 FULL 会先 fsync 一轮。
+    sqlite.pragma(`synchronous = ${sqliteSynchronousMode()}`);
     sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("synchronous = FULL");
     sqlite.pragma("foreign_keys = ON");
     sqlite.pragma("busy_timeout = 5000");
     sqlite.pragma("wal_autocheckpoint = 1000");
