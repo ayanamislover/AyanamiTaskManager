@@ -16,6 +16,9 @@ overrides:
   '@xmldom/xmldom@>=0.9 <0.9.12': 0.9.12
   js-yaml@>=4 <4.3.2: 4.3.2
 
+patchedDependencies:
+  '@electron-forge/core@7.11.2': 6fee583e051efb7694e47f729da02324ad81f61ee922d3d663e24c130f8e5fdf
+
 importers:
 
   .:
@@ -65,7 +68,7 @@ importers:
         version: 7.11.2(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)
       '@electron-forge/core':
         specifier: 7.11.2
-        version: 7.11.2(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)
+        version: 7.11.2(patch_hash=6fee583e051efb7694e47f729da02324ad81f61ee922d3d663e24c130f8e5fdf)(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)
       '@electron-forge/maker-squirrel':
         specifier: 7.11.2
         version: 7.11.2(bluebird@3.7.2)(supports-color@8.1.1)
@@ -4204,7 +4207,7 @@ snapshots:
 
   '@electron-forge/cli@7.11.2(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)':
     dependencies:
-      '@electron-forge/core': 7.11.2(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)
+      '@electron-forge/core': 7.11.2(patch_hash=6fee583e051efb7694e47f729da02324ad81f61ee922d3d663e24c130f8e5fdf)(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)
       '@electron-forge/core-utils': 7.11.2(bluebird@3.7.2)(supports-color@8.1.1)
       '@electron-forge/shared-types': 7.11.2(bluebird@3.7.2)(supports-color@8.1.1)
       '@electron/get': 3.1.0(supports-color@8.1.1)
@@ -4251,7 +4254,7 @@ snapshots:
       - bluebird
       - supports-color
 
-  '@electron-forge/core@7.11.2(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)':
+  '@electron-forge/core@7.11.2(patch_hash=6fee583e051efb7694e47f729da02324ad81f61ee922d3d663e24c130f8e5fdf)(bluebird@3.7.2)(encoding@0.1.13)(esbuild@0.27.2)(postcss@8.5.26)(supports-color@8.1.1)':
     dependencies:
       '@electron-forge/core-utils': 7.11.2(bluebird@3.7.2)(supports-color@8.1.1)
       '@electron-forge/maker-base': 7.11.2(bluebird@3.7.2)(supports-color@8.1.1)
