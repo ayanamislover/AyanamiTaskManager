@@ -210,8 +210,13 @@ export class ProjectActivityReadModel {
     };
   }
 
+  /**
+   * sinceSequence 为 null 时取最新的 limit 条（仍按 seq 升序返回）。跨 Session 恢复时
+   * 调用方手里恰好没有上次的 seq——它在被压缩掉的上下文里——而从当前 seq 往后按定义是空的。
+   * 最新窗口之后没有更新的事件，hasMore 恒为 false；更早的事件用返回的首个 seq 往前另查。
+   */
   delta(
-    sinceSequence: number,
+    sinceSequence: number | null,
     limit = 50,
     types: string[] = [],
   ): {
@@ -233,21 +238,23 @@ export class ProjectActivityReadModel {
     currentSequence: number;
     hasMore: boolean;
   } {
-    const clauses = ["sequence > ?"];
-    const params: unknown[] = [sinceSequence];
+    const clauses = sinceSequence === null ? ["1 = 1"] : ["sequence > ?"];
+    const params: unknown[] = sinceSequence === null ? [] : [sinceSequence];
     if (types.length > 0) {
       clauses.push(`type IN (${types.map(() => "?").join(",")})`);
       params.push(...types);
     }
     const bounded = Math.max(1, Math.min(100, limit));
-    params.push(bounded + 1);
-    const rows = this.#sqlite
+    params.push(sinceSequence === null ? bounded : bounded + 1);
+    const selected = this.#sqlite
       .prepare(
         `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
                 payload_json, created_at, op_id FROM events
-         WHERE ${clauses.join(" AND ")} ORDER BY sequence LIMIT ?`,
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY sequence ${sinceSequence === null ? "DESC" : ""} LIMIT ?`,
       )
       .all(...params) as any[];
+    const rows = sinceSequence === null ? selected.reverse() : selected;
     const hasMore = rows.length > bounded;
     return {
       events: rows.slice(0, bounded).map((row) => {

@@ -7,7 +7,7 @@ Surface: `v5`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 7913 | `d2cef6a6c9b4a6346371f12e24d644b08b10c28be603ce413f6d1f8133831645` |
-| memory | 9147 | `bbb5351a682d85fbd3f078a343fbb8a8d42fd49cacec493c225dc0ba59890393` |
+| memory | 9180 | `aba2e761a67f8b1a96dcdc8af6aa9c3cc6ef89544c115b559d63b270f5eec1f9` |
 | actions | 7975 | `2e20175aabf65c942d374929db2758018cc804155bba4b72069064b444aed2b9` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -22,7 +22,7 @@ Surface: `v5`
 | memory | `atm_record` | 保存关键记录。kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON；importance=LOW\|NORMAL\|HIGH\|CRITICAL。summary 上限 300 个 code point，长内容放 detail。 | false | false | `1295ceac3e229287` |
 | memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。severity=LOW\|NORMAL\|HIGH\|CRITICAL。 | false | false | `03389ebe6d38b74c` |
 | memory | `atm_search` | 搜索事实。多个词须同时命中，双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。 | true | false | `1ad9185e31d74bf9` |
-| memory | `atm_delta` | 读增量变化。 | true | false | `6441973a372b0bbb` |
+| memory | `atm_delta` | 读增量变化。省略 since_seq 时返回最近 limit 条。 | true | false | `4de40d3b1d57ba2d` |
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `8e25620829d4e8dc` |
 | memory | `atm_knowledge_get` | 读取固定修订，part=body\|metadata（默认 body）。编辑用 for_edit=true；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。沿 cursor 读完整再保存。 | true | false | `fdfec61a2bf88c95` |
 | memory | `atm_knowledge_save` | 直接发布共享知识，无需手工导入。先查重；更新须带 id 和 expected_revision_id，并提交完整内容；新建省略二者。重试复用 op_id。 | false | false | `700dd274ffe76554` |

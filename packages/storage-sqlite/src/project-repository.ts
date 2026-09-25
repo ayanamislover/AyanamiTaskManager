@@ -803,7 +803,7 @@ export class ProjectRepository {
   }
 
   delta(
-    sinceSequence: number,
+    sinceSequence: number | null,
     limit = 50,
     types: string[] = [],
   ): {

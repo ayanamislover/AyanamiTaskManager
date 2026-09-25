@@ -146,7 +146,7 @@ export function globalDelta(runtime: ApplicationServiceRuntime, sinceSequence: n
 export async function delta(
   runtime: ApplicationServiceRuntime,
   projectCode: string,
-  sinceSequence: number,
+  sinceSequence: number | null,
   limit = 50,
   types: string[] = [],
 ) {

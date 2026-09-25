@@ -734,7 +734,7 @@ export class AyanamiTaskService {
     return readQueries.globalDelta(this.#runtime, sinceSequence, limit);
   }
 
-  async delta(projectCode: string, sinceSequence: number, limit = 50, types: string[] = []) {
+  async delta(projectCode: string, sinceSequence: number | null, limit = 50, types: string[] = []) {
     return readQueries.delta(this.#runtime, projectCode, sinceSequence, limit, types);
   }
 
