@@ -147,7 +147,7 @@ export function createAtmSearchTool(
     profile: "memory",
     name: "atm_search",
     description:
-      "搜索事实。多个词须同时命中，双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。",
+      "搜索事实。多个词须同时命中（最多 8 个），双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },

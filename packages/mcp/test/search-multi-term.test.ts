@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "@ayanami-task/application";
+import { MAX_SEARCH_TERMS } from "../../storage-sqlite/src/search-terms.js";
+import { createAtmSearchTool } from "../src/tools/memory/search.js";
 import { connectProfiledClients } from "./profile-client.js";
 
 const roots: string[] = [];
@@ -142,6 +145,71 @@ describe("atm_search 多词查询", () => {
     });
     expect(JSON.stringify(tight).length).toBeLessThanOrEqual(300);
     expect(tight.next_step.suggestions).toHaveLength(3);
+  });
+
+  // ATM-T-0490 P2：原来第九个词起被静默丢掉，缺了 MUST_MATCH 的文档也会被当成命中返回。
+  it("超过 8 个词时三条搜索路径都明确拒绝，不截断", async () => {
+    const { service, client } = await open();
+    const project = await service.createProject({
+      name: "词数上限",
+      sourcePath: null,
+      code: "MTL",
+    });
+    const eight = "one two three four five six seven eight";
+    await service.createRecordAsUser(project.code, "all-but-last", {
+      kind: "FACT",
+      title: eight,
+      summary: "缺第九个词",
+    });
+    await service.knowledge.save({
+      expectedVersion: 0,
+      opId: "k-eight",
+      slug: "eight-words",
+      title: eight,
+      summary: "缺第九个词",
+      bodyMarkdown: eight,
+      useWhen: "验证词数上限时",
+      tags: ["search"],
+      appliesTo: ["ATM"],
+    });
+    const nine = `${eight} MUST_MATCH`;
+    const call = (name: string, args: Record<string, unknown>) =>
+      client.callTool({ name, arguments: { max_chars: 20_000, ...args } });
+    const errorText = (response: Awaited<ReturnType<typeof call>>) => {
+      expect(response.isError).toBe(true);
+      return (response.content as Array<{ text?: string }>)[0]?.text ?? "";
+    };
+
+    for (const [label, response] of [
+      ["项目", await call("atm_search", { project: project.code, query: nine })],
+      ["全局", await call("atm_search", { query: nine })],
+      ["知识", await call("atm_knowledge_search", { query: nine })],
+    ] as const) {
+      const text = errorText(response);
+      expect(text, label).toContain("VALIDATION_ERROR");
+      expect(text, label).toContain("最多 8 个词（去重后 9 个）");
+    }
+
+    // 恰好 8 个词照常搜；重复词去重后不算超限；用引号合并成短语也能表达更长的条件。
+    expect(keys(await search(client, { project: project.code, query: eight }))).toHaveLength(1);
+    expect(
+      keys(await search(client, { project: project.code, query: `${eight} one two` })),
+    ).toHaveLength(1);
+    expect(
+      keys(
+        await search(client, {
+          project: project.code,
+          query: `"one two three" four five six seven eight MUST_MATCH`,
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("公开说明写清了 8 个词的上限", async () => {
+    const { service } = await open();
+    expect(createAtmSearchTool(service).description).toContain(`最多 ${MAX_SEARCH_TERMS} 个`);
+    const guide = readFileSync(join(process.cwd(), "ATM_AGENT_GUIDE.md"), "utf8");
+    expect(guide).toMatch(/`atm_search`[^\n]*最多 8 个词，超出直接报错/u);
   });
 
   it("atm_knowledge_search 同样按词取交集", async () => {

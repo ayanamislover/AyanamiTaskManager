@@ -7,7 +7,7 @@ Surface: `v5`
 | Profile | Descriptor bytes | Profile schema hash |
 | --- | ---: | --- |
 | core | 8016 | `ce2bce04ec26f73aad31acde87dfe8de49950e6df5d073daa0597ecab270ddf9` |
-| memory | 9180 | `aba2e761a67f8b1a96dcdc8af6aa9c3cc6ef89544c115b559d63b270f5eec1f9` |
+| memory | 9198 | `56bd52f327fc438091412c346b0bffc42d7e521b94d9dd4f712cfe82d617c3bc` |
 | actions | 8164 | `2f515d6e9df128bf293218542aee927137f983f43420595d22cd569ae6850466` |
 
 | Profile | Tool | Description | Read only | Destructive | Schema hash |
@@ -21,7 +21,7 @@ Surface: `v5`
 | memory | `atm_progress_add` | 写任务或项目进度。scope=task\|project；health=ON_TRACK\|AT_RISK\|OFF_TRACK\|UNKNOWN，仅限 project；percent 仅限 task。task 的非空 blocker 会转为 BLOCKED 并清除等待对象；普通说明请写 summary。summary 上限 500 个 code point。 | false | false | `65a68de06d4cfcc8` |
 | memory | `atm_record` | 保存关键记录。kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON；importance=LOW\|NORMAL\|HIGH\|CRITICAL。summary 上限 300 个 code point，长内容放 detail。 | false | false | `1295ceac3e229287` |
 | memory | `atm_feedback` | 提交仅存本机的 ATM 使用反馈。severity=LOW\|NORMAL\|HIGH\|CRITICAL。 | false | false | `03389ebe6d38b74c` |
-| memory | `atm_search` | 搜索事实。多个词须同时命中，双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。 | true | false | `1ad9185e31d74bf9` |
+| memory | `atm_search` | 搜索事实。多个词须同时命中（最多 8 个），双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。 | true | false | `1ad9185e31d74bf9` |
 | memory | `atm_delta` | 读增量变化。省略 since_seq 时返回最近 limit 条。 | true | false | `4de40d3b1d57ba2d` |
 | memory | `atm_knowledge_search` | 搜索本地共享知识的摘要与适用范围。 | true | false | `8e25620829d4e8dc` |
 | memory | `atm_knowledge_get` | 读取固定修订，part=body\|metadata（默认 body）。编辑用 for_edit=true；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。沿 cursor 读完整再保存。 | true | false | `fdfec61a2bf88c95` |

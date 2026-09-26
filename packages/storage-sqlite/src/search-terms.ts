@@ -3,8 +3,14 @@
 // 这里按空白拆成若干词，每个词各自匹配、彼此 AND；双引号括起来的一段仍当一个词，
 // 给确实需要相邻短语的调用方留一条路。
 
-const MAX_TERMS = 8;
+import { AtmError } from "@ayanami-task/errors";
 
+export const MAX_SEARCH_TERMS = 8;
+
+/**
+ * 超过上限直接拒绝，不截断（ATM-T-0490 P2）：公开契约是「每个词都须命中」，
+ * 悄悄丢掉第九个词以后，缺了那个词的文档也会被当成命中返回。
+ */
 export function searchTerms(query: string): string[] {
   const seen = new Set<string>();
   const terms: string[] = [];
@@ -14,8 +20,17 @@ export function searchTerms(query: string): string[] {
     if (!term || seen.has(folded)) continue;
     seen.add(folded);
     terms.push(term);
-    if (terms.length === MAX_TERMS) break;
   }
+  if (terms.length > MAX_SEARCH_TERMS)
+    throw new AtmError("VALIDATION_ERROR", {
+      message: `query 最多 ${MAX_SEARCH_TERMS} 个词（去重后 ${terms.length} 个）：删掉次要的词，或用双引号把相邻的几个词合成一个短语`,
+      details: {
+        field: "query",
+        issue: "too_many_terms",
+        max: MAX_SEARCH_TERMS,
+        actual: terms.length,
+      },
+    });
   return terms;
 }
 
