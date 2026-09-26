@@ -489,4 +489,96 @@ describe("MCP first-class Review workflow", () => {
       await closeReviewFixture(fixture);
     }
   });
+
+  // ATM-T-0411：这两个错误的恢复动作是「换 Session 身份」，猜不出来；details 要写明下一步。
+  it("REVIEWER_REQUIRED 与 REVIEW_IDENTITY_MISMATCH 在 details 里给出失败原因和恢复步骤", async () => {
+    const fixture = await openReviewFixture("MRVR");
+    try {
+      const hashes = { git_head: "e".repeat(40) };
+      const requested = await requestReview(fixture, "recovery-request", hashes);
+      expect(requested.isError, JSON.stringify(requested.content)).not.toBe(true);
+      const submit = async (session: string, opId: string, expectedVersion: number) => {
+        const response = await fixture.client.callTool({
+          name: "atm_task_patch",
+          arguments: {
+            project: fixture.project.code,
+            session,
+            op_id: opId,
+            items: [
+              {
+                task_key: fixture.review.key,
+                expected_version: expectedVersion,
+                operation: "review_submit",
+                request_key: "MRVR-RR-0001",
+                verdict: "APPROVED",
+                candidate_hashes: hashes,
+                evidence: [{ kind: "test_result", value: "ok" }],
+              },
+            ],
+          },
+        });
+        expect(response.isError).toBe(true);
+        return response.structuredContent as { code: string; details: Record<string, any> };
+      };
+      const currentVersion = async () =>
+        (await fixture.service.getWorkItem(fixture.project.code, fixture.review.key, "core"))
+          .version;
+
+      // 作者自己的 PRIMARY Session 去提交：要换 REVIEWER Session。
+      const asAuthor = await submit(fixture.primary, "recovery-author", await currentVersion());
+      expect(asAuthor).toMatchObject({
+        code: "REVIEWER_REQUIRED",
+        details: {
+          reason: "ROLE_NOT_REVIEWER",
+          session_role: "PRIMARY",
+          recovery: { action: "begin_reviewer_session", begin_arguments: { role: "REVIEWER" } },
+        },
+      });
+
+      // Reviewer Session 还没领 Review 任务：先 claim。
+      const early = await fixture.service.begin({
+        projectCode: fixture.project.code,
+        agentId: "early-reviewer",
+        role: "REVIEWER",
+      });
+      const unclaimed = await submit(early.session, "recovery-unclaimed", await currentVersion());
+      expect(unclaimed).toMatchObject({
+        code: "REVIEW_IDENTITY_MISMATCH",
+        details: {
+          reason: "REVIEW_TASK_UNCLAIMED",
+          claimed_by_session_id: null,
+          recovery: { action: "claim_review_task" },
+        },
+      });
+
+      // 已被别的 Reviewer 领走：要原领取者 release，steps 里点名是哪个 Session。
+      const reviewer = await claimAndStartReview(fixture);
+      const other = await submit(early.session, "recovery-other", reviewer.version);
+      expect(other).toMatchObject({
+        code: "REVIEW_IDENTITY_MISMATCH",
+        details: {
+          reason: "REVIEW_TASK_CLAIMED_BY_OTHER_SESSION",
+          claimed_by_session_id: reviewer.session,
+          assignee_agent_id: "review-agent",
+          recovery: { action: "transfer_review_claim" },
+        },
+      });
+      expect(other.details.recovery.steps.join("\n")).toContain(String(reviewer.session));
+
+      // 原领取者租约过期：改走 takeover_stale。
+      const database = await fixture.service.databases.openProject(fixture.project.code);
+      const reviewLocalNo = Number(fixture.review.key.split("-").at(-1));
+      database.sqlite
+        .prepare("UPDATE work_items SET claim_lease_until = ? WHERE local_no = ?")
+        .run("2000-01-01T00:00:00.000Z", reviewLocalNo);
+      const stale = await submit(early.session, "recovery-stale", reviewer.version);
+      expect(stale.details).toMatchObject({
+        reason: "REVIEW_TASK_CLAIMED_BY_OTHER_SESSION",
+        recovery: { action: "take_over_stale_claim" },
+      });
+      expect(stale.details.recovery.steps.join("\n")).toContain("takeover_stale:true");
+    } finally {
+      await closeReviewFixture(fixture);
+    }
+  });
 });

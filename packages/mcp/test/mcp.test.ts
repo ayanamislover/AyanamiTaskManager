@@ -146,15 +146,8 @@ describe("Ayanami MCP", () => {
       .map((line) => line.match(/ at ([^\s]+)$/u)?.[1] ?? null)
       .filter((path): path is string => path !== null)
       .sort();
-    expect(issuePaths).toEqual([
-      "kind",
-      "op_id",
-      "project",
-      "session",
-      "summary",
-      "summary",
-      "title",
-    ]);
+    // 每个字段只报一次：summary 曾因 protocol 与 MCP 各挂一个长度检查而出现两条。
+    expect(issuePaths).toEqual(["kind", "op_id", "project", "session", "summary", "title"]);
 
     const result = await client.callTool({
       name: "atm_begin",

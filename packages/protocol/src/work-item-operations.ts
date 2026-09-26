@@ -131,6 +131,16 @@ export const WorkItemOperations = {
       requiresStaleClaim: true,
     },
   },
+  // BACKLOG → READY 的唯一入口。以前只能在创建时直接写 READY，或者 claim 一下再 release，
+  // 后者会留下一条假的领取记录（ATM-T-0410）。不改领取、不改 Session。
+  ready: {
+    allowedFrom: ["BACKLOG", "READY"],
+    homomorphicFrom: ["READY"],
+    resolveTarget: fixedTarget("READY"),
+    preconditions: [],
+    effects: [],
+    ui: { label: "设为就绪", visibleFrom: [] },
+  },
   block: {
     allowedFrom: [
       "CLAIMED",

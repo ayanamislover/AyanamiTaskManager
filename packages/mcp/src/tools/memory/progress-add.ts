@@ -4,7 +4,7 @@ import { EvidenceInputSchema } from "@ayanami-task/protocol";
 import { z } from "zod";
 import { mutationAck, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
-import { opId, outputSchema, projectCode, sessionId, taskKey } from "../primitives.js";
+import { limitedText, opId, outputSchema, projectCode, sessionId, taskKey } from "../primitives.js";
 
 const progressCompleted = z.union([
   z.string().max(500),
@@ -23,12 +23,12 @@ const inputSchema = z
     op_id: opId,
     scope: z.enum(["task", "project"]),
     task_key: taskKey.optional(),
-    summary: z.string().min(1).max(500),
+    summary: limitedText("summary", 500, 1),
     percent: z.number().min(0).max(100).optional(),
     completed: z.array(progressCompleted).max(20).default([]),
     evidence: z.array(EvidenceInputSchema).max(20).default([]),
     health: z.enum(["ON_TRACK", "AT_RISK", "OFF_TRACK", "UNKNOWN"]).nullable().optional(),
-    blocker: z.string().max(1000).nullable().optional(),
+    blocker: limitedText("blocker", 1000).nullable().optional(),
     next: z.array(z.string().max(500)).max(20).default([]),
   })
   .strict()

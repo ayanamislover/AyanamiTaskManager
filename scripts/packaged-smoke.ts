@@ -17,6 +17,8 @@ import {
   buildAgentDocumentationManifest,
   compareAgentDocumentationManifests,
 } from "../apps/desktop/src/agent-documentation.js";
+import { buildStampedSourceManifest } from "../apps/desktop/src/agent-documentation-manifest.js";
+import { readAgentGuideBuild } from "../apps/desktop/src/agent-guide-stamp.js";
 import {
   MCP_RUNTIME_LINK,
   MCP_SHIM_FILENAME,
@@ -762,7 +764,21 @@ try {
     existsSync(installedMutationAckDocs),
     installedMutationAckDocs,
   );
-  const sourceDocumentationManifest = buildAgentDocumentationManifest(root, "bundled");
+  // 打包只在 guide 顶部加一行构建戳（ATM-T-0412），其余文件与源仓逐字相同；
+  // 期望值由源仓 guide 盖同一个戳推出，戳缺失或内容漂移都会在下面的比对里暴露。
+  const packagedGuideBuild = readAgentGuideBuild(
+    await readFile(join(packagedResourcesRoot, "ATM_AGENT_GUIDE.md"), "utf8"),
+  );
+  check(
+    "package resources 的 Guide 带当前版本的构建戳",
+    packagedGuideBuild?.version ===
+      (JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string })
+        .version,
+    JSON.stringify(packagedGuideBuild),
+  );
+  const sourceDocumentationManifest = packagedGuideBuild
+    ? buildStampedSourceManifest(root, packagedGuideBuild)
+    : buildAgentDocumentationManifest(root, "bundled");
   const packagedDocumentationManifest = buildAgentDocumentationManifest(
     packagedResourcesRoot,
     "bundled",

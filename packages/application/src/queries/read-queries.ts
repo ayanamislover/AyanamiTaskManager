@@ -88,6 +88,14 @@ export async function getRecord(
   return (await runtime.repository(projectCode)).getRecord(reference);
 }
 
+export async function recentTaskProgress(
+  runtime: ApplicationServiceRuntime,
+  projectCode: string,
+  taskKey: string,
+  limit: number,
+) {
+  return (await runtime.repository(projectCode)).recentProgressForTask(taskKey, limit);
+}
 export async function getProgressUpdate(
   runtime: ApplicationServiceRuntime,
   projectCode: string,
@@ -146,7 +154,7 @@ export function globalDelta(runtime: ApplicationServiceRuntime, sinceSequence: n
 export async function delta(
   runtime: ApplicationServiceRuntime,
   projectCode: string,
-  sinceSequence: number,
+  sinceSequence: number | null,
   limit = 50,
   types: string[] = [],
 ) {

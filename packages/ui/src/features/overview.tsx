@@ -14,6 +14,7 @@ import {
 import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
+import { useProjectOrder } from "../project-order.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
@@ -32,6 +33,9 @@ export function OverviewPage({
   TimelineEventRow: ComponentType<{ event: Record<string, unknown> }>;
 }) {
   const queryClient = useQueryClient();
+  // 总览卡片和侧栏、项目页用同一份手动顺序（ATM-T-0421）：client.overview 按 updated_at 排，
+  // 不接这一层的话，首屏的项目位置随每次改动乱跳，手动排序在这里等于没做。
+  const projectOrder = useProjectOrder(client);
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => client.overview(),
@@ -39,6 +43,11 @@ export function OverviewPage({
   const quickQuery = useQuery({
     queryKey: ["quick"],
     queryFn: () => client.quick.list(),
+  });
+  // 和项目页垃圾箱分区同一个 queryKey，共用缓存（ATM-T-0494）。取不到就不提示，不挡总览。
+  const trashQuery = useQuery({
+    queryKey: ["projects", "trash"],
+    queryFn: () => client.projects.trashed(),
   });
   const completeQuick = useMutation({
     mutationFn: (task: any) =>
@@ -67,7 +76,9 @@ export function OverviewPage({
   const recentBusinessEvents = ((data.recentEvents ?? []) as Record<string, unknown>[]).filter(
     (event) => !isSystemTimelineEvent(event),
   );
-  const projects = data.projects.filter((project) => project.lifecycle !== "TRASHED");
+  const projects = projectOrder.apply(
+    data.projects.filter((project) => project.lifecycle !== "TRASHED"),
+  );
   const quickTasks = ((quickQuery.data ?? []) as any[]).filter(
     (task) => !["DONE", "CANCELLED", "PROMOTED"].includes(task.status),
   );
@@ -104,6 +115,12 @@ export function OverviewPage({
     else if (failure.reason === "INVERTED")
       attention.push(`${code} 数据投影序列倒挂（lag ${failure.lag}）`);
     else attention.push(`${code} 数据投影等待重试（lag ${failure.lag}）`);
+  }
+  for (const project of trashQuery.data ?? []) {
+    if (project.restoreRequest)
+      attention.push(
+        `${project.restoreRequest.requestedBy} 请求恢复垃圾箱里的 ${project.code}，请在项目 → 垃圾箱授权或拒绝`,
+      );
   }
   if ((data.recentEvents as any[] | undefined)?.some((event) => event.type === "backup.failed"))
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");

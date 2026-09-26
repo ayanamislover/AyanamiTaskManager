@@ -56,17 +56,23 @@ const editPatchFields = {
   assigneeAgentId: z.string().nullable().optional(),
   targetDate: NullableDateOnlySchema,
   parentKey: z.string().nullable().optional(),
+  // 关系按整组替换：dependsOn 给出本任务全部前置依赖（[] 表示清空），
+  // discoveredFrom 给出来源任务（null 表示解除）。建完才想补关系时走这里（ATM-T-0410）。
+  dependsOn: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
+  discoveredFrom: z.string().trim().min(1).max(100).nullable().optional(),
 };
 
 const editWorkItemPatchSchema = coreWorkItemPatchSchema("edit", editPatchFields).superRefine(
   (value, context) => {
     if (!value.expectedFields) return;
-    if (value.assigneeAgentId !== undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["assigneeAgentId"],
-        message: "assigneeAgentId 必须使用严格 expectedVersion",
-      });
+    for (const field of ["assigneeAgentId", "dependsOn", "discoveredFrom"] as const) {
+      if (value[field] !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: `${field} 必须使用严格 expectedVersion`,
+        });
+      }
     }
     const changedFields = (
       ["title", "description", "acceptance", "targetDate", "parentKey"] as const
@@ -94,6 +100,7 @@ export const CoreWorkItemPatchSchemas = {
   claim: coreWorkItemPatchSchema("claim", {}),
   start: coreWorkItemPatchSchema("start", {}),
   release: coreWorkItemPatchSchema("release", {}),
+  ready: coreWorkItemPatchSchema("ready", {}),
   block: coreWorkItemPatchSchema("block", { blockedReason: z.string().trim().min(1).max(2000) }),
   wait_user: coreWorkItemPatchSchema("wait_user", {
     waitingFor: z.string().trim().min(1).max(1000),
@@ -241,6 +248,8 @@ export const ChecklistBatchFailureReasonSchema = z.discriminatedUnion("code", [
       code: z.literal("VERSION_CONFLICT"),
       expected: z.number().int().nonnegative(),
       actual: z.number().int().nonnegative(),
+      // expected 恰好等于批内某条检查项的版本：多半把检查项版本当成了任务版本。
+      hint: z.literal("CHECKLIST_VERSION_PASSED").optional(),
     })
     .strict(),
   z
@@ -260,7 +269,11 @@ function checklistBatchFailureMessage(reasons: readonly ChecklistBatchFailureRea
   return reasons
     .map((reason) => {
       if (reason.code === "VERSION_CONFLICT") {
-        return `version conflict (${reason.task_key}: expected ${reason.expected}, actual ${reason.actual})`;
+        const hint =
+          reason.hint === "CHECKLIST_VERSION_PASSED"
+            ? "; checklist_batch expects the task version, not a checklist item version"
+            : "";
+        return `version conflict (${reason.task_key}: expected ${reason.expected}, actual ${reason.actual}${hint})`;
       }
       if (reason.code === "EVIDENCE_REQUIRED") return `evidence required (${reason.checklist_id})`;
       if (reason.code === "TASK_MISMATCH") {

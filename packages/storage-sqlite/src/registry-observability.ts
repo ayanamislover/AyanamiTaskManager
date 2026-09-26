@@ -23,6 +23,7 @@ import {
 } from "./event-presentation.js";
 import type { RegisteredProject } from "./registry-workspace.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import { allTerms, ftsPhrase, likePattern, searchTerms, usesFts } from "./search-terms.js";
 
 export type StoredWorkItemEngineeringMetrics = {
   taskKey: string;
@@ -528,74 +529,54 @@ export class RegistryObservability {
           decoded.last.entityKey,
         ]
       : [];
-    const escaped = `%${normalized.replace(/[\\%_]/gu, "\\$&")}%`;
-    const rows = (
-      [...normalized].length >= 3
-        ? this.#registry.sqlite
-            .prepare(
-              `WITH candidates AS (
-                 SELECT documents.entity_type, documents.entity_key, documents.title,
-                        documents.summary, documents.updated_at, projects.code AS project
-                 FROM global_search_documents_fts search
-                 JOIN global_search_documents documents
-                   ON documents.project_id = search.project_id
-                  AND documents.entity_type = search.entity_type
-                  AND documents.entity_key = search.entity_key
-                 JOIN projects ON projects.id = documents.project_id
-                 WHERE global_search_documents_fts MATCH ? AND documents.rowid <= ?
-                 UNION ALL
-                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
-                        quick.note, quick.updated_at, NULL
-                 FROM quick_tasks quick
-                 WHERE quick.rowid <= ?
-                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
-               )
-               SELECT entity_type, entity_key, title, summary, updated_at, project
-               FROM candidates WHERE ${keyset}
-               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
-               LIMIT ?`,
-            )
-            .all(
-              `"${normalized.replaceAll('"', '""')}"`,
-              snapshot.documents,
-              snapshot.quickTasks,
-              escaped,
-              escaped,
-              ...keysetParams,
-              boundedLimit + 1,
-            )
-        : this.#registry.sqlite
-            .prepare(
-              `WITH candidates AS (
-                 SELECT documents.entity_type, documents.entity_key, documents.title,
-                        documents.summary, documents.updated_at, projects.code AS project
-                 FROM global_search_documents documents
-                 JOIN projects ON projects.id = documents.project_id
-                 WHERE documents.rowid <= ?
-                   AND (documents.title LIKE ? ESCAPE '\\' OR documents.summary LIKE ? ESCAPE '\\')
-                 UNION ALL
-                 SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
-                        quick.note, quick.updated_at, NULL
-                 FROM quick_tasks quick
-                 WHERE quick.rowid <= ?
-                   AND (quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\')
-               )
-               SELECT entity_type, entity_key, title, summary, updated_at, project
-               FROM candidates WHERE ${keyset}
-               ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
-               LIMIT ?`,
-            )
-            .all(
-              snapshot.documents,
-              escaped,
-              escaped,
-              snapshot.quickTasks,
-              escaped,
-              escaped,
-              ...keysetParams,
-              boundedLimit + 1,
-            )
-    ) as Array<{
+    const terms = searchTerms(normalized);
+    // entity_key 在 FTS 表里是 UNINDEXED，打 `D-398` 这类 key 片段只能靠 LIKE 补上。
+    const documentMatch = allTerms(terms, (term) =>
+      usesFts(term)
+        ? {
+            sql: `(documents.project_id, documents.entity_type, documents.entity_key) IN (
+                    SELECT project_id, entity_type, entity_key FROM global_search_documents_fts
+                    WHERE global_search_documents_fts MATCH ?)
+                  OR documents.entity_key LIKE ? ESCAPE '\\'`,
+            params: [ftsPhrase(term), likePattern(term)],
+          }
+        : {
+            sql: `documents.title LIKE ? ESCAPE '\\' OR documents.summary LIKE ? ESCAPE '\\'`,
+            params: [likePattern(term), likePattern(term)],
+          },
+    );
+    const quickMatch = allTerms(terms, (term) => ({
+      sql: `quick.title LIKE ? ESCAPE '\\' OR quick.note LIKE ? ESCAPE '\\'
+            OR 'Q-' || printf('%04d', quick.local_no) LIKE ? ESCAPE '\\'`,
+      params: [likePattern(term), likePattern(term), likePattern(term)],
+    }));
+    const rows = this.#registry.sqlite
+      .prepare(
+        `WITH candidates AS (
+           SELECT documents.entity_type, documents.entity_key, documents.title,
+                  documents.summary, documents.updated_at, projects.code AS project
+           FROM global_search_documents documents
+           JOIN projects ON projects.id = documents.project_id
+           WHERE documents.rowid <= ? AND ${documentMatch.sql}
+           UNION ALL
+           SELECT 'QUICK_TASK', 'Q-' || printf('%04d', quick.local_no), quick.title,
+                  quick.note, quick.updated_at, NULL
+           FROM quick_tasks quick
+           WHERE quick.rowid <= ? AND ${quickMatch.sql}
+         )
+         SELECT entity_type, entity_key, title, summary, updated_at, project
+         FROM candidates WHERE ${keyset}
+         ORDER BY updated_at DESC, COALESCE(project, ''), entity_type, entity_key
+         LIMIT ?`,
+      )
+      .all(
+        snapshot.documents,
+        ...documentMatch.params,
+        snapshot.quickTasks,
+        ...quickMatch.params,
+        ...keysetParams,
+        boundedLimit + 1,
+      ) as Array<{
       entity_type: string;
       entity_key: string;
       title: string;

@@ -84,7 +84,7 @@ describe("atm_task_patch 的校验错误定位", () => {
     return { path: issue.path.join("."), message: issue.message };
   }
 
-  // 曾经这些都只报 "No matching discriminator: operation" 并列出全部 16 个 operation——
+  // 曾经这些都只报 "No matching discriminator: operation" 并列出全部 17 个 operation——
   // 指着唯一写对的字段报错，调用方只能穷举形状。
   it("叶子类型错误指向该叶子，而不是 operation", () => {
     expect(

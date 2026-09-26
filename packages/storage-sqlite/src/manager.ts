@@ -22,6 +22,10 @@ import {
 import { ProjectDatabasePool } from "./project-database-pool.js";
 import { ProjectRepository } from "./project-repository.js";
 import {
+  ProjectRestoreRequests,
+  type ProjectRestoreRequestView,
+} from "./project-restore-requests.js";
+import {
   projectionErrorMessage,
   RegistryProjectionDispatcher,
   type ProjectionDispatchResult,
@@ -99,6 +103,7 @@ export class AyanamiDatabaseManager {
   readonly #registryReads: RegistryReadModel;
   readonly #registryObservability: RegistryObservability;
   readonly #registryWorkspace: RegistryWorkspace;
+  readonly #restoreRequests: ProjectRestoreRequests;
   readonly #startupRecovery: StartupRecovery;
 
   private constructor(input: {
@@ -111,6 +116,12 @@ export class AyanamiDatabaseManager {
     this.registry = input.registry;
     this.knowledge = new KnowledgeDatabase(input.dataDir, input.migrationsRoot);
     this.#registryReads = new RegistryReadModel(input.registry.sqlite);
+    this.#restoreRequests = new ProjectRestoreRequests(
+      input.registry.sqlite,
+      (type, projectId, actor, payload) => {
+        this.appendGlobalEvent(type, projectId, actor, payload);
+      },
+    );
     this.#registryWorkspace = new RegistryWorkspace({
       dataDir: input.dataDir,
       migrationsRoot: input.migrationsRoot,
@@ -699,9 +710,58 @@ export class AyanamiDatabaseManager {
       this.appendGlobalEvent(eventType, project.id, actor, {
         code: project.code,
       });
+      // 用户从垃圾箱手动恢复时，Agent 挂着的恢复请求随之结掉，不留一条已经没意义的待办。
+      if (project.lifecycle === "TRASHED") {
+        const pending = this.#restoreRequests.pendingFor(project.id);
+        if (pending) this.#restoreRequests.decide(pending.id, "APPROVED", actor, project.code);
+      }
     })();
     if (lifecycle === "TRASHED") this.closeProject(project.id);
     return this.getProject(project.id);
+  }
+
+  /** Agent 撞上垃圾箱项目时登记恢复请求；只接受 TRASHED 项目。 */
+  requestProjectRestore(
+    codeOrId: string,
+    input: { requestedBy: string; sourceCwd: string | null },
+  ): ProjectRestoreRequestView {
+    const project = this.getProject(codeOrId);
+    if (project.lifecycle !== "TRASHED")
+      throw new AtmError("PROJECT_LIFECYCLE_CONFLICT", {
+        message: `只有垃圾箱里的项目需要恢复请求：${project.code} 当前是 ${project.lifecycle}`,
+        details: { lifecycle: project.lifecycle },
+      });
+    return this.#restoreRequests.request({
+      projectId: project.id,
+      projectCode: project.code,
+      requestedBy: input.requestedBy,
+      sourceCwd: input.sourceCwd,
+    });
+  }
+
+  pendingProjectRestore(codeOrId: string): ProjectRestoreRequestView | null {
+    return this.#restoreRequests.pendingFor(this.getProject(codeOrId).id);
+  }
+
+  /**
+   * 用户对恢复请求的决定。授权：请求记 APPROVED，项目回到 ACTIVE；拒绝：请求记 REJECTED，
+   * 项目留在垃圾箱。两步在同一个事务里，不会出现「请求已授权但项目没恢复」。
+   */
+  decideProjectRestoreRequest(
+    requestId: string,
+    decision: "APPROVED" | "REJECTED",
+    actor = "USER",
+  ): { request: ProjectRestoreRequestView; project: RegisteredProject } {
+    return this.registry.sqlite.transaction(() => {
+      const current = this.#restoreRequests.get(requestId);
+      const project = this.getProject(current.projectId);
+      const request = this.#restoreRequests.decide(requestId, decision, actor, project.code);
+      const next =
+        decision === "APPROVED" && project.lifecycle === "TRASHED"
+          ? this.setProjectLifecycle(project.id, "ACTIVE", actor)
+          : this.getProject(project.id);
+      return { request, project: next };
+    })();
   }
 
   listBackups(projectCodeOrId?: string): BackupView[] {
@@ -765,7 +825,7 @@ export class AyanamiDatabaseManager {
       const manifest = {
         format: "ayanami-task-project",
         formatVersion: 1,
-        applicationVersion: "1.1.6",
+        applicationVersion: "1.1.7",
         project: { id: project.id, code: project.code, name: project.name },
         schemaVersion: database.schemaVersion,
         createdAt,

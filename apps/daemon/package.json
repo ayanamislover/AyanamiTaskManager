@@ -21,7 +21,7 @@
     "@ayanami-task/protocol": "workspace:*",
     "@fastify/cors": "11.0.1",
     "@fastify/websocket": "11.3.0",
-    "fastify": "5.11.2"
+    "fastify": "5.12.1"
   },
   "devDependencies": {
     "@ayanami-task/storage-sqlite": "workspace:*"

@@ -65,6 +65,43 @@ export class SessionCommands {
     this.#metrics = metrics;
   }
 
+  /**
+   * begin 撞上垃圾箱项目（ATM-T-0493）：不恢复、不新建、quick 也不绕过，但留下一条恢复请求，
+   * 等用户在 ATM「项目 → 垃圾箱」里授权。原来只报一句「请从项目管理入口恢复」，而那个入口
+   * 在界面上根本不存在，Agent 和用户两头都卡住。
+   */
+  #trashedProjectRequest(project: RegisteredProject, input: BeginInput): AtmError {
+    const request = this.#runtime.databases.requestProjectRestore(project.id, {
+      requestedBy: input.agentId,
+      sourceCwd: input.cwd ?? null,
+    });
+    this.#runtime.emitGlobal();
+    return new AtmError("PROJECT_DB_UNAVAILABLE", {
+      message:
+        `项目 ${project.code}（${project.name}）在垃圾箱中。已登记恢复请求 ${request.id}，` +
+        "等待用户在 ATM「项目 → 垃圾箱」点击授权；授权后重新调用 atm_begin 即可。" +
+        "不会自动恢复或新建项目，quick 模式也不会绕过。",
+      retryable: false,
+      details: {
+        lifecycle: project.lifecycle,
+        project_code: project.code,
+        project_id: project.id,
+        recovery: {
+          action: "await_user_restore_authorization",
+          request_id: request.id,
+          request_count: request.requestCount,
+          where: "ATM 桌面端 → 项目 → 垃圾箱",
+          message: "只有用户能授权恢复；授权后重新调用 atm_begin。不要反复重试，也不要另建项目。",
+        },
+        quick: {
+          matched_project: true,
+          action: "do_not_bypass",
+          message: "quick 入口保持匹配项目优先，不会静默绕过垃圾箱项目。",
+        },
+      },
+    });
+  }
+
   async begin(input: BeginInput, createProject: CreateProject) {
     const operationId = input.operationId?.trim();
     if (input.operationId !== undefined && (!operationId || operationId.length > 128)) {
@@ -101,6 +138,7 @@ export class SessionCommands {
         ...(input.signals === undefined ? {} : { creationSignals: input.signals }),
       });
     }
+    if (project.lifecycle === "TRASHED") throw this.#trashedProjectRequest(project, input);
     const repository = await this.#runtime.repository(project.code);
     const gitContext = input.cwd ? await inspectGitContext(input.cwd) : null;
     const sessionInput: CreateSessionInput = {

@@ -26,6 +26,21 @@ type BriefFitInput = {
   recordSnapshot?: BriefRecordSnapshot[];
 };
 
+// brief 是恢复用的 working set，不是 Record 详情页。来源的 actor/session/ref 每条约 110 字符，
+// 8 条就吃掉近千字符预算，却几乎不影响「接下来做什么」；要追溯时用 key 走 atm_search。
+// source_type 留着：USER 与 AGENT 写的事实可信度不同。
+function briefRecordView(record: unknown): unknown {
+  if (!record || typeof record !== "object") return record;
+  const {
+    source_actor_id: _actor,
+    source_session_id: _session,
+    source_ref: _ref,
+    ...rest
+  } = record as Record<string, unknown>;
+  void [_actor, _session, _ref];
+  return rest;
+}
+
 function briefCandidate(input: {
   source: Record<string, unknown>;
   identity: Record<string, unknown>;
@@ -50,7 +65,7 @@ function briefCandidate(input: {
       )
       .map(([key, value]) =>
         key === "records" && Array.isArray(value)
-          ? [key, value.slice(0, input.recordCount)]
+          ? [key, value.slice(0, input.recordCount).map(briefRecordView)]
           : [key, value],
       ),
   );
@@ -214,7 +229,7 @@ export function continueWholeBrief(
       project: source.project,
       seq: source.seq,
       ...(input.sessionId === undefined ? {} : { session_id: input.sessionId }),
-      records: records.slice(cursor.o, nextOffset),
+      records: records.slice(cursor.o, nextOffset).map(briefRecordView),
       offset: cursor.o,
       returned_items: returned,
       total_items: records.length,

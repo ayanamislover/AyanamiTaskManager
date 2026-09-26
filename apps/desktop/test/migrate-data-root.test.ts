@@ -8,16 +8,22 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AyanamiTaskService } from "../../../packages/application/src/index.js";
 import { migrateDataRoot } from "../../../scripts/migrate-data-root.js";
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+// 规范的「已停止」运行态：daemon.json 里的 pid 属于一个已经退出的进程。
+const exitedPid = spawnSync(process.execPath, ["-e", ""]).pid!;
 
 function isWithinDirectory(rootPath: string, candidatePath: string): boolean {
   const root = statSync(rootPath, { bigint: true });
@@ -186,12 +192,12 @@ describe("正式数据根迁移", () => {
     writeFileSync(join(destination, "runtime", "local.token"), "destination-token", "utf8");
     writeFileSync(
       join(source, "runtime", "daemon.json"),
-      JSON.stringify({ token: "source-runtime-token" }),
+      JSON.stringify({ pid: exitedPid, token: "source-runtime-token" }),
       "utf8",
     );
     writeFileSync(
       join(destination, "runtime", "daemon.json"),
-      JSON.stringify({ token: "destination-runtime-token" }),
+      JSON.stringify({ pid: exitedPid, token: "destination-runtime-token" }),
       "utf8",
     );
 
@@ -261,12 +267,12 @@ describe("正式数据根迁移", () => {
       );
       writeFileSync(
         join(source, "runtime", "daemon.json"),
-        JSON.stringify({ token: "source-daemon-sentinel-secret" }),
+        JSON.stringify({ pid: exitedPid, token: "source-daemon-sentinel-secret" }),
         "utf8",
       );
       writeFileSync(
         join(destination, "runtime", "daemon.json"),
-        JSON.stringify({ token: "destination-daemon-sentinel-secret" }),
+        JSON.stringify({ pid: exitedPid, token: "destination-daemon-sentinel-secret" }),
         "utf8",
       );
       let injected = false;
@@ -299,6 +305,188 @@ describe("正式数据根迁移", () => {
         retried,
       );
     }
+  });
+
+  // ATM-T-0340：发现文件读不了、损坏或缺 pid 时原来一律放行，服务可能还开着数据库就被复制、改名。
+  it("运行态判定不了时拒绝迁移：不复制、不改名、不动源", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-runtime-unknown-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "运行态未知", code: "UNK", sourcePath: null });
+    sourceService.close();
+    const runtimePath = join(source, "runtime", "daemon.json");
+    mkdirSync(join(source, "runtime"), { recursive: true });
+
+    const cases: Array<[string, () => void, string]> = [
+      ["读不了", () => mkdirSync(runtimePath), "RUNTIME_STATE_UNREADABLE"],
+      ["JSON 损坏", () => writeFileSync(runtimePath, "{not json"), "RUNTIME_STATE_CORRUPT"],
+      ["不是对象", () => writeFileSync(runtimePath, "null"), "RUNTIME_STATE_PID_INVALID"],
+      [
+        "缺 pid",
+        () => writeFileSync(runtimePath, JSON.stringify({ token: "unknown-secret" })),
+        "RUNTIME_STATE_PID_INVALID",
+      ],
+      [
+        "pid 是字符串",
+        () => writeFileSync(runtimePath, JSON.stringify({ pid: String(exitedPid) })),
+        "RUNTIME_STATE_PID_INVALID",
+      ],
+      [
+        "pid 非正",
+        () => writeFileSync(runtimePath, JSON.stringify({ pid: 0 })),
+        "RUNTIME_STATE_PID_INVALID",
+      ],
+      [
+        "服务还活着",
+        () => writeFileSync(runtimePath, JSON.stringify({ pid: process.pid })),
+        `SOURCE_DAEMON_STILL_RUNNING:${process.pid}`,
+      ],
+    ];
+    for (const [label, arrange, code] of cases) {
+      rmSync(runtimePath, { recursive: true, force: true });
+      arrange();
+      const destination = join(root, `destination-${cases.findIndex(([name]) => name === label)}`);
+      const failure = await migrateDataRoot({ source, destination, execute: true }).then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      expect(failure, label).toContain(code);
+      if (code.startsWith("RUNTIME_STATE_")) {
+        expect(failure, label).toContain(join(await realpath(source), "runtime", "daemon.json"));
+        expect(failure, label).toContain("删除该 daemon.json 后重试");
+      }
+      expect(failure, label).not.toContain("unknown-secret");
+      expect(existsSync(destination), label).toBe(false);
+      expect(existsSync(`${destination}-migrating`), label).toBe(false);
+      expect(existsSync(join(source, "registry", "registry.sqlite")), label).toBe(true);
+    }
+
+    // 缺少发现文件与「存在但判定不了」是两回事：没有文件照常迁移。
+    rmSync(runtimePath, { recursive: true, force: true });
+    await expect(
+      migrateDataRoot({ source, destination: join(root, "destination-ok"), execute: true }),
+    ).resolves.toMatchObject({ executed: true, projects: 1 });
+  });
+
+  it("目标数据根的运行态同样判定，EPERM 视为进程仍在", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-runtime-eperm-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "EPERM", code: "EPM", sourcePath: null });
+    sourceService.close();
+    (await AyanamiTaskService.open({ dataDir: destination, migrationsRoot })).close();
+    mkdirSync(join(destination, "runtime"), { recursive: true });
+    writeFileSync(join(destination, "runtime", "daemon.json"), "{broken");
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "RUNTIME_STATE_CORRUPT",
+    );
+
+    // 无权发信号（另一用户或提权的服务）不等于进程不在。
+    writeFileSync(join(destination, "runtime", "daemon.json"), JSON.stringify({ pid: 424242 }));
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+    });
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "SOURCE_DAEMON_STILL_RUNNING:424242",
+    );
+    vi.restoreAllMocks();
+    expect(existsSync(join(destination, "migration-manifest.json"))).toBe(false);
+    expect(existsSync(`${destination}-migrating`)).toBe(false);
+  });
+
+  // ATM-T-0490 P1：原来只有 EPERM 算「还活着」，其余探测错误（EACCES 等）一律当成已退出放行。
+  it("进程探测报 ESRCH 以外的未知错误时，源和目标都拒绝迁移", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-runtime-probe-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "探测失败", code: "PRB", sourcePath: null });
+    sourceService.close();
+    (await AyanamiTaskService.open({ dataDir: destination, migrationsRoot })).close();
+    // 源、目标各一份运行态，pid 不同，按 pid 决定探测结果：才能分别证明两边都被探测。
+    const sourcePid = 424241;
+    const destinationPid = 424242;
+    for (const [runtimeRoot, pid] of [
+      [source, sourcePid],
+      [destination, destinationPid],
+    ] as const) {
+      mkdirSync(join(runtimeRoot, "runtime"), { recursive: true });
+      writeFileSync(join(runtimeRoot, "runtime", "daemon.json"), JSON.stringify({ pid }));
+    }
+    const probe = new Map<number, string>();
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      const code = probe.get(pid) ?? "ESRCH";
+      throw Object.assign(new Error(`kill ${code}`), { code });
+    }) as typeof process.kill);
+
+    for (const [label, runtimeRoot, pid] of [
+      ["源", source, sourcePid],
+      ["目标", destination, destinationPid],
+    ] as const) {
+      probe.clear();
+      probe.set(pid, "EACCES");
+      const failure = await migrateDataRoot({ source, destination, execute: true }).then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      const canonicalRuntimePath = join(await realpath(runtimeRoot), "runtime", "daemon.json");
+      expect(failure, label).toContain(
+        `RUNTIME_STATE_PROBE_FAILED:${canonicalRuntimePath}:${pid}:EACCES`,
+      );
+      expect(failure, label).toContain("删除该 daemon.json 后重试");
+      expect(existsSync(join(destination, "migration-manifest.json")), label).toBe(false);
+      expect(existsSync(`${destination}-migrating`), label).toBe(false);
+    }
+
+    // 阳性对照：两边的运行态都还在，探测明确报 ESRCH（已退出）时才放行，迁移照常完成。
+    probe.clear();
+    kill.mockClear();
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toMatchObject({
+      executed: true,
+      projects: 1,
+    });
+    expect(kill).toHaveBeenCalledWith(sourcePid, 0);
+    expect(kill).toHaveBeenCalledWith(destinationPid, 0);
+  });
+
+  it("判定不了迁移锁的持有进程时不当陈旧锁挪走", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-lock-probe-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "锁探测", code: "LCK", sourcePath: null });
+    sourceService.close();
+    const lockPath = join(root, ".destination.migration.lock");
+    const lockContent = `${JSON.stringify({ pid: 424242, nonce: "held-by-someone" })}\n`;
+    writeFileSync(lockPath, lockContent);
+    const kill = vi.spyOn(process, "kill");
+
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error("kill EACCES"), { code: "EACCES" });
+    });
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "MIGRATION_LOCK_OWNER_UNKNOWN:424242:EACCES",
+    );
+    expect(readFileSync(lockPath, "utf8")).toBe(lockContent);
+    expect(existsSync(destination)).toBe(false);
+
+    // 阳性对照：持锁进程明确已退出（ESRCH）才算陈旧锁，迁移照常完成。
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    });
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toMatchObject({
+      executed: true,
+    });
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("并发迁移只有一个提交者，另一方明确返回进行中", async () => {

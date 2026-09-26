@@ -76,6 +76,16 @@ function maskedExact(
   return wrap(result);
 }
 
+// 0 命中时告诉调用方下一步怎么查，而不是让它在同一条 query 上反复换写法。
+function noMatchNextStep(query: string, project: string | undefined) {
+  const suggestions = /\s/u.test(query)
+    ? ["每个词都必须命中；删掉部分词，只留最有区分度的一两个（如 ID 片段 D-398）"]
+    : ["换更短的片段或同义词；ID 可只写编号部分（如 D-398）"];
+  suggestions.push("已知完整 key（如 ATM-R-12）时直接用它查，走精确读取");
+  if (project !== undefined) suggestions.push("省略 project 可跨全部项目搜索");
+  return { reason: "NO_MATCH", suggestions };
+}
+
 const inputSchema = z
   .object({
     list: z.enum(["records", "sessions"]).optional(),
@@ -136,7 +146,8 @@ export function createAtmSearchTool(
   return {
     profile: "memory",
     name: "atm_search",
-    description: "搜索事实。session 只能与 op_id 精确回查一起传。",
+    description:
+      "搜索事实。多个词须同时命中（最多 8 个），双引号括起为相邻短语。session 只能与 op_id 精确回查一起传。",
     inputSchema,
     outputSchema,
     annotations: { readOnlyHint: true, destructiveHint: false },
@@ -325,18 +336,20 @@ export function createAtmSearchTool(
         decoded.field_mask,
         decoded.max_chars,
       );
-      return checkedPage(
-        await fitSearchPage({
-          initial,
-          fetchPage,
-          requestedLimit: decoded.limit,
-          ...(decoded.cursor === undefined ? {} : { inputCursor: decoded.cursor }),
-          fieldMask: decoded.field_mask,
-          maxChars: decoded.max_chars - cost,
-        }),
-        echo,
-        decoded.max_chars,
-      );
+      const page = await fitSearchPage({
+        initial,
+        fetchPage,
+        requestedLimit: decoded.limit,
+        ...(decoded.cursor === undefined ? {} : { inputCursor: decoded.cursor }),
+        fieldMask: decoded.field_mask,
+        maxChars: decoded.max_chars - cost,
+      });
+      // 提示在 max_chars 下限 300 内放得下（有用例钉住），不必再为它单独降级。
+      const hinted =
+        initial.hits.length === 0 && decoded.cursor === undefined
+          ? { ...page, next_step: noMatchNextStep(searchQuery, decoded.project) }
+          : page;
+      return checkedPage(hinted, echo, decoded.max_chars);
     },
   };
 }

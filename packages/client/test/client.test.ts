@@ -17,6 +17,50 @@ afterEach(async () => {
 });
 
 describe("typed client", () => {
+  // ATM-T-0494：垃圾箱与恢复请求的决定都走真实 HTTP，URL 写错时授权会悄悄变成拒绝。
+  it("垃圾箱列表带恢复请求，授权与拒绝打到各自的路由", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "atm-client-trash-"));
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: join(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "typed-token" });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    cleanup.push(async () => {
+      await app.close();
+      service.close();
+      await rm(dataDir, { recursive: true, force: true });
+    });
+    const address = app.server.address();
+    if (!address || typeof address === "string") throw new Error("测试服务未监听 TCP");
+    const client = new AyanamiClient({
+      endpoint: `http://127.0.0.1:${address.port}`,
+      token: "typed-token",
+    });
+    await client.projects.create({ name: "垃圾箱客户端", sourcePath: null, code: "CTRSH" });
+    await client.projects.trash("CTRSH");
+    const ask = () =>
+      service.databases.requestProjectRestore("CTRSH", {
+        requestedBy: "client-agent",
+        sourceCwd: null,
+      });
+
+    const first = ask();
+    await expect(client.projects.trashed()).resolves.toMatchObject([
+      { code: "CTRSH", restoreRequest: { id: first.id, status: "PENDING" } },
+    ]);
+    await expect(client.projects.rejectRestoreRequest(first.id)).resolves.toMatchObject({
+      request: { status: "REJECTED" },
+      project: { lifecycle: "TRASHED" },
+    });
+    const second = ask();
+    await expect(client.projects.approveRestoreRequest(second.id)).resolves.toMatchObject({
+      request: { status: "APPROVED" },
+      project: { lifecycle: "ACTIVE" },
+    });
+    await expect(client.projects.trashed()).resolves.toEqual([]);
+  });
+
   it("通过真实 HTTP 创建项目并保留结构化错误码", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "atm-client-"));
     const service = await AyanamiTaskService.open({

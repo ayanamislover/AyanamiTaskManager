@@ -2,7 +2,7 @@ import type { AyanamiTaskService } from "@ayanami-task/application";
 import { z } from "zod";
 import { mutationAck, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
-import { opId, outputSchema, projectCode, sessionId } from "../primitives.js";
+import { limitedText, opId, outputSchema, projectCode, sessionId } from "../primitives.js";
 
 const inputSchema = z
   .object({
@@ -10,10 +10,10 @@ const inputSchema = z
     session: sessionId,
     op_id: opId,
     outcome: z.enum(["completed", "paused", "blocked", "cancelled", "error", "retired"]),
-    summary: z.string().min(1).max(500),
+    summary: limitedText("summary", 500, 1),
     next: z.array(z.string().max(500)).max(20).default([]),
     release_claims: z.boolean().default(true),
-    retirement_reason: z.string().max(500).nullable().optional(),
+    retirement_reason: limitedText("retirement_reason", 500).nullable().optional(),
   })
   .strict();
 

@@ -4,6 +4,7 @@ import type { SearchHit, SearchPage } from "@ayanami-task/protocol";
 import { presentEvent, type PresentedEvent } from "./event-presentation.js";
 import type { ProgressUpdateView } from "./read-model-types.js";
 import { decodeSearchCursor, encodeSearchCursor } from "./search-pagination.js";
+import { allTerms, ftsPhrase, likePattern, searchTerms, usesFts } from "./search-terms.js";
 
 function json<T>(value: string | null | undefined, fallback: T): T {
   if (!value) return fallback;
@@ -154,36 +155,32 @@ export class ProjectActivityReadModel {
         decoded.last.entityKey,
       );
     }
-    let rows: any[];
-    if ([...normalized].length < 3) {
-      const escaped = normalized.replace(/[\\%_]/gu, "\\$&");
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title,
-                  documents.body, documents.updated_at
-           FROM search_documents documents
-           WHERE (documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\')
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(`%${escaped}%`, `%${escaped}%`, ...params, bounded + 1) as any[];
-    } else {
-      const phrase = `"${normalized.replaceAll('"', '""')}"`;
-      rows = this.#sqlite
-        .prepare(
-          `SELECT documents.entity_type, documents.entity_key, documents.title, documents.body,
-             documents.updated_at
-           FROM search_documents_fts fts
-           JOIN search_documents documents
-             ON documents.entity_type = fts.entity_type AND documents.entity_id = fts.entity_id
-           WHERE search_documents_fts MATCH ?
-             AND ${clauses.join(" AND ")}
-           ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
-           LIMIT ?`,
-        )
-        .all(phrase, ...params, bounded + 1) as any[];
-    }
+    // entity_key 在 FTS 表里是 UNINDEXED，打 `D-398` 这类 key 片段只能靠 LIKE 补上。
+    const matched = allTerms(searchTerms(normalized), (term) =>
+      usesFts(term)
+        ? {
+            sql: `(documents.entity_type, documents.entity_id) IN (
+                    SELECT entity_type, entity_id FROM search_documents_fts
+                    WHERE search_documents_fts MATCH ?)
+                  OR documents.entity_key LIKE ? ESCAPE '\\'`,
+            params: [ftsPhrase(term), likePattern(term)],
+          }
+        : {
+            sql: `documents.title LIKE ? ESCAPE '\\' OR documents.body LIKE ? ESCAPE '\\'`,
+            params: [likePattern(term), likePattern(term)],
+          },
+    );
+    const rows = this.#sqlite
+      .prepare(
+        `SELECT documents.entity_type, documents.entity_key, documents.title,
+                documents.body, documents.updated_at
+         FROM search_documents documents
+         WHERE ${matched.sql}
+           AND ${clauses.join(" AND ")}
+         ORDER BY documents.updated_at DESC, documents.entity_type, documents.entity_key
+         LIMIT ?`,
+      )
+      .all(...matched.params, ...params, bounded + 1) as any[];
     const hits: SearchHit[] = rows.slice(0, bounded).map((row) => ({
       entityType: row.entity_type,
       entityKey: row.entity_key,
@@ -213,8 +210,13 @@ export class ProjectActivityReadModel {
     };
   }
 
+  /**
+   * sinceSequence 为 null 时取最新的 limit 条（仍按 seq 升序返回）。跨 Session 恢复时
+   * 调用方手里恰好没有上次的 seq——它在被压缩掉的上下文里——而从当前 seq 往后按定义是空的。
+   * 最新窗口之后没有更新的事件，hasMore 恒为 false；更早的事件用返回的首个 seq 往前另查。
+   */
   delta(
-    sinceSequence: number,
+    sinceSequence: number | null,
     limit = 50,
     types: string[] = [],
   ): {
@@ -236,21 +238,23 @@ export class ProjectActivityReadModel {
     currentSequence: number;
     hasMore: boolean;
   } {
-    const clauses = ["sequence > ?"];
-    const params: unknown[] = [sinceSequence];
+    const clauses = sinceSequence === null ? ["1 = 1"] : ["sequence > ?"];
+    const params: unknown[] = sinceSequence === null ? [] : [sinceSequence];
     if (types.length > 0) {
       clauses.push(`type IN (${types.map(() => "?").join(",")})`);
       params.push(...types);
     }
     const bounded = Math.max(1, Math.min(100, limit));
-    params.push(bounded + 1);
-    const rows = this.#sqlite
+    params.push(sinceSequence === null ? bounded : bounded + 1);
+    const selected = this.#sqlite
       .prepare(
         `SELECT sequence, type, aggregate_type, aggregate_id, actor_type, actor_id,
                 payload_json, created_at, op_id FROM events
-         WHERE ${clauses.join(" AND ")} ORDER BY sequence LIMIT ?`,
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY sequence ${sinceSequence === null ? "DESC" : ""} LIMIT ?`,
       )
       .all(...params) as any[];
+    const rows = sinceSequence === null ? selected.reverse() : selected;
     const hasMore = rows.length > bounded;
     return {
       events: rows.slice(0, bounded).map((row) => {

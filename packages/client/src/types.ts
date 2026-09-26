@@ -68,6 +68,22 @@ export type RegisteredProject = {
   version: number;
 };
 
+/** Agent 在垃圾箱项目目录里 begin 时留下、等用户授权的恢复请求。 */
+export type ProjectRestoreRequest = {
+  id: string;
+  projectId: string;
+  requestedBy: string;
+  sourceCwd: string | null;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  requestCount: number;
+  createdAt: string;
+  updatedAt: string;
+  decidedAt: string | null;
+  decidedBy: string | null;
+};
+
+export type TrashedProject = RegisteredProject & { restoreRequest: ProjectRestoreRequest | null };
+
 export type AgentRecordCreateInput = Omit<RecordInput, "project">;
 export type UserRecordCreateInput = Omit<AgentRecordCreateInput, "session">;
 export type RecordCreateReceipt = {

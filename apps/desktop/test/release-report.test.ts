@@ -1,15 +1,21 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { STAGE_INPUTS, type ReleaseFingerprint } from "../../../scripts/release-fingerprint.js";
 import {
   appendReleaseEvidenceLayer,
   assertReleaseCandidateIdentity,
+  assertReleaseEvidenceResolves,
   createReleaseCandidateIdentity,
   feedbackCloseoutStatusViolations,
   highestReleaseEvidenceLevel,
   nonBlockingItems,
+  RELEASE_REPORT_LOG_DIR,
   releaseChecklistViolations,
+  releaseLogReportPath,
   stageProvenance,
   type ReleaseCandidateIdentity,
   type ReleaseCandidateArtifacts,
@@ -278,6 +284,134 @@ describe("发布报告的证据出处", () => {
     );
     expect(ASSEMBLER).not.toContain('join(root, "node_modules", "electron", "dist"');
     expect(ASSEMBLER).toContain("if (probe.error)");
+  });
+});
+
+// ATM-T-0361：CI 证据原来写成 `test-report/${command.log}`，Windows 上得到
+// `test-report/release-logs\test.log`，而文件实际复制在 test-report/logs/ 下——一条都解析不到。
+describe("发行报告里的证据路径", () => {
+  const sha = (bytes: string) => createHash("sha256").update(bytes).digest("hex").toUpperCase();
+  const digestFile = async (path: string) => sha(await readFile(path, "utf8"));
+
+  it("release.ts 记下的日志路径换成发行目录里的真实相对路径，两种分隔符都认", () => {
+    // 与 release.ts 同一种写法：本机分隔符。
+    expect(releaseLogReportPath(join("release-logs", "test.log"))).toBe(
+      "test-report/logs/test.log",
+    );
+    expect(releaseLogReportPath("release-logs\\forge-make.log")).toBe(
+      "test-report/logs/forge-make.log",
+    );
+    expect(releaseLogReportPath("release-logs/packaged-smoke.log")).toBe(
+      "test-report/logs/packaged-smoke.log",
+    );
+    for (const bad of [
+      "test.log",
+      "logs/test.log",
+      "release-logs/../../secret.log",
+      "release-logs/sub/test.log",
+      "release-logs/test.txt",
+      "/release-logs/test.log",
+    ]) {
+      expect(() => releaseLogReportPath(bad), bad).toThrow(/RELEASE_LOG_PATH_INVALID/u);
+    }
+  });
+
+  it("按 assembler 的复制方式落盘后，每条证据都能直接打开且 SHA256 一致", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-release-evidence-"));
+    try {
+      const output = join(root, "output");
+      const releaseDir = join(root, "release");
+      const logs = ["test", "e2e", "packaged-smoke"].map((name) =>
+        join("release-logs", `${name}.log`),
+      );
+      mkdirSync(join(output, "release-logs"), { recursive: true });
+      for (const log of logs) writeFileSync(join(output, log), `log body of ${log}`);
+      await cp(
+        join(output, "release-logs"),
+        join(releaseDir, ...RELEASE_REPORT_LOG_DIR.split("/")),
+        {
+          recursive: true,
+        },
+      );
+      mkdirSync(join(releaseDir, "test-report"), { recursive: true });
+      writeFileSync(join(releaseDir, "test-report", "packaged-smoke-report.json"), "{}");
+      writeFileSync(join(releaseDir, "Setup.exe"), "setup bytes");
+
+      const evidence = await Promise.all([
+        ...logs.map(async (log) => {
+          const path = releaseLogReportPath(log);
+          return { path, sha256: await digestFile(join(releaseDir, ...path.split("/"))) };
+        }),
+      ]);
+      const releaseCandidate = candidate();
+      let layers = appendReleaseEvidenceLayer([], releaseCandidate, {
+        level: "SOURCE_DONE",
+        verifiedAt: "2026-08-28T00:00:00.000Z",
+        origin: "source-checkout",
+        evidence: [{ path: "Setup.exe", sha256: sha("setup bytes") }],
+      });
+      layers = appendReleaseEvidenceLayer(layers, releaseCandidate, {
+        level: "CI_VERIFIED",
+        verifiedAt: "2026-08-28T00:00:00.000Z",
+        origin: "local-ci-equivalent",
+        evidence,
+      });
+      layers = appendReleaseEvidenceLayer(layers, releaseCandidate, {
+        level: "PACKAGED_VERIFIED",
+        verifiedAt: "2026-08-28T00:00:00.000Z",
+        origin: "packaged-smoke",
+        evidence: [{ path: "test-report/packaged-smoke-report.json", sha256: sha("{}") }],
+      });
+      await expect(assertReleaseEvidenceResolves(releaseDir, layers, digestFile)).resolves.toBe(
+        undefined,
+      );
+
+      // 旧写法得到的路径：目录不对。
+      const oldStyle = layers.map((layer) =>
+        layer.level === "CI_VERIFIED"
+          ? {
+              ...layer,
+              evidence: layer.evidence.map((item) => ({
+                ...item,
+                path: item.path.replace("test-report/logs/", "test-report/release-logs/"),
+              })),
+            }
+          : layer,
+      );
+      await expect(assertReleaseEvidenceResolves(releaseDir, oldStyle, digestFile)).rejects.toThrow(
+        /RELEASE_EVIDENCE_UNRESOLVED: CI_VERIFIED test-report\/release-logs\/test\.log/u,
+      );
+      // 字节变了（比如拿了另一次运行的日志）：路径对也不放过。
+      writeFileSync(join(releaseDir, "test-report", "logs", "e2e.log"), "tampered");
+      await expect(assertReleaseEvidenceResolves(releaseDir, layers, digestFile)).rejects.toThrow(
+        /RELEASE_EVIDENCE_DIGEST_MISMATCH: CI_VERIFIED test-report\/logs\/e2e\.log/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("证据路径带反斜杠时拒绝写进报告", () => {
+    expect(() =>
+      appendReleaseEvidenceLayer([], candidate(), {
+        level: "SOURCE_DONE",
+        verifiedAt: "2026-08-28T00:00:00.000Z",
+        origin: "source-checkout",
+        evidence: [{ path: "test-report\\logs\\test.log", sha256: HASH_A }],
+      }),
+    ).toThrow(/RELEASE_EVIDENCE_REFERENCE_INVALID/u);
+  });
+
+  it("assembler 用同一个映射生成路径、复制到同一目录，并在写报告前核对", () => {
+    expect(ASSEMBLER).not.toContain("`test-report/${command.log}`");
+    expect(ASSEMBLER).toContain("releaseLogReportPath(command.log)");
+    expect(ASSEMBLER).toMatch(
+      /cp\(join\(output, "release-logs"\), join\(releaseDir, \.\.\.RELEASE_REPORT_LOG_DIR\.split\("\/"\)\)/u,
+    );
+    expect(
+      ASSEMBLER.indexOf("assertReleaseEvidenceResolves(releaseDir, evidenceLayers"),
+    ).toBeLessThan(ASSEMBLER.indexOf("const summary = {"));
+    expect(ASSEMBLER).toContain("assertReleaseEvidenceResolves(releaseDir, evidenceLayers");
   });
 });
 

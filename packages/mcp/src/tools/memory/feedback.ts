@@ -1,27 +1,19 @@
 import type { AyanamiTaskService } from "@ayanami-task/application";
-import {
-  ATM_FEEDBACK_RECORD_SCOPE,
-  RECORD_SUMMARY_CODE_POINT_LIMIT,
-  RecordSummarySchema,
-  unicodeCodePointLength,
-} from "@ayanami-task/protocol";
+import { ATM_FEEDBACK_RECORD_SCOPE, RECORD_SUMMARY_CODE_POINT_LIMIT } from "@ayanami-task/protocol";
 import { z } from "zod";
 import { mutationAck, wrap } from "../../result.js";
 import type { ToolDefinition } from "../../tool-registry.js";
-import { opId, outputSchema, projectCode, sessionId, taskKey } from "../primitives.js";
+import {
+  codePointSummary,
+  limitedText,
+  opId,
+  outputSchema,
+  projectCode,
+  sessionId,
+  taskKey,
+} from "../primitives.js";
 
-const feedbackSummary = RecordSummarySchema.superRefine((value, context) => {
-  const actualLength = unicodeCodePointLength(value);
-  if (actualLength <= RECORD_SUMMARY_CODE_POINT_LIMIT) return;
-  context.addIssue({
-    code: "custom",
-    message: `INVALID_ARGUMENT ${JSON.stringify({
-      actual_length: actualLength,
-      limit: RECORD_SUMMARY_CODE_POINT_LIMIT,
-      path: "summary",
-    })}`,
-  });
-}).meta({ maxLength: RECORD_SUMMARY_CODE_POINT_LIMIT });
+const feedbackSummary = codePointSummary("summary", RECORD_SUMMARY_CODE_POINT_LIMIT);
 
 const inputSchema = z
   .object({
@@ -29,7 +21,7 @@ const inputSchema = z
     session: sessionId,
     op_id: opId,
     summary: feedbackSummary,
-    detail: z.string().max(50_000).default(""),
+    detail: limitedText("detail", 50_000).default(""),
     severity: z.enum(["LOW", "NORMAL", "HIGH", "CRITICAL"]).default("NORMAL"),
     tool: z.string().trim().min(1).max(128).optional(),
     task_key: taskKey.optional(),

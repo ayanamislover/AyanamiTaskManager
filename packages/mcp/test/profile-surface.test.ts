@@ -68,11 +68,17 @@ describe("MCP static profiles", () => {
       // core 与 actions 改为完全内联后各涨了一些：$defs 去重虽然更省字节，但客户端
       // 解析不到定义会把属性渲染成 {}，枚举和联合类型对 agent 就此消失。
       // 详见 published-schema-readability.test.ts。
-      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 7913, framingBytes: 7 });
-      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 9087, framingBytes: 9 });
-      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 7975, framingBytes: 2 });
+      expect(mcpSchemaBreakdown(core.tools)).toMatchObject({ bytes: 8016, framingBytes: 7 });
+      expect(mcpSchemaBreakdown(memory.tools)).toMatchObject({ bytes: 9198, framingBytes: 9 });
+      expect(mcpSchemaBreakdown(actions.tools)).toMatchObject({ bytes: 8164, framingBytes: 2 });
       expect(mcpSchemaBreakdown(core.tools).descriptors).toHaveLength(6);
       expect(mcpSchemaBreakdown(memory.tools).descriptors).toHaveLength(8);
+      // ATM-R-238：memory 贴着预算跑，知识库三件套（约 3.5 KB）是拆独立 profile 的现成候选。
+      // 余量掉到 300 以下就不要再改上面钉住的字节数了事，按那条记录把知识库拆出去。
+      expect(
+        9728 - mcpSchemaBytes(memory.tools),
+        "memory profile 余量不足 300 字节：按 ATM-R-238 把知识库工具拆成独立 profile",
+      ).toBeGreaterThanOrEqual(300);
       expect(mcpSchemaBreakdown(actions.tools).descriptors).toHaveLength(1);
       expect(() =>
         assertMcpSchemaBudget([

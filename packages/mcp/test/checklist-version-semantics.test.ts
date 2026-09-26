@@ -184,7 +184,23 @@ describe("checklist 操作的 expected_version 语义", () => {
         ],
       });
 
-    await expect(patch(s.taskVersion, "single-wrong")).rejects.toThrow(/VERSION_CONFLICT/u);
+    // ATM-R-240 方案 D：传进来的恰好是任务版本时，报错里直接说破拿错了哪一种，并给出两边的现值。
+    const wrongKind = await patch(s.taskVersion, "single-wrong").then(
+      () => "",
+      (error: Error) => error.message,
+    );
+    expect(wrongKind).toMatch(/VERSION_CONFLICT/u);
+    expect(wrongKind).toContain('"hint":"TASK_VERSION_PASSED"');
+    expect(wrongKind).toContain(`"task_version":${s.taskVersion}`);
+    expect(wrongKind).toContain(`"checklist_version":${s.checklistVersion}`);
+    expect(wrongKind).toContain("checklist[].version");
+    // 只是过期、两种版本都对不上时不瞎猜。
+    const stale = await patch(Math.max(s.taskVersion, s.checklistVersion) + 5, "single-stale").then(
+      () => "",
+      (error: Error) => error.message,
+    );
+    expect(stale).toMatch(/VERSION_CONFLICT/u);
+    expect(stale).not.toContain("TASK_VERSION_PASSED");
     const ok = await patch(s.checklistVersion, "single-right");
     expect(ok.ok).toBe(true);
   });
@@ -262,7 +278,19 @@ describe("checklist 操作的 expected_version 语义", () => {
 
     // batch 的版本冲突不像 single 那样直接抛 VERSION_CONFLICT，而是收进整批失败原因里
     // 由闸门报出——错误码不同，但比对的确实是任务版本。
-    await expect(patch(s.checklistVersion, "batch-wrong")).rejects.toThrow(/version conflict/iu);
+    const wrongKind = await patch(s.checklistVersion, "batch-wrong").then(
+      () => "",
+      (error: Error) => error.message,
+    );
+    expect(wrongKind).toMatch(/version conflict/iu);
+    expect(wrongKind).toContain('"hint":"CHECKLIST_VERSION_PASSED"');
+    expect(wrongKind).toContain("expects the task version");
+    const stale = await patch(Math.max(s.taskVersion, s.checklistVersion) + 5, "batch-stale").then(
+      () => "",
+      (error: Error) => error.message,
+    );
+    expect(stale).toMatch(/version conflict/iu);
+    expect(stale).not.toContain("CHECKLIST_VERSION_PASSED");
     const ok = await patch(s.taskVersion, "batch-right");
     expect(ok.ok).toBe(true);
   });

@@ -482,6 +482,9 @@ export class ProjectRepository {
     return this.#recordReads.getProgressUpdate(id);
   }
 
+  recentProgressForTask(taskKey: string, limit: number): ProgressUpdateView[] {
+    return this.#recordReads.recentProgressForWorkItem(this.rowForTaskKey(taskKey).id, limit);
+  }
   getOperationTrace(opId: string, sessionId?: string | null): any {
     return this.#activityReads.getOperationTrace(opId, sessionId);
   }
@@ -672,6 +675,8 @@ export class ProjectRepository {
       assigneeAgentId?: string | null;
       targetDate?: string | null;
       parentKey?: string | null;
+      dependsOn?: string[];
+      discoveredFrom?: string | null;
       takeoverStale?: boolean;
     }>,
   ): {
@@ -803,7 +808,7 @@ export class ProjectRepository {
   }
 
   delta(
-    sinceSequence: number,
+    sinceSequence: number | null,
     limit = 50,
     types: string[] = [],
   ): {

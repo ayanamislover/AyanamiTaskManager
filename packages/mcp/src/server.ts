@@ -11,7 +11,7 @@ const profileInstructions: Readonly<Record<AyanamiMcpProfile, string>> = Object.
   memory:
     "MCP surface v5 · memory profile。Session 由 core profile 建立；本 profile 负责进度、长期记录、本机反馈、搜索与增量读取；共享知识可按需读取与直接发布。",
   actions:
-    "MCP surface v5 · actions profile。Session 由 core profile 建立；本 profile 只负责 atm_task_patch 的 16 类规范化任务操作。",
+    "MCP surface v5 · actions profile。Session 由 core profile 建立；本 profile 只负责 atm_task_patch 的 17 类规范化任务操作。",
 });
 
 export function createAyanamiMcpServer(
@@ -20,7 +20,7 @@ export function createAyanamiMcpServer(
 ): Server {
   const profile = options.profile ?? "core";
   const server = new Server(
-    { name: "ayanami-task-manager", version: "1.1.6" },
+    { name: "ayanami-task-manager", version: "1.1.7" },
     { capabilities: { tools: {} }, instructions: profileInstructions[profile] },
   );
   registerPublishedToolHandlers(

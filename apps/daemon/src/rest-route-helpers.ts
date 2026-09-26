@@ -22,6 +22,8 @@ type OptionalPatchFields = Partial<{
   assigneeAgentId: string;
   targetDate: string | null;
   parentKey: string | null;
+  dependsOn: string[];
+  discoveredFrom: string | null;
 }>;
 
 export function repositoryPatchInput(item: WorkItemPatchInput): RepositoryPatchInput {
@@ -43,6 +45,8 @@ export function repositoryPatchInput(item: WorkItemPatchInput): RepositoryPatchI
     ...(fields.assigneeAgentId === undefined ? {} : { assigneeAgentId: fields.assigneeAgentId }),
     ...(fields.targetDate === undefined ? {} : { targetDate: fields.targetDate }),
     ...(fields.parentKey === undefined ? {} : { parentKey: fields.parentKey }),
+    ...(fields.dependsOn === undefined ? {} : { dependsOn: fields.dependsOn }),
+    ...(fields.discoveredFrom === undefined ? {} : { discoveredFrom: fields.discoveredFrom }),
   };
 }
 

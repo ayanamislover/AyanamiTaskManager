@@ -115,12 +115,21 @@ function quickCheck(path: string): void {
   }
 }
 
-function processAlive(pid: number): boolean {
+type ProcessState = { state: "ALIVE" } | { state: "EXITED" } | { state: "UNKNOWN"; code: string };
+
+/**
+ * 只有 ESRCH 证明进程已退出。EPERM 是「进程在，但无权给它发信号」（另一个用户、提权运行的服务）；
+ * 其余任何错误都只说明「探测失败」，调用方必须按判定不了处理，不能当成已退出放行（ATM-T-0490 P1）。
+ */
+function processState(pid: number): ProcessState {
   try {
     process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
+    return { state: "ALIVE" };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN_ERROR";
+    if (code === "ESRCH") return { state: "EXITED" };
+    if (code === "EPERM") return { state: "ALIVE" };
+    return { state: "UNKNOWN", code };
   }
 }
 
@@ -154,7 +163,13 @@ async function acquireMigrationLock(destination: string): Promise<() => Promise<
     } catch {
       // Malformed lock content is stale and is quarantined below.
     }
-    if (ownerPid > 0 && processAlive(ownerPid)) throw new Error("MIGRATION_IN_PROGRESS");
+    if (ownerPid > 0) {
+      const owner = processState(ownerPid);
+      if (owner.state === "ALIVE") throw new Error("MIGRATION_IN_PROGRESS");
+      // 判定不了持锁进程是否还在，就不能当成陈旧锁挪走：那可能是一个正在迁移的活进程。
+      if (owner.state === "UNKNOWN")
+        throw new Error(`MIGRATION_LOCK_OWNER_UNKNOWN:${ownerPid}:${owner.code}`);
+    }
     const stalePath = `${lockPath}.stale-${process.pid}-${nonce}-${attempt}`;
     try {
       await rename(lockPath, stalePath);
@@ -271,17 +286,41 @@ async function completedMigration(
   };
 }
 
-async function assertSourceStopped(source: string): Promise<void> {
-  const runtimePath = join(source, "runtime", "daemon.json");
-  if (!existsSync(runtimePath)) return;
+const RUNTIME_STATE_RECOVERY =
+  "先退出 ATM 桌面端并确认没有 atm 服务进程仍在使用这个数据根，再删除该 daemon.json 后重试";
+
+/**
+ * 迁移前确认服务已停（ATM-T-0340）。
+ *
+ * 没有 daemon.json 才算「没在运行」：服务正常退出时会删掉它。文件在但读不了、JSON 损坏、
+ * pid 缺失或不合法，都只说明「判定不了」，不能当成已停——原来这几种一律放行，
+ * 迁移会在服务还开着数据库时复制、改名数据根。这里不去杀进程，也不查 WMI：
+ * 未知的进程不归迁移脚本处置，交给人确认。
+ */
+async function assertSourceStopped(root: string): Promise<void> {
+  const runtimePath = join(root, "runtime", "daemon.json");
+  let text: string;
   try {
-    const runtime = JSON.parse(await readFile(runtimePath, "utf8")) as { pid?: unknown };
-    if (typeof runtime.pid === "number" && processAlive(runtime.pid))
-      throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${runtime.pid}`);
+    text = await readFile(runtimePath, "utf8");
   } catch (error) {
-    if (error instanceof Error && error.message.startsWith("SOURCE_DAEMON_STILL_RUNNING"))
-      throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new Error(`RUNTIME_STATE_UNREADABLE:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
   }
+  let runtime: unknown;
+  try {
+    runtime = JSON.parse(text);
+  } catch {
+    throw new Error(`RUNTIME_STATE_CORRUPT:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
+  }
+  const pid = (runtime as { pid?: unknown } | null)?.pid;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0)
+    throw new Error(`RUNTIME_STATE_PID_INVALID:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
+  const daemon = processState(pid);
+  if (daemon.state === "ALIVE") throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${pid}`);
+  if (daemon.state === "UNKNOWN")
+    throw new Error(
+      `RUNTIME_STATE_PROBE_FAILED:${runtimePath}:${pid}:${daemon.code}：${RUNTIME_STATE_RECOVERY}`,
+    );
 }
 
 function rewritePath(value: string, source: string, destination: string): string {

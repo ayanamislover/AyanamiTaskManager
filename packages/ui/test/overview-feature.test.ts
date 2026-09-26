@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
 import { OverviewPage, TasksAcrossProjects } from "../src/features/overview.js";
+import { PROJECT_ORDER_SETTING } from "../src/project-order.js";
 import { uiCssText } from "./css-source-graph.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "overview.tsx");
@@ -13,6 +14,9 @@ const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "ove
 function client(): AyanamiClient {
   return {
     overview: vi.fn(),
+    settings: {
+      list: vi.fn(async () => []),
+    },
     quick: {
       list: vi.fn(),
       patch: vi.fn(),
@@ -112,6 +116,44 @@ describe("Overview feature", () => {
     expect(markup).toContain("临时检查");
   });
 
+  // ATM-T-0494：Agent 等着授权的恢复请求要在首屏被看见，不然请求挂着没人知道。
+  it("垃圾箱里有 Agent 恢复请求时进入「需要处理」", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["overview"], {
+      sequence: 45,
+      projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
+      quick: { blocked: 0 },
+      projectionFailures: [],
+      recentEvents: [],
+    });
+    queryClient.setQueryData(["quick"], []);
+    queryClient.setQueryData(
+      ["projects", "trash"],
+      [
+        {
+          ...project(),
+          code: "OLD",
+          lifecycle: "TRASHED",
+          restoreRequest: { requestedBy: "codex" },
+        },
+        { ...project(), code: "QUIET", lifecycle: "TRASHED", restoreRequest: null },
+      ],
+    );
+    const markup = renderWithClient(
+      queryClient,
+      createElement(OverviewPage, {
+        client: client(),
+        onProject: vi.fn(),
+        onQuick: vi.fn(),
+        notify: vi.fn(),
+        TimelineEventRow: () => createElement("div"),
+      }),
+    );
+    expect(markup).toContain("需要处理");
+    expect(markup).toContain("codex 请求恢复垃圾箱里的 OLD，请在项目 → 垃圾箱授权或拒绝");
+    expect(markup).not.toContain("QUIET");
+  });
+
   it("总览项目卡长名称最多两行并保留全称提示", () => {
     const longName = "Codex Agent Permission Preflight And Deployment Readiness Verification";
     const queryClient = new QueryClient();
@@ -141,6 +183,42 @@ describe("Overview feature", () => {
     expect(styles).toMatch(
       /\.atm-overview-project-name\s*\{[\s\S]*-webkit-box-orient:\s*vertical;[\s\S]*-webkit-line-clamp:\s*2;[\s\S]*overflow:\s*hidden;/u,
     );
+  });
+
+  // ATM-T-0421：client.overview 按 updated_at 排，总览卡片原先没过手动顺序，
+  // 侧栏排好的顺序到了首屏就被最近一次改动打乱。
+  it("总览项目卡片跟随侧栏与项目页的手动顺序，没排过的留在后面", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["overview"], {
+      sequence: 44,
+      projects: ["alpha", "beta", "gamma", "delta"].map((name) => ({
+        ...project(),
+        id: `id-${name}`,
+        code: name.toUpperCase(),
+        name: `项目${name}`,
+      })),
+      quick: { blocked: 0 },
+      projectionFailures: [],
+      recentEvents: [],
+    });
+    queryClient.setQueryData(["quick"], []);
+    queryClient.setQueryData(["settings", PROJECT_ORDER_SETTING], ["id-gamma", "id-alpha"]);
+
+    const markup = renderWithClient(
+      queryClient,
+      createElement(OverviewPage, {
+        client: client(),
+        onProject: vi.fn(),
+        onQuick: vi.fn(),
+        notify: vi.fn(),
+        TimelineEventRow: () => createElement("div"),
+      }),
+    );
+    const names = [...markup.matchAll(/class="atm-overview-project-name">([^<]+)</gu)].map(
+      (match) => match[1],
+    );
+
+    expect(names).toEqual(["项目gamma", "项目alpha", "项目beta", "项目delta"]);
   });
 
   it("保持跨项目 active/blocked 空态与局部分页入口", () => {

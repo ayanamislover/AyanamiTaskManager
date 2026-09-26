@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MCP_SHIM_RELEASE_EXE } from "../../../scripts/mcp-shim-build.js";
 import {
@@ -46,6 +46,16 @@ describe("packaged application content policy", () => {
 
     expect(findForbiddenPackagedEntries(entries)).toEqual([]);
     expect(missingRequiredPackagedEntries(entries)).toEqual([]);
+  });
+
+  // 打包漏了最新的 Registry 迁移，装上后首启就会停在旧 schema；清单得跟着迁移目录走。
+  it("requires the newest registry migration", () => {
+    const newest = readdirSync("migrations/registry")
+      .filter((name) => name.endsWith(".sql"))
+      .sort()
+      .at(-1);
+    expect(newest).toBeDefined();
+    expect(REQUIRED_PACKAGED_ENTRIES).toContain(`migrations/registry/${newest}`);
   });
 
   it("rejects repository sources, tests and native build metadata", () => {

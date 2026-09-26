@@ -34,7 +34,7 @@ export class ProjectDatabasePool {
       const isTrashed = project.lifecycle === "TRASHED";
       throw new AtmError("PROJECT_DB_UNAVAILABLE", {
         message: isTrashed
-          ? `项目数据库当前不可用：${project.code}（${project.id}）已在垃圾箱中；请先从项目管理入口恢复项目后再重试。quick 模式不会绕过已匹配项目。`
+          ? `项目数据库当前不可用：${project.code}（${project.id}）已在垃圾箱中；请由用户在 ATM「项目 → 垃圾箱」恢复后再重试。quick 模式不会绕过已匹配项目。`
           : `项目数据库当前不可用：${project.code}（${project.id}），生命周期为 ${project.lifecycle}`,
         retryable: !isTrashed,
         details: {
@@ -44,7 +44,7 @@ export class ProjectDatabasePool {
           recovery: isTrashed
             ? {
                 action: "restore_project",
-                message: "请从项目管理入口恢复该项目；不会自动恢复或新建项目。",
+                message: "请由用户在 ATM「项目 → 垃圾箱」恢复该项目；不会自动恢复或新建项目。",
               }
             : null,
           quick: isTrashed

@@ -606,6 +606,112 @@ describe("REST 边界", () => {
     }
   });
 
+  // ATM-T-0492：/projects 从不返回 TRASHED，原来 UI 的恢复按钮因此永远渲染不出来。
+  it("垃圾箱项目单独列出，恢复后回到项目列表", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-trash-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    const codes = async (url: string) =>
+      ((await app.inject({ method: "GET", url, headers })).json() as Array<{ code: string }>).map(
+        (project) => project.code,
+      );
+    try {
+      for (const code of ["KEEP", "GONE"]) {
+        const created = await app.inject({
+          method: "POST",
+          url: "/api/v1/projects",
+          headers,
+          payload: { name: code, sourcePath: null, code },
+        });
+        expect(created.statusCode).toBe(201);
+      }
+      expect(await codes("/api/v1/trash/projects")).toEqual([]);
+      const trashed = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/GONE/trash",
+        headers,
+      });
+      expect(trashed.statusCode).toBe(200);
+
+      expect(await codes("/api/v1/projects")).toEqual(["KEEP"]);
+      expect(await codes("/api/v1/trash/projects")).toEqual(["GONE"]);
+      const unauthenticated = await app.inject({ method: "GET", url: "/api/v1/trash/projects" });
+      expect(unauthenticated.statusCode).toBe(401);
+
+      const restored = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/GONE/restore",
+        headers,
+      });
+      expect(restored.json()).toMatchObject({ code: "GONE", lifecycle: "ACTIVE" });
+      expect(new Set(await codes("/api/v1/projects"))).toEqual(new Set(["KEEP", "GONE"]));
+      expect(await codes("/api/v1/trash/projects")).toEqual([]);
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
+  // ATM-T-0494：Agent 的恢复请求只能经用户 REST（桌面端）授权或拒绝。
+  it("垃圾箱列表带出恢复请求，授权与拒绝走需鉴权的 REST", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-restore-request-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    const decide = (id: string, verb: "approve" | "reject", withToken = true) =>
+      app.inject({
+        method: "POST",
+        url: `/api/v1/trash/restore-requests/${id}/${verb}`,
+        ...(withToken ? { headers } : {}),
+      });
+    const ask = () =>
+      service.databases.requestProjectRestore("ASKED", {
+        requestedBy: "api-agent",
+        sourceCwd: "R:\\asked",
+      });
+    try {
+      await service.createProject({ name: "被请求", sourcePath: null, code: "ASKED" });
+      await service.trashProject("ASKED");
+      const first = ask();
+      const listed = await app.inject({ method: "GET", url: "/api/v1/trash/projects", headers });
+      expect(listed.json()).toMatchObject([
+        { code: "ASKED", restoreRequest: { id: first.id, requestedBy: "api-agent" } },
+      ]);
+
+      for (const verb of ["approve", "reject"] as const)
+        expect((await decide(first.id, verb, false)).statusCode).toBe(401);
+      expect(service.databases.getProject("ASKED").lifecycle).toBe("TRASHED");
+
+      const rejected = await decide(first.id, "reject");
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json()).toMatchObject({
+        request: { status: "REJECTED", decidedBy: "USER" },
+        project: { code: "ASKED", lifecycle: "TRASHED" },
+      });
+
+      const second = ask();
+      const approved = await decide(second.id, "approve");
+      expect(approved.json()).toMatchObject({
+        request: { id: second.id, status: "APPROVED" },
+        project: { code: "ASKED", lifecycle: "ACTIVE" },
+      });
+      expect((await decide(second.id, "reject")).statusCode).toBe(409);
+      expect((await decide("missing-request", "approve")).statusCode).toBe(404);
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
   it("提供 Markdown 预览应用和三种项目导出格式", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-api-data-"));
     temporary.push(dataDir);

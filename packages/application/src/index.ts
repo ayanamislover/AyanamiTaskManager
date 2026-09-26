@@ -108,6 +108,10 @@ export class AyanamiTaskService {
     return projectQueries.listProjects(this.#runtime);
   }
 
+  listTrashedProjects() {
+    return projectQueries.listTrashedProjects(this.#runtime);
+  }
+
   attachProjectPath(projectCode: string, path: string, primary = true) {
     return this.#projectCommands.attachProjectPath(projectCode, path, primary);
   }
@@ -183,6 +187,10 @@ export class AyanamiTaskService {
 
   restoreProject(projectCode: string, actor = "USER") {
     return this.#projectCommands.restoreProject(projectCode, actor);
+  }
+
+  decideProjectRestoreRequest(requestId: string, decision: "APPROVED" | "REJECTED") {
+    return this.#projectCommands.decideProjectRestoreRequest(requestId, decision);
   }
 
   async trashProject(projectCode: string, actor = "USER") {
@@ -406,6 +414,9 @@ export class AyanamiTaskService {
     return readQueries.getRecord(this.#runtime, projectCode, reference);
   }
 
+  async recentTaskProgress(projectCode: string, taskKey: string, limit: number) {
+    return readQueries.recentTaskProgress(this.#runtime, projectCode, taskKey, limit);
+  }
   async getProgressUpdate(projectCode: string, id: string) {
     return readQueries.getProgressUpdate(this.#runtime, projectCode, id);
   }
@@ -734,7 +745,7 @@ export class AyanamiTaskService {
     return readQueries.globalDelta(this.#runtime, sinceSequence, limit);
   }
 
-  async delta(projectCode: string, sinceSequence: number, limit = 50, types: string[] = []) {
+  async delta(projectCode: string, sinceSequence: number | null, limit = 50, types: string[] = []) {
     return readQueries.delta(this.#runtime, projectCode, sinceSequence, limit, types);
   }
 

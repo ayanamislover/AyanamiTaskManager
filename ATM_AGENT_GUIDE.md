@@ -80,7 +80,7 @@ task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等�
 
 编排工具结果时只输出一份业务载荷：`result.structuredContent ?? result.content`。MCP 同时保留两种载荷是为兼容不同客户端，不要把整个对象重复展开；失败时也必须保留错误正文。写回执是该次操作的快照，重放旧 `op_id` 不等于查询当前状态。
 
-候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`quick` 不会自动绕过；先由用户在项目管理中恢复，重复 `begin` 不会修复生命周期。
+候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`begin` 会拒绝（`quick` 也不绕过、不另建项目），同时登记一条恢复请求，编号在 `details.recovery.request_id`。只有用户能在 ATM「项目 → 垃圾箱」授权恢复：把编号转告用户，等授权后再调用一次 `begin`；重复 `begin` 只会累加同一条请求，不会修复生命周期。
 
 ### 字段约束速查
 
@@ -93,9 +93,10 @@ task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等�
 | `atm_record` | `summary` ≤ 300 个 Unicode code point（中文按字数算）；`title` ≤ 400；`detail` ≤ 100,000，长内容放这里。`kind=DECISION\|CONSTRAINT\|FACT\|RISK\|REFERENCE\|LESSON`，`importance=LOW\|NORMAL\|HIGH\|CRITICAL`。 |
 | `atm_progress_add` | `summary` ≤ 500 code point；`completed` / `evidence` / `next` 各 ≤ 20 项。`scope=task\|project`（`health` 只用于 project，`percent` 只用于 task）。 |
 | `atm_end` | `summary` ≤ 500 code point。`outcome=completed\|paused\|blocked\|cancelled\|error\|retired`——**全小写**。大小写没有通用规律（同一张表里 `kind` / `importance` 是大写，`scope` / `view` / `operation` 是小写），逐个字段照本表写，不要从上一个调用类推。 |
-| `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。 |
-| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
-| `atm_search` | `session` 只能与 `op_id` 精确回查一起传。 |
+| `atm_task_patch` | `items` 1–50 条；composite 操作（`verify_and_complete`、`review_request`、`review_submit`、`checklist_single`、`checklist_batch`）不可与其他操作同批，`items` 只允许一条。建完再补关系用 `edit`：`depends_on` 整组替换全部前置（`[]` 清空），`discovered_from` 改来源（`null` 解除），两者都要严格 `expected_version`。BACKLOG 转 READY 用 `ready`，不会留下领取记录。 |
+| `atm_task_get` / `atm_task_list` | `field_mask` 是「在 `view` 已有的字段内过滤」，不是「我要这些字段」；越界字段会回显在 `ignored_fields`。`atm_task_get` 传 `last_progress=N`（1–10）可一次附带本任务最近 N 条进度（新的在前），不传时响应不变。`field_mask` 在 `atm_task_get` ≤ 30 项、`atm_task_list` ≤ 20 项，每项 ≤ 64 字符。`view=core\|context\|full`（`atm_task_list` 多一个 `reconcile`）。 |
+| `atm_delta` | 恢复时手里没有上次的 seq，就省略 `since_seq`：返回最近 `limit` 条（`window: "latest"`），响应里的 `since_seq` 可直接用于之后的增量读取。 |
+| `atm_search` | `session` 只能与 `op_id` 精确回查一起传。`query` 按空白拆词，每个词都须命中（AND），最多 8 个词，超出直接报错；ID 片段如 `D-398` 按 key 匹配；双引号括起的一段按相邻短语匹配（算一个词）。0 命中时看响应里的 `next_step`。 |
 
 MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCase`。不要把两套命名混用。
 
@@ -112,8 +113,8 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 <!-- prettier-ignore -->
 | 状态 | 显示名 | 合法操作 |
 | --- | --- | --- |
-| `BACKLOG` | 待整理 | `claim`, `start`, `complete`, `cancel`, `edit` |
-| `READY` | 可开始 | `claim`, `start`, `complete`, `cancel`, `edit` |
+| `BACKLOG` | 待整理 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
+| `READY` | 可开始 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
 | `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
 | `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
 | `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `complete`, `cancel`, `reopen`, `edit` |
@@ -129,6 +130,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 | `claim` | 领取 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS` | DEPENDENCIES_READY, CLAIM_AVAILABLE, SAME_ASSIGNEE_WHEN_RUNNING |
 | `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
 | `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
+| `ready` | 设为就绪 | `BACKLOG`, `READY` | - |
 | `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
 | `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_AGENT` | WAITING_FOR |
 | `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_USER` | WAITING_FOR |

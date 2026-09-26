@@ -64,6 +64,7 @@ const contracts: Record<string, { fields: readonly string[]; required: readonly 
   claim: { fields: common, required: common.slice(0, 3) },
   start: { fields: common, required: common.slice(0, 3) },
   release: { fields: common, required: common.slice(0, 3) },
+  ready: { fields: common, required: common.slice(0, 3) },
   block: {
     fields: [...common, "blocked_reason"],
     required: [...common.slice(0, 3), "blocked_reason"],
@@ -93,6 +94,8 @@ const contracts: Record<string, { fields: readonly string[]; required: readonly 
       "assignee_agent_id",
       "target_date",
       "parent_key",
+      "depends_on",
+      "discovered_from",
     ],
     required: common.slice(0, 3),
   },
@@ -126,7 +129,7 @@ const contracts: Record<string, { fields: readonly string[]; required: readonly 
 };
 
 describe("atm_task_patch operation schema", () => {
-  it("publishes all 16 operation-specific required and allowed fields", async () => {
+  it("publishes all 17 operation-specific required and allowed fields", async () => {
     const server = createAyanamiMcpServer({} as AyanamiTaskService, { profile: "actions" });
     const client = new Client({ name: "operation-schema", version: "1" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

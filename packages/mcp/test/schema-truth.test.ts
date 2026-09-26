@@ -55,7 +55,15 @@ const publicFields: Record<string, readonly string[]> = {
     "field_mask",
     "max_chars",
   ],
-  atm_task_get: ["project", "task_key", "view", "field_mask", "cursor", "max_chars"],
+  atm_task_get: [
+    "project",
+    "task_key",
+    "view",
+    "field_mask",
+    "cursor",
+    "last_progress",
+    "max_chars",
+  ],
   atm_task_create: ["project", "session", "op_id", "items"],
   atm_task_patch: ["project", "session", "op_id", "items"],
   atm_progress_add: [
