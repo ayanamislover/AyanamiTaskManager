@@ -6,7 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  writeFileSync,
+  statSync,
 } from "node:fs";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { createRequire } from "node:module";
@@ -14,6 +14,7 @@ import { createServer as createTcpServer, type Server as TcpServer, type Socket 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { replaceFileAtomically } from "../../daemon/src/runtime-discovery.js";
 import { ensureNativeShim, SHIM_CRATE, SHIM_EXE, WAKE_RECORDER_EXE } from "./native-shim.js";
 
 /**
@@ -130,16 +131,20 @@ function dataDir(label: string): string {
   return dir;
 }
 
+/**
+ * Publishes exactly the way the daemon does. Several cases rewrite the descriptor while a
+ * bridge is polling it; writing it in place let a bridge read the truncated file under
+ * load and answer ATM_RUNTIME_DESCRIPTOR_INVALID, a state the real daemon never produces.
+ */
 function publish(
   dir: string,
   endpoint: string,
   token: string,
   overrides: Record<string, unknown> = {},
 ): void {
-  writeFileSync(
+  replaceFileAtomically(
     join(dir, "runtime", "daemon.json"),
     JSON.stringify({ ...runtimeDescriptor(endpoint, token), ...overrides }),
-    "utf8",
   );
 }
 
@@ -246,6 +251,19 @@ const request = (id: unknown, method = "tools/list") => ({
 });
 const reply = (id: unknown, result: unknown = { ok: true }) =>
   JSON.stringify({ jsonrpc: "2.0", id, result });
+
+describe("descriptor fixture", () => {
+  it("replaces daemon.json the way the daemon does instead of rewriting it in place", () => {
+    const dir = dataDir("fixture");
+    const path = join(dir, "runtime", "daemon.json");
+    publish(dir, "http://127.0.0.1:1", "first-token");
+    const before = statSync(path, { bigint: true }).ino;
+    publish(dir, "http://127.0.0.1:2", "second-token");
+    // A new file identity means readers only ever saw a complete descriptor.
+    expect(statSync(path, { bigint: true }).ino).not.toBe(before);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ token: "second-token" });
+  });
+});
 
 describe.each(implementations)("stdio bridge contract: $name", (implementation) => {
   beforeAll(() => implementation.prepare(), 300_000);

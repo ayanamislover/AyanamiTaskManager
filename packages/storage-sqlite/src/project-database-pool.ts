@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 import { AtmError } from "@ayanami-task/errors";
+import { closeAllStages } from "./close-stages.js";
 import { openManagedDatabase, type ManagedDatabase } from "./database.js";
 
 export type PoolProject = {
@@ -105,12 +106,19 @@ export class ProjectDatabasePool {
     this.#projects.delete(projectId);
   }
 
+  /** Close every project database, even when one of them fails to checkpoint or close. */
   closeAll(): void {
-    for (const { database } of this.#projects.values()) {
-      if (!database.sqlite.open) continue;
-      database.sqlite.pragma("wal_checkpoint(PASSIVE)");
-      database.sqlite.close();
-    }
+    const databases = [...this.#projects.values()].map(({ database }) => database);
     this.#projects.clear();
+    closeAllStages(
+      databases.map((database) => () => {
+        if (!database.sqlite.open) return;
+        try {
+          database.sqlite.pragma("wal_checkpoint(PASSIVE)");
+        } finally {
+          database.sqlite.close();
+        }
+      }),
+    );
   }
 }

@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -5,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +18,7 @@ import {
   createDaemonToken,
   DAEMON_VERSION,
   readDaemonRuntime,
+  replaceFileAtomically,
   resolveDaemonDataDirectory,
   type DaemonRuntimeDescriptor,
 } from "../src/index.js";
@@ -106,6 +109,51 @@ describe("single-source daemon runtime discovery", () => {
     lease.clear();
     lease.release();
   });
+
+  it("publishes by replacing the file, never by rewriting it in place", () => {
+    // A reader polling daemon.json must see the old descriptor or the new one. Rewriting in
+    // place truncates first, and a bridge that reads the empty file fails fast with
+    // ATM_RUNTIME_DESCRIPTOR_INVALID. Replacement shows up as a new file identity.
+    const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-replace-"));
+    temporary.push(runtimeDir);
+    const target = join(runtimeDir, "daemon.json");
+    replaceFileAtomically(target, '{"generation":1}\n');
+    const first = statSync(target, { bigint: true }).ino;
+    replaceFileAtomically(target, '{"generation":2}\n');
+    expect(statSync(target, { bigint: true }).ino).not.toBe(first);
+    expect(readFileSync(target, "utf8")).toBe('{"generation":2}\n');
+    expect(readdirSync(runtimeDir)).toEqual(["daemon.json"]);
+  });
+
+  it.runIf(process.platform === "win32")(
+    "publishes while a bridge is still reading the previous descriptor",
+    async () => {
+      // Windows refuses to rename over a file any process has open (EPERM), even with
+      // FILE_SHARE_DELETE. Bridges waiting for a restart read daemon.json every 100 ms, so
+      // a daemon that finds a stale descriptor can publish onto an open one.
+      const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-held-"));
+      temporary.push(runtimeDir);
+      const target = join(runtimeDir, "daemon.json");
+      replaceFileAtomically(target, '{"generation":1}\n');
+      const reader = spawn(
+        process.execPath,
+        [
+          "-e",
+          "const fs=require('node:fs');const fd=fs.openSync(process.argv[1],'r');" +
+            "process.stdout.write('open\\n');setTimeout(()=>fs.closeSync(fd),150);",
+          target,
+        ],
+        { stdio: ["ignore", "pipe", "inherit"], windowsHide: true },
+      );
+      const exited = new Promise((resolveExit) => reader.once("exit", resolveExit));
+      await new Promise((resolveOpen) => reader.stdout?.once("data", resolveOpen));
+
+      replaceFileAtomically(target, '{"generation":2}\n');
+      await exited;
+      expect(readFileSync(target, "utf8")).toBe('{"generation":2}\n');
+      expect(readdirSync(runtimeDir)).toEqual(["daemon.json"]);
+    },
+  );
 
   it("rejects non-loopback or malformed descriptors without echoing token or path", () => {
     const runtimeDir = mkdtempSync(join(tmpdir(), "atm-runtime-invalid-"));
