@@ -1,5 +1,5 @@
 import { type ProjectionStateView, type ProjectionSummary } from "@ayanami-task/protocol";
-import type { RegisteredProject } from "@ayanami-task/storage-sqlite";
+import type { ProjectRestoreRequestView, RegisteredProject } from "@ayanami-task/storage-sqlite";
 import type { ApplicationServiceRuntime } from "../runtime/service-runtime.js";
 
 export function listProjects(runtime: ApplicationServiceRuntime): RegisteredProject[] {
@@ -10,8 +10,17 @@ export function listProjects(runtime: ApplicationServiceRuntime): RegisteredProj
  * 垃圾箱里的项目（ATM-T-0492）。默认列表把它们排除在外，侧栏、总览、项目网格都不该看到；
  * 但恢复入口必须能列出它们，否则「移入垃圾箱」就成了单向操作。
  */
-export function listTrashedProjects(runtime: ApplicationServiceRuntime): RegisteredProject[] {
-  return runtime.databases.listProjects(true).filter((project) => project.lifecycle === "TRASHED");
+export function listTrashedProjects(
+  runtime: ApplicationServiceRuntime,
+): Array<RegisteredProject & { restoreRequest: ProjectRestoreRequestView | null }> {
+  return runtime.databases
+    .listProjects(true)
+    .filter((project) => project.lifecycle === "TRASHED")
+    .map((project) => ({
+      ...project,
+      // Agent 等着用户授权的那条请求（ATM-T-0493）；没有就是 null。
+      restoreRequest: runtime.databases.pendingProjectRestore(project.id),
+    }));
 }
 
 export function overview(runtime: ApplicationServiceRuntime) {

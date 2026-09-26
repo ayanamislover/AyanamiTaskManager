@@ -44,7 +44,14 @@ describe("迁移完整性", () => {
       cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
       manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
       try {
-        expect(manager.registry.schemaVersion).toBe(6);
+        expect(manager.registry.schemaVersion).toBe(7);
+        // 0007：垃圾箱项目的恢复请求；同一项目只允许一条 PENDING。
+        const insertRequest = manager.registry.sqlite.prepare(
+          `INSERT INTO project_restore_requests(id, project_id, requested_by, status, created_at, updated_at)
+           VALUES (?, ?, 'agent', 'PENDING', '2026-09-26T00:00:00.000Z', '2026-09-26T00:00:00.000Z')`,
+        );
+        insertRequest.run("restore-a", project.id);
+        expect(() => insertRequest.run("restore-b", project.id)).toThrow(/UNIQUE/u);
         const upgraded = await manager.openProject(project.code);
         expect(upgraded.schemaVersion).toBe(18);
         expect(

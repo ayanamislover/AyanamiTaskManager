@@ -11,7 +11,7 @@ export const REQUIRED_PACKAGED_ENTRIES = [
   "migrations/registry/0001_initial.sql",
   "migrations/project/0001_initial.sql",
   "migrations/knowledge/0001_initial.sql",
-  "migrations/registry/0006_knowledge_backups.sql",
+  "migrations/registry/0007_project_restore_requests.sql",
 ] as const;
 
 export const PUBLISHED_LOGO_MAX_EDGE = 256;

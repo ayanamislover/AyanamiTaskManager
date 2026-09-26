@@ -108,7 +108,7 @@ export class AyanamiTaskService {
     return projectQueries.listProjects(this.#runtime);
   }
 
-  listTrashedProjects(): RegisteredProject[] {
+  listTrashedProjects() {
     return projectQueries.listTrashedProjects(this.#runtime);
   }
 
@@ -187,6 +187,10 @@ export class AyanamiTaskService {
 
   restoreProject(projectCode: string, actor = "USER") {
     return this.#projectCommands.restoreProject(projectCode, actor);
+  }
+
+  decideProjectRestoreRequest(requestId: string, decision: "APPROVED" | "REJECTED") {
+    return this.#projectCommands.decideProjectRestoreRequest(requestId, decision);
   }
 
   async trashProject(projectCode: string, actor = "USER") {

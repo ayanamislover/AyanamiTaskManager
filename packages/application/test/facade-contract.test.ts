@@ -105,6 +105,7 @@ const EXPECTED_PROTOTYPE_METHODS = [
   "refreshSessionGitContextAsUser",
   "restoreBackup",
   "restoreProject",
+  "decideProjectRestoreRequest",
   "runMaintenance",
   "search",
   "setSetting",

@@ -80,7 +80,7 @@ task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等�
 
 编排工具结果时只输出一份业务载荷：`result.structuredContent ?? result.content`。MCP 同时保留两种载荷是为兼容不同客户端，不要把整个对象重复展开；失败时也必须保留错误正文。写回执是该次操作的快照，重放旧 `op_id` 不等于查询当前状态。
 
-候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`quick` 不会自动绕过；先由用户在项目管理中恢复，重复 `begin` 不会修复生命周期。
+候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`begin` 会拒绝（`quick` 也不绕过、不另建项目），同时登记一条恢复请求，编号在 `details.recovery.request_id`。只有用户能在 ATM「项目 → 垃圾箱」授权恢复：把编号转告用户，等授权后再调用一次 `begin`；重复 `begin` 只会累加同一条请求，不会修复生命周期。
 
 ### 字段约束速查
 

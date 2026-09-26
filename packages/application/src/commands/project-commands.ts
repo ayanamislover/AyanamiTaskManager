@@ -89,6 +89,13 @@ export class ProjectCommands {
     return result;
   }
 
+  /** 用户对 Agent 恢复请求的决定（ATM-T-0494）。只由用户入口调用，MCP 不暴露。 */
+  decideProjectRestoreRequest(requestId: string, decision: "APPROVED" | "REJECTED") {
+    const result = this.#runtime.databases.decideProjectRestoreRequest(requestId, decision, "USER");
+    this.#runtime.emitGlobal();
+    return result;
+  }
+
   async trashProject(projectCode: string, actor = "USER") {
     await this.#runtime.databases.createBackup({
       scope: "PROJECT",
