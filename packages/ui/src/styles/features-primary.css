@@ -379,7 +379,8 @@
 .atm-engineering {
   margin-bottom: 18px;
 }
-.atm-project-reconcile {
+.atm-project-reconcile,
+.atm-project-trash {
   margin-top: 18px;
 }
 /* 诊断区：折叠条沿用工程统计的样式；展开后三块面板依次排开。 */

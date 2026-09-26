@@ -108,6 +108,10 @@ export class AyanamiTaskService {
     return projectQueries.listProjects(this.#runtime);
   }
 
+  listTrashedProjects(): RegisteredProject[] {
+    return projectQueries.listTrashedProjects(this.#runtime);
+  }
+
   attachProjectPath(projectCode: string, path: string, primary = true) {
     return this.#projectCommands.attachProjectPath(projectCode, path, primary);
   }

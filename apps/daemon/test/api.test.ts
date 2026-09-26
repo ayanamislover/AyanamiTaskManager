@@ -606,6 +606,57 @@ describe("REST 边界", () => {
     }
   });
 
+  // ATM-T-0492：/projects 从不返回 TRASHED，原来 UI 的恢复按钮因此永远渲染不出来。
+  it("垃圾箱项目单独列出，恢复后回到项目列表", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-api-trash-"));
+    temporary.push(dataDir);
+    const service = await AyanamiTaskService.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    const app = await buildAyanamiServer({ service, token: "local-secret" });
+    const headers = { authorization: "Bearer local-secret" };
+    const codes = async (url: string) =>
+      ((await app.inject({ method: "GET", url, headers })).json() as Array<{ code: string }>).map(
+        (project) => project.code,
+      );
+    try {
+      for (const code of ["KEEP", "GONE"]) {
+        const created = await app.inject({
+          method: "POST",
+          url: "/api/v1/projects",
+          headers,
+          payload: { name: code, sourcePath: null, code },
+        });
+        expect(created.statusCode).toBe(201);
+      }
+      expect(await codes("/api/v1/trash/projects")).toEqual([]);
+      const trashed = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/GONE/trash",
+        headers,
+      });
+      expect(trashed.statusCode).toBe(200);
+
+      expect(await codes("/api/v1/projects")).toEqual(["KEEP"]);
+      expect(await codes("/api/v1/trash/projects")).toEqual(["GONE"]);
+      const unauthenticated = await app.inject({ method: "GET", url: "/api/v1/trash/projects" });
+      expect(unauthenticated.statusCode).toBe(401);
+
+      const restored = await app.inject({
+        method: "POST",
+        url: "/api/v1/projects/GONE/restore",
+        headers,
+      });
+      expect(restored.json()).toMatchObject({ code: "GONE", lifecycle: "ACTIVE" });
+      expect(new Set(await codes("/api/v1/projects"))).toEqual(new Set(["KEEP", "GONE"]));
+      expect(await codes("/api/v1/trash/projects")).toEqual([]);
+    } finally {
+      await app.close();
+      service.close();
+    }
+  });
+
   it("提供 Markdown 预览应用和三种项目导出格式", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "atm-api-data-"));
     temporary.push(dataDir);

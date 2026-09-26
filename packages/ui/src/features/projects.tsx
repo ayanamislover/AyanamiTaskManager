@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowCounterClockwiseIcon as ArrowCounterClockwise } from "@phosphor-icons/react/dist/icons/ArrowCounterClockwise";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
+import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
 import type { AyanamiClient } from "@ayanami-task/client";
@@ -301,7 +302,6 @@ export function ProjectsPage({
   desktop?: DesktopBridge;
 }) {
   const [wizard, setWizard] = useState(false);
-  const queryClient = useQueryClient();
   const query = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
   // 卡片和侧栏读同一份手动顺序，两处永远一致。
   const projectOrder = useProjectOrder(client);
@@ -311,13 +311,6 @@ export function ProjectsPage({
     projectOrder,
     "horizontal",
   );
-  const restore = useMutation({
-    mutationFn: (code: string) => client.projects.restore(code),
-    onSuccess: async (project) => {
-      await queryClient.invalidateQueries();
-      notify(`已从垃圾箱恢复 ${project.code}`);
-    },
-  });
   return (
     <>
       <PageHead
@@ -350,11 +343,7 @@ export function ProjectsPage({
         <section className="atm-project-grid">
           {projects.map((project) => (
             <article className="atm-project" key={project.id} {...reorder(project.id)}>
-              <button
-                className="atm-project-main"
-                disabled={project.lifecycle === "TRASHED"}
-                onClick={() => onProject(project.code)}
-              >
+              <button className="atm-project-main" onClick={() => onProject(project.code)}>
                 <div>
                   <span className="atm-project-code">{project.code}</span>
                   <Status value={project.lifecycle} />
@@ -363,24 +352,14 @@ export function ProjectsPage({
                 <p>{project.description || "尚未填写项目说明"}</p>
                 <div className="atm-project-footer">
                   <span className="atm-row-sub">{project.sourcePaths[0] ?? "无源码目录"}</span>
-                  {project.lifecycle === "TRASHED" ? null : <ArrowRight size={18} />}
+                  <ArrowRight size={18} />
                 </div>
               </button>
-              {project.lifecycle === "TRASHED" ? (
-                <button
-                  className="atm-button"
-                  disabled={restore.isPending}
-                  onClick={() => restore.mutate(project.code)}
-                >
-                  <ArrowCounterClockwise size={16} />
-                  恢复项目
-                </button>
-              ) : null}
             </article>
           ))}
         </section>
       )}
-      <MutationErrorAlert error={restore.error} />
+      <ProjectTrash client={client} notify={notify} />
       <Presence present={wizard} inertWhenClosing>
         {wizard ? (
           <ProjectWizard
@@ -393,5 +372,86 @@ export function ProjectsPage({
         ) : null}
       </Presence>
     </>
+  );
+}
+
+/**
+ * 项目页的垃圾箱分区（ATM-T-0492）。
+ *
+ * 原来恢复按钮写在项目网格里，但网格的数据来自 client.projects.list()，而那个接口从来不返回
+ * TRASHED 项目——按钮永远渲染不出来，「移入垃圾箱」成了单向操作。垃圾箱单独取数，
+ * 默认折叠，没有被删的项目时整块不出现。
+ */
+export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify: Notify }) {
+  const queryClient = useQueryClient();
+  const [collapsed, setCollapsed] = useState(true);
+  const trashed = useQuery({
+    queryKey: ["projects", "trash"],
+    queryFn: () => client.projects.trashed(),
+  });
+  const restore = useMutation({
+    mutationFn: (code: string) => client.projects.restore(code),
+    onSuccess: async (project) => {
+      await queryClient.invalidateQueries();
+      notify(`已从垃圾箱恢复 ${project.code}`);
+    },
+  });
+  const projects = trashed.data ?? [];
+  if (!trashed.error && projects.length === 0) return null;
+  return (
+    <section
+      className={`atm-panel atm-engineering atm-project-trash${collapsed ? " is-collapsed" : ""}`}
+      aria-label="垃圾箱"
+    >
+      <div className="atm-panel-head">
+        <button
+          type="button"
+          className="atm-engineering-toggle"
+          aria-label={collapsed ? "展开垃圾箱" : "折叠垃圾箱"}
+          aria-expanded={!collapsed}
+          aria-controls="project-trash-content"
+          onClick={() => setCollapsed((value) => !value)}
+        >
+          <CaretDown size={17} aria-hidden="true" />
+          <span>
+            <strong>垃圾箱（{projects.length}）</strong>
+            <small>移入垃圾箱前已自动备份；恢复后回到项目列表</small>
+          </span>
+        </button>
+      </div>
+      <div id="project-trash-content" hidden={collapsed}>
+        {trashed.error ? (
+          <ErrorState error={trashed.error} />
+        ) : (
+          <div className="atm-panel-body atm-project-grid">
+            {projects.map((project) => (
+              <article className="atm-project" key={project.id}>
+                <div className="atm-project-main" aria-disabled="true">
+                  <div>
+                    <span className="atm-project-code">{project.code}</span>
+                    <Status value={project.lifecycle} />
+                  </div>
+                  <h2>{project.name}</h2>
+                  <p>{project.description || "尚未填写项目说明"}</p>
+                  <div className="atm-project-footer">
+                    <span className="atm-row-sub">{project.sourcePaths[0] ?? "无源码目录"}</span>
+                  </div>
+                </div>
+                <button
+                  className="atm-button"
+                  aria-label={`恢复项目 ${project.name}`}
+                  disabled={restore.isPending}
+                  onClick={() => restore.mutate(project.code)}
+                >
+                  <ArrowCounterClockwise size={16} />
+                  恢复项目
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+        <MutationErrorAlert error={restore.error} />
+      </div>
+    </section>
   );
 }

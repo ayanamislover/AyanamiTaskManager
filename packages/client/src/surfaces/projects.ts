@@ -11,6 +11,8 @@ import type {
 export function createProjectsSurface(request: ClientRequest) {
   const surface = {
     list: () => request<RegisteredProject[]>("GET", "/api/v1/projects"),
+    /** 垃圾箱里的项目；list() 不含它们。 */
+    trashed: () => request<RegisteredProject[]>("GET", "/api/v1/trash/projects"),
     get: (code: string) =>
       request<RegisteredProject>("GET", `/api/v1/projects/${encodeURIComponent(code)}`),
     attachPath: (code: string, path: string, primary = true) =>

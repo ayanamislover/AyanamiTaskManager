@@ -6,6 +6,14 @@ export function listProjects(runtime: ApplicationServiceRuntime): RegisteredProj
   return runtime.databases.listProjects();
 }
 
+/**
+ * 垃圾箱里的项目（ATM-T-0492）。默认列表把它们排除在外，侧栏、总览、项目网格都不该看到；
+ * 但恢复入口必须能列出它们，否则「移入垃圾箱」就成了单向操作。
+ */
+export function listTrashedProjects(runtime: ApplicationServiceRuntime): RegisteredProject[] {
+  return runtime.databases.listProjects(true).filter((project) => project.lifecycle === "TRASHED");
+}
+
 export function overview(runtime: ApplicationServiceRuntime) {
   return runtime.databases.overview();
 }

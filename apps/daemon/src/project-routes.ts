@@ -96,6 +96,8 @@ export function registerProjectRoutes(
   });
 
   app.get("/api/v1/projects", async () => options.service.listProjects());
+  // 不挂在 /projects 下：/projects/:code 是动态段，垃圾箱列表单独一条路由更不易撞车。
+  app.get("/api/v1/trash/projects", async () => options.service.listTrashedProjects());
   app.post("/api/v1/projects", async (request, reply) => {
     const input = CreateProjectInputSchema.parse(request.body);
     const project = await options.service.createProject({

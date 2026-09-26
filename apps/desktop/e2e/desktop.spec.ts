@@ -365,6 +365,64 @@ test("总览项目卡片与侧栏使用同一份手动顺序", async ({ page }) 
   }
 });
 
+// ATM-T-0492：/projects 从不返回 TRASHED，原来项目页的恢复按钮永远渲染不出来。
+test("项目页的垃圾箱分区能列出并恢复被删项目", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const existing = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{ code: string }>;
+  const trashedAlready = (await (await api.get(`${apiUrl}/trash/projects`)).json()) as Array<{
+    code: string;
+  }>;
+  if (
+    !existing.some((project) => project.code === "TRASHUI") &&
+    !trashedAlready.some((project) => project.code === "TRASHUI")
+  ) {
+    const created = await api.post(`${apiUrl}/projects`, {
+      data: { name: "垃圾箱验收项目", sourcePath: null, code: "TRASHUI", description: "e2e" },
+    });
+    expect(created.ok()).toBeTruthy();
+  }
+  if (!trashedAlready.some((project) => project.code === "TRASHUI")) {
+    expect((await api.post(`${apiUrl}/projects/TRASHUI/trash`)).ok()).toBeTruthy();
+  }
+
+  try {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto("/#projects");
+    const grid = page.locator(".atm-project-grid").first();
+    await expect(grid.getByText("E2E 验收项目")).toBeVisible();
+    await expect(grid.getByText("垃圾箱验收项目")).toHaveCount(0);
+    await expect(page.locator(".atm-sidebar").getByText("垃圾箱验收项目")).toHaveCount(0);
+
+    const toggle = page.getByRole("button", { name: "展开垃圾箱" });
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText(/垃圾箱（\d+）/u)).toBeVisible();
+    const caret = page.locator(".atm-project-trash .atm-engineering-toggle > svg");
+    await expect
+      .poll(() => caret.evaluate((svg) => getComputedStyle(svg).transform))
+      .not.toBe("none");
+    await toggle.click();
+    const trash = page.locator("#project-trash-content");
+    await expect(trash.getByText("垃圾箱验收项目")).toBeVisible();
+    // 箭头旋转有过渡，等它转完再截图，免得拍到半程。
+    await expect.poll(() => caret.evaluate((svg) => getComputedStyle(svg).transform)).toBe("none");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-project-trash-1920.png"),
+      fullPage: true,
+    });
+
+    await trash.getByRole("button", { name: "恢复项目 垃圾箱验收项目" }).click();
+    await expect(page.getByText("已从垃圾箱恢复 TRASHUI")).toBeVisible();
+    await expect(grid.getByText("垃圾箱验收项目")).toBeVisible();
+    await expect(page.locator(".atm-sidebar").getByText("垃圾箱验收项目")).toBeVisible();
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-project-trash-restored-1920.png"),
+      fullPage: true,
+    });
+  } finally {
+    await api.dispose();
+  }
+});
+
 test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ page }) => {
   // staleTime 3 秒内切回来会命中新鲜缓存、queryFn 不执行；归属如果跟着「请求是否跑过」
   // 走，列表就会卡在空白加载态直到下一次网络刷新。
