@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { asAtmError, AtmError, atmErrorDto } from "@ayanami-task/errors";
@@ -100,9 +101,51 @@ function bearer(request: FastifyRequest): string | null {
   return value.slice("Bearer ".length);
 }
 
-function assertToken(request: FastifyRequest, token: string): void {
-  if (bearer(request) !== token)
-    throw new AtmError("UNAUTHORIZED", { message: "本地访问令牌无效" });
+/** 请求是谁发的（ATM-T-0503）：界面上的用户，还是拿 daemon.json 令牌的 Agent。 */
+export type AtmPrincipal = "USER" | "AGENT";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    atmPrincipal: AtmPrincipal;
+  }
+  interface FastifyContextConfig {
+    atmPrincipal?: AtmPrincipal;
+  }
+}
+
+/**
+ * 只接受用户凭证的路由。daemon.json 里的令牌谁都能读，所以恢复垃圾箱、以用户身份写入这类
+ * 「用户的决定」不能只凭它放行。挂在路由选项上：`app.post(path, USER_ONLY, handler)`。
+ */
+export const USER_ONLY = { config: { atmPrincipal: "USER" as AtmPrincipal } };
+
+function sameSecret(presented: string, expected: string): boolean {
+  // 先各自摘要再比，长度不同也不提前返回，避免按字节泄露比对进度。
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(presented), digest(expected));
+}
+
+export function authenticate(
+  presented: unknown,
+  options: Pick<AyanamiServerOptions, "token" | "userToken">,
+): AtmPrincipal | null {
+  if (typeof presented !== "string") return null;
+  if (options.userToken !== undefined && sameSecret(presented, options.userToken)) return "USER";
+  if (sameSecret(presented, options.token))
+    return options.userToken === undefined ? "USER" : "AGENT";
+  return null;
+}
+
+export function assertUser(request: FastifyRequest, action: string): void {
+  if (request.atmPrincipal === "USER") return;
+  throw new AtmError("USER_AUTHORIZATION_REQUIRED", {
+    message: `${action}只能由用户在 ATM 桌面端界面操作；runtime/daemon.json 里的 Agent 令牌无权执行。`,
+    details: {
+      principal: request.atmPrincipal,
+      where: "ATM 桌面端界面",
+      next_step: "把需要的操作告诉用户，由用户在 ATM 里点击完成；不要重试或寻找其他入口。",
+    },
+  });
 }
 
 function isAllowedBrowserOrigin(origin: string | undefined): boolean {
@@ -186,7 +229,11 @@ export async function createHttpServer(options: AyanamiServerOptions): Promise<F
   app.addHook("preValidation", async (request) => {
     if (request.method === "OPTIONS") return;
     if (request.url.startsWith("/api/v1/ws")) return;
-    assertToken(request, options.token);
+    const principal = authenticate(bearer(request), options);
+    if (principal === null) throw new AtmError("UNAUTHORIZED", { message: "本地访问令牌无效" });
+    request.atmPrincipal = principal;
+    if (request.routeOptions.config.atmPrincipal === "USER")
+      assertUser(request, `${request.method} ${request.routeOptions.url ?? request.url} `);
   });
   return app;
 }

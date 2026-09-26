@@ -10,9 +10,20 @@
 - 正式桌面 daemon 每次启动都会生成新的 Bearer token，并原子发布到 `<数据目录>\runtime\daemon.json`。发现文件同时绑定 `endpoint`、`pid`、`version`、`startedAt` 和随机 `instanceId`；正常退出会清除它，旧 token 在重启后失效。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，正式桌面 host 明确忽略该 override。
 - 自动安装的 Agent 配置使用 stdio bridge，bridge 每次请求都重新读取并校验发现文件，因此配置不持久化 endpoint/token，也能跨 daemon 重启恢复。
 - REST 在认证前拒绝非 localhost/127.0.0.1 的浏览器 `Origin`；错误响应不回显当前或调用方提供的 token。WebSocket 必须在 3 秒内完成认证；错误 token 或超时以 `1008` 关闭，认证成功前不发送业务事件。认证前的非法 JSON 只返回有界协议错误，不会得到业务数据。
-- 打包 Renderer 不接收原始 endpoint/token，只通过 Preload 暴露的有界 Main-process API capability 访问 `/api/v1/*`；跨源导航和新窗口被拒绝。
+- 打包 Renderer 不接收原始 endpoint 与用户凭证，只通过 Preload 暴露的有界 Main-process API capability 访问 `/api/v1/*`；跨源导航和新窗口被拒绝。设置页为“复制当前运行实例的 Streamable HTTP 配置”取得的配置里带的是 Agent 凭证。
 
 Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、ATM Record、对话、命令行参数或长期 Agent 配置。只有用户明确复制“当前运行实例”的 Streamable HTTP 配置时，该临时配置才会包含当前 token。
+
+### 用户凭证与 Agent 凭证
+
+正式桌面 daemon 同时持有两份凭证，每次启动都重新生成：
+
+- **Agent 凭证**：即 `daemon.json` 里的 `token`。MCP bridge、`--mcp-stdio`、`--cli` 和按指南直接调 REST 的 Agent 都用它。
+- **用户凭证**：只由桌面主进程在内存里生成，不写入 `daemon.json`、日志或 Agent 配置，也不交给 Renderer；Renderer 的每个 `/api/v1/*` 请求由主进程代为注入。
+
+「用户的决定」只接受用户凭证，Agent 凭证调用返回 `403 USER_AUTHORIZATION_REQUIRED`，且不产生任何写入。包括：垃圾箱恢复请求的授权与拒绝，项目恢复、移入垃圾箱与归档，备份恢复，设置写入，导入 apply，项目路径绑定，Session 强制关闭，`/projects/:code/ui/*` 与其他以用户身份落账的写入，以及 `actor=USER`（含缺省）的临时任务写入。路由上的这一标记由静态守卫检查：处理器里出现用户身份却没标的路由会让测试变红。
+
+这一层挡住的是「按文档办事的 Agent」和「读一个文件就能冒充用户」：只持 MCP/bridge，或读取 `daemon.json` 后直接调 REST 的 Agent，都无法替用户授权。它**不是**同用户进程之间的强隔离：同一 Windows 用户下的程序仍可以蓄意读取 ATM 主进程内存，或模拟键盘鼠标操作界面，这两类仍属于下文的非目标。standalone 开发 daemon 只有显式设置 `AYANAMI_TASK_USER_TOKEN` 时才分离凭证，否则那一个 token 同时代表用户，不应用于安装版。
 
 ### Cursor 完整性与作用域
 

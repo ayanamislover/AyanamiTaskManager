@@ -41,6 +41,52 @@ describe("runtime secret safety guards", () => {
     expect(preload).not.toContain("sendSync");
   });
 
+  // ATM-T-0503：用户凭证只在主进程内存里，renderer 请求由主进程代为注入。
+  it("keeps the user credential out of daemon.json and hands it only to renderer requests", () => {
+    const leaks = (runtimeHost: string, integrations: string): string[] => {
+      const problems: string[] = [];
+      const descriptor = /const runtime: Runtime = \{([\s\S]*?)\n {2}\};/u.exec(runtimeHost)?.[1];
+      if (descriptor === undefined) problems.push("descriptor block not found");
+      else if (/userToken/u.test(descriptor)) problems.push("userToken in daemon.json descriptor");
+      if (!/lease\.publish\(runtime\)/u.test(runtimeHost))
+        problems.push("publish is not the descriptor");
+      if (!/const userToken = createDaemonToken\(\{\}\)/u.test(runtimeHost))
+        problems.push("userToken not rotated per start");
+      if (!/proxyRuntimeRequest\(\{[^}]*token: host\.userToken[^}]*\}/u.test(runtimeHost))
+        problems.push("renderer requests do not carry the user credential");
+      if (/userToken/u.test(integrations)) problems.push("userToken reaches agent integrations");
+      if (/(?:writeFileSync|appendFileSync|console\.\w+|log\w*)\([^)]*userToken/u.test(runtimeHost))
+        problems.push("userToken written or logged");
+      return problems;
+    };
+    const runtimeHost = readFileSync(join(root, "apps/desktop/src/runtime-host.ts"), "utf8");
+    const integrations = readFileSync(
+      join(root, "apps/desktop/src/main-agent-integrations.ts"),
+      "utf8",
+    );
+    expect(leaks(runtimeHost, integrations)).toEqual([]);
+
+    // 阳性对照：把根因逐条写回去，守卫都要认出来。
+    expect(
+      leaks(
+        runtimeHost.replace("    token,\n    pid:", "    token,\n    userToken,\n    pid:"),
+        integrations,
+      ),
+    ).toContain("userToken in daemon.json descriptor");
+    expect(
+      leaks(
+        runtimeHost.replace("token: host.userToken", "token: host.runtime.token"),
+        integrations,
+      ),
+    ).toContain("renderer requests do not carry the user credential");
+    expect(leaks(runtimeHost, `${integrations}\nconst leaked = host.userToken;`)).toContain(
+      "userToken reaches agent integrations",
+    );
+    expect(leaks(`${runtimeHost}\nconsole.log(userToken);`, integrations)).toContain(
+      "userToken written or logged",
+    );
+  });
+
   it("always rotates the packaged desktop token even when the parent environment has an override", () => {
     const runtimeHost = readFileSync(join(root, "apps/desktop/src/runtime-host.ts"), "utf8");
     expect(runtimeHost).toContain("createDaemonToken({})");
