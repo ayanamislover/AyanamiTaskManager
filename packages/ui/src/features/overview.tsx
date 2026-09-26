@@ -44,6 +44,11 @@ export function OverviewPage({
     queryKey: ["quick"],
     queryFn: () => client.quick.list(),
   });
+  // 和项目页垃圾箱分区同一个 queryKey，共用缓存（ATM-T-0494）。取不到就不提示，不挡总览。
+  const trashQuery = useQuery({
+    queryKey: ["projects", "trash"],
+    queryFn: () => client.projects.trashed(),
+  });
   const completeQuick = useMutation({
     mutationFn: (task: any) =>
       client.quick.patch(String(task.id), {
@@ -110,6 +115,12 @@ export function OverviewPage({
     else if (failure.reason === "INVERTED")
       attention.push(`${code} 数据投影序列倒挂（lag ${failure.lag}）`);
     else attention.push(`${code} 数据投影等待重试（lag ${failure.lag}）`);
+  }
+  for (const project of trashQuery.data ?? []) {
+    if (project.restoreRequest)
+      attention.push(
+        `${project.restoreRequest.requestedBy} 请求恢复垃圾箱里的 ${project.code}，请在项目 → 垃圾箱授权或拒绝`,
+      );
   }
   if ((data.recentEvents as any[] | undefined)?.some((event) => event.type === "backup.failed"))
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");

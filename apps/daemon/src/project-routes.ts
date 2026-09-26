@@ -98,6 +98,15 @@ export function registerProjectRoutes(
   app.get("/api/v1/projects", async () => options.service.listProjects());
   // 不挂在 /projects 下：/projects/:code 是动态段，垃圾箱列表单独一条路由更不易撞车。
   app.get("/api/v1/trash/projects", async () => options.service.listTrashedProjects());
+  // 用户对 Agent 恢复请求的决定（ATM-T-0494）。MCP 工具面不提供对应操作。
+  app.post("/api/v1/trash/restore-requests/:id/approve", async (request) => {
+    const { id } = request.params as { id: string };
+    return options.service.decideProjectRestoreRequest(id, "APPROVED");
+  });
+  app.post("/api/v1/trash/restore-requests/:id/reject", async (request) => {
+    const { id } = request.params as { id: string };
+    return options.service.decideProjectRestoreRequest(id, "REJECTED");
+  });
   app.post("/api/v1/projects", async (request, reply) => {
     const input = CreateProjectInputSchema.parse(request.body);
     const project = await options.service.createProject({

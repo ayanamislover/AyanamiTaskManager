@@ -4,15 +4,27 @@ import { AyanamiClientError, queryString, type ClientRequest } from "../http.js"
 import type {
   AgentSession,
   ProjectRecord,
+  ProjectRestoreRequest,
   ReconciliationResult,
   RegisteredProject,
+  TrashedProject,
 } from "../types.js";
 
 export function createProjectsSurface(request: ClientRequest) {
   const surface = {
     list: () => request<RegisteredProject[]>("GET", "/api/v1/projects"),
-    /** 垃圾箱里的项目；list() 不含它们。 */
-    trashed: () => request<RegisteredProject[]>("GET", "/api/v1/trash/projects"),
+    /** 垃圾箱里的项目，连同 Agent 等待授权的恢复请求；list() 不含它们。 */
+    trashed: () => request<TrashedProject[]>("GET", "/api/v1/trash/projects"),
+    approveRestoreRequest: (id: string) =>
+      request<{ request: ProjectRestoreRequest; project: RegisteredProject }>(
+        "POST",
+        `/api/v1/trash/restore-requests/${encodeURIComponent(id)}/approve`,
+      ),
+    rejectRestoreRequest: (id: string) =>
+      request<{ request: ProjectRestoreRequest; project: RegisteredProject }>(
+        "POST",
+        `/api/v1/trash/restore-requests/${encodeURIComponent(id)}/reject`,
+      ),
     get: (code: string) =>
       request<RegisteredProject>("GET", `/api/v1/projects/${encodeURIComponent(code)}`),
     attachPath: (code: string, path: string, primary = true) =>

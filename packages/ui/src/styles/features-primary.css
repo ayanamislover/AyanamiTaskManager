@@ -35,6 +35,22 @@
 .atm-project > .atm-button {
   margin-top: 12px;
 }
+/* 垃圾箱卡片上 Agent 的恢复请求（ATM-T-0494）：沿用 atm-inline-warning 的底色和字色。 */
+.atm-restore-request {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.atm-restore-request > span {
+  color: var(--atm-text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.atm-restore-request-actions {
+  margin-top: 10px;
+}
 @media (hover: hover) and (pointer: fine) {
   .atm-project:hover {
     border-color: color-mix(in srgb, var(--atm-primary) 44%, var(--atm-border));

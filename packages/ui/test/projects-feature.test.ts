@@ -50,6 +50,8 @@ function missingProjectContracts(source: string): string[] {
     "client.projects.restore(code)",
     'queryKey: ["projects", "trash"]',
     "client.projects.trashed()",
+    "client.projects.approveRestoreRequest(id)",
+    "client.projects.rejectRestoreRequest(id)",
     "await queryClient.invalidateQueries();",
     "onCreated(project.code)",
     "onProject(project.code)",
@@ -105,6 +107,52 @@ describe("Projects feature", () => {
     expect(wizardMarkup).toContain('aria-labelledby="project-wizard-title"');
     expect(wizardMarkup).toContain("选择与配置");
     expect(wizardMarkup).toContain('id="project-name"');
+  });
+
+  // ATM-T-0494：Agent 撞上垃圾箱项目留下的请求，只能由用户在这里授权或拒绝。
+  it("有 Agent 恢复请求时垃圾箱默认展开，卡片给出授权与拒绝", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["projects"], [project()]);
+    queryClient.setQueryData(
+      ["projects", "trash"],
+      [
+        {
+          ...project({ id: "asked-id", code: "ASK", name: "被请求项目", lifecycle: "TRASHED" }),
+          restoreRequest: {
+            id: "request-1",
+            projectId: "asked-id",
+            requestedBy: "codex-agent",
+            sourceCwd: "R:\\Project_All\\Asked",
+            status: "PENDING",
+            requestCount: 3,
+            createdAt: "2026-09-26T00:00:00.000Z",
+            updatedAt: "2026-09-26T00:00:00.000Z",
+            decidedAt: null,
+            decidedBy: null,
+          },
+        },
+        {
+          ...project({ id: "quiet-id", code: "QUIET", name: "安静项目", lifecycle: "TRASHED" }),
+          restoreRequest: null,
+        },
+      ],
+    );
+    const markup = renderWithClient(
+      queryClient,
+      createElement(ProjectsPage, { client: client(), onProject: vi.fn(), notify: vi.fn() }),
+    );
+    const trash = markup.split('aria-label="垃圾箱"')[1] ?? "";
+    expect(trash).toMatch(/id="project-trash-content">/u);
+    expect(trash).toContain("1 个 Agent 恢复请求等待你授权");
+    expect(trash).toContain("1 待授权");
+    expect(trash).toContain("codex-agent 请求恢复这个项目");
+    expect(trash).toContain("共 3 次");
+    expect(trash).toContain('aria-label="授权恢复 被请求项目"');
+    expect(trash).toContain('aria-label="拒绝恢复 被请求项目"');
+    // 挂着请求的卡片用「授权恢复」代替「恢复项目」；没请求的卡片照旧。
+    expect(trash).not.toContain('aria-label="恢复项目 被请求项目"');
+    expect(trash).toContain('aria-label="恢复项目 安静项目"');
+    expect(trash).not.toContain('aria-label="授权恢复 安静项目"');
   });
 
   it("垃圾箱为空时整块不出现", () => {

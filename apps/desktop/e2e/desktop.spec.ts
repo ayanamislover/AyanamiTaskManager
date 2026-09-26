@@ -423,6 +423,73 @@ test("项目页的垃圾箱分区能列出并恢复被删项目", async ({ page 
   }
 });
 
+// ATM-T-0494：Agent 撞上垃圾箱项目只能留下请求，用户在总览看见、在垃圾箱里授权或拒绝。
+test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const suffix = Date.now().toString(36);
+  const code = `RQ${suffix.slice(-4).toUpperCase()}`;
+  const name = `请求恢复验收 ${suffix}`;
+  const agentBegin = () =>
+    api.post(`${apiUrl}/sessions`, {
+      data: { mode: "project", projectCode: code, agentId: "e2e-restore-agent" },
+    });
+  const caret = page.locator(".atm-project-trash .atm-engineering-toggle > svg");
+  const card = page.locator("#project-trash-content .atm-project").filter({ hasText: name });
+  try {
+    const created = await api.post(`${apiUrl}/projects`, {
+      data: { name, sourcePath: null, code, description: "e2e" },
+    });
+    expect(created.ok()).toBeTruthy();
+    expect((await api.post(`${apiUrl}/projects/${code}/trash`)).ok()).toBeTruthy();
+
+    const blocked = await agentBegin();
+    expect(blocked.ok()).toBeFalsy();
+    expect(await blocked.text()).toContain("await_user_restore_authorization");
+
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.goto("/#overview");
+    await expect(
+      page.getByText(`e2e-restore-agent 请求恢复垃圾箱里的 ${code}，请在项目 → 垃圾箱授权或拒绝`),
+    ).toBeVisible();
+
+    await page.locator(".atm-sidebar").getByRole("button", { name: "项目", exact: true }).click();
+    // 有请求时垃圾箱默认展开。
+    await expect(page.getByRole("button", { name: "折叠垃圾箱" })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await expect(card.getByText("e2e-restore-agent 请求恢复这个项目")).toBeVisible();
+    await expect(card.getByRole("button", { name: `恢复项目 ${name}` })).toHaveCount(0);
+    await expect.poll(() => caret.evaluate((svg) => getComputedStyle(svg).transform)).toBe("none");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-restore-request-1920.png"),
+      fullPage: true,
+    });
+
+    await card.getByRole("button", { name: `拒绝恢复 ${name}` }).click();
+    await expect(page.getByText(`已拒绝 e2e-restore-agent 恢复 ${code} 的请求`)).toBeVisible();
+    await expect(card.getByRole("button", { name: `恢复项目 ${name}` })).toBeVisible();
+    expect((await agentBegin()).ok()).toBeFalsy();
+
+    // 界面靠 30 秒轮询和窗口聚焦刷新，这里直接重载拿到 Agent 新登记的请求。
+    await page.reload();
+    await expect(card.getByRole("button", { name: `授权恢复 ${name}` })).toBeVisible();
+    await card.getByRole("button", { name: `授权恢复 ${name}` }).click();
+    await expect(
+      page.getByText(`已授权恢复 ${code}，e2e-restore-agent 可以重新开工`),
+    ).toBeVisible();
+    await expect(page.locator(".atm-project-grid").first().getByText(name)).toBeVisible();
+    const resumed = await agentBegin();
+    expect(resumed.status()).toBe(201);
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-restore-request-approved-1920.png"),
+      fullPage: true,
+    });
+  } finally {
+    await api.dispose();
+  }
+});
+
 test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ page }) => {
   // staleTime 3 秒内切回来会命中新鲜缓存、queryFn 不执行；归属如果跟着「请求是否跑过」
   // 走，列表就会卡在空白加载态直到下一次网络刷新。

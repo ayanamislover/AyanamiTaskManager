@@ -116,6 +116,44 @@ describe("Overview feature", () => {
     expect(markup).toContain("临时检查");
   });
 
+  // ATM-T-0494：Agent 等着授权的恢复请求要在首屏被看见，不然请求挂着没人知道。
+  it("垃圾箱里有 Agent 恢复请求时进入「需要处理」", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["overview"], {
+      sequence: 45,
+      projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
+      quick: { blocked: 0 },
+      projectionFailures: [],
+      recentEvents: [],
+    });
+    queryClient.setQueryData(["quick"], []);
+    queryClient.setQueryData(
+      ["projects", "trash"],
+      [
+        {
+          ...project(),
+          code: "OLD",
+          lifecycle: "TRASHED",
+          restoreRequest: { requestedBy: "codex" },
+        },
+        { ...project(), code: "QUIET", lifecycle: "TRASHED", restoreRequest: null },
+      ],
+    );
+    const markup = renderWithClient(
+      queryClient,
+      createElement(OverviewPage, {
+        client: client(),
+        onProject: vi.fn(),
+        onQuick: vi.fn(),
+        notify: vi.fn(),
+        TimelineEventRow: () => createElement("div"),
+      }),
+    );
+    expect(markup).toContain("需要处理");
+    expect(markup).toContain("codex 请求恢复垃圾箱里的 OLD，请在项目 → 垃圾箱授权或拒绝");
+    expect(markup).not.toContain("QUIET");
+  });
+
   it("总览项目卡长名称最多两行并保留全称提示", () => {
     const longName = "Codex Agent Permission Preflight And Deployment Readiness Verification";
     const queryClient = new QueryClient();
