@@ -115,13 +115,21 @@ function quickCheck(path: string): void {
   }
 }
 
-function processAlive(pid: number): boolean {
+type ProcessState = { state: "ALIVE" } | { state: "EXITED" } | { state: "UNKNOWN"; code: string };
+
+/**
+ * 只有 ESRCH 证明进程已退出。EPERM 是「进程在，但无权给它发信号」（另一个用户、提权运行的服务）；
+ * 其余任何错误都只说明「探测失败」，调用方必须按判定不了处理，不能当成已退出放行（ATM-T-0490 P1）。
+ */
+function processState(pid: number): ProcessState {
   try {
     process.kill(pid, 0);
-    return true;
+    return { state: "ALIVE" };
   } catch (error) {
-    // EPERM 是「进程在，但无权给它发信号」（比如另一个用户、提权运行的服务），只有 ESRCH 才证明已退出。
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN_ERROR";
+    if (code === "ESRCH") return { state: "EXITED" };
+    if (code === "EPERM") return { state: "ALIVE" };
+    return { state: "UNKNOWN", code };
   }
 }
 
@@ -155,7 +163,13 @@ async function acquireMigrationLock(destination: string): Promise<() => Promise<
     } catch {
       // Malformed lock content is stale and is quarantined below.
     }
-    if (ownerPid > 0 && processAlive(ownerPid)) throw new Error("MIGRATION_IN_PROGRESS");
+    if (ownerPid > 0) {
+      const owner = processState(ownerPid);
+      if (owner.state === "ALIVE") throw new Error("MIGRATION_IN_PROGRESS");
+      // 判定不了持锁进程是否还在，就不能当成陈旧锁挪走：那可能是一个正在迁移的活进程。
+      if (owner.state === "UNKNOWN")
+        throw new Error(`MIGRATION_LOCK_OWNER_UNKNOWN:${ownerPid}:${owner.code}`);
+    }
     const stalePath = `${lockPath}.stale-${process.pid}-${nonce}-${attempt}`;
     try {
       await rename(lockPath, stalePath);
@@ -301,7 +315,12 @@ async function assertSourceStopped(root: string): Promise<void> {
   const pid = (runtime as { pid?: unknown } | null)?.pid;
   if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0)
     throw new Error(`RUNTIME_STATE_PID_INVALID:${runtimePath}：${RUNTIME_STATE_RECOVERY}`);
-  if (processAlive(pid)) throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${pid}`);
+  const daemon = processState(pid);
+  if (daemon.state === "ALIVE") throw new Error(`SOURCE_DAEMON_STILL_RUNNING:${pid}`);
+  if (daemon.state === "UNKNOWN")
+    throw new Error(
+      `RUNTIME_STATE_PROBE_FAILED:${runtimePath}:${pid}:${daemon.code}：${RUNTIME_STATE_RECOVERY}`,
+    );
 }
 
 function rewritePath(value: string, source: string, destination: string): string {

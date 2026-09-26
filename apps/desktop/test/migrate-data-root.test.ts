@@ -398,6 +398,94 @@ describe("正式数据根迁移", () => {
     expect(existsSync(`${destination}-migrating`)).toBe(false);
   });
 
+  // ATM-T-0490 P1：原来只有 EPERM 算「还活着」，其余探测错误（EACCES 等）一律当成已退出放行。
+  it("进程探测报 ESRCH 以外的未知错误时，源和目标都拒绝迁移", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-runtime-probe-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "探测失败", code: "PRB", sourcePath: null });
+    sourceService.close();
+    (await AyanamiTaskService.open({ dataDir: destination, migrationsRoot })).close();
+    // 源、目标各一份运行态，pid 不同，按 pid 决定探测结果：才能分别证明两边都被探测。
+    const sourcePid = 424241;
+    const destinationPid = 424242;
+    for (const [runtimeRoot, pid] of [
+      [source, sourcePid],
+      [destination, destinationPid],
+    ] as const) {
+      mkdirSync(join(runtimeRoot, "runtime"), { recursive: true });
+      writeFileSync(join(runtimeRoot, "runtime", "daemon.json"), JSON.stringify({ pid }));
+    }
+    const probe = new Map<number, string>();
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      const code = probe.get(pid) ?? "ESRCH";
+      throw Object.assign(new Error(`kill ${code}`), { code });
+    }) as typeof process.kill);
+
+    for (const [label, runtimeRoot, pid] of [
+      ["源", source, sourcePid],
+      ["目标", destination, destinationPid],
+    ] as const) {
+      probe.clear();
+      probe.set(pid, "EACCES");
+      const runtimePath = join(runtimeRoot, "runtime", "daemon.json");
+      const failure = await migrateDataRoot({ source, destination, execute: true }).then(
+        () => "",
+        (error: Error) => error.message,
+      );
+      expect(failure, label).toContain(`RUNTIME_STATE_PROBE_FAILED:${runtimePath}:${pid}:EACCES`);
+      expect(failure, label).toContain("删除该 daemon.json 后重试");
+      expect(existsSync(join(destination, "migration-manifest.json")), label).toBe(false);
+      expect(existsSync(`${destination}-migrating`), label).toBe(false);
+    }
+
+    // 阳性对照：两边的运行态都还在，探测明确报 ESRCH（已退出）时才放行，迁移照常完成。
+    probe.clear();
+    kill.mockClear();
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toMatchObject({
+      executed: true,
+      projects: 1,
+    });
+    expect(kill).toHaveBeenCalledWith(sourcePid, 0);
+    expect(kill).toHaveBeenCalledWith(destinationPid, 0);
+  });
+
+  it("判定不了迁移锁的持有进程时不当陈旧锁挪走", async () => {
+    const root = mkdtempSync(join(tmpdir(), "atm-data-lock-probe-"));
+    roots.push(root);
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    const migrationsRoot = join(process.cwd(), "migrations");
+    const sourceService = await AyanamiTaskService.open({ dataDir: source, migrationsRoot });
+    await sourceService.createProject({ name: "锁探测", code: "LCK", sourcePath: null });
+    sourceService.close();
+    const lockPath = join(root, ".destination.migration.lock");
+    const lockContent = `${JSON.stringify({ pid: 424242, nonce: "held-by-someone" })}\n`;
+    writeFileSync(lockPath, lockContent);
+    const kill = vi.spyOn(process, "kill");
+
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error("kill EACCES"), { code: "EACCES" });
+    });
+    await expect(migrateDataRoot({ source, destination, execute: true })).rejects.toThrow(
+      "MIGRATION_LOCK_OWNER_UNKNOWN:424242:EACCES",
+    );
+    expect(readFileSync(lockPath, "utf8")).toBe(lockContent);
+    expect(existsSync(destination)).toBe(false);
+
+    // 阳性对照：持锁进程明确已退出（ESRCH）才算陈旧锁，迁移照常完成。
+    kill.mockImplementation(() => {
+      throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+    });
+    await expect(migrateDataRoot({ source, destination, execute: true })).resolves.toMatchObject({
+      executed: true,
+    });
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
   it("并发迁移只有一个提交者，另一方明确返回进行中", async () => {
     const root = mkdtempSync(join(tmpdir(), "atm-data-concurrent-"));
     roots.push(root);
