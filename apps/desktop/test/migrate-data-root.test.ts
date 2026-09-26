@@ -8,6 +8,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -353,7 +354,7 @@ describe("正式数据根迁移", () => {
       );
       expect(failure, label).toContain(code);
       if (code.startsWith("RUNTIME_STATE_")) {
-        expect(failure, label).toContain(runtimePath);
+        expect(failure, label).toContain(join(await realpath(source), "runtime", "daemon.json"));
         expect(failure, label).toContain("删除该 daemon.json 后重试");
       }
       expect(failure, label).not.toContain("unknown-secret");
@@ -431,12 +432,14 @@ describe("正式数据根迁移", () => {
     ] as const) {
       probe.clear();
       probe.set(pid, "EACCES");
-      const runtimePath = join(runtimeRoot, "runtime", "daemon.json");
       const failure = await migrateDataRoot({ source, destination, execute: true }).then(
         () => "",
         (error: Error) => error.message,
       );
-      expect(failure, label).toContain(`RUNTIME_STATE_PROBE_FAILED:${runtimePath}:${pid}:EACCES`);
+      const canonicalRuntimePath = join(await realpath(runtimeRoot), "runtime", "daemon.json");
+      expect(failure, label).toContain(
+        `RUNTIME_STATE_PROBE_FAILED:${canonicalRuntimePath}:${pid}:EACCES`,
+      );
       expect(failure, label).toContain("删除该 daemon.json 后重试");
       expect(existsSync(join(destination, "migration-manifest.json")), label).toBe(false);
       expect(existsSync(`${destination}-migrating`), label).toBe(false);
