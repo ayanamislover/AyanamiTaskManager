@@ -6,6 +6,7 @@ import {
   KnowledgeSearchInputSchema,
 } from "@ayanami-task/protocol";
 import { AtmError } from "@ayanami-task/errors";
+import { USER_ONLY } from "./http-boundary.js";
 import type { AyanamiServerOptions } from "./server-options.js";
 
 type Query = Record<string, unknown>;
@@ -141,7 +142,7 @@ export function registerKnowledgeRoutes(app: FastifyInstance, options: AyanamiSe
     return options.service.knowledge.history(input.id, input.beforeRevision, input.limit);
   });
 
-  app.post("/api/v1/knowledge/:id/archive", async (request) => {
+  app.post("/api/v1/knowledge/:id/archive", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     return options.service.knowledge.archive(KnowledgeArchiveInputSchema.parse({ ...body, id }));

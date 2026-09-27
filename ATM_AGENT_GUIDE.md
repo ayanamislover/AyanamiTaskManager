@@ -8,7 +8,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## ATM 服务如何发现
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid`、`version`、`startedAt` 和 `instanceId`。服务只监听 `127.0.0.1`；正式桌面 daemon 每次启动都会生成新的 token，旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。这个 token 是 Agent 凭证：恢复/移入垃圾箱/归档项目、授权恢复请求、恢复备份、改设置、以用户身份写入这类「用户的决定」会返回 `403 USER_AUTHORIZATION_REQUIRED`，只能请用户在 ATM 界面操作，不要重试或寻找其他入口。`output/` 下的数据只用于测试。完整边界见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid`、`version`、`startedAt` 和 `instanceId`。服务只监听 `127.0.0.1`；正式桌面 daemon 每次启动都会生成新的 token，旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。这个 token 是 Agent 凭证：恢复/移入垃圾箱/归档项目、授权恢复请求、恢复备份、改设置、改动或删除保存的视图、归档知识、以用户身份写入这类「用户的决定」会返回 `403 USER_AUTHORIZATION_REQUIRED`，只能请用户在 ATM 界面操作，不要重试或寻找其他入口。`output/` 下的数据只用于测试。完整边界见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`。
 
 ## ATM 未运行怎么办
 

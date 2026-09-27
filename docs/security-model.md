@@ -21,7 +21,9 @@ Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、A
 - **Agent 凭证**：即 `daemon.json` 里的 `token`。MCP bridge、`--mcp-stdio`、`--cli` 和按指南直接调 REST 的 Agent 都用它。
 - **用户凭证**：只由桌面主进程在内存里生成，不写入 `daemon.json`、日志或 Agent 配置，也不交给 Renderer；Renderer 的每个 `/api/v1/*` 请求由主进程代为注入。
 
-「用户的决定」只接受用户凭证，Agent 凭证调用返回 `403 USER_AUTHORIZATION_REQUIRED`，且不产生任何写入。包括：垃圾箱恢复请求的授权与拒绝，项目恢复、移入垃圾箱与归档，备份恢复，设置写入，导入 apply，项目路径绑定，Session 强制关闭，`/projects/:code/ui/*` 与其他以用户身份落账的写入，以及 `actor=USER`（含缺省）的临时任务写入。路由上的这一标记由静态守卫检查：处理器里出现用户身份却没标的路由会让测试变红。
+「用户的决定」只接受用户凭证，Agent 凭证调用返回 `403 USER_AUTHORIZATION_REQUIRED`，且不产生任何写入。包括：垃圾箱恢复请求的授权与拒绝，项目恢复、移入垃圾箱与归档，备份恢复，设置写入，保存视图的新建、修改与删除，知识归档，导入 apply，项目路径绑定，Session 强制关闭，`/projects/:code/ui/*` 与其他以用户身份落账的写入，以及 `actor=USER`（含缺省）的临时任务写入。
+
+归类由守卫按 daemon 实际注册的路由逐条核对，而不是扫描源码字面：每条写路由（非 GET/HEAD/OPTIONS）要么标为用户专属，要么出现在测试里写明理由的 Agent 放行清单中（MCP 传输、开工/收工、与 MCP 等价的任务流、只新增备份、只读预览、重建读模型等）；新增写路由两边都不在，或放行清单留有已不存在的条目，测试即红。这保证清单**完整**，但每条路由**归哪一边**仍是人为判断。
 
 这一层挡住的是「按文档办事的 Agent」和「读一个文件就能冒充用户」：只持 MCP/bridge，或读取 `daemon.json` 后直接调 REST 的 Agent，都无法替用户授权。它**不是**同用户进程之间的强隔离：同一 Windows 用户下的程序仍可以蓄意读取 ATM 主进程内存，或模拟键盘鼠标操作界面，这两类仍属于下文的非目标。standalone 开发 daemon 只有显式设置 `AYANAMI_TASK_USER_TOKEN` 时才分离凭证，否则那一个 token 同时代表用户，不应用于安装版。
 

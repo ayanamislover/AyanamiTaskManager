@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "@ayanami-task/application";
-import { authenticate, buildAyanamiServer } from "../src/index.js";
+import { authenticate, buildAyanamiServer, type AtmRouteEntry } from "../src/index.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -48,10 +48,66 @@ function sourceFiles() {
     .map((file) => ({ file, text: readFileSync(join(routeSources, file), "utf8") }));
 }
 
-function userOnlyRoutes(): RouteBlock[] {
-  return routeBlocks(sourceFiles()).filter((block) =>
-    /^app\.\w+\(\s*"[^"]+",\s*USER_ONLY,/u.test(block.text),
-  );
+const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+/**
+ * Agent 凭证可以调的写路由，每条都要写明为什么（ATM-T-0506）。
+ * 新增写路由若既没标 USER_ONLY、也不在这里，守卫就红：默认没有「顺手开放」。
+ */
+const AGENT_WRITES: Record<string, string> = {
+  "POST /mcp": "MCP 传输本身；工具面另有守卫，不含恢复/授权",
+  "DELETE /mcp": "MCP 会话结束",
+  "POST /mcp/core": "MCP 传输本身",
+  "DELETE /mcp/core": "MCP 会话结束",
+  "POST /mcp/memory": "MCP 传输本身",
+  "DELETE /mcp/memory": "MCP 会话结束",
+  "POST /mcp/actions": "MCP 传输本身",
+  "DELETE /mcp/actions": "MCP 会话结束",
+  "POST /api/v1/sessions": "Agent 开工（begin），撞上垃圾箱项目只登记请求",
+  "POST /api/v1/sessions/:id/close": "Agent 收工（end）",
+  "POST /api/v1/projects": "与 begin 的 allow_project_create 等价",
+  "POST /api/v1/projects/:code/objectives": "指南让 Agent 走 REST 再建 Objective",
+  "POST /api/v1/projects/:code/milestones": "指南让 Agent 走 REST 再建 Milestone",
+  "POST /api/v1/projects/:code/work-items": "Agent 任务流，与 MCP 等价，需 session",
+  "POST /api/v1/projects/:code/work-items/patch": "Agent 任务流，与 MCP 等价，需 session",
+  "POST /api/v1/projects/:code/work-items/:taskKey/verify-and-complete": "Agent 任务流",
+  "POST /api/v1/projects/:code/reviews/requests": "Agent 发起复核",
+  "POST /api/v1/projects/:code/reviews/requests/:requestKey/submit": "Agent 提交复核结论",
+  "PATCH /api/v1/projects/:code/checklist/batch": "Agent 任务流",
+  "PATCH /api/v1/projects/:code/checklist/:id": "Agent 任务流",
+  "POST /api/v1/projects/:code/progress-updates": "与 MCP atm_progress_add 等价",
+  "POST /api/v1/projects/:code/records": "与 MCP atm_record 等价",
+  "POST /api/v1/knowledge": "与 MCP atm_knowledge_save 等价",
+  "PUT /api/v1/knowledge/:id": "与 MCP atm_knowledge_save 等价",
+  "PATCH /api/v1/knowledge/:id": "与 MCP atm_knowledge_save 等价",
+  "POST /api/v1/quick-tasks": "处理器内按 actor 检查：actor=USER（含缺省）需用户凭证",
+  "PATCH /api/v1/quick-tasks/:id": "处理器内按 actor 检查",
+  "POST /api/v1/quick-tasks/:id/promote": "处理器内按 actor 检查",
+  "POST /api/v1/backups": "只新增一份备份，不改动数据",
+  "POST /api/v1/imports/agenttask-md/preview": "只读预览，不落账",
+  "POST /api/v1/projects/:code/projection/reconcile": "重建可重建的读模型，不改项目事实",
+  "POST /api/v1/system/projections/reconcile": "重建可重建的读模型，不改项目事实",
+};
+
+/** 写路由的归类问题：既非用户专属也不在放行清单，或放行清单里有已不存在/已改成用户专属的条目。 */
+function unclassifiedWrites(routes: readonly AtmRouteEntry[], allowed: Record<string, string>) {
+  const writes = routes.filter((route) => !READ_METHODS.has(route.method));
+  const keys = new Set(writes.map((route) => `${route.method} ${route.url}`));
+  return [
+    ...writes
+      .filter((route) => route.principal !== "USER" && !(`${route.method} ${route.url}` in allowed))
+      .map((route) => `unclassified ${route.method} ${route.url}`),
+    ...writes
+      .filter((route) => route.principal === "USER" && `${route.method} ${route.url}` in allowed)
+      .map((route) => `both ${route.method} ${route.url}`),
+    ...Object.keys(allowed)
+      .filter((key) => !keys.has(key))
+      .map((key) => `stale ${key}`),
+  ];
+}
+
+function userOnlyRoutes(routes: readonly AtmRouteEntry[]): AtmRouteEntry[] {
+  return routes.filter((route) => route.principal === "USER");
 }
 
 async function server(userToken?: string) {
@@ -82,21 +138,49 @@ const concrete = (path: string) =>
 
 // ATM-T-0503：daemon.json 里的令牌谁都能读，用户的决定不能只凭它放行。
 describe("用户凭证与 Agent 凭证分离", () => {
+  it("每条写路由都已归类：用户专属，或带理由的 Agent 放行", async () => {
+    const { app, close } = await server(USER);
+    try {
+      expect(app.atmRoutes.length).toBeGreaterThan(100);
+      expect(unclassifiedWrites(app.atmRoutes, AGENT_WRITES)).toEqual([]);
+
+      // 阳性对照：漏标、重复归类、过期放行都要认出来。
+      const probe: AtmRouteEntry[] = [
+        { method: "DELETE", url: "/api/v1/saved-views/:id", principal: "ANY" },
+        { method: "POST", url: "/api/v1/sessions", principal: "USER" },
+        { method: "GET", url: "/api/v1/projects", principal: "ANY" },
+      ];
+      expect(
+        unclassifiedWrites(probe, {
+          "POST /api/v1/sessions": "x",
+          "POST /api/v1/gone": "x",
+        }),
+      ).toEqual([
+        "unclassified DELETE /api/v1/saved-views/:id",
+        "both POST /api/v1/sessions",
+        "stale POST /api/v1/gone",
+      ]);
+    } finally {
+      await close();
+    }
+  });
+
   it("每条用户操作路由都拒绝 Agent 令牌，且不碰数据", async () => {
-    const routes = userOnlyRoutes();
-    expect(routes.length).toBeGreaterThanOrEqual(21);
     const { service, app, close } = await server(USER);
     try {
+      // 断言放在 try 里：失败时也要先关库，否则临时目录删不掉。
+      const routes = userOnlyRoutes(app.atmRoutes);
+      expect(routes.length).toBeGreaterThanOrEqual(25);
       await service.createProject({ name: "授权边界", sourcePath: null, code: "AUTHZ" });
       for (const route of routes) {
         const response = await app.inject({
           method: route.method as "POST",
-          url: concrete(route.path),
+          url: concrete(route.url),
           headers: bearer(AGENT),
           payload: { actor: "USER", opId: "authz-probe" },
         });
-        expect(response.statusCode, `${route.method} ${route.path}`).toBe(403);
-        expect(response.json().error, route.path).toMatchObject({
+        expect(response.statusCode, `${route.method} ${route.url}`).toBe(403);
+        expect(response.json().error, route.url).toMatchObject({
           code: "USER_AUTHORIZATION_REQUIRED",
         });
       }
@@ -144,6 +228,56 @@ describe("用户凭证与 Agent 凭证分离", () => {
         (await app.inject({ method: "GET", url: "/api/v1/projects", headers: bearer("wrong") }))
           .statusCode,
       ).toBe(401);
+    } finally {
+      await close();
+    }
+  });
+
+  // ATM-T-0506 peer：保存的视图是用户在项目页存下的偏好，Agent 令牌原来能删掉它（实测 200）。
+  it("保存的视图只有用户能建、改、删；Agent 令牌被拒且视图原样保留", async () => {
+    const { app, close } = await server(USER);
+    try {
+      const create = (token: string) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/saved-views",
+          headers: bearer(token),
+          payload: { scope: "GLOBAL", name: "我的阻塞视图", query: { status: "BLOCKED" } },
+        });
+      expect((await create(AGENT)).statusCode).toBe(403);
+      const created = await create(USER);
+      expect(created.statusCode).toBe(201);
+      const view = created.json() as { id: string; version: number };
+      const listViews = async () =>
+        (
+          await app.inject({ method: "GET", url: "/api/v1/saved-views", headers: bearer(AGENT) })
+        ).json() as Array<{ id: string; name: string; version: number }>;
+
+      const renamed = await app.inject({
+        method: "PATCH",
+        url: `/api/v1/saved-views/${view.id}`,
+        headers: bearer(AGENT),
+        payload: { expectedVersion: view.version, name: "被 Agent 改名" },
+      });
+      expect(renamed.statusCode).toBe(403);
+      const deleted = await app.inject({
+        method: "DELETE",
+        url: `/api/v1/saved-views/${view.id}?expectedVersion=${view.version}`,
+        headers: bearer(AGENT),
+      });
+      expect(deleted.statusCode).toBe(403);
+      expect(deleted.json().error).toMatchObject({ code: "USER_AUTHORIZATION_REQUIRED" });
+      expect(await listViews()).toEqual([
+        expect.objectContaining({ id: view.id, name: "我的阻塞视图", version: view.version }),
+      ]);
+
+      const removed = await app.inject({
+        method: "DELETE",
+        url: `/api/v1/saved-views/${view.id}?expectedVersion=${view.version}`,
+        headers: bearer(USER),
+      });
+      expect(removed.statusCode).toBe(200);
+      expect(await listViews()).toEqual([]);
     } finally {
       await close();
     }

@@ -39,7 +39,7 @@ export function registerProjectRoutes(
     const { project } = request.query as { project?: string };
     return options.service.listSavedViews(project);
   });
-  app.post("/api/v1/saved-views", async (request, reply) => {
+  app.post("/api/v1/saved-views", USER_ONLY, async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if ((body.scope !== "GLOBAL" && body.scope !== "PROJECT") || typeof body.name !== "string") {
       throw new AtmError("VALIDATION_ERROR", { message: "scope 和 name 必填" });
@@ -61,7 +61,7 @@ export function registerProjectRoutes(
       }),
     );
   });
-  app.patch("/api/v1/saved-views/:id", async (request) => {
+  app.patch("/api/v1/saved-views/:id", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (!Number.isInteger(body.expectedVersion))
@@ -77,7 +77,7 @@ export function registerProjectRoutes(
         : {}),
     });
   });
-  app.delete("/api/v1/saved-views/:id", async (request) => {
+  app.delete("/api/v1/saved-views/:id", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     const { expectedVersion } = request.query as { expectedVersion?: string };
     if (!expectedVersion || !Number.isInteger(Number(expectedVersion)))

@@ -111,7 +111,14 @@ declare module "fastify" {
   interface FastifyContextConfig {
     atmPrincipal?: AtmPrincipal;
   }
+  interface FastifyInstance {
+    /** 全部已注册路由及其凭证要求，供权限清单守卫逐条核对（ATM-T-0503 / 0506）。 */
+    atmRoutes: readonly AtmRouteEntry[];
+  }
 }
+
+/** 一条已注册路由：`USER` 表示只认用户凭证，`ANY` 表示两种凭证都能调。 */
+export type AtmRouteEntry = { method: string; url: string; principal: AtmPrincipal | "ANY" };
 
 /**
  * 只接受用户凭证的路由。daemon.json 里的令牌谁都能读，所以恢复垃圾箱、以用户身份写入这类
@@ -157,6 +164,14 @@ export async function createHttpServer(options: AyanamiServerOptions): Promise<F
     logger: false,
     bodyLimit: 10 * 1024 * 1024,
     requestIdHeader: "x-request-id",
+  });
+  // 在任何路由注册之前挂上，插件里注册的路由（含 app.route 与计算路径）也会被记下。
+  const routes: AtmRouteEntry[] = [];
+  app.decorate("atmRoutes", routes);
+  app.addHook("onRoute", (route) => {
+    const methods = Array.isArray(route.method) ? route.method : [route.method];
+    for (const method of methods)
+      routes.push({ method, url: route.url, principal: route.config?.atmPrincipal ?? "ANY" });
   });
   app.addHook("onRequest", (request, reply, done) => {
     if (!isAllowedBrowserOrigin(request.headers.origin)) {
