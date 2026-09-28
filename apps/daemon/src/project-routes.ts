@@ -157,7 +157,7 @@ export function registerProjectRoutes(
     const { project } = request.query as { project?: string };
     return options.service.listBackups(project);
   });
-  app.post("/api/v1/backups", async (request, reply) => {
+  app.post("/api/v1/backups", USER_ONLY, async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const scope = body.scope ?? "PROJECT";
     if (scope !== "REGISTRY" && scope !== "PROJECT" && scope !== "KNOWLEDGE") {

@@ -159,7 +159,7 @@ test("修订历史分页可从 120 个修订载入最早版本草稿", async ({ 
   const title = `历史分页知识 ${suffix}`;
   const slug = `history-pagination-${suffix}`;
   const headers = {
-    authorization: "Bearer e2e-test-token",
+    authorization: "Bearer e2e-user-token",
     "content-type": "application/json",
   };
   const saveUrl = "http://127.0.0.1:4394/api/v1/knowledge";
@@ -282,7 +282,7 @@ test("慢历史读取不会覆盖用户随后开始的新草稿", async ({ page,
   const title = `慢历史读取知识 ${suffix}`;
   const slug = `slow-history-${suffix}`;
   const headers = {
-    authorization: "Bearer e2e-test-token",
+    authorization: "Bearer e2e-user-token",
     "content-type": "application/json",
   };
   const saveUrl = "http://127.0.0.1:4394/api/v1/knowledge";
@@ -371,7 +371,7 @@ for (const count of [0, 29, 30]) {
       reference: `original-${index}`,
     }));
     const response = await request.post("http://127.0.0.1:4394/api/v1/knowledge", {
-      headers: { authorization: "Bearer e2e-test-token" },
+      headers: { authorization: "Bearer e2e-user-token" },
       data: {
         opId: `source-roundtrip-${suffix}`,
         expectedVersion: 0,

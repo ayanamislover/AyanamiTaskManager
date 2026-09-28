@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -55,38 +55,45 @@ const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
  * 新增写路由若既没标 USER_ONLY、也不在这里，守卫就红：默认没有「顺手开放」。
  */
 const AGENT_WRITES: Record<string, string> = {
-  "POST /mcp": "MCP 传输本身；工具面另有守卫，不含恢复/授权",
-  "DELETE /mcp": "MCP 会话结束",
-  "POST /mcp/core": "MCP 传输本身",
-  "DELETE /mcp/core": "MCP 会话结束",
-  "POST /mcp/memory": "MCP 传输本身",
-  "DELETE /mcp/memory": "MCP 会话结束",
-  "POST /mcp/actions": "MCP 传输本身",
-  "DELETE /mcp/actions": "MCP 会话结束",
-  "POST /api/v1/sessions": "Agent 开工（begin），撞上垃圾箱项目只登记请求",
-  "POST /api/v1/sessions/:id/close": "Agent 收工（end）",
-  "POST /api/v1/projects": "与 begin 的 allow_project_create 等价",
-  "POST /api/v1/projects/:code/objectives": "指南让 Agent 走 REST 再建 Objective",
-  "POST /api/v1/projects/:code/milestones": "指南让 Agent 走 REST 再建 Milestone",
-  "POST /api/v1/projects/:code/work-items": "Agent 任务流，与 MCP 等价，需 session",
-  "POST /api/v1/projects/:code/work-items/patch": "Agent 任务流，与 MCP 等价，需 session",
-  "POST /api/v1/projects/:code/work-items/:taskKey/verify-and-complete": "Agent 任务流",
-  "POST /api/v1/projects/:code/reviews/requests": "Agent 发起复核",
-  "POST /api/v1/projects/:code/reviews/requests/:requestKey/submit": "Agent 提交复核结论",
-  "PATCH /api/v1/projects/:code/checklist/batch": "Agent 任务流",
-  "PATCH /api/v1/projects/:code/checklist/:id": "Agent 任务流",
-  "POST /api/v1/projects/:code/progress-updates": "与 MCP atm_progress_add 等价",
-  "POST /api/v1/projects/:code/records": "与 MCP atm_record 等价",
-  "POST /api/v1/knowledge": "与 MCP atm_knowledge_save 等价",
-  "PUT /api/v1/knowledge/:id": "与 MCP atm_knowledge_save 等价",
-  "PATCH /api/v1/knowledge/:id": "与 MCP atm_knowledge_save 等价",
-  "POST /api/v1/quick-tasks": "处理器内按 actor 检查：actor=USER（含缺省）需用户凭证",
-  "PATCH /api/v1/quick-tasks/:id": "处理器内按 actor 检查",
-  "POST /api/v1/quick-tasks/:id/promote": "处理器内按 actor 检查",
-  "POST /api/v1/backups": "只新增一份备份，不改动数据",
-  "POST /api/v1/imports/agenttask-md/preview": "只读预览，不落账",
-  "POST /api/v1/projects/:code/projection/reconcile": "重建可重建的读模型，不改项目事实",
-  "POST /api/v1/system/projections/reconcile": "重建可重建的读模型，不改项目事实",
+  // 理由必须写实际行为，而不是「看起来无害」（ATM-T-0508：备份曾被写成「只新增」）。
+  "POST /mcp": "MCP 传输入口；实际能做什么由工具契约决定，工具面另有守卫，不含恢复/授权",
+  "POST /mcp/core": "MCP 传输入口（core profile）",
+  "POST /mcp/memory": "MCP 传输入口（memory profile）",
+  "POST /mcp/actions": "MCP 传输入口（actions profile）",
+  "DELETE /mcp": "已注册但固定返回 405（无状态 MCP 传输），不产生写入",
+  "DELETE /mcp/core": "已注册但固定返回 405，不产生写入",
+  "DELETE /mcp/memory": "已注册但固定返回 405，不产生写入",
+  "DELETE /mcp/actions": "已注册但固定返回 405，不产生写入",
+  "POST /api/v1/sessions": "Agent 开工（begin）；撞上垃圾箱项目只登记恢复请求",
+  "POST /api/v1/sessions/:id/close":
+    "Agent 收工（end）：按 id 结束 Session 并释放其领取，id 可以是别的 Agent 的 Session（与 MCP atm_end 同一能力）",
+  "POST /api/v1/projects":
+    "登记新受管项目（自动建项目的既定授权）；带 sourcePath 时还会写 .ayanami-task/project.json 与 Git exclude；目录已被绑定则拒绝，不接管已有项目",
+  "POST /api/v1/projects/:code/objectives":
+    "指南让 Agent 走 REST 再建 Objective；需有效 Agent session",
+  "POST /api/v1/projects/:code/milestones":
+    "指南让 Agent 走 REST 再建 Milestone；需有效 Agent session",
+  "POST /api/v1/projects/:code/work-items": "Agent 任务流；需有效 Agent session，session=USER 被拒",
+  "POST /api/v1/projects/:code/work-items/patch": "Agent 任务流；受 session/op/版本约束",
+  "POST /api/v1/projects/:code/work-items/:taskKey/verify-and-complete":
+    "Agent 任务流；受完成闸门约束",
+  "POST /api/v1/projects/:code/reviews/requests": "Agent 发起复核；候选绑定在服务层校验",
+  "POST /api/v1/projects/:code/reviews/requests/:requestKey/submit":
+    "Agent 提交复核结论；reviewer 身份在服务层校验",
+  "PATCH /api/v1/projects/:code/checklist/batch": "Agent 检查项工作流；版本与归属在服务层校验",
+  "PATCH /api/v1/projects/:code/checklist/:id": "Agent 检查项工作流；版本与归属在服务层校验",
+  "POST /api/v1/projects/:code/progress-updates":
+    "与 MCP atm_progress_add 同一写入面；需有效 session",
+  "POST /api/v1/projects/:code/records":
+    "与 MCP atm_record 同一写入面；需有效 session，session=USER 被拒",
+  "POST /api/v1/quick-tasks": "落账 actor 不能冒用 USER（缺省即 USER，需用户凭证）；不校验任务归属",
+  "PATCH /api/v1/quick-tasks/:id":
+    "同上：只挡 actor=USER；Agent 以自己的 actor 仍能改用户建的临时任务",
+  "POST /api/v1/quick-tasks/:id/promote": "同上：只挡 actor=USER，不校验任务归属",
+  "POST /api/v1/imports/agenttask-md/preview": "只解析并返回预览，不调用 apply、不落账",
+  "POST /api/v1/projects/:code/projection/reconcile":
+    "重放投影 outbox，修复派生读模型，不改项目事实；可能耗时",
+  "POST /api/v1/system/projections/reconcile": "同上，对全部活动/归档项目逐个重放",
 };
 
 /** 写路由的归类问题：既非用户专属也不在放行清单，或放行清单里有已不存在/已改成用户专属的条目。 */
@@ -278,6 +285,108 @@ describe("用户凭证与 Agent 凭证分离", () => {
       });
       expect(removed.statusCode).toBe(200);
       expect(await listViews()).toEqual([]);
+    } finally {
+      await close();
+    }
+  });
+
+  // ATM-T-0508 peer：手动备份每组只留 otherKeep（默认 2）份，新建会淘汰最旧的。
+  // Agent 令牌原来能借「新建备份」挤掉用户留着的手动备份，文件一并删掉。
+  it("Agent 令牌不能新建备份，也就挤不掉用户的手动备份", async () => {
+    const { service, app, close } = await server(USER);
+    try {
+      await service.createProject({ name: "备份边界", sourcePath: null, code: "AUTHZ" });
+      const backup = (token: string) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/backups",
+          headers: bearer(token),
+          payload: { scope: "PROJECT", project: "AUTHZ" },
+        });
+      const first = (await backup(USER)).json() as { id: string; path: string };
+      const second = (await backup(USER)).json() as { id: string; path: string };
+      const manual = () =>
+        service
+          .listBackups("AUTHZ")
+          .filter((row) => row.reason === "MANUAL")
+          .map((row) => row.id)
+          .sort();
+
+      const refused = await backup(AGENT);
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json().error).toMatchObject({ code: "USER_AUTHORIZATION_REQUIRED" });
+      expect(manual()).toEqual([first.id, second.id].sort());
+      expect(existsSync(first.path)).toBe(true);
+      expect(existsSync(second.path)).toBe(true);
+
+      // 用户自己再建一份，淘汰最旧的：这是用户的决定，照常生效。
+      const third = (await backup(USER)).json() as { id: string };
+      expect(manual()).toEqual([second.id, third.id].sort());
+      expect(existsSync(first.path)).toBe(false);
+    } finally {
+      await close();
+    }
+  });
+
+  // ATM-T-0508 复核：REST 的知识保存是管理界面入口——不记 Agent 作者、不要 Session、
+  // 还能改已归档的知识；Agent 该走 MCP atm_knowledge_save。
+  it("知识的新建与更新只认用户令牌；Agent 路由也不能借 session=USER 冒充用户", async () => {
+    const { service, app, close } = await server(USER);
+    try {
+      await service.createProject({ name: "知识边界", sourcePath: null, code: "AUTHZ" });
+      const knowledge = {
+        opId: "authz-knowledge",
+        expectedVersion: 0,
+        slug: "authz-knowledge",
+        title: "授权边界",
+        summary: "测试用",
+        useWhen: "测试",
+        tags: [],
+        aliases: [],
+        appliesTo: [],
+        bodyMarkdown: "正文",
+        sourceRefs: [],
+      };
+      const save = (token: string) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/knowledge",
+          headers: bearer(token),
+          payload: knowledge,
+        });
+      expect((await save(AGENT)).statusCode).toBe(403);
+      expect((await save(USER)).statusCode).toBeLessThan(300);
+
+      // 同一个请求只换 session：真实的 Agent session 能写（阳性对照），session=USER 被拒。
+      const begun = await app.inject({
+        method: "POST",
+        url: "/api/v1/sessions",
+        headers: bearer(AGENT),
+        payload: { mode: "project", projectCode: "AUTHZ", agentId: "authz-agent", signals: {} },
+      });
+      expect(begun.statusCode).toBe(201);
+      const record = (session: string, opId: string) =>
+        app.inject({
+          method: "POST",
+          url: "/api/v1/projects/AUTHZ/records",
+          headers: bearer(AGENT),
+          payload: {
+            session,
+            opId,
+            kind: "FACT",
+            title: "边界",
+            summary: "记录",
+            scope: "PROJECT",
+          },
+        });
+      expect((await record(String(begun.json().session), "authz-rec-real")).statusCode).toBe(201);
+      expect((await record("USER", "authz-rec-user")).statusCode).toBeGreaterThanOrEqual(400);
+      const repository = await service.databases.openProject("AUTHZ");
+      const records = repository.sqlite.prepare("SELECT actor FROM records").all() as Array<{
+        actor: string;
+      }>;
+      expect(records).toHaveLength(1);
+      expect(records[0]!.actor).not.toBe("USER");
     } finally {
       await close();
     }

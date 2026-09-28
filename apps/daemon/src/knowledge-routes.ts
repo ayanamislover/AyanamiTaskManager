@@ -118,7 +118,7 @@ export function registerKnowledgeRoutes(app: FastifyInstance, options: AyanamiSe
     options.service.knowledge.search(searchInput(request)),
   );
 
-  app.post("/api/v1/knowledge", async (request, reply) => {
+  app.post("/api/v1/knowledge", USER_ONLY, async (request, reply) => {
     const input = KnowledgeSaveInputSchema.parse(request.body);
     const entry = await options.service.knowledge.save(input);
     return reply.code(input.id === undefined ? 201 : 200).send(entry);
@@ -130,8 +130,8 @@ export function registerKnowledgeRoutes(app: FastifyInstance, options: AyanamiSe
     const input = KnowledgeSaveInputSchema.parse({ ...body, id });
     return options.service.knowledge.save(input);
   };
-  app.put("/api/v1/knowledge/:id", saveExisting);
-  app.patch("/api/v1/knowledge/:id", saveExisting);
+  app.put("/api/v1/knowledge/:id", USER_ONLY, saveExisting);
+  app.patch("/api/v1/knowledge/:id", USER_ONLY, saveExisting);
 
   app.get("/api/v1/knowledge/:id", async (request) =>
     options.service.knowledge.get(getInput(request)),
