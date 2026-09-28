@@ -13,18 +13,35 @@ function dataDirectory(): string {
   return resolveDaemonDataDirectory();
 }
 
+/**
+ * 独立 daemon 只用于开发与 e2e（ATM-T-0503）。显式给了 AYANAMI_TASK_USER_TOKEN 才分离凭证，
+ * 否则保持单 token：那一个 token 同时代表用户，用户操作路由不设防——安装版桌面不走这里。
+ */
+function standaloneUserToken(agentToken: string): string | undefined {
+  const value = process.env.AYANAMI_TASK_USER_TOKEN;
+  if (value === undefined || value === "") return undefined;
+  if (value === agentToken)
+    throw new Error("AYANAMI_TASK_USER_TOKEN 不能与 Agent token 相同，否则分离凭证形同虚设");
+  return value;
+}
+
 async function main(): Promise<void> {
   const dataDir = dataDirectory();
   const runtime = join(dataDir, "runtime");
   mkdirSync(runtime, { recursive: true });
   const lease = acquireDaemonRuntime(runtime);
   const token = createDaemonToken();
+  const userToken = standaloneUserToken(token);
   let service: AyanamiTaskService | null = null;
   let app: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
   try {
     const migrationsRoot = resolve(process.env.AYANAMI_TASK_MIGRATIONS_DIR ?? "migrations");
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
-    app = await buildAyanamiServer({ service, token });
+    app = await buildAyanamiServer({
+      service,
+      token,
+      ...(userToken === undefined ? {} : { userToken }),
+    });
     const address = await app.listen({
       host: "127.0.0.1",
       port: Number(process.env.AYANAMI_TASK_PORT ?? 4393),

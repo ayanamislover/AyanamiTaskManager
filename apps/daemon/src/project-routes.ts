@@ -3,6 +3,7 @@ import { AtmError } from "@ayanami-task/errors";
 import { CreateProjectInputSchema } from "@ayanami-task/protocol";
 import { requestOpId } from "./rest-route-helpers.js";
 import type { AyanamiServerOptions } from "./server-options.js";
+import { USER_ONLY } from "./http-boundary.js";
 
 export function registerProjectRoutes(
   app: FastifyInstance,
@@ -38,7 +39,7 @@ export function registerProjectRoutes(
     const { project } = request.query as { project?: string };
     return options.service.listSavedViews(project);
   });
-  app.post("/api/v1/saved-views", async (request, reply) => {
+  app.post("/api/v1/saved-views", USER_ONLY, async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if ((body.scope !== "GLOBAL" && body.scope !== "PROJECT") || typeof body.name !== "string") {
       throw new AtmError("VALIDATION_ERROR", { message: "scope 和 name 必填" });
@@ -60,7 +61,7 @@ export function registerProjectRoutes(
       }),
     );
   });
-  app.patch("/api/v1/saved-views/:id", async (request) => {
+  app.patch("/api/v1/saved-views/:id", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (!Number.isInteger(body.expectedVersion))
@@ -76,7 +77,7 @@ export function registerProjectRoutes(
         : {}),
     });
   });
-  app.delete("/api/v1/saved-views/:id", async (request) => {
+  app.delete("/api/v1/saved-views/:id", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     const { expectedVersion } = request.query as { expectedVersion?: string };
     if (!expectedVersion || !Number.isInteger(Number(expectedVersion)))
@@ -84,7 +85,7 @@ export function registerProjectRoutes(
     return options.service.deleteSavedView(id, Number(expectedVersion));
   });
   app.get("/api/v1/settings", async () => options.service.listSettings());
-  app.put("/api/v1/settings/:key", async (request) => {
+  app.put("/api/v1/settings/:key", USER_ONLY, async (request) => {
     const { key } = request.params as { key: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (!("value" in body)) throw new AtmError("VALIDATION_ERROR", { message: "value 必填" });
@@ -99,11 +100,11 @@ export function registerProjectRoutes(
   // 不挂在 /projects 下：/projects/:code 是动态段，垃圾箱列表单独一条路由更不易撞车。
   app.get("/api/v1/trash/projects", async () => options.service.listTrashedProjects());
   // 用户对 Agent 恢复请求的决定（ATM-T-0494）。MCP 工具面不提供对应操作。
-  app.post("/api/v1/trash/restore-requests/:id/approve", async (request) => {
+  app.post("/api/v1/trash/restore-requests/:id/approve", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     return options.service.decideProjectRestoreRequest(id, "APPROVED");
   });
-  app.post("/api/v1/trash/restore-requests/:id/reject", async (request) => {
+  app.post("/api/v1/trash/restore-requests/:id/reject", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     return options.service.decideProjectRestoreRequest(id, "REJECTED");
   });
@@ -124,7 +125,7 @@ export function registerProjectRoutes(
     const { code } = request.params as { code: string };
     return options.service.databases.getProject(code);
   });
-  app.post("/api/v1/projects/:code/paths", async (request) => {
+  app.post("/api/v1/projects/:code/paths", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.path !== "string" || !body.path.trim()) {
@@ -140,15 +141,15 @@ export function registerProjectRoutes(
       refresh: refresh === "true" || refresh === "1",
     });
   });
-  app.post("/api/v1/projects/:code/archive", async (request) => {
+  app.post("/api/v1/projects/:code/archive", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     return options.service.archiveProject(code);
   });
-  app.post("/api/v1/projects/:code/restore", async (request) => {
+  app.post("/api/v1/projects/:code/restore", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     return options.service.restoreProject(code);
   });
-  app.post("/api/v1/projects/:code/trash", async (request) => {
+  app.post("/api/v1/projects/:code/trash", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     return options.service.trashProject(code);
   });
@@ -156,7 +157,7 @@ export function registerProjectRoutes(
     const { project } = request.query as { project?: string };
     return options.service.listBackups(project);
   });
-  app.post("/api/v1/backups", async (request, reply) => {
+  app.post("/api/v1/backups", USER_ONLY, async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const scope = body.scope ?? "PROJECT";
     if (scope !== "REGISTRY" && scope !== "PROJECT" && scope !== "KNOWLEDGE") {
@@ -172,7 +173,7 @@ export function registerProjectRoutes(
     });
     return reply.code(201).send(backup);
   });
-  app.post("/api/v1/backups/:id/restore", async (request) => {
+  app.post("/api/v1/backups/:id/restore", USER_ONLY, async (request) => {
     const { id } = request.params as { id: string };
     return options.service.restoreBackup(id);
   });
@@ -187,7 +188,7 @@ export function registerProjectRoutes(
       typeof body.sourceName === "string" ? body.sourceName : "agenttask.md",
     );
   });
-  app.post("/api/v1/imports/agenttask-md/apply", async (request) => {
+  app.post("/api/v1/imports/agenttask-md/apply", USER_ONLY, async (request) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     if (typeof body.project !== "string" || typeof body.content !== "string") {
       throw new AtmError("VALIDATION_ERROR", { message: "project 和 content 必填" });
@@ -273,14 +274,14 @@ export function registerProjectRoutes(
     const { session } = (request.query ?? {}) as { session?: string };
     return options.service.getOperationTrace(code, opId, session);
   });
-  app.post("/api/v1/projects/:code/project-updates/draft", async (request, reply) => {
+  app.post("/api/v1/projects/:code/project-updates/draft", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     return reply
       .code(201)
       .send(await options.service.draftProjectUpdateAsUser(code, requestOpId(body)));
   });
-  app.post("/api/v1/projects/:code/project-updates", async (request, reply) => {
+  app.post("/api/v1/projects/:code/project-updates", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     const health = typeof body.health === "string" ? body.health : "UNKNOWN";

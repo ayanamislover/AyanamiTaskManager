@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { expect, _electron as electron } from "@playwright/test";
+import { rendererPost } from "./renderer-user-request.js";
 import { expectedInitialWindowSize, windowSizeMatches } from "./window-smoke-sizing.js";
 
 const root = process.cwd();
@@ -67,18 +68,8 @@ try {
     endpoint: string;
     token: string;
   };
-  const post = async (path: string, body: unknown): Promise<any> => {
-    const response = await fetch(`${runtime.endpoint}${path}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${runtime.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) throw new Error(`${path} 创建验收数据失败：${response.status}`);
-    return response.json();
-  };
+  // 搭数据要以用户身份写（/ui/*），daemon.json 的 Agent 凭证会被拒，所以经 renderer 走。
+  const post = (path: string, body: unknown): Promise<any> => rendererPost(page, path, body);
   const nativeWindowHandle = await nativeWindow.evaluate((window) => {
     const handle = window.getNativeWindowHandle();
     return handle.length === 8

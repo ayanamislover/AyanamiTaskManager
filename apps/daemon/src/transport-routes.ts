@@ -1,6 +1,7 @@
 import websocket from "@fastify/websocket";
 import type { FastifyInstance } from "fastify";
 import { handleAyanamiMcpHttp, type AyanamiMcpProfile } from "@ayanami-task/mcp";
+import { authenticate } from "./http-boundary.js";
 import type { AyanamiServerOptions } from "./server-options.js";
 
 const WS_OPEN = 1;
@@ -271,7 +272,8 @@ export async function registerTransportRoutes(
         return;
       }
       if (!authenticated) {
-        if (frame.type !== "authenticate" || frame.token !== options.token) {
+        // 事件流只读，两种凭证都可以订阅。
+        if (frame.type !== "authenticate" || authenticate(frame.token, options) === null) {
           closeSocket(1008, "Authentication failed");
           return;
         }

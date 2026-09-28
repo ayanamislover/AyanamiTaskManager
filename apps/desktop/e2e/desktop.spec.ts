@@ -10,7 +10,9 @@ import {
 import Database from "better-sqlite3";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
-const headers = { authorization: "Bearer e2e-test-token" };
+// 分离凭证（ATM-T-0503）：场景搭建与界面走用户 token；daemon.json 里的是 Agent token。
+const headers = { authorization: "Bearer e2e-user-token" };
+const agentHeaders = { authorization: "Bearer e2e-test-token" };
 const longSidebarProjectName =
   "Codex Agent Permission Preflight And Deployment Readiness Verification";
 
@@ -429,8 +431,10 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
   const suffix = Date.now().toString(36);
   const code = `RQ${suffix.slice(-4).toUpperCase()}`;
   const name = `请求恢复验收 ${suffix}`;
+  // Agent 只有 daemon.json 里的那份 token。
+  const agent = await createRequest.newContext({ extraHTTPHeaders: agentHeaders });
   const agentBegin = () =>
-    api.post(`${apiUrl}/sessions`, {
+    agent.post(`${apiUrl}/sessions`, {
       data: { mode: "project", projectCode: code, agentId: "e2e-restore-agent" },
     });
   const caret = page.locator(".atm-project-trash .atm-engineering-toggle > svg");
@@ -444,7 +448,18 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
 
     const blocked = await agentBegin();
     expect(blocked.ok()).toBeFalsy();
-    expect(await blocked.text()).toContain("await_user_restore_authorization");
+    const blockedBody = (await blocked.json()) as {
+      error: { details: { recovery: { request_id: string } } };
+    };
+    expect(blockedBody.error.details.recovery).toMatchObject({
+      action: "await_user_restore_authorization",
+    });
+    // ATM-T-0503：拿着 daemon.json 令牌直接调授权接口，也过不去。
+    const selfApproved = await agent.post(
+      `${apiUrl}/trash/restore-requests/${blockedBody.error.details.recovery.request_id}/approve`,
+    );
+    expect(selfApproved.status()).toBe(403);
+    expect(await selfApproved.text()).toContain("USER_AUTHORIZATION_REQUIRED");
 
     await page.setViewportSize({ width: 1920, height: 1080 });
     await page.goto("/#overview");
@@ -486,6 +501,7 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
       fullPage: true,
     });
   } finally {
+    await agent.dispose();
     await api.dispose();
   }
 });
@@ -895,7 +911,7 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
         },
       });
     },
-    { endpoint: "http://127.0.0.1:4394", token: "e2e-test-token" },
+    { endpoint: "http://127.0.0.1:4394", token: "e2e-user-token" },
   );
   await page.goto("/#settings");
 

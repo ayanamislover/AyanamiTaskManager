@@ -29,7 +29,13 @@ export type Runtime = DaemonRuntimeDescriptor;
 export type RuntimeHost = {
   dataDir: string;
   runtimeDir: string;
+  /** 写进 daemon.json 的那份描述符；其中的 token 是 Agent 凭证。 */
   runtime: Runtime;
+  /**
+   * 用户凭证（ATM-T-0503）：只在本进程内存里，不进 daemon.json、不进日志、不给 renderer。
+   * renderer 的每个请求由主进程代为注入，所以只有界面上的操作能通过用户操作路由。
+   */
+  userToken: string;
   service: AyanamiTaskService;
   close(): Promise<void>;
 };
@@ -108,6 +114,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   // standalone daemon keeps an explicit development override, but inherited
   // environment cannot pin an installed desktop token across restarts.
   const token = createDaemonToken({});
+  const userToken = createDaemonToken({});
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
   try {
@@ -115,7 +122,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
       dataDir,
       migrationsRoot: join(app.getAppPath(), "migrations"),
     });
-    server = await buildAyanamiServer({ service, token });
+    server = await buildAyanamiServer({ service, token, userToken });
     await server.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
     if (server) await server.close().catch(() => undefined);
@@ -144,6 +151,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
     dataDir,
     runtimeDir,
     runtime,
+    userToken,
     service,
     async close() {
       if (closed) return;
@@ -191,7 +199,7 @@ export function installRuntimeIpc(host: RuntimeHost): void {
     );
   }
   ipcMain.handle("atm:runtime-request", (_event, input: RuntimeRequestInput) =>
-    proxyRuntimeRequest(host.runtime, input),
+    proxyRuntimeRequest({ endpoint: host.runtime.endpoint, token: host.userToken }, input),
   );
   ipcMain.handle("atm:get-auto-launch", () => autoLaunchEnabled(host.dataDir));
   ipcMain.handle("atm:set-auto-launch", (_event, enabled: boolean) =>

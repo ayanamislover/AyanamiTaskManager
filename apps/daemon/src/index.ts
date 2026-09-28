@@ -8,6 +8,7 @@ import { registerTransportRoutes } from "./transport-routes.js";
 import { registerWorkRoutes } from "./work-routes.js";
 
 export type { AyanamiServerOptions } from "./server-options.js";
+export { authenticate, type AtmPrincipal } from "./http-boundary.js";
 export {
   acquireDaemonRuntime,
   createDaemonToken,

@@ -21,6 +21,8 @@ const daemon = spawn(node, ["node_modules/tsx/dist/cli.mjs", "apps/daemon/src/ma
     ...process.env,
     ATM_DATA_DIR: dataDir,
     AYANAMI_TASK_TOKEN: "e2e-test-token",
+    // 分离凭证（ATM-T-0503）：界面用用户 token，daemon.json 里只有 Agent token。
+    AYANAMI_TASK_USER_TOKEN: "e2e-user-token",
     AYANAMI_TASK_PORT: "4394",
   },
 });
@@ -44,7 +46,7 @@ const vite = spawn(
     env: {
       ...process.env,
       VITE_ATM_ENDPOINT: "http://127.0.0.1:4394",
-      VITE_ATM_TOKEN: "e2e-test-token",
+      VITE_ATM_TOKEN: "e2e-user-token",
     },
   },
 );

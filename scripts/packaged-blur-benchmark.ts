@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, _electron as electron, type CDPSession, type Page } from "@playwright/test";
+import { rendererPost } from "./renderer-user-request.js";
 import {
   assertBlurBenchmarkReport,
   compareBlurRows,
@@ -170,25 +171,9 @@ const setBlur = async (page: Page, blur: "on" | "off") => {
 try {
   const page = await application.firstWindow();
   await page.waitForSelector(".atm-shell");
-  const runtime = JSON.parse(await readFile(join(dataDir, "runtime", "daemon.json"), "utf8")) as {
-    endpoint: string;
-    token: string;
-  };
-  const post = async (path: string, body: unknown): Promise<any> => {
-    const response = await fetch(`${runtime.endpoint}${path}`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${runtime.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 500);
-      throw new Error(`${path} 创建性能数据失败：${response.status} ${detail}`);
-    }
-    return response.json();
-  };
+
+  // 搭数据要以用户身份写（/ui/*），daemon.json 的 Agent 凭证会被拒，所以经 renderer 走。
+  const post = (path: string, body: unknown): Promise<any> => rendererPost(page, path, body);
 
   await post("/api/v1/projects", {
     name: "Packaged Blur Performance",

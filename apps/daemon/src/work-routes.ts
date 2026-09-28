@@ -23,6 +23,7 @@ import {
   requestOpId,
 } from "./rest-route-helpers.js";
 import type { AyanamiServerOptions } from "./server-options.js";
+import { USER_ONLY } from "./http-boundary.js";
 
 export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerOptions): void {
   app.post("/api/v1/projects/:code/objectives", async (request, reply) => {
@@ -46,7 +47,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       }),
     );
   });
-  app.post("/api/v1/projects/:code/ui/objectives", async (request, reply) => {
+  app.post("/api/v1/projects/:code/ui/objectives", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = request.body as Record<string, unknown>;
     const input = CreateObjectiveInputSchema.parse(body);
@@ -54,7 +55,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       .code(201)
       .send(await options.service.createObjectiveAsUser(code, requestOpId(body), input));
   });
-  app.post("/api/v1/projects/:code/ui/milestones", async (request, reply) => {
+  app.post("/api/v1/projects/:code/ui/milestones", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = request.body as Record<string, unknown>;
     const input = CreateMilestoneInputSchema.parse(body);
@@ -67,7 +68,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       }),
     );
   });
-  app.post("/api/v1/projects/:code/ui/work-items", async (request, reply) => {
+  app.post("/api/v1/projects/:code/ui/work-items", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = request.body as Record<string, unknown>;
     const parsed = TaskCreateBatchInputSchema.parse({ ...body, project: code, session: "USER" });
@@ -102,7 +103,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       ),
     );
   });
-  app.post("/api/v1/projects/:code/ui/work-items/patch", async (request) => {
+  app.post("/api/v1/projects/:code/ui/work-items/patch", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     const body = request.body as Record<string, unknown>;
     const parsed = TaskPatchBatchInputSchema.parse({ ...body, project: code, session: "USER" });
@@ -112,21 +113,25 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       parsed.items.map(repositoryPatchInput),
     );
   });
-  app.post("/api/v1/projects/:code/ui/work-items/:taskKey/verify-and-complete", async (request) => {
-    const { code, taskKey } = request.params as { code: string; taskKey: string };
-    const body = request.body as Record<string, unknown>;
-    const input = VerifyAndCompleteInputSchema.parse({
-      ...body,
-      project: code,
-      session: "USER",
-      taskKey,
-    });
-    return options.service.verifyAndCompleteAsUser(code, input.opId, {
-      taskKey: input.taskKey,
-      expectedVersion: input.expectedVersion,
-    });
-  });
-  app.patch("/api/v1/projects/:code/ui/checklist/batch", async (request) => {
+  app.post(
+    "/api/v1/projects/:code/ui/work-items/:taskKey/verify-and-complete",
+    USER_ONLY,
+    async (request) => {
+      const { code, taskKey } = request.params as { code: string; taskKey: string };
+      const body = request.body as Record<string, unknown>;
+      const input = VerifyAndCompleteInputSchema.parse({
+        ...body,
+        project: code,
+        session: "USER",
+        taskKey,
+      });
+      return options.service.verifyAndCompleteAsUser(code, input.opId, {
+        taskKey: input.taskKey,
+        expectedVersion: input.expectedVersion,
+      });
+    },
+  );
+  app.patch("/api/v1/projects/:code/ui/checklist/batch", USER_ONLY, async (request) => {
     const { code } = request.params as { code: string };
     const body = request.body as Record<string, unknown>;
     const input = ChecklistBatchUpdateInputSchema.parse({
@@ -144,7 +149,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       })),
     });
   });
-  app.patch("/api/v1/projects/:code/ui/checklist/:id", async (request) => {
+  app.patch("/api/v1/projects/:code/ui/checklist/:id", USER_ONLY, async (request) => {
     const { code, id } = request.params as { code: string; id: string };
     const body = request.body as Record<string, unknown>;
     const input = ChecklistUpdateInputSchema.parse({ ...body, checklistId: id });
@@ -380,7 +385,7 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
       }),
     );
   });
-  app.post("/api/v1/projects/:code/ui/records", async (request, reply) => {
+  app.post("/api/v1/projects/:code/ui/records", USER_ONLY, async (request, reply) => {
     const { code } = request.params as { code: string };
     const body = (request.body ?? {}) as Record<string, unknown>;
     const input = RecordInputSchema.parse({ ...body, project: code, session: "USER" });

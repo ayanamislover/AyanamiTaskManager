@@ -8,7 +8,7 @@ AyanamiTaskManager（ATM）是本机 Agent 项目的任务控制面：统一保�
 
 ## ATM 服务如何发现
 
-正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid`、`version`、`startedAt` 和 `instanceId`。服务只监听 `127.0.0.1`；正式桌面 daemon 每次启动都会生成新的 token，旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。`output/` 下的数据只用于测试。完整边界见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`。
+正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`；显式设置 `ATM_DATA_DIR` 时以该目录为准。读取 `<数据目录>\runtime\daemon.json` 获得 `endpoint`、`token`、`pid`、`version`、`startedAt` 和 `instanceId`。服务只监听 `127.0.0.1`；正式桌面 daemon 每次启动都会生成新的 token，旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要猜端口，也不要把 token 写入仓库、日志、对话或 ATM 记录。这个 token 是 Agent 凭证：恢复/移入垃圾箱/归档项目、授权恢复请求、新建或恢复备份、改设置、改动或删除保存的视图、经 REST 新建/更新/归档知识（发布知识请用 MCP `atm_knowledge_save`）、以用户身份写入这类「用户的决定」会返回 `403 USER_AUTHORIZATION_REQUIRED`，只能请用户在 ATM 界面操作，不要重试或寻找其他入口。`output/` 下的数据只用于测试。完整边界见 `%LOCALAPPDATA%\AyanamiTaskManager\docs\security-model.md`。
 
 ## ATM 未运行怎么办
 
@@ -80,7 +80,7 @@ task 进度的非空 `blocker` 是状态操作：转为 BLOCKED 并清除原等�
 
 编排工具结果时只输出一份业务载荷：`result.structuredContent ?? result.content`。MCP 同时保留两种载荷是为兼容不同客户端，不要把整个对象重复展开；失败时也必须保留错误正文。写回执是该次操作的快照，重放旧 `op_id` 不等于查询当前状态。
 
-候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`begin` 会拒绝（`quick` 也不绕过、不另建项目），同时登记一条恢复请求，编号在 `details.recovery.request_id`。只有用户能在 ATM「项目 → 垃圾箱」授权恢复：把编号转告用户，等授权后再调用一次 `begin`；重复 `begin` 只会累加同一条请求，不会修复生命周期。
+候选哈希失配时检查错误中的 `missing` / `extra` / `mismatch`，不要反复猜 commit/tree/base 键或自动改绑。完整绑定可按 `request_lookup` 的只读 REST 路径获取，仍使用 runtime 发现的本次令牌。cwd 若绑定到垃圾箱项目，`begin` 会拒绝（`quick` 也不绕过、不另建项目），同时登记一条恢复请求，编号在 `details.recovery.request_id`。只有用户能在 ATM「项目 → 垃圾箱」授权恢复（Agent 令牌调授权接口会得到 `403 USER_AUTHORIZATION_REQUIRED`）：把编号转告用户，等授权后再调用一次 `begin`；重复 `begin` 只会累加同一条请求，不会修复生命周期。
 
 ### 字段约束速查
 
@@ -340,7 +340,7 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 ### MCP 没有的能力走 REST
 
-少数能力目前只有 REST 入口，例如**再建一个** Objective / Milestone（`POST /api/v1/projects/{code}/objectives`、`.../milestones`）。REST 与 MCP 用同一个 `endpoint` 和 token（见「ATM 服务如何发现」），写操作同样需要 `session` 与唯一 `op_id`。
+少数能力目前只有 REST 入口，例如**再建一个** Objective / Milestone（`POST /api/v1/projects/{code}/objectives`、`.../milestones`）。REST 与 MCP 用同一个 `endpoint` 和 token（见「ATM 服务如何发现」），写操作同样需要 `session` 与唯一 `op_id`。`/ui/*` 等以用户身份落账的路由不对 Agent 开放；临时任务走 REST 时在 `actor` 里写自己的 agent_id，缺省会记成 USER 而被拒。
 
 新项目**不需要**先建 Objective：项目还没有活动目标时，`atm_task_create` 会自动补一个以项目名命名、带「（自动补建）」后缀的目标和一个「执行」里程碑。这个规划决策保存在 durable operation receipt；按上方固定 mutation ACK 说明精确回查后，应按实际规划改写目标标题与验收，或另建目标后归档它。条目自带 `objective_id` 时不会触发补建。
 

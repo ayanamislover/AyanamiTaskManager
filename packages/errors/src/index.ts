@@ -107,6 +107,7 @@ export const ERROR_POLICIES = Object.freeze({
   SQLITE_VERSION_UNSAFE: policy(500),
   TASK_ALREADY_CLAIMED: policy(409),
   UNAUTHORIZED: policy(401),
+  USER_AUTHORIZATION_REQUIRED: policy(403),
   VALIDATION_ERROR: policy(422),
   VERSION_CONFLICT: policy(409, true),
   WAITING_FOR_REQUIRED: policy(422),
