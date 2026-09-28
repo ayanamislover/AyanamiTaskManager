@@ -1,10 +1,11 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { chromium, type Browser, type Page } from "@playwright/test";
 import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
 import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
@@ -25,6 +26,7 @@ import {
   mcpLaunch,
   type McpProfile,
 } from "../apps/desktop/src/mcp-launch.js";
+import { rendererRequest } from "./renderer-user-request.js";
 import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
 
 type Runtime = {
@@ -114,19 +116,71 @@ async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): 
   throw lastError ?? new Error(`等待 ${timeoutMs}ms 超时`);
 }
 
+// Chromium 用 --remote-debugging-port=0 时把实际端口写在这里（用户数据目录下）。
+const devToolsPortFile = join(electronUserDataDir, "DevToolsActivePort");
+
 function startApp(): RunningApp {
-  const child = spawn(executable, ["--background", `--user-data-dir=${electronUserDataDir}`], {
-    cwd: root,
-    env: smokeEnvironment,
-    windowsHide: true,
-    stdio: ["ignore", "ignore", "pipe"],
-  });
+  rmSync(devToolsPortFile, { force: true });
+  const child = spawn(
+    executable,
+    [
+      "--background",
+      `--user-data-dir=${electronUserDataDir}`,
+      // 只加在烟测自己拉起的进程上：用来走真实 renderer 的用户路径，见 connectUserRenderer。
+      "--remote-debugging-port=0",
+    ],
+    {
+      cwd: root,
+      env: smokeEnvironment,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
   const stderr: string[] = [];
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr.push(chunk.toString("utf8"));
     if (stderr.length > 20) stderr.shift();
   });
   return { child, stderr };
+}
+
+type UserPath = {
+  page: Page;
+  request<T = any>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; body: T }>;
+  close(): Promise<void>;
+};
+
+/**
+ * 以用户身份调用（ATM-T-0503 / 0509）。daemon.json 里只有 Agent 凭证，用户专属路由必须
+ * 走界面真正走的那条路：renderer → preload 的 runtimeRequest → 主进程代为注入内存里的
+ * 用户凭证。这里经 CDP 在已打包应用的 renderer 里调 runtimeRequest，用户凭证始终不离开
+ * 主进程；烟测也不需要、也拿不到它。
+ */
+async function connectUserRenderer(): Promise<UserPath> {
+  const port = await waitUntil(async () => {
+    if (!existsSync(devToolsPortFile)) return null;
+    const value = Number((await readFile(devToolsPortFile, "utf8")).split(/\r?\n/u)[0]);
+    return Number.isInteger(value) && value > 0 ? value : null;
+  });
+  const browser: Browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+  try {
+    const page = await waitUntil(async () => {
+      const pages = browser.contexts().flatMap((context) => context.pages());
+      return pages.find((candidate) => !candidate.url().startsWith("devtools:")) ?? null;
+    });
+    return {
+      page,
+      request: (method, path, body) => rendererRequest(page, method, path, body),
+      close: () => browser.close(),
+    };
+  } catch (error) {
+    await browser.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 async function waitForRuntime(app: RunningApp): Promise<Runtime> {
@@ -720,6 +774,7 @@ let app = startApp();
 // The app's own autostart self-check writes the shared HKCU Run value (Electron gives
 // no way to namespace it), so a smoke run would otherwise delete the user's real entry.
 const runEntriesBeforeSmoke = readRunEntries();
+let user: UserPath | null = null;
 try {
   const runtime = await waitForRuntime(app);
   const recoveredLock = JSON.parse(await readFile(lockPath, "utf8"));
@@ -732,7 +787,9 @@ try {
     /^\d{17,19}$/u.test(recoveredLock.processIdentity?.createdAtTicks ?? ""),
   );
   recordedAgentProfiles = await waitForPackagedAgentProfiles();
+  // runtime.token 是 Agent 凭证：读和 Agent 写走它；用户操作走 user（真实 renderer 路径）。
   const client = new AyanamiClient(runtime);
+  user = await connectUserRenderer();
   const status = await client.status();
   check("打包应用健康检查", status.ok === true);
   check("正式桌面忽略继承的固定 token override", runtime.token !== hostileInheritedTokenOverride);
@@ -833,23 +890,28 @@ try {
     sourcePath: null,
     code: "PSM",
   });
-  const knowledge = await client.knowledge.save({
-    opId: "packaged-smoke-knowledge-create",
-    expectedVersion: 0,
-    slug: "packaged-smoke-knowledge",
-    title: "Packaged smoke knowledge",
-    summary: "Knowledge fixture for packaged MCP smoke",
-    useWhen: "验证打包 memory 入口",
-    tags: ["packaged", "smoke"],
-    appliesTo: ["packaged-smoke"],
-    bodyMarkdown: "# Packaged smoke\n\npackaged smoke knowledge body",
-    sourceRefs: [],
-    aliases: [],
-  });
+  const knowledgeSaved = await user.request<Awaited<ReturnType<typeof client.knowledge.get>>>(
+    "POST",
+    "/api/v1/knowledge",
+    {
+      opId: "packaged-smoke-knowledge-create",
+      expectedVersion: 0,
+      slug: "packaged-smoke-knowledge",
+      title: "Packaged smoke knowledge",
+      summary: "Knowledge fixture for packaged MCP smoke",
+      useWhen: "验证打包 memory 入口",
+      tags: ["packaged", "smoke"],
+      appliesTo: ["packaged-smoke"],
+      bodyMarkdown: "# Packaged smoke\n\npackaged smoke knowledge body",
+      sourceRefs: [],
+      aliases: [],
+    },
+  );
+  const knowledge = knowledgeSaved.body;
   check(
-    "HTTP knowledge service 创建隔离烟测条目",
-    knowledge.revision === 1 && knowledge.version === 1,
-    JSON.stringify(knowledge),
+    "用户路径（renderer → 主进程代理）创建隔离烟测知识条目",
+    knowledgeSaved.status === 201 && knowledge.revision === 1 && knowledge.version === 1,
+    JSON.stringify(knowledgeSaved),
   );
   const httpKnowledge = await client.knowledge.get(knowledge.id, {
     revisionId: knowledge.revisionId,
@@ -862,12 +924,17 @@ try {
     JSON.stringify(httpKnowledge),
   );
   await readKnowledgeThroughPackagedMemory(knowledge.id, knowledge.revisionId, project.code);
-  await client.projects.createObjectiveAsUser(project.code, {
-    opId: "packaged-smoke-objective",
-    title: "验证打包产物",
-    description: "仅使用打包后的应用进行端到端验收",
-    definitionOfDone: ["MCP、事件、备份恢复与重启通过"],
-  });
+  const objective = await user.request(
+    "POST",
+    `/api/v1/projects/${encodeURIComponent(project.code)}/ui/objectives`,
+    {
+      opId: "packaged-smoke-objective",
+      title: "验证打包产物",
+      description: "仅使用打包后的应用进行端到端验收",
+      definitionOfDone: ["MCP、事件、备份恢复与重启通过"],
+    },
+  );
+  check("用户路径以用户身份创建 Objective", objective.status === 201, JSON.stringify(objective));
   check("创建独立项目数据库", existsSync(project.databasePath), project.databasePath);
 
   // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
@@ -985,10 +1052,35 @@ try {
   );
   check("core / actions Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
 
-  const backup = await client.backups.create(project.code);
+  // 分离凭证在安装态生效：Agent 凭证新建备份被拒（它会淘汰用户的手动备份），且不落账。
+  const backupsBefore = (await client.backups.list(project.code)).length;
+  const agentBackup = await fetch(`${runtime.endpoint}/api/v1/backups`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${runtime.token}`, "content-type": "application/json" },
+    body: JSON.stringify({ scope: "PROJECT", project: project.code }),
+  });
+  const agentBackupBody = await agentBackup.text();
+  check(
+    "Agent 凭证调用户操作返回 403 且不落账",
+    agentBackup.status === 403 &&
+      agentBackupBody.includes("USER_AUTHORIZATION_REQUIRED") &&
+      !agentBackupBody.includes(runtime.token) &&
+      (await client.backups.list(project.code)).length === backupsBefore,
+    `${agentBackup.status} ${agentBackupBody.slice(0, 200)}`,
+  );
+  const backupCreated = await user.request<{ id: string }>("POST", "/api/v1/backups", {
+    scope: "PROJECT",
+    project: project.code,
+  });
+  check("用户路径创建备份", backupCreated.status === 201, JSON.stringify(backupCreated));
+  const backup = backupCreated.body;
   await createThroughPackagedMcp(project.code, "恢复后应消失", "packaged-smoke-create-2");
   check("备份后写入第二项", (await client.tasks.list(project.code)).length === 2);
-  await client.backups.restore(String(backup.id));
+  const restored = await user.request(
+    "POST",
+    `/api/v1/backups/${encodeURIComponent(String(backup.id))}/restore`,
+  );
+  check("用户路径恢复备份", restored.status === 200, JSON.stringify(restored).slice(0, 300));
   const restoredTasks = await client.tasks.list(project.code, { view: "context" });
   check(
     "在线备份恢复一致",
@@ -1007,6 +1099,8 @@ try {
     `${autoLaunch.path} ${autoLaunch.args.join(" ")}`,
   );
 
+  await user.close();
+  user = null;
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));
   check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
@@ -1063,6 +1157,8 @@ try {
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 } catch (error) {
+  // 成功路径在退出应用前已关；失败时在这里断开 CDP，免得连接拖住进程。
+  await user?.close().catch(() => undefined);
   if (app.child.exitCode === null) app.child.kill();
   const report = {
     passed: false,
