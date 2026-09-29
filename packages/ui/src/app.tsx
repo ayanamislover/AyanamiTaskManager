@@ -71,7 +71,6 @@ function App({
           desktop={desktop}
           route={route}
           projects={projectList}
-          selectedProject={selectedProject ?? null}
           notify={notify}
           onRoute={setRoute}
           onTask={openTaskInPlace}

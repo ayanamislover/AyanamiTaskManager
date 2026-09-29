@@ -31,8 +31,13 @@
   border-radius: 9px;
   color: var(--atm-on-primary);
   background: var(--atm-primary-fill);
-  box-shadow: 0 3px 10px rgb(168 85 247 / 0.22);
+  /* 只要一圈很淡的描边勾出方块轮廓。以前是紫色发光阴影，暗色底上像一团光斑。 */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--atm-text) 10%, transparent);
   overflow: hidden;
+}
+/* 有 logo 图时不垫渐变：圆角裁切的抗锯齿边会透出一圈粉紫。渐变只给没有图时的图标用。 */
+.atm-brand-mark:has(> img) {
+  background: transparent;
 }
 /* 字标占满 logo 右边剩下的宽度，右缘和导航项右缘对齐。 */
 .atm-wordmark {
@@ -321,7 +326,24 @@
   font: 500 10px var(--atm-mono);
 }
 .atm-content {
+  position: relative;
   width: min(100%, 2280px);
   margin: 0 auto;
   padding: 20px 28px 48px;
+}
+/* 路由舞台（route-stage.tsx）：前台那层不参与版面，页面像以前一样直接排在内容区里。 */
+.atm-route-layer {
+  display: contents;
+}
+/* 后台准备中的那一页：照常挂载、照常读数据，但不占版面、不撑开滚动区、看不见也点不到。 */
+.atm-route-layer.atm-route-pending {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: block;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
 }

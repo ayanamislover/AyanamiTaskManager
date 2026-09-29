@@ -10,6 +10,8 @@ import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
+import { useQueriesSettled } from "../queries-settled.js";
+import type { RouteStageSlot } from "../routes/route-stage.js";
 import { CreateRecordModal } from "./create-record-modal.js";
 import { CreateTaskModal } from "./create-task-modal.js";
 import { ProjectDataModal } from "./project-data-modal.js";
@@ -28,9 +30,12 @@ export function ProjectPage({
   onExit,
   desktop,
   onKnowledgeDraft,
+  stage,
 }: {
   client: AyanamiClient;
   project: RegisteredProject;
+  /** 由路由舞台传入：还在后台准备时不响应全局快捷键，首屏读完时通知换上。 */
+  stage?: RouteStageSlot;
   notify: Notify;
   openTask: (key: string) => void;
   onExit: () => void;
@@ -86,11 +91,29 @@ export function ProjectPage({
       onExit();
     },
   });
+  const pending = stage?.pending ?? false;
   useEffect(() => {
+    // 后台准备中的那一页看不见，快捷键「新建任务」只该打开前面这一页的弹窗。
+    if (pending) return;
     const listener = () => setCreate(true);
     window.addEventListener("atm:new-project-task", listener);
     return () => window.removeEventListener("atm:new-project-task", listener);
-  }, []);
+  }, [pending]);
+  // 首屏要一起出现的几块：任务列表、已结束任务、进度条、目标与里程碑、Agent、项目更新、
+  // 健康度（来自总览）。全部有了结果才换上，免得先闪一遍「尚未设置」和空列表。
+  const firstScreenReady = useQueriesSettled([
+    ["tasks", project.code, "ui", "open"],
+    ["tasks", project.code, "ui", "closed"],
+    ["tasks", project.code, "progress-strip"],
+    ["brief", project.code],
+    ["agents", project.code],
+    ["project-updates", project.code],
+    ["overview"],
+  ]);
+  const onReady = stage?.onReady;
+  useEffect(() => {
+    if (firstScreenReady) onReady?.();
+  }, [firstScreenReady, onReady]);
   const workItems = tasks.items as any[];
   const diagnostics = useProjectDiagnostics(client, project.code);
   const diagnosticsPanel = (
@@ -187,6 +210,7 @@ export function ProjectPage({
         client={client}
         projectCode={project.code}
         workItems={workItems}
+        tasksLoading={tasks.isLoading}
         openTask={openTask}
       >
         <ProjectTaskControls

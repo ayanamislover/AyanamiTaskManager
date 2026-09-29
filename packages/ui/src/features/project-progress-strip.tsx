@@ -38,8 +38,12 @@ export function progressStripSegments(counts: ProgressStripCounts): ProgressStri
   }));
 }
 
-export function ProgressStripView({ counts }: { counts: ProgressStripCounts }) {
-  const segments = progressStripSegments(counts);
+const NO_COUNTS: ProgressStripCounts = { since: "", done: 0, active: 0, waiting: 0, ready: 0 };
+
+/** counts 为 null 表示还在读：结构和尺寸与读完一样，数字位显示破折号。 */
+export function ProgressStripView({ counts }: { counts: ProgressStripCounts | null }) {
+  const loading = counts === null;
+  const segments = progressStripSegments(counts ?? NO_COUNTS);
   const done = segments[0]!;
   const hintId = useId();
   return (
@@ -48,15 +52,21 @@ export function ProgressStripView({ counts }: { counts: ProgressStripCounts }) {
       className="atm-panel atm-progress-strip"
       aria-label="项目进度"
       aria-describedby={hintId}
+      aria-busy={loading || undefined}
     >
       <span className="atm-visually-hidden" id={hintId}>
         {PROGRESS_STRIP_HINT}
       </span>
       <div className="atm-progress-strip-row">
         <div className="atm-progress-strip-big">
-          {Math.round(done.percent)}%<small>本次完成</small>
+          {loading ? "—" : `${Math.round(done.percent)}%`}
+          <small>本次完成</small>
         </div>
-        <div className="atm-progress-strip-bar" role="img" aria-label={stripSummary(segments)}>
+        <div
+          className="atm-progress-strip-bar"
+          role="img"
+          aria-label={loading ? "正在读取" : stripSummary(segments)}
+        >
           {segments
             .filter((segment) => segment.count > 0)
             .map((segment) => (
@@ -72,7 +82,7 @@ export function ProgressStripView({ counts }: { counts: ProgressStripCounts }) {
         {segments.map((segment) => (
           <span key={segment.key} data-segment={segment.key}>
             {segment.label}
-            <b>{segment.count}</b>
+            <b>{loading ? "—" : segment.count}</b>
           </span>
         ))}
       </div>
@@ -96,6 +106,9 @@ export function ProjectProgressStrip({
     queryKey: ["tasks", projectCode, "progress-strip"],
     queryFn: () => client.tasks.progressStripForUi(projectCode),
   });
+  // 读取中也占着同样的位置：以前这里返回 null，数据回来时整条插进来，把下面的列表往下推一截。
+  // 读失败时不留空壳。
+  if (strip.isPending) return <ProgressStripView counts={null} />;
   if (!strip.data) return null;
   return <ProgressStripView counts={strip.data} />;
 }

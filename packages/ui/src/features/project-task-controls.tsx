@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
@@ -121,8 +121,18 @@ export function projectTaskGroups(
   };
 }
 
+/**
+ * 最近一次选的视图（列表 / 看板 / …）。项目页按项目各自挂载，切项目时筛选和排序
+ * 都该重置——里程碑、负责人本来就是按项目的；但看板看惯了，换个项目不该被打回列表。
+ */
+let lastProjectTaskView: ProjectTaskView = "list";
+
 export function useProjectTaskViewState(openTasks: any[], closedTasks: any[] = []) {
-  const [view, setView] = useState<ProjectTaskView>("list");
+  const [view, setViewState] = useState<ProjectTaskView>(() => lastProjectTaskView);
+  const setView = useCallback((next: ProjectTaskView) => {
+    lastProjectTaskView = next;
+    setViewState(next);
+  }, []);
   const [filters, setFilters] = useState<ProjectTaskFilters>(EMPTY_PROJECT_TASK_FILTERS);
   const [taskSort, setTaskSort] = useState<ProjectTaskSort>(DEFAULT_PROJECT_TASK_SORT);
   const groups = projectTaskGroups(openTasks, closedTasks, filters, taskSort);
