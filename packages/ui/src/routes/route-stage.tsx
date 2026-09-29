@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
-/** 这一页是怎么换上来的：首屏读齐（ready）、等满时限（timeout），或者不需要等（direct）。 */
-export type RouteSwap = "direct" | "ready" | "timeout";
+/**
+ * 这一页是怎么换上来的：首屏读齐（ready）、用户在它上面下了命令（command）、
+ * 等满时限（timeout），或者不需要等（direct）。
+ */
+export type RouteSwap = "direct" | "ready" | "command" | "timeout";
 
 /** 新页面最多在后台准备这么久；超时就直接换上，让它自己显示加载态。 */
 export const ROUTE_HOLD_MS = 450;
@@ -15,6 +18,10 @@ export const ROUTE_HOLD_MS = 450;
  * 这里让新页面先在后台挂载、开始读取，旧页面原样留在前面；新页面报告
  * 「首屏数据齐了」就立刻换上，最多等 ROUTE_HOLD_MS。两个页面各自渲染各自的数据，
  * 不会出现标题是新项目、列表还是旧项目的错位。
+ *
+ * 等待期间旧页面只是一张预览：设为 inert，不接受点击和键盘。否则用户在旧页上
+ * 打开的弹窗、填到一半的内容，会在新页换上时连同旧页一起被卸载（侧栏、顶栏、
+ * 任务抽屉都在舞台之外，不受影响）。
  *
  * 不需要等待的页面（defer 为 false）照旧立即切换。
  */
@@ -46,14 +53,23 @@ export function RouteStage({
     return () => window.clearTimeout(timer);
   }, [pending]);
 
-  const promote = useCallback(() => {
+  const onReady = useCallback(() => {
     if (pending !== null) setStage({ shown: pending, swap: "ready" });
+  }, [pending]);
+  const onCommand = useCallback(() => {
+    if (pending !== null) setStage({ shown: pending, swap: "command" });
   }, [pending]);
 
   return (
     <>
       {/* data-swap 给测试看：快的读取应当是 ready，靠 timeout 换上说明就绪条件漏了或等不齐。 */}
-      <div className="atm-route-layer" key={shown} data-swap={swap}>
+      <div
+        className="atm-route-layer"
+        key={shown}
+        data-swap={swap}
+        data-leaving={pending === null ? undefined : "true"}
+        inert={pending !== null}
+      >
         {render(shown, SHOWN)}
       </div>
       {pending === null ? null : (
@@ -65,7 +81,7 @@ export function RouteStage({
           inert
           data-testid="route-pending"
         >
-          {render(pending, { pending: true, onReady: promote })}
+          {render(pending, { pending: true, onReady, onCommand })}
         </div>
       )}
     </>
@@ -73,10 +89,13 @@ export function RouteStage({
 }
 
 export type RouteStageSlot = {
-  /** 还在后台准备、用户看不见：页面不该响应全局快捷键之类的事件。 */
+  /** 还在后台准备、用户看不见。收到发给它的命令时应先调用 onCommand 换上来。 */
   pending: boolean;
   /** 首屏数据齐了（成功或失败都算）时调用一次。 */
   onReady: () => void;
+  /** 用户在这一页上下了命令（例如「新建任务」）：不等数据，立刻换上。 */
+  onCommand: () => void;
 };
 
-const SHOWN: RouteStageSlot = { pending: false, onReady: () => {} };
+const noop = () => {};
+const SHOWN: RouteStageSlot = { pending: false, onReady: noop, onCommand: noop };

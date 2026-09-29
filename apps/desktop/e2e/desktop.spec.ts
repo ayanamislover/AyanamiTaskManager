@@ -2578,3 +2578,50 @@ test("切项目的等待窗口里又点回原项目：留在原页，不残留�
   )) as Array<{ h1: string }>;
   expect([...new Set(timeline.map((entry) => entry.h1))]).toEqual(["E2E 验收项目"]);
 });
+
+for (const { tab, button, dialogName } of [
+  { tab: "列表", button: "新建任务", dialogName: "新建任务" },
+  { tab: "记录", button: "新建记录", dialogName: "新建项目记录" },
+]) {
+  test(`切项目的等待窗口里旧页只是预览：点它页头的「${button}」不会开出随后消失的弹窗`, async ({
+    page,
+  }) => {
+    await ensureSwitchTargetProject();
+    await page.goto("/#project:E2E");
+    await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+    await page.getByRole("tab", { name: tab }).click();
+    const oldButton = page.locator(".atm-page-head").getByRole("button", { name: button });
+    await expect(oldButton).toBeEnabled();
+    const box = (await oldButton.boundingBox())!;
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    await page.route(/\/api\/v1\/projects\/E2ESW\//u, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page
+      .locator(".atm-sidebar")
+      .getByRole("button", { name: "E2E 切换目标", exact: true })
+      .click();
+    await expect(page.getByTestId("route-pending")).toHaveCount(1);
+    await expect(page.locator(".atm-route-layer[data-leaving='true']")).toHaveAttribute(
+      "inert",
+      "",
+    );
+    // 用坐标点，模拟用户照着还看得见的旧按钮点下去。
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(100);
+    // 当场数一次，不用会自动重试的 toHaveCount(0)：旧页的弹窗会在超时换页时自己消失，
+    // 重试着等就等到了——那正是要抓的问题。
+    expect(await page.getByRole("dialog").count()).toBe(0);
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    release();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // 换上来的新页，自己的按钮照常能用。
+    await page.locator(".atm-page-head").getByRole("button", { name: button }).click();
+    const dialog = page.getByRole("dialog", { name: dialogName });
+    await expect(dialog).toBeVisible();
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    await dialog.getByRole("button", { name: "关闭" }).click();
+  });
+}

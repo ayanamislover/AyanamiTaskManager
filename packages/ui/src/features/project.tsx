@@ -36,7 +36,7 @@ export function ProjectPage({
 }: {
   client: AyanamiClient;
   project: RegisteredProject;
-  /** 由路由舞台传入：还在后台准备时不响应全局快捷键，首屏读完时通知换上。 */
+  /** 由路由舞台传入：首屏读完时通知换上；在后台准备时收到本项目的命令就立刻换上。 */
   stage?: RouteStageSlot;
   notify: Notify;
   openTask: (key: string) => void;
@@ -95,17 +95,18 @@ export function ProjectPage({
   });
   const pending = stage?.pending ?? false;
   const onReady = stage?.onReady;
+  const onCommand = stage?.onCommand;
   useEffect(() => {
     // 只认发给本项目的命令。还在后台准备时收到，说明用户已经要在这一页干活了：
     // 立刻换上来（先带加载态），在这一页打开弹窗。
     const listener = (event: Event) => {
       if (!isNewProjectTaskFor(event, project.code)) return;
-      if (pending) onReady?.();
+      if (pending) onCommand?.();
       setCreate(true);
     };
     window.addEventListener(NEW_PROJECT_TASK_EVENT, listener);
     return () => window.removeEventListener(NEW_PROJECT_TASK_EVENT, listener);
-  }, [pending, onReady, project.code]);
+  }, [pending, onCommand, project.code]);
   // 首屏要一起出现的几块：任务列表、已结束任务、进度条、目标与里程碑、Agent、项目更新、
   // 健康度（来自总览）、筛选条的保存视图与里程碑选项，以及当前视图自己的数据
   // （记录、时间线只在选中时才读）。全部有了结果才换上，免得先闪一遍骨架和「尚未设置」。
