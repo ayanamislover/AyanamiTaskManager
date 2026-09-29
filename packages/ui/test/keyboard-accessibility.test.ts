@@ -104,7 +104,8 @@ describe("keyboard accessibility primitives", () => {
         source,
       );
     expect(hasRowFocusGuard(styles)).toBe(true);
-    expect(hasRowFocusGuard(styles.replace("tr[tabindex]:focus-visible", "tr"))).toBe(false);
+    // 行焦点现在有两条规则（整行 outline 与单元格底色），变异要把两条都拿掉。
+    expect(hasRowFocusGuard(styles.replaceAll("tr[tabindex]:focus-visible", "tr"))).toBe(false);
     expect(
       hasRowFocusGuard(styles.replace("outline-color: Highlight", "outline-color: Canvas")),
     ).toBe(false);

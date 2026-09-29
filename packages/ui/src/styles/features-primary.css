@@ -121,7 +121,7 @@
 }
 .atm-project-stats span {
   padding: 6px 7px;
-  border-radius: 7px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text-muted);
   background: var(--atm-surface-muted);
   font-size: 11px;
@@ -153,7 +153,7 @@
 .atm-projection-failure {
   min-width: 0;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   overflow: hidden;
 }
 .atm-projection-failure .atm-row {
@@ -237,7 +237,7 @@
   gap: 12px;
   padding: 13px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-integration-card > header {
@@ -279,7 +279,7 @@
 }
 .atm-integration-preview {
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-integration-preview > summary {
@@ -315,7 +315,7 @@
   gap: 9px;
   padding: 9px 10px;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text);
   background: var(--atm-surface);
   text-align: left;
@@ -479,7 +479,7 @@
   display: grid;
   gap: 7px;
   padding: 11px 12px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-engineering-kpis span {
@@ -516,7 +516,7 @@
   display: grid;
   max-height: 420px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   overflow: auto;
 }
 .atm-mcp-bridge-row {
@@ -582,7 +582,7 @@
 }
 .atm-inline-warning {
   padding: 10px 12px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-warning);
   background: color-mix(in srgb, var(--atm-warning) 10%, transparent);
 }

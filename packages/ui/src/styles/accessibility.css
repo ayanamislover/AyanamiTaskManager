@@ -88,9 +88,14 @@
     backdrop-filter: none;
   }
 
-  .atm-sidebar,
-  .atm-topbar {
+  .atm-sidebar {
+    background: var(--atm-surface);
+  }
+
+  .atm-topbar::before {
     background: var(--atm-bg);
+    backdrop-filter: none;
+    mask-image: none;
   }
 }
 
@@ -117,5 +122,16 @@
   .atm-modal,
   .atm-drawer {
     border-color: ButtonText;
+  }
+
+  /* 柔彩稿里这些面靠阴影和底色区分，没有边框；高对比度下阴影和底色都会被抹掉，补一圈系统色边。 */
+  .atm-button,
+  .atm-panel,
+  .atm-metric,
+  .atm-sidebar,
+  .atm-search-button,
+  .atm-tabs,
+  .atm-badge {
+    border: 1px solid ButtonText;
   }
 }

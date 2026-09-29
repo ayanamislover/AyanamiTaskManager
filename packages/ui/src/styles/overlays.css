@@ -6,7 +6,7 @@
   place-items: center;
   padding: 24px;
   background: var(--atm-overlay);
-  backdrop-filter: blur(3px);
+  backdrop-filter: blur(4px);
   opacity: 1;
   transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
 }
@@ -14,7 +14,7 @@
   width: min(640px, 100%);
   max-height: calc(100dvh - 48px);
   border: 1px solid var(--atm-border);
-  border-radius: 15px;
+  border-radius: 26px;
   background: var(--atm-surface);
   box-shadow: var(--atm-shadow);
   overflow: auto;
@@ -72,22 +72,20 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 20px;
-  border-bottom: 1px solid var(--atm-border);
+  padding: 20px 24px 8px;
 }
 .atm-modal-head h2 {
   margin: 0;
   font-size: 18px;
 }
 .atm-modal-body {
-  padding: 20px;
+  padding: 16px 24px 20px;
 }
 .atm-modal-foot {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
-  padding: 14px 20px;
-  border-top: 1px solid var(--atm-border);
+  padding: 4px 24px 22px;
 }
 .atm-form {
   display: grid;
@@ -98,22 +96,24 @@
   gap: 7px;
 }
 .atm-field label {
+  color: var(--atm-text-muted);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
 }
 .atm-field input,
 .atm-field textarea {
   width: 100%;
   min-height: 40px;
-  padding: 9px 11px;
-  border: 1px solid var(--atm-border);
-  border-radius: 9px;
-  background: var(--atm-bg);
+  padding: 9px 14px;
+  border: 1.5px solid var(--atm-control-fill);
+  border-radius: 14px;
+  background: var(--atm-surface);
 }
 .atm-field .atm-select.atm-field-shell {
   width: 100%;
   min-height: 40px;
-  background: var(--atm-bg);
+  border-radius: 14px;
+  background: var(--atm-surface);
 }
 .atm-field .atm-select-trigger {
   min-height: 38px;
@@ -131,8 +131,8 @@
   gap: 14px;
 }
 .atm-inline-error {
-  padding: 10px 12px;
-  border-radius: 9px;
+  padding: 10px 14px;
+  border-radius: 14px;
   color: var(--atm-danger);
   background: color-mix(in srgb, var(--atm-danger) 10%, transparent);
 }
@@ -155,9 +155,10 @@
 }
 .atm-drawer {
   position: absolute;
-  inset: 0 0 0 auto;
-  width: min(540px, calc(100vw - var(--atm-sidebar)));
-  border-left: 1px solid var(--atm-border);
+  inset: 10px 10px 10px auto;
+  width: min(540px, calc(100vw - var(--atm-sidebar) - 20px));
+  border: 1px solid var(--atm-border);
+  border-radius: 28px;
   background: var(--atm-surface);
   box-shadow: var(--atm-drawer-shadow);
   overflow-y: auto;
@@ -165,7 +166,7 @@
   transition: transform var(--atm-duration-surface) var(--atm-ease-drawer);
 }
 .atm-drawer-backdrop[data-presence="closing"] .atm-drawer {
-  transform: translateX(100%);
+  transform: translateX(calc(100% + 20px));
 }
 @starting-style {
   .atm-drawer-backdrop {
@@ -173,7 +174,7 @@
   }
 
   .atm-drawer {
-    transform: translateX(100%);
+    transform: translateX(calc(100% + 20px));
   }
 }
 .atm-drawer-head {
@@ -184,8 +185,7 @@
   justify-content: flex-start;
   gap: 16px;
   min-height: 68px;
-  padding: 19px 20px 19px 60px;
-  border-bottom: 1px solid var(--atm-border);
+  padding: 20px 22px 16px 64px;
   background: var(--atm-surface);
 }
 .atm-drawer-head > div {
@@ -193,17 +193,17 @@
 }
 .atm-drawer-collapse {
   position: absolute;
-  inset: 0 auto 0 0;
+  top: 18px;
+  left: 16px;
   display: grid;
-  width: 44px;
-  min-height: 44px;
+  width: 34px;
+  height: 34px;
   place-items: center;
   padding: 0;
   border: 0;
-  border-right: 1px solid var(--atm-border);
-  border-radius: 0;
-  color: var(--atm-text-muted);
-  background: color-mix(in srgb, var(--atm-surface-muted) 58%, transparent);
+  border-radius: 999px;
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
   transition:
     color var(--atm-duration-hover) var(--atm-ease-hover),
     background-color var(--atm-duration-hover) var(--atm-ease-hover);
@@ -216,14 +216,14 @@
 }
 @media (hover: hover) and (pointer: fine) {
   .atm-drawer-collapse:hover {
-    color: var(--atm-primary-strong);
-    background: var(--atm-primary-soft);
+    color: var(--atm-control-text);
+    background: var(--atm-control-fill-hover);
   }
 }
 .atm-drawer-body {
   display: grid;
-  gap: 22px;
-  padding: 20px;
+  gap: 18px;
+  padding: 8px 22px 22px;
 }
 .atm-section h3 {
   margin: 0 0 10px;
@@ -288,8 +288,8 @@
 }
 .atm-command input {
   width: 100%;
-  min-height: 55px;
-  padding: 0 18px;
+  min-height: 58px;
+  padding: 0 22px;
   border: 0;
   border-bottom: 1px solid var(--atm-border);
   background: transparent;
@@ -305,9 +305,9 @@
   bottom: 22px;
   z-index: 30;
   max-width: 420px;
-  padding: 12px 14px;
+  padding: 12px 18px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: 18px;
   background: var(--atm-surface);
   box-shadow: var(--atm-shadow);
   opacity: 1;

@@ -13,7 +13,7 @@ describe("createWindowOptions", () => {
       minimizable: true,
       maximizable: true,
       closable: true,
-      backgroundColor: "#F7F5F0",
+      backgroundColor: "#FBF7FF",
       icon: "C:\\atm\\logo.png",
       webPreferences: {
         preload: "C:\\atm\\preload.cjs",
@@ -25,6 +25,6 @@ describe("createWindowOptions", () => {
   });
 
   it("按原生系统主题选择暗色首屏背景", () => {
-    expect(createWindowOptions("preload.cjs", true).backgroundColor).toBe("#1F1D23");
+    expect(createWindowOptions("preload.cjs", true).backgroundColor).toBe("#241E30");
   });
 });

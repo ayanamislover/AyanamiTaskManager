@@ -123,7 +123,7 @@ describe("Sidebar", () => {
     ).toBe(false);
     expect(css).toMatch(/\.atm-sidebar-project-list\s*\{[^}]*gap: 6px/su);
     expect(css).toMatch(
-      /\.atm-sidebar-project-list \.atm-nav-project\s*\{[^}]*padding: 9px 10px/su,
+      /\.atm-sidebar-project-list \.atm-nav-project\s*\{[^}]*padding: 8px 10px/su,
     );
   });
 

@@ -12,6 +12,7 @@ import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/i
 import type { Route, SidebarProject } from "../contracts.js";
 import { sidebarProjectHint } from "../presentation.js";
 import { useProjectReorder, type ProjectOrder } from "../hooks/use-project-reorder.js";
+import { Wordmark } from "./wordmark.js";
 
 /** 没接排序时的空实现：Sidebar 在用例里会被单独渲染。 */
 const NO_REORDER: ProjectOrder = {
@@ -73,7 +74,7 @@ export function Sidebar({
               <CheckSquare size={18} weight="bold" />
             )}
           </span>
-          <span>AyanamiTaskManager</span>
+          <Wordmark />
         </div>
         <div className="atm-nav-group atm-primary-navigation">
           <nav className="atm-nav" aria-label="主导航">
