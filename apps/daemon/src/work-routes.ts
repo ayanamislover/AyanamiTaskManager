@@ -175,6 +175,14 @@ export function registerWorkRoutes(app: FastifyInstance, options: AyanamiServerO
     });
     return { items: page.items, nextCursor: page.nextCursor, hasMore: page.hasMore };
   });
+  // 项目进度条：「已完成」只算本次启动以来完成的任务，起点由服务端定，界面不传。
+  app.get("/api/v1/projects/:code/ui/progress-strip", async (request) => {
+    const { code } = request.params as { code: string };
+    return options.service.projectProgressStripForUi(
+      code,
+      options.startedAt ?? new Date(0).toISOString(),
+    );
+  });
   // 静态段优先于 /:taskKey 匹配；任务键不会是 closed。
   app.get("/api/v1/projects/:code/ui/work-items/closed", async (request) => {
     const { code } = request.params as { code: string };

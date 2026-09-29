@@ -564,6 +564,14 @@ export class AyanamiTaskService {
     return taskQueries.listRecentClosedWorkItemPageForUi(this.#runtime, projectCode, filters);
   }
 
+  /** Desktop-only: four-segment progress strip; DONE counts only completions at or after `since`. */
+  async projectProgressStripForUi(
+    projectCode: string,
+    since: string,
+  ): Promise<ReturnType<ProjectRepository["progressStrip"]>> {
+    return taskQueries.projectProgressStripForUi(this.#runtime, projectCode, since);
+  }
+
   /** Desktop-only operational metadata kept outside the bounded Agent read views. */
   async listWorkItemsForUi(
     projectCode: string,

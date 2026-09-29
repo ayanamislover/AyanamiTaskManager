@@ -88,6 +88,7 @@ const EXPECTED_PROTOTYPE_METHODS = [
   "patchWorkItemsAsUser",
   "planningContext",
   "previewAgentTaskImport",
+  "projectProgressStripForUi",
   "projectSuggestionDetails",
   "projectionState",
   "projectionStates",

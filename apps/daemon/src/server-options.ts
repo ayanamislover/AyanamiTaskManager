@@ -10,4 +10,9 @@ export type AyanamiServerOptions = {
    * 此时唯一的 token 同时代表用户。
    */
   userToken?: string;
+  /**
+   * 本次启动的时间（ISO 8601）。项目进度条的「已完成」只算这之后完成的任务。
+   * 不传时取构建服务器的那一刻：桌面端在启动时进程内构建，正好就是「本次 ATM 启动」。
+   */
+  startedAt?: string;
 };

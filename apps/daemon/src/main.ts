@@ -37,9 +37,11 @@ async function main(): Promise<void> {
   try {
     const migrationsRoot = resolve(process.env.AYANAMI_TASK_MIGRATIONS_DIR ?? "migrations");
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
+    const startedAt = new Date().toISOString();
     app = await buildAyanamiServer({
       service,
       token,
+      startedAt,
       ...(userToken === undefined ? {} : { userToken }),
     });
     const address = await app.listen({
@@ -52,7 +54,7 @@ async function main(): Promise<void> {
       pid: process.pid,
       instanceId: lease.instanceId,
       version: DAEMON_VERSION,
-      startedAt: new Date().toISOString(),
+      startedAt,
     });
   } catch (error) {
     if (app) await app.close().catch(() => undefined);

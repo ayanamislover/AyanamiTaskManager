@@ -82,6 +82,15 @@ export async function listRecentClosedWorkItemPageForUi(
   return repository.listRecentClosedWorkItemPage(filters);
 }
 
+export async function projectProgressStripForUi(
+  runtime: ApplicationServiceRuntime,
+  projectCode: string,
+  since: string,
+): Promise<ReturnType<ProjectRepository["progressStrip"]>> {
+  const repository = await runtime.repository(projectCode);
+  return repository.progressStrip(since);
+}
+
 export async function listWorkItemsForUi(
   projectCode: string,
   filters: WorkItemListFilters,

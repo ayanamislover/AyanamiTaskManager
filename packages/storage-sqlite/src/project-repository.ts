@@ -619,6 +619,10 @@ export class ProjectRepository {
     return this.#taskReads.listWorkItemPage(filters);
   }
 
+  progressStrip(since: string) {
+    return this.#taskReads.progressStrip(since);
+  }
+
   listTaskViewRows(
     filters: WorkItemListFilters = {},
     view: TaskViewName = "core",

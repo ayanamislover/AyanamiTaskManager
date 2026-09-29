@@ -586,3 +586,92 @@
   color: var(--atm-warning);
   background: color-mix(in srgb, var(--atm-warning) 10%, transparent);
 }
+
+/* 项目进度条：四段（已完成 / 进行中 / 等你 / 可开始），已完成只算本次启动以来。 */
+.atm-progress-strip {
+  margin: 18px 0;
+  padding: 16px 20px;
+}
+.atm-progress-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.atm-progress-strip-big {
+  display: flex;
+  min-width: 72px;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1;
+}
+.atm-progress-strip-big small {
+  color: var(--atm-text-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+.atm-progress-strip-bar {
+  display: flex;
+  flex: 1;
+  height: 10px;
+  gap: 3px;
+  border-radius: 999px;
+  background: var(--atm-hover-strong);
+  overflow: hidden;
+}
+.atm-progress-strip-bar i {
+  display: block;
+  border-radius: 999px;
+  background: var(--segment);
+}
+:root:not([data-theme="dark"]) .atm-progress-strip-bar i {
+  background: color-mix(in srgb, var(--segment) 72%, #fff);
+}
+.atm-progress-strip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin-top: 12px;
+}
+.atm-progress-strip-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.atm-progress-strip-legend span::before {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--segment);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--segment) 18%, transparent);
+  content: "";
+}
+.atm-progress-strip-legend b {
+  margin-left: 2px;
+  color: var(--atm-text);
+  font-weight: 600;
+}
+.atm-progress-strip [data-segment="done"] {
+  --segment: var(--atm-st-done);
+}
+.atm-progress-strip [data-segment="active"] {
+  --segment: var(--atm-st-progress);
+}
+.atm-progress-strip [data-segment="waiting"] {
+  --segment: var(--atm-st-user);
+}
+.atm-progress-strip [data-segment="ready"] {
+  --segment: var(--atm-st-ready);
+}
+@media (forced-colors: active) {
+  .atm-progress-strip-bar i,
+  .atm-progress-strip-legend span::before {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}

@@ -60,6 +60,12 @@ export function createTasksSurface(request: ClientRequest) {
         "GET",
         `/api/v1/projects/${encodeURIComponent(project)}/ui/work-items${queryString(filters)}`,
       ),
+    /** 项目进度条四段计数；「已完成」只算本次 ATM 启动以来完成的任务。 */
+    progressStripForUi: (project: string) =>
+      request<{ since: string; done: number; active: number; waiting: number; ready: number }>(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/ui/progress-strip`,
+      ),
     /** 已结束任务按结束时间倒序，附带总数；界面默认只取最近几项。 */
     recentClosedPageForUi: (project: string, filters: { limit?: number; cursor?: string } = {}) =>
       request<CursorPage<Record<string, unknown>> & { total: number }>(
