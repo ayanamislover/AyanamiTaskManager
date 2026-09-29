@@ -110,5 +110,6 @@ export function integrationState(report: AgentIntegrationReport): AgentIntegrati
 export function agentClientLabel(client: McpClient): string {
   if (client === "CODEX") return "Codex";
   if (client === "CLAUDE_CODE") return "Claude Code";
+  if (client === "KIMI_CODE") return "Kimi Code";
   return "Claude Desktop";
 }

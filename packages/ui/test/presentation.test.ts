@@ -77,5 +77,6 @@ describe("UI presentation", () => {
     expect(agentClientLabel("CODEX")).toBe("Codex");
     expect(agentClientLabel("CLAUDE_CODE")).toBe("Claude Code");
     expect(agentClientLabel("CLAUDE")).toBe("Claude Desktop");
+    expect(agentClientLabel("KIMI_CODE")).toBe("Kimi Code");
   });
 });

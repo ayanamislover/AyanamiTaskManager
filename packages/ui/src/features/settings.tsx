@@ -26,7 +26,6 @@ import {
 import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
-import { KimiCodeCard } from "./kimi-code-card.js";
 
 export function SettingsPage({
   client,
@@ -227,7 +226,7 @@ export function SettingsPage({
                 ) : (
                   <>
                     <div className="atm-row-sub">
-                      只管理 ATM 的 MCP、全局规则 block 与两个 Skill；写入前备份，不覆盖其他内容。
+                      只管理 ATM 的 MCP、全局规则 block 与三个 Skill；写入前备份，不覆盖其他内容。
                     </div>
                     {desktop?.setMemoryProfile ? (
                       <div className="atm-row" data-testid="memory-profile-toggle">
@@ -390,7 +389,6 @@ export function SettingsPage({
                             </article>
                           );
                         })}
-                        <KimiCodeCard desktop={desktop} />
                       </div>
                     ) : null}
                     {integrationPreview ? (

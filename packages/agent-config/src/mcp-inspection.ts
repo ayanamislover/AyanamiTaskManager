@@ -199,21 +199,17 @@ function installedProfileSetMatches(
   );
 }
 
-/**
- * Kimi Code 目前由用户手动配置，ATM 只读不写：看配置里登记了哪几个 ATM profile。
- * 只认服务名，不读 command/args/env 的值——那里面可能有别的服务的凭证。
- */
-export type KimiCodeStatus = {
-  configPath: string;
-  profiles: McpProfile[];
-};
+export function installedKimiCodeProfileLaunches(
+  path = defaultKimiCodeConfigPath(),
+): InstalledMcpProfileLaunches {
+  return jsonProfileLaunches(path);
+}
 
-export function inspectKimiCodeConfig(path = defaultKimiCodeConfigPath()): KimiCodeStatus {
-  const servers = readJsonMcpServers(path) ?? {};
-  const profiles = (["core", "memory", "actions"] as const).filter((profile) =>
-    Boolean(servers[MCP_SERVER_NAMES[profile]]),
-  );
-  return { configPath: path, profiles };
+export function isKimiCodeConfigInstalled(
+  path = defaultKimiCodeConfigPath(),
+  profiles?: readonly McpProfile[],
+): boolean {
+  return installedProfileSetMatches(installedKimiCodeProfileLaunches(path), profiles);
 }
 
 export function isCodexConfigInstalled(

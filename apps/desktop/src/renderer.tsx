@@ -9,7 +9,7 @@ import { AyanamiTaskManager } from "@ayanami-task/ui";
 import brandLogoUrl from "../../../logo.png?url";
 import "./window-chrome.css";
 
-type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 type McpProfileSwitchResult = {
   enabled: boolean;
   status: "APPLIED";

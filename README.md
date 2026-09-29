@@ -66,15 +66,15 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 ## 为什么需要 ATM
 
-| 能力             | ATM 提供的结果                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------ |
-| **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据 |
-| **Agent 原生**   | Codex、Claude Desktop、Claude Code 经 MCP 直接领取、推进、交接，不需要人来转述       |
-| **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史          |
-| **跨项目知识**   | 独立本地知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief               |
-| **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯     |
-| **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现          |
-| **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号             |
+| 能力             | ATM 提供的结果                                                                            |
+| ---------------- | ----------------------------------------------------------------------------------------- |
+| **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据      |
+| **Agent 原生**   | Codex、Claude Desktop、Claude Code、Kimi Code 经 MCP 直接领取、推进、交接，不需要人来转述 |
+| **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史               |
+| **跨项目知识**   | 独立本地知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                    |
+| **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯          |
+| **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现               |
+| **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                  |
 
 ## 用 ATM 开发 ATM
 
@@ -139,7 +139,7 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 
 1. 打开 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest)。
 2. 日常使用选择 `AyanamiTaskManager-Setup-*-win-x64.exe`；需要免安装时选择 portable ZIP。
-3. 启动 ATM，在“设置 → Agent 接入”中安装 Codex、Claude Desktop 或 Claude Code 配置。
+3. 启动 ATM，在“设置 → Agent 接入”中安装 Codex、Claude Desktop、Claude Code 或 Kimi Code 配置。
 4. 开启“登录启动”后，ATM 会在 Windows 登录后随机延迟后台启动；关闭窗口只会收进托盘。
 
 应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。安装版会把精简 Agent Guide 与完整文档同步到该目录，换设备后仍能从同一路径发现使用说明。
@@ -153,11 +153,12 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 
 ATM 会最小合并现有配置，并在写入前创建备份：
 
-| 客户端         | MCP 配置                                      | 规则与技能                                |
-| -------------- | --------------------------------------------- | ----------------------------------------- |
-| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`、`~/.codex/skills`   |
-| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md`、`~/.claude/skills` |
-| Claude Code    | 由官方 `claude` CLI 注册                      | 与 Claude Desktop 共用                    |
+| 客户端         | MCP 配置                                      | 规则与技能                                      |
+| -------------- | --------------------------------------------- | ----------------------------------------------- |
+| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`、`~/.codex/skills`         |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md`、`~/.claude/skills`       |
+| Claude Code    | 由官方 `claude` CLI 注册                      | 与 Claude Desktop 共用                          |
+| Kimi Code      | `~/.kimi-code/mcp.json`                       | `~/.kimi-code/AGENTS.md`、`~/.kimi-code/skills` |
 
 最短工作流：
 

@@ -232,6 +232,13 @@ export function ProjectWizard({
                     </button>
                     <button
                       className="atm-button"
+                      disabled={install.isPending || !desktop.installMcp}
+                      onClick={() => install.mutate("KIMI_CODE")}
+                    >
+                      安装到 Kimi Code
+                    </button>
+                    <button
+                      className="atm-button"
                       disabled={!configs.data || !desktop.copyText}
                       onClick={() => void desktop.copyText!(configs.data!.stdio)}
                     >

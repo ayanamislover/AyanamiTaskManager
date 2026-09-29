@@ -64,6 +64,7 @@ const smokeAppData = join(agentConfigRoot, "Roaming");
 const smokeLocalAppData = join(agentConfigRoot, "Local");
 const codexConfigPath = join(smokeHome, ".codex", "config.toml");
 const claudeConfigPath = join(smokeAppData, "Claude", "claude_desktop_config.json");
+const kimiConfigPath = join(smokeHome, ".kimi-code", "mcp.json");
 const runtimePath = join(dataDir, "runtime", "daemon.json");
 const hostileInheritedTokenOverride = "packaged-smoke-inherited-token-must-be-ignored";
 const inheritedEnvironment = Object.fromEntries(
@@ -218,6 +219,9 @@ function recordedLaunch(value: unknown, label: string): RecordedMcpLaunch {
 async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, RecordedMcpLaunch>> {
   return waitUntil(async () => {
     if (!existsSync(codexConfigPath) || !existsSync(claudeConfigPath)) return null;
+    const kimi = JSON.parse(await readFile(kimiConfigPath, "utf8")) as Record<string, any>;
+    const kimiServers = (kimi.mcpServers ?? {}) as Record<string, Record<string, unknown>>;
+    if (!kimiServers["ayanami-task-manager-core"]) return null;
     const codex = await readFile(codexConfigPath, "utf8");
     const claude = JSON.parse(await readFile(claudeConfigPath, "utf8")) as Record<string, any>;
     const servers = claude.mcpServers as Record<string, unknown> | undefined;
@@ -234,6 +238,16 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
         codex.includes('mcp_servers."ayanami-task-manager-memory"') &&
         codex.includes('mcp_servers."ayanami-task-manager-actions"'),
       codex,
+    );
+    check(
+      "打包应用迁移 Kimi Code：三个档位写明 stdio，旧单入口删除，保留无关 server 与顶层键",
+      kimi.theme === "keep-top-level" &&
+        Boolean(kimiServers.other) &&
+        !kimiServers["ayanami-task-manager"] &&
+        ["core", "memory", "actions"].every(
+          (profile) => kimiServers[`ayanami-task-manager-${profile}`]?.transport === "stdio",
+        ),
+      JSON.stringify(kimi),
     );
     check(
       "打包应用迁移 Claude Desktop 且保留无关 server",
@@ -740,6 +754,18 @@ await rm(dataDir, { recursive: true, force: true });
 await rm(electronUserDataDir, { recursive: true, force: true });
 await mkdir(dirname(codexConfigPath), { recursive: true });
 await mkdir(dirname(claudeConfigPath), { recursive: true });
+await mkdir(dirname(kimiConfigPath), { recursive: true });
+await writeFile(
+  kimiConfigPath,
+  `${JSON.stringify({
+    theme: "keep-top-level",
+    mcpServers: {
+      "ayanami-task-manager": { transport: "stdio", command: "legacy.exe", args: [] },
+      other: { transport: "stdio", command: "keep.exe", args: [] },
+    },
+  })}\n`,
+  "utf8",
+);
 await writeFile(
   codexConfigPath,
   [

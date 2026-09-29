@@ -22,7 +22,7 @@ export type Theme = "light" | "dark";
 export type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 export type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 export type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
-export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 
 export type McpProfileSwitchResult = {
   enabled: boolean;
@@ -72,12 +72,6 @@ export type McpBridgeObservation = {
   }>;
 };
 
-/** Kimi Code 的 ATM 接入情况：只读，列出配置里登记了哪几个 ATM profile。 */
-export type KimiCodeStatus = {
-  configPath: string;
-  profiles: Array<"core" | "memory" | "actions">;
-};
-
 export type DesktopBridge = {
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
   getAutoLaunch?: () => Promise<boolean>;
@@ -91,7 +85,6 @@ export type DesktopBridge = {
     agentRule: string;
   }>;
   getMcpBridges?: () => Promise<McpBridgeObservation>;
-  getKimiCodeStatus?: () => Promise<KimiCodeStatus>;
   getMemoryProfile?: () => Promise<boolean>;
   setMemoryProfile?: (enabled: boolean) => Promise<McpProfileSwitchResult>;
   installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;

@@ -6,9 +6,10 @@ import {
   defaultClaudeSkillsPath,
   defaultCodexRulePath,
   defaultCodexSkillsPath,
+  defaultKimiCodeRulePath,
+  defaultKimiCodeSkillsPath,
   findClaudeCodeCli,
   inspectAgentSkills,
-  inspectKimiCodeConfig,
   inspectManagedAgentRule,
   installClaudeCodeConfig,
   installClaudeConfig,
@@ -17,17 +18,21 @@ import {
   installedClaudeProfileLaunches,
   installedClaudeProfileLaunchSets,
   installedCodexProfileLaunches,
+  installedKimiCodeProfileLaunches,
+  installKimiCodeConfig,
   agentSkillsToRepair,
   installAgentSkills,
   isClaudeCodeConfigInstalled,
   isClaudeConfigInstalled,
   isCodexConfigInstalled,
+  isKimiCodeConfigInstalled,
   manageAgentRule,
   renderMcpConfigs,
   uninstallAgentSkills,
   uninstallClaudeCodeConfig,
   uninstallClaudeConfig,
   uninstallCodexConfig,
+  uninstallKimiCodeConfig,
   type AgentRuleAction,
   type McpClient,
   type McpProfile,
@@ -92,6 +97,7 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
   }): McpProfileSyncAdapter[] {
     const codex = installedCodexProfileLaunches();
     const claudeCode = installedClaudeCodeProfileLaunches();
+    const kimiCode = installedKimiCodeProfileLaunches();
     return [
       {
         client: "CODEX",
@@ -117,6 +123,13 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
         present: hasManagedMcpProfile(claudeCode),
         previousProfiles: profilesRepresentedBy(claudeCode),
         apply: (profiles) => void installClaudeCodeConfig({ ...write, profiles }),
+      },
+      {
+        client: "KIMI_CODE",
+        target: "Kimi Code",
+        present: hasManagedMcpProfile(kimiCode),
+        previousProfiles: profilesRepresentedBy(kimiCode),
+        apply: (profiles) => void installKimiCodeConfig({ ...write, profiles }),
       },
     ];
   }
@@ -157,6 +170,11 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
           mcpProfileLaunchesStale(installedClaudeCodeProfileLaunches(), profiles, enabled),
         repair: () => void installClaudeCodeConfig({ ...write, profiles: enabled }),
       },
+      {
+        client: "KIMI_CODE",
+        stale: () => mcpProfileLaunchesStale(installedKimiCodeProfileLaunches(), profiles, enabled),
+        repair: () => void installKimiCodeConfig({ ...write, profiles: enabled }),
+      },
     ];
     for (const entry of clients) {
       try {
@@ -176,16 +194,20 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
 
   // Claude Code 与 Claude Desktop 共用 ~/.claude/CLAUDE.md 与 ~/.claude/skills，
   // 只有 MCP 注册位置不同：Desktop 读 claude_desktop_config.json，Claude Code 读 ~/.claude.json。
+  // Kimi Code 自成一套：~/.kimi-code/mcp.json、AGENTS.md 与 skills/。
   function agentIntegrationPaths(client: McpClient) {
-    return client === "CODEX"
-      ? { rulePath: defaultCodexRulePath(), skillsPath: defaultCodexSkillsPath() }
-      : { rulePath: defaultClaudeRulePath(), skillsPath: defaultClaudeSkillsPath() };
+    if (client === "CODEX")
+      return { rulePath: defaultCodexRulePath(), skillsPath: defaultCodexSkillsPath() };
+    if (client === "KIMI_CODE")
+      return { rulePath: defaultKimiCodeRulePath(), skillsPath: defaultKimiCodeSkillsPath() };
+    return { rulePath: defaultClaudeRulePath(), skillsPath: defaultClaudeSkillsPath() };
   }
 
   function mcpInstalledFor(client: McpClient): boolean {
     const profiles = enabledProfiles();
     if (client === "CODEX") return isCodexConfigInstalled(undefined, profiles);
     if (client === "CLAUDE") return isClaudeConfigInstalled(undefined, profiles);
+    if (client === "KIMI_CODE") return isKimiCodeConfigInstalled(undefined, profiles);
     return isClaudeCodeConfigInstalled(undefined, profiles);
   }
 
@@ -199,6 +221,7 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
   function mcpPresentFor(client: McpClient): boolean {
     if (client === "CODEX") return hasManagedMcpProfile(installedCodexProfileLaunches());
     if (client === "CLAUDE") return installedClaudeProfileLaunchSets().some(hasManagedMcpProfile);
+    if (client === "KIMI_CODE") return hasManagedMcpProfile(installedKimiCodeProfileLaunches());
     return hasManagedMcpProfile(installedClaudeCodeProfileLaunches());
   }
 
@@ -227,7 +250,7 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
    * ——没接入过的一个都不动；用户自己改过的 Skill 也不碰。任何一个客户端出错都不能影响启动。
    */
   function repairMissingAgentSkills(): void {
-    for (const client of ["CODEX", "CLAUDE"] as const) {
+    for (const client of ["CODEX", "CLAUDE", "KIMI_CODE"] as const) {
       try {
         if (!mcpPresentFor(client)) continue;
         const roots = {
@@ -265,8 +288,6 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     execPath: options.execPath,
     dataDir: dataDirBeforeReady(),
   }).command;
-  // Kimi Code 由用户手动配置，这里只读；接管（写入、修复、卸载）见 ATM-T-0526。
-  ipcMain.handle("atm:get-kimi-code-status", () => inspectKimiCodeConfig());
   ipcMain.handle("atm:get-mcp-bridges", () =>
     observeMcpBridgeCommands({ bridgeCommands: [stdioCommand, nodeBridgeCommand] }),
   );
@@ -316,7 +337,9 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
           ? installClaudeConfig(write)
           : client === "CLAUDE_CODE"
             ? installClaudeCodeConfig(write)
-            : null;
+            : client === "KIMI_CODE"
+              ? installKimiCodeConfig(write)
+              : null;
     if (!result) throw new Error("MCP_CLIENT_UNSUPPORTED");
     mcpRepairFailures.delete(client);
     return result;
@@ -325,11 +348,19 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     agentIntegrationReport("CODEX"),
     agentIntegrationReport("CLAUDE"),
     agentIntegrationReport("CLAUDE_CODE"),
+    agentIntegrationReport("KIMI_CODE"),
   ]);
   ipcMain.handle(
     "atm:manage-agent-integration",
     (_event, client: McpClient, action: AgentRuleAction) => {
-      if (!(client === "CODEX" || client === "CLAUDE" || client === "CLAUDE_CODE"))
+      if (
+        !(
+          client === "CODEX" ||
+          client === "CLAUDE" ||
+          client === "CLAUDE_CODE" ||
+          client === "KIMI_CODE"
+        )
+      )
         throw new Error("MCP_CLIENT_UNSUPPORTED");
       const paths = agentIntegrationPaths(client);
       const skillState = inspectAgentSkills({
@@ -358,6 +389,7 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
       if (action === "UNINSTALL") {
         if (client === "CODEX") uninstallCodexConfig();
         else if (client === "CLAUDE") uninstallClaudeConfig();
+        else if (client === "KIMI_CODE") uninstallKimiCodeConfig();
         else uninstallClaudeCodeConfig();
         if (removeSharedAssets) uninstallAgentSkills(paths.skillsPath);
       } else {
@@ -369,6 +401,8 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
           installClaudeConfig(write);
         if (client === "CLAUDE_CODE" && !isClaudeCodeConfigInstalled(undefined, profiles))
           installClaudeCodeConfig(write);
+        if (client === "KIMI_CODE" && !isKimiCodeConfigInstalled(undefined, profiles))
+          installKimiCodeConfig(write);
         if (skillState !== "INSTALLED")
           installAgentSkills({
             sourceRoot: join(dataDirBeforeReady(), "skills"),

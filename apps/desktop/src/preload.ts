@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 
 contextBridge.exposeInMainWorld("ayanamiDesktop", {
   notifyRendererReady: () => ipcRenderer.send("atm:renderer-ready"),
@@ -17,7 +17,6 @@ contextBridge.exposeInMainWorld("ayanamiDesktop", {
   showItemInFolder: (path: string) => ipcRenderer.invoke("atm:show-item", path),
   getMcpConfigs: () => ipcRenderer.invoke("atm:get-mcp-configs"),
   getMcpBridges: () => ipcRenderer.invoke("atm:get-mcp-bridges"),
-  getKimiCodeStatus: () => ipcRenderer.invoke("atm:get-kimi-code-status"),
   getMemoryProfile: () => ipcRenderer.invoke("atm:get-memory-profile"),
   setMemoryProfile: (enabled: boolean) => ipcRenderer.invoke("atm:set-memory-profile", enabled),
   installMcp: (client: McpClient) => ipcRenderer.invoke("atm:install-mcp", client),

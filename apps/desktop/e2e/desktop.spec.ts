@@ -1928,6 +1928,25 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
               ],
             },
           },
+          {
+            client: "KIMI_CODE",
+            mcpInstalled: false,
+            sharesRuleAndSkillsWith: null,
+            cliAvailable: true,
+            rule: {
+              state: "NOT_INSTALLED",
+              version: null,
+              path: "C:\\Users\\tester\\.kimi-code\\AGENTS.md",
+            },
+            skills: {
+              state: "NOT_INSTALLED",
+              skills: [
+                { name: "atm-plan", state: "NOT_INSTALLED", version: null },
+                { name: "atm-task", state: "NOT_INSTALLED", version: null },
+                { name: "atm-knowledge", state: "NOT_INSTALLED", version: null },
+              ],
+            },
+          },
         ],
         manageAgentIntegration: async (client: string) => ({
           report: null,
@@ -1935,10 +1954,6 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
             current: "Personal rule.",
             proposed: `<!-- AYANAMI_TASK_MANAGER:BEGIN -->\n## ${client}\n<!-- AYANAMI_TASK_MANAGER:END -->`,
           },
-        }),
-        getKimiCodeStatus: async () => ({
-          configPath: "C:\\Users\\tester\\.kimi-code\\mcp.json",
-          profiles: ["core", "memory", "actions"],
         }),
         getMcpConfigs: async () => ({
           streamableHttp: "{}",
@@ -2009,10 +2024,12 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await claudeCode.screenshot({
     path: resolve("output", "playwright", "e2e-claude-code-integration-dark.png"),
   });
-  const kimi = page.getByTestId("kimi-code-integration");
-  await expect(kimi).toContainText("已接入（手动配置）");
-  await expect(kimi).toContainText("core · memory · actions");
-  await expect(kimi.getByRole("button", { name: "交给 ATM 管理" })).toBeDisabled();
+  // Kimi Code 和其他客户端一样出现在接入列表里，可一键安装。
+  const kimi = page.locator(".atm-integration-card").filter({ hasText: "Kimi Code" });
+  await expect(kimi).toContainText("全局 ATM 规则");
+  await expect(kimi).toContainText("atm-knowledge");
+  await expect(kimi.getByRole("button", { name: "安装" })).toBeEnabled();
+  await expect(kimi.getByRole("button", { name: "预览修改" })).toBeEnabled();
   await kimi.scrollIntoViewIfNeeded();
   await kimi.screenshot({
     path: resolve("output", "playwright", "e2e-kimi-code-integration-dark.png"),
