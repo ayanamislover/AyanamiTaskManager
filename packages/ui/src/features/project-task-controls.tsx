@@ -124,8 +124,8 @@ export function projectTaskGroups(
 /**
  * 当前选的视图（列表 / 看板 / …），所有项目页共用一份。项目页按项目各自挂载，切项目时
  * 筛选和排序都该重置——里程碑、负责人本来就是按项目的；但看板看惯了，换个项目不该被
- * 打回列表。做成订阅而不是「挂载时读一次」：切项目的等待窗口里前后台各有一页，在前台
- * 那页换了标签，后台那页也要跟着换。
+ * 打回列表。做成订阅而不是「挂载时读一次」：切项目的等待窗口里前后台同时挂着两页，
+ * 两个实例读的必须是同一份偏好，换上来的那页才和用户最后选的一致。
  */
 let sharedProjectTaskView: ProjectTaskView = "list";
 const projectTaskViewListeners = new Set<() => void>();

@@ -2614,6 +2614,8 @@ for (const { tab, button, dialogName } of [
     // 当场数一次，不用会自动重试的 toHaveCount(0)：旧页的弹窗会在超时换页时自己消失，
     // 重试着等就等到了——那正是要抓的问题。
     expect(await page.getByRole("dialog").count()).toBe(0);
+    // 同一时刻确认还在等待窗口里，否则这次点击测的不是「预览中的旧页」。
+    expect(await page.getByTestId("route-pending").count()).toBe(1);
     await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
     release();
     await expect(page.getByRole("dialog")).toHaveCount(0);
