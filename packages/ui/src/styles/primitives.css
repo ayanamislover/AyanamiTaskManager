@@ -25,40 +25,50 @@
 }
 .atm-button {
   display: inline-flex;
-  min-height: 38px;
+  min-height: 36px;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 8px 13px;
-  border: 1px solid var(--atm-border);
-  border-radius: 9px;
-  color: var(--atm-text);
-  background: var(--atm-surface);
-  font-weight: 620;
+  gap: 7px;
+  padding: 7px 16px;
+  border: 0;
+  border-radius: var(--atm-radius-control);
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
+  font-weight: 500;
   white-space: nowrap;
   transition:
     transform var(--atm-duration-press) var(--atm-ease-out),
-    border-color var(--atm-duration-hover) var(--atm-ease-hover),
+    filter var(--atm-duration-hover) var(--atm-ease-hover),
     background-color var(--atm-duration-hover) var(--atm-ease-hover);
 }
 .atm-button:active {
   transform: scale(0.97);
 }
+/* 主按钮：粉到紫的糖果渐变，带同色柔光。 */
 .atm-button.primary {
-  border-color: var(--atm-primary-fill);
   color: var(--atm-on-primary);
   background: var(--atm-primary-fill);
+  box-shadow: var(--atm-shadow-primary);
 }
 .atm-button.danger {
   color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 12%, transparent);
 }
 .atm-icon-button {
-  width: 38px;
+  width: 36px;
   padding: 0;
 }
 @media (hover: hover) and (pointer: fine) {
   .atm-button:hover {
-    border-color: color-mix(in srgb, var(--atm-primary) 46%, var(--atm-border));
+    background-color: var(--atm-control-fill-hover);
+  }
+
+  .atm-button.primary:hover {
+    filter: brightness(1.05);
+  }
+
+  .atm-button.danger:hover {
+    background-color: color-mix(in srgb, var(--atm-danger) 18%, transparent);
   }
 }
 
@@ -73,10 +83,10 @@
 }
 .atm-metric {
   min-height: 112px;
-  padding: 17px 18px;
-  border: 1px solid var(--atm-border);
+  padding: 18px 20px;
   border-radius: var(--atm-radius);
   background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
 }
 .atm-metric .label {
   color: var(--atm-text-muted);
@@ -99,51 +109,59 @@
 }
 .atm-panel {
   min-width: 0;
-  border: 1px solid var(--atm-border);
   border-radius: var(--atm-radius);
   background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
   overflow: hidden;
 }
 .atm-panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 51px;
-  padding: 11px 15px;
-  border-bottom: 1px solid var(--atm-border);
+  min-height: 54px;
+  padding: 14px 20px 8px;
 }
 .atm-panel-head h2 {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
 }
 .atm-panel-body {
-  padding: 14px 15px;
+  padding: 12px 20px 18px;
 }
 .atm-list {
   display: grid;
+  padding: 0 8px 8px;
 }
 .atm-row {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 16px;
   min-height: 58px;
-  padding: 10px 15px;
+  padding: 10px 12px;
   border: 0;
-  border-bottom: 1px solid var(--atm-border);
+  border-radius: var(--atm-radius-row);
   background: transparent;
   text-align: left;
 }
-.atm-row:last-child {
-  border-bottom: 0;
+/* 行与行之间不画贯穿线：只在文字区留一条很淡的缩进分隔。 */
+.atm-row + .atm-row::before {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  left: 12px;
+  height: 1px;
+  background: var(--atm-border);
+  content: "";
 }
 button.atm-row:hover {
-  background: var(--atm-surface-muted);
+  background: var(--atm-hover);
 }
 .atm-row-title {
   min-width: 0;
   overflow: hidden;
-  font-weight: 620;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -158,14 +176,14 @@ button.atm-row:hover {
 }
 .atm-badge {
   display: inline-flex;
-  min-height: 24px;
+  min-height: 22px;
   align-items: center;
-  padding: 3px 8px;
-  border-radius: 7px;
+  padding: 2px 9px;
+  border-radius: 999px;
   color: var(--atm-text-muted);
   background: var(--atm-surface-muted);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
 }
 .atm-badge.primary {
   color: var(--atm-primary-strong);
@@ -205,7 +223,7 @@ button.atm-row:hover {
 .atm-skeleton {
   position: relative;
   min-height: 54px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
   overflow: hidden;
 }

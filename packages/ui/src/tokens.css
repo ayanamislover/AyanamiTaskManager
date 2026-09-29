@@ -1,33 +1,77 @@
+/*
+ * 设计 token：「二次元柔彩」（ATM-T-0515，定稿见 ATM-D-259）。
+ *
+ * 画布是粉、紫、蓝的淡彩雾，内容放在大圆角的白卡上；颜色只在状态点、图标块和分段条上说话。
+ * 暗色是偏紫的深色调，不是纯黑；面板比画布亮一档，文字不用纯白。
+ *
+ * 旧变量名（--atm-bg / --atm-surface / --atm-primary…）全部保留，含义不变，只换色值：
+ * 这样既有组件一次换装，新组件用下面新增的状态色与柔色。
+ */
 :root {
   color-scheme: light;
-  --atm-bg: #f7f5f0;
-  --atm-surface: #fffcf8;
-  --atm-surface-muted: #f3efe8;
-  --atm-text: #24212b;
-  --atm-text-muted: #77717f;
-  --atm-border: #e6ded3;
-  --atm-primary: #7257d6;
-  --atm-primary-strong: #5d42bf;
-  --atm-primary-fill: #5d42bf;
-  --atm-primary-soft: #f0ebff;
+  --atm-bg: #fbf7ff;
+  --atm-surface: #ffffff;
+  --atm-surface-muted: #f6f0ff;
+  --atm-text: #3b2f55;
+  /* 正文辅助色在白卡与画布上都要 ≥ 4.5:1；faint 只比 muted 浅一点，不再是 3:1 的装饰灰。 */
+  --atm-text-muted: #6a5d84;
+  --atm-text-faint: #74688c;
+  --atm-border: rgb(168 85 247 / 0.1);
+  --atm-primary: #a855f7;
+  --atm-primary-strong: #9333ea;
+  --atm-primary-fill: linear-gradient(135deg, #f472b6, #a78bfa);
+  --atm-primary-soft: #f3e8ff;
   --atm-on-primary: #fff;
-  --atm-success: #4d8f69;
-  --atm-warning: #b77a2e;
-  --atm-danger: #b95757;
-  --atm-info: #5e79a8;
-  --atm-radius: 12px;
-  --atm-shadow: 0 12px 38px rgb(70 52 38 / 0.1);
-  --atm-shadow-subtle: 0 2px 10px rgb(70 52 38 / 0.04);
-  --atm-shadow-raised: 0 1px 5px rgb(50 35 25 / 0.08);
-  --atm-drawer-shadow: -15px 0 45px rgb(50 34 25 / 0.12);
-  --atm-overlay: rgb(28 24 34 / 0.45);
-  --atm-focus: #5d42bf;
-  --atm-scrollbar-thumb: #aaa1ae;
-  --atm-scrollbar-thumb-hover: #7257d6;
-  --atm-sidebar: 252px;
+  /* 这几色也当文字用（徽标、错误提示），按 12% 同色底上 ≥ 4.5:1 取值。 */
+  --atm-success: #2d7a52;
+  --atm-warning: #9a5d05;
+  --atm-danger: #b8335a;
+  --atm-info: #3a67b8;
+  --atm-radius: 22px;
+  --atm-radius-control: 999px;
+  --atm-radius-row: 14px;
+  --atm-shadow: 0 16px 44px rgb(190 90 220 / 0.14);
+  --atm-shadow-subtle: 0 8px 28px rgb(190 90 220 / 0.09);
+  --atm-shadow-raised: 0 6px 18px rgb(170 90 220 / 0.12);
+  --atm-shadow-primary: 0 6px 16px rgb(236 72 153 / 0.25);
+  --atm-drawer-shadow: -18px 0 60px rgb(160 80 200 / 0.18);
+  --atm-overlay: rgb(90 60 130 / 0.18);
+  --atm-focus: #a855f7;
+  --atm-scrollbar-thumb: #d8c4f0;
+  --atm-scrollbar-thumb-hover: #b98cf0;
+  --atm-hover: rgb(168 85 247 / 0.06);
+  --atm-hover-strong: rgb(168 85 247 / 0.1);
+  --atm-control-fill: #f3e8ff;
+  --atm-control-fill-hover: #ead5ff;
+  /* 输入框、下拉外壳的边：白底上用 control-fill 当边只有 1.18:1，几乎看不见框在哪。 */
+  --atm-control-border: #d2bdef;
+  --atm-control-border-hover: #bfa2e8;
+  --atm-control-text: #7e22ce;
+  --atm-glass: rgb(255 255 255 / 0.72);
+
+  /* 背景彩雾 */
+  --atm-aurora-a: rgb(251 207 232 / 0.7);
+  --atm-aurora-b: rgb(221 214 254 / 0.8);
+  --atm-aurora-c: rgb(191 219 254 / 0.6);
+
+  /* 状态色：主色；柔底由 color-mix 从主色派生 */
+  --atm-st-progress: #a66cf0;
+  --atm-st-verify: #2fa89a;
+  --atm-st-blocked: #e0587a;
+  --atm-st-user: #e0962e;
+  --atm-st-agent: #4f8fd9;
+  --atm-st-ready: #9c93b3;
+  --atm-st-done: #5fae80;
+
+  /* 字标渐变 */
+  --atm-wordmark-a: #9b5cf0;
+  --atm-wordmark-b: #c26ae0;
+  --atm-wordmark-c: #ec5f9f;
+
+  --atm-sidebar: 256px;
   --atm-duration-press: 120ms;
-  --atm-duration-hover: 160ms;
-  --atm-duration-surface: 220ms;
+  --atm-duration-hover: 140ms;
+  --atm-duration-surface: 240ms;
   --atm-ease-hover: ease;
   --atm-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --atm-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
@@ -38,56 +82,102 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --atm-bg: #1f1d23;
-  --atm-surface: #29262e;
-  --atm-surface-muted: #332f38;
-  --atm-text: #f2eef6;
-  --atm-text-muted: #aaa2b2;
-  --atm-border: #46404d;
-  --atm-primary: #a895ee;
-  --atm-primary-strong: #b7a6f3;
-  --atm-primary-fill: #7257d6;
-  --atm-primary-soft: #3a3152;
+  --atm-bg: #241e30;
+  --atm-surface: #2e2640;
+  --atm-surface-muted: #382e4d;
+  --atm-text: #f6f0ff;
+  --atm-text-muted: #c7b8dd;
+  --atm-text-faint: #a394bb;
+  --atm-border: rgb(255 255 255 / 0.06);
+  --atm-primary: #d0a6ff;
+  --atm-primary-strong: #dcb8ff;
+  --atm-primary-fill: linear-gradient(135deg, #d9669f, #8f73e6);
+  --atm-primary-soft: #3f3358;
   --atm-on-primary: #fff;
-  --atm-success: #76b790;
-  --atm-warning: #d7a15d;
-  --atm-danger: #df8585;
-  --atm-info: #8da7d4;
-  --atm-shadow: 0 12px 38px rgb(0 0 0 / 0.3);
-  --atm-shadow-subtle: 0 2px 10px rgb(0 0 0 / 0.18);
-  --atm-shadow-raised: 0 1px 6px rgb(0 0 0 / 0.24);
-  --atm-drawer-shadow: -15px 0 45px rgb(0 0 0 / 0.32);
-  --atm-overlay: rgb(8 7 11 / 0.68);
-  --atm-focus: #b7a6f3;
-  --atm-scrollbar-thumb: #6a6270;
-  --atm-scrollbar-thumb-hover: #a895ee;
+  --atm-success: #8fd4aa;
+  --atm-warning: #f5c27a;
+  --atm-danger: #f59ab4;
+  --atm-info: #9cc4f0;
+  --atm-shadow: 0 16px 44px rgb(0 0 0 / 0.32);
+  --atm-shadow-subtle: 0 8px 24px rgb(0 0 0 / 0.2);
+  --atm-shadow-raised: 0 6px 18px rgb(0 0 0 / 0.28);
+  --atm-shadow-primary: 0 6px 16px rgb(200 80 160 / 0.25);
+  --atm-drawer-shadow: -18px 0 60px rgb(0 0 0 / 0.4);
+  --atm-overlay: rgb(24 14 40 / 0.3);
+  --atm-focus: #d0a6ff;
+  --atm-scrollbar-thumb: #54457a;
+  --atm-scrollbar-thumb-hover: #7a64a8;
+  --atm-hover: rgb(233 213 255 / 0.06);
+  --atm-hover-strong: rgb(233 213 255 / 0.1);
+  --atm-control-fill: #3f3358;
+  --atm-control-fill-hover: #4a3c67;
+  --atm-control-border: #54457a;
+  --atm-control-border-hover: #6a5895;
+  --atm-control-text: #ead5ff;
+  --atm-glass: rgb(46 38 64 / 0.8);
+  --atm-aurora-a: rgb(190 80 150 / 0.18);
+  --atm-aurora-b: rgb(130 100 220 / 0.2);
+  --atm-aurora-c: rgb(80 110 200 / 0.14);
+  --atm-st-progress: #c9a3ff;
+  --atm-st-verify: #86d6c9;
+  --atm-st-blocked: #f59ab4;
+  --atm-st-user: #f5c27a;
+  --atm-st-agent: #9cc4f0;
+  --atm-st-ready: #b3a8c9;
+  --atm-st-done: #8fd4aa;
+  --atm-wordmark-a: #e2cdff;
+  --atm-wordmark-b: #f0cdf0;
+  --atm-wordmark-c: #ffc6de;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --atm-bg: #1f1d23;
-    --atm-surface: #29262e;
-    --atm-surface-muted: #332f38;
-    --atm-text: #f2eef6;
-    --atm-text-muted: #aaa2b2;
-    --atm-border: #46404d;
-    --atm-primary: #a895ee;
-    --atm-primary-strong: #b7a6f3;
-    --atm-primary-fill: #7257d6;
-    --atm-primary-soft: #3a3152;
+    --atm-bg: #241e30;
+    --atm-surface: #2e2640;
+    --atm-surface-muted: #382e4d;
+    --atm-text: #f6f0ff;
+    --atm-text-muted: #c7b8dd;
+    --atm-text-faint: #a394bb;
+    --atm-border: rgb(255 255 255 / 0.06);
+    --atm-primary: #d0a6ff;
+    --atm-primary-strong: #dcb8ff;
+    --atm-primary-fill: linear-gradient(135deg, #d9669f, #8f73e6);
+    --atm-primary-soft: #3f3358;
     --atm-on-primary: #fff;
-    --atm-success: #76b790;
-    --atm-warning: #d7a15d;
-    --atm-danger: #df8585;
-    --atm-info: #8da7d4;
-    --atm-shadow: 0 12px 38px rgb(0 0 0 / 0.3);
-    --atm-shadow-subtle: 0 2px 10px rgb(0 0 0 / 0.18);
-    --atm-shadow-raised: 0 1px 6px rgb(0 0 0 / 0.24);
-    --atm-drawer-shadow: -15px 0 45px rgb(0 0 0 / 0.32);
-    --atm-overlay: rgb(8 7 11 / 0.68);
-    --atm-focus: #b7a6f3;
-    --atm-scrollbar-thumb: #6a6270;
-    --atm-scrollbar-thumb-hover: #a895ee;
+    --atm-success: #8fd4aa;
+    --atm-warning: #f5c27a;
+    --atm-danger: #f59ab4;
+    --atm-info: #9cc4f0;
+    --atm-shadow: 0 16px 44px rgb(0 0 0 / 0.32);
+    --atm-shadow-subtle: 0 8px 24px rgb(0 0 0 / 0.2);
+    --atm-shadow-raised: 0 6px 18px rgb(0 0 0 / 0.28);
+    --atm-shadow-primary: 0 6px 16px rgb(200 80 160 / 0.25);
+    --atm-drawer-shadow: -18px 0 60px rgb(0 0 0 / 0.4);
+    --atm-overlay: rgb(24 14 40 / 0.3);
+    --atm-focus: #d0a6ff;
+    --atm-scrollbar-thumb: #54457a;
+    --atm-scrollbar-thumb-hover: #7a64a8;
+    --atm-hover: rgb(233 213 255 / 0.06);
+    --atm-hover-strong: rgb(233 213 255 / 0.1);
+    --atm-control-fill: #3f3358;
+    --atm-control-fill-hover: #4a3c67;
+    --atm-control-border: #54457a;
+    --atm-control-border-hover: #6a5895;
+    --atm-control-text: #ead5ff;
+    --atm-glass: rgb(46 38 64 / 0.8);
+    --atm-aurora-a: rgb(190 80 150 / 0.18);
+    --atm-aurora-b: rgb(130 100 220 / 0.2);
+    --atm-aurora-c: rgb(80 110 200 / 0.14);
+    --atm-st-progress: #c9a3ff;
+    --atm-st-verify: #86d6c9;
+    --atm-st-blocked: #f59ab4;
+    --atm-st-user: #f5c27a;
+    --atm-st-agent: #9cc4f0;
+    --atm-st-ready: #b3a8c9;
+    --atm-st-done: #8fd4aa;
+    --atm-wordmark-a: #e2cdff;
+    --atm-wordmark-b: #f0cdf0;
+    --atm-wordmark-c: #ffc6de;
   }
 }

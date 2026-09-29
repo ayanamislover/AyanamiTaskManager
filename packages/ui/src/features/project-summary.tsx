@@ -11,6 +11,7 @@ import {
   progressSourceLabels,
   statusLabels,
 } from "../presentation.js";
+import { ProjectProgressStrip } from "./project-progress-strip.js";
 
 /**
  * 项目页主体：指标卡在上，任务列表（children）紧跟其后，管理摘要卡放在列表下面。
@@ -99,6 +100,7 @@ export function ProjectSummary({
           </div>
         </div>
       </section>
+      <ProjectProgressStrip client={client} projectCode={projectCode} />
       {children}
       <section className="atm-management-grid atm-project-management" aria-label="项目管理摘要">
         <article className="atm-panel atm-management-card">

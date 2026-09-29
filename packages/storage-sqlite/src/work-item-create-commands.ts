@@ -417,8 +417,8 @@ export class WorkItemCreateCommands {
                  priority, sort_key, target_date, reported_progress,
                  computed_progress, progress_source, weight, verification_required, version,
                  created_by_agent_id, created_by_session_id, created_at, updated_at, source_quick_id,
-                 assignee_agent_id
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
+                 assignee_agent_id, completed_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, 0, 'NONE', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
               entry.id,
@@ -444,6 +444,9 @@ export class WorkItemCreateCommands {
               entry.createdAt,
               item.sourceQuickId ?? null,
               item.assigneeAgentId ?? null,
+              // 直接以已完成登记的任务，登记那一刻就是完成时间；不写的话只能拿会随编辑变化的
+              // updated_at 顶替，进度条「本次启动以来完成」会把改个标题的旧任务重新算进来。
+              status === "DONE" ? entry.createdAt : null,
             );
           for (const checklist of item.checklist ?? []) {
             this.#sqlite

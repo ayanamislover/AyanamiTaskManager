@@ -528,7 +528,13 @@ export class AyanamiDatabaseManager {
 
   async doctor(): Promise<{
     knowledge: { present: boolean; ok: boolean; error: string | null };
-    registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
+    registry: {
+      ok: boolean;
+      sqliteVersion: string;
+      fts5: boolean;
+      trigram: boolean;
+      wal: boolean;
+    };
     projectCounts: Record<string, { total: number; failed: number }>;
     projectionSummary: ProjectionSummary;
     projectionFailures: ProjectionFailureView[];
@@ -825,7 +831,7 @@ export class AyanamiDatabaseManager {
       const manifest = {
         format: "ayanami-task-project",
         formatVersion: 1,
-        applicationVersion: "1.1.8",
+        applicationVersion: "1.2.0",
         project: { id: project.id, code: project.code, name: project.name },
         schemaVersion: database.schemaVersion,
         createdAt,

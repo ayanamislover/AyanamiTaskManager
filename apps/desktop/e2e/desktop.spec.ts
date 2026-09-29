@@ -595,6 +595,10 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
     const body = document.querySelector("#project-diagnostics-content");
     if (!body) return null;
     return {
+      // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
+      tokenDuration: Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
+      ),
       opacity: Number(getComputedStyle(body).opacity),
       transitions: body.getAnimations().map((animation) => ({
         property:
@@ -609,8 +613,9 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
     "opacity",
     "transform",
   ]);
+  expect(motion!.tokenDuration).toBeGreaterThan(0);
   expect(new Set(motion!.transitions.map((transition) => transition.duration))).toEqual(
-    new Set([160]),
+    new Set([motion!.tokenDuration]),
   );
   await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
 });
@@ -666,13 +671,15 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
   expect(keyboard.opacity, "内容立刻就位").toBe(1);
 });
 
-test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({ page }) => {
+test("服务状态灯在侧栏设置行右侧单行显示，顶栏按钮不压住搜索框", async ({ page }) => {
   // 桌面窗口最小宽度 1100；1280 是以前「活动」被挤成一字一行、月亮按钮压住 Ctrl K 的宽度。
   for (const width of [1101, 1280, 1920]) {
     await page.setViewportSize({ width, height: 800 });
     if (width === 1101) await page.goto("/#project:E2E");
-    const status = page.locator(".atm-topbar .atm-service-status");
-    await expect(status).toHaveText("服务正常");
+    await expect(page.locator(".atm-topbar .atm-service-status")).toHaveCount(0);
+    const status = page.locator(".atm-sidebar-footer .atm-service-status");
+    await expect(status).toHaveText("本地服务正常");
+    await expect(status).toHaveAttribute("data-state", "ok");
     const layout = await page.evaluate(() => {
       const rect = (selector: string) => {
         const element = document.querySelector<HTMLElement>(selector);
@@ -684,19 +691,27 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
         (element) => element.getBoundingClientRect(),
       );
       const statusElement = document.querySelector<HTMLElement>(
-        ".atm-top-actions .atm-service-status",
+        ".atm-sidebar-footer .atm-service-status",
       );
       if (!statusElement) throw new Error("缺少 .atm-service-status");
       const status = statusElement.getBoundingClientRect();
       // 文字每折一行就多一个不同 top 的矩形。
       const range = document.createRange();
-      range.selectNodeContents(statusElement);
+      // 只量看得见的那几个字；读屏前缀是 1px 的隐藏元素，不算行。
+      range.selectNodeContents(statusElement.lastChild!);
       const lineTops = new Set([...range.getClientRects()].map((line) => Math.round(line.top)));
       const barRect = bar.getBoundingClientRect();
       const barPadding = Number.parseFloat(getComputedStyle(bar).paddingRight);
+      const settings = rect(".atm-sidebar-settings");
+      const settingsLabel = rect(".atm-sidebar-settings > span");
       return {
         statusLines: lineTops.size,
         statusHeight: status.height,
+        // 灯在设置那一行里、文字右边，竖直居中。
+        statusInsideRow: status.left > settingsLabel.right && status.right <= settings.right,
+        statusCenterOffset: Math.abs(
+          status.top + status.height / 2 - (settings.top + settings.height / 2),
+        ),
         searchRight: rect(".atm-search-button").right,
         firstActionLeft: Math.min(...actions.map((action) => action.left)),
         lastActionRight: Math.max(...actions.map((action) => action.right)),
@@ -705,6 +720,8 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
     });
     expect(layout.statusHeight, `${width}px 状态标签高度`).toBeLessThanOrEqual(28);
     expect(layout.statusLines, `${width}px 状态标签行数`).toBe(1);
+    expect(layout.statusInsideRow, `${width}px 状态灯在设置行右侧`).toBe(true);
+    expect(layout.statusCenterOffset, `${width}px 状态灯与设置行竖直居中`).toBeLessThanOrEqual(1);
     // 不只是不重叠：搜索框和第一个按钮之间要留得出间距。
     expect(
       layout.firstActionLeft - layout.searchRight,
@@ -715,8 +732,8 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
     );
   }
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.locator(".atm-topbar").screenshot({
-    path: resolve("output", "playwright", "e2e-topbar-service-status-1280.png"),
+  await page.locator(".atm-sidebar-footer").screenshot({
+    path: resolve("output", "playwright", "e2e-sidebar-service-status-1280.png"),
   });
 });
 
@@ -1911,6 +1928,25 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
               ],
             },
           },
+          {
+            client: "KIMI_CODE",
+            mcpInstalled: false,
+            sharesRuleAndSkillsWith: null,
+            cliAvailable: true,
+            rule: {
+              state: "NOT_INSTALLED",
+              version: null,
+              path: "C:\\Users\\tester\\.kimi-code\\AGENTS.md",
+            },
+            skills: {
+              state: "NOT_INSTALLED",
+              skills: [
+                { name: "atm-plan", state: "NOT_INSTALLED", version: null },
+                { name: "atm-task", state: "NOT_INSTALLED", version: null },
+                { name: "atm-knowledge", state: "NOT_INSTALLED", version: null },
+              ],
+            },
+          },
         ],
         manageAgentIntegration: async (client: string) => ({
           report: null,
@@ -1987,6 +2023,16 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await claudeCode.scrollIntoViewIfNeeded();
   await claudeCode.screenshot({
     path: resolve("output", "playwright", "e2e-claude-code-integration-dark.png"),
+  });
+  // Kimi Code 和其他客户端一样出现在接入列表里，可一键安装。
+  const kimi = page.locator(".atm-integration-card").filter({ hasText: "Kimi Code" });
+  await expect(kimi).toContainText("全局 ATM 规则");
+  await expect(kimi).toContainText("atm-knowledge");
+  await expect(kimi.getByRole("button", { name: "安装" })).toBeEnabled();
+  await expect(kimi.getByRole("button", { name: "预览修改" })).toBeEnabled();
+  await kimi.scrollIntoViewIfNeeded();
+  await kimi.screenshot({
+    path: resolve("output", "playwright", "e2e-kimi-code-integration-dark.png"),
   });
 });
 
@@ -2301,4 +2347,37 @@ test("投影健康状态可在总览、项目和设置中查看并安全重试",
       await api.dispose();
     }
   }
+});
+
+// ATM-T-0517 复审：首屏读取失败时「重试」曾是空操作——首屏失败被当成续读，续读要求已有行。
+test("总览「等你处理」首屏读取失败后点重试会真的重新读取", async ({ page }) => {
+  let failing = true;
+  let requests = 0;
+  await page.route(/\/api\/v1\/projects\/E2E\/ui\/work-items\?(?=.*closed=0)/u, async (route) => {
+    requests += 1;
+    if (!failing) return route.continue();
+    return route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "E2E_INJECTED", message: "注入的读取故障", retryable: true },
+      }),
+    });
+  });
+  await page.goto("/#overview");
+  const panel = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "等你处理", exact: true }),
+  });
+  await expect(panel.getByRole("alert")).toContainText("部分任务读取失败");
+  await expect(page.locator(".atm-page-head p")).toHaveText(
+    "等你处理的事没能全部读出来，可在下方重试。",
+  );
+  await expect(panel).not.toContainText("没有等你处理的事");
+
+  failing = false;
+  const before = requests;
+  await panel.getByRole("button", { name: "重试" }).click();
+  await expect.poll(() => requests, { timeout: 5_000 }).toBeGreaterThan(before);
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator(".atm-page-head p")).not.toContainText("没能全部读出来");
 });

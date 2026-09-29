@@ -117,12 +117,14 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   const userToken = createDaemonToken({});
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+  // 同一个启动时间既发布在 runtime 元数据里，也作为进度条「本次启动以来」的起点。
+  const startedAt = new Date().toISOString();
   try {
     service = await AyanamiTaskService.open({
       dataDir,
       migrationsRoot: join(app.getAppPath(), "migrations"),
     });
-    server = await buildAyanamiServer({ service, token, userToken });
+    server = await buildAyanamiServer({ service, token, userToken, startedAt });
     await server.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
     if (server) await server.close().catch(() => undefined);
@@ -143,7 +145,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
     pid: process.pid,
     instanceId: lease.instanceId,
     version: DAEMON_VERSION,
-    startedAt: new Date().toISOString(),
+    startedAt,
   };
   lease.publish(runtime);
   let closed = false;

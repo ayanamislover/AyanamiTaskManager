@@ -5,7 +5,18 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
-import { OverviewPage, TasksAcrossProjects } from "../src/features/overview.js";
+import {
+  OverviewPage,
+  TasksAcrossProjects,
+  TasksAcrossProjectsView,
+} from "../src/features/overview.js";
+import {
+  NeedsYouList,
+  NeedsYouPanel,
+  needsYouHeadline,
+  needsYouState,
+  needsYouTasks,
+} from "../src/features/overview-inbox.js";
 import { PROJECT_ORDER_SETTING } from "../src/project-order.js";
 import { uiCssText } from "./css-source-graph.js";
 
@@ -52,7 +63,7 @@ function missingOverviewContracts(source: string): string[] {
     '.filter((project) => project.lifecycle === "ACTIVE")',
     "client.tasks.pageForUi(project.code, {",
     "limit: 100",
-    '["tasks", "all", "ui", ...sources.map((source) => source.key)]',
+    '["tasks", "all", "ui", "open", ...sources.map((source) => source.key)]',
     '["CLAIMED", "IN_PROGRESS", "VERIFYING"]',
     '["BLOCKED", "WAITING_USER", "WAITING_AGENT"]',
     "onTask(task.project, task.key)",
@@ -107,9 +118,13 @@ describe("Overview feature", () => {
       }),
     );
 
-    expect(markup).toContain("只显示已经写入事实源的项目状态，不展示模拟数据。");
+    // 静态渲染时任务还没读回来：页头不提前下结论。
+    expect(markup).toContain("<h1>总览</h1><p>正在汇总等你处理的事…</p>");
+    expect(markup).not.toContain("没有等你处理的事");
     expect(markup).toContain("进行中项目");
-    expect(markup).toContain("需要处理");
+    // 等你回复、受阻已逐条列在「等你处理」里，「项目提醒」不再按项目重复计数。
+    expect(markup).not.toContain("项等待用户");
+    expect(markup).not.toContain("项阻塞");
     expect(markup).toContain("AyanamiTaskManager");
     expect(markup).toContain("seq 42");
     expect(markup).toContain('data-testid="timeline-row"');
@@ -117,7 +132,7 @@ describe("Overview feature", () => {
   });
 
   // ATM-T-0494：Agent 等着授权的恢复请求要在首屏被看见，不然请求挂着没人知道。
-  it("垃圾箱里有 Agent 恢复请求时进入「需要处理」", () => {
+  it("垃圾箱里有 Agent 恢复请求时进入「项目提醒」", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(["overview"], {
       sequence: 45,
@@ -149,7 +164,7 @@ describe("Overview feature", () => {
         TimelineEventRow: () => createElement("div"),
       }),
     );
-    expect(markup).toContain("需要处理");
+    expect(markup).toContain("项目提醒");
     expect(markup).toContain("codex 请求恢复垃圾箱里的 OLD，请在项目 → 垃圾箱授权或拒绝");
     expect(markup).not.toContain("QUIET");
   });
@@ -245,6 +260,143 @@ describe("Overview feature", () => {
     expect(active).toContain("任务被领取或开始后会出现在这里。");
     expect(blocked).toContain("没有阻塞或等待");
     expect(blocked).toContain("当前没有需要外部处理的任务。");
+  });
+
+  it("跨项目任务的计数数的是表里显示的行，不是扫过的任务", () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      key: "ATM",
+      items: [
+        { key: "ATM-T-1", title: "正在做", status: "IN_PROGRESS" },
+        { key: "ATM-T-2", title: "还没开始", status: "READY" },
+        { key: "ATM-T-3", title: "等用户", status: "WAITING_USER" },
+      ],
+      loadedCount: 3,
+      hasMore: false,
+      isLoading: false,
+      isFetchingNextPage: false,
+      error: null,
+      ...overrides,
+    });
+    const render = (mode: "active" | "blocked", overrides?: Record<string, unknown>) =>
+      renderToStaticMarkup(
+        createElement(TasksAcrossProjectsView, {
+          entries: [entry(overrides)],
+          projects: [project()],
+          mode,
+          onTask: vi.fn(),
+          onRetry: vi.fn(),
+        }),
+      );
+
+    const active = render("active");
+    expect(active).toContain("共 1 项");
+    expect(active).not.toContain("已加载 3 项");
+    expect(active.match(/<tr tabindex/g)).toHaveLength(1);
+    expect(render("blocked")).toContain("共 1 项");
+    expect(render("active", { hasMore: true })).toContain("已找到 1 项，还有任务未加载");
+    expect(render("active", { error: new Error("断了"), hasMore: true })).toContain(
+      "已找到 1 项，部分任务读取失败",
+    );
+  });
+
+  describe("页头与「等你处理」同源", () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      key: "ATM",
+      items: [] as any[],
+      isLoading: false,
+      isFetchingNextPage: false,
+      hasMore: false,
+      error: null as unknown,
+      ...overrides,
+    });
+    const panel = (state: ReturnType<typeof needsYouState>) =>
+      renderToStaticMarkup(createElement(NeedsYouPanel, { state, onTask: vi.fn() }));
+
+    it("只有待验收时页头、徽章、列表都是 1 件", () => {
+      const state = needsYouState(
+        ["ATM"],
+        [entry({ items: [{ key: "ATM-T-1", title: "验收", status: "VERIFYING" }] })],
+        vi.fn(),
+      );
+      expect(needsYouHeadline(state, 2)).toBe("1 件事等你处理，2 个任务正在推进。");
+      const markup = panel(state);
+      expect(markup).toContain('<span class="atm-badge warning">1</span>');
+      expect(markup.match(/data-kind=/g)).toHaveLength(1);
+    });
+
+    it("全部读完且为 0 才说没有", () => {
+      const state = needsYouState(["ATM"], [entry()], vi.fn());
+      expect(needsYouHeadline(state, 0)).toBe("没有要你处理的事，眼下没有进行中的任务。");
+      expect(panel(state)).toContain("没有等你处理的事");
+    });
+
+    it("还在读时不下结论，也不显示空态", () => {
+      const state = needsYouState(["ATM", "MAPX"], [entry()], vi.fn());
+      expect(needsYouHeadline(state, 1)).toBe("正在汇总等你处理的事…");
+      expect(panel(state)).not.toContain("没有等你处理的事");
+    });
+
+    it("首屏读失败：页头说明、面板报错并可重试，不显示空态", () => {
+      const retry = vi.fn();
+      const state = needsYouState(["ATM"], [entry({ error: new Error("503") })], retry);
+      expect(needsYouHeadline(state, 1)).toBe("等你处理的事没能全部读出来，可在下方重试。");
+      const markup = panel(state);
+      expect(markup).toContain('role="alert"');
+      expect(markup).toContain("已找到 0 项，部分任务读取失败");
+      expect(markup).toContain(">重试</button>");
+      expect(markup).not.toContain("没有等你处理的事");
+    });
+
+    it("续页失败：保留已找到的行，同时提示不完整", () => {
+      const state = needsYouState(
+        ["ATM"],
+        [
+          entry({
+            items: [{ key: "ATM-T-4", title: "受阻", status: "BLOCKED" }],
+            hasMore: true,
+            error: new Error("503"),
+          }),
+        ],
+        vi.fn(),
+      );
+      const markup = panel(state);
+      expect(markup).toContain("已找到 1 项，部分任务读取失败");
+      expect(markup.match(/data-kind=/g)).toHaveLength(1);
+      expect(needsYouHeadline(state, 0)).toContain("没能全部读出来");
+    });
+  });
+
+  it("等你处理按受阻、等你回复、待验收排序，只收这三类", () => {
+    const tasks = needsYouTasks([
+      {
+        key: "ATM",
+        items: [
+          { key: "ATM-T-1", title: "验收", status: "VERIFYING", updatedAt: "2026-09-29T03:00:00Z" },
+          { key: "ATM-T-2", title: "进行", status: "IN_PROGRESS" },
+          {
+            key: "ATM-T-3",
+            title: "回复",
+            status: "WAITING_USER",
+            waitingFor: "包名",
+            updatedAt: "2026-09-29T01:00:00Z",
+          },
+          { key: "ATM-T-4", title: "受阻", status: "BLOCKED", blockedReason: "缺真机" },
+        ],
+      },
+    ]);
+    expect(tasks.map((task) => task.key)).toEqual(["ATM-T-4", "ATM-T-3", "ATM-T-1"]);
+    expect(tasks.map((task) => task.reason)).toEqual(["缺真机", "包名", ""]);
+    const markup = renderToStaticMarkup(createElement(NeedsYouList, { tasks, onTask: vi.fn() }));
+    expect(markup).toContain('data-kind="BLOCKED"');
+    expect(markup).toContain("<b>等你回复</b>");
+    expect(
+      renderToStaticMarkup(createElement(NeedsYouList, { tasks: [], onTask: vi.fn() })),
+    ).toContain("没有等你处理的事");
+  });
+
+  it("跨项目任务只拉未结束的任务", () => {
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toMatch(/client\.tasks\.pageForUi\(project\.code, \{\s*closed: "0",/u);
   });
 
   it("query key、分页和状态集合守卫有阳性变异红灯", () => {

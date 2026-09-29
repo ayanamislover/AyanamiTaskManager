@@ -88,9 +88,14 @@
     backdrop-filter: none;
   }
 
-  .atm-sidebar,
-  .atm-topbar {
+  .atm-sidebar {
+    background: var(--atm-surface);
+  }
+
+  .atm-topbar::before {
     background: var(--atm-bg);
+    backdrop-filter: none;
+    mask-image: none;
   }
 }
 
@@ -102,6 +107,11 @@
   .atm-field-shell > .atm-select-trigger:is(:focus-visible):not(:disabled) {
     outline: 2px solid Highlight;
     outline-offset: -3px;
+  }
+
+  /* 抽屉收起把手的焦点环画在圆钮上：高对比度下同样换成系统高亮色。 */
+  .atm-drawer-collapse:focus-visible > svg {
+    outline-color: Highlight;
   }
 
   .atm-sidebar,
@@ -117,5 +127,16 @@
   .atm-modal,
   .atm-drawer {
     border-color: ButtonText;
+  }
+
+  /* 柔彩稿里这些面靠阴影和底色区分，没有边框；高对比度下阴影和底色都会被抹掉，补一圈系统色边。 */
+  .atm-button,
+  .atm-panel,
+  .atm-metric,
+  .atm-sidebar,
+  .atm-search-button,
+  .atm-tabs,
+  .atm-badge {
+    border: 1px solid ButtonText;
   }
 }

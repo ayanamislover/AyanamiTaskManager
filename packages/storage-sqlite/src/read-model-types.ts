@@ -39,6 +39,24 @@ export type RecentClosedWorkItemPage = {
   total: number;
 };
 
+/**
+ * 项目进度条的四段计数。
+ *
+ * 「已完成」只算 since 之后完成的任务（本次 ATM 启动以来），历史完成不计，
+ * 否则老项目的已完成段会越堆越长，把其余三段挤成细线。完成时间只认 completed_at：
+ * updated_at 会随普通编辑变化，不能当完成时间；早年直接登记为已完成、没有 completed_at
+ * 的历史任务完成时间未知，一律不算本次。
+ */
+export type ProgressStripCounts = {
+  since: string;
+  done: number;
+  /** 待整理、已领取、进行中、验收中、等待 Agent。 */
+  active: number;
+  /** 等待用户与受阻：都卡在人这边。 */
+  waiting: number;
+  ready: number;
+};
+
 export type WorkItemProjectionPage = {
   items: WorkItemView[];
   itemCursors: string[];

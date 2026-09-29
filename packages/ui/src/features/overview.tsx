@@ -18,6 +18,7 @@ import { useProjectOrder } from "../project-order.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
+import { NeedsYouPanel, needsYouHeadline, useNeedsYou } from "./overview-inbox.js";
 
 export function OverviewPage({
   client,
@@ -25,12 +26,15 @@ export function OverviewPage({
   onQuick,
   notify,
   TimelineEventRow,
+  onTask,
 }: {
   client: AyanamiClient;
   onProject: (code: string) => void;
   onQuick: () => void;
   notify: Notify;
   TimelineEventRow: ComponentType<{ event: Record<string, unknown> }>;
+  /** 打开某个项目里的任务；不传时点了不跳转（用例里单独渲染总览时）。 */
+  onTask?: (project: string, key: string) => void;
 }) {
   const queryClient = useQueryClient();
   // 总览卡片和侧栏、项目页用同一份手动顺序（ATM-T-0421）：client.overview 按 updated_at 排，
@@ -40,6 +44,8 @@ export function OverviewPage({
     queryKey: ["overview"],
     queryFn: () => client.overview(),
   });
+  // 页头结论与「等你处理」面板读同一份数据，数字不会各说各的。
+  const needsYou = useNeedsYou(client, query.data?.projects ?? []);
   const quickQuery = useQuery({
     queryKey: ["quick"],
     queryFn: () => client.quick.list(),
@@ -95,12 +101,10 @@ export function OverviewPage({
     (sum, project) => sum + Number(project.active_agent_count ?? 0),
     0,
   );
+  // 等你回复、受阻的任务已经逐条列在「等你处理」里，这里不再按项目重复计数一遍；
+  // 只放那张表里没有的项目级、系统级提醒。
   const attention = projects.flatMap((project) => {
     const items: string[] = [];
-    if (Number(project.waiting_user_count ?? 0))
-      items.push(`${project.code} 有 ${project.waiting_user_count} 项等待用户`);
-    if (Number(project.blocked_count ?? 0))
-      items.push(`${project.code} 有 ${project.blocked_count} 项阻塞`);
     if (Number(project.overdue_count ?? 0))
       items.push(`${project.code} 有 ${project.overdue_count} 项超期`);
     if (Number(project.stale_claim_count ?? 0))
@@ -126,152 +130,158 @@ export function OverviewPage({
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");
   return (
     <>
-      <PageHead title="总览" description="只显示已经写入事实源的项目状态，不展示模拟数据。" />
-      <section className="atm-metrics five">
-        <div className="atm-metric">
-          <div className="label">进行中项目</div>
-          <div className="value">
-            {projects.filter((project) => project.lifecycle === "ACTIVE").length}
-          </div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">进行中任务</div>
-          <div className="value">{active}</div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">受阻</div>
-          <div className="value">{blocked}</div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">等待</div>
-          <div className="value">{waiting}</div>
-        </div>
-        <div className="atm-metric">
-          <div className="label">在线 Agent</div>
-          <div className="value">{agents}</div>
-        </div>
+      <PageHead title="总览" description={needsYouHeadline(needsYou, active)} />
+      <section className="atm-stat-band" aria-label="概况">
+        <span>
+          <b>{projects.filter((project) => project.lifecycle === "ACTIVE").length}</b>
+          进行中项目
+        </span>
+        <span>
+          <b>{active}</b>
+          进行中任务
+        </span>
+        <span data-tone={blocked ? "blocked" : undefined}>
+          <b>{blocked}</b>
+          受阻
+        </span>
+        <span data-tone={waiting ? "user" : undefined}>
+          <b>{waiting}</b>
+          等待
+        </span>
+        <span>
+          <b>{agents}</b>
+          在线 Agent
+        </span>
+        <span className="atm-stat-band-seq">seq {data.sequence}</span>
       </section>
-      {attention.length ? (
-        <section className="atm-panel" style={{ marginBottom: 18 }}>
-          <div className="atm-panel-head">
-            <h2>需要处理</h2>
-            <span className="atm-badge warning">{attention.length}</span>
-          </div>
-          <div className="atm-panel-body atm-attention-grid">
-            {attention.map((item) => (
-              <div className="atm-row-sub" key={item}>
-                <WarningCircle size={15} /> {item}
+      <div className="atm-overview-layout">
+        <div className="atm-overview-main">
+          <NeedsYouPanel state={needsYou} onTask={onTask ?? (() => undefined)} />
+          <section className="atm-panel">
+            <div className="atm-panel-head">
+              <h2>项目状态</h2>
+            </div>
+            {projects.length === 0 ? (
+              <Empty title="还没有正式项目" text="从项目页创建第一个项目。" />
+            ) : (
+              <div className="atm-overview-projects">
+                {projects.map((project) => (
+                  <button
+                    className="atm-project atm-overview-project"
+                    key={project.id}
+                    title={sidebarProjectHint(project.name)}
+                    onClick={() => onProject(project.code)}
+                  >
+                    <div className="atm-actions" style={{ justifyContent: "space-between" }}>
+                      <span className="atm-project-code">{project.code}</span>
+                      <Status value={project.health ?? "UNKNOWN"} />
+                    </div>
+                    <h2 className="atm-overview-project-name">{project.name}</h2>
+                    <div className="atm-row-sub">
+                      {project.current_milestone ?? "尚未设置里程碑"} ·{" "}
+                      {project.next_target_date ?? "无目标日期"}
+                    </div>
+                    <div className="atm-progress">
+                      <span style={{ width: `${Number(project.progress ?? 0)}%` }} />
+                    </div>
+                    <div className="atm-row-sub">
+                      {Math.round(Number(project.progress ?? 0))}% ·{" "}
+                      {progressSourceLabels[String(project.progress_source ?? "NONE")] ??
+                        "尚无进度"}
+                    </div>
+                    <div className="atm-project-stats">
+                      <span>活动 {Number(project.active_count ?? 0)}</span>
+                      <span>阻塞 {Number(project.blocked_count ?? 0)}</span>
+                      <span>
+                        等待{" "}
+                        {Number(project.waiting_user_count ?? 0) +
+                          Number(project.waiting_agent_count ?? 0)}
+                      </span>
+                      <span>Agent {Number(project.active_agent_count ?? 0)}</span>
+                    </div>
+                    <div className="atm-row-sub">
+                      最近活动 {formatTime(project.last_activity_at)}
+                    </div>
+                    <div className="atm-projection-summary">
+                      <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
+                      <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
+                    </div>
+                  </button>
+                ))}
               </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-      <div className="atm-grid">
-        <section className="atm-panel">
-          <div className="atm-panel-head">
-            <h2>项目状态</h2>
-            <span className="atm-key">seq {data.sequence}</span>
-          </div>
-          {projects.length === 0 ? (
-            <Empty title="还没有正式项目" text="从项目页创建第一个项目。" />
-          ) : (
-            <div className="atm-overview-projects">
-              {projects.map((project) => (
-                <button
-                  className="atm-project atm-overview-project"
-                  key={project.id}
-                  title={sidebarProjectHint(project.name)}
-                  onClick={() => onProject(project.code)}
-                >
-                  <div className="atm-actions" style={{ justifyContent: "space-between" }}>
-                    <span className="atm-project-code">{project.code}</span>
-                    <Status value={project.health ?? "UNKNOWN"} />
+            )}
+          </section>
+        </div>
+        <div className="atm-overview-side">
+          {attention.length ? (
+            <section className="atm-panel">
+              <div className="atm-panel-head">
+                <h2>项目提醒</h2>
+                <span className="atm-badge warning">{attention.length}</span>
+              </div>
+              <div className="atm-panel-body atm-attention-grid">
+                {attention.map((item) => (
+                  <div className="atm-row-sub" key={item}>
+                    <WarningCircle size={15} /> {item}
                   </div>
-                  <h2 className="atm-overview-project-name">{project.name}</h2>
-                  <div className="atm-row-sub">
-                    {project.current_milestone ?? "尚未设置里程碑"} ·{" "}
-                    {project.next_target_date ?? "无目标日期"}
-                  </div>
-                  <div className="atm-progress">
-                    <span style={{ width: `${Number(project.progress ?? 0)}%` }} />
-                  </div>
-                  <div className="atm-row-sub">
-                    {Math.round(Number(project.progress ?? 0))}% ·{" "}
-                    {progressSourceLabels[String(project.progress_source ?? "NONE")] ?? "尚无进度"}
-                  </div>
-                  <div className="atm-project-stats">
-                    <span>活动 {Number(project.active_count ?? 0)}</span>
-                    <span>阻塞 {Number(project.blocked_count ?? 0)}</span>
-                    <span>
-                      等待{" "}
-                      {Number(project.waiting_user_count ?? 0) +
-                        Number(project.waiting_agent_count ?? 0)}
-                    </span>
-                    <span>Agent {Number(project.active_agent_count ?? 0)}</span>
-                  </div>
-                  <div className="atm-row-sub">最近活动 {formatTime(project.last_activity_at)}</div>
-                  <div className="atm-projection-summary">
-                    <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
-                    <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
-                  </div>
-                </button>
-              ))}
+                ))}
+              </div>
+            </section>
+          ) : null}
+          <section className="atm-panel">
+            <div className="atm-panel-head">
+              <h2>最近变化</h2>
             </div>
-          )}
-        </section>
-        <section className="atm-panel">
-          <div className="atm-panel-head">
-            <h2>最近变化</h2>
-          </div>
-          {/* 总览只看业务变化；自动备份等系统事件在全局时间线里勾选后查看。 */}
-          {recentBusinessEvents.length === 0 ? (
-            <Empty title="暂无事件" text="创建或更新任务后，变化会出现在这里。" />
-          ) : (
-            <div className="atm-timeline atm-scroll-list">
-              {recentBusinessEvents.map((event) => {
-                const item = presentTimelineEvent(event);
-                return <TimelineEventRow event={event} key={item.id} />;
-              })}
+            {/* 总览只看业务变化；自动备份等系统事件在全局时间线里勾选后查看。 */}
+            {recentBusinessEvents.length === 0 ? (
+              <Empty title="暂无事件" text="创建或更新任务后，变化会出现在这里。" />
+            ) : (
+              <div className="atm-timeline atm-scroll-list">
+                {recentBusinessEvents.map((event) => {
+                  const item = presentTimelineEvent(event);
+                  return <TimelineEventRow event={event} key={item.id} />;
+                })}
+              </div>
+            )}
+          </section>
+          <section className="atm-panel">
+            <div className="atm-panel-head">
+              <h2>临时任务</h2>
+              <button className="atm-button" onClick={onQuick}>
+                <Plus size={16} />
+                添加或晋升
+              </button>
             </div>
-          )}
-        </section>
+            {quickQuery.isLoading ? (
+              <LoadingRows count={3} />
+            ) : quickTasks.length === 0 ? (
+              <Empty title="没有待处理临时任务" text="适合几分钟内完成、无需拆分的工作。" />
+            ) : (
+              <div className="atm-list atm-scroll-list">
+                {quickTasks.map((task) => (
+                  <div className="atm-row" key={task.id}>
+                    <label className="atm-check">
+                      <input
+                        type="checkbox"
+                        aria-label={`完成 ${task.title}`}
+                        disabled={completeQuick.isPending}
+                        onChange={() => completeQuick.mutate(task)}
+                      />
+                      <span>
+                        <span className="atm-row-title">{task.title}</span>
+                        <span className="atm-row-sub">
+                          {task.key} · {formatTime(task.updated_at ?? task.updatedAt)}
+                        </span>
+                      </span>
+                    </label>
+                    <Status value={task.status} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
-      <section className="atm-panel" style={{ marginTop: 18 }}>
-        <div className="atm-panel-head">
-          <h2>临时任务</h2>
-          <button className="atm-button" onClick={onQuick}>
-            <Plus size={16} />
-            添加或晋升
-          </button>
-        </div>
-        {quickQuery.isLoading ? (
-          <LoadingRows count={3} />
-        ) : quickTasks.length === 0 ? (
-          <Empty title="没有待处理临时任务" text="适合几分钟内完成、无需拆分的工作。" />
-        ) : (
-          <div className="atm-list atm-scroll-list">
-            {quickTasks.map((task) => (
-              <div className="atm-row" key={task.id}>
-                <label className="atm-check">
-                  <input
-                    type="checkbox"
-                    aria-label={`完成 ${task.title}`}
-                    disabled={completeQuick.isPending}
-                    onChange={() => completeQuick.mutate(task)}
-                  />
-                  <span>
-                    <span className="atm-row-title">{task.title}</span>
-                    <span className="atm-row-sub">
-                      {task.key} · {formatTime(task.updated_at ?? task.updatedAt)}
-                    </span>
-                  </span>
-                </label>
-                <Status value={task.status} />
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
       <MutationErrorAlert error={completeQuick.error} />
     </>
   );
@@ -282,14 +292,16 @@ function useAllProjectTasks(client: AyanamiClient, projects: RegisteredProject[]
     .filter((project) => project.lifecycle === "ACTIVE")
     .map((project) => ({
       key: project.code,
+      // 两种模式列的都是未结束状态，已结束的任务不必拉下来再丢掉。
       loadPage: (cursor?: string) =>
         client.tasks.pageForUi(project.code, {
+          closed: "0",
           limit: 100,
           ...(cursor === undefined ? {} : { cursor }),
         }),
     }));
   return useCursorCollections(
-    ["tasks", "all", "ui", ...sources.map((source) => source.key)],
+    ["tasks", "all", "ui", "open", ...sources.map((source) => source.key)],
     sources,
   );
 }
@@ -306,7 +318,40 @@ export function TasksAcrossProjects({
   onTask: (project: string, key: string) => void;
 }) {
   const collection = useAllProjectTasks(client, projects);
-  const entries = Object.values(collection.entries);
+  return (
+    <TasksAcrossProjectsView
+      entries={Object.values(collection.entries)}
+      projects={projects}
+      mode={mode}
+      onTask={onTask}
+      onRetry={(key) => void collection.retry(key)}
+    />
+  );
+}
+
+type TaskCollectionEntry = {
+  key: string;
+  items: any[];
+  loadedCount: number;
+  hasMore: boolean;
+  isLoading: boolean;
+  isFetchingNextPage: boolean;
+  error: unknown;
+};
+
+export function TasksAcrossProjectsView({
+  entries,
+  projects,
+  mode,
+  onTask,
+  onRetry,
+}: {
+  entries: TaskCollectionEntry[];
+  projects: RegisteredProject[];
+  mode: "active" | "blocked";
+  onTask: (project: string, key: string) => void;
+  onRetry: (key: string) => void;
+}) {
   const isLoading = entries.some((entry) => entry.isLoading);
   const errorEntry = entries.find((entry) => entry.error);
   const error = errorEntry?.error;
@@ -319,7 +364,7 @@ export function TasksAcrossProjects({
           loadedCount={loadedCount}
           hasMore={false}
           error={error}
-          onRetry={() => (errorEntry ? void collection.retry(errorEntry.key) : undefined)}
+          onRetry={() => (errorEntry ? onRetry(errorEntry.key) : undefined)}
         />
         <ErrorState error={error} />
       </>
@@ -340,12 +385,13 @@ export function TasksAcrossProjects({
       <>
         <CursorLoadStatus
           loadedCount={loadedCount}
+          matchedCount={0}
           hasMore={entries.some((entry) => entry.hasMore)}
           loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
           error={error}
           onRetry={() => {
             for (const entry of entries) {
-              if (entry.error) void collection.retry(entry.key);
+              if (entry.error) onRetry(entry.key);
             }
           }}
         />
@@ -365,12 +411,13 @@ export function TasksAcrossProjects({
     <>
       <CursorLoadStatus
         loadedCount={loadedCount}
+        matchedCount={tasks.length}
         hasMore={entries.some((entry) => entry.hasMore)}
         loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
         error={error}
         onRetry={() => {
           for (const entry of entries) {
-            if (entry.error) void collection.retry(entry.key);
+            if (entry.error) onRetry(entry.key);
           }
         }}
       />

@@ -18,7 +18,7 @@ type Expect<Value extends true> = Value;
 const contractParity: [
   Expect<Equal<McpBridgeObservation, PanelObservation>>,
   Expect<Equal<Theme, "light" | "dark">>,
-  Expect<Equal<McpClient, "CODEX" | "CLAUDE" | "CLAUDE_CODE">>,
+  Expect<Equal<McpClient, "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE">>,
   Expect<Equal<DesktopBridge, Partial<Required<DesktopBridge>>>>,
 ] = [true, true, true, true];
 

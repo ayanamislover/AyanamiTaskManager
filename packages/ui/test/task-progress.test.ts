@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { taskProgressPresentation } from "../src/task-progress.js";
+import { phaseBadgeLabel, taskProgressPresentation } from "../src/task-progress.js";
 
 describe("taskProgressPresentation", () => {
   it("同时解释派生进度、报告进度、分母和阻塞原因", () => {
@@ -48,5 +48,17 @@ describe("taskProgressPresentation", () => {
       totalWeight: 0,
       totalStages: 0,
     });
+  });
+
+  it("阶段和状态一致时不重复放阶段徽标；阶段不同或在等人时才放", () => {
+    const badge = (task: Record<string, unknown>) =>
+      phaseBadgeLabel(taskProgressPresentation(task), String(task.status));
+    expect(badge({ status: "IN_PROGRESS", phase: "IN_PROGRESS" })).toBeNull();
+    expect(badge({ status: "IN_PROGRESS" })).toBeNull();
+    expect(badge({ status: "IN_PROGRESS", phase: "VERIFYING" })).toBe("验收中");
+    expect(badge({ status: "IN_PROGRESS", phase: "IN_PROGRESS", waitingOn: "USER" })).toBe(
+      "执行中 · 等待用户",
+    );
+    expect(badge({ status: "WAITING_USER" })).toBe("执行中 · 等待用户");
   });
 });

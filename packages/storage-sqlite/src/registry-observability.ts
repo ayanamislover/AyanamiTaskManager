@@ -296,7 +296,13 @@ export class RegistryObservability {
   }
 
   async doctor(): Promise<{
-    registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
+    registry: {
+      ok: boolean;
+      sqliteVersion: string;
+      fts5: boolean;
+      trigram: boolean;
+      wal: boolean;
+    };
     projectCounts: Record<string, { total: number; failed: number }>;
     projectionSummary: ProjectionSummary;
     projectionFailures: ProjectionFailureView[];
@@ -316,6 +322,7 @@ export class RegistryObservability {
       sqliteVersion: registryCapabilities.version,
       fts5: registryCapabilities.fts5,
       trigram: registryCapabilities.trigram,
+      wal: registryCapabilities.wal,
     };
     const registryPath = resolve(this.#registry.path).toLowerCase();
     const projectionStates = this.#dependencies.listProjectionStates(true);

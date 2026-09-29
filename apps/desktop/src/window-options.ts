@@ -1,7 +1,7 @@
 import type { BrowserWindowConstructorOptions } from "electron";
 
-const LIGHT_WINDOW_BACKGROUND = "#F7F5F0";
-const DARK_WINDOW_BACKGROUND = "#1F1D23";
+const LIGHT_WINDOW_BACKGROUND = "#FBF7FF";
+const DARK_WINDOW_BACKGROUND = "#241E30";
 
 export function createWindowOptions(
   preloadPath: string,

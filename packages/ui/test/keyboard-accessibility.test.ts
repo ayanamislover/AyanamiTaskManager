@@ -85,34 +85,81 @@ describe("keyboard accessibility primitives", () => {
       join(process.cwd(), "packages", "ui", "src", "routes", "app-router.tsx"),
       "utf8",
     );
-    const inPlaceBindings = router.match(/onTask=\{onTask\}/gu) ?? [];
+    const inPlaceBindings = (source: string) => (source.match(/onTask=\{onTask\}/gu) ?? []).length;
     expect(app).toMatch(
       /const openTaskInPlace = \(project: string, key: string\) => setDrawer\(\{ project, key \}\)/u,
     );
     expect(app).toContain("onTask={openTaskInPlace}");
-    expect(inPlaceBindings).toHaveLength(2);
-    expect(router.replace("onTask={onTask}", "onTask={() => undefined}")).not.toMatch(
-      /onTask=\{onTask\}[\s\S]*onTask=\{onTask\}/u,
+    // 总览「等你处理」、活动任务、阻塞与等待三处都原地打开抽屉。
+    expect(inPlaceBindings(router)).toBe(3);
+    expect(inPlaceBindings(router.replace("onTask={onTask}", "onTask={() => undefined}"))).not.toBe(
+      3,
     );
   });
 
   it("任务行焦点沿用现有设计 token，并由 forced-colors 保留系统指示", () => {
     const styles = uiCssText();
+    // 绑定到任务行实际依赖的那一条：forced-colors 里的通用 `:focus-visible { outline-color: Highlight; }`。
+    // 不能写成「块里某处有 :focus-visible、某处有 Highlight」——别的组件的 Highlight 规则也会让它通过。
+    const genericForcedFocus =
+      /@media \(forced-colors: active\) \{[^@]*?\n {2}:focus-visible \{\s*outline-color: Highlight;\s*\}/u;
     const hasRowFocusGuard = (source: string) =>
       source.includes(".atm-table tbody tr[tabindex]:focus-visible") &&
-      /@media \(forced-colors: active\)[\s\S]*?:focus-visible[\s\S]*?outline-color: Highlight/u.test(
-        source,
-      );
+      genericForcedFocus.test(source);
     expect(hasRowFocusGuard(styles)).toBe(true);
-    expect(hasRowFocusGuard(styles.replace("tr[tabindex]:focus-visible", "tr"))).toBe(false);
-    expect(
-      hasRowFocusGuard(styles.replace("outline-color: Highlight", "outline-color: Canvas")),
-    ).toBe(false);
+    // 行焦点现在有两条规则（整行 outline 与单元格底色），变异要把两条都拿掉。
+    expect(hasRowFocusGuard(styles.replaceAll("tr[tabindex]:focus-visible", "tr"))).toBe(false);
+    // 只把通用那条改掉、保留抽屉专用的 Highlight：必须仍然发现。
+    const genericOnlyMutated = styles.replace(
+      /(\n {2}:focus-visible \{\s*outline-color: )Highlight;/u,
+      "$1Canvas;",
+    );
+    expect(genericOnlyMutated).not.toBe(styles);
+    expect(genericOnlyMutated).toContain(".atm-drawer-collapse:focus-visible > svg");
+    expect(hasRowFocusGuard(genericOnlyMutated)).toBe(false);
     expect(
       hasRowFocusGuard(
         ".atm-table tbody tr { outline: none; } @media (forced-colors: active) { :focus-visible { outline-color: Canvas; } }",
       ),
     ).toBe(false);
+  });
+
+  it("抽屉收起把手在 forced-colors 下用系统高亮色画焦点环", () => {
+    const styles = uiCssText();
+    const drawerForcedFocus =
+      /@media \(forced-colors: active\) \{[^@]*?\.atm-drawer-collapse:focus-visible > svg \{\s*outline-color: Highlight;/u;
+    expect(styles).toMatch(drawerForcedFocus);
+    expect(
+      styles.replace(
+        /(\.atm-drawer-collapse:focus-visible > svg \{\s*outline-color: )Highlight;/u,
+        "$1Canvas;",
+      ),
+    ).not.toMatch(drawerForcedFocus);
+  });
+
+  it("进度条填充在 forced-colors 下换成系统高亮色，不随渐变一起消失", () => {
+    const styles = uiCssText();
+    const forcedProgress =
+      /@media \(forced-colors: active\) \{[^@]*?\.atm-progress > span \{\s*background: Highlight;/u;
+    expect(styles).toMatch(forcedProgress);
+    expect(
+      styles.replace(/(\.atm-progress > span \{\s*background: )Highlight;/u, "$1Canvas;"),
+    ).not.toMatch(forcedProgress);
+  });
+
+  it("窄屏侧栏收起时藏的是字标，logo 留着", () => {
+    // 收起侧栏的是把 --atm-sidebar 压到 68px 的那一段。
+    const narrow =
+      [...uiCssText().matchAll(/@media \(max-width: 760px\) \{([\s\S]*?)\n\}/gu)]
+        .map((match) => match[1]!)
+        .find((block) => block.includes("--atm-sidebar: 68px")) ?? "";
+    expect(narrow).toContain(".atm-brand .atm-wordmark");
+    expect(narrow).not.toMatch(/\.atm-brand span\b/u);
+    // 「工作区」折叠按钮的字和状态灯的「正常」两个字，68px 里都放不下。
+    expect(narrow).toMatch(/\.atm-nav-disclosure span \{\s*display: none;/u);
+    // 只收侧栏那盏；设置页行内版（.is-inline）的「正常 / 异常」在窄屏也要看得见。
+    expect(narrow).toMatch(/\.atm-service-status:not\(\.is-inline\) \{[^}]*font-size: 0;/u);
+    expect(narrow).not.toMatch(/\.atm-service-status \{[^}]*font-size: 0;/u);
   });
 
   it("forced-colors 用等特指度规则恢复自绘 Select 的系统焦点环", () => {

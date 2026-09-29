@@ -45,6 +45,9 @@ export {
   defaultCodexConfigPath,
   defaultCodexRulePath,
   defaultCodexSkillsPath,
+  defaultKimiCodeConfigPath,
+  defaultKimiCodeRulePath,
+  defaultKimiCodeSkillsPath,
   findClaudeCodeCli,
 } from "./mcp-paths.js";
 export {
@@ -68,4 +71,8 @@ export {
   isClaudeCodeConfigInstalled,
   isClaudeConfigInstalled,
   isCodexConfigInstalled,
+  installedKimiCodeProfileLaunches,
+  isKimiCodeConfigInstalled,
+  kimiCodeTransportMismatch,
 } from "./mcp-inspection.js";
+export { installKimiCodeConfig, uninstallKimiCodeConfig } from "./kimi-code-config.js";

@@ -22,7 +22,7 @@ export type Theme = "light" | "dark";
 export type NotificationMode = "ALL" | "CRITICAL" | "OFF";
 export type AgentIntegrationState = "NOT_INSTALLED" | "INSTALLED" | "NEEDS_UPDATE" | "MODIFIED";
 export type AgentIntegrationAction = "PREVIEW" | "INSTALL" | "UPDATE" | "REPAIR" | "UNINSTALL";
-export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 
 export type McpProfileSwitchResult = {
   enabled: boolean;

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { advanceCursorPage, type CursorCollectionState } from "../src/cursor-collection.js";
+import {
+  advanceCursorPage,
+  collectionRetryPlan,
+  type CursorCollectionState,
+} from "../src/cursor-collection.js";
 
 function state<T>(): CursorCollectionState<T> {
   return {
@@ -93,5 +97,20 @@ describe("cursor collection state", () => {
       itemCount: 2,
       resumeCursor: "third-page",
     });
+  });
+});
+
+describe("读取失败后的重试方式", () => {
+  it("首屏失败从头重读，已读到行则续读，没有剩页则整次刷新", () => {
+    const failed = new Error("503");
+    // 首屏就失败：一行都没有但还有页。以前被当成续读，续读要求已有行，按钮什么都不做。
+    expect(collectionRetryPlan({ error: failed, hasMore: true, items: [] })).toBe("restart");
+    expect(collectionRetryPlan({ error: failed, hasMore: true, items: [{ id: 1 }] })).toBe(
+      "resume",
+    );
+    expect(collectionRetryPlan({ error: failed, hasMore: false, items: [{ id: 1 }] })).toBe(
+      "refresh",
+    );
+    expect(collectionRetryPlan({ error: null, hasMore: true, items: [] })).toBe("none");
   });
 });

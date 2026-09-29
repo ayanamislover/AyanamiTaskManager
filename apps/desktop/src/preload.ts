@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 
 contextBridge.exposeInMainWorld("ayanamiDesktop", {
   notifyRendererReady: () => ipcRenderer.send("atm:renderer-ready"),

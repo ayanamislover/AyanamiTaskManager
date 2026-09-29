@@ -24,7 +24,8 @@ export {
 export { prefetchSelfProcessIdentity } from "./process-identity.js";
 import { DAEMON_VERSION } from "./runtime-discovery.js";
 
-export async function buildAyanamiServer(options: AyanamiServerOptions): Promise<FastifyInstance> {
+export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<FastifyInstance> {
+  const options = { ...input, startedAt: input.startedAt ?? new Date().toISOString() };
   const app = await createHttpServer(options);
   registerProjectRoutes(app, options, DAEMON_VERSION);
   registerKnowledgeRoutes(app, options);

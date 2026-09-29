@@ -76,7 +76,7 @@
   min-width: 0;
   padding: 13px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .agent-session-card-header {
@@ -160,7 +160,7 @@
   gap: 7px;
   padding: 6px 8px;
   border: 1px solid var(--atm-border);
-  border-radius: 7px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text-muted);
   font-size: 11px;
 }
@@ -232,7 +232,7 @@
   margin-bottom: 8px;
   padding: 12px;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface);
   text-align: left;
 }
@@ -254,7 +254,7 @@
   position: relative;
   display: grid;
   gap: 0;
-  padding-left: 16px;
+  padding: 8px 12px 12px 20px;
 }
 .atm-event {
   position: relative;

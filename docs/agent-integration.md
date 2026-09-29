@@ -4,17 +4,20 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 
 ## 一次性接入
 
-桌面端进入“设置 → Agent 接入”，可直接安装 Codex、Claude Desktop 或 Claude Code 配置，也可复制 streamable HTTP、stdio 或通用 JSON 配置。安装操作会最小合并现有配置，并在写入前创建备份。
+桌面端进入“设置 → Agent 接入”，可直接安装 Codex、Claude Desktop、Claude Code 或 Kimi Code 配置，也可复制 streamable HTTP、stdio 或通用 JSON 配置。安装操作会最小合并现有配置，并在写入前创建备份。
 
-三个客户端的落点互不相同，不能互相替代：
+四个客户端的落点互不相同，不能互相替代：
 
-| 客户端         | MCP 注册                                      | 规则                  | 技能                  |
-| -------------- | --------------------------------------------- | --------------------- | --------------------- |
-| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`  | `~/.codex/skills`     |
-| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md` | `~/.claude/skills`    |
-| Claude Code    | `~/.claude.json`（user scope）                | 同上，与 Desktop 共用 | 同上，与 Desktop 共用 |
+| 客户端         | MCP 注册                                      | 规则                     | 技能                  |
+| -------------- | --------------------------------------------- | ------------------------ | --------------------- |
+| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`     | `~/.codex/skills`     |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md`    | `~/.claude/skills`    |
+| Claude Code    | `~/.claude.json`（user scope）                | 同上，与 Desktop 共用    | 同上，与 Desktop 共用 |
+| Kimi Code      | `~/.kimi-code/mcp.json`                       | `~/.kimi-code/AGENTS.md` | `~/.kimi-code/skills` |
 
 Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~/.claude.json`：该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会丢失对方更新。找不到 CLI 时安装会以 `CLAUDE_CODE_CLI_NOT_FOUND` 失败，不会退化成直接改文件。由于规则与技能同 Desktop 共用，卸载其中一个客户端时，只要另一个仍装着 MCP，共用的规则和技能会被保留。
+
+Kimi Code 的 VS Code 扩展与 CLI 共用 `~/.kimi-code`，装一次两边都生效。ATM 直接最小合并 `mcp.json`：只替换 ATM 自己的服务并写明 `"transport": "stdio"`，其他服务与顶层键原样保留；原来手工写在 `AGENTS.md` 里、没有 ATM 标记的规则文字不会被删，确认受管区块生效后可自行删掉那份手写副本。
 
 本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token，并原子发布数据目录下的 `runtime/daemon.json`；旧 endpoint/token 不可复用。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，该变量不得用于安装版。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。自动安装配置使用会动态重读发现文件的 stdio bridge；完整威胁边界见 [security-model.md](./security-model.md)。
 

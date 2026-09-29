@@ -3,34 +3,53 @@
   grid-template-columns: var(--atm-sidebar) minmax(0, 1fr);
   min-height: 100dvh;
 }
+/* 侧栏是浮在彩雾上的一张卡：左、上、下各留 12px 气口，右侧贴着内容区。 */
 .atm-sidebar {
   position: sticky;
-  top: 0;
-  height: 100dvh;
-  padding: 18px 14px;
-  border-right: 1px solid var(--atm-border);
-  background: color-mix(in srgb, var(--atm-surface) 86%, transparent);
+  top: 12px;
+  height: calc(100dvh - 24px);
+  margin: 12px 0 12px 12px;
+  padding: 14px 10px 10px;
+  border-radius: 24px;
+  background: var(--atm-glass);
+  box-shadow: var(--atm-shadow-subtle);
   overflow: hidden;
 }
 .atm-brand {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   min-height: 42px;
-  padding: 4px 8px 16px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  padding: 0 0 14px;
 }
 .atm-brand-mark {
   display: grid;
+  flex: none;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 9px;
   color: var(--atm-on-primary);
   background: var(--atm-primary-fill);
-  box-shadow: 0 5px 15px color-mix(in srgb, var(--atm-primary) 24%, transparent);
+  box-shadow: 0 3px 10px rgb(168 85 247 / 0.22);
   overflow: hidden;
+}
+/* 字标占满 logo 右边剩下的宽度，右缘和导航项右缘对齐。 */
+.atm-wordmark {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: auto;
+  overflow: visible;
+}
+.atm-wordmark-stop-a {
+  stop-color: var(--atm-wordmark-a);
+}
+.atm-wordmark-stop-b {
+  stop-color: var(--atm-wordmark-b);
+}
+.atm-wordmark-stop-c {
+  stop-color: var(--atm-wordmark-c);
 }
 .atm-brand-mark img {
   width: 100%;
@@ -41,15 +60,15 @@
   margin: 10px 0 18px;
 }
 .atm-nav-title {
-  margin: 0 10px 7px;
-  color: var(--atm-text-muted);
+  margin: 0 10px 6px;
+  color: var(--atm-text-faint);
   font-size: 11px;
-  font-weight: 650;
-  letter-spacing: 0.08em;
+  font-weight: 500;
+  letter-spacing: 0.04em;
 }
 .atm-nav {
   display: grid;
-  gap: 3px;
+  gap: 2px;
 }
 .atm-nav[hidden] {
   display: none;
@@ -61,22 +80,27 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 38px;
+  min-height: 36px;
   padding: 7px 10px;
   border: 0;
-  border-radius: 9px;
+  border-radius: 12px;
   color: var(--atm-text-muted);
   background: transparent;
   text-align: left;
+}
+.atm-nav button > svg,
+.atm-sidebar-settings > svg {
+  flex: none;
+  color: var(--atm-primary);
 }
 .atm-nav-disclosure {
   transition: none;
 }
 .atm-nav button[aria-current="page"],
 .atm-sidebar-settings[aria-current="page"] {
-  color: var(--atm-primary-strong);
-  background: var(--atm-primary-soft);
-  font-weight: 650;
+  color: var(--atm-text);
+  background: var(--atm-hover-strong);
+  font-weight: 600;
 }
 .atm-primary-navigation {
   margin-bottom: 8px;
@@ -88,7 +112,7 @@
   justify-content: flex-start;
   margin-bottom: 4px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 500;
 }
 .atm-nav-disclosure svg {
   transition: none;
@@ -101,7 +125,7 @@
   .atm-nav-disclosure:hover,
   .atm-sidebar-settings:hover {
     color: var(--atm-text);
-    background: var(--atm-surface-muted);
+    background: var(--atm-hover);
   }
 }
 .atm-nav-secondary {
@@ -124,10 +148,58 @@
   line-height: 1.35;
 }
 .atm-sidebar-footer {
+  position: relative;
   flex: none;
   margin-top: auto;
-  padding-top: 10px;
-  border-top: 1px solid var(--atm-border);
+  padding-top: 8px;
+}
+/* 服务状态灯压在「设置」这一行的右侧：一颗灯加两个字。不接指针，点这一行仍然是进设置。 */
+.atm-service-status {
+  position: absolute;
+  /* 竖直居中到设置按钮：页脚上内边距 8 + 按钮高 36 的一半。 */
+  top: 26px;
+  right: 12px;
+  display: inline-flex;
+  transform: translateY(-50%);
+  align-items: center;
+  gap: 6px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  --status-dot: var(--atm-st-ready);
+}
+.atm-service-status::before {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--status-dot);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-dot) 20%, transparent);
+  content: "";
+}
+.atm-service-status[data-state="ok"] {
+  --status-dot: var(--atm-st-done);
+}
+.atm-service-status[data-state="error"] {
+  color: var(--atm-danger);
+  --status-dot: var(--atm-danger);
+  /* 出错时要能悬停看原因；只占右端那两个字，设置按钮的其余部分照常可点。 */
+  cursor: help;
+  pointer-events: auto;
+}
+/* 设置页「本地服务」一行里的同一盏灯：随行排版，不再贴着侧栏按钮定位。 */
+.atm-service-status.is-inline {
+  position: static;
+  transform: none;
+  pointer-events: auto;
+}
+@media (forced-colors: active) {
+  .atm-service-status::before {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
 }
 .atm-sidebar-settings {
   justify-content: flex-start;
@@ -159,14 +231,16 @@
      Keep each row content-sized; the list, not its buttons, absorbs overflow. */
   grid-auto-rows: max-content;
   gap: 6px;
-  /* Leave room for the keyboard focus outline inside the scroll clipping edge. */
+  /* Leave room for the keyboard focus outline inside the scroll clipping edge;
+     the negative margin keeps the rows' left edge on the same line as the nav above. */
+  margin: 0 -4px;
   padding: 4px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 .atm-sidebar-project-list .atm-nav-project {
-  min-height: 42px;
-  padding: 9px 10px;
+  min-height: 40px;
+  padding: 8px 10px;
 }
 
 .atm-main {
@@ -182,10 +256,20 @@
   column-gap: 16px;
   align-items: center;
   min-height: 64px;
-  padding: 10px 28px;
-  border-bottom: 1px solid var(--atm-border);
-  background: color-mix(in srgb, var(--atm-bg) 88%, transparent);
+  /* 顶栏这一行的垂直中线和侧栏字标对齐（都在 y=40）。 */
+  padding: 18px 28px 2px;
+  background: transparent;
+}
+/* 内容滚到顶栏下面时，垫一层随彩雾走的磨砂底，下缘渐隐，不画硬分界线。 */
+.atm-topbar::before {
+  position: absolute;
+  inset: 0 0 -14px;
+  z-index: -1;
+  background: color-mix(in srgb, var(--atm-bg) 78%, transparent);
   backdrop-filter: blur(14px);
+  content: "";
+  mask-image: linear-gradient(#000 72%, transparent);
+  pointer-events: none;
 }
 .atm-titlebar-drag {
   min-width: 0;
@@ -196,23 +280,28 @@
   align-items: center;
   gap: 9px;
   width: 100%;
-  min-height: 40px;
-  padding: 0 13px;
-  border: 1px solid var(--atm-border);
-  border-radius: 10px;
-  color: var(--atm-text-muted);
+  min-height: 38px;
+  padding: 0 8px 0 16px;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: 999px;
+  color: var(--atm-text-faint);
   background: var(--atm-surface);
   text-align: left;
-  box-shadow: var(--atm-shadow-subtle);
+  transition: border-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+@media (hover: hover) and (pointer: fine) {
+  .atm-search-button:hover {
+    border-color: var(--atm-control-border-hover);
+  }
 }
 .atm-search-button kbd {
   margin-left: auto;
-  padding: 2px 6px;
-  border: 1px solid var(--atm-border);
-  border-radius: 5px;
-  color: var(--atm-text-muted);
-  background: var(--atm-surface-muted);
-  font: 11px var(--atm-mono);
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--atm-text-faint);
+  background: var(--atm-hover-strong);
+  font: 500 11px var(--atm-mono);
 }
 .atm-top-actions {
   display: flex;
@@ -221,18 +310,18 @@
   gap: 8px;
 }
 .atm-theme-toggle {
-  flex: 0 0 38px;
+  flex: 0 0 36px;
 }
 .atm-top-actions kbd {
-  padding: 2px 5px;
-  border: 1px solid var(--atm-border);
-  border-radius: 5px;
-  color: var(--atm-text-muted);
-  background: var(--atm-surface-muted);
-  font: 10px var(--atm-mono);
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 999px;
+  color: inherit;
+  background: color-mix(in srgb, var(--atm-surface) 72%, transparent);
+  font: 500 10px var(--atm-mono);
 }
 .atm-content {
   width: min(100%, 2280px);
   margin: 0 auto;
-  padding: 30px 32px 48px;
+  padding: 20px 28px 48px;
 }

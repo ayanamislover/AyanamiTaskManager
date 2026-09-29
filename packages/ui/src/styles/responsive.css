@@ -58,7 +58,7 @@
   .atm-sidebar {
     padding-inline: 8px;
   }
-  .atm-brand span,
+  .atm-brand .atm-wordmark,
   .atm-nav-title,
   .atm-nav button span,
   .atm-sidebar-settings span {
@@ -75,6 +75,22 @@
   .atm-sidebar-settings {
     justify-content: center;
     padding-inline: 0;
+  }
+  /* 「工作区」折叠按钮不在 .atm-nav 里，上面那条藏不到它的字，68px 宽里会被挤成竖排。 */
+  .atm-nav-disclosure {
+    justify-content: center;
+    padding-inline: 0;
+  }
+  .atm-nav-disclosure span {
+    display: none;
+  }
+  /* 侧栏状态灯只留圆点，挂在齿轮右上角；字用 font-size: 0 收起，读屏照样读得到。
+     设置页行内那盏（.is-inline）有地方放字，不收。 */
+  .atm-service-status:not(.is-inline) {
+    top: 19px;
+    right: 8px;
+    gap: 0;
+    font-size: 0;
   }
   .atm-topbar {
     grid-template-columns: 1fr auto;

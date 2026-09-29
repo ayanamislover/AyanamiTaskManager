@@ -7,7 +7,7 @@ export type McpRuntime = {
   env?: Record<string, string>;
 };
 
-export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE";
+export type McpClient = "CODEX" | "CLAUDE" | "CLAUDE_CODE" | "KIMI_CODE";
 export type InstallResult = { client: McpClient; path: string; backupPath: string | null };
 export type McpProfile = "core" | "memory" | "actions";
 

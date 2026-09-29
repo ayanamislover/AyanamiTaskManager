@@ -9,6 +9,7 @@ import {
 } from "./read-model-mappers.js";
 import type {
   ChecklistView,
+  ProgressStripCounts,
   RecentClosedWorkItemPage,
   TaskViewProjectionPage,
   WorkItemListFilters,
@@ -27,6 +28,10 @@ import {
 } from "./task-list-pagination.js";
 import { taskViewProjectionSql, type TaskViewProjectionRow } from "./task-view-query.js";
 import { CLOSED_STATUS_SQL, FINISHED_AT_SQL, hydratedWorkItemSql } from "./work-item-sql.js";
+
+const PROGRESS_STRIP_ACTIVE_SQL =
+  "('BACKLOG', 'CLAIMED', 'IN_PROGRESS', 'VERIFYING', 'WAITING_AGENT')";
+const PROGRESS_STRIP_WAITING_SQL = "('WAITING_USER', 'BLOCKED')";
 
 export class TaskReadModel {
   constructor(
@@ -218,6 +223,26 @@ export class TaskReadModel {
           : null,
       hasMore,
       total,
+    };
+  }
+
+  progressStrip(since: string): ProgressStripCounts {
+    const row = this.sqlite
+      .prepare(
+        `SELECT
+           SUM(CASE WHEN status = 'DONE' AND completed_at >= ? THEN 1 ELSE 0 END) AS done,
+           SUM(CASE WHEN status IN ${PROGRESS_STRIP_ACTIVE_SQL} THEN 1 ELSE 0 END) AS active,
+           SUM(CASE WHEN status IN ${PROGRESS_STRIP_WAITING_SQL} THEN 1 ELSE 0 END) AS waiting,
+           SUM(CASE WHEN status = 'READY' THEN 1 ELSE 0 END) AS ready
+         FROM work_items WHERE archived_at IS NULL`,
+      )
+      .get(since) as Record<"done" | "active" | "waiting" | "ready", number | null>;
+    return {
+      since,
+      done: Number(row.done ?? 0),
+      active: Number(row.active ?? 0),
+      waiting: Number(row.waiting ?? 0),
+      ready: Number(row.ready ?? 0),
     };
   }
 

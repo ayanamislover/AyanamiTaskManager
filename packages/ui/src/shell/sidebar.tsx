@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/CaretRight";
 import { CheckSquareIcon as CheckSquare } from "@phosphor-icons/react/dist/icons/CheckSquare";
 import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-icons/react/dist/icons/ClockCounterClockwise";
@@ -12,6 +12,7 @@ import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/i
 import type { Route, SidebarProject } from "../contracts.js";
 import { sidebarProjectHint } from "../presentation.js";
 import { useProjectReorder, type ProjectOrder } from "../hooks/use-project-reorder.js";
+import { Wordmark } from "./wordmark.js";
 
 /** 没接排序时的空实现：Sidebar 在用例里会被单独渲染。 */
 const NO_REORDER: ProjectOrder = {
@@ -27,12 +28,15 @@ export function Sidebar({
   projects,
   brandLogoSrc,
   projectOrder,
+  footerStatus,
 }: {
   route: Route;
   setRoute: (route: Route) => void;
   projects: SidebarProject[];
   brandLogoSrc?: string;
   projectOrder?: ProjectOrder;
+  /** 设置一行右侧的本机服务状态灯。 */
+  footerStatus?: ReactNode;
 }) {
   const activeProjects = projects.filter((project) => project.lifecycle === "ACTIVE");
   const reorder = useProjectReorder(
@@ -73,7 +77,7 @@ export function Sidebar({
               <CheckSquare size={18} weight="bold" />
             )}
           </span>
-          <span>AyanamiTaskManager</span>
+          <Wordmark />
         </div>
         <div className="atm-nav-group atm-primary-navigation">
           <nav className="atm-nav" aria-label="主导航">
@@ -149,6 +153,7 @@ export function Sidebar({
             <GearSix size={18} />
             <span>设置</span>
           </button>
+          {footerStatus}
         </div>
       </div>
     </aside>

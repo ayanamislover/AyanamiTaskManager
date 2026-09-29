@@ -21,6 +21,7 @@ export function registerProjectRoutes(
       projectFailures: doctor.projects.filter((project) => !project.ok),
       projectionSummary: doctor.projectionSummary,
       projectionFailures: doctor.projectionFailures,
+      startedAt: options.startedAt ?? null,
       at: new Date().toISOString(),
     };
   });

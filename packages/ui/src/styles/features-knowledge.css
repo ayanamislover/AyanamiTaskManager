@@ -10,7 +10,6 @@
 .atm-knowledge-search {
   display: grid;
   gap: 12px;
-  border-bottom: 1px solid var(--atm-border);
 }
 .atm-knowledge-list {
   display: grid;
@@ -34,7 +33,7 @@
 }
 .atm-knowledge-list-item[data-selected="true"] {
   background: var(--atm-primary-soft);
-  box-shadow: inset 3px 0 var(--atm-primary-fill);
+  box-shadow: inset 3px 0 var(--atm-primary);
 }
 .atm-knowledge-list-item .atm-row-title {
   white-space: normal;
@@ -99,7 +98,7 @@
   gap: 5px;
   min-width: 0;
   padding: 10px 11px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-knowledge-meta-grid span {
@@ -116,12 +115,12 @@
   gap: 5px;
   padding: 11px 12px;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-knowledge-toc {
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text-muted);
   background: var(--atm-surface-muted);
 }
@@ -143,7 +142,7 @@
   margin: 0;
   padding: 16px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text);
   background: var(--atm-bg);
   font: 12px/1.65 var(--atm-mono);

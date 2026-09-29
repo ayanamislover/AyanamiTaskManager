@@ -15,6 +15,8 @@
 }
 .atm-project-main {
   display: grid;
+  /* 标题行、名称、说明、页脚：说明占剩余高度，说明一行还是两行，名称都在同一高度。 */
+  grid-template-rows: auto auto 1fr auto;
   width: 100%;
   min-height: 148px;
   padding: 0;
@@ -80,21 +82,31 @@
 }
 .atm-progress {
   width: 100%;
-  height: 5px;
+  height: 6px;
   margin-top: 11px;
-  border-radius: 3px;
-  background: var(--atm-surface-muted);
+  border-radius: 999px;
+  background: var(--atm-hover-strong);
   overflow: hidden;
 }
 .atm-progress > span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--atm-primary);
+  background: var(--atm-primary-fill);
+}
+/* 高对比度模式会丢掉渐变背景，填充段就看不见了：换成系统高亮色。 */
+@media (forced-colors: active) {
+  .atm-progress {
+    border: 1px solid CanvasText;
+  }
+  .atm-progress > span {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
 }
 .atm-overview-projects {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 12px;
   padding: 14px;
 }
@@ -121,7 +133,7 @@
 }
 .atm-project-stats span {
   padding: 6px 7px;
-  border-radius: 7px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text-muted);
   background: var(--atm-surface-muted);
   font-size: 11px;
@@ -153,7 +165,7 @@
 .atm-projection-failure {
   min-width: 0;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   overflow: hidden;
 }
 .atm-projection-failure .atm-row {
@@ -171,8 +183,8 @@
 }
 .atm-attention-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 18px;
+  grid-template-columns: 1fr;
+  gap: 6px;
 }
 .atm-attention-grid .atm-row-sub {
   display: flex;
@@ -237,7 +249,7 @@
   gap: 12px;
   padding: 13px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-integration-card > header {
@@ -279,7 +291,7 @@
 }
 .atm-integration-preview {
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-integration-preview > summary {
@@ -315,7 +327,7 @@
   gap: 9px;
   padding: 9px 10px;
   border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-text);
   background: var(--atm-surface);
   text-align: left;
@@ -479,7 +491,7 @@
   display: grid;
   gap: 7px;
   padding: 11px 12px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   background: var(--atm-surface-muted);
 }
 .atm-engineering-kpis span {
@@ -516,7 +528,7 @@
   display: grid;
   max-height: 420px;
   border: 1px solid var(--atm-border);
-  border-radius: 10px;
+  border-radius: var(--atm-radius-row);
   overflow: auto;
 }
 .atm-mcp-bridge-row {
@@ -582,7 +594,220 @@
 }
 .atm-inline-warning {
   padding: 10px 12px;
-  border-radius: 9px;
+  border-radius: var(--atm-radius-row);
   color: var(--atm-warning);
   background: color-mix(in srgb, var(--atm-warning) 10%, transparent);
+}
+
+/* 项目进度条：四段（已完成 / 进行中 / 等你 / 可开始），已完成只算本次启动以来。 */
+.atm-progress-strip {
+  margin: 18px 0;
+  padding: 16px 20px;
+}
+.atm-progress-strip-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.atm-progress-strip-big {
+  display: flex;
+  min-width: 72px;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1;
+}
+.atm-progress-strip-big small {
+  color: var(--atm-text-faint);
+  font-size: 11px;
+  font-weight: 400;
+}
+.atm-progress-strip-bar {
+  display: flex;
+  flex: 1;
+  height: 10px;
+  gap: 3px;
+  border-radius: 999px;
+  background: var(--atm-hover-strong);
+  overflow: hidden;
+}
+.atm-progress-strip-bar i {
+  display: block;
+  border-radius: 999px;
+  background: var(--segment);
+}
+:root:not([data-theme="dark"]) .atm-progress-strip-bar i {
+  background: color-mix(in srgb, var(--segment) 72%, #fff);
+}
+.atm-progress-strip-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  margin-top: 12px;
+}
+.atm-progress-strip-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--atm-text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.atm-progress-strip-legend span::before {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--segment);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--segment) 18%, transparent);
+  content: "";
+}
+.atm-progress-strip-legend b {
+  margin-left: 2px;
+  color: var(--atm-text);
+  font-weight: 600;
+}
+.atm-progress-strip [data-segment="done"] {
+  --segment: var(--atm-st-done);
+}
+.atm-progress-strip [data-segment="active"] {
+  --segment: var(--atm-st-progress);
+}
+.atm-progress-strip [data-segment="waiting"] {
+  --segment: var(--atm-st-user);
+}
+.atm-progress-strip [data-segment="ready"] {
+  --segment: var(--atm-st-ready);
+}
+@media (forced-colors: active) {
+  .atm-progress-strip-bar i,
+  .atm-progress-strip-legend span::before {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}
+
+/* 总览：概况胶囊带 + 主列（等你处理、项目）/ 侧列（项目提醒、最近变化、临时任务）。 */
+.atm-stat-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.atm-stat-band > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  color: var(--atm-text-muted);
+  /* 只是读数，不能点：不给阴影，免得看起来像一排按钮。 */
+  background: color-mix(in srgb, var(--atm-surface) 72%, transparent);
+  font-size: 13px;
+}
+.atm-stat-band b {
+  color: var(--atm-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+.atm-stat-band > span[data-tone="blocked"] b {
+  /* 状态色本身是给圆点和色条的，直接当字色只有 2.5–3.6:1；混进正文色压到 ≥ 4.5。 */
+  color: color-mix(in srgb, var(--atm-st-blocked) 55%, var(--atm-text));
+}
+.atm-stat-band > span[data-tone="user"] b {
+  color: color-mix(in srgb, var(--atm-st-user) 55%, var(--atm-text));
+}
+.atm-stat-band > .atm-stat-band-seq {
+  margin-left: auto;
+  padding-inline: 4px;
+  color: var(--atm-text-faint);
+  background: transparent;
+  font: 11px var(--atm-mono);
+}
+.atm-overview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+.atm-overview-main,
+.atm-overview-side {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+@media (max-width: 1100px) {
+  .atm-overview-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.atm-inbox-row {
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+  color: inherit;
+}
+/* 分隔线从文字开始，不贯穿图标块。 */
+.atm-inbox-row + .atm-inbox-row::before {
+  left: 56px;
+}
+.atm-inbox-row[data-kind="BLOCKED"] {
+  --kind: var(--atm-st-blocked);
+}
+.atm-inbox-row[data-kind="WAITING_USER"] {
+  --kind: var(--atm-st-user);
+}
+.atm-inbox-row[data-kind="VERIFYING"] {
+  --kind: var(--atm-st-verify);
+}
+.atm-inbox-icon {
+  display: grid;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--kind);
+}
+:root[data-theme="dark"] .atm-inbox-icon {
+  color: var(--atm-bg);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.14);
+}
+.atm-inbox-main {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+}
+.atm-inbox-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.atm-inbox-meta b {
+  color: color-mix(in srgb, var(--kind) 55%, var(--atm-text));
+  font-weight: 600;
+}
+.atm-inbox-main .atm-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-inbox-time {
+  flex: none;
+  color: var(--atm-text-faint);
+  font: 11px var(--atm-mono);
+  line-height: 20px;
+}
+@media (forced-colors: active) {
+  .atm-inbox-icon {
+    border: 1px solid CanvasText;
+  }
 }

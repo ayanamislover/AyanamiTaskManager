@@ -1,21 +1,20 @@
 .atm-tabs {
   display: flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--atm-border);
-  border-radius: 10px;
-  background: var(--atm-surface-muted);
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--atm-control-fill);
 }
 .atm-tabs button {
-  min-height: 31px;
-  padding: 5px 10px;
+  min-height: 30px;
+  padding: 5px 14px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 999px;
   color: var(--atm-text-muted);
   background: transparent;
 }
 .atm-tabs button[aria-selected="true"] {
-  color: var(--atm-text);
+  color: var(--atm-control-text);
   background: var(--atm-surface);
   box-shadow: var(--atm-shadow-raised);
 }
@@ -27,10 +26,10 @@
   margin-bottom: 14px;
 }
 .atm-filter {
-  min-height: 38px;
-  padding: 7px 10px;
-  border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  min-height: 36px;
+  padding: 7px 14px;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: 999px;
   background: var(--atm-surface);
 }
 .atm-select {
@@ -38,9 +37,9 @@
   min-width: 120px;
 }
 .atm-select.atm-field-shell {
-  min-height: 38px;
-  border: 1px solid var(--atm-border);
-  border-radius: 9px;
+  min-height: 36px;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: 999px;
   background: var(--atm-surface);
   transition:
     border-color var(--atm-duration-hover) var(--atm-ease-hover),
@@ -67,12 +66,12 @@
 .atm-select-trigger {
   display: flex;
   width: 100%;
-  min-height: 36px;
+  min-height: 33px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 7px 10px;
-  border-radius: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
   color: var(--atm-text);
   background: transparent;
   text-align: left;
@@ -105,18 +104,18 @@
 }
 .atm-select-popover {
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 8px);
   left: 0;
   z-index: 45;
   display: grid;
   min-width: max(100%, 180px);
   max-width: min(280px, calc(100vw - 32px));
   max-height: min(320px, calc(100vh - 120px));
-  padding: 5px;
+  padding: 6px;
   border: 1px solid var(--atm-border);
-  border-radius: 11px;
+  border-radius: 18px;
   background: var(--atm-surface);
-  box-shadow: var(--atm-shadow-raised);
+  box-shadow: var(--atm-shadow);
   opacity: 1;
   overflow-y: auto;
   transform: translateY(0) scale(1);
@@ -154,9 +153,9 @@
   grid-template-columns: minmax(0, 1fr) 16px;
   align-items: center;
   gap: 10px;
-  padding: 7px 9px;
+  padding: 7px 11px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 12px;
   color: var(--atm-text-muted);
   background: transparent;
   text-align: left;
@@ -170,8 +169,8 @@
   color: var(--atm-primary-strong);
 }
 .atm-select-option[data-selected="true"] {
-  color: var(--atm-text);
-  background: color-mix(in srgb, var(--atm-primary) 12%, transparent);
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
 }
 .atm-filterbar {
   display: flex;
@@ -190,17 +189,17 @@
 }
 @media (hover: hover) and (pointer: fine) {
   .atm-select.atm-field-shell:has(> .atm-select-trigger:hover) {
-    border-color: color-mix(in srgb, var(--atm-primary) 38%, var(--atm-border));
+    border-color: var(--atm-control-border-hover);
     background: var(--atm-surface);
   }
 
   .atm-select-option:hover {
     color: var(--atm-text);
-    background: var(--atm-surface-muted);
+    background: var(--atm-hover-strong);
   }
 }
 .atm-record {
-  padding: 16px 18px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--atm-border);
 }
 .atm-record:last-child {
@@ -225,7 +224,8 @@
 }
 .atm-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0 2px;
   /* 列宽由每张表自己的 colgroup 定死。用默认的 auto 布局时，任务标题那一列的
      max-content 会把整张表撑开，剩下的列被压到 min-content——而中文的
      min-content 就是一个字宽，于是表头和单元格逐字竖排成一列。长英文标题
@@ -262,10 +262,9 @@
 .atm-table th {
   height: 39px;
   padding: 7px 12px;
-  border-bottom: 1px solid var(--atm-border);
-  color: var(--atm-text-muted);
+  color: var(--atm-text-faint);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 500;
   text-align: left;
 }
 .atm-table-sort {
@@ -310,30 +309,34 @@
   }
 }
 .atm-table td {
-  height: 51px;
+  height: 48px;
   padding: 8px 12px;
-  border-bottom: 1px solid var(--atm-border);
 }
-.atm-table tr:last-child td {
-  border-bottom: 0;
+.atm-table td:first-child {
+  border-radius: var(--atm-radius-row) 0 0 var(--atm-radius-row);
+}
+.atm-table td:last-child {
+  border-radius: 0 var(--atm-radius-row) var(--atm-radius-row) 0;
 }
 .atm-table tbody tr {
   cursor: pointer;
 }
-.atm-table tbody tr:hover {
-  background: var(--atm-surface-muted);
+.atm-table tbody tr:hover td {
+  background: var(--atm-hover);
+}
+.atm-table tbody tr[tabindex]:focus-visible td {
+  background: var(--atm-hover-strong);
 }
 .atm-table tbody tr[tabindex]:focus-visible {
-  background: var(--atm-surface-muted);
   outline-offset: -2px;
 }
 /* 已结束任务单独成组放在表尾。分组行只是标题，不可点。 */
 .atm-table .atm-table-section th {
-  height: 34px;
-  padding: 6px 12px;
-  border-top: 1px solid var(--atm-border);
-  background: var(--atm-surface-muted);
+  height: 38px;
+  padding: 12px 12px 4px;
+  color: var(--atm-text-muted);
   font-size: 12px;
+  font-weight: 600;
 }
 .atm-table .atm-table-section th .atm-row-sub {
   margin-left: 8px;
@@ -342,7 +345,7 @@
 .atm-table tbody tr.atm-table-section {
   cursor: default;
 }
-.atm-table tbody tr.atm-table-section:hover {
+.atm-table tbody tr.atm-table-section:hover th {
   background: transparent;
 }
 .atm-closed-tasks .atm-row-title {
