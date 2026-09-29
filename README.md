@@ -217,7 +217,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/screenshot-overview-dark.png" />
-    <img src="./docs/assets/screenshot-overview-light.png" alt="ATM 总览页：跨项目 KPI、需要处理清单、各项目健康度与最近变化时间线" width="100%" />
+    <img src="./docs/assets/screenshot-overview-light.png" alt="ATM 总览页：跨项目 KPI、等你处理清单、各项目健康度与最近变化时间线" width="100%" />
   </picture>
   <p><sub>总览把所有受管项目的进行中、受阻、等待和在线 Agent 汇到一屏。</sub></p>
 </div>

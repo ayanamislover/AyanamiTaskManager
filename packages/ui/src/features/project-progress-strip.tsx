@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 
@@ -25,7 +26,7 @@ const SEGMENTS = [
 ] as const;
 
 export const PROGRESS_STRIP_HINT =
-  "已完成只算本次 ATM 启动以来完成的任务，重启后清零。待整理、验收中、等待 Agent 计入进行中；受阻计入等你。";
+  "已完成只算本次 ATM 启动以来完成的任务，重启后清零。进行中含待整理、已领取、执行中、验收中和等待 Agent；等你含等你回复和受阻（受阻多半要你出手解除）。";
 
 export function progressStripSegments(counts: ProgressStripCounts): ProgressStripSegment[] {
   const total = counts.done + counts.active + counts.waiting + counts.ready;
@@ -40,8 +41,17 @@ export function progressStripSegments(counts: ProgressStripCounts): ProgressStri
 export function ProgressStripView({ counts }: { counts: ProgressStripCounts }) {
   const segments = progressStripSegments(counts);
   const done = segments[0]!;
+  const hintId = useId();
   return (
-    <section className="atm-panel atm-progress-strip" aria-label="项目进度">
+    // 口径说明只放在 title 里，键盘和读屏都够不着；再挂一份给 aria-describedby。
+    <section
+      className="atm-panel atm-progress-strip"
+      aria-label="项目进度"
+      aria-describedby={hintId}
+    >
+      <span className="atm-visually-hidden" id={hintId}>
+        {PROGRESS_STRIP_HINT}
+      </span>
       <div className="atm-progress-strip-row">
         <div className="atm-progress-strip-big">
           {Math.round(done.percent)}%<small>本次完成</small>

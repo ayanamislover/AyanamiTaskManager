@@ -28,6 +28,8 @@ describe("Registry 与每项目独立数据库", () => {
       expect(projects.every((project) => project.lifecycle === "ACTIVE")).toBe(true);
       const health = await manager.doctor();
       expect(health.registry.ok).toBe(true);
+      // 设置页「SQLite」一行读的就是这里；少了 wal 会显示成「WAL undefined」。
+      expect(health.registry.wal).toBe(true);
       expect(health.projects).toHaveLength(10);
       expect(health.projects.every((project) => project.ok && project.separateDatabase)).toBe(true);
     } finally {

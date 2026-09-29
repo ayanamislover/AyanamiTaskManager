@@ -73,5 +73,6 @@ export {
   isCodexConfigInstalled,
   installedKimiCodeProfileLaunches,
   isKimiCodeConfigInstalled,
+  kimiCodeTransportMismatch,
 } from "./mcp-inspection.js";
 export { installKimiCodeConfig, uninstallKimiCodeConfig } from "./kimi-code-config.js";

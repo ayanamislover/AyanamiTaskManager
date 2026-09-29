@@ -94,6 +94,16 @@
   border-radius: inherit;
   background: var(--atm-primary-fill);
 }
+/* 高对比度模式会丢掉渐变背景，填充段就看不见了：换成系统高亮色。 */
+@media (forced-colors: active) {
+  .atm-progress {
+    border: 1px solid CanvasText;
+  }
+  .atm-progress > span {
+    background: Highlight;
+    forced-color-adjust: none;
+  }
+}
 .atm-overview-projects {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -678,7 +688,7 @@
   }
 }
 
-/* 总览：概况胶囊带 + 主列（等你处理、项目）/ 侧列（需要处理、最近变化、临时任务）。 */
+/* 总览：概况胶囊带 + 主列（等你处理、项目）/ 侧列（项目提醒、最近变化、临时任务）。 */
 .atm-stat-band {
   display: flex;
   flex-wrap: wrap;
@@ -694,8 +704,8 @@
   padding: 7px 14px;
   border-radius: 999px;
   color: var(--atm-text-muted);
-  background: var(--atm-surface);
-  box-shadow: var(--atm-shadow-subtle);
+  /* 只是读数，不能点：不给阴影，免得看起来像一排按钮。 */
+  background: color-mix(in srgb, var(--atm-surface) 72%, transparent);
   font-size: 13px;
 }
 .atm-stat-band b {
@@ -704,17 +714,17 @@
   font-weight: 600;
 }
 .atm-stat-band > span[data-tone="blocked"] b {
-  color: var(--atm-st-blocked);
+  /* 状态色本身是给圆点和色条的，直接当字色只有 2.5–3.6:1；混进正文色压到 ≥ 4.5。 */
+  color: color-mix(in srgb, var(--atm-st-blocked) 55%, var(--atm-text));
 }
 .atm-stat-band > span[data-tone="user"] b {
-  color: var(--atm-st-user);
+  color: color-mix(in srgb, var(--atm-st-user) 55%, var(--atm-text));
 }
 .atm-stat-band > .atm-stat-band-seq {
   margin-left: auto;
   padding-inline: 4px;
   color: var(--atm-text-faint);
   background: transparent;
-  box-shadow: none;
   font: 11px var(--atm-mono);
 }
 .atm-overview-layout {
@@ -782,7 +792,7 @@
   font-size: 11px;
 }
 .atm-inbox-meta b {
-  color: var(--kind);
+  color: color-mix(in srgb, var(--kind) 55%, var(--atm-text));
   font-weight: 600;
 }
 .atm-inbox-main .atm-row-sub {

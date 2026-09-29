@@ -130,8 +130,6 @@
 }
 .atm-list {
   display: grid;
-}
-.atm-list {
   padding: 0 8px 8px;
 }
 .atm-row {

@@ -42,4 +42,13 @@ describe("项目进度条", () => {
     expect(markup).toContain("本次 ATM 启动以来");
     expect(markup).toContain('aria-label="已完成 5，进行中 5，等你 2，可开始 2"');
   });
+
+  it("口径说明读屏也读得到，且写明「等你」含受阻、「进行中」含验收中", () => {
+    const markup = renderToStaticMarkup(createElement(ProgressStripView, { counts }));
+    const describedBy = /aria-describedby="([^"]+)"/u.exec(markup)?.[1];
+    expect(describedBy).toBeTruthy();
+    const hint = new RegExp(`id="${describedBy}"[^>]*>([^<]+)<`, "u").exec(markup)?.[1];
+    expect(hint).toContain("等你含等你回复和受阻");
+    expect(hint).toContain("验收中");
+  });
 });

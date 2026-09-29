@@ -205,11 +205,26 @@ export function installedKimiCodeProfileLaunches(
   return jsonProfileLaunches(path);
 }
 
+/**
+ * Kimi 要求每个服务写明 `transport`；缺了或写错，Kimi 就起不来这个服务，
+ * 而 command / args / env 看起来全对。所以「装好了」和「过期了」都要把它算进去，
+ * 否则界面显示已安装、启动修复与「修复」按钮也都认为无事可做。
+ */
+export function kimiCodeTransportMismatch(path = defaultKimiCodeConfigPath()): boolean {
+  const servers = readJsonMcpServers(path) ?? {};
+  return Object.entries(servers).some(
+    ([name, server]) => isManagedMcpServerName(name) && server.transport !== "stdio",
+  );
+}
+
 export function isKimiCodeConfigInstalled(
   path = defaultKimiCodeConfigPath(),
   profiles?: readonly McpProfile[],
 ): boolean {
-  return installedProfileSetMatches(installedKimiCodeProfileLaunches(path), profiles);
+  return (
+    installedProfileSetMatches(installedKimiCodeProfileLaunches(path), profiles) &&
+    !kimiCodeTransportMismatch(path)
+  );
 }
 
 export function isCodexConfigInstalled(

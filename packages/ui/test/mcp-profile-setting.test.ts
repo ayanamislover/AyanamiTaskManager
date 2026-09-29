@@ -4,10 +4,12 @@ import { describe, expect, it } from "vitest";
 
 describe("memory Profile 设置说明", () => {
   it("默认完整工具面，并明确低内存降级损失与客户端重载要求", () => {
-    const source = readFileSync(
-      join(process.cwd(), "packages", "ui", "src", "features", "settings.tsx"),
-      "utf8",
-    );
+    // 接入卡片拆到了 agent-integration-card.tsx，两份一起看。
+    const source = ["settings.tsx", "agent-integration-card.tsx"]
+      .map((file) =>
+        readFileSync(join(process.cwd(), "packages", "ui", "src", "features", file), "utf8"),
+      )
+      .join("\n");
     expect(source).toContain("默认开启");
     expect(source).toContain("关闭后将失去");
     expect(source).toContain("atm_feedback");

@@ -33,10 +33,13 @@ function desktop(): DesktopBridge {
   } as unknown as DesktopBridge;
 }
 
-function renderSettings() {
+function renderSettings(
+  overrides: { ok?: boolean; integrations?: Array<Record<string, unknown>> } = {},
+) {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["status"], {
-    ok: true,
+    ok: overrides.ok ?? true,
+    projectFailures: overrides.ok === false ? [{ code: "BROKEN" }] : [],
     projectCount: 3,
     sqlite: { fts5: true, trigram: true, wal: true, sqliteVersion: "3.50.0" },
     projectionSummary: { healthy: 3, deferred: 0, failed: 0 },
@@ -58,7 +61,7 @@ function renderSettings() {
   });
   queryClient.setQueryData(
     ["agent-integrations"],
-    [
+    overrides.integrations ?? [
       {
         client: "CODEX",
         mcpInstalled: true,
@@ -150,6 +153,35 @@ describe("Settings feature", () => {
     expect(markup).toContain('role="radiogroup" aria-label="系统通知级别"');
     expect(markup.match(/role="radio"/gu)).toHaveLength(3);
     expect(markup).not.toMatch(/<select(?:\s|>)/u);
+  });
+
+  it("「本地服务」一行用正常 / 异常，SQLite 一行不出现 undefined", () => {
+    const healthy = renderSettings();
+    expect(healthy).toMatch(/本地服务<\/div>[\s\S]*?data-state="ok"[^>]*>正常</u);
+    expect(healthy).toContain("WAL true");
+    expect(healthy).not.toContain("undefined");
+    expect(healthy).not.toContain("MIGRATION_FAILED");
+    const broken = renderSettings({ ok: false });
+    expect(broken).toMatch(/data-state="error"[^>]*title="1 个项目库未通过检查"[^>]*>异常</u);
+  });
+
+  it("Kimi Code 没装时显示未检测到，安装按钮不可用", () => {
+    const missing = { state: "NOT_INSTALLED", version: null };
+    const markup = renderSettings({
+      integrations: [
+        {
+          client: "KIMI_CODE",
+          mcpInstalled: false,
+          repairError: null,
+          sharesRuleAndSkillsWith: null,
+          cliAvailable: false,
+          rule: { ...missing, path: "C:/Users/test/.kimi-code/AGENTS.md" },
+          skills: { state: "NOT_INSTALLED", skills: [{ name: "atm-plan", ...missing }] },
+        },
+      ],
+    });
+    expect(markup).toContain("未检测到，请先安装 Kimi Code");
+    expect(markup).toMatch(/<button class="atm-button primary" disabled="">安装<\/button>/u);
   });
 
   it("保持 Settings 查询、Mutation、30 秒刷新与 DesktopBridge 契约", () => {

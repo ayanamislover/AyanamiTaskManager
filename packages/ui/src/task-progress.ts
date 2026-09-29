@@ -65,3 +65,15 @@ export function taskProgressPresentation(task: TaskProgressInput) {
     blocker: blockedReason || waitingFor || null,
   };
 }
+
+/**
+ * 抽屉「状态」一行在状态徽标旁边要不要再放一个阶段徽标。
+ * 只有阶段和状态说的不是一回事（阶段不同，或者正在等人）时才放；
+ * 以前拿中文阶段名去比英文状态枚举，永远不相等，于是「执行中」旁边总跟着一个「执行中」。
+ */
+export function phaseBadgeLabel(
+  progress: Pick<ReturnType<typeof taskProgressPresentation>, "phase" | "waitingOn" | "phaseLabel">,
+  status: string,
+): string | null {
+  return progress.phase !== status || progress.waitingOn ? progress.phaseLabel : null;
+}

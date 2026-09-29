@@ -33,7 +33,7 @@ export function OverviewPage({
   onQuick: () => void;
   notify: Notify;
   TimelineEventRow: ComponentType<{ event: Record<string, unknown> }>;
-  /** 打开某个项目里的任务；不传时不显示「等你处理」（用例里单独渲染总览时）。 */
+  /** 打开某个项目里的任务；不传时点了不跳转（用例里单独渲染总览时）。 */
   onTask?: (project: string, key: string) => void;
 }) {
   const queryClient = useQueryClient();
@@ -101,12 +101,10 @@ export function OverviewPage({
     (sum, project) => sum + Number(project.active_agent_count ?? 0),
     0,
   );
+  // 等你回复、受阻的任务已经逐条列在「等你处理」里，这里不再按项目重复计数一遍；
+  // 只放那张表里没有的项目级、系统级提醒。
   const attention = projects.flatMap((project) => {
     const items: string[] = [];
-    if (Number(project.waiting_user_count ?? 0))
-      items.push(`${project.code} 有 ${project.waiting_user_count} 项等待用户`);
-    if (Number(project.blocked_count ?? 0))
-      items.push(`${project.code} 有 ${project.blocked_count} 项阻塞`);
     if (Number(project.overdue_count ?? 0))
       items.push(`${project.code} 有 ${project.overdue_count} 项超期`);
     if (Number(project.stale_claim_count ?? 0))
@@ -218,7 +216,7 @@ export function OverviewPage({
           {attention.length ? (
             <section className="atm-panel">
               <div className="atm-panel-head">
-                <h2>需要处理</h2>
+                <h2>项目提醒</h2>
                 <span className="atm-badge warning">{attention.length}</span>
               </div>
               <div className="atm-panel-body atm-attention-grid">

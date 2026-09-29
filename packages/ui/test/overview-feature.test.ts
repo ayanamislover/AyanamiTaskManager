@@ -122,7 +122,9 @@ describe("Overview feature", () => {
     expect(markup).toContain("<h1>总览</h1><p>正在汇总等你处理的事…</p>");
     expect(markup).not.toContain("没有等你处理的事");
     expect(markup).toContain("进行中项目");
-    expect(markup).toContain("需要处理");
+    // 等你回复、受阻已逐条列在「等你处理」里，「项目提醒」不再按项目重复计数。
+    expect(markup).not.toContain("项等待用户");
+    expect(markup).not.toContain("项阻塞");
     expect(markup).toContain("AyanamiTaskManager");
     expect(markup).toContain("seq 42");
     expect(markup).toContain('data-testid="timeline-row"');
@@ -130,7 +132,7 @@ describe("Overview feature", () => {
   });
 
   // ATM-T-0494：Agent 等着授权的恢复请求要在首屏被看见，不然请求挂着没人知道。
-  it("垃圾箱里有 Agent 恢复请求时进入「需要处理」", () => {
+  it("垃圾箱里有 Agent 恢复请求时进入「项目提醒」", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(["overview"], {
       sequence: 45,
@@ -162,7 +164,7 @@ describe("Overview feature", () => {
         TimelineEventRow: () => createElement("div"),
       }),
     );
-    expect(markup).toContain("需要处理");
+    expect(markup).toContain("项目提醒");
     expect(markup).toContain("codex 请求恢复垃圾箱里的 OLD，请在项目 → 垃圾箱授权或拒绝");
     expect(markup).not.toContain("QUIET");
   });

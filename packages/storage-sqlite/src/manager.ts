@@ -528,7 +528,13 @@ export class AyanamiDatabaseManager {
 
   async doctor(): Promise<{
     knowledge: { present: boolean; ok: boolean; error: string | null };
-    registry: { ok: boolean; sqliteVersion: string; fts5: boolean; trigram: boolean };
+    registry: {
+      ok: boolean;
+      sqliteVersion: string;
+      fts5: boolean;
+      trigram: boolean;
+      wal: boolean;
+    };
     projectCounts: Record<string, { total: number; failed: number }>;
     projectionSummary: ProjectionSummary;
     projectionFailures: ProjectionFailureView[];

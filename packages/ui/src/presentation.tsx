@@ -108,8 +108,36 @@ export function integrationState(report: AgentIntegrationReport): AgentIntegrati
 }
 
 export function agentClientLabel(client: McpClient): string {
-  if (client === "CODEX") return "Codex";
-  if (client === "CLAUDE_CODE") return "Claude Code";
-  if (client === "KIMI_CODE") return "Kimi Code";
-  return "Claude Desktop";
+  switch (client) {
+    case "CODEX":
+      return "Codex";
+    case "CLAUDE":
+      return "Claude Desktop";
+    case "CLAUDE_CODE":
+      return "Claude Code";
+    case "KIMI_CODE":
+      return "Kimi Code";
+    default:
+      return String(client satisfies never);
+  }
+}
+
+/** 主进程抛出的是错误码；设置页把认得的几种换成用户能照着处理的话，认不得的原样显示。 */
+const agentIntegrationErrors: Record<string, string> = {
+  KIMI_CODE_CONFIG_INVALID_JSON:
+    "~/.kimi-code/mcp.json 不是合法的 JSON，ATM 没有改动它。请先修正或移走这个文件，再点一次。",
+  CLAUDE_CONFIG_INVALID_JSON:
+    "Claude 的配置文件不是合法的 JSON，ATM 没有改动它。请先修正这个文件，再点一次。",
+  CLAUDE_CODE_CLI_NOT_FOUND: "没有找到 claude 命令行，Claude Code 的接入需要它来写配置。",
+  AGENT_SKILL_MODIFIED_REQUIRES_REPAIR: "有 Skill 被手动改过，请点「修复」（会先备份再覆盖）。",
+  AGENT_RULE_MODIFIED_REQUIRES_REPAIR:
+    "全局规则里 ATM 的区块被手动改过，请点「修复」（会先备份）。",
+  AGENT_RULE_NEEDS_EXPLICIT_UPDATE: "全局规则有新版本，请点「更新」。",
+};
+
+export function agentIntegrationErrorMessage(error: unknown): string | null {
+  if (error === null || error === undefined) return null;
+  const raw = error instanceof Error ? error.message : String(error);
+  const code = Object.keys(agentIntegrationErrors).find((each) => raw.includes(each));
+  return code ? agentIntegrationErrors[code]! : raw;
 }

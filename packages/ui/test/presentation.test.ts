@@ -5,6 +5,7 @@ import {
   AgentIntegrationBadge,
   Status,
   agentClientLabel,
+  agentIntegrationErrorMessage,
   compactPath,
   formatDuration,
   formatTime,
@@ -78,5 +79,15 @@ describe("UI presentation", () => {
     expect(agentClientLabel("CLAUDE_CODE")).toBe("Claude Code");
     expect(agentClientLabel("CLAUDE")).toBe("Claude Desktop");
     expect(agentClientLabel("KIMI_CODE")).toBe("Kimi Code");
+  });
+
+  it("接入错误码换成能照着处理的话；认不得的原样显示，没有错误时不显示", () => {
+    const ipc = new Error(
+      "Error invoking remote method 'atm:manage-agent-integration': Error: KIMI_CODE_CONFIG_INVALID_JSON",
+    );
+    expect(agentIntegrationErrorMessage(ipc)).toContain("~/.kimi-code/mcp.json 不是合法的 JSON");
+    expect(agentIntegrationErrorMessage("CLAUDE_CODE_CLI_NOT_FOUND")).toContain("claude 命令行");
+    expect(agentIntegrationErrorMessage(new Error("EACCES"))).toBe("EACCES");
+    expect(agentIntegrationErrorMessage(null)).toBeNull();
   });
 });

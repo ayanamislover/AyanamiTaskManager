@@ -239,14 +239,28 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
         codex.includes('mcp_servers."ayanami-task-manager-actions"'),
       codex,
     );
+    // Kimi 的三个档位要和 Claude 那边写下的启动方式完全一致（同一个 atm-mcp、同一组参数与环境），
+    // 无关 server 要逐字段原样保留，而不只是「还在」。
+    const sameLaunch = (left: unknown, right: unknown) => {
+      const pick = (value: unknown) => {
+        const entry = (value ?? {}) as Record<string, unknown>;
+        return JSON.stringify([entry.command, entry.args ?? [], entry.env ?? {}]);
+      };
+      return pick(left) === pick(right);
+    };
     check(
-      "打包应用迁移 Kimi Code：三个档位写明 stdio，旧单入口删除，保留无关 server 与顶层键",
+      "打包应用迁移 Kimi Code：三个档位写明 stdio 且启动方式与 Claude 一致，旧单入口删除，保留无关 server 与顶层键",
       kimi.theme === "keep-top-level" &&
-        Boolean(kimiServers.other) &&
+        JSON.stringify(kimiServers.other) ===
+          JSON.stringify({ transport: "stdio", command: "keep.exe", args: [] }) &&
         !kimiServers["ayanami-task-manager"] &&
-        ["core", "memory", "actions"].every(
-          (profile) => kimiServers[`ayanami-task-manager-${profile}`]?.transport === "stdio",
-        ),
+        (["core", "memory", "actions"] as const).every((profile) => {
+          const entry = kimiServers[`ayanami-task-manager-${profile}`];
+          return (
+            entry?.transport === "stdio" &&
+            sameLaunch(entry, servers?.[`ayanami-task-manager-${profile}`])
+          );
+        }),
       JSON.stringify(kimi),
     );
     check(

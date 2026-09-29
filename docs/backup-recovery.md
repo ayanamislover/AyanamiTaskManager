@@ -24,7 +24,7 @@ pnpm atm backup create --project ATM
 pnpm atm backup list --project ATM
 ```
 
-备份完成只有在 SQLite `quick_check`、文件 SHA-256 和 manifest 写入都成功后才返回成功。失败事件会出现在总览“需要处理”。
+备份完成只有在 SQLite `quick_check`、文件 SHA-256 和 manifest 写入都成功后才返回成功。失败事件会出现在总览“项目提醒”。
 
 ### 外部备份工具的目录边界
 

@@ -28,7 +28,7 @@ ATM 默认登记 `ayanami-task-manager-core`、`ayanami-task-manager-memory` 与
 
 ## Kimi Code 怎么接入
 
-在“设置 → Agent 接入”的 Kimi Code 一栏点“安装”（已有手工配置时点“修复”）。ATM 会备份并最小合并 `%USERPROFILE%\.kimi-code\mcp.json`（只替换 ATM 的三个 Profile，并写明 `"transport": "stdio"`，其他 MCP 服务保留），在 `%USERPROFILE%\.kimi-code\AGENTS.md` 写入受管规则区块，并安装 `atm-plan`、`atm-task`、`atm-knowledge` 到 `%USERPROFILE%\.kimi-code\skills`。VS Code 扩展与 `kimi` CLI 共用这一份配置，改完后重开 Kimi 会话即可。
+在“设置 → Agent 接入”的 Kimi Code 一栏点“安装”（以前手写过 ATM 配置也点“安装”：旧的单服务条目会换成三个 Profile；手写在 `AGENTS.md` 里的 ATM 规则不会被删，ATM 只管理自己的受管区块，重复的那段请自行删掉）。ATM 会备份并最小合并 `%USERPROFILE%\.kimi-code\mcp.json`（只替换 ATM 的三个 Profile，并写明 `"transport": "stdio"`，其他 MCP 服务保留），在 `%USERPROFILE%\.kimi-code\AGENTS.md` 写入受管规则区块，并安装 `atm-plan`、`atm-task`、`atm-knowledge` 到 `%USERPROFILE%\.kimi-code\skills`。VS Code 扩展与 `kimi` CLI 共用这一份配置，改完后重开 Kimi 会话即可。
 
 ## Claude Code 怎么接入
 

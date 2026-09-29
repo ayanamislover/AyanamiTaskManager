@@ -13,18 +13,20 @@
   --atm-surface: #ffffff;
   --atm-surface-muted: #f6f0ff;
   --atm-text: #3b2f55;
-  --atm-text-muted: #76698f;
-  --atm-text-faint: #9a8fb0;
+  /* 正文辅助色在白卡与画布上都要 ≥ 4.5:1；faint 只比 muted 浅一点，不再是 3:1 的装饰灰。 */
+  --atm-text-muted: #6a5d84;
+  --atm-text-faint: #74688c;
   --atm-border: rgb(168 85 247 / 0.1);
   --atm-primary: #a855f7;
   --atm-primary-strong: #9333ea;
   --atm-primary-fill: linear-gradient(135deg, #f472b6, #a78bfa);
   --atm-primary-soft: #f3e8ff;
   --atm-on-primary: #fff;
-  --atm-success: #3f9468;
-  --atm-warning: #c27a14;
-  --atm-danger: #d0466b;
-  --atm-info: #4f7fd0;
+  /* 这几色也当文字用（徽标、错误提示），按 12% 同色底上 ≥ 4.5:1 取值。 */
+  --atm-success: #2d7a52;
+  --atm-warning: #9a5d05;
+  --atm-danger: #b8335a;
+  --atm-info: #3a67b8;
   --atm-radius: 22px;
   --atm-radius-control: 999px;
   --atm-radius-row: 14px;
@@ -41,6 +43,9 @@
   --atm-hover-strong: rgb(168 85 247 / 0.1);
   --atm-control-fill: #f3e8ff;
   --atm-control-fill-hover: #ead5ff;
+  /* 输入框、下拉外壳的边：白底上用 control-fill 当边只有 1.18:1，几乎看不见框在哪。 */
+  --atm-control-border: #d2bdef;
+  --atm-control-border-hover: #bfa2e8;
   --atm-control-text: #7e22ce;
   --atm-glass: rgb(255 255 255 / 0.72);
 
@@ -106,6 +111,8 @@
   --atm-hover-strong: rgb(233 213 255 / 0.1);
   --atm-control-fill: #3f3358;
   --atm-control-fill-hover: #4a3c67;
+  --atm-control-border: #54457a;
+  --atm-control-border-hover: #6a5895;
   --atm-control-text: #ead5ff;
   --atm-glass: rgb(46 38 64 / 0.8);
   --atm-aurora-a: rgb(190 80 150 / 0.18);
@@ -155,6 +162,8 @@
     --atm-hover-strong: rgb(233 213 255 / 0.1);
     --atm-control-fill: #3f3358;
     --atm-control-fill-hover: #4a3c67;
+    --atm-control-border: #54457a;
+    --atm-control-border-hover: #6a5895;
     --atm-control-text: #ead5ff;
     --atm-glass: rgb(46 38 64 / 0.8);
     --atm-aurora-a: rgb(190 80 150 / 0.18);

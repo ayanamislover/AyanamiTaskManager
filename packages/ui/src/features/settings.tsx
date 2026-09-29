@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import {
@@ -16,14 +16,10 @@ import type {
   NotificationMode,
 } from "../contracts.js";
 import { McpBridgePanel } from "../mcp-bridge-panel.js";
-import {
-  AgentIntegrationBadge,
-  Status,
-  agentClientLabel,
-  formatTime,
-  integrationState,
-} from "../presentation.js";
+import { agentClientLabel, agentIntegrationErrorMessage, formatTime } from "../presentation.js";
 import { SystemProjectionPanel } from "../projection-health-panel.js";
+import { ServiceStatus } from "../shell/service-status.js";
+import { AgentIntegrationCard } from "./agent-integration-card.js";
 import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
 
@@ -178,7 +174,18 @@ export function SettingsPage({
                   <div className="atm-row-title">本地服务</div>
                   <div className="atm-row-sub">仅绑定 127.0.0.1，并要求本地令牌</div>
                 </div>
-                <Status value={query.data!.ok ? "ACTIVE" : "MIGRATION_FAILED"} />
+                {/* 和侧栏那盏灯同一套说法：正常 / 异常，不借任务状态的「活动」「迁移失败」。 */}
+                <ServiceStatus
+                  inline
+                  loading={false}
+                  error={
+                    query.data!.ok
+                      ? null
+                      : new Error(
+                          `${(query.data!.projectFailures as unknown[] | undefined)?.length ?? 0} 个项目库未通过检查`,
+                        )
+                  }
+                />
               </div>
               <div className="atm-row">
                 <div>
@@ -287,108 +294,16 @@ export function SettingsPage({
                       <LoadingRows count={2} />
                     ) : integrations.data ? (
                       <div className="atm-integration-list">
-                        {integrations.data.map((report) => {
-                          const overall = integrationState(report);
-                          const primaryAction: AgentIntegrationAction =
-                            overall === "MODIFIED"
-                              ? "REPAIR"
-                              : overall === "NEEDS_UPDATE"
-                                ? "UPDATE"
-                                : "INSTALL";
-                          const primaryLabel =
-                            primaryAction === "REPAIR"
-                              ? "修复"
-                              : primaryAction === "UPDATE"
-                                ? "更新"
-                                : "安装";
-                          const cliUnavailable =
-                            report.client === "CLAUDE_CODE" && !report.cliAvailable;
-                          const installNeedsCli = cliUnavailable && !report.mcpInstalled;
-                          return (
-                            <article className="atm-integration-card" key={report.client}>
-                              <header>
-                                <strong>{agentClientLabel(report.client)}</strong>
-                                <AgentIntegrationBadge state={overall} />
-                              </header>
-                              <div className="atm-integration-checks">
-                                <span>MCP</span>
-                                <AgentIntegrationBadge
-                                  state={report.mcpInstalled ? "INSTALLED" : "NOT_INSTALLED"}
-                                />
-                                {report.sharesRuleAndSkillsWith ? (
-                                  <>
-                                    <span>规则/技能</span>
-                                    <span className="atm-row-sub">与 Claude Desktop 共用</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <span>全局 ATM 规则</span>
-                                    <AgentIntegrationBadge state={report.rule.state} />
-                                    {report.skills.skills.map((skill) => (
-                                      <Fragment key={skill.name}>
-                                        <span>{skill.name}</span>
-                                        <AgentIntegrationBadge state={skill.state} />
-                                      </Fragment>
-                                    ))}
-                                  </>
-                                )}
-                                {cliUnavailable ? (
-                                  <>
-                                    <span>CLI</span>
-                                    <span className="atm-row-sub">未检测到，安装/卸载不可用</span>
-                                  </>
-                                ) : null}
-                              </div>
-                              {report.repairError ? (
-                                <div className="atm-inline-error" role="alert">
-                                  自动修复失败：{report.repairError}
-                                </div>
-                              ) : null}
-                              <div className="atm-actions">
-                                <button
-                                  className="atm-button"
-                                  disabled={manageIntegration.isPending}
-                                  onClick={() =>
-                                    manageIntegration.mutate({
-                                      client: report.client,
-                                      action: "PREVIEW",
-                                    })
-                                  }
-                                >
-                                  预览修改
-                                </button>
-                                {overall !== "INSTALLED" ? (
-                                  <button
-                                    className="atm-button primary"
-                                    disabled={manageIntegration.isPending || installNeedsCli}
-                                    onClick={() =>
-                                      manageIntegration.mutate({
-                                        client: report.client,
-                                        action: primaryAction,
-                                      })
-                                    }
-                                  >
-                                    {primaryLabel}
-                                  </button>
-                                ) : null}
-                                {overall !== "NOT_INSTALLED" ? (
-                                  <button
-                                    className="atm-button danger"
-                                    disabled={manageIntegration.isPending || cliUnavailable}
-                                    onClick={() =>
-                                      manageIntegration.mutate({
-                                        client: report.client,
-                                        action: "UNINSTALL",
-                                      })
-                                    }
-                                  >
-                                    卸载 ATM 接入
-                                  </button>
-                                ) : null}
-                              </div>
-                            </article>
-                          );
-                        })}
+                        {integrations.data.map((report) => (
+                          <AgentIntegrationCard
+                            key={report.client}
+                            report={report}
+                            pending={manageIntegration.isPending}
+                            onAction={(action) =>
+                              manageIntegration.mutate({ client: report.client, action })
+                            }
+                          />
+                        ))}
                       </div>
                     ) : null}
                     {integrationPreview ? (
@@ -405,7 +320,7 @@ export function SettingsPage({
             ) : (
               <Empty title="浏览器预览模式" text="Agent 自动安装仅在桌面应用内可用。" />
             )}
-            <MutationErrorAlert error={manageIntegration.error} />
+            <MutationErrorAlert error={agentIntegrationErrorMessage(manageIntegration.error)} />
           </div>
         </section>
         <section className="atm-panel atm-settings-maintenance">

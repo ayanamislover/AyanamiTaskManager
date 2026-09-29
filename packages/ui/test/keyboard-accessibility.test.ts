@@ -137,6 +137,29 @@ describe("keyboard accessibility primitives", () => {
     ).not.toMatch(drawerForcedFocus);
   });
 
+  it("进度条填充在 forced-colors 下换成系统高亮色，不随渐变一起消失", () => {
+    const styles = uiCssText();
+    const forcedProgress =
+      /@media \(forced-colors: active\) \{[^@]*?\.atm-progress > span \{\s*background: Highlight;/u;
+    expect(styles).toMatch(forcedProgress);
+    expect(
+      styles.replace(/(\.atm-progress > span \{\s*background: )Highlight;/u, "$1Canvas;"),
+    ).not.toMatch(forcedProgress);
+  });
+
+  it("窄屏侧栏收起时藏的是字标，logo 留着", () => {
+    // 收起侧栏的是把 --atm-sidebar 压到 68px 的那一段。
+    const narrow =
+      [...uiCssText().matchAll(/@media \(max-width: 760px\) \{([\s\S]*?)\n\}/gu)]
+        .map((match) => match[1]!)
+        .find((block) => block.includes("--atm-sidebar: 68px")) ?? "";
+    expect(narrow).toContain(".atm-brand .atm-wordmark");
+    expect(narrow).not.toMatch(/\.atm-brand span\b/u);
+    // 「工作区」折叠按钮的字和状态灯的「正常」两个字，68px 里都放不下。
+    expect(narrow).toMatch(/\.atm-nav-disclosure span \{\s*display: none;/u);
+    expect(narrow).toMatch(/\.atm-service-status \{[^}]*font-size: 0;/u);
+  });
+
   it("forced-colors 用等特指度规则恢复自绘 Select 的系统焦点环", () => {
     const styles = uiCssText();
     const forcedColorsSelect =

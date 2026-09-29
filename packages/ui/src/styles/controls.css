@@ -28,7 +28,7 @@
 .atm-filter {
   min-height: 36px;
   padding: 7px 14px;
-  border: 1.5px solid var(--atm-control-fill);
+  border: 1.5px solid var(--atm-control-border);
   border-radius: 999px;
   background: var(--atm-surface);
 }
@@ -38,7 +38,7 @@
 }
 .atm-select.atm-field-shell {
   min-height: 36px;
-  border: 1.5px solid var(--atm-control-fill);
+  border: 1.5px solid var(--atm-control-border);
   border-radius: 999px;
   background: var(--atm-surface);
   transition:
@@ -189,7 +189,7 @@
 }
 @media (hover: hover) and (pointer: fine) {
   .atm-select.atm-field-shell:has(> .atm-select-trigger:hover) {
-    border-color: var(--atm-control-fill-hover);
+    border-color: var(--atm-control-border-hover);
     background: var(--atm-surface);
   }
 

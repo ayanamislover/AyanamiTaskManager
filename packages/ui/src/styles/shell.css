@@ -185,6 +185,15 @@
 .atm-service-status[data-state="error"] {
   color: var(--atm-danger);
   --status-dot: var(--atm-danger);
+  /* 出错时要能悬停看原因；只占右端那两个字，设置按钮的其余部分照常可点。 */
+  cursor: help;
+  pointer-events: auto;
+}
+/* 设置页「本地服务」一行里的同一盏灯：随行排版，不再贴着侧栏按钮定位。 */
+.atm-service-status.is-inline {
+  position: static;
+  transform: none;
+  pointer-events: auto;
 }
 @media (forced-colors: active) {
   .atm-service-status::before {
@@ -273,7 +282,7 @@
   width: 100%;
   min-height: 38px;
   padding: 0 8px 0 16px;
-  border: 1.5px solid var(--atm-control-fill);
+  border: 1.5px solid var(--atm-control-border);
   border-radius: 999px;
   color: var(--atm-text-faint);
   background: var(--atm-surface);
@@ -282,7 +291,7 @@
 }
 @media (hover: hover) and (pointer: fine) {
   .atm-search-button:hover {
-    border-color: var(--atm-control-fill-hover);
+    border-color: var(--atm-control-border-hover);
   }
 }
 .atm-search-button kbd {

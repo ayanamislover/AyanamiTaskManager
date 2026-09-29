@@ -13,7 +13,7 @@ import { useCursorCollection } from "../cursor-collection.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { compactPath, progressSourceLabels, Status } from "../presentation.js";
 import { workItemUiActions } from "../task-actions.js";
-import { taskProgressPresentation } from "../task-progress.js";
+import { phaseBadgeLabel, taskProgressPresentation } from "../task-progress.js";
 
 export function TaskDrawer({
   client,
@@ -139,6 +139,8 @@ export function TaskDrawer({
     patch.mutate(input);
   };
   const progress = query.data ? taskProgressPresentation(query.data) : null;
+  const phaseBadge =
+    progress && query.data ? phaseBadgeLabel(progress, String(query.data.status)) : null;
   return (
     <div
       {...presenceRootProps}
@@ -185,10 +187,7 @@ export function TaskDrawer({
             <div className="atm-drawer-status">
               <span className="atm-drawer-status-label">状态</span>
               <Status value={String(query.data!.status)} />
-              {progress && progress.phaseLabel !== String(query.data!.status) ? (
-                <span className="atm-badge">{progress.phaseLabel}</span>
-              ) : null}
-              <span className="atm-row-sub">{Math.round(progress!.computed)}%</span>
+              {phaseBadge ? <span className="atm-badge">{phaseBadge}</span> : null}
             </div>
             <div className="atm-actions atm-drawer-actions">
               {workItemUiActions({

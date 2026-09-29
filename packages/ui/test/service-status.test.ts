@@ -26,6 +26,21 @@ describe("侧栏服务状态灯", () => {
     }
   });
 
+  it("设置页行内版：不重复「本地服务」前缀，也不当作实时播报；出错时悬停看原因", () => {
+    const inline = (error: unknown) =>
+      renderToStaticMarkup(createElement(ServiceStatus, { error, loading: false, inline: true }));
+    expect(inline(null)).toBe(
+      '<span class="atm-service-status is-inline" data-state="ok">正常</span>',
+    );
+    expect(inline(new Error("2 个项目库未通过检查"))).toContain('title="2 个项目库未通过检查"');
+    const css = readFileSync(
+      join(process.cwd(), "packages", "ui", "src", "styles", "shell.css"),
+      "utf8",
+    );
+    const errorRule = /\.atm-service-status\[data-state="error"\]\s*\{([^}]*)\}/u.exec(css)?.[1];
+    expect(errorRule).toContain("pointer-events: auto");
+  });
+
   it("状态灯放在侧栏设置那一行，不再放在顶栏", () => {
     const shell = readFileSync(
       join(process.cwd(), "packages", "ui", "src", "shell", "app-shell.tsx"),

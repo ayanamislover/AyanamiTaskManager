@@ -24,15 +24,28 @@ export function serviceState({
  * 以前这里借用任务状态徽标，连得上显示「活动」、连不上显示原始枚举 `MIGRATION_FAILED`——
  * 前者看不出指什么，后者把读不到项目列表的任何原因都说成迁移失败。
  */
-export function ServiceStatus({ error, loading }: { error: unknown; loading: boolean }) {
+export function ServiceStatus({
+  error,
+  loading,
+  inline = false,
+}: {
+  error: unknown;
+  loading: boolean;
+  /** 设置页「本地服务」一行里的版本：行标题已经写了「本地服务」，不再重复，也不当作实时播报。 */
+  inline?: boolean;
+}) {
   const state = serviceState({ error, loading });
+  const message = error instanceof Error ? error.message : String(error);
   const detail =
-    state === "error"
-      ? `无法读取项目列表：${error instanceof Error ? error.message : String(error)}`
-      : undefined;
+    state === "error" ? (inline ? message : `无法读取项目列表：${message}`) : undefined;
   return (
-    <span className="atm-service-status" data-state={state} role="status" title={detail}>
-      <span className="atm-visually-hidden">本地服务</span>
+    <span
+      className={inline ? "atm-service-status is-inline" : "atm-service-status"}
+      data-state={state}
+      role={inline ? undefined : "status"}
+      title={detail}
+    >
+      {inline ? null : <span className="atm-visually-hidden">本地服务</span>}
       {labels[state]}
     </span>
   );
