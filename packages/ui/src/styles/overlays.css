@@ -185,38 +185,48 @@
   justify-content: flex-start;
   gap: 16px;
   min-height: 68px;
-  padding: 20px 22px 16px 64px;
+  padding: 20px 22px 16px 58px;
   background: var(--atm-surface);
 }
 .atm-drawer-head > div {
   min-width: 0;
 }
 .atm-drawer-collapse {
+  /* 点击区是左缘一整条 44px 宽的把手（键盘与触控的最小目标）；看得见的只有中间那颗圆钮。 */
   position: absolute;
-  top: 18px;
-  left: 16px;
+  inset: 0 auto 0 0;
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  min-height: 44px;
   place-items: center;
-  padding: 0;
+  padding: 0 0 0 6px;
   border: 0;
-  border-radius: 999px;
+  border-radius: 0;
   color: var(--atm-control-text);
-  background: var(--atm-control-fill);
-  transition:
-    color var(--atm-duration-hover) var(--atm-ease-hover),
-    background-color var(--atm-duration-hover) var(--atm-ease-hover);
+  background: transparent;
 }
 .atm-drawer-collapse > svg {
-  transition: transform var(--atm-duration-press) var(--atm-ease-out);
+  box-sizing: content-box;
+  padding: 8px;
+  border-radius: 999px;
+  background: var(--atm-control-fill);
+  transition:
+    background-color var(--atm-duration-hover) var(--atm-ease-hover),
+    transform var(--atm-duration-press) var(--atm-ease-out);
 }
 .atm-drawer-collapse:active > svg {
   transform: translateX(2px);
 }
+/* 焦点环画在圆钮上，不画在整条把手上。 */
+.atm-drawer-collapse:focus-visible {
+  outline: none;
+}
+.atm-drawer-collapse:focus-visible > svg {
+  outline: 2px solid var(--atm-focus);
+  outline-offset: 2px;
+}
 @media (hover: hover) and (pointer: fine) {
-  .atm-drawer-collapse:hover {
-    color: var(--atm-control-text);
+  .atm-drawer-collapse:hover > svg {
     background: var(--atm-control-fill-hover);
   }
 }

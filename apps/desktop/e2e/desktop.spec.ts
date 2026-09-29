@@ -595,6 +595,10 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
     const body = document.querySelector("#project-diagnostics-content");
     if (!body) return null;
     return {
+      // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
+      tokenDuration: Number.parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
+      ),
       opacity: Number(getComputedStyle(body).opacity),
       transitions: body.getAnimations().map((animation) => ({
         property:
@@ -609,8 +613,9 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
     "opacity",
     "transform",
   ]);
+  expect(motion!.tokenDuration).toBeGreaterThan(0);
   expect(new Set(motion!.transitions.map((transition) => transition.duration))).toEqual(
-    new Set([160]),
+    new Set([motion!.tokenDuration]),
   );
   await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
 });
