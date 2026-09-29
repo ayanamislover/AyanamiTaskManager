@@ -73,17 +73,34 @@ export function MutationErrorAlert({
 
 export function CursorLoadStatus({
   loadedCount,
+  matchedCount,
   hasMore,
   loading,
   error,
   onRetry,
 }: {
   loadedCount: number;
+  /**
+   * 页面只展示加载结果里的一部分（比如只看进行中）时传这个：状态行要数「显示了几项」，
+   * 不能数「扫过几项」，否则表里 4 行、上面却写着已加载 56 项。
+   */
+  matchedCount?: number;
   hasMore: boolean;
   loading?: boolean;
   error?: unknown;
   onRetry?: () => void;
 }) {
+  if (matchedCount !== undefined) {
+    return (
+      <MatchedLoadStatus
+        matchedCount={matchedCount}
+        hasMore={hasMore}
+        {...(loading === undefined ? {} : { loading })}
+        error={error}
+        {...(onRetry ? { onRetry } : {})}
+      />
+    );
+  }
   if (error) {
     return (
       <div className="atm-inline-error" role="alert">
@@ -103,6 +120,42 @@ export function CursorLoadStatus({
         : hasMore
           ? `已加载 ${loadedCount} 项`
           : `已加载 ${loadedCount} 项，已全部加载`}
+    </div>
+  );
+}
+
+function MatchedLoadStatus({
+  matchedCount,
+  hasMore,
+  loading,
+  error,
+  onRetry,
+}: {
+  matchedCount: number;
+  hasMore: boolean;
+  loading?: boolean;
+  error?: unknown;
+  onRetry?: () => void;
+}) {
+  if (error) {
+    return (
+      <div className="atm-inline-error" role="alert">
+        已找到 {matchedCount} 项，后续分页加载失败，可能还有没列出的。
+        {onRetry ? (
+          <button className="atm-button" style={{ marginLeft: 8 }} onClick={onRetry}>
+            重试
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+  return (
+    <div className="atm-row-sub atm-cursor-load-status" role="status" aria-live="polite">
+      {loading
+        ? `已找到 ${matchedCount} 项，正在加载后续…`
+        : hasMore
+          ? `已找到 ${matchedCount} 项，还有任务未加载`
+          : `共 ${matchedCount} 项`}
     </div>
   );
 }

@@ -94,7 +94,7 @@
 }
 .atm-overview-projects {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 12px;
   padding: 14px;
 }
@@ -171,8 +171,8 @@
 }
 .atm-attention-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px 18px;
+  grid-template-columns: 1fr;
+  gap: 6px;
 }
 .atm-attention-grid .atm-row-sub {
   display: flex;
@@ -673,5 +673,129 @@
   .atm-progress-strip-legend span::before {
     border: 1px solid CanvasText;
     forced-color-adjust: none;
+  }
+}
+
+/* 总览：概况胶囊带 + 主列（等你处理、项目）/ 侧列（需要处理、最近变化、临时任务）。 */
+.atm-stat-band {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.atm-stat-band > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
+  font-size: 13px;
+}
+.atm-stat-band b {
+  color: var(--atm-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+.atm-stat-band > span[data-tone="blocked"] b {
+  color: var(--atm-st-blocked);
+}
+.atm-stat-band > span[data-tone="user"] b {
+  color: var(--atm-st-user);
+}
+.atm-stat-band > .atm-stat-band-seq {
+  margin-left: auto;
+  padding-inline: 4px;
+  color: var(--atm-text-faint);
+  background: transparent;
+  box-shadow: none;
+  font: 11px var(--atm-mono);
+}
+.atm-overview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
+  align-items: start;
+  gap: 18px;
+}
+.atm-overview-main,
+.atm-overview-side {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+@media (max-width: 1100px) {
+  .atm-overview-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.atm-inbox-row {
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 12px;
+  color: inherit;
+}
+/* 分隔线从文字开始，不贯穿图标块。 */
+.atm-inbox-row + .atm-inbox-row::before {
+  left: 56px;
+}
+.atm-inbox-row[data-kind="BLOCKED"] {
+  --kind: var(--atm-st-blocked);
+}
+.atm-inbox-row[data-kind="WAITING_USER"] {
+  --kind: var(--atm-st-user);
+}
+.atm-inbox-row[data-kind="VERIFYING"] {
+  --kind: var(--atm-st-verify);
+}
+.atm-inbox-icon {
+  display: grid;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--kind);
+}
+:root[data-theme="dark"] .atm-inbox-icon {
+  color: var(--atm-bg);
+  box-shadow: 0 0 0 1px rgb(255 255 255 / 0.14);
+}
+.atm-inbox-main {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 3px;
+}
+.atm-inbox-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.atm-inbox-meta b {
+  color: var(--kind);
+  font-weight: 600;
+}
+.atm-inbox-main .atm-row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atm-inbox-time {
+  flex: none;
+  color: var(--atm-text-faint);
+  font: 11px var(--atm-mono);
+  line-height: 20px;
+}
+@media (forced-colors: active) {
+  .atm-inbox-icon {
+    border: 1px solid CanvasText;
   }
 }

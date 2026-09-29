@@ -5,7 +5,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
-import { OverviewPage, TasksAcrossProjects } from "../src/features/overview.js";
+import {
+  OverviewPage,
+  TasksAcrossProjects,
+  TasksAcrossProjectsView,
+  overviewConclusion,
+} from "../src/features/overview.js";
+import { NeedsYouList, needsYouTasks } from "../src/features/overview-inbox.js";
 import { PROJECT_ORDER_SETTING } from "../src/project-order.js";
 import { uiCssText } from "./css-source-graph.js";
 
@@ -52,7 +58,7 @@ function missingOverviewContracts(source: string): string[] {
     '.filter((project) => project.lifecycle === "ACTIVE")',
     "client.tasks.pageForUi(project.code, {",
     "limit: 100",
-    '["tasks", "all", "ui", ...sources.map((source) => source.key)]',
+    '["tasks", "all", "ui", "open", ...sources.map((source) => source.key)]',
     '["CLAIMED", "IN_PROGRESS", "VERIFYING"]',
     '["BLOCKED", "WAITING_USER", "WAITING_AGENT"]',
     "onTask(task.project, task.key)",
@@ -107,7 +113,7 @@ describe("Overview feature", () => {
       }),
     );
 
-    expect(markup).toContain("只显示已经写入事实源的项目状态，不展示模拟数据。");
+    expect(markup).toContain("<h1>总览</h1><p>3 件事等你处理，2 个任务正在推进。</p>");
     expect(markup).toContain("进行中项目");
     expect(markup).toContain("需要处理");
     expect(markup).toContain("AyanamiTaskManager");
@@ -245,6 +251,82 @@ describe("Overview feature", () => {
     expect(active).toContain("任务被领取或开始后会出现在这里。");
     expect(blocked).toContain("没有阻塞或等待");
     expect(blocked).toContain("当前没有需要外部处理的任务。");
+  });
+
+  it("跨项目任务的计数数的是表里显示的行，不是扫过的任务", () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      key: "ATM",
+      items: [
+        { key: "ATM-T-1", title: "正在做", status: "IN_PROGRESS" },
+        { key: "ATM-T-2", title: "还没开始", status: "READY" },
+        { key: "ATM-T-3", title: "等用户", status: "WAITING_USER" },
+      ],
+      loadedCount: 3,
+      hasMore: false,
+      isLoading: false,
+      isFetchingNextPage: false,
+      error: null,
+      ...overrides,
+    });
+    const render = (mode: "active" | "blocked", overrides?: Record<string, unknown>) =>
+      renderToStaticMarkup(
+        createElement(TasksAcrossProjectsView, {
+          entries: [entry(overrides)],
+          projects: [project()],
+          mode,
+          onTask: vi.fn(),
+          onRetry: vi.fn(),
+        }),
+      );
+
+    const active = render("active");
+    expect(active).toContain("共 1 项");
+    expect(active).not.toContain("已加载 3 项");
+    expect(active.match(/<tr tabindex/g)).toHaveLength(1);
+    expect(render("blocked")).toContain("共 1 项");
+    expect(render("active", { hasMore: true })).toContain("已找到 1 项，还有任务未加载");
+    expect(render("active", { error: new Error("断了"), hasMore: true })).toContain(
+      "已找到 1 项，后续分页加载失败",
+    );
+  });
+
+  it("页头结论先说有没有事等你，再说有多少在推进", () => {
+    expect(overviewConclusion(3, 2)).toBe("3 件事等你处理，2 个任务正在推进。");
+    expect(overviewConclusion(0, 2)).toBe("没有要你处理的事，2 个任务正在推进。");
+    expect(overviewConclusion(0, 0)).toBe("没有要你处理的事，眼下没有进行中的任务。");
+  });
+
+  it("等你处理按受阻、等你回复、待验收排序，只收这三类", () => {
+    const tasks = needsYouTasks([
+      {
+        key: "ATM",
+        items: [
+          { key: "ATM-T-1", title: "验收", status: "VERIFYING", updatedAt: "2026-09-29T03:00:00Z" },
+          { key: "ATM-T-2", title: "进行", status: "IN_PROGRESS" },
+          {
+            key: "ATM-T-3",
+            title: "回复",
+            status: "WAITING_USER",
+            waitingFor: "包名",
+            updatedAt: "2026-09-29T01:00:00Z",
+          },
+          { key: "ATM-T-4", title: "受阻", status: "BLOCKED", blockedReason: "缺真机" },
+        ],
+      },
+    ]);
+    expect(tasks.map((task) => task.key)).toEqual(["ATM-T-4", "ATM-T-3", "ATM-T-1"]);
+    expect(tasks.map((task) => task.reason)).toEqual(["缺真机", "包名", ""]);
+    const markup = renderToStaticMarkup(createElement(NeedsYouList, { tasks, onTask: vi.fn() }));
+    expect(markup).toContain('data-kind="BLOCKED"');
+    expect(markup).toContain("<b>等你回复</b>");
+    expect(
+      renderToStaticMarkup(createElement(NeedsYouList, { tasks: [], onTask: vi.fn() })),
+    ).toContain("没有等你处理的事");
+  });
+
+  it("跨项目任务只拉未结束的任务", () => {
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toMatch(/client\.tasks\.pageForUi\(project\.code, \{\s*closed: "0",/u);
   });
 
   it("query key、分页和状态集合守卫有阳性变异红灯", () => {

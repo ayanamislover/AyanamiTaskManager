@@ -44,6 +44,7 @@ export function AppRouter({
         onQuick={() => onRoute("quick")}
         notify={notify}
         TimelineEventRow={TimelineEventRow}
+        onTask={onTask}
       />
     );
   if (route === "projects")

@@ -85,14 +85,15 @@ describe("keyboard accessibility primitives", () => {
       join(process.cwd(), "packages", "ui", "src", "routes", "app-router.tsx"),
       "utf8",
     );
-    const inPlaceBindings = router.match(/onTask=\{onTask\}/gu) ?? [];
+    const inPlaceBindings = (source: string) => (source.match(/onTask=\{onTask\}/gu) ?? []).length;
     expect(app).toMatch(
       /const openTaskInPlace = \(project: string, key: string\) => setDrawer\(\{ project, key \}\)/u,
     );
     expect(app).toContain("onTask={openTaskInPlace}");
-    expect(inPlaceBindings).toHaveLength(2);
-    expect(router.replace("onTask={onTask}", "onTask={() => undefined}")).not.toMatch(
-      /onTask=\{onTask\}[\s\S]*onTask=\{onTask\}/u,
+    // 总览「等你处理」、活动任务、阻塞与等待三处都原地打开抽屉。
+    expect(inPlaceBindings(router)).toBe(3);
+    expect(inPlaceBindings(router.replace("onTask={onTask}", "onTask={() => undefined}"))).not.toBe(
+      3,
     );
   });
 
