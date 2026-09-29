@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CaretRightIcon as CaretRight } from "@phosphor-icons/react/dist/icons/CaretRight";
 import { CheckSquareIcon as CheckSquare } from "@phosphor-icons/react/dist/icons/CheckSquare";
 import { ClockCounterClockwiseIcon as ClockCounterClockwise } from "@phosphor-icons/react/dist/icons/ClockCounterClockwise";
@@ -28,12 +28,15 @@ export function Sidebar({
   projects,
   brandLogoSrc,
   projectOrder,
+  footerStatus,
 }: {
   route: Route;
   setRoute: (route: Route) => void;
   projects: SidebarProject[];
   brandLogoSrc?: string;
   projectOrder?: ProjectOrder;
+  /** 设置一行右侧的本机服务状态灯。 */
+  footerStatus?: ReactNode;
 }) {
   const activeProjects = projects.filter((project) => project.lifecycle === "ACTIVE");
   const reorder = useProjectReorder(
@@ -150,6 +153,7 @@ export function Sidebar({
             <GearSix size={18} />
             <span>设置</span>
           </button>
+          {footerStatus}
         </div>
       </div>
     </aside>

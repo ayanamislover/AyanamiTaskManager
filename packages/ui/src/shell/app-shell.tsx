@@ -47,6 +47,7 @@ export function AppShell({
         route={route}
         setRoute={onRoute}
         projects={projects}
+        footerStatus={statusSlot}
         {...(brandLogoSrc ? { brandLogoSrc } : {})}
         {...(projectOrder ? { projectOrder } : {})}
       />
@@ -71,7 +72,6 @@ export function AppShell({
               {route.startsWith("project:") ? "新建任务" : "临时任务"}
               <kbd>Ctrl N</kbd>
             </button>
-            {statusSlot}
           </div>
         </header>
         <div className="atm-content">{content}</div>

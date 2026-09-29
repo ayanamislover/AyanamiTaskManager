@@ -148,9 +148,49 @@
   line-height: 1.35;
 }
 .atm-sidebar-footer {
+  position: relative;
   flex: none;
   margin-top: auto;
   padding-top: 8px;
+}
+/* 服务状态灯压在「设置」这一行的右侧：一颗灯加两个字。不接指针，点这一行仍然是进设置。 */
+.atm-service-status {
+  position: absolute;
+  /* 竖直居中到设置按钮：页脚上内边距 8 + 按钮高 36 的一半。 */
+  top: 26px;
+  right: 12px;
+  display: inline-flex;
+  transform: translateY(-50%);
+  align-items: center;
+  gap: 6px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  --status-dot: var(--atm-st-ready);
+}
+.atm-service-status::before {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--status-dot);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-dot) 20%, transparent);
+  content: "";
+}
+.atm-service-status[data-state="ok"] {
+  --status-dot: var(--atm-st-done);
+}
+.atm-service-status[data-state="error"] {
+  color: var(--atm-danger);
+  --status-dot: var(--atm-danger);
+}
+@media (forced-colors: active) {
+  .atm-service-status::before {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
 }
 .atm-sidebar-settings {
   justify-content: flex-start;

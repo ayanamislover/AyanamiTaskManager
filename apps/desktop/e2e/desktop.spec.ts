@@ -671,13 +671,15 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
   expect(keyboard.opacity, "内容立刻就位").toBe(1);
 });
 
-test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({ page }) => {
+test("服务状态灯在侧栏设置行右侧单行显示，顶栏按钮不压住搜索框", async ({ page }) => {
   // 桌面窗口最小宽度 1100；1280 是以前「活动」被挤成一字一行、月亮按钮压住 Ctrl K 的宽度。
   for (const width of [1101, 1280, 1920]) {
     await page.setViewportSize({ width, height: 800 });
     if (width === 1101) await page.goto("/#project:E2E");
-    const status = page.locator(".atm-topbar .atm-service-status");
-    await expect(status).toHaveText("服务正常");
+    await expect(page.locator(".atm-topbar .atm-service-status")).toHaveCount(0);
+    const status = page.locator(".atm-sidebar-footer .atm-service-status");
+    await expect(status).toHaveText("本地服务正常");
+    await expect(status).toHaveAttribute("data-state", "ok");
     const layout = await page.evaluate(() => {
       const rect = (selector: string) => {
         const element = document.querySelector<HTMLElement>(selector);
@@ -689,19 +691,27 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
         (element) => element.getBoundingClientRect(),
       );
       const statusElement = document.querySelector<HTMLElement>(
-        ".atm-top-actions .atm-service-status",
+        ".atm-sidebar-footer .atm-service-status",
       );
       if (!statusElement) throw new Error("缺少 .atm-service-status");
       const status = statusElement.getBoundingClientRect();
       // 文字每折一行就多一个不同 top 的矩形。
       const range = document.createRange();
-      range.selectNodeContents(statusElement);
+      // 只量看得见的那几个字；读屏前缀是 1px 的隐藏元素，不算行。
+      range.selectNodeContents(statusElement.lastChild!);
       const lineTops = new Set([...range.getClientRects()].map((line) => Math.round(line.top)));
       const barRect = bar.getBoundingClientRect();
       const barPadding = Number.parseFloat(getComputedStyle(bar).paddingRight);
+      const settings = rect(".atm-sidebar-settings");
+      const settingsLabel = rect(".atm-sidebar-settings > span");
       return {
         statusLines: lineTops.size,
         statusHeight: status.height,
+        // 灯在设置那一行里、文字右边，竖直居中。
+        statusInsideRow: status.left > settingsLabel.right && status.right <= settings.right,
+        statusCenterOffset: Math.abs(
+          status.top + status.height / 2 - (settings.top + settings.height / 2),
+        ),
         searchRight: rect(".atm-search-button").right,
         firstActionLeft: Math.min(...actions.map((action) => action.left)),
         lastActionRight: Math.max(...actions.map((action) => action.right)),
@@ -710,6 +720,8 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
     });
     expect(layout.statusHeight, `${width}px 状态标签高度`).toBeLessThanOrEqual(28);
     expect(layout.statusLines, `${width}px 状态标签行数`).toBe(1);
+    expect(layout.statusInsideRow, `${width}px 状态灯在设置行右侧`).toBe(true);
+    expect(layout.statusCenterOffset, `${width}px 状态灯与设置行竖直居中`).toBeLessThanOrEqual(1);
     // 不只是不重叠：搜索框和第一个按钮之间要留得出间距。
     expect(
       layout.firstActionLeft - layout.searchRight,
@@ -720,8 +732,8 @@ test("顶栏服务状态单行显示，右侧按钮不压住搜索框", async ({
     );
   }
   await page.setViewportSize({ width: 1280, height: 800 });
-  await page.locator(".atm-topbar").screenshot({
-    path: resolve("output", "playwright", "e2e-topbar-service-status-1280.png"),
+  await page.locator(".atm-sidebar-footer").screenshot({
+    path: resolve("output", "playwright", "e2e-sidebar-service-status-1280.png"),
   });
 });
 
