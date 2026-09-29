@@ -299,6 +299,18 @@ export function asAtmError(error: unknown): AtmError {
   });
 }
 
+/**
+ * Keep a secondary failure on the primary error (`error.suppressed`) without replacing it.
+ * Cleanup after a failure can fail too; the caller must still see why the work failed,
+ * and the cleanup failure must not vanish either. `cause` would claim the cleanup caused
+ * the primary failure, so it rides alongside instead. Non-object primaries are left alone.
+ */
+export function noteSuppressed(primary: unknown, secondary: unknown): void {
+  if (typeof primary !== "object" || primary === null) return;
+  const earlier: unknown = Reflect.get(primary, "suppressed");
+  Reflect.set(primary, "suppressed", [...(Array.isArray(earlier) ? earlier : []), secondary]);
+}
+
 export function atmErrorDto<C extends AtmErrorCode>(error: AtmError<C>): AtmErrorDto<C> {
   return {
     code: error.code,

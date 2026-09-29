@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { strToU8, zipSync, type Zippable } from "fflate";
-import { AtmError } from "@ayanami-task/errors";
+import { AtmError, noteSuppressed } from "@ayanami-task/errors";
 import {
   nowIso,
   type ProjectionReceipt,
@@ -19,6 +19,7 @@ import {
   type CreateBackupInput,
   type MaintenanceResult,
 } from "./backup-maintenance.js";
+import { closeAllStages } from "./close-stages.js";
 import { ProjectDatabasePool } from "./project-database-pool.js";
 import { ProjectRepository } from "./project-repository.js";
 import {
@@ -223,19 +224,34 @@ export class AyanamiDatabaseManager {
       migrationDirectory: join(migrationsRoot, "registry"),
       backupDirectory: join(dataDir, "backups", "registry"),
     });
-    const now = nowIso();
-    registry.sqlite
-      .prepare(
-        `INSERT INTO app_meta(singleton, current_sequence, data_version, created_at, updated_at)
-         VALUES (1, 0, 1, ?, ?) ON CONFLICT(singleton) DO NOTHING`,
-      )
-      .run(now, now);
-    const manager = new AyanamiDatabaseManager({ dataDir, migrationsRoot, registry });
-    manager.recoverCreatingProjects();
-    await manager.cleanupInterruptedFiles();
-    await manager.recoverFailedProjectMigrations();
-    await manager.recoverProjectSessions();
-    await manager.repairSummaries();
+    let manager: AyanamiDatabaseManager | undefined;
+    try {
+      const now = nowIso();
+      registry.sqlite
+        .prepare(
+          `INSERT INTO app_meta(singleton, current_sequence, data_version, created_at, updated_at)
+           VALUES (1, 0, 1, ?, ?) ON CONFLICT(singleton) DO NOTHING`,
+        )
+        .run(now, now);
+      manager = new AyanamiDatabaseManager({ dataDir, migrationsRoot, registry });
+      manager.recoverCreatingProjects();
+      await manager.cleanupInterruptedFiles();
+      await manager.recoverFailedProjectMigrations();
+      await manager.recoverProjectSessions();
+      await manager.repairSummaries();
+    } catch (error) {
+      // Nobody else can close what a failed open created. On Windows the open Registry
+      // handle would keep the whole data directory locked for the rest of the process.
+      // close() reaches the Registry even when an earlier stage fails; what the cleanup
+      // itself hit rides on the startup error, which stays the one reported.
+      try {
+        if (manager) manager.close();
+        else if (registry.sqlite.open) registry.sqlite.close();
+      } catch (closeError) {
+        noteSuppressed(error, closeError);
+      }
+      throw error;
+    }
     return manager;
   }
 
@@ -915,12 +931,24 @@ export class AyanamiDatabaseManager {
     };
   }
 
+  /**
+   * Close every database this manager holds. Each stage runs even when an earlier one
+   * throws: an open Registry handle locks the data directory for the rest of the process,
+   * so a failing knowledge or project close must not keep it open. The first failure is
+   * rethrown, later ones ride on it as `suppressed`.
+   */
   close(): void {
-    this.knowledge.close();
-    this.#projectPool.closeAll();
-    if (this.registry.sqlite.open) {
-      this.registry.sqlite.pragma("wal_checkpoint(PASSIVE)");
-      this.registry.sqlite.close();
-    }
+    closeAllStages([
+      () => this.knowledge.close(),
+      () => this.#projectPool.closeAll(),
+      () => {
+        if (!this.registry.sqlite.open) return;
+        try {
+          this.registry.sqlite.pragma("wal_checkpoint(PASSIVE)");
+        } finally {
+          this.registry.sqlite.close();
+        }
+      },
+    ]);
   }
 }

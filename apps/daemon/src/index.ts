@@ -17,6 +17,7 @@ export {
   DAEMON_VERSION,
   LEGACY_TOKEN_FILENAME,
   readDaemonRuntime,
+  replaceFileAtomically,
   resolveDaemonDataDirectory,
   type DaemonRuntimeDescriptor,
   type DaemonRuntimeLease,

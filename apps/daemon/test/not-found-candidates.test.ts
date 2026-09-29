@@ -307,8 +307,10 @@ describe("dynamic NOT_FOUND candidates", () => {
   it("does not disclose dynamic candidates to an unauthenticated REST caller", async () => {
     const { app, service, project, sourcePath, created, milestones, sessions } = await fixture();
     try {
-      const missingSession = `${String(sessions[0]!.session).slice(0, -1)}0`;
-      const missingMilestone = `${String(milestones[0]!.id).slice(0, -1)}0`;
+      // 与上面几条一致：末位本来就是 0 时换成 1，保证真的是一个不存在的 id。
+      const missing = (id: string) => `${id.slice(0, -1)}${id.endsWith("0") ? "1" : "0"}`;
+      const missingSession = missing(String(sessions[0]!.session));
+      const missingMilestone = missing(String(milestones[0]!.id));
       const urls = [
         `/api/v1/projects/${project.code}/work-items/${project.code}-T-000I`,
         `/api/v1/projects/${project.code}/sessions/${missingSession}`,

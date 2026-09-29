@@ -5,6 +5,7 @@ import {
   AtmError,
   ERROR_POLICIES,
   isAtmErrorCode,
+  noteSuppressed,
   type AtmErrorCode,
   type ErrorDetailsByCode,
 } from "../src/index.js";
@@ -72,5 +73,24 @@ describe("AtmError registry", () => {
     );
 
     expect(findings).toEqual([]);
+  });
+});
+
+// 清理失败挂在原始错误上，而不是顶替它（ATM-T-0504，daemon 与 storage 共用这一份）。
+describe("noteSuppressed", () => {
+  it("keeps the primary error and accumulates secondary failures in order", () => {
+    const primary = new Error("rename-blocked");
+    const first = new Error("cleanup-blocked");
+    const second = new Error("close-failed");
+    noteSuppressed(primary, first);
+    noteSuppressed(primary, second);
+    expect(primary.message).toBe("rename-blocked");
+    expect(Reflect.get(primary, "suppressed")).toEqual([first, second]);
+    expect(primary.cause).toBeUndefined();
+  });
+
+  it("leaves non-object primaries untouched", () => {
+    expect(() => noteSuppressed("text", new Error("x"))).not.toThrow();
+    expect(() => noteSuppressed(null, new Error("x"))).not.toThrow();
   });
 });

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { noteSuppressed } from "@ayanami-task/errors";
 import { isDifferentProcess, readProcessIdentity } from "./process-identity.js";
 
 export const DAEMON_VERSION = "1.2.0";
@@ -168,6 +169,65 @@ export function readDaemonRuntime(runtimeDir: string): DaemonRuntimeDescriptor {
   throw new Error("ATM_RUNTIME_UNAVAILABLE");
 }
 
+const HELD_OPEN_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+const REPLACE_ATTEMPTS = 8;
+
+/**
+ * Replace `target` with `content` in one rename, so a reader sees the previous file or
+ * the new one and never a partial write. Writing in place truncates first: a bridge that
+ * polls daemon.json and reads it at that moment gets an empty file and fails fast with
+ * ATM_RUNTIME_DESCRIPTOR_INVALID.
+ *
+ * Windows refuses to rename over a file any process has open (EPERM), even one opened
+ * with FILE_SHARE_DELETE. Readers hold daemon.json for well under a millisecond, but
+ * bridges waiting for a restart read it every 100 ms and scanners open fresh files, so
+ * the replace waits for the reader briefly (at most ~1.3 s in total) instead of failing
+ * the daemon's start. Measured: 9 bridge-like readers made 4 of 1500 bare renames fail.
+ *
+ * When the publish fails, the error thrown is the one that failed it (the last rename's,
+ * once the retries run out). A temporary file that could not be removed afterwards is
+ * reported on that error as `suppressed`, never in its place.
+ */
+export function replaceFileAtomically(target: string, content: string): void {
+  const temporary = join(
+    dirname(target),
+    `.${basename(target)}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
+  );
+  try {
+    writeFileSync(temporary, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameReplacing(temporary, target);
+  } catch (error) {
+    // Whatever held the target may hold the temporary file too, so removing it can fail
+    // as well. That must not replace the reason the publish failed: the caller gets the
+    // original error, carrying the cleanup failure (and the leftover's name) with it.
+    try {
+      rmSync(temporary, { force: true });
+    } catch (cleanupError) {
+      noteSuppressed(error, cleanupError);
+    }
+    throw error;
+  }
+  rmSync(temporary, { force: true });
+}
+
+function renameReplacing(temporary: string, target: string): void {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      renameSync(temporary, target);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (
+        process.platform !== "win32" ||
+        !HELD_OPEN_RENAME_ERRORS.has(code) ||
+        attempt >= REPLACE_ATTEMPTS
+      )
+        throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * 2 ** (attempt - 1));
+    }
+  }
+}
+
 /**
  * Publish one atomic endpoint/token descriptor, then remove the obsolete second
  * token source. A failed publish leaves the legacy file untouched so an older
@@ -177,20 +237,7 @@ function publishDaemonRuntime(runtimeDir: string, descriptor: DaemonRuntimeDescr
   if (!runtimeDescriptor(descriptor)) throw new Error("ATM_RUNTIME_DESCRIPTOR_INVALID");
   mkdirSync(runtimeDir, { recursive: true });
   const target = join(runtimeDir, DAEMON_RUNTIME_FILENAME);
-  const temporary = join(
-    runtimeDir,
-    `.${DAEMON_RUNTIME_FILENAME}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`,
-  );
-  try {
-    writeFileSync(temporary, `${JSON.stringify(descriptor)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    renameSync(temporary, target);
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+  replaceFileAtomically(target, `${JSON.stringify(descriptor)}\n`);
   rmSync(join(runtimeDir, LEGACY_TOKEN_FILENAME), { force: true });
   return target;
 }

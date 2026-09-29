@@ -103,7 +103,11 @@ describe("Record REST 读取面", () => {
         nextCursor: expect.stringMatching(/^rl1\./u),
         hasMore: true,
       });
-      const invalidCursor = `${firstPage.json().nextCursor.slice(0, -1)}x`;
+      // 签名末位是摘要的 base64url 字符，约 1/64 的概率本来就是 x；固定换成 x 时，
+      // 「篡改」后的游标和原游标一模一样，用例会偶发拿到 200。换成一个一定不同的字符。
+      const validCursor = String(firstPage.json().nextCursor);
+      const invalidCursor = `${validCursor.slice(0, -1)}${validCursor.endsWith("x") ? "y" : "x"}`;
+      expect(invalidCursor).not.toBe(validCursor);
       const invalid = await app.inject({
         method: "GET",
         url: `/api/v1/projects/${project.code}/records?limit=1&cursor=${encodeURIComponent(invalidCursor)}`,

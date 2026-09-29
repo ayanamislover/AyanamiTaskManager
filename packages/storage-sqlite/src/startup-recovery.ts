@@ -3,7 +3,7 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import Database from "better-sqlite3";
 import { nowIso } from "@ayanami-task/protocol";
 import { quickCheck, type ManagedDatabase } from "./database.js";
-import { removeSqliteSidecars, renameWithRetry } from "./storage-file-operations.js";
+import { renameWithRetry } from "./storage-file-operations.js";
 
 type RecoveryProject = {
   id: string;
@@ -26,6 +26,30 @@ function healthyDatabase(path: string): boolean {
     return false;
   } finally {
     if (sqlite?.open) sqlite.close();
+  }
+}
+
+const HELD_BY_ANOTHER_PROCESS = new Set(["EACCES", "EBUSY", "EPERM"]);
+
+/**
+ * Removes a crash leftover unless another process holds that name right now, in which
+ * case it stays for the next start. Returns whether the path is gone.
+ *
+ * On Windows a name next to our backups can belong to someone else for a moment: a
+ * real-time scanner that sees `X` deleted creates and deletes its own upper-cased `X.tmp`
+ * (captured under load: `UNREGISTERED-CRASH.SQLITE.tmp` right after removing
+ * `unregistered-crash.sqlite`, `…SQLITE.TMP-SHM.tmp` after a snapshot's `-shm`). That is the
+ * very `.tmp` companion removed next, and the `.tmp` sweep lists it too. The resulting
+ * EPERM used to escape AyanamiDatabaseManager.open, so the daemon failed to start over
+ * garbage. A leftover is never the only copy of anything, so leaving it is always safe.
+ */
+function removeLeftover(path: string): boolean {
+  try {
+    rmSync(path, { force: true });
+    return true;
+  } catch (error) {
+    if (HELD_BY_ANOTHER_PROCESS.has((error as NodeJS.ErrnoException).code ?? "")) return false;
+    throw error;
   }
 }
 
@@ -177,7 +201,7 @@ export class StartupRecovery {
           entry.name.endsWith(".tmp-wal") ||
           entry.name.endsWith(".tmp-shm"))
       ) {
-        rmSync(join(directory, entry.name), { force: true });
+        removeLeftover(join(directory, entry.name));
       }
     }
   }
@@ -192,12 +216,13 @@ export class StartupRecovery {
         this.#registry.sqlite.prepare("SELECT 1 FROM backup_catalog WHERE path = ?").get(finalPath),
       );
       if (!registered) {
-        rmSync(finalPath, { force: true });
-        rmSync(`${finalPath}.manifest.json`, { force: true });
-        rmSync(`${finalPath}.tmp`, { force: true });
-        removeSqliteSidecars(`${finalPath}.tmp`);
+        const uncommitted = [finalPath, `${finalPath}.manifest.json`].map(removeLeftover);
+        for (const scratch of ["", "-wal", "-shm"]) removeLeftover(`${finalPath}.tmp${scratch}`);
+        // The marker is what tells the next start this backup never committed; keep it
+        // until the uncommitted artifacts are really gone.
+        if (!uncommitted.every(Boolean)) continue;
       }
-      rmSync(pendingPath, { force: true });
+      removeLeftover(pendingPath);
     }
   }
 
@@ -211,11 +236,12 @@ export class StartupRecovery {
         this.#registry.sqlite.prepare("SELECT 1 FROM backup_catalog WHERE path = ?").get(finalPath),
       );
       if (!registered) {
-        rmSync(finalPath, { force: true });
-        rmSync(`${finalPath}.manifest.json`, { force: true });
-        rmSync(`${finalPath}.pending`, { force: true });
+        const removed = [finalPath, `${finalPath}.manifest.json`, `${finalPath}.pending`].map(
+          removeLeftover,
+        );
+        if (!removed.every(Boolean)) continue;
       }
-      rmSync(markerPath, { force: true });
+      removeLeftover(markerPath);
     }
   }
 }
