@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useSyncExternalStore } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
@@ -122,17 +122,34 @@ export function projectTaskGroups(
 }
 
 /**
- * 最近一次选的视图（列表 / 看板 / …）。项目页按项目各自挂载，切项目时筛选和排序
- * 都该重置——里程碑、负责人本来就是按项目的；但看板看惯了，换个项目不该被打回列表。
+ * 当前选的视图（列表 / 看板 / …），所有项目页共用一份。项目页按项目各自挂载，切项目时
+ * 筛选和排序都该重置——里程碑、负责人本来就是按项目的；但看板看惯了，换个项目不该被
+ * 打回列表。做成订阅而不是「挂载时读一次」：切项目的等待窗口里前后台各有一页，在前台
+ * 那页换了标签，后台那页也要跟着换。
  */
-let lastProjectTaskView: ProjectTaskView = "list";
+let sharedProjectTaskView: ProjectTaskView = "list";
+const projectTaskViewListeners = new Set<() => void>();
+
+function subscribeProjectTaskView(listener: () => void): () => void {
+  projectTaskViewListeners.add(listener);
+  return () => projectTaskViewListeners.delete(listener);
+}
+
+function setSharedProjectTaskView(next: ProjectTaskView): void {
+  if (next === sharedProjectTaskView) return;
+  sharedProjectTaskView = next;
+  for (const listener of projectTaskViewListeners) listener();
+}
+
+const readProjectTaskView = () => sharedProjectTaskView;
 
 export function useProjectTaskViewState(openTasks: any[], closedTasks: any[] = []) {
-  const [view, setViewState] = useState<ProjectTaskView>(() => lastProjectTaskView);
-  const setView = useCallback((next: ProjectTaskView) => {
-    lastProjectTaskView = next;
-    setViewState(next);
-  }, []);
+  const view = useSyncExternalStore(
+    subscribeProjectTaskView,
+    readProjectTaskView,
+    readProjectTaskView,
+  );
+  const setView = useCallback((next: ProjectTaskView) => setSharedProjectTaskView(next), []);
   const [filters, setFilters] = useState<ProjectTaskFilters>(EMPTY_PROJECT_TASK_FILTERS);
   const [taskSort, setTaskSort] = useState<ProjectTaskSort>(DEFAULT_PROJECT_TASK_SORT);
   const groups = projectTaskGroups(openTasks, closedTasks, filters, taskSort);

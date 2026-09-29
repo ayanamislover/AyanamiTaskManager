@@ -116,3 +116,31 @@ describe("侧栏左上角不再有光晕", () => {
     expect(aurora?.[2]).not.toBe("0% 0%");
   });
 });
+
+describe("切换窗口里的命令与视图", () => {
+  it("首屏等待集合跟着当前视图：记录、时间线只在选中时等", async () => {
+    const { firstScreenQueries } = await import("../src/features/project.js");
+    const keys = (view: Parameters<typeof firstScreenQueries>[1]) =>
+      firstScreenQueries("P", view).map((key) => JSON.stringify(key));
+    expect(keys("list")).not.toContain(JSON.stringify(["records", "P"]));
+    expect(keys("list")).not.toContain(JSON.stringify(["events", "P"]));
+    expect(keys("records")).toContain(JSON.stringify(["records", "P"]));
+    expect(keys("timeline")).toContain(JSON.stringify(["events", "P"]));
+    // 筛选条只在任务类视图里渲染；记录、时间线下等它的查询会永远等不齐。
+    for (const filterBarQuery of ["saved-views", "milestones"]) {
+      expect(keys("board")).toContain(JSON.stringify([filterBarQuery, "P"]));
+      expect(keys("records")).not.toContain(JSON.stringify([filterBarQuery, "P"]));
+      expect(keys("timeline")).not.toContain(JSON.stringify([filterBarQuery, "P"]));
+    }
+  });
+
+  it("「新建任务」命令只认目标项目；不带项目的旧式事件谁都不认", async () => {
+    const { isNewProjectTaskFor, NEW_PROJECT_TASK_EVENT } = await import(
+      "../src/hooks/new-project-task.js"
+    );
+    const forB = new CustomEvent(NEW_PROJECT_TASK_EVENT, { detail: { project: "B" } });
+    expect(isNewProjectTaskFor(forB, "B")).toBe(true);
+    expect(isNewProjectTaskFor(forB, "A")).toBe(false);
+    expect(isNewProjectTaskFor(new Event(NEW_PROJECT_TASK_EVENT), "A")).toBe(false);
+  });
+});

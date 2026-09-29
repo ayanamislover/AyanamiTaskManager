@@ -1,5 +1,6 @@
 import { useEffect, type Dispatch, type SetStateAction } from "react";
 import type { Route } from "../contracts.js";
+import { requestNewProjectTask } from "./new-project-task.js";
 
 export function isEditableTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -36,7 +37,7 @@ export function useAppShortcuts(
       }
       if (event.key.toLowerCase() === "n") {
         event.preventDefault();
-        if (route.startsWith("project:")) window.dispatchEvent(new Event("atm:new-project-task"));
+        if (route.startsWith("project:")) requestNewProjectTask(route.slice(8));
         else setRoute("quick");
       }
     };

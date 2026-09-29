@@ -22,6 +22,7 @@ import {
 } from "./routes/use-app-route.js";
 import type { AyanamiTaskManagerProps, DesktopBridge } from "./contracts.js";
 import "./styles.css";
+import { requestNewProjectTask } from "./hooks/new-project-task.js";
 
 function App({
   client,
@@ -106,7 +107,7 @@ function App({
       onSearch={() => setPalette(true)}
       onToggleTheme={toggleTheme}
       onCreate={() => {
-        if (route.startsWith("project:")) window.dispatchEvent(new Event("atm:new-project-task"));
+        if (route.startsWith("project:")) requestNewProjectTask(route.slice(8));
         else setRoute("quick");
       }}
     />

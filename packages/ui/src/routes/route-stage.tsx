@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+/** 这一页是怎么换上来的：首屏读齐（ready）、等满时限（timeout），或者不需要等（direct）。 */
+export type RouteSwap = "direct" | "ready" | "timeout";
+
 /** 新页面最多在后台准备这么久；超时就直接换上，让它自己显示加载态。 */
 export const ROUTE_HOLD_MS = 450;
 
@@ -25,25 +28,32 @@ export function RouteStage({
   defer: boolean;
   render: (route: string, stage: RouteStageSlot) => ReactNode;
 }) {
-  const [shown, setShown] = useState(route);
+  const [{ shown, swap }, setStage] = useState<{ shown: string; swap: RouteSwap }>({
+    shown: route,
+    swap: "direct",
+  });
   // 目标不需要等待时，在渲染期间直接对齐（React 推荐的「随 props 调整 state」写法），
   // 不先画一帧旧页面。
-  if (route !== shown && !defer) setShown(route);
+  if (route !== shown && !defer) setStage({ shown: route, swap: "direct" });
   const pending = route !== shown && defer ? route : null;
 
   useEffect(() => {
     if (pending === null) return;
-    const timer = window.setTimeout(() => setShown(pending), ROUTE_HOLD_MS);
+    const timer = window.setTimeout(
+      () => setStage({ shown: pending, swap: "timeout" }),
+      ROUTE_HOLD_MS,
+    );
     return () => window.clearTimeout(timer);
   }, [pending]);
 
   const promote = useCallback(() => {
-    if (pending !== null) setShown(pending);
+    if (pending !== null) setStage({ shown: pending, swap: "ready" });
   }, [pending]);
 
   return (
     <>
-      <div className="atm-route-layer" key={shown}>
+      {/* data-swap 给测试看：快的读取应当是 ready，靠 timeout 换上说明就绪条件漏了或等不齐。 */}
+      <div className="atm-route-layer" key={shown} data-swap={swap}>
         {render(shown, SHOWN)}
       </div>
       {pending === null ? null : (
