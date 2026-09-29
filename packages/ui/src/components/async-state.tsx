@@ -140,7 +140,7 @@ function MatchedLoadStatus({
   if (error) {
     return (
       <div className="atm-inline-error" role="alert">
-        已找到 {matchedCount} 项，后续分页加载失败，可能还有没列出的。
+        已找到 {matchedCount} 项，部分任务读取失败，可能还有没列出的。
         {onRetry ? (
           <button className="atm-button" style={{ marginLeft: 8 }} onClick={onRetry}>
             重试

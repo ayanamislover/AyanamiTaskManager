@@ -2319,3 +2319,36 @@ test("投影健康状态可在总览、项目和设置中查看并安全重试",
     }
   }
 });
+
+// ATM-T-0517 复审：首屏读取失败时「重试」曾是空操作——首屏失败被当成续读，续读要求已有行。
+test("总览「等你处理」首屏读取失败后点重试会真的重新读取", async ({ page }) => {
+  let failing = true;
+  let requests = 0;
+  await page.route(/\/api\/v1\/projects\/E2E\/ui\/work-items\?(?=.*closed=0)/u, async (route) => {
+    requests += 1;
+    if (!failing) return route.continue();
+    return route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({
+        error: { code: "E2E_INJECTED", message: "注入的读取故障", retryable: true },
+      }),
+    });
+  });
+  await page.goto("/#overview");
+  const panel = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "等你处理", exact: true }),
+  });
+  await expect(panel.getByRole("alert")).toContainText("部分任务读取失败");
+  await expect(page.locator(".atm-page-head p")).toHaveText(
+    "等你处理的事没能全部读出来，可在下方重试。",
+  );
+  await expect(panel).not.toContainText("没有等你处理的事");
+
+  failing = false;
+  const before = requests;
+  await panel.getByRole("button", { name: "重试" }).click();
+  await expect.poll(() => requests, { timeout: 5_000 }).toBeGreaterThan(before);
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(page.locator(".atm-page-head p")).not.toContainText("没能全部读出来");
+});

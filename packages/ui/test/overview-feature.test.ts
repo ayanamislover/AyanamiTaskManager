@@ -293,7 +293,7 @@ describe("Overview feature", () => {
     expect(render("blocked")).toContain("共 1 项");
     expect(render("active", { hasMore: true })).toContain("已找到 1 项，还有任务未加载");
     expect(render("active", { error: new Error("断了"), hasMore: true })).toContain(
-      "已找到 1 项，后续分页加载失败",
+      "已找到 1 项，部分任务读取失败",
     );
   });
 
@@ -340,7 +340,7 @@ describe("Overview feature", () => {
       expect(needsYouHeadline(state, 1)).toBe("等你处理的事没能全部读出来，可在下方重试。");
       const markup = panel(state);
       expect(markup).toContain('role="alert"');
-      expect(markup).toContain("已找到 0 项，后续分页加载失败");
+      expect(markup).toContain("已找到 0 项，部分任务读取失败");
       expect(markup).toContain(">重试</button>");
       expect(markup).not.toContain("没有等你处理的事");
     });
@@ -358,7 +358,7 @@ describe("Overview feature", () => {
         vi.fn(),
       );
       const markup = panel(state);
-      expect(markup).toContain("已找到 1 项，后续分页加载失败");
+      expect(markup).toContain("已找到 1 项，部分任务读取失败");
       expect(markup.match(/data-kind=/g)).toHaveLength(1);
       expect(needsYouHeadline(state, 0)).toContain("没能全部读出来");
     });

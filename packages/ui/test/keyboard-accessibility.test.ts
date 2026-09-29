@@ -99,22 +99,42 @@ describe("keyboard accessibility primitives", () => {
 
   it("任务行焦点沿用现有设计 token，并由 forced-colors 保留系统指示", () => {
     const styles = uiCssText();
+    // 绑定到任务行实际依赖的那一条：forced-colors 里的通用 `:focus-visible { outline-color: Highlight; }`。
+    // 不能写成「块里某处有 :focus-visible、某处有 Highlight」——别的组件的 Highlight 规则也会让它通过。
+    const genericForcedFocus =
+      /@media \(forced-colors: active\) \{[^@]*?\n {2}:focus-visible \{\s*outline-color: Highlight;\s*\}/u;
     const hasRowFocusGuard = (source: string) =>
       source.includes(".atm-table tbody tr[tabindex]:focus-visible") &&
-      /@media \(forced-colors: active\)[\s\S]*?:focus-visible[\s\S]*?outline-color: Highlight/u.test(
-        source,
-      );
+      genericForcedFocus.test(source);
     expect(hasRowFocusGuard(styles)).toBe(true);
     // 行焦点现在有两条规则（整行 outline 与单元格底色），变异要把两条都拿掉。
     expect(hasRowFocusGuard(styles.replaceAll("tr[tabindex]:focus-visible", "tr"))).toBe(false);
-    expect(
-      hasRowFocusGuard(styles.replaceAll("outline-color: Highlight", "outline-color: Canvas")),
-    ).toBe(false);
+    // 只把通用那条改掉、保留抽屉专用的 Highlight：必须仍然发现。
+    const genericOnlyMutated = styles.replace(
+      /(\n {2}:focus-visible \{\s*outline-color: )Highlight;/u,
+      "$1Canvas;",
+    );
+    expect(genericOnlyMutated).not.toBe(styles);
+    expect(genericOnlyMutated).toContain(".atm-drawer-collapse:focus-visible > svg");
+    expect(hasRowFocusGuard(genericOnlyMutated)).toBe(false);
     expect(
       hasRowFocusGuard(
         ".atm-table tbody tr { outline: none; } @media (forced-colors: active) { :focus-visible { outline-color: Canvas; } }",
       ),
     ).toBe(false);
+  });
+
+  it("抽屉收起把手在 forced-colors 下用系统高亮色画焦点环", () => {
+    const styles = uiCssText();
+    const drawerForcedFocus =
+      /@media \(forced-colors: active\) \{[^@]*?\.atm-drawer-collapse:focus-visible > svg \{\s*outline-color: Highlight;/u;
+    expect(styles).toMatch(drawerForcedFocus);
+    expect(
+      styles.replace(
+        /(\.atm-drawer-collapse:focus-visible > svg \{\s*outline-color: )Highlight;/u,
+        "$1Canvas;",
+      ),
+    ).not.toMatch(drawerForcedFocus);
   });
 
   it("forced-colors 用等特指度规则恢复自绘 Select 的系统焦点环", () => {

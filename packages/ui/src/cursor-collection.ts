@@ -53,6 +53,23 @@ export type CursorCollectionState<T> = {
   pageCount: number;
 };
 
+/**
+ * 某个来源读取失败后点「重试」该做什么：
+ * - refresh：没有剩页（刷新失败、保留着旧列表），整次刷新；
+ * - resume：已经读到一些行、还有下一页，接着往下读；
+ * - restart：一行都没读到（首屏就失败，或首页为空、后续页失败），从头重读这个来源。
+ *   以前这里只看 hasMore，首屏失败会被当成续读，而续读要求已有行，于是按钮什么都不做。
+ */
+export function collectionRetryPlan(entry: {
+  error: unknown;
+  hasMore: boolean;
+  items: readonly unknown[];
+}): "none" | "refresh" | "resume" | "restart" {
+  if (!entry.error) return "none";
+  if (!entry.hasMore) return "refresh";
+  return entry.items.length ? "resume" : "restart";
+}
+
 export type CursorPageAdvance<T> =
   | { ok: true; state: CursorCollectionState<T> }
   | { ok: false; state: CursorCollectionState<T>; error: AyanamiClientError };
@@ -464,9 +481,11 @@ export function useCursorCollections<T>(
   const retry = useCallback(
     async (projectKey: string) => {
       const current = entriesRef.current[projectKey];
-      if (!current?.error) return;
-      if (!current.hasMore) return refetch();
-      await read(projectKey, true);
+      const plan = current ? collectionRetryPlan(current) : "none";
+      if (plan === "none") return;
+      if (plan === "refresh") return refetch();
+      // resume 接着已读的行往下读；restart 是首屏就失败，没有可接的行，这个项目从头读一轮。
+      await read(projectKey, plan === "resume");
     },
     [read, refetch],
   );
