@@ -109,6 +109,11 @@
     outline-offset: -3px;
   }
 
+  /* 抽屉收起把手的焦点环画在圆钮上：高对比度下同样换成系统高亮色。 */
+  .atm-drawer-collapse:focus-visible > svg {
+    outline-color: Highlight;
+  }
+
   .atm-sidebar,
   .atm-topbar,
   .atm-modal-backdrop {

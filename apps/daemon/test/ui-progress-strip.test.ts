@@ -51,10 +51,19 @@ async function move(call: Call, title: string, operations: Array<Record<string, 
     const all = await call("GET", "/api/v1/projects/STRIP/ui/work-items?limit=100");
     const task = all.items.find((item: any) => item.title === title);
     await call("POST", "/api/v1/projects/STRIP/ui/work-items/patch", {
-      opId: `strip-${String(step.operation)}-${task.key}`,
+      opId: `strip-${String(step.operation)}-${task.key}-v${task.version}`,
       items: [{ taskKey: task.key, expectedVersion: task.version, ...step }],
     });
   }
+}
+
+async function registerDone(call: Call, objectiveId: string, title: string) {
+  await call("POST", "/api/v1/projects/STRIP/ui/work-items", {
+    opId: `strip-register-${title}`,
+    items: [
+      { clientRef: title, objectiveId, title, status: "DONE", acceptance: [], checklist: [] },
+    ],
+  });
 }
 
 describe("项目进度条四段计数", () => {
@@ -108,11 +117,12 @@ describe("项目进度条四段计数", () => {
         { operation: "start" },
         { operation: "complete" },
       ]);
+      await registerDone(first.call, objective.id, "上次补登");
 
       const before = await first.call("GET", "/api/v1/projects/STRIP/ui/progress-strip");
       expect(before).toEqual({
         since: "2000-01-01T00:00:00.000Z",
-        done: 1,
+        done: 2,
         active: 3,
         waiting: 2,
         ready: 2,
@@ -126,25 +136,34 @@ describe("项目进度条四段计数", () => {
     await new Promise((done) => setTimeout(done, 5));
     const second = await serve(service, restartedAt);
     try {
-      const reset = await second.call("GET", "/api/v1/projects/STRIP/ui/progress-strip");
-      expect(reset.done).toBe(0);
+      const strip = () => second.call("GET", "/api/v1/projects/STRIP/ui/progress-strip");
+      expect((await strip()).done).toBe(0);
+
+      // 上次完成、上次补登的任务在本次只改标题：没有新的完成，不计入。
+      await move(second.call, "上次补登", [{ operation: "edit", title: "上次补登（改名）" }]);
+      await move(second.call, "上次启动完成", [
+        { operation: "edit", title: "上次启动完成（改名）" },
+      ]);
+      expect((await strip()).done).toBe(0);
+
       await move(second.call, "本次启动完成", [{ operation: "start" }, { operation: "complete" }]);
-      // 直接以已完成状态登记的任务没有 completed_at，和「最近结束」一样按最后更新时间算结束时间。
-      await second.call("POST", "/api/v1/projects/STRIP/ui/work-items", {
-        opId: "strip-recorded-done",
-        items: [
-          {
-            clientRef: "recorded",
-            objectiveId,
-            title: "补登已完成",
-            status: "DONE",
-            acceptance: [],
-            checklist: [],
-          },
-        ],
+      expect((await strip()).done).toBe(1);
+
+      // 本次直接以已完成登记：登记时刻就是完成时间。
+      await registerDone(second.call, objectiveId, "本次补登");
+      expect((await strip()).done).toBe(2);
+
+      // 旧任务重新打开再完成：按新的完成时间算，计入本次。
+      await move(second.call, "上次启动完成（改名）", [{ operation: "reopen" }]);
+      expect(await strip()).toMatchObject({ done: 2, active: 4 });
+      await move(second.call, "上次启动完成（改名）", [{ operation: "complete" }]);
+      expect(await strip()).toEqual({
+        since: restartedAt,
+        done: 3,
+        active: 3,
+        waiting: 2,
+        ready: 1,
       });
-      const after = await second.call("GET", "/api/v1/projects/STRIP/ui/progress-strip");
-      expect(after).toEqual({ since: restartedAt, done: 2, active: 3, waiting: 2, ready: 1 });
 
       const status = await second.call("GET", "/api/v1/system/status");
       expect(status.startedAt).toBe(restartedAt);

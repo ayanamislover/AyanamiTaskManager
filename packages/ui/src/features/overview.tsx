@@ -18,13 +18,7 @@ import { useProjectOrder } from "../project-order.js";
 import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
-import { NeedsYouPanel } from "./overview-inbox.js";
-
-/** 页头一句结论：先说有没有事要你处理，再说其余的在谁手里。 */
-export function overviewConclusion(needYou: number, active: number): string {
-  const rest = active ? `${active} 个任务正在推进。` : "眼下没有进行中的任务。";
-  return needYou ? `${needYou} 件事等你处理，${rest}` : `没有要你处理的事，${rest}`;
-}
+import { NeedsYouPanel, needsYouHeadline, useNeedsYou } from "./overview-inbox.js";
 
 export function OverviewPage({
   client,
@@ -50,6 +44,8 @@ export function OverviewPage({
     queryKey: ["overview"],
     queryFn: () => client.overview(),
   });
+  // 页头结论与「等你处理」面板读同一份数据，数字不会各说各的。
+  const needsYou = useNeedsYou(client, query.data?.projects ?? []);
   const quickQuery = useQuery({
     queryKey: ["quick"],
     queryFn: () => client.quick.list(),
@@ -101,8 +97,6 @@ export function OverviewPage({
       sum + Number(project.waiting_user_count ?? 0) + Number(project.waiting_agent_count ?? 0),
     0,
   );
-  const needYou =
-    blocked + projects.reduce((sum, project) => sum + Number(project.waiting_user_count ?? 0), 0);
   const agents = projects.reduce(
     (sum, project) => sum + Number(project.active_agent_count ?? 0),
     0,
@@ -138,7 +132,7 @@ export function OverviewPage({
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");
   return (
     <>
-      <PageHead title="总览" description={overviewConclusion(needYou, active)} />
+      <PageHead title="总览" description={needsYouHeadline(needsYou, active)} />
       <section className="atm-stat-band" aria-label="概况">
         <span>
           <b>{projects.filter((project) => project.lifecycle === "ACTIVE").length}</b>
@@ -164,7 +158,7 @@ export function OverviewPage({
       </section>
       <div className="atm-overview-layout">
         <div className="atm-overview-main">
-          {onTask ? <NeedsYouPanel client={client} projects={projects} onTask={onTask} /> : null}
+          <NeedsYouPanel state={needsYou} onTask={onTask ?? (() => undefined)} />
           <section className="atm-panel">
             <div className="atm-panel-head">
               <h2>项目状态</h2>

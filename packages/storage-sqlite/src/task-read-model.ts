@@ -230,7 +230,7 @@ export class TaskReadModel {
     const row = this.sqlite
       .prepare(
         `SELECT
-           SUM(CASE WHEN status = 'DONE' AND ${FINISHED_AT_SQL} >= ? THEN 1 ELSE 0 END) AS done,
+           SUM(CASE WHEN status = 'DONE' AND completed_at >= ? THEN 1 ELSE 0 END) AS done,
            SUM(CASE WHEN status IN ${PROGRESS_STRIP_ACTIVE_SQL} THEN 1 ELSE 0 END) AS active,
            SUM(CASE WHEN status IN ${PROGRESS_STRIP_WAITING_SQL} THEN 1 ELSE 0 END) AS waiting,
            SUM(CASE WHEN status = 'READY' THEN 1 ELSE 0 END) AS ready

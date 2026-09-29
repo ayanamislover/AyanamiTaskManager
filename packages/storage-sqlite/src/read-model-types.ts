@@ -43,7 +43,9 @@ export type RecentClosedWorkItemPage = {
  * 项目进度条的四段计数。
  *
  * 「已完成」只算 since 之后完成的任务（本次 ATM 启动以来），历史完成不计，
- * 否则老项目的已完成段会越堆越长，把其余三段挤成细线。
+ * 否则老项目的已完成段会越堆越长，把其余三段挤成细线。完成时间只认 completed_at：
+ * updated_at 会随普通编辑变化，不能当完成时间；早年直接登记为已完成、没有 completed_at
+ * 的历史任务完成时间未知，一律不算本次。
  */
 export type ProgressStripCounts = {
   since: string;

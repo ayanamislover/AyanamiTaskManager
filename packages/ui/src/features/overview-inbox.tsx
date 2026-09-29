@@ -3,7 +3,7 @@ import { ChatCircleIcon as ChatCircle } from "@phosphor-icons/react/dist/icons/C
 import { CheckIcon as Check } from "@phosphor-icons/react/dist/icons/Check";
 import { PauseIcon as Pause } from "@phosphor-icons/react/dist/icons/Pause";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { Empty, LoadingRows } from "../components/async-state.js";
+import { CursorLoadStatus, Empty, LoadingRows } from "../components/async-state.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { formatTime } from "../presentation.js";
 
@@ -89,16 +89,53 @@ export function NeedsYouList({
   );
 }
 
-export function NeedsYouPanel({
-  client,
-  projects,
-  onTask,
-}: {
-  client: AyanamiClient;
-  /** 只用到代号和生命周期：总览的项目摘要和注册表里的项目都能直接传进来。 */
-  projects: Array<{ code: string; lifecycle?: string | null }>;
-  onTask: (project: string, key: string) => void;
-}) {
+/** 「等你处理」的统计范围：活动的正式项目里，受阻、等你回复、待验收三类未结束任务。 */
+export type NeedsYouState = {
+  tasks: NeedsYouTask[];
+  /** 全部项目都读完、没有失败也没有剩页：只有这时「一共几件」「没有」才算数。 */
+  complete: boolean;
+  loading: boolean;
+  error: unknown;
+  hasMore: boolean;
+  entries: Array<{ key: string; error: unknown }>;
+  retry: (key: string) => void;
+};
+
+type NeedsYouEntry = {
+  key: string;
+  items: any[];
+  isLoading: boolean;
+  isFetchingNextPage: boolean;
+  hasMore: boolean;
+  error: unknown;
+};
+
+/** 纯函数：从各项目的读取状态推出「等你处理」的结论，页头和面板都用它。 */
+export function needsYouState(
+  sourceKeys: string[],
+  entries: NeedsYouEntry[],
+  retry: (key: string) => void,
+): NeedsYouState {
+  const byKey = new Map(entries.map((entry) => [entry.key, entry]));
+  const settled = sourceKeys.map((key) => byKey.get(key));
+  const loading = settled.some((entry) => !entry || entry.isLoading || entry.isFetchingNextPage);
+  const failed = entries.find((entry) => entry.error);
+  const hasMore = entries.some((entry) => entry.hasMore);
+  return {
+    tasks: needsYouTasks(entries),
+    complete: !loading && !failed && !hasMore,
+    loading,
+    error: failed?.error ?? null,
+    hasMore,
+    entries: entries.map((entry) => ({ key: entry.key, error: entry.error })),
+    retry,
+  };
+}
+
+export function useNeedsYou(
+  client: AyanamiClient,
+  projects: Array<{ code: string; lifecycle?: string | null }>,
+): NeedsYouState {
   const sources = projects
     .filter((project) => project.lifecycle === "ACTIVE")
     .map((project) => ({
@@ -114,20 +151,58 @@ export function NeedsYouPanel({
     ["tasks", "all", "ui", "open", ...sources.map((source) => source.key)],
     sources,
   );
-  const entries = Object.values(collection.entries);
-  const loading = entries.length === 0 || entries.some((entry) => entry.isLoading);
-  const tasks = needsYouTasks(entries);
+  return needsYouState(
+    sources.map((source) => source.key),
+    Object.values(collection.entries),
+    (key) => void collection.retry(key),
+  );
+}
+
+/** 页头结论只在读完时给数字；没读完或读失败时照实说，不提前下「没有」的结论。 */
+export function needsYouHeadline(state: NeedsYouState, active: number): string {
+  if (state.error) return "等你处理的事没能全部读出来，可在下方重试。";
+  if (!state.complete) return "正在汇总等你处理的事…";
+  const rest = active ? `${active} 个任务正在推进。` : "眼下没有进行中的任务。";
+  return state.tasks.length
+    ? `${state.tasks.length} 件事等你处理，${rest}`
+    : `没有要你处理的事，${rest}`;
+}
+
+export function NeedsYouPanel({
+  state,
+  onTask,
+}: {
+  state: NeedsYouState;
+  onTask: (project: string, key: string) => void;
+}) {
+  const { tasks } = state;
   return (
     <section className="atm-panel" aria-labelledby="atm-needs-you-title">
       <div className="atm-panel-head">
         <h2 id="atm-needs-you-title">等你处理</h2>
         {tasks.length ? <span className="atm-badge warning">{tasks.length}</span> : null}
       </div>
-      {loading && tasks.length === 0 && sources.length ? (
-        <LoadingRows count={3} />
-      ) : (
+      {!state.complete ? (
+        <div className="atm-panel-body atm-needs-you-status">
+          <CursorLoadStatus
+            loadedCount={tasks.length}
+            matchedCount={tasks.length}
+            hasMore={state.hasMore}
+            loading={state.loading}
+            error={state.error}
+            onRetry={() => {
+              for (const entry of state.entries) if (entry.error) state.retry(entry.key);
+            }}
+          />
+        </div>
+      ) : null}
+      {tasks.length ? (
         <NeedsYouList tasks={tasks} onTask={onTask} />
-      )}
+      ) : state.complete ? (
+        <NeedsYouList tasks={[]} onTask={onTask} />
+      ) : state.loading && !state.error ? (
+        <LoadingRows count={3} />
+      ) : null}
     </section>
   );
 }

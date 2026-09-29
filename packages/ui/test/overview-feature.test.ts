@@ -9,9 +9,14 @@ import {
   OverviewPage,
   TasksAcrossProjects,
   TasksAcrossProjectsView,
-  overviewConclusion,
 } from "../src/features/overview.js";
-import { NeedsYouList, needsYouTasks } from "../src/features/overview-inbox.js";
+import {
+  NeedsYouList,
+  NeedsYouPanel,
+  needsYouHeadline,
+  needsYouState,
+  needsYouTasks,
+} from "../src/features/overview-inbox.js";
 import { PROJECT_ORDER_SETTING } from "../src/project-order.js";
 import { uiCssText } from "./css-source-graph.js";
 
@@ -113,7 +118,9 @@ describe("Overview feature", () => {
       }),
     );
 
-    expect(markup).toContain("<h1>总览</h1><p>3 件事等你处理，2 个任务正在推进。</p>");
+    // 静态渲染时任务还没读回来：页头不提前下结论。
+    expect(markup).toContain("<h1>总览</h1><p>正在汇总等你处理的事…</p>");
+    expect(markup).not.toContain("没有等你处理的事");
     expect(markup).toContain("进行中项目");
     expect(markup).toContain("需要处理");
     expect(markup).toContain("AyanamiTaskManager");
@@ -290,10 +297,71 @@ describe("Overview feature", () => {
     );
   });
 
-  it("页头结论先说有没有事等你，再说有多少在推进", () => {
-    expect(overviewConclusion(3, 2)).toBe("3 件事等你处理，2 个任务正在推进。");
-    expect(overviewConclusion(0, 2)).toBe("没有要你处理的事，2 个任务正在推进。");
-    expect(overviewConclusion(0, 0)).toBe("没有要你处理的事，眼下没有进行中的任务。");
+  describe("页头与「等你处理」同源", () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      key: "ATM",
+      items: [] as any[],
+      isLoading: false,
+      isFetchingNextPage: false,
+      hasMore: false,
+      error: null as unknown,
+      ...overrides,
+    });
+    const panel = (state: ReturnType<typeof needsYouState>) =>
+      renderToStaticMarkup(createElement(NeedsYouPanel, { state, onTask: vi.fn() }));
+
+    it("只有待验收时页头、徽章、列表都是 1 件", () => {
+      const state = needsYouState(
+        ["ATM"],
+        [entry({ items: [{ key: "ATM-T-1", title: "验收", status: "VERIFYING" }] })],
+        vi.fn(),
+      );
+      expect(needsYouHeadline(state, 2)).toBe("1 件事等你处理，2 个任务正在推进。");
+      const markup = panel(state);
+      expect(markup).toContain('<span class="atm-badge warning">1</span>');
+      expect(markup.match(/data-kind=/g)).toHaveLength(1);
+    });
+
+    it("全部读完且为 0 才说没有", () => {
+      const state = needsYouState(["ATM"], [entry()], vi.fn());
+      expect(needsYouHeadline(state, 0)).toBe("没有要你处理的事，眼下没有进行中的任务。");
+      expect(panel(state)).toContain("没有等你处理的事");
+    });
+
+    it("还在读时不下结论，也不显示空态", () => {
+      const state = needsYouState(["ATM", "MAPX"], [entry()], vi.fn());
+      expect(needsYouHeadline(state, 1)).toBe("正在汇总等你处理的事…");
+      expect(panel(state)).not.toContain("没有等你处理的事");
+    });
+
+    it("首屏读失败：页头说明、面板报错并可重试，不显示空态", () => {
+      const retry = vi.fn();
+      const state = needsYouState(["ATM"], [entry({ error: new Error("503") })], retry);
+      expect(needsYouHeadline(state, 1)).toBe("等你处理的事没能全部读出来，可在下方重试。");
+      const markup = panel(state);
+      expect(markup).toContain('role="alert"');
+      expect(markup).toContain("已找到 0 项，后续分页加载失败");
+      expect(markup).toContain(">重试</button>");
+      expect(markup).not.toContain("没有等你处理的事");
+    });
+
+    it("续页失败：保留已找到的行，同时提示不完整", () => {
+      const state = needsYouState(
+        ["ATM"],
+        [
+          entry({
+            items: [{ key: "ATM-T-4", title: "受阻", status: "BLOCKED" }],
+            hasMore: true,
+            error: new Error("503"),
+          }),
+        ],
+        vi.fn(),
+      );
+      const markup = panel(state);
+      expect(markup).toContain("已找到 1 项，后续分页加载失败");
+      expect(markup.match(/data-kind=/g)).toHaveLength(1);
+      expect(needsYouHeadline(state, 0)).toContain("没能全部读出来");
+    });
   });
 
   it("等你处理按受阻、等你回复、待验收排序，只收这三类", () => {
