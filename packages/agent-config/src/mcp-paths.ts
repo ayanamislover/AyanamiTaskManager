@@ -4,6 +4,11 @@ import { dirname, join } from "node:path";
 
 const CLAUDE_DESKTOP_CONFIG = "claude_desktop_config.json";
 
+/** Kimi Code CLI 的 MCP 配置；VS Code 扩展与 CLI 共用这一份。 */
+export function defaultKimiCodeConfigPath(): string {
+  return join(homedir(), ".kimi-code", "mcp.json");
+}
+
 export function defaultCodexConfigPath(): string {
   return join(homedir(), ".codex", "config.toml");
 }

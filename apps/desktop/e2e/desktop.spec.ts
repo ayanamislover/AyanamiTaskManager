@@ -1919,6 +1919,10 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
             proposed: `<!-- AYANAMI_TASK_MANAGER:BEGIN -->\n## ${client}\n<!-- AYANAMI_TASK_MANAGER:END -->`,
           },
         }),
+        getKimiCodeStatus: async () => ({
+          configPath: "C:\\Users\\tester\\.kimi-code\\mcp.json",
+          profiles: ["core", "memory", "actions"],
+        }),
         getMcpConfigs: async () => ({
           streamableHttp: "{}",
           stdio: "{}",
@@ -1987,6 +1991,14 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await claudeCode.scrollIntoViewIfNeeded();
   await claudeCode.screenshot({
     path: resolve("output", "playwright", "e2e-claude-code-integration-dark.png"),
+  });
+  const kimi = page.getByTestId("kimi-code-integration");
+  await expect(kimi).toContainText("已接入（手动配置）");
+  await expect(kimi).toContainText("core · memory · actions");
+  await expect(kimi.getByRole("button", { name: "交给 ATM 管理" })).toBeDisabled();
+  await kimi.scrollIntoViewIfNeeded();
+  await kimi.screenshot({
+    path: resolve("output", "playwright", "e2e-kimi-code-integration-dark.png"),
   });
 });
 

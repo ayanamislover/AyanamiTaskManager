@@ -8,6 +8,7 @@ import {
   defaultCodexSkillsPath,
   findClaudeCodeCli,
   inspectAgentSkills,
+  inspectKimiCodeConfig,
   inspectManagedAgentRule,
   installClaudeCodeConfig,
   installClaudeConfig,
@@ -264,6 +265,8 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     execPath: options.execPath,
     dataDir: dataDirBeforeReady(),
   }).command;
+  // Kimi Code 由用户手动配置，这里只读；接管（写入、修复、卸载）见 ATM-T-0526。
+  ipcMain.handle("atm:get-kimi-code-status", () => inspectKimiCodeConfig());
   ipcMain.handle("atm:get-mcp-bridges", () =>
     observeMcpBridgeCommands({ bridgeCommands: [stdioCommand, nodeBridgeCommand] }),
   );

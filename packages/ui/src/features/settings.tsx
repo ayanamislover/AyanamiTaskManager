@@ -26,6 +26,7 @@ import {
 import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
+import { KimiCodeCard } from "./kimi-code-card.js";
 
 export function SettingsPage({
   client,
@@ -389,6 +390,7 @@ export function SettingsPage({
                             </article>
                           );
                         })}
+                        <KimiCodeCard desktop={desktop} />
                       </div>
                     ) : null}
                     {integrationPreview ? (

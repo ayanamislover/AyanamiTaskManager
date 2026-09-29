@@ -72,6 +72,12 @@ export type McpBridgeObservation = {
   }>;
 };
 
+/** Kimi Code 的 ATM 接入情况：只读，列出配置里登记了哪几个 ATM profile。 */
+export type KimiCodeStatus = {
+  configPath: string;
+  profiles: Array<"core" | "memory" | "actions">;
+};
+
 export type DesktopBridge = {
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
   getAutoLaunch?: () => Promise<boolean>;
@@ -85,6 +91,7 @@ export type DesktopBridge = {
     agentRule: string;
   }>;
   getMcpBridges?: () => Promise<McpBridgeObservation>;
+  getKimiCodeStatus?: () => Promise<KimiCodeStatus>;
   getMemoryProfile?: () => Promise<boolean>;
   setMemoryProfile?: (enabled: boolean) => Promise<McpProfileSwitchResult>;
   installMcp?: (client: McpClient) => Promise<{ path: string; backupPath: string | null }>;
