@@ -182,11 +182,15 @@ export function TaskDrawer({
           <ErrorState error={query.error} />
         ) : (
           <div className="atm-drawer-body">
-            <div className="atm-actions">
+            <div className="atm-drawer-status">
+              <span className="atm-drawer-status-label">状态</span>
               <Status value={String(query.data!.status)} />
               {progress && progress.phaseLabel !== String(query.data!.status) ? (
                 <span className="atm-badge">{progress.phaseLabel}</span>
               ) : null}
+              <span className="atm-row-sub">{Math.round(progress!.computed)}%</span>
+            </div>
+            <div className="atm-actions atm-drawer-actions">
               {workItemUiActions({
                 status: String(query.data!.status) as WorkItemStatus,
                 actor: "USER",
@@ -211,12 +215,12 @@ export function TaskDrawer({
               ))}
             </div>
             <MutationErrorAlert errors={[patch.error, check.error]} />
-            <section className="atm-section">
-              <h3>说明</h3>
-              <div className="atm-description">
-                {String(query.data!.description || "尚未填写说明")}
-              </div>
-            </section>
+            {query.data!.description ? (
+              <section className="atm-section">
+                <h3>说明</h3>
+                <div className="atm-description">{String(query.data!.description)}</div>
+              </section>
+            ) : null}
             {/*
               计划日只有真设了才出现。任务列表里原来常驻一整列，可实际上一条都没设过，
               整列全是「—」，白占一列宽度。字段本身 MCP 还能写，所以留在这里。
@@ -282,23 +286,21 @@ export function TaskDrawer({
                 <div className="atm-row-sub">当前没有领取此任务的 Session。</div>
               )}
             </section>
-            <section className="atm-section">
-              <h3>验收标准</h3>
-              {(query.data!.acceptance as string[]).length ? (
-                (query.data!.acceptance as string[]).map((item) => (
+            {(query.data!.acceptance as string[]).length ? (
+              <section className="atm-section">
+                <h3>验收标准</h3>
+                {(query.data!.acceptance as string[]).map((item) => (
                   <div className="atm-check" key={item}>
                     <CheckCircle size={17} color="var(--atm-success)" />
                     <span>{item}</span>
                   </div>
-                ))
-              ) : (
-                <div className="atm-row-sub">未设置验收标准</div>
-              )}
-            </section>
-            <section className="atm-section">
-              <h3>检查项</h3>
-              {(query.data!.checklist as any[]).length ? (
-                (query.data!.checklist as any[]).map((item) => {
+                ))}
+              </section>
+            ) : null}
+            {(query.data!.checklist as any[]).length ? (
+              <section className="atm-section">
+                <h3>检查项</h3>
+                {(query.data!.checklist as any[]).map((item) => {
                   const evidence: unknown[] = item.evidence ?? [];
                   const draft = evidenceDraft?.id === item.id ? evidenceDraft : null;
                   return (
@@ -403,16 +405,14 @@ export function TaskDrawer({
                       )}
                     </div>
                   );
-                })
-              ) : (
-                <div className="atm-row-sub">未设置检查项</div>
-              )}
-            </section>
-            <section className="atm-section">
-              <h3>任务关系</h3>
-              <div className="atm-actions">
-                {query.data!.relations.length ? (
-                  query.data!.relations.map((relation) => {
+                })}
+              </section>
+            ) : null}
+            {query.data!.relations.length ? (
+              <section className="atm-section">
+                <h3>任务关系</h3>
+                <div className="atm-actions">
+                  {query.data!.relations.map((relation) => {
                     const label =
                       relation.type === "PARENT"
                         ? "父任务"
@@ -437,12 +437,22 @@ export function TaskDrawer({
                         {label} {relation.taskKey}
                       </span>
                     );
-                  })
-                ) : (
-                  <span className="atm-row-sub">没有任务关系</span>
-                )}
-              </div>
-            </section>
+                  })}
+                </div>
+              </section>
+            ) : null}
+            {missingDetails(query.data!).length ? (
+              <section className="atm-section atm-drawer-missing" aria-label="尚未填写">
+                <h3>尚未填写</h3>
+                <div className="atm-actions">
+                  {missingDetails(query.data!).map((label) => (
+                    <span className="atm-badge" key={label}>
+                      {label}
+                    </span>
+                  ))}
+                </div>
+              </section>
+            ) : null}
             {engineering.data?.available && engineering.data.workItem?.metrics ? (
               <section className="atm-section">
                 <h3>工程变更</h3>
@@ -492,4 +502,20 @@ export function TaskDrawer({
       </aside>
     </div>
   );
+}
+
+/** 空着的详情不各占一块写「未设置」，收成一行「尚未填写」。 */
+export function missingDetails(task: {
+  description?: unknown;
+  acceptance?: unknown;
+  checklist?: unknown;
+  relations?: unknown;
+}): string[] {
+  const empty = (value: unknown) => !Array.isArray(value) || value.length === 0;
+  return [
+    ...(task.description ? [] : ["说明"]),
+    ...(empty(task.acceptance) ? ["验收标准"] : []),
+    ...(empty(task.checklist) ? ["检查项"] : []),
+    ...(empty(task.relations) ? ["任务关系"] : []),
+  ];
 }

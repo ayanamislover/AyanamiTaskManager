@@ -222,12 +222,45 @@
 }
 .atm-drawer-body {
   display: grid;
-  gap: 18px;
+  gap: 10px;
   padding: 8px 22px 22px;
 }
 .atm-section h3 {
   margin: 0 0 10px;
   font-size: 13px;
+}
+/* 抽屉里每个分区是一张柔色小卡，不用分隔线；分区标题降成小号淡色标签。 */
+.atm-drawer .atm-section {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: var(--atm-surface-muted);
+}
+.atm-drawer .atm-section h3 {
+  margin: 0 0 8px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+  font-weight: 500;
+}
+.atm-drawer-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.atm-drawer-status-label {
+  min-width: 48px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+}
+.atm-drawer-actions {
+  flex-wrap: wrap;
+}
+.atm-drawer .atm-progress {
+  background: color-mix(in srgb, var(--atm-surface) 70%, transparent);
+}
+.atm-drawer-missing .atm-badge {
+  color: var(--atm-text-muted);
+  background: var(--atm-surface);
 }
 .atm-description {
   color: var(--atm-text-muted);
