@@ -84,8 +84,9 @@
   .atm-nav-disclosure span {
     display: none;
   }
-  /* 状态灯只留圆点，挂在齿轮右上角；字用 font-size: 0 收起，读屏照样读得到。 */
-  .atm-service-status {
+  /* 侧栏状态灯只留圆点，挂在齿轮右上角；字用 font-size: 0 收起，读屏照样读得到。
+     设置页行内那盏（.is-inline）有地方放字，不收。 */
+  .atm-service-status:not(.is-inline) {
     top: 19px;
     right: 8px;
     gap: 0;

@@ -157,7 +157,9 @@ describe("keyboard accessibility primitives", () => {
     expect(narrow).not.toMatch(/\.atm-brand span\b/u);
     // 「工作区」折叠按钮的字和状态灯的「正常」两个字，68px 里都放不下。
     expect(narrow).toMatch(/\.atm-nav-disclosure span \{\s*display: none;/u);
-    expect(narrow).toMatch(/\.atm-service-status \{[^}]*font-size: 0;/u);
+    // 只收侧栏那盏；设置页行内版（.is-inline）的「正常 / 异常」在窄屏也要看得见。
+    expect(narrow).toMatch(/\.atm-service-status:not\(\.is-inline\) \{[^}]*font-size: 0;/u);
+    expect(narrow).not.toMatch(/\.atm-service-status \{[^}]*font-size: 0;/u);
   });
 
   it("forced-colors 用等特指度规则恢复自绘 Select 的系统焦点环", () => {
