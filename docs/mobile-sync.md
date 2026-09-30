@@ -180,12 +180,12 @@ type TaskCard = {
 
 ## 6. 命令
 
-| type            | body                                                            | 电脑侧动作                                                                                                                                                                                                                                                     |
-| --------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `task.create`   | `{project, title, description?, priority?, dispatch?: boolean}` | 以 USER 身份建任务：挂到该项目第一个 ACTIVE 目标、状态 READY、`op_id = mobile:<cmdId>`；`dispatch` 为真且派单已开启时随即排队派单。结果 `{project, key, dispatch?: {run, state}, dispatchError?: {code, message}}`（任务已建好但派单被拒时给 `dispatchError`） |
-| `task.dispatch` | `{project, key}`                                                | 对已有任务排队派单。任务必须是 READY 或 BACKLOG 且没有有效领取                                                                                                                                                                                                 |
+| type            | body                                                            | 电脑侧动作                                                                                                                                                                                                                                                                                                        |
+| --------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `task.create`   | `{project, title, description?, priority?, dispatch?: boolean}` | 以 USER 身份建任务：挂到该项目第一个 ACTIVE 目标（没有就按 promote 的规则补建一个「自动补建」目标）、状态 READY、`op_id = mobile:<cmdId>`；`dispatch` 为真且派单已开启时随即排队派单。结果 `{project, key, dispatch?: {run, state}, dispatchError?: {code, message}}`（任务已建好但派单被拒时给 `dispatchError`） |
+| `task.dispatch` | `{project, key}`                                                | 对已有任务排队派单。任务必须是 READY 或 BACKLOG 且没有有效领取                                                                                                                                                                                                                                                    |
 
-校验失败、项目不存在、没有 ACTIVE 目标、派单未开启等都写 `ok:false` 的 ack，错误码见实现里的 `SyncCommandError`。
+校验失败、项目不存在、任务不存在、命令过期等写 `ok:false` 的 ack；任务已建好但派单被拒（例如派单未开启）写 `ok:true` 并带 `dispatchError`，错误码见实现里的 `SyncCommandError`。
 `title` 1–200 字符，`description` ≤ 8000 字符，`priority ∈ LOW|NORMAL|HIGH|CRITICAL`（默认 NORMAL）。
 命令 `at` 早于 7 天的直接拒绝（`COMMAND_EXPIRED`）。
 

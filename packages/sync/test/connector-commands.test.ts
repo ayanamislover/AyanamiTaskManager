@@ -151,7 +151,7 @@ describe("手机命令", () => {
     }
   });
 
-  it("项目没有 ACTIVE 目标、项目不存在时回失败回执", async () => {
+  it("项目没有 ACTIVE 目标时补建一个（标题可辨）再建任务；项目不存在时回失败回执", async () => {
     const fixture = await openFixture();
     try {
       await seedProject(fixture.service, "BARE", { objective: false });
@@ -160,12 +160,18 @@ describe("手机命令", () => {
       const phone = await phoneFor(fixture.relay, pairing.pairingCode);
       const bare = await phone.store.sendCommand(phone.device, {
         type: "task.create",
-        body: { project: "BARE", title: "无处落位" },
+        body: { project: "BARE", title: "新项目的第一个任务" },
       });
-      expect(await phone.awaitAck(bare.id)).toMatchObject({
-        ok: false,
-        error: { code: "PROJECT_NO_ACTIVE_OBJECTIVE" },
-      });
+      const bareAck = await phone.awaitAck(bare.id);
+      expect(bareAck).toMatchObject({ ok: true, result: { project: "BARE" } });
+      const objectives = (await fixture.service.listObjectives("BARE")) as Array<{
+        id: string;
+        title: string;
+        status: string;
+      }>;
+      expect(objectives).toHaveLength(1);
+      expect(objectives[0]?.title).toContain("自动补建");
+      expect(await taskKeys(fixture, "BARE")).toEqual([bareAck.ok ? bareAck.result.key : ""]);
       const missing = await phone.store.sendCommand(phone.device, {
         type: "task.create",
         body: { project: "NOPE", title: "没有这个项目" },
@@ -174,7 +180,6 @@ describe("手机命令", () => {
         ok: false,
         error: { code: "PROJECT_NOT_FOUND" },
       });
-      expect(await taskKeys(fixture, "BARE")).toEqual([]);
     } finally {
       await fixture.close();
     }

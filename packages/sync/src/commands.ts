@@ -52,16 +52,16 @@ function activeProject(service: AyanamiTaskService, code: string): { code: strin
   throw new SyncCommandError("PROJECT_NOT_FOUND", `项目 ${code} 不存在或已归档`);
 }
 
-/** 与桌面端「新建任务」同一规则：项目目标按创建顺序，取第一个 ACTIVE 的。 */
+/**
+ * 与桌面端「新建任务」同一规则：项目目标按创建顺序，取第一个 ACTIVE 的。
+ * 项目还没有目标时，走 promote / Agent 建任务共用的补建路径（标题带「自动补建」，一眼可辨），
+ * 而不是把手机上的任务拒掉——新项目头一个任务多半就是从手机发来的。
+ */
 async function firstActiveObjective(service: AyanamiTaskService, code: string): Promise<string> {
   const objectives = (await service.listObjectives(code)) as Array<{ id: string; status: string }>;
   const objective = objectives.find((entry) => entry.status === "ACTIVE");
-  if (!objective)
-    throw new SyncCommandError(
-      "PROJECT_NO_ACTIVE_OBJECTIVE",
-      `项目 ${code} 还没有进行中的目标：请先在电脑上为它建一个目标`,
-    );
-  return String(objective.id);
+  if (objective) return String(objective.id);
+  return (await service.ensurePlanningRoot(code)).objectiveId;
 }
 
 async function dispatchOutcome(
