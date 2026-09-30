@@ -42,3 +42,6 @@ output/
 *.db
 *.db-wal
 *.db-shm
+
+# Local build outputs and signing material (Android keystore lives in .local/android)
+.local/

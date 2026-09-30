@@ -1,0 +1,27 @@
+{
+  "name": "@ayanami-task/mobile",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174 --strictPort",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "cap:sync": "cap sync android"
+  },
+  "dependencies": {
+    "@ayanami-task/protocol": "workspace:*",
+    "@ayanami-task/sync-protocol": "workspace:*",
+    "@ayanami-task/ui": "workspace:*",
+    "@capacitor/android": "8.5.2",
+    "@capacitor/app": "8.1.1",
+    "@capacitor/core": "8.5.2",
+    "@phosphor-icons/react": "2.1.10",
+    "jsqr": "1.4.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  }
+}
