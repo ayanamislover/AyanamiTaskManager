@@ -55,6 +55,15 @@ fn run_entry(entry: &CoreCommand, layout: &Layout, extra: &[String], console: bo
 pub fn run(layout: &Layout, mode: &Headless) -> i32 {
     match mode {
         Headless::Cli(args) => run_entry(&layout.cli, layout, args, true),
-        Headless::McpStdio(args) => run_entry(&layout.mcp_stdio, layout, args, false),
+        Headless::McpStdio(args) => {
+            // The JS bridge wakes the desktop when no daemon is published. Under Electron it
+            // ran as the desktop exe and used its own path; on the bundled Node it is told.
+            let mut entry = layout.mcp_stdio.clone();
+            entry.env.push((
+                "ATM_DESKTOP_EXECUTABLE".into(),
+                layout.host_exe.to_string_lossy().into_owned(),
+            ));
+            run_entry(&entry, layout, args, false)
+        }
     }
 }

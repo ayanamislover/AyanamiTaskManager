@@ -14,6 +14,7 @@ fn main() {
     let record = serde_json::json!({
         "args": std::env::args().skip(1).collect::<Vec<_>>(),
         "electronRunAsNode": text("ELECTRON_RUN_AS_NODE"),
+        "desktopExecutable": text("ATM_DESKTOP_EXECUTABLE"),
         "dataDir": text("ATM_DATA_DIR"),
         "pid": std::process::id(),
     });
