@@ -329,6 +329,22 @@
 .step-label .mono {
   font-size: 13px;
 }
+/* 失败那一步下面的原因：比步骤名轻一档，与详情页的 .dispatch-reason 同一层级。 */
+.step-detail {
+  display: block;
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--atm-danger) 55%, var(--atm-text));
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.steps li:has(.step-detail) {
+  align-items: flex-start;
+  padding: 9px 0;
+}
+.steps li:has(.step-detail) .step-mark {
+  margin-top: -1px;
+}
 
 /* ─── 设置 ─── */
 .settings-group {

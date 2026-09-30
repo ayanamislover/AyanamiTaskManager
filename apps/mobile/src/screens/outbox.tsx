@@ -6,7 +6,7 @@ import type { LocalCommand } from "../data/commands.js";
 import { findTask } from "../data/snapshot.js";
 import { formatRelative } from "../data/time.js";
 import { useEngine, useEngineState, useNow } from "../ui/hooks.js";
-import { describeCommand } from "../ui/labels.js";
+import { describeCommand, dispatchFailureReason } from "../ui/labels.js";
 import { SectionTitle } from "../ui/layout.js";
 import { push } from "../ui/nav.js";
 
@@ -92,7 +92,7 @@ export function CommandCard({
 }
 
 type StepState = "done" | "active" | "todo" | "failed";
-type Step = { state: StepState; label: string; mono?: string };
+type Step = { state: StepState; label: string; mono?: string; detail?: string | null };
 
 /**
  * 新任务发出后的三步：电脑接收 → 建出任务 → （勾了交给 Claude 时）Claude 开工。
@@ -123,8 +123,9 @@ export function CommandSteps({ command }: { command: LocalCommand }) {
   const wantsDispatch = doc.type === "task.create" && doc.body.dispatch === true;
   if (wantsDispatch) {
     const dispatch = task?.dispatch ?? (result?.dispatch ? { state: result.dispatch.state } : null);
+    const reason = dispatchFailureReason(result, task);
     if (result?.dispatchError)
-      steps.push({ state: "failed", label: `派单没有开始：${result.dispatchError.message}` });
+      steps.push({ state: "failed", label: "派单没有开始", detail: reason });
     else if (!dispatch) steps.push({ state: "todo", label: "Claude 开工" });
     else if (dispatch.state === "queued") steps.push({ state: "active", label: "Claude 排队中" });
     else if (dispatch.state === "running") steps.push({ state: "done", label: "Claude 已开工" });
@@ -133,6 +134,7 @@ export function CommandSteps({ command }: { command: LocalCommand }) {
       steps.push({
         state: "failed",
         label: dispatch.state === "failed" ? "Claude 运行失败" : "派单已取消",
+        detail: dispatch.state === "failed" ? reason : null,
       });
   }
   return (
@@ -151,6 +153,7 @@ export function CommandSteps({ command }: { command: LocalCommand }) {
           <span className="step-label">
             {step.label}
             {step.mono ? <span className="mono"> {step.mono}</span> : null}
+            {step.detail ? <span className="step-detail">{step.detail}</span> : null}
           </span>
         </li>
       ))}

@@ -84,6 +84,41 @@ export function dispatchBlocker(
   return null;
 }
 
+/**
+ * 派单失败时给用户看的原因。回执里的 dispatchError（派单根本没开始，针对的正是这条命令）优先；
+ * 其次是任务卡上电脑写的 dispatch.error（跑起来之后失败，只在状态为 failed 时有意义）。都没有返回 null。
+ */
+export function dispatchFailureReason(
+  result: { dispatchError?: { message: string } | undefined } | null | undefined,
+  task: Pick<TaskCard, "dispatch"> | null | undefined,
+): string | null {
+  const fromAck = result?.dispatchError?.message.trim();
+  if (fromAck) return fromAck;
+  if (task?.dispatch?.state !== "failed") return null;
+  return task.dispatch.error?.trim() || null;
+}
+
+/**
+ * 电脑已经接下这条「交给 Claude」，但快照还没更新到这次派单（任务卡上仍是上一次的 failed 等）。
+ * 这段时间里按钮不能再点，否则会连发两次。以回执里的 run 为准：快照出现同一个 run，
+ * 或出现了比回执更晚的派单，就算赶上了。回执没带 run 时不拦（无从判断，宁可放行）。
+ */
+export function dispatchAwaitingSnapshot(
+  command: LocalCommand,
+  taskKey: string,
+  task: Pick<TaskCard, "dispatch"> | null | undefined,
+): boolean {
+  const { doc, result } = command;
+  if (doc.type !== "task.dispatch" || doc.body.key !== taskKey) return false;
+  if (command.state !== "created" || !result || result.dispatchError) return false;
+  const run = result.dispatch?.run;
+  if (!run) return false;
+  const current = task?.dispatch;
+  if (!current) return true;
+  if (current.run === run) return false;
+  return !(command.ackAt && Date.parse(current.at) >= Date.parse(command.ackAt));
+}
+
 export type CommandView = { tone: Tone | "pending"; title: string; detail: string | null };
 
 /** 本地命令在界面上的样子：等待电脑接收 → 已创建 ATM-T-xxxx → 派单状态。 */
@@ -112,10 +147,11 @@ export function describeCommand(command: LocalCommand, task: TaskCard | null): C
     };
   }
   if (dispatch) {
+    const reason = dispatch.state === "failed" ? dispatchFailureReason(result, task) : null;
     return {
       tone: dispatchTone(dispatch.state),
       title: doc.type === "task.create" ? `已创建 ${key}` : `${key} 已交给 Claude`,
-      detail: `Claude ${DISPATCH_LABELS[dispatch.state]}`,
+      detail: reason ? `Claude 运行失败：${reason}` : `Claude ${DISPATCH_LABELS[dispatch.state]}`,
     };
   }
   return { tone: "done", title: `已创建 ${key}`, detail: subject };

@@ -12,7 +12,9 @@ import { formatClock, formatRelative } from "../data/time.js";
 import { useEngine, useEngineState, useNow } from "../ui/hooks.js";
 import {
   DISPATCH_LABELS,
+  dispatchAwaitingSnapshot,
   dispatchBlocker,
+  dispatchFailureReason,
   dispatchTone,
   priorityLabel,
   typeLabel,
@@ -29,15 +31,28 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
   const now = useNow();
   const task = findTask(state.snapshot, code, taskKey);
   const dispatchEnabled = state.snapshot.head?.dispatch.enabled;
+  // 电脑已接下、但快照还停在上一次派单（例如上次 failed）的命令也算在途：按钮保持不可点，免得连发两次。
   const pending = state.commands.filter(
     (command) =>
       command.doc.type === "task.dispatch" &&
       command.doc.body.key === taskKey &&
       !command.dismissed &&
-      (command.state === "pending" || command.state === "sent" || command.state === "failed"),
+      (command.state === "pending" ||
+        command.state === "sent" ||
+        command.state === "failed" ||
+        dispatchAwaitingSnapshot(command, taskKey, task)),
   );
-  const waitingForAck = pending.some((command) => command.state !== "failed");
-  const blocker = task ? dispatchBlocker(task, dispatchEnabled) : null;
+  const waitingForAck = pending.some(
+    (command) => command.state === "pending" || command.state === "sent",
+  );
+  const handedOff = pending.some((command) => command.state === "created");
+  const blocker = task
+    ? handedOff
+      ? "已经交给 Claude 了"
+      : dispatchBlocker(task, dispatchEnabled)
+    : null;
+  const retry = task?.dispatch?.state === "failed";
+  const retryHasReason = Boolean(task && dispatchFailureReason(null, task));
   const [sending, setSending] = useState(false);
 
   const send = async () => {
@@ -65,6 +80,12 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
             {dispatchEnabled ? null : <WarningCircle size={16} weight="bold" aria-hidden="true" />}
             {blocker}
           </p>
+        ) : retry ? (
+          <p className="dispatch-reason">
+            {retryHasReason
+              ? "上次没有跑成功；把上面的原因处理好后，可以再交给 Claude。"
+              : "上次没有跑成功，可以再交给 Claude 试一次；详细原因在电脑 ATM 的派单记录里。"}
+          </p>
         ) : (
           <p className="dispatch-reason">
             电脑收到后会拉起 Claude Code 领取这个任务、补全目标并开工。
@@ -77,7 +98,7 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
           onClick={() => void send()}
         >
           <Sparkle size={18} weight="fill" aria-hidden="true" />
-          {waitingForAck ? "等待电脑接收…" : "交给 Claude"}
+          {waitingForAck ? "等待电脑接收…" : retry && !blocker ? "再次交给 Claude" : "交给 Claude"}
         </button>
       </div>
     ) : undefined;
@@ -103,6 +124,7 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
 function TaskBody({ task, now }: { task: TaskCard; now: number }) {
   const closed = task.status === "DONE" || task.status === "CANCELLED";
   const flagged = task.priority === "HIGH" || task.priority === "CRITICAL";
+  const failureReason = dispatchFailureReason(null, task);
   const note =
     task.status === "BLOCKED"
       ? task.blocked
@@ -177,6 +199,12 @@ function TaskBody({ task, now }: { task: TaskCard; now: number }) {
             </ToneBadge>
             <span className="dispatch-time">{formatRelative(task.dispatch.at, now)}</span>
           </div>
+          {failureReason ? (
+            <p className="dispatch-reason dispatch-error" data-tone="blocked">
+              <WarningCircle size={16} weight="bold" aria-hidden="true" />
+              {failureReason}
+            </p>
+          ) : null}
         </section>
       ) : null}
 

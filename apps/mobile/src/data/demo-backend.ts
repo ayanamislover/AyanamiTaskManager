@@ -25,10 +25,13 @@ export type DemoScenario =
   | "offline"
   | "empty"
   | "dispatch-off"
+  | "dispatch-failed"
   | "denied"
   | "host-offline";
 
 const WAIT_MS = 25_000;
+const DEMO_DISPATCH_ERROR =
+  "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude";
 
 /** 回执去掉信封字段后的部分（在联合类型上逐支 Omit）。 */
 type AckBody = AckDoc extends infer Doc
@@ -278,14 +281,14 @@ export class DemoBackend implements SyncBackend {
       };
       project.tasks.unshift(card);
       const dispatch = doc.body.dispatch && dispatchEnabled;
-      if (dispatch) card.dispatch = { state: "queued", at: iso(Date.now()), run: `run-${next}` };
+      if (dispatch) card.dispatch = { state: "queued", at: iso(Date.now()), run: `run-${next}-1` };
       this.#touch(project);
       this.#ack(doc, {
         ok: true,
         result: {
           project: project.code,
           key,
-          ...(dispatch ? { dispatch: { run: `run-${next}`, state: "queued" as const } } : {}),
+          ...(dispatch ? { dispatch: { run: `run-${next}-1`, state: "queued" as const } } : {}),
           ...(doc.body.dispatch && !dispatchEnabled
             ? { dispatchError: { code: "DISPATCH_DISABLED", message: "电脑端未开启 Claude 派单" } }
             : {}),
@@ -309,15 +312,13 @@ export class DemoBackend implements SyncBackend {
       });
       return;
     }
-    task.dispatch = { state: "queued", at: iso(Date.now()), run: `run-${task.key}` };
+    // 每次派单一个新 run：手机据此判断快照是否已经跟上这一次（重试失败的派单时要用到）。
+    const run = `run-${task.key}-${Date.now().toString(36)}`;
+    task.dispatch = { state: "queued", at: iso(Date.now()), run };
     this.#touch(project);
     this.#ack(doc, {
       ok: true,
-      result: {
-        project: project.code,
-        key: task.key,
-        dispatch: { run: `run-${task.key}`, state: "queued" },
-      },
+      result: { project: project.code, key: task.key, dispatch: { run, state: "queued" } },
     });
     this.#runDispatch(project, task.key);
   }
@@ -326,6 +327,17 @@ export class DemoBackend implements SyncBackend {
     this.#later(3_000, () => {
       const task = project.tasks.find((t) => t.key === key);
       if (!task?.dispatch) return;
+      if (this.#scenario === "dispatch-failed") {
+        // 照电脑端真实报错：Claude Code 没登录，派单拉起即失败，任务仍待领取。
+        task.dispatch = {
+          ...task.dispatch,
+          state: "failed",
+          at: iso(Date.now()),
+          error: DEMO_DISPATCH_ERROR,
+        };
+        this.#touch(project);
+        return;
+      }
       task.dispatch = { ...task.dispatch, state: "running", at: iso(Date.now()) };
       task.status = "IN_PROGRESS";
       task.claim = { agent: "claude-code · 派单", since: iso(Date.now()) };
