@@ -374,6 +374,38 @@ describe("Overview feature", () => {
     );
   });
 
+  it("过滤后为空但还没完整读完（读失败、有剩页）时不下「没有」的结论", () => {
+    const ready = {
+      key: "ATM",
+      items: [{ key: "ATM-T-2", title: "还没开始", status: "READY" }],
+      loadedCount: 1,
+      hasMore: false,
+      isLoading: false,
+      isFetchingNextPage: false,
+      error: null as unknown,
+    };
+    const render = (other: Record<string, unknown>) =>
+      renderToStaticMarkup(
+        createElement(TasksAcrossProjectsView, {
+          entries: [ready, { ...ready, key: "SEARCH", items: [], loadedCount: 0, ...other }],
+          projects: [project()],
+          mode: "active",
+          onTask: vi.fn(),
+          onRetry: vi.fn(),
+        }),
+      );
+    for (const other of [{ error: new Error("断了"), hasMore: true }, { hasMore: true }]) {
+      const markup = render(other);
+      expect(markup).not.toContain("<strong>没有活动任务</strong>");
+      expect(markup).toContain("<strong>结果还不完整</strong>");
+      expect(markup).toContain("已读到的部分里没有活动任务");
+    }
+    // 全部完整读完、确实没有匹配项，才是确定性的空态。
+    const complete = render({});
+    expect(complete).toContain("<strong>没有活动任务</strong>");
+    expect(complete).not.toContain("结果还不完整");
+  });
+
   describe("页头与「等你处理」同源", () => {
     const entry = (overrides: Record<string, unknown> = {}) => ({
       key: "ATM",

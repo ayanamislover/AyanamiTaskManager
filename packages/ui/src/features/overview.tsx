@@ -7,6 +7,7 @@ import {
   CursorLoadStatus,
   Empty,
   ErrorState,
+  IncompleteEmpty,
   LoadingRows,
   MutationErrorAlert,
   PageHead,
@@ -393,14 +394,16 @@ export function TasksAcrossProjectsView({
       projectName: projects.find((project) => project.code === task.project)?.name ?? task.project,
     }))
     .filter((task: any) => statuses.includes(task.status));
+  const reading = isLoading || entries.some((entry) => entry.isFetchingNextPage);
+  const unread = entries.some((entry) => entry.hasMore);
   if (!tasks.length)
     return (
       <>
         <CursorLoadStatus
           loadedCount={loadedCount}
           matchedCount={0}
-          hasMore={entries.some((entry) => entry.hasMore)}
-          loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
+          hasMore={unread}
+          loading={reading}
           error={error}
           onRetry={() => {
             for (const entry of entries) {
@@ -409,14 +412,22 @@ export function TasksAcrossProjectsView({
           }}
         />
         <section className="atm-panel">
-          <Empty
-            title={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
-            text={
-              mode === "active"
-                ? "任务被领取或开始后会出现在这里。"
-                : "当前没有需要外部处理的任务。"
-            }
-          />
+          {/* 读到的任务可能全是 READY，过滤后为空不等于「没有」：全部项目完整读完才下结论。 */}
+          {reading || unread || error ? (
+            <IncompleteEmpty
+              loading={reading}
+              found={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
+            />
+          ) : (
+            <Empty
+              title={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
+              text={
+                mode === "active"
+                  ? "任务被领取或开始后会出现在这里。"
+                  : "当前没有需要外部处理的任务。"
+              }
+            />
+          )}
         </section>
       </>
     );
@@ -425,8 +436,8 @@ export function TasksAcrossProjectsView({
       <CursorLoadStatus
         loadedCount={loadedCount}
         matchedCount={tasks.length}
-        hasMore={entries.some((entry) => entry.hasMore)}
-        loading={isLoading || entries.some((entry) => entry.isFetchingNextPage)}
+        hasMore={unread}
+        loading={reading}
         error={error}
         onRetry={() => {
           for (const entry of entries) {

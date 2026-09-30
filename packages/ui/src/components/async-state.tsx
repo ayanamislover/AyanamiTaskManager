@@ -30,6 +30,21 @@ export function Empty({
   );
 }
 
+/**
+ * 过滤后一条都没有、但还不能下「没有」的结论时用：还有来源在读、有剩页没读，或者读失败了。
+ * 首屏等满时限先换上、或重试某个项目时会进这里；只有全部来源完整读完，才轮到确定性的空态。
+ */
+export function IncompleteEmpty({ loading, found }: { loading: boolean; found: string }) {
+  return (
+    <Empty
+      title={loading ? "还有项目没读完" : "结果还不完整"}
+      text={`已读到的部分里${found}；${
+        loading ? "其余项目读完后会出现在这里。" : "重试后才能确定。"
+      }`}
+    />
+  );
+}
+
 export function ErrorState({ error }: { error: unknown }) {
   return (
     <div className="atm-error">

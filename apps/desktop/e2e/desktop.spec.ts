@@ -2844,3 +2844,103 @@ test("总览首屏有一块迟迟不回来时，等满上限先换上已就绪�
   await expect(page.locator(".atm-stat-band")).toBeVisible({ timeout: 4_000 });
   await expect(page.getByRole("heading", { name: "项目状态", exact: true })).toBeVisible();
 });
+
+for (const { route, done, status, conclusion } of [
+  { route: "my", done: "活动任务", status: "IN_PROGRESS", conclusion: "没有活动任务" },
+  { route: "blockers", done: "阻塞与等待", status: "WAITING_USER", conclusion: "没有阻塞或等待" },
+]) {
+  test(`「${done}」首屏等满上限时还有项目没读完：不说「${conclusion}」，读完后补上`, async ({
+    page,
+  }) => {
+    await ensureSwitchTargetProject();
+    // 其他项目读到的一律改成 READY（过滤后为空，不受前面用例留下的任务影响）；
+    // E2ESW 晚 3 秒回来，带一条匹配的任务。
+    await page.route(/\/api\/v1\/projects\/[^/]+\/ui\/work-items/u, async (request) => {
+      const response = await request.fetch();
+      const body = (await response.json()) as { items: Array<Record<string, unknown>> };
+      if (!request.request().url().includes("/projects/E2ESW/"))
+        return request.fulfill({
+          response,
+          json: { ...body, items: body.items.map((item) => ({ ...item, status: "READY" })) },
+        });
+      await new Promise((done) => setTimeout(done, 3_000));
+      await request.fulfill({
+        response,
+        json: {
+          ...body,
+          items: [
+            ...body.items,
+            {
+              id: "e2e-slow-task",
+              key: "E2ESW-T-9999",
+              title: "慢项目里的任务",
+              status,
+              priority: "NORMAL",
+              version: 1,
+            },
+          ],
+        },
+      });
+    });
+    await page.goto(`/#${route}`);
+    await expect(page.locator(".atm-content h1")).toHaveText(done);
+    // 等满首屏上限（1.5s）后先换上已读到的部分。
+    const empty = page.locator(".atm-content .atm-empty strong");
+    await expect(empty).toHaveText("还有项目没读完", { timeout: 2_500 });
+    expect(await page.locator(".atm-content").getByText(conclusion, { exact: true }).count()).toBe(
+      0,
+    );
+    await expect(page.getByText("E2ESW-T-9999")).toBeVisible({ timeout: 5_000 });
+    await expect(empty).toHaveCount(0);
+  });
+}
+
+test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先出来，并说明还在读", async ({ page }) => {
+  await ensureSwitchTargetProject();
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const agentId = `e2e-partial-${Date.now().toString(36)}`;
+  const begun = await api.post(`${apiUrl}/sessions`, {
+    data: {
+      cwd: process.cwd(),
+      projectCode: "E2E",
+      mode: "project",
+      agentId,
+      displayName: "E2E 局部读取 Agent",
+      clientKind: "playwright",
+      role: "PRIMARY",
+      resume: false,
+      allowProjectCreate: false,
+    },
+  });
+  expect(begun.ok()).toBeTruthy();
+  const session = String((await begun.json()).session);
+  try {
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    await page.route(/\/api\/v1\/projects\/E2ESW\/agents/u, async (request) => {
+      await held;
+      await request.continue();
+    });
+    await page.goto("/#agents");
+    const card = page.locator(`[data-agent-id="${agentId}"]`);
+    await expect(card).toBeVisible({ timeout: 2_500 });
+    // 缺席的项目要说出来「还在读」，不能看起来像已经完整了。
+    const status = page.locator(".atm-content .atm-cursor-load-status");
+    await expect(status).toContainText("正在加载后续");
+    release();
+    await expect(status).toHaveCount(0);
+    await expect(card).toBeVisible();
+  } finally {
+    await api.post(`${apiUrl}/sessions/${session}/close`, {
+      data: {
+        project: "E2E",
+        opId: `e2e-close-${crypto.randomUUID()}`,
+        outcome: "completed",
+        summary: "Agent 局部读取 E2E 清理",
+        next: [],
+        releaseClaims: true,
+      },
+    });
+    await api.dispose();
+  }
+});

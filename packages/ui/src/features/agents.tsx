@@ -12,6 +12,7 @@ import {
   CursorLoadStatus,
   Empty,
   ErrorState,
+  IncompleteEmpty,
   LoadingRows,
   MutationErrorAlert,
   PageHead,
@@ -106,6 +107,9 @@ export function AgentsPage({
     Date.now(),
   );
   const conflicts = findAgentSessionConflicts(allSessions);
+  const reading = entries.some((entry) => entry.isLoading || entry.isFetchingNextPage);
+  // 全部项目完整读完才能说「没有」：还在读、有剩页或有项目读失败时只说已读到的部分。
+  const complete = !reading && !error && !entries.some((entry) => entry.hasMore);
   return (
     <>
       <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
@@ -121,11 +125,13 @@ export function AgentsPage({
           ))}
         </div>
       ) : null}
-      {error || entries.some((entry) => entry.isFetchingNextPage) ? (
+      {/* 首屏等满时限先换上、或重试某个项目时，还在首读的来源也要说出来：
+          不然缺席的项目看起来像是「没有 Agent」，页面像是已经完整了。 */}
+      {error || reading ? (
         <CursorLoadStatus
           loadedCount={loadedSessionCount}
           hasMore={entries.some((entry) => entry.hasMore)}
-          loading={entries.some((entry) => entry.isFetchingNextPage)}
+          loading={reading}
           error={error}
           onRetry={() => {
             for (const entry of entries) {
@@ -135,7 +141,12 @@ export function AgentsPage({
         />
       ) : null}
       <section className="atm-panel">
-        {projectGroups.length === 0 ? (
+        {activeGroups.length === 0 && !complete ? (
+          <IncompleteEmpty
+            loading={reading}
+            found={projectGroups.length === 0 ? "没有 Agent 会话" : "最近 7 天没有活跃的 Agent"}
+          />
+        ) : projectGroups.length === 0 ? (
           <Empty title="没有 Agent 会话" text="Agent 调用 atm_begin 后会在这里出现。" />
         ) : activeGroups.length === 0 ? (
           <Empty title="最近 7 天没有活跃的 Agent" text="更早的 Agent 在下方历史里。" />
