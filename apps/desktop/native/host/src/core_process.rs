@@ -27,11 +27,24 @@ pub const CORE_EXIT_REJECTED: i32 = 64;
 
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
-    Ready,
-    Response { id: u64, frame: Value },
+    /// The whole ready frame: it carries the core's pid/startedAtMs/instanceId, which the
+    /// SERVICE_HEALTHY witness needs.
+    Ready(Value),
+    /// Read-only install probe result (`hello.probe`).
+    Probed(Value),
+    Response {
+        id: u64,
+        frame: Value,
+    },
     Tray(Value),
-    Notify { title: String, body: String },
-    Fatal { code: String, message: String },
+    Notify {
+        title: String,
+        body: String,
+    },
+    Fatal {
+        code: String,
+        message: String,
+    },
     Exited(Option<i32>),
 }
 
@@ -46,7 +59,22 @@ pub struct Core {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Child>>,
     marker: SessionMarker,
+    stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
+
+/// How to start one core: what the hello says and where its stderr goes.
+pub struct Spawn<'a> {
+    pub run_id: &'a str,
+    pub version: &'a str,
+    pub launch: Launch,
+    /// `Some(txn)` asks for the read-only install probe instead of the service.
+    pub probe_txn: Option<&'a str>,
+    /// `<dataDir>\logs\core-stderr.log` normally. `None` for the probe, which must not
+    /// write anything under the data root: stderr is only kept as a bounded tail.
+    pub stderr_log: Option<PathBuf>,
+}
+
+const STDERR_TAIL_BYTES: usize = 4096;
 
 /// What the session-end window needs from the running core: a way to ask it to write its
 /// lifecycle marker, and to learn that it has. Cloned out so the window procedure does not
@@ -130,7 +158,8 @@ fn parse_frame(line: &[u8]) -> Option<CoreEvent> {
 
 fn parse_value(frame: Value) -> Option<CoreEvent> {
     match frame.get("t")?.as_str()? {
-        "ready" if frame.get("v")?.as_u64()? == PROTOCOL_VERSION => Some(CoreEvent::Ready),
+        "ready" if frame.get("v")?.as_u64()? == PROTOCOL_VERSION => Some(CoreEvent::Ready(frame)),
+        "probed" if frame.get("ok")?.is_boolean() => Some(CoreEvent::Probed(frame)),
         "res" => Some(CoreEvent::Response {
             id: frame.get("id")?.as_u64()?,
             frame,
@@ -152,11 +181,16 @@ impl Core {
     pub fn spawn(
         command: &CoreCommand,
         data_dir: &Path,
-        run_id: &str,
-        version: &str,
-        launch: Launch,
+        options: Spawn<'_>,
         on_event: impl Fn(CoreEvent) + Send + Sync + 'static,
     ) -> Result<Core, String> {
+        let Spawn {
+            run_id,
+            version,
+            launch,
+            probe_txn,
+            stderr_log,
+        } = options;
         let mut process = Command::new(&command.exe);
         process
             .args(&command.args)
@@ -178,9 +212,13 @@ impl Core {
         let on_event = Arc::new(on_event);
         let child = Arc::new(Mutex::new(child));
 
-        let log_dir: PathBuf = data_dir.join("logs");
-        let _ = fs::create_dir_all(&log_dir);
-        let log = log_dir.join("core-stderr.log");
+        if let Some(log) = &stderr_log
+            && let Some(dir) = log.parent()
+        {
+            let _ = fs::create_dir_all(dir);
+        }
+        let stderr_tail = Arc::new(Mutex::new(Vec::new()));
+        let tail = stderr_tail.clone();
         thread::Builder::new()
             .name("core-stderr".into())
             .spawn(move || {
@@ -189,7 +227,14 @@ impl Core {
                     if read == 0 {
                         break;
                     }
-                    append_bounded(&log, &buffer[..read]);
+                    if let Some(log) = &stderr_log {
+                        append_bounded(log, &buffer[..read]);
+                    }
+                    if let Ok(mut tail) = tail.lock() {
+                        tail.extend_from_slice(&buffer[..read]);
+                        let excess = tail.len().saturating_sub(STDERR_TAIL_BYTES);
+                        tail.drain(..excess);
+                    }
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -251,8 +296,9 @@ impl Core {
             },
             stdin,
             child,
+            stderr_tail,
         };
-        core.send(&json!({
+        let mut hello = json!({
             "t": "hello",
             "v": PROTOCOL_VERSION,
             "runId": run_id,
@@ -262,12 +308,24 @@ impl Core {
                 "agentWake": launch.agent_wake,
                 "randomStartupDelay": launch.random_startup_delay,
             },
-        }));
+        });
+        if let Some(txn) = probe_txn {
+            hello["probe"] = json!({ "txn": txn });
+        }
+        core.send(&hello);
         Ok(core)
     }
 
     fn send(&self, frame: &Value) {
         write_frame(&self.stdin, frame);
+    }
+
+    /// The last few KiB the core wrote to stderr (lossy UTF-8).
+    pub fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .map(|tail| String::from_utf8_lossy(&tail).into_owned())
+            .unwrap_or_default()
     }
 
     pub fn session_marker(&self) -> SessionMarker {
@@ -317,7 +375,7 @@ mod tests {
     fn frames_are_parsed_strictly() {
         assert!(matches!(
             parse_frame(br#"{"t":"ready","v":1,"runId":"r","version":"x"}"#),
-            Some(CoreEvent::Ready)
+            Some(CoreEvent::Ready(_))
         ));
         assert!(parse_frame(br#"{"t":"ready","v":2}"#).is_none());
         assert!(matches!(
@@ -327,6 +385,11 @@ mod tests {
         assert!(parse_frame(br#"{"t":"res","id":-1}"#).is_none());
         assert!(parse_frame(b"not json").is_none());
         assert!(parse_frame(br#"{"t":"eval","code":"x"}"#).is_none());
+        assert!(matches!(
+            parse_frame(br#"{"t":"probed","ok":false,"code":"MIGRATION_FILE_MISSING"}"#),
+            Some(CoreEvent::Probed(_))
+        ));
+        assert!(parse_frame(br#"{"t":"probed","ok":"yes"}"#).is_none());
     }
 
     #[test]

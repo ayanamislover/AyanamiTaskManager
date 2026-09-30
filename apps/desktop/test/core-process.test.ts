@@ -65,7 +65,14 @@ describe("打包 core 进程", () => {
   it("假宿主握手后，用户凭证经 core 写设置成功；伪造 Authorization 被丢弃；Agent 凭证写同一设置 403", async () => {
     const dataDir = join(work, "data-ok");
     const result = runFakeHost(dataDir);
-    expect(result.ready, result.stderr).toMatchObject({ t: "ready", v: 1 });
+    expect(result.ready, result.stderr).toMatchObject({
+      t: "ready",
+      v: 1,
+      // SERVICE_HEALTHY 见证要的 core 身份。
+      pid: expect.any(Number),
+      startedAtMs: expect.any(Number),
+      instanceId: expect.stringMatching(/^[a-f0-9]{32}$/u),
+    });
     expect(result.res1).toMatchObject({ ok: true, value: { status: 200 } });
     expect(result.res2).toMatchObject({ ok: true, value: { status: 200 } });
     expect(JSON.parse(result.res2.value.body)).toMatchObject({ value: "CRITICAL" });

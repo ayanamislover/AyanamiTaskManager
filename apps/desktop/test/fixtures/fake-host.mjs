@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const [coreExe, coreBundle, mode] = process.argv.slice(2);
+const [coreExe, coreBundle, mode, txn] = process.argv.slice(2);
 const child = spawn(coreExe, [coreBundle], {
   stdio: ["pipe", "pipe", "pipe"],
   env: process.env,
@@ -49,8 +49,15 @@ send({
   runId: "fake-host",
   version: "test",
   launch: { background: true, agentWake: false, randomStartupDelay: false },
+  ...(mode === "probe" ? { probe: { txn } } : {}),
 });
-result.ready = await until((frame) => frame.t === "ready");
+if (mode === "probe") {
+  // 只读探测：回 probed 后宿主断管，core 应当 0 退出，什么都不发布。
+  result.probed = await until((frame) => frame.t === "probed");
+  result.frames = frames.map((frame) => frame.t);
+  child.stdin.end();
+}
+result.ready = mode === "probe" ? null : await until((frame) => frame.t === "ready");
 if (result.ready && mode === "session-end") {
   // 注销：宿主转发 WM_ENDSESSION，等 core 回 marked，随后系统直接结束进程树。
   send({ t: "event", name: "session-end" });
@@ -97,7 +104,7 @@ if (result.ready && mode === "session-end") {
   result.res5 = await until((frame) => frame.t === "res" && frame.id === 5);
 }
 if (mode === "disconnect") child.stdin.end();
-else if (mode !== "session-end") send({ t: "shutdown" });
+else if (mode !== "session-end" && mode !== "probe") send({ t: "shutdown" });
 result.exitCode = await exited;
 result.stderr = stderr.slice(0, 2000);
 process.stdout.write(`${JSON.stringify(result)}\n`);

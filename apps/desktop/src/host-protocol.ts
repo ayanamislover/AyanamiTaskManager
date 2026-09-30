@@ -47,6 +47,11 @@ export type HostHello = {
   runId: string;
   version: string;
   launch: HostLaunch;
+  /**
+   * 安装事务的只读探测（de-electron §6 第 4 步）。core 不信这个字段本身：自己再按 bundle
+   * 位置读 install.json 与安装锁复核，对不上就拒绝。
+   */
+  probe?: { txn: string };
 };
 
 export type HostRequest = {
@@ -78,13 +83,31 @@ export type TraySnapshot = {
 };
 
 export type CoreFrame =
-  | { t: "ready"; v: number; runId: string; version: string }
+  | {
+      t: "ready";
+      v: number;
+      runId: string;
+      version: string;
+      /** SERVICE_HEALTHY 见证用：core 自己的身份，由宿主转写进 state\health。 */
+      pid: number;
+      startedAtMs: number;
+      instanceId: string;
+    }
+  | { t: "probed"; ok: true; databases: ProbeDatabase[] }
+  | { t: "probed"; ok: false; code: string; scope: string | null }
   | { t: "res"; id: number; ok: true; value: unknown }
   | { t: "res"; id: number; ok: false; error: CoreError }
   | { t: "tray"; snapshot: TraySnapshot }
   | { t: "notify"; title: string; body: string }
   | { t: "marked"; name: "session-end" }
   | { t: "fatal"; code: string; message: string };
+
+export type ProbeDatabase = {
+  scope: "registry" | "knowledge" | "project";
+  applied: number;
+  /** snapshot：库文件读进内存核对；live：已有 -wal，只读直连；large：超过内存上限未核对。 */
+  mode: "snapshot" | "live" | "large";
+};
 
 export class HostProtocolError extends Error {
   constructor(
@@ -134,7 +157,9 @@ export function parseHostFrame(line: string): HostFrame {
         !isRecord(launch) ||
         typeof launch.background !== "boolean" ||
         typeof launch.agentWake !== "boolean" ||
-        typeof launch.randomStartupDelay !== "boolean"
+        typeof launch.randomStartupDelay !== "boolean" ||
+        (value.probe !== undefined &&
+          (!isRecord(value.probe) || !boundedString(value.probe.txn, 64)))
       )
         throw new HostProtocolError("HELLO_INVALID", "握手帧不合规");
       return {
@@ -147,6 +172,7 @@ export function parseHostFrame(line: string): HostFrame {
           agentWake: launch.agentWake,
           randomStartupDelay: launch.randomStartupDelay,
         },
+        ...(isRecord(value.probe) ? { probe: { txn: value.probe.txn as string } } : {}),
       };
     }
     case "req": {

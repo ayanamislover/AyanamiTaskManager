@@ -45,7 +45,7 @@ export function loadMigrationPlan(directory: string): Migration[] {
   return plan;
 }
 
-type AppliedMigration = {
+export type AppliedMigration = {
   version: number;
   name: string;
   content_sha256: string;
@@ -87,7 +87,7 @@ function ensureMigrationTable(sqlite: Database.Database): void {
   `);
 }
 
-function assertAppliedPlan(applied: AppliedMigration[], plan: Migration[]): void {
+export function assertAppliedMigrations(applied: AppliedMigration[], plan: Migration[]): void {
   const byVersion = new Map(plan.map((migration) => [migration.version, migration]));
   const appliedVersions = new Set(applied.map((migration) => migration.version));
   const maximum = Math.max(0, ...appliedVersions);
@@ -140,7 +140,7 @@ export async function runMigrations(input: {
       "SELECT version, name, content_sha256, hash_origin FROM schema_migrations ORDER BY version",
     )
     .all() as AppliedMigration[];
-  assertAppliedPlan(applied, plan);
+  assertAppliedMigrations(applied, plan);
   const appliedVersions = new Set(applied.map((row) => row.version));
   const pending = plan.filter((migration) => !appliedVersions.has(migration.version));
   if (pending.length > 0 && input.hadDatabase) {

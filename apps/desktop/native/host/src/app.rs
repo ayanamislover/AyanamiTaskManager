@@ -18,7 +18,7 @@ use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtW
 use crate::args::Args;
 use crate::assets;
 use crate::bridge::{self, Call, Local, Method};
-use crate::core_process::{CORE_EXIT_REJECTED, Core, CoreEvent, Launch};
+use crate::core_process::{CORE_EXIT_REJECTED, Core, CoreEvent, Launch, Spawn};
 use crate::paths::Layout;
 use crate::single_instance::{Command, Primary, Route};
 use crate::tray::{self, Snapshot};
@@ -72,6 +72,9 @@ pub struct App {
     args: Args,
     run_id: String,
     version: String,
+    /// Set when setup started this host with `--txn-start`: the SERVICE_HEALTHY witness goes
+    /// to that transaction once the core is ready.
+    witness: Option<crate::health::Witness>,
     autostart_target: PathBuf,
     _primary: Primary,
 
@@ -126,6 +129,7 @@ pub fn run(
     primary: Primary,
     autostart_target: PathBuf,
     version: String,
+    witness: Option<crate::health::Witness>,
 ) -> i32 {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -162,6 +166,7 @@ pub fn run(
         args,
         run_id: run_id(),
         version,
+        witness,
         autostart_target,
         _primary: primary,
         core: None,
@@ -244,9 +249,13 @@ impl App {
         match Core::spawn(
             &self.layout.core,
             &self.layout.data_dir,
-            &self.run_id,
-            &self.version,
-            launch,
+            Spawn {
+                run_id: &self.run_id,
+                version: &self.version,
+                launch,
+                probe_txn: None,
+                stderr_log: Some(self.layout.data_dir.join("logs").join("core-stderr.log")),
+            },
             move |event| {
                 let _ = proxy.send_event(UserEvent::Core(generation, event));
             },
@@ -369,7 +378,10 @@ impl App {
 
     fn on_core_event(&mut self, event: CoreEvent, target: &EventLoopWindowTarget<UserEvent>) {
         match event {
-            CoreEvent::Ready => {
+            CoreEvent::Ready(frame) => {
+                if let Some(witness) = &self.witness {
+                    crate::health::service_witness(witness, &self.version, &self.run_id, &frame);
+                }
                 self.core_starting = false;
                 self.core_ready = true;
                 let queued = std::mem::take(&mut self.queued);
@@ -406,6 +418,8 @@ impl App {
                     }
                 }
             }
+            // Only the install probe asks for this; a service core never sends it.
+            CoreEvent::Probed(_) => {}
             CoreEvent::Notify { title, body } => {
                 crate::notify::show(&self.layout.data_dir, &title, &body)
             }

@@ -11,6 +11,7 @@ mod headless;
 mod health;
 mod notify;
 mod paths;
+mod probe;
 mod session_end;
 mod single_instance;
 mod tray;
@@ -200,17 +201,28 @@ fn real_main() -> i32 {
     if let Some(mode) = &parsed.headless {
         return headless::run(&layout, mode);
     }
+    if let Some(txn) = &parsed.health_probe {
+        // Decided before admission: an unbound probe must not fall into the GUI paths
+        // (recovery prompt, redirect), get nothing, and leave nothing in the data root.
+        let context = atm_install_state::detect_context(
+            &layout.app_dir,
+            &LaunchIntent::Probe(txn.clone()),
+            atm_install_state::read_journal,
+            atm_install_state::lock_held,
+        );
+        return match &context {
+            Context::SetupProbe {
+                install_root,
+                version,
+                txn,
+            } => probe::run(&layout, install_root, version, txn),
+            _ => 3,
+        };
+    }
     let context = match admit(&layout, &parsed, &argv) {
         Ok(context) => context,
         Err(code) => return code,
     };
-    if parsed.health_probe.is_some() {
-        log(
-            &layout.data_dir,
-            "health probe is implemented by ATM-T-0522",
-        );
-        return 3;
-    }
     let Some(primary) = single_instance::acquire(&layout.data_dir) else {
         let command = if parsed.agent_wake || parsed.background {
             single_instance::Command::Wake
@@ -230,7 +242,16 @@ fn real_main() -> i32 {
     let version =
         atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
     let target = autostart_target(&layout, &context);
-    app::run(layout, parsed, primary, target, version)
+    let witness = match &context {
+        Context::TxnStart {
+            install_root, txn, ..
+        } => Some(health::Witness {
+            install_root: install_root.clone(),
+            txn: txn.clone(),
+        }),
+        _ => None,
+    };
+    app::run(layout, parsed, primary, target, version, witness)
 }
 
 fn main() {

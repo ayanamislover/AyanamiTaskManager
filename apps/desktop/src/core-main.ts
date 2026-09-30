@@ -21,6 +21,7 @@ import {
 import { DesktopObserver } from "./desktop-observer.js";
 import { HostControlSession } from "./host-control-session.js";
 import { HOST_PROTOCOL_VERSION, type HostHello } from "./host-protocol.js";
+import { probeDataRoot, probeTransactionBound } from "./core-probe.js";
 import { createLifecycleDiagnostics, lifecycleError } from "./lifecycle-diagnostics.js";
 import { installAgentIntegrationHost } from "./main-agent-integrations.js";
 import { installMcpStdioBridge, shouldManageMcpRuntime } from "./mcp-launch.js";
@@ -156,6 +157,8 @@ async function main(): Promise<void> {
   let initialMaintenance: NodeJS.Timeout | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
   let shuttingDown = false;
+  /** 只读探测已回过 probed：之后宿主断管是正常结束，不是握手被拒。 */
+  let probed = false;
 
   const shutdown = async (code: number) => {
     if (shuttingDown) return;
@@ -189,6 +192,16 @@ async function main(): Promise<void> {
           `ATM_CORE_HOST_UNTRUSTED ${parent ? "parent-mismatch" : "parent-unknown"}\n`,
         );
         throw new Error("HOST_PARENT_UNTRUSTED");
+      }
+      if (hello.probe) {
+        // 安装事务的只读探测：不写日志、不开服务、不取 lease、不 listen、不发布 daemon.json。
+        if (!paths.packaged || !probeTransactionBound(paths.appDir, hello.probe.txn)) {
+          process.stderr.write("ATM_CORE_PROBE_UNBOUND\n");
+          throw new Error("PROBE_UNBOUND");
+        }
+        session.send({ t: "probed", ...probeDataRoot(dataDir, paths.migrationsRoot) });
+        probed = true;
+        return;
       }
       lifecycle.start({ background: hello.launch.background, agentWake: hello.launch.agentWake });
       try {
@@ -243,6 +256,9 @@ async function main(): Promise<void> {
         v: HOST_PROTOCOL_VERSION,
         runId: hello.runId,
         version: DAEMON_VERSION,
+        pid: process.pid,
+        startedAtMs: selfStartedAtMs,
+        instanceId: current.descriptor.instanceId,
       });
       activeObserver.start();
       initialMaintenance = setTimeout(() => void current.service.runMaintenance(), 2500);
@@ -263,6 +279,7 @@ async function main(): Promise<void> {
       }
     },
     onClose(reason) {
+      if (probed) process.exit(0);
       // 服务还没起来就关闭（超时、协议错误、握手途中断管）：一律按「被拒绝」退出，
       // 不能让校验途中的 onHello 继续往下把服务拉起来。
       if (runtime === null) {
