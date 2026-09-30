@@ -168,4 +168,35 @@ describe("event presentation", () => {
       manager.close();
     }
   });
+
+  // 一阵系统事件（自动备份、Git 上下文刷新）不能把业务事件挤出总览窗口：
+  // 界面会过滤掉系统事件，挤出去的业务事件就从「最近变化」里消失了。
+  it("keeps recent business events in the overview window behind a burst of system events", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-event-presentation-"));
+    temporary.push(dataDir);
+    const manager = await AyanamiDatabaseManager.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      for (const title of ["第一件", "第二件", "第三件"]) manager.createQuickTask({ title });
+      const append = (
+        manager as unknown as {
+          appendGlobalEvent(type: string, id: string, actor: string, payload: unknown): number;
+        }
+      ).appendGlobalEvent.bind(manager);
+      for (let index = 0; index < 30; index += 1) {
+        append("backup.created", `backup-${index}`, "SYSTEM", { reason: "DAILY" });
+        append("agent.git_context.updated", `agent-${index}`, "codex", {});
+      }
+      const overview = manager.overview() as { recentEvents: Array<Record<string, unknown>> };
+      const types = overview.recentEvents.map((event) => event.type);
+      expect(types.filter((type) => type === "quick.created")).toHaveLength(3);
+      expect(types.filter((type) => type !== "quick.created").length).toBeLessThanOrEqual(20);
+      const sequences = overview.recentEvents.map((event) => Number(event.sequence));
+      expect(sequences).toEqual([...sequences].sort((left, right) => right - left));
+    } finally {
+      manager.close();
+    }
+  });
 });

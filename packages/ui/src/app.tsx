@@ -72,6 +72,7 @@ function App({
           desktop={desktop}
           route={route}
           projects={projectList}
+          projectsPending={projects.isPending}
           notify={notify}
           onRoute={setRoute}
           onTask={openTaskInPlace}

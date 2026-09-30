@@ -20,6 +20,20 @@ import { useDialogs } from "../components/atm-dialogs.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { Status, compactPath, formatDuration, formatTime, statusLabels } from "../presentation.js";
 
+// 加载、出错、读完用同一段页头：以前加载时是另一句，冷启动时页头文字要变两次。
+const AGENTS_DESCRIPTION =
+  "按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。";
+
+/** Agent 页的加载占位；项目列表还没读回来时路由也用它，避免先判成「没有 Agent 会话」。 */
+export function AgentsLoading() {
+  return (
+    <>
+      <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
+      <LoadingRows />
+    </>
+  );
+}
+
 export function AgentsPage({
   client,
   projects,
@@ -63,17 +77,12 @@ export function AgentsPage({
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
-  if (isLoading && loadedSessionCount === 0)
-    return (
-      <>
-        <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
-        <LoadingRows />
-      </>
-    );
+  // 等全部项目读完再一次换上，不先出半张表再往里补。
+  if (isLoading && !error) return <AgentsLoading />;
   if (error && loadedSessionCount === 0)
     return (
       <>
-        <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
+        <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
         <CursorLoadStatus
           loadedCount={loadedSessionCount}
           hasMore={false}
@@ -94,10 +103,7 @@ export function AgentsPage({
   const conflicts = findAgentSessionConflicts(allSessions);
   return (
     <>
-      <PageHead
-        title="Agent"
-        description="按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。"
-      />
+      <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
       {conflicts.length ? (
         // 页内警告，不能用 atm-notice：那是右下角浮层提示条，会盖在卡片上。
         <div className="atm-inline-warning agent-conflicts" role="status">

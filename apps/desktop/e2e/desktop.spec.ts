@@ -2627,3 +2627,125 @@ for (const { tab, button, dialogName } of [
     await dialog.getByRole("button", { name: "关闭" }).click();
   });
 }
+
+type ColdEntry = {
+  t: number;
+  h1: string;
+  head: string;
+  skeletons: number;
+  empty: string;
+  text: string;
+  swap: string;
+};
+
+/**
+ * 冷启动（F5）时从第一帧开始记录看得见的那一层。和 recordVisibleTimeline 一样不算后台层，
+ * 但要在页面脚本跑之前挂上，所以走 addInitScript。
+ */
+async function recordColdTimeline(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __coldTimeline: Array<Record<string, unknown>> };
+    w.__coldTimeline = [];
+    const started = performance.now();
+    const start = () => {
+      const visible = (element: Element) => !element.closest(".atm-route-pending");
+      const all = (selector: string) => [...document.querySelectorAll(selector)].filter(visible);
+      const sample = () => {
+        const content = all(".atm-content .atm-route-layer");
+        const entry = {
+          h1: all(".atm-content h1")[0]?.textContent ?? "",
+          head: all(".atm-content .atm-page-head p")[0]?.textContent ?? "",
+          skeletons: all(".atm-content .atm-skeleton").length,
+          empty: all(".atm-content .atm-empty")
+            .map((element) => element.textContent ?? "")
+            .join("/"),
+          text: content.map((element) => element.textContent ?? "").join(""),
+          swap: content.map((element) => (element as HTMLElement).dataset.swap ?? "").join(","),
+        };
+        const last = w.__coldTimeline.at(-1);
+        if (!last || JSON.stringify({ ...last, t: 0 }) !== JSON.stringify({ ...entry, t: 0 }))
+          w.__coldTimeline.push({ t: Math.round(performance.now() - started), ...entry });
+      };
+      new MutationObserver(sample).observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+      sample();
+    };
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start);
+    else start();
+  });
+}
+
+async function coldTimeline(page: Page): Promise<ColdEntry[]> {
+  return (await page.evaluate(
+    () => (window as unknown as { __coldTimeline: unknown[] }).__coldTimeline,
+  )) as ColdEntry[];
+}
+
+/** 项目列表和各项目的任务都晚一点回来：冷启动时它们回来的先后决定了会不会闪。 */
+async function slowColdReads(page: Page): Promise<void> {
+  await page.route(/\/api\/v1\/projects(\?.*)?$/u, async (route) => {
+    await new Promise((done) => setTimeout(done, 200));
+    await route.continue();
+  });
+  // 各项目错开回来：E2E 先到、其余晚到，「先出一个项目的几行」这种中间态才看得见。
+  await page.route(/\/api\/v1\/projects\/[^/]+\/(ui\/work-items|agents)/u, async (route) => {
+    const first = route.request().url().includes("/projects/E2E/");
+    await new Promise((done) => setTimeout(done, first ? 80 : 260));
+    await route.continue();
+  });
+}
+
+test("冷启动直接打开项目页：先占位，读齐首屏再一次换上，不报找不到也不先说「没有」", async ({
+  page,
+}) => {
+  await slowColdReads(page);
+  await recordColdTimeline(page);
+  await page.goto("/#project:E2E");
+  await expect(page.locator(".atm-content h1")).toHaveText("E2E 验收项目");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  await expect(page.getByTestId("route-pending")).toHaveCount(0);
+  // 项目列表回来后项目页在后台读齐首屏才换上，不是等满时限。
+  await expect(page.locator(".atm-route-layer")).toHaveAttribute("data-swap", "ready");
+  const timeline = await coldTimeline(page);
+  expect(timeline.some((entry) => entry.text.includes("找不到这个项目"))).toBe(false);
+  // 看得见的只有两种画面：占位骨架，然后是读完的项目页。
+  const project = timeline.filter((entry) => entry.h1 === "E2E 验收项目");
+  expect(project.length).toBeGreaterThan(0);
+  // 换上来就是读完的样子：没有骨架，空态（这个项目确实没有进行中任务）从第一帧起就不再变。
+  expect(project.filter((entry) => entry.skeletons > 0)).toEqual([]);
+  expect(new Set(project.map((entry) => entry.empty)).size).toBe(1);
+  expect([...new Set(timeline.map((entry) => entry.h1))]).toEqual(["", "E2E 验收项目"]);
+});
+
+// heads：页头文案一共出现几种。总览的结论要等数据读完才写得出，占位一句、结论一句；其余页面始终一句。
+for (const { route, empty, done, heads } of [
+  { route: "my", empty: "没有活动任务", done: "活动任务", heads: 1 },
+  { route: "blockers", empty: "没有阻塞或等待", done: "阻塞与等待", heads: 1 },
+  { route: "agents", empty: "没有 Agent 会话", done: "Agent", heads: 1 },
+  { route: "overview", empty: "没有等你处理的事", done: "总览", heads: 2 },
+]) {
+  test(`冷启动打开「${done}」：骨架之后一次换上结果，不先判成「没有」、不出半张表`, async ({
+    page,
+  }) => {
+    await slowColdReads(page);
+    await recordColdTimeline(page);
+    await page.goto(`/#${route}`);
+    await expect(page.locator(".atm-content h1")).toHaveText(done);
+    await expect(page.locator(".atm-content .atm-skeleton")).toHaveCount(0);
+    await page.waitForTimeout(300);
+    const timeline = await coldTimeline(page);
+    const lastSkeleton = timeline.findLastIndex((entry) => entry.skeletons > 0);
+    expect(lastSkeleton).toBeGreaterThanOrEqual(0);
+    // 骨架出现过就只消失一次：之后不再回到骨架，之前也没有先画过结果。
+    const beforeResult = timeline.slice(0, lastSkeleton + 1);
+    expect(beforeResult.filter((entry) => entry.empty.includes(empty))).toEqual([]);
+    expect(beforeResult.filter((entry) => entry.text.includes("已找到"))).toEqual([]);
+    // 读的过程中从不出现「正在加载后续」「正在汇总」这类中间结论；页头只换一次。
+    expect(timeline.filter((entry) => /正在加载后续|正在汇总/u.test(entry.text))).toEqual([]);
+    expect(new Set(timeline.map((entry) => entry.head).filter(Boolean)).size).toBe(heads);
+  });
+}

@@ -684,14 +684,24 @@ export class RegistryObservability {
     const sequence = this.#registry.sqlite
       .prepare("SELECT current_sequence FROM app_meta WHERE singleton = 1")
       .get() as { current_sequence: number };
-    const recentEventRows = this.#registry.sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events
-         WHERE type <> 'project.summary.updated'
-         ORDER BY sequence DESC LIMIT 40`,
-      )
-      .all() as Array<Record<string, unknown>>;
+    // 业务事件与系统事件分开取窗口：合在一个 LIMIT 40 里时，一阵自动备份、Git 上下文刷新
+    // 就能把业务事件挤出窗口，总览「最近变化」过滤掉系统事件后，每次刷新都在变短。
+    // 判定与界面的 isSystemTimelineEvent 保持一致。
+    const systemEvent = `(COALESCE(actor, 'SYSTEM') = 'SYSTEM' OR type LIKE 'backup.%'
+      OR type IN ('project.creating', 'agent.git_context.updated', 'database.recovered'))`;
+    const recentWindow = (predicate: string, limit: number) =>
+      this.#registry.sqlite
+        .prepare(
+          `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
+           FROM global_events
+           WHERE type <> 'project.summary.updated' AND ${predicate}
+           ORDER BY sequence DESC LIMIT ${limit}`,
+        )
+        .all() as Array<Record<string, unknown>>;
+    const recentEventRows = [
+      ...recentWindow(`NOT ${systemEvent}`, 40),
+      ...recentWindow(systemEvent, 20),
+    ].sort((left, right) => Number(right.sequence) - Number(left.sequence));
     const recentEvents = recentEventRows.map((row) =>
       this.#presentGlobalRow({
         sequence: Number(row.sequence),

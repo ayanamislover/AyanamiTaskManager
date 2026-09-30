@@ -1,4 +1,4 @@
-import type { ComponentType } from "react";
+import { useRef, type ComponentType } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { WarningCircleIcon as WarningCircle } from "@phosphor-icons/react/dist/icons/WarningCircle";
@@ -70,7 +70,14 @@ export function OverviewPage({
       notify("临时任务已完成");
     },
   });
-  if (query.isLoading)
+  // 首屏等总览、「等你处理」、临时任务和垃圾箱都有了结果（成功或失败）再一次换上。
+  // 以前总览一回来就先渲染，页头先是「正在汇总…」、面板里是「已找到 0 项，正在加载后续…」、
+  // 临时任务先说「没有」，冷启动一次要变三四回。只卡第一次：换上之后项目增减、
+  // 后台刷新都在原地更新，不再退回骨架。
+  const firstScreenShown = useRef(false);
+  if (query.data && !needsYou.loading && !quickQuery.isPending && !trashQuery.isPending)
+    firstScreenShown.current = true;
+  if (query.isLoading || (!query.error && !firstScreenShown.current))
     return (
       <>
         <PageHead title="总览" description="项目状态、阻塞和最近变化集中在这里。" />
@@ -126,7 +133,11 @@ export function OverviewPage({
         `${project.restoreRequest.requestedBy} 请求恢复垃圾箱里的 ${project.code}，请在项目 → 垃圾箱授权或拒绝`,
       );
   }
-  if ((data.recentEvents as any[] | undefined)?.some((event) => event.type === "backup.failed"))
+  // 事件按序号倒序：看最近一次备份的结果，失败之后又成功过就不再提醒。
+  const lastBackup = (data.recentEvents as any[] | undefined)?.find(
+    (event) => event.type === "backup.created" || event.type === "backup.failed",
+  );
+  if (lastBackup?.type === "backup.failed")
     attention.push("最近一次自动备份失败，请在设置与数据工具中检查");
   return (
     <>
@@ -356,7 +367,8 @@ export function TasksAcrossProjectsView({
   const errorEntry = entries.find((entry) => entry.error);
   const error = errorEntry?.error;
   const loadedCount = entries.reduce((total, entry) => total + entry.loadedCount, 0);
-  if (isLoading && loadedCount === 0) return <LoadingRows count={6} />;
+  // 等全部项目读完再一次换上：先出一个项目的几行、再补进其余项目，冷启动要跳两三次。
+  if (isLoading && !error) return <LoadingRows count={6} />;
   if (error && loadedCount === 0)
     return (
       <>

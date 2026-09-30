@@ -271,6 +271,24 @@ function settledEntry<T>(
 }
 
 /**
+ * 这一轮读取是不是「后台刷新」：界面保留当前显示，读完一次换上，不回到加载态。
+ *
+ * 以前只看「手里有没有行」。上一轮已经完整读完、结果就是 0 条的来源（没有任务的项目、
+ * 空的临时任务列表）因此每次刷新都被当成首次读取，先清成加载占位——每 30 秒闪一次骨架，
+ * 总览的「等你处理」也跟着退回「正在汇总」。已经完整读完的，不管几条，都算有结果。
+ * 还没读过（hasMore 仍为 true）或上次失败且一行没有的，照旧显示加载态。
+ */
+export function keepsViewWhileRefreshing(entry: {
+  items: readonly unknown[];
+  loading: boolean;
+  hasMore: boolean;
+  error: unknown;
+}): boolean {
+  if (entry.items.length > 0) return true;
+  return !entry.loading && !entry.hasMore && !entry.error;
+}
+
+/**
  * 一轮读取交给缓存的结果。被同一个 key 的新一轮取代时，这一轮必须彻底作废。
  *
  * 「交回上一份已结算的数据」看着稳妥，其实两头都会出事：它是这一轮开跑时拍下的快照，
@@ -340,7 +358,7 @@ export function useCursorCollection<T>(
       const load = loadRef.current;
       const current = pickOwnedEntry(key, entryRef.current) ?? emptyEntry<T>(key);
       const resume = Boolean(current.error && current.hasMore && current.items.length);
-      const refreshing = !resume && current.items.length > 0;
+      const refreshing = !resume && keepsViewWhileRefreshing(current);
       // 加载中的占位只发给界面，不作为这一轮的返回值：切走之后这次结果仍然要写进
       // 本 key 的缓存，好让下次切回来立刻有数据，但不能写进别的 key 的视图。
       if (resume) commit({ ...current, loading: true, error: null });
@@ -432,7 +450,7 @@ export function useCursorCollections<T>(
       const current = entriesRef.current[projectKey] ?? null;
       const resume = Boolean(current?.error && current.hasMore && current.items.length);
       if (resumeOnly && !resume) return true;
-      const refreshing = !resume && Boolean(current?.items.length);
+      const refreshing = !resume && current !== null && keepsViewWhileRefreshing(current);
       // 续读接着当前这一次往下读，不推进代数；整轮重读才推进。
       const generation = resumeOnly
         ? (generationsRef.current.get(projectKey) ?? 0)
@@ -490,10 +508,21 @@ export function useCursorCollections<T>(
     [read, refetch],
   );
 
+  // 按来源逐个投影，不按手里已有的格子：已不在来源里的项目（归档、删除）不再显示，
+  // 不必等下一次 queryFn 清理；还没开读的来源算「正在读」。以前只投影已有的格子，
+  // queryFn 开跑前那一帧一格都没有，页面就把「还没读」当成「读完了，0 条」，
+  // 冷启动先闪一下「没有活动任务」。本地那份还没从缓存接手时先用缓存里的，
+  // 回到读过的页面不必先看一帧加载占位。
   const projected = Object.fromEntries(
-    Object.entries(entries)
-      // 已不在来源里的项目（归档、删除）不再显示，不必等下一次 queryFn 清理。
-      .filter(([projectKey]) => sourcesRef.current.has(projectKey))
+    sources
+      .map(
+        (source) =>
+          [
+            source.key,
+            entries[source.key] ??
+              query.data?.[source.key] ?? { ...emptyEntry<T>(source.key), loading: true },
+          ] as const,
+      )
       .map(([projectKey, entry]) => [
         projectKey,
         {
