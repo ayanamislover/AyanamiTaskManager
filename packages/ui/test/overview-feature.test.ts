@@ -209,15 +209,17 @@ describe("Overview feature", () => {
     expect(markup).not.toContain("QUIET");
   });
 
-  it("备份提醒看最近一次备份的结果：失败后又成功过就不再提醒", () => {
-    const render = (recentEvents: Array<Record<string, unknown>>) => {
+  it("备份提醒看服务端给出的最近一次备份结果：失败后又成功过就不再提醒", () => {
+    const render = (lastBackup: Record<string, unknown> | null) => {
       const queryClient = new QueryClient();
       queryClient.setQueryData(["overview"], {
         sequence: 46,
         projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
         quick: { blocked: 0 },
         projectionFailures: [],
-        recentEvents,
+        // 展示窗口里的备份事件与结论无关：提醒只看服务端给出的最近一次备份结果。
+        recentEvents: [{ sequence: 30, type: "backup.failed", actor: "SYSTEM" }],
+        lastBackup,
       });
       queryClient.setQueryData(["quick"], []);
       seedFirstScreen(queryClient);
@@ -235,9 +237,9 @@ describe("Overview feature", () => {
     const warning = "最近一次自动备份失败";
     const failed = { sequence: 40, type: "backup.failed", actor: "SYSTEM" };
     const created = { sequence: 44, type: "backup.created", actor: "SYSTEM" };
-    expect(render([failed])).toContain(warning);
-    expect(render([failed, { ...created, sequence: 30 }])).toContain(warning);
-    expect(render([created, failed])).not.toContain(warning);
+    expect(render(failed)).toContain(warning);
+    expect(render(created)).not.toContain(warning);
+    expect(render(null)).not.toContain(warning);
   });
 
   it("总览项目卡长名称最多两行并保留全称提示", () => {

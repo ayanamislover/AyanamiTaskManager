@@ -2749,3 +2749,98 @@ for (const { route, empty, done, heads } of [
     expect(new Set(timeline.map((entry) => entry.head).filter(Boolean)).size).toBe(heads);
   });
 }
+
+for (const { route, done } of [
+  { route: "my", done: "活动任务" },
+  { route: "blockers", done: "阻塞与等待" },
+]) {
+  test(`「${done}」里一个项目读失败后点重试：其他项目已显示的内容留着，不退回整页骨架`, async ({
+    page,
+  }) => {
+    await ensureSwitchTargetProject();
+    let mode: "fail" | "hold" | "pass" = "fail";
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    await page.route(/\/api\/v1\/projects\/E2ESW\/ui\/work-items/u, async (request) => {
+      if (mode === "pass") return request.continue();
+      if (mode === "hold") {
+        await held;
+        return request.continue();
+      }
+      return request.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "E2E_INJECTED", message: "注入的读取故障", retryable: true },
+        }),
+      });
+    });
+    await page.goto(`/#${route}`);
+    await expect(page.locator(".atm-content h1")).toHaveText(done);
+    const alert = page.locator(".atm-content").getByRole("alert");
+    await expect(alert).toContainText("部分任务读取失败");
+    const panels = page.locator(".atm-content .atm-panel");
+    const before = await panels.count();
+    expect(before).toBeGreaterThan(0);
+    mode = "hold";
+    await alert.getByRole("button", { name: "重试" }).click();
+    await page.waitForTimeout(200);
+    // 当场数一次：重读的那个项目还挂着，其他项目的内容不能被整页骨架盖掉。
+    expect(await page.locator(".atm-content .atm-skeleton").count()).toBe(0);
+    expect(await panels.count()).toBe(before);
+    mode = "pass";
+    release();
+    await expect(alert).toHaveCount(0);
+    await expect(page.locator(".atm-content .atm-skeleton")).toHaveCount(0);
+  });
+}
+
+for (const { route, done } of [
+  { route: "project:E2E", done: "E2E 验收项目" },
+  { route: "my", done: "活动任务" },
+  { route: "blockers", done: "阻塞与等待" },
+  { route: "agents", done: "Agent" },
+]) {
+  test(`冷启动时项目列表读失败（#${route}）：报读取失败并可重试，不说「没有」也不说找不到`, async ({
+    page,
+  }) => {
+    let failing = true;
+    await page.route(/\/api\/v1\/projects(\?.*)?$/u, async (request) => {
+      if (!failing || request.request().method() !== "GET") return request.continue();
+      return request.fulfill({
+        status: 503,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "E2E_INJECTED", message: "注入的项目列表故障", retryable: true },
+        }),
+      });
+    });
+    await page.goto(`/#${route}`);
+    const alert = page.locator(".atm-content").getByRole("alert");
+    await expect(alert).toContainText("项目列表没能读出来", { timeout: 8_000 });
+    const content = page.locator(".atm-content");
+    for (const conclusion of [
+      "找不到这个项目",
+      "没有活动任务",
+      "没有阻塞或等待",
+      "没有 Agent 会话",
+      "共 0 项",
+    ])
+      await expect(content).not.toContainText(conclusion);
+    failing = false;
+    await alert.getByRole("button", { name: "重试" }).click();
+    await expect(page.locator(".atm-content h1").first()).toHaveText(done);
+    await expect(content.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator(".atm-content .atm-skeleton")).toHaveCount(0);
+  });
+}
+
+test("总览首屏有一块迟迟不回来时，等满上限先换上已就绪的部分", async ({ page }) => {
+  await page.route(/\/api\/v1\/trash\/projects/u, async () => {
+    // 一直不回：client 没有请求超时，首屏不能跟着一直是骨架。
+    await new Promise(() => {});
+  });
+  await page.goto("/#overview");
+  await expect(page.locator(".atm-stat-band")).toBeVisible({ timeout: 4_000 });
+  await expect(page.getByRole("heading", { name: "项目状态", exact: true })).toBeVisible();
+});

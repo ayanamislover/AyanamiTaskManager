@@ -1,6 +1,11 @@
 import type { ReactNode } from "react";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
-import { ErrorState, LoadingRows, PageHead } from "../components/async-state.js";
+import {
+  ErrorState,
+  LoadingRows,
+  PageHead,
+  ProjectsUnavailable,
+} from "../components/async-state.js";
 import type { DesktopBridge, Notify, Route } from "../contracts.js";
 import { AgentsLoading, AgentsPage } from "../features/agents.js";
 import { OverviewPage, TasksAcrossProjects } from "../features/overview.js";
@@ -17,8 +22,11 @@ type AppRouterProps = {
   desktop: DesktopBridge | undefined;
   route: Route;
   projects: RegisteredProject[];
-  /** 项目列表还没读回来：这时的空数组不是「没有项目」。 */
+  /** 项目列表还没拿到（在读，或读失败了）：这时的空数组不是「没有项目」。 */
   projectsPending: boolean;
+  /** 项目列表读失败、眼下也没在重读：依赖它的页面显示失败和重试，不下「没有」的结论。 */
+  projectsError: unknown;
+  onRetryProjects: () => void;
   notify: Notify;
   onRoute: (route: Route) => void;
   onTask: (project: string, key: string) => void;
@@ -63,6 +71,8 @@ function routePage(
     route,
     projects,
     projectsPending,
+    projectsError,
+    onRetryProjects,
     notify,
     onRoute,
     onTask,
@@ -77,6 +87,11 @@ function routePage(
     route.startsWith("project:") && !projectsPending
       ? projects.find((project) => project.code === route.slice(8))
       : undefined;
+  const awaitingProjects = projectsError ? (
+    <ProjectsUnavailable error={projectsError} onRetry={onRetryProjects} />
+  ) : (
+    <LoadingRows count={6} />
+  );
   if (route === "overview")
     return (
       <OverviewPage
@@ -102,7 +117,7 @@ function routePage(
       <>
         <PageHead title="活动任务" description="所有正式项目中已领取、进行中和验收中的任务。" />
         {projectsPending ? (
-          <LoadingRows count={6} />
+          awaitingProjects
         ) : (
           <TasksAcrossProjects client={client} projects={projects} mode="active" onTask={onTask} />
         )}
@@ -117,14 +132,18 @@ function routePage(
           description="集中处理被阻塞、等待用户或等待其他 Agent 的工作。"
         />
         {projectsPending ? (
-          <LoadingRows count={6} />
+          awaitingProjects
         ) : (
           <TasksAcrossProjects client={client} projects={projects} mode="blocked" onTask={onTask} />
         )}
       </>
     );
   if (route === "agents")
-    return projectsPending ? <AgentsLoading /> : <AgentsPage client={client} projects={projects} />;
+    return projectsPending ? (
+      <AgentsLoading>{projectsError ? awaitingProjects : undefined}</AgentsLoading>
+    ) : (
+      <AgentsPage client={client} projects={projects} />
+    );
   if (route === "timeline") return <GlobalTimelinePage client={client} />;
   if (route === "knowledge")
     return (
@@ -171,6 +190,6 @@ function routePage(
         {...(desktop ? { desktop } : {})}
       />
     );
-  if (projectsPending) return <LoadingRows count={6} />;
+  if (projectsPending) return awaitingProjects;
   return <ErrorState error="找不到这个项目，可能已被移除或路径发生变化。" />;
 }

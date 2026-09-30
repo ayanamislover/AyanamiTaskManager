@@ -41,6 +41,24 @@ export function ErrorState({ error }: { error: unknown }) {
   );
 }
 
+/**
+ * 项目列表读失败时，依赖它的页面（项目页、活动任务、阻塞、Agent）显示这个，
+ * 不把空列表当成「没有项目」「没有活动任务」。
+ */
+export function ProjectsUnavailable({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  return (
+    <>
+      <div className="atm-inline-error" role="alert">
+        项目列表没能读出来，暂时无法判断这里有什么。
+        <button className="atm-button" style={{ marginLeft: 8 }} onClick={onRetry}>
+          重试
+        </button>
+      </div>
+      <ErrorState error={error} />
+    </>
+  );
+}
+
 export function MutationErrorAlert({
   error,
   errors,

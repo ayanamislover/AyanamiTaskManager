@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderOpenIcon as FolderOpen } from "@phosphor-icons/react/dist/icons/FolderOpen";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
@@ -18,18 +18,22 @@ import {
 } from "../components/async-state.js";
 import { useDialogs } from "../components/atm-dialogs.js";
 import { useCursorCollections } from "../cursor-collection.js";
+import { useFirstScreen } from "../hooks/use-first-screen.js";
 import { Status, compactPath, formatDuration, formatTime, statusLabels } from "../presentation.js";
 
 // 加载、出错、读完用同一段页头：以前加载时是另一句，冷启动时页头文字要变两次。
 const AGENTS_DESCRIPTION =
   "按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。";
 
-/** Agent 页的加载占位；项目列表还没读回来时路由也用它，避免先判成「没有 Agent 会话」。 */
-export function AgentsLoading() {
+/**
+ * Agent 页的加载占位；项目列表还没读回来时路由也用它，避免先判成「没有 Agent 会话」。
+ * 传了 children（例如项目列表读失败的提示）就用它替换骨架，页头不变。
+ */
+export function AgentsLoading({ children }: { children?: ReactNode }) {
   return (
     <>
       <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
-      <LoadingRows />
+      {children ?? <LoadingRows />}
     </>
   );
 }
@@ -77,8 +81,9 @@ export function AgentsPage({
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
-  // 等全部项目读完再一次换上，不先出半张表再往里补。
-  if (isLoading && !error) return <AgentsLoading />;
+  // 首屏等全部项目读完再一次换上，不先出半张表再往里补；换上后重试、新增项目不退回骨架。
+  const firstScreen = useFirstScreen(!isLoading || Boolean(error));
+  if (isLoading && (loadedSessionCount === 0 || !firstScreen)) return <AgentsLoading />;
   if (error && loadedSessionCount === 0)
     return (
       <>

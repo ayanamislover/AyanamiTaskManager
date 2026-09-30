@@ -199,4 +199,34 @@ describe("event presentation", () => {
       manager.close();
     }
   });
+
+  // 备份健康不能取自截断的展示窗口：失败之后来一阵无关系统事件，提醒不能跟着消失。
+  it("reports the latest backup outcome even after it scrolls out of the recent window", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "atm-event-presentation-"));
+    temporary.push(dataDir);
+    const manager = await AyanamiDatabaseManager.open({
+      dataDir,
+      migrationsRoot: resolve(process.cwd(), "migrations"),
+    });
+    try {
+      const append = (
+        manager as unknown as {
+          appendGlobalEvent(type: string, id: string, actor: string, payload: unknown): number;
+        }
+      ).appendGlobalEvent.bind(manager);
+      const lastBackup = () =>
+        (manager.overview() as { lastBackup: Record<string, unknown> | null }).lastBackup;
+      expect(lastBackup()).toBeNull();
+      append("backup.failed", "backup-1", "SYSTEM", { reason: "DAILY", code: "IO_ERROR" });
+      for (let index = 0; index < 25; index += 1)
+        append("agent.git_context.updated", `agent-${index}`, "codex", {});
+      const overview = manager.overview() as { recentEvents: Array<Record<string, unknown>> };
+      expect(overview.recentEvents.some((event) => event.type === "backup.failed")).toBe(false);
+      expect(lastBackup()).toMatchObject({ type: "backup.failed" });
+      append("backup.created", "backup-2", "SYSTEM", { reason: "DAILY", scope: "PROJECT" });
+      expect(lastBackup()).toMatchObject({ type: "backup.created" });
+    } finally {
+      manager.close();
+    }
+  });
 });

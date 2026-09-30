@@ -72,7 +72,11 @@ function App({
           desktop={desktop}
           route={route}
           projects={projectList}
-          projectsPending={projects.isPending}
+          projectsPending={projects.data === undefined}
+          projectsError={
+            projects.data === undefined && !projects.isFetching ? projects.error : null
+          }
+          onRetryProjects={() => void projects.refetch()}
           notify={notify}
           onRoute={setRoute}
           onTask={openTaskInPlace}

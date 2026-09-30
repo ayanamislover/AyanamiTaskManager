@@ -702,7 +702,7 @@ export class RegistryObservability {
       ...recentWindow(`NOT ${systemEvent}`, 40),
       ...recentWindow(systemEvent, 20),
     ].sort((left, right) => Number(right.sequence) - Number(left.sequence));
-    const recentEvents = recentEventRows.map((row) =>
+    const present = (row: Record<string, unknown>) =>
       this.#presentGlobalRow({
         sequence: Number(row.sequence),
         type: String(row.type),
@@ -710,13 +710,24 @@ export class RegistryObservability {
         actor: String(row.actor ?? "SYSTEM"),
         payload_json: String(row.payload_json ?? "{}"),
         created_at: String(row.created_at),
-      }),
-    );
+      });
+    const recentEvents = recentEventRows.map(present);
+    // 备份健康单独取「最近一次备份的结果」：展示窗口是截断的，一阵无关系统事件就能把
+    // 一次还没恢复的失败挤出去，从窗口里找会让提醒自己消失。
+    const lastBackupRow = this.#registry.sqlite
+      .prepare(
+        `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
+         FROM global_events
+         WHERE type IN ('backup.created', 'backup.failed')
+         ORDER BY sequence DESC LIMIT 1`,
+      )
+      .get() as Record<string, unknown> | undefined;
     return {
       sequence: sequence.current_sequence,
       projects: projectViews,
       quick: totals,
       recentEvents,
+      lastBackup: lastBackupRow ? present(lastBackupRow) : null,
       projectionSummary: this.#dependencies.projectionSummary(),
       projectionFailures: this.#dependencies.projectionFailures(),
     };
