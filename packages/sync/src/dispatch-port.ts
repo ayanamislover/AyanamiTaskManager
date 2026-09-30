@@ -5,8 +5,16 @@ import { DISPATCH_STATES, PERMISSION_MODES } from "@ayanami-task/sync-protocol";
 export type SyncDispatchState = (typeof DISPATCH_STATES)[number];
 export type SyncPermissionMode = (typeof PERMISSION_MODES)[number];
 
-/** 任务卡片上的派单状态；`at` 取最近一次状态变化的时间。 */
-export type SyncDispatchRun = { run: string; state: SyncDispatchState; at: string };
+/**
+ * 任务卡片上的派单状态；`at` 取最近一次状态变化的时间；`error` 是派单记下的失败原因
+ * （原文，发布时只给 failed 带上并截断）。
+ */
+export type SyncDispatchRun = {
+  run: string;
+  state: SyncDispatchState;
+  at: string;
+  error?: string;
+};
 
 /**
  * 连接器对派单的全部需求。sync 包不依赖 agent-dispatch，宿主用 {@link dispatchPortFrom}
@@ -29,6 +37,7 @@ type DispatchRunLike = {
   createdAt: string;
   startedAt?: string;
   endedAt?: string;
+  error?: string;
 };
 
 /** AgentDispatcher 的结构化子集：按形状对接，不 import agent-dispatch 包。 */
@@ -46,7 +55,12 @@ export type DispatcherLike = {
 };
 
 function runView(run: DispatchRunLike): SyncDispatchRun {
-  return { run: run.run, state: run.state, at: run.endedAt ?? run.startedAt ?? run.createdAt };
+  return {
+    run: run.run,
+    state: run.state,
+    at: run.endedAt ?? run.startedAt ?? run.createdAt,
+    ...(run.error ? { error: run.error } : {}),
+  };
 }
 
 function permissionMode(value: string): SyncPermissionMode {

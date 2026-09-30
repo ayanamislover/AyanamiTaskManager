@@ -211,7 +211,12 @@ export function fakeDispatch(options: { reject?: { code: string; message: string
       return () => listeners.delete(listener);
     },
   };
-  return { port, calls, runs };
+  /** 模拟派单状态变化（例如会话失败），并像 AgentDispatcher 一样通知订阅者。 */
+  const settle = (project: string, key: string, run: SyncDispatchRun) => {
+    runs.set(`${project}/${key}`, run);
+    for (const listener of listeners) listener({ project });
+  };
+  return { port, calls, runs, settle };
 }
 
 /** 系统加密不可用的密钥存储（模拟 safeStorage.isEncryptionAvailable() 为假）。 */

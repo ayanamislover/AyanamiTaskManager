@@ -12,7 +12,7 @@ import {
   type ProjectHead,
   type TaskCard,
 } from "@ayanami-task/sync-protocol";
-import type { DispatchPort } from "./dispatch-port.js";
+import type { DispatchPort, SyncDispatchRun } from "./dispatch-port.js";
 
 // 快照：把 ATM 的项目与任务映射成 docs/mobile-sync.md §5 的 ProjectDoc / ProjectHead。
 
@@ -32,12 +32,17 @@ const LIMITS = {
   agent: 128,
   recent: 3,
   summary: 500,
+  /** 派单失败原因（协议上限 200）。 */
+  dispatchError: 200,
 } as const;
 
 type WorkItemDetail = Awaited<ReturnType<AyanamiTaskService["getWorkItemForUi"]>>;
 type WorkItemRow = Awaited<ReturnType<AyanamiTaskService["listWorkItemsForUi"]>>[number];
 
-/** 截断到 max 个 UTF-16 单元（与 zod 的 max 同一口径），不把代理对劈开，末尾加省略号。 */
+/**
+ * 截断到 max 个 UTF-16 单元（与 zod 的 max 同一口径），不把代理对劈开，末尾加省略号。
+ * 结果按码点数也不超过 max（码点数 ≤ UTF-16 单元数）。
+ */
 export function clipText(text: string, max: number): string {
   if (text.length <= max) return text;
   let end = max - 1;
@@ -142,8 +147,19 @@ async function openCard(
       ...(entry.percent === null ? {} : { percent: Math.min(100, Math.max(0, entry.percent)) }),
     }));
   const run = dispatch?.runForTask(code, item.key) ?? null;
-  if (run) card.dispatch = { state: run.state, at: run.at, run: clipText(run.run, 64) };
+  if (run) card.dispatch = dispatchCard(run);
   return card;
+}
+
+/** 只有失败的派单带原因（例如「Claude Code 未登录…」），截到 200；其它状态不带。 */
+function dispatchCard(run: SyncDispatchRun): NonNullable<TaskCard["dispatch"]> {
+  const error = run.state === "failed" ? run.error?.trim() : undefined;
+  return {
+    state: run.state,
+    at: run.at,
+    run: clipText(run.run, 64),
+    ...(error ? { error: clipText(error, LIMITS.dispatchError) } : {}),
+  };
 }
 
 export type ProjectSnapshot = {
