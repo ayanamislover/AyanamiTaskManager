@@ -51,7 +51,8 @@ export function renderDispatchPrompt(input: DispatchPromptInput): string {
     "3. 完善目标：阅读相关代码，并用 atm_search 查该任务相关的 ATM 记录与历史进度，" +
       "然后用 atm_task_patch 的 edit 操作把描述改写成清晰、可执行的目标，并补齐 2～6 条可验证的验收标准；" +
       "任务明显过大时用 atm_task_create 拆成子任务。",
-    "4. 开始实现：遵守 ATM 规则，只在有意义的状态变化时用 atm_progress_add 写进度，长期决策、事实与风险用 atm_record 记下。",
+    "4. 开始实现：遵守 ATM 规则，只在有意义的状态变化时用 atm_progress_add 写进度，长期决策、事实与风险用 atm_record 记下。" +
+      "验收标准全部满足并已自测后，用 atm_task_patch 的 verify_and_complete（或 complete）关闭任务；做不完就保持进行中，留给交接。",
     "5. 需要用户做决定时（需求不明确、多种方案需要取舍、需要凭据或授权），不要猜：" +
       "用 atm_task_patch 的 wait_user 把任务置为 WAITING_USER，把问题写清楚，然后调用 atm_end 交接结束。",
     "6. 不要做发布、推送（git push）、删除数据、改动线上环境等对外或不可逆的操作，除非任务描述明确要求。",
