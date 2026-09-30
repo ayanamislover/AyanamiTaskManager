@@ -23,7 +23,7 @@ describe("workspace Module import architecture", () => {
     const report = auditImportArchitecture(inventory);
     expect(report.fileCount).toBeGreaterThanOrEqual(160);
     expect(report.importCount).toBeGreaterThanOrEqual(800);
-    expect(report.packageCount).toBe(14);
+    expect(report.packageCount).toBe(19);
     expect(report.violations).toEqual([]);
   });
 
@@ -426,7 +426,7 @@ describe("workspace Module import architecture", () => {
     }
   });
 
-  it("canonical policy 必须与全部14个生产 package 一一对应，防止空扫描", () => {
+  it("canonical policy 必须与全部19个生产 package 一一对应，防止空扫描", () => {
     const inventory = collectRepositorySources(repositoryRoot);
     expect(inventory.packages.map((entry) => entry.name).sort()).toEqual(
       Object.keys(DEFAULT_WORKSPACE_DEPENDENCIES).sort(),

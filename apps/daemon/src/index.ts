@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { registerDispatchRoutes } from "./dispatch-routes.js";
 import { createHttpServer, installNotFoundHandler } from "./http-boundary.js";
 import { registerKnowledgeRoutes } from "./knowledge-routes.js";
 import { registerProjectRoutes } from "./project-routes.js";
@@ -7,7 +8,7 @@ import { registerSessionRoutes } from "./session-routes.js";
 import { registerTransportRoutes } from "./transport-routes.js";
 import { registerWorkRoutes } from "./work-routes.js";
 
-export type { AyanamiServerOptions } from "./server-options.js";
+export type { AyanamiServerOptions, DispatchController } from "./server-options.js";
 export { authenticate, type AtmPrincipal } from "./http-boundary.js";
 export {
   acquireDaemonRuntime,
@@ -32,6 +33,7 @@ export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<F
   registerKnowledgeRoutes(app, options);
   registerWorkRoutes(app, options);
   registerSessionRoutes(app, options);
+  registerDispatchRoutes(app, options.dispatch);
   await registerTransportRoutes(app, options);
   installNotFoundHandler(app);
   await app.ready();

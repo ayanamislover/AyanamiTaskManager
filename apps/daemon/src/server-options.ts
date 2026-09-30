@@ -15,4 +15,19 @@ export type AyanamiServerOptions = {
    * 不传时取构建服务器的那一刻：桌面端在启动时进程内构建，正好就是「本次 ATM 启动」。
    */
   startedAt?: string;
+  /** Claude 自动派单（可选）。不传时派单路由统一返回 404 DISPATCH_UNAVAILABLE。 */
+  dispatch?: DispatchController;
+};
+
+/**
+ * Claude 派单控制器的最小接口（docs/mobile-sync.md §7–8），路由在 dispatch-routes.ts。
+ * `@ayanami-task/agent-dispatch` 的 AgentDispatcher 满足它；daemon 不依赖那个包，由宿主注入。
+ */
+export type DispatchController = {
+  /** 状态，不含任何密钥：配置、claude 可执行文件、最近的派单。 */
+  status(): Promise<unknown>;
+  /** 部分更新配置；校验在控制器里做，不合法时抛 DISPATCH_INVALID_ARGUMENT。 */
+  updateConfig(patch: unknown): Promise<unknown>;
+  enqueue(input: { project: string; key: string; origin: "desktop" }): Promise<unknown>;
+  cancel(run: string): Promise<unknown>;
 };
