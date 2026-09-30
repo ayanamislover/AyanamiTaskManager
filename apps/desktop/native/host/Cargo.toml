@@ -1,0 +1,46 @@
+[package]
+name = "atm-host"
+version = "0.0.0"
+description = "AyanamiTaskManager desktop host (WebView2 window, tray, core supervisor)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "AyanamiTaskManager"
+path = "src/main.rs"
+
+[features]
+# 测试构建：允许 CDP 调试端口与 smoke 钩子。生产构建永远不带（de-electron §5）。
+smoke = []
+
+[dependencies]
+atm-install-state = { path = "../install-state" }
+serde.workspace = true
+serde_json.workspace = true
+tao = "0.35"
+wry = "0.55"
+tray-icon = "0.24"
+# 与 wry 0.55 同版本：直接挂 WebView2 的 frame 事件（webview_frames.rs）。
+webview2-com = "0.38"
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_RemoteDesktop",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Pipes",
+  "Win32_System_Registry",
+  "Win32_System_Threading",
+  "Win32_System_IO",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+serde_json.workspace = true

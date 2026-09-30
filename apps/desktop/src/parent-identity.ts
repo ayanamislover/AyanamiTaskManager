@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /**
@@ -72,11 +73,17 @@ export function queryParentIdentity(pid: number): Promise<ParentIdentity | null>
   });
 }
 
+/** 经 junction（`<dataDir>\current`）启动时进程报告的是链接路径；两边都先解析到真实路径再比。 */
 function samePath(left: string, right: string): boolean {
-  const normalize = (value: string) =>
-    resolve(value)
-      .replace(/[\\/]+$/u, "")
-      .toLowerCase();
+  const normalize = (value: string) => {
+    let real = resolve(value);
+    try {
+      real = realpathSync.native(real);
+    } catch {
+      // 不存在就按字面比：映像已被删掉的父进程不可能是可信宿主。
+    }
+    return real.replace(/[\\/]+$/u, "").toLowerCase();
+  };
   return normalize(left) === normalize(right);
 }
 
