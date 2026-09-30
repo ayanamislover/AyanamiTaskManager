@@ -379,8 +379,14 @@ impl App {
     fn on_core_event(&mut self, event: CoreEvent, target: &EventLoopWindowTarget<UserEvent>) {
         match event {
             CoreEvent::Ready(frame) => {
-                if let Some(witness) = &self.witness {
-                    crate::health::service_witness(witness, &self.version, &self.run_id, &frame);
+                if let (Some(witness), Some(core)) = (&self.witness, &self.core) {
+                    crate::health::service_witness(
+                        witness,
+                        &self.version,
+                        &self.run_id,
+                        &frame,
+                        core.pid,
+                    );
                 }
                 self.core_starting = false;
                 self.core_ready = true;

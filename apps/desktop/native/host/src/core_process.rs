@@ -56,6 +56,7 @@ pub struct Launch {
 }
 
 pub struct Core {
+    pub pid: u32,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Child>>,
     marker: SessionMarker,
@@ -206,6 +207,7 @@ impl Core {
         let mut child = process
             .spawn()
             .map_err(|error| format!("CORE_SPAWN_FAILED: {error}"))?;
+        let pid = child.id();
         let stdin = child.stdin.take().ok_or("CORE_STDIN_MISSING")?;
         let stdout = child.stdout.take().ok_or("CORE_STDOUT_MISSING")?;
         let mut stderr = child.stderr.take().ok_or("CORE_STDERR_MISSING")?;
@@ -290,6 +292,7 @@ impl Core {
 
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let core = Core {
+            pid,
             marker: SessionMarker {
                 stdin: stdin.clone(),
                 recorded,

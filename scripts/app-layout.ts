@@ -6,6 +6,8 @@ import { dirname, join, resolve } from "node:path";
  * 免得测试里的布局和真正发出去的不是一回事。
  *
  *   AyanamiTaskManager.exe            宿主（Rust）
+ *   launcher\AyanamiTaskManager.exe   根启动器（FENCE 时由 setup 拷到安装根）
+ *   atm-setup.exe                     安装器（同上；也是「ATM 修复」的后备入口）
  *   runtime\atm-core.exe              改名的 node.exe
  *   runtime\core.mjs、cli.mjs         esbuild 单文件
  *   runtime\node_modules\better-sqlite3\{package.json,lib\,prebuilds\win32-x64.node}
@@ -15,6 +17,8 @@ import { dirname, join, resolve } from "node:path";
  */
 export const APP_LAYOUT = {
   host: "AyanamiTaskManager.exe",
+  launcher: join("launcher", "AyanamiTaskManager.exe"),
+  setup: "atm-setup.exe",
   coreExe: join("runtime", "atm-core.exe"),
   coreBundle: join("runtime", "core.mjs"),
   cliBundle: join("runtime", "cli.mjs"),
@@ -35,6 +39,11 @@ export type AppLayoutInput = {
   rendererDir?: string;
   /** 打包时盖过构建戳的 Guide 文本；不传用源文件。 */
   stampedGuide?: string;
+  /** core.mjs/cli.mjs 所在目录；默认 apps/desktop/dist/core（演练的第二版本另建）。 */
+  coreDir?: string;
+  /** 根启动器与安装器；只测 core 时不需要。 */
+  launcherExe?: string;
+  setupExe?: string;
 };
 
 function betterSqlitePackage(root: string): string {
@@ -50,7 +59,7 @@ export function assembleAppDirectory(input: AppLayoutInput): string {
   mkdirSync(at("runtime"), { recursive: true });
   copyFileSync(input.hostExe, at(APP_LAYOUT.host));
   copyFileSync(input.nodeExe, at(APP_LAYOUT.coreExe));
-  const coreDist = join(root, "apps", "desktop", "dist", "core");
+  const coreDist = input.coreDir ?? join(root, "apps", "desktop", "dist", "core");
   copyFileSync(join(coreDist, "core.mjs"), at(APP_LAYOUT.coreBundle));
   copyFileSync(join(coreDist, "cli.mjs"), at(APP_LAYOUT.cliBundle));
 
@@ -79,6 +88,10 @@ export function assembleAppDirectory(input: AppLayoutInput): string {
   if (input.mcpShimExe) copyFileSync(input.mcpShimExe, join(resources, "atm-mcp.exe"));
   if (input.rendererDir) cpSync(input.rendererDir, at(APP_LAYOUT.renderer), { recursive: true });
   cpSync(join(root, "migrations"), at(APP_LAYOUT.migrations), { recursive: true });
-  mkdirSync(dirname(at(APP_LAYOUT.host)), { recursive: true });
+  if (input.launcherExe) {
+    mkdirSync(dirname(at(APP_LAYOUT.launcher)), { recursive: true });
+    copyFileSync(input.launcherExe, at(APP_LAYOUT.launcher));
+  }
+  if (input.setupExe) copyFileSync(input.setupExe, at(APP_LAYOUT.setup));
   return target;
 }

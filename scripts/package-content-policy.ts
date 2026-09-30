@@ -41,12 +41,29 @@ export function assertPublishedLogoBytes(bytes: Buffer, entry: string): void {
  * UTF-16LE 的键、NUL、补齐到 4 字节边界的 0～2 个字节，然后是 UTF-16LE 的值和 NUL。
  */
 export function assertMcpShimVersionResource(bytes: Buffer, version: string): void {
+  assertExecutableVersionResource(
+    bytes,
+    version,
+    "AyanamiTaskManager MCP stdio bridge",
+    "MCP_SHIM",
+  );
+}
+
+/** 同一条规则，用于宿主、根启动器和 atm-setup（native/build-support 写的资源）。 */
+export function assertExecutableVersionResource(
+  bytes: Buffer,
+  version: string,
+  description: string,
+  label: string,
+): void {
   const nul = String.fromCharCode(0);
   const key = Buffer.from(`ProductVersion${nul}`, "utf16le");
   const expected = Buffer.from(`${version}${nul}`, "utf16le");
-  const at = bytes.indexOf(key);
-  if (at < 0 || !bytes.includes(Buffer.from("AyanamiTaskManager MCP stdio bridge", "utf16le")))
-    throw new Error("PACKAGED_MCP_SHIM_VERSION_RESOURCE_MISSING");
+  // 大二进制里 "ProductVersion" 也会出现在依赖库的常量里；只认版本资源结构之后的那一处。
+  const resource = bytes.lastIndexOf(Buffer.from("VS_VERSION_INFO", "utf16le"));
+  const at = resource < 0 ? -1 : bytes.indexOf(key, resource);
+  if (at < 0 || !bytes.includes(Buffer.from(description, "utf16le")))
+    throw new Error(`PACKAGED_${label}_VERSION_RESOURCE_MISSING`);
   let value = at + key.length;
   // 补齐是相对资源结构对齐的，不是相对文件偏移；值的首字符不会是 NUL，见零就跳。
   if (value + 2 <= bytes.length && bytes.readUInt16LE(value) === 0) value += 2;
@@ -54,7 +71,7 @@ export function assertMcpShimVersionResource(bytes: Buffer, version: string): vo
     let end = value;
     while (end + 2 <= bytes.length && end < value + 64 && bytes.readUInt16LE(end) !== 0) end += 2;
     const found = bytes.subarray(value, end).toString("utf16le");
-    throw new Error(`PACKAGED_MCP_SHIM_VERSION_MISMATCH: expected ${version}, found ${found}`);
+    throw new Error(`PACKAGED_${label}_VERSION_MISMATCH: expected ${version}, found ${found}`);
   }
 }
 

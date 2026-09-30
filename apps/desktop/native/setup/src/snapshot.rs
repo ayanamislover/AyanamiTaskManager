@@ -133,7 +133,7 @@ pub fn restore_root_files(env: &Env, snapshot: &Snapshot) -> Result<(), String> 
         if file.saved {
             fsx::replace_file(&target, &saved.join(&file.relative))
                 .map_err(|error| format!("restore {}: {error}", file.relative))?;
-        } else if target.is_file() {
+        } else if target.is_file() && fs::remove_file(&target).is_err() {
             // A running new launcher/shim cannot be deleted, but it can be renamed aside.
             let aside = target.with_file_name(format!(
                 "{}.old",
@@ -144,6 +144,8 @@ pub fn restore_root_files(env: &Env, snapshot: &Snapshot) -> Result<(), String> 
                 .map_err(|error| format!("remove {}: {error}", file.relative))?;
         }
     }
+    // Only succeeds when empty: a first install's undo leaves no bare `resources\`.
+    let _ = fs::remove_dir(env.install_root.join("resources"));
     Ok(())
 }
 

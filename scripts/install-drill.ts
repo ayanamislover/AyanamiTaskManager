@@ -1,0 +1,428 @@
+/**
+ * 安装/更新/迁移/回滚演练（ATM-T-0554，de-electron §6、§9）。全部在沙箱里：
+ *
+ *   output/drill/<场景>/install     安装根（ATM_SETUP_SANDBOX 把它、快捷方式目录一起换走）
+ *   output/drill/<场景>/data        数据根（ATM_DATA_DIR）
+ *   HKCU\Software\AyanamiTaskManagerDrill\<hash>\  Uninstall 与 Run（结束时删掉）
+ *
+ * 用的是 drill 构建的 setup（带沙箱与故障注入）；真实安装根、真实注册表和用户正在跑的 ATM
+ * 都碰不到。Electron 1.x 用 setup/examples/fake-electron.rs 代替：真 Electron 在沙箱里会和
+ * 用户在跑的那一份抢同一把单实例锁。
+ *
+ *   pnpm exec tsx scripts/install-drill.ts            # 需要已构建的原生产物与 renderer/core
+ *   pnpm exec tsx scripts/install-drill.ts --only update,faults
+ */
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
+
+const root = resolve(process.cwd());
+const drillRoot = resolve(root, "output", "drill");
+const VERSION_A = "2.0.0";
+const VERSION_B = "2.0.1";
+const LEGACY = "1.2.2";
+const AUMID = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
+const TOAST_CLSID = "{69f12b18-2bbb-5b7a-98b5-b8f0246b08a6}";
+const fakeElectron = join(root, NATIVE_CRATE_DIR, "target-drill", "release", "examples", "fake-electron.exe");
+
+type Pointer = { current: string; previous?: string | null };
+type Journal = { id: string; state: string; outcome?: string | null; kind?: string; commitPending?: boolean };
+
+const results: Array<{ scenario: string; check: string; passed: boolean; detail?: string }> = [];
+let currentScenario = "";
+
+function check(name: string, passed: boolean, detail?: unknown): void {
+  results.push({
+    scenario: currentScenario,
+    check: name,
+    passed,
+    ...(passed || detail === undefined ? {} : { detail: JSON.stringify(detail).slice(0, 400) }),
+  });
+  process.stdout.write(`  ${passed ? "✓" : "✗"} ${name}${passed ? "" : `  ${JSON.stringify(detail)?.slice(0, 300)}`}\n`);
+}
+
+/** Same FNV-1a as setup's Env::sandboxed, over the lower-cased path. */
+function registryBase(sandbox: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(sandbox.toLowerCase(), "utf8")) {
+    hash ^= BigInt(byte);
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return `HKCU\\Software\\AyanamiTaskManagerDrill\\${hash.toString(16).padStart(16, "0")}`;
+}
+
+class Sandbox {
+  readonly dir: string;
+  readonly install: string;
+  readonly data: string;
+  readonly registry: string;
+  constructor(name: string) {
+    this.dir = join(drillRoot, name);
+    this.install = join(this.dir, "install");
+    this.data = join(this.dir, "data");
+    this.registry = registryBase(this.dir);
+  }
+  env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = { ...process.env, ATM_SETUP_SANDBOX: this.dir, ATM_DATA_DIR: this.data, ...extra };
+    for (const key of ["ATM_SETUP_DIE_AFTER", "ATM_SETUP_FAIL_AT"]) if (!(key in extra)) delete env[key];
+    return env;
+  }
+  pointer(): Pointer | null {
+    const path = join(this.install, "app.json");
+    return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Pointer) : null;
+  }
+  journal(): Journal | null {
+    const path = join(this.install, "state", "install.json");
+    return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Journal) : null;
+  }
+  /** Version the running service publishes (daemon.json; the token field is never read out). */
+  serviceVersion(): string | null {
+    const path = join(this.data, "runtime", "daemon.json");
+    if (!existsSync(path)) return null;
+    const { version, pid } = JSON.parse(readFileSync(path, "utf8")) as { version: string; pid: number };
+    return processes(this.dir).some((proc) => proc.pid === pid) ? version : null;
+  }
+  log(lines = 12): string {
+    const path = join(this.install, "state", "setup.log");
+    return existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").slice(-lines).join("\n") : "";
+  }
+}
+
+function processes(prefix: string): Array<{ pid: number; path: string }> {
+  const script =
+    "Get-Process | Where-Object { $_.Path } | ForEach-Object { [pscustomobject]@{ pid = $_.Id; path = $_.Path } } | ConvertTo-Json -Compress";
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    encoding: "utf8",
+    windowsHide: true,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const parsed = JSON.parse(result.stdout.trim() || "[]") as unknown;
+  const list = (Array.isArray(parsed) ? parsed : [parsed]) as Array<{ pid: number; path: string }>;
+  return list.filter((proc) => proc.path?.toLowerCase().startsWith(prefix.toLowerCase()));
+}
+
+function killAll(prefix: string): void {
+  for (const proc of processes(prefix))
+    spawnSync("taskkill.exe", ["/F", "/PID", String(proc.pid)], { windowsHide: true, stdio: "ignore" });
+}
+
+function runSetup(sandbox: Sandbox, setup: string, args: string[], extra: Record<string, string> = {}): number {
+  const result = spawnSync(setup, args, { env: sandbox.env(extra), stdio: "ignore", windowsHide: true, timeout: 240_000 });
+  return result.status ?? -1;
+}
+
+function runLauncher(sandbox: Sandbox, args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(join(sandbox.install, "AyanamiTaskManager.exe"), args, {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 240_000,
+  });
+}
+
+async function until(predicate: () => boolean, ms = 30_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await sleep(250);
+  }
+  return predicate();
+}
+
+function reg(args: string[]): SpawnSyncReturns<string> {
+  return spawnSync("reg.exe", args, { encoding: "utf8", windowsHide: true });
+}
+
+function regValue(key: string, name: string): string | null {
+  const result = reg(["query", key, "/v", name]);
+  if (result.status !== 0) return null;
+  const line = result.stdout.split(/\r?\n/u).find((row) => row.trim().startsWith(name));
+  return line ? line.trim().split(/\s{4,}/u).slice(2).join("    ") : null;
+}
+
+function shortcut(path: string): Record<string, string> | null {
+  if (!existsSync(path)) return null;
+  const literal = path.replaceAll("'", "''");
+  const script = `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${literal}'); [pscustomobject]@{ target = $s.TargetPath; args = $s.Arguments; workdir = $s.WorkingDirectory } | ConvertTo-Json -Compress`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true });
+  return JSON.parse(result.stdout.trim() || "null") as Record<string, string> | null;
+}
+
+/** AppUserModel.ID and ToastActivatorCLSID via the Shell property system. */
+function shortcutIdentity(path: string): { aumid: string; toast: string } {
+  const literal = path.replaceAll("'", "''");
+  const script =
+    `$shell = New-Object -ComObject Shell.Application; $folder = $shell.Namespace((Split-Path '${literal}')); ` +
+    `$item = $folder.ParseName((Split-Path '${literal}' -Leaf)); ` +
+    `[pscustomobject]@{ aumid = [string]$item.ExtendedProperty('System.AppUserModel.ID'); toast = [string]$item.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID') } | ConvertTo-Json -Compress`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true });
+  return JSON.parse(result.stdout.trim() || '{"aumid":"","toast":""}') as { aumid: string; toast: string };
+}
+
+function junctionTarget(link: string): string | null {
+  const script = `$i = Get-Item '${link.replaceAll("'", "''")}' -Force -ErrorAction SilentlyContinue; if ($i -and $i.LinkType) { [string]$i.Target }`;
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", windowsHide: true });
+  return result.stdout.trim() || null;
+}
+
+function samePath(left: string | null, right: string): boolean {
+  return (left ?? "").replace(/[\\/]+$/u, "").toLowerCase() === right.replace(/[\\/]+$/u, "").toLowerCase();
+}
+
+function reset(sandbox: Sandbox): void {
+  killAll(sandbox.dir);
+  reg(["delete", sandbox.registry, "/f"]);
+  rmSync(sandbox.dir, { recursive: true, force: true });
+  mkdirSync(sandbox.dir, { recursive: true });
+}
+
+function teardown(sandbox: Sandbox): void {
+  killAll(sandbox.dir);
+  reg(["delete", sandbox.registry, "/f"]);
+}
+
+function packages(rebuild: boolean): { a: { setup: string; manifest: string }; b: { setup: string; manifest: string } } {
+  const out = (version: string) => join(drillRoot, `package-${version}`);
+  for (const version of [VERSION_A, VERSION_B])
+    if (rebuild || !existsSync(join(out(version), `atm-${version}-win-x64.json`)))
+      packageNative({ root, build: false, drill: true, drillVersion: version, outDir: out(version) });
+  const at = (version: string) => ({
+    setup: join(out(version), "atm-setup.exe"),
+    manifest: join(out(version), `atm-${version}-win-x64.json`),
+  });
+  return { a: at(VERSION_A), b: at(VERSION_B) };
+}
+
+type Packages = ReturnType<typeof packages>;
+
+async function installed(sandbox: Sandbox, version: string, previous: string | null): Promise<void> {
+  const pointer = sandbox.pointer();
+  check(`app.json = {current: ${version}, previous: ${previous}}`, pointer?.current === version && (pointer.previous ?? null) === previous, pointer);
+  check(`service running ${version}`, await until(() => sandbox.serviceVersion() === version, 20_000), sandbox.serviceVersion());
+  const journal = sandbox.journal();
+  check("journal terminal COMMITTED, not pending", journal?.state === "DONE" && journal.outcome === "COMMITTED" && !journal.commitPending, journal);
+  check("current → install root", samePath(junctionTarget(join(sandbox.data, "current")), sandbox.install), junctionTarget(join(sandbox.data, "current")));
+}
+
+async function scenarioLifecycle(pkg: Packages): Promise<void> {
+  currentScenario = "lifecycle";
+  const sandbox = new Sandbox("lifecycle");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] first install ${VERSION_A}\n`);
+  let started = Date.now();
+  check("install exit 0", runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0, sandbox.log());
+  check(`install took ${((Date.now() - started) / 1000).toFixed(1)}s (< 30s)`, Date.now() - started < 30_000);
+  await installed(sandbox, VERSION_A, null);
+  const startMenu = join(sandbox.dir, "start-menu", "ayanami", "AyanamiTaskManager.lnk");
+  const link = shortcut(startMenu);
+  check("start-menu shortcut → root launcher, workdir install root", samePath(link?.target ?? null, join(sandbox.install, "AyanamiTaskManager.exe")) && samePath(link?.workdir ?? null, sandbox.install), link);
+  check("start-menu shortcut carries the Squirrel AUMID", shortcutIdentity(startMenu).aumid === AUMID, shortcutIdentity(startMenu));
+  check("first install creates a desktop shortcut", existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")));
+  check("repair shortcut → atm-setup --repair", shortcut(join(sandbox.dir, "start-menu", "ayanami", "ATM 修复.lnk"))?.args === "--repair");
+  const uninstallKey = `${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`;
+  check("Uninstall key points at atm-setup", (regValue(uninstallKey, "UninstallString") ?? "").includes("atm-setup.exe\" --uninstall"), regValue(uninstallKey, "UninstallString"));
+  check(`Uninstall DisplayVersion ${VERSION_A}`, regValue(uninstallKey, "DisplayVersion") === VERSION_A, regValue(uninstallKey, "DisplayVersion"));
+  check("first install does not enable autostart", regValue(`${sandbox.registry}\\Run`, AUMID) === null);
+
+  process.stdout.write(`[${currentScenario}] launcher routing\n`);
+  const doctor = runLauncher(sandbox, ["--doctor"]);
+  check("launcher --doctor exits 0 with a JSON report", doctor.status === 0 && doctor.stdout.trim().startsWith("{"), { status: doctor.status, out: doctor.stdout.slice(0, 200), err: doctor.stderr.slice(0, 200) });
+  const hostsBefore = processes(sandbox.install).filter((proc) => proc.path.endsWith("AyanamiTaskManager.exe")).length;
+  check("launcher GUI start returns at once", runLauncher(sandbox, ["--background"]).status === 0);
+  await sleep(1500);
+  const hostsAfter = processes(sandbox.install).filter((proc) => proc.path.endsWith("AyanamiTaskManager.exe")).length;
+  check("second start hands over to the running host (no second service)", hostsAfter === hostsBefore, { hostsBefore, hostsAfter });
+  check("launcher rejects unknown arguments with 2", runLauncher(sandbox, ["--inspect"]).status === 2);
+
+  process.stdout.write(`[${currentScenario}] update ${VERSION_A} → ${VERSION_B}\n`);
+  started = Date.now();
+  check("update exit 0", runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["install", pkg.b.manifest, "--quiet"]) === 0, sandbox.log());
+  check(`update took ${((Date.now() - started) / 1000).toFixed(1)}s (< 30s)`, Date.now() - started < 30_000);
+  await installed(sandbox, VERSION_B, VERSION_A);
+  check(`app-${VERSION_A} kept as previous`, existsSync(join(sandbox.install, `app-${VERSION_A}`)));
+  check(`no process left from app-${VERSION_A}`, processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0, processes(join(sandbox.install, `app-${VERSION_A}`)));
+  check("root launcher is the new version's", readFileSync(join(sandbox.install, "AyanamiTaskManager.exe")).equals(readFileSync(join(sandbox.install, `app-${VERSION_B}`, "launcher", "AyanamiTaskManager.exe"))));
+  check("same version again is refused", runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["install", pkg.b.manifest, "--quiet"]) !== 0);
+  check("…and changes nothing", sandbox.pointer()?.current === VERSION_B && sandbox.serviceVersion() === VERSION_B);
+
+  process.stdout.write(`[${currentScenario}] rollback → ${VERSION_A}\n`);
+  check("rollback exit 0", runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]) === 0, sandbox.log());
+  await installed(sandbox, VERSION_A, VERSION_B);
+
+  process.stdout.write(`[${currentScenario}] uninstall\n`);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  check("install root removed", await until(() => !existsSync(sandbox.install), 60_000), existsSync(sandbox.install) ? readdirSync(sandbox.install) : null);
+  check("no process left", processes(sandbox.dir).length === 0, processes(sandbox.dir));
+  check("Uninstall key removed", regValue(uninstallKey, "DisplayName") === null);
+  check("shortcuts removed", !existsSync(startMenu) && !existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")));
+  check("current junction removed", junctionTarget(join(sandbox.data, "current")) === null);
+  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  teardown(sandbox);
+}
+
+/** Setup dies right after persisting each state; the next start (the launcher) recovers. */
+async function scenarioFaults(pkg: Packages): Promise<void> {
+  currentScenario = "faults";
+  const sandbox = new Sandbox("faults");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] base install ${VERSION_A}\n`);
+  check("base install", runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0, sandbox.log());
+  const expected: Array<[string, "ABORTED" | "ROLLED_BACK" | "COMMITTED"]> = [
+    ["STAGE", "ABORTED"],
+    ["PROBE", "ABORTED"],
+    ["SNAPSHOT", "ABORTED"],
+    ["FENCE", "ABORTED"],
+    ["QUIESCE", "ABORTED"],
+    ["SEAL", "ABORTED"],
+    ["SWITCH", "ROLLED_BACK"],
+    ["START", "ROLLED_BACK"],
+    ["UNDO:2", "ROLLED_BACK"],
+    ["COMMIT", "COMMITTED"],
+  ];
+  for (const [state, outcome] of expected) {
+    process.stdout.write(`[${currentScenario}] die after ${state}\n`);
+    // UNDO:2 = die in the middle of the undo that a failed START started.
+    const extra = state === "UNDO:2" ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" } : { ATM_SETUP_DIE_AFTER: state };
+    const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["install", pkg.b.manifest, "--quiet", "--retry"], extra);
+    check(`${state}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
+    check(`${state}: journal left unfinished`, sandbox.journal()?.outcome == null, sandbox.journal());
+    // The next ordinary start is what recovers: the launcher's barrier runs --recover.
+    const start = runLauncher(sandbox, ["--background"]);
+    check(`${state}: launcher start exits 0`, start.status === 0, { status: start.status, err: start.stderr.slice(0, 200) });
+    const journal = sandbox.journal();
+    check(`${state}: recovered to ${outcome}`, journal?.state === "DONE" && journal.outcome === outcome, { journal, log: sandbox.log(6) });
+    const version = outcome === "COMMITTED" ? VERSION_B : VERSION_A;
+    check(`${state}: app.json.current = ${version}`, sandbox.pointer()?.current === version, sandbox.pointer());
+    check(`${state}: service running ${version}`, await until(() => sandbox.serviceVersion() === version, 30_000), sandbox.serviceVersion());
+    if (outcome !== "COMMITTED") {
+      check(`${state}: staged app-${VERSION_B} removed`, !existsSync(join(sandbox.install, `app-${VERSION_B}`)));
+      check(`${state}: root launcher is ${VERSION_A}'s again`, readFileSync(join(sandbox.install, "AyanamiTaskManager.exe")).equals(readFileSync(join(sandbox.install, `app-${VERSION_A}`, "launcher", "AyanamiTaskManager.exe"))));
+    }
+  }
+  process.stdout.write(`[${currentScenario}] in-process failures\n`);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
+  for (const [state, outcome] of [["PROBE", "ABORTED"], ["SEAL", "ABORTED"], ["START", "ROLLED_BACK"]] as const) {
+    const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["install", pkg.b.manifest, "--quiet", "--retry"], { ATM_SETUP_FAIL_AT: state });
+    const journal = sandbox.journal();
+    check(`fail at ${state} → ${outcome} (exit ${code})`, journal?.outcome === outcome, { journal, log: sandbox.log(5) });
+    check(`fail at ${state}: still serving ${VERSION_A}`, await until(() => sandbox.serviceVersion() === VERSION_A, 30_000), sandbox.serviceVersion());
+  }
+  const refused = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["install", pkg.b.manifest, "--quiet"]);
+  check("a version that failed twice is not retried without --retry", refused !== 0 && sandbox.pointer()?.current === VERSION_A, { refused, log: sandbox.log(2) });
+  teardown(sandbox);
+}
+
+/** A Squirrel 1.2.2 layout with its registrations, served by the fake Electron. */
+async function squirrelLayout(sandbox: Sandbox): Promise<void> {
+  const app = join(sandbox.install, `app-${LEGACY}`);
+  mkdirSync(join(app, "resources"), { recursive: true });
+  copyFileSync(fakeElectron, join(app, "AyanamiTaskManager.exe"));
+  writeFileSync(join(app, "resources", "app.asar"), "drill");
+  copyFileSync(fakeElectron, join(sandbox.install, "AyanamiTaskManager.exe"));
+  copyFileSync(fakeElectron, join(sandbox.install, "Update.exe"));
+  mkdirSync(join(sandbox.install, "packages"), { recursive: true });
+  writeFileSync(join(sandbox.install, "packages", "RELEASES"), "drill");
+  writeFileSync(join(sandbox.install, "app.ico"), "drill");
+  const key = `${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`;
+  const update = `"${join(sandbox.install, "Update.exe")}"`;
+  for (const [name, value] of [
+    ["DisplayName", "AyanamiTaskManager"],
+    ["DisplayVersion", LEGACY],
+    ["InstallLocation", sandbox.install],
+    ["UninstallString", `${update} --uninstall`],
+    ["QuietUninstallString", `${update} --uninstall -s`],
+    ["InstallDate", "20260930"],
+  ])
+    reg(["add", key, "/v", name, "/t", "REG_SZ", "/d", value, "/f"]);
+  reg(["add", `${sandbox.registry}\\Run`, "/v", AUMID, "/t", "REG_SZ", "/d", `"${join(sandbox.data, "current", "AyanamiTaskManager.exe")}" --background --random-startup-delay`, "/f"]);
+  for (const dir of [join(sandbox.dir, "start-menu", "ayanami"), join(sandbox.dir, "desktop")]) {
+    mkdirSync(dir, { recursive: true });
+    const lnk = join(dir, "AyanamiTaskManager.lnk").replaceAll("'", "''");
+    const target = join(sandbox.install, "AyanamiTaskManager.exe").replaceAll("'", "''");
+    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${lnk}'); $s.TargetPath = '${target}'; $s.WorkingDirectory = '${app.replaceAll("'", "''")}'; $s.Save()`], { windowsHide: true });
+  }
+  // AUMID + toast CLSID as Squirrel writes them: set with the same setup code path in reverse is
+  // circular, so borrow the property store through a tiny PowerShell-free route: the setup's own
+  // shortcut writer is exercised by COMMIT; here only the snapshot must carry what exists.
+  spawnSync(join(app, "AyanamiTaskManager.exe"), ["--background"], { env: sandbox.env(), stdio: "ignore", windowsHide: true, detached: true, timeout: 1 });
+  await until(() => existsSync(join(sandbox.data, "runtime", "daemon.json")), 15_000);
+}
+
+async function scenarioMigration(pkg: Packages): Promise<void> {
+  currentScenario = "migration";
+  const sandbox = new Sandbox("migration");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] Squirrel ${LEGACY} layout with a running (fake) Electron\n`);
+  await squirrelLayout(sandbox);
+  const stub = readFileSync(join(sandbox.install, "AyanamiTaskManager.exe"));
+  check("fake Electron serves 1.2.2", await until(() => sandbox.serviceVersion() === LEGACY), sandbox.serviceVersion());
+  check("old app points current at its own app dir", samePath(junctionTarget(join(sandbox.data, "current")), join(sandbox.install, `app-${LEGACY}`)));
+  check("without --force a running Electron blocks migration (quiet = no prompt)", runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) !== 0, sandbox.log(4));
+  check("…ABORTED, Electron untouched", sandbox.journal()?.outcome === "ABORTED" && sandbox.serviceVersion() === LEGACY && existsSync(join(sandbox.install, `app-${LEGACY}`)), { journal: sandbox.journal(), log: sandbox.log(4) });
+
+  process.stdout.write(`[${currentScenario}] migrate → ${VERSION_A} (--force)\n`);
+  check("migration exit 0", runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force", "--retry"]) === 0, sandbox.log());
+  await installed(sandbox, VERSION_A, `legacy:${LEGACY}`);
+  const rollback = join(sandbox.install, "state", "rollback");
+  for (const item of [`app-${LEGACY}`, "Update.exe", "packages"])
+    check(`${item} isolated in state\\rollback\\legacy`, existsSync(join(rollback, "legacy", item)) && !existsSync(join(sandbox.install, item)));
+  check("Squirrel stub saved for a reverse migration", readFileSync(join(rollback, "legacy-stub", "AyanamiTaskManager.exe")).equals(stub));
+  check("migration.json written", existsSync(join(rollback, "migration.json")));
+  check("no fake Electron left", processes(join(sandbox.install, "state")).length === 0 && processes(join(sandbox.install, `app-${LEGACY}`)).length === 0);
+  const run = regValue(`${sandbox.registry}\\Run`, AUMID);
+  check("Run value kept, now straight at the root launcher, arguments kept", run === `"${join(sandbox.install, "AyanamiTaskManager.exe")}" --background --random-startup-delay`, run);
+  const key = `${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`;
+  check("Uninstall key rewritten for atm-setup, InstallDate kept", (regValue(key, "UninstallString") ?? "").includes("atm-setup.exe") && regValue(key, "InstallDate") === "20260930", { u: regValue(key, "UninstallString"), d: regValue(key, "InstallDate") });
+  const desktop = shortcut(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk"));
+  check("existing desktop shortcut rewritten: workdir no longer app-1.2.2", samePath(desktop?.workdir ?? null, sandbox.install), desktop);
+  check("user data still readable by the new core (same registry DB)", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+
+  process.stdout.write(`[${currentScenario}] back to Electron\n`);
+  check("reverse migration exit 0", runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]) === 0, sandbox.log());
+  check("app.json = legacy pointer", sandbox.pointer()?.current === `legacy:${LEGACY}` && sandbox.pointer()?.previous === VERSION_A, sandbox.pointer());
+  check("Electron serving again", await until(() => sandbox.serviceVersion() === LEGACY, 20_000), sandbox.serviceVersion());
+  check("stub back at the root", readFileSync(join(sandbox.install, "AyanamiTaskManager.exe")).equals(stub));
+  check(`app-${LEGACY}, Update.exe, packages back in place`, [`app-${LEGACY}`, "Update.exe", "packages"].every((item) => existsSync(join(sandbox.install, item))));
+  check("new-style versions moved out of the stub's reach", !existsSync(join(sandbox.install, `app-${VERSION_A}`)) && existsSync(join(rollback, "newstyle", `app-${VERSION_A}`)));
+  check("Squirrel Uninstall string restored", (regValue(key, "UninstallString") ?? "").includes("Update.exe"));
+  check("Run value restored to the current\\ form", (regValue(`${sandbox.registry}\\Run`, AUMID) ?? "").includes(`${join(sandbox.data, "current")}`));
+  check("no new-style process left", processes(join(sandbox.install, "state", "rollback", "newstyle")).length === 0);
+
+  process.stdout.write(`[${currentScenario}] migrate again, then die after ISOLATE and recover\n`);
+  const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force", "--retry"], { ATM_SETUP_DIE_AFTER: "ISOLATE" });
+  check("died after ISOLATE (99)", code === 99, sandbox.log(3));
+  check("recover exit (ABORTED = 1)", runSetup(sandbox, pkg.a.setup, ["--recover", "--quiet"]) === 1, sandbox.log(4));
+  check("Electron restored and serving", await until(() => sandbox.serviceVersion() === LEGACY, 20_000), { v: sandbox.serviceVersion(), log: sandbox.log(6) });
+  check("stub restored after the aborted migration", readFileSync(join(sandbox.install, "AyanamiTaskManager.exe")).equals(stub));
+  check("current points at the Electron app again", samePath(junctionTarget(join(sandbox.data, "current")), join(sandbox.install, `app-${LEGACY}`)), junctionTarget(join(sandbox.data, "current")));
+
+  process.stdout.write(`[${currentScenario}] migrate, then a reverse migration that fails at R_START_LEGACY\n`);
+  check("migrate again exit 0", runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force", "--retry"]) === 0, sandbox.log(4));
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"], { ATM_SETUP_FAIL_AT: "R_START_LEGACY" });
+  check("UNDO_LEGACY → ABORTED", sandbox.journal()?.outcome === "ABORTED" && sandbox.journal()?.kind === "LEGACY", { j: sandbox.journal(), log: sandbox.log(6) });
+  check(`still on ${VERSION_A}, serving`, sandbox.pointer()?.current === VERSION_A && (await until(() => sandbox.serviceVersion() === VERSION_A, 20_000)), { p: sandbox.pointer(), v: sandbox.serviceVersion() });
+  check("Electron assets isolated again", existsSync(join(rollback, "legacy", `app-${LEGACY}`)) && !existsSync(join(sandbox.install, `app-${LEGACY}`)));
+  teardown(sandbox);
+}
+
+async function main(): Promise<void> {
+  if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
+  const only = process.argv.includes("--only") ? process.argv[process.argv.indexOf("--only") + 1]!.split(",") : null;
+  const pkg = packages(process.argv.includes("--rebuild-packages"));
+  const scenarios: Array<[string, (pkg: Packages) => Promise<void>]> = [
+    ["lifecycle", scenarioLifecycle],
+    ["faults", scenarioFaults],
+    ["migration", scenarioMigration],
+  ];
+  for (const [name, run] of scenarios) if (!only || only.includes(name)) await run(pkg);
+  const failed = results.filter((result) => !result.passed);
+  const report = { at: new Date().toISOString(), passed: failed.length === 0, total: results.length, failed: failed.length, results };
+  writeFileSync(join(drillRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+  process.stdout.write(`\n${results.length - failed.length}/${results.length} checks passed → ${join(drillRoot, "report.json")}\n`);
+  process.exitCode = failed.length === 0 ? 0 : 1;
+  void statSync;
+}
+
+await main();

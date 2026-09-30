@@ -147,6 +147,13 @@ impl Setup {
             .and_then(|pointer| pointer.previous.clone());
         let mut reuse = false;
         if target.exists() {
+            if legacy::is_electron_dir(&target) {
+                // Same version number as the Electron install: that directory is the old app
+                // itself (and ISOLATE would move it). Never staged over, never deleted.
+                return Err(format!(
+                    "PRECHECK_VERSION_IS_LEGACY: app-{to} is the Electron install; package a newer version"
+                ));
+            }
             if package::verify_tree(&package.manifest, &target).is_ok() {
                 reuse = true;
             } else if previous.as_deref() == Some(to.as_str()) {

@@ -14,9 +14,12 @@ const packageVersion = (JSON.parse(readFileSync("package.json", "utf8")) as { ve
   .version;
 
 /** VS_VERSIONINFO 的一条 String：键、NUL、padding 个零字节、值、NUL。 */
-function versionString(value: string, padding: 0 | 2): Buffer {
+function versionString(value: string, padding: 0 | 2, decoy = ""): Buffer {
   const nul = String.fromCharCode(0);
   return Buffer.concat([
+    // 大二进制的常量区里也可能有同名串（宿主链接的库就有），在版本资源之前。
+    ...(decoy ? [Buffer.from(`ProductVersion${nul}${decoy}${nul}`, "utf16le")] : []),
+    Buffer.from(`VS_VERSION_INFO${nul}`, "utf16le"),
     Buffer.from("AyanamiTaskManager MCP stdio bridge", "utf16le"),
     Buffer.from(`ProductVersion${nul}`, "utf16le"),
     Buffer.alloc(padding),
@@ -126,6 +129,15 @@ describe("packaged MCP shim", () => {
         /PACKAGED_MCP_SHIM_VERSION_MISMATCH/u,
       );
     }
+  });
+
+  it("常量区里在前面的同名串不影响：只读版本资源结构里的值", () => {
+    expect(() =>
+      assertMcpShimVersionResource(versionString("1.2.3", 0, "garbage"), "1.2.3"),
+    ).not.toThrow();
+    expect(() => assertMcpShimVersionResource(versionString("1.2.4", 0, "1.2.3"), "1.2.3")).toThrow(
+      /PACKAGED_MCP_SHIM_VERSION_MISMATCH/u,
+    );
   });
 
   it("没有版本资源的 exe 被拒", () => {

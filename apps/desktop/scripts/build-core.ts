@@ -1,5 +1,6 @@
-import { build } from "esbuild";
-import { resolve } from "node:path";
+import { build, type Plugin } from "esbuild";
+import { readFileSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -10,7 +11,33 @@ import { fileURLToPath } from "node:url";
  * 源码运行（tsx）时不存在这个常量。
  */
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../../..");
-const outdir = resolve(root, "apps/desktop/dist/core");
+/**
+ * 安装演练要第二个版本号的包（更新、回滚都要两个版本）。ATM_DRILL_VERSION 只换 core 自报的
+ * DAEMON_VERSION，且只允许构建到 output/ 下，发布产物目录永远是源码里的版本。
+ */
+const drillVersion = process.env.ATM_DRILL_VERSION;
+const outdir = resolve(process.env.ATM_CORE_OUT_DIR ?? resolve(root, "apps/desktop/dist/core"));
+if (drillVersion !== undefined) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u.test(drillVersion))
+    throw new Error(`ATM_DRILL_VERSION_INVALID: ${drillVersion}`);
+  if (!outdir.toLowerCase().startsWith(`${resolve(root, "output").toLowerCase()}${sep}`))
+    throw new Error(`ATM_DRILL_VERSION_OUTSIDE_OUTPUT: ${outdir}`);
+}
+const versionPlugin: Plugin = {
+  name: "atm-drill-version",
+  setup(context) {
+    // esbuild compiles the filter as a Go regular expression, which has no `u` flag.
+    context.onLoad({ filter: /runtime-discovery\.ts$/ }, (args) => {
+      const source = readFileSync(args.path, "utf8");
+      const replaced = source.replace(
+        /export const DAEMON_VERSION = "[^"]+";/u,
+        `export const DAEMON_VERSION = ${JSON.stringify(drillVersion)};`,
+      );
+      if (replaced === source) throw new Error("ATM_DRILL_VERSION_ANCHOR_MISSING");
+      return { contents: replaced, loader: "ts" };
+    });
+  },
+};
 
 const shared = {
   bundle: true,
@@ -27,6 +54,7 @@ const shared = {
   },
   define: { __ATM_PACKAGED__: "true" },
   logLevel: "warning" as const,
+  plugins: drillVersion === undefined ? [] : [versionPlugin],
 };
 
 await build({
