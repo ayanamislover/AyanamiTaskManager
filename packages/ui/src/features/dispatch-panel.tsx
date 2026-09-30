@@ -11,9 +11,11 @@ import { useDialogs } from "../components/atm-dialogs.js";
 import { AtmSelect } from "../components/atm-select.js";
 import { LoadingRows, MutationErrorAlert, SectionLoadError } from "../components/async-state.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
-import { compactPath } from "../presentation.js";
 import {
+  CLAUDE_LOGIN_COMMAND,
+  claudeReadiness,
   CONCURRENCY_OPTIONS,
+  copyToClipboard,
   dispatchRefetchInterval,
   DISPATCH_STATUS_QUERY_KEY,
   dispatchOriginLabels,
@@ -53,7 +55,12 @@ export function DispatchPanel({
       <div className="atm-panel-body">
         {status.data ? (
           <div className="atm-dispatch-layout">
-            <DispatchSettings client={client} status={status.data} notify={notify} />
+            <DispatchSettings
+              client={client}
+              status={status.data}
+              notify={notify}
+              {...(desktop ? { desktop } : {})}
+            />
             <DispatchRuns
               client={client}
               runs={status.data.runs}
@@ -81,10 +88,12 @@ export function DispatchPanel({
 function DispatchSettings({
   client,
   status,
+  desktop,
   notify,
 }: {
   client: AyanamiClient;
   status: DispatchStatus;
+  desktop?: DesktopBridge;
   notify: Notify;
 }) {
   const queryClient = useQueryClient();
@@ -139,6 +148,15 @@ function DispatchSettings({
     save.mutate();
   };
   const selectedMode = PERMISSION_MODES.find((entry) => entry.value === mode);
+  const claude = claudeReadiness(status.claude);
+  const copyLoginCommand = async () => {
+    try {
+      await copyToClipboard(desktop, CLAUDE_LOGIN_COMMAND);
+      notify("命令已复制，到终端里粘贴运行");
+    } catch (error) {
+      notify(`复制失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
   return (
     <div className="atm-form">
       <p className="atm-row-sub atm-sync-intro">
@@ -166,18 +184,23 @@ function DispatchSettings({
           <div>
             <div className="atm-row-title">Claude Code</div>
             <div className="atm-row-sub" title={status.claude.path ?? undefined}>
-              {status.claude.found
-                ? compactPath(status.claude.path)
-                : "没有找到 claude 命令行；安装 Claude Code 后重启 ATM 才能派单"}
+              {claude.detail}
             </div>
           </div>
-          <span className={`atm-badge ${status.claude.found ? "success" : "warning"}`}>
-            {status.claude.found
-              ? `已找到${status.claude.version ? ` · ${status.claude.version}` : ""}`
-              : "未找到"}
-          </span>
+          <span className={`atm-badge ${claude.tone}`}>{claude.label}</span>
         </div>
       </div>
+      {claude.needsLogin ? (
+        <div className="atm-sync-note atm-claude-login" data-tone="warning">
+          <p>
+            Claude Code 未登录或登录已过期：在这台电脑的终端运行 <code>{CLAUDE_LOGIN_COMMAND}</code>
+            ，派单才能开工
+          </p>
+          <button className="atm-button" type="button" onClick={() => void copyLoginCommand()}>
+            复制命令
+          </button>
+        </div>
+      ) : null}
       <div className="atm-dispatch-fields">
         <div className="atm-field">
           <label htmlFor="dispatch-permission-mode">权限模式</label>
@@ -278,8 +301,7 @@ function DispatchRuns({
   };
   const copy = async (sessionId: string) => {
     try {
-      if (desktop?.copyText) await desktop.copyText(sessionId);
-      else await navigator.clipboard.writeText(sessionId);
+      await copyToClipboard(desktop, sessionId);
       notify(`会话 ID 已复制；在项目目录运行 ${resumeCommand(sessionId)} 可以接着对话`);
     } catch (error) {
       notify(`复制失败：${error instanceof Error ? error.message : String(error)}`);

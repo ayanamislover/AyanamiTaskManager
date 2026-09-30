@@ -1,4 +1,5 @@
 import type {
+  DispatchClaudeStatus,
   DispatchEffort,
   DispatchOrigin,
   DispatchPermissionMode,
@@ -8,7 +9,8 @@ import type {
   SyncRelayTestResult,
   SyncStatus,
 } from "@ayanami-task/client";
-import { formatTime } from "../presentation.js";
+import type { DesktopBridge } from "../contracts.js";
+import { compactPath, formatTime } from "../presentation.js";
 import { ATM_QUERY_REFRESH_INTERVAL_MS } from "../query-policy.js";
 
 /**
@@ -206,6 +208,61 @@ export function isActiveRun(run: Pick<DispatchRunView, "state">): boolean {
 /** 有排队或运行中的派单时 5 秒刷一次状态；其余时间沿用全局节奏。 */
 export function dispatchRefetchInterval(data: { runs: readonly DispatchRunView[] } | undefined) {
   return data?.runs.some(isActiveRun) ? DISPATCH_ACTIVE_REFRESH_MS : ATM_QUERY_REFRESH_INTERVAL_MS;
+}
+
+/** Claude Code 登录已过期时让用户在终端里跑的命令。 */
+export const CLAUDE_LOGIN_COMMAND = "claude auth login";
+
+/**
+ * 设置页「Claude Code」一行：右侧徽标、下面一行小字，以及要不要给出去登录的提示条。
+ * `loggedIn` 为 null（或旧版 daemon 没有这个字段）时不下结论，照常显示「已找到」。
+ */
+export function claudeReadiness(
+  claude: Pick<DispatchClaudeStatus, "found" | "path" | "version" | "authMethod"> & {
+    loggedIn?: boolean | null;
+  },
+): { tone: "success" | "warning"; label: string; detail: string; needsLogin: boolean } {
+  if (!claude.found) {
+    return {
+      tone: "warning",
+      label: "未找到",
+      detail: "没有找到 claude 命令行；安装 Claude Code 后重启 ATM 才能派单",
+      needsLogin: false,
+    };
+  }
+  const path = compactPath(claude.path);
+  if (claude.loggedIn === false) {
+    return {
+      tone: "warning",
+      label: "未登录",
+      detail: claude.version ? `${path} · ${claude.version}` : path,
+      needsLogin: true,
+    };
+  }
+  return {
+    tone: "success",
+    label: `已找到${claude.version ? ` · ${claude.version}` : ""}`,
+    detail:
+      claude.loggedIn === true && claude.authMethod
+        ? `${path} · 已登录（${claude.authMethod}）`
+        : path,
+    needsLogin: false,
+  };
+}
+
+/** 失败的派单给一句原因（服务端的 error 字段）；其它状态没有。 */
+export function dispatchFailureReason(
+  run: Pick<DispatchRunView, "state" | "error">,
+): string | null {
+  if (run.state !== "failed") return null;
+  const reason = run.error?.trim();
+  return reason ? reason : null;
+}
+
+/** 桌面端走宿主的剪贴板接口，浏览器预览退回 navigator.clipboard。 */
+export async function copyToClipboard(desktop: DesktopBridge | undefined, text: string) {
+  if (desktop?.copyText) await desktop.copyText(text);
+  else await navigator.clipboard.writeText(text);
 }
 
 export const PERMISSION_MODES: ReadonlyArray<{

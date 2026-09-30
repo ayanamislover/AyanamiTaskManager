@@ -42,7 +42,13 @@ function dispatchStatus(overrides: Partial<DispatchStatus> = {}): DispatchStatus
     maxConcurrent: 1,
     model: null,
     effort: null,
-    claude: { found: true, path: "C:/Users/me/.local/bin/claude.exe", version: "2.1.0" },
+    claude: {
+      found: true,
+      path: "C:/Users/me/.local/bin/claude.exe",
+      version: "2.1.0",
+      loggedIn: true,
+      authMethod: "claude.ai",
+    },
     runs: [],
     ...overrides,
   };
@@ -156,12 +162,40 @@ describe("Claude 自动开工面板", () => {
     const markup = panel(
       dispatchStatus({
         permissionMode: "bypassPermissions",
-        claude: { found: false, path: null },
+        claude: { found: false, path: null, loggedIn: null },
       }),
     );
     expect(markup).toMatch(/data-tone="danger">跳过全部确认：有风险/u);
     expect(markup).toContain("没有找到 claude 命令行");
     expect(markup).toContain(">未找到<");
+  });
+
+  it("claude 登录过期：Claude Code 一行是「未登录」，下面给出可复制的 claude auth login", () => {
+    const markup = panel(
+      dispatchStatus({
+        claude: { found: true, path: "C:/bin/claude.exe", version: "2.1.93", loggedIn: false },
+      }),
+    );
+    expect(markup).toContain('class="atm-badge warning">未登录<');
+    expect(markup).not.toContain("已找到");
+    expect(markup).toContain(
+      "Claude Code 未登录或登录已过期：在这台电脑的终端运行 <code>claude auth login</code>，派单才能开工",
+    );
+    expect(markup).toContain(">复制命令</button>");
+  });
+
+  it("登录状态查不出来（null）或已登录时不提示", () => {
+    for (const loggedIn of [null, true] as const) {
+      const markup = panel(
+        dispatchStatus({
+          claude: { found: true, path: "C:/bin/claude.exe", version: "2.1.93", loggedIn },
+        }),
+      );
+      expect(markup).toContain('class="atm-badge success">已找到 · 2.1.93<');
+      expect(markup).not.toContain("claude auth login");
+      expect(markup).not.toContain("未登录");
+    }
+    expect(panel(dispatchStatus())).toContain("已登录（claude.ai）");
   });
 
   it("派单列表：任务键、来源、状态徽标、摘要；运行中的才能结束", () => {
@@ -253,6 +287,19 @@ describe("任务抽屉「交给 Claude」", () => {
     expect(failed.badge).toBe(
       '<span class="atm-badge danger" data-testid="task-dispatch-state">Claude 失败</span>',
     );
+    // 失败原因紧跟在徽标后面，是次要文字。
+    const reason = "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login";
+    const failedWithReason = control(
+      dispatchStatus({ runs: [{ ...base, state: "failed", error: reason }] }),
+    );
+    expect(failedWithReason.badge).toContain(
+      `Claude 失败</span><span class="atm-row-sub atm-task-dispatch-reason" title="${reason}">${reason}</span>`,
+    );
+    // 只有失败才带原因。
+    const cancelled = control(
+      dispatchStatus({ runs: [{ ...base, state: "cancelled", error: "用户结束" }] }),
+    );
+    expect(cancelled.badge).not.toContain("用户结束");
     expect(failed.button).toContain(">交给 Claude</button>");
     // 别的任务的派单不算这个任务的。
     const other = control(

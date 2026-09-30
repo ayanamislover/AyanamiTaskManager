@@ -80,6 +80,28 @@
   gap: 8px;
 }
 
+/* Claude Code 未登录：提示条里左边一句话带等宽命令，右边「复制命令」。 */
+.atm-claude-login {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.atm-claude-login > p {
+  margin: 0;
+}
+.atm-claude-login code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--atm-warning) 12%, transparent);
+  font: 12px var(--atm-mono);
+  white-space: nowrap;
+  user-select: all;
+}
+.atm-claude-login > .atm-button {
+  flex: none;
+}
+
 /* 状态灯借侧栏「本地服务」那一盏；未启用画成空心灯，和「连接中」的实心灰灯区分开。 */
 .atm-sync-lamp[data-state="off"]::before {
   background: transparent;
@@ -174,6 +196,19 @@
   display: grid;
   justify-items: end;
   gap: 8px;
+}
+
+/* 抽屉状态行里上一次派单失败的原因：次要文字，紧跟在徽标后面，最多两行。 */
+.atm-drawer-status > .atm-task-dispatch-reason {
+  display: -webkit-box;
+  flex: 1 1 180px;
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 /* 任务抽屉操作行里的「交给 Claude」失败原因：独占一整行，不挤在按钮中间。 */

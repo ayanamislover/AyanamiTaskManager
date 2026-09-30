@@ -3,6 +3,7 @@ import type { AyanamiClient } from "@ayanami-task/client";
 import { MutationErrorAlert } from "../components/async-state.js";
 import type { Notify } from "../contracts.js";
 import {
+  dispatchFailureReason,
   dispatchRefetchInterval,
   DISPATCH_STATUS_QUERY_KEY,
   dispatchStateLabels,
@@ -28,7 +29,10 @@ function useDispatchStatus(client: AyanamiClient) {
   });
 }
 
-/** 状态行里的「Claude 进行中」之类：这个任务派过单才出现，显示最近一次。 */
+/**
+ * 状态行里的「Claude 进行中」之类：这个任务派过单才出现，显示最近一次。
+ * 失败时紧跟一句原因（例如 claude 登录过期），用次要文字，放不下就折到下一行。
+ */
 export function TaskDispatchBadge({
   client,
   project,
@@ -41,10 +45,21 @@ export function TaskDispatchBadge({
   const status = useDispatchStatus(client);
   const run = status.data ? latestRunFor(status.data.runs, project, taskKey) : null;
   if (!run) return null;
+  const reason = dispatchFailureReason(run);
   return (
-    <span className={`atm-badge ${dispatchStateTone(run.state)}`} data-testid="task-dispatch-state">
-      Claude {dispatchStateLabels[run.state] ?? run.state}
-    </span>
+    <>
+      <span
+        className={`atm-badge ${dispatchStateTone(run.state)}`}
+        data-testid="task-dispatch-state"
+      >
+        Claude {dispatchStateLabels[run.state] ?? run.state}
+      </span>
+      {reason ? (
+        <span className="atm-row-sub atm-task-dispatch-reason" title={reason}>
+          {reason}
+        </span>
+      ) : null}
+    </>
   );
 }
 

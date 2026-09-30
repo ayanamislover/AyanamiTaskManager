@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { DispatchRunView } from "@ayanami-task/client";
 import {
+  claudeReadiness,
   DEVICE_ONLINE_WINDOW_MS,
   describeRelayTest,
   deviceKindLabel,
   deviceOnline,
   DISPATCH_ACTIVE_REFRESH_MS,
+  dispatchFailureReason,
   dispatchRefetchInterval,
   featureUnavailable,
   formatCountdown,
@@ -197,6 +199,42 @@ describe("派单", () => {
       ATM_QUERY_REFRESH_INTERVAL_MS,
     );
     expect(dispatchRefetchInterval(undefined)).toBe(ATM_QUERY_REFRESH_INTERVAL_MS);
+  });
+
+  it("Claude Code 一行：没找到、未登录、查不出、已登录四种说法", () => {
+    // 路径用正斜杠写，compactPath 统一换成反斜杠并只留最后两段。
+    const base = { found: true, path: "C:/Users/me/.local/bin/claude.exe", version: "2.1.93" };
+    const shortPath = String.raw`…\bin\claude.exe`;
+    expect(claudeReadiness({ found: false, path: null, loggedIn: null })).toMatchObject({
+      tone: "warning",
+      label: "未找到",
+      needsLogin: false,
+    });
+    expect(claudeReadiness({ ...base, loggedIn: false })).toEqual({
+      tone: "warning",
+      label: "未登录",
+      detail: `${shortPath} · 2.1.93`,
+      needsLogin: true,
+    });
+    // null 与旧版 daemon 缺字段一样：不下结论。
+    for (const claude of [{ ...base, loggedIn: null }, base]) {
+      expect(claudeReadiness(claude)).toEqual({
+        tone: "success",
+        label: "已找到 · 2.1.93",
+        detail: shortPath,
+        needsLogin: false,
+      });
+    }
+    expect(claudeReadiness({ ...base, loggedIn: true, authMethod: "claude.ai" }).detail).toBe(
+      `${shortPath} · 已登录（claude.ai）`,
+    );
+  });
+
+  it("只有失败的派单带原因，空白原因不算", () => {
+    expect(dispatchFailureReason({ state: "failed", error: " 登录过期 " })).toBe("登录过期");
+    expect(dispatchFailureReason({ state: "failed", error: "  " })).toBeNull();
+    expect(dispatchFailureReason({ state: "failed" })).toBeNull();
+    expect(dispatchFailureReason({ state: "cancelled", error: "用户结束" })).toBeNull();
   });
 
   it("模型名留空跟随默认，非法字符拒绝；权限模式里只有 bypass 标成有风险", () => {

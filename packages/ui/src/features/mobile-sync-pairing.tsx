@@ -6,7 +6,12 @@ import type { PresenceRootProps } from "../components/presence.js";
 import { QrCode } from "../components/qr-code.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
-import { formatCountdown, PAIRING_VISIBLE_MS, problemText } from "./mobile-sync-support.js";
+import {
+  copyToClipboard,
+  formatCountdown,
+  PAIRING_VISIBLE_MS,
+  problemText,
+} from "./mobile-sync-support.js";
 
 type PairingState =
   | { phase: "loading" }
@@ -88,8 +93,7 @@ export function PairingDialog({
 
   const copy = async (code: string) => {
     try {
-      if (desktop?.copyText) await desktop.copyText(code);
-      else await navigator.clipboard.writeText(code);
+      await copyToClipboard(desktop, code);
       notify("配对码已复制，粘贴到手机上后记得清空剪贴板");
     } catch (error) {
       notify(`复制失败：${error instanceof Error ? error.message : String(error)}`);

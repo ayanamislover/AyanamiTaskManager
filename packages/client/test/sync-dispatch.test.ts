@@ -91,7 +91,13 @@ describe("Claude 派单 REST 客户端", () => {
           maxConcurrent: 1,
           model: null,
           effort: null,
-          claude: { found: true, path: "C:/bin/claude.exe", version: "2.1.0" },
+          claude: {
+            found: true,
+            path: "C:/bin/claude.exe",
+            version: "2.1.0",
+            loggedIn: false,
+            authMethod: "claude.ai",
+          },
           runs: [],
         },
       },
@@ -101,7 +107,7 @@ describe("Claude 派单 REST 客户端", () => {
     ]);
 
     await expect(client.getDispatchStatus()).resolves.toMatchObject({
-      claude: { found: true },
+      claude: { found: true, loggedIn: false, authMethod: "claude.ai" },
     });
     await client.updateDispatchConfig({ enabled: true, model: null, effort: "high" });
     await expect(client.dispatchTask("ATM", "ATM-T-0546")).resolves.toMatchObject({ run: "r1" });
@@ -124,9 +130,27 @@ describe("Claude 派单 REST 客户端", () => {
         status: 409,
         body: { error: { code: "DISPATCH_DISABLED", message: "派单未开启", retryable: false } },
       },
+      {
+        status: 503,
+        body: {
+          error: {
+            code: "DISPATCH_CLAUDE_NOT_LOGGED_IN",
+            message: "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login",
+            retryable: false,
+          },
+        },
+      },
     ]);
     const failure = await client.dispatchTask("ATM", "ATM-T-1").catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AyanamiClientError);
     expect(failure).toMatchObject({ status: 409, message: "派单未开启" });
+    // 未登录也是一句能照着做的话，界面原样显示。
+    const notLoggedIn = await client
+      .dispatchTask("ATM", "ATM-T-1")
+      .catch((error: unknown) => error);
+    expect(notLoggedIn).toMatchObject({
+      status: 503,
+      message: expect.stringContaining("claude auth login"),
+    });
   });
 });

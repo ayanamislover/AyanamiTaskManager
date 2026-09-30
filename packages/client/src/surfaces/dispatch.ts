@@ -47,7 +47,18 @@ export type DispatchRunView = {
   error?: string;
 };
 
-export type DispatchClaudeStatus = { found: boolean; path: string | null; version?: string };
+export type DispatchClaudeStatus = {
+  found: boolean;
+  path: string | null;
+  version?: string;
+  /**
+   * claude 命令行是否已登录：false = 未登录或登录已过期（派单会失败，报 DISPATCH_CLAUDE_NOT_LOGGED_IN）；
+   * null = 查不出来（没找到可执行文件、探测超时等），界面不下结论。
+   */
+  loggedIn: boolean | null;
+  /** 登录方式，例如 claude.ai 订阅或 API key；只用于显示。 */
+  authMethod?: string;
+};
 
 export type DispatchStatus = DispatchConfigView & {
   claude: DispatchClaudeStatus;
