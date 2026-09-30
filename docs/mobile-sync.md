@@ -168,6 +168,7 @@ type TaskCard = {
     state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
     at: string;
     run: string;
+    error?: string; // 失败时给用户看的一句原因，≤ 200 字
   };
 };
 ```
