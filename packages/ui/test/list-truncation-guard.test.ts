@@ -27,6 +27,10 @@ const STRING_CLAMPS = new Map<string, string>([
   ],
   ["packages/ui/src/features/knowledge-support.ts|.slice(0, 160);", "知识摘要夹到 160 字"],
   [
+    "packages/ui/src/features/mobile-sync-support.ts|return sessionId.length > 8 ? `${sessionId.slice(0, 8)}…` : sessionId;",
+    "Claude 会话 ID 只露头 8 位，复制按钮给完整的",
+  ],
+  [
     'packages/ui/src/features/task-drawer.tsx|HEAD：{String(session.git?.head || "不可用").slice(0, 12)}',
     "git 短哈希",
   ],

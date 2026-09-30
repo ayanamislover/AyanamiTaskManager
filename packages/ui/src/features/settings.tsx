@@ -21,7 +21,9 @@ import { agentClientLabel, agentIntegrationErrorMessage, formatTime } from "../p
 import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { ServiceStatus } from "../shell/service-status.js";
 import { AgentIntegrationCard } from "./agent-integration-card.js";
+import { DispatchPanel } from "./dispatch-panel.js";
 import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
+import { MobileSyncPanel } from "./mobile-sync-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
 
 export function SettingsPage({
@@ -158,7 +160,10 @@ export function SettingsPage({
   };
   return (
     <>
-      <PageHead title="设置" description="本地服务、Agent 接入、自动备份和 Windows 启动行为。" />
+      <PageHead
+        title="设置"
+        description="本地服务、Agent 接入、手机同步、自动备份和 Windows 启动行为。"
+      />
       <div className="atm-settings-grid">
         <section className="atm-panel">
           <div className="atm-panel-head">
@@ -324,6 +329,8 @@ export function SettingsPage({
             <MutationErrorAlert error={agentIntegrationErrorMessage(manageIntegration.error)} />
           </div>
         </section>
+        <MobileSyncPanel client={client} notify={notify} {...(desktop ? { desktop } : {})} />
+        <DispatchPanel client={client} notify={notify} {...(desktop ? { desktop } : {})} />
         <section className="atm-panel atm-settings-maintenance">
           <div className="atm-panel-head">
             <h2>维护与 Windows</h2>

@@ -1,0 +1,275 @@
+/*
+ * 设置页「手机同步」「Claude 自动开工」两张面板与「添加手机」对话框（ATM-T-0546）。
+ *
+ * 两张面板和「Agent 接入」「维护与 Windows」一样横跨整行，里面左右两栏：左边设置，右边列表。
+ * 面板里所有东西都落在同一条竖线上（面板内边距 20px）：说明、字段标签、行标题、列表行的字。
+ * 通用的 .atm-row 自带 12px 内缩，放进这里的行用负外边距抵掉，行的分隔线仍然只画在文字区。
+ */
+.atm-settings-grid > .atm-settings-sync,
+.atm-settings-grid > .atm-settings-dispatch {
+  grid-column: 1 / -1;
+}
+.atm-sync-layout,
+.atm-dispatch-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 18px 28px;
+}
+.atm-sync-intro {
+  max-width: 76ch;
+  margin: 0;
+  line-height: 1.6;
+}
+
+/* 说明条：提醒、测试结果、权限模式说明。柔色底，不画框。 */
+.atm-sync-note {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 14px;
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.atm-sync-note[data-tone="warning"] {
+  color: var(--atm-warning);
+  background: color-mix(in srgb, var(--atm-warning) 10%, transparent);
+}
+.atm-sync-note[data-tone="danger"] {
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 10%, transparent);
+}
+.atm-sync-note[data-tone="success"] {
+  color: var(--atm-success);
+  background: color-mix(in srgb, var(--atm-success) 10%, transparent);
+}
+.atm-sync-note[data-tone="info"] {
+  color: var(--atm-info);
+  background: color-mix(in srgb, var(--atm-info) 9%, transparent);
+}
+
+/* 中继表单：整行时四个字段一排，地址最宽；收进左栏时两列，地址独占一行。 */
+.atm-sync-form {
+  display: grid;
+  gap: 15px;
+}
+.atm-sync-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.atm-sync-layout .atm-sync-fields,
+.atm-dispatch-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.atm-sync-layout .atm-sync-field-relay {
+  grid-column: 1 / -1;
+}
+.atm-dispatch-fields {
+  display: grid;
+  gap: 14px;
+}
+.atm-dispatch-fields .atm-field-problem {
+  color: var(--atm-danger);
+}
+.atm-sync-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 状态灯借侧栏「本地服务」那一盏；未启用画成空心灯，和「连接中」的实心灰灯区分开。 */
+.atm-sync-lamp[data-state="off"]::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--atm-st-ready);
+}
+
+/* 已启用时的四个事实：中继、上次同步、待处理命令、轮询方式。 */
+.atm-sync-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.atm-sync-facts > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 11px 12px;
+  border-radius: var(--atm-radius-row);
+  background: var(--atm-surface-muted);
+}
+.atm-sync-facts dt {
+  color: var(--atm-text-muted);
+  font-size: 11px;
+}
+.atm-sync-facts dd {
+  margin: 0;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右栏列表：小标题 + 条数，下面是行。 */
+.atm-sync-subhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  margin-bottom: 6px;
+}
+.atm-sync-subhead h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.atm-sync-devices > .atm-list,
+.atm-dispatch-runs > .atm-list,
+.atm-dispatch-rows {
+  margin-inline: -12px;
+  padding: 0;
+}
+.atm-dispatch-rows {
+  display: grid;
+}
+.atm-dispatch-run-list {
+  max-height: 440px;
+}
+.atm-sync-empty {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: var(--atm-radius-row);
+  background: var(--atm-surface-muted);
+  line-height: 1.55;
+}
+
+/* 一次派单：左边任务与摘要，右边状态徽标和操作。 */
+.atm-dispatch-run {
+  align-items: start;
+}
+.atm-dispatch-run-copy {
+  min-width: 0;
+}
+.atm-dispatch-run-copy .atm-key {
+  margin-right: 4px;
+}
+.atm-dispatch-run-copy code {
+  font: 11px var(--atm-mono);
+}
+.atm-dispatch-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--atm-text);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.atm-dispatch-error {
+  color: var(--atm-danger);
+}
+.atm-dispatch-run-side {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+/* 任务抽屉操作行里的「交给 Claude」失败原因：独占一整行，不挤在按钮中间。 */
+.atm-drawer-actions > .atm-task-dispatch-error {
+  flex-basis: 100%;
+}
+
+/* 「添加手机」：左边二维码，右边步骤、配对码和提醒。 */
+.atm-modal.atm-pairing-modal {
+  width: min(720px, 100%);
+}
+.atm-pairing {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 22px;
+}
+/* 二维码只认深码浅底：深色主题下底板也保持白色，四周另有 4 个模块的静区。 */
+.atm-qr-tile {
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: var(--atm-shadow-subtle);
+}
+.atm-qr-code {
+  display: block;
+}
+.atm-pairing-side {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+.atm-pairing-steps {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--atm-text-muted);
+  line-height: 1.6;
+}
+.atm-pairing-code {
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--atm-surface-muted);
+}
+.atm-pairing-code code {
+  font: 11px/1.5 var(--atm-mono);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.atm-pairing-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.atm-pairing-meta .atm-row-sub {
+  margin-top: 0;
+}
+.atm-pairing-hidden {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 36px 16px;
+  text-align: center;
+}
+
+@media (max-width: 1100px) {
+  .atm-sync-layout,
+  .atm-dispatch-layout {
+    grid-template-columns: 1fr;
+  }
+  .atm-sync-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .atm-sync-field-relay {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 760px) {
+  .atm-sync-fields,
+  .atm-sync-layout .atm-sync-fields,
+  .atm-dispatch-fields,
+  .atm-sync-facts {
+    grid-template-columns: 1fr;
+  }
+  .atm-pairing {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+}
+@media (forced-colors: active) {
+  .atm-qr-tile {
+    forced-color-adjust: none;
+  }
+}
