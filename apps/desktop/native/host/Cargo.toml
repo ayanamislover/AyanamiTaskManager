@@ -25,6 +25,8 @@ wry = "0.55"
 tray-icon = "0.24"
 # 与 wry 0.55 同版本：直接挂 WebView2 的 frame 事件（webview_frames.rs）。
 webview2-com = "0.38"
+# 与 webview2-com 同一版本；只开 toast 所需的 WinRT 面。
+windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_UI_Shell"] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
@@ -38,6 +40,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_System_IO",
+  "Win32_System_LibraryLoader",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

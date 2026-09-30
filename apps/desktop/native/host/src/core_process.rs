@@ -7,8 +7,9 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -18,7 +19,9 @@ pub const PROTOCOL_VERSION: u64 = 1;
 /// Same number as MAX_RESPONSE_BYTES in host-protocol.ts.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_STDERR_LOG_BYTES: u64 = 1024 * 1024;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// No console at all for the core: CREATE_NO_WINDOW still attaches a hidden conhost
+/// (~6 MB private, measured); the core only talks over its stdio pipes.
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 /// `core-main.ts` CORE_EXIT_REJECTED: the core refused this host. Never restart on it.
 pub const CORE_EXIT_REJECTED: i32 = 64;
 
@@ -42,7 +45,48 @@ pub struct Launch {
 pub struct Core {
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     child: Arc<Mutex<Child>>,
-    pub pid: u32,
+    marker: SessionMarker,
+}
+
+/// What the session-end window needs from the running core: a way to ask it to write its
+/// lifecycle marker, and to learn that it has. Cloned out so the window procedure does not
+/// have to reach into the event loop, which is blocked while Windows waits on it.
+#[derive(Clone)]
+pub struct SessionMarker {
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    recorded: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl SessionMarker {
+    /// Returns whether the core confirmed the marker within `timeout`.
+    pub fn mark(&self, timeout: Duration) -> bool {
+        write_frame(&self.stdin, &json!({ "t": "event", "name": "session-end" }));
+        let (flag, signal) = &*self.recorded;
+        let Ok(guard) = flag.lock() else {
+            return false;
+        };
+        signal
+            .wait_timeout_while(guard, timeout, |recorded| !*recorded)
+            .map(|(recorded, _)| *recorded)
+            .unwrap_or(false)
+    }
+}
+
+fn write_frame(stdin: &Mutex<Option<ChildStdin>>, frame: &Value) {
+    let Ok(mut guard) = stdin.lock() else {
+        return;
+    };
+    if let Some(pipe) = guard.as_mut() {
+        let mut line = frame.to_string();
+        line.push('\n');
+        if pipe
+            .write_all(line.as_bytes())
+            .and_then(|()| pipe.flush())
+            .is_err()
+        {
+            *guard = None;
+        }
+    }
 }
 
 /// Variables that could inject code or debugging into Node or WebView2 children.
@@ -73,8 +117,18 @@ fn append_bounded(path: &Path, bytes: &[u8]) {
     }
 }
 
+/// The core's reply to the session-end event; handled on the reader thread, never queued.
+fn is_session_marked(frame: &Value) -> bool {
+    frame.get("t").and_then(Value::as_str) == Some("marked")
+        && frame.get("name").and_then(Value::as_str) == Some("session-end")
+}
+
+#[cfg(test)]
 fn parse_frame(line: &[u8]) -> Option<CoreEvent> {
-    let frame: Value = serde_json::from_slice(line).ok()?;
+    parse_value(serde_json::from_slice(line).ok()?)
+}
+
+fn parse_value(frame: Value) -> Option<CoreEvent> {
     match frame.get("t")?.as_str()? {
         "ready" if frame.get("v")?.as_u64()? == PROTOCOL_VERSION => Some(CoreEvent::Ready),
         "res" => Some(CoreEvent::Response {
@@ -109,7 +163,7 @@ impl Core {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW);
+            .creation_flags(DETACHED_PROCESS);
         scrub_environment(&mut process);
         for (key, value) in &command.env {
             process.env(key, value);
@@ -118,7 +172,6 @@ impl Core {
         let mut child = process
             .spawn()
             .map_err(|error| format!("CORE_SPAWN_FAILED: {error}"))?;
-        let pid = child.id();
         let stdin = child.stdin.take().ok_or("CORE_STDIN_MISSING")?;
         let stdout = child.stdout.take().ok_or("CORE_STDOUT_MISSING")?;
         let mut stderr = child.stderr.take().ok_or("CORE_STDERR_MISSING")?;
@@ -141,6 +194,8 @@ impl Core {
             })
             .map_err(|error| error.to_string())?;
 
+        let recorded = Arc::new((Mutex::new(false), Condvar::new()));
+        let reader_recorded = recorded.clone();
         let reader_events = on_event.clone();
         let reader_child = child.clone();
         thread::Builder::new()
@@ -157,9 +212,18 @@ impl Core {
                         Ok(0) | Err(_) => break,
                         Ok(_) if line.len() > MAX_FRAME_BYTES => break,
                         Ok(_) => {
-                            if let Some(event) =
-                                parse_frame(line.strip_suffix(b"\n").unwrap_or(&line))
-                            {
+                            let Ok(frame) = serde_json::from_slice::<Value>(
+                                line.strip_suffix(b"\n").unwrap_or(&line),
+                            ) else {
+                                continue;
+                            };
+                            if is_session_marked(&frame) {
+                                let (flag, signal) = &*reader_recorded;
+                                if let Ok(mut flag) = flag.lock() {
+                                    *flag = true;
+                                }
+                                signal.notify_all();
+                            } else if let Some(event) = parse_value(frame) {
                                 reader_events(event);
                             }
                         }
@@ -179,10 +243,14 @@ impl Core {
             })
             .map_err(|error| error.to_string())?;
 
+        let stdin = Arc::new(Mutex::new(Some(stdin)));
         let core = Core {
-            stdin: Arc::new(Mutex::new(Some(stdin))),
+            marker: SessionMarker {
+                stdin: stdin.clone(),
+                recorded,
+            },
+            stdin,
             child,
-            pid,
         };
         core.send(&json!({
             "t": "hello",
@@ -199,20 +267,11 @@ impl Core {
     }
 
     fn send(&self, frame: &Value) {
-        let Ok(mut guard) = self.stdin.lock() else {
-            return;
-        };
-        if let Some(stdin) = guard.as_mut() {
-            let mut line = frame.to_string();
-            line.push('\n');
-            if stdin
-                .write_all(line.as_bytes())
-                .and_then(|()| stdin.flush())
-                .is_err()
-            {
-                *guard = None;
-            }
-        }
+        write_frame(&self.stdin, frame);
+    }
+
+    pub fn session_marker(&self) -> SessionMarker {
+        self.marker.clone()
     }
 
     pub fn request(&self, id: u64, method: &str, args: Value) {

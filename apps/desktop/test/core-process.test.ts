@@ -39,7 +39,10 @@ afterAll(() => {
   if (work) rmSync(work, { recursive: true, force: true });
 });
 
-function runFakeHost(dataDir: string, mode: "shutdown" | "disconnect" = "shutdown") {
+function runFakeHost(
+  dataDir: string,
+  mode: "shutdown" | "disconnect" | "session-end" = "shutdown",
+) {
   const result = spawnSync(
     hostExe,
     [
@@ -85,6 +88,24 @@ describe("打包 core 进程", () => {
     expect(result.exitCode).toBe(0);
     expect(existsSync(join(dataDir, "runtime", "daemon.json"))).toBe(false);
   }, 90_000);
+
+  it("注销：core 收到 session-end 后同步落标记再回 marked；被系统硬杀后，下次启动记为 previous.session-end 而非 unclean", () => {
+    const dataDir = join(work, "data-session-end");
+    const ended = runFakeHost(dataDir, "session-end");
+    expect(ended.marked, ended.stderr).toEqual({ t: "marked", name: "session-end" });
+    const state = JSON.parse(
+      readFileSync(join(dataDir, "logs", "lifecycle-core-state.json"), "utf8"),
+    );
+    expect(state).toMatchObject({ event: "session-end", clean: false });
+    const next = runFakeHost(dataDir, "disconnect");
+    expect(next.ready, next.stderr).toBeTruthy();
+    const events = readFileSync(join(dataDir, "logs", "lifecycle-core.ndjson"), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).event as string);
+    expect(events).toContain("previous.session-end");
+    expect(events).not.toContain("previous.unclean");
+  }, 120_000);
 
   /** 保持 stdin 打开，直到 core 自己退出——否则 EOF 会抢在父进程校验之前把它关掉。 */
   async function runIntruder(dataDir: string, lines: unknown[]) {

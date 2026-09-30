@@ -51,7 +51,12 @@ send({
   launch: { background: true, agentWake: false, randomStartupDelay: false },
 });
 result.ready = await until((frame) => frame.t === "ready");
-if (result.ready) {
+if (result.ready && mode === "session-end") {
+  // 注销：宿主转发 WM_ENDSESSION，等 core 回 marked，随后系统直接结束进程树。
+  send({ t: "event", name: "session-end" });
+  result.marked = await until((frame) => frame.t === "marked");
+  child.kill();
+} else if (result.ready) {
   send({ t: "req", id: 1, method: "runtimeRequest", args: [{ path: "/api/v1/overview" }] });
   send({
     t: "req",
@@ -92,7 +97,7 @@ if (result.ready) {
   result.res5 = await until((frame) => frame.t === "res" && frame.id === 5);
 }
 if (mode === "disconnect") child.stdin.end();
-else send({ t: "shutdown" });
+else if (mode !== "session-end") send({ t: "shutdown" });
 result.exitCode = await exited;
 result.stderr = stderr.slice(0, 2000);
 process.stdout.write(`${JSON.stringify(result)}\n`);

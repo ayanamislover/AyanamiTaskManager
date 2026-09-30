@@ -255,6 +255,13 @@ async function main(): Promise<void> {
       heartbeat.unref();
       lifecycle.record("ready");
     },
+    onEvent(event) {
+      // 同步写：宿主回完 WM_ENDSESSION 进程树就会被系统结束，异步链路来不及。
+      if (event.name === "session-end") {
+        lifecycle.record("session-end");
+        session.send({ t: "marked", name: "session-end" });
+      }
+    },
     onClose(reason) {
       // 服务还没起来就关闭（超时、协议错误、握手途中断管）：一律按「被拒绝」退出，
       // 不能让校验途中的 onHello 继续往下把服务拉起来。

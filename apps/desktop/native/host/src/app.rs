@@ -129,6 +129,7 @@ pub fn run(
 ) -> i32 {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    crate::session_end::install(&layout.data_dir);
     {
         let proxy = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
@@ -250,7 +251,10 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Core(generation, event));
             },
         ) {
-            Ok(core) => self.core = Some(core),
+            Ok(core) => {
+                crate::session_end::set_core(Some(core.session_marker()));
+                self.core = Some(core);
+            }
             Err(error) => {
                 self.core_starting = false;
                 crate::log(&self.layout.data_dir, &error);
@@ -412,6 +416,7 @@ impl App {
                 );
             }
             CoreEvent::Exited(code) => {
+                crate::session_end::set_core(None);
                 self.core = None;
                 self.core_ready = false;
                 self.core_starting = false;

@@ -11,6 +11,7 @@ mod headless;
 mod health;
 mod notify;
 mod paths;
+mod session_end;
 mod single_instance;
 mod tray;
 mod webview_frames;
@@ -225,6 +226,7 @@ fn real_main() -> i32 {
         single_instance::send(&layout.data_dir, &command, Duration::from_secs(5));
         return 0;
     };
+    notify::set_process_identity();
     let version =
         atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
     let target = autostart_target(&layout, &context);

@@ -60,7 +60,9 @@ export type HostEvent =
   | { t: "event"; name: "renderer-ready" }
   | { t: "event"; name: "window-shown" }
   | { t: "event"; name: "window-closed" }
-  | { t: "event"; name: "startup-delay-cancelled" };
+  | { t: "event"; name: "startup-delay-cancelled" }
+  // Windows 注销/关机：宿主收到 WM_ENDSESSION 后发来，core 同步写下退出标记再回 marked。
+  | { t: "event"; name: "session-end" };
 
 export type HostShutdown = { t: "shutdown" };
 
@@ -81,6 +83,7 @@ export type CoreFrame =
   | { t: "res"; id: number; ok: false; error: CoreError }
   | { t: "tray"; snapshot: TraySnapshot }
   | { t: "notify"; title: string; body: string }
+  | { t: "marked"; name: "session-end" }
   | { t: "fatal"; code: string; message: string };
 
 export class HostProtocolError extends Error {
@@ -98,6 +101,7 @@ const HOST_EVENTS = new Set([
   "window-shown",
   "window-closed",
   "startup-delay-cancelled",
+  "session-end",
 ]);
 const CORE_METHOD_SET = new Set<string>(CORE_METHODS);
 
