@@ -95,6 +95,57 @@ describe("读取中的占位", () => {
       expect(markup).not.toContain(claim);
     expect(markup).toContain("atm-skeleton");
   });
+
+  it("读失败、任务只读到一部分时，卡片也不下「没有」「尚未设置」「尚无」的结论", async () => {
+    // 自动重试已经用完、停在失败状态（retryOnMount 关掉，渲染时不当成「马上重读」）。
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retryOnMount: false } } });
+    const failed = () => Promise.reject(new Error("503"));
+    for (const queryKey of [
+      ["brief", "P"],
+      ["agents", "P"],
+      ["project-updates", "P"],
+      ["overview"],
+    ])
+      await queryClient.prefetchQuery({ queryKey, queryFn: failed, retry: false });
+    const client = {
+      projects: { brief: vi.fn(failed), agents: vi.fn(failed), updates: vi.fn(failed) },
+      tasks: { progressStripForUi: vi.fn(() => new Promise(() => {})) },
+      overview: vi.fn(failed),
+    } as unknown as AyanamiClient;
+    const render = (tasksIncomplete: { reading: boolean; error: boolean } | null) =>
+      renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(ProjectSummary, {
+            client,
+            projectCode: "P",
+            // 已读到的一页里只有 READY：过滤后「进行中」「阻塞」为空，但还有页没读成。
+            workItems: [{ id: "1", key: "P-T-1", title: "可开始", status: "READY" }],
+            tasksIncomplete,
+            openTask: () => {},
+          }),
+        ),
+      );
+    const markup = render({ reading: false, error: true });
+    for (const claim of [
+      "<strong>没有进行中任务</strong>",
+      "<strong>没有阻塞</strong>",
+      "尚未设置",
+      "尚无在线 Agent 会话",
+      "尚未发布项目更新",
+      "尚无进度",
+    ])
+      expect(markup).not.toContain(claim);
+    expect(markup).toContain("读取失败");
+    expect(markup).toContain("已读到的部分里没有进行中任务");
+    expect(markup).toContain("可开始 1+");
+    // 完整读完才下结论（其他块仍读失败，照样不给缺省值）。
+    const complete = render(null);
+    expect(complete).toContain("<strong>没有进行中任务</strong>");
+    expect(complete).toContain("可开始 1<");
+    expect(complete).not.toContain("尚未设置");
+  });
 });
 
 describe("侧栏左上角不再有光晕", () => {

@@ -144,6 +144,7 @@ export function AgentsPage({
         {activeGroups.length === 0 && !complete ? (
           <IncompleteEmpty
             loading={reading}
+            error={Boolean(error)}
             found={projectGroups.length === 0 ? "没有 Agent 会话" : "最近 7 天没有活跃的 Agent"}
           />
         ) : projectGroups.length === 0 ? (

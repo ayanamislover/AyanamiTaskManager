@@ -2944,3 +2944,104 @@ test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先�
     await api.dispose();
   }
 });
+
+/** 注入一次 503：只影响给定的 GET 请求，其他照常。 */
+function failWith(message: string) {
+  return {
+    status: 503,
+    contentType: "application/json",
+    body: JSON.stringify({ error: { code: "E2E_INJECTED", message, retryable: true } }),
+  };
+}
+
+test("总览的临时任务读失败：报失败并可重试，不说「没有待处理临时任务」", async ({ page }) => {
+  let failing = true;
+  await page.route(/\/api\/v1\/quick-tasks(\?.*)?$/u, async (request) => {
+    if (!failing || request.request().method() !== "GET") return request.continue();
+    return request.fulfill(failWith("注入的临时任务故障"));
+  });
+  await page.goto("/#overview");
+  const panel = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "临时任务", exact: true }),
+  });
+  await expect(panel.getByRole("alert")).toContainText("临时任务没能读出来", { timeout: 8_000 });
+  await expect(panel).not.toContainText("没有待处理临时任务");
+  failing = false;
+  await panel.getByRole("alert").getByRole("button", { name: "重试" }).click();
+  await expect(panel.getByRole("alert")).toHaveCount(0);
+  await expect(panel.locator(".atm-skeleton")).toHaveCount(0);
+});
+
+test("项目页任务第一页只有 READY、下一页读失败：摘要不说「没有进行中任务」，续读后恢复", async ({
+  page,
+}) => {
+  let failing = true;
+  await page.route(/\/api\/v1\/projects\/E2E\/ui\/work-items\?(?=.*closed=0)/u, async (request) => {
+    const url = request.request().url();
+    if (url.includes("cursor=e2e-next")) {
+      if (failing) return request.fulfill(failWith("注入的分页故障"));
+      return request.fulfill({ json: { items: [], hasMore: false } });
+    }
+    const response = await request.fetch();
+    const body = (await response.json()) as { items: Array<Record<string, unknown>> };
+    // 第一页只放 READY，并声明还有下一页：「进行中」「阻塞」要等下一页才能下结论。
+    return request.fulfill({
+      response,
+      json: {
+        items: body.items.map((item) => ({ ...item, status: "READY" })),
+        hasMore: true,
+        nextCursor: "e2e-next",
+      },
+    });
+  });
+  await page.goto("/#project:E2E");
+  const content = page.locator(".atm-content");
+  await expect(content.getByRole("alert").first()).toContainText("后续分页加载失败", {
+    timeout: 8_000,
+  });
+  const empties = content.locator(".atm-empty strong");
+  await expect(empties.filter({ hasText: "结果还不完整" }).first()).toBeVisible();
+  for (const conclusion of ["没有进行中任务", "没有阻塞"])
+    expect(await empties.filter({ hasText: new RegExp(`^${conclusion}$`, "u") }).count()).toBe(0);
+  await expect(content).toContainText("已读到的部分里没有进行中任务");
+
+  failing = false;
+  await content.getByRole("alert").first().getByRole("button", { name: "重试" }).click();
+  await expect(content.getByRole("alert")).toHaveCount(0);
+  // 读完了，确实没有进行中任务，才下结论。
+  await expect(empties.filter({ hasText: /^没有进行中任务$/u })).toHaveCount(1);
+  await expect(content).not.toContainText("结果还不完整");
+});
+
+test("项目页各分区读失败：说读取失败，不拿「尚未设置」「尚无」「没有项目事件」顶替", async ({
+  page,
+}) => {
+  let failing = true;
+  await page.route(
+    /\/api\/v1\/projects\/E2E\/(brief|agents|project-updates|events)(\?.*)?$/u,
+    async (request) => {
+      if (!failing || request.request().method() !== "GET") return request.continue();
+      return request.fulfill(failWith("注入的分区故障"));
+    },
+  );
+  await page.goto("/#project:E2E");
+  const content = page.locator(".atm-content");
+  await expect(content.getByText("Agent 会话没能读出来", { exact: false })).toBeVisible({
+    timeout: 8_000,
+  });
+  await expect(content.getByText("项目更新没能读出来", { exact: false })).toBeVisible();
+  await expect(content.locator(".atm-metric").first()).toContainText("读取失败");
+  for (const conclusion of ["尚无在线 Agent 会话", "尚未发布项目更新"])
+    await expect(content).not.toContainText(conclusion);
+  await expect(content.locator(".atm-metric").first()).not.toContainText("尚未设置");
+
+  await page.getByRole("tab", { name: "时间线" }).click();
+  const alert = content.getByRole("alert").filter({ hasText: "项目时间线没能读出来" });
+  await expect(alert).toBeVisible();
+  await expect(content).not.toContainText("没有项目事件");
+  failing = false;
+  await alert.getByRole("button", { name: "重试" }).click();
+  await expect(alert).toHaveCount(0);
+  await expect(content.locator(".atm-timeline")).toBeVisible();
+  await page.getByRole("tab", { name: "列表" }).click();
+});

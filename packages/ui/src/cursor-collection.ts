@@ -540,3 +540,16 @@ export function useCursorCollections<T>(
   ) as Record<string, CursorCollectionEntry<T>>;
   return { entries: projected, retry };
 }
+
+/**
+ * 列表只读到一部分（还有页在读、有剩页或读失败）时给页面的说明；读完为 null。
+ * 首读还没回来时由 isLoading 管，不在这里。
+ */
+export function collectionIncomplete(collection: {
+  error: unknown;
+  hasMore: boolean;
+  isFetchingNextPage: boolean;
+}): { reading: boolean; error: boolean } | null {
+  if (!collection.error && !collection.hasMore && !collection.isFetchingNextPage) return null;
+  return { reading: collection.isFetchingNextPage, error: Boolean(collection.error) };
+}

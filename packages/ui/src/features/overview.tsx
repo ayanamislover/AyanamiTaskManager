@@ -11,6 +11,7 @@ import {
   LoadingRows,
   MutationErrorAlert,
   PageHead,
+  SectionLoadError,
 } from "../components/async-state.js";
 import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import type { Notify } from "../contracts.js";
@@ -262,9 +263,20 @@ export function OverviewPage({
                 添加或晋升
               </button>
             </div>
+            {/* 读失败不是「没有」：首读失败给错误和重试；已读到过就留着上次的，并说明刷新失败。 */}
+            {quickQuery.error ? (
+              <SectionLoadError
+                message={
+                  quickQuery.data
+                    ? "临时任务刷新失败，下面是上次读到的内容。"
+                    : "临时任务没能读出来。"
+                }
+                onRetry={() => void quickQuery.refetch()}
+              />
+            ) : null}
             {quickQuery.isLoading ? (
               <LoadingRows count={3} />
-            ) : quickTasks.length === 0 ? (
+            ) : quickQuery.data === undefined ? null : quickTasks.length === 0 ? (
               <Empty title="没有待处理临时任务" text="适合几分钟内完成、无需拆分的工作。" />
             ) : (
               <div className="atm-list atm-scroll-list">
@@ -416,6 +428,7 @@ export function TasksAcrossProjectsView({
           {reading || unread || error ? (
             <IncompleteEmpty
               loading={reading}
+              error={Boolean(error)}
               found={mode === "active" ? "没有活动任务" : "没有阻塞或等待"}
             />
           ) : (

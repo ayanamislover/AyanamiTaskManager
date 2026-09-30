@@ -55,7 +55,7 @@ function renderViews() {
       view: "timeline",
       tasks: collection as never,
       records: collection as never,
-      events: { isLoading: false, data: { events: [] } },
+      events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
       filteredTasks: [],
       sortedTasks: [],
       taskSort: null,
