@@ -56,7 +56,13 @@ export const TaskCardSchema = z.object({
     .max(3)
     .optional(),
   dispatch: z
-    .object({ state: z.enum(DISPATCH_STATES), at: timestamp, run: shortText(64) })
+    .object({
+      state: z.enum(DISPATCH_STATES),
+      at: timestamp,
+      run: shortText(64),
+      /** 失败时给用户看的一句原因（中文，可操作），例如「Claude Code 未登录…」。 */
+      error: shortText(200).optional(),
+    })
     .optional(),
 });
 export type TaskCard = z.infer<typeof TaskCardSchema>;
