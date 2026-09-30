@@ -1,15 +1,16 @@
-import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, statSync } from "node:fs";
 import { findClaudeCodeCli } from "@ayanami-task/agent-config";
 import { noteSuppressed } from "@ayanami-task/errors";
+import { ClaudeProbe } from "./claude-probe.js";
 import {
   type DispatchConfig,
   loadDispatchConfig,
   mergeDispatchConfig,
   saveDispatchConfig,
 } from "./config.js";
-import { DispatchError } from "./errors.js";
+import { CLAUDE_LOGIN_REQUIRED_MESSAGE, DispatchError } from "./errors.js";
 import { type DispatchPaths, dispatchPaths } from "./files.js";
 import {
   claudeArguments,
@@ -20,7 +21,7 @@ import {
 } from "./launch.js";
 import { defaultProcessStartTime, isPidAlive, killProcessTree } from "./process.js";
 import { renderDispatchPrompt } from "./prompt.js";
-import { judgeOutcome, logHasResult } from "./result.js";
+import { type DispatchOutcome, judgeOutcome, logHasResult } from "./result.js";
 import { loadRuns, pruneLogs, saveRuns, toRunView, trimHistory } from "./run-store.js";
 import type {
   AgentDispatcherOptions,
@@ -97,7 +98,7 @@ export class AgentDispatcher {
   readonly #listeners = new Set<(event: DispatchChangeEvent) => void>();
   /** 项目名只在排队到启动之间用来渲染提示词，不进历史文件。 */
   readonly #promptContext = new Map<string, string>();
-  #version: { path: string; version: Promise<string | null> } | null = null;
+  readonly #probe: ClaudeProbe;
   #closed = false;
 
   constructor(options: AgentDispatcherOptions) {
@@ -110,6 +111,13 @@ export class AgentDispatcher {
     this.#pollIntervalMs = options.pollIntervalMs ?? 5_000;
     this.#processStartTime = options.processStartTime ?? defaultProcessStartTime;
     this.#baseEnv = options.baseEnv ?? process.env;
+    this.#probe = new ClaudeProbe({
+      baseEnv: this.#baseEnv,
+      now: this.#now,
+      ...(options.authProbeTimeoutMs === undefined
+        ? {}
+        : { authTimeoutMs: options.authProbeTimeoutMs }),
+    });
     this.#config = loadDispatchConfig(this.#paths.config, this.#logger);
     this.#runs = loadRuns(this.#paths.runs, this.#logger);
   }
@@ -155,10 +163,19 @@ export class AgentDispatcher {
 
   async status(): Promise<DispatchStatus> {
     const path = this.#resolveClaude();
-    const version = path ? await this.#claudeVersion(path) : null;
+    const [version, auth] = path
+      ? await Promise.all([this.#probe.version(path), this.#probe.auth(path)])
+      : [null, null];
+    const authMethod = auth?.state.authMethod;
     return {
       ...this.#config,
-      claude: { found: path !== null, path, ...(version ? { version } : {}) },
+      claude: {
+        found: path !== null,
+        path,
+        ...(version ? { version } : {}),
+        loggedIn: auth?.state.loggedIn ?? null,
+        ...(authMethod ? { authMethod } : {}),
+      },
       runs: this.listRuns(),
     };
   }
@@ -188,11 +205,13 @@ export class AgentDispatcher {
         "派单未开启：请先在 ATM 设置里打开「交给 Claude」",
       );
     this.#assertNotActive(input.project, input.key);
-    if (this.#resolveClaude() === null)
+    const claude = this.#resolveClaude();
+    if (claude === null)
       throw new DispatchError(
         "DISPATCH_CLAUDE_NOT_FOUND",
         "找不到 Claude Code 命令行（claude）：请先安装 Claude Code 并确认能在终端里运行 claude",
       );
+    await this.#assertLoggedIn(claude);
     const project = await this.#host.getProject(input.project);
     if (!project)
       throw new DispatchError("DISPATCH_PROJECT_NOT_FOUND", `项目不存在：${input.project}`, {
@@ -281,6 +300,31 @@ export class AgentDispatcher {
   }
 
   // ---- 内部 ----
+
+  /**
+   * 缓存说「未登录」时先强制重探一次（用户可能刚在终端登录完），仍未登录才拒绝；
+   * 探不出来（null）照常排队，真没登录会在会话结束时按鉴权失败报出来。
+   */
+  async #assertLoggedIn(claude: string): Promise<void> {
+    let auth = await this.#probe.auth(claude);
+    if (auth.state.loggedIn === false && auth.fromCache)
+      auth = await this.#probe.auth(claude, { force: true });
+    if (auth.state.loggedIn === false)
+      throw new DispatchError("DISPATCH_CLAUDE_NOT_LOGGED_IN", CLAUDE_LOGIN_REQUIRED_MESSAGE, {
+        ...(auth.state.authMethod ? { authMethod: auth.state.authMethod } : {}),
+      });
+  }
+
+  /** 按日志判定结局；鉴权失败时让登录状态缓存失效，状态页与下次派单都会重新探。 */
+  #judge(record: DispatchRunRecord, exitCode: number | null): DispatchOutcome {
+    const outcome = judgeOutcome(
+      this.#paths.stdoutLog(record.run),
+      this.#paths.stderrLog(record.run),
+      exitCode,
+    );
+    if (outcome.authFailure) this.#probe.invalidateAuth();
+    return outcome;
+  }
 
   #assertNotActive(project: string, key: string): void {
     const active = this.#runs.find(
@@ -462,7 +506,7 @@ export class AgentDispatcher {
       this.#persist();
       return;
     }
-    const outcome = judgeOutcome(this.#paths.stdoutLog(run), this.#paths.stderrLog(run), code);
+    const outcome = this.#judge(record, code);
     this.#finish(record, { ...outcome, exitCode: code });
   }
 
@@ -482,11 +526,7 @@ export class AgentDispatcher {
       this.#watch(record, pid);
       return;
     }
-    const outcome = judgeOutcome(
-      this.#paths.stdoutLog(record.run),
-      this.#paths.stderrLog(record.run),
-      null,
-    );
+    const outcome = this.#judge(record, null);
     record.state = outcome.state;
     record.endedAt = this.#now().toISOString();
     if (outcome.summary) record.summary = outcome.summary;
@@ -500,12 +540,7 @@ export class AgentDispatcher {
       if (isPidAlive(pid)) return;
       this.#stopWatching(record.run);
       if (record.state !== "running") return;
-      const outcome = judgeOutcome(
-        this.#paths.stdoutLog(record.run),
-        this.#paths.stderrLog(record.run),
-        null,
-      );
-      this.#finish(record, outcome);
+      this.#finish(record, this.#judge(record, null));
     }, this.#pollIntervalMs);
     timer.unref();
     this.#watchers.set(record.run, timer);
@@ -515,31 +550,6 @@ export class AgentDispatcher {
     const timer = this.#watchers.get(run);
     if (timer) clearInterval(timer);
     this.#watchers.delete(run);
-  }
-
-  /** `claude --version` 只取一次并按路径缓存；失败不致命，只是状态里不带版本号。 */
-  #claudeVersion(path: string): Promise<string | null> {
-    if (this.#version?.path === path) return this.#version.version;
-    const command = launchCommand(path, ["--version"]);
-    const version = new Promise<string | null>((resolve) => {
-      execFile(
-        command.command,
-        command.args,
-        {
-          timeout: 10_000,
-          windowsHide: true,
-          encoding: "utf8",
-          env: dispatchChildEnv(this.#baseEnv, "version-probe"),
-          ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
-        },
-        (error, stdout) => {
-          const line = error ? "" : String(stdout).trim().split(/\r?\n/u)[0]!.trim();
-          resolve(line ? line.slice(0, 80) : null);
-        },
-      );
-    });
-    this.#version = { path, version };
-    return version;
   }
 }
 

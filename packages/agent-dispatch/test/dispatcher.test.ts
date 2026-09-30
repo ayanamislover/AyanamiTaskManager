@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CLAUDE_LOGIN_REQUIRED_MESSAGE,
   DispatchError,
   type DispatchChangeEvent,
   dispatchPaths,
@@ -205,8 +206,11 @@ describe("启动与结局", () => {
       const run = dispatcher.runForTask("DEMO", "DEMO-T-0002");
       return run?.state === "failed" ? run : null;
     });
-    expect(auth.error).toContain("Failed to authenticate");
-    expect(auth.summary).toMatchObject({ numTurns: 1 });
+    expect(auth.error).toBe(CLAUDE_LOGIN_REQUIRED_MESSAGE);
+    expect(auth.summary).toMatchObject({
+      numTurns: 1,
+      result: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
   });
 
   it("spawn 同步抛错：记为失败，错误原因原样保留，不影响后续派单", async () => {
@@ -235,11 +239,17 @@ describe("启动与结局", () => {
       enabled: false,
       permissionMode: "auto",
       maxConcurrent: 1,
-      claude: { found: true, path: FAKE_CLAUDE, version: "9.9.9 (Fake Claude)" },
+      claude: {
+        found: true,
+        path: FAKE_CLAUDE,
+        version: "9.9.9 (Fake Claude)",
+        loggedIn: true,
+        authMethod: "claude.ai",
+      },
       runs: [],
     });
     const missing = await f.dispatcher({ resolveClaude: () => null }).status();
-    expect(missing.claude).toEqual({ found: false, path: null });
+    expect(missing.claude).toEqual({ found: false, path: null, loggedIn: null });
   });
 });
 

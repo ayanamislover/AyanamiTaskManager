@@ -2,14 +2,17 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  CLAUDE_LOGIN_REQUIRED_MESSAGE,
   claudeArguments,
   DEFAULT_DISPATCH_CONFIG,
   DispatchError,
   dispatchChildEnv,
   dispatchPaths,
   HOST_SESSION_ENV,
+  isAuthFailure,
   judgeOutcome,
   launchCommand,
+  parseAuthStatus,
   renderDispatchPrompt,
 } from "../src/index.js";
 import { cleanupAll, fixture } from "./support.js";
@@ -216,11 +219,8 @@ describe("结局判定", () => {
       state: "succeeded",
       summary: { numTurns: 2, durationMs: null, totalCostUsd: null, result: "好" },
     });
-    write({ type: "result", subtype: "success", is_error: true, result: "Failed to authenticate" });
-    expect(judgeOutcome(out, err, 1)).toMatchObject({
-      state: "failed",
-      error: "Failed to authenticate",
-    });
+    write({ type: "result", subtype: "success", is_error: true, result: "API Error: 529" });
+    expect(judgeOutcome(out, err, 1)).toMatchObject({ state: "failed", error: "API Error: 529" });
     write({ type: "result", subtype: "error_max_turns", is_error: true });
     expect(judgeOutcome(out, err, 1)).toMatchObject({ state: "failed", error: "error_max_turns" });
     writeFileSync(out, '{"type":"assistant"}\n');
@@ -233,5 +233,85 @@ describe("结局判定", () => {
       state: "failed",
       error: "进程已结束，日志里没有 result 行",
     });
+  });
+
+  it("鉴权失败换成可操作的中文，原文留在 summary.result；别的失败保持原样", () => {
+    const f = fixture();
+    const out = join(f.root, "out.jsonl");
+    const err = join(f.root, "err.log");
+    const failWith = (result: string) =>
+      writeFileSync(
+        out,
+        `${JSON.stringify({ type: "result", subtype: "success", is_error: true, num_turns: 1, result })}\n`,
+      );
+    writeFileSync(err, "");
+    for (const text of [
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+      "FAILED TO AUTHENTICATE",
+      "OAuth token has expired. Please obtain a new token",
+      "Not logged in · Please run /login",
+      "Invalid API key · Fix external API key",
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error"}}',
+    ]) {
+      failWith(text);
+      expect(judgeOutcome(out, err, 1), text).toEqual({
+        state: "failed",
+        summary: { numTurns: 1, durationMs: null, totalCostUsd: null, result: text },
+        error: CLAUDE_LOGIN_REQUIRED_MESSAGE,
+        authFailure: true,
+      });
+    }
+    expect(CLAUDE_LOGIN_REQUIRED_MESSAGE).toBe(
+      "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude",
+    );
+
+    // 没有 result 行、只有 stderr：同样映射，stderr 原文进 summary.result。
+    writeFileSync(out, '{"type":"system"}\n');
+    writeFileSync(err, "Invalid API key · Please run /login\n");
+    expect(judgeOutcome(out, err, 1)).toEqual({
+      state: "failed",
+      summary: {
+        numTurns: null,
+        durationMs: null,
+        totalCostUsd: null,
+        result: "Invalid API key · Please run /login",
+      },
+      error: CLAUDE_LOGIN_REQUIRED_MESSAGE,
+      authFailure: true,
+    });
+    // result 文本与登录无关，但 stderr 说没登录：以 stderr 为准。
+    failWith("Execution error");
+    expect(judgeOutcome(out, err, 1)).toMatchObject({ error: CLAUDE_LOGIN_REQUIRED_MESSAGE });
+
+    // MCP 服务器要 OAuth 授权的提示不是 claude 本身没登录。
+    writeFileSync(err, 'MCP server "figma" requires OAuth authorization\n');
+    failWith("API Error: 529 overloaded_error");
+    expect(judgeOutcome(out, err, 1)).toMatchObject({
+      state: "failed",
+      error: "API Error: 529 overloaded_error",
+    });
+    expect(judgeOutcome(out, err, 1)).not.toHaveProperty("authFailure");
+    // 成功的会话不看这些特征。
+    writeFileSync(
+      out,
+      `${JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "修好了 Invalid API key 的提示" })}\n`,
+    );
+    expect(judgeOutcome(out, err, 0)).toMatchObject({ state: "succeeded" });
+  });
+
+  it("auth status 解析：多行 JSON、未登录、看不懂的输出", () => {
+    expect(
+      parseAuthStatus(
+        '{\n  "loggedIn": false,\n  "authMethod": "none",\n  "apiProvider": "firstParty"\n}\n',
+      ),
+    ).toEqual({ loggedIn: false, authMethod: "none" });
+    expect(parseAuthStatus('提示\n{"loggedIn":true,"authMethod":"claude.ai"}')).toEqual({
+      loggedIn: true,
+      authMethod: "claude.ai",
+    });
+    expect(parseAuthStatus('{"loggedIn":"yes"}')).toEqual({ loggedIn: null });
+    expect(parseAuthStatus("Usage: claude auth")).toEqual({ loggedIn: null });
+    expect(parseAuthStatus("")).toEqual({ loggedIn: null });
+    expect(isAuthFailure("需要 OAuth 授权")).toBe(false);
   });
 });

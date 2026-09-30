@@ -11,11 +11,19 @@ export const DISPATCH_ERROR_POLICIES = Object.freeze({
   DISPATCH_TASK_NOT_READY: { httpStatus: 409, retryable: false },
   DISPATCH_ALREADY_ACTIVE: { httpStatus: 409, retryable: false },
   DISPATCH_CLAUDE_NOT_FOUND: { httpStatus: 503, retryable: false },
+  DISPATCH_CLAUDE_NOT_LOGGED_IN: { httpStatus: 503, retryable: false },
   DISPATCH_RUN_NOT_FOUND: { httpStatus: 404, retryable: false },
   DISPATCH_RUN_NOT_ACTIVE: { httpStatus: 409, retryable: false },
 } as const);
 
 export type DispatchErrorCode = keyof typeof DISPATCH_ERROR_POLICIES;
+
+/**
+ * claude 命令行没登录或登录过期时给用户看的话：派单被拒（DISPATCH_CLAUDE_NOT_LOGGED_IN）
+ * 与会话因鉴权失败结束（run.error）用同一句，原文另存在 summary.result。
+ */
+export const CLAUDE_LOGIN_REQUIRED_MESSAGE =
+  "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude";
 
 export type DispatchErrorDto = {
   code: DispatchErrorCode;

@@ -14,6 +14,13 @@ export {
   type DispatchConfigPatch,
 } from "./config.js";
 export {
+  CLAUDE_AUTH_CACHE_MS,
+  CLAUDE_AUTH_PROBE_TIMEOUT_MS,
+  parseAuthStatus,
+  type ClaudeAuthState,
+} from "./claude-probe.js";
+export {
+  CLAUDE_LOGIN_REQUIRED_MESSAGE,
   DISPATCH_ERROR_POLICIES,
   DispatchError,
   isDispatchError,
@@ -30,7 +37,7 @@ export {
   launchCommand,
 } from "./launch.js";
 export { renderDispatchPrompt, type DispatchPromptInput } from "./prompt.js";
-export { findResultLine, judgeOutcome } from "./result.js";
+export { findResultLine, isAuthFailure, judgeOutcome } from "./result.js";
 export { DISPATCH_HISTORY_LIMIT } from "./run-store.js";
 export type {
   AgentDispatcherOptions,

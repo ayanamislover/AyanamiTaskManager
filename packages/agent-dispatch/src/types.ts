@@ -61,7 +61,15 @@ export type DispatchRunRecord = DispatchRunView & {
   pid?: number;
 };
 
-export type DispatchClaudeStatus = { found: boolean; path: string | null; version?: string };
+export type DispatchClaudeStatus = {
+  found: boolean;
+  path: string | null;
+  version?: string;
+  /** `claude auth status` 的结论，缓存 5 分钟；null = 没探出来（超时、输出看不懂或没找到 claude）。 */
+  loggedIn: boolean | null;
+  /** 例如 `claude.ai`、`none`；探不出来时没有这个字段。 */
+  authMethod?: string;
+};
 
 export type DispatchStatus = DispatchConfig & {
   claude: DispatchClaudeStatus;
@@ -107,4 +115,6 @@ export type AgentDispatcherOptions = {
   processStartTime?: (pid: number) => Promise<Date | null>;
   /** 子进程环境的来源，默认 process.env。 */
   baseEnv?: NodeJS.ProcessEnv;
+  /** `claude auth status` 的超时，默认 5 秒；超时按「没探出来」处理。 */
+  authProbeTimeoutMs?: number;
 };

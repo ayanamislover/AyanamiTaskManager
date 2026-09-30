@@ -44,7 +44,10 @@ export type Fixture = {
   };
   warnings: string[];
   logger: DispatchLogger;
-  behave(mode: "success" | "fail" | "error-result" | "slow", delayMs?: number): void;
+  behave(
+    mode: "success" | "fail" | "error-result" | "auth-stderr" | "api-error" | "slow",
+    delayMs?: number,
+  ): void;
   addTask(key: string, patch?: Partial<DispatchTask>): DispatchTask;
   dump(run: string): {
     args: string[];

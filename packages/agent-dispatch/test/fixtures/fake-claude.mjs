@@ -1,13 +1,47 @@
 // 假的 claude 命令行：经 process.execPath 运行，模拟 `claude -p --output-format stream-json`。
-// 行为由工作目录里的 fake-claude.json 决定：{ "mode": "success" | "fail" | "error-result" | "slow", "delayMs": 数字 }。
+// 行为由工作目录里的 fake-claude.json 决定：
+//   { "mode": "success" | "fail" | "error-result" | "auth-stderr" | "api-error" | "slow", "delayMs": 数字 }。
+// `auth status` 由环境变量 FAKE_CLAUDE_AUTH_FILE 指向的 JSON 决定：{ "mode": "in" | "out" | "hang" | "garbage" }，
+// 没有这个变量时视为已登录；每探一次往 <文件>.count 追加一行，用例据此数探测次数。
 // 每次运行都把收到的参数、stdin、工作目录与环境变量写进 fake-claude-dump-<ATM_DISPATCH_RUN>.json，供用例断言。
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   process.stdout.write("9.9.9 (Fake Claude)\n");
   process.exit(0);
+}
+
+if (args[0] === "auth" && args[1] === "status") {
+  const authFile = process.env.FAKE_CLAUDE_AUTH_FILE;
+  let auth = { mode: "in" };
+  if (authFile) {
+    appendFileSync(`${authFile}.count`, "probe\n");
+    if (existsSync(authFile)) auth = JSON.parse(readFileSync(authFile, "utf8"));
+  }
+  if (auth.mode === "hang") {
+    setTimeout(() => process.exit(0), 60_000);
+    await new Promise(() => {});
+  }
+  if (auth.mode === "garbage") {
+    process.stdout.write("Usage: claude auth [command]\n");
+    process.exit(0);
+  }
+  const loggedIn = auth.mode !== "out";
+  // 与真 claude 一致：多行 JSON，未登录退出码 1。
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        loggedIn,
+        authMethod: loggedIn ? "claude.ai" : "none",
+        apiProvider: "firstParty",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  process.exit(loggedIn ? 0 : 1);
 }
 
 const behaviorPath = join(process.cwd(), "fake-claude.json");
@@ -57,6 +91,22 @@ async function finish() {
       duration_ms: 104,
       total_cost_usd: 0,
       result: "Failed to authenticate: OAuth session expired and could not be refreshed",
+    });
+    process.exit(1);
+  }
+  if (mode === "auth-stderr") {
+    process.stderr.write("Invalid API key · Please run /login\n");
+    process.exit(1);
+  }
+  if (mode === "api-error") {
+    // 与登录无关的失败；stderr 里夹一条 MCP 的 OAuth 提示，不能被当成「claude 没登录」。
+    process.stderr.write('MCP server "figma" requires OAuth authorization\n');
+    line({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      num_turns: 2,
+      result: "API Error: 529 overloaded_error",
     });
     process.exit(1);
   }

@@ -1,3 +1,4 @@
+import { CLAUDE_LOGIN_REQUIRED_MESSAGE } from "./errors.js";
 import { readTail } from "./files.js";
 import type { DispatchRunSummary } from "./types.js";
 
@@ -39,7 +40,27 @@ export type DispatchOutcome = {
   state: "succeeded" | "failed";
   summary?: DispatchRunSummary;
   error?: string;
+  /** 失败原因是 claude 没登录或登录过期；调用方据此让登录状态缓存失效。 */
+  authFailure?: true;
 };
+
+/**
+ * 鉴权失败的特征，大小写不敏感，只对已判定失败的会话使用。
+ * 「OAuth」单独出现不算：stderr 里常有「某个 MCP 服务器需要 OAuth 授权」这类与 claude 本身登录
+ * 无关的提示，所以要求它后面跟着过期、吊销、无效或刷新。
+ */
+const AUTH_FAILURE_PATTERNS = [
+  /failed to authenticate/iu,
+  /not logged in/iu,
+  /invalid api key/iu,
+  /please run \/login/iu,
+  /authentication_error/iu,
+  /\boauth\b[^\n]{0,80}\b(?:expired|revoked|invalid|refresh)/iu,
+];
+
+export function isAuthFailure(text: string): boolean {
+  return AUTH_FAILURE_PATTERNS.some((pattern) => pattern.test(text));
+}
 
 export function summarizeResult(result: Record<string, unknown>): DispatchRunSummary {
   return {
@@ -53,7 +74,7 @@ export function summarizeResult(result: Record<string, unknown>): DispatchRunSum
 /**
  * 按日志判定一次派单的结局。`subtype` 为 success 但 `is_error` 为真的情况真实存在
  * （实测：登录态过期时 `{"subtype":"success","is_error":true,"result":"Failed to authenticate…"}`），
- * 所以两个条件都要看。
+ * 所以两个条件都要看。鉴权失败的 `error` 换成能照着做的中文，原文留在 `summary.result`。
  */
 export function judgeOutcome(
   stdoutLog: string,
@@ -61,20 +82,36 @@ export function judgeOutcome(
   exitCode: number | null,
 ): DispatchOutcome {
   const result = findResultLine(readTail(stdoutLog));
+  const stderrTail = readTail(stderrLog, 16 * 1024);
   if (result) {
     const summary = summarizeResult(result);
     if (result.subtype === "success" && result.is_error !== true)
       return { state: "succeeded", summary };
+    const text = typeof result.result === "string" ? result.result : "";
+    if (isAuthFailure(text) || isAuthFailure(stderrTail))
+      return { state: "failed", summary, error: CLAUDE_LOGIN_REQUIRED_MESSAGE, authFailure: true };
     const reason =
       summary.result || (typeof result.subtype === "string" ? result.subtype : "未知错误");
     return { state: "failed", summary, error: truncate(reason, ERROR_LIMIT) };
   }
-  const stderr = readTail(stderrLog, 16 * 1024)
+  const stderr = stderrTail
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(-3)
     .join(" | ");
+  if (isAuthFailure(stderrTail))
+    return {
+      state: "failed",
+      summary: {
+        numTurns: null,
+        durationMs: null,
+        totalCostUsd: null,
+        result: truncate(stderr, RESULT_LIMIT),
+      },
+      error: CLAUDE_LOGIN_REQUIRED_MESSAGE,
+      authFailure: true,
+    };
   const exit = exitCode === null ? "进程已结束" : `进程退出（exit code ${exitCode}）`;
   return {
     state: "failed",
