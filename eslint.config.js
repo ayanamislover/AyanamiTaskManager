@@ -14,6 +14,8 @@ export default tseslint.config(
       "release/**",
       "test-results/**",
       "node_modules/**",
+      "apps/mobile/android/**",
+      "**/.local/**",
     ],
   },
   eslint.configs.recommended,

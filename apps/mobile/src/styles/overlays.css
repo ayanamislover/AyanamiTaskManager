@@ -1,0 +1,377 @@
+/*
+ * 弹出与选择类控件：自绘下拉、胶囊分段、开关、底部确认框，以及空状态与下拉刷新指示器。
+ * 从 controls.css 拆出（单文件不超过 600 行）；变量与动效曲线同 controls.css。
+ */
+
+/* ─── 自绘下拉（外壳画框与焦点环，触发器不画） ─── */
+.select {
+  position: relative;
+}
+.select.field-shell {
+  min-height: 48px;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: var(--radius-field);
+  background: var(--atm-surface);
+  transition:
+    border-color var(--atm-duration-hover) var(--atm-ease-hover),
+    box-shadow var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.select.field-shell[data-open="true"] {
+  border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
+}
+.select-trigger {
+  display: flex;
+  width: 100%;
+  min-height: 45px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  font-size: 16px;
+  text-align: left;
+}
+.field-shell > .select-trigger:is(:hover, :focus, :focus-visible):not(:disabled) {
+  outline: none;
+  box-shadow: none;
+}
+.select-trigger > svg {
+  flex: none;
+  color: var(--atm-text-muted);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-in-out);
+}
+.select[data-open="true"] .select-trigger > svg {
+  transform: rotate(180deg);
+}
+.select-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-value.is-placeholder {
+  color: var(--atm-text-faint);
+}
+.select-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  z-index: 30;
+  display: grid;
+  max-height: min(320px, 50vh);
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-soft);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow);
+  overflow-y: auto;
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  transform-origin: top center;
+  transition:
+    opacity var(--atm-duration-hover) var(--atm-ease-out),
+    transform var(--atm-duration-hover) var(--atm-ease-out);
+}
+.select[data-placement="top"] .select-popover {
+  top: auto;
+  bottom: calc(100% + 8px);
+  transform-origin: bottom center;
+}
+.select-popover[data-presence="closing"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.98);
+}
+@starting-style {
+  .select-popover {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+}
+.select-option {
+  display: flex;
+  min-height: var(--touch);
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 12px;
+  color: var(--atm-text);
+  background: transparent;
+  font-size: 15px;
+  text-align: left;
+}
+.select-option-text {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 10px;
+}
+.select-option-text > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-option-text small {
+  flex: none;
+  color: var(--atm-text-faint);
+  font: 500 12px var(--atm-mono);
+}
+.select-option > svg {
+  flex: none;
+  color: var(--atm-primary-strong);
+}
+.select-option[data-selected="true"] {
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
+  font-weight: 600;
+}
+.select-option:active {
+  background: var(--atm-hover-strong);
+}
+.select-option:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ─── 胶囊分段（桌面端 .atm-tabs 的触屏版） ─── */
+.segmented {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 999px;
+  background: var(--atm-control-fill);
+}
+.segmented-option {
+  min-height: var(--touch);
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--atm-text-muted);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 600;
+  transition:
+    color var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.segmented-option[aria-checked="true"] {
+  color: var(--atm-control-text);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-raised);
+}
+.segmented-option:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ─── 开关 ─── */
+.switch-row {
+  display: flex;
+  width: 100%;
+  min-height: 64px;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  text-align: left;
+}
+.switch-row:disabled {
+  opacity: 0.6;
+}
+.switch-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+.switch-copy strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+.switch-copy small {
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.switch-track {
+  position: relative;
+  width: 50px;
+  height: 30px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--atm-control-border);
+  transition: background-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.switch-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgb(90 40 140 / 0.25);
+  transition: transform var(--atm-duration-hover) var(--atm-ease-out);
+}
+.switch-row[aria-checked="true"] .switch-track {
+  background: var(--atm-primary-fill);
+}
+.switch-row[aria-checked="true"] .switch-thumb {
+  transform: translateX(20px);
+}
+.switch-row:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ─── 底部确认框 ─── */
+.sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  background: var(--atm-overlay);
+  opacity: 1;
+  transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
+}
+.sheet {
+  display: grid;
+  width: 100%;
+  gap: 14px;
+  padding: 10px var(--gutter) calc(18px + var(--inset-bottom));
+  border-radius: 28px 28px 0 0;
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow);
+  transform: translateY(0);
+  transition: transform var(--atm-duration-surface) var(--atm-ease-drawer);
+}
+.sheet-backdrop[data-presence="closing"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.sheet-backdrop[data-presence="closing"] .sheet {
+  transform: translateY(100%);
+}
+@starting-style {
+  .sheet-backdrop {
+    opacity: 0;
+  }
+  .sheet {
+    transform: translateY(100%);
+  }
+}
+.sheet:focus {
+  outline: none;
+}
+.sheet-grip {
+  justify-self: center;
+  width: 40px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--atm-control-border);
+}
+.sheet h2 {
+  font-size: 18px;
+  font-weight: 650;
+}
+.sheet-body {
+  display: grid;
+  gap: 10px;
+  color: var(--atm-text-muted);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.sheet-warning {
+  padding: 10px 14px;
+  border-radius: var(--radius-field);
+  color: color-mix(in srgb, var(--atm-st-user) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-user) 12%, transparent);
+}
+.sheet-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* ─── 空状态 / 错误态 ─── */
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 36px 24px;
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--atm-surface) 60%, transparent);
+  color: var(--atm-text-muted);
+  text-align: center;
+}
+.empty-icon {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  margin-bottom: 4px;
+  border-radius: 20px;
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+}
+.empty[data-tone="danger"] .empty-icon {
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 12%, transparent);
+}
+.empty strong {
+  color: var(--atm-text);
+  font-size: 16px;
+}
+.empty p {
+  max-width: 30ch;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.empty-action {
+  margin-top: 10px;
+}
+
+/* ─── 下拉刷新指示器 ─── */
+.pull-indicator {
+  position: absolute;
+  top: calc(var(--inset-top) + var(--topbar) - 8px);
+  left: 50%;
+  z-index: 6;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
+  box-shadow: var(--atm-shadow-primary);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity var(--atm-duration-hover) var(--atm-ease-hover),
+    transform var(--atm-duration-surface) var(--atm-ease-out);
+}
+.pull-indicator[data-dragging="true"] {
+  transition: opacity var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.pull-indicator[data-visible="true"] {
+  opacity: 1;
+}
+.pull-indicator > span:first-child {
+  display: grid;
+  place-items: center;
+}
+.pull-indicator[data-refreshing="true"] > span:first-child {
+  animation: spin 0.9s linear infinite;
+}
+.pull-indicator[data-ready="false"][data-dragging="true"] {
+  filter: saturate(0.4);
+}

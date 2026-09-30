@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 packages/ui/src/tokens.css 的 atm-bg 与 atm-primary 一致。 -->
+    <color name="atm_background">#fbf7ff</color>
+    <color name="colorPrimary">#a855f7</color>
+    <color name="colorPrimaryDark">#fbf7ff</color>
+    <color name="colorAccent">#a855f7</color>
+    <bool name="atm_light_system_bars">true</bool>
+</resources>

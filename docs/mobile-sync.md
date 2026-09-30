@@ -249,7 +249,8 @@ type TaskCard = {
 
 - 应用 ID `moe.ayanami.atm`，minSdk 29、targetSdk 36；网页资源打包进 APK（不加载远程网页）。
 - 视觉沿用桌面端 `packages/ui/src/tokens.css` 的二次元柔彩（浅/深两套），组件为手机重新实现：
-  触控目标 ≥ 44px、自绘下拉、单焦点环（`field-shell`）、系统栏 inset 由原生留边。
+  触控目标 ≥ 44px、自绘下拉、单焦点环（`field-shell`）。edge-to-edge：状态栏与导航栏高度由原生量出后交给网页留边
+  （WebView 151 的 `env(safe-area-inset-*)` 不可靠），键盘与刘海仍由原生留边；深浅色由原生注入（`prefers-color-scheme` 在该 WebView 里恒为浅色）。
 - 请求走 Capacitor 原生 HTTP（`CapacitorHttp`），不受中继 CORS 限制。
 - 配对信息（中继 token、空间 secret）存在由 Android Keystore 加密的原生存储里；快照缓存存 IndexedDB，离线可看。
 - 屏幕：配对（扫码 / 粘贴配对码）→ 总览（电脑在线状态、项目卡片）→ 项目（按状态分组的任务）→

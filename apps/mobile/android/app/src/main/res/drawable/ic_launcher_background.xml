@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 应用图标的背景层：粉 → 淡紫 → 淡蓝，与桌面端画布的彩雾同色系（scripts/generate-icons.py 的旧式图标同色）。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient
+        android:angle="315"
+        android:startColor="#fbcfe8"
+        android:centerColor="#e9d5ff"
+        android:endColor="#bfdbfe"
+        android:type="linear" />
+</shape>

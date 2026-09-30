@@ -1,0 +1,404 @@
+/* 任务详情、新任务、设置。 */
+
+/* ─── 任务详情 ─── */
+.task-hero {
+  display: grid;
+  gap: 12px;
+  padding-top: 4px;
+}
+.task-hero-title {
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+/* 详情页的优先级旗与状态徽章同高同形，色调沿用任务卡上的 .priority-flag。 */
+.badge-row .priority-flag {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge-row .badge-meta {
+  margin-left: 2px;
+}
+.task-hero-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-soft);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
+}
+.task-hero-progress .progress {
+  height: 8px;
+}
+.task-hero-progress .task-percent {
+  min-width: 40px;
+  color: var(--atm-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.task-hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+}
+.task-hero-agent,
+.task-hero-updated {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.task-hero-agent .mono {
+  font-size: 12px;
+}
+.task-hero-agent > svg {
+  flex: none;
+}
+.dot-sep {
+  color: var(--atm-text-faint);
+}
+
+.callout {
+  --tone: var(--atm-st-user);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius-soft);
+  color: color-mix(in srgb, var(--tone) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.callout[data-status="BLOCKED"] {
+  --tone: var(--atm-st-blocked);
+}
+.callout[data-status="WAITING_AGENT"] {
+  --tone: var(--atm-st-agent);
+}
+.callout > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.callout strong {
+  display: block;
+  font-size: 13px;
+}
+
+/* 分区：柔色小卡，不画分隔线（与桌面端任务抽屉的 .atm-section 同一形态）。 */
+.soft-section {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-soft);
+  background: color-mix(in srgb, var(--atm-surface) 78%, var(--atm-surface-muted));
+}
+:root[data-theme="dark"] .soft-section {
+  background: var(--atm-surface);
+}
+.soft-section h3 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.soft-section-aside {
+  color: var(--atm-text-muted);
+  font: 600 12px var(--atm-mono);
+}
+.description {
+  color: var(--atm-text);
+  font-size: 14px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.description[data-clamped="true"] {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+}
+.description.is-empty {
+  color: var(--atm-text-faint);
+}
+.acceptance {
+  display: grid;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+  counter-reset: acceptance;
+}
+.acceptance li {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  font-size: 14px;
+  line-height: 1.55;
+  counter-increment: acceptance;
+}
+.acceptance li::before {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
+  font: 600 11px var(--atm-mono);
+  content: counter(acceptance);
+}
+/* 时间线三列：等宽时间 / 摘要 / 百分比——逐行像素对齐。 */
+.timeline {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  list-style: none;
+}
+.timeline li {
+  display: grid;
+  grid-template-columns: 76px 1fr auto;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.timeline-time,
+.timeline-percent {
+  color: var(--atm-text-faint);
+  font: 12px var(--atm-mono);
+  white-space: nowrap;
+}
+.timeline-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dispatch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.dispatch-time {
+  color: var(--atm-text-faint);
+  font: 12px var(--atm-mono);
+}
+.closed-note {
+  color: var(--atm-text-faint);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.dispatch-bar {
+  display: grid;
+  gap: 10px;
+}
+.dispatch-reason {
+  display: flex;
+  gap: 8px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dispatch-reason[data-tone] {
+  color: color-mix(in srgb, var(--tone) 55%, var(--atm-text));
+}
+.dispatch-reason > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.dispatch-pending {
+  display: grid;
+  gap: 8px;
+}
+
+/* ─── 新任务 ─── */
+.switch-card {
+  overflow: hidden;
+}
+.form-hint {
+  padding: 24px 0;
+  color: var(--atm-text-muted);
+  text-align: center;
+}
+.sent-card {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  padding: 20px 16px 16px;
+}
+.sent-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  place-items: center;
+  border-radius: 18px;
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
+  box-shadow: var(--atm-shadow-primary);
+}
+.sent-card > strong {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.sent-card > p {
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.steps {
+  display: grid;
+  width: 100%;
+  gap: 2px;
+  padding: 8px 14px;
+  border-radius: var(--radius-soft);
+  background: var(--atm-surface-muted);
+  list-style: none;
+}
+.steps li {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 12px;
+  color: var(--atm-text-faint);
+  font-size: 14px;
+}
+.step-mark {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: 50%;
+}
+.steps li[data-state="done"] {
+  color: var(--atm-text);
+}
+.steps li[data-state="done"] .step-mark {
+  border-color: transparent;
+  color: #fff;
+  background: var(--atm-st-done);
+}
+.steps li[data-state="active"] {
+  color: var(--atm-text);
+  font-weight: 600;
+}
+.steps li[data-state="active"] .step-mark {
+  border-color: transparent;
+  color: var(--atm-primary-strong);
+}
+.steps li[data-state="active"] .step-mark > svg {
+  animation: spin 1s linear infinite;
+}
+.steps li[data-state="failed"] {
+  color: var(--atm-danger);
+}
+.steps li[data-state="failed"] .step-mark {
+  border-color: transparent;
+  color: #fff;
+  background: var(--atm-danger);
+}
+:root[data-theme="dark"] .steps li:is([data-state="done"], [data-state="failed"]) .step-mark {
+  color: var(--atm-bg);
+}
+.step-label .mono {
+  font-size: 13px;
+}
+
+/* ─── 设置 ─── */
+.settings-group {
+  display: grid;
+  gap: 8px;
+}
+.settings-group > h2 {
+  margin-top: 8px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-card {
+  padding: 2px 0;
+}
+.settings-row {
+  position: relative;
+  display: flex;
+  min-height: 50px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 16px;
+}
+.settings-row + .settings-row::before {
+  position: absolute;
+  top: 0;
+  right: 16px;
+  left: 16px;
+  height: 1px;
+  background: var(--atm-border);
+  content: "";
+}
+.settings-label {
+  flex: none;
+  color: var(--atm-text-muted);
+  font-size: 14px;
+}
+.settings-value {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-value.mono,
+.settings-value .mono {
+  font-size: 13px;
+}
+.settings-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.settings-note > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.settings-footer {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  margin-top: 16px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+}
+.settings-footer .mono {
+  font-size: 11px;
+}

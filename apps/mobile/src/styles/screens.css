@@ -1,0 +1,423 @@
+/* 配对、总览、项目三屏。卡片内边距统一 16：卡内文字起点 = 页边距 16 + 16。 */
+
+/* ─── 配对 ─── */
+.status-scrim {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: var(--inset-top);
+  transition: background-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.status-scrim[data-scrolled="true"] {
+  background-color: color-mix(in srgb, var(--atm-bg) 86%, transparent);
+  box-shadow: 0 1px 0 var(--atm-border);
+  backdrop-filter: blur(16px) saturate(1.2);
+}
+.pairing-content {
+  gap: 16px;
+  padding-top: 36px;
+}
+.pairing-hero {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 8px 8px 4px;
+  text-align: center;
+}
+.pairing-avatar {
+  width: 88px;
+  height: 88px;
+  border: 3px solid var(--atm-surface);
+  border-radius: 50%;
+  box-shadow: var(--atm-shadow);
+  object-fit: cover;
+}
+.pairing-wordmark {
+  width: min(280px, 80vw);
+  height: auto;
+  margin-top: 4px;
+}
+.pairing-lede {
+  max-width: 28ch;
+  color: var(--atm-text-muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.pairing-notice {
+  justify-self: center;
+  padding: 8px 16px;
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--atm-st-done) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-done) 14%, transparent);
+  font-size: 13px;
+}
+.pairing-steps {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  list-style: none;
+}
+.pairing-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.step-index {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
+  font: 600 12px var(--atm-mono);
+}
+.pairing-actions {
+  display: grid;
+  gap: 10px;
+}
+.paste-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+.paste-card .field-label {
+  padding: 0;
+}
+.demo-button {
+  justify-self: center;
+  margin: 0;
+  color: var(--atm-text-faint);
+  font-weight: 500;
+}
+.confirm-card {
+  display: grid;
+  gap: 12px;
+  padding: 20px 16px 16px;
+}
+.confirm-icon {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 16px;
+  color: color-mix(in srgb, var(--atm-st-done) 60%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-done) 16%, transparent);
+}
+.confirm-card > strong {
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.confirm-facts {
+  display: grid;
+  gap: 2px;
+  padding: 4px 14px;
+  border-radius: var(--radius-soft);
+  background: var(--atm-surface-muted);
+}
+.confirm-facts > div {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.confirm-facts > div + div {
+  box-shadow: inset 0 1px 0 var(--atm-border);
+}
+.confirm-facts dt {
+  color: var(--atm-text-muted);
+  font-size: 13px;
+}
+.confirm-facts dd {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.confirm-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.confirm-hint > svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--atm-primary-strong);
+}
+
+/* ─── 扫码 ─── */
+.scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: #120d1a;
+  color: #fff;
+}
+.scanner-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--atm-duration-surface) var(--atm-ease-out);
+}
+.scanner-video[data-ready="true"] {
+  opacity: 1;
+}
+.scanner-shade {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+/* 取景框：四角圆弧，框外压暗（用超大阴影挖出透明窗口）。 */
+.scanner-frame {
+  position: relative;
+  width: min(68vw, 300px);
+  aspect-ratio: 1;
+  border-radius: 28px;
+  box-shadow: 0 0 0 100vmax rgb(18 13 26 / 0.58);
+}
+.scanner-frame > i {
+  position: absolute;
+  width: 36px;
+  height: 36px;
+  border: 4px solid #fff;
+}
+.scanner-frame > i:nth-child(1) {
+  top: 0;
+  left: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-top-left-radius: 28px;
+}
+.scanner-frame > i:nth-child(2) {
+  top: 0;
+  right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-top-right-radius: 28px;
+}
+.scanner-frame > i:nth-child(3) {
+  bottom: 0;
+  left: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom-left-radius: 28px;
+}
+.scanner-frame > i:nth-child(4) {
+  right: 0;
+  bottom: 0;
+  border-top: 0;
+  border-left: 0;
+  border-bottom-right-radius: 28px;
+}
+.scanner-line {
+  position: absolute;
+  right: 18px;
+  left: 18px;
+  top: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, #f9a8d4, #c4b5fd, transparent);
+  animation: scan-line 2.2s var(--atm-ease-in-out) infinite alternate;
+}
+@keyframes scan-line {
+  to {
+    top: calc(100% - 21px);
+  }
+}
+.scanner-top {
+  position: absolute;
+  top: calc(var(--inset-top) + 6px);
+  left: var(--gutter);
+}
+.scanner-bottom {
+  position: absolute;
+  right: var(--gutter);
+  bottom: calc(var(--inset-bottom) + 36px);
+  left: var(--gutter);
+  display: grid;
+  justify-items: center;
+  gap: 16px;
+  text-align: center;
+}
+.scanner-bottom p {
+  font-size: 15px;
+  font-weight: 600;
+  text-shadow: 0 1px 8px rgb(0 0 0 / 0.5);
+}
+
+/* ─── 总览：电脑状态卡 ─── */
+.host-card {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+.host-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.host-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 4px;
+}
+.host-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.host-meta {
+  display: flex;
+  flex-wrap: wrap;
+  padding-left: 18px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+/* 分隔点跟着后一段走：折行时不会有一个孤零零的「·」挂在行尾。 */
+.host-meta > span + span::before {
+  padding: 0 6px;
+  color: var(--atm-text-faint);
+  content: "·";
+}
+.project-counts i {
+  color: var(--atm-text-faint);
+  font-style: normal;
+}
+.host-icon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--atm-text-faint);
+}
+.host-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  color: color-mix(in srgb, var(--atm-st-user) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-user) 12%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.host-alert > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.host-alert > span {
+  flex: 1;
+}
+.host-alert .text-button {
+  margin: -10px -6px -10px 0;
+  color: inherit;
+}
+.offline-note {
+  align-items: center;
+}
+
+/* ─── 总览：项目卡 ─── */
+.project-list,
+.outbox,
+.task-list {
+  display: grid;
+  gap: 10px;
+}
+.project-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px 16px;
+}
+.project-head {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 10px;
+}
+.code-chip {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 8px;
+  color: var(--atm-primary-strong);
+  background: var(--atm-primary-soft);
+  font: 650 11px/1.3 var(--atm-mono);
+  letter-spacing: 0.02em;
+}
+.project-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-size: 16px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-chevron {
+  flex: none;
+  color: var(--atm-text-faint);
+}
+.project-counts {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 6px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.project-counts > span {
+  display: inline-flex;
+  gap: 6px;
+}
+.project-counts b {
+  color: var(--atm-text);
+  font-weight: 600;
+}
+.project-counts [data-tone] b {
+  color: color-mix(in srgb, var(--tone) 60%, var(--atm-text));
+}
+/* 四段比例条：已完成 / 进行中 / 等你与受阻 / 可开始（桌面端项目进度条同一组色）。 */
+.project-bar {
+  display: flex;
+  height: 6px;
+  gap: 3px;
+  margin-top: 4px;
+}
+.project-bar > i {
+  min-width: 6px;
+  border-radius: 999px;
+  background: var(--segment);
+}
+.project-bar [data-segment="done"] {
+  --segment: var(--atm-st-done);
+}
+.project-bar [data-segment="active"] {
+  --segment: var(--atm-st-progress);
+}
+.project-bar [data-segment="waiting"] {
+  --segment: var(--atm-st-user);
+}
+.project-bar [data-segment="ready"] {
+  --segment: var(--atm-st-ready);
+}
+.project-bar [data-segment="empty"] {
+  --segment: var(--atm-hover-strong);
+}
+:root:not([data-theme="dark"]) .project-bar > i:not([data-segment="empty"]) {
+  background: color-mix(in srgb, var(--segment) 78%, #fff);
+}

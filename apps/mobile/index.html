@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="format-detection" content="telephone=no" />
+    <title>ATM 任务</title>
+    <script>
+      // 首帧之前定下主题和系统栏留白，避免先白后暗地闪一下。
+      // 逻辑与 src/ui/theme.ts 一致：手动偏好优先，其次原生报告的系统深浅色，最后才信 WebView。
+      (function () {
+        var root = document.documentElement;
+        var pref = "system";
+        try {
+          pref = localStorage.getItem("atm-mobile-theme") || "system";
+        } catch (e) {}
+        var dark = false;
+        if (pref === "dark") dark = true;
+        else if (pref !== "light") {
+          try {
+            dark = window.AtmNativeSync
+              ? window.AtmNativeSync.isDark()
+              : matchMedia("(prefers-color-scheme: dark)").matches;
+          } catch (e) {}
+        }
+        root.setAttribute("data-theme", dark ? "dark" : "light");
+        try {
+          var insets = window.AtmNativeSync ? JSON.parse(window.AtmNativeSync.insets()) : null;
+          if (insets) {
+            root.style.setProperty("--inset-top", insets.top + "px");
+            root.style.setProperty("--inset-bottom", insets.bottom + "px");
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root">
+      <p class="boot-fallback">
+        如果一直停在这里，请在应用商店更新「Android System WebView」后再打开。
+      </p>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

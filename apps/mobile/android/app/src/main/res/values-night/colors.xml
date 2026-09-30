@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="atm_background">#241e30</color>
+    <color name="colorPrimary">#d0a6ff</color>
+    <color name="colorPrimaryDark">#241e30</color>
+    <color name="colorAccent">#d0a6ff</color>
+    <bool name="atm_light_system_bars">false</bool>
+</resources>
