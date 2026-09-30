@@ -9,7 +9,7 @@ import { useDialogs } from "../components/atm-dialogs.js";
 import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
-import { useCursorCollection } from "../cursor-collection.js";
+import { collectionIncomplete, useCursorCollection } from "../cursor-collection.js";
 import { isNewProjectTaskFor, NEW_PROJECT_TASK_EVENT } from "../hooks/new-project-task.js";
 import { useQueriesSettled } from "../queries-settled.js";
 import type { RouteStageSlot } from "../routes/route-stage.js";
@@ -211,6 +211,7 @@ export function ProjectPage({
         projectCode={project.code}
         workItems={workItems}
         tasksLoading={tasks.isLoading}
+        tasksIncomplete={collectionIncomplete(tasks)}
         openTask={openTask}
       >
         <ProjectTaskControls

@@ -131,6 +131,8 @@ export type OverviewResponse = Record<string, unknown> & {
   projectionFailures: ProjectionFailureView[];
   quick: Record<string, unknown>;
   recentEvents: Array<Record<string, unknown>>;
+  /** 最近一次自动或手动备份的结果事件（backup.created / backup.failed），从没备份过为 null。 */
+  lastBackup?: Record<string, unknown> | null;
 };
 
 export type TaskViewFor<TView extends TaskViewName> = TView extends "full"

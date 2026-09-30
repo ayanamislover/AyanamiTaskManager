@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
 import { AtmError } from "@ayanami-task/errors";
+import { LAST_BACKUP_OUTCOME_SQL, recentEventWindowSql } from "./global-event-queries.js";
 import {
   createUlid,
   nowIso,
@@ -684,15 +685,16 @@ export class RegistryObservability {
     const sequence = this.#registry.sqlite
       .prepare("SELECT current_sequence FROM app_meta WHERE singleton = 1")
       .get() as { current_sequence: number };
-    const recentEventRows = this.#registry.sqlite
-      .prepare(
-        `SELECT sequence, type, aggregate_id, actor, payload_json, created_at
-         FROM global_events
-         WHERE type <> 'project.summary.updated'
-         ORDER BY sequence DESC LIMIT 40`,
-      )
-      .all() as Array<Record<string, unknown>>;
-    const recentEvents = recentEventRows.map((row) =>
+    // 业务事件与系统事件分开取窗口：合在一个 LIMIT 40 里时，一阵自动备份、Git 上下文刷新
+    // 就能把业务事件挤出窗口，总览「最近变化」过滤掉系统事件后，每次刷新都在变短。
+    const recentWindow = (kind: "business" | "system", limit: number) =>
+      this.#registry.sqlite.prepare(recentEventWindowSql(kind, limit)).all() as Array<
+        Record<string, unknown>
+      >;
+    const recentEventRows = [...recentWindow("business", 40), ...recentWindow("system", 20)].sort(
+      (left, right) => Number(right.sequence) - Number(left.sequence),
+    );
+    const present = (row: Record<string, unknown>) =>
       this.#presentGlobalRow({
         sequence: Number(row.sequence),
         type: String(row.type),
@@ -700,13 +702,19 @@ export class RegistryObservability {
         actor: String(row.actor ?? "SYSTEM"),
         payload_json: String(row.payload_json ?? "{}"),
         created_at: String(row.created_at),
-      }),
-    );
+      });
+    const recentEvents = recentEventRows.map(present);
+    // 备份健康单独取「最近一次备份的结果」：展示窗口是截断的，一阵无关系统事件就能把
+    // 一次还没恢复的失败挤出去，从窗口里找会让提醒自己消失。
+    const lastBackupRow = this.#registry.sqlite.prepare(LAST_BACKUP_OUTCOME_SQL).get() as
+      | Record<string, unknown>
+      | undefined;
     return {
       sequence: sequence.current_sequence,
       projects: projectViews,
       quick: totals,
       recentEvents,
+      lastBackup: lastBackupRow ? present(lastBackupRow) : null,
       projectionSummary: this.#dependencies.projectionSummary(),
       projectionFailures: this.#dependencies.projectionFailures(),
     };

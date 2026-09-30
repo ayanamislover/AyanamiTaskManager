@@ -1,9 +1,14 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   advanceCursorPage,
   collectionRetryPlan,
+  keepsViewWhileRefreshing,
   type CursorCollectionState,
 } from "../src/cursor-collection.js";
+
+const sourcePath = join(process.cwd(), "packages", "ui", "src", "cursor-collection.ts");
 
 function state<T>(): CursorCollectionState<T> {
   return {
@@ -112,5 +117,40 @@ describe("读取失败后的重试方式", () => {
       "refresh",
     );
     expect(collectionRetryPlan({ error: null, hasMore: true, items: [] })).toBe("none");
+  });
+});
+
+describe("后台刷新不回到加载态", () => {
+  it("已经完整读完的来源，哪怕是 0 条，刷新时也保留当前显示", () => {
+    const settled = { loading: false, hasMore: false, error: null };
+    // 空项目、空的临时任务列表：以前每 30 秒被清成骨架，总览退回「正在汇总」。
+    expect(keepsViewWhileRefreshing({ ...settled, items: [] })).toBe(true);
+    expect(keepsViewWhileRefreshing({ ...settled, items: [{ id: 1 }] })).toBe(true);
+    // 读失败但手里有行：保留旧列表，只报错。
+    expect(
+      keepsViewWhileRefreshing({ items: [{ id: 1 }], loading: false, hasMore: true, error: 1 }),
+    ).toBe(true);
+  });
+
+  it("还没读过、正在首读或首读失败且一行没有的，照旧显示加载态", () => {
+    expect(
+      keepsViewWhileRefreshing({ items: [], loading: false, hasMore: true, error: null }),
+    ).toBe(false);
+    expect(
+      keepsViewWhileRefreshing({ items: [], loading: true, hasMore: false, error: null }),
+    ).toBe(false);
+    expect(
+      keepsViewWhileRefreshing({ items: [], loading: false, hasMore: false, error: new Error() }),
+    ).toBe(false);
+  });
+
+  it("源码契约：单来源与多来源两个 hook 都用同一个判据决定要不要清成加载态", () => {
+    const source = readFileSync(sourcePath, "utf8");
+    expect(source).toContain("const refreshing = !resume && keepsViewWhileRefreshing(current);");
+    expect(source).toContain(
+      "const refreshing = !resume && current !== null && keepsViewWhileRefreshing(current);",
+    );
+    // 只按「手里有没有行」判断，空的已结算列表每次刷新都会闪一下。
+    expect(source).not.toMatch(/const refreshing = [^;]*items\.length > 0/u);
   });
 });

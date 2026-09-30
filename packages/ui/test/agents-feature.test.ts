@@ -53,6 +53,57 @@ describe("Agents feature", () => {
     expect(markup).toContain("Agent 调用 atm_begin 后会在这里出现。");
   });
 
+  it("有项目读失败、已读到的只有历史 Agent 时不下「最近 7 天没有活跃的 Agent」的结论", () => {
+    const projects = ["ATM", "SEARCH"].map((code) => ({
+      id: `id-${code}`,
+      code,
+      name: code,
+      lifecycle: "ACTIVE",
+    })) as any[];
+    const render = (search: Record<string, unknown>) => {
+      const queryClient = new QueryClient();
+      const settled = (owner: string) => ({
+        owner,
+        items: [],
+        hasMore: false,
+        loading: false,
+        error: null,
+        cursor: undefined,
+        seenCursors: [],
+      });
+      queryClient.setQueryData(["agents", "all", "ATM", "SEARCH", "ATM\u0000SEARCH"], {
+        // 已读到的只有一个 30 天前的 Session：进历史，不算活跃。
+        ATM: {
+          ...settled("ATM"),
+          items: [
+            {
+              id: "old-session",
+              agentId: "old-agent",
+              connectionState: "CLOSED",
+              lastSeenAt: new Date(Date.now() - 30 * 86_400_000).toISOString(),
+            },
+          ],
+        },
+        SEARCH: { ...settled("SEARCH"), ...search },
+      });
+      return renderToStaticMarkup(
+        createElement(
+          QueryClientProvider,
+          { client: queryClient },
+          createElement(AgentsPage, { client: client(), projects }),
+        ),
+      );
+    };
+    const failed = render({ error: new Error("断了"), hasMore: true });
+    expect(failed).not.toContain("<strong>最近 7 天没有活跃的 Agent</strong>");
+    expect(failed).toContain("<strong>结果还不完整</strong>");
+    expect(failed).toContain("已读到的部分里最近 7 天没有活跃的 Agent");
+    // 全部读完、确实没有，才是确定性的空态。
+    const complete = render({});
+    expect(complete).toContain("<strong>最近 7 天没有活跃的 Agent</strong>");
+    expect(complete).not.toContain("结果还不完整");
+  });
+
   it("分页、聚合、Git context 与 mutation 契约有阳性变异红灯", () => {
     const source = readFileSync(sourcePath, "utf8");
     expect(missingAgentContracts(source)).toEqual([]);

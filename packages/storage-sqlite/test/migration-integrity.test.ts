@@ -44,7 +44,7 @@ describe("迁移完整性", () => {
       cpSync(resolve(process.cwd(), "migrations"), migrationsRoot, { recursive: true });
       manager = await AyanamiDatabaseManager.open({ dataDir, migrationsRoot });
       try {
-        expect(manager.registry.schemaVersion).toBe(7);
+        expect(manager.registry.schemaVersion).toBe(8);
         // 0007：垃圾箱项目的恢复请求；同一项目只允许一条 PENDING。
         const insertRequest = manager.registry.sqlite.prepare(
           `INSERT INTO project_restore_requests(id, project_id, requested_by, status, created_at, updated_at)

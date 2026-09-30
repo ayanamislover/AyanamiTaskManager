@@ -149,7 +149,7 @@ describe("Project task controls and five views", () => {
     const common = {
       tasks: collection(tasks),
       records: collection([]),
-      events: { isLoading: false, data: { events: [] } },
+      events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
       filteredTasks: tasks,
       sortedTasks: tasks,
       taskSort: null,
@@ -166,6 +166,75 @@ describe("Project task controls and five views", () => {
     expect(renderView("tree")).toContain('class="atm-tree"');
     expect(renderView("timeline")).toContain("没有项目事件");
     expect(renderView("records")).toContain("还没有项目记录");
+  });
+
+  it("任务只读到一部分、时间线读失败时，不说「没有匹配任务」「没有项目事件」", () => {
+    const common = {
+      records: collection([]),
+      sortedTasks: [],
+      taskSort: null,
+      onTaskSort: vi.fn(),
+      onOpenTask: vi.fn(),
+    };
+    const partial = { ...collection([tasks[0]]), hasMore: true, error: new Error("503") };
+    const filtered = renderToStaticMarkup(
+      createElement(ProjectTaskViews, {
+        ...common,
+        view: "list",
+        tasks: partial,
+        filteredTasks: [],
+        events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
+      }),
+    );
+    expect(filtered).not.toContain("<strong>没有匹配任务</strong>");
+    expect(filtered).toContain("<strong>结果还不完整</strong>");
+    expect(filtered).toContain("已读到的部分里没有匹配的任务");
+
+    // 未结束任务已读完，但筛选结果里的已结束任务那一路读失败或还有没取回的页：同样不下结论。
+    const closedBase = {
+      items: [],
+      total: 5,
+      hasMore: false,
+      isLoading: false,
+      isFetchingMore: false,
+      error: null as unknown,
+      loadMore: vi.fn(),
+    };
+    const withClosed = (closed: typeof closedBase) =>
+      renderToStaticMarkup(
+        createElement(ProjectTaskViews, {
+          ...common,
+          view: "list",
+          tasks: collection(tasks),
+          filteredTasks: [],
+          closedTasks: closed,
+          events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
+        }),
+      );
+    for (const closed of [
+      { ...closedBase, error: new Error("503") },
+      { ...closedBase, hasMore: true },
+      { ...closedBase, isLoading: true },
+    ])
+      expect(withClosed(closed)).not.toContain("<strong>没有匹配任务</strong>");
+    expect(withClosed(closedBase)).toContain("<strong>没有匹配任务</strong>");
+
+    const timeline = (data: { events: unknown[] } | undefined) =>
+      renderToStaticMarkup(
+        createElement(ProjectTaskViews, {
+          ...common,
+          view: "timeline",
+          tasks: collection(tasks),
+          filteredTasks: tasks,
+          events: { isLoading: false, data, error: new Error("503"), refetch: vi.fn() },
+        }),
+      );
+    const failed = timeline(undefined);
+    expect(failed).not.toContain("没有项目事件");
+    expect(failed).toContain("项目时间线没能读出来");
+    expect(failed).toContain("载入失败");
+    // 读到过、刷新失败：留着上次的内容，并说明刷新失败。
+    expect(timeline({ events: [] })).toContain("项目时间线刷新失败");
   });
 
   it("模块边界保留 query/keyset/排序契约并限制文件深度", () => {

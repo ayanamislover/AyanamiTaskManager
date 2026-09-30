@@ -39,6 +39,31 @@ body::before {
     display: none;
   }
 }
+/* 滚动条跟着柔彩走：透明轨道、圆角细滑块、没有两端箭头。不设时 Windows 画的是中性灰
+ * 轨道加灰滑块，在暗色侧栏的项目列表旁边是一条灰黑的竖带。只用 ::-webkit-scrollbar：
+ * Chromium 里一旦设了标准的 scrollbar-color / scrollbar-width，这些伪元素就不再生效。
+ * 高对比度模式下交还系统滚动条。 */
+@media not (forced-colors: active) {
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+  ::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: var(--atm-scrollbar-thumb) padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--atm-scrollbar-thumb-hover);
+  }
+}
 button,
 input,
 textarea,

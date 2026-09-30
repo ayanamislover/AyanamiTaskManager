@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderOpenIcon as FolderOpen } from "@phosphor-icons/react/dist/icons/FolderOpen";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
@@ -12,13 +12,32 @@ import {
   CursorLoadStatus,
   Empty,
   ErrorState,
+  IncompleteEmpty,
   LoadingRows,
   MutationErrorAlert,
   PageHead,
 } from "../components/async-state.js";
 import { useDialogs } from "../components/atm-dialogs.js";
 import { useCursorCollections } from "../cursor-collection.js";
+import { useFirstScreen } from "../hooks/use-first-screen.js";
 import { Status, compactPath, formatDuration, formatTime, statusLabels } from "../presentation.js";
+
+// 加载、出错、读完用同一段页头：以前加载时是另一句，冷启动时页头文字要变两次。
+const AGENTS_DESCRIPTION =
+  "按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。";
+
+/**
+ * Agent 页的加载占位；项目列表还没读回来时路由也用它，避免先判成「没有 Agent 会话」。
+ * 传了 children（例如项目列表读失败的提示）就用它替换骨架，页头不变。
+ */
+export function AgentsLoading({ children }: { children?: ReactNode }) {
+  return (
+    <>
+      <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
+      {children ?? <LoadingRows />}
+    </>
+  );
+}
 
 export function AgentsPage({
   client,
@@ -63,17 +82,13 @@ export function AgentsPage({
       await queryClient.invalidateQueries({ queryKey: ["agents"] });
     },
   });
-  if (isLoading && loadedSessionCount === 0)
-    return (
-      <>
-        <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
-        <LoadingRows />
-      </>
-    );
+  // 首屏等全部项目读完再一次换上，不先出半张表再往里补；换上后重试、新增项目不退回骨架。
+  const firstScreen = useFirstScreen(!isLoading || Boolean(error));
+  if (isLoading && (loadedSessionCount === 0 || !firstScreen)) return <AgentsLoading />;
   if (error && loadedSessionCount === 0)
     return (
       <>
-        <PageHead title="Agent" description="项目内已注册的 Agent 会话和最近活动。" />
+        <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
         <CursorLoadStatus
           loadedCount={loadedSessionCount}
           hasMore={false}
@@ -92,12 +107,12 @@ export function AgentsPage({
     Date.now(),
   );
   const conflicts = findAgentSessionConflicts(allSessions);
+  const reading = entries.some((entry) => entry.isLoading || entry.isFetchingNextPage);
+  // 全部项目完整读完才能说「没有」：还在读、有剩页或有项目读失败时只说已读到的部分。
+  const complete = !reading && !error && !entries.some((entry) => entry.hasMore);
   return (
     <>
-      <PageHead
-        title="Agent"
-        description="按项目与 Agent 身份聚合正式 Session。默认只显示在线和 7 天内活跃的 Agent，更早的收在底部历史里。"
-      />
+      <PageHead title="Agent" description={AGENTS_DESCRIPTION} />
       {conflicts.length ? (
         // 页内警告，不能用 atm-notice：那是右下角浮层提示条，会盖在卡片上。
         <div className="atm-inline-warning agent-conflicts" role="status">
@@ -110,11 +125,13 @@ export function AgentsPage({
           ))}
         </div>
       ) : null}
-      {error || entries.some((entry) => entry.isFetchingNextPage) ? (
+      {/* 首屏等满时限先换上、或重试某个项目时，还在首读的来源也要说出来：
+          不然缺席的项目看起来像是「没有 Agent」，页面像是已经完整了。 */}
+      {error || reading ? (
         <CursorLoadStatus
           loadedCount={loadedSessionCount}
           hasMore={entries.some((entry) => entry.hasMore)}
-          loading={entries.some((entry) => entry.isFetchingNextPage)}
+          loading={reading}
           error={error}
           onRetry={() => {
             for (const entry of entries) {
@@ -124,7 +141,13 @@ export function AgentsPage({
         />
       ) : null}
       <section className="atm-panel">
-        {projectGroups.length === 0 ? (
+        {activeGroups.length === 0 && !complete ? (
+          <IncompleteEmpty
+            loading={reading}
+            error={Boolean(error)}
+            found={projectGroups.length === 0 ? "没有 Agent 会话" : "最近 7 天没有活跃的 Agent"}
+          />
+        ) : projectGroups.length === 0 ? (
           <Empty title="没有 Agent 会话" text="Agent 调用 atm_begin 后会在这里出现。" />
         ) : activeGroups.length === 0 ? (
           <Empty title="最近 7 天没有活跃的 Agent" text="更早的 Agent 在下方历史里。" />

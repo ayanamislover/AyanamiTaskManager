@@ -89,7 +89,7 @@ describe("项目任务分组", () => {
         view: "list",
         tasks: collection(open),
         records: collection([]),
-        events: { isLoading: false, data: { events: [] } },
+        events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
         filteredTasks: groups.filteredTasks,
         sortedTasks: groups.sortedTasks,
         closedRows: groups.closedRows,

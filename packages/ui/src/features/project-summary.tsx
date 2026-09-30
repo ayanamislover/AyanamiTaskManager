@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/ArrowRight";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { Empty, LoadingRows } from "../components/async-state.js";
+import { Empty, IncompleteEmpty, LoadingRows } from "../components/async-state.js";
 import {
   Status,
   compactPath,
@@ -23,6 +23,7 @@ export function ProjectSummary({
   projectCode,
   workItems,
   tasksLoading = false,
+  tasksIncomplete = null,
   openTask,
   children,
 }: {
@@ -31,6 +32,11 @@ export function ProjectSummary({
   workItems: any[];
   /** 任务首屏还没读回来：下面几张卡显示加载态，不能先说「没有进行中任务」。 */
   tasksLoading?: boolean;
+  /**
+   * 任务读到了一部分：还有页在读、有剩页，或者读失败了。这时下面几张卡只说已读到的，
+   * 计数写成「n+」，过滤为空也不说「没有进行中任务」。null 表示已完整读完。
+   */
+  tasksIncomplete?: { reading: boolean; error: boolean } | null;
   openTask: (key: string) => void;
   children?: ReactNode;
 }) {
@@ -64,8 +70,27 @@ export function ProjectSummary({
   const claimedCount = workItems.filter((task) => Boolean(task.claimedBySessionId)).length;
   const latestUpdate = (updates.data ?? []).find((update) => update.status === "PUBLISHED");
   // 还没读回来就显示占位，不先说「尚未设置」：那是一句关于项目的断言，读回来再改口就是闪一下。
-  const briefValue = (value: unknown) => (brief.isPending ? PENDING : String(value ?? "尚未设置"));
-  const tasksCount = (count: number) => (tasksLoading ? PENDING : count);
+  // 读失败也一样不能落到缺省值：「尚未设置」「尚无」是结论，读失败只能说读失败。
+  // 各块由查询自己的 30 秒刷新重读，读到了就换回正常内容。
+  const unavailable = (query: { isPending: boolean; data: unknown }) =>
+    query.isPending ? PENDING : query.data === undefined ? FAILED : null;
+  const briefValue = (value: unknown) => unavailable(brief) ?? String(value ?? "尚未设置");
+  const tasksCount = (count: number) =>
+    tasksLoading ? PENDING : tasksIncomplete ? (count ? `${count}+` : PENDING) : count;
+  const tasksEmpty = (found: string, title: string, text: string) =>
+    tasksIncomplete ? (
+      <IncompleteEmpty
+        loading={tasksIncomplete.reading}
+        error={tasksIncomplete.error}
+        found={found}
+        scope="任务"
+      />
+    ) : (
+      <Empty title={title} text={text} />
+    );
+  const overviewValue = unavailable(overview);
+  const agentsValue = unavailable(agents);
+  const updatesValue = unavailable(updates);
 
   return (
     <>
@@ -81,36 +106,30 @@ export function ProjectSummary({
         <div className="atm-metric">
           <div className="label">健康度</div>
           <div style={{ marginTop: 12 }}>
-            {overview.isPending ? (
-              PENDING
-            ) : (
-              <Status value={String(projectSummary?.health ?? "UNKNOWN")} />
-            )}
+            {overviewValue ?? <Status value={String(projectSummary?.health ?? "UNKNOWN")} />}
           </div>
           <div className="detail">
-            最近活动 {overview.isPending ? PENDING : formatTime(projectSummary?.last_activity_at)}
+            最近活动 {overviewValue ?? formatTime(projectSummary?.last_activity_at)}
           </div>
         </div>
         <div className="atm-metric">
           <div className="label">项目进度</div>
           <div className="value">
-            {overview.isPending ? PENDING : `${Math.round(Number(projectSummary?.progress ?? 0))}%`}
+            {overviewValue ?? `${Math.round(Number(projectSummary?.progress ?? 0))}%`}
           </div>
           <div className="detail">
-            {overview.isPending
-              ? PENDING
-              : (progressSourceLabels[String(projectSummary?.progress_source ?? "NONE")] ??
-                "尚无进度")}
+            {overviewValue ??
+              progressSourceLabels[String(projectSummary?.progress_source ?? "NONE")] ??
+              "尚无进度"}
           </div>
         </div>
         <div className="atm-metric">
           <div className="label">下一目标日期</div>
           <div style={{ marginTop: 12, fontWeight: 650 }}>
-            {overview.isPending ? PENDING : String(projectSummary?.next_target_date ?? "尚未设置")}
+            {overviewValue ?? String(projectSummary?.next_target_date ?? "尚未设置")}
           </div>
           <div className="detail">
-            项目更新{" "}
-            {overview.isPending ? PENDING : formatTime(projectSummary?.last_project_update_at)}
+            项目更新 {overviewValue ?? formatTime(projectSummary?.last_project_update_at)}
           </div>
         </div>
       </section>
@@ -139,14 +158,14 @@ export function ProjectSummary({
               ))}
             </div>
           ) : (
-            <Empty title="没有进行中任务" text="从可开始任务中选择下一项。" />
+            tasksEmpty("没有进行中任务", "没有进行中任务", "从可开始任务中选择下一项。")
           )}
         </article>
         <article className="atm-panel atm-management-card">
           <div className="atm-panel-head">
             <h2>阻塞与等待</h2>
             <span
-              className={`atm-badge ${tasksLoading ? "" : blockers.length ? "danger" : "success"}`}
+              className={`atm-badge ${tasksLoading ? "" : blockers.length ? "danger" : tasksIncomplete ? "" : "success"}`}
             >
               {tasksCount(blockers.length)}
             </span>
@@ -168,24 +187,23 @@ export function ProjectSummary({
               ))}
             </div>
           ) : (
-            <Empty title="没有阻塞" text="当前没有需要外部处理的条件。" />
+            tasksEmpty("没有阻塞或等待", "没有阻塞", "当前没有需要外部处理的条件。")
           )}
         </article>
         <article className="atm-panel atm-management-card">
           <div className="atm-panel-head">
             <h2>Agent 与领取</h2>
-            <span className="atm-badge">
-              在线 {agents.isPending ? PENDING : onlineAgents.length}
-            </span>
+            <span className="atm-badge">在线 {agentsValue ?? onlineAgents.length}</span>
           </div>
           <div className="atm-panel-body">
             <div className="atm-row-title">{tasksCount(claimedCount)} 项任务已领取</div>
             <div className="atm-row-sub">
-              {agents.isPending
-                ? PENDING
-                : onlineAgents.length
-                  ? onlineAgents.map((agent) => agent.displayName || agent.agentId).join("、")
-                  : "尚无在线 Agent 会话"}
+              {agentsValue === FAILED
+                ? "Agent 会话没能读出来，稍后会自动重读。"
+                : (agentsValue ??
+                  (onlineAgents.length
+                    ? onlineAgents.map((agent) => agent.displayName || agent.agentId).join("、")
+                    : "尚无在线 Agent 会话"))}
             </div>
             {onlineAgents.map((agent: any) => (
               <div
@@ -203,14 +221,16 @@ export function ProjectSummary({
           </div>
           <div className="atm-panel-body">
             <div className="atm-row-title">
-              {updates.isPending ? PENDING : (latestUpdate?.summary ?? "尚未发布项目更新")}
+              {updatesValue ?? latestUpdate?.summary ?? "尚未发布项目更新"}
             </div>
             <div className="atm-row-sub">
-              {updates.isPending
-                ? PENDING
-                : latestUpdate
-                  ? `${statusLabels[latestUpdate.health] ?? latestUpdate.health} · ${formatTime(latestUpdate.publishedAt)}`
-                  : "发布后会形成可追溯的项目判断"}
+              {updatesValue === FAILED
+                ? "项目更新没能读出来，稍后会自动重读。"
+                : updatesValue
+                  ? updatesValue
+                  : latestUpdate
+                    ? `${statusLabels[latestUpdate.health] ?? latestUpdate.health} · ${formatTime(latestUpdate.publishedAt)}`
+                    : "发布后会形成可追溯的项目判断"}
             </div>
           </div>
         </article>
@@ -236,7 +256,7 @@ export function ProjectSummary({
               ))}
             </div>
           ) : (
-            <Empty title="没有 READY 任务" text="拆解并创建下一项可执行工作。" />
+            tasksEmpty("没有 READY 任务", "没有 READY 任务", "拆解并创建下一项可执行工作。")
           )}
         </article>
       </section>
@@ -246,3 +266,5 @@ export function ProjectSummary({
 
 /** 读取中的占位：一个破折号，不是「0」也不是「尚未设置」。 */
 const PENDING = "—";
+/** 读取失败时的占位：不拿缺省值（「尚未设置」「尚无」）顶替。 */
+const FAILED = "读取失败";

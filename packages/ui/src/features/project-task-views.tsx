@@ -1,7 +1,14 @@
 import type { ReactNode } from "react";
 import { GitBranchIcon as GitBranch } from "@phosphor-icons/react/dist/icons/GitBranch";
-import type { CursorCollection } from "../cursor-collection.js";
-import { CursorLoadStatus, Empty, ErrorState, LoadingRows } from "../components/async-state.js";
+import { collectionIncomplete, type CursorCollection } from "../cursor-collection.js";
+import {
+  CursorLoadStatus,
+  Empty,
+  ErrorState,
+  IncompleteEmpty,
+  LoadingRows,
+  SectionLoadError,
+} from "../components/async-state.js";
 import { taskRowInteractionProps } from "../components/keyboard-interactions.js";
 import { formatTime, priorityLabels, Status } from "../presentation.js";
 import { presentTimelineEvent } from "../timeline-events.js";
@@ -17,6 +24,8 @@ import type { RecentClosedTasks } from "./recent-closed-tasks.js";
 type ProjectEventsState = {
   isLoading: boolean;
   data: { events?: unknown[] } | undefined;
+  error: unknown;
+  refetch: () => unknown;
 };
 
 export function ProjectTaskViews({
@@ -149,9 +158,26 @@ export function ProjectTaskViews({
     }
     if (view === "timeline") {
       if (events.isLoading) return <LoadingRows />;
+      // 读失败不是「没有项目事件」：首读失败给错误和重试；读到过就留着，并说明刷新失败。
+      const failure = events.error ? (
+        <SectionLoadError
+          message={
+            events.data ? "项目时间线刷新失败，下面是上次读到的内容。" : "项目时间线没能读出来。"
+          }
+          onRetry={() => void events.refetch()}
+        />
+      ) : null;
+      if (events.error && !events.data)
+        return (
+          <>
+            {failure}
+            <ErrorState error={events.error} />
+          </>
+        );
       const rows = timeline.visible;
       return (
         <>
+          {failure}
           <div className="atm-timeline-toolbar">
             <SystemEventsToggle checked={timeline.showSystem} onChange={timeline.setShowSystem} />
           </div>
@@ -178,7 +204,24 @@ export function ProjectTaskViews({
         </>
       );
     }
-    if (!filteredTasks.length) return <Empty title="没有匹配任务" text="调整筛选或创建任务。" />;
+    if (!filteredTasks.length) {
+      // 任务只读到一部分时，筛选为空只说明已读到的部分里没有（上方状态行给出重试）。
+      // 筛选结果也包含已结束任务：那一路在读、读失败或还有没取回的页，同样不能下结论。
+      const incomplete = mergeIncomplete(
+        collectionIncomplete(tasks),
+        closedIncomplete(closedTasks),
+      );
+      return incomplete ? (
+        <IncompleteEmpty
+          loading={incomplete.reading}
+          error={incomplete.error}
+          found="没有匹配的任务"
+          scope="任务"
+        />
+      ) : (
+        <Empty title="没有匹配任务" text="调整筛选或创建任务。" />
+      );
+    }
     if (view === "board") {
       const columns = [
         ["待开始", ["BACKLOG", "READY"]],
@@ -392,4 +435,24 @@ export function ProjectTaskViews({
       </section>
     </>
   );
+}
+
+function closedIncomplete(
+  closed: RecentClosedTasks | undefined,
+): { reading: boolean; error: boolean } | null {
+  if (!closed) return null;
+  const reading = closed.isLoading || closed.isFetchingMore;
+  if (!reading && !closed.error && !closed.hasMore) return null;
+  return { reading, error: Boolean(closed.error) };
+}
+
+function mergeIncomplete(
+  ...parts: Array<{ reading: boolean; error: boolean } | null>
+): { reading: boolean; error: boolean } | null {
+  const present = parts.filter((part) => part !== null);
+  if (!present.length) return null;
+  return {
+    reading: present.some((part) => part.reading),
+    error: present.some((part) => part.error),
+  };
 }

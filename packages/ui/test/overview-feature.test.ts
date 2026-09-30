@@ -54,6 +54,36 @@ function renderWithClient(
   return renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient }, child));
 }
 
+/**
+ * 总览首屏要等「等你处理」各项目的任务和垃圾箱都有结果才换上。静态渲染不跑 queryFn，
+ * 这里把它们按读完的样子放进缓存；没放的（垃圾箱已由用例自己放）保持原样。
+ */
+function seedFirstScreen(queryClient: QueryClient, tasks: Record<string, unknown[]> = {}) {
+  const overview = queryClient.getQueryData<{ projects: RegisteredProject[] }>(["overview"]);
+  const codes = (overview?.projects ?? [])
+    .filter((item) => item.lifecycle === "ACTIVE")
+    .map((item) => item.code);
+  queryClient.setQueryData(
+    ["tasks", "all", "ui", "open", ...codes, codes.join("\u0000")],
+    Object.fromEntries(
+      codes.map((code) => [
+        code,
+        {
+          owner: code,
+          items: tasks[code] ?? [],
+          hasMore: false,
+          loading: false,
+          error: null,
+          cursor: undefined,
+          seenCursors: [],
+        },
+      ]),
+    ),
+  );
+  if (queryClient.getQueryData(["projects", "trash"]) === undefined)
+    queryClient.setQueryData(["projects", "trash"], []);
+}
+
 function missingOverviewContracts(source: string): string[] {
   const contracts = [
     'queryKey: ["overview"]',
@@ -107,20 +137,29 @@ describe("Overview feature", () => {
     const TimelineRow: ComponentType<{ event: Record<string, unknown> }> = ({ event }) =>
       createElement("div", { "data-testid": "timeline-row" }, String(event.title));
 
-    const markup = renderWithClient(
-      queryClient,
-      createElement(OverviewPage, {
-        client: client(),
-        onProject: vi.fn(),
-        onQuick: vi.fn(),
-        notify: vi.fn(),
-        TimelineEventRow: TimelineRow,
-      }),
-    );
+    const render = () =>
+      renderWithClient(
+        queryClient,
+        createElement(OverviewPage, {
+          client: client(),
+          onProject: vi.fn(),
+          onQuick: vi.fn(),
+          notify: vi.fn(),
+          TimelineEventRow: TimelineRow,
+        }),
+      );
 
-    // 静态渲染时任务还没读回来：页头不提前下结论。
-    expect(markup).toContain("<h1>总览</h1><p>正在汇总等你处理的事…</p>");
-    expect(markup).not.toContain("没有等你处理的事");
+    // 总览已经回来、各项目任务还没读完：整页仍是骨架，不先渲染一版「正在汇总…」再换。
+    const pending = render();
+    expect(pending).toContain("atm-skeleton");
+    expect(pending).not.toContain("正在汇总等你处理的事");
+    expect(pending).not.toContain("进行中项目");
+
+    seedFirstScreen(queryClient, {
+      ATM: [{ key: "ATM-T-0001", title: "等你拍板", status: "WAITING_USER" }],
+    });
+    const markup = render();
+    expect(markup).toContain("<h1>总览</h1><p>1 件事等你处理，2 个任务正在推进。</p>");
     expect(markup).toContain("进行中项目");
     // 等你回复、受阻已逐条列在「等你处理」里，「项目提醒」不再按项目重复计数。
     expect(markup).not.toContain("项等待用户");
@@ -154,6 +193,7 @@ describe("Overview feature", () => {
         { ...project(), code: "QUIET", lifecycle: "TRASHED", restoreRequest: null },
       ],
     );
+    seedFirstScreen(queryClient);
     const markup = renderWithClient(
       queryClient,
       createElement(OverviewPage, {
@@ -169,6 +209,39 @@ describe("Overview feature", () => {
     expect(markup).not.toContain("QUIET");
   });
 
+  it("备份提醒看服务端给出的最近一次备份结果：失败后又成功过就不再提醒", () => {
+    const render = (lastBackup: Record<string, unknown> | null) => {
+      const queryClient = new QueryClient();
+      queryClient.setQueryData(["overview"], {
+        sequence: 46,
+        projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
+        quick: { blocked: 0 },
+        projectionFailures: [],
+        // 展示窗口里的备份事件与结论无关：提醒只看服务端给出的最近一次备份结果。
+        recentEvents: [{ sequence: 30, type: "backup.failed", actor: "SYSTEM" }],
+        lastBackup,
+      });
+      queryClient.setQueryData(["quick"], []);
+      seedFirstScreen(queryClient);
+      return renderWithClient(
+        queryClient,
+        createElement(OverviewPage, {
+          client: client(),
+          onProject: vi.fn(),
+          onQuick: vi.fn(),
+          notify: vi.fn(),
+          TimelineEventRow: () => createElement("div"),
+        }),
+      );
+    };
+    const warning = "最近一次自动备份失败";
+    const failed = { sequence: 40, type: "backup.failed", actor: "SYSTEM" };
+    const created = { sequence: 44, type: "backup.created", actor: "SYSTEM" };
+    expect(render(failed)).toContain(warning);
+    expect(render(created)).not.toContain(warning);
+    expect(render(null)).not.toContain(warning);
+  });
+
   it("总览项目卡长名称最多两行并保留全称提示", () => {
     const longName = "Codex Agent Permission Preflight And Deployment Readiness Verification";
     const queryClient = new QueryClient();
@@ -181,6 +254,7 @@ describe("Overview feature", () => {
     });
     queryClient.setQueryData(["quick"], []);
 
+    seedFirstScreen(queryClient);
     const markup = renderWithClient(
       queryClient,
       createElement(OverviewPage, {
@@ -219,6 +293,7 @@ describe("Overview feature", () => {
     queryClient.setQueryData(["quick"], []);
     queryClient.setQueryData(["settings", PROJECT_ORDER_SETTING], ["id-gamma", "id-alpha"]);
 
+    seedFirstScreen(queryClient);
     const markup = renderWithClient(
       queryClient,
       createElement(OverviewPage, {
@@ -297,6 +372,38 @@ describe("Overview feature", () => {
     expect(render("active", { error: new Error("断了"), hasMore: true })).toContain(
       "已找到 1 项，部分任务读取失败",
     );
+  });
+
+  it("过滤后为空但还没完整读完（读失败、有剩页）时不下「没有」的结论", () => {
+    const ready = {
+      key: "ATM",
+      items: [{ key: "ATM-T-2", title: "还没开始", status: "READY" }],
+      loadedCount: 1,
+      hasMore: false,
+      isLoading: false,
+      isFetchingNextPage: false,
+      error: null as unknown,
+    };
+    const render = (other: Record<string, unknown>) =>
+      renderToStaticMarkup(
+        createElement(TasksAcrossProjectsView, {
+          entries: [ready, { ...ready, key: "SEARCH", items: [], loadedCount: 0, ...other }],
+          projects: [project()],
+          mode: "active",
+          onTask: vi.fn(),
+          onRetry: vi.fn(),
+        }),
+      );
+    for (const other of [{ error: new Error("断了"), hasMore: true }, { hasMore: true }]) {
+      const markup = render(other);
+      expect(markup).not.toContain("<strong>没有活动任务</strong>");
+      expect(markup).toContain("<strong>结果还不完整</strong>");
+      expect(markup).toContain("已读到的部分里没有活动任务");
+    }
+    // 全部完整读完、确实没有匹配项，才是确定性的空态。
+    const complete = render({});
+    expect(complete).toContain("<strong>没有活动任务</strong>");
+    expect(complete).not.toContain("结果还不完整");
   });
 
   describe("页头与「等你处理」同源", () => {

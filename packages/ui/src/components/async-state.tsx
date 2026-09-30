@@ -30,6 +30,47 @@ export function Empty({
   );
 }
 
+/**
+ * 过滤后一条都没有、但还不能下「没有」的结论时用：还有来源在读、有剩页没读，或者读失败了。
+ * 首屏等满时限先换上、重试某个来源、或分页读到一半失败时会进这里；
+ * 只有全部完整读完，才轮到确定性的空态。scope 说的是「还没读完的是什么」。
+ */
+export function IncompleteEmpty({
+  loading,
+  error = false,
+  found,
+  scope = "项目",
+}: {
+  loading: boolean;
+  error?: boolean;
+  found: string;
+  scope?: string;
+}) {
+  const next = error
+    ? "重试后才能确定。"
+    : loading
+      ? "全部读完后才能确定。"
+      : "还有没读取的部分，结果可能不全。";
+  return (
+    <Empty
+      title={loading ? `还有${scope}没读完` : "结果还不完整"}
+      text={`已读到的部分里${found}；${next}`}
+    />
+  );
+}
+
+/** 页面里某一块读失败时的行内提示：说清楚是哪一块，给出重试，不拿空态顶替。 */
+export function SectionLoadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="atm-inline-error" role="alert">
+      {message}
+      <button className="atm-button" style={{ marginLeft: 8 }} onClick={onRetry}>
+        重试
+      </button>
+    </div>
+  );
+}
+
 export function ErrorState({ error }: { error: unknown }) {
   return (
     <div className="atm-error">
@@ -38,6 +79,19 @@ export function ErrorState({ error }: { error: unknown }) {
         <div>{error instanceof Error ? error.message : String(error)}</div>
       </div>
     </div>
+  );
+}
+
+/**
+ * 项目列表读失败时，依赖它的页面（项目页、活动任务、阻塞、Agent）显示这个，
+ * 不把空列表当成「没有项目」「没有活动任务」。
+ */
+export function ProjectsUnavailable({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  return (
+    <>
+      <SectionLoadError message="项目列表没能读出来，暂时无法判断这里有什么。" onRetry={onRetry} />
+      <ErrorState error={error} />
+    </>
   );
 }
 

@@ -770,12 +770,15 @@ describe("waking the desktop", () => {
   // checks), hence the generous deadline. One unexplained miss was seen during mutation
   // runs and did not reproduce; the message carries what was on disk so a repeat is
   // diagnosable instead of anecdotal.
+  //
+  // Only newline-terminated lines count: the recorder may still be writing the last one,
+  // and parsing that half line was a flaky "Unterminated string in JSON" failure.
   async function records(path: string, count: number): Promise<Array<Record<string, unknown>>> {
-    const read = () =>
-      existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean) : null;
+    const read = () => (existsSync(path) ? readFileSync(path, "utf8") : null);
+    const completeLines = (text: string) => text.split("\n").slice(0, -1).filter(Boolean);
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      const lines = read() ?? [];
+      const lines = completeLines(read() ?? "");
       if (lines.length >= count) return lines.map((line) => JSON.parse(line));
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
     }
