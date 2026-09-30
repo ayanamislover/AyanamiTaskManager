@@ -116,7 +116,7 @@ projectH  = hex(HMAC(nameKey, "project:" + CODE))[0:20]        项目码不出�
 ```
 
 配对码里有中继 token 和空间密钥，只在电脑端「手机同步」面板上显示，不写日志、不进 ATM 记录。
-「重置配对」会生成新的 `spaceId` 和 `secret`，并删除旧空间里电脑写过的文档；旧手机随即失效，需要重新扫码。
+「重置配对」会生成新的 `spaceId` 和 `secret`，并删除旧空间里的全部文档（含手机写的）；旧手机随即失效，需要重新扫码。
 吊销中继 token 属于中继自己的管理动作（`atm-relay token revoke` 或 AyanamiCloud 网页）。
 
 ## 5. 文档键
@@ -194,14 +194,22 @@ type TaskCard = {
 - 运行在 daemon 所在进程（当前是 Electron 主进程），直接调用 `AyanamiTaskService`，不走 HTTP。
 - 非敏感配置 `<数据目录>/sync/config.json`：`enabled、relayUrl、appId、deviceId、deviceName、spaceId、cursor`
   和每个项目最近一次发布的摘要。敏感项（中继 token、空间 secret）经宿主提供的 `SecretStore` 落盘：
-  桌面端用 Electron `safeStorage`（DPAPI）；独立 daemon（开发 / e2e）用明文文件并在状态里标注。
+  桌面端用 Electron `safeStorage`（DPAPI），落在 `sync/secrets.enc.json`，`safeStorage` 不可用时拒绝保存；
+  独立 daemon（开发 / e2e，需设 `ATM_SYNC=1` 才创建连接器）用明文 `sync/secrets.json` 并在状态里标注。
   **两者都不进 Registry 的 settings 表**（那张表 Agent 令牌可读）。
+- 启用且地址、app、token 齐全时自动建空间；并发请求配对码也只会建一次（单飞）。
+  换中继地址或 app、重置配对时清空游标、已发布摘要与修订号缓存，走一次全量重同步。
 - 快照：订阅进程内全局事件，把受影响项目标脏，1.5 s 去抖后重建该项目的 `TaskCard` 列表；摘要不变就不写。
   启动时全量发布一次。
 - 命令：变更流里出现 `<S>/cmd/*` 的 put 就读、解密、校验、执行、回 ack；启动时再 `documents?prefix=<S>/cmd/` 兜底一次。
-- 退避：网络错误 1 s → 2 s → … → 60 s；401/403 停止并在状态里显示「中继拒绝了 token」；410 走全量重同步。
+- 退避：网络错误 1 s → 2 s → … → 60 s；401/403 停止并在状态里显示「中继拒绝了 token」；410 走全量重同步；
+  `changes` 回 400（多半是换了中继、拿着对方格式的游标）清游标重来一次，再失败才报错；429 按 `retry_after` 等待。
 
 ### REST（daemon，供桌面设置页用）
+
+宿主没有注入连接器 / 派单器时，对应路由统一返回 404 `SYNC_UNAVAILABLE` / `DISPATCH_UNAVAILABLE`（路由总是注册，权限守卫才能覆盖到）。
+`state ∈ disabled | connecting | online | error`，细分原因写在 `lastError`（中文）；`paired` 每项是设备文档去掉 `v`，只列其它设备；
+`configured` 表示地址、app、token 三者齐备；`secretStore ∈ safeStorage | plaintext`。
 
 | 方法 | 路径                                                 | 权限      | 说明                                                                                                                                                                     |
 | ---- | ---------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

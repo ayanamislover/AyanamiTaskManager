@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { app, ipcMain } from "electron";
+import { createAgentDispatcher, type AgentDispatcher } from "@ayanami-task/agent-dispatch";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { AyanamiClient } from "@ayanami-task/client";
 import { createCliProgram } from "@ayanami-task/cli";
@@ -14,6 +15,12 @@ import {
   type DaemonRuntimeDescriptor,
 } from "@ayanami-task/daemon";
 import { runStdioMcpProxy } from "@ayanami-task/mcp";
+import {
+  SyncConnector,
+  dispatchPortFrom,
+  syncDirectory,
+  taskServiceDispatchHost,
+} from "@ayanami-task/sync";
 import { installAgentDocumentation } from "./agent-documentation.js";
 import {
   installMcpRuntimeLink,
@@ -23,6 +30,7 @@ import {
 } from "./mcp-launch.js";
 import { LOGIN_ITEM_ARGS, loginItemExecutable } from "./startup.js";
 import { proxyRuntimeRequest, type RuntimeRequestInput } from "./runtime-request.js";
+import { SafeStorageSecretStore } from "./safe-storage-secret-store.js";
 
 export type Runtime = DaemonRuntimeDescriptor;
 
@@ -100,6 +108,62 @@ export function bundledMcpStdioPath(): string {
     : join(app.getAppPath(), "apps", "desktop", "resources", "mcp-stdio.cjs");
 }
 
+/** 手机同步与派单只写错误说明与命令 ID，不含任何密钥。 */
+const mobileLogger = {
+  info: () => undefined,
+  warn: (message: string, meta?: Record<string, unknown>) => console.warn(`[ATM] ${message}`, meta),
+  error: (message: string, meta?: Record<string, unknown>) =>
+    console.error(`[ATM] ${message}`, meta),
+};
+
+type MobileFeatures = {
+  sync: SyncConnector | null;
+  dispatch: AgentDispatcher | null;
+  close(): Promise<void>;
+};
+
+/**
+ * 手机同步与 Claude 派单（docs/mobile-sync.md）。两者默认关闭：未启用时连接器不联网、派单不接单。
+ * 同步密钥经 safeStorage（DPAPI）加密落盘；系统加密不可用时拒绝保存，状态里说明。
+ * 它们是可选功能：创建失败不拖垮 ATM 本体，对应路由回 404 *_UNAVAILABLE。
+ */
+async function startMobileFeatures(
+  service: AyanamiTaskService,
+  dataDir: string,
+): Promise<MobileFeatures> {
+  const unavailable = (feature: string) => (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    mobileLogger.error(`${feature}没有启动`, { error: message });
+    smokeTrace(`${feature}.unavailable`, { error: message });
+    return null;
+  };
+  const dispatch = await createAgentDispatcher({
+    dataDir,
+    host: taskServiceDispatchHost(service),
+    logger: mobileLogger,
+  }).catch(unavailable("dispatch"));
+  const connector = new SyncConnector({
+    dataDir,
+    service,
+    secrets: new SafeStorageSecretStore(syncDirectory(dataDir)),
+    appVersion: DAEMON_VERSION,
+    dispatch: dispatch ? dispatchPortFrom(dispatch) : null,
+    logger: mobileLogger,
+  });
+  const sync = await connector
+    .start()
+    .then(() => connector)
+    .catch(unavailable("sync"));
+  return {
+    sync,
+    dispatch,
+    async close() {
+      await sync?.stop();
+      dispatch?.close();
+    },
+  };
+}
+
 export async function startRuntimeHost(): Promise<RuntimeHost> {
   const dataDir = dataDirBeforeReady();
   if (shouldManageMcpRuntime(app.isPackaged)) {
@@ -117,6 +181,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   const userToken = createDaemonToken({});
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+  let mobile: MobileFeatures | null = null;
   // 同一个启动时间既发布在 runtime 元数据里，也作为进度条「本次启动以来」的起点。
   const startedAt = new Date().toISOString();
   try {
@@ -124,10 +189,19 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
       dataDir,
       migrationsRoot: join(app.getAppPath(), "migrations"),
     });
-    server = await buildAyanamiServer({ service, token, userToken, startedAt });
+    mobile = await startMobileFeatures(service, dataDir);
+    server = await buildAyanamiServer({
+      service,
+      token,
+      userToken,
+      startedAt,
+      ...(mobile.sync ? { sync: mobile.sync } : {}),
+      ...(mobile.dispatch ? { dispatch: mobile.dispatch } : {}),
+    });
     await server.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
     if (server) await server.close().catch(() => undefined);
+    await mobile?.close().catch(() => undefined);
     service?.close();
     lease.release();
     throw error;
@@ -135,6 +209,7 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
   const address = server.server.address();
   if (!address || typeof address === "string") {
     await server.close();
+    await mobile.close();
     service.close();
     lease.release();
     throw new Error("DAEMON_TCP_ADDRESS_MISSING");
@@ -159,6 +234,8 @@ export async function startRuntimeHost(): Promise<RuntimeHost> {
       if (closed) return;
       closed = true;
       await server.close();
+      // 连接器停下时要写离线状态，得在关库之前。
+      await mobile.close();
       service.close();
       lease.clear();
       lease.release();

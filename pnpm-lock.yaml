@@ -141,6 +141,9 @@ importers:
 
   apps/daemon:
     dependencies:
+      '@ayanami-task/agent-dispatch':
+        specifier: workspace:*
+        version: link:../../packages/agent-dispatch
       '@ayanami-task/application':
         specifier: workspace:*
         version: link:../../packages/application
@@ -153,6 +156,9 @@ importers:
       '@ayanami-task/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@ayanami-task/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
       '@fastify/cors':
         specifier: 11.0.1
         version: 11.0.1
@@ -172,6 +178,9 @@ importers:
       '@ayanami-task/agent-config':
         specifier: workspace:*
         version: link:../../packages/agent-config
+      '@ayanami-task/agent-dispatch':
+        specifier: workspace:*
+        version: link:../../packages/agent-dispatch
       '@ayanami-task/application':
         specifier: workspace:*
         version: link:../../packages/application
@@ -187,6 +196,9 @@ importers:
       '@ayanami-task/mcp':
         specifier: workspace:*
         version: link:../../packages/mcp
+      '@ayanami-task/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
       '@ayanami-task/ui':
         specifier: workspace:*
         version: link:../../packages/ui

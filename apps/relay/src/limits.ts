@@ -32,7 +32,7 @@ export const DEFAULT_LIMITS: Readonly<RelayLimits> = Object.freeze({
   maxDataBytes: 256 * 1024,
   maxDocumentsPerApp: 5000,
   maxBytesPerApp: 200 * 1024 * 1024,
-  requestsPerSecond: 20,
+  requestsPerSecond: 50,
   waitersPerToken: 4,
   waitersGlobal: 256,
   maxWaitSeconds: 25,

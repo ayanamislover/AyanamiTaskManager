@@ -112,7 +112,7 @@ atm-relay app create other-app --name 另一个应用 --data ./relay-data
 | 单文档 `data`（原文字节）             | 256 KiB  | `ATM_RELAY_MAX_DATA_BYTES`           | 413 `PAYLOAD_TOO_LARGE`            |
 | 每应用文档数                          | 5000     | `ATM_RELAY_MAX_DOCUMENTS`            | 507 `INSUFFICIENT_STORAGE`         |
 | 每应用总字节                          | 200 MiB  | `ATM_RELAY_MAX_APP_BYTES`            | 507 `INSUFFICIENT_STORAGE`         |
-| 每 token 请求速率（令牌桶，容量同值） | 20 次/秒 | `ATM_RELAY_RATE_PER_SECOND`          | 429 `RATE_LIMITED` + `retry_after` |
+| 每 token 请求速率（令牌桶，容量同值） | 50 次/秒 | `ATM_RELAY_RATE_PER_SECOND`          | 429 `RATE_LIMITED` + `retry_after` |
 | 每 token 同时挂起的长轮询             | 4        | `ATM_RELAY_WAITERS_PER_TOKEN`        | 429 `TOO_MANY_WAITERS`             |
 | 全局同时挂起的长轮询                  | 256      | `ATM_RELAY_WAITERS_GLOBAL`           | 429 `TOO_MANY_WAITERS`             |
 | 长轮询最长等待                        | 25 秒    | `ATM_RELAY_MAX_WAIT_SECONDS`（≤ 60） | 超过按上限处理                     |

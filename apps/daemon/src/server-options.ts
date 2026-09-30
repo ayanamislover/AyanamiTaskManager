@@ -17,6 +17,25 @@ export type AyanamiServerOptions = {
   startedAt?: string;
   /** Claude 自动派单（可选）。不传时派单路由统一返回 404 DISPATCH_UNAVAILABLE。 */
   dispatch?: DispatchController;
+  /** 手机同步连接器（可选）。不传时同步路由统一返回 404 SYNC_UNAVAILABLE。 */
+  sync?: SyncController;
+};
+
+/**
+ * 手机同步连接器的最小接口（docs/mobile-sync.md §7），路由在 sync-routes.ts。
+ * `@ayanami-task/sync` 的 SyncConnector 满足它；daemon 不依赖那个包，由宿主注入。
+ */
+export type SyncController = {
+  /** 状态，**不含任何密钥**（token、空间密钥、配对码都不在里面）。 */
+  status(): Promise<unknown>;
+  /** `{enabled?, relayUrl?, appId?, token?, deviceName?}`；token 只写不读。不合法抛 AtmError。 */
+  updateConfig(patch: unknown): Promise<unknown>;
+  /** 探测中继：`{ok, latencyMs, longPoll, server?, error?}`，连不上不抛错。 */
+  testRelay(candidate?: unknown): Promise<unknown>;
+  /** `{pairingCode, spaceId}`；配对码含 token 与空间密钥，只能回给用户凭证。 */
+  createPairing(): Promise<{ pairingCode: string; spaceId: string }>;
+  /** 轮换配对空间，旧手机失效。 */
+  resetSpace(): Promise<unknown>;
 };
 
 /**

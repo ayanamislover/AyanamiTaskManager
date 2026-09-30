@@ -5,10 +5,11 @@ import { registerKnowledgeRoutes } from "./knowledge-routes.js";
 import { registerProjectRoutes } from "./project-routes.js";
 import type { AyanamiServerOptions } from "./server-options.js";
 import { registerSessionRoutes } from "./session-routes.js";
+import { registerSyncRoutes } from "./sync-routes.js";
 import { registerTransportRoutes } from "./transport-routes.js";
 import { registerWorkRoutes } from "./work-routes.js";
 
-export type { AyanamiServerOptions, DispatchController } from "./server-options.js";
+export type { AyanamiServerOptions, DispatchController, SyncController } from "./server-options.js";
 export { authenticate, type AtmPrincipal } from "./http-boundary.js";
 export {
   acquireDaemonRuntime,
@@ -34,6 +35,7 @@ export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<F
   registerWorkRoutes(app, options);
   registerSessionRoutes(app, options);
   registerDispatchRoutes(app, options.dispatch);
+  registerSyncRoutes(app, options.sync);
   await registerTransportRoutes(app, options);
   installNotFoundHandler(app);
   await app.ready();

@@ -37,7 +37,7 @@ Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、A
 - **密钥不进 Agent 可读的地方。** 中继 token 与空间密钥经宿主提供的 SecretStore 落盘：正式桌面端用 Electron `safeStorage`（Windows 上即 DPAPI），不可用时拒绝保存；standalone 开发 daemon 用明文文件并在状态里标明。两者都不写入 Registry 的 settings 表、`daemon.json`、日志或 ATM Record。`GET /api/v1/sync/status` 两种凭证都能读，但不含 token、空间密钥或配对码。
 - **写入口全部是用户专属。** 修改中继配置、生成配对码、重置配对都要求用户凭证；Agent 凭证返回 `403 USER_AUTHORIZATION_REQUIRED`。配对码同时携带中继 token 与空间密钥，只在设置页本地展示。
 - **手机只能发白名单命令。** 仅「建任务」与「对已有任务派单」两种；命令 ID 同时是幂等键（`op_id = mobile:<命令 ID>`），重放不会建第二个任务；早于 7 天的命令被拒。建出的任务以 USER 身份落账，与在桌面端点「新建任务」等价。
-- **撤销。** 「重置配对」轮换空间 ID 与密钥并删除电脑在旧空间写过的文档，旧手机随即无法解密新数据；吊销中继 token 属于中继自身的管理动作。
+- **撤销。** 「重置配对」轮换空间 ID 与密钥并删除旧空间里的全部文档，旧手机随即无法解密新数据；吊销中继 token 属于中继自身的管理动作。
 
 ### Claude 自动派单（可选，默认关闭）
 

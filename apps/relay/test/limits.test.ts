@@ -106,10 +106,10 @@ describe("限流", () => {
   it("限额环境变量：合法值覆盖默认，非法值直接报错", () => {
     expect(limitsFromEnv({})).toEqual(DEFAULT_LIMITS);
     const custom = limitsFromEnv({
-      ATM_RELAY_RATE_PER_SECOND: "50",
+      ATM_RELAY_RATE_PER_SECOND: "80",
       ATM_RELAY_MAX_DOCUMENTS: " 10 ",
     });
-    expect(custom.requestsPerSecond).toBe(50);
+    expect(custom.requestsPerSecond).toBe(80);
     expect(custom.maxDocumentsPerApp).toBe(10);
     expect(() => limitsFromEnv({ ATM_RELAY_MAX_BODY_BYTES: "300k" })).toThrow(
       /ATM_RELAY_MAX_BODY_BYTES/,
