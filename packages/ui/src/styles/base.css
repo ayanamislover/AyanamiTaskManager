@@ -14,13 +14,16 @@ body {
   font-family: var(--atm-font);
   font-size: 14px;
 }
-/* 画布后面固定一层粉、紫、蓝的淡彩雾；卡片都浮在它上面。它不参与布局，也不接收指针。 */
+/* 画布后面固定一层粉、紫、蓝的淡彩雾；卡片都浮在它上面。它不参与布局，也不接收指针。
+ * 粉色那团的中心不放在窗口左上角：那里被侧栏卡片盖住，只剩卡片四周一圈窄缝透出彩雾，
+ * 右边又被顶栏毛玻璃截断，看起来是一圈贴着侧栏左上角的光晕。挪到内容区上方，
+ * 让它从顶栏下面散开。 */
 body::before {
   position: fixed;
   inset: 0;
   z-index: -1;
   background:
-    radial-gradient(50vw 45vh at 0% 0%, var(--atm-aurora-a), transparent 70%),
+    radial-gradient(50vw 45vh at 32% 0%, var(--atm-aurora-a), transparent 70%),
     radial-gradient(50vw 50vh at 100% 10%, var(--atm-aurora-b), transparent 70%),
     radial-gradient(60vw 50vh at 60% 110%, var(--atm-aurora-c), transparent 70%);
   content: "";

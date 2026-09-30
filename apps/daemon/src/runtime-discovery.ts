@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { noteSuppressed } from "@ayanami-task/errors";
 import { isDifferentProcess, readProcessIdentity } from "./process-identity.js";
 
-export const DAEMON_VERSION = "1.2.0";
+export const DAEMON_VERSION = "1.2.1";
 export const DAEMON_RUNTIME_FILENAME = "daemon.json";
 export const LEGACY_TOKEN_FILENAME = "local.token";
 export const DAEMON_LOCK_FILENAME = "daemon.lock";

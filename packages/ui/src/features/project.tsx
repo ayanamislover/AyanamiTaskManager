@@ -10,6 +10,10 @@ import { MutationErrorAlert, PageHead } from "../components/async-state.js";
 import { Presence } from "../components/presence.js";
 import type { DesktopBridge, Notify } from "../contracts.js";
 import { useCursorCollection } from "../cursor-collection.js";
+import { isNewProjectTaskFor, NEW_PROJECT_TASK_EVENT } from "../hooks/new-project-task.js";
+import { useQueriesSettled } from "../queries-settled.js";
+import type { RouteStageSlot } from "../routes/route-stage.js";
+import type { ProjectTaskView } from "./project-task-controls.js";
 import { CreateRecordModal } from "./create-record-modal.js";
 import { CreateTaskModal } from "./create-task-modal.js";
 import { ProjectDataModal } from "./project-data-modal.js";
@@ -28,9 +32,12 @@ export function ProjectPage({
   onExit,
   desktop,
   onKnowledgeDraft,
+  stage,
 }: {
   client: AyanamiClient;
   project: RegisteredProject;
+  /** 由路由舞台传入：首屏读完时通知换上；在后台准备时收到本项目的命令就立刻换上。 */
+  stage?: RouteStageSlot;
   notify: Notify;
   openTask: (key: string) => void;
   onExit: () => void;
@@ -86,11 +93,27 @@ export function ProjectPage({
       onExit();
     },
   });
+  const pending = stage?.pending ?? false;
+  const onReady = stage?.onReady;
+  const onCommand = stage?.onCommand;
   useEffect(() => {
-    const listener = () => setCreate(true);
-    window.addEventListener("atm:new-project-task", listener);
-    return () => window.removeEventListener("atm:new-project-task", listener);
-  }, []);
+    // 只认发给本项目的命令。还在后台准备时收到，说明用户已经要在这一页干活了：
+    // 立刻换上来（先带加载态），在这一页打开弹窗。
+    const listener = (event: Event) => {
+      if (!isNewProjectTaskFor(event, project.code)) return;
+      if (pending) onCommand?.();
+      setCreate(true);
+    };
+    window.addEventListener(NEW_PROJECT_TASK_EVENT, listener);
+    return () => window.removeEventListener(NEW_PROJECT_TASK_EVENT, listener);
+  }, [pending, onCommand, project.code]);
+  // 首屏要一起出现的几块：任务列表、已结束任务、进度条、目标与里程碑、Agent、项目更新、
+  // 健康度（来自总览）、筛选条的保存视图与里程碑选项，以及当前视图自己的数据
+  // （记录、时间线只在选中时才读）。全部有了结果才换上，免得先闪一遍骨架和「尚未设置」。
+  const firstScreenReady = useQueriesSettled(firstScreenQueries(project.code, view));
+  useEffect(() => {
+    if (firstScreenReady) onReady?.();
+  }, [firstScreenReady, onReady]);
   const workItems = tasks.items as any[];
   const diagnostics = useProjectDiagnostics(client, project.code);
   const diagnosticsPanel = (
@@ -187,6 +210,7 @@ export function ProjectPage({
         client={client}
         projectCode={project.code}
         workItems={workItems}
+        tasksLoading={tasks.isLoading}
         openTask={openTask}
       >
         <ProjectTaskControls
@@ -258,4 +282,27 @@ export function ProjectPage({
       </Presence>
     </>
   );
+}
+
+/** 项目页换上来之前要等的查询。视图相关的只在该视图选中时才读，所以按视图加。 */
+export function firstScreenQueries(code: string, view: ProjectTaskView): unknown[][] {
+  return [
+    ["tasks", code, "ui", "open"],
+    ["tasks", code, "ui", "closed"],
+    ["tasks", code, "progress-strip"],
+    ["brief", code],
+    ["agents", code],
+    ["project-updates", code],
+    ["overview"],
+    // 筛选条（保存视图、里程碑选项）只在任务类视图里渲染；记录、时间线下它的查询不会
+    // 被创建，放进来就永远等不齐。
+    ...(view === "records" || view === "timeline"
+      ? []
+      : [
+          ["saved-views", code],
+          ["milestones", code],
+        ]),
+    ...(view === "records" ? [["records", code]] : []),
+    ...(view === "timeline" ? [["events", code]] : []),
+  ];
 }

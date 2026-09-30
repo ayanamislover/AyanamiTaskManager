@@ -2381,3 +2381,249 @@ test("总览「等你处理」首屏读取失败后点重试会真的重新读�
   await expect(panel.getByRole("alert")).toHaveCount(0);
   await expect(page.locator(".atm-page-head p")).not.toContainText("没能全部读出来");
 });
+
+/** 在页面里记录用户看得见的那一层：标题、骨架数、进度条位置。后台准备中的那一页不算。 */
+async function recordVisibleTimeline(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as { __switchTimeline: Array<Record<string, unknown>> };
+    w.__switchTimeline = [];
+    const started = performance.now();
+    const visible = (element: Element) => !element.closest(".atm-route-pending");
+    const all = (selector: string) => [...document.querySelectorAll(selector)].filter(visible);
+    const sample = () => {
+      const strip = all(".atm-content .atm-progress-strip")[0];
+      const entry = {
+        t: Math.round(performance.now() - started),
+        h1: all(".atm-content h1")[0]?.textContent ?? "",
+        skeletons: all(".atm-content .atm-skeleton").length,
+        stripTop: strip ? Math.round(strip.getBoundingClientRect().top) : null,
+        emptyInProgress: all(".atm-content").some((e) =>
+          (e.textContent ?? "").includes("没有进行中任务"),
+        ),
+      };
+      const last = w.__switchTimeline.at(-1);
+      if (!last || JSON.stringify({ ...last, t: 0 }) !== JSON.stringify({ ...entry, t: 0 }))
+        w.__switchTimeline.push(entry);
+    };
+    new MutationObserver(sample).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+    });
+    sample();
+  });
+}
+
+async function ensureSwitchTargetProject(): Promise<void> {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  const projects = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+    code: string;
+  }>;
+  if (!projects.some((project) => project.code === "E2ESW")) {
+    const created = await api.post(`${apiUrl}/projects`, {
+      data: { name: "E2E 切换目标", sourcePath: null, code: "E2ESW", description: "切换验收" },
+    });
+    expect(created.ok()).toBeTruthy();
+  }
+  await api.dispose();
+}
+
+test("侧栏切到没缓存的项目：先留着旧页，新页读完整页换上，中间不闪骨架", async ({ page }) => {
+  await ensureSwitchTargetProject();
+  await page.goto("/#project:E2E");
+  await expect(page.locator(".atm-content h1")).toHaveText("E2E 验收项目");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  // 新项目的读取慢一点（仍在 450ms 等待上限之内），模拟真实数据量。
+  await page.route(/\/api\/v1\/projects\/E2ESW\//u, async (route) => {
+    await new Promise((done) => setTimeout(done, 250));
+    await route.continue();
+  });
+  await recordVisibleTimeline(page);
+  await page
+    .locator(".atm-sidebar")
+    .getByRole("button", { name: "E2E 切换目标", exact: true })
+    .click();
+  await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+  await expect(page.getByTestId("route-pending")).toHaveCount(0);
+  // 是首屏读齐换上的，不是等满时限。
+  await expect(page.locator(".atm-route-layer")).toHaveAttribute("data-swap", "ready");
+  const timeline = (await page.evaluate(
+    () => (window as unknown as { __switchTimeline: unknown[] }).__switchTimeline,
+  )) as Array<{ h1: string; skeletons: number; emptyInProgress: boolean }>;
+  // 看得见的只有两种画面：旧项目，然后是读完的新项目。
+  expect(timeline.filter((entry) => entry.skeletons > 0)).toEqual([]);
+  expect([...new Set(timeline.map((entry) => entry.h1))]).toEqual(["E2E 验收项目", "E2E 切换目标"]);
+});
+
+test("新项目读得慢时先换上加载态：进度条占着位置不跳，卡片不先说「没有进行中任务」", async ({
+  page,
+}) => {
+  await ensureSwitchTargetProject();
+  await page.goto("/#project:E2E");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  let release: () => void = () => {};
+  const held = new Promise<void>((done) => (release = done));
+  await page.route(/\/api\/v1\/projects\/E2ESW\//u, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await recordVisibleTimeline(page);
+  await page
+    .locator(".atm-sidebar")
+    .getByRole("button", { name: "E2E 切换目标", exact: true })
+    .click();
+  // 超过等待上限，新页带着加载态换上来。
+  await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+  await expect(page.locator(".atm-progress-strip[aria-busy='true']")).toBeVisible();
+  release();
+  await expect(page.locator(".atm-progress-strip[aria-busy='true']")).toHaveCount(0);
+  await expect(page.locator(".atm-content")).toContainText("没有进行中任务");
+  const timeline = (await page.evaluate(
+    () => (window as unknown as { __switchTimeline: unknown[] }).__switchTimeline,
+  )) as Array<{ h1: string; skeletons: number; stripTop: number | null; emptyInProgress: boolean }>;
+  const target = timeline.filter((entry) => entry.h1 === "E2E 切换目标");
+  // 进度条从新页第一帧就在，位置到读完都没变。
+  expect(new Set(target.map((entry) => entry.stripTop)).size).toBe(1);
+  expect(target[0]!.stripTop).not.toBeNull();
+  // 「没有进行中任务」只在骨架消失之后出现。
+  const firstEmpty = target.findIndex((entry) => entry.emptyInProgress);
+  expect(firstEmpty).toBeGreaterThan(0);
+  expect(target.slice(firstEmpty).every((entry) => entry.skeletons === 0)).toBe(true);
+});
+
+for (const { tab, endpoint } of [
+  { tab: "记录", endpoint: /\/api\/v1\/projects\/E2ESW\/records/u },
+  { tab: "时间线", endpoint: /\/api\/v1\/projects\/E2ESW\/events/u },
+]) {
+  test(`停在「${tab}」视图切项目：只有这个视图的数据慢，也等它读完再换上`, async ({ page }) => {
+    await ensureSwitchTargetProject();
+    await page.goto("/#project:E2E");
+    await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+    await page.getByRole("tab", { name: tab }).click();
+    await expect(page.getByRole("tab", { name: tab })).toHaveAttribute("aria-selected", "true");
+    await page.waitForTimeout(600);
+    await page.route(endpoint, async (route) => {
+      await new Promise((done) => setTimeout(done, 300));
+      await route.continue();
+    });
+    await recordVisibleTimeline(page);
+    await page
+      .locator(".atm-sidebar")
+      .getByRole("button", { name: "E2E 切换目标", exact: true })
+      .click();
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    await expect(page.getByTestId("route-pending")).toHaveCount(0);
+    await expect(page.locator(".atm-route-layer")).toHaveAttribute("data-swap", "ready");
+    // 视图标签跟着带过去了。
+    await expect(page.getByRole("tab", { name: tab })).toHaveAttribute("aria-selected", "true");
+    const timeline = (await page.evaluate(
+      () => (window as unknown as { __switchTimeline: unknown[] }).__switchTimeline,
+    )) as Array<{ h1: string; skeletons: number }>;
+    expect(timeline.filter((entry) => entry.skeletons > 0)).toEqual([]);
+  });
+}
+
+for (const from of ["project:E2E", "overview"]) {
+  test(`切项目的等待窗口里按 Ctrl+N（从 ${from}）：弹窗开在目标项目上，不随旧页消失`, async ({
+    page,
+  }) => {
+    await ensureSwitchTargetProject();
+    await page.goto(`/#${from}`);
+    await expect(page.locator(".atm-sidebar")).toBeVisible();
+    await page.waitForTimeout(600);
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    await page.route(/\/api\/v1\/projects\/E2ESW\//u, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page
+      .locator(".atm-sidebar")
+      .getByRole("button", { name: "E2E 切换目标", exact: true })
+      .click();
+    await page.keyboard.press("Control+N");
+    const dialog = page.getByRole("dialog", { name: "新建任务" });
+    await expect(dialog).toBeVisible();
+    // 命令一到，目标页立刻换上来：弹窗属于它，不属于旧页。
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    await expect(page.getByTestId("route-pending")).toHaveCount(0);
+    release();
+    await page.waitForTimeout(700);
+    await expect(dialog).toBeVisible();
+    await dialog.getByRole("button", { name: "关闭" }).click();
+    await expect(dialog).toHaveCount(0);
+  });
+}
+
+test("切项目的等待窗口里又点回原项目：留在原页，不残留后台层，之后也不会被超时切走", async ({
+  page,
+}) => {
+  await ensureSwitchTargetProject();
+  await page.goto("/#project:E2E");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  await page.route(/\/api\/v1\/projects\/E2ESW\//u, () => new Promise<void>(() => {}));
+  const sidebar = page.locator(".atm-sidebar");
+  await recordVisibleTimeline(page);
+  await sidebar.getByRole("button", { name: "E2E 切换目标", exact: true }).click();
+  await expect(page.getByTestId("route-pending")).toHaveCount(1);
+  await sidebar.getByRole("button", { name: "E2E 验收项目", exact: true }).click();
+  await expect(page.getByTestId("route-pending")).toHaveCount(0);
+  await page.waitForTimeout(700);
+  await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 验收项目");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  // 作废的那次等待不能在超时后把页面切过去，哪怕只闪一下。
+  const timeline = (await page.evaluate(
+    () => (window as unknown as { __switchTimeline: unknown[] }).__switchTimeline,
+  )) as Array<{ h1: string }>;
+  expect([...new Set(timeline.map((entry) => entry.h1))]).toEqual(["E2E 验收项目"]);
+});
+
+for (const { tab, button, dialogName } of [
+  { tab: "列表", button: "新建任务", dialogName: "新建任务" },
+  { tab: "记录", button: "新建记录", dialogName: "新建项目记录" },
+]) {
+  test(`切项目的等待窗口里旧页只是预览：点它页头的「${button}」不会开出随后消失的弹窗`, async ({
+    page,
+  }) => {
+    await ensureSwitchTargetProject();
+    await page.goto("/#project:E2E");
+    await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+    await page.getByRole("tab", { name: tab }).click();
+    const oldButton = page.locator(".atm-page-head").getByRole("button", { name: button });
+    await expect(oldButton).toBeEnabled();
+    const box = (await oldButton.boundingBox())!;
+    let release: () => void = () => {};
+    const held = new Promise<void>((done) => (release = done));
+    await page.route(/\/api\/v1\/projects\/E2ESW\//u, async (route) => {
+      await held;
+      await route.continue();
+    });
+    await page
+      .locator(".atm-sidebar")
+      .getByRole("button", { name: "E2E 切换目标", exact: true })
+      .click();
+    await expect(page.getByTestId("route-pending")).toHaveCount(1);
+    await expect(page.locator(".atm-route-layer[data-leaving='true']")).toHaveAttribute(
+      "inert",
+      "",
+    );
+    // 用坐标点，模拟用户照着还看得见的旧按钮点下去。
+    await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(100);
+    // 当场数一次，不用会自动重试的 toHaveCount(0)：旧页的弹窗会在超时换页时自己消失，
+    // 重试着等就等到了——那正是要抓的问题。
+    expect(await page.getByRole("dialog").count()).toBe(0);
+    // 同一时刻确认还在等待窗口里，否则这次点击测的不是「预览中的旧页」。
+    expect(await page.getByTestId("route-pending").count()).toBe(1);
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    release();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    // 换上来的新页，自己的按钮照常能用。
+    await page.locator(".atm-page-head").getByRole("button", { name: button }).click();
+    const dialog = page.getByRole("dialog", { name: dialogName });
+    await expect(dialog).toBeVisible();
+    await expect(page.locator(".atm-content h1").first()).toHaveText("E2E 切换目标");
+    await dialog.getByRole("button", { name: "关闭" }).click();
+  });
+}

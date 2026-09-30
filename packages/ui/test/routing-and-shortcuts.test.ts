@@ -22,7 +22,7 @@ const shortcutContracts = {
   palette:
     /event\.key\.toLowerCase\(\) === "k"[\s\S]*?event\.preventDefault\(\);[\s\S]*?setPalette\(true\)/u,
   projectTask:
-    /event\.key\.toLowerCase\(\) === "n"[\s\S]*?route\.startsWith\("project:"\)[\s\S]*?window\.dispatchEvent\(new Event\("atm:new-project-task"\)\)/u,
+    /event\.key\.toLowerCase\(\) === "n"[\s\S]*?route\.startsWith\("project:"\)[\s\S]*?requestNewProjectTask\(route\.slice\(8\)\)/u,
   quickTask: /else setRoute\("quick"\)/u,
   listener: /addEventListener\("keydown", onKey\)[\s\S]*?removeEventListener\("keydown", onKey\)/u,
   dependency: /\}, \[route\]\);/u,

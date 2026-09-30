@@ -10,32 +10,52 @@ import { QuickPage } from "../features/quick.js";
 import { SettingsPage } from "../features/settings.js";
 import { GlobalTimelinePage, TimelineEventRow } from "../features/timeline.js";
 import { KnowledgePage, type KnowledgeDraftSeed } from "../features/knowledge.js";
+import { RouteStage, type RouteStageSlot } from "./route-stage.js";
 
-export function AppRouter({
-  client,
-  desktop,
-  route,
-  projects,
-  selectedProject,
-  notify,
-  onRoute,
-  onTask,
-  knowledgeDraft,
-  onKnowledgeDraft,
-  onKnowledgeDraftConsumed,
-}: {
+type AppRouterProps = {
   client: AyanamiClient;
   desktop: DesktopBridge | undefined;
   route: Route;
   projects: RegisteredProject[];
-  selectedProject: RegisteredProject | null;
   notify: Notify;
   onRoute: (route: Route) => void;
   onTask: (project: string, key: string) => void;
   knowledgeDraft: KnowledgeDraftSeed | null;
   onKnowledgeDraft: (draft: KnowledgeDraftSeed) => void;
   onKnowledgeDraftConsumed: () => void;
-}): ReactNode {
+};
+
+/**
+ * 切项目时让新项目页先在后台读完首屏再换上（见 RouteStage）；其他页面照旧立即切换。
+ */
+export function AppRouter(props: AppRouterProps): ReactNode {
+  return (
+    <RouteStage
+      route={props.route}
+      defer={props.route.startsWith("project:")}
+      render={(route, stage) => routePage({ ...props, route: route as Route }, stage)}
+    />
+  );
+}
+
+function routePage(
+  {
+    client,
+    desktop,
+    route,
+    projects,
+    notify,
+    onRoute,
+    onTask,
+    knowledgeDraft,
+    onKnowledgeDraft,
+    onKnowledgeDraftConsumed,
+  }: AppRouterProps,
+  stage: RouteStageSlot,
+): ReactNode {
+  const selectedProject = route.startsWith("project:")
+    ? projects.find((project) => project.code === route.slice(8))
+    : undefined;
   if (route === "overview")
     return (
       <OverviewPage
@@ -98,6 +118,7 @@ export function AppRouter({
       <ProjectPage
         client={client}
         project={selectedProject}
+        stage={stage}
         notify={notify}
         openTask={(key) => onTask(selectedProject.code, key)}
         onExit={() => onRoute("projects")}

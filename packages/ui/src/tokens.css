@@ -115,7 +115,7 @@
   --atm-control-border-hover: #6a5895;
   --atm-control-text: #ead5ff;
   --atm-glass: rgb(46 38 64 / 0.8);
-  --atm-aurora-a: rgb(190 80 150 / 0.18);
+  --atm-aurora-a: rgb(160 90 190 / 0.12);
   --atm-aurora-b: rgb(130 100 220 / 0.2);
   --atm-aurora-c: rgb(80 110 200 / 0.14);
   --atm-st-progress: #c9a3ff;
@@ -166,7 +166,7 @@
     --atm-control-border-hover: #6a5895;
     --atm-control-text: #ead5ff;
     --atm-glass: rgb(46 38 64 / 0.8);
-    --atm-aurora-a: rgb(190 80 150 / 0.18);
+    --atm-aurora-a: rgb(160 90 190 / 0.12);
     --atm-aurora-b: rgb(130 100 220 / 0.2);
     --atm-aurora-c: rgb(80 110 200 / 0.14);
     --atm-st-progress: #c9a3ff;
