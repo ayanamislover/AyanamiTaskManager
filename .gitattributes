@@ -12,3 +12,6 @@
 *.sqlite binary
 *.webp binary
 *.zip binary
+# cmd.exe mis-parses labels and goto in LF-only batch files (gradlew.bat).
+*.bat text eol=crlf
+*.cmd text eol=crlf
