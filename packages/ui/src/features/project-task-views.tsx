@@ -206,7 +206,11 @@ export function ProjectTaskViews({
     }
     if (!filteredTasks.length) {
       // 任务只读到一部分时，筛选为空只说明已读到的部分里没有（上方状态行给出重试）。
-      const incomplete = collectionIncomplete(tasks);
+      // 筛选结果也包含已结束任务：那一路在读、读失败或还有没取回的页，同样不能下结论。
+      const incomplete = mergeIncomplete(
+        collectionIncomplete(tasks),
+        closedIncomplete(closedTasks),
+      );
       return incomplete ? (
         <IncompleteEmpty
           loading={incomplete.reading}
@@ -431,4 +435,24 @@ export function ProjectTaskViews({
       </section>
     </>
   );
+}
+
+function closedIncomplete(
+  closed: RecentClosedTasks | undefined,
+): { reading: boolean; error: boolean } | null {
+  if (!closed) return null;
+  const reading = closed.isLoading || closed.isFetchingMore;
+  if (!reading && !closed.error && !closed.hasMore) return null;
+  return { reading, error: Boolean(closed.error) };
+}
+
+function mergeIncomplete(
+  ...parts: Array<{ reading: boolean; error: boolean } | null>
+): { reading: boolean; error: boolean } | null {
+  const present = parts.filter((part) => part !== null);
+  if (!present.length) return null;
+  return {
+    reading: present.some((part) => part.reading),
+    error: present.some((part) => part.error),
+  };
 }

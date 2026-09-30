@@ -7,6 +7,7 @@ import {
   LoadingRows,
   MutationErrorAlert,
   PageHead,
+  SectionLoadError,
 } from "../components/async-state.js";
 import type {
   Notify,
@@ -328,55 +329,68 @@ export function SettingsPage({
             <h2>维护与 Windows</h2>
           </div>
           <div className="atm-panel-body atm-settings-maintenance-grid">
-            <div className="atm-form">
-              <label className="atm-check">
-                <input
-                  type="checkbox"
-                  checked={dailyEnabled}
-                  onChange={(event) => setDailyEnabled(event.target.checked)}
-                />
-                <span>每日首次空闲时自动备份活动项目</span>
-              </label>
-              <div className="atm-row-sub">
-                内容与上一份完全一致时沿用旧备份，不会多占空间；超出保留份数的旧备份在维护时删除。
-              </div>
-              <div className="atm-form-grid">
-                <div className="atm-field">
-                  <label htmlFor="daily-keep">每日备份保留数</label>
-                  <input
-                    id="daily-keep"
-                    type="number"
-                    min="1"
-                    max="90"
-                    value={dailyKeep}
-                    onChange={(event) => setDailyKeep(Number(event.target.value))}
-                  />
+            {/* 备份与通知策略只在读到之后才显示：表单的初始值只是占位，读失败时显示它们
+                就成了「自动备份已开启、保留 2 份」这种没有依据的断言，还能照着保存。 */}
+            {settings.data ? (
+              <>
+                <div className="atm-form">
+                  <label className="atm-check">
+                    <input
+                      type="checkbox"
+                      checked={dailyEnabled}
+                      onChange={(event) => setDailyEnabled(event.target.checked)}
+                    />
+                    <span>每日首次空闲时自动备份活动项目</span>
+                  </label>
+                  <div className="atm-row-sub">
+                    内容与上一份完全一致时沿用旧备份，不会多占空间；超出保留份数的旧备份在维护时删除。
+                  </div>
+                  <div className="atm-form-grid">
+                    <div className="atm-field">
+                      <label htmlFor="daily-keep">每日备份保留数</label>
+                      <input
+                        id="daily-keep"
+                        type="number"
+                        min="1"
+                        max="90"
+                        value={dailyKeep}
+                        onChange={(event) => setDailyKeep(Number(event.target.value))}
+                      />
+                    </div>
+                    <div className="atm-field">
+                      <label htmlFor="weekly-keep">每周备份保留数</label>
+                      <input
+                        id="weekly-keep"
+                        type="number"
+                        min="1"
+                        max="52"
+                        value={weeklyKeep}
+                        onChange={(event) => setWeeklyKeep(Number(event.target.value))}
+                      />
+                    </div>
+                    <div className="atm-field">
+                      <label htmlFor="other-keep">手动与操作前备份保留数</label>
+                      <input
+                        id="other-keep"
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={otherKeep}
+                        onChange={(event) => setOtherKeep(Number(event.target.value))}
+                      />
+                    </div>
+                  </div>
                 </div>
-                <div className="atm-field">
-                  <label htmlFor="weekly-keep">每周备份保留数</label>
-                  <input
-                    id="weekly-keep"
-                    type="number"
-                    min="1"
-                    max="52"
-                    value={weeklyKeep}
-                    onChange={(event) => setWeeklyKeep(Number(event.target.value))}
-                  />
-                </div>
-                <div className="atm-field">
-                  <label htmlFor="other-keep">手动与操作前备份保留数</label>
-                  <input
-                    id="other-keep"
-                    type="number"
-                    min="1"
-                    max="20"
-                    value={otherKeep}
-                    onChange={(event) => setOtherKeep(Number(event.target.value))}
-                  />
-                </div>
-              </div>
-            </div>
-            <NotificationPolicy value={notificationMode} onChange={setNotificationMode} />
+                <NotificationPolicy value={notificationMode} onChange={setNotificationMode} />
+              </>
+            ) : settings.error && !settings.isFetching ? (
+              <SectionLoadError
+                message="备份与通知设置没能读出来，暂时无法显示或修改。"
+                onRetry={() => void settings.refetch()}
+              />
+            ) : (
+              <LoadingRows count={3} />
+            )}
             <div className="atm-form">
               {desktop?.setAutoLaunch ? (
                 <div className="atm-row">
@@ -448,7 +462,7 @@ export function SettingsPage({
             <div className="atm-settings-maintenance-save">
               <button
                 className="atm-button primary"
-                disabled={savePolicy.isPending || settings.isLoading}
+                disabled={savePolicy.isPending || settings.data === undefined}
                 onClick={() => savePolicy.mutate()}
               >
                 保存设置

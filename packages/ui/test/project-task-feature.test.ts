@@ -190,6 +190,35 @@ describe("Project task controls and five views", () => {
     expect(filtered).toContain("<strong>结果还不完整</strong>");
     expect(filtered).toContain("已读到的部分里没有匹配的任务");
 
+    // 未结束任务已读完，但筛选结果里的已结束任务那一路读失败或还有没取回的页：同样不下结论。
+    const closedBase = {
+      items: [],
+      total: 5,
+      hasMore: false,
+      isLoading: false,
+      isFetchingMore: false,
+      error: null as unknown,
+      loadMore: vi.fn(),
+    };
+    const withClosed = (closed: typeof closedBase) =>
+      renderToStaticMarkup(
+        createElement(ProjectTaskViews, {
+          ...common,
+          view: "list",
+          tasks: collection(tasks),
+          filteredTasks: [],
+          closedTasks: closed,
+          events: { isLoading: false, data: { events: [] }, error: null, refetch: vi.fn() },
+        }),
+      );
+    for (const closed of [
+      { ...closedBase, error: new Error("503") },
+      { ...closedBase, hasMore: true },
+      { ...closedBase, isLoading: true },
+    ])
+      expect(withClosed(closed)).not.toContain("<strong>没有匹配任务</strong>");
+    expect(withClosed(closedBase)).toContain("<strong>没有匹配任务</strong>");
+
     const timeline = (data: { events: unknown[] } | undefined) =>
       renderToStaticMarkup(
         createElement(ProjectTaskViews, {

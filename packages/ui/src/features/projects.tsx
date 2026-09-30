@@ -13,6 +13,7 @@ import {
   LoadingRows,
   MutationErrorAlert,
   PageHead,
+  SectionLoadError,
 } from "../components/async-state.js";
 import { Presence, type PresenceRootProps } from "../components/presence.js";
 import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
@@ -422,7 +423,9 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
   });
   const projects = trashed.data ?? [];
   const pending = projects.filter((project) => project.restoreRequest).length;
-  const collapsed = collapsedChoice ?? pending === 0;
+  // 首读失败时数量未知：默认展开把错误亮出来，计数写「—」而不是「0」。
+  const unreadable = Boolean(trashed.error) && trashed.data === undefined;
+  const collapsed = collapsedChoice ?? (pending === 0 && !unreadable);
   const busy = restore.isPending || decide.isPending;
   if (!trashed.error && projects.length === 0) return null;
   return (
@@ -441,11 +444,13 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
         >
           <CaretDown size={17} aria-hidden="true" />
           <span>
-            <strong>垃圾箱（{projects.length}）</strong>
+            <strong>垃圾箱（{unreadable ? "—" : projects.length}）</strong>
             <small>
-              {pending
-                ? `${pending} 个 Agent 恢复请求等待你授权`
-                : "移入垃圾箱前已自动备份；恢复后回到项目列表"}
+              {unreadable
+                ? "垃圾箱没能读出来"
+                : pending
+                  ? `${pending} 个 Agent 恢复请求等待你授权`
+                  : "移入垃圾箱前已自动备份；恢复后回到项目列表"}
             </small>
           </span>
         </button>
@@ -453,6 +458,12 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
       </div>
       <div id="project-trash-content" hidden={collapsed}>
         {trashed.error ? (
+          <SectionLoadError
+            message={unreadable ? "垃圾箱没能读出来。" : "垃圾箱刷新失败，下面是上次读到的内容。"}
+            onRetry={() => void trashed.refetch()}
+          />
+        ) : null}
+        {unreadable ? (
           <ErrorState error={trashed.error} />
         ) : (
           <div className="atm-panel-body atm-project-grid">

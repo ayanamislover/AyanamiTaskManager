@@ -3045,3 +3045,64 @@ test("项目页各分区读失败：说读取失败，不拿「尚未设置」�
   await expect(content.locator(".atm-timeline")).toBeVisible();
   await page.getByRole("tab", { name: "列表" }).click();
 });
+
+test("已结束任务读失败时筛「已完成」：不说「没有匹配任务」，重试后恢复", async ({ page }) => {
+  let failing = true;
+  await page.route(/\/api\/v1\/projects\/E2E\/ui\/work-items\/closed/u, async (request) => {
+    if (!failing) return request.continue();
+    return request.fulfill(failWith("注入的已结束任务故障"));
+  });
+  await page.goto("/#project:E2E");
+  await expect(page.locator(".atm-table tbody tr").first()).toBeVisible();
+  const statusFilter = page.getByRole("combobox", { name: "状态筛选" });
+  await statusFilter.click();
+  await page.getByRole("option", { name: "已完成" }).click();
+  await expect(statusFilter).toContainText("已完成");
+  const content = page.locator(".atm-content");
+  const empties = content.locator(".atm-empty strong");
+  await expect(empties.filter({ hasText: "结果还不完整" }).first()).toBeVisible({
+    timeout: 8_000,
+  });
+  expect(await empties.filter({ hasText: /^没有匹配任务$/u }).count()).toBe(0);
+  failing = false;
+  // 已结束任务那一路自己的重试入口。
+  await content.getByRole("button", { name: "重试" }).last().click();
+  await expect(empties.filter({ hasText: "结果还不完整" })).toHaveCount(0);
+  await statusFilter.click();
+  await page.getByRole("option", { name: "全部状态" }).click();
+});
+
+test("设置读失败：不把默认值当成当前配置显示，也不能保存；重试后恢复", async ({ page }) => {
+  let failing = true;
+  await page.route(/\/api\/v1\/settings(\?.*)?$/u, async (request) => {
+    if (!failing || request.request().method() !== "GET") return request.continue();
+    return request.fulfill(failWith("注入的设置故障"));
+  });
+  await page.goto("/#settings");
+  const maintenance = page.locator(".atm-settings-maintenance");
+  const alert = maintenance.getByRole("alert").filter({ hasText: "备份与通知设置没能读出来" });
+  await expect(alert).toBeVisible({ timeout: 8_000 });
+  await expect(maintenance.getByText("每日首次空闲时自动备份活动项目")).toHaveCount(0);
+  await expect(maintenance.getByRole("button", { name: "保存设置" })).toBeDisabled();
+  failing = false;
+  await alert.getByRole("button", { name: "重试" }).click();
+  await expect(maintenance.getByText("每日首次空闲时自动备份活动项目")).toBeVisible();
+  await expect(maintenance.getByRole("button", { name: "保存设置" })).toBeEnabled();
+});
+
+test("垃圾箱读失败：计数写「—」并展开显示错误，不写「垃圾箱（0）」", async ({ page }) => {
+  let failing = true;
+  await page.route(/\/api\/v1\/trash\/projects/u, async (request) => {
+    if (!failing) return request.continue();
+    return request.fulfill(failWith("注入的垃圾箱故障"));
+  });
+  await page.goto("/#projects");
+  const trash = page.getByRole("region", { name: "垃圾箱" });
+  await expect(trash).toContainText("垃圾箱（—）", { timeout: 8_000 });
+  await expect(trash).not.toContainText("垃圾箱（0）");
+  const alert = trash.getByRole("alert").filter({ hasText: "垃圾箱没能读出来" });
+  await expect(alert).toBeVisible();
+  failing = false;
+  await alert.getByRole("button", { name: "重试" }).click();
+  await expect(alert).toHaveCount(0);
+});
