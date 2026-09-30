@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [features]
 # 测试构建：允许 CDP 调试端口与 smoke 钩子。生产构建永远不带（de-electron §5）。
-smoke = []
+smoke = ["atm-install-state/smoke"]
 
 [dependencies]
 atm-install-state = { path = "../install-state" }
@@ -46,4 +46,4 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [build-dependencies]
-serde_json.workspace = true
+atm-build-support = { path = "../build-support" }

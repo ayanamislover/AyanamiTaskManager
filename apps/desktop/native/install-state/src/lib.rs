@@ -11,6 +11,9 @@
 //! Admission is decided here once so that the launcher, a host started from a physical
 //! path, a host woken by the MCP shim and a host started by setup cannot disagree.
 
+#[cfg(windows)]
+pub mod ipc;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -32,6 +35,21 @@ pub struct AppPointer {
     pub previous: Option<String>,
 }
 
+/// What a transaction does. The state list is shared; the kind picks the path through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TxnKind {
+    /// First install or an update between new-style versions.
+    #[default]
+    Install,
+    /// From a Squirrel/Electron 1.x install to the new layout (§6 steps 6–8).
+    Migrate,
+    /// Active rollback to `app.json.previous`: an ordinary activation (§6).
+    Activate,
+    /// Back to Electron: the reverse migration with its own steps and UNDO_LEGACY.
+    Legacy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TxnState {
@@ -46,8 +64,21 @@ pub enum TxnState {
     Switch,
     Start,
     Commit,
+    /// The generic undo path; progress in `undo.step`.
     Undo,
     RollbackStart,
+    #[serde(rename = "R_QUIESCE")]
+    ReverseQuiesce,
+    #[serde(rename = "R_RESTORE_LEGACY")]
+    ReverseRestoreLegacy,
+    #[serde(rename = "R_ISOLATE_NEW")]
+    ReverseIsolateNew,
+    #[serde(rename = "R_POINTER")]
+    ReversePointer,
+    #[serde(rename = "R_START_LEGACY")]
+    ReverseStartLegacy,
+    /// Failure branch of the reverse migration; progress in `undo.step`.
+    UndoLegacy,
     Done,
 }
 
@@ -60,10 +91,32 @@ pub enum Outcome {
     RecoveryFailed,
 }
 
+/// Where an undo stands: the outcome it is heading for and the next step to run. A dead
+/// setup's successor resumes from `step`, so every step is idempotent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoProgress {
+    pub target: Outcome,
+    pub step: u8,
+}
+
+/// A process pinned by pid and creation time (and the image it was started from), so a
+/// recycled pid is never mistaken for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub started_at_ms: u64,
+    #[serde(default)]
+    pub image: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transaction {
     pub id: String,
+    /// The version before: `app.json.current` at LOCK (`legacy:<1.x>` for a migration),
+    /// `None` for a first install.
     #[serde(default)]
     pub from: Option<String>,
     pub to: String,
@@ -74,9 +127,55 @@ pub struct Transaction {
     pub commit_pending: bool,
     #[serde(default)]
     pub snapshot_complete: bool,
+    #[serde(default)]
+    pub kind: TxnKind,
+    /// Whether `from`'s service was running when the transaction began (UNDO_RESTART).
+    #[serde(default)]
+    pub from_running: bool,
+    #[serde(default)]
+    pub undo: Option<UndoProgress>,
+    /// This transaction created `app-<to>` (STAGE). Undo deletes only what it created:
+    /// an activation's target, or `app.json.previous`, is never removed.
+    #[serde(default)]
+    pub staged: bool,
+    /// FENCE→QUIESCE→ISOLATE→SEAL rounds used (at most 3).
+    #[serde(default)]
+    pub seal_rounds: u8,
+    /// The Electron process a reverse migration started (R_START_LEGACY).
+    #[serde(default)]
+    pub legacy: Option<ProcessIdentity>,
+    /// The host setup started for START / ROLLBACK_START.
+    #[serde(default)]
+    pub started: Option<ProcessIdentity>,
+    #[serde(default)]
+    pub started_at_ms: u64,
+    /// Short failure code of the step that sent the transaction into undo.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 impl Transaction {
+    pub fn new(id: String, from: Option<String>, to: String, kind: TxnKind) -> Self {
+        Transaction {
+            id,
+            from,
+            to,
+            state: TxnState::Lock,
+            outcome: None,
+            commit_pending: false,
+            snapshot_complete: false,
+            kind,
+            from_running: false,
+            undo: None,
+            staged: false,
+            seal_rounds: 0,
+            legacy: None,
+            started: None,
+            started_at_ms: 0,
+            error: None,
+        }
+    }
+
     /// A transaction with an outcome no longer blocks anybody, except RECOVERY_FAILED,
     /// which must stop every start until a repair runs.
     pub fn is_terminal(&self) -> bool {
@@ -116,6 +215,18 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, Sta
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|error| StateError::Invalid(path.to_path_buf(), error.to_string()))
+}
+
+/// Same rule as `resolveDaemonDataDirectory` in apps/daemon/src/runtime-discovery.ts. Host,
+/// launcher and setup must agree on it: the second-instance pipe name hashes it.
+pub fn data_dir() -> Result<PathBuf, String> {
+    for key in ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"] {
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            return std::path::absolute(PathBuf::from(value)).map_err(|error| error.to_string());
+        }
+    }
+    let local = std::env::var_os("LOCALAPPDATA").ok_or("ATM_DATA_DIRECTORY_UNAVAILABLE")?;
+    Ok(PathBuf::from(local).join("AyanamiTaskManager"))
 }
 
 pub fn read_pointer(install_root: &Path) -> Result<Option<AppPointer>, StateError> {
@@ -309,15 +420,16 @@ mod tests {
     use std::cell::RefCell;
 
     fn txn(state: TxnState, outcome: Option<Outcome>) -> Transaction {
-        Transaction {
-            id: "t1".into(),
-            from: Some("1.0.0".into()),
-            to: "2.0.0".into(),
-            state,
-            outcome,
-            commit_pending: false,
-            snapshot_complete: true,
-        }
+        let mut txn = Transaction::new(
+            "t1".into(),
+            Some("1.0.0".into()),
+            "2.0.0".into(),
+            TxnKind::Install,
+        );
+        txn.state = state;
+        txn.outcome = outcome;
+        txn.snapshot_complete = true;
+        txn
     }
 
     struct Scratch(PathBuf);

@@ -1,6 +1,6 @@
 fn main() {
     atm_build_support::embed(atm_build_support::Resource {
-        name: "host",
+        name: "launcher",
         description: "AyanamiTaskManager",
         original_filename: "AyanamiTaskManager.exe",
     });

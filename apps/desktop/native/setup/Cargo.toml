@@ -1,0 +1,52 @@
+[package]
+name = "atm-setup"
+version = "0.0.0"
+description = "AyanamiTaskManager installer, updater and repair tool"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "atm-setup"
+path = "src/main.rs"
+
+[features]
+# 迁移/回滚演练构建：允许 ATM_SETUP_SANDBOX 把安装根、快捷方式与注册表位置整体换到沙箱，
+# 以及按步骤注入故障。发布包里的 setup 永远不带（守卫扫发布产物）。
+drill = []
+
+[dependencies]
+atm-install-state = { path = "../install-state" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
+# 快捷方式（IShellLink + AppUserModel 属性）。与宿主同一版本，不引入第二份 windows crate。
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_UI_Shell",
+  "Win32_UI_Shell_PropertiesSystem",
+  "Win32_Storage_EnhancedStorage",
+  "Win32_Storage_FileSystem",
+] }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_System_Registry",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+atm-build-support = { path = "../build-support" }

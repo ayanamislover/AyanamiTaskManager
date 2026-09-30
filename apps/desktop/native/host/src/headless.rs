@@ -58,10 +58,19 @@ pub fn run(layout: &Layout, mode: &Headless) -> i32 {
         Headless::McpStdio(args) => {
             // The JS bridge wakes the desktop when no daemon is published. Under Electron it
             // ran as the desktop exe and used its own path; on the bundled Node it is told.
+            // Installed: wake through the root launcher, so the woken host passes the
+            // barrier and lands on app.json.current (§8). Portable/dev: this host.
+            let wake = layout
+                .app_dir
+                .parent()
+                .filter(|root| root.join(atm_install_state::APP_POINTER).is_file())
+                .map(|root| root.join("AyanamiTaskManager.exe"))
+                .filter(|launcher| launcher.is_file())
+                .unwrap_or_else(|| layout.host_exe.clone());
             let mut entry = layout.mcp_stdio.clone();
             entry.env.push((
                 "ATM_DESKTOP_EXECUTABLE".into(),
-                layout.host_exe.to_string_lossy().into_owned(),
+                wake.to_string_lossy().into_owned(),
             ));
             run_entry(&entry, layout, args, false)
         }

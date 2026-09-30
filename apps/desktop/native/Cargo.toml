@@ -2,7 +2,7 @@
 # mcp-shim 保持独立 crate（它的构建与 lock 已被发布链钉住），不进这个工作区。
 [workspace]
 resolver = "3"
-members = ["install-state", "host"]
+members = ["install-state", "build-support", "host", "launcher", "setup"]
 exclude = ["mcp-shim"]
 
 [workspace.package]

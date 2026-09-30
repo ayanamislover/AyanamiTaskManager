@@ -23,16 +23,7 @@ pub struct CoreCommand {
     pub env: Vec<(String, String)>,
 }
 
-/// Same rule as `resolveDaemonDataDirectory` in apps/daemon/src/runtime-discovery.ts.
-pub fn data_dir() -> Result<PathBuf, String> {
-    for key in ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"] {
-        if let Some(value) = env::var_os(key).filter(|value| !value.is_empty()) {
-            return std::path::absolute(PathBuf::from(value)).map_err(|error| error.to_string());
-        }
-    }
-    let local = env::var_os("LOCALAPPDATA").ok_or("ATM_DATA_DIRECTORY_UNAVAILABLE")?;
-    Ok(PathBuf::from(local).join("AyanamiTaskManager"))
-}
+pub use atm_install_state::data_dir;
 
 fn node_entry(exe: &Path, script: PathBuf, env: Vec<(String, String)>) -> CoreCommand {
     CoreCommand {

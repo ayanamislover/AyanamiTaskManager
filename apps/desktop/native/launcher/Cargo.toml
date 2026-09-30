@@ -1,0 +1,23 @@
+[package]
+name = "atm-launcher"
+version = "0.0.0"
+description = "AyanamiTaskManager root launcher: install barrier, version pointer, command routing"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "AyanamiTaskManager"
+path = "src/main.rs"
+
+[dependencies]
+atm-install-state = { path = "../install-state" }
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+atm-build-support = { path = "../build-support" }
