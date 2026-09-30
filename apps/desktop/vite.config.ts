@@ -1,11 +1,25 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
+
+// index.html 写的是生产 CSP（与宿主 assets.rs 下发的响应头一致，connect-src 'none'）。
+// 只有 dev server 需要让页面直连本机 daemon 和 HMR 的 websocket。
+const DEV_CONNECT_SRC = "connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*";
+function devServerConnect(): Plugin {
+  return {
+    name: "atm-dev-server-connect",
+    apply: "serve",
+    transformIndexHtml(html) {
+      if (!html.includes("connect-src 'none'")) throw new Error("ATM_DEV_CSP_ANCHOR_MISSING");
+      return html.replace("connect-src 'none'", DEV_CONNECT_SRC);
+    },
+  };
+}
 
 export default defineConfig({
   root: fileURLToPath(new URL(".", import.meta.url)),
   base: "./",
-  plugins: [react()],
+  plugins: [react(), devServerConnect()],
   server: {
     host: "127.0.0.1",
     port: 9999,

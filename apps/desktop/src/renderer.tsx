@@ -179,8 +179,10 @@ function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
   );
 }
 
-const browserEndpoint = import.meta.env.VITE_ATM_ENDPOINT as string | undefined;
-const browserToken = import.meta.env.VITE_ATM_TOKEN as string | undefined;
+function missingDesktopBridge(): never {
+  throw new Error("ATM_DESKTOP_BRIDGE_MISSING");
+}
+
 const desktop = window.ayanamiDesktop;
 if (desktop) document.documentElement.dataset.atmDesktop = "true";
 const favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -204,10 +206,16 @@ const client = desktop
         });
       },
     })
-  : new AyanamiClient({
-      endpoint: browserEndpoint ?? "http://127.0.0.1:43127",
-      token: browserToken ?? "browser-preview-token",
-    });
+  : // 生产包只在宿主 WebView 里跑：没有桥就是被别处加载了，不去连任何端口。
+    // 浏览器直连只留给 vite dev server（e2e、README 截图）；DEV 是构建期常量，
+    // 生产构建里这一支连同其中的端口和预览 token 一起被消除。
+    import.meta.env.DEV
+    ? new AyanamiClient({
+        endpoint:
+          (import.meta.env.VITE_ATM_ENDPOINT as string | undefined) ?? "http://127.0.0.1:43127",
+        token: (import.meta.env.VITE_ATM_TOKEN as string | undefined) ?? "browser-preview-token",
+      })
+    : missingDesktopBridge();
 const root = document.getElementById("root");
 if (!root) throw new Error("ROOT_ELEMENT_MISSING");
 
