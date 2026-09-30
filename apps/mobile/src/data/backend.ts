@@ -5,6 +5,7 @@ import type {
   HeadDoc,
   ProjectDoc,
   RelayChange,
+  RevokedDoc,
 } from "@ayanami-task/sync-protocol";
 
 export type ChangeBatch = { changes: RelayChange[]; cursor: string | null; reset: boolean };
@@ -18,6 +19,8 @@ export interface SyncBackend {
   /** 探测中继并从给定游标开始变更流；每次重新连上都会再调一次。 */
   connect(cursor: string | null): Promise<{ longPoll: boolean }>;
   readHead(): Promise<HeadDoc | null>;
+  /** 电脑重置配对后留在旧空间的撤销标记；没有就是 null。 */
+  readRevoked(): Promise<RevokedDoc | null>;
   readProject(hash: string): Promise<ProjectDoc | null>;
   readDevice(id: string): Promise<DeviceDoc | null>;
   /** 以「新建」写入命令；同一个 ID 重复写入是幂等的。 */

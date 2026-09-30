@@ -2,6 +2,8 @@ import { AtmError } from "@ayanami-task/errors";
 import {
   APP_ID_PATTERN,
   RelayError,
+  SpaceStore,
+  deriveSpaceKeys,
   normalizeRelayUrl,
   spacePrefix,
   type RelayClient,
@@ -154,6 +156,21 @@ export async function purgeSpace(client: RelayClient, spaceId: string): Promise<
     }
   }
   return removed;
+}
+
+/**
+ * 在（已清空的）旧空间里留撤销标记，用旧空间的密钥加密：旧手机读到就回到「需要重新配对」，
+ * 而不是一直当成「电脑还没发布」，把新任务发进一个没人读的空间。
+ */
+export async function revokeSpace(
+  client: RelayClient,
+  spaceId: string,
+  secret: string,
+  host: { id: string; name: string },
+  now: Date,
+): Promise<void> {
+  const store = new SpaceStore({ client, keys: await deriveSpaceKeys(secret), spaceId });
+  await store.writeRevoked({ v: 1, at: now.toISOString(), host });
 }
 
 export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {

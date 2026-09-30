@@ -184,6 +184,19 @@ export const DeviceDocSchema = z.object({
 });
 export type DeviceDoc = z.infer<typeof DeviceDocSchema>;
 
+/**
+ * 撤销标记：电脑重置配对时清空旧空间后写入，用旧空间的密钥加密。
+ * 能解开就说明是持有这份密钥的一方写的；中继伪造不了，最多删掉它（等同于拒绝服务）。
+ */
+export const RevokedDocSchema = z
+  .object({
+    v: z.literal(1),
+    at: timestamp,
+    host: z.object({ id: z.string().regex(DEVICE_ID_PATTERN), name: shortText(64) }),
+  })
+  .strict();
+export type RevokedDoc = z.infer<typeof RevokedDocSchema>;
+
 /** 手机判定「电脑在线」的窗口。电脑每 5 分钟写一次在线状态。 */
 export const HOST_ONLINE_WINDOW_MS = 7 * 60 * 1000;
 /** 早于这个时间的命令直接拒绝。 */

@@ -262,7 +262,7 @@ describe("结局判定", () => {
       });
     }
     expect(CLAUDE_LOGIN_REQUIRED_MESSAGE).toBe(
-      "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude",
+      "Claude Code 未登录或登录已过期：在电脑终端运行 claude auth login 后再交给 Claude",
     );
 
     // 没有 result 行、只有 stderr：同样映射，stderr 原文进 summary.result。

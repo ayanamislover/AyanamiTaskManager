@@ -13,6 +13,7 @@ import {
   type HeadDoc,
   type PairingPayload,
   type ProjectDoc,
+  type RevokedDoc,
 } from "@ayanami-task/sync-protocol";
 import type { ChangeBatch, SyncBackend } from "./backend.js";
 
@@ -69,6 +70,10 @@ export class RelayBackend implements SyncBackend {
 
   readHead(): Promise<HeadDoc | null> {
     return this.#store.readHead();
+  }
+
+  readRevoked(): Promise<RevokedDoc | null> {
+    return this.#store.readRevoked();
   }
 
   readProject(hash: string): Promise<ProjectDoc | null> {

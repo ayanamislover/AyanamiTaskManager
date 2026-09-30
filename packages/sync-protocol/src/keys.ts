@@ -43,6 +43,11 @@ export function headKey(spaceId: string): string {
   return `${checkSpace(spaceId)}/head`;
 }
 
+/** 电脑「重置配对」后留在旧空间里的撤销标记（用旧密钥加密）：旧手机读到就知道要重新扫码。 */
+export function revokedKey(spaceId: string): string {
+  return `${checkSpace(spaceId)}/revoked`;
+}
+
 export function projectKey(spaceId: string, hash: string): string {
   if (!PROJECT_HASH_PATTERN.test(hash)) throw new SyncProtocolError("KEY_INVALID", "projectHash");
   return `${checkSpace(spaceId)}/p/${hash}`;
@@ -72,6 +77,7 @@ export function partKey(logicalKey: string, index: number): string {
 
 export type KeyKind =
   | { kind: "head" }
+  | { kind: "revoked" }
   | { kind: "project"; hash: string }
   | { kind: "command"; id: string }
   | { kind: "ack"; id: string }
@@ -94,6 +100,7 @@ export function classifyKey(spaceId: string, key: string): ClassifiedKey | null 
   }
   const rest = logicalKey.slice(prefix.length);
   if (rest === "head") return { kind: "head", logicalKey, part };
+  if (rest === "revoked") return { kind: "revoked", logicalKey, part };
   const [group, id, ...extra] = rest.split("/");
   if (!id || extra.length > 0) return null;
   switch (group) {

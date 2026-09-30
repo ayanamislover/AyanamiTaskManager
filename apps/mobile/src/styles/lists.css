@@ -48,16 +48,29 @@
   flex: 1;
   gap: 2px;
 }
+/* 时间放在标题行右侧，下面的原因才能占满整宽。 */
+.command-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
 .command-copy strong {
+  min-width: 0;
   font-size: 14px;
   font-weight: 600;
 }
+/* 拒收原因里常带「去终端运行 claude auth login」这类要照做的指引，截成一行就读不到了：最多放三行。 */
 .command-detail {
+  display: -webkit-box;
   overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   color: var(--atm-text-muted);
   font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .command-time {
   flex: none;

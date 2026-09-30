@@ -8,6 +8,7 @@ import {
   type CommandInput,
   type PairingPayload,
   type RelayChange,
+  type RevokedDoc,
 } from "@ayanami-task/sync-protocol";
 import type { SyncBackend } from "./backend.js";
 import { cacheGet, cachePut, debouncedWriter } from "./cache.js";
@@ -274,6 +275,8 @@ export class SyncEngine {
         if (this.#forceFull) {
           this.#forceFull = false;
           await this.#fullSync();
+          // 读到撤销标记：已经停下并标成 rekey，不能再往下走（#markLive 会把它盖回 live）。
+          if (!this.#running) break;
         }
         await this.#flushOutbox();
         this.#markLive();
@@ -286,6 +289,7 @@ export class SyncEngine {
           this.#forceFull = true;
         } else {
           await this.#applyChanges(batch.changes);
+          if (!this.#running) break;
         }
         this.#setSnapshot({ ...this.#state.snapshot, cursor: batch.cursor });
         this.#markLive();
@@ -347,10 +351,27 @@ export class SyncEngine {
     });
   }
 
+  /**
+   * 这个空间已经作废（电脑重置了配对）：停下循环，等用户重新扫码。
+   * 不再写心跳，也不再发命令——发进旧空间的命令没有人会读。
+   */
+  #revoke(revoked: RevokedDoc | null): void {
+    this.#running = false;
+    const host = revoked?.host.name.trim();
+    this.#set({
+      phase: "rekey",
+      lastError: `${host ? `电脑「${host}」` : "电脑端"}已经重置了配对，这台手机需要重新扫码`,
+      refreshing: false,
+      retryAt: null,
+    });
+  }
+
   async #fullSync(): Promise<void> {
     const head = await this.#backend.readHead();
     if (!head) {
-      // 空间里还没有头部：电脑还没发布过，或者已经重置了配对（旧空间被清空）。
+      // 空间里没有头部：电脑还没发布过，或者已经重置了配对。后者会留下撤销标记，据此区分。
+      const revoked = await this.#backend.readRevoked();
+      if (revoked) return this.#revoke(revoked);
       this.#setSnapshot({ ...this.#state.snapshot, head: null, projects: {}, host: null });
     } else {
       this.#setSnapshot(applyHead(this.#state.snapshot, head));
@@ -416,6 +437,7 @@ export class SyncEngine {
     const spaceId = this.#backend.spaceId;
     const awaiting = new Set(commandsAwaitingAck(this.#state.commands).map((c) => c.doc.id));
     let headChanged = false;
+    let revokedChanged = false;
     let hostChanged = false;
     const projectHashes = new Set<string>();
     const acks = new Set<string>();
@@ -426,6 +448,9 @@ export class SyncEngine {
       switch (key.kind) {
         case "head":
           headChanged = true;
+          break;
+        case "revoked":
+          if (change.op === "put") revokedChanged = true;
           break;
         case "project":
           if (change.op === "delete")
@@ -442,15 +467,16 @@ export class SyncEngine {
           break;
       }
     }
+    if (revokedChanged) {
+      // 以能解开的标记为准：解不开会抛 DECRYPT_FAILED，同样按 rekey 处理。
+      const revoked = await this.#backend.readRevoked();
+      if (revoked) return this.#revoke(revoked);
+    }
     if (headChanged) {
       const head = await this.#backend.readHead();
       if (!head) {
-        this.#running = false;
-        this.#set({
-          phase: "rekey",
-          lastError: "电脑端已经重置了配对，这台手机需要重新扫码",
-        });
-        return;
+        // 头部被删只会发生在重置配对清空旧空间时；撤销标记随后才写，这里先按作废处理。
+        return this.#revoke(await this.#backend.readRevoked().catch(() => null));
       }
       this.#setSnapshot(applyHead(this.#state.snapshot, head));
       for (const project of projectsToFetch(this.#state.snapshot)) projectHashes.add(project.h);

@@ -10,6 +10,7 @@ import {
   type HeadDoc,
   type ProjectDoc,
   type RelayChange,
+  type RevokedDoc,
   type TaskCard,
 } from "@ayanami-task/sync-protocol";
 import type { ChangeBatch, SyncBackend } from "./backend.js";
@@ -27,11 +28,13 @@ export type DemoScenario =
   | "dispatch-off"
   | "dispatch-failed"
   | "denied"
-  | "host-offline";
+  | "host-offline"
+  /** 电脑重置了配对：头部没了，只剩撤销标记。 */
+  | "revoked";
 
 const WAIT_MS = 25_000;
 const DEMO_DISPATCH_ERROR =
-  "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude";
+  "Claude Code 未登录或登录已过期：在电脑终端运行 claude auth login 后再交给 Claude";
 
 /** 回执去掉信封字段后的部分（在联合类型上逐支 Omit）。 */
 type AckBody = AckDoc extends infer Doc
@@ -92,9 +95,17 @@ export class DemoBackend implements SyncBackend {
     return { longPoll: true };
   }
 
+  async readRevoked(): Promise<RevokedDoc | null> {
+    await this.#latency();
+    this.#failIfNeeded();
+    if (this.#scenario !== "revoked") return null;
+    return { v: 1, at: iso(Date.now()), host: { id: DEMO_HOST.id, name: DEMO_HOST.name } };
+  }
+
   async readHead(): Promise<HeadDoc | null> {
     await this.#latency();
     this.#failIfNeeded();
+    if (this.#scenario === "revoked") return null;
     const projects = this.#scenario === "empty" ? [] : this.#projects;
     return {
       v: 1,

@@ -9,7 +9,7 @@ import {
 } from "../src/ui/labels.js";
 
 const NOT_LOGGED_IN =
-  "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude";
+  "Claude Code 未登录或登录已过期：在电脑终端运行 claude auth login 后再交给 Claude";
 
 function card(overrides: Partial<TaskCard> = {}): TaskCard {
   return {
@@ -151,5 +151,18 @@ describe("发出的任务卡片上的派单失败", () => {
     const view = describeCommand(created, card({ dispatch: failed(NOT_LOGGED_IN) }));
     expect(view.detail).toBe(`Claude 运行失败：${NOT_LOGGED_IN}`);
     expect(describeCommand(created, card({ dispatch: failed() })).detail).toBe("Claude 失败");
+  });
+
+  it("快照里找不到任务时，不把回执那一刻的「排队中」当成现在的状态", () => {
+    const created = command(
+      {
+        type: "task.create",
+        body: { project: "DEMO", title: "从手机交给 Claude", dispatch: true },
+      } as CommandDoc,
+      { result: accepted("run-1") },
+    );
+    const view = describeCommand(created, null);
+    expect(view.title).toBe("已创建 DEMO-T-0001");
+    expect(view.detail).toBe("已交给 Claude，进度等电脑同步");
   });
 });

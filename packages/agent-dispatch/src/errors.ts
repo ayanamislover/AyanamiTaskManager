@@ -23,7 +23,7 @@ export type DispatchErrorCode = keyof typeof DISPATCH_ERROR_POLICIES;
  * 与会话因鉴权失败结束（run.error）用同一句，原文另存在 summary.result。
  */
 export const CLAUDE_LOGIN_REQUIRED_MESSAGE =
-  "Claude Code 未登录或登录已过期：在这台电脑的终端运行 claude auth login 后再交给 Claude";
+  "Claude Code 未登录或登录已过期：在电脑终端运行 claude auth login 后再交给 Claude";
 
 export type DispatchErrorDto = {
   code: DispatchErrorCode;

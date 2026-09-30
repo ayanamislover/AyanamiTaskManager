@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   COMMAND_ID_PATTERN,
   classifyKey,
+  revokedKey,
   commandKey,
   commandTimestamp,
   decodePairingCode,
@@ -80,6 +81,7 @@ describe("文档键", () => {
     expect(command).toMatch(COMMAND_ID_PATTERN);
     const hash = "0123456789abcdef0123";
     expect(classifyKey(spaceId, headKey(spaceId))).toMatchObject({ kind: "head", part: 0 });
+    expect(classifyKey(spaceId, revokedKey(spaceId))).toMatchObject({ kind: "revoked", part: 0 });
     expect(classifyKey(spaceId, projectKey(spaceId, hash))).toMatchObject({
       kind: "project",
       hash,

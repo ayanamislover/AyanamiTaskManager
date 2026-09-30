@@ -116,7 +116,9 @@ projectH  = hex(HMAC(nameKey, "project:" + CODE))[0:20]        项目码不出�
 ```
 
 配对码里有中继 token 和空间密钥，只在电脑端「手机同步」面板上显示，不写日志、不进 ATM 记录。
-「重置配对」会生成新的 `spaceId` 和 `secret`，并删除旧空间里的全部文档（含手机写的）；旧手机随即失效，需要重新扫码。
+「重置配对」会生成新的 `spaceId` 和 `secret`，并删除旧空间里的全部文档（含手机写的），然后在旧空间留一条用旧密钥加密的撤销标记 `<S>/revoked`。
+旧手机在变更流里看到头部被删或撤销标记、或全量重读时「没有头部但有撤销标记」，就停止同步、不再写心跳和命令，提示重新扫码；「没有头部也没有标记」只表示电脑还没发布。
+标记必须在清空之后写（先写会被一起删掉）；清理失败也照写。中继伪造不了标记（解不开），最多删掉它，等同于拒绝服务。
 吊销中继 token 属于中继自己的管理动作（`atm-relay token revoke` 或 AyanamiCloud 网页）。
 
 ## 5. 文档键
@@ -130,6 +132,7 @@ projectH  = hex(HMAC(nameKey, "project:" + CODE))[0:20]        项目码不出�
 | `<S>/cmd/<cmdId>`    | 手机   | `{v, id, device:{id,name}, at, type, body}`                                                           |
 | `<S>/ack/<cmdId>`    | 电脑   | `{v, id, at, ok:true, result} \| {v, id, at, ok:false, error:{code,message}}`                         |
 | `<S>/dev/<deviceId>` | 各设备 | `{v, id, name, kind:"windows"\|"android", role:"host"\|"client", app, at, state:"online"\|"offline"}` |
+| `<S>/revoked`        | 电脑   | `{v, at, host:{id,name}}`：只在重置配对后的旧空间里出现                                               |
 
 ```ts
 type ProjectHead = {

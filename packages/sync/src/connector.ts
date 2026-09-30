@@ -20,6 +20,7 @@ import {
   parseRelayCandidate,
   planConfigChange,
   purgeSpace,
+  revokeSpace,
   withTimeout,
 } from "./settings.js";
 import {
@@ -270,25 +271,41 @@ export class SyncConnector {
     });
   }
 
-  /** 轮换空间：删掉旧空间里的文档（尽力而为），换新空间与密钥；旧手机随即失效。 */
+  /**
+   * 轮换空间：删掉旧空间里的文档（尽力而为），再留一条用旧密钥加密的撤销标记，
+   * 然后换新空间与密钥。旧手机读到撤销标记就提示重新扫码。
+   */
   resetSpace(): Promise<ResetSpaceResult> {
     return this.#serialized(async () => {
       await this.#vault.load(this.#config.spaceId);
       this.#vault.assertWritable();
       await this.#spaceCreation;
-      const { spaceId: previous, relayUrl, appId } = this.#config;
+      const { spaceId: previous, relayUrl, appId, deviceId, deviceName } = this.#config;
       const token = this.#vault.token;
+      const previousSecret = this.#vault.secret;
       await this.#halt(false);
       let removed = 0;
-      let cleanupError: string | undefined;
+      const cleanupErrors: string[] = [];
       if (previous && relayUrl && token) {
+        const client = this.#client(relayUrl, appId, token);
         try {
-          removed = await purgeSpace(this.#client(relayUrl, appId, token), previous);
+          removed = await purgeSpace(client, previous);
         } catch (error) {
-          cleanupError = describeError(error);
-          this.#logger.warn("清理旧配对空间失败", { error: cleanupError });
+          cleanupErrors.push(describeError(error));
+          this.#logger.warn("清理旧配对空间失败", { error: describeError(error) });
+        }
+        // 撤销标记必须在清空之后写（先写会被一起删掉）；清理失败也照写，旧手机只认它。
+        if (previousSecret) {
+          try {
+            const host = { id: deviceId, name: deviceName };
+            await revokeSpace(client, previous, previousSecret, host, this.#now());
+          } catch (error) {
+            cleanupErrors.push(describeError(error));
+            this.#logger.warn("写撤销标记失败", { error: describeError(error) });
+          }
         }
       }
+      const cleanupError = cleanupErrors.length > 0 ? cleanupErrors.join("；") : undefined;
       await this.#createSpace();
       this.#launch();
       const spaceId = this.#config.spaceId!;

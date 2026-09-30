@@ -11,6 +11,7 @@ import {
   newCommandId,
   partKey,
   projectKey,
+  revokedKey,
   spacePrefix,
 } from "./keys.js";
 import { RelayError, type RelayClient } from "./relay-client.js";
@@ -20,12 +21,14 @@ import {
   DeviceDocSchema,
   HeadDocSchema,
   ProjectDocSchema,
+  RevokedDocSchema,
   type AckDoc,
   type CommandDoc,
   type CommandInput,
   type DeviceDoc,
   type HeadDoc,
   type ProjectDoc,
+  type RevokedDoc,
 } from "./schemas.js";
 
 export type SpaceStoreOptions = {
@@ -262,5 +265,13 @@ export class SpaceStore {
 
   async deleteDevice(deviceId: string): Promise<void> {
     await this.deleteObject(deviceKey(this.spaceId, deviceId));
+  }
+
+  readRevoked(): Promise<RevokedDoc | null> {
+    return this.readObject(revokedKey(this.spaceId), RevokedDocSchema);
+  }
+
+  async writeRevoked(doc: RevokedDoc): Promise<void> {
+    await this.writeObject(revokedKey(this.spaceId), RevokedDocSchema.parse(doc));
   }
 }

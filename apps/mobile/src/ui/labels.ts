@@ -138,7 +138,7 @@ export function describeCommand(command: LocalCommand, task: TaskCard | null): C
   }
   const result = command.result;
   const key = result?.key ?? "";
-  const dispatch = task?.dispatch ?? (result?.dispatch ? { state: result.dispatch.state } : null);
+  const title = doc.type === "task.create" ? `已创建 ${key}` : `${key} 已交给 Claude`;
   if (result?.dispatchError) {
     return {
       tone: "user",
@@ -146,11 +146,20 @@ export function describeCommand(command: LocalCommand, task: TaskCard | null): C
       detail: `派单没有开始：${result.dispatchError.message}`,
     };
   }
+  if (!task && result?.dispatch) {
+    // 快照里还没有（或已经没有）这个任务：回执里的派单状态只是接单那一刻的，不能当成现在的进度。
+    return {
+      tone: dispatchTone(result.dispatch.state),
+      title,
+      detail: "已交给 Claude，进度等电脑同步",
+    };
+  }
+  const dispatch = task?.dispatch ?? null;
   if (dispatch) {
     const reason = dispatch.state === "failed" ? dispatchFailureReason(result, task) : null;
     return {
       tone: dispatchTone(dispatch.state),
-      title: doc.type === "task.create" ? `已创建 ${key}` : `${key} 已交给 Claude`,
+      title,
       detail: reason ? `Claude 运行失败：${reason}` : `Claude ${DISPATCH_LABELS[dispatch.state]}`,
     };
   }

@@ -52,10 +52,14 @@ export function CommandCard({
     <>
       <span className="command-dot" data-tone={view.tone} aria-hidden="true" />
       <span className="command-copy">
-        <strong>{view.title}</strong>
+        <span className="command-head">
+          <strong>{view.title}</strong>
+          <span className="command-time">
+            {formatRelative(command.ackAt ?? command.doc.at, now)}
+          </span>
+        </span>
         {view.detail ? <span className="command-detail">{view.detail}</span> : null}
       </span>
-      <span className="command-time">{formatRelative(command.ackAt ?? command.doc.at, now)}</span>
     </>
   );
   return (

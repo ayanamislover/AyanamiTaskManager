@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SpaceStore, headKey, spacePrefix } from "@ayanami-task/sync-protocol";
+import { SpaceStore, headKey, revokedKey, spacePrefix } from "@ayanami-task/sync-protocol";
 import {
   FileSecretStore,
   SECRET_NAMES,
@@ -347,7 +347,7 @@ describe("配对", () => {
     }
   });
 
-  it("resetSpace 换新空间：旧空间被清空，旧密钥读不了新数据，新配对码可用", async () => {
+  it("resetSpace 换新空间：旧空间只剩撤销标记，旧密钥读不了新数据，新配对码可用", async () => {
     const fixture = await openFixture();
     try {
       await seedProject(fixture.service, "ALPHA");
@@ -360,11 +360,18 @@ describe("配对", () => {
       expect(reset.spaceId).not.toBe(pairing.spaceId);
       expect(reset.removed).toBeGreaterThan(0);
       expect(reset.cleanupError).toBeUndefined();
+      // 清空之后只留一条撤销标记：旧手机用旧密钥解得开，才知道要重新扫码。
       const oldKeys = [...fixture.relay.docs.keys()].filter((key) =>
         key.startsWith(spacePrefix(pairing.spaceId)),
       );
-      expect(oldKeys).toEqual([]);
+      expect(oldKeys).toEqual([revokedKey(pairing.spaceId)]);
       expect(await oldPhone.store.readHead()).toBeNull();
+      const status = await connector.status();
+      expect(await oldPhone.store.readRevoked()).toMatchObject({
+        v: 1,
+        host: { name: status.deviceName },
+      });
+      expect(fixture.relay.docs.has(revokedKey(reset.spaceId))).toBe(false);
 
       await waitFor(async () => (await connector.status()).state === "online", "新空间上线");
       await waitFor(() => fixture.relay.docs.has(headKey(reset.spaceId)), "新空间有 head");
