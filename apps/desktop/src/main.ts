@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, clipboard, ipcMain } from "electron";
 import { prefetchSelfProcessIdentity } from "@ayanami-task/daemon";
 import { installAgentIntegrationHost } from "./main-agent-integrations.js";
 import {
@@ -81,6 +81,16 @@ async function startApplication(background: boolean): Promise<void> {
     execPath: process.execPath,
     packaged: app.isPackaged,
     smokeTrace,
+    // 过渡期：Electron 壳仍在，协议方法名映射回原来的 IPC 通道（getMcpBridges → atm:get-mcp-bridges）。
+    handle: (method, handler) =>
+      ipcMain.handle(
+        `atm:${method.replace(/[A-Z]/gu, (letter) => `-${letter.toLowerCase()}`)}`,
+        (_event, ...args: unknown[]) => handler(...args),
+      ),
+  });
+  ipcMain.handle("atm:copy-text", (_event, text: string) => {
+    clipboard.writeText(text);
+    return true;
   });
 
   windowHost = new WindowHost({

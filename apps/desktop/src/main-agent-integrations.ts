@@ -1,6 +1,5 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { clipboard, ipcMain } from "electron";
 import {
   claudeDesktopConfigPaths,
   defaultClaudeRulePath,
@@ -66,14 +65,36 @@ function unsupportedClient(client: never): never {
   throw new Error(`MCP_CLIENT_UNSUPPORTED: ${String(client)}`);
 }
 
+/** 桥方法注册：core 把它们挂到 host-control 协议上（host-protocol.ts 的 CORE_METHODS）。 */
+export type BridgeMethodRegistrar = (
+  method: string,
+  handler: (...args: unknown[]) => unknown,
+) => void;
+
 export type AgentIntegrationHostOptions = {
   service: AyanamiTaskService;
   runtime: Runtime;
   dataDir: string;
+  /** 宿主 exe 的路径（`<appDir>\AyanamiTaskManager.exe`）；MCP 启动方式由它与 current 推导。 */
   execPath: string;
   packaged: boolean;
   smokeTrace(stage: string, detail?: unknown): void;
+  handle: BridgeMethodRegistrar;
 };
+
+const AGENT_RULE_ACTIONS: readonly AgentRuleAction[] = [
+  "PREVIEW",
+  "INSTALL",
+  "UPDATE",
+  "REPAIR",
+  "UNINSTALL",
+];
+
+function mcpClientArgument(value: unknown): McpClient {
+  if (typeof value !== "string" || !MCP_CLIENTS.includes(value as McpClient))
+    throw new Error("MCP_CLIENT_UNSUPPORTED");
+  return value as McpClient;
+}
 
 export function installAgentIntegrationHost(options: AgentIntegrationHostOptions): void {
   const service = options.service;
@@ -378,18 +399,19 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     execPath: options.execPath,
     dataDir: dataDirBeforeReady(),
   }).command;
-  ipcMain.handle("atm:get-mcp-bridges", () =>
+  const handle = options.handle;
+  handle("getMcpBridges", () =>
     observeMcpBridgeCommands({ bridgeCommands: [stdioCommand, nodeBridgeCommand] }),
   );
-  ipcMain.handle("atm:get-mcp-configs", () => {
+  handle("getMcpConfigs", () => {
     if (!runtime) throw new Error("RUNTIME_NOT_READY");
     return renderMcpConfigs(
       { ...runtime, command: stdioCommand, args: stdioArgs, env: stdioEnv },
       enabledProfiles(),
     );
   });
-  ipcMain.handle("atm:get-memory-profile", () => memoryProfileEnabled());
-  ipcMain.handle("atm:set-memory-profile", (_event, enabled: boolean) => {
+  handle("getMemoryProfile", () => memoryProfileEnabled());
+  handle("setMemoryProfile", (enabled: unknown) => {
     if (!service) throw new Error("RUNTIME_NOT_READY");
     const current = service.getSetting<boolean>(MEMORY_PROFILE_SETTING, true);
     const write = { command: stdioCommand, args: stdioArgs, env: stdioEnv };
@@ -413,7 +435,8 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     }
     return result;
   });
-  ipcMain.handle("atm:install-mcp", (_event, client: McpClient) => {
+  handle("installMcp", (clientArgument: unknown) => {
+    const client = mcpClientArgument(clientArgument);
     const write = {
       command: stdioCommand,
       args: stdioArgs,
@@ -424,54 +447,50 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     mcpRepairFailures.delete(client);
     return result;
   });
-  ipcMain.handle("atm:get-agent-integrations", () => MCP_CLIENTS.map(agentIntegrationReport));
-  ipcMain.handle(
-    "atm:manage-agent-integration",
-    (_event, client: McpClient, action: AgentRuleAction) => {
-      if (!MCP_CLIENTS.includes(client)) throw new Error("MCP_CLIENT_UNSUPPORTED");
-      const paths = agentIntegrationPaths(client);
-      const skillState = inspectAgentSkills({
-        sourceRoot: join(dataDirBeforeReady(), "skills"),
-        targetRoot: paths.skillsPath,
-      }).state;
-      if (
-        action !== "PREVIEW" &&
-        action !== "UNINSTALL" &&
-        skillState === "MODIFIED" &&
-        action !== "REPAIR"
-      ) {
-        throw new Error("AGENT_SKILL_MODIFIED_REQUIRES_REPAIR");
-      }
-      // CLAUDE 与 CLAUDE_CODE 共用规则与技能路径。卸载其中一个时，只要另一个还装着
-      // MCP，就必须保留共用的规则和技能，否则会连带废掉仍在使用的那一个。
-      const sibling: McpClient | null =
-        client === "CLAUDE" ? "CLAUDE_CODE" : client === "CLAUDE_CODE" ? "CLAUDE" : null;
-      const siblingStillInstalled = sibling !== null && mcpPresentFor(sibling);
-      const removeSharedAssets = action === "UNINSTALL" && !siblingStillInstalled;
-      const rule = manageAgentRule({
-        path: paths.rulePath,
-        action: action === "UNINSTALL" && !removeSharedAssets ? "PREVIEW" : action,
-      });
-      if (action === "PREVIEW") return { report: agentIntegrationReport(client), preview: rule };
-      if (action === "UNINSTALL") {
-        uninstallMcpFor(client);
-        if (removeSharedAssets) uninstallAgentSkills(paths.skillsPath);
-      } else {
-        const profiles = enabledProfiles();
-        const write = { command: stdioCommand, args: stdioArgs, env: stdioEnv, profiles };
-        if (!mcpInstalledFor(client)) installMcpFor(client, write);
-        if (skillState !== "INSTALLED")
-          installAgentSkills({
-            sourceRoot: join(dataDirBeforeReady(), "skills"),
-            targetRoot: paths.skillsPath,
-          });
-      }
-      mcpRepairFailures.delete(client);
-      return { report: agentIntegrationReport(client), preview: null };
-    },
-  );
-  ipcMain.handle("atm:copy-text", (_event, text: string) => {
-    clipboard.writeText(text);
-    return true;
+  handle("getAgentIntegrations", () => MCP_CLIENTS.map(agentIntegrationReport));
+  handle("manageAgentIntegration", (clientArgument: unknown, actionArgument: unknown) => {
+    const client = mcpClientArgument(clientArgument);
+    if (!AGENT_RULE_ACTIONS.includes(actionArgument as AgentRuleAction))
+      throw new Error("AGENT_RULE_ACTION_UNSUPPORTED");
+    const action = actionArgument as AgentRuleAction;
+    const paths = agentIntegrationPaths(client);
+    const skillState = inspectAgentSkills({
+      sourceRoot: join(dataDirBeforeReady(), "skills"),
+      targetRoot: paths.skillsPath,
+    }).state;
+    if (
+      action !== "PREVIEW" &&
+      action !== "UNINSTALL" &&
+      skillState === "MODIFIED" &&
+      action !== "REPAIR"
+    ) {
+      throw new Error("AGENT_SKILL_MODIFIED_REQUIRES_REPAIR");
+    }
+    // CLAUDE 与 CLAUDE_CODE 共用规则与技能路径。卸载其中一个时，只要另一个还装着
+    // MCP，就必须保留共用的规则和技能，否则会连带废掉仍在使用的那一个。
+    const sibling: McpClient | null =
+      client === "CLAUDE" ? "CLAUDE_CODE" : client === "CLAUDE_CODE" ? "CLAUDE" : null;
+    const siblingStillInstalled = sibling !== null && mcpPresentFor(sibling);
+    const removeSharedAssets = action === "UNINSTALL" && !siblingStillInstalled;
+    const rule = manageAgentRule({
+      path: paths.rulePath,
+      action: action === "UNINSTALL" && !removeSharedAssets ? "PREVIEW" : action,
+    });
+    if (action === "PREVIEW") return { report: agentIntegrationReport(client), preview: rule };
+    if (action === "UNINSTALL") {
+      uninstallMcpFor(client);
+      if (removeSharedAssets) uninstallAgentSkills(paths.skillsPath);
+    } else {
+      const profiles = enabledProfiles();
+      const write = { command: stdioCommand, args: stdioArgs, env: stdioEnv, profiles };
+      if (!mcpInstalledFor(client)) installMcpFor(client, write);
+      if (skillState !== "INSTALLED")
+        installAgentSkills({
+          sourceRoot: join(dataDirBeforeReady(), "skills"),
+          targetRoot: paths.skillsPath,
+        });
+    }
+    mcpRepairFailures.delete(client);
+    return { report: agentIntegrationReport(client), preview: null };
   });
 }

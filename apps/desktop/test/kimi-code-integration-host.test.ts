@@ -19,12 +19,6 @@ const state = vi.hoisted(() => ({
   home: "",
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
 }));
-vi.mock("electron", () => ({
-  ipcMain: {
-    handle: (name: string, fn: (...args: unknown[]) => unknown) => state.handlers.set(name, fn),
-  },
-  clipboard: { writeText: () => {} },
-}));
 vi.mock("node:os", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:os")>()),
   homedir: () => state.home,
@@ -81,10 +75,9 @@ const backups = () =>
   existsSync(dirname(configPath))
     ? readdirSync(dirname(configPath)).filter((name) => name.startsWith("mcp.json.bak-"))
     : [];
-const call = (name: string, ...args: unknown[]) =>
-  state.handlers.get(`atm:${name}`)!(null, ...args);
+const call = (name: string, ...args: unknown[]) => state.handlers.get(name)!(...args);
 const kimiReport = () =>
-  (call("get-agent-integrations") as KimiReport[]).find((each) => each.client === "KIMI_CODE")!;
+  (call("getAgentIntegrations") as KimiReport[]).find((each) => each.client === "KIMI_CODE")!;
 
 /** 等同一次应用启动：注册 IPC，并跑启动时的过期修复。 */
 function boot(): void {
@@ -99,6 +92,7 @@ function boot(): void {
     execPath: join(root, "app", "ATM.exe"),
     packaged: true,
     smokeTrace: () => {},
+    handle: (method, handler) => state.handlers.set(method, handler),
   });
 }
 
@@ -131,7 +125,7 @@ describe("Kimi Code 接入（主进程）", () => {
     boot();
     expect(readFileSync(configPath, "utf8")).toBe(bytes);
     expect(kimiReport()).toMatchObject({ mcpInstalled: false, cliAvailable: true });
-    expect(JSON.stringify(call("get-agent-integrations"))).not.toContain("marker-x");
+    expect(JSON.stringify(call("getAgentIntegrations"))).not.toContain("marker-x");
   });
 
   it.each([
@@ -139,7 +133,7 @@ describe("Kimi Code 接入（主进程）", () => {
     ["缺了 transport", undefined],
   ])("ATM 条目 %s：报告为未装好，启动时自动改回 stdio", (_label, transport) => {
     boot();
-    call("manage-agent-integration", "KIMI_CODE", "INSTALL");
+    call("manageAgentIntegration", "KIMI_CODE", "INSTALL");
     setManagedTransport(transport);
     expect(kimiReport().mcpInstalled).toBe(false);
 
@@ -151,20 +145,20 @@ describe("Kimi Code 接入（主进程）", () => {
   it("「修复」按钮同样会改回 stdio，别的服务原样保留", () => {
     put(configPath, JSON.stringify({ mcpServers: { other: { transport: "http", url: "u" } } }));
     boot();
-    call("manage-agent-integration", "KIMI_CODE", "INSTALL");
+    call("manageAgentIntegration", "KIMI_CODE", "INSTALL");
     setManagedTransport("http");
-    call("manage-agent-integration", "KIMI_CODE", "REPAIR");
+    call("manageAgentIntegration", "KIMI_CODE", "REPAIR");
     expect(managedTransports()).toEqual(["stdio", "stdio", "stdio"]);
     expect(read().mcpServers.other).toEqual({ transport: "http", url: "u" });
   });
 
   it("配置本来就对：重复启动与「修复」都不改文件、不留备份", () => {
     boot();
-    call("manage-agent-integration", "KIMI_CODE", "INSTALL");
+    call("manageAgentIntegration", "KIMI_CODE", "INSTALL");
     const bytes = readFileSync(configPath, "utf8");
     const before = backups().length;
     boot();
-    call("manage-agent-integration", "KIMI_CODE", "REPAIR");
+    call("manageAgentIntegration", "KIMI_CODE", "REPAIR");
     expect(readFileSync(configPath, "utf8")).toBe(bytes);
     expect(backups().length).toBe(before);
     expect(kimiReport().mcpInstalled).toBe(true);
@@ -191,8 +185,8 @@ describe("Kimi Code 接入（主进程）", () => {
   it("卸载只删 ATM 条目；之后启动不会再装回来", () => {
     put(configPath, JSON.stringify({ mcpServers: { other: { command: "other" } } }));
     boot();
-    call("manage-agent-integration", "KIMI_CODE", "INSTALL");
-    call("manage-agent-integration", "KIMI_CODE", "UNINSTALL");
+    call("manageAgentIntegration", "KIMI_CODE", "INSTALL");
+    call("manageAgentIntegration", "KIMI_CODE", "UNINSTALL");
     expect(read().mcpServers).toEqual({ other: { command: "other" } });
     boot();
     expect(read().mcpServers).toEqual({ other: { command: "other" } });
