@@ -186,6 +186,41 @@ describe("快照发布", () => {
     }
   });
 
+  it("已关闭任务也带派单结果，手机发送卡片才能显示「Claude 已完成」", async () => {
+    const fixture = await openFixture();
+    try {
+      const objective = (await seedProject(fixture.service, "ALPHA"))!;
+      const done = await seedTask(fixture.service, "ALPHA", objective, {
+        title: "手机交给 Claude",
+        description: "不该出现",
+      });
+      await fixture.service.patchWorkItemsAsUser("ALPHA", "cancel-done", [
+        {
+          taskKey: done.key,
+          expectedVersion: done.version,
+          operation: "cancel",
+          cancelReason: "测试",
+        } as never,
+      ]);
+      const dispatch = fakeDispatch();
+      const at = "2026-10-01T12:37:45.000Z";
+      dispatch.runs.set(`ALPHA/${done.key}`, { run: "run-1", state: "succeeded", at });
+      const project = { code: "ALPHA", name: "项目 ALPHA" };
+      const snapshot = await buildProjectSnapshot(
+        fixture.service,
+        project,
+        dispatch.port,
+        new Date(),
+      );
+      const closedCard = snapshot.body.tasks.find((card) => card.key === done.key)!;
+      expect(closedCard.status).toBe("CANCELLED");
+      expect(closedCard.dispatch).toEqual({ run: "run-1", state: "succeeded", at });
+      expect(closedCard.desc).toBeUndefined();
+    } finally {
+      await fixture.close();
+    }
+  });
+
   it("配置文件里有 deviceId 与已发布摘要，但没有 token 与空间密钥", async () => {
     const fixture = await openFixture();
     try {

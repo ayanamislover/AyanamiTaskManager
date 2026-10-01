@@ -119,6 +119,41 @@ export function dispatchAwaitingSnapshot(
   return !(command.ackAt && Date.parse(current.at) >= Date.parse(command.ackAt));
 }
 
+export type StepState = "done" | "active" | "todo" | "failed";
+export type DispatchStep = { state: StepState; label: string; detail?: string | null };
+
+/**
+ * 勾了「交给 Claude」的新任务，发出后「Claude 开工」那一步。不是这种命令返回 null。
+ * 以快照里的任务卡为准；回执里的派单状态只是电脑接单那一刻的，只在卡上还没有派单时顶上。
+ * 任务已经结束、卡上却没有派单（旧版电脑不给已结束的任务带派单，或派单记录已被裁掉）时按任务状态说，
+ * 否则回执里的「排队中」会一直转圈。
+ */
+export function dispatchStep(command: LocalCommand, task: TaskCard | null): DispatchStep | null {
+  const { doc, result } = command;
+  if (doc.type !== "task.create" || doc.body.dispatch !== true) return null;
+  const reason = dispatchFailureReason(result, task);
+  if (result?.dispatchError) return { state: "failed", label: "派单没有开始", detail: reason };
+  if (task && !task.dispatch && (task.status === "DONE" || task.status === "CANCELLED")) {
+    return task.status === "DONE"
+      ? { state: "done", label: "任务已完成" }
+      : { state: "todo", label: "任务已取消" };
+  }
+  const dispatch = task?.dispatch ?? result?.dispatch ?? null;
+  if (!dispatch) return { state: "todo", label: "Claude 开工" };
+  switch (dispatch.state) {
+    case "queued":
+      return { state: "active", label: "Claude 排队中" };
+    case "running":
+      return { state: "done", label: "Claude 已开工" };
+    case "succeeded":
+      return { state: "done", label: "Claude 已完成" };
+    case "failed":
+      return { state: "failed", label: "Claude 运行失败", detail: reason };
+    default:
+      return { state: "failed", label: "派单已取消" };
+  }
+}
+
 export type CommandView = { tone: Tone | "pending"; title: string; detail: string | null };
 
 /** 本地命令在界面上的样子：等待电脑接收 → 已创建 ATM-T-xxxx → 派单状态。 */

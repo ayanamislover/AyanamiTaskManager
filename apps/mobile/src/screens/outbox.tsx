@@ -6,7 +6,7 @@ import type { LocalCommand } from "../data/commands.js";
 import { findTask } from "../data/snapshot.js";
 import { formatRelative } from "../data/time.js";
 import { useEngine, useEngineState, useNow } from "../ui/hooks.js";
-import { describeCommand, dispatchFailureReason } from "../ui/labels.js";
+import { describeCommand, dispatchStep, type DispatchStep } from "../ui/labels.js";
 import { SectionTitle } from "../ui/layout.js";
 import { push } from "../ui/nav.js";
 
@@ -95,8 +95,7 @@ export function CommandCard({
   );
 }
 
-type StepState = "done" | "active" | "todo" | "failed";
-type Step = { state: StepState; label: string; mono?: string; detail?: string | null };
+type Step = DispatchStep & { mono?: string };
 
 /**
  * 新任务发出后的三步：电脑接收 → 建出任务 → （勾了交给 Claude 时）Claude 开工。
@@ -104,7 +103,7 @@ type Step = { state: StepState; label: string; mono?: string; detail?: string | 
  */
 export function CommandSteps({ command }: { command: LocalCommand }) {
   const state = useEngineState();
-  const { doc, result } = command;
+  const { result } = command;
   const task = result ? findTask(state.snapshot, result.project, result.key) : null;
   const steps: Step[] = [];
   if (command.state === "pending") {
@@ -124,23 +123,8 @@ export function CommandSteps({ command }: { command: LocalCommand }) {
       ? { state: "done", label: "已创建", mono: result.key }
       : { state: "todo", label: "创建任务" },
   );
-  const wantsDispatch = doc.type === "task.create" && doc.body.dispatch === true;
-  if (wantsDispatch) {
-    const dispatch = task?.dispatch ?? (result?.dispatch ? { state: result.dispatch.state } : null);
-    const reason = dispatchFailureReason(result, task);
-    if (result?.dispatchError)
-      steps.push({ state: "failed", label: "派单没有开始", detail: reason });
-    else if (!dispatch) steps.push({ state: "todo", label: "Claude 开工" });
-    else if (dispatch.state === "queued") steps.push({ state: "active", label: "Claude 排队中" });
-    else if (dispatch.state === "running") steps.push({ state: "done", label: "Claude 已开工" });
-    else if (dispatch.state === "succeeded") steps.push({ state: "done", label: "Claude 已完成" });
-    else
-      steps.push({
-        state: "failed",
-        label: dispatch.state === "failed" ? "Claude 运行失败" : "派单已取消",
-        detail: dispatch.state === "failed" ? reason : null,
-      });
-  }
+  const claude = dispatchStep(command, task);
+  if (claude) steps.push(claude);
   return (
     <ol className="steps">
       {steps.map((step, index) => (

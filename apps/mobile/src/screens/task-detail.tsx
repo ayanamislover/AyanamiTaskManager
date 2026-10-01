@@ -164,7 +164,8 @@ function TaskBody({ task, now }: { task: TaskCard; now: number }) {
               <span className="mono">{task.claim.agent}</span>
               {task.claim.since ? <span>{formatRelative(task.claim.since, now)}领取</span> : null}
             </span>
-          ) : (
+          ) : closed ? null : (
+            // 已结束的任务领取早已释放，「没人领取」是误导；派单结果在下面的「Claude 派单」里。
             <span>还没有人领取</span>
           )}
           <span className="task-hero-updated">
@@ -214,7 +215,7 @@ function TaskBody({ task, now }: { task: TaskCard; now: number }) {
       ) : null}
 
       {closed ? (
-        <p className="closed-note">已结束的任务只同步标题与状态；详情请在电脑上查看。</p>
+        <p className="closed-note">已结束的任务不同步描述和进度；详情请在电脑上查看。</p>
       ) : (
         <>
           <Description text={task.desc} />

@@ -6,6 +6,7 @@ import {
   dispatchAwaitingSnapshot,
   dispatchBlocker,
   dispatchFailureReason,
+  dispatchStep,
 } from "../src/ui/labels.js";
 
 const NOT_LOGGED_IN =
@@ -164,5 +165,73 @@ describe("发出的任务卡片上的派单失败", () => {
     const view = describeCommand(created, null);
     expect(view.title).toBe("已创建 DEMO-T-0001");
     expect(view.detail).toBe("已交给 Claude，进度等电脑同步");
+  });
+});
+
+describe("发送卡片上「Claude 开工」那一步", () => {
+  const created = (extra: Partial<LocalCommand> = { result: accepted("run-1") }) =>
+    command(
+      {
+        type: "task.create",
+        body: { project: "DEMO", title: "从手机交给 Claude", dispatch: true },
+      } as CommandDoc,
+      extra,
+    );
+  const succeeded = { state: "succeeded", at: "2026-09-30T21:03:00.000Z", run: "run-1" } as const;
+
+  it("任务做完、卡上没有派单时按任务状态说，不再停在回执里的「排队中」", () => {
+    // 真机复现：旧版电脑不给已结束的任务带派单，发送卡片一直转「Claude 排队中」。
+    expect(dispatchStep(created(), card({ status: "DONE", progress: 100 }))).toEqual({
+      state: "done",
+      label: "任务已完成",
+    });
+    expect(dispatchStep(created(), card({ status: "CANCELLED" }))).toEqual({
+      state: "todo",
+      label: "任务已取消",
+    });
+  });
+
+  it("卡上有派单时以卡为准：任务已完成也显示「Claude 已完成」", () => {
+    expect(dispatchStep(created(), card({ status: "DONE", dispatch: succeeded }))).toEqual({
+      state: "done",
+      label: "Claude 已完成",
+    });
+    const running = { state: "running", at: "2026-09-30T21:02:30.000Z", run: "run-1" } as const;
+    expect(dispatchStep(created(), card({ dispatch: running }))?.label).toBe("Claude 已开工");
+  });
+
+  it("快照还没跟上（没有任务，或任务开着但卡上暂无派单）时用回执的状态", () => {
+    expect(dispatchStep(created(), null)).toEqual({ state: "active", label: "Claude 排队中" });
+    expect(dispatchStep(created(), card())).toEqual({ state: "active", label: "Claude 排队中" });
+    expect(dispatchStep(created({ state: "sent" }), null)).toEqual({
+      state: "todo",
+      label: "Claude 开工",
+    });
+  });
+
+  it("派单没开始或跑失败时带原因；没勾交给 Claude 的命令没有这一步", () => {
+    const refused = created({
+      result: {
+        project: "DEMO",
+        key: "DEMO-T-0001",
+        dispatchError: { code: "X", message: "未开启" },
+      },
+    });
+    expect(dispatchStep(refused, card({ status: "DONE" }))).toEqual({
+      state: "failed",
+      label: "派单没有开始",
+      detail: "未开启",
+    });
+    expect(dispatchStep(created(), card({ dispatch: failed(NOT_LOGGED_IN) }))).toEqual({
+      state: "failed",
+      label: "Claude 运行失败",
+      detail: NOT_LOGGED_IN,
+    });
+    const plain = command({
+      type: "task.create",
+      body: { project: "DEMO", title: "只建任务" },
+    } as CommandDoc);
+    expect(dispatchStep(plain, card({ status: "DONE" }))).toBe(null);
+    expect(dispatchStep(command(dispatchDoc, { result: accepted("run-1") }), card())).toBe(null);
   });
 });

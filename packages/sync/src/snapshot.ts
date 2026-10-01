@@ -16,7 +16,7 @@ import type { DispatchPort, SyncDispatchRun } from "./dispatch-port.js";
 
 // 快照：把 ATM 的项目与任务映射成 docs/mobile-sync.md §5 的 ProjectDoc / ProjectHead。
 
-/** 已关闭任务只带最近 14 天内的，至多 30 个，且不带详情字段。 */
+/** 已关闭任务只带最近 14 天内的，至多 30 个，且不带详情字段（派单结果照带）。 */
 export const CLOSED_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 export const CLOSED_LIMIT = 30;
 /** 协议上限 5000 张卡片，给已关闭的留出余量。 */
@@ -146,7 +146,19 @@ async function openCard(
       summary: clipText(entry.summary, LIMITS.summary),
       ...(entry.percent === null ? {} : { percent: Math.min(100, Math.max(0, entry.percent)) }),
     }));
-  const run = dispatch?.runForTask(code, item.key) ?? null;
+  return withDispatch(card, code, dispatch);
+}
+
+/**
+ * 已关闭的任务不带详情，但带派单结果：手机发出的任务做完之后，发送卡片和任务页
+ * 还要能显示「Claude 已完成」，否则只剩回执里接单那一刻的「排队中」。
+ */
+function closedCard(code: string, item: WorkItemRow, dispatch: DispatchPort | null): TaskCard {
+  return withDispatch(baseCard(item), code, dispatch);
+}
+
+function withDispatch(card: TaskCard, code: string, dispatch: DispatchPort | null): TaskCard {
+  const run = dispatch?.runForTask(code, card.key) ?? null;
   if (run) card.dispatch = dispatchCard(run);
   return card;
 }
@@ -171,7 +183,7 @@ export type ProjectSnapshot = {
   updatedAt: string | null;
 };
 
-/** 读一个项目：全部未关闭任务（带详情）+ 14 天内关闭的至多 30 个（不带详情）。 */
+/** 读一个项目：全部未关闭任务（带详情）+ 14 天内关闭的至多 30 个（不带详情，只带派单结果）。 */
 export async function buildProjectSnapshot(
   service: AyanamiTaskService,
   project: { code: string; name: string },
@@ -193,7 +205,7 @@ export async function buildProjectSnapshot(
     if (index > 0 && index % 25 === 0) await yieldToEventLoop();
     tasks.push(await openCard(service, project.code, item, dispatch));
   }
-  for (const item of closed) tasks.push(baseCard(item));
+  for (const item of closed) tasks.push(closedCard(project.code, item, dispatch));
   const counts: ProjectCounts = {
     active: open.length,
     ready: open.filter((item) => item.status === "READY").length,
