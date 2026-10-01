@@ -150,6 +150,9 @@ importers:
       '@ayanami-task/agent-config':
         specifier: workspace:*
         version: link:../../packages/agent-config
+      '@ayanami-task/agent-dispatch':
+        specifier: workspace:*
+        version: link:../../packages/agent-dispatch
       '@ayanami-task/application':
         specifier: workspace:*
         version: link:../../packages/application
@@ -165,6 +168,9 @@ importers:
       '@ayanami-task/storage-sqlite':
         specifier: workspace:*
         version: link:../../packages/storage-sqlite
+      '@ayanami-task/sync':
+        specifier: workspace:*
+        version: link:../../packages/sync
       '@ayanami-task/ui':
         specifier: workspace:*
         version: link:../../packages/ui

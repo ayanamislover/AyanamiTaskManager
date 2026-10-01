@@ -83,6 +83,16 @@ describe("打包 core 进程", () => {
     expect(result.agentWriteStatus).toBe(403);
     expect(result.res5.value.body).toContain('"CRITICAL"');
     expect(result.res5.value.body).not.toContain('"OFF"');
+    // 手机同步与派单接上了，默认都关着。假宿主是 node，不认识 --dpapi：
+    // 同步如实报告 DPAPI 不可用，而不是悄悄退回明文。
+    expect(result.res6, result.stderr).toMatchObject({ ok: true, value: { status: 200 } });
+    expect(JSON.parse(result.res6.value.body)).toMatchObject({
+      enabled: false,
+      state: "disabled",
+      lastError: expect.stringContaining("DPAPI"),
+    });
+    expect(result.res7, result.stderr).toMatchObject({ ok: true, value: { status: 200 } });
+    expect(JSON.parse(result.res7.value.body)).toMatchObject({ enabled: false, runs: [] });
     expect(result.exitCode).toBe(0);
     // 优雅退出清掉发现文件；打包版忽略继承来的固定 token。
     expect(existsSync(join(dataDir, "runtime", "daemon.json"))).toBe(false);

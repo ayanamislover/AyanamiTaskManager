@@ -102,6 +102,11 @@ if (result.ready && mode === "session-end") {
   await agentWrite.text();
   send({ t: "req", id: 5, method: "runtimeRequest", args: [{ path: "/api/v1/settings" }] });
   result.res5 = await until((frame) => frame.t === "res" && frame.id === 5);
+  // 手机同步与 Claude 派单：core 应当把两组路由都接上（没接上是 404 *_UNAVAILABLE）。
+  send({ t: "req", id: 6, method: "runtimeRequest", args: [{ path: "/api/v1/sync/status" }] });
+  send({ t: "req", id: 7, method: "runtimeRequest", args: [{ path: "/api/v1/dispatch/status" }] });
+  for (const id of [6, 7])
+    result[`res${id}`] = await until((frame) => frame.t === "res" && frame.id === id);
 }
 if (mode === "disconnect") child.stdin.end();
 else if (mode !== "session-end" && mode !== "probe") send({ t: "shutdown" });

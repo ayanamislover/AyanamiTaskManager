@@ -19,6 +19,7 @@ import {
   sourceCorePaths,
   type CorePaths,
 } from "./core-paths.js";
+import { openSyncSecrets, startMobileFeatures, type MobileFeatures } from "./core-mobile.js";
 import { DesktopObserver } from "./desktop-observer.js";
 import { HostControlSession } from "./host-control-session.js";
 import { HOST_PROTOCOL_VERSION, type HostHello } from "./host-protocol.js";
@@ -104,14 +105,26 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
   const token = createDaemonToken({});
   const userToken = createDaemonToken({});
   const startedAt = new Date().toISOString();
+  // DPAPI 自检和打开数据库并行（core-mobile.ts）。
+  const secrets = openSyncSecrets(dataDir, paths.hostPath);
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+  let mobile: MobileFeatures | null = null;
   try {
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot: paths.migrationsRoot });
-    server = await buildAyanamiServer({ service, token, userToken, startedAt });
+    mobile = await startMobileFeatures(service, dataDir, await secrets);
+    server = await buildAyanamiServer({
+      service,
+      token,
+      userToken,
+      startedAt,
+      ...(mobile.sync ? { sync: mobile.sync } : {}),
+      ...(mobile.dispatch ? { dispatch: mobile.dispatch } : {}),
+    });
     await server.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
     if (server) await server.close().catch(() => undefined);
+    await mobile?.close().catch(() => undefined);
     service?.close();
     lease.release();
     throw error;
@@ -119,6 +132,7 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
   const address = server.server.address();
   if (!address || typeof address === "string") {
     await server.close();
+    await mobile.close();
     service.close();
     lease.release();
     throw new Error("DAEMON_TCP_ADDRESS_MISSING");
@@ -135,6 +149,7 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
   let closed = false;
   const openService = service;
   const openServer = server;
+  const openMobile = mobile;
   return {
     descriptor,
     userToken,
@@ -144,6 +159,7 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
       if (closed) return;
       closed = true;
       await openServer.close();
+      await openMobile.close();
       openService.close();
       lease.clear();
       lease.release();
