@@ -225,19 +225,35 @@ describe("packaged MCP shim", () => {
 describe("构建机路径", () => {
   const needles = buildMachinePathNeedles(["C:\\Users\\builder", "D:\\src\\atm\\"]);
 
-  it("原样、小写、正斜杠，UTF-8 与 UTF-16LE 都认得出", () => {
+  it("原样、小写、混合大小写、正斜杠，UTF-8 与 UTF-16LE 都认得出", () => {
     for (const text of [
       "panicked at C:\\Users\\builder\\.cargo\\registry\\src\\x.rs",
       "c:\\users\\builder\\.cargo",
+      "C:\\USERS\\Builder\\.cargo",
       "C:/Users/builder/.cargo",
       "d:/src/atm/host/src/app.rs",
-      // JSON 与 JS 字符串字面量里的反斜杠是两个。
+      "D:/Src/ATM/host/src/app.rs",
+      // JSON 与 JS 字符串字面量里的反斜杠是两个，或写成 \u005c。
       '{"path":"C:\\\\Users\\\\builder\\\\.cargo"}',
+      '{"path":"C:\\u005cUsers\\u005cBuilder\\u005c.cargo"}',
     ]) {
       expect(findBuildMachinePath(Buffer.from(text, "utf8"), needles), text).not.toBeNull();
       expect(findBuildMachinePath(Buffer.from(text, "utf16le"), needles), text).not.toBeNull();
     }
     expect(findBuildMachinePath(Buffer.from("/cargo/registry/src/x.rs"), needles)).toBeNull();
+    // 只折 ASCII：内容里的大写不能把别的字节也改了，原内容也不能被改动。
+    const original = Buffer.from("C:\\USERS\\BUILDER", "utf8");
+    findBuildMachinePath(original, needles);
+    expect(original.toString("utf8")).toBe("C:\\USERS\\BUILDER");
+  });
+
+  it("发布构建不继承外面的 CARGO_TARGET_DIR；外面设过的也当构建机路径扫", () => {
+    expect(
+      releaseRustEnv("D:\\src\\atm", { CARGO_TARGET_DIR: "E:\\cargo-target" }).CARGO_TARGET_DIR,
+    ).toBeUndefined();
+    expect(readFileSync("scripts/package-native.ts", "utf8")).toContain(
+      "...(process.env.CARGO_TARGET_DIR ? [resolve(root, process.env.CARGO_TARGET_DIR)] : []),",
+    );
   });
 
   it("发布构建把 cargo 主目录和仓库根重映射掉，并保留已有的 flag", () => {

@@ -123,8 +123,11 @@ export type ReleaseResumeDecision = {
 
 export type ReleaseRunMode = "standard" | "resume" | "full";
 
+/** `--local-only` 不改运行模式，只原样交给 assembler（见 assemble-release.ts）。 */
 export function parseReleaseRunMode(args: readonly string[]): ReleaseRunMode {
-  const unknown = args.filter((argument) => argument !== "--resume" && argument !== "--full");
+  const unknown = args.filter(
+    (argument) => argument !== "--resume" && argument !== "--full" && argument !== "--local-only",
+  );
   if (unknown.length > 0) throw new Error(`RELEASE_ARGUMENT_UNKNOWN: ${unknown.join(", ")}`);
   if (args.includes("--resume") && args.includes("--full")) {
     throw new Error("RELEASE_ARGUMENT_CONFLICT: --resume 与 --full 不能同时使用");

@@ -8,7 +8,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
-import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
+import {
+  applyRunRestore,
+  loginItemRestorePlan,
+  readRunEntries,
+  readRunSnapshot,
+} from "./login-item-guard.js";
+import { assertSandboxDataDir } from "./smoke-host.js";
 import {
   generateMutationAcknowledgementDocumentation,
   MUTATION_ACK_DOCUMENTATION_BEGIN,
@@ -67,7 +73,11 @@ const packagedResourcesRoot = join(currentAppDir(), "resources");
 /** 自启动登记的入口：安装态是安装根的启动器（就是 executable），便携态是本目录的宿主。 */
 const AUTOSTART_VALUE = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
 const outputDir = join(root, "output");
-const dataDir = resolve(process.env.ATM_SMOKE_DATA_DIR ?? join(outputDir, "packaged-smoke-data"));
+// 数据根在启动前会被整棵清掉：显式覆盖值也必须是 output/ 下的沙箱，不能是（或经 junction 接到）
+// 真实数据根与安装。
+const dataDir = assertSandboxDataDir(
+  process.env.ATM_SMOKE_DATA_DIR ?? join(outputDir, "packaged-smoke-data"),
+);
 const reportPath = resolve(
   process.env.ATM_SMOKE_REPORT ?? join(outputDir, "packaged-smoke-report.json"),
 );
@@ -543,13 +553,19 @@ async function checkBridgeParity(
       copied === true && Buffer.from(read, "base64").toString("utf8") === marker,
     );
   } finally {
-    if (snapshot === "EMPTY") clipboard("[Windows.Forms.Clipboard]::Clear()");
-    else
-      clipboard(
-        "$b = [Console]::In.ReadToEnd().Trim(); " +
-          "[Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))",
-        snapshot.slice("TEXT:".length),
-      );
+    // 只在剪贴板里还是本轮写的标记时才还原：期间用户复制了别的，就留着用户的。
+    const current = clipboard(
+      "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Windows.Forms.Clipboard]::GetText()))",
+    );
+    if (Buffer.from(current, "base64").toString("utf8") === marker) {
+      if (snapshot === "EMPTY") clipboard("[Windows.Forms.Clipboard]::Clear()");
+      else
+        clipboard(
+          "$b = [Console]::In.ReadToEnd().Trim(); " +
+            "[Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))",
+          snapshot.slice("TEXT:".length),
+        );
+    }
   }
 }
 
@@ -1042,7 +1058,7 @@ await utimes(lockPath, previousBoot, previousBoot);
 let app = startApp();
 // The app's own autostart self-check writes the shared HKCU Run value (Electron gives
 // no way to namespace it), so a smoke run would otherwise delete the user's real entry.
-const runEntriesBeforeSmoke = readRunEntries();
+const runEntriesBeforeSmoke = readRunSnapshot();
 let user: UserPath | null = null;
 try {
   const runtime = await waitForRuntime(app);
@@ -1463,5 +1479,10 @@ try {
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   throw error;
 } finally {
-  applyRunRestore(loginItemRestorePlan(runEntriesBeforeSmoke, readRunEntries()));
+  applyRunRestore(
+    loginItemRestorePlan(runEntriesBeforeSmoke, readRunSnapshot(), {
+      executables: [executable],
+      mayRestoreDeleted: true,
+    }),
+  );
 }

@@ -131,7 +131,7 @@ export function assertProductionHost(bytes: Buffer): void {
     throw new Error(`PACKAGED_HOST_IS_SMOKE_BUILD: ${SMOKE_HOST_MARKER}`);
 }
 
-function assertSmokeHost(bytes: Buffer): void {
+export function assertSmokeHost(bytes: Buffer): void {
   if (!bytes.includes(Buffer.from(SMOKE_HOST_MARKER, "utf8")))
     throw new Error("SMOKE_HOST_WITHOUT_SMOKE_FEATURE");
 }
@@ -345,8 +345,14 @@ export function packageNative(input: {
   const logos = payload.filter((path) => /^renderer\/assets\/logo[^/]*\.png$/u.test(path));
   if (logos.length === 0) throw new Error("PACKAGED_BRAND_ASSET_MISSING");
   for (const logo of logos) assertPublishedLogoBytes(readFileSync(join(appDir, logo)), logo);
-  // 构建机路径（用户目录、cargo 主目录、仓库根）不能出现在任何发出去的字节里。
-  const needles = buildMachinePathNeedles([homedir(), cargoHome(), root]);
+  // 构建机路径（用户目录、cargo 主目录、仓库根，以及外面设过的 cargo target 目录）不能出现在
+  // 任何发出去的字节里。
+  const needles = buildMachinePathNeedles([
+    homedir(),
+    cargoHome(),
+    root,
+    ...(process.env.CARGO_TARGET_DIR ? [resolve(root, process.env.CARGO_TARGET_DIR)] : []),
+  ]);
   for (const path of payload) {
     const found = findBuildMachinePath(readFileSync(join(appDir, path)), needles);
     if (found !== null) throw new Error(`PACKAGED_CONTENT_MAINTAINER_PATH: ${path} (${found})`);

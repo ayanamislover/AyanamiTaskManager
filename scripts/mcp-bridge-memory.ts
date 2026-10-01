@@ -21,6 +21,7 @@ import {
   waitForRuntime,
   waitUntil,
   withLoginItemsRestored,
+  exited,
 } from "./smoke-host.js";
 
 const run = promisify(execFile);
@@ -235,13 +236,12 @@ function startBridge(launch: Launch, env: NodeJS.ProcessEnv, index: number): Bri
 async function stopBridges(bridges: Bridge[]): Promise<void> {
   for (const bridge of bridges) bridge.child.stdin?.end();
   await waitUntil(
-    async () => (bridges.every((bridge) => bridge.child.exitCode !== null) ? true : null),
+    async () => (bridges.every((bridge) => exited(bridge.child)) ? true : null),
     5_000,
     "bridge 退出",
   ).catch(() => undefined);
   for (const bridge of bridges)
-    if (bridge.child.exitCode === null && bridge.child.pid !== undefined)
-      killProcessTree(bridge.child.pid);
+    if (!exited(bridge.child) && bridge.child.pid !== undefined) killProcessTree(bridge.child.pid);
 }
 
 function sum(samples: Sample[]): Sample {
@@ -277,7 +277,7 @@ async function round(
   try {
     for (let index = 0; index < bridges; index += 1) started.push(startBridge(launch, env, index));
     await delay(settleMs);
-    const dead = started.filter((bridge) => bridge.child.exitCode !== null);
+    const dead = started.filter((bridge) => exited(bridge.child));
     if (dead.length > 0) {
       throw new Error(
         `${dead.length} 个 bridge 提前退出：${dead[0]!.stderr.join("").slice(0, 300)}`,

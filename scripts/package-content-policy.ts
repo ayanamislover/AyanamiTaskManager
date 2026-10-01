@@ -113,19 +113,19 @@ export function assertExecutableIdentity(bytes: Buffer, internalName: string, la
 }
 
 /**
- * 构建机路径在二进制里可能的几种写法：原样、全小写（Windows 路径不分大小写，工具链常转成
- * 小写）、正斜杠、JSON/JS 字符串里反斜杠翻倍；UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。
+ * 构建机路径在二进制里可能的几种写法：正斜杠、JSON/JS 字符串里反斜杠翻倍或写成 \u005c；
+ * UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。Windows 路径不分大小写，工具链也会改写大小写，
+ * 所以针一律小写、比对时把内容的 ASCII 字母也折成小写（见 findBuildMachinePath）。
  */
 export function buildMachinePathNeedles(paths: readonly string[]): Array<[string, Buffer]> {
   const spellings = new Set<string>();
   for (const path of paths) {
-    const trimmed = path.replace(/[\\/]+$/u, "");
+    const trimmed = path.replace(/[\\/]+$/u, "").toLowerCase();
     if (trimmed.length < 4) continue;
-    for (const spelling of [trimmed, trimmed.toLowerCase()]) {
-      spellings.add(spelling);
-      spellings.add(spelling.replaceAll("\\", "/"));
-      spellings.add(spelling.replaceAll("\\", "\\\\"));
-    }
+    spellings.add(trimmed);
+    spellings.add(trimmed.replaceAll("\\", "/"));
+    spellings.add(trimmed.replaceAll("\\", "\\\\"));
+    spellings.add(trimmed.replaceAll("\\", "\\u005c"));
   }
   return [...spellings].flatMap(
     (spelling): Array<[string, Buffer]> => [
@@ -139,7 +139,13 @@ export function findBuildMachinePath(
   bytes: Buffer,
   needles: ReadonlyArray<[string, Buffer]>,
 ): string | null {
-  for (const [spelling, needle] of needles) if (bytes.includes(needle)) return spelling;
+  // 只折 ASCII 字母：UTF-16LE 里 ASCII 字符的低字节同样是这些值。
+  const folded = Buffer.from(bytes);
+  for (let index = 0; index < folded.length; index += 1) {
+    const byte = folded[index]!;
+    if (byte >= 0x41 && byte <= 0x5a) folded[index] = byte + 0x20;
+  }
+  for (const [spelling, needle] of needles) if (folded.includes(needle)) return spelling;
   return null;
 }
 

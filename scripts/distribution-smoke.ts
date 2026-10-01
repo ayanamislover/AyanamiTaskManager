@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { describeAppProcesses, parseTasklistCsv, type AppProcess } from "./app-processes.js";
-import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
+import { applyRunRestore, loginItemRestorePlan, readRunSnapshot } from "./login-item-guard.js";
 import { portableZipName } from "./package-native.js";
 import {
   assertSafeInstallRoot as assertInstallRootIsProduct,
@@ -273,7 +273,7 @@ async function installed(): Promise<"verified" | "skipped"> {
   const dataDir = join(outputRoot, "installed-data");
   const manifest = join(packageDir, `atm-${packageVersion}-win-x64.json`);
   const setup = join(packageDir, "atm-setup.exe");
-  const runBefore = readRunEntries();
+  const runBefore = readRunSnapshot();
   try {
     check(
       "atm-setup 静默安装",
@@ -334,7 +334,13 @@ async function installed(): Promise<"verified" | "skipped"> {
     await writeSmokeReport("installed", dataDir, from);
     return "verified";
   } finally {
-    applyRunRestore(loginItemRestorePlan(runBefore, readRunEntries()));
+    // 安装写的自启指向安装根的启动器，卸载会删掉它：这两样都是本轮的。
+    applyRunRestore(
+      loginItemRestorePlan(runBefore, readRunSnapshot(), {
+        executables: [join(installRoot, "AyanamiTaskManager.exe")],
+        mayRestoreDeleted: true,
+      }),
+    );
   }
 }
 

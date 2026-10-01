@@ -253,21 +253,41 @@ describe("过期判定", () => {
     ).toBe(false);
   });
 
-  // 原生宿主总会把解析好的数据根交给 core：指向默认产品数据根时照常修复（大小写不敏感）。
-  it("ATM_DATA_DIR 就是默认产品数据根时照常修复", () => {
+  // 原生宿主总会把解析好的数据根交给 core；是不是产品数据根由宿主判定后经
+  // ATM_PRODUCT_DATA_ROOT 告诉 core，core 不拿可被沙箱替换的 LOCALAPPDATA 自证。
+  it("宿主判定为产品数据根时照常修复；只凭路径相等、源码运行或烟测都不行", () => {
     const local = "C:\\Users\\u\\AppData\\Local";
-    for (const dataDir of [
-      `${local}\\AyanamiTaskManager`,
-      `${local.toLowerCase()}\\ayanamitaskmanager\\`,
-    ])
-      expect(
-        shouldRepairMcpConfigs({ ATM_DATA_DIR: dataDir, LOCALAPPDATA: local } as NodeJS.ProcessEnv),
-        dataDir,
-      ).toBe(true);
-    // 宿主确实无条件传它——这条用例存在的理由。
+    const productRoot = `${local}\\AyanamiTaskManager`;
+    const host = { ATM_DATA_DIR: productRoot, LOCALAPPDATA: local } as NodeJS.ProcessEnv;
+    expect(shouldRepairMcpConfigs({ ...host, ATM_PRODUCT_DATA_ROOT: "1" }, true)).toBe(true);
+    // 路径和 LOCALAPPDATA 对得上，但宿主没有确认（例如只把 LOCALAPPDATA 换成了沙箱）。
+    expect(shouldRepairMcpConfigs(host, true)).toBe(false);
+    // 源码运行的宿主同样会给默认根。
+    expect(shouldRepairMcpConfigs({ ...host, ATM_PRODUCT_DATA_ROOT: "1" }, false)).toBe(false);
+    // 烟测标记压过一切捷径：配置根没全隔离就不修。
     expect(
-      readFileSync(join(process.cwd(), "apps/desktop/native/host/src/core_process.rs"), "utf8"),
-    ).toContain('process.env("ATM_DATA_DIR", data_dir);');
+      shouldRepairMcpConfigs(
+        {
+          ...host,
+          ATM_PRODUCT_DATA_ROOT: "1",
+          ATM_PACKAGED_SMOKE: "1",
+          ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
+          ATM_SMOKE_AGENT_CONFIG_ROOT: "C:\\temp\\smoke\\agents",
+          APPDATA: "C:\\Users\\u\\AppData\\Roaming",
+          USERPROFILE: "C:\\Users\\u",
+        },
+        true,
+      ),
+    ).toBe(false);
+    // 宿主只在没有继承覆盖、LOCALAPPDATA 等于系统已知文件夹时才设它，并清掉继承来的同名变量。
+    const core = readFileSync(
+      join(process.cwd(), "apps/desktop/native/host/src/core_process.rs"),
+      "utf8",
+    );
+    expect(core).toContain('process.env("ATM_DATA_DIR", data_dir);');
+    expect(core).toContain("if product_default_data_root(data_dir) {");
+    expect(core).toContain("crate::win::known_local_app_data()");
+    expect(core).toContain("|| upper == PRODUCT_DATA_ROOT");
   });
 
   it("开发态默认数据根不覆盖正式 current 与 Agent 配置", () => {

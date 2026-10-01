@@ -133,15 +133,24 @@ export function shouldManageMcpRuntime(
  * 用户手动点安装不受影响：那是明示的意图，写什么都是他自己选的。
  *
  * 原生宿主总把解析好的数据根经 ATM_DATA_DIR 交给 core，哪怕它就是默认的产品数据根——
- * 所以「有这个变量」不等于隔离，要看它指向哪里。只看变量在不在时，正式版的修复和低内存
- * 开关的客户端同步会恒被跳过。
+ * 所以「有这个变量」不等于隔离。是不是产品数据根由宿主判定：没有继承来的数据根覆盖、
+ * LOCALAPPDATA 就是系统的 Local AppData 已知文件夹（沙箱能改环境变量，改不了它），宿主才给
+ * core 设 ATM_PRODUCT_DATA_ROOT=1（继承来的同名变量一律被宿主清掉）。core 不拿 LOCALAPPDATA
+ * 自证：只把它的一部分换成沙箱、其余配置根还是真的，路径照样「相等」。
+ *
+ * 只认打包运行：源码运行的宿主同样会给默认根，可它算出来的启动方式指向开发目录。
+ * 烟测标记一律走下面要求全部配置根都隔离的那一支，不被任何捷径短路。
  */
 export function shouldRepairMcpConfigs(
   env: NodeJS.ProcessEnv = process.env,
   packaged = true,
 ): boolean {
   if (!shouldManageMcpRuntime(packaged, env)) return false;
-  if (!isolatedDataDir(env)) return true;
+  const smoke = env.ATM_PACKAGED_SMOKE === "1" || env.ATM_SMOKE_MCP_CONFIG_REPAIR !== undefined;
+  if (!smoke) {
+    if (!env.ATM_DATA_DIR) return true;
+    return packaged && env.ATM_PRODUCT_DATA_ROOT === "1";
+  }
   if (env.ATM_PACKAGED_SMOKE !== "1" || env.ATM_SMOKE_MCP_CONFIG_REPAIR !== "1") return false;
   const root = env.ATM_SMOKE_AGENT_CONFIG_ROOT;
   if (!root) return false;
@@ -151,14 +160,6 @@ export function shouldRepairMcpConfigs(
     return path === "" || (!path.startsWith("..") && !isAbsolute(path));
   };
   return [env.APPDATA, env.LOCALAPPDATA, env.USERPROFILE].every(inside);
-}
-
-/** ATM_DATA_DIR 指向默认产品数据根（`%LOCALAPPDATA%\AyanamiTaskManager`）以外的地方。 */
-function isolatedDataDir(env: NodeJS.ProcessEnv): boolean {
-  if (!env.ATM_DATA_DIR) return false;
-  if (!env.LOCALAPPDATA) return true;
-  const productRoot = resolve(env.LOCALAPPDATA, "AyanamiTaskManager");
-  return resolve(env.ATM_DATA_DIR).toLowerCase() !== productRoot.toLowerCase();
 }
 
 /**

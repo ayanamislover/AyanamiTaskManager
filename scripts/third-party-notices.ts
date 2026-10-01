@@ -1,6 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { unzipSync } from "fflate";
 
 /**
  * 版本目录里的 THIRD_PARTY_NOTICES.txt：随包分发的第三方组件及其许可证原文。
@@ -8,8 +10,8 @@ import { dirname, join, resolve } from "node:path";
  * 三处来源，各按「实际进了包的」收：
  * - Rust：宿主、根启动器、安装器与 MCP shim 经正常依赖（不含 build/dev 依赖）链接进来的 crate，
  *   取自 `cargo metadata`（--locked、Windows x64 目标），许可证文件取自 crate 源码目录；
- * - npm：core/CLI/renderer 打包进来的生产依赖（根与各 workspace 的 dependencies 及其传递依赖），
- *   许可证文件取自 node_modules；
+ * - npm：core/CLI/renderer 打包进来的生产依赖（根与各 workspace 的 dependencies 及其传递依赖，
+ *   含已安装的 peer 依赖），许可证文件取自 node_modules；
  * - Node.js 运行时：`third_party/node/LICENSE`，`third_party/node/VERSION` 必须等于随包的版本。
  *   缺了或版本对不上就写入 NODE_LICENSE_PENDING——包照样能打（本机验收要用），
  *   assemble-release 见到这个标记拒绝组装候选，不会发出去。
@@ -144,6 +146,7 @@ type PackageJson = {
   author?: string | { name?: string };
   dependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
 };
 
 function packageDirectory(name: string, from: string, root: string): string | null {
@@ -154,7 +157,12 @@ function packageDirectory(name: string, from: string, root: string): string | nu
   }
 }
 
-/** 根与各 workspace 的生产依赖（排除本仓自己的 @ayanami-task/*）及其传递依赖。 */
+/**
+ * 根与各 workspace 的生产依赖（排除本仓自己的 @ayanami-task/*）及其传递依赖。
+ *
+ * peer 依赖由使用方提供：装了就是会被一起打进去的那一份，要收；没装说明没人用到。可选依赖
+ * 没装是别的平台的预编译包。必需的 dependencies 没装则是依赖树坏了——不能默默少列一项。
+ */
 export function npmComponents(root: string): Component[] {
   const manifests = [
     join(root, "package.json"),
@@ -165,16 +173,19 @@ export function npmComponents(root: string): Component[] {
         .filter((path) => existsSync(path)),
     ),
   ];
-  const pending: Array<[string, string]> = manifests.flatMap((manifest) =>
+  const pending: Array<[string, string, boolean]> = manifests.flatMap((manifest) =>
     Object.keys((JSON.parse(readFileSync(manifest, "utf8")) as PackageJson).dependencies ?? {})
       .filter((name) => !name.startsWith("@ayanami-task/"))
-      .map((name): [string, string] => [name, dirname(manifest)]),
+      .map((name): [string, string, boolean] => [name, dirname(manifest), true]),
   );
   const found = new Map<string, Component>();
   while (pending.length > 0) {
-    const [name, from] = pending.pop()!;
+    const [name, from, required] = pending.pop()!;
     const directory = packageDirectory(name, from, root);
-    if (!directory) continue; // 未安装的可选依赖（别的平台的预编译包）
+    if (!directory) {
+      if (required) throw new Error(`NOTICES_DEPENDENCY_MISSING: ${name}（${from} 需要它）`);
+      continue;
+    }
     const manifest = JSON.parse(
       readFileSync(join(directory, "package.json"), "utf8"),
     ) as PackageJson;
@@ -197,11 +208,11 @@ export function npmComponents(root: string): Component[] {
             : [],
       texts: licenseTexts(directory),
     });
-    for (const dependency of [
-      ...Object.keys(manifest.dependencies ?? {}),
-      ...Object.keys(manifest.optionalDependencies ?? {}),
-    ])
-      pending.push([dependency, directory]);
+    const optional = new Set(Object.keys(manifest.optionalDependencies ?? {}));
+    for (const dependency of Object.keys(manifest.dependencies ?? {}))
+      pending.push([dependency, directory, !optional.has(dependency)]);
+    for (const dependency of [...optional, ...Object.keys(manifest.peerDependencies ?? {})])
+      pending.push([dependency, directory, false]);
   }
   return [...found.values()];
 }
@@ -261,4 +272,39 @@ export function buildThirdPartyNotices(root: string, nodeVersion = process.versi
     components.map((entry) => [`${entry.ecosystem}:${entry.name}@${entry.version}`, entry]),
   );
   return renderThirdPartyNotices({ root, nodeVersion, components: [...unique.values()] });
+}
+
+export type ReleaseNoticesStatus = { distributable: boolean; sha256: string };
+
+/**
+ * 发出去的是归档，不是 output 里旁边那个松散的版本目录：从版本 zip 与便携 zip 里取出
+ * notices，两份必须逐字节相同、且等于版本清单逐文件记下的哈希（setup 按清单校验安装）。
+ * 没有 Node 待补标记才算可分发。
+ */
+export function releaseNoticesStatus(input: {
+  packageZip: Uint8Array;
+  portableZip: Uint8Array;
+  portableFolder: string;
+  manifestFiles: ReadonlyArray<{ path: string; sha256: string }>;
+}): ReleaseNoticesStatus {
+  const portableName = `${input.portableFolder}/${THIRD_PARTY_NOTICES}`;
+  const inPackage = unzipSync(input.packageZip, {
+    filter: (file) => file.name === THIRD_PARTY_NOTICES,
+  })[THIRD_PARTY_NOTICES];
+  const inPortable = unzipSync(input.portableZip, {
+    filter: (file) => file.name === portableName,
+  })[portableName];
+  if (!inPackage || !inPortable)
+    throw new Error(`RELEASE_NOTICES_MISSING: 归档里没有 ${THIRD_PARTY_NOTICES}`);
+  const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const sha256 = hash(inPackage);
+  if (hash(inPortable) !== sha256)
+    throw new Error("RELEASE_NOTICES_MISMATCH: 版本 zip 与便携 zip 里的声明不同");
+  const listed = input.manifestFiles.find((file) => file.path === THIRD_PARTY_NOTICES);
+  if (listed?.sha256.toLowerCase() !== sha256)
+    throw new Error("RELEASE_NOTICES_MISMATCH: 版本清单记录的声明哈希与归档不符");
+  return {
+    distributable: !Buffer.from(inPackage).toString("utf8").includes(NODE_LICENSE_PENDING),
+    sha256,
+  };
 }

@@ -38,6 +38,7 @@ import {
   waitForRuntime,
   waitUntil,
   withLoginItemsRestored,
+  exited,
   type SmokeHost,
   type SmokeRenderer,
 } from "./smoke-host.js";
@@ -437,8 +438,8 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
     renderer = null;
     check(
       "关到托盘后宿主进程仍在",
-      host.child.exitCode === null,
-      `pid ${host.pid} exit ${String(host.child.exitCode)}`,
+      !exited(host.child),
+      `pid ${host.pid} exit ${String(host.child.exitCode ?? host.child.signalCode)}`,
     );
     check("关到托盘后服务仍健康", (await readRuntime(host.dataDir)) !== null);
     await requestShow(host);
@@ -467,6 +468,55 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
         afterReopen.window.x === beforeClose.window.x &&
         afterReopen.window.y === beforeClose.window.y,
       `${JSON.stringify(beforeClose.window)} → ${JSON.stringify(afterReopen.window)}`,
+    );
+
+    // 挪一下再最大化、关窗：重开仍是最大化，还原回到的是这次挪过的外框——宿主要一路记着
+    // 最近一次正常外框，不能只在关窗那一刻读（那时已是最大化，读不到），也不能沿用上次关窗记的。
+    const moved = await probe.setBounds(reopened.hwnd, {
+      x: afterReopen.window.x + 40,
+      y: afterReopen.window.y + 30,
+      width: afterReopen.window.width,
+      height: afterReopen.window.height,
+    });
+    await page.getByTestId("window-maximize").click();
+    await log.eventually(
+      "挪过的窗口再最大化",
+      async () => (await probe.state(reopened.hwnd)).maximized,
+      Boolean,
+      5_000,
+    );
+    await page
+      .getByTestId("window-close")
+      .click({ noWaitAfter: true })
+      .catch(() => undefined);
+    await log.eventually(
+      "最大化时关到托盘",
+      () => appWindow(host),
+      (state) => state === null,
+      10_000,
+    );
+    await renderer.browser.close().catch(() => undefined);
+    renderer = null;
+    await requestShow(host);
+    const maximizedReopen = await visibleWindow(host, "最大化关窗后重新打开");
+    check(
+      "最大化关窗后重新打开仍是最大化",
+      (await probe.state(maximizedReopen.hwnd)).maximized,
+      JSON.stringify(await probe.state(maximizedReopen.hwnd)),
+    );
+    renderer = await connectRenderer(host);
+    page = renderer.page;
+    await page.waitForSelector(".atm-shell");
+    await page.getByTestId("window-maximize").click();
+    await log.eventually(
+      "还原回到最大化之前挪到的外框",
+      async () => (await probe.state(maximizedReopen.hwnd)).window,
+      (window) =>
+        window.x === moved.window.x &&
+        window.y === moved.window.y &&
+        window.width === moved.window.width &&
+        window.height === moved.window.height,
+      5_000,
     );
     await renderer.browser.close();
     renderer = null;

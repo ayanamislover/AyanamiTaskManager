@@ -254,9 +254,11 @@ function stopInstalledShims(): number[] {
 if (needsCleanRoom) await clearInstallation();
 
 step("十阶段流水线");
+// 本机安装验收的候选允许不可分发（例如 Node 许可证原文待补）；release.json 照实记下，
+// 发布入口（publish-verified-release）只收 distributable 的候选。
 const releaseCommand = flag("resume")
-  ? "pnpm exec tsx scripts/release.ts --resume"
-  : "pnpm exec tsx scripts/release.ts";
+  ? "pnpm exec tsx scripts/release.ts --resume --local-only"
+  : "pnpm exec tsx scripts/release.ts --local-only";
 const releaseExit = run(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", releaseCommand]);
 if (releaseExit !== 0) {
   process.stderr.write(`\npnpm release 退出码 ${releaseExit}，中止。\n`);

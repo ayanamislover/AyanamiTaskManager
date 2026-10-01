@@ -65,6 +65,8 @@ const manifest = await readJson(join(releaseRoot, "release.json"));
 const summary = await readJson(join(releaseRoot, "test-report/summary.json"));
 const verification = await readJson(join(releaseRoot, "test-report/release-verification.json"));
 assert.equal(manifest.version, version);
+// Local-only candidates (release-and-install) may lack required notices; never publish them.
+assert.equal(manifest.distributable, true, "Candidate is not distributable");
 assert.equal(manifest.commit, head);
 assert.equal(manifest.candidate.gitHead, head);
 assert.deepEqual(summary.candidate, manifest.candidate);

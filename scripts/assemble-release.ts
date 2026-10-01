@@ -26,7 +26,7 @@ import {
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
 import { APP_LAYOUT } from "./app-layout.js";
 import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
-import { NODE_LICENSE_PENDING, THIRD_PARTY_NOTICES } from "./third-party-notices.js";
+import { releaseNoticesStatus } from "./third-party-notices.js";
 
 type Artifact = ReleaseArtifactIdentity;
 type Verification = {
@@ -52,6 +52,12 @@ type SmokeReport = {
 /** distribution-smoke 记下安装验收是做了还是因为机器上已有安装而显式跳过。 */
 type DistributionReport = SmokeReport & { installed: "verified" | "skipped" };
 
+const assembleArguments = process.argv.slice(2);
+const unknownArguments = assembleArguments.filter((argument) => argument !== "--local-only");
+if (unknownArguments.length > 0)
+  throw new Error(`RELEASE_ARGUMENT_UNKNOWN: ${unknownArguments.join(", ")}`);
+/** 本机安装验收：允许组装不可分发的候选（release.json 照实记 distributable）。 */
+const localOnly = assembleArguments.includes("--local-only");
 const root = resolve(process.cwd());
 const releaseDir = resolve(root, "release");
 if (!releaseDir.toLowerCase().startsWith(`${root.toLowerCase()}${sep}`)) {
@@ -191,11 +197,23 @@ const portableName = portableZipName(packageJson.version);
 const releaseNames = [setupName, packageName, manifestName, portableName];
 const missing = releaseNames.filter((name) => !existsSync(join(packageDir, name)));
 if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missing.join("、")}`);
-// 本机验收的包可以缺 Node 的许可证原文（标记 NODE_LICENSE_PENDING），发出去的候选不行。
-const notices = join(packageDir, `app-${packageJson.version}`, THIRD_PARTY_NOTICES);
-if (!existsSync(notices) || readFileSync(notices, "utf8").includes(NODE_LICENSE_PENDING))
+// 声明从将要发出去的归档里取，不看旁边的松散目录。缺 Node 许可证原文（NODE_LICENSE_PENDING）
+// 的候选不可分发：只有本机安装验收（--local-only，release-and-install 传）能继续组装，
+// release.json 记 distributable:false，发布入口见到就拒绝。
+const notices = releaseNoticesStatus({
+  packageZip: readFileSync(join(packageDir, packageName)),
+  portableZip: readFileSync(join(packageDir, portableName)),
+  portableFolder: `AyanamiTaskManager-${packageJson.version}`,
+  manifestFiles: (
+    JSON.parse(readFileSync(join(packageDir, manifestName), "utf8")) as {
+      files: Array<{ path: string; sha256: string }>;
+    }
+  ).files,
+});
+if (!notices.distributable && !localOnly)
   throw new Error(
-    `RELEASE_NOTICES_INCOMPLETE: ${THIRD_PARTY_NOTICES} 缺失或没有随包 Node 的许可证（third_party/node/）`,
+    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明没有随包 Node 的许可证（third_party/node/）；" +
+      "只做本机安装验收时用 --local-only",
   );
 
 await rm(releaseDir, { recursive: true, force: true });
@@ -386,6 +404,7 @@ sqlite.close();
 const release = {
   product: packageJson.productName,
   version: packageJson.version,
+  distributable: notices.distributable,
   platform: "win32-x64",
   node: versions.node,
   nodeAbi: versions.modules,

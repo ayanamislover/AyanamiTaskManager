@@ -932,16 +932,9 @@ impl App {
         {
             self.saved.route = Some(route);
         }
+        self.remember_normal_bounds();
         if let Some(window) = &self.window {
             self.saved.maximized = window.is_maximized();
-            // Maximized or minimized bounds are not the ones to come back to; keep the last
-            // normal ones.
-            if !self.saved.maximized
-                && !window.is_minimized()
-                && let Ok(position) = window.outer_position()
-            {
-                self.saved.bounds = Some((position, window.inner_size()));
-            }
         }
         self.webview = None;
         self.window = None;
@@ -958,10 +951,25 @@ impl App {
         }
     }
 
+    /// Maximized or minimized bounds are not the ones to come back to. They are tracked on
+    /// every move and resize, not read at close: a window moved, then maximized and closed,
+    /// must come back restoring to where it was moved, not to an older position.
+    fn remember_normal_bounds(&mut self) {
+        if let Some(window) = &self.window
+            && !window.is_maximized()
+            && !window.is_minimized()
+            && let Ok(position) = window.outer_position()
+        {
+            self.saved.bounds = Some((position, window.inner_size()));
+        }
+    }
+
     fn on_window_event(&mut self, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => self.close_window(),
+            WindowEvent::Moved(_) => self.remember_normal_bounds(),
             WindowEvent::Resized(_) => {
+                self.remember_normal_bounds();
                 let maximized = self.window.as_ref().is_some_and(Window::is_maximized);
                 if maximized != self.maximized {
                     self.maximized = maximized;

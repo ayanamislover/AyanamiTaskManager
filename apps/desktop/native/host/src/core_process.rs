@@ -129,6 +129,40 @@ fn scrubbed(key: &str) -> bool {
         || upper.starts_with("ELECTRON_")
         || upper.starts_with("WEBVIEW2_")
         || upper == "UV_THREADPOOL_SIZE"
+        || upper == PRODUCT_DATA_ROOT
+}
+
+/// Set for the core only when the host itself established that the data root is the
+/// product's default one (mcp-launch.ts shouldRepairMcpConfigs): only then may the core
+/// rewrite the user's global Agent configs. An inherited value is scrubbed, never trusted.
+const PRODUCT_DATA_ROOT: &str = "ATM_PRODUCT_DATA_ROOT";
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let normal = |path: &Path| {
+        path.to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    };
+    normal(left) == normal(right)
+}
+
+/// No ATM_DATA_DIR / AYANAMI_TASK_DATA_DIR override reached the host, and LOCALAPPDATA is
+/// the real Local AppData known folder — so `data_dir` is `<Local AppData>\AyanamiTaskManager`
+/// because it is the product root, not because a sandbox redirected LOCALAPPDATA.
+fn product_default_data_root(data_dir: &Path) -> bool {
+    let overridden = ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
+    if overridden {
+        return false;
+    }
+    let (Some(local), Some(known)) = (
+        std::env::var_os("LOCALAPPDATA"),
+        crate::win::known_local_app_data(),
+    ) else {
+        return false;
+    };
+    same_path(Path::new(&local), &known) && same_path(data_dir, &known.join("AyanamiTaskManager"))
 }
 
 pub fn scrub_environment(command: &mut Command) {
@@ -222,6 +256,9 @@ impl Core {
             process.env(key, value);
         }
         process.env("ATM_DATA_DIR", data_dir);
+        if product_default_data_root(data_dir) {
+            process.env(PRODUCT_DATA_ROOT, "1");
+        }
         let mut child = process
             .spawn()
             .map_err(|error| format!("CORE_SPAWN_FAILED: {error}"))?;
@@ -391,6 +428,20 @@ impl Core {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_data_root_marker_is_never_inherited_and_paths_compare_like_windows() {
+        assert!(scrubbed("ATM_PRODUCT_DATA_ROOT"));
+        assert!(scrubbed("atm_product_data_root"));
+        assert!(same_path(
+            Path::new(r"C:\Users\U\AppData\Local\AyanamiTaskManager\"),
+            Path::new(r"c:\users\u\appdata\local\ayanamitaskmanager"),
+        ));
+        assert!(!same_path(
+            Path::new(r"C:\Users\U\AppData\Local\AyanamiTaskManager"),
+            Path::new(r"C:\sandbox\Local\AyanamiTaskManager"),
+        ));
+    }
 
     #[test]
     fn frames_are_parsed_strictly() {

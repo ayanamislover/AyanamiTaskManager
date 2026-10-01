@@ -22,6 +22,7 @@ import {
   startSmokeHost,
   stopSmokeHost,
   withLoginItemsRestored,
+  exited,
   type SmokeRuntime,
 } from "./smoke-host.js";
 
@@ -51,8 +52,10 @@ try {
     try {
       // 每一轮同时看描述符与窗口：随机延迟期间与服务起来以后都不许冒出应用窗口。
       while (Date.now() - startedAt < timeoutMs) {
-        if (host.child.exitCode !== null)
-          throw new Error(`登录启动进程提前退出：${host.child.exitCode}; ${host.stderr.join("")}`);
+        if (exited(host.child))
+          throw new Error(
+            `登录启动进程提前退出：${host.child.exitCode ?? host.child.signalCode}; ${host.stderr.join("")}`,
+          );
         windowsSeen = Math.max(
           windowsSeen,
           (await probe.windows(host.pid)).filter((entry) => entry.visible).length,

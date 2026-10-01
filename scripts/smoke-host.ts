@@ -14,7 +14,8 @@ import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "@playwright/test";
-import { applyRunRestore, loginItemRestorePlan, readRunEntries } from "./login-item-guard.js";
+import { applyRunRestore, loginItemRestorePlan, readRunSnapshot } from "./login-item-guard.js";
+import { assertSmokeHost } from "./package-native.js";
 
 export type SmokeRuntime = {
   endpoint: string;
@@ -80,6 +81,13 @@ export function smokeExecutable(): string {
     );
   if (!existsSync(join(dirname(executable), "portable")))
     throw new Error(`烟测宿主需要版本目录里的 portable 标记：${dirname(executable)}`);
+  // 生产宿主也能带 portable 标记，可它不认 ATM_SMOKE_CORE_USERPROFILE：Node 子进程会读到真实
+  // home 下的 Agent 配置。拿错了二进制要在启动前拒，不能等 CDP 超时才发现。
+  assertSmokeHost(readFileSync(executable));
+  // 版本目录的上一层有 app.json 或 state\ 就是一份安装：宿主会按安装上下文准入、甚至走安装恢复。
+  const parent = dirname(dirname(executable));
+  if (existsSync(join(parent, "app.json")) || existsSync(join(parent, "state")))
+    throw new Error(`烟测宿主不能放在一份安装里：${parent}`);
   return executable;
 }
 
@@ -282,8 +290,10 @@ export async function readRuntime(dataDir: string): Promise<SmokeRuntime | null>
 export async function waitForRuntime(host: SmokeHost, timeoutMs = 30_000): Promise<SmokeRuntime> {
   return waitUntil(
     async () => {
-      if (host.child.exitCode !== null)
-        throw new Error(`宿主提前退出（${host.child.exitCode}）：${host.stderr.join("")}`);
+      if (exited(host.child))
+        throw new Error(
+          `宿主提前退出（${host.child.exitCode ?? host.child.signalCode}）：${host.stderr.join("")}`,
+        );
       return readRuntime(host.dataDir);
     },
     timeoutMs,
@@ -291,18 +301,24 @@ export async function waitForRuntime(host: SmokeHost, timeoutMs = 30_000): Promi
   );
 }
 
-async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<number | null> {
-  if (child.exitCode !== null) return child.exitCode;
+/** 以信号结束的子进程 exitCode 是 null、signalCode 不是：两者都算退出。 */
+export function exited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+/** 退出返回 true，超时返回 false。退出事件不论 code 是否为 null 都算退出。 */
+async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (exited(child)) return true;
   return Promise.race([
-    new Promise<number | null>((resolveExit) => child.once("exit", (code) => resolveExit(code))),
-    delay(timeoutMs).then(() => null),
+    new Promise<boolean>((resolveExit) => child.once("exit", () => resolveExit(true))),
+    delay(timeoutMs).then(() => exited(child)),
   ]);
 }
 
 /** 用户再点一次入口：第二实例把 SHOW 交给正在运行的宿主后退出。 */
 export async function requestShow(host: SmokeHost): Promise<void> {
   const show = spawn(host.executable, [], { cwd: repoRoot, env: host.env, stdio: "ignore" });
-  if ((await waitForExit(show, 10_000)) === null) {
+  if (!(await waitForExit(show, 10_000))) {
     show.kill();
     throw new Error("SHOW 请求没有在 10 秒内送达");
   }
@@ -353,7 +369,10 @@ export async function openProjectFromSidebar(page: Page, name: string): Promise<
     .click({ timeout: 40_000 });
 }
 
-/** 只结束自己拉起的那个宿主的进程树（core、WebView2 都在树里），从不按镜像名。 */
+/**
+ * 只结束自己拉起的那个宿主的进程树（core、WebView2 都在树里），从不按镜像名。
+ * 只能对还没退出的子进程调用：Node 握着它的进程句柄，PID 在退出前不会被系统复用。
+ */
 export function killProcessTree(pid: number): void {
   spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
     stdio: "ignore",
@@ -366,7 +385,7 @@ export function killProcessTree(pid: number): void {
  * 返回是否干净退出；超时就按进程树强制结束并返回 false。
  */
 export async function stopSmokeHost(host: SmokeHost, timeoutMs = 15_000): Promise<boolean> {
-  if (host.child.exitCode !== null) return true;
+  if (exited(host.child)) return true;
   const request = spawn(host.executable, ["--smoke-quit"], {
     cwd: repoRoot,
     env: host.env,
@@ -374,21 +393,27 @@ export async function stopSmokeHost(host: SmokeHost, timeoutMs = 15_000): Promis
     stdio: "ignore",
   });
   await waitForExit(request, 5_000);
-  if ((await waitForExit(host.child, timeoutMs)) !== null) return true;
-  killProcessTree(host.pid);
+  if (await waitForExit(host.child, timeoutMs)) return true;
+  if (!exited(host.child)) killProcessTree(host.pid);
   await waitForExit(host.child, 5_000);
   return false;
 }
 
 /**
  * 宿主的自启动开关写的是 HKCU Run 里与真实安装共用的那个值。界面上的设置一旦碰到它，
- * 就会把用户真实的登记改指到烟测宿主。跑之前记下、跑完把本应用相关的登记原样放回。
+ * 就会把用户真实的登记改指到烟测宿主。跑之前记下（读不到就不跑）；跑完只撤销本轮自己
+ * 的改动——现值仍指向本轮的烟测宿主才放回。这些烟测不关自启，消失的值不归它们补。
  */
-export async function withLoginItemsRestored<T>(run: () => Promise<T>): Promise<T> {
-  const before = readRunEntries();
+export async function withLoginItemsRestored<T>(
+  run: () => Promise<T>,
+  executables: readonly string[] = [smokeExecutable()],
+): Promise<T> {
+  const before = readRunSnapshot();
   try {
     return await run();
   } finally {
-    applyRunRestore(loginItemRestorePlan(before, readRunEntries()));
+    applyRunRestore(
+      loginItemRestorePlan(before, readRunSnapshot(), { executables, mayRestoreDeleted: false }),
+    );
   }
 }

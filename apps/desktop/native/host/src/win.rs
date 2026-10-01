@@ -29,6 +29,38 @@ const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes
 const CF_UNICODETEXT: u32 = 13;
 const MAX_CLIPBOARD_CHARS: usize = 1 << 20;
 
+/// The user's Local AppData from the shell (FOLDERID_LocalAppData), not from the
+/// environment: tests and sandboxes redirect LOCALAPPDATA, the known folder they do not.
+pub fn known_local_app_data() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+    };
+
+    let mut raw: windows_sys::core::PWSTR = null_mut();
+    // SAFETY: the out pointer is ours; the shell allocates and we free it below either way.
+    let status = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_DEFAULT as u32,
+            null_mut(),
+            &mut raw,
+        )
+    };
+    let path = (status >= 0 && !raw.is_null()).then(|| {
+        // SAFETY: on success the shell returns a NUL-terminated wide string.
+        let length = (0..)
+            .take_while(|&index| unsafe { *raw.add(index) } != 0)
+            .count();
+        let units = unsafe { std::slice::from_raw_parts(raw, length) };
+        std::path::PathBuf::from(std::ffi::OsString::from_wide(units))
+    });
+    // SAFETY: CoTaskMemFree accepts null.
+    unsafe { CoTaskMemFree(raw.cast_const().cast()) };
+    path
+}
+
 pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value
         .as_ref()

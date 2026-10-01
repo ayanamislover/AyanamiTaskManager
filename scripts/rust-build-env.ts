@@ -11,6 +11,10 @@ import { join, resolve } from "node:path";
  * 用 CARGO_ENCODED_RUSTFLAGS（0x1f 分隔）而不是 RUSTFLAGS：路径里有空格时 RUSTFLAGS 会被
  * 按空白拆开。测试里构建同一个 target 目录时也要用这一份，否则两边的 flag 不同，cargo 会
  * 来回整棵重编。
+ *
+ * 继承来的 CARGO_TARGET_DIR 不要：指到仓库外时，build script 生成的 OUT_DIR 路径不在
+ * 重映射范围里，而且产物不在调用方去取的 `<crate>\target`，拿到的可能是旧的。
+ * 要别的 target 目录的调用方（drill/smoke）自己在这之后设，都在 crate 目录下。
  */
 export function releaseRustEnv(
   root: string,
@@ -26,7 +30,9 @@ export function releaseRustEnv(
     `--remap-path-prefix=${cargoHome(base)}=/cargo`,
     `--remap-path-prefix=${resolve(root)}=/atm`,
   ];
-  return { ...base, CARGO_ENCODED_RUSTFLAGS: flags.join(separator) };
+  const env = { ...base, CARGO_ENCODED_RUSTFLAGS: flags.join(separator) };
+  delete env.CARGO_TARGET_DIR;
+  return env;
 }
 
 export function cargoHome(base: NodeJS.ProcessEnv = process.env): string {

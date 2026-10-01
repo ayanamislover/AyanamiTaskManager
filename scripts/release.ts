@@ -174,6 +174,11 @@ await writeFile(
 if (!passed) {
   process.exitCode = results.at(-1)?.exitCode || 1;
 } else {
-  const assembled = await run("assemble-release", ["exec", "tsx", "scripts/assemble-release.ts"]);
+  const assembled = await run("assemble-release", [
+    "exec",
+    "tsx",
+    "scripts/assemble-release.ts",
+    ...(process.argv.includes("--local-only") ? ["--local-only"] : []),
+  ]);
   if (assembled.exitCode !== 0) process.exitCode = assembled.exitCode;
 }
