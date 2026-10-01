@@ -96,6 +96,12 @@ export class ProjectDatabasePool {
     return closed;
   }
 
+  /** 仍开着的项目库释放 SQLite 页缓存；连接与预编译语句保留。 */
+  shrinkOpenProjects(): void {
+    for (const { database } of this.#projects.values())
+      if (database.sqlite.open) database.sqlite.pragma("shrink_memory");
+  }
+
   closeProject(projectId: string): void {
     const cached = this.#projects.get(projectId);
     if (!cached) return;

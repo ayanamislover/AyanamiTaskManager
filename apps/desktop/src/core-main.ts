@@ -23,6 +23,7 @@ import { HostControlSession } from "./host-control-session.js";
 import { HOST_PROTOCOL_VERSION, type HostHello } from "./host-protocol.js";
 import { probeDataRoot, probeTransactionBound } from "./core-probe.js";
 import { createLifecycleDiagnostics, lifecycleError } from "./lifecycle-diagnostics.js";
+import { WindowMemoryRelease } from "./window-memory-release.js";
 import { installAgentIntegrationHost } from "./main-agent-integrations.js";
 import { installMcpStdioBridge, shouldManageMcpRuntime } from "./mcp-launch.js";
 import { normalizeNotificationMode } from "./notification-policy.js";
@@ -43,6 +44,21 @@ declare const __ATM_PACKAGED__: boolean | undefined;
 const PACKAGED = typeof __ATM_PACKAGED__ === "boolean" && __ATM_PACKAGED__;
 /** 握手失败、父进程不可信：退出码固定，宿主据此区分「被拒绝」与「崩溃」。 */
 export const CORE_EXIT_REJECTED = 64;
+
+/** 关窗后多久释放界面用过的数据库内存；期间没再用过的项目库会被关闭。 */
+const WINDOW_CLOSED_RELEASE_MS = 5_000;
+
+/** 心跳与开关窗时的内存分项：区分 V8 堆、ArrayBuffer 与其余堆外（SQLite、原生分配）。 */
+function memoryDetail() {
+  const memory = process.memoryUsage();
+  return {
+    rss: memory.rss,
+    heapUsed: memory.heapUsed,
+    heapTotal: memory.heapTotal,
+    external: memory.external,
+    arrayBuffers: memory.arrayBuffers,
+  };
+}
 
 function redirectConsoleToStderr(): void {
   const write = (...values: unknown[]) => {
@@ -152,6 +168,21 @@ async function main(): Promise<void> {
   void prefetchSelfProcessIdentity();
 
   let runtime: CoreRuntime | null = null;
+  const windowMemory = new WindowMemoryRelease({
+    delayMs: WINDOW_CLOSED_RELEASE_MS,
+    release: () => {
+      if (shuttingDown) return;
+      try {
+        runtime?.service.databases.releaseIdleMemory(WINDOW_CLOSED_RELEASE_MS);
+        // 界面那批请求留下的 V8 堆空间也只有完整 GC 才还（宿主给 core 加了 --expose-gc）。
+        (globalThis as { gc?: () => void }).gc?.();
+        lifecycle.record("window.released", memoryDetail());
+      } catch (error) {
+        // 释放失败只是少还了内存：连接照常可用，下次维护还会关空闲库。
+        lifecycle.record("exception", { reason: "memory-release", ...lifecycleError(error) });
+      }
+    },
+  });
   let observer: DesktopObserver | null = null;
   let maintenance: NodeJS.Timeout | null = null;
   let initialMaintenance: NodeJS.Timeout | null = null;
@@ -166,6 +197,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     lifecycle.record("shutdown.begin");
     if (heartbeat) clearInterval(heartbeat);
+    windowMemory.cancel();
     if (initialMaintenance) clearTimeout(initialMaintenance);
     if (maintenance) clearInterval(maintenance);
     updates?.stop();
@@ -282,10 +314,7 @@ async function main(): Promise<void> {
       initialMaintenance = setTimeout(() => void current.service.runMaintenance(), 2500);
       maintenance = setInterval(() => void current.service.runMaintenance(), 60 * 60 * 1000);
       maintenance.unref();
-      heartbeat = setInterval(() => {
-        const memory = process.memoryUsage();
-        lifecycle.record("heartbeat", { rss: memory.rss, heapUsed: memory.heapUsed });
-      }, 60_000);
+      heartbeat = setInterval(() => lifecycle.record("heartbeat", memoryDetail()), 60_000);
       heartbeat.unref();
       lifecycle.record("ready");
     },
@@ -296,6 +325,14 @@ async function main(): Promise<void> {
         session.send({ t: "marked", name: "session-end" });
       }
       if (event.name === "update-launch-failed") updates?.launchFailed();
+      if (event.name === "window-shown") {
+        lifecycle.record("window.shown", memoryDetail());
+        windowMemory.windowShown();
+      }
+      if (event.name === "window-closed") {
+        lifecycle.record("window.closed", memoryDetail());
+        windowMemory.windowClosed();
+      }
     },
     onClose(reason) {
       if (probed) process.exit(0);

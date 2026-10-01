@@ -494,6 +494,20 @@ export class AyanamiDatabaseManager {
     return this.#projectPool.closeIdleProjects(maxIdleMs, at);
   }
 
+  /**
+   * 把界面用过的 SQLite 内存还回去：打开窗口时首屏会把一批项目库拉进连接池，各库的页缓存在
+   * V8 堆外，窗口关了也不会自己释放（实测关窗后多出约 50 MiB 私有内存，ATM-T-0523）。
+   * 关闭空闲超过 maxIdleMs 的项目库，其余连接（注册库、知识库、仍在用的项目库）释放页缓存。
+   * 返回关闭的项目库个数。
+   */
+  releaseIdleMemory(maxIdleMs: number, at = Date.now()): number {
+    const closed = this.#projectPool.closeIdleProjects(maxIdleMs, at);
+    this.#projectPool.shrinkOpenProjects();
+    this.registry.sqlite.pragma("shrink_memory");
+    this.knowledge.shrinkMemory();
+    return closed;
+  }
+
   async saveProjectEngineeringMetrics(
     projectCode: string,
     metrics: Record<string, unknown> & { head: string; capturedAt: string },

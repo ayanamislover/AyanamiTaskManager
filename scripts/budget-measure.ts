@@ -2,6 +2,8 @@
  * de-electron §2 预算实测（ATM-T-0523b）：在 output/ 下的沙箱里量当前构建。
  *
  *   pnpm exec tsx scripts/budget-measure.ts [--json output/de-electron-budget-raw.json]
+ *     [--memory-only]   只量后台与关开窗内存（调内存时反复跑用），不量冷启动
+ *     [--cycles N]      关开窗轮数（默认 5）；看有没有缓慢上涨时加大
  *
  * 量什么、怎么量：
  *   - 活动版本净 payload：output/package/app-<version> 递归字节；压缩更新包：zip 字节。
@@ -66,7 +68,10 @@ const jsonPath = resolve(
 const coldRuns = Number(
   process.argv.includes("--cold-runs") ? process.argv[process.argv.indexOf("--cold-runs") + 1] : 5,
 );
-const cycles = 5;
+const cycles = Number(
+  process.argv.includes("--cycles") ? process.argv[process.argv.indexOf("--cycles") + 1] : 5,
+);
+const memoryOnly = process.argv.includes("--memory-only");
 
 const seedDir = assertSandboxDataDir(join(outputRoot, "budget-seed-data"));
 const runDir = assertSandboxDataDir(join(outputRoot, "budget-run-data"));
@@ -631,7 +636,9 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
     const heartbeats = existsSync(lifecycle)
       ? readFileSync(lifecycle, "utf8")
           .split(/\r?\n/u)
-          .filter((line) => line.includes('"heartbeat"'))
+          .filter((line) =>
+            /"event":"(?:heartbeat|window\.shown|window\.closed|window\.released)"/u.test(line),
+          )
           .map((line) => JSON.parse(line) as Record<string, unknown>)
       : [];
     return {
@@ -818,6 +825,7 @@ try {
   await withLoginItemsRestored(async () => {
     report.memory = await measureMemory(production, probe, windows);
     save();
+    if (memoryOnly) return;
 
     const production_foreground = [];
     const production_background = [];

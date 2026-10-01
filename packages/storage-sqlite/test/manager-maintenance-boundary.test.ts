@@ -124,6 +124,28 @@ describe("Project database pool boundaries", () => {
     await manager.openProject(project.id);
     expect(getProject).toHaveBeenCalledWith(project.id);
   });
+
+  // 关窗后把界面拉进连接池、之后没再用的项目库关掉，其余连接释放页缓存：SQLite 的页缓存在
+  // V8 堆外，不还回去的话关窗后常驻内存比开窗前高约 50 MiB（ATM-T-0523）。
+  it("releases idle project databases and shrinks the caches of the connections kept", async () => {
+    const { manager } = await openManager("release");
+    let tick = 50_000;
+    vi.spyOn(Date, "now").mockImplementation(() => tick);
+    const idle = await manager.createProject({ name: "Idle", sourcePath: null, code: "RIDLE" });
+    const busy = await manager.createProject({ name: "Busy", sourcePath: null, code: "RBUSY" });
+    const idleDatabase = await manager.openProject(idle.id);
+    tick += 10_000;
+    const busyDatabase = await manager.openProject(busy.id);
+    const busyPragma = vi.spyOn(busyDatabase.sqlite, "pragma");
+    const registryPragma = vi.spyOn(manager.registry.sqlite, "pragma");
+    expect(manager.releaseIdleMemory(5_000, tick + 1)).toBe(1);
+    expect(idleDatabase.sqlite.open).toBe(false);
+    expect(busyDatabase.sqlite.open).toBe(true);
+    expect(busyPragma).toHaveBeenCalledWith("shrink_memory");
+    expect(registryPragma).toHaveBeenCalledWith("shrink_memory");
+    // 关掉的库下次用到时照常重新打开。
+    expect((await manager.openProject(idle.id)).sqlite.open).toBe(true);
+  });
 });
 
 describe("Backup and restore failure atomicity", () => {

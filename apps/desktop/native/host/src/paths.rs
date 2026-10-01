@@ -25,6 +25,18 @@ pub struct CoreCommand {
 
 pub use atm_install_state::data_dir;
 
+/// Node flags for the core only. After the window closes the core gives back what the UI used
+/// (core-main.ts, WINDOW_CLOSED_RELEASE_MS); a full GC is part of that, and Node exposes one
+/// only with this flag. CLI and the MCP bridge do not get it.
+const CORE_NODE_FLAGS: [&str; 1] = ["--expose-gc"];
+
+fn with_core_flags(mut command: CoreCommand) -> CoreCommand {
+    command
+        .args
+        .splice(0..0, CORE_NODE_FLAGS.iter().map(|flag| (*flag).to_owned()));
+    command
+}
+
 fn node_entry(exe: &Path, script: PathBuf, env: Vec<(String, String)>) -> CoreCommand {
     CoreCommand {
         exe: exe.to_path_buf(),
@@ -44,7 +56,7 @@ pub fn resolve() -> Result<Layout, String> {
     if packaged_core.is_file() {
         let node = app_dir.join("runtime").join("atm-core.exe");
         return Ok(Layout {
-            core: node_entry(&node, packaged_core, Vec::new()),
+            core: with_core_flags(node_entry(&node, packaged_core, Vec::new())),
             cli: node_entry(&node, app_dir.join("runtime").join("cli.mjs"), Vec::new()),
             mcp_stdio: node_entry(
                 &node,
@@ -102,7 +114,7 @@ fn development_layout(
         env: dev_env.clone(),
     };
     Ok(Layout {
-        core: ts_entry("core-main.ts"),
+        core: with_core_flags(ts_entry("core-main.ts")),
         cli: ts_entry("cli-main.ts"),
         mcp_stdio: node_entry(
             &node,
@@ -149,5 +161,23 @@ pub fn dunce(path: PathBuf) -> PathBuf {
     match text.strip_prefix(r"\\?\") {
         Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
         _ => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_core_command_gets_node_flags_and_they_come_before_the_script() {
+        let entry = || {
+            node_entry(
+                Path::new("atm-core.exe"),
+                PathBuf::from("core.mjs"),
+                Vec::new(),
+            )
+        };
+        assert_eq!(with_core_flags(entry()).args, ["--expose-gc", "core.mjs"]);
+        assert_eq!(entry().args, ["core.mjs"]);
     }
 }

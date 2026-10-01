@@ -17,6 +17,9 @@ type LifecycleEvent =
   | "previous.session-end"
   | "ready"
   | "heartbeat"
+  | "window.shown"
+  | "window.closed"
+  | "window.released"
   | "exception"
   | "bootstrap.failed"
   | "session-end"
@@ -34,6 +37,9 @@ type Detail = {
   clean?: boolean;
   rss?: number;
   heapUsed?: number;
+  heapTotal?: number;
+  external?: number;
+  arrayBuffers?: number;
   reason?: string;
   processType?: string;
   origin?: string;
@@ -92,7 +98,15 @@ export function createLifecycleDiagnostics(
       for (const key of ["background", "agentWake", "clean"] as const) {
         if (typeof input[key] === "boolean") detail[key] = input[key];
       }
-      for (const key of ["exitCode", "rss", "heapUsed", "previousPid"] as const) {
+      for (const key of [
+        "exitCode",
+        "rss",
+        "heapUsed",
+        "heapTotal",
+        "external",
+        "arrayBuffers",
+        "previousPid",
+      ] as const) {
         if (typeof input[key] === "number" && Number.isFinite(input[key])) detail[key] = input[key];
       }
       for (const key of [
