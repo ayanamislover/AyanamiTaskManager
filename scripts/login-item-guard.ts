@@ -11,7 +11,8 @@ import { execFileSync } from "node:child_process";
  * and this run deleted that very name (`deleted`, recorded at the step that deletes it).
  * A value the user changed or removed in the meantime — the real app's own settings,
  * another tool — is left alone. Entries that do not name this application are never
- * touched. The value type is kept on restore.
+ * touched. The value type is kept on restore. Value names compare case-insensitively, as the
+ * registry does: "COM.SQUIRREL..." and "com.squirrel..." are the same value.
  */
 export type RunEntry = { type: string; data: string };
 export type RunSnapshot = Record<string, RunEntry>;
@@ -33,6 +34,14 @@ const APPLICATION = "ayanamitaskmanager";
 const mentionsApplication = (name: string, data: string) =>
   `${name} ${data}`.toLowerCase().includes(APPLICATION);
 
+const sameName = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+
+/** The value with this name, compared as the registry compares names (case-insensitively). */
+export function findRunEntry(snapshot: RunSnapshot, name: string): RunEntry | undefined {
+  const found = Object.keys(snapshot).find((candidate) => sameName(candidate, name));
+  return found === undefined ? undefined : snapshot[found];
+}
+
 /** Steps that undo this run's own changes to this application's entries. */
 export function loginItemRestorePlan(
   before: RunSnapshot,
@@ -44,13 +53,13 @@ export function loginItemRestorePlan(
   const steps: RunRestoreStep[] = [];
   for (const [name, entry] of Object.entries(before)) {
     if (!mentionsApplication(name, entry.data)) continue;
-    const now = after[name];
+    const now = findRunEntry(after, name);
     if (now?.data === entry.data && now.type === entry.type) continue;
-    if (now ? ours(now.data) : owned.deleted.includes(name))
+    if (now ? ours(now.data) : owned.deleted.some((deleted) => sameName(deleted, name)))
       steps.push({ action: "set", name, type: entry.type, data: entry.data });
   }
   for (const [name, entry] of Object.entries(after)) {
-    if (name in before || !mentionsApplication(name, entry.data)) continue;
+    if (findRunEntry(before, name) || !mentionsApplication(name, entry.data)) continue;
     if (ours(entry.data)) steps.push({ action: "delete", name });
   }
   return steps;

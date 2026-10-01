@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  findRunEntry,
   loginItemRestorePlan,
   parseRunQuery,
   RUN_VALUE,
@@ -116,10 +117,10 @@ describe("smokes must not damage the real autostart entry", () => {
   it("distribution-smoke installs only where the shared Run value is absent, and never restores one", () => {
     expect(RUN_VALUE).toBe(NAME);
     const source = readFileSync(join(process.cwd(), "scripts/distribution-smoke.ts"), "utf8");
-    expect(source).toContain("RUN_VALUE in runBefore;");
-    expect(source.indexOf("RUN_VALUE in runBefore;")).toBeLessThan(
-      source.indexOf('run(setup, ["install"'),
-    );
+    const precondition = "findRunEntry(runBefore, RUN_VALUE) !== undefined;";
+    expect(source).toContain(precondition);
+    expect(source).not.toMatch(/RUN_VALUE in |\[RUN_VALUE\]/u);
+    expect(source.indexOf(precondition)).toBeLessThan(source.indexOf('run(setup, ["install"'));
     expect(source).toMatch(/deleted: \[\],/u);
     expect(source).not.toContain("uninstallDeletes");
     // 值本不存在时，计划只会删本轮安装写下的那一条。
@@ -127,5 +128,26 @@ describe("smokes must not damage the real autostart entry", () => {
     expect(loginItemRestorePlan({}, { [NAME]: ours }, { ...owned, deleted: [] })).toEqual([
       { action: "delete", name: NAME },
     ]);
+  });
+
+  // 注册表的值名不区分大小写（Codex R7-P2-2）：便携版或管理脚本写下的同名值大小写不同，
+  // 也是同一个值。安装会改写它、卸载会删它。
+  it("treats value names that differ only in case as the same value", () => {
+    const upper = NAME.toUpperCase();
+    const query = `\r\nHKEY_CURRENT_USER\\...\\Run\r\n    ${upper}    REG_SZ    ${production}\r\n`;
+    expect(findRunEntry(parseRunQuery(query), RUN_VALUE)).toEqual(sz(production));
+    expect(findRunEntry(parseRunQuery(query), "SomethingElse")).toBeUndefined();
+    // 本轮把同一个值改写成了自己的：放回用户原来的，而不是当成本轮新加的删掉。
+    expect(loginItemRestorePlan({ [upper]: sz(production) }, { [NAME]: sz(smoke) }, owned)).toEqual(
+      [{ action: "set", name: upper, type: "REG_SZ", data: production }],
+    );
+    // 本轮删的名字与快照里的大小写不同，仍是同一个值。
+    expect(loginItemRestorePlan({ [upper]: sz(production) }, {}, owned)).toEqual([
+      { action: "set", name: upper, type: "REG_SZ", data: production },
+    ]);
+    // 没变就什么都不做。
+    expect(
+      loginItemRestorePlan({ [upper]: sz(production) }, { [NAME]: sz(production) }, owned),
+    ).toEqual([]);
   });
 });

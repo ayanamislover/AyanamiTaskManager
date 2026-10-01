@@ -160,12 +160,14 @@ describe("烟测宿主与子进程", () => {
   // 出生时间与树成员身份一起取；核对与结束在同一个进程句柄上；查不了的不当成已退出。
   it("预算脚本只结束 PID 上仍是当初那个进程的，查不了的如实报告", () => {
     const budget = readFileSync("scripts/budget-measure.ts", "utf8");
-    expect(budget).toContain("process.StartTime.ToUniversalTime().Ticks");
-    expect(budget).toMatch(
+    // 探针的 C# 在 budget-probe.ts（真编译的行为见 budget-probe.test.ts）。
+    const probe = readFileSync("scripts/budget-probe.ts", "utf8");
+    expect(probe).toContain("process.StartTime.ToUniversalTime().Ticks");
+    expect(probe).toMatch(
       /IntPtr pinned = process\.Handle;\s*if \(process\.StartTime\.ToUniversalTime\(\)\.Ticks != ticks\) return "other";\s*process\.Kill\(\);/u,
     );
     expect(budget).toContain("for (const row of descendants) await probe.killSame(row);");
-    expect(budget).toContain('state === "same" || state === "unknown"');
+    expect(budget).toContain("states.every((state) => EXITED_STATES.has(state))");
     expect(budget).not.toMatch(/killProcessTree\(row\.pid\)/u);
     expect(budget).not.toMatch(/process\.kill\(pid, 0\)/u);
     expect(budget).not.toMatch(/child\.exitCode/u);

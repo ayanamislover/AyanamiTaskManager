@@ -23,6 +23,7 @@ import {
   loginItemRestorePlan,
   readRunSnapshot,
   RUN_VALUE,
+  findRunEntry,
 } from "./login-item-guard.js";
 import { portableZipName } from "./package-native.js";
 import {
@@ -265,7 +266,7 @@ async function installed(): Promise<"verified" | "skipped"> {
     existsSync(join(installRoot, "app.json")) ||
     existsSync(join(installRoot, "Update.exe")) ||
     uninstallRegistrationExists() ||
-    RUN_VALUE in runBefore;
+    findRunEntry(runBefore, RUN_VALUE) !== undefined;
   if (preexisting && skipInstalled) {
     checks.push({
       name: "已有安装：按 ATM_DISTRIBUTION_SKIP_INSTALLED 跳过安装验收",
@@ -278,7 +279,7 @@ async function installed(): Promise<"verified" | "skipped"> {
   check(
     "验收前没有同名安装与同名自启登记",
     !preexisting,
-    `${installRoot}; Run ${RUN_VALUE}: ${runBefore[RUN_VALUE]?.data ?? "(none)"}`,
+    `${installRoot}; Run ${RUN_VALUE}: ${findRunEntry(runBefore, RUN_VALUE)?.data ?? "(none)"}`,
   );
   const running = appProcesses();
   check("验收前没有运行中的同名进程", running.length === 0, describeAppProcesses(running));

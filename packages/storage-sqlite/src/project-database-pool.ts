@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join } from "node:path";
 import { AtmError } from "@ayanami-task/errors";
 import { closeAllStages } from "./close-stages.js";
@@ -10,11 +11,15 @@ export type PoolProject = {
   lifecycle: string;
 };
 
+type PoolEntry = { database: ManagedDatabase; lastUsed: number; holds: number };
+
+/** 一个在途操作，以及它（连同被它调起的下层操作）取用过的项目库。 */
+type Activity = { parent: Activity | undefined; projects: Set<string> };
+
 export class ProjectDatabasePool {
-  readonly #projects = new Map<
-    string,
-    { database: ManagedDatabase; lastUsed: number; holds: number }
-  >();
+  readonly #projects = new Map<string, PoolEntry>();
+  readonly #activities = new Set<Activity>();
+  readonly #current = new AsyncLocalStorage<Activity>();
   readonly #migrationsRoot: string;
   readonly #maxOpenProjects: number;
   readonly #getProject: (codeOrId: string) => PoolProject;
@@ -63,30 +68,92 @@ export class ProjectDatabasePool {
     }
     const cached = this.#projects.get(project.id);
     if (cached) {
-      cached.lastUsed = Date.now();
+      this.#touch(project.id, cached);
       return cached.database;
     }
-    while (this.#projects.size >= this.#maxOpenProjects) {
-      // 被持有的连接（备份进行中）不淘汰；全被持有时暂时超出上限。
-      const oldest = [...this.#projects.entries()]
-        .filter(([, entry]) => entry.holds === 0)
-        .sort((left, right) => left[1].lastUsed - right[1].lastUsed)[0];
-      if (!oldest) break;
-      oldest[1].database.sqlite.pragma("wal_checkpoint(PASSIVE)");
-      oldest[1].database.sqlite.close();
-      this.#projects.delete(oldest[0]);
-    }
+    this.#evictTo(this.#maxOpenProjects - 1);
     try {
       const database = await openManagedDatabase({
         path: project.databasePath,
         migrationDirectory: join(this.#migrationsRoot, "project"),
         backupDirectory: join(dirname(project.databasePath), "backups"),
       });
-      this.#projects.set(project.id, { database, lastUsed: Date.now(), holds: 0 });
+      const entry: PoolEntry = { database, lastUsed: 0, holds: 0 };
+      this.#touch(project.id, entry);
+      this.#projects.set(project.id, entry);
       return database;
     } catch (error) {
       this.#markMigrationFailed(project.id);
       throw error;
+    }
+  }
+
+  /**
+   * 把 run 作为一个在途操作执行（服务方法、知识库方法、后台补扫）。它取用过的项目库，在它
+   * （含异步）结束前不会被别的操作的空闲回收或容量淘汰关掉：请求拿到缓存的连接后去等 Git、
+   * 等子进程，回来时库还得开着（Codex R7-P2-1）。
+   *
+   * 只挡「别的」操作：同一条调用链自己挨个遍历项目（启动维护、首屏概览扫全部项目）时，
+   * 照旧按 LRU 淘汰自己先前取的，池子不因一次遍历涨到项目总数。因保护暂时超出上限的部分，
+   * 在操作结束时收回。
+   */
+  runActivity<T>(run: () => T): T {
+    const activity: Activity = { parent: this.#current.getStore(), projects: new Set() };
+    this.#activities.add(activity);
+    const end = () => {
+      this.#activities.delete(activity);
+      this.#evictTo(this.#maxOpenProjects);
+    };
+    let result: T;
+    try {
+      result = this.#current.run(activity, run);
+    } catch (error) {
+      end();
+      throw error;
+    }
+    if (!(result instanceof Promise)) {
+      end();
+      return result;
+    }
+    return result.then(
+      (value: unknown) => {
+        end();
+        return value;
+      },
+      (error: unknown) => {
+        end();
+        throw error;
+      },
+    ) as T;
+  }
+
+  #touch(projectId: string, entry: PoolEntry): void {
+    entry.lastUsed = Date.now();
+    for (let activity = this.#current.getStore(); activity; activity = activity.parent)
+      activity.projects.add(projectId);
+  }
+
+  /** 没人持有，也没被当前调用链以外的在途操作取用过。 */
+  #reclaimable(projectId: string, entry: PoolEntry): boolean {
+    if (entry.holds > 0) return false;
+    const chain = new Set<Activity>();
+    for (let activity = this.#current.getStore(); activity; activity = activity.parent)
+      chain.add(activity);
+    for (const activity of this.#activities)
+      if (!chain.has(activity) && activity.projects.has(projectId)) return false;
+    return true;
+  }
+
+  /** 按最久未用淘汰到 limit 个；在用的不淘汰，全在用时暂时超出上限。 */
+  #evictTo(limit: number): void {
+    while (this.#projects.size > limit) {
+      const oldest = [...this.#projects.entries()]
+        .filter(([projectId, entry]) => this.#reclaimable(projectId, entry))
+        .sort((left, right) => left[1].lastUsed - right[1].lastUsed)[0];
+      if (!oldest) return;
+      oldest[1].database.sqlite.pragma("wal_checkpoint(PASSIVE)");
+      oldest[1].database.sqlite.close();
+      this.#projects.delete(oldest[0]);
     }
   }
 
@@ -104,15 +171,15 @@ export class ProjectDatabasePool {
       if (released) return;
       released = true;
       cached.holds -= 1;
-      cached.lastUsed = Date.now();
+      this.#touch(projectId, cached);
     };
   }
 
-  /** 关闭空闲超过 maxIdleMs、没人持有的项目库（每小时维护）。 */
+  /** 关闭空闲超过 maxIdleMs、不在用的项目库（每小时维护）。 */
   closeIdleProjects(maxIdleMs = 5 * 60_000, at = Date.now()): number {
     let closed = 0;
     for (const [projectId, cached] of [...this.#projects]) {
-      if (cached.holds > 0 || at - cached.lastUsed < maxIdleMs) continue;
+      if (!this.#reclaimable(projectId, cached) || at - cached.lastUsed < maxIdleMs) continue;
       this.closeProject(projectId);
       closed += 1;
     }

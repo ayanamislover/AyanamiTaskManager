@@ -60,6 +60,12 @@ import {
   withLoginItemsRestored,
 } from "./smoke-host.js";
 import { powershellScratch } from "./powershell-scratch.js";
+import {
+  BUDGET_PROBE as PROBE,
+  EXITED_STATES,
+  type ProcessRow,
+  type ProcessTree,
+} from "./budget-probe.js";
 
 const MIB = 1024 * 1024;
 const jsonPath = resolve(
@@ -246,113 +252,6 @@ function ensurePortable(): string {
 
 // ---------------------------------------------------------------- 进程探针（Toolhelp32 + 标量）
 
-type ProcessRow = {
-  pid: number;
-  ppid: number;
-  exe: string;
-  ws: number;
-  priv: number;
-  /** 出生时间（.NET ticks，UTC）：与树成员身份一起取，之后按它认人。 */
-  ticks: string;
-};
-
-const PROBE = `
-Add-Type @"
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
-public static class AtmBudgetProbe {
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  private struct Entry {
-    public uint Size; public uint Usage; public uint Pid; public IntPtr Heap; public uint Module;
-    public uint Threads; public uint Parent; public int Priority; public uint Flags;
-    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string Exe;
-  }
-  [DllImport("kernel32.dll")] private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32FirstW(IntPtr snapshot, ref Entry entry);
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern bool Process32NextW(IntPtr snapshot, ref Entry entry);
-  [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
-  [DllImport("user32.dll")] private static extern bool PostMessageW(IntPtr hwnd, uint message, IntPtr w, IntPtr l);
-  private static DateTime Started(int pid) {
-    try { return Process.GetProcessById(pid).StartTime; } catch { return DateTime.MaxValue; }
-  }
-  public static string Tree(int root) {
-    var children = new Dictionary<int, List<int>>();
-    var parents = new Dictionary<int, int>();
-    var names = new Dictionary<int, string>();
-    IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
-    var entry = new Entry { Size = (uint)Marshal.SizeOf(typeof(Entry)) };
-    for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
-      List<int> list;
-      if (!children.TryGetValue((int)entry.Parent, out list)) children[(int)entry.Parent] = list = new List<int>();
-      list.Add((int)entry.Pid);
-      parents[(int)entry.Pid] = (int)entry.Parent;
-      names[(int)entry.Pid] = entry.Exe;
-    }
-    CloseHandle(snapshot);
-    var tree = new List<int> { root };
-    for (int index = 0; index < tree.Count; index++) {
-      List<int> list;
-      if (!children.TryGetValue(tree[index], out list)) continue;
-      DateTime parentStarted = Started(tree[index]);
-      foreach (int child in list) {
-        DateTime started = Started(child);
-        if (child != tree[index] && started != DateTime.MaxValue && started >= parentStarted) tree.Add(child);
-      }
-    }
-    var rows = new List<string>();
-    foreach (int pid in tree) {
-      try {
-        var process = Process.GetProcessById(pid);
-        rows.Add("{\\"pid\\":" + pid + ",\\"ppid\\":" + parents[pid] + ",\\"exe\\":\\"" + names[pid] + "\\",\\"ws\\":" + process.WorkingSet64 + ",\\"priv\\":" + process.PrivateMemorySize64 + ",\\"ticks\\":\\"" + process.StartTime.ToUniversalTime().Ticks + "\\"}");
-      } catch { }
-    }
-    return "[" + string.Join(",", rows.ToArray()) + "]";
-  }
-  public static string Close(long hwnd) {
-    return PostMessageW(new IntPtr(hwnd), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "true" : "false";
-  }
-  // PID 上是不是记下的那个进程：same / gone（没了）/ other（PID 已给了别人）/ unknown（查不了）。
-  public static string Alive(int pid, long ticks) {
-    Process process;
-    try { process = Process.GetProcessById(pid); } catch (ArgumentException) { return "gone"; } catch { return "unknown"; }
-    try { return process.StartTime.ToUniversalTime().Ticks == ticks ? "same" : "other"; } catch { return "unknown"; }
-  }
-  // 只结束记下的那个进程：先拿住句柄（PID 在句柄关闭前不会被复用），再在同一个对象上核出生时间并结束。
-  public static string KillSame(int pid, long ticks) {
-    Process process;
-    try { process = Process.GetProcessById(pid); } catch (ArgumentException) { return "gone"; } catch { return "unknown"; }
-    try {
-      IntPtr pinned = process.Handle;
-      if (process.StartTime.ToUniversalTime().Ticks != ticks) return "other";
-      process.Kill();
-      return "killed";
-    } catch { return "unknown"; }
-  }
-  public static string Session(int pid) {
-    return Process.GetProcessById(pid).SessionId.ToString();
-  }
-}
-"@
-[Console]::Out.WriteLine("ready")
-while ($true) {
-  $line = [Console]::In.ReadLine()
-  if ($line -eq $null) { break }
-  $parts = $line.Split(' ')
-  try {
-    switch ($parts[0]) {
-      'tree' { [Console]::Out.WriteLine([AtmBudgetProbe]::Tree([int]$parts[1])) }
-      'close' { [Console]::Out.WriteLine([AtmBudgetProbe]::Close([long]$parts[1])) }
-      'session' { [Console]::Out.WriteLine([AtmBudgetProbe]::Session([int]$parts[1])) }
-      'alive' { [Console]::Out.WriteLine([AtmBudgetProbe]::Alive([int]$parts[1], [long]$parts[2])) }
-      'killsame' { [Console]::Out.WriteLine([AtmBudgetProbe]::KillSame([int]$parts[1], [long]$parts[2])) }
-      default { [Console]::Out.WriteLine('null') }
-    }
-  } catch { [Console]::Out.WriteLine('null') }
-}
-`;
-
 class ProcessProbe {
   // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
   private readonly scratch = powershellScratch(repoRoot);
@@ -403,9 +302,22 @@ class ProcessProbe {
     return next;
   }
 
-  async tree(pid: number): Promise<ProcessRow[]> {
+  /**
+   * 以 pid 为根的进程树。rows 是认得出身份、读得到内存的成员；unknown 是查不了的成员 PID
+   * （不悄悄丢掉）。整次查询失败抛错，不当成空树。
+   */
+  async tree(pid: number): Promise<ProcessTree> {
     const line = await this.ask(`tree ${pid}`);
-    return line === "null" ? [] : (JSON.parse(line) as ProcessRow[]);
+    if (line === "null") throw new Error(`进程树查询失败：${pid}`);
+    return JSON.parse(line) as ProcessTree;
+  }
+
+  /** 用来量内存的树：有查不了的成员就不出样本，免得少算。 */
+  async measuredTree(pid: number): Promise<ProcessRow[]> {
+    const tree = await this.tree(pid);
+    if (tree.unknown.length > 0)
+      throw new Error(`进程树里有查不了的成员，样本不可信：${tree.unknown.join(",")}`);
+    return tree.rows;
   }
 
   async close(hwnd: number): Promise<boolean> {
@@ -470,7 +382,7 @@ async function sampleSeries(
   const samples: Sample[] = [];
   for (let index = 0; index < count; index += 1) {
     if (index > 0) await sleep(intervalMs);
-    samples.push(summarize(await probe.tree(hostPid), hostPid, index === count - 1));
+    samples.push(summarize(await probe.measuredTree(hostPid), hostPid, index === count - 1));
   }
   const pick = (key: keyof Omit<Sample, "atMs" | "rows">) =>
     median(samples.map((sample) => sample[key]));
@@ -583,6 +495,7 @@ async function quitHost(
   reply: string;
   descendantsGoneMs: number | null;
   descendantsUnknown: number;
+  treeFailed: boolean;
 }> {
   if (childExited(host.child))
     return {
@@ -590,10 +503,14 @@ async function quitHost(
       reply: "already-exited",
       descendantsGoneMs: null,
       descendantsUnknown: 0,
+      treeFailed: false,
     };
   // 先记下整棵树：宿主退出后 WebView2 浏览器进程可能还要一会儿才走，下一轮不能和它共用用户数据目录。
   // 出生时间与树成员身份一起取：之后只认 PID 上仍是这个进程的，PID 被复用给别人时不碰它。
-  const descendants = (await probe.tree(host.pid)).filter((row) => row.pid !== host.pid);
+  // 树查不全（整次失败，或有成员查不了身份）就不能声称子孙都已退出：如实报告。
+  const tree = await probe.tree(host.pid).catch(() => null);
+  const descendants = (tree?.rows ?? []).filter((row) => row.pid !== host.pid);
+  const unlisted = tree ? tree.unknown.filter((pid) => pid !== host.pid).length : 0;
   const reply = await sendPipe(pipeName(await probe.session(host.pid)), { cmd: "QUIT" });
   let graceful = await exited(host, 20_000);
   if (!graceful) {
@@ -602,27 +519,29 @@ async function quitHost(
   }
   const quitAt = Date.now();
   let unknown = 0;
-  const gone = await until(
+  const left = await until(
     async () => {
       const states = await Promise.all(descendants.map((row) => probe.alive(row)));
-      unknown = states.filter((state) => state === "unknown").length;
-      // 查不了的不算走了：等它，最后如实报告。
-      return states.some((state) => state === "same" || state === "unknown") ? null : true;
+      unknown = states.filter((state) => state !== "same" && !EXITED_STATES.has(state)).length;
+      // 只有明确 gone / other 才算走了；same 与查不了的都等，最后如实报告。
+      return states.every((state) => EXITED_STATES.has(state)) ? true : null;
     },
     15_000,
     "宿主的子孙进程退出",
     50,
   ).catch(() => false);
-  if (!gone) {
+  const gone = left && tree !== null && unlisted === 0;
+  if (!left) {
     graceful = false;
     for (const row of descendants) await probe.killSame(row);
   }
   return {
-    graceful,
+    graceful: graceful && gone,
     reply,
     descendantsGoneMs: gone ? Date.now() - quitAt : null,
-    // 最后一轮仍查不了身份的子孙个数：非 0 时「子孙已退出」不成立。
-    descendantsUnknown: gone ? 0 : unknown,
+    // 查不了身份的子孙个数（退出前就查不了的，加上最后一轮仍查不了的）：非 0 时「子孙已退出」不成立。
+    descendantsUnknown: unlisted + (left ? 0 : unknown),
+    treeFailed: tree === null,
   };
 }
 
@@ -687,8 +606,12 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
       await probe.close(visible.hwnd);
       await until(
         async () => {
-          const rows = await probe.tree(host.pid);
-          return rows.some((row) => row.exe.toLowerCase() === "msedgewebview2.exe") ? null : rows;
+          const tree = await probe.tree(host.pid);
+          // 查不了的成员可能正是 WebView2：等它。
+          if (tree.unknown.length > 0) return null;
+          return tree.rows.some((row) => row.exe.toLowerCase() === "msedgewebview2.exe")
+            ? null
+            : tree.rows;
         },
         30_000,
         "WebView2 进程退出",

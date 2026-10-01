@@ -491,6 +491,11 @@ export class AyanamiDatabaseManager {
     return this.#projectPool.openProject(codeOrId);
   }
 
+  /** 把 run 作为一个在途操作执行，见 ProjectDatabasePool.runActivity。 */
+  runActivity<T>(run: () => T): T {
+    return this.#projectPool.runActivity(run);
+  }
+
   closeIdleProjects(maxIdleMs = 5 * 60_000, at = Date.now()): number {
     return this.#projectPool.closeIdleProjects(maxIdleMs, at);
   }

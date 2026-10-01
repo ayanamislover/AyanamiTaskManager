@@ -1,13 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { NativeWindowProbe } from "../../../scripts/native-window.js";
 import {
   POWERSHELL_SCRATCH_PREFIX,
+  pendingScratchRemovals,
   powershellScratch,
+  retryPendingScratchRemovals,
   withPowerShellScratch,
 } from "../../../scripts/powershell-scratch.js";
 
@@ -76,10 +78,24 @@ describe("PowerShell 的编译临时目录不落 %TEMP%", () => {
     });
     expect(scratch.dispose()).toBe(false);
     expect(existsSync(scratch.env.TEMP!)).toBe(true);
+    // 删失败的记进待删表，驱动退出时再删；调用方自己重试成功就划掉。
+    expect(pendingScratchRemovals()).toContain(scratch.env.TEMP);
     expect(scratch.dispose()).toBe(true);
     expect(existsSync(scratch.env.TEMP!)).toBe(false);
+    expect(pendingScratchRemovals()).not.toContain(scratch.env.TEMP);
     expect(scratch.dispose()).toBe(true);
     expect(attempts).toBe(2);
+    // 调用方不再来（探针退出回调只调一次）：由退出重试删掉。
+    let calls = 0;
+    const abandoned = powershellScratch(process.cwd(), process.env, (directory) => {
+      calls += 1;
+      if (calls === 1) throw new Error("EBUSY: resource busy");
+      rmSync(directory, { recursive: true, force: true });
+    });
+    expect(abandoned.dispose()).toBe(false);
+    expect(retryPendingScratchRemovals()).toBe(0);
+    expect(existsSync(abandoned.env.TEMP!)).toBe(false);
+    expect(pendingScratchRemovals()).toEqual([]);
     // 一次性调用里清理失败不盖住 run 自己的错误。
     expect(() =>
       withPowerShellScratch(() => {
@@ -107,6 +123,21 @@ describe("PowerShell 的编译临时目录不落 %TEMP%", () => {
     90_000,
   );
 
+  // Codex R7-P2-5：探针退出时删失败，之后没人再调 dispose；驱动正常退出时要再删一次。
+  it("删失败后驱动正常退出：退出时把临时根删掉", () => {
+    const loader = pathToFileURL(join(process.cwd(), "node_modules/tsx/dist/loader.mjs")).href;
+    const result = spawnSync(
+      process.execPath,
+      ["--import", loader, "apps/desktop/test/fixtures/scratch-retry-at-exit.mts", process.cwd()],
+      { encoding: "utf8", timeout: 60_000, windowsHide: true },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const reported = JSON.parse(result.stdout.trim()) as { directory: string; disposed: boolean };
+    expect(reported.disposed).toBe(false);
+    expect(reported.directory.startsWith(join(outputRoot, POWERSHELL_SCRATCH_PREFIX))).toBe(true);
+    expect(existsSync(reported.directory)).toBe(false);
+  }, 60_000);
+
   it("凡是用 Add-Type 编译 C# 的脚本都走这个临时根（递归、大小写不敏感，注释里提到不算）", () => {
     const scripts = join(process.cwd(), "scripts");
     const files: string[] = [];
@@ -130,11 +161,24 @@ describe("PowerShell 的编译临时目录不落 %TEMP%", () => {
         );
     const compiling = files.filter((path) => compiles.test(readFileSync(path, "utf8")));
     expect(compiling.length).toBeGreaterThan(4);
+    const launches = /\b(?:spawn|spawnSync|execFile|execFileSync)\(/u;
+    // 检查真正拉起 PowerShell 的那一边：.ps1 由同名 .ts 拉起；只放源码、自己不拉起进程的
+    // 模块（budget-probe.ts）由 import 它的脚本拉起，每个都要走临时根，且至少有一个。
+    const launchersOf = (path: string): string[] => {
+      if (/\.ps1$/iu.test(path)) return [path.replace(/\.ps1$/iu, ".ts")];
+      if (launches.test(readFileSync(path, "utf8"))) return [path];
+      const specifier = `"./${basename(path).replace(/\.m?ts$/iu, ".js")}"`;
+      return files.filter((file) => readFileSync(file, "utf8").includes(specifier));
+    };
     for (const path of compiling) {
-      // .ps1 由同名 .ts 拉起，检查拉起它的那一边。
-      const launcher = path.replace(/\.ps1$/iu, ".ts");
-      expect(usesScratch(readFileSync(launcher, "utf8")), relative(scripts, launcher)).toBe(true);
+      const launchers = launchersOf(path);
+      expect(launchers.length, relative(scripts, path)).toBeGreaterThan(0);
+      for (const launcher of launchers)
+        expect(usesScratch(readFileSync(launcher, "utf8")), relative(scripts, launcher)).toBe(true);
     }
+    expect(launchersOf(join(scripts, "budget-probe.ts")).map((path) => basename(path))).toEqual([
+      "budget-measure.ts",
+    ]);
     // 阳性对照：守卫自己认得出这些写法，也不被注释骗过。
     for (const sample of [
       "Add-Type @'",
