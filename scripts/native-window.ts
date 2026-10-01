@@ -153,6 +153,11 @@ export class NativeWindowProbe {
     return this.request({ op: "hittest", hwnd, x: point.x, y: point.y });
   }
 
+  /** 像系统菜单或 Win+Up 那样发 WM_SYSCOMMAND（不经应用按钮）；投递即返回。 */
+  sysCommand(hwnd: number, command: "maximize" | "minimize" | "restore"): Promise<boolean> {
+    return this.request({ op: "syscommand", hwnd, command });
+  }
+
   /** 用户拖边框时系统允许的最小外框（WM_GETMINMAXINFO.ptMinTrackSize），物理像素。 */
   minTrackSize(hwnd: number): Promise<{ width: number; height: number }> {
     return this.request({ op: "mintrack", hwnd });

@@ -8,9 +8,10 @@ import { execFileSync } from "node:child_process";
  *
  * Restore only what this run itself did: an entry is put back when its current value
  * still names one of this run's own executables (this run wrote it), or when it is gone
- * and the run is one that deletes it (`mayRestoreDeleted`). A value the user changed in
- * the meantime — the real app's own settings, another tool — is left alone. Entries that
- * do not name this application are never touched. The value type is kept on restore.
+ * and this run deleted that very name (`deleted`, recorded at the step that deletes it).
+ * A value the user changed or removed in the meantime — the real app's own settings,
+ * another tool — is left alone. Entries that do not name this application are never
+ * touched. The value type is kept on restore.
  */
 export type RunEntry = { type: string; data: string };
 export type RunSnapshot = Record<string, RunEntry>;
@@ -20,8 +21,12 @@ export type RunRestoreStep =
 export type RunOwnership = {
   /** Executables this run launched; a value naming one of them was written by this run. */
   executables: readonly string[];
-  /** The run itself deletes the entry (switching autostart off), so a gap is ours. */
-  mayRestoreDeleted: boolean;
+  /**
+   * Names this run removed itself: recorded right at the step that removes them (switching
+   * autostart off, uninstalling), never assumed for the whole run. A name not listed that is
+   * gone was removed by someone else.
+   */
+  deleted: readonly string[];
 };
 
 const APPLICATION = "ayanamitaskmanager";
@@ -41,7 +46,7 @@ export function loginItemRestorePlan(
     if (!mentionsApplication(name, entry.data)) continue;
     const now = after[name];
     if (now?.data === entry.data && now.type === entry.type) continue;
-    if (now ? ours(now.data) : owned.mayRestoreDeleted)
+    if (now ? ours(now.data) : owned.deleted.includes(name))
       steps.push({ action: "set", name, type: entry.type, data: entry.data });
   }
   for (const [name, entry] of Object.entries(after)) {

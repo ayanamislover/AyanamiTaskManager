@@ -274,6 +274,8 @@ async function installed(): Promise<"verified" | "skipped"> {
   const manifest = join(packageDir, `atm-${packageVersion}-win-x64.json`);
   const setup = join(packageDir, "atm-setup.exe");
   const runBefore = readRunSnapshot();
+  /** 卸载这一步删掉的 Run 值名（卸载前在、卸载后没了）；卸载没跑就是空的。 */
+  let runDeletedByUninstall: string[] = [];
   try {
     check(
       "atm-setup 静默安装",
@@ -302,6 +304,7 @@ async function installed(): Promise<"verified" | "skipped"> {
       join(installRoot, "state", "health"),
     );
 
+    const runBeforeUninstall = readRunSnapshot();
     const preservedMarker = join(dataDir, "uninstall-preservation.marker");
     await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
     check(
@@ -320,6 +323,10 @@ async function installed(): Promise<"verified" | "skipped"> {
           : null,
       120_000,
     );
+    const runAfterUninstall = readRunSnapshot();
+    runDeletedByUninstall = Object.keys(runBeforeUninstall).filter(
+      (name) => !(name in runAfterUninstall),
+    );
     const left = appProcesses();
     check("卸载后应用进程已退出", left.length === 0, describeAppProcesses(left));
     check("卸载后卸载注册项已移除", !uninstallRegistrationExists(), uninstallRegistryKey);
@@ -334,11 +341,11 @@ async function installed(): Promise<"verified" | "skipped"> {
     await writeSmokeReport("installed", dataDir, from);
     return "verified";
   } finally {
-    // 安装写的自启指向安装根的启动器，卸载会删掉它：这两样都是本轮的。
+    // 安装写的自启指向安装根的启动器（现值还指向它就是本轮写的）；卸载删掉的是上面记下的那些名字。
     applyRunRestore(
       loginItemRestorePlan(runBefore, readRunSnapshot(), {
         executables: [join(installRoot, "AyanamiTaskManager.exe")],
-        mayRestoreDeleted: true,
+        deleted: runDeletedByUninstall,
       }),
     );
   }

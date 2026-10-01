@@ -49,6 +49,7 @@ public static class AtmNativeWindow
     [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
     private const uint SWP_NOMOVE = 0x0002;
     private const uint SWP_NOZORDER = 0x0004;
@@ -133,6 +134,22 @@ public static class AtmNativeWindow
             return true;
         }, IntPtr.Zero);
         return "[" + string.Join(",", found.ToArray()) + "]";
+    }
+
+    /// 系统菜单/Win+Up 走的那条路：WM_SYSCOMMAND，不经应用自己的按钮。
+    public static string SysCommand(long handle, string command)
+    {
+        uint code;
+        switch (command)
+        {
+            case "maximize": code = 0xF030; break;
+            case "minimize": code = 0xF020; break;
+            case "restore": code = 0xF120; break;
+            default: throw new ArgumentException("unknown syscommand: " + command);
+        }
+        if (!PostMessage(new IntPtr(handle), 0x0112, new IntPtr(code), IntPtr.Zero))
+            throw new InvalidOperationException("PostMessage failed: " + Marshal.GetLastWin32Error());
+        return "true";
     }
 
     /// 物理像素的外框；x/y 为空时只改尺寸。
@@ -256,6 +273,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       }
       "hittest" { $response = [AtmNativeWindow]::HitTest([long]$request.hwnd, [int]$request.x, [int]$request.y) }
       "mintrack" { $response = [AtmNativeWindow]::MinTrackSize([long]$request.hwnd) }
+      "syscommand" { $response = [AtmNativeWindow]::SysCommand([long]$request.hwnd, [string]$request.command) }
       "children" { $response = [AtmNativeWindow]::Children([long]$request.hwnd, [int]$request.x, [int]$request.y) }
       default { throw "unknown op: $($request.op)" }
     }

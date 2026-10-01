@@ -71,14 +71,17 @@ export async function waitUntil<T>(
 
 /** 被测宿主：默认是 smoke 构建的便携版本目录；ATM_PACKAGED_EXE 可改指另一份 smoke 构建。 */
 export function smokeExecutable(): string {
-  const executable = resolve(
+  const requested = resolve(
     process.env.ATM_PACKAGED_EXE ??
       join(outputRoot, "package-smoke", `app-${sourceVersion}`, "AyanamiTaskManager.exe"),
   );
-  if (!existsSync(executable))
+  if (!existsSync(requested))
     throw new Error(
-      `找不到烟测宿主：${executable}；先跑 pnpm exec tsx scripts/package-native.ts --smoke output/package-smoke`,
+      `找不到烟测宿主：${requested}；先跑 pnpm exec tsx scripts/package-native.ts --smoke output/package-smoke`,
     );
+  // 宿主先 canonicalize 自己的路径、按真实父目录认安装（paths.rs）：经 junction 别名进来的
+  // 也要按真实位置检查，之后启动与归属比较都用这同一个真实路径。
+  const executable = realpathSync.native(requested);
   if (!existsSync(join(dirname(executable), "portable")))
     throw new Error(`烟测宿主需要版本目录里的 portable 标记：${dirname(executable)}`);
   // 生产宿主也能带 portable 标记，可它不认 ATM_SMOKE_CORE_USERPROFILE：Node 子进程会读到真实
@@ -412,8 +415,6 @@ export async function withLoginItemsRestored<T>(
   try {
     return await run();
   } finally {
-    applyRunRestore(
-      loginItemRestorePlan(before, readRunSnapshot(), { executables, mayRestoreDeleted: false }),
-    );
+    applyRunRestore(loginItemRestorePlan(before, readRunSnapshot(), { executables, deleted: [] }));
   }
 }

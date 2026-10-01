@@ -518,8 +518,66 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
         window.height === moved.window.height,
       5_000,
     );
-    await renderer.browser.close();
+
+    // 同一件事走系统那条路（系统菜单 / Win+Up）：WM_SYSCOMMAND 最大化，中途再最小化、恢复。
+    // 应用按钮会先告诉窗口库「要最大化了」；系统路径不会，移动事件可能先于窗口库更新状态到达。
+    const movedAgain = await probe.setBounds(maximizedReopen.hwnd, {
+      x: moved.window.x + 30,
+      y: moved.window.y + 20,
+      width: moved.window.width,
+      height: moved.window.height,
+    });
+    await probe.sysCommand(maximizedReopen.hwnd, "maximize");
+    await log.eventually(
+      "系统命令最大化",
+      async () => (await probe.state(maximizedReopen.hwnd)).maximized,
+      Boolean,
+      5_000,
+    );
+    await probe.sysCommand(maximizedReopen.hwnd, "minimize");
+    await log.eventually(
+      "最大化后再最小化",
+      async () => (await probe.state(maximizedReopen.hwnd)).minimized,
+      Boolean,
+      5_000,
+    );
+    await probe.sysCommand(maximizedReopen.hwnd, "restore");
+    await log.eventually(
+      "从最小化恢复回最大化",
+      () => probe.state(maximizedReopen.hwnd),
+      (state) => state.maximized && !state.minimized,
+      5_000,
+    );
+    await page
+      .getByTestId("window-close")
+      .click({ noWaitAfter: true })
+      .catch(() => undefined);
+    await log.eventually(
+      "系统最大化后关到托盘",
+      () => appWindow(host),
+      (state) => state === null,
+      10_000,
+    );
+    await renderer.browser.close().catch(() => undefined);
     renderer = null;
+    await requestShow(host);
+    const systemReopen = await visibleWindow(host, "系统最大化关窗后重新打开");
+    check(
+      "系统最大化关窗后重新打开仍是最大化",
+      (await probe.state(systemReopen.hwnd)).maximized,
+      JSON.stringify(await probe.state(systemReopen.hwnd)),
+    );
+    await probe.sysCommand(systemReopen.hwnd, "restore");
+    await log.eventually(
+      "系统还原回到系统最大化之前挪到的外框",
+      async () => (await probe.state(systemReopen.hwnd)).window,
+      (window) =>
+        window.x === movedAgain.window.x &&
+        window.y === movedAgain.window.y &&
+        window.width === movedAgain.window.width &&
+        window.height === movedAgain.window.height,
+      5_000,
+    );
 
     return {
       screenshot,

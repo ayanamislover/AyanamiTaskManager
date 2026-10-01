@@ -113,39 +113,85 @@ export function assertExecutableIdentity(bytes: Buffer, internalName: string, la
 }
 
 /**
- * 构建机路径在二进制里可能的几种写法：正斜杠、JSON/JS 字符串里反斜杠翻倍或写成 \u005c；
- * UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。Windows 路径不分大小写，工具链也会改写大小写，
- * 所以针一律小写、比对时把内容的 ASCII 字母也折成小写（见 findBuildMachinePath）。
+ * 构建机路径在二进制里可能的几种写法：正斜杠、JSON/JS 字符串里反斜杠翻倍或写成 \u005c、
+ * 整条路径逐字符写成 \uXXXX；UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。
+ *
+ * Windows 路径不分大小写，工具链也会改写大小写：针里的 ASCII 字母一律小写，比对时把内容里的
+ * ASCII 字母也折成小写（见 findBuildMachinePath）。非 ASCII 字符不折，针同时备一份原样、一份
+ * 整体小写。
  */
-export function buildMachinePathNeedles(paths: readonly string[]): Array<[string, Buffer]> {
+export type BuildMachinePathNeedle = {
+  spelling: string;
+  encoding: "utf8" | "utf16le";
+  bytes: Buffer;
+};
+
+const asciiLower = (text: string) => text.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+const unicodeEscaped = (text: string) =>
+  [...text]
+    .map((character) =>
+      [...Buffer.from(character, "utf16le").swap16().toString("hex").match(/.{4}/gu)!]
+        .map((unit) => `\\u${unit}`)
+        .join(""),
+    )
+    .join("");
+
+export function buildMachinePathNeedles(paths: readonly string[]): BuildMachinePathNeedle[] {
   const spellings = new Set<string>();
   for (const path of paths) {
-    const trimmed = path.replace(/[\\/]+$/u, "").toLowerCase();
+    const trimmed = path.replace(/[\\/]+$/u, "");
     if (trimmed.length < 4) continue;
-    spellings.add(trimmed);
-    spellings.add(trimmed.replaceAll("\\", "/"));
-    spellings.add(trimmed.replaceAll("\\", "\\\\"));
-    spellings.add(trimmed.replaceAll("\\", "\\u005c"));
+    for (const variant of new Set([asciiLower(trimmed), asciiLower(trimmed.toLowerCase())])) {
+      spellings.add(variant);
+      spellings.add(variant.replaceAll("\\", "/"));
+      spellings.add(variant.replaceAll("\\", "\\\\"));
+      spellings.add(variant.replaceAll("\\", "\\u005c"));
+    }
+    // 逐字符转义保留原字符的大小写（转义码里看得出来），原样与整体小写各一份。
+    spellings.add(unicodeEscaped(trimmed));
+    spellings.add(unicodeEscaped(trimmed.toLowerCase()));
   }
-  return [...spellings].flatMap(
-    (spelling): Array<[string, Buffer]> => [
-      [spelling, Buffer.from(spelling, "utf8")],
-      [spelling, Buffer.from(spelling, "utf16le")],
-    ],
-  );
+  return [...spellings].flatMap((spelling): BuildMachinePathNeedle[] => [
+    { spelling, encoding: "utf8", bytes: Buffer.from(spelling, "utf8") },
+    { spelling, encoding: "utf16le", bytes: Buffer.from(spelling, "utf16le") },
+  ]);
 }
 
-export function findBuildMachinePath(
-  bytes: Buffer,
-  needles: ReadonlyArray<[string, Buffer]>,
-): string | null {
-  // 只折 ASCII 字母：UTF-16LE 里 ASCII 字符的低字节同样是这些值。
+/**
+ * UTF-8 的多字节序列每个字节都 ≥ 0x80，逐字节折 ASCII 不会碰到它们。UTF-16LE 不行：汉字等
+ * 字符的任一字节都可能落在 0x41..0x5A，只能按「高字节为 0 的代码单元」折，而且宽字符串可能从
+ * 奇数偏移开始，两种对齐各折一份。
+ */
+function foldUtf8(bytes: Buffer): Buffer {
   const folded = Buffer.from(bytes);
   for (let index = 0; index < folded.length; index += 1) {
     const byte = folded[index]!;
     if (byte >= 0x41 && byte <= 0x5a) folded[index] = byte + 0x20;
   }
-  for (const [spelling, needle] of needles) if (folded.includes(needle)) return spelling;
+  return folded;
+}
+
+function foldUtf16(bytes: Buffer, offset: 0 | 1): Buffer {
+  const folded = Buffer.from(bytes);
+  for (let index = offset; index + 1 < folded.length; index += 2) {
+    const low = folded[index]!;
+    if (folded[index + 1] === 0 && low >= 0x41 && low <= 0x5a) folded[index] = low + 0x20;
+  }
+  return folded;
+}
+
+export function findBuildMachinePath(
+  bytes: Buffer,
+  needles: readonly BuildMachinePathNeedle[],
+): string | null {
+  const utf8 = foldUtf8(bytes);
+  for (const needle of needles)
+    if (needle.encoding === "utf8" && utf8.includes(needle.bytes)) return needle.spelling;
+  for (const offset of [0, 1] as const) {
+    const utf16 = foldUtf16(bytes, offset);
+    for (const needle of needles)
+      if (needle.encoding === "utf16le" && utf16.includes(needle.bytes)) return needle.spelling;
+  }
   return null;
 }
 

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
-use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
+use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows, WindowExtWindows};
 use tao::window::{Icon as WindowIcon, Window, WindowBuilder};
 use tray_icon::menu::MenuEvent;
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconEvent};
@@ -953,11 +953,11 @@ impl App {
 
     /// Maximized or minimized bounds are not the ones to come back to. They are tracked on
     /// every move and resize, not read at close: a window moved, then maximized and closed,
-    /// must come back restoring to where it was moved, not to an older position.
+    /// must come back restoring to where it was moved, not to an older position. The state is
+    /// read from Windows, not tao's cache (see `win::shown_normal`).
     fn remember_normal_bounds(&mut self) {
         if let Some(window) = &self.window
-            && !window.is_maximized()
-            && !window.is_minimized()
+            && win::shown_normal(window.hwnd())
             && let Ok(position) = window.outer_position()
         {
             self.saved.bounds = Some((position, window.inner_size()));

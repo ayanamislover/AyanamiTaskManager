@@ -61,6 +61,17 @@ pub fn known_local_app_data() -> Option<std::path::PathBuf> {
     path
 }
 
+/// Neither maximized nor minimized, as Windows has it right now. Tao caches "maximized" and
+/// updates the cache on WM_SIZE, which a system maximize (Win+Up, the system menu, Aero Snap)
+/// sends after the WM_WINDOWPOSCHANGED that tao reports as Moved: by the cache, that Moved is
+/// still a normal window with a maximized frame.
+pub fn shown_normal(hwnd: isize) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsZoomed};
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: both only read the state of a window handle this process owns.
+    unsafe { IsZoomed(hwnd) == 0 && IsIconic(hwnd) == 0 }
+}
+
 pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value
         .as_ref()

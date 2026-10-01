@@ -241,6 +241,28 @@ describe("构建机路径", () => {
       expect(findBuildMachinePath(Buffer.from(text, "utf16le"), needles), text).not.toBeNull();
     }
     expect(findBuildMachinePath(Buffer.from("/cargo/registry/src/x.rs"), needles)).toBeNull();
+    // 非 ASCII 路径：汉字「字」的 UTF-16LE 是 57 5B，逐字节折 ASCII 会把 57 改坏；
+    // 宽字符串从奇数偏移开始也要认得出。
+    const wide = buildMachinePathNeedles(["C:\\Users\\字"]);
+    expect(findBuildMachinePath(Buffer.from("x C:\\USERS\\字\\a", "utf16le"), wide)).not.toBeNull();
+    expect(
+      findBuildMachinePath(
+        Buffer.concat([Buffer.from([0x20]), Buffer.from("C:\\USERS\\字", "utf16le")]),
+        wide,
+      ),
+    ).not.toBeNull();
+    expect(findBuildMachinePath(Buffer.from("C:\\Users\\字", "utf8"), wide)).not.toBeNull();
+    expect(findBuildMachinePath(Buffer.from("C:\\Users\\宇", "utf16le"), wide)).toBeNull();
+    // 非 ASCII 的大写字母：整体小写的写法也认。
+    const accented = buildMachinePathNeedles(["C:\\Users\\ÉMILE"]);
+    expect(findBuildMachinePath(Buffer.from("c:/users/émile/x", "utf8"), accented)).not.toBeNull();
+    // 整条路径逐字符写成 \uXXXX（大小写不同的十六进制也一样）。
+    const escaped = [..."C:\\Users\\builder"]
+      .map(
+        (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`,
+      )
+      .join("");
+    expect(findBuildMachinePath(Buffer.from(`{"p":"${escaped}"}`, "utf8"), needles)).not.toBeNull();
     // 只折 ASCII：内容里的大写不能把别的字节也改了，原内容也不能被改动。
     const original = Buffer.from("C:\\USERS\\BUILDER", "utf8");
     findBuildMachinePath(original, needles);

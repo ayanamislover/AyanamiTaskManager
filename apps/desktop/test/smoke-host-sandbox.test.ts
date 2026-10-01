@@ -1,5 +1,13 @@
 import type { ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -91,9 +99,18 @@ describe("烟测宿主与子进程", () => {
       process.env.ATM_PACKAGED_EXE = host("installed", "MZ --remote-debugging-port=0");
       writeFileSync(join(scratch, "installed", "app.json"), "{}");
       expect(() => smokeExecutable()).toThrow(/不能放在一份安装里/u);
+      // 经 junction 别名进来：字面父目录没有安装，真实父目录有，也要拒。
+      mkdirSync(join(scratch, "alias"));
+      symlinkSync(
+        join(scratch, "installed", "app-9.9.9"),
+        join(scratch, "alias", "app-9.9.9"),
+        "junction",
+      );
+      process.env.ATM_PACKAGED_EXE = join(scratch, "alias", "app-9.9.9", "AyanamiTaskManager.exe");
+      expect(() => smokeExecutable()).toThrow(/不能放在一份安装里/u);
       const smoke = host("smoke", "MZ --remote-debugging-port=0");
       process.env.ATM_PACKAGED_EXE = smoke;
-      expect(smokeExecutable()).toBe(smoke);
+      expect(smokeExecutable()).toBe(realpathSync.native(smoke));
     } finally {
       if (previous === undefined) delete process.env.ATM_PACKAGED_EXE;
       else process.env.ATM_PACKAGED_EXE = previous;

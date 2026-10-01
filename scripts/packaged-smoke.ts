@@ -1055,10 +1055,12 @@ await mkdir(dirname(lockPath), { recursive: true });
 await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-boot" }));
 const previousBoot = new Date("2020-01-01T00:00:00Z");
 await utimes(lockPath, previousBoot, previousBoot);
-let app = startApp();
-// The app's own autostart self-check writes the shared HKCU Run value (Electron gives
-// no way to namespace it), so a smoke run would otherwise delete the user's real entry.
+// 自启开关写的是与真实安装共用的 HKCU Run 值：启动前先拍快照（读不到就抛，什么都不启动），
+// 结束时只撤销本轮自己的改动。
 const runEntriesBeforeSmoke = readRunSnapshot();
+/** 本轮自己删掉的 Run 值名：只在真去删的那一步记，恢复后清掉。 */
+const runDeletedBySmoke: string[] = [];
+let app = startApp();
 let user: UserPath | null = null;
 try {
   const runtime = await waitForRuntime(app);
@@ -1394,6 +1396,7 @@ try {
       registered?.toLowerCase() === expectedAutostart.toLowerCase(),
     `${String(enabled)} ${registered ?? "(none)"}`,
   );
+  runDeletedBySmoke.push(AUTOSTART_VALUE);
   const disabled = await desktopCall("setAutoLaunch", false);
   check(
     "自启动经桥关闭并删除登记",
@@ -1401,6 +1404,13 @@ try {
       (await desktopCall("getAutoLaunch")) === false &&
       readRunEntries()[AUTOSTART_VALUE] === undefined,
     `${String(disabled)} ${readRunEntries()[AUTOSTART_VALUE] ?? "(none)"}`,
+  );
+  // 当场放回用户原来的登记，不拖到 finally：之后用户在真实 ATM 里关掉自启，不该被补回来。
+  applyRunRestore(
+    loginItemRestorePlan(runEntriesBeforeSmoke, readRunSnapshot(), {
+      executables: [executable],
+      deleted: runDeletedBySmoke.splice(0),
+    }),
   );
 
   await checkBridgeParity(desktopCall);
@@ -1482,7 +1492,7 @@ try {
   applyRunRestore(
     loginItemRestorePlan(runEntriesBeforeSmoke, readRunSnapshot(), {
       executables: [executable],
-      mayRestoreDeleted: true,
+      deleted: runDeletedBySmoke,
     }),
   );
 }
