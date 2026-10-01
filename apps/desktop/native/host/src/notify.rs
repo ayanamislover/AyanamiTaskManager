@@ -45,9 +45,12 @@ fn show_toast(title: &str, body: &str) -> windows::core::Result<()> {
     notifier.Show(&toast)
 }
 
+/// Logs the outcome either way, never the text (task titles stay out of the log), so
+/// whether a toast actually reached Windows can be checked.
 pub fn show(data_dir: &Path, title: &str, body: &str) {
-    if let Err(error) = show_toast(title, body) {
-        crate::log(data_dir, &format!("toast failed: {error}"));
+    match show_toast(title, body) {
+        Ok(()) => crate::log(data_dir, "toast shown"),
+        Err(error) => crate::log(data_dir, &format!("toast failed: {error}")),
     }
 }
 

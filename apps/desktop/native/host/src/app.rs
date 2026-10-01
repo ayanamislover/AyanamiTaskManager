@@ -570,6 +570,16 @@ impl App {
                 if let Ok(snapshot) = serde_json::from_value::<Snapshot>(snapshot)
                     && snapshot != self.snapshot
                 {
+                    // One line when the tray starts offering a version: "update ready" can be
+                    // traced from the core to the tray.
+                    if let Some(version) = &snapshot.pending_update
+                        && self.snapshot.pending_update.as_ref() != Some(version)
+                    {
+                        crate::log(
+                            &self.layout.data_dir,
+                            &format!("tray offers update {version}"),
+                        );
+                    }
                     self.snapshot = snapshot;
                     if let Some(tray) = &self.tray {
                         tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
