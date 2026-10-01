@@ -41,10 +41,11 @@ class FeatureError extends Error {
   }
 }
 
-type Feature = { starting(): FeatureError; unavailable(): FeatureError };
+type Feature = { starting(): FeatureError; unavailable(): FeatureError; closing(): FeatureError };
 
 const SYNC: Feature = {
   starting: () => new FeatureError("SYNC_STARTING", 503, true, "手机同步正在启动，请稍后再试"),
+  closing: () => new FeatureError("SYNC_UNAVAILABLE", 404, false, "ATM 正在退出，手机同步已停止"),
   unavailable: () =>
     new FeatureError(
       "SYNC_UNAVAILABLE",
@@ -56,6 +57,8 @@ const SYNC: Feature = {
 const DISPATCH: Feature = {
   starting: () =>
     new FeatureError("DISPATCH_STARTING", 503, true, "Claude 派单正在启动，请稍后再试"),
+  closing: () =>
+    new FeatureError("DISPATCH_UNAVAILABLE", 404, false, "ATM 正在退出，Claude 派单已停止"),
   unavailable: () =>
     new FeatureError(
       "DISPATCH_UNAVAILABLE",
@@ -136,6 +139,8 @@ export function startMobileFeatures(options: MobileFeatureOptions): MobileFeatur
     dataDir,
     host: taskServiceDispatchHost(service),
     logger: mobileLogger,
+    // 收尾时还在修正残留（慢的进程身份查询）：派单器自己停手，不等它起来再关。
+    signal: abort.signal,
   }).then((dispatcher) => {
     // 起来时 core 已经在收尾：直接关掉，不留给没人管的派单器。
     if (!abort.signal.aborted) return dispatcher;
@@ -188,20 +193,27 @@ export function startMobileFeatures(options: MobileFeatureOptions): MobileFeatur
     dispatcher?.close();
   }
 
+  /** 路由用：收尾一开始就一律不可用，新请求不再触达正在停或已停的功能。 */
+  const use = async <T>(ready: Promise<T | null>, feature: Feature): Promise<T> => {
+    if (abort.signal.aborted) throw feature.closing();
+    const value = await when(ready, feature, waitMs);
+    if (abort.signal.aborted) throw feature.closing();
+    return value;
+  };
+
   return {
     sync: {
-      status: async () => (await when(syncReady, SYNC, waitMs)).status(),
-      updateConfig: async (patch) => (await when(syncReady, SYNC, waitMs)).updateConfig(patch),
-      testRelay: async (candidate) => (await when(syncReady, SYNC, waitMs)).testRelay(candidate),
-      createPairing: async () => (await when(syncReady, SYNC, waitMs)).createPairing(),
-      resetSpace: async () => (await when(syncReady, SYNC, waitMs)).resetSpace(),
+      status: async () => (await use(syncReady, SYNC)).status(),
+      updateConfig: async (patch) => (await use(syncReady, SYNC)).updateConfig(patch),
+      testRelay: async (candidate) => (await use(syncReady, SYNC)).testRelay(candidate),
+      createPairing: async () => (await use(syncReady, SYNC)).createPairing(),
+      resetSpace: async () => (await use(syncReady, SYNC)).resetSpace(),
     },
     dispatch: {
-      status: async () => (await when(dispatchReady, DISPATCH, waitMs)).status(),
-      updateConfig: async (patch) =>
-        (await when(dispatchReady, DISPATCH, waitMs)).updateConfig(patch),
-      enqueue: async (input) => (await when(dispatchReady, DISPATCH, waitMs)).enqueue(input),
-      cancel: async (run) => (await when(dispatchReady, DISPATCH, waitMs)).cancel(run),
+      status: async () => (await use(dispatchReady, DISPATCH)).status(),
+      updateConfig: async (patch) => (await use(dispatchReady, DISPATCH)).updateConfig(patch),
+      enqueue: async (input) => (await use(dispatchReady, DISPATCH)).enqueue(input),
+      cancel: async (run) => (await use(dispatchReady, DISPATCH)).cancel(run),
     },
     ready: Promise.all([syncReady, dispatchReady]).then(() => undefined),
     close() {

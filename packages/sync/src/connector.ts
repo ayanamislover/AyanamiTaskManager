@@ -28,44 +28,17 @@ import {
   purgeSpace,
   revokeSpace,
 } from "./settings.js";
-import { haltLoop, newLoop, retireLoop, type Loop } from "./sync-loop.js";
+import { PUBLIC_STATE, UNCONFIGURED_MESSAGE, type Phase } from "./connector-state.js";
+import { guardedPort, haltLoop, newLoop, retireLoop, type Loop } from "./sync-loop.js";
 import {
   DEFAULT_TIMINGS,
   type PairingResult,
   type RelayTestResult,
   type ResetSpaceResult,
   type SyncConnectorOptions,
-  type SyncState,
   type SyncStatus,
   type SyncTimings,
 } from "./types.js";
-
-/**
- * 内部阶段，比对外的 state 细：对外 unconfigured / retrying / rejected / failed 都是 error，
- * stopped 是 disabled，原因写在 lastError。
- */
-type Phase =
-  | "disabled"
-  | "unconfigured"
-  | "connecting"
-  | "online"
-  | "retrying"
-  | "rejected"
-  | "failed"
-  | "stopped";
-
-const PUBLIC_STATE: Record<Phase, SyncState> = {
-  disabled: "disabled",
-  stopped: "disabled",
-  connecting: "connecting",
-  online: "online",
-  unconfigured: "error",
-  retrying: "error",
-  rejected: "error",
-  failed: "error",
-};
-
-const UNCONFIGURED_MESSAGE = "已启用手机同步，但还没有填写中继地址或 token";
 
 function isCursorRejected(error: unknown): boolean {
   return error instanceof RelayError && error.status === 400;
@@ -103,6 +76,9 @@ export class SyncConnector {
   #spaceCreation: Promise<void> | null = null;
   /** 设置页发起的中继请求（测试连接、清理旧空间）；停止时一并中止。 */
   #management = new AbortController();
+  /** 进行中的 halt（改连接设置、重置配对、停止各自发起）：stop 要等它们全部收尾。 */
+  readonly #halts = new Set<Promise<void>>();
+  #stopping: Promise<void> | null = null;
   readonly #unsubscribers: Array<() => void> = [];
 
   constructor(options: SyncConnectorOptions) {
@@ -162,13 +138,23 @@ export class SyncConnector {
    * 中断长轮询、写离线状态，然后停下。总耗时不超过 stopTimeoutMs（再加掐断后的短暂收尾）：
    * 宿主只给 core 有限的退出时间。返回后不会再有同步任务碰 service。
    */
-  async stop(): Promise<void> {
-    if (!this.#started) return;
+  stop(): Promise<void> {
+    if (this.#stopping) return this.#stopping;
+    if (!this.#started) return Promise.resolve();
     this.#started = false;
+    this.#stopping = this.#shutDown().finally(() => {
+      this.#stopping = null;
+    });
+    return this.#stopping;
+  }
+
+  async #shutDown(): Promise<void> {
     this.#management.abort();
     for (const unsubscribe of this.#unsubscribers.splice(0)) unsubscribe();
     this.#publisher.stop();
     await this.#halt(true);
+    // 改连接设置、重置配对可能已经在停旧会话：等它们作废完，停止才算数。
+    await Promise.all(this.#halts);
     this.#persist();
     this.#phase = "stopped";
   }
@@ -410,31 +396,26 @@ export class SyncConnector {
     const loop = this.#loop;
     if (!loop) return;
     this.#loop = null;
-    await haltLoop(loop, {
+    const halting = haltLoop(loop, {
       chain: this.#chain,
       budgetMs: this.#timings.stopTimeoutMs,
       offline,
       logger: this.#logger,
       describe: (error) => this.#describe(error),
     });
+    this.#halts.add(halting);
+    try {
+      await halting;
+    } finally {
+      this.#halts.delete(halting);
+    }
   }
 
   #sessionHost(loop: Loop): SessionHost {
-    const service = this.#service;
-    const dispatch = this.#dispatch;
-    // 停下以后 core 会关库、关派单：迟到的任务在这里就失败，不去碰已关闭的对象。
-    const live = () => {
-      if (loop.retired) throw new Error("SYNC_SESSION_RETIRED");
-    };
+    // 停下以后 core 会关库、关派单：迟到的任务在每次调用时就失败，不去碰已关闭的对象。
     return {
-      get service() {
-        live();
-        return service;
-      },
-      get dispatch() {
-        live();
-        return dispatch;
-      },
+      service: guardedPort(loop, this.#service),
+      dispatch: this.#dispatch ? guardedPort(loop, this.#dispatch) : null,
       appVersion: this.#options.appVersion,
       logger: this.#logger,
       now: () => this.#now(),

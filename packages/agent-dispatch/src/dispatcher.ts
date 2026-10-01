@@ -27,7 +27,7 @@ import {
 } from "./process-identity.js";
 import { ProcessTracker } from "./process-tracker.js";
 import { renderDispatchPrompt } from "./prompt.js";
-import { type DispatchOutcome, judgeOutcome, logHasResult } from "./result.js";
+import { type DispatchOutcome, identityLostMessage, judgeOutcome, logHasResult } from "./result.js";
 import {
   DISPATCH_REQUEST_ID_PATTERN,
   type DispatchRequestEntry,
@@ -52,12 +52,6 @@ const silentLogger: DispatchLogger = { info() {}, warn() {}, error() {} };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/** 确认不了 PID 归属时停止跟踪的说明：不接管、不结束，告诉用户怎么自己处理。 */
-function identityLostMessage(pid: number | undefined, when: string): string {
-  const which = pid === undefined ? "" : `（PID ${pid}）`;
-  return `${when}无法确认 Claude 进程身份${which}，已停止跟踪，没有结束该进程；如仍在运行可在任务管理器里手动结束`;
 }
 
 /**
@@ -130,12 +124,18 @@ export class AgentDispatcher {
       this.#now(),
       (since) => saveRuns(this.#paths.runs, this.#runs, since),
     );
+    if (options.signal?.aborted) this.close();
+    else options.signal?.addEventListener("abort", () => this.close(), { once: true });
   }
 
   /** 修正上次留下的 running 记录、清理旧日志，然后开始处理队列。 */
   async start(): Promise<void> {
-    for (const record of this.#runs.filter((entry) => entry.state === "running"))
+    for (const record of this.#runs.filter((entry) => entry.state === "running")) {
+      if (this.#closed) return;
       await this.#reconcileResidual(record);
+    }
+    // 修正期间宿主开始收尾：剩下的残留与队列留给下次启动。
+    if (this.#closed) return;
     if (!this.#config.enabled) this.#cancelQueued("派单已关闭");
     this.#persist();
     this.#pump();
@@ -440,6 +440,7 @@ export class AgentDispatcher {
   }
 
   async #launch(record: DispatchRunRecord): Promise<void> {
+    // #pump 只在没关时调这里；之后每次 await 回来都再看一眼：宿主收尾（close）后不起会话，记录留在队列里。
     const claude = this.#resolveClaude();
     if (claude === null) {
       this.#finish(record, { state: "failed", error: "找不到 Claude Code 命令行（claude）" });
@@ -447,7 +448,7 @@ export class AgentDispatcher {
     }
     // 排队期间任务可能已被别人领取或改了状态，起一个注定要退出的会话没有意义。
     const task = await this.#host.getTask(record.project, record.key);
-    if (record.state !== "queued") return; // 等待期间被取消。
+    if (this.#closed || record.state !== "queued") return; // 等待期间被取消或宿主在收尾。
     const blocker = task ? taskBlocker(task, this.#now()) : "任务已不存在";
     if (blocker) {
       this.#finish(record, { state: "cancelled", error: `排队期间任务状态已变化：${blocker}` });
@@ -457,7 +458,7 @@ export class AgentDispatcher {
       this.#promptContext.get(record.run) ??
       (await this.#host.getProject(record.project))?.name ??
       record.project;
-    if (record.state !== "queued") return;
+    if (this.#closed || record.state !== "queued") return;
     const args = claudeArguments({
       sessionId: record.sessionId,
       key: record.key,
@@ -568,7 +569,8 @@ export class AgentDispatcher {
       pid === undefined
         ? "gone"
         : await checkProcessIdentity(this.#process, pid, record.processIdentity);
-    if (record.state !== "running") return; // 核验期间被取消。
+    // 核验期间被取消，或宿主在收尾（残留留给下次启动再核验）。
+    if (this.#closed || record.state !== "running") return;
     if (identity === "same" && pid !== undefined && record.processIdentity !== undefined) {
       this.#tracker.watch(record.run, pid, record.processIdentity);
       return;

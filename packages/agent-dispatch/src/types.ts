@@ -149,4 +149,9 @@ export type AgentDispatcherOptions = {
   baseEnv?: NodeJS.ProcessEnv;
   /** `claude auth status` 的超时，默认 5 秒；超时按「没探出来」处理。 */
   authProbeTimeoutMs?: number;
+  /**
+   * 宿主收尾：中止即 close()。还在修正残留、处理队列的派单器到下一步就停手，不再起会话、不再读任务；
+   * 排队与残留记录原样留给下次启动。
+   */
+  signal?: AbortSignal;
 };

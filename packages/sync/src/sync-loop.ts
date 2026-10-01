@@ -38,6 +38,33 @@ export function retireLoop(loop: Loop): void {
   loop.relay.abort();
 }
 
+/**
+ * 交给会话的 service / 派单端口：每个方法调用前都检查会话是否已作废。辅助函数把它存进局部变量、
+ * 跨 await 再用也拦得住（只在取属性时检查是不够的）；属性里的对象（如 service.databases）同样包一层。
+ */
+export function guardedPort<T extends object>(loop: Loop, target: T): T {
+  const wrapped = new WeakMap<object, object>();
+  const wrap = <U extends object>(object: U): U => {
+    const cached = wrapped.get(object);
+    if (cached) return cached as U;
+    const proxy = new Proxy(object, {
+      get(raw, property) {
+        const value: unknown = Reflect.get(raw, property, raw);
+        if (typeof value === "function")
+          return (...args: unknown[]): unknown => {
+            if (loop.retired) throw new Error("SYNC_SESSION_RETIRED");
+            return Reflect.apply(value as (...parameters: unknown[]) => unknown, raw, args);
+          };
+        if (value !== null && typeof value === "object") return wrap(value);
+        return value;
+      },
+    });
+    wrapped.set(object, proxy);
+    return proxy;
+  };
+  return wrap(target);
+}
+
 export type HaltOptions = {
   /** 对中继写操作的串行链（连接器的 #chain）：停下前等它收尾。 */
   chain: Promise<unknown>;

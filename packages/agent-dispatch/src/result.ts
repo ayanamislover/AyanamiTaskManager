@@ -122,3 +122,9 @@ export function judgeOutcome(
 export function logHasResult(stdoutLog: string): boolean {
   return findResultLine(readTail(stdoutLog)) !== null;
 }
+
+/** 确认不了 PID 归属时停止跟踪的说明：不接管、不结束，告诉用户怎么自己处理。 */
+export function identityLostMessage(pid: number | undefined, when: string): string {
+  const which = pid === undefined ? "" : `（PID ${pid}）`;
+  return `${when}无法确认 Claude 进程身份${which}，已停止跟踪，没有结束该进程；如仍在运行可在任务管理器里手动结束`;
+}

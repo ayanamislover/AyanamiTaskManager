@@ -1,7 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
+import {
+  createAgentDispatcher,
+  DEFAULT_DISPATCH_CONFIG,
+  dispatchPaths,
+} from "@ayanami-task/agent-dispatch";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { startMobileFeatures, type MobileFeatureOptions } from "../src/core-mobile.js";
 import { hostDpapi } from "../src/dpapi.js";
@@ -192,5 +197,107 @@ describe("core 里的手机同步与派单", () => {
     const coreMain = readFileSync(resolve(process.cwd(), "apps/desktop/src/core-main.ts"), "utf8");
     expect(coreMain).toMatch(/mobile = startMobileFeatures\(\{/u);
     expect(coreMain).not.toMatch(/await\s+(?:startMobileFeatures|mobile\??\.ready)/u);
+  });
+
+  it("就绪之后收尾：路由一律回 404「正在退出」，不再转给已停的连接器与派单器", async () => {
+    const { features } = await open();
+    await features.ready;
+    expect(await features.sync.status()).toMatchObject({ enabled: false });
+    await features.close();
+    await expect(features.sync.status()).rejects.toMatchObject({
+      code: "SYNC_UNAVAILABLE",
+      httpStatus: 404,
+      message: expect.stringContaining("正在退出"),
+    });
+    await expect(features.dispatch.status()).rejects.toMatchObject({
+      code: "DISPATCH_UNAVAILABLE",
+      httpStatus: 404,
+    });
+  });
+
+  it("派单恢复慢过收尾等待：close 之后恢复回来也不再读任务、不再起会话（peer R2-03）", async () => {
+    const dataDir = join(work, `case-${(counter += 1)}`);
+    const paths = dispatchPaths(dataDir);
+    mkdirSync(paths.logs, { recursive: true });
+    writeFileSync(paths.config, JSON.stringify({ ...DEFAULT_DISPATCH_CONFIG, enabled: true }));
+    const common = {
+      project: "DEMO",
+      title: "合成记录",
+      origin: "desktop",
+      sessionId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      createdAt: new Date().toISOString(),
+      cwd: dataDir,
+    };
+    writeFileSync(
+      paths.runs,
+      JSON.stringify({
+        v: 1,
+        runs: [
+          // PID 只存在于注入的探针里，不对应任何真实进程。
+          {
+            ...common,
+            run: "a-00000001",
+            key: "DEMO-T-0001",
+            state: "running",
+            pid: 4_000_004,
+            processIdentity: "synthetic-before",
+            startedAt: new Date().toISOString(),
+          },
+          { ...common, run: "a-00000002", key: "DEMO-T-0002", state: "queued" },
+        ],
+      }),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered = false;
+    let closed = false;
+    const late: string[] = [];
+    const service = {
+      subscribeGlobal: () => () => undefined,
+      getWorkItemForUi: async () => {
+        if (closed) late.push("getWorkItemForUi");
+        throw new Error("synthetic closed service");
+      },
+    } as unknown as AyanamiTaskService;
+    const features = startMobileFeatures({
+      service,
+      dataDir,
+      hostPath: process.execPath,
+      dpapi: () => null,
+      createDispatcher: (options) =>
+        createAgentDispatcher({
+          ...options,
+          resolveClaude: () => "synthetic-claude.exe",
+          isPidAlive: () => true,
+          processIdentity: async () => {
+            entered = true;
+            await gate;
+            return "synthetic-after";
+          },
+          killProcessTree: async () => {
+            throw new Error("must never kill");
+          },
+          spawnImpl: () => {
+            throw new Error("must never spawn");
+          },
+        }),
+    });
+    cleanups.push(async () => {
+      release();
+      await features.close();
+    });
+    const deadline = Date.now() + 5000;
+    while (!entered && Date.now() < deadline) await new Promise((done) => setTimeout(done, 10));
+    expect(entered).toBe(true);
+    await features.close();
+    closed = true;
+    release();
+    await features.ready;
+    await new Promise((done) => setTimeout(done, 50));
+    expect(late).toEqual([]);
+    const saved = JSON.parse(readFileSync(paths.runs, "utf8")) as {
+      runs: Array<{ state: string }>;
+    };
+    expect(saved.runs.map((run) => run.state)).toEqual(["running", "queued"]);
   });
 });

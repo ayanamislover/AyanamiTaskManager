@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_DISPATCH_CONFIG,
   DISPATCH_HISTORY_LIMIT,
   DispatchError,
   dispatchPaths,
@@ -73,6 +74,96 @@ async function rejection(promise: Promise<unknown>): Promise<DispatchError> {
 }
 
 describe("重启后修正残留的 running 记录", () => {
+  it("宿主收尾（signal 中止）时还在核验残留：不再读任务、不再起会话，记录原样留给下次启动", async () => {
+    const f = fixture();
+    const fake = fakeProcesses();
+    fake.alive.add(PID);
+    f.addTask("DEMO-T-0002");
+    const paths = seed(f.dataDir, f.projectDir, [
+      { run: "s-00000001", pid: PID, processIdentity: BORN },
+      { run: "s-00000002", state: "queued" },
+    ]);
+    writeFileSync(paths.config, JSON.stringify({ ...DEFAULT_DISPATCH_CONFIG, enabled: true }));
+    const before = readFileSync(paths.runs, "utf8");
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    let asked = false;
+    const reads: string[] = [];
+    const abort = new AbortController();
+    const dispatcher = f.dispatcher({
+      ...fake.options,
+      signal: abort.signal,
+      host: {
+        ...f.host,
+        getTask: (code, key) => {
+          reads.push(key);
+          return f.host.getTask(code, key);
+        },
+      },
+      // 进程身份查询很慢（宿主收尾时还没回来）。
+      processIdentity: async () => {
+        asked = true;
+        await gate;
+        return BORN;
+      },
+    });
+    const starting = dispatcher.start();
+    await waitFor(() => asked);
+    abort.abort();
+    release();
+    await starting;
+    await new Promise((done) => setTimeout(done, 50));
+    expect(reads).toEqual([]);
+    expect(fake.children).toEqual([]);
+    expect(readFileSync(paths.runs, "utf8")).toBe(before);
+  });
+
+  it("收尾时正在读任务、准备起会话：放行后不起会话，记录留在队列里", async () => {
+    const f = fixture();
+    const fake = fakeProcesses();
+    f.addTask("DEMO-T-0001");
+    const paths = seed(f.dataDir, f.projectDir, [{ run: "u-00000001", state: "queued" }]);
+    writeFileSync(paths.config, JSON.stringify({ ...DEFAULT_DISPATCH_CONFIG, enabled: true }));
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    let reading = false;
+    const abort = new AbortController();
+    const dispatcher = f.dispatcher({
+      ...fake.options,
+      signal: abort.signal,
+      host: {
+        ...f.host,
+        getTask: async (code, key) => {
+          reading = true;
+          await gate;
+          return f.host.getTask(code, key);
+        },
+      },
+    });
+    await dispatcher.start();
+    await waitFor(() => reading);
+    abort.abort();
+    release();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(fake.children).toEqual([]);
+    expect(dispatcher.listRuns()[0]?.state).toBe("queued");
+  });
+
+  it("创建时 signal 已中止：start 什么都不做", async () => {
+    const f = fixture();
+    const fake = fakeProcesses();
+    f.addTask("DEMO-T-0001");
+    const paths = seed(f.dataDir, f.projectDir, [{ run: "t-00000001", state: "queued" }]);
+    writeFileSync(paths.config, JSON.stringify({ ...DEFAULT_DISPATCH_CONFIG, enabled: true }));
+    const abort = new AbortController();
+    abort.abort();
+    const dispatcher = f.dispatcher({ ...fake.options, signal: abort.signal });
+    await dispatcher.start();
+    await new Promise((done) => setTimeout(done, 50));
+    expect(fake.children).toEqual([]);
+    expect(dispatcher.listRuns()[0]?.state).toBe("queued");
+  });
+
   it("进程已死：有 result 行判成功，没有判失败；从没结束过任何进程", async () => {
     const f = fixture();
     const fake = fakeProcesses();

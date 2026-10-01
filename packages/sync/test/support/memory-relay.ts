@@ -76,6 +76,8 @@ export class MemoryRelay {
     const key = rest.startsWith("/documents/")
       ? decodeURIComponent(rest.slice("/documents/".length))
       : null;
+    // 像真的 fetch 一样：signal 已中止的请求直接失败（停下的会话写不出任何东西）。
+    if (init.signal?.aborted) throw init.signal.reason;
     this.requests.push({ method: init.method, url, key });
     if (this.offline) throw new TypeError("fetch failed");
     if (init.headers.Authorization !== `Bearer ${this.token}`) return error(401, "UNAUTHORIZED");
