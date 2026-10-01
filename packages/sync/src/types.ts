@@ -30,8 +30,8 @@ export type SyncStatus = {
   lastSyncAt: string | null;
   /** 中继是否支持长轮询；还没连上过为 null。 */
   longPoll: boolean | null;
-  /** 桌面端 safeStorage（DPAPI）加密，或独立 daemon 的明文文件。 */
-  secretStore: "safeStorage" | "plaintext";
+  /** 桌面端经原生宿主用 Windows DPAPI 加密，或独立 daemon 的明文文件。 */
+  secretStore: "os-encrypted" | "plaintext";
   /** 其它设备（不含本机），按最后在线时间倒序。 */
   paired: DeviceView[];
   pendingCommands: number;

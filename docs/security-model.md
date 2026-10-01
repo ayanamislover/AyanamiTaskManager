@@ -34,7 +34,7 @@ Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、A
 - **不新开监听端口。** 同步连接器在 daemon 进程内只做出站 HTTPS，连接用户自己配置的中继；daemon 仍然只监听 `127.0.0.1`。中继地址只接受 https，明文 http 只允许 `127.0.0.1` / `localhost`（开发联调）。
 - **仓库与安装包里没有默认服务器。** 未配置中继时连接器不发任何网络请求；守卫扫描生产代码，出现维护者自己的服务器域名即红。
 - **中继是不可信传输层。** 每个配对空间有一把 32 字节空间密钥，经 HKDF 派生出 AES-256-GCM 与 HMAC 两把子密钥；所有文档内容端到端加密，AAD 绑定文档键，项目码经 HMAC 后才进键名。中继运营者或拿到中继 token 的人能看到键名、大小与时间，能删改或重放密文、拒绝服务，但读不到内容，也伪造不出能通过校验的命令。
-- **密钥不进 Agent 可读的地方。** 中继 token 与空间密钥经宿主提供的 SecretStore 落盘：正式桌面端用 Electron `safeStorage`（Windows 上即 DPAPI），不可用时拒绝保存；standalone 开发 daemon 用明文文件并在状态里标明。两者都不写入 Registry 的 settings 表、`daemon.json`、日志或 ATM Record。`GET /api/v1/sync/status` 两种凭证都能读，但不含 token、空间密钥或配对码。
+- **密钥不进 Agent 可读的地方。** 中继 token 与空间密钥经宿主提供的 SecretStore 落盘：正式桌面端经原生宿主的 `--dpapi` 模式用 Windows DPAPI（当前用户）加密，启动自检不通过就拒绝保存、绝不退回明文；standalone 开发 daemon 用明文文件并在状态里标明。两者都不写入 Registry 的 settings 表、`daemon.json`、日志或 ATM Record。`GET /api/v1/sync/status` 两种凭证都能读，但不含 token、空间密钥或配对码。
 - **写入口全部是用户专属。** 修改中继配置、生成配对码、重置配对都要求用户凭证；Agent 凭证返回 `403 USER_AUTHORIZATION_REQUIRED`。配对码同时携带中继 token 与空间密钥，只在设置页本地展示。
 - **手机只能发白名单命令。** 仅「建任务」与「对已有任务派单」两种；命令 ID 同时是幂等键（`op_id = mobile:<命令 ID>`），重放不会建第二个任务；早于 7 天的命令被拒。建出的任务以 USER 身份落账，与在桌面端点「新建任务」等价。
 - **撤销。** 「重置配对」轮换空间 ID 与密钥并删除旧空间里的全部文档，旧手机随即无法解密新数据；吊销中继 token 属于中继自身的管理动作。

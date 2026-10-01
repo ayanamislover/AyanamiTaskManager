@@ -201,7 +201,7 @@ export async function buildProjectSnapshot(
   const closed = closedPage.items.filter((item) => Date.parse(item.updatedAt) >= cutoff);
   const tasks: TaskCard[] = [];
   for (const [index, item] of open.entries()) {
-    // 同步读库会占住主进程，大项目分批让出事件循环。
+    // 同步读库会占住 core 进程，大项目分批让出事件循环。
     if (index > 0 && index % 25 === 0) await yieldToEventLoop();
     tasks.push(await openCard(service, project.code, item, dispatch));
   }

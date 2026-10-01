@@ -35,7 +35,7 @@ function fakeSync() {
         lastError: null,
         lastSyncAt: null,
         longPoll: true,
-        secretStore: "safeStorage",
+        secretStore: "os-encrypted",
         paired: [],
         pendingCommands: 0,
       };

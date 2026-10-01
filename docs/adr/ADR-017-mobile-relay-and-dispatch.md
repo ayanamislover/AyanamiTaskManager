@@ -32,7 +32,8 @@ ATM 至今是纯本地工具：daemon 只监听 loopback，安全模型把「把
 ## 后果
 
 - 新增 `packages/sync-protocol`、`packages/sync`、`packages/agent-dispatch`、`apps/relay`、`apps/mobile`。
-- 中继 token 与空间密钥经宿主的 `SecretStore` 加密落盘，不进 Registry settings 表；相关写接口全部 USER_ONLY。
+- 中继 token 与空间密钥经宿主的 `SecretStore` 加密落盘（桌面端由原生宿主代调 Windows DPAPI，不可用时拒绝保存），
+  不进 Registry settings 表；相关写接口全部 USER_ONLY。
 - `security-model.md` 增加中继与派单两节；README 说明同步是可选功能、默认关闭。
 - AyanamiCloud 的变更接口没有长轮询，接它时是 3～4 秒定时轮询；`atm-relay` 支持 25 秒长轮询。
 

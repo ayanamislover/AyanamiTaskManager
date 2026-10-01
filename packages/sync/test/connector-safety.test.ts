@@ -107,7 +107,7 @@ describe("密钥与状态", () => {
         code: "VALIDATION_ERROR",
       });
       const status = await connector.status();
-      expect(status).toMatchObject({ secretStore: "safeStorage", configured: false });
+      expect(status).toMatchObject({ secretStore: "os-encrypted", configured: false });
       expect(status.lastError).toContain("系统加密不可用");
       const configPath = join(fixture.dataDir, "sync", "config.json");
       const saved = existsSync(configPath) ? readFileSync(configPath, "utf8") : "";

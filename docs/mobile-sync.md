@@ -215,10 +215,13 @@ type TaskCard = {
 
 ## 7. 电脑侧连接器（packages/sync）
 
-- 运行在 daemon 所在进程（当前是 Electron 主进程），直接调用 `AyanamiTaskService`，不走 HTTP。
+- 运行在 daemon 所在进程（桌面端是原生宿主拉起的 core，接线见 `apps/desktop/src/core-mobile.ts`），
+  直接调用 `AyanamiTaskService`，不走 HTTP。
 - 非敏感配置 `<数据目录>/sync/config.json`：`enabled、relayUrl、appId、deviceId、deviceName、spaceId、cursor`
   和每个项目最近一次发布的摘要。敏感项（中继 token、空间 secret）经宿主提供的 `SecretStore` 落盘：
-  桌面端用 Electron `safeStorage`（DPAPI），落在 `sync/secrets.enc.json`，`safeStorage` 不可用时拒绝保存；
+  桌面端经原生宿主的一次性 `--dpapi protect|unprotect` 模式用 Windows DPAPI（当前用户）加密，落在
+  `sync/secrets.dpapi.json`；core 启动时先做一次加密→解密自检，不通过就整体不可用——拒绝保存、读一律为空、
+  状态里写明原因，**绝不退回明文**；
   独立 daemon（开发 / e2e，需设 `ATM_SYNC=1` 才创建连接器）用明文 `sync/secrets.json` 并在状态里标注。
   **两者都不进 Registry 的 settings 表**（那张表 Agent 令牌可读）。
 - 启用且地址、app、token 齐全时自动建空间；并发请求配对码也只会建一次（单飞）。
@@ -233,7 +236,7 @@ type TaskCard = {
 
 宿主没有注入连接器 / 派单器时，对应路由统一返回 404 `SYNC_UNAVAILABLE` / `DISPATCH_UNAVAILABLE`（路由总是注册，权限守卫才能覆盖到）。
 `state ∈ disabled | connecting | online | error`，细分原因写在 `lastError`（中文）；`paired` 每项是设备文档去掉 `v`，只列其它设备；
-`configured` 表示地址、app、token 三者齐备；`secretStore ∈ safeStorage | plaintext`。
+`configured` 表示地址、app、token 三者齐备；`secretStore ∈ os-encrypted | plaintext`。
 
 | 方法 | 路径                                                 | 权限      | 说明                                                                                                                                                                     |
 | ---- | ---------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

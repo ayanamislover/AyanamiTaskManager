@@ -24,7 +24,8 @@ export const SECRET_NAMES = {
 export type SecretName = (typeof SECRET_NAMES)[keyof typeof SECRET_NAMES];
 
 /**
- * 密钥存储端口。桌面端用 Electron `safeStorage`（DPAPI）实现，标 `os-encrypted`；
+ * 密钥存储端口。桌面端经原生宿主的 `--dpapi` 模式用 Windows DPAPI 加密（apps/desktop/src/dpapi-secret-store.ts），
+ * 标 `os-encrypted`；
  * 独立 daemon（开发 / e2e）用 {@link FileSecretStore}，明文落盘并如实标 `plaintext`。
  */
 export type SecretStore = {
@@ -136,9 +137,9 @@ export class SecretVault {
     this.#store = store;
   }
 
-  /** 状态接口里的取值：桌面端 safeStorage，独立 daemon 明文文件。 */
-  get statusKind(): "safeStorage" | "plaintext" {
-    return this.#store.kind === "plaintext" ? "plaintext" : "safeStorage";
+  /** 状态接口里的取值：桌面端系统加密，独立 daemon 明文文件。 */
+  get statusKind(): SecretStore["kind"] {
+    return this.#store.kind;
   }
 
   /** 系统加密不可用时的原因；可用时为 null。 */

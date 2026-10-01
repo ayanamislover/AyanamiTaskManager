@@ -39,7 +39,7 @@ describe("手机同步 REST 客户端", () => {
       lastError: null,
       lastSyncAt: "2026-09-30T10:00:00.000Z",
       longPoll: true,
-      secretStore: "safeStorage",
+      secretStore: "os-encrypted",
       paired: [],
       pendingCommands: 0,
     };

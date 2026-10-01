@@ -8,8 +8,8 @@ import type { ClientRequest } from "../http.js";
 /** 连接器当前状态：未启用 / 连接中 / 正常 / 出错（原因在 lastError）。 */
 export type SyncConnectionState = "disabled" | "connecting" | "online" | "error";
 
-/** 敏感项怎么落盘：桌面端走 Electron safeStorage；独立 daemon（开发 / e2e）是明文文件。 */
-export type SyncSecretStore = "safeStorage" | "plaintext";
+/** 敏感项怎么落盘：桌面端经原生宿主用 Windows DPAPI 加密；独立 daemon（开发 / e2e）是明文文件。 */
+export type SyncSecretStore = "os-encrypted" | "plaintext";
 
 /** 已配对设备：设备自己写在中继上的在线状态文档（`<S>/dev/<deviceId>`）去掉版本号。 */
 export type SyncDeviceView = {

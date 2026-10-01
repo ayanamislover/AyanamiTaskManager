@@ -89,6 +89,7 @@ describe("打包 core 进程", () => {
     expect(JSON.parse(result.res6.value.body)).toMatchObject({
       enabled: false,
       state: "disabled",
+      secretStore: "os-encrypted",
       lastError: expect.stringContaining("DPAPI"),
     });
     expect(result.res7, result.stderr).toMatchObject({ ok: true, value: { status: 200 } });

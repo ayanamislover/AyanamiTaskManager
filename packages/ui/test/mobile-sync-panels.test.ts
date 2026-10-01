@@ -28,7 +28,7 @@ function syncStatus(overrides: Partial<SyncStatus> = {}): SyncStatus {
     lastError: null,
     lastSyncAt: null,
     longPoll: null,
-    secretStore: "safeStorage",
+    secretStore: "os-encrypted",
     paired: [],
     pendingCommands: 0,
     ...overrides,

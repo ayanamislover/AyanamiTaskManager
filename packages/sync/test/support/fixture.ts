@@ -219,7 +219,7 @@ export function fakeDispatch(options: { reject?: { code: string; message: string
   return { port, calls, runs, settle };
 }
 
-/** 系统加密不可用的密钥存储（模拟 safeStorage.isEncryptionAvailable() 为假）。 */
+/** 系统加密不可用的密钥存储（模拟 DPAPI 自检没通过）。 */
 export function unavailableSecrets(): SecretStore {
   return {
     kind: "os-encrypted",

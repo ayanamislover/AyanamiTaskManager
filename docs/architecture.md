@@ -4,8 +4,9 @@
 
 生产桌面由三个进程组成（[ADR-016](./adr/ADR-016-native-host.md)）：
 
-- **宿主**（Rust，`apps/desktop/native/host`）：单实例、窗口（系统 WebView2）、托盘、登录自启动、更新与安装状态准入；不含业务逻辑。
-- **core**（随包 Node 运行 `runtime\core.mjs`，进程名 `atm-core.exe`）：Fastify 服务、数据库生命周期、Agent 接入与诊断，由宿主拉起并看护。
+- **宿主**（Rust，`apps/desktop/native/host`）：单实例、窗口（系统 WebView2）、托盘、登录自启动、更新与安装状态准入，
+  以及替 core 代办的一次性系统调用（进程身份、DPAPI 加解密）；不含业务逻辑。
+- **core**（随包 Node 运行 `runtime\core.mjs`，进程名 `atm-core.exe`）：Fastify 服务、数据库生命周期、Agent 接入与诊断，以及默认关闭的手机同步与 Claude 派单（[mobile-sync.md](./mobile-sync.md)），由宿主拉起并看护。
 - **Renderer**（WebView2）：不接收原始 endpoint/token；只通过宿主注入的 `window.ayanamiDesktop` 窄 capability 发消息，由宿主转给 core 代理有界 `/api/v1/*` 请求和系统操作。只接受入口文档的消息，跨源导航和新窗口被拒绝。
 
 安装、更新、修复和卸载由事务式安装器 `atm-setup.exe` 负责；安装根的启动器在事务未完成时挡住启动。`apps/daemon` 可独立启动，只用于测试与开发。完整威胁边界见 [security-model.md](./security-model.md)。
