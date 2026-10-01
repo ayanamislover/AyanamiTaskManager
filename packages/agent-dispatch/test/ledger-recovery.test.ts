@@ -266,3 +266,89 @@ describe("请求账本坏了、丢了、读不出来：不能让同一条命令�
     expect(fake.children).toHaveLength(1);
   });
 });
+
+describe("账本用过的标记不随历史裁剪消失（peer R3-01）", () => {
+  const runsFile = (f: Fixture) => JSON.parse(readFileSync(dispatchPaths(f.dataDir).runs, "utf8"));
+
+  it("手机派单被 50 次桌面派单挤出历史后单删账本：标记还在 → 判丢失，旧命令拒绝，spawn 仍为 1", async () => {
+    const f = fixture();
+    const fake = fakeProcesses();
+    const c = clock();
+    const { id } = await dispatchedOnce(f, fake, c);
+    expect(runsFile(f).requestsSince).toBe(new Date(T0).toISOString());
+    pushOutOfHistory(f);
+    rmSync(dispatchPaths(f.dataDir).requests);
+    c.at += 60_000;
+    const dispatcher = await restart(f, fake, c);
+    const error = await rejection(dispatcher.enqueue(mobile(id)));
+    expect(error.code).toBe("DISPATCH_REQUEST_STATE_LOST");
+    expect(error.message).toBe(REQUEST_STATE_LOST_MESSAGE);
+    expect(fake.children).toHaveLength(1);
+    expect((await dispatcher.status()).requestLedger.lostBefore).toBe(new Date(c.at).toISOString());
+    // 标记跟着之后的历史保存一直留着。
+    expect(runsFile(f).requestsSince).toBe(new Date(T0).toISOString());
+  });
+
+  it("账本里只有被拒的记录、历史里没有手机派单：单删账本仍判丢失，开了派单也不会补起会话", async () => {
+    const f = fixture();
+    f.addTask("DEMO-T-0001");
+    const fake = fakeProcesses();
+    const c = clock();
+    const first = f.dispatcher({ ...fake.options, now: c.now });
+    const id = commandId(c.at - 1_000, "1");
+    expect((await rejection(first.enqueue(mobile(id)))).code).toBe("DISPATCH_DISABLED");
+    first.close();
+    expect(runsFile(f)).toMatchObject({ requestsSince: new Date(T0).toISOString(), runs: [] });
+    rmSync(dispatchPaths(f.dataDir).requests);
+    c.at += 60_000;
+    const dispatcher = await restart(f, fake, c);
+    await dispatcher.updateConfig({ enabled: true });
+    expect((await rejection(dispatcher.enqueue(mobile(id)))).code).toBe(
+      "DISPATCH_REQUEST_STATE_LOST",
+    );
+    expect(fake.children).toHaveLength(0);
+  });
+
+  it("只用过桌面派单（没有标记、没有手机派单）：删掉账本仍是全新，不设水位线", async () => {
+    const f = fixture();
+    f.addTask("DEMO-T-0001");
+    f.addTask("DEMO-T-0002");
+    const fake = fakeProcesses();
+    const c = clock();
+    const first = f.dispatcher({ ...fake.options, now: c.now });
+    await first.updateConfig({ enabled: true });
+    await first.enqueue({ project: "DEMO", key: "DEMO-T-0002", origin: "desktop" });
+    await waitFor(() => fake.children.length === 1);
+    fake.children[0]!.finish(0);
+    await waitFor(() => first.runForTask("DEMO", "DEMO-T-0002")?.state !== "running");
+    first.close();
+    expect(runsFile(f).requestsSince).toBeUndefined();
+    rmSync(dispatchPaths(f.dataDir).requests, { force: true });
+    const dispatcher = await restart(f, fake, c);
+    expect((await dispatcher.status()).requestLedger.lostBefore).toBeNull();
+    await dispatcher.enqueue(mobile(commandId(c.at - 1_000, "2")));
+    await waitFor(() => fake.children.length === 2);
+  });
+
+  it("旧版本留下的账本（历史里还没有标记）：启动时补写标记，之后单删账本也认得出", async () => {
+    const f = fixture();
+    const fake = fakeProcesses();
+    const c = clock();
+    const { id } = await dispatchedOnce(f, fake, c);
+    const paths = dispatchPaths(f.dataDir);
+    const legacy = runsFile(f);
+    delete legacy.requestsSince;
+    writeFileSync(paths.runs, JSON.stringify(legacy));
+    c.at += 60_000;
+    (await restart(f, fake, c)).close();
+    expect(runsFile(f).requestsSince).toBe(new Date(c.at).toISOString());
+    pushOutOfHistory(f);
+    rmSync(paths.requests);
+    c.at += 60_000;
+    const dispatcher = await restart(f, fake, c);
+    expect((await rejection(dispatcher.enqueue(mobile(id)))).code).toBe(
+      "DISPATCH_REQUEST_STATE_LOST",
+    );
+    expect(fake.children).toHaveLength(1);
+  });
+});

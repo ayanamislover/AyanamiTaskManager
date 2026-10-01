@@ -36,27 +36,38 @@ const RunRecordSchema = z.object({
   requestId: z.string().min(1).optional(),
 });
 
-const RunsFileSchema = z.object({ v: z.literal(1), runs: z.array(z.unknown()) });
+const RunsFileSchema = z.object({
+  v: z.literal(1),
+  /**
+   * 第一次往请求账本记东西的时刻（ISO）。放在历史文件顶层、不随 50 条裁剪消失：手机派单的记录被裁掉后，
+   * 单删 requests.json 也能认出是「数据丢了」，而不是「从没用过手机派单」。
+   */
+  requestsSince: z.string().min(1).optional(),
+  runs: z.array(z.unknown()),
+});
+
+export type RunsHistory = {
+  runs: DispatchRunRecord[];
+  damaged: boolean;
+  requestsSince: string | null;
+};
 
 /**
  * 读 runs.json；逐条校验，坏条目丢弃并记日志，整个文件坏了就从空历史开始。
  * `damaged` 表示历史读出来时有损（读不出、不是 JSON、格式不对或有条目被丢）：请求账本据此判断
- * 「两份记录都没了」是不是数据丢失，而不是全新安装。
+ * 「两份记录都没了」是不是数据丢失，而不是全新安装。`requestsSince` 见 RunsFileSchema。
  */
-export function loadRuns(
-  path: string,
-  logger: DispatchLogger,
-): { runs: DispatchRunRecord[]; damaged: boolean } {
+export function loadRuns(path: string, logger: DispatchLogger): RunsHistory {
   const read = readJsonFile(path);
-  if (read.kind === "missing") return { runs: [], damaged: false };
+  if (read.kind === "missing") return { runs: [], damaged: false, requestsSince: null };
   if (read.kind !== "ok") {
     logger.warn("派单历史文件无法读取或解析，已从空历史开始", { path, error: read.error });
-    return { runs: [], damaged: true };
+    return { runs: [], damaged: true, requestsSince: null };
   }
   const file = RunsFileSchema.safeParse(read.value);
   if (!file.success) {
     logger.warn("派单历史文件格式不对，已从空历史开始", { path });
-    return { runs: [], damaged: true };
+    return { runs: [], damaged: true, requestsSince: null };
   }
   const runs: DispatchRunRecord[] = [];
   let damaged = false;
@@ -69,15 +80,19 @@ export function loadRuns(
     }
   }
   runs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-  return { runs, damaged };
+  return { runs, damaged, requestsSince: file.data.requestsSince ?? null };
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
 }
 
-export function saveRuns(path: string, runs: readonly DispatchRunRecord[]): void {
-  writeJsonAtomic(path, { v: 1, runs });
+export function saveRuns(
+  path: string,
+  runs: readonly DispatchRunRecord[],
+  requestsSince: string | null = null,
+): void {
+  writeJsonAtomic(path, { v: 1, ...(requestsSince === null ? {} : { requestsSince }), runs });
 }
 
 /**

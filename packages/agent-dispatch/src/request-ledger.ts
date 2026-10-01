@@ -4,6 +4,7 @@ import {
   DISPATCH_REQUEST_LIMIT,
   DISPATCH_REQUEST_RETENTION_MS,
   type DispatchRequestEntry,
+  type LedgerHistory,
   loadLedgerFile,
   requestTimestamp,
   sameSnapshot,
@@ -16,6 +17,9 @@ import type {
   DispatchRunRecord,
   DispatchRunView,
 } from "./types.js";
+
+const LEDGER_UNAVAILABLE_MESSAGE =
+  "电脑上的派单记录暂时读不出来（文件权限或磁盘问题），为防重复执行暂不接收手机派单；稍后会自动重试，也可以在电脑上直接派单";
 
 export {
   DISPATCH_REQUEST_ID_PATTERN,
@@ -57,23 +61,45 @@ export const REQUEST_STATE_LOST_MESSAGE =
 export class RequestLedger {
   readonly #path: string;
   readonly #logger: DispatchLogger;
-  readonly #history: () => { runs: readonly DispatchRunRecord[]; damaged: boolean };
+  readonly #history: () => LedgerHistory;
+  readonly #markUsed: (since: string) => void;
+  /** 第一次往账本记东西的时刻，持久化在派单历史顶层（见 run-store.ts）；null = 从没用过。 */
+  #requestsSince: string | null;
   #available = false;
   #entries: DispatchRequestEntry[] = [];
   #lostBefore: number | null = null;
   /** admit 发出、还没用掉或还回来的名额；容量按「条目 + 这些名额」算。 */
   readonly #reserved = new Set<LedgerReservation>();
 
+  /**
+   * `markUsed` 把「用过账本」的标记写进派单历史文件，写失败要抛出；缺省只记在内存里（测试用）。
+   */
   constructor(
     path: string,
     logger: DispatchLogger,
-    history: () => { runs: readonly DispatchRunRecord[]; damaged: boolean },
+    history: () => LedgerHistory,
     now: Date,
+    markUsed: (since: string) => void = () => {},
   ) {
     this.#path = path;
     this.#logger = logger;
     this.#history = history;
+    this.#markUsed = markUsed;
+    this.#requestsSince = history().requestsSince ?? null;
     this.#reload(now);
+  }
+
+  /** 派单历史保存时要带上的标记。 */
+  get requestsSince(): string | null {
+    return this.#requestsSince;
+  }
+
+  /** 第一次记账之前先把标记落盘（之后单删账本才认得出是数据丢了）。写失败抛出，调用方不得记账。 */
+  #ensureMarked(now: Date): void {
+    if (this.#requestsSince !== null) return;
+    const since = now.toISOString();
+    this.#markUsed(since);
+    this.#requestsSince = since;
   }
 
   /** 读盘；读不出来就保持 unavailable。发现丢失或补回了条目时立即写盘（写失败下次启动会再判一次丢失）。 */
@@ -90,6 +116,16 @@ export class RequestLedger {
       this.#lostBefore = Math.max(this.#lostBefore ?? Number.NEGATIVE_INFINITY, now.getTime());
     this.#prune(now);
     if (loaded.dirty) this.#trySave("写恢复后的派单请求账本失败");
+    // 旧版本留下的账本还没有标记：现在补上（失败只记日志，下次再补；在那之前仍靠历史里的手机派单判断）。
+    if (this.#entries.length > 0 || this.#lostBefore !== null) {
+      try {
+        this.#ensureMarked(now);
+      } catch (error) {
+        this.#logger.warn("给派单历史补写账本标记失败", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   }
 
   #save(): void {
@@ -129,10 +165,7 @@ export class RequestLedger {
   #ensureAvailable(now: Date): void {
     if (!this.#available) this.#reload(now);
     if (!this.#available)
-      throw new DispatchError(
-        "DISPATCH_LEDGER_UNAVAILABLE",
-        "电脑上的派单记录暂时读不出来（文件权限或磁盘问题），为防重复执行暂不接收手机派单；稍后会自动重试，也可以在电脑上直接派单",
-      );
+      throw new DispatchError("DISPATCH_LEDGER_UNAVAILABLE", LEDGER_UNAVAILABLE_MESSAGE);
   }
 
   status(now: Date): DispatchLedgerStatus {
@@ -179,6 +212,15 @@ export class RequestLedger {
         "DISPATCH_TOO_MANY_REQUESTS",
         `最近 ${DISPATCH_REQUEST_RETENTION_MS / DAY_MS} 天收到的手机派单已达 ${DISPATCH_REQUEST_LIMIT} 次，为防重放暂不接收新的手机派单；可以在电脑上直接派单，或过几天再试`,
       );
+    // 第一次接纳之前先落标记：这时新派单还没进历史，写失败直接拒绝，不留半截记录。
+    try {
+      this.#ensureMarked(now);
+    } catch (error) {
+      this.#logger.error("写派单账本标记失败，暂不接收手机派单", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new DispatchError("DISPATCH_LEDGER_UNAVAILABLE", LEDGER_UNAVAILABLE_MESSAGE);
+    }
     const reservation = { id: requestId, open: true };
     this.#reserved.add(reservation);
     return { kind: "new", reservation };

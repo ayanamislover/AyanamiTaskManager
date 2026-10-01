@@ -126,8 +126,9 @@ export class AgentDispatcher {
     this.#ledger = new RequestLedger(
       this.#paths.requests,
       this.#logger,
-      () => ({ runs: this.#runs, damaged: history.damaged }),
+      () => ({ runs: this.#runs, damaged: history.damaged, requestsSince: history.requestsSince }),
       this.#now(),
+      (since) => saveRuns(this.#paths.runs, this.#runs, since),
     );
   }
 
@@ -384,7 +385,7 @@ export class AgentDispatcher {
     const kept = trimHistory(this.#runs);
     this.#runs = kept;
     try {
-      saveRuns(this.#paths.runs, kept);
+      saveRuns(this.#paths.runs, kept, this.#ledger.requestsSince);
     } catch (error) {
       this.#logger.error("写派单历史失败", { error: errorText(error) });
     }

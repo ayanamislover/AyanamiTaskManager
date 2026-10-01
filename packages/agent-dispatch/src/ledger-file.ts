@@ -98,6 +98,13 @@ export function sameSnapshot(left: Snapshot, right: Snapshot): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/** 账本读盘时参考的派单历史。`requestsSince` 缺省等同 null（旧调用方、测试）。 */
+export type LedgerHistory = {
+  runs: readonly DispatchRunRecord[];
+  damaged: boolean;
+  requestsSince?: string | null;
+};
+
 export type LedgerLoad =
   /** 文件在但读不出来：内容未知，什么都不能判断，也不能覆盖它。 */
   | { kind: "unavailable"; code: string }
@@ -114,7 +121,9 @@ export type LedgerLoad =
 
 /**
  * 读账本并判断有没有丢过数据：
- * - 不存在：派单历史里没有任何带 requestId 的记录、历史也完好 → 全新；否则 → 丢失（被删了）。
+ * - 不存在：历史完好、没有「用过账本」的标记（requestsSince）、也没有任何手机派单记录（带 requestId 或
+ *   origin=mobile）→ 全新；否则 → 丢失（被删了）。标记不随历史裁剪消失，所以手机派单的记录被 50 条
+ *   上限挤掉后，单删账本仍会判成丢失。
  * - 读不出来（不是 ENOENT）→ unavailable：调用方拒绝手机派单、下次再读，不改名不重建。
  * - 不是 JSON / 格式不对 → 丢失，原文件复制成 `requests.corrupt.json` 留给排查。
  * - 有条目不合法 → 丢失（合法的照留）。
@@ -122,7 +131,7 @@ export type LedgerLoad =
  */
 export function loadLedgerFile(
   path: string,
-  history: { runs: readonly DispatchRunRecord[]; damaged: boolean },
+  history: LedgerHistory,
   logger: DispatchLogger,
 ): LedgerLoad {
   const read = readJsonFile(path);
@@ -137,8 +146,11 @@ export function loadLedgerFile(
   let lostBefore: number | null = null;
   let loss: string | null = null;
   if (read.kind === "missing") {
-    if (history.damaged || history.runs.some((record) => record.requestId !== undefined))
-      loss = "账本文件不见了，而派单历史里有手机派单（或历史也坏了）";
+    const usedBefore =
+      (history.requestsSince ?? null) !== null ||
+      history.runs.some((record) => record.requestId !== undefined || record.origin === "mobile");
+    if (history.damaged || usedBefore)
+      loss = "账本文件不见了，而这台电脑用过手机派单（或派单历史也坏了）";
   } else {
     const file = read.kind === "ok" ? LedgerFileSchema.safeParse(read.value) : null;
     if (!file?.success) loss = "账本文件损坏";
