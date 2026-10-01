@@ -137,8 +137,8 @@ describe("原生弹窗守卫", () => {
     expect(Object.keys(sources).length).toBeGreaterThan(100);
     for (const expected of [
       "packages/ui/src/features/task-drawer.tsx",
-      "apps/desktop/src/main.ts",
-      "apps/desktop/src/window-host.ts",
+      "apps/desktop/src/core-main.ts",
+      "apps/desktop/src/renderer.tsx",
       "apps/mobile/src/screens/pairing.tsx",
       "apps/mobile/src/app.tsx",
     ]) {

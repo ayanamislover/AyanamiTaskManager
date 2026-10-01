@@ -62,13 +62,13 @@ export const DEFAULT_WORKSPACE_DEPENDENCIES: Readonly<Record<string, readonly st
   ],
   "@ayanami-task/desktop": [
     "@ayanami-task/agent-config",
-    "@ayanami-task/agent-dispatch",
     "@ayanami-task/application",
     "@ayanami-task/client",
     "@ayanami-task/cli",
     "@ayanami-task/daemon",
-    "@ayanami-task/mcp",
-    "@ayanami-task/sync",
+    // 安装事务的只读探测（core-probe.ts）：只读打开数据库核对已应用的迁移，不能经 service
+    // 层——那会起服务、取 lease、按需迁移，正是 PROBE 必须避免的副作用。
+    "@ayanami-task/storage-sqlite",
     "@ayanami-task/ui",
   ],
   "@ayanami-task/domain": ["@ayanami-task/errors"],

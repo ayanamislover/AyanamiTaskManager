@@ -220,6 +220,14 @@
   align-items: start;
   gap: 18px;
 }
+/* 设置维护栏只有三分之一宽：更新就绪时多出「立即更新」，操作排到说明下方，不挤说明文字。 */
+.atm-settings-maintenance .atm-row.atm-update-ready {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+.atm-settings-maintenance .atm-row.atm-update-ready .atm-actions {
+  justify-content: flex-end;
+}
 .atm-settings-maintenance-save {
   grid-column: 1 / -1;
   display: flex;

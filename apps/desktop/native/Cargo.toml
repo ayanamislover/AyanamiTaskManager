@@ -1,0 +1,25 @@
+# 桌面原生组件工作区（de-electron）：宿主、根启动器、安装器共用一个 lock 与 target。
+# mcp-shim 保持独立 crate（它的构建与 lock 已被发布链钉住），不进这个工作区。
+[workspace]
+resolver = "3"
+members = ["install-state", "build-support", "host", "launcher", "setup"]
+exclude = ["mcp-shim"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+authors = ["ayanami"]
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows-sys = { version = "0.61" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

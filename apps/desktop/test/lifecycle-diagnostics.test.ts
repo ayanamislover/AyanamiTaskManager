@@ -58,15 +58,14 @@ describe("bounded desktop lifecycle diagnostics", () => {
     }
   });
 
-  it("desktop hooks monitor faults without swallowing exceptions or rejections", () => {
-    const source = readFileSync(join(process.cwd(), "apps/desktop/src/main.ts"), "utf8");
+  it("the core monitors faults without swallowing exceptions or rejections", () => {
+    const source = readFileSync(join(process.cwd(), "apps/desktop/src/core-main.ts"), "utf8");
     expect(source).toContain('process.on("uncaughtExceptionMonitor"');
     expect(source).not.toMatch(/process\.on\("(?:uncaughtException|unhandledRejection)"/u);
-    expect(source.indexOf("lifecycle.start(")).toBeGreaterThan(
-      source.indexOf("app.requestSingleInstanceLock()"),
-    );
-    for (const hook of ['"child-process-gone"', '"render-process-gone"', '"did-fail-load"'])
-      expect(source).toContain(hook);
+    // 只有通过父进程校验、且不是安装事务只读探测的 core 才写生命周期。
+    const start = source.indexOf("lifecycle.start(");
+    expect(start).toBeGreaterThan(source.indexOf("isTrustedHostParent(parent"));
+    expect(start).toBeGreaterThan(source.indexOf("if (hello.probe) {"));
   });
 
   it("only activates for the primary desktop and records clean shutdown once", () => {
@@ -132,32 +131,13 @@ describe("bounded desktop lifecycle diagnostics", () => {
     expect(events).not.toContain("previous.session-end");
   });
 
-  it("the desktop subscribes every window to session-end and writes it synchronously", () => {
-    const source = readFileSync(join(process.cwd(), "apps/desktop/src/main.ts"), "utf8");
-    // Electron puts session-end on the window, so the subscription has to ride on window
-    // creation — app.on("session-end") silently never fires. And because Windows kills the
-    // process right after the notification, anything deferred to a microtask, a timer or an
-    // await would never reach the disk: pin the whole handler body, not just its presence.
+  it("the core writes the session-end marker synchronously before acknowledging the host", () => {
+    const source = readFileSync(join(process.cwd(), "apps/desktop/src/core-main.ts"), "utf8");
+    // Windows kills the process tree right after the host returns from WM_ENDSESSION, and the
+    // host returns once the core says "marked": anything deferred to a microtask, a timer or
+    // an await would never reach the disk. Pin the whole handler body, not just its presence.
     expect(source).toMatch(
-      /app\.on\("browser-window-created", \(_event, window\) => \{\s*window\.on\("session-end", \(\) => lifecycle\.record\("session-end"\)\);\s*\}\);/u,
-    );
-  });
-
-  it("session-end is a window event in this Electron, not an app event", () => {
-    // If a future Electron moves it onto app, the wiring above stops firing without any
-    // type error, so the assumption it rests on is pinned here rather than in a comment.
-    const typings = readFileSync(
-      join(process.cwd(), "node_modules/electron/electron.d.ts"),
-      "utf8",
-    );
-    const appInterface = typings.slice(
-      typings.indexOf("interface App extends"),
-      typings.indexOf("class BaseWindow extends"),
-    );
-    expect(appInterface).toContain("'browser-window-created'");
-    expect(appInterface).not.toContain("'session-end'");
-    expect(typings.slice(typings.indexOf("class BaseWindow extends"))).toContain(
-      "on(event: 'session-end'",
+      /if \(event\.name === "session-end"\) \{\s*lifecycle\.record\("session-end"\);\s*session\.send\(\{ t: "marked", name: "session-end" \}\);/u,
     );
   });
 

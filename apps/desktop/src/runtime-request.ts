@@ -12,6 +12,46 @@ export type RuntimeRequestOutput = {
   body: string;
 };
 
+const allowedHeaders = new Set(["accept", "content-type"]);
+
+/**
+ * host-control 协议里的 runtimeRequest 参数来自 WebView，经 JSON 进来的是 unknown：
+ * 逐个字段校验，只留 path/method/body 与 accept、content-type 两个头。
+ */
+export function parseRuntimeRequestInput(value: unknown): RuntimeRequestInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("ATM_RENDERER_REQUEST_REJECTED");
+  const record = value as Record<string, unknown>;
+  if (typeof record.path !== "string" || record.path.length > 4096)
+    throw new Error("ATM_RENDERER_PATH_REJECTED");
+  if (record.method !== undefined && typeof record.method !== "string")
+    throw new Error("ATM_RENDERER_METHOD_REJECTED");
+  if (record.body !== undefined && typeof record.body !== "string")
+    throw new Error("ATM_RENDERER_BODY_REJECTED");
+  const headers: Record<string, string> = {};
+  if (record.headers !== undefined) {
+    if (
+      typeof record.headers !== "object" ||
+      record.headers === null ||
+      Array.isArray(record.headers)
+    )
+      throw new Error("ATM_RENDERER_HEADERS_REJECTED");
+    for (const [key, header] of Object.entries(record.headers as Record<string, unknown>)) {
+      const name = key.toLowerCase();
+      if (!allowedHeaders.has(name)) continue;
+      if (typeof header !== "string" || header.length > 256)
+        throw new Error("ATM_RENDERER_HEADERS_REJECTED");
+      headers[name] = header;
+    }
+  }
+  return {
+    path: record.path,
+    ...(record.method === undefined ? {} : { method: record.method }),
+    headers,
+    ...(record.body === undefined ? {} : { body: record.body }),
+  };
+}
+
 const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const maximumBodyBytes = 2 * 1024 * 1024;
 

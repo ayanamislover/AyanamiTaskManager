@@ -1,20 +1,43 @@
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+/**
+ * 发布阶段 10：用**生产二进制**验收发出去的两种形态（de-electron §9「最终候选单独跑」）。
+ *
+ * packaged-smoke 验行为，用的是带 smoke feature 的测试宿主（能开 CDP、接受烟测专用的退出命令）；
+ * 这里验的是用户真正拿到的那份：
+ *
+ *   便携 zip   解压 → 启动 → 服务健康 → SHOW 后窗口与 WebView 起来 → 注入的 WebView2 调试参数
+ *              与用户数据目录被宿主清掉，没有调试端口
+ *   安装包     atm-setup.exe install → 登记（app.json、current、卸载项、开始菜单与「ATM 修复」）
+ *              → 同上的运行检查与界面就绪见证 → --uninstall → 登记全部撤掉、用户数据保留
+ *
+ * 安装那一半会写真实的 HKCU 卸载项与开始菜单，只能在干净的机器上跑（CI 每次都是）。机器上已有
+ * 安装时照旧报错；release-and-install 要保留现有安装去走迁移时，显式设
+ * ATM_DISTRIBUTION_SKIP_INSTALLED=1，报告里记下跳过，不写 installed 报告——INSTALLED 层随之缺席。
+ */
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
-import { resolveSystemTar } from "./system-tar.js";
+import { dirname, join, resolve } from "node:path";
 import { describeAppProcesses, parseTasklistCsv, type AppProcess } from "./app-processes.js";
+import {
+  applyRunRestore,
+  loginItemRestorePlan,
+  readRunSnapshot,
+  RUN_VALUE,
+  findRunEntry,
+} from "./login-item-guard.js";
+import { portableZipName } from "./package-native.js";
 import {
   assertSafeInstallRoot as assertInstallRootIsProduct,
   findProductShortcuts,
-  removeProductShortcuts,
 } from "./product-install-sites.js";
+import { resolveSystemTar } from "./system-tar.js";
+import { withPowerShellScratch } from "./powershell-scratch.js";
 
 type Check = { name: string; passed: boolean; detail?: string };
+type Runtime = { endpoint: string; token: string; pid: number; version: string };
 
 const root = process.cwd();
-const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");
-const packagedSmokeScript = join(root, "scripts", "packaged-smoke.ts");
+const packageDir = join(root, "output", "package");
 const outputRoot = join(root, "output", "distribution-smoke");
 const reportPath = join(root, "output", "distribution-smoke-report.json");
 const packageVersion = (
@@ -25,10 +48,9 @@ if (!localAppData) throw new Error("LOCALAPPDATA_MISSING");
 
 const localAppDataRoot = resolve(localAppData);
 const installRoot = resolve(localAppDataRoot, "AyanamiTaskManagerDesktop");
-const defaultDataRoot = resolve(localAppDataRoot, "AyanamiTaskManager");
-const deadMarker = join(installRoot, ".dead");
 const uninstallRegistryKey =
   "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AyanamiTaskManagerDesktop";
+const skipInstalled = process.env.ATM_DISTRIBUTION_SKIP_INSTALLED === "1";
 const checks: Check[] = [];
 
 function check(name: string, condition: unknown, detail?: string): asserts condition {
@@ -37,30 +59,33 @@ function check(name: string, condition: unknown, detail?: string): asserts condi
   if (!passed) throw new Error(`${name}：${detail ?? "未通过"}`);
 }
 
-async function filesBelow(directory: string): Promise<string[]> {
-  if (!existsSync(directory)) return [];
-  const result: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) result.push(...(await filesBelow(path)));
-    else result.push(path);
+const delay = (milliseconds: number) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): Promise<T | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const value = await read();
+      if (value !== null) return value;
+    } catch {
+      // 文件写到一半、服务还没 listen：下一轮再看。
+    }
+    await delay(200);
   }
-  return result;
+  return null;
 }
 
-function run(command: string, args: string[], env?: NodeJS.ProcessEnv): void {
-  const isCommandScript = process.platform === "win32" && command.toLowerCase().endsWith(".cmd");
-  const executable = isCommandScript ? (process.env.ComSpec ?? "cmd.exe") : command;
-  const executableArgs = isCommandScript ? ["/d", "/s", "/c", [command, ...args].join(" ")] : args;
-  const result = spawnSync(executable, executableArgs, {
+function run(command: string, args: string[], env?: NodeJS.ProcessEnv): number {
+  const result = spawnSync(command, args, {
     cwd: root,
-    env: { ...process.env, ...env, CI: "1" },
-    encoding: "utf8",
+    env: { ...process.env, ...env },
     stdio: "inherit",
     windowsHide: true,
+    timeout: 300_000,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} 退出码 ${result.status}`);
+  return result.status ?? 1;
 }
 
 function appProcesses(): AppProcess[] {
@@ -74,17 +99,6 @@ function appProcesses(): AppProcess[] {
   return parseTasklistCsv(result.stdout);
 }
 
-function appProcessIsRunning(): boolean {
-  return appProcesses().length > 0;
-}
-
-// 进程类检查一律走这里。失败信息全靠 check 的第三个参数，把一个光秃秃的布尔量
-// 交上去，PID 和「是谁在占」就都没了——上一版正是这样，报「未通过」三个字。
-function checkNoAppProcess(checkName: string): void {
-  const running = appProcesses();
-  check(checkName, running.length === 0, describeAppProcesses(running));
-}
-
 function uninstallRegistrationExists(): boolean {
   const result = spawnSync("reg.exe", ["query", uninstallRegistryKey], {
     encoding: "utf8",
@@ -96,167 +110,269 @@ function uninstallRegistrationExists(): boolean {
   throw new Error(`reg.exe query 退出码 ${result.status}`);
 }
 
-// 扫描位置与卸载后的清理共用 product-install-sites，两边不能各存一份。
-const productShortcuts = async (): Promise<string[]> => await findProductShortcuts();
-
-function assertSafeInstallRoot(): void {
-  assertInstallRootIsProduct(installRoot, localAppDataRoot);
+/**
+ * 宿主有没有可见的应用窗口（标题 AyanamiTaskManager）。不能用 MainWindowHandle：tao 的事件
+ * 线程挂着一个 16×16 的透明工具窗口，它带 WS_VISIBLE，后台运行时会被当成「主窗口」。
+ */
+const WINDOW_PROBE = `
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class AtmWindows {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  public static int Count(uint target) {
+    int count = 0;
+    EnumWindows((h, l) => {
+      uint pid; GetWindowThreadProcessId(h, out pid);
+      var title = new StringBuilder(64); GetWindowText(h, title, 64);
+      if (pid == target && IsWindowVisible(h) && title.ToString() == "AyanamiTaskManager") count++;
+      return true;
+    }, IntPtr.Zero);
+    return count;
+  }
 }
+"@
+`;
 
-async function cleanupDeadInstallRoot(checkName: string): Promise<void> {
-  assertSafeInstallRoot();
-  check(`${checkName}带有 Squirrel .dead 标记`, existsSync(deadMarker), deadMarker);
-  checkNoAppProcess(`${checkName}没有运行中的应用进程`);
-  check(`${checkName}没有卸载注册项`, !uninstallRegistrationExists(), uninstallRegistryKey);
-  await removeProductShortcuts();
-  const remainingShortcuts = await productShortcuts();
-  check(
-    `${checkName}产品快捷方式已清理`,
-    remainingShortcuts.length === 0,
-    remainingShortcuts.join(", "),
+function appWindowVisible(pid: number): boolean {
+  const result = withPowerShellScratch((env) =>
+    spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::Count(${pid})`],
+      { encoding: "utf8", windowsHide: true, env },
+    ),
   );
-  await rm(installRoot, { recursive: true, force: true });
-  check(`${checkName}已从精确安装路径清理`, !existsSync(installRoot), installRoot);
+  return Number(result.stdout.trim()) > 0;
 }
 
-function runPackagedSmoke(label: string, executable: string): void {
-  const slug = label === "portable" ? "portable" : "installed";
-  run(process.execPath, [tsxCli, packagedSmokeScript], {
-    ATM_PACKAGED_EXE: executable,
-    ATM_SMOKE_DATA_DIR: join(outputRoot, `${slug}-data`),
-    ATM_SMOKE_REPORT: join(root, "output", `${slug}-smoke-report.json`),
+/**
+ * 生产二进制的运行检查。宿主已在运行（安装事务 START 拉起的）就直接用；否则后台启动。
+ * 环境里故意塞 WebView2 的调试参数和另一个用户数据目录：生产宿主必须在建任何进程前把它们
+ * 清掉，于是既不会出现调试端口，也不会在那个目录里写东西。
+ */
+async function productionChecks(
+  label: "portable" | "installed",
+  executable: string,
+  dataDir: string,
+): Promise<{ child: ChildProcess | null; runtime: Runtime; hostPid: number }> {
+  const decoy = join(outputRoot, `${label}-webview2-decoy`);
+  const env = {
+    ...process.env,
+    ATM_DATA_DIR: dataDir,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=0",
+    WEBVIEW2_USER_DATA_FOLDER: decoy,
+  };
+  const runtimePath = join(dataDir, "runtime", "daemon.json");
+  const child = existsSync(runtimePath)
+    ? null
+    : spawn(executable, ["--background"], { env, stdio: "ignore", windowsHide: true });
+  const runtime = await waitUntil(async () => {
+    const value = JSON.parse(await readFile(runtimePath, "utf8")) as Runtime;
+    const response = await fetch(`${value.endpoint}/api/v1/system/status`, {
+      headers: { authorization: `Bearer ${value.token}` },
+    });
+    return response.ok ? value : null;
+  }, 60_000);
+  check(`${label}：服务健康`, runtime, runtimePath);
+  check(`${label}：服务版本是本次候选`, runtime.version === packageVersion, runtime.version);
+
+  const hostRecord = JSON.parse(readFileSync(join(dataDir, "runtime", "host.json"), "utf8")) as {
+    pid: number;
+  };
+  check(`${label}：后台启动不建窗口`, !appWindowVisible(hostRecord.pid), String(hostRecord.pid));
+  run(executable, [], env);
+  const shown = await waitUntil(
+    async () => (appWindowVisible(hostRecord.pid) ? true : null),
+    20_000,
+  );
+  check(`${label}：SHOW 后宿主窗口可见`, shown, String(hostRecord.pid));
+  const webviewProfile = join(dataDir, "webview", "EBWebView");
+  check(
+    `${label}：WebView 在数据根下建起来`,
+    await waitUntil(async () => (existsSync(webviewProfile) ? true : null), 20_000),
+    webviewProfile,
+  );
+  // 有调试端口的话 Chromium 起来就写；多等几秒再断言「没有」。
+  await delay(4_000);
+  check(
+    `${label}：注入的调试参数无效，没有调试端口`,
+    !existsSync(join(webviewProfile, "DevToolsActivePort")) &&
+      !existsSync(join(decoy, "EBWebView", "DevToolsActivePort")),
+    webviewProfile,
+  );
+  check(`${label}：注入的 WebView2 用户数据目录无效`, !existsSync(decoy), decoy);
+  return { child, runtime, hostPid: hostRecord.pid };
+}
+
+function killTree(pid: number): void {
+  spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
   });
 }
 
-async function waitForInstalledExecutable(timeoutMs = 60_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const executable = (await filesBelow(installRoot)).find(
-      (path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe",
-    );
-    if (executable) return executable;
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-  }
-  throw new Error(`安装后 ${timeoutMs}ms 内未找到 AyanamiTaskManager.exe`);
+async function writeSmokeReport(label: string, dataDir: string, from: number): Promise<void> {
+  const own = checks.slice(from);
+  await writeFile(
+    join(root, "output", `${label}-smoke-report.json`),
+    `${JSON.stringify(
+      {
+        passed: own.every((entry) => entry.passed),
+        completedAt: new Date().toISOString(),
+        dataDir,
+        checks: own,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
 }
 
-async function waitForUninstallState(
-  installedExecutable: string,
-  timeoutMs = 60_000,
-): Promise<"removed" | "dead"> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const physicallyRemoved = !existsSync(installedExecutable);
-    const markedDead = existsSync(deadMarker);
-    const processStopped = !appProcessIsRunning();
-    const registrationRemoved = !uninstallRegistrationExists();
-    const shortcutsRemoved = (await productShortcuts()).length === 0;
-    if (
-      (physicallyRemoved || markedDead) &&
-      processStopped &&
-      registrationRemoved &&
-      shortcutsRemoved
-    ) {
-      return physicallyRemoved ? "removed" : "dead";
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
+async function portable(): Promise<void> {
+  const from = checks.length;
+  const zip = join(packageDir, portableZipName(packageVersion));
+  check("便携 zip 存在", existsSync(zip), zip);
+  const portableRoot = join(outputRoot, "portable");
+  await mkdir(portableRoot, { recursive: true });
+  check("便携 zip 可解压", run(resolveSystemTar(), ["-xf", zip, "-C", portableRoot]) === 0, zip);
+  const appDir = join(portableRoot, `AyanamiTaskManager-${packageVersion}`);
+  const executable = join(appDir, "AyanamiTaskManager.exe");
+  check("便携目录带 portable 标记", existsSync(join(appDir, "portable")), appDir);
+  const dataDir = join(outputRoot, "portable-data");
+  const { hostPid } = await productionChecks("portable", executable, dataDir);
+  // 生产宿主没有 SMOKE_QUIT；干净退出由 packaged-smoke 验，这里按进程树结束。
+  killTree(hostPid);
+  check(
+    "便携：结束后没有残留进程",
+    await waitUntil(async () =>
+      appProcesses().every((entry) => entry.pid !== hostPid) ? true : null,
+    ),
+    String(hostPid),
+  );
+  await writeSmokeReport("portable", dataDir, from);
+}
+
+async function installed(): Promise<"verified" | "skipped"> {
+  // 自启登记的值名与真实安装共用：验收前已有这个值（哪怕指向便携版），安装会改写、卸载会删，
+  // 事后分不清是卸载删的还是用户期间删的。和同名安装一样，有就不做安装验收。
+  const runBefore = readRunSnapshot();
+  const preexisting =
+    existsSync(join(installRoot, "app.json")) ||
+    existsSync(join(installRoot, "Update.exe")) ||
+    uninstallRegistrationExists() ||
+    findRunEntry(runBefore, RUN_VALUE) !== undefined;
+  if (preexisting && skipInstalled) {
+    checks.push({
+      name: "已有安装：按 ATM_DISTRIBUTION_SKIP_INSTALLED 跳过安装验收",
+      passed: true,
+      detail: installRoot,
+    });
+    return "skipped";
   }
-  throw new Error(`卸载后 ${timeoutMs}ms 内未进入完整卸载状态`);
+  assertInstallRootIsProduct(installRoot, localAppDataRoot);
+  check(
+    "验收前没有同名安装与同名自启登记",
+    !preexisting,
+    `${installRoot}; Run ${RUN_VALUE}: ${findRunEntry(runBefore, RUN_VALUE)?.data ?? "(none)"}`,
+  );
+  const running = appProcesses();
+  check("验收前没有运行中的同名进程", running.length === 0, describeAppProcesses(running));
+  const priorShortcuts = await findProductShortcuts();
+  check("验收前没有同名产品快捷方式", priorShortcuts.length === 0, priorShortcuts.join(", "));
+
+  const from = checks.length;
+  const dataDir = join(outputRoot, "installed-data");
+  const manifest = join(packageDir, `atm-${packageVersion}-win-x64.json`);
+  const setup = join(packageDir, "atm-setup.exe");
+  try {
+    check(
+      "atm-setup 静默安装",
+      run(setup, ["install", manifest, "--quiet"], { ATM_DATA_DIR: dataDir }) === 0,
+      manifest,
+    );
+    const pointer = JSON.parse(await readFile(join(installRoot, "app.json"), "utf8")) as {
+      current: string;
+    };
+    check("app.json 指向本次版本", pointer.current === packageVersion, pointer.current);
+    check("卸载注册项已创建", uninstallRegistrationExists(), uninstallRegistryKey);
+    const shortcuts = await findProductShortcuts();
+    check(
+      "开始菜单有应用与「ATM 修复」",
+      shortcuts.length >= 2 && shortcuts.some((path) => path.includes("修复")),
+      shortcuts.join(", "),
+    );
+    const launcher = join(installRoot, "AyanamiTaskManager.exe");
+    check("安装根有启动器", existsSync(launcher), launcher);
+    await productionChecks("installed", launcher, dataDir);
+    check(
+      "界面就绪见证已写（renderer 真加载了）",
+      await waitUntil(async () =>
+        existsSync(join(installRoot, "state", "health", `ui-${packageVersion}.json`)) ? true : null,
+      ),
+      join(installRoot, "state", "health"),
+    );
+
+    const preservedMarker = join(dataDir, "uninstall-preservation.marker");
+    await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
+    check(
+      "atm-setup 静默卸载",
+      run(join(installRoot, "atm-setup.exe"), ["--uninstall", "--quiet"], {
+        ATM_DATA_DIR: dataDir,
+      }) === 0,
+    );
+    // 安装根里的 setup 删不掉正在运行的自己：它把卸载交给 %TEMP% 里的副本继续做，自己先返回。
+    await waitUntil(
+      async () =>
+        (!existsSync(installRoot) || (await readdir(installRoot)).length === 0) &&
+        !uninstallRegistrationExists() &&
+        appProcesses().length === 0
+          ? true
+          : null,
+      120_000,
+    );
+    const left = appProcesses();
+    check("卸载后应用进程已退出", left.length === 0, describeAppProcesses(left));
+    check("卸载后卸载注册项已移除", !uninstallRegistrationExists(), uninstallRegistryKey);
+    const remaining = await findProductShortcuts();
+    check("卸载后产品快捷方式已移除", remaining.length === 0, remaining.join(", "));
+    check(
+      "卸载后安装根已清空",
+      !existsSync(installRoot) || (await readdir(installRoot)).length === 0,
+      installRoot,
+    );
+    check("卸载后用户数据仍保留", existsSync(preservedMarker), preservedMarker);
+    await writeSmokeReport("installed", dataDir, from);
+    return "verified";
+  } finally {
+    // 安装写的自启指向安装根的启动器（现值还指向它就是本轮写的）；卸载删掉的是上面记下的那些名字。
+    applyRunRestore(
+      loginItemRestorePlan(runBefore, readRunSnapshot(), {
+        executables: [join(installRoot, "AyanamiTaskManager.exe")],
+        // 验收前没有这个值，就没有要放回的：只删本轮安装新加、仍指向本轮启动器的。
+        deleted: [],
+      }),
+    );
+  }
 }
 
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
-
-const makeFiles = await filesBelow(join(root, "out", "make"));
-const expectedSetupName = `AyanamiTaskManager-Setup-${packageVersion}-win-x64.exe`.toLowerCase();
-const expectedPortableName = `AyanamiTaskManager-win32-x64-${packageVersion}.zip`.toLowerCase();
-const setup = makeFiles.find((path) => basename(path).toLowerCase() === expectedSetupName);
-const portableZip = makeFiles.find((path) => basename(path).toLowerCase() === expectedPortableName);
-check("Forge Setup 存在", setup, setup);
-check("Forge portable ZIP 存在", portableZip, portableZip);
-check(
-  "安装目录与用户数据目录隔离",
-  installRoot.toLowerCase() !== defaultDataRoot.toLowerCase(),
-  `${installRoot} != ${defaultDataRoot}`,
-);
-let priorInstallFiles = await filesBelow(installRoot);
-if (
-  priorInstallFiles.some((path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe") &&
-  existsSync(deadMarker)
-) {
-  await cleanupDeadInstallRoot("验收前遗留的已卸载目录");
-  priorInstallFiles = await filesBelow(installRoot);
-}
-check(
-  "验收前没有活跃同名安装",
-  !priorInstallFiles.some((path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe"),
-  installRoot,
-);
-checkNoAppProcess("验收前没有运行中的同名进程");
-check("验收前没有同名卸载注册项", !uninstallRegistrationExists(), uninstallRegistryKey);
-const priorShortcuts = await productShortcuts();
-check("验收前没有同名产品快捷方式", priorShortcuts.length === 0, priorShortcuts.join(", "));
-
-let installedExecutable: string | null = null;
-let uninstallState: "removed" | "dead" | null = null;
+let installedState: "verified" | "skipped" | null = null;
 try {
-  const portableRoot = join(outputRoot, "portable");
-  await mkdir(portableRoot, { recursive: true });
-  run(resolveSystemTar(), ["-xf", portableZip, "-C", portableRoot]);
-  const portableExecutable = (await filesBelow(portableRoot)).find(
-    (path) => basename(path).toLowerCase() === "ayanamitaskmanager.exe",
-  );
-  check("portable ZIP 可解压", portableExecutable, portableRoot);
-  runPackagedSmoke("portable", portableExecutable);
-  const portableReport = JSON.parse(
-    await readFile(join(root, "output", "portable-smoke-report.json"), "utf8"),
-  ) as { passed: boolean; checks: Check[] };
-  check("portable 首启/退出/重启与数据持久化", portableReport.passed);
-
-  run(setup, ["--silent"]);
-  installedExecutable = await waitForInstalledExecutable();
-  check("Squirrel Setup 可静默安装", existsSync(installedExecutable), installedExecutable);
-  check("Squirrel 卸载注册项已创建", uninstallRegistrationExists(), uninstallRegistryKey);
-  // 1.0.5 装完开始菜单里什么都没有，卸载注册项却正常——只验注册项漏掉了这个。
-  // Electron 应用带 Squirrel-aware 标记，Squirrel 把建快捷方式的责任交给应用；
-  // 应用不接管就两边都不做，而这条链路只有装完一看才发现。
-  const installedShortcuts = await productShortcuts();
-  check("安装后存在产品快捷方式", installedShortcuts.length > 0, installedShortcuts.join(", "));
-  runPackagedSmoke("installed", installedExecutable);
-  const installedReport = JSON.parse(
-    await readFile(join(root, "output", "installed-smoke-report.json"), "utf8"),
-  ) as { passed: boolean; dataDir: string; checks: Check[] };
-  check("安装版首启/退出/重启与数据持久化", installedReport.passed);
-
-  const preservedMarker = join(installedReport.dataDir, "uninstall-preservation.marker");
-  await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
-  const updater = join(installRoot, "Update.exe");
-  check("Squirrel 卸载器存在", existsSync(updater), updater);
-  run(updater, ["--uninstall", "-s"]);
-  uninstallState = await waitForUninstallState(installedExecutable);
-  checkNoAppProcess("卸载后应用进程已退出");
-  check("卸载后卸载注册项已移除", !uninstallRegistrationExists(), uninstallRegistryKey);
-  const remainingShortcuts = await productShortcuts();
-  check("卸载后产品快捷方式已移除", remainingShortcuts.length === 0, remainingShortcuts.join(", "));
-  check(
-    "卸载后安装目录已移除或被 Squirrel 标记为已卸载",
-    !existsSync(installedExecutable) || existsSync(deadMarker),
-    `${uninstallState}: ${installedExecutable}`,
-  );
-  check("卸载后用户数据仍保留", existsSync(preservedMarker), preservedMarker);
-  if (uninstallState === "dead") {
-    await cleanupDeadInstallRoot("烟测产生的已卸载目录");
-  }
-
+  await portable();
+  installedState = await installed();
   const report = {
     passed: true,
     completedAt: new Date().toISOString(),
-    setup,
-    portableZip,
+    packageDir,
     installRoot,
-    defaultDataRoot,
-    installedExecutable,
-    uninstallState,
+    installed: installedState,
     checks,
   };
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -265,12 +381,9 @@ try {
   const report = {
     passed: false,
     completedAt: new Date().toISOString(),
-    setup,
-    portableZip,
+    packageDir,
     installRoot,
-    defaultDataRoot,
-    installedExecutable,
-    uninstallState,
+    installed: installedState,
     checks,
     error: error instanceof Error ? (error.stack ?? error.message) : String(error),
   };

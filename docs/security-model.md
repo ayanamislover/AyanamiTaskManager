@@ -10,7 +10,7 @@
 - 正式桌面 daemon 每次启动都会生成新的 Bearer token，并原子发布到 `<数据目录>\runtime\daemon.json`。发现文件同时绑定 `endpoint`、`pid`、`version`、`startedAt` 和随机 `instanceId`；正常退出会清除它，旧 token 在重启后失效。standalone 开发入口仅在显式设置 `AYANAMI_TASK_TOKEN` 时允许固定测试 token，正式桌面 host 明确忽略该 override。
 - 自动安装的 Agent 配置使用 stdio bridge，bridge 每次请求都重新读取并校验发现文件，因此配置不持久化 endpoint/token，也能跨 daemon 重启恢复。
 - REST 在认证前拒绝非 localhost/127.0.0.1 的浏览器 `Origin`；错误响应不回显当前或调用方提供的 token。WebSocket 必须在 3 秒内完成认证；错误 token 或超时以 `1008` 关闭，认证成功前不发送业务事件。认证前的非法 JSON 只返回有界协议错误，不会得到业务数据。
-- 打包 Renderer 不接收原始 endpoint 与用户凭证，只通过 Preload 暴露的有界 Main-process API capability 访问 `/api/v1/*`；跨源导航和新窗口被拒绝。设置页为“复制当前运行实例的 Streamable HTTP 配置”取得的配置里带的是 Agent 凭证。
+- 打包 Renderer 不接收原始 endpoint 与用户凭证，只通过宿主注入的有界 `window.ayanamiDesktop` capability 访问 `/api/v1/*`（宿主只接受入口文档、白名单方法、类型正确的参数，再转给 core 代理）；跨源导航和新窗口被拒绝。生产宿主不开 WebView2 调试端口，并清掉试图从环境变量注入的浏览器参数。设置页为“复制当前运行实例的 Streamable HTTP 配置”取得的配置里带的是 Agent 凭证。
 
 Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、ATM Record、对话、命令行参数或长期 Agent 配置。只有用户明确复制“当前运行实例”的 Streamable HTTP 配置时，该临时配置才会包含当前 token。
 
@@ -19,7 +19,7 @@ Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、A
 正式桌面 daemon 同时持有两份凭证，每次启动都重新生成：
 
 - **Agent 凭证**：即 `daemon.json` 里的 `token`。MCP bridge、`--mcp-stdio`、`--cli` 和按指南直接调 REST 的 Agent 都用它。
-- **用户凭证**：只由桌面主进程在内存里生成，不写入 `daemon.json`、日志或 Agent 配置，也不交给 Renderer；Renderer 的每个 `/api/v1/*` 请求由主进程代为注入。
+- **用户凭证**：只由桌面 core 进程在内存里生成，不写入 `daemon.json`、日志或 Agent 配置，也不交给宿主或 Renderer；Renderer 的每个 `/api/v1/*` 请求经宿主转到 core，由 core 代为注入。
 
 「用户的决定」只接受用户凭证，Agent 凭证调用返回 `403 USER_AUTHORIZATION_REQUIRED`，且不产生任何写入。包括：垃圾箱恢复请求的授权与拒绝，项目恢复、移入垃圾箱与归档，新建与恢复备份（新建会按保留策略删除同组最旧的手动备份），设置写入，保存视图的新建、修改与删除，知识的新建、更新与归档（REST 这几条是管理界面入口：不记 Agent 作者、不要求 Session、能改已归档条目；Agent 发布知识走 MCP `atm_knowledge_save`，作者记为该 Agent），导入 apply，项目路径绑定，Session 强制关闭，`/projects/:code/ui/*` 与其他以用户身份落账的写入，以及 `actor=USER`（含缺省）的临时任务写入。
 
@@ -29,7 +29,7 @@ Bearer token 是本地调用认证凭据。不要把它写入仓库、日志、A
 
 ### 手机同步与自建中继（可选，默认关闭）
 
-设计与协议见 [mobile-sync.md](mobile-sync.md)，决策见 [ADR-016](adr/ADR-016-mobile-relay-and-dispatch.md)。
+设计与协议见 [mobile-sync.md](mobile-sync.md)，决策见 [ADR-017](adr/ADR-017-mobile-relay-and-dispatch.md)。
 
 - **不新开监听端口。** 同步连接器在 daemon 进程内只做出站 HTTPS，连接用户自己配置的中继；daemon 仍然只监听 `127.0.0.1`。中继地址只接受 https，明文 http 只允许 `127.0.0.1` / `localhost`（开发联调）。
 - **仓库与安装包里没有默认服务器。** 未配置中继时连接器不发任何网络请求；守卫扫描生产代码，出现维护者自己的服务器域名即红。
@@ -75,7 +75,7 @@ Task、Record、Session、Search 和长字段 cursor 包含版本、选择条件
 ATM 不试图防御以下主体或场景：
 
 - 与 ATM 处于同一 Windows 用户、能够读取或修改 `%LOCALAPPDATA%` 的恶意进程；
-- 已能修改安装文件、注入受信 Main/Preload/Renderer、读取进程内存或取得当前用户调试权限的代码；
+- 已能修改安装文件、注入受信宿主/core/Renderer、读取进程内存或取得当前用户调试权限的代码；
 - 用户主动泄露 Bearer token 后的调用；
 - Registry 与 Project SQLite 之间的跨数据库原子提交；
 - 把本机 loopback 服务直接暴露到局域网或互联网后的安全性（手机同步走出站中继，不需要也不应该这样做）；

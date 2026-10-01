@@ -66,12 +66,10 @@ describe("open-source repository guardrails", () => {
     }
   });
 
-  it("uses the public default branch for installer icon retrieval", () => {
-    const forge = read("forge.config.ts");
-    const extraResource = /extraResource:\s*\[([\s\S]*?)\]/u.exec(forge)?.[1] ?? "";
-    expect(forge).toContain("refs/heads/main/logo.ico");
-    expect(forge).not.toContain("refs/heads/ayanamislover/complete-implementation");
-    expect(extraResource).not.toContain('"logo.png"');
-    expect(forge).toContain("logo\\.png$");
+  // 原生二进制在构建时从仓库根的 logo.ico 嵌入图标，不再像 Squirrel 那样从分支 URL 拉取。
+  it("embeds the repository icon into the native binaries at build time", () => {
+    const support = read("apps/desktop/native/build-support/src/lib.rs");
+    expect(support).toContain('.join("../../../../logo.ico")');
+    expect(support).not.toMatch(/https?:\/\//u);
   });
 });

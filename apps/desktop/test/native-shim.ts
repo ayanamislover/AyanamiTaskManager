@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { releaseRustEnv } from "../../../scripts/rust-build-env.js";
 
 export const SHIM_CRATE = join(process.cwd(), "apps", "desktop", "native", "mcp-shim");
 const RELEASE = join(SHIM_CRATE, "target", "release");
@@ -20,6 +21,8 @@ export function ensureNativeShim(): string {
   if (built) return SHIM_EXE;
   const result = spawnSync("cargo", ["build", "--release", "--locked", "--bins", "--examples"], {
     cwd: SHIM_CRATE,
+    // 和打包同一份 flag：否则测试和打包轮流把 target\release 整棵重编。
+    env: releaseRustEnv(process.cwd()),
     encoding: "utf8",
     windowsHide: true,
   });

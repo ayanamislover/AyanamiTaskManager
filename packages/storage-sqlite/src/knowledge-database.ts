@@ -50,6 +50,11 @@ export class KnowledgeDatabase {
     }
   }
 
+  /** 让已打开的知识库释放 SQLite 页缓存（还没打开就什么都不做）。 */
+  shrinkMemory(): void {
+    if (this.#opened?.database.sqlite.open) this.#opened.database.sqlite.pragma("shrink_memory");
+  }
+
   close(): void {
     this.#closed = true;
     if (this.#opened?.database.sqlite.open) this.#opened.database.sqlite.close();

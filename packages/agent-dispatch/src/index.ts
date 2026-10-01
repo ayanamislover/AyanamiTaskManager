@@ -1,5 +1,5 @@
 /**
- * Claude Code 无头派单（docs/mobile-sync.md §8、ADR-016）。
+ * Claude Code 无头派单（docs/mobile-sync.md §8、ADR-017）。
  * 只处理用户点名的任务；默认关闭；宿主通过 {@link DispatchHost} 端口提供项目与任务。
  */
 export { AgentDispatcher, createAgentDispatcher } from "./dispatcher.js";

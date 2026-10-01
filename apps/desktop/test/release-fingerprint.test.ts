@@ -34,6 +34,7 @@ describe("release --resume 输入指纹", () => {
     expect(parseReleaseRunMode([])).toBe("standard");
     expect(parseReleaseRunMode(["--resume"])).toBe("resume");
     expect(parseReleaseRunMode(["--full"])).toBe("full");
+    expect(parseReleaseRunMode(["--resume", "--local-only"])).toBe("resume");
     expect(() => parseReleaseRunMode(["--resume", "--full"])).toThrow(/RELEASE_ARGUMENT_CONFLICT/u);
     expect(() => parseReleaseRunMode(["--fast"])).toThrow(/RELEASE_ARGUMENT_UNKNOWN/u);
 

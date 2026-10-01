@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { createReadStream, readFileSync } from "node:fs";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   assertReleaseCandidateIdentity,
   type ReleaseArtifactIdentity,
@@ -31,7 +31,6 @@ const FIXED_RESUME_EVIDENCE = [
   "output/benchmark-report.json",
   "output/packaged-smoke-report.json",
   "output/portable-smoke-report.json",
-  "output/installed-smoke-report.json",
   "output/distribution-smoke-report.json",
   "release/release.json",
   "release/sbom.spdx.json",
@@ -98,14 +97,43 @@ export async function assertReleaseArtifact(
   }
 }
 
+/**
+ * 上一次发布验收里安装那一半是否真的做了：distribution-smoke 报告的 installed 字段。
+ * 读不到或不是 "verified" 都按没做算——resume 证据里就不会要求 installed 报告，
+ * 而 assemble 那边同样据此决定有没有 INSTALLED 层，两边口径一致。
+ */
+export function installedSmokeVerified(root = process.cwd()): boolean {
+  try {
+    const report = JSON.parse(
+      readFileSync(join(root, "output", "distribution-smoke-report.json"), "utf8"),
+    ) as { installed?: unknown };
+    return report.installed === "verified";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `installed`：这次的安装验收是否真的做了（distribution-smoke 报告的 installed 字段）。
+ * 调用方必须明说——默认值会让「跳过」和「漏了 installed 报告」看起来一样。
+ *
+ * 制品同时绑定 release/ 与 output/package/ 两份：assemble-release 每次都从 output/package
+ * 重新复制。只绑 release/ 时，重新打过包、release/ 原样不动，resume 照样通过，旧烟测报告
+ * 就被挂到了一批没测过的字节上。
+ */
 export function releaseResumeEvidencePaths(
   candidate: ReleaseCandidateIdentity,
   commands: readonly ReleaseCommandLog[],
+  options: { installed: boolean },
 ): string[] {
   assertReleaseCandidateIdentity(candidate);
   const paths = [
     ...FIXED_RESUME_EVIDENCE,
-    ...Object.values(candidate.artifacts).map((artifact) => `release/${artifact.name}`),
+    ...(options.installed ? ["output/installed-smoke-report.json"] : []),
+    ...Object.values(candidate.artifacts).flatMap((artifact) => [
+      `release/${artifact.name}`,
+      `output/package/${artifact.name}`,
+    ]),
     ...commands.map((command) => `output/${normalizedRelativePath(command.log)}`),
   ].map(normalizedRelativePath);
   const unique = [...new Set(paths)].sort();

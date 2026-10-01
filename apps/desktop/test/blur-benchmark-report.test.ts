@@ -176,6 +176,61 @@ describe("packaged blur benchmark report", () => {
     ).toThrow(/fallback/u);
   });
 
+  it("原生宿主报告（schemaVersion 2）以宿主 exe + renderer 目录绑定候选，脏树只在显式放行时接受", () => {
+    const rows = [1366, 1920, 3440].flatMap((width) => {
+      const height = { 1366: 768, 1920: 1080, 3440: 1440 }[width]!;
+      return [
+        row(width, height, "off", Array(600).fill(16)),
+        row(width, height, "on", Array(600).fill(16)),
+      ];
+    });
+    const electron = report(rows);
+    if (electron.schemaVersion !== 1) throw new Error("fixture 应为 schemaVersion 1");
+    const native: BlurBenchmarkReport = {
+      ...electron,
+      schemaVersion: 2,
+      host: "webview2",
+      candidate: {
+        gitHead: "a".repeat(40),
+        gitDirty: false,
+        executableSha256: "a".repeat(64),
+        rendererSha256: "d".repeat(64),
+        candidateSha256: "c".repeat(64),
+      },
+    };
+    expect(() => assertBlurBenchmarkReport(native)).not.toThrow();
+    const dirty: BlurBenchmarkReport = {
+      ...native,
+      candidate: { ...native.candidate, gitDirty: true },
+    };
+    expect(() => assertBlurBenchmarkReport(dirty)).toThrow(/clean Git tree/u);
+    expect(() => assertBlurBenchmarkReport(dirty, { allowDirty: true })).not.toThrow();
+    // Electron 历史报告不享受放行：它们是发布证据。
+    expect(() =>
+      assertBlurBenchmarkReport(
+        { ...electron, candidate: { ...electron.candidate, gitDirty: true as false } },
+        { allowDirty: true },
+      ),
+    ).toThrow(/clean Git tree/u);
+    expect(() =>
+      assertBlurBenchmarkReport({
+        ...native,
+        candidate: { ...native.candidate, rendererSha256: "not-a-hash" },
+      }),
+    ).toThrow(/hash/u);
+  });
+
+  it("基准对准真正画材质的元素：顶栏的 ::before 与窗口控件", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "packaged-blur-benchmark.ts"),
+      "utf8",
+    );
+    expect(source).toContain(
+      ".atm-topbar::before, .atm-window-chrome { backdrop-filter: none !important; }",
+    );
+    expect(source).not.toMatch(/getComputedStyle\(document\.querySelector\("\.atm-topbar"\)!\)\./u);
+  });
+
   it("renderer 采样不得丢弃 >=250ms 的严重长帧", () => {
     const source = readFileSync(
       join(process.cwd(), "scripts", "packaged-blur-benchmark.ts"),

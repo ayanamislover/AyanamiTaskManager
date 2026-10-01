@@ -18,6 +18,7 @@ import {
   ProjectRepository,
   type AyanamiDatabaseManager,
 } from "@ayanami-task/storage-sqlite";
+import { trackProjectActivity } from "./runtime/project-activity.js";
 
 /** Shared application boundary; adapters never open SQLite or access project databases. */
 export class KnowledgeService {
@@ -98,3 +99,9 @@ export class KnowledgeService {
     };
   }
 }
+
+// 知识库方法会跨 await 用项目库连接（saveForAgent 先取项目库再开知识库），同样登记在途。
+trackProjectActivity(
+  KnowledgeService.prototype,
+  (service) => (service as unknown as { databases: AyanamiDatabaseManager }).databases,
+);

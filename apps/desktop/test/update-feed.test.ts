@@ -1,62 +1,85 @@
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { pruneUpdateFeed, releasesPackages } from "../../../scripts/update-feed.js";
+import { scanUpdateFeed } from "../src/update-coordinator.js";
+import { deliverUpdate, pruneConsumedFeed } from "../../../scripts/update-feed.js";
 
 const temporary: string[] = [];
 afterEach(() => {
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function feedFixture(releases: string | null): string {
-  const feed = mkdtempSync(join(tmpdir(), "atm-feed-"));
-  temporary.push(feed);
-  for (const version of ["1.0.6", "1.0.7", "1.0.8"]) {
-    writeFileSync(join(feed, `AyanamiTaskManagerDesktop-${version}-full.nupkg`), version, "utf8");
-  }
-  // feed 里不只有包：RELEASES 之外的东西一概不该被碰。
-  writeFileSync(join(feed, "notes.txt"), "keep me", "utf8");
-  if (releases !== null) writeFileSync(join(feed, "RELEASES"), releases, "utf8");
-  return feed;
+function scratch(): string {
+  const directory = mkdtempSync(join(tmpdir(), "atm-feed-"));
+  temporary.push(directory);
+  return directory;
+}
+
+/** 一个打包目录：zip 与清单（清单内容由 core 校验，这里只关心投递与清理）。 */
+function packageDir(version: string): string {
+  const directory = scratch();
+  writeFileSync(join(directory, `atm-${version}-win-x64.zip`), `zip ${version}`, "utf8");
+  writeFileSync(join(directory, `atm-${version}-win-x64.json`), `{"version":"${version}"}`, "utf8");
+  return directory;
 }
 
 describe("本地更新源", () => {
-  it("RELEASES 每行取第二列，忽略空行", () => {
-    expect(
-      releasesPackages(
-        "AAA AyanamiTaskManagerDesktop-1.0.8-full.nupkg 169596287\r\n\r\nBBB b.nupkg 1\n",
-      ),
-    ).toEqual(["AyanamiTaskManagerDesktop-1.0.8-full.nupkg", "b.nupkg"]);
+  it("投递 zip 与清单，清单在 zip 之后写", () => {
+    const feed = join(scratch(), "feed");
+    const delivered = deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
+    expect(readdirSync(feed).sort()).toEqual(["atm-2.0.1-win-x64.json", "atm-2.0.1-win-x64.zip"]);
+    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1");
   });
 
-  // Squirrel 的 RELEASES 每次只列当前这一个 full 包，旧包不会被任何人删掉——
-  // feed 是发布脚本写的，Squirrel 只读不管。跑到 1.0.9 时实测已经堆到 647 MB，
-  // 其中 485 MB 是 RELEASES 根本没提到的死重。
-  it("只删 RELEASES 没列出的包，列出的和非包文件都留下", () => {
-    const feed = feedFixture("AAA AyanamiTaskManagerDesktop-1.0.8-full.nupkg 169596287\n");
-    const removed = pruneUpdateFeed(feed);
-    expect(removed.sort()).toEqual([
-      "AyanamiTaskManagerDesktop-1.0.6-full.nupkg",
-      "AyanamiTaskManagerDesktop-1.0.7-full.nupkg",
-    ]);
+  // 同版本重投递：旧清单先撤，新 zip 写完前扫描看不到「就绪」；不留 .partial。
+  it("同版本重投递先撤旧清单、经临时名改名，不留半成品", () => {
+    const feed = join(scratch(), "feed");
+    deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
+    const rebuilt = packageDir("2.0.1");
+    writeFileSync(join(rebuilt, "atm-2.0.1-win-x64.zip"), "zip 2.0.1 rebuilt", "utf8");
+    const delivered = deliverUpdate(feed, rebuilt, "2.0.1");
+    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1 rebuilt");
+    expect(readdirSync(feed).sort()).toEqual(["atm-2.0.1-win-x64.json", "atm-2.0.1-win-x64.zip"]);
+    const source = readFileSync(join(process.cwd(), "scripts", "update-feed.ts"), "utf8");
+    expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeLessThan(
+      source.indexOf("copyFileSync(join(packageDir, name), partial)"),
+    );
+    expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeGreaterThan(0);
+  });
+
+  // 投递是一次性的，装完没人负责收。清理的判据必须和运行中的 core 是同一份，
+  // 否则一边把包当「还没装」提示更新，另一边已经把它删了。
+  it("装好之后只清已消费的：不高于已装版本的包与 Squirrel 遗留，更新的与无关文件都留下", () => {
+    const feed = join(scratch(), "feed");
+    mkdirSync(feed, { recursive: true });
+    deliverUpdate(feed, packageDir("2.0.0"), "2.0.0");
+    deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
+    deliverUpdate(feed, packageDir("2.0.2"), "2.0.2");
+    writeFileSync(join(feed, "RELEASES"), "AAA AyanamiTaskManagerDesktop-1.2.2-full.nupkg 1\n");
+    writeFileSync(join(feed, "AyanamiTaskManagerDesktop-1.2.2-full.nupkg"), "old");
+    writeFileSync(join(feed, "notes.txt"), "keep me");
+
+    const removed = pruneConsumedFeed(feed, "2.0.1");
+    expect(removed.sort()).toEqual(
+      [
+        "AyanamiTaskManagerDesktop-1.2.2-full.nupkg",
+        "RELEASES",
+        "atm-2.0.0-win-x64.json",
+        "atm-2.0.0-win-x64.zip",
+        "atm-2.0.1-win-x64.json",
+        "atm-2.0.1-win-x64.zip",
+      ].sort(),
+    );
     expect(readdirSync(feed).sort()).toEqual([
-      "AyanamiTaskManagerDesktop-1.0.8-full.nupkg",
-      "RELEASES",
+      "atm-2.0.2-win-x64.json",
+      "atm-2.0.2-win-x64.zip",
       "notes.txt",
     ]);
-    // 幂等：再跑一次没有可删的。
-    expect(pruneUpdateFeed(feed)).toEqual([]);
-  });
-
-  // 没有 RELEASES 就无从判断谁还有用。这时删任何一个都可能删掉唯一可用的包，
-  // 而多留几份只是占磁盘。
-  it("没有 RELEASES 时一个都不删", () => {
-    const feed = feedFixture(null);
-    expect(pruneUpdateFeed(feed)).toEqual([]);
-    expect(readdirSync(feed)).toHaveLength(4);
-    expect(existsSync(join(feed, "AyanamiTaskManagerDesktop-1.0.6-full.nupkg"))).toBe(true);
+    // 与 core 同口径：剩下的正是 core 会当成待装候选的那个版本。
+    expect(scanUpdateFeed(feed, "2.0.1").consumed).toEqual([]);
+    // 幂等。
+    expect(pruneConsumedFeed(feed, "2.0.1")).toEqual([]);
   });
 
   // 「feed 在哪」和「快捷方式在哪」是同一类问题：两处各存一份认知，迟早一处
@@ -66,7 +89,8 @@ describe("本地更新源", () => {
       "scripts/release-and-install.ts",
       "scripts/update-feed.ts",
       "scripts/distribution-smoke.ts",
-      "apps/desktop/src/main.ts",
+      "apps/desktop/src/core-main.ts",
+      "apps/desktop/src/update-coordinator.ts",
     ];
     for (const source of sources) {
       const content = readFileSync(join(process.cwd(), source), "utf8");

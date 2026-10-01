@@ -21,9 +21,11 @@ export class ApplicationServiceRuntime {
 
   async repository(projectCode: string): Promise<ProjectRepository> {
     const project = this.databases.getProject(projectCode);
+    // 命中缓存也经过连接池：池按取用记录判断连接是否在用（空闲回收、容量淘汰都看它）。
+    const database = await this.databases.openProject(project.id);
     const existing = this.#repositories.get(project.id);
-    if (existing && existing.database.sqlite.open) return existing;
-    const repository = new ProjectRepository(await this.databases.openProject(project.id));
+    if (existing?.database === database) return existing;
+    const repository = new ProjectRepository(database);
     this.#repositories.set(project.id, repository);
     return repository;
   }

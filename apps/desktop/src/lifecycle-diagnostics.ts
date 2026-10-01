@@ -17,6 +17,9 @@ type LifecycleEvent =
   | "previous.session-end"
   | "ready"
   | "heartbeat"
+  | "window.shown"
+  | "window.closed"
+  | "window.released"
   | "exception"
   | "bootstrap.failed"
   | "session-end"
@@ -34,6 +37,9 @@ type Detail = {
   clean?: boolean;
   rss?: number;
   heapUsed?: number;
+  heapTotal?: number;
+  external?: number;
+  arrayBuffers?: number;
   reason?: string;
   processType?: string;
   origin?: string;
@@ -65,11 +71,18 @@ export function lifecycleError(error: unknown): Detail {
 export function createLifecycleDiagnostics(
   dataDir: string,
   version: string,
-  options: { maxLogBytes?: number; maxLogFiles?: number } = {},
+  options: {
+    maxLogBytes?: number;
+    maxLogFiles?: number;
+    name?: "lifecycle" | "lifecycle-core";
+  } = {},
 ) {
+  // 宿主与 core 是两个进程，各有自己的 runId 与退出标记；共用一个文件就会互相覆盖
+  // 「上次是否正常退出」。core 用 lifecycle-core，宿主沿用 lifecycle。
+  const name = options.name ?? "lifecycle";
   const directory = join(dataDir, "logs");
-  const logPath = join(directory, "lifecycle.ndjson");
-  const statePath = join(directory, "lifecycle-state.json");
+  const logPath = join(directory, `${name}.ndjson`);
+  const statePath = join(directory, `${name}-state.json`);
   const maxBytes = Math.max(4096, options.maxLogBytes ?? 256 * 1024);
   const files = Math.max(1, Math.min(5, options.maxLogFiles ?? 3));
   const runId = randomUUID();
@@ -85,7 +98,15 @@ export function createLifecycleDiagnostics(
       for (const key of ["background", "agentWake", "clean"] as const) {
         if (typeof input[key] === "boolean") detail[key] = input[key];
       }
-      for (const key of ["exitCode", "rss", "heapUsed", "previousPid"] as const) {
+      for (const key of [
+        "exitCode",
+        "rss",
+        "heapUsed",
+        "heapTotal",
+        "external",
+        "arrayBuffers",
+        "previousPid",
+      ] as const) {
         if (typeof input[key] === "number" && Number.isFinite(input[key])) detail[key] = input[key];
       }
       for (const key of [
@@ -110,8 +131,8 @@ export function createLifecycleDiagnostics(
         if (files === 1) rmSync(logPath);
         else
           for (let index = files - 1; index >= 1; index--) {
-            const target = join(directory, `lifecycle.${index}.ndjson`);
-            const source = index === 1 ? logPath : join(directory, `lifecycle.${index - 1}.ndjson`);
+            const target = join(directory, `${name}.${index}.ndjson`);
+            const source = index === 1 ? logPath : join(directory, `${name}.${index - 1}.ndjson`);
             rmSync(target, { force: true });
             if (existsSync(source)) renameSync(source, target);
           }

@@ -42,7 +42,7 @@ claude mcp add-json ayanami-task-manager-memory '{"command":"<atm-mcp.exe>","arg
 claude mcp add-json ayanami-task-manager-actions '{"command":"<atm-mcp.exe>","args":["--profile","actions"]}' --scope user
 ```
 
-`<atm-mcp.exe>` 是 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe` 的完整展开路径（JSON 里反斜杠写成 `\\`）。该文件缺失时改用 `{"command":"<ATM.exe>","args":["<数据目录>\\mcp-stdio.cjs","--profile","core"],"env":{"ELECTRON_RUN_AS_NODE":"1"}}`。
+`<atm-mcp.exe>` 是 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe` 的完整展开路径（JSON 里反斜杠写成 `\\`）。该文件缺失时改用 `{"command":"<ATM.exe>","args":["--mcp-stdio","--profile","core"]}`，`<ATM.exe>` 是 `%LOCALAPPDATA%\AyanamiTaskManager\current\AyanamiTaskManager.exe`。
 
 用 stdio 而不是 streamable-http：后者要把 endpoint 和 token 写进配置，而两者每次 daemon 重启都会变，配置随即失效。
 

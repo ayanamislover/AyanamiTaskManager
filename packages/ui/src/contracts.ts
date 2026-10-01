@@ -77,6 +77,8 @@ export type DesktopBridge = {
   getAutoLaunch?: () => Promise<boolean>;
   getUpdateStatus?: () => Promise<UpdateStatus | null>;
   checkForUpdates?: () => Promise<UpdateStatus | null>;
+  /** 安装已就绪的本地更新：应用会关闭，装好后带窗口重新打开。 */
+  applyUpdate?: () => Promise<UpdateStatus | null>;
   showItemInFolder?: (path: string) => Promise<void>;
   getMcpConfigs?: () => Promise<{
     streamableHttp: string;

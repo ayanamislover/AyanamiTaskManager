@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { extname, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// 手机同步像 RustDesk 一样由用户自己配置中继（docs/mobile-sync.md、ADR-016）。
+// 手机同步像 RustDesk 一样由用户自己配置中继（docs/mobile-sync.md、ADR-017）。
 // 开源仓库与安装包里不许出现维护者自己的服务器地址——哪怕只是默认值或示例。
 // 维护者联系邮箱（ay@nami.ltd）不是服务器地址，不在拦截范围内。
 
@@ -28,6 +28,8 @@ const TEXT_EXTENSIONS = new Set([
   ".ps1",
   ".sh",
   ".toml",
+  // 原生宿主（de-electron）是生产代码。
+  ".rs",
 ]);
 
 const SKIPPED_DIRECTORIES = new Set([
@@ -46,6 +48,10 @@ const SKIPPED_DIRECTORIES = new Set([
   "coverage",
   "test-results",
   "playwright-report",
+  // Rust 构建产物（apps/desktop/native/target*）。
+  "target",
+  "target-drill",
+  "target-smoke",
 ]);
 
 export function findForbiddenHosts(
@@ -88,7 +94,7 @@ describe("不内置任何中继服务器", () => {
     for (const top of ["apps", "packages", "integrations", "scripts", "docs"]) {
       collectTextFiles(root, join(root, top), files);
     }
-    for (const single of ["README.md", "ATM_AGENT_GUIDE.md", "package.json", "forge.config.ts"]) {
+    for (const single of ["README.md", "ATM_AGENT_GUIDE.md", "package.json"]) {
       files.push({ path: single, source: readFileSync(join(root, single), "utf8") });
     }
     expect(files.length).toBeGreaterThan(200);

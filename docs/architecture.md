@@ -2,7 +2,13 @@
 
 ## 运行边界
 
-Electron Main 是生产常驻宿主，负责单实例、托盘、登录自启动、Fastify 服务与数据库生命周期。Renderer 开启 `contextIsolation`、关闭 Node Integration，不接收原始 endpoint/token；它只通过 Preload 的窄 capability 让 Main process 代理有界 `/api/v1/*` 请求和系统操作。`apps/daemon` 可独立启动，只用于测试与开发。完整威胁边界见 [security-model.md](./security-model.md)。
+生产桌面由三个进程组成（[ADR-016](./adr/ADR-016-native-host.md)）：
+
+- **宿主**（Rust，`apps/desktop/native/host`）：单实例、窗口（系统 WebView2）、托盘、登录自启动、更新与安装状态准入；不含业务逻辑。
+- **core**（随包 Node 运行 `runtime\core.mjs`，进程名 `atm-core.exe`）：Fastify 服务、数据库生命周期、Agent 接入与诊断，由宿主拉起并看护。
+- **Renderer**（WebView2）：不接收原始 endpoint/token；只通过宿主注入的 `window.ayanamiDesktop` 窄 capability 发消息，由宿主转给 core 代理有界 `/api/v1/*` 请求和系统操作。只接受入口文档的消息，跨源导航和新窗口被拒绝。
+
+安装、更新、修复和卸载由事务式安装器 `atm-setup.exe` 负责；安装根的启动器在事务未完成时挡住启动。`apps/daemon` 可独立启动，只用于测试与开发。完整威胁边界见 [security-model.md](./security-model.md)。
 
 ```text
 Renderer / MCP stdio / atm CLI
@@ -26,7 +32,7 @@ Renderer / MCP stdio / atm CLI
 - `application`：用例、actor、版本/幂等、事务事件/outbox、投影与上下文包。
 - `daemon`：Fastify REST、WebSocket、健康检查和静态 Renderer。
 - `mcp` / `cli` / `client`：薄适配器，只调用公共应用服务或 REST。
-- `desktop`：Electron 生命周期与安全边界。
+- `desktop`：core 进程入口与生命周期（TS），以及原生宿主、启动器与安装器（`native/`，Rust）。
 
 正式项目写入只触碰一个项目库。Registry 摘要由项目 outbox 在提交后更新；失败不回滚项目事实，启动时按项目序列补投。任何客户端都不能直接写 SQLite。
 

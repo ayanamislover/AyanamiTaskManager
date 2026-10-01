@@ -4,7 +4,7 @@
 const { existsSync, readFileSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { createInterface } = require("node:readline");
-const { join } = require("node:path");
+const { isAbsolute, join } = require("node:path");
 
 function dataDirectory() {
   if (process.env.ATM_DATA_DIR) return process.env.ATM_DATA_DIR;
@@ -48,6 +48,15 @@ function runtime() {
 }
 
 /**
+ * Under Electron this bridge ran as the desktop exe itself. The native host runs it on the
+ * bundled Node (runtime\atm-core.exe) and names the desktop to wake instead.
+ */
+function desktopExecutable(env) {
+  if (/AyanamiTaskManager\.exe$/i.test(process.execPath)) return process.execPath;
+  return typeof env.ATM_DESKTOP_EXECUTABLE === "string" ? env.ATM_DESKTOP_EXECUTABLE : "";
+}
+
+/**
  * Starting the desktop as a detached child does NOT guarantee it outlives an Agent
  * host that closes a kill-on-close Job: on Windows the child stays in the host's Job.
  * A woken ATM can therefore end with the Agent that woke it. Registering a Task
@@ -56,16 +65,20 @@ function runtime() {
  * A desktop started at login or from the Start menu is not affected either way.
  */
 function wakeDesktop(options = {}) {
-  const execPath = options.execPath ?? process.execPath;
   const env = { ...(options.env ?? process.env) };
-  if (!/AyanamiTaskManager\.exe$/i.test(execPath)) return;
+  const execPath = options.execPath ?? desktopExecutable(env);
+  if (!/AyanamiTaskManager\.exe$/i.test(execPath) || !isAbsolute(execPath)) return;
   delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ATM_DESKTOP_EXECUTABLE;
   const child = spawn(execPath, ["--background", "--agent-wake"], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
     env,
   });
+  // A missing desktop (removed version, quarantined exe) must not crash the bridge:
+  // waitForRuntime still times out with ATM_RUNTIME_UNAVAILABLE, which the Agent can read.
+  child.once("error", () => undefined);
   child.unref();
 }
 

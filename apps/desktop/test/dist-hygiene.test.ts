@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const desktopRoot = join(process.cwd(), "apps", "desktop");
 const rendererAssets = join(desktopRoot, "dist", "renderer", "assets");
-const mainDist = join(desktopRoot, "dist", "main");
+const coreDist = join(desktopRoot, "dist", "core");
 
 function assetsOrSkip(): string[] | null {
   if (!existsSync(rendererAssets)) return null;
@@ -31,8 +31,8 @@ describe("构建产物卫生", () => {
   it("打包产物里不带 source map", () => {
     const files = assetsOrSkip();
     if (files !== null) expect(files.filter((name) => name.endsWith(".map"))).toEqual([]);
-    if (existsSync(mainDist)) {
-      expect(readdirSync(mainDist).filter((name) => name.endsWith(".map"))).toEqual([]);
+    if (existsSync(coreDist)) {
+      expect(readdirSync(coreDist).filter((name) => name.endsWith(".map"))).toEqual([]);
     }
   });
 
@@ -42,7 +42,7 @@ describe("构建产物卫生", () => {
     const vite = readFileSync(join(desktopRoot, "vite.config.ts"), "utf8");
     expect(vite).toMatch(/emptyOutDir:\s*true/u);
     expect(vite).toMatch(/sourcemap:\s*false/u);
-    const tsup = readFileSync(join(desktopRoot, "tsup.config.ts"), "utf8");
-    expect(tsup).toMatch(/sourcemap:\s*false/u);
+    const core = readFileSync(join(desktopRoot, "scripts", "build-core.ts"), "utf8");
+    expect(core).toMatch(/sourcemap:\s*false/u);
   });
 });

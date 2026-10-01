@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
-import { copyFile, cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { basename, join, relative, resolve, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import {
   createReleaseResumeEvidence,
@@ -24,6 +24,9 @@ import {
   type StageDecisions,
 } from "./release-report.js";
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
+import { APP_LAYOUT } from "./app-layout.js";
+import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
+import { releaseNoticesStatus } from "./third-party-notices.js";
 
 type Artifact = ReleaseArtifactIdentity;
 type Verification = {
@@ -46,6 +49,15 @@ type SmokeReport = {
   checks: Array<{ passed: boolean }>;
 };
 
+/** distribution-smoke 记下安装验收是做了还是因为机器上已有安装而显式跳过。 */
+type DistributionReport = SmokeReport & { installed: "verified" | "skipped" };
+
+const assembleArguments = process.argv.slice(2);
+const unknownArguments = assembleArguments.filter((argument) => argument !== "--local-only");
+if (unknownArguments.length > 0)
+  throw new Error(`RELEASE_ARGUMENT_UNKNOWN: ${unknownArguments.join(", ")}`);
+/** 本机安装验收：允许组装不可分发的候选（release.json 照实记 distributable）。 */
+const localOnly = assembleArguments.includes("--local-only");
 const root = resolve(process.cwd());
 const releaseDir = resolve(root, "release");
 if (!releaseDir.toLowerCase().startsWith(`${root.toLowerCase()}${sep}`)) {
@@ -59,16 +71,6 @@ const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
 };
-
-async function filesBelow(directory: string): Promise<string[]> {
-  const result: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) result.push(...(await filesBelow(path)));
-    else result.push(path);
-  }
-  return result;
-}
 
 async function digest(path: string): Promise<string> {
   return (await identifyReleaseArtifact(path)).sha256;
@@ -101,19 +103,25 @@ function latestSchema(directory: string): number {
   );
 }
 
-function electronVersions(): Record<string, string> {
-  // 发布清单描述的是实际交付的运行时，所以直接探测已经通过 packaged / distribution
-  // smoke 的发行程序。依赖缓存里的 electron.exe 不是交付物，在 hosted runner 上还可能
-  // 被安装/卸载阶段的进程治理暂时阻断。
-  const executable = join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe");
+/**
+ * 发布清单描述的是实际交付的运行时：直接问包里那个改了名的 node（runtime\atm-core.exe），
+ * 它也是已经通过烟测的那一份。开发机上的 node 不是交付物。
+ */
+function runtimeVersions(): Record<string, string> {
+  const executable = join(
+    root,
+    "output",
+    "package",
+    `app-${packageJson.version}`,
+    APP_LAYOUT.coreExe,
+  );
   const probe = spawnSync(executable, ["-p", "JSON.stringify(process.versions)"], {
     encoding: "utf8",
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     windowsHide: true,
   });
-  if (probe.error) throw new Error(`无法启动发行程序读取 Electron ABI：${probe.error.message}`);
+  if (probe.error) throw new Error(`无法启动发行包里的运行时：${probe.error.message}`);
   if (probe.status !== 0) {
-    throw new Error(`无法读取 Electron ABI：${String(probe.stderr ?? "").slice(0, 500)}`);
+    throw new Error(`无法读取运行时版本：${String(probe.stderr ?? "").slice(0, 500)}`);
   }
   return JSON.parse(probe.stdout.trim()) as Record<string, string>;
 }
@@ -133,7 +141,7 @@ const requiredCommands = [
   "e2e",
   "benchmark",
   "build",
-  "forge-make",
+  "package",
   "packaged-smoke",
   "distribution-smoke",
 ] as const;
@@ -153,15 +161,22 @@ const benchmark = await readJson<{ passed: boolean; metrics: Record<string, unkn
 );
 const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
 const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));
-const installedSmoke = await readJson<SmokeReport>(join(output, "installed-smoke-report.json"));
-const distributionSmoke = await readJson<SmokeReport>(
+const distributionSmoke = await readJson<DistributionReport>(
   join(output, "distribution-smoke-report.json"),
 );
+if (distributionSmoke.installed !== "verified" && distributionSmoke.installed !== "skipped") {
+  throw new Error("DISTRIBUTION_INSTALLED_STATE_INVALID");
+}
+// 安装验收只在干净机器上做；显式跳过时没有 installed 报告，INSTALLED 层随之缺席。
+const installedSmoke =
+  distributionSmoke.installed === "verified"
+    ? await readJson<SmokeReport>(join(output, "installed-smoke-report.json"))
+    : null;
 if (
   !benchmark.passed ||
   !packagedSmoke.passed ||
   !portableSmoke.passed ||
-  !installedSmoke.passed ||
+  (installedSmoke !== null && !installedSmoke.passed) ||
   !distributionSmoke.passed ||
   Number(e2e.stats.unexpected) > 0
 ) {
@@ -169,51 +184,50 @@ if (
 }
 assertSmokeReport("packaged", packagedSmoke);
 assertSmokeReport("portable", portableSmoke);
-assertSmokeReport("installed", installedSmoke);
+if (installedSmoke) assertSmokeReport("installed", installedSmoke);
 assertSmokeReport("distribution", distributionSmoke);
 
-const makeFiles = await filesBelow(join(root, "out", "make"));
-const expectedSetupName =
-  `AyanamiTaskManager-Setup-${packageJson.version}-win-x64.exe`.toLowerCase();
-const expectedZipName = `AyanamiTaskManager-win32-x64-${packageJson.version}.zip`.toLowerCase();
-const nupkgName = `AyanamiTaskManagerDesktop-${packageJson.version}-full.nupkg`;
-const releasesName = "RELEASES";
-const setupSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedSetupName);
-const zipSource = makeFiles.find((path) => basename(path).toLowerCase() === expectedZipName);
-const squirrelDirectory = join(root, "out", "make", "squirrel.windows", "x64");
-const nupkgSource = join(squirrelDirectory, nupkgName);
-const releasesSource = join(squirrelDirectory, releasesName);
-if (
-  !setupSource ||
-  !zipSource ||
-  !makeFiles.includes(nupkgSource) ||
-  !makeFiles.includes(releasesSource)
-) {
-  throw new Error("Forge make 产物不完整：缺少安装包、portable、NUPKG 或 RELEASES");
-}
+// 打包阶段（package-native --release）的产物：安装器、版本包、清单放同一目录就是安装包；
+// 便携 zip 是同一个版本目录加 portable 标记。
+const packageDir = join(output, "package");
+const setupName = "atm-setup.exe";
+const packageName = `atm-${packageJson.version}-win-x64.zip`;
+const manifestName = `atm-${packageJson.version}-win-x64.json`;
+const portableName = portableZipName(packageJson.version);
+const releaseNames = [setupName, packageName, manifestName, portableName];
+const missing = releaseNames.filter((name) => !existsSync(join(packageDir, name)));
+if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missing.join("、")}`);
+// 声明从将要发出去的归档里取，不看旁边的松散目录。缺 Node 许可证原文（NODE_LICENSE_PENDING）
+// 的候选不可分发：只有本机安装验收（--local-only，release-and-install 传）能继续组装，
+// release.json 记 distributable:false，发布入口见到就拒绝。
+const notices = releaseNoticesStatus({
+  packageZip: readFileSync(join(packageDir, packageName)),
+  portableZip: readFileSync(join(packageDir, portableName)),
+  portableFolder: `AyanamiTaskManager-${packageJson.version}`,
+  manifestFiles: (
+    JSON.parse(readFileSync(join(packageDir, manifestName), "utf8")) as {
+      files: Array<{ path: string; sha256: string }>;
+    }
+  ).files,
+});
+if (!notices.distributable && !localOnly)
+  throw new Error(
+    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明没有随包 Node 的许可证（third_party/node/）；" +
+      "只做本机安装验收时用 --local-only",
+  );
 
 await rm(releaseDir, { recursive: true, force: true });
 await mkdir(releaseDir, { recursive: true });
 const testReportDir = join(releaseDir, "test-report");
 await mkdir(testReportDir, { recursive: true });
-
-const setupName = `AyanamiTaskManager-Setup-${packageJson.version}-win-x64.exe`;
-const portableName = `AyanamiTaskManager-${packageJson.version}-win-x64-portable.zip`;
-await copyFile(setupSource, join(releaseDir, setupName));
-await copyFile(zipSource, join(releaseDir, portableName));
-await copyFile(nupkgSource, join(releaseDir, nupkgName));
-await copyFile(releasesSource, join(releaseDir, releasesName));
+for (const name of releaseNames) await copyFile(join(packageDir, name), join(releaseDir, name));
 
 const artifacts: Artifact[] = [];
-for (const name of [setupName, portableName, nupkgName, releasesName]) {
-  const path = join(releaseDir, name);
-  artifacts.push(await identifyReleaseArtifact(path, name));
+for (const name of releaseNames) {
+  artifacts.push(await identifyReleaseArtifact(join(releaseDir, name), name));
 }
-const setupArtifact = artifacts.find((artifact) => artifact.name === setupName);
-const portableArtifact = artifacts.find((artifact) => artifact.name === portableName);
-const upgradePackageArtifact = artifacts.find((artifact) => artifact.name === nupkgName);
-const releasesArtifact = artifacts.find((artifact) => artifact.name === releasesName);
-if (!setupArtifact || !portableArtifact || !upgradePackageArtifact || !releasesArtifact) {
+const [setupArtifact, packageArtifact, manifestArtifact, portableArtifact] = artifacts;
+if (!setupArtifact || !packageArtifact || !manifestArtifact || !portableArtifact) {
   throw new Error("RELEASE_ARTIFACT_IDENTITY_MISSING");
 }
 const candidate = createReleaseCandidateIdentity({
@@ -222,8 +236,8 @@ const candidate = createReleaseCandidateIdentity({
   artifacts: {
     setup: setupArtifact,
     portable: portableArtifact,
-    upgradePackage: upgradePackageArtifact,
-    releases: releasesArtifact,
+    package: packageArtifact,
+    manifest: manifestArtifact,
   },
 });
 const githubActionsRun = process.env.GITHUB_ACTIONS === "true";
@@ -236,7 +250,9 @@ const reportInputs = [
   ["benchmark-report.json", "benchmark-report.json"],
   ["packaged-smoke-report.json", "packaged-smoke-report.json"],
   ["portable-smoke-report.json", "portable-smoke-report.json"],
-  ["installed-smoke-report.json", "installed-smoke-report.json"],
+  ...(installedSmoke
+    ? [["installed-smoke-report.json", "installed-smoke-report.json"] as const]
+    : []),
   ["distribution-smoke-report.json", "distribution-smoke-report.json"],
   ["release-verification.json", "release-verification.json"],
 ] as const;
@@ -302,18 +318,20 @@ evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
     ...artifacts.map(artifactEvidence),
   ],
 });
-evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
-  level: "INSTALLED_VERIFIED",
-  verifiedAt: distributionSmoke.completedAt,
-  origin: "installed-smoke",
-  evidence: [
-    await reportEvidence("installed-smoke-report.json"),
-    await reportEvidence("distribution-smoke-report.json"),
-    artifactEvidence(setupArtifact),
-    artifactEvidence(upgradePackageArtifact),
-    artifactEvidence(releasesArtifact),
-  ],
-});
+if (installedSmoke) {
+  evidenceLayers = appendReleaseEvidenceLayer(evidenceLayers, candidate, {
+    level: "INSTALLED_VERIFIED",
+    verifiedAt: distributionSmoke.completedAt,
+    origin: "installed-smoke",
+    evidence: [
+      await reportEvidence("installed-smoke-report.json"),
+      await reportEvidence("distribution-smoke-report.json"),
+      artifactEvidence(setupArtifact),
+      artifactEvidence(packageArtifact),
+      artifactEvidence(manifestArtifact),
+    ],
+  });
+}
 await assertReleaseEvidenceResolves(releaseDir, evidenceLayers, digest);
 const highestVerifiedLevel = highestReleaseEvidenceLevel(evidenceLayers);
 const summary = {
@@ -336,7 +354,7 @@ const summary = {
     },
     packagedSmoke: { checks: packagedSmoke.checks.length },
     portableSmoke: { checks: portableSmoke.checks.length },
-    installedSmoke: { checks: installedSmoke.checks.length },
+    installedSmoke: installedSmoke ? { checks: installedSmoke.checks.length } : { skipped: true },
     distributionSmoke: {
       checks: distributionSmoke.checks.length,
       reused: reused("distribution-smoke"),
@@ -369,7 +387,7 @@ await writeFile(
     `- 桌面 E2E：${e2e.stats.expected} 项通过，失败 ${e2e.stats.unexpected}${provenance("e2e")}\n` +
     `- packaged smoke：${packagedSmoke.checks.length} 项通过\n` +
     `- portable smoke：${portableSmoke.checks.length} 项通过\n` +
-    `- installed smoke：${installedSmoke.checks.length} 项通过\n` +
+    `- installed smoke：${installedSmoke ? `${installedSmoke.checks.length} 项通过` : "跳过（机器上已有安装）"}\n` +
     `- distribution smoke：${distributionSmoke.checks.length} 项通过${provenance("distribution-smoke")}\n` +
     `- benchmark：全部阈值通过${provenance("benchmark")}\n` +
     `- 已知非阻塞剩余项：${remaining.length === 0 ? "无" : `${remaining.length} 条\n${remaining.map((item) => `  - ${item}`).join("\n")}`}\n\n` +
@@ -377,7 +395,7 @@ await writeFile(
   "utf8",
 );
 
-const versions = electronVersions();
+const versions = runtimeVersions();
 const sqlite = new Database(":memory:");
 const sqliteVersion = String(
   (sqlite.prepare("SELECT sqlite_version() AS version").get() as { version: string }).version,
@@ -386,11 +404,12 @@ sqlite.close();
 const release = {
   product: packageJson.productName,
   version: packageJson.version,
+  distributable: notices.distributable,
   platform: "win32-x64",
-  electron: versions.electron,
   node: versions.node,
   nodeAbi: versions.modules,
   napi: versions.napi,
+  webview2Min: MIN_WEBVIEW2,
   sqlite: sqliteVersion,
   schema: {
     registry: latestSchema(join(root, "migrations", "registry")),
@@ -455,14 +474,7 @@ const sbom = {
 };
 await writeFile(join(releaseDir, "sbom.spdx.json"), `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
 
-const checksumNames = [
-  setupName,
-  portableName,
-  nupkgName,
-  releasesName,
-  "release.json",
-  "sbom.spdx.json",
-];
+const checksumNames = [...releaseNames, "release.json", "sbom.spdx.json"];
 const checksums = await Promise.all(
   checksumNames.map(async (name) => `${await digest(join(releaseDir, name))}  ${name}`),
 );
@@ -471,7 +483,9 @@ await writeFile(join(releaseDir, "SHA256SUMS.txt"), `${checksums.join("\n")}\n`,
 const resumeEvidence = await createReleaseResumeEvidence(
   root,
   candidate,
-  releaseResumeEvidencePaths(candidate, verification.commands),
+  releaseResumeEvidencePaths(candidate, verification.commands, {
+    installed: installedSmoke !== null,
+  }),
 );
 await writeFile(
   join(output, "release-resume-evidence.json"),

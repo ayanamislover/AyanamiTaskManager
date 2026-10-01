@@ -12,7 +12,7 @@ import { createServer, type RequestListener, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as createTcpServer, type Server as TcpServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { replaceFileAtomically } from "../../daemon/src/runtime-discovery.js";
 import { ensureNativeShim, SHIM_CRATE, SHIM_EXE, WAKE_RECORDER_EXE } from "./native-shim.js";
@@ -811,6 +811,65 @@ describe("waking the desktop", () => {
         dataDir: dir,
       }),
     ]);
+  });
+
+  it("JS bridge 跑在打包 node 上：按宿主给的 ATM_DESKTOP_EXECUTABLE 唤醒，且不把它传给桌面", async () => {
+    const { desktop, record } = layout("js-node");
+    const dir = dataDir("wake-js-node");
+    const { wakeDesktop } = createRequire(import.meta.url)(JS_BRIDGE) as {
+      wakeDesktop(options: { env: NodeJS.ProcessEnv }): void;
+    };
+    // 本进程是 node.exe，不叫 AyanamiTaskManager.exe：只能靠宿主告知的路径。
+    expect(process.execPath).not.toMatch(/AyanamiTaskManager\.exe$/iu);
+    wakeDesktop({
+      env: {
+        ...process.env,
+        ATM_DATA_DIR: dir,
+        ATM_WAKE_RECORD: record,
+        ATM_DESKTOP_EXECUTABLE: desktop,
+      },
+    });
+    expect(await records(record, 1)).toEqual([
+      expect.objectContaining({
+        args: ["--background", "--agent-wake"],
+        dataDir: dir,
+        desktopExecutable: null,
+      }),
+    ]);
+    // 相对路径或别的程序名一律不拉。
+    const relativeRecord = join(dir, "relative.ndjson");
+    wakeDesktop({
+      env: {
+        ...process.env,
+        ATM_WAKE_RECORD: relativeRecord,
+        // 能解析到真 recorder 的相对路径：没有绝对路径校验就会真的被拉起来。
+        ATM_DESKTOP_EXECUTABLE: relative(process.cwd(), desktop),
+      },
+    });
+    wakeDesktop({
+      env: {
+        ...process.env,
+        ATM_WAKE_RECORD: relativeRecord,
+        ATM_DESKTOP_EXECUTABLE: process.execPath,
+      },
+    });
+    // 指向一个不存在的桌面：不能抛出未捕获的 spawn 错误把桥带崩。
+    const crashed: unknown[] = [];
+    const onUncaught = (error: unknown) => crashed.push(error);
+    process.on("uncaughtException", onUncaught);
+    try {
+      wakeDesktop({
+        env: {
+          ...process.env,
+          ATM_DESKTOP_EXECUTABLE: join(dir, "gone", "AyanamiTaskManager.exe"),
+        },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+    expect(crashed).toEqual([]);
+    expect(existsSync(relativeRecord)).toBe(false);
   });
 
   it("native shim：没有 daemon 时只唤醒一次同级桌面，发布后完成请求", async () => {

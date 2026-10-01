@@ -37,10 +37,15 @@ jobs:
         working-directory: apps/desktop/native/mcp-shim
         run: rustup toolchain install
 
+      # ...and the host, root launcher and setup from the desktop workspace.
+      - name: Install the pinned Rust toolchain for the desktop workspace
+        working-directory: apps/desktop/native
+        run: rustup toolchain install
+
       - name: Install the Playwright browser
         run: pnpm exec playwright install chromium
 
-      - name: Run full E2E, benchmark, make, and distribution validation
+      - name: Run full E2E, benchmark, package, and distribution validation
         run: pnpm release --full
 
       - name: Upload release validation evidence

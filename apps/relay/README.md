@@ -7,7 +7,7 @@ AyanamiTaskManager（ATM）的手机同步不在电脑上开任何端口：电�
 - 实现 AyanamiCloud「应用数据」接口的一个子集（6 个接口，逐字段兼容，见文末「兼容性」），另加 25 秒长轮询；
 - **只见密文**：载荷在电脑和手机之间端到端加密，中继只看得到键名、大小和时间。
 
-设计背景见仓库里的 `docs/mobile-sync.md` §3、§10、§12 与 `docs/adr/ADR-016-mobile-relay-and-dispatch.md`。
+设计背景见仓库里的 `docs/mobile-sync.md` §3、§10、§12 与 `docs/adr/ADR-017-mobile-relay-and-dispatch.md`。
 
 ## 直接运行
 

@@ -41,7 +41,8 @@ const FIXTURE_FILES = [
   "scripts/start-e2e.ts",
   "scripts/release.ts",
   "scripts/version-sites.ts",
-  "forge.config.ts",
+  "logo.ico",
+  "LICENSE",
   "package.json",
   "pnpm-lock.yaml",
 ];
@@ -90,11 +91,11 @@ describe("非签发按阶段依赖复用", () => {
   });
 
   // 便宜的阶段一律照跑：lint/format/typecheck/test 合计 26 秒就跑完全部用例，
-  // 省它们没收益还要担风险。build/forge-make/packaged-smoke 要产出并验证本
+  // 省它们没收益还要担风险。build/package/packaged-smoke 要产出并验证本
   // 版本的产物，也不能跳。
   it("只有三个昂贵且作用域明确的阶段声明了依赖", () => {
     expect(Object.keys(STAGE_INPUTS).sort()).toEqual(["benchmark", "distribution-smoke", "e2e"]);
-    for (const cheap of ["lint", "format", "typecheck", "test", "build", "forge-make"]) {
+    for (const cheap of ["lint", "format", "typecheck", "test", "build", "package"]) {
       expect(
         decideNonReleaseStageReuse(cheap, fingerprintWith({}), fingerprintWith({}), 0).reuse,
       ).toBe(false);

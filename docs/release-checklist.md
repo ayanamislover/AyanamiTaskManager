@@ -22,13 +22,18 @@
 - 输入必须是可由声明 HEAD 直接检出的干净工作树；发布校验后源码变化即作废。
 - `--resume` 只允许完整 fingerprint 一致时复用，不能用局部 stage hash 绕过稳定签发门禁。
 - CI 门禁覆盖格式、lint、类型、单元/集成、构建；Windows 发布验证覆盖 E2E、benchmark、
-  Forge make、packaged、portable、distribution 与 installed smoke。
+  原生打包（package）、packaged、portable、distribution 与 installed smoke。
 - packaged 与 installed 层必须读取逐项报告；顶层布尔值不能替代逐项检查。
 - Setup 和 portable ZIP 都进入发布 manifest 与 checksum 文件；installed receipt 必须绑定
   实际安装的 Setup 身份和运行实例自报版本。
 - 正式安装验收必须从真实 `%LOCALAPPDATA%` 运行；不得使用只对单个 Agent 可见的覆盖层。
 - 发布前处理占用安装目录的桌面实例与 MCP stdio bridge；不得结束无关进程。
 - 用户数据目录不属于卸载产物，安装、升级和卸载均不得误删。
+- 版本目录带 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt`（随包 Node、链接进原生程序的 crate、打包进
+  core/renderer 的 npm 依赖）。随包 Node 的许可证原文放 `third_party/node/LICENSE`，
+  `third_party/node/VERSION` 写打包所用 node 的版本；缺失或版本不符时声明里留
+  `NODE_LICENSE_PENDING`，assemble-release 拒绝组装候选。
+- `--resume` 的证据同时绑定 `release/` 与 `output/package/` 两份制品；重新打包即作废。
 
 ## 执行入口
 

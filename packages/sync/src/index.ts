@@ -1,5 +1,5 @@
 /**
- * 电脑侧手机同步连接器（docs/mobile-sync.md §7、ADR-016）：配置与密钥、快照发布、
+ * 电脑侧手机同步连接器（docs/mobile-sync.md §7、ADR-017）：配置与密钥、快照发布、
  * 命令处理、在线状态。只做出站 HTTPS，默认关闭。
  */
 export { SyncConnector } from "./connector.js";

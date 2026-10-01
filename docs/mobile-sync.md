@@ -1,7 +1,7 @@
 # 手机同步、自建中继与 Claude 自动派单
 
 状态：设计定稿（2026-09-30），实现跟踪 ATM EPIC「手机端 ATM 与自建中继同步」。决策理由见
-[ADR-016](adr/ADR-016-mobile-relay-and-dispatch.md)。
+[ADR-017](adr/ADR-017-mobile-relay-and-dispatch.md)。
 
 ## 1. 目标与边界
 

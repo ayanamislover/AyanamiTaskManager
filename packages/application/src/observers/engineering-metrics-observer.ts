@@ -134,19 +134,22 @@ export class EngineeringMetricsObserver {
     taskKey: string,
     sourcePath: string,
   ): Promise<Record<string, unknown>> {
-    return this.#enqueue(JSON.stringify([projectCode, taskKey]), async () => {
-      const baseline = await this.#runtime.databases.ensureWorkItemEngineeringBaseline(
-        projectCode,
-        taskKey,
-        await gitHead(sourcePath),
-      );
-      return this.#runtime.databases.saveWorkItemEngineeringMetrics(
-        projectCode,
-        taskKey,
-        baseline.baseline,
-        await scanWorkItemChanges(sourcePath, baseline.baseline),
-      );
-    });
+    // 后台补扫不在任何服务方法里，自己登记在途：等 Git 期间连接不被别的操作回收关掉。
+    return this.#enqueue(JSON.stringify([projectCode, taskKey]), () =>
+      this.#runtime.databases.runActivity(async () => {
+        const baseline = await this.#runtime.databases.ensureWorkItemEngineeringBaseline(
+          projectCode,
+          taskKey,
+          await gitHead(sourcePath),
+        );
+        return this.#runtime.databases.saveWorkItemEngineeringMetrics(
+          projectCode,
+          taskKey,
+          baseline.baseline,
+          await scanWorkItemChanges(sourcePath, baseline.baseline),
+        );
+      }),
+    );
   }
 
   /**

@@ -147,6 +147,42 @@ describe("keyboard accessibility primitives", () => {
     ).not.toMatch(forcedProgress);
   });
 
+  // 磨砂（backdrop-filter）在高对比度与「减少透明度」下都要关掉。顶栏的磨砂挪到 ::before 之后，
+  // 高对比度那段只关了 .atm-topbar 本身，::before 还在糊——所以按「谁有磨砂」逐个核对，不按名单。
+  it("每个带磨砂的选择器在 forced-colors 与 reduced-transparency 下都被关掉", () => {
+    const unresetBlur = (css: string, media: string): string[] => {
+      css = css.replace(/\/\*[\s\S]*?\*\//gu, "");
+      const blocks = [
+        ...css.matchAll(new RegExp(`@media \\(${media}\\) \\{([\\s\\S]*?)\\n\\}`, "gu")),
+      ];
+      const outside = blocks.reduce((text, block) => text.replace(block[0], ""), css);
+      const selectorsWith = (text: string, value: (declared: string) => boolean) =>
+        [...text.matchAll(/([^{}]+)\{([^{}]*)\}/gu)]
+          .filter(([, , body]) =>
+            [...body!.matchAll(/backdrop-filter:\s*([^;]+);/gu)].some(([, declared]) =>
+              value(declared!.trim()),
+            ),
+          )
+          .flatMap(([, selectors]) => selectors!.split(",").map((selector) => selector.trim()));
+      const blurred = new Set(selectorsWith(outside, (declared) => declared !== "none"));
+      const reset = new Set(
+        blocks.flatMap((block) => selectorsWith(block[1]!, (declared) => declared === "none")),
+      );
+      return [...blurred].filter((selector) => !reset.has(selector)).sort();
+    };
+    const styles = uiCssText();
+    for (const media of ["forced-colors: active", "prefers-reduced-transparency: reduce"]) {
+      expect(unresetBlur(styles, media), media).toEqual([]);
+    }
+    // 阳性对照：再加一个带磨砂的面而不在两段里关掉，必须被点名。
+    expect(
+      unresetBlur(
+        `${styles}\n.atm-new-glass {\n  backdrop-filter: blur(8px);\n}\n`,
+        "forced-colors: active",
+      ),
+    ).toEqual([".atm-new-glass"]);
+  });
+
   it("窄屏侧栏收起时藏的是字标，logo 留着", () => {
     // 收起侧栏的是把 --atm-sidebar 压到 68px 的那一段。
     const narrow =
