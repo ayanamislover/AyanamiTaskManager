@@ -45,6 +45,10 @@ pub enum CoreEvent {
         code: String,
         message: String,
     },
+    /// The core found a delivered update and the user asked to install it (update.rs).
+    InstallUpdate {
+        manifest: String,
+    },
     Exited(Option<i32>),
 }
 
@@ -173,6 +177,13 @@ fn parse_value(frame: Value) -> Option<CoreEvent> {
         "fatal" => Some(CoreEvent::Fatal {
             code: frame.get("code")?.as_str()?.chars().take(64).collect(),
             message: frame.get("message")?.as_str()?.chars().take(2000).collect(),
+        }),
+        "install-update" => Some(CoreEvent::InstallUpdate {
+            manifest: frame
+                .get("manifest")?
+                .as_str()
+                .filter(|path| path.len() <= 1024)?
+                .to_owned(),
         }),
         _ => None,
     }

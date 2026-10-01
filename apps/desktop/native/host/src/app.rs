@@ -352,6 +352,14 @@ impl App {
                         core.request(id, "setNotificationMode", json!([mode]));
                     }
                 }
+                // The core re-checks the feed and answers with an install-update frame.
+                Some(tray::Action::InstallUpdate) => {
+                    if let Some(core) = self.core.as_ref().filter(|_| self.core_ready) {
+                        let id = self.next_core_id;
+                        self.next_core_id += 1;
+                        core.request(id, "applyUpdate", json!([]));
+                    }
+                }
                 Some(tray::Action::Quit) => self.quit(),
                 None => {}
             },
@@ -428,6 +436,19 @@ impl App {
             CoreEvent::Probed(_) => {}
             CoreEvent::Notify { title, body } => {
                 crate::notify::show(&self.layout.data_dir, &title, &body)
+            }
+            CoreEvent::InstallUpdate { manifest } => {
+                let result =
+                    crate::update::install(&self.layout.app_dir, &self.layout.data_dir, &manifest);
+                if let Err(error) = &result {
+                    crate::log(
+                        &self.layout.data_dir,
+                        &format!("install-update refused: {error}"),
+                    );
+                    if let Some(core) = &self.core {
+                        core.event("update-launch-failed");
+                    }
+                }
             }
             CoreEvent::Fatal { code, message } => {
                 crate::log(

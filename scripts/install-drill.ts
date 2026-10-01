@@ -30,7 +30,8 @@ const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
 const VERSION_A = "2.0.0";
 const VERSION_B = "2.0.1";
-const LEGACY = "1.2.2";
+/** The fake Electron install; any version below the drill packages (not the real one). */
+const LEGACY = "1.9.0";
 const AUMID = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
 const TOAST_CLSID = "{69f12b18-2bbb-5b7a-98b5-b8f0246b08a6}";
 const fakeElectron = join(
@@ -463,6 +464,111 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+type UpdateStatusFile = { code: string; version: string | null; outcome: string };
+
+function updateStatus(sandbox: Sandbox): UpdateStatusFile | null {
+  try {
+    return JSON.parse(
+      readFileSync(join(sandbox.data, "logs", "update-status.json"), "utf8"),
+    ) as UpdateStatusFile;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The update bridge: a package delivered to `<data>\updates` is found by the packaged core,
+ * then installed by exactly the command the host runs for "立即更新"
+ * (`atm-setup --update <manifest> --quiet --show`). The core → host frame and the host's
+ * path checks are covered by update-coordinator.test.ts and host update.rs tests.
+ */
+async function scenarioUpdate(pkg: Packages): Promise<void> {
+  currentScenario = "update";
+  const sandbox = new Sandbox("update");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] install ${VERSION_A}, deliver ${VERSION_B}\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+    sandbox.log(),
+  );
+  killAll(sandbox.dir);
+  const feed = join(sandbox.data, "updates");
+  mkdirSync(feed, { recursive: true });
+  // Delivery order: the zip first, the manifest last. Plus leftovers of the Squirrel era.
+  copyFileSync(
+    join(drillRoot, `package-${VERSION_B}`, `atm-${VERSION_B}-win-x64.zip`),
+    join(feed, `atm-${VERSION_B}-win-x64.zip`),
+  );
+  copyFileSync(pkg.b.manifest, join(feed, `atm-${VERSION_B}-win-x64.json`));
+  writeFileSync(join(feed, "RELEASES"), "drill");
+  writeFileSync(join(feed, "AyanamiTaskManager-1.0.0-full.nupkg"), "drill");
+  check("launcher start exits 0", runLauncher(sandbox, ["--background"]).status === 0);
+  check(
+    `packaged core reports ${VERSION_B} ready`,
+    await until(() => updateStatus(sandbox)?.code === "UPDATE_READY", 30_000),
+    updateStatus(sandbox),
+  );
+  check("Squirrel feed leftovers pruned", !existsSync(join(feed, "RELEASES")), readdirSync(feed));
+  check(
+    "the delivered package is kept until installed",
+    existsSync(join(feed, `atm-${VERSION_B}-win-x64.zip`)),
+  );
+
+  process.stdout.write(`[${currentScenario}] 立即更新 → ${VERSION_B}\n`);
+  // What UpdateCoordinator.apply() records before asking the host.
+  writeFileSync(
+    join(sandbox.data, "logs", "update-status.json"),
+    JSON.stringify({
+      ...updateStatus(sandbox),
+      phase: "INSTALL",
+      outcome: "IN_PROGRESS",
+      code: "INSTALLING",
+    }),
+  );
+  check(
+    "atm-setup --update --quiet --show exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+      "--update",
+      join(feed, `atm-${VERSION_B}-win-x64.json`),
+      "--quiet",
+      "--show",
+    ]) === 0,
+    sandbox.log(),
+  );
+  await installed(sandbox, VERSION_B, VERSION_A);
+  check(
+    "new version reports UPDATE_INSTALLED",
+    await until(() => updateStatus(sandbox)?.code === "UPDATE_INSTALLED", 30_000),
+    updateStatus(sandbox),
+  );
+  check(
+    "consumed package removed from the feed",
+    readdirSync(feed).length === 0,
+    readdirSync(feed),
+  );
+  const host = processes(join(sandbox.install, `app-${VERSION_B}`)).find((proc) =>
+    proc.path.endsWith("AyanamiTaskManager.exe"),
+  );
+  const window = host
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-Process -Id ${host.pid}).MainWindowHandle`,
+        ],
+        { encoding: "utf8", windowsHide: true },
+      ).stdout.trim()
+    : "";
+  check("--show: the new version opened its window", window !== "" && window !== "0", {
+    host,
+    window,
+  });
+  teardown(sandbox);
+}
+
 /** Setup dies right after persisting each state; the next start (the launcher) recovers. */
 async function scenarioFaults(pkg: Packages): Promise<void> {
   currentScenario = "faults";
@@ -584,7 +690,7 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
-/** A Squirrel 1.2.2 layout with its registrations, served by the fake Electron. */
+/** A Squirrel 1.x layout with its registrations, served by the fake Electron. */
 async function squirrelLayout(sandbox: Sandbox): Promise<void> {
   const app = join(sandbox.install, `app-${LEGACY}`);
   mkdirSync(join(app, "resources"), { recursive: true });
@@ -651,7 +757,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
   await squirrelLayout(sandbox);
   const stub = readFileSync(join(sandbox.install, "AyanamiTaskManager.exe"));
   check(
-    "fake Electron serves 1.2.2",
+    `fake Electron serves ${LEGACY}`,
     await until(() => sandbox.serviceVersion() === LEGACY),
     sandbox.serviceVersion(),
   );
@@ -713,7 +819,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
   );
   const desktop = shortcut(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk"));
   check(
-    "existing desktop shortcut rewritten: workdir no longer app-1.2.2",
+    `existing desktop shortcut rewritten: workdir no longer app-${LEGACY}`,
     samePath(desktop?.workdir ?? null, sandbox.install),
     desktop,
   );
@@ -835,6 +941,7 @@ async function main(): Promise<void> {
   const pkg = packages(process.argv.includes("--rebuild-packages"));
   const scenarios: Array<[string, (pkg: Packages) => Promise<void>]> = [
     ["lifecycle", scenarioLifecycle],
+    ["update", scenarioUpdate],
     ["faults", scenarioFaults],
     ["migration", scenarioMigration],
   ];

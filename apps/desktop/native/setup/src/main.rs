@@ -45,6 +45,7 @@ struct Args {
     quiet: bool,
     retry: bool,
     from_temp: bool,
+    show: bool,
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
@@ -55,6 +56,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         quiet: false,
         retry: false,
         from_temp: false,
+        show: false,
     };
     let mut rest = argv.iter();
     while let Some(arg) = rest.next() {
@@ -63,6 +65,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--quiet" => args.quiet = true,
             "--retry" => args.retry = true,
             "--from-temp" => args.from_temp = true,
+            "--show" => args.show = true,
             "install" | "--install" | "--update" => {
                 args.command = "install".into();
                 args.manifest = Some(PathBuf::from(
@@ -122,7 +125,13 @@ fn install(env: env::Env, args: &Args) -> i32 {
         }
     };
     let version = package.manifest.version.clone();
-    let mut setup = match txn::Setup::open(env, txn::Options { force: args.force }) {
+    let mut setup = match txn::Setup::open(
+        env,
+        txn::Options {
+            force: args.force,
+            show: args.show,
+        },
+    ) {
         Ok(setup) => setup,
         Err(error) => {
             log::warn(&format!("无法开始安装：{error}"));
@@ -168,7 +177,13 @@ fn with_setup(
     args: &Args,
     run: impl FnOnce(&mut txn::Setup) -> Result<i32, String>,
 ) -> i32 {
-    match txn::Setup::open(env, txn::Options { force: args.force }) {
+    match txn::Setup::open(
+        env,
+        txn::Options {
+            force: args.force,
+            show: args.show,
+        },
+    ) {
         Ok(mut setup) => match run(&mut setup) {
             Ok(code) => code,
             Err(error) => {

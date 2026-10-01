@@ -33,6 +33,9 @@ const MAX_ATTEMPTS: u32 = 2;
 pub struct Options {
     /// Terminate a service that will not quit (the user said so explicitly).
     pub force: bool,
+    /// Start versions with their window (an update the user started from the app);
+    /// otherwise in the background, as autostart would.
+    pub show: bool,
 }
 
 pub struct Setup {
@@ -496,8 +499,12 @@ impl Setup {
                 .health_dir()
                 .join(format!("service-{}.json", txn.id)),
         );
-        let (_child, identity) =
-            procs::spawn(&host, &["--txn-start", &txn.id, "--background"]).map_err(io)?;
+        let args: &[&str] = if self.options.show {
+            &["--txn-start", &txn.id]
+        } else {
+            &["--txn-start", &txn.id, "--background"]
+        };
+        let (_child, identity) = procs::spawn(&host, args).map_err(io)?;
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
         let deadline = Instant::now() + START_TIMEOUT;

@@ -42,18 +42,21 @@ const DEFAULT_LOG_FILES = 3;
 const MAX_DETAIL_LENGTH = 512;
 
 const updateActions: Record<string, string> = {
-  CHECK_FAILED: "请检查本地更新目录中的 RELEASES 与安装包是否完整。",
+  CHECK_FAILED: "请检查本地更新目录中的安装包清单（atm-*.json）与安装包是否完整。",
   DOWNLOAD_FAILED: "请确认更新包仍在本地更新目录中，并稍后重试。",
-  VERIFY_FAILED: "更新包校验失败，请重新生成并投递完整安装包。",
-  INSTALL_FAILED: "更新安装未完成；当前版本仍可使用，请重新运行安装包。",
+  VERIFY_FAILED: "更新包不完整，请重新生成并投递完整安装包。",
+  INSTALL_FAILED: "更新没有装上，当前版本仍可使用；安装日志在安装目录的 state\\setup.log。",
   UPDATE_FAILED: "当前版本仍可使用；请打开更新日志排查后重试。",
   UPDATE_SOURCE_MISSING: "当前没有待安装的本地更新，无需处理。",
   UPDATE_SOURCE_CONSUMED: "本地更新已经装好，旧安装包已清理。",
-  UPDATE_RUNNER_MISSING: "找不到 Squirrel 的 Update.exe，请重新运行安装包。",
+  UPDATE_RUNNER_MISSING: "找不到安装程序，请运行开始菜单里的「ATM 修复」。",
+  UPDATE_UNSUPPORTED: "便携版与源码运行不参与自动更新。",
   CHECKING: "正在检查本地更新。",
   UPDATE_AVAILABLE: "已发现新版本，正在下载并校验。",
   UP_TO_DATE: "当前已是最新版本。",
-  UPDATE_READY: "更新已就绪，下次启动时生效。",
+  UPDATE_READY: "新版本已就绪，点击「立即更新」重启生效。",
+  INSTALLING: "正在安装更新，完成后会自动重新打开。",
+  UPDATE_INSTALLED: "已更新到最新版本。",
 };
 
 function bounded(value: string): string {

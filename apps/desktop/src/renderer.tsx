@@ -60,6 +60,7 @@ type DesktopBridge = {
   getAutoLaunch(): Promise<boolean>;
   getUpdateStatus(): Promise<UpdateStatus | null>;
   checkForUpdates(): Promise<UpdateStatus | null>;
+  applyUpdate(): Promise<UpdateStatus | null>;
   showItemInFolder(path: string): Promise<void>;
   getMcpConfigs(): Promise<{
     streamableHttp: string;

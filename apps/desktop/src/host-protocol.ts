@@ -23,6 +23,7 @@ export const CORE_METHODS = [
   "runtimeRequest",
   "getUpdateStatus",
   "checkForUpdates",
+  "applyUpdate",
   "getMcpConfigs",
   "getMcpBridges",
   "getMemoryProfile",
@@ -67,7 +68,9 @@ export type HostEvent =
   | { t: "event"; name: "window-closed" }
   | { t: "event"; name: "startup-delay-cancelled" }
   // Windows 注销/关机：宿主收到 WM_ENDSESSION 后发来，core 同步写下退出标记再回 marked。
-  | { t: "event"; name: "session-end" };
+  | { t: "event"; name: "session-end" }
+  // core 要求安装更新，宿主核对路径后没能拉起 atm-setup。
+  | { t: "event"; name: "update-launch-failed" };
 
 export type HostShutdown = { t: "shutdown" };
 
@@ -100,6 +103,8 @@ export type CoreFrame =
   | { t: "tray"; snapshot: TraySnapshot }
   | { t: "notify"; title: string; body: string }
   | { t: "marked"; name: "session-end" }
+  /** 请宿主拉起 `<安装根>\atm-setup.exe --update <manifest>`；路径由宿主再核对一遍。 */
+  | { t: "install-update"; manifest: string }
   | { t: "fatal"; code: string; message: string };
 
 export type ProbeDatabase = {
@@ -125,6 +130,7 @@ const HOST_EVENTS = new Set([
   "window-closed",
   "startup-delay-cancelled",
   "session-end",
+  "update-launch-failed",
 ]);
 const CORE_METHOD_SET = new Set<string>(CORE_METHODS);
 

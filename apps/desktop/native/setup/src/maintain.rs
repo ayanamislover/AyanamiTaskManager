@@ -104,7 +104,7 @@ pub fn uninstall(env: &Env, quiet: bool, force: bool) -> Result<(), String> {
         return relaunch_from_temp(env, force);
     }
     {
-        let mut setup = Setup::open(env.clone(), crate::txn::Options { force })?;
+        let mut setup = Setup::open(env.clone(), crate::txn::Options { force, show: false })?;
         if let Some(txn) = setup.store.load(env).map_err(io)?
             && !txn.is_terminal()
         {

@@ -15,6 +15,7 @@ mod probe;
 mod session_end;
 mod single_instance;
 mod tray;
+mod update;
 mod webview_frames;
 mod win;
 

@@ -20,12 +20,14 @@ pub enum Action {
     QuickTask,
     Settings,
     NotificationMode(&'static str),
+    InstallUpdate,
     Quit,
 }
 
 pub const OPEN: &str = "atm.open";
 pub const QUICK: &str = "atm.quick";
 pub const SETTINGS: &str = "atm.settings";
+pub const UPDATE: &str = "atm.update";
 pub const QUIT: &str = "atm.quit";
 const MODES: [(&str, &str, &str); 3] = [
     ("ALL", "atm.mode.all", "全部通知"),
@@ -38,6 +40,7 @@ pub fn action(id: &MenuId) -> Option<Action> {
         OPEN => Action::Open,
         QUICK => Action::QuickTask,
         SETTINGS => Action::Settings,
+        UPDATE => Action::InstallUpdate,
         QUIT => Action::Quit,
         other => {
             let (mode, _, _) = MODES.iter().find(|(_, menu_id, _)| *menu_id == other)?;
@@ -64,9 +67,10 @@ pub fn menu(snapshot: &Snapshot) -> Menu {
         None,
     ));
     if let Some(version) = &snapshot.pending_update {
-        let _ = menu.append(&MenuItem::new(
-            format!("{version} 已就绪，重启生效"),
-            false,
+        let _ = menu.append(&MenuItem::with_id(
+            UPDATE,
+            format!("{version} 已就绪，点击重启更新"),
+            true,
             None,
         ));
     }
@@ -114,6 +118,7 @@ mod tests {
     #[test]
     fn menu_ids_map_to_actions() {
         assert_eq!(action(&MenuId::new(OPEN)), Some(Action::Open));
+        assert_eq!(action(&MenuId::new(UPDATE)), Some(Action::InstallUpdate));
         assert_eq!(
             action(&MenuId::new("atm.mode.critical")),
             Some(Action::NotificationMode("CRITICAL"))

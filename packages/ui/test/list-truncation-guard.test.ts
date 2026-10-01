@@ -54,6 +54,19 @@ const STRING_CLAMPS = new Map<string, string>([
     "apps/desktop/src/lifecycle-diagnostics.ts|const line = `${JSON.stringify({ at, event, runId, pid: process.pid, ppid: process.ppid, version: version.slice(0, 40), ...detail })}\\n`;",
     "版本号夹到 40 字，防止异常版本串撑大诊断日志行",
   ],
+  ["apps/desktop/src/core-main.ts|.slice(0, 4000);", "转到 stderr 的单条 console 输出夹到 4000 字"],
+  [
+    "apps/desktop/src/core-main.ts|message: error instanceof Error ? error.message.slice(0, 2000) : String(error),",
+    "fatal 帧的错误消息夹到 2000 字（宿主同样按 2000 截）",
+  ],
+  [
+    "apps/desktop/src/host-protocol.ts|message: error.message.slice(0, 2000),",
+    "跨协议的错误消息夹到 2000 字",
+  ],
+  [
+    'apps/desktop/src/host-protocol.ts|return { code: "CORE_METHOD_FAILED", message: String(error).slice(0, 2000) };',
+    "跨协议的错误消息夹到 2000 字",
+  ],
 ]);
 
 function sourceFiles(root: string): string[] {

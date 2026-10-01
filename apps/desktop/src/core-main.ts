@@ -29,7 +29,7 @@ import { normalizeNotificationMode } from "./notification-policy.js";
 import { isTrustedHostParent, queryParentIdentity } from "./parent-identity.js";
 import { injectFetch, type InjectableServer } from "./inject-fetch.js";
 import { parseRuntimeRequestInput, proxyRuntimeRequest } from "./runtime-request.js";
-import { createUpdateDiagnostics } from "./updater.js";
+import { installRootOf, UpdateCoordinator } from "./update-coordinator.js";
 
 /**
  * core 进程入口（打包为 runtime\core.mjs，由宿主以 atm-core.exe 启动）。
@@ -156,6 +156,7 @@ async function main(): Promise<void> {
   let maintenance: NodeJS.Timeout | null = null;
   let initialMaintenance: NodeJS.Timeout | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
+  let updates: UpdateCoordinator | null = null;
   let shuttingDown = false;
   /** 只读探测已回过 probed：之后宿主断管是正常结束，不是握手被拒。 */
   let probed = false;
@@ -167,6 +168,7 @@ async function main(): Promise<void> {
     if (heartbeat) clearInterval(heartbeat);
     if (initialMaintenance) clearTimeout(initialMaintenance);
     if (maintenance) clearInterval(maintenance);
+    updates?.stop();
     observer?.stop();
     let clean = code === 0;
     try {
@@ -178,8 +180,6 @@ async function main(): Promise<void> {
     lifecycle.finish(code, clean);
     process.exit(code);
   };
-
-  const updates = createUpdateDiagnostics(dataDir);
 
   const session = new HostControlSession({
     input: process.stdin,
@@ -228,15 +228,32 @@ async function main(): Promise<void> {
           userFetch,
         ),
       );
-      session.handle("getUpdateStatus", () => updates.read());
-      session.handle("checkForUpdates", () => updates.read());
       observer = new DesktopObserver({
         service: current.service,
-        pendingUpdate: () => null,
+        pendingUpdate: () => updates?.pendingUpdate ?? null,
         notify: (notification) => session.send({ t: "notify", ...notification }),
         trayChanged: (snapshot) => session.send({ t: "tray", snapshot }),
       });
       const activeObserver = observer;
+      const activeUpdates = new UpdateCoordinator({
+        dataDir,
+        currentVersion: DAEMON_VERSION,
+        installRoot: installRootOf(paths.appDir, paths.packaged),
+        requestInstall: (manifest) => session.send({ t: "install-update", manifest }),
+        onUpdateReady: (version) => {
+          activeObserver.refreshTray();
+          if (activeObserver.notificationMode() !== "OFF")
+            session.send({
+              t: "notify",
+              title: "AyanamiTaskManager 有新版本",
+              body: `${version} 已就绪，在托盘或设置里点「立即更新」。`,
+            });
+        },
+      });
+      updates = activeUpdates;
+      session.handle("getUpdateStatus", () => activeUpdates.status());
+      session.handle("checkForUpdates", () => activeUpdates.check());
+      session.handle("applyUpdate", () => activeUpdates.apply());
       session.handle("setNotificationMode", (mode) => {
         const normalized = normalizeNotificationMode(mode, true);
         if (normalized !== mode) throw new Error("NOTIFICATION_MODE_INVALID");
@@ -261,6 +278,7 @@ async function main(): Promise<void> {
         instanceId: current.descriptor.instanceId,
       });
       activeObserver.start();
+      activeUpdates.start();
       initialMaintenance = setTimeout(() => void current.service.runMaintenance(), 2500);
       maintenance = setInterval(() => void current.service.runMaintenance(), 60 * 60 * 1000);
       maintenance.unref();
@@ -277,6 +295,7 @@ async function main(): Promise<void> {
         lifecycle.record("session-end");
         session.send({ t: "marked", name: "session-end" });
       }
+      if (event.name === "update-launch-failed") updates?.launchFailed();
     },
     onClose(reason) {
       if (probed) process.exit(0);

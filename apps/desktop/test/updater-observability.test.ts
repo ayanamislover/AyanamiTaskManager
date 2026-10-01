@@ -40,7 +40,7 @@ describe("自动更新持久诊断", () => {
       outcome: "ERROR",
       code: "CHECK_FAILED",
       message: "更新清单不可读",
-      action: "请检查本地更新目录中的 RELEASES 与安装包是否完整。",
+      action: "请检查本地更新目录中的安装包清单（atm-*.json）与安装包是否完整。",
       at: "2026-08-26T12:00:00.000Z",
       version: null,
     });
