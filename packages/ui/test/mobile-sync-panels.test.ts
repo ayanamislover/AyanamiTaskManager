@@ -336,6 +336,30 @@ describe("Claude 自动开工面板", () => {
     expect(markup).not.toContain("atm-dispatch-summary");
   });
 
+  it("失败原因是缩进代码时原样显示，glob 不被当成粗体（peer R8-01）", () => {
+    const reason = "失败：\n\n    src/**/test/**";
+    const markup = panel(
+      dispatchStatus({
+        runs: [
+          {
+            run: "r5",
+            project: "DEMO",
+            key: "DEMO-T-0005",
+            title: "找不到测试",
+            origin: "mobile",
+            state: "failed",
+            sessionId: "s5",
+            createdAt: "2026-10-01T12:40:00.000Z",
+            endedAt: "2026-10-01T12:40:05.000Z",
+            error: reason,
+            summary: { numTurns: 1, durationMs: 10, totalCostUsd: 0, result: reason },
+          },
+        ],
+      }),
+    );
+    expect(markup).toContain('atm-dispatch-error">失败： src/**/test/**<');
+  });
+
   it("结果与原因原文不同、预览相同时只留红色那一行", () => {
     const markup = panel(
       dispatchStatus({

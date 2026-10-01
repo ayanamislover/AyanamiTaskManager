@@ -63,6 +63,33 @@ describe("派单结果的纯文本预览", () => {
       expect(plainPreview(text)).toBe(text);
   });
 
+  it("缩进按列算（Tab 到 4 列）：4 列及以上不开闭围栏，缩进代码按原文（peer R8-01）", () => {
+    expect(plainPreview(`${FENCE}text\n\t${FENCE}\n**literal**\n${FENCE}`)).toBe(
+      `${FENCE} **literal**`,
+    );
+    expect(plainPreview(`说明：\n\n\t${FENCE}ENOENT: missing a_b.ts\n\t**literal**`)).toBe(
+      `说明： ${FENCE}ENOENT: missing a_b.ts **literal**`,
+    );
+    expect(plainPreview("失败：\n\n    src/**/test/**")).toBe("失败： src/**/test/**");
+    expect(plainPreview("失败：\n\n    # literal\n    [a](b)\n    **literal**")).toBe(
+      "失败： # literal [a](b) **literal**",
+    );
+    // 3 列以内仍是围栏；两个空格加一个 Tab 正好 4 列，那一行按原文、也不开围栏，下一行仍是正文。
+    expect(plainPreview(`   ${FENCE}\n**保留**\n   ${FENCE}\n**去掉**`)).toBe("**保留** 去掉");
+    expect(plainPreview(`  \t${FENCE}\n**去掉**`)).toBe(`${FENCE} 去掉`);
+  });
+
+  it("链接文字里夹着行内代码也只留文字；代码里的链接写法不动（peer R8-02）", () => {
+    expect(plainPreview("查看 [日志 `a_b.ts`](./a_b.ts)")).toBe("查看 日志 a_b.ts");
+    expect(plainPreview("照抄 `[日志](./a_b.ts)` 原样")).toBe("照抄 [日志](./a_b.ts) 原样");
+  });
+
+  it("原文自带私用区字符时：有行内代码的那行按原文，没有代码的行照常清理且字符不丢", () => {
+    const privateUse = String.fromCharCode(0xe001);
+    expect(plainPreview(`**a** ${privateUse} \`x\``)).toBe(`**a** ${privateUse} \`x\``);
+    expect(plainPreview(`**a** ${privateUse}`)).toBe(`a ${privateUse}`);
+  });
+
   it("只看前 2000 个字符，截断不劈开代理对；异常长输入也很快", () => {
     expect(plainPreview("a".repeat(5000))).toBe("a".repeat(PREVIEW_INPUT_LIMIT));
     expect(plainPreview(`${"a".repeat(1999)}😀bb`)).toBe("a".repeat(1999));
