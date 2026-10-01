@@ -6,6 +6,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
@@ -28,6 +29,28 @@ const fakeHost = resolve(process.cwd(), "apps/desktop/test/fixtures/fake-dpapi.m
 const fake = (timeoutMs?: number) =>
   hostDpapi(process.execPath, { prefixArgs: [fakeHost], ...(timeoutMs ? { timeoutMs } : {}) });
 const realHost = resolve(process.cwd(), "apps/desktop/native/target/debug/AyanamiTaskManager.exe");
+const hostCrate = resolve(process.cwd(), "apps/desktop/native/host");
+
+/**
+ * 真宿主用例只在 debug 宿主已编译、且不比宿主源码旧时跑。落后的构建可能还不认 `--dpapi`（报出来是
+ * DPAPI_FAILED，像产品故障），也可能是改代码之前的行为（假绿）。和 cargo 一样按修改时间判断。
+ */
+function realHostState(): "missing" | "stale" | "ready" {
+  if (process.platform !== "win32" || !existsSync(realHost)) return "missing";
+  const sources = [
+    join(hostCrate, "Cargo.toml"),
+    ...readdirSync(join(hostCrate, "src"), { recursive: true, encoding: "utf8" }).map((name) =>
+      join(hostCrate, "src", name),
+    ),
+  ];
+  const newest = Math.max(...sources.map((path) => statSync(path).mtimeMs));
+  return newest > statSync(realHost).mtimeMs ? "stale" : "ready";
+}
+const realHostReady = realHostState();
+if (realHostReady === "stale")
+  console.warn(
+    "跳过真宿主 DPAPI 用例：apps/desktop/native/target/debug 里的宿主比 host 源码旧，先运行 cargo build -p atm-host",
+  );
 
 let counter = 0;
 const freshDirectory = () => join(work, `case-${(counter += 1)}`);
@@ -127,8 +150,10 @@ describe("经宿主调 DPAPI 的协议", () => {
     await expectGone(pid!);
   });
 
-  it.skipIf(process.platform !== "win32" || !existsSync(realHost))(
-    "真宿主（cargo build -p atm-host）：DPAPI 往返，篡改过的密文解不开",
+  it.skipIf(realHostReady !== "ready")(
+    realHostReady === "stale"
+      ? "真宿主：DPAPI 往返（跳过：debug 宿主比源码旧，先 cargo build -p atm-host）"
+      : "真宿主（cargo build -p atm-host）：DPAPI 往返，篡改过的密文解不开",
     async () => {
       const dpapi = hostDpapi(realHost);
       const secret = Buffer.from("space:0123456789abcdef");
