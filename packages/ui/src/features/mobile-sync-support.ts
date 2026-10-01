@@ -212,6 +212,8 @@ export function dispatchRefetchInterval(data: { runs: readonly DispatchRunView[]
 
 /** Claude Code 登录已过期时让用户在终端里跑的命令。 */
 export const CLAUDE_LOGIN_COMMAND = "claude auth login";
+/** 生成长期令牌（经 CLAUDE_CODE_OAUTH_TOKEN 使用），派单会话不再随登录过期。 */
+export const CLAUDE_TOKEN_COMMAND = "claude setup-token";
 
 /**
  * 设置页「Claude Code」一行：右侧徽标、下面一行小字，以及要不要给出去登录的提示条。

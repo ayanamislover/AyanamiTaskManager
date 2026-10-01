@@ -13,6 +13,7 @@ import { LoadingRows, MutationErrorAlert, SectionLoadError } from "../components
 import type { DesktopBridge, Notify } from "../contracts.js";
 import {
   CLAUDE_LOGIN_COMMAND,
+  CLAUDE_TOKEN_COMMAND,
   claudeReadiness,
   CONCURRENCY_OPTIONS,
   copyToClipboard,
@@ -192,10 +193,17 @@ function DispatchSettings({
       </div>
       {claude.needsLogin ? (
         <div className="atm-sync-note atm-claude-login" data-tone="warning">
-          <p>
-            Claude Code 未登录或登录已过期：在这台电脑的终端运行 <code>{CLAUDE_LOGIN_COMMAND}</code>
-            ，派单才能开工
-          </p>
+          <div className="atm-claude-login-copy">
+            <p>
+              Claude Code 未登录或登录已过期：在这台电脑的终端运行{" "}
+              <code>{CLAUDE_LOGIN_COMMAND}</code>
+              ，派单才能开工
+            </p>
+            <p className="atm-claude-login-alt">
+              想长期免登录：运行 <code>{CLAUDE_TOKEN_COMMAND}</code>{" "}
+              生成一年期令牌，设为用户环境变量 <code>CLAUDE_CODE_OAUTH_TOKEN</code> 后重启 ATM
+            </p>
+          </div>
           <button className="atm-button" type="button" onClick={() => void copyLoginCommand()}>
             复制命令
           </button>
@@ -326,7 +334,8 @@ function DispatchRuns({
                 <div className="atm-row-sub">
                   来自{dispatchOriginLabels[run.origin] ?? run.origin} · {runWindow(run)}
                 </div>
-                {run.summary?.result ? (
+                {/* 失败时 Claude 的结果原文常和错误原因是同一句（旧记录尤其如此），只留红色那一行。 */}
+                {run.summary?.result && run.summary.result.trim() !== run.error?.trim() ? (
                   <div className="atm-row-sub atm-dispatch-summary">{run.summary.result}</div>
                 ) : null}
                 {run.error ? (

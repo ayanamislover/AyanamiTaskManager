@@ -87,8 +87,18 @@
   justify-content: space-between;
   gap: 12px;
 }
-.atm-claude-login > p {
+.atm-claude-login-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+.atm-claude-login-copy > p {
   margin: 0;
+}
+/* 第二行是可选的长期办法，降一级。 */
+.atm-claude-login-alt {
+  color: var(--atm-text-muted);
+  font-size: 12px;
 }
 .atm-claude-login code {
   padding: 1px 6px;

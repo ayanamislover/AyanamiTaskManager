@@ -182,6 +182,8 @@ describe("Claude 自动开工面板", () => {
       "Claude Code 未登录或登录已过期：在这台电脑的终端运行 <code>claude auth login</code>，派单才能开工",
     );
     expect(markup).toContain(">复制命令</button>");
+    expect(markup).toContain("<code>claude setup-token</code>");
+    expect(markup).toContain("<code>CLAUDE_CODE_OAUTH_TOKEN</code>");
   });
 
   it("登录状态查不出来（null）或已登录时不提示", () => {
@@ -237,6 +239,47 @@ describe("Claude 自动开工面板", () => {
     expect(markup).toContain("0f5e7c1a…");
     expect(markup.match(/>结束<\/button>/gu)).toHaveLength(1);
     expect(markup.match(/>复制会话 ID<\/button>/gu)).toHaveLength(2);
+  });
+
+  it("失败记录：结果原文与错误原因相同只显示一次，不同就都显示", () => {
+    const failed = {
+      run: "r9",
+      project: "ATM",
+      key: "ATM-T-0009",
+      title: "登录过期",
+      origin: "mobile" as const,
+      state: "failed" as const,
+      sessionId: "s9",
+      createdAt: "2026-09-30T10:00:00.000Z",
+      endedAt: "2026-09-30T10:00:05.000Z",
+    };
+    const same = "Failed to authenticate: OAuth session expired";
+    const once = panel(
+      dispatchStatus({
+        runs: [
+          {
+            ...failed,
+            error: same,
+            summary: { numTurns: 1, durationMs: 10, totalCostUsd: 0, result: same },
+          },
+        ],
+      }),
+    );
+    expect(once.split(same)).toHaveLength(2);
+    expect(once).toContain(`atm-dispatch-error">${same}<`);
+    const both = panel(
+      dispatchStatus({
+        runs: [
+          {
+            ...failed,
+            error: "Claude Code 未登录或登录已过期",
+            summary: { numTurns: 1, durationMs: 10, totalCostUsd: 0, result: same },
+          },
+        ],
+      }),
+    );
+    expect(both).toContain(`atm-dispatch-summary">${same}<`);
+    expect(both).toContain('atm-dispatch-error">Claude Code 未登录或登录已过期<');
   });
 
   it("结束派单失败（500 DISPATCH_CANCEL_FAILED）：原因进列表上方的错误条，成败都刷新列表", () => {
