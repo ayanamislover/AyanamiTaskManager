@@ -39,19 +39,33 @@ export type BlurBenchmarkComparison = {
   thresholdExceeded: boolean;
 };
 
-export type BlurBenchmarkReport = {
-  schemaVersion: 1;
+/** schemaVersion 1：Electron 包，候选由主程序与 app.asar 共同确定。只为已发布的历史报告保留。 */
+export type ElectronBlurCandidate = {
+  gitHead: string;
+  gitDirty: false;
+  executableSha256: string;
+  asarSha256: string;
+  candidateSha256: string;
+};
+
+/**
+ * schemaVersion 2：原生宿主（WebView2）。没有 asar 了，被测的样式与脚本全在 renderer 目录，
+ * 候选由宿主 exe 与整个 renderer 目录的摘要共同确定。gitDirty 如实记录：只有显式
+ * --allow-dirty 的探索性运行才允许为 true，那种报告不能当发布证据。
+ */
+export type NativeBlurCandidate = {
+  gitHead: string;
+  gitDirty: boolean;
+  executableSha256: string;
+  rendererSha256: string;
+  candidateSha256: string;
+};
+
+type BlurBenchmarkReportBody = {
   generatedAt: string;
   durationMs: number;
   thresholdPercent: number;
   aggregationMethod: string;
-  candidate: {
-    gitHead: string;
-    gitDirty: false;
-    executableSha256: string;
-    asarSha256: string;
-    candidateSha256: string;
-  };
   device: {
     platform: string;
     architecture: string;
@@ -79,6 +93,14 @@ export type BlurBenchmarkReport = {
   };
   decision: "KEEP_BLUR" | "DISABLE_BLUR";
 };
+
+export type BlurBenchmarkReport =
+  | (BlurBenchmarkReportBody & { schemaVersion: 1; candidate: ElectronBlurCandidate })
+  | (BlurBenchmarkReportBody & {
+      schemaVersion: 2;
+      host: "webview2";
+      candidate: NativeBlurCandidate;
+    });
 
 const rounded = (value: number) => Math.round(value * 1_000) / 1_000;
 
@@ -152,16 +174,27 @@ export function compareBlurRows(
   });
 }
 
-export function assertBlurBenchmarkReport(report: BlurBenchmarkReport): void {
-  if (report.schemaVersion !== 1) throw new Error("blur benchmark schemaVersion 必须为 1");
+export function assertBlurBenchmarkReport(
+  report: BlurBenchmarkReport,
+  options: { allowDirty?: boolean } = {},
+): void {
+  if (report.schemaVersion !== 1 && report.schemaVersion !== 2)
+    throw new Error("blur benchmark schemaVersion 必须为 1（Electron）或 2（原生宿主）");
   if (report.durationMs < 10_000) throw new Error("每种模式必须至少连续测量 10 秒");
   if (!report.aggregationMethod.includes("requestAnimationFrame")) {
     throw new Error("性能报告缺少可审计聚合方法");
   }
-  if (report.candidate.gitDirty !== false) throw new Error("性能候选必须来自 clean Git tree");
+  // 脏树只放行显式 --allow-dirty 的原生探索报告；Electron 历史报告一律必须干净。
+  const dirtyAllowed = report.schemaVersion === 2 && options.allowDirty === true;
+  if (report.candidate.gitDirty !== false && !dirtyAllowed)
+    throw new Error("性能候选必须来自 clean Git tree");
+  if (report.schemaVersion === 2 && report.host !== "webview2")
+    throw new Error("原生性能报告必须标明 WebView2 宿主");
+  const candidateHashes =
+    report.schemaVersion === 1 ? [report.candidate.asarSha256] : [report.candidate.rendererSha256];
   for (const hash of [
     report.candidate.executableSha256,
-    report.candidate.asarSha256,
+    ...candidateHashes,
     report.candidate.candidateSha256,
   ]) {
     if (!/^[a-f0-9]{64}$/u.test(hash)) throw new Error("候选 hash 非法");
@@ -229,7 +262,9 @@ export function assertBlurBenchmarkReport(report: BlurBenchmarkReport): void {
       (background) => background === "transparent" || background === "rgba(0, 0, 0, 0)",
     )
   ) {
-    throw new Error("forced-colors/reduced-transparency 运行时 fallback 未命中");
+    throw new Error(
+      `forced-colors/reduced-transparency 运行时 fallback 未命中：${JSON.stringify(report.fallbacks)}`,
+    );
   }
   const recomputedComparisons = compareBlurRows(report.rows, report.thresholdPercent);
   if (JSON.stringify(recomputedComparisons) !== JSON.stringify(report.comparisons)) {

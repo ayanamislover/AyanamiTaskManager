@@ -1,10 +1,23 @@
+/**
+ * 毛玻璃性能基准：在原生 smoke 宿主（WebView2）里，三种窗口尺寸下各连续滚动 10 秒，
+ * 比较 blur 开/关的帧时间，决定是否保留 backdrop-filter。
+ *
+ * 窗口尺寸改的是宿主窗口本身（Win32 SetWindowPos，外框 = 视口 × DPI + 阴影边），
+ * 不是 CDP 的视口模拟——要测的是真实合成面积下的合成开销。
+ *
+ *   pnpm benchmark:blur-packaged                 只在 clean Git tree 上运行，报告可作证据
+ *   pnpm benchmark:blur-packaged --allow-dirty   探索性运行：报告如实记 gitDirty: true，不作证据
+ *
+ * 报告写 output/performance/native-blur-benchmark.json；Electron 时代的
+ * output/performance/packaged-blur-benchmark.json 是已发布的历史证据，不覆盖。
+ */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import { join, resolve } from "node:path";
-import { expect, _electron as electron, type CDPSession, type Page } from "@playwright/test";
+import { dirname, join, relative } from "node:path";
+import type { CDPSession, Page } from "@playwright/test";
 import { rendererPost } from "./renderer-user-request.js";
 import {
   assertBlurBenchmarkReport,
@@ -13,18 +26,29 @@ import {
   type BlurBenchmarkReport,
   type BlurBenchmarkRow,
 } from "./blur-benchmark-report.js";
+import { NativeWindowProbe, type NativeWindowState } from "./native-window.js";
+import {
+  connectRenderer,
+  openProjectFromSidebar,
+  outputRoot,
+  prepareSandbox,
+  requestShow,
+  smokeExecutable,
+  startSmokeHost,
+  stopSmokeHost,
+  waitForRuntime,
+  waitUntil,
+  withLoginItemsRestored,
+  type SmokeRenderer,
+} from "./smoke-host.js";
 
 const root = process.cwd();
-const executable = resolve(
-  process.env.ATM_PACKAGED_EXE ??
-    join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe"),
-);
-const asar = join(executable, "..", "resources", "app.asar");
-const dataDir = resolve(join(root, "output", "blur-benchmark-data"));
-const electronUserDataDir = resolve(join(root, "output", "blur-benchmark-electron-profile"));
-const outputDir = resolve(join(root, "output", "performance"));
-const screenshotDir = resolve(join(root, "output", "playwright"));
-const reportPath = resolve(join(outputDir, "packaged-blur-benchmark.json"));
+const executable = smokeExecutable();
+const rendererDir = join(dirname(executable), "renderer");
+const outputDir = join(outputRoot, "performance");
+const screenshotDir = join(outputRoot, "playwright");
+const reportPath = join(outputDir, "native-blur-benchmark.json");
+const allowDirty = process.argv.includes("--allow-dirty");
 const durationMs = 10_000;
 const thresholdPercent = 20;
 const viewports = [
@@ -33,16 +57,16 @@ const viewports = [
   { width: 3440, height: 1440 },
 ] as const;
 
-if (!existsSync(executable) || !existsSync(asar)) {
-  throw new Error(`找不到 packaged candidate：${executable}`);
-}
-
 const gitHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 const gitState = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
   cwd: root,
   encoding: "utf8",
 }).trim();
-if (gitState) throw new Error("packaged blur benchmark 只允许在 clean Git tree 上运行");
+const gitDirty = gitState.length > 0;
+if (gitDirty && !allowDirty)
+  throw new Error(
+    "packaged blur benchmark 只允许在 clean Git tree 上运行（探索性运行加 --allow-dirty，报告不作证据）",
+  );
 
 const sha256File = async (path: string): Promise<string> =>
   new Promise((resolveHash, reject) => {
@@ -53,31 +77,31 @@ const sha256File = async (path: string): Promise<string> =>
     stream.on("end", () => resolveHash(hash.digest("hex")));
   });
 
-const [executableSha256, asarSha256] = await Promise.all([
+/** renderer 目录的摘要：按相对路径排序，逐个文件「路径 + 内容摘要」再摘要一次。 */
+async function sha256Directory(directory: string): Promise<string> {
+  const entries = (await readdir(directory, { recursive: true, withFileTypes: true }))
+    .filter((entry) => entry.isFile())
+    .map((entry) => join(entry.parentPath, entry.name))
+    .sort((left, right) => relative(directory, left).localeCompare(relative(directory, right)));
+  if (entries.length === 0) throw new Error(`renderer 目录是空的：${directory}`);
+  const hash = createHash("sha256");
+  for (const path of entries)
+    hash.update(`${relative(directory, path).replaceAll("\\", "/")}\0${await sha256File(path)}\n`);
+  return hash.digest("hex");
+}
+
+const [executableSha256, rendererSha256] = await Promise.all([
   sha256File(executable),
-  sha256File(asar),
+  sha256Directory(rendererDir),
 ]);
 const candidateSha256 = createHash("sha256")
-  .update(JSON.stringify({ gitHead, executableSha256, asarSha256 }))
+  .update(JSON.stringify({ gitHead, gitDirty, executableSha256, rendererSha256 }))
   .digest("hex");
 
-await rm(dataDir, { recursive: true, force: true });
-await rm(electronUserDataDir, { recursive: true, force: true });
 await mkdir(outputDir, { recursive: true });
 await mkdir(screenshotDir, { recursive: true });
-
-const inheritedEnvironment = Object.fromEntries(
-  Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-);
-const application = await electron.launch({
-  executablePath: executable,
-  args: [`--user-data-dir=${electronUserDataDir}`],
-  env: {
-    ...inheritedEnvironment,
-    ATM_DATA_DIR: dataDir,
-    ATM_PACKAGED_SMOKE: "1",
-  },
-});
+const sandbox = await prepareSandbox("blur-benchmark");
+const probe = NativeWindowProbe.start();
 
 const scalarMetrics = (metrics: Array<{ name: string; value: number }>) => {
   const values = new Map(metrics.map((metric) => [metric.name, metric.value]));
@@ -155,23 +179,57 @@ const startTraceActivity = async (cdp: CDPSession) => {
   };
 };
 
+/**
+ * 顶栏的磨砂材质画在 .atm-topbar::before 上（shell.css），顶栏本身是透明的；窗口控件的材质在
+ * .atm-window-chrome 本身。开关、读回与 fallback 都对准真正画材质的那两个元素。
+ */
 const setBlur = async (page: Page, blur: "on" | "off") => {
   await page.evaluate((mode) => {
     document.getElementById("atm-blur-benchmark-override")?.remove();
     if (mode === "off") {
       const style = document.createElement("style");
       style.id = "atm-blur-benchmark-override";
-      style.textContent = ".atm-topbar, .atm-window-chrome { backdrop-filter: none !important; }";
+      style.textContent =
+        ".atm-topbar::before, .atm-window-chrome { backdrop-filter: none !important; }";
       document.head.append(style);
     }
   }, blur);
   await page.waitForTimeout(300);
 };
 
-try {
-  const page = await application.firstWindow();
-  await page.waitForSelector(".atm-shell");
+/**
+ * 把宿主窗口的客户区调成 viewport（CSS 像素）。外框比客户区多出阴影/缩放边，按当前差值补上；
+ * 窗口挪到显示器左上，让最大的 3440 宽视口也落在屏幕内。
+ */
+async function resizeClient(
+  window: NativeWindowState,
+  page: Page,
+  viewport: { width: number; height: number },
+): Promise<void> {
+  const state = await probe.state(window.hwnd);
+  const devicePixelRatio = await page.evaluate(() => globalThis.devicePixelRatio);
+  const left = state.client.x - state.window.x;
+  const top = state.client.y - state.window.y;
+  await probe.setBounds(window.hwnd, {
+    x: state.monitor.x - left,
+    y: state.monitor.y - top,
+    width: Math.round(viewport.width * devicePixelRatio) + state.window.width - state.client.width,
+    height:
+      Math.round(viewport.height * devicePixelRatio) + state.window.height - state.client.height,
+  });
+  const actual = await waitUntil(
+    async () => {
+      const size = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+      return size.width === viewport.width && size.height === viewport.height ? size : null;
+    },
+    10_000,
+    `视口 ${viewport.width}x${viewport.height}`,
+  );
+  if (!actual) throw new Error(`视口没有跟上宿主窗口：${JSON.stringify(viewport)}`);
+}
 
+async function measure(renderer: SmokeRenderer, window: NativeWindowState): Promise<void> {
+  const page = renderer.page;
   // 搭数据要以用户身份写（/ui/*），daemon.json 的 Agent 凭证会被拒，所以经 renderer 走。
   const post = (path: string, body: unknown): Promise<any> => rendererPost(page, path, body);
 
@@ -205,14 +263,12 @@ try {
       }),
     });
   }
-  await page.evaluate(() => {
-    location.hash = "project:BLUR";
-    location.reload();
-  });
-  await page.waitForSelector(".atm-shell");
-  await expect
-    .poll(() => page.locator(".atm-table tbody tr").count(), { timeout: 20_000 })
-    .toBe(240);
+  await openProjectFromSidebar(page, "Packaged Blur Performance");
+  await waitUntil(
+    async () => ((await page.locator(".atm-table tbody tr").count()) === 240 ? true : null),
+    20_000,
+    "长列表 240 行",
+  );
   const scrollRange = await page
     .locator(".atm-main")
     .evaluate((element) => element.scrollHeight - element.clientHeight);
@@ -220,21 +276,14 @@ try {
 
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
-  const nativeWindow = await application.browserWindow(page);
   const rows: BlurBenchmarkRow[] = [];
   for (const [viewportIndex, viewport] of viewports.entries()) {
-    await nativeWindow.evaluate(
-      (window, size) => window.setSize(size.width, size.height),
-      viewport,
-    );
-    await expect
-      .poll(() => page.evaluate(() => ({ width: innerWidth, height: innerHeight })))
-      .toMatchObject({ width: viewport.width, height: viewport.height });
+    await resizeClient(window, page, viewport);
     const order: Array<"on" | "off"> = viewportIndex % 2 === 0 ? ["on", "off"] : ["off", "on"];
     for (const blur of order) {
       await setBlur(page, blur);
       const computed = await page.evaluate(() => ({
-        topbar: getComputedStyle(document.querySelector(".atm-topbar")!).backdropFilter,
+        topbar: getComputedStyle(document.querySelector(".atm-topbar")!, "::before").backdropFilter,
         window: getComputedStyle(document.querySelector(".atm-window-chrome")!).backdropFilter,
       }));
       if (
@@ -300,9 +349,10 @@ try {
   await page.emulateMedia({ forcedColors: "active" });
   const forcedColors = await page.evaluate(() => ({
     matched: matchMedia("(forced-colors: active)").matches,
-    topbar: getComputedStyle(document.querySelector(".atm-topbar")!).backdropFilter,
+    topbar: getComputedStyle(document.querySelector(".atm-topbar")!, "::before").backdropFilter,
     window: getComputedStyle(document.querySelector(".atm-window-chrome")!).backdropFilter,
-    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!).backgroundColor,
+    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!, "::before")
+      .backgroundColor,
     windowBackground: getComputedStyle(document.querySelector(".atm-window-chrome")!)
       .backgroundColor,
   }));
@@ -312,12 +362,14 @@ try {
   });
   const reducedTransparency = await page.evaluate(() => ({
     matched: matchMedia("(prefers-reduced-transparency: reduce)").matches,
-    topbar: getComputedStyle(document.querySelector(".atm-topbar")!).backdropFilter,
+    topbar: getComputedStyle(document.querySelector(".atm-topbar")!, "::before").backdropFilter,
     window: getComputedStyle(document.querySelector(".atm-window-chrome")!).backdropFilter,
-    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!).backgroundColor,
+    topbarBackground: getComputedStyle(document.querySelector(".atm-topbar")!, "::before")
+      .backgroundColor,
     windowBackground: getComputedStyle(document.querySelector(".atm-window-chrome")!)
       .backgroundColor,
   }));
+  await cdp.send("Emulation.setEmulatedMedia", { features: [] });
   const device = await page.evaluate(() => {
     const canvas = document.createElement("canvas");
     const gl = canvas.getContext("webgl");
@@ -330,9 +382,11 @@ try {
         debug && gl ? String(gl.getParameter(debug.UNMASKED_RENDERER_WEBGL)) : "unknown",
     };
   });
+  await cdp.detach();
   const comparisons = compareBlurRows(rows, thresholdPercent);
   const report: BlurBenchmarkReport = {
-    schemaVersion: 1,
+    schemaVersion: 2,
+    host: "webview2",
     generatedAt: new Date().toISOString(),
     durationMs,
     thresholdPercent,
@@ -340,9 +394,9 @@ try {
       "Raw requestAnimationFrame deltas; p50/p95 use linear interpolation; a dropped frame exceeds 1.5x the measured median; visible drop means at least 3 consecutive dropped frames.",
     candidate: {
       gitHead,
-      gitDirty: false,
+      gitDirty,
       executableSha256,
-      asarSha256,
+      rendererSha256,
       candidateSha256,
     },
     device: {
@@ -369,11 +423,53 @@ try {
     },
     decision: comparisons.some((entry) => entry.thresholdExceeded) ? "DISABLE_BLUR" : "KEEP_BLUR",
   };
-  assertBlurBenchmarkReport(report);
+  try {
+    assertBlurBenchmarkReport(report, { allowDirty });
+  } catch (error) {
+    // 一轮要测一分多钟：被拒的报告另存一份，量到的数据不丢，但不占用正式报告的位置。
+    await writeFile(
+      reportPath.replace(/\.json$/u, ".rejected.json"),
+      `${JSON.stringify({ rejected: String(error), report }, null, 2)}\n`,
+      "utf8",
+    );
+    throw error;
+  }
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   process.stdout.write(
-    `${JSON.stringify({ ok: true, report: reportPath, candidateSha256, decision: report.decision, comparisons })}\n`,
+    `${JSON.stringify({ ok: true, report: reportPath, gitDirty, candidateSha256, decision: report.decision, comparisons })}\n`,
   );
+}
+
+const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+try {
+  await withLoginItemsRestored(async () => {
+    let renderer: SmokeRenderer | null = null;
+    try {
+      await waitForRuntime(host);
+      await requestShow(host);
+      const window = await waitUntil(
+        async () => {
+          const state = await probe.appWindow(host.pid);
+          return state?.visible ? state : null;
+        },
+        20_000,
+        "应用窗口可见",
+      );
+      renderer = await connectRenderer(host);
+      await renderer.page.waitForSelector(".atm-shell");
+      await measure(renderer, window);
+    } catch (error) {
+      // 失败时留一张现场截图。
+      await renderer?.page
+        .screenshot({ path: join(screenshotDir, "packaged-blur-failure.png"), timeout: 5_000 })
+        .catch(() => undefined);
+      throw error;
+    } finally {
+      await renderer?.browser.close().catch(() => undefined);
+      if (!(await stopSmokeHost(host)))
+        process.stderr.write(`宿主没有按 --smoke-quit 干净退出：${host.stderr.join("")}\n`);
+    }
+  });
 } finally {
-  await application.close();
+  probe.close();
 }
