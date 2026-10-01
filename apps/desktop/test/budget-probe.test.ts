@@ -2,7 +2,14 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { describe, expect, it } from "vitest";
-import { BUDGET_PROBE, EXITED_STATES, type ProcessTree } from "../../../scripts/budget-probe.js";
+import {
+  BUDGET_PROBE,
+  buildProcessTree,
+  descendantsExited,
+  EXITED_STATES,
+  requireExitConfirmed,
+  type RawProcessTree,
+} from "../../../scripts/budget-probe.js";
 import { powershellScratch } from "../../../scripts/powershell-scratch.js";
 
 /** 起一个真探针，按行问答；结束时连同临时根一起收掉。 */
@@ -59,14 +66,24 @@ describe("预算探针（真编译、真跑）", () => {
           ),
         );
         await withProbe(async (ask) => {
-          const tree = JSON.parse(await ask(`tree ${parent.pid}`)) as ProcessTree;
+          const tree = buildProcessTree(
+            JSON.parse(await ask(`tree ${parent.pid}`)) as RawProcessTree,
+            parent.pid!,
+          );
+          expect(tree.unmeasured).toEqual([]);
           expect(tree.unknown).toEqual([]);
           const child = tree.rows.find((row) => row.pid === childPid)!;
           expect(child).toMatchObject({ ppid: parent.pid, exe: "node.exe" });
           expect(child.ws).toBeGreaterThan(0);
           expect(child.ticks).toMatch(/^\d{17,}$/u);
           // 不存在的根：空树，不是失败。
-          expect(JSON.parse(await ask("tree 4294960"))).toEqual({ rows: [], unknown: [] });
+          const missing = JSON.parse(await ask("tree 4294960")) as RawProcessTree;
+          expect(missing.members).toEqual([]);
+          expect(buildProcessTree(missing, 4294960)).toEqual({
+            rows: [],
+            unknown: [],
+            unmeasured: [],
+          });
           const otherTicks = String(BigInt(child.ticks) + 1n);
           expect(await ask(`alive ${child.pid} ${child.ticks}`)).toBe("same");
           expect(await ask(`alive ${child.pid} ${otherTicks}`)).toBe("other");
@@ -90,26 +107,117 @@ describe("预算探针（真编译、真跑）", () => {
     90_000,
   );
 
-  // 进程树身份（Codex R7-P2-3/4）：成员与出生时间在同一个句柄上取，快照之后出生的（PID 被复用）
-  // 与早于父进程出生的都排除；查不了的单列 unknown，不悄悄丢掉。这几条无法在真机上稳定造出来，
-  // 守住源码里的判定。
-  it("树成员按快照时间与父进程出生时间认人，查不了的单列", () => {
-    const source = readFileSync("scripts/budget-probe.ts", "utf8");
-    const snapshot = source.indexOf("CreateToolhelp32Snapshot(2, 0);");
-    const taken = source.indexOf("DateTime taken = DateTime.UtcNow;");
-    expect(snapshot).toBeGreaterThan(0);
-    expect(taken).toBeGreaterThan(snapshot);
-    expect(source).toContain("if (birth > taken || birth < started[tree[index]])");
-    expect(source).toContain('if (state == "unknown") { unknown.Add(child); continue; }');
-    expect(source).toContain("catch { unknown.Add(pid); continue; }");
-    expect(source).toContain("IntPtr pinned = process.Handle;");
-    expect(source).not.toMatch(/catch \{ \}/u);
-    expect(source).not.toContain("DateTime.MaxValue");
+  // 进程树身份（Codex R7-P2-3/4、R8-P2-1/2）：判定是纯函数，直接拿竞态数据做回归。
+  describe("buildProcessTree", () => {
+    const member = (
+      pid: number,
+      ppid: number,
+      ticks: number | null,
+      extra: Partial<RawProcessTree["members"][number]> = {},
+    ): RawProcessTree["members"][number] => ({
+      pid,
+      ppid,
+      exe: "x.exe",
+      state: "ok",
+      ticks: ticks === null ? null : String(ticks),
+      ws: 10,
+      priv: 20,
+      ...extra,
+    });
+
+    it("快照前界限之后出生的（PID 被复用）记为查不了，不当成员", () => {
+      // R8 反例：父出生 100、快照前界限 200、PID 被复用的新对象出生 250。旧做法在快照之后才取
+      // 时间（300），会把它认成子孙，之后 KillSame 核对 ticks 也对得上，就结束了无关进程。
+      const tree = buildProcessTree(
+        { bound: "200", members: [member(1, 0, 100), member(2, 1, 250)] },
+        1,
+      );
+      expect(tree.rows.map((row) => row.pid)).toEqual([1]);
+      expect(tree.unknown).toEqual([2]);
+      expect(descendantsExited(tree, [])).toBe(false);
+    });
+
+    it("早于父进程出生的不是子孙（父 PID 被复用过），排除且不展开", () => {
+      const tree = buildProcessTree(
+        { bound: "500", members: [member(1, 0, 300), member(2, 1, 100), member(3, 2, 400)] },
+        1,
+      );
+      expect(tree.rows.map((row) => row.pid)).toEqual([1]);
+      expect(tree.unknown).toEqual([]);
+    });
+
+    it("根查不了身份：整棵树不完整，不能确认子孙已退出", () => {
+      // R8-P2-2：旧做法把根从 unknown 里滤掉，空子孙列表就成了「全部退出」。
+      const tree = buildProcessTree(
+        { bound: "500", members: [member(1, 0, null, { state: "unknown" }), member(2, 1, 300)] },
+        1,
+      );
+      expect(tree).toEqual({ rows: [], unknown: [1], unmeasured: [] });
+      expect(descendantsExited(tree, [])).toBe(false);
+    });
+
+    it("查不了的子孙单列且不展开；已退出的不算成员也不算查不了", () => {
+      const tree = buildProcessTree(
+        {
+          bound: "500",
+          members: [
+            member(1, 0, 100),
+            member(2, 1, null, { state: "unknown" }),
+            member(3, 2, 300),
+            member(4, 1, null, { state: "gone" }),
+            member(5, 1, 200),
+          ],
+        },
+        1,
+      );
+      expect(tree.rows.map((row) => row.pid)).toEqual([1, 5]);
+      expect(tree.unknown).toEqual([2]);
+    });
+
+    it("身份确认但内存读不到：仍是成员（收尾要等它），另列 unmeasured", () => {
+      const tree = buildProcessTree(
+        { bound: "500", members: [member(1, 0, 100), member(2, 1, 200, { ws: null, priv: null })] },
+        1,
+      );
+      expect(tree.rows.find((row) => row.pid === 2)).toMatchObject({ ws: -1, priv: -1 });
+      expect(tree.unmeasured).toEqual([2]);
+      expect(tree.unknown).toEqual([]);
+    });
+
+    it("只有树查全了、每个子孙都明确 gone / other 才算确认退出", () => {
+      const complete = buildProcessTree(
+        { bound: "500", members: [member(1, 0, 100), member(2, 1, 200)] },
+        1,
+      );
+      expect(descendantsExited(complete, ["gone"])).toBe(true);
+      expect(descendantsExited(complete, ["other"])).toBe(true);
+      expect(descendantsExited(complete, ["same"])).toBe(false);
+      expect(descendantsExited(complete, ["unknown"])).toBe(false);
+      expect(descendantsExited(complete, ["null"])).toBe(false);
+      expect(descendantsExited(null, [])).toBe(false);
+    });
+  });
+
+  // R8-P2-3：没确认退出就停止后续轮次，不再刷新、复用这一轮的数据目录。
+  it("每轮保存退出证据之后确认，没确认就停", () => {
+    expect(() => requireExitConfirmed("第 1 轮", { confirmed: false })).toThrow(/停止后续轮次/u);
+    expect(() => requireExitConfirmed("第 1 轮", { confirmed: true })).not.toThrow();
     const budget = readFileSync("scripts/budget-measure.ts", "utf8");
-    expect(budget).toContain('if (line === "null") throw new Error(');
-    expect(budget).toContain("summarize(await probe.measuredTree(hostPid)");
-    expect(budget).toContain("states.every((state) => EXITED_STATES.has(state))");
-    expect(budget).toContain("const gone = left && tree !== null && unlisted === 0;");
-    expect(budget).not.toMatch(/state === "unknown"/u);
+    const main = budget.slice(budget.indexOf("await withLoginItemsRestored(async () => {"));
+    // 四处收尾（内存、前台、后台、smoke）各确认一次，且都在保存证据之后。
+    const confirms = [...main.matchAll(/requireExitConfirmed\(/gu)].map((match) => match.index!);
+    expect(confirms).toHaveLength(4);
+    for (const at of confirms) {
+      expect(main.slice(0, at).trimEnd().endsWith("save();")).toBe(true);
+    }
+    // 收尾的结论来自纯函数，根不再被滤掉；宿主提前退出不算确认。
+    expect(budget).toContain("const confirmed = descendantsExited(tree, states);");
+    expect(budget).not.toMatch(/unknown\.filter\(\(pid\) => pid !== host\.pid\)/u);
+    expect(budget).toMatch(/reply: "already-exited",\s*confirmed: false,/u);
+    const probe = readFileSync("scripts/budget-probe.ts", "utf8");
+    expect(probe.indexOf("long bound = DateTime.UtcNow.Ticks;")).toBeGreaterThan(0);
+    expect(probe.indexOf("long bound = DateTime.UtcNow.Ticks;")).toBeLessThan(
+      probe.indexOf("IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);"),
+    );
   });
 });

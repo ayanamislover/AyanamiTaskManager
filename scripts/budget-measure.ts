@@ -62,9 +62,14 @@ import {
 import { powershellScratch } from "./powershell-scratch.js";
 import {
   BUDGET_PROBE as PROBE,
+  buildProcessTree,
+  descendantsExited,
   EXITED_STATES,
+  requireExitConfirmed,
+  treeComplete,
   type ProcessRow,
   type ProcessTree,
+  type RawProcessTree,
 } from "./budget-probe.js";
 
 const MIB = 1024 * 1024;
@@ -303,21 +308,29 @@ class ProcessProbe {
   }
 
   /**
-   * 以 pid 为根的进程树。rows 是认得出身份、读得到内存的成员；unknown 是查不了的成员 PID
-   * （不悄悄丢掉）。整次查询失败抛错，不当成空树。
+   * 以 pid 为根的进程树（判定见 buildProcessTree）：查不了身份的列在 unknown、读不到内存的
+   * 列在 unmeasured，不悄悄丢掉。整次查询失败抛错，不当成空树。
    */
   async tree(pid: number): Promise<ProcessTree> {
     const line = await this.ask(`tree ${pid}`);
     if (line === "null") throw new Error(`进程树查询失败：${pid}`);
-    return JSON.parse(line) as ProcessTree;
+    return buildProcessTree(JSON.parse(line) as RawProcessTree, pid);
   }
 
-  /** 用来量内存的树：有查不了的成员就不出样本，免得少算。 */
+  /**
+   * 用来量内存的树：有查不了身份或读不到内存的成员就不出样本，免得少算。快照前后刚好有进程
+   * 出生会被记成查不了，短暂重试几次。
+   */
   async measuredTree(pid: number): Promise<ProcessRow[]> {
-    const tree = await this.tree(pid);
-    if (tree.unknown.length > 0)
-      throw new Error(`进程树里有查不了的成员，样本不可信：${tree.unknown.join(",")}`);
-    return tree.rows;
+    for (let attempt = 1; ; attempt += 1) {
+      const tree = await this.tree(pid);
+      if (treeComplete(tree) && tree.unmeasured.length === 0) return tree.rows;
+      if (attempt >= 3)
+        throw new Error(
+          `进程树查不全，样本不可信：unknown ${tree.unknown.join(",")}; unmeasured ${tree.unmeasured.join(",")}`,
+        );
+      await sleep(200);
+    }
   }
 
   async close(hwnd: number): Promise<boolean> {
@@ -493,36 +506,38 @@ async function quitHost(
 ): Promise<{
   graceful: boolean;
   reply: string;
+  /** 确认了宿主的整棵子孙树都已退出（见 descendantsExited）。 */
+  confirmed: boolean;
   descendantsGoneMs: number | null;
   descendantsUnknown: number;
   treeFailed: boolean;
 }> {
+  // 宿主在收尾前就自己退出了：子孙树已经没法从它查起，不能确认。
   if (childExited(host.child))
     return {
-      graceful: true,
+      graceful: false,
       reply: "already-exited",
+      confirmed: false,
       descendantsGoneMs: null,
       descendantsUnknown: 0,
-      treeFailed: false,
+      treeFailed: true,
     };
   // 先记下整棵树：宿主退出后 WebView2 浏览器进程可能还要一会儿才走，下一轮不能和它共用用户数据目录。
   // 出生时间与树成员身份一起取：之后只认 PID 上仍是这个进程的，PID 被复用给别人时不碰它。
-  // 树查不全（整次失败，或有成员查不了身份）就不能声称子孙都已退出：如实报告。
+  // 树查不全（整次失败，或有候选——包括根——查不了身份）就不能声称子孙都已退出：如实报告。
   const tree = await probe.tree(host.pid).catch(() => null);
   const descendants = (tree?.rows ?? []).filter((row) => row.pid !== host.pid);
-  const unlisted = tree ? tree.unknown.filter((pid) => pid !== host.pid).length : 0;
   const reply = await sendPipe(pipeName(await probe.session(host.pid)), { cmd: "QUIT" });
-  let graceful = await exited(host, 20_000);
+  const graceful = await exited(host, 20_000);
   if (!graceful) {
     killProcessTree(host.pid);
     await exited(host, 5_000);
   }
   const quitAt = Date.now();
-  let unknown = 0;
+  let states: string[] = [];
   const left = await until(
     async () => {
-      const states = await Promise.all(descendants.map((row) => probe.alive(row)));
-      unknown = states.filter((state) => state !== "same" && !EXITED_STATES.has(state)).length;
+      states = await Promise.all(descendants.map((row) => probe.alive(row)));
       // 只有明确 gone / other 才算走了；same 与查不了的都等，最后如实报告。
       return states.every((state) => EXITED_STATES.has(state)) ? true : null;
     },
@@ -530,17 +545,17 @@ async function quitHost(
     "宿主的子孙进程退出",
     50,
   ).catch(() => false);
-  const gone = left && tree !== null && unlisted === 0;
-  if (!left) {
-    graceful = false;
-    for (const row of descendants) await probe.killSame(row);
-  }
+  if (!left) for (const row of descendants) await probe.killSame(row);
+  const confirmed = descendantsExited(tree, states);
   return {
-    graceful: graceful && gone,
+    graceful: graceful && confirmed,
     reply,
-    descendantsGoneMs: gone ? Date.now() - quitAt : null,
-    // 查不了身份的子孙个数（退出前就查不了的，加上最后一轮仍查不了的）：非 0 时「子孙已退出」不成立。
-    descendantsUnknown: unlisted + (left ? 0 : unknown),
+    confirmed,
+    descendantsGoneMs: confirmed ? Date.now() - quitAt : null,
+    // 查不了身份的个数：快照时就查不了的候选，加上最后一轮仍查不了的子孙。
+    descendantsUnknown:
+      (tree?.unknown.length ?? 0) +
+      states.filter((state) => state !== "same" && !EXITED_STATES.has(state)).length,
     treeFailed: tree === null,
   };
 }
@@ -816,8 +831,10 @@ try {
   const nativeWindows = windows;
   await nativeWindows.windows(process.pid);
   await withLoginItemsRestored(async () => {
-    report.memory = await measureMemory(production, probe, nativeWindows);
+    const memory = await measureMemory(production, probe, nativeWindows);
+    report.memory = memory;
     save();
+    requireExitConfirmed("内存测量", memory.quit);
     if (memoryOnly) return;
 
     const production_foreground = [];
@@ -825,14 +842,22 @@ try {
     // 第一轮带着刚才那次运行留下的 WebView2 用户数据目录，和用户日常登录一致。
     for (let run = 0; run < coldRuns; run += 1) {
       freshRunData(true);
-      production_foreground.push(
-        await coldStartProduction(production, probe, nativeWindows, false),
-      );
+      const result = await coldStartProduction(production, probe, nativeWindows, false);
+      production_foreground.push(result);
+      report.coldStartProduction = { foreground: production_foreground };
       save();
+      requireExitConfirmed(`前台冷启动第 ${run + 1} 轮`, result.quit);
     }
     for (let run = 0; run < coldRuns; run += 1) {
       freshRunData(true);
-      production_background.push(await coldStartProduction(production, probe, nativeWindows, true));
+      const result = await coldStartProduction(production, probe, nativeWindows, true);
+      production_background.push(result);
+      report.coldStartProduction = {
+        foreground: production_foreground,
+        background: production_background,
+      };
+      save();
+      requireExitConfirmed(`后台冷启动第 ${run + 1} 轮`, result.quit);
     }
     report.coldStartProduction = {
       foreground: production_foreground,
@@ -843,8 +868,11 @@ try {
     const smokeRuns = [];
     for (let run = 0; run < Math.min(coldRuns, 3); run += 1) {
       freshRunData(true);
-      smokeRuns.push(await coldStartSmoke(smoke, probe, nativeWindows));
+      const result = await coldStartSmoke(smoke, probe, nativeWindows);
+      smokeRuns.push(result);
+      report.coldStartSmoke = smokeRuns;
       save();
+      requireExitConfirmed(`smoke 冷启动第 ${run + 1} 轮`, result.quit);
     }
     report.coldStartSmoke = smokeRuns;
   }, [production, smoke]);

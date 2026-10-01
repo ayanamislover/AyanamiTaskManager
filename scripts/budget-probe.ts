@@ -1,21 +1,117 @@
 /**
  * 预算测量用的常驻 PowerShell 进程探针（Toolhelp32 进程树 + 出生身份 + 标量查询）。
  * 单独成模块、无副作用：budget-measure.ts 用它，测试也能直接真编译、真跑。
+ *
+ * 分工：C# 只采集原始数据（快照里的候选、各自的出生时间与内存，句柄拿住时读）；谁算这棵树的
+ * 成员、哪些查不了，由下面的纯函数 buildProcessTree 判定，可以直接拿竞态数据做回归。
  */
 export type ProcessRow = {
   pid: number;
   ppid: number;
   exe: string;
+  /** 读不到时为 -1，并列在 ProcessTree.unmeasured。 */
   ws: number;
   priv: number;
   /** 出生时间（.NET ticks，UTC）：与树成员身份一起取，之后按它认人。 */
   ticks: string;
 };
 
-export type ProcessTree = { rows: ProcessRow[]; unknown: number[] };
+export type ProcessTree = {
+  /** 认得出身份的成员（含根）。 */
+  rows: ProcessRow[];
+  /** 查不了身份的候选 PID（含根）：树不完整，不能据此声称子孙都已退出。 */
+  unknown: number[];
+  /** 身份确认、但内存读不到的成员 PID：量内存时不出样本。 */
+  unmeasured: number[];
+};
+
+/** 探针 Tree 的原始输出。 */
+export type RawProcessTree = {
+  /**
+   * 拍快照之前取的时间（ticks，UTC）。快照里的进程都在快照完成前出生；出生晚于它的，无法证明
+   * 就是快照里的那一个。
+   */
+  bound: string;
+  members: Array<{
+    pid: number;
+    ppid: number;
+    exe: string;
+    state: string;
+    ticks: string | null;
+    ws: number | null;
+    priv: number | null;
+  }>;
+};
+
+/**
+ * 从快照候选里认出以 root 为根的进程树：
+ * - 已退出（gone）的不算成员；
+ * - 查不了身份的、出生晚于快照前界限的（分不清是快照期间合法出生的子孙，还是 PID 被复用后
+ *   的别人）记为 unknown，不当成员也不当已退出；
+ * - 出生早于父进程的不是它的子孙（父 PID 被复用过），排除；
+ * - unknown 与被排除者的下层不再展开。根查不了时整棵树都是 unknown。
+ */
+export function buildProcessTree(raw: RawProcessTree, root: number): ProcessTree {
+  const bound = BigInt(raw.bound);
+  const tree: ProcessTree = { rows: [], unknown: [], unmeasured: [] };
+  const births = new Map<number, bigint>();
+  const order: number[] = [];
+  const accept = (member: RawProcessTree["members"][number], parentBirth: bigint | null) => {
+    if (member.state === "gone") return;
+    if (member.state !== "ok" || member.ticks === null) {
+      tree.unknown.push(member.pid);
+      return;
+    }
+    const birth = BigInt(member.ticks);
+    if (birth > bound) {
+      tree.unknown.push(member.pid);
+      return;
+    }
+    if (parentBirth !== null && birth < parentBirth) return;
+    tree.rows.push({
+      pid: member.pid,
+      ppid: member.ppid,
+      exe: member.exe,
+      ws: member.ws ?? -1,
+      priv: member.priv ?? -1,
+      ticks: member.ticks,
+    });
+    if (member.ws === null || member.priv === null) tree.unmeasured.push(member.pid);
+    births.set(member.pid, birth);
+    order.push(member.pid);
+  };
+  const rootMember = raw.members.find((member) => member.pid === root);
+  if (rootMember) accept(rootMember, null);
+  for (let index = 0; index < order.length; index += 1) {
+    const parent = order[index]!;
+    for (const member of raw.members)
+      if (member.ppid === parent && member.pid !== parent && !births.has(member.pid))
+        accept(member, births.get(parent)!);
+  }
+  return tree;
+}
+
+/** 树查全了：整次查询成功，且没有查不了身份的候选（含根）。 */
+export function treeComplete(tree: ProcessTree | null): tree is ProcessTree {
+  return tree !== null && tree.unknown.length === 0;
+}
 
 /** alive 的回答里只有这两种算「记下的那个进程已经不在」；其余（含协议错误）都是查不了。 */
 export const EXITED_STATES: ReadonlySet<string> = new Set(["gone", "other"]);
+
+/** 宿主退出后的结论：只有树查全了、且每个子孙都明确 gone / other，才算确认全部退出。 */
+export function descendantsExited(tree: ProcessTree | null, states: readonly string[]): boolean {
+  return treeComplete(tree) && states.every((state) => EXITED_STATES.has(state));
+}
+
+/**
+ * 每轮保存退出证据之后调用：没确认子孙全部退出，就停止后续轮次——未确认退出的 WebView2
+ * 可能还占着这一轮的用户数据目录，下一轮不能刷新、复用它。不结束身份未知的进程。
+ */
+export function requireExitConfirmed(label: string, quit: { confirmed: boolean }): void {
+  if (!quit.confirmed)
+    throw new Error(`${label}：宿主的子孙进程没能确认全部退出，停止后续轮次（不复用数据目录）`);
+}
 
 export const BUDGET_PROBE = `
 Add-Type @"
@@ -47,18 +143,18 @@ public static class AtmBudgetProbe {
     } catch (InvalidOperationException) { process.Dispose(); process = null; return "gone"; }
     catch { process.Dispose(); process = null; return "unknown"; }
   }
-  // 树成员与出生时间在同一个句柄上取：快照之后才出生的是 PID 被复用后的别人，早于父进程出生的
-  // 不是它的子孙（父 PID 被复用过）；两者都不是这棵树的成员。查不了身份或内存的成员单列为
-  // unknown，不悄悄丢掉。整次查询失败由调用方的 catch 输出 null。
+  // 只采集，不判定（判定在 TS 的 buildProcessTree）。bound 取在拍快照之前。候选是快照里以 root
+  // 为根、按父 PID 连起来的进程；每个都拿住句柄，在同一个对象上读出生时间与内存。
+  // 整次查询失败由调用方的 catch 输出 null。
   public static string Tree(int root) {
-    var children = new Dictionary<int, List<int>>();
-    var names = new Dictionary<int, string>();
-    var parents = new Dictionary<int, int>();
+    long bound = DateTime.UtcNow.Ticks;
     IntPtr snapshot = CreateToolhelp32Snapshot(2, 0);
     if (snapshot == new IntPtr(-1)) throw new InvalidOperationException("CreateToolhelp32Snapshot");
-    DateTime taken = DateTime.UtcNow;
     var pinned = new List<Process>();
     try {
+      var children = new Dictionary<int, List<int>>();
+      var names = new Dictionary<int, string>();
+      var parents = new Dictionary<int, int>();
       var entry = new Entry { Size = (uint)Marshal.SizeOf(typeof(Entry)) };
       for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
         List<int> list;
@@ -67,41 +163,33 @@ public static class AtmBudgetProbe {
         parents[(int)entry.Pid] = (int)entry.Parent;
         names[(int)entry.Pid] = entry.Exe;
       }
-      var tree = new List<int>();
-      var started = new Dictionary<int, DateTime>();
-      var processes = new Dictionary<int, Process>();
-      var unknown = new List<int>();
-      Process process = null;
-      DateTime birth = DateTime.MinValue;
-      string state = names.ContainsKey(root) ? Pin(root, out process, out birth) : "gone";
-      if (state == "unknown") unknown.Add(root);
-      if (state == "ok") {
-        if (birth > taken) process.Dispose();
-        else { pinned.Add(process); processes[root] = process; started[root] = birth; tree.Add(root); }
-      }
-      for (int index = 0; index < tree.Count; index++) {
+      var candidates = new List<int>();
+      var seen = new Dictionary<int, bool>();
+      if (names.ContainsKey(root)) { candidates.Add(root); seen[root] = true; }
+      for (int index = 0; index < candidates.Count; index++) {
         List<int> list;
-        if (!children.TryGetValue(tree[index], out list)) continue;
-        foreach (int child in list) {
-          if (child == tree[index] || started.ContainsKey(child)) continue;
-          state = Pin(child, out process, out birth);
-          if (state == "unknown") { unknown.Add(child); continue; }
-          if (state != "ok") continue;
-          if (birth > taken || birth < started[tree[index]]) { process.Dispose(); continue; }
+        if (!children.TryGetValue(candidates[index], out list)) continue;
+        foreach (int child in list) if (!seen.ContainsKey(child)) { seen[child] = true; candidates.Add(child); }
+      }
+      var members = new List<string>();
+      foreach (int pid in candidates) {
+        Process process;
+        DateTime birth;
+        string state = Pin(pid, out process, out birth);
+        string ticks = "null", ws = "null", priv = "null";
+        if (state == "ok") {
           pinned.Add(process);
-          processes[child] = process;
-          started[child] = birth;
-          tree.Add(child);
+          ticks = "\\"" + birth.Ticks + "\\"";
+          try {
+            string workingSet = process.WorkingSet64.ToString();
+            string privateBytes = process.PrivateMemorySize64.ToString();
+            ws = workingSet;
+            priv = privateBytes;
+          } catch { }
         }
+        members.Add("{\\"pid\\":" + pid + ",\\"ppid\\":" + parents[pid] + ",\\"exe\\":\\"" + names[pid] + "\\",\\"state\\":\\"" + state + "\\",\\"ticks\\":" + ticks + ",\\"ws\\":" + ws + ",\\"priv\\":" + priv + "}");
       }
-      var rows = new List<string>();
-      foreach (int pid in tree) {
-        long ws, priv;
-        try { ws = processes[pid].WorkingSet64; priv = processes[pid].PrivateMemorySize64; }
-        catch { unknown.Add(pid); continue; }
-        rows.Add("{\\"pid\\":" + pid + ",\\"ppid\\":" + parents[pid] + ",\\"exe\\":\\"" + names[pid] + "\\",\\"ws\\":" + ws + ",\\"priv\\":" + priv + ",\\"ticks\\":\\"" + started[pid].Ticks + "\\"}");
-      }
-      return "{\\"rows\\":[" + string.Join(",", rows.ToArray()) + "],\\"unknown\\":[" + string.Join(",", unknown.ConvertAll(pid => pid.ToString()).ToArray()) + "]}";
+      return "{\\"bound\\":\\"" + bound + "\\",\\"members\\":[" + string.Join(",", members.ToArray()) + "]}";
     } finally {
       foreach (var held in pinned) held.Dispose();
       CloseHandle(snapshot);
