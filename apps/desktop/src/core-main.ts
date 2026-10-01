@@ -7,6 +7,7 @@ import {
   buildAyanamiServer,
   createDaemonToken,
   DAEMON_VERSION,
+  configureProcessIdentityHelper,
   prefetchSelfProcessIdentity,
   resolveDaemonDataDirectory,
   type DaemonRuntimeDescriptor,
@@ -164,7 +165,9 @@ async function main(): Promise<void> {
   });
   const selfStartedAtMs = Date.now() - Math.round(process.uptime() * 1000);
   // 父进程身份查询要起一次 PowerShell（约 175 ms），先踢出去，和等握手重叠。
-  const parentQuery = queryParentIdentity(process.ppid);
+  // 两次查询都交给本版本目录里的宿主（--process-identity），不再各起一个 PowerShell。
+  configureProcessIdentityHelper(paths.hostPath);
+  const parentQuery = queryParentIdentity(process.ppid, paths.hostPath);
   void prefetchSelfProcessIdentity();
 
   let runtime: CoreRuntime | null = null;

@@ -9,6 +9,7 @@ mod bridge;
 mod core_process;
 mod headless;
 mod health;
+mod identity;
 mod notify;
 mod paths;
 mod probe;
@@ -306,6 +307,11 @@ fn real_main() -> i32 {
 }
 
 fn main() {
+    // Read-only query for the core and daemon; nothing else of the host runs (identity.rs).
+    let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some(identity::FLAG) {
+        std::process::exit(identity::run(argv.next().as_deref()));
+    }
     atm_install_state::stop_std_handle_inheritance();
     std::process::exit(real_main());
 }

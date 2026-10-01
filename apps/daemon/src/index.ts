@@ -22,7 +22,7 @@ export {
   type DaemonRuntimeDescriptor,
   type DaemonRuntimeLease,
 } from "./runtime-discovery.js";
-export { prefetchSelfProcessIdentity } from "./process-identity.js";
+export { configureProcessIdentityHelper, prefetchSelfProcessIdentity } from "./process-identity.js";
 import { DAEMON_VERSION } from "./runtime-discovery.js";
 
 export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<FastifyInstance> {

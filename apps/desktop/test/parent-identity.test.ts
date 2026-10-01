@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   isTrustedHostParent,
+  parseHelperIdentity,
   parseParentIdentity,
   queryParentIdentity,
 } from "../src/parent-identity.js";
@@ -109,4 +110,39 @@ describe("core 的父进程校验", () => {
     expect(isTrustedHostParent(self, process.execPath, Date.now())).toBe(true);
     expect(isTrustedHostParent(self, hostPath, Date.now())).toBe(false);
   }, 20_000);
+
+  // 宿主 --process-identity 的三行输出：ticks、Unix 毫秒、映像路径。
+  it("宿主查询的输出：三行齐全才算，ticks 与毫秒都要合法", () => {
+    const lines = (...values: string[]) => values.join("\n");
+    expect(
+      parseHelperIdentity(`${lines("639264096000000000", "1790812800000", hostPath)}\n`),
+    ).toEqual({ path: hostPath, startedAtMs: 1790812800000 });
+    for (const bad of [
+      "",
+      lines("639264096000000000", "1790812800000"),
+      lines("x", "1790812800000", hostPath),
+      lines("639264096000000000", "nope", hostPath),
+      lines("639264096000000000", "0", hostPath),
+    ])
+      expect(parseHelperIdentity(bad), JSON.stringify(bad)).toBeNull();
+  });
+
+  it("宿主给不出答案就退回 PowerShell：答案一样，进程不存在仍是查不到", async () => {
+    const direct = await queryParentIdentity(process.pid);
+    expect(isTrustedHostParent(direct, process.execPath, Date.now())).toBe(true);
+    // 宿主不在、或起来了却不认这个参数（node.exe）。
+    expect(await queryParentIdentity(process.pid, join(work, "no-such-host.exe"))).toEqual(direct);
+    expect(await queryParentIdentity(process.pid, process.execPath)).toEqual(direct);
+    expect(await queryParentIdentity(0x7ffffff0, process.execPath)).toBeNull();
+  }, 30_000);
+
+  // 冷启动不再等 PowerShell：core 两次身份查询都交给本版本目录里的宿主。
+  it("core 把本版本目录里的宿主交给两次身份查询", () => {
+    const core = readFileSync("apps/desktop/src/core-main.ts", "utf8");
+    expect(core).toContain("configureProcessIdentityHelper(paths.hostPath);");
+    expect(core).toContain("queryParentIdentity(process.ppid, paths.hostPath)");
+    expect(core.indexOf("configureProcessIdentityHelper(paths.hostPath);")).toBeLessThan(
+      core.indexOf("void prefetchSelfProcessIdentity();"),
+    );
+  });
 });

@@ -12,7 +12,11 @@ import { join, resolve } from "node:path";
  * 伪造父进程属性、注入宿主属于安全模型的非目标（同用户蓄意攻击，见 docs/security-model.md）；
  * 这里挡的是「按文档办事的 Agent 顺手拉起 core」这条路。
  *
- * 查询方式与 apps/daemon/src/process-identity.ts 同一口径：Get-Process 标量，不走 WMI/CIM。
+ * 查询方式与 apps/daemon/src/process-identity.ts 同一口径：有宿主时用本版本目录里的宿主
+ * `--process-identity <pid>`（GetProcessTimes + QueryFullProcessImageNameW，宿主 identity.rs），
+ * 宿主起不来才退回 PowerShell 的 Get-Process 标量；都不走 WMI/CIM。宿主二进制和 core 的 bundle
+ * 在同一个版本目录里，信它不比信 core 自己多信任什么；而 PowerShell 每次要约 190 ms，
+ * 这次查询挡在握手前面，冷启动每次都等它。
  */
 
 export type ParentIdentity = { path: string; startedAtMs: number };
@@ -43,33 +47,71 @@ export function parseParentIdentity(stdout: string): ParentIdentity | null {
   return { path, startedAtMs };
 }
 
-/** 查不到、拒绝访问、超时一律返回 null；调用方把 null 当作拒绝。 */
-export function queryParentIdentity(pid: number): Promise<ParentIdentity | null> {
+/** 宿主 `--process-identity` 的输出：ticks、Unix 毫秒、映像路径各一行。 */
+export function parseHelperIdentity(stdout: string): ParentIdentity | null {
+  const [ticks, milliseconds, path] = stdout.trim().split(/\r?\n/u);
+  if (!ticks || !/^\d{17,19}$/u.test(ticks) || path === undefined) return null;
+  return parseParentIdentity(`${path}\n${milliseconds ?? ""}`);
+}
+
+type ParentQuery = {
+  command: string;
+  args: string[];
+  parse: (stdout: string) => ParentIdentity | null;
+};
+
+/**
+ * 查不到、拒绝访问、超时一律返回 null；调用方把 null 当作拒绝。helper 是本版本目录里的宿主，
+ * 它给不出答案（起不来、不认这个参数、查不到）就换 PowerShell 再问一次：两边读的是同一份
+ * 系统记录，换一条路问不会让答案更宽松，只是慢一些。
+ */
+export function queryParentIdentity(
+  pid: number,
+  helper: string | null = null,
+): Promise<ParentIdentity | null> {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return Promise.resolve(null);
+  const queries: ParentQuery[] = [];
+  if (helper)
+    queries.push({
+      command: helper,
+      args: ["--process-identity", String(pid)],
+      parse: parseHelperIdentity,
+    });
   const shell = powershellPath();
-  if (!shell || !Number.isSafeInteger(pid) || pid <= 0) return Promise.resolve(null);
+  if (shell)
+    queries.push({ command: shell, args: parentQueryArguments(pid), parse: parseParentIdentity });
+  return runParentQuery(queries);
+}
+
+function runParentQuery(queries: readonly ParentQuery[]): Promise<ParentIdentity | null> {
+  const [query, ...fallbacks] = queries;
+  if (!query) return Promise.resolve(null);
   return new Promise((done) => {
     let child;
     try {
-      child = spawn(shell, parentQueryArguments(pid), {
+      child = spawn(query.command, query.args, {
         windowsHide: true,
         stdio: ["ignore", "pipe", "ignore"],
       });
     } catch {
-      done(null);
+      done(runParentQuery(fallbacks));
       return;
     }
     let stdout = "";
+    let settled = false;
     const timer = setTimeout(() => child.kill(), QUERY_TIMEOUT_MS);
+    const finish = (identity: ParentIdentity | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(identity ?? runParentQuery(fallbacks));
+    };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (stdout.length < MAX_OUTPUT_BYTES) stdout += chunk;
     });
-    const finish = (code: number | null) => {
-      clearTimeout(timer);
-      done(code === 0 ? parseParentIdentity(stdout) : null);
-    };
     child.on("error", () => finish(null));
-    child.on("close", finish);
+    child.on("close", (code) => finish(code === 0 ? query.parse(stdout) : null));
   });
 }
 
