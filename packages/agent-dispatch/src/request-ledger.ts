@@ -106,6 +106,9 @@ export class RequestLedger {
    */
   #ensureMarked(now: Date): void {
     if (this.#markConfirmed) return;
+    // 账本文件先于标记落盘：「有标记、没文件」重启时会被判成数据丢失。第一次接纳的请求如果没记账
+    // 就结束（宿主正在退出、读库临时失败），同一条命令重来时不能因此被当成「可能执行过」拒掉。
+    this.#save();
     const since = this.#requestsSince ?? now.toISOString();
     this.#markUsed(since);
     this.#requestsSince = since;

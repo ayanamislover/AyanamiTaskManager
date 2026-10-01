@@ -2,13 +2,50 @@ import { statSync } from "node:fs";
 import { DispatchError } from "./errors.js";
 import type { DispatchHost, DispatchProject, DispatchTask } from "./types.js";
 
-// 派单入口的校验：项目、工作目录、任务归属与状态。只读宿主端口，不碰派单内部状态。
+// 派单入口的校验：项目、工作目录、任务归属与状态，以及派单器关闭后的拒绝。只读宿主端口，不碰派单内部状态。
+
+/**
+ * 等一个异步步骤；派单器关闭（`lifetime` 中止）就不再等，立即以 DISPATCH_CLOSED 结束。
+ * 关闭之后它才落定（读到结果，或因库已关而失败）都不再算数：那时这个 Promise 已经 reject。
+ */
+export function whileOpen<T>(work: Promise<T>, lifetime: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onClose = () => reject(closedError());
+    if (lifetime.aborted) return onClose();
+    lifetime.addEventListener("abort", onClose, { once: true });
+    void work.then(resolve, reject).finally(() => lifetime.removeEventListener("abort", onClose));
+  });
+}
 
 /** 可以派单的任务状态：还没人开工的。 */
 const DISPATCHABLE_STATUSES = new Set(["READY", "BACKLOG"]);
 
 export function disabledError(): DispatchError {
   return new DispatchError("DISPATCH_DISABLED", "派单未开启：请先在 ATM 设置里打开「交给 Claude」");
+}
+
+export function closedError(): DispatchError {
+  return new DispatchError(
+    "DISPATCH_CLOSED",
+    "ATM 正在退出，Claude 派单已停止：重新打开 ATM 后再试",
+  );
+}
+
+/**
+ * 关闭后一律拒绝的宿主端口：宿主收尾时（随后就关库）已经在途的入队、启动不能再读库。
+ * 只拦调用的入口；已经发出的读取由调用方在 await 回来后自己再查。
+ */
+export function openOnly(host: DispatchHost, closed: () => boolean): DispatchHost {
+  return {
+    getProject(code) {
+      if (closed()) throw closedError();
+      return host.getProject(code);
+    },
+    getTask(code, key) {
+      if (closed()) throw closedError();
+      return host.getTask(code, key);
+    },
+  };
 }
 
 function isDirectory(path: string): boolean {

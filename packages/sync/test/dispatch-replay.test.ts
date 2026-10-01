@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,8 @@ import {
 // sync 包不依赖 agent-dispatch，测试按相对路径引用其源码（与 client 测试引用 application 同一做法）。
 import {
   AgentDispatcher,
+  type AgentDispatcherOptions,
+  type DispatchHost,
   DISPATCH_REQUEST_MAX_AGE_MS,
   DISPATCH_REQUEST_RETENTION_MS,
   type KillResult,
@@ -55,7 +57,7 @@ type FakeChild = ChildProcess & { finish(code: number): void };
  * 派单器 + 进程替身：spawn 出来的是不起真进程的 {@link FakeChild}；结束进程树只记下调用。
  * `auth status` 由 agent-dispatch 的假 claude 回答（已登录），不会碰真 claude。
  */
-async function realDispatcher(fixture: Fixture) {
+async function realDispatcher(fixture: Fixture, options: Partial<AgentDispatcherOptions> = {}) {
   const children: FakeChild[] = [];
   let nextPid = 4_200_000;
   const dispatcher = new AgentDispatcher({
@@ -85,6 +87,7 @@ async function realDispatcher(fixture: Fixture) {
       kind: "failed",
       reason: "测试里不结束进程",
     }),
+    ...options,
   });
   dispatchers.push(dispatcher);
   await dispatcher.start();
@@ -279,6 +282,88 @@ describe("派单命令重放（peer R1-02）", () => {
       await fixture.close();
     }
   });
+});
+
+describe("电脑上的 ATM 退出时手机派单还在途（peer R3-01）", () => {
+  it.each([
+    ["交给 Claude（task.dispatch）", "dispatch"],
+    ["建任务并交给 Claude（task.create + dispatch）", "create"],
+  ] as const)(
+    "%s：派单器先随退出关闭，在途派单立即结束、不再读库、不写回执；下次启动处理这条命令，只建一次、只派一次",
+    async (_name, kind) => {
+      const fixture = await openFixture();
+      try {
+        const task = await seedDispatchable(fixture);
+        // 这次启动时 claude 的登录探测迟迟不回来（假 claude 的 hang 模式，1.5 s 后超时）。
+        const authFile = join(fixture.dataDir, "fake-claude-auth.json");
+        writeFileSync(authFile, JSON.stringify({ mode: "hang" }));
+        const baseEnv = { ...process.env, FAKE_CLAUDE_AUTH_FILE: authFile };
+        const base = taskServiceDispatchHost(fixture.service);
+        let stopped = false;
+        const late: string[] = [];
+        const host: DispatchHost = {
+          getProject(code) {
+            if (stopped) late.push("getProject");
+            return base.getProject(code);
+          },
+          getTask(code, key) {
+            if (stopped) late.push("getTask");
+            return base.getTask(code, key);
+          },
+        };
+        const abort = new AbortController();
+        const first = await realDispatcher(fixture, {
+          host,
+          signal: abort.signal,
+          baseEnv,
+          authProbeTimeoutMs: 1_500,
+        });
+        const connector = fixture.connector({ dispatch: first.port });
+        const pairing = await connect(connector, fixture.relay);
+        const phone = await phoneFor(fixture.relay, pairing.pairingCode);
+        const sent = await phone.store.sendCommand(
+          phone.device,
+          kind === "dispatch"
+            ? { type: "task.dispatch", body: { project: "ALPHA", key: task.key } }
+            : {
+                type: "task.create",
+                body: { project: "ALPHA", title: "退出时还在派的任务", dispatch: true },
+              },
+        );
+        await waitFor(() => existsSync(`${authFile}.count`), "登录探测已发出");
+        const mark = fixture.relay.requests.length;
+        // 与 core-mobile 收尾同序：先中止（派单器随之关闭），再停连接器。
+        abort.abort();
+        const began = performance.now();
+        await connector.stop();
+        // 在途的派单立即结束，连接器不用等满停止预算（1 s）。
+        expect(performance.now() - began).toBeLessThan(500);
+        stopped = true;
+        expect(fixture.relay.putsSince(mark).filter((put) => put.includes("/ack/"))).toEqual([]);
+        expect(fixture.relay.docs.has(commandKey(pairing.spaceId, sent.id))).toBe(true);
+        // 探测超时回来以后也不再往下走：不读库、不排队。
+        await new Promise((resolve) => setTimeout(resolve, 1_800));
+        expect(late).toEqual([]);
+        expect(first.dispatcher.listRuns()).toEqual([]);
+
+        writeFileSync(authFile, JSON.stringify({ mode: "in" }));
+        const second = await realDispatcher(fixture, { baseEnv });
+        const restarted = fixture.connector({ dispatch: second.port });
+        await restarted.start();
+        const ack = await phone.awaitAck(sent.id);
+        expect(ack).toMatchObject({ ok: true, result: { dispatch: { state: "queued" } } });
+        await waitFor(() => second.children.length === 1, "会话已起");
+        expect(second.dispatcher.listRuns()).toHaveLength(1);
+        expect(second.enqueued.map((input) => input.requestId)).toEqual([sent.id]);
+        // 建任务那一半在第一次就做完了：重做靠 op_id 拿回同一个任务，不会建出第二个。
+        const items = await fixture.service.listWorkItemsForUi("ALPHA", {});
+        expect(items).toHaveLength(kind === "dispatch" ? 1 : 2);
+        await restarted.stop();
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
 });
 
 describe("已处理命令的保留窗口", () => {

@@ -209,6 +209,28 @@ describe("请求账本坏了、丢了、读不出来：不能让同一条命令�
     await waitFor(() => fake.children.length === 1);
   });
 
+  it("第一条手机派单没记账就结束（读库临时失败）：重启后不判丢失，同一条命令照常派出", async () => {
+    const f = fixture();
+    f.addTask("DEMO-T-0001");
+    const fake = fakeProcesses();
+    const c = clock();
+    const flaky = f.dispatcher({
+      ...fake.options,
+      now: c.now,
+      host: { ...f.host, getTask: () => Promise.reject(new Error("库暂时打不开")) },
+    });
+    await flaky.updateConfig({ enabled: true });
+    const id = commandId(c.at - 1_000, "1");
+    // 不是 DispatchError：临时故障，不记账；但接纳时已经落了「用过账本」的标记。
+    await expect(flaky.enqueue(mobile(id))).rejects.toThrow("库暂时打不开");
+    flaky.close();
+    c.at += 60_000;
+    const dispatcher = await restart(f, fake, c);
+    expect((await dispatcher.status()).requestLedger.lostBefore).toBeNull();
+    expect(await dispatcher.enqueue(mobile(id))).toMatchObject({ state: "queued" });
+    await waitFor(() => fake.children.length === 1);
+  });
+
   it("读盘失败（EACCES）：手机派单 503 可重试，不改名不重建；读得出来以后精确回放，spawn 仍为 1", async () => {
     const f = fixture();
     const fake = fakeProcesses();

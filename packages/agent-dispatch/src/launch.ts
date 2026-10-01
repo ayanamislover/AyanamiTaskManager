@@ -1,5 +1,8 @@
+import type { ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { extname } from "node:path";
+import { closeSync, mkdirSync, openSync } from "node:fs";
+import { dirname, extname } from "node:path";
+import { noteSuppressed } from "@ayanami-task/errors";
 import {
   DISPATCH_EFFORTS,
   DISPATCH_MODEL_PATTERN,
@@ -7,6 +10,7 @@ import {
   type DispatchConfig,
 } from "./config.js";
 import { DispatchError } from "./errors.js";
+import type { DispatchSpawn } from "./types.js";
 
 /** 任务键会进命令行（`--name "ATM · <key>"`），入口处按这个格式校验。 */
 export const DISPATCH_TASK_KEY_PATTERN = /^[A-Z][A-Z0-9]*-T-\d{4,}$/u;
@@ -144,4 +148,46 @@ export function dispatchChildEnv(base: NodeJS.ProcessEnv, run: string): NodeJS.P
   }
   env.ATM_DISPATCH_RUN = run;
   return env;
+}
+
+/**
+ * 起会话进程。stdout/stderr 直接接日志文件而不是管道：宿主退出后会话还能继续写日志；
+ * detached：宿主退出不连带结束它。子进程继承了自己的一份句柄，父进程这份起完即关。
+ */
+export function spawnSession(options: {
+  spawn: DispatchSpawn;
+  command: LaunchCommand;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  stdoutLog: string;
+  stderrLog: string;
+}): ChildProcess {
+  const { command } = options;
+  mkdirSync(dirname(options.stdoutLog), { recursive: true });
+  const stdout = openSync(options.stdoutLog, "a");
+  const stderr = openSync(options.stderrLog, "a");
+  let child: ChildProcess;
+  try {
+    child = options.spawn(command.command, command.args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["pipe", stdout, stderr],
+      detached: true,
+      windowsHide: true,
+      ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    });
+  } catch (error) {
+    // 关文件句柄再失败也不能盖掉「为什么没起来」：次要错误挂在主错误的 suppressed 上。
+    for (const fd of [stdout, stderr]) {
+      try {
+        closeSync(fd);
+      } catch (closeError) {
+        noteSuppressed(error, closeError);
+      }
+    }
+    throw error;
+  }
+  closeSync(stdout);
+  closeSync(stderr);
+  return child;
 }

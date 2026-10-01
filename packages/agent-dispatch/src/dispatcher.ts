@@ -1,9 +1,15 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync } from "node:fs";
 import { findClaudeCodeCli } from "@ayanami-task/agent-config";
-import { noteSuppressed } from "@ayanami-task/errors";
-import { admitTask, cleanRequester, disabledError, taskBlocker } from "./admission.js";
+import {
+  admitTask,
+  cleanRequester,
+  closedError,
+  disabledError,
+  openOnly,
+  taskBlocker,
+  whileOpen,
+} from "./admission.js";
 import { ClaudeProbe } from "./claude-probe.js";
 import {
   type DispatchConfig,
@@ -19,6 +25,7 @@ import {
   dispatchChildEnv,
   launchCommand,
   newRunId,
+  spawnSession,
 } from "./launch.js";
 import {
   checkProcessIdentity,
@@ -82,10 +89,13 @@ export class AgentDispatcher {
   readonly #promptContext = new Map<string, string>();
   readonly #probe: ClaudeProbe;
   #closed = false;
+  /** close() 时中止：在途的入队不等登录探测、读库回来，立即以 DISPATCH_CLOSED 结束。 */
+  readonly #lifetime = new AbortController();
 
   constructor(options: AgentDispatcherOptions) {
     this.#paths = dispatchPaths(options.dataDir);
-    this.#host = options.host;
+    // 关闭后（宿主收尾、随后关库）任何在途步骤都不能再读库。
+    this.#host = openOnly(options.host, () => this.#closed);
     this.#resolveClaude = options.resolveClaude ?? findClaudeCodeCli;
     this.#spawn = options.spawnImpl ?? spawn;
     this.#now = options.now ?? (() => new Date());
@@ -144,6 +154,7 @@ export class AgentDispatcher {
   /** 停止内部计时器；不结束任何会话（它们本来就与宿主解耦）。 */
   close(): void {
     this.#closed = true;
+    this.#lifetime.abort();
     this.#tracker.close();
     this.#listeners.clear();
   }
@@ -204,9 +215,10 @@ export class AgentDispatcher {
   /**
    * 排队一次派单。带 `requestId` 时先过请求账本（{@link RequestLedger.admit}）：记过的直接回放那次的结局
    * （派单的当前视图，或当初的拒绝），绝不再起会话；账本不可用、丢失水位线之前发出的、账本满了的直接拒绝；
-   * 其余预留名额后照常校验，建出派单或业务拒绝都记进账本。
+   * 其余预留名额后照常校验，建出派单或业务拒绝都记进账本。关闭后（宿主收尾）抛 DISPATCH_CLOSED，不记账本。
    */
   async enqueue(input: EnqueueInput): Promise<DispatchRunView> {
+    if (this.#closed) throw closedError();
     if (input.origin !== "mobile" && input.origin !== "desktop")
       throw new DispatchError("DISPATCH_INVALID_ARGUMENT", "origin 只能是 mobile 或 desktop");
     if (typeof input.key !== "string" || !DISPATCH_TASK_KEY_PATTERN.test(input.key))
@@ -224,8 +236,9 @@ export class AgentDispatcher {
       return await this.#enqueueNew(input, gate.reservation);
     } catch (error) {
       // 业务上的拒绝也记下来：同一条命令以后再来（重放、回执写失败后重处理）照样拒绝，
-      // 不会因为期间开了派单、任务变回 READY 就补起一次会话。临时故障（例如库打不开）不记。
-      if (isDispatchError(error))
+      // 不会因为期间开了派单、任务变回 READY 就补起一次会话。临时故障（例如库打不开）与
+      // 可重试的拒绝（例如宿主正在退出）不记：那不是对这条命令的判断，以后再来照常处理。
+      if (isDispatchError(error) && !error.retryable)
         this.#ledger.recordRejection(gate.reservation, error, this.#now());
       throw error;
     } finally {
@@ -253,9 +266,11 @@ export class AgentDispatcher {
         "DISPATCH_CLAUDE_NOT_FOUND",
         "找不到 Claude Code 命令行（claude）：请先安装 Claude Code 并确认能在终端里运行 claude",
       );
-    await this.#assertLoggedIn(claude);
-    const { project, task, cwd } = await admitTask(this.#host, input, this.#now);
-    // 上面有 await：同一任务（或同一请求）的两次调用可能交错，插入前再查一次。
+    await whileOpen(this.#assertLoggedIn(claude), this.#lifetime.signal);
+    const admitted = admitTask(this.#host, input, this.#now);
+    const { project, task, cwd } = await whileOpen(admitted, this.#lifetime.signal);
+    // 上面有 await：期间可能已关闭，或同一任务（或同一请求）的两次调用交错，插入前再查一次。
+    if (this.#closed) throw closedError();
     if (reservation !== undefined) {
       const raced = this.#ledger.find(reservation.id, this.#now());
       if (raced) return this.#replay(raced);
@@ -429,7 +444,8 @@ export class AgentDispatcher {
       this.#launching.add(record.run);
       void this.#launch(record)
         .catch((error: unknown) => {
-          if (record.state === "queued")
+          // 关闭后的失败（读库被拒、库已关）不是这次派单的问题：记录留在队列里给下次启动。
+          if (!this.#closed && record.state === "queued")
             this.#finish(record, { state: "failed", error: `启动失败：${errorText(error)}` });
         })
         .finally(() => {
@@ -475,34 +491,14 @@ export class AgentDispatcher {
       origin: record.origin,
       ...(record.requestedBy === undefined ? {} : { requestedBy: record.requestedBy }),
     });
-    mkdirSync(this.#paths.logs, { recursive: true });
-    const stdout = openSync(this.#paths.stdoutLog(record.run), "a");
-    const stderr = openSync(this.#paths.stderrLog(record.run), "a");
-    let child: ChildProcess;
-    try {
-      child = this.#spawn(command.command, command.args, {
-        cwd: record.cwd,
-        env: dispatchChildEnv(this.#baseEnv, record.run),
-        // stdout/stderr 直接接文件而不是管道：宿主退出后会话还能继续写日志。
-        stdio: ["pipe", stdout, stderr],
-        detached: true,
-        windowsHide: true,
-        ...(command.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
-      });
-    } catch (error) {
-      // 关文件句柄再失败也不能盖掉「为什么没起来」：次要错误挂在主错误的 suppressed 上。
-      for (const fd of [stdout, stderr]) {
-        try {
-          closeSync(fd);
-        } catch (closeError) {
-          noteSuppressed(error, closeError);
-        }
-      }
-      throw error;
-    }
-    // 子进程已经继承了自己的一份句柄，父进程这份立刻关掉。
-    closeSync(stdout);
-    closeSync(stderr);
+    const child = spawnSession({
+      spawn: this.#spawn,
+      command,
+      cwd: record.cwd,
+      env: dispatchChildEnv(this.#baseEnv, record.run),
+      stdoutLog: this.#paths.stdoutLog(record.run),
+      stderrLog: this.#paths.stderrLog(record.run),
+    });
     // 句柄挂上 exit/error，同时立刻向 OS 要这个 PID 的出生标识（宿主重启后据此核验身份）。
     const identity = this.#tracker.attach(record.run, child);
     if (child.pid !== undefined) record.pid = child.pid;

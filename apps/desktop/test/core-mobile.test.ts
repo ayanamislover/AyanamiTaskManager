@@ -215,6 +215,49 @@ describe("core 里的手机同步与派单", () => {
     });
   });
 
+  it.each([
+    ["派单器一直起不来（等待本会超时回 503）", () => new Promise<never>(() => undefined)],
+    [
+      "派单器随收尾以失败落定（本会回「没能启动」）",
+      (options: { signal?: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) =>
+          options.signal?.addEventListener("abort", () => reject(new Error("aborted"))),
+        ),
+    ],
+  ])(
+    "启动中已经在等的路由：收尾一开始就回 404「正在退出」——%s（peer R3-03）",
+    async (_name, create) => {
+      const features = startMobileFeatures({
+        service: {} as AyanamiTaskService,
+        dataDir: join(work, `case-${(counter += 1)}`),
+        hostPath: process.execPath,
+        dpapi: () => null,
+        createDispatcher: create as MobileFeatureOptions["createDispatcher"],
+        featureWaitMs: 3000,
+      });
+      cleanups.push(() => features.close());
+      let settledAt = Number.NaN;
+      const pending = features.dispatch.status().then(
+        () => null,
+        (error: unknown) => {
+          settledAt = performance.now();
+          return error;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const began = performance.now();
+      await features.close();
+      expect(await pending).toMatchObject({
+        code: "DISPATCH_UNAVAILABLE",
+        httpStatus: 404,
+        retryable: false,
+        message: expect.stringContaining("正在退出"),
+      });
+      // 不等满路由的等待上限（3 s），也不等 close 自己的落定等待（1 s）。
+      expect(settledAt - began).toBeLessThan(200);
+    },
+  );
+
   it("派单恢复慢过收尾等待：close 之后恢复回来也不再读任务、不再起会话（peer R2-03）", async () => {
     const dataDir = join(work, `case-${(counter += 1)}`);
     const paths = dispatchPaths(dataDir);

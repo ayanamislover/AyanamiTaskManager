@@ -88,6 +88,26 @@ async function when<T>(ready: Promise<T | null>, feature: Feature, waitMs: numbe
   return value;
 }
 
+/**
+ * 路由用：在 {@link when} 之上加收尾。收尾一开始（signal 中止）就不再等，回「正在退出」——
+ * 之后等待才落定（拿到功能、还在启动、起不来）都不再算数，请求不会触达正在停或已停的功能。
+ */
+function unlessClosing<T>(
+  ready: Promise<T | null>,
+  feature: Feature,
+  waitMs: number,
+  signal: AbortSignal,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onClose = () => reject(feature.closing());
+    if (signal.aborted) return onClose();
+    signal.addEventListener("abort", onClose, { once: true });
+    void when(ready, feature, waitMs)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", onClose));
+  });
+}
+
 export type MobileFeatureOptions = {
   service: AyanamiTaskService;
   dataDir: string;
@@ -183,7 +203,8 @@ export function startMobileFeatures(options: MobileFeatureOptions): MobileFeatur
       within(dispatchReady, STARTUP_SETTLE_MS),
     ]);
     try {
-      // 连接器停下时要写离线状态，得在关库之前；它还会调派单，所以先停它。
+      // 连接器停下时要写离线状态，得在关库之前。派单器已随 abort 关闭（在途的手机派单以
+      // DISPATCH_CLOSED 结束、命令留到下次启动），下面的 close 只是兜底。
       await connector?.stop();
     } catch (error) {
       mobileLogger.warn("手机同步收尾出错", {
@@ -193,13 +214,8 @@ export function startMobileFeatures(options: MobileFeatureOptions): MobileFeatur
     dispatcher?.close();
   }
 
-  /** 路由用：收尾一开始就一律不可用，新请求不再触达正在停或已停的功能。 */
-  const use = async <T>(ready: Promise<T | null>, feature: Feature): Promise<T> => {
-    if (abort.signal.aborted) throw feature.closing();
-    const value = await when(ready, feature, waitMs);
-    if (abort.signal.aborted) throw feature.closing();
-    return value;
-  };
+  const use = <T>(ready: Promise<T | null>, feature: Feature): Promise<T> =>
+    unlessClosing(ready, feature, waitMs, abort.signal);
 
   return {
     sync: {

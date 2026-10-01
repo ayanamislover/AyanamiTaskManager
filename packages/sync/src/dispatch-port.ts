@@ -25,7 +25,8 @@ export type DispatchPort = {
   summary(): { enabled: boolean; mode: SyncPermissionMode; running: number };
   runForTask(project: string, key: string): SyncDispatchRun | null;
   /**
-   * 被拒时抛出带 `code`（SCREAMING_SNAKE）与中文 `message` 的错误。
+   * 被拒时抛出带 `code`（SCREAMING_SNAKE）与中文 `message` 的错误。派单器已随宿主退出关闭时
+   * code 是 `DISPATCH_CLOSED`：命令不写失败回执，留到下次启动再处理。
    * `requestId` 是手机命令 ID：派单层按它持久幂等，同一个 ID 再来只返回那次派单（或那次的拒绝），不再起会话。
    */
   enqueue(input: {

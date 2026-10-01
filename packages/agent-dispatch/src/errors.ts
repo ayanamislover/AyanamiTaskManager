@@ -28,6 +28,11 @@ export const DISPATCH_ERROR_POLICIES = Object.freeze({
    * 同一条命令重试也不会变，所以不可重试；用户在手机上重新交给 Claude（新命令 ID）即可。
    */
   DISPATCH_REQUEST_STATE_LOST: { httpStatus: 409, retryable: false },
+  /**
+   * 宿主正在退出，派单器已关闭：已经进来的请求不再读库、不再排队。这不是对请求本身的判断，
+   * 所以不记进请求账本；手机命令留到下次启动再处理，同一个命令 ID 照常幂等。
+   */
+  DISPATCH_CLOSED: { httpStatus: 503, retryable: true },
 } as const);
 
 export type DispatchErrorCode = keyof typeof DISPATCH_ERROR_POLICIES;
