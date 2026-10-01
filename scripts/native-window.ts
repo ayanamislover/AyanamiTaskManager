@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { powershellScratch } from "./powershell-scratch.js";
 
 export type ScreenBox = { x: number; y: number; width: number; height: number };
 
@@ -66,10 +67,12 @@ export class NativeWindowProbe {
   private stderr = "";
   private queue: Promise<unknown> = Promise.resolve();
 
-  private constructor(script: string) {
+  private constructor(script: string, root: string) {
     // Windows PowerShell 5.1 把不带 BOM 的 .ps1 当 ANSI 读，中文注释会吞掉换行、把 C# 拼坏；
     // 这里显式按 UTF-8 读进来再执行，不依赖文件有没有 BOM。
     const literal = script.replaceAll("'", "''");
+    // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
+    const scratch = powershellScratch(root);
     this.child = spawn(
       windowsPowerShell,
       [
@@ -81,8 +84,10 @@ export class NativeWindowProbe {
         "-Command",
         `& ([scriptblock]::Create([IO.File]::ReadAllText('${literal}', [Text.Encoding]::UTF8)))`,
       ],
-      { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+      { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: scratch.env },
     );
+    this.child.once("exit", () => scratch.dispose());
+    this.child.once("error", () => scratch.dispose());
     this.child.stderr.on("data", (chunk: Buffer) => {
       this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-2_000);
     });
@@ -92,7 +97,7 @@ export class NativeWindowProbe {
   }
 
   static start(root = process.cwd()): NativeWindowProbe {
-    return new NativeWindowProbe(join(root, "scripts", "native-window.ps1"));
+    return new NativeWindowProbe(join(root, "scripts", "native-window.ps1"), root);
   }
 
   private request<T>(payload: Record<string, unknown>): Promise<T> {

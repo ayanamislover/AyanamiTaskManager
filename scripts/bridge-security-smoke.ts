@@ -43,6 +43,7 @@ import {
   type SmokeHost,
   type SmokeRenderer,
 } from "./smoke-host.js";
+import { withPowerShellScratch } from "./powershell-scratch.js";
 
 const ENTRY = "https://atm.localhost/index.html";
 const RESOLVE_PREFIX = "window.__atmBridge&&window.__atmBridge.resolve(";
@@ -122,10 +123,13 @@ if ($process.Path -ne '${expected}') { throw "not our core: $($process.Path)" }
 $status = [AtmSmoke.Nt]::${suspended ? "NtSuspendProcess" : "NtResumeProcess"}($process.Handle)
 if ($status -ne 0) { throw "NTSTATUS $status" }
 `;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true, timeout: 30_000 },
+  const result = withPowerShellScratch((env) =>
+    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 30_000,
+      env,
+    }),
   );
   if (result.status !== 0)
     throw new Error(`${suspended ? "挂起" : "恢复"} core 失败：${result.stderr || result.stdout}`);
@@ -158,15 +162,14 @@ public static class AtmSmokeTree {
 "@
 [AtmSmokeTree]::List()
 `;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    {
+  const result = withPowerShellScratch((env) =>
+    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
       encoding: "utf8",
       windowsHide: true,
       timeout: 30_000,
       maxBuffer: 16 * 1024 * 1024,
-    },
+      env,
+    }),
   );
   if (result.status !== 0) throw new Error(`进程快照失败：${result.stderr}`);
   return JSON.parse(result.stdout.trim()) as TreeEntry[];

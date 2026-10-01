@@ -25,6 +25,7 @@ import {
   findProductShortcuts,
 } from "./product-install-sites.js";
 import { resolveSystemTar } from "./system-tar.js";
+import { withPowerShellScratch } from "./powershell-scratch.js";
 
 type Check = { name: string; passed: boolean; detail?: string };
 type Runtime = { endpoint: string; token: string; pid: number; version: string };
@@ -133,10 +134,12 @@ public static class AtmWindows {
 `;
 
 function appWindowVisible(pid: number): boolean {
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::Count(${pid})`],
-    { encoding: "utf8", windowsHide: true },
+  const result = withPowerShellScratch((env) =>
+    spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::Count(${pid})`],
+      { encoding: "utf8", windowsHide: true, env },
+    ),
   );
   return Number(result.stdout.trim()) > 0;
 }

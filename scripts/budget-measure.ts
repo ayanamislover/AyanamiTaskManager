@@ -58,6 +58,7 @@ import {
   sourceVersion,
   withLoginItemsRestored,
 } from "./smoke-host.js";
+import { powershellScratch } from "./powershell-scratch.js";
 
 const MIB = 1024 * 1024;
 const jsonPath = resolve(
@@ -325,16 +326,20 @@ while ($true) {
 `;
 
 class ProcessProbe {
+  // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
+  private readonly scratch = powershellScratch(repoRoot);
   private readonly child = spawn(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", PROBE],
-    { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+    { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: this.scratch.env },
   );
   private readonly waiting: Array<(line: string) => void> = [];
   private queue: Promise<unknown> = Promise.resolve();
   readonly ready: Promise<void>;
 
   constructor() {
+    this.child.once("exit", () => this.scratch.dispose());
+    this.child.once("error", () => this.scratch.dispose());
     const lines = createInterface({ input: this.child.stdout });
     let first: (() => void) | null = null;
     this.ready = new Promise((done) => (first = done));
