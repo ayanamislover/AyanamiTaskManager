@@ -104,9 +104,13 @@
     forced-color-adjust: none;
   }
 }
+.atm-overview-projects-panel {
+  margin-top: 18px;
+}
+/* 卡片占满整行、至少 280px：底部四格统计（活动 / 阻塞 / 等待 / Agent）一行放得下。 */
 .atm-overview-projects {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 12px;
   padding: 14px;
 }
@@ -132,12 +136,17 @@
   margin-top: 13px;
 }
 .atm-project-stats span {
+  min-width: 0;
+  overflow: hidden;
   padding: 6px 7px;
   border-radius: var(--atm-radius-row);
   color: var(--atm-text-muted);
   background: var(--atm-surface-muted);
   font-size: 11px;
   text-align: center;
+  text-overflow: ellipsis;
+  /* 「Agent 0」这类标签和数字不许被挤成上下两行。 */
+  white-space: nowrap;
 }
 .atm-projection-summary {
   display: flex;
@@ -738,7 +747,7 @@
 .atm-overview-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr);
-  align-items: start;
+  align-items: stretch;
   gap: 18px;
 }
 .atm-overview-main,
@@ -747,9 +756,40 @@
   min-width: 0;
   gap: 18px;
 }
+.atm-overview-main {
+  grid-template-rows: minmax(0, 1fr);
+}
+.atm-overview-side {
+  align-content: start;
+}
+/* 「等你处理」与右栏等高，列表在面板里自己滚：列表绝对定位，不参与撑高这一行。 */
+.atm-needs-you {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+.atm-needs-you-scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 360px;
+}
+.atm-needs-you-scroll-body {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 @media (max-width: 1100px) {
   .atm-overview-layout {
     grid-template-columns: 1fr;
+  }
+  /* 单栏时没有右栏可对齐：限高后照样内滚。 */
+  .atm-needs-you-scroll {
+    min-height: 0;
+  }
+  .atm-needs-you-scroll-body {
+    position: static;
+    max-height: min(60vh, 560px);
   }
 }
 .atm-inbox-row {

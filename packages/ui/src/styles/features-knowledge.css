@@ -11,8 +11,13 @@
   display: grid;
   gap: 12px;
 }
+/* 目录在面板里自己滚：条目再多，搜索框和详情也留在原处。 */
 .atm-knowledge-list {
   display: grid;
+  align-content: start;
+  max-height: max(300px, calc(100vh - 500px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .atm-knowledge-list-item {
   display: grid;

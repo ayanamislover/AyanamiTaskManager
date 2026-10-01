@@ -177,7 +177,7 @@ export function NeedsYouPanel({
 }) {
   const { tasks } = state;
   return (
-    <section className="atm-panel" aria-labelledby="atm-needs-you-title">
+    <section className="atm-panel atm-needs-you" aria-labelledby="atm-needs-you-title">
       <div className="atm-panel-head">
         <h2 id="atm-needs-you-title">等你处理</h2>
         {tasks.length ? <span className="atm-badge warning">{tasks.length}</span> : null}
@@ -196,13 +196,18 @@ export function NeedsYouPanel({
           />
         </div>
       ) : null}
-      {tasks.length ? (
-        <NeedsYouList tasks={tasks} onTask={onTask} />
-      ) : state.complete ? (
-        <NeedsYouList tasks={[]} onTask={onTask} />
-      ) : state.loading && !state.error ? (
-        <LoadingRows count={3} />
-      ) : null}
+      {/* 列表在面板里自己滚：面板高度跟右栏对齐，条目再多也不把下面的项目状态顶出屏幕。 */}
+      <div className="atm-needs-you-scroll">
+        <div className="atm-needs-you-scroll-body">
+          {tasks.length ? (
+            <NeedsYouList tasks={tasks} onTask={onTask} />
+          ) : state.complete ? (
+            <NeedsYouList tasks={[]} onTask={onTask} />
+          ) : state.loading && !state.error ? (
+            <LoadingRows count={3} />
+          ) : null}
+        </div>
+      </div>
     </section>
   );
 }
