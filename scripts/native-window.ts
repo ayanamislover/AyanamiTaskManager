@@ -71,23 +71,38 @@ export class NativeWindowProbe {
     // Windows PowerShell 5.1 把不带 BOM 的 .ps1 当 ANSI 读，中文注释会吞掉换行、把 C# 拼坏；
     // 这里显式按 UTF-8 读进来再执行，不依赖文件有没有 BOM。
     const literal = script.replaceAll("'", "''");
-    // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
+    // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），探针进程退出就删。
     const scratch = powershellScratch(root);
-    this.child = spawn(
-      windowsPowerShell,
-      [
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        `& ([scriptblock]::Create([IO.File]::ReadAllText('${literal}', [Text.Encoding]::UTF8)))`,
-      ],
-      { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: scratch.env },
-    );
-    this.child.once("exit", () => scratch.dispose());
-    this.child.once("error", () => scratch.dispose());
+    try {
+      this.child = spawn(
+        windowsPowerShell,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `& ([scriptblock]::Create([IO.File]::ReadAllText('${literal}', [Text.Encoding]::UTF8)))`,
+        ],
+        { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: scratch.env },
+      );
+    } catch (error) {
+      scratch.dispose();
+      throw error;
+    }
+    // 驱动脚本无论怎么结束（正常走完、未捕获异常、忘了 close）都把探针和临时根带走。
+    const onDriverExit = () => {
+      if (this.child.exitCode === null) this.child.kill();
+      scratch.dispose();
+    };
+    process.once("exit", onDriverExit);
+    const onProbeGone = () => {
+      process.removeListener("exit", onDriverExit);
+      scratch.dispose();
+    };
+    this.child.once("exit", onProbeGone);
+    this.child.once("error", onProbeGone);
     this.child.stderr.on("data", (chunk: Buffer) => {
       this.stderr = `${this.stderr}${chunk.toString("utf8")}`.slice(-2_000);
     });

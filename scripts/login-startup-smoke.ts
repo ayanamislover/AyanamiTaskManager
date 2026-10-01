@@ -32,12 +32,12 @@ const reportPath = join(outputRoot, "login-startup-smoke-report.json");
 const log: CheckLog = new CheckLog();
 const check: CheckLog["check"] = (name, condition, detail) => log.check(name, condition, detail);
 const sandbox = await prepareSandbox("login-startup-smoke");
+// 先拍 Run 快照，再起探针和宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const probe = NativeWindowProbe.start();
 // 先让探针编译好（Add-Type 要一两秒），免得这段时间被算进启动耗时。
 await probe.windows(process.pid);
 
-// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
-const loginItems = snapshotLoginItems();
 const startedAt = Date.now();
 const host = startSmokeHost({
   executable,

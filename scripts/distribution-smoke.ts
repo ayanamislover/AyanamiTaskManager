@@ -22,7 +22,7 @@ import {
   applyRunRestore,
   loginItemRestorePlan,
   readRunSnapshot,
-  uninstallDeletes,
+  RUN_VALUE,
 } from "./login-item-guard.js";
 import { portableZipName } from "./package-native.js";
 import {
@@ -258,10 +258,14 @@ async function portable(): Promise<void> {
 }
 
 async function installed(): Promise<"verified" | "skipped"> {
+  // 自启登记的值名与真实安装共用：验收前已有这个值（哪怕指向便携版），安装会改写、卸载会删，
+  // 事后分不清是卸载删的还是用户期间删的。和同名安装一样，有就不做安装验收。
+  const runBefore = readRunSnapshot();
   const preexisting =
     existsSync(join(installRoot, "app.json")) ||
     existsSync(join(installRoot, "Update.exe")) ||
-    uninstallRegistrationExists();
+    uninstallRegistrationExists() ||
+    RUN_VALUE in runBefore;
   if (preexisting && skipInstalled) {
     checks.push({
       name: "已有安装：按 ATM_DISTRIBUTION_SKIP_INSTALLED 跳过安装验收",
@@ -271,7 +275,11 @@ async function installed(): Promise<"verified" | "skipped"> {
     return "skipped";
   }
   assertInstallRootIsProduct(installRoot, localAppDataRoot);
-  check("验收前没有同名安装", !preexisting, installRoot);
+  check(
+    "验收前没有同名安装与同名自启登记",
+    !preexisting,
+    `${installRoot}; Run ${RUN_VALUE}: ${runBefore[RUN_VALUE]?.data ?? "(none)"}`,
+  );
   const running = appProcesses();
   check("验收前没有运行中的同名进程", running.length === 0, describeAppProcesses(running));
   const priorShortcuts = await findProductShortcuts();
@@ -281,13 +289,6 @@ async function installed(): Promise<"verified" | "skipped"> {
   const dataDir = join(outputRoot, "installed-data");
   const manifest = join(packageDir, `atm-${packageVersion}-win-x64.json`);
   const setup = join(packageDir, "atm-setup.exe");
-  const runBefore = readRunSnapshot();
-  /**
-   * 卸载会删的 Run 值：只有卸载器删的那个固定名称（setup register.rs 的 RUN_VALUE），
-   * 而且卸载前它指向本轮安装根的启动器（是本轮安装写的）。卸载前就定下来，卸载中途失败也算；
-   * 期间被别人删掉的其他名称不算本轮的。
-   */
-  let runDeletedByUninstall: string[] = [];
   try {
     check(
       "atm-setup 静默安装",
@@ -316,7 +317,6 @@ async function installed(): Promise<"verified" | "skipped"> {
       join(installRoot, "state", "health"),
     );
 
-    runDeletedByUninstall = uninstallDeletes(readRunSnapshot(), installRoot);
     const preservedMarker = join(dataDir, "uninstall-preservation.marker");
     await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
     check(
@@ -353,7 +353,8 @@ async function installed(): Promise<"verified" | "skipped"> {
     applyRunRestore(
       loginItemRestorePlan(runBefore, readRunSnapshot(), {
         executables: [join(installRoot, "AyanamiTaskManager.exe")],
-        deleted: runDeletedByUninstall,
+        // 验收前没有这个值，就没有要放回的：只删本轮安装新加、仍指向本轮启动器的。
+        deleted: [],
       }),
     );
   }

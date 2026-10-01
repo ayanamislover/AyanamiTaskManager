@@ -91,8 +91,9 @@ export class ProjectDatabasePool {
   }
 
   /**
-   * 跨 await 用着连接的操作（备份：手动、导出、每日维护、恢复前）持有它。lastUsed 只在取连接时
-   * 更新，备份跑得比空闲阈值久时，不持有就会被空闲回收或容量淘汰从手里关掉。放下时重新计空闲。
+   * 跨 await 用着连接的备份（手动、导出、每日维护、恢复前）持有它。lastUsed 只在取连接时
+   * 更新，备份跑得比空闲阈值久时，不持有就会被每小时的空闲回收或容量淘汰从手里关掉。
+   * 放下时重新计空闲。显式 closeProject / closeAll（恢复换库、垃圾箱、关机）不看持有。
    */
   holdProject(projectId: string): () => void {
     const cached = this.#projects.get(projectId);
@@ -107,19 +108,12 @@ export class ProjectDatabasePool {
     };
   }
 
-  /**
-   * 关闭空闲超过 maxIdleMs、没人持有的项目库。checkpoint 默认 TRUNCATE（要等读者，有
-   * busy_timeout）；释放内存时用 PASSIVE，不等任何人、不挡事件循环。
-   */
-  closeIdleProjects(
-    maxIdleMs = 5 * 60_000,
-    at = Date.now(),
-    checkpoint: "TRUNCATE" | "PASSIVE" = "TRUNCATE",
-  ): number {
+  /** 关闭空闲超过 maxIdleMs、没人持有的项目库（每小时维护）。 */
+  closeIdleProjects(maxIdleMs = 5 * 60_000, at = Date.now()): number {
     let closed = 0;
     for (const [projectId, cached] of [...this.#projects]) {
       if (cached.holds > 0 || at - cached.lastUsed < maxIdleMs) continue;
-      this.closeProject(projectId, checkpoint);
+      this.closeProject(projectId);
       closed += 1;
     }
     return closed;
@@ -131,11 +125,11 @@ export class ProjectDatabasePool {
       if (database.sqlite.open) database.sqlite.pragma("shrink_memory");
   }
 
-  closeProject(projectId: string, checkpoint: "TRUNCATE" | "PASSIVE" = "TRUNCATE"): void {
+  closeProject(projectId: string): void {
     const cached = this.#projects.get(projectId);
     if (!cached) return;
     if (cached.database.sqlite.open) {
-      cached.database.sqlite.pragma(`wal_checkpoint(${checkpoint})`);
+      cached.database.sqlite.pragma("wal_checkpoint(TRUNCATE)");
       cached.database.sqlite.close();
     }
     this.#projects.delete(projectId);

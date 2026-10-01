@@ -1,6 +1,8 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { NativeWindowProbe } from "../../../scripts/native-window.js";
 import {
@@ -64,22 +66,83 @@ describe("PowerShell 的编译临时目录不落 %TEMP%", () => {
     60_000,
   );
 
-  it("凡是用 Add-Type 编译 C# 的脚本都走这个临时根", () => {
+  // 被扫描、编译进程还没走时删不掉：不抛、不当成已删，之后能再删。
+  it("删不掉时不抛、不当成已删，解除占用后再删就成功", () => {
+    let attempts = 0;
+    const scratch = powershellScratch(process.cwd(), process.env, (directory) => {
+      attempts += 1;
+      if (attempts === 1) throw Object.assign(new Error("EBUSY: resource busy"), { code: "EBUSY" });
+      rmSync(directory, { recursive: true, force: true });
+    });
+    expect(scratch.dispose()).toBe(false);
+    expect(existsSync(scratch.env.TEMP!)).toBe(true);
+    expect(scratch.dispose()).toBe(true);
+    expect(existsSync(scratch.env.TEMP!)).toBe(false);
+    expect(scratch.dispose()).toBe(true);
+    expect(attempts).toBe(2);
+    // 一次性调用里清理失败不盖住 run 自己的错误。
+    expect(() =>
+      withPowerShellScratch(() => {
+        throw new Error("run failed");
+      }),
+    ).toThrow("run failed");
+  });
+
+  it.runIf(process.platform === "win32")(
+    "驱动忘了 close 还崩了：探针与临时根照样被带走，%TEMP% 不多目录",
+    () => {
+      const before = new Set(compilerDirectories());
+      const scratchBefore = new Set(scratchDirectories());
+      const loader = pathToFileURL(join(process.cwd(), "node_modules/tsx/dist/loader.mjs")).href;
+      const result = spawnSync(
+        process.execPath,
+        ["--import", loader, "apps/desktop/test/fixtures/probe-forgotten.mts", process.cwd()],
+        { encoding: "utf8", timeout: 60_000, windowsHide: true },
+      );
+      expect(result.stdout).toContain("probe-ready");
+      expect(result.status).not.toBe(0);
+      expect(scratchDirectories().filter((name) => !scratchBefore.has(name))).toEqual([]);
+      expect(compilerDirectories().filter((name) => !before.has(name))).toEqual([]);
+    },
+    90_000,
+  );
+
+  it("凡是用 Add-Type 编译 C# 的脚本都走这个临时根（递归、大小写不敏感，注释里提到不算）", () => {
     const scripts = join(process.cwd(), "scripts");
-    const compiling = readdirSync(scripts)
-      .filter((name) => /\.(?:ts|ps1)$/u.test(name))
-      .filter((name) =>
-        /Add-Type\s+(?:@"|-Namespace|-TypeDefinition)/u.test(
-          readFileSync(join(scripts, name), "utf8"),
-        ),
-      );
-    expect(compiling.length).toBeGreaterThan(3);
-    for (const name of compiling) {
-      // .ps1 由 native-window.ts 拉起，检查拉起它的那一边。
-      const launcher = name.endsWith(".ps1") ? name.replace(/\.ps1$/u, ".ts") : name;
-      expect(readFileSync(join(scripts, launcher), "utf8"), launcher).toMatch(
-        /powershellScratch\(|withPowerShellScratch\(/u,
-      );
+    const files: string[] = [];
+    const walk = (directory: string) => {
+      for (const name of readdirSync(directory)) {
+        const path = join(directory, name);
+        if (statSync(path).isDirectory()) walk(path);
+        else if (/\.(?:ts|mts|ps1)$/iu.test(name)) files.push(path);
+      }
+    };
+    walk(scripts);
+    const compiles =
+      /add-type\s+(?:@["']|-typedefinition\b|-namespace\b|-memberdefinition\b|-name\s)/iu;
+    const usesScratch = (source: string) =>
+      source
+        .split(/\r?\n/u)
+        .some(
+          (line) =>
+            !/^\s*(?:\/\/|\*)/u.test(line) &&
+            /\b(?:powershellScratch|withPowerShellScratch)\(/u.test(line),
+        );
+    const compiling = files.filter((path) => compiles.test(readFileSync(path, "utf8")));
+    expect(compiling.length).toBeGreaterThan(4);
+    for (const path of compiling) {
+      // .ps1 由同名 .ts 拉起，检查拉起它的那一边。
+      const launcher = path.replace(/\.ps1$/iu, ".ts");
+      expect(usesScratch(readFileSync(launcher, "utf8")), relative(scripts, launcher)).toBe(true);
     }
+    // 阳性对照：守卫自己认得出这些写法，也不被注释骗过。
+    for (const sample of [
+      "Add-Type @'",
+      "ADD-TYPE -TypeDefinition $x",
+      "add-type -MemberDefinition 'x' -Name N",
+    ])
+      expect(compiles.test(sample), sample).toBe(true);
+    expect(usesScratch("// withPowerShellScratch(() => 1)")).toBe(false);
+    expect(usesScratch("  return withPowerShellScratch((env) => run(env));")).toBe(true);
   });
 });

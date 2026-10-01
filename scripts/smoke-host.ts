@@ -373,30 +373,6 @@ export async function openProjectFromSidebar(page: Page, name: string): Promise<
 }
 
 /**
- * 进程的出生身份（ticks、Unix 毫秒、映像路径各一行），由宿主的 --process-identity 查（宿主
- * identity.rs，与 core 校验父进程同一口径）。查不到（已退出、拒绝访问）为 null。
- */
-export function processIdentity(helper: string, pid: number): string | null {
-  const result = spawnSync(helper, ["--process-identity", String(pid)], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 5_000,
-  });
-  return result.status === 0 && !result.error ? result.stdout.trim() || null : null;
-}
-
-/**
- * 记下的进程里，哪些 PID 上仍是当初那个进程（出生身份逐字相同）。查不到（已退出、拒绝访问）
- * 或换了人（PID 被系统复用）都不算：只有这些才可以去结束。
- */
-export function survivingProcesses(
-  recorded: ReadonlyArray<{ pid: number; identity: string }>,
-  query: (pid: number) => string | null,
-): number[] {
-  return recorded.filter((row) => query(row.pid) === row.identity).map((row) => row.pid);
-}
-
-/**
  * 只结束自己拉起的那个宿主的进程树（core、WebView2 都在树里），从不按镜像名。
  * 只能对还没退出的子进程调用：Node 握着它的进程句柄，PID 在退出前不会被系统复用。
  */

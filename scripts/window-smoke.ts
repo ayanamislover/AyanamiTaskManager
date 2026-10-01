@@ -61,6 +61,8 @@ const RESIZED = { width: 1280, height: 800 };
 
 const log: CheckLog = new CheckLog();
 const check: CheckLog["check"] = (name, condition, detail) => log.check(name, condition, detail);
+// 先拍 Run 快照，再起探针和宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const probe = NativeWindowProbe.start();
 await mkdir(screenshotDir, { recursive: true });
 const sandbox = await prepareSandbox("window-smoke");
@@ -600,8 +602,6 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   }
 }
 
-// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
-const loginItems = snapshotLoginItems();
 const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 let error: unknown;
 let details: Record<string, unknown> = {};

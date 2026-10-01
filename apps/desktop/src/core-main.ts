@@ -46,7 +46,7 @@ const PACKAGED = typeof __ATM_PACKAGED__ === "boolean" && __ATM_PACKAGED__;
 /** 握手失败、父进程不可信：退出码固定，宿主据此区分「被拒绝」与「崩溃」。 */
 export const CORE_EXIT_REJECTED = 64;
 
-/** 关窗后多久释放界面用过的数据库内存；期间没再用过的项目库会被关闭。 */
+/** 关窗后多久释放界面用过的内存（等界面最后的请求落地）。 */
 const WINDOW_CLOSED_RELEASE_MS = 5_000;
 
 /** 心跳与开关窗时的内存分项：区分 V8 堆、ArrayBuffer 与其余堆外（SQLite、原生分配）。 */
@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     release: () => {
       if (shuttingDown) return;
       try {
-        runtime?.service.databases.releaseIdleMemory(WINDOW_CLOSED_RELEASE_MS);
+        runtime?.service.databases.releaseMemory();
         // 界面那批请求留下的 V8 堆空间也只有完整 GC 才还（宿主给 core 加了 --expose-gc）。
         (globalThis as { gc?: () => void }).gc?.();
         lifecycle.record("window.released", memoryDetail());

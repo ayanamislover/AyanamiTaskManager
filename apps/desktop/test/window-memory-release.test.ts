@@ -35,14 +35,12 @@ describe("关窗后释放内存", () => {
     expect(release).toHaveBeenCalledTimes(2);
   });
 
-  it("core 收到宿主的开关窗事件就驱动它，释放时关空闲项目库并做完整 GC；宿主只给 core 开 GC", () => {
+  it("core 收到宿主的开关窗事件就驱动它，释放时让各连接还页缓存并做完整 GC；宿主只给 core 开 GC", () => {
     const core = readFileSync("apps/desktop/src/core-main.ts", "utf8");
     expect(core).toContain("windowMemory.windowShown();");
     expect(core).toContain("windowMemory.windowClosed();");
     expect(core).toContain("windowMemory.cancel();");
-    expect(core).toContain(
-      "runtime?.service.databases.releaseIdleMemory(WINDOW_CLOSED_RELEASE_MS);",
-    );
+    expect(core).toContain("runtime?.service.databases.releaseMemory();");
     expect(core).toContain("(globalThis as { gc?: () => void }).gc?.();");
     const paths = readFileSync("apps/desktop/native/host/src/paths.rs", "utf8");
     expect(paths).toContain('const CORE_NODE_FLAGS: [&str; 1] = ["--expose-gc"];');

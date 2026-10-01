@@ -17,7 +17,6 @@ import {
   exited,
   smokeExecutable,
   smokeHostEnvironment,
-  survivingProcesses,
 } from "../../../scripts/smoke-host.js";
 
 // 手动烟测（窗口、历史、毛玻璃、登录启动、bridge 内存）共用这道闸：数据根只能在 output/ 下，
@@ -150,25 +149,24 @@ describe("烟测宿主与子进程", () => {
       const snapshot = source.indexOf("snapshotLoginItems(");
       expect(snapshot, name).toBeGreaterThan(0);
       expect(snapshot, name).toBeLessThan(source.indexOf("startSmokeHost("));
+      // 探针也是资源：快照读不到时它还没起来，就没有要收拾的。
+      const probe = source.indexOf("NativeWindowProbe.start(");
+      if (probe >= 0) expect(snapshot, name).toBeLessThan(probe);
       expect(source, name).not.toContain("withLoginItemsRestored(");
     }
   });
 
-  // 收尾按 PID 结束进程前先核出生身份：PID 可能已被系统复用给无关进程（Codex R5-P2-4）。
-  it("只结束 PID 上仍是当初那个进程的：已退出、查不到、换了人都不碰", () => {
-    const recorded = [
-      { pid: 10, identity: "a" },
-      { pid: 11, identity: "b" },
-      { pid: 12, identity: "c" },
-      { pid: 13, identity: "d" },
-    ];
-    const now: Record<number, string | null> = { 10: "a", 11: null, 12: "c-reused", 13: "d" };
-    expect(survivingProcesses(recorded, (pid) => now[pid] ?? null)).toEqual([10, 13]);
-    expect(survivingProcesses(recorded, () => null)).toEqual([]);
+  // 收尾按 PID 结束进程前先核出生身份（PID 可能已被系统复用给无关进程，Codex R5/R6-P2-4）：
+  // 出生时间与树成员身份一起取；核对与结束在同一个进程句柄上；查不了的不当成已退出。
+  it("预算脚本只结束 PID 上仍是当初那个进程的，查不了的如实报告", () => {
     const budget = readFileSync("scripts/budget-measure.ts", "utf8");
-    expect(budget).toContain(
-      "for (const pid of survivingProcesses(descendants, query)) killProcessTree(pid);",
+    expect(budget).toContain("process.StartTime.ToUniversalTime().Ticks");
+    expect(budget).toMatch(
+      /IntPtr pinned = process\.Handle;\s*if \(process\.StartTime\.ToUniversalTime\(\)\.Ticks != ticks\) return "other";\s*process\.Kill\(\);/u,
     );
+    expect(budget).toContain("for (const row of descendants) await probe.killSame(row);");
+    expect(budget).toContain('state === "same" || state === "unknown"');
+    expect(budget).not.toMatch(/killProcessTree\(row\.pid\)/u);
     expect(budget).not.toMatch(/process\.kill\(pid, 0\)/u);
     expect(budget).not.toMatch(/child\.exitCode/u);
   });

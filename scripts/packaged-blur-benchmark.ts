@@ -101,6 +101,8 @@ const candidateSha256 = createHash("sha256")
 await mkdir(outputDir, { recursive: true });
 await mkdir(screenshotDir, { recursive: true });
 const sandbox = await prepareSandbox("blur-benchmark");
+// 先拍 Run 快照，再起探针和宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const probe = NativeWindowProbe.start();
 
 const scalarMetrics = (metrics: Array<{ name: string; value: number }>) => {
@@ -440,8 +442,6 @@ async function measure(renderer: SmokeRenderer, window: NativeWindowState): Prom
   );
 }
 
-// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
-const loginItems = snapshotLoginItems();
 const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 try {
   await loginItems.restoreAfter(async () => {

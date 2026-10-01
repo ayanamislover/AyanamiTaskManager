@@ -50,8 +50,6 @@ import {
   devToolsPortFile,
   exited as childExited,
   killProcessTree,
-  processIdentity,
-  survivingProcesses,
   outputRoot,
   readDevToolsPort,
   repoRoot,
@@ -248,7 +246,15 @@ function ensurePortable(): string {
 
 // ---------------------------------------------------------------- 进程探针（Toolhelp32 + 标量）
 
-type ProcessRow = { pid: number; ppid: number; exe: string; ws: number; priv: number };
+type ProcessRow = {
+  pid: number;
+  ppid: number;
+  exe: string;
+  ws: number;
+  priv: number;
+  /** 出生时间（.NET ticks，UTC）：与树成员身份一起取，之后按它认人。 */
+  ticks: string;
+};
 
 const PROBE = `
 Add-Type @"
@@ -299,13 +305,30 @@ public static class AtmBudgetProbe {
     foreach (int pid in tree) {
       try {
         var process = Process.GetProcessById(pid);
-        rows.Add("{\\"pid\\":" + pid + ",\\"ppid\\":" + parents[pid] + ",\\"exe\\":\\"" + names[pid] + "\\",\\"ws\\":" + process.WorkingSet64 + ",\\"priv\\":" + process.PrivateMemorySize64 + "}");
+        rows.Add("{\\"pid\\":" + pid + ",\\"ppid\\":" + parents[pid] + ",\\"exe\\":\\"" + names[pid] + "\\",\\"ws\\":" + process.WorkingSet64 + ",\\"priv\\":" + process.PrivateMemorySize64 + ",\\"ticks\\":\\"" + process.StartTime.ToUniversalTime().Ticks + "\\"}");
       } catch { }
     }
     return "[" + string.Join(",", rows.ToArray()) + "]";
   }
   public static string Close(long hwnd) {
     return PostMessageW(new IntPtr(hwnd), 0x0010, IntPtr.Zero, IntPtr.Zero) ? "true" : "false";
+  }
+  // PID 上是不是记下的那个进程：same / gone（没了）/ other（PID 已给了别人）/ unknown（查不了）。
+  public static string Alive(int pid, long ticks) {
+    Process process;
+    try { process = Process.GetProcessById(pid); } catch (ArgumentException) { return "gone"; } catch { return "unknown"; }
+    try { return process.StartTime.ToUniversalTime().Ticks == ticks ? "same" : "other"; } catch { return "unknown"; }
+  }
+  // 只结束记下的那个进程：先拿住句柄（PID 在句柄关闭前不会被复用），再在同一个对象上核出生时间并结束。
+  public static string KillSame(int pid, long ticks) {
+    Process process;
+    try { process = Process.GetProcessById(pid); } catch (ArgumentException) { return "gone"; } catch { return "unknown"; }
+    try {
+      IntPtr pinned = process.Handle;
+      if (process.StartTime.ToUniversalTime().Ticks != ticks) return "other";
+      process.Kill();
+      return "killed";
+    } catch { return "unknown"; }
   }
   public static string Session(int pid) {
     return Process.GetProcessById(pid).SessionId.ToString();
@@ -322,6 +345,8 @@ while ($true) {
       'tree' { [Console]::Out.WriteLine([AtmBudgetProbe]::Tree([int]$parts[1])) }
       'close' { [Console]::Out.WriteLine([AtmBudgetProbe]::Close([long]$parts[1])) }
       'session' { [Console]::Out.WriteLine([AtmBudgetProbe]::Session([int]$parts[1])) }
+      'alive' { [Console]::Out.WriteLine([AtmBudgetProbe]::Alive([int]$parts[1], [long]$parts[2])) }
+      'killsame' { [Console]::Out.WriteLine([AtmBudgetProbe]::KillSame([int]$parts[1], [long]$parts[2])) }
       default { [Console]::Out.WriteLine('null') }
     }
   } catch { [Console]::Out.WriteLine('null') }
@@ -341,8 +366,18 @@ class ProcessProbe {
   readonly ready: Promise<void>;
 
   constructor() {
-    this.child.once("exit", () => this.scratch.dispose());
-    this.child.once("error", () => this.scratch.dispose());
+    // 驱动脚本无论怎么结束都把探针和临时根带走（见 native-window.ts 同一做法）。
+    const onDriverExit = () => {
+      if (!childExited(this.child)) this.child.kill();
+      this.scratch.dispose();
+    };
+    process.once("exit", onDriverExit);
+    const onProbeGone = () => {
+      process.removeListener("exit", onDriverExit);
+      this.scratch.dispose();
+    };
+    this.child.once("exit", onProbeGone);
+    this.child.once("error", onProbeGone);
     const lines = createInterface({ input: this.child.stdout });
     let first: (() => void) | null = null;
     this.ready = new Promise((done) => (first = done));
@@ -375,6 +410,16 @@ class ProcessProbe {
 
   async close(hwnd: number): Promise<boolean> {
     return (await this.ask(`close ${hwnd}`)) === "true";
+  }
+
+  /** 记下的进程是否还在：same / gone / other / unknown。 */
+  async alive(row: { pid: number; ticks: string }): Promise<string> {
+    return this.ask(`alive ${row.pid} ${row.ticks}`);
+  }
+
+  /** 只在 PID 上仍是记下的那个进程时结束它（同一句柄上核对并结束）。 */
+  async killSame(row: { pid: number; ticks: string }): Promise<string> {
+    return this.ask(`killsame ${row.pid} ${row.ticks}`);
   }
 
   async session(pid: number): Promise<number> {
@@ -533,15 +578,22 @@ const exited = (host: Host, timeoutMs: number) =>
 async function quitHost(
   host: Host,
   probe: ProcessProbe,
-): Promise<{ graceful: boolean; reply: string; descendantsGoneMs: number | null }> {
+): Promise<{
+  graceful: boolean;
+  reply: string;
+  descendantsGoneMs: number | null;
+  descendantsUnknown: number;
+}> {
   if (childExited(host.child))
-    return { graceful: true, reply: "already-exited", descendantsGoneMs: null };
+    return {
+      graceful: true,
+      reply: "already-exited",
+      descendantsGoneMs: null,
+      descendantsUnknown: 0,
+    };
   // 先记下整棵树：宿主退出后 WebView2 浏览器进程可能还要一会儿才走，下一轮不能和它共用用户数据目录。
-  // 连同出生身份一起记：之后只认身份对得上的进程，PID 被系统复用给别人时不碰它。
-  const descendants = (await probe.tree(host.pid))
-    .filter((row) => row.pid !== host.pid)
-    .map((row) => ({ pid: row.pid, identity: processIdentity(host.executable, row.pid) }))
-    .filter((row): row is { pid: number; identity: string } => row.identity !== null);
+  // 出生时间与树成员身份一起取：之后只认 PID 上仍是这个进程的，PID 被复用给别人时不碰它。
+  const descendants = (await probe.tree(host.pid)).filter((row) => row.pid !== host.pid);
   const reply = await sendPipe(pipeName(await probe.session(host.pid)), { cmd: "QUIT" });
   let graceful = await exited(host, 20_000);
   if (!graceful) {
@@ -549,19 +601,29 @@ async function quitHost(
     await exited(host, 5_000);
   }
   const quitAt = Date.now();
-  const query = (pid: number) => processIdentity(host.executable, pid);
+  let unknown = 0;
   const gone = await until(
-    () => (survivingProcesses(descendants, query).length > 0 ? null : true),
+    async () => {
+      const states = await Promise.all(descendants.map((row) => probe.alive(row)));
+      unknown = states.filter((state) => state === "unknown").length;
+      // 查不了的不算走了：等它，最后如实报告。
+      return states.some((state) => state === "same" || state === "unknown") ? null : true;
+    },
     15_000,
     "宿主的子孙进程退出",
     50,
   ).catch(() => false);
   if (!gone) {
     graceful = false;
-    // 结束前再核一次身份；核对与结束之间仍有毫秒级窗口，这里只量本机沙箱里自己拉起的树。
-    for (const pid of survivingProcesses(descendants, query)) killProcessTree(pid);
+    for (const row of descendants) await probe.killSame(row);
   }
-  return { graceful, reply, descendantsGoneMs: gone ? Date.now() - quitAt : null };
+  return {
+    graceful,
+    reply,
+    descendantsGoneMs: gone ? Date.now() - quitAt : null,
+    // 最后一轮仍查不了身份的子孙个数：非 0 时「子孙已退出」不成立。
+    descendantsUnknown: gone ? 0 : unknown,
+  };
 }
 
 async function requestShow(host: Host): Promise<void> {
@@ -824,12 +886,14 @@ report.executables = { production, smoke };
 save();
 
 const probe = new ProcessProbe();
-await probe.ready;
-const windows = NativeWindowProbe.start();
-await windows.windows(process.pid);
+let windows: NativeWindowProbe | null = null;
 try {
+  await probe.ready;
+  windows = NativeWindowProbe.start();
+  const nativeWindows = windows;
+  await nativeWindows.windows(process.pid);
   await withLoginItemsRestored(async () => {
-    report.memory = await measureMemory(production, probe, windows);
+    report.memory = await measureMemory(production, probe, nativeWindows);
     save();
     if (memoryOnly) return;
 
@@ -838,12 +902,14 @@ try {
     // 第一轮带着刚才那次运行留下的 WebView2 用户数据目录，和用户日常登录一致。
     for (let run = 0; run < coldRuns; run += 1) {
       freshRunData(true);
-      production_foreground.push(await coldStartProduction(production, probe, windows, false));
+      production_foreground.push(
+        await coldStartProduction(production, probe, nativeWindows, false),
+      );
       save();
     }
     for (let run = 0; run < coldRuns; run += 1) {
       freshRunData(true);
-      production_background.push(await coldStartProduction(production, probe, windows, true));
+      production_background.push(await coldStartProduction(production, probe, nativeWindows, true));
     }
     report.coldStartProduction = {
       foreground: production_foreground,
@@ -854,7 +920,7 @@ try {
     const smokeRuns = [];
     for (let run = 0; run < Math.min(coldRuns, 3); run += 1) {
       freshRunData(true);
-      smokeRuns.push(await coldStartSmoke(smoke, probe, windows));
+      smokeRuns.push(await coldStartSmoke(smoke, probe, nativeWindows));
       save();
     }
     report.coldStartSmoke = smokeRuns;
@@ -863,7 +929,7 @@ try {
   report.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
 } finally {
   probe.stop();
-  windows.close();
+  windows?.close();
   report.completedAt = new Date().toISOString();
   save();
 }
