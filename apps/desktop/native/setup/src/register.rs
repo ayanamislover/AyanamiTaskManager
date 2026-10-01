@@ -167,37 +167,111 @@ pub fn commit(
     Ok(())
 }
 
+/// One of this install's own entry points, exactly — not merely something under the root.
 fn ours(env: &Env, target: &str) -> bool {
-    let target = Path::new(target);
-    fsx::is_within(target, &env.install_root) || fsx::is_within(target, &env.current_link())
+    let target = Path::new(target.trim());
+    [
+        env.launcher(),
+        env.setup(),
+        env.current_link().join(env::LAUNCHER),
+    ]
+    .iter()
+    .any(|entry| fsx::same_path(target, entry))
 }
 
-/// Uninstall: remove only what points at this install (exact targets), keep the rest.
-pub fn remove(env: &Env) -> Result<(), String> {
-    registry::delete_key(&env.uninstall_key)?;
+fn command_exe(command: &str) -> &str {
+    let command = command.trim();
+    match command.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or(rest),
+        None => command.split(' ').next().unwrap_or(command),
+    }
+}
+
+/// Uninstall, first half: the shortcuts and the Run value that start this install. What
+/// points elsewhere (the user re-targeted it, another app took the name) stays.
+pub fn remove_entries(env: &Env) -> Result<(), String> {
     if let Some(run) = registry::read_value(&env.run_key, env::RUN_VALUE)?
         && let Some(command) = run.as_string()
     {
-        let exe = command.trim().trim_start_matches('"');
-        let exe = exe.split('"').next().unwrap_or(exe);
-        if ours(env, exe) {
+        if ours(env, command_exe(&command)) {
             registry::delete_value(&env.run_key, env::RUN_VALUE)?;
+        } else {
+            say!("uninstall: Run value points elsewhere, kept: {command}");
         }
     }
     for path in crate::snapshot::shortcut_paths(env) {
-        if let Some(value) = shortcut::read(&path)?
-            && ours(env, &value.target)
-        {
-            fs::remove_file(&path).map_err(|error| error.to_string())?;
+        if let Some(value) = shortcut::read(&path)? {
+            if ours(env, &value.target) {
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+            } else {
+                say!("uninstall: {} points elsewhere, kept", path.display());
+            }
         }
     }
     let _ = fs::remove_dir(&env.start_menu_dir);
     Ok(())
 }
 
+/// Uninstall, last: the Apps-list entry, only when it is this install's (it stays until
+/// the files are gone, so an incomplete uninstall can be run again from there).
+pub fn remove_uninstall_entry(env: &Env) -> Result<(), String> {
+    let Some(values) = registry::read_key(&env.uninstall_key)? else {
+        return Ok(());
+    };
+    let location = values
+        .get("InstallLocation")
+        .and_then(RawValue::as_string)
+        .unwrap_or_default();
+    let uninstaller = values
+        .get("UninstallString")
+        .and_then(RawValue::as_string)
+        .unwrap_or_default();
+    if fsx::same_path(Path::new(location.trim()), &env.install_root)
+        && fsx::same_path(Path::new(command_exe(&uninstaller)), &env.setup())
+    {
+        registry::restore_key(&env.uninstall_key, &None)
+    } else {
+        say!("uninstall: the Uninstall entry belongs to another install, kept");
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn only_this_installs_exact_entry_points_are_ours() {
+        let env = Env {
+            install_root: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop"),
+            data_dir: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager"),
+            start_menu_dir: PathBuf::new(),
+            desktop_dir: PathBuf::new(),
+            uninstall_key: String::new(),
+            run_key: String::new(),
+            sandbox: true,
+        };
+        for mine in [
+            r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop\AyanamiTaskManager.exe",
+            r"c:\users\u\appdata\local\ayanamitaskmanagerdesktop\atm-setup.exe",
+            r"C:\Users\u\AppData\Local\AyanamiTaskManager\current\AyanamiTaskManager.exe",
+        ] {
+            assert!(ours(&env, mine), "{mine}");
+        }
+        for other in [
+            r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop\..\OtherApp\other.exe",
+            r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop\tools\other.exe",
+            r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop\app-2.0.0\AyanamiTaskManager.exe",
+        ] {
+            assert!(!ours(&env, other), "{other}");
+        }
+        assert_eq!(
+            command_exe(r#""C:\x\a b.exe" --uninstall"#),
+            r"C:\x\a b.exe"
+        );
+        assert_eq!(command_exe(r"C:\x\a.exe --background"), r"C:\x\a.exe");
+    }
 
     #[test]
     fn run_arguments_survive_quoting_styles() {

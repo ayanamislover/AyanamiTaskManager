@@ -23,9 +23,14 @@ use crate::register;
 use crate::runtime;
 use crate::snapshot::{self, Snapshot};
 use crate::store::{self, InstallLock, Store};
+use atm_install_state::ipc;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 const START_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a replay waits for the host an earlier attempt started. That host may never
+/// serve: having lost its transaction it goes through normal admission, finds the journal
+/// unfinished and blocks on its own `--recover` — which waits for this one (P1-7 replay).
+const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(20);
 const QUIESCE_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_SEAL_ROUNDS: u8 = 3;
 const MAX_ATTEMPTS: u32 = 2;
@@ -59,6 +64,19 @@ fn code(error: &str) -> String {
         .chars()
         .take(64)
         .collect()
+}
+
+/// Where a failed or interrupted forward path ends. Before SWITCH nothing changed:
+/// ABORTED. After it, ROLLED_BACK — unless nothing was installed before: a first install
+/// has nothing to roll back to, it is ABORTED as well (Codex P2-2).
+fn failure_outcome(txn: &Transaction) -> Outcome {
+    match txn.state {
+        _ if txn.from.is_none() => Outcome::Aborted,
+        TxnState::Fence | TxnState::Quiesce | TxnState::Isolate | TxnState::Seal => {
+            Outcome::Aborted
+        }
+        _ => Outcome::RolledBack,
+    }
 }
 
 impl Setup {
@@ -220,13 +238,21 @@ impl Setup {
 
     fn recover_if_needed(&mut self) -> Result<(), String> {
         if let Some(mut txn) = self.store.load(&self.env).map_err(io)? {
+            if txn.outcome == Some(Outcome::RecoveryFailed) {
+                return Err(
+                    "RECOVERY_FAILED: 上一次安装没能撤销干净，请先运行开始菜单里的「ATM 修复」"
+                        .into(),
+                );
+            }
             if !txn.is_terminal() {
                 say!(
                     "found unfinished transaction {} at {:?}; recovering first",
                     txn.id,
                     txn.state
                 );
-                self.recover()?;
+                if self.recover()? == Outcome::RecoveryFailed {
+                    return Err("RECOVERY_FAILED: 未完成的事务没能撤销，请运行「ATM 修复」".into());
+                }
             } else if txn.commit_pending {
                 self.finish_commit(&mut txn);
             }
@@ -328,6 +354,9 @@ impl Setup {
         }
         txn.snapshot_complete = true;
         self.store.save(txn).map_err(io)?;
+        if txn.kind == TxnKind::Migrate {
+            fault::squirrel_adds(&self.env.install_root);
+        }
         // FENCE → QUIESCE → ISOLATE → SEAL, at most three rounds (§6 steps 6–8a).
         loop {
             txn.seal_rounds += 1;
@@ -337,7 +366,7 @@ impl Setup {
             self.quiesce(txn)?;
             if txn.kind == TxnKind::Migrate {
                 self.enter(txn, TxnState::Isolate)?;
-                self.isolate(&snap)?;
+                self.isolate(txn, &snap)?;
             }
             self.enter(txn, TxnState::Seal)?;
             match self.seal(txn, &snap) {
@@ -441,15 +470,53 @@ impl Setup {
         }
     }
 
-    fn isolate(&self, snap: &Snapshot) -> Step {
-        let legacy = snap.legacy.as_ref().ok_or("ISOLATE_WITHOUT_LEGACY")?;
+    fn legacy_items_path(&self, txn: &Transaction) -> PathBuf {
+        self.env.txn_dir(&txn.id).join("legacy-items.json")
+    }
+
+    /// The Squirrel items this transaction moves: the snapshot's, plus any the updater
+    /// produced later (recorded before they are moved, so an undo puts them back too).
+    fn legacy_items(&self, txn: &Transaction, snap: &Snapshot) -> Vec<String> {
+        let base = snap
+            .legacy
+            .as_ref()
+            .map(|legacy| legacy.items.clone())
+            .unwrap_or_default();
+        let recorded: Vec<String> = fsx::read_json_limited(&self.legacy_items_path(txn), 64 * 1024)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        legacy::with_new_items(&base, recorded).unwrap_or(base)
+    }
+
+    fn isolate(&self, txn: &Transaction, snap: &Snapshot) -> Step {
+        snap.legacy.as_ref().ok_or("ISOLATE_WITHOUT_LEGACY")?;
+        let mut items = self.legacy_items(txn, snap);
+        if let Some(all) =
+            legacy::with_new_items(&items, legacy::scan_items(&self.env.install_root))
+        {
+            // Write-ahead: the transaction's list and the reverse-migration record first.
+            fsx::write_json_atomic(&self.legacy_items_path(txn), &all).map_err(io)?;
+            let record = legacy::migration_record(&self.env.rollback_dir());
+            if let Ok(Some(mut migration)) = fsx::read_json_limited::<Snapshot>(&record, 16 << 20)
+                && let Some(legacy) = migration.legacy.as_mut()
+            {
+                legacy.items = all.clone();
+                fsx::write_json_atomic(&record, &migration).map_err(io)?;
+            }
+            say!(
+                "ISOLATE: Squirrel added {:?} since the snapshot",
+                &all[items.len()..]
+            );
+            items = all;
+        }
         legacy::move_items(
-            &legacy.items,
+            &items,
             &self.env.install_root,
             &legacy::isolated_dir(&self.env.rollback_dir()),
         )
         .map_err(|error| format!("ISOLATE: {error}"))?;
-        say!("ISOLATE moved {:?}", legacy.items);
+        say!("ISOLATE moved {items:?}");
         Ok(())
     }
 
@@ -461,6 +528,12 @@ impl Setup {
                 if self.env.install_root.join(item).exists() {
                     return Err(format!("(i) {item} is back in the install root"));
                 }
+            }
+            let left = legacy::scan_items(&self.env.install_root);
+            if !left.is_empty() {
+                return Err(format!(
+                    "(i) Squirrel entries in the install root: {left:?}"
+                ));
             }
         }
         for (from, relative) in env::stable_sources(&self.env.app_dir(&txn.to)) {
@@ -477,6 +550,9 @@ impl Setup {
         }
         if let Some((proc, _)) = quiesce::service(&self.env) {
             return Err(format!("(ii) lease still held by pid {}", proc.pid));
+        }
+        if ipc::primary_alive(&self.env.data_dir) {
+            return Err("(ii) a host still holds the single-instance lock".into());
         }
         fsx::retarget_junction(&self.env.current_link(), &self.env.install_root)
             .map_err(|error| format!("(iii) {error}"))?;
@@ -507,7 +583,33 @@ impl Setup {
         let (_child, identity) = procs::spawn(&host, args).map_err(io)?;
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
-        let deadline = Instant::now() + START_TIMEOUT;
+        fault::after_spawn(txn.state);
+        self.await_healthy(txn, version, &identity, START_TIMEOUT)
+    }
+
+    /// The host this transaction started for `version`, if a replay finds it still alive:
+    /// take it over instead of starting a second one, which would only hand off to the
+    /// first through the single-instance pipe and exit (Codex P1-7).
+    fn started_host(
+        &self,
+        txn: &Transaction,
+        version: &str,
+    ) -> Option<atm_install_state::ProcessIdentity> {
+        let started = txn.started.clone()?;
+        let dir = self.env.app_dir(version);
+        (procs::alive(&started) && fsx::is_within(std::path::Path::new(&started.image), &dir))
+            .then_some(started)
+    }
+
+    fn await_healthy(
+        &self,
+        txn: &Transaction,
+        version: &str,
+        identity: &atm_install_state::ProcessIdentity,
+        timeout: Duration,
+    ) -> Step {
+        let identity = identity.clone();
+        let deadline = Instant::now() + timeout;
         let mut last = String::new();
         while Instant::now() < deadline {
             match runtime::service_healthy(
@@ -563,13 +665,7 @@ impl Setup {
         if early {
             return self.early_abort(txn);
         }
-        let target = match txn.state {
-            TxnState::Fence | TxnState::Quiesce | TxnState::Isolate | TxnState::Seal => {
-                Outcome::Aborted
-            }
-            _ => Outcome::RolledBack,
-        };
-        self.undo(txn, target, 1)
+        self.undo(txn, failure_outcome(txn), 1)
     }
 
     /// Undo step 0 (§6): nothing outside this transaction's own staging was touched.
@@ -606,15 +702,21 @@ impl Setup {
         let mut step = from_step.max(1);
         while step <= 3 {
             store::enter_undo(&self.store, txn, TxnState::Undo, target, step).map_err(io)?;
-            let mut result = self.undo_step(txn, &snap, step, undo_started);
+            let attempt = |setup: &mut Self, txn: &mut Transaction| {
+                if fault::fail_undo(step) {
+                    return Err(format!("DRILL_FAIL_UNDO: {step}"));
+                }
+                setup.undo_step(txn, &snap, step, undo_started)
+            };
+            let mut result = attempt(self, txn);
             if let Err(error) = &result {
                 say!("UNDO step {step} failed once: {error}; retrying");
-                result = self.undo_step(txn, &snap, step, undo_started);
+                result = attempt(self, txn);
             }
             if let Err(error) = result {
                 say!("RECOVERY_FAILED at undo step {step}: {error}");
                 txn.error = Some(code(&error));
-                store::finish(&self.store, txn, Outcome::RecoveryFailed).map_err(io)?;
+                store::recovery_failed(&self.store, txn).map_err(io)?;
                 return Ok(Outcome::RecoveryFailed);
             }
             step += 1;
@@ -645,11 +747,12 @@ impl Setup {
                     None => self.store.remove_pointer().map_err(io)?,
                 }
                 snapshot::restore_root_files(&self.env, snap)?;
-                if let Some(legacy) = &snap.legacy {
-                    legacy::move_items(
-                        &legacy.items,
-                        &legacy::isolated_dir(&self.env.rollback_dir()),
+                if snap.legacy.is_some() {
+                    // Undo of ISOLATE, item by item (resumable; extra items included).
+                    legacy::move_back(
+                        &self.legacy_items(txn, snap),
                         &self.env.install_root,
+                        &legacy::isolated_dir(&self.env.rollback_dir()),
                     )?;
                 }
                 snapshot::restore_current_link(&self.env, snap)?;
@@ -663,28 +766,54 @@ impl Setup {
                 }
                 Ok(())
             }
-            // UNDO_RESTART
+            // UNDO_RESTART (ROLLBACK_START for a new-style `from`, with the dual-process
+            // witness; a live lease alone proves nothing).
             3 => {
-                if !txn.from_running || quiesce::service_running(&self.env) {
+                if !txn.from_running {
                     return Ok(());
                 }
                 let Some(from) = txn.from.clone() else {
                     return Ok(());
                 };
-                match legacy::parse_legacy_pointer(&from) {
-                    Some(version) => self.restart_legacy(version, undo_started).map(|_| ()),
-                    None => {
-                        store::enter_undo(
-                            &self.store,
-                            txn,
-                            TxnState::RollbackStart,
-                            txn.undo.map(|undo| undo.target).unwrap_or(Outcome::Aborted),
-                            3,
-                        )
-                        .map_err(io)?;
-                        self.start(txn, &from)
+                if let Some(version) = legacy::parse_legacy_pointer(&from) {
+                    return self.restart_legacy(version, undo_started).map(|_| ());
+                }
+                if let Some(started) = self.started_host(txn, &from) {
+                    say!(
+                        "ROLLBACK_START: taking over host {} started earlier",
+                        started.pid
+                    );
+                    match self.await_healthy(txn, &from, &started, TAKEOVER_TIMEOUT) {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            say!(
+                                "ROLLBACK_START: host {} never served ({error}); replacing it",
+                                started.pid
+                            );
+                            procs::terminate(&started);
+                            if !procs::wait_all_gone(
+                                std::slice::from_ref(&started),
+                                Duration::from_secs(10),
+                            ) {
+                                return Err(format!(
+                                    "ROLLBACK_START_TAKEOVER: host {} did not exit",
+                                    started.pid
+                                ));
+                            }
+                        }
                     }
                 }
+                // Whatever serves now was not started by this transaction: stop it, start ours.
+                quiesce::stop_new_style(&self.env, true, Duration::from_secs(30))?;
+                store::enter_undo(
+                    &self.store,
+                    txn,
+                    TxnState::RollbackStart,
+                    txn.undo.map(|undo| undo.target).unwrap_or(Outcome::Aborted),
+                    3,
+                )
+                .map_err(io)?;
+                self.start(txn, &from)
             }
             _ => Ok(()),
         }
@@ -697,6 +826,16 @@ impl Setup {
         version: &str,
         since_ms: u64,
     ) -> Result<atm_install_state::ProcessIdentity, String> {
+        // A replay may find the Electron an earlier attempt started already serving; a
+        // second one would only hand off to it and exit.
+        if let Some((proc, true)) = quiesce::service(&self.env)
+            && proc.started_at_ms() >= since_ms
+            && runtime::descriptor(&self.env.runtime_dir())
+                .is_some_and(|published| runtime::port_open(&published.endpoint))
+        {
+            say!("legacy {version} already serving again (pid {})", proc.pid);
+            return Ok(proc.identity());
+        }
         let exe = self.env.app_dir(version).join(env::LAUNCHER);
         let (_child, identity) = procs::spawn(&exe, &["--background"]).map_err(io)?;
         let deadline = Instant::now() + START_TIMEOUT;
@@ -731,6 +870,10 @@ impl Setup {
             txn.state,
             txn.undo
         );
+        // Only "ATM 修复" retries a failed recovery (it clears the outcome first).
+        if txn.outcome == Some(Outcome::RecoveryFailed) {
+            return Ok(Outcome::RecoveryFailed);
+        }
         if txn.state == TxnState::Done {
             if txn.commit_pending && txn.outcome == Some(Outcome::Committed) {
                 self.finish_commit(&mut txn);
@@ -747,7 +890,15 @@ impl Setup {
             TxnState::Fence | TxnState::Quiesce | TxnState::Isolate | TxnState::Seal => {
                 self.undo(&mut txn, Outcome::Aborted, 1)
             }
-            TxnState::Switch | TxnState::Start => self.undo(&mut txn, Outcome::RolledBack, 1),
+            TxnState::Switch | TxnState::Start => {
+                let target = failure_outcome(&txn);
+                self.undo(&mut txn, target, 1)
+            }
+            // A killed uninstall: only an uninstall run resumes it (it must run from a copy
+            // outside the root it deletes); every start stays behind the barrier until then.
+            TxnState::Uninstall => {
+                Err("UNINSTALL_IN_PROGRESS: 卸载没有完成，请从系统「应用」里再卸载一次".into())
+            }
             TxnState::Commit => {
                 let snap = snapshot::load(&self.env, &txn.id)?;
                 self.commit(&mut txn, &snap);

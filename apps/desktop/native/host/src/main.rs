@@ -82,13 +82,34 @@ fn scrub_own_environment() {
     }
 }
 
-fn relaunch_through(launcher: &Path, argv: &[String]) -> i32 {
+fn relaunch_through(launcher: &Path, argv: &[String], headless: bool) -> i32 {
+    if headless {
+        // The caller (an Agent, a script) talks to this process: stdio and the exit code go
+        // through to the current version's entry.
+        return match Command::new(launcher).args(argv).status() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(error) => {
+                eprintln!("ATM_CURRENT_VERSION_UNAVAILABLE: {error}");
+                2
+            }
+        };
+    }
     match Command::new(launcher).args(argv).spawn() {
         Ok(_) => 0,
         Err(error) => {
             message_box(&format!("无法启动当前版本：{error}"));
             2
         }
+    }
+}
+
+/// GUI starts explain in a message box; headless entries (CLI, MCP stdio) on stderr — a
+/// box nobody sees would hang an Agent's tool call.
+fn refuse(headless: bool, text: &str) {
+    if headless {
+        eprintln!("ATM_INSTALL_STATE: {text}");
+    } else {
+        message_box(text);
     }
 }
 
@@ -107,7 +128,11 @@ fn run_recovery(install_root: &Path, app_dir: &Path) -> bool {
 }
 
 /// §3.0 admission for installed layouts. Returns the exit code to stop with, if any.
+/// §3.0 admission, for every physical entry — the headless ones too: a cached
+/// `app-<old>\AyanamiTaskManager.exe --mcp-stdio` lands on the current version, and waits
+/// out (or is refused by) an unfinished transaction like a GUI start.
 fn admit(layout: &paths::Layout, parsed: &args::Args, argv: &[String]) -> Result<Context, i32> {
+    let headless = parsed.headless.is_some();
     let intent = match (&parsed.txn_start, &parsed.health_probe) {
         (Some(txn), _) => LaunchIntent::TxnStart(txn.clone()),
         (None, Some(txn)) => LaunchIntent::Probe(txn.clone()),
@@ -134,13 +159,20 @@ fn admit(layout: &paths::Layout, parsed: &args::Args, argv: &[String]) -> Result
         match decision {
             Admission::Proceed => return Ok(context),
             Admission::RedirectToLauncher(root) => {
-                return Err(relaunch_through(&root.join("AyanamiTaskManager.exe"), argv));
+                return Err(relaunch_through(
+                    &root.join("AyanamiTaskManager.exe"),
+                    argv,
+                    headless,
+                ));
             }
             Admission::WaitForInstaller if started.elapsed() < INSTALLER_WAIT => {
                 std::thread::sleep(Duration::from_millis(500));
             }
             Admission::WaitForInstaller => {
-                message_box("正在安装或更新 AyanamiTaskManager，请稍后再打开。");
+                refuse(
+                    headless,
+                    "正在安装或更新 AyanamiTaskManager，请稍后再打开。",
+                );
                 return Err(3);
             }
             Admission::NeedsRecovery if !recovered => {
@@ -151,12 +183,12 @@ fn admit(layout: &paths::Layout, parsed: &args::Args, argv: &[String]) -> Result
                     .map(Path::to_path_buf)
                     .unwrap_or_default();
                 if !run_recovery(&root, &layout.app_dir) {
-                    message_box("安装状态不完整，请运行开始菜单里的「ATM 修复」。");
+                    refuse(headless, "安装状态不完整，请运行开始菜单里的「ATM 修复」。");
                     return Err(3);
                 }
             }
             Admission::NeedsRecovery | Admission::RecoveryFailed => {
-                message_box("安装未完成，请运行开始菜单里的「ATM 修复」。");
+                refuse(headless, "安装未完成，请运行开始菜单里的「ATM 修复」。");
                 return Err(3);
             }
             Admission::Reject(reason) => {
@@ -173,6 +205,23 @@ fn autostart_target(layout: &paths::Layout, context: &Context) -> PathBuf {
             install_root.join("AyanamiTaskManager.exe")
         }
         _ => layout.host_exe.clone(),
+    }
+}
+
+/// `runtime\host.json`: who holds the primary mutex, so setup can stop this host by
+/// identity even before (or between) core leases. Stale records are harmless: setup checks
+/// pid *and* start time.
+fn publish_host_record(data_dir: &Path) {
+    let pid = std::process::id();
+    let record = atm_install_state::ipc::HostRecord {
+        pid,
+        started_at_ms: health::process_started_at_ms(),
+    };
+    let Ok(body) = serde_json::to_value(&record) else {
+        return;
+    };
+    if let Err(error) = health::write_atomically(&data_dir.join("runtime"), "host.json", &body) {
+        log(data_dir, &format!("host record not written: {error}"));
     }
 }
 
@@ -199,9 +248,6 @@ fn real_main() -> i32 {
             return 2;
         }
     };
-    if let Some(mode) = &parsed.headless {
-        return headless::run(&layout, mode);
-    }
     if let Some(txn) = &parsed.health_probe {
         // Decided before admission: an unbound probe must not fall into the GUI paths
         // (recovery prompt, redirect), get nothing, and leave nothing in the data root.
@@ -224,6 +270,9 @@ fn real_main() -> i32 {
         Ok(context) => context,
         Err(code) => return code,
     };
+    if let Some(mode) = &parsed.headless {
+        return headless::run(&layout, mode);
+    }
     let Some(primary) = single_instance::acquire(&layout.data_dir) else {
         let command = if parsed.agent_wake || parsed.background {
             single_instance::Command::Wake
@@ -239,6 +288,7 @@ fn real_main() -> i32 {
         single_instance::send(&layout.data_dir, &command, Duration::from_secs(5));
         return 0;
     };
+    publish_host_record(&layout.data_dir);
     notify::set_process_identity();
     let version =
         atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());

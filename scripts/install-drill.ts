@@ -14,7 +14,9 @@
  */
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
+  closeSync,
   copyFileSync,
+  openSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -32,6 +34,8 @@ const VERSION_A = "2.0.0";
 const VERSION_B = "2.0.1";
 /** The fake Electron install; any version below the drill packages (not the real one). */
 const LEGACY = "1.9.0";
+/** An older Electron version directory Squirrel leaves behind, produced mid-migration. */
+const SQUIRREL_ADDED = "app-1.8.9";
 const AUMID = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
 const TOAST_CLSID = "{69f12b18-2bbb-5b7a-98b5-b8f0246b08a6}";
 const fakeElectron = join(
@@ -95,7 +99,12 @@ class Sandbox {
       ATM_DATA_DIR: this.data,
       ...extra,
     };
-    for (const key of ["ATM_SETUP_DIE_AFTER", "ATM_SETUP_FAIL_AT"])
+    for (const key of [
+      "ATM_SETUP_DIE_AFTER",
+      "ATM_SETUP_FAIL_AT",
+      "ATM_SETUP_FAIL_UNDO",
+      "ATM_SETUP_SQUIRREL_ADDS",
+    ])
       if (!(key in extra)) delete env[key];
     return env;
   }
@@ -569,6 +578,270 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+function hostsUnder(dir: string): Array<{ pid: number; path: string }> {
+  return processes(dir).filter((proc) =>
+    proc.path.toLowerCase().endsWith("ayanamitaskmanager.exe"),
+  );
+}
+
+/**
+ * The defects of the Codex review (output/peer0519-tmp/review-install.md), each driven
+ * through the real binaries: first-install failure (P2-2), a failed undo finished by
+ * "ATM 修复" (P1-3), a ROLLBACK_START replay after the host was spawned (P1-7), and a data
+ * root inside the install root (P1-6).
+ */
+async function scenarioReview(pkg: Packages): Promise<void> {
+  currentScenario = "review";
+  let sandbox = new Sandbox("review-first");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] first install fails at START (P2-2)\n`);
+  runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], {
+    ATM_SETUP_FAIL_AT: "START",
+  });
+  check(
+    "first install failing after SWITCH is ABORTED, not ROLLED_BACK",
+    sandbox.journal()?.outcome === "ABORTED",
+    { journal: sandbox.journal(), log: sandbox.log(5) },
+  );
+  check(
+    "nothing left installed",
+    sandbox.pointer() === null && !existsSync(join(sandbox.install, `app-${VERSION_A}`)),
+  );
+  teardown(sandbox);
+
+  sandbox = new Sandbox("review-repair");
+  reset(sandbox);
+  process.stdout.write(`[${currentScenario}] a failed undo, finished by ATM 修复 (P1-3)\n`);
+  check(
+    "base install",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  const failed = runSetup(
+    sandbox,
+    join(sandbox.install, "atm-setup.exe"),
+    ["install", pkg.b.manifest, "--quiet", "--retry"],
+    { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_FAIL_UNDO: "2" },
+  );
+  const stuck = sandbox.journal() as (Journal & { undo?: { step: number } }) | null;
+  check(
+    "undo step 2 failing ends RECOVERY_FAILED (exit 3), state and step kept",
+    failed === 3 &&
+      stuck?.outcome === "RECOVERY_FAILED" &&
+      stuck.state === "UNDO" &&
+      stuck.undo?.step === 2,
+    { failed, stuck },
+  );
+  check(
+    "every start is refused until a repair (headless route: no message box)",
+    runLauncher(sandbox, ["--doctor"]).status === 3,
+  );
+  check(
+    "a new install is refused too",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+      "install",
+      pkg.b.manifest,
+      "--quiet",
+      "--retry",
+    ]) !== 0 && sandbox.journal()?.outcome === "RECOVERY_FAILED",
+  );
+  check(
+    "ATM 修复 exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--repair", "--quiet"]) === 0,
+    sandbox.log(8),
+  );
+  check(
+    "the repair resumed the undo: ROLLED_BACK, not a fresh COMMITTED record",
+    sandbox.journal()?.outcome === "ROLLED_BACK" && sandbox.journal()?.state === "DONE",
+    sandbox.journal(),
+  );
+  check(
+    `${VERSION_A} serving again`,
+    sandbox.pointer()?.current === VERSION_A &&
+      (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)),
+    { pointer: sandbox.pointer(), service: sandbox.serviceVersion() },
+  );
+  check(`staged app-${VERSION_B} removed`, !existsSync(join(sandbox.install, `app-${VERSION_B}`)));
+
+  process.stdout.write(
+    `[${currentScenario}] killed after ROLLBACK_START spawned the host (P1-7)\n`,
+  );
+  const died = runSetup(
+    sandbox,
+    join(sandbox.install, "atm-setup.exe"),
+    ["install", pkg.b.manifest, "--quiet", "--retry"],
+    { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "SPAWNED:ROLLBACK_START" },
+  );
+  check("setup died right after spawning (99)", died === 99, sandbox.log(4));
+  check(
+    "recover exit 4 (ROLLED_BACK)",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--recover", "--quiet"]) === 4,
+    sandbox.log(6),
+  );
+  check(
+    "the recovery took the spawned host over instead of starting a second",
+    sandbox.log(6).includes("taking over host"),
+    sandbox.log(6),
+  );
+  check(
+    `exactly one ${VERSION_A} host, serving`,
+    hostsUnder(join(sandbox.install, `app-${VERSION_A}`)).length === 1 &&
+      (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)),
+    hostsUnder(sandbox.install),
+  );
+  teardown(sandbox);
+
+  sandbox = new Sandbox("review-overlap");
+  reset(sandbox);
+  process.stdout.write(`[${currentScenario}] data root inside the install root (P1-6)\n`);
+  const inside = join(sandbox.install, "data");
+  const refused = spawnSync(pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], {
+    env: { ...sandbox.env(), ATM_DATA_DIR: inside },
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+  });
+  check(
+    "refused before anything is written",
+    refused.status === 1 &&
+      refused.stderr.includes("DATA_DIR_OVERLAPS_INSTALL_ROOT") &&
+      !existsSync(join(sandbox.install, "app.json")),
+    { status: refused.status, err: refused.stderr.slice(0, 200) },
+  );
+  teardown(sandbox);
+}
+
+/**
+ * A host that holds the single-instance lock but no lease yet (autostart waiting out
+ * `--random-startup-delay`) when an update begins (Codex P1-1). The delay is 0–5 s at
+ * random, so rounds repeat until one has setup meet the host while it is still leaseless.
+ */
+async function scenarioDelayed(pkg: Packages): Promise<void> {
+  currentScenario = "delayed";
+  const sandbox = new Sandbox("delayed");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] update while a delayed host has no lease yet\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  let exercised = false;
+  for (let round = 1; round <= 6 && !exercised; round += 1) {
+    killAll(sandbox.dir);
+    rmSync(join(sandbox.data, "runtime", "host.json"), { force: true });
+    if (sandbox.pointer()?.current !== VERSION_A)
+      runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
+    killAll(sandbox.dir);
+    // Killed lease holders leave their lease file behind; with it gone, the file's presence
+    // alone says a core has come up. serviceVersion() enumerates processes, which takes
+    // seconds — longer than the window this scenario is after.
+    const lease = join(sandbox.data, "runtime", "daemon.json");
+    rmSync(lease, { force: true });
+    spawn(
+      join(sandbox.install, "AyanamiTaskManager.exe"),
+      ["--background", "--random-startup-delay"],
+      {
+        env: sandbox.env(),
+        stdio: "ignore",
+        windowsHide: true,
+        detached: true,
+      },
+    ).unref();
+    await until(() => existsSync(join(sandbox.data, "runtime", "host.json")), 10_000);
+    if (existsSync(lease)) continue;
+    const before = sandbox.log(400).split("\n").length;
+    const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+      "install",
+      pkg.b.manifest,
+      "--quiet",
+      "--retry",
+    ]);
+    const lines = sandbox
+      .log(400)
+      .split("\n")
+      .slice(before - 1);
+    // The leaseless case: QUIESCE found exactly one target, the recorded host.
+    exercised = lines.some((line) => /quiesce: QUIT delivered=true targets=\[\d+\]$/u.test(line));
+    check(`round ${round}: update exit 0`, code === 0, lines.slice(-6));
+    check(
+      `round ${round}: ${VERSION_B} serving, no ${VERSION_A} host left`,
+      (await until(() => sandbox.serviceVersion() === VERSION_B, 30_000)) &&
+        hostsUnder(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+      { service: sandbox.serviceVersion(), hosts: hostsUnder(sandbox.install) },
+    );
+  }
+  check("a round met the host while it had no lease", exercised);
+  teardown(sandbox);
+}
+
+/** An uninstall that meets a file in use stops short, keeps its barrier, and resumes (P1-2). */
+async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
+  currentScenario = "uninstall-busy";
+  const sandbox = new Sandbox("uninstall-busy");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] uninstall with a file held open\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  const busy = join(sandbox.install, `app-${VERSION_A}`, "renderer", "index.html");
+  const holder = spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$f = [IO.File]::Open('${busy.replaceAll("'", "''")}', 'Open', 'Read', 'None'); Start-Sleep -Seconds 120; $f.Close()`,
+    ],
+    { stdio: "ignore", windowsHide: true },
+  );
+  await sleep(1500);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  // The root copy re-runs itself from a temporary copy and returns at once.
+  await until(() => !installLockHeld(sandbox) && sandbox.journal()?.kind === "UNINSTALL", 60_000);
+  await until(() => !installLockHeld(sandbox), 60_000);
+  const journal = sandbox.journal();
+  check(
+    "stopped short: journal still UNINSTALL (the barrier holds)",
+    journal?.kind === "UNINSTALL" && journal.state === "UNINSTALL" && journal.outcome == null,
+    journal,
+  );
+  check("the version pointer went first", sandbox.pointer() === null);
+  check("the file in use is still there", existsSync(busy));
+  check(
+    "the Apps-list entry stays, so the uninstall can be run again",
+    regValue(`${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`, "UninstallString") !==
+      null,
+  );
+  check("atm-setup.exe kept for that", existsSync(join(sandbox.install, "atm-setup.exe")));
+  holder.kill();
+  await sleep(1000);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  check(
+    "run again: the install root is gone",
+    await until(() => !existsSync(sandbox.install), 60_000),
+    existsSync(sandbox.install) ? readdirSync(sandbox.install) : null,
+  );
+  check(
+    "and the Apps-list entry with it",
+    regValue(`${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`, "UninstallString") ===
+      null,
+  );
+  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  teardown(sandbox);
+}
+
+function installLockHeld(sandbox: Sandbox): boolean {
+  const lock = join(sandbox.install, "state", "install.lock");
+  if (!existsSync(lock)) return false;
+  try {
+    const fd = openSync(lock, "r+");
+    closeSync(fd);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
 /** Setup dies right after persisting each state; the next start (the launcher) recovers. */
 async function scenarioFaults(pkg: Packages): Promise<void> {
   currentScenario = "faults";
@@ -779,16 +1052,29 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     { journal: sandbox.journal(), log: sandbox.log(4) },
   );
 
-  process.stdout.write(`[${currentScenario}] migrate → ${VERSION_A} (--force)\n`);
+  process.stdout.write(
+    `[${currentScenario}] migrate → ${VERSION_A} (--force); Squirrel adds ${SQUIRREL_ADDED} after the snapshot\n`,
+  );
   check(
     "migration exit 0",
-    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force", "--retry"]) ===
-      0,
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force", "--retry"], {
+      ATM_SETUP_SQUIRREL_ADDS: SQUIRREL_ADDED,
+    }) === 0,
     sandbox.log(),
   );
   await installed(sandbox, VERSION_A, `legacy:${LEGACY}`);
   const rollback = join(sandbox.install, "state", "rollback");
-  for (const item of [`app-${LEGACY}`, "Update.exe", "packages"])
+  const migrationItems = (
+    JSON.parse(readFileSync(join(rollback, "migration.json"), "utf8")) as {
+      legacy: { items: string[] };
+    }
+  ).legacy.items;
+  check(
+    `${SQUIRREL_ADDED} (appeared after the snapshot) recorded for a reverse migration`,
+    migrationItems.includes(SQUIRREL_ADDED),
+    migrationItems,
+  );
+  for (const item of [`app-${LEGACY}`, SQUIRREL_ADDED, "Update.exe", "packages"])
     check(
       `${item} isolated in state\\rollback\\legacy`,
       existsSync(join(rollback, "legacy", item)) && !existsSync(join(sandbox.install, item)),
@@ -849,8 +1135,8 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     readFileSync(join(sandbox.install, "AyanamiTaskManager.exe")).equals(stub),
   );
   check(
-    `app-${LEGACY}, Update.exe, packages back in place`,
-    [`app-${LEGACY}`, "Update.exe", "packages"].every((item) =>
+    `app-${LEGACY}, ${SQUIRREL_ADDED}, Update.exe, packages back in place`,
+    [`app-${LEGACY}`, SQUIRREL_ADDED, "Update.exe", "packages"].every((item) =>
       existsSync(join(sandbox.install, item)),
     ),
   );
@@ -942,6 +1228,9 @@ async function main(): Promise<void> {
   const scenarios: Array<[string, (pkg: Packages) => Promise<void>]> = [
     ["lifecycle", scenarioLifecycle],
     ["update", scenarioUpdate],
+    ["review", scenarioReview],
+    ["delayed", scenarioDelayed],
+    ["uninstall-busy", scenarioUninstallBusy],
     ["faults", scenarioFaults],
     ["migration", scenarioMigration],
   ];

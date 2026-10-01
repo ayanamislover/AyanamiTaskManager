@@ -114,12 +114,53 @@ pub struct Primary {
     _mutex: HANDLE,
 }
 
-/// `Some` when this process is the primary instance for `data_dir`.
-pub fn acquire(data_dir: &Path) -> Option<Primary> {
-    let name = wide(format!(
+fn primary_mutex_name(data_dir: &Path) -> Vec<u16> {
+    wide(format!(
         r"Local\AyanamiTaskManager.Host.{}",
         scope(data_dir)
-    ));
+    ))
+}
+
+/// Whether a primary host for `data_dir` is alive — with or without a service lease: a
+/// host waiting out `--random-startup-delay`, or between core restarts, holds the mutex
+/// long before (or after) any lease. The mutex lives exactly as long as its holder.
+pub fn primary_alive(data_dir: &Path) -> bool {
+    use windows_sys::Win32::System::Threading::{OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
+    let name = primary_mutex_name(data_dir);
+    unsafe {
+        let mutex = OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, 0, name.as_ptr());
+        if mutex.is_null() {
+            return false;
+        }
+        CloseHandle(mutex);
+        true
+    }
+}
+
+/// The primary host's identity, published next to the lease (`runtime\host.json`) so a
+/// setup can stop a host that has no lease yet — pid alone could be recycled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostRecord {
+    pub pid: u32,
+    pub started_at_ms: u64,
+}
+
+pub fn host_record_path(data_dir: &Path) -> std::path::PathBuf {
+    data_dir.join("runtime").join("host.json")
+}
+
+pub fn read_host_record(data_dir: &Path) -> Option<HostRecord> {
+    let bytes = std::fs::read(host_record_path(data_dir)).ok()?;
+    if bytes.len() > 4096 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// `Some` when this process is the primary instance for `data_dir`.
+pub fn acquire(data_dir: &Path) -> Option<Primary> {
+    let name = primary_mutex_name(data_dir);
     unsafe {
         let mutex = CreateMutexW(null_mut(), 1, name.as_ptr());
         if mutex.is_null() {

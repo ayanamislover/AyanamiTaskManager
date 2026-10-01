@@ -214,6 +214,13 @@ pub fn run(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    Open,
+    Wait,
+    Closed,
+}
+
 impl App {
     fn on_init(&mut self) {
         match tray::build(&self.snapshot) {
@@ -232,9 +239,61 @@ impl App {
         }
     }
 
+    /// Admission was decided once, at start; a delayed start or a core restart can come
+    /// after a setup began a transaction (Codex review P1-1). Checked before every core start.
+    fn install_gate(&self) -> Gate {
+        if self.witness.is_some() || !self.layout.packaged {
+            return Gate::Open;
+        }
+        let Some(root) = self.layout.app_dir.parent() else {
+            return Gate::Open;
+        };
+        if !root.join(atm_install_state::APP_POINTER).is_file() {
+            return Gate::Open;
+        }
+        match atm_install_state::read_journal(root) {
+            Ok(Some(journal))
+                if !journal.is_terminal()
+                    || journal.outcome == Some(atm_install_state::Outcome::RecoveryFailed) =>
+            {
+                return Gate::Closed;
+            }
+            Err(_) => return Gate::Closed,
+            _ => {}
+        }
+        // A setup holding the lock may still be in PRECHECK (no journal yet): wait, do not
+        // quit — the install may be refused and this service is still wanted.
+        if atm_install_state::lock_held(root) {
+            return Gate::Wait;
+        }
+        match atm_install_state::read_pointer(root) {
+            Ok(Some(pointer)) if pointer.current == self.version => Gate::Open,
+            _ => Gate::Closed,
+        }
+    }
+
     fn start_core(&mut self) {
         if self.core.is_some() || self.core_starting || self.quitting {
             return;
+        }
+        match self.install_gate() {
+            Gate::Open => {}
+            Gate::Wait => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(1));
+                    let _ = proxy.send_event(UserEvent::RestartCore);
+                });
+                return;
+            }
+            Gate::Closed => {
+                crate::log(
+                    &self.layout.data_dir,
+                    "core not started: an install transaction began after this host started",
+                );
+                self.quit();
+                return;
+            }
         }
         self.startup_delay_pending = false;
         self.core_starting = true;

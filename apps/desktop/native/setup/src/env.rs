@@ -41,8 +41,41 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// Neither root may contain the other: uninstall deletes the whole install root, and
+/// the data root (ATM_DATA_DIR / AYANAMI_TASK_DATA_DIR can put it anywhere) must survive it.
+pub fn check_roots_apart(install_root: &Path, data_dir: &Path) -> Result<(), String> {
+    let canonical = |path: &Path| {
+        std::fs::canonicalize(path)
+            .map(|path| crate::fsx::strip_verbatim(&path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    for (install, data) in [
+        (install_root.to_path_buf(), data_dir.to_path_buf()),
+        (canonical(install_root), canonical(data_dir)),
+    ] {
+        if crate::fsx::same_path(&install, &data)
+            || crate::fsx::is_within(&data, &install)
+            || crate::fsx::is_within(&install, &data)
+        {
+            return Err(format!(
+                "DATA_DIR_OVERLAPS_INSTALL_ROOT: 数据目录 {} 与安装目录 {} 互相包含；请先把数据目录移到别处",
+                data_dir.display(),
+                install_root.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Env {
     pub fn detect() -> Result<Env, String> {
+        let env = Env::locate()?;
+        check_roots_apart(&env.install_root, &env.data_dir)?;
+        crate::fsx::protect(vec![env.data_dir.clone()]);
+        Ok(env)
+    }
+
+    fn locate() -> Result<Env, String> {
         let data_dir = atm_install_state::data_dir()?;
         #[cfg(feature = "drill")]
         if let Some(sandbox) = env_path("ATM_SETUP_SANDBOX") {

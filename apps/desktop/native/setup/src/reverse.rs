@@ -164,7 +164,7 @@ pub fn recover_quiesce(setup: &mut Setup, txn: &mut Transaction) -> Result<Outco
         .map_err(io)?;
         if let Err(error) = setup.start_version(txn, &from) {
             say!("restart {from} failed: {error}");
-            store::finish(&setup.store, txn, Outcome::RecoveryFailed).map_err(io)?;
+            store::recovery_failed(&setup.store, txn).map_err(io)?;
             return Ok(Outcome::RecoveryFailed);
         }
     }
@@ -203,7 +203,7 @@ pub fn undo_legacy(
             Err(error) => {
                 say!("RECOVERY_FAILED at UNDO_LEGACY step {step}: {error}");
                 txn.error = Some(error.chars().take(64).collect());
-                store::finish(&setup.store, txn, Outcome::RecoveryFailed).map_err(io)?;
+                store::recovery_failed(&setup.store, txn).map_err(io)?;
                 return Ok(Outcome::RecoveryFailed);
             }
         }
@@ -244,9 +244,33 @@ fn undo_legacy_step(
         2 => {
             let launcher = snapshot::saved_root_file(&env, &snap.txn, env::LAUNCHER);
             fsx::replace_file(&env.launcher(), &launcher).map_err(io)?;
+            // While Electron ran again its updater may have produced new entries: record them
+            // (write-ahead, in the migration record) and seal them away with the rest.
+            let items = match legacy::with_new_items(
+                &legacy.items,
+                legacy::scan_items(&env.install_root),
+            ) {
+                Some(all) => {
+                    let mut updated = record.clone();
+                    if let Some(entry) = updated.legacy.as_mut() {
+                        entry.items = all.clone();
+                    }
+                    fsx::write_json_atomic(
+                        &legacy::migration_record(&env.rollback_dir()),
+                        &updated,
+                    )
+                    .map_err(io)?;
+                    say!(
+                        "UNDO_LEGACY: Squirrel added {:?}",
+                        &all[legacy.items.len()..]
+                    );
+                    all
+                }
+                None => legacy.items.clone(),
+            };
             // Undo of R_RESTORE_LEGACY (isolated → root), resumable item by item.
             legacy::move_back(
-                &legacy.items,
+                &items,
                 &legacy::isolated_dir(&env.rollback_dir()),
                 &env.install_root,
             )?;
@@ -254,10 +278,9 @@ fn undo_legacy_step(
         }
         // 3. The SEAL invariants, re-established.
         3 => {
-            for item in &legacy.items {
-                if env.install_root.join(item).exists() {
-                    return Err(format!("{item} still in the install root"));
-                }
+            let left = legacy::scan_items(&env.install_root);
+            if !left.is_empty() {
+                return Err(format!("{left:?} still in the install root"));
             }
             let alive = quiesce::legacy_app(&env, u64::MAX);
             if !alive.is_empty() {
@@ -265,6 +288,9 @@ fn undo_legacy_step(
             }
             if quiesce::service(&env).is_some() {
                 return Err("lease still held".into());
+            }
+            if atm_install_state::ipc::primary_alive(&env.data_dir) {
+                return Err("a host still holds the single-instance lock".into());
             }
             match fsx::link_state(&env.current_link()) {
                 fsx::LinkState::Link(target) if fsx::same_path(&target, &env.install_root) => {

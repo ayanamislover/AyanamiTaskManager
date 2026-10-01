@@ -32,6 +32,36 @@ fn version_of(dir: &Path) -> Option<String> {
     atm_install_state::app_dir_version(dir)
 }
 
+/// Every Squirrel/Electron entry in the root right now, whether or not Update.exe is
+/// still there: SEAL requires this to be empty, and ISOLATE moves whatever it finds — the
+/// updater can produce an `app-1.x.y` or a `.dead` after the snapshot was taken.
+pub fn scan_items(root: &Path) -> Vec<String> {
+    let mut items: Vec<String> = fsx::list_dir(root)
+        .into_iter()
+        .filter(|path| path.is_dir() && is_electron_dir(path))
+        .filter_map(|path| Some(path.file_name()?.to_string_lossy().into_owned()))
+        .collect();
+    items.sort();
+    for extra in ["Update.exe", "packages", ".dead"] {
+        if root.join(extra).exists() {
+            items.push(extra.into());
+        }
+    }
+    items
+}
+
+/// `base` plus whatever `found` adds, in order; `None` when nothing is new.
+pub fn with_new_items(base: &[String], found: Vec<String>) -> Option<Vec<String>> {
+    let added: Vec<String> = found
+        .into_iter()
+        .filter(|item| !base.contains(item))
+        .collect();
+    if added.is_empty() {
+        return None;
+    }
+    Some(base.iter().cloned().chain(added).collect())
+}
+
 /// A Squirrel install is present when Update.exe sits in the root next to at least one
 /// Electron version directory.
 pub fn detect(root: &Path) -> Option<Legacy> {

@@ -103,6 +103,13 @@ pub fn enter_undo(
     enter(store, txn, state)
 }
 
+/// A failed recovery keeps the state and undo step it failed in: the outcome holds the
+/// barrier, and "ATM 修复" retries exactly that step instead of starting over or giving up.
+pub fn recovery_failed(store: &Store, txn: &mut Transaction) -> io::Result<()> {
+    txn.outcome = Some(Outcome::RecoveryFailed);
+    store.save(txn)
+}
+
 pub fn finish(store: &Store, txn: &mut Transaction, outcome: Outcome) -> io::Result<()> {
     txn.outcome = Some(outcome);
     txn.state = TxnState::Done;

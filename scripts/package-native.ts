@@ -148,7 +148,13 @@ export function buildAll(root: string, drill = false): void {
 
 /** 发布包里的 setup 不能带演练开关：扫二进制里的环境变量名。 */
 export function assertProductionSetup(bytes: Buffer): void {
-  for (const marker of ["ATM_SETUP_SANDBOX", "ATM_SETUP_DIE_AFTER", "ATM_SETUP_FAIL_AT"])
+  for (const marker of [
+    "ATM_SETUP_SANDBOX",
+    "ATM_SETUP_DIE_AFTER",
+    "ATM_SETUP_FAIL_AT",
+    "ATM_SETUP_FAIL_UNDO",
+    "ATM_SETUP_SQUIRREL_ADDS",
+  ])
     if (bytes.includes(Buffer.from(marker, "utf8")))
       throw new Error(`PACKAGED_SETUP_IS_DRILL_BUILD: ${marker}`);
 }

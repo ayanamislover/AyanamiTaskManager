@@ -48,6 +48,9 @@ pub enum TxnKind {
     Activate,
     /// Back to Electron: the reverse migration with its own steps and UNDO_LEGACY.
     Legacy,
+    /// Removing the install (user data stays). Its journal entry is the barrier that keeps
+    /// every start out while files are deleted, and what a re-run resumes from.
+    Uninstall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +82,7 @@ pub enum TxnState {
     ReverseStartLegacy,
     /// Failure branch of the reverse migration; progress in `undo.step`.
     UndoLegacy,
+    Uninstall,
     Done,
 }
 
@@ -177,7 +181,8 @@ impl Transaction {
     }
 
     /// A transaction with an outcome no longer blocks anybody, except RECOVERY_FAILED,
-    /// which must stop every start until a repair runs.
+    /// which must stop every start until a repair runs. A failed recovery keeps the state it
+    /// failed in (with its undo step), so the repair can retry exactly that step.
     pub fn is_terminal(&self) -> bool {
         self.state == TxnState::Done && self.outcome.is_some()
     }

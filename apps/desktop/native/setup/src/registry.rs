@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_DWORD, REG_EXPAND_SZ,
-    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW,
-    RegEnumValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegEnumValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
 
 fn wide(text: &str) -> Vec<u16> {
@@ -183,7 +183,9 @@ pub fn delete_value(path: &str, name: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 pub fn delete_key(path: &str) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::RegDeleteTreeW;
     match unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(path).as_ptr()) } {
         ERROR_SUCCESS | ERROR_FILE_NOT_FOUND => Ok(()),
         other => Err(format!("RegDeleteTree {path}: {other}")),
@@ -191,20 +193,27 @@ pub fn delete_key(path: &str) -> Result<(), String> {
 }
 
 /// Remove `path` only if it has no subkeys (values alone do not block it).
-#[cfg(test)]
 pub fn delete_key_if_empty(path: &str) {
     use windows_sys::Win32::System::Registry::RegDeleteKeyW;
     unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, wide(path).as_ptr()) };
 }
 
-/// Make the key hold exactly `values` (restore from a snapshot), or remove it if `None`.
+/// Make the key's values exactly `values` (restore from a snapshot), or remove its values
+/// and then the key if `None`. Snapshots hold values only, so subkeys are never touched:
+/// a recursive delete could not be put back.
 pub fn restore_key(path: &str, values: &Option<BTreeMap<String, RawValue>>) -> Result<(), String> {
-    delete_key(path)?;
-    if let Some(values) = values {
-        create(path)?;
-        for (name, value) in values {
-            write_value(path, name, value)?;
-        }
+    let present = read_key(path)?.unwrap_or_default();
+    let wanted = values.clone().unwrap_or_default();
+    for name in present.keys().filter(|name| !wanted.contains_key(*name)) {
+        delete_value(path, name)?;
+    }
+    if values.is_none() {
+        delete_key_if_empty(path);
+        return Ok(());
+    }
+    create(path)?;
+    for (name, value) in &wanted {
+        write_value(path, name, value)?;
     }
     Ok(())
 }
@@ -237,6 +246,17 @@ mod tests {
         assert_eq!(read_key(&path).unwrap(), saved);
         restore_key(&path, &None).unwrap();
         assert_eq!(read_key(&path).unwrap(), None);
+        // A subkey someone else put there survives both a restore and a removal.
+        write_value(&format!(r"{path}\Child"), "Keep", &RawValue::dword(1)).unwrap();
+        restore_key(&path, &saved).unwrap();
+        restore_key(&path, &None).unwrap();
+        assert!(
+            read_value(&format!(r"{path}\Child"), "Keep")
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(read_key(&path).unwrap(), Some(BTreeMap::new()));
+        delete_key(&path).unwrap();
         delete_key_if_empty(r"Software\AyanamiTaskManagerDrill");
     }
 }

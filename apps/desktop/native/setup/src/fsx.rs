@@ -120,20 +120,99 @@ pub fn same_path(left: &Path, right: &Path) -> bool {
     lower(left) == lower(right)
 }
 
-/// `path` strictly inside `root` (textually, after both are made absolute).
+/// `path` strictly inside `root` (textually, after both are made absolute). A `..` or `.`
+/// component never counts as inside: `root\..\outside` starts with `root` as text only.
 pub fn is_within(path: &Path, root: &Path) -> bool {
+    use std::path::Component;
+    if path
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
     let (path, root) = (lower(path), lower(root));
     path.len() > root.len() + 1 && path.starts_with(&root) && path.as_bytes()[root.len()] == b'\\'
 }
 
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+fn is_reparse_point(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Paths no delete may reach, whatever it was asked to remove: the data root. Registered
+/// once by `Env`; a delete of anything containing, equal to, or inside one is refused.
+static PROTECTED: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+pub fn protect(paths: Vec<PathBuf>) {
+    let mut all = Vec::new();
+    for path in paths {
+        if let Ok(canonical) = fs::canonicalize(&path) {
+            all.push(strip_verbatim(&canonical));
+        }
+        all.push(path);
+    }
+    let _ = PROTECTED.set(all);
+}
+
+fn touches_protected(path: &Path) -> Option<PathBuf> {
+    let resolved = fs::canonicalize(path)
+        .map(|path| strip_verbatim(&path))
+        .ok();
+    PROTECTED.get()?.iter().find_map(|protected| {
+        [Some(path.to_path_buf()), resolved.clone()]
+            .into_iter()
+            .flatten()
+            .any(|candidate| {
+                same_path(&candidate, protected)
+                    || is_within(protected, &candidate)
+                    || is_within(&candidate, protected)
+            })
+            .then(|| protected.clone())
+    })
+}
+
 /// Recursive delete that refuses anything outside `root`. std's remove_dir_all removes
-/// junctions and symlinks themselves rather than descending into their targets.
+/// a junction or symlink at the leaf itself rather than descending into its target; the
+/// components above the leaf are another matter — the OS resolves them before the delete
+/// even starts. So the root and every directory between it and `path` must be real
+/// directories, not reparse points: a `state\txn` that is a junction into the data root
+/// would otherwise turn "delete state\txn\x" into "delete a project".
 pub fn remove_tree_within(path: &Path, root: &Path) -> io::Result<()> {
     if !is_within(path, root) {
         return Err(io::Error::other(format!(
             "refusing to delete {} outside {}",
             path.display(),
             root.display()
+        )));
+    }
+    if is_reparse_point(root) {
+        return Err(io::Error::other(format!(
+            "refusing to delete under {}: the install root is a link",
+            root.display()
+        )));
+    }
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if same_path(dir, root) {
+            break;
+        }
+        if is_reparse_point(dir) {
+            return Err(io::Error::other(format!(
+                "refusing to delete {}: {} is a link",
+                path.display(),
+                dir.display()
+            )));
+        }
+        ancestor = dir.parent();
+    }
+    if let Some(protected) = touches_protected(path) {
+        return Err(io::Error::other(format!(
+            "refusing to delete {}: it overlaps the data root {}",
+            path.display(),
+            protected.display()
         )));
     }
     match fs::symlink_metadata(path) {
@@ -394,6 +473,46 @@ mod tests {
             &dir
         ));
         assert!(remove_tree_within(&dir, &dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every way a delete could leave the root: a `..`, a link at the leaf (removed as a
+    /// link), a link above the leaf, the root itself a link. The sentinel outside survives.
+    #[test]
+    fn deletes_never_follow_a_link_or_dot_dot_out_of_the_root() {
+        let dir = scratch("escape");
+        let (root, outside) = (dir.join("root"), dir.join("outside"));
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::create_dir_all(outside.join("project")).unwrap();
+        let sentinel = outside.join("project").join("project.sqlite");
+        fs::write(&sentinel, b"data").unwrap();
+
+        assert!(!is_within(&root.join("..").join("outside"), &root));
+        assert!(remove_tree_within(&root.join("..").join("outside"), &root).is_err());
+
+        // Leaf link: the link goes, the target stays.
+        create_junction(&root.join("leaf"), &outside).unwrap();
+        remove_tree_within(&root.join("leaf"), &root).unwrap();
+        assert!(sentinel.is_file());
+
+        // Ancestor link: state\txn -> outside; deleting state\txn\project is refused.
+        create_junction(&root.join("state").join("txn"), &outside).unwrap();
+        let through = root.join("state").join("txn").join("project");
+        assert!(
+            remove_tree_within(&through, &root)
+                .unwrap_err()
+                .to_string()
+                .contains("is a link")
+        );
+        assert!(sentinel.is_file());
+        fs::remove_dir(root.join("state").join("txn")).unwrap();
+
+        // The root itself a link.
+        let linked_root = dir.join("linked-root");
+        create_junction(&linked_root, &outside).unwrap();
+        assert!(remove_tree_within(&linked_root.join("project"), &linked_root).is_err());
+        assert!(sentinel.is_file());
+        fs::remove_dir(&linked_root).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

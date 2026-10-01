@@ -38,37 +38,75 @@ pub fn service_running(env: &Env) -> bool {
     service(env).is_some()
 }
 
+/// The primary host as `runtime\host.json` records it — only if that process is alive,
+/// started when the record says, and is a host image of this install.
+pub fn recorded_host(env: &Env) -> Option<Proc> {
+    let record = ipc::read_host_record(&env.data_dir)?;
+    let proc = procs::find(record.pid)?;
+    let ours = proc.started_at_ms() == record.started_at_ms
+        && file_name_is(&proc.image, crate::env::LAUNCHER)
+        && proc
+            .image
+            .as_ref()
+            .is_some_and(|image| fsx::is_within(image, &env.install_root));
+    ours.then_some(proc)
+}
+
+/// Any new-style instance for this data root: a lease holder, or a primary host without
+/// one yet — waiting out `--random-startup-delay`, or between core restarts (Codex P1-1).
+pub fn new_style_alive(env: &Env) -> bool {
+    matches!(service(env), Some((_, false))) || ipc::primary_alive(&env.data_dir)
+}
+
+fn drained(env: &Env, targets: &[ProcessIdentity]) -> bool {
+    targets.iter().all(|target| !procs::alive(target)) && !new_style_alive(env)
+}
+
+fn wait_drained(env: &Env, targets: &[ProcessIdentity], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if drained(env, targets) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 pub fn stop_new_style(env: &Env, force: bool, timeout: Duration) -> Result<(), String> {
-    let Some((core, legacy)) = service(env) else {
-        return Ok(());
-    };
-    if legacy {
+    let service = service(env);
+    if let Some((_, true)) = &service {
         return Err("QUIESCE_UNEXPECTED_LEGACY_SERVICE".into());
     }
-    let all = procs::snapshot();
-    let host = all
-        .iter()
-        .find(|proc| {
-            proc.pid
-                == all
-                    .iter()
-                    .find(|p| p.pid == core.pid)
-                    .map(|p| p.parent)
-                    .unwrap_or(0)
-        })
-        .filter(|proc| {
-            file_name_is(&proc.image, crate::env::LAUNCHER) && proc.created <= core.created
-        })
-        .cloned();
-    let mut targets: Vec<ProcessIdentity> = vec![core.identity()];
-    targets.extend(host.as_ref().map(Proc::identity));
+    if service.is_none() && !ipc::primary_alive(&env.data_dir) {
+        return Ok(());
+    }
+    let mut targets: Vec<ProcessIdentity> = Vec::new();
+    if let Some((core, _)) = &service {
+        let all = procs::snapshot();
+        let parent = all.iter().find(|p| p.pid == core.pid).map(|p| p.parent);
+        let host = all
+            .iter()
+            .find(|proc| Some(proc.pid) == parent)
+            .filter(|proc| {
+                file_name_is(&proc.image, crate::env::LAUNCHER) && proc.created <= core.created
+            });
+        targets.push(core.identity());
+        targets.extend(host.map(Proc::identity));
+    }
+    if let Some(host) = recorded_host(env)
+        && !targets.iter().any(|target| target.pid == host.pid)
+    {
+        targets.push(host.identity());
+    }
     let delivered = ipc::send(&env.data_dir, &Command::Quit, Duration::from_secs(5));
     say!(
-        "quiesce: QUIT delivered={delivered} core={} host={:?}",
-        core.pid,
-        host.as_ref().map(|h| h.pid)
+        "quiesce: QUIT delivered={delivered} targets={:?}",
+        targets.iter().map(|target| target.pid).collect::<Vec<_>>()
     );
-    if procs::wait_all_gone(&targets, timeout) {
+    if wait_drained(env, &targets, timeout) {
         return Ok(());
     }
     if !force {
@@ -78,8 +116,10 @@ pub fn stop_new_style(env: &Env, force: bool, timeout: Duration) -> Result<(), S
     for target in targets.iter().rev() {
         procs::terminate(target);
     }
-    if procs::wait_all_gone(&targets, Duration::from_secs(10)) {
+    if wait_drained(env, &targets, Duration::from_secs(10)) {
         Ok(())
+    } else if ipc::primary_alive(&env.data_dir) {
+        Err("QUIESCE_PRIMARY_UNKNOWN: a host holds the single-instance lock and is not the recorded one".into())
     } else {
         Err("QUIESCE_TERMINATE_FAILED".into())
     }
@@ -92,6 +132,15 @@ pub fn legacy_app(env: &Env, before_ms: u64) -> Vec<Proc> {
     let all = procs::snapshot();
     let current_exe = env.current_link().join(crate::env::LAUNCHER);
     let isolated = legacy::isolated_dir(&env.rollback_dir());
+    // Squirrel's updater: no lease, no helpers, not under an app dir — and it rebuilds
+    // `app-*` directories and entries while it runs, so it is always part of the app.
+    let updater = env.install_root.join("Update.exe");
+    let is_updater = |proc: &Proc| {
+        proc.image.as_ref().is_some_and(|image| {
+            fsx::same_path(image, &updater)
+                || (fsx::is_within(image, &isolated) && file_name_is(&proc.image, "Update.exe"))
+        })
+    };
     let is_candidate = |proc: &Proc| {
         let Some(image) = &proc.image else {
             return false;
@@ -113,6 +162,7 @@ pub fn legacy_app(env: &Env, before_ms: u64) -> Vec<Proc> {
                 || candidates.iter().any(|other| other.parent == proc.pid)
         })
         .map(|proc| (*proc).clone())
+        .chain(all.iter().filter(|proc| is_updater(proc)).cloned())
         .collect()
 }
 
