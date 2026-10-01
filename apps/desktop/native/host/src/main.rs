@@ -7,6 +7,7 @@ mod args;
 mod assets;
 mod bridge;
 mod core_process;
+mod dpapi;
 mod headless;
 mod health;
 mod identity;
@@ -309,8 +310,11 @@ fn real_main() -> i32 {
 fn main() {
     // Read-only query for the core and daemon; nothing else of the host runs (identity.rs).
     let mut argv = std::env::args().skip(1);
-    if argv.next().as_deref() == Some(identity::FLAG) {
-        std::process::exit(identity::run(argv.next().as_deref()));
+    match argv.next().as_deref() {
+        Some(identity::FLAG) => std::process::exit(identity::run(argv.next().as_deref())),
+        // Sealing the phone-sync secrets for the core (dpapi.rs); also nothing else of the host.
+        Some(dpapi::FLAG) => std::process::exit(dpapi::run(argv.next().as_deref())),
+        _ => {}
     }
     atm_install_state::stop_std_handle_inheritance();
     std::process::exit(real_main());
