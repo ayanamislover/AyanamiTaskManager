@@ -54,12 +54,16 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
   const retry = task?.dispatch?.state === "failed";
   const retryHasReason = Boolean(task && dispatchFailureReason(null, task));
   const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const send = async () => {
     if (!task || blocker || waitingForAck) return;
     setSending(true);
+    setSendError(null);
     try {
       await engine.submit({ type: "task.dispatch", body: { project: code, key: task.key } });
+    } catch (failure) {
+      setSendError(failure instanceof Error ? failure.message : "没能发出，请重试");
     } finally {
       setSending(false);
     }
@@ -91,6 +95,7 @@ export function TaskScreen({ code, taskKey }: { code: string; taskKey: string })
             电脑收到后会拉起 Claude Code 领取这个任务、补全目标并开工。
           </p>
         )}
+        {sendError ? <p className="inline-error">{sendError}</p> : null}
         <button
           type="button"
           className="button primary block"

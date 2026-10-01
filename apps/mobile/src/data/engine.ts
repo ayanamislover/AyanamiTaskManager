@@ -64,7 +64,18 @@ const MAX_BACKOFF_MS = 30_000;
 
 type Failure = { fatal: "denied" | "rekey" | null; message: string; retryAfterMs: number | null };
 
+/** 命令队列没能写进手机本地存储：不能当成已保存，更不能当成已发出。 */
+export class CommandStoreError extends Error {
+  constructor() {
+    super("没能把任务存到这台手机上（本地存储写不进去），所以没有发出。稍后再试一次。");
+    this.name = "CommandStoreError";
+  }
+}
+
 export function describeFailure(error: unknown): Failure {
+  if (error instanceof CommandStoreError) {
+    return { fatal: null, message: error.message, retryAfterMs: null };
+  }
   if (error instanceof RelayError) {
     if (error.isAuthFailure) {
       return {
@@ -135,6 +146,9 @@ export class SyncEngine {
   #controller: AbortController | null = null;
   #lastDeviceWrite = 0;
   #loop: Promise<void> | null = null;
+  /** 每次 start/pause/stop 加一；循环只在自己那一代里跑，旧循环看到代数变了就退出。 */
+  #generation = 0;
+  #commandWrites: Promise<unknown> = Promise.resolve();
 
   constructor(options: EngineOptions) {
     this.#backend = options.backend;
@@ -175,12 +189,19 @@ export class SyncEngine {
     this.#snapshotWriter.write(snapshot);
   }
 
-  async #dispatch(event: CommandEvent): Promise<void> {
-    const commands = reduceCommands(this.#state.commands, event);
-    if (commands === this.#state.commands) return;
-    this.#set({ commands });
-    // 命令队列小，直接写；发送之前必须已经落盘。
-    await cachePut("commands", commands);
+  /**
+   * 命令队列的变化：先落盘，写成功才公布。写入串行，免得两次变化基于同一个旧队列互相覆盖。
+   * 落盘失败抛 CommandStoreError——入队要如实告诉用户；回执没存下就不能去删中继上的那份。
+   */
+  #dispatch(event: CommandEvent): Promise<void> {
+    const next = this.#commandWrites.then(async () => {
+      const commands = reduceCommands(this.#state.commands, event);
+      if (commands === this.#state.commands) return;
+      if (!(await cachePut("commands", commands))) throw new CommandStoreError();
+      this.#set({ commands });
+    });
+    this.#commandWrites = next.catch(() => undefined);
+    return next;
   }
 
   /**
@@ -206,16 +227,24 @@ export class SyncEngine {
     if (this.#state.phase === "denied" || this.#state.phase === "rekey") return;
     this.#running = true;
     this.#forceFull = true;
+    const generation = ++this.#generation;
     this.#set({ phase: this.#state.snapshot.syncedAt ? this.#state.phase : "connecting" });
-    this.#loop = this.#run().finally(() => {
-      this.#loop = null;
+    // pause 之后旧循环可能还卡在一次请求里没退出：等它退完再开新一轮，同一时刻只有一个循环读写。
+    const previous = this.#loop;
+    const loop: Promise<void> = (async () => {
+      if (previous) await previous.catch(() => undefined);
+      await this.#run(generation);
+    })().finally(() => {
+      if (this.#loop === loop) this.#loop = null;
     });
+    this.#loop = loop;
   }
 
   /** 进后台：停止轮询，尽量告诉电脑这台手机下线了。 */
   pause(): void {
     if (!this.#running) return;
     this.#running = false;
+    this.#generation += 1;
     this.#controller?.abort();
     this.#set({ phase: "idle", refreshing: false });
     void this.#snapshotWriter.flush();
@@ -234,12 +263,13 @@ export class SyncEngine {
 
   async stop(): Promise<void> {
     this.#running = false;
+    this.#generation += 1;
     this.#controller?.abort();
     await this.#loop;
     await this.#snapshotWriter.flush();
   }
 
-  /** 发命令：先落盘，再让循环去发。返回本地命令 ID。 */
+  /** 发命令：先落盘（失败抛 CommandStoreError，什么都不发），再让循环去发。返回本地命令 ID。 */
   async submit(input: CommandInput): Promise<string> {
     const doc = {
       v: 1,
@@ -255,13 +285,20 @@ export class SyncEngine {
     return doc.id;
   }
 
-  async dismiss(id: string): Promise<void> {
-    await this.#dispatch({ type: "dismiss", id });
-    await this.#dispatch({ type: "prune", now: this.#now() });
+  /** 从列表移除；本地存储写不进去时返回 false，列表保持原样。 */
+  async dismiss(id: string): Promise<boolean> {
+    try {
+      await this.#dispatch({ type: "dismiss", id });
+      await this.#dispatch({ type: "prune", now: this.#now() });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  async #run(): Promise<void> {
-    while (this.#running) {
+  async #run(generation: number): Promise<void> {
+    const alive = () => this.#running && generation === this.#generation;
+    while (alive()) {
       const controller = new AbortController();
       this.#controller = controller;
       try {
@@ -276,7 +313,7 @@ export class SyncEngine {
           this.#forceFull = false;
           await this.#fullSync();
           // 读到撤销标记：已经停下并标成 rekey，不能再往下走（#markLive 会把它盖回 live）。
-          if (!this.#running) break;
+          if (!alive()) break;
         }
         await this.#flushOutbox();
         this.#markLive();
@@ -289,12 +326,12 @@ export class SyncEngine {
           this.#forceFull = true;
         } else {
           await this.#applyChanges(batch.changes);
-          if (!this.#running) break;
+          if (!alive()) break;
         }
         this.#setSnapshot({ ...this.#state.snapshot, cursor: batch.cursor });
         this.#markLive();
       } catch (error) {
-        if (!this.#running) break;
+        if (!alive()) break;
         // 刷新或新命令打断了等待：不算失败，直接进入下一轮。
         if (controller.signal.aborted) continue;
         const failure = describeFailure(error);
@@ -323,7 +360,7 @@ export class SyncEngine {
         await sleep(delay, controller.signal);
       }
     }
-    this.#controller = null;
+    if (generation === this.#generation) this.#controller = null;
   }
 
   #markLive(): void {
@@ -367,11 +404,13 @@ export class SyncEngine {
   }
 
   async #fullSync(): Promise<void> {
+    // 先看撤销标记，与头部在不在无关：清理旧空间可能只成功了一部分（头部还留着），
+    // 离线回来的手机从空游标起步又跳过了历史变更，只能靠这一步发现配对已作废。
+    const revoked = await this.#backend.readRevoked();
+    if (revoked) return this.#revoke(revoked);
     const head = await this.#backend.readHead();
     if (!head) {
-      // 空间里没有头部：电脑还没发布过，或者已经重置了配对。后者会留下撤销标记，据此区分。
-      const revoked = await this.#backend.readRevoked();
-      if (revoked) return this.#revoke(revoked);
+      // 没有头部也没有撤销标记：电脑还没发布过。
       this.#setSnapshot({ ...this.#state.snapshot, head: null, projects: {}, host: null });
     } else {
       this.#setSnapshot(applyHead(this.#state.snapshot, head));
@@ -410,7 +449,7 @@ export class SyncEngine {
           type: "send-error",
           id: command.doc.id,
           message: describeFailure(error).message,
-        });
+        }).catch(() => undefined);
         throw error;
       }
     }
