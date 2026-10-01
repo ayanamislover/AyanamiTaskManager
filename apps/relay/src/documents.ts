@@ -1,4 +1,4 @@
-// 文档、修订号与变更流。语义逐条对齐 AyanamiCloud 应用数据接口（见 README「兼容性」）。
+// 文档、修订号与变更流。语义对齐 AyanamiCloud 应用数据接口，有意的差异列在 README「兼容性」。
 import { type Database, nowIso, transaction } from "./database.js";
 import {
   RelayError,
@@ -192,18 +192,34 @@ function revisionConflict(current: DocumentRow | undefined, withConflictId: bool
   return new RelayError(409, "REVISION_CONFLICT", "文档已被其它设备修改", { extraJson });
 }
 
-function highWater(db: Database, appId: string, key: string): number {
-  const row = db
-    .prepare("SELECT revision FROM revisions WHERE app_id = ? AND key = ?")
-    .get(appId, key) as { revision: number } | undefined;
+// ───────────────────────── 修订号 ─────────────────────────
+//
+// 防 ABA 的要求：同一个键删掉再建，新修订号必须大于它以前用过的全部修订号，否则拿着旧修订号的
+// 客户端能对重建的文档条件写成功。逐键记高水位能做到，但每个出现过的键都要永久留一行——
+// 命令、回执每次都是新键，一枚泄露的 token 在限速内「新建 → 删除」就能让这张表无界增长，配额管不到。
+//
+// 这里每个 app 只存一个**修订号地板**：该 app 里删除用过的最大修订号。规则：
+//   - 更新：当前修订号 + 1；删除：当前修订号 + 1，并把地板抬到不低于它；
+//   - 新建（键当前不存在）：地板 + 1。
+// 不变式「地板 ≥ 任何已删除的键用过的全部修订号」由此成立：一个键活着时修订号逐次 +1，删除用的
+// 修订号是这一世代的最大值，删除时地板抬到 ≥ 它；地板只升不降。于是重建的修订号严格大于该键以前
+// 的全部修订号，同一个键在所有世代里的修订号严格递增、永不重复（防 ABA）。
+//
+// 与逐键高水位相比，对外只差在新建：应用里删过文档之后，新键不再从 1 开始，重建也不一定恰好是
+// 删除前 + 2。客户端本来就只能把修订号当不透明的单调值（条件写原样回传、409 时取 current 重试）。
+
+function revisionFloor(db: Database, appId: string): number {
+  const row = db.prepare("SELECT revision FROM revision_floors WHERE app_id = ?").get(appId) as
+    | { revision: number }
+    | undefined;
   return row?.revision ?? 0;
 }
 
-function raiseHighWater(db: Database, appId: string, key: string, revision: number): void {
+function raiseRevisionFloor(db: Database, appId: string, revision: number): void {
   db.prepare(
-    `INSERT INTO revisions (app_id, key, revision) VALUES (?, ?, ?)
-     ON CONFLICT (app_id, key) DO UPDATE SET revision = MAX(revision, excluded.revision)`,
-  ).run(appId, key, revision);
+    `INSERT INTO revision_floors (app_id, revision) VALUES (?, ?)
+     ON CONFLICT (app_id) DO UPDATE SET revision = MAX(revision, excluded.revision)`,
+  ).run(appId, revision);
 }
 
 function recordChange(db: Database, change: Omit<Change, "seq"> & { appId: string }): void {
@@ -289,8 +305,8 @@ export function putDocument(
       if (usage.bytes + input.sizeBytes > limits.maxBytesPerApp) {
         throw insufficientStorage("该应用的存储空间已达上限");
       }
-      // 新建取「历史高水位 + 1」：删掉再建不会回到 1，持有旧修订号的客户端写不进来（防 ABA）。
-      revision = highWater(db, input.appId, input.key) + 1;
+      // 新建取「地板 + 1」：删掉再建严格大于该键以前的全部修订号，持有旧修订号的客户端写不进来。
+      revision = revisionFloor(db, input.appId) + 1;
       db.prepare(
         `INSERT INTO documents (app_id, key, schema_version, revision, data, size_bytes, updated_at, updated_by_device)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -326,7 +342,6 @@ export function putDocument(
         input.key,
       );
     }
-    raiseHighWater(db, input.appId, input.key, revision);
     recordChange(db, {
       appId: input.appId,
       key: input.key,
@@ -351,7 +366,10 @@ export function putDocument(
   });
 }
 
-/** 删除也消耗一个修订号：变更流里 delete 的 revision = 删除前的修订号 + 1。 */
+/**
+ * 删除也消耗一个修订号：变更流里 delete 的 revision = 删除前的修订号 + 1，并抬高地板。
+ * 键本身不留任何痕迹（没有墓碑行），磁盘占用随文档一起释放。
+ */
 export function deleteDocument(
   db: Database,
   appId: string,
@@ -366,8 +384,8 @@ export function deleteDocument(
     if (!current) throw notFound("文档不存在");
     if (current.revision !== expectedRevision) throw revisionConflict(current, false);
     db.prepare("DELETE FROM documents WHERE app_id = ? AND key = ?").run(appId, key);
-    const revision = Math.max(highWater(db, appId, key), current.revision) + 1;
-    raiseHighWater(db, appId, key, revision);
+    const revision = current.revision + 1;
+    raiseRevisionFloor(db, appId, revision);
     recordChange(db, { appId, key, revision, op: "delete", device_id: null, at });
     pruneChanges(db, appId, limits, now);
   });

@@ -179,7 +179,7 @@ export const appDataContractCases: ContractCase[] = [
     },
   },
   {
-    name: "修订号跨删除单调递增：删除消耗一个修订号，重建不回到 1",
+    name: "修订号跨删除单调递增：删除消耗一个修订号，重建大于以前的全部修订号",
     async run(client) {
       const key = client.key("aba");
       const head = await client.headCursor();
@@ -188,15 +188,20 @@ export const appDataContractCases: ContractCase[] = [
       assert.equal((await client.remove(key, r)).status, 204);
       const again = await client.put(key, 0, { gen: 2 });
       assert.equal(again.status, 201);
-      assert.equal(again.json.revision, r + 2);
-      expectError(await client.put(key, r, { gen: 3 }), 409, "REVISION_CONFLICT");
+      // 客户端只依赖「重建严格大于删除用掉的修订号」。AyanamiCloud 恰好是 r + 2；
+      // atm-relay 取应用的修订号地板 + 1，应用里同时有别的删除时会更大（README「兼容性」）。
+      const rebuilt = again.json.revision as number;
+      assert.ok(rebuilt > r + 1, `重建的修订号 ${rebuilt} 应大于删除用掉的 ${r + 1}`);
+      for (const stale of [r, r + 1]) {
+        expectError(await client.put(key, stale, { gen: 3 }), 409, "REVISION_CONFLICT");
+      }
       const ours = (await client.changesSince(head)).changes.filter((c) => c.key === key);
       assert.deepEqual(
         ours.map((c) => [c.op, c.revision]),
         [
           ["put", r],
           ["delete", r + 1],
-          ["put", r + 2],
+          ["put", rebuilt],
         ],
       );
     },

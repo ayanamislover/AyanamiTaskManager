@@ -193,7 +193,7 @@ describe("请求体与存储细节", () => {
     expect(typed.json.error.code).toBe("BAD_REQUEST");
   });
 
-  it("修订号高水位跨进程重启保留：删除后重启再建，仍是 r+2", async () => {
+  it("修订号地板跨进程重启保留：删除后重启再建，仍是 r+2", async () => {
     const dataDir = tempDataDir();
     const first = await startTestRelay({ dataDir });
     const created = await call(first, "PUT", doc("aba"), {
