@@ -62,9 +62,15 @@ describe("总览项目卡片样式", () => {
     const base = chips.map((rule) => rule.body).join(";");
     expect(declaration(base, "white-space")).toContain("nowrap");
     expect(declaration(base, "min-width")).toContain("max-content");
-    const stats = rulesFor(".atm-project-stats")
-      .map((rule) => rule.body)
-      .join(";");
-    expect(declaration(stats, "flex-wrap")).toContain("wrap");
+    // 每条点名统计容器的规则都要看：后面再补一条 grid 覆盖时，留着的 wrap 不能让守卫放行。
+    const stats = rulesFor(".atm-project-stats");
+    for (const rule of stats) {
+      for (const display of declaration(rule.body, "display"))
+        expect(display, rule.file).toBe("flex");
+      expect(declaration(rule.body, "grid-template-columns"), rule.file).toEqual([]);
+    }
+    const body = stats.map((rule) => rule.body).join(";");
+    expect(declaration(body, "display")).toContain("flex");
+    expect(declaration(body, "flex-wrap")).toContain("wrap");
   });
 });
