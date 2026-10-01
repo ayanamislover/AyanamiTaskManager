@@ -1,5 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { SECRET_NAMES } from "@ayanami-task/sync";
 import { hostDpapi, type Dpapi } from "../src/dpapi.js";
@@ -26,6 +36,33 @@ afterEach(() => {
   delete process.env.FAKE_DPAPI_MODE;
 });
 
+/** 假 helper 起来后会在目录里留下以自己 PID 命名的文件。 */
+async function helperPid(directory: string): Promise<number> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const [name] = readdirSync(directory);
+    if (name) return Number(name);
+    if (Date.now() > deadline) throw new Error("helper 没有起来");
+    await new Promise((done) => setTimeout(done, 20));
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 进程结束有一点延迟：最多等 3 s。 */
+async function expectGone(pid: number): Promise<void> {
+  const deadline = Date.now() + 3000;
+  while (alive(pid) && Date.now() < deadline) await new Promise((done) => setTimeout(done, 50));
+  expect(alive(pid)).toBe(false);
+}
+
 describe("经宿主调 DPAPI 的协议", () => {
   it("往返：密文不含明文，解开等于原文", async () => {
     const dpapi = fake();
@@ -44,6 +81,50 @@ describe("经宿主调 DPAPI 的协议", () => {
     }
     process.env.FAKE_DPAPI_MODE = "hang";
     await expect(fake(300).protect(Buffer.from("x"))).rejects.toThrow("DPAPI_TIMEOUT");
+  });
+
+  it("中止：在途调用结束 helper 并 reject，之后的调用直接 reject（core 收尾时用）", async () => {
+    const pidDirectory = freshDirectory();
+    mkdirSync(pidDirectory, { recursive: true });
+    process.env.FAKE_DPAPI_MODE = "hang";
+    process.env.FAKE_DPAPI_PID_DIR = pidDirectory;
+    try {
+      const abort = new AbortController();
+      const dpapi = hostDpapi(process.execPath, { prefixArgs: [fakeHost], signal: abort.signal });
+      const pending = dpapi.protect(Buffer.from("x"));
+      const pid = await helperPid(pidDirectory);
+      abort.abort();
+      await expect(pending).rejects.toThrow("DPAPI_CANCELLED");
+      await expectGone(pid);
+      await expect(dpapi.unprotect(Buffer.from("x"))).rejects.toThrow("DPAPI_CANCELLED");
+    } finally {
+      delete process.env.FAKE_DPAPI_PID_DIR;
+    }
+  });
+
+  it("core 带着卡住的 helper 直接 process.exit（握手被拒等）：helper 跟着被结束，不留孤儿", async () => {
+    const pidDirectory = freshDirectory();
+    mkdirSync(pidDirectory, { recursive: true });
+    const loader = pathToFileURL(resolve(process.cwd(), "node_modules/tsx/dist/loader.mjs")).href;
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        loader,
+        resolve(process.cwd(), "apps/desktop/test/fixtures/dpapi-exit.ts"),
+        fakeHost,
+        pidDirectory,
+      ],
+      {
+        encoding: "utf8",
+        timeout: 30_000,
+        env: { ...process.env, FAKE_DPAPI_MODE: "hang", FAKE_DPAPI_PID_DIR: pidDirectory },
+      },
+    );
+    expect(result.status, result.stderr).toBe(64);
+    const [pid] = readdirSync(pidDirectory).map(Number);
+    expect(pid).toBeGreaterThan(0);
+    await expectGone(pid!);
   });
 
   it.skipIf(process.platform !== "win32" || !existsSync(realHost))(

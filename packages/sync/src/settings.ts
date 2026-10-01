@@ -197,6 +197,15 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
+/** promise 在 ms 毫秒内落定（成功或失败都算）返回 true，否则 false；不取消原操作。 */
+export async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  const settled = promise.then(
+    () => true,
+    () => true,
+  );
+  return (await withTimeout(settled, ms)) ?? false;
+}
+
 /** 等 promise，最多 ms 毫秒；超时返回 undefined（不取消原操作）。 */
 export async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
   let timer: NodeJS.Timeout | undefined;

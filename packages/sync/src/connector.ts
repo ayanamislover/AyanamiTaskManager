@@ -27,8 +27,8 @@ import {
   planConfigChange,
   purgeSpace,
   revokeSpace,
-  withTimeout,
 } from "./settings.js";
+import { haltLoop, newLoop, retireLoop, type Loop } from "./sync-loop.js";
 import {
   DEFAULT_TIMINGS,
   type PairingResult,
@@ -67,16 +67,6 @@ const PUBLIC_STATE: Record<Phase, SyncState> = {
 
 const UNCONFIGURED_MESSAGE = "已启用手机同步，但还没有填写中继地址或 token";
 
-type Loop = {
-  controller: AbortController;
-  promise: Promise<void>;
-  session: SyncSession | null;
-  /** 首次同步已完成，可以接受去抖发布与在线状态心跳。 */
-  ready: boolean;
-  /** 已经因为游标被拒（400）清过一次游标；再被拒就按普通错误处理。 */
-  cursorRescued: boolean;
-};
-
 function isCursorRejected(error: unknown): boolean {
   return error instanceof RelayError && error.status === 400;
 }
@@ -111,6 +101,8 @@ export class SyncConnector {
   #admin: Promise<unknown> = Promise.resolve();
   /** 正在建的配对空间：并发请求共用同一个，保证只建一次。 */
   #spaceCreation: Promise<void> | null = null;
+  /** 设置页发起的中继请求（测试连接、清理旧空间）；停止时一并中止。 */
+  #management = new AbortController();
   readonly #unsubscribers: Array<() => void> = [];
 
   constructor(options: SyncConnectorOptions) {
@@ -155,6 +147,7 @@ export class SyncConnector {
   async start(): Promise<void> {
     if (this.#started) return;
     this.#started = true;
+    if (this.#management.signal.aborted) this.#management = new AbortController();
     await this.#vault.load(this.#config.spaceId);
     this.#persist();
     this.#publisher.activate();
@@ -165,10 +158,14 @@ export class SyncConnector {
     this.#launch();
   }
 
-  /** 中断长轮询、写离线状态（有上限地等待），然后停下。 */
+  /**
+   * 中断长轮询、写离线状态，然后停下。总耗时不超过 stopTimeoutMs（再加掐断后的短暂收尾）：
+   * 宿主只给 core 有限的退出时间。返回后不会再有同步任务碰 service。
+   */
   async stop(): Promise<void> {
     if (!this.#started) return;
     this.#started = false;
+    this.#management.abort();
     for (const unsubscribe of this.#unsubscribers.splice(0)) unsubscribe();
     this.#publisher.stop();
     await this.#halt(true);
@@ -381,6 +378,7 @@ export class SyncConnector {
       baseUrl: relayUrl,
       appId,
       token,
+      signal: this.#management.signal,
       ...(fetchImpl ? { fetchImpl } : {}),
     });
   }
@@ -402,36 +400,41 @@ export class SyncConnector {
     if (!this.#started || this.#loop) return;
     this.#phase = this.#idlePhase();
     if (this.#phase !== "connecting") return;
-    const loop: Loop = {
-      controller: new AbortController(),
-      promise: Promise.resolve(),
-      session: null,
-      ready: false,
-      cursorRescued: false,
-    };
+    const loop = newLoop();
     this.#loop = loop;
     loop.promise = this.#run(loop).catch((error: unknown) => this.#fail(loop, error));
   }
 
+  /** 停下当前循环（总时长有上限，见 sync-loop.ts）。 */
   async #halt(offline: boolean): Promise<void> {
     const loop = this.#loop;
     if (!loop) return;
     this.#loop = null;
-    loop.controller.abort();
-    await loop.promise;
-    await withTimeout(this.#chain, this.#timings.stopTimeoutMs);
-    if (!offline || !loop.session || !loop.ready) return;
-    try {
-      await withTimeout(loop.session.writePresence("offline"), this.#timings.stopTimeoutMs);
-    } catch (error) {
-      this.#logger.warn("写离线状态失败", { error: this.#describe(error) });
-    }
+    await haltLoop(loop, {
+      chain: this.#chain,
+      budgetMs: this.#timings.stopTimeoutMs,
+      offline,
+      logger: this.#logger,
+      describe: (error) => this.#describe(error),
+    });
   }
 
   #sessionHost(loop: Loop): SessionHost {
+    const service = this.#service;
+    const dispatch = this.#dispatch;
+    // 停下以后 core 会关库、关派单：迟到的任务在这里就失败，不去碰已关闭的对象。
+    const live = () => {
+      if (loop.retired) throw new Error("SYNC_SESSION_RETIRED");
+    };
     return {
-      service: this.#service,
-      dispatch: this.#dispatch,
+      get service() {
+        live();
+        return service;
+      },
+      get dispatch() {
+        live();
+        return dispatch;
+      },
       appVersion: this.#options.appVersion,
       logger: this.#logger,
       now: () => this.#now(),
@@ -456,6 +459,7 @@ export class SyncConnector {
     const { token, secret } = this.#vault;
     if (!relayUrl || !spaceId || !token || !secret) return null;
     const session = await SyncSession.open(this.#sessionHost(loop), {
+      signal: loop.relay.signal,
       relayUrl,
       appId,
       token,
@@ -565,6 +569,7 @@ export class SyncConnector {
     if (this.#loop !== loop) return;
     this.#loop = null;
     loop.controller.abort();
+    retireLoop(loop);
     this.#phase = phase;
     this.#lastError = message;
   }

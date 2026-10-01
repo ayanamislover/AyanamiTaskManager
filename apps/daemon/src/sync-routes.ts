@@ -8,8 +8,24 @@ import type { SyncController } from "./server-options.js";
  *
  * 只有状态是两种令牌都能读（内容不含任何密钥）；改配置、测试中继、取配对码、重置配对都是
  * 用户的决定，USER_ONLY。配对码里有中继 token 与空间密钥，响应标 no-store。
- * 连接器的校验错误是 AtmError，交给全局错误处理。
+ * 连接器的校验错误是 AtmError，交给全局错误处理；宿主抛出的 SYNC_ 错误（例如同步还在启动，
+ * 503 SYNC_STARTING）按它给的状态码与错误码原样回给调用方。
  */
+/** 宿主抛出的同步错误：形状与 AtmError 相同，错误码以 SYNC_ 开头。 */
+type SyncFailure = Error & { code: string; httpStatus: number; retryable?: boolean };
+
+function isSyncFailure(error: unknown): error is SyncFailure {
+  if (!(error instanceof Error)) return false;
+  const { code, httpStatus } = error as Partial<SyncFailure>;
+  return (
+    typeof code === "string" &&
+    code.startsWith("SYNC_") &&
+    Number.isInteger(httpStatus) &&
+    Number(httpStatus) >= 400 &&
+    Number(httpStatus) < 600
+  );
+}
+
 export function registerSyncRoutes(app: FastifyInstance, sync: SyncController | undefined): void {
   async function handle(
     request: FastifyRequest,
@@ -25,7 +41,15 @@ export function registerSyncRoutes(app: FastifyInstance, sync: SyncController | 
         },
         request_id: request.id,
       });
-    return reply.send(await work(sync));
+    try {
+      return reply.send(await work(sync));
+    } catch (error) {
+      if (!isSyncFailure(error)) throw error;
+      return reply.code(error.httpStatus).send({
+        error: { code: error.code, message: error.message, retryable: error.retryable ?? false },
+        request_id: request.id,
+      });
+    }
   }
 
   app.get("/api/v1/sync/status", async (request, reply) =>

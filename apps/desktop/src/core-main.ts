@@ -19,7 +19,7 @@ import {
   sourceCorePaths,
   type CorePaths,
 } from "./core-paths.js";
-import { openSyncSecrets, startMobileFeatures, type MobileFeatures } from "./core-mobile.js";
+import { startMobileFeatures, type MobileFeatures } from "./core-mobile.js";
 import { DesktopObserver } from "./desktop-observer.js";
 import { HostControlSession } from "./host-control-session.js";
 import { HOST_PROTOCOL_VERSION, type HostHello } from "./host-protocol.js";
@@ -105,33 +105,32 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
   const token = createDaemonToken({});
   const userToken = createDaemonToken({});
   const startedAt = new Date().toISOString();
-  // DPAPI 自检和打开数据库并行（core-mobile.ts）。
-  const secrets = openSyncSecrets(dataDir, paths.hostPath);
   let service: AyanamiTaskService | null = null;
   let server: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
   let mobile: MobileFeatures | null = null;
   try {
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot: paths.migrationsRoot });
-    mobile = await startMobileFeatures(service, dataDir, await secrets);
+    // 手机同步与派单在后台起来（core-mobile.ts）：DPAPI 自检、派单恢复不占与宿主握手的时间。
+    mobile = startMobileFeatures({ service, dataDir, hostPath: paths.hostPath });
     server = await buildAyanamiServer({
       service,
       token,
       userToken,
       startedAt,
-      ...(mobile.sync ? { sync: mobile.sync } : {}),
-      ...(mobile.dispatch ? { dispatch: mobile.dispatch } : {}),
+      sync: mobile.sync,
+      dispatch: mobile.dispatch,
     });
     await server.listen({ host: "127.0.0.1", port: 0 });
   } catch (error) {
     if (server) await server.close().catch(() => undefined);
-    await mobile?.close().catch(() => undefined);
+    await mobile?.close();
     service?.close();
     lease.release();
     throw error;
   }
   const address = server.server.address();
   if (!address || typeof address === "string") {
-    await server.close();
+    await server.close().catch(() => undefined);
     await mobile.close();
     service.close();
     lease.release();
@@ -158,11 +157,17 @@ async function startRuntime(paths: CorePaths, dataDir: string): Promise<CoreRunt
     async close() {
       if (closed) return;
       closed = true;
-      await openServer.close();
-      await openMobile.close();
-      openService.close();
-      lease.clear();
-      lease.release();
+      // 手机功能与 HTTP 服务同时收尾：前者有总时长上限（core-mobile.ts），整体留在宿主的退出宽限内；
+      // 任何一步出错，后面的关库与发现文件清理照样做。
+      const mobileClosed = openMobile.close();
+      try {
+        await openServer.close();
+      } finally {
+        await mobileClosed;
+        openService.close();
+        lease.clear();
+        lease.release();
+      }
     },
   };
 }

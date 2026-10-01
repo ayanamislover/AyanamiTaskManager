@@ -52,6 +52,8 @@ export type SessionOptions = {
   /** 不支持长轮询的中继（AyanamiCloud）多久问一次，电脑默认 4 s。 */
   pollIntervalMs: number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** 会话的生命周期：中止后探测、发布、命令、在线状态等全部中继请求立即失败。 */
+  signal?: AbortSignal;
 };
 
 /** 可重试的命令最多试几次，之后写失败 ack。 */
@@ -95,6 +97,7 @@ export class SyncSession {
       appId: options.appId,
       token: options.token,
       ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     const probe = await client.probe();
     const keys = await deriveSpaceKeys(options.secret);
@@ -315,7 +318,8 @@ export class SyncSession {
     let ack: AckDoc;
     try {
       validateCommand(doc, commandId, host.now());
-      const result = await executeCommand({ service: host.service, dispatch: host.dispatch }, doc);
+      // 传 host 本身：每次用到 service / 派单都重新取，会话停下后迟到的步骤会直接失败（connector.ts）。
+      const result = await executeCommand(host, doc);
       ack = { v: 1, id: commandId, at: host.now().toISOString(), ok: true, result };
       host.logger.info("已执行手机命令", { command: commandId, type: doc.type, key: result.key });
     } catch (error) {

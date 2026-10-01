@@ -59,7 +59,7 @@ export type SyncTimings = {
   pollIntervalMs: number;
   /** 发布失败后多久重试，默认 15 s。 */
   retryPublishMs: number;
-  /** 停止时等待收尾（写离线状态）的上限，默认 5 s。 */
+  /** 停止的总预算（等在途的中继写操作、写离线状态），默认 5 s；到点掐断会话的全部中继请求。 */
   stopTimeoutMs: number;
 };
 

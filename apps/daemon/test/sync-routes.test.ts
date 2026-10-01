@@ -198,6 +198,43 @@ describe("手机同步路由", () => {
     }
   });
 
+  it("宿主抛出的 SYNC_ 错误（同步还在启动）按它的状态码与错误码原样回，其它错误仍走全局处理", async () => {
+    const { controller } = fakeSync();
+    const starting = Object.assign(new Error("手机同步正在启动，请稍后再试"), {
+      code: "SYNC_STARTING",
+      httpStatus: 503,
+      retryable: true,
+    });
+    controller.status = async () => {
+      throw starting;
+    };
+    controller.fail = new Error("boom");
+    const { app, close } = await server(controller);
+    try {
+      const status = await app.inject({
+        method: "GET",
+        url: "/api/v1/sync/status",
+        headers: bearer(AGENT),
+      });
+      expect(status.statusCode).toBe(503);
+      expect(status.json().error).toEqual({
+        code: "SYNC_STARTING",
+        message: "手机同步正在启动，请稍后再试",
+        retryable: true,
+      });
+      const other = await app.inject({
+        method: "PUT",
+        url: "/api/v1/sync/config",
+        headers: bearer(USER),
+        payload: {},
+      });
+      expect(other.statusCode).toBe(500);
+      expect(other.json().error.code).not.toMatch(/^SYNC_/u);
+    } finally {
+      await close();
+    }
+  });
+
   it("宿主没有注入连接器：路由照样注册（权限照样生效），调用得到 404 SYNC_UNAVAILABLE", async () => {
     const { app, close } = await server();
     try {

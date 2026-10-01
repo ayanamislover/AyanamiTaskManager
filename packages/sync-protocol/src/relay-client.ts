@@ -172,6 +172,8 @@ export type RelayClientOptions = {
   fetchImpl?: FetchLike;
   /** 普通请求超时，默认 20 s。长轮询会在 wait 之上再加 15 s。 */
   timeoutMs?: number;
+  /** 客户端的生命周期：中止后在途与之后的请求都立即失败（连接器停下时用它掐断整个会话）。 */
+  signal?: AbortSignal;
 };
 
 const MAX_LIST_PAGES = 100;
@@ -295,6 +297,7 @@ export class RelayClient {
   readonly #token: string;
   readonly #fetch: FetchLike;
   readonly #timeoutMs: number;
+  readonly #lifetime: AbortSignal | null;
 
   constructor(options: RelayClientOptions) {
     this.baseUrl = normalizeRelayUrl(options.baseUrl);
@@ -303,6 +306,7 @@ export class RelayClient {
     this.#token = options.token;
     this.#fetch = options.fetchImpl ?? ((url, init) => globalThis.fetch(url, init));
     this.#timeoutMs = options.timeoutMs ?? 20_000;
+    this.#lifetime = options.signal ?? null;
   }
 
   #url(path: string, query?: Record<string, string | number | null | undefined>): string {
@@ -326,7 +330,9 @@ export class RelayClient {
     headers: FetchLikeResponse["headers"];
   }> {
     const timeoutMs = options.timeoutMs ?? this.#timeoutMs;
-    const signals = [AbortSignal.timeout(timeoutMs), ...(options.signal ? [options.signal] : [])];
+    const signals = [AbortSignal.timeout(timeoutMs)];
+    if (options.signal) signals.push(options.signal);
+    if (this.#lifetime) signals.push(this.#lifetime);
     const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.#token}`,
@@ -342,7 +348,7 @@ export class RelayClient {
     try {
       response = await this.#fetch(url, init);
     } catch (error) {
-      if (options.signal?.aborted) throw error;
+      if (options.signal?.aborted || this.#lifetime?.aborted) throw error;
       throw networkError(error);
     }
     const body = parseObject(await response.text());

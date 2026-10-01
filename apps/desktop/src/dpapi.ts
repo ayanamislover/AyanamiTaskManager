@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable, Writable } from "node:stream";
 
 /** 原生宿主的一次性 DPAPI 模式（native/host/src/dpapi.rs）。 */
 export const DPAPI_FLAG = "--dpapi";
@@ -18,19 +19,29 @@ export type HostDpapiOptions = {
   /** 插在 `--dpapi` 前面的参数；测试用它让 node 跑一个假宿主脚本。 */
   prefixArgs?: readonly string[];
   timeoutMs?: number;
+  /** 中止后：在途的调用结束 helper 并 reject，之后的调用直接 reject（core 收尾时用）。 */
+  signal?: AbortSignal;
 };
 
 /**
  * 经原生宿主调 DPAPI：`<host> --dpapi protect|unprotect`，数据走 stdin / stdout（hex 一行），
  * 不上命令行。宿主与 core 包在同一个版本目录里，和请求方同样可信。
- * 失败（宿主不存在、不认识这个模式、调用失败、超时、输出不合格式）一律 reject，由调用方当作不可用。
+ * 失败（宿主不存在、不认识这个模式、调用失败、超时、被中止、输出不合格式）一律 reject，由调用方当作不可用。
+ *
+ * helper 必须是 core 的普通（非 detached）子进程：Windows 上 libuv 把这类子进程放进随父进程关闭
+ * 而结束的 job，core 怎么退出（包括握手被拒时直接 process.exit）都不会留下卡在系统调用里的 helper。
  */
 export function hostDpapi(hostPath: string, options: HostDpapiOptions = {}): Dpapi {
   const prefixArgs = options.prefixArgs ?? [];
   const timeoutMs = options.timeoutMs ?? CALL_TIMEOUT_MS;
+  const signal = options.signal;
   const call = (operation: "protect" | "unprotect", data: Buffer): Promise<Buffer> =>
     new Promise((resolve, reject) => {
-      let child;
+      if (signal?.aborted) {
+        reject(new Error("DPAPI_CANCELLED"));
+        return;
+      }
+      let child: ChildProcessByStdio<Writable, Readable, null>;
       try {
         child = spawn(hostPath, [...prefixArgs, DPAPI_FLAG, operation], {
           windowsHide: true,
@@ -42,23 +53,25 @@ export function hostDpapi(hostPath: string, options: HostDpapiOptions = {}): Dpa
       }
       let output = "";
       let settled = false;
+      const stop = (reason: string) => {
+        child.kill();
+        finish(new Error(reason));
+      };
+      const onAbort = () => stop("DPAPI_CANCELLED");
+      const timer = setTimeout(() => stop("DPAPI_TIMEOUT"), timeoutMs);
       const finish = (error: Error | null, value?: Buffer) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
         if (error) reject(error);
         else resolve(value ?? Buffer.alloc(0));
       };
-      const timer = setTimeout(() => {
-        child.kill();
-        finish(new Error("DPAPI_TIMEOUT"));
-      }, timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk: string) => {
         output += chunk;
-        if (output.length <= MAX_OUTPUT_CHARS) return;
-        child.kill();
-        finish(new Error("DPAPI_OUTPUT_TOO_LARGE"));
+        if (output.length > MAX_OUTPUT_CHARS) stop("DPAPI_OUTPUT_TOO_LARGE");
       });
       child.on("error", (error) => finish(error));
       child.on("close", (code) => {

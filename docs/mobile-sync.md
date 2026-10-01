@@ -189,6 +189,7 @@ type TaskCard = {
   所以同一条命令被处理两次也只建一个任务。
 - 电脑处理完命令：先写 `ack`，再删 `cmd`。手机看到 `ack` 后删掉它；电脑每天清一次 7 天前的 `ack`。
 - 在线状态：电脑启动、每 5 分钟、正常退出（`state:"offline"`）各写一次。手机据 `at` 在 7 分钟内判定「电脑在线」。
+  退出时中继迟迟不响应就不写离线状态（见 §7 停止预算），手机靠 7 分钟判定兜底。
 
 ## 6. 命令
 
@@ -229,12 +230,17 @@ type TaskCard = {
 - 快照：订阅进程内全局事件，把受影响项目标脏，1.5 s 去抖后重建该项目的 `TaskCard` 列表；摘要不变就不写。
   启动时全量发布一次。
 - 命令：变更流里出现 `<S>/cmd/*` 的 put 就读、解密、校验、执行、回 ack；启动时再 `documents?prefix=<S>/cmd/` 兜底一次。
+- 启停：桌面 core 在后台起连接器与派单器（DPAPI 自检、派单恢复不占与宿主握手的时间），起来之前路由先等至多 5 s，
+  还没起来回 503 `SYNC_STARTING` / `DISPATCH_STARTING`（retryable，界面自动重试）。停止有总预算（core 里 3 s）：
+  等在途的中继写操作、写离线状态共用这段时间，到点掐断这个会话的全部中继请求（含设置页的测试连接），
+  之后迟到的任务不再碰 service 与派单——原生宿主请 core 退出后只等 8 s。
 - 退避：网络错误 1 s → 2 s → … → 60 s；401/403 停止并在状态里显示「中继拒绝了 token」；410 走全量重同步；
   `changes` 回 400（多半是换了中继、拿着对方格式的游标）清游标重来一次，再失败才报错；429 按 `retry_after` 等待。
 
 ### REST（daemon，供桌面设置页用）
 
-宿主没有注入连接器 / 派单器时，对应路由统一返回 404 `SYNC_UNAVAILABLE` / `DISPATCH_UNAVAILABLE`（路由总是注册，权限守卫才能覆盖到）。
+宿主没有注入连接器 / 派单器、或它们没能启动时，对应路由统一返回 404 `SYNC_UNAVAILABLE` / `DISPATCH_UNAVAILABLE`
+（路由总是注册，权限守卫才能覆盖到）；还在启动时返回 503 `SYNC_STARTING` / `DISPATCH_STARTING`。
 `state ∈ disabled | connecting | online | error`，细分原因写在 `lastError`（中文）；`paired` 每项是设备文档去掉 `v`，只列其它设备；
 `configured` 表示地址、app、token 三者齐备；`secretStore ∈ os-encrypted | plaintext`。
 
