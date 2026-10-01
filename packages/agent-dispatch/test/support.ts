@@ -123,7 +123,7 @@ export function fixture(): Fixture {
     },
     dispatcher(options = {}) {
       // 进程相关的系统调用一律换成替身：只认这个夹具自己 spawn 出来的子进程，结束时走它的句柄
-      // （child.kill()），绝不对别的 PID 发信号；创建时间是固定值，不起 PowerShell。
+      // （child.kill()），绝不对别的 PID 发信号；出生标识按 PID 编，不起 PowerShell、不读 /proc。
       const inner = options.spawnImpl ?? spawn;
       const spawnImpl: DispatchSpawn = (command, args, spawnOptions) => {
         const child = inner(command, args, spawnOptions);
@@ -140,7 +140,7 @@ export function fixture(): Fixture {
         resolveClaude: () => FAKE_CLAUDE,
         logger,
         pollIntervalMs: 50,
-        processStartTime: async (pid) => (own.has(pid) ? FIXED_CREATED_AT : null),
+        processIdentity: async (pid) => (own.has(pid) ? `test:${pid}` : null),
         isPidAlive: ownAlive,
         killProcessTree: async (pid): Promise<KillResult> => {
           if (!ownAlive(pid)) return { kind: "gone" };
@@ -158,7 +158,14 @@ export function fixture(): Fixture {
   return self;
 }
 
-const FIXED_CREATED_AT = new Date("2026-09-01T00:00:00.000Z");
+/**
+ * 与 Windows 默认探测同形的出生标识：`win32:<FILETIME>`（1601 年起的 100ns 计数）。
+ * `extraTicks` 是在毫秒之外再加的 100ns 刻度，用来造「只差一点点」的不同进程。
+ */
+export function winIdentity(at: Date, extraTicks = 0n): string {
+  const ticks = (BigInt(at.getTime()) + 11_644_473_600_000n) * 10_000n + extraTicks;
+  return `win32:${ticks}`;
+}
 
 /** 不起真进程的子进程替身：有 PID、stdin、exit 事件；`finish` 模拟进程退出。 */
 export type FakeChild = ChildProcess & { finish(code: number | null): void };
@@ -184,14 +191,14 @@ export function fakeChild(pid: number, onExit: () => void = () => {}): FakeChild
 let nextFakePid = 4_100_000;
 
 /**
- * 一套进程替身：`spawnImpl` 造 {@link FakeChild}；`alive` 是「系统里活着的 PID」，`created` 是各 PID 的创建时间
+ * 一套进程替身：`spawnImpl` 造 {@link FakeChild}；`alive` 是「系统里活着的 PID」，`identities` 是各 PID 的出生标识
  * （没有 = 查不到）；`killProcessTree` 只记下调用并按 `killResult` 回答，默认让对应替身退出。
- * 残留/接管类用例直接往 `alive`、`created` 里放 PID，用不到任何真实进程。
+ * 残留/接管类用例直接往 `alive`、`identities` 里放 PID，用不到任何真实进程。
  */
 export function fakeProcesses() {
   const children: FakeChild[] = [];
   const alive = new Set<number>();
-  const created = new Map<number, Date>();
+  const identities = new Map<number, string>();
   const kills: number[] = [];
   const control: { killResult: KillResult | null } = { killResult: null };
   const spawnImpl: DispatchSpawn = () => {
@@ -199,14 +206,14 @@ export function fakeProcesses() {
     nextFakePid += 4;
     const child = fakeChild(pid, () => alive.delete(pid));
     alive.add(pid);
-    created.set(pid, new Date(Date.UTC(2026, 8, 1, 0, 0, children.length)));
+    identities.set(pid, winIdentity(new Date(Date.UTC(2026, 8, 1, 0, 0, children.length))));
     children.push(child);
     return child;
   };
   const options = {
     spawnImpl,
     isPidAlive: (pid: number) => alive.has(pid),
-    processStartTime: async (pid: number) => created.get(pid) ?? null,
+    processIdentity: async (pid: number) => identities.get(pid) ?? null,
     killProcessTree: async (pid: number): Promise<KillResult> => {
       kills.push(pid);
       if (control.killResult) return control.killResult;
@@ -218,7 +225,7 @@ export function fakeProcesses() {
       return { kind: "killed" };
     },
   } satisfies Partial<AgentDispatcherOptions>;
-  return { children, alive, created, kills, control, options };
+  return { children, alive, identities, kills, control, options };
 }
 
 export async function waitFor<T>(

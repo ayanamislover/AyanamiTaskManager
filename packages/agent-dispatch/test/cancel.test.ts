@@ -46,7 +46,7 @@ async function twoTasks(
 }
 
 describe("取消：确认进程结束后才算取消", () => {
-  it("spawn 后立刻记下 OS 给的创建时间；查不到就不记（身份未知）", async () => {
+  it("spawn 后立刻记下 OS 给的出生标识；查不到就不记（身份未知）", async () => {
     const f = fixture();
     f.addTask("DEMO-T-0001");
     f.addTask("DEMO-T-0002");
@@ -62,16 +62,16 @@ describe("取消：确认进程结束后才算取消", () => {
       JSON.parse(readFileSync(dispatchPaths(f.dataDir).runs, "utf8")).runs as Array<{
         run: string;
         pid?: number;
-        processCreatedAt?: string;
+        processIdentity?: string;
       }>;
-    await waitFor(() => saved().find((run) => run.run === known.run)?.processCreatedAt);
+    await waitFor(() => saved().find((run) => run.run === known.run)?.processIdentity);
     const record = saved().find((run) => run.run === known.run)!;
-    expect(record.processCreatedAt).toBe(fake.created.get(record.pid!)!.toISOString());
+    expect(record.processIdentity).toBe(fake.identities.get(record.pid!));
     // 对外视图不带只供本机核验身份用的字段。
-    expect(dispatcher.listRuns()[0]).not.toHaveProperty("processCreatedAt");
+    expect(dispatcher.listRuns()[0]).not.toHaveProperty("processIdentity");
     dispatcher.close();
 
-    const blind = f.dispatcher({ ...fake.options, processStartTime: async () => null });
+    const blind = f.dispatcher({ ...fake.options, processIdentity: async () => null });
     await blind.start();
     const unknown = await blind.enqueue({
       project: "DEMO",
@@ -79,8 +79,8 @@ describe("取消：确认进程结束后才算取消", () => {
       origin: "desktop",
     });
     await waitFor(() => blind.runForTask("DEMO", "DEMO-T-0002")?.state === "running");
-    await waitFor(() => f.warnings.some((warning) => warning.includes("查不到会话进程的创建时间")));
-    expect(saved().find((run) => run.run === unknown.run)?.processCreatedAt).toBeUndefined();
+    await waitFor(() => f.warnings.some((warning) => warning.includes("查不到会话进程的出生标识")));
+    expect(saved().find((run) => run.run === unknown.run)?.processIdentity).toBeUndefined();
   });
 
   it("结束成功：记为取消、释放名额，排队的下一个才启动", async () => {

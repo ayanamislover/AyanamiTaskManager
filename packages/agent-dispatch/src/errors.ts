@@ -21,6 +21,13 @@ export const DISPATCH_ERROR_POLICIES = Object.freeze({
   DISPATCH_CANCEL_FAILED: { httpStatus: 500, retryable: true },
   /** 保留期内的手机派单请求数到了账本上限（见 request-ledger.ts），条目过期后自然恢复。 */
   DISPATCH_TOO_MANY_REQUESTS: { httpStatus: 429, retryable: true },
+  /** 请求账本文件读不出来（权限、磁盘错误）：无法判断命令是否执行过，手机派单暂停，下次重读。 */
+  DISPATCH_LEDGER_UNAVAILABLE: { httpStatus: 503, retryable: true },
+  /**
+   * 请求账本丢过数据，这条命令发出时间在丢失水位线之前、账本里又查不到：无法确认是否已经执行过。
+   * 同一条命令重试也不会变，所以不可重试；用户在手机上重新交给 Claude（新命令 ID）即可。
+   */
+  DISPATCH_REQUEST_STATE_LOST: { httpStatus: 409, retryable: false },
 } as const);
 
 export type DispatchErrorCode = keyof typeof DISPATCH_ERROR_POLICIES;

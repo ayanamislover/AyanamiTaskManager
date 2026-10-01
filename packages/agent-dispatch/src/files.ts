@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
-  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -55,15 +54,32 @@ export function writeJsonAtomic(path: string, value: unknown): void {
   }
 }
 
+/**
+ * - `missing`：文件不存在（ENOENT）；
+ * - `unreadable`：文件在但读不出来（EACCES、EIO、EISDIR……）——内容未知，不能当成「没有」也不能当成「坏了」；
+ * - `corrupt`：读出来了但不是 JSON。
+ */
 export type JsonReadResult =
   | { kind: "missing" }
   | { kind: "ok"; value: unknown }
+  | { kind: "unreadable"; code: string; error: string }
   | { kind: "corrupt"; error: string };
 
 export function readJsonFile(path: string): JsonReadResult {
-  if (!existsSync(path)) return { kind: "missing" };
+  let text: string;
   try {
-    return { kind: "ok", value: JSON.parse(readFileSync(path, "utf8")) as unknown };
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "UNKNOWN";
+    if (code === "ENOENT") return { kind: "missing" };
+    return {
+      kind: "unreadable",
+      code,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  try {
+    return { kind: "ok", value: JSON.parse(text) as unknown };
   } catch (error) {
     return { kind: "corrupt", error: error instanceof Error ? error.message : String(error) };
   }

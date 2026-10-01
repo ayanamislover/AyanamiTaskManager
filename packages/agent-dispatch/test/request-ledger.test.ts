@@ -7,6 +7,7 @@ import {
   DispatchError,
   dispatchPaths,
 } from "../src/index.js";
+import { RequestLedger } from "../src/request-ledger.js";
 import { cleanupAll, fakeProcesses, type Fixture, fixture, waitFor } from "./support.js";
 
 afterEach(cleanupAll);
@@ -209,7 +210,7 @@ describe("派单请求账本：同一个 requestId 只起一次会话", () => {
     expect(fake.children).toHaveLength(2);
   });
 
-  it("坏的账本改名留存、从空账本开始；格式不对的 requestId 被拒", async () => {
+  it("坏的账本：原文复制留存，设下丢失水位线（不再静默从空账本开始）；格式不对的 requestId 被拒", async () => {
     const f = fixture();
     f.addTask("DEMO-T-0001");
     const paths = dispatchPaths(f.dataDir);
@@ -218,10 +219,109 @@ describe("派单请求账本：同一个 requestId 只起一次会话", () => {
     const dispatcher = f.dispatcher(fakeProcesses().options);
     await dispatcher.updateConfig({ enabled: true });
     expect(readFileSync(paths.requests.replace(/\.json$/u, ".corrupt.json"), "utf8")).toBe("{ 坏");
-    expect(f.warnings.some((warning) => warning.includes("派单请求账本"))).toBe(true);
+    expect(f.warnings.some((warning) => warning.includes("派单请求账本数据丢失"))).toBe(true);
+    expect(ledgerFile(f)).toMatchObject({ lostBefore: expect.any(String) });
     for (const bad of ["", "有中文", "a/b", "x".repeat(200)])
       expect((await rejection(dispatcher.enqueue(mobile(bad)))).code).toBe(
         "DISPATCH_INVALID_ARGUMENT",
       );
+  });
+});
+
+describe("账本上限在并发入场时也守得住（peer R2-05）", () => {
+  it("写入端只认 admit 发出的名额：用过的名额不能再写", () => {
+    const f = fixture();
+    const ledger = new RequestLedger(
+      dispatchPaths(f.dataDir).requests,
+      f.logger,
+      () => ({ runs: [], damaged: false }),
+      new Date(),
+    );
+    const gate = ledger.admit(COMMAND, new Date());
+    if (gate.kind !== "new") throw new Error("应当是新请求");
+    const refusal = new DispatchError("DISPATCH_DISABLED", "派单未开启");
+    ledger.recordRejection(gate.reservation, refusal, new Date());
+    expect(ledger.size).toBe(1);
+    const view = {
+      run: "r-1",
+      project: "DEMO",
+      key: "DEMO-T-0001",
+      title: "t",
+      origin: "mobile" as const,
+      state: "queued" as const,
+      sessionId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      createdAt: new Date().toISOString(),
+    };
+    expect(() => ledger.recordRun(gate.reservation, view, new Date())).toThrow("没有可用名额");
+    expect(() => ledger.recordRun({ id: OTHER, open: true }, view, new Date())).toThrow(
+      "没有可用名额",
+    );
+    expect(ledger.size).toBe(1);
+  });
+
+  /** 写满到 `count` 条未过期的条目（都是别的请求的拒绝记录）。 */
+  function fill(f: Fixture, count: number, at: Date) {
+    const paths = dispatchPaths(f.dataDir);
+    mkdirSync(paths.root, { recursive: true });
+    const requests = Array.from({ length: count }, (_, index) => ({
+      id: `fill-${index}`,
+      at: at.toISOString(),
+      rejected: { code: "DISPATCH_DISABLED", message: "派单未开启" },
+    }));
+    writeFileSync(paths.requests, JSON.stringify({ v: 1, requests }));
+  }
+
+  it("还剩 1 个名额时并发 3 个新请求：只放进 1 个，账本恰好到上限；被 429 的请求过期腾出名额后仍可办理", async () => {
+    const f = fixture();
+    for (const key of ["DEMO-T-0001", "DEMO-T-0002", "DEMO-T-0003"]) f.addTask(key);
+    let at = Date.parse("2026-09-30T00:00:00.000Z");
+    const now = () => new Date(at);
+    // 填充条目再过 1 秒就过期；这次被 429 的请求若被记了账，它的条目会比填充条目活得久得多。
+    fill(f, DISPATCH_REQUEST_LIMIT - 1, new Date(at - DISPATCH_REQUEST_RETENTION_MS + 1_000));
+    const fake = fakeProcesses();
+    const dispatcher = f.dispatcher({ ...fake.options, now });
+    await dispatcher.updateConfig({ enabled: true, maxConcurrent: 3 });
+    const ids = ["m-0123456789ab.000000000000a00000001", "m-0123456789ab.000000000000b00000002"];
+    ids.push("m-0123456789ab.000000000000c00000003");
+    const results = await Promise.allSettled(
+      ids.map((id, index) => dispatcher.enqueue(mobile(id, `DEMO-T-000${index + 1}`))),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const refused = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason as DispatchError] : [],
+    );
+    expect(refused.map((error) => error.code)).toEqual([
+      "DISPATCH_TOO_MANY_REQUESTS",
+      "DISPATCH_TOO_MANY_REQUESTS",
+    ]);
+    expect(ledgerFile(f).requests).toHaveLength(DISPATCH_REQUEST_LIMIT);
+    await waitFor(() => fake.children.length === 1);
+
+    // 429 不会被记成这些 ID 的永久拒绝：填充条目一过期腾出名额，同一个被拒的 ID 就能正常办理。
+    const rejectedIndex = results.findIndex((result) => result.status === "rejected");
+    at += 2_000;
+    const retried = await dispatcher.enqueue(
+      mobile(ids[rejectedIndex]!, `DEMO-T-000${rejectedIndex + 1}`),
+    );
+    expect(retried.state).toBe("queued");
+    await waitFor(() => fake.children.length === 2);
+  });
+
+  it("业务拒绝也守上限：还剩 1 个名额时并发 2 个会被拒的请求，只记 1 条拒绝", async () => {
+    const f = fixture();
+    f.addTask("DEMO-T-0001", { status: "IN_PROGRESS" });
+    f.addTask("DEMO-T-0002", { status: "IN_PROGRESS" });
+    fill(f, DISPATCH_REQUEST_LIMIT - 1, new Date());
+    const dispatcher = f.dispatcher(fakeProcesses().options);
+    await dispatcher.updateConfig({ enabled: true });
+    const results = await Promise.allSettled([
+      dispatcher.enqueue(mobile(COMMAND, "DEMO-T-0001")),
+      dispatcher.enqueue(mobile(OTHER, "DEMO-T-0002")),
+    ]);
+    const codes = results.map((result) =>
+      result.status === "rejected" ? (result.reason as DispatchError).code : "fulfilled",
+    );
+    expect([...codes].sort()).toEqual(["DISPATCH_TASK_NOT_READY", "DISPATCH_TOO_MANY_REQUESTS"]);
+    expect(ledgerFile(f).requests).toHaveLength(DISPATCH_REQUEST_LIMIT);
   });
 });

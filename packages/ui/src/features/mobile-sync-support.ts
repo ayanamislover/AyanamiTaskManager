@@ -1,6 +1,7 @@
 import type {
   DispatchClaudeStatus,
   DispatchEffort,
+  DispatchLedgerStatus,
   DispatchOrigin,
   DispatchPermissionMode,
   DispatchRunView,
@@ -208,6 +209,19 @@ export function isActiveRun(run: Pick<DispatchRunView, "state">): boolean {
 /** 有排队或运行中的派单时 5 秒刷一次状态；其余时间沿用全局节奏。 */
 export function dispatchRefetchInterval(data: { runs: readonly DispatchRunView[] } | undefined) {
   return data?.runs.some(isActiveRun) ? DISPATCH_ACTIVE_REFRESH_MS : ATM_QUERY_REFRESH_INTERVAL_MS;
+}
+
+/**
+ * 派单请求账本出过问题时设置页上的提示（一切正常、或旧版宿主没给这个字段时返回 null）：
+ * 说清发生了什么、影响哪段时间之前的手机派单、用户该怎么做。
+ */
+export function dispatchLedgerNotice(ledger: DispatchLedgerStatus | undefined): string | null {
+  if (!ledger) return null;
+  if (ledger.unavailable)
+    return "电脑上的手机派单记录暂时读不出来（文件权限或磁盘问题）：为防同一条命令被执行两次，手机上的「交给 Claude」暂时都会被拒绝，读得出来后自动恢复；在电脑上直接派单不受影响。";
+  if (!ledger.lostBefore) return null;
+  const until = ledger.lostUntil ? `；这条提示到 ${formatTime(ledger.lostUntil)} 自动消失` : "";
+  return `电脑上的手机派单记录损坏过：${formatTime(ledger.lostBefore)} 及之前从手机发出、而电脑上已查不到记录的派单，无法确认是否执行过，已一律拒绝。需要的话在手机上重新「交给 Claude」即可${until}。`;
 }
 
 /** Claude Code 登录已过期时让用户在终端里跑的命令。 */

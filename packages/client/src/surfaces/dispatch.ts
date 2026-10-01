@@ -60,9 +60,23 @@ export type DispatchClaudeStatus = {
   authMethod?: string;
 };
 
+/**
+ * 派单请求账本（防止同一条手机命令执行两次）的健康状况，不含任何密钥。
+ * 旧版宿主没有这个字段。
+ */
+export type DispatchLedgerStatus = {
+  /** 账本丢过数据：这个时刻（含）之前发出、电脑上又查不到记录的手机派单一律被拒；没丢过为 null。 */
+  lostBefore: string | null;
+  /** 上面的限制自动解除的时刻。 */
+  lostUntil: string | null;
+  /** 账本文件暂时读不出来：手机派单全部被拒，读得出来后自动恢复。 */
+  unavailable: boolean;
+};
+
 export type DispatchStatus = DispatchConfigView & {
   claude: DispatchClaudeStatus;
   runs: DispatchRunView[];
+  requestLedger?: DispatchLedgerStatus;
 };
 
 export function createDispatchSurface(request: ClientRequest) {

@@ -265,21 +265,42 @@ type TaskCard = {
   需要用户决定时置为 WAITING_USER 并写清问题 → `atm_end` 交接。
 - 进程 `detached`、`windowsHide`，stdout 逐行写 `<数据目录>/dispatch/logs/<run>.jsonl`；
   历史（最近 50 次）写 `<数据目录>/dispatch/runs.json`。宿主退出不杀会话。
-- 请求账本 `<数据目录>/dispatch/requests.json`：`{v:1, requests:[{id, at, run:<派单快照>} | {id, at, rejected:{code, message}}]}`。
-  `enqueue` 带 `requestId`（手机命令 ID；桌面点按不带）时先查账本，记过的直接返回那次派单的当前视图
-  （还在历史里用历史，已被裁剪用账本里的快照，快照随派单状态变化刷新）或原样拒绝，绝不再起会话；
-  新请求的条目在排队、起进程**之前**原子写盘，写不下去就不派。业务拒绝（`DISPATCH_*`）也记下，
-  免得之后开了派单、任务又能派时同一条旧命令补起一次会话。条目从记下起保留 9 天（命令有效期 7 天 +
-  手机时钟最多快 1 天 + 1 天余量），超期裁剪；保留期内最多 2000 条，满了拒收新的手机派单
-  （429 `DISPATCH_TOO_MANY_REQUESTS`）而不是挤掉旧条目。
-- 进程身份：spawn 后立刻向系统查这个 PID 的创建时间存进历史（`processCreatedAt`，查不到就不存 = 身份未知）。
-  本宿主起的会话靠 ChildProcess 句柄（exit 事件）判断存活——句柄在，系统不会把 PID 给别的进程。
-  宿主重启后，只有「存的创建时间已知 + 现查的已知 + 两者相差 ≤ 1 秒」才接管；PID 不在或创建时间对不上
+- 请求账本 `<数据目录>/dispatch/requests.json`：`{v:1, lostBefore?, requests:[{id, at, run:<派单快照>} | {id, at, rejected:{code, message}}]}`。
+  `enqueue` 带 `requestId`（手机命令 ID；桌面点按不带）时先过账本，整段同步、没有 await：记过的直接返回
+  那次派单的当前视图（还在历史里用历史，已被裁剪用账本里的快照，快照随派单状态变化刷新）或原样拒绝，绝不再起会话；
+  新请求在同一段代码里检查容量并预留名额，并发入场也越不过上限。新请求的条目在排队、起进程**之前**原子写盘，
+  写不下去就不派。业务拒绝（`DISPATCH_*`）也记下，免得之后开了派单、任务又能派时同一条旧命令补起一次会话。
+  条目从记下起保留 9 天（命令有效期 7 天 + 手机时钟最多快 1 天 + 1 天余量），超期裁剪；保留期内最多 2000 条
+  （含预留），满了拒收新的手机派单（429 `DISPATCH_TOO_MANY_REQUESTS`，不记账，过期腾出名额后同一 ID 仍可办理）
+  而不是挤掉旧条目。派单历史 `runs.json` 里每条手机派单也存着它的 `requestId`。
+- 账本恢复（fail-closed）：
+  - 文件不存在、历史里也没有带 `requestId` 的派单且历史完好 → 全新。
+  - 读不出来（EACCES、EIO 等，不是 ENOENT）→ 不改名不重建；带 `requestId` 的派单一律
+    503 `DISPATCH_LEDGER_UNAVAILABLE`（retryable），每次手机派单、查状态前重读，读出来就恢复。
+  - 文件被删（而历史里有带 `requestId` 的派单，或历史也坏了）、不是 JSON、格式不对、有条目不合法 → 记为数据丢失：
+    原文件复制成 `requests.corrupt.json`，设下水位线 `lostBefore = 发现丢失的时刻` 并写进新账本。
+  - 无论哪种，历史里带 `requestId` 的派单都补回成精确条目，照常回放，不受水位线影响。
+  - 有水位线时，账本里查不到的请求：命令 ID 里的发送时间 ≤ `lostBefore`、或取不出发送时间的，一律
+    409 `DISPATCH_REQUEST_STATE_LOST`（「电脑上的派单记录损坏过，无法确认这条命令是否已经执行；如需再派，
+    请在手机上重新交给 Claude」，不记账，免得把它固化）；之后发出的照常办理。水位线在 `lostBefore` + 9 天后自动清除。
+  - `GET /api/v1/dispatch/status` 带 `requestLedger: {lostBefore, lostUntil, unavailable}`（不含密钥），
+    桌面「Claude 自动开工」面板据此在派单列表上方给一条 warning 提示。
+- 进程身份：spawn 后立刻向系统要这个 PID 的**出生标识**存进历史（`processIdentity`，查不到就不存 = 身份未知），
+  宿主重启后只做**精确相等**比较，没有任何时间容差：
+  - Windows：`(Get-Process -Id <pid>).StartTime.ToFileTimeUtc()`，即创建时刻的 FILETIME 原值（100ns 整数），
+    存成 `win32:<FILETIME>`。同一进程两次读取逐位相同，差 100ns 就是另一个进程。
+  - Linux：`/proc/<pid>/stat` 第 22 字段 starttime 原值 + `/proc/sys/kernel/random/boot_id`，存成
+    `linux:<boot_id>:<starttime>`。
+  - 其它平台（macOS 等）拿不到稳定且足够精细的出生标识（`ps lstart` 只有秒级，排除不了同秒复用）：身份一律未知。
+  - 旧版本存的 ISO 创建时间（`processCreatedAt`）读入时丢弃，按未知处理。
+- 接管：本宿主起的会话靠 ChildProcess 句柄（exit 事件）判断存活——句柄在，系统不会把 PID 给别的进程。
+  宿主重启后只有「存的标识已知 + 现查的已知 + 两者逐字相同」才接管；PID 不在或标识不同
   （PID 被复用，原进程必然已退出）按日志定结局；身份核验不了（没存或查不到）时不接管、不结束：
   日志里已有 result 行按日志定结局，否则记为失败——「宿主重启后无法确认 Claude 进程身份（PID n），已停止跟踪，
   没有结束该进程；如仍在运行可在任务管理器里手动结束」。日志里有没有 result 行不能证明 PID 归属。
   接管后每次轮询都重核身份：对不上按已退出处理；连续 3 次查不到同样停止跟踪、不结束进程。
-- 取消：排队中的直接取消；运行中的先核验身份（本宿主起的看句柄，接管的重查创建时间）再
+  精确比较仍挡不住「核验完、执行 taskkill 之前」这一瞬间的复用（接管的进程没有句柄），只是把窗口压到最小。
+- 取消：排队中的直接取消；运行中的先核验身份（本宿主起的看句柄，接管的重查出生标识）再
   `taskkill /PID <pid> /T /F`（POSIX 向进程组发 SIGKILL）。taskkill 成功或退出码 128（进程已不存在）才记为
   `cancelled` 并释放并发名额；其它失败、或身份核验不了，派单保持 running、名额不释放，抛 500
   `DISPATCH_CANCEL_FAILED`（retryable，带中文原因），可以重试。核验发现原进程早已退出时不动任何进程、按日志定结局。

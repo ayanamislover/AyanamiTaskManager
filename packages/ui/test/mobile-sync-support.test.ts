@@ -8,6 +8,7 @@ import {
   deviceOnline,
   DISPATCH_ACTIVE_REFRESH_MS,
   dispatchFailureReason,
+  dispatchLedgerNotice,
   dispatchRefetchInterval,
   featureUnavailable,
   formatCountdown,
@@ -166,6 +167,31 @@ describe("中继表单校验", () => {
 });
 
 describe("派单", () => {
+  it("请求账本提示：读不出来、丢过数据各一句；正常或旧版宿主没给字段时不提示", () => {
+    expect(dispatchLedgerNotice(undefined)).toBeNull();
+    expect(
+      dispatchLedgerNotice({ lostBefore: null, lostUntil: null, unavailable: false }),
+    ).toBeNull();
+    const unreadable = dispatchLedgerNotice({
+      lostBefore: null,
+      lostUntil: null,
+      unavailable: true,
+    });
+    expect(unreadable).toContain("暂时读不出来");
+    expect(unreadable).toContain("在电脑上直接派单不受影响");
+    const lost = dispatchLedgerNotice({
+      lostBefore: ago(0),
+      lostUntil: ago(-9 * 86_400_000),
+      unavailable: false,
+    })!;
+    expect(lost).toContain("派单记录损坏过");
+    expect(lost).toContain("及之前从手机发出");
+    expect(lost).toContain("在手机上重新「交给 Claude」即可");
+    expect(lost).toContain("自动消失");
+    // 时间按界面统一格式显示，不把 ISO 原文甩给用户。
+    expect(lost).not.toContain("T12:00:00.000Z");
+  });
+
   it("只有 READY / BACKLOG 且没有有效领取的任务能交给 Claude", () => {
     expect(taskAcceptsDispatch({ status: "READY" }, NOW)).toBe(true);
     expect(taskAcceptsDispatch({ status: "BACKLOG", claimedBySessionId: null }, NOW)).toBe(true);

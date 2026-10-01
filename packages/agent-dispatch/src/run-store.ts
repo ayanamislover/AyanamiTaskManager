@@ -31,31 +31,45 @@ const RunRecordSchema = z.object({
   cwd: z.string(),
   requestedBy: z.string().optional(),
   pid: z.number().int().positive().optional(),
-  processCreatedAt: z.string().optional(),
+  // 旧版本存的 processCreatedAt（ISO 创建时间）不在这里：解析时被丢弃，身份按未知处理。
+  processIdentity: z.string().min(1).optional(),
+  requestId: z.string().min(1).optional(),
 });
 
 const RunsFileSchema = z.object({ v: z.literal(1), runs: z.array(z.unknown()) });
 
-/** 读 runs.json；逐条校验，坏条目丢弃并记日志，整个文件坏了就从空历史开始。 */
-export function loadRuns(path: string, logger: DispatchLogger): DispatchRunRecord[] {
+/**
+ * 读 runs.json；逐条校验，坏条目丢弃并记日志，整个文件坏了就从空历史开始。
+ * `damaged` 表示历史读出来时有损（读不出、不是 JSON、格式不对或有条目被丢）：请求账本据此判断
+ * 「两份记录都没了」是不是数据丢失，而不是全新安装。
+ */
+export function loadRuns(
+  path: string,
+  logger: DispatchLogger,
+): { runs: DispatchRunRecord[]; damaged: boolean } {
   const read = readJsonFile(path);
-  if (read.kind === "missing") return [];
-  if (read.kind === "corrupt") {
-    logger.warn("派单历史文件无法解析，已从空历史开始", { path, error: read.error });
-    return [];
+  if (read.kind === "missing") return { runs: [], damaged: false };
+  if (read.kind !== "ok") {
+    logger.warn("派单历史文件无法读取或解析，已从空历史开始", { path, error: read.error });
+    return { runs: [], damaged: true };
   }
   const file = RunsFileSchema.safeParse(read.value);
   if (!file.success) {
     logger.warn("派单历史文件格式不对，已从空历史开始", { path });
-    return [];
+    return { runs: [], damaged: true };
   }
   const runs: DispatchRunRecord[] = [];
+  let damaged = false;
   for (const entry of file.data.runs) {
     const parsed = RunRecordSchema.safeParse(entry);
     if (parsed.success) runs.push(stripUndefined(parsed.data) as DispatchRunRecord);
-    else logger.warn("派单历史里有一条记录不合法，已丢弃", { path });
+    else {
+      damaged = true;
+      logger.warn("派单历史里有一条记录不合法，已丢弃", { path });
+    }
   }
-  return runs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  runs.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  return { runs, damaged };
 }
 
 function stripUndefined<T extends Record<string, unknown>>(value: T): T {
@@ -111,12 +125,14 @@ export function pruneLogs(paths: DispatchPaths, keep: ReadonlySet<string>, logge
   }
 }
 
-/** 对外视图：去掉 cwd / requestedBy / pid / processCreatedAt 这些只供本机跟踪进程用的字段。 */
+/** 对外视图：去掉 cwd / requestedBy / pid / processIdentity / requestId 这些只供本机用的字段。 */
 export function toRunView(record: DispatchRunRecord): DispatchRunView {
-  const view = { ...record } as Partial<DispatchRunRecord>;
+  const view = { ...record } as Partial<DispatchRunRecord> & { processCreatedAt?: unknown };
   delete view.cwd;
   delete view.requestedBy;
   delete view.pid;
+  delete view.processIdentity;
+  delete view.requestId;
   delete view.processCreatedAt;
   return view as DispatchRunView;
 }

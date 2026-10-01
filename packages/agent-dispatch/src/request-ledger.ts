@@ -1,134 +1,117 @@
-import { renameSync, rmSync } from "node:fs";
-import { z } from "zod";
-import { DISPATCH_ERROR_POLICIES, DispatchError, type DispatchErrorCode } from "./errors.js";
-import { readJsonFile, writeJsonAtomic } from "./files.js";
-import type { DispatchLogger, DispatchRunRecord, DispatchRunView } from "./types.js";
+import { DispatchError } from "./errors.js";
+import { writeJsonAtomic } from "./files.js";
+import {
+  DISPATCH_REQUEST_LIMIT,
+  DISPATCH_REQUEST_RETENTION_MS,
+  type DispatchRequestEntry,
+  loadLedgerFile,
+  requestTimestamp,
+  sameSnapshot,
+  type Snapshot,
+  snapshotOf,
+} from "./ledger-file.js";
+import type {
+  DispatchLedgerStatus,
+  DispatchLogger,
+  DispatchRunRecord,
+  DispatchRunView,
+} from "./types.js";
+
+export {
+  DISPATCH_REQUEST_ID_PATTERN,
+  DISPATCH_REQUEST_LIMIT,
+  DISPATCH_REQUEST_MAX_AGE_MS,
+  DISPATCH_REQUEST_RETENTION_MS,
+  requestTimestamp,
+  snapshotView,
+  type DispatchRequestEntry,
+} from "./ledger-file.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/**
- * 手机命令的有效期：与 `@ayanami-task/sync-protocol` 的 COMMAND_MAX_AGE_MS 同值（7 天）。
- * 架构白名单里 agent-dispatch 只能依赖 agent-config 与 errors，所以在这里另立一份；
- * packages/sync/test/dispatch-replay.test.ts 有一条对照，两边不一致会红。
- */
-export const DISPATCH_REQUEST_MAX_AGE_MS = 7 * DAY_MS;
-
-/**
- * 账本条目从记下起保留多久：命令有效期 7 天 + 手机时钟最多快 1 天（同步侧在这个范围内仍接受命令，
- * 于是命令最晚能在首次处理后 8 天被重放而不过期）+ 1 天余量吸收电脑时钟回拨。超过它的重放会被同步侧以
- * COMMAND_EXPIRED 拒绝，不会走到这里。
- */
-export const DISPATCH_REQUEST_RETENTION_MS = DISPATCH_REQUEST_MAX_AGE_MS + 2 * DAY_MS;
-
-/**
- * 保留期内最多记这么多条；满了拒收新的手机派单（DISPATCH_TOO_MANY_REQUESTS）而不是挤掉旧条目，
- * 否则被挤掉的命令在有效期内重放就能再起一次会话。正常使用九天里远到不了这个数。
- */
-export const DISPATCH_REQUEST_LIMIT = 2_000;
-
-/** requestId 只是不透明的幂等键（手机命令传命令 ID）；限制字符集与长度，免得账本被塞进奇怪的东西。 */
-export const DISPATCH_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-
 const ACTIVE = new Set(["queued", "running"]);
 
-/** 派单被历史裁剪后仍要能回答「那次怎么样了」的最小快照：对外视图去掉摘要。 */
-const SnapshotSchema = z.object({
-  run: z.string().min(1),
-  project: z.string().min(1),
-  key: z.string().min(1),
-  title: z.string(),
-  origin: z.enum(["mobile", "desktop"]),
-  state: z.enum(["queued", "running", "succeeded", "failed", "cancelled"]),
-  sessionId: z.string().min(1),
-  createdAt: z.string(),
-  startedAt: z.string().optional(),
-  endedAt: z.string().optional(),
-  exitCode: z.number().int().nullable().optional(),
-  error: z.string().optional(),
-});
-type Snapshot = z.infer<typeof SnapshotSchema>;
+/** 给新请求预留的一个账本名额：成功或业务拒绝时转成条目，否则释放。 */
+export type LedgerReservation = { readonly id: string; open: boolean };
 
-const CODES = Object.keys(DISPATCH_ERROR_POLICIES) as [DispatchErrorCode, ...DispatchErrorCode[]];
+export type LedgerGate =
+  | { kind: "replay"; entry: DispatchRequestEntry }
+  | { kind: "new"; reservation: LedgerReservation };
 
-const EntrySchema = z.union([
-  z.object({
-    id: z.string().regex(DISPATCH_REQUEST_ID_PATTERN),
-    at: z.string(),
-    run: SnapshotSchema,
-  }),
-  z.object({
-    id: z.string().regex(DISPATCH_REQUEST_ID_PATTERN),
-    at: z.string(),
-    rejected: z.object({ code: z.enum(CODES), message: z.string() }),
-  }),
-]);
-export type DispatchRequestEntry = z.infer<typeof EntrySchema>;
-
-const LedgerFileSchema = z.object({ v: z.literal(1), requests: z.array(z.unknown()) });
-
-function snapshotOf(view: DispatchRunView): Snapshot {
-  return Object.fromEntries(
-    Object.entries(view).filter(([name, value]) => name !== "summary" && value !== undefined),
-  ) as Snapshot;
-}
-
-/** 账本快照当对外视图用（派单已被历史裁剪时）。快照不含值为 undefined 的键：snapshotOf 滤掉了，解析也不会补。 */
-export function snapshotView(snapshot: Snapshot): DispatchRunView {
-  return { ...snapshot } as DispatchRunView;
-}
-
-function sameSnapshot(left: Snapshot, right: Snapshot): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
+/** 发送时间早于水位线的手机派单被拒时给用户看的话。 */
+export const REQUEST_STATE_LOST_MESSAGE =
+  "电脑上的派单记录损坏过，无法确认这条命令是否已经执行；如需再派，请在手机上重新交给 Claude";
 
 /**
  * 派单请求账本（`dispatch/requests.json`）：requestId → 那次请求的结局（建出来的派单，或被拒的原因）。
  * 同一个 requestId 再来，派单层直接回放这个结局，绝不再起会话；条目在起进程之前落盘。
- * 与 runs.json 同样原子写；文件坏了改名成 `requests.corrupt.json` 留给排查，从空账本开始。
+ *
+ * 恢复状态机（读盘规则见 ledger-file.ts 的 loadLedgerFile）：
+ * - `unavailable`：文件读不出来。带 requestId 的派单一律 503 DISPATCH_LEDGER_UNAVAILABLE，不改名不重建，
+ *   每次派单/查状态前重读，读出来就转入正常状态。
+ * - 正常、无水位线：照常幂等。
+ * - 正常、有水位线 `lostBefore`（发现数据丢失的时刻，持久化）：记得住的请求（含从带 requestId 的派单历史
+ *   补回的）照常精确回放；记不住的，发送时间 ≤ 水位线、或取不出发送时间的一律
+ *   409 DISPATCH_REQUEST_STATE_LOST（不记进账本，免得把它固化）；发送时间在水位线之后的照常办理。
+ *   水位线在 lostBefore + 保留期后自动清除：那之前发出的命令到时都已过期。
  */
 export class RequestLedger {
   readonly #path: string;
   readonly #logger: DispatchLogger;
+  readonly #history: () => { runs: readonly DispatchRunRecord[]; damaged: boolean };
+  #available = false;
   #entries: DispatchRequestEntry[] = [];
+  #lostBefore: number | null = null;
+  /** admit 发出、还没用掉或还回来的名额；容量按「条目 + 这些名额」算。 */
+  readonly #reserved = new Set<LedgerReservation>();
 
-  constructor(path: string, logger: DispatchLogger) {
+  constructor(
+    path: string,
+    logger: DispatchLogger,
+    history: () => { runs: readonly DispatchRunRecord[]; damaged: boolean },
+    now: Date,
+  ) {
     this.#path = path;
     this.#logger = logger;
-    this.#entries = this.#load();
+    this.#history = history;
+    this.#reload(now);
   }
 
-  #load(): DispatchRequestEntry[] {
-    const read = readJsonFile(this.#path);
-    if (read.kind === "missing") return [];
-    const file = read.kind === "ok" ? LedgerFileSchema.safeParse(read.value) : null;
-    if (!file?.success) {
-      this.#quarantine();
-      return [];
+  /** 读盘；读不出来就保持 unavailable。发现丢失或补回了条目时立即写盘（写失败下次启动会再判一次丢失）。 */
+  #reload(now: Date): void {
+    const loaded = loadLedgerFile(this.#path, this.#history(), this.#logger);
+    if (loaded.kind === "unavailable") {
+      this.#available = false;
+      return;
     }
-    const entries: DispatchRequestEntry[] = [];
-    for (const raw of file.data.requests) {
-      const parsed = EntrySchema.safeParse(raw);
-      if (parsed.success) entries.push(parsed.data);
-      else this.#logger.warn("派单请求账本里有一条记录不合法，已丢弃", { path: this.#path });
-    }
-    return entries;
-  }
-
-  #quarantine(): void {
-    const target = this.#path.replace(/\.json$/u, ".corrupt.json");
-    try {
-      rmSync(target, { force: true });
-      renameSync(this.#path, target);
-    } catch {
-      // 改名失败不影响：下一次写入会覆盖原文件。
-    }
-    this.#logger.warn("派单请求账本无法解析，已改名留存并从空账本开始", { path: this.#path });
+    this.#available = true;
+    this.#entries = loaded.entries;
+    this.#lostBefore = loaded.lostBefore;
+    if (loaded.loss !== null)
+      this.#lostBefore = Math.max(this.#lostBefore ?? Number.NEGATIVE_INFINITY, now.getTime());
+    this.#prune(now);
+    if (loaded.dirty) this.#trySave("写恢复后的派单请求账本失败");
   }
 
   #save(): void {
-    writeJsonAtomic(this.#path, { v: 1, requests: this.#entries });
+    if (!this.#available) throw new Error("派单请求账本不可用，不能写");
+    writeJsonAtomic(this.#path, {
+      v: 1,
+      ...(this.#lostBefore === null
+        ? {}
+        : { lostBefore: new Date(this.#lostBefore).toISOString() }),
+      requests: this.#entries,
+    });
   }
 
+  #trySave(message: string): void {
+    try {
+      this.#save();
+    } catch (error) {
+      this.#logger.warn(message, { error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  /** 裁掉超过保留期的条目；水位线到期就清除（清除要落盘，免得重启后又冒出来）。 */
   #prune(now: Date): void {
     const cutoff = now.getTime() - DISPATCH_REQUEST_RETENTION_MS;
     this.#entries = this.#entries.filter((entry) => {
@@ -136,35 +119,93 @@ export class RequestLedger {
       // 记下时间看不懂的条目宁可留着（受条数上限约束），不能因此丢掉幂等。
       return Number.isNaN(at) || at >= cutoff;
     });
+    if (this.#lostBefore !== null && this.#lostBefore < cutoff) {
+      this.#lostBefore = null;
+      this.#trySave("清除派单请求账本的水位线失败，下次再写");
+    }
+  }
+
+  /** 读不出来的账本：先重读一次，仍不行就拒绝。 */
+  #ensureAvailable(now: Date): void {
+    if (!this.#available) this.#reload(now);
+    if (!this.#available)
+      throw new DispatchError(
+        "DISPATCH_LEDGER_UNAVAILABLE",
+        "电脑上的派单记录暂时读不出来（文件权限或磁盘问题），为防重复执行暂不接收手机派单；稍后会自动重试，也可以在电脑上直接派单",
+      );
+  }
+
+  status(now: Date): DispatchLedgerStatus {
+    if (!this.#available) this.#reload(now);
+    if (this.#available) this.#prune(now);
+    const lost = this.#available ? this.#lostBefore : null;
+    return {
+      lostBefore: lost === null ? null : new Date(lost).toISOString(),
+      lostUntil:
+        lost === null ? null : new Date(lost + DISPATCH_REQUEST_RETENTION_MS).toISOString(),
+      unavailable: !this.#available,
+    };
+  }
+
+  /** 已记下的条目（不做可用性检查；不可用时没有条目）。 */
+  find(requestId: string, now: Date): DispatchRequestEntry | undefined {
+    this.#prune(now);
+    return this.#entries.find((entry) => entry.id === requestId);
   }
 
   get size(): number {
     return this.#entries.length;
   }
 
-  find(requestId: string, now: Date): DispatchRequestEntry | undefined {
-    this.#prune(now);
-    return this.#entries.find((entry) => entry.id === requestId);
-  }
-
-  /** 满了就拒收：在做任何事之前调用。 */
-  assertCapacity(now: Date): void {
-    this.#prune(now);
-    if (this.#entries.length >= DISPATCH_REQUEST_LIMIT)
+  /**
+   * 带 requestId 的派单入口，整段同步、没有 await：记过的 → 回放；账本读不出来 → 503；
+   * 水位线之前发出的 → 409（不记账）；满了 → 429（不记账，过期后同一 ID 仍可办理）；
+   * 否则预留一个名额。容量检查与预留在同一段同步代码里，并发请求不会越过上限。
+   */
+  admit(requestId: string, now: Date): LedgerGate {
+    this.#ensureAvailable(now);
+    const entry = this.find(requestId, now);
+    if (entry) return { kind: "replay", entry };
+    if (this.#lostBefore !== null) {
+      const sentAt = requestTimestamp(requestId);
+      if (sentAt === null || sentAt <= this.#lostBefore)
+        throw new DispatchError("DISPATCH_REQUEST_STATE_LOST", REQUEST_STATE_LOST_MESSAGE, {
+          requestId,
+          lostBefore: new Date(this.#lostBefore).toISOString(),
+        });
+    }
+    if (this.#entries.length + this.#reserved.size >= DISPATCH_REQUEST_LIMIT)
       throw new DispatchError(
         "DISPATCH_TOO_MANY_REQUESTS",
         `最近 ${DISPATCH_REQUEST_RETENTION_MS / DAY_MS} 天收到的手机派单已达 ${DISPATCH_REQUEST_LIMIT} 次，为防重放暂不接收新的手机派单；可以在电脑上直接派单，或过几天再试`,
       );
+    const reservation = { id: requestId, open: true };
+    this.#reserved.add(reservation);
+    return { kind: "new", reservation };
+  }
+
+  /** 没用上的名额还回去（成功或拒绝记账后再调也无妨）。 */
+  release(reservation: LedgerReservation): void {
+    reservation.open = false;
+    this.#reserved.delete(reservation);
+  }
+
+  #append(reservation: LedgerReservation, entry: DispatchRequestEntry): void {
+    // 写入端也守上限：只认 admit 发出且还没用掉的名额（名额在 admit 时已经计入容量），自己拼的对象不算。
+    if (!this.#reserved.has(reservation) || !reservation.open || reservation.id !== entry.id)
+      throw new Error("派单请求账本：没有可用名额，拒绝写入");
+    this.release(reservation);
+    this.#entries.push(entry);
   }
 
   /** 记下建出来的派单并立即落盘；写盘失败抛出（调用方不得再起会话）。 */
-  recordRun(requestId: string, view: DispatchRunView, now: Date): void {
+  recordRun(reservation: LedgerReservation, view: DispatchRunView, now: Date): void {
     const entry: DispatchRequestEntry = {
-      id: requestId,
+      id: reservation.id,
       at: now.toISOString(),
       run: snapshotOf(view),
     };
-    this.#entries.push(entry);
+    this.#append(reservation, entry);
     try {
       this.#save();
     } catch (error) {
@@ -174,19 +215,18 @@ export class RequestLedger {
   }
 
   /** 记下被拒的结局：同一请求再来时原样拒绝，不会因为状态变了就补起一次会话。写盘失败只记日志。 */
-  recordRejection(requestId: string, error: DispatchError, now: Date): void {
-    this.#entries.push({
-      id: requestId,
+  recordRejection(reservation: LedgerReservation, error: DispatchError, now: Date): void {
+    if (
+      !this.#reserved.has(reservation) ||
+      this.#entries.some((entry) => entry.id === reservation.id)
+    )
+      return;
+    this.#append(reservation, {
+      id: reservation.id,
       at: now.toISOString(),
       rejected: { code: error.code, message: error.message },
     });
-    try {
-      this.#save();
-    } catch (saveError) {
-      this.#logger.warn("写派单请求账本失败（被拒的请求）", {
-        error: saveError instanceof Error ? saveError.message : String(saveError),
-      });
-    }
+    this.#trySave("写派单请求账本失败（被拒的请求）");
   }
 
   /**
@@ -197,6 +237,7 @@ export class RequestLedger {
     records: readonly DispatchRunRecord[],
     view: (record: DispatchRunRecord) => DispatchRunView,
   ) {
+    if (!this.#available) return;
     const byRun = new Map(records.map((record) => [record.run, record]));
     let changed = false;
     for (const entry of this.#entries) {
@@ -215,13 +256,6 @@ export class RequestLedger {
       entry.run = next;
       changed = true;
     }
-    if (!changed) return;
-    try {
-      this.#save();
-    } catch (error) {
-      this.#logger.warn("刷新派单请求账本失败，下次状态变化时再写", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    if (changed) this.#trySave("刷新派单请求账本失败，下次状态变化时再写");
   }
 }

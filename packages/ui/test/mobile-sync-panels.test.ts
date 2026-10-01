@@ -296,6 +296,36 @@ describe("Claude 自动开工面板", () => {
       '<MutationErrorAlert error={cancel.error} prefix="结束派单失败：" />',
     );
   });
+
+  it("派单请求账本出过问题：列表上方一条 warning 提示，说明影响哪段时间、在手机上重新交给 Claude", () => {
+    const lost = panel(
+      dispatchStatus({
+        requestLedger: {
+          lostBefore: "2026-09-30T10:00:00.000Z",
+          lostUntil: "2026-10-09T10:00:00.000Z",
+          unavailable: false,
+        },
+      }),
+    );
+    const note = /<p class="atm-sync-note" data-tone="warning" role="status">([^<]*)<\/p>/u.exec(
+      lost,
+    );
+    expect(note?.[1]).toContain("派单记录损坏过");
+    expect(note?.[1]).toContain("在手机上重新「交给 Claude」");
+    // 提示在「最近派单」标题之后、列表之前。
+    expect(lost.indexOf("最近派单")).toBeLessThan(lost.indexOf("派单记录损坏过"));
+    const unreadable = panel(
+      dispatchStatus({ requestLedger: { lostBefore: null, lostUntil: null, unavailable: true } }),
+    );
+    expect(unreadable).toContain('data-tone="warning" role="status"');
+    expect(unreadable).toContain("暂时读不出来");
+    // 正常、或旧版宿主没有这个字段：不提示。
+    for (const healthy of [
+      dispatchStatus({ requestLedger: { lostBefore: null, lostUntil: null, unavailable: false } }),
+      dispatchStatus(),
+    ])
+      expect(panel(healthy)).not.toContain('role="status"');
+  });
 });
 
 describe("任务抽屉「交给 Claude」", () => {

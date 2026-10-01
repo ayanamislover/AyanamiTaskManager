@@ -47,8 +47,8 @@ export function loadDispatchConfig(
 ): DispatchConfig {
   const read = readJsonFile(path);
   if (read.kind === "missing") return { ...DEFAULT_DISPATCH_CONFIG };
-  if (read.kind === "corrupt") {
-    logger.warn("派单配置文件无法解析，已回退默认配置", { path, error: read.error });
+  if (read.kind === "corrupt" || read.kind === "unreadable") {
+    logger.warn("派单配置文件无法读取或解析，已回退默认配置", { path, error: read.error });
     return { ...DEFAULT_DISPATCH_CONFIG };
   }
   const parsed = DispatchConfigSchema.safeParse(read.value);

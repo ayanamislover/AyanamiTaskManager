@@ -1,14 +1,14 @@
 import type { ChildProcess } from "node:child_process";
 import { DispatchError } from "./errors.js";
 import {
-  captureCreatedAt,
+  captureIdentity,
   checkProcessIdentity,
   childRunning,
   type ProcessProbe,
 } from "./process-identity.js";
 import type { DispatchLogger } from "./types.js";
 
-/** 接管的进程连续这么多次查不到创建时间（身份核验不了）就停止跟踪；进程本身不动。 */
+/** 接管的进程连续这么多次查不到出生标识（身份核验不了）就停止跟踪；进程本身不动。 */
 export const IDENTITY_MISS_LIMIT = 3;
 
 export type ProcessTrackerEvents = {
@@ -32,7 +32,7 @@ function cancelFailed(run: string, pid: number, message: string): DispatchError 
 
 /**
  * 跟踪会话进程。本宿主 spawn 的用 ChildProcess 句柄（exit 事件）判断存活——句柄在，系统不会把 PID
- * 分给别的进程；宿主重启后接管的只有 PID，靠「PID + 创建时间」核验身份，每次轮询、每次结束前都重核。
+ * 分给别的进程；宿主重启后接管的只有 PID，靠「PID + 出生标识」精确核验身份，每次轮询、每次结束前都重核。
  * 任何时候身份对不上都按「原进程已退出」处理，核验不了就不动它：绝不对身份不明的 PID 结束进程树。
  */
 export class ProcessTracker {
@@ -56,7 +56,7 @@ export class ProcessTracker {
     this.#events = options.events;
   }
 
-  /** 本宿主刚 spawn 的会话：挂上 exit/error，并返回 OS 给的创建时间（查不到为 null，身份记为未知）。 */
+  /** 本宿主刚 spawn 的会话：挂上 exit/error，并返回 OS 给的出生标识（查不到为 null，身份记为未知）。 */
   attach(run: string, child: ChildProcess): Promise<string | null> {
     this.#children.set(run, child);
     child.once("error", (error) => {
@@ -67,22 +67,22 @@ export class ProcessTracker {
       this.#children.delete(run);
       this.#events.exited(run, code);
     });
-    return captureCreatedAt(this.#probe, child);
+    return captureIdentity(this.#probe, child);
   }
 
-  /** 宿主重启后接管（调用方已确认身份一致）：轮询，每次都重核 PID + 创建时间。 */
-  watch(run: string, pid: number, createdAt: string): void {
+  /** 宿主重启后接管（调用方已确认身份一致）：轮询，每次都重核 PID + 出生标识。 */
+  watch(run: string, pid: number, identity: string): void {
     let misses = 0;
     const tick = async () => {
       if (this.#closed || !this.#watchers.has(run)) return;
-      const identity = await checkProcessIdentity(this.#probe, pid, createdAt);
+      const verdict = await checkProcessIdentity(this.#probe, pid, identity);
       if (this.#closed || !this.#watchers.has(run)) return; // 核验期间被取消或关闭。
-      if (identity === "gone" || identity === "different") {
+      if (verdict === "gone" || verdict === "different") {
         this.#stopWatching(run);
         this.#events.exited(run);
         return;
       }
-      misses = identity === "unknown" ? misses + 1 : 0;
+      misses = verdict === "unknown" ? misses + 1 : 0;
       if (misses >= IDENTITY_MISS_LIMIT) {
         this.#stopWatching(run);
         this.#logger.warn("接管的会话进程身份连续核验不了，已停止跟踪", { run, pid });
@@ -109,22 +109,22 @@ export class ProcessTracker {
   /**
    * 用户取消：先核验身份，再结束整棵进程树。
    * - 本宿主 spawn 的：句柄说还没退出就结束（此时 PID 不可能被复用）；
-   * - 接管的、或还没进入跟踪的：PID + 创建时间核验一致才结束；PID 不在或已换人返回 `exited`；
+   * - 接管的、或还没进入跟踪的：PID + 出生标识精确一致才结束；PID 不在或已换人返回 `exited`；
    * 核验不了、或结束失败而进程仍在：抛 DISPATCH_CANCEL_FAILED，跟踪照旧（接管的恢复轮询），可以重试。
    */
   async terminate(
     run: string,
     pid: number | undefined,
-    createdAt: string | undefined,
+    identity: string | undefined,
   ): Promise<TerminateOutcome> {
     const child = this.#children.get(run);
     if (child) return this.#terminateChild(run, child);
     if (pid === undefined) return "exited";
     const watching = this.#stopWatching(run);
     try {
-      const identity = await checkProcessIdentity(this.#probe, pid, createdAt);
-      if (identity === "gone" || identity === "different") return "exited";
-      if (identity === "unknown")
+      const verdict = await checkProcessIdentity(this.#probe, pid, identity);
+      if (verdict === "gone" || verdict === "different") return "exited";
+      if (verdict === "unknown")
         throw cancelFailed(
           run,
           pid,
@@ -132,7 +132,7 @@ export class ProcessTracker {
         );
       return await this.#kill(run, pid, () => this.#probe.isAlive(pid));
     } catch (error) {
-      if (watching && createdAt !== undefined && !this.#closed) this.watch(run, pid, createdAt);
+      if (watching && identity !== undefined && !this.#closed) this.watch(run, pid, identity);
       throw error;
     }
   }

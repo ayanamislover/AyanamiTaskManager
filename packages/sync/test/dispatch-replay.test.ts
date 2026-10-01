@@ -79,7 +79,7 @@ async function realDispatcher(fixture: Fixture) {
       children.push(child);
       return child;
     },
-    processStartTime: async () => new Date("2026-09-01T00:00:00.000Z"),
+    processIdentity: async (pid) => `test:${pid}`,
     isPidAlive: (pid) => children.some((child) => child.pid === pid && child.exitCode === null),
     killProcessTree: async (): Promise<KillResult> => ({
       kind: "failed",

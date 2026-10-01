@@ -17,6 +17,7 @@ import {
   claudeReadiness,
   CONCURRENCY_OPTIONS,
   copyToClipboard,
+  dispatchLedgerNotice,
   dispatchRefetchInterval,
   DISPATCH_STATUS_QUERY_KEY,
   dispatchOriginLabels,
@@ -65,6 +66,7 @@ export function DispatchPanel({
             <DispatchRuns
               client={client}
               runs={status.data.runs}
+              ledgerNotice={dispatchLedgerNotice(status.data.requestLedger)}
               notify={notify}
               {...(desktop ? { desktop } : {})}
             />
@@ -281,11 +283,14 @@ function DispatchSettings({
 function DispatchRuns({
   client,
   runs,
+  ledgerNotice,
   desktop,
   notify,
 }: {
   client: AyanamiClient;
   runs: DispatchRunView[];
+  /** 派单请求账本出过问题时的提示（见 dispatchLedgerNotice），正常时为 null。 */
+  ledgerNotice: string | null;
   desktop?: DesktopBridge;
   notify: Notify;
 }) {
@@ -322,6 +327,11 @@ function DispatchRuns({
         <h3>最近派单</h3>
         <span className="atm-badge">{runs.length}</span>
       </div>
+      {ledgerNotice ? (
+        <p className="atm-sync-note" data-tone="warning" role="status">
+          {ledgerNotice}
+        </p>
+      ) : null}
       <MutationErrorAlert error={cancel.error} prefix="结束派单失败：" />
       {ordered.length ? (
         <div className="atm-list atm-scroll-list atm-dispatch-run-list">

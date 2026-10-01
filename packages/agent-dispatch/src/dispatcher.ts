@@ -28,7 +28,13 @@ import {
 import { ProcessTracker } from "./process-tracker.js";
 import { renderDispatchPrompt } from "./prompt.js";
 import { type DispatchOutcome, judgeOutcome, logHasResult } from "./result.js";
-import { DISPATCH_REQUEST_ID_PATTERN, RequestLedger, snapshotView } from "./request-ledger.js";
+import {
+  DISPATCH_REQUEST_ID_PATTERN,
+  type DispatchRequestEntry,
+  type LedgerReservation,
+  RequestLedger,
+  snapshotView,
+} from "./request-ledger.js";
 import { loadRuns, pruneLogs, saveRuns, toRunView, trimHistory } from "./run-store.js";
 import type {
   AgentDispatcherOptions,
@@ -57,7 +63,7 @@ function identityLostMessage(pid: number | undefined, when: string): string {
 /**
  * Claude Code 无头派单：只处理用户点名的任务，排队、限并发、起进程、落日志、记历史。
  * 会话进程 detached 且 stdout/stderr 直接写日志文件，宿主退出后会话照常跑完；
- * 宿主重启时 {@link AgentDispatcher.start} 只接管身份（PID + 创建时间）确认无误的残留进程。
+ * 宿主重启时 {@link AgentDispatcher.start} 只接管身份（PID + 出生标识，精确相等）确认无误的残留进程。
  * 带 requestId 的请求（手机命令）经 {@link RequestLedger} 持久幂等：同一个 ID 绝不起第二次会话。
  */
 export class AgentDispatcher {
@@ -92,7 +98,7 @@ export class AgentDispatcher {
     this.#logger = options.logger ?? silentLogger;
     this.#process = {
       isAlive: options.isPidAlive ?? defaultProcessProbe.isAlive,
-      startTime: options.processStartTime ?? defaultProcessProbe.startTime,
+      identity: options.processIdentity ?? defaultProcessProbe.identity,
       killTree: options.killProcessTree ?? defaultProcessProbe.killTree,
     };
     this.#tracker = new ProcessTracker({
@@ -114,8 +120,15 @@ export class AgentDispatcher {
         : { authTimeoutMs: options.authProbeTimeoutMs }),
     });
     this.#config = loadDispatchConfig(this.#paths.config, this.#logger);
-    this.#runs = loadRuns(this.#paths.runs, this.#logger);
-    this.#ledger = new RequestLedger(this.#paths.requests, this.#logger);
+    const history = loadRuns(this.#paths.runs, this.#logger);
+    this.#runs = history.runs;
+    // 账本按需重读时要看当时的派单历史（补回带 requestId 的条目、判断是不是丢了数据）。
+    this.#ledger = new RequestLedger(
+      this.#paths.requests,
+      this.#logger,
+      () => ({ runs: this.#runs, damaged: history.damaged }),
+      this.#now(),
+    );
   }
 
   /** 修正上次留下的 running 记录、清理旧日志，然后开始处理队列。 */
@@ -172,6 +185,7 @@ export class AgentDispatcher {
         ...(authMethod ? { authMethod } : {}),
       },
       runs: this.listRuns(),
+      requestLedger: this.#ledger.status(this.#now()),
     };
   }
 
@@ -187,8 +201,9 @@ export class AgentDispatcher {
   }
 
   /**
-   * 排队一次派单。带 `requestId` 时先查请求账本：记过的直接回放那次的结局（派单的当前视图，或当初的拒绝），
-   * 绝不再起会话；没记过的照常校验，建出派单或被拒都记进账本。
+   * 排队一次派单。带 `requestId` 时先过请求账本（{@link RequestLedger.admit}）：记过的直接回放那次的结局
+   * （派单的当前视图，或当初的拒绝），绝不再起会话；账本不可用、丢失水位线之前发出的、账本满了的直接拒绝；
+   * 其余预留名额后照常校验，建出派单或业务拒绝都记进账本。
    */
   async enqueue(input: EnqueueInput): Promise<DispatchRunView> {
     if (input.origin !== "mobile" && input.origin !== "desktop")
@@ -202,31 +217,33 @@ export class AgentDispatcher {
     if (requestId === undefined) return this.#enqueueNew(input);
     if (typeof requestId !== "string" || !DISPATCH_REQUEST_ID_PATTERN.test(requestId))
       throw new DispatchError("DISPATCH_INVALID_ARGUMENT", "requestId 格式不合法");
-    const replayed = this.#replay(requestId);
-    if (replayed) return replayed;
-    this.#ledger.assertCapacity(this.#now());
+    const gate = this.#ledger.admit(requestId, this.#now());
+    if (gate.kind === "replay") return this.#replay(gate.entry);
     try {
-      return await this.#enqueueNew(input, requestId);
+      return await this.#enqueueNew(input, gate.reservation);
     } catch (error) {
       // 业务上的拒绝也记下来：同一条命令以后再来（重放、回执写失败后重处理）照样拒绝，
       // 不会因为期间开了派单、任务变回 READY 就补起一次会话。临时故障（例如库打不开）不记。
-      if (isDispatchError(error) && !this.#ledger.find(requestId, this.#now()))
-        this.#ledger.recordRejection(requestId, error, this.#now());
+      if (isDispatchError(error))
+        this.#ledger.recordRejection(gate.reservation, error, this.#now());
       throw error;
+    } finally {
+      this.#ledger.release(gate.reservation);
     }
   }
 
-  /** 账本里有这个请求：返回那次派单的当前视图（还在历史里用历史，已被裁剪用账本快照），或原样拒绝。 */
-  #replay(requestId: string): DispatchRunView | null {
-    const entry = this.#ledger.find(requestId, this.#now());
-    if (!entry) return null;
+  /** 账本里记过的请求：返回那次派单的当前视图（还在历史里用历史，已被裁剪用账本快照），或原样拒绝。 */
+  #replay(entry: DispatchRequestEntry): DispatchRunView {
     if ("rejected" in entry)
-      throw new DispatchError(entry.rejected.code, entry.rejected.message, { requestId });
+      throw new DispatchError(entry.rejected.code, entry.rejected.message, { requestId: entry.id });
     const record = this.#runs.find((candidate) => candidate.run === entry.run.run);
     return record ? toRunView(record) : snapshotView(entry.run);
   }
 
-  async #enqueueNew(input: EnqueueInput, requestId?: string): Promise<DispatchRunView> {
+  async #enqueueNew(
+    input: EnqueueInput,
+    reservation?: LedgerReservation,
+  ): Promise<DispatchRunView> {
     if (!this.#config.enabled) throw disabledError();
     this.#assertNotActive(input.project, input.key);
     const claude = this.#resolveClaude();
@@ -238,9 +255,9 @@ export class AgentDispatcher {
     await this.#assertLoggedIn(claude);
     const { project, task, cwd } = await admitTask(this.#host, input, this.#now);
     // 上面有 await：同一任务（或同一请求）的两次调用可能交错，插入前再查一次。
-    if (requestId !== undefined) {
-      const replayed = this.#replay(requestId);
-      if (replayed) return replayed;
+    if (reservation !== undefined) {
+      const raced = this.#ledger.find(reservation.id, this.#now());
+      if (raced) return this.#replay(raced);
     }
     if (!this.#config.enabled) throw disabledError();
     this.#assertNotActive(project.code, task.key);
@@ -257,12 +274,14 @@ export class AgentDispatcher {
       createdAt: now.toISOString(),
       cwd,
       ...(requestedBy === undefined ? {} : { requestedBy }),
+      // 历史里也存一份命令 ID：账本丢了还能据此补回「这条命令派过哪次」。
+      ...(reservation === undefined ? {} : { requestId: reservation.id }),
     };
     this.#runs.push(record);
-    if (requestId !== undefined) {
+    if (reservation !== undefined) {
       // 先落账本再排队起进程：账本写不下去就不派，免得崩溃或回执失败后重处理时再起一次。
       try {
-        this.#ledger.recordRun(requestId, toRunView(record), now);
+        this.#ledger.recordRun(reservation, toRunView(record), now);
       } catch (error) {
         this.#runs = this.#runs.filter((candidate) => candidate !== record);
         throw new Error(`写派单请求账本失败，没有启动 Claude：${errorText(error)}`);
@@ -299,7 +318,7 @@ export class AgentDispatcher {
   }
 
   async #cancelRunning(record: DispatchRunRecord): Promise<DispatchRunView> {
-    const outcome = await this.#tracker.terminate(record.run, record.pid, record.processCreatedAt);
+    const outcome = await this.#tracker.terminate(record.run, record.pid, record.processIdentity);
     if (record.state === "running") {
       // `exited`：核验发现原进程早已退出（PID 不在或已换人），没动任何进程，按日志定结局。
       if (outcome === "exited") this.#finish(record, this.#judge(record, null));
@@ -482,7 +501,7 @@ export class AgentDispatcher {
     // 子进程已经继承了自己的一份句柄，父进程这份立刻关掉。
     closeSync(stdout);
     closeSync(stderr);
-    // 句柄挂上 exit/error，同时立刻向 OS 要这个 PID 的创建时间（宿主重启后据此核验身份）。
+    // 句柄挂上 exit/error，同时立刻向 OS 要这个 PID 的出生标识（宿主重启后据此核验身份）。
     const identity = this.#tracker.attach(record.run, child);
     if (child.pid !== undefined) record.pid = child.pid;
     record.state = "running";
@@ -497,13 +516,13 @@ export class AgentDispatcher {
     this.#persist();
     this.#emit({ type: "run", run: toRunView(record) });
     this.#logger.info("已派单", { run: record.run, key: record.key, pid: child.pid });
-    void identity.then((createdAt) => {
+    void identity.then((born) => {
       if (record.state !== "running") return;
-      if (createdAt === null) {
-        this.#logger.warn("查不到会话进程的创建时间：宿主重启后不会接管它", { run: record.run });
+      if (born === null) {
+        this.#logger.warn("查不到会话进程的出生标识：宿主重启后不会接管它", { run: record.run });
         return;
       }
-      record.processCreatedAt = createdAt;
+      record.processIdentity = born;
       this.#persist();
     });
   }
@@ -538,7 +557,7 @@ export class AgentDispatcher {
   }
 
   /**
-   * 上次宿主退出时仍在跑的记录。只有「记录里的创建时间已知 + 现查的已知 + 两者一致」才接着跟踪；
+   * 上次宿主退出时仍在跑的记录。只有「记录里的出生标识已知 + 现查的已知 + 两者逐字相同」才接着跟踪；
    * PID 不在或已换人（原进程肯定已退出）按日志定结局；身份核验不了时绝不接管、绝不结束：
    * 日志里已有 result 行（会话已结束）按日志定结局，否则记为失败并说明（进程可能还在，由用户处理）。
    */
@@ -547,10 +566,10 @@ export class AgentDispatcher {
     const identity =
       pid === undefined
         ? "gone"
-        : await checkProcessIdentity(this.#process, pid, record.processCreatedAt);
+        : await checkProcessIdentity(this.#process, pid, record.processIdentity);
     if (record.state !== "running") return; // 核验期间被取消。
-    if (identity === "same" && pid !== undefined && record.processCreatedAt !== undefined) {
-      this.#tracker.watch(record.run, pid, record.processCreatedAt);
+    if (identity === "same" && pid !== undefined && record.processIdentity !== undefined) {
+      this.#tracker.watch(record.run, pid, record.processIdentity);
       return;
     }
     record.endedAt = this.#now().toISOString();

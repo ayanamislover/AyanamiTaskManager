@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -6,11 +5,8 @@ import {
   DispatchError,
   dispatchPaths,
   type DispatchRunView,
-  PROCESS_IDENTITY_TOLERANCE_MS,
 } from "../src/index.js";
-import { defaultProcessStartTime, type KillResult, killProcessTree } from "../src/process.js";
-import { checkProcessIdentity } from "../src/process-identity.js";
-import { cleanupAll, fakeProcesses, fixture, waitFor } from "./support.js";
+import { cleanupAll, fakeProcesses, fixture, waitFor, winIdentity } from "./support.js";
 
 afterEach(cleanupAll);
 
@@ -27,10 +23,19 @@ const SUCCESS = JSON.stringify({
 /** 残留用例里的 PID 只存在于替身的「活着」集合里，不对应任何真实进程。 */
 const PID = 4_000_004;
 const CREATED = new Date("2026-09-01T08:00:00.000Z");
+const BORN = winIdentity(CREATED);
+/** 原进程退出后 PID 立刻被复用，新进程只晚生了这么一点：1ms / 500ms / 1000ms（以 100ns 刻度计）。 */
+const NEAR_MISSES = [
+  ["1ms", 10_000n],
+  ["500ms", 5_000_000n],
+  ["1000ms", 10_000_000n],
+] as const;
 
 type Seed = Partial<DispatchRunView> & {
   run: string;
   pid?: number;
+  processIdentity?: string;
+  /** 旧版本存的 ISO 创建时间。 */
   processCreatedAt?: string;
   log?: string;
 };
@@ -95,36 +100,43 @@ describe("重启后修正残留的 running 记录", () => {
     expect(fake.kills).toEqual([]);
   });
 
-  it("PID 活着但创建时间对不上（PID 被复用）：原进程肯定已退出，不接管，按日志判定", async () => {
-    const f = fixture();
-    const fake = fakeProcesses();
-    fake.alive.add(PID);
-    fake.created.set(PID, new Date(CREATED.getTime() + 2 * 86_400_000));
-    seed(f.dataDir, f.projectDir, [
-      { run: "b-00000001", pid: PID, processCreatedAt: CREATED.toISOString(), log: `${SUCCESS}\n` },
-      { run: "b-00000002", pid: PID, processCreatedAt: CREATED.toISOString(), log: "" },
-    ]);
-    const dispatcher = f.dispatcher(fake.options);
-    await dispatcher.start();
-    const byRun = new Map(dispatcher.listRuns().map((run) => [run.run, run]));
-    expect(byRun.get("b-00000001")?.state).toBe("succeeded");
-    expect(byRun.get("b-00000002")).toMatchObject({ state: "failed" });
-    expect(byRun.get("b-00000002")!.error).toContain("宿主重启时会话已结束");
-    expect(fake.kills).toEqual([]);
-  });
+  it.each(NEAR_MISSES)(
+    "PID 活着但出生标识差 %s（PID 被复用）：不接管、不结束，按日志判定",
+    async (_label, ticks) => {
+      const f = fixture();
+      const fake = fakeProcesses();
+      fake.alive.add(PID);
+      fake.identities.set(PID, winIdentity(CREATED, ticks));
+      seed(f.dataDir, f.projectDir, [
+        { run: "b-00000001", pid: PID, processIdentity: BORN, log: `${SUCCESS}\n` },
+        { run: "b-00000002", pid: PID, processIdentity: BORN, log: "" },
+      ]);
+      const dispatcher = f.dispatcher(fake.options);
+      await dispatcher.start();
+      const byRun = new Map(dispatcher.listRuns().map((run) => [run.run, run]));
+      expect(byRun.get("b-00000001")?.state).toBe("succeeded");
+      expect(byRun.get("b-00000002")).toMatchObject({ state: "failed" });
+      expect(byRun.get("b-00000002")!.error).toContain("宿主重启时会话已结束");
+      await new Promise((done) => setTimeout(done, 120));
+      expect(fake.kills).toEqual([]);
+    },
+  );
 
-  it("身份未知（记录里没有创建时间，或现在查不到）：绝不接管也不结束；没有 result 行就记失败并说明", async () => {
+  it("身份未知（记录里没有标识、只有旧版 ISO 创建时间，或现在查不到）：绝不接管也不结束；没有 result 行就记失败并说明", async () => {
     const f = fixture();
     const fake = fakeProcesses();
-    const unknown = 4_000_008;
-    fake.alive.add(PID);
-    fake.alive.add(unknown);
-    fake.created.set(PID, CREATED); // 现查得到，但记录里没存（旧版本留下的记录）
+    const legacy = 4_000_008;
+    const blind = 4_000_012;
+    for (const pid of [PID, legacy, blind]) fake.alive.add(pid);
+    fake.identities.set(PID, BORN); // 现查得到，但记录里没存。
+    fake.identities.set(legacy, BORN);
     seed(f.dataDir, f.projectDir, [
       { run: "c-00000001", pid: PID, log: `${SUCCESS}\n` },
       { run: "c-00000002", pid: PID, log: '{"type":"system"}\n' },
+      // 旧版本只存了 ISO 创建时间：升级后无法精确比较，按未知处理。
+      { run: "c-00000003", pid: legacy, processCreatedAt: CREATED.toISOString(), log: "" },
       // 记录里存了，但现在查不到（探测失败或超时）。
-      { run: "c-00000003", pid: unknown, processCreatedAt: CREATED.toISOString(), log: "" },
+      { run: "c-00000004", pid: blind, processIdentity: BORN, log: "" },
     ]);
     const dispatcher = f.dispatcher(fake.options);
     await dispatcher.start();
@@ -133,7 +145,8 @@ describe("重启后修正残留的 running 记录", () => {
     expect(byRun.get("c-00000001")?.state).toBe("succeeded");
     for (const [run, pid] of [
       ["c-00000002", PID],
-      ["c-00000003", unknown],
+      ["c-00000003", legacy],
+      ["c-00000004", blind],
     ] as const) {
       const view = byRun.get(run)!;
       expect(view.state).toBe("failed");
@@ -147,27 +160,24 @@ describe("重启后修正残留的 running 记录", () => {
     await new Promise((done) => setTimeout(done, 200));
     expect(fake.kills).toEqual([]);
     expect(dispatcher.listRuns().filter((run) => run.state === "running")).toEqual([]);
+    // 旧字段不会被原样写回。
+    expect(readFileSync(dispatchPaths(f.dataDir).runs, "utf8")).not.toContain("processCreatedAt");
   });
 
-  it("身份一致才接管；接管后每次轮询都重核，进程退出后按日志定结局", async () => {
+  it("出生标识逐字相同才接管；接管后每次轮询都重核，进程退出后按日志定结局", async () => {
     const f = fixture();
     const fake = fakeProcesses();
     fake.alive.add(PID);
-    fake.created.set(PID, new Date(CREATED.getTime() + PROCESS_IDENTITY_TOLERANCE_MS));
+    fake.identities.set(PID, BORN);
     const paths = seed(f.dataDir, f.projectDir, [
-      {
-        run: "d-00000001",
-        pid: PID,
-        processCreatedAt: CREATED.toISOString(),
-        log: '{"type":"system"}\n',
-      },
+      { run: "d-00000001", pid: PID, processIdentity: BORN, log: '{"type":"system"}\n' },
     ]);
     let probes = 0;
     const dispatcher = f.dispatcher({
       ...fake.options,
-      processStartTime: async (pid) => {
+      processIdentity: async (pid) => {
         probes += 1;
-        return fake.created.get(pid) ?? null;
+        return fake.identities.get(pid) ?? null;
       },
     });
     await dispatcher.start();
@@ -184,19 +194,19 @@ describe("重启后修正残留的 running 记录", () => {
     expect(fake.kills).toEqual([]);
   });
 
-  it("接管后 PID 被复用（创建时间变了）：按已退出处理，不结束新进程", async () => {
+  it("接管后 PID 被复用（出生标识只差 100ns）：按已退出处理，不结束新进程", async () => {
     const f = fixture();
     const fake = fakeProcesses();
     fake.alive.add(PID);
-    fake.created.set(PID, CREATED);
+    fake.identities.set(PID, BORN);
     seed(f.dataDir, f.projectDir, [
-      { run: "e-00000001", pid: PID, processCreatedAt: CREATED.toISOString(), log: "" },
+      { run: "e-00000001", pid: PID, processIdentity: BORN, log: "" },
     ]);
     const dispatcher = f.dispatcher(fake.options);
     await dispatcher.start();
     expect(dispatcher.listRuns()[0]?.state).toBe("running");
-    // 原进程退出、PID 立刻被别的进程拿走：PID 仍「活着」，只有创建时间能看出换了人。
-    fake.created.set(PID, new Date(CREATED.getTime() + PROCESS_IDENTITY_TOLERANCE_MS + 1));
+    // 原进程退出、PID 立刻被别的进程拿走：PID 仍「活着」，只有出生标识能看出换了人。
+    fake.identities.set(PID, winIdentity(CREATED, 1n));
     const done = await waitFor(() => {
       const run = dispatcher.listRuns()[0];
       return run?.state !== "running" ? run : null;
@@ -205,18 +215,18 @@ describe("重启后修正残留的 running 记录", () => {
     expect(fake.kills).toEqual([]);
   });
 
-  it("接管后连续几次查不到创建时间：停止跟踪、记失败并说明，不结束进程", async () => {
+  it("接管后连续几次查不到出生标识：停止跟踪、记失败并说明，不结束进程", async () => {
     const f = fixture();
     const fake = fakeProcesses();
     fake.alive.add(PID);
-    fake.created.set(PID, CREATED);
+    fake.identities.set(PID, BORN);
     seed(f.dataDir, f.projectDir, [
-      { run: "g-00000001", pid: PID, processCreatedAt: CREATED.toISOString(), log: "" },
+      { run: "g-00000001", pid: PID, processIdentity: BORN, log: "" },
     ]);
     const dispatcher = f.dispatcher(fake.options);
     await dispatcher.start();
     expect(dispatcher.listRuns()[0]?.state).toBe("running");
-    fake.created.delete(PID);
+    fake.identities.delete(PID);
     const done = await waitFor(() => {
       const run = dispatcher.listRuns()[0];
       return run?.state !== "running" ? run : null;
@@ -234,12 +244,12 @@ describe("重启后修正残留的 running 记录", () => {
     const [same, reused, unknown] = [4_000_100, 4_000_104, 4_000_108];
     for (const pid of [same, reused, unknown]) {
       fake.alive.add(pid);
-      fake.created.set(pid, CREATED);
+      fake.identities.set(pid, BORN);
     }
     seed(f.dataDir, f.projectDir, [
-      { run: "k-00000001", pid: same, processCreatedAt: CREATED.toISOString(), log: "" },
-      { run: "k-00000002", pid: reused, processCreatedAt: CREATED.toISOString(), log: "" },
-      { run: "k-00000003", pid: unknown, processCreatedAt: CREATED.toISOString(), log: "" },
+      { run: "k-00000001", pid: same, processIdentity: BORN, log: "" },
+      { run: "k-00000002", pid: reused, processIdentity: BORN, log: "" },
+      { run: "k-00000003", pid: unknown, processIdentity: BORN, log: "" },
     ]);
     // 轮询间隔拉长：只看取消前的那一次核验。
     const dispatcher = f.dispatcher({ ...fake.options, pollIntervalMs: 60_000 });
@@ -249,12 +259,12 @@ describe("重启后修正残留的 running 记录", () => {
     expect(await dispatcher.cancel("k-00000001")).toMatchObject({ state: "cancelled" });
     expect(fake.kills).toEqual([same]);
 
-    fake.created.set(reused, new Date(CREATED.getTime() + 60_000));
+    fake.identities.set(reused, winIdentity(CREATED, 10_000n));
     const exited = await dispatcher.cancel("k-00000002");
     expect(exited.state).toBe("failed"); // 按日志判定：原会话没写 result。
     expect(fake.kills).toEqual([same]);
 
-    fake.created.delete(unknown);
+    fake.identities.delete(unknown);
     const refused = await rejection(dispatcher.cancel("k-00000003"));
     expect(refused.code).toBe("DISPATCH_CANCEL_FAILED");
     expect(refused.httpStatus).toBe(500);
@@ -263,40 +273,24 @@ describe("重启后修正残留的 running 记录", () => {
     expect(fake.kills).toEqual([same]);
   });
 
-  it("身份核验的容差只吸收精度差（≤ 2 秒），不是宽松时间窗", async () => {
-    expect(PROCESS_IDENTITY_TOLERANCE_MS).toBeLessThanOrEqual(2_000);
-    const probe = (created: Date | null, alive = true) => ({
-      isAlive: () => alive,
-      startTime: async () => created,
-      killTree: async (): Promise<KillResult> => {
-        throw new Error("核验不应结束进程");
-      },
-    });
-    const at = (offset: number) => new Date(CREATED.getTime() + offset);
-    const recorded = CREATED.toISOString();
-    expect(await checkProcessIdentity(probe(at(0)), PID, recorded)).toBe("same");
-    expect(await checkProcessIdentity(probe(at(-999)), PID, recorded)).toBe("same");
-    expect(await checkProcessIdentity(probe(at(5_000)), PID, recorded)).toBe("different");
-    expect(await checkProcessIdentity(probe(at(60_000)), PID, recorded)).toBe("different");
-    expect(await checkProcessIdentity(probe(null), PID, recorded)).toBe("unknown");
-    expect(await checkProcessIdentity(probe(at(0)), PID, undefined)).toBe("unknown");
-    expect(await checkProcessIdentity(probe(at(0), false), PID, recorded)).toBe("gone");
-  });
-
-  it("默认的创建时间探测能认出当前进程，死进程返回 null（只读探测）", async () => {
-    const created = await defaultProcessStartTime(process.pid);
-    expect(created).toBeInstanceOf(Date);
-    expect(created!.getTime()).toBeLessThanOrEqual(Date.now() + 1_000);
-    expect(Date.now() - created!.getTime()).toBeLessThan(6 * 3_600_000);
-    const child = spawn(process.execPath, ["-e", "0"], { windowsHide: true });
-    await new Promise((done) => child.once("exit", done));
-    expect(await defaultProcessStartTime(child.pid!)).toBeNull();
-  }, 60_000);
-
-  it("默认的结束进程树：进程不存在时报 gone（PID 取不可能存在的奇数，Windows 的 PID 都是 4 的倍数）", async () => {
-    expect(await killProcessTree(99_999_997)).toEqual({ kind: "gone" });
-    expect(await killProcessTree(0)).toEqual({ kind: "gone" });
-  }, 60_000);
+  it.each(NEAR_MISSES)(
+    "接管后取消前发现出生标识差 %s：按已退出处理，kill 一次都不调",
+    async (_label, ticks) => {
+      const f = fixture();
+      const fake = fakeProcesses();
+      fake.alive.add(PID);
+      fake.identities.set(PID, BORN);
+      seed(f.dataDir, f.projectDir, [
+        { run: "m-00000001", pid: PID, processIdentity: BORN, log: "" },
+      ]);
+      const dispatcher = f.dispatcher({ ...fake.options, pollIntervalMs: 60_000 });
+      await dispatcher.start();
+      expect(dispatcher.listRuns()[0]?.state).toBe("running");
+      fake.identities.set(PID, winIdentity(CREATED, ticks));
+      expect((await dispatcher.cancel("m-00000001")).state).toBe("failed");
+      expect(fake.kills).toEqual([]);
+    },
+  );
 });
 
 describe("历史与日志上限", () => {

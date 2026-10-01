@@ -61,10 +61,13 @@ export type DispatchRunRecord = DispatchRunView & {
   requestedBy?: string;
   pid?: number;
   /**
-   * spawn 后立刻向 OS 查到的进程创建时间（ISO）；查不到就没有这个字段（身份未知）。
-   * 宿主重启后只有它与现查的创建时间一致才接管这个 PID，见 process-identity.ts。
+   * spawn 后立刻向 OS 查到的进程出生标识（Windows `win32:<FILETIME>`、Linux `linux:<boot_id>:<starttime>`）；
+   * 查不到就没有这个字段（身份未知）。宿主重启后只有它与现查的标识逐字相同才接管这个 PID，
+   * 见 process-identity.ts。旧版本存的 ISO 创建时间（processCreatedAt）读入时丢弃，按未知处理。
    */
-  processCreatedAt?: string;
+  processIdentity?: string;
+  /** 手机命令 ID（EnqueueInput.requestId）：请求账本丢失时据此重建「这条命令派过哪次」。 */
+  requestId?: string;
 };
 
 export type DispatchClaudeStatus = {
@@ -77,9 +80,23 @@ export type DispatchClaudeStatus = {
   authMethod?: string;
 };
 
+/** 派单请求账本的健康状况（不含任何密钥），见 request-ledger.ts。 */
+export type DispatchLedgerStatus = {
+  /**
+   * 账本数据丢失过（文件损坏、条目不合法、被删）：这个时刻（含）之前发出的手机派单无法确认是否执行过，
+   * 一律拒绝（DISPATCH_REQUEST_STATE_LOST），请用户在手机上重新交给 Claude。没有丢失过为 null。
+   */
+  lostBefore: string | null;
+  /** 上面的限制自动解除的时刻（那之前发出的命令到时都已过期）。 */
+  lostUntil: string | null;
+  /** 账本文件暂时读不出来（权限、磁盘错误）：手机派单全部拒绝（DISPATCH_LEDGER_UNAVAILABLE），下次派单时重读。 */
+  unavailable: boolean;
+};
+
 export type DispatchStatus = DispatchConfig & {
   claude: DispatchClaudeStatus;
   runs: DispatchRunView[];
+  requestLedger: DispatchLedgerStatus;
 };
 
 export type DispatchChangeEvent =
@@ -122,8 +139,8 @@ export type AgentDispatcherOptions = {
   logger?: DispatchLogger;
   /** 重启后接管的会话（不是本进程的子进程）用轮询判断是否结束，默认 5 秒。 */
   pollIntervalMs?: number;
-  /** 查询进程创建时间，用来识别 Windows PID 复用；拿不到返回 null。 */
-  processStartTime?: (pid: number) => Promise<Date | null>;
+  /** 测试注入用：查询进程出生标识（识别 PID 复用），拿不到返回 null；默认见 process.ts 的 defaultProcessIdentity。 */
+  processIdentity?: (pid: number) => Promise<string | null>;
   /** 测试注入用：PID 是否还在；默认 `process.kill(pid, 0)`。 */
   isPidAlive?: (pid: number) => boolean;
   /** 测试注入用：结束整棵进程树；默认 taskkill /T /F（POSIX 发 SIGKILL 给进程组）。 */
