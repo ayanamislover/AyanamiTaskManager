@@ -1,7 +1,8 @@
 import { deflateSync } from "fflate";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { inflateLimited } from "../src/crypto.js";
+import { inflateLimited, sealBytes } from "../src/crypto.js";
+import { fromBase64Url, toHex, utf8 } from "../src/encoding.js";
 import {
   PART_CHARS,
   SyncProtocolError,
@@ -113,6 +114,41 @@ describe("加密信封", () => {
     expect(await projectHash(a.keys, "ATM")).toBe(first);
     expect(await projectHash(b.keys, "ATM")).not.toBe(first);
     expect(first).not.toContain("ATM".toLowerCase());
+  });
+
+  // peer R1-09：把 sealBytes 的 IV 换成 `new Uint8Array(IV_BYTES)`（固定全零）时，上面几条照样全绿。
+  // AES-GCM 同一密钥下 IV 重复会同时泄露明文异或与认证密钥，下面两条把这个变异钉死。
+  it("同一空间、同一逻辑键、同一明文反复加密：IV 都是 12 字节且两两不同，密文也不同", async () => {
+    const { keys } = await keysPair();
+    const key = "atm1/aaaaaaaaaaaaaaaaaaaaaaaa/head";
+    const value = { same: "同一份明文" };
+    const rounds = 16;
+    const heads = [];
+    for (let round = 0; round < rounds; round += 1)
+      heads.push(parseHeadEnvelope((await sealObject(keys, key, value))[0]?.data));
+    const ivs = heads.map((head) => fromBase64Url(head.iv));
+    for (const iv of ivs) expect(iv).toHaveLength(12);
+    expect(new Set(ivs.map(toHex)).size).toBe(rounds);
+    expect(new Set(heads.map((head) => head.c)).size).toBe(rounds);
+    for (const head of heads) expect(await openObject(keys, key, head, reader([]))).toEqual(value);
+  });
+
+  it("IV 取自系统安全随机源 crypto.getRandomValues，原样用作 nonce", async () => {
+    const { keys } = await keysPair();
+    const requested: number[] = [];
+    const spy = vi.spyOn(globalThis.crypto, "getRandomValues").mockImplementation((array) => {
+      const bytes = array as Uint8Array;
+      requested.push(bytes.length);
+      bytes.fill(0xa5);
+      return array;
+    });
+    try {
+      const sealed = await sealBytes(keys, "atm1/aaaaaaaaaaaaaaaaaaaaaaaa/head", utf8("x"));
+      expect(requested).toEqual([12]);
+      expect(toHex(sealed.iv)).toBe("a5".repeat(12));
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("解压有上限：压缩炸弹在超限时中止", () => {

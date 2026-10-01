@@ -67,8 +67,10 @@ export {
   type RelayChange,
   type RelayChangesPage,
   type RelayClientOptions,
+  type RelayConflictCurrent,
   type RelayDocument,
   type RelayDocumentMeta,
+  type RelayErrorCode,
   type RelayProbe,
 } from "./relay-client.js";
 export {

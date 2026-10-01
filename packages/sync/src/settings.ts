@@ -10,7 +10,7 @@ import {
 } from "@ayanami-task/sync-protocol";
 import { z } from "zod";
 import { DEVICE_NAME_MAX, type SyncConfig } from "./config.js";
-import { describeError } from "./errors.js";
+import { describeError, redactSecrets } from "./errors.js";
 import type { RelayTestResult } from "./types.js";
 
 // 设置页操作的纯逻辑：配置补丁校验、中继探测、旧空间清理，以及两个计时小工具。
@@ -126,20 +126,29 @@ export function parseRelayCandidate(
   };
 }
 
-/** 探测中继并计时。连不上不抛错，结果里带中文原因。 */
-export async function measureProbe(makeClient: () => RelayClient): Promise<RelayTestResult> {
+/**
+ * 探测中继并计时。连不上不抛错，结果里带中文原因。`error` 只来自 {@link describeError}
+ * （不含中继返回的原文），`server` 是 RelayClient 按字符集筛过的标签；两者再抹一遍 `secrets`
+ * 里的字面量作纵深防御。
+ */
+export async function measureProbe(
+  makeClient: () => RelayClient,
+  secrets: ReadonlyArray<string | null | undefined> = [],
+): Promise<RelayTestResult> {
   const started = performance.now();
   const elapsed = () => Math.round(performance.now() - started);
   try {
     const probe = await makeClient().probe();
+    const server = probe.version ? `${probe.server} ${probe.version}` : probe.server;
     return {
       ok: true,
       latencyMs: elapsed(),
       longPoll: probe.longPoll,
-      server: probe.version ? `${probe.server} ${probe.version}` : probe.server,
+      server: redactSecrets(server, secrets),
     };
   } catch (error) {
-    return { ok: false, latencyMs: elapsed(), longPoll: false, error: describeError(error) };
+    const reason = redactSecrets(describeError(error), secrets);
+    return { ok: false, latencyMs: elapsed(), longPoll: false, error: reason };
   }
 }
 

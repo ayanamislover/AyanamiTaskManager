@@ -10,7 +10,13 @@ import {
 } from "@ayanami-task/sync-protocol";
 import { defaultDeviceName, loadSyncConfig, saveSyncConfig, type SyncConfig } from "./config.js";
 import type { DispatchPort } from "./dispatch-port.js";
-import { RELAY_REJECTED_MESSAGE, describeError, isAuthFailure } from "./errors.js";
+import {
+  RELAY_REJECTED_MESSAGE,
+  describeError,
+  isAuthFailure,
+  redactSecrets,
+  redactingLogger,
+} from "./errors.js";
 import { PublishScheduler } from "./publish-scheduler.js";
 import { SecretVault } from "./secret-store.js";
 import { SyncSession, type DeviceView, type SessionHost, type SyncLogger } from "./session.js";
@@ -112,7 +118,8 @@ export class SyncConnector {
     this.#service = options.service;
     this.#vault = new SecretVault(options.secrets);
     this.#dispatch = options.dispatch ?? null;
-    this.#logger = options.logger ?? silentLogger;
+    // 纵深防御：日志里出现 token / 空间 secret 的字面量一律抹掉（session 也用这个 logger）。
+    this.#logger = redactingLogger(options.logger ?? silentLogger, () => this.#secretValues());
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? abortableSleep;
     this.#timings = { ...DEFAULT_TIMINGS, ...options.timings };
@@ -135,7 +142,7 @@ export class SyncConnector {
           this.#reject(loop);
           return false;
         }
-        this.#lastError = describeError(error);
+        this.#lastError = this.#describe(error);
         this.#logger.warn("发布快照失败，稍后重试", { error: this.#lastError });
         return true;
       },
@@ -181,6 +188,8 @@ export class SyncConnector {
     await this.#vault.load(this.#config.spaceId);
     const phase = this.#started ? this.#phase : this.#idlePhase();
     const reason = this.#vault.loadError ?? this.#vault.unavailableReason();
+    const lastError =
+      this.#lastError ?? reason ?? (phase === "unconfigured" ? UNCONFIGURED_MESSAGE : null);
     return {
       enabled: this.#config.enabled,
       configured: this.#configured(),
@@ -188,8 +197,8 @@ export class SyncConnector {
       appId: this.#config.appId,
       deviceName: this.#config.deviceName,
       state: this.#started ? PUBLIC_STATE[phase] : "disabled",
-      lastError:
-        this.#lastError ?? reason ?? (phase === "unconfigured" ? UNCONFIGURED_MESSAGE : null),
+      // Agent 令牌也能读状态：出口处再抹一遍密钥字面量（写入时已抹过，这里兜住其它来源）。
+      lastError: lastError === null ? null : redactSecrets(lastError, this.#secretValues()),
       lastSyncAt: this.#config.lastSyncAt,
       longPoll: this.#longPoll,
       secretStore: this.#vault.statusKind,
@@ -217,7 +226,7 @@ export class SyncConnector {
         const session = this.#readySession();
         if (session)
           void this.#exclusive(() => session.writePresence("online")).catch((error: unknown) => {
-            this.#lastError = describeError(error);
+            this.#lastError = this.#describe(error);
           });
       }
       return this.status();
@@ -234,7 +243,10 @@ export class SyncConnector {
     const token = input.token ?? this.#vault.token;
     if (!relayUrl) return { ok: false, latencyMs: 0, longPoll: false, error: "还没有填写中继地址" };
     if (!token) return { ok: false, latencyMs: 0, longPoll: false, error: "还没有填写 token" };
-    const result = await measureProbe(() => this.#client(relayUrl, appId, token));
+    const result = await measureProbe(
+      () => this.#client(relayUrl, appId, token),
+      [token, ...this.#secretValues()],
+    );
     if (result.ok && relayUrl === this.#config.relayUrl && appId === this.#config.appId)
       this.#longPoll = result.longPoll;
     return result;
@@ -291,8 +303,8 @@ export class SyncConnector {
         try {
           removed = await purgeSpace(client, previous);
         } catch (error) {
-          cleanupErrors.push(describeError(error));
-          this.#logger.warn("清理旧配对空间失败", { error: describeError(error) });
+          cleanupErrors.push(this.#describe(error));
+          this.#logger.warn("清理旧配对空间失败", { error: this.#describe(error) });
         }
         // 撤销标记必须在清空之后写（先写会被一起删掉）；清理失败也照写，旧手机只认它。
         if (previousSecret) {
@@ -300,8 +312,8 @@ export class SyncConnector {
             const host = { id: deviceId, name: deviceName };
             await revokeSpace(client, previous, previousSecret, host, this.#now());
           } catch (error) {
-            cleanupErrors.push(describeError(error));
-            this.#logger.warn("写撤销标记失败", { error: describeError(error) });
+            cleanupErrors.push(this.#describe(error));
+            this.#logger.warn("写撤销标记失败", { error: this.#describe(error) });
           }
         }
       }
@@ -323,6 +335,15 @@ export class SyncConnector {
 
   #persist(): void {
     saveSyncConfig(this.#options.dataDir, this.#config);
+  }
+
+  #secretValues(): Array<string | null> {
+    return [this.#vault.token, this.#vault.secret];
+  }
+
+  /** 错误写进 lastError、日志或设置页结果前统一走这里：本地文案，再抹一遍密钥字面量（补充）。 */
+  #describe(error: unknown): string {
+    return redactSecrets(describeError(error), this.#secretValues());
   }
 
   #configured(): boolean {
@@ -403,7 +424,7 @@ export class SyncConnector {
     try {
       await withTimeout(loop.session.writePresence("offline"), this.#timings.stopTimeoutMs);
     } catch (error) {
-      this.#logger.warn("写离线状态失败", { error: describeError(error) });
+      this.#logger.warn("写离线状态失败", { error: this.#describe(error) });
     }
   }
 
@@ -504,7 +525,7 @@ export class SyncConnector {
         if (isAuthFailure(error)) return this.#reject(loop);
         failures += 1;
         this.#phase = "retrying";
-        this.#lastError = describeError(error);
+        this.#lastError = this.#describe(error);
         this.#logger.warn("同步失败，稍后重试", { error: this.#lastError, failures });
         // 中继限流（429）给了 retry_after 就至少等那么久。
         const asked = error instanceof RelayError ? (error.retryAfter ?? 0) * 1000 : 0;
@@ -536,7 +557,7 @@ export class SyncConnector {
 
   /** 重试也没用的错误（例如系统加密不可用、建不了配对空间）：停下并说明原因。 */
   #fail(loop: Loop, error: unknown): void {
-    this.#stopLoop(loop, "failed", describeError(error));
+    this.#stopLoop(loop, "failed", this.#describe(error));
     this.#logger.error("同步已停止", { error: this.#lastError });
   }
 
@@ -554,7 +575,7 @@ export class SyncConnector {
       if (this.#loop !== loop || !session) return void clearInterval(timer);
       void this.#exclusive(() => session.presenceTick()).catch((error: unknown) => {
         if (isAuthFailure(error)) this.#reject(loop);
-        else this.#lastError = describeError(error);
+        else this.#lastError = this.#describe(error);
       });
     }, this.#timings.presenceMs);
     timer.unref?.();
