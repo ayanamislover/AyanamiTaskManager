@@ -72,6 +72,14 @@ export class CommandStoreError extends Error {
   }
 }
 
+/** 引擎已经停止（配对刚被替换、解除或改名）：这次操作没有生效。 */
+export class EngineStoppedError extends Error {
+  constructor() {
+    super("同步刚刚停止（配对被替换或解除），这条任务没有保存，请重新发一次。");
+    this.name = "EngineStoppedError";
+  }
+}
+
 export function describeFailure(error: unknown): Failure {
   if (error instanceof CommandStoreError) {
     return { fatal: null, message: error.message, retryAfterMs: null };
@@ -148,6 +156,8 @@ export class SyncEngine {
   #loop: Promise<void> | null = null;
   /** 每次 start/pause/stop 加一；循环只在自己那一代里跑，旧循环看到代数变了就退出。 */
   #generation = 0;
+  /** stop() 之后为真：实例作废，不再写缓存、不再联网，也不会被晚到的操作重新拉起。 */
+  #disposed = false;
   #commandWrites: Promise<unknown> = Promise.resolve();
 
   constructor(options: EngineOptions) {
@@ -195,6 +205,8 @@ export class SyncEngine {
    */
   #dispatch(event: CommandEvent): Promise<void> {
     const next = this.#commandWrites.then(async () => {
+      // 排在 stop 之后才轮到的写入作废：调用方可能正要清缓存，或换一台引擎读它。
+      if (this.#disposed) throw new EngineStoppedError();
       const commands = reduceCommands(this.#state.commands, event);
       if (commands === this.#state.commands) return;
       if (!(await cachePut("commands", commands))) throw new CommandStoreError();
@@ -223,7 +235,7 @@ export class SyncEngine {
   }
 
   start(): void {
-    if (this.#running) return;
+    if (this.#running || this.#disposed) return;
     if (this.#state.phase === "denied" || this.#state.phase === "rekey") return;
     this.#running = true;
     this.#forceFull = true;
@@ -254,6 +266,7 @@ export class SyncEngine {
   }
 
   refresh(): void {
+    if (this.#disposed) return;
     if (this.#state.phase === "denied" || this.#state.phase === "rekey") return;
     this.#forceFull = true;
     this.#set({ refreshing: true });
@@ -261,15 +274,24 @@ export class SyncEngine {
     else this.#controller?.abort();
   }
 
+  /**
+   * 终止这个实例（换配对、解除配对、改名时用；进后台用 pause）。返回前等正在写的命令队列落完盘，
+   * 调用方随后清缓存或让新引擎读缓存才不会和它交错；还没轮到的写入直接作废。
+   */
   async stop(): Promise<void> {
+    this.#disposed = true;
     this.#running = false;
     this.#generation += 1;
     this.#controller?.abort();
     await this.#loop;
+    await this.#commandWrites;
     await this.#snapshotWriter.flush();
   }
 
-  /** 发命令：先落盘（失败抛 CommandStoreError，什么都不发），再让循环去发。返回本地命令 ID。 */
+  /**
+   * 发命令：先落盘（失败抛 CommandStoreError；引擎已停止抛 EngineStoppedError，都什么都不发），
+   * 再让循环去发。返回本地命令 ID。
+   */
   async submit(input: CommandInput): Promise<string> {
     const doc = {
       v: 1,
@@ -279,6 +301,8 @@ export class SyncEngine {
       ...input,
     } as CommandDoc;
     await this.#dispatch({ type: "enqueue", doc });
+    // 落盘期间引擎被停掉：命令已经存下，同一配对的下一台引擎会从缓存里接着发；这里不能把旧实例拉起来。
+    if (this.#disposed) return doc.id;
     this.#backend.poke();
     if (this.#running) this.#controller?.abort();
     else this.start();

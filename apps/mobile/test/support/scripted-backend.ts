@@ -46,6 +46,8 @@ export class ScriptedBackend implements SyncBackend {
   readonly written: CommandDoc[] = [];
   readonly deletedAcks: string[] = [];
   deviceWrites = 0;
+  /** readHead / readRevoked 的调用次数：停止后的实例不该再联网读任何东西。 */
+  reads = 0;
   abortLagMs = 0;
   polling = 0;
   maxPolling = 0;
@@ -54,9 +56,11 @@ export class ScriptedBackend implements SyncBackend {
     return { longPoll: true };
   }
   async readHead() {
+    this.reads += 1;
     return this.head;
   }
   async readRevoked() {
+    this.reads += 1;
     return this.revoked;
   }
   async readProject() {
