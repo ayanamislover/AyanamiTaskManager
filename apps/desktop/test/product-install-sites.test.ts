@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -15,8 +16,9 @@ import {
   assertSafeInstallRoot,
   clearStaleDeadMarker,
   findProductShortcuts,
+  powerShellLiteral,
   productShortcutRoots,
-  removeProductShortcuts,
+  stopInstalledShimsScript,
   walkProductFiles,
 } from "../../../scripts/product-install-sites.js";
 
@@ -46,16 +48,39 @@ describe("产品安装位置", () => {
     ]);
   });
 
-  it("清理只删产品快捷方式", async () => {
-    const root = shortcutFixture();
-    const removed = await removeProductShortcuts([root]);
-    expect(removed).toHaveLength(2);
-    expect(await findProductShortcuts([root])).toEqual([]);
-    expect(readdirSync(root).sort()).toEqual([
-      "Ayanami",
-      "AyanamiTaskManager.txt",
-      "SomethingElse.lnk",
-    ]);
+  // 快捷方式归 atm-setup 按目标核对归属后删；发布清场只看不删（同名的可能属于便携版）。
+  it("发布清场不按名字删快捷方式", () => {
+    const source = readFileSync(join(process.cwd(), "scripts", "release-and-install.ts"), "utf8");
+    expect(source).not.toMatch(/removeProductShortcuts|rm\(\s*shortcut/u);
+    expect(readdirSync(shortcutFixture()).sort()).toContain("AyanamiTaskManager.lnk");
+  });
+
+  // 清场要结束占着安装根 shim 的进程。原先用 JSON 转义拼 PowerShell 单引号串，反斜杠被翻倍，
+  // 正常路径一个也匹配不上。这里经真实 PowerShell 读回字面量。
+  it("PowerShell 字面量原样读回路径，JSON 转义读不回", () => {
+    const path = "C:\\Synthetic\\it's here\\AyanamiTaskManagerDesktop\\resources\\atm-mcp.exe";
+    const echo = (literal: string) =>
+      spawnSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", `Write-Output ${literal}`],
+        {
+          encoding: "utf8",
+          windowsHide: true,
+        },
+      ).stdout.trim();
+    expect(echo(powerShellLiteral(path))).toBe(path);
+    const jsonQuoted = JSON.stringify("C:\\Synthetic\\x").replaceAll('"', "'");
+    expect(echo(jsonQuoted)).not.toBe("C:\\Synthetic\\x");
+
+    const script = stopInstalledShimsScript("C:\\Synthetic\\it's here\\AyanamiTaskManagerDesktop");
+    const imageLine = script.split("\n")[0]!;
+    expect(echo(`$(${imageLine.replace(/^\$image = /u, "")})`)).toBe(path);
+    // 精确比对映像路径，用取到的同一句柄结束，不按 PID 另起 taskkill。
+    expect(script).toContain(
+      "[string]::Equals($_.Path, $image, [StringComparison]::OrdinalIgnoreCase)",
+    );
+    expect(script).toContain("$null = $_.Handle");
+    expect(script).not.toMatch(/taskkill|-like/u);
   });
 
   it("不跟随开始菜单中的目录链接或循环 junction", async () => {

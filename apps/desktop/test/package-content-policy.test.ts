@@ -231,6 +231,8 @@ describe("构建机路径", () => {
       "c:\\users\\builder\\.cargo",
       "C:/Users/builder/.cargo",
       "d:/src/atm/host/src/app.rs",
+      // JSON 与 JS 字符串字面量里的反斜杠是两个。
+      '{"path":"C:\\\\Users\\\\builder\\\\.cargo"}',
     ]) {
       expect(findBuildMachinePath(Buffer.from(text, "utf8"), needles), text).not.toBeNull();
       expect(findBuildMachinePath(Buffer.from(text, "utf16le"), needles), text).not.toBeNull();

@@ -62,6 +62,8 @@ type Journal = {
   outcome?: string | null;
   kind?: string;
   commitPending?: boolean;
+  undo?: { target: string; step: number } | null;
+  started?: { pid: number } | null;
 };
 
 const results: Array<{ scenario: string; check: string; passed: boolean; detail?: string }> = [];
@@ -112,6 +114,7 @@ class Sandbox {
       "ATM_SETUP_FAIL_AT",
       "ATM_SETUP_FAIL_UNDO",
       "ATM_SETUP_SQUIRREL_ADDS",
+      "ATM_SETUP_PAUSE_UNLOCKED",
     ])
       if (!(key in extra)) delete env[key];
     return env;
@@ -139,6 +142,15 @@ class Sandbox {
     return existsSync(path)
       ? readFileSync(path, "utf8").trim().split("\n").slice(-lines).join("\n")
       : "";
+  }
+  /** A mark in setup.log; `since(mark)` is everything logged after it. */
+  logMark(): number {
+    const path = join(this.install, "state", "setup.log");
+    return existsSync(path) ? readFileSync(path, "utf8").length : 0;
+  }
+  since(mark: number): string {
+    const path = join(this.install, "state", "setup.log");
+    return existsSync(path) ? readFileSync(path, "utf8").slice(mark) : "";
   }
 }
 
@@ -1277,6 +1289,255 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+/**
+ * Codex r2 P1-1: both reverse-migration paths that bring B back through ROLLBACK_START —
+ * UNDO_LEGACY step 5 and the R_QUIESCE recovery — killed with the host already started:
+ * right after it was spawned and recorded (SPAWNED), once it is the primary instance but
+ * before any lease (PRIMARY), and once its core holds the lease but before setup saw the
+ * witness (LEASED). The replay must take that host over and wait for its witness, never
+ * start a second one, and never take a lease as "B is serving".
+ */
+async function scenarioReverseReplay(pkg: Packages): Promise<void> {
+  currentScenario = "reverse-replay";
+  const sandbox = new Sandbox("reverse-replay");
+  reset(sandbox);
+  process.stdout.write(
+    `\n[${currentScenario}] Squirrel ${LEGACY} layout, migrate → ${VERSION_A}\n`,
+  );
+  await squirrelLayout(sandbox);
+  check(
+    "migration exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet", "--force"]) === 0,
+    sandbox.log(),
+  );
+  await installed(sandbox, VERSION_A, `legacy:${LEGACY}`);
+  const setup = join(sandbox.install, "atm-setup.exe");
+  const appA = join(sandbox.install, `app-${VERSION_A}`);
+
+  const replay = async (label: string, point: string, step: number): Promise<void> => {
+    const journal = sandbox.journal();
+    check(
+      `${label}: died at ROLLBACK_START (step ${step}), journal unfinished`,
+      journal?.state === "ROLLBACK_START" &&
+        journal.kind === "LEGACY" &&
+        journal.undo?.step === step &&
+        journal.outcome == null,
+      journal,
+    );
+    const died = sandbox.log(6);
+    check(
+      `${label}: the fault point was really reached`,
+      died.includes(`ATM_SETUP_DRILL_DIE ${point}:ROLLBACK_START reached=true`) &&
+        (point !== "PRIMARY" || died.includes("primary=true lease=false")) &&
+        (point !== "LEASED" || died.includes("lease=true")),
+      died,
+    );
+    const started = journal?.started?.pid ?? -1;
+    const mark = sandbox.logMark();
+    // SPAWNED: the orphaned host was not admitted with its --txn-start (the lock was free)
+    // and runs its own --recover, racing this one for the lock. Either may win.
+    const code = runSetup(sandbox, setup, ["--recover", "--quiet"]);
+    check(
+      `${label}: recovered to ABORTED`,
+      (code === 1 || sandbox.since(mark).includes("INSTALL_LOCK_BUSY")) &&
+        (await until(() => sandbox.journal()?.outcome === "ABORTED", 90_000)),
+      { code, journal: sandbox.journal(), log: sandbox.since(mark).slice(-1500) },
+    );
+    const log = sandbox.since(mark);
+    check(
+      `${label}: the replay took over the host started earlier`,
+      log.includes(`ROLLBACK_START: taking over host ${started}`),
+      log.slice(-1500),
+    );
+    if (point !== "SPAWNED")
+      check(
+        `${label}: …and verified its witness instead of starting a second host`,
+        log.includes(`SERVICE_HEALTHY (host ${started})`) && !log.includes("never served"),
+        log.slice(-1500),
+      );
+    else
+      check(
+        `${label}: B confirmed by a witness`,
+        /START \S+ SERVICE_HEALTHY \(host \d+\)/u.test(log),
+        log.slice(-1500),
+      );
+    check(
+      `${label}: still on ${VERSION_A}`,
+      sandbox.pointer()?.current === VERSION_A &&
+        sandbox.pointer()?.previous === `legacy:${LEGACY}`,
+      sandbox.pointer(),
+    );
+    check(
+      `${label}: exactly one ${VERSION_A} host, serving`,
+      (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)) &&
+        (await until(() => hostsUnder(appA).length === 1, 15_000)),
+      { service: sandbox.serviceVersion(), hosts: hostsUnder(sandbox.install) },
+    );
+  };
+
+  for (const point of ["SPAWNED", "PRIMARY", "LEASED"]) {
+    const label = `UNDO_LEGACY ${point}`;
+    process.stdout.write(`[${currentScenario}] ${label}\n`);
+    const code = runSetup(sandbox, setup, ["--rollback", "--quiet"], {
+      ATM_SETUP_FAIL_AT: "R_START_LEGACY",
+      ATM_SETUP_DIE_AFTER: `${point}:ROLLBACK_START`,
+    });
+    check(`${label}: setup died (99)`, code === 99, { code, log: sandbox.log(6) });
+    await replay(label, point, 5);
+  }
+
+  for (const point of ["SPAWNED", "PRIMARY", "LEASED"]) {
+    const label = `R_QUIESCE ${point}`;
+    process.stdout.write(`[${currentScenario}] ${label}\n`);
+    const first = runSetup(sandbox, setup, ["--rollback", "--quiet"], {
+      ATM_SETUP_DIE_AFTER: "R_QUIESCE",
+    });
+    check(
+      `${label}: reverse migration died at R_QUIESCE (99)`,
+      first === 99 && sandbox.journal()?.state === "R_QUIESCE",
+      { first, journal: sandbox.journal() },
+    );
+    // The recovery of R_QUIESCE restarts B — and dies with that host started.
+    const second = runSetup(sandbox, setup, ["--recover", "--quiet"], {
+      ATM_SETUP_DIE_AFTER: `${point}:ROLLBACK_START`,
+    });
+    check(`${label}: its recovery died (99)`, second === 99, { second, log: sandbox.log(6) });
+    await replay(label, point, 3);
+  }
+  teardown(sandbox);
+}
+
+/**
+ * Codex r2 P2-6: a RECOVERY_FAILED record the first implementation wrote (state DONE, undo
+ * progress kept). With its undo progress, ATM 修复 converts it and finishes the undo; without,
+ * it refuses and leaves the barrier in place — never a fresh COMMITTED record.
+ */
+async function scenarioLegacyRecord(pkg: Packages): Promise<void> {
+  currentScenario = "legacy-record";
+  const sandbox = new Sandbox("legacy-record");
+  reset(sandbox);
+  const setup = join(sandbox.install, "atm-setup.exe");
+  const journalPath = join(sandbox.install, "state", "install.json");
+  process.stdout.write(`\n[${currentScenario}] base install, then an undo that fails\n`);
+  check(
+    "base install",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  const failUndo = (): Record<string, unknown> | null => {
+    runSetup(sandbox, setup, ["install", pkg.b.manifest, "--quiet", "--retry"], {
+      ATM_SETUP_FAIL_AT: "START",
+      ATM_SETUP_FAIL_UNDO: "2",
+    });
+    const journal = sandbox.journal();
+    if (journal?.outcome !== "RECOVERY_FAILED" || journal.state !== "UNDO") return null;
+    // What the first implementation wrote: the same record, closed as DONE.
+    const old = { ...(JSON.parse(readFileSync(journalPath, "utf8")) as object), state: "DONE" };
+    writeFileSync(journalPath, `${JSON.stringify(old, null, 2)}\n`);
+    return old as Record<string, unknown>;
+  };
+
+  process.stdout.write(`[${currentScenario}] an old record with its undo progress\n`);
+  const old = failUndo();
+  check("old-format RECOVERY_FAILED record in place", old !== null, sandbox.journal());
+  check("starts are refused (3)", runLauncher(sandbox, ["--doctor"]).status === 3);
+  check("ATM 修复 exit 0", runSetup(sandbox, setup, ["--repair", "--quiet"]) === 0, sandbox.log(8));
+  check(
+    "the old record was resumed: ROLLED_BACK under its own id, not a fresh COMMITTED",
+    sandbox.journal()?.id === old?.id &&
+      sandbox.journal()?.outcome === "ROLLED_BACK" &&
+      sandbox.journal()?.state === "DONE",
+    sandbox.journal(),
+  );
+  check(
+    `${VERSION_A} serving again, app-${VERSION_B} removed`,
+    sandbox.pointer()?.current === VERSION_A &&
+      (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)) &&
+      !existsSync(join(sandbox.install, `app-${VERSION_B}`)),
+    { pointer: sandbox.pointer(), service: sandbox.serviceVersion() },
+  );
+
+  process.stdout.write(`[${currentScenario}] an old record that does not say where it failed\n`);
+  const bare = failUndo();
+  check("old-format record in place", bare !== null, sandbox.journal());
+  delete bare?.undo;
+  writeFileSync(journalPath, `${JSON.stringify(bare, null, 2)}\n`);
+  const before = readFileSync(journalPath);
+  const refused = spawnSync(setup, ["--repair", "--quiet"], {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 120_000,
+  });
+  check(
+    "ATM 修复 refuses with the manual steps",
+    refused.status !== 0 && refused.stderr.includes("REPAIR_MANUAL_REQUIRED"),
+    { status: refused.status, err: refused.stderr.slice(0, 300) },
+  );
+  check("the failed record is left exactly as it was", readFileSync(journalPath).equals(before));
+  check("starts are still refused (3)", runLauncher(sandbox, ["--doctor"]).status === 3);
+  teardown(sandbox);
+}
+
+/**
+ * Codex r2 P2-3: an uninstall paused right after it released the install lock while a new
+ * install runs in that gap. The uninstall's remaining work must not delete the new
+ * install's atm-setup.exe or journal.
+ */
+async function scenarioUninstallRace(pkg: Packages): Promise<void> {
+  currentScenario = "uninstall-race";
+  const sandbox = new Sandbox("uninstall-race");
+  reset(sandbox);
+  const pause = join(sandbox.dir, "pause");
+  process.stdout.write(`\n[${currentScenario}] install, uninstall paused after its lock\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  // Run from the package (outside the root), so it runs in place with the fault variable.
+  const uninstall = spawn(pkg.a.setup, ["--uninstall", "--quiet"], {
+    env: sandbox.env({ ATM_SETUP_PAUSE_UNLOCKED: pause }),
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  check(
+    "the uninstall reached the gap after its lock",
+    await until(() => existsSync(join(pause, "paused")), 90_000),
+  );
+  check(
+    "atm-setup.exe and the journal were removed while it held the lock",
+    !existsSync(join(sandbox.install, "atm-setup.exe")) &&
+      !existsSync(join(sandbox.install, "state", "install.json")),
+    existsSync(sandbox.install) ? readdirSync(sandbox.install) : null,
+  );
+  process.stdout.write(`[${currentScenario}] a new install in the gap\n`);
+  check(
+    "new install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+    sandbox.log(6),
+  );
+  const journal = sandbox.journal();
+  writeFileSync(join(pause, "resume"), "drill");
+  check("the paused uninstall finished", await until(() => uninstall.exitCode !== null, 60_000));
+  check(
+    "the new install's atm-setup.exe survived",
+    existsSync(join(sandbox.install, "atm-setup.exe")),
+    existsSync(sandbox.install) ? readdirSync(sandbox.install) : null,
+  );
+  check(
+    "the new install's journal survived",
+    journal !== null &&
+      sandbox.journal()?.id === journal.id &&
+      sandbox.journal()?.outcome === "COMMITTED",
+    { before: journal, after: sandbox.journal() },
+  );
+  check(
+    `the new install still works (${VERSION_A})`,
+    sandbox.pointer()?.current === VERSION_A && runLauncher(sandbox, ["--doctor"]).status === 0,
+    sandbox.pointer(),
+  );
+  teardown(sandbox);
+}
+
 async function main(): Promise<void> {
   if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
   const only = process.argv.includes("--only")
@@ -1292,6 +1553,9 @@ async function main(): Promise<void> {
     ["uninstall-busy", scenarioUninstallBusy],
     ["faults", scenarioFaults],
     ["migration", scenarioMigration],
+    ["reverse-replay", scenarioReverseReplay],
+    ["legacy-record", scenarioLegacyRecord],
+    ["uninstall-race", scenarioUninstallRace],
   ];
   for (const [name, run] of scenarios) if (!only || only.includes(name)) await run(pkg);
   const failed = results.filter((result) => !result.passed);

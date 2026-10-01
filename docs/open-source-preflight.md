@@ -21,7 +21,8 @@ Every package is checked before its manifest is written:
 
 1. an entry policy verifies required runtime anchors and rejects forbidden repository content;
 2. a byte scan of every file rejects the build machine's home directory, Cargo home and repository root (UTF-8 and UTF-16LE, original and lower case). Release Cargo builds remap those prefixes with `--remap-path-prefix`; without it, dependency source paths embed the builder's Windows user name in every executable;
-3. every native executable must carry this version's version resource and the expected internal name, and the production host and installer must not contain smoke or drill hooks.
+3. every native executable must carry this version's version resource and the expected internal name, and the production host and installer must not contain smoke or drill hooks;
+4. the version directory carries `LICENSE` and `THIRD_PARTY_NOTICES.txt`, generated from what actually ships: the Rust crates linked into the host, launcher, installer and MCP shim (`cargo metadata`, normal dependencies only), the npm production dependency graph bundled into the core and renderer, and the bundled Node.js runtime. A release candidate is refused while the Node.js license text for the bundled version is missing.
 
 The resulting production binaries are started from both the portable ZIP and a clean install and exercised against SQLite before release. Final stable releases additionally run the clean-install distribution smoke, portable smoke, installed runtime check and release fingerprint verification described in [`release-checklist.md`](./release-checklist.md).
 

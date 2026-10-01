@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tao::dpi::LogicalSize;
+use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget};
 use tao::platform::windows::{IconExtWindows, WindowBuilderExtWindows};
@@ -95,15 +95,99 @@ pub struct App {
     page_loaded: bool,
     renderer_ready: bool,
     show_pending: bool,
-    route_pending: Option<&'static str>,
+    route_pending: Option<String>,
     ready_deadline: Option<Instant>,
     maximized: bool,
+    /// What the last window looked like when it closed, so reopening from the tray lands
+    /// where the user left (Electron hid the window; this host drops it to free WebView2).
+    saved: SavedWindow,
 
     tray: Option<TrayIcon>,
     snapshot: Snapshot,
     startup_delay_pending: bool,
     quitting: bool,
     exit_code: i32,
+}
+
+#[derive(Default)]
+struct SavedWindow {
+    route: Option<String>,
+    /// Normal (restored) bounds, physical pixels.
+    bounds: Option<(PhysicalPosition<i32>, PhysicalSize<u32>)>,
+    maximized: bool,
+}
+
+/// The renderer route in the entry document's fragment, if it is one the UI knows
+/// (`Route` in packages/ui/src/contracts.ts). Anything else is dropped, not replayed.
+fn route_from_url(url: &str) -> Option<String> {
+    let (document, fragment) = url.split_once('#')?;
+    if !assets::navigation_allowed(document) {
+        return None;
+    }
+    const ROUTES: [&str; 9] = [
+        "overview",
+        "projects",
+        "my",
+        "quick",
+        "blockers",
+        "agents",
+        "timeline",
+        "knowledge",
+        "settings",
+    ];
+    let project = fragment.strip_prefix("project:").is_some_and(|code| {
+        (1..=64).contains(&code.len())
+            && code
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    });
+    (ROUTES.contains(&fragment) || project).then(|| fragment.to_owned())
+}
+
+/// Restore the saved position only if its title bar still lands on a monitor (a monitor
+/// may have been unplugged since).
+fn on_some_monitor(
+    target: &EventLoopWindowTarget<UserEvent>,
+    position: PhysicalPosition<i32>,
+) -> bool {
+    target.available_monitors().any(|monitor| {
+        let origin = monitor.position();
+        let size = monitor.size();
+        let (x, y) = (position.x + 48, position.y + 16);
+        x >= origin.x
+            && y >= origin.y
+            && x < origin.x + size.width as i32
+            && y < origin.y + size.height as i32
+    })
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::route_from_url;
+
+    #[test]
+    fn keeps_known_routes_of_the_entry_document_only() {
+        let entry = crate::assets::ENTRY_SOURCE;
+        assert_eq!(
+            route_from_url(&format!("{entry}#settings")).as_deref(),
+            Some("settings")
+        );
+        assert_eq!(
+            route_from_url(&format!("{entry}#project:ATM")).as_deref(),
+            Some("project:ATM")
+        );
+        for rejected in [
+            entry.to_string(),
+            format!("{entry}#"),
+            format!("{entry}#nowhere"),
+            format!("{entry}#project:"),
+            format!("{entry}#project:a/b"),
+            format!("{entry}#project:{}", "x".repeat(65)),
+            "https://example.com/index.html#settings".to_owned(),
+        ] {
+            assert_eq!(route_from_url(&rejected), None, "{rejected}");
+        }
+    }
 }
 
 fn run_id() -> String {
@@ -187,6 +271,7 @@ pub fn run(
         route_pending: None,
         ready_deadline: None,
         maximized: false,
+        saved: SavedWindow::default(),
         tray: None,
         snapshot: Snapshot {
             notification_mode: "ALL".into(),
@@ -686,8 +771,10 @@ impl App {
         target: &EventLoopWindowTarget<UserEvent>,
     ) {
         self.show_pending = true;
-        if route.is_some() {
-            self.route_pending = route;
+        // An explicit destination (tray menu, NAVIGATE) beats the route saved at close.
+        if let Some(route) = route {
+            self.route_pending = Some(route.to_owned());
+            self.saved.route = None;
         }
         if self.startup_delay_pending {
             self.start_core();
@@ -746,6 +833,15 @@ impl App {
             .with_visible(false)
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(1100.0, 680.0));
+        if let Some((position, size)) = self.saved.bounds {
+            builder = builder.with_inner_size(size);
+            if on_some_monitor(target, position) {
+                builder = builder.with_position(position);
+            }
+        }
+        if self.saved.maximized {
+            builder = builder.with_maximized(true);
+        }
         if let Ok(icon) = WindowIcon::from_resource(1, None) {
             builder = builder.with_window_icon(Some(icon));
         }
@@ -763,7 +859,10 @@ impl App {
         self.epoch += 1;
         self.page_loaded = false;
         self.renderer_ready = false;
-        self.maximized = false;
+        self.maximized = self.saved.maximized;
+        if self.route_pending.is_none() {
+            self.route_pending = self.saved.route.take();
+        }
         let generation = self.generation;
         let renderer_dir = self.layout.renderer_dir.clone();
         let (ipc_proxy, load_proxy) = (self.proxy.clone(), self.proxy.clone());
@@ -825,6 +924,25 @@ impl App {
     /// Closing drops the whole WebView (its WebView2 processes exit) and the window; the
     /// core, tray and notifications keep running.
     fn close_window(&mut self) {
+        if let Some(route) = self
+            .webview
+            .as_ref()
+            .and_then(|webview| webview.url().ok())
+            .and_then(|url| route_from_url(&url))
+        {
+            self.saved.route = Some(route);
+        }
+        if let Some(window) = &self.window {
+            self.saved.maximized = window.is_maximized();
+            // Maximized or minimized bounds are not the ones to come back to; keep the last
+            // normal ones.
+            if !self.saved.maximized
+                && !window.is_minimized()
+                && let Ok(position) = window.outer_position()
+            {
+                self.saved.bounds = Some((position, window.inner_size()));
+            }
+        }
         self.webview = None;
         self.window = None;
         self.ready_deadline = None;

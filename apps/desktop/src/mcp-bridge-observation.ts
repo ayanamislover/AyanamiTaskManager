@@ -137,23 +137,28 @@ function counterProcesses(stdout: string): CounterProcess[] {
  * 启动器把它交给当前版本的宿主并等着，宿主再拉起 atm-core.exe 跑 stdio 桥。一条连接的开销是
  * 这条链的总和，只数 Agent 的直接子进程会把真正占内存的那两个漏掉。
  *
- * 只认固定的两层，不做任意深度的后代汇总：桥要唤醒桌面时，新拉起的宿主也会挂在这条链下面，
- * 把它和它的 core 算进来就成了「一条连接一百多 MB」。
+ * 根也可能就是宿主本身（便携版没有 current 链接，配置直接指向解压目录里的宿主）：那时下一层
+ * 直接是 atm-core。两种拓扑都只认固定的层级、到 atm-core 为止，不做任意深度的后代汇总：桥要
+ * 唤醒桌面时，新拉起的宿主挂在 core 下面，把它和它的 core 算进来就成了「一条连接一百多 MB」。
  */
 const HOST_CHAIN = ["AyanamiTaskManager", "atm-core"] as const;
 
 function chainPrivateBytes(root: number, processes: readonly CounterProcess[]): number {
   let total = 0;
   let parents = [root];
-  for (const name of HOST_CHAIN) {
+  for (let depth = 0; depth < HOST_CHAIN.length && parents.length > 0; depth += 1) {
+    const allowed = HOST_CHAIN.slice(depth).map((name) => name.toLowerCase());
     const level = processes.filter(
       (entry) =>
-        entry.name.toLowerCase() === name.toLowerCase() &&
+        allowed.includes(entry.name.toLowerCase()) &&
         entry.parentPid !== undefined &&
         parents.includes(entry.parentPid),
     );
     total += level.reduce((sum, entry) => sum + (entry.privateBytes ?? 0), 0);
-    parents = level.map((entry) => entry.pid);
+    // atm-core 是链的终点：它下面的只可能是被唤醒的桌面。
+    parents = level
+      .filter((entry) => entry.name.toLowerCase() !== HOST_CHAIN.at(-1)!.toLowerCase())
+      .map((entry) => entry.pid);
   }
   return total;
 }

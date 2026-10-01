@@ -564,8 +564,50 @@ impl Setup {
         }
     }
 
-    pub fn start_version(&self, txn: &mut Transaction, version: &str) -> Step {
-        self.start(txn, version)
+    /// ROLLBACK_START (§6 UNDO_RESTART for a new-style `from`, with the dual-process
+    /// witness). The one way every undo brings `from` back: the ordinary undo (step 3),
+    /// UNDO_LEGACY (step 5) and the R_QUIESCE recovery (Codex r2 P1-1).
+    ///
+    /// A replay first takes over the host an earlier attempt started (`txn.started`) and
+    /// waits for its witness; a host that never serves is stopped by identity and replaced.
+    /// Whatever else serves now was not started by this transaction — a live lease or primary
+    /// proves nothing about it — so it is stopped and ours started, under ROLLBACK_START
+    /// with `target`/`step` as the undo progress a successor resumes from.
+    pub fn rollback_start(
+        &self,
+        txn: &mut Transaction,
+        from: &str,
+        target: Outcome,
+        step: u8,
+    ) -> Step {
+        if let Some(started) = self.started_host(txn, from) {
+            say!(
+                "ROLLBACK_START: taking over host {} started earlier",
+                started.pid
+            );
+            match self.await_healthy(txn, from, &started, TAKEOVER_TIMEOUT) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    say!(
+                        "ROLLBACK_START: host {} never served ({error}); replacing it",
+                        started.pid
+                    );
+                    procs::terminate(&started);
+                    if !procs::wait_all_gone(
+                        std::slice::from_ref(&started),
+                        Duration::from_secs(10),
+                    ) {
+                        return Err(format!(
+                            "ROLLBACK_START_TAKEOVER: host {} did not exit",
+                            started.pid
+                        ));
+                    }
+                }
+            }
+        }
+        quiesce::stop_new_style(&self.env, true, Duration::from_secs(30))?;
+        store::enter_undo(&self.store, txn, TxnState::RollbackStart, target, step).map_err(io)?;
+        self.start(txn, from)
     }
 
     fn start(&self, txn: &mut Transaction, version: &str) -> Step {
@@ -583,7 +625,7 @@ impl Setup {
         let (_child, identity) = procs::spawn(&host, args).map_err(io)?;
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
-        fault::after_spawn(txn.state);
+        fault::after_spawn(txn.state, &self.env, &identity);
         self.await_healthy(txn, version, &identity, START_TIMEOUT)
     }
 
@@ -778,42 +820,8 @@ impl Setup {
                 if let Some(version) = legacy::parse_legacy_pointer(&from) {
                     return self.restart_legacy(version, undo_started).map(|_| ());
                 }
-                if let Some(started) = self.started_host(txn, &from) {
-                    say!(
-                        "ROLLBACK_START: taking over host {} started earlier",
-                        started.pid
-                    );
-                    match self.await_healthy(txn, &from, &started, TAKEOVER_TIMEOUT) {
-                        Ok(()) => return Ok(()),
-                        Err(error) => {
-                            say!(
-                                "ROLLBACK_START: host {} never served ({error}); replacing it",
-                                started.pid
-                            );
-                            procs::terminate(&started);
-                            if !procs::wait_all_gone(
-                                std::slice::from_ref(&started),
-                                Duration::from_secs(10),
-                            ) {
-                                return Err(format!(
-                                    "ROLLBACK_START_TAKEOVER: host {} did not exit",
-                                    started.pid
-                                ));
-                            }
-                        }
-                    }
-                }
-                // Whatever serves now was not started by this transaction: stop it, start ours.
-                quiesce::stop_new_style(&self.env, true, Duration::from_secs(30))?;
-                store::enter_undo(
-                    &self.store,
-                    txn,
-                    TxnState::RollbackStart,
-                    txn.undo.map(|undo| undo.target).unwrap_or(Outcome::Aborted),
-                    3,
-                )
-                .map_err(io)?;
-                self.start(txn, &from)
+                let target = txn.undo.map(|undo| undo.target).unwrap_or(Outcome::Aborted);
+                self.rollback_start(txn, &from, target, 3)
             }
             _ => Ok(()),
         }

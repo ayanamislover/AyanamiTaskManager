@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
@@ -26,6 +26,7 @@ import {
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
 import { APP_LAYOUT } from "./app-layout.js";
 import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
+import { NODE_LICENSE_PENDING, THIRD_PARTY_NOTICES } from "./third-party-notices.js";
 
 type Artifact = ReleaseArtifactIdentity;
 type Verification = {
@@ -190,6 +191,12 @@ const portableName = portableZipName(packageJson.version);
 const releaseNames = [setupName, packageName, manifestName, portableName];
 const missing = releaseNames.filter((name) => !existsSync(join(packageDir, name)));
 if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missing.join("、")}`);
+// 本机验收的包可以缺 Node 的许可证原文（标记 NODE_LICENSE_PENDING），发出去的候选不行。
+const notices = join(packageDir, `app-${packageJson.version}`, THIRD_PARTY_NOTICES);
+if (!existsSync(notices) || readFileSync(notices, "utf8").includes(NODE_LICENSE_PENDING))
+  throw new Error(
+    `RELEASE_NOTICES_INCOMPLETE: ${THIRD_PARTY_NOTICES} 缺失或没有随包 Node 的许可证（third_party/node/）`,
+  );
 
 await rm(releaseDir, { recursive: true, force: true });
 await mkdir(releaseDir, { recursive: true });

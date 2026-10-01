@@ -37,6 +37,7 @@ import { resolveAgentGuideBuild } from "./agent-guide-build.js";
 import { APP_LAYOUT, assembleAppDirectory } from "./app-layout.js";
 import { buildMcpShim, MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
 import { cargoHome, releaseRustEnv } from "./rust-build-env.js";
+import { buildThirdPartyNotices, THIRD_PARTY_NOTICES } from "./third-party-notices.js";
 import {
   assertExecutableIdentity,
   assertExecutableVersionResource,
@@ -323,6 +324,8 @@ export function packageNative(input: {
     ...(coreDir ? { coreDir } : {}),
   });
   if (coreDir) rmSync(coreDir, { recursive: true, force: true });
+  // 随包的 Node 就是跑这个脚本的 node（nodeExe: process.execPath），版本取 process.version。
+  writeFileSync(join(appDir, THIRD_PARTY_NOTICES), buildThirdPartyNotices(root), "utf8");
   // 烟测包总是就地便携运行：没有安装根、没有 app.json，宿主靠这个标记认出便携布局。
   if (smoke) writeFileSync(join(appDir, PORTABLE_MARKER), "");
   // 身份与版本无关，演练包也查：同名的宿主被当成启动器拷进包，启动「也能用」，却没了安装屏障。

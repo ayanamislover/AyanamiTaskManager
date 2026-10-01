@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, rmSync } from "node:fs";
@@ -384,6 +384,210 @@ async function withProjectEvent<T>(
  *
  * 所以这条单独验寿命：保持 stdin 打开、什么都不发，看它到点还在不在。
  */
+const windowsPowerShell = join(
+  process.env.SystemRoot ?? "C:\\Windows",
+  "System32",
+  "WindowsPowerShell",
+  "v1.0",
+  "powershell.exe",
+);
+
+/** Windows PowerShell 5.1 默认 STA，剪贴板 API 要求 STA；正文一律走 base64，免得代码页把中文搅坏。 */
+function clipboard(script: string, input?: string): string {
+  const result = spawnSync(
+    windowsPowerShell,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-STA",
+      "-Command",
+      `Add-Type -AssemblyName System.Windows.Forms; ${script}`,
+    ],
+    { encoding: "utf8", windowsHide: true, ...(input === undefined ? {} : { input }) },
+  );
+  if (result.status !== 0) throw new Error(`CLIPBOARD_${String(result.status)}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+const CLIPBOARD_SNAPSHOT =
+  "$d = [Windows.Forms.Clipboard]::GetDataObject(); $f = @(); if ($d) { $f = @($d.GetFormats()) }; " +
+  "if ($f.Count -eq 0) { 'EMPTY' } " +
+  "elseif (@($f | Where-Object { $_ -notmatch '^(System\\.String|UnicodeText|Text|OEMText|Locale)$' }).Count -eq 0) " +
+  "{ 'TEXT:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Windows.Forms.Clipboard]::GetText())) } " +
+  "else { 'OTHER' }";
+
+/** 宿主丢弃不合规的桥消息、不回应：以「限时内没有结果」加宿主日志里的拒绝记录为准。 */
+async function rejectedByHost(
+  call: (method: string, ...args: unknown[]) => Promise<unknown>,
+  method: string,
+  ...args: unknown[]
+): Promise<boolean> {
+  const logPath = join(dataDir, "logs", "host.log");
+  const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0;
+  const settled = await Promise.race([
+    call(method, ...args).then(
+      () => "resolved",
+      () => "rejected",
+    ),
+    delay(1_500).then(() => "pending"),
+  ]);
+  const logged = existsSync(logPath)
+    ? readFileSync(logPath, "utf8").slice(before).includes("renderer message rejected: Arguments")
+    : false;
+  return settled === "pending" && logged;
+}
+
+/**
+ * DesktopBridge 的其余能力（ATM-T-0539）。e2e 跑在网页和假桥上，只有这里经真实的
+ * renderer → 宿主 → core 走一遍。core 的 home、APPDATA、LOCALAPPDATA 都在烟测目录里，
+ * Agent 配置写进的是合成目录；Claude Code 走 claude CLI，不在这里装。会碰用户桌面的两项：
+ * 资源管理器只验参数校验，不真的打开；剪贴板先存后还，原内容不是纯文本就不动它。
+ */
+async function checkBridgeParity(
+  call: (method: string, ...args: unknown[]) => Promise<any>,
+): Promise<void> {
+  const checked = (await call("checkForUpdates")) as Record<string, unknown> | null;
+  const status = (await call("getUpdateStatus")) as Record<string, unknown> | null;
+  if (layout === "portable") {
+    check(
+      "便携版检查更新：明确报不参与自动更新",
+      checked?.code === "UPDATE_UNSUPPORTED" && status?.code === "UPDATE_UNSUPPORTED",
+      JSON.stringify(checked),
+    );
+    const applied = (await call("applyUpdate")) as Record<string, unknown> | null;
+    check(
+      "便携版点「立即更新」不会起安装",
+      applied?.code === "UPDATE_UNSUPPORTED",
+      JSON.stringify(applied),
+    );
+  } else {
+    check(
+      "安装版检查更新经桥返回状态",
+      typeof checked?.code === "string" && typeof status?.code === "string",
+      JSON.stringify(checked),
+    );
+  }
+
+  // streamableHttp 里带着 Agent 凭证：只核结构与路径，内容不进报告。
+  const configs = (await call("getMcpConfigs")) as Record<string, string>;
+  const stdio = JSON.parse(configs?.stdio ?? "{}") as {
+    mcpServers?: Record<string, { command?: string; args?: string[] }>;
+  };
+  const stdioCore = stdio.mcpServers?.["ayanami-task-manager-core"];
+  check(
+    "getMcpConfigs 给出指向原生 shim 的 stdio 配置，且 stdio 配置不含凭证",
+    typeof stdioCore?.command === "string" &&
+      stdioCore.command.toLowerCase().endsWith("\\atm-mcp.exe") &&
+      stdioCore.args?.join(" ") === "--profile core" &&
+      !configs.stdio!.includes("Bearer") &&
+      typeof configs.streamableHttp === "string",
+    stdioCore?.command ?? Object.keys(configs ?? {}).join(","),
+  );
+  const bridges = (await call("getMcpBridges")) as Record<string, unknown>;
+  check(
+    "getMcpBridges 返回进程观测",
+    bridges?.metric === "PRIVATE_BYTES" && Array.isArray(bridges.bridges),
+    JSON.stringify(bridges).slice(0, 300),
+  );
+
+  const memory = (await call("getMemoryProfile")) as unknown;
+  check("getMemoryProfile 返回布尔值", typeof memory === "boolean", String(memory));
+  const switched = (await call("setMemoryProfile", memory)) as Record<string, any>;
+  check(
+    "setMemoryProfile 按原值重写一遍，各客户端都没有失败",
+    switched?.enabled === memory &&
+      Array.isArray(switched.clients) &&
+      switched.clients.every(
+        (entry: { status: string }) => entry.status === "UPDATED" || entry.status === "SKIPPED",
+      ),
+    JSON.stringify(switched?.clients ?? switched),
+  );
+
+  const installed = (await call("installMcp", "CODEX")) as { path?: string };
+  check(
+    "installMcp 把 Codex 配置写进合成 home",
+    typeof installed?.path === "string" &&
+      resolve(installed.path).toLowerCase() === resolve(codexConfigPath).toLowerCase() &&
+      readFileSync(codexConfigPath, "utf8").includes('mcp_servers."ayanami-task-manager-core"'),
+    installed?.path ?? JSON.stringify(installed),
+  );
+  const integrations = (await call("getAgentIntegrations")) as Array<Record<string, any>>;
+  check(
+    "getAgentIntegrations 报告四个客户端",
+    Array.isArray(integrations) &&
+      ["CODEX", "CLAUDE", "CLAUDE_CODE", "KIMI_CODE"].every((client) =>
+        integrations.some((entry) => entry.client === client),
+      ) &&
+      integrations.find((entry) => entry.client === "CODEX")?.mcpInstalled === true,
+    JSON.stringify(integrations?.map((entry) => [entry.client, entry.mcpInstalled])),
+  );
+  const preview = (await call("manageAgentIntegration", "CODEX", "PREVIEW")) as unknown;
+  check("manageAgentIntegration 预览经桥返回", preview !== null && preview !== undefined);
+
+  check("showItemInFolder 拒绝非字符串参数", await rejectedByHost(call, "showItemInFolder", 42));
+  check("copyText 拒绝非字符串参数", await rejectedByHost(call, "copyText", { text: "x" }));
+
+  const snapshot = clipboard(CLIPBOARD_SNAPSHOT);
+  if (snapshot === "OTHER") {
+    check("copyText 写入剪贴板（剪贴板里有非文本内容，为不破坏它而跳过）", true, "skipped");
+    return;
+  }
+  const marker = `ATM packaged smoke ${randomUUID()}`;
+  try {
+    const copied = await call("copyText", marker);
+    const read = clipboard(
+      "[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([Windows.Forms.Clipboard]::GetText()))",
+    );
+    check(
+      "copyText 经宿主写入系统剪贴板",
+      copied === true && Buffer.from(read, "base64").toString("utf8") === marker,
+    );
+  } finally {
+    if (snapshot === "EMPTY") clipboard("[Windows.Forms.Clipboard]::Clear()");
+    else
+      clipboard(
+        "$b = [Console]::In.ReadToEnd().Trim(); " +
+          "[Windows.Forms.Clipboard]::SetText([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b)))",
+        snapshot.slice("TEXT:".length),
+      );
+  }
+}
+
+/**
+ * 「atm-mcp.exe 唤醒路径」：应用完全退出后，Agent 发来的第一个请求要由 shim 拉起同目录的
+ * 宿主（--background --agent-wake），等发布后完成握手；core 的生命周期日志记下这是一次唤醒。
+ */
+async function checkShimWakesApp(): Promise<void> {
+  // 被唤醒的实例不是烟测自己拉起的子进程：断言失败也要经 --smoke-quit 让它退出，不留进程。
+  try {
+    const tools = await packagedProfileTools("core");
+    check("应用退出后 shim 唤醒宿主并完成握手", tools.includes("atm_begin"), tools.join(","));
+    const lifecycle = join(dataDir, "logs", "lifecycle-core.ndjson");
+    const startups = readFileSync(lifecycle, "utf8")
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((entry) => entry.event === "startup");
+    check(
+      "被唤醒的实例以 --background --agent-wake 启动",
+      startups.at(-1)?.agentWake === true && startups.at(-1)?.background === true,
+      JSON.stringify(startups.at(-1)),
+    );
+  } finally {
+    const quit = spawn(executable, ["--smoke-quit"], {
+      cwd: root,
+      env: hostEnvironment,
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    await waitForExit(quit, 5_000);
+    await waitUntil(async () => (existsSync(runtimePath) ? null : true), 15_000).catch(
+      () => undefined,
+    );
+  }
+  check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath));
+}
+
 async function checkMcpProcessOutlivesHandshake(): Promise<void> {
   const launch = installedProfileLaunch("core");
   const child = spawn(launch.command, launch.args, {
@@ -1157,7 +1361,7 @@ try {
 
   // 自启动开关走界面真正调用的那条桥（宿主写 HKCU Run），登记值逐字比对；
   // 结束时由 finally 里的 loginItemRestorePlan 恢复用户原来的登记。
-  const desktopCall = (method: "setAutoLaunch" | "getAutoLaunch", ...args: unknown[]) =>
+  const desktopCall = (method: string, ...args: unknown[]): Promise<any> =>
     user!.page.evaluate(
       ([name, values]) =>
         (window as unknown as { ayanamiDesktop: Record<string, (...a: unknown[]) => unknown> })
@@ -1183,10 +1387,13 @@ try {
     `${String(disabled)} ${readRunEntries()[AUTOSTART_VALUE] ?? "(none)"}`,
   );
 
+  await checkBridgeParity(desktopCall);
+
   await user.close();
   user = null;
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));
+  await checkShimWakesApp();
   check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
 
   await writeFile(

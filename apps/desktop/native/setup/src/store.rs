@@ -32,6 +32,10 @@ pub fn acquire_lock(env: &Env, wait: Duration) -> io::Result<InstallLock> {
             .open(&path)
         {
             Ok(file) => return Ok(InstallLock { _file: file }),
+            // A finishing uninstall removed the empty `state\` between our create and open.
+            Err(error) if error.kind() == io::ErrorKind::NotFound && Instant::now() < deadline => {
+                fs::create_dir_all(env.state_dir())?;
+            }
             Err(error) if error.raw_os_error() == Some(32) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(250));
             }

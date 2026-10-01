@@ -116,6 +116,10 @@ export function installedSmokeVerified(root = process.cwd()): boolean {
 /**
  * `installed`：这次的安装验收是否真的做了（distribution-smoke 报告的 installed 字段）。
  * 调用方必须明说——默认值会让「跳过」和「漏了 installed 报告」看起来一样。
+ *
+ * 制品同时绑定 release/ 与 output/package/ 两份：assemble-release 每次都从 output/package
+ * 重新复制。只绑 release/ 时，重新打过包、release/ 原样不动，resume 照样通过，旧烟测报告
+ * 就被挂到了一批没测过的字节上。
  */
 export function releaseResumeEvidencePaths(
   candidate: ReleaseCandidateIdentity,
@@ -126,7 +130,10 @@ export function releaseResumeEvidencePaths(
   const paths = [
     ...FIXED_RESUME_EVIDENCE,
     ...(options.installed ? ["output/installed-smoke-report.json"] : []),
-    ...Object.values(candidate.artifacts).map((artifact) => `release/${artifact.name}`),
+    ...Object.values(candidate.artifacts).flatMap((artifact) => [
+      `release/${artifact.name}`,
+      `output/package/${artifact.name}`,
+    ]),
     ...commands.map((command) => `output/${normalizedRelativePath(command.log)}`),
   ].map(normalizedRelativePath);
   const unique = [...new Set(paths)].sort();

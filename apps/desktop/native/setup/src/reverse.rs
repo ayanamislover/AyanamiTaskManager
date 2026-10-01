@@ -148,25 +148,19 @@ fn forward(setup: &mut Setup, txn: &mut Transaction, record: &Snapshot, version:
     Ok(())
 }
 
-/// R_QUIESCE died or failed: B was never touched beyond being stopped.
+/// R_QUIESCE died or failed: B was never touched beyond being stopped. If B had been
+/// running it comes back through ROLLBACK_START (step 3) with the dual-process witness —
+/// taking over a host an earlier attempt already started; a lease alone is not B serving
+/// (Codex r2 P1-1).
 pub fn recover_quiesce(setup: &mut Setup, txn: &mut Transaction) -> Result<Outcome, String> {
     if txn.from_running
-        && !quiesce::service_running(&setup.env)
         && let Some(from) = txn.from.clone()
+        && let Err(error) = setup.rollback_start(txn, &from, Outcome::Aborted, 3)
     {
-        store::enter_undo(
-            &setup.store,
-            txn,
-            TxnState::RollbackStart,
-            Outcome::Aborted,
-            3,
-        )
-        .map_err(io)?;
-        if let Err(error) = setup.start_version(txn, &from) {
-            say!("restart {from} failed: {error}");
-            store::recovery_failed(&setup.store, txn).map_err(io)?;
-            return Ok(Outcome::RecoveryFailed);
-        }
+        say!("restart {from} failed: {error}");
+        txn.error = Some(error.chars().take(64).collect());
+        store::recovery_failed(&setup.store, txn).map_err(io)?;
+        return Ok(Outcome::RecoveryFailed);
     }
     store::finish(&setup.store, txn, Outcome::Aborted).map_err(io)?;
     Ok(Outcome::Aborted)
@@ -316,21 +310,14 @@ fn undo_legacy_step(
             snapshot::restore_root_files(&env, snap)?;
             snapshot::restore_registrations(&env, snap)
         }
-        // 5. Restart B if it had been running (ROLLBACK_START, dual-process witness).
+        // 5. Restart B if it had been running (ROLLBACK_START, dual-process witness; a
+        //    replay takes over the host an earlier attempt started).
         5 => {
-            if !txn.from_running || quiesce::service_running(&env) {
+            if !txn.from_running {
                 return Ok(());
             }
             let from = txn.from.clone().ok_or("UNDO_LEGACY_WITHOUT_FROM")?;
-            store::enter_undo(
-                &setup.store,
-                txn,
-                TxnState::RollbackStart,
-                Outcome::Aborted,
-                5,
-            )
-            .map_err(io)?;
-            let result = setup.start_version(txn, &from);
+            let result = setup.rollback_start(txn, &from, Outcome::Aborted, 5);
             // Stay in UNDO_LEGACY for the journal; the next loop turn finishes.
             txn.state = TxnState::UndoLegacy;
             result

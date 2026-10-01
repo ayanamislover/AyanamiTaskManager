@@ -120,6 +120,12 @@
     backdrop-filter: none;
   }
 
+  /* 顶栏的磨砂画在 ::before 上：只关 .atm-topbar 本身，高对比度下底下照样是糊的。 */
+  .atm-topbar::before {
+    backdrop-filter: none;
+    mask-image: none;
+  }
+
   .atm-button,
   .atm-panel,
   .atm-project,

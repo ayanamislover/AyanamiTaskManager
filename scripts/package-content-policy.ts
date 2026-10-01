@@ -10,6 +10,7 @@ export const REQUIRED_PACKAGED_ENTRIES = [
   "launcher/AyanamiTaskManager.exe",
   "atm-setup.exe",
   "LICENSE",
+  "THIRD_PARTY_NOTICES.txt",
   "runtime/atm-core.exe",
   "runtime/core.mjs",
   "runtime/cli.mjs",
@@ -113,7 +114,7 @@ export function assertExecutableIdentity(bytes: Buffer, internalName: string, la
 
 /**
  * 构建机路径在二进制里可能的几种写法：原样、全小写（Windows 路径不分大小写，工具链常转成
- * 小写）、正斜杠；UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。
+ * 小写）、正斜杠、JSON/JS 字符串里反斜杠翻倍；UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。
  */
 export function buildMachinePathNeedles(paths: readonly string[]): Array<[string, Buffer]> {
   const spellings = new Set<string>();
@@ -123,6 +124,7 @@ export function buildMachinePathNeedles(paths: readonly string[]): Array<[string
     for (const spelling of [trimmed, trimmed.toLowerCase()]) {
       spellings.add(spelling);
       spellings.add(spelling.replaceAll("\\", "/"));
+      spellings.add(spelling.replaceAll("\\", "\\\\"));
     }
   }
   return [...spellings].flatMap(

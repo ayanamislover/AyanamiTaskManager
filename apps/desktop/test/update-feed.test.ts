@@ -32,6 +32,22 @@ describe("本地更新源", () => {
     expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1");
   });
 
+  // 同版本重投递：旧清单先撤，新 zip 写完前扫描看不到「就绪」；不留 .partial。
+  it("同版本重投递先撤旧清单、经临时名改名，不留半成品", () => {
+    const feed = join(scratch(), "feed");
+    deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
+    const rebuilt = packageDir("2.0.1");
+    writeFileSync(join(rebuilt, "atm-2.0.1-win-x64.zip"), "zip 2.0.1 rebuilt", "utf8");
+    const delivered = deliverUpdate(feed, rebuilt, "2.0.1");
+    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1 rebuilt");
+    expect(readdirSync(feed).sort()).toEqual(["atm-2.0.1-win-x64.json", "atm-2.0.1-win-x64.zip"]);
+    const source = readFileSync(join(process.cwd(), "scripts", "update-feed.ts"), "utf8");
+    expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeLessThan(
+      source.indexOf("copyFileSync(join(packageDir, name), partial)"),
+    );
+    expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeGreaterThan(0);
+  });
+
   // 投递是一次性的，装完没人负责收。清理的判据必须和运行中的 core 是同一份，
   // 否则一边把包当「还没装」提示更新，另一边已经把它删了。
   it("装好之后只清已消费的：不高于已装版本的包与 Squirrel 遗留，更新的与无关文件都留下", () => {

@@ -204,6 +204,60 @@ describe("MCP bridge 只读观测", () => {
     expect(counters).toContain("\\Process(AyanamiTaskManager*)\\Private Bytes");
   });
 
+  // 便携版的回落直接指向宿主：Agent → 宿主 → atm-core，少了启动器那一层。
+  it("根就是宿主时按宿主 → atm-core 汇总，唤醒的桌面不算", async () => {
+    const MiB = MIB;
+    const rows: Array<[string, number, number, number]> = [
+      // [实例名, pid, 父 pid, Private Bytes]
+      ["AyanamiTaskManager", 4101, 101, 6 * MiB], // 宿主 --mcp-stdio：codex 的直接子进程
+      ["atm-core", 4301, 4101, 40 * MiB], // stdio 桥
+      ["AyanamiTaskManager#2", 4401, 4301, 2 * MiB], // 被唤醒的桌面启动器
+      ["AyanamiTaskManager#3", 4501, 4401, 9 * MiB], // 桌面宿主
+      ["atm-core#1", 4601, 4501, 120 * MiB], // 桌面 core
+    ];
+    const header = [
+      '"(PDH-CSV 4.0)"',
+      ...rows.flatMap(([name]) => [
+        `"\\\\HOST\\Process(${name})\\ID Process"`,
+        `"\\\\HOST\\Process(${name})\\Creating Process ID"`,
+        `"\\\\HOST\\Process(${name})\\Private Bytes"`,
+      ]),
+    ].join(",");
+    const values = [
+      '"10/01/2026 03:02:00.000"',
+      ...rows.flatMap(([, pid, parent, bytes]) => [
+        `"${pid}.000000"`,
+        `"${parent}.000000"`,
+        `"${bytes}.000000"`,
+      ]),
+    ].join(",");
+    const execute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([
+          { pid: 4101, startedAt: "2026-10-01T02:00:00.000Z", privateBytes: 6 * MiB },
+        ]),
+      })
+      .mockResolvedValueOnce({ stdout: `${header}\r\n${values}\r\n` })
+      .mockResolvedValueOnce({ stdout: JSON.stringify([{ pid: 101, name: "codex" }]) });
+
+    const observation = await observeMcpBridges({
+      bridgeCommand: "C:\\ATM\\portable\\AyanamiTaskManager.exe",
+      now: () => new Date("2026-10-01T03:02:03.000Z"),
+      execute,
+    });
+
+    expect(observation.bridges).toEqual([
+      expect.objectContaining({ pid: 4101, ownerName: "codex", privateBytes: 46 * MiB }),
+    ]);
+    expect(observation.totalPrivateBytes).toBe(46 * MiB);
+    // 同一次采样里要带上链上两种进程的 Private Bytes。
+    const counters = (execute.mock.calls[1]?.[1] ?? []) as string[];
+    expect(counters).toContain("\\Process(atm-core*)\\Creating Process ID");
+    expect(counters).toContain("\\Process(atm-core*)\\Private Bytes");
+    expect(counters).toContain("\\Process(AyanamiTaskManager*)\\Private Bytes");
+  });
+
   it("shim 没有下游进程，不取链上的计数器", async () => {
     const execute = vi
       .fn()

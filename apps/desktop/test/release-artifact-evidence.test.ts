@@ -131,6 +131,8 @@ describe("resume 证据字节闭包", () => {
     expect(skipped).toContain("output/distribution-smoke-report.json");
     for (const artifact of Object.values(candidate.artifacts)) {
       expect(paths).toContain(`release/${artifact.name}`);
+      // assembler 的真实输入：换掉它而 release/ 不动，resume 也必须失效。
+      expect(paths).toContain(`output/package/${artifact.name}`);
     }
     for (const report of [
       "output/release-verification.json",

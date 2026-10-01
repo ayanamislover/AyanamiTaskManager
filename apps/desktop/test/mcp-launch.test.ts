@@ -245,6 +245,29 @@ describe("过期判定", () => {
     expect(shouldRepairMcpConfigs({ ATM_DATA_DIR: "C:\\temp\\smoke" } as NodeJS.ProcessEnv)).toBe(
       false,
     );
+    expect(
+      shouldRepairMcpConfigs({
+        ATM_DATA_DIR: "C:\\temp\\smoke",
+        LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      } as NodeJS.ProcessEnv),
+    ).toBe(false);
+  });
+
+  // 原生宿主总会把解析好的数据根交给 core：指向默认产品数据根时照常修复（大小写不敏感）。
+  it("ATM_DATA_DIR 就是默认产品数据根时照常修复", () => {
+    const local = "C:\\Users\\u\\AppData\\Local";
+    for (const dataDir of [
+      `${local}\\AyanamiTaskManager`,
+      `${local.toLowerCase()}\\ayanamitaskmanager\\`,
+    ])
+      expect(
+        shouldRepairMcpConfigs({ ATM_DATA_DIR: dataDir, LOCALAPPDATA: local } as NodeJS.ProcessEnv),
+        dataDir,
+      ).toBe(true);
+    // 宿主确实无条件传它——这条用例存在的理由。
+    expect(
+      readFileSync(join(process.cwd(), "apps/desktop/native/host/src/core_process.rs"), "utf8"),
+    ).toContain('process.env("ATM_DATA_DIR", data_dir);');
   });
 
   it("开发态默认数据根不覆盖正式 current 与 Agent 配置", () => {
@@ -481,7 +504,15 @@ describe("原生 shim 优先", () => {
       expect(JSON.parse(json)).toEqual({ command: "<atm-mcp.exe>", args: ["--profile", profile] });
     }
     expect(guide).toContain(`\`<atm-mcp.exe>\` 是 \`${shimPath}\``);
-    expect(readFileSync("docs/portable-usage.md", "utf8")).toContain(`\`${shimPath}\``);
+    // 便携版没有安装事务建的 current 链接，mcpLaunch 落在解压目录本身。
+    const portable = readFileSync("docs/portable-usage.md", "utf8");
+    expect(portable).toContain(`命令指向解压目录下的 \`resources\\${MCP_SHIM_FILENAME}\``);
+    expect(portable).not.toContain(shimPath);
+    // shim 缺失时的回落就是 mcpLaunch 的另一支：宿主自己的 --mcp-stdio，不带环境变量。
+    expect(guide).toContain(
+      '`{"command":"<ATM.exe>","args":["--mcp-stdio","--profile","core"]}`，`<ATM.exe>` 是 ' +
+        `\`%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\AyanamiTaskManager.exe\``,
+    );
     expect(readFileSync("docs/troubleshooting.md", "utf8")).toContain(
       `使用 \`${shimPath}\`，参数只有 \`--profile <name>\`，不带环境变量`,
     );

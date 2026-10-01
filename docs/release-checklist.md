@@ -29,6 +29,11 @@
 - 正式安装验收必须从真实 `%LOCALAPPDATA%` 运行；不得使用只对单个 Agent 可见的覆盖层。
 - 发布前处理占用安装目录的桌面实例与 MCP stdio bridge；不得结束无关进程。
 - 用户数据目录不属于卸载产物，安装、升级和卸载均不得误删。
+- 版本目录带 `LICENSE` 与 `THIRD_PARTY_NOTICES.txt`（随包 Node、链接进原生程序的 crate、打包进
+  core/renderer 的 npm 依赖）。随包 Node 的许可证原文放 `third_party/node/LICENSE`，
+  `third_party/node/VERSION` 写打包所用 node 的版本；缺失或版本不符时声明里留
+  `NODE_LICENSE_PENDING`，assemble-release 拒绝组装候选。
+- `--resume` 的证据同时绑定 `release/` 与 `output/package/` 两份制品；重新打包即作废。
 
 ## 执行入口
 

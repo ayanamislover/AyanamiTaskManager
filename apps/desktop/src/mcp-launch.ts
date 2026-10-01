@@ -131,13 +131,17 @@ export function shouldManageMcpRuntime(
  * 就指向一个不存在的路径，正好制造出这次要修的那个故障，而且是我们自己制造的。
  *
  * 用户手动点安装不受影响：那是明示的意图，写什么都是他自己选的。
+ *
+ * 原生宿主总把解析好的数据根经 ATM_DATA_DIR 交给 core，哪怕它就是默认的产品数据根——
+ * 所以「有这个变量」不等于隔离，要看它指向哪里。只看变量在不在时，正式版的修复和低内存
+ * 开关的客户端同步会恒被跳过。
  */
 export function shouldRepairMcpConfigs(
   env: NodeJS.ProcessEnv = process.env,
   packaged = true,
 ): boolean {
   if (!shouldManageMcpRuntime(packaged, env)) return false;
-  if (!env.ATM_DATA_DIR) return true;
+  if (!isolatedDataDir(env)) return true;
   if (env.ATM_PACKAGED_SMOKE !== "1" || env.ATM_SMOKE_MCP_CONFIG_REPAIR !== "1") return false;
   const root = env.ATM_SMOKE_AGENT_CONFIG_ROOT;
   if (!root) return false;
@@ -147,6 +151,14 @@ export function shouldRepairMcpConfigs(
     return path === "" || (!path.startsWith("..") && !isAbsolute(path));
   };
   return [env.APPDATA, env.LOCALAPPDATA, env.USERPROFILE].every(inside);
+}
+
+/** ATM_DATA_DIR 指向默认产品数据根（`%LOCALAPPDATA%\AyanamiTaskManager`）以外的地方。 */
+function isolatedDataDir(env: NodeJS.ProcessEnv): boolean {
+  if (!env.ATM_DATA_DIR) return false;
+  if (!env.LOCALAPPDATA) return true;
+  const productRoot = resolve(env.LOCALAPPDATA, "AyanamiTaskManager");
+  return resolve(env.ATM_DATA_DIR).toLowerCase() !== productRoot.toLowerCase();
 }
 
 /**

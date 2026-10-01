@@ -29,7 +29,11 @@ import {
   releaseResumeEvidencePaths,
   type ReleaseResumeEvidenceManifest,
 } from "./release-artifact-evidence.js";
-import { assertSafeInstallRoot, removeProductShortcuts } from "./product-install-sites.js";
+import {
+  assertSafeInstallRoot,
+  findProductShortcuts,
+  stopInstalledShimsScript,
+} from "./product-install-sites.js";
 import { deliverUpdate, pruneConsumedFeed, updateFeedDir } from "./update-feed.js";
 import {
   commitReleasePreparation,
@@ -192,7 +196,9 @@ const canReuseDistributionSmoke =
   reusableReleaseCommands.has("distribution-smoke");
 
 // 1.x 不清场：卸掉它就没有了「回到 Electron」，第一次装原生版要走真正的迁移事务（快照、
-// 隔离旧版、失败自动撤回）。安装验收因此跳过，INSTALLED 证据由最后对运行实例的实测补上。
+// 隔离旧版、失败自动撤回）。安装验收因此跳过，候选没有 INSTALLED 层：最后对运行实例的
+// 实测只写 output/release-and-install.json，不补发布报告，GitHub 发布入口会拒绝这种候选。
+// 要签发稳定版，得在干净机器上跑一轮带安装验收的全量发布。
 const migrating = existing === "electron";
 const needsCleanRoom = existing === "native" && !canReuseDistributionSmoke;
 if (migrating) {
@@ -210,9 +216,8 @@ async function clearInstallation(): Promise<void> {
   step("清场：卸载当前原生版（用户数据保留）");
   assertSafeInstallRoot(installRoot, localAppDataRoot);
   // Agent 会话拉起的 atm-mcp.exe 占着安装根里的 shim；卸载遇到在用的文件会停在半途。
-  for (const pid of shimProcesses()) {
-    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-  }
+  const stopped = stopInstalledShims();
+  if (stopped.length > 0) process.stdout.write(`  结束安装根里的 MCP shim ${stopped.length} 个\n`);
   const uninstall = run(join(installRoot, "atm-setup.exe"), ["--uninstall", "--force", "--quiet"]);
   if (uninstall !== 0) throw new Error(`UNINSTALL_EXIT: ${uninstall}`);
   // 安装根里的 setup 删不掉正在运行的自己：它把卸载交给 %TEMP% 里的副本，自己先返回。
@@ -224,22 +229,20 @@ async function clearInstallation(): Promise<void> {
     await sleep(1000);
   if (existsSync(join(installRoot, "app.json")) || uninstallRegistered())
     throw new Error("UNINSTALL_INCOMPLETE");
-  const strandedShortcuts = await removeProductShortcuts();
-  if (strandedShortcuts.length > 0) {
-    process.stdout.write(`  清理残留快捷方式 ${strandedShortcuts.length} 个\n`);
+  // 快捷方式归 atm-setup 管：它按目标核对归属，只删本安装的。这里只报告剩下的，不按名字删——
+  // 同名的可能是便携版或用户自己改指别处的入口。
+  const remaining = await findProductShortcuts();
+  if (remaining.length > 0) {
+    process.stdout.write(
+      `  卸载后仍有 ${remaining.length} 个产品名快捷方式（未动，不属于本安装）\n`,
+    );
   }
 }
 
-/** 安装根下 resources\atm-mcp.exe 的进程（各 Agent 会话的 stdio shim）。 */
-function shimProcesses(): number[] {
+function stopInstalledShims(): number[] {
   const result = spawnSync(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `Get-Process -Name atm-mcp -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ${JSON.stringify(`${installRoot}\\*`).replaceAll('"', "'")} } | ForEach-Object { $_.Id }`,
-    ],
+    ["-NoProfile", "-NonInteractive", "-Command", stopInstalledShimsScript(installRoot)],
     { encoding: "utf8", windowsHide: true },
   );
   return (result.stdout ?? "")

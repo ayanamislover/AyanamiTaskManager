@@ -417,7 +417,7 @@ export function installAgentIntegrationHost(options: AgentIntegrationHostOptions
     const write = { command: stdioCommand, args: stdioArgs, env: stdioEnv };
     const result = runMcpProfileSwitch({
       enabled: enabled === true,
-      // ATM_DATA_DIR 是烟测/隔离环境，绝不能借设置开关改用户全局 Agent 配置。
+      // ATM_DATA_DIR 指到别处是烟测/隔离环境，绝不能借设置开关改用户全局 Agent 配置。
       adapters: shouldRepairMcpConfigs(process.env, options.packaged)
         ? profileSyncAdapters(write)
         : [],
