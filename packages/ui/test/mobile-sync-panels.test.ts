@@ -360,6 +360,31 @@ describe("Claude 自动开工面板", () => {
     expect(markup).toContain('atm-dispatch-error">失败： src/**/test/**<');
   });
 
+  it("失败原因写成链接、目标是行内代码时，红色原因行保留代码内容（peer R9-01）", () => {
+    const reason = "[检查](`ENOENT: missing a_b.ts`)";
+    const markup = panel(
+      dispatchStatus({
+        runs: [
+          {
+            run: "r4",
+            project: "DEMO",
+            key: "DEMO-T-0006",
+            title: "缺文件",
+            origin: "mobile",
+            state: "failed",
+            sessionId: "s4",
+            createdAt: "2026-10-01T12:40:00.000Z",
+            endedAt: "2026-10-01T12:40:05.000Z",
+            error: reason,
+            summary: { numTurns: 1, durationMs: 10, totalCostUsd: 0, result: reason },
+          },
+        ],
+      }),
+    );
+    expect(markup).toContain('atm-dispatch-error">[检查](ENOENT: missing a_b.ts)<');
+    expect(markup.match(/atm-row-sub atm-dispatch-(?:error|summary)/gu)).toHaveLength(1);
+  });
+
   it("结果与原因原文不同、预览相同时只留红色那一行", () => {
     const markup = panel(
       dispatchStatus({

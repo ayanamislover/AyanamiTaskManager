@@ -84,6 +84,15 @@ describe("派单结果的纯文本预览", () => {
     expect(plainPreview("照抄 `[日志](./a_b.ts)` 原样")).toBe("照抄 [日志](./a_b.ts) 原样");
   });
 
+  it("链接目标里是行内代码时整段留着，代码不随地址一起删掉（peer R9-01）", () => {
+    expect(plainPreview("[命令](`npm test`) 失败")).toBe("[命令](npm test) 失败");
+    expect(plainPreview("[检查](`ENOENT: missing a_b.ts`)")).toBe("[检查](ENOENT: missing a_b.ts)");
+    // 普通地址照常省略；文字里的代码照常保留。
+    expect(plainPreview("见 [`a_b.ts`](./a_b.ts) 和 [文档](https://example.invalid/x)")).toBe(
+      "见 a_b.ts 和 文档",
+    );
+  });
+
   it("原文自带私用区字符时：有行内代码的那行按原文，没有代码的行照常清理且字符不丢", () => {
     const privateUse = String.fromCharCode(0xe001);
     expect(plainPreview(`**a** ${privateUse} \`x\``)).toBe(`**a** ${privateUse} \`x\``);

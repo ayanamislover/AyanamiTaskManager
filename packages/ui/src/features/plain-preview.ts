@@ -57,7 +57,7 @@ const FENCE_CLOSE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/u;
 /** 行首记号：后面必须跟空白（标题、引用也可以直接到行尾），`#123`、`>=22` 这类普通文本不算。 */
 const LINE_MARKER =
   /^[ \t]*(?:#{1,6}(?=[ \t]|$)|>(?=[ \t]|$)|[-*+](?=[ \t])|\d{1,9}[.)](?=[ \t]))[ \t]*/u;
-const LINK = /\[([^\]\n]+)\]\([^)\s]*\)/gu;
+const LINK = /\[([^\]\n]+)\]\(([^)\s]*)\)/gu;
 /** 行内代码的占位字符取 Unicode 私用区，运行时生成。 */
 const PLACEHOLDER_BASE = 0xe000;
 const PLACEHOLDER_END = 0xf8ff;
@@ -96,8 +96,23 @@ function isPlaceholder(codePoint: number): boolean {
   return codePoint >= PLACEHOLDER_BASE && codePoint <= PLACEHOLDER_END;
 }
 
+function placeholderIndexes(text: string, count: number): number[] {
+  return Array.from(text).flatMap((char) => {
+    const index = (char.codePointAt(0) ?? 0) - PLACEHOLDER_BASE;
+    return index >= 0 && index < count ? [index] : [];
+  });
+}
+
+/**
+ * 链接只留文字。目标里有行内代码（占位符）时那不是能省略的地址（例如 [检查](`ENOENT: …`)），
+ * 整段留着，免得把代码连同地址一起删掉；文字里的代码照常保留。
+ */
 function cleanProse(text: string): string {
-  return dropBold(text).replace(LINE_MARKER, "").replace(LINK, "$1");
+  return dropBold(text)
+    .replace(LINE_MARKER, "")
+    .replace(LINK, (whole: string, label: string, target: string) =>
+      Array.from(target).some((char) => isPlaceholder(char.codePointAt(0) ?? 0)) ? whole : label,
+    );
 }
 
 function proseLine(line: string): string {
@@ -112,8 +127,12 @@ function proseLine(line: string): string {
     cursor = span.end;
   });
   masked += line.slice(cursor);
+  const cleaned = cleanProse(masked);
+  // 兜底：清理不该删掉、复制或调换任何一段代码；对不上就整行按原文，宁可露出记号也不丢内容。
+  const kept = placeholderIndexes(cleaned, spans.length);
+  if (kept.length !== spans.length || kept.some((index, at) => index !== at)) return line;
   let result = "";
-  for (const char of cleanProse(masked)) {
+  for (const char of cleaned) {
     const index = (char.codePointAt(0) ?? 0) - PLACEHOLDER_BASE;
     const span = index >= 0 ? spans[index] : undefined;
     result += span ? span.code : char;
