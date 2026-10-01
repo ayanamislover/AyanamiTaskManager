@@ -43,3 +43,4 @@ output/
 *.db
 *.db-wal
 *.db-shm
+/apps/desktop/native/target-drill/

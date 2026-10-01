@@ -140,7 +140,8 @@ pub fn commit(
     let toast = start_menu
         .as_ref()
         .or(desktop.as_ref())
-        .and_then(|shortcut| shortcut.toast_activator_clsid.clone());
+        .and_then(|shortcut| shortcut.toast_activator_clsid.clone())
+        .or_else(|| Some(env::TOAST_ACTIVATOR_CLSID.into()));
     shortcut::write(
         &env.start_menu_shortcut(),
         &app_shortcut(env, toast.clone()),

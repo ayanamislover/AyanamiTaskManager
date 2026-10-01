@@ -245,7 +245,7 @@ mod tests {
             icon_index: 0,
             description: "绫波任务管理器".into(),
             app_user_model_id: Some(crate::env::APP_USER_MODEL_ID.into()),
-            toast_activator_clsid: Some("{69f12b18-2bbb-5b7a-98b5-b8f0246b08a6}".into()),
+            toast_activator_clsid: Some(crate::env::TOAST_ACTIVATOR_CLSID.into()),
         };
         write(&path, &shortcut).unwrap();
         let read_back = read(&path).unwrap().unwrap();

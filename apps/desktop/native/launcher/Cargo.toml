@@ -8,8 +8,10 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+# Not "AyanamiTaskManager": the host has that bin name, and cargo keeps only one
+# target/release/AyanamiTaskManager.exe. Packaging copies this to launcher\AyanamiTaskManager.exe.
 [[bin]]
-name = "AyanamiTaskManager"
+name = "atm-launcher"
 path = "src/main.rs"
 
 [dependencies]

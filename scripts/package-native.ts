@@ -31,6 +31,7 @@ import { resolveAgentGuideBuild } from "./agent-guide-build.js";
 import { APP_LAYOUT, assembleAppDirectory } from "./app-layout.js";
 import { buildMcpShim } from "./mcp-shim-build.js";
 import {
+  assertExecutableIdentity,
   assertExecutableVersionResource,
   assertMcpShimVersionResource,
 } from "./package-content-policy.js";
@@ -85,7 +86,7 @@ export function nativeRelease(root: string): { host: string; launcher: string; s
   const target = join(root, NATIVE_CRATE_DIR, "target", "release");
   return {
     host: join(target, "AyanamiTaskManager.exe"),
-    launcher: join(target, "AyanamiTaskManager-launcher.exe"),
+    launcher: join(target, "atm-launcher.exe"),
     setup: join(target, "atm-setup.exe"),
   };
 }
@@ -99,18 +100,29 @@ export function drillSetup(root: string): string {
   return join(root, NATIVE_CRATE_DIR, "target-drill", "release", "atm-setup.exe");
 }
 
-/** host 与 launcher 的二进制同名，cargo 按包分别产出；构建后把启动器改名存一份。 */
 function buildNative(root: string, drill: boolean): void {
   const cwd = join(root, NATIVE_CRATE_DIR);
   const env = { CARGO_TARGET_DIR: "target", ATM_REQUIRE_VERSION_RESOURCE: "1" };
-  run("cargo", ["build", "--release", "--locked", "-p", "atm-launcher"], cwd, env);
-  const release = nativeRelease(root);
-  copyFileSync(join(cwd, "target", "release", "AyanamiTaskManager.exe"), release.launcher);
-  run("cargo", ["build", "--release", "--locked", "-p", "atm-host", "-p", "atm-setup"], cwd, env);
+  run(
+    "cargo",
+    ["build", "--release", "--locked", "-p", "atm-launcher", "-p", "atm-host", "-p", "atm-setup"],
+    cwd,
+    env,
+  );
   if (drill)
     run(
       "cargo",
-      ["build", "--release", "--locked", "-p", "atm-setup", "--features", "drill"],
+      [
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "atm-setup",
+        "--features",
+        "drill",
+        "--bins",
+        "--examples",
+      ],
       cwd,
       {
         ...env,
@@ -162,6 +174,10 @@ export function schemaSet(migrationsRoot: string): string {
     )
     .sort();
   return sha256(Buffer.from(lines.join("\n"), "utf8"));
+}
+
+function assertExecutable(appDir: string, path: string, internalName: string, label: string): void {
+  assertExecutableIdentity(readFileSync(join(appDir, path)), internalName, label);
 }
 
 /** 版本目录里的每个原生可执行文件都必须带本版本的版本资源。 */
@@ -247,6 +263,10 @@ export function packageNative(input: {
     ...(coreDir ? { coreDir } : {}),
   });
   if (coreDir) rmSync(coreDir, { recursive: true, force: true });
+  // 身份与版本无关，演练包也查：同名的宿主被当成启动器拷进包，启动「也能用」，却没了安装屏障。
+  assertExecutable(appDir, APP_LAYOUT.host, "AyanamiTaskManager.Host", "HOST");
+  assertExecutable(appDir, APP_LAYOUT.launcher, "AyanamiTaskManager.Launcher", "LAUNCHER");
+  assertExecutable(appDir, APP_LAYOUT.setup, "atm-setup", "SETUP");
   if (input.drillVersion === undefined) assertExecutables(appDir, version);
   if (!drill) assertProductionSetup(readFileSync(join(appDir, APP_LAYOUT.setup)));
 

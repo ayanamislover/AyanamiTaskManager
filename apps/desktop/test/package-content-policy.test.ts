@@ -2,7 +2,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { MCP_SHIM_RELEASE_EXE } from "../../../scripts/mcp-shim-build.js";
 import {
+  assertExecutableIdentity,
   assertMcpShimVersionResource,
+  executableInternalName,
   assertPublishedLogoBytes,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
@@ -137,6 +139,43 @@ describe("packaged MCP shim", () => {
     ).not.toThrow();
     expect(() => assertMcpShimVersionResource(versionString("1.2.4", 0, "1.2.3"), "1.2.3")).toThrow(
       /PACKAGED_MCP_SHIM_VERSION_MISMATCH/u,
+    );
+  });
+
+  it("宿主和根启动器同名同描述，只认 InternalName 区分", () => {
+    const nul = String.fromCharCode(0);
+    const exe = (internalName: string, padding: 0 | 2) =>
+      Buffer.concat([
+        // 常量区里在前面的同名键不算。
+        Buffer.from(`InternalName${nul}AyanamiTaskManager.Launcher${nul}`, "utf16le"),
+        Buffer.from(`VS_VERSION_INFO${nul}`, "utf16le"),
+        Buffer.from(`InternalName${nul}`, "utf16le"),
+        Buffer.alloc(padding),
+        Buffer.from(`${internalName}${nul}`, "utf16le"),
+      ]);
+    for (const padding of [0, 2] as const) {
+      expect(executableInternalName(exe("AyanamiTaskManager.Host", padding))).toBe(
+        "AyanamiTaskManager.Host",
+      );
+      expect(() =>
+        assertExecutableIdentity(
+          exe("AyanamiTaskManager.Launcher", padding),
+          "AyanamiTaskManager.Launcher",
+          "LAUNCHER",
+        ),
+      ).not.toThrow();
+      expect(() =>
+        assertExecutableIdentity(
+          exe("AyanamiTaskManager.Host", padding),
+          "AyanamiTaskManager.Launcher",
+          "LAUNCHER",
+        ),
+      ).toThrow(
+        /PACKAGED_LAUNCHER_WRONG_EXECUTABLE: expected AyanamiTaskManager\.Launcher, found AyanamiTaskManager\.Host/u,
+      );
+    }
+    expect(() => assertExecutableIdentity(Buffer.alloc(64), "atm-setup", "SETUP")).toThrow(
+      /PACKAGED_SETUP_WRONG_EXECUTABLE: expected atm-setup, found null/u,
     );
   });
 

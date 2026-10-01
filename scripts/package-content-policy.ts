@@ -75,6 +75,31 @@ export function assertExecutableVersionResource(
   }
 }
 
+/**
+ * 版本资源里 InternalName 的值；没有版本资源或没有这个键时为 null。
+ *
+ * 宿主和根启动器的文件名、描述都是 AyanamiTaskManager（快捷方式和任务管理器里看到的就是它），
+ * 只有 InternalName 能区分两者：把宿主当启动器拷进包，功能上「也能启动」，却没有了安装屏障。
+ */
+export function executableInternalName(bytes: Buffer): string | null {
+  const nul = String.fromCharCode(0);
+  const resource = bytes.lastIndexOf(Buffer.from("VS_VERSION_INFO", "utf16le"));
+  const key = Buffer.from(`InternalName${nul}`, "utf16le");
+  const at = resource < 0 ? -1 : bytes.indexOf(key, resource);
+  if (at < 0) return null;
+  let value = at + key.length;
+  if (value + 2 <= bytes.length && bytes.readUInt16LE(value) === 0) value += 2;
+  let end = value;
+  while (end + 2 <= bytes.length && end < value + 128 && bytes.readUInt16LE(end) !== 0) end += 2;
+  return bytes.subarray(value, end).toString("utf16le");
+}
+
+export function assertExecutableIdentity(bytes: Buffer, internalName: string, label: string): void {
+  const found = executableInternalName(bytes);
+  if (found !== internalName)
+    throw new Error(`PACKAGED_${label}_WRONG_EXECUTABLE: expected ${internalName}, found ${found}`);
+}
+
 const forbiddenEntryPatterns = [
   /^knowledge(?:\/|$)/u,
   /(?:^|\/)knowledge\.sqlite(?:-(?:wal|shm))?$/u,

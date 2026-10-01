@@ -271,6 +271,33 @@ pub fn lock_held(_install_root: &Path) -> bool {
     false
 }
 
+/// Stop this process's standard handles from leaking into the processes it starts.
+///
+/// std's `Command` creates every child with `bInheritHandles = TRUE`, so a child given
+/// `Stdio::null()` still inherits every inheritable handle — including the pipe a caller
+/// captured our output with. Launcher → setup → host passes it down hop by hop, and the
+/// long-lived host then holds the caller's pipe open: `AyanamiTaskManager.exe --background`
+/// run with captured output never reaches EOF. `Stdio::inherit()` duplicates the handle as
+/// inheritable for that one child, so inherited stdio (headless routes) keeps working.
+#[cfg(windows)]
+pub fn stop_std_handle_inheritance() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let handle = unsafe { GetStdHandle(id) };
+        if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) };
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn stop_std_handle_inheritance() {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchIntent {
     Normal,

@@ -87,6 +87,25 @@ pub fn newstyle_dir(rollback: &Path) -> PathBuf {
 
 /// Move each item from `from` to `to` if it is still at `from`; idempotent, so a resumed
 /// step picks up where a dead setup stopped.
+/// Undo of [`move_items`] (`from`/`to` as in the forward call): each item moved with one
+/// atomic rename, so an item still at its original place was never moved, and whatever has
+/// its name at the far end is a leftover of an earlier cycle — not ours to bring back.
+pub fn move_back(items: &[String], from: &Path, to: &Path) -> Result<(), String> {
+    for item in items {
+        let original = from.join(item);
+        let moved = to.join(item);
+        if original.exists() || std::fs::symlink_metadata(&original).is_ok() {
+            continue;
+        }
+        if moved.exists() || std::fs::symlink_metadata(&moved).is_ok() {
+            fsx::move_path(&moved, &original).map_err(|error| {
+                format!("move {} → {}: {error}", moved.display(), original.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn move_items(items: &[String], from: &Path, to: &Path) -> Result<(), String> {
     for item in items {
         let source = from.join(item);
@@ -101,4 +120,54 @@ pub fn move_items(items: &[String], from: &Path, to: &Path) -> Result<(), String
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("target")
+            .join("setup-tests")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::path::absolute(dir).unwrap()
+    }
+
+    /// Round trip to Electron and forward again leaves `newstyle\app-2.0.0` behind; the next
+    /// reverse migration fails before moving anything and undoes. The live directory must stay
+    /// and the leftover must not be brought back over it.
+    #[test]
+    fn move_back_skips_items_that_never_moved_and_ignores_leftovers() {
+        let dir = scratch("move-back");
+        let (root, aside) = (dir.join("root"), dir.join("aside"));
+        for path in [
+            root.join("app-2.0.0"),
+            aside.join("app-2.0.0"),
+            aside.join("app-2.0.1"),
+        ] {
+            fs::create_dir_all(&path).unwrap();
+        }
+        fs::write(root.join("app-2.0.0").join("live"), b"").unwrap();
+        fs::write(aside.join("app-2.0.0").join("stale"), b"").unwrap();
+        let items = vec!["app-2.0.0".to_owned(), "app-2.0.1".to_owned()];
+        assert!(
+            move_items(&items, &root, &aside)
+                .unwrap_err()
+                .contains("already exists")
+        );
+        move_back(&items, &root, &aside).unwrap();
+        assert!(root.join("app-2.0.0").join("live").is_file());
+        assert!(aside.join("app-2.0.0").join("stale").is_file());
+        // app-2.0.1 had been moved aside: it comes back.
+        assert!(root.join("app-2.0.1").is_dir() && !aside.join("app-2.0.1").exists());
+        // Resumed after finishing: nothing left to do, nothing disturbed.
+        move_back(&items, &root, &aside).unwrap();
+        assert!(root.join("app-2.0.0").join("live").is_file() && root.join("app-2.0.1").is_dir());
+    }
 }

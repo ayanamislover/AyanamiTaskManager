@@ -3,5 +3,6 @@ fn main() {
         name: "host",
         description: "AyanamiTaskManager",
         original_filename: "AyanamiTaskManager.exe",
+        internal_name: "AyanamiTaskManager.Host",
     });
 }

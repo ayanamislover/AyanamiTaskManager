@@ -129,6 +129,13 @@ fn install(env: env::Env, args: &Args) -> i32 {
             return EXIT_FAILED;
         }
     };
+    let journal_id = |setup: &txn::Setup| {
+        atm_install_state::read_journal(&setup.env.install_root)
+            .ok()
+            .flatten()
+            .map(|txn| (txn.id, txn.outcome))
+    };
+    let before = journal_id(&setup).map(|(id, _)| id);
     match setup.install(&package, args.retry) {
         Ok(outcome) => {
             if !args.quiet {
@@ -136,14 +143,22 @@ fn install(env: env::Env, args: &Args) -> i32 {
             }
             outcome_exit(outcome)
         }
+        Err(error) if error.starts_with("ALREADY_INSTALLED") => {
+            if !args.quiet {
+                log::inform(&format!(
+                    "AyanamiTaskManager {version} 已经安装，无需重复安装。"
+                ));
+            }
+            EXIT_OK
+        }
         Err(error) => {
             log::warn(&format!("安装没有完成，原来的版本保持不变。\n\n{error}"));
-            // The outcome is in the journal; map it for scripts.
-            let outcome = atm_install_state::read_journal(&setup.env.install_root)
-                .ok()
-                .flatten()
-                .and_then(|txn| txn.outcome);
-            outcome.map(outcome_exit).unwrap_or(EXIT_FAILED)
+            // A transaction this call started has its outcome in the journal. Refused before
+            // LOCK, the journal is still the previous one — its COMMITTED says nothing here.
+            match journal_id(&setup) {
+                Some((id, Some(outcome))) if Some(&id) != before.as_ref() => outcome_exit(outcome),
+                _ => EXIT_FAILED,
+            }
         }
     }
 }
@@ -236,5 +251,6 @@ fn real_main() -> i32 {
 }
 
 fn main() {
+    atm_install_state::stop_std_handle_inheritance();
     std::process::exit(real_main());
 }

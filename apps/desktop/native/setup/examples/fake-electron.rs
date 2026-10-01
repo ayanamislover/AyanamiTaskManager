@@ -55,6 +55,8 @@ fn main() {
     let data = PathBuf::from(std::env::var_os("ATM_DATA_DIR").expect("ATM_DATA_DIR"));
     let me = std::env::current_exe().expect("exe");
     let app_dir = me.parent().expect("app dir").to_path_buf();
+    let runtime = data.join("runtime");
+    fs::create_dir_all(&runtime).expect("runtime dir");
     // The old app's installMcpRuntimeLink: current → its own app directory.
     let link = data.join("current");
     let _ = fs::remove_dir(&link);
@@ -63,8 +65,6 @@ fn main() {
         .arg(&link)
         .arg(&app_dir)
         .output();
-    let runtime = data.join("runtime");
-    fs::create_dir_all(&runtime).expect("runtime dir");
     let (ticks, started_ms) = creation_ticks();
     let pid = std::process::id();
     let nonce = format!("{:032x}", u128::from(now_ms()) << 20 | u128::from(pid));
@@ -72,7 +72,11 @@ fn main() {
     let lease = format!(
         "{{\"pid\":{pid},\"nonce\":\"{nonce}\",\"processIdentity\":{{\"createdAtTicks\":\"{ticks}\",\"startedAtMs\":{started_ms}}}}}\n"
     );
-    match fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
         Ok(mut file) => file.write_all(lease.as_bytes()).expect("write lease"),
         Err(_) => {
             fs::write(&lock, lease.as_bytes()).expect("take stale lease");

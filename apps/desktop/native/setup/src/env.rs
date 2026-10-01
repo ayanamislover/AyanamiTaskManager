@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 /// shortcuts and in the host (toasts), and the Uninstall key all carry it (§ plan v9).
 pub const APP_USER_MODEL_ID: &str = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
 pub const RUN_VALUE: &str = APP_USER_MODEL_ID;
+/// The ToastActivatorCLSID Squirrel derived from that AUMID (name-based UUID). A first
+/// install writes the same one, so a fresh and a migrated install have identical shortcuts.
+pub const TOAST_ACTIVATOR_CLSID: &str = "{69f12b18-2bbb-5b7a-98b5-b8f0246b08a6}";
 pub const UNINSTALL_NAME: &str = "AyanamiTaskManagerDesktop";
 pub const INSTALL_DIR_NAME: &str = "AyanamiTaskManagerDesktop";
 pub const DISPLAY_NAME: &str = "AyanamiTaskManager";

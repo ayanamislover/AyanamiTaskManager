@@ -24,6 +24,9 @@ pub struct Resource<'a> {
     pub name: &'a str,
     pub description: &'a str,
     pub original_filename: &'a str,
+    /// Tells apart executables that share a file name and description (host and root
+    /// launcher are both `AyanamiTaskManager.exe`); packaging checks it per slot.
+    pub internal_name: &'a str,
 }
 
 /// Call from a crate's build.rs under apps/desktop/native/<crate>.
@@ -85,7 +88,7 @@ BEGIN
       VALUE "CompanyName", "ayanami"
       VALUE "FileDescription", "{description}"
       VALUE "FileVersion", "{version}"
-      VALUE "InternalName", "AyanamiTaskManager"
+      VALUE "InternalName", "{internal_name}"
       VALUE "OriginalFilename", "{original_filename}"
       VALUE "ProductName", "AyanamiTaskManager"
       VALUE "ProductVersion", "{version}"
@@ -99,6 +102,7 @@ END
 "#,
         description = resource.description,
         original_filename = resource.original_filename,
+        internal_name = resource.internal_name,
     );
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let source = out.join(format!("{}.rc", resource.name));

@@ -117,11 +117,17 @@ fn forward(setup: &mut Setup, txn: &mut Transaction, record: &Snapshot, version:
         })
         .collect();
     fsx::write_json_atomic(&newstyle_record(setup, txn), &moved).map_err(io)?;
-    legacy::move_items(
-        &moved,
-        &env.install_root,
-        &legacy::newstyle_dir(&env.rollback_dir()),
-    )?;
+    // An earlier round trip (to Electron, forward again) left its copies here; the version
+    // directories in the root are the live ones and replace them.
+    let newstyle = legacy::newstyle_dir(&env.rollback_dir());
+    for name in &moved {
+        let stale = newstyle.join(name);
+        if stale.exists() {
+            fsx::remove_tree_within(&stale, &env.install_root).map_err(io)?;
+            say!("R_ISOLATE_NEW replaced the stale {}", stale.display());
+        }
+    }
+    legacy::move_items(&moved, &env.install_root, &newstyle)?;
     // R_POINTER: `legacy:` never equals any `app-x.y.z`, so every new-style admission ends.
     store::enter(&setup.store, txn, TxnState::ReversePointer).map_err(io)?;
     setup
@@ -238,10 +244,11 @@ fn undo_legacy_step(
         2 => {
             let launcher = snapshot::saved_root_file(&env, &snap.txn, env::LAUNCHER);
             fsx::replace_file(&env.launcher(), &launcher).map_err(io)?;
-            legacy::move_items(
+            // Undo of R_RESTORE_LEGACY (isolated → root), resumable item by item.
+            legacy::move_back(
                 &legacy.items,
-                &env.install_root,
                 &legacy::isolated_dir(&env.rollback_dir()),
+                &env.install_root,
             )?;
             fsx::retarget_junction(&env.current_link(), &env.install_root).map_err(io)
         }
@@ -272,10 +279,10 @@ fn undo_legacy_step(
                 fsx::read_json_limited(&newstyle_record(setup, txn), 256 * 1024)
                     .map_err(io)?
                     .unwrap_or_default();
-            legacy::move_items(
+            legacy::move_back(
                 &moved,
-                &legacy::newstyle_dir(&env.rollback_dir()),
                 &env.install_root,
+                &legacy::newstyle_dir(&env.rollback_dir()),
             )?;
             if let Some(pointer) = &snap.pointer {
                 setup.store.set_pointer(pointer).map_err(io)?;
