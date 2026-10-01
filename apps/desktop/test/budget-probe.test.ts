@@ -7,6 +7,7 @@ import {
   buildProcessTree,
   descendantsExited,
   EXITED_STATES,
+  quitConfirmed,
   requireExitConfirmed,
   type RawProcessTree,
 } from "../../../scripts/budget-probe.js";
@@ -198,6 +199,24 @@ describe("预算探针（真编译、真跑）", () => {
     });
   });
 
+  // R9-P2-1：强制结束后宿主仍在，子孙再干净也不算确认；强制结束成功则算。
+  it("宿主自己最终退出才算确认", () => {
+    const tree = buildProcessTree(
+      {
+        bound: "500",
+        members: [
+          { pid: 1, ppid: 0, exe: "h.exe", state: "ok", ticks: "100", ws: 1, priv: 1 },
+          { pid: 2, ppid: 1, exe: "c.exe", state: "ok", ticks: "200", ws: 1, priv: 1 },
+        ],
+      },
+      1,
+    );
+    expect(quitConfirmed({ hostGone: false, tree, states: ["gone"] })).toBe(false);
+    expect(quitConfirmed({ hostGone: true, tree, states: ["gone"] })).toBe(true);
+    expect(quitConfirmed({ hostGone: true, tree, states: ["same"] })).toBe(false);
+    expect(quitConfirmed({ hostGone: true, tree: null, states: [] })).toBe(false);
+  });
+
   // R8-P2-3：没确认退出就停止后续轮次，不再刷新、复用这一轮的数据目录。
   it("每轮保存退出证据之后确认，没确认就停", () => {
     expect(() => requireExitConfirmed("第 1 轮", { confirmed: false })).toThrow(/停止后续轮次/u);
@@ -211,9 +230,10 @@ describe("预算探针（真编译、真跑）", () => {
       expect(main.slice(0, at).trimEnd().endsWith("save();")).toBe(true);
     }
     // 收尾的结论来自纯函数，根不再被滤掉；宿主提前退出不算确认。
-    expect(budget).toContain("const confirmed = descendantsExited(tree, states);");
+    expect(budget).toContain("const confirmed = quitConfirmed({ hostGone, tree, states });");
+    expect(budget).toContain("hostGone = await exited(host, 5_000);");
     expect(budget).not.toMatch(/unknown\.filter\(\(pid\) => pid !== host\.pid\)/u);
-    expect(budget).toMatch(/reply: "already-exited",\s*confirmed: false,/u);
+    expect(budget).toMatch(/reply: "already-exited",\s*hostGone: true,\s*confirmed: false,/u);
     const probe = readFileSync("scripts/budget-probe.ts", "utf8");
     expect(probe.indexOf("long bound = DateTime.UtcNow.Ticks;")).toBeGreaterThan(0);
     expect(probe.indexOf("long bound = DateTime.UtcNow.Ticks;")).toBeLessThan(

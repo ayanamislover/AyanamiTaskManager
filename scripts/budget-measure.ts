@@ -63,7 +63,7 @@ import { powershellScratch } from "./powershell-scratch.js";
 import {
   BUDGET_PROBE as PROBE,
   buildProcessTree,
-  descendantsExited,
+  quitConfirmed,
   EXITED_STATES,
   requireExitConfirmed,
   treeComplete,
@@ -506,7 +506,9 @@ async function quitHost(
 ): Promise<{
   graceful: boolean;
   reply: string;
-  /** 确认了宿主的整棵子孙树都已退出（见 descendantsExited）。 */
+  /** 宿主自己最终退出了（优雅退出，或强制结束后确实退出）。 */
+  hostGone: boolean;
+  /** 宿主与整棵子孙树都确认已退出（见 quitConfirmed）。 */
   confirmed: boolean;
   descendantsGoneMs: number | null;
   descendantsUnknown: number;
@@ -517,6 +519,7 @@ async function quitHost(
     return {
       graceful: false,
       reply: "already-exited",
+      hostGone: true,
       confirmed: false,
       descendantsGoneMs: null,
       descendantsUnknown: 0,
@@ -529,9 +532,10 @@ async function quitHost(
   const descendants = (tree?.rows ?? []).filter((row) => row.pid !== host.pid);
   const reply = await sendPipe(pipeName(await probe.session(host.pid)), { cmd: "QUIT" });
   const graceful = await exited(host, 20_000);
+  let hostGone = graceful;
   if (!graceful) {
     killProcessTree(host.pid);
-    await exited(host, 5_000);
+    hostGone = await exited(host, 5_000);
   }
   const quitAt = Date.now();
   let states: string[] = [];
@@ -546,10 +550,11 @@ async function quitHost(
     50,
   ).catch(() => false);
   if (!left) for (const row of descendants) await probe.killSame(row);
-  const confirmed = descendantsExited(tree, states);
+  const confirmed = quitConfirmed({ hostGone, tree, states });
   return {
     graceful: graceful && confirmed,
     reply,
+    hostGone,
     confirmed,
     descendantsGoneMs: confirmed ? Date.now() - quitAt : null,
     // 查不了身份的个数：快照时就查不了的候选，加上最后一轮仍查不了的子孙。

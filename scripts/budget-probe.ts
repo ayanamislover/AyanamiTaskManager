@@ -105,6 +105,18 @@ export function descendantsExited(tree: ProcessTree | null, states: readonly str
 }
 
 /**
+ * 整次收尾是否确认：宿主自己最终退出了（优雅退出，或强制结束后确实退出），且子孙全部确认退出。
+ * 强制结束成功也算安全收尾；强制结束后宿主仍在，就不能放行下一轮（Codex R9-P2-1）。
+ */
+export function quitConfirmed(input: {
+  hostGone: boolean;
+  tree: ProcessTree | null;
+  states: readonly string[];
+}): boolean {
+  return input.hostGone && descendantsExited(input.tree, input.states);
+}
+
+/**
  * 每轮保存退出证据之后调用：没确认子孙全部退出，就停止后续轮次——未确认退出的 WebView2
  * 可能还占着这一轮的用户数据目录，下一轮不能刷新、复用它。不结束身份未知的进程。
  */
