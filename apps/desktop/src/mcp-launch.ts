@@ -1,15 +1,5 @@
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import {
-  copyFileSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  realpathSync,
-  readlinkSync,
-  rmdirSync,
-  symlinkSync,
-  unlinkSync,
-} from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 
 export const MCP_STDIO_FILENAME = "mcp-stdio.cjs";
 
@@ -54,35 +44,35 @@ export function mcpStdioHttpPath(args: readonly string[]): string {
  *    之后 ATM 再怎么改盘上的配置，那个会话都还在拿旧路径 spawn。用户看到的就是
  *    `spawn ...app-1.0.10\AyanamiTaskManager.exe ENOENT`。
  *
- * 所以路径本身必须不认版本：数据根下建一个目录链接（NTFS junction，**不需要管理员
- * 权限**），每次启动重新指向当前安装目录，command 走链接。客户端拿着多久以前的配置
- * 都无所谓，那个路径永远存在、永远是当前版本。实测穿透后 Electron 正常以 Node 运行，
- * `process.execPath` 就是链接路径。
+ * 所以路径本身必须不认版本：数据根下的目录链接 `current`（NTFS junction，**不需要管理员
+ * 权限**）由安装事务指向安装根，command 走链接。客户端拿着多久以前的配置都无所谓，那个
+ * 路径永远存在、永远是当前版本。
  *
- * 建不出链接时回落到真实 exe——那就退回 1.0.12 的行为（靠启动时修复），是下限不是缺陷。
+ * **优先用原生 shim**：`current\resources\atm-mcp.exe`，只做逐行转发，私有内存不到 1 MB，
+ * 由链接下的 `..\AyanamiTaskManager.exe` 唤醒桌面。不需要任何环境变量；`args` 必须是空数组
+ * 而不是省略——agent-config 在缺省时会补 `--mcp-stdio`，那是给宿主 exe 的开关。
  *
- * **优先用原生 shim。** 旧写法每个 MCP server 都把 215 MB 的 Electron 当 Node 跑一份
- * （实测私有内存约 30 MB、首包约 115 ms），而它只做逐行转发；每个 Agent 会话起三个。
- * shim 协议与 `mcp-stdio.cjs` 完全一致（共享契约测试钉住），私有内存不到 1 MB。它走同一个
- * 版本无关链接：`current\resources\atm-mcp.exe`，并由链接下的 `..\AyanamiTaskManager.exe`
- * 唤醒桌面。不需要任何环境变量；`args` 必须是空数组而不是省略——agent-config 在缺省时会补
- * `--mcp-stdio`，那是给桌面 exe 的旧开关。
- *
- * shim 不在（开发态、旧安装、或被杀毒软件隔离）就回落到 Electron-as-node 的 JS 桥：
+ * shim 不在（开发态、或被杀毒软件隔离）就回落到宿主自己的 `--mcp-stdio`：安装根的启动器把它
+ * 当无界面命令转给当前版本的宿主，宿主再用随包的 Node 跑 `mcp-stdio.cjs`，等它退出才退出。
  * 下次启动时的过期修复会把 Agent 配置自动改过去，不会降级成连不上。
  */
 export function mcpLaunch(input: { execPath: string; dataDir: string }): McpLaunch {
-  const linkedRoot = join(input.dataDir, MCP_RUNTIME_LINK);
-  const linked = join(linkedRoot, basename(input.execPath));
-  const installRoot = existsSync(linked) ? linkedRoot : dirname(input.execPath);
-  const shim = join(installRoot, "resources", MCP_SHIM_FILENAME);
+  const host = versionlessHost(input);
+  const shim = join(dirname(host), "resources", MCP_SHIM_FILENAME);
   if (existsSync(shim)) return { command: shim, args: [], env: {} };
-  return mcpNodeBridgeLaunch(input);
+  return { command: host, args: ["--mcp-stdio"], env: {} };
+}
+
+/** 链接下的宿主入口；链接还没建（开发态）时用真实路径——那就只能靠启动时修复跟上。 */
+function versionlessHost(input: { execPath: string; dataDir: string }): string {
+  const linked = join(input.dataDir, MCP_RUNTIME_LINK, basename(input.execPath));
+  return existsSync(linked) ? linked : input.execPath;
 }
 
 /**
- * Electron-as-node 跑 `mcp-stdio.cjs` 的旧启动方式。shim 缺失时的回落，也是桥进程观测
- * 在切换期间要一并认出的另一种进程：已开着的会话仍握着旧配置，直到它们重启。
+ * Electron 1.x 写进 Agent 配置的旧启动方式：`current\AyanamiTaskManager.exe` 以
+ * ELECTRON_RUN_AS_NODE 跑数据根下的 `mcp-stdio.cjs`。新版本绝不再写它；迁移后宿主仍认这条
+ * 命令（args.rs 的 legacy 形式），桥进程观测也要一并认出——已开着的会话会握着旧配置直到重启。
  */
 export function mcpNodeBridgeLaunch(input: { execPath: string; dataDir: string }): McpLaunch {
   const linked = join(input.dataDir, MCP_RUNTIME_LINK, basename(input.execPath));
@@ -110,58 +100,6 @@ export function mcpProfileLaunches(input: {
 }
 
 /**
- * 把数据根下那个版本无关的目录链接指向当前安装目录。
- *
- * 已经指得对就不动：重建有一个「链接不存在」的窗口，正好落在那一刻的 spawn 会失败。
- *
- * 删除只用 `rmdirSync` / `unlinkSync`。两个都只作用在链接本身，不可能穿透进目标——
- * 万一哪天这里换成递归删除，删掉的就是用户装好的应用。这不是洁癖：链接指向安装根。
- */
-export function installMcpRuntimeLink(execPath: string, dataDir: string): string | null {
-  const link = join(dataDir, MCP_RUNTIME_LINK);
-  // Electron 保留进程的启动路径：若登录项从 `current\\AyanamiTaskManager.exe` 启动，
-  // process.execPath 仍然落在 current 下面。直接 dirname(execPath) 会把 current 重建成
-  // 指向自身的 junction，下一次 MCP spawn 就只剩 Transport closed。先穿透链接取得真实
-  // app-<version> 目录；解析失败时也必须靠下面的自引用守卫 fail closed。
-  let target: string;
-  try {
-    target = dirname(realpathSync.native(execPath));
-  } catch {
-    target = dirname(resolve(execPath));
-  }
-  const samePath = (left: string, right: string): boolean => {
-    const resolvedLeft = resolve(left);
-    const resolvedRight = resolve(right);
-    return process.platform === "win32"
-      ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
-      : resolvedLeft === resolvedRight;
-  };
-  if (samePath(target, link)) return null;
-  try {
-    mkdirSync(dataDir, { recursive: true });
-    // existsSync 会沿着 junction 看目标：旧 app-<version> 已删时它返回 false，
-    // 但链接目录项本身仍在。随后直接 symlink 会 EEXIST，并被 catch 静默回退到
-    // 带版本号的真实 exe。lstat 看的是目录项本身，悬空链接也能被识别和换指。
-    const stat = lstatSync(link, { throwIfNoEntry: false });
-    if (stat) {
-      if (!stat.isSymbolicLink()) return null; // 有人拿真目录占了位，不替他做主删掉
-      if (samePath(readlinkSync(link), target)) return link;
-      // rmdir 删 Windows 的 junction，unlink 删 POSIX 的目录符号链接。两个都只作用在
-      // 链接本身；这里绝不能出现任何 recursive 删除。
-      try {
-        rmdirSync(link);
-      } catch {
-        unlinkSync(link);
-      }
-    }
-    symlinkSync(target, link, "junction");
-    return existsSync(join(link, basename(execPath))) ? link : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * 桥接脚本复制到数据根。resources 每版换目录，数据根不换；每次启动覆盖，
  * 所以它始终是当前版本的那一份。
  */
@@ -175,8 +113,8 @@ export function installMcpStdioBridge(source: string, dataDir: string): string {
 
 /**
  * 正式安装版可以维护稳定 MCP 入口；开发态只有显式隔离了数据根才允许写入。
- * 否则 `pnpm dev` 会把正式 current 指向 node_modules/electron，并同步污染全局
- * Codex/Claude 配置，导致已安装版本和所有新 Agent 会话同时失联。
+ * 否则源码运行会把全局 Codex/Claude 配置改成指向开发目录，已安装版本和所有新 Agent
+ * 会话同时失联。
  */
 export function shouldManageMcpRuntime(
   packaged: boolean,

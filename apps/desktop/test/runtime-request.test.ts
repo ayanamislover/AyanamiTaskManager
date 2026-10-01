@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { proxyRuntimeRequest } from "../src/runtime-request.js";
 
 describe("renderer runtime request capability", () => {
-  it("preload and renderer never expose the daemon descriptor or raw token", () => {
-    const sourceRoot = join(process.cwd(), "apps", "desktop", "src");
-    const preload = readFileSync(join(sourceRoot, "preload.ts"), "utf8");
-    const renderer = readFileSync(join(sourceRoot, "renderer.tsx"), "utf8");
-    expect(preload).not.toContain("atm:get-runtime");
-    expect(preload).not.toContain("sendSync");
-    expect(preload).not.toMatch(/runtime\s*[:,]/u);
+  it("the page bridge and renderer never expose the daemon descriptor or raw token", () => {
+    const desktop = join(process.cwd(), "apps", "desktop");
+    const bridge = readFileSync(join(desktop, "native", "host", "src", "bridge.rs"), "utf8");
+    const renderer = readFileSync(join(desktop, "src", "renderer.tsx"), "utf8");
+    expect(bridge).toContain("pub const INIT_SCRIPT");
+    expect(bridge).not.toMatch(/getRuntime|atm:get-runtime/u);
+    expect(bridge).not.toMatch(/\bruntime\s*[:,]/u);
     expect(renderer).not.toContain("desktop?.runtime");
     expect(renderer).toContain("desktop.runtimeRequest");
   });

@@ -94,19 +94,20 @@ describe("MCP profile 过期判据跟随启用集合", () => {
     ).toBe(true);
   });
 
-  it("Electron Node bridge 环境变量缺失或写错时不能假绿", () => {
+  it("启动参数少了或残留旧环境变量时不能假绿", () => {
     expect(
       mcpProfileLaunchesStale(
-        { legacy: null, core: { command: core().command, args: core().args }, memory: null },
+        { legacy: null, core: { ...core(), args: ["--profile", "core"] }, memory: null },
         EXPECTED,
         ["core"],
       ),
     ).toBe(true);
+    // Electron 1.x 写进去的 ELECTRON_RUN_AS_NODE 留在新命令上，也要改写。
     expect(
       mcpProfileLaunchesStale(
         {
           legacy: null,
-          core: { ...core(), env: { ELECTRON_RUN_AS_NODE: "0" } },
+          core: { ...core(), env: { ELECTRON_RUN_AS_NODE: "1" } },
           memory: null,
         },
         EXPECTED,

@@ -101,16 +101,19 @@ function parseCsvRow(line: string): string[] {
   return cells;
 }
 
-function parentPidByBridge(stdout: string): Map<number, number> {
+type CounterProcess = { name: string; pid: number; parentPid?: number; privateBytes?: number };
+
+/** typeperf 的一次采样：同一实例名（`name#n`）下的 ID、父进程 ID 与 Private Bytes 归到一起。 */
+function counterProcesses(stdout: string): CounterProcess[] {
   const rows = stdout
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line.startsWith('"'))
     .map(parseCsvRow);
-  if (rows.length < 2) return new Map();
+  if (rows.length < 2) return [];
   const headers = rows[0]!;
   const values = rows[1]!;
-  const instances = new Map<string, { pid?: number; parentPid?: number }>();
+  const instances = new Map<string, Partial<CounterProcess>>();
   for (let index = 1; index < Math.min(headers.length, values.length); index += 1) {
     const header = headers[index]!;
     const instance = header.match(/\(([^()]*)\)\\/u)?.[1];
@@ -119,15 +122,40 @@ function parentPidByBridge(stdout: string): Map<number, number> {
     const entry = instances.get(instance) ?? {};
     if (/\\Creating Process ID$/iu.test(header)) entry.parentPid = numeric;
     else if (/\\ID Process$/iu.test(header)) entry.pid = numeric;
+    else if (/\\Private Bytes$/iu.test(header)) entry.privateBytes = numeric;
     instances.set(instance, entry);
   }
-  const result = new Map<number, number>();
-  for (const entry of instances.values()) {
-    if (entry.pid !== undefined && entry.parentPid !== undefined) {
-      result.set(entry.pid, entry.parentPid);
-    }
+  return [...instances].flatMap(([instance, entry]) =>
+    entry.pid === undefined
+      ? []
+      : [{ ...entry, name: instance.replace(/#\d+$/u, ""), pid: entry.pid }],
+  );
+}
+
+/**
+ * 宿主入口（`current\AyanamiTaskManager.exe --mcp-stdio`，以及 1.x 留下的旧命令）不是终点：
+ * 启动器把它交给当前版本的宿主并等着，宿主再拉起 atm-core.exe 跑 stdio 桥。一条连接的开销是
+ * 这条链的总和，只数 Agent 的直接子进程会把真正占内存的那两个漏掉。
+ *
+ * 只认固定的两层，不做任意深度的后代汇总：桥要唤醒桌面时，新拉起的宿主也会挂在这条链下面，
+ * 把它和它的 core 算进来就成了「一条连接一百多 MB」。
+ */
+const HOST_CHAIN = ["AyanamiTaskManager", "atm-core"] as const;
+
+function chainPrivateBytes(root: number, processes: readonly CounterProcess[]): number {
+  let total = 0;
+  let parents = [root];
+  for (const name of HOST_CHAIN) {
+    const level = processes.filter(
+      (entry) =>
+        entry.name.toLowerCase() === name.toLowerCase() &&
+        entry.parentPid !== undefined &&
+        parents.includes(entry.parentPid),
+    );
+    total += level.reduce((sum, entry) => sum + (entry.privateBytes ?? 0), 0);
+    parents = level.map((entry) => entry.pid);
   }
-  return result;
+  return total;
 }
 
 async function execute(file: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -185,13 +213,26 @@ export async function observeMcpBridges(input: {
     return { sampledAt, metric: "PRIVATE_BYTES", totalPrivateBytes: 0, bridges: [] };
   }
 
+  const hostChain = executable.toLowerCase() === HOST_CHAIN[0].toLowerCase();
   const counterOutput = await run("typeperf.exe", [
     `\\Process(${executable}*)\\ID Process`,
     `\\Process(${executable}*)\\Creating Process ID`,
+    ...(hostChain
+      ? HOST_CHAIN.flatMap((name) => [
+          ...(name === executable ? [] : [`\\Process(${name}*)\\ID Process`]),
+          ...(name === executable ? [] : [`\\Process(${name}*)\\Creating Process ID`]),
+          `\\Process(${name}*)\\Private Bytes`,
+        ])
+      : []),
     "-sc",
     "1",
   ]);
-  const parentPids = parentPidByBridge(counterOutput.stdout);
+  const sampled = counterProcesses(counterOutput.stdout);
+  const parentPids = new Map(
+    sampled.flatMap((entry) =>
+      entry.parentPid === undefined ? [] : [[entry.pid, entry.parentPid] as const],
+    ),
+  );
   const distinctParentPids = [
     ...new Set(
       bridges
@@ -225,9 +266,10 @@ export async function observeMcpBridges(input: {
     const ownerName = ownerPid === undefined ? undefined : parentNames.get(ownerPid);
     // 进程在候选采样与父进程采样之间退出时直接丢弃；数量与累计值只来自仍由受支持
     // Agent 直接持有的连接，绝不把 owner unknown 当作“可能是 bridge”继续计入。
-    return ownerPid === undefined || !ownerName || !supportedAgentProcess(ownerName)
-      ? []
-      : [{ ...bridge, ownerPid, ownerName }];
+    if (ownerPid === undefined || !ownerName || !supportedAgentProcess(ownerName)) return [];
+    const privateBytes =
+      bridge.privateBytes + (hostChain ? chainPrivateBytes(bridge.pid, sampled) : 0);
+    return [{ ...bridge, privateBytes, ownerPid, ownerName }];
   });
   return {
     sampledAt,
@@ -240,8 +282,8 @@ export async function observeMcpBridges(input: {
 /**
  * 同时观测多种 bridge 可执行文件并合并。
  *
- * 换成原生 shim 之后，已经开着的 Agent 会话仍握着旧配置（Electron-as-node），直到它们
- * 重启；只看新 command 会把这些进程漏掉，统计看起来「省了」其实是没数到。同一路径只查一次。
+ * 换成原生 shim 之后，已经开着的 Agent 会话仍握着旧配置（宿主入口），直到它们重启；
+ * 只看新 command 会把这些进程漏掉，统计看起来「省了」其实是没数到。同一路径只查一次。
  */
 export async function observeMcpBridgeCommands(input: {
   bridgeCommands: readonly string[];

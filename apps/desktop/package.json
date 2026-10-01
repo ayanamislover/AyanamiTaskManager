@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n renderer,desktop -c cyan,magenta \"vite --host 127.0.0.1 --port 9999 --strictPort\" \"tsx scripts/dev-electron.ts\"",
+    "dev": "tsx scripts/dev.ts",
     "build": "tsx scripts/build.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
@@ -14,7 +14,6 @@
     "@ayanami-task/client": "workspace:*",
     "@ayanami-task/cli": "workspace:*",
     "@ayanami-task/daemon": "workspace:*",
-    "@ayanami-task/mcp": "workspace:*",
     "@ayanami-task/storage-sqlite": "workspace:*",
     "@ayanami-task/ui": "workspace:*",
     "@phosphor-icons/react": "2.1.10",
@@ -22,8 +21,5 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zustand": "5.0.14"
-  },
-  "devDependencies": {
-    "concurrently": "9.2.0"
   }
 }

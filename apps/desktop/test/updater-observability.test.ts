@@ -2,12 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  classifyUpdateFailure,
-  createUpdateDiagnostics,
-  sanitizeUpdateDetail,
-} from "../src/updater.js";
-import { handleSquirrelStartup } from "../src/squirrel.js";
+import { compareVersions, createUpdateDiagnostics, sanitizeUpdateDetail } from "../src/updater.js";
 
 const temporary: string[] = [];
 
@@ -106,37 +101,9 @@ describe("自动更新持久诊断", () => {
     expect(diagnostics.read()).toBeNull();
   });
 
-  it("把检查、下载、校验和安装失败归入可操作阶段", () => {
-    expect(classifyUpdateFailure("feed unavailable", "CHECK")).toMatchObject({
-      phase: "CHECK",
-      code: "CHECK_FAILED",
-    });
-    expect(classifyUpdateFailure("network connection reset", "DOWNLOAD")).toMatchObject({
-      phase: "DOWNLOAD",
-      code: "DOWNLOAD_FAILED",
-    });
-    expect(classifyUpdateFailure("package checksum mismatch", "DOWNLOAD")).toMatchObject({
-      phase: "VERIFY",
-      code: "VERIFY_FAILED",
-    });
-    expect(classifyUpdateFailure("Update.exe apply failed", "DOWNLOAD")).toMatchObject({
-      phase: "INSTALL",
-      code: "INSTALL_FAILED",
-    });
-  });
-});
-
-describe("Squirrel 更新失败", () => {
-  it("生命周期命令失败时把安装失败交给持久诊断通道", () => {
-    const failures: string[] = [];
-    const handled = handleSquirrelStartup(
-      ["C:\\app-2.0.0\\ATM.exe", "--squirrel-updated", "2.0.0"],
-      "C:\\app-2.0.0\\ATM.exe",
-      () => ({ ok: false, detail: "shortcut exit 5" }),
-      (detail) => failures.push(detail),
-    );
-
-    expect(handled).toBe(true);
-    expect(failures).toEqual(["shortcut exit 5"]);
+  it("版本号逐段比数字，段数不同时缺的段按 0 算", () => {
+    expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
+    expect(compareVersions("1.0.9", "1.0.10")).toBe(-1);
+    expect(compareVersions("2.0", "2.0.0")).toBe(0);
   });
 });

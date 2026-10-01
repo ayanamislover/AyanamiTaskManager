@@ -66,7 +66,8 @@ describe("本地更新源", () => {
       "scripts/release-and-install.ts",
       "scripts/update-feed.ts",
       "scripts/distribution-smoke.ts",
-      "apps/desktop/src/main.ts",
+      "apps/desktop/src/core-main.ts",
+      "apps/desktop/src/update-coordinator.ts",
     ];
     for (const source of sources) {
       const content = readFileSync(join(process.cwd(), source), "utf8");

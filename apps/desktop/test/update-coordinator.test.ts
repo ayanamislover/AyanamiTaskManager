@@ -51,6 +51,14 @@ function coordinator(paths: ReturnType<typeof sandbox>, installRoot: string | nu
   return { updates, requestInstall, onUpdateReady };
 }
 
+/**
+ * feed 里属于发布链的文件。其他进程可能在 feed 里短暂留下自己的东西（实测：扫描刚写入的
+ * zip 时出现过大写的 `ATM-2.0.1-WIN-X64.ZIP.tmp`），那不归 coordinator 管，也不该让断言抖。
+ */
+function delivered(feed: string): string[] {
+  return readdirSync(feed).filter((name) => name.startsWith("atm-"));
+}
+
 describe("本地更新源（原生包）", () => {
   it("挑最高的完整新版本；不高于当前版本的包与 Squirrel 遗留物算已消费", () => {
     const { feed } = sandbox();
@@ -164,7 +172,7 @@ describe("UpdateCoordinator", () => {
       onUpdateReady: vi.fn(),
     });
     expect(await after.check()).toMatchObject({ code: "UPDATE_INSTALLED", version: "2.0.1" });
-    expect(readdirSync(paths.feed)).toEqual([]);
+    expect(delivered(paths.feed)).toEqual([]);
   });
 
   it("新版本在 START 阶段就开始检查：事务未定时不报、不清包，定下来后再报", async () => {
@@ -181,7 +189,7 @@ describe("UpdateCoordinator", () => {
       onUpdateReady: vi.fn(),
     });
     expect(await after.check()).toMatchObject({ code: "INSTALLING" });
-    expect(readdirSync(paths.feed).sort()).toEqual([
+    expect(delivered(paths.feed).sort()).toEqual([
       "atm-2.0.1-win-x64.json",
       "atm-2.0.1-win-x64.zip",
     ]);
@@ -190,7 +198,7 @@ describe("UpdateCoordinator", () => {
       JSON.stringify({ id: "t1", to: "2.0.1", state: "DONE", outcome: "COMMITTED" }),
     );
     expect(await after.check()).toMatchObject({ code: "UPDATE_INSTALLED" });
-    expect(readdirSync(paths.feed)).toEqual([]);
+    expect(delivered(paths.feed)).toEqual([]);
     after.stop();
   });
 

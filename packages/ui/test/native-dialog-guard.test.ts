@@ -57,7 +57,7 @@ describe("原生弹窗守卫", () => {
     const sources = productionSources();
     // 扫描面不能是空的，否则永远是绿的。
     expect(Object.keys(sources).length).toBeGreaterThan(60);
-    for (const expected of ["task-drawer.tsx", "main.ts", "window-host.ts"])
+    for (const expected of ["task-drawer.tsx", "core-main.ts", "renderer.tsx"])
       expect(Object.keys(sources).some((file) => file.endsWith(expected))).toBe(true);
     expect(nativeDialogCalls(sources)).toEqual([]);
   });

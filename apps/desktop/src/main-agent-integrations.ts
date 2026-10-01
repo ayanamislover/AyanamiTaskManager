@@ -57,7 +57,7 @@ import {
   runMcpProfileSwitch,
   type McpProfileSyncAdapter,
 } from "./mcp-profile-switch.js";
-import type { Runtime } from "./runtime-host.js";
+import type { DaemonRuntimeDescriptor as Runtime } from "@ayanami-task/daemon";
 
 const MCP_CLIENTS: readonly McpClient[] = ["CODEX", "CLAUDE", "CLAUDE_CODE", "KIMI_CODE"];
 
