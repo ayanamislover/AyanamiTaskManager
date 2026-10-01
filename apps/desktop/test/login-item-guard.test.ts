@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   loginItemRestorePlan,
   parseRunQuery,
+  RUN_VALUE,
+  uninstallDeletes,
   type RunSnapshot,
 } from "../../../scripts/login-item-guard.js";
 
@@ -108,5 +110,30 @@ describe("smokes must not damage the real autostart entry", () => {
     const host = readFileSync(join(process.cwd(), "scripts/smoke-host.ts"), "utf8");
     expect(host).toContain("const before = readRunSnapshot();");
     expect(host).not.toContain("readRunEntries");
+  });
+
+  // 卸载期间别人删掉的名称不归本轮：只认卸载器删的固定名称，且它指向本轮安装根的启动器。
+  it("distribution-smoke counts as its own deletion only the value its install wrote", () => {
+    expect(RUN_VALUE).toBe(NAME);
+    const installRoot = "C:\\sandbox\\Local\\AyanamiTaskManagerDesktop\\";
+    const ours = sz(
+      `"C:\\sandbox\\Local\\AyanamiTaskManagerDesktop\\AyanamiTaskManager.exe" --background`,
+    );
+    expect(uninstallDeletes({ [NAME]: ours }, installRoot)).toEqual([NAME]);
+    // 指向别处（用户真实安装、便携版）、或根本没有：不归本轮。
+    expect(uninstallDeletes({ [NAME]: sz(production) }, installRoot)).toEqual([]);
+    expect(uninstallDeletes({}, installRoot)).toEqual([]);
+    // 同属本应用的其他名称即便指向本轮安装根，卸载器也不删它：不列入。
+    expect(
+      uninstallDeletes({ [NAME]: ours, "AyanamiTaskManager-legacy": ours }, installRoot),
+    ).toEqual([NAME]);
+    // 调用方在卸载前就定下名单（中途失败也覆盖），不再拿卸载前后的快照差集。
+    const source = readFileSync(join(process.cwd(), "scripts/distribution-smoke.ts"), "utf8");
+    const decided = source.indexOf(
+      "runDeletedByUninstall = uninstallDeletes(readRunSnapshot(), installRoot);",
+    );
+    expect(decided).toBeGreaterThan(0);
+    expect(decided).toBeLessThan(source.indexOf('"--uninstall"'));
+    expect(source).not.toMatch(/Object\.keys\(runBefore/u);
   });
 });

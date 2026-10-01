@@ -18,7 +18,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { describeAppProcesses, parseTasklistCsv, type AppProcess } from "./app-processes.js";
-import { applyRunRestore, loginItemRestorePlan, readRunSnapshot } from "./login-item-guard.js";
+import {
+  applyRunRestore,
+  loginItemRestorePlan,
+  readRunSnapshot,
+  uninstallDeletes,
+} from "./login-item-guard.js";
 import { portableZipName } from "./package-native.js";
 import {
   assertSafeInstallRoot as assertInstallRootIsProduct,
@@ -277,7 +282,11 @@ async function installed(): Promise<"verified" | "skipped"> {
   const manifest = join(packageDir, `atm-${packageVersion}-win-x64.json`);
   const setup = join(packageDir, "atm-setup.exe");
   const runBefore = readRunSnapshot();
-  /** 卸载这一步删掉的 Run 值名（卸载前在、卸载后没了）；卸载没跑就是空的。 */
+  /**
+   * 卸载会删的 Run 值：只有卸载器删的那个固定名称（setup register.rs 的 RUN_VALUE），
+   * 而且卸载前它指向本轮安装根的启动器（是本轮安装写的）。卸载前就定下来，卸载中途失败也算；
+   * 期间被别人删掉的其他名称不算本轮的。
+   */
   let runDeletedByUninstall: string[] = [];
   try {
     check(
@@ -307,7 +316,7 @@ async function installed(): Promise<"verified" | "skipped"> {
       join(installRoot, "state", "health"),
     );
 
-    const runBeforeUninstall = readRunSnapshot();
+    runDeletedByUninstall = uninstallDeletes(readRunSnapshot(), installRoot);
     const preservedMarker = join(dataDir, "uninstall-preservation.marker");
     await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
     check(
@@ -325,10 +334,6 @@ async function installed(): Promise<"verified" | "skipped"> {
           ? true
           : null,
       120_000,
-    );
-    const runAfterUninstall = readRunSnapshot();
-    runDeletedByUninstall = Object.keys(runBeforeUninstall).filter(
-      (name) => !(name in runAfterUninstall),
     );
     const left = appProcesses();
     check("卸载后应用进程已退出", left.length === 0, describeAppProcesses(left));

@@ -37,6 +37,7 @@ export class BackupMaintenance {
   readonly #knowledge: KnowledgeDatabase;
   readonly #getProject: (codeOrId: string) => BackupProject;
   readonly #openProject: (codeOrId: string) => Promise<ManagedDatabase>;
+  readonly #holdProject: (projectId: string) => () => void;
   readonly #closeIdleProjects: (maxIdleMs: number, at: number) => number;
   readonly #closeProject: (projectId: string) => void;
   readonly #getSetting: (key: string, fallback: unknown) => { value: any };
@@ -67,6 +68,7 @@ export class BackupMaintenance {
     knowledge: KnowledgeDatabase;
     getProject: (codeOrId: string) => BackupProject;
     openProject: (codeOrId: string) => Promise<ManagedDatabase>;
+    holdProject: (projectId: string) => () => void;
     closeIdleProjects: (maxIdleMs: number, at: number) => number;
     closeProject: (projectId: string) => void;
     getSetting: (key: string, fallback: unknown) => { value: any };
@@ -96,6 +98,7 @@ export class BackupMaintenance {
     this.#knowledge = input.knowledge;
     this.#getProject = input.getProject;
     this.#openProject = input.openProject;
+    this.#holdProject = input.holdProject;
     this.#closeIdleProjects = input.closeIdleProjects;
     this.#closeProject = input.closeProject;
     this.#getSetting = input.getSetting;
@@ -151,109 +154,115 @@ export class BackupMaintenance {
         ? (await this.#knowledge.open()).database
         : this.#registry;
     let createdBackup: BackupView | null = null;
+    // 备份跨 await 用着这个连接：持有它，关窗释放内存与容量淘汰都不会从手里关掉它。
+    const releaseHold = project ? this.#holdProject(project.id) : () => undefined;
     try {
-      writeFileSync(pendingPath, `${JSON.stringify({ id, finalPath })}\n`, "utf8");
-      await database.sqlite.backup(temporaryPath);
-      const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
-      let healthy: boolean;
       try {
-        healthy =
-          quickCheck(snapshot) && (input.scope !== "KNOWLEDGE" || foreignKeyCheck(snapshot));
-      } finally {
-        snapshot.close();
-      }
-      removeSqliteSidecars(temporaryPath);
-      if (!healthy) {
-        throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
-      }
-      await renameWithRetry(temporaryPath, finalPath);
-      const sha256 = sha256File(finalPath);
-      const reusable = this.#reusableBackup(input, project?.id ?? null, sha256);
-      if (reusable) {
-        // 内容和上一份一模一样：删掉新快照，把旧的重新盖上今天的时间戳。
-        // 空闲项目以前每天都留一份字节完全相同的副本。
-        rmSync(finalPath, { force: true });
-        rmSync(pendingPath, { force: true });
-        this.#registry.sqlite
-          .prepare("UPDATE backup_catalog SET created_at = ?, verified_at = ? WHERE id = ?")
-          .run(createdAt, nowIso(), reusable.id);
-        return this.#listBackups().find((candidate) => candidate.id === reusable.id) ?? reusable;
-      }
-      const sizeBytes = statSync(finalPath).size;
-      const verifiedAt = nowIso();
-      const manifest = {
-        format: 1,
-        id,
-        scope: input.scope,
-        projectId: project?.id ?? null,
-        projectCode: project?.code ?? null,
-        reason: input.reason,
-        schemaVersion: database.schemaVersion,
-        sha256,
-        sizeBytes,
-        createdAt,
-        verifiedAt,
-      };
-      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-      createdBackup = {
-        id,
-        scope: input.scope,
-        projectId: project?.id ?? null,
-        projectCode: project?.code ?? null,
-        path: finalPath,
-        sha256,
-        sizeBytes,
-        reason: input.reason,
-        schemaVersion: database.schemaVersion,
-        createdAt,
-        verifiedAt,
-      };
-      this.#registry.sqlite.transaction(() => {
-        this.#registry.sqlite
-          .prepare(
-            `INSERT INTO backup_catalog(
+        writeFileSync(pendingPath, `${JSON.stringify({ id, finalPath })}\n`, "utf8");
+        await database.sqlite.backup(temporaryPath);
+        const snapshot = new Database(temporaryPath, { readonly: true, fileMustExist: true });
+        let healthy: boolean;
+        try {
+          healthy =
+            quickCheck(snapshot) && (input.scope !== "KNOWLEDGE" || foreignKeyCheck(snapshot));
+        } finally {
+          snapshot.close();
+        }
+        removeSqliteSidecars(temporaryPath);
+        if (!healthy) {
+          throw new AtmError("BACKUP_INTEGRITY_FAILED", { message: "备份完整性检查失败" });
+        }
+        await renameWithRetry(temporaryPath, finalPath);
+        const sha256 = sha256File(finalPath);
+        const reusable = this.#reusableBackup(input, project?.id ?? null, sha256);
+        if (reusable) {
+          // 内容和上一份一模一样：删掉新快照，把旧的重新盖上今天的时间戳。
+          // 空闲项目以前每天都留一份字节完全相同的副本。
+          rmSync(finalPath, { force: true });
+          rmSync(pendingPath, { force: true });
+          this.#registry.sqlite
+            .prepare("UPDATE backup_catalog SET created_at = ?, verified_at = ? WHERE id = ?")
+            .run(createdAt, nowIso(), reusable.id);
+          return this.#listBackups().find((candidate) => candidate.id === reusable.id) ?? reusable;
+        }
+        const sizeBytes = statSync(finalPath).size;
+        const verifiedAt = nowIso();
+        const manifest = {
+          format: 1,
+          id,
+          scope: input.scope,
+          projectId: project?.id ?? null,
+          projectCode: project?.code ?? null,
+          reason: input.reason,
+          schemaVersion: database.schemaVersion,
+          sha256,
+          sizeBytes,
+          createdAt,
+          verifiedAt,
+        };
+        writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+        createdBackup = {
+          id,
+          scope: input.scope,
+          projectId: project?.id ?? null,
+          projectCode: project?.code ?? null,
+          path: finalPath,
+          sha256,
+          sizeBytes,
+          reason: input.reason,
+          schemaVersion: database.schemaVersion,
+          createdAt,
+          verifiedAt,
+        };
+        this.#registry.sqlite.transaction(() => {
+          this.#registry.sqlite
+            .prepare(
+              `INSERT INTO backup_catalog(
                id, scope, project_id, path, sha256, size_bytes, reason,
                schema_version, created_at, verified_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            id,
-            input.scope,
-            project?.id ?? null,
-            finalPath,
-            sha256,
-            sizeBytes,
-            input.reason,
-            database.schemaVersion,
-            createdAt,
-            verifiedAt,
-          );
-        this.#appendGlobalEvent("backup.created", id, "SYSTEM", {
-          scope: input.scope,
-          projectId: project?.id ?? null,
-          reason: input.reason,
-        });
-      })();
-    } catch (error) {
-      const typed = asAtmError(error);
-      rmSync(temporaryPath, { force: true });
-      removeSqliteSidecars(temporaryPath);
-      rmSync(finalPath, { force: true });
-      rmSync(manifestPath, { force: true });
-      rmSync(pendingPath, { force: true });
-      try {
-        this.#registry.sqlite.transaction(() => {
-          this.#appendGlobalEvent("backup.failed", id, "SYSTEM", {
+            )
+            .run(
+              id,
+              input.scope,
+              project?.id ?? null,
+              finalPath,
+              sha256,
+              sizeBytes,
+              input.reason,
+              database.schemaVersion,
+              createdAt,
+              verifiedAt,
+            );
+          this.#appendGlobalEvent("backup.created", id, "SYSTEM", {
             scope: input.scope,
             projectId: project?.id ?? null,
             reason: input.reason,
-            code: typed.code,
           });
         })();
-      } catch {
-        // Preserve the original backup failure when Registry diagnostics are unavailable.
+      } catch (error) {
+        const typed = asAtmError(error);
+        rmSync(temporaryPath, { force: true });
+        removeSqliteSidecars(temporaryPath);
+        rmSync(finalPath, { force: true });
+        rmSync(manifestPath, { force: true });
+        rmSync(pendingPath, { force: true });
+        try {
+          this.#registry.sqlite.transaction(() => {
+            this.#appendGlobalEvent("backup.failed", id, "SYSTEM", {
+              scope: input.scope,
+              projectId: project?.id ?? null,
+              reason: input.reason,
+              code: typed.code,
+            });
+          })();
+        } catch {
+          // Preserve the original backup failure when Registry diagnostics are unavailable.
+        }
+        throw error;
       }
-      throw error;
+    } finally {
+      releaseHold();
     }
 
     // Catalog + event is the durable commit point. Cleanup and retention after it are

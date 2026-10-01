@@ -186,6 +186,7 @@ export class AyanamiDatabaseManager {
       knowledge: this.knowledge,
       getProject: (codeOrId) => this.getProject(codeOrId),
       openProject: (codeOrId) => this.openProject(codeOrId),
+      holdProject: (projectId) => this.#projectPool.holdProject(projectId),
       closeIdleProjects: (maxIdleMs, at) => this.closeIdleProjects(maxIdleMs, at),
       closeProject: (projectId) => this.closeProject(projectId),
       getSetting: (key, fallback) => this.getSetting(key, fallback),
@@ -501,7 +502,7 @@ export class AyanamiDatabaseManager {
    * 返回关闭的项目库个数。
    */
   releaseIdleMemory(maxIdleMs: number, at = Date.now()): number {
-    const closed = this.#projectPool.closeIdleProjects(maxIdleMs, at);
+    const closed = this.#projectPool.closeIdleProjects(maxIdleMs, at, "PASSIVE");
     this.#projectPool.shrinkOpenProjects();
     this.registry.sqlite.pragma("shrink_memory");
     this.knowledge.shrinkMemory();

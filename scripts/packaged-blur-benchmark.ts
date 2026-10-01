@@ -38,7 +38,7 @@ import {
   stopSmokeHost,
   waitForRuntime,
   waitUntil,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   type SmokeRenderer,
 } from "./smoke-host.js";
 
@@ -440,9 +440,11 @@ async function measure(renderer: SmokeRenderer, window: NativeWindowState): Prom
   );
 }
 
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 try {
-  await withLoginItemsRestored(async () => {
+  await loginItems.restoreAfter(async () => {
     let renderer: SmokeRenderer | null = null;
     try {
       await waitForRuntime(host);

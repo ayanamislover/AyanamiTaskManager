@@ -56,6 +56,19 @@ export function loginItemRestorePlan(
   return steps;
 }
 
+/** 自启登记的值名：与 setup（register.rs RUN_VALUE）及真实安装共用。 */
+export const RUN_VALUE = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
+
+/**
+ * 卸载会删、且算本轮的 Run 值名：卸载器只删这个固定名称；现值指向本轮安装根的启动器，
+ * 才是本轮安装写的。别的名称（哪怕同属本应用）在卸载期间消失，不归本轮。
+ */
+export function uninstallDeletes(run: RunSnapshot, installRoot: string): string[] {
+  const root = installRoot.replace(/[\\/]+$/u, "");
+  const launcher = `${root}\\AyanamiTaskManager.exe`.toLowerCase();
+  return run[RUN_VALUE]?.data.toLowerCase().includes(launcher) ? [RUN_VALUE] : [];
+}
+
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 export function parseRunQuery(output: string): RunSnapshot {

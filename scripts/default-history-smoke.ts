@@ -26,7 +26,7 @@ import {
   startSmokeHost,
   stopSmokeHost,
   waitForRuntime,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   type SmokeHost,
   type SmokeRenderer,
   type SmokeRuntime,
@@ -82,13 +82,15 @@ async function seed(renderer: SmokeRenderer): Promise<void> {
     });
 }
 
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 let host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 let renderer: SmokeRenderer | null = null;
 let error: unknown;
 let seeded = false;
 let projectCount: number | undefined;
 try {
-  await withLoginItemsRestored(async () => {
+  await loginItems.restoreAfter(async () => {
     try {
       let opened = await open(host);
       renderer = opened.renderer;

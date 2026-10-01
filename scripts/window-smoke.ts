@@ -37,7 +37,7 @@ import {
   stopSmokeHost,
   waitForRuntime,
   waitUntil,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   exited,
   type SmokeHost,
   type SmokeRenderer,
@@ -600,11 +600,13 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   }
 }
 
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 let error: unknown;
 let details: Record<string, unknown> = {};
 try {
-  details = await withLoginItemsRestored(async () => {
+  details = await loginItems.restoreAfter(async () => {
     try {
       return await runSmoke(host);
     } finally {

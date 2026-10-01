@@ -21,7 +21,7 @@ import {
   sourceVersion,
   startSmokeHost,
   stopSmokeHost,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   exited,
   type SmokeRuntime,
 } from "./smoke-host.js";
@@ -36,6 +36,8 @@ const probe = NativeWindowProbe.start();
 // 先让探针编译好（Add-Type 要一两秒），免得这段时间被算进启动耗时。
 await probe.windows(process.pid);
 
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const startedAt = Date.now();
 const host = startSmokeHost({
   executable,
@@ -48,7 +50,7 @@ let runtime: SmokeRuntime | null = null;
 let windowsSeen = 0;
 let error: unknown;
 try {
-  await withLoginItemsRestored(async () => {
+  await loginItems.restoreAfter(async () => {
     try {
       // 每一轮同时看描述符与窗口：随机延迟期间与服务起来以后都不许冒出应用窗口。
       while (Date.now() - startedAt < timeoutMs) {

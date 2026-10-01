@@ -20,7 +20,7 @@ import {
   stopSmokeHost,
   waitForRuntime,
   waitUntil,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   exited,
 } from "./smoke-host.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
@@ -352,8 +352,10 @@ async function main(): Promise<void> {
   console.log(`数据根 : ${sandbox.dataDir}`);
   console.log("");
 
+  // 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+  const loginItems = snapshotLoginItems();
   const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
-  await withLoginItemsRestored(async () => {
+  await loginItems.restoreAfter(async () => {
     try {
       await waitForRuntime(host);
       if (runtime === "legacy" || runtime === "node")

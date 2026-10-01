@@ -48,7 +48,10 @@ import { NativeWindowProbe } from "./native-window.js";
 import {
   assertSandboxDataDir,
   devToolsPortFile,
+  exited as childExited,
   killProcessTree,
+  processIdentity,
+  survivingProcesses,
   outputRoot,
   readDevToolsPort,
   repoRoot,
@@ -519,7 +522,7 @@ function sendPipe(name: string, command: object): Promise<string> {
 }
 
 const exited = (host: Host, timeoutMs: number) =>
-  host.child.exitCode !== null
+  childExited(host.child)
     ? Promise.resolve(true)
     : Promise.race([
         new Promise<boolean>((done) => host.child.once("exit", () => done(true))),
@@ -531,10 +534,14 @@ async function quitHost(
   host: Host,
   probe: ProcessProbe,
 ): Promise<{ graceful: boolean; reply: string; descendantsGoneMs: number | null }> {
-  if (host.child.exitCode !== null)
+  if (childExited(host.child))
     return { graceful: true, reply: "already-exited", descendantsGoneMs: null };
   // 先记下整棵树：宿主退出后 WebView2 浏览器进程可能还要一会儿才走，下一轮不能和它共用用户数据目录。
-  const descendants = (await probe.tree(host.pid)).filter((row) => row.pid !== host.pid);
+  // 连同出生身份一起记：之后只认身份对得上的进程，PID 被系统复用给别人时不碰它。
+  const descendants = (await probe.tree(host.pid))
+    .filter((row) => row.pid !== host.pid)
+    .map((row) => ({ pid: row.pid, identity: processIdentity(host.executable, row.pid) }))
+    .filter((row): row is { pid: number; identity: string } => row.identity !== null);
   const reply = await sendPipe(pipeName(await probe.session(host.pid)), { cmd: "QUIT" });
   let graceful = await exited(host, 20_000);
   if (!graceful) {
@@ -542,23 +549,17 @@ async function quitHost(
     await exited(host, 5_000);
   }
   const quitAt = Date.now();
-  const alive = (pid: number) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
+  const query = (pid: number) => processIdentity(host.executable, pid);
   const gone = await until(
-    () => (descendants.some((row) => alive(row.pid)) ? null : true),
+    () => (survivingProcesses(descendants, query).length > 0 ? null : true),
     15_000,
     "宿主的子孙进程退出",
     50,
   ).catch(() => false);
   if (!gone) {
     graceful = false;
-    for (const row of descendants) if (alive(row.pid)) killProcessTree(row.pid);
+    // 结束前再核一次身份；核对与结束之间仍有毫秒级窗口，这里只量本机沙箱里自己拉起的树。
+    for (const pid of survivingProcesses(descendants, query)) killProcessTree(pid);
   }
   return { graceful, reply, descendantsGoneMs: gone ? Date.now() - quitAt : null };
 }
@@ -655,7 +656,7 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
       quit: await quitHost(host, probe),
     };
   } finally {
-    if (host.child.exitCode === null) killProcessTree(host.pid);
+    if (!childExited(host.child)) killProcessTree(host.pid);
   }
 }
 
@@ -695,7 +696,7 @@ async function coldStartProduction(
       quit: await quitHost(host, probe),
     };
   } finally {
-    if (host.child.exitCode === null) killProcessTree(host.pid);
+    if (!childExited(host.child)) killProcessTree(host.pid);
   }
 }
 
@@ -780,7 +781,7 @@ async function coldStartSmoke(executable: string, probe: ProcessProbe, windows: 
     };
   } finally {
     await browser?.close().catch(() => undefined);
-    if (host.child.exitCode === null) killProcessTree(host.pid);
+    if (!childExited(host.child)) killProcessTree(host.pid);
   }
 }
 

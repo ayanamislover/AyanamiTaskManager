@@ -11,7 +11,10 @@ export type PoolProject = {
 };
 
 export class ProjectDatabasePool {
-  readonly #projects = new Map<string, { database: ManagedDatabase; lastUsed: number }>();
+  readonly #projects = new Map<
+    string,
+    { database: ManagedDatabase; lastUsed: number; holds: number }
+  >();
   readonly #migrationsRoot: string;
   readonly #maxOpenProjects: number;
   readonly #getProject: (codeOrId: string) => PoolProject;
@@ -64,9 +67,10 @@ export class ProjectDatabasePool {
       return cached.database;
     }
     while (this.#projects.size >= this.#maxOpenProjects) {
-      const oldest = [...this.#projects.entries()].sort(
-        (left, right) => left[1].lastUsed - right[1].lastUsed,
-      )[0];
+      // 被持有的连接（备份进行中）不淘汰；全被持有时暂时超出上限。
+      const oldest = [...this.#projects.entries()]
+        .filter(([, entry]) => entry.holds === 0)
+        .sort((left, right) => left[1].lastUsed - right[1].lastUsed)[0];
       if (!oldest) break;
       oldest[1].database.sqlite.pragma("wal_checkpoint(PASSIVE)");
       oldest[1].database.sqlite.close();
@@ -78,7 +82,7 @@ export class ProjectDatabasePool {
         migrationDirectory: join(this.#migrationsRoot, "project"),
         backupDirectory: join(dirname(project.databasePath), "backups"),
       });
-      this.#projects.set(project.id, { database, lastUsed: Date.now() });
+      this.#projects.set(project.id, { database, lastUsed: Date.now(), holds: 0 });
       return database;
     } catch (error) {
       this.#markMigrationFailed(project.id);
@@ -86,11 +90,36 @@ export class ProjectDatabasePool {
     }
   }
 
-  closeIdleProjects(maxIdleMs = 5 * 60_000, at = Date.now()): number {
+  /**
+   * 跨 await 用着连接的操作（备份：手动、导出、每日维护、恢复前）持有它。lastUsed 只在取连接时
+   * 更新，备份跑得比空闲阈值久时，不持有就会被空闲回收或容量淘汰从手里关掉。放下时重新计空闲。
+   */
+  holdProject(projectId: string): () => void {
+    const cached = this.#projects.get(projectId);
+    if (!cached) return () => undefined;
+    cached.holds += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      cached.holds -= 1;
+      cached.lastUsed = Date.now();
+    };
+  }
+
+  /**
+   * 关闭空闲超过 maxIdleMs、没人持有的项目库。checkpoint 默认 TRUNCATE（要等读者，有
+   * busy_timeout）；释放内存时用 PASSIVE，不等任何人、不挡事件循环。
+   */
+  closeIdleProjects(
+    maxIdleMs = 5 * 60_000,
+    at = Date.now(),
+    checkpoint: "TRUNCATE" | "PASSIVE" = "TRUNCATE",
+  ): number {
     let closed = 0;
     for (const [projectId, cached] of [...this.#projects]) {
-      if (at - cached.lastUsed < maxIdleMs) continue;
-      this.closeProject(projectId);
+      if (cached.holds > 0 || at - cached.lastUsed < maxIdleMs) continue;
+      this.closeProject(projectId, checkpoint);
       closed += 1;
     }
     return closed;
@@ -102,11 +131,11 @@ export class ProjectDatabasePool {
       if (database.sqlite.open) database.sqlite.pragma("shrink_memory");
   }
 
-  closeProject(projectId: string): void {
+  closeProject(projectId: string, checkpoint: "TRUNCATE" | "PASSIVE" = "TRUNCATE"): void {
     const cached = this.#projects.get(projectId);
     if (!cached) return;
     if (cached.database.sqlite.open) {
-      cached.database.sqlite.pragma("wal_checkpoint(TRUNCATE)");
+      cached.database.sqlite.pragma(`wal_checkpoint(${checkpoint})`);
       cached.database.sqlite.close();
     }
     this.#projects.delete(projectId);

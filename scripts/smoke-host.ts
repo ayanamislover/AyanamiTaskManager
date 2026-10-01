@@ -373,6 +373,30 @@ export async function openProjectFromSidebar(page: Page, name: string): Promise<
 }
 
 /**
+ * 进程的出生身份（ticks、Unix 毫秒、映像路径各一行），由宿主的 --process-identity 查（宿主
+ * identity.rs，与 core 校验父进程同一口径）。查不到（已退出、拒绝访问）为 null。
+ */
+export function processIdentity(helper: string, pid: number): string | null {
+  const result = spawnSync(helper, ["--process-identity", String(pid)], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 5_000,
+  });
+  return result.status === 0 && !result.error ? result.stdout.trim() || null : null;
+}
+
+/**
+ * 记下的进程里，哪些 PID 上仍是当初那个进程（出生身份逐字相同）。查不到（已退出、拒绝访问）
+ * 或换了人（PID 被系统复用）都不算：只有这些才可以去结束。
+ */
+export function survivingProcesses(
+  recorded: ReadonlyArray<{ pid: number; identity: string }>,
+  query: (pid: number) => string | null,
+): number[] {
+  return recorded.filter((row) => query(row.pid) === row.identity).map((row) => row.pid);
+}
+
+/**
  * 只结束自己拉起的那个宿主的进程树（core、WebView2 都在树里），从不按镜像名。
  * 只能对还没退出的子进程调用：Node 握着它的进程句柄，PID 在退出前不会被系统复用。
  */
@@ -402,19 +426,38 @@ export async function stopSmokeHost(host: SmokeHost, timeoutMs = 15_000): Promis
   return false;
 }
 
+export type LoginItemsSnapshot = {
+  /** 跑 run；不论怎么结束，只撤销本轮自己的改动。 */
+  restoreAfter<T>(run: () => Promise<T>): Promise<T>;
+};
+
 /**
  * 宿主的自启动开关写的是 HKCU Run 里与真实安装共用的那个值。界面上的设置一旦碰到它，
- * 就会把用户真实的登记改指到烟测宿主。跑之前记下（读不到就不跑）；跑完只撤销本轮自己
- * 的改动——现值仍指向本轮的烟测宿主才放回。这些烟测不关自启，消失的值不归它们补。
+ * 就会把用户真实的登记改指到烟测宿主。启动任何东西之前先拍快照（读不到就抛——此时什么都
+ * 还没启动，没有要收拾的）；跑完只撤销本轮自己的改动：现值仍指向本轮的烟测宿主才放回。
+ * 这些烟测不关自启，消失的值不归它们补。
  */
+export function snapshotLoginItems(
+  executables: readonly string[] = [smokeExecutable()],
+): LoginItemsSnapshot {
+  const before = readRunSnapshot();
+  return {
+    async restoreAfter<T>(run: () => Promise<T>): Promise<T> {
+      try {
+        return await run();
+      } finally {
+        applyRunRestore(
+          loginItemRestorePlan(before, readRunSnapshot(), { executables, deleted: [] }),
+        );
+      }
+    },
+  };
+}
+
+/** 宿主在 run 里面才启动的调用方用这个；先启动宿主的必须先 snapshotLoginItems。 */
 export async function withLoginItemsRestored<T>(
   run: () => Promise<T>,
   executables: readonly string[] = [smokeExecutable()],
 ): Promise<T> {
-  const before = readRunSnapshot();
-  try {
-    return await run();
-  } finally {
-    applyRunRestore(loginItemRestorePlan(before, readRunSnapshot(), { executables, deleted: [] }));
-  }
+  return snapshotLoginItems(executables).restoreAfter(run);
 }

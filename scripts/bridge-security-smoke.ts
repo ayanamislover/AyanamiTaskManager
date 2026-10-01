@@ -39,7 +39,7 @@ import {
   startSmokeHost,
   stopSmokeHost,
   waitForRuntime,
-  withLoginItemsRestored,
+  snapshotLoginItems,
   type SmokeHost,
   type SmokeRenderer,
 } from "./smoke-host.js";
@@ -456,10 +456,12 @@ async function run(host: SmokeHost): Promise<void> {
 }
 
 const sandbox = await prepareSandbox("bridge-security-smoke");
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动。
+const loginItems = snapshotLoginItems();
 const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
 let error: unknown;
 try {
-  await withLoginItemsRestored(async () => {
+  await loginItems.restoreAfter(async () => {
     try {
       await run(host);
     } finally {

@@ -138,13 +138,58 @@ describe("Project database pool boundaries", () => {
     const busyDatabase = await manager.openProject(busy.id);
     const busyPragma = vi.spyOn(busyDatabase.sqlite, "pragma");
     const registryPragma = vi.spyOn(manager.registry.sqlite, "pragma");
+    const idlePragma = vi.spyOn(idleDatabase.sqlite, "pragma");
     expect(manager.releaseIdleMemory(5_000, tick + 1)).toBe(1);
+    // 释放内存不等读者：PASSIVE，不是会吃 busy_timeout 的 TRUNCATE。
+    expect(idlePragma).toHaveBeenCalledWith("wal_checkpoint(PASSIVE)");
+    expect(idlePragma).not.toHaveBeenCalledWith("wal_checkpoint(TRUNCATE)");
     expect(idleDatabase.sqlite.open).toBe(false);
     expect(busyDatabase.sqlite.open).toBe(true);
     expect(busyPragma).toHaveBeenCalledWith("shrink_memory");
     expect(registryPragma).toHaveBeenCalledWith("shrink_memory");
     // 关掉的库下次用到时照常重新打开。
     expect((await manager.openProject(idle.id)).sqlite.open).toBe(true);
+  });
+
+  // 备份跨 await 用着连接；lastUsed 只在取连接时更新，备份跑得比空闲阈值久也不能被关掉。
+  it("a backup in progress keeps its connection through memory release and capacity eviction", async () => {
+    const { manager } = await openManager("release-backup");
+    const project = await manager.createProject({ name: "Held", sourcePath: null, code: "RHOLD" });
+    const database = await manager.openProject(project.id);
+    const backup = database.sqlite.backup.bind(database.sqlite);
+    let closedDuringBackup = 0;
+    vi.spyOn(database.sqlite, "backup").mockImplementation(async (destination) => {
+      // 关窗释放正好落在备份进行中：时间已远超空闲阈值。
+      closedDuringBackup = manager.releaseIdleMemory(0, Date.now() + 3_600_000);
+      return backup(destination);
+    });
+    const created = await manager.createBackup({
+      scope: "PROJECT",
+      project: project.id,
+      reason: "MANUAL",
+    });
+    expect(closedDuringBackup).toBe(0);
+    expect(database.sqlite.open).toBe(true);
+    expect(existsSync(created.path)).toBe(true);
+    // 容量淘汰同理：备份中的库最旧，开满 8 个别的库也不能淘汰它。
+    const others = [];
+    for (let index = 0; index < 8; index += 1)
+      others.push(
+        await manager.createProject({
+          name: `Other ${index}`,
+          sourcePath: null,
+          code: `ROT${index}`,
+        }),
+      );
+    vi.spyOn(database.sqlite, "backup").mockImplementation(async (destination) => {
+      for (const other of others) await manager.openProject(other.id);
+      return backup(destination);
+    });
+    await manager.createBackup({ scope: "PROJECT", project: project.id, reason: "MANUAL" });
+    expect(database.sqlite.open).toBe(true);
+    // 备份结束放下持有，之后照常按空闲回收。
+    expect(manager.releaseIdleMemory(0, Date.now() + 3_600_000)).toBeGreaterThanOrEqual(1);
+    expect(database.sqlite.open).toBe(false);
   });
 });
 

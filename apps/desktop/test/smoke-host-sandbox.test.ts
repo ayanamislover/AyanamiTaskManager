@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -16,6 +17,7 @@ import {
   exited,
   smokeExecutable,
   smokeHostEnvironment,
+  survivingProcesses,
 } from "../../../scripts/smoke-host.js";
 
 // 手动烟测（窗口、历史、毛玻璃、登录启动、bridge 内存）共用这道闸：数据根只能在 output/ 下，
@@ -134,5 +136,40 @@ describe("烟测宿主与子进程", () => {
     expect(source).toMatch(
       /if \(Buffer\.from\(current, "base64"\)\.toString\("utf8"\) === marker\) \{\s*if \(snapshot === "EMPTY"\)/u,
     );
+  });
+
+  // 先启动宿主、后拍 Run 快照的话，快照读失败时宿主已经起来了却没人收拾（Codex R5-P2-3）。
+  it("每个直接启动烟测宿主的脚本都先拍 Run 快照", () => {
+    const scripts = join(process.cwd(), "scripts");
+    const starting = readdirSync(scripts)
+      .filter((name) => name.endsWith(".ts") && name !== "smoke-host.ts")
+      .filter((name) => readFileSync(join(scripts, name), "utf8").includes("startSmokeHost("));
+    expect(starting.length).toBeGreaterThanOrEqual(6);
+    for (const name of starting) {
+      const source = readFileSync(join(scripts, name), "utf8");
+      const snapshot = source.indexOf("snapshotLoginItems(");
+      expect(snapshot, name).toBeGreaterThan(0);
+      expect(snapshot, name).toBeLessThan(source.indexOf("startSmokeHost("));
+      expect(source, name).not.toContain("withLoginItemsRestored(");
+    }
+  });
+
+  // 收尾按 PID 结束进程前先核出生身份：PID 可能已被系统复用给无关进程（Codex R5-P2-4）。
+  it("只结束 PID 上仍是当初那个进程的：已退出、查不到、换了人都不碰", () => {
+    const recorded = [
+      { pid: 10, identity: "a" },
+      { pid: 11, identity: "b" },
+      { pid: 12, identity: "c" },
+      { pid: 13, identity: "d" },
+    ];
+    const now: Record<number, string | null> = { 10: "a", 11: null, 12: "c-reused", 13: "d" };
+    expect(survivingProcesses(recorded, (pid) => now[pid] ?? null)).toEqual([10, 13]);
+    expect(survivingProcesses(recorded, () => null)).toEqual([]);
+    const budget = readFileSync("scripts/budget-measure.ts", "utf8");
+    expect(budget).toContain(
+      "for (const pid of survivingProcesses(descendants, query)) killProcessTree(pid);",
+    );
+    expect(budget).not.toMatch(/process\.kill\(pid, 0\)/u);
+    expect(budget).not.toMatch(/child\.exitCode/u);
   });
 });
