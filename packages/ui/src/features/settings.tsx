@@ -417,7 +417,10 @@ export function SettingsPage({
                 </div>
               ) : null}
               {desktop?.getUpdateStatus ? (
-                <div className="atm-row" data-testid="update-diagnostics">
+                <div
+                  className={`atm-row${updateReady ? " atm-update-ready" : ""}`}
+                  data-testid="update-diagnostics"
+                >
                   <div>
                     <div className="atm-row-title">自动更新</div>
                     <div className="atm-row-sub">
