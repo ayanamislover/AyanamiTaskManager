@@ -672,15 +672,22 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "SPAWNED:ROLLBACK_START" },
   );
   check("setup died right after spawning (99)", died === 99, sandbox.log(4));
+  // The orphaned host finds the journal unfinished and starts its own --recover; this one
+  // races it for the install lock. Either may win — what matters is how the journal ends.
+  const recovered = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+    "--recover",
+    "--quiet",
+  ]);
   check(
-    "recover exit 4 (ROLLED_BACK)",
-    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--recover", "--quiet"]) === 4,
-    sandbox.log(6),
+    "recovered to ROLLED_BACK (by this --recover or the host's own)",
+    (recovered === 4 || sandbox.log(12).includes("INSTALL_LOCK_BUSY")) &&
+      (await until(() => sandbox.journal()?.outcome === "ROLLED_BACK", 90_000)),
+    { recovered, journal: sandbox.journal(), log: sandbox.log(8) },
   );
   check(
     "the recovery took the spawned host over instead of starting a second",
-    sandbox.log(6).includes("taking over host"),
-    sandbox.log(6),
+    sandbox.log(12).includes("taking over host"),
+    sandbox.log(12),
   );
   check(
     `exactly one ${VERSION_A} host, serving`,

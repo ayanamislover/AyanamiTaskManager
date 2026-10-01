@@ -137,6 +137,13 @@ pub fn scrub_environment(command: &mut Command) {
             command.env_remove(key);
         }
     }
+    // Test builds only. The packaged smoke isolates Agent configs under a synthetic home, but
+    // WebView2 does not start under a synthetic USERPROFILE; so the host keeps the real profile
+    // and Node children — whose os.homedir() decides where those configs live — get this one.
+    #[cfg(feature = "smoke")]
+    if let Some(home) = std::env::var_os("ATM_SMOKE_CORE_USERPROFILE") {
+        command.env("USERPROFILE", &home).env("HOME", &home);
+    }
 }
 
 fn append_bounded(path: &Path, bytes: &[u8]) {

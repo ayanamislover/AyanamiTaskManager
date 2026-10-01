@@ -798,6 +798,13 @@ impl App {
                 });
             })
             .with_url(assets::ENTRY_URL);
+        // Test builds only: a DevTools endpoint on a port the OS picks. Chromium writes it to
+        // `<data>\webview\EBWebView\DevToolsActivePort`, where the smoke scripts read it —
+        // nobody guesses a port. Setting the args replaces wry's defaults, so they are repeated.
+        #[cfg(feature = "smoke")]
+        let builder = builder.with_additional_browser_args(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port=0",
+        );
         match builder.build(&window) {
             Ok(webview) => {
                 crate::webview_frames::deny_frames(&webview);

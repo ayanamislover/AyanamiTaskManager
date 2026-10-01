@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -41,20 +41,37 @@ type RunningApp = { child: ChildProcess; stderr: string[] };
 type RecordedMcpLaunch = { command: string; args: string[]; env: Record<string, string> };
 
 const root = process.cwd();
+const sourceVersion = (
+  JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { version: string }
+).version;
+/**
+ * 被测的宿主。默认是烟测包（package-native --smoke，宿主带 smoke feature：WebView2 开 CDP、
+ * 接受 --smoke-quit）就地便携运行；distribution-smoke 用它指向安装后的入口。
+ */
 const executable = resolve(
   process.env.ATM_PACKAGED_EXE ??
-    join(root, "out", "AyanamiTaskManager-win32-x64", "AyanamiTaskManager.exe"),
+    join(root, "output", "package-smoke", `app-${sourceVersion}`, "AyanamiTaskManager.exe"),
 );
-const packagedResourcesRoot = join(dirname(executable), "resources");
+/** portable：版本目录就地运行；installed：经 atm-setup 安装，入口是安装根的启动器。 */
+const layout = process.env.ATM_SMOKE_LAYOUT === "installed" ? "installed" : "portable";
+const appDir = layout === "installed" ? null : dirname(executable);
+/** 安装态的入口是安装根的启动器；当前版本目录由 app.json 指向。 */
+function currentAppDir(): string {
+  if (appDir) return appDir;
+  const pointer = JSON.parse(readFileSync(join(dirname(executable), "app.json"), "utf8")) as {
+    current: string;
+  };
+  return join(dirname(executable), `app-${pointer.current}`);
+}
+const packagedResourcesRoot = join(currentAppDir(), "resources");
+/** 自启动登记的入口：安装态是安装根的启动器（就是 executable），便携态是本目录的宿主。 */
+const AUTOSTART_VALUE = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
 const outputDir = join(root, "output");
 const dataDir = resolve(process.env.ATM_SMOKE_DATA_DIR ?? join(outputDir, "packaged-smoke-data"));
-const electronUserDataDir = resolve(
-  process.env.ATM_SMOKE_USER_DATA_DIR ?? join(outputDir, "packaged-smoke-electron-profile"),
-);
 const reportPath = resolve(
   process.env.ATM_SMOKE_REPORT ?? join(outputDir, "packaged-smoke-report.json"),
 );
-// IME helpers may outlive Electron and retain log handles under the synthetic USERPROFILE.
+// IME helpers may outlive the app and retain log handles under the synthetic USERPROFILE.
 // Each invocation needs a fresh home; never delete a previous run's still-open helper files.
 // Older homes are reclaimed on startup instead: see reclaimSmokeWorkspaces.
 const agentConfigPrefix = "packaged-smoke-agent-config-";
@@ -81,6 +98,17 @@ const smokeEnvironment = {
   USERPROFILE: smokeHome,
   APPDATA: smokeAppData,
   LOCALAPPDATA: smokeLocalAppData,
+};
+/**
+ * 宿主进程用的环境：WebView2 在合成的 USERPROFILE 下起不来，宿主保留真实 profile；
+ * smoke 构建的宿主把 ATM_SMOKE_CORE_USERPROFILE 交给它拉起的 Node（core 与 stdio 桥），
+ * Agent 配置的位置由它们的 os.homedir() 决定，于是仍落在合成 home 里。
+ */
+const hostEnvironment = {
+  ...smokeEnvironment,
+  HOME: inheritedEnvironment.HOME ?? inheritedEnvironment.USERPROFILE ?? smokeHome,
+  USERPROFILE: inheritedEnvironment.USERPROFILE ?? smokeHome,
+  ATM_SMOKE_CORE_USERPROFILE: smokeHome,
 };
 const checks: Array<{ name: string; passed: boolean; detail?: string }> = [];
 let recordedAgentProfiles: Record<McpProfile, RecordedMcpLaunch> | null = null;
@@ -117,26 +145,18 @@ async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): 
   throw lastError ?? new Error(`等待 ${timeoutMs}ms 超时`);
 }
 
-// Chromium 用 --remote-debugging-port=0 时把实际端口写在这里（用户数据目录下）。
-const devToolsPortFile = join(electronUserDataDir, "DevToolsActivePort");
+// smoke 宿主让 WebView2 以 --remote-debugging-port=0 启动，Chromium 把实际端口写在
+// WebView2 用户数据目录（<数据根>\webview）下——不猜端口。
+const devToolsPortFile = join(dataDir, "webview", "EBWebView", "DevToolsActivePort");
 
 function startApp(): RunningApp {
   rmSync(devToolsPortFile, { force: true });
-  const child = spawn(
-    executable,
-    [
-      "--background",
-      `--user-data-dir=${electronUserDataDir}`,
-      // 只加在烟测自己拉起的进程上：用来走真实 renderer 的用户路径，见 connectUserRenderer。
-      "--remote-debugging-port=0",
-    ],
-    {
-      cwd: root,
-      env: smokeEnvironment,
-      windowsHide: true,
-      stdio: ["ignore", "ignore", "pipe"],
-    },
-  );
+  const child = spawn(executable, ["--background"], {
+    cwd: root,
+    env: hostEnvironment,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "pipe"],
+  });
   const stderr: string[] = [];
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr.push(chunk.toString("utf8"));
@@ -157,11 +177,15 @@ type UserPath = {
 
 /**
  * 以用户身份调用（ATM-T-0503 / 0509）。daemon.json 里只有 Agent 凭证，用户专属路由必须
- * 走界面真正走的那条路：renderer → preload 的 runtimeRequest → 主进程代为注入内存里的
+ * 走界面真正走的那条路：renderer → 宿主注入的 runtimeRequest → core 代为注入内存里的
  * 用户凭证。这里经 CDP 在已打包应用的 renderer 里调 runtimeRequest，用户凭证始终不离开
- * 主进程；烟测也不需要、也拿不到它。
+ * core；烟测也不需要、也拿不到它。
+ *
+ * 后台启动的宿主没有窗口：先像用户再点一次入口那样发 SHOW（第二实例），窗口和 WebView 才建。
  */
 async function connectUserRenderer(): Promise<UserPath> {
+  const show = spawn(executable, [], { cwd: root, env: hostEnvironment, stdio: "ignore" });
+  await waitForExit(show, 10_000);
   const port = await waitUntil(async () => {
     if (!existsSync(devToolsPortFile)) return null;
     const value = Number((await readFile(devToolsPortFile, "utf8")).split(/\r?\n/u)[0]);
@@ -291,9 +315,9 @@ async function waitForExit(child: ChildProcess, timeoutMs = 15_000): Promise<num
 
 async function stopApp(app: RunningApp): Promise<void> {
   if (app.child.exitCode !== null) return;
-  const request = spawn(executable, ["--smoke-quit", `--user-data-dir=${electronUserDataDir}`], {
+  const request = spawn(executable, ["--smoke-quit"], {
     cwd: root,
-    env: smokeEnvironment,
+    env: hostEnvironment,
     windowsHide: true,
     stdio: "ignore",
   });
@@ -756,6 +780,8 @@ async function claimThroughPackagedActions(
 }
 
 if (!existsSync(executable)) throw new Error(`找不到打包应用：${executable}`);
+if (appDir && !existsSync(join(appDir, "portable")))
+  throw new Error(`便携烟测需要版本目录里的 portable 标记：${appDir}`);
 await mkdir(outputDir, { recursive: true });
 // 每跑一次就留一个合成 home，不清的话最后是打包流程去遍历它们并撞上 EPERM。
 await reclaimSmokeWorkspaces({
@@ -765,7 +791,6 @@ await reclaimSmokeWorkspaces({
 });
 await mkdir(dirname(reportPath), { recursive: true });
 await rm(dataDir, { recursive: true, force: true });
-await rm(electronUserDataDir, { recursive: true, force: true });
 await mkdir(dirname(codexConfigPath), { recursive: true });
 await mkdir(dirname(claudeConfigPath), { recursive: true });
 await mkdir(dirname(kimiConfigPath), { recursive: true });
@@ -981,34 +1006,37 @@ try {
   const bridgePath = join(dataDir, "mcp-stdio.cjs");
   check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
 
-  // 写进 Agent 配置的 command 也不能带版本号。1.0.12 是靠「启动时把配置改回当前版本」
-  // 兜的，可那只改得动盘上的文件，改不动已经把配置读进内存的客户端——Claude 桌面版
-  // 一个会话里始终拿启动那一刻的路径去 spawn，于是用户看到 app-1.0.10 ENOENT。
-  // 路径本身不认版本，客户端拿多旧的配置都无所谓。
-  const launchPath = mcpLaunch({ execPath: executable, dataDir }).command;
-  check(
-    "MCP 启动路径落在数据根的版本无关链接下",
-    launchPath.startsWith(join(dataDir, MCP_RUNTIME_LINK) + sep),
-    launchPath,
-  );
-  check(
-    "MCP 启动路径不含 app-<version> 段",
-    !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
-    launchPath,
-  );
-  // 包里带着原生 shim，配置就必须指向它。回落到 Electron-as-node 也能连通，下面的 MCP
+  // 写进 Agent 配置的 command 不能带版本号：客户端在会话开始时把配置读进内存，之后盘上
+  // 怎么改都影响不到它。安装态走数据根下由 atm-setup 维护的 current 链接；便携版没有安装
+  // 事务，配置就指向便携目录本身——便携目录不随版本换名，同样不认版本。
+  const launchPath = mcpLaunch({
+    execPath: join(currentAppDir(), "AyanamiTaskManager.exe"),
+    dataDir,
+  }).command;
+  const expectedShim =
+    layout === "installed"
+      ? join(dataDir, MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME)
+      : join(currentAppDir(), "resources", MCP_SHIM_FILENAME);
+  if (layout === "installed") {
+    check(
+      "MCP 启动路径落在数据根的版本无关链接下",
+      launchPath.startsWith(join(dataDir, MCP_RUNTIME_LINK) + sep),
+      launchPath,
+    );
+    check(
+      "MCP 启动路径不含 app-<version> 段",
+      !/[\\/]app-\d+\.\d+\.\d+[\\/]/u.test(launchPath),
+      launchPath,
+    );
+  }
+  // 包里带着原生 shim，配置就必须指向它。回落到宿主的 --mcp-stdio 也能连通，下面的 MCP
   // 用例照样全绿——所以只能在这里按路径与参数钉死，否则 shim 没生效也看不出来。
-  check(
-    "MCP 启动路径是链接下的原生 shim",
-    launchPath === join(dataDir, MCP_RUNTIME_LINK, "resources", MCP_SHIM_FILENAME),
-    launchPath,
-  );
+  check("MCP 启动路径是原生 shim", launchPath === expectedShim, launchPath);
   for (const [profile, launch] of Object.entries(recordedAgentProfiles)) {
     check(`${profile} 配置使用版本无关启动路径`, launch.command === launchPath, launch.command);
     check(
-      `${profile} 配置只带静态 Profile 参数、不带 Node bridge 环境`,
-      launch.args.join(" ") === `--profile ${profile}` &&
-        launch.env.ELECTRON_RUN_AS_NODE === undefined,
+      `${profile} 配置只带静态 Profile 参数、不带环境变量`,
+      launch.args.join(" ") === `--profile ${profile}` && Object.keys(launch.env).length === 0,
       JSON.stringify(launch),
     );
   }
@@ -1127,16 +1155,32 @@ try {
     restoredTasks.length === 1 && restoredTasks[0]?.title === "打包烟测任务",
   );
 
-  const autoLaunch = JSON.parse(
-    await readFile(join(dataDir, "runtime", "autolaunch-smoke.json"), "utf8"),
-  ) as { passed: boolean; path: string; args: string[] };
-  check("自启动开关写入并恢复", autoLaunch.passed === true);
+  // 自启动开关走界面真正调用的那条桥（宿主写 HKCU Run），登记值逐字比对；
+  // 结束时由 finally 里的 loginItemRestorePlan 恢复用户原来的登记。
+  const desktopCall = (method: "setAutoLaunch" | "getAutoLaunch", ...args: unknown[]) =>
+    user!.page.evaluate(
+      ([name, values]) =>
+        (window as unknown as { ayanamiDesktop: Record<string, (...a: unknown[]) => unknown> })
+          .ayanamiDesktop[name]!(...values),
+      [method, args] as const,
+    );
+  const enabled = await desktopCall("setAutoLaunch", true);
+  const registered = readRunEntries()[AUTOSTART_VALUE];
+  const expectedAutostart = `"${executable}" --background --random-startup-delay`;
   check(
-    "自启动使用版本无关入口与后台随机延迟参数",
-    autoLaunch.path === join(dataDir, "current", "AyanamiTaskManager.exe") &&
-      JSON.stringify(autoLaunch.args) ===
-        JSON.stringify(["--background", "--random-startup-delay"]),
-    `${autoLaunch.path} ${autoLaunch.args.join(" ")}`,
+    "自启动经桥写入：入口与后台随机延迟参数",
+    enabled === true &&
+      (await desktopCall("getAutoLaunch")) === true &&
+      registered?.toLowerCase() === expectedAutostart.toLowerCase(),
+    `${String(enabled)} ${registered ?? "(none)"}`,
+  );
+  const disabled = await desktopCall("setAutoLaunch", false);
+  check(
+    "自启动经桥关闭并删除登记",
+    disabled === false &&
+      (await desktopCall("getAutoLaunch")) === false &&
+      readRunEntries()[AUTOSTART_VALUE] === undefined,
+    `${String(disabled)} ${readRunEntries()[AUTOSTART_VALUE] ?? "(none)"}`,
   );
 
   await user.close();

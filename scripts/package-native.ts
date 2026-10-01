@@ -1,13 +1,16 @@
 /**
  * 生成一个版本的发布产物（de-electron §6 包格式），替代 electron-forge 的 package/make：
  *
- *   release/native/atm-<v>-win-x64.zip    版本目录 app-<v> 的全部文件
- *   release/native/atm-<v>-win-x64.json   清单：zip 的 sha256/字节数、逐文件 size+sha256、
+ *   output/package/atm-<v>-win-x64.zip    版本目录 app-<v> 的全部文件
+ *   output/package/atm-<v>-win-x64.json   清单：zip 的 sha256/字节数、逐文件 size+sha256、
  *                                          最低 WebView2、schemaSet；最后写，写完才算发布
- *   release/native/atm-setup.exe           安装器；与上面两个放在同一目录就是一个安装包
+ *   output/package/atm-setup.exe           安装器；与上面两个放在同一目录就是一个安装包
  *
- *   pnpm exec tsx scripts/package-native.ts            # 构建全部并打包
- *   pnpm exec tsx scripts/package-native.ts --no-build # 只重打包已有构建产物
+ *   pnpm exec tsx scripts/package-native.ts                  # 构建全部并打包
+ *   pnpm exec tsx scripts/package-native.ts --no-build       # 只重打包已有构建产物
+ *   pnpm exec tsx scripts/package-native.ts --smoke <dir>    # 烟测包：宿主带 smoke feature
+ *
+ * 产物先落在 output/：发布组装（assemble-release.ts）会清空 release/ 再从这里取。
  *
  * 构建失败一律直接报错，不回落：缺任何一个原生组件的包「看起来能装」，恰恰没交付要交付的东西。
  */
@@ -42,6 +45,8 @@ import {
  */
 export const MIN_WEBVIEW2 = "128.0.2739.42";
 export const MANIFEST_FORMAT = 1;
+/** 版本目录里有这个空文件，宿主就按便携版运行（install-state 的 PORTABLE_MARKER）。 */
+export const PORTABLE_MARKER = "portable";
 export const NATIVE_CRATE_DIR = "apps/desktop/native";
 const FIXED_MTIME = new Date("2026-01-01T00:00:00Z");
 
@@ -100,7 +105,28 @@ export function drillSetup(root: string): string {
   return join(root, NATIVE_CRATE_DIR, "target-drill", "release", "atm-setup.exe");
 }
 
-function buildNative(root: string, drill: boolean): void {
+/**
+ * 烟测用宿主：带 `smoke` feature（WebView2 开 CDP、接受 SMOKE_QUIT），单独的 target 目录。
+ * 烟测包只证明行为；发布的是生产宿主，它另有「没有调试入口」的检查（assertProductionHost）。
+ */
+export function smokeHost(root: string): string {
+  return join(root, NATIVE_CRATE_DIR, "target-smoke", "release", "AyanamiTaskManager.exe");
+}
+
+/** 只出现在 smoke 构建里的字面量；生产宿主里出现就是拿错了二进制。 */
+const SMOKE_HOST_MARKER = "--remote-debugging-port";
+
+export function assertProductionHost(bytes: Buffer): void {
+  if (bytes.includes(Buffer.from(SMOKE_HOST_MARKER, "utf8")))
+    throw new Error(`PACKAGED_HOST_IS_SMOKE_BUILD: ${SMOKE_HOST_MARKER}`);
+}
+
+function assertSmokeHost(bytes: Buffer): void {
+  if (!bytes.includes(Buffer.from(SMOKE_HOST_MARKER, "utf8")))
+    throw new Error("SMOKE_HOST_WITHOUT_SMOKE_FEATURE");
+}
+
+function buildNative(root: string, drill: boolean, smoke: boolean): void {
   const cwd = join(root, NATIVE_CRATE_DIR);
   const env = { CARGO_TARGET_DIR: "target", ATM_REQUIRE_VERSION_RESOURCE: "1" };
   run(
@@ -129,9 +155,14 @@ function buildNative(root: string, drill: boolean): void {
         CARGO_TARGET_DIR: "target-drill",
       },
     );
+  if (smoke)
+    run("cargo", ["build", "--release", "--locked", "-p", "atm-host", "--features", "smoke"], cwd, {
+      ...env,
+      CARGO_TARGET_DIR: "target-smoke",
+    });
 }
 
-export function buildAll(root: string, drill = false): void {
+export function buildAll(root: string, drill = false, smoke = false): void {
   run(
     process.execPath,
     ["node_modules/vite/bin/vite.js", "build", "--config", "apps/desktop/vite.config.ts"],
@@ -143,7 +174,7 @@ export function buildAll(root: string, drill = false): void {
     root,
   );
   buildMcpShim(root);
-  buildNative(root, drill);
+  buildNative(root, drill, smoke);
 }
 
 /** 发布包里的 setup 不能带演练开关：扫二进制里的环境变量名。 */
@@ -217,6 +248,8 @@ export function packageNative(input: {
   drill?: boolean;
   /** 演练的第二版本：core 以这个版本号另行构建，原生 exe 沿用（它们的版本资源不参与判定）。 */
   drillVersion?: string;
+  /** 烟测包：宿主换成 smoke 构建，产物只能落在 output/ 下。 */
+  smoke?: boolean;
 }): NativeRelease {
   const root = resolve(input.root);
   const { version: sourceVersion } = JSON.parse(
@@ -228,15 +261,23 @@ export function packageNative(input: {
     throw new Error("DRILL_VERSION_REQUIRES_DRILL");
   const version = input.drillVersion ?? sourceVersion;
   const drill = input.drill === true;
-  if (input.build !== false) buildAll(root, drill);
-  const out = resolve(input.outDir ?? join(root, "release", "native"));
+  const smoke = input.smoke === true;
+  if (input.build !== false) buildAll(root, drill, smoke);
+  const out = resolve(input.outDir ?? join(root, "output", "package"));
   if (!out.toLowerCase().startsWith(`${root.toLowerCase()}${sep}`))
     throw new Error(`PACKAGE_OUTSIDE_WORKSPACE: ${out}`);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
-  if (drill && !out.toLowerCase().startsWith(`${join(root, "output").toLowerCase()}${sep}`))
-    throw new Error(`DRILL_PACKAGE_OUTSIDE_OUTPUT: ${out}`);
-  const exes = { ...nativeRelease(root), ...(drill ? { setup: drillSetup(root) } : {}) };
+  if (
+    (drill || smoke) &&
+    !out.toLowerCase().startsWith(`${join(root, "output").toLowerCase()}${sep}`)
+  )
+    throw new Error(`TEST_PACKAGE_OUTSIDE_OUTPUT: ${out}`);
+  const exes = {
+    ...nativeRelease(root),
+    ...(drill ? { setup: drillSetup(root) } : {}),
+    ...(smoke ? { host: smokeHost(root) } : {}),
+  };
   let coreDir: string | undefined;
   if (input.drillVersion !== undefined) {
     coreDir = join(out, "core-build");
@@ -269,12 +310,16 @@ export function packageNative(input: {
     ...(coreDir ? { coreDir } : {}),
   });
   if (coreDir) rmSync(coreDir, { recursive: true, force: true });
+  // 烟测包总是就地便携运行：没有安装根、没有 app.json，宿主靠这个标记认出便携布局。
+  if (smoke) writeFileSync(join(appDir, PORTABLE_MARKER), "");
   // 身份与版本无关，演练包也查：同名的宿主被当成启动器拷进包，启动「也能用」，却没了安装屏障。
   assertExecutable(appDir, APP_LAYOUT.host, "AyanamiTaskManager.Host", "HOST");
   assertExecutable(appDir, APP_LAYOUT.launcher, "AyanamiTaskManager.Launcher", "LAUNCHER");
   assertExecutable(appDir, APP_LAYOUT.setup, "atm-setup", "SETUP");
   if (input.drillVersion === undefined) assertExecutables(appDir, version);
   if (!drill) assertProductionSetup(readFileSync(join(appDir, APP_LAYOUT.setup)));
+  if (smoke) assertSmokeHost(readFileSync(join(appDir, APP_LAYOUT.host)));
+  else assertProductionHost(readFileSync(join(appDir, APP_LAYOUT.host)));
 
   const files: ManifestFile[] = [];
   const zippable: Zippable = {};
@@ -324,6 +369,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
       : {}),
     ...(process.argv.includes("--drill-version")
       ? { drillVersion: process.argv[process.argv.indexOf("--drill-version") + 1] }
+      : {}),
+    ...(process.argv.includes("--smoke")
+      ? { smoke: true, outDir: process.argv[process.argv.indexOf("--smoke") + 1] }
       : {}),
   });
   const manifest = JSON.parse(readFileSync(release.manifest, "utf8")) as NativeManifest;

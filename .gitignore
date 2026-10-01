@@ -44,3 +44,4 @@ output/
 *.db-wal
 *.db-shm
 /apps/desktop/native/target-drill/
+/apps/desktop/native/target-smoke/
