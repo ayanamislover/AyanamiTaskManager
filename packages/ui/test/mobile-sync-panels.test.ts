@@ -311,6 +311,60 @@ describe("Claude 自动开工面板", () => {
     expect(markup).not.toContain("`");
   });
 
+  it("失败记录的结果与原因相同、又是行内代码时，红色原因行仍有内容（peer R7-01）", () => {
+    const reason = "```ENOENT: missing a_b.ts```";
+    const markup = panel(
+      dispatchStatus({
+        runs: [
+          {
+            run: "r8",
+            project: "DEMO",
+            key: "DEMO-T-0003",
+            title: "缺文件",
+            origin: "mobile",
+            state: "failed",
+            sessionId: "s8",
+            createdAt: "2026-10-01T12:40:00.000Z",
+            endedAt: "2026-10-01T12:40:05.000Z",
+            error: reason,
+            summary: { numTurns: 1, durationMs: 10, totalCostUsd: 0, result: reason },
+          },
+        ],
+      }),
+    );
+    expect(markup).toContain('atm-dispatch-error">ENOENT: missing a_b.ts<');
+    expect(markup).not.toContain("atm-dispatch-summary");
+  });
+
+  it("结果与原因原文不同、预览相同时只留红色那一行", () => {
+    const markup = panel(
+      dispatchStatus({
+        runs: [
+          {
+            run: "r6",
+            project: "DEMO",
+            key: "DEMO-T-0004",
+            title: "失败",
+            origin: "desktop",
+            state: "failed",
+            sessionId: "s6",
+            createdAt: "2026-10-01T12:40:00.000Z",
+            endedAt: "2026-10-01T12:40:05.000Z",
+            error: "构建失败：缺少 a_b.ts",
+            summary: {
+              numTurns: 1,
+              durationMs: 10,
+              totalCostUsd: 0,
+              result: "**构建失败**：缺少 `a_b.ts`",
+            },
+          },
+        ],
+      }),
+    );
+    expect(markup).toContain('atm-dispatch-error">构建失败：缺少 a_b.ts<');
+    expect(markup).not.toContain("atm-dispatch-summary");
+  });
+
   it("结束派单失败（500 DISPATCH_CANCEL_FAILED）：原因进列表上方的错误条，成败都刷新列表", () => {
     // 服务端没结束掉进程时派单仍在运行：「结束」按钮要还在（靠刷新拿到 running），原因要看得见。
     const panelSource = source("dispatch-panel.tsx");

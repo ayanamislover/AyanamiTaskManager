@@ -275,22 +275,6 @@ export function dispatchFailureReason(
   return reason ? reason : null;
 }
 
-/**
- * 派单记录里 Claude 的结果原文多是 Markdown，列表里只给两行，按纯文本预览显示：
- * 去掉代码围栏、行首的标题 / 引用 / 列表记号、成对的 `**` 和反引号，链接只留文字，空白并成一个空格。
- * 单个 `*`、`_` 不动：标识符里常有下划线（atm_task_patch），误删比留着更糟。存下来的原文不改。
- */
-export function plainPreview(text: string): string {
-  return text
-    .replace(/^[ \t]*```.*$/gmu, " ")
-    .replace(/^[ \t]*(?:#{1,6}[ \t]+|>[ \t]?|[-*+][ \t]+|\d+[.)][ \t]+)/gmu, "")
-    .replace(/\[([^\]\n]+)\]\([^)\s]*\)/gu, "$1")
-    .replace(/\*\*([^*\n]+)\*\*/gu, "$1")
-    .replace(/`+([^`\n]*)`+/gu, "$1")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
 /** 桌面端走宿主的剪贴板接口，浏览器预览退回 navigator.clipboard。 */
 export async function copyToClipboard(desktop: DesktopBridge | undefined, text: string) {
   if (desktop?.copyText) await desktop.copyText(text);

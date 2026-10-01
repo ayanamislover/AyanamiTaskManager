@@ -16,7 +16,6 @@ import {
   latestRunFor,
   modelInput,
   PERMISSION_MODES,
-  plainPreview,
   pollingLabel,
   problemText,
   relativeTime,
@@ -168,32 +167,6 @@ describe("中继表单校验", () => {
 });
 
 describe("派单", () => {
-  it("派单结果按纯文本预览：去掉 Markdown 记号，标识符里的下划线不动", () => {
-    // 真机派单的结果原文（节选）：面板曾原样显示 ** 和反引号。
-    const result = [
-      "## 结果",
-      "**测试内容：** 用 `node:test` 检查 `greet('Ayanami')`。",
-      "- 新增 [greet.test.js](greet.test.js)",
-      "1. 调用 atm_task_patch 的 verify_and_complete",
-      "> 没有提交",
-      "```js",
-      "const a = 1;",
-      "```",
-    ].join("\n");
-    expect(plainPreview(result)).toBe(
-      "结果 测试内容： 用 node:test 检查 greet('Ayanami')。 新增 greet.test.js " +
-        "调用 atm_task_patch 的 verify_and_complete 没有提交 const a = 1;",
-    );
-    expect(plainPreview("Failed to authenticate: OAuth session expired")).toBe(
-      "Failed to authenticate: OAuth session expired",
-    );
-    // 单个星号、数字开头的普通句子、版本号都不算 Markdown。
-    expect(plainPreview("耗时 3.5 秒，a * b 不变，2.1.286 已登录")).toBe(
-      "耗时 3.5 秒，a * b 不变，2.1.286 已登录",
-    );
-    expect(plainPreview("  \n```\n```\n ")).toBe("");
-  });
-
   it("请求账本提示：读不出来、丢过数据各一句；正常或旧版宿主没给字段时不提示", () => {
     expect(dispatchLedgerNotice(undefined)).toBeNull();
     expect(

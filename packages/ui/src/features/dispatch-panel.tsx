@@ -28,11 +28,11 @@ import {
   isActiveRun,
   modelInput,
   PERMISSION_MODES,
-  plainPreview,
   resumeCommand,
   runWindow,
   shortSessionId,
 } from "./mobile-sync-support.js";
+import { plainPreview } from "./plain-preview.js";
 
 /** 设置页「Claude 自动开工」：开关、权限模式、并发、模型与 effort，以及最近的派单。 */
 export function DispatchPanel({
@@ -281,6 +281,23 @@ function DispatchSettings({
   );
 }
 
+/**
+ * 一次派单的结果与失败原因。两者都可能是 Claude 的 Markdown 原文，按纯文本预览显示；
+ * 失败时结果常和原因是同一句（旧记录尤其如此），预览相同就只留红色那一行。
+ */
+function RunText({ run }: { run: Pick<DispatchRunView, "summary" | "error"> }) {
+  const summary = run.summary?.result ? plainPreview(run.summary.result) : "";
+  const error = run.error ? plainPreview(run.error) : "";
+  return (
+    <>
+      {summary && summary !== error ? (
+        <div className="atm-row-sub atm-dispatch-summary">{summary}</div>
+      ) : null}
+      {error ? <div className="atm-row-sub atm-dispatch-error">{error}</div> : null}
+    </>
+  );
+}
+
 function DispatchRuns({
   client,
   runs,
@@ -345,16 +362,7 @@ function DispatchRuns({
                 <div className="atm-row-sub">
                   来自{dispatchOriginLabels[run.origin] ?? run.origin} · {runWindow(run)}
                 </div>
-                {/* 失败时 Claude 的结果原文常和错误原因是同一句（旧记录尤其如此），只留红色那一行。
-                    两者都可能是 Markdown 原文，按纯文本预览显示，不露出 ** 和反引号。 */}
-                {run.summary?.result && run.summary.result.trim() !== run.error?.trim() ? (
-                  <div className="atm-row-sub atm-dispatch-summary">
-                    {plainPreview(run.summary.result)}
-                  </div>
-                ) : null}
-                {run.error ? (
-                  <div className="atm-row-sub atm-dispatch-error">{plainPreview(run.error)}</div>
-                ) : null}
+                <RunText run={run} />
                 <div className="atm-row-sub" title={resumeCommand(run.sessionId)}>
                   会话 <code>{shortSessionId(run.sessionId)}</code> · 可用 claude -r 接着对话
                 </div>
