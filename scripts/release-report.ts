@@ -24,19 +24,18 @@ export type ReleaseArtifactIdentity = {
   sha256: string;
 };
 
+/**
+ * 一个候选发出去的四份字节：安装器、版本包、清单（三者放同一目录就是安装包，清单最后写），
+ * 以及便携 zip。
+ */
 export type ReleaseCandidateArtifacts = {
   setup: ReleaseArtifactIdentity;
   portable: ReleaseArtifactIdentity;
-  upgradePackage: ReleaseArtifactIdentity;
-  releases: ReleaseArtifactIdentity;
+  package: ReleaseArtifactIdentity;
+  manifest: ReleaseArtifactIdentity;
 };
 
-const RELEASE_CANDIDATE_ARTIFACT_KEYS = [
-  "portable",
-  "releases",
-  "setup",
-  "upgradePackage",
-] as const;
+const RELEASE_CANDIDATE_ARTIFACT_KEYS = ["manifest", "package", "portable", "setup"] as const;
 const RELEASE_CANDIDATE_KEYS = [
   "artifacts",
   "candidateSha256",
@@ -173,7 +172,7 @@ function assertEvidenceLayer(
 
 /**
  * 发布候选不是版本号或 HEAD 的别名。它绑定完整源码 fingerprint（含全部 stageHashes）
- * 和 Setup、portable、升级 NUPKG、RELEASES 的实际字节；任意一个字段变化都会
+ * 和安装器、版本包、清单、便携 zip 的实际字节；任意一个字段变化都会
  * 得到不同 candidateSha256。
  */
 export function createReleaseCandidateIdentity(input: {
@@ -188,8 +187,8 @@ export function createReleaseCandidateIdentity(input: {
   const artifacts = {
     setup: normalizedArtifact(input.artifacts.setup),
     portable: normalizedArtifact(input.artifacts.portable),
-    upgradePackage: normalizedArtifact(input.artifacts.upgradePackage),
-    releases: normalizedArtifact(input.artifacts.releases),
+    package: normalizedArtifact(input.artifacts.package),
+    manifest: normalizedArtifact(input.artifacts.manifest),
   };
   const artifactNames = Object.values(artifacts).map((artifact) => artifact.name.toLowerCase());
   if (new Set(artifactNames).size !== artifactNames.length) {

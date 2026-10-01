@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
  * 免得测试里的布局和真正发出去的不是一回事。
  *
  *   AyanamiTaskManager.exe            宿主（Rust）
+ *   LICENSE                           本项目许可证（AGPL-3.0）
  *   launcher\AyanamiTaskManager.exe   根启动器（FENCE 时由 setup 拷到安装根）
  *   atm-setup.exe                     安装器（同上；也是「ATM 修复」的后备入口）
  *   runtime\atm-core.exe              改名的 node.exe
@@ -58,6 +59,8 @@ export function assembleAppDirectory(input: AppLayoutInput): string {
   const at = (path: string) => join(target, path);
   mkdirSync(at("runtime"), { recursive: true });
   copyFileSync(input.hostExe, at(APP_LAYOUT.host));
+  // AGPL：二进制分发要带许可证全文。
+  copyFileSync(join(input.root, "LICENSE"), at("LICENSE"));
   copyFileSync(input.nodeExe, at(APP_LAYOUT.coreExe));
   const coreDist = input.coreDir ?? join(root, "apps", "desktop", "dist", "core");
   copyFileSync(join(coreDist, "core.mjs"), at(APP_LAYOUT.coreBundle));

@@ -1,31 +1,31 @@
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { pruneUpdateFeed, scanUpdateFeed } from "../apps/desktop/src/update-coordinator.js";
 
 export { updateFeedDir } from "../apps/desktop/src/updater.js";
 
-/** RELEASES 每行是 `<SHA1> <文件名> <字节数>`，只有第二列有用。 */
-export function releasesPackages(releases: string): string[] {
-  return releases
-    .split(/\r?\n/u)
-    .map((line) => line.trim().split(/\s+/u)[1])
-    .filter((name): name is string => Boolean(name));
+/**
+ * 把一个版本投递进本地更新源：先 zip，最后清单。core 只认「清单在」的版本
+ * （update-coordinator.ts），所以清单写下去之前，半个 zip 不会被当成可安装的更新。
+ */
+export function deliverUpdate(
+  feed: string,
+  packageDir: string,
+  version: string,
+): { zip: string; manifest: string } {
+  mkdirSync(feed, { recursive: true });
+  const zipName = `atm-${version}-win-x64.zip`;
+  const manifestName = `atm-${version}-win-x64.json`;
+  copyFileSync(join(packageDir, zipName), join(feed, zipName));
+  copyFileSync(join(packageDir, manifestName), join(feed, manifestName));
+  return { zip: join(feed, zipName), manifest: join(feed, manifestName) };
 }
 
 /**
- * Squirrel 产出的 RELEASES 每次只列当前这一个 full 包，旧包不会被任何人删掉——
- * 而 feed 是发布脚本写的，Squirrel 只读不管。发一版留一份 161.7 MB：跑到 1.0.9
- * 时 feed 已经 647 MB，其中 485 MB 是 RELEASES 根本没提到的死重。
- *
- * 判据只有一条：RELEASES 列了就留。没有 RELEASES 时一个都不删——那种状态下
- * 「谁还有用」无从判断，宁可留着。
+ * 装好 `installedVersion` 之后清掉已消费的投递：不高于它的原生包与清单，以及 Squirrel
+ * 时代留下的 RELEASES / *.nupkg。判据和运行中的 core 是同一份（scanUpdateFeed），
+ * 两边对「什么算用完了」不会各说各的。
  */
-export function pruneUpdateFeed(feed: string): string[] {
-  const releases = join(feed, "RELEASES");
-  if (!existsSync(releases)) return [];
-  const keep = new Set(releasesPackages(readFileSync(releases, "utf8")));
-  const stale = readdirSync(feed).filter(
-    (name) => name.toLowerCase().endsWith(".nupkg") && !keep.has(name),
-  );
-  for (const name of stale) rmSync(join(feed, name), { force: true });
-  return stale;
+export function pruneConsumedFeed(feed: string, installedVersion: string): string[] {
+  return pruneUpdateFeed(feed, scanUpdateFeed(feed, installedVersion).consumed);
 }

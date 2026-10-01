@@ -46,6 +46,14 @@ const fakeElectron = join(
   "examples",
   "fake-electron.exe",
 );
+const jobRunner = join(
+  root,
+  NATIVE_CRATE_DIR,
+  "target-drill",
+  "release",
+  "examples",
+  "job-runner.exe",
+);
 
 type Pointer = { current: string; previous?: string | null };
 type Journal = {
@@ -780,6 +788,49 @@ async function scenarioDelayed(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+/**
+ * Setup run inside a kill-on-close job (an Agent's terminal; an update started by a host the
+ * Agent woke). The ATM it starts must leave the job when the job allows it, or it ends the
+ * moment the job's owner does. A job that forbids breakaway still gets a committed install.
+ */
+async function scenarioJob(pkg: Packages): Promise<void> {
+  currentScenario = "job";
+  const sandbox = new Sandbox("job");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] install from inside a kill-on-close job\n`);
+  const inJob = (extra: string[], args: string[]) =>
+    spawnSync(jobRunner, [...extra, "--", pkg.a.setup, ...args], {
+      env: sandbox.env(),
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 180_000,
+    }).status;
+  check(
+    "install exit 0 (job allows breakaway)",
+    inJob([], ["install", pkg.a.manifest, "--quiet"]) === 0,
+  );
+  // job-runner has exited: its job is closed and everything left inside it is gone.
+  await sleep(3_000);
+  check(
+    "the started ATM outlived the job",
+    hostsUnder(join(sandbox.install, `app-${VERSION_A}`)).length === 1 &&
+      (await until(() => sandbox.serviceVersion() === VERSION_A, 10_000)),
+    hostsUnder(sandbox.install),
+  );
+  killAll(sandbox.dir);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  await until(() => !existsSync(join(sandbox.install, "app.json")), 60_000);
+
+  reset(sandbox);
+  check(
+    "install still commits when the job forbids breakaway",
+    inJob(["--no-breakaway"], ["install", pkg.a.manifest, "--quiet"]) === 0 &&
+      sandbox.journal()?.outcome === "COMMITTED",
+    sandbox.log(6),
+  );
+  teardown(sandbox);
+}
+
 /** An uninstall that meets a file in use stops short, keeps its barrier, and resumes (P1-2). */
 async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
   currentScenario = "uninstall-busy";
@@ -1237,6 +1288,7 @@ async function main(): Promise<void> {
     ["update", scenarioUpdate],
     ["review", scenarioReview],
     ["delayed", scenarioDelayed],
+    ["job", scenarioJob],
     ["uninstall-busy", scenarioUninstallBusy],
     ["faults", scenarioFaults],
     ["migration", scenarioMigration],

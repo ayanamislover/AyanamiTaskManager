@@ -84,7 +84,7 @@ const stages = [
   "e2e",
   "benchmark",
   "build",
-  "forge-make",
+  "package",
   "packaged-smoke",
   "distribution-smoke",
 ];
@@ -117,10 +117,10 @@ for (const layer of summary.evidenceLayers) {
   }
 }
 const expectedNames = [
-  `AyanamiTaskManager-Setup-${version}-win-x64.exe`,
+  "atm-setup.exe",
+  `atm-${version}-win-x64.zip`,
+  `atm-${version}-win-x64.json`,
   `AyanamiTaskManager-${version}-win-x64-portable.zip`,
-  `AyanamiTaskManagerDesktop-${version}-full.nupkg`,
-  "RELEASES",
   "release.json",
   "sbom.spdx.json",
 ];

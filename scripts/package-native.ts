@@ -1,5 +1,5 @@
 /**
- * 生成一个版本的发布产物（de-electron §6 包格式），替代 electron-forge 的 package/make：
+ * 生成一个版本的发布产物（de-electron §6 包格式）：
  *
  *   output/package/atm-<v>-win-x64.zip    版本目录 app-<v> 的全部文件
  *   output/package/atm-<v>-win-x64.json   清单：zip 的 sha256/字节数、逐文件 size+sha256、
@@ -9,6 +9,8 @@
  *   pnpm exec tsx scripts/package-native.ts                  # 构建全部并打包
  *   pnpm exec tsx scripts/package-native.ts --no-build       # 只重打包已有构建产物
  *   pnpm exec tsx scripts/package-native.ts --smoke <dir>    # 烟测包：宿主带 smoke feature
+ *   pnpm exec tsx scripts/package-native.ts --release        # 发布流水线：构建一次，产出
+ *       output/package（安装包 + 便携 zip）与 output/package-smoke（烟测包）
  *
  * 产物先落在 output/：发布组装（assemble-release.ts）会清空 release/ 再从这里取。
  *
@@ -26,17 +28,24 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { zipSync, type Zippable } from "fflate";
 import { stampAgentGuide } from "../apps/desktop/src/agent-guide-stamp.js";
 import { resolveAgentGuideBuild } from "./agent-guide-build.js";
 import { APP_LAYOUT, assembleAppDirectory } from "./app-layout.js";
-import { buildMcpShim } from "./mcp-shim-build.js";
+import { buildMcpShim, MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
+import { cargoHome, releaseRustEnv } from "./rust-build-env.js";
 import {
   assertExecutableIdentity,
   assertExecutableVersionResource,
   assertMcpShimVersionResource,
+  assertPublishedLogoBytes,
+  buildMachinePathNeedles,
+  findBuildMachinePath,
+  findForbiddenPackagedEntries,
+  missingRequiredPackagedEntries,
 } from "./package-content-policy.js";
 
 /**
@@ -128,7 +137,11 @@ function assertSmokeHost(bytes: Buffer): void {
 
 function buildNative(root: string, drill: boolean, smoke: boolean): void {
   const cwd = join(root, NATIVE_CRATE_DIR);
-  const env = { CARGO_TARGET_DIR: "target", ATM_REQUIRE_VERSION_RESOURCE: "1" };
+  const env = {
+    ...releaseRustEnv(root),
+    CARGO_TARGET_DIR: "target",
+    ATM_REQUIRE_VERSION_RESOURCE: "1",
+  };
   run(
     "cargo",
     ["build", "--release", "--locked", "-p", "atm-launcher", "-p", "atm-host", "-p", "atm-setup"],
@@ -299,7 +312,7 @@ export function packageNative(input: {
     target: join(out, `app-${version}`),
     hostExe: exes.host,
     nodeExe: process.execPath,
-    mcpShimExe: join(root, "apps/desktop/native/mcp-shim/target/release/atm-mcp.exe"),
+    mcpShimExe: join(root, MCP_SHIM_RELEASE_EXE),
     rendererDir: join(root, "apps", "desktop", "dist", "renderer"),
     stampedGuide: stampAgentGuide(readFileSync(join(root, "ATM_AGENT_GUIDE.md"), "utf8"), {
       ...resolveAgentGuideBuild(root),
@@ -320,6 +333,21 @@ export function packageNative(input: {
   if (!drill) assertProductionSetup(readFileSync(join(appDir, APP_LAYOUT.setup)));
   if (smoke) assertSmokeHost(readFileSync(join(appDir, APP_LAYOUT.host)));
   else assertProductionHost(readFileSync(join(appDir, APP_LAYOUT.host)));
+
+  const payload = walk(appDir).map((path) => relative(appDir, path).split(sep).join("/"));
+  const forbidden = findForbiddenPackagedEntries(payload);
+  if (forbidden.length > 0) throw new Error(`PACKAGED_CONTENT_FORBIDDEN: ${forbidden.join(", ")}`);
+  const missing = missingRequiredPackagedEntries(payload);
+  if (missing.length > 0) throw new Error(`PACKAGED_CONTENT_MISSING: ${missing.join(", ")}`);
+  const logos = payload.filter((path) => /^renderer\/assets\/logo[^/]*\.png$/u.test(path));
+  if (logos.length === 0) throw new Error("PACKAGED_BRAND_ASSET_MISSING");
+  for (const logo of logos) assertPublishedLogoBytes(readFileSync(join(appDir, logo)), logo);
+  // 构建机路径（用户目录、cargo 主目录、仓库根）不能出现在任何发出去的字节里。
+  const needles = buildMachinePathNeedles([homedir(), cargoHome(), root]);
+  for (const path of payload) {
+    const found = findBuildMachinePath(readFileSync(join(appDir, path)), needles);
+    if (found !== null) throw new Error(`PACKAGED_CONTENT_MAINTAINER_PATH: ${path} (${found})`);
+  }
 
   const files: ManifestFile[] = [];
   const zippable: Zippable = {};
@@ -356,11 +384,53 @@ export function packageNative(input: {
   return { version, dir: out, appDir, zip: zipPath, manifest: manifestPath, setup: setupPath };
 }
 
+/** 便携 zip 的文件名；解压出来是一个带 portable 标记的版本目录。 */
+export function portableZipName(version: string): string {
+  return `AyanamiTaskManager-${version}-win-x64-portable.zip`;
+}
+
+/**
+ * 便携版：同一个版本目录加上 portable 标记，放在 `AyanamiTaskManager-<v>\` 下打成 zip。
+ * 内容逐字节就是安装包里的那些文件，只多一个空标记——便携与安装验的是同一份二进制。
+ */
+export function packagePortable(release: NativeRelease): string {
+  const folder = `AyanamiTaskManager-${release.version}`;
+  const zippable: Zippable = {};
+  for (const path of walk(release.appDir).sort()) {
+    const name = relative(release.appDir, path).split(sep).join("/");
+    zippable[`${folder}/${name}`] = [readFileSync(path), { mtime: FIXED_MTIME, level: 9 }];
+  }
+  zippable[`${folder}/${PORTABLE_MARKER}`] = [new Uint8Array(), { mtime: FIXED_MTIME }];
+  const zipPath = join(release.dir, portableZipName(release.version));
+  writeFileSync(zipPath, zipSync(zippable));
+  return zipPath;
+}
+
+/** 发布流水线的打包阶段：一次构建，生产包、便携 zip、烟测包。 */
+export function packageRelease(root: string): { release: NativeRelease; portable: string } {
+  buildAll(root, false, true);
+  const release = packageNative({ root, build: false, outDir: join(root, "output", "package") });
+  const portable = packagePortable(release);
+  packageNative({
+    root,
+    build: false,
+    smoke: true,
+    outDir: join(root, "output", "package-smoke"),
+  });
+  return { release, portable };
+}
+
 function mib(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+if (
+  import.meta.url === pathToFileURL(process.argv[1] ?? "").href &&
+  process.argv.includes("--release")
+) {
+  const { release, portable } = packageRelease(process.cwd());
+  process.stdout.write(`${release.version}: ${release.manifest}\n${portable}\n`);
+} else if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
   const release = packageNative({
     root: process.cwd(),
     build: !process.argv.includes("--no-build"),

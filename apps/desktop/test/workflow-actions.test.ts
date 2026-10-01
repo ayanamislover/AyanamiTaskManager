@@ -40,9 +40,9 @@ const releaseGateContracts = [
   },
   { name: "build", source: "releaseRunner", needle: '{ name: "build", args: ["build"] },' },
   {
-    name: "Forge make",
+    name: "native package",
     source: "releaseRunner",
-    needle: '{ name: "forge-make", args: ["exec", "tsx", "scripts/forge-make.ts"] },',
+    needle: '{ name: "package", args: ["exec", "tsx", "scripts/package-native.ts", "--release"] },',
   },
   {
     name: "packaged smoke",
@@ -58,12 +58,12 @@ const releaseGateContracts = [
   {
     name: "portable smoke",
     source: "distributionSmoke",
-    needle: 'runPackagedSmoke("portable", portableExecutable);',
+    needle: "  await portable();",
   },
   {
     name: "installed smoke",
     source: "distributionSmoke",
-    needle: 'runPackagedSmoke("installed", installedExecutable);',
+    needle: "  installedState = await installed();",
   },
 ] as const satisfies ReadonlyArray<{
   name: string;
@@ -107,23 +107,41 @@ describe("GitHub Actions runtime policy", () => {
     expect(ci).toContain("run: pnpm install --frozen-lockfile");
   });
 
-  // pnpm test 构建并检查原生 shim，打包也要构建它；两条 Windows 流水线都得先装上固定的工具链。
-  it("installs the pinned Rust toolchain before the native shim is built", () => {
+  // pnpm test 构建并检查原生 shim，打包要构建 shim 与桌面原生工作区（宿主、启动器、安装器）；
+  // 两条 Windows 流水线都得先把两处固定的工具链装上。
+  it("installs the pinned Rust toolchains before anything native is built", () => {
     for (const name of ["ci.yml", "windows-release-validation.yml"]) {
       const source = readFileSync(resolve(workflowDirectory, name), "utf8");
-      expect(source, name).toMatch(
-        /working-directory: apps\/desktop\/native\/mcp-shim\s+run: rustup toolchain install/u,
-      );
-      expect(source.indexOf("rustup toolchain install"), name).toBeLessThan(
-        source.indexOf(name === "ci.yml" ? "run: pnpm test" : "run: pnpm release --full"),
-      );
+      const firstUse = source.indexOf(name === "ci.yml" ? "cargo " : "run: pnpm release --full");
+      for (const directory of ["apps/desktop/native/mcp-shim", "apps/desktop/native"]) {
+        const step = new RegExp(
+          `working-directory: ${directory.replaceAll("/", "\\/")}\\s+run: rustup toolchain install`,
+          "u",
+        );
+        expect(source, `${name} ${directory}`).toMatch(step);
+        expect(source.search(step), `${name} ${directory}`).toBeLessThan(firstUse);
+      }
     }
-    const toolchain = readFileSync(
-      resolve(root, "apps/desktop/native/mcp-shim/rust-toolchain.toml"),
-      "utf8",
-    );
-    expect(toolchain).toMatch(/^channel = "\d+\.\d+\.\d+"$/mu);
-    expect(toolchain).toContain('components = ["clippy", "rustfmt"]');
+    for (const file of [
+      "apps/desktop/native/mcp-shim/rust-toolchain.toml",
+      "apps/desktop/native/rust-toolchain.toml",
+    ]) {
+      const toolchain = readFileSync(resolve(root, file), "utf8");
+      expect(toolchain, file).toMatch(/^channel = "\d+\.\d+\.\d+"$/mu);
+      expect(toolchain, file).toContain('components = ["clippy", "rustfmt"]');
+    }
+  });
+
+  it("CI checks the desktop native workspace, drill and smoke builds included", () => {
+    const ci = readFileSync(resolve(workflowDirectory, "ci.yml"), "utf8");
+    for (const command of [
+      "cargo fmt --all --check",
+      "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "cargo clippy -p atm-setup --features drill --all-targets --locked -- -D warnings",
+      "cargo clippy -p atm-host --features smoke --all-targets --locked -- -D warnings",
+      "cargo test --workspace --locked",
+    ])
+      expect(ci).toContain(command);
   });
 
   it("keeps the full test gate bounded on Windows runners", () => {
@@ -149,14 +167,16 @@ describe("GitHub Actions runtime policy", () => {
     expect(missingReleaseGates(sources)).toEqual([]);
   });
 
-  it("launches nested packaged smoke without assuming a global pnpm.cmd shim", () => {
+  // distribution-smoke 验的是用户拿到的生产二进制：不能借 smoke 构建的钩子退出，
+  // 并且要主动塞调试参数，证明生产宿主把它们清掉了。
+  it("checks the production binaries without smoke hooks, and tries to open a debug port", () => {
     const source = readFileSync(distributionSmokePath, "utf8");
 
     expect(source).not.toContain("pnpm.cmd");
-    expect(source).toContain(
-      'const tsxCli = join(root, "node_modules", "tsx", "dist", "cli.mjs");',
-    );
-    expect(source).toContain("run(process.execPath, [tsxCli, packagedSmokeScript]");
+    expect(source).not.toContain("--smoke-quit");
+    expect(source).not.toContain("package-smoke");
+    expect(source).toContain('WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=0"');
+    expect(source).toContain('join(webviewProfile, "DevToolsActivePort")');
   });
 
   it("detects each release gate independently when its contract is removed", () => {

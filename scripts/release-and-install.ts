@@ -1,9 +1,11 @@
 /**
- * 一条命令走完：升版本号 → 十阶段流水线 → 投递更新 → 就地应用 → 对运行实例实测。
+ * 一条命令走完：升版本号 → 十阶段流水线 → 安装（首次安装 / 原生版更新 / 从 Electron 1.x
+ * 迁移）→ 对运行实例实测。
  *
- * 默认走清场和全量验收。只有显式 --resume 且上一轮完整 release fingerprint
- * （含 stageHashes 完整键集和值）逐字段相同时，才允许沿用已通过的旧证据并跳过
- * distribution-smoke 清场；局部阶段哈希绝不构成稳定签发授权。
+ * 已是原生版时默认清场（atm-setup --uninstall，数据保留）后全量验收。只有显式 --resume 且
+ * 上一轮完整 release fingerprint（含 stageHashes 完整键集和值）逐字段相同时，才允许沿用
+ * 已通过的旧证据、不清场，改走本地更新源 + atm-setup --update；局部阶段哈希绝不构成稳定
+ * 签发授权。还是 Electron 1.x 时不清场，最后走迁移事务（可回到 Electron）。
  *
  * 必须在能真实写入 %LOCALAPPDATA% 的终端里跑。Agent 的 Bash 工具对该路径的
  * 创建会落进只有它自己看得见的覆盖层（删除却是穿透的），安装看起来成功、实际
@@ -15,23 +17,20 @@
  *   ... --skip-install                                      # 只跑到产出 release/
  */
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { launchDirect, launchThroughShell } from "./launch-installed-app.js";
+import { portableZipName } from "./package-native.js";
 import {
   assertReleaseArtifact,
   assertReleaseResumeEvidence,
+  installedSmokeVerified,
   releaseResumeEvidencePaths,
   type ReleaseResumeEvidenceManifest,
 } from "./release-artifact-evidence.js";
-import {
-  assertSafeInstallRoot,
-  clearStaleDeadMarker,
-  removeProductShortcuts,
-} from "./product-install-sites.js";
-import { pruneUpdateFeed, updateFeedDir } from "./update-feed.js";
+import { assertSafeInstallRoot, removeProductShortcuts } from "./product-install-sites.js";
+import { deliverUpdate, pruneConsumedFeed, updateFeedDir } from "./update-feed.js";
 import {
   commitReleasePreparation,
   computeReleaseFingerprint,
@@ -101,7 +100,7 @@ if (target !== currentVersion) {
         throw new Error(`VERSION_SITE_MISSED: ${file} 里没有找到 ${currentVersion}`);
       process.stdout.write(`  ${file}\n`);
     }
-    // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
+    // 漏改一处版本号，包里自报的版本和清单对不上，装出来的不是想发的那一版。
     const leftovers = findVersionLeftovers(currentVersion);
     if (leftovers.length > 0) {
       throw new Error(`VERSION_LEFTOVER: 代码里仍有 ${currentVersion}\n${leftovers.join("\n")}`);
@@ -118,29 +117,41 @@ if (target !== currentVersion) {
   process.stdout.write(`  发布准备已提交到 clean HEAD：${releaseHead}\n`);
 }
 
-const setupName = `AyanamiTaskManager-Setup-${target}-win-x64.exe`;
 const localAppData = process.env.LOCALAPPDATA;
 if (!localAppData) throw new Error("LOCALAPPDATA_MISSING");
 // 收窄后再固化一次：闭包里 TS 不保留顶层的 narrowing。
 const localAppDataRoot: string = localAppData;
 const installRoot = join(localAppData, "AyanamiTaskManagerDesktop");
+const dataRoot = join(localAppData, "AyanamiTaskManager");
 
-function appProcesses(): number[] {
-  const result = spawnSync(
-    "tasklist.exe",
-    ["/fo", "csv", "/nh", "/fi", "IMAGENAME eq AyanamiTaskManager.exe"],
-    { encoding: "utf8", windowsHide: true },
+/**
+ * 机器上现有的安装：
+ *   native    atm-setup 装的（安装根有 app.json）
+ *   electron  Squirrel 装的 1.x（安装根有 Update.exe）——第一次装原生版就是迁移
+ *   none      没装过
+ */
+const existing: "native" | "electron" | "none" = existsSync(join(installRoot, "app.json"))
+  ? "native"
+  : existsSync(join(installRoot, "Update.exe"))
+    ? "electron"
+    : "none";
+
+function uninstallRegistered(): boolean {
+  return (
+    spawnSync(
+      "reg.exe",
+      [
+        "query",
+        "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AyanamiTaskManagerDesktop",
+      ],
+      { windowsHide: true },
+    ).status === 0
   );
-  return (result.stdout ?? "")
-    .split(/\r?\n/u)
-    .map((line) => /^"[^"]+","(\d+)"/u.exec(line.trim())?.[1])
-    .filter((pid): pid is string => Boolean(pid))
-    .map(Number);
 }
 
-// distribution-smoke 的前置条件要求「没有已安装版本、没有同名进程」。稳定签发
-// 只有显式 --resume 且完整 fingerprint 命中已通过报告时才能沿用这份证据；局部
-// stageHash 相同不构成跳过清场或稳定签发验证的授权。
+// distribution-smoke 的安装验收要求「没有已安装版本」。稳定签发只有显式 --resume 且完整
+// fingerprint 命中已通过报告时才能沿用这份证据；局部 stageHash 相同不构成跳过清场或稳定
+// 签发验证的授权。
 const previousReport = join(root, "output", "release-verification.json");
 const previousRun = existsSync(previousReport)
   ? (JSON.parse(readFileSync(previousReport, "utf8")) as {
@@ -166,7 +177,9 @@ if (releaseResume.reuse) {
       root,
       resumeManifest,
       releaseFingerprint,
-      releaseResumeEvidencePaths(resumeManifest.candidate, previousRun?.commands ?? []),
+      releaseResumeEvidencePaths(resumeManifest.candidate, previousRun?.commands ?? [], {
+        installed: installedSmokeVerified(root),
+      }),
     );
     resumeEvidenceValid = true;
   } catch {
@@ -177,55 +190,62 @@ const canReuseDistributionSmoke =
   resumeEvidenceValid &&
   previousRun?.passed === true &&
   reusableReleaseCommands.has("distribution-smoke");
-const needsCleanRoom = !canReuseDistributionSmoke;
 
-if (!needsCleanRoom) {
+// 1.x 不清场：卸掉它就没有了「回到 Electron」，第一次装原生版要走真正的迁移事务（快照、
+// 隔离旧版、失败自动撤回）。安装验收因此跳过，INSTALLED 证据由最后对运行实例的实测补上。
+const migrating = existing === "electron";
+const needsCleanRoom = existing === "native" && !canReuseDistributionSmoke;
+if (migrating) {
+  step("检测到 Electron 1.x 安装：保留它，最后走迁移");
+  process.env.ATM_DISTRIBUTION_SKIP_INSTALLED = "1";
+} else if (existing === "native" && canReuseDistributionSmoke) {
   step("跳过清场");
   process.stdout.write(
     `  完整 fingerprint 命中（${releaseResume.reason}），复用已通过的 distribution-smoke 稳定签发证据。\n` +
-      `  不卸载、不杀进程：应用保持运行，更新通过 feed 生效。\n`,
+      `  不卸载：应用保持运行，新版本经本地更新源由 atm-setup --update 装上。\n`,
   );
 }
 
 async function clearInstallation(): Promise<void> {
-  step("清场：关闭同名进程并卸载旧版");
-  // MCP stdio 桥用的是同一个 exe 名，退出桌面应用不会带走它们；它们还占着安装
-  // 目录里的 exe 句柄，不杀干净 Squirrel 只能留下 .dead 标记。
-  const running = appProcesses();
-  if (running.length > 0) {
-    process.stdout.write(
-      `  结束 ${running.length} 个 AyanamiTaskManager.exe（含 MCP stdio 桥）：${running.join("、")}\n`,
-    );
-    for (const pid of running)
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-    await sleep(1200);
+  step("清场：卸载当前原生版（用户数据保留）");
+  assertSafeInstallRoot(installRoot, localAppDataRoot);
+  // Agent 会话拉起的 atm-mcp.exe 占着安装根里的 shim；卸载遇到在用的文件会停在半途。
+  for (const pid of shimProcesses()) {
+    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
   }
-  const updater = join(installRoot, "Update.exe");
-  if (existsSync(updater)) {
-    process.stdout.write("  Squirrel 静默卸载\n");
-    run(updater, ["--uninstall", "-s"]);
-    await sleep(3000);
-    for (const pid of appProcesses())
-      spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-  } else {
-    process.stdout.write("  没有已安装版本，跳过\n");
-  }
-
-  // Squirrel 静默卸载会留下开始菜单快捷方式、.dead 标记和半个 app-<version> 目录。
-  // distribution-smoke 的前置条件要求这些全都不在，否则跑完九个阶段才在第十阶段
-  // 倒掉——1.0.5 就白跑了一轮。清理位置与它共用 product-install-sites。
+  const uninstall = run(join(installRoot, "atm-setup.exe"), ["--uninstall", "--force", "--quiet"]);
+  if (uninstall !== 0) throw new Error(`UNINSTALL_EXIT: ${uninstall}`);
+  // 安装根里的 setup 删不掉正在运行的自己：它把卸载交给 %TEMP% 里的副本，自己先返回。
+  for (
+    let i = 0;
+    i < 120 && (existsSync(join(installRoot, "app.json")) || uninstallRegistered());
+    i += 1
+  )
+    await sleep(1000);
+  if (existsSync(join(installRoot, "app.json")) || uninstallRegistered())
+    throw new Error("UNINSTALL_INCOMPLETE");
   const strandedShortcuts = await removeProductShortcuts();
   if (strandedShortcuts.length > 0) {
     process.stdout.write(`  清理残留快捷方式 ${strandedShortcuts.length} 个\n`);
   }
-  if (existsSync(installRoot)) {
-    assertSafeInstallRoot(installRoot, localAppDataRoot);
-    if (appProcesses().length > 0) {
-      throw new Error(`INSTALL_ROOT_BUSY: 仍有同名进程占用 ${installRoot}`);
-    }
-    await rm(installRoot, { recursive: true, force: true });
-    process.stdout.write(`  清理卸载残留目录：${installRoot}\n`);
-  }
+}
+
+/** 安装根下 resources\atm-mcp.exe 的进程（各 Agent 会话的 stdio shim）。 */
+function shimProcesses(): number[] {
+  const result = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `Get-Process -Name atm-mcp -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ${JSON.stringify(`${installRoot}\\*`).replaceAll('"', "'")} } | ForEach-Object { $_.Id }`,
+    ],
+    { encoding: "utf8", windowsHide: true },
+  );
+  return (result.stdout ?? "")
+    .split(/\r?\n/u)
+    .map((line) => Number(line.trim()))
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
 }
 
 if (needsCleanRoom) await clearInstallation();
@@ -254,88 +274,69 @@ if (
   throw new Error("RELEASE_MANIFEST_CANDIDATE_MISMATCH");
 }
 const candidate = releaseManifest.candidate;
-const setup = join(root, "release", candidate.artifacts.setup.name);
-const portable = join(root, "release", candidate.artifacts.portable.name);
-const upgradePackage = join(root, "release", candidate.artifacts.upgradePackage.name);
-const releases = join(root, "release", candidate.artifacts.releases.name);
-if (candidate.artifacts.setup.name !== setupName) {
-  throw new Error(`SETUP_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.setup.name}`);
+const expectedNames = {
+  setup: "atm-setup.exe",
+  package: `atm-${target}-win-x64.zip`,
+  manifest: `atm-${target}-win-x64.json`,
+  portable: portableZipName(target),
+} as const;
+for (const [key, name] of Object.entries(expectedNames) as Array<
+  [keyof typeof expectedNames, string]
+>) {
+  if (candidate.artifacts[key].name !== name)
+    throw new Error(
+      `${key.toUpperCase()}_MANIFEST_NAME_MISMATCH: ${candidate.artifacts[key].name}`,
+    );
 }
-if (candidate.artifacts.portable.name !== `AyanamiTaskManager-${target}-win-x64-portable.zip`) {
-  throw new Error(`PORTABLE_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.portable.name}`);
-}
-if (candidate.artifacts.upgradePackage.name !== `AyanamiTaskManagerDesktop-${target}-full.nupkg`) {
-  throw new Error(`NUPKG_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.upgradePackage.name}`);
-}
-if (candidate.artifacts.releases.name !== "RELEASES") {
-  throw new Error(`RELEASES_MANIFEST_NAME_MISMATCH: ${candidate.artifacts.releases.name}`);
-}
-await Promise.all([
-  assertReleaseArtifact(setup, candidate.artifacts.setup),
-  assertReleaseArtifact(portable, candidate.artifacts.portable),
-  assertReleaseArtifact(upgradePackage, candidate.artifacts.upgradePackage),
-  assertReleaseArtifact(releases, candidate.artifacts.releases),
-]);
+const releaseFile = (key: keyof typeof expectedNames) =>
+  join(root, "release", candidate.artifacts[key].name);
+await Promise.all(
+  (Object.keys(expectedNames) as Array<keyof typeof expectedNames>).map((key) =>
+    assertReleaseArtifact(releaseFile(key), candidate.artifacts[key]),
+  ),
+);
 if (flag("skip-install")) {
-  process.stdout.write(`\n产物就绪：${setup}\n（--skip-install，未安装）\n`);
+  process.stdout.write(`\n产物就绪：${join(root, "release")}\n（--skip-install，未安装）\n`);
   process.exit(0);
 }
 
-// 更新源是一个本地目录，不是服务器。169 MB 在本机是一次文件复制而不是一次网络
-// 下载，所以不需要 delta 包——delta 是为跨机分发省流量的。
-step("投递更新到本地 feed");
-const feed = updateFeedDir(join(localAppData, "AyanamiTaskManager"));
-mkdirSync(feed, { recursive: true });
-for (const artifact of [candidate.artifacts.releases, candidate.artifacts.upgradePackage]) {
-  const source = join(root, "release", artifact.name);
-  const destination = join(feed, artifact.name);
-  copyFileSync(source, destination);
-  await assertReleaseArtifact(destination, artifact);
-  process.stdout.write(`  ${artifact.name}\n`);
-}
-// 投递之后才清：RELEASES 这时已经换成新的，旧包到这一刻才真正没人要了。
-const staleFeedPackages = pruneUpdateFeed(feed);
-if (staleFeedPackages.length > 0) {
-  process.stdout.write(`  清理 ${staleFeedPackages.length} 个 RELEASES 未列出的旧包\n`);
-}
-
-const alreadyInstalled = existsSync(join(installRoot, "Update.exe"));
-if (!alreadyInstalled) {
-  step(`首次安装 ${setupName}`);
-  const install = run(setup, ["--silent"]);
-  if (install !== 0) throw new Error(`SETUP_EXIT: ${install}`);
+const feed = updateFeedDir(dataRoot);
+if (existing === "native" && !needsCleanRoom) {
+  // 已经装着、也没清场：投递进本地更新源，让安装根里的 setup 按更新事务装上（停当前实例、
+  // 切换、带窗口启动新版本、失败自动撤回）——和用户点「立即更新」走的是同一条路。
+  step("投递到本地更新源并更新");
+  const delivered = deliverUpdate(feed, join(root, "release"), target);
+  await assertReleaseArtifact(delivered.zip, candidate.artifacts.package);
+  await assertReleaseArtifact(delivered.manifest, candidate.artifacts.manifest);
+  const updated = run(join(installRoot, "atm-setup.exe"), [
+    "--update",
+    delivered.manifest,
+    "--quiet",
+  ]);
+  if (updated !== 0) throw new Error(`UPDATE_EXIT: ${updated}`);
 } else {
-  // 已经装过就不再卸载重装：让 Squirrel 就地把新版本铺到 app-<version>。
-  // 运行中的应用自己也会在 6 小时内或下次启动时发现，这里主动应用只是为了
-  // 让这条命令结束时就能对新版本做实测。
-  step("就地应用更新");
-  const applied = run(join(installRoot, "Update.exe"), ["--update", feed]);
-  if (applied !== 0) throw new Error(`UPDATE_EXIT: ${applied}`);
+  step(migrating ? `迁移 Electron 1.x → ${target}` : `首次安装 ${target}`);
+  // 迁移要先停掉正在运行的 1.x（它没有退出管道），所以带 --force；数据根保持原样，
+  // 旧版本隔离进 state\rollback，开始菜单里的「ATM 修复」可以回到它。
+  const install = run(releaseFile("setup"), [
+    "install",
+    releaseFile("manifest"),
+    "--quiet",
+    ...(migrating ? ["--force"] : []),
+  ]);
+  if (install !== 0) throw new Error(`SETUP_EXIT: ${install}`);
 }
-for (let i = 0; i < 60 && !existsSync(join(installRoot, `app-${target}`)); i += 1)
-  await sleep(1000);
-if (!existsSync(join(installRoot, `app-${target}`)))
-  throw new Error(`INSTALL_DIR_MISSING: app-${target}`);
-// distribution-smoke 走完一整轮装—验—卸后会留下 .dead，紧接着的就地更新把
-// app-<version> 铺回来却不清它，于是「已卸载」标记贴在活着的安装上。
-if (clearStaleDeadMarker(installRoot, target)) {
-  process.stdout.write("  清除烟测遗留的 .dead 标记\n");
-}
-
-// 启动壳始终拉最新的 app-<version>，但已经在跑的进程仍是旧版，MCP stdio 桥也
-// 一样（它们是各 Agent 拉起的独立进程，用同一个 exe 名）。要让实测打在新版本
-// 上，就得先把它们全带走。
-const stale = appProcesses();
-if (stale.length > 0) {
-  process.stdout.write(`  结束 ${stale.length} 个旧版进程（含 MCP stdio 桥）\n`);
-  for (const pid of stale)
-    spawnSync("taskkill.exe", ["/PID", String(pid), "/F"], { windowsHide: true });
-  await sleep(1500);
-}
+const pointer = JSON.parse(readFileSync(join(installRoot, "app.json"), "utf8")) as {
+  current?: string;
+};
+if (pointer.current !== target) throw new Error(`INSTALLED_VERSION_MISMATCH: ${pointer.current}`);
+// 投递是一次性的：装好之后连同 Squirrel 时代的 RELEASES / nupkg 一起清掉。
+const consumed = pruneConsumedFeed(feed, target);
+if (consumed.length > 0) process.stdout.write(`  清理本地更新源 ${consumed.length} 个已消费文件\n`);
 
 step("启动并对运行实例实测");
 const installedLauncher = join(installRoot, "AyanamiTaskManager.exe");
-const runtimePath = join(localAppData, "AyanamiTaskManager", "runtime", "daemon.json");
+const runtimePath = join(dataRoot, "runtime", "daemon.json");
 
 async function waitForStatus(seconds: number): Promise<Record<string, unknown> | null> {
   for (let i = 0; i < seconds; i += 1) {
@@ -358,14 +359,13 @@ async function waitForStatus(seconds: number): Promise<Record<string, unknown> |
   return null;
 }
 
-// 交给桌面 shell 启动：这条命令跑在 Agent 终端里，直接拉起的正式版会留在宿主的 Job
-// 里、随宿主一起结束，还会带着宿主的环境变量。见 launch-installed-app.ts。
+// 安装事务已经带着新版本启动；这里经桌面 shell 再点一次入口（单实例转交成 SHOW）。若机器上
+// 没有在跑的实例，explorer 拉起的正式版不在 Agent 终端的 Job 里、也不带它的环境变量。
 launchThroughShell(installedLauncher);
 let status = await waitForStatus(20);
 if (!status) {
-  // 没有桌面 shell（服务会话、explorer 未运行）时 explorer 起不来任何东西。不按进程名
-  // 判断：旧会话的 JS 桥与桌面同名，杀掉后会被各 Agent 重新拉起。若 explorer 那边只是慢，
-  // 两个实例里后到的会被单实例锁挡回去，最坏只是多打一条提示。
+  // 没有桌面 shell（服务会话、explorer 未运行）时 explorer 起不来任何东西。若 explorer
+  // 那边只是慢，两个实例里后到的会被单实例锁挡回去，最坏只是多打一条提示。
   process.stdout.write(
     "  ⚠ explorer 未能拉起 ATM，改为直接启动。该实例在当前 Agent 宿主内、带着它的环境变量，\n" +
       "    关闭宿主会连带结束它：验收后请从托盘完全退出，再从开始菜单启动。\n",
@@ -374,9 +374,9 @@ if (!status) {
 }
 status ??= await waitForStatus(45);
 if (!status) throw new Error("DAEMON_UNREACHABLE");
-// 旧会话的桥被杀后会被 Agent 重新拉起，收到请求就会自己唤醒桌面——那也是从 Agent
-// 宿主里直接拉起的。生命周期日志记着最近一次启动是不是这样来的。
-const lifecycleLog = join(localAppData, "AyanamiTaskManager", "logs", "lifecycle.ndjson");
+// Agent 的 MCP 桥收到请求就会自己唤醒桌面——那是从 Agent 宿主里拉起的。生命周期日志记着
+// 最近一次启动是不是这样来的。
+const lifecycleLog = join(dataRoot, "logs", "lifecycle-core.ndjson");
 const lastStartup = existsSync(lifecycleLog)
   ? readFileSync(lifecycleLog, "utf8")
       .split("\n")
@@ -392,7 +392,7 @@ const lastStartup = existsSync(lifecycleLog)
   : undefined;
 if (lastStartup?.agentWake === true) {
   process.stdout.write(
-    "  ⚠ 运行实例是被 Agent 的 MCP 桥唤醒的，不是本次经 explorer 启动的那个：它在 Agent 宿主内，\n" +
+    "  ⚠ 运行实例是被 Agent 的 MCP 桥唤醒的，不是本次安装启动的那个：它可能在 Agent 宿主内，\n" +
       "    关闭宿主会连带结束它。验收后请从托盘完全退出，再从开始菜单启动。\n",
   );
 }
@@ -413,14 +413,19 @@ const projectCount =
     ? status.projectCount
     : null;
 const summary = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   candidateSha256: candidate.candidateSha256,
   version: target,
   gitHead: candidate.gitHead,
+  installPath: migrating
+    ? "migrated-from-electron"
+    : existing === "native" && !needsCleanRoom
+      ? "updated"
+      : "installed",
   setupSha256: candidate.artifacts.setup.sha256,
+  packageSha256: candidate.artifacts.package.sha256,
+  manifestSha256: candidate.artifacts.manifest.sha256,
   portableSha256: candidate.artifacts.portable.sha256,
-  upgradePackageSha256: candidate.artifacts.upgradePackage.sha256,
-  releasesSha256: candidate.artifacts.releases.sha256,
   installedVersion: String(status.version),
   installedOk: true,
   projectCount,

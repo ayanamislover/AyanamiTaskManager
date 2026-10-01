@@ -177,17 +177,30 @@ pub fn under(dir: &Path) -> Vec<Proc> {
 }
 
 /// Start a detached process and pin its identity.
+///
+/// The process leaves setup's job when the job allows it. Setup may run inside one that
+/// ends everything with it — an Agent's terminal, or an update started by a host the Agent
+/// woke — and the ATM it starts must outlive that. A job that forbids breakaway makes
+/// CreateProcess fail with access denied; then the process starts inside it, as before.
 pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child, ProcessIdentity)> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    let child = Command::new(exe)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
-        .spawn()?;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    let start = |flags: u32| {
+        Command::new(exe)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    let child = match start(flags | CREATE_BREAKAWAY_FROM_JOB) {
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => start(flags)?,
+        other => other?,
+    };
     let pid = child.id();
     let started_at_ms = find(pid).map(|proc| proc.started_at_ms()).unwrap_or(0);
     Ok((

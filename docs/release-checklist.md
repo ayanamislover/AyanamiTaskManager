@@ -22,7 +22,7 @@
 - 输入必须是可由声明 HEAD 直接检出的干净工作树；发布校验后源码变化即作废。
 - `--resume` 只允许完整 fingerprint 一致时复用，不能用局部 stage hash 绕过稳定签发门禁。
 - CI 门禁覆盖格式、lint、类型、单元/集成、构建；Windows 发布验证覆盖 E2E、benchmark、
-  Forge make、packaged、portable、distribution 与 installed smoke。
+  原生打包（package）、packaged、portable、distribution 与 installed smoke。
 - packaged 与 installed 层必须读取逐项报告；顶层布尔值不能替代逐项检查。
 - Setup 和 portable ZIP 都进入发布 manifest 与 checksum 文件；installed receipt 必须绑定
   实际安装的 Setup 身份和运行实例自报版本。

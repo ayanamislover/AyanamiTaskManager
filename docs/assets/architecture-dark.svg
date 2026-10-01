@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 952 386" width="952" height="386" role="img" aria-label="AyanamiTaskManager 产品结构：AI Agents 经 MCP 连接本地动态 bridge，与 Electron 桌面 UI、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 952 386" width="952" height="386" role="img" aria-label="AyanamiTaskManager 产品结构：AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite">
   <defs>
     <marker id="atm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b6376" />
@@ -63,7 +63,7 @@
     <line x1="28" y1="278" x2="924" y2="278" stroke="#46404d" stroke-width="1" stroke-dasharray="3 5" />
     <text x="28" y="300" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="12" fill="#aaa2b2">同机直连，不经 MCP</text>
     <rect x="28" y="310" width="150" height="40" rx="9" fill="#29262e" stroke="#46404d" stroke-width="1" />
-    <text x="103" y="335" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="13" fill="#f2eef6">Electron 桌面 UI</text>
+    <text x="103" y="335" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="13" fill="#f2eef6">桌面 UI</text>
     <rect x="194" y="310" width="150" height="40" rx="9" fill="#29262e" stroke="#46404d" stroke-width="1" />
     <text x="269" y="335" text-anchor="middle" font-family="'Segoe UI Variable','Segoe UI','PingFang SC','Microsoft YaHei UI',sans-serif" font-size="13" fill="#f2eef6">CLI</text>
     <path d="M 344 330 H 596 V 262" fill="none" stroke="#6b6376" stroke-width="1.5" marker-end="url(#atm-arrow)" />

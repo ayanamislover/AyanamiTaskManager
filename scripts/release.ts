@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   assertReleaseResumeEvidence,
+  installedSmokeVerified,
   releaseResumeEvidencePaths,
   type ReleaseResumeEvidenceManifest,
 } from "./release-artifact-evidence.js";
@@ -40,7 +41,7 @@ const commands: Array<{ name: string; args: string[] }> = [
   { name: "e2e", args: ["test:e2e"] },
   { name: "benchmark", args: ["benchmark"] },
   { name: "build", args: ["build"] },
-  { name: "forge-make", args: ["exec", "tsx", "scripts/forge-make.ts"] },
+  { name: "package", args: ["exec", "tsx", "scripts/package-native.ts", "--release"] },
   { name: "packaged-smoke", args: ["smoke:packaged"] },
   { name: "distribution-smoke", args: ["exec", "tsx", "scripts/distribution-smoke.ts"] },
 ];
@@ -80,7 +81,9 @@ if (resumeDecision.reuse) {
       root,
       evidenceManifest,
       fingerprint,
-      releaseResumeEvidencePaths(evidenceManifest.candidate, previous?.commands ?? []),
+      releaseResumeEvidencePaths(evidenceManifest.candidate, previous?.commands ?? [], {
+        installed: installedSmokeVerified(),
+      }),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

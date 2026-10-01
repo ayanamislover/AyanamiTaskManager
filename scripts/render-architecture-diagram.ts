@@ -152,7 +152,7 @@ function arrow(index: number, palette: Palette): string {
 
 /** 桌面 UI 与 CLI 不经 bridge，直接落到同一套应用服务上——图上必须看得出这一点。 */
 function localClients(palette: Palette): string {
-  const chips = ["Electron 桌面 UI", "CLI"];
+  const chips = ["桌面 UI", "CLI"];
   const riserX = columnX(2) + COLUMN_WIDTH / 2;
   const laneMidY = LANE_TOP + LANE_HEIGHT / 2;
   const boxes = chips
@@ -176,7 +176,7 @@ function render(palette: Palette): string {
   const arrows = COLUMNS.slice(0, -1)
     .map((_spec, index) => arrow(index, palette))
     .join("\n");
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" width="${WIDTH}" height="${HEIGHT}" role="img" aria-label="AyanamiTaskManager 产品结构：AI Agents 经 MCP 连接本地动态 bridge，与 Electron 桌面 UI、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite">
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WIDTH} ${HEIGHT}" width="${WIDTH}" height="${HEIGHT}" role="img" aria-label="AyanamiTaskManager 产品结构：AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite">
   <defs>
     <marker id="atm-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="${palette.borderStrong}" />

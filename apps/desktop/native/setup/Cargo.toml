@@ -42,6 +42,8 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_IO",
   "Win32_System_Ioctl",
+  # examples/job-runner.rs only (drill): kill-on-close jobs like an Agent terminal's.
+  "Win32_System_JobObjects",
   "Win32_System_Registry",
   "Win32_System_SystemServices",
   "Win32_System_Threading",

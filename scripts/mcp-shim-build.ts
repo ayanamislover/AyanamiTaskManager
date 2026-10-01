@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { releaseRustEnv } from "./rust-build-env.js";
 
 export const MCP_SHIM_CRATE = "apps/desktop/native/mcp-shim";
-/** forge 的 extraResource 按文件名拷进 resources\，也就是 mcpLaunch 找的 resources\atm-mcp.exe。 */
+/** package-native 把它拷进版本目录的 resources\，也就是 mcpLaunch 找的 resources\atm-mcp.exe。 */
 export const MCP_SHIM_RELEASE_EXE = `${MCP_SHIM_CRATE}/target/release/atm-mcp.exe`;
 
 /**
@@ -19,7 +20,7 @@ export function buildMcpShim(root: string): string {
   const crate = join(root, MCP_SHIM_CRATE);
   const result = spawnSync("cargo", ["build", "--release", "--locked", "--bin", "atm-mcp"], {
     cwd: crate,
-    env: { ...process.env, ATM_REQUIRE_VERSION_RESOURCE: "1" },
+    env: { ...releaseRustEnv(root), ATM_REQUIRE_VERSION_RESOURCE: "1" },
     stdio: "inherit",
     windowsHide: true,
   });

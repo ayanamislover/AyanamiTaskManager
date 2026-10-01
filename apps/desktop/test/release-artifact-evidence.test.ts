@@ -48,8 +48,8 @@ async function fixtureCandidate(root: string): Promise<ReleaseCandidateIdentity>
     artifacts: {
       setup: await identifyReleaseArtifact(join(release, names[0])),
       portable: await identifyReleaseArtifact(join(release, names[1])),
-      upgradePackage: await identifyReleaseArtifact(join(release, names[2])),
-      releases: await identifyReleaseArtifact(join(release, names[3])),
+      package: await identifyReleaseArtifact(join(release, names[2])),
+      manifest: await identifyReleaseArtifact(join(release, names[3])),
     },
   });
 }
@@ -59,7 +59,7 @@ describe("发布制品身份", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-release-artifact-"));
     temporary.push(root);
     const candidate = await fixtureCandidate(root);
-    for (const expected of [candidate.artifacts.setup, candidate.artifacts.upgradePackage]) {
+    for (const expected of [candidate.artifacts.setup, candidate.artifacts.package]) {
       const path = join(root, "release", expected.name);
       await expect(assertReleaseArtifact(path, expected)).resolves.toBeUndefined();
       writeFileSync(path, "tampered\n", "utf8");
@@ -118,10 +118,17 @@ describe("resume 证据字节闭包", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-release-evidence-set-"));
     temporary.push(root);
     const candidate = await fixtureCandidate(root);
-    const paths = releaseResumeEvidencePaths(candidate, [
-      { log: "release-logs/lint.log" },
-      { log: "release-logs/test.log" },
-    ]);
+    const paths = releaseResumeEvidencePaths(
+      candidate,
+      [{ log: "release-logs/lint.log" }, { log: "release-logs/test.log" }],
+      { installed: true },
+    );
+    // 安装验收显式跳过的那一轮：installed 报告不在证据里，其余照旧。
+    const skipped = releaseResumeEvidencePaths(candidate, [{ log: "release-logs/lint.log" }], {
+      installed: false,
+    });
+    expect(skipped).not.toContain("output/installed-smoke-report.json");
+    expect(skipped).toContain("output/distribution-smoke-report.json");
     for (const artifact of Object.values(candidate.artifacts)) {
       expect(paths).toContain(`release/${artifact.name}`);
     }

@@ -1,8 +1,9 @@
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveAgentGuideBuild, stampPackagedAgentGuides } from "../../../scripts/forge-api.js";
+import { resolveAgentGuideBuild } from "../../../scripts/agent-guide-build.js";
+import { APP_LAYOUT, assembleAppDirectory } from "../../../scripts/app-layout.js";
 import {
   buildAgentDocumentationManifest,
   buildStampedSourceManifest,
@@ -77,21 +78,33 @@ describe("Agent Guide 构建戳", () => {
     );
   });
 
-  it("打包产物盖戳后与「源仓盖戳」的期望 manifest 完全一致；漏盖则只有 guide 一项不符", async () => {
+  it("装配的版本目录盖戳后与「源仓盖戳」的期望 manifest 完全一致；漏盖则只有 guide 一项不符", () => {
     const dir = scratch();
-    const resources = join(dir, "out", "AyanamiTaskManager-win32-x64", "resources");
-    mkdirSync(resources, { recursive: true });
-    writeFileSync(join(resources, "ATM_AGENT_GUIDE.md"), sourceGuide, "utf8");
-    cpSync(join(root, "docs"), join(resources, "docs"), { recursive: true });
-    cpSync(join(root, "integrations"), join(resources, "integrations"), { recursive: true });
+    const stub = join(dir, "stub.exe");
+    writeFileSync(stub, "");
+    const core = join(dir, "core");
+    mkdirSync(core);
+    for (const bundle of ["core.mjs", "cli.mjs"]) writeFileSync(join(core, bundle), "");
+    const resourcesOf = (target: string, stampedGuide?: string) =>
+      join(
+        assembleAppDirectory({
+          root,
+          target: join(dir, target),
+          hostExe: stub,
+          nodeExe: stub,
+          coreDir: core,
+          ...(stampedGuide === undefined ? {} : { stampedGuide }),
+        }),
+        APP_LAYOUT.resources,
+      );
 
     const unstamped = compareAgentDocumentationManifests(
       buildStampedSourceManifest(root, build),
-      buildAgentDocumentationManifest(resources, "bundled"),
+      buildAgentDocumentationManifest(resourcesOf("plain"), "bundled"),
     );
     expect(unstamped.map((mismatch) => mismatch.path)).toEqual(["ATM_AGENT_GUIDE.md"]);
 
-    await stampPackagedAgentGuides(dir, build);
+    const resources = resourcesOf("stamped", stampAgentGuide(sourceGuide, build));
     expect(
       compareAgentDocumentationManifests(
         buildStampedSourceManifest(root, build),

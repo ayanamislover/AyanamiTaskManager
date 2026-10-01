@@ -1,13 +1,24 @@
 const normalized = (entry: string): string =>
   entry.replaceAll("\\", "/").replace(/^\/+|\/+$/gu, "");
 
+/**
+ * 版本目录（app-<v>，de-electron §3）里必须有的文件：缺任何一个，装上去要么起不来，要么少了
+ * 一块要交付的东西。路径相对版本目录、用 `/`，和清单 files[].path 同一写法。
+ */
 export const REQUIRED_PACKAGED_ENTRIES = [
-  "package.json",
+  "AyanamiTaskManager.exe",
+  "launcher/AyanamiTaskManager.exe",
+  "atm-setup.exe",
   "LICENSE",
-  "logo.png",
-  "apps/desktop/dist/main/main.cjs",
-  "apps/desktop/dist/main/preload.cjs",
-  "apps/desktop/dist/renderer/index.html",
+  "runtime/atm-core.exe",
+  "runtime/core.mjs",
+  "runtime/cli.mjs",
+  "runtime/node_modules/better-sqlite3/package.json",
+  "runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node",
+  "renderer/index.html",
+  "resources/ATM_AGENT_GUIDE.md",
+  "resources/mcp-stdio.cjs",
+  "resources/atm-mcp.exe",
   "migrations/registry/0001_initial.sql",
   "migrations/project/0001_initial.sql",
   "migrations/knowledge/0001_initial.sql",
@@ -100,16 +111,47 @@ export function assertExecutableIdentity(bytes: Buffer, internalName: string, la
     throw new Error(`PACKAGED_${label}_WRONG_EXECUTABLE: expected ${internalName}, found ${found}`);
 }
 
+/**
+ * 构建机路径在二进制里可能的几种写法：原样、全小写（Windows 路径不分大小写，工具链常转成
+ * 小写）、正斜杠；UTF-8 与 UTF-16LE（PE 资源和宽字符串）各一份。
+ */
+export function buildMachinePathNeedles(paths: readonly string[]): Array<[string, Buffer]> {
+  const spellings = new Set<string>();
+  for (const path of paths) {
+    const trimmed = path.replace(/[\\/]+$/u, "");
+    if (trimmed.length < 4) continue;
+    for (const spelling of [trimmed, trimmed.toLowerCase()]) {
+      spellings.add(spelling);
+      spellings.add(spelling.replaceAll("\\", "/"));
+    }
+  }
+  return [...spellings].flatMap(
+    (spelling): Array<[string, Buffer]> => [
+      [spelling, Buffer.from(spelling, "utf8")],
+      [spelling, Buffer.from(spelling, "utf16le")],
+    ],
+  );
+}
+
+export function findBuildMachinePath(
+  bytes: Buffer,
+  needles: ReadonlyArray<[string, Buffer]>,
+): string | null {
+  for (const [spelling, needle] of needles) if (bytes.includes(needle)) return spelling;
+  return null;
+}
+
 const forbiddenEntryPatterns = [
+  // 用户数据：知识库、数据库文件，任何时候都不进包。
   /^knowledge(?:\/|$)/u,
-  /(?:^|\/)knowledge\.sqlite(?:-(?:wal|shm))?$/u,
-  /^(?:\.claude|\.crossagent|\.github)(?:\/|$)/u,
-  /^(?:packages|scripts|integrations)(?:\/|$)/u,
-  /^apps\/(?!desktop(?:$|\/dist(?:\/|$)))/u,
-  /^node_modules\/(?:\.cache(?:\/|$)|\.modules\.yaml$|\.package-map\.json$)/u,
-  /^ATM_AGENT_GUIDE\.md$/u,
-  /^(?:README\.md|forge\.config\.ts|playwright\.config\.ts|vitest\.config\.ts|tsconfig(?:\.base)?\.json)$/u,
-  /^node_modules\/(?:\.pnpm\/better-sqlite3@[^/]+\/node_modules\/)?better-sqlite3\/build\/(?!Release(?:$|\/better_sqlite3\.node$))/u,
+  /(?:^|\/)[^/]+\.sqlite(?:-(?:wal|shm))?$/u,
+  // 仓库与工具目录、源码、source map、原生构建的调试与链接中间件。
+  /(?:^|\/)\.(?:claude|crossagent|github|git)(?:\/|$)/u,
+  /^(?:apps|packages|scripts|src)(?:\/|$)/u,
+  /\.(?:ts|tsx|map|pdb|ilk|exp|lib)$/u,
+  // runtime 只带 better-sqlite3 的运行时部分：没有它的 C 源码、构建目录，也没有别的包。
+  /^runtime\/node_modules\/(?!better-sqlite3(?:$|\/))/u,
+  /^runtime\/node_modules\/better-sqlite3\/(?:src|deps|build)(?:\/|$)/u,
 ] as const;
 
 export function findForbiddenPackagedEntries(entries: Iterable<string>): string[] {
