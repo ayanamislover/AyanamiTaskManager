@@ -168,60 +168,6 @@ export function OverviewPage({
       <div className="atm-overview-layout">
         <div className="atm-overview-main">
           <NeedsYouPanel state={needsYou} onTask={onTask ?? (() => undefined)} />
-          <section className="atm-panel">
-            <div className="atm-panel-head">
-              <h2>项目状态</h2>
-            </div>
-            {projects.length === 0 ? (
-              <Empty title="还没有正式项目" text="从项目页创建第一个项目。" />
-            ) : (
-              <div className="atm-overview-projects">
-                {projects.map((project) => (
-                  <button
-                    className="atm-project atm-overview-project"
-                    key={project.id}
-                    title={sidebarProjectHint(project.name)}
-                    onClick={() => onProject(project.code)}
-                  >
-                    <div className="atm-actions" style={{ justifyContent: "space-between" }}>
-                      <span className="atm-project-code">{project.code}</span>
-                      <Status value={project.health ?? "UNKNOWN"} />
-                    </div>
-                    <h2 className="atm-overview-project-name">{project.name}</h2>
-                    <div className="atm-row-sub">
-                      {project.current_milestone ?? "尚未设置里程碑"} ·{" "}
-                      {project.next_target_date ?? "无目标日期"}
-                    </div>
-                    <div className="atm-progress">
-                      <span style={{ width: `${Number(project.progress ?? 0)}%` }} />
-                    </div>
-                    <div className="atm-row-sub">
-                      {Math.round(Number(project.progress ?? 0))}% ·{" "}
-                      {progressSourceLabels[String(project.progress_source ?? "NONE")] ??
-                        "尚无进度"}
-                    </div>
-                    <div className="atm-project-stats">
-                      <span>活动 {Number(project.active_count ?? 0)}</span>
-                      <span>阻塞 {Number(project.blocked_count ?? 0)}</span>
-                      <span>
-                        等待{" "}
-                        {Number(project.waiting_user_count ?? 0) +
-                          Number(project.waiting_agent_count ?? 0)}
-                      </span>
-                      <span>Agent {Number(project.active_agent_count ?? 0)}</span>
-                    </div>
-                    <div className="atm-row-sub">
-                      最近活动 {formatTime(project.last_activity_at)}
-                    </div>
-                    <div className="atm-projection-summary">
-                      <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
-                      <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </section>
         </div>
         <div className="atm-overview-side">
           {attention.length ? (
@@ -304,6 +250,58 @@ export function OverviewPage({
           </section>
         </div>
       </div>
+      {/* 项目卡片占满整行：每张够宽，底部四格统计不挤成两行。 */}
+      <section className="atm-panel atm-overview-projects-panel">
+        <div className="atm-panel-head">
+          <h2>项目状态</h2>
+        </div>
+        {projects.length === 0 ? (
+          <Empty title="还没有正式项目" text="从项目页创建第一个项目。" />
+        ) : (
+          <div className="atm-overview-projects">
+            {projects.map((project) => (
+              <button
+                className="atm-project atm-overview-project"
+                key={project.id}
+                title={sidebarProjectHint(project.name)}
+                onClick={() => onProject(project.code)}
+              >
+                <div className="atm-actions" style={{ justifyContent: "space-between" }}>
+                  <span className="atm-project-code">{project.code}</span>
+                  <Status value={project.health ?? "UNKNOWN"} />
+                </div>
+                <h2 className="atm-overview-project-name">{project.name}</h2>
+                <div className="atm-row-sub">
+                  {project.current_milestone ?? "尚未设置里程碑"} ·{" "}
+                  {project.next_target_date ?? "无目标日期"}
+                </div>
+                <div className="atm-progress">
+                  <span style={{ width: `${Number(project.progress ?? 0)}%` }} />
+                </div>
+                <div className="atm-row-sub">
+                  {Math.round(Number(project.progress ?? 0))}% ·{" "}
+                  {progressSourceLabels[String(project.progress_source ?? "NONE")] ?? "尚无进度"}
+                </div>
+                <div className="atm-project-stats">
+                  <span>活动 {Number(project.active_count ?? 0)}</span>
+                  <span>阻塞 {Number(project.blocked_count ?? 0)}</span>
+                  <span>
+                    等待{" "}
+                    {Number(project.waiting_user_count ?? 0) +
+                      Number(project.waiting_agent_count ?? 0)}
+                  </span>
+                  <span>Agent {Number(project.active_agent_count ?? 0)}</span>
+                </div>
+                <div className="atm-row-sub">最近活动 {formatTime(project.last_activity_at)}</div>
+                <div className="atm-projection-summary">
+                  <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
+                  <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
       <MutationErrorAlert error={completeQuick.error} />
     </>
   );

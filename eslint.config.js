@@ -16,6 +16,9 @@ export default tseslint.config(
       "node_modules/**",
       "apps/mobile/android/**",
       "**/.local/**",
+      // Agent worktrees of other branches live here (with their own build output); each
+      // branch is linted in its own checkout.
+      ".claude/**",
     ],
   },
   eslint.configs.recommended,

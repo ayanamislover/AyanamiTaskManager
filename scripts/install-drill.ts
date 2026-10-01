@@ -538,6 +538,25 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
     await until(() => updateStatus(sandbox)?.code === "UPDATE_READY", 30_000),
     updateStatus(sandbox),
   );
+  // The ready version reaches the tray, and the toast is handed to Windows (the host logs
+  // both; a toast that Windows refused logs "toast failed").
+  const hostLog = () => {
+    try {
+      return readFileSync(join(sandbox.data, "logs", "host.log"), "utf8");
+    } catch {
+      return "";
+    }
+  };
+  check(
+    `tray offers ${VERSION_B}`,
+    await until(() => hostLog().includes(`tray offers update ${VERSION_B}`), 15_000),
+    hostLog().slice(-800),
+  );
+  check(
+    "update-ready toast shown",
+    await until(() => hostLog().includes("toast shown"), 15_000),
+    hostLog().slice(-800),
+  );
   check("Squirrel feed leftovers pruned", !existsSync(join(feed, "RELEASES")), readdirSync(feed));
   check(
     "the delivered package is kept until installed",
