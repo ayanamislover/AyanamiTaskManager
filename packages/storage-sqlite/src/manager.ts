@@ -865,7 +865,7 @@ export class AyanamiDatabaseManager {
       const manifest = {
         format: "ayanami-task-project",
         formatVersion: 1,
-        applicationVersion: "1.2.2",
+        applicationVersion: "2.0.0",
         project: { id: project.id, code: project.code, name: project.name },
         schemaVersion: database.schemaVersion,
         createdAt,
