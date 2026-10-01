@@ -94,7 +94,7 @@ describe("Claude 派单 REST 客户端", () => {
           claude: {
             found: true,
             path: "C:/bin/claude.exe",
-            version: "2.1.0",
+            version: "9.1.0",
             loggedIn: false,
             authMethod: "claude.ai",
           },

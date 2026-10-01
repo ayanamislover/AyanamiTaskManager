@@ -1976,19 +1976,19 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
           phase: "READY",
           outcome: "SUCCESS",
           code: "UPDATE_READY",
-          message: "2.0.1 已就绪，点击「立即更新」重启生效",
+          message: "9.0.1 已就绪，点击「立即更新」重启生效",
           action: "新版本已就绪，点击「立即更新」重启生效。",
           at: "2026-08-26T12:01:00.000Z",
-          version: "2.0.1",
+          version: "9.0.1",
         }),
         applyUpdate: async () => ({
           phase: "INSTALL",
           outcome: "IN_PROGRESS",
           code: "INSTALLING",
-          message: "正在安装 2.0.1，完成后会自动重新打开",
+          message: "正在安装 9.0.1，完成后会自动重新打开",
           action: "正在安装更新，完成后会自动重新打开。",
           at: "2026-08-26T12:02:00.000Z",
-          version: "2.0.1",
+          version: "9.0.1",
         }),
         copyText: async () => true,
         showItemInFolder: async () => undefined,
@@ -2010,13 +2010,13 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
   await expect(updateDiagnostics).toContainText("更新包校验失败");
   await expect(updateDiagnostics.getByRole("button", { name: "立即更新" })).toHaveCount(0);
   await updateDiagnostics.getByRole("button", { name: "立即检查" }).click();
-  await expect(updateDiagnostics).toContainText("2.0.1 已就绪");
+  await expect(updateDiagnostics).toContainText("9.0.1 已就绪");
   await expect(updateDiagnostics).toContainText("可更新");
   await updateDiagnostics.screenshot({
     path: resolve("output", "playwright", "e2e-update-diagnostics-dark.png"),
   });
   await updateDiagnostics.getByRole("button", { name: "立即更新" }).click();
-  await expect(updateDiagnostics).toContainText("正在安装 2.0.1");
+  await expect(updateDiagnostics).toContainText("正在安装 9.0.1");
   await expect(updateDiagnostics).toContainText("安装中");
   await expect(updateDiagnostics.getByRole("button", { name: "立即更新" })).toHaveCount(0);
   await expect(updateDiagnostics.getByRole("button", { name: "立即检查" })).toBeDisabled();

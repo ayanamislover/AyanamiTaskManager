@@ -104,6 +104,6 @@ describe("自动更新持久诊断", () => {
   it("版本号逐段比数字，段数不同时缺的段按 0 算", () => {
     expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
     expect(compareVersions("1.0.9", "1.0.10")).toBe(-1);
-    expect(compareVersions("2.0", "2.0.0")).toBe(0);
+    expect(compareVersions("9.0", "9.0.0")).toBe(0);
   });
 });

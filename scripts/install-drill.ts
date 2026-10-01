@@ -30,8 +30,8 @@ import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
 
 const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
-const VERSION_A = "2.0.0";
-const VERSION_B = "2.0.1";
+const VERSION_A = "9.0.0";
+const VERSION_B = "9.0.1";
 /** The fake Electron install; any version below the drill packages (not the real one). */
 const LEGACY = "1.9.0";
 /** An older Electron version directory Squirrel leaves behind, produced mid-migration. */

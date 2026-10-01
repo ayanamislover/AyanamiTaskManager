@@ -45,7 +45,7 @@ function dispatchStatus(overrides: Partial<DispatchStatus> = {}): DispatchStatus
     claude: {
       found: true,
       path: "C:/Users/me/.local/bin/claude.exe",
-      version: "2.1.0",
+      version: "9.1.0",
       loggedIn: true,
       authMethod: "claude.ai",
     },
@@ -150,7 +150,7 @@ describe("Claude 自动开工面板", () => {
     expect(markup).toContain('class="atm-panel atm-settings-dispatch"');
     expect(markup).toContain("只处理你明确交给 Claude 的任务，不会自己挑任务");
     expect(markup).toMatch(/aria-pressed="false"[^>]*>已关闭</u);
-    expect(markup).toContain("已找到 · 2.1.0");
+    expect(markup).toContain("已找到 · 9.1.0");
     expect(markup.match(/role="combobox"/gu)).toHaveLength(3);
     expect(markup).toContain("自动（推荐）");
     expect(markup).toContain('placeholder="跟随 Claude Code 默认"');

@@ -27,20 +27,20 @@ function packageDir(version: string): string {
 describe("本地更新源", () => {
   it("投递 zip 与清单，清单在 zip 之后写", () => {
     const feed = join(scratch(), "feed");
-    const delivered = deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
-    expect(readdirSync(feed).sort()).toEqual(["atm-2.0.1-win-x64.json", "atm-2.0.1-win-x64.zip"]);
-    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1");
+    const delivered = deliverUpdate(feed, packageDir("9.0.1"), "9.0.1");
+    expect(readdirSync(feed).sort()).toEqual(["atm-9.0.1-win-x64.json", "atm-9.0.1-win-x64.zip"]);
+    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 9.0.1");
   });
 
   // 同版本重投递：旧清单先撤，新 zip 写完前扫描看不到「就绪」；不留 .partial。
   it("同版本重投递先撤旧清单、经临时名改名，不留半成品", () => {
     const feed = join(scratch(), "feed");
-    deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
-    const rebuilt = packageDir("2.0.1");
-    writeFileSync(join(rebuilt, "atm-2.0.1-win-x64.zip"), "zip 2.0.1 rebuilt", "utf8");
-    const delivered = deliverUpdate(feed, rebuilt, "2.0.1");
-    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 2.0.1 rebuilt");
-    expect(readdirSync(feed).sort()).toEqual(["atm-2.0.1-win-x64.json", "atm-2.0.1-win-x64.zip"]);
+    deliverUpdate(feed, packageDir("9.0.1"), "9.0.1");
+    const rebuilt = packageDir("9.0.1");
+    writeFileSync(join(rebuilt, "atm-9.0.1-win-x64.zip"), "zip 9.0.1 rebuilt", "utf8");
+    const delivered = deliverUpdate(feed, rebuilt, "9.0.1");
+    expect(readFileSync(delivered.zip, "utf8")).toBe("zip 9.0.1 rebuilt");
+    expect(readdirSync(feed).sort()).toEqual(["atm-9.0.1-win-x64.json", "atm-9.0.1-win-x64.zip"]);
     const source = readFileSync(join(process.cwd(), "scripts", "update-feed.ts"), "utf8");
     expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeLessThan(
       source.indexOf("copyFileSync(join(packageDir, name), partial)"),
@@ -53,33 +53,33 @@ describe("本地更新源", () => {
   it("装好之后只清已消费的：不高于已装版本的包与 Squirrel 遗留，更新的与无关文件都留下", () => {
     const feed = join(scratch(), "feed");
     mkdirSync(feed, { recursive: true });
-    deliverUpdate(feed, packageDir("2.0.0"), "2.0.0");
-    deliverUpdate(feed, packageDir("2.0.1"), "2.0.1");
-    deliverUpdate(feed, packageDir("2.0.2"), "2.0.2");
+    deliverUpdate(feed, packageDir("9.0.0"), "9.0.0");
+    deliverUpdate(feed, packageDir("9.0.1"), "9.0.1");
+    deliverUpdate(feed, packageDir("9.0.2"), "9.0.2");
     writeFileSync(join(feed, "RELEASES"), "AAA AyanamiTaskManagerDesktop-1.2.2-full.nupkg 1\n");
     writeFileSync(join(feed, "AyanamiTaskManagerDesktop-1.2.2-full.nupkg"), "old");
     writeFileSync(join(feed, "notes.txt"), "keep me");
 
-    const removed = pruneConsumedFeed(feed, "2.0.1");
+    const removed = pruneConsumedFeed(feed, "9.0.1");
     expect(removed.sort()).toEqual(
       [
         "AyanamiTaskManagerDesktop-1.2.2-full.nupkg",
         "RELEASES",
-        "atm-2.0.0-win-x64.json",
-        "atm-2.0.0-win-x64.zip",
-        "atm-2.0.1-win-x64.json",
-        "atm-2.0.1-win-x64.zip",
+        "atm-9.0.0-win-x64.json",
+        "atm-9.0.0-win-x64.zip",
+        "atm-9.0.1-win-x64.json",
+        "atm-9.0.1-win-x64.zip",
       ].sort(),
     );
     expect(readdirSync(feed).sort()).toEqual([
-      "atm-2.0.2-win-x64.json",
-      "atm-2.0.2-win-x64.zip",
+      "atm-9.0.2-win-x64.json",
+      "atm-9.0.2-win-x64.zip",
       "notes.txt",
     ]);
     // 与 core 同口径：剩下的正是 core 会当成待装候选的那个版本。
-    expect(scanUpdateFeed(feed, "2.0.1").consumed).toEqual([]);
+    expect(scanUpdateFeed(feed, "9.0.1").consumed).toEqual([]);
     // 幂等。
-    expect(pruneConsumedFeed(feed, "2.0.1")).toEqual([]);
+    expect(pruneConsumedFeed(feed, "9.0.1")).toEqual([]);
   });
 
   // 「feed 在哪」和「快捷方式在哪」是同一类问题：两处各存一份认知，迟早一处

@@ -13,7 +13,7 @@ const hello = {
   t: "hello",
   v: HOST_PROTOCOL_VERSION,
   runId: "run-1",
-  version: "2.0.0",
+  version: "9.0.0",
   launch: { background: false, agentWake: false, randomStartupDelay: false },
 };
 

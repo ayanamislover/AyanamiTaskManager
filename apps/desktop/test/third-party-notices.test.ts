@@ -67,7 +67,7 @@ describe("第三方许可证声明", () => {
         {
           ecosystem: "npm",
           name: "bare-mit",
-          version: "2.0.0",
+          version: "9.0.0",
           license: "MIT",
           authors: ["Jane Doe"],
           texts: [],
@@ -120,7 +120,7 @@ describe("第三方许可证声明", () => {
       peerDependencies: { "runtime-peer": "*", "absent-peer": "*" },
       optionalDependencies: { "other-platform": "*" },
     });
-    write("node_modules/runtime-peer", { name: "runtime-peer", version: "2.0.0" });
+    write("node_modules/runtime-peer", { name: "runtime-peer", version: "9.0.0" });
     expect(
       npmComponents(root)
         .map((entry) => entry.name)
