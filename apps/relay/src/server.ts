@@ -58,10 +58,20 @@ const TOUCH_INTERVAL_MS = 60_000;
 const SHUTDOWN_GRACE_MS = 5_000;
 
 export async function startRelay(options: RelayServerOptions): Promise<RunningRelay> {
+  const db = openDatabase(options.dataDir);
+  try {
+    return await serveDatabase(db, options);
+  } catch (error) {
+    // 首次初始化、证书或监听（例如端口被占）失败：先关库再抛，不把句柄留给调用方。
+    db.close();
+    throw error;
+  }
+}
+
+async function serveDatabase(db: Database, options: RelayServerOptions): Promise<RunningRelay> {
   const log = options.log ?? silentLogger;
   const limits = resolveLimits(options.limits);
   const now = options.now ?? Date.now;
-  const db = openDatabase(options.dataDir);
   const initialTokenPath =
     options.bootstrap === false ? null : bootstrapIfNeeded(db, options.dataDir, log);
 

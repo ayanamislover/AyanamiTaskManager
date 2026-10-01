@@ -121,18 +121,94 @@ export const SCHEMA_VERSION = MIGRATIONS.length;
 
 export const DATABASE_FILE = "relay.db";
 
-/** 打开（必要时创建）数据目录下的库。 */
-export function openDatabase(dataDir: string): Database {
+/** 拿不到锁时 SQLite 自己等多久（毫秒）。serve 与管理命令并发打开同一个库时靠它排队。 */
+export const BUSY_TIMEOUT_MS = 5000;
+
+/**
+ * 切 WAL 的有界重试：最多 WAL_SWITCH_ATTEMPTS 次，第 n 次失败后睡 WAL_RETRY_BASE_MS·2^(n−1)
+ * （25、50、100、200 ms，合计 375 ms）；累计耗时已超过 busy_timeout 就不再重试——那说明锁被长期占着，
+ * 不是两个打开者撞车。最坏约两倍 busy_timeout 后抛出原错误。
+ */
+export const WAL_SWITCH_ATTEMPTS = 5;
+const WAL_RETRY_BASE_MS = 25;
+
+export type OpenDatabaseOptions = {
+  /** 覆盖 BUSY_TIMEOUT_MS（测试用：让「锁一直被占着」的失败路径快点结束）。 */
+  busyTimeoutMs?: number;
+};
+
+/**
+ * 打开（必要时创建）数据目录下的库。打开或迁移失败时先关掉连接再抛出，不留文件句柄。
+ *
+ * 顺序有讲究：busy_timeout 必须是第一条语句。它不碰文件锁，而后面的切 WAL、读库版本、迁移事务都要锁；
+ * 若先切 WAL 后设等待，serve 与 `token …` 同时首次打开空目录或非 WAL 的旧库时，争锁的一方会直接报
+ * `database is locked`，根本到不了迁移事务。只提前 busy_timeout 还不够（实测 3 个打开者仍有过半轮次失败），
+ * 切 WAL 另有有界重试，见 enableWal。迁移事务里重读库版本，保证多个打开者只有一个真正迁移。
+ */
+export function openDatabase(dataDir: string, options: OpenDatabaseOptions = {}): Database {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const { DatabaseSync } = loadSqlite();
   const db = new DatabaseSync(join(dataDir, DATABASE_FILE));
-  // CLI（token create/revoke）与 serve 可能同时打开同一个库：WAL + busy_timeout 让两边都不报 SQLITE_BUSY。
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA synchronous = NORMAL");
-  db.exec("PRAGMA busy_timeout = 5000");
-  db.exec("PRAGMA foreign_keys = ON");
-  migrate(db);
-  return db;
+  try {
+    const busyTimeoutMs = Math.max(0, Math.floor(options.busyTimeoutMs ?? BUSY_TIMEOUT_MS));
+    db.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+    // WAL 让 serve 与管理命令读写互不阻塞。
+    enableWal(db, busyTimeoutMs);
+    db.exec("PRAGMA synchronous = NORMAL");
+    db.exec("PRAGMA foreign_keys = ON");
+    migrate(db);
+    return db;
+  } catch (error) {
+    closeQuietly(db);
+    throw error;
+  }
+}
+
+function closeQuietly(db: Database): void {
+  try {
+    db.close();
+  } catch {
+    // 已经关了或关不掉：都不该盖住真正的错误。
+  }
+}
+
+/** SQLITE_BUSY（5）或 SQLITE_LOCKED（6），含扩展码（看低 8 位）。没有 errcode 的旧版 Node 按错误文本兜底。 */
+export function isBusyError(error: unknown): boolean {
+  const errcode = (error as { errcode?: unknown } | null)?.errcode;
+  if (typeof errcode === "number") return (errcode & 0xff) === 5 || (errcode & 0xff) === 6;
+  return /database (table )?is locked/i.test(String((error as Error | null)?.message ?? ""));
+}
+
+const sleepCell = new Int32Array(new SharedArrayBuffer(4));
+
+/** openDatabase 是同步接口，退避也只能同步睡。 */
+function sleepSync(ms: number): void {
+  Atomics.wait(sleepCell, 0, 0, ms);
+}
+
+/**
+ * 从回滚日志切到 WAL 要短暂独占整个库。busy_timeout 让 SQLite 拿不到锁时先等，但 SQLite 判断
+ * 「等下去可能死锁」时会不等、直接回 SQLITE_BUSY；两个连接同时首次打开正是这种情形。
+ * 所以 BUSY/LOCKED 再按 WAL_SWITCH_ATTEMPTS 的规则有界重试，别的错误原样抛出。
+ */
+export function enableWal(
+  db: Pick<Database, "exec">,
+  busyTimeoutMs: number,
+  sleep: (ms: number) => void = sleepSync,
+): void {
+  const started = Date.now();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+      return;
+    } catch (error) {
+      const spent = Date.now() - started;
+      if (!isBusyError(error) || attempt >= WAL_SWITCH_ATTEMPTS || spent >= busyTimeoutMs) {
+        throw error;
+      }
+      sleep(WAL_RETRY_BASE_MS * 2 ** (attempt - 1));
+    }
+  }
 }
 
 function schemaVersion(db: Database): number {
