@@ -17,7 +17,12 @@ import {
   type RelayChange,
   type RelayProbe,
 } from "@ayanami-task/sync-protocol";
-import { executeCommand, isRetryableCommandError, validateCommand } from "./commands.js";
+import {
+  executeCommand,
+  isDeferredCommandError,
+  isRetryableCommandError,
+  validateCommand,
+} from "./commands.js";
 import { rememberProcessed, type PublishedProject, type SyncConfig } from "./config.js";
 import type { DispatchPort } from "./dispatch-port.js";
 import { ackError, describeError } from "./errors.js";
@@ -58,6 +63,9 @@ export type SessionOptions = {
 
 /** 可重试的命令最多试几次，之后写失败 ack。 */
 const COMMAND_ATTEMPTS = 5;
+
+/** 一条命令这一轮的结局：处理完（含写了失败 ack）、稍后重试（算一次尝试）、延后到下次启动（不算）。 */
+type CommandOutcome = "done" | "retry" | "deferred";
 const ACK_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HEAD_PROJECT_LIMIT = 500;
 
@@ -282,21 +290,23 @@ export class SyncSession {
   async processPending(): Promise<void> {
     try {
       for (const [commandId, attempts] of [...this.#pending]) {
-        const done = await this.#processCommand(commandId, attempts);
-        if (done) this.#pending.delete(commandId);
-        else this.#pending.set(commandId, attempts + 1);
+        const outcome = await this.#processCommand(commandId, attempts);
+        if (outcome === "done") this.#pending.delete(commandId);
+        else if (outcome === "retry") this.#pending.set(commandId, attempts + 1);
+        // 派单器已随宿主退出：这一批剩下的命令也留给下次启动，不再白耗它们的尝试次数。
+        else break;
       }
     } finally {
       this.#host.onPending(this.#pending.size);
     }
   }
 
-  async #processCommand(commandId: string, attempts: number): Promise<boolean> {
+  async #processCommand(commandId: string, attempts: number): Promise<CommandOutcome> {
     const host = this.#host;
     if (host.config().processed.includes(commandId)) {
       // 回执已经写过（上次删命令没成功，或中继把旧密文原样放了回来）：只补删，不再执行。
       await this.store.deleteCommand(commandId);
-      return true;
+      return "done";
     }
     let doc: CommandDoc | null;
     try {
@@ -304,7 +314,7 @@ export class SyncSession {
     } catch (error) {
       if (error instanceof RelayError) throw error;
       const incomplete = error instanceof SyncProtocolError && error.code === "OBJECT_INCOMPLETE";
-      if (incomplete && attempts + 1 < COMMAND_ATTEMPTS) return false;
+      if (incomplete && attempts + 1 < COMMAND_ATTEMPTS) return "retry";
       await this.#finish(commandId, {
         v: 1,
         id: commandId,
@@ -312,9 +322,9 @@ export class SyncSession {
         ok: false,
         error: { code: "COMMAND_UNREADABLE", message: describeError(error) },
       });
-      return true;
+      return "done";
     }
-    if (!doc) return true;
+    if (!doc) return "done";
     let ack: AckDoc;
     try {
       validateCommand(doc, commandId, host.now());
@@ -323,13 +333,16 @@ export class SyncSession {
       ack = { v: 1, id: commandId, at: host.now().toISOString(), ok: true, result };
       host.logger.info("已执行手机命令", { command: commandId, type: doc.type, key: result.key });
     } catch (error) {
-      if (isRetryableCommandError(error) && attempts + 1 < COMMAND_ATTEMPTS) return false;
+      // 派单器已随宿主退出关闭：不是这条命令的结局，也不算一次尝试——不写 ack，命令留在中继上，
+      // 下次启动再处理（哪怕之前已经因临时故障试过几次）。
+      if (isDeferredCommandError(error)) return "deferred";
+      if (isRetryableCommandError(error) && attempts + 1 < COMMAND_ATTEMPTS) return "retry";
       const failure = ackError(error);
       ack = { v: 1, id: commandId, at: host.now().toISOString(), ok: false, error: failure };
       host.logger.warn("手机命令未执行", { command: commandId, code: failure.code });
     }
     await this.#finish(commandId, ack);
-    return true;
+    return "done";
   }
 
   /**

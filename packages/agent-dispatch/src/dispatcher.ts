@@ -267,6 +267,7 @@ export class AgentDispatcher {
         "找不到 Claude Code 命令行（claude）：请先安装 Claude Code 并确认能在终端里运行 claude",
       );
     await whileOpen(this.#assertLoggedIn(claude), this.#lifetime.signal);
+    if (this.#closed) throw closedError();
     const admitted = admitTask(this.#host, input, this.#now);
     const { project, task, cwd } = await whileOpen(admitted, this.#lifetime.signal);
     // 上面有 await：期间可能已关闭，或同一任务（或同一请求）的两次调用交错，插入前再查一次。

@@ -90,21 +90,36 @@ async function when<T>(ready: Promise<T | null>, feature: Feature, waitMs: numbe
 
 /**
  * 路由用：在 {@link when} 之上加收尾。收尾一开始（signal 中止）就不再等，回「正在退出」——
- * 之后等待才落定（拿到功能、还在启动、起不来）都不再算数，请求不会触达正在停或已停的功能。
+ * 之后等待才落定（拿到功能、还在启动、起不来）都不再算数。拿到功能后在同一段同步代码里先看收尾、
+ * 再调用 `act`：中间不隔 await，请求不会在收尾开始后才触达正在停或已停的功能。调用发出之后，
+ * 结果就是功能自己的（例如派单器在途时关闭会回 DISPATCH_CLOSED），收尾不再改写它。
  */
-function unlessClosing<T>(
+function unlessClosing<T, R>(
   ready: Promise<T | null>,
   feature: Feature,
   waitMs: number,
   signal: AbortSignal,
-): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
+  act: (value: T) => Promise<R>,
+): Promise<R> {
+  return new Promise<R>((resolve, reject) => {
     const onClose = () => reject(feature.closing());
     if (signal.aborted) return onClose();
     signal.addEventListener("abort", onClose, { once: true });
-    void when(ready, feature, waitMs)
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener("abort", onClose));
+    void when(ready, feature, waitMs).then(
+      (value) => {
+        signal.removeEventListener("abort", onClose);
+        if (signal.aborted) return; // 已经回了「正在退出」。
+        try {
+          resolve(act(value));
+        } catch (error) {
+          reject(error);
+        }
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onClose);
+        reject(error);
+      },
+    );
   });
 }
 
@@ -214,22 +229,23 @@ export function startMobileFeatures(options: MobileFeatureOptions): MobileFeatur
     dispatcher?.close();
   }
 
-  const use = <T>(ready: Promise<T | null>, feature: Feature): Promise<T> =>
-    unlessClosing(ready, feature, waitMs, abort.signal);
+  const use = <T, R>(ready: Promise<T | null>, feature: Feature, act: (value: T) => Promise<R>) =>
+    unlessClosing(ready, feature, waitMs, abort.signal, act);
 
   return {
     sync: {
-      status: async () => (await use(syncReady, SYNC)).status(),
-      updateConfig: async (patch) => (await use(syncReady, SYNC)).updateConfig(patch),
-      testRelay: async (candidate) => (await use(syncReady, SYNC)).testRelay(candidate),
-      createPairing: async () => (await use(syncReady, SYNC)).createPairing(),
-      resetSpace: async () => (await use(syncReady, SYNC)).resetSpace(),
+      status: () => use(syncReady, SYNC, (sync) => sync.status()),
+      updateConfig: (patch) => use(syncReady, SYNC, (sync) => sync.updateConfig(patch)),
+      testRelay: (candidate) => use(syncReady, SYNC, (sync) => sync.testRelay(candidate)),
+      createPairing: () => use(syncReady, SYNC, (sync) => sync.createPairing()),
+      resetSpace: () => use(syncReady, SYNC, (sync) => sync.resetSpace()),
     },
     dispatch: {
-      status: async () => (await use(dispatchReady, DISPATCH)).status(),
-      updateConfig: async (patch) => (await use(dispatchReady, DISPATCH)).updateConfig(patch),
-      enqueue: async (input) => (await use(dispatchReady, DISPATCH)).enqueue(input),
-      cancel: async (run) => (await use(dispatchReady, DISPATCH)).cancel(run),
+      status: () => use(dispatchReady, DISPATCH, (dispatch) => dispatch.status()),
+      updateConfig: (patch) =>
+        use(dispatchReady, DISPATCH, (dispatch) => dispatch.updateConfig(patch)),
+      enqueue: (input) => use(dispatchReady, DISPATCH, (dispatch) => dispatch.enqueue(input)),
+      cancel: (run) => use(dispatchReady, DISPATCH, (dispatch) => dispatch.cancel(run)),
     },
     ready: Promise.all([syncReady, dispatchReady]).then(() => undefined),
     close() {

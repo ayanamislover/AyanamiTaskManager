@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AyanamiTaskService } from "@ayanami-task/application";
+import { AtmError } from "@ayanami-task/errors";
 import {
   COMMAND_MAX_AGE_MS,
   commandKey,
@@ -364,6 +366,111 @@ describe("电脑上的 ATM 退出时手机派单还在途（peer R3-01）", () =
       }
     },
   );
+
+  it.each([
+    ["交给 Claude", "dispatch"],
+    ["建任务并交给 Claude", "create"],
+  ] as const)(
+    "%s：前四次因临时故障重试，第五次撞上退出——仍不写回执、命令留着，下次启动照常处理（peer R4-02）",
+    async (_name, kind) => {
+      const fixture = await openFixture();
+      try {
+        const task = await seedDispatchable(fixture);
+        // 前四次在命令自己读写 service 的那一步报「库暂时打不开」（可重试，最多五次）。
+        // 连上之后才开始计：初次全量发布快照也会读任务详情。
+        const flaky = kind === "dispatch" ? "getWorkItemForUi" : "createWorkItemsAsUser";
+        let armed = false;
+        let calls = 0;
+        const service = new Proxy(fixture.service, {
+          get(raw, property) {
+            const value: unknown = Reflect.get(raw, property, raw);
+            if (typeof value !== "function") return value;
+            const method = value as (...args: unknown[]) => unknown;
+            if (property !== flaky || !armed) return method.bind(raw);
+            return async (...args: unknown[]) => {
+              const result = await method.apply(raw, args);
+              calls += 1;
+              if (calls <= 4)
+                throw new AtmError("PROJECT_DB_UNAVAILABLE", { message: "库暂时打不开" });
+              return result;
+            };
+          },
+        }) as AyanamiTaskService;
+        const authFile = join(fixture.dataDir, "fake-claude-auth.json");
+        writeFileSync(authFile, JSON.stringify({ mode: "hang" }));
+        const baseEnv = { ...process.env, FAKE_CLAUDE_AUTH_FILE: authFile };
+        const abort = new AbortController();
+        const first = await realDispatcher(fixture, {
+          signal: abort.signal,
+          baseEnv,
+          authProbeTimeoutMs: 1_500,
+        });
+        const connector = fixture.connector({ service, dispatch: first.port });
+        const pairing = await connect(connector, fixture.relay);
+        const phone = await phoneFor(fixture.relay, pairing.pairingCode);
+        armed = true;
+        const sent = await phone.store.sendCommand(
+          phone.device,
+          kind === "dispatch"
+            ? { type: "task.dispatch", body: { project: "ALPHA", key: task.key } }
+            : {
+                type: "task.create",
+                body: { project: "ALPHA", title: "退出时还在派的任务", dispatch: true },
+              },
+        );
+        // 只有第五次能走到派单（登录探测）：前四次都在读写 service 那一步失败了。
+        await waitFor(() => existsSync(`${authFile}.count`), "第五次走到登录探测");
+        expect(calls).toBe(5);
+        abort.abort();
+        await connector.stop();
+        expect(await phone.store.readAck(sent.id)).toBeNull();
+        expect(fixture.relay.docs.has(commandKey(pairing.spaceId, sent.id))).toBe(true);
+
+        writeFileSync(authFile, JSON.stringify({ mode: "in" }));
+        const second = await realDispatcher(fixture, { baseEnv });
+        const restarted = fixture.connector({ dispatch: second.port });
+        await restarted.start();
+        const ack = await phone.awaitAck(sent.id);
+        expect(ack).toMatchObject({ ok: true, result: { dispatch: { state: "queued" } } });
+        await waitFor(() => second.children.length === 1, "会话已起");
+        const items = await fixture.service.listWorkItemsForUi("ALPHA", {});
+        expect(items).toHaveLength(kind === "dispatch" ? 1 : 2);
+        await restarted.stop();
+      } finally {
+        await fixture.close();
+      }
+    },
+  );
+
+  it("派单器已关闭时这一批就此打住：后面的建任务命令不执行、不写回执，都留给下次启动（peer R4-02）", async () => {
+    const fixture = await openFixture();
+    try {
+      const task = await seedDispatchable(fixture);
+      const dispatch = await realDispatcher(fixture);
+      const connector = fixture.connector({ dispatch: dispatch.port });
+      const pairing = await connect(connector, fixture.relay);
+      const phone = await phoneFor(fixture.relay, pairing.pairingCode);
+      dispatch.dispatcher.close();
+      const dispatched = await phone.store.sendCommand(phone.device, {
+        type: "task.dispatch",
+        body: { project: "ALPHA", key: task.key },
+      });
+      await waitFor(() => dispatch.enqueued.length > 0, "派单命令撞上已关闭的派单器");
+      const created = await phone.store.sendCommand(phone.device, {
+        type: "task.create",
+        body: { project: "ALPHA", title: "排在后面的任务" },
+      });
+      // 给后面那条足够的处理机会（几轮长轮询）。
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      expect(dispatch.enqueued.length).toBeGreaterThan(1);
+      expect(await phone.store.readAck(dispatched.id)).toBeNull();
+      expect(await phone.store.readAck(created.id)).toBeNull();
+      expect(await fixture.service.listWorkItemsForUi("ALPHA", {})).toHaveLength(1);
+      await connector.stop();
+    } finally {
+      await fixture.close();
+    }
+  });
 });
 
 describe("已处理命令的保留窗口", () => {

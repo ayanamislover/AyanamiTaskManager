@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { closedError, whileOpen } from "../src/admission.js";
+import { ClaudeProbe } from "../src/claude-probe.js";
 import {
   DEFAULT_DISPATCH_CONFIG,
   DispatchError,
@@ -9,7 +11,24 @@ import {
 } from "../src/index.js";
 import { cleanupAll, fakeProcesses, type Fixture, fixture, waitFor } from "./support.js";
 
-afterEach(cleanupAll);
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await cleanupAll();
+});
+
+/** 收集测试期间没人接的 Promise 拒绝（Node 默认会因此让进程退出，core 也不例外）。 */
+async function unhandledDuring(body: () => Promise<void>): Promise<unknown[]> {
+  const seen: unknown[] = [];
+  const record = (reason: unknown) => seen.push(reason);
+  process.on("unhandledRejection", record);
+  try {
+    await body();
+    await new Promise((done) => setTimeout(done, 20));
+  } finally {
+    process.off("unhandledRejection", record);
+  }
+  return seen;
+}
 
 // 宿主收尾（core 的 abort → close）之后，派单器随后就要面对一个已经关掉的库：
 // 已经进来的入队不再读库、不排队、不记账本；已在队列里的派单不因关闭后的读取失败被记成 failed。
@@ -241,5 +260,52 @@ describe("关闭时队列里的派单", () => {
     await waitFor(() => dispatcher.listRuns()[0]?.state === "failed");
     expect(dispatcher.listRuns()[0]?.error).toBe("启动失败：库读不出来");
     expect(fake.children).toEqual([]);
+  });
+});
+
+describe("关闭时的 Promise 都有人接（peer R4-01）", () => {
+  it("whileOpen 在已经关闭时也接住传进来的步骤：它随后失败不会变成未处理的拒绝", async () => {
+    const lifetime = new AbortController();
+    lifetime.abort();
+    const unhandled = await unhandledDuring(async () => {
+      await closedRejection(whileOpen(Promise.reject(closedError()), lifetime.signal));
+      let fail!: (error: Error) => void;
+      const later = new Promise<never>((_resolve, reject) => (fail = reject));
+      await closedRejection(whileOpen(later, lifetime.signal));
+      fail(new Error("库已关闭"));
+    });
+    expect(unhandled).toEqual([]);
+  });
+
+  it("登录探测刚回来、准入还没开始时关闭：逐个微任务时点扫一遍，入队要么照常排上、要么 DISPATCH_CLOSED，没有未处理的拒绝", async () => {
+    const outcomes: string[] = [];
+    const unhandled = await unhandledDuring(async () => {
+      for (let phase = 0; phase <= 30; phase += 1) {
+        const f = fixture();
+        const fake = fakeProcesses();
+        f.addTask("DEMO-T-0001");
+        const dispatcher = f.dispatcher(fake.options);
+        await dispatcher.updateConfig({ enabled: true });
+        // 探测立即回「已登录」，同时排好在第 phase 个微任务之后关闭。
+        vi.spyOn(ClaudeProbe.prototype, "auth").mockImplementation(async () => {
+          let hop = Promise.resolve();
+          for (let index = 0; index < phase; index += 1) hop = hop.then(() => undefined);
+          void hop.then(() => dispatcher.close());
+          return { state: { loggedIn: true }, fromCache: false };
+        });
+        const outcome = await dispatcher.enqueue(mobile(commandId(`p${phase}`))).then(
+          (run) => run.state,
+          (error: unknown) => (error as DispatchError).code,
+        );
+        outcomes.push(outcome);
+        if (outcome === "DISPATCH_CLOSED") expect(dispatcher.listRuns()).toEqual([]);
+        else expect(outcome).toBe("queued");
+        vi.restoreAllMocks();
+      }
+    });
+    expect(unhandled).toEqual([]);
+    // 扫过的时点两头都覆盖到了：先关闭的被拒，晚关闭的已经排上。
+    expect(outcomes).toContain("DISPATCH_CLOSED");
+    expect(outcomes).toContain("queued");
   });
 });

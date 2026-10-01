@@ -7,13 +7,15 @@ import type { DispatchHost, DispatchProject, DispatchTask } from "./types.js";
 /**
  * 等一个异步步骤；派单器关闭（`lifetime` 中止）就不再等，立即以 DISPATCH_CLOSED 结束。
  * 关闭之后它才落定（读到结果，或因库已关而失败）都不再算数：那时这个 Promise 已经 reject。
+ * `work` 无论如何都要先接住——已经关闭时它多半正以 DISPATCH_CLOSED 失败（宿主端口拒绝），
+ * 没人接的拒绝在 Node 里默认会让整个进程退出。
  */
 export function whileOpen<T>(work: Promise<T>, lifetime: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const onClose = () => reject(closedError());
+    void work.then(resolve, reject).finally(() => lifetime.removeEventListener("abort", onClose));
     if (lifetime.aborted) return onClose();
     lifetime.addEventListener("abort", onClose, { once: true });
-    void work.then(resolve, reject).finally(() => lifetime.removeEventListener("abort", onClose));
   });
 }
 

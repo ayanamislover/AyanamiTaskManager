@@ -86,11 +86,10 @@ async function dispatchOutcome(
     const run = await context.dispatch.enqueue(input);
     return { dispatch: { run: run.run, state: run.state } };
   } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
     // 派单器正随电脑上的 ATM 退出：这条命令不算失败，整条留到下次启动再处理（建任务靠 op_id、
     // 派单靠命令 ID 幂等），不当作派单被拒写进回执。
-    if (code === "DISPATCH_CLOSED") throw error;
-    if (code === "DISPATCH_ALREADY_ACTIVE") {
+    if (isDeferredCommandError(error)) throw error;
+    if ((error as { code?: unknown } | null)?.code === "DISPATCH_ALREADY_ACTIVE") {
       const existing = context.dispatch.runForTask(input.project, input.key);
       if (existing && (existing.state === "queued" || existing.state === "running"))
         return { dispatch: { run: existing.run, state: existing.state } };
@@ -186,11 +185,15 @@ export async function executeCommand(context: CommandContext, doc: CommandDoc): 
   }
 }
 
-/**
- * 不写失败 ack、稍后再处理的错误：ATM 自己标了可重试的（例如项目库暂时打不开），
- * 或派单器已随宿主退出关闭（agent-dispatch 的 DISPATCH_CLOSED）。
- */
+/** ATM 自己标了可重试的错误（例如项目库暂时打不开）：不写失败 ack，稍后再处理（有次数上限）。 */
 export function isRetryableCommandError(error: unknown): boolean {
-  if (error instanceof AtmError) return error.retryable;
+  return error instanceof AtmError && error.retryable;
+}
+
+/**
+ * 派单器已随宿主退出关闭（agent-dispatch 的 DISPATCH_CLOSED）：不是命令的结局。不写 ack、不算尝试次数，
+ * 命令留在中继上，下次启动再处理。
+ */
+export function isDeferredCommandError(error: unknown): boolean {
   return (error as { code?: unknown } | null)?.code === "DISPATCH_CLOSED";
 }

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
+  type AgentDispatcher,
   createAgentDispatcher,
   DEFAULT_DISPATCH_CONFIG,
   dispatchPaths,
@@ -257,6 +258,45 @@ describe("core 里的手机同步与派单", () => {
       expect(settledAt - began).toBeLessThan(200);
     },
   );
+
+  it("功能已就绪、路由还没调用时收尾：逐个微任务时点扫一遍，调用一定发生在收尾之前，否则回 404「正在退出」（peer R4-03）", async () => {
+    const outcomes: string[] = [];
+    for (let phase = 0; phase <= 12; phase += 1) {
+      // 每次调用都记下当时是不是已经在收尾。
+      const calls: boolean[] = [];
+      const features = startMobileFeatures({
+        service: { subscribeGlobal: () => () => undefined } as unknown as AyanamiTaskService,
+        dataDir: join(work, `case-${(counter += 1)}`),
+        hostPath: process.execPath,
+        dpapi: () => null,
+        createDispatcher: async (options) =>
+          ({
+            close() {},
+            async updateConfig(patch: { enabled: boolean }) {
+              calls.push(options.signal?.aborted ?? false);
+              return patch;
+            },
+          }) as unknown as AgentDispatcher,
+      });
+      cleanups.push(() => features.close());
+      await features.ready;
+      const pending = features.dispatch.updateConfig({ enabled: true }).then(
+        () => "applied",
+        (error: unknown) => {
+          expect(error).toMatchObject({ code: "DISPATCH_UNAVAILABLE", httpStatus: 404 });
+          return "closing";
+        },
+      );
+      for (let index = 0; index < phase; index += 1) await Promise.resolve();
+      await features.close();
+      const outcome = await pending;
+      outcomes.push(outcome);
+      expect(calls).toEqual(outcome === "applied" ? [false] : []);
+    }
+    // 扫过的时点两头都覆盖到了：早收尾的没调用，晚收尾的已经调用完。
+    expect(outcomes).toContain("closing");
+    expect(outcomes).toContain("applied");
+  });
 
   it("派单恢复慢过收尾等待：close 之后恢复回来也不再读任务、不再起会话（peer R2-03）", async () => {
     const dataDir = join(work, `case-${(counter += 1)}`);
