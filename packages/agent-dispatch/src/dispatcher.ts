@@ -1,8 +1,9 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, mkdirSync, openSync, statSync } from "node:fs";
+import { closeSync, mkdirSync, openSync } from "node:fs";
 import { findClaudeCodeCli } from "@ayanami-task/agent-config";
 import { noteSuppressed } from "@ayanami-task/errors";
+import { admitTask, cleanRequester, disabledError, taskBlocker } from "./admission.js";
 import { ClaudeProbe } from "./claude-probe.js";
 import {
   type DispatchConfig,
@@ -10,7 +11,7 @@ import {
   mergeDispatchConfig,
   saveDispatchConfig,
 } from "./config.js";
-import { CLAUDE_LOGIN_REQUIRED_MESSAGE, DispatchError } from "./errors.js";
+import { CLAUDE_LOGIN_REQUIRED_MESSAGE, DispatchError, isDispatchError } from "./errors.js";
 import { type DispatchPaths, dispatchPaths } from "./files.js";
 import {
   claudeArguments,
@@ -19,9 +20,15 @@ import {
   launchCommand,
   newRunId,
 } from "./launch.js";
-import { defaultProcessStartTime, isPidAlive, killProcessTree } from "./process.js";
+import {
+  checkProcessIdentity,
+  defaultProcessProbe,
+  type ProcessProbe,
+} from "./process-identity.js";
+import { ProcessTracker } from "./process-tracker.js";
 import { renderDispatchPrompt } from "./prompt.js";
 import { type DispatchOutcome, judgeOutcome, logHasResult } from "./result.js";
+import { DISPATCH_REQUEST_ID_PATTERN, RequestLedger, snapshotView } from "./request-ledger.js";
 import { loadRuns, pruneLogs, saveRuns, toRunView, trimHistory } from "./run-store.js";
 import type {
   AgentDispatcherOptions,
@@ -32,14 +39,8 @@ import type {
   DispatchRunView,
   DispatchSpawn,
   DispatchStatus,
-  DispatchTask,
   EnqueueInput,
 } from "./types.js";
-
-/** 可以派单的任务状态：还没人开工的。 */
-const DISPATCHABLE_STATUSES = new Set(["READY", "BACKLOG"]);
-/** 重启后判断「记录里的 PID 还是不是当初那个进程」时，创建时间与记录的启动时间允许的误差。 */
-const START_TIME_TOLERANCE_MS = 60_000;
 
 const silentLogger: DispatchLogger = { info() {}, warn() {}, error() {} };
 
@@ -47,37 +48,17 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** 任务现在不能派单的原因；可以派单返回 null。 */
-function taskBlocker(task: DispatchTask, now: Date): string | null {
-  if (!DISPATCHABLE_STATUSES.has(task.status))
-    return `任务状态是 ${task.status}，只有 READY 或 BACKLOG 的任务可以交给 Claude`;
-  if (task.claimedBySessionId) {
-    const lease = task.claimLeaseUntil ? Date.parse(task.claimLeaseUntil) : Number.NaN;
-    if (Number.isNaN(lease) || lease > now.getTime())
-      return `任务已被会话 ${task.claimedBySessionId} 领取`;
-  }
-  return null;
-}
-
-function cleanRequester(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  // eslint-disable-next-line no-control-regex
-  const flat = Array.from(value.replace(/[\u0000-\u001f\u007f]+/gu, " ").trim());
-  return flat.length === 0 ? undefined : flat.slice(0, 60).join("");
+/** 确认不了 PID 归属时停止跟踪的说明：不接管、不结束，告诉用户怎么自己处理。 */
+function identityLostMessage(pid: number | undefined, when: string): string {
+  const which = pid === undefined ? "" : `（PID ${pid}）`;
+  return `${when}无法确认 Claude 进程身份${which}，已停止跟踪，没有结束该进程；如仍在运行可在任务管理器里手动结束`;
 }
 
 /**
  * Claude Code 无头派单：只处理用户点名的任务，排队、限并发、起进程、落日志、记历史。
  * 会话进程 detached 且 stdout/stderr 直接写日志文件，宿主退出后会话照常跑完；
- * 宿主重启时 {@link AgentDispatcher.start} 按 PID 与日志把残留的 running 记录修正或重新接管。
+ * 宿主重启时 {@link AgentDispatcher.start} 只接管身份（PID + 创建时间）确认无误的残留进程。
+ * 带 requestId 的请求（手机命令）经 {@link RequestLedger} 持久幂等：同一个 ID 绝不起第二次会话。
  */
 export class AgentDispatcher {
   readonly #paths: DispatchPaths;
@@ -86,15 +67,16 @@ export class AgentDispatcher {
   readonly #spawn: DispatchSpawn;
   readonly #now: () => Date;
   readonly #logger: DispatchLogger;
-  readonly #pollIntervalMs: number;
-  readonly #processStartTime: (pid: number) => Promise<Date | null>;
+  readonly #process: ProcessProbe;
+  readonly #tracker: ProcessTracker;
+  readonly #ledger: RequestLedger;
   readonly #baseEnv: NodeJS.ProcessEnv;
   #config: DispatchConfig;
   /** 按创建时间升序。 */
   #runs: DispatchRunRecord[];
-  readonly #children = new Map<string, ChildProcess>();
-  readonly #watchers = new Map<string, NodeJS.Timeout>();
   readonly #launching = new Set<string>();
+  /** 进行中的取消：同一次派单再点取消拿到同一个结果，不会并发结束两次。 */
+  readonly #cancelling = new Map<string, Promise<DispatchRunView>>();
   readonly #listeners = new Set<(event: DispatchChangeEvent) => void>();
   /** 项目名只在排队到启动之间用来渲染提示词，不进历史文件。 */
   readonly #promptContext = new Map<string, string>();
@@ -108,8 +90,21 @@ export class AgentDispatcher {
     this.#spawn = options.spawnImpl ?? spawn;
     this.#now = options.now ?? (() => new Date());
     this.#logger = options.logger ?? silentLogger;
-    this.#pollIntervalMs = options.pollIntervalMs ?? 5_000;
-    this.#processStartTime = options.processStartTime ?? defaultProcessStartTime;
+    this.#process = {
+      isAlive: options.isPidAlive ?? defaultProcessProbe.isAlive,
+      startTime: options.processStartTime ?? defaultProcessProbe.startTime,
+      killTree: options.killProcessTree ?? defaultProcessProbe.killTree,
+    };
+    this.#tracker = new ProcessTracker({
+      probe: this.#process,
+      pollIntervalMs: options.pollIntervalMs ?? 5_000,
+      logger: this.#logger,
+      events: {
+        exited: (run, code) => this.#onExit(run, code),
+        failed: (run, error) => this.#onSpawnError(run, error),
+        lost: (run) => this.#onLost(run),
+      },
+    });
     this.#baseEnv = options.baseEnv ?? process.env;
     this.#probe = new ClaudeProbe({
       baseEnv: this.#baseEnv,
@@ -120,6 +115,7 @@ export class AgentDispatcher {
     });
     this.#config = loadDispatchConfig(this.#paths.config, this.#logger);
     this.#runs = loadRuns(this.#paths.runs, this.#logger);
+    this.#ledger = new RequestLedger(this.#paths.requests, this.#logger);
   }
 
   /** 修正上次留下的 running 记录、清理旧日志，然后开始处理队列。 */
@@ -134,8 +130,7 @@ export class AgentDispatcher {
   /** 停止内部计时器；不结束任何会话（它们本来就与宿主解耦）。 */
   close(): void {
     this.#closed = true;
-    for (const timer of this.#watchers.values()) clearInterval(timer);
-    this.#watchers.clear();
+    this.#tracker.close();
     this.#listeners.clear();
   }
 
@@ -191,6 +186,10 @@ export class AgentDispatcher {
     return { ...next };
   }
 
+  /**
+   * 排队一次派单。带 `requestId` 时先查请求账本：记过的直接回放那次的结局（派单的当前视图，或当初的拒绝），
+   * 绝不再起会话；没记过的照常校验，建出派单或被拒都记进账本。
+   */
   async enqueue(input: EnqueueInput): Promise<DispatchRunView> {
     if (input.origin !== "mobile" && input.origin !== "desktop")
       throw new DispatchError("DISPATCH_INVALID_ARGUMENT", "origin 只能是 mobile 或 desktop");
@@ -199,11 +198,36 @@ export class AgentDispatcher {
         "DISPATCH_INVALID_ARGUMENT",
         `任务键格式不合法：${String(input.key)}`,
       );
-    if (!this.#config.enabled)
-      throw new DispatchError(
-        "DISPATCH_DISABLED",
-        "派单未开启：请先在 ATM 设置里打开「交给 Claude」",
-      );
+    const requestId = input.requestId;
+    if (requestId === undefined) return this.#enqueueNew(input);
+    if (typeof requestId !== "string" || !DISPATCH_REQUEST_ID_PATTERN.test(requestId))
+      throw new DispatchError("DISPATCH_INVALID_ARGUMENT", "requestId 格式不合法");
+    const replayed = this.#replay(requestId);
+    if (replayed) return replayed;
+    this.#ledger.assertCapacity(this.#now());
+    try {
+      return await this.#enqueueNew(input, requestId);
+    } catch (error) {
+      // 业务上的拒绝也记下来：同一条命令以后再来（重放、回执写失败后重处理）照样拒绝，
+      // 不会因为期间开了派单、任务变回 READY 就补起一次会话。临时故障（例如库打不开）不记。
+      if (isDispatchError(error) && !this.#ledger.find(requestId, this.#now()))
+        this.#ledger.recordRejection(requestId, error, this.#now());
+      throw error;
+    }
+  }
+
+  /** 账本里有这个请求：返回那次派单的当前视图（还在历史里用历史，已被裁剪用账本快照），或原样拒绝。 */
+  #replay(requestId: string): DispatchRunView | null {
+    const entry = this.#ledger.find(requestId, this.#now());
+    if (!entry) return null;
+    if ("rejected" in entry)
+      throw new DispatchError(entry.rejected.code, entry.rejected.message, { requestId });
+    const record = this.#runs.find((candidate) => candidate.run === entry.run.run);
+    return record ? toRunView(record) : snapshotView(entry.run);
+  }
+
+  async #enqueueNew(input: EnqueueInput, requestId?: string): Promise<DispatchRunView> {
+    if (!this.#config.enabled) throw disabledError();
     this.#assertNotActive(input.project, input.key);
     const claude = this.#resolveClaude();
     if (claude === null)
@@ -212,49 +236,13 @@ export class AgentDispatcher {
         "找不到 Claude Code 命令行（claude）：请先安装 Claude Code 并确认能在终端里运行 claude",
       );
     await this.#assertLoggedIn(claude);
-    const project = await this.#host.getProject(input.project);
-    if (!project)
-      throw new DispatchError("DISPATCH_PROJECT_NOT_FOUND", `项目不存在：${input.project}`, {
-        project: input.project,
-      });
-    const cwd = project.paths.find(isDirectory);
-    if (!cwd)
-      throw new DispatchError(
-        "DISPATCH_PROJECT_PATH_MISSING",
-        project.paths.length === 0
-          ? `项目 ${project.code} 没有绑定工作目录，Claude 不知道在哪里干活：请先在 ATM 里给项目绑定目录`
-          : `项目 ${project.code} 绑定的目录都不存在`,
-        { project: project.code, paths: project.paths },
-      );
-    if (!input.key.startsWith(`${project.code}-`))
-      throw new DispatchError(
-        "DISPATCH_TASK_NOT_FOUND",
-        `${input.key} 不属于项目 ${project.code}`,
-        {
-          project: project.code,
-          key: input.key,
-        },
-      );
-    const task = await this.#host.getTask(project.code, input.key);
-    if (!task)
-      throw new DispatchError("DISPATCH_TASK_NOT_FOUND", `任务不存在：${input.key}`, {
-        project: project.code,
-        key: input.key,
-      });
-    const blocker = taskBlocker(task, this.#now());
-    if (blocker)
-      throw new DispatchError("DISPATCH_TASK_NOT_READY", blocker, {
-        key: task.key,
-        status: task.status,
-        claimedBySessionId: task.claimedBySessionId,
-        claimLeaseUntil: task.claimLeaseUntil,
-      });
-    // 上面有 await：同一任务的两次请求可能交错，插入前再查一次。
-    if (!this.#config.enabled)
-      throw new DispatchError(
-        "DISPATCH_DISABLED",
-        "派单未开启：请先在 ATM 设置里打开「交给 Claude」",
-      );
+    const { project, task, cwd } = await admitTask(this.#host, input, this.#now);
+    // 上面有 await：同一任务（或同一请求）的两次调用可能交错，插入前再查一次。
+    if (requestId !== undefined) {
+      const replayed = this.#replay(requestId);
+      if (replayed) return replayed;
+    }
+    if (!this.#config.enabled) throw disabledError();
     this.#assertNotActive(project.code, task.key);
     const now = this.#now();
     const requestedBy = cleanRequester(input.requestedBy);
@@ -271,6 +259,15 @@ export class AgentDispatcher {
       ...(requestedBy === undefined ? {} : { requestedBy }),
     };
     this.#runs.push(record);
+    if (requestId !== undefined) {
+      // 先落账本再排队起进程：账本写不下去就不派，免得崩溃或回执失败后重处理时再起一次。
+      try {
+        this.#ledger.recordRun(requestId, toRunView(record), now);
+      } catch (error) {
+        this.#runs = this.#runs.filter((candidate) => candidate !== record);
+        throw new Error(`写派单请求账本失败，没有启动 Claude：${errorText(error)}`);
+      }
+    }
     this.#promptContext.set(record.run, project.name);
     this.#persist();
     this.#emit({ type: "run", run: toRunView(record) });
@@ -278,7 +275,13 @@ export class AgentDispatcher {
     return toRunView(record);
   }
 
+  /**
+   * 取消。排队中的直接取消；运行中的先核验进程身份再结束整棵进程树，确认结束后才记为取消并释放名额。
+   * 结束失败（或身份核验不了）时派单保持运行中、名额不释放，抛 DISPATCH_CANCEL_FAILED，可以重试。
+   */
   async cancel(run: string): Promise<DispatchRunView> {
+    const pending = this.#cancelling.get(run);
+    if (pending) return pending;
     const record = this.#runs.find((entry) => entry.run === run);
     if (!record) throw new DispatchError("DISPATCH_RUN_NOT_FOUND", `派单不存在：${run}`, { run });
     if (record.state !== "queued" && record.state !== "running")
@@ -286,15 +289,21 @@ export class AgentDispatcher {
         run,
         state: record.state,
       });
-    const pid = record.state === "running" ? record.pid : undefined;
-    this.#finish(record, { state: "cancelled", error: "用户取消" });
-    if (pid !== undefined) {
-      this.#stopWatching(run);
-      try {
-        await killProcessTree(pid);
-      } catch (error) {
-        this.#logger.warn("结束派单进程失败", { run, pid, error: errorText(error) });
-      }
+    if (record.state === "queued") {
+      this.#finish(record, { state: "cancelled", error: "用户取消" });
+      return toRunView(record);
+    }
+    const work = this.#cancelRunning(record).finally(() => this.#cancelling.delete(run));
+    this.#cancelling.set(run, work);
+    return work;
+  }
+
+  async #cancelRunning(record: DispatchRunRecord): Promise<DispatchRunView> {
+    const outcome = await this.#tracker.terminate(record.run, record.pid, record.processCreatedAt);
+    if (record.state === "running") {
+      // `exited`：核验发现原进程早已退出（PID 不在或已换人），没动任何进程，按日志定结局。
+      if (outcome === "exited") this.#finish(record, this.#judge(record, null));
+      else this.#finish(record, { state: "cancelled", error: "用户取消" });
     }
     return toRunView(record);
   }
@@ -351,6 +360,8 @@ export class AgentDispatcher {
   }
 
   #persist(): void {
+    // 先用完整历史刷新账本快照：下面裁剪掉的派单，账本里留的是它最后的状态。
+    this.#ledger.sync(this.#runs, toRunView);
     const kept = trimHistory(this.#runs);
     this.#runs = kept;
     try {
@@ -471,9 +482,8 @@ export class AgentDispatcher {
     // 子进程已经继承了自己的一份句柄，父进程这份立刻关掉。
     closeSync(stdout);
     closeSync(stderr);
-    this.#children.set(record.run, child);
-    child.once("error", (error) => this.#onChildError(record.run, error));
-    child.once("exit", (code) => this.#onChildExit(record.run, code));
+    // 句柄挂上 exit/error，同时立刻向 OS 要这个 PID 的创建时间（宿主重启后据此核验身份）。
+    const identity = this.#tracker.attach(record.run, child);
     if (child.pid !== undefined) record.pid = child.pid;
     record.state = "running";
     record.startedAt = this.#now().toISOString();
@@ -487,69 +497,73 @@ export class AgentDispatcher {
     this.#persist();
     this.#emit({ type: "run", run: toRunView(record) });
     this.#logger.info("已派单", { run: record.run, key: record.key, pid: child.pid });
+    void identity.then((createdAt) => {
+      if (record.state !== "running") return;
+      if (createdAt === null) {
+        this.#logger.warn("查不到会话进程的创建时间：宿主重启后不会接管它", { run: record.run });
+        return;
+      }
+      record.processCreatedAt = createdAt;
+      this.#persist();
+    });
   }
 
-  #onChildError(run: string, error: Error): void {
-    this.#children.delete(run);
+  #onSpawnError(run: string, error: Error): void {
     const record = this.#runs.find((entry) => entry.run === run);
     if (!record || record.state !== "running") return;
     this.#finish(record, { state: "failed", error: `无法启动 claude：${errorText(error)}` });
   }
 
-  #onChildExit(run: string, code: number | null): void {
-    this.#children.delete(run);
+  /** 进程结束：句柄的 exit（带退出码）或接管轮询发现进程已不在（不带）。取消进行中时结局由取消流程定。 */
+  #onExit(run: string, code?: number | null): void {
     const record = this.#runs.find((entry) => entry.run === run);
     if (!record) return;
-    if (record.state !== "running") {
-      // 已取消：只补记退出码。
-      record.exitCode = code;
+    if (record.state !== "running" || this.#cancelling.has(run)) {
+      if (code !== undefined) record.exitCode = code;
       this.#persist();
       return;
     }
-    const outcome = this.#judge(record, code);
-    this.#finish(record, { ...outcome, exitCode: code });
+    const outcome = this.#judge(record, code ?? null);
+    this.#finish(record, { ...outcome, ...(code === undefined ? {} : { exitCode: code }) });
   }
 
-  /** 上次宿主退出时仍在跑的记录：进程还在（且确是同一个进程）就接着跟踪，否则按日志定结局。 */
+  /** 接管的进程身份连续核验不了：停止跟踪，不结束进程，结局记为失败并说明。 */
+  #onLost(run: string): void {
+    const record = this.#runs.find((entry) => entry.run === run);
+    if (!record || record.state !== "running") return;
+    this.#finish(record, {
+      state: "failed",
+      error: identityLostMessage(record.pid, "接管后连续几次"),
+    });
+  }
+
+  /**
+   * 上次宿主退出时仍在跑的记录。只有「记录里的创建时间已知 + 现查的已知 + 两者一致」才接着跟踪；
+   * PID 不在或已换人（原进程肯定已退出）按日志定结局；身份核验不了时绝不接管、绝不结束：
+   * 日志里已有 result 行（会话已结束）按日志定结局，否则记为失败并说明（进程可能还在，由用户处理）。
+   */
   async #reconcileResidual(record: DispatchRunRecord): Promise<void> {
     const pid = record.pid;
-    let alive = pid !== undefined && isPidAlive(pid);
-    if (alive && pid !== undefined) {
-      const created = await this.#processStartTime(pid).catch(() => null);
-      const started = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
-      if (created && !Number.isNaN(started))
-        alive = Math.abs(created.getTime() - started) <= START_TIME_TOLERANCE_MS;
-      // 拿不到创建时间：以日志里有无 result 行为准（有 result 说明会话已经结束，PID 被复用了）。
-      else alive = !logHasResult(this.#paths.stdoutLog(record.run));
-    }
-    if (alive && pid !== undefined) {
-      this.#watch(record, pid);
+    const identity =
+      pid === undefined
+        ? "gone"
+        : await checkProcessIdentity(this.#process, pid, record.processCreatedAt);
+    if (record.state !== "running") return; // 核验期间被取消。
+    if (identity === "same" && pid !== undefined && record.processCreatedAt !== undefined) {
+      this.#tracker.watch(record.run, pid, record.processCreatedAt);
       return;
     }
-    const outcome = this.#judge(record, null);
-    record.state = outcome.state;
     record.endedAt = this.#now().toISOString();
-    if (outcome.summary) record.summary = outcome.summary;
-    if (outcome.error) record.error = `宿主重启时会话已结束；${outcome.error}`;
+    if (identity === "unknown" && !logHasResult(this.#paths.stdoutLog(record.run))) {
+      record.state = "failed";
+      record.error = identityLostMessage(pid, "宿主重启后");
+    } else {
+      const outcome = this.#judge(record, null);
+      record.state = outcome.state;
+      if (outcome.summary) record.summary = outcome.summary;
+      if (outcome.error) record.error = `宿主重启时会话已结束；${outcome.error}`;
+    }
     this.#emit({ type: "run", run: toRunView(record) });
-  }
-
-  /** 接管不是本进程子进程的会话：轮询 PID，进程消失后按日志定结局。 */
-  #watch(record: DispatchRunRecord, pid: number): void {
-    const timer = setInterval(() => {
-      if (isPidAlive(pid)) return;
-      this.#stopWatching(record.run);
-      if (record.state !== "running") return;
-      this.#finish(record, this.#judge(record, null));
-    }, this.#pollIntervalMs);
-    timer.unref();
-    this.#watchers.set(record.run, timer);
-  }
-
-  #stopWatching(run: string): void {
-    const timer = this.#watchers.get(run);
-    if (timer) clearInterval(timer);
-    this.#watchers.delete(run);
   }
 }
 

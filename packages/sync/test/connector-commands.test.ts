@@ -203,7 +203,10 @@ describe("手机命令", () => {
         result: { dispatch: { run: "run-1", state: "queued" } },
       });
       const key = ack.ok ? ack.result.key : "";
-      expect(accepted.calls).toEqual([{ project: "ALPHA", key, requestedBy: "测试手机" }]);
+      // 命令 ID 作 requestId 交给派单层，派单按它持久幂等（重放、回执失败后重做都不会再起会话）。
+      expect(accepted.calls).toEqual([
+        { project: "ALPHA", key, requestedBy: "测试手机", requestId: sent.id },
+      ]);
       await connector.stop();
 
       const rejected = fakeDispatch({

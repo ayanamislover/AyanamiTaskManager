@@ -5,15 +5,27 @@ import { z } from "zod";
 import {
   APP_ID_PATTERN,
   COMMAND_ID_PATTERN,
+  COMMAND_MAX_AGE_MS,
   DEVICE_ID_PATTERN,
   PROJECT_CODE_PATTERN,
   ProjectHeadSchema,
   SPACE_ID_PATTERN,
+  commandTimestamp,
   newDeviceId,
 } from "@ayanami-task/sync-protocol";
 
-/** 已处理命令 ID 最多记这么多条（配合 ATM 的 op_id 幂等，足够挡住重放）。 */
-export const PROCESSED_COMMAND_LIMIT = 500;
+/**
+ * 已处理命令 ID 记多久：按命令 ID 里内嵌的发送时间算，超过命令有效期（7 天）再加 1 天余量才忘。
+ * 余量覆盖「ID 时间与 `at` 允许差 10 分钟」（validateCommand）和电脑时钟回拨；忘掉的命令再被重放，
+ * 一定会因 COMMAND_EXPIRED 被拒，不会执行。手机时钟快了（ID 时间在未来）的命令记得更久，不会提前忘。
+ */
+export const PROCESSED_RETENTION_MS = COMMAND_MAX_AGE_MS + 24 * 60 * 60 * 1000;
+/**
+ * 内存与配置文件的硬上限。保留期内正常使用远到不了；真被挤掉的旧 ID 再被重放时，
+ * 派单层的请求账本（agent-dispatch request-ledger，按命令 ID 持久幂等）兜底，不会再起会话，
+ * 建任务也有 ATM 的 op_id 幂等。
+ */
+export const PROCESSED_COMMAND_LIMIT = 2_000;
 export const DEFAULT_APP_ID = "atm";
 export const DEVICE_NAME_MAX = 64;
 
@@ -135,9 +147,23 @@ export function saveSyncConfig(dataDir: string, config: SyncConfig): void {
   }
 }
 
-/** 记下已处理的命令 ID，超出上限丢最旧的。 */
-export function rememberProcessed(config: SyncConfig, commandId: string): SyncConfig {
-  if (config.processed.includes(commandId)) return config;
-  const processed = [...config.processed, commandId].slice(-PROCESSED_COMMAND_LIMIT);
+/**
+ * 记下已处理的命令 ID，同时忘掉发送时间早于保留期的（见 {@link PROCESSED_RETENTION_MS}）；
+ * 仍超出硬上限时丢最早记下的。不是按条数滚动：旧窗口只留 500 条，7 天内再处理 500 条命令，
+ * 早先的 ID 就被挤掉，重放原密文会被当成新命令再执行一次。
+ */
+export function rememberProcessed(config: SyncConfig, commandId: string, now: Date): SyncConfig {
+  const cutoff = now.getTime() - PROCESSED_RETENTION_MS;
+  const kept = config.processed.filter((id) => {
+    const sentAt = commandTimestamp(id);
+    return sentAt === null || sentAt >= cutoff;
+  });
+  if (!kept.includes(commandId)) kept.push(commandId);
+  const processed = kept.slice(-PROCESSED_COMMAND_LIMIT);
+  if (
+    processed.length === config.processed.length &&
+    processed.every((id, index) => id === config.processed[index])
+  )
+    return config;
   return { ...config, processed };
 }

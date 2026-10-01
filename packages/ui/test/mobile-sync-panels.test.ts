@@ -238,6 +238,21 @@ describe("Claude 自动开工面板", () => {
     expect(markup.match(/>结束<\/button>/gu)).toHaveLength(1);
     expect(markup.match(/>复制会话 ID<\/button>/gu)).toHaveLength(2);
   });
+
+  it("结束派单失败（500 DISPATCH_CANCEL_FAILED）：原因进列表上方的错误条，成败都刷新列表", () => {
+    // 服务端没结束掉进程时派单仍在运行：「结束」按钮要还在（靠刷新拿到 running），原因要看得见。
+    const panelSource = source("dispatch-panel.tsx");
+    const cancel =
+      /const cancel = useMutation\(\{[\s\S]*?\n {2}\}\);/u.exec(panelSource)?.[0] ?? "";
+    expect(cancel).toContain("client.cancelDispatchRun(run)");
+    expect(cancel).toMatch(
+      /onSettled:[^\n]*invalidateQueries\(\{ queryKey: DISPATCH_STATUS_QUERY_KEY \}\)/u,
+    );
+    expect(cancel).not.toMatch(/onSuccess:[^\n]*invalidateQueries/u);
+    expect(panelSource).toContain(
+      '<MutationErrorAlert error={cancel.error} prefix="结束派单失败：" />',
+    );
+  });
 });
 
 describe("任务抽屉「交给 Claude」", () => {

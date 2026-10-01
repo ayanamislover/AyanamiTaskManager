@@ -20,6 +20,8 @@ export function dispatchPaths(dataDir: string) {
     root,
     config: join(root, "config.json"),
     runs: join(root, "runs.json"),
+    /** 派单请求账本：requestId（手机命令 ID）→ 那次请求的结局，见 request-ledger.ts。 */
+    requests: join(root, "requests.json"),
     logs: join(root, "logs"),
     stdoutLog: (run: string) => join(root, "logs", `${run}.jsonl`),
     stderrLog: (run: string) => join(root, "logs", `${run}.stderr.log`),

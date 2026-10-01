@@ -77,6 +77,11 @@ export function createDispatchSurface(request: ClientRequest) {
         `/api/v1/projects/${encodeURIComponent(projectCode)}/ui/work-items/${encodeURIComponent(taskKey)}/dispatch`,
         {},
       ),
+    /**
+     * 结束一次派单：服务端核验进程身份、确认进程树已结束后才回 `cancelled`。
+     * 没结束掉时抛 AyanamiClientError（500 DISPATCH_CANCEL_FAILED，retryable，带中文原因），
+     * 派单仍在运行、名额不释放，可以重试；进行中的取消再点一次拿到同一个结果。
+     */
     cancelDispatchRun: (run: string) =>
       request<DispatchRunView>(
         "POST",

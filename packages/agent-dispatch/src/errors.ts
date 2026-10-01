@@ -14,6 +14,13 @@ export const DISPATCH_ERROR_POLICIES = Object.freeze({
   DISPATCH_CLAUDE_NOT_LOGGED_IN: { httpStatus: 503, retryable: false },
   DISPATCH_RUN_NOT_FOUND: { httpStatus: 404, retryable: false },
   DISPATCH_RUN_NOT_ACTIVE: { httpStatus: 409, retryable: false },
+  /**
+   * 取消时没能结束会话进程（taskkill 失败），或确认不了那个 PID 还是不是这次的会话：
+   * 派单仍算运行中、并发名额不释放，可以重试。是宿主这边没办成，所以按 500 + retryable。
+   */
+  DISPATCH_CANCEL_FAILED: { httpStatus: 500, retryable: true },
+  /** 保留期内的手机派单请求数到了账本上限（见 request-ledger.ts），条目过期后自然恢复。 */
+  DISPATCH_TOO_MANY_REQUESTS: { httpStatus: 429, retryable: true },
 } as const);
 
 export type DispatchErrorCode = keyof typeof DISPATCH_ERROR_POLICIES;

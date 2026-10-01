@@ -1,6 +1,6 @@
 import { AtmError } from "@ayanami-task/errors";
 import { RelayError, SyncProtocolError } from "@ayanami-task/sync-protocol";
-import type { SyncLogger } from "./session.js";
+import type { SyncLogger } from "./logger.js";
 
 /**
  * 命令处理失败时写进 `ok:false` ack 的错误码。派单被拒时透传 agent-dispatch 的

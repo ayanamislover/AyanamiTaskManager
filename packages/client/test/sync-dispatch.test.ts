@@ -153,4 +153,30 @@ describe("Claude 派单 REST 客户端", () => {
       message: expect.stringContaining("claude auth login"),
     });
   });
+
+  it("结束派单失败（进程没结束掉）：保留 500、错误码、可重试与中文原因，界面据此提示重试", async () => {
+    const { client } = recordingClient([
+      {
+        status: 500,
+        body: {
+          error: {
+            code: "DISPATCH_CANCEL_FAILED",
+            message:
+              "没能结束 Claude 进程（PID 4321）：taskkill 退出码 1：拒绝访问。派单仍在进行，可以稍后再点「结束」重试",
+            retryable: true,
+            details: { run: "r1", pid: 4321 },
+          },
+        },
+      },
+    ]);
+    const failure = await client.cancelDispatchRun("r1").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AyanamiClientError);
+    // 派单错误码不在 ATM 错误码表里，客户端只保留状态码、可重试标记与原文消息（界面显示的就是它）。
+    expect(failure).toMatchObject({
+      status: 500,
+      retryable: true,
+      message: expect.stringContaining("派单仍在进行"),
+      details: { run: "r1", pid: 4321 },
+    });
+  });
 });

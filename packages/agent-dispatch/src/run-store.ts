@@ -31,6 +31,7 @@ const RunRecordSchema = z.object({
   cwd: z.string(),
   requestedBy: z.string().optional(),
   pid: z.number().int().positive().optional(),
+  processCreatedAt: z.string().optional(),
 });
 
 const RunsFileSchema = z.object({ v: z.literal(1), runs: z.array(z.unknown()) });
@@ -110,11 +111,12 @@ export function pruneLogs(paths: DispatchPaths, keep: ReadonlySet<string>, logge
   }
 }
 
-/** 对外视图：去掉 cwd / requestedBy / pid 这些只供本机跟踪进程用的字段。 */
+/** 对外视图：去掉 cwd / requestedBy / pid / processCreatedAt 这些只供本机跟踪进程用的字段。 */
 export function toRunView(record: DispatchRunRecord): DispatchRunView {
   const view = { ...record } as Partial<DispatchRunRecord>;
   delete view.cwd;
   delete view.requestedBy;
   delete view.pid;
+  delete view.processCreatedAt;
   return view as DispatchRunView;
 }

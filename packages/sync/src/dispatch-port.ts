@@ -24,8 +24,16 @@ export type DispatchPort = {
   /** head 里的派单摘要。 */
   summary(): { enabled: boolean; mode: SyncPermissionMode; running: number };
   runForTask(project: string, key: string): SyncDispatchRun | null;
-  /** 被拒时抛出带 `code`（SCREAMING_SNAKE）与中文 `message` 的错误。 */
-  enqueue(input: { project: string; key: string; requestedBy?: string }): Promise<SyncDispatchRun>;
+  /**
+   * 被拒时抛出带 `code`（SCREAMING_SNAKE）与中文 `message` 的错误。
+   * `requestId` 是手机命令 ID：派单层按它持久幂等，同一个 ID 再来只返回那次派单（或那次的拒绝），不再起会话。
+   */
+  enqueue(input: {
+    project: string;
+    key: string;
+    requestedBy?: string;
+    requestId?: string;
+  }): Promise<SyncDispatchRun>;
   /** 派单状态或配置变化；`project` 缺省表示影响全局（例如开关）。 */
   onChange(listener: (event: { project?: string }) => void): () => void;
 };
@@ -50,6 +58,7 @@ export type DispatcherLike = {
     key: string;
     origin: "mobile";
     requestedBy?: string;
+    requestId?: string;
   }): Promise<DispatchRunLike>;
   onChange(listener: (event: { type: string; run?: { project: string } }) => void): () => void;
 };
@@ -89,6 +98,7 @@ export function dispatchPortFrom(dispatcher: DispatcherLike): DispatchPort {
         key: input.key,
         origin: "mobile",
         ...(input.requestedBy === undefined ? {} : { requestedBy: input.requestedBy }),
+        ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
       });
       return runView(run);
     },

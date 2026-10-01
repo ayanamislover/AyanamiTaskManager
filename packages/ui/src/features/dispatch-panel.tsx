@@ -283,12 +283,12 @@ function DispatchRuns({
 }) {
   const queryClient = useQueryClient();
   const dialogs = useDialogs();
+  // 服务端确认进程已结束才回成功；没结束掉（DISPATCH_CANCEL_FAILED）时派单仍在运行、「结束」按钮还在，
+  // 原因显示在列表上方，用户可以再点一次。无论成败都刷新列表：期间会话可能已经自己结束了。
   const cancel = useMutation({
     mutationFn: (run: string) => client.cancelDispatchRun(run),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: DISPATCH_STATUS_QUERY_KEY });
-      notify("派单已结束");
-    },
+    onSuccess: () => notify("派单已结束"),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: DISPATCH_STATUS_QUERY_KEY }),
   });
   const confirmCancel = async (run: DispatchRunView) => {
     const confirmed = await dialogs.confirm({
@@ -314,7 +314,7 @@ function DispatchRuns({
         <h3>最近派单</h3>
         <span className="atm-badge">{runs.length}</span>
       </div>
-      <MutationErrorAlert error={cancel.error} />
+      <MutationErrorAlert error={cancel.error} prefix="结束派单失败：" />
       {ordered.length ? (
         <div className="atm-list atm-scroll-list atm-dispatch-run-list">
           {ordered.map((run) => (

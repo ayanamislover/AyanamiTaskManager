@@ -36,7 +36,15 @@ export {
   HOST_SESSION_ENV,
   launchCommand,
 } from "./launch.js";
+export { type KillResult } from "./process.js";
+export { PROCESS_IDENTITY_TOLERANCE_MS } from "./process-identity.js";
 export { renderDispatchPrompt, type DispatchPromptInput } from "./prompt.js";
+export {
+  DISPATCH_REQUEST_ID_PATTERN,
+  DISPATCH_REQUEST_LIMIT,
+  DISPATCH_REQUEST_MAX_AGE_MS,
+  DISPATCH_REQUEST_RETENTION_MS,
+} from "./request-ledger.js";
 export { findResultLine, isAuthFailure, judgeOutcome } from "./result.js";
 export { DISPATCH_HISTORY_LIMIT } from "./run-store.js";
 export type {

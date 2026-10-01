@@ -42,6 +42,8 @@ function sendError(
 /**
  * 派单路由总是注册（这样权限守卫能逐条核对它们）；宿主没有注入控制器时统一 404 DISPATCH_UNAVAILABLE。
  * 派单错误按控制器给的状态码与错误码原样回给调用方，其余错误交给全局错误处理。
+ * 5xx 的派单错误也走这里：例如取消时没能结束会话进程（500 DISPATCH_CANCEL_FAILED，retryable），
+ * 中文原因要原样到界面，不能被全局处理换成笼统的 INTERNAL_ERROR。
  */
 export function registerDispatchRoutes(
   app: FastifyInstance,

@@ -1,5 +1,6 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import type { DispatchConfig } from "./config.js";
+import type { KillResult } from "./process.js";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -59,6 +60,11 @@ export type DispatchRunRecord = DispatchRunView & {
   cwd: string;
   requestedBy?: string;
   pid?: number;
+  /**
+   * spawn 后立刻向 OS 查到的进程创建时间（ISO）；查不到就没有这个字段（身份未知）。
+   * 宿主重启后只有它与现查的创建时间一致才接管这个 PID，见 process-identity.ts。
+   */
+  processCreatedAt?: string;
 };
 
 export type DispatchClaudeStatus = {
@@ -98,6 +104,11 @@ export type EnqueueInput = {
   origin: DispatchOrigin;
   /** 谁发起的（例如手机设备名），只进历史与提示词的「来源」一行。 */
   requestedBy?: string;
+  /**
+   * 幂等键：手机命令传命令 ID，桌面点按不传。同一个 requestId 只会建一次派单——再来时直接返回
+   * 那次派单的当前视图（或原样拒绝），绝不再起会话；账本条目在起进程之前落盘，宿主重启后仍有效。
+   */
+  requestId?: string;
 };
 
 export type AgentDispatcherOptions = {
@@ -113,6 +124,10 @@ export type AgentDispatcherOptions = {
   pollIntervalMs?: number;
   /** 查询进程创建时间，用来识别 Windows PID 复用；拿不到返回 null。 */
   processStartTime?: (pid: number) => Promise<Date | null>;
+  /** 测试注入用：PID 是否还在；默认 `process.kill(pid, 0)`。 */
+  isPidAlive?: (pid: number) => boolean;
+  /** 测试注入用：结束整棵进程树；默认 taskkill /T /F（POSIX 发 SIGKILL 给进程组）。 */
+  killProcessTree?: (pid: number) => Promise<KillResult>;
   /** 子进程环境的来源，默认 process.env。 */
   baseEnv?: NodeJS.ProcessEnv;
   /** `claude auth status` 的超时，默认 5 秒；超时按「没探出来」处理。 */

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { DispatchError } from "@ayanami-task/agent-dispatch";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { AtmError } from "@ayanami-task/errors";
 import { buildAyanamiServer, type DispatchController } from "../src/index.js";
@@ -170,6 +171,25 @@ describe("派单路由", () => {
       });
       expect(typed.statusCode).toBe(503);
       expect(typed.json().error).toMatchObject({ code: "PROJECT_DB_UNAVAILABLE" });
+
+      // 取消时没能结束会话进程：500 + retryable，中文原因原样给界面；派单仍在运行，用户可以重试。
+      controller.fail = new DispatchError(
+        "DISPATCH_CANCEL_FAILED",
+        "没能结束 Claude 进程（PID 4321）：taskkill 退出码 1：拒绝访问。派单仍在进行，可以稍后再点「结束」重试",
+        { run: "mg7x3k2a-1a2b3c4d", pid: 4321 },
+      );
+      const cancelFailed = await app.inject({
+        method: "POST",
+        url: "/api/v1/dispatch/runs/mg7x3k2a-1a2b3c4d/cancel",
+        headers: bearer(USER),
+      });
+      expect(cancelFailed.statusCode).toBe(500);
+      expect(cancelFailed.json().error).toMatchObject({
+        code: "DISPATCH_CANCEL_FAILED",
+        message: expect.stringContaining("派单仍在进行"),
+        retryable: true,
+        details: { run: "mg7x3k2a-1a2b3c4d", pid: 4321 },
+      });
 
       // 不是 DISPATCH_ 前缀的「长得像」错误不会被当成派单错误透出。
       controller.fail = new FakeDispatchError("SOMETHING_ELSE", 418, "内部细节");

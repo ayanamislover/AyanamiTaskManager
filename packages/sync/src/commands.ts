@@ -64,9 +64,16 @@ async function firstActiveObjective(service: AyanamiTaskService, code: string): 
   return (await service.ensurePlanningRoot(code)).objectiveId;
 }
 
+/**
+ * 派单。命令 ID 作 `requestId` 交给派单层：它按这个 ID 持久幂等（账本在起进程之前落盘，保留超过命令
+ * 有效期），同一条命令无论被中继重放、还是回执写失败后重做，拿到的都是当初那次派单（或当初的拒绝），
+ * 绝不会再起一次会话——哪怕那次已经结束、任务又能派了。用户想再派一次，手机会发一条新 ID 的命令。
+ * 「任务最近一次派单是不是 queued/running」不是防重放手段（结束了就挡不住），这里只在派单层说
+ * 「已经在派单中」时用它报告正在跑的那一次，与桌面上先点过的派单对得上。
+ */
 async function dispatchOutcome(
   context: CommandContext,
-  input: { project: string; key: string; requestedBy: string },
+  input: { project: string; key: string; requestedBy: string; requestId: string },
 ): Promise<Pick<AckResult, "dispatch" | "dispatchError">> {
   if (!context.dispatch)
     return {
@@ -75,14 +82,15 @@ async function dispatchOutcome(
         message: "这台电脑没有启用 Claude 派单",
       },
     };
-  // 同一条命令重放时，已经排上的派单直接报告，不再排第二次。
-  const existing = context.dispatch.runForTask(input.project, input.key);
-  if (existing && (existing.state === "queued" || existing.state === "running"))
-    return { dispatch: { run: existing.run, state: existing.state } };
   try {
     const run = await context.dispatch.enqueue(input);
     return { dispatch: { run: run.run, state: run.state } };
   } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === "DISPATCH_ALREADY_ACTIVE") {
+      const existing = context.dispatch.runForTask(input.project, input.key);
+      if (existing && (existing.state === "queued" || existing.state === "running"))
+        return { dispatch: { run: existing.run, state: existing.state } };
+    }
     return { dispatchError: ackError(error) };
   }
 }
@@ -130,6 +138,7 @@ async function createTask(
       project: project.code,
       key,
       requestedBy: doc.device.name,
+      requestId: doc.id,
     })),
   };
 }
@@ -150,6 +159,7 @@ async function dispatchTask(
     project: project.code,
     key: doc.body.key,
     requestedBy: doc.device.name,
+    requestId: doc.id,
   });
   if (outcome.dispatchError) {
     // 派单被拒就是这条命令失败，错误码照实透传（例如 DISPATCH_DISABLED）。

@@ -55,13 +55,20 @@
 - `{key}` 满足 `^[A-Za-z0-9_./-]{1,200}$`，路径里斜杠必须编码成 `%2F`。
 - `DocumentMeta = {key, schema_version, revision, updated_at, updated_by_device, size_bytes}`。
 - `Change = {seq, key, revision, op: "put"|"delete", device_id, at}`。
-- 同一个键的修订号**跨删除单调递增**（防 ABA）；新建时客户端以响应里的 `revision` 为准。
+- 同一个键的修订号**跨删除单调递增**（防 ABA）：删掉再建后，以前的任何修订号做条件写都是 409。
+  客户端只能把修订号当**不透明的单调值**：条件写原样回传上次拿到的值，409 时取 `current.revision`（没有则 0）重试；
+  新建时以响应里的 `revision` 为准，不假设新建为 1、重建为删除前 + 2（`atm-relay` 新建取应用的修订号地板 + 1，见 §10）。
 - 单文档 `data` 序列化后 ≤ 256 KiB（本协议自己把每片控制在 160 KiB 以内）。
 - `wait`（秒，≤ 25）是 `atm-relay` 的扩展：没有新变更时挂起到有变更或超时。
   AyanamiCloud 忽略这个参数、立即返回，客户端据 `GET /v1/apps/{app}` 里有没有 `relay.long_poll`
   决定用长轮询还是定时轮询（电脑 4 s、手机前台 3 s，后台不轮询）。
 - 首次同步（没有游标）：先沿 `changes` 从空游标翻到 `has_more=false` 拿到头部游标，
   再 `documents?prefix=atm1/<space>/` 全量列一遍。410 时同样重来一次。
+- **中继不可信，错误正文不外显**：中继看得到 `Authorization`，把正文原样展示就等于让它把 token 反射出来。
+  客户端只认本地白名单里的 `error.code`（每个码绑定唯一合法的 HTTP 状态，其余一律记为 `RELAY_ERROR`），
+  `message` 换成本地固定中文；`retry_after` 只认 JSON 数字、`Retry-After` 头只认纯数字（上限 600 秒），
+  409 的 `current` 只取修订号等数字字段。中继返回的原文不进同步状态、日志、「测试连接」结果或手机界面；
+  电脑侧连接器写状态与日志前另把 token、空间 secret 的字面量换成 `[已隐藏]`（纵深防御，不替代白名单）。
 
 ## 4. 空间、密钥与加密
 
@@ -193,6 +200,18 @@ type TaskCard = {
 `title` 1–200 字符，`description` ≤ 8000 字符，`priority ∈ LOW|NORMAL|HIGH|CRITICAL`（默认 NORMAL）。
 命令 `at` 早于 7 天的直接拒绝（`COMMAND_EXPIRED`）。
 
+防重放（中继可以把旧密文原样放回去）分两层，都以命令 ID 为键：
+
+- **已处理集合**（`sync/config.json` 的 `processed`）：处理完（ack 写成功）就记下，按命令 ID 里内嵌的发送时间
+  保留到 7 天有效期之后再加 1 天，不按条数滚动；硬上限 2000 条（`PROCESSED_COMMAND_LIMIT`），只作内存边界。
+  在集合里的命令再出现只补删 `cmd`，不执行、不重写 ack。忘掉的命令再被重放必然已过期。
+- **派单请求账本**（派单层的 `dispatch/requests.json`，见 §8）：带派单的命令把命令 ID 作 `requestId` 交给派单层，
+  它持久记下「命令 ID → 那次派单（或那次被拒的原因）」。同一条命令无论被重放（已处理集合被挤爆时）、还是 ack
+  写失败后整条重做，拿到的都是当初那次派单（`dispatch.state` 可能已是 failed / cancelled）或当初的拒绝，
+  **绝不会再起一次 Claude**——哪怕那次已经结束、任务又能派了。用户想再派一次，手机会发一条新 ID 的命令。
+  建任务那一半由 ATM 的 `op_id`（`mobile:<cmdId>`）保证只建一个。
+- 任务已经在派单中（例如桌面上刚点过）时，`dispatch` 报告正在跑的那一次，不算失败。
+
 ## 7. 电脑侧连接器（packages/sync）
 
 - 运行在 daemon 所在进程（当前是 Electron 主进程），直接调用 `AyanamiTaskService`，不走 HTTP。
@@ -225,7 +244,7 @@ type TaskCard = {
 | GET  | `/api/v1/dispatch/status`                            | 两种令牌  | `{enabled, permissionMode, maxConcurrent, model, effort, claude:{found, path, version?}, runs: DispatchRunView[]}`                                                       |
 | PUT  | `/api/v1/dispatch/config`                            | USER_ONLY | `{enabled?, permissionMode?, maxConcurrent?, model?, effort?}`                                                                                                           |
 | POST | `/api/v1/projects/:code/ui/work-items/:key/dispatch` | USER_ONLY | 桌面端「交给 Claude」按钮                                                                                                                                                |
-| POST | `/api/v1/dispatch/runs/:run/cancel`                  | USER_ONLY | 结束一次派单                                                                                                                                                             |
+| POST | `/api/v1/dispatch/runs/:run/cancel`                  | USER_ONLY | 结束一次派单：核验进程身份、确认进程树已结束才回 `cancelled`；没结束掉回 500 `DISPATCH_CANCEL_FAILED`（retryable，派单仍运行、名额不释放）                               |
 
 ## 8. Claude 自动派单（packages/agent-dispatch）
 
@@ -245,7 +264,26 @@ type TaskCard = {
   用 `atm_task_patch edit` 改写描述、补齐验收标准，必要时拆子任务 → 开始实现，按 ATM 规则写进度 →
   需要用户决定时置为 WAITING_USER 并写清问题 → `atm_end` 交接。
 - 进程 `detached`、`windowsHide`，stdout 逐行写 `<数据目录>/dispatch/logs/<run>.jsonl`；
-  历史（最近 50 次）写 `<数据目录>/dispatch/runs.json`。宿主退出不杀会话；重启后把残留的 running 按 PID 存活与否修正。
+  历史（最近 50 次）写 `<数据目录>/dispatch/runs.json`。宿主退出不杀会话。
+- 请求账本 `<数据目录>/dispatch/requests.json`：`{v:1, requests:[{id, at, run:<派单快照>} | {id, at, rejected:{code, message}}]}`。
+  `enqueue` 带 `requestId`（手机命令 ID；桌面点按不带）时先查账本，记过的直接返回那次派单的当前视图
+  （还在历史里用历史，已被裁剪用账本里的快照，快照随派单状态变化刷新）或原样拒绝，绝不再起会话；
+  新请求的条目在排队、起进程**之前**原子写盘，写不下去就不派。业务拒绝（`DISPATCH_*`）也记下，
+  免得之后开了派单、任务又能派时同一条旧命令补起一次会话。条目从记下起保留 9 天（命令有效期 7 天 +
+  手机时钟最多快 1 天 + 1 天余量），超期裁剪；保留期内最多 2000 条，满了拒收新的手机派单
+  （429 `DISPATCH_TOO_MANY_REQUESTS`）而不是挤掉旧条目。
+- 进程身份：spawn 后立刻向系统查这个 PID 的创建时间存进历史（`processCreatedAt`，查不到就不存 = 身份未知）。
+  本宿主起的会话靠 ChildProcess 句柄（exit 事件）判断存活——句柄在，系统不会把 PID 给别的进程。
+  宿主重启后，只有「存的创建时间已知 + 现查的已知 + 两者相差 ≤ 1 秒」才接管；PID 不在或创建时间对不上
+  （PID 被复用，原进程必然已退出）按日志定结局；身份核验不了（没存或查不到）时不接管、不结束：
+  日志里已有 result 行按日志定结局，否则记为失败——「宿主重启后无法确认 Claude 进程身份（PID n），已停止跟踪，
+  没有结束该进程；如仍在运行可在任务管理器里手动结束」。日志里有没有 result 行不能证明 PID 归属。
+  接管后每次轮询都重核身份：对不上按已退出处理；连续 3 次查不到同样停止跟踪、不结束进程。
+- 取消：排队中的直接取消；运行中的先核验身份（本宿主起的看句柄，接管的重查创建时间）再
+  `taskkill /PID <pid> /T /F`（POSIX 向进程组发 SIGKILL）。taskkill 成功或退出码 128（进程已不存在）才记为
+  `cancelled` 并释放并发名额；其它失败、或身份核验不了，派单保持 running、名额不释放，抛 500
+  `DISPATCH_CANCEL_FAILED`（retryable，带中文原因），可以重试。核验发现原进程早已退出时不动任何进程、按日志定结局。
+  取消进行中再点取消拿到同一个结果。
 - 会话 ID 固定且会持久化：事后可以在电脑上 `claude -r <session-id>` 接着和这个会话对话。
 - 派单状态随快照出现在手机任务卡片上；任务本身的进度来自 Claude 写进 ATM 的 progress。
 
@@ -273,7 +311,10 @@ node atm-relay.mjs token list | token revoke <id>
 
 - 首次启动自动建 app `atm`，并把第一枚 token 写进 `<data>/initial-token.txt`（0600），日志里只打印这个路径。
 - 服务端只存 token 的 SHA-256；文档与变更存 `node:sqlite`。变更保留 30 天或 10 000 条，超出后游标 410。
-- 限额：请求体 300 KiB、每 app 5000 个文档、200 MiB；每 token 20 req/s；长轮询每 token 4 个、全局 256 个。
+- 限额：请求体 300 KiB、每 app 5000 个文档、200 MiB；每 token 50 req/s；长轮询每 token 4 个、全局 256 个。
+- 磁盘占用有界：每个 app 落盘的只有现存文档、裁剪后的变更流和一行**修订号地板**（该 app 删除用过的最大修订号）。
+  新建的键取「地板 + 1」，所以删掉再建的键修订号必然大于以前的全部修订号，不必为删掉的键永久留墓碑；
+  反复「建新键 → 删掉」（命令、回执的正常用法，或一枚泄露的 token）不会让库无界增长。
 - 建议放在 Caddy / Nginx / Cloudflare Tunnel 后面提供 HTTPS；也可以直接给证书文件。
 - `docker build -f apps/relay/Dockerfile .` 得到只含 Node 运行时和单文件的镜像。
 
@@ -291,4 +332,5 @@ ATM 仓库不内置这个地址，也不引用它。
 | 拿到手机的人                     | 用已配对手机看任务、发任务（和本人一样）            | 在电脑上做白名单以外的任何操作                                      |
 | 本机其它 Agent                   | 读 `/api/v1/sync/status`、`/api/v1/dispatch/status` | 拿配对码、token、secret；改同步或派单配置（USER_ONLY）              |
 
-重放：命令 ID 唯一且作为幂等键，重放同一条命令不会建第二个任务；过期命令被拒。
+重放：命令 ID 唯一且作为幂等键，重放同一条命令不会建第二个任务（`op_id`），也不会再起一次 Claude
+（派单请求账本，即使那次派单已结束、任务又能派）；过期命令被拒。详见 §6。

@@ -21,13 +21,10 @@ import { executeCommand, isRetryableCommandError, validateCommand } from "./comm
 import { rememberProcessed, type PublishedProject, type SyncConfig } from "./config.js";
 import type { DispatchPort } from "./dispatch-port.js";
 import { ackError, describeError } from "./errors.js";
+import type { SyncLogger } from "./logger.js";
 import { buildHeadBody, buildProjectSnapshot, clipText, projectHeadOf } from "./snapshot.js";
 
-export type SyncLogger = {
-  info(message: string, meta?: Record<string, unknown>): void;
-  warn(message: string, meta?: Record<string, unknown>): void;
-  error(message: string, meta?: Record<string, unknown>): void;
-};
+export type { SyncLogger };
 
 /** 状态接口里的「已配对设备」：设备自己写的在线状态文档去掉版本号 `v`。 */
 export type DeviceView = Omit<DeviceDoc, "v">;
@@ -294,7 +291,7 @@ export class SyncSession {
   async #processCommand(commandId: string, attempts: number): Promise<boolean> {
     const host = this.#host;
     if (host.config().processed.includes(commandId)) {
-      // 回执已经写过，上次删命令没成功：只补删。
+      // 回执已经写过（上次删命令没成功，或中继把旧密文原样放了回来）：只补删，不再执行。
       await this.store.deleteCommand(commandId);
       return true;
     }
@@ -331,10 +328,15 @@ export class SyncSession {
     return true;
   }
 
-  /** 先写回执、记下已处理，再删命令：任何一步断掉，重来都不会重复执行。 */
+  /**
+   * 先写回执、记下已处理，再删命令。回执写失败时命令留在待处理里、稍后整条重做：建任务靠 ATM 的
+   * op_id（`mobile:<命令 ID>`）拿回同一个任务，派单靠派单层以命令 ID 为键的请求账本拿回同一次派单
+   * （见 commands.ts），所以重做只会补写回执，不会再起一次 Claude。
+   */
   async #finish(commandId: string, ack: AckDoc): Promise<void> {
     await this.store.writeAck(ack);
-    this.#host.commit(this, (config) => rememberProcessed(config, commandId));
+    const now = this.#host.now();
+    this.#host.commit(this, (config) => rememberProcessed(config, commandId, now));
     await this.store.deleteCommand(commandId);
   }
 
