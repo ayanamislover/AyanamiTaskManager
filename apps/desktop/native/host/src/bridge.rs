@@ -271,6 +271,59 @@ mod tests {
         );
     }
 
+    /// §9 负例「超大消息」：合法 JSON、白名单方法、类型正确的参数，只因体积超限就被拒。
+    /// 上面那条用的是非 JSON 的填充，去掉体积检查也会以 Malformed 被拒，证明不了上限本身。
+    #[test]
+    fn oversized_but_well_formed_messages_are_rejected() {
+        let message = |padding: usize| {
+            format!(
+                r#"{{"id":1,"method":"runtimeRequest","args":[{{"method":"PUT","path":"/api/v1/settings/x","body":"{}"}}]}}"#,
+                "x".repeat(padding)
+            )
+        };
+        let overhead = message(0).len();
+        let at_limit = message(MAX_MESSAGE_BYTES - overhead);
+        assert_eq!(at_limit.len(), MAX_MESSAGE_BYTES);
+        assert!(parse(SOURCE, &at_limit).is_ok());
+        let over = message(MAX_MESSAGE_BYTES - overhead + 1);
+        assert_eq!(parse(SOURCE, &over), Err(Rejected::TooLarge));
+        // 体积先于来源以外的一切检查：不解析超大消息。
+        assert_eq!(
+            parse(SOURCE, &message(8 * MAX_MESSAGE_BYTES)),
+            Err(Rejected::TooLarge)
+        );
+    }
+
+    /// §9 负例「伪造 origin」：只认 WebView2 报告的 Source，消息体里自报的来源一概不看；
+    /// frame 与非顶层文档能报出来的各种 Source 都不等于入口文档。
+    #[test]
+    fn forged_origins_are_rejected_whatever_the_payload_claims() {
+        let body = r#"{"id":1,"origin":"https://atm.localhost","source":"https://atm.localhost/index.html","method":"setAutoLaunch","args":[true]}"#;
+        assert!(parse(SOURCE, body).is_ok());
+        for forged in [
+            "",
+            "null",
+            "about:blank",
+            "about:srcdoc",
+            "data:text/html,<script>1</script>",
+            "blob:https://atm.localhost/0b1c2d3e-0000-4000-8000-000000000000",
+            "https://atm.localhost",
+            "https://atm.localhost/",
+            "https://atm.localhost/index.html?x=1",
+            "https://atm.localhost/assets/index.html",
+            "https://atm.localhost./index.html",
+            "https://ATM.LOCALHOST/index.html",
+            "https://atm.localhost.evil.example/index.html",
+            "https://evil.example/https://atm.localhost/index.html",
+            "https://atm.localhost:443/index.html",
+            "https://atm.localhost@evil.example/index.html",
+            "atm://localhost/index.html",
+            "file:///C:/renderer/index.html",
+        ] {
+            assert_eq!(parse(forged, body), Err(Rejected::Source), "{forged}");
+        }
+    }
+
     #[test]
     fn responses_cannot_break_out_of_the_script() {
         let script = resolve_script(&ok(1, json!("\"); alert(1); (\" \u{2028}")));

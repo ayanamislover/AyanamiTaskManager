@@ -30,7 +30,7 @@ export function releaseRustEnv(
     `--remap-path-prefix=${cargoHome(base)}=/cargo`,
     `--remap-path-prefix=${resolve(root)}=/atm`,
   ];
-  const env = { ...base, CARGO_ENCODED_RUSTFLAGS: flags.join(separator) };
+  const env: NodeJS.ProcessEnv = { ...base, CARGO_ENCODED_RUSTFLAGS: flags.join(separator) };
   delete env.CARGO_TARGET_DIR;
   return env;
 }
