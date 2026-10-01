@@ -166,20 +166,21 @@ type TaskCard = {
   progress: number;
   parent?: string;
   updatedAt: string;
-  claim?: { agent: string; since?: string };
-  waiting?: string;
-  blocked?: string;
-  // 以下只给未关闭任务
-  desc?: string; // ≤ 2000 字符
-  acceptance?: string[]; // ≤ 12 条
-  checklist?: { done: number; total: number };
-  recent?: Array<{ at: string; summary: string; percent?: number }>; // ≤ 3 条
+  waiting?: string; // 只在 WAITING_USER / WAITING_AGENT 时
+  blocked?: string; // 只在 BLOCKED 时
+  // 打开和关闭的任务都带（有派单记录时）：关闭卡靠它让发送卡片显示「Claude 已完成」
   dispatch?: {
     state: "queued" | "running" | "succeeded" | "failed" | "cancelled";
     at: string;
     run: string;
     error?: string; // 失败时给用户看的一句原因，≤ 200 字
   };
+  // 以下只给未关闭任务
+  claim?: { agent: string; since?: string };
+  desc?: string; // ≤ 2000 字符
+  acceptance?: string[]; // ≤ 12 条
+  checklist?: { done: number; total: number };
+  recent?: Array<{ at: string; summary: string; percent?: number }>; // ≤ 3 条
 };
 ```
 

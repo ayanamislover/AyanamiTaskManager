@@ -28,6 +28,7 @@ import {
   isActiveRun,
   modelInput,
   PERMISSION_MODES,
+  plainPreview,
   resumeCommand,
   runWindow,
   shortSessionId,
@@ -344,12 +345,15 @@ function DispatchRuns({
                 <div className="atm-row-sub">
                   来自{dispatchOriginLabels[run.origin] ?? run.origin} · {runWindow(run)}
                 </div>
-                {/* 失败时 Claude 的结果原文常和错误原因是同一句（旧记录尤其如此），只留红色那一行。 */}
+                {/* 失败时 Claude 的结果原文常和错误原因是同一句（旧记录尤其如此），只留红色那一行。
+                    两者都可能是 Markdown 原文，按纯文本预览显示，不露出 ** 和反引号。 */}
                 {run.summary?.result && run.summary.result.trim() !== run.error?.trim() ? (
-                  <div className="atm-row-sub atm-dispatch-summary">{run.summary.result}</div>
+                  <div className="atm-row-sub atm-dispatch-summary">
+                    {plainPreview(run.summary.result)}
+                  </div>
                 ) : null}
                 {run.error ? (
-                  <div className="atm-row-sub atm-dispatch-error">{run.error}</div>
+                  <div className="atm-row-sub atm-dispatch-error">{plainPreview(run.error)}</div>
                 ) : null}
                 <div className="atm-row-sub" title={resumeCommand(run.sessionId)}>
                   会话 <code>{shortSessionId(run.sessionId)}</code> · 可用 claude -r 接着对话

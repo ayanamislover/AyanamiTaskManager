@@ -282,6 +282,35 @@ describe("Claude 自动开工面板", () => {
     expect(both).toContain('atm-dispatch-error">Claude Code 未登录或登录已过期<');
   });
 
+  it("结果原文是 Markdown 时列表里显示纯文本，不露出 ** 和反引号", () => {
+    const markup = panel(
+      dispatchStatus({
+        runs: [
+          {
+            run: "r7",
+            project: "DEMO",
+            key: "DEMO-T-0001",
+            title: "Add a unit test for greet",
+            origin: "mobile",
+            state: "succeeded",
+            sessionId: "dc55e067-ac21",
+            createdAt: "2026-10-01T12:36:49.000Z",
+            endedAt: "2026-10-01T12:37:45.000Z",
+            summary: {
+              numTurns: 13,
+              durationMs: 53_000,
+              totalCostUsd: 0.44,
+              result: "**测试内容：** 新文件 `greet.test.js` 还没提交。",
+            },
+          },
+        ],
+      }),
+    );
+    expect(markup).toContain('atm-dispatch-summary">测试内容： 新文件 greet.test.js 还没提交。<');
+    expect(markup).not.toContain("**");
+    expect(markup).not.toContain("`");
+  });
+
   it("结束派单失败（500 DISPATCH_CANCEL_FAILED）：原因进列表上方的错误条，成败都刷新列表", () => {
     // 服务端没结束掉进程时派单仍在运行：「结束」按钮要还在（靠刷新拿到 running），原因要看得见。
     const panelSource = source("dispatch-panel.tsx");
