@@ -16,7 +16,13 @@
     border-color var(--atm-duration-hover) var(--atm-ease-hover),
     box-shadow var(--atm-duration-hover) var(--atm-ease-hover);
 }
-.select.field-shell[data-open="true"] {
+/*
+ * 聚焦换主色边：controls.css 的 .field-shell:has(:focus-visible) 也写了，但本文件在它之后引入，
+ * 上面 .select.field-shell 的 border 简写（同为 (0,2,0)）会把边框色重置回静止色——
+ * 下拉聚焦时就只有外圈、没有主色边，和旁边输入框对不上。这里按 (0,3,0) 再点一次。
+ */
+.select.field-shell[data-open="true"],
+.select.field-shell:has(:focus-visible) {
   border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
 }
 .select-trigger {
@@ -27,11 +33,14 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
-  border: 0;
   border-radius: inherit;
   background: transparent;
   font-size: 16px;
   text-align: left;
+}
+/* 边框和焦点环由外壳画：清零触发器自己的边框、关掉它的环，都只在挂了 field-shell 的外壳里做。 */
+.field-shell > .select-trigger {
+  border: 0;
 }
 .field-shell > .select-trigger:is(:hover, :focus, :focus-visible):not(:disabled) {
   outline: none;

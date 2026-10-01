@@ -349,9 +349,24 @@ button.card:active {
   color: var(--atm-text-faint);
   opacity: 0.8;
 }
+/*
+ * 高对比度出口：forced-colors 下外壳那圈会被系统换色，未必看得出焦点落在哪，
+ * 把壳里控件自己那一环放回来——宁可双框，也不能没有焦点指示。
+ * 画在控件内侧（-3px），不和外壳的边框、外圈叠成一团。
+ */
 @media (forced-colors: active) {
   .field-shell :is(input, textarea):focus-visible {
     outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+  /*
+   * 自绘下拉只点名触发器：壳里别的按钮（弹层选项等）本来就保留自己的环，不能泛化成 button。
+   * 关环的 overlays.css `.field-shell > .select-trigger:is(:hover, :focus, :focus-visible):not(:disabled)`
+   * 是 (0,4,0)，且在本文件之后引入；这里多点名一个 .select 到 (0,5,0)，不靠文件顺序也压得住。
+   */
+  .select.field-shell > .select-trigger:focus-visible:not(:disabled) {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
   }
 }
 
