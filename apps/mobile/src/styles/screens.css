@@ -421,3 +421,11 @@
 :root:not([data-theme="dark"]) .project-bar > i:not([data-segment="empty"]) {
   background: color-mix(in srgb, var(--segment) 78%, #fff);
 }
+/* 高对比度：分段条只靠底色画，系统去色后整条消失。与桌面端 .atm-progress-strip-bar 同法：
+ * 保留各段原色（forced-color-adjust: none，旁边的数字已经说明各段含义）并描一圈系统色边。 */
+@media (forced-colors: active) {
+  .project-bar > i {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}

@@ -369,6 +369,37 @@ button.card:active {
     outline-offset: -3px;
   }
 }
+/*
+ * 高对比度下的状态与边界（与桌面端 accessibility.css、features-primary.css 同法）：
+ * forced-colors 会抹掉非系统色的底、渐变和投影。按钮、徽章原来只靠底色成面，补一圈系统色边；
+ * 主按钮禁用时 opacity 仍是 1，只靠换底色区分，改用 GrayText；
+ * 进度条填充换成 Highlight，状态灯保留原色（forced-color-adjust: none）并描一圈边——
+ * 灯色是状态本身，旁边都有文字说明，局部保留不影响其余部分跟随系统配色。
+ */
+@media (forced-colors: active) {
+  .button,
+  .icon-button,
+  .badge {
+    border: 1px solid ButtonText;
+  }
+  /* 第二个选择器 (0,3,0) 压住上面 .button.primary:disabled 的字色。 */
+  .button:disabled,
+  .button.primary:disabled {
+    border-color: GrayText;
+    color: GrayText;
+  }
+  .progress {
+    border: 1px solid CanvasText;
+  }
+  .progress > span {
+    background: Highlight;
+  }
+  .status-dot,
+  .dispatch-dot {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}
 
 .inline-error {
   display: flex;

@@ -239,6 +239,41 @@
   outline-offset: -2px;
 }
 
+/*
+ * 高对比度：分段的选中项、开关的开与关原来只靠白底、渐变和投影区分，forced-colors 下全被抹掉，
+ * 两态看起来一模一样。选中项改用系统高亮色；开关轨道描一圈系统色边、滑块填实，
+ * 开启时轨道填 Highlight、滑块换 HighlightText。轨道多了 1px 边，滑块的定位跟着内收 1px，仍然居中。
+ */
+@media (forced-colors: active) {
+  .segmented {
+    border: 1px solid ButtonText;
+  }
+  /* forced-color-adjust: none 只用在这一颗选中项上：不加的话浏览器会在字后面垫一块 Canvas 色背板，
+   * HighlightText 的字压在白板上就成了一块白（实测截图里看得到）。颜色全部写成系统色，仍跟随用户主题。 */
+  .segmented-option[aria-checked="true"] {
+    color: HighlightText;
+    background: Highlight;
+    box-shadow: none;
+    forced-color-adjust: none;
+  }
+  .switch-track {
+    border: 1px solid CanvasText;
+    background: Canvas;
+  }
+  .switch-thumb {
+    top: 2px;
+    left: 2px;
+    background: CanvasText;
+  }
+  .switch-row[aria-checked="true"] .switch-track {
+    border-color: Highlight;
+    background: Highlight;
+  }
+  .switch-row[aria-checked="true"] .switch-thumb {
+    background: HighlightText;
+  }
+}
+
 /* ─── 底部确认框 ─── */
 .sheet-backdrop {
   position: fixed;

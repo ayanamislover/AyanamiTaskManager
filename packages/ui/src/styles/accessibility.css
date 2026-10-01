@@ -139,4 +139,29 @@
   .atm-badge {
     border: 1px solid ButtonText;
   }
+
+  /*
+   * 选中 / 当前项原来靠白底、柔色底、左侧色条（inset 投影）区分，高对比度下全被抹掉，
+   * 和未选中的看起来一样。改用系统高亮色，里面的字和图标一并换成 HighlightText。
+   * forced-color-adjust: none 只用在这几个选中项上：不加的话浏览器会在字后面垫一块 Canvas 色背板，
+   * HighlightText 的字压在白板上就成了一块白；关掉后颜色全部写成系统色，仍跟随用户主题，投影一并去掉。
+   */
+  .atm-tabs button[aria-selected="true"],
+  .atm-nav button[aria-current="page"],
+  .atm-sidebar-settings[aria-current="page"],
+  .atm-knowledge-list-item[data-selected="true"] {
+    color: HighlightText;
+    background: Highlight;
+    box-shadow: none;
+    forced-color-adjust: none;
+  }
+  :is(
+      .atm-tabs button[aria-selected="true"],
+      .atm-nav button[aria-current="page"],
+      .atm-sidebar-settings[aria-current="page"],
+      .atm-knowledge-list-item[data-selected="true"]
+    )
+    * {
+    color: HighlightText;
+  }
 }

@@ -286,7 +286,18 @@ function parseCompound(text: string, start: number): [Compound, number] {
   };
   while (index < text.length && !/[\s>+~]/u.test(text[index]!)) {
     const char = text[index]!;
-    if (pseudoElement !== null) throw new Error(`伪元素后面不能再接选择器：${text}`);
+    if (pseudoElement !== null) {
+      // 伪元素后面只能再接用户动作类伪类（如 ::-webkit-scrollbar-thumb:hover）。这类规则只作用于伪元素，
+      // 永远不会命中元素本身，所以只记特指度、不校验伪类名。
+      if (char !== ":" || text[index + 1] === ":") {
+        throw new Error(`伪元素后面不能再接选择器：${text}`);
+      }
+      index += 1;
+      const name = ident().toLowerCase();
+      if (text[index] === "(") index = closingIndex(text, index, "(", ")") + 1;
+      simples.push({ kind: "pseudo", name, selectors: null, argument: null });
+      continue;
+    }
     if (char === "*") {
       simples.push({ kind: "type", name: "*" });
       index += 1;
@@ -414,12 +425,15 @@ export type ModelElement = {
   readonly states: Set<InteractionState>;
   parent: ModelElement | null;
   readonly children: ModelElement[];
+  /** 元素自己直接含文字（forced-colors 下要检查字色是否读得清）。 */
+  hasText: boolean;
 };
 
 export function element(
   tag: string,
   attributes: Record<string, string> = {},
   children: ModelElement[] = [],
+  hasText = false,
 ): ModelElement {
   const node: ModelElement = {
     tag: tag.toLowerCase(),
@@ -427,6 +441,7 @@ export function element(
     states: new Set(),
     parent: null,
     children: [],
+    hasText,
   };
   for (const child of children) appendChild(node, child);
   return node;
@@ -467,8 +482,12 @@ export function parseMarkup(html: string): ModelElement[] {
   const fragment = element("#fragment");
   let current = fragment;
   const tokens =
-    /<!--[\s\S]*?-->|<\/([a-zA-Z][\w:-]*)\s*>|<([a-zA-Z][\w:-]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>/gu;
+    /<!--[\s\S]*?-->|<\/([a-zA-Z][\w:-]*)\s*>|<([a-zA-Z][\w:-]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(\/?)>|([^<]+)/gu;
   for (const match of html.matchAll(tokens)) {
+    if (match[5] !== undefined) {
+      if (match[5].trim() !== "") current.hasText = true;
+      continue;
+    }
     if (match[1]) {
       if (current.tag !== match[1].toLowerCase() || !current.parent) {
         throw new Error(`markup 标签不配对：</${match[1]}>`);
@@ -674,6 +693,9 @@ function mediaFeatureHolds(feature: string, environment: CascadeEnvironment): bo
     case "prefers-contrast:more":
     case "prefers-color-scheme:dark":
       return false;
+    case "prefers-reduced-motion:no-preference":
+    case "prefers-reduced-transparency:no-preference":
+    case "prefers-contrast:no-preference":
     case "prefers-color-scheme:light":
       return true;
     case "hover:hover":
@@ -699,13 +721,15 @@ export function conditionHolds(condition: string, environment: CascadeEnvironmen
   if (condition.startsWith("@supports")) return true;
   const query = /^@media\s+(.+)$/u.exec(condition)?.[1];
   if (!query) throw new Error(`级联模型不认识条件：${condition}`);
-  return splitTopLevel(query, ",").some((alternative) =>
-    alternative
-      .trim()
-      .replace(/^(?:only\s+)?(?:screen|all)\s+and\s+/u, "")
+  return splitTopLevel(query, ",").some((alternative) => {
+    const text = alternative.trim().replace(/^(?:only\s+)?(?:screen|all)\s+and\s+/u, "");
+    const negated = /^not\s+/u.test(text);
+    const holds = text
+      .replace(/^not\s+/u, "")
       .split(/\s+and\s+/u)
-      .every((feature) => mediaFeatureHolds(feature, environment)),
-  );
+      .every((feature) => mediaFeatureHolds(feature, environment));
+    return negated ? !holds : holds;
+  });
 }
 
 const OUTLINE_STYLES = new Set([
@@ -766,6 +790,9 @@ export function expandDeclaration(declaration: CssDeclaration): CssDeclaration[]
     expanded = lineShorthand(property, value);
   } else if (/^border-(?:width|style|color)$/u.test(property)) {
     expanded = boxSides(property, value);
+  } else if (property === "background") {
+    // 只关心底色：简写整体当作 background-color，好和单写的 background-color 按级联比较。
+    expanded = [{ property: "background-color", value, important: false }];
   } else {
     return [declaration];
   }
@@ -812,4 +839,278 @@ export function cascade(
 
 export function formatSpecificity(specificity: Specificity): string {
   return `(${specificity.join(",")})`;
+}
+
+/* ─── forced-colors：系统换色之后还看得见什么 ───
+ * 高对比度模式下，作者写的非系统色（color、background-color、border-color、outline-color）都被换成系统色，
+ * box-shadow 与渐变底图被去掉；系统色关键字（Highlight、CanvasText…）和 forced-color-adjust: none 的元素例外。
+ * 状态如果只靠底色或投影表达，在这里就会「两态长得一模一样」。 */
+
+const SYSTEM_COLOR_NAMES = [
+  "AccentColor",
+  "AccentColorText",
+  "ActiveText",
+  "ButtonBorder",
+  "ButtonFace",
+  "ButtonText",
+  "Canvas",
+  "CanvasText",
+  "Field",
+  "FieldText",
+  "GrayText",
+  "Highlight",
+  "HighlightText",
+  "LinkText",
+  "Mark",
+  "MarkText",
+  "SelectedItem",
+  "SelectedItemText",
+  "VisitedText",
+];
+const SYSTEM_COLORS = new Map(SYSTEM_COLOR_NAMES.map((name) => [name.toLowerCase(), name]));
+
+/** 系统色底上允许的前景；其余组合在用户的高对比度主题里不保证读得清。 */
+const READABLE_ON: Readonly<Record<string, readonly string[]>> = {
+  Canvas: ["CanvasText", "LinkText", "VisitedText", "ActiveText", "GrayText", "ButtonText"],
+  ButtonFace: ["ButtonText", "GrayText"],
+  Field: ["FieldText", "GrayText"],
+  Highlight: ["HighlightText"],
+  HighlightText: ["Highlight"],
+  CanvasText: ["Canvas"],
+  ButtonText: ["ButtonFace"],
+  Mark: ["MarkText"],
+  SelectedItem: ["SelectedItemText"],
+  AccentColor: ["AccentColorText"],
+};
+
+/** 值里出现的系统色关键字（规范大小写），没有就是 null。 */
+export function systemColorIn(value: string | undefined): string | null {
+  if (!value) return null;
+  for (const token of splitTopLevel(value.trim(), /\s/u)) {
+    const name = SYSTEM_COLORS.get(token.toLowerCase());
+    if (name) return name;
+  }
+  return null;
+}
+
+export const FORCED_PHONE: CascadeEnvironment = {
+  forcedColors: true,
+  finePointer: false,
+  viewportWidth: 375,
+};
+
+function declaredValue(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+  property: string,
+): string | undefined {
+  return cascade(rules, node, environment).get(property)?.value;
+}
+
+/** forced-color-adjust 会继承：沿祖先找第一处声明。 */
+function keepsAuthorColors(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+): boolean {
+  for (let current: ModelElement | null = node; current; current = current.parent) {
+    const value = declaredValue(rules, current, environment, "forced-color-adjust");
+    if (value !== undefined && value !== "inherit") return value === "none";
+  }
+  return false;
+}
+
+function rendered(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+): boolean {
+  return (
+    !node.attributes.has("hidden") && declaredValue(rules, node, environment, "display") !== "none"
+  );
+}
+
+/** forced-colors 下一个元素自己的底：系统色原样保留；其他不透明的底被换成画布色；透明或没写为 null。 */
+function forcedBackground(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+): string | null {
+  const value = declaredValue(rules, node, environment, "background-color");
+  if (value === undefined || /^(?:transparent|none|inherit)$/iu.test(value.trim())) return null;
+  if (keepsAuthorColors(rules, node, environment)) return value;
+  return systemColorIn(value) ?? "Canvas";
+}
+
+/** 元素背后实际的底：沿祖先找第一处画出来的底，默认画布色。 */
+function backgroundBehind(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+): string {
+  for (let current = node.parent; current; current = current.parent) {
+    const value = forcedBackground(rules, current, environment);
+    if (value) return value;
+  }
+  return "Canvas";
+}
+
+/** 字色会继承：沿祖先找第一处声明；非系统色被换成 CanvasText。 */
+function forcedTextColor(
+  rules: readonly CssRule[],
+  node: ModelElement,
+  environment: CascadeEnvironment,
+): string {
+  for (let current: ModelElement | null = node; current; current = current.parent) {
+    const value = declaredValue(rules, current, environment, "color");
+    if (value === undefined || /^(?:inherit|currentcolor)$/iu.test(value)) continue;
+    if (keepsAuthorColors(rules, current, environment)) return value;
+    return systemColorIn(value) ?? "CanvasText";
+  }
+  return "CanvasText";
+}
+
+/**
+ * 一棵子树在 forced-colors 下留得下来的外观，一行一个元素。
+ * 只记高对比度里真正看得见的东西：和背后不同的底、有字或图标的元素的字色、实际画出来的边框与 outline、
+ * 透明度、字重、文字装饰，以及「本身画得出来」的元素的 transform——开关滑块被去色后和轨道一个颜色，
+ * 位移也就看不见了。
+ */
+export function forcedColorsAppearance(
+  rules: readonly CssRule[],
+  root: ModelElement,
+  environment: CascadeEnvironment = FORCED_PHONE,
+): string[] {
+  if (!environment.forcedColors) {
+    throw new Error("forcedColorsAppearance 只用于 forced-colors 环境");
+  }
+  const lines: string[] = [];
+  const visit = (node: ModelElement, depth: number) => {
+    if (!rendered(rules, node, environment)) return;
+    const style = cascade(rules, node, environment);
+    const get = (name: string) => style.get(name)?.value;
+    const keep = keepsAuthorColors(rules, node, environment);
+    const lineColor = (value: string | undefined) =>
+      keep ? (value ?? "currentcolor") : (systemColorIn(value) ?? "CanvasText");
+    const parts: string[] = [];
+    const background = forcedBackground(rules, node, environment);
+    const visibleBackground =
+      background !== null && background !== backgroundBehind(rules, node, environment);
+    if (visibleBackground) parts.push(`底 ${background}`);
+    if (node.hasText || node.tag === "svg") {
+      parts.push(`字 ${forcedTextColor(rules, node, environment)}`);
+    }
+    let drawsLine = false;
+    for (const line of ["border-top", "border-right", "border-bottom", "border-left", "outline"]) {
+      const lineStyle = get(`${line}-style`) ?? "none";
+      const width = get(`${line}-width`) ?? "medium";
+      if (lineStyle === "none" || lineStyle === "hidden" || /^0(?:px)?$/u.test(width)) continue;
+      drawsLine = true;
+      parts.push(`${line} ${lineStyle} ${width} ${lineColor(get(`${line}-color`))}`);
+    }
+    const shadow = get("box-shadow");
+    if (keep && shadow && shadow !== "none") parts.push(`投影 ${shadow}`);
+    for (const name of ["opacity", "font-weight", "text-decoration", "text-decoration-line"]) {
+      const value = get(name);
+      // opacity: 1 与没写一样，不算差别。
+      if (value !== undefined && !(name === "opacity" && Number(value) === 1)) {
+        parts.push(`${name} ${value}`);
+      }
+    }
+    const paints = node.tag === "svg" || node.hasText || visibleBackground || drawsLine;
+    const transform = get("transform");
+    if (paints && transform && transform !== "none") parts.push(`transform ${transform}`);
+    lines.push(`${"  ".repeat(depth)}<${node.tag}>${parts.length ? ` ${parts.join("；")}` : ""}`);
+    for (const child of node.children) visit(child, depth + 1);
+  };
+  visit(root, 0);
+  return lines;
+}
+
+/** forced-colors 下：系统色底上的字和图标，必须用与该底配对的系统前景色（Highlight 底配 HighlightText）。 */
+export function forcedColorsContrastViolations(
+  rules: readonly CssRule[],
+  root: ModelElement,
+  environment: CascadeEnvironment = FORCED_PHONE,
+): string[] {
+  const violations: string[] = [];
+  const visit = (node: ModelElement) => {
+    if (!rendered(rules, node, environment)) return;
+    // 只查真正有字或图标的元素：开关滑块这类纯色块没有前景，不需要配色。
+    if (node.hasText || node.tag === "svg") {
+      const keep = keepsAuthorColors(rules, node, environment);
+      // forced-color-adjust: auto 时，Chromium 会在文字后面垫一块 Canvas 色的背板（readability backplate），
+      // 元素自己的底换成 Highlight 也垫不过它：HighlightText 的字压在白板上就成了一块白。
+      // 所以「选中项用 Highlight 底 + HighlightText 字」必须配 forced-color-adjust: none。svg 图标不垫板。
+      const onBackplate = !keep && node.hasText;
+      const rawBackground = onBackplate
+        ? "Canvas"
+        : (forcedBackground(rules, node, environment) ??
+          backgroundBehind(rules, node, environment));
+      const background = systemColorIn(rawBackground) ?? rawBackground;
+      const rawColor = forcedTextColor(rules, node, environment);
+      const color = systemColorIn(rawColor) ?? rawColor;
+      // 底不是系统色（forced-color-adjust: none 保留了作者配色）时无从判断，交给作者。
+      const allowed = READABLE_ON[background];
+      if (allowed && !allowed.includes(color)) {
+        const classes = node.attributes.get("class");
+        violations.push(
+          `<${node.tag}${classes ? ` class="${classes}"` : ""}> 在 ${background}${onBackplate ? "（文字背板）" : " 底"}上用的是 ${color}`,
+        );
+      }
+    }
+    for (const child of node.children) visit(child);
+  };
+  visit(root);
+  return violations;
+}
+
+export type ForcedStateCase = {
+  readonly label: string;
+  /** 选中 / 开启 / 当前那一态的元素（挂在完整文档里，祖先选择器才命中得了）。 */
+  readonly on: ModelElement;
+  readonly off: ModelElement;
+};
+
+/** 每个状态对：forced-colors 下两态必须看得出差别，且系统色底上的字读得清。 */
+export function forcedStateViolations(
+  rules: readonly CssRule[],
+  cases: readonly ForcedStateCase[],
+  environment: CascadeEnvironment = FORCED_PHONE,
+): string[] {
+  const violations: string[] = [];
+  for (const { label, on, off } of cases) {
+    const onLook = forcedColorsAppearance(rules, on, environment);
+    const offLook = forcedColorsAppearance(rules, off, environment);
+    if (onLook.join("\n") === offLook.join("\n")) {
+      violations.push(
+        `${label}：forced-colors 下两态看起来一样（只靠会被系统去掉的底色/投影区分）：${onLook.join(" | ")}`,
+      );
+    }
+    for (const [state, node] of [
+      ["选中", on],
+      ["未选中", off],
+    ] as const) {
+      for (const problem of forcedColorsContrastViolations(rules, node, environment)) {
+        violations.push(`${label}（${state}）：${problem}`);
+      }
+    }
+  }
+  return violations;
+}
+
+/** 只靠底色画出来的元素（进度条填充、状态灯）：forced-colors 下必须还画得出来。 */
+export function forcedInvisibleViolations(
+  rules: readonly CssRule[],
+  cases: readonly { readonly label: string; readonly node: ModelElement }[],
+  environment: CascadeEnvironment = FORCED_PHONE,
+): string[] {
+  return cases.flatMap(({ label, node }) => {
+    const [look] = forcedColorsAppearance(rules, node, environment);
+    // 外观里只记和背后不同的底，所以出现「底」「边框」「outline」就说明画得出来。
+    return look && /(?:底 |border-|outline )/u.test(look)
+      ? []
+      : [`${label}：forced-colors 下什么都画不出来（${look ?? "未渲染"}）`];
+  });
 }

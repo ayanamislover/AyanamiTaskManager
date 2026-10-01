@@ -1,11 +1,13 @@
 import { readFileSync } from "node:fs";
-import { createElement } from "react";
+import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import {
   appendChild,
   cascade,
   element,
+  forcedInvisibleViolations,
+  forcedStateViolations,
   formatSpecificity,
   parseCssRules,
   parseMarkup,
@@ -15,9 +17,11 @@ import {
   type ComplexSelector,
   type Compound,
   type CssRule,
+  type ForcedStateCase,
   type ModelElement,
   type SimpleSelector,
 } from "../../../packages/ui/test/css-cascade-model.js";
+import { nativeSelectOffenders } from "../../../packages/ui/test/native-select-scan.js";
 import {
   mobileCssSources,
   mobileEntry,
@@ -28,6 +32,8 @@ import {
   relativeToRepository,
   type CssSourceFile,
 } from "../../../packages/ui/test/css-source-graph.js";
+import { Segmented, SwitchRow } from "../src/ui/controls.js";
+import { Progress } from "../src/ui/layout.js";
 import { Select } from "../src/ui/select.js";
 
 /*
@@ -88,20 +94,32 @@ function appendOpenPopover(shell: ModelElement): void {
   appendChild(
     shell,
     element("div", { class: "select-popover", role: "listbox" }, [
-      element("button", {
-        type: "button",
-        class: "select-option",
-        role: "option",
-        "aria-selected": "true",
-        "data-selected": "true",
-      }),
-      element("button", {
-        type: "button",
-        class: "select-option",
-        role: "option",
-        "aria-selected": "false",
-        "data-selected": "false",
-      }),
+      element(
+        "button",
+        {
+          type: "button",
+          class: "select-option",
+          role: "option",
+          "aria-selected": "true",
+          "data-selected": "true",
+        },
+        // 选中项右侧的勾（select.tsx：option.value === value ? <CheckCircle …/> : null）。
+        [
+          element("span", { class: "select-option-text" }),
+          element("svg", { "aria-hidden": "true" }),
+        ],
+      ),
+      element(
+        "button",
+        {
+          type: "button",
+          class: "select-option",
+          role: "option",
+          "aria-selected": "false",
+          "data-selected": "false",
+        },
+        [element("span", { class: "select-option-text" })],
+      ),
     ]),
   );
 }
@@ -376,7 +394,7 @@ const SHELL_PROPERTIES = [
   "border-top-style",
   "border-top-color",
   "border-radius",
-  "background",
+  "background-color",
   "min-height",
   "outline-style",
   "outline-width",
@@ -448,16 +466,111 @@ export function shellConsistencyViolations(sources: readonly CssSourceFile[]): s
   return violations;
 }
 
-/* ─── 守卫四：原生 select ─── */
+/* ─── 守卫四：forced-colors 下状态看得出来 ───
+ * 选中、开启、禁用这些状态如果只靠底色或投影表达，高对比度一开全被系统抹掉，两态长得一样。
+ * 用真实组件渲染出两态，在级联模型里比较 forced-colors 下留得下来的外观。 */
 
-export function nativeSelectOffenders(files: Record<string, string>): string[] {
-  return Object.entries(files)
-    .filter(([file, source]) => {
-      // JSX 区分大小写：<Select 是自绘组件；HTML 不区分，<SELECT> 也是原生下拉。
-      const tag = file.endsWith(".html") ? /<select(?=[\s>/])/iu : /<select(?=[\s>/])/u;
-      return tag.test(source) || /createElement\(\s*["'`]select["'`]/u.test(source);
-    })
-    .map(([file]) => file);
+function renderModel(node: ReactElement): ModelElement[] {
+  return parseMarkup(renderToStaticMarkup(node));
+}
+
+function phoneDocument(...nodes: ModelElement[]): ModelElement {
+  return element("html", { lang: "zh-CN", "data-theme": "light" }, [
+    element("body", {}, [
+      element("div", { id: "root" }, [element("main", { class: "screen" }, nodes)]),
+    ]),
+  ]);
+}
+
+function stateCases(): ForcedStateCase[] {
+  const segmented = phoneDocument(
+    ...renderModel(
+      createElement(Segmented, {
+        label: "优先级",
+        value: "normal",
+        options: [
+          { value: "low", label: "低" },
+          { value: "normal", label: "普通" },
+        ],
+        onChange: () => undefined,
+      }),
+    ),
+  );
+  const switches = phoneDocument(
+    element(
+      "div",
+      { class: "card switch-card" },
+      [true, false].flatMap((checked) =>
+        renderModel(
+          createElement(SwitchRow, {
+            checked,
+            onChange: () => undefined,
+            title: "交给 Claude 自动开工",
+            description: "电脑收到后会自动启动 Claude Code",
+          }),
+        ),
+      ),
+    ),
+  );
+  const buttons = phoneDocument(
+    element("button", { type: "button", class: "button primary block" }, [], true),
+    element("button", { type: "button", class: "button primary block", disabled: "" }, [], true),
+    element("button", { type: "button", class: "button" }, [], true),
+    element("button", { type: "button", class: "button", disabled: "" }, [], true),
+  );
+  const select = fieldDocument(true);
+  return [
+    {
+      label: "分段控件的选中项",
+      on: querySelector(segmented, '[role="radio"][aria-checked="true"]'),
+      off: querySelector(segmented, '[role="radio"][aria-checked="false"]'),
+    },
+    {
+      label: "开关的开与关",
+      on: querySelector(switches, '[role="switch"][aria-checked="true"]'),
+      off: querySelector(switches, '[role="switch"][aria-checked="false"]'),
+    },
+    {
+      label: "下拉弹层的选中项",
+      on: querySelector(select, '.select-option[data-selected="true"]'),
+      off: querySelector(select, '.select-option[data-selected="false"]'),
+    },
+    {
+      label: "主按钮的可用与禁用",
+      on: querySelector(buttons, ".button.primary:not([disabled])"),
+      off: querySelector(buttons, ".button.primary[disabled]"),
+    },
+    {
+      label: "普通按钮的可用与禁用",
+      on: querySelector(buttons, ".button:not(.primary):not([disabled])"),
+      off: querySelector(buttons, ".button:not(.primary)[disabled]"),
+    },
+  ];
+}
+
+function paintCases() {
+  const progress = phoneDocument(...renderModel(createElement(Progress, { value: 40 })));
+  const dots = phoneDocument(
+    element("span", { class: "status-dot", "data-state": "online" }),
+    element("span", { class: "badge", "data-tone": "progress" }, [
+      element("span", { class: "dispatch-dot", "data-state": "running" }),
+    ]),
+    element("div", { class: "project-bar" }, [element("i", { "data-segment": "done" })]),
+  );
+  return [
+    { label: "进度条的填充", node: querySelector(progress, ".progress > span") },
+    { label: "连接状态灯", node: querySelector(dots, ".status-dot") },
+    { label: "派单状态灯", node: querySelector(dots, ".dispatch-dot") },
+    { label: "项目分段条的一段", node: querySelector(dots, ".project-bar > i") },
+  ];
+}
+
+export function forcedColorsStateViolations(sources: readonly CssSourceFile[]): string[] {
+  const rules = parseCssRules(sources);
+  return [
+    ...forcedStateViolations(rules, stateCases(), PHONE_FORCED),
+    ...forcedInvisibleViolations(rules, paintCases(), PHONE_FORCED),
+  ];
 }
 
 /* ─── 变异工具：把根因写回真实 CSS，确认守卫真的会红 ─── */
@@ -559,6 +672,8 @@ describe("手机端设计系统守卫", () => {
     const selectSource = readFileSync(`${mobileSourceRoot}/ui/select.tsx`, "utf8");
     expect(selectSource).toContain('className="select-popover"');
     expect(selectSource).toContain('className="select-option"');
+    // 模型里只有选中项带勾：对应 select.tsx 里按选中与否渲染的 CheckCircle。
+    expect(selectSource).toMatch(/option\.value === value \? \(\s*<CheckCircle/u);
 
     // 生产 TSX 里出现过的每一种外壳组合，都必须能对上模型里的某个字段。
     const shells = new Set<string>();
@@ -610,6 +725,10 @@ describe("手机端设计系统守卫", () => {
 
   it("下拉外壳与输入框外壳取值一致：静止与聚焦的边框、圆角、底色、高度、焦点环，以及 forced-colors 下控件的环", () => {
     expect(shellConsistencyViolations(mobileCssSources())).toEqual([]);
+  });
+
+  it("forced-colors 下选中、开启、禁用看得出来，只靠底色画的进度条与状态灯也还画得出来", () => {
+    expect(forcedColorsStateViolations(mobileCssSources())).toEqual([]);
   });
 
   describe("阳性对照：逐条把根因写回去，守卫必须变红", () => {
@@ -768,6 +887,97 @@ describe("手机端设计系统守卫", () => {
       expect(shellConsistencyViolations(offset)).toEqual([
         "forced-colors 下控件放回来的环：单行输入框的 outline-offset 是 2px，下拉触发器是 -3px",
         "forced-colors 下控件放回来的环：多行输入框的 outline-offset 是 2px，下拉触发器是 -3px",
+      ]);
+    });
+
+    it("forced-colors 状态：选中项、开关、禁用回到只靠底色，或高亮底上字色没换，都会红", () => {
+      const segmented = mutate(
+        sources,
+        "overlays.css",
+        '  .segmented-option[aria-checked="true"] {\n    color: HighlightText;\n    background: Highlight;\n    box-shadow: none;\n    forced-color-adjust: none;\n  }\n',
+        "",
+      );
+      expect(forcedColorsStateViolations(segmented)).toEqual([
+        expect.stringMatching(/^分段控件的选中项：forced-colors 下两态看起来一样/u),
+      ]);
+      // Highlight 底上的字没换 HighlightText：作者的柔色字压在系统高亮上。
+      const contrast = mutate(
+        sources,
+        "overlays.css",
+        '  .segmented-option[aria-checked="true"] {\n    color: HighlightText;\n',
+        '  .segmented-option[aria-checked="true"] {\n',
+      );
+      expect(forcedColorsStateViolations(contrast)).toEqual([
+        '分段控件的选中项（选中）：<button class="segmented-option"> 在 Highlight 底上用的是 var(--atm-control-text)',
+      ]);
+      // 没有 forced-color-adjust: none：浏览器在字后垫 Canvas 背板，HighlightText 的字成了一块白。
+      const backplate = mutate(
+        sources,
+        "overlays.css",
+        "    box-shadow: none;\n    forced-color-adjust: none;\n  }\n  .switch-track",
+        "    box-shadow: none;\n  }\n  .switch-track",
+      );
+      expect(forcedColorsStateViolations(backplate)).toEqual([
+        '分段控件的选中项（选中）：<button class="segmented-option"> 在 Canvas（文字背板）上用的是 HighlightText',
+      ]);
+      // 滑块回到白色：被系统去色后看不见，位移也就看不出来；轨道单靠底色同理。
+      const thumb = mutate(
+        sources,
+        "overlays.css",
+        '  .switch-row[aria-checked="true"] .switch-thumb {\n    background: HighlightText;\n  }\n',
+        "",
+      );
+      const track = mutate(
+        thumb,
+        "overlays.css",
+        '  .switch-row[aria-checked="true"] .switch-track {\n    border-color: Highlight;\n    background: Highlight;\n  }\n',
+        "",
+      );
+      const bareThumb = mutate(
+        track,
+        "overlays.css",
+        "    left: 2px;\n    background: CanvasText;\n",
+        "    left: 2px;\n",
+      );
+      expect(forcedColorsStateViolations(bareThumb)).toEqual([
+        expect.stringMatching(/^开关的开与关：forced-colors 下两态看起来一样/u),
+      ]);
+      const disabled = mutate(
+        sources,
+        "controls.css",
+        "  .button:disabled,\n  .button.primary:disabled {\n    border-color: GrayText;\n    color: GrayText;\n  }\n",
+        "",
+      );
+      expect(forcedColorsStateViolations(disabled)).toEqual([
+        expect.stringMatching(/^主按钮的可用与禁用：forced-colors 下两态看起来一样/u),
+      ]);
+      const progress = mutate(
+        sources,
+        "controls.css",
+        "  .progress > span {\n    background: Highlight;\n  }\n",
+        "",
+      );
+      expect(forcedColorsStateViolations(progress)).toEqual([
+        expect.stringMatching(/^进度条的填充：forced-colors 下什么都画不出来/u),
+      ]);
+      const dots = mutate(
+        sources,
+        "controls.css",
+        "  .status-dot,\n  .dispatch-dot {\n    border: 1px solid CanvasText;\n    forced-color-adjust: none;\n  }\n",
+        "",
+      );
+      expect(forcedColorsStateViolations(dots)).toEqual([
+        expect.stringMatching(/^连接状态灯：forced-colors 下什么都画不出来/u),
+        expect.stringMatching(/^派单状态灯：forced-colors 下什么都画不出来/u),
+      ]);
+      const segments = mutate(
+        sources,
+        "screens.css",
+        "  .project-bar > i {\n    border: 1px solid CanvasText;\n    forced-color-adjust: none;\n  }\n",
+        "",
+      );
+      expect(forcedColorsStateViolations(segments)).toEqual([
+        expect.stringMatching(/^项目分段条的一段：forced-colors 下什么都画不出来/u),
       ]);
     });
 

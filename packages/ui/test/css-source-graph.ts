@@ -42,6 +42,14 @@ export function uiCssText(): string {
     .join("\n");
 }
 
+/** 桌面 UI 全部生效 CSS，按 styles.css 的 cascade 顺序，供级联模型使用。 */
+export function uiCssSources(): { path: string; text: string }[] {
+  return readCssImportGraph().map((path) => ({
+    path: relativeToRepository(path),
+    text: readFileSync(path, "utf8"),
+  }));
+}
+
 export function uiComponentCssText(): string {
   return readCssImportGraph()
     .slice(1)
