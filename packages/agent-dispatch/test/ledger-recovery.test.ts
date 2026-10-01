@@ -1,4 +1,5 @@
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type AgentDispatcher,
@@ -13,6 +14,8 @@ import { cleanupAll, fakeProcesses, type Fixture, fixture, waitFor } from "./sup
 // 读盘失败（EACCES）只能靠替换 readFileSync 造：Windows 上没法可靠地 chmod 出「读不出来」。
 // 只对名为 requests.json 的文件、只在开关打开时抛错，其余调用原样转给真的 fs。
 const denied = vi.hoisted(() => ({ on: false }));
+// 写 runs.json 失败（磁盘满）：接下来 failRunsWrites 次把临时文件改名成 runs.json 时抛 ENOSPC（不在重试之列）。
+const writes = vi.hoisted(() => ({ failRunsWrites: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -24,11 +27,20 @@ vi.mock("node:fs", async (importOriginal) => {
         });
       return (actual.readFileSync as (...args: unknown[]) => unknown)(path, ...rest);
     }) as typeof actual.readFileSync,
+    renameSync: ((from: unknown, to: unknown) => {
+      if (writes.failRunsWrites > 0 && String(to).endsWith("runs.json")) {
+        writes.failRunsWrites -= 1;
+        actual.rmSync(String(from), { force: true });
+        throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+      }
+      return actual.renameSync(from as string, to as string);
+    }) as typeof actual.renameSync,
   };
 });
 
 afterEach(async () => {
   denied.on = false;
+  writes.failRunsWrites = 0;
   await cleanupAll();
 });
 
@@ -349,6 +361,87 @@ describe("账本用过的标记不随历史裁剪消失（peer R3-01）", () => 
     expect((await rejection(dispatcher.enqueue(mobile(id)))).code).toBe(
       "DISPATCH_REQUEST_STATE_LOST",
     );
+    expect(fake.children).toHaveLength(1);
+  });
+});
+
+describe("标记写失败之后（peer R4-01）", () => {
+  const runsFile = (f: Fixture) => JSON.parse(readFileSync(dispatchPaths(f.dataDir).runs, "utf8"));
+  const stripMarker = (f: Fixture) => {
+    const legacy = runsFile(f);
+    delete legacy.requestsSince;
+    writeFileSync(dispatchPaths(f.dataDir).runs, JSON.stringify(legacy));
+  };
+
+  /** 三种旧版本账本：有派单条目、只有被拒条目、只有水位线。返回旧命令 ID。 */
+  async function legacyLedger(
+    kind: "run" | "rejected" | "watermark",
+    f: Fixture,
+    fake: ReturnType<typeof fakeProcesses>,
+    c: Clock,
+  ): Promise<string> {
+    if (kind === "run") return (await dispatchedOnce(f, fake, c)).id;
+    f.addTask("DEMO-T-0001");
+    const id = commandId(c.at - 1_000, "1");
+    if (kind === "rejected") {
+      const first = f.dispatcher({ ...fake.options, now: c.now });
+      expect((await rejection(first.enqueue(mobile(id)))).code).toBe("DISPATCH_DISABLED");
+      first.close();
+    } else {
+      const paths = dispatchPaths(f.dataDir);
+      mkdirSync(dirname(paths.runs), { recursive: true });
+      writeFileSync(paths.runs, JSON.stringify({ v: 1, runs: [] }));
+      writeFileSync(
+        paths.requests,
+        JSON.stringify({ v: 1, lostBefore: new Date(c.at).toISOString(), requests: [] }),
+      );
+    }
+    return id;
+  }
+
+  for (const kind of ["run", "rejected", "watermark"] as const) {
+    it(`旧账本（${kind}）启动时补写标记失败一次：之后的普通保存带上标记，单删账本照样认得出`, async () => {
+      const f = fixture();
+      const fake = fakeProcesses();
+      const c = clock();
+      const id = await legacyLedger(kind, f, fake, c);
+      stripMarker(f);
+      c.at += 60_000;
+      writes.failRunsWrites = 1;
+      const second = await restart(f, fake, c);
+      expect(writes.failRunsWrites).toBe(0);
+      second.close();
+      expect(runsFile(f).requestsSince).toBe(new Date(c.at).toISOString());
+      if (kind === "run") pushOutOfHistory(f);
+      rmSync(dispatchPaths(f.dataDir).requests);
+      c.at += 60_000;
+      const dispatcher = await restart(f, fake, c);
+      await dispatcher.updateConfig({ enabled: true });
+      expect((await rejection(dispatcher.enqueue(mobile(id)))).code).toBe(
+        "DISPATCH_REQUEST_STATE_LOST",
+      );
+      expect(fake.children).toHaveLength(kind === "run" ? 1 : 0);
+    });
+  }
+
+  it("首次接纳时标记写不进去：503 可重试，不记账、不起会话；同一 ID 之后照常派一次", async () => {
+    const f = fixture();
+    f.addTask("DEMO-T-0001");
+    const fake = fakeProcesses();
+    const c = clock();
+    const dispatcher = await restart(f, fake, c);
+    await dispatcher.updateConfig({ enabled: true });
+    const id = commandId(c.at - 1_000, "1");
+    writes.failRunsWrites = 1;
+    const error = await rejection(dispatcher.enqueue(mobile(id)));
+    expect(error.code).toBe("DISPATCH_LEDGER_UNAVAILABLE");
+    expect(error.retryable).toBe(true);
+    expect(fake.children).toHaveLength(0);
+    expect(dispatcher.runForTask("DEMO", "DEMO-T-0001")).toBeNull();
+    await dispatcher.enqueue(mobile(id));
+    await waitFor(() => fake.children.length === 1);
+    expect(runsFile(f).requestsSince).toBe(new Date(c.at).toISOString());
+    await dispatcher.enqueue(mobile(id));
     expect(fake.children).toHaveLength(1);
   });
 });

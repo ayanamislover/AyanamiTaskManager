@@ -63,8 +63,13 @@ export class RequestLedger {
   readonly #logger: DispatchLogger;
   readonly #history: () => LedgerHistory;
   readonly #markUsed: (since: string) => void;
-  /** 第一次往账本记东西的时刻，持久化在派单历史顶层（见 run-store.ts）；null = 从没用过。 */
+  /**
+   * 第一次往账本记东西的时刻，持久化在派单历史顶层（见 run-store.ts）；null = 从没用过。
+   * 一旦有值就再不清空：每次保存历史都带上它，哪怕之前某次专门写它失败了。
+   */
   #requestsSince: string | null;
+  /** 标记已确认在盘上（读历史时就有，或专门写成功过）。只有确认过，首次接纳才能跳过那次安全写入。 */
+  #markConfirmed: boolean;
   #available = false;
   #entries: DispatchRequestEntry[] = [];
   #lostBefore: number | null = null;
@@ -86,6 +91,7 @@ export class RequestLedger {
     this.#history = history;
     this.#markUsed = markUsed;
     this.#requestsSince = history().requestsSince ?? null;
+    this.#markConfirmed = this.#requestsSince !== null;
     this.#reload(now);
   }
 
@@ -94,12 +100,16 @@ export class RequestLedger {
     return this.#requestsSince;
   }
 
-  /** 第一次记账之前先把标记落盘（之后单删账本才认得出是数据丢了）。写失败抛出，调用方不得记账。 */
+  /**
+   * 确认标记在盘上（之后单删账本才认得出是数据丢了）：没确认过就专门写一次。写失败抛出，调用方不得记账；
+   * 已经决定要的标记（`#requestsSince`）不会因此丢掉，之后任何一次历史保存都会把它带上。
+   */
   #ensureMarked(now: Date): void {
-    if (this.#requestsSince !== null) return;
-    const since = now.toISOString();
+    if (this.#markConfirmed) return;
+    const since = this.#requestsSince ?? now.toISOString();
     this.#markUsed(since);
     this.#requestsSince = since;
+    this.#markConfirmed = true;
   }
 
   /** 读盘；读不出来就保持 unavailable。发现丢失或补回了条目时立即写盘（写失败下次启动会再判一次丢失）。 */
@@ -116,8 +126,10 @@ export class RequestLedger {
       this.#lostBefore = Math.max(this.#lostBefore ?? Number.NEGATIVE_INFINITY, now.getTime());
     this.#prune(now);
     if (loaded.dirty) this.#trySave("写恢复后的派单请求账本失败");
-    // 旧版本留下的账本还没有标记：现在补上（失败只记日志，下次再补；在那之前仍靠历史里的手机派单判断）。
+    // 旧版本留下的账本还没有标记：现在就认定要标记（之后每次保存历史都带上），再试着专门写一次；
+    // 写失败只记日志——下一次历史保存或下一次手机派单的接纳都会再写。
     if (this.#entries.length > 0 || this.#lostBefore !== null) {
+      this.#requestsSince ??= now.toISOString();
       try {
         this.#ensureMarked(now);
       } catch (error) {
