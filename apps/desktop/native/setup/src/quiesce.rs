@@ -18,6 +18,7 @@ use atm_install_state::ipc::{self, Command};
 
 use crate::env::Env;
 use crate::procs::{self, Proc};
+use crate::runtime::Layout;
 use crate::{fsx, legacy, log, runtime};
 
 fn file_name_is(path: &Option<std::path::PathBuf>, name: &str) -> bool {
@@ -28,10 +29,29 @@ fn file_name_is(path: &Option<std::path::PathBuf>, name: &str) -> bool {
 
 /// The process holding the service lease and whether it is an Electron 1.x main process.
 pub fn service(env: &Env) -> Option<(Proc, bool)> {
-    let pid = runtime::lease_holder(&env.runtime_dir())?;
+    service_with_layout(env).map(|(proc, legacy, _)| (proc, legacy))
+}
+
+fn service_with_layout(env: &Env) -> Option<(Proc, bool, Layout)> {
+    let (pid, layout) = runtime::lease(&env.runtime_dir())?;
     let proc = procs::find(pid)?;
-    let legacy = !file_name_is(&proc.image, "atm-core.exe");
-    Some((proc, legacy))
+    let legacy = is_legacy(&proc.image, layout, &env.install_root);
+    Some((proc, legacy, layout))
+}
+
+/// 2.x: the lease holder is the core child, `atm-core.exe`. 3.x (`single`): it is the host
+/// image of this install. Electron 1.x holds the lease from a host-named image too, but its
+/// lock never declares `single`, so it stays legacy.
+fn is_legacy(image: &Option<std::path::PathBuf>, layout: Layout, install_root: &Path) -> bool {
+    match layout {
+        Layout::HostAndCore => !file_name_is(image, "atm-core.exe"),
+        Layout::Single => {
+            !(file_name_is(image, crate::env::LAUNCHER)
+                && image
+                    .as_ref()
+                    .is_some_and(|image| fsx::is_within(image, install_root)))
+        }
+    }
 }
 
 pub fn service_running(env: &Env) -> bool {
@@ -76,15 +96,18 @@ fn wait_drained(env: &Env, targets: &[ProcessIdentity], timeout: Duration) -> bo
 }
 
 pub fn stop_new_style(env: &Env, force: bool, timeout: Duration) -> Result<(), String> {
-    let service = service(env);
-    if let Some((_, true)) = &service {
+    let service = service_with_layout(env);
+    if let Some((_, true, _)) = &service {
         return Err("QUIESCE_UNEXPECTED_LEGACY_SERVICE".into());
     }
     if service.is_none() && !ipc::primary_alive(&env.data_dir) {
         return Ok(());
     }
     let mut targets: Vec<ProcessIdentity> = Vec::new();
-    if let Some((core, _)) = &service {
+    if let Some((single, _, Layout::Single)) = &service {
+        // The service is the host: no core child, and its parent is whatever started it.
+        targets.push(single.identity());
+    } else if let Some((core, _, _)) = &service {
         let all = procs::snapshot();
         let parent = all.iter().find(|p| p.pid == core.pid).map(|p| p.parent);
         let host = all
@@ -244,4 +267,28 @@ pub fn stop_started(
         procs::terminate(&proc.identity());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_lease_layout_tells_3x_from_electron() {
+        let root = PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager");
+        let host = Some(root.join("app-3.0.0").join("AyanamiTaskManager.exe"));
+        let core = Some(root.join("app-2.0.0").join("runtime").join("atm-core.exe"));
+        let elsewhere = Some(PathBuf::from(r"C:\Temp\AyanamiTaskManager.exe"));
+        // 2.x: only the core child is new-style.
+        assert!(!is_legacy(&core, Layout::HostAndCore, &root));
+        // Electron 1.x: host-named image, no `single` in its lock.
+        assert!(is_legacy(&host, Layout::HostAndCore, &root));
+        // 3.x: host image of this install, lock says `single`.
+        assert!(!is_legacy(&host, Layout::Single, &root));
+        // A `single` claim from outside the install root or from another image is not 3.x.
+        assert!(is_legacy(&elsewhere, Layout::Single, &root));
+        assert!(is_legacy(&core, Layout::Single, &root));
+        assert!(is_legacy(&None, Layout::Single, &root));
+    }
 }

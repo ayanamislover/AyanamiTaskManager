@@ -114,8 +114,10 @@ pub fn after_spawn(
         return;
     };
     let lease = || {
-        crate::runtime::lease_holder(&env.runtime_dir())
-            .is_some_and(|pid| crate::procs::parent_of(pid) == Some(host.pid))
+        crate::runtime::lease(&env.runtime_dir()).is_some_and(|(pid, layout)| match layout {
+            crate::runtime::Layout::Single => pid == host.pid,
+            crate::runtime::Layout::HostAndCore => crate::procs::parent_of(pid) == Some(host.pid),
+        })
     };
     let primary = || {
         atm_install_state::ipc::read_host_record(&env.data_dir)
