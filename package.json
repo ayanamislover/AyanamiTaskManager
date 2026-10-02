@@ -1,7 +1,7 @@
 {
   "name": "ayanami-task-manager",
   "productName": "AyanamiTaskManager",
-  "version": "1.2.2",
+  "version": "2.0.0",
   "description": "Local-first Windows project progress control plane for AI agents.",
   "author": "ayanami",
   "private": true,
@@ -15,7 +15,6 @@
     "url": "https://github.com/ayanamislover/AyanamiTaskManager/issues"
   },
   "type": "module",
-  "main": "apps/desktop/dist/main/main.cjs",
   "packageManager": "pnpm@11.16.0",
   "engines": {
     "node": ">=22.13.0"
@@ -31,11 +30,9 @@
     "test:e2e": "playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "start": "electron .",
     "atm": "tsx packages/cli/src/bin.ts",
     "doctor": "tsx packages/cli/src/bin.ts doctor",
-    "package": "pnpm build && tsx scripts/forge-package.ts",
-    "make": "pnpm build && tsx scripts/forge-make.ts",
+    "package": "tsx scripts/package-native.ts --release",
     "release": "tsx scripts/release.ts",
     "smoke:packaged": "tsx scripts/packaged-smoke.ts",
     "smoke:startup": "tsx scripts/login-startup-smoke.ts",
@@ -63,13 +60,6 @@
     "zustand": "5.0.14"
   },
   "devDependencies": {
-    "@electron-forge/cli": "7.11.2",
-    "@electron-forge/core": "7.11.2",
-    "@electron-forge/maker-squirrel": "7.11.2",
-    "@electron-forge/maker-zip": "7.11.2",
-    "@electron-forge/plugin-auto-unpack-natives": "7.11.2",
-    "@electron-forge/shared-types": "7.11.2",
-    "@electron/asar": "3.4.1",
     "@eslint/js": "9.32.0",
     "@playwright/test": "1.62.1",
     "@types/better-sqlite3": "7.6.13",
@@ -77,7 +67,6 @@
     "@types/react": "19.1.9",
     "@types/react-dom": "19.1.7",
     "@vitejs/plugin-react": "4.7.0",
-    "electron": "43.3.0",
     "eslint": "9.32.0",
     "eslint-config-prettier": "10.1.8",
     "globals": "16.3.0",

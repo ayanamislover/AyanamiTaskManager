@@ -20,7 +20,7 @@ export function createAyanamiMcpServer(
 ): Server {
   const profile = options.profile ?? "core";
   const server = new Server(
-    { name: "ayanami-task-manager", version: "1.2.2" },
+    { name: "ayanami-task-manager", version: "2.0.0" },
     { capabilities: { tools: {} }, instructions: profileInstructions[profile] },
   );
   registerPublishedToolHandlers(

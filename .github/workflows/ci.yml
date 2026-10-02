@@ -23,8 +23,20 @@ jobs:
       - name: Install the pinned Rust toolchain
         working-directory: apps/desktop/native/mcp-shim
         run: rustup toolchain install
+      # Host, root launcher and setup: their own workspace and toolchain file.
+      - name: Install the pinned Rust toolchain for the desktop workspace
+        working-directory: apps/desktop/native
+        run: rustup toolchain install
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
+      - name: Check the desktop native workspace
+        working-directory: apps/desktop/native
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy -p atm-setup --features drill --all-targets --locked -- -D warnings
+          cargo clippy -p atm-host --features smoke --all-targets --locked -- -D warnings
+          cargo test --workspace --locked
       - run: pnpm test
       - run: pnpm build

@@ -21,7 +21,9 @@ import { agentClientLabel, agentIntegrationErrorMessage, formatTime } from "../p
 import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { ServiceStatus } from "../shell/service-status.js";
 import { AgentIntegrationCard } from "./agent-integration-card.js";
+import { DispatchPanel } from "./dispatch-panel.js";
 import { KnowledgeBackupPanel } from "./knowledge-backup-panel.js";
+import { MobileSyncPanel } from "./mobile-sync-panel.js";
 import { NotificationPolicy } from "./settings-panels.js";
 
 export function SettingsPage({
@@ -151,6 +153,15 @@ export function SettingsPage({
       notify(status?.message ?? "更新检查已启动");
     },
   });
+  const applyUpdate = useMutation({
+    mutationFn: () => desktop!.applyUpdate!(),
+    onSuccess: (status) => {
+      queryClient.setQueryData(["desktop-update-status"], status);
+      notify(status?.message ?? "正在安装更新");
+    },
+  });
+  const updateReady = updateStatus.data?.code === "UPDATE_READY";
+  const updateInstalling = updateStatus.data?.code === "INSTALLING";
   const copy = async (text: string, label: string) => {
     if (desktop?.copyText) await desktop.copyText(text);
     else await navigator.clipboard.writeText(text);
@@ -158,7 +169,10 @@ export function SettingsPage({
   };
   return (
     <>
-      <PageHead title="设置" description="本地服务、Agent 接入、自动备份和 Windows 启动行为。" />
+      <PageHead
+        title="设置"
+        description="本地服务、Agent 接入、手机同步、自动备份和 Windows 启动行为。"
+      />
       <div className="atm-settings-grid">
         <section className="atm-panel">
           <div className="atm-panel-head">
@@ -324,6 +338,8 @@ export function SettingsPage({
             <MutationErrorAlert error={agentIntegrationErrorMessage(manageIntegration.error)} />
           </div>
         </section>
+        <MobileSyncPanel client={client} notify={notify} {...(desktop ? { desktop } : {})} />
+        <DispatchPanel client={client} notify={notify} {...(desktop ? { desktop } : {})} />
         <section className="atm-panel atm-settings-maintenance">
           <div className="atm-panel-head">
             <h2>维护与 Windows</h2>
@@ -408,7 +424,10 @@ export function SettingsPage({
                 </div>
               ) : null}
               {desktop?.getUpdateStatus ? (
-                <div className="atm-row" data-testid="update-diagnostics">
+                <div
+                  className={`atm-row${updateReady ? " atm-update-ready" : ""}`}
+                  data-testid="update-diagnostics"
+                >
                   <div>
                     <div className="atm-row-title">自动更新</div>
                     <div className="atm-row-sub">
@@ -429,26 +448,39 @@ export function SettingsPage({
                         className={`atm-badge ${
                           updateStatus.data.outcome === "ERROR"
                             ? "danger"
-                            : updateStatus.data.outcome === "SUCCESS"
-                              ? "success"
-                              : updateStatus.data.outcome === "IN_PROGRESS"
-                                ? "primary"
+                            : updateReady || updateStatus.data.outcome === "IN_PROGRESS"
+                              ? "primary"
+                              : updateStatus.data.outcome === "SUCCESS"
+                                ? "success"
                                 : ""
                         }`}
                       >
                         {updateStatus.data.outcome === "ERROR"
                           ? "失败"
-                          : updateStatus.data.outcome === "SUCCESS"
-                            ? "已完成"
-                            : updateStatus.data.outcome === "IN_PROGRESS"
-                              ? "检查中"
-                              : "无更新"}
+                          : updateReady
+                            ? "可更新"
+                            : updateInstalling
+                              ? "安装中"
+                              : updateStatus.data.outcome === "SUCCESS"
+                                ? "已完成"
+                                : updateStatus.data.outcome === "IN_PROGRESS"
+                                  ? "检查中"
+                                  : "无更新"}
                       </span>
+                    ) : null}
+                    {desktop.applyUpdate && updateReady ? (
+                      <button
+                        className="atm-button primary"
+                        disabled={applyUpdate.isPending}
+                        onClick={() => applyUpdate.mutate()}
+                      >
+                        立即更新
+                      </button>
                     ) : null}
                     {desktop.checkForUpdates ? (
                       <button
                         className="atm-button"
-                        disabled={checkUpdate.isPending}
+                        disabled={checkUpdate.isPending || updateInstalling}
                         onClick={() => checkUpdate.mutate()}
                       >
                         立即检查
@@ -458,6 +490,7 @@ export function SettingsPage({
                 </div>
               ) : null}
               <MutationErrorAlert error={checkUpdate.error} />
+              <MutationErrorAlert error={applyUpdate.error} />
             </div>
             <div className="atm-settings-maintenance-save">
               <button

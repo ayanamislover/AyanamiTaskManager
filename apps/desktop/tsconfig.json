@@ -5,5 +5,5 @@
     "rootDir": ".",
     "types": ["node", "vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts", "vite.config.ts", "tsup.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "scripts/**/*.ts", "vite.config.ts"]
 }

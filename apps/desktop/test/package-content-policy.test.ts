@@ -1,22 +1,29 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { MCP_SHIM_RELEASE_EXE } from "../../../scripts/mcp-shim-build.js";
 import {
+  assertExecutableIdentity,
   assertMcpShimVersionResource,
+  executableInternalName,
   assertPublishedLogoBytes,
+  buildMachinePathNeedles,
+  findBuildMachinePath,
   findForbiddenPackagedEntries,
   missingRequiredPackagedEntries,
   REQUIRED_PACKAGED_ENTRIES,
 } from "../../../scripts/package-content-policy.js";
+import { releaseRustEnv } from "../../../scripts/rust-build-env.js";
 import { ensureNativeShim } from "./native-shim.js";
 
 const packageVersion = (JSON.parse(readFileSync("package.json", "utf8")) as { version: string })
   .version;
 
 /** VS_VERSIONINFO 的一条 String：键、NUL、padding 个零字节、值、NUL。 */
-function versionString(value: string, padding: 0 | 2): Buffer {
+function versionString(value: string, padding: 0 | 2, decoy = ""): Buffer {
   const nul = String.fromCharCode(0);
   return Buffer.concat([
+    // 大二进制的常量区里也可能有同名串（宿主链接的库就有），在版本资源之前。
+    ...(decoy ? [Buffer.from(`ProductVersion${nul}${decoy}${nul}`, "utf16le")] : []),
+    Buffer.from(`VS_VERSION_INFO${nul}`, "utf16le"),
     Buffer.from("AyanamiTaskManager MCP stdio bridge", "utf16le"),
     Buffer.from(`ProductVersion${nul}`, "utf16le"),
     Buffer.alloc(padding),
@@ -33,15 +40,16 @@ function pngHeader(width: number, height: number, bytes = 24): Buffer {
 }
 
 describe("packaged application content policy", () => {
-  it("accepts the minimal runtime image", () => {
+  it("accepts the minimal version directory", () => {
     const entries = [
       ...REQUIRED_PACKAGED_ENTRIES,
-      "apps/desktop",
-      "apps/desktop/dist/renderer/assets/index.js",
+      "renderer/assets/index-BeYpKEDu.js",
+      "renderer/assets/logo-DNGVc3qF.png",
       "migrations/project/0018_session_list_keyset.sql",
-      "node_modules/zod/package.json",
-      "node_modules/better-sqlite3/build/Release",
-      "node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+      "runtime/node_modules/better-sqlite3/LICENSE",
+      "runtime/node_modules/better-sqlite3/lib/index.js",
+      "resources/docs/user-guide.md",
+      "resources/integrations/claude-code/README.md",
     ];
 
     expect(findForbiddenPackagedEntries(entries)).toEqual([]);
@@ -58,28 +66,35 @@ describe("packaged application content policy", () => {
     expect(REQUIRED_PACKAGED_ENTRIES).toContain(`migrations/registry/${newest}`);
   });
 
-  it("rejects repository sources, tests and native build metadata", () => {
+  it("rejects repository sources, source maps, native debug output and stray packages", () => {
     const forbidden = findForbiddenPackagedEntries([
       "/packages/domain/src/index.ts",
       "/scripts/release.ts",
-      "/apps/desktop/test/runtime-request.test.ts",
-      "/apps/desktop/src/main.ts",
-      "/node_modules/.cache/prettier/.prettier-caches/abc.json",
-      "/node_modules/better-sqlite3/build/better_sqlite3.vcxproj",
-      "/node_modules/better-sqlite3/build/Release/obj/better_sqlite3.recipe",
+      "apps/desktop/src/core-main.ts",
+      "runtime/core.mjs.map",
+      "AyanamiTaskManager.pdb",
+      "launcher/atm_launcher.exp",
+      "runtime/node_modules/zod/package.json",
+      "runtime/node_modules/better-sqlite3/src/better_sqlite3.cpp",
+      "runtime/node_modules/better-sqlite3/deps/sqlite3/sqlite3.c",
+      "runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+      ".github/workflows/ci.yml",
     ]);
 
-    expect(forbidden).toHaveLength(7);
+    expect(forbidden).toHaveLength(11);
   });
 
   it("reports missing runtime anchors", () => {
-    expect(missingRequiredPackagedEntries(["package.json"])).toContain(
-      "apps/desktop/dist/main/main.cjs",
-    );
-    expect(missingRequiredPackagedEntries(["package.json"])).toContain("logo.png");
-    expect(missingRequiredPackagedEntries(["package.json"])).toContain(
+    const missing = missingRequiredPackagedEntries(["AyanamiTaskManager.exe"]);
+    expect(missing).not.toContain("AyanamiTaskManager.exe");
+    for (const anchor of [
+      "LICENSE",
+      "runtime/atm-core.exe",
+      "runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node",
+      "resources/atm-mcp.exe",
       "migrations/knowledge/0001_initial.sql",
-    );
+    ])
+      expect(missing).toContain(anchor);
   });
 
   it("rejects user knowledge while requiring its schema migration", () => {
@@ -87,10 +102,10 @@ describe("packaged application content policy", () => {
       findForbiddenPackagedEntries([
         "knowledge/private.md",
         "knowledge/knowledge.sqlite",
-        "data/knowledge.sqlite-wal",
+        "data/registry.sqlite-wal",
         "migrations/knowledge/0001_initial.sql",
       ]),
-    ).toEqual(["data/knowledge.sqlite-wal", "knowledge/knowledge.sqlite", "knowledge/private.md"]);
+    ).toEqual(["data/registry.sqlite-wal", "knowledge/knowledge.sqlite", "knowledge/private.md"]);
   });
 
   it("rejects a high-resolution or oversized published logo", () => {
@@ -128,21 +143,160 @@ describe("packaged MCP shim", () => {
     }
   });
 
+  it("常量区里在前面的同名串不影响：只读版本资源结构里的值", () => {
+    expect(() =>
+      assertMcpShimVersionResource(versionString("1.2.3", 0, "garbage"), "1.2.3"),
+    ).not.toThrow();
+    expect(() => assertMcpShimVersionResource(versionString("1.2.4", 0, "1.2.3"), "1.2.3")).toThrow(
+      /PACKAGED_MCP_SHIM_VERSION_MISMATCH/u,
+    );
+  });
+
+  it("宿主和根启动器同名同描述，只认 InternalName 区分", () => {
+    const nul = String.fromCharCode(0);
+    const exe = (internalName: string, padding: 0 | 2) =>
+      Buffer.concat([
+        // 常量区里在前面的同名键不算。
+        Buffer.from(`InternalName${nul}AyanamiTaskManager.Launcher${nul}`, "utf16le"),
+        Buffer.from(`VS_VERSION_INFO${nul}`, "utf16le"),
+        Buffer.from(`InternalName${nul}`, "utf16le"),
+        Buffer.alloc(padding),
+        Buffer.from(`${internalName}${nul}`, "utf16le"),
+      ]);
+    for (const padding of [0, 2] as const) {
+      expect(executableInternalName(exe("AyanamiTaskManager.Host", padding))).toBe(
+        "AyanamiTaskManager.Host",
+      );
+      expect(() =>
+        assertExecutableIdentity(
+          exe("AyanamiTaskManager.Launcher", padding),
+          "AyanamiTaskManager.Launcher",
+          "LAUNCHER",
+        ),
+      ).not.toThrow();
+      expect(() =>
+        assertExecutableIdentity(
+          exe("AyanamiTaskManager.Host", padding),
+          "AyanamiTaskManager.Launcher",
+          "LAUNCHER",
+        ),
+      ).toThrow(
+        /PACKAGED_LAUNCHER_WRONG_EXECUTABLE: expected AyanamiTaskManager\.Launcher, found AyanamiTaskManager\.Host/u,
+      );
+    }
+    expect(() => assertExecutableIdentity(Buffer.alloc(64), "atm-setup", "SETUP")).toThrow(
+      /PACKAGED_SETUP_WRONG_EXECUTABLE: expected atm-setup, found null/u,
+    );
+  });
+
   it("没有版本资源的 exe 被拒", () => {
     expect(() => assertMcpShimVersionResource(Buffer.alloc(4096), "1.2.3")).toThrow(
       /PACKAGED_MCP_SHIM_VERSION_RESOURCE_MISSING/u,
     );
   });
 
-  it("forge 把 cargo 的 release 产物作为 extraResource 拷进 resources", () => {
-    const forge = readFileSync("forge.config.ts", "utf8");
-    const extraResource = /extraResource:\s*\[([\s\S]*?)\]/u.exec(forge)?.[1] ?? "";
-    expect(extraResource).toContain(`"${MCP_SHIM_RELEASE_EXE}"`);
-    // 打包入口先构建 shim 再打包、打完校验：顺序反了拷进去的就是上一次的构建。
-    const api = readFileSync("scripts/forge-api.ts", "utf8");
-    expect(api).toMatch(
-      /packageApplication\(dir: string\): Promise<void> \{\s*buildMcpShim\(dir\);\s*await api\.package\(/u,
+  it("打包先构建 shim、从 cargo 的 release 产物拷进 resources，打完按版本资源校验", () => {
+    const source = readFileSync("scripts/package-native.ts", "utf8");
+    expect(source).toContain("mcpShimExe: join(root, MCP_SHIM_RELEASE_EXE),");
+    // 顺序反了拷进去的就是上一次的构建。
+    expect(source.indexOf("buildMcpShim(root);")).toBeGreaterThan(0);
+    expect(source).toMatch(
+      /assertMcpShimVersionResource\(readFileSync\(join\(appDir, "resources", "atm-mcp\.exe"\)\), version\)/u,
     );
-    expect(api).toContain("assertMcpShimVersionResource(await readFile(shim), version)");
+  });
+
+  // 每一次打包都过内容策略：缺件或夹带都在出包前失败，不靠事后抽查。
+  it("打包在写清单前检查内容策略和发布 logo", () => {
+    const source = readFileSync("scripts/package-native.ts", "utf8");
+    const manifest = source.indexOf("const files: ManifestFile[] = [];");
+    for (const check of [
+      "findForbiddenPackagedEntries(payload)",
+      "findBuildMachinePath(",
+      "missingRequiredPackagedEntries(payload)",
+      "assertPublishedLogoBytes(",
+    ]) {
+      expect(source, check).toContain(check);
+      expect(source.indexOf(check), check).toBeLessThan(manifest);
+    }
+  });
+});
+
+// 依赖 crate 的源码路径会被编进 exe：1.2.2 发出去的 atm-mcp.exe 里就写着打包人的用户目录。
+describe("构建机路径", () => {
+  const needles = buildMachinePathNeedles(["C:\\Users\\builder", "D:\\src\\atm\\"]);
+
+  it("原样、小写、混合大小写、正斜杠，UTF-8 与 UTF-16LE 都认得出", () => {
+    for (const text of [
+      "panicked at C:\\Users\\builder\\.cargo\\registry\\src\\x.rs",
+      "c:\\users\\builder\\.cargo",
+      "C:\\USERS\\Builder\\.cargo",
+      "C:/Users/builder/.cargo",
+      "d:/src/atm/host/src/app.rs",
+      "D:/Src/ATM/host/src/app.rs",
+      // JSON 与 JS 字符串字面量里的反斜杠是两个，或写成 \u005c。
+      '{"path":"C:\\\\Users\\\\builder\\\\.cargo"}',
+      '{"path":"C:\\u005cUsers\\u005cBuilder\\u005c.cargo"}',
+    ]) {
+      expect(findBuildMachinePath(Buffer.from(text, "utf8"), needles), text).not.toBeNull();
+      expect(findBuildMachinePath(Buffer.from(text, "utf16le"), needles), text).not.toBeNull();
+    }
+    expect(findBuildMachinePath(Buffer.from("/cargo/registry/src/x.rs"), needles)).toBeNull();
+    // 非 ASCII 路径：汉字「字」的 UTF-16LE 是 57 5B，逐字节折 ASCII 会把 57 改坏；
+    // 宽字符串从奇数偏移开始也要认得出。
+    const wide = buildMachinePathNeedles(["C:\\Users\\字"]);
+    expect(findBuildMachinePath(Buffer.from("x C:\\USERS\\字\\a", "utf16le"), wide)).not.toBeNull();
+    expect(
+      findBuildMachinePath(
+        Buffer.concat([Buffer.from([0x20]), Buffer.from("C:\\USERS\\字", "utf16le")]),
+        wide,
+      ),
+    ).not.toBeNull();
+    expect(findBuildMachinePath(Buffer.from("C:\\Users\\字", "utf8"), wide)).not.toBeNull();
+    expect(findBuildMachinePath(Buffer.from("C:\\Users\\宇", "utf16le"), wide)).toBeNull();
+    // 非 ASCII 的大写字母：整体小写的写法也认。
+    const accented = buildMachinePathNeedles(["C:\\Users\\ÉMILE"]);
+    expect(findBuildMachinePath(Buffer.from("c:/users/émile/x", "utf8"), accented)).not.toBeNull();
+    // 整条路径逐字符写成 \uXXXX（大小写不同的十六进制也一样）。
+    const escaped = [..."C:\\Users\\builder"]
+      .map(
+        (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0").toUpperCase()}`,
+      )
+      .join("");
+    expect(findBuildMachinePath(Buffer.from(`{"p":"${escaped}"}`, "utf8"), needles)).not.toBeNull();
+    // 只折 ASCII：内容里的大写不能把别的字节也改了，原内容也不能被改动。
+    const original = Buffer.from("C:\\USERS\\BUILDER", "utf8");
+    findBuildMachinePath(original, needles);
+    expect(original.toString("utf8")).toBe("C:\\USERS\\BUILDER");
+  });
+
+  it("发布构建不继承外面的 CARGO_TARGET_DIR；外面设过的也当构建机路径扫", () => {
+    expect(
+      releaseRustEnv("D:\\src\\atm", { CARGO_TARGET_DIR: "E:\\cargo-target" }).CARGO_TARGET_DIR,
+    ).toBeUndefined();
+    expect(readFileSync("scripts/package-native.ts", "utf8")).toContain(
+      "...(process.env.CARGO_TARGET_DIR ? [resolve(root, process.env.CARGO_TARGET_DIR)] : []),",
+    );
+  });
+
+  it("发布构建把 cargo 主目录和仓库根重映射掉，并保留已有的 flag", () => {
+    const separator = String.fromCharCode(0x1f);
+    const env = releaseRustEnv("D:\\src\\atm", {
+      CARGO_HOME: "C:\\Users\\builder\\.cargo",
+      RUSTFLAGS: "-C target-cpu=native",
+    });
+    expect(env.CARGO_ENCODED_RUSTFLAGS?.split(separator)).toEqual([
+      "-C",
+      "target-cpu=native",
+      "--remap-path-prefix=C:\\Users\\builder\\.cargo=/cargo",
+      "--remap-path-prefix=D:\\src\\atm=/atm",
+    ]);
+  });
+
+  it("所有发布用的 cargo 构建都走这份环境", () => {
+    expect(readFileSync("scripts/mcp-shim-build.ts", "utf8")).toContain("...releaseRustEnv(root),");
+    expect(readFileSync("scripts/package-native.ts", "utf8")).toContain("...releaseRustEnv(root),");
+    expect(readFileSync("apps/desktop/test/native-shim.ts", "utf8")).toContain(
+      "env: releaseRustEnv(process.cwd()),",
+    );
   });
 });

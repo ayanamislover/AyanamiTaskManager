@@ -1,5 +1,6 @@
 import Database from "better-sqlite3";
 import { resolve } from "node:path";
+import { setImmediate as yieldTurn } from "node:timers/promises";
 import { AtmError } from "@ayanami-task/errors";
 import { LAST_BACKUP_OUTCOME_SQL, recentEventWindowSql } from "./global-event-queries.js";
 import {
@@ -330,7 +331,23 @@ export class RegistryObservability {
     const projectionByProject = new Map(
       projectionStates.map((state) => [state.project.id, state] as const),
     );
-    const projects = this.#dependencies.listProjects(true).map((project) => {
+    // quick_check / foreign_key_check 要把整个库读一遍，同步跑在请求所在的事件循环上：项目多、
+    // 库大、冷缓存再加上杀毒扫描时，连着查完所有库要好几秒，期间别的请求全在排队（设置页一打开
+    // 就查，用户看到的是整个界面卡住）。每查完一个库让出一次，别的请求能插进来。
+    const projects: Array<{
+      code: string;
+      lifecycle: string;
+      ok: boolean;
+      quickCheck: boolean;
+      foreignKeys: boolean;
+      separateDatabase: boolean;
+      projection: ProjectionStateView | null;
+    }> = [];
+    for (const project of this.#dependencies.listProjects(true)) {
+      if (projects.length > 0) await yieldTurn();
+      projects.push(checkProject(project));
+    }
+    function checkProject(project: RegisteredProject) {
       let sqlite: Database.Database | null = null;
       try {
         sqlite = new Database(project.databasePath, {
@@ -362,7 +379,7 @@ export class RegistryObservability {
       } finally {
         sqlite?.close();
       }
-    });
+    }
     const projectCounts: Record<string, { total: number; failed: number }> = {};
     for (const project of projects) {
       const current = projectCounts[project.lifecycle] ?? { total: 0, failed: 0 };

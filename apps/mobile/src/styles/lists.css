@@ -1,0 +1,264 @@
+/* 列表类卡片：发出的任务（命令卡）与项目页的任务卡、已完成行。从 screens.css 拆出。 */
+
+/* ─── 发出的任务 ─── */
+.command-card {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-soft);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
+}
+.command-card[data-compact="true"] {
+  border: 0;
+  background: var(--atm-surface-muted);
+  box-shadow: none;
+}
+.command-main {
+  display: flex;
+  min-width: 0;
+  min-height: 56px;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: inherit;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+.command-dot {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--tone, var(--atm-st-ready));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--tone, var(--atm-st-ready)) 20%, transparent);
+}
+.command-dot[data-tone="pending"] {
+  --tone: var(--atm-st-agent);
+  animation: pulse 1.6s var(--atm-ease-in-out) infinite;
+}
+.command-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+/* 时间放在标题行右侧，下面的原因才能占满整宽。 */
+.command-head {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.command-copy strong {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+/* 拒收原因里常带「去终端运行 claude auth login」这类要照做的指引，截成一行就读不到了：最多放三行。 */
+.command-detail {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.command-time {
+  flex: none;
+  color: var(--atm-text-faint);
+  font: 12px var(--atm-mono);
+}
+.command-dismiss {
+  display: grid;
+  width: var(--touch);
+  flex: none;
+  place-items: center;
+  margin-left: -8px;
+  border: 0;
+  border-radius: 0 var(--radius-soft) var(--radius-soft) 0;
+  color: var(--atm-text-faint);
+  background: transparent;
+}
+
+/* ─── 项目：任务卡 ─── */
+.task-group {
+  display: grid;
+  gap: 10px;
+}
+.task-card {
+  display: grid;
+  gap: 8px;
+  padding: 14px 16px;
+}
+.task-card-head {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 8px;
+}
+.task-key {
+  color: var(--atm-text-faint);
+  font: 500 12px var(--atm-mono);
+}
+.task-card-head .badge {
+  margin-left: auto;
+}
+.priority-flag {
+  padding: 1px 7px;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--atm-st-user) 60%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-user) 14%, transparent);
+  font-size: 11px;
+  font-weight: 650;
+}
+.priority-flag[data-priority="CRITICAL"] {
+  color: color-mix(in srgb, var(--atm-st-blocked) 60%, var(--atm-text));
+  background: color-mix(in srgb, var(--atm-st-blocked) 14%, transparent);
+}
+.task-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.task-note {
+  display: -webkit-box;
+  overflow: hidden;
+  padding: 6px 10px;
+  border-radius: 10px;
+  color: color-mix(in srgb, var(--tone) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--tone) 10%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+.task-note[data-status="BLOCKED"] {
+  --tone: var(--atm-st-blocked);
+}
+.task-note[data-status="WAITING_USER"] {
+  --tone: var(--atm-st-user);
+}
+.task-note[data-status="WAITING_AGENT"] {
+  --tone: var(--atm-st-agent);
+}
+.task-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.task-percent {
+  min-width: 34px;
+  color: var(--atm-text-muted);
+  font: 500 12px var(--atm-mono);
+  text-align: right;
+}
+.task-meta {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.task-agent {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--atm-text-muted);
+  font: 12px var(--atm-mono);
+}
+.task-agent > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-agent > svg {
+  flex: none;
+}
+.task-agent.is-empty {
+  color: var(--atm-text-faint);
+  font-family: var(--atm-font);
+  font-size: 13px;
+}
+.task-time {
+  flex: none;
+  color: var(--atm-text-faint);
+  font: 12px var(--atm-mono);
+}
+
+/* 最近完成：退后一档——柔色底、无阴影、单行。 */
+.task-group[data-group="done"] .task-list {
+  gap: 0;
+  padding: 4px 0;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--atm-surface) 55%, transparent);
+}
+.done-row {
+  position: relative;
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
+.done-row + .done-row::before {
+  position: absolute;
+  top: 0;
+  right: 16px;
+  left: 46px;
+  height: 1px;
+  background: var(--atm-border);
+  content: "";
+}
+.done-check {
+  display: grid;
+  flex: none;
+  color: var(--atm-st-done);
+}
+.done-check[data-status="CANCELLED"] {
+  color: var(--atm-st-ready);
+}
+.done-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+.done-title {
+  overflow: hidden;
+  color: var(--atm-text-muted);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.done-meta {
+  display: flex;
+  gap: 8px;
+  color: var(--atm-text-faint);
+  font-size: 12px;
+}
+.more-button {
+  justify-self: center;
+  margin: 0;
+}

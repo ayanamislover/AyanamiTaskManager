@@ -124,6 +124,73 @@ describe("Project database pool boundaries", () => {
     await manager.openProject(project.id);
     expect(getProject).toHaveBeenCalledWith(project.id);
   });
+
+  // 关窗后让各连接还页缓存：SQLite 的页缓存在 V8 堆外，不还回去的话关窗后常驻内存比开窗前
+  // 高约 50 MiB（ATM-T-0523）。不关任何连接：跨 await 用着缓存连接的请求回来时库还得开着。
+  it("memory release shrinks every open connection and closes none, however long idle", async () => {
+    const { manager } = await openManager("release");
+    let tick = 50_000;
+    vi.spyOn(Date, "now").mockImplementation(() => tick);
+    const first = await manager.createProject({ name: "First", sourcePath: null, code: "RFIRST" });
+    const second = await manager.createProject({
+      name: "Second",
+      sourcePath: null,
+      code: "RSECOND",
+    });
+    const firstDatabase = await manager.openProject(first.id);
+    const secondDatabase = await manager.openProject(second.id);
+    const firstPragma = vi.spyOn(firstDatabase.sqlite, "pragma");
+    const secondPragma = vi.spyOn(secondDatabase.sqlite, "pragma");
+    const registryPragma = vi.spyOn(manager.registry.sqlite, "pragma");
+    tick += 24 * 3_600_000;
+    manager.releaseMemory();
+    expect(firstDatabase.sqlite.open).toBe(true);
+    expect(secondDatabase.sqlite.open).toBe(true);
+    for (const pragma of [firstPragma, secondPragma, registryPragma])
+      expect(pragma).toHaveBeenCalledWith("shrink_memory");
+    expect(firstPragma).not.toHaveBeenCalledWith(expect.stringMatching(/^wal_checkpoint/u));
+  });
+
+  // 备份跨 await 用着连接；lastUsed 只在取连接时更新，备份跑得比空闲阈值久也不能被关掉。
+  it("a backup in progress keeps its connection through idle reclaim and capacity eviction", async () => {
+    const { manager } = await openManager("release-backup");
+    const project = await manager.createProject({ name: "Held", sourcePath: null, code: "RHOLD" });
+    const database = await manager.openProject(project.id);
+    const backup = database.sqlite.backup.bind(database.sqlite);
+    let closedDuringBackup = 0;
+    vi.spyOn(database.sqlite, "backup").mockImplementation(async (destination) => {
+      // 每小时的空闲回收正好落在备份进行中：时间已远超空闲阈值。
+      closedDuringBackup = manager.closeIdleProjects(0, Date.now() + 3_600_000);
+      return backup(destination);
+    });
+    const created = await manager.createBackup({
+      scope: "PROJECT",
+      project: project.id,
+      reason: "MANUAL",
+    });
+    expect(closedDuringBackup).toBe(0);
+    expect(database.sqlite.open).toBe(true);
+    expect(existsSync(created.path)).toBe(true);
+    // 容量淘汰同理：备份中的库最旧，开满 8 个别的库也不能淘汰它。
+    const others = [];
+    for (let index = 0; index < 8; index += 1)
+      others.push(
+        await manager.createProject({
+          name: `Other ${index}`,
+          sourcePath: null,
+          code: `ROT${index}`,
+        }),
+      );
+    vi.spyOn(database.sqlite, "backup").mockImplementation(async (destination) => {
+      for (const other of others) await manager.openProject(other.id);
+      return backup(destination);
+    });
+    await manager.createBackup({ scope: "PROJECT", project: project.id, reason: "MANUAL" });
+    expect(database.sqlite.open).toBe(true);
+    // 备份结束放下持有，之后照常按空闲回收。
+    expect(manager.closeIdleProjects(0, Date.now() + 3_600_000)).toBeGreaterThanOrEqual(1);
+    expect(database.sqlite.open).toBe(false);
+  });
 });
 
 describe("Backup and restore failure atomicity", () => {

@@ -23,7 +23,7 @@ Use `ATM_DATA_DIR` with a disposable directory for development and tests. Do not
 
 ## Change guidelines
 
-1. Keep domain and application behavior out of Electron/HTTP/MCP adapters; all entry points should reuse the same application services.
+1. Keep domain and application behavior out of desktop host/HTTP/MCP adapters; all entry points should reuse the same application services.
 2. Add focused tests that fail for the original defect. For UI changes, also inspect the rendered result and preserve the existing design system, keyboard access and reduced-motion behavior.
 3. Keep migrations additive and transactional. Existing project databases and idempotency receipts are compatibility surfaces.
 4. Update public docs and generated contracts when behavior or Agent-facing schemas change.

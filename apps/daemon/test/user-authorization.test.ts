@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { AyanamiTaskService } from "@ayanami-task/application";
 import { authenticate, buildAyanamiServer, type AtmRouteEntry } from "../src/index.js";
@@ -132,11 +134,64 @@ async function server(userToken?: string) {
   return {
     service,
     app,
+    dataDir,
     async close() {
       await app.close();
       service.close();
     },
   };
+}
+
+/**
+ * 数据根的全量指纹：每个 SQLite 库每张表（含 FTS 影子表）的全部行，加上库以外每个文件的内容。
+ * WAL/SHM 与诊断日志不算数据；库文件本身按行比，不按字节比（检查点会改字节不改数据）。
+ */
+function dataFingerprint(dataDir: string): Record<string, string> {
+  const digest = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+  const fingerprint: Record<string, string> = {};
+  const walk = (directory: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const name = relative(dataDir, path).replaceAll("\\", "/");
+      if (entry.isDirectory()) {
+        if (name !== "logs") walk(path);
+        continue;
+      }
+      if (/-(?:wal|shm|journal)$/u.test(name)) continue;
+      if (!/\.(?:db|sqlite)$/u.test(name)) {
+        fingerprint[name] = digest(readFileSync(path));
+        continue;
+      }
+      const database = new Database(path, { readonly: true, fileMustExist: true });
+      try {
+        const tables = database
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+          .all() as Array<{ name: string }>;
+        for (const { name: table } of tables) {
+          const rows = database
+            .prepare(`SELECT * FROM "${table.replaceAll('"', '""')}"`)
+            .raw()
+            .all()
+            .map((row) => JSON.stringify(row))
+            .sort();
+          fingerprint[`${name}#${table}`] = digest(rows.join("\n"));
+        }
+      } finally {
+        database.close();
+      }
+    }
+  };
+  walk(dataDir);
+  return fingerprint;
+}
+
+function fingerprintChanges(
+  before: Record<string, string>,
+  after: Record<string, string>,
+): string[] {
+  return [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter((key) => before[key] !== after[key])
+    .sort();
 }
 
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
@@ -173,13 +228,17 @@ describe("用户凭证与 Agent 凭证分离", () => {
   });
 
   it("每条用户操作路由都拒绝 Agent 令牌，且不碰数据", async () => {
-    const { service, app, close } = await server(USER);
+    const { service, app, dataDir, close } = await server(USER);
     try {
       // 断言放在 try 里：失败时也要先关库，否则临时目录删不掉。
       const routes = userOnlyRoutes(app.atmRoutes);
       expect(routes.length).toBeGreaterThanOrEqual(25);
       await service.createProject({ name: "授权边界", sourcePath: null, code: "AUTHZ" });
+      // de-electron §9「所有用户专属 mutation 仍对 Agent 403 且无副作用」：只看 403 不够——
+      // 先执行、后判权限的写法同样回 403。每条路由前后各取一次数据根全量指纹（每个库每张表的
+      // 全部行 + 库以外的文件），任何一处变化都点名到那条路由。
       for (const route of routes) {
+        const before = dataFingerprint(dataDir);
         const response = await app.inject({
           method: route.method as "POST",
           url: concrete(route.url),
@@ -190,8 +249,27 @@ describe("用户凭证与 Agent 凭证分离", () => {
         expect(response.json().error, route.url).toMatchObject({
           code: "USER_AUTHORIZATION_REQUIRED",
         });
+        expect(
+          fingerprintChanges(before, dataFingerprint(dataDir)),
+          `${route.method} ${route.url}`,
+        ).toEqual([]);
       }
       expect(service.databases.getProject("AUTHZ").lifecycle).toBe("ACTIVE");
+
+      // 阳性对照：同一组请求换成用户令牌，指纹必须认得出真实写入（否则上面的「无变化」是空转）。
+      const changedByUser: string[] = [];
+      for (const route of routes) {
+        const before = dataFingerprint(dataDir);
+        await app.inject({
+          method: route.method as "POST",
+          url: concrete(route.url),
+          headers: bearer(USER),
+          payload: { actor: "USER", opId: "authz-probe" },
+        });
+        if (fingerprintChanges(before, dataFingerprint(dataDir)).length > 0)
+          changedByUser.push(`${route.method} ${route.url}`);
+      }
+      expect(changedByUser.length, "用户令牌下没有任何一条路由留下可见写入").toBeGreaterThan(0);
     } finally {
       await close();
     }

@@ -30,8 +30,8 @@ pnpm atm backup list --project ATM
 
 使用文件级备份软件时，先从托盘“完全退出” ATM，再备份数据根中的 `registry/`、`projects/`
 和 `backups/`；`exports/` 可按需保留。备份工具必须启用“跳过重解析点/目录链接”，并明确排除
-`current/`：它是指向当前 Squirrel 安装目录的 junction，不属于用户数据，跟随它会把整套
-Electron/Chromium 安装文件重复计入备份。`runtime/`、`logs/` 以及随安装包重新分发的 Guide、
+`current/`：它是指向安装根（`%LOCALAPPDATA%\AyanamiTaskManagerDesktop`）的 junction，不属于
+用户数据，跟随它会把整套程序文件重复计入备份。`runtime/`、`logs/` 以及随安装包重新分发的 Guide、
 docs、skills 和 MCP bridge 都不是恢复任务状态所必需的内容。
 
 仓库提供的 `migrate:data-root` 同样跳过所有符号链接和 junction；迁移完成后由新安装版重新创建

@@ -23,7 +23,7 @@ Kimi Code 的 VS Code 扩展与 CLI 共用 `~/.kimi-code`，装一次两边都�
 
 stdio MCP 由随包的原生转发程序 `resources\atm-mcp.exe` 承担：它只读 `runtime/daemon.json`、把每行 JSON-RPC 转发到本机 daemon，每个进程私有内存不到 1 MB，不需要任何环境变量。写进 Agent 配置的路径是数据目录下的版本无关链接 `current\resources\atm-mcp.exe`，升级后旧配置依然有效；三个 Profile 各起一个进程，参数只有 `--profile core|memory|actions`。daemon 未运行时它会唤醒一次同目录的桌面程序并等待发布。
 
-`atm-mcp.exe` 缺失时（开发态、旧安装、被杀毒软件隔离），ATM 回落到旧方式：用 `ELECTRON_RUN_AS_NODE=1` 把桌面 EXE 当 Node 运行 `mcp-stdio.cjs`，协议完全相同，只是每个进程约 30 MB。启动时的配置修复会在两种方式之间自动迁移。Windows GUI EXE 本身没有可用 stdin，因此不要把桌面 EXE 直接当 stdio 程序。
+`atm-mcp.exe` 缺失时（开发态、被杀毒软件隔离），ATM 回落到桌面程序自己的 `--mcp-stdio`：命令是 `current\AyanamiTaskManager.exe`，参数 `--mcp-stdio --profile <name>`。它把请求转给当前版本的宿主，宿主用随包的 Node 运行 `mcp-stdio.cjs` 并等它退出；协议完全相同，只是每个连接多一个 Node 进程。启动时的配置修复会在两种方式之间自动迁移，1.x 写下的 `ELECTRON_RUN_AS_NODE=1` 旧配置也会在首次启动时改写（改写前宿主仍认这条旧命令）。不带 `--mcp-stdio` 的桌面 EXE 不是 stdio 程序，不要直接把它写进 Agent 配置。
 
 ## 标准 Session 流程
 

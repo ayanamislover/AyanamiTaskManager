@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ATM 任务</string>
+    <string name="title_activity_main">ATM 任务</string>
+    <string name="package_name">moe.ayanami.atm</string>
+    <string name="custom_url_scheme">moe.ayanami.atm</string>
+</resources>

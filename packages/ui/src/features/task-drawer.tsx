@@ -14,6 +14,7 @@ import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { compactPath, progressSourceLabels, Status } from "../presentation.js";
 import { workItemUiActions } from "../task-actions.js";
 import { phaseBadgeLabel, taskProgressPresentation } from "../task-progress.js";
+import { TaskDispatchBadge, TaskDispatchButton } from "./task-dispatch.js";
 
 export function TaskDrawer({
   client,
@@ -188,6 +189,7 @@ export function TaskDrawer({
               <span className="atm-drawer-status-label">状态</span>
               <Status value={String(query.data!.status)} />
               {phaseBadge ? <span className="atm-badge">{phaseBadge}</span> : null}
+              <TaskDispatchBadge client={client} project={project} taskKey={taskKey} />
             </div>
             <div className="atm-actions atm-drawer-actions">
               {workItemUiActions({
@@ -212,6 +214,17 @@ export function TaskDrawer({
                   {label}
                 </button>
               ))}
+              <TaskDispatchButton
+                client={client}
+                project={project}
+                taskKey={taskKey}
+                task={{
+                  status: String(query.data!.status),
+                  claimedBySessionId: (query.data as Record<string, unknown>).claimedBySessionId,
+                  claimLeaseUntil: (query.data as Record<string, unknown>).claimLeaseUntil,
+                }}
+                notify={notify}
+              />
             </div>
             <MutationErrorAlert errors={[patch.error, check.error]} />
             {query.data!.description ? (

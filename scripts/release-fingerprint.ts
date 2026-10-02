@@ -27,11 +27,11 @@ export type ReleaseSourceProvenance = {
  * 昂贵且作用域明确的阶段各自声明依赖：输入没变就复用上次的绿，而不是重证已证之事。
  *
  * 只收三个阶段。lint / format / typecheck / test 合计 26 秒就跑完 147 个用例，
- * 省它们既没收益又要担风险，一律照跑；build / forge-make / packaged-smoke 要产出
+ * 省它们既没收益又要担风险，一律照跑；build / package / packaged-smoke 要产出
  * 并验证本版本的产物，也必须每次跑。
  *
  * 声明式而不是 --fast 开关：开关会用错（人判断"这次改动小"），声明不会——碰了
- * scripts/ 或 forge.config.ts，distribution-smoke 自动回来。
+ * scripts/、原生工作区或图标，distribution-smoke 自动回来。
  */
 export type StageInputs = {
   include: string[];
@@ -87,8 +87,10 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
   // 而「装不上」的代价远大于多跑三十秒。
   "distribution-smoke": {
     include: [
-      "forge.config.ts",
       "scripts/",
+      // 根目录的图标与许可证随原生构建和打包进版本目录。
+      "logo.ico",
+      "LICENSE",
       "package.json",
       "pnpm-lock.yaml",
       "apps/desktop/src/",
@@ -121,8 +123,11 @@ export type ReleaseResumeDecision = {
 
 export type ReleaseRunMode = "standard" | "resume" | "full";
 
+/** `--local-only` 不改运行模式，只原样交给 assembler（见 assemble-release.ts）。 */
 export function parseReleaseRunMode(args: readonly string[]): ReleaseRunMode {
-  const unknown = args.filter((argument) => argument !== "--resume" && argument !== "--full");
+  const unknown = args.filter(
+    (argument) => argument !== "--resume" && argument !== "--full" && argument !== "--local-only",
+  );
   if (unknown.length > 0) throw new Error(`RELEASE_ARGUMENT_UNKNOWN: ${unknown.join(", ")}`);
   if (args.includes("--resume") && args.includes("--full")) {
     throw new Error("RELEASE_ARGUMENT_CONFLICT: --resume 与 --full 不能同时使用");

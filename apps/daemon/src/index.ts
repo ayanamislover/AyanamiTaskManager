@@ -1,13 +1,15 @@
 import type { FastifyInstance } from "fastify";
+import { registerDispatchRoutes } from "./dispatch-routes.js";
 import { createHttpServer, installNotFoundHandler } from "./http-boundary.js";
 import { registerKnowledgeRoutes } from "./knowledge-routes.js";
 import { registerProjectRoutes } from "./project-routes.js";
 import type { AyanamiServerOptions } from "./server-options.js";
 import { registerSessionRoutes } from "./session-routes.js";
+import { registerSyncRoutes } from "./sync-routes.js";
 import { registerTransportRoutes } from "./transport-routes.js";
 import { registerWorkRoutes } from "./work-routes.js";
 
-export type { AyanamiServerOptions } from "./server-options.js";
+export type { AyanamiServerOptions, DispatchController, SyncController } from "./server-options.js";
 export { authenticate, type AtmPrincipal } from "./http-boundary.js";
 export {
   acquireDaemonRuntime,
@@ -22,7 +24,7 @@ export {
   type DaemonRuntimeDescriptor,
   type DaemonRuntimeLease,
 } from "./runtime-discovery.js";
-export { prefetchSelfProcessIdentity } from "./process-identity.js";
+export { configureProcessIdentityHelper, prefetchSelfProcessIdentity } from "./process-identity.js";
 import { DAEMON_VERSION } from "./runtime-discovery.js";
 
 export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<FastifyInstance> {
@@ -32,6 +34,8 @@ export async function buildAyanamiServer(input: AyanamiServerOptions): Promise<F
   registerKnowledgeRoutes(app, options);
   registerWorkRoutes(app, options);
   registerSessionRoutes(app, options);
+  registerDispatchRoutes(app, options.dispatch);
+  registerSyncRoutes(app, options.sync);
   await registerTransportRoutes(app, options);
   installNotFoundHandler(app);
   await app.ready();

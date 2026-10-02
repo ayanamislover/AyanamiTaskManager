@@ -1,5 +1,5 @@
 import { existsSync, rmSync } from "node:fs";
-import { readdir, rm } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 // 「产品装在哪、快捷方式落在哪」只能有一份认知。发布脚本负责卸载后清理，
@@ -66,12 +66,29 @@ export async function findProductShortcuts(
   );
 }
 
-export async function removeProductShortcuts(
-  roots: string[] = productShortcutRoots(),
-): Promise<string[]> {
-  const shortcuts = await findProductShortcuts(roots);
-  for (const shortcut of shortcuts) await rm(shortcut, { force: true });
-  return shortcuts;
+/** PowerShell 单引号字面量：只有单引号要翻倍，反斜杠原样（JSON 的转义规则在这里是错的）。 */
+export function powerShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/**
+ * 结束本安装根里 `resources\atm-mcp.exe` 的进程（各 Agent 会话的 stdio shim），输出被结束的 PID。
+ *
+ * 映像路径要精确相等，别处的 atm-mcp（便携版、另一份安装）不碰。先取进程句柄再核路径、再用
+ * 同一个句柄结束：句柄开着，这个 PID 就不会被系统复用，「先枚举 PID、再 taskkill」之间换了
+ * 进程的竞态也就没有了。
+ */
+export function stopInstalledShimsScript(installRoot: string): string {
+  const image = join(installRoot, "resources", "atm-mcp.exe");
+  return [
+    `$image = ${powerShellLiteral(image)}`,
+    "Get-Process -Name atm-mcp -ErrorAction SilentlyContinue | ForEach-Object {",
+    "  try { $null = $_.Handle } catch { return }",
+    "  if ($_.Path -and [string]::Equals($_.Path, $image, [StringComparison]::OrdinalIgnoreCase)) {",
+    "    $_.Kill(); $_.Id",
+    "  }",
+    "}",
+  ].join("\n");
 }
 
 /**

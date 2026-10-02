@@ -1,0 +1,30 @@
+[package]
+name = "atm-install-state"
+version = "0.0.0"
+description = "AyanamiTaskManager install state and admission rules shared by host, launcher and setup"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# 测试构建才有的 SMOKE_QUIT 管道命令（宿主 smoke feature 透传）。
+smoke = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Console",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
+] }

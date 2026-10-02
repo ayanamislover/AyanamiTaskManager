@@ -59,8 +59,8 @@ function candidateArtifacts(
   return {
     setup: { name: "Setup.exe", bytes: 42, sha256: HASH_A },
     portable: { name: "Portable.zip", bytes: 43, sha256: HASH_B },
-    upgradePackage: { name: "Update-full.nupkg", bytes: 44, sha256: "C".repeat(64) },
-    releases: { name: "RELEASES", bytes: 45, sha256: "D".repeat(64) },
+    package: { name: "atm-9.9.9-win-x64.zip", bytes: 44, sha256: "C".repeat(64) },
+    manifest: { name: "atm-9.9.9-win-x64.json", bytes: 45, sha256: "D".repeat(64) },
     ...overrides,
   };
 }
@@ -122,14 +122,14 @@ describe("发布候选身份", () => {
         version: "9.9.9",
         fingerprint: fingerprint(),
         artifacts: candidateArtifacts({
-          upgradePackage: { name: "Update-full.nupkg", bytes: 44, sha256: HASH_A },
+          package: { name: "atm-9.9.9-win-x64.zip", bytes: 44, sha256: HASH_A },
         }),
       }),
       createReleaseCandidateIdentity({
         version: "9.9.9",
         fingerprint: fingerprint(),
         artifacts: candidateArtifacts({
-          releases: { name: "RELEASES", bytes: 45, sha256: HASH_A },
+          manifest: { name: "atm-9.9.9-win-x64.json", bytes: 45, sha256: HASH_A },
         }),
       }),
     ];
@@ -144,7 +144,7 @@ describe("发布候选身份", () => {
       ...base,
       artifacts: {
         ...base.artifacts,
-        upgradePackage: { ...base.artifacts.upgradePackage, sha256: HASH_A },
+        package: { ...base.artifacts.package, sha256: HASH_A },
       },
     };
     expect(() => assertReleaseCandidateIdentity(manifestArtifactTamper)).toThrow(
@@ -165,7 +165,7 @@ describe("发布候选身份", () => {
     const missingArtifact = {
       setup: base.artifacts.setup,
       portable: base.artifacts.portable,
-      upgradePackage: base.artifacts.upgradePackage,
+      package: base.artifacts.package,
     };
     expect(() =>
       assertReleaseCandidateIdentity({
@@ -278,12 +278,22 @@ describe("发布报告的证据出处", () => {
     }
   });
 
-  it("assembler 从已通过烟测的发行程序读取 Electron ABI", () => {
+  it("assembler 从发行包里的运行时读取 Node ABI，而不是开发机上的 node", () => {
     expect(ASSEMBLER).toMatch(
-      /join\(\s*root,\s*"out",\s*"AyanamiTaskManager-win32-x64",\s*"AyanamiTaskManager\.exe"/u,
+      /join\(\s*root,\s*"output",\s*"package",\s*`app-\$\{packageJson\.version\}`,\s*APP_LAYOUT\.coreExe/u,
     );
-    expect(ASSEMBLER).not.toContain('join(root, "node_modules", "electron", "dist"');
+    expect(ASSEMBLER).not.toContain("process.execPath");
+    expect(ASSEMBLER).not.toMatch(/electron/iu);
     expect(ASSEMBLER).toContain("if (probe.error)");
+  });
+
+  // 安装验收只在干净机器上做；跳过时不能假装有 INSTALLED 层。
+  it("assembler 只在 distribution 报告记为 verified 时读 installed 报告并追加 INSTALLED 层", () => {
+    expect(ASSEMBLER).toContain('distributionSmoke.installed === "verified"');
+    const layer = ASSEMBLER.indexOf('level: "INSTALLED_VERIFIED"');
+    const guard = ASSEMBLER.lastIndexOf("if (installedSmoke) {", layer);
+    expect(guard).toBeGreaterThan(0);
+    expect(ASSEMBLER.slice(guard, layer)).not.toContain("}");
   });
 });
 
@@ -298,9 +308,7 @@ describe("发行报告里的证据路径", () => {
     expect(releaseLogReportPath(join("release-logs", "test.log"))).toBe(
       "test-report/logs/test.log",
     );
-    expect(releaseLogReportPath("release-logs\\forge-make.log")).toBe(
-      "test-report/logs/forge-make.log",
-    );
+    expect(releaseLogReportPath("release-logs\\package.log")).toBe("test-report/logs/package.log");
     expect(releaseLogReportPath("release-logs/packaged-smoke.log")).toBe(
       "test-report/logs/packaged-smoke.log",
     );

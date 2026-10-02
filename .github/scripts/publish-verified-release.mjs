@@ -65,6 +65,8 @@ const manifest = await readJson(join(releaseRoot, "release.json"));
 const summary = await readJson(join(releaseRoot, "test-report/summary.json"));
 const verification = await readJson(join(releaseRoot, "test-report/release-verification.json"));
 assert.equal(manifest.version, version);
+// Local-only candidates (release-and-install) may lack required notices; never publish them.
+assert.equal(manifest.distributable, true, "Candidate is not distributable");
 assert.equal(manifest.commit, head);
 assert.equal(manifest.candidate.gitHead, head);
 assert.deepEqual(summary.candidate, manifest.candidate);
@@ -84,7 +86,7 @@ const stages = [
   "e2e",
   "benchmark",
   "build",
-  "forge-make",
+  "package",
   "packaged-smoke",
   "distribution-smoke",
 ];
@@ -117,10 +119,10 @@ for (const layer of summary.evidenceLayers) {
   }
 }
 const expectedNames = [
-  `AyanamiTaskManager-Setup-${version}-win-x64.exe`,
+  "atm-setup.exe",
+  `atm-${version}-win-x64.zip`,
+  `atm-${version}-win-x64.json`,
   `AyanamiTaskManager-${version}-win-x64-portable.zip`,
-  `AyanamiTaskManagerDesktop-${version}-full.nupkg`,
-  "RELEASES",
   "release.json",
   "sbom.spdx.json",
 ];

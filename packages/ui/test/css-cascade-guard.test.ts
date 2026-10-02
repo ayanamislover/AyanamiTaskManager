@@ -20,6 +20,7 @@ const expectedImports = [
   "./styles/features-knowledge.css",
   "./styles/controls.css",
   "./styles/features-secondary.css",
+  "./styles/features-sync.css",
   "./styles/overlays.css",
   "./styles/responsive.css",
   "./styles/accessibility.css",

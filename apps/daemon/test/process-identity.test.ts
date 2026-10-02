@@ -1,5 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { isDifferentProcess, readProcessIdentity } from "../src/process-identity.js";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  configureProcessIdentityHelper,
+  isDifferentProcess,
+  readProcessIdentity,
+} from "../src/process-identity.js";
+
+afterEach(() => configureProcessIdentityHelper(null));
 
 const observed = { createdAtTicks: "638000000000000000", startedAtMs: 1664403200000 };
 describe("runtime owner birth identity", () => {
@@ -29,5 +37,28 @@ describe("runtime owner birth identity", () => {
       expect(identity!.startedAtMs).toBeLessThanOrEqual(Date.now());
       expect(identity!.startedAtMs).toBeGreaterThan(Date.now() - process.uptime() * 1000 - 5000);
     },
+  );
+  // 有宿主时问宿主（--process-identity）；宿主给不出答案就退回 PowerShell，答案与只问 PowerShell 相同。
+  it.runIf(process.platform === "win32")(
+    "falls back to PowerShell whenever the helper gives no answer",
+    async () => {
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 20000)"], {
+        stdio: "ignore",
+      });
+      try {
+        const direct = readProcessIdentity(child.pid!);
+        expect(direct?.createdAtTicks).toMatch(/^\d{17,19}$/u);
+        // 宿主不在、或起来了却不认这个参数（node.exe）：都退回 PowerShell，答案一样。
+        configureProcessIdentityHelper(join(process.cwd(), "output", "no-such-helper.exe"));
+        expect(readProcessIdentity(child.pid!)).toEqual(direct);
+        configureProcessIdentityHelper(process.execPath);
+        expect(readProcessIdentity(child.pid!)).toEqual(direct);
+        // 进程不存在：哪条路都查不到。
+        expect(readProcessIdentity(0x7ffffff0)).toBeNull();
+      } finally {
+        child.kill();
+      }
+    },
+    20_000,
   );
 });

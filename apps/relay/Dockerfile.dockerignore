@@ -1,0 +1,8 @@
+# 仅供 apps/relay/Dockerfile 使用（BuildKit 的「Dockerfile 专属 ignore 文件」）。
+# 构建上下文是仓库根，但镜像只需要下面这几样；其余一律不送进构建器。
+*
+!tsconfig.base.json
+!apps/relay/package.json
+!apps/relay/tsconfig.json
+!apps/relay/tsup.config.ts
+!apps/relay/src

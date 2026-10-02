@@ -1,0 +1,90 @@
+apply plugin: 'com.android.application'
+
+def mobileDir = rootProject.projectDir.parentFile
+def versionProps = new Properties()
+file("${mobileDir}/version.properties").withInputStream { versionProps.load(it) }
+def packageInfo = new groovy.json.JsonSlurper().parse(file("${mobileDir}/package.json"))
+
+// 发布签名：默认读「主仓库」的 .local/android/keystore.properties。
+// 在 git worktree 里构建也落到同一处——用 git 的公共目录找主仓库根，而不是当前工作树。
+// ATM_ANDROID_KEYSTORE_PROPS 可以指到别处（例如外部备份）。
+def keystorePropsPath = System.getenv('ATM_ANDROID_KEYSTORE_PROPS')
+if (!keystorePropsPath) {
+    try {
+        def commonDir = providers.exec {
+            workingDir mobileDir
+            commandLine 'git', 'rev-parse', '--path-format=absolute', '--git-common-dir'
+        }.standardOutput.asText.get().trim()
+        keystorePropsPath = new File(new File(commonDir).parentFile, '.local/android/keystore.properties').path
+    } catch (Exception ignored) {
+        keystorePropsPath = new File(mobileDir.parentFile.parentFile, '.local/android/keystore.properties').path
+    }
+}
+def signingPropsFile = file(keystorePropsPath)
+def signingProps = new Properties()
+if (signingPropsFile.exists()) signingPropsFile.withInputStream { signingProps.load(it) }
+def signingReady = ['storeFile', 'storePassword', 'keyAlias', 'keyPassword'].every { signingProps.getProperty(it) }
+gradle.taskGraph.whenReady { graph ->
+    if (graph.allTasks.any { it.project == project && it.name.toLowerCase().contains('release') } && !signingReady) {
+        throw new GradleException('缺少发布签名配置：先运行 apps/mobile/scripts/keygen.ps1，或用 ATM_ANDROID_KEYSTORE_PROPS 指定 keystore.properties。')
+    }
+}
+
+android {
+    namespace = "moe.ayanami.atm"
+    compileSdk = rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "moe.ayanami.atm"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode Integer.parseInt(versionProps.getProperty('versionCode'))
+        versionName packageInfo.version
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            if (signingReady) {
+                storeFile file(signingProps.getProperty('storeFile'))
+                storePassword signingProps.getProperty('storePassword')
+                keyAlias signingProps.getProperty('keyAlias')
+                keyPassword signingProps.getProperty('keyPassword')
+                storeType 'JKS'
+            }
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            shrinkResources false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+    // 同一份源码两次构建得到相同的 APK 内容：不把构建时间、主机路径写进产物。
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'

@@ -3,6 +3,8 @@ import { queryString, requestJson } from "./http.js";
 import { createProjectsSurface } from "./surfaces/projects.js";
 import { createTasksSurface } from "./surfaces/tasks.js";
 import { createKnowledgeSurface } from "./surfaces/knowledge.js";
+import { createSyncSurface } from "./surfaces/sync.js";
+import { createDispatchSurface } from "./surfaces/dispatch.js";
 import type {
   AgentRecordCreateInput,
   AyanamiClientOptions,
@@ -16,17 +18,36 @@ export { drainCursorPages } from "./cursor-drain.js";
 export type { CursorDrainOptions, CursorPage } from "./cursor-drain.js";
 export { AyanamiClientError } from "./http.js";
 export type * from "./types.js";
+export type * from "./surfaces/sync.js";
+export type * from "./surfaces/dispatch.js";
+
+type SyncSurface = ReturnType<typeof createSyncSurface>;
+type DispatchSurface = ReturnType<typeof createDispatchSurface>;
 
 export class AyanamiClient {
   readonly #endpoint: string;
   readonly #token: string;
   readonly #fetch: typeof fetch;
+  readonly #sync: SyncSurface = createSyncSurface(this.request.bind(this));
+  readonly #dispatch: DispatchSurface = createDispatchSurface(this.request.bind(this));
 
   constructor(options: AyanamiClientOptions) {
     this.#endpoint = options.endpoint.replace(/\/$/u, "");
     this.#token = options.token;
     this.#fetch = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   }
+
+  // 手机同步与 Claude 派单平铺在客户端上（docs/mobile-sync.md §7），实现各在 surfaces/ 里。
+  // 字段按声明顺序初始化，#sync / #dispatch 在上面先建好。
+  readonly getSyncStatus = this.#sync.getSyncStatus;
+  readonly updateSyncConfig = this.#sync.updateSyncConfig;
+  readonly testSyncRelay = this.#sync.testSyncRelay;
+  readonly createSyncPairing = this.#sync.createSyncPairing;
+  readonly resetSyncSpace = this.#sync.resetSyncSpace;
+  readonly getDispatchStatus = this.#dispatch.getDispatchStatus;
+  readonly updateDispatchConfig = this.#dispatch.updateDispatchConfig;
+  readonly dispatchTask = this.#dispatch.dispatchTask;
+  readonly cancelDispatchRun = this.#dispatch.cancelDispatchRun;
 
   request<T>(method: string, path: string, body?: unknown): Promise<T> {
     return requestJson<T>({

@@ -7,6 +7,8 @@ import {
   createDaemonToken,
   DAEMON_VERSION,
   resolveDaemonDataDirectory,
+  type DispatchController,
+  type SyncController,
 } from "./index.js";
 
 function dataDirectory(): string {
@@ -25,6 +27,58 @@ function standaloneUserToken(agentToken: string): string | undefined {
   return value;
 }
 
+type MobileSync = { sync: SyncController; dispatch: DispatchController; close(): Promise<void> };
+
+/** 结构化日志写 stderr。连接器与派单只传错误说明与命令 ID，不传任何密钥。 */
+function logLine(level: string) {
+  return (message: string, meta?: Record<string, unknown>): void => {
+    process.stderr.write(`${JSON.stringify({ level, message, ...meta })}\n`);
+  };
+}
+const stderrLogger = { info: logLine("info"), warn: logLine("warn"), error: logLine("error") };
+
+/**
+ * 手机同步与 Claude 派单（docs/mobile-sync.md）。独立 daemon 只在 ATM_SYNC=1 时启用：
+ * 密钥明文落在 `<数据目录>/sync/secrets.json`，状态里如实标 plaintext。按需加载，不开时一行都不跑。
+ */
+async function startMobileSync(
+  service: AyanamiTaskService,
+  dataDir: string,
+): Promise<MobileSync | null> {
+  if (process.env.ATM_SYNC !== "1") return null;
+  const [sync, agentDispatch] = await Promise.all([
+    import("@ayanami-task/sync"),
+    import("@ayanami-task/agent-dispatch"),
+  ]);
+  const dispatcher = await agentDispatch.createAgentDispatcher({
+    dataDir,
+    host: sync.taskServiceDispatchHost(service),
+    logger: stderrLogger,
+  });
+  const connector = new sync.SyncConnector({
+    dataDir,
+    service,
+    secrets: new sync.FileSecretStore(sync.syncDirectory(dataDir)),
+    appVersion: DAEMON_VERSION,
+    dispatch: sync.dispatchPortFrom(dispatcher),
+    logger: stderrLogger,
+  });
+  try {
+    await connector.start();
+  } catch (error) {
+    dispatcher.close();
+    throw error;
+  }
+  return {
+    sync: connector,
+    dispatch: dispatcher,
+    async close() {
+      await connector.stop();
+      dispatcher.close();
+    },
+  };
+}
+
 async function main(): Promise<void> {
   const dataDir = dataDirectory();
   const runtime = join(dataDir, "runtime");
@@ -34,15 +88,18 @@ async function main(): Promise<void> {
   const userToken = standaloneUserToken(token);
   let service: AyanamiTaskService | null = null;
   let app: Awaited<ReturnType<typeof buildAyanamiServer>> | null = null;
+  let mobile: MobileSync | null = null;
   try {
     const migrationsRoot = resolve(process.env.AYANAMI_TASK_MIGRATIONS_DIR ?? "migrations");
     service = await AyanamiTaskService.open({ dataDir, migrationsRoot });
+    mobile = await startMobileSync(service, dataDir);
     const startedAt = new Date().toISOString();
     app = await buildAyanamiServer({
       service,
       token,
       startedAt,
       ...(userToken === undefined ? {} : { userToken }),
+      ...(mobile ? { sync: mobile.sync, dispatch: mobile.dispatch } : {}),
     });
     const address = await app.listen({
       host: "127.0.0.1",
@@ -58,6 +115,7 @@ async function main(): Promise<void> {
     });
   } catch (error) {
     if (app) await app.close().catch(() => undefined);
+    await mobile?.close().catch(() => undefined);
     service?.close();
     lease.release();
     throw error;
@@ -76,6 +134,8 @@ async function main(): Promise<void> {
     clearTimeout(initialMaintenance);
     clearInterval(maintenance);
     await app.close();
+    // 连接器停下时写离线状态，要在关库之前。
+    await mobile?.close();
     service.close();
     lease.clear();
     lease.release();

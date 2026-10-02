@@ -66,15 +66,16 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 ## 为什么需要 ATM
 
-| 能力             | ATM 提供的结果                                                                            |
-| ---------------- | ----------------------------------------------------------------------------------------- |
-| **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据      |
-| **Agent 原生**   | Codex、Claude Desktop、Claude Code、Kimi Code 经 MCP 直接领取、推进、交接，不需要人来转述 |
-| **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史               |
-| **跨项目知识**   | 独立本地知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                    |
-| **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯          |
-| **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现               |
-| **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                  |
+| 能力             | ATM 提供的结果                                                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据                                                 |
+| **Agent 原生**   | Codex、Claude Desktop、Claude Code、Kimi Code 经 MCP 直接领取、推进、交接，不需要人来转述                                            |
+| **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史                                                          |
+| **跨项目知识**   | 独立本地知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                                                               |
+| **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯                                                     |
+| **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现                                                          |
+| **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                                                             |
+| **手机随身**     | 手机 App 看任务、发任务，勾一下「交给 Claude」就自动领取、完善目标并开工；中继服务器像 RustDesk 一样自己配，内容端到端加密，默认关闭 |
 
 ## 用 ATM 开发 ATM
 
@@ -114,7 +115,7 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 | 增量拉取 100 条事件         | p95 100 ms |
 | 隔离服务探针的空闲 RSS      | 150 MB     |
 
-服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个 Electron 应用的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
+服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个桌面应用（宿主、core 与 WebView2 进程）的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
 
 每个版本还带一份可核对的证据包：候选先算指纹（gitHead、工作区脏状态哈希、源码哈希、lockfile 哈希、各阶段哈希），再逐层验证，每层记录产物的 SHA-256——
 
@@ -127,7 +128,7 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg" />
-    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与 Electron 桌面 UI、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite" width="100%" />
+    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite" width="100%" />
   </picture>
 </div>
 
@@ -138,13 +139,13 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 当前稳定版支持 Windows 10/11 x64。
 
 1. 打开 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest)。
-2. 日常使用选择 `AyanamiTaskManager-Setup-*-win-x64.exe`；需要免安装时选择 portable ZIP。
+2. 日常使用选择 `atm-setup.exe`；需要免安装时选择 `AyanamiTaskManager-*-win-x64-portable.zip`。
 3. 启动 ATM，在“设置 → Agent 接入”中安装 Codex、Claude Desktop、Claude Code 或 Kimi Code 配置。
 4. 开启“登录启动”后，ATM 会在 Windows 登录后随机延迟后台启动；关闭窗口只会收进托盘。
 
 应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。安装版会把精简 Agent Guide 与完整文档同步到该目录，换设备后仍能从同一路径发现使用说明。
 
-下载后可用 Release 附带的 `SHA256SUMS.txt` 核对文件。Setup 与 portable 是两种分发方式，使用差异见[便携版说明](./docs/portable-usage.md)；`NUPKG` 和 `RELEASES` 是安装版更新文件，不是另一个需要手动安装的应用。
+下载后可用 Release 附带的 `SHA256SUMS.txt` 核对文件。Setup 与 portable 是两种分发方式，使用差异见[便携版说明](./docs/portable-usage.md)；`atm-*-win-x64.zip` 与同名 `.json` 是安装版的更新包和清单，由安装器读取，不是另一个需要手动安装的应用。
 
 > [!IMPORTANT]
 > 不要把 `%LOCALAPPDATA%\AyanamiTaskManager\runtime\daemon.json`、Bearer token、项目数据库或备份提交到仓库。ATM 的运行时发现文件只服务当前 Windows 用户和当前 daemon 实例。
@@ -230,6 +231,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 - 在线备份恢复、导入导出、工程统计与托盘通知；
 - 本地共享知识库、修订历史、归档与 Markdown 导入／导出；
 - 开机随机延迟后台启动，以及关闭到托盘的常驻模式。
+- 可选的手机同步与 Claude 自动开工：ATM 不内置任何服务器，需要你自建 [atm-relay](./apps/relay/README.md)（或任何兼容同一 HTTP 子集的服务）；设计与安全边界见[手机同步说明](./docs/mobile-sync.md)。
 
 更完整的操作说明见[用户指南](./docs/user-guide.md)，故障定位见[排障指南](./docs/troubleshooting.md)，便携版差异见[便携版说明](./docs/portable-usage.md)。
 
@@ -258,7 +260,7 @@ pnpm build
 pnpm test:e2e
 ```
 
-发布流水线在这之上继续：生成并验证 Squirrel 安装版与 portable ZIP，跑 packaged / distribution smoke、性能 benchmark 和安装态验收，最后把上面那份四层证据包落盘。维护者流程见[发布检查表](./docs/release-checklist.md)。
+发布流水线在这之上继续：生成并验证原生安装器、更新包与 portable ZIP，跑 packaged / distribution smoke、性能 benchmark 和安装态验收，最后把上面那份四层证据包落盘。维护者流程见[发布检查表](./docs/release-checklist.md)。
 
 README 里的图和截图都由脚本生成，不手工维护：
 

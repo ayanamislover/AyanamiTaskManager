@@ -8,10 +8,33 @@ const MAX_OUTPUT_BYTES = 1024;
 
 let selfIdentity: ProcessIdentity | null = null;
 let selfPrefetch: Promise<void> | null = null;
+let identityHelper: string | null = null;
+
+/**
+ * 有宿主时用宿主查（`AyanamiTaskManager.exe --process-identity <pid>`，宿主 identity.rs）：
+ * 读的是同一个 GetProcessTimes，输出与 PowerShell 的 ticks 逐位相同，却不用每次起一个
+ * powershell.exe（实测约 190 ms，冷启动时要起两个）。宿主给不出答案（起不来、不认这个参数、
+ * 查不到）就退回 PowerShell：两边读的是同一份系统记录，只是慢一些。
+ */
+export function configureProcessIdentityHelper(executable: string | null): void {
+  identityHelper = executable;
+}
 
 function powershellPath(): string | null {
   if (process.platform !== "win32" || !process.env.SystemRoot) return null;
   return join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+type IdentityQuery = { command: string; args: string[] };
+
+/** The helper first, PowerShell whenever the helper gives no answer. */
+function identityQueries(pid: number): IdentityQuery[] {
+  const queries: IdentityQuery[] = [];
+  if (identityHelper)
+    queries.push({ command: identityHelper, args: ["--process-identity", String(pid)] });
+  const shell = powershellPath();
+  if (shell) queries.push({ command: shell, args: queryArguments(pid) });
+  return queries;
 }
 
 /** Shared by the sync and prefetch paths so the two can never query different things. */
@@ -24,6 +47,7 @@ function queryArguments(pid: number): string[] {
   ];
 }
 
+/** First two lines: ticks, Unix ms. The helper adds the image path as a third, unused here. */
 function parseIdentity(stdout: string): ProcessIdentity | null {
   const [ticks, milliseconds] = stdout.trim().split(/\r?\n/u);
   if (!ticks || !/^\d{17,19}$/u.test(ticks) || !milliseconds || !/^\d{1,16}$/u.test(milliseconds))
@@ -52,62 +76,74 @@ function parseIdentity(stdout: string): ProcessIdentity | null {
  */
 export function prefetchSelfProcessIdentity(): Promise<void> {
   if (selfPrefetch) return selfPrefetch;
-  const shell = powershellPath();
-  if (selfIdentity || !shell) {
+  const queries = identityQueries(process.pid);
+  if (selfIdentity || queries.length === 0) {
     selfPrefetch = Promise.resolve();
     return selfPrefetch;
   }
-  selfPrefetch = new Promise<void>((resolve) => {
+  // 预取失败绝不能让启动失败：拿不到就退回同步那条路，和以前一样。
+  selfPrefetch = queryAsync(queries).then((identity) => {
+    if (identity) selfIdentity ??= identity;
+  });
+  return selfPrefetch;
+}
+
+/** The identity from the first query that gives one; null when none does. */
+function queryAsync(queries: readonly IdentityQuery[]): Promise<ProcessIdentity | null> {
+  const [query, ...fallbacks] = queries;
+  if (!query) return Promise.resolve(null);
+  return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(shell, queryArguments(process.pid), {
+      child = spawn(query.command, query.args, {
         windowsHide: true,
         stdio: ["ignore", "pipe", "ignore"],
       });
     } catch {
-      resolve();
+      resolve(queryAsync(fallbacks));
       return;
     }
     let stdout = "";
+    let settled = false;
     const timer = setTimeout(() => child.kill(), QUERY_TIMEOUT_MS);
-    const finish = (code: number | null) => {
+    const finish = (identity: ProcessIdentity | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (code === 0) selfIdentity ??= parseIdentity(stdout);
-      resolve();
+      resolve(identity ?? queryAsync(fallbacks));
     };
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (stdout.length < MAX_OUTPUT_BYTES) stdout += chunk;
     });
-    // 预取失败绝不能让启动失败：拿不到就退回同步那条路，和以前一样。
     child.on("error", () => finish(null));
-    child.on("close", finish);
+    child.on("close", (code) => finish(code === 0 ? parseIdentity(stdout) : null));
   });
-  return selfPrefetch;
 }
 
 /** Read only process birth time, never WMI or a serialized Process/.NET object graph. */
 export function readProcessIdentity(pid: number): ProcessIdentity | null {
   if (!Number.isSafeInteger(pid) || pid <= 0 || process.platform !== "win32") return null;
   if (pid === process.pid && selfIdentity) return selfIdentity;
-  const shell = powershellPath();
-  if (!shell) return null;
-  try {
-    const result = spawnSync(shell, queryArguments(pid), {
-      encoding: "utf8",
-      windowsHide: true,
-      timeout: QUERY_TIMEOUT_MS,
-      maxBuffer: MAX_OUTPUT_BYTES,
-    });
-    if (result.status !== 0 || result.error) return null;
-    const identity = parseIdentity(result.stdout);
-    if (!identity) return null;
-    if (pid === process.pid) selfIdentity = identity;
-    return identity;
-  } catch {
-    // Access denied / missing PowerShell / timeout must not evict an apparently live owner.
-    return null;
+  for (const query of identityQueries(pid)) {
+    try {
+      const result = spawnSync(query.command, query.args, {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: QUERY_TIMEOUT_MS,
+        maxBuffer: MAX_OUTPUT_BYTES,
+      });
+      const identity = result.status === 0 && !result.error ? parseIdentity(result.stdout) : null;
+      // No answer this way (missing helper, process gone, access denied): ask the next way.
+      if (!identity) continue;
+      if (pid === process.pid) selfIdentity = identity;
+      return identity;
+    } catch {
+      // Access denied / missing PowerShell / timeout must not evict an apparently live owner.
+      continue;
+    }
   }
+  return null;
 }
 
 /** Called only after checking that the PID is alive. Unknown identity retains the lock. */

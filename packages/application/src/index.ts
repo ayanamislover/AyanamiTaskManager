@@ -36,6 +36,7 @@ import * as readQueries from "./queries/read-queries.js";
 import * as reconciliationQueries from "./queries/reconciliation-queries.js";
 import * as taskQueries from "./queries/task-queries.js";
 import { ApplicationServiceRuntime } from "./runtime/service-runtime.js";
+import { trackProjectActivity } from "./runtime/project-activity.js";
 
 export * from "./agenttask-import.js";
 export * from "./reconcile.js";
@@ -798,3 +799,6 @@ export class AyanamiTaskService {
     this.#runtime.close();
   }
 }
+
+// 每个服务方法是一次在途操作：期间取用的项目库连接不被空闲回收或容量淘汰关掉。
+trackProjectActivity(AyanamiTaskService.prototype, (service) => service.databases);

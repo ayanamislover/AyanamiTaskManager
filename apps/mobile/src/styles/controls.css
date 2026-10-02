@@ -1,0 +1,436 @@
+/*
+ * 控件：形态照桌面端 packages/ui/src/styles（胶囊按钮、柔色徽章、field-shell 外壳），
+ * 尺寸放大到触屏：可点的东西至少 44px。
+ */
+
+/* ─── 按钮 ─── */
+.button {
+  display: inline-flex;
+  min-height: var(--touch);
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border: 0;
+  border-radius: var(--atm-radius-control);
+  color: var(--atm-control-text);
+  background: var(--atm-control-fill);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    transform var(--atm-duration-press) var(--atm-ease-out),
+    filter var(--atm-duration-hover) var(--atm-ease-hover),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover),
+    opacity var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.button:disabled {
+  opacity: 0.45;
+}
+/* 主按钮：粉到紫的糖果渐变，带同色柔光（与桌面端 .atm-button.primary 相同）。 */
+.button.primary {
+  color: var(--atm-on-primary);
+  background: var(--atm-primary-fill);
+  box-shadow: var(--atm-shadow-primary);
+}
+/* 禁用的主按钮：白字压在半透明渐变上读不出来，换成控件底色 + 淡字（K3 第二轮评审）。 */
+.button.primary:disabled {
+  color: var(--atm-text-faint);
+  background: var(--atm-control-fill);
+  box-shadow: none;
+  opacity: 1;
+}
+.button.danger {
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 12%, transparent);
+}
+.button.danger-solid {
+  color: #fff;
+  background: color-mix(in srgb, var(--atm-danger) 88%, var(--atm-text));
+}
+:root[data-theme="dark"] .button.danger-solid {
+  color: var(--atm-bg);
+  background: var(--atm-danger);
+}
+.button.block {
+  width: 100%;
+}
+.button.large {
+  min-height: 52px;
+  font-size: 16px;
+}
+.button.fab {
+  min-height: 52px;
+  padding: 12px 22px 12px 18px;
+  font-size: 16px;
+}
+.button.on-dark {
+  color: #fff;
+  background: rgb(255 255 255 / 0.16);
+}
+
+.icon-button {
+  display: inline-grid;
+  width: var(--touch);
+  height: var(--touch);
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  color: var(--atm-control-text);
+  background: color-mix(in srgb, var(--atm-surface) 72%, transparent);
+  box-shadow: var(--atm-shadow-subtle);
+  transition:
+    transform var(--atm-duration-press) var(--atm-ease-out),
+    background-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+:root[data-theme="dark"] .icon-button {
+  background: var(--atm-surface);
+}
+.icon-button:active {
+  transform: scale(0.94);
+}
+.icon-button[data-busy="true"] > svg {
+  animation: spin 0.9s linear infinite;
+}
+.icon-button.on-dark {
+  color: #fff;
+  background: rgb(0 0 0 / 0.32);
+  box-shadow: none;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.text-button {
+  display: inline-flex;
+  min-height: var(--touch);
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  margin: -10px -8px;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 12px;
+  color: var(--atm-primary-strong);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.footer-pair {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: 10px;
+}
+
+/* ─── 卡片与分区标题 ─── */
+.card {
+  border: 1px solid var(--atm-border);
+  border-radius: var(--radius-card);
+  background: var(--atm-surface);
+  box-shadow: var(--atm-shadow-subtle);
+}
+button.card {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition:
+    transform var(--atm-duration-press) var(--atm-ease-out),
+    border-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+button.card:active {
+  transform: scale(0.985);
+  border-color: color-mix(in srgb, var(--atm-primary) 36%, var(--atm-border));
+}
+
+.section-title {
+  display: flex;
+  min-height: 32px;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-top: 10px;
+}
+.section-title h2 {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.section-count {
+  color: var(--atm-text-faint);
+  font: 500 12px var(--atm-mono);
+}
+
+/* ─── 徽章：状态色 14% 做底，字色是状态色与正文色的混合（≥ 4.5:1，与桌面端同法） ─── */
+.badge {
+  --tone: var(--atm-st-ready);
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--tone) 55%, var(--atm-text));
+  background: color-mix(in srgb, var(--tone) 15%, transparent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+[data-tone="progress"] {
+  --tone: var(--atm-st-progress);
+}
+[data-tone="verify"] {
+  --tone: var(--atm-st-verify);
+}
+[data-tone="blocked"] {
+  --tone: var(--atm-st-blocked);
+}
+[data-tone="user"] {
+  --tone: var(--atm-st-user);
+}
+[data-tone="agent"] {
+  --tone: var(--atm-st-agent);
+}
+[data-tone="ready"],
+[data-tone="pending"] {
+  --tone: var(--atm-st-ready);
+}
+[data-tone="done"] {
+  --tone: var(--atm-st-done);
+}
+.badge-meta {
+  color: var(--atm-text-muted);
+  font-size: 12px;
+}
+.badge[data-tone="neutral"] {
+  color: var(--atm-text-muted);
+  background: var(--atm-surface-muted);
+}
+.dispatch-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--tone);
+}
+.dispatch-dot[data-state="running"],
+.dispatch-dot[data-state="queued"] {
+  animation: pulse 1.6s var(--atm-ease-in-out) infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* 在线灯：7px 圆点 + 3px 同色柔光圈（与桌面端服务状态灯相同）。 */
+.status-dot {
+  --dot: var(--atm-st-ready);
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--dot);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot) 22%, transparent);
+}
+.status-dot[data-state="online"] {
+  --dot: var(--atm-st-done);
+}
+.status-dot[data-state="pending"] {
+  --dot: var(--atm-st-agent);
+  animation: pulse 1.6s var(--atm-ease-in-out) infinite;
+}
+
+/* ─── 进度条 ─── */
+.progress {
+  height: 6px;
+  flex: 1;
+  border-radius: 999px;
+  background: var(--atm-hover-strong);
+  overflow: hidden;
+}
+.progress > span {
+  display: block;
+  height: 100%;
+  min-width: 0;
+  border-radius: inherit;
+  background: var(--atm-primary-fill);
+  transition: width var(--atm-duration-surface) var(--atm-ease-out);
+}
+
+/* ─── 表单：一个字段只有一个元素画框和焦点环——谁画边框谁画环（外壳 .field-shell） ─── */
+.form {
+  display: grid;
+  gap: 18px;
+}
+.field {
+  display: grid;
+  gap: 8px;
+}
+.field > label,
+.field-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  color: var(--atm-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+.field-count {
+  color: var(--atm-text-faint);
+  font: 500 12px var(--atm-mono);
+}
+.field-count[data-over="true"] {
+  color: var(--atm-danger);
+}
+.field-help {
+  color: var(--atm-text-faint);
+  font-size: 12px;
+}
+.input-shell.field-shell {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  border: 1.5px solid var(--atm-control-border);
+  border-radius: var(--radius-field);
+  background: var(--atm-surface);
+  transition: border-color var(--atm-duration-hover) var(--atm-ease-hover);
+}
+.input-shell.field-shell.is-multiline {
+  align-items: stretch;
+}
+/* 与桌面端 .atm-field-shell 一致：外壳换主色边 + 2px 焦点描边；里面的控件不画第二道。 */
+.field-shell:has(:focus-visible) {
+  border-color: color-mix(in srgb, var(--atm-primary) 54%, var(--atm-border));
+  outline: 2px solid var(--atm-focus);
+  outline-offset: 2px;
+}
+.field-shell[data-invalid="true"] {
+  border-color: color-mix(in srgb, var(--atm-danger) 60%, var(--atm-control-border));
+}
+.field-shell :is(input, textarea) {
+  width: 100%;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1.45;
+}
+.field-shell :is(input, textarea):is(:focus, :focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+.field-shell textarea {
+  min-height: 116px;
+  resize: none;
+}
+.field-shell textarea.mono {
+  min-height: 96px;
+  font-size: 13px;
+  word-break: break-all;
+}
+.field-shell ::placeholder {
+  color: var(--atm-text-faint);
+  opacity: 0.8;
+}
+/*
+ * 高对比度出口：forced-colors 下外壳那圈会被系统换色，未必看得出焦点落在哪，
+ * 把壳里控件自己那一环放回来——宁可双框，也不能没有焦点指示。
+ * 画在控件内侧（-3px），不和外壳的边框、外圈叠成一团。
+ */
+@media (forced-colors: active) {
+  .field-shell :is(input, textarea):focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+  /*
+   * 自绘下拉只点名触发器：壳里别的按钮（弹层选项等）本来就保留自己的环，不能泛化成 button。
+   * 关环的 overlays.css `.field-shell > .select-trigger:is(:hover, :focus, :focus-visible):not(:disabled)`
+   * 是 (0,4,0)，且在本文件之后引入；这里多点名一个 .select 到 (0,5,0)，不靠文件顺序也压得住。
+   */
+  .select.field-shell > .select-trigger:focus-visible:not(:disabled) {
+    outline: 2px solid Highlight;
+    outline-offset: -3px;
+  }
+}
+/*
+ * 高对比度下的状态与边界（与桌面端 accessibility.css、features-primary.css 同法）：
+ * forced-colors 会抹掉非系统色的底、渐变和投影。按钮、徽章原来只靠底色成面，补一圈系统色边；
+ * 主按钮禁用时 opacity 仍是 1，只靠换底色区分，改用 GrayText；
+ * 进度条填充换成 Highlight，状态灯保留原色（forced-color-adjust: none）并描一圈边——
+ * 灯色是状态本身，旁边都有文字说明，局部保留不影响其余部分跟随系统配色。
+ */
+@media (forced-colors: active) {
+  .button,
+  .icon-button,
+  .badge {
+    border: 1px solid ButtonText;
+  }
+  /* 第二个选择器 (0,3,0) 压住上面 .button.primary:disabled 的字色。 */
+  .button:disabled,
+  .button.primary:disabled {
+    border-color: GrayText;
+    color: GrayText;
+  }
+  .progress {
+    border: 1px solid CanvasText;
+  }
+  .progress > span {
+    background: Highlight;
+  }
+  .status-dot,
+  .dispatch-dot {
+    border: 1px solid CanvasText;
+    forced-color-adjust: none;
+  }
+}
+
+.inline-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-field);
+  color: var(--atm-danger);
+  background: color-mix(in srgb, var(--atm-danger) 10%, transparent);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.inline-error > svg {
+  flex: none;
+  margin-top: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button,
+  .icon-button,
+  button.card {
+    transition: none;
+  }
+  .button:active:not(:disabled),
+  .icon-button:active,
+  button.card:active {
+    transform: none;
+  }
+  .dispatch-dot,
+  .status-dot,
+  .icon-button[data-busy="true"] > svg {
+    animation: none !important;
+  }
+}
