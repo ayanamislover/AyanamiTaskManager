@@ -482,6 +482,9 @@ mod tests {
                                     }
                                 }
                                 let _ = stream.write_all(body.as_bytes());
+                                // Keep the connection open after the whole body: the answer is
+                                // complete by its Content-Length, not by EOF.
+                                std::thread::sleep(Duration::from_secs(5));
                             }
                             Delivery::Truncated => {
                                 let _ = write!(stream, "{}{}", head(body.len() + 10), body);
@@ -790,7 +793,9 @@ mod tests {
             pad: 3,
             every_ms: 100,
         });
-        assert_eq!(timed(3_000).0, Ok(()));
+        let (ok, took) = timed(3_000);
+        assert_eq!(ok, Ok(()));
+        assert!(took < Duration::from_millis(1_500), "{took:?}");
         // Never answers: refused at the caller's deadline.
         f.deliver(Delivery::Hang);
         let (refused, took) = timed(1_500);
@@ -827,7 +832,9 @@ mod tests {
         );
         // A body shorter than its Content-Length is not an answer.
         f.deliver(Delivery::Truncated);
-        assert_eq!(timed(3_000).0, Err("service did not answer /health".into()));
+        let (refused, took) = timed(3_000);
+        assert_eq!(refused, Err("service did not answer /health".into()));
+        assert!(took < Duration::from_secs(1), "{took:?}");
         // An already-passed deadline refuses at once.
         f.deliver(Delivery::Whole);
         let (refused, took) = timed(0);
