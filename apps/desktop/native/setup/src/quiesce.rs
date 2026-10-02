@@ -95,6 +95,45 @@ fn wait_drained(env: &Env, targets: &[ProcessIdentity], timeout: Duration) -> bo
     }
 }
 
+/// Who quiesce waits for and, with `--force`, terminates.
+///
+/// - 2.x: the core, its host parent, and the recorded host if it is another process.
+/// - 3.x single: the lease holder alone — its parent is whatever started it (an Agent, the
+///   launcher). A recorded host that is a *different* process contradicts the lease: fail
+///   closed rather than let a file widen the set of processes we may terminate.
+/// - No lease but a live primary: the recorded host.
+fn quiesce_targets(
+    service: Option<(&Proc, Layout)>,
+    core_parent: Option<&Proc>,
+    recorded: Option<&Proc>,
+) -> Result<Vec<ProcessIdentity>, String> {
+    let mut targets: Vec<ProcessIdentity> = Vec::new();
+    match service {
+        Some((holder, Layout::Single)) => {
+            if let Some(recorded) = recorded
+                && (recorded.pid != holder.pid || recorded.created != holder.created)
+            {
+                return Err(format!(
+                    "QUIESCE_IDENTITY_MISMATCH: the single-process lease holder ({}) is not the recorded host ({})",
+                    holder.pid, recorded.pid
+                ));
+            }
+            targets.push(holder.identity());
+        }
+        Some((core, Layout::HostAndCore)) => {
+            targets.push(core.identity());
+            targets.extend(core_parent.map(Proc::identity));
+        }
+        None => {}
+    }
+    if let Some(host) = recorded
+        && !targets.iter().any(|target| target.pid == host.pid)
+    {
+        targets.push(host.identity());
+    }
+    Ok(targets)
+}
+
 pub fn stop_new_style(env: &Env, force: bool, timeout: Duration) -> Result<(), String> {
     let service = service_with_layout(env);
     if let Some((_, true, _)) = &service {
@@ -103,27 +142,23 @@ pub fn stop_new_style(env: &Env, force: bool, timeout: Duration) -> Result<(), S
     if service.is_none() && !ipc::primary_alive(&env.data_dir) {
         return Ok(());
     }
-    let mut targets: Vec<ProcessIdentity> = Vec::new();
-    if let Some((single, _, Layout::Single)) = &service {
-        // The service is the host: no core child, and its parent is whatever started it.
-        targets.push(single.identity());
-    } else if let Some((core, _, _)) = &service {
-        let all = procs::snapshot();
-        let parent = all.iter().find(|p| p.pid == core.pid).map(|p| p.parent);
-        let host = all
-            .iter()
-            .find(|proc| Some(proc.pid) == parent)
-            .filter(|proc| {
-                file_name_is(&proc.image, crate::env::LAUNCHER) && proc.created <= core.created
-            });
-        targets.push(core.identity());
-        targets.extend(host.map(Proc::identity));
-    }
-    if let Some(host) = recorded_host(env)
-        && !targets.iter().any(|target| target.pid == host.pid)
-    {
-        targets.push(host.identity());
-    }
+    let core_parent = match &service {
+        Some((core, _, Layout::HostAndCore)) => {
+            let all = procs::snapshot();
+            let parent = all.iter().find(|p| p.pid == core.pid).map(|p| p.parent);
+            all.into_iter()
+                .find(|proc| Some(proc.pid) == parent)
+                .filter(|proc| {
+                    file_name_is(&proc.image, crate::env::LAUNCHER) && proc.created <= core.created
+                })
+        }
+        _ => None,
+    };
+    let targets = quiesce_targets(
+        service.as_ref().map(|(proc, _, layout)| (proc, *layout)),
+        core_parent.as_ref(),
+        recorded_host(env).as_ref(),
+    )?;
     let delivered = ipc::send(&env.data_dir, &Command::Quit, Duration::from_secs(5));
     say!(
         "quiesce: QUIT delivered={delivered} targets={:?}",
@@ -290,5 +325,66 @@ mod tests {
         assert!(is_legacy(&elsewhere, Layout::Single, &root));
         assert!(is_legacy(&core, Layout::Single, &root));
         assert!(is_legacy(&None, Layout::Single, &root));
+    }
+
+    fn proc(pid: u32, created: u64, name: &str) -> Proc {
+        Proc {
+            pid,
+            parent: 1,
+            image: Some(PathBuf::from(r"C:\i").join(name)),
+            created,
+        }
+    }
+
+    fn pids(targets: &[ProcessIdentity]) -> Vec<u32> {
+        targets.iter().map(|t| t.pid).collect()
+    }
+
+    #[test]
+    fn a_single_service_is_stopped_alone() {
+        let holder = proc(10, 100, "AyanamiTaskManager.exe");
+        let starter = proc(9, 50, "AyanamiTaskManager.exe");
+        // The process that started it is never a target, even if it looks like a host.
+        let only = quiesce_targets(Some((&holder, Layout::Single)), Some(&starter), None).unwrap();
+        assert_eq!(pids(&only), vec![10]);
+        // The recorded host being the same process adds nothing.
+        let same = quiesce_targets(Some((&holder, Layout::Single)), None, Some(&holder)).unwrap();
+        assert_eq!(pids(&same), vec![10]);
+    }
+
+    #[test]
+    fn a_recorded_host_that_contradicts_a_single_lease_fails_closed() {
+        let holder = proc(10, 100, "AyanamiTaskManager.exe");
+        let other = proc(11, 101, "AyanamiTaskManager.exe");
+        let recycled = proc(10, 999, "AyanamiTaskManager.exe");
+        for recorded in [&other, &recycled] {
+            let refused = quiesce_targets(Some((&holder, Layout::Single)), None, Some(recorded));
+            assert!(
+                refused
+                    .as_ref()
+                    .is_err_and(|e| e.starts_with("QUIESCE_IDENTITY_MISMATCH")),
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_process_and_lease_less_targets_are_unchanged() {
+        let core = proc(20, 200, "atm-core.exe");
+        let host = proc(19, 150, "AyanamiTaskManager.exe");
+        let recorded = proc(18, 140, "AyanamiTaskManager.exe");
+        let both =
+            quiesce_targets(Some((&core, Layout::HostAndCore)), Some(&host), Some(&host)).unwrap();
+        assert_eq!(pids(&both), vec![20, 19]);
+        let three = quiesce_targets(
+            Some((&core, Layout::HostAndCore)),
+            Some(&host),
+            Some(&recorded),
+        )
+        .unwrap();
+        assert_eq!(pids(&three), vec![20, 19, 18]);
+        let lease_less = quiesce_targets(None, None, Some(&recorded)).unwrap();
+        assert_eq!(pids(&lease_less), vec![18]);
+        assert!(quiesce_targets(None, None, None).unwrap().is_empty());
     }
 }
