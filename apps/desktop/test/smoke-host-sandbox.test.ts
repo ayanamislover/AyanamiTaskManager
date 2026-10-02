@@ -64,6 +64,19 @@ describe("烟测数据根沙箱", () => {
     );
   });
 
+  // CI 上 LOCALAPPDATA 是 8.3 短名（C:\Users\RUNNER~1\…），junction 解出来却是长名；
+  // 这里用 junction 别名造出同样「真实根写法不规范」的情形。
+  it("真实根写成别名时，经 junction 接过去的数据根仍按真实数据根拒绝", () => {
+    const { output, real, options } = layout();
+    const alias = join(scratch!, "LocalAlias");
+    symlinkSync(join(scratch!, "Local"), alias, "junction");
+    symlinkSync(real, join(output, "linked"), "junction");
+    const realRoots = options.realRoots.map((root) => join(alias, root.split(/[\\/]/u).pop()!));
+    expect(() =>
+      assertSandboxDataDir(join(output, "linked", "data"), { outputRoot: output, realRoots }),
+    ).toThrow(/真实数据根/u);
+  });
+
   it("宿主环境去掉继承的数据根别名，Node 子进程拿合成 home", () => {
     const previous = process.env.AYANAMI_TASK_DATA_DIR;
     process.env.AYANAMI_TASK_DATA_DIR = "C:\\real";

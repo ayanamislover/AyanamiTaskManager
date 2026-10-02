@@ -12,7 +12,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { applyRunRestore, loginItemRestorePlan, readRunSnapshot } from "./login-item-guard.js";
 import { assertSmokeHost } from "./package-native.js";
@@ -132,18 +132,23 @@ export function assertSandboxDataDir(
   const resolved = resolve(dataDir);
   const sandboxRoot = resolve(options.outputRoot ?? outputRoot);
   const realRoots = options.realRoots ?? realInstallRoots();
-  const refuseReal = (candidate: string) => {
-    for (const real of realRoots)
+  const refuseReal = (candidate: string, roots: string[]) => {
+    for (const real of roots)
       if (candidate.toLowerCase() === real.toLowerCase() || insideDirectory(real, candidate))
         throw new Error(`拒绝在真实数据根/安装目录上运行烟测：${resolved}`);
   };
   // 先按字面拒：真实数据根本身连 realpath 都不去碰。
-  refuseReal(resolved);
+  refuseReal(resolved, realRoots);
   if (!insideDirectory(sandboxRoot, resolved))
     throw new Error(`烟测数据根必须在 ${sandboxRoot} 之下：${resolved}`);
-  // 再按真实路径拒：output/ 下的 junction 不能把数据根接到别处。
+  // 再按真实路径拒：output/ 下的 junction 不能把数据根接到别处。真实根也得换成真实路径再比：
+  // LOCALAPPDATA 可能写成 8.3 短名（CI 上是 C:\Users\RUNNER~1\…），而 junction 解出来的是长名，
+  // 按字面比就对不上。只解析真实根的父目录，真实根本身仍不做 realpath。
   const actual = realPath(resolved);
-  refuseReal(actual);
+  refuseReal(
+    actual,
+    realRoots.map((real) => join(realPath(dirname(real)), basename(real))),
+  );
   if (!insideDirectory(realPath(sandboxRoot), actual))
     throw new Error(`烟测数据根必须在 ${sandboxRoot} 之下（真实路径 ${actual}）：${resolved}`);
   return resolved;
