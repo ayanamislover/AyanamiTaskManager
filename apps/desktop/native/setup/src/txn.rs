@@ -660,6 +660,7 @@ impl Setup {
                 &txn.id,
                 version,
                 &identity,
+                deadline,
             ) {
                 Ok(()) => {
                     say!("START {version} SERVICE_HEALTHY (host {})", identity.pid);

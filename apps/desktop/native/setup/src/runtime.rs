@@ -5,7 +5,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -175,30 +175,85 @@ struct HealthAnswer {
     generation: Option<u64>,
 }
 
-/// One bounded `GET /health` (no token: the health route carries none). Total time ≤ ~4 s.
-fn health_answer(port: u16) -> Result<HealthAnswer, String> {
-    let mut stream = TcpStream::connect_timeout(
-        &SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_secs(2),
-    )
-    .map_err(|_| "service did not answer /health")?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+/// Own budget of one `/health` request; the caller's deadline caps it further.
+const HEALTH_BUDGET: Duration = Duration::from_secs(4);
+const HEALTH_MAX_BYTES: usize = 64 * 1024;
+
+/// A complete HTTP response in `raw`: (status, body) once the headers and the whole
+/// `Content-Length` body have arrived. Without a Content-Length only EOF completes it.
+fn complete_response(raw: &[u8], eof: bool) -> Option<(u16, &[u8])> {
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = std::str::from_utf8(&raw[..split]).ok()?;
+    let body = &raw[split + 4..];
+    let status = head.split_whitespace().nth(1)?.parse().ok()?;
+    let length = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    match length {
+        Some(length) if body.len() >= length => Some((status, &body[..length])),
+        Some(_) => None,
+        None => eof.then_some((status, body)),
+    }
+}
+
+/// One `GET /health` (no token: the health route carries none). Every step — connect,
+/// write, each read — runs on what is left of one monotonic deadline: the earlier of the
+/// caller's and `HEALTH_BUDGET`. A server that trickles bytes cannot stretch it.
+/// Because every blocking step waits at most for what is left, the whole call returns by
+/// the deadline (plus scheduling); the tests assert the elapsed time, not a final re-check.
+fn health_answer(port: u16, deadline: Instant) -> Result<HealthAnswer, String> {
+    let until = deadline.min(Instant::now() + HEALTH_BUDGET);
+    let left = || {
+        until
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| "service did not answer /health in time".to_string())
+    };
+    let mut stream = TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), left()?)
+        .map_err(|_| "service did not answer /health")?;
+    stream
+        .set_write_timeout(Some(left()?))
+        .map_err(|_| "service did not answer /health")?;
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .map_err(|_| "service did not answer /health")?;
-    let mut raw = Vec::new();
-    let _ = stream.take(64 * 1024).read_to_end(&mut raw);
-    let text = String::from_utf8_lossy(&raw);
-    let status_ok = text
-        .split_whitespace()
-        .nth(1)
-        .is_some_and(|code| code == "200");
-    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
-    if !status_ok {
+    let mut raw: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let (status, body) = loop {
+        if let Some((status, body)) = complete_response(&raw, false) {
+            break (status, body.to_vec());
+        }
+        if raw.len() >= HEALTH_MAX_BYTES {
+            return Err("service did not answer /health".into());
+        }
+        stream
+            .set_read_timeout(Some(left()?))
+            .map_err(|_| "service did not answer /health")?;
+        match stream.read(&mut chunk) {
+            Ok(0) => match complete_response(&raw, true) {
+                Some((status, body)) => break (status, body.to_vec()),
+                None => return Err("service did not answer /health".into()),
+            },
+            Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err("service did not answer /health in time".into());
+            }
+            Err(_) => return Err("service did not answer /health".into()),
+        }
+    };
+    if status != 200 {
         return Err("service did not answer /health".into());
     }
-    serde_json::from_str(body).map_err(|_| "service did not answer /health".into())
+    serde_json::from_slice(&body).map_err(|_| "service did not answer /health".into())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,6 +298,7 @@ pub fn service_healthy(
     txn: &str,
     version: &str,
     host: &atm_install_state::ProcessIdentity,
+    deadline: Instant,
 ) -> Result<(), String> {
     let witness: Witness =
         crate::fsx::read_json_limited(&health_dir.join(format!("service-{txn}.json")), 64 * 1024)
@@ -315,7 +371,7 @@ pub fn service_healthy(
             if port_owner(port) != Some(host.pid) {
                 return Err("service port is not held by the host".into());
             }
-            let answer = health_answer(port)?;
+            let answer = health_answer(port, deadline)?;
             if answer.pid != host.pid
                 || Some(&answer.instance_id) != witness.core.instance_id.as_ref()
                 || answer.generation != witness.generation
@@ -350,15 +406,35 @@ mod tests {
         answer: Arc<Mutex<Option<serde_json::Value>>>,
         /// The HTTP status `/health` answers with.
         status: Arc<Mutex<u16>>,
+        /// How the answer is delivered.
+        delivery: Arc<Mutex<Delivery>>,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Delivery {
+        Whole,
+        /// Accept, read the request, then hold the connection open without answering.
+        Hang,
+        /// Headers at once, then `pad` leading spaces of the body one per `every_ms`.
+        Trickle {
+            pad: usize,
+            every_ms: u64,
+        },
+        /// Declare a longer body than is sent, then close.
+        Truncated,
     }
 
     impl Fixture {
         fn new(name: &str) -> Fixture {
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("target")
-                .join("setup-tests")
-                .join(name);
+            // Under CARGO_TARGET_DIR when one is set, so a sandboxed run stays inside it.
+            let target = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .join("target")
+                });
+            let dir = target.join("setup-tests").join(name);
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let dir = std::path::absolute(dir).unwrap();
@@ -374,19 +450,44 @@ mod tests {
             let served = answer.clone();
             let status = Arc::new(Mutex::new(200u16));
             let served_status = status.clone();
+            let delivery = Arc::new(Mutex::new(Delivery::Whole));
+            let served_delivery = delivery.clone();
             std::thread::spawn(move || {
                 for mut stream in listener.incoming().flatten() {
-                    let mut buffer = [0u8; 1024];
-                    let _ = stream.read(&mut buffer);
-                    if let Some(body) = served.lock().unwrap().clone() {
+                    let body = served.lock().unwrap().clone();
+                    let status = *served_status.lock().unwrap();
+                    let delivery = *served_delivery.lock().unwrap();
+                    // One thread per connection: a hanging answer never blocks the next one.
+                    std::thread::spawn(move || {
+                        let mut buffer = [0u8; 1024];
+                        let _ = stream.read(&mut buffer);
+                        let Some(body) = body else { return };
                         let body = body.to_string();
-                        let _ = write!(
-                            stream,
-                            "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            *served_status.lock().unwrap(),
-                            body.len()
-                        );
-                    }
+                        let head = |length: usize| {
+                            format!(
+                                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                            )
+                        };
+                        match delivery {
+                            Delivery::Whole => {
+                                let _ = write!(stream, "{}{body}", head(body.len()));
+                            }
+                            Delivery::Hang => std::thread::sleep(Duration::from_secs(15)),
+                            Delivery::Trickle { pad, every_ms } => {
+                                let _ = write!(stream, "{}", head(pad + body.len()));
+                                for _ in 0..pad {
+                                    std::thread::sleep(Duration::from_millis(every_ms));
+                                    if stream.write_all(b" ").is_err() {
+                                        return;
+                                    }
+                                }
+                                let _ = stream.write_all(body.as_bytes());
+                            }
+                            Delivery::Truncated => {
+                                let _ = write!(stream, "{}{}", head(body.len() + 10), body);
+                            }
+                        }
+                    });
                 }
             });
             Fixture {
@@ -398,6 +499,7 @@ mod tests {
                 port,
                 answer,
                 status,
+                delivery,
             }
         }
 
@@ -461,13 +563,22 @@ mod tests {
         }
 
         fn check(&self) -> Result<(), String> {
+            self.check_by(Instant::now() + Duration::from_secs(10))
+        }
+
+        fn check_by(&self, deadline: Instant) -> Result<(), String> {
             service_healthy(
                 &self.health,
                 &self.runtime,
                 "T1",
                 "9.0.0",
                 &self.me.identity(),
+                deadline,
             )
+        }
+
+        fn deliver(&self, delivery: Delivery) {
+            *self.delivery.lock().unwrap() = delivery;
         }
 
         /// Our parent (the test runner) is alive and older: a perfect impostor.
@@ -662,6 +773,84 @@ mod tests {
     }
 
     #[test]
+    fn health_is_bounded_by_one_deadline_not_per_read() {
+        let f = Fixture::new("single-health-deadline");
+        f.single();
+        let timed = |deadline_ms: u64| {
+            let t0 = Instant::now();
+            let result = f.check_by(Instant::now() + Duration::from_millis(deadline_ms));
+            (result, t0.elapsed())
+        };
+        // A normal answer is quick.
+        let (ok, took) = timed(10_000);
+        assert_eq!(ok, Ok(()));
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        // Whitespace before the JSON is fine when it arrives in time.
+        f.deliver(Delivery::Trickle {
+            pad: 3,
+            every_ms: 100,
+        });
+        assert_eq!(timed(3_000).0, Ok(()));
+        // Never answers: refused at the caller's deadline.
+        f.deliver(Delivery::Hang);
+        let (refused, took) = timed(1_500);
+        assert_eq!(
+            refused,
+            Err("service did not answer /health in time".into())
+        );
+        assert!(took < Duration::from_millis(2_100), "{took:?}");
+        // Trickles past the caller's deadline (W0-S peer r2 P1-02): each read is quick,
+        // the whole answer is not.
+        f.deliver(Delivery::Trickle {
+            pad: 10,
+            every_ms: 300,
+        });
+        let (refused, took) = timed(1_500);
+        assert_eq!(
+            refused,
+            Err("service did not answer /health in time".into())
+        );
+        assert!(took < Duration::from_millis(2_100), "{took:?}");
+        // Trickles past the request's own budget even with a far caller deadline.
+        f.deliver(Delivery::Trickle {
+            pad: 12,
+            every_ms: 450,
+        });
+        let (refused, took) = timed(30_000);
+        assert_eq!(
+            refused,
+            Err("service did not answer /health in time".into())
+        );
+        assert!(
+            took < HEALTH_BUDGET + Duration::from_millis(700),
+            "{took:?}"
+        );
+        // A body shorter than its Content-Length is not an answer.
+        f.deliver(Delivery::Truncated);
+        assert_eq!(timed(3_000).0, Err("service did not answer /health".into()));
+        // An already-passed deadline refuses at once.
+        f.deliver(Delivery::Whole);
+        let (refused, took) = timed(0);
+        assert!(refused.is_err());
+        assert!(took < Duration::from_millis(300), "{took:?}");
+    }
+
+    #[test]
+    fn complete_response_needs_the_whole_declared_body() {
+        let full = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(complete_response(full, false), Some((200, &b"{}"[..])));
+        assert_eq!(complete_response(&full[..full.len() - 1], false), None);
+        assert_eq!(complete_response(&full[..full.len() - 1], true), None);
+        let open = b"HTTP/1.1 200 OK\r\n\r\n{}";
+        assert_eq!(complete_response(open, false), None);
+        assert_eq!(complete_response(open, true), Some((200, &b"{}"[..])));
+        assert_eq!(
+            complete_response(b"HTTP/1.1 200 OK\r\nContent-", true),
+            None
+        );
+    }
+
+    #[test]
     fn r1_impostor_fixture_is_refused() {
         // W0-S peer r1 P1-03: wrong nonce, three different generations, nonsense daemon
         // layout, and a plain listener. Each mismatch alone is refused above; together too.
@@ -697,6 +886,7 @@ mod tests {
             &var("ATM_W0S_TXN"),
             &var("ATM_W0S_VERSION"),
             &host,
+            Instant::now() + Duration::from_secs(10),
         );
         assert_eq!(result, Ok(()));
         assert_eq!(lease(&runtime), Some((pid, Layout::Single)));
