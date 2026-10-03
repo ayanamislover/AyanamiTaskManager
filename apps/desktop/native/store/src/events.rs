@@ -8,7 +8,7 @@
 //!
 //! 这里的函数都只接受 `&Transaction`：它们只能在写作业里调用。
 
-use rusqlite::{OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
@@ -261,8 +261,8 @@ impl HighWater {
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// 26 位 Crockford base32 ULID，与 2.0 `createUlid` 同一格式。随机部分取 SQLite 的 `randomblob`（由 OS 熵播种）。
-pub fn ulid(tx: &Transaction<'_>) -> rusqlite::Result<String> {
-    let random: Vec<u8> = tx.query_row("SELECT randomblob(10)", [], |r| r.get(0))?;
+pub fn ulid(conn: &Connection) -> rusqlite::Result<String> {
+    let random: Vec<u8> = conn.query_row("SELECT randomblob(10)", [], |r| r.get(0))?;
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())

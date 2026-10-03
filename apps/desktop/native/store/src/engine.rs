@@ -362,7 +362,41 @@ impl Store {
             *lock(&out.value) = Some(result);
             out.ready.notify_all();
         });
+        self.enqueue(job)?;
+        Ok(Ticket { slot })
+    }
 
+    /// 独占作业：在写线程上拿到整条写连接，不自动开事务。
+    ///
+    /// 只给需要在事务外做准备的维护操作用（例如按范围恢复要先 ATTACH 备份库，而 ATTACH 不能在事务里做）。
+    /// 作业自己开、自己提交事务。预算只通过 progress handler 中断正在执行的 SQL，不做事后判定：
+    /// 作业可能已经提交，没法再回滚。作业返回后，残留的事务一律回滚，ATTACH 的库一律 DETACH。
+    pub fn submit_exclusive<R, E, F>(
+        &self,
+        budget: Duration,
+        f: F,
+    ) -> Result<Ticket<R, E>, WriteError<E>>
+    where
+        F: FnOnce(&mut Connection) -> Result<R, E> + Send + 'static,
+        R: Send + 'static,
+        E: Send + 'static,
+    {
+        let slot = Arc::new(Slot {
+            value: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        let out = slot.clone();
+        let job: Job = Box::new(move |conn, b, stats| {
+            let result = run_exclusive(conn, b, stats, budget, f);
+            *lock(&out.value) = Some(result);
+            out.ready.notify_all();
+        });
+        self.enqueue(job)?;
+        Ok(Ticket { slot })
+    }
+
+    /// 入队即受理。等不到空位返回 Busy，已关闭返回 Closed；这两种情况作业被丢弃，从未执行。
+    fn enqueue<E>(&self, job: Job) -> Result<(), WriteError<E>> {
         let deadline = Instant::now() + self.config.admit_wait;
         let mut q = lock(&self.shared.queue);
         loop {
@@ -391,7 +425,7 @@ impl Store {
         Stats::bump(&self.stats.admitted);
         drop(q);
         self.shared.not_empty.notify_one();
-        Ok(Ticket { slot })
+        Ok(())
     }
 
     /// 在一个只读事务里读。闭包里不要做网络、进程或文件 IO：快照在闭包返回前一直占着。
@@ -480,6 +514,49 @@ where
         &stats.rollbacks
     });
     result
+}
+
+fn run_exclusive<R, E, F>(
+    conn: &mut Connection,
+    b: &Budget,
+    stats: &Stats,
+    limit: Duration,
+    f: F,
+) -> Result<R, WriteError<E>>
+where
+    F: FnOnce(&mut Connection) -> Result<R, E>,
+{
+    b.arm(limit);
+    let out = catch_unwind(AssertUnwindSafe(|| f(&mut *conn)));
+    b.disarm();
+    // 作业没收尾的事务：回滚，免得下一个作业接着在它里面写。
+    let leaked = !conn.is_autocommit();
+    if leaked {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
+    detach_all(conn);
+    let result = match out {
+        Err(_) => Err(WriteError::Panicked),
+        Ok(Err(e)) => Err(WriteError::Rejected(e)),
+        Ok(Ok(_)) if leaked => Err(WriteError::Sqlite(rusqlite::Error::InvalidQuery)),
+        Ok(Ok(r)) => Ok(r),
+    };
+    Stats::bump(if result.is_ok() {
+        &stats.commits
+    } else {
+        &stats.rollbacks
+    });
+    result
+}
+
+fn detach_all(conn: &Connection) {
+    let names: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_database_list WHERE name NOT IN ('main', 'temp')")
+        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+        .unwrap_or_default();
+    for name in names {
+        let _ = conn.execute("DETACH DATABASE ?1", [name]);
+    }
 }
 
 fn run_read<R, E, F>(

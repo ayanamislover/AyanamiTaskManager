@@ -1,0 +1,509 @@
+//! 整库备份与校验（W1e，05 §2.7 第 1 步、A4）。
+//!
+//! 一个备份是一个目录 `<备份根>/<备份 id>/`：
+//! - `atm.sqlite`：`VACUUM INTO` 得到的一致快照，在旁路只读连接上做，不占写线程；
+//! - `artifacts/**`：附件文件的副本（数据根下 `artifacts/` 的全部内容）；
+//! - `manifest.json`：库的 sha256 与大小、迁移清单、app_meta 身份、各项目与知识库的序号和世代、
+//!   附件清单及其摘要（A4：manifest 绑定附件及其哈希）。
+//!
+//! 每个文件先写 `.tmp`、落盘后再改名；manifest 最后写，有 manifest 的目录才是完整的备份。
+//! 登记写进 `backups` 表。校验（[`verify_backup`]）逐项核对文件、manifest、目录、完整性、schema 与时间线。
+
+use crate::Store;
+use crate::events::ulid;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use sha2::{Digest, Sha256};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+pub const MANIFEST_FORMAT: &str = "atm3-backup-1";
+const DB_FILE: &str = "atm.sqlite";
+const MANIFEST_FILE: &str = "manifest.json";
+const ARTIFACTS_DIR: &str = "artifacts";
+
+#[derive(Debug)]
+pub enum BackupError {
+    Sqlite(rusqlite::Error),
+    Io(std::io::Error),
+    /// 写线程拒绝或执行失败（STORE_BUSY 等），带错误码与说明。
+    Write(String),
+    NotFound(String),
+    /// 文件、manifest、目录三者对不上，或完整性检查失败。
+    Corrupt(String),
+    /// 备份的迁移清单与当前库不同。
+    SchemaMismatch,
+    /// 备份与当前库不在同一条时间线上（data_root_id / instance_epoch 不同，或回执对不上）。
+    TimelineMismatch(String),
+    /// 备份里没有要恢复的范围。
+    ScopeMissing(String),
+    /// 附件目录里有符号链接 / 重解析点。
+    Unsupported(String),
+}
+
+impl std::fmt::Display for BackupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackupError::Sqlite(e) => write!(f, "sqlite: {e}"),
+            BackupError::Io(e) => write!(f, "io: {e}"),
+            BackupError::Write(m) => write!(f, "write: {m}"),
+            BackupError::NotFound(m) => write!(f, "backup not found: {m}"),
+            BackupError::Corrupt(m) => write!(f, "backup corrupt: {m}"),
+            BackupError::SchemaMismatch => {
+                write!(f, "backup schema differs from the current database")
+            }
+            BackupError::TimelineMismatch(m) => write!(f, "backup is from another timeline: {m}"),
+            BackupError::ScopeMissing(m) => write!(f, "scope not in backup: {m}"),
+            BackupError::Unsupported(m) => write!(f, "unsupported file: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for BackupError {}
+
+impl From<rusqlite::Error> for BackupError {
+    fn from(e: rusqlite::Error) -> Self {
+        BackupError::Sqlite(e)
+    }
+}
+
+impl From<std::io::Error> for BackupError {
+    fn from(e: std::io::Error) -> Self {
+        BackupError::Io(e)
+    }
+}
+
+impl<E: std::fmt::Debug> From<crate::WriteError<E>> for BackupError {
+    fn from(e: crate::WriteError<E>) -> Self {
+        BackupError::Write(format!("{}: {e:?}", e.code().unwrap_or("REJECTED")))
+    }
+}
+
+impl<E: std::fmt::Debug> From<crate::ReadError<E>> for BackupError {
+    fn from(e: crate::ReadError<E>) -> Self {
+        BackupError::Write(format!("read: {e:?}"))
+    }
+}
+
+pub type Result<T> = std::result::Result<T, BackupError>;
+
+/// 数据根下的附件目录：与库文件同级的 `artifacts/`（05 §3.3：`N\data\artifacts\<project_id>\**`）。
+pub fn artifacts_root(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .map(|p| p.join(ARTIFACTS_DIR))
+        .unwrap_or_else(|| PathBuf::from(ARTIFACTS_DIR))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileEntry {
+    /// 相对路径，`/` 分隔。
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackupInfo {
+    pub id: String,
+    pub kind: String,
+    pub dir: PathBuf,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub attachments_sha256: String,
+    pub created_at: String,
+}
+
+/// 只读的旁路连接：备份与校验用，不进读连接池，也不受读事务时长上限约束。
+pub fn side_reader(path: &Path) -> Result<Connection> {
+    let c = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_URI,
+    )?;
+    c.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(c)
+}
+
+/// 做一个整库备份并登记。`kind` 取 `backups.kind` 的取值之一。
+pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
+    let side = side_reader(store.path())?;
+    let id = ulid(&side)?;
+    let dir = root.join(&id);
+    fs::create_dir_all(&dir)?;
+
+    let tmp = dir.join(format!("{DB_FILE}.tmp"));
+    side.execute("VACUUM INTO ?1", [path_str(&tmp)?])?;
+    drop(side);
+    sync_file(&tmp)?;
+    let db = dir.join(DB_FILE);
+    fs::rename(&tmp, &db)?;
+    let (sha256, size_bytes) = hash_file(&db)?;
+
+    let files = copy_tree(&artifacts_root(store.path()), &dir.join(ARTIFACTS_DIR))?;
+    let attachments_sha256 = attachments_digest(&files);
+
+    // manifest 的内容全部从快照本身读出，保证与库一致。
+    let snap = side_reader(&db)?;
+    let files_json = files_json(&snap, &files)?;
+    let manifest: String = snap.query_row(
+        "SELECT json_object(
+           'format', ?1, 'backupId', ?2, 'kind', ?3, 'createdAt', ?4,
+           'db', json_object('file', ?5, 'sha256', ?6, 'sizeBytes', ?7),
+           'migrations', (SELECT json_group_array(json_object('version', version, 'sha256', sha256))
+                          FROM (SELECT version, sha256 FROM schema_migrations ORDER BY version)),
+           'appMeta', (SELECT json_object('dataRootId', data_root_id, 'instanceEpoch', instance_epoch,
+                                          'generation', generation, 'globalSeq', global_seq,
+                                          'scopeGenCounter', scope_gen_counter) FROM app_meta),
+           'projects', (SELECT json_group_array(json_object('id', id, 'code', code, 'lifecycle', lifecycle,
+                                                            'projectSeq', project_seq, 'scopeGen', scope_gen, 'epoch', epoch))
+                        FROM (SELECT * FROM projects ORDER BY id)),
+           'knowledge', (SELECT json_object('databaseId', database_id, 'generation', generation,
+                                            'sequence', sequence, 'scopeGen', scope_gen) FROM knowledge_meta),
+           'attachments', json_object('sha256', ?8, 'files', json(?9)))",
+        params![MANIFEST_FORMAT, id, kind, at, DB_FILE, sha256, size_bytes as i64, attachments_sha256, files_json],
+        |r| r.get(0),
+    )?;
+    let (schema_version, generation): (i64, String) = snap.query_row(
+        "SELECT (SELECT max(version) FROM schema_migrations), coalesce((SELECT generation FROM app_meta), '')",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    drop(snap);
+    write_atomically(&dir.join(MANIFEST_FILE), manifest.as_bytes())?;
+
+    let row = (
+        id.clone(),
+        kind.to_string(),
+        path_str(&dir)?.to_string(),
+        sha256.clone(),
+        size_bytes as i64,
+        attachments_sha256.clone(),
+        at.to_string(),
+    );
+    store.write(move |tx| {
+        tx.execute(
+            "INSERT INTO backups (id, kind, path, sha256, size_bytes, schema_version, generation,
+                                  attachments_manifest_sha256, created_at, verified_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            params![
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                schema_version,
+                generation,
+                row.5,
+                row.6
+            ],
+        )
+    })?;
+    Ok(BackupInfo {
+        id,
+        kind: kind.to_string(),
+        dir,
+        sha256,
+        size_bytes,
+        attachments_sha256,
+        created_at: at.to_string(),
+    })
+}
+
+/// 校验通过的备份：恢复需要的定位信息。
+#[derive(Clone, Debug)]
+pub struct VerifiedBackup {
+    pub id: String,
+    pub dir: PathBuf,
+    pub db: PathBuf,
+    pub created_at: String,
+    /// 备份时的 global_seq：全局流里比它大的行都在备份点之后。
+    pub global_seq: i64,
+    pub attachments: Vec<FileEntry>,
+}
+
+impl VerifiedBackup {
+    pub fn artifacts_dir(&self) -> PathBuf {
+        self.dir.join(ARTIFACTS_DIR)
+    }
+}
+
+/// 逐项核对一个已登记的备份。任一项不符都拒绝，不做部分恢复。
+pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
+    let key = id.to_string();
+    let row: Option<(String, String, i64, Option<String>, String)> = store.read(move |tx| {
+        tx.query_row(
+            "SELECT path, sha256, size_bytes, attachments_manifest_sha256, created_at FROM backups WHERE id = ?1",
+            [&key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+    })?;
+    let (dir, sha, size, attachments_sha, created_at) =
+        row.ok_or_else(|| BackupError::NotFound(id.to_string()))?;
+    let dir = PathBuf::from(dir);
+    let db = dir.join(DB_FILE);
+    if !db.is_file() {
+        return Err(BackupError::Corrupt(format!("{} is missing", db.display())));
+    }
+    let (actual_sha, actual_size) = hash_file(&db)?;
+    if actual_sha != sha || actual_size as i64 != size {
+        return Err(BackupError::Corrupt(
+            "database file differs from the catalog".into(),
+        ));
+    }
+
+    let manifest = fs::read_to_string(dir.join(MANIFEST_FILE))
+        .map_err(|e| BackupError::Corrupt(format!("manifest unreadable: {e}")))?;
+    let side = side_reader(&db)?;
+    struct Head {
+        format: Option<String>,
+        id: Option<String>,
+        sha: Option<String>,
+        size: Option<i64>,
+        attachments: Option<String>,
+    }
+    let head = side.query_row(
+        "SELECT ?1 ->> '$.format', ?1 ->> '$.backupId', ?1 ->> '$.db.sha256', ?1 ->> '$.db.sizeBytes',
+                ?1 ->> '$.attachments.sha256'",
+        [&manifest],
+        |r| {
+            Ok(Head {
+                format: r.get(0)?,
+                id: r.get(1)?,
+                sha: r.get(2)?,
+                size: r.get(3)?,
+                attachments: r.get(4)?,
+            })
+        },
+    )?;
+    let m_att = head.attachments;
+    if head.format.as_deref() != Some(MANIFEST_FORMAT)
+        || head.id.as_deref() != Some(id)
+        || head.sha.as_deref() != Some(sha.as_str())
+        || head.size != Some(size)
+    {
+        return Err(BackupError::Corrupt(
+            "manifest does not describe this database file".into(),
+        ));
+    }
+
+    let attachments = list_tree(&dir.join(ARTIFACTS_DIR))?;
+    let digest = attachments_digest(&attachments);
+    if m_att.as_deref() != Some(digest.as_str())
+        || attachments_sha.as_deref() != Some(digest.as_str())
+    {
+        return Err(BackupError::Corrupt(
+            "attachments differ from the manifest".into(),
+        ));
+    }
+
+    let check: String = side.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+    if check != "ok" {
+        return Err(BackupError::Corrupt(format!("quick_check: {check}")));
+    }
+
+    let backup_migrations = migrations(&side)?;
+    let backup_identity = identity(&side)?;
+    let global_seq: i64 = side.query_row(
+        "SELECT coalesce((SELECT global_seq FROM app_meta), 0)",
+        [],
+        |r| r.get(0),
+    )?;
+    drop(side);
+    let (current_migrations, current_identity) =
+        store.read(|tx| Ok::<_, rusqlite::Error>((migrations(tx)?, identity(tx)?)))?;
+    if backup_migrations != current_migrations {
+        return Err(BackupError::SchemaMismatch);
+    }
+    if backup_identity.is_none() || backup_identity != current_identity {
+        return Err(BackupError::TimelineMismatch(
+            "data_root_id / instance_epoch differ".into(),
+        ));
+    }
+
+    let key = id.to_string();
+    store.write(move |tx| {
+        tx.execute(
+            "UPDATE backups SET verified_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?1",
+            [key],
+        )
+    })?;
+    Ok(VerifiedBackup {
+        id: id.to_string(),
+        dir,
+        db,
+        created_at,
+        global_seq,
+        attachments,
+    })
+}
+
+/// 固定一个备份到 `until`（A4：恢复前先固定，保留策略不得删除）。
+pub fn pin(store: &Store, id: &str, until: &str) -> Result<()> {
+    let (key, until) = (id.to_string(), until.to_string());
+    let n = store.write(move |tx| {
+        tx.execute(
+            "UPDATE backups SET pinned_until = ?2 WHERE id = ?1",
+            [key, until],
+        )
+    })?;
+    if n == 0 {
+        return Err(BackupError::NotFound(id.to_string()));
+    }
+    Ok(())
+}
+
+fn migrations(c: &Connection) -> rusqlite::Result<Vec<(i64, String)>> {
+    let mut st = c.prepare("SELECT version, sha256 FROM schema_migrations ORDER BY version")?;
+    st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+}
+
+fn identity(c: &Connection) -> rusqlite::Result<Option<(String, String)>> {
+    c.query_row(
+        "SELECT data_root_id, instance_epoch FROM app_meta",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .optional()
+}
+
+pub(crate) fn path_str(p: &Path) -> Result<&str> {
+    p.to_str()
+        .ok_or_else(|| BackupError::Unsupported(format!("non-UTF-8 path {}", p.display())))
+}
+
+pub(crate) fn hash_file(path: &Path) -> Result<(String, u64)> {
+    let mut f = File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    let mut total = 0u64;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((hex(&h.finalize()), total))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 落盘。Windows 上 FlushFileBuffers 要求句柄有写权限，只读打开会被拒绝。
+fn sync_file(path: &Path) -> Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 附件清单的摘要：按相对路径字节序排列的 `路径 \0 大小 \0 sha256 \n` 序列的 sha256（05 §5.1 文件集合族）。
+pub fn attachments_digest(files: &[FileEntry]) -> String {
+    let mut h = Sha256::new();
+    for f in files {
+        h.update(f.path.as_bytes());
+        h.update([0]);
+        h.update(f.size.to_string().as_bytes());
+        h.update([0]);
+        h.update(f.sha256.as_bytes());
+        h.update(b"\n");
+    }
+    hex(&h.finalize())
+}
+
+fn files_json(c: &Connection, files: &[FileEntry]) -> Result<String> {
+    let mut json = String::from("[]");
+    for f in files {
+        json = c.query_row(
+            "SELECT json_insert(?1, '$[#]', json_object('path', ?2, 'sizeBytes', ?3, 'sha256', ?4))",
+            params![json, f.path, f.size as i64, f.sha256],
+            |r| r.get(0),
+        )?;
+    }
+    Ok(json)
+}
+
+/// 列出目录下的全部普通文件（相对路径、大小、sha256），按路径字节序。目录不存在视为空。
+pub fn list_tree(root: &Path) -> Result<Vec<FileEntry>> {
+    let mut out = Vec::new();
+    if root.exists() {
+        walk(root, root, &mut |abs, rel| {
+            let (sha256, size) = hash_file(abs)?;
+            out.push(FileEntry {
+                path: rel.to_string(),
+                size,
+                sha256,
+            });
+            Ok(())
+        })?;
+    }
+    out.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    Ok(out)
+}
+
+/// 把 `from` 下的全部普通文件复制到 `to`，返回清单。
+pub fn copy_tree(from: &Path, to: &Path) -> Result<Vec<FileEntry>> {
+    if from.exists() {
+        walk(from, from, &mut |abs, rel| {
+            let dest = to.join(rel);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(abs, &dest)?;
+            sync_file(&dest)?;
+            Ok(())
+        })?;
+    }
+    list_tree(to)
+}
+
+fn walk(root: &Path, dir: &Path, f: &mut dyn FnMut(&Path, &str) -> Result<()>) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        let path = e.path();
+        let meta = fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() || is_reparse_point(&meta) {
+            return Err(BackupError::Unsupported(path.display().to_string()));
+        }
+        if meta.is_dir() {
+            walk(root, &path, f)?;
+        } else if meta.is_file() {
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|_| BackupError::Unsupported(path.display().to_string()))?;
+            let rel: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            f(&path, &rel.join("/"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_point(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_meta: &fs::Metadata) -> bool {
+    false
+}

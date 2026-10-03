@@ -8,8 +8,10 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub mod backup;
 mod engine;
 pub mod events;
+pub mod restore;
 pub mod search;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
 
