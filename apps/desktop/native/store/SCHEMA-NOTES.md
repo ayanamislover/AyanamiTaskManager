@@ -27,7 +27,7 @@
 ## 沿用 05、容易误改的地方
 
 - `restore_guard`（05 §2.7）：知识修订平时不可改、不可删，删除触发器只在这张表有 `KNOWLEDGE` 行时放行。这一行只在恢复事务内插入、提交前删除，其他连接看不到它，所以恢复期间别处的写入依然受约束。不要为了恢复去关触发器。
-- `search_fts`（05 §2.5）：外部内容 FTS5，trigram 分词，`content_rowid` 绑定显式的 `INTEGER PRIMARY KEY doc_id`，用 ai/ad/au 三个触发器同步。隐式 rowid 在 VACUUM 后可能变化，会让索引和内容错位，所以 `doc_id` 必须是显式主键。
+- `search_fts`（05 §2.5）：外部内容 FTS5，trigram 分词，`content_rowid` 绑定显式的 `INTEGER PRIMARY KEY doc_id`，用 ai/ad/au 三个触发器同步。SQLite 只保证显式 INTEGER PRIMARY KEY 在 VACUUM 后不变，隐式 rowid「可能」被重排，那样索引和内容就会错位，所以 `doc_id` 必须是显式主键。当前打包的 SQLite 实测 VACUUM 并没有重排隐式 rowid，VACUUM 用例因此抓不到这个错，守卫改成直接断言 `doc_id` 就是 rowid 的别名（`tests/search.rs`）。
 
 ## 连接参数
 

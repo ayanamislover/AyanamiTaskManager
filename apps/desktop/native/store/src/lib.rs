@@ -10,6 +10,7 @@ use std::path::Path;
 
 mod engine;
 pub mod events;
+pub mod search;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
 
 /// 内置迁移，按版本号升序。新增迁移只能追加，不能改已发布的文本。
