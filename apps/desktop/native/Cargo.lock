@@ -48,6 +48,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-domain"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "atm-host"
 version = "0.0.0"
 dependencies = [
