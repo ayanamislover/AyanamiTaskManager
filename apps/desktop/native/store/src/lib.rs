@@ -16,6 +16,8 @@ pub mod legacy;
 pub mod restore;
 pub mod search;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
+#[doc(hidden)]
+pub use engine::{PassiveHold, hold_next_passive};
 
 /// 内置迁移，按版本号升序。新增迁移只能追加，不能改已发布的文本。
 pub const MIGRATIONS: &[Migration] = &[Migration {

@@ -8,9 +8,10 @@ use atm_store::backup::{
 };
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
-    PROJECT_TABLES, PROJECT_TABLES_HANDLED_ELSEWHERE, RestoreOptions, ScopeRef, ScopeRestored,
-    SwapStep, current_generation, ensure_generation, finish_attachment_swaps, inject_swap_fault,
-    restore_knowledge, restore_project, with_project_attachments,
+    PROJECT_TABLES, PROJECT_TABLES_HANDLED_ELSEWHERE, RestoreOptions, SWAP_EXIT_CODE, ScopeRef,
+    ScopeRestored, SwapStep, current_generation, ensure_generation, finish_attachment_swaps,
+    inject_swap_exit, inject_swap_fault, restore_knowledge, restore_project,
+    with_project_attachments,
 };
 use atm_store::search::{
     Doc, Scope, check_fts, match_docs, rebuild_knowledge_fts, terms, upsert_doc,
@@ -717,9 +718,16 @@ fn consecutive_restores_keep_earlier_tombstones_and_revive_what_the_backup_holds
     healthy(&w);
 }
 
-/// 失败前后的状态指纹：各表行数、几个高水位、附件与暂存目录。
-/// (各表行数, 高水位, PA 的附件, PA 的暂存目录是否存在)
-type Fingerprint = (Vec<(String, i64)>, Vec<i64>, Vec<(String, String)>, bool);
+/// 失败前后的状态指纹：各表行数、几个高水位、附件与暂存目录，以及两个项目逐列的业务摘要
+/// （W1 peer r4 P2-05：只比行数时，同样行数下正文变了看不出来）。
+type Fingerprint = (
+    Vec<(String, i64)>,
+    Vec<i64>,
+    Vec<(String, String)>,
+    bool,
+    Vec<(String, Vec<String>)>,
+    Vec<(String, Vec<String>)>,
+);
 
 fn fingerprint(w: &World) -> Fingerprint {
     let counts = w
@@ -757,6 +765,8 @@ fn fingerprint(w: &World) -> Fingerprint {
         marks,
         files(&root.join("PA")),
         root.join(".restore-staging").join("PA").exists(),
+        business(w, "PA", &[]),
+        business(w, "PB", &[]),
     )
 }
 
@@ -1488,4 +1498,259 @@ fn attachment_operations_are_refused_inside_a_write_job() {
         .expect("an attachment operation inside a write job deadlocked")
         .unwrap();
     assert_eq!(refused, (true, true));
+}
+
+/// 一个项目的业务列摘要（W1 peer r4 P2-05）：每张带 project_id 列的表（加上 projects 自己那一行），
+/// 每行按「列名=值」序列化，行排序后逐表列出。比行数严格：同样行数下正文变了也看得出来。
+/// `skip` 列出允许不同的 (表, 列)。
+fn business(
+    w: &World,
+    project: &str,
+    skip: &'static [(&'static str, &'static str)],
+) -> Vec<(String, Vec<String>)> {
+    let project = project.to_string();
+    w.store
+        .read(move |tx| {
+            let mut tables: Vec<String> = tx
+                .prepare(
+                    "SELECT m.name FROM sqlite_master m
+                     WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%' AND m.name NOT LIKE '%fts%'
+                       AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) WHERE name = 'project_id')
+                     ORDER BY m.name",
+                )?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            tables.push("projects".into());
+            let mut out = Vec::new();
+            for t in tables {
+                let filter = if t == "projects" { "id" } else { "project_id" };
+                let mut stmt = tx.prepare(&format!("SELECT * FROM {t} WHERE {filter} = ?1"))?;
+                let names: Vec<String> =
+                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let mut rows: Vec<String> = stmt
+                    .query_map([&project], |r| {
+                        let mut cells = Vec::new();
+                        for (i, n) in names.iter().enumerate() {
+                            if skip.contains(&(t.as_str(), n.as_str())) {
+                                continue;
+                            }
+                            let v = match r.get_ref(i)? {
+                                rusqlite::types::ValueRef::Null => "NULL".to_string(),
+                                rusqlite::types::ValueRef::Integer(x) => x.to_string(),
+                                rusqlite::types::ValueRef::Real(x) => format!("{x:?}"),
+                                rusqlite::types::ValueRef::Text(b) => {
+                                    format!("{:?}", String::from_utf8_lossy(b))
+                                }
+                                rusqlite::types::ValueRef::Blob(b) => format!("blob{b:?}"),
+                            };
+                            cells.push(format!("{n}={v}"));
+                        }
+                        Ok(cells.join("|"))
+                    })?
+                    .collect::<rusqlite::Result<_>>()?;
+                rows.sort();
+                out.push((t, rows));
+            }
+            Ok::<_, rusqlite::Error>(out)
+        })
+        .unwrap()
+}
+
+/// 恢复本身每次新生成的两个 id：`project.restored` 事件的 id、PRE_RESTORE 备份的 id。
+/// 一次不中断的恢复与一次中断后收尾的恢复只在这两个值（以及世代的 epoch）上不同，替换成占位符再比。
+fn after_restore(w: &World, project: &'static str) -> Vec<(String, Vec<String>)> {
+    let ids: Vec<(String, String)> = w
+        .store
+        .read(move |tx| {
+            tx.prepare(
+                "SELECT id, json_extract(payload_json, '$.preRestoreBackupId') FROM events
+                 WHERE project_id = ?1 AND type = 'project.restored'",
+            )?
+            .query_map([project], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()
+        })
+        .unwrap();
+    business(w, project, PER_RUN)
+        .into_iter()
+        .map(|(t, rows)| {
+            let rows = rows
+                .into_iter()
+                .map(|mut row| {
+                    for (event, pre) in &ids {
+                        row = row
+                            .replace(event, "<RESTORED_EVENT>")
+                            .replace(pre, "<PRE_RESTORE>");
+                    }
+                    row
+                })
+                .collect();
+            (t, rows)
+        })
+        .collect()
+}
+
+const EXIT_DB: &str = "ATM_RESTORE_EXIT_DB";
+const EXIT_BACKUPS: &str = "ATM_RESTORE_EXIT_BACKUPS";
+const EXIT_BACKUP_ID: &str = "ATM_RESTORE_EXIT_BACKUP_ID";
+const EXIT_STEP: &str = "ATM_RESTORE_EXIT_STEP";
+
+/// 每次恢复新分配的世代 epoch。
+const PER_RUN: &[(&str, &str)] = &[("projects", "epoch")];
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for e in fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let target = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &target);
+        } else {
+            fs::copy(e.path(), &target).unwrap();
+        }
+    }
+}
+
+/// 子进程用例的场景：PA、PB 各有工作数据，PA 有附件；备份之后 PA 又写了一笔、换了附件。
+/// 只建一次，之后每一格都复制整个目录，所以各格的起点逐字节相同。
+fn exit_template() -> (PathBuf, String) {
+    let w = world("restore-exit-template");
+    task(&w, "PA", "one", "op-1", None, T0);
+    task(&w, "PB", "keep", "op-k", None, T0);
+    attachment(&w, "PA", "a.txt", "v1");
+    let b = backup(&w);
+    task(&w, "PA", "two", "op-2", None, T1);
+    attachment(&w, "PA", "a.txt", "v2");
+    attachment(&w, "PA", "b.txt", "new");
+    let dir = w.store.path().parent().unwrap().to_path_buf();
+    drop(w);
+    (dir, b)
+}
+
+fn exit_case(template: &Path, name: &str) -> World {
+    let dir = template.with_file_name(name);
+    let _ = fs::remove_dir_all(&dir);
+    copy_dir(template, &dir);
+    World {
+        store: Store::open(&dir.join("atm.sqlite"), Config::default()).unwrap(),
+        backups: dir.join("backups"),
+    }
+}
+
+/// W1 peer r4 P2-05：恢复在提交前、提交后以及换入的每一步，进程真的退出（不是同进程里返回错误）。
+/// 重开之后收尾一次：提交前退出的，项目逐列原样；提交后退出的，结果与一次不中断的恢复逐列相同。
+/// 其他项目在任何情况下都逐列不变，之后可以照常备份。
+#[test]
+fn a_process_that_exits_at_any_restore_step_is_finished_on_reopen() {
+    let (template, b) = exit_template();
+    let reference = {
+        let w = exit_case(&template, "restore-exit-reference");
+        restore_project(&w.store, &b, "PA", &opts(&w)).unwrap();
+        after_restore(&w, "PA")
+    };
+    for step in SwapStep::EXIT_POINTS {
+        let w = exit_case(&template, &format!("restore-exit-{step:?}"));
+        let pa_before = business(&w, "PA", &[]);
+        let pb_before = business(&w, "PB", &[]);
+        let path = w.store.path().to_path_buf();
+        let backups = w.backups.clone();
+        drop(w);
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "restore_exit_child",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(EXIT_DB, &path)
+            .env(EXIT_BACKUPS, &backups)
+            .env(EXIT_BACKUP_ID, &b)
+            .env(EXIT_STEP, format!("{step:?}"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.code(),
+            Some(SWAP_EXIT_CODE),
+            "{step:?}: the child must exit at that step"
+        );
+
+        let w = World {
+            store: Store::open(&path, Config::default()).unwrap(),
+            backups,
+        };
+        assert_eq!(finish_attachment_swaps(&w.store).unwrap(), 1, "{step:?}");
+        let root = artifacts_root(&path);
+        if step == SwapStep::BeforeCommit {
+            assert_eq!(
+                business(&w, "PA", &[]),
+                pa_before,
+                "{step:?}: nothing was committed"
+            );
+            assert_eq!(
+                files(&root.join("PA")),
+                pairs(&[("a.txt", "v2"), ("b.txt", "new")]),
+                "{step:?}"
+            );
+        } else {
+            assert_eq!(
+                after_restore(&w, "PA"),
+                reference,
+                "{step:?}: same as an uninterrupted restore"
+            );
+            assert_eq!(
+                files(&root.join("PA")),
+                pairs(&[("a.txt", "v1")]),
+                "{step:?}"
+            );
+        }
+        assert_eq!(
+            business(&w, "PB", &[]),
+            pb_before,
+            "{step:?}: other projects untouched"
+        );
+        assert!(
+            fs::read_dir(root.join(".restore-staging"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true),
+            "{step:?}: staging left behind"
+        );
+        assert!(
+            fs::read_dir(root.join(".restore-old"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true),
+            "{step:?}: old attachments left behind"
+        );
+        healthy(&w);
+        create_backup(&w.store, &w.backups, "MANUAL", T3).unwrap();
+    }
+}
+
+/// 上一条用例的子进程：打开库，注入「走到这一步就退出」，执行恢复。
+#[test]
+#[ignore = "run as a child process by a_process_that_exits_at_any_restore_step_is_finished_on_reopen"]
+fn restore_exit_child() {
+    let (Some(path), Some(backups), Some(id), Some(step)) = (
+        std::env::var_os(EXIT_DB),
+        std::env::var_os(EXIT_BACKUPS),
+        std::env::var(EXIT_BACKUP_ID).ok(),
+        std::env::var(EXIT_STEP).ok(),
+    ) else {
+        return;
+    };
+    let step = SwapStep::EXIT_POINTS
+        .into_iter()
+        .find(|s| format!("{s:?}") == step)
+        .expect("known step");
+    let w = World {
+        store: Store::open(Path::new(&path), Config::default()).unwrap(),
+        backups: PathBuf::from(backups),
+    };
+    inject_swap_exit(w.store.path(), step);
+    let r = restore_project(&w.store, &id, "PA", &opts(&w));
+    // 走到这里说明注入点没有触发。
+    eprintln!("restore finished without reaching {step:?}: {r:?}");
+    std::process::exit(3);
 }

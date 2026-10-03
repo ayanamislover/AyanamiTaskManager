@@ -3,7 +3,7 @@
 //! 可能卡死的操作（变异后读不返回、写线程被占住）都放在子线程里跑，主线程限时等结果；
 //! 子线程持有 `Arc<Store>`，超时 panic 时不会在主线程里 join 一个停不下来的写线程。
 
-use atm_store::{Config, ReadError, Stats, Store, Waited, WriteError, open};
+use atm_store::{Config, ReadError, Stats, Store, Waited, WriteError, hold_next_passive, open};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -462,6 +462,126 @@ fn a_long_read_is_cut_off_and_truncate_then_proceeds() {
     assert_eq!(Stats::get(&store.stats().read_interrupts), 1);
 }
 
+/// W1 peer r4 P2-01：progress handler 只在 SQL 执行时跑。短 SQL 加长时间的 Rust 计算中断不了，
+/// 但闭包返回时按耗时判为超时，结果丢弃；这和 SQL 被中断是两个不同的计数。
+#[test]
+fn a_read_that_is_slow_in_rust_is_over_budget() {
+    let store = Arc::new(
+        Store::open(
+            &db_path("engine-slow-read"),
+            Config {
+                read_budget: MS(100),
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    store.write(|tx| put(tx, "seed")).unwrap();
+    let (done_tx, done_rx) = channel();
+    {
+        let store = store.clone();
+        thread::spawn(move || {
+            let r = store.read(|tx| {
+                let n =
+                    tx.query_row("SELECT count(*) FROM settings", [], |r| r.get::<_, i64>(0))?;
+                thread::sleep(MS(300));
+                Ok::<_, rusqlite::Error>(n)
+            });
+            done_tx
+                .send(matches!(r, Err(ReadError::OverBudget)))
+                .unwrap();
+        });
+    }
+    let over = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the read must return");
+    assert!(
+        over,
+        "a read that overran in Rust must not return its result"
+    );
+    assert_eq!(Stats::get(&store.stats().read_overruns), 1);
+    assert_eq!(Stats::get(&store.stats().read_interrupts), 0);
+    // 预算内的读不受影响。
+    assert!(has(&store, "seed"));
+}
+
+/// W1 peer r4 P2-01：写预算从 BEGIN 成功开始计。等别的连接放开写锁的时间不算，
+/// 所以它不是端到端时延的上限；作业本身很快时照常提交。
+#[test]
+fn the_write_budget_does_not_count_the_wait_for_begin() {
+    let path = db_path("engine-begin-wait");
+    let store = Arc::new(
+        Store::open(
+            &path,
+            Config {
+                write_budget: MS(150),
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    let (held_tx, held_rx) = channel();
+    let holder = {
+        let path = path.clone();
+        thread::spawn(move || {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch("BEGIN IMMEDIATE").unwrap();
+            held_tx.send(()).unwrap();
+            thread::sleep(MS(500));
+            c.execute_batch("COMMIT").unwrap();
+        })
+    };
+    held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (done_tx, done_rx) = channel();
+    {
+        let store = store.clone();
+        thread::spawn(move || {
+            let t0 = Instant::now();
+            let r = store.write(|tx| put(tx, "after-wait"));
+            done_tx.send((r.is_ok(), t0.elapsed())).unwrap();
+        });
+    }
+    let (ok, took) = done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the write must finish once the lock is released");
+    holder.join().unwrap();
+    assert!(ok, "waiting for BEGIN is outside the write budget");
+    assert!(
+        took >= MS(300),
+        "the write really waited for the lock ({took:?})"
+    );
+    assert!(has(&store, "after-wait"));
+    assert_eq!(Stats::get(&store.stats().over_budget), 0);
+}
+
+/// W1 peer r4 P2-01：独占作业自己提交事务，之后返回的 Err 不会撤销已提交的内容。
+/// 这条用例把这个合同钉住：谁要「失败即回滚」，就该用普通写作业。
+#[test]
+fn an_exclusive_job_that_fails_after_committing_stays_committed() {
+    let store = Store::open(&db_path("engine-exclusive-result"), fast()).unwrap();
+    let r = store
+        .submit_exclusive(Duration::from_secs(5), |conn| {
+            let tx = conn.transaction()?;
+            put(&tx, "committed-then-failed")?;
+            tx.commit()?;
+            Err::<(), _>(rusqlite::Error::InvalidQuery)
+        })
+        .unwrap()
+        .wait();
+    assert!(matches!(r, Err(WriteError::Rejected(_))));
+    assert!(
+        has(&store, "committed-then-failed"),
+        "an exclusive job's Err does not roll back what it already committed"
+    );
+    // 对照：普通写作业返回 Err 就是回滚。
+    let r = store.write(|tx| {
+        put(tx, "rolled-back")?;
+        Err::<(), _>(rusqlite::Error::InvalidQuery)
+    });
+    assert!(matches!(r, Err(WriteError::Rejected(_))));
+    assert!(!has(&store, "rolled-back"));
+}
+
 #[test]
 fn writes_are_passively_checkpointed_when_the_queue_drains() {
     let path = db_path("engine-passive");
@@ -671,6 +791,195 @@ fn a_queue_that_never_drains_still_gets_checkpoints() {
         Stats::get(&store.stats().restart_busy),
         wal_len(&path)
     );
+}
+
+/// W1 peer r4 P2-05：关闭发生在 PASSIVE 进行中。已受理的写入照样执行完，新写入被拒；
+/// PASSIVE 没结束之前关闭不返回（不会丢下 checkpoint 线程，也不会和它同时做最后的 TRUNCATE），
+/// 结束之后照常收尾。
+#[test]
+fn shutdown_during_a_passive_checkpoint_waits_for_it() {
+    let path = db_path("engine-shutdown-passive");
+    let store = Arc::new(
+        Store::open(
+            &path,
+            Config {
+                checkpoint_gap: MS(10),
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    let hold = hold_next_passive(store.path());
+    store.write(|tx| put(tx, "first")).unwrap();
+    assert!(
+        eventually(Duration::from_secs(5), || hold.entered()),
+        "the checkpoint thread never started a PASSIVE"
+    );
+    assert_eq!(Stats::get(&store.stats().passive_running), 1);
+
+    let tickets: Vec<_> = (0..5)
+        .map(|i| {
+            store
+                .submit(move |tx| put(tx, &format!("queued-{i}")))
+                .unwrap()
+        })
+        .collect();
+    let (done_tx, done_rx) = channel();
+    {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.shutdown();
+            done_tx.send(()).unwrap();
+        });
+    }
+    for t in tickets {
+        match t.wait_timeout(Duration::from_secs(10)) {
+            Waited::Done(r) => r.expect("writes admitted before shutdown still commit"),
+            Waited::Pending(_) => panic!("a write admitted before shutdown was never executed"),
+        }
+    }
+    assert!(
+        done_rx.recv_timeout(MS(400)).is_err(),
+        "shutdown returned while a PASSIVE was still running"
+    );
+    assert!(matches!(
+        store.write(|tx| put(tx, "late")),
+        Err(WriteError::Closed)
+    ));
+
+    assert_eq!(
+        Stats::get(&store.stats().truncate_checkpoints),
+        0,
+        "the final TRUNCATE must wait for the checkpoint thread to stop"
+    );
+    hold.release();
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("shutdown must finish once the PASSIVE does");
+    assert_eq!(Stats::get(&store.stats().passive_running), 0);
+    assert!(Stats::get(&store.stats().passive_checkpoints) >= 1);
+    assert!(Stats::get(&store.stats().truncate_checkpoints) >= 1);
+    assert_eq!(
+        wal_len(&path),
+        0,
+        "the final TRUNCATE ran after the PASSIVE"
+    );
+
+    let c = open(&path).unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM settings WHERE key LIKE 'queued-%' OR key = 'first'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 6);
+    assert!(
+        !c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM settings WHERE key = 'late')",
+            [],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap()
+    );
+}
+
+/// W1 peer r4 P2-05：关闭发生在 RESTART 进行中——一个读者一直占着快照，RESTART 在 SQLite 里等它。
+/// 关闭要等 RESTART 等满时限，再执行完排队的写入；最后的 TRUNCATE 被同一个读者挡住，报 busy，
+/// 关闭照样返回，不会挂住。读者离开后重开，数据完整。
+#[test]
+fn shutdown_during_a_restart_waits_it_out_and_truncate_reports_the_reader() {
+    let path = db_path("engine-shutdown-restart");
+    let store = Arc::new(
+        Store::open(
+            &path,
+            Config {
+                checkpoint_gap: MS(10),
+                wal_soft_limit: 64 << 10,
+                wal_restart_wait: Duration::from_secs(2),
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    store.write(|tx| put(tx, "seed")).unwrap();
+    let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT count(*) FROM settings", [], |r| r.get(0))
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut i = 0;
+    loop {
+        assert!(Instant::now() < deadline, "no RESTART started");
+        store
+            .write(move |tx| {
+                tx.execute(
+                    "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, json_quote(?2), 'T')",
+                    [format!("big-{i}"), "x".repeat(32 << 10)],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        i += 1;
+        if eventually(MS(60), || Stats::get(&store.stats().restart_running) == 1) {
+            break;
+        }
+    }
+
+    let tickets: Vec<_> = (0..3)
+        .map(|k| {
+            store
+                .submit(move |tx| put(tx, &format!("queued-{k}")))
+                .unwrap()
+        })
+        .collect();
+    let (done_tx, done_rx) = channel();
+    {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.shutdown();
+            done_tx.send(()).unwrap();
+        });
+    }
+    assert!(
+        done_rx.recv_timeout(MS(300)).is_err(),
+        "shutdown returned while the RESTART was still waiting for the reader"
+    );
+    done_rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("shutdown must not hang behind a reader");
+    for t in tickets {
+        match t.wait_timeout(Duration::from_secs(10)) {
+            Waited::Done(r) => r.expect("writes admitted before shutdown still commit"),
+            Waited::Pending(_) => panic!("a write admitted before shutdown was never executed"),
+        }
+    }
+    assert!(
+        Stats::get(&store.stats().restart_busy) >= 1,
+        "the reader held the RESTART off"
+    );
+    assert!(
+        Stats::get(&store.stats().truncate_busy) >= 1,
+        "the final TRUNCATE must report the reader, not wait for it"
+    );
+    assert!(wal_len(&path) > 0);
+    drop(reader);
+
+    let c = open(&path).unwrap();
+    let ok: String = c
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ok, "ok");
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM settings WHERE key LIKE 'queued-%' OR key LIKE 'big-%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 3 + i);
 }
 
 #[test]

@@ -132,13 +132,18 @@ pub fn restore_project(
         staging_marker: staging.marker.clone(),
     };
     let uri = readonly_uri(&vb.db)?;
+    let db = store.path().to_path_buf();
     let outcome = run(store, opts.budget, move |conn| {
         conn.execute("ATTACH DATABASE ?1 AS bk", [uri])?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let out = restore_project_tx(&tx, &ctx)?;
+        fault(&db, SwapStep::BeforeCommit)?;
         tx.commit()?;
         Ok(out)
     });
+    if outcome.is_ok() {
+        fault(store.path(), SwapStep::AfterCommit)?;
+    }
     // 成功：标记里的世代已在库里，换入暂存。失败：事务回滚，世代不在库里，丢弃暂存；
     // 作业在写标记之前就失败时没有标记，暂存目录在这里直接删。
     // 库已提交而换入失败时返回 AttachmentsPending：调用方不能把它当作已回滚。
@@ -776,10 +781,15 @@ pub fn with_project_attachments<R>(
     .map_err(BackupError::Io)
 }
 
-/// 换入的各个步骤，供测试在每一步注入故障（中断后再调用一次收尾，等同于进程在这一步退出后重启）。
+/// 恢复的各个步骤，供测试注入故障：在这一步返回错误（之后再调用一次收尾，等同于重启），
+/// 或者在这一步让进程真的退出（W1 peer r4 P2-05）。
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SwapStep {
+    /// 世代标记已落盘、库事务还没提交。
+    BeforeCommit,
+    /// 库事务已提交、还没开始换入附件。
+    AfterCommit,
     MoveLiveAside,
     MoveStagedIn,
     RemoveOld,
@@ -787,7 +797,18 @@ pub enum SwapStep {
 }
 
 impl SwapStep {
+    /// 换入本身的四步（提交之后，失败时返回 AttachmentsPending）。
     pub const ALL: [SwapStep; 4] = [
+        SwapStep::MoveLiveAside,
+        SwapStep::MoveStagedIn,
+        SwapStep::RemoveOld,
+        SwapStep::RemoveMarker,
+    ];
+
+    /// 进程可能退出的全部位置：提交前后，加上换入的四步。
+    pub const EXIT_POINTS: [SwapStep; 6] = [
+        SwapStep::BeforeCommit,
+        SwapStep::AfterCommit,
         SwapStep::MoveLiveAside,
         SwapStep::MoveStagedIn,
         SwapStep::RemoveOld,
@@ -795,22 +816,50 @@ impl SwapStep {
     ];
 }
 
-static SWAP_FAULTS: Mutex<Vec<(PathBuf, SwapStep)>> = Mutex::new(Vec::new());
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FaultMode {
+    Fail,
+    Exit,
+}
+
+static SWAP_FAULTS: Mutex<Vec<(PathBuf, SwapStep, FaultMode)>> = Mutex::new(Vec::new());
+
+/// 进程在注入点退出时的退出码，供父进程确认子进程确实走到了那一步。
+#[doc(hidden)]
+pub const SWAP_EXIT_CODE: i32 = 86;
 
 /// 测试用：这个库下一次走到 `step` 时失败一次。
 #[doc(hidden)]
 pub fn inject_swap_fault(db_path: &Path, step: SwapStep) {
-    SWAP_FAULTS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((db_path.to_path_buf(), step));
+    SWAP_FAULTS.lock().unwrap_or_else(|e| e.into_inner()).push((
+        db_path.to_path_buf(),
+        step,
+        FaultMode::Fail,
+    ));
+}
+
+/// 测试用：这个库下一次走到 `step` 时，整个进程立刻退出（不跑析构、不刷缓冲），
+/// 退出码 [`SWAP_EXIT_CODE`]。只在子进程里用。
+#[doc(hidden)]
+pub fn inject_swap_exit(db_path: &Path, step: SwapStep) {
+    SWAP_FAULTS.lock().unwrap_or_else(|e| e.into_inner()).push((
+        db_path.to_path_buf(),
+        step,
+        FaultMode::Exit,
+    ));
 }
 
 fn fault(db_path: &Path, step: SwapStep) -> std::io::Result<()> {
     let mut faults = SWAP_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
-    match faults.iter().position(|(p, s)| p == db_path && *s == step) {
+    match faults
+        .iter()
+        .position(|(p, s, _)| p == db_path && *s == step)
+    {
         Some(i) => {
-            faults.remove(i);
+            let (_, _, mode) = faults.remove(i);
+            if mode == FaultMode::Exit {
+                std::process::exit(SWAP_EXIT_CODE);
+            }
             Err(std::io::Error::other(format!("injected fault at {step:?}")))
         }
         None => Ok(()),

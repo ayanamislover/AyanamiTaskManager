@@ -8,7 +8,8 @@
 //!   想知道结果，用同一个 op_id 重放（00 Q-02、A6）。
 //!
 //! 读取：最多 `readers` 个只读连接，每次读在一个事务里看到一致的快照。
-//! 读事务有时长上限，超过即被中断，快照随之释放，不会无限拖住 checkpoint。
+//! 读事务有时长上限：SQL 超时当场中断，快照随之释放，不会无限拖住 checkpoint；
+//! 慢在 Rust 里的闭包中断不了，返回时按耗时判为超时（所以读闭包里只做查询）。
 //!
 //! checkpoint：关掉 SQLite 的自动 checkpoint。写线程每执行完一个作业就通知 checkpoint 线程（只置位，
 //! 不等），后者合并请求做 PASSIVE，两次之间至少隔 `checkpoint_gap`。不能只在队列排空时通知：
@@ -45,13 +46,17 @@ pub struct Config {
     pub queue_capacity: usize,
     /// 等队列空位的最长时间，超过返回 STORE_BUSY。
     pub admit_wait: Duration,
-    /// 单个写事务的默认时长预算，超过即回滚。
+    /// 单个写事务的默认时长预算，超过即回滚。从 BEGIN 成功开始计，到 COMMIT 之前判定：
+    /// 不含排队、等 BEGIN 的写锁（busy timeout）和 COMMIT 本身，所以不是端到端时延的上限（W1 peer r4 P2-01）。
+    /// SQL 执行中超时由 progress handler 当场中断；纯 Rust 的慢计算中断不了，只能在闭包返回后按耗时判定、回滚。
     pub write_budget: Duration,
     /// 只读连接数。
     pub readers: usize,
     /// 等空闲读连接的最长时间。
     pub read_wait: Duration,
-    /// 单个读事务的时长上限。
+    /// 单个读事务的时长上限，判定方式同 `write_budget`：SQL 当场中断（快照随即释放），
+    /// 纯 Rust 的慢计算要等闭包返回才判定，期间快照一直占着。超时的读一律返回 `ReadError::OverBudget`，
+    /// 算出来的结果丢弃。所以读闭包里只做查询、把行收出来，处理放到闭包外（W1 peer r4 P2-01）。
     pub read_budget: Duration,
     /// 写线程空闲这么久后做 TRUNCATE checkpoint。
     pub idle_checkpoint: Duration,
@@ -156,10 +161,16 @@ pub struct Stats {
     pub restart_checkpoints: AtomicU64,
     pub restart_busy: AtomicU64,
     pub restart_max_us: AtomicU64,
+    /// 正在执行的 PASSIVE / RESTART（0 或 1）。诊断用，也让关闭用例确认 checkpoint 确实在进行中。
+    pub passive_running: AtomicU64,
+    pub restart_running: AtomicU64,
     /// 单个写作业（含 BEGIN / COMMIT）在写线程上的最长执行时间，µs。
     pub job_max_us: AtomicU64,
     pub reads: AtomicU64,
+    /// 读事务里的 SQL 被 progress handler 中断。
     pub read_interrupts: AtomicU64,
+    /// 读闭包返回时已超出预算（SQL 没被中断，慢在 Rust 里）。
+    pub read_overruns: AtomicU64,
 }
 
 impl Stats {
@@ -419,6 +430,10 @@ impl Store {
     /// 只给需要在事务外做准备的维护操作用（例如按范围恢复要先 ATTACH 备份库，而 ATTACH 不能在事务里做）。
     /// 作业自己开、自己提交事务。预算只通过 progress handler 中断正在执行的 SQL，不做事后判定：
     /// 作业可能已经提交，没法再回滚。作业返回后，残留的事务一律回滚，ATTACH 的库一律 DETACH。
+    ///
+    /// **结果合同与 [`Store::submit`] 不同**：这里的 `Err` 不等于「什么都没提交」。作业提交之后再返回 `Err`，
+    /// 已提交的内容照样在（W1 peer r4 P2-01，用例 `an_exclusive_job_that_fails_after_committing_stays_committed`）。
+    /// 所以作业要把提交放在最后一步，提交之后不再做可能失败的事；需要「失败即回滚」的写入一律用 `submit`。
     pub fn submit_exclusive<R, E, F>(
         &self,
         budget: Duration,
@@ -476,7 +491,8 @@ impl Store {
         Ok(())
     }
 
-    /// 在一个只读事务里读。闭包里不要做网络、进程或文件 IO：快照在闭包返回前一直占着。
+    /// 在一个只读事务里读。闭包里不要做网络、进程或文件 IO，也不要做长计算：快照在闭包返回前一直占着，
+    /// 而预算只能当场中断 SQL（见 `Config::read_budget`）。
     pub fn read<R, E, F>(&self, f: F) -> Result<R, ReadError<E>>
     where
         F: FnOnce(&Transaction<'_>) -> Result<R, E>,
@@ -621,12 +637,17 @@ where
         .conn
         .transaction_with_behavior(TransactionBehavior::Deferred)
         .map_err(ReadError::Sqlite)?;
-    reader.budget.arm(limit);
+    let started = reader.budget.arm(limit);
     let out = catch_unwind(AssertUnwindSafe(|| f(&tx)));
     let tripped = reader.budget.disarm();
     drop(tx); // 只读事务：回滚即释放快照
     if tripped {
         Stats::bump(&stats.read_interrupts);
+        return Err(ReadError::OverBudget);
+    }
+    // SQL 没被中断，但闭包在 Rust 里慢：同样超时，结果丢弃（W1 peer r4 P2-01）。
+    if out.is_ok() && started.elapsed() > limit {
+        Stats::bump(&stats.read_overruns);
         return Err(ReadError::OverBudget);
     }
     match out {
@@ -733,7 +754,10 @@ impl Checkpointer {
             let signal = signal.clone();
             std::thread::Builder::new()
                 .name("atm-store-checkpoint".into())
-                .spawn(move || checkpointer_loop(conn, &signal, limit, &stats))
+                .spawn({
+                    let path = path.to_path_buf();
+                    move || checkpointer_loop(conn, &path, &signal, limit, &stats)
+                })
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
         Ok(Checkpointer {
@@ -776,6 +800,7 @@ struct Limit {
 
 fn checkpointer_loop(
     conn: Connection,
+    path: &Path,
     signal: &(Mutex<Signal>, Condvar),
     limit: Limit,
     stats: &Stats,
@@ -804,7 +829,7 @@ fn checkpointer_loop(
         }
         st.pending = false;
         drop(st);
-        if passive(&conn, stats).is_some_and(|frames| frames >= limit.restart_frames) {
+        if passive(&conn, path, stats).is_some_and(|frames| frames >= limit.restart_frames) {
             limit.restart.store(true, Ordering::SeqCst);
         }
         last = Some(Instant::now());
@@ -812,9 +837,12 @@ fn checkpointer_loop(
 }
 
 /// 返回 WAL 里的帧数。
-fn passive(conn: &Connection, stats: &Stats) -> Option<i64> {
+fn passive(conn: &Connection, path: &Path, stats: &Stats) -> Option<i64> {
+    stats.passive_running.store(1, Ordering::SeqCst);
+    held_here(path);
     let started = Instant::now();
     let r = checkpoint_frames(conn, "PASSIVE").ok();
+    stats.passive_running.store(0, Ordering::SeqCst);
     if r.is_some() {
         Stats::bump(&stats.passive_checkpoints);
     }
@@ -827,9 +855,11 @@ fn passive(conn: &Connection, stats: &Stats) -> Option<i64> {
 /// 在写线程上、两个作业之间做 RESTART：等读者离开 WAL（最多 `wait`），做完后下一个写事务从头复用 WAL。
 fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     let started = Instant::now();
+    stats.restart_running.store(1, Ordering::SeqCst);
     let _ = conn.busy_timeout(wait);
     let done = matches!(checkpoint(conn, "RESTART"), Ok(true));
     let _ = conn.busy_timeout(Duration::from_secs(5));
+    stats.restart_running.store(0, Ordering::SeqCst);
     stats
         .restart_max_us
         .fetch_max(micros(started), Ordering::SeqCst);
@@ -838,6 +868,49 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     } else {
         &stats.restart_busy
     });
+}
+
+type Hold = Arc<(Mutex<(bool, bool)>, Condvar)>;
+
+static PASSIVE_HOLDS: Mutex<Vec<(PathBuf, Hold)>> = Mutex::new(Vec::new());
+
+/// 测试用：让这个库的下一次 PASSIVE 停在开始处，直到 [`PassiveHold::release`]（W1 peer r4 P2-05，
+/// 关闭发生在 checkpoint 进行中）。PASSIVE 不等读者，没有别的办法让它停在半路。
+#[doc(hidden)]
+pub struct PassiveHold(Hold);
+
+impl PassiveHold {
+    /// checkpoint 线程已经停在这里了。
+    pub fn entered(&self) -> bool {
+        lock(&self.0.0).0
+    }
+
+    pub fn release(&self) {
+        lock(&self.0.0).1 = true;
+        self.0.1.notify_all();
+    }
+}
+
+#[doc(hidden)]
+pub fn hold_next_passive(db_path: &Path) -> PassiveHold {
+    let hold: Hold = Arc::new((Mutex::new((false, false)), Condvar::new()));
+    lock(&PASSIVE_HOLDS).push((db_path.to_path_buf(), hold.clone()));
+    PassiveHold(hold)
+}
+
+fn held_here(path: &Path) {
+    let hold = {
+        let mut holds = lock(&PASSIVE_HOLDS);
+        match holds.iter().position(|(p, _)| p == path) {
+            Some(i) => holds.remove(i).1,
+            None => return,
+        }
+    };
+    let mut st = lock(&hold.0);
+    st.0 = true;
+    while !st.1 {
+        st = hold.1.wait(st).unwrap_or_else(|e| e.into_inner());
+    }
 }
 
 fn micros(since: Instant) -> u64 {
