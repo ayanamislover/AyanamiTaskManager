@@ -37,6 +37,7 @@ fn fast() -> Config {
         read_wait: Duration::from_millis(200),
         read_budget: Duration::from_secs(30),
         idle_checkpoint: Duration::from_secs(60),
+        ..Config::default()
     }
 }
 
@@ -83,21 +84,39 @@ fn eventually(limit: Duration, mut ok: impl FnMut() -> bool) -> bool {
 
 #[test]
 fn a_write_commits_with_the_writer_settings_and_readers_see_it() {
-    let store = Store::open(&db_path("engine-basic"), fast()).unwrap();
-    let (fk, ac, mode) = store
-        .write(|tx| {
+    let store = Store::open(
+        &db_path("engine-basic"),
+        Config {
+            cache_kib: 3000,
+            wal_soft_limit: 5 << 20,
+            ..fast()
+        },
+    )
+    .unwrap();
+    let pragma = |tx: &Transaction<'_>, name: &str| {
+        tx.query_row(&format!("PRAGMA {name}"), [], |r| r.get::<_, i64>(0))
+    };
+    let (fk, ac, mode, cache, limit) = store
+        .write(move |tx| {
             put(tx, "k")?;
             Ok::<_, rusqlite::Error>((
-                tx.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))?,
-                tx.query_row("PRAGMA wal_autocheckpoint", [], |r| r.get::<_, i64>(0))?,
+                pragma(tx, "foreign_keys")?,
+                pragma(tx, "wal_autocheckpoint")?,
                 tx.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))?,
+                pragma(tx, "cache_size")?,
+                pragma(tx, "journal_size_limit")?,
             ))
         })
         .unwrap();
     assert_eq!(
-        (fk, ac, mode.as_str()),
-        (1, 0, "wal"),
-        "writer: foreign keys on, no auto checkpoint, WAL"
+        (fk, ac, mode.as_str(), cache, limit),
+        (1, 0, "wal", -3000, 5 << 20),
+        "writer: foreign keys on, no auto checkpoint, WAL, page cache in KiB, WAL size limit"
+    );
+    assert_eq!(
+        store.read(move |tx| pragma(tx, "cache_size")).unwrap(),
+        -3000,
+        "readers get the same page cache limit"
     );
     assert!(has(&store, "k"));
     assert_eq!(Stats::get(&store.stats().commits), 1);
@@ -454,6 +473,93 @@ fn writes_are_passively_checkpointed_when_the_queue_drains() {
     // PASSIVE 不截断 WAL；截断留给空闲或关闭。
     assert!(wal_len(&path) > 0);
     assert_eq!(Stats::get(&store.stats().truncate_checkpoints), 0);
+}
+
+#[test]
+fn passive_checkpoints_keep_a_minimum_gap() {
+    let gap = Duration::from_secs(1);
+    let store = Store::open(
+        &db_path("engine-gap"),
+        Config {
+            checkpoint_gap: gap,
+            ..fast()
+        },
+    )
+    .unwrap();
+    let started = Instant::now();
+    // 每次写完队列都空了，每次都会请求；停 5 ms 让不限流时每个请求都来得及单独做一次。
+    for i in 0..40 {
+        let k = format!("k{i}");
+        store.write(move |tx| put(tx, &k)).unwrap();
+        thread::sleep(MS(5));
+    }
+    // 限流后每个 gap 里最多做一次。
+    let elapsed = started.elapsed().as_millis() as u64;
+    let done = Stats::get(&store.stats().passive_checkpoints);
+    assert!(
+        done <= 1 + elapsed / 1000,
+        "{done} passive checkpoints in {elapsed} ms"
+    );
+    // 被限流的请求不丢：gap 满了之后照样做。
+    assert!(eventually(Duration::from_secs(3), || {
+        Stats::get(&store.stats().passive_checkpoints) > done
+    }));
+}
+
+#[test]
+fn readers_that_never_let_go_cannot_grow_the_wal_past_its_soft_limit() {
+    let path = db_path("engine-wal-limit");
+    let store = Arc::new(
+        Store::open(
+            &path,
+            Config {
+                checkpoint_gap: MS(0),
+                wal_soft_limit: 256 << 10,
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    // 两个读者错开 3 ms、各自持有快照 6 ms：任何时刻都有读者占着 WAL，PASSIVE 永远追不平，
+    // WAL 不会被复用。没有 RESTART 时它只增不减。
+    let stop = Arc::new(AtomicBool::new(false));
+    let readers: Vec<_> = (0..2)
+        .map(|i| {
+            let (store, stop) = (store.clone(), stop.clone());
+            thread::spawn(move || {
+                thread::sleep(MS(i * 3));
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = store.read(|tx| {
+                        tx.query_row("SELECT count(*) FROM settings", [], |r| r.get::<_, i64>(0))?;
+                        thread::sleep(MS(6));
+                        Ok::<_, rusqlite::Error>(())
+                    });
+                }
+            })
+        })
+        .collect();
+    let mut peak = 0;
+    // 3000 次写入约 50 MB；不做 RESTART 时 WAL 一点不复用，实测涨到这个量（1500 次时 26 MB），
+    // 做 RESTART 时峰值 4～7 MB（截短要等到下一次写入复用 WAL，中间的写入会先把文件撑大）。
+    for i in 0..3000 {
+        let k = format!("k{i}");
+        store
+            .write(move |tx| {
+                tx.execute(
+                    "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, json_quote(?2), 'T')",
+                    [k, "x".repeat(3000)],
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        peak = peak.max(wal_len(&path));
+    }
+    stop.store(true, Ordering::Relaxed);
+    for r in readers {
+        r.join().unwrap();
+    }
+    assert!(Stats::get(&store.stats().restart_checkpoints) >= 1);
+    assert!(peak < 16 << 20, "the WAL peaked at {peak} bytes");
 }
 
 #[test]

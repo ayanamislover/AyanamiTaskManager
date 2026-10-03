@@ -10,8 +10,15 @@
 //! 读取：最多 `readers` 个只读连接，每次读在一个事务里看到一致的快照。
 //! 读事务有时长上限，超过即被中断，快照随之释放，不会无限拖住 checkpoint。
 //!
-//! checkpoint：关掉 SQLite 的自动 checkpoint，改由写线程决定：
-//! 队列排空时做 PASSIVE；空闲满 `idle_checkpoint` 时做 TRUNCATE（有读者占着就下次再试）。
+//! checkpoint：关掉 SQLite 的自动 checkpoint。队列排空时，写线程通知 checkpoint 线程做 PASSIVE，
+//! 两次之间至少隔 `checkpoint_gap`。PASSIVE 用自己的连接，和写入并发进行，不占写线程：
+//! W1g 实测一次 PASSIVE 最长 349 ms（复制页再 fsync 整个库文件），放在写线程上时，
+//! 这段时间里所有写入都在排队。
+//! 读者几乎一直持有快照时，PASSIVE 追不平 WAL，WAL 就不会被复用，只增不减
+//! （W1g 实测 30 s 涨到 2.2 GiB）。所以 WAL 超过 `wal_soft_limit` 后，checkpoint 线程改做一次 RESTART：
+//! 它挡住新写入，最多等 `wal_restart_wait` 让读者离开 WAL，之后下一个写事务从头复用 WAL，
+//! 并按 `journal_size_limit`（同一个值）截短文件。写线程空闲满 `idle_checkpoint` 时自己做 TRUNCATE
+//! （有读者或正在进行的 PASSIVE 挡着就下次再试）；关闭时先停 checkpoint 线程，再做最后一次 TRUNCATE。
 
 use crate::{StoreError, configure, migrate};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
@@ -39,6 +46,16 @@ pub struct Config {
     pub read_budget: Duration,
     /// 写线程空闲这么久后做 TRUNCATE checkpoint。
     pub idle_checkpoint: Duration,
+    /// 两次 PASSIVE checkpoint 之间的最小间隔。checkpoint 要 fsync，和写入抢同一个文件：
+    /// W1g 的 Agent 档里 250 ms 时写入 p99 75.6 ms，1 s 时 4.9 ms（`output/w1-bench/REPORT.md`）。
+    pub checkpoint_gap: Duration,
+    /// WAL 的软上限，字节。超过后做 RESTART；也是 `journal_size_limit`。
+    pub wal_soft_limit: u64,
+    /// RESTART 最多等读者多久（这段时间里新写入排队）。
+    pub wal_restart_wait: Duration,
+    /// 每条连接（写连接和每个读连接）的 page cache 上限，KiB。W1g 实测 512～8192 之间时延没有差别
+    /// （库文件靠操作系统的文件缓存），内存随之上涨；取 1024。
+    pub cache_kib: u32,
 }
 
 impl Default for Config {
@@ -51,6 +68,10 @@ impl Default for Config {
             read_wait: Duration::from_secs(5),
             read_budget: Duration::from_secs(5),
             idle_checkpoint: Duration::from_secs(30),
+            checkpoint_gap: Duration::from_secs(1),
+            wal_soft_limit: 64 << 20,
+            wal_restart_wait: Duration::from_millis(100),
+            cache_kib: 1024,
         }
     }
 }
@@ -115,6 +136,15 @@ pub struct Stats {
     pub passive_checkpoints: AtomicU64,
     pub truncate_checkpoints: AtomicU64,
     pub truncate_busy: AtomicU64,
+    /// 单次 PASSIVE checkpoint 的最长耗时与累计耗时，µs。checkpoint 在写线程里做，期间写入排队。
+    pub passive_max_us: AtomicU64,
+    pub passive_total_us: AtomicU64,
+    /// WAL 超过软上限后做的 RESTART：成功、被读者挡住、最长耗时（µs，期间新写入排队）。
+    pub restart_checkpoints: AtomicU64,
+    pub restart_busy: AtomicU64,
+    pub restart_max_us: AtomicU64,
+    /// 单个写作业（含 BEGIN / COMMIT）在写线程上的最长执行时间，µs。
+    pub job_max_us: AtomicU64,
     pub reads: AtomicU64,
     pub read_interrupts: AtomicU64,
 }
@@ -268,6 +298,8 @@ impl Store {
         conn.busy_timeout(Duration::from_secs(5))?;
         // checkpoint 时机由写线程决定，不让提交顺手做。
         conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+        conn.pragma_update(None, "cache_size", -i64::from(config.cache_kib))?;
+        conn.pragma_update(None, "journal_size_limit", config.wal_soft_limit as i64)?;
         migrate(&conn)?;
         let budget = Budget::install(&conn)?;
 
@@ -281,6 +313,7 @@ impl Store {
             )?;
             r.busy_timeout(Duration::from_secs(1))?;
             crate::harden(&r)?;
+            r.pragma_update(None, "cache_size", -i64::from(config.cache_kib))?;
             let budget = Budget::install(&r)?;
             readers.push(Reader { conn: r, budget });
         }
@@ -295,10 +328,11 @@ impl Store {
         });
         let stats = Arc::new(Stats::default());
         let writer = {
+            let checkpointer = Checkpointer::start(path, &config, stats.clone())?;
             let (shared, stats, idle) = (shared.clone(), stats.clone(), config.idle_checkpoint);
             std::thread::Builder::new()
                 .name("atm-store-writer".into())
-                .spawn(move || writer_loop(conn, budget, shared, stats, idle))
+                .spawn(move || writer_loop(conn, budget, shared, stats, idle, checkpointer))
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
         Ok(Store {
@@ -595,6 +629,7 @@ fn writer_loop(
     shared: Arc<Shared>,
     stats: Arc<Stats>,
     idle: Duration,
+    checkpointer: Checkpointer,
 ) {
     // WAL 里是否还有没被 TRUNCATE 掉的内容。
     let mut dirty = false;
@@ -623,29 +658,163 @@ fn writer_loop(
             }
         };
         let Some(job) = job else { break };
+        let started = Instant::now();
         job(&mut conn, &budget, &stats);
+        stats
+            .job_max_us
+            .fetch_max(micros(started), Ordering::SeqCst);
         dirty = true;
         if lock(&shared.queue).jobs.is_empty() {
-            passive(&conn, &stats);
+            checkpointer.request();
         }
     }
+    checkpointer.stop();
     if dirty {
         truncate(&conn, &stats);
     }
 }
 
 fn checkpoint(conn: &Connection, mode: &str) -> rusqlite::Result<bool> {
-    // 返回 (busy, log, checkpointed)；busy = 1 表示有读者挡着，没做完。
-    conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
-        r.get::<_, i64>(0)
-    })
-    .map(|busy| busy == 0)
+    checkpoint_frames(conn, mode).map(|(done, _)| done)
 }
 
-fn passive(conn: &Connection, stats: &Stats) {
-    if checkpoint(conn, "PASSIVE").is_ok() {
+/// 返回（是否做完，WAL 里的帧数）。PRAGMA 返回 (busy, log, checkpointed)；busy = 1 表示被挡住，没做完。
+fn checkpoint_frames(conn: &Connection, mode: &str) -> rusqlite::Result<(bool, i64)> {
+    conn.query_row(&format!("PRAGMA wal_checkpoint({mode})"), [], |r| {
+        Ok((r.get::<_, i64>(0)? == 0, r.get::<_, i64>(1)?))
+    })
+}
+
+/// checkpoint 线程：收到请求后做一次 PASSIVE，两次之间至少隔 `gap`。
+struct Checkpointer {
+    signal: Arc<(Mutex<Signal>, Condvar)>,
+    thread: Option<JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct Signal {
+    pending: bool,
+    closed: bool,
+}
+
+impl Checkpointer {
+    fn start(path: &Path, config: &Config, stats: Arc<Stats>) -> Result<Checkpointer, StoreError> {
+        let conn = Connection::open(path)?;
+        configure(&conn)?;
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+        let page: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let limit = Limit {
+            gap: config.checkpoint_gap,
+            restart_frames: (config.wal_soft_limit as i64 / page.max(1)).max(1),
+            restart_wait: config.wal_restart_wait,
+        };
+        let signal = Arc::new((Mutex::new(Signal::default()), Condvar::new()));
+        let thread = {
+            let signal = signal.clone();
+            std::thread::Builder::new()
+                .name("atm-store-checkpoint".into())
+                .spawn(move || checkpointer_loop(conn, &signal, limit, &stats))
+                .map_err(|e| StoreError::Io(e.to_string()))?
+        };
+        Ok(Checkpointer {
+            signal,
+            thread: Some(thread),
+        })
+    }
+
+    fn request(&self) {
+        lock(&self.signal.0).pending = true;
+        self.signal.1.notify_one();
+    }
+
+    /// 停下并等线程退出。之后不会再有 PASSIVE。
+    fn stop(self) {}
+}
+
+impl Drop for Checkpointer {
+    fn drop(&mut self) {
+        lock(&self.signal.0).closed = true;
+        self.signal.1.notify_one();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+struct Limit {
+    gap: Duration,
+    restart_frames: i64,
+    restart_wait: Duration,
+}
+
+fn checkpointer_loop(
+    conn: Connection,
+    signal: &(Mutex<Signal>, Condvar),
+    limit: Limit,
+    stats: &Stats,
+) {
+    let gap = limit.gap;
+    let (state, wake) = signal;
+    let mut last: Option<Instant> = None;
+    loop {
+        let mut st = lock(state);
+        while !st.pending && !st.closed {
+            st = wake.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        // 限流：离上一次不足 gap 就等到 gap 满（关闭时立即退出）。
+        while let Some(due) = last.map(|l| l + gap) {
+            let left = due.saturating_duration_since(Instant::now());
+            if left.is_zero() || st.closed {
+                break;
+            }
+            st = wake
+                .wait_timeout(st, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+        if st.closed {
+            return;
+        }
+        st.pending = false;
+        drop(st);
+        if passive(&conn, stats).is_some_and(|frames| frames >= limit.restart_frames) {
+            restart(&conn, limit.restart_wait, stats);
+        }
+        last = Some(Instant::now());
+    }
+}
+
+/// 返回 WAL 里的帧数。
+fn passive(conn: &Connection, stats: &Stats) -> Option<i64> {
+    let started = Instant::now();
+    let r = checkpoint_frames(conn, "PASSIVE").ok();
+    if r.is_some() {
         Stats::bump(&stats.passive_checkpoints);
     }
+    let us = micros(started);
+    stats.passive_max_us.fetch_max(us, Ordering::SeqCst);
+    stats.passive_total_us.fetch_add(us, Ordering::SeqCst);
+    r.map(|(_, frames)| frames)
+}
+
+/// RESTART 挡住新写入，等读者离开 WAL（最多 `wait`）；做完后下一个写事务从头复用 WAL。
+fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
+    let started = Instant::now();
+    let _ = conn.busy_timeout(wait);
+    let done = matches!(checkpoint(conn, "RESTART"), Ok(true));
+    let _ = conn.busy_timeout(Duration::ZERO);
+    stats
+        .restart_max_us
+        .fetch_max(micros(started), Ordering::SeqCst);
+    Stats::bump(if done {
+        &stats.restart_checkpoints
+    } else {
+        &stats.restart_busy
+    });
+}
+
+fn micros(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 /// TRUNCATE 要等所有读者离开；不在写线程里等，挡住了就返回 false，下次空闲再试。

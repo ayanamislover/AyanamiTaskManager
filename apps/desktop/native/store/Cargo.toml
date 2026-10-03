@@ -11,3 +11,6 @@ publish.workspace = true
 [dependencies]
 rusqlite = { version = "0.39", features = ["bundled", "hooks"] }
 sha2 = "0.10"
+
+[dev-dependencies]
+serde_json = { workspace = true }

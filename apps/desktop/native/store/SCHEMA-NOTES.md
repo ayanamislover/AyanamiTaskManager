@@ -40,6 +40,12 @@
 - `foreign_keys = ON`：这是连接级参数，默认关闭，漏开时所有复合 FK 都会形同虚设。
 - 关闭「双引号回退」（`SQLITE_DBCONFIG_DQS_DML/DDL = 0`，`lib.rs::harden`），写线程、读连接、旁路连接都关。默认情况下找不到的 `"标识符"` 会被悄悄当成字符串字面量：W1f 里一处列名写错，结果把列名本身写进了数据，没有任何报错。关掉之后写错就报错。
 
+`Store::open` 另外设置（`src/engine.rs`，取值依据见 `output/w1-bench/REPORT.md`）：
+
+- `cache_size = -1024`（每条连接 1 MiB page cache，写连接和每个读连接都设）：W1g 在 104 MiB 样本库上实测 512 KiB～8 MiB 时延没有差别，内存随之上涨。
+- `wal_autocheckpoint = 0`：checkpoint 不在提交里顺手做。写线程排空队列时通知独立的 checkpoint 线程做 PASSIVE，两次至少隔 1 s；PASSIVE 放在写线程上时，一次最长 349 ms，期间写入全部排队。
+- `journal_size_limit = 64 MiB`，同时是 WAL 软上限：读者一直占着快照时 PASSIVE 追不平，WAL 只增不减（实测 30 s 涨到 2.2 GiB）。超过软上限时 checkpoint 线程做一次 RESTART，最多等读者 100 ms。
+
 ## 验证
 
 - 用例：`tests/schema.rs`，共 12 条。
