@@ -112,7 +112,7 @@ pub fn restore_project(
     project_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock("restore_project")?;
+    let _serial = attachments_lock(store, "restore_project")?;
     // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
     finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
@@ -157,7 +157,7 @@ pub fn restore_knowledge(
     backup_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock("restore_knowledge")?;
+    let _serial = attachments_lock(store, "restore_knowledge")?;
     finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.db)?;
@@ -736,7 +736,7 @@ fn stage_attachments(db_path: &Path, vb: &VerifiedBackup, project_id: &str) -> R
 /// 再调用一次都会走到同一个终态。已提交的换入失败时返回 [`BackupError::AttachmentsPending`]。
 /// 返回处理过的标记数。
 pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
-    let _serial = attachments_lock("finish_attachment_swaps")?;
+    let _serial = attachments_lock(store, "finish_attachment_swaps")?;
     finish_swaps_locked(store)
 }
 
@@ -759,7 +759,7 @@ pub fn with_project_attachments<R>(
     project_id: &str,
     f: impl FnOnce(ProjectAttachments<'_>) -> std::io::Result<R>,
 ) -> Result<R> {
-    let _serial = attachments_lock("with_project_attachments")?;
+    let _serial = attachments_lock(store, "with_project_attachments")?;
     finish_swaps_locked(store)?;
     let id = project_id.to_string();
     let generation: Option<i64> = store.read(move |tx| {

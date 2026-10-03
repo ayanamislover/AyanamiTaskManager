@@ -3,7 +3,9 @@
 //! 时间线照 05 M-06 / 10 R4 / P2-07：备份 → 继续写 → 恢复，检查工作数据回退、序号与编号不回退、
 //! 身份不回退、回执原地变墓碑、全局流打撤销标记、其他范围不受影响、失败时什么都不变。
 
-use atm_store::backup::{BackupError, artifacts_root, create_backup, verify_backup};
+use atm_store::backup::{
+    BackupError, artifacts_root, attachment_lock_waiters, create_backup, verify_backup,
+};
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
     PROJECT_TABLES, PROJECT_TABLES_HANDLED_ELSEWHERE, RestoreOptions, ScopeRef, ScopeRestored,
@@ -1327,6 +1329,18 @@ fn restore_internals_are_not_backed_up() {
     );
 }
 
+/// 等到 `what` 停在这个库的附件锁上。不靠固定的时间窗口：没有锁、或者操作不等锁就直接做完时，这里超时失败。
+fn wait_for_lock(w: &World, what: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !attachment_lock_waiters(w.store.path()).contains(&what) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} never waited for the attachment lock"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 fn read_pair(dir: &Path) -> std::io::Result<(String, String)> {
     Ok((
         fs::read_to_string(dir.join("a.txt"))?,
@@ -1371,9 +1385,10 @@ fn a_restore_waits_for_an_attachment_access_in_progress() {
             r.map(|o| o.generation)
         })
     };
-    // 访问还没结束：恢复必须等着。
+    // 访问还没结束：恢复必须停在附件锁上（确认它真的走到了锁前，而不是还在准备），也还没完成。
+    wait_for_lock(&w, "restore_project");
     assert!(
-        done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+        done_rx.try_recv().is_err(),
         "the restore swapped attachments under an access in progress"
     );
     gate_tx.send(()).unwrap();
@@ -1432,8 +1447,9 @@ fn a_backup_waits_for_an_attachment_write_in_progress() {
             id
         })
     };
+    wait_for_lock(&w, "create_backup");
     assert!(
-        done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+        done_rx.try_recv().is_err(),
         "the backup copied attachments under a write in progress"
     );
     gate_tx.send(()).unwrap();

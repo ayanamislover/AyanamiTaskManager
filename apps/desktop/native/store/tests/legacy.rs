@@ -4,9 +4,9 @@
 //! 数据是合成的，含边界情况：两个项目重号、超大事件、损坏的 JSON 文本、各种形状的旧回执（R7‴ 的向量）、
 //! 孤儿全局事件、没送达的投影。全程不碰真实数据根。
 
+use atm_store::jsjson;
 use atm_store::legacy::{
-    ConvertError, ConvertOptions, LegacySources, Report, convert, js_string_spread,
-    verify_converted,
+    ConvertError, ConvertOptions, LegacySources, Report, convert, verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
 use rusqlite::{Connection, params};
@@ -802,120 +802,178 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
     .unwrap();
 }
 
-/// W1 peer r2 P1-r2-01：补投影的 payload 是 2.0 的 `{ ...JSON.parse(payload), 项目字段 }`。
-/// 期望由 node v24.14.1 跑 2.0 的 readJson、对象展开与 JSON.stringify 生成
-/// （`output/w1-evidence/spread-vectors.mjs`），不由本 crate 的 SQL 生成。
-/// 文本不同时按 JSON 值比较：JS 会把整数形状的键排到前面，这里保留原文顺序。
-/// 第三列是单纯的 `{ ...JSON.parse(源) }`：源是 JSON 字符串时直接对照 `js_string_spread`，
-/// 因为端到端的结果还要过 SQLite 的 `json_set`，它会把控制字符等重新转义，掩盖这个函数自己的错。
-const SPREAD_VECTORS: &[(&str, &str, &str)] = &[
-    (
-        "[\"keep-me\", 1, true, null, {\"a\":[1]}]",
-        "{\"0\":\"keep-me\",\"1\":1,\"2\":true,\"3\":null,\"4\":{\"a\":[1]},\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"keep-me\",\"1\":1,\"2\":true,\"3\":null,\"4\":{\"a\":[1]}}",
-    ),
-    (
-        "\"xy\"",
-        "{\"0\":\"x\",\"1\":\"y\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"x\",\"1\":\"y\"}",
-    ),
-    (
-        "\"a😀é\\n\\u0001\\\"\\\\\"",
-        "{\"0\":\"a\",\"1\":\"\\ud83d\",\"2\":\"\\ude00\",\"3\":\"é\",\"4\":\"\\n\",\"5\":\"\\u0001\",\"6\":\"\\\"\",\"7\":\"\\\\\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"a\",\"1\":\"\\ud83d\",\"2\":\"\\ude00\",\"3\":\"é\",\"4\":\"\\n\",\"5\":\"\\u0001\",\"6\":\"\\\"\",\"7\":\"\\\\\"}",
-    ),
-    (
-        "\"\\ud83d\"",
-        "{\"0\":\"\\ud83d\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"\\ud83d\"}",
-    ),
-    (
-        "42",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "true",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "null",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "not json {",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "{\"b\":1,\"2\":\"two\",\"a\":{\"x\":null}}",
-        "{\"2\":\"two\",\"b\":1,\"a\":{\"x\":null},\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"2\":\"two\",\"b\":1,\"a\":{\"x\":null}}",
-    ),
-    (
-        "\"\"",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "[]",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "-1.5e3",
-        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{}",
-    ),
-    (
-        "{\"projectId\":\"spoofed\",\"keep\":1}",
-        "{\"projectId\":\"P1\",\"keep\":1,\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"projectId\":\"spoofed\",\"keep\":1}",
-    ),
-    (
-        "[[1,\"x\"],[],{\"b\":false},false]",
-        "{\"0\":[1,\"x\"],\"1\":[],\"2\":{\"b\":false},\"3\":false,\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":[1,\"x\"],\"1\":[],\"2\":{\"b\":false},\"3\":false}",
-    ),
-    (
-        "\"\\b\\f\\t\\u001f\\u2028\\u007f\\/\"",
-        "{\"0\":\"\\b\",\"1\":\"\\f\",\"2\":\"\\t\",\"3\":\"\\u001f\",\"4\":\"\u{2028}\",\"5\":\"\u{7f}\",\"6\":\"/\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"\\b\",\"1\":\"\\f\",\"2\":\"\\t\",\"3\":\"\\u001f\",\"4\":\"\u{2028}\",\"5\":\"\u{7f}\",\"6\":\"/\"}",
-    ),
-    (
-        "\"\\udc00x\\ud83d\\ude00\"",
-        "{\"0\":\"\\udc00\",\"1\":\"x\",\"2\":\"\\ud83d\",\"3\":\"\\ude00\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
-        "{\"0\":\"\\udc00\",\"1\":\"x\",\"2\":\"\\ud83d\",\"3\":\"\\ude00\"}",
-    ),
-];
+fn data(name: &str) -> serde_json::Value {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("data")
+        .join(name);
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
 
+fn text(v: &serde_json::Value, key: &str) -> String {
+    v[key].as_str().unwrap().to_string()
+}
+
+/// W1 peer r2 P1-r2-01、r3 P1-r3-01 / P1-r3-02：补投影的 payload 是 2.0 的
+/// `JSON.stringify({ ...readJson(payload, {}), 项目字段 })`。期望由 node 跑 2.0 的 readJson、对象展开与
+/// JSON.stringify 生成（`tests/data/spread-vectors.mjs`），不由本 crate 生成，要求逐字节一致。
+/// 向量覆盖数组里的落单代理项和长小数、重复键、下标形状的键、SQLite 深度上限（1000）两侧和本 crate 的上限。
+/// 全部向量作为 P1 的事件 `SV<i>`（序号 100 + i）插入，一次转换补出全部镜像；转换内含 VERIFY。
 #[test]
 fn replayed_mirrors_spread_payloads_like_2x() {
-    for (i, (source, expected, spread)) in SPREAD_VECTORS.iter().enumerate() {
-        if source.trim_start().starts_with('"') {
-            assert_eq!(js_string_spread(source), *spread, "vector {i}: {source}");
+    let d = data("spread-vectors.json");
+    assert_eq!(d["maxDepth"].as_u64(), Some(jsjson::MAX_DEPTH as u64));
+    let vectors = d["vectors"].as_array().unwrap();
+    let f = fixture("legacy-spread");
+    let p = f.project(0);
+    for v in vectors {
+        p.execute(
+            "INSERT INTO events (id, sequence, type, actor_type, actor_id, aggregate_type, aggregate_id, payload_json, created_at)
+             VALUES (?1, ?2, 'work.updated', 'AGENT', 'claude', 'WORK_ITEM', 'W1', ?3, ?4)",
+            params![
+                text(v, "eventId"),
+                v["sequence"].as_i64().unwrap(),
+                text(v, "source"),
+                T2
+            ],
+        )
+        .unwrap();
+    }
+    let last = vectors.last().unwrap()["sequence"].as_i64().unwrap();
+    p.execute("UPDATE project_meta SET current_sequence = ?1", [last])
+        .unwrap();
+    drop(p);
+    let report = f.convert().unwrap();
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+
+    let t = Connection::open(f.target()).unwrap();
+    let mut wrong = Vec::new();
+    for v in vectors {
+        let name = text(v, "name");
+        let got: Vec<u8> = t
+            .query_row(
+                "SELECT CAST(payload_json AS BLOB) FROM global_feed WHERE project_id = 'P1' AND event_id = ?1",
+                [text(v, "eventId")],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|e| panic!("{name}: no mirror ({e})"));
+        let got =
+            String::from_utf8(got).unwrap_or_else(|e| panic!("{name}: mirror is not UTF-8 ({e})"));
+        if got != text(v, "mirror") {
+            wrong.push(format!("{name}: {got}"));
         }
-        let f = fixture(&format!("legacy-spread-{i}"));
+    }
+    assert!(
+        wrong.is_empty(),
+        "mirrors differ from node:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// 同一批向量直接对照 `jsjson`（单纯展开和完整镜像），不经过 SQLite。跑在 256 KiB 栈的线程上：
+/// 解析和输出不递归，MAX_DEPTH 层也不依赖调用线程的栈大小（递归实现在默认 2 MiB 的测试线程上就溢出）。
+#[test]
+fn spread_and_stringify_match_node_without_sqlite() {
+    let d = data("spread-vectors.json");
+    std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(move || {
+            for v in d["vectors"].as_array().unwrap() {
+                let (name, source) = (text(v, "name"), text(v, "source"));
+                assert_eq!(
+                    jsjson::spread_json(Some(&source)).unwrap_or_else(|_| panic!("{name}: too deep")),
+                    text(v, "spread"),
+                    "{name}"
+                );
+                let fields = format!(
+                    "{{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":{seq},\
+                     \"sourceEventId\":\"{id}\",\"sourceProjectSequence\":{seq},\"sourceAggregateType\":\"WORK_ITEM\",\
+                     \"sourceAggregateId\":\"W1\"}}",
+                    seq = v["sequence"],
+                    id = text(v, "eventId")
+                );
+                assert_eq!(
+                    jsjson::mirror_payload(Some(&source), &fields).unwrap(),
+                    text(v, "mirror"),
+                    "{name}"
+                );
+            }
+            for v in d["refused"].as_array().unwrap() {
+                assert_eq!(
+                    jsjson::spread_json(Some(&text(v, "source"))).err(),
+                    Some(jsjson::TooDeep),
+                    "{}",
+                    text(v, "name")
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// JS 的 `Number::toString`：node 生成的 5000 个数（特殊值、10 的幂、2^53 附近、随机位模式），
+/// 格式化逐字节一致；解析 node 的文本得到同一个位模式（-0 输出为 0）。
+#[test]
+fn numbers_format_and_parse_like_v8() {
+    let d = data("numbers.json");
+    let numbers = d["numbers"].as_array().unwrap();
+    assert!(numbers.len() >= 4000);
+    for pair in numbers {
+        let bits = u64::from_str_radix(pair[0].as_str().unwrap(), 16).unwrap();
+        let expected = pair[1].as_str().unwrap();
+        let x = f64::from_bits(bits);
+        assert_eq!(jsjson::number_to_string(x), expected, "{bits:016x}");
+        let y = jsjson::parse(expected)
+            .ok()
+            .flatten()
+            .and_then(|doc| doc.as_number())
+            .unwrap_or_else(|| panic!("{expected} does not parse as a number"));
+        assert_eq!(y.to_bits(), if x == 0.0 { 0 } else { bits }, "{expected}");
+    }
+}
+
+/// 嵌套超过 MAX_DEPTH 的合法 JSON：转换显式失败并写明事件，不把内容清空后通过 VERIFY。
+#[test]
+fn payloads_nested_beyond_the_supported_depth_are_refused() {
+    let d = data("spread-vectors.json");
+    for v in d["refused"].as_array().unwrap() {
+        let f = fixture(&format!("legacy-too-deep-{}", text(v, "name")));
         f.project(0)
             .execute(
                 "UPDATE events SET payload_json = ?1 WHERE id = 'E1-big'",
-                [source],
+                [text(v, "source")],
             )
             .unwrap();
-        // convert 里含 VERIFY。
-        f.convert().unwrap();
-        let t = Connection::open(f.target()).unwrap();
-        let got = q::<String>(
-            &t,
-            "SELECT payload_json FROM global_feed WHERE project_id = 'P1' AND event_id = 'E1-big'",
+        let err = f
+            .convert()
+            .expect_err("a payload deeper than the supported depth converted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("event P1/E1-big") && msg.contains("deeper than"),
+            "{msg}"
         );
-        if got != *expected {
-            let got: serde_json::Value = serde_json::from_str(&got)
-                .unwrap_or_else(|e| panic!("vector {i} ({source}): {got} does not parse: {e}"));
-            let want: serde_json::Value = serde_json::from_str(expected).unwrap();
-            assert_eq!(got, want, "vector {i}: {source}");
-        }
     }
+}
+
+/// 关联旧全局行用的 `sourceEventId`、outbox 的 `eventId` 按 JSON.parse 读：重复键取最后一个，
+/// 转义的键名照样认；深度超限报错而不是当作没有。
+#[test]
+fn reading_a_payload_field_follows_json_parse() {
+    use jsjson::{MAX_DEPTH, TooDeep, top_level_string as get};
+    let k = "sourceEventId";
+    assert_eq!(
+        get(r#"{"sourceEventId":"A","sourceEventId":"B"}"#, k),
+        Ok(Some("B".to_string()))
+    );
+    let escaped = format!("{{\"source{}u0045ventId\":\"A\"}}", '\\');
+    assert_eq!(get(&escaped, k), Ok(Some("A".to_string())));
+    assert_eq!(get(r#"{"sourceEventId":1}"#, k), Ok(None));
+    assert_eq!(get("not json", k), Ok(None));
+    let deep = format!(
+        "{{\"sourceEventId\":\"A\",\"d\":{}{}}}",
+        "[".repeat(MAX_DEPTH),
+        "]".repeat(MAX_DEPTH)
+    );
+    assert_eq!(get(&deep, k), Err(TooDeep));
 }

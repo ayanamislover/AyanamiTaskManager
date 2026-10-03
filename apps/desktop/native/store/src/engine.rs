@@ -62,7 +62,8 @@ pub struct Config {
     pub wal_soft_limit: u64,
     /// RESTART 最多等读者多久（这段时间里新写入排队）。读者一直重叠、总有一个占着同一个 read mark 时，
     /// RESTART 会等满这个时长后放弃，到下一次 PASSIVE（至少隔 `checkpoint_gap`）再试；
-    /// 所以写线程因此停顿的比例不超过 `wal_restart_wait / checkpoint_gap`。
+    /// 所以「等读者」这一部分让写线程停顿的比例，稳态下约为 `wal_restart_wait / checkpoint_gap`。
+    /// 这只是等待预算的估计：RESTART 成功时还要复制页、fsync，那部分不受它限制，也不是单次停顿的上限。
     pub wal_restart_wait: Duration,
     /// 每条连接（写连接和每个读连接）的 page cache 上限，KiB。W1g 的 cache 矩阵（每格一次运行，
     /// 有界观测）里 512～8192 之间时延看不出差别（库文件有操作系统的文件缓存兜着），内存随之上涨；

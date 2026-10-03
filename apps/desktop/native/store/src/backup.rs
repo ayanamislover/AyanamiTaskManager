@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 pub const MANIFEST_FORMAT: &str = "atm3-backup-1";
 const DB_FILE: &str = "atm.sqlite";
@@ -163,11 +163,45 @@ pub fn side_reader(path: &Path) -> Result<Connection> {
 /// 读事务的闭包里也不要拿（恢复持锁时要借读连接，借不到会在 `read_wait` 后失败）。
 static ATTACHMENTS_LOCK: Mutex<()> = Mutex::new(());
 
-pub(crate) fn attachments_lock(what: &'static str) -> Result<MutexGuard<'static, ()>> {
+/// 正在等附件锁的操作：（库路径，操作名）。拿不到锁时登记，拿到后注销。
+/// 供测试确认一个操作确实停在锁上，而不是还没走到那里（W1 peer r3 P2-07）。
+static WAITING: Mutex<Vec<(PathBuf, &'static str)>> = Mutex::new(Vec::new());
+
+pub(crate) fn attachments_lock(
+    store: &Store,
+    what: &'static str,
+) -> Result<MutexGuard<'static, ()>> {
     if std::thread::current().name() == Some(crate::engine::WRITER_THREAD) {
         return Err(BackupError::Reentrant(what));
     }
-    Ok(ATTACHMENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+    match ATTACHMENTS_LOCK.try_lock() {
+        Ok(guard) => return Ok(guard),
+        Err(TryLockError::Poisoned(e)) => return Ok(e.into_inner()),
+        Err(TryLockError::WouldBlock) => {}
+    }
+    let me = (store.path().to_path_buf(), what);
+    WAITING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(me.clone());
+    let guard = ATTACHMENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(i) = waiting.iter().position(|w| *w == me) {
+        waiting.remove(i);
+    }
+    Ok(guard)
+}
+
+/// 这个库上正在等附件锁的操作名（`create_backup`、`restore_project` 等）。只供测试使用。
+#[doc(hidden)]
+pub fn attachment_lock_waiters(db_path: &Path) -> Vec<&'static str> {
+    WAITING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(p, _)| p == db_path)
+        .map(|(_, what)| *what)
+        .collect()
 }
 
 /// 附件根目录下恢复用的内部目录（暂存、换下来的旧版本），不属于任何项目，不进备份。
@@ -180,7 +214,7 @@ pub(crate) fn is_internal(rel: &str) -> bool {
 /// 先把上一次恢复没换完的附件换完；换不完就拒绝（[`BackupError::AttachmentsPending`]），
 /// 不会把恢复后的库和恢复前的附件打进同一份备份。
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
-    let _lock = attachments_lock("create_backup")?;
+    let _lock = attachments_lock(store, "create_backup")?;
     crate::restore::finish_swaps_locked(store)?;
     create_backup_locked(store, root, kind, at)
 }

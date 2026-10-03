@@ -4,7 +4,7 @@
 //! 子线程持有 `Arc<Store>`，超时 panic 时不会在主线程里 join 一个停不下来的写线程。
 
 use atm_store::{Config, ReadError, Stats, Store, Waited, WriteError, open};
-use rusqlite::{ErrorCode, Transaction};
+use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -515,7 +515,7 @@ fn readers_that_never_let_go_cannot_grow_the_wal_past_its_soft_limit() {
             Config {
                 checkpoint_gap: MS(0),
                 wal_soft_limit: 256 << 10,
-                // 成功的 RESTART 约 30 ms。两个读者重叠时总有一个占着同一个 read mark，
+                // 成功的 RESTART 约 30 ms。读者重叠时偶尔总有一个占着同一个 read mark，
                 // 这时 RESTART 会等满这个时长后放弃（下次再试），所以不设太长：只拖慢测试，不改变结论。
                 wal_restart_wait: MS(300),
                 ..fast()
@@ -523,28 +523,57 @@ fn readers_that_never_let_go_cannot_grow_the_wal_past_its_soft_limit() {
         )
         .unwrap(),
     );
-    // 两个读者错开 3 ms、各自持有快照 6 ms：任何时刻都有读者占着 WAL，PASSIVE 永远追不平，
-    // WAL 不会被复用。没有 RESTART 时它只增不减。
+    // 两条只读连接接力：一条开了新快照，另一条才提交。任何时刻都有读者占着 WAL，与线程调度无关
+    // （原先两个读者线程按时间错开，机器忙时会出现没有读者的空档，WAL 自然复用，用例偶发失败）。
+    // PASSIVE 因此永远追不平，WAL 不会自己复用；没有 RESTART 时它只增不减。
     let stop = Arc::new(AtomicBool::new(false));
-    let readers: Vec<_> = (0..2)
-        .map(|i| {
-            let (store, stop) = (store.clone(), stop.clone());
-            thread::spawn(move || {
-                thread::sleep(MS(i * 3));
-                while !stop.load(Ordering::Relaxed) {
-                    let _ = store.read(|tx| {
-                        tx.query_row("SELECT count(*) FROM settings", [], |r| r.get::<_, i64>(0))?;
-                        thread::sleep(MS(6));
-                        Ok::<_, rusqlite::Error>(())
-                    });
-                }
-            })
+    let (ready_tx, ready_rx) = channel();
+    let relay = {
+        let (path, stop) = (path.clone(), stop.clone());
+        thread::spawn(move || {
+            let reader = || {
+                let c =
+                    Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                c.busy_timeout(Duration::from_secs(10)).unwrap();
+                c
+            };
+            let snapshot = |c: &Connection| {
+                c.execute_batch("BEGIN").unwrap();
+                c.query_row("SELECT count(*) FROM settings", [], |r| r.get::<_, i64>(0))
+                    .unwrap();
+            };
+            let (mut holding, mut next) = (reader(), reader());
+            snapshot(&holding);
+            ready_tx.send(()).unwrap();
+            let mut handoffs = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                snapshot(&next);
+                holding.execute_batch("COMMIT").unwrap();
+                std::mem::swap(&mut holding, &mut next);
+                handoffs += 1;
+                thread::sleep(MS(2));
+            }
+            holding.execute_batch("COMMIT").unwrap();
+            handoffs
         })
-        .collect();
+    };
+    // 第一个快照就位后才开始写。
+    ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     // 不看峰值（取决于机器忙不忙，软上限也不是硬上限），看机制：RESTART 发生过，
     // 而且 WAL 被复用、按 journal_size_limit 截短过——不做 RESTART 时 WAL 一点不复用，文件只会变长。
+    // 不按固定写入条数下结论：机器忙时（整包并发跑）第一次 PASSIVE 的复制与 fsync 可能比 600 条写入还慢。
+    // 所以一直写到机制出现为止；600 条之后每条间隔 5 ms 让 checkpoint 线程追上，20 s 截止。
     let (mut previous, mut shrank) = (0, false);
-    for i in 0..600 {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    for i in 0.. {
+        if shrank && Stats::get(&store.stats().restart_checkpoints) >= 1
+            || Instant::now() > deadline
+        {
+            break;
+        }
+        if i >= 600 {
+            thread::sleep(MS(5));
+        }
         let k = format!("k{i}");
         store
             .write(move |tx| {
@@ -560,14 +589,21 @@ fn readers_that_never_let_go_cannot_grow_the_wal_past_its_soft_limit() {
         previous = now;
     }
     stop.store(true, Ordering::Relaxed);
-    for r in readers {
-        r.join().unwrap();
-    }
+    let handoffs = relay.join().unwrap();
     let (restarts, busy) = (
         Stats::get(&store.stats().restart_checkpoints),
         Stats::get(&store.stats().restart_busy),
     );
-    assert!(restarts >= 1, "no RESTART ({busy} busy)");
+    let st = store.stats();
+    let detail = format!(
+        "{busy} busy, {} passive (max {} us), restart max {} us, job max {} us, wal {} bytes, {handoffs} handoffs",
+        Stats::get(&st.passive_checkpoints),
+        Stats::get(&st.passive_max_us),
+        Stats::get(&st.restart_max_us),
+        Stats::get(&st.job_max_us),
+        wal_len(&path)
+    );
+    assert!(restarts >= 1, "no RESTART ({detail})");
     assert!(
         shrank,
         "the WAL was never reused and cut back ({restarts} restarts)"
@@ -649,8 +685,10 @@ fn an_idle_writer_truncates_the_wal_and_so_does_shutdown() {
     )
     .unwrap();
     store.write(|tx| put(tx, "k")).unwrap();
-    assert!(eventually(Duration::from_secs(3), || wal_len(&path) == 0));
-    assert!(Stats::get(&store.stats().truncate_checkpoints) >= 1);
+    // WAL 先被截成 0、计数随后才加：两者一起等，不在中间读计数。
+    assert!(eventually(Duration::from_secs(3), || {
+        wal_len(&path) == 0 && Stats::get(&store.stats().truncate_checkpoints) >= 1
+    }));
 
     let path = db_path("engine-close");
     let store = Store::open(&path, fast()).unwrap(); // 空闲 60 s，等不到

@@ -986,10 +986,7 @@ fn count_outbox_without_event(tx: &Transaction<'_>) -> Result<usize> {
     Ok(tx.query_row(
         "SELECT count(*) FROM p.outbox o
          WHERE o.delivered_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM p.events e WHERE e.id =
-                 CASE WHEN json_valid(o.payload_json)
-                      THEN CASE WHEN json_type(o.payload_json, '$.eventId') = 'text'
-                                THEN json_extract(o.payload_json, '$.eventId') END END)",
+           AND NOT EXISTS (SELECT 1 FROM p.events e WHERE e.id = atm_json_text(o.payload_json, 'eventId'))",
         [],
         |r| r.get::<_, i64>(0),
     )? as usize)
@@ -997,11 +994,9 @@ fn count_outbox_without_event(tx: &Transaction<'_>) -> Result<usize> {
 
 /// R6 补投影：一个项目里没有全局镜像的事件，按项目内序号排列，形状与 2.0 投影相同
 /// （`registry-projection-dispatcher.ts` + `outbox-read-model.ts`）：
-/// - payload 是 `{ ...JSON.parse(事件 payload), 项目字段 }`（W1 peer r2 P1-r2-01）：
-///   - 解析失败按 `{}`（2.0 `readJson` 的回退）；
-///   - 对象原样；数组展开成 `{"0": .., "1": ..}`；字符串按 UTF-16 码元展开（[`js_string_spread`]）；
-///   - 数字、布尔、null 展开后没有属性，即 `{}`；
-///   - JS 把整数形状的键排到前面，这里保留原文顺序：JSON 值相同，文本顺序可能不同。
+/// - payload 是 `JSON.stringify({ ...readJson(事件 payload, {}), 项目字段 })`，由 SQL 函数
+///   `atm_mirror_payload` 按 V8 的语义算出（[`crate::jsjson`]，W1 peer r2 P1-r2-01、r3 P1-r3-01 / 02），
+///   与 2.0 逐字节一致；嵌套超过 [`crate::jsjson::MAX_DEPTH`] 层时报错，转换整体失败，不把内容清空。
 /// - aggregate_id 为空时取项目 id；actor 取 actor_id，没有就 actor_type，再没有就 SYSTEM；
 /// - dedupe_key = `project:<id>:event:<event_id>`。
 ///
@@ -1020,20 +1015,10 @@ fn mirror_rows(
     format!(
         "SELECT e.{seq} AS seq, e.type AS type, CASE WHEN e.aggregate_id = '' THEN ?1 ELSE e.aggregate_id END AS aggregate_id,
                 coalesce(e.actor_id, e.actor_type, 'SYSTEM') AS actor,
-                json_set(CASE WHEN json_valid(e.payload_json)
-                              THEN CASE json_type(e.payload_json)
-                                   WHEN 'object' THEN e.payload_json
-                                   WHEN 'array' THEN (
-                                     SELECT json_group_object(CAST(j.key AS TEXT),
-                                              CASE j.type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false')
-                                                          ELSE j.value END)
-                                     FROM json_each(e.payload_json) j)
-                                   WHEN 'text' THEN atm_js_string_spread(e.payload_json)
-                                   ELSE '{{}}' END
-                              ELSE '{{}}' END,
-                         '$.projectId', ?1, '$.projectCode', pr.code, '$.projectName', pr.name,
-                         '$.projectSequence', e.{seq}, '$.sourceEventId', e.id, '$.sourceProjectSequence', e.{seq},
-                         '$.sourceAggregateType', e.aggregate_type, '$.sourceAggregateId', e.aggregate_id) AS payload,
+                atm_mirror_payload(e.payload_json, json_object(
+                    'projectId', ?1, 'projectCode', pr.code, 'projectName', pr.name,
+                    'projectSequence', e.{seq}, 'sourceEventId', e.id, 'sourceProjectSequence', e.{seq},
+                    'sourceAggregateType', e.aggregate_type, 'sourceAggregateId', e.aggregate_id)) AS payload,
                 e.created_at AS created_at, 'project:' || ?1 || ':event:' || e.id AS dedupe, e.id AS event_id
          FROM {events} e JOIN {projects} pr ON pr.id = ?1
          WHERE {event_project} AND e.id NOT IN ({linked})
@@ -1041,94 +1026,58 @@ fn mirror_rows(
     )
 }
 
-/// 转换与 VERIFY 的连接上要用的 SQL 函数。
+/// 转换与 VERIFY 的连接上要用的 SQL 函数。读旧 payload 一律走 [`crate::jsjson`]，不用 SQLite 的 JSON 函数
+/// （W1 peer r3：它会改坏数组里的字符串和数字，也会把深层的合法 JSON 当成非法）。
+/// - `atm_mirror_payload(payload, fields)`：补投影的 payload，见 [`mirror_rows`]；
+/// - `atm_json_text(json, key)`：`JSON.parse(json)[key]`，是字符串时返回它，否则 NULL。
+///
+/// 嵌套超过上限时两者都报错，转换或 VERIFY 失败并在错误里写明事件，不静默回退。
 fn register_functions(c: &Connection) -> rusqlite::Result<()> {
+    use crate::jsjson::{MAX_DEPTH, mirror_payload, top_level_string};
     use rusqlite::functions::FunctionFlags;
-    c.create_scalar_function(
-        "atm_js_string_spread",
-        1,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
-        |ctx| {
-            Ok(match ctx.get_raw(0) {
-                ValueRef::Text(b) => std::str::from_utf8(b)
-                    .map(js_string_spread)
-                    .unwrap_or_else(|_| "{}".to_string()),
-                _ => "{}".to_string(),
-            })
-        },
-    )
-}
-
-/// `{ ...JSON.parse(json) }`，`json` 是一个 JSON 字符串字面量：JS 把字符串按 UTF-16 码元展开成
-/// `{"0": 码元0, "1": 码元1, ..}`，非 BMP 字符拆成两个落单的代理项。输出按 `JSON.stringify` 转义。
-/// 不是合法的字符串字面量时返回 `{}`。
-pub fn js_string_spread(json: &str) -> String {
-    let Some(units) = json_string_units(json.trim_matches([' ', '\t', '\n', '\r'])) else {
-        return "{}".to_string();
-    };
-    let mut out = String::from("{");
-    for (i, u) in units.iter().enumerate() {
-        if i > 0 {
-            out.push(',');
-        }
-        out.push('"');
-        out.push_str(&i.to_string());
-        out.push_str("\":\"");
-        push_js_unit(&mut out, *u);
-        out.push('"');
-    }
-    out.push('}');
-    out
-}
-
-/// 一个 JSON 字符串字面量的 UTF-16 码元。`\\uXXXX` 原样取码元，落单的代理项也保留。
-fn json_string_units(s: &str) -> Option<Vec<u16>> {
-    let inner = s.strip_prefix('"')?.strip_suffix('"')?;
-    let mut units = Vec::new();
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            let mut buf = [0u16; 2];
-            units.extend_from_slice(c.encode_utf16(&mut buf));
-            continue;
-        }
-        let unit = match chars.next()? {
-            '"' => 0x22,
-            '\\' => 0x5c,
-            '/' => 0x2f,
-            'b' => 0x08,
-            'f' => 0x0c,
-            'n' => 0x0a,
-            'r' => 0x0d,
-            't' => 0x09,
-            'u' => {
-                let hex: String = (0..4).map(|_| chars.next()).collect::<Option<_>>()?;
-                u16::from_str_radix(&hex, 16).ok()?
-            }
-            _ => return None,
+    let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    c.create_scalar_function("atm_mirror_payload", 2, flags, |ctx| {
+        let payload = text_arg(ctx.get_raw(0));
+        let fields = text_arg(ctx.get_raw(1)).unwrap_or_default();
+        mirror_payload(payload.as_deref(), &fields).map_err(|_| {
+            let field = |k| {
+                top_level_string(&fields, k)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            };
+            too_deep(format!(
+                "event {}/{}: payload nests deeper than {MAX_DEPTH} levels",
+                field("projectId"),
+                field("sourceEventId")
+            ))
+        })
+    })?;
+    c.create_scalar_function("atm_json_text", 2, flags, |ctx| {
+        let Some(json) = text_arg(ctx.get_raw(0)) else {
+            return Ok(None);
         };
-        units.push(unit);
-    }
-    Some(units)
+        let key = text_arg(ctx.get_raw(1)).unwrap_or_default();
+        top_level_string(&json, &key).map_err(|_| {
+            too_deep(format!(
+                "payload nests deeper than {MAX_DEPTH} levels (reading {key})"
+            ))
+        })
+    })
 }
 
-/// 按 `JSON.stringify`（QuoteJSONString）转义一个码元：短转义、其余控制字符与落单代理项用小写 `\\u` 四位十六进制。
-fn push_js_unit(out: &mut String, u: u16) {
-    match u {
-        0x08 => out.push_str("\\b"),
-        0x09 => out.push_str("\\t"),
-        0x0a => out.push_str("\\n"),
-        0x0c => out.push_str("\\f"),
-        0x0d => out.push_str("\\r"),
-        0x22 => out.push_str("\\\""),
-        0x5c => out.push_str("\\\\"),
-        0x00..=0x1f | 0xd800..=0xdfff => {
-            out.push('\\');
-            out.push('u');
-            out.push_str(&format!("{u:04x}"));
-        }
-        _ => out.push(char::from_u32(u32::from(u)).unwrap_or(char::REPLACEMENT_CHARACTER)),
+/// 2.0 用 better-sqlite3 读 TEXT，非法 UTF-8 按替换字符解码；这里同样处理。数字、NULL 按 `readJson` 的回退走。
+fn text_arg(v: ValueRef<'_>) -> Option<String> {
+    match v {
+        ValueRef::Text(b) | ValueRef::Blob(b) => Some(String::from_utf8_lossy(b).into_owned()),
+        _ => None,
     }
+}
+
+fn too_deep(message: String) -> rusqlite::Error {
+    rusqlite::Error::UserFunctionError(
+        format!("{message}; the converter refuses it rather than drop its content").into(),
+    )
 }
 
 /// 全局流的旧行认领项目、关联事件（R6）。`?1` 项目 id，`?2` = `project:<id>:`，`?3` = `project:<id>:event:`。
@@ -1143,9 +1092,7 @@ fn link_sql(feed: &str, events: &str, event_project: &str) -> [String; 2] {
                   AND e.id = CASE WHEN substr(g.dedupe_key, 1, length(?3)) = ?3
                                   THEN substr(g.dedupe_key, length(?3) + 1) END),
                (SELECT e.id FROM {events} e WHERE {event_project}
-                  AND e.id = CASE WHEN json_valid(g.payload_json)
-                                  THEN CASE WHEN json_type(g.payload_json, '$.sourceEventId') = 'text'
-                                            THEN json_extract(g.payload_json, '$.sourceEventId') END END))
+                  AND e.id = atm_json_text(g.payload_json, 'sourceEventId')))
              WHERE g.project_id = ?1"
         ),
     ]
