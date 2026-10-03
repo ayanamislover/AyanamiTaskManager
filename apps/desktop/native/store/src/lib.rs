@@ -8,6 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+mod engine;
+pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
+
 /// 内置迁移，按版本号升序。新增迁移只能追加，不能改已发布的文本。
 pub const MIGRATIONS: &[Migration] = &[Migration {
     version: 1,
@@ -33,6 +36,8 @@ pub enum StoreError {
     Sqlite(rusqlite::Error),
     /// 库里记录的迁移和内置的对不上：版本相同、内容不同，或者库比程序新。
     MigrationMismatch(String),
+    /// 启动写线程等非 SQLite 的系统调用失败。
+    Io(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -40,6 +45,7 @@ impl std::fmt::Display for StoreError {
         match self {
             StoreError::Sqlite(e) => write!(f, "sqlite: {e}"),
             StoreError::MigrationMismatch(m) => write!(f, "migration mismatch: {m}"),
+            StoreError::Io(m) => write!(f, "io: {m}"),
         }
     }
 }
