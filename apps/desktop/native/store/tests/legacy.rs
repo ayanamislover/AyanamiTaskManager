@@ -977,3 +977,47 @@ fn reading_a_payload_field_follows_json_parse() {
     );
     assert_eq!(get(&deep, k), Err(TooDeep));
 }
+
+/// W1 peer r4 P2-09：关联旧全局行（`sourceEventId`）和统计 outbox（`eventId`）时遇到超限 payload，
+/// 走真实的转换 SQL 失败，错误写明是源库里的哪一行（项目 + 全局序号与 dedupe_key，或项目 + outbox id）。
+#[test]
+fn field_reads_beyond_the_supported_depth_name_the_source_row() {
+    let deep = |field: &str, value: &str| {
+        format!(
+            "{{\"{field}\":\"{value}\",\"d\":{}{}}}",
+            "[".repeat(jsjson::MAX_DEPTH),
+            "]".repeat(jsjson::MAX_DEPTH)
+        )
+    };
+    let f = fixture("legacy-deep-global-row");
+    f.registry()
+        .execute(
+            "UPDATE global_events SET payload_json = ?1 WHERE sequence = 6",
+            [deep("sourceEventId", "F1-big")],
+        )
+        .unwrap();
+    let msg = f
+        .convert()
+        .expect_err("a deep global row converted")
+        .to_string();
+    assert!(
+        msg.contains("project P2 global row 6 (project:P2:outbox:O8): payload nests deeper than"),
+        "{msg}"
+    );
+
+    let f = fixture("legacy-deep-outbox");
+    f.project(0)
+        .execute(
+            "UPDATE outbox SET payload_json = ?1 WHERE id = 'O2'",
+            [deep("eventId", "E1-bad")],
+        )
+        .unwrap();
+    let msg = f
+        .convert()
+        .expect_err("a deep outbox row converted")
+        .to_string();
+    assert!(
+        msg.contains("project P1 outbox O2: payload nests deeper than"),
+        "{msg}"
+    );
+}

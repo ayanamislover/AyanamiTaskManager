@@ -4,7 +4,8 @@
 //! 不用 SQLite 的 JSON 函数：`json_each` 把数组元素先转成 SQLite 值再编码，落单代理项变成非法 UTF-8、
 //! 长小数被截成 15 位；嵌套超过 1000 层的合法 JSON 被 `json_valid` 判为非法，再被当成解析失败清空。这里：
 //! - 字符串按 UTF-16 码元保存，落单代理项原样保留，输出时按 `JSON.stringify` 转义；
-//! - 数字解析成 f64（与 JS 一样就近舍入），输出按 JS 的 `Number::toString`，非有限值输出 `null`；
+//! - 数字解析成 f64（与 JS 一样就近舍入），输出按 JS 的 `Number::toString`（含等距候选取偶数），
+//!   非有限值输出 `null`；
 //! - 对象的重复键后者覆盖、位置不变；输出时数组下标形状的键按数值升序排在前面，其余按插入顺序；
 //! - 嵌套超过 [`MAX_DEPTH`] 层时返回 [`TooDeep`]：转换据此显式拒绝，不当作解析失败。
 //!
@@ -487,12 +488,12 @@ pub fn number_to_string(x: f64) -> String {
         return if x > 0.0 { "Infinity" } else { "-Infinity" }.into();
     }
     let sign = if x < 0.0 { "-" } else { "" };
-    // Rust 的 `{:e}` 给出最短能往返的数字（多个最短候选时取最接近的，与 JS 相同）：d[.ddd]e<指数>。
+    // Rust 的 `{:e}` 给出最短能往返的数字：d[.ddd]e<指数>。两个候选等距时它不一定取偶数，由 `even_tie` 改正。
     let sci = format!("{:e}", x.abs());
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let k = digits.len() as i64;
     let n = exp.parse::<i64>().unwrap_or(0) + 1;
+    let digits = even_tie(x.abs(), mantissa.chars().filter(|c| *c != '.').collect(), n);
+    let k = digits.len() as i64;
     let body = if k <= n && n <= 21 {
         format!("{digits}{}", "0".repeat((n - k) as usize))
     } else if 0 < n && n <= 21 {
@@ -509,6 +510,81 @@ pub fn number_to_string(x: f64) -> String {
         format!("{m}e{}{}", if e >= 0 { "+" } else { "-" }, e.abs())
     };
     format!("{sign}{body}")
+}
+
+/// ECMAScript `Number::toString` 第 5 步：最短位数下有两个与 x 等距的候选时，取末位为偶数的那个
+/// （W1 peer r4 P2-08，例如 1951.00006103515625 输出 `1951.0000610351562` 而不是 `…563`）。
+///
+/// 等距只在 x 的精确十进制展开恰好比最短位数多一位、且末位是 5 时出现。把 x 写成 奇数 × 2^e：
+/// e ≥ 0 时 x 是偶数或奇整数本身，展开末位不是 5 或者没有更短的候选；e < 0 时展开的有效数字就是
+/// 奇数 × 5^-e，只有它不超过 u128 时才可能短到「最短位数 + 1」，所以用 u128 精确计算就够了。
+/// `digits` 是 Rust 给出的最短有效数字，`n` 是小数点位置（值 = 0.digits × 10^n）。
+fn even_tie(x: f64, digits: String, n: i64) -> String {
+    let bits = x.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i64;
+    let fraction = bits & ((1u64 << 52) - 1);
+    let (mut m, mut e) = if biased == 0 {
+        (fraction, -1074)
+    } else {
+        (fraction | (1u64 << 52), biased - 1075)
+    };
+    let zeros = m.trailing_zeros();
+    m >>= zeros;
+    e += i64::from(zeros);
+    if e >= 0 {
+        return digits;
+    }
+    let Some(exact) = u32::try_from(-e)
+        .ok()
+        .and_then(|k| 5u128.checked_pow(k))
+        .and_then(|p| p.checked_mul(u128::from(m)))
+    else {
+        return digits;
+    };
+    let exact = exact.to_string();
+    if exact.len() != digits.len() + 1 {
+        return digits;
+    }
+    let down = exact[..digits.len()].to_string();
+    let Some(up) = increment(&down) else {
+        return digits;
+    };
+    if digits != down && digits != up {
+        return digits;
+    }
+    let even = if (down.as_bytes()[down.len() - 1] - b'0').is_multiple_of(2) {
+        down
+    } else {
+        up
+    };
+    if even == digits {
+        return digits;
+    }
+    // 偶数候选也必须能往返到 x（规范要求候选本身就是 x 的最短表示之一）。
+    let text = if even.len() == 1 {
+        format!("{even}e{}", n - 1)
+    } else {
+        format!("{}.{}e{}", &even[..1], &even[1..], n - 1)
+    };
+    if text.parse::<f64>().map(f64::to_bits) == Ok(bits) {
+        even
+    } else {
+        digits
+    }
+}
+
+/// 十进制数字串加一；进位使位数增加时返回 None。
+fn increment(digits: &str) -> Option<String> {
+    let mut out = digits.as_bytes().to_vec();
+    for d in out.iter_mut().rev() {
+        if *d == b'9' {
+            *d = b'0';
+        } else {
+            *d += 1;
+            return String::from_utf8(out).ok();
+        }
+    }
+    None
 }
 
 /// `JSON.parse(text)`：不合法时 `Ok(None)`。

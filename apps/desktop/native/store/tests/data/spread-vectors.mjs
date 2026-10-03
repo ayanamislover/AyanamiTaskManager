@@ -8,7 +8,6 @@
 //   mirror 是该事件补出镜像的完整 payload，spread 是单纯的 `{ ...readJson(source) }`。
 //   refused 是嵌套超过 maxDepth 的合法 JSON：转换器必须显式拒绝，不能清空后通过。
 // - numbers.json：{ node, numbers: [[f64 的 16 位十六进制位模式, JSON.stringify(x)], ...] }
-import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -214,10 +213,31 @@ for (let e = -330; e <= 310; e++) {
   add(Number(`7.5e${e}`));
   add(-Number(`3.3333333333333335e${e}`));
 }
-for (let i = 0; numbers.size < 5000 && i < 100000; i++) {
-  const b = randomBytes(8);
-  add(new DataView(b.buffer, b.byteOffset, 8).getFloat64(0));
-  add(Math.round(Math.random() * 1e6) / 10 ** Math.floor(Math.random() * 12));
+// 固定种子（mulberry32），文件可复现。
+let seed = 0x5eed2026;
+const random = () => {
+  seed = (seed + 0x6d2b79f5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+};
+const u32 = () => Math.floor(random() * 4294967296);
+// 最短位数下两个候选与 x 等距（x 的精确十进制展开恰好多一位、末位是 5）时，JS 取末位为偶数的那个
+// （W1 peer r4 P2-08）。二进制分数 a + b / 2^k 的精确展开短，这种情况多。
+[1951.0000610351562, -1951.0000610351562].forEach(add);
+for (let i = 0; i < 4000; i++) {
+  const k = 8 + Math.floor(random() * 40);
+  const a = Math.floor(random() * 2 ** Math.floor(random() * 40));
+  const b = Math.floor(random() * 2 ** Math.min(k, 30)) * 2 ** Math.max(0, k - 30) + 1;
+  const x = (a + b / 2 ** k) * (random() < 0.5 ? 1 : -1) * 10 ** (Math.floor(random() * 9) - 4);
+  add(x);
+  add(a + b / 2 ** k);
+}
+for (let i = 0; numbers.size < 12000 && i < 100000; i++) {
+  view.setUint32(0, u32());
+  view.setUint32(4, u32());
+  add(view.getFloat64(0));
+  add(Math.round(random() * 1e6) / 10 ** Math.floor(random() * 12));
 }
 writeFileSync(
   join(dir, "numbers.json"),

@@ -986,7 +986,8 @@ fn count_outbox_without_event(tx: &Transaction<'_>) -> Result<usize> {
     Ok(tx.query_row(
         "SELECT count(*) FROM p.outbox o
          WHERE o.delivered_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM p.events e WHERE e.id = atm_json_text(o.payload_json, 'eventId'))",
+           AND NOT EXISTS (SELECT 1 FROM p.events e WHERE e.id = atm_json_text(o.payload_json, 'eventId',
+                 'project ' || (SELECT project_id FROM p.project_meta) || ' outbox ' || o.id))",
         [],
         |r| r.get::<_, i64>(0),
     )? as usize)
@@ -1029,7 +1030,8 @@ fn mirror_rows(
 /// 转换与 VERIFY 的连接上要用的 SQL 函数。读旧 payload 一律走 [`crate::jsjson`]，不用 SQLite 的 JSON 函数
 /// （W1 peer r3：它会改坏数组里的字符串和数字，也会把深层的合法 JSON 当成非法）。
 /// - `atm_mirror_payload(payload, fields)`：补投影的 payload，见 [`mirror_rows`]；
-/// - `atm_json_text(json, key)`：`JSON.parse(json)[key]`，是字符串时返回它，否则 NULL。
+/// - `atm_json_text(json, key, row)`：`JSON.parse(json)[key]`，是字符串时返回它，否则 NULL；
+///   `row` 是这一行在源库里的位置（项目 + 全局序号或 outbox id），只用于报错（W1 peer r4 P2-09）。
 ///
 /// 嵌套超过上限时两者都报错，转换或 VERIFY 失败并在错误里写明事件，不静默回退。
 fn register_functions(c: &Connection) -> rusqlite::Result<()> {
@@ -1053,14 +1055,15 @@ fn register_functions(c: &Connection) -> rusqlite::Result<()> {
             ))
         })
     })?;
-    c.create_scalar_function("atm_json_text", 2, flags, |ctx| {
+    c.create_scalar_function("atm_json_text", 3, flags, |ctx| {
         let Some(json) = text_arg(ctx.get_raw(0)) else {
             return Ok(None);
         };
         let key = text_arg(ctx.get_raw(1)).unwrap_or_default();
         top_level_string(&json, &key).map_err(|_| {
+            let row = text_arg(ctx.get_raw(2)).unwrap_or_default();
             too_deep(format!(
-                "payload nests deeper than {MAX_DEPTH} levels (reading {key})"
+                "{row}: payload nests deeper than {MAX_DEPTH} levels (reading {key})"
             ))
         })
     })
@@ -1092,7 +1095,8 @@ fn link_sql(feed: &str, events: &str, event_project: &str) -> [String; 2] {
                   AND e.id = CASE WHEN substr(g.dedupe_key, 1, length(?3)) = ?3
                                   THEN substr(g.dedupe_key, length(?3) + 1) END),
                (SELECT e.id FROM {events} e WHERE {event_project}
-                  AND e.id = atm_json_text(g.payload_json, 'sourceEventId')))
+                  AND e.id = atm_json_text(g.payload_json, 'sourceEventId',
+                        'project ' || ?1 || ' global row ' || g.global_seq || ' (' || coalesce(g.dedupe_key, '') || ')')))
              WHERE g.project_id = ?1"
         ),
     ]
