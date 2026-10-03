@@ -5,7 +5,8 @@
 //! 孤儿全局事件、没送达的投影。全程不碰真实数据根。
 
 use atm_store::legacy::{
-    ConvertError, ConvertOptions, LegacySources, Report, convert, verify_converted,
+    ConvertError, ConvertOptions, LegacySources, Report, convert, js_string_spread,
+    verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
 use rusqlite::{Connection, params};
@@ -799,4 +800,122 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
         },
     )
     .unwrap();
+}
+
+/// W1 peer r2 P1-r2-01：补投影的 payload 是 2.0 的 `{ ...JSON.parse(payload), 项目字段 }`。
+/// 期望由 node v24.14.1 跑 2.0 的 readJson、对象展开与 JSON.stringify 生成
+/// （`output/w1-evidence/spread-vectors.mjs`），不由本 crate 的 SQL 生成。
+/// 文本不同时按 JSON 值比较：JS 会把整数形状的键排到前面，这里保留原文顺序。
+/// 第三列是单纯的 `{ ...JSON.parse(源) }`：源是 JSON 字符串时直接对照 `js_string_spread`，
+/// 因为端到端的结果还要过 SQLite 的 `json_set`，它会把控制字符等重新转义，掩盖这个函数自己的错。
+const SPREAD_VECTORS: &[(&str, &str, &str)] = &[
+    (
+        "[\"keep-me\", 1, true, null, {\"a\":[1]}]",
+        "{\"0\":\"keep-me\",\"1\":1,\"2\":true,\"3\":null,\"4\":{\"a\":[1]},\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"keep-me\",\"1\":1,\"2\":true,\"3\":null,\"4\":{\"a\":[1]}}",
+    ),
+    (
+        "\"xy\"",
+        "{\"0\":\"x\",\"1\":\"y\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"x\",\"1\":\"y\"}",
+    ),
+    (
+        "\"a😀é\\n\\u0001\\\"\\\\\"",
+        "{\"0\":\"a\",\"1\":\"\\ud83d\",\"2\":\"\\ude00\",\"3\":\"é\",\"4\":\"\\n\",\"5\":\"\\u0001\",\"6\":\"\\\"\",\"7\":\"\\\\\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"a\",\"1\":\"\\ud83d\",\"2\":\"\\ude00\",\"3\":\"é\",\"4\":\"\\n\",\"5\":\"\\u0001\",\"6\":\"\\\"\",\"7\":\"\\\\\"}",
+    ),
+    (
+        "\"\\ud83d\"",
+        "{\"0\":\"\\ud83d\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"\\ud83d\"}",
+    ),
+    (
+        "42",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "true",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "null",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "not json {",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "{\"b\":1,\"2\":\"two\",\"a\":{\"x\":null}}",
+        "{\"2\":\"two\",\"b\":1,\"a\":{\"x\":null},\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"2\":\"two\",\"b\":1,\"a\":{\"x\":null}}",
+    ),
+    (
+        "\"\"",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "[]",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "-1.5e3",
+        "{\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{}",
+    ),
+    (
+        "{\"projectId\":\"spoofed\",\"keep\":1}",
+        "{\"projectId\":\"P1\",\"keep\":1,\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"projectId\":\"spoofed\",\"keep\":1}",
+    ),
+    (
+        "[[1,\"x\"],[],{\"b\":false},false]",
+        "{\"0\":[1,\"x\"],\"1\":[],\"2\":{\"b\":false},\"3\":false,\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":[1,\"x\"],\"1\":[],\"2\":{\"b\":false},\"3\":false}",
+    ),
+    (
+        "\"\\b\\f\\t\\u001f\\u2028\\u007f\\/\"",
+        "{\"0\":\"\\b\",\"1\":\"\\f\",\"2\":\"\\t\",\"3\":\"\\u001f\",\"4\":\"\u{2028}\",\"5\":\"\u{7f}\",\"6\":\"/\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"\\b\",\"1\":\"\\f\",\"2\":\"\\t\",\"3\":\"\\u001f\",\"4\":\"\u{2028}\",\"5\":\"\u{7f}\",\"6\":\"/\"}",
+    ),
+    (
+        "\"\\udc00x\\ud83d\\ude00\"",
+        "{\"0\":\"\\udc00\",\"1\":\"x\",\"2\":\"\\ud83d\",\"3\":\"\\ude00\",\"projectId\":\"P1\",\"projectCode\":\"AAA\",\"projectName\":\"Alpha\",\"projectSequence\":2,\"sourceEventId\":\"E1-big\",\"sourceProjectSequence\":2,\"sourceAggregateType\":\"WORK_ITEM\",\"sourceAggregateId\":\"W1\"}",
+        "{\"0\":\"\\udc00\",\"1\":\"x\",\"2\":\"\\ud83d\",\"3\":\"\\ude00\"}",
+    ),
+];
+
+#[test]
+fn replayed_mirrors_spread_payloads_like_2x() {
+    for (i, (source, expected, spread)) in SPREAD_VECTORS.iter().enumerate() {
+        if source.trim_start().starts_with('"') {
+            assert_eq!(js_string_spread(source), *spread, "vector {i}: {source}");
+        }
+        let f = fixture(&format!("legacy-spread-{i}"));
+        f.project(0)
+            .execute(
+                "UPDATE events SET payload_json = ?1 WHERE id = 'E1-big'",
+                [source],
+            )
+            .unwrap();
+        // convert 里含 VERIFY。
+        f.convert().unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        let got = q::<String>(
+            &t,
+            "SELECT payload_json FROM global_feed WHERE project_id = 'P1' AND event_id = 'E1-big'",
+        );
+        if got != *expected {
+            let got: serde_json::Value = serde_json::from_str(&got)
+                .unwrap_or_else(|e| panic!("vector {i} ({source}): {got} does not parse: {e}"));
+            let want: serde_json::Value = serde_json::from_str(expected).unwrap();
+            assert_eq!(got, want, "vector {i}: {source}");
+        }
+    }
 }

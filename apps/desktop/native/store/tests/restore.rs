@@ -8,7 +8,7 @@ use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
     PROJECT_TABLES, PROJECT_TABLES_HANDLED_ELSEWHERE, RestoreOptions, ScopeRef, ScopeRestored,
     SwapStep, current_generation, ensure_generation, finish_attachment_swaps, inject_swap_fault,
-    project_attachments, restore_knowledge, restore_project,
+    restore_knowledge, restore_project, with_project_attachments,
 };
 use atm_store::search::{
     Doc, Scope, check_fts, match_docs, rebuild_knowledge_fts, terms, upsert_doc,
@@ -1235,7 +1235,7 @@ fn a_restore_whose_attachments_did_not_swap_blocks_backups_until_finished() {
         Err(BackupError::AttachmentsPending { .. })
     ));
     assert!(matches!(
-        project_attachments(&w.store, "PA"),
+        with_project_attachments(&w.store, "PA", |_| Ok(())),
         Err(BackupError::AttachmentsPending { .. })
     ));
     assert_eq!(i(&w, "SELECT count(*) FROM backups", &[]), backups);
@@ -1254,7 +1254,7 @@ fn a_restore_whose_attachments_did_not_swap_blocks_backups_until_finished() {
     );
     assert!(!root.join(".restore-staging").join("PA.gen").exists());
     assert_eq!(
-        project_attachments(&w.store, "PA").unwrap(),
+        with_project_attachments(&w.store, "PA", |a| Ok(a.dir.to_path_buf())).unwrap(),
         root.join("PA")
     );
 }
@@ -1325,4 +1325,151 @@ fn restore_internals_are_not_backed_up() {
         backed_up(&w, &id, "PA/a.txt"),
         (vec!["PA/a.txt".to_string()], "v1".to_string())
     );
+}
+
+fn read_pair(dir: &Path) -> std::io::Result<(String, String)> {
+    Ok((
+        fs::read_to_string(dir.join("a.txt"))?,
+        fs::read_to_string(dir.join("b.txt"))?,
+    ))
+}
+
+/// P1-r2-02：一次附件访问（读 a、停住、再读 b）没结束之前，恢复不能换目录；
+/// 访问结束后恢复照常完成，之后的访问看到的是完整的目标状态。
+#[test]
+fn a_restore_waits_for_an_attachment_access_in_progress() {
+    let w = std::sync::Arc::new(world("restore-access-read"));
+    attachment(&w, "PA", "a.txt", "v1");
+    attachment(&w, "PA", "b.txt", "v1");
+    let b = backup(&w);
+    attachment(&w, "PA", "a.txt", "v2");
+    attachment(&w, "PA", "b.txt", "v2");
+
+    let before = i(&w, "SELECT scope_gen FROM projects WHERE id = 'PA'", &[]);
+    let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    let reader = {
+        let w = w.clone();
+        std::thread::spawn(move || {
+            with_project_attachments(&w.store, "PA", |access| {
+                let a = fs::read_to_string(access.dir.join("a.txt"))?;
+                inside_tx.send(()).unwrap();
+                gate_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                let b = fs::read_to_string(access.dir.join("b.txt"))?;
+                Ok((access.generation, a, b))
+            })
+            .unwrap()
+        })
+    };
+    inside_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let restorer = {
+        let (w, b) = (w.clone(), b.clone());
+        std::thread::spawn(move || {
+            let r = restore_project(&w.store, &b, "PA", &opts(&w));
+            done_tx.send(()).unwrap();
+            r.map(|o| o.generation)
+        })
+    };
+    // 访问还没结束：恢复必须等着。
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the restore swapped attachments under an access in progress"
+    );
+    gate_tx.send(()).unwrap();
+    assert_eq!(
+        reader.join().unwrap(),
+        (Some(before), "v2".to_string(), "v2".to_string()),
+        "one access saw a mix of versions or generations"
+    );
+    let generation = restorer.join().unwrap().unwrap();
+    assert!(generation > before);
+    assert_eq!(
+        with_project_attachments(&w.store, "PA", |access| Ok((
+            access.generation,
+            read_pair(access.dir)?
+        )))
+        .unwrap(),
+        (Some(generation), ("v1".to_string(), "v1".to_string()))
+    );
+    assert_eq!(
+        with_project_attachments(&w.store, "NOPE", |access| Ok(access.generation)).unwrap(),
+        None
+    );
+}
+
+/// P1-r2-02：附件写入（先写 a、停住、再写 b）没结束之前，备份不能开始复制附件；
+/// 备份里是写入完成后的完整一份。
+#[test]
+fn a_backup_waits_for_an_attachment_write_in_progress() {
+    let w = std::sync::Arc::new(world("restore-access-write"));
+    attachment(&w, "PA", "a.txt", "v1");
+    attachment(&w, "PA", "b.txt", "v1");
+
+    let (inside_tx, inside_rx) = std::sync::mpsc::channel();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    let writer = {
+        let w = w.clone();
+        std::thread::spawn(move || {
+            with_project_attachments(&w.store, "PA", |access| {
+                fs::write(access.dir.join("a.txt"), "v3")?;
+                inside_tx.send(()).unwrap();
+                gate_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                fs::write(access.dir.join("b.txt"), "v3")
+            })
+            .unwrap()
+        })
+    };
+    inside_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let backer = {
+        let w = w.clone();
+        std::thread::spawn(move || {
+            let id = create_backup(&w.store, &w.backups, "MANUAL", T3)
+                .unwrap()
+                .id;
+            done_tx.send(()).unwrap();
+            id
+        })
+    };
+    assert!(
+        done_rx.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the backup copied attachments under a write in progress"
+    );
+    gate_tx.send(()).unwrap();
+    writer.join().unwrap();
+    let id = backer.join().unwrap();
+    let vb = verify_backup(&w.store, &id).unwrap();
+    assert_eq!(
+        read_pair(&vb.artifacts_dir().join("PA")).unwrap(),
+        ("v3".to_string(), "v3".to_string())
+    );
+}
+
+/// 写线程的作业里拿附件锁会和「持锁等写线程」的恢复互等，所以直接拒绝，不等锁。
+#[test]
+fn attachment_operations_are_refused_inside_a_write_job() {
+    let w = std::sync::Arc::new(world("restore-access-reentrant"));
+    // 不拒绝时这里会互等死锁：在另一个线程里跑，等不到结果就判失败，不让用例挂住。
+    let (tx, rx) = std::sync::mpsc::channel();
+    {
+        let w = w.clone();
+        std::thread::spawn(move || {
+            let inner = w.clone();
+            let refused = w.store.write(move |_tx| {
+                let access = with_project_attachments(&inner.store, "PA", |_| Ok(()));
+                let backup = create_backup(&inner.store, &inner.backups, "MANUAL", T3);
+                Ok::<_, rusqlite::Error>((
+                    matches!(access, Err(BackupError::Reentrant(_))),
+                    matches!(backup, Err(BackupError::Reentrant(_))),
+                ))
+            });
+            let _ = tx.send(refused.map_err(|e| format!("{e:?}")));
+        });
+    }
+    let refused = rx
+        .recv_timeout(Duration::from_secs(20))
+        .expect("an attachment operation inside a write job deadlocked")
+        .unwrap();
+    assert_eq!(refused, (true, true));
 }

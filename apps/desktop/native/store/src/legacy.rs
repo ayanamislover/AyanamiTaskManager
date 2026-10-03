@@ -332,6 +332,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     }
 
     let mut t = crate::open(target)?;
+    register_functions(&t)?;
     let mut report = Report::default();
     let gens = convert_registry(&mut t, src, opts.at, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
@@ -996,7 +997,11 @@ fn count_outbox_without_event(tx: &Transaction<'_>) -> Result<usize> {
 
 /// R6 补投影：一个项目里没有全局镜像的事件，按项目内序号排列，形状与 2.0 投影相同
 /// （`registry-projection-dispatcher.ts` + `outbox-read-model.ts`）：
-/// - payload 是事件 payload 再补上项目字段；不是合法 JSON 对象时按 `{}`（2.0 `readJson` 的回退）；
+/// - payload 是 `{ ...JSON.parse(事件 payload), 项目字段 }`（W1 peer r2 P1-r2-01）：
+///   - 解析失败按 `{}`（2.0 `readJson` 的回退）；
+///   - 对象原样；数组展开成 `{"0": .., "1": ..}`；字符串按 UTF-16 码元展开（[`js_string_spread`]）；
+///   - 数字、布尔、null 展开后没有属性，即 `{}`；
+///   - JS 把整数形状的键排到前面，这里保留原文顺序：JSON 值相同，文本顺序可能不同。
 /// - aggregate_id 为空时取项目 id；actor 取 actor_id，没有就 actor_type，再没有就 SYSTEM；
 /// - dedupe_key = `project:<id>:event:<event_id>`。
 ///
@@ -1016,7 +1021,15 @@ fn mirror_rows(
         "SELECT e.{seq} AS seq, e.type AS type, CASE WHEN e.aggregate_id = '' THEN ?1 ELSE e.aggregate_id END AS aggregate_id,
                 coalesce(e.actor_id, e.actor_type, 'SYSTEM') AS actor,
                 json_set(CASE WHEN json_valid(e.payload_json)
-                              THEN CASE WHEN json_type(e.payload_json) = 'object' THEN e.payload_json ELSE '{{}}' END
+                              THEN CASE json_type(e.payload_json)
+                                   WHEN 'object' THEN e.payload_json
+                                   WHEN 'array' THEN (
+                                     SELECT json_group_object(CAST(j.key AS TEXT),
+                                              CASE j.type WHEN 'true' THEN json('true') WHEN 'false' THEN json('false')
+                                                          ELSE j.value END)
+                                     FROM json_each(e.payload_json) j)
+                                   WHEN 'text' THEN atm_js_string_spread(e.payload_json)
+                                   ELSE '{{}}' END
                               ELSE '{{}}' END,
                          '$.projectId', ?1, '$.projectCode', pr.code, '$.projectName', pr.name,
                          '$.projectSequence', e.{seq}, '$.sourceEventId', e.id, '$.sourceProjectSequence', e.{seq},
@@ -1026,6 +1039,96 @@ fn mirror_rows(
          WHERE {event_project} AND e.id NOT IN ({linked})
          ORDER BY e.{seq}"
     )
+}
+
+/// 转换与 VERIFY 的连接上要用的 SQL 函数。
+fn register_functions(c: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    c.create_scalar_function(
+        "atm_js_string_spread",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            Ok(match ctx.get_raw(0) {
+                ValueRef::Text(b) => std::str::from_utf8(b)
+                    .map(js_string_spread)
+                    .unwrap_or_else(|_| "{}".to_string()),
+                _ => "{}".to_string(),
+            })
+        },
+    )
+}
+
+/// `{ ...JSON.parse(json) }`，`json` 是一个 JSON 字符串字面量：JS 把字符串按 UTF-16 码元展开成
+/// `{"0": 码元0, "1": 码元1, ..}`，非 BMP 字符拆成两个落单的代理项。输出按 `JSON.stringify` 转义。
+/// 不是合法的字符串字面量时返回 `{}`。
+pub fn js_string_spread(json: &str) -> String {
+    let Some(units) = json_string_units(json.trim_matches([' ', '\t', '\n', '\r'])) else {
+        return "{}".to_string();
+    };
+    let mut out = String::from("{");
+    for (i, u) in units.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('"');
+        out.push_str(&i.to_string());
+        out.push_str("\":\"");
+        push_js_unit(&mut out, *u);
+        out.push('"');
+    }
+    out.push('}');
+    out
+}
+
+/// 一个 JSON 字符串字面量的 UTF-16 码元。`\\uXXXX` 原样取码元，落单的代理项也保留。
+fn json_string_units(s: &str) -> Option<Vec<u16>> {
+    let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+    let mut units = Vec::new();
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0u16; 2];
+            units.extend_from_slice(c.encode_utf16(&mut buf));
+            continue;
+        }
+        let unit = match chars.next()? {
+            '"' => 0x22,
+            '\\' => 0x5c,
+            '/' => 0x2f,
+            'b' => 0x08,
+            'f' => 0x0c,
+            'n' => 0x0a,
+            'r' => 0x0d,
+            't' => 0x09,
+            'u' => {
+                let hex: String = (0..4).map(|_| chars.next()).collect::<Option<_>>()?;
+                u16::from_str_radix(&hex, 16).ok()?
+            }
+            _ => return None,
+        };
+        units.push(unit);
+    }
+    Some(units)
+}
+
+/// 按 `JSON.stringify`（QuoteJSONString）转义一个码元：短转义、其余控制字符与落单代理项用小写 `\\u` 四位十六进制。
+fn push_js_unit(out: &mut String, u: u16) {
+    match u {
+        0x08 => out.push_str("\\b"),
+        0x09 => out.push_str("\\t"),
+        0x0a => out.push_str("\\n"),
+        0x0c => out.push_str("\\f"),
+        0x0d => out.push_str("\\r"),
+        0x22 => out.push_str("\\\""),
+        0x5c => out.push_str("\\\\"),
+        0x00..=0x1f | 0xd800..=0xdfff => {
+            out.push('\\');
+            out.push('u');
+            out.push_str(&format!("{u:04x}"));
+        }
+        _ => out.push(char::from_u32(u32::from(u)).unwrap_or(char::REPLACEMENT_CHARACTER)),
+    }
 }
 
 /// 全局流的旧行认领项目、关联事件（R6）。`?1` 项目 id，`?2` = `project:<id>:`，`?3` = `project:<id>:event:`。
@@ -1273,6 +1376,7 @@ fn compare_table(
 pub fn verify_converted(target: &Path, src: &LegacySources) -> Result<Report> {
     let t = Connection::open(target)?;
     crate::configure(&t)?;
+    register_functions(&t)?;
     let mut report = Report::default();
     verify(&t, src, &mut report)?;
     Ok(report)

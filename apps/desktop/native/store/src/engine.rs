@@ -36,6 +36,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// 写线程的名字。附件协调锁据此拒绝在写线程上加锁（见 `backup::attachments_lock`）。
+pub(crate) const WRITER_THREAD: &str = "atm-store-writer";
+
 #[derive(Clone, Debug)]
 pub struct Config {
     /// 排队（不含正在执行的）作业的上限。
@@ -57,10 +60,13 @@ pub struct Config {
     pub checkpoint_gap: Duration,
     /// WAL 的软上限，字节。超过后做 RESTART；也是 `journal_size_limit`。
     pub wal_soft_limit: u64,
-    /// RESTART 最多等读者多久（这段时间里新写入排队）。
+    /// RESTART 最多等读者多久（这段时间里新写入排队）。读者一直重叠、总有一个占着同一个 read mark 时，
+    /// RESTART 会等满这个时长后放弃，到下一次 PASSIVE（至少隔 `checkpoint_gap`）再试；
+    /// 所以写线程因此停顿的比例不超过 `wal_restart_wait / checkpoint_gap`。
     pub wal_restart_wait: Duration,
-    /// 每条连接（写连接和每个读连接）的 page cache 上限，KiB。W1g 实测 512～8192 之间时延没有差别
-    /// （库文件靠操作系统的文件缓存），内存随之上涨；取 1024。
+    /// 每条连接（写连接和每个读连接）的 page cache 上限，KiB。W1g 的 cache 矩阵（每格一次运行，
+    /// 有界观测）里 512～8192 之间时延看不出差别（库文件有操作系统的文件缓存兜着），内存随之上涨；
+    /// 取 1024。见 `output/w1-bench/REPORT.md`。
     pub cache_kib: u32,
 }
 
@@ -142,7 +148,7 @@ pub struct Stats {
     pub passive_checkpoints: AtomicU64,
     pub truncate_checkpoints: AtomicU64,
     pub truncate_busy: AtomicU64,
-    /// 单次 PASSIVE checkpoint 的最长耗时与累计耗时，µs。checkpoint 在写线程里做，期间写入排队。
+    /// 单次 PASSIVE checkpoint 的最长耗时与累计耗时，µs。PASSIVE 在 checkpoint 线程上做，不挡写入。
     pub passive_max_us: AtomicU64,
     pub passive_total_us: AtomicU64,
     /// WAL 超过软上限后做的 RESTART：成功、被读者挡住、最长耗时（µs，期间新写入排队）。
@@ -337,7 +343,7 @@ impl Store {
             let checkpointer = Checkpointer::start(path, &config, stats.clone())?;
             let (shared, stats, idle) = (shared.clone(), stats.clone(), config.idle_checkpoint);
             std::thread::Builder::new()
-                .name("atm-store-writer".into())
+                .name(WRITER_THREAD.into())
                 .spawn(move || writer_loop(conn, budget, shared, stats, idle, checkpointer))
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };

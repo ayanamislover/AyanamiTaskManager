@@ -48,6 +48,9 @@ pub enum BackupError {
         generation: i64,
         cause: String,
     },
+    /// 在写线程的作业里调用了要拿附件锁的操作（备份、恢复、附件访问）。
+    /// 恢复持着附件锁时要等写线程执行它的作业，写线程再等附件锁就互相等死，所以直接拒绝。
+    Reentrant(&'static str),
 }
 
 impl std::fmt::Display for BackupError {
@@ -72,6 +75,12 @@ impl std::fmt::Display for BackupError {
                 f,
                 "project {project} was restored to generation {generation} but its attachments are not swapped in yet: {cause}"
             ),
+            BackupError::Reentrant(what) => {
+                write!(
+                    f,
+                    "{what} cannot run inside a write job on the writer thread"
+                )
+            }
         }
     }
 }
@@ -148,10 +157,17 @@ pub fn side_reader(path: &Path) -> Result<Connection> {
 }
 
 /// 附件目录的协调锁：整库备份、按范围恢复、附件收尾与附件访问共用（W1 peer r1 P1-05）。
+///
+/// 锁顺序：附件锁在外，Store 的写线程与读池在内。持锁的一方可以等写线程、借读连接；
+/// 反过来不行：写线程的作业里不能拿附件锁（直接拒绝，[`BackupError::Reentrant`]），
+/// 读事务的闭包里也不要拿（恢复持锁时要借读连接，借不到会在 `read_wait` 后失败）。
 static ATTACHMENTS_LOCK: Mutex<()> = Mutex::new(());
 
-pub(crate) fn attachments_lock() -> MutexGuard<'static, ()> {
-    ATTACHMENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn attachments_lock(what: &'static str) -> Result<MutexGuard<'static, ()>> {
+    if std::thread::current().name() == Some(crate::engine::WRITER_THREAD) {
+        return Err(BackupError::Reentrant(what));
+    }
+    Ok(ATTACHMENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// 附件根目录下恢复用的内部目录（暂存、换下来的旧版本），不属于任何项目，不进备份。
@@ -164,7 +180,7 @@ pub(crate) fn is_internal(rel: &str) -> bool {
 /// 先把上一次恢复没换完的附件换完；换不完就拒绝（[`BackupError::AttachmentsPending`]），
 /// 不会把恢复后的库和恢复前的附件打进同一份备份。
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
-    let _lock = attachments_lock();
+    let _lock = attachments_lock("create_backup")?;
     crate::restore::finish_swaps_locked(store)?;
     create_backup_locked(store, root, kind, at)
 }

@@ -112,7 +112,7 @@ pub fn restore_project(
     project_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock();
+    let _serial = attachments_lock("restore_project")?;
     // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
     finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
@@ -157,7 +157,7 @@ pub fn restore_knowledge(
     backup_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock();
+    let _serial = attachments_lock("restore_knowledge")?;
     finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.db)?;
@@ -736,16 +736,44 @@ fn stage_attachments(db_path: &Path, vb: &VerifiedBackup, project_id: &str) -> R
 /// 再调用一次都会走到同一个终态。已提交的换入失败时返回 [`BackupError::AttachmentsPending`]。
 /// 返回处理过的标记数。
 pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
-    let _serial = attachments_lock();
+    let _serial = attachments_lock("finish_attachment_swaps")?;
     finish_swaps_locked(store)
 }
 
-/// 这个项目的附件目录。先换完它没换完的附件，换不完就拒绝：读到的要么是恢复前、要么是恢复后的完整一份。
-/// 附件的读写（W3）都要经过这里取目录。
-pub fn project_attachments(store: &Store, project_id: &str) -> Result<PathBuf> {
-    let _serial = attachments_lock();
+/// 一次附件访问拿到的东西，只在回调里有效。
+#[derive(Debug)]
+pub struct ProjectAttachments<'a> {
+    /// 这个项目的附件目录，可能还不存在。
+    pub dir: &'a Path,
+    /// 锁内读到的项目当前世代，项目不存在时为 None。持锁期间没有恢复能提交，所以整个访问里它不变。
+    pub generation: Option<i64>,
+}
+
+/// 在附件协调锁里访问一个项目的附件目录（W1 peer r2 P1-r2-02）。附件的读写（W3）都要经过这里。
+///
+/// 先换完这个库没换完的附件，换不完就拒绝；`f` 执行的整段时间里持锁，备份、恢复、收尾都要等它结束，
+/// 所以一次访问看到的要么是恢复前、要么是恢复后的完整一份，写入也不会和备份交错。
+/// `f` 里不要调用 Store 的写入、读取、备份或恢复，也不要做和附件无关的长操作：锁是全进程的。
+pub fn with_project_attachments<R>(
+    store: &Store,
+    project_id: &str,
+    f: impl FnOnce(ProjectAttachments<'_>) -> std::io::Result<R>,
+) -> Result<R> {
+    let _serial = attachments_lock("with_project_attachments")?;
     finish_swaps_locked(store)?;
-    Ok(artifacts_root(store.path()).join(project_id))
+    let id = project_id.to_string();
+    let generation: Option<i64> = store.read(move |tx| {
+        tx.query_row("SELECT scope_gen FROM projects WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()
+    })?;
+    let dir = artifacts_root(store.path()).join(project_id);
+    f(ProjectAttachments {
+        dir: &dir,
+        generation,
+    })
+    .map_err(BackupError::Io)
 }
 
 /// 换入的各个步骤，供测试在每一步注入故障（中断后再调用一次收尾，等同于进程在这一步退出后重启）。

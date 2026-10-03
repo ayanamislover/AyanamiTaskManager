@@ -42,9 +42,9 @@
 
 `Store::open` 另外设置（`src/engine.rs`，取值依据见 `output/w1-bench/REPORT.md`）：
 
-- `cache_size = -1024`（每条连接 1 MiB page cache，写连接和每个读连接都设）：W1g 在 104 MiB 样本库上实测 512 KiB～8 MiB 时延没有差别，内存随之上涨。
+- `cache_size = -1024`（每条连接 1 MiB page cache，写连接和每个读连接都设）：W1g 在 104 MiB 样本库上的 cache 矩阵（每格一次，有界观测）里 512 KiB～8 MiB 时延看不出差别，内存随之上涨；重复、交错的矩阵留到 W2 性能复核。
 - `wal_autocheckpoint = 0`：checkpoint 不在提交里顺手做。写线程每执行完一个作业就通知独立的 checkpoint 线程（只置位），后者做 PASSIVE，两次至少隔 1 s。PASSIVE 放在写线程上时，一次最长 349 ms，期间写入全部排队；只在队列排空时通知，则队列一直有积压时永远没有 checkpoint（W1 peer r1 P1-02）。
-- `journal_size_limit = 64 MiB`，同时是 WAL 软上限：读者一直占着快照时 PASSIVE 追不平，WAL 只增不减（实测 30 s 涨到 2.2 GiB）。PASSIVE 报告的帧数超过软上限时，写线程在两个作业之间做一次 RESTART（最多等读者 100 ms）。放在 checkpoint 线程上做时，积压下它抢不到写锁。这是软上限：复制和 fsync 期间写入排队，峰值取决于写入速度和读者，不是硬上限。
+- `journal_size_limit = 64 MiB`，同时是 WAL 软上限：读者一直占着快照时 PASSIVE 追不平，WAL 只增不减（实测 30 s 涨到 2.2 GiB）。PASSIVE 报告的帧数超过软上限时，写线程在两个作业之间做一次 RESTART（最多等读者 100 ms）。读者一直重叠、总占着同一个 read mark 时 RESTART 会等满 100 ms 后放弃，下一次 PASSIVE（至少隔 1 s）再试，写线程因此停顿不超过 10%。放在 checkpoint 线程上做时，积压下它抢不到写锁。这是软上限：复制和 fsync 期间写入排队，峰值取决于写入速度和读者，不是硬上限。
 
 ## 验证
 
