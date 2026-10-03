@@ -11,6 +11,7 @@ use std::path::Path;
 pub mod backup;
 mod engine;
 pub mod events;
+pub mod legacy;
 pub mod restore;
 pub mod search;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
@@ -83,6 +84,16 @@ pub fn configure(conn: &Connection) -> Result<()> {
     }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    harden(conn)?;
+    Ok(())
+}
+
+/// 关掉 SQLite 的「双引号回退」：默认情况下，找不到的 `"标识符"` 会被悄悄当成字符串字面量，
+/// 列名写错时不报错、而是把列名本身写进数据（W1f 转换原型里实际踩到过）。每条连接都要关。
+pub fn harden(conn: &Connection) -> Result<()> {
+    use rusqlite::config::DbConfig;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
     Ok(())
 }
 

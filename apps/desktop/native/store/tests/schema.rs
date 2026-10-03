@@ -531,3 +531,36 @@ fn search_docs_keep_the_fts_index_in_step() {
         .unwrap();
     assert!(hits("读连接").is_empty());
 }
+
+#[test]
+fn a_misspelled_identifier_is_an_error_not_a_string() {
+    // SQLite 默认把找不到的 "标识符" 当成字符串字面量。关掉之后，写错列名必须报错。
+    let c = fresh("dqs");
+    let e = c
+        .query_row("SELECT \"no_such_column\" FROM app_meta", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap_err();
+    assert!(e.to_string().contains("no_such_column"), "{e}");
+    assert!(
+        c.execute(
+            "INSERT INTO settings (key, value_json, updated_at) VALUES (\"k\", '1', 'T')",
+            []
+        )
+        .is_err()
+    );
+
+    // 写线程与读连接也一样。
+    let store =
+        atm_store::Store::open(&db_path("dqs-store"), atm_store::Config::default()).unwrap();
+    assert!(
+        store
+            .read(|tx| tx.query_row("SELECT \"nope\"", [], |r| r.get::<_, String>(0)))
+            .is_err()
+    );
+    assert!(
+        store
+            .write(|tx| tx.query_row("SELECT \"nope\"", [], |r| r.get::<_, String>(0)))
+            .is_err()
+    );
+}

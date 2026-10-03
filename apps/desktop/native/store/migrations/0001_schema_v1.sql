@@ -50,6 +50,9 @@ CREATE TABLE projects (
   scope_gen INTEGER NOT NULL REFERENCES scope_generations(gen) DEFERRABLE INITIALLY DEFERRED,
   epoch TEXT NOT NULL,
   legacy_schema_version INTEGER,
+  -- W1f：2.x 原值。registry 的 db_path 与项目库的整行 project_meta 放不进单库的列
+  -- （project_meta 的 lifecycle / updated_at 等与 registry 各走各的，2.0 从不同步），转换时原样存这里供反投影。
+  legacy_json TEXT CHECK (legacy_json IS NULL OR json_valid(legacy_json)),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT
 );
 CREATE INDEX ix_projects_lifecycle ON projects(lifecycle, updated_at DESC);
@@ -452,6 +455,11 @@ CREATE TABLE idempotency_receipts (
   ns_id TEXT,
   op_id TEXT,
   legacy_key TEXT,                            -- 2.0 原键，逐值保留；3.0 新写入为 NULL
+  -- W1f：2.0 项目回执的原 op_id（每一行都有，不论能否被命中）与 R7‴ 分类。
+  -- 惰性类（PROMOTION_HISTORY / LEGACY_UNCLASSIFIED）在 R3′ 收集候选时排除，新键为 NULL。
+  legacy_op_id TEXT,
+  legacy_class TEXT CHECK (legacy_class IS NULL OR legacy_class IN
+    ('BEGIN','USER','SYSTEM_CONST','AGENT','PROMOTION_HISTORY','LEGACY_UNCLASSIFIED')),
   actor_session_id TEXT,                      -- 2.0 0007 拆出的列，逐值保留（R7 的三种形状）
   operation TEXT NOT NULL,
   fp_v INTEGER NOT NULL CHECK (fp_v IN (1,2)),
@@ -472,6 +480,8 @@ CREATE TABLE idempotency_receipts (
   CHECK ((state = 'TOMBSTONED') = (tombstoned_by_gen IS NOT NULL)),
   CHECK ((state = 'TOMBSTONED') = (tombstoned_at IS NOT NULL)),
   CHECK (op_id IS NOT NULL OR legacy_key IS NOT NULL),
+  CHECK (legacy_class IS NULL OR legacy_key IS NOT NULL),
+  CHECK (legacy_op_id IS NULL OR legacy_key IS NOT NULL),
   CHECK ((ns_kind IS NULL) = (ns_id IS NULL)),
   CHECK ((ns_kind IS NULL) = (op_id IS NULL)),
   CHECK ((COALESCE(ns_kind, '') = 'CALL') = (call_operation IS NOT NULL)),

@@ -280,6 +280,7 @@ impl Store {
                     | OpenFlags::SQLITE_OPEN_URI,
             )?;
             r.busy_timeout(Duration::from_secs(1))?;
+            crate::harden(&r)?;
             let budget = Budget::install(&r)?;
             readers.push(Reader { conn: r, budget });
         }

@@ -123,6 +123,10 @@ pub fn side_reader(path: &Path) -> Result<Connection> {
             | OpenFlags::SQLITE_OPEN_URI,
     )?;
     c.busy_timeout(std::time::Duration::from_secs(5))?;
+    crate::harden(&c).map_err(|e| match e {
+        crate::StoreError::Sqlite(e) => BackupError::Sqlite(e),
+        other => BackupError::Corrupt(other.to_string()),
+    })?;
     Ok(c)
 }
 
