@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 pub const MANIFEST_FORMAT: &str = "atm3-backup-1";
 const DB_FILE: &str = "atm.sqlite";
@@ -39,6 +40,14 @@ pub enum BackupError {
     ScopeMissing(String),
     /// 附件目录里有符号链接 / 重解析点。
     Unsupported(String),
+    /// 一次按范围恢复已经提交（这个项目的库已是 `generation` 代），附件还没换入。
+    /// [`crate::restore::finish_attachment_swaps`] 成功之前，整库备份、再次恢复、读这个项目的附件都会拒绝，
+    /// 免得把恢复后的库和恢复前的附件拼成一份（W1 peer r1 P1-05）。
+    AttachmentsPending {
+        project: String,
+        generation: i64,
+        cause: String,
+    },
 }
 
 impl std::fmt::Display for BackupError {
@@ -55,6 +64,14 @@ impl std::fmt::Display for BackupError {
             BackupError::TimelineMismatch(m) => write!(f, "backup is from another timeline: {m}"),
             BackupError::ScopeMissing(m) => write!(f, "scope not in backup: {m}"),
             BackupError::Unsupported(m) => write!(f, "unsupported file: {m}"),
+            BackupError::AttachmentsPending {
+                project,
+                generation,
+                cause,
+            } => write!(
+                f,
+                "project {project} was restored to generation {generation} but its attachments are not swapped in yet: {cause}"
+            ),
         }
     }
 }
@@ -130,8 +147,36 @@ pub fn side_reader(path: &Path) -> Result<Connection> {
     Ok(c)
 }
 
+/// 附件目录的协调锁：整库备份、按范围恢复、附件收尾与附件访问共用（W1 peer r1 P1-05）。
+static ATTACHMENTS_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn attachments_lock() -> MutexGuard<'static, ()> {
+    ATTACHMENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 附件根目录下恢复用的内部目录（暂存、换下来的旧版本），不属于任何项目，不进备份。
+pub(crate) fn is_internal(rel: &str) -> bool {
+    rel.starts_with(".restore-")
+}
+
 /// 做一个整库备份并登记。`kind` 取 `backups.kind` 的取值之一。
+///
+/// 先把上一次恢复没换完的附件换完；换不完就拒绝（[`BackupError::AttachmentsPending`]），
+/// 不会把恢复后的库和恢复前的附件打进同一份备份。
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
+    let _lock = attachments_lock();
+    crate::restore::finish_swaps_locked(store)?;
+    create_backup_locked(store, root, kind, at)
+}
+
+/// 已持有 [`attachments_lock`] 时用（按范围恢复里的 PRE_RESTORE）。有已提交、未换入的附件就拒绝。
+pub(crate) fn create_backup_locked(
+    store: &Store,
+    root: &Path,
+    kind: &str,
+    at: &str,
+) -> Result<BackupInfo> {
+    crate::restore::refuse_pending_swaps(store)?;
     let side = side_reader(store.path())?;
     let id = ulid(&side)?;
     let dir = root.join(&id);
@@ -145,7 +190,11 @@ pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result
     fs::rename(&tmp, &db)?;
     let (sha256, size_bytes) = hash_file(&db)?;
 
-    let files = copy_tree(&artifacts_root(store.path()), &dir.join(ARTIFACTS_DIR))?;
+    let files = copy_tree_filtered(
+        &artifacts_root(store.path()),
+        &dir.join(ARTIFACTS_DIR),
+        &|rel| !is_internal(rel),
+    )?;
     let attachments_sha256 = attachments_digest(&files);
 
     // manifest 的内容全部从快照本身读出，保证与库一致。
@@ -461,8 +510,20 @@ pub fn list_tree(root: &Path) -> Result<Vec<FileEntry>> {
 
 /// 把 `from` 下的全部普通文件复制到 `to`，返回清单。
 pub fn copy_tree(from: &Path, to: &Path) -> Result<Vec<FileEntry>> {
+    copy_tree_filtered(from, to, &|_| true)
+}
+
+/// 同 [`copy_tree`]，只复制 `keep(相对路径)` 为真的文件。
+fn copy_tree_filtered(
+    from: &Path,
+    to: &Path,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<Vec<FileEntry>> {
     if from.exists() {
         walk(from, from, &mut |abs, rel| {
+            if !keep(rel) {
+                return Ok(());
+            }
             let dest = to.join(rel);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;

@@ -79,6 +79,12 @@ fn is_constraint(r: rusqlite::Result<usize>) -> bool {
     matches!(r, Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation)
 }
 
+/// 违反的是哪一条约束：SQLite 的报错里带着约束文本或索引列。
+fn violates(r: rusqlite::Result<usize>, needle: &str) -> bool {
+    matches!(&r, Err(rusqlite::Error::SqliteFailure(e, Some(m)))
+        if e.code == rusqlite::ErrorCode::ConstraintViolation && m.contains(needle))
+}
+
 fn integrity(c: &Connection) -> (String, usize) {
     let ok: String = c
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
@@ -279,6 +285,7 @@ fn only_three_project_lifecycles_are_persisted() {
 }
 
 /// 一条回执；`call` 为 Some((kind, id, operation)) 时是调用索引行。
+/// 项目、知识库回执记在世代 1 上；GLOBAL 回执没有世代。
 fn receipt(
     c: &Connection,
     scope: (&str, &str),
@@ -291,7 +298,8 @@ fn receipt(
         "INSERT INTO idempotency_receipts
            (scope_kind, scope_id, ns_kind, ns_id, op_id, legacy_key, operation, fp_v, fp_family, fingerprint,
             receipt_json, scope_generation, created_at, call_principal_kind, call_principal_id, call_operation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'op', 2, 'canon-v2', 'fp', '{}', 1, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'op', 2, 'canon-v2', 'fp', '{}',
+                 CASE WHEN ?1 = 'GLOBAL' THEN NULL ELSE 1 END, ?7, ?8, ?9, ?10)",
         params![
             scope.0,
             scope.1,
@@ -333,13 +341,10 @@ fn the_call_index_is_four_raw_columns_and_global() {
         "begin",
         "c"
     )));
-    assert!(is_constraint(call(
-        ("GLOBAL", "GLOBAL"),
-        "AGENT",
-        "a:b",
-        "begin",
-        "c"
-    )));
+    assert!(violates(
+        call(("GLOBAL", "GLOBAL"), "AGENT", "a:b", "begin", "c"),
+        "UNIQUE constraint failed: idempotency_receipts.call_principal_kind"
+    ));
     // operation 不同、kind 不同都是不同的键。
     assert!(call(("PROJECT", "Q"), "AGENT", "a:b", "project.create", "c").is_ok());
     assert!(call(("PROJECT", "Q"), "USER", "a:b", "begin", "c").is_ok());
@@ -391,6 +396,105 @@ fn the_call_index_is_four_raw_columns_and_global() {
          VALUES ('PROJECT','P','CALL','z','x4','op',2,'canon-v2','fp','{}',1,'z','begin')",
         [],
     )));
+}
+
+/// P1-01：GLOBAL 回执（quick registry、begin 的 NONE 分支）不属于任何恢复范围，没有世代。
+/// 空库里一个项目、一个知识库都没有时，它们也必须能落盘、能被重放找到。
+#[test]
+fn a_global_receipt_needs_no_scope_generation() {
+    let c = fresh("global-receipt");
+    // 空库：没有任何 scope_generations 行。
+    assert_eq!(
+        c.query_row("SELECT count(*) FROM scope_generations", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // quick.create（USER 命名空间）与 begin 落在 quick / NONE 分支（调用索引行）。
+    assert!(
+        receipt(
+            &c,
+            ("GLOBAL", "GLOBAL"),
+            Some(("ACTOR", "USER")),
+            Some("q1"),
+            None,
+            None
+        )
+        .is_ok()
+    );
+    assert!(
+        receipt(
+            &c,
+            ("GLOBAL", "GLOBAL"),
+            Some(("CALL", "claude")),
+            Some("auto:b1"),
+            None,
+            Some(("AGENT", "claude", "begin"))
+        )
+        .is_ok()
+    );
+    // 丢了响应后重放：同一调用键只能有一行，按四列原值找得到原来那条。
+    assert!(violates(
+        receipt(
+            &c,
+            ("GLOBAL", "GLOBAL"),
+            Some(("CALL", "claude")),
+            Some("auto:b1"),
+            None,
+            Some(("AGENT", "claude", "begin"))
+        ),
+        "UNIQUE constraint failed: idempotency_receipts.call_principal_kind"
+    ));
+    let found: i64 = c
+        .query_row(
+            "SELECT count(*) FROM idempotency_receipts
+             WHERE call_principal_kind = 'AGENT' AND call_principal_id = 'claude' AND call_operation = 'begin'
+               AND op_id = 'auto:b1' AND scope_kind = 'GLOBAL' AND scope_generation IS NULL AND state = 'VALID'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(found, 1);
+    assert_eq!(integrity(&c), ("ok".to_string(), 0));
+
+    let insert = |kind: &str, scope: &str, generation: Option<i64>, op: &str| {
+        c.execute(
+            "INSERT INTO idempotency_receipts (scope_kind, scope_id, ns_kind, ns_id, op_id, operation, fp_v, fp_family,
+                                               fingerprint, receipt_json, scope_generation, created_at)
+             VALUES (?1, ?2, 'ACTOR', 'USER', ?3, 'op', 2, 'canon-v2', 'fp', '{}', ?4, ?5)",
+            params![kind, scope, op, generation, T],
+        )
+    };
+    // GLOBAL 不能借一个项目的世代；项目、知识库回执不能没有世代。
+    project(&c, "P", "PAA", 1);
+    generation(&c, 2, "KNOWLEDGE", "KDB");
+    assert!(violates(
+        insert("GLOBAL", "GLOBAL", Some(1), "g-borrowed"),
+        "CHECK constraint failed: (scope_kind = 'GLOBAL') = (scope_generation IS NULL)"
+    ));
+    assert!(violates(
+        insert("PROJECT", "P", None, "p-none"),
+        "CHECK constraint failed: (scope_kind = 'GLOBAL') = (scope_generation IS NULL)"
+    ));
+    assert!(violates(
+        insert("KNOWLEDGE", "KDB", None, "k-none"),
+        "CHECK constraint failed: (scope_kind = 'GLOBAL') = (scope_generation IS NULL)"
+    ));
+    assert!(insert("PROJECT", "P", Some(1), "p-ok").is_ok());
+    // GLOBAL 的 scope_id 只能是字面量 GLOBAL。
+    assert!(violates(
+        insert("GLOBAL", "P", None, "g-scoped"),
+        "CHECK constraint failed: scope_kind <> 'GLOBAL' OR scope_id = 'GLOBAL'"
+    ));
+    // 墓碑只由按范围恢复产生，GLOBAL 回执不会变成墓碑。
+    assert!(violates(
+        c.execute(
+            "UPDATE idempotency_receipts SET state = 'TOMBSTONED', tombstoned_by_gen = 1, tombstoned_at = ?1
+             WHERE scope_kind = 'GLOBAL' AND op_id = 'q1'",
+            [T],
+        ),
+        "CHECK constraint failed: scope_kind <> 'GLOBAL' OR state = 'VALID'"
+    ));
 }
 
 #[test]

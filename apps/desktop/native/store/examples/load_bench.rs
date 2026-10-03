@@ -8,13 +8,13 @@
 //! ```text
 //! cargo run --release -p atm-store --example load_bench -- seed <seed-dir>
 //! cargo run --release -p atm-store --example load_bench -- amplify <seed-dir> <run-dir>
-//! cargo run --release -p atm-store --example load_bench -- run <seed-dir> <run-dir> [cache=KiB] [gap=ms] [wal=MiB] [rwait=ms] [secs=N] [profile=stress|agent]
+//! cargo run --release -p atm-store --example load_bench -- run <seed-dir> <run-dir> [cache=KiB] [gap=ms] [wal=MiB] [rwait=ms] [secs=N] [profile=stress|agent] [backup=1|0]
 //! ```
 //!
 //! `run` 每次从种子复制一份，结果写到 `<run-dir>/result.json`。每个 page cache 取值单独起一个进程，
 //! 内存读数互不污染。
 
-use atm_store::backup::create_backup;
+use atm_store::backup::{create_backup, verify_backup};
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::search::{Doc, Scope, match_docs, terms, upsert_doc};
 use atm_store::{Config, ReadError, Stats, Store, WriteError};
@@ -622,21 +622,21 @@ fn overview(sh: Arc<Shared>) -> Vec<Lat> {
             let mut st = tx.prepare_cached(
                 "SELECT status, count(*) FROM work_items WHERE project_id = ?1 GROUP BY status",
             )?;
-            n += st.query_map([&p], |_| Ok(()))?.count();
+            n += st.query_map([&p], |_| Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len();
             let mut st = tx.prepare_cached(
                 "SELECT id, title, status FROM work_items WHERE project_id = ?1 AND archived_at IS NULL
                  ORDER BY (CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END), sort_key, created_at, local_no
                  LIMIT 50",
             )?;
-            n += st.query_map([&p], |_| Ok(()))?.count();
+            n += st.query_map([&p], |_| Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len();
             let mut st = tx.prepare_cached(
                 "SELECT seq, type, payload_json FROM events WHERE project_id = ?1 ORDER BY seq DESC LIMIT 20",
             )?;
-            n += st.query_map([&p], |_| Ok(()))?.count();
+            n += st.query_map([&p], |_| Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len();
             let mut st = tx.prepare_cached(
                 "SELECT global_seq, payload_json FROM global_feed ORDER BY global_seq DESC LIMIT 20",
             )?;
-            n += st.query_map([], |_| Ok(()))?.count();
+            n += st.query_map([], |_| Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len();
             Ok::<_, rusqlite::Error>(n)
         });
         match r {
@@ -698,8 +698,17 @@ fn backup(sh: Arc<Shared>) -> Vec<Lat> {
         let t = Instant::now();
         match create_backup(&sh.store, &root, "MANUAL", AT) {
             Ok(info) => {
-                let end = sh.now_ms();
                 out.push(("backup", start, t.elapsed().as_micros() as u64));
+                // 恢复前要做的完整校验（文件 sha、manifest、附件、quick_check、迁移、时间线）也算进备份窗口。
+                let v = Instant::now();
+                if let Err(e) = verify_backup(&sh.store, &info.id) {
+                    sh.err(
+                        "backup.verify",
+                        &format!("{e:?}").chars().take(80).collect::<String>(),
+                    );
+                }
+                out.push(("backup.verify", sh.now_ms(), v.elapsed().as_micros() as u64));
+                let end = sh.now_ms();
                 sh.backups.lock().unwrap().push((start, end));
                 // 只量写入时的影响；保留文件会让后面的轮次多占盘，这里量完就删。
                 let _ = fs::remove_dir_all(&info.dir);
@@ -741,6 +750,7 @@ struct RunArgs {
     restart_wait_ms: u64,
     secs: u64,
     profile: String,
+    backup: bool,
 }
 
 impl RunArgs {
@@ -753,6 +763,7 @@ impl RunArgs {
             restart_wait_ms: d.wal_restart_wait.as_millis() as u64,
             secs: 60,
             profile: "stress".into(),
+            backup: true,
         };
         for arg in kv {
             let (k, v) = arg
@@ -766,6 +777,7 @@ impl RunArgs {
                 "rwait" => a.restart_wait_ms = n()?,
                 "secs" => a.secs = n()?,
                 "profile" if v == "stress" || v == "agent" => a.profile = v.into(),
+                "backup" => a.backup = n()? != 0,
                 _ => return Err(format!("unknown argument {arg}")),
             }
         }
@@ -846,7 +858,11 @@ fn run(seed_dir: &Path, run: &Path, a: &RunArgs) -> Result<(), String> {
         let sh = sh.clone();
         workers.push(std::thread::spawn(move || searcher(sh, seat)));
     }
-    for f in [overview, export, backup] {
+    let mut clients: Vec<fn(Arc<Shared>) -> Vec<Lat>> = vec![overview, export];
+    if a.backup {
+        clients.push(backup);
+    }
+    for f in clients {
         let sh = sh.clone();
         workers.push(std::thread::spawn(move || f(sh)));
     }
@@ -919,6 +935,7 @@ fn run(seed_dir: &Path, run: &Path, a: &RunArgs) -> Result<(), String> {
     let secs_f = (load_end - load_start) as f64 / 1000.0;
     let result = json!({
         "profile": a.profile,
+        "backups": a.backup,
         "cacheKib": cache_kib,
         "checkpointGapMs": gap_ms,
         "walSoftLimitMib": wal_mib,
@@ -1078,7 +1095,7 @@ fn main() {
         Some("run") if args.len() >= 4 => RunArgs::parse(&args[4..])
             .and_then(|a| run(Path::new(&args[2]), Path::new(&args[3]), &a)),
         _ => Err(
-            "usage: load_bench seed <dir> | amplify <seed-dir> <run-dir> | run <seed-dir> <run-dir> [cache=KiB] [gap=ms] [wal=MiB] [rwait=ms] [secs=N] [profile=stress|agent]"
+            "usage: load_bench seed <dir> | amplify <seed-dir> <run-dir> | run <seed-dir> <run-dir> [cache=KiB] [gap=ms] [wal=MiB] [rwait=ms] [secs=N] [profile=stress|agent] [backup=1|0]"
                 .into(),
         ),
     };

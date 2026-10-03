@@ -559,7 +559,74 @@ fn readers_that_never_let_go_cannot_grow_the_wal_past_its_soft_limit() {
         r.join().unwrap();
     }
     assert!(Stats::get(&store.stats().restart_checkpoints) >= 1);
-    assert!(peak < 16 << 20, "the WAL peaked at {peak} bytes");
+    assert!(
+        peak < 16 << 20,
+        "the WAL peaked at {peak} bytes ({} restarts, {} busy)",
+        Stats::get(&store.stats().restart_checkpoints),
+        Stats::get(&store.stats().restart_busy)
+    );
+}
+
+/// 队列一直有积压（从不排空）时，checkpoint 也照常进行，WAL 软上限照样生效。
+#[test]
+fn a_queue_that_never_drains_still_gets_checkpoints() {
+    let path = db_path("engine-backlog");
+    let store = Arc::new(
+        Store::open(
+            &path,
+            Config {
+                checkpoint_gap: MS(20),
+                wal_soft_limit: 64 << 10,
+                ..fast()
+            },
+        )
+        .unwrap(),
+    );
+    // 闸门先占住写线程，把 180 个作业全排进队列，再一起放行。
+    let (gate_tx, gate_rx) = channel::<()>();
+    let gate = store
+        .submit(move |tx| {
+            let _ = gate_rx.recv_timeout(Duration::from_secs(10));
+            put(tx, "gate")
+        })
+        .unwrap();
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(180));
+    let mut tickets = Vec::new();
+    for i in 0..180 {
+        let remaining = remaining.clone();
+        tickets.push(
+            store
+                .submit(move |tx| {
+                    tx.execute(
+                        "INSERT INTO settings (key, value_json, updated_at) VALUES (?1, json_quote(?2), 'T')",
+                        [format!("k{i}"), "x".repeat(32 << 10)],
+                    )?;
+                    thread::sleep(MS(5));
+                    remaining.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap(),
+        );
+    }
+    gate_tx.send(()).unwrap();
+    // 还剩 20 个以上作业在排队时，PASSIVE 与 RESTART 都已经发生过。
+    let (mut passive, mut restart) = (0, 0);
+    while remaining.load(Ordering::SeqCst) > 20 {
+        passive = Stats::get(&store.stats().passive_checkpoints);
+        restart = Stats::get(&store.stats().restart_checkpoints);
+        thread::sleep(MS(5));
+    }
+    gate.wait().unwrap();
+    for t in tickets {
+        t.wait().unwrap();
+    }
+    assert!(passive >= 1, "no PASSIVE while the queue was backed up");
+    assert!(
+        restart >= 1,
+        "no RESTART while the queue was backed up ({} busy, WAL {} bytes)",
+        Stats::get(&store.stats().restart_busy),
+        wal_len(&path)
+    );
 }
 
 #[test]

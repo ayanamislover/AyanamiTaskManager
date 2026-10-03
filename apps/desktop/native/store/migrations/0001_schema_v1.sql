@@ -468,7 +468,9 @@ CREATE TABLE idempotency_receipts (
   receipt_json TEXT NOT NULL,                 -- 回执原文，逐字节保留
   receipt_format TEXT,
   author_agent TEXT, author_session TEXT,     -- R3′：比较时按候选的原作者重建指纹
-  scope_generation INTEGER NOT NULL REFERENCES scope_generations(gen) DEFERRABLE INITIALLY DEFERRED,
+  -- 回执落在哪一代范围上。GLOBAL（quick registry、begin 的 NONE 分支等，A3）不随任何范围恢复，没有世代，为 NULL；
+  -- 项目、知识库的回执必须指向真实分配过的世代（#9b）。
+  scope_generation INTEGER REFERENCES scope_generations(gen) DEFERRABLE INITIALLY DEFERRED,
   created_at TEXT,                            -- 2.0 知识行没有时间
   state TEXT NOT NULL DEFAULT 'VALID' CHECK (state IN ('VALID','TOMBSTONED')),
   tombstoned_by_gen INTEGER REFERENCES scope_generations(gen) DEFERRABLE INITIALLY DEFERRED,
@@ -477,6 +479,10 @@ CREATE TABLE idempotency_receipts (
   call_principal_kind TEXT CHECK (call_principal_kind IS NULL OR call_principal_kind IN ('AGENT','USER')),
   call_principal_id TEXT,
   call_operation TEXT,
+  CHECK ((scope_kind = 'GLOBAL') = (scope_generation IS NULL)),
+  CHECK (scope_kind <> 'GLOBAL' OR scope_id = 'GLOBAL'),
+  -- 墓碑只由按范围恢复产生，GLOBAL 回执不在任何范围里。
+  CHECK (scope_kind <> 'GLOBAL' OR state = 'VALID'),
   CHECK ((state = 'TOMBSTONED') = (tombstoned_by_gen IS NOT NULL)),
   CHECK ((state = 'TOMBSTONED') = (tombstoned_at IS NOT NULL)),
   CHECK (op_id IS NOT NULL OR legacy_key IS NOT NULL),

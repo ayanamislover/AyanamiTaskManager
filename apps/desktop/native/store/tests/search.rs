@@ -201,6 +201,17 @@ fn terms_and_their_fallbacks_match_like_2x() {
 #[test]
 fn query_parsing_follows_search_terms_ts() {
     assert_eq!(terms("  a  b\tc ").unwrap(), ["a", "b", "c"]);
+    // 空白集合按 ECMAScript：U+0085 不是空白，U+FEFF、U+3000、U+2028 是。
+    assert_eq!(terms("a\u{85}b").unwrap(), ["a\u{85}b"]);
+    assert_eq!(
+        terms("a\u{feff}b\u{3000}c\u{2028}d\u{0b}e").unwrap(),
+        ["a", "b", "c", "d", "e"]
+    );
+    assert_eq!(
+        terms("\u{85}x\u{85}").unwrap(),
+        ["\u{85}x\u{85}"],
+        "trim keeps U+0085 too"
+    );
     assert_eq!(terms("\"half open\" x").unwrap(), ["half open", "x"]);
     assert_eq!(
         terms("ab\"cd ef\"").unwrap(),

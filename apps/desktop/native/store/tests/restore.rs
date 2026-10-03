@@ -7,8 +7,8 @@ use atm_store::backup::{BackupError, artifacts_root, create_backup, verify_backu
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
     PROJECT_TABLES, PROJECT_TABLES_HANDLED_ELSEWHERE, RestoreOptions, ScopeRef, ScopeRestored,
-    current_generation, ensure_generation, finish_attachment_swaps, restore_knowledge,
-    restore_project,
+    SwapStep, current_generation, ensure_generation, finish_attachment_swaps, inject_swap_fault,
+    project_attachments, restore_knowledge, restore_project,
 };
 use atm_store::search::{
     Doc, Scope, check_fts, match_docs, rebuild_knowledge_fts, terms, upsert_doc,
@@ -162,7 +162,12 @@ fn receipt(
     call: Option<(&str, &str, &str)>,
     at: &str,
 ) -> rusqlite::Result<()> {
-    let g: i64 = tx.query_row("SELECT max(gen) FROM scope_generations", [], |r| r.get(0))?;
+    // GLOBAL 回执没有世代（P1-01）。
+    let g: Option<i64> = if kind == "GLOBAL" {
+        None
+    } else {
+        tx.query_row("SELECT max(gen) FROM scope_generations", [], |r| r.get(0))?
+    };
     tx.execute(
         "INSERT INTO idempotency_receipts (scope_kind, scope_id, ns_kind, ns_id, op_id, operation, fp_v, fp_family, fingerprint,
                                            receipt_json, scope_generation, created_at, call_principal_kind, call_principal_id, call_operation)
@@ -270,6 +275,20 @@ fn files(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect()
+}
+
+/// 备份里登记的附件路径，以及其中一个文件的内容。
+fn backed_up(w: &World, id: &str, file: &str) -> (Vec<String>, String) {
+    let vb = verify_backup(&w.store, id).unwrap();
+    let paths = vb.attachments.iter().map(|f| f.path.clone()).collect();
+    let body = fs::read_to_string(vb.artifacts_dir().join(file)).unwrap();
+    (paths, body)
+}
+
 fn healthy(w: &World) {
     w.store
         .write(|tx| {
@@ -313,6 +332,29 @@ fn a_project_restore_rewinds_work_but_not_numbers_identity_or_other_scopes() {
     let w2 = task(&w, "PA", "beta", "op-2", Some("S1"), T2);
     task(&w, "PB", "charlie", "op-pb-2", None, T2);
     call(&w, "PA", "S1", "begin-2");
+    // 备份之后的 GLOBAL 回执（quick.create、begin 的 NONE 分支）：不属于 PA，恢复 PA 不碰它们。
+    w.store
+        .write(|tx| {
+            receipt(
+                tx,
+                "GLOBAL",
+                "GLOBAL",
+                ("ACTOR", "USER"),
+                "quick-1",
+                None,
+                T2,
+            )?;
+            receipt(
+                tx,
+                "GLOBAL",
+                "GLOBAL",
+                ("CALL", "S1"),
+                "begin-global",
+                Some(("AGENT", "S1", "begin")),
+                T2,
+            )
+        })
+        .unwrap();
     attachment(&w, "PA", "a.txt", "v2");
     attachment(&w, "PA", "b.txt", "new");
     w.store
@@ -441,6 +483,16 @@ fn a_project_restore_rewinds_work_but_not_numbers_identity_or_other_scopes() {
     assert_eq!(receipt_state(&w, "op-2"), ("TOMBSTONED".into(), Some(4)));
     assert_eq!(receipt_state(&w, "begin-1"), ("VALID".into(), None));
     assert_eq!(receipt_state(&w, "begin-2"), ("TOMBSTONED".into(), Some(4)));
+    assert_eq!(receipt_state(&w, "quick-1"), ("VALID".into(), None));
+    assert_eq!(receipt_state(&w, "begin-global"), ("VALID".into(), None));
+    assert_eq!(
+        i(
+            &w,
+            "SELECT count(*) FROM idempotency_receipts WHERE scope_kind = 'GLOBAL' AND scope_generation IS NULL",
+            &[]
+        ),
+        2
+    );
     assert_eq!(
         i(&w, "SELECT count(*) FROM idempotency_receipts", &[]),
         receipts_before
@@ -1126,5 +1178,151 @@ fn an_attachment_swap_interrupted_after_commit_is_finished_on_the_next_start() {
         finish_attachment_swaps(&w.store).unwrap(),
         0,
         "running it again does nothing"
+    );
+}
+
+/// P1-05：库已提交、附件换入失败，而且故障一直在。收尾完成之前，备份、再次恢复、读附件都拒绝，
+/// 不会认证一份「恢复后的库 + 恢复前的附件」；故障排除后，备份先把换入做完，再备份完整的目标状态。
+#[test]
+fn a_restore_whose_attachments_did_not_swap_blocks_backups_until_finished() {
+    let w = world("restore-swap-blocked");
+    let root = artifacts_root(w.store.path());
+    task(&w, "PA", "alpha", "op-1", None, T0);
+    attachment(&w, "PA", "a.txt", "v1");
+    let b = backup(&w);
+    task(&w, "PA", "late", "op-2", None, T2);
+    attachment(&w, "PA", "a.txt", "v2");
+    attachment(&w, "PA", "b.txt", "new");
+    // 与 .restore-old 同名的普通文件：换入时建不了旧目录，失败一直持续。
+    fs::write(root.join(".restore-old"), "blocker").unwrap();
+
+    let generation = match restore_project(&w.store, &b, "PA", &opts(&w)) {
+        Err(BackupError::AttachmentsPending {
+            project,
+            generation,
+            ..
+        }) => {
+            assert_eq!(project, "PA");
+            generation
+        }
+        other => panic!("expected AttachmentsPending, got {other:?}"),
+    };
+    // 库已经回到备份点；附件还是恢复前的。
+    assert_eq!(
+        i(&w, "SELECT scope_gen FROM projects WHERE id = 'PA'", &[]),
+        generation
+    );
+    assert_eq!(
+        i(
+            &w,
+            "SELECT count(*) FROM work_items WHERE project_id = 'PA' AND title = 'late'",
+            &[]
+        ),
+        0
+    );
+    assert_eq!(
+        files(&root.join("PA")),
+        pairs(&[("a.txt", "v2"), ("b.txt", "new")])
+    );
+
+    let backups = i(&w, "SELECT count(*) FROM backups", &[]);
+    assert!(matches!(
+        create_backup(&w.store, &w.backups, "MANUAL", T3),
+        Err(BackupError::AttachmentsPending { .. })
+    ));
+    assert!(matches!(
+        restore_project(&w.store, &b, "PA", &opts(&w)),
+        Err(BackupError::AttachmentsPending { .. })
+    ));
+    assert!(matches!(
+        project_attachments(&w.store, "PA"),
+        Err(BackupError::AttachmentsPending { .. })
+    ));
+    assert_eq!(i(&w, "SELECT count(*) FROM backups", &[]), backups);
+    // 再次恢复没有覆盖未完成的暂存。
+    assert_eq!(
+        files(&root.join(".restore-staging").join("PA")),
+        pairs(&[("a.txt", "v1")])
+    );
+
+    fs::remove_file(root.join(".restore-old")).unwrap();
+    let after = create_backup(&w.store, &w.backups, "MANUAL", T3).unwrap();
+    assert_eq!(files(&root.join("PA")), pairs(&[("a.txt", "v1")]));
+    assert_eq!(
+        backed_up(&w, &after.id, "PA/a.txt"),
+        (vec!["PA/a.txt".to_string()], "v1".to_string())
+    );
+    assert!(!root.join(".restore-staging").join("PA.gen").exists());
+    assert_eq!(
+        project_attachments(&w.store, "PA").unwrap(),
+        root.join("PA")
+    );
+}
+
+/// P1-05：换入的每一步之后中断（出错，或进程在这一步退出），下一次收尾都走到同一个终态，
+/// 不留暂存、旧目录和标记；之后的备份里只有目标状态的附件，没有恢复用的内部目录。
+#[test]
+fn a_swap_interrupted_at_any_step_finishes_on_the_next_call() {
+    for step in SwapStep::ALL {
+        let w = world(&format!("restore-swap-step-{step:?}"));
+        let root = artifacts_root(w.store.path());
+        attachment(&w, "PA", "a.txt", "v1");
+        let b = backup(&w);
+        attachment(&w, "PA", "a.txt", "v2");
+        attachment(&w, "PA", "b.txt", "new");
+        inject_swap_fault(w.store.path(), step);
+        let err = restore_project(&w.store, &b, "PA", &opts(&w)).unwrap_err();
+        assert!(
+            matches!(err, BackupError::AttachmentsPending { .. }),
+            "{step:?}: {err:?}"
+        );
+        // 不做任何修补，直接再收尾一次（等同重启后的那次调用）。
+        assert_eq!(finish_attachment_swaps(&w.store).unwrap(), 1, "{step:?}");
+        assert_eq!(
+            files(&root.join("PA")),
+            pairs(&[("a.txt", "v1")]),
+            "{step:?}"
+        );
+        assert!(
+            !root.join(".restore-staging").join("PA.gen").exists(),
+            "{step:?}"
+        );
+        assert!(
+            !root.join(".restore-staging").join("PA").exists(),
+            "{step:?}"
+        );
+        assert!(
+            fs::read_dir(root.join(".restore-old"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true),
+            "{step:?}: old attachments left behind"
+        );
+        let after = create_backup(&w.store, &w.backups, "MANUAL", T3).unwrap();
+        assert_eq!(
+            backed_up(&w, &after.id, "PA/a.txt"),
+            (vec!["PA/a.txt".to_string()], "v1".to_string()),
+            "{step:?}"
+        );
+    }
+}
+
+/// 恢复用的内部目录（暂存、旧版本）不属于任何项目，不进备份。
+#[test]
+fn restore_internals_are_not_backed_up() {
+    let w = world("restore-internals");
+    let root = artifacts_root(w.store.path());
+    attachment(&w, "PA", "a.txt", "v1");
+    fs::create_dir_all(root.join(".restore-old").join("PA-9")).unwrap();
+    fs::write(root.join(".restore-old").join("PA-9").join("x.txt"), "old").unwrap();
+    fs::create_dir_all(root.join(".restore-staging").join("PB")).unwrap();
+    fs::write(
+        root.join(".restore-staging").join("PB").join("y.txt"),
+        "staged",
+    )
+    .unwrap();
+    let id = backup(&w);
+    assert_eq!(
+        backed_up(&w, &id, "PA/a.txt"),
+        (vec!["PA/a.txt".to_string()], "v1".to_string())
     );
 }

@@ -172,9 +172,10 @@ pub struct Report {
     pub receipt_violations: Vec<String>,
     /// 全局流里指向项目事件、但事件已不存在的行（R6 孤儿）。
     pub global_orphans: usize,
-    /// 项目事件已提交、投影没送达，转换时补到全局流末尾的条数（R6）。
-    pub outbox_replayed: usize,
-    /// 未送达、但找不到对应事件的 outbox 行（不补，只计数）。
+    /// 没有全局镜像的项目事件，转换时补到全局流末尾的条数（R6）。
+    /// 按差集算：源项目事件减去已关联到全局行的事件，不看 outbox。
+    pub mirrors_replayed: usize,
+    /// 未送达、但找不到对应事件的 outbox 行（只计数；outbox 整族舍弃）。
     pub outbox_without_event: usize,
     /// quick 的晋升目标在项目里解析不到的条数。
     pub unresolved_promotions: usize,
@@ -637,8 +638,10 @@ fn convert_registry(
                 "INSERT INTO idempotency_receipts (scope_kind, scope_id, legacy_key, operation, fp_v, fp_family, fingerprint,
                                                    receipt_json, receipt_format, scope_generation)
                  SELECT 'KNOWLEDGE', ?1, op_id, '*', 1, 'knowledge-v1', fingerprint, receipt,
-                        CASE WHEN json_valid(receipt) AND json_extract(receipt, '$.format') = 'knowledge-receipt-v2'
-                             THEN 'knowledge-receipt-v2' ELSE 'knowledge-entry-legacy' END,
+                        CASE WHEN json_valid(receipt)
+                             THEN CASE WHEN json_extract(receipt, '$.format') = 'knowledge-receipt-v2'
+                                       THEN 'knowledge-receipt-v2' ELSE 'knowledge-entry-legacy' END
+                             ELSE 'knowledge-entry-legacy' END,
                         ?2
                  FROM k.knowledge_operations",
                 params![db, g],
@@ -892,7 +895,7 @@ fn convert_project(
         .ctx("search_docs")?;
 
         convert_receipts(&tx, &pid, generation, report, promotions)?;
-        replay_outbox(&tx, &pid, report)?;
+        report.outbox_without_event += count_outbox_without_event(&tx)?;
         let n: i64 = tx.query_row("SELECT count(*) FROM p.outbox", [], |r| r.get(0))?;
         *report.dropped.entry("project.outbox".into()).or_default() += n;
         commit_checked(tx, &format!("project {pid}"))?;
@@ -977,61 +980,72 @@ fn convert_receipts(
     Ok(())
 }
 
-/// R6：项目事件已提交、投影没送达的，按项目内序号追加到全局流末尾，镜像形状与 2.0 投影相同。
-fn replay_outbox(tx: &Transaction<'_>, pid: &str, report: &mut Report) -> Result<()> {
-    let pending: Vec<(String, Option<String>)> = tx
-        .prepare(
-            "SELECT o.id, CASE WHEN json_valid(o.payload_json) AND json_type(o.payload_json, '$.eventId') = 'text'
-                               THEN json_extract(o.payload_json, '$.eventId') END
-             FROM p.outbox o WHERE o.delivered_at IS NULL ORDER BY o.project_sequence, o.id",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (_, event) in pending {
-        let Some(event) = event else {
-            report.outbox_without_event += 1;
-            continue;
-        };
-        let dedupe = format!("project:{pid}:event:{event}");
-        let exists: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM main.global_feed WHERE dedupe_key = ?1)",
-            [&dedupe],
-            |r| r.get(0),
-        )?;
-        if exists {
-            continue;
-        }
-        let has_event: bool = tx.query_row(
-            "SELECT EXISTS (SELECT 1 FROM main.events WHERE project_id = ?1 AND id = ?2)",
-            [pid, &event],
-            |r| r.get(0),
-        )?;
-        if !has_event {
-            report.outbox_without_event += 1;
-            continue;
-        }
-        let seq: i64 = tx.query_row(
-            "UPDATE app_meta SET global_seq = global_seq + 1 RETURNING global_seq",
-            [],
-            |r| r.get(0),
-        )?;
-        tx.execute(
-            "INSERT INTO main.global_feed (global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key, project_id, event_id)
-             SELECT ?1, e.type, CASE WHEN e.aggregate_id = '' THEN e.project_id ELSE e.aggregate_id END,
-                    coalesce(e.actor_id, e.actor_type, 'SYSTEM'),
-                    json_set(CASE WHEN json_valid(e.payload_json) AND json_type(e.payload_json) = 'object' THEN e.payload_json ELSE '{}' END,
-                             '$.projectId', e.project_id, '$.projectCode', pr.code, '$.projectName', pr.name,
-                             '$.projectSequence', e.seq, '$.sourceEventId', e.id, '$.sourceProjectSequence', e.seq,
-                             '$.sourceAggregateType', e.aggregate_type, '$.sourceAggregateId', e.aggregate_id),
-                    e.created_at, ?2, e.project_id, e.id
-             FROM main.events e JOIN main.projects pr ON pr.id = e.project_id
-             WHERE e.project_id = ?3 AND e.id = ?4",
-            params![seq, dedupe, pid, event],
-        )
-        .ctx("global_feed")?;
-        report.outbox_replayed += 1;
-    }
-    Ok(())
+/// 未送达、而且对应事件不存在（或 payload 里没有 eventId）的 outbox 行数。只进报告。
+fn count_outbox_without_event(tx: &Transaction<'_>) -> Result<usize> {
+    Ok(tx.query_row(
+        "SELECT count(*) FROM p.outbox o
+         WHERE o.delivered_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM p.events e WHERE e.id =
+                 CASE WHEN json_valid(o.payload_json)
+                      THEN CASE WHEN json_type(o.payload_json, '$.eventId') = 'text'
+                                THEN json_extract(o.payload_json, '$.eventId') END END)",
+        [],
+        |r| r.get::<_, i64>(0),
+    )? as usize)
+}
+
+/// R6 补投影：一个项目里没有全局镜像的事件，按项目内序号排列，形状与 2.0 投影相同
+/// （`registry-projection-dispatcher.ts` + `outbox-read-model.ts`）：
+/// - payload 是事件 payload 再补上项目字段；不是合法 JSON 对象时按 `{}`（2.0 `readJson` 的回退）；
+/// - aggregate_id 为空时取项目 id；actor 取 actor_id，没有就 actor_type，再没有就 SYSTEM；
+/// - dedupe_key = `project:<id>:event:<event_id>`。
+///
+/// 转换和 VERIFY 共用：转换时 `events` 是目标库的 `main.events`、`projects` 是 `main.projects`；
+/// VERIFY 时是源项目库的 `p.events` 与源 registry 的 `r.projects`。`linked` 是已关联事件的集合
+/// （`SELECT event_id ...`），`event_project` 是事件表上限定项目的条件，`?1` 是项目 id。
+///
+/// 返回列：seq, type, aggregate_id, actor, payload, created_at, dedupe, event_id。
+fn mirror_rows(
+    events: &str,
+    seq: &str,
+    projects: &str,
+    event_project: &str,
+    linked: &str,
+) -> String {
+    format!(
+        "SELECT e.{seq} AS seq, e.type AS type, CASE WHEN e.aggregate_id = '' THEN ?1 ELSE e.aggregate_id END AS aggregate_id,
+                coalesce(e.actor_id, e.actor_type, 'SYSTEM') AS actor,
+                json_set(CASE WHEN json_valid(e.payload_json)
+                              THEN CASE WHEN json_type(e.payload_json) = 'object' THEN e.payload_json ELSE '{{}}' END
+                              ELSE '{{}}' END,
+                         '$.projectId', ?1, '$.projectCode', pr.code, '$.projectName', pr.name,
+                         '$.projectSequence', e.{seq}, '$.sourceEventId', e.id, '$.sourceProjectSequence', e.{seq},
+                         '$.sourceAggregateType', e.aggregate_type, '$.sourceAggregateId', e.aggregate_id) AS payload,
+                e.created_at AS created_at, 'project:' || ?1 || ':event:' || e.id AS dedupe, e.id AS event_id
+         FROM {events} e JOIN {projects} pr ON pr.id = ?1
+         WHERE {event_project} AND e.id NOT IN ({linked})
+         ORDER BY e.{seq}"
+    )
+}
+
+/// 全局流的旧行认领项目、关联事件（R6）。`?1` 项目 id，`?2` = `project:<id>:`，`?3` = `project:<id>:event:`。
+/// 认领看 dedupe_key 前缀；事件先按 dedupe_key 的后缀找，找不到再按 payload 的 sourceEventId，
+/// 只填项目里真有的事件。`feed` / `events` 是表名，`event_project` 是事件表上限定项目的条件。
+fn link_sql(feed: &str, events: &str, event_project: &str) -> [String; 2] {
+    [
+        format!("UPDATE {feed} SET project_id = ?1 WHERE substr(dedupe_key, 1, length(?2)) = ?2"),
+        format!(
+            "UPDATE {feed} AS g SET event_id = coalesce(
+               (SELECT e.id FROM {events} e WHERE {event_project}
+                  AND e.id = CASE WHEN substr(g.dedupe_key, 1, length(?3)) = ?3
+                                  THEN substr(g.dedupe_key, length(?3) + 1) END),
+               (SELECT e.id FROM {events} e WHERE {event_project}
+                  AND e.id = CASE WHEN json_valid(g.payload_json)
+                                  THEN CASE WHEN json_type(g.payload_json, '$.sourceEventId') = 'text'
+                                            THEN json_extract(g.payload_json, '$.sourceEventId') END END))
+             WHERE g.project_id = ?1"
+        ),
+    ]
 }
 
 fn finish(
@@ -1041,26 +1055,44 @@ fn finish(
     report: &mut Report,
 ) -> Result<()> {
     let tx = t.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    // R6：全局流按 dedupe_key 认领项目，能找到事件的填 event_id，找不到的是孤儿。
+    // R6：全局流的旧行认领项目、关联事件；指向事件但事件已不存在的是孤儿。
+    let [claim, link] = link_sql("main.global_feed", "main.events", "e.project_id = ?1");
     for pid in gens.projects.keys() {
-        let prefix = format!("project:{pid}:");
-        tx.execute(
-            "UPDATE global_feed SET project_id = ?1 WHERE substr(dedupe_key, 1, length(?2)) = ?2",
-            params![pid, prefix],
-        )?;
-        let event_prefix = format!("project:{pid}:event:");
-        tx.execute(
-            "UPDATE global_feed SET event_id = substr(dedupe_key, length(?2) + 1)
-             WHERE substr(dedupe_key, 1, length(?2)) = ?2
-               AND EXISTS (SELECT 1 FROM events e WHERE e.project_id = ?1 AND e.id = substr(dedupe_key, length(?2) + 1))",
-            params![pid, event_prefix],
-        )?;
+        let (prefix, event_prefix) = (format!("project:{pid}:"), format!("project:{pid}:event:"));
+        tx.execute(&claim, params![pid, prefix])?;
+        tx.execute(&link, params![pid, prefix, event_prefix])?;
         let orphans: i64 = tx.query_row(
             "SELECT count(*) FROM global_feed WHERE substr(dedupe_key, 1, length(?1)) = ?1 AND event_id IS NULL",
             [&event_prefix],
             |r| r.get(0),
         )?;
         report.global_orphans += orphans as usize;
+    }
+    // R6：没有镜像的项目事件（差集，不看 outbox），按项目 id、项目内序号追加到全局流末尾。
+    for pid in gens.projects.keys() {
+        let rows = mirror_rows(
+            "main.events",
+            "seq",
+            "main.projects",
+            "e.project_id = ?1",
+            "SELECT event_id FROM main.global_feed WHERE project_id = ?1 AND event_id IS NOT NULL",
+        );
+        let n = tx
+            .execute(
+                &format!(
+                    "INSERT INTO main.global_feed (global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key, project_id, event_id)
+                     SELECT (SELECT global_seq FROM main.app_meta) + row_number() OVER (ORDER BY m.seq),
+                            m.type, m.aggregate_id, m.actor, m.payload, m.created_at, m.dedupe, ?1, m.event_id
+                     FROM ({rows}) AS m"
+                ),
+                [pid],
+            )
+            .ctx("global_feed")?;
+        tx.execute(
+            "UPDATE app_meta SET global_seq = global_seq + ?1",
+            [n as i64],
+        )?;
+        report.mirrors_replayed += n;
     }
     // R5：quick 的晋升目标补上实体 id；解析不到的计数。
     tx.execute(
@@ -1104,8 +1136,8 @@ fn finish(
             .or_default() += 1;
     }
     tx.execute(
-        "UPDATE app_meta SET converted_from = json_set(converted_from, '$.outboxReplayed', ?1)",
-        [report.outbox_replayed as i64],
+        "UPDATE app_meta SET converted_from = json_set(converted_from, '$.mirrorsReplayed', ?1)",
+        [report.mirrors_replayed as i64],
     )?;
     commit_checked(tx, "finish")?;
     let integrity: String = t.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
@@ -1248,21 +1280,118 @@ pub fn verify_converted(target: &Path, src: &LegacySources) -> Result<Report> {
 
 fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
     attach(t, &src.registry, "r")?;
-    let r = verify_registry(t, report);
+    let r = (|| {
+        verify_registry(t, report)?;
+        expect_global_begin(t)?;
+        if let Some(k) = &src.knowledge {
+            attach(t, k, "k")?;
+            let r = verify_knowledge(t, report);
+            detach(t, "k");
+            r?;
+        }
+        for p in &src.projects {
+            attach(t, p, "p")?;
+            let r = verify_project(t, report).and_then(|()| expect_global_project(t));
+            detach(t, "p");
+            r?;
+        }
+        verify_global(t, report)
+    })();
+    let _ = t.execute_batch(
+        "DROP TABLE IF EXISTS temp.expected_links; DROP TABLE IF EXISTS temp.expected_mirrors;",
+    );
     detach(t, "r");
-    r?;
-    if let Some(k) = &src.knowledge {
-        attach(t, k, "k")?;
-        let r = verify_knowledge(t, report);
-        detach(t, "k");
-        r?;
-    }
-    for p in &src.projects {
-        attach(t, p, "p")?;
-        let r = verify_project(t, report);
-        detach(t, "p");
-        r?;
-    }
+    r
+}
+
+/// R6 的 VERIFY：全局流的预期由源库独立算出，不看转换器记下的计数。
+/// `expected_links` 是旧行该有的项目与事件关联；`expected_mirrors` 是该补的镜像。
+fn expect_global_begin(c: &Connection) -> Result<()> {
+    c.execute_batch(
+        "DROP TABLE IF EXISTS temp.expected_links; DROP TABLE IF EXISTS temp.expected_mirrors;
+         CREATE TEMP TABLE expected_links (global_seq INTEGER PRIMARY KEY, dedupe_key TEXT, payload_json TEXT,
+                                           project_id TEXT, event_id TEXT);
+         INSERT INTO temp.expected_links SELECT sequence, dedupe_key, payload_json, NULL, NULL FROM r.global_events;
+         CREATE TEMP TABLE expected_mirrors (project_id TEXT NOT NULL, seq INTEGER NOT NULL, type, aggregate_id, actor,
+                                             payload, created_at, dedupe, event_id, PRIMARY KEY (project_id, seq));",
+    )?;
+    Ok(())
+}
+
+/// 一个源项目（挂在 `p`）对全局流的预期：旧行的关联，以及没有镜像的事件。
+fn expect_global_project(c: &Connection) -> Result<()> {
+    let pid: String = c.query_row("SELECT project_id FROM p.project_meta", [], |r| r.get(0))?;
+    let (prefix, event_prefix) = (format!("project:{pid}:"), format!("project:{pid}:event:"));
+    let [claim, link] = link_sql("temp.expected_links", "p.events", "1");
+    c.execute(&claim, params![pid, prefix])?;
+    c.execute(&link, params![pid, prefix, event_prefix])?;
+    let rows = mirror_rows(
+        "p.events",
+        "sequence",
+        "r.projects",
+        "1",
+        "SELECT event_id FROM temp.expected_links WHERE project_id = ?1 AND event_id IS NOT NULL",
+    );
+    c.execute(
+        &format!(
+            "INSERT INTO temp.expected_mirrors
+             SELECT ?1, m.seq, m.type, m.aggregate_id, m.actor, m.payload, m.created_at, m.dedupe, m.event_id FROM ({rows}) AS m"
+        ),
+        [&pid],
+    )?;
+    Ok(())
+}
+
+fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
+    let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
+    compare(
+        c,
+        report,
+        "r/global_feed.links",
+        &["global_seq", "project_id", "event_id"].map(String::from),
+        "SELECT global_seq, project_id, event_id FROM temp.expected_links ORDER BY global_seq",
+        &[],
+        "SELECT global_seq, project_id, event_id FROM main.global_feed WHERE global_seq <= ?1 ORDER BY global_seq",
+        &[&baseline],
+    )?;
+    compare(
+        c,
+        report,
+        "r/global_feed.replayed",
+        &[
+            "global_seq",
+            "type",
+            "aggregate_id",
+            "actor",
+            "payload_json",
+            "created_at",
+            "dedupe_key",
+            "project_id",
+            "event_id",
+            "undone_by_restore_gen",
+        ]
+        .map(String::from),
+        "SELECT ?1 + row_number() OVER (ORDER BY project_id, seq), type, aggregate_id, actor, payload, created_at,
+                dedupe, project_id, event_id, NULL
+         FROM temp.expected_mirrors ORDER BY project_id, seq",
+        &[&baseline],
+        "SELECT global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key, project_id, event_id,
+                undone_by_restore_gen
+         FROM main.global_feed WHERE global_seq > ?1 ORDER BY global_seq",
+        &[&baseline],
+    )?;
+    // 高水位 = 源高水位 + 应补条数；converted_from 里的两个数也要对得上。
+    compare(
+        c,
+        report,
+        "r/app_meta.global_seq",
+        &["global_seq", "mirrors_replayed", "source_current_sequence"].map(String::from),
+        "SELECT ?1 + count(*), count(*), ?1 FROM temp.expected_mirrors",
+        &[&baseline],
+        "SELECT global_seq, converted_from ->> '$.mirrorsReplayed', converted_from ->> '$.sourceCurrentSequence'
+         FROM main.app_meta",
+        &[],
+    )?;
     Ok(())
 }
 
@@ -1315,18 +1444,6 @@ fn verify_registry(c: &Connection, report: &mut Report) -> Result<()> {
         "SELECT global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key FROM main.global_feed
          WHERE global_seq <= ?1 ORDER BY global_seq",
         &[&baseline],
-    )?;
-    // app_meta：源高水位 = 目标高水位 - 补投影条数，且原值记在 converted_from 里。
-    compare(
-        c,
-        report,
-        "r/app_meta.current_sequence",
-        &["current_sequence".to_string()],
-        "SELECT current_sequence FROM r.app_meta",
-        &[],
-        "SELECT global_seq - (converted_from ->> '$.outboxReplayed') FROM main.app_meta
-         WHERE converted_from ->> '$.sourceCurrentSequence' = global_seq - (converted_from ->> '$.outboxReplayed')",
-        &[],
     )?;
     let cols: Vec<String> = [
         "id",

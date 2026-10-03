@@ -10,15 +10,21 @@
 //! 读取：最多 `readers` 个只读连接，每次读在一个事务里看到一致的快照。
 //! 读事务有时长上限，超过即被中断，快照随之释放，不会无限拖住 checkpoint。
 //!
-//! checkpoint：关掉 SQLite 的自动 checkpoint。队列排空时，写线程通知 checkpoint 线程做 PASSIVE，
-//! 两次之间至少隔 `checkpoint_gap`。PASSIVE 用自己的连接，和写入并发进行，不占写线程：
+//! checkpoint：关掉 SQLite 的自动 checkpoint。写线程每执行完一个作业就通知 checkpoint 线程（只置位，
+//! 不等），后者合并请求做 PASSIVE，两次之间至少隔 `checkpoint_gap`。不能只在队列排空时通知：
+//! 队列一直有积压时就永远没有 checkpoint，WAL 无界增长。PASSIVE 用自己的连接，和写入并发进行，不占写线程：
 //! W1g 实测一次 PASSIVE 最长 349 ms（复制页再 fsync 整个库文件），放在写线程上时，
 //! 这段时间里所有写入都在排队。
 //! 读者几乎一直持有快照时，PASSIVE 追不平 WAL，WAL 就不会被复用，只增不减
-//! （W1g 实测 30 s 涨到 2.2 GiB）。所以 WAL 超过 `wal_soft_limit` 后，checkpoint 线程改做一次 RESTART：
-//! 它挡住新写入，最多等 `wal_restart_wait` 让读者离开 WAL，之后下一个写事务从头复用 WAL，
-//! 并按 `journal_size_limit`（同一个值）截短文件。写线程空闲满 `idle_checkpoint` 时自己做 TRUNCATE
-//! （有读者或正在进行的 PASSIVE 挡着就下次再试）；关闭时先停 checkpoint 线程，再做最后一次 TRUNCATE。
+//! （W1g 实测 30 s 涨到 2.2 GiB）。所以 PASSIVE 报告的 WAL 帧数超过 `wal_soft_limit` 时，
+//! checkpoint 线程只置一个标志；写线程在两个作业之间看到它，就在自己的连接上做 RESTART：
+//! 写线程这时不持有事务，不必和自己抢写锁（放在 checkpoint 线程上做时，写线程一提交就开始下一个作业，
+//! 忙等待没有公平性，积压时 RESTART 一直抢不到锁，W1 peer r1 P1-02）。RESTART 最多等
+//! `wal_restart_wait` 让读者离开 WAL，之后下一个写事务从头复用 WAL，并按 `journal_size_limit`
+//! （同一个值）截短文件。等待只管读者；复制和 fsync 的时间另算，期间写入照样排队，
+//! 所以软上限不是硬上限，WAL 的峰值取决于写入速度和读者。
+//! 写线程空闲满 `idle_checkpoint` 时自己做 TRUNCATE（有读者或正在进行的 PASSIVE 挡着就下次再试）；
+//! 关闭时先停 checkpoint 线程，再做最后一次 TRUNCATE。
 
 use crate::{StoreError, configure, migrate};
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
@@ -664,8 +670,11 @@ fn writer_loop(
             .job_max_us
             .fetch_max(micros(started), Ordering::SeqCst);
         dirty = true;
-        if lock(&shared.queue).jobs.is_empty() {
-            checkpointer.request();
+        // 每个作业之后都请求：队列一直有积压时也要有 checkpoint（W1 peer r1 P1-02）。
+        // 请求只是置位，checkpoint 线程合并并按 gap 限流。
+        checkpointer.request();
+        if checkpointer.restart_due() {
+            restart(&conn, checkpointer.restart_wait, &stats);
         }
     }
     checkpointer.stop();
@@ -685,10 +694,13 @@ fn checkpoint_frames(conn: &Connection, mode: &str) -> rusqlite::Result<(bool, i
     })
 }
 
-/// checkpoint 线程：收到请求后做一次 PASSIVE，两次之间至少隔 `gap`。
+/// checkpoint 线程：收到请求后做一次 PASSIVE，两次之间至少隔 `gap`；
+/// WAL 超过软上限时置 `restart`，由写线程在两个作业之间做 RESTART。
 struct Checkpointer {
     signal: Arc<(Mutex<Signal>, Condvar)>,
     thread: Option<JoinHandle<()>>,
+    restart: Arc<AtomicBool>,
+    restart_wait: Duration,
 }
 
 #[derive(Default)]
@@ -703,10 +715,11 @@ impl Checkpointer {
         configure(&conn)?;
         conn.pragma_update(None, "wal_autocheckpoint", 0)?;
         let page: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let restart = Arc::new(AtomicBool::new(false));
         let limit = Limit {
             gap: config.checkpoint_gap,
             restart_frames: (config.wal_soft_limit as i64 / page.max(1)).max(1),
-            restart_wait: config.wal_restart_wait,
+            restart: restart.clone(),
         };
         let signal = Arc::new((Mutex::new(Signal::default()), Condvar::new()));
         let thread = {
@@ -719,7 +732,14 @@ impl Checkpointer {
         Ok(Checkpointer {
             signal,
             thread: Some(thread),
+            restart,
+            restart_wait: config.wal_restart_wait,
         })
+    }
+
+    /// WAL 超过了软上限、该做 RESTART 了。取走标志。
+    fn restart_due(&self) -> bool {
+        self.restart.swap(false, Ordering::SeqCst)
     }
 
     fn request(&self) {
@@ -744,7 +764,7 @@ impl Drop for Checkpointer {
 struct Limit {
     gap: Duration,
     restart_frames: i64,
-    restart_wait: Duration,
+    restart: Arc<AtomicBool>,
 }
 
 fn checkpointer_loop(
@@ -778,7 +798,7 @@ fn checkpointer_loop(
         st.pending = false;
         drop(st);
         if passive(&conn, stats).is_some_and(|frames| frames >= limit.restart_frames) {
-            restart(&conn, limit.restart_wait, stats);
+            limit.restart.store(true, Ordering::SeqCst);
         }
         last = Some(Instant::now());
     }
@@ -797,12 +817,12 @@ fn passive(conn: &Connection, stats: &Stats) -> Option<i64> {
     r.map(|(_, frames)| frames)
 }
 
-/// RESTART 挡住新写入，等读者离开 WAL（最多 `wait`）；做完后下一个写事务从头复用 WAL。
+/// 在写线程上、两个作业之间做 RESTART：等读者离开 WAL（最多 `wait`），做完后下一个写事务从头复用 WAL。
 fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     let started = Instant::now();
     let _ = conn.busy_timeout(wait);
     let done = matches!(checkpoint(conn, "RESTART"), Ok(true));
-    let _ = conn.busy_timeout(Duration::ZERO);
+    let _ = conn.busy_timeout(Duration::from_secs(5));
     stats
         .restart_max_us
         .fetch_max(micros(started), Ordering::SeqCst);

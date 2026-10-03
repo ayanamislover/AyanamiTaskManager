@@ -120,6 +120,7 @@ fn fixture(name: &str) -> Fixture {
            (3, 'work.created', 'W1', 'claude', '{{}}', '{T}', 'project:P2:event:F1'),
            (4, 'work.updated', 'W9', 'claude', '{{}}', '{T}', 'project:P1:event:GONE'),
            (5, 'registry.project_changed', 'P2', 'SYSTEM', '{{}}', '{T}', 'project:P2:outbox:O9'),
+           (6, 'work.updated', 'W1', 'claude', '{{\"sourceEventId\":\"F1-big\"}}', '{T}', 'project:P2:outbox:O8'),
            (7, 'backup.created', 'B1', 'SYSTEM', '{{\"kind\":\"DAILY\"}}', '{T2}', 'backup:B1');
          INSERT INTO backup_catalog (id, scope, project_id, path, sha256, size_bytes, reason, schema_version, created_at)
            VALUES ('B1', 'PROJECT', 'P1', 'C:/old/backups/b1.sqlite', 'ff', 10, 'DAILY', 18, '{T2}'),
@@ -141,7 +142,8 @@ fn fixture(name: &str) -> Fixture {
            ('K1', 2, 'K1-R2', '{\"title\":\"Single database\",\"aliases\":[\"one file\"],\"tags\":[\"store\"],\"summary\":\"s\",\"useWhen\":\"u\",\"appliesTo\":[\"atm\"],\"bodyMarkdown\":\"two\"}');
          INSERT INTO knowledge_operations (op_id, fingerprint, receipt) VALUES
            ('USER-op-1', 'fp1', '{\"format\":\"knowledge-receipt-v2\",\"id\":\"K1\"}'),
-           ('agent:abc', 'fp2', '{\"id\":\"K1\",\"revision\":1}');"
+           ('agent:abc', 'fp2', '{\"id\":\"K1\",\"revision\":1}'),
+           ('agent:list', 'fp3', '[1]');"
     )
     .unwrap();
     drop(k);
@@ -191,11 +193,13 @@ fn fixture(name: &str) -> Fixture {
         projects.push(path);
     }
 
-    // P1 的 outbox：一条已送达；一条没送达、事件在、全局流里没有镜像（要补）；一条没送达、找不到事件。
+    // P1 的 outbox：一条已送达且有镜像；一条已送达但全局流里没有镜像（照样要补）；
+    // 一条没送达、事件在、没有镜像（要补）；一条没送达、找不到事件。P2 没有 outbox，缺镜像的事件照样要补。
     let p1 = Connection::open(&projects[0]).unwrap();
     p1.execute_batch(&format!(
         "INSERT INTO outbox (id, project_sequence, type, payload_json, created_at, delivered_at) VALUES
            ('O1', 1, 'registry.project_changed', '{{\"eventId\":\"E1\"}}', '{T}', '{T}'),
+           ('O4', 2, 'registry.project_changed', '{{\"eventId\":\"E1-big\"}}', '{T}', '{T}'),
            ('O2', 4, 'registry.project_changed', '{{\"eventId\":\"E1-bad\"}}', '{T2}', NULL),
            ('O3', 4, 'registry.project_changed', '{{\"type\":\"x\"}}', '{T2}', NULL);"
     ))
@@ -345,7 +349,8 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
         "C:/old/projects/P1/project.sqlite"
     );
 
-    // 全局流（R6）：能匹配到事件的填上 event_id；孤儿留空；outbox 补投影追加到末尾。
+    // 全局流（R6）：能匹配到事件的填上 event_id（dedupe_key，其次 sourceEventId）；孤儿留空；
+    // 没有镜像的事件按差集补到末尾，不看 outbox。
     assert_eq!(
         q::<String>(
             &t,
@@ -379,25 +384,61 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
         None
     );
     assert_eq!(
-        (
-            report.global_orphans,
-            report.outbox_replayed,
-            report.outbox_without_event
+        q::<String>(
+            &t,
+            "SELECT project_id || '/' || event_id FROM global_feed WHERE global_seq = 6"
         ),
-        (1, 1, 1)
+        "P2/F1-big",
+        "linked through sourceEventId"
     );
     assert_eq!(
-        q::<String>(&t, "SELECT event_id FROM global_feed WHERE global_seq = 8"),
-        "E1-bad"
+        (
+            report.global_orphans,
+            report.mirrors_replayed,
+            report.outbox_without_event
+        ),
+        (1, 3, 1)
     );
+    // 每个项目的事件都恰好有一个镜像。
     assert_eq!(
         q::<i64>(
             &t,
-            "SELECT payload_json ->> '$.projectSequence' FROM global_feed WHERE global_seq = 8"
+            "SELECT count(*) FROM events e WHERE (SELECT count(*) FROM global_feed g
+               WHERE g.project_id = e.project_id AND g.event_id = e.id) <> 1"
         ),
-        4
+        0
     );
-    assert_eq!(q::<i64>(&t, "SELECT global_seq FROM app_meta"), 8);
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT group_concat(project_id || '/' || event_id || '@' || (payload_json ->> '$.projectSequence'), ',')
+             FROM (SELECT * FROM global_feed WHERE global_seq > 7 ORDER BY global_seq)"
+        ),
+        "P1/E1-big@2,P1/E1-bad@4,P2/F1-bad@4"
+    );
+    // 损坏的 payload 按 2.0 readJson 的回退当 {}，再补上项目字段。
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT payload_json FROM global_feed WHERE global_seq = 9"
+        ),
+        r#"{"projectId":"P1","projectCode":"AAA","projectName":"Alpha","projectSequence":4,"sourceEventId":"E1-bad","sourceProjectSequence":4,"sourceAggregateType":"WORK_ITEM","sourceAggregateId":"W1"}"#
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT dedupe_key || ' ' || type || ' ' || actor FROM global_feed WHERE global_seq = 10"
+        ),
+        "project:P2:event:F1-bad work.updated claude"
+    );
+    assert_eq!(q::<i64>(&t, "SELECT global_seq FROM app_meta"), 10);
+    assert_eq!(
+        q::<i64>(
+            &t,
+            "SELECT converted_from ->> '$.mirrorsReplayed' FROM app_meta"
+        ),
+        3
+    );
 
     // quick 的晋升目标（R5）：解析到实体 id；解析不到的计数。
     assert_eq!(
@@ -463,6 +504,14 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
         ),
         "knowledge-receipt-v2"
     );
+    // 回执原文是 JSON 但不是对象（2.x 的 CHECK 只保证 json_valid）：按旧格式记，原文逐字节保留。
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT receipt_format || '|' || receipt_json FROM idempotency_receipts WHERE scope_kind = 'KNOWLEDGE' AND legacy_key = 'agent:list'"
+        ),
+        "knowledge-entry-legacy|[1]"
+    );
     assert_eq!(
         q::<i64>(
             &t,
@@ -486,7 +535,7 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
         report.dropped.get("registry.global_search_documents"),
         Some(&1)
     );
-    assert_eq!(report.dropped.get("project.outbox"), Some(&3));
+    assert_eq!(report.dropped.get("project.outbox"), Some(&4));
     assert_eq!(q::<String>(&t, "PRAGMA integrity_check"), "ok");
     assert_eq!(
         q::<i64>(&t, "SELECT count(*) FROM pragma_foreign_key_check"),
@@ -531,6 +580,49 @@ fn verify_notices_a_target_that_drifted_from_its_source() {
         failures,
         ["P1/work_items", "P1/idempotency_keys", "P2/events"]
     );
+}
+
+#[test]
+fn verify_rebuilds_the_global_feed_from_the_sources() {
+    let f = fixture("legacy-feed-tamper");
+    f.convert().unwrap();
+    let clean = f.dir.join("out").join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let cases: &[(&str, &str, &[&str])] = &[
+        ("delete a replayed mirror", "DELETE FROM global_feed WHERE global_seq = 9", &["r/global_feed.replayed"]),
+        (
+            "duplicate a replayed mirror",
+            "INSERT INTO global_feed (global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key, project_id, event_id)
+             SELECT 11, type, aggregate_id, actor, payload_json, created_at, NULL, project_id, event_id FROM global_feed WHERE global_seq = 10",
+            &["r/global_feed.replayed"],
+        ),
+        ("mirror under the wrong project", "UPDATE global_feed SET project_id = 'P2' WHERE global_seq = 9", &["r/global_feed.replayed"]),
+        ("mirror of the wrong event", "UPDATE global_feed SET event_id = 'E1' WHERE global_seq = 9", &["r/global_feed.replayed"]),
+        (
+            "mirror payload changed",
+            "UPDATE global_feed SET payload_json = json_set(payload_json, '$.projectSequence', 5) WHERE global_seq = 10",
+            &["r/global_feed.replayed"],
+        ),
+        (
+            "replay count misreported",
+            "UPDATE app_meta SET converted_from = json_set(converted_from, '$.mirrorsReplayed', 2)",
+            &["r/app_meta.global_seq"],
+        ),
+        ("high water moved", "UPDATE app_meta SET global_seq = 11", &["r/app_meta.global_seq"]),
+        ("old row unlinked", "UPDATE global_feed SET event_id = NULL WHERE global_seq = 6", &["r/global_feed.links"]),
+        ("orphan given an event", "UPDATE global_feed SET event_id = 'E1' WHERE global_seq = 4", &["r/global_feed.links"]),
+        ("non-project row claimed", "UPDATE global_feed SET project_id = 'P1' WHERE global_seq = 7", &["r/global_feed.links"]),
+    ];
+    for (name, tamper, expected) in cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        t.execute_batch(tamper).unwrap();
+        drop(t);
+        let failures = verify_converted(&f.target(), &f.sources)
+            .unwrap()
+            .failures();
+        assert_eq!(&failures, expected, "{name}");
+    }
 }
 
 #[test]

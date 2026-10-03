@@ -17,8 +17,8 @@
 
 use crate::Store;
 use crate::backup::{
-    BackupError, Result, VerifiedBackup, artifacts_root, copy_tree, create_backup, path_str, pin,
-    side_reader, verify_backup,
+    BackupError, Result, VerifiedBackup, artifacts_root, attachments_lock, copy_tree,
+    create_backup_locked, path_str, pin, side_reader, verify_backup,
 };
 use crate::events::{HighWater, NewEvent, append_event, append_global, ulid};
 use crate::search::rebuild_knowledge_fts;
@@ -28,13 +28,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-
-/// 恢复与附件收尾串行执行：暂存目录按项目命名，并发的恢复会互相踩到。
-static RESTORE_LOCK: Mutex<()> = Mutex::new(());
-
-fn restore_lock() -> std::sync::MutexGuard<'static, ()> {
-    RESTORE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
 
 /// 按项目恢复的工作数据表（都有 `project_id` 列）。`search_docs` 另行处理：它的 `doc_id` 是全局主键。
 pub const PROJECT_TABLES: &[&str] = &[
@@ -119,11 +112,13 @@ pub fn restore_project(
     project_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = restore_lock();
+    let _serial = attachments_lock();
+    // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
+    finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
 
     // 附件：先暂存，事务里只写世代标记的「意图」，提交后换入。
     let staging = stage_attachments(store.path(), &vb, project_id)?;
@@ -146,6 +141,7 @@ pub fn restore_project(
     });
     // 成功：标记里的世代已在库里，换入暂存。失败：事务回滚，世代不在库里，丢弃暂存；
     // 作业在写标记之前就失败时没有标记，暂存目录在这里直接删。
+    // 库已提交而换入失败时返回 AttachmentsPending：调用方不能把它当作已回滚。
     let finished = finish_swaps_locked(store);
     if outcome.is_err() && !staging.marker.exists() && staging.dir.exists() {
         let _ = fs::remove_dir_all(&staging.dir);
@@ -161,7 +157,8 @@ pub fn restore_knowledge(
     backup_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = restore_lock();
+    let _serial = attachments_lock();
+    finish_swaps_locked(store)?;
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.db)?;
     let present: bool =
@@ -173,7 +170,7 @@ pub fn restore_knowledge(
         return Err(BackupError::ScopeMissing("knowledge".into()));
     }
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
     let ctx = KnowledgeCtx {
         backup_id: backup_id.to_string(),
         pre_id: pre.id.clone(),
@@ -735,25 +732,92 @@ fn stage_attachments(db_path: &Path, vb: &VerifiedBackup, project_id: &str) -> R
 /// 完成或丢弃附件换入。恢复结束时调用，服务启动时也要调用一次（上次可能在提交后、换入前退出）。
 ///
 /// 每个 `<项目>.gen` 标记记着一次恢复的世代：库里该项目的 scope_gen 等于它，说明事务已提交，换入暂存；
-/// 否则事务没有提交，丢弃暂存。每一步都可重复执行。返回处理过的标记数。
+/// 否则事务没有提交，丢弃暂存。每一步都可重复执行：在任何一步中断（出错或进程退出），
+/// 再调用一次都会走到同一个终态。已提交的换入失败时返回 [`BackupError::AttachmentsPending`]。
+/// 返回处理过的标记数。
 pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
-    let _serial = restore_lock();
+    let _serial = attachments_lock();
     finish_swaps_locked(store)
 }
 
-fn finish_swaps_locked(store: &Store) -> Result<usize> {
-    let root = artifacts_root(store.path());
-    let staging_root = root.join(STAGING_DIR);
-    if !staging_root.exists() {
-        return Ok(0);
+/// 这个项目的附件目录。先换完它没换完的附件，换不完就拒绝：读到的要么是恢复前、要么是恢复后的完整一份。
+/// 附件的读写（W3）都要经过这里取目录。
+pub fn project_attachments(store: &Store, project_id: &str) -> Result<PathBuf> {
+    let _serial = attachments_lock();
+    finish_swaps_locked(store)?;
+    Ok(artifacts_root(store.path()).join(project_id))
+}
+
+/// 换入的各个步骤，供测试在每一步注入故障（中断后再调用一次收尾，等同于进程在这一步退出后重启）。
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SwapStep {
+    MoveLiveAside,
+    MoveStagedIn,
+    RemoveOld,
+    RemoveMarker,
+}
+
+impl SwapStep {
+    pub const ALL: [SwapStep; 4] = [
+        SwapStep::MoveLiveAside,
+        SwapStep::MoveStagedIn,
+        SwapStep::RemoveOld,
+        SwapStep::RemoveMarker,
+    ];
+}
+
+static SWAP_FAULTS: Mutex<Vec<(PathBuf, SwapStep)>> = Mutex::new(Vec::new());
+
+/// 测试用：这个库下一次走到 `step` 时失败一次。
+#[doc(hidden)]
+pub fn inject_swap_fault(db_path: &Path, step: SwapStep) {
+    SWAP_FAULTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((db_path.to_path_buf(), step));
+}
+
+fn fault(db_path: &Path, step: SwapStep) -> std::io::Result<()> {
+    let mut faults = SWAP_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
+    match faults.iter().position(|(p, s)| p == db_path && *s == step) {
+        Some(i) => {
+            faults.remove(i);
+            Err(std::io::Error::other(format!("injected fault at {step:?}")))
+        }
+        None => Ok(()),
     }
-    let mut done = 0;
-    let mut markers: Vec<PathBuf> = fs::read_dir(&staging_root)?
+}
+
+/// 一个换入标记。
+struct Marker {
+    path: PathBuf,
+    project: String,
+    /// 标记里记的世代。
+    wanted: Option<i64>,
+    /// 库里这个项目当前的世代。
+    current: Option<i64>,
+}
+
+impl Marker {
+    /// 事务已提交（库里就是标记里的世代）：该换入，不是丢弃。
+    fn committed(&self) -> Option<i64> {
+        self.wanted.filter(|w| Some(*w) == self.current)
+    }
+}
+
+fn markers(store: &Store) -> Result<Vec<Marker>> {
+    let staging_root = artifacts_root(store.path()).join(STAGING_DIR);
+    if !staging_root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths: Vec<PathBuf> = fs::read_dir(&staging_root)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "gen"))
         .collect();
-    markers.sort();
-    for marker in markers {
+    paths.sort();
+    let mut out = Vec::new();
+    for marker in paths {
         let project = marker
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -768,30 +832,85 @@ fn finish_swaps_locked(store: &Store) -> Result<usize> {
             })
             .optional()
         })?;
-        let staged = staging_root.join(&project);
-        let live = root.join(&project);
-        if wanted.is_some() && wanted == current {
-            if staged.exists() {
-                let old = root
-                    .join(OLD_DIR)
-                    .join(format!("{project}-{}", wanted.unwrap_or_default()));
-                if live.exists() {
-                    if old.exists() {
-                        fs::remove_dir_all(&old)?;
-                    }
-                    fs::create_dir_all(root.join(OLD_DIR))?;
-                    fs::rename(&live, &old)?;
-                }
-                fs::rename(&staged, &live)?;
-                if old.exists() {
-                    fs::remove_dir_all(&old)?;
-                }
-            }
-        } else if staged.exists() {
-            fs::remove_dir_all(&staged)?;
+        out.push(Marker {
+            path: marker,
+            project,
+            wanted,
+            current,
+        });
+    }
+    Ok(out)
+}
+
+/// 有已提交、未换入的附件就拒绝（持锁的调用方用，例如 PRE_RESTORE 备份）。
+pub(crate) fn refuse_pending_swaps(store: &Store) -> Result<()> {
+    for m in markers(store)? {
+        if let Some(g) = m.committed() {
+            return Err(BackupError::AttachmentsPending {
+                project: m.project,
+                generation: g,
+                cause: "an earlier restore has not finished swapping attachments".into(),
+            });
         }
-        fs::remove_file(&marker)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn finish_swaps_locked(store: &Store) -> Result<usize> {
+    let db = store.path();
+    let root = artifacts_root(db);
+    let staging_root = root.join(STAGING_DIR);
+    let mut done = 0;
+    for m in markers(store)? {
+        let staged = staging_root.join(&m.project);
+        if let Some(g) = m.committed() {
+            swap_in(db, &root, &staged, &m.path, &m.project, g).map_err(|e| {
+                BackupError::AttachmentsPending {
+                    project: m.project.clone(),
+                    generation: g,
+                    cause: e.to_string(),
+                }
+            })?;
+        } else {
+            if staged.exists() {
+                fs::remove_dir_all(&staged)?;
+            }
+            fs::remove_file(&m.path)?;
+        }
         done += 1;
     }
     Ok(done)
+}
+
+/// 已提交的换入：live → `.restore-old/<项目>-<世代>`，暂存 → live，删旧目录，删标记。
+/// 中断在任何一步，重来一次都能走完：暂存还在就继续换入；旧目录还在就删；最后删标记。
+fn swap_in(
+    db: &Path,
+    root: &Path,
+    staged: &Path,
+    marker: &Path,
+    project: &str,
+    generation: i64,
+) -> std::io::Result<()> {
+    let live = root.join(project);
+    let old = root.join(OLD_DIR).join(format!("{project}-{generation}"));
+    if staged.exists() {
+        if live.exists() {
+            if old.exists() {
+                // 上一次中断在「live 移走之后、暂存换入之前」，然后 live 又被重建过：旧的那份作废。
+                fs::remove_dir_all(&old)?;
+            }
+            fs::create_dir_all(root.join(OLD_DIR))?;
+            fault(db, SwapStep::MoveLiveAside)?;
+            fs::rename(&live, &old)?;
+        }
+        fault(db, SwapStep::MoveStagedIn)?;
+        fs::rename(staged, &live)?;
+    }
+    if old.exists() {
+        fault(db, SwapStep::RemoveOld)?;
+        fs::remove_dir_all(&old)?;
+    }
+    fault(db, SwapStep::RemoveMarker)?;
+    fs::remove_file(marker)
 }

@@ -57,9 +57,20 @@ pub fn terms(query: &str) -> Result<Vec<String>, TermsError> {
     Ok(out)
 }
 
-/// JS 的 `\s`：Unicode 空白再加 U+FEFF。
+/// JS 的 `\s` 与 `trim()`：ECMAScript 的 WhiteSpace 加 LineTerminator。
+/// 和 Rust 的 `char::is_whitespace()` 不同：U+0085 不算，U+FEFF 算（W1 peer r1 P2-02）。
 fn is_space(c: char) -> bool {
-    c.is_whitespace() || c == '\u{feff}'
+    matches!(
+        c,
+        '\t' | '\n' | '\u{0b}' | '\u{0c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+    )
 }
 
 /// 不少于 3 个 code point 的词走 FTS。
