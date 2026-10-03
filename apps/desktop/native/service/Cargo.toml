@@ -1,0 +1,17 @@
+[package]
+name = "atm-service"
+version = "0.0.0"
+description = "AyanamiTaskManager 3 service layer: entry points, capability checks, transactions, idempotency"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-domain = { path = "../domain" }
+atm-store = { path = "../store" }
+rusqlite = "0.39"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"

@@ -90,6 +90,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-service"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "atm-setup"
 version = "0.0.0"
 dependencies = [
