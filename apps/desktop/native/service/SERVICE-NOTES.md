@@ -413,3 +413,43 @@ L-014（begin 的 quick 分支幂等）在 W2g1 的 `a3_begin_quick_branch` 里�
 
 变异验红：`output/w2-evidence/mutations/mut-w2g2.py`，67 条全部 RED，证据 `output/w2-evidence/w2g2-mutation-evidence.json`。
 日期的长度检查起初是等价变异：`Timestamp::parse` 按固定位置校验，长度不对的日期本来就过不去，于是删掉了这道检查。
+
+## 知识库写入（`src/knowledge.rs`，W2g3）
+
+入口：`Service::knowledge_save`（User）、`knowledge_archive`（User）、`knowledge_save_agent`（Agent，带项目与 session）。
+三者都经写入流水线，回执落在知识范围（`knowledge_meta.database_id`）。
+
+### 规格没写死、由实现定下的
+
+| 位置              | 做法                                                                                                                                                                                                                                                                                                                      | 理由                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 知识库身份行      | 新库第一次写知识时在单独的写事务里建 `knowledge_meta`（新 database_id、generation，`scope_generations` 记 KNOWLEDGE / CREATED）；转换来的库已经有，不动                                                                                                                                                                   | 写入流水线要先知道范围 id 和世代才能查回执                                    |
+| 回执与返回        | 回执只存 `knowledge-receipt-v2 {id, revisionId, version, archived}`；新写入和重放都按不可变修订展开，version / archived 用回执里的值；2.x 的旧格式回执本身就是条目，原样返回                                                                                                                                              | 04 L-107；回执不带正文，库不膨胀                                              |
+| operation 名      | `knowledge.save`、`knowledge.archive`、`knowledge.agent-save`；同一 op_id 换一种操作算冲突；转换来的旧行 operation 为 `*`，只比指纹                                                                                                                                                                                       | 2.x 三种操作共用一个命名空间，靠 payload 里的 operation 区分                  |
+| knowledge-v1 指纹 | payload 按 2.x zod 输出拼：`{operation, slug, title, summary, useWhen, tags, aliases, appliesTo, bodyMarkdown, sourceRefs, …}`，去空白、补默认值后的值；User 带 opId / id / expectedVersion / expectedRevisionId；Agent 的 project 是项目 id，作者按候选自己的 session 重建（agentId 从 session 行取）                    | 10 A2；向量由 2.x 的 zod schema 生成（`tests/data/knowledge-v1-vectors.mjs`） |
+| canon-v2 指纹     | 业务字段：operation、规范化后的内容、id、expected 系列、archived；不含 op_id、session、作者（命名空间已经绑定）                                                                                                                                                                                                           | 02 §3.4                                                                       |
+| 内容校验          | 照 2.x：slug ≤ 160、title ≤ 240、summary ≤ 1000（都去空白且非空），useWhen ≤ 2000，tags / aliases / appliesTo 各最多 30 项（每项去空白非空，上限 80 / 160 / 200），正文 ≤ 500000 且不含 NUL，来源最多 30 条、类型四选一、project_record 必须固定 projectId / recordId / sourceVersion；越界 `VALIDATION_ERROR` 带 `field` | 04 §5.2；`protocol/src/inputs/knowledge.ts`                                   |
+| 双 CAS            | User 保存：head 的 version 与 revisionId 都要匹配，新建时 expected_version 必须是 0；带 id 不带 expected_revision_id 是 schema 错误；归档的 expected_version 必须是正整数                                                                                                                                                 | 04 L-103、L-104                                                               |
+| Agent 保存        | 作者 `{type:"AGENT", agentId, sessionId, projectId}` 取自写入流水线解析出的 session（rebind 后是后继）；CAS 只看 revisionId（expected_version 取 head 当前值）；已归档 `INVALID_ARGUMENT`；session 所在项目在垃圾箱里 `PROJECT_DB_UNAVAILABLE`（重放之后判定）                                                            | 04 L-105；2.x 要先打开项目库                                                  |
+| slug 冲突         | `KNOWLEDGE_SLUG_CONFLICT`（409），带 `slug`、`holder_id`                                                                                                                                                                                                                                                                  | 04 C-L11                                                                      |
+| FTS               | 每次保存删掉旧行、按新 head 插一行；metadata 照 2.x 的命中形状（去掉正文、来源、别名，加 version、archived）；归档不改 FTS，读侧以 entries 为准                                                                                                                                                                           | 04 §5.1；读取在 W2g4                                                          |
+| sequence          | 每次成功的保存与归档 `sequence+1`（搜索游标绑定它）                                                                                                                                                                                                                                                                       | 04 §5.2、L-111                                                                |
+
+### 追溯（`tests/knowledge.rs`）
+
+| 规则            | 用例                                                                |
+| --------------- | ------------------------------------------------------------------- |
+| 04 L-101、D34   | `l101_revisions_are_immutable`（含直接 UPDATE / DELETE 修订表报错） |
+| 04 L-102        | `l102_six_distinct_fields`                                          |
+| 04 L-103        | `l103_user_save_checks_version_and_revision`                        |
+| 04 L-104        | `l104_archive_and_edit_archived`                                    |
+| 04 L-105        | `l105_agent_save`                                                   |
+| 04 L-106        | `l106_namespaces_are_separate`                                      |
+| 04 L-107        | `l107_replay_returns_the_original_revision`                         |
+| 04 L-108、C-L11 | `l108_slugs_are_unique`                                             |
+| 10 A2           | `a2_converted_receipts_replay`（2.x 运行环境生成的向量）            |
+| 04 L-117、C-L14 | `l117_restore_tombstones_later_operations`                          |
+
+变异验红：`output/w2-evidence/mutations/mut-w2g3.py`，46 条全部 RED，证据 `output/w2-evidence/w2g3-mutation-evidence.json`。
+「useWhen 缺省时省略」起初写成了等价变异（规范化之后 use_when 恒为 Some），改成空串写 null 后变红；
+「更新把 version 重置为 1」由 l104 的归档 → 编辑 → 再归档链条抓住。

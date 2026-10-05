@@ -21,6 +21,8 @@ pub const PAST: &str = "2000-01-01T00:00:00.000Z";
 pub struct World {
     pub svc: Service,
     pub op: std::sync::atomic::AtomicU32,
+    /// 世界目录（库文件与默认的 backups）。
+    pub dir: PathBuf,
 }
 
 pub fn world(name: &str) -> World {
@@ -123,6 +125,7 @@ pub fn world_full(
             None => svc,
         },
         op: std::sync::atomic::AtomicU32::new(0),
+        dir,
     }
 }
 

@@ -13,6 +13,7 @@ AyanamiTaskManager_Development_Spec_CN_v2.md
 packages/mcp/src/legacy-tools-list-v1.0.18.json
 # node 对照生成的指纹向量（tests/data/fp-vectors.mjs 产出），保持生成器原样输出。
 apps/desktop/native/service/tests/data/fp-vectors.json
+apps/desktop/native/service/tests/data/knowledge-v1-vectors.json
 docs/generated/mcp-tool-contracts.md
 apps/mobile/android
 .local

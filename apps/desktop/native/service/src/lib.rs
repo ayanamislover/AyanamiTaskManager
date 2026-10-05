@@ -3,6 +3,7 @@
 
 pub(crate) mod evidence;
 pub mod fp;
+pub mod knowledge;
 pub mod lineage;
 pub mod memory;
 pub mod project;
