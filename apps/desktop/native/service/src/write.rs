@@ -80,12 +80,33 @@ pub struct WriteRequest {
     pub fingerprint: FpInput,
 }
 
+/// 写入者：已经由可信入口与 session 解析确定，业务动作直接用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Actor {
+    pub kind: PrincipalKind,
+    /// 事件的 actor_type：`USER` / `AGENT` / `SYSTEM`。Phone 的写入记作 `USER`，actor_id 带设备（03 C-05）。
+    pub event_type: &'static str,
+    /// 事件的 actor_id，也是写进 assignee 的 id：Agent 是 agent_id，User 是 `USER`，
+    /// Phone 是 `PHONE:<device>`，System 是 `SYSTEM`。
+    pub id: String,
+    pub session: Option<String>,
+    /// session 所在 lineage 的全部成员（含自己），无 session 时为空（R2、R3）。
+    pub lineage: Vec<String>,
+}
+
+impl Actor {
+    pub fn in_lineage(&self, session: &str) -> bool {
+        self.lineage.iter().any(|m| m == session)
+    }
+}
+
 /// 业务动作看到的上下文。
 #[derive(Clone, Debug)]
 pub struct WriteCtx {
     pub scope: ReceiptScope,
     pub generation: Option<i64>,
     pub author: Author,
+    pub actor: Actor,
     pub op_id: String,
     pub now: Timestamp,
 }
@@ -123,6 +144,7 @@ impl Service {
     {
         capability::require(principal, req.capability)?;
         let actor_ns = admit(principal, &req)?;
+        let seed = actor_seed(principal, &req);
         let enqueued = match req.expected_generation {
             Some(g) => Some(g),
             None => self
@@ -131,8 +153,32 @@ impl Service {
                 .map_err(read_error)?,
         };
         self.store
-            .write(move |tx| run(tx, req, actor_ns, enqueued, action))
+            .write(move |tx| run(tx, req, actor_ns, seed, enqueued, action))
             .map_err(write_error)
+    }
+}
+
+/// 无 session 的写入者，以及 Agent 写入者的种类；session 与 lineage 在事务里补。
+fn actor_seed(principal: &Principal, req: &WriteRequest) -> Actor {
+    let kind = principal.kind();
+    let (event_type, id) = match kind {
+        PrincipalKind::User => ("USER", "USER".to_owned()),
+        PrincipalKind::System => ("SYSTEM", "SYSTEM".to_owned()),
+        PrincipalKind::Phone => (
+            "USER",
+            format!("PHONE:{}", principal.phone().map_or("", |p| p.1)),
+        ),
+        PrincipalKind::Agent => (
+            "AGENT",
+            req.actor.clone().unwrap_or_else(|| "AGENT_ANON".to_owned()),
+        ),
+    };
+    Actor {
+        kind,
+        event_type,
+        id,
+        session: None,
+        lineage: Vec::new(),
     }
 }
 
@@ -191,7 +237,7 @@ fn now() -> Timestamp {
     Timestamp::from_millis(i64::try_from(ms).unwrap_or(i64::MAX))
 }
 
-fn internal(e: impl std::fmt::Display) -> DomainError {
+pub(crate) fn internal(e: impl std::fmt::Display) -> DomainError {
     DomainError::new(ErrorCode::INTERNAL_ERROR, format!("服务内部错误：{e}"))
 }
 
@@ -199,6 +245,7 @@ fn run<A>(
     tx: &Transaction<'_>,
     req: WriteRequest,
     actor_ns: Option<Ns>,
+    mut actor: Actor,
     enqueued: Option<i64>,
     action: A,
 ) -> Result<Written, DomainError>
@@ -254,6 +301,9 @@ where
             } else {
                 Vec::new()
             };
+            actor.id = agent.clone();
+            actor.session = Some(s.session_id.clone());
+            actor.lineage = members;
             let author = Author {
                 agent: Some(agent),
                 session: Some(s.session_id.clone()),
@@ -330,6 +380,7 @@ where
         scope,
         generation: current,
         author,
+        actor,
         op_id,
         now: now(),
     };

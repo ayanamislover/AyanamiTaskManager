@@ -4,4 +4,5 @@
 pub mod fp;
 pub mod lineage;
 pub mod receipts;
+pub mod work;
 pub mod write;

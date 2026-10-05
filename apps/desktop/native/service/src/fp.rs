@@ -41,6 +41,24 @@ impl JsValue {
     pub fn opt(v: Option<JsValue>) -> Self {
         v.unwrap_or(JsValue::Undefined)
     }
+
+    /// serde_json 值转过来。对象保留 serde_json 的键序，只适合会自己排序的族（kernel-v1、canon-v2）；
+    /// 缺失的键直接不放，JSON 里没有 undefined。
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        match v {
+            Value::Null => JsValue::Null,
+            Value::Bool(b) => JsValue::Bool(*b),
+            Value::Number(n) => JsValue::Number(n.as_f64().unwrap_or(f64::NAN)),
+            Value::String(s) => JsValue::String(s.clone()),
+            Value::Array(items) => JsValue::Array(items.iter().map(JsValue::from_json).collect()),
+            Value::Object(map) => JsValue::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), JsValue::from_json(v)))
+                    .collect(),
+            ),
+        }
+    }
 }
 
 /// kernel-v1 遇到无法复现的键。
