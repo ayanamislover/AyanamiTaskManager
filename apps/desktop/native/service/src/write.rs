@@ -13,6 +13,7 @@
 
 use crate::fp::{self, JsValue};
 use crate::lineage::lineage;
+pub use crate::rebind::Rebind;
 use crate::receipts::{
     self, Candidate, CandidateSummary, ConflictReason, FixedLookup, LegacyProbe, NewReceipt, Ns,
     Rebuilt, ReceiptScope, ScopeKind, Verdict,
@@ -88,6 +89,8 @@ pub struct WriteRequest {
     /// kernel-v1 下另一个也算同一请求的形状（02 §3.3 的兼容请求）；没有就是 None。
     pub compat_v1: Option<FpInput>,
     pub replay_guard: Option<ReplayGuard>,
+    /// session 因心跳超时关闭时：新建 successor，还是只认已有的（02 §2.4）。
+    pub rebind: Rebind,
 }
 
 /// 写入者：已经由可信入口与 session 解析确定，业务动作直接用。
@@ -127,6 +130,8 @@ pub struct Written {
     pub result: Value,
     pub replayed: bool,
     pub receipt_id: i64,
+    /// 这次写入被 rebind 到了哪个 session（02 §2.4 REBOUND；ACK 的 `session_rebound`）。
+    pub rebound_to: Option<String>,
 }
 
 pub struct Service {
@@ -270,8 +275,10 @@ where
         fingerprint,
         compat_v1,
         replay_guard,
+        rebind,
         ..
     } = req;
+    let now = now();
     let (own, others, legacy, author) = match (&session, actor_ns) {
         (Some(s), _) => {
             let agent: Option<String> =
@@ -358,6 +365,7 @@ where
                 result,
                 replayed: true,
                 receipt_id: c.receipt_id,
+                rebound_to: None,
             });
         }
         Verdict::Undone { generation } => {
@@ -372,6 +380,32 @@ where
             return Err(conflict(&op_id, &reason, &candidates));
         }
     }
+
+    // 02 §2.4 第 5–8 步：新写入才看 session 状态；心跳超时的旧 session 换成它的 successor。
+    let (own, author, rebound_to) = match &session {
+        Some(s) => {
+            let (effective, rebound) = crate::rebind::effective_session(
+                tx,
+                &s.project_id,
+                &s.session_id,
+                rebind,
+                &op_id,
+                now,
+            )?;
+            if rebound {
+                actor.session = Some(effective.clone());
+                actor.lineage = lineage(tx, &s.project_id, &effective).map_err(internal)?;
+                let author = Author {
+                    agent: author.agent,
+                    session: Some(effective.clone()),
+                };
+                (Ns::session(effective.clone()), author, Some(effective))
+            } else {
+                (own, author, None)
+            }
+        }
+        None => (own, author, None),
+    };
 
     // R4：只有新写入才看世代。
     let current = generation(tx, &scope).map_err(internal)?;
@@ -397,9 +431,12 @@ where
         author,
         actor,
         op_id,
-        now: now(),
+        now,
     };
     let result = action(tx, &ctx)?;
+    if let (Some(s), Some(effective)) = (&session, ctx.actor.session.as_deref()) {
+        crate::rebind::heartbeat(tx, &s.project_id, effective, now)?;
+    }
     let receipt_json = serde_json::to_string(&result).map_err(internal)?;
     let created_at = ctx.now.to_string();
     let receipt_id = receipts::insert(
@@ -424,6 +461,7 @@ where
         result,
         replayed: false,
         receipt_id,
+        rebound_to,
     })
 }
 

@@ -172,5 +172,81 @@ W-050 的「混批 → INVALID_ARGUMENT」与 `takeoverStale` 只能是 false �
 
 W-061（不提供独立性保证）没有可测的行为：实现只校验 role / agent / session / 领取 / 哈希 / 版本，代码与文档都不声称独立。
 
-变异验红：`output/w2-evidence/mutations/mut-w2d.py`，44 条全部 RED，证据 `output/w2-evidence/w2d-mutation-evidence.json`。
+变异验红：`output/w2-evidence/mutations/mut-w2d.py`，43 条全部 RED，证据 `output/w2-evidence/w2d-mutation-evidence.json`。
 任务书点名的三条（batch 比 item.version、跳过候选哈希、门失败后仍提交 VERIFYING）都在其中。
+（原有 44 条；「submit 不查 ONLINE」在 W2e 之后由管线的 SESSION_CLOSED 先拦下，那段代码不再可达，删去。）
+
+## Session 生命周期与进度、记录（`src/{session,rebind,memory}.rs`，W2e）
+
+入口：`Service::begin`、`end_session`、`force_close_session`（User）、`sweep_sessions`（System `StartupRecover`）、
+`refresh_git_context`（User）、`add_progress`、`create_record`、`feedback`。operation 名 `session.recover-or-begin`
+（调用索引，A3）、`session.end`、`session.force-close`、`work.progress`、`project-update.publish`、`record.create`
+（反馈同名）。
+
+### 写入流水线的新步骤
+
+R3′ 判定为新写入之后（S-036：已关闭 session 上成功过的请求照样 REPLAY），`rebind::effective_session` 看 session：
+ONLINE 用它本身；`HEARTBEAT_TIMEOUT` / `CLIENT_EXITED` 关闭的接到唯一一条身份（agent、thread、parent、role）一致的
+ONLINE successor，没有就在**同一个写事务**里新建（发 `agent.joined`，`rebind:true`；写入失败一起回滚）；其他关闭原因
+`SESSION_CLOSED`，`details.next` 是带 predecessor 的 begin。`atm_end` 用 `Rebind::ExistingOnly`：只认已有 successor。
+action 成功后 `rebind::heartbeat` 刷新心跳（不推 session 版本），session 仍 ONLINE 时给它持有的未终态领取续租。
+
+### 规格没写死、由实现定下的
+
+| 位置                          | 做法                                                                                                                                                                                                                                       | 理由                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| begin 的客户端身份            | 取 `Principal::client_group()`（连接所属的进程组），不信请求里的字段                                                                                                                                                                       | A1 的「同一连接组」只能由传输层认定；请求可伪造  |
+| begin 不带 resume             | 默认 `auto`（R11 P1-3）：只接续 `CLIENT_EXITED` / `HEARTBEAT_TIMEOUT` 关闭、或有给本 agent 待确认交接、且还没被接续过的 session；永远不接回 ONLINE；多个候选时新建并在 `resumeCandidates` 列出带 predecessor 的 begin                      | 不阻塞开工；Agent 想接哪个自己指名               |
+| 显式 `session`（A1 优先级 1） | 同项目、同 agent、同 role、未关闭 → `CURRENT`；已关闭报 `SESSION_CLOSED`，next 是带 predecessor 的 begin；与 `predecessor_session_id` 同时给出报 `INVALID_ARGUMENT`。它是业务字段，进 canon-v2 指纹                                        | 接回与接续是两件事，混在一起就猜不出意图         |
+| begin 的 `resume` 省略        | 按 `auto` 执行；与 2.x 旧回执比较时按 2.x 的缺省值 false 重建；显式 `auto`、显式 `session` 在 kernel-v1 里无法表达，与旧行不可比                                                                                                           | R11 A3「缺省值按各候选自己的版本重建」           |
+| A1 接回                       | 只对白名单客户端（`single_conversation`）、PRIMARY、resume 不是 false、没指名 predecessor；同一连接组、同 agent、同 cwd 的唯一 ONLINE PRIMARY → `CURRENT`                                                                                  | 同一进程里可能跑多个对话的客户端不能共用 session |
+| 指名 predecessor              | ONLINE：四元组全等才接回（`RESUMED`）；已关闭：只校验 agent 与 role（C-07），有待确认交接或退役原因才接续，否则 `SESSION_NOT_RETIRED`；resume:false：同 agent、同 role（C-14 / R3），不确认交接                                            | 02 §2.3 的判定表                                 |
+| begin 的幂等                  | 调用索引 `(AGENT, agent_id, session.recover-or-begin, op_id)`，不按项目划分；2.x 旧键 `session-begin:<op>` 作为 legacy 探测；重放时补 `sessionState`（C-17）；auto resume 在 kernel-v1 里没有对应形状                                      | A3；git 探测结果不进指纹（每次都可能变）         |
+| TRASHED 项目的 begin          | 登记或累加恢复请求并**提交**，再报 `PROJECT_DB_UNAVAILABLE`（`retryable:false`、`recovery`、`quick:do_not_bypass`）                                                                                                                        | 请求要留下来给用户看到；重试只是累加计数         |
+| 没认出项目                    | 暂时一律 `PROJECT_REQUIRED`（带 `next.allow_project_create`）；A3 的 ③④（quick、建项目）随 W2g 接入                                                                                                                                        | 项目生命周期在 W2g                               |
+| schema                        | `agent_sessions.client_identity` 列、`close_reason` 加 `CLIENT_EXITED`、索引 `ix_agent_sessions_client` 直接改在 `0001_schema_v1.sql` 里                                                                                                   | 3.0 schema 尚未发布，没有需要迁移的库            |
+| 超时扫描                      | 只扫 ACTIVE 项目；客户端已退出 → `CLIENT_EXITED`；客户端仍存活按 120 分钟兜底，查不到身份按设置的超时（默认 5，夹到 [1, 1440]）；读快照之后心跳前进过的跳过；不释放领取，记 `last_session_closed_at`；`agent.recovered_stale` 由 SYSTEM 发 | 00 02 C-08、R11 P1-3、S-012                      |
+| end 的交接与释放              | paused / retired 给未终态领取写交接，与 `release_claims` 互相独立；释放只把 CLAIMED 变回 READY 并清 assignee（C-06），其余状态保留、只清领取；每个被释放的任务 version +1                                                                  | S-013、S-014                                     |
+| 强制关闭                      | 已关闭的也照样执行，覆盖 close_reason 为 `FORCE_CLOSE`（之后不能 rebind）                                                                                                                                                                  | 用户的意图是「这个 session 不要再用了」          |
+| 任务进度的版本                | 任务行直接写入 +1，事务末尾的重算按 C-02 / C-21 不再加                                                                                                                                                                                     | 02 S-083 的「至少 +2」是逐次重算的 2.x 现状      |
+| 进度的 noop                   | 同任务最近一条：同桶、同摘要哈希、没有证据、没有（trim 后非空的）blocker → 不写行、不推版本，回执带 `noop:true` 和那条的 id                                                                                                                | S-081；纯空白 blocker 按 C-13 视为没有           |
+| 进度的领取                    | 不论带不带 blocker、percent，都按 R1 校验；写入后按 R2 把领取转到当前 session                                                                                                                                                              | 10 R1、R2                                        |
+| 项目进度                      | completed 里的任务 key 必须存在并改写成规范 key；health 默认 UNKNOWN，带 blocker 时 AT_RISK；from = 上次发布的 to                                                                                                                          | 02 §5.6、C-02                                    |
+| 记录 summary 超长             | 超过 300 个 code point：截成 299 个加「…」，全文放到 detail 开头（原 detail 接在空行之后），回执带 `summaryTruncated:true`                                                                                                                 | R11 P2-1：不让 Agent 因为摘要写长了被拒          |
+| 反馈                          | 固定形状的 RISK 记录：scope `ATM_FEEDBACK`、topic `atm-agent-feedback`、detail 开头注明只存本机                                                                                                                                            | 02 §1.8                                          |
+
+### 追溯（`tests/session.rs`、`tests/memory.rs`）
+
+| 规则                                  | 用例                                                                                        |
+| ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| S-001、S-004、00 02 C-17              | `s001_s004_atomic_begin`                                                                    |
+| R11 A3                                | `a3_begin_op_id_is_shared_across_projects`、`a3_omitted_resume_matches_a_2x_begin_receipt`  |
+| S-003、04 L-008                       | `s003_l008_trashed_and_archived_projects`                                                   |
+| 04 L-010                              | `l010_project_is_found_by_path_marker_or_common_dir`                                        |
+| S-006、S-011                          | `s006_s011_resume_reattaches_the_open_session`                                              |
+| S-007、S-013、S-016、R4′              | `s007_s013_s016_resume_through_a_pending_handoff`、`s007_two_handoff_sources_are_ambiguous` |
+| S-008、S-009、00 02 C-07、C-14、10 R3 | `s008_s009_c07_named_predecessor`                                                           |
+| S-010                                 | `s010_plain_begin_acknowledges_nothing`                                                     |
+| R11 P1-3                              | `p1_3_auto_resume`、`s012_c08_p1_3_sweep`                                                   |
+| R11 A1                                | `a1_single_conversation_reattach`、`a1_explicit_session_reattach`                           |
+| S-012、00 02 C-08                     | `s012_c08_p1_3_sweep`                                                                       |
+| S-014、00 02 C-06                     | `s014_c06_end_releases_claims`                                                              |
+| S-017                                 | `s017_force_close`                                                                          |
+| S-018、S-036                          | `s018_s036_closed_sessions_replay_but_do_not_write`                                         |
+| S-019、S-020                          | `s019_s020_rebind_on_heartbeat_timeout`、`s019_rebind_refusals`                             |
+| S-021                                 | `s021_end_does_not_create_a_successor`                                                      |
+| 03 P-006                              | `p006_the_session_must_belong_to_the_project`                                               |
+| 00 02 C-08、10 R2 心跳与续租          | `c08_r2_writes_refresh_heartbeat_and_renew_leases`                                          |
+| S-022                                 | `s022_git_context`                                                                          |
+| S-080、S-083、00 02 C-23              | `s080_bucket`、`s080_s083_c23_task_progress`                                                |
+| S-081、00 02 C-13                     | `s081_c13_duplicate_progress_is_a_noop`                                                     |
+| S-082                                 | `s082_blocker_blocks_the_task`                                                              |
+| 10 R1、R2                             | `r1_r2_progress_respects_the_claim`                                                         |
+| S-084                                 | `s084_progress_validation`                                                                  |
+| S-085、S-086                          | `s085_s086_project_progress`                                                                |
+| S-030、S-031、02 §3.3                 | `s030_progress_idempotency_and_v1_receipts`、`s031_record_idempotency`                      |
+| 02 §1.6 记录                          | `s090_records`、`s091_supersede`、`s092_related_records`、`s094_user_records`               |
+| R11 P2-1                              | `p2_1_long_summaries_are_truncated`                                                         |
+| 02 §1.8 反馈                          | `s093_feedback`                                                                             |
+
+变异验红：`output/w2-evidence/mutations/mut-w2e.py`，证据 `output/w2-evidence/w2e-mutation-evidence.json`。

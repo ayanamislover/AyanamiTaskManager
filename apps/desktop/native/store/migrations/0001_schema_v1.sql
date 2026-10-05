@@ -355,7 +355,9 @@ CREATE TABLE agent_sessions (
   predecessor_session_id TEXT, retirement_reason TEXT,
   git_repo_root TEXT, worktree_root TEXT, git_common_dir TEXT, git_is_linked_worktree INTEGER,
   git_detached INTEGER, git_dirty INTEGER, git_available INTEGER NOT NULL DEFAULT 0, git_error TEXT,
-  close_reason TEXT CHECK (close_reason IN ('HEARTBEAT_TIMEOUT','EXPLICIT_END','EXPLICIT_RETIRE','FORCE_CLOSE')),
+  close_reason TEXT CHECK (close_reason IN ('HEARTBEAT_TIMEOUT','EXPLICIT_END','EXPLICIT_RETIRE','FORCE_CLOSE','CLIENT_EXITED')),
+  -- R11 P1-2/P1-3：客户端身份（父进程 pid:创建时间）。身份字段，跨恢复保留（R4′）。有它时按进程存活判超时。
+  client_identity TEXT,
   PRIMARY KEY (project_id, id),
   FOREIGN KEY (project_id, agent_id) REFERENCES agents(project_id, id) DEFERRABLE INITIALLY DEFERRED,
   FOREIGN KEY (project_id, parent_session_id) REFERENCES agent_sessions(project_id, id) DEFERRABLE INITIALLY DEFERRED,
@@ -367,6 +369,7 @@ CREATE INDEX ix_agent_sessions_predecessor ON agent_sessions(project_id, predece
 CREATE INDEX ix_agent_sessions_active_worktree ON agent_sessions(project_id, connection_state, worktree_root);
 CREATE INDEX ix_agent_sessions_active_branch ON agent_sessions(project_id, connection_state, git_branch);
 CREATE INDEX ix_agent_sessions_list_keyset ON agent_sessions(project_id, started_at DESC, id DESC);
+CREATE INDEX ix_agent_sessions_client ON agent_sessions(client_identity, connection_state) WHERE client_identity IS NOT NULL;
 
 CREATE TABLE handoffs (
   project_id TEXT NOT NULL, id TEXT NOT NULL, work_item_id TEXT NOT NULL,

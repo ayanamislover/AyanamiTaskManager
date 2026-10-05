@@ -204,6 +204,20 @@ impl Task {
     }
 }
 
+/// 一条任务进度的内容（02 §1.5）。
+pub(crate) struct NewProgress<'a> {
+    /// 已 trim。
+    pub summary: &'a str,
+    /// 原值。
+    pub percent: Option<f64>,
+    pub bucket: Option<i64>,
+    pub completed: Value,
+    pub next: Value,
+    /// 非空的 blocker 文本（00 02 C-13：纯空白视为没有）。
+    pub blocker: Option<&'a str>,
+    pub evidence: Value,
+}
+
 /// W-038 的会话效果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionEffect {
@@ -528,36 +542,39 @@ impl<'a> Work<'a> {
         Ok(keys::blocker_key(&self.code, no))
     }
 
-    /// 写一条任务进度（02 §1.5、§5.5）并发 `work.progressed`。不改任务行：调用方随后的写入负责版本。
-    /// 用于 complete 一步写全的 note（R11 P1-1 第 4 条）；W2e 的 progress_add 在此之上加去重桶与 blocker。
+    /// 写一条任务进度（02 §1.5、§5.5）并发事件（`work.progressed`，带 blocker 时 `work.blocked`）。
+    /// 不改任务行：调用方随后的写入负责版本。
     pub fn add_progress(
         &mut self,
         task: &Task,
         key: &str,
-        summary: &str,
-        bucket: Option<i64>,
-        evidence: &Value,
+        p: &NewProgress<'_>,
     ) -> Result<String, DomainError> {
         use sha2::{Digest, Sha256};
         let id = self.ulid()?;
-        let hash = format!("{:x}", Sha256::digest(summary.as_bytes()));
+        let hash = format!("{:x}", Sha256::digest(p.summary.as_bytes()));
         let actor = self.ctx.actor.clone();
         self.tx
             .execute(
                 "INSERT INTO progress_updates (project_id, id, work_item_id, percent, progress_bucket, summary, summary_hash,
-                                               actor, session_id, created_at, evidence_json, op_id)
-                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                               completed_json, next_json, blocker_text, actor, session_id, created_at,
+                                               evidence_json, op_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     self.project,
                     id,
                     task.id,
-                    bucket,
-                    summary,
+                    p.percent,
+                    p.bucket,
+                    p.summary,
                     hash,
+                    p.completed.to_string(),
+                    p.next.to_string(),
+                    p.blocker,
                     actor.id,
                     actor.session,
                     self.now_iso,
-                    evidence.to_string(),
+                    p.evidence.to_string(),
                     self.ctx.op_id
                 ],
             )
@@ -566,11 +583,16 @@ impl<'a> Work<'a> {
             "key": key,
             "title": task.title,
             "from": task.computed_progress,
-            "to": bucket,
-            "summary": summary,
-            "evidence": evidence,
+            "to": p.bucket,
+            "summary": p.summary,
+            "evidence": p.evidence,
         });
-        self.emit("work.progressed", "WORK_ITEM", &task.id, &payload)?;
+        let kind = if p.blocker.is_some() {
+            "work.blocked"
+        } else {
+            "work.progressed"
+        };
+        self.emit(kind, "WORK_ITEM", &task.id, &payload)?;
         search::upsert_doc(
             self.tx,
             &Doc {
@@ -579,7 +601,7 @@ impl<'a> Work<'a> {
                 entity_id: &task.id,
                 entity_key: key,
                 title: &task.title,
-                body: summary,
+                body: p.summary,
                 updated_at: &self.now_iso,
             },
         )

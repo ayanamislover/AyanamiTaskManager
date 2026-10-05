@@ -8,7 +8,7 @@
 //! 复合操作各有自己的入口，结构上就不能与别的操作混在一个批次里（W-050 的混批拒绝在 W4 的适配层）。
 
 mod checklist;
-mod core;
+pub(crate) mod core;
 mod create;
 mod graph;
 mod patch;
@@ -19,6 +19,7 @@ pub use checklist::{
 };
 pub use create::{CreateItem, NewChecklist};
 pub use patch::{COMPLETE_NOTE, EditFields, ExpectedFields, PatchItem, VerifyAndComplete};
+pub(crate) use patch::{claim_not_owned, invalid_transition};
 pub use review::{Hashes, ReviewRequest, ReviewSubmit, Verdict};
 
 use crate::fp::JsValue;
@@ -79,6 +80,7 @@ impl Target {
             fingerprint,
             compat_v1: None,
             replay_guard: None,
+            rebind: crate::write::Rebind::Create,
         }
     }
 }

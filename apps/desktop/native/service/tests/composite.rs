@@ -1115,10 +1115,10 @@ fn w058_c26_submitter_identity() {
     });
     assert_eq!(e.details["reason"], "ROLE_NOT_REVIEWER");
     assert_eq!(e.details["recovery"]["begin_arguments"]["role"], "REVIEWER");
-    let e = w.refused(ErrorCode::REVIEWER_REQUIRED, || {
+    // 已关闭的 REVIEWER session 先被写入流水线拦下（02 §2.4 第 6 步，早于 W-058 的身份检查）。
+    w.refused(ErrorCode::SESSION_CLOSED, || {
         w.submit_as("RZ", submission(&s, 1, Verdict::Approved))
     });
-    assert_eq!(e.details["reason"], "SESSION_IDENTITY_INVALID");
     let e = w.refused(ErrorCode::REVIEW_IDENTITY_MISMATCH, || {
         w.submit_as("RV", submission(&s, 1, Verdict::Approved))
     });

@@ -720,9 +720,15 @@ fn complete_note(
     w.add_progress(
         task,
         key,
-        &summary,
-        None,
-        &crate::evidence::to_json(&evidence),
+        &super::core::NewProgress {
+            summary: &summary,
+            percent: None,
+            bucket: None,
+            completed: Value::Array(Vec::new()),
+            next: Value::Array(Vec::new()),
+            blocker: None,
+            evidence: crate::evidence::to_json(&evidence),
+        },
     )?;
     Ok(())
 }
