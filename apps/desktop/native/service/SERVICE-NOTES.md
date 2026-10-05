@@ -250,3 +250,75 @@ action 成功后 `rebind::heartbeat` 刷新心跳（不推 session 版本），s
 | 02 §1.8 反馈                          | `s093_feedback`                                                                             |
 
 变异验红：`output/w2-evidence/mutations/mut-w2e.py`，100 条全部 RED，证据 `output/w2-evidence/w2e-mutation-evidence.json`。
+
+## 读模型（`src/read/`，W2f）
+
+入口：`Service::brief`、`begin_brief`、`delta`、`task_list`、`task_get`、`record_list`、`session_list`、`search`、
+`mutation_ack`。全部在一个只读事务里完成，SQL 一律带 `project_id`（S-070）。输出形状照 surface v5 的 MCP 回执：
+brief 是 camelCase 载荷，列表、搜索、精确读取是 snake_case；W4 的 MCP 适配层只做参数映射。预算是
+`JSON.stringify(x).length`（UTF-16 码元），serde_json 的整数值 f64 先经 `codec::jsify` 改成整数，两边文本一致。
+
+### 游标
+
+| 前缀  | 用途                       | 绑定                                                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| `b4`  | brief 记录续读（点分格式） | 世代、目标哈希（项目、session、include、task_key、since_seq）、冻结记录版本、30 分钟桶过期 |
+| `tl2` | 任务列表                   | 项目、世代、选择集哈希、keyset 位置                                                        |
+| `rl2` | 记录列表                   | 同上                                                                                       |
+| `sl2` | session 列表               | 同上，选择集含 task_key（C-15）                                                            |
+| `s2`  | 全文搜索                   | 项目（全局搜索为 `*`）、世代、查询哈希、doc_id 与 quick rowid 快照、keyset 位置            |
+| `f3`  | 字段续读                   | 项目、世代、实体、类型、mask 哈希、实体版本、字段哈希、偏移、7 天桶过期                    |
+
+签名是 `app_meta.cursor_key`（建库时随机生成）对 `<前缀>.<载荷>` 的 HMAC-SHA256 前 16 字节。2.x 的前缀
+（`b3`、`tl1`、`rc1`、`rl1`、`sl1`、`s1`、`f2`）一律 `INVALID_CURSOR FORMAT_RETIRED`（Q-01）；别的项目的游标、改过的
+游标是 `INVALID_OR_TAMPERED`；按范围恢复之后（`projects.scope_gen` 变了）是 `SCOPE_RESTORED`。三者的恢复都是
+`{action:"restart_read", omit_cursor:true}`。参数与首页不同是 `CONTINUATION_CONFLICT TARGET_MISMATCH`（保留游标重试），
+冻结的内容变了是 `CONTINUATION_CONFLICT STALE`。
+
+### 规格没写死、由实现定下的
+
+| 位置                   | 做法                                                                                                    | 理由                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| brief 的 milestone     | 活动 objective 下按 sort_key、local_no 取第一个活动 milestone                                           | 00 02 C-10                                      |
+| brief 的「自己的」任务 | own 与 currentTask 按 session 的 lineage 判断                                                           | 10 R2：领取属于 lineage                         |
+| brief 的交接           | 唯一同四元组的已关闭来源（2.x），加上 lineage 里其他 session 发出、仍待确认的交接                       | 10 R4′：指名 predecessor 之后祖先的交接不能消失 |
+| 冻结记录的版本         | 紧凑记录去掉 related_records 后的 sha256 前 6 字节                                                      | 00 02 C-12：同 topic 新增记录不该让续读失效     |
+| brief 的身份放不下     | `RESULT_TOO_LARGE`（recovery 提高 max_chars）；begin 例外，始终返回身份                                 | 00 02 C-16                                      |
+| brief 的 session 状态  | session 不是 ONLINE 时身份里带 `session_state`                                                          | 00 02 C-17                                      |
+| delta 续读             | `continuation.arguments` 带上原请求的 types                                                             | 00 02 C-04                                      |
+| ACK 的 session         | 回执所属的 session（author_session → SESSION 命名空间 → actor_session_id）；rebind 时是后继             | 00 02 C-05：details_cursor 原样调用总能查到     |
+| ACK 的投影             | 不再有 `projection`；加 `replayed`                                                                      | 00 02 Q-05：单库没有异步投影                    |
+| 搜索的 `truncated`     | 只表示预算截断；首页一条都放不下时 `next_cursor` 是起点游标                                             | 00 02 C-09                                      |
+| 字段续读的偏移         | 按 UTF-16 计，但只落在 code point 边界上                                                                | 00 02 C-19                                      |
+| 全局搜索               | 只看 ACTIVE / ARCHIVED 项目，带上 quick task（`project:null`）                                          | 03 F-05                                         |
+| TRASHED 项目的读       | `PROJECT_DB_UNAVAILABLE`（`retryable:false`、recovery `restore_project`）                               | 04 §1.3                                         |
+| task_list              | `status` 接受 `open` / `closed` / `all` / 具体状态；`mine_session` 只列该 session 的 lineage 持有的任务 | R11 P2-5                                        |
+| 查询与选择集的哈希     | 不做 NFC 规范化（没有可用的 crate）；2.x 也只在少数入口做                                               | 差异只影响「换了写法的同一查询」能否续读        |
+| 推迟到 W4              | owner 读时续租、reconcile 视图                                                                          | 需要 MCP 会话上下文                             |
+
+### 追溯（`tests/read.rs`）
+
+| 规则                      | 用例                                                         |
+| ------------------------- | ------------------------------------------------------------ |
+| S-050                     | `s050_brief_selects_records`                                 |
+| S-051、10 R2、R4′         | `s051_r4_handoffs_by_identity`、`r2_own_follows_the_lineage` |
+| S-052、00 02 C-10         | `s052_c10_include_and_sections`                              |
+| S-053、S-054              | `s053_s054_budget_and_continuation`                          |
+| S-055～S-059、A3          | `s055_s059_continuation_rules`                               |
+| 00 02 C-12                | `c12_related_records_do_not_stale_the_cursor`                |
+| S-060、00 02 C-16         | `s060_c16_begin_brief_modes`                                 |
+| 00 02 C-17                | `c17_brief_flags_a_closed_session`                           |
+| S-061～S-063、00 02 C-04  | `s061_s063_c04_delta`、`delta_types_filter`                  |
+| S-064                     | `s064_oversized_event`                                       |
+| S-065、R11 P2-5           | `s065_task_list_paging`                                      |
+| 02 §4.5 视图与 field_mask | `task_views_and_masks`                                       |
+| 00 02 C-19                | `c19_field_continuation`、`field_cursor_expires`             |
+| S-066、S-067、00 02 C-15  | `s066_s067_c15_record_and_session_lists`                     |
+| S-068、00 02 C-09         | `s068_c09_search`                                            |
+| 03 F-05、04 §1.3          | `f05_global_search_and_trashed_projects`                     |
+| 02 §4.5 精确读取          | `exact_reads`                                                |
+| S-069、00 02 C-05、Q-05   | `s069_c05_q05_ack_and_trace`、`ack_preview_is_bounded`       |
+| S-070、00 02 Q-01、A3     | `q01_retired_cursors_and_generations`                        |
+
+变异验红：`output/w2-evidence/mutations/mut-w2f.py`，93 条全部 RED，证据 `output/w2-evidence/w2f-mutation-evidence.json`。
+「ACK 忽略 rebind 后继」是等价变异，未列入：有回执时回执的 `author_session` 已经是后继，`rebound_to` 只在没有回执时兜底。

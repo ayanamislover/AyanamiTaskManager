@@ -24,6 +24,11 @@ pub struct World {
 }
 
 pub fn world(name: &str) -> World {
+    world_with(name, None)
+}
+
+/// 读侧时钟可换的世界（游标过期）。
+pub fn world_with(name: &str, clock: Option<atm_service::write::Clock>) -> World {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -102,8 +107,12 @@ pub fn world(name: &str) -> World {
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
+    let svc = Service::new(store);
     World {
-        svc: Service::new(store),
+        svc: match clock {
+            Some(c) => svc.with_clock(c),
+            None => svc,
+        },
         op: std::sync::atomic::AtomicU32::new(0),
     }
 }

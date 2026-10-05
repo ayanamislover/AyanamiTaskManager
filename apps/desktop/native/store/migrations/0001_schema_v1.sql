@@ -14,6 +14,8 @@ CREATE TABLE app_meta (
   global_seq         INTEGER NOT NULL DEFAULT 0,
   scope_gen_counter  INTEGER NOT NULL DEFAULT 0,
   converted_from     TEXT,
+  -- 00 C-L12 / 02 §9.5：读游标（brief、列表、搜索、字段续读、知识）的 HMAC 密钥，库内随机生成，不出库。
+  cursor_key         TEXT    NOT NULL DEFAULT (lower(hex(randomblob(32)))),
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 

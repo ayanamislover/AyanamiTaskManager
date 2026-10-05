@@ -134,13 +134,27 @@ pub struct Written {
     pub rebound_to: Option<String>,
 }
 
+/// 读侧用的时钟（游标过期）。测试可以换成固定时间。
+pub type Clock = std::sync::Arc<dyn Fn() -> Timestamp + Send + Sync>;
+
 pub struct Service {
     store: Store,
+    clock: Option<Clock>,
 }
 
 impl Service {
     pub fn new(store: Store) -> Self {
-        Service { store }
+        Service { store, clock: None }
+    }
+
+    /// 换掉读侧的时钟（只影响游标的签发与过期判断）。
+    pub fn with_clock(mut self, clock: Clock) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
+    pub(crate) fn clock(&self) -> Timestamp {
+        self.clock.as_ref().map_or_else(crate::read::now, |c| c())
     }
 
     pub fn store(&self) -> &Store {
