@@ -11,10 +11,12 @@
 //!
 //! 批内任一条失败，整个事务回滚（W-041）。
 
+use super::checklist::CompleteChecklist;
 use super::core::{SessionEffect, Task, Work, db, invalid_argument, validation, with_next};
 use super::graph::{self, GraphError};
 use crate::write::internal;
 use atm_domain::error::{DomainError, ErrorCode};
+use atm_domain::evidence::{self, Evidence, EvidenceSite};
 use atm_domain::gate::{self, GateBlocker, GateChecklist, GateInput, GateTask};
 use atm_domain::keys;
 use atm_domain::ownership::{
@@ -23,7 +25,7 @@ use atm_domain::ownership::{
 use atm_domain::text::{js_trim, utf16_len};
 use atm_domain::work::{
     AutoStart, InvalidTransition, Operation, PatchKind, StateWrite, Status, VersionNeed, WaitingOn,
-    auto_start, resolve, version_need,
+    WorkState, auto_start, resolve, version_need,
 };
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
@@ -72,6 +74,12 @@ pub struct PatchItem {
     pub superseded_by: Option<Option<String>>,
     pub edit: EditFields,
     pub expected_fields: Option<ExpectedFields>,
+    /// complete 一步写全（R11 P1-1 第 4 条）：同一事务里写一条任务进度。
+    pub note: Option<String>,
+    /// complete 附带的证据，随 note 的那条进度落库（没给 note 时进度摘要用 [`COMPLETE_NOTE`]）。
+    pub evidence: Option<Vec<Evidence>>,
+    /// complete 之前先更新的检查项，效果同一事务里先做 checklist_batch。
+    pub checklist: Option<Vec<CompleteChecklist>>,
 }
 
 impl PatchItem {
@@ -88,6 +96,9 @@ impl PatchItem {
             superseded_by: None,
             edit: EditFields::default(),
             expected_fields: None,
+            note: None,
+            evidence: None,
+            checklist: None,
         }
     }
 
@@ -98,6 +109,9 @@ impl PatchItem {
 }
 
 pub const MAX_BATCH: usize = 50;
+
+/// complete 只带 evidence、没带 note 时那条进度的摘要。
+pub const COMPLETE_NOTE: &str = "完成";
 
 /// 不碰存储的入参校验（相当于 2.x 的 schema 层，W-102；违反报 INVALID_ARGUMENT）。
 pub(crate) fn validate(items: &[PatchItem]) -> Result<(), DomainError> {
@@ -113,6 +127,15 @@ pub(crate) fn validate(items: &[PatchItem]) -> Result<(), DomainError> {
         validate_item(item).map_err(|e| e.detail("item_index", index))?;
     }
     Ok(())
+}
+
+/// W-011 的格式校验与 trim；违反报 INVALID_ARGUMENT（带 problems）。
+pub(crate) fn checked_evidence(
+    path: &str,
+    site: EvidenceSite,
+    list: &[Evidence],
+) -> Result<Vec<Evidence>, DomainError> {
+    evidence::validate(path, site, list.to_vec()).map_err(DomainError::invalid_argument)
 }
 
 fn too_long(field: &str, max: usize) -> DomainError {
@@ -161,6 +184,30 @@ fn validate_item(item: &PatchItem) -> Result<(), DomainError> {
                 return Err(unexpected(field));
             }
         }
+    }
+    if op != Operation::Complete {
+        for (field, given) in [
+            ("note", item.note.is_some()),
+            ("evidence", item.evidence.is_some()),
+            ("checklist", item.checklist.is_some()),
+        ] {
+            if given {
+                return Err(unexpected(field));
+            }
+        }
+    }
+    if let Some(note) = &item.note {
+        let note = js_trim(note);
+        if note.is_empty() {
+            return Err(invalid_argument("note", "note 不能为空白；不需要时省略它"));
+        }
+        check_text("note", note, 500)?;
+    }
+    if let Some(list) = &item.evidence {
+        checked_evidence("evidence", EvidenceSite::Progress, list)?;
+    }
+    if let Some(list) = &item.checklist {
+        super::checklist::validate_complete(list)?;
     }
     if op != Operation::Edit {
         if !item.edit.is_empty() {
@@ -502,51 +549,15 @@ fn apply(
             w.session_effect(&task.id, SessionEffect::Working)?;
         }
         Operation::Complete => {
-            let outcome = gate::evaluate(&gate_input(w, &task)?);
-            if !outcome.passed() {
-                let mut e = DomainError::new(
-                    ErrorCode::COMPLETION_GATE_FAILED,
-                    "任务尚未满足完成条件：按 reasons 逐条处理",
-                )
-                .detail("task_key", key.as_str())
-                .detail(
-                    "reasons",
-                    serde_json::to_value(&outcome.reasons).map_err(internal)?,
-                )
-                .detail("truncated", outcome.truncated)
-                .detail(
-                    "reason_limit_per_predicate",
-                    outcome.reason_limit_per_predicate,
-                )
-                .detail(
-                    "truncation",
-                    serde_json::to_value(&outcome.truncation).map_err(internal)?,
-                );
-                if auto == AutoStart::SuggestStart {
-                    e = with_next(e, json!({ "operation": "start", "task_key": key }));
-                }
-                return Err(e);
+            // R11 P1-1 第 4 条：先按 checklist_batch 的规则写检查项，门在写过之后的状态上求值。
+            if let Some(list) = &item.checklist {
+                super::checklist::for_complete(w, &mut task, &key, list)?;
             }
-            task.state = target;
-            task.clear_waiting();
-            task.completed_at = Some(w.now_iso.clone());
-            task.computed_progress = 100.0;
-            task.reported_progress = Some(100.0);
-            // 00 C-24
-            task.progress_source = "NONE".to_owned();
-            // 00 C-03：终态没有领取。
-            task.drop_claim();
-            commit(
-                w,
-                &mut task,
-                &key,
-                "work.completed",
-                op,
-                &before,
-                Value::Null,
-                false,
-            )?;
-            w.session_effect(&task.id, SessionEffect::Idle)?;
+            check_gate(w, &task, &key, auto == AutoStart::SuggestStart)?;
+            if item.note.is_some() || item.evidence.is_some() {
+                complete_note(w, &mut task, &key, item)?;
+            }
+            complete_write(w, &mut task, target, &key, op, &before, Value::Null)?;
         }
         Operation::Cancel => {
             let dup = resolve_ref(w, &task, &key, "duplicate_of", item.duplicate_of.as_ref())?;
@@ -626,6 +637,96 @@ fn apply(
     })
 }
 
+/// 完成门（§4）。不过时报 COMPLETION_GATE_FAILED；`suggest_start`：附上「先 start」的下一步。
+pub(crate) fn check_gate(
+    w: &Work<'_>,
+    task: &Task,
+    key: &str,
+    suggest_start: bool,
+) -> Result<(), DomainError> {
+    let outcome = gate::evaluate(&gate_input(w, task)?);
+    if outcome.passed() {
+        return Ok(());
+    }
+    let mut e = DomainError::new(
+        ErrorCode::COMPLETION_GATE_FAILED,
+        "任务尚未满足完成条件：按 reasons 逐条处理",
+    )
+    .detail("task_key", key)
+    .detail(
+        "reasons",
+        serde_json::to_value(&outcome.reasons).map_err(internal)?,
+    )
+    .detail("truncated", outcome.truncated)
+    .detail(
+        "reason_limit_per_predicate",
+        outcome.reason_limit_per_predicate,
+    )
+    .detail(
+        "truncation",
+        serde_json::to_value(&outcome.truncation).map_err(internal)?,
+    );
+    if suggest_start {
+        e = with_next(e, json!({ "operation": "start", "task_key": key }));
+    }
+    Err(e)
+}
+
+/// W-032 的写入：DONE、completed_at、进度 100、来源 NONE（C-24）、清领取（C-03），会话 IDLE。
+pub(crate) fn complete_write(
+    w: &mut Work<'_>,
+    task: &mut Task,
+    target: WorkState,
+    key: &str,
+    op: Operation,
+    before: &Task,
+    extra: Value,
+) -> Result<(), DomainError> {
+    task.state = target;
+    task.clear_waiting();
+    task.completed_at = Some(w.now_iso.clone());
+    task.computed_progress = 100.0;
+    task.reported_progress = Some(100.0);
+    // 00 C-24
+    task.progress_source = "NONE".to_owned();
+    // 00 C-03：终态没有领取。
+    task.drop_claim();
+    commit(w, task, key, "work.completed", op, before, extra, false)?;
+    w.session_effect(&task.id, SessionEffect::Idle)
+}
+
+/// complete 带的 note / evidence：一条进度（不单独推版本，随 complete 的 +1）。
+fn complete_note(
+    w: &mut Work<'_>,
+    task: &mut Task,
+    key: &str,
+    item: &PatchItem,
+) -> Result<(), DomainError> {
+    let summary = item
+        .note
+        .as_deref()
+        .map_or(COMPLETE_NOTE, js_trim)
+        .to_owned();
+    let evidence = match &item.evidence {
+        Some(list) => {
+            let list = checked_evidence("evidence", EvidenceSite::Progress, list)?;
+            crate::evidence::normalize(w.tx, &w.project, &w.code, "evidence", list)?
+        }
+        None => Vec::new(),
+    };
+    if !evidence.is_empty() {
+        task.last_evidence_at = Some(w.now_iso.clone());
+    }
+    w.add_progress(
+        task,
+        key,
+        &summary,
+        None,
+        &crate::evidence::to_json(&evidence),
+    )?;
+    Ok(())
+}
+
 /// 写回一行并发一条事件。`transfer`：R2 的自动转移与续租（领取仍在、写入者在领取的 lineage 里）。
 #[allow(clippy::too_many_arguments)]
 fn commit(
@@ -639,13 +740,7 @@ fn commit(
     transfer: bool,
 ) -> Result<(), DomainError> {
     if transfer {
-        let claim = task.claim();
-        let requester = w.requester(&claim);
-        if let Some((session, lease)) = ownership::claim_after_write(claim, requester, w.now) {
-            let session = session.to_owned();
-            task.claimed_by = Some(session);
-            task.lease = Some(lease.to_string());
-        }
+        w.transfer_claim(task);
     }
     task.version += 1;
     w.save(task)?;
@@ -666,7 +761,7 @@ fn commit(
 
 // ---------- 版本 ----------
 
-fn holds_claim(w: &Work<'_>, task: &Task, op: Operation, takeover: bool) -> bool {
+fn holds_claim(w: &Work<'_>, task: &Task, write: StateWrite, takeover: bool) -> bool {
     let claim = task.claim();
     let requester = w.requester(&claim);
     let Requester::Agent {
@@ -680,8 +775,10 @@ fn holds_claim(w: &Work<'_>, task: &Task, op: Operation, takeover: bool) -> bool
         return true;
     }
     // 这次 claim / start / 自动 start 能拿到领取（不含接管别人的过期领取）。
-    let acquires = matches!(op, Operation::Claim | Operation::Start)
-        || auto_start(StateWrite::Basic(op), task.status()) == AutoStart::Apply;
+    let acquires = matches!(
+        write,
+        StateWrite::Basic(Operation::Claim | Operation::Start)
+    ) || auto_start(write, task.status()) == AutoStart::Apply;
     acquires
         && matches!(
             ownership::acquire(claim, requester, takeover, w.now),
@@ -717,28 +814,41 @@ fn check_version(
         None => {
             if version_need(
                 PatchKind::Basic(op),
-                holds_claim(w, task, op, item.takeover_stale),
+                holds_claim(w, task, StateWrite::Basic(op), item.takeover_stale),
             ) == VersionNeed::Required
             {
-                let e = DomainError::new(
-                    ErrorCode::EXPECTED_VERSION_REQUIRED,
-                    format!(
-                        "{} 需要 expected_version：任务 {key} 当前版本是 {}",
-                        op.as_str(),
-                        task.version
-                    ),
-                )
-                .detail("task_key", key)
-                .detail("operation", op.as_str())
-                .detail("current_version", task.version);
-                return Err(with_next(
-                    e,
-                    json!({ "operation": op.as_str(), "task_key": key, "expected_version": task.version }),
-                ));
+                return Err(version_required(key, op.as_str(), task.version));
             }
             Ok(None)
         }
     }
+}
+
+/// EXPECTED_VERSION_REQUIRED（R11 P1-1）：带上当前版本与填好版本的下一步。
+pub(crate) fn version_required(key: &str, operation: &str, current: i64) -> DomainError {
+    let e = DomainError::new(
+        ErrorCode::EXPECTED_VERSION_REQUIRED,
+        format!("{operation} 需要 expected_version：任务 {key} 当前版本是 {current}"),
+    )
+    .detail("task_key", key)
+    .detail("operation", operation)
+    .detail("current_version", current);
+    with_next(
+        e,
+        json!({ "operation": operation, "task_key": key, "expected_version": current }),
+    )
+}
+
+/// 本 lineage 是否持有这个任务的领取（不含这次才拿到的）。
+pub(crate) fn lineage_holds(w: &Work<'_>, task: &Task) -> bool {
+    let claim = task.claim();
+    matches!(
+        w.requester(&claim),
+        Requester::Agent {
+            holder_in_lineage: true,
+            ..
+        }
+    ) && claim.is_held()
 }
 
 /// W-101：版本不等时，edit 只有在「每个比较值都等于当前值」时才继续。返回被修改的字段。
@@ -1260,9 +1370,122 @@ pub(crate) fn dependency_cycle(g: GraphError, task: &str, dep: &str) -> DomainEr
     .detail("reason", g.reason())
 }
 
+// ---------- verify_and_complete ----------
+
+/// W-052 的入参。
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifyAndComplete {
+    pub task_key: String,
+    /// 比的是目标任务版本（W-051）。R11 P1-1：本 lineage 持有领取（含这次自动 start 拿到）时可省略。
+    pub expected_version: Option<i64>,
+}
+
+/// W-052：verify（不在 VERIFYING 时）→ 在 VERIFYING 上求完成门 → DONE，一个事务。
+/// 门不过整事务回滚：不留 VERIFYING、会话改动、第一条事件、序号与回执（W-062）。
+pub(crate) fn verify_and_complete(
+    w: &mut Work<'_>,
+    req: &VerifyAndComplete,
+) -> Result<Value, DomainError> {
+    const OPERATION: &str = "verify_and_complete";
+    let mut task = w.load_by_key(&req.task_key)?;
+    let key = w.task_key(&task);
+    let from_status = task.status();
+    let from_version = task.version;
+
+    // R1：verify_and_complete 改的是领取中的任务。
+    let claim = task.claim();
+    if let Err(e) = ownership::may_modify(claim, w.requester(&claim), w.now) {
+        return Err(claim_not_owned(&key, e));
+    }
+    match req.expected_version {
+        Some(expected) if expected != task.version => {
+            return Err(w.version_conflict(&task, expected)?);
+        }
+        Some(_) => {}
+        None => {
+            let holds = holds_claim(w, &task, StateWrite::VerifyAndComplete, false);
+            if version_need(PatchKind::VerifyAndComplete, holds) == VersionNeed::Required {
+                return Err(version_required(&key, OPERATION, task.version));
+            }
+        }
+    }
+
+    let auto = auto_start(StateWrite::VerifyAndComplete, task.status());
+    let mut auto_applied = false;
+    if auto == AutoStart::Apply {
+        start_preconditions(w, &task, &key, false)?;
+        let target = resolve(Operation::Start, task.state, false)
+            .map_err(|e| invalid_transition(&key, e, false))?;
+        claim_and_start(w, &mut task, target, Operation::Start, &key)?;
+        auto_applied = true;
+    }
+
+    let parent_before = task.parent_id.clone();
+    let mut transitions = Vec::new();
+    let mut verification_sequence = None;
+    if task.status() != Status::Verifying {
+        let target = resolve(Operation::Verify, task.state, false)
+            .map_err(|e| invalid_transition(&key, e, auto == AutoStart::SuggestStart))?;
+        let before = task.clone();
+        task.state = target;
+        task.clear_waiting();
+        commit(
+            w,
+            &mut task,
+            &key,
+            "work.verification_requested",
+            Operation::Verify,
+            &before,
+            json!({ "operation": OPERATION, "composite": true }),
+            true,
+        )?;
+        w.session_effect(&task.id, SessionEffect::Working)?;
+        transitions.push(Status::Verifying.as_str());
+        verification_sequence = Some(w.sequence);
+    }
+
+    let target = resolve(Operation::Complete, task.state, false)
+        .map_err(|e| invalid_transition(&key, e, false))?;
+    check_gate(w, &task, &key, false)?;
+    let before = task.clone();
+    let mut extra = json!({ "operation": OPERATION, "composite": true });
+    if let Some(seq) = verification_sequence {
+        extra["verificationSequence"] = json!(seq);
+    }
+    complete_write(
+        w,
+        &mut task,
+        target,
+        &key,
+        Operation::Complete,
+        &before,
+        extra,
+    )?;
+    transitions.push(Status::Done.as_str());
+    if let Some(parent) = parent_before {
+        w.recompute_from(&parent);
+    }
+    w.finish()?;
+    let item = w.view(&task.id)?;
+    let mut result = json!({
+        "taskKey": key,
+        "fromStatus": from_status.as_str(),
+        "status": Status::Done.as_str(),
+        "fromVersion": from_version,
+        "taskVersion": item["version"],
+        "transitions": transitions,
+        "item": item,
+        "sequence": w.sequence,
+    });
+    if auto_applied {
+        result["autoApplied"] = json!([{ "taskKey": key, "operations": ["start"] }]);
+    }
+    Ok(result)
+}
+
 // ---------- 错误 ----------
 
-fn claim_not_owned(key: &str, e: ClaimNotOwned) -> DomainError {
+pub(crate) fn claim_not_owned(key: &str, e: ClaimNotOwned) -> DomainError {
     with_next(
         DomainError::new(
             ErrorCode::CLAIM_NOT_OWNED,
@@ -1321,7 +1544,11 @@ fn owner_required(
     error
 }
 
-fn invalid_transition(key: &str, e: InvalidTransition, suggest_start: bool) -> DomainError {
+pub(crate) fn invalid_transition(
+    key: &str,
+    e: InvalidTransition,
+    suggest_start: bool,
+) -> DomainError {
     let legal: Vec<&str> = e.legal_operations.iter().map(|op| op.as_str()).collect();
     let error = DomainError::new(
         ErrorCode::INVALID_TRANSITION,

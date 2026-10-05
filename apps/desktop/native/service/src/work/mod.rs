@@ -1,25 +1,37 @@
-//! 工作项服务（W2c）：批量创建与十二种基础操作。
+//! 工作项服务：批量创建与十二种基础操作（W2c），五种复合操作（W2d）。
 //!
 //! 入口都经 [`Service::write`]（能力检查 → 入队世代 → 同事务的幂等查找 → 动作 → 回执）。
-//! operation 名沿用 2.x（`work.create.batch`、`work.patch.batch`），转换来的旧回执才能按 kernel-v1 比对。
+//! operation 名沿用 2.x（`work.create.batch`、`work.patch.batch`、`work.verify-and-complete`、
+//! `checklist.update`、`checklist.update.batch`、`review.request.create`、`review.submit`），
+//! 转换来的旧回执才能按 kernel-v1 比对。
+//!
+//! 复合操作各有自己的入口，结构上就不能与别的操作混在一个批次里（W-050 的混批拒绝在 W4 的适配层）。
 
+mod checklist;
 mod core;
 mod create;
 mod graph;
 mod patch;
+mod review;
 
+pub use checklist::{
+    ChecklistBatch, ChecklistChange, ChecklistRef, ChecklistSingle, CompleteChecklist,
+};
 pub use create::{CreateItem, NewChecklist};
-pub use patch::{EditFields, ExpectedFields, PatchItem};
+pub use patch::{COMPLETE_NOTE, EditFields, ExpectedFields, PatchItem, VerifyAndComplete};
+pub use review::{Hashes, ReviewRequest, ReviewSubmit, Verdict};
 
 use crate::fp::JsValue;
 use crate::receipts::ReceiptScope;
-use crate::write::{Family, FpInput, Service, SessionRef, WriteRequest, Written};
+use crate::write::{Family, FpInput, ReplayGuard, Service, SessionRef, WriteRequest, Written};
 use atm_domain::capability::Capability;
 use atm_domain::error::DomainError;
+use atm_domain::evidence::{Evidence, EvidenceSite};
 use atm_domain::keys;
 use atm_domain::principal::Principal;
 use atm_domain::text::js_trim;
 use atm_domain::work::Operation;
+use rusqlite::Transaction;
 use serde_json::{Map, Value, json};
 
 /// 写一个项目时都要带的部分。
@@ -65,12 +77,19 @@ impl Target {
             actor: None,
             expected_generation: self.expected_generation,
             fingerprint,
+            compat_v1: None,
+            replay_guard: None,
         }
     }
 }
 
 pub const CREATE_OPERATION: &str = "work.create.batch";
 pub const PATCH_OPERATION: &str = "work.patch.batch";
+pub const VERIFY_AND_COMPLETE_OPERATION: &str = "work.verify-and-complete";
+pub const CHECKLIST_OPERATION: &str = "checklist.update";
+pub const CHECKLIST_BATCH_OPERATION: &str = "checklist.update.batch";
+pub const REVIEW_REQUEST_OPERATION: &str = "review.request.create";
+pub const REVIEW_SUBMIT_OPERATION: &str = "review.submit";
 
 impl Service {
     /// 批量创建（W-070～W-080）。公开入口：只能建成 BACKLOG / READY，默认 READY。
@@ -82,7 +101,7 @@ impl Service {
     ) -> Result<Written, DomainError> {
         create::validate(&items, false)?;
         let fp_items = items.clone();
-        let fingerprint: FpInput = Box::new(move |family, _| create_fp(family, &fp_items));
+        let fingerprint: FpInput = Box::new(move |_, family, _| create_fp(family, &fp_items));
         self.write(
             principal,
             target.request(Capability::WorkCreate, CREATE_OPERATION, fingerprint),
@@ -102,13 +121,239 @@ impl Service {
     ) -> Result<Written, DomainError> {
         patch::validate(&items)?;
         let fp_items = items.clone();
-        let fingerprint: FpInput = Box::new(move |family, _| patch_fp(family, &fp_items));
+        let project = target.project_id.clone();
+        let fingerprint: FpInput =
+            Box::new(move |tx, family, _| patch_fp(tx, &project, family, &fp_items));
         self.write(
             principal,
             target.request(Capability::WorkPatch, PATCH_OPERATION, fingerprint),
             move |tx, ctx| {
                 let mut w = core::Work::open(tx, ctx)?;
                 patch::run(&mut w, &items)
+            },
+        )
+    }
+
+    /// W-052 verify_and_complete。
+    pub fn verify_and_complete(
+        &self,
+        principal: &Principal,
+        target: &Target,
+        req: VerifyAndComplete,
+    ) -> Result<Written, DomainError> {
+        if let Some(v) = req.expected_version
+            && v < 0
+        {
+            return Err(core::invalid_argument(
+                "expected_version",
+                "expected_version 不能是负数",
+            ));
+        }
+        let fp_req = req.clone();
+        let fingerprint: FpInput = Box::new(move |_, family, _| {
+            let value = match family {
+                Family::CanonV2 => {
+                    let mut m = Map::new();
+                    m.insert("task_key".into(), key(&fp_req.task_key));
+                    opt(&mut m, "expected_version", fp_req.expected_version, |v| {
+                        json!(v)
+                    });
+                    Value::Object(m)
+                }
+                Family::KernelV1 => json!({
+                    "taskKey": js_trim(&fp_req.task_key),
+                    "expectedVersion": fp_req.expected_version?,
+                }),
+                Family::KnowledgeV1 => return None,
+            };
+            Some(JsValue::from_json(&value))
+        });
+        self.write(
+            principal,
+            target.request(
+                Capability::WorkVerifyComplete,
+                VERIFY_AND_COMPLETE_OPERATION,
+                fingerprint,
+            ),
+            move |tx, ctx| {
+                let mut w = core::Work::open(tx, ctx)?;
+                patch::verify_and_complete(&mut w, &req)
+            },
+        )
+    }
+
+    /// W-053 checklist_single。
+    pub fn update_checklist(
+        &self,
+        principal: &Principal,
+        target: &Target,
+        req: ChecklistSingle,
+    ) -> Result<Written, DomainError> {
+        checklist::validate_single(&req)?;
+        let project = target.project_id.clone();
+        let fp_req = req.clone();
+        let fingerprint: FpInput =
+            Box::new(move |tx, family, _| checklist_single_fp(tx, &project, family, &fp_req, true));
+        let mut request = target.request(
+            Capability::ChecklistUpdate,
+            CHECKLIST_OPERATION,
+            fingerprint,
+        );
+        if let Some(task_key) = req.task_key.clone() {
+            // 02 §3.3：带 taskKey 的请求也认不带 taskKey 的旧回执，但重放前确认检查项仍属于这个任务。
+            let project = target.project_id.clone();
+            let compat_req = req.clone();
+            request.compat_v1 = Some(Box::new(move |tx, family, _| {
+                checklist_single_fp(tx, &project, family, &compat_req, false)
+            }));
+            let project = target.project_id.clone();
+            let checklist_id = req.checklist_id.clone();
+            let guard: ReplayGuard =
+                Box::new(move |tx| checklist::replay_guard(tx, &project, &checklist_id, &task_key));
+            request.replay_guard = Some(guard);
+        }
+        self.write(principal, request, move |tx, ctx| {
+            let mut w = core::Work::open(tx, ctx)?;
+            checklist::single(&mut w, &req)
+        })
+    }
+
+    /// W-054 checklist_batch。
+    pub fn update_checklist_batch(
+        &self,
+        principal: &Principal,
+        target: &Target,
+        req: ChecklistBatch,
+    ) -> Result<Written, DomainError> {
+        checklist::validate_batch(&req)?;
+        let project = target.project_id.clone();
+        let fp_req = req.clone();
+        let fingerprint: FpInput =
+            Box::new(move |tx, family, _| checklist_batch_fp(tx, &project, family, &fp_req));
+        self.write(
+            principal,
+            target.request(
+                Capability::ChecklistUpdate,
+                CHECKLIST_BATCH_OPERATION,
+                fingerprint,
+            ),
+            move |tx, ctx| {
+                let mut w = core::Work::open(tx, ctx)?;
+                checklist::batch(&mut w, &req)
+            },
+        )
+    }
+
+    /// W-057 review_request。
+    pub fn request_review(
+        &self,
+        principal: &Principal,
+        target: &Target,
+        req: ReviewRequest,
+    ) -> Result<Written, DomainError> {
+        let req = review::validate_request(&req)?;
+        let fp_req = req.clone();
+        let fingerprint: FpInput = Box::new(move |_, family, _| {
+            let hashes = review::hashes_json(&fp_req.candidate_hashes);
+            let value = match family {
+                Family::CanonV2 => {
+                    let mut m = Map::new();
+                    m.insert("review_task_key".into(), key(&fp_req.review_task_key));
+                    opt(
+                        &mut m,
+                        "expected_review_task_version",
+                        fp_req.expected_review_task_version,
+                        |v| json!(v),
+                    );
+                    m.insert("parent_checklist_id".into(), s(&fp_req.parent_checklist_id));
+                    m.insert(
+                        "expected_parent_checklist_version".into(),
+                        json!(fp_req.expected_parent_checklist_version),
+                    );
+                    m.insert("expected_candidate_hashes".into(), hashes);
+                    Value::Object(m)
+                }
+                Family::KernelV1 => json!({
+                    "reviewTaskKey": js_trim(&fp_req.review_task_key),
+                    "expectedReviewTaskVersion": fp_req.expected_review_task_version?,
+                    "parentChecklistId": fp_req.parent_checklist_id,
+                    "expectedParentChecklistVersion": fp_req.expected_parent_checklist_version,
+                    "expectedCandidateHashes": hashes,
+                }),
+                Family::KnowledgeV1 => return None,
+            };
+            Some(JsValue::from_json(&value))
+        });
+        self.write(
+            principal,
+            target.request(
+                Capability::ReviewRequest,
+                REVIEW_REQUEST_OPERATION,
+                fingerprint,
+            ),
+            move |tx, ctx| {
+                let mut w = core::Work::open(tx, ctx)?;
+                review::request(&mut w, &req)
+            },
+        )
+    }
+
+    /// W-058～W-060 review_submit。
+    pub fn submit_review(
+        &self,
+        principal: &Principal,
+        target: &Target,
+        req: ReviewSubmit,
+    ) -> Result<Written, DomainError> {
+        let req = review::validate_submit(&req)?;
+        let project = target.project_id.clone();
+        let fp_req = req.clone();
+        let fingerprint: FpInput = Box::new(move |tx, family, _| {
+            let hashes = review::hashes_json(&fp_req.reviewed_hashes);
+            let evidence = fp_evidence(tx, &project, &fp_req.evidence, EvidenceSite::ReviewSubmit);
+            let value = match family {
+                Family::CanonV2 => {
+                    let mut m = Map::new();
+                    m.insert("request_key".into(), key(&fp_req.request_key));
+                    opt(
+                        &mut m,
+                        "review_task_key",
+                        fp_req.review_task_key.as_deref(),
+                        key,
+                    );
+                    opt(
+                        &mut m,
+                        "expected_review_task_version",
+                        fp_req.expected_review_task_version,
+                        |v| json!(v),
+                    );
+                    m.insert("verdict".into(), s(fp_req.verdict.as_str()));
+                    m.insert("reviewed_hashes".into(), hashes);
+                    m.insert("evidence".into(), evidence);
+                    Value::Object(m)
+                }
+                Family::KernelV1 => json!({
+                    "requestKey": js_trim(&fp_req.request_key),
+                    "reviewTaskKey": js_trim(fp_req.review_task_key.as_deref()?),
+                    "expectedReviewTaskVersion": fp_req.expected_review_task_version?,
+                    "verdict": fp_req.verdict.as_str(),
+                    "reviewedHashes": hashes,
+                    "evidence": evidence,
+                }),
+                Family::KnowledgeV1 => return None,
+            };
+            Some(JsValue::from_json(&value))
+        });
+        self.write(
+            principal,
+            target.request(
+                Capability::ReviewSubmit,
+                REVIEW_SUBMIT_OPERATION,
+                fingerprint,
+            ),
+            move |tx, ctx| {
+                let mut w = core::Work::open(tx, ctx)?;
+                review::submit(&mut w, &req)
             },
         )
     }
@@ -302,16 +547,33 @@ fn create_v1(it: &CreateItem) -> Option<Value> {
     Some(Value::Object(m))
 }
 
-fn patch_fp(family: Family, items: &[PatchItem]) -> Option<JsValue> {
+/// 指纹里的证据：先按 W-011 trim，再按 W-012 规范化；任一步失败就退回原样（02 §3.3）。
+fn fp_evidence(
+    tx: &Transaction<'_>,
+    project: &str,
+    list: &[Evidence],
+    site: EvidenceSite,
+) -> Value {
+    let trimmed = atm_domain::evidence::validate("evidence", site, list.to_vec())
+        .unwrap_or_else(|_| list.to_vec());
+    crate::evidence::to_json(&crate::evidence::normalize_or_raw(tx, project, &trimmed))
+}
+
+fn patch_fp(
+    tx: &Transaction<'_>,
+    project: &str,
+    family: Family,
+    items: &[PatchItem],
+) -> Option<JsValue> {
     let value = match family {
-        Family::CanonV2 => Value::Array(items.iter().map(patch_v2).collect()),
+        Family::CanonV2 => Value::Array(items.iter().map(|it| patch_v2(tx, project, it)).collect()),
         Family::KernelV1 => Value::Array(items.iter().map(patch_v1).collect::<Option<Vec<_>>>()?),
         Family::KnowledgeV1 => return None,
     };
     Some(JsValue::from_json(&value))
 }
 
-fn patch_v2(it: &PatchItem) -> Value {
+fn patch_v2(tx: &Transaction<'_>, project: &str, it: &PatchItem) -> Value {
     let mut m = Map::new();
     m.insert("task_key".into(), key(&it.task_key));
     m.insert("operation".into(), s(it.operation.as_str()));
@@ -345,6 +607,32 @@ fn patch_v2(it: &PatchItem) -> Value {
         });
         m.insert("expected_fields".into(), Value::Object(e));
     }
+    // R11 P1-1 第 4 条：complete 一步写全。
+    opt(&mut m, "note", it.note.as_deref(), trim);
+    opt(&mut m, "evidence", it.evidence.as_deref(), |e| {
+        fp_evidence(tx, project, e, EvidenceSite::Progress)
+    });
+    opt(&mut m, "checklist", it.checklist.as_deref(), |list| {
+        Value::Array(
+            list.iter()
+                .map(|c| {
+                    let mut x = Map::new();
+                    x.insert(
+                        "item".into(),
+                        match &c.item {
+                            ChecklistRef::Index(n) => json!(n),
+                            ChecklistRef::Text(t) => trim(t),
+                        },
+                    );
+                    x.insert("status".into(), s(checklist::status_str(c.status)));
+                    opt(&mut x, "evidence", c.evidence.as_deref(), |e| {
+                        fp_evidence(tx, project, e, EvidenceSite::Checklist)
+                    });
+                    Value::Object(x)
+                })
+                .collect(),
+        )
+    });
     Value::Object(m)
 }
 
@@ -398,6 +686,10 @@ fn edit_fields(m: &mut Map<String, Value>, e: &EditFields, v2: bool) {
 /// 2.x `CoreWorkItemPatchSchemas` 解析后的形状。
 fn patch_v1(it: &PatchItem) -> Option<Value> {
     let expected = it.expected_version?;
+    // 2.x 的 complete 没有 note / evidence / checklist。
+    if it.note.is_some() || it.evidence.is_some() || it.checklist.is_some() {
+        return None;
+    }
     let mut m = Map::new();
     m.insert("taskKey".into(), trim(&it.task_key));
     m.insert("expectedVersion".into(), json!(expected));
@@ -438,4 +730,95 @@ fn patch_v1(it: &PatchItem) -> Option<Value> {
         _ => {}
     }
     Some(Value::Object(m))
+}
+
+/// checklist.update。`with_task`：kernel-v1 下是否带 taskKey（false 是 02 §3.3 的旧兼容形状）。
+fn checklist_single_fp(
+    tx: &Transaction<'_>,
+    project: &str,
+    family: Family,
+    req: &ChecklistSingle,
+    with_task: bool,
+) -> Option<JsValue> {
+    let evidence = req
+        .evidence
+        .as_deref()
+        .map(|e| fp_evidence(tx, project, e, EvidenceSite::Checklist));
+    let status = s(checklist::status_str(req.status));
+    let value = match family {
+        Family::CanonV2 => {
+            let mut m = Map::new();
+            m.insert("checklist_id".into(), s(&req.checklist_id));
+            opt(&mut m, "task_key", req.task_key.as_deref(), key);
+            opt(
+                &mut m,
+                "expected_checklist_version",
+                req.expected_checklist_version,
+                |v| json!(v),
+            );
+            m.insert("status".into(), status);
+            opt(&mut m, "evidence", evidence, |e| e);
+            Value::Object(m)
+        }
+        Family::KernelV1 => {
+            let mut m = Map::new();
+            m.insert("checklistId".into(), s(&req.checklist_id));
+            if with_task {
+                opt(&mut m, "taskKey", req.task_key.as_deref(), trim);
+            }
+            m.insert(
+                "expectedVersion".into(),
+                json!(req.expected_checklist_version?),
+            );
+            m.insert("status".into(), status);
+            opt(&mut m, "evidence", evidence, |e| e);
+            Value::Object(m)
+        }
+        Family::KnowledgeV1 => return None,
+    };
+    Some(JsValue::from_json(&value))
+}
+
+/// checklist.update.batch。
+fn checklist_batch_fp(
+    tx: &Transaction<'_>,
+    project: &str,
+    family: Family,
+    req: &ChecklistBatch,
+) -> Option<JsValue> {
+    let v2 = family == Family::CanonV2;
+    let items: Vec<Value> = req
+        .items
+        .iter()
+        .map(|it| {
+            let mut m = Map::new();
+            m.insert(
+                if v2 { "checklist_id" } else { "checklistId" }.into(),
+                s(&it.checklist_id),
+            );
+            m.insert("status".into(), s(checklist::status_str(it.status)));
+            opt(&mut m, "evidence", it.evidence.as_deref(), |e| {
+                fp_evidence(tx, project, e, EvidenceSite::Checklist)
+            });
+            Value::Object(m)
+        })
+        .collect();
+    let value = match family {
+        Family::CanonV2 => {
+            let mut m = Map::new();
+            m.insert("task_key".into(), key(&req.task_key));
+            opt(&mut m, "expected_version", req.expected_version, |v| {
+                json!(v)
+            });
+            m.insert("items".into(), Value::Array(items));
+            Value::Object(m)
+        }
+        Family::KernelV1 => json!({
+            "taskKey": js_trim(&req.task_key),
+            "expectedVersion": req.expected_version?,
+            "items": items,
+        }),
+        Family::KnowledgeV1 => return None,
+    };
+    Some(JsValue::from_json(&value))
 }

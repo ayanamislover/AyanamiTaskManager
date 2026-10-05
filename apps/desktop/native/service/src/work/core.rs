@@ -7,7 +7,7 @@ use crate::write::{Actor, WriteCtx, internal};
 use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::gate::ChecklistStatus;
 use atm_domain::keys;
-use atm_domain::ownership::{Claim, Requester};
+use atm_domain::ownership::{self, Claim, Requester};
 use atm_domain::principal::PrincipalKind;
 use atm_domain::progress::{self, ChecklistWeight, ChildProgress, Progress, ProgressSource};
 use atm_domain::time::Timestamp;
@@ -358,7 +358,7 @@ impl<'a> Work<'a> {
                    completed_at = ?13, assignee_agent_id = ?14, claimed_by_session_id = ?15, claim_lease_until = ?16,
                    reported_progress = ?17, computed_progress = ?18, progress_source = ?19, blocked_reason = ?20,
                    waiting_for = ?21, version = ?22, updated_at = ?23, cancel_reason = ?24, duplicate_of_id = ?25,
-                   superseded_by_id = ?26, ever_claimed_at = ?27, last_started_at = ?28
+                   superseded_by_id = ?26, ever_claimed_at = ?27, last_started_at = ?28, last_evidence_at = ?29
                  WHERE project_id = ?1 AND id = ?2",
                 params![
                     self.project,
@@ -389,11 +389,23 @@ impl<'a> Work<'a> {
                     t.superseded_by_id,
                     t.ever_claimed_at,
                     t.last_started_at,
+                    t.last_evidence_at,
                 ],
             )
             .map_err(db)?;
         self.touched.insert(t.id.clone());
         Ok(())
+    }
+
+    /// R2：领取仍在、写入者在领取的 lineage 里时，领取转给写入的 session 并续租。
+    pub fn transfer_claim(&self, task: &mut Task) {
+        let claim = task.claim();
+        let requester = self.requester(&claim);
+        if let Some((session, lease)) = ownership::claim_after_write(claim, requester, self.now) {
+            let session = session.to_owned();
+            task.claimed_by = Some(session);
+            task.lease = Some(lease.to_string());
+        }
     }
 
     pub fn mark_fresh(&mut self, id: &str) {
@@ -514,6 +526,65 @@ impl<'a> Work<'a> {
             )
             .map_err(db)?;
         Ok(keys::blocker_key(&self.code, no))
+    }
+
+    /// 写一条任务进度（02 §1.5、§5.5）并发 `work.progressed`。不改任务行：调用方随后的写入负责版本。
+    /// 用于 complete 一步写全的 note（R11 P1-1 第 4 条）；W2e 的 progress_add 在此之上加去重桶与 blocker。
+    pub fn add_progress(
+        &mut self,
+        task: &Task,
+        key: &str,
+        summary: &str,
+        bucket: Option<i64>,
+        evidence: &Value,
+    ) -> Result<String, DomainError> {
+        use sha2::{Digest, Sha256};
+        let id = self.ulid()?;
+        let hash = format!("{:x}", Sha256::digest(summary.as_bytes()));
+        let actor = self.ctx.actor.clone();
+        self.tx
+            .execute(
+                "INSERT INTO progress_updates (project_id, id, work_item_id, percent, progress_bucket, summary, summary_hash,
+                                               actor, session_id, created_at, evidence_json, op_id)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    self.project,
+                    id,
+                    task.id,
+                    bucket,
+                    summary,
+                    hash,
+                    actor.id,
+                    actor.session,
+                    self.now_iso,
+                    evidence.to_string(),
+                    self.ctx.op_id
+                ],
+            )
+            .map_err(db)?;
+        let payload = json!({
+            "key": key,
+            "title": task.title,
+            "from": task.computed_progress,
+            "to": bucket,
+            "summary": summary,
+            "evidence": evidence,
+        });
+        self.emit("work.progressed", "WORK_ITEM", &task.id, &payload)?;
+        search::upsert_doc(
+            self.tx,
+            &Doc {
+                project_id: &self.project,
+                entity_type: "PROGRESS",
+                entity_id: &task.id,
+                entity_key: key,
+                title: &task.title,
+                body: summary,
+                updated_at: &self.now_iso,
+            },
+        )
+        .map_err(db)?;
+        Ok(id)
     }
 
     // ---------- 事务末尾 ----------

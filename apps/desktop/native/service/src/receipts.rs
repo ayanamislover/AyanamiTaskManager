@@ -156,6 +156,8 @@ impl Candidate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Rebuilt {
     Fingerprint(String),
+    /// 几个形状都算同一请求（02 §3.3 的兼容请求），命中任一即可。
+    AnyOf(Vec<String>),
     /// kernel-v1 无法复现这个键（02 §9.4）。
     Unsupported(String),
     /// 这次请求带了旧族表达不了、且不是缺省值的字段：与该候选不是同一请求（A3 可比性检查）。
@@ -315,7 +317,8 @@ fn judge(c: &Candidate, operation: &str, rebuild: &dyn Fn(&Candidate) -> Rebuilt
     }
     match rebuild(c) {
         Rebuilt::Fingerprint(fp) if fp == c.fingerprint => Match::Yes,
-        Rebuilt::Fingerprint(_) | Rebuilt::NotComparable => Match::No,
+        Rebuilt::AnyOf(fps) if fps.contains(&c.fingerprint) => Match::Yes,
+        Rebuilt::Fingerprint(_) | Rebuilt::AnyOf(_) | Rebuilt::NotComparable => Match::No,
         Rebuilt::Unsupported(key) => Match::Unsupported(key),
     }
 }

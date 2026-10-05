@@ -115,16 +115,18 @@ fn user() -> Principal {
 /// 测试用的指纹输入：业务字段 title，另带作者 session（这样「按原作者重建」是否生效会直接反映在结果上）。
 fn title_fp(title: &str) -> FpInput {
     let title = title.to_owned();
-    Box::new(move |family: Family, author: &Author| {
-        let by = JsValue::opt(author.session.clone().map(JsValue::String));
-        Some(match family {
-            Family::CanonV2 => JsValue::object([("title", JsValue::str(&title)), ("by", by)]),
-            Family::KernelV1 => {
-                JsValue::object([("title", JsValue::str(&title)), ("actorSessionId", by)])
-            }
-            Family::KnowledgeV1 => JsValue::object([("title", JsValue::str(&title))]),
-        })
-    })
+    Box::new(
+        move |_: &rusqlite::Transaction<'_>, family: Family, author: &Author| {
+            let by = JsValue::opt(author.session.clone().map(JsValue::String));
+            Some(match family {
+                Family::CanonV2 => JsValue::object([("title", JsValue::str(&title)), ("by", by)]),
+                Family::KernelV1 => {
+                    JsValue::object([("title", JsValue::str(&title)), ("actorSessionId", by)])
+                }
+                Family::KnowledgeV1 => JsValue::object([("title", JsValue::str(&title))]),
+            })
+        },
+    )
 }
 
 fn canon(title: &str, by: Option<&str>) -> String {
@@ -157,6 +159,8 @@ fn req(
         actor: None,
         expected_generation: None,
         fingerprint,
+        compat_v1: None,
+        replay_guard: None,
     }
 }
 
@@ -785,7 +789,7 @@ fn a_kernel_key_that_cannot_be_reproduced_conflicts_with_zero_writes() {
         },
     );
     let before = snapshot(&w);
-    let odd: FpInput = Box::new(|_, _| Some(JsValue::object([("标题", JsValue::str("a"))])));
+    let odd: FpInput = Box::new(|_, _, _| Some(JsValue::object([("标题", JsValue::str("a"))])));
     let e = code(write(
         &w,
         &agent(),
@@ -826,7 +830,7 @@ fn a_request_the_old_family_cannot_express_does_not_match_it() {
             ..Raw::default()
         },
     );
-    let only_v2: FpInput = Box::new(|family, _| {
+    let only_v2: FpInput = Box::new(|_, family, _| {
         (family == Family::CanonV2).then(|| JsValue::object([("a", JsValue::Null)]))
     });
     let e = code(write(

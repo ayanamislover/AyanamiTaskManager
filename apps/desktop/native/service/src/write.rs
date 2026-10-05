@@ -56,7 +56,14 @@ pub struct Author {
 /// 这次请求在某个指纹族下、以某个作者身份的指纹输入（业务字段，已规范化，不含定位与控制字段）。
 /// `None`：这个族表达不了这次请求（A3 的可比性检查），与该族的候选不是同一请求。
 /// canon-v2 必须总能表达。
-pub type FpInput = Box<dyn Fn(Family, &Author) -> Option<JsValue> + Send>;
+///
+/// 事务参数用于只读的规范化（W-012：证据里的 atm_record / atm_task 引用改写成规范 key）。规范化失败时
+/// 退回原样（02 §3.3，与 2.x 的 session 闸门一致），由业务动作报出准确的错误。
+pub type FpInput = Box<dyn Fn(&Transaction<'_>, Family, &Author) -> Option<JsValue> + Send>;
+
+/// 重放之前再做的校验（02 §3.3 唯一的兼容请求：checklist.update 的旧形状不含 taskKey，重放前确认检查项
+/// 仍属于请求给的任务）。返回 Err 时不重放，原样报错。
+pub type ReplayGuard = Box<dyn Fn(&Transaction<'_>) -> Result<(), DomainError> + Send>;
 
 /// Agent 的 session。sessions 按项目划分，所以带项目。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +85,9 @@ pub struct WriteRequest {
     /// 调用上下文里带着的世代；没有时按入队时刻记（R4）。
     pub expected_generation: Option<i64>,
     pub fingerprint: FpInput,
+    /// kernel-v1 下另一个也算同一请求的形状（02 §3.3 的兼容请求）；没有就是 None。
+    pub compat_v1: Option<FpInput>,
+    pub replay_guard: Option<ReplayGuard>,
 }
 
 /// 写入者：已经由可信入口与 session 解析确定，业务动作直接用。
@@ -258,6 +268,8 @@ where
         scope,
         session,
         fingerprint,
+        compat_v1,
+        replay_guard,
         ..
     } = req;
     let (own, others, legacy, author) = match (&session, actor_ns) {
@@ -334,10 +346,13 @@ where
         others,
         legacy,
     };
-    let rebuild = |c: &Candidate| rebuild(c, &fingerprint);
+    let rebuild = |c: &Candidate| rebuild(tx, c, &fingerprint, compat_v1.as_ref());
     match receipts::find_fixed(tx, &lookup, &rebuild).map_err(internal)? {
         Verdict::New => {}
         Verdict::Replay(c) => {
+            if let Some(guard) = &replay_guard {
+                guard(tx)?;
+            }
             let result = serde_json::from_str(&c.receipt_json).map_err(internal)?;
             return Ok(Written {
                 result,
@@ -374,7 +389,7 @@ where
     }
 
     let own_input =
-        fingerprint(Family::CanonV2, &author).ok_or_else(|| internal("canon-v2 input"))?;
+        fingerprint(tx, Family::CanonV2, &author).ok_or_else(|| internal("canon-v2 input"))?;
     let own_fp = fp::canon_v2(&own_input);
     let ctx = WriteCtx {
         scope,
@@ -413,7 +428,12 @@ where
 }
 
 /// R3′ 第 4 步：按候选自己的族与原作者重建这次请求的指纹。
-fn rebuild(c: &Candidate, fingerprint: &FpInput) -> Rebuilt {
+fn rebuild(
+    tx: &Transaction<'_>,
+    c: &Candidate,
+    fingerprint: &FpInput,
+    compat_v1: Option<&FpInput>,
+) -> Rebuilt {
     let Some(family) = Family::parse(&c.fp_family) else {
         return Rebuilt::NotComparable;
     };
@@ -431,12 +451,20 @@ fn rebuild(c: &Candidate, fingerprint: &FpInput) -> Rebuilt {
             session: c.via_session.clone(),
         },
     };
-    let Some(input) = fingerprint(family, &author) else {
+    let Some(input) = fingerprint(tx, family, &author) else {
         return Rebuilt::NotComparable;
     };
     match family {
         Family::KernelV1 => match fp::kernel_v1(&input) {
-            Ok(f) => Rebuilt::Fingerprint(f),
+            Ok(f) => {
+                let compat = compat_v1
+                    .and_then(|compat| compat(tx, family, &author))
+                    .and_then(|v| fp::kernel_v1(&v).ok());
+                match compat {
+                    Some(other) => Rebuilt::AnyOf(vec![f, other]),
+                    None => Rebuilt::Fingerprint(f),
+                }
+            }
             Err(e) => Rebuilt::Unsupported(e.key),
         },
         Family::KnowledgeV1 => Rebuilt::Fingerprint(fp::knowledge_v1(&input)),
