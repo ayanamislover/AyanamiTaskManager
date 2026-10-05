@@ -36,6 +36,16 @@ struct World {
 }
 
 fn world(name: &str) -> World {
+    world_cfg(
+        name,
+        Config {
+            idle_checkpoint: Duration::from_secs(3600),
+            ..Config::default()
+        },
+    )
+}
+
+fn world_cfg(name: &str, config: Config) -> World {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -46,14 +56,7 @@ fn world(name: &str) -> World {
     let dir = target.join("service-tests").join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let store = Store::open(
-        &dir.join("atm.sqlite"),
-        Config {
-            idle_checkpoint: Duration::from_secs(3600),
-            ..Config::default()
-        },
-    )
-    .unwrap();
+    let store = Store::open(&dir.join("atm.sqlite"), config).unwrap();
     store
         .write(|tx| {
             tx.execute_batch(&format!(
@@ -1019,4 +1022,83 @@ fn a_request_queued_across_a_restore_is_refused() {
             .unwrap()
             .replayed
     );
+}
+
+fn exec(w: &World, sql: &str) {
+    let sql = sql.to_owned();
+    w.svc
+        .store()
+        .write(move |tx| tx.execute_batch(&sql))
+        .unwrap();
+}
+
+/// S-034 反例：action 成功之后、写回执之前出错（这里用触发器在插回执时注入失败），事件、业务行、计数器全部回滚；
+/// 去掉故障后同一 op_id 照常执行一次，不是重放。
+#[test]
+fn s034_a_failure_after_the_action_rolls_everything_back() {
+    let w = world("receipt-fault");
+    let before = snapshot(&w);
+    exec(
+        &w,
+        "CREATE TRIGGER inject_receipt_fault BEFORE INSERT ON idempotency_receipts
+         BEGIN SELECT RAISE(ABORT, 'injected receipt fault'); END;",
+    );
+    let e = code(write(&w, &agent(), record(Some("S0"), "op-1", "一"), "一"));
+    assert_eq!(e.code, ErrorCode::INTERNAL_ERROR, "{e:?}");
+    assert_eq!(snapshot(&w), before);
+    assert_eq!(w.calls.load(Ordering::SeqCst), 1, "the action did run");
+    exec(&w, "DROP TRIGGER inject_receipt_fault;");
+    let ok = write(&w, &agent(), record(Some("S0"), "op-1", "一"), "一").unwrap();
+    assert!(!ok.replayed);
+    assert_eq!(w.calls.load(Ordering::SeqCst), 2);
+}
+
+/// 00 Q-02 + W-106：写队列准入超时 → STORE_BUSY（可重试），details 带 committed:false，action 一次都没执行、
+/// 整库不变；之后用同一个 op_id 重试是一次全新的执行（不是重放）。
+#[test]
+fn q02_w106_store_busy_means_nothing_was_committed() {
+    let w = world_cfg(
+        "busy",
+        Config {
+            idle_checkpoint: Duration::from_secs(3600),
+            queue_capacity: 1,
+            admit_wait: Duration::from_millis(200),
+            ..Config::default()
+        },
+    );
+    let before = snapshot(&w);
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+    let holder = w
+        .svc
+        .store()
+        .submit(move |_tx| {
+            started_tx.send(()).unwrap();
+            let _ = gate_rx.recv_timeout(Duration::from_secs(10));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let queued = w
+        .svc
+        .store()
+        .submit(|_tx| Ok::<_, rusqlite::Error>(()))
+        .unwrap();
+    let e = code(write(
+        &w,
+        &agent(),
+        record(Some("S0"), "op-busy", "一"),
+        "一",
+    ));
+    gate_tx.send(()).unwrap();
+    holder.wait().unwrap();
+    queued.wait().unwrap();
+    assert_eq!(e.code, ErrorCode::STORE_BUSY);
+    assert!(e.code.retryable());
+    assert_eq!(e.details["committed"], false);
+    assert_eq!(w.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot(&w), before);
+    let ok = write(&w, &agent(), record(Some("S0"), "op-busy", "一"), "一").unwrap();
+    assert!(!ok.replayed);
+    assert_eq!(w.calls.load(Ordering::SeqCst), 1);
 }

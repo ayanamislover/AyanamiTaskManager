@@ -269,11 +269,12 @@ pub(crate) fn request(w: &mut Work<'_>, req: &ReviewRequest) -> Result<Value, Do
     let parent_key = w.task_key(&parent);
     if item.version != req.expected_parent_checklist_version {
         return Err(checklist_conflict(
+            w,
             &item,
             req.expected_parent_checklist_version,
-            &parent_key,
-            Some(parent.version),
-        ));
+            &parent,
+            true,
+        )?);
     }
     // 6. Review 任务必须挂在检查项所属任务下面。
     if review.parent_id.as_deref() != Some(item.work_item_id.as_str()) {
@@ -583,10 +584,14 @@ pub(crate) fn submit(w: &mut Work<'_>, req: &ReviewSubmit) -> Result<Value, Doma
     let parent_key = w.task_key(&parent);
     // 9. 父检查项从请求之后没被改过（D16：不继承旧绑定）。
     if item.version != request.parent_checklist_version {
-        return Err(
-            checklist_conflict(&item, request.parent_checklist_version, &parent_key, None)
-                .detail("request_key", request_key.as_str()),
-        );
+        return Err(checklist_conflict(
+            w,
+            &item,
+            request.parent_checklist_version,
+            &parent,
+            false,
+        )?
+        .detail("request_key", request_key.as_str()));
     }
     // 10. Review 任务自己要能 complete，并过完成门。
     let target = resolve(Operation::Complete, review.state, false)

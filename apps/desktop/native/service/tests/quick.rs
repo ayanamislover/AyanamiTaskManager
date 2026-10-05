@@ -390,6 +390,16 @@ fn l015_promote_to_an_existing_project() {
     assert_eq!(w.col("ATM-T-0001", "source_quick_id"), id.as_str());
     assert_eq!(w.col("ATM-T-0001", "id"), pq["promotedWorkItemId"]);
     assert_eq!(w.col("ATM-T-0001", "description"), "细节");
+    // 00 C-17：内部创建在 work.created 里写明来源。
+    let created: Value = serde_json::from_str(
+        w.scalar(
+            "SELECT payload_json FROM events WHERE project_id = 'PA' AND type = 'work.created'",
+        )
+        .as_str()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(created["source"], "quick.promote");
     assert_eq!(
         w.scalar(&format!(
             "SELECT scope_id FROM idempotency_receipts WHERE receipt_id = {}",
@@ -542,4 +552,68 @@ fn r5_adopts_and_flags_undone_promotions() {
     let v = w.svc.quick_get(&user(), "Q-0001").unwrap();
     assert_eq!(v["promotionUndone"], true);
     assert!(w.svc.quick_get(&agent(), "q-0001").is_ok());
+}
+
+/// 10 R5 验收（真实链路）：先晋升，再把项目恢复到晋升之前；之后新建任务的编号跳过被撤销的那个，
+/// quick 的链接显示「已被恢复撤销」。
+#[test]
+fn r5_a_restore_undoes_a_promotion_without_reusing_its_number() {
+    let w = world("qk-r5-restore");
+    let now = || {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        atm_domain::time::Timestamp::from_millis(ms).to_string()
+    };
+    let backups = w.dir.join("backups");
+    let backup = atm_store::backup::create_backup(w.svc.store(), &backups, "MANUAL", &now())
+        .unwrap()
+        .id;
+    w.quick("要晋升的");
+    let r = w.promote("Q-0001", 0, Some("ATM"), "p-1").unwrap();
+    assert_eq!(r.result["quick"]["promotedWorkItemKey"], "ATM-T-0001");
+    let at = now();
+    atm_store::restore::restore_project(
+        w.svc.store(),
+        &backup,
+        "PA",
+        &atm_store::restore::RestoreOptions {
+            backups_root: &backups,
+            at: &at,
+            pin_until: &at,
+            budget: std::time::Duration::from_secs(60),
+        },
+    )
+    .unwrap();
+    let q = w.svc.quick_get(&user(), "Q-0001").unwrap();
+    assert_eq!(q["promotionUndone"], true);
+    assert_eq!(w.task("恢复之后新建"), "ATM-T-0002");
+}
+
+/// 10 R7‴：A 里有 UNMARKED 残留（source_quick_id = Q 的工作项）时，把 Q 晋升到另一个项目 B 照常新建，
+/// A 的残留原样保留（晋升到 A 本身则采用残留，见 r5_adopts_and_flags_undone_promotions）。
+#[test]
+fn r7_promoting_elsewhere_leaves_the_residue_alone() {
+    let w = world("qk-r7-residue");
+    let q = w.quick("有残留的");
+    let id = q["id"].as_str().unwrap().to_owned();
+    let residue = w.task("A 里的残留");
+    w.exec(&format!(
+        "UPDATE work_items SET source_quick_id = '{id}' WHERE local_no = 1"
+    ));
+    let r = w.promote("Q-0001", 0, Some("EMP"), "to-b").unwrap();
+    assert_eq!(r.result["adopted"], false);
+    assert_eq!(r.result["quick"]["promotedWorkItemKey"], "EMP-T-0001");
+    assert_eq!(w.col(&residue, "source_quick_id"), id.as_str());
+    assert_eq!(w.col(&residue, "status"), "READY");
+    for project in ["PA", "PE"] {
+        assert_eq!(
+            w.count(&format!(
+                "SELECT count(*) FROM work_items WHERE project_id = '{project}' AND source_quick_id = '{id}'"
+            )),
+            1,
+            "{project}"
+        );
+    }
 }

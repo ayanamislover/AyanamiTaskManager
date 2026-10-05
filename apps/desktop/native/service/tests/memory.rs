@@ -231,6 +231,25 @@ fn r1_r2_progress_respects_the_claim() {
     w.refused(ErrorCode::CLAIM_NOT_OWNED, || {
         w.progress("SX", ProgressRequest::task(&k, "别人的"))
     });
+    // R1 点名的两条：带 blocker、带 percent 的进度同样受领取约束。
+    w.refused(ErrorCode::CLAIM_NOT_OWNED, || {
+        w.progress(
+            "SX",
+            ProgressRequest {
+                blocker: Some("别人的阻塞".into()),
+                ..ProgressRequest::task(&k, "卡住了")
+            },
+        )
+    });
+    w.refused(ErrorCode::CLAIM_NOT_OWNED, || {
+        w.progress(
+            "SX",
+            ProgressRequest {
+                percent: Some(60.0),
+                ..ProgressRequest::task(&k, "做了一半")
+            },
+        )
+    });
     w.progress("S2", ProgressRequest::task(&k, "接着做"))
         .unwrap();
     assert_eq!(w.col(&k, "claimed_by_session_id"), "S2");
@@ -241,7 +260,7 @@ fn r1_r2_progress_respects_the_claim() {
 
 /// 02 §5.1：参数校验，全部零写入。
 #[test]
-fn s084_progress_validation() {
+fn progress_arguments_are_validated_with_zero_writes() {
     let w = world("mm-validate");
     let k = w.started("一");
     for (code, req) in [
@@ -309,7 +328,7 @@ fn s084_progress_validation() {
 /// S-085 + S-086：项目进度直接发布；completed 里的任务 key 校验并规范化；health 默认 UNKNOWN、带 blocker 为 AT_RISK；
 /// from / to 序列号接续上一次发布。
 #[test]
-fn s085_s086_project_progress() {
+fn s085_project_progress() {
     let w = world("mm-project");
     let k = w.task("一");
     w.refused(ErrorCode::WORK_ITEM_NOT_FOUND, || {
@@ -370,9 +389,9 @@ fn s085_s086_project_progress() {
     assert_eq!(third.result["health"], "ON_TRACK");
 }
 
-/// S-030 + 02 §3.3：同 op_id 同请求重放；不同请求冲突；2.x kernel-v1 的旧回执也能重放。
+/// S-031、S-032 + 02 §3.3：同 op_id 同请求重放；不同请求冲突；2.x kernel-v1 的旧回执也能重放。
 #[test]
-fn s030_progress_idempotency_and_v1_receipts() {
+fn s031_s032_progress_idempotency_and_v1_receipts() {
     let w = world("mm-idem");
     let k = w.started("一");
     let t = Target::new("PA", Some("S1"), "pg-1");
@@ -434,7 +453,7 @@ fn s030_progress_idempotency_and_v1_receipts() {
 
 /// 02 §1.6：六种 kind（大小写不敏感）；DECISION 用 D、其他用 R；importance 默认 NORMAL；记录事件与搜索文档。
 #[test]
-fn s090_records() {
+fn records_kinds_keys_and_defaults() {
     let w = world("mm-record");
     let d = w
         .record(RecordRequest::new(" decision ", "选 Rust", "单进程"))
@@ -482,7 +501,7 @@ fn s090_records() {
 
 /// 02 §1.6：supersedes 把旧记录标成 SUPERSEDED（版本 +1）；REVIEW_AUDIT 不可替代；不存在 → RECORD_NOT_FOUND。
 #[test]
-fn s091_supersede() {
+fn records_supersede_marks_the_old_one() {
     let w = world("mm-supersede");
     w.record(RecordRequest::new("DECISION", "旧决定", "a"))
         .unwrap();
@@ -519,7 +538,7 @@ fn s091_supersede() {
 
 /// 02 §1.6：relatedRecords 列出同 topic 或同 subject_key 的其他 ACTIVE 记录（不含自己、不含已替代的）。
 #[test]
-fn s092_related_records() {
+fn records_list_related_records() {
     let w = world("mm-related");
     let topic = |t: &str, title: &str| RecordRequest {
         topic: Some(t.into()),
@@ -597,7 +616,7 @@ fn s031_record_idempotency() {
 
 /// 02 §1.8：反馈是固定形状的 RISK 记录（scope ATM_FEEDBACK、topic atm-agent-feedback），只存本机。
 #[test]
-fn s093_feedback() {
+fn feedback_is_a_fixed_shape_local_risk_record() {
     let w = world("mm-feedback");
     let k = w.task("一");
     let fb = FeedbackRequest {
@@ -658,7 +677,7 @@ fn s093_feedback() {
 
 /// 03 §5：用户也能写记录（无 session）；Agent 写记录必须带 session 由管线保证（W2b 已验）。
 #[test]
-fn s094_user_records() {
+fn users_write_records_without_a_session() {
     let w = world("mm-user");
     let r = w
         .svc
@@ -670,4 +689,77 @@ fn s094_user_records() {
         .unwrap();
     assert_eq!(r.result["record"]["key"], "ATM-R-001");
     assert_eq!(w.record_col(1, "source_type"), "USER");
+}
+
+// ================= 追溯补齐（W2h2） =================
+
+/// S-039：noop 也是成功回执；同一 op 重试拿回同一个 noop 回执，整库不变。
+#[test]
+fn s039_a_noop_receipt_replays_as_a_noop() {
+    let w = world("mm-s039");
+    let k = w.started("一");
+    w.progress("S1", ProgressRequest::task(&k, "进展")).unwrap();
+    let t = Target::new("PA", Some("S1"), "noop-1");
+    let first = w
+        .svc
+        .add_progress(&agent(), &t, ProgressRequest::task(&k, "进展"))
+        .unwrap();
+    assert_eq!(first.result["noop"], true);
+    assert!(!first.replayed);
+    let before = w.snapshot();
+    let again = w
+        .svc
+        .add_progress(&agent(), &t, ProgressRequest::task(&k, "进展"))
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.result, first.result);
+    assert_eq!(w.snapshot(), before);
+}
+
+/// S-043：两道闸门的规范化一致：project 进度里写小写 key 成功后，原样重试和换成大写写法都是 REPLAY；换内容冲突。
+#[test]
+fn s043_normalized_keys_replay() {
+    let w = world("mm-s043");
+    let k = w.task("一");
+    let t = Target::new("PA", Some("S1"), "pp-1");
+    let with_key = |key: String, text: &str| ProgressRequest {
+        completed: vec![Completed::Item {
+            text: text.into(),
+            work_item_key: Some(key),
+        }],
+        ..project("周报")
+    };
+    let first = w
+        .svc
+        .add_progress(&agent(), &t, with_key(k.to_lowercase(), "做完一"))
+        .unwrap();
+    assert!(!first.replayed);
+    for key in [k.to_lowercase(), k.clone()] {
+        let again = w
+            .svc
+            .add_progress(&agent(), &t, with_key(key, "做完一"))
+            .unwrap();
+        assert!(again.replayed);
+    }
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc
+            .add_progress(&agent(), &t, with_key(k.clone(), "做完二"))
+    });
+}
+
+/// S-085：project 进度不去重：同样内容发两次就是两条 PUBLISHED（task 进度的 noop 见 s081）。
+#[test]
+fn s085_project_updates_are_never_deduplicated() {
+    let w = world("mm-s085");
+    w.progress("S1", project("周报")).unwrap();
+    let r = w.progress("S1", project("周报")).unwrap();
+    assert!(
+        r.result.get("noop").is_none_or(|n| n != true),
+        "{}",
+        r.result
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM project_updates WHERE status = 'PUBLISHED'"),
+        2
+    );
 }

@@ -1019,7 +1019,13 @@ fn w060_approved_submission() {
     let w = world("rv-approved");
     let s = review_setup(&w);
     w.start_as("S1", &s.parent);
+    let requested_after = w.last_seq();
     w.request_as("S1", &s, 1, 0).unwrap();
+    assert_eq!(
+        w.events_after(requested_after),
+        ["review.requested"],
+        "S-091"
+    );
     w.start_as("RV", &s.review);
     let parent_version = w.version(&s.parent);
     let before_seq = w.last_seq();
@@ -1255,4 +1261,146 @@ fn w063_review_submit_replays() {
     assert!(again.replayed);
     assert_eq!(again.result, first.result);
     assert_eq!(w.snapshot(), before);
+}
+
+// ---------- 追溯补齐（W2h2） ----------
+
+/// W-114：三层链 G→P→C，C 的检查项更新后 C、P、G 都重算并各 +1；只重算 C 会让 P、G 的聚合过期。
+#[test]
+fn w114_checklist_updates_recompute_the_whole_parent_chain() {
+    let w = world("cl-w114");
+    let r = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![
+                CreateItem {
+                    client_ref: Some("g".into()),
+                    ..item("G")
+                },
+                CreateItem {
+                    client_ref: Some("p".into()),
+                    parent_ref: Some("g".into()),
+                    ..item("P")
+                },
+                CreateItem {
+                    parent_ref: Some("p".into()),
+                    checklist: vec![checklist("唯一一项", false)],
+                    ..item("C")
+                },
+            ],
+        )
+        .unwrap();
+    let key = |i: usize| r.result["items"][i]["key"].as_str().unwrap().to_owned();
+    let (g, p, c) = (key(0), key(1), key(2));
+    let id = r.result["checklist"][&c][0].as_str().unwrap().to_owned();
+    let before: Vec<i64> = [&g, &p, &c].iter().map(|k| w.version(k)).collect();
+    w.checklist_as(None, single(Some(&c), &id, Some(0), ChecklistStatus::Done))
+        .unwrap();
+    let after: Vec<i64> = [&g, &p, &c].iter().map(|k| w.version(k)).collect();
+    assert_eq!(after, before.iter().map(|v| v + 1).collect::<Vec<_>>());
+    for k in [&g, &p, &c] {
+        assert_eq!(w.col(k, "computed_progress"), json!(99.0), "{k}");
+    }
+}
+
+/// 00 C-12：用新参数名 expected_checklist_version 时回执不带弃用提示（旧名的提示见上一条）。
+#[test]
+fn c12_the_new_parameter_name_carries_no_deprecation() {
+    let w = world("cl-c12-new");
+    let (k, ids) = task_with(&w, "A", &[("一项", false)]);
+    let r = w
+        .checklist_as(
+            None,
+            single(Some(&k), &ids[0], Some(0), ChecklistStatus::Done),
+        )
+        .unwrap();
+    assert!(
+        r.result.get("deprecations").is_none_or(|d| d.is_null()),
+        "{}",
+        r.result
+    );
+}
+
+/// 00 C-19：review_request 中 Review 任务的版本冲突，details.entity 是任务，并带当前快照；检查项冲突是 CHECKLIST（w057）。
+#[test]
+fn c19_version_conflicts_name_the_entity_that_moved() {
+    let w = world("rv-c19");
+    let s = review_setup(&w);
+    let e = w.refused(ErrorCode::VERSION_CONFLICT, || w.request_as("S1", &s, 5, 0));
+    assert_eq!(e.details["entity"], "WORK_ITEM");
+    assert_eq!(e.details["key"], s.review.as_str());
+    assert_eq!(e.details["current"]["version"], 1);
+    w.request_as("S1", &s, 1, 0).unwrap();
+}
+
+/// W-104：VERSION_CONFLICT 的载荷。checklist_single 冲突是 CHECKLIST，带 task_version 与 version_gap；
+/// recent_changes 最多 6 条、changes_complete=false；批次里以冲突那一条的 key 为准。
+#[test]
+fn w104_version_conflict_payloads() {
+    let w = world("cl-w104");
+    let (k, ids) = task_with(&w, "A", &[("一项", false)]);
+    for status in [
+        ChecklistStatus::Doing,
+        ChecklistStatus::Todo,
+        ChecklistStatus::Doing,
+        ChecklistStatus::Todo,
+    ] {
+        let v = w.checklist_col(&ids[0], "version").as_i64().unwrap();
+        w.checklist_as(None, single(Some(&k), &ids[0], Some(v), status))
+            .unwrap();
+    }
+    let e = w.refused(ErrorCode::VERSION_CONFLICT, || {
+        w.checklist_as(
+            None,
+            single(Some(&k), &ids[0], Some(1), ChecklistStatus::Done),
+        )
+    });
+    assert!(e.code.retryable());
+    assert_eq!(e.details["entity"], "CHECKLIST");
+    assert_eq!(e.details["version_gap"], 3);
+    assert_eq!(e.details["current"]["task_version"], w.version(&k));
+    assert_eq!(e.details["changes_complete"], false);
+    let recent = e.details["recent_changes"].as_array().unwrap();
+    assert!(!recent.is_empty() && recent.len() <= 6, "{recent:?}");
+    // 批次第 2 条冲突：details.key 是第 2 条的任务。
+    let b = w.task("B");
+    let e = w.refused(ErrorCode::VERSION_CONFLICT, || {
+        w.patch_as(
+            &user(),
+            None,
+            vec![
+                p(&k, Operation::Claim).version(w.version(&k)),
+                p(&b, Operation::Claim).version(9),
+            ],
+        )
+    });
+    assert_eq!(e.details["key"], b.as_str());
+    assert_eq!(e.details["item_index"], 1);
+    assert_eq!(e.details["version_gap"], -8);
+}
+
+/// W-099：WAITING_AGENT 上直接 complete 被门挡住（domain 层 w096_w099）；verify_and_complete 先转 VERIFYING 再完成。
+#[test]
+fn w099_verify_and_complete_from_waiting_agent() {
+    let w = world("vac-waiting");
+    let k = w.task("A");
+    w.s1(p(&k, Operation::Start)).unwrap();
+    w.s1(wait(&k, Operation::WaitAgent, "等 codex")).unwrap();
+    assert_eq!(status(&w, &k), "WAITING_AGENT");
+    let r = w.vac_as(Some("S1"), vac(&k, None)).unwrap();
+    assert_eq!(r.result["transitions"], json!(["VERIFYING", "DONE"]));
+    assert_eq!(status(&w, &k), "DONE");
+}
+
+/// 10 R1：review_request 修改的是 Review 任务。它被别的 session 有效领取时报 CLAIM_NOT_OWNED、零写入；
+/// 领取者自己可以发起（阳性对照）。父任务只被读取，不受它的领取约束。
+#[test]
+fn r1_review_request_respects_the_review_task_claim() {
+    let w = world("rv-r1");
+    let s = review_setup(&w);
+    w.patch_as(&agent(), Some("S1"), vec![p(&s.review, Operation::Claim)])
+        .unwrap();
+    w.refused(ErrorCode::CLAIM_NOT_OWNED, || w.request_as("SX", &s, 2, 0));
+    w.request_as("S1", &s, 2, 0).unwrap();
 }

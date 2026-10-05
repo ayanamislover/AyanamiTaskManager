@@ -862,17 +862,15 @@ impl<'a> Work<'a> {
         }))
     }
 
-    /// W-104：VERSION_CONFLICT 带当前快照与最近变化（≤ 6 条）。
-    pub fn version_conflict(&self, t: &Task, expected: i64) -> Result<DomainError, DomainError> {
-        let key = self.task_key(t);
-        let recent: Vec<Value> = self
-            .tx
+    /// 聚合最近的变化（≤ 6 条，新的在前）：VERSION_CONFLICT 的 recent_changes（W-104）。
+    pub(crate) fn recent_changes(&self, aggregate_id: &str) -> Result<Vec<Value>, DomainError> {
+        Ok(self.tx
             .prepare_cached(
                 "SELECT seq, type, payload_json, op_id, created_at FROM events
                  WHERE project_id = ?1 AND aggregate_id = ?2 ORDER BY seq DESC LIMIT 6",
             )
             .map_err(db)?
-            .query_map([&self.project, &t.id], |r| {
+            .query_map([&self.project, aggregate_id], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -893,7 +891,13 @@ impl<'a> Work<'a> {
                 };
                 json!({ "seq": seq, "type": kind, "key": payload.get("key"), "summary": summary, "op_id": op_id, "at": at })
             })
-            .collect();
+            .collect())
+    }
+
+    /// W-104：VERSION_CONFLICT 带当前快照与最近变化（≤ 6 条）。
+    pub fn version_conflict(&self, t: &Task, expected: i64) -> Result<DomainError, DomainError> {
+        let key = self.task_key(t);
+        let recent = self.recent_changes(&t.id)?;
         let state = t.state;
         let current = json!({
             "key": key,

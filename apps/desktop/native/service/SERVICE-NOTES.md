@@ -217,37 +217,37 @@ action 成功后 `rebind::heartbeat` 刷新心跳（不推 session 版本），s
 
 ### 追溯（`tests/session.rs`、`tests/memory.rs`）
 
-| 规则                                  | 用例                                                                                        |
-| ------------------------------------- | ------------------------------------------------------------------------------------------- |
-| S-001、S-004、00 02 C-17              | `s001_s004_atomic_begin`                                                                    |
-| R11 A3                                | `a3_begin_op_id_is_shared_across_projects`、`a3_omitted_resume_matches_a_2x_begin_receipt`  |
-| S-003、04 L-008                       | `s003_l008_trashed_and_archived_projects`                                                   |
-| 04 L-010                              | `l010_project_is_found_by_path_marker_or_common_dir`                                        |
-| S-006、S-011                          | `s006_s011_resume_reattaches_the_open_session`                                              |
-| S-007、S-013、S-016、R4′              | `s007_s013_s016_resume_through_a_pending_handoff`、`s007_two_handoff_sources_are_ambiguous` |
-| S-008、S-009、00 02 C-07、C-14、10 R3 | `s008_s009_c07_named_predecessor`                                                           |
-| S-010                                 | `s010_plain_begin_acknowledges_nothing`                                                     |
-| R11 P1-3                              | `p1_3_auto_resume`、`s012_c08_p1_3_sweep`                                                   |
-| R11 A1                                | `a1_single_conversation_reattach`、`a1_explicit_session_reattach`                           |
-| S-012、00 02 C-08                     | `s012_c08_p1_3_sweep`                                                                       |
-| S-014、00 02 C-06                     | `s014_c06_end_releases_claims`                                                              |
-| S-017                                 | `s017_force_close`                                                                          |
-| S-018、S-036                          | `s018_s036_closed_sessions_replay_but_do_not_write`                                         |
-| S-019、S-020                          | `s019_s020_rebind_on_heartbeat_timeout`、`s019_rebind_refusals`                             |
-| S-021                                 | `s021_end_does_not_create_a_successor`                                                      |
-| 03 P-006                              | `p006_the_session_must_belong_to_the_project`                                               |
-| 00 02 C-08、10 R2 心跳与续租          | `c08_r2_writes_refresh_heartbeat_and_renew_leases`                                          |
-| S-022                                 | `s022_git_context`                                                                          |
-| S-080、S-083、00 02 C-23              | `s080_bucket`、`s080_s083_c23_task_progress`                                                |
-| S-081、00 02 C-13                     | `s081_c13_duplicate_progress_is_a_noop`                                                     |
-| S-082                                 | `s082_blocker_blocks_the_task`                                                              |
-| 10 R1、R2                             | `r1_r2_progress_respects_the_claim`                                                         |
-| S-084                                 | `s084_progress_validation`                                                                  |
-| S-085、S-086                          | `s085_s086_project_progress`                                                                |
-| S-030、S-031、02 §3.3                 | `s030_progress_idempotency_and_v1_receipts`、`s031_record_idempotency`                      |
-| 02 §1.6 记录                          | `s090_records`、`s091_supersede`、`s092_related_records`、`s094_user_records`               |
-| R11 P2-1                              | `p2_1_long_summaries_are_truncated`                                                         |
-| 02 §1.8 反馈                          | `s093_feedback`                                                                             |
+| 规则                                  | 用例                                                                                                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S-001、S-004、00 02 C-17              | `s001_s004_atomic_begin`                                                                                                                          |
+| R11 A3                                | `a3_begin_op_id_is_shared_across_projects`、`a3_omitted_resume_matches_a_2x_begin_receipt`                                                        |
+| S-003、04 L-008                       | `s003_l008_trashed_and_archived_projects`                                                                                                         |
+| 04 L-010                              | `l010_project_is_found_by_path_marker_or_common_dir`                                                                                              |
+| S-006、S-011                          | `s006_s011_resume_reattaches_the_open_session`                                                                                                    |
+| S-007、S-013、S-016、R4′              | `s007_s013_s016_resume_through_a_pending_handoff`、`s007_two_handoff_sources_are_ambiguous`                                                       |
+| S-008、S-009、00 02 C-07、C-14、10 R3 | `s008_s009_c07_named_predecessor`                                                                                                                 |
+| S-010                                 | `s010_plain_begin_acknowledges_nothing`                                                                                                           |
+| R11 P1-3                              | `p1_3_auto_resume`、`s012_c08_p1_3_sweep`                                                                                                         |
+| R11 A1                                | `a1_single_conversation_reattach`、`a1_explicit_session_reattach`                                                                                 |
+| S-012、00 02 C-08                     | `s012_c08_p1_3_sweep`                                                                                                                             |
+| S-014、00 02 C-06                     | `s014_c06_end_releases_claims`                                                                                                                    |
+| S-017                                 | `s017_force_close`                                                                                                                                |
+| S-018、S-036                          | `s018_s036_closed_sessions_replay_but_do_not_write`                                                                                               |
+| S-019、S-020                          | `s019_s020_rebind_on_heartbeat_timeout`、`s019_rebind_refusals`                                                                                   |
+| S-021                                 | `s021_end_does_not_create_a_successor`                                                                                                            |
+| 03 P-006                              | `p006_the_session_must_belong_to_the_project`                                                                                                     |
+| 00 02 C-08、10 R2 心跳与续租          | `c08_r2_writes_refresh_heartbeat_and_renew_leases`                                                                                                |
+| S-022                                 | `s022_git_context`                                                                                                                                |
+| S-080、S-083、00 02 C-23              | `s080_bucket`、`s080_s083_c23_task_progress`                                                                                                      |
+| S-081、00 02 C-13                     | `s081_c13_duplicate_progress_is_a_noop`                                                                                                           |
+| S-082                                 | `s082_blocker_blocks_the_task`                                                                                                                    |
+| 10 R1、R2                             | `r1_r2_progress_respects_the_claim`                                                                                                               |
+| 02 §5.1 参数校验                      | `progress_arguments_are_validated_with_zero_writes`                                                                                               |
+| S-085                                 | `s085_project_progress`、`s085_project_updates_are_never_deduplicated`                                                                            |
+| S-031、S-032、02 §3.3                 | `s031_s032_progress_idempotency_and_v1_receipts`、`s031_record_idempotency`                                                                       |
+| 02 §1.6 记录                          | `records_kinds_keys_and_defaults`、`records_supersede_marks_the_old_one`、`records_list_related_records`、`users_write_records_without_a_session` |
+| R11 P2-1                              | `p2_1_long_summaries_are_truncated`                                                                                                               |
+| 02 §1.8 反馈                          | `feedback_is_a_fixed_shape_local_risk_record`                                                                                                     |
 
 变异验红：`output/w2-evidence/mutations/mut-w2e.py`，100 条全部 RED，证据 `output/w2-evidence/w2e-mutation-evidence.json`。
 
@@ -511,3 +511,30 @@ Agent 视图，否则给管理视图。
 
 首跑时完成门那条存活：服务层没有用例会走到「开工后加上的前置被取消，再完成」（domain 层的 gate 单测覆盖了，
 但服务层是否把依赖状态喂进门没人看），补了 `w095_d03_…` 后变红。
+
+## 阶段验收：规格追溯（W2h2）
+
+追溯表与检查见 [`TRACE.md`](TRACE.md)：357 个编号（D01–D35、W / S / P / L 规则、00 §1–§4 与 10 的裁决）逐条落到用例或后续阶段，
+`tests/spec_trace.rs` 随整套测试运行。
+
+补追溯时发现并修掉的实现缺口：
+
+- 00 Q-02：`STORE_BUSY` 的 details 带 `committed:false`（准入超时的作业保证没执行）。
+- W-104：检查项的 `VERSION_CONFLICT` 按规格给 `current{id, task_key, task_version, …}`、`recent_changes`（≤ 6 条）与
+  `changes_complete:false`，和任务冲突共用 `Work::recent_changes`。
+- 10 R4′：范围恢复把已确认的交接退回待确认后，后继 resume（接回）时重新确认祖先发给它的交接；以前只在新建后继时确认。
+
+补追溯时更正的用例名：`s090`～`s092`、`s094` 测的是记录（02 §1.6），`s093` 是反馈，`s084` 是参数校验，`s030` 测的是 S-031 / S-032，
+`s085_s086` 与反馈无关——编号借用会让追溯检查误判覆盖，已改成不带编号或带正确编号的名字。
+
+规格没写死、由实现定下的：
+
+| 项目           | 做法                                                                                                                                                                 | 依据                         |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| 批次条数越界   | 服务层报 `INVALID_ARGUMENT`（与 MCP schema 拦下时同一个码），规格写的服务层兜底码是 `VALIDATION_ERROR`                                                               | Agent 易用：同一个错误一个码 |
+| 读是否续租     | R2 说读不续租，R11 P3 说 owner 的读也续租：按更晚的 R11，W4 读请求带上 session 后实现                                                                                | ATM 记录                     |
+| 01 C-16 的删除 | `work_items.archived_at / phase_inferred / planned_start_date`、labels、RELATES / DUPLICATES 仍在 schema：W1 原型按列搬运它们，删除与「非默认值进报告附件」一起在 W3 | W3 硬门                      |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h2.py`，11 条全部 RED（追溯检查对删用例、规格加规则、未知编号、引用不存在的用例、
+矩阵过期、去掉人工判定说明、去向不写阶段都变红；三处实现修复各自变红），证据 `output/w2-evidence/w2h2-mutation-evidence.json`。
+抽取脚本 `spec-trace-extract.py --check --spec <副本>` 在规格副本里加一条规则时失败、原规格通过。

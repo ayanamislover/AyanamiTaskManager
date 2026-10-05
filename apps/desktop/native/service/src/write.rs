@@ -578,8 +578,10 @@ fn read_error(e: ReadError<rusqlite::Error>) -> DomainError {
 fn write_error(e: WriteError<DomainError>) -> DomainError {
     match e {
         WriteError::Rejected(e) => e,
+        // 00 Q-02：准入超时的作业保证没执行，所以明确告诉调用方没有提交。
         WriteError::Busy => {
             DomainError::new(ErrorCode::STORE_BUSY, "存储繁忙，稍后用同一个 op_id 重试")
+                .detail("committed", false)
         }
         WriteError::Closed => DomainError::new(
             ErrorCode::SERVICE_UNAVAILABLE,

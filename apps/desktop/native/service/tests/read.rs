@@ -12,7 +12,7 @@ use atm_service::read::{
     TaskListRequest, TaskView,
 };
 use atm_service::session::{BeginRequest, EndRequest, Outcome, ProjectSelector, Resume};
-use atm_service::work::Target;
+use atm_service::work::{CreateItem, Target};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -463,8 +463,18 @@ fn s055_s059_continuation_rules() {
     );
     assert_eq!(e.code, ErrorCode::RESULT_TOO_LARGE);
     assert_eq!(e.details["recovery"]["preserve_cursor"], true);
-    // S-057：过期。
-    clock.fetch_add(61 * 60 * 1000, Ordering::SeqCst);
+    // S-057：过期。游标里的过期时刻 e 当时仍有效，e+1 起 INVALID_CURSOR EXPIRED，出路是重新读。
+    let now = clock.load(Ordering::SeqCst);
+    let expires: i64 = cursor.split('.').nth(5).unwrap().parse().unwrap();
+    clock.store(expires, Ordering::SeqCst);
+    brief(
+        &w,
+        BriefRequest {
+            cursor: Some(cursor.clone()),
+            ..BriefRequest::default()
+        },
+    );
+    clock.store(expires + 1, Ordering::SeqCst);
     let e = brief_err(
         &w,
         BriefRequest {
@@ -472,8 +482,10 @@ fn s055_s059_continuation_rules() {
             ..BriefRequest::default()
         },
     );
+    assert_eq!(e.code, ErrorCode::INVALID_CURSOR);
     assert_eq!(e.details["reason"], "EXPIRED");
-    clock.fetch_sub(61 * 60 * 1000, Ordering::SeqCst);
+    assert_eq!(e.details["recovery"]["action"], "restart_read");
+    clock.store(now, Ordering::SeqCst);
     // S-056：冻结的记录被替代 → STALE，带 record_key。
     let frozen = keys.last().unwrap();
     w.svc
@@ -514,7 +526,7 @@ fn s055_s059_continuation_rules() {
 #[test]
 fn s060_c16_begin_brief_modes() {
     let w = world("rd-begin-brief");
-    long_records(&w, 3);
+    long_records(&w, 8);
     let begun = w
         .svc
         .begin(
@@ -563,6 +575,10 @@ fn s060_c16_begin_brief_modes() {
         .unwrap();
     assert_eq!(full["session"], begun.result["session"]["id"]);
     assert_eq!(full["brief_truncated"], true);
+    // S-005：8 条长记录、400 字符的预算下，身份字段一个不少（只有可裁剪的 body 被丢）。
+    for k in ["scope", "session", "project", "surface_version", "outcome"] {
+        assert!(full.get(k).is_some_and(|v| !v.is_null()), "{k}: {full}");
+    }
     let e = brief_err(
         &w,
         BriefRequest {
@@ -665,6 +681,21 @@ fn s061_s063_c04_delta() {
         json!(["work.created"])
     );
     assert!(js(&d) <= 1000);
+    // 照续读参数再调一次：仍只有点名的类型，从上一页之后接着给。
+    let args = &d["continuation"]["arguments"];
+    let next = delta(
+        &w,
+        DeltaRequest {
+            since_seq: args["since_seq"].as_i64(),
+            limit: 30,
+            types: vec![args["types"][0].as_str().unwrap().to_owned()],
+            max_chars: 1000,
+        },
+    );
+    let events = next["events"].as_array().unwrap();
+    assert!(!events.is_empty());
+    assert!(events.iter().all(|e| e["type"] == "work.created"));
+    assert!(events[0]["seq"].as_i64() > d["next_seq"].as_i64());
 }
 
 /// S-064：单条放不下 → oversized_event 给出 REST 回取路径，next_seq 越过它。
@@ -1119,6 +1150,46 @@ fn s066_s067_c15_record_and_session_lists() {
     })
     .unwrap();
     assert_eq!(none["returned_count"], 0);
+    // C-15 的正例：按 task_key 过滤命中正在做它的 session，带同一过滤的游标逐页续读得到同一组。
+    let k = w.task("被过滤的任务");
+    let other = w.task("别的任务");
+    w.s1(p(&k, Operation::Start)).unwrap();
+    w.patch_as(&agent(), Some("SX"), vec![p(&other, Operation::Start)])
+        .unwrap();
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let whole = ids(&sessions(ListRequest {
+        task_key: Some(k.to_lowercase()),
+        ..ListRequest::default()
+    })
+    .unwrap());
+    assert!(
+        whole.contains(&"S1".to_owned()) && !whole.contains(&"SX".to_owned()),
+        "{whole:?}"
+    );
+    let mut paged = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = sessions(ListRequest {
+            limit: 1,
+            cursor: cursor.clone(),
+            task_key: Some(k.to_lowercase()),
+            ..ListRequest::default()
+        })
+        .unwrap();
+        paged.extend(ids(&page));
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if page["has_more"] == false {
+            break;
+        }
+    }
+    assert_eq!(paged, whole);
 }
 
 // ================= 搜索与精确读取 =================
@@ -1712,4 +1783,146 @@ fn ack_preview_is_bounded() {
         .mutation_ack("ATM", "work.create.batch", "op-many", Some("S1"), &again)
         .unwrap();
     assert_eq!(ack["replayed"], true);
+}
+
+// ================= 追溯补齐（W2h2） =================
+
+/// S-067：session 列表按 (started_at, id) 降序；同一时刻按 id 降序；逐页续读不丢不重。
+#[test]
+fn s067_session_list_order_and_paging() {
+    let w = world("rd-s067");
+    let ids = |page: &Value| -> Vec<String> {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let whole = ids(&w
+        .svc
+        .session_list(&agent(), "ATM", &ListRequest::default())
+        .unwrap());
+    assert_eq!(whole, ["S2", "RV2", "SX", "S1", "RZ", "RV", "RC"]);
+    let mut paged = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = w
+            .svc
+            .session_list(
+                &agent(),
+                "ATM",
+                &ListRequest {
+                    limit: 2,
+                    cursor: cursor.clone(),
+                    ..ListRequest::default()
+                },
+            )
+            .unwrap();
+        paged.extend(ids(&page));
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if page["has_more"] == false {
+            break;
+        }
+    }
+    assert_eq!(paged, whole);
+}
+
+/// S-070：两个项目有相同的任务号、事件序号和 session id，各自只读到自己的。
+#[test]
+fn s070_projects_with_the_same_keys_stay_apart() {
+    let w = world("rd-s070");
+    w.exec(&format!(
+        "INSERT INTO agent_sessions (project_id, id, agent_id, role, work_state, connection_state, started_at, updated_at)
+           VALUES ('PE', 'S1', 'claude', 'PRIMARY', 'IDLE', 'ONLINE', '{T0}', '{T0}')"
+    ));
+    w.task("甲项目的任务");
+    w.svc
+        .create_work_items(
+            &agent(),
+            &Target::new("PE", Some("S1"), "pe-1"),
+            vec![CreateItem {
+                objective_id: None,
+                ..item("乙项目的任务")
+            }],
+        )
+        .unwrap();
+    for code in ["ATM", "EMP"] {
+        let list = w
+            .svc
+            .task_list(&agent(), code, &TaskListRequest::default())
+            .unwrap();
+        let items = list["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{code}");
+        assert_eq!(items[0]["key"], format!("{code}-T-0001"));
+        let d = w
+            .svc
+            .delta(
+                &agent(),
+                code,
+                &DeltaRequest {
+                    since_seq: Some(0),
+                    ..DeltaRequest::default()
+                },
+            )
+            .unwrap();
+        let keys: Vec<&Value> = d["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| &e["key"])
+            .collect();
+        assert!(
+            keys.contains(&&json!(format!("{code}-T-0001"))),
+            "{code}: {keys:?}"
+        );
+        let other = if code == "ATM" {
+            "EMP-T-0001"
+        } else {
+            "ATM-T-0001"
+        };
+        assert!(!keys.contains(&&json!(other)), "{code}: {keys:?}");
+    }
+    let emp_sessions = w
+        .svc
+        .session_list(&agent(), "EMP", &ListRequest::default())
+        .unwrap();
+    let ids: Vec<&str> = emp_sessions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["S1", "EX"]);
+}
+
+/// S-086：反馈不进 brief 的精选记录（s050），但在记录列表里照常可见，CRITICAL 也一样。
+#[test]
+fn s086_feedback_is_listed_but_not_briefed() {
+    let w = world("rd-s086");
+    w.svc
+        .feedback(
+            &agent(),
+            &w.target(Some("S1")),
+            FeedbackRequest {
+                summary: "回执看不懂".into(),
+                detail: None,
+                tool: None,
+                severity: Some("critical".into()),
+                task_key: None,
+            },
+        )
+        .unwrap();
+    let list = w
+        .svc
+        .record_list(&agent(), "ATM", &ListRequest::default())
+        .unwrap();
+    assert_eq!(list["items"][0]["importance"], "CRITICAL");
+    assert_eq!(list["items"][0]["topic"], "atm-agent-feedback");
+    let b = brief(&w, BriefRequest::default());
+    assert!(
+        b["records"].as_array().is_none_or(|r| r.is_empty()),
+        "{}",
+        b["records"]
+    );
 }

@@ -668,3 +668,20 @@ fn a_misspelled_identifier_is_an_error_not_a_string() {
             .is_err()
     );
 }
+
+/// 00 C-L15：projects 没有 archived_at（2.0 从没写过它；转换时原值放进 legacy_json）。
+/// 01 C-16 的其余删除（work_items 的 archived_at / phase_inferred / planned_start_date、labels、RELATES / DUPLICATES）
+/// 与转换器的「非默认值进报告附件」一起在 W3 做，见 TRACE.md。
+#[test]
+fn c_l15_projects_have_no_archived_at() {
+    let c = fresh("removed");
+    let columns: Vec<String> = c
+        .prepare("SELECT name FROM pragma_table_info('projects')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(columns.contains(&"lifecycle".to_owned()));
+    assert!(!columns.contains(&"archived_at".to_owned()));
+}

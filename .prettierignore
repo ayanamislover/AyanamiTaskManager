@@ -14,6 +14,8 @@ packages/mcp/src/legacy-tools-list-v1.0.18.json
 # node 对照生成的指纹向量（tests/data/fp-vectors.mjs 产出），保持生成器原样输出。
 apps/desktop/native/service/tests/data/fp-vectors.json
 apps/desktop/native/service/tests/data/knowledge-v1-vectors.json
+# 文末矩阵由 spec_trace 测试生成并逐字核对（ATM_TRACE_BLESS=1 重写）。
+apps/desktop/native/service/TRACE.md
 docs/generated/mcp-tool-contracts.md
 apps/mobile/android
 .local

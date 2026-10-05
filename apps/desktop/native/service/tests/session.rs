@@ -8,7 +8,7 @@ use atm_domain::principal::{JobId, Principal};
 use atm_domain::time::Timestamp;
 use atm_domain::work::Operation;
 use atm_service::fp::{self, JsValue};
-use atm_service::memory::{ProgressRequest, RecordRequest};
+use atm_service::memory::{ProgressRequest, ProgressScope, RecordRequest};
 use atm_service::session::{
     BeginRequest, EndRequest, GitContext, Outcome, ProjectSelector, Resume, SweepPolicy,
 };
@@ -168,6 +168,15 @@ fn s001_s004_atomic_begin() {
             },
         )
     });
+    // 02 C-17：session 关闭后再重放，回执照常给原 session，但如实报 sessionState=CLOSED。
+    w.exec(&format!(
+        "UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'EXPLICIT_END' WHERE id = '{}'",
+        sid(&first)
+    ));
+    let late = w.begin(req.clone());
+    assert!(late.replayed);
+    assert_eq!(sid(&late), sid(&first));
+    assert_eq!(late.result["sessionState"], "CLOSED");
 }
 
 /// R11 A3：3.0 的 begin 按 (principal, operation, op_id) 唯一，不按项目划分。
@@ -806,6 +815,39 @@ fn s018_s036_closed_sessions_replay_but_do_not_write() {
     assert_eq!(again.result, first.result);
     let e = w.refused(ErrorCode::SESSION_CLOSED, || w.record_as(&s, "新的"));
     assert_eq!(e.details["next"]["predecessor_session_id"], s.as_str());
+    // S-036 反例：先查幂等，所以已关闭 session 上同 op_id 换内容是 IDEMPOTENCY_CONFLICT，不是 SESSION_CLOSED。
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc.create_record(
+            &agent(),
+            &t,
+            RecordRequest::new("FACT", "事实", "改过的摘要"),
+        )
+    });
+}
+
+/// S-035：服务写出的事件带请求的 op_id；不带 op_id 的普通 begin 写的 agent.joined 没有 op_id。
+#[test]
+fn s035_events_carry_the_request_op_id() {
+    let w = world("ss-s035");
+    let k = w.task("一");
+    w.svc
+        .patch_work_items(
+            &agent(),
+            &Target::new("PA", Some("S1"), "op-claim"),
+            vec![p(&k, Operation::Claim)],
+        )
+        .unwrap();
+    assert_eq!(
+        w.scalar("SELECT op_id FROM events WHERE project_id = 'PA' AND type = 'work.claimed'"),
+        "op-claim"
+    );
+    let s = sid(&w.begin(begin_req("codex")));
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT op_id FROM events WHERE project_id = 'PA' AND type = 'agent.joined' AND session_id = '{s}'"
+        )),
+        Value::Null
+    );
 }
 
 /// S-019 + S-020：心跳超时后用旧 id 写入 → 同事务新建 successor（REBOUND）；再写一次接到同一个 successor；
@@ -1130,4 +1172,162 @@ fn a3_omitted_resume_matches_a_2x_begin_receipt() {
             w.svc.begin(&agent(), other)
         });
     }
+}
+
+/// S-091：每种写入发出 02 §6.3 表里的事件（类型 + aggregate_type）；REPLAY 不发事件。
+/// 任务操作、检查项、review 的事件在 work / composite 的用例里逐个断言；这里覆盖 session、进度、记录与规划根。
+#[test]
+fn s091_each_write_emits_its_event() {
+    let w = world("ss-s091");
+    let last = || w.count("SELECT coalesce(max(seq), 0) FROM events WHERE project_id = 'PA'");
+    let since = |after: i64| -> Vec<String> {
+        let rows = w.scalar(&format!(
+            "SELECT json_group_array(type || '/' || aggregate_type) FROM
+               (SELECT type, aggregate_type FROM events WHERE project_id = 'PA' AND seq > {after} ORDER BY seq)"
+        ));
+        serde_json::from_str(rows.as_str().unwrap()).unwrap()
+    };
+    let mut at = last();
+    let mut expect = |what: &str, events: &[&str]| {
+        let now = last();
+        assert_eq!(since(at), events, "{what}");
+        at = now;
+    };
+    let joined = w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    });
+    let s = sid(&joined);
+    expect("new session", &["agent.joined/SESSION"]);
+    w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        ..begin_req("codex")
+    });
+    expect("resume", &["agent.resumed/SESSION"]);
+    w.svc
+        .refresh_git_context(
+            &user(),
+            "PA",
+            &s,
+            GitContext {
+                available: true,
+                branch: Some("main".into()),
+                ..GitContext::default()
+            },
+        )
+        .unwrap();
+    expect("git refresh", &["agent.git_context.updated/SESSION"]);
+    let k = w.task("一");
+    expect("create", &["work.created/WORK_ITEM"]);
+    w.s1(p(&k, Operation::Start)).unwrap();
+    expect("start", &["work.started/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest::task(&k, "进展"),
+        )
+        .unwrap();
+    expect("task progress", &["work.progressed/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest {
+                blocker: Some("等 CI".into()),
+                ..ProgressRequest::task(&k, "卡住")
+            },
+        )
+        .unwrap();
+    expect("blocker", &["work.blocked/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest {
+                scope: ProgressScope::Project,
+                task_key: None,
+                ..ProgressRequest::task("", "周报")
+            },
+        )
+        .unwrap();
+    expect(
+        "project progress",
+        &["project.update.published/PROJECT_UPDATE"],
+    );
+    let t = w.target(Some("S1"));
+    let req = RecordRequest::new("FACT", "事实", "摘要");
+    w.svc.create_record(&agent(), &t, req.clone()).unwrap();
+    expect("record", &["record.created/RECORD"]);
+    w.svc.create_record(&agent(), &t, req).unwrap();
+    expect("replay", &[]);
+    w.end_as(&s, end(Outcome::Completed, true)).unwrap();
+    expect("end", &["agent.left/SESSION"]);
+    w.svc
+        .force_close_session(&user(), &w.target(None), "SX", true)
+        .unwrap();
+    expect("force close", &["agent.force_closed/SESSION"]);
+}
+
+/// 10 R4′ 验收：待确认交接 → 后继确认 → 范围恢复把交接退回待确认 → 后继 resume 时再次确认并继续工作；
+/// 确认方后来 CLOSED，交接作为历史保留，不让 CLOSED 的 session 复活。
+#[test]
+fn r4_handoffs_are_reconfirmed_after_a_restore() {
+    let w = world("ss-r4-handoff");
+    let thread_a = |resume: Resume| BeginRequest {
+        resume: Some(resume),
+        thread_id: Some("A".into()),
+        ..begin_req("codex")
+    };
+    let a = sid(&w.begin(thread_a(Resume::No)));
+    let k = w.task("一");
+    w.patch_as(&agent(), Some(&a), vec![p(&k, Operation::Start)])
+        .unwrap();
+    w.end_as(&a, end(Outcome::Paused, false)).unwrap();
+    let backups = w.dir.join("backups");
+    let backup = atm_store::backup::create_backup(w.svc.store(), &backups, "MANUAL", &now_minus(0))
+        .unwrap()
+        .id;
+    let n = w.begin(thread_a(Resume::Yes));
+    assert_eq!(n.result["outcome"], "SUCCESSOR");
+    assert_eq!(n.result["acknowledgedHandoffs"], 1);
+    let n = sid(&n);
+    let to = || {
+        w.scalar(&format!(
+            "SELECT to_session_id FROM handoffs WHERE from_session_id = '{a}'"
+        ))
+    };
+    assert_eq!(to(), n.as_str());
+    let at = now_minus(0);
+    atm_store::restore::restore_project(
+        w.svc.store(),
+        &backup,
+        "PA",
+        &atm_store::restore::RestoreOptions {
+            backups_root: &backups,
+            at: &at,
+            pin_until: &at,
+            budget: std::time::Duration::from_secs(60),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        to(),
+        Value::Null,
+        "the restore brought the handoff back to pending"
+    );
+    assert_eq!(w.session_col("PA", &n, "connection_state"), "ONLINE");
+    let again = w.begin(thread_a(Resume::Yes));
+    assert_eq!(sid(&again), n);
+    assert_eq!(again.result["outcome"], "RESUMED");
+    assert_eq!(again.result["acknowledgedHandoffs"], 1);
+    assert_eq!(to(), n.as_str());
+    w.patch_as(&agent(), Some(&n), vec![p(&k, Operation::Verify)])
+        .unwrap();
+    // 确认方结束：交接留作历史，n 不会因此复活；新的 resume 开新的 session。
+    w.end_as(&n, end(Outcome::Completed, true)).unwrap();
+    let later = w.begin(thread_a(Resume::Yes));
+    assert_ne!(sid(&later), n);
+    assert_eq!(to(), n.as_str());
+    assert_eq!(w.session_col("PA", &n, "connection_state"), "CLOSED");
 }

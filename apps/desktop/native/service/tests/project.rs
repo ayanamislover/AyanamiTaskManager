@@ -821,3 +821,66 @@ fn a3_begin_without_a_project() {
         )
     });
 }
+
+/// L-001 反例：建项目的事务中途失败（这里用触发器在写 scope 世代时注入），项目、路径、计数器、事件一条都不留，
+/// 全局序号不前进；去掉故障后同名再建成功。
+#[test]
+fn l001_a_failure_inside_create_leaves_nothing() {
+    let w = world("pj-create-fault");
+    w.exec(
+        "CREATE TRIGGER inject_create_fault BEFORE INSERT ON scope_generations
+         BEGIN SELECT RAISE(ABORT, 'injected create fault'); END;",
+    );
+    let e = w.refused(ErrorCode::INTERNAL_ERROR, || {
+        w.svc.create_project(
+            &user(),
+            CreateProjectRequest {
+                path: at(r"D:\Work\Beta\"),
+                ..create("Beta")
+            },
+        )
+    });
+    assert!(e.message.contains("injected"), "{e:?}");
+    w.exec("DROP TRIGGER inject_create_fault;");
+    let r = w
+        .svc
+        .create_project(
+            &user(),
+            CreateProjectRequest {
+                path: at(r"D:\Work\Beta\"),
+                ..create("Beta")
+            },
+        )
+        .unwrap();
+    let code = r.result["project"]["code"].as_str().unwrap().to_owned();
+    assert_eq!(w.lifecycle(&code), "ACTIVE");
+}
+
+/// L-004 反例：同一项目同时只能有一条 PENDING 恢复请求（部分唯一索引兜底，并发撞上也只累加那一条）；
+/// 已决定的请求不受限制。
+#[test]
+fn l004_one_pending_restore_request_per_project() {
+    let w = world("pj-one-pending");
+    let row = |id: &str, status: &str| {
+        let decided = if status == "PENDING" {
+            "NULL, NULL"
+        } else {
+            "'2026-10-05T00:00:00.000Z', 'USER'"
+        };
+        format!(
+            "INSERT INTO project_restore_requests (id, project_id, requested_by, status, created_at, updated_at, decided_at, decided_by)
+               VALUES ('{id}', 'PA', 'claude', '{status}', '2026-10-05T00:00:00.000Z', '2026-10-05T00:00:00.000Z', {decided})"
+        )
+    };
+    w.exec(&row("r1", "PENDING"));
+    let second = w.svc.store().write({
+        let sql = row("r2", "PENDING");
+        move |tx| tx.execute_batch(&sql)
+    });
+    assert!(second.is_err(), "a second PENDING request was accepted");
+    w.exec(&row("r3", "APPROVED"));
+    assert_eq!(
+        w.count("SELECT count(*) FROM project_restore_requests WHERE project_id = 'PA'"),
+        2
+    );
+}

@@ -98,10 +98,10 @@ pub(crate) struct Row {
     pub evidence_required: bool,
     pub evidence: Value,
     pub version: i64,
+    pub updated_at: String,
 }
 
-const COLUMNS: &str =
-    "id, work_item_id, title, kind, status, weight, evidence_required, evidence_json, version";
+const COLUMNS: &str = "id, work_item_id, title, kind, status, weight, evidence_required, evidence_json, version, updated_at";
 
 fn row(r: &SqlRow<'_>) -> rusqlite::Result<Result<Row, String>> {
     let status: String = r.get(4)?;
@@ -122,6 +122,7 @@ fn row(r: &SqlRow<'_>) -> rusqlite::Result<Result<Row, String>> {
         evidence_required: r.get::<_, i64>(6)? != 0,
         evidence,
         version: r.get(8)?,
+        updated_at: r.get(9)?,
     }))
 }
 
@@ -445,7 +446,7 @@ pub(crate) fn single(w: &mut Work<'_>, req: &ChecklistSingle) -> Result<Value, D
     match req.expected_checklist_version {
         Some(expected) if expected != r.version => {
             return Err(with_next(
-                checklist_conflict(&r, expected, &key, Some(task.version)),
+                checklist_conflict(w, &r, expected, &task, true)?,
                 json!({ "operation": "checklist", "task_key": key, "checklist_id": r.id, "expected_checklist_version": r.version }),
             ));
         }
@@ -503,15 +504,18 @@ pub(crate) fn single(w: &mut Work<'_>, req: &ChecklistSingle) -> Result<Value, D
     Ok(result)
 }
 
-/// 检查项的 VERSION_CONFLICT（W-053 第 4 步、W-057 第 5 步、W-059 第 9 步；C-19 快照按 entity 分支）。
-/// `task_version`：给了且恰好等于 expected 时，提示传成了任务版本（TASK_VERSION_PASSED）。
+/// 检查项的 VERSION_CONFLICT（W-053 第 4 步、W-057 第 5 步、W-059 第 9 步；C-19 快照按 entity 分支；W-104 载荷）。
+/// `hint`：调用方传的版本恰好等于任务版本时，提示传成了任务版本（TASK_VERSION_PASSED）。
 pub(crate) fn checklist_conflict(
+    w: &Work<'_>,
     r: &Row,
     expected: i64,
-    task_key: &str,
-    task_version: Option<i64>,
-) -> DomainError {
-    let passed_task_version = task_version == Some(expected);
+    task: &Task,
+    hint: bool,
+) -> Result<DomainError, DomainError> {
+    let task_key = w.task_key(task);
+    let task_key = task_key.as_str();
+    let passed_task_version = hint && task.version == expected;
     let message = if passed_task_version {
         format!(
             "expected_checklist_version 比的是检查项 {} 自己的版本（{}），传进来的 {expected} 是任务 {task_key} 的版本",
@@ -533,7 +537,22 @@ pub(crate) fn checklist_conflict(
         .detail("expected_version", expected)
         .detail("current_version", r.version)
         .detail("version_gap", r.version - expected)
-        .detail("current", r.view());
+        .detail(
+            "current",
+            json!({
+                "id": r.id,
+                "task_key": task_key,
+                "task_version": task.version,
+                "title": r.title,
+                "status": status_str(r.status),
+                "evidence_required": r.evidence_required,
+                "evidence_count": r.evidence_len(),
+                "version": r.version,
+                "updated_at": r.updated_at,
+            }),
+        )
+        .detail("recent_changes", w.recent_changes(&task.id)?)
+        .detail("changes_complete", false);
     if passed_task_version {
         e = e
             .detail("hint", "TASK_VERSION_PASSED")
@@ -544,7 +563,7 @@ pub(crate) fn checklist_conflict(
                 "这个版本参数比的是检查项自己的 version（task_get 的 checklist[].version），不是任务版本",
             );
     }
-    e
+    Ok(e)
 }
 
 fn checklist_version_required(r: &Row, task_key: &str) -> DomainError {

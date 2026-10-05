@@ -842,3 +842,21 @@ fn l117_restore_tombstones_later_operations() {
             .replayed
     );
 }
+
+/// 02 C-20：心跳超时关闭的 session 写知识，和其他写入一样 rebind 到后继，作者记成后继；EXPLICIT_END 的拒绝见 l105。
+#[test]
+fn c20_agent_knowledge_writes_rebind_after_a_heartbeat_timeout() {
+    let w = world("kn-c20");
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'S2'");
+    let r = w.agent_save("S2", agent_new("rebind", "一"), "r1").unwrap();
+    let successor = r.rebound_to.clone().expect("rebound");
+    assert_ne!(successor, "S2");
+    assert_eq!(r.result["publishedBy"]["sessionId"], successor.as_str());
+    assert_eq!(r.result["publishedBy"]["agentId"], "claude");
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT predecessor_session_id FROM agent_sessions WHERE id = '{successor}'"
+        )),
+        "S2"
+    );
+}

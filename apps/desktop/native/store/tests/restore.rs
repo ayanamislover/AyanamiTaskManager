@@ -1754,3 +1754,35 @@ fn restore_exit_child() {
     eprintln!("restore finished without reaching {step:?}: {r:?}");
     std::process::exit(3);
 }
+
+/// 04 L-011 / C-L07：范围恢复保持项目当前的生命周期，不取备份里的值；恢复失败也不把 TRASHED 变成 ACTIVE。
+#[test]
+fn l011_restores_keep_the_current_lifecycle() {
+    let w = world("restore-lifecycle");
+    task(&w, "PA", "one", "op-1", None, T0);
+    let set = |lifecycle: &str| {
+        let sql = format!("UPDATE projects SET lifecycle = '{lifecycle}' WHERE id = 'PA'");
+        w.store.write(move |tx| tx.execute_batch(&sql)).unwrap();
+    };
+    let lifecycle = || s(&w, "SELECT lifecycle FROM projects WHERE id = 'PA'", &[]).unwrap();
+    // 备份时 ARCHIVED，当前 ACTIVE：恢复后仍 ACTIVE。
+    set("ARCHIVED");
+    let archived_backup = backup(&w);
+    set("ACTIVE");
+    restore_project(&w.store, &archived_backup, "PA", &opts(&w)).unwrap();
+    assert_eq!(lifecycle(), "ACTIVE");
+    // 备份时 ACTIVE，当前 ARCHIVED / TRASHED：恢复后保持当前值。
+    let active_backup = backup(&w);
+    for current in ["ARCHIVED", "TRASHED"] {
+        set(current);
+        restore_project(&w.store, &active_backup, "PA", &opts(&w)).unwrap();
+        assert_eq!(lifecycle(), current);
+    }
+    // 失败的恢复：TRASHED 不变。
+    let short = RestoreOptions {
+        budget: Duration::ZERO,
+        ..opts(&w)
+    };
+    restore_project(&w.store, &active_backup, "PA", &short).unwrap_err();
+    assert_eq!(lifecycle(), "TRASHED");
+}

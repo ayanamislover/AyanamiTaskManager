@@ -129,6 +129,14 @@ fn w071_planning_root_is_provisioned_for_agents_only() {
         w.scalar("SELECT title FROM milestones WHERE project_id = 'PE'"),
         "执行"
     );
+    // S-091：补建规划根也记事件。
+    assert_eq!(
+        w.scalar(
+            "SELECT group_concat(type || '/' || aggregate_type, ' ') FROM
+               (SELECT type, aggregate_type FROM events WHERE project_id = 'PE' ORDER BY seq)"
+        ),
+        "objective.created/OBJECTIVE milestone.created/MILESTONE work.created/WORK_ITEM"
+    );
 }
 
 /// W-072 + 00 C-18。
@@ -388,6 +396,29 @@ fn w075_discovered_from_is_searchable_but_not_blocking() {
     );
     // W-005：不阻塞。
     w.s1(p(&found, Operation::Start)).unwrap();
+    // 反例：引用自身、key 与 ref 同时给、ref 找不到。
+    let one = |c: CreateItem| w.create_as(&agent(), Some("S1"), vec![c]);
+    let e = w.refused(ErrorCode::VALIDATION_ERROR, || {
+        one(CreateItem {
+            client_ref: Some("n".into()),
+            discovered_from_ref: Some("n".into()),
+            ..item("自指")
+        })
+    });
+    assert_eq!(e.details["issue"], "self_reference");
+    w.refused(ErrorCode::VALIDATION_ERROR, || {
+        one(CreateItem {
+            discovered_from: Some(origin.clone()),
+            discovered_from_ref: Some("x".into()),
+            ..item("两个都给")
+        })
+    });
+    w.refused(ErrorCode::DISCOVERED_FROM_REF_NOT_FOUND, || {
+        one(CreateItem {
+            discovered_from_ref: Some("nope".into()),
+            ..item("找不到")
+        })
+    });
 }
 
 // ================= 基础操作 =================
@@ -441,6 +472,21 @@ fn w024_c11_c29_dependencies_must_be_done() {
     });
     assert!(e.message.contains("已取消"), "{}", e.message);
     assert_eq!(e.details["dependencies"][1]["cancelled"], true);
+    // 正例：去掉已取消的前置、完成 A 之后，C 可以 claim / start。
+    w.s1(edit(
+        &c,
+        1,
+        EditFields {
+            depends_on: Some(vec![a.clone()]),
+            ..EditFields::default()
+        },
+    ))
+    .unwrap();
+    w.patch_as(&agent(), Some("SX"), vec![p(&a, Operation::Complete)])
+        .unwrap();
+    w.s1(p(&c, Operation::Claim)).unwrap();
+    w.s1(p(&c, Operation::Start)).unwrap();
+    assert_eq!(status(&w, &c), "IN_PROGRESS");
 }
 
 /// W-025 + 10 R2：别人的有效领取挡住 claim / start；过期且带 takeover_stale 才能接管；同一 lineage 直接接手。
@@ -1485,4 +1531,455 @@ fn w020_verify_is_refused_on_closed_tasks() {
         )
     });
     assert_eq!(e.details["legal_operations"], json!(["reopen", "edit"]));
+}
+
+// ================= 追溯补齐（W2h2：01 的规则与 00 §1 裁决） =================
+
+/// W-005：discoveredFrom 只是溯源。来源还在 IN_PROGRESS，新任务照样 claim / start / complete；同时挂了 BLOCKS 的那条才被挡住。
+#[test]
+fn w005_discovered_from_never_blocks() {
+    let w = world("discovered-free");
+    let origin = w.task("来源");
+    w.s1(p(&origin, Operation::Start)).unwrap();
+    let r = w
+        .create_as(
+            &agent(),
+            Some("SX"),
+            vec![
+                CreateItem {
+                    discovered_from: Some(origin.clone()),
+                    ..item("顺手发现")
+                },
+                CreateItem {
+                    discovered_from: Some(origin.clone()),
+                    depends_on: vec![origin.clone()],
+                    ..item("要等来源")
+                },
+            ],
+        )
+        .unwrap();
+    let key = |i: usize| r.result["items"][i]["key"].as_str().unwrap().to_owned();
+    let (free, held) = (key(0), key(1));
+    let sx = |item: PatchItem| w.patch_as(&agent(), Some("SX"), vec![item]);
+    sx(p(&free, Operation::Claim)).unwrap();
+    sx(p(&free, Operation::Start)).unwrap();
+    sx(p(&free, Operation::Complete)).unwrap();
+    assert_eq!(status(&w, &free), "DONE");
+    assert_eq!(status(&w, &origin), "IN_PROGRESS");
+    w.refused(ErrorCode::DEPENDENCY_NOT_READY, || {
+        sx(p(&held, Operation::Claim))
+    });
+}
+
+/// W-039：每条成功 patch 恰好一条事件；同批的事件共享 op_id、序号连续，带主体与 session；READY 上的同态 ready 也记一条。
+#[test]
+fn w039_one_event_per_patch_and_the_batch_shares_its_op_id() {
+    let w = world("events");
+    let k = w.task("A");
+    let before = w.count("SELECT count(*) FROM events WHERE project_id = 'PA'");
+    w.patch_as(
+        &agent(),
+        Some("S1"),
+        vec![p(&k, Operation::Claim), p(&k, Operation::Start)],
+    )
+    .unwrap();
+    assert_eq!(
+        w.count("SELECT count(*) FROM events WHERE project_id = 'PA'"),
+        before + 2
+    );
+    let last2 = "FROM (SELECT * FROM events WHERE project_id = 'PA' ORDER BY seq DESC LIMIT 2)";
+    assert_eq!(w.count(&format!("SELECT count(DISTINCT op_id) {last2}")), 1);
+    assert_eq!(w.count(&format!("SELECT max(seq) - min(seq) {last2}")), 1);
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) {last2} WHERE actor_type = 'AGENT' AND actor_id = 'claude' AND session_id = 'S1'
+               AND aggregate_type = 'WORK_ITEM' AND op_id IS NOT NULL"
+        )),
+        2
+    );
+    assert_eq!(w.events(&k)[1..], ["work.claimed", "work.started"]);
+    let r = w.task("R");
+    w.s1(p(&r, Operation::Ready).version(1)).unwrap();
+    assert_eq!(w.events(&r), ["work.created", "work.readied"]);
+    assert_eq!(w.version(&r), 2);
+}
+
+/// W-044：USER 可以释放别人已过期的领取；有效领取不行。
+#[test]
+fn w044_users_release_expired_claims_of_others() {
+    let w = world("user-release");
+    let k = w.task("A");
+    w.s1(p(&k, Operation::Claim)).unwrap();
+    w.refused(ErrorCode::CLAIM_OWNER_REQUIRED, || {
+        w.patch_as(&user(), None, vec![p(&k, Operation::Release).version(2)])
+    });
+    w.exec(&format!(
+        "UPDATE work_items SET claim_lease_until = '{PAST}' WHERE local_no = 1"
+    ));
+    w.patch_as(&user(), None, vec![p(&k, Operation::Release).version(2)])
+        .unwrap();
+    assert_eq!(status(&w, &k), "READY");
+    assert_eq!(w.col(&k, "claimed_by_session_id"), Value::Null);
+}
+
+/// W-070：批次 1～50 条；clientRef 区分大小写，"a" 与 "A" 同批合法。
+/// 条数越界服务层报 INVALID_ARGUMENT（与 MCP schema 拦下时同一个码；规格写的服务层兜底码是 VALIDATION_ERROR，见 SERVICE-NOTES）。
+#[test]
+fn w070_batch_size_and_case_sensitive_client_refs() {
+    let w = world("batch-size");
+    let r = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![
+                CreateItem {
+                    client_ref: Some("a".into()),
+                    ..item("小写")
+                },
+                CreateItem {
+                    client_ref: Some("A".into()),
+                    depends_on_refs: vec!["a".into()],
+                    ..item("大写")
+                },
+            ],
+        )
+        .unwrap();
+    assert_eq!(r.result["items"].as_array().unwrap().len(), 2);
+    w.refused(ErrorCode::INVALID_ARGUMENT, || {
+        w.create_as(&agent(), Some("S1"), Vec::new())
+    });
+    w.refused(ErrorCode::INVALID_ARGUMENT, || {
+        w.create_as(
+            &agent(),
+            Some("S1"),
+            (0..51).map(|i| item(&format!("第{i}条"))).collect(),
+        )
+    });
+    w.create_as(
+        &agent(),
+        Some("S1"),
+        (0..50).map(|i| item(&format!("第{i}条"))).collect(),
+    )
+    .unwrap();
+}
+
+/// W-077：检查项按初始形状插入（ACCEPTANCE、TODO、证据为空、版本 0）。
+#[test]
+fn w077_checklist_items_start_empty() {
+    let w = world("create-checklist");
+    w.create_as(
+        &agent(),
+        Some("S1"),
+        vec![CreateItem {
+            checklist: vec![NewChecklist {
+                title: "测试".into(),
+                ..NewChecklist::default()
+            }],
+            ..item("A")
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM checklist_items WHERE kind = 'ACCEPTANCE' AND status = 'TODO'
+               AND evidence_json = '[]' AND version = 0"
+        ),
+        1
+    );
+}
+
+/// W-080：回执的 sequence 是最后一条 work.created 的序号；work.created 的 payload 带来源的 key。
+#[test]
+fn w080_create_receipt_and_created_payload() {
+    let w = world("create-receipt");
+    let origin = w.task("来源");
+    let r = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![
+                CreateItem {
+                    discovered_from: Some(origin.to_lowercase()),
+                    ..item("甲")
+                },
+                item("乙"),
+            ],
+        )
+        .unwrap();
+    assert_eq!(r.result["items"][0]["key"], "ATM-T-0002");
+    assert_eq!(r.result["items"][1]["key"], "ATM-T-0003");
+    let last = w.scalar(
+        "SELECT seq FROM events WHERE project_id = 'PA' AND type = 'work.created' ORDER BY seq DESC LIMIT 1",
+    );
+    assert_eq!(r.result["sequence"], last);
+    let payload: Value = serde_json::from_str(
+        w.scalar(
+            "SELECT payload_json FROM events WHERE type = 'work.created' AND payload_json LIKE '%甲%'",
+        )
+        .as_str()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["key"], "ATM-T-0002");
+    assert_eq!(payload["status"], "READY");
+    assert_eq!(payload["discoveredFrom"], origin.as_str());
+}
+
+/// W-105 + W-113：完成子项推动父任务版本，旧版本 complete 父任务冲突，新版本成功；complete 写 reported=100。
+#[test]
+fn w105_w113_a_finished_child_stales_the_parent_version() {
+    let w = world("stale-parent");
+    let parent = w.task("P");
+    let child = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![CreateItem {
+                parent_key: Some(parent.clone()),
+                ..item("C")
+            }],
+        )
+        .unwrap()
+        .result["items"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let held = w.version(&parent);
+    w.s1(p(&child, Operation::Complete)).unwrap();
+    assert_eq!(w.col(&child, "reported_progress"), json!(100.0));
+    assert_eq!(w.col(&child, "computed_progress"), json!(100.0));
+    assert_eq!(w.col(&parent, "computed_progress"), json!(99.0));
+    assert_eq!(w.version(&parent), held + 1);
+    w.refused(ErrorCode::VERSION_CONFLICT, || {
+        w.patch_as(
+            &user(),
+            None,
+            vec![p(&parent, Operation::Complete).version(held)],
+        )
+    });
+    w.patch_as(
+        &user(),
+        None,
+        vec![p(&parent, Operation::Complete).version(held + 1)],
+    )
+    .unwrap();
+    assert_eq!(status(&w, &parent), "DONE");
+}
+
+/// 00 C-03：进入 DONE / CANCELLED 时清掉领取与租约，assignee 留作历史。
+#[test]
+fn c03_terminal_states_drop_the_claim_and_lease() {
+    let w = world("c03");
+    for (title, op) in [("完成", Operation::Complete), ("取消", Operation::Cancel)] {
+        let k = w.task(title);
+        w.s1(p(&k, Operation::Start)).unwrap();
+        assert!(w.col(&k, "claim_lease_until").is_string());
+        let item = PatchItem {
+            cancel_reason: (op == Operation::Cancel).then(|| "不做了".into()),
+            ..p(&k, op).version(2)
+        };
+        w.s1(item).unwrap();
+        assert_eq!(w.col(&k, "claimed_by_session_id"), Value::Null, "{title}");
+        assert_eq!(w.col(&k, "claim_lease_until"), Value::Null, "{title}");
+        assert_eq!(w.col(&k, "assignee_agent_id"), "claude", "{title}");
+    }
+}
+
+/// 00 C-05：从 CANCELLED 重开清掉 duplicate_of / superseded_by。
+#[test]
+fn c05_reopen_clears_duplicate_and_superseded() {
+    let w = world("c05");
+    let a = w.task("A");
+    let b = w.task("B");
+    let c = w.task("C");
+    w.s1(PatchItem {
+        duplicate_of: Some(Some(a.clone())),
+        ..p(&b, Operation::Cancel).version(1)
+    })
+    .unwrap();
+    w.s1(PatchItem {
+        superseded_by: Some(Some(a.clone())),
+        ..p(&c, Operation::Cancel).version(1)
+    })
+    .unwrap();
+    assert!(w.col(&b, "duplicate_of_id").is_string());
+    assert!(w.col(&c, "superseded_by_id").is_string());
+    w.s1(p(&b, Operation::Reopen).version(2)).unwrap();
+    w.s1(p(&c, Operation::Reopen).version(2)).unwrap();
+    assert_eq!(w.col(&b, "duplicate_of_id"), Value::Null);
+    assert_eq!(w.col(&c, "superseded_by_id"), Value::Null);
+}
+
+/// 00 C-07 / 10 R1：别人有效领取中的任务，wait_*、verify、cancel 都报 CLAIM_NOT_OWNED，details 写明领取者与未过期。
+#[test]
+fn c07_r1_every_state_write_respects_a_valid_claim() {
+    let w = world("c07");
+    let k = w.task("A");
+    w.s1(p(&k, Operation::Start)).unwrap();
+    for item in [
+        wait(&k, Operation::WaitAgent, "等 codex").version(2),
+        wait(&k, Operation::WaitUser, "等用户").version(2),
+        p(&k, Operation::Verify).version(2),
+        PatchItem {
+            cancel_reason: Some("不做".into()),
+            ..p(&k, Operation::Cancel).version(2)
+        },
+    ] {
+        let e = w.refused(ErrorCode::CLAIM_NOT_OWNED, || {
+            w.patch_as(&agent(), Some("SX"), vec![item])
+        });
+        assert_eq!(e.details["holder_agent_id"], "claude");
+        assert_eq!(e.details["stale"], false);
+        assert!(e.details["claim_lease_until"].is_string());
+    }
+    // 阳性对照：领取者自己可以。
+    w.s1(wait(&k, Operation::WaitUser, "等用户")).unwrap();
+    assert_eq!(status(&w, &k), "WAITING_USER");
+}
+
+/// 00 C-09 / 10 R2：失败的写与 REPLAY 不续租、不转移领取。
+#[test]
+fn c09_r2_failures_and_replays_do_not_renew() {
+    let w = world("lease-no-renew");
+    let k = w.task("A");
+    let target = w.target(Some("S1"));
+    w.svc
+        .patch_work_items(&agent(), &target, vec![p(&k, Operation::Start)])
+        .unwrap();
+    w.exec(&format!(
+        "UPDATE work_items SET claim_lease_until = '{PAST}' WHERE local_no = 1"
+    ));
+    // 同 lineage 的 S2 写失败（版本不对）：领取不动、租约不续。
+    w.refused(ErrorCode::VERSION_CONFLICT, || {
+        w.patch_as(
+            &agent(),
+            Some("S2"),
+            vec![p(&k, Operation::Verify).version(1)],
+        )
+    });
+    // S1 原样重放 start：REPLAY，不续租。
+    let again = w
+        .svc
+        .patch_work_items(&agent(), &target, vec![p(&k, Operation::Start)])
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(w.col(&k, "claimed_by_session_id"), "S1");
+    assert_eq!(w.col(&k, "claim_lease_until"), PAST);
+}
+
+/// 00 C-11：未就绪前置超过 50 条时只列 50 条、带 total 与 truncated；details 不外泄内部 id。
+#[test]
+fn c11_dependency_lists_are_capped_and_use_public_keys() {
+    let w = world("c11-cap");
+    let target = w.task("等很多前置");
+    let deps: Vec<String> = (0..2)
+        .flat_map(|b| {
+            w.create_as(
+                &agent(),
+                Some("S1"),
+                (0..30).map(|i| item(&format!("前置{b}-{i}"))).collect(),
+            )
+            .unwrap()
+            .result["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["key"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(deps.len(), 60);
+    // 公开入口一次最多挂 50 条依赖，超过 50 的只会是存量数据：这里直接写关系行。
+    w.exec(
+        "INSERT INTO work_item_relations (project_id, source_id, target_id, relation_type, created_at)
+           SELECT 'PA', s.id, t.id, 'BLOCKS', '2026-10-05T00:00:00.000Z'
+             FROM work_items s, work_items t WHERE t.local_no = 1 AND s.local_no > 1",
+    );
+    let e = w.refused(ErrorCode::DEPENDENCY_NOT_READY, || {
+        w.s1(p(&target, Operation::Claim))
+    });
+    assert_eq!(e.details["dependencies"].as_array().unwrap().len(), 50);
+    assert_eq!(e.details["total"], 60);
+    assert_eq!(e.details["truncated"], true);
+    let internal = w.col(&deps[0], "id");
+    assert!(
+        !serde_json::to_string(&e.details)
+            .unwrap()
+            .contains(internal.as_str().unwrap())
+    );
+}
+
+/// 00 C-14：edit 之后完整刷新搜索文档，「工作中发现」的来源说明保留。
+#[test]
+fn c14_edit_rebuilds_the_whole_search_document() {
+    let w = world("c14");
+    let origin = w.task("来源任务");
+    let k = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![CreateItem {
+                discovered_from: Some(origin.clone()),
+                description: Some("旧描述".into()),
+                ..item("旧标题")
+            }],
+        )
+        .unwrap()
+        .result["items"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    w.s1(edit(
+        &k,
+        1,
+        EditFields {
+            title: Some("新标题".into()),
+            description: Some("新描述".into()),
+            ..EditFields::default()
+        },
+    ))
+    .unwrap();
+    let doc = |col: &str| {
+        w.scalar(&format!(
+            "SELECT {col} FROM search_docs WHERE entity_key = '{k}'"
+        ))
+        .as_str()
+        .unwrap()
+        .to_owned()
+    };
+    assert!(doc("title").contains("新标题"));
+    let body = doc("body");
+    assert!(
+        body.contains("新描述") && !body.contains("旧描述"),
+        "{body}"
+    );
+    assert!(body.contains(&format!("工作中发现于 {origin}")), "{body}");
+}
+
+/// 00 C-18：不能挂到终态的 objective 或 milestone 下；ACTIVE 的可以。
+#[test]
+fn c18_closed_planning_targets_are_refused() {
+    let w = world("c18");
+    w.exec(&format!(
+        "INSERT INTO objectives (project_id, id, local_no, title, status, created_at, updated_at)
+           VALUES ('PA', 'OC', 3, '取消的目标', 'CANCELLED', '{T0}', '{T0}');
+         INSERT INTO milestones (project_id, id, local_no, objective_id, title, status, sort_key, created_at, updated_at) VALUES
+           ('PA', 'MD', 3, 'O1', '完成的里程碑', 'DONE', 2000, '{T0}', '{T0}'),
+           ('PA', 'MC', 4, 'O1', '取消的里程碑', 'CANCELLED', 3000, '{T0}', '{T0}');"
+    ));
+    let make = |objective: Option<&str>, milestone: Option<&str>| {
+        w.create_as(
+            &agent(),
+            Some("S1"),
+            vec![CreateItem {
+                objective_id: objective.map(str::to_owned),
+                milestone_id: milestone.map(|m| Some(m.to_owned())),
+                ..item("x")
+            }],
+        )
+    };
+    w.refused(ErrorCode::PLANNING_TARGET_CLOSED, || make(Some("OC"), None));
+    w.refused(ErrorCode::PLANNING_TARGET_CLOSED, || make(None, Some("MD")));
+    w.refused(ErrorCode::PLANNING_TARGET_CLOSED, || make(None, Some("MC")));
+    make(None, Some("M1")).unwrap();
 }

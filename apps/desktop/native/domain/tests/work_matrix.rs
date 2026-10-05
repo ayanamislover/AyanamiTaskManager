@@ -390,3 +390,53 @@ fn w097_current_state_lists_prerequisites_without_complete() {
     };
     assert!(!legal_operations.contains(&"complete -> DONE".to_owned()));
 }
+
+/// W-002 反例（属性测试）：12 种操作 × 全部起始形态（含 successor 两种），结果的 (status, phase, waiting_on)
+/// 一定落在规格的合法组合表里；表照规格抄成字符串，不经过被测代码。非法形态本身也构造不出来。
+#[test]
+fn w002_every_result_is_a_legal_combination() {
+    let legal = |status: &str, phase: &str, on: Option<&str>| -> bool {
+        match (status, on) {
+            ("WAITING_AGENT", Some("AGENT")) | ("WAITING_USER", Some("USER")) => {
+                matches!(phase, "IN_PROGRESS" | "VERIFYING")
+            }
+            (s, None) => {
+                s == phase
+                    && [
+                        "BACKLOG",
+                        "READY",
+                        "CLAIMED",
+                        "IN_PROGRESS",
+                        "BLOCKED",
+                        "VERIFYING",
+                        "DONE",
+                        "CANCELLED",
+                    ]
+                    .contains(&s)
+            }
+            _ => false,
+        }
+    };
+    let mut checked = 0;
+    for &op in Operation::ALL {
+        for &status in Status::ALL {
+            for from in shapes(status) {
+                for successor in [false, true] {
+                    if let Ok(to) = resolve(op, from, successor) {
+                        checked += 1;
+                        let on = to.waiting_on().map(|w| w.as_str());
+                        assert!(
+                            legal(to.status().as_str(), to.phase().as_str(), on),
+                            "{op:?} on {from:?} gave {to:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100, "{checked}");
+    // 规格点名的三种非法组合构造不出来。
+    assert!(WorkState::new(Phase::Blocked, Some(WaitingOn::User)).is_none());
+    assert!(WorkState::new(Phase::Blocked, Some(WaitingOn::Agent)).is_none());
+    assert!(!legal("READY", "IN_PROGRESS", None));
+}

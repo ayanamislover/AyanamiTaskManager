@@ -1076,7 +1076,20 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
     let (session_id, outcome, predecessor, acknowledged, candidates) = match plan(&c, b)? {
         Plan::Reattach(s, outcome) => {
             reattach(&mut c, b, &s)?;
-            (s.id.clone(), outcome, None, 0, Vec::new())
+            // R4′：范围恢复会把已确认的交接退回待确认；接回的后继在这里重新确认祖先发给它的交接。
+            // 平时这些交接在建后继时就确认过了，这里什么也不改。
+            let predecessor: Option<String> = tx
+                .query_row(
+                    "SELECT predecessor_session_id FROM agent_sessions WHERE project_id = ?1 AND id = ?2",
+                    params![project.id, s.id],
+                    |r| r.get(0),
+                )
+                .map_err(db)?;
+            let acked = match &predecessor {
+                Some(p) => acknowledge(&c, p, &s.id, &b.agent, &b.role)?,
+                None => 0,
+            };
+            (s.id.clone(), outcome, None, acked, Vec::new())
         }
         Plan::New {
             predecessor,
