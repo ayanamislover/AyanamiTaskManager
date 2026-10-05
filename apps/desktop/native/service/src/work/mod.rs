@@ -9,7 +9,7 @@
 
 mod checklist;
 pub(crate) mod core;
-mod create;
+pub(crate) mod create;
 mod graph;
 mod patch;
 mod review;

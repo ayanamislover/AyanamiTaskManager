@@ -48,7 +48,7 @@ const COUNTERS: [&str; 7] = [
     "review_submission",
 ];
 
-fn db(e: rusqlite::Error) -> DomainError {
+pub(crate) fn db(e: rusqlite::Error) -> DomainError {
     internal(e)
 }
 
@@ -59,7 +59,7 @@ fn now_iso() -> String {
     atm_domain::time::Timestamp::from_millis(i64::try_from(ms).unwrap_or(i64::MAX)).to_string()
 }
 
-fn invalid(field: &str, message: impl Into<String>) -> DomainError {
+pub(crate) fn invalid(field: &str, message: impl Into<String>) -> DomainError {
     DomainError::new(ErrorCode::VALIDATION_ERROR, message).detail("field", field)
 }
 
@@ -427,7 +427,7 @@ fn call_identity(principal: &Principal, actor: Option<&str>) -> (&'static str, S
     }
 }
 
-fn write_error(e: WriteError<DomainError>) -> DomainError {
+pub(crate) fn write_error(e: WriteError<DomainError>) -> DomainError {
     match e {
         WriteError::Rejected(e) => e,
         WriteError::Busy => {
@@ -448,7 +448,7 @@ fn read_error(e: ReadError<rusqlite::Error>) -> DomainError {
     }
 }
 
-fn dom_read_error(e: ReadError<DomainError>) -> DomainError {
+pub(crate) fn dom_read_error(e: ReadError<DomainError>) -> DomainError {
     match e {
         ReadError::Rejected(e) => e,
         ReadError::Busy => DomainError::new(ErrorCode::STORE_BUSY, "存储繁忙，稍后重试"),
@@ -456,7 +456,7 @@ fn dom_read_error(e: ReadError<DomainError>) -> DomainError {
     }
 }
 
-fn idempotency_conflict(op: &str, operation: &str) -> DomainError {
+pub(crate) fn idempotency_conflict(op: &str, operation: &str) -> DomainError {
     DomainError::new(
         ErrorCode::IDEMPOTENCY_CONFLICT,
         format!("这个 op_id 已经用于另一个不同的 {operation}：重试原请求请原样重发，新请求换一个新的 op_id"),
@@ -1140,7 +1140,7 @@ impl Service {
     }
 
     /// 按代码或 id 找到项目 id（不看生命周期）。
-    fn project_scope(&self, project: &str) -> Result<String, DomainError> {
+    pub(crate) fn project_scope(&self, project: &str) -> Result<String, DomainError> {
         let project = project.to_owned();
         let found: Option<String> = {
             let code = keys::normalize(&project);
@@ -1165,7 +1165,7 @@ impl Service {
 }
 
 /// 落点固定、只有 canon-v2 的 User 写入的指纹。
-fn fixed_fp(value: Value) -> FpInput {
+pub(crate) fn fixed_fp(value: Value) -> FpInput {
     Box::new(move |_, family, _| match family {
         Family::CanonV2 => Some(JsValue::from_json(&value)),
         _ => None,

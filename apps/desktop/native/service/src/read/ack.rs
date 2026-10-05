@@ -181,6 +181,31 @@ pub(crate) fn entities(operation: &str, r: &Value) -> Vec<Value> {
                 add(&mut out, "WORK_ITEM", &item["key"], &item["version"], None);
             }
         }
+        "quick.create" | "quick.update" => {
+            add(
+                &mut out,
+                "QUICK_TASK",
+                &r["quick"]["key"],
+                &r["quick"]["version"],
+                None,
+            );
+        }
+        "quick.promote" => {
+            add(
+                &mut out,
+                "QUICK_TASK",
+                &r["quick"]["key"],
+                &r["quick"]["version"],
+                None,
+            );
+            add(
+                &mut out,
+                "WORK_ITEM",
+                &r["quick"]["promotedWorkItemKey"],
+                &null,
+                None,
+            );
+        }
         _ => {}
     }
     unique(out)
@@ -304,6 +329,23 @@ mod tests {
                         "items": [] });
         let e = entities("review.request.create", &r);
         assert_eq!(e[1]["version"], Value::Null);
+    }
+
+    #[test]
+    fn quick_operations_name_their_entities() {
+        let q = json!({ "quick": { "key": "Q-0003", "version": 2, "promotedWorkItemKey": "ATM-T-0009" } });
+        for op in ["quick.create", "quick.update"] {
+            let e = entities(op, &q);
+            assert_eq!(e.len(), 1, "{op}");
+            assert_eq!(
+                (&e[0]["entity_type"], &e[0]["key"], &e[0]["version"]),
+                (&json!("QUICK_TASK"), &json!("Q-0003"), &json!(2))
+            );
+        }
+        let e = entities("quick.promote", &q);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[1]["entity_type"], "WORK_ITEM");
+        assert_eq!(e[1]["key"], "ATM-T-0009");
     }
 
     #[test]
