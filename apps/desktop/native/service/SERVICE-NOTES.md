@@ -491,3 +491,23 @@ Agent 视图，否则给管理视图。
 变异验红：`output/w2-evidence/mutations/mut-w2g4.py`，46 条全部 RED，证据 `output/w2-evidence/w2g4-mutation-evidence.json`。
 补用例的几处：section 名为 `metadata` 的正文游标与元数据游标 scope 相同，只能靠种类区分（l116）；排名需要「精确标题 vs 标题包含」
 与同名次两条对照（l114）；截断页必须塞满预算（l110）；预算只放得下元数据时报错而不是发空页（l115）。
+
+## 阶段验收：09 §5 规则变异（W2h3）
+
+在 W2 收尾的代码上把 09 §5 必须变红的规则变异重跑一遍：`output/w2-evidence/mutations/mut-w2h3.py`，9 条全部 RED，
+证据 `output/w2-evidence/w2h3-mutation-evidence.json`（首跑存档 `w2h3-mutation-evidence.first-run.json`）。
+
+| 09 §5 规则                   | 变异位置                                    | 变红的用例                                                      |
+| ---------------------------- | ------------------------------------------- | --------------------------------------------------------------- |
+| 去掉 USER_ONLY 检查          | 能力表 `settings.write` 改成 Agent 可用     | `permissions:p005_…`（逐能力 15 条见 `mut-w2h1.py`）            |
+| checklist_batch 比较 version | `work/checklist.rs` 逐项比 expected_version | `composite:w054_batch_bumps_the_task_once`                      |
+| review_submit 跳过候选 hash  | `work/review.rs` 不比 hash                  | `composite:w059_candidate_hash_mismatch`                        |
+| 完成门失败仍提交 VERIFYING   | `work/patch.rs` 门失败时照样提交            | `composite:w052_w062_gate_failure_commits_nothing`              |
+| 去掉幂等回执                 | `receipts.rs` 不写回执                      | `write:a_replay_returns_the_original_receipt_and_adds_nothing`  |
+| CANCELLED 依赖当作 ready     | 完成门 `domain/src/gate.rs`                 | `work:w095_d03_cancelled_dependencies_fail_the_completion_gate` |
+|                              | claim/start `work/patch.rs` 的依赖查询      | `work:w024_c11_c29_dependencies_must_be_done`                   |
+| brief 游标不检查 include     | `read/brief.rs` 不比 target 摘要            | `read:s055_s059_continuation_rules`                             |
+| fp_v1 改按码元排序           | `fp.rs` kernel_v1 键序                      | `fp:kernel_v1_matches_the_2x_runtime`                           |
+
+首跑时完成门那条存活：服务层没有用例会走到「开工后加上的前置被取消，再完成」（domain 层的 gate 单测覆盖了，
+但服务层是否把依赖状态喂进门没人看），补了 `w095_d03_…` 后变红。

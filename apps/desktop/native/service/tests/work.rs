@@ -712,6 +712,38 @@ fn w032_c03_c24_complete() {
     assert_eq!(w.session("S1", "work_state"), "IDLE");
 }
 
+/// W-095 + D03：开工后才加上的前置被取消，完成门照样拦下（CANCELLED 不算就绪）；前置 DONE 才放行。
+#[test]
+fn w095_d03_cancelled_dependencies_fail_the_completion_gate() {
+    let w = world("gate-deps");
+    let a = w.task("A");
+    let b = w.task("B");
+    let c = w.task("C");
+    w.s1(p(&c, Operation::Start)).unwrap();
+    let with_deps = |deps: Vec<String>| EditFields {
+        depends_on: Some(deps),
+        ..EditFields::default()
+    };
+    w.s1(edit(&c, w.version(&c), with_deps(vec![a.clone()])))
+        .unwrap();
+    w.patch_as(&user(), None, vec![p(&a, Operation::Cancel).version(1)])
+        .unwrap();
+    let e = w.refused(ErrorCode::COMPLETION_GATE_FAILED, || {
+        w.s1(p(&c, Operation::Complete))
+    });
+    assert_eq!(e.details["reasons"][0]["code"], "DEPENDENCY_INCOMPLETE");
+    assert_eq!(e.details["reasons"][0]["task_key"], a.as_str());
+    assert_eq!(e.details["reasons"][0]["cancelled"], true);
+    assert_eq!(status(&w, &c), "IN_PROGRESS");
+    // 正对照：换成已完成的前置就能完成。
+    w.patch_as(&user(), None, vec![p(&b, Operation::Complete).version(1)])
+        .unwrap();
+    w.s1(edit(&c, w.version(&c), with_deps(vec![b.clone()])))
+        .unwrap();
+    w.s1(p(&c, Operation::Complete)).unwrap();
+    assert_eq!(status(&w, &c), "DONE");
+}
+
 /// R11 P1-1：complete 遇到 READY 时在同一事务里先 start，ACK 带 autoApplied。
 #[test]
 fn r11_p1_1_complete_auto_starts() {
