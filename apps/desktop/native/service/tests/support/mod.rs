@@ -29,6 +29,15 @@ pub fn world(name: &str) -> World {
 
 /// 读侧时钟可换的世界（游标过期）。
 pub fn world_with(name: &str, clock: Option<atm_service::write::Clock>) -> World {
+    world_full(name, clock, None)
+}
+
+/// 备份目录可换的世界（备份失败的用例）；省略时用世界目录下的 backups。
+pub fn world_full(
+    name: &str,
+    clock: Option<atm_service::write::Clock>,
+    backups: Option<PathBuf>,
+) -> World {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -107,7 +116,7 @@ pub fn world_with(name: &str, clock: Option<atm_service::write::Clock>) -> World
             Ok::<_, rusqlite::Error>(())
         })
         .unwrap();
-    let svc = Service::new(store);
+    let svc = Service::new(store).with_backups_root(backups.unwrap_or_else(|| dir.join("backups")));
     World {
         svc: match clock {
             Some(c) => svc.with_clock(c),

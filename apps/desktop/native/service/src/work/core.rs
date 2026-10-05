@@ -264,12 +264,7 @@ impl<'a> Work<'a> {
             return Err(project_not_found(&project));
         };
         if lifecycle == "TRASHED" {
-            return Err(DomainError::new(
-                ErrorCode::PROJECT_DB_UNAVAILABLE,
-                format!("项目 {code} 在垃圾箱里，恢复之后才能写入"),
-            )
-            .detail("project", code.as_str())
-            .detail("lifecycle", "TRASHED"));
+            return Err(crate::project::trashed_error(&code));
         }
         Ok(Work {
             tx,

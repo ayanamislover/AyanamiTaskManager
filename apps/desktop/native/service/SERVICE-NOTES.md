@@ -322,3 +322,52 @@ brief 是 camelCase 载荷，列表、搜索、精确读取是 snake_case；W4 �
 
 变异验红：`output/w2-evidence/mutations/mut-w2f.py`，93 条全部 RED，证据 `output/w2-evidence/w2f-mutation-evidence.json`。
 「ACK 忽略 rebind 后继」是等价变异，未列入：有回执时回执的 `author_session` 已经是后继，`rebound_to` 只在没有回执时兜底。
+
+## 项目生命周期、路径与 begin ③④⑤（`src/project.rs`、`src/quick.rs`，W2g1）
+
+入口：`Service::create_project`（User / Agent，调用索引 `project.create`）、`attach_path`（User）、`set_lifecycle`
+（User：archive / unarchive / trash / untrash）、`decide_restore_request`（User）、`project_info`、`trash`；begin 没有
+匹配到项目时的 ③④⑤。
+
+### 规格没写死、由实现定下的
+
+| 位置                  | 做法                                                                                                                                                                                                                                            | 理由                                                                                             |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ----- |
+| 路径唯一键            | `project_paths.path_key`（`atm_store::paths::path_key`：去掉末尾分隔符、Unicode 小写；盘符根保留一个分隔符），`canonical_path` 原样留作显示；begin 的选择器、建项目、登记路径都用这一个函数                                                     | 04 C-L09；所有入口一个函数，键才不会对不上                                                       |
+| 转换                  | 2.x 的 project_paths 逐行算 path_key 再插入；两个项目撞同一个键时唯一约束让转换失败；`projects.archived_at` 删除，原值进 `legacy_json.archivedAt`，VERIFY 照旧逐列比对                                                                          | 04 C-L15、L-009                                                                                  |
+| 建项目                | 一个写事务：新世代（`allocate_generation`，reason CREATED）、projects、7 个计数器、primary 路径、全局事件 `project.created`；路径已被任何项目（含垃圾箱里的）经 path_key 或 git common dir 认领 → `PROJECT_ALREADY_EXISTS`                      | 04 L-001、L-009                                                                                  |
+| marker 与 git exclude | 回执给出 `marker {directory, file, content, gitExclude}`，由调用方提交之后写并报告 `markerWritten`                                                                                                                                              | 04 C-L03：文件 IO 不进写事务                                                                     |
+| 项目代码              | 照搬 2.x `allocateProjectCode`（驼峰拆词、短尾词、首字母、单词前 6 位、数字后缀到 9999、兜底 `AYT-nnnn`）；显式代码先转大写再校验                                                                                                               | 04 L-012                                                                                         |
+| project.create 的幂等 | 调用索引 `(USER                                                                                                                                                                                                                                 | AGENT, principal, project.create, op_id)`，回执落在新项目范围、带它的初始世代；没有 op_id 不幂等 | 10 A3 |
+| 生命周期迁移表        | archive：ACTIVE→ARCHIVED，ARCHIVED 幂等，TRASHED 冲突；unarchive：ARCHIVED→ACTIVE，ACTIVE 幂等，TRASHED 冲突（用 untrash）；trash：ACTIVE / ARCHIVED→TRASHED，TRASHED 幂等；untrash：TRASHED→ACTIVE，ACTIVE 幂等，ARCHIVED 冲突（用 unarchive） | 04 L-002；冲突是 409 而不是 2.x 碰巧的 503（LF-04）                                              |
+| PRE\_\* 备份          | 先读当前生命周期，确实要迁移才备份（整库，`create_backup`），在写事务之外；备份失败 `INTERNAL_ERROR`（`backup_kind`），生命周期不变；已在目标上的请求不备份                                                                                     | 04 L-002：备份失败不改状态                                                                       |
+| 生命周期事件          | 沿用 2.x 的全局事件名：`project.archived`、`project.trashed`、回到 ACTIVE 一律 `project.restored`；`projects.version` +1                                                                                                                        | 2.x `setProjectLifecycle`                                                                        |
+| 恢复请求              | 续上时累加次数并把 requested_by / source_cwd 改成最后一次的值；只有第一次登记记 `project.restore_requested`；决定记 `project.restore_approved` / `_rejected`；untrash 与批准都结掉 PENDING                                                      | 04 L-004～L-006                                                                                  |
+| 垃圾箱项目的写入      | 写入流水线在重放判定之后、session 检查之前查生命周期，TRASHED 报 `PROJECT_DB_UNAVAILABLE`（retryable:false，recovery `restore_project`）；生命周期操作与恢复请求的决定自己判定                                                                  | 04 L-008；已提交的请求照样拿回原回执                                                             |
+| begin ③               | 显式 `mode:"quick"`（不论 allow_project_create）建 quick task，回执 `{scope:"quick", quick, session:null, outcome:"QUICK"}` 落在 GLOBAL、没有世代；begin 的 brief 只回身份与 quick                                                              | 10 A3；03 C-11：带 op_id 重试拿回同一个 Q 键                                                     |
+| begin ④               | 同一写事务里建项目（名字取 title，否则目录名，否则「未命名项目」；路径取选择器的 canonical_path，否则 cwd），之后照常建 session；回执带 `projectCreated`、`sourcePath`、`marker`，落在新项目范围；`expected_generation` 对新项目不比较          | 10 A3：CREATE 没有可比的世代                                                                     |
+| begin ⑤ 与 mode       | 不 quick、不允许建项目 → `PROJECT_REQUIRED`（带 next），零写入；mode 只认 auto / project / quick                                                                                                                                                | 10 R11 P1-5                                                                                      |
+| 没有匹配时的重放      | 调用索引全局共享：先查重放，再按分支执行                                                                                                                                                                                                        | 10 A3                                                                                            |
+
+### 追溯（`tests/project.rs`）
+
+| 规则                 | 用例                                                                                                  |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| 04 L-001             | `l001_create_project_in_one_transaction`                                                              |
+| 04 L-012             | `l012_project_codes`                                                                                  |
+| 10 A3 project.create | `a3_create_project_is_idempotent_by_op_id`                                                            |
+| 04 L-009、C-L09      | `l009_canonical_paths_are_unique`                                                                     |
+| 04 L-010             | `l010_attach_path`（另见 `tests/session.rs` 的 `l010_project_is_found_by_path_marker_or_common_dir`） |
+| 04 L-002、D31        | `l002_archive_and_unarchive`、`l002_refusals`                                                         |
+| 04 L-006、L-007      | `l006_l007_trash_and_untrash`                                                                         |
+| 04 L-003、L-004、D32 | `l003_l004_trashed_begin_registers_a_restore_request`                                                 |
+| 04 L-005             | `l005_restore_requests_are_decided_once`                                                              |
+| 04 L-008、D33        | `l008_what_each_state_allows`                                                                         |
+| 10 A3 ③④⑤、03 C-11   | `a3_begin_quick_branch`、`a3_begin_create_branch`、`a3_begin_without_a_project`                       |
+
+L-011（范围恢复不改生命周期）由存储层的恢复保证（`store/src/restore.rs` 不写 lifecycle），服务层的恢复入口随 W5 的
+备份界面接入时补用例。
+
+变异验红：`output/w2-evidence/mutations/mut-w2g1.py`，40 条全部 RED，证据 `output/w2-evidence/w2g1-mutation-evidence.json`。
+其中「写入流水线不拦垃圾箱项目」起初存活：工作项层的 `Work::open` 也拦，掩盖了流水线这一道；l008 补了不经过工作项层的
+写入（垃圾箱里 `atm_end`）后变红。

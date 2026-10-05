@@ -85,6 +85,9 @@ pub struct ProjectSelector {
     /// cwd 里 marker 指向的项目 id（04 L-010）。
     pub marker_project_id: Option<String>,
     pub git_common_dir: Option<String>,
+    /// realpath 之后的 cwd（begin ④ 建项目时登记成项目目录；唯一键由服务按 `atm_store::paths::path_key` 算）。
+    /// 省略时用 cwd 原样。
+    pub canonical_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -223,6 +226,11 @@ fn normalize(req: BeginRequest, client_identity: Option<String>) -> Result<Begin
     bounded("thread_id", req.thread_id.as_deref(), 256)?;
     bounded("display_name", req.display_name.as_deref(), 200)?;
     bounded("title", req.title.as_deref(), 400)?;
+    if let Some(m) = req.mode.as_deref()
+        && !["auto", "project", "quick"].contains(&js_trim(m).to_lowercase().as_str())
+    {
+        return Err(invalid("mode", "mode 只能是 auto / project / quick").detail("got", m));
+    }
     // R11 A3：接回（session）与接续（predecessor）是两件事，同时给出说明调用方没想清楚。
     if req.session.is_some() && req.predecessor_session_id.is_some() {
         return Err(invalid(
@@ -393,7 +401,7 @@ fn locate(tx: &Transaction<'_>, s: &ProjectSelector) -> Result<Option<Project>, 
     if let Some(key) = &s.path_key
         && let Some(p) = project_by(
             tx,
-            "p.id = (SELECT project_id FROM project_paths WHERE canonical_path = ?1)",
+            "p.id = (SELECT project_id FROM project_paths WHERE path_key = ?1)",
             key,
         )?
     {
@@ -421,36 +429,10 @@ fn locate(tx: &Transaction<'_>, s: &ProjectSelector) -> Result<Option<Project>, 
     Ok(None)
 }
 
-/// S-003：TRASHED 项目登记或累加恢复请求（提交），之后报错。
+/// S-003 / 04 L-003、L-004：TRASHED 项目登记或累加恢复请求（提交），之后报错。
 fn trashed(tx: &Transaction<'_>, p: &Project, b: &Begin, at: &str) -> Result<Value, DomainError> {
-    let existing: Option<(String, i64)> = tx
-        .query_row(
-            "SELECT id, request_count FROM project_restore_requests WHERE project_id = ?1 AND status = 'PENDING'",
-            [&p.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(db)?;
-    let (id, count) = match existing {
-        Some((id, n)) => {
-            tx.execute(
-                "UPDATE project_restore_requests SET request_count = request_count + 1, updated_at = ?2 WHERE id = ?1",
-                params![id, at],
-            )
-            .map_err(db)?;
-            (id, n + 1)
-        }
-        None => {
-            let id = store_events::ulid(tx).map_err(db)?;
-            tx.execute(
-                "INSERT INTO project_restore_requests (id, project_id, requested_by, source_cwd, status, request_count, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, 'PENDING', 1, ?5, ?5)",
-                params![id, p.id, b.agent, b.req.cwd, at],
-            )
-            .map_err(db)?;
-            (id, 1)
-        }
-    };
+    let (id, count) =
+        crate::project::request_restore(tx, &p.id, &p.code, &b.agent, b.req.cwd.as_deref(), at)?;
     Ok(json!({ "request_id": id, "request_count": count }))
 }
 
@@ -999,15 +981,25 @@ impl Service {
 fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError> {
     let at = now();
     let at_iso = at.to_string();
-    let Some(project) = locate(tx, &b.req.selector)? else {
-        // A3 ⑤（③④ 在 W2g 接入）。
-        return Err(with_begin_next(
-            DomainError::new(
-                ErrorCode::PROJECT_REQUIRED,
-                "没有认出项目：在仓库里首次使用时 begin 加 allow_project_create:true，或者带 project 指明项目",
+    let call = CallKey {
+        principal_kind: "AGENT",
+        principal_id: b.agent.clone(),
+        operation: BEGIN_OPERATION.to_owned(),
+    };
+    let (project, created) = match locate(tx, &b.req.selector)? {
+        Some(p) => (p, None),
+        None => match unmatched(tx, b, &call, &at_iso)? {
+            Unmatched::Done(w) => return Ok(BeginOutcome::Written(w)),
+            Unmatched::Created(c, path) => (
+                Project {
+                    id: c.id.clone(),
+                    code: c.code.clone(),
+                    name: c.name.clone(),
+                    lifecycle: "ACTIVE".to_owned(),
+                },
+                Some((c, path)),
             ),
-            b,
-        ));
+        },
     };
     if project.lifecycle == "TRASHED" {
         let request = trashed(tx, &project, b, &at_iso)?;
@@ -1017,11 +1009,6 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
         });
     }
     let scope = ReceiptScope::project(project.id.clone());
-    let call = CallKey {
-        principal_kind: "AGENT",
-        principal_id: b.agent.clone(),
-        operation: BEGIN_OPERATION.to_owned(),
-    };
     if let Some(op) = &b.op_id {
         let legacy_key = format!("session-begin:{op}");
         let rebuild = |c: &Candidate| rebuilt(b, c);
@@ -1066,7 +1053,11 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
         }
     }
     let generation = crate::write::generation(tx, &scope).map_err(db)?;
-    if b.req.expected_generation.is_some() && b.req.expected_generation != generation {
+    // CREATE 分支的新项目没有可比的世代（A3）。
+    if created.is_none()
+        && b.req.expected_generation.is_some()
+        && b.req.expected_generation != generation
+    {
         return Err(DomainError::new(
             ErrorCode::SCOPE_RESTORED,
             "目标项目在这次请求发出之后被恢复过：重新 begin",
@@ -1114,6 +1105,13 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
         "acknowledgedHandoffs": acknowledged,
         "sequence": c.sequence,
     });
+    if let Some((c, path)) = &created {
+        // C-L03：marker 与 git exclude 由调用方在提交之后写。
+        let view = c.view(path.as_ref());
+        result["projectCreated"] = json!(true);
+        result["sourcePath"] = view["sourcePath"].clone();
+        result["marker"] = view["marker"].clone();
+    }
     if !candidates.is_empty() {
         // R11 P1-3：多个候选不阻塞开工，列出来并给出带 predecessor 的 begin。
         result["resumeCandidates"] = json!(candidates
@@ -1155,6 +1153,150 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
 
 fn db_json(e: serde_json::Error) -> DomainError {
     internal(e)
+}
+
+enum Unmatched {
+    /// ③ 的 quick task，或调用索引的重放。
+    Done(Written),
+    /// ④ 新建的项目（本事务内），之后照常建 session。
+    Created(crate::project::Created, Option<crate::project::PathInfo>),
+}
+
+/// 目录名：去掉末尾分隔符后的最后一段。
+fn basename(path: &str) -> Option<&str> {
+    path.trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .filter(|n| !n.is_empty())
+}
+
+/// 没有匹配到项目（10 A3 的 ③④⑤）。分支按 2.x 的顺序取第一个满足的：显式 quick 先于建项目。
+/// 调用索引全局共享，所以先查重放：同一个 op_id 原来落在 quick 或新项目上，都原样重放。
+fn unmatched(
+    tx: &Transaction<'_>,
+    b: &Begin,
+    call: &CallKey,
+    at: &str,
+) -> Result<Unmatched, DomainError> {
+    if let Some(op) = &b.op_id {
+        let rebuild = |c: &Candidate| rebuilt(b, c);
+        match receipts::find_call(tx, call, op, None, &rebuild).map_err(db)? {
+            Verdict::New => {}
+            Verdict::Replay(c) => {
+                return Ok(Unmatched::Done(Written {
+                    result: serde_json::from_str(&c.receipt_json).map_err(db_json)?,
+                    replayed: true,
+                    receipt_id: c.receipt_id,
+                    rebound_to: None,
+                }));
+            }
+            Verdict::Undone { generation } => {
+                return Err(DomainError::new(
+                    ErrorCode::OPERATION_UNDONE_BY_RESTORE,
+                    "这个 op_id 的 begin 已被一次按范围恢复撤销：换一个新的 op_id 重新 begin",
+                )
+                .detail("op_id", op.as_str())
+                .detail("restored_generation", generation));
+            }
+            Verdict::Conflict { .. } => {
+                return Err(DomainError::new(
+                    ErrorCode::IDEMPOTENCY_CONFLICT,
+                    "这个 op_id 已经用于另一个不同的 begin：重试原请求请原样重发，新请求换一个新的 op_id",
+                )
+                .detail("op_id", op.as_str()));
+            }
+        }
+    }
+    let mode = b
+        .req
+        .mode
+        .as_deref()
+        .map_or("auto".to_owned(), |m| js_trim(m).to_lowercase());
+    if mode == "quick" {
+        // ③：quick task（全局，不随范围恢复回退）；op_id 让重试拿到同一个 Q 键（03 C-11）。
+        let title = b
+            .req
+            .title
+            .as_deref()
+            .map(js_trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or("未命名临时任务");
+        let quick =
+            crate::quick::create_tx(tx, title, "", None, b.req.cwd.as_deref(), &b.agent, at)?;
+        let result =
+            json!({ "scope": "quick", "quick": quick, "session": null, "outcome": "QUICK" });
+        let receipt_id = match &b.op_id {
+            Some(op) => {
+                let input =
+                    begin_fp(b, Family::CanonV2).ok_or_else(|| internal("canon-v2 begin"))?;
+                receipts::insert(
+                    tx,
+                    &NewReceipt {
+                        scope: &ReceiptScope::global(),
+                        ns: None,
+                        call: Some(call),
+                        op_id: op,
+                        operation: BEGIN_OPERATION,
+                        fingerprint: &fp::canon_v2(&input),
+                        receipt_json: &result.to_string(),
+                        author_agent: Some(&b.agent),
+                        author_session: None,
+                        actor_session_id: None,
+                        scope_generation: None,
+                        created_at: at,
+                    },
+                )
+                .map_err(db)?
+            }
+            None => 0,
+        };
+        return Ok(Unmatched::Done(Written {
+            result,
+            replayed: false,
+            receipt_id,
+            rebound_to: None,
+        }));
+    }
+    if !b.req.allow_project_create {
+        // ⑤：报错，不写任何东西（R11 P1-5：auto 不再静默建 quick）。
+        return Err(with_begin_next(
+            DomainError::new(
+                ErrorCode::PROJECT_REQUIRED,
+                "没有认出项目：在仓库里首次使用时 begin 加 allow_project_create:true，或者带 project 指明项目",
+            ),
+            b,
+        ));
+    }
+    // ④：在同一个写事务里建项目，之后照常建 session。
+    let canonical = b
+        .req
+        .selector
+        .canonical_path
+        .clone()
+        .or_else(|| b.req.cwd.clone())
+        .map(|c| js_trim(&c).to_owned())
+        .filter(|c| !c.is_empty());
+    let name = b
+        .req
+        .title
+        .as_deref()
+        .map(js_trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .or_else(|| canonical.as_deref().and_then(basename).map(str::to_owned))
+        .unwrap_or_else(|| "未命名项目".to_owned());
+    let path = canonical.map(|c| crate::project::PathInfo {
+        canonical_path: c,
+        git_common_dir: b.req.selector.git_common_dir.clone(),
+    });
+    let spec = crate::project::spec(&crate::project::CreateProjectRequest {
+        path,
+        creation_reason: b.req.creation_reason.clone(),
+        signals: b.req.signals.clone(),
+        ..crate::project::CreateProjectRequest::new(name)
+    })?;
+    let created = crate::project::create_tx(tx, &spec, &b.agent, at)?;
+    Ok(Unmatched::Created(created, spec.path))
 }
 
 fn with_begin_next(e: DomainError, b: &Begin) -> DomainError {

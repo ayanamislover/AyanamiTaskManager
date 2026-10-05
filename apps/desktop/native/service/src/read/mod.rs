@@ -34,7 +34,7 @@ use atm_domain::principal::Principal;
 use atm_domain::time::Timestamp;
 use atm_store::ReadError;
 use rusqlite::{OptionalExtension, Transaction};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 一次读请求看到的项目。
@@ -104,14 +104,7 @@ pub(crate) fn locate(tx: &Transaction<'_>, code: &str) -> Result<Proj, DomainErr
         return Err(project_not_found(code.trim()));
     };
     if lifecycle == "TRASHED" {
-        return Err(DomainError::new(
-            ErrorCode::PROJECT_DB_UNAVAILABLE,
-            format!("项目 {code} 在垃圾箱里，内容不可读：等用户在界面里恢复"),
-        )
-        .detail("project", code.as_str())
-        .detail("lifecycle", "TRASHED")
-        .detail("retryable", false)
-        .detail("recovery", json!({ "action": "restore_project" })));
+        return Err(crate::project::trashed_error(&code));
     }
     Ok(Proj {
         id,

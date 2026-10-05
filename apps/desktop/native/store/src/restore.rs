@@ -462,7 +462,8 @@ fn restore_knowledge_tx(tx: &Transaction<'_>, c: &KnowledgeCtx) -> Result<Restor
 }
 
 /// 新的 scope generation：全局单调，永不复用。计数器落后于已有世代时（数据异常）也不会撞号。
-fn allocate_generation(tx: &Transaction<'_>) -> Result<(i64, String)> {
+/// 建项目（04 L-001）也从这里取初始世代。
+pub fn allocate_generation(tx: &Transaction<'_>) -> Result<(i64, String)> {
     let generation: i64 = tx
         .query_row(
             "UPDATE app_meta SET scope_gen_counter =

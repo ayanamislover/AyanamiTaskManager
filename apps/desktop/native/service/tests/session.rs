@@ -265,8 +265,8 @@ fn s003_l008_trashed_and_archived_projects() {
 fn l010_project_is_found_by_path_marker_or_common_dir() {
     let w = world("ss-begin-locate");
     w.exec(&format!(
-        "INSERT INTO project_paths (id, project_id, canonical_path, git_common_dir, is_primary, last_seen_at)
-         VALUES ('PP1', 'PA', 'r:\\repo', 'r:\\repo\\.git', 1, '{T0}')"
+        "INSERT INTO project_paths (id, project_id, path_key, canonical_path, git_common_dir, is_primary, last_seen_at)
+         VALUES ('PP1', 'PA', 'r:\\repo', 'R:\\Repo', 'r:\\repo\\.git', 1, '{T0}')"
     ));
     for selector in [
         ProjectSelector {

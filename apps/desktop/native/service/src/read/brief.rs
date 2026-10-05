@@ -1126,7 +1126,14 @@ impl Service {
             result.get("scope").cloned().unwrap_or(json!("project")),
         );
         identity.insert("session".into(), json!(session));
-        identity.insert("project".into(), json!(code));
+        identity.insert(
+            "project".into(),
+            if code.is_empty() {
+                Value::Null
+            } else {
+                json!(code)
+            },
+        );
         identity.insert("surface_version".into(), json!(6));
         for (from, to) in [
             ("outcome", "outcome"),
@@ -1134,6 +1141,10 @@ impl Service {
             ("acknowledgedHandoffs", "acknowledged_handoffs"),
             ("resumeCandidates", "resume_candidates"),
             ("sessionState", "session_state"),
+            // A3 ④：新建的项目与待写的 marker（C-L03）。
+            ("projectCreated", "project_created"),
+            ("sourcePath", "source_path"),
+            ("marker", "marker"),
         ] {
             if let Some(v) = result.get(from).filter(|v| !v.is_null()) {
                 identity.insert(to.into(), v.clone());
@@ -1141,6 +1152,13 @@ impl Service {
         }
         if begun.replayed {
             identity.insert("replayed".into(), json!(true));
+        }
+        // A3 ③：quick task 不在任何项目里，没有 brief 可读。
+        if result["scope"] == "quick" {
+            identity.insert("quick".into(), result["quick"].clone());
+            identity.insert("brief_mode".into(), json!("none"));
+            identity.insert("brief_truncated".into(), json!(false));
+            return Ok(jsify(Value::Object(identity)));
         }
         if mode == BeginBrief::None {
             identity.insert("brief_mode".into(), json!("none"));

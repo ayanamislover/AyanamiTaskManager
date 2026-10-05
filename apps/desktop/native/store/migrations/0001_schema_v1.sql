@@ -55,16 +55,20 @@ CREATE TABLE projects (
   -- W1f：2.x 原值。registry 的 db_path 与项目库的整行 project_meta 放不进单库的列
   -- （project_meta 的 lifecycle / updated_at 等与 registry 各走各的，2.0 从不同步），转换时原样存这里供反投影。
   legacy_json TEXT CHECK (legacy_json IS NULL OR json_valid(legacy_json)),
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT
+  -- 04 C-L15：archived_at 删除（2.0 从不写它）。
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE INDEX ix_projects_lifecycle ON projects(lifecycle, updated_at DESC);
 
 CREATE TABLE project_paths (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) DEFERRABLE INITIALLY DEFERRED,
-  canonical_path TEXT NOT NULL UNIQUE,
+  -- 04 L-009 / C-L09：唯一键是 path_key（realpath、去掉末尾分隔符、按 Windows 规则大小写折叠，见
+  -- atm_store::paths::path_key）；canonical_path 保留原样用于显示。
+  path_key TEXT NOT NULL UNIQUE,
+  canonical_path TEXT NOT NULL,
   git_common_dir TEXT, is_primary INTEGER NOT NULL DEFAULT 0, last_seen_at TEXT NOT NULL,
-  UNIQUE (project_id, canonical_path)
+  UNIQUE (project_id, path_key)
 );
 CREATE INDEX ix_project_paths_common ON project_paths(git_common_dir);
 

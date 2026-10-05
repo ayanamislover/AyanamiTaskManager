@@ -5,6 +5,8 @@ pub(crate) mod evidence;
 pub mod fp;
 pub mod lineage;
 pub mod memory;
+pub mod project;
+pub(crate) mod quick;
 pub mod read;
 mod rebind;
 pub mod receipts;

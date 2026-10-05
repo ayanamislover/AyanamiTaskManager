@@ -140,11 +140,17 @@ pub type Clock = std::sync::Arc<dyn Fn() -> Timestamp + Send + Sync>;
 pub struct Service {
     store: Store,
     clock: Option<Clock>,
+    /// 生命周期迁移前的 PRE_* 备份目录（04 L-002）。
+    pub(crate) backups_root: Option<std::path::PathBuf>,
 }
 
 impl Service {
     pub fn new(store: Store) -> Self {
-        Service { store, clock: None }
+        Service {
+            store,
+            clock: None,
+            backups_root: None,
+        }
     }
 
     /// 换掉读侧的时钟（只影响游标的签发与过期判断）。
@@ -393,6 +399,13 @@ where
         Verdict::Conflict { reason, candidates } => {
             return Err(conflict(&op_id, &reason, &candidates));
         }
+    }
+
+    // 04 L-008：垃圾箱项目的内容不可写。在重放之后：已提交的请求照样拿回原回执。生命周期操作自己判定。
+    if scope.kind == ScopeKind::Project
+        && !crate::project::LIFECYCLE_OPERATIONS.contains(&operation)
+    {
+        crate::project::require_writable(tx, &scope.id)?;
     }
 
     // 02 §2.4 第 5–8 步：新写入才看 session 状态；心跳超时的旧 session 换成它的 successor。

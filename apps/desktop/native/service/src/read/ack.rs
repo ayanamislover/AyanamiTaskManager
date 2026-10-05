@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn preview_is_bounded_by_items_and_chars() {
         let small: Vec<Value> = (0..20).map(|i| json!({ "k": i })).collect();
-        assert_eq!(preview(&small).len(), PREVIEW_ITEMS);
+        assert_eq!(preview(&small).len(), 12);
         let big: Vec<Value> = (0..5).map(|_| json!({ "k": "x".repeat(700) })).collect();
         assert_eq!(preview(&big).len(), 2);
     }

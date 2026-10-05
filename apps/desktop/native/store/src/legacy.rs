@@ -219,10 +219,11 @@ const REGISTRY_TABLES: &[&str] = &[
     "settings",
     "schema_migrations",
 ];
+/// 2.x project_paths 的一行：id（可能为 NULL）、project_id、canonical_path、git_common_dir、is_primary、last_seen_at。
+type PathRow = (Option<String>, String, String, Option<String>, i64, String);
 const REGISTRY_FTS: &str = "global_search_documents_fts";
 /// registry 里按列名原样搬的表。
 const REGISTRY_COPY: &[&str] = &[
-    "project_paths",
     "quick_tasks",
     "quick_task_updates",
     "saved_views",
@@ -577,11 +578,11 @@ fn convert_registry(
             let (g, e) = &gens.projects[&id];
             tx.execute(
                 "INSERT INTO projects (id, code, name, description, lifecycle, coordination_mode, creation_reason,
-                                       creation_signals_json, version, created_at, updated_at, archived_at,
+                                       creation_signals_json, version, created_at, updated_at,
                                        scope_gen, epoch, legacy_json)
                  SELECT id, code, name, description, lifecycle, coordination_mode, creation_reason,
-                        creation_signals_json, version, created_at, updated_at, archived_at,
-                        ?2, ?3, json_object('registryDbPath', db_path)
+                        creation_signals_json, version, created_at, updated_at,
+                        ?2, ?3, json_object('registryDbPath', db_path, 'archivedAt', archived_at)
                  FROM r.projects WHERE id = ?1",
                 params![id, g, e],
             )
@@ -596,6 +597,32 @@ fn convert_registry(
                 [],
             )
             .ctx(table)?;
+        }
+        // project_paths：另算唯一键 path_key（04 C-L09）。两个项目认领同一个键会撞上唯一约束，
+        // 转换就此失败，不会悄悄留下其中一条（L-009）。
+        let mut st = tx.prepare(
+            "SELECT id, project_id, canonical_path, git_common_dir, is_primary, last_seen_at FROM r.project_paths ORDER BY rowid",
+        )?;
+        let paths: Vec<PathRow> = st
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(st);
+        for (id, project, canonical, common, primary, seen) in paths {
+            tx.execute(
+                "INSERT INTO project_paths (id, project_id, path_key, canonical_path, git_common_dir, is_primary, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![id, project, crate::paths::path_key(&canonical), canonical, common, primary, seen],
+            )
+            .ctx("project_paths")?;
         }
         tx.execute(
             "INSERT INTO global_feed (global_seq, type, aggregate_id, actor, payload_json, created_at, dedupe_key)
@@ -1458,6 +1485,9 @@ fn verify_registry(c: &Connection, report: &mut Report) -> Result<()> {
         .map(|col| {
             if col == "db_path" {
                 "legacy_json ->> '$.registryDbPath'".to_string()
+            } else if col == "archived_at" {
+                // 04 C-L15：3.0 删了这一列，原值放在 legacy_json 里。
+                "legacy_json ->> '$.archivedAt'".to_string()
             } else {
                 format!("\"{col}\"")
             }
@@ -1477,6 +1507,8 @@ fn verify_registry(c: &Connection, report: &mut Report) -> Result<()> {
     for table in REGISTRY_COPY {
         compare_table(c, report, "r", table, None)?;
     }
+    // 按 2.x 的列比较。3.0 多出来的 path_key 在转换时由 canonical_path 推出，靠唯一约束兜底。
+    compare_table(c, report, "r", "project_paths", None)?;
     let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
     let cols: Vec<String> = [
         "sequence",

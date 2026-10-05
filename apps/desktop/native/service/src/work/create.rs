@@ -239,8 +239,9 @@ pub(crate) fn run(
         }
     }
 
-    // W-071：规划根只给 Agent 入口；User / Phone / System 缺 objective 直接报错。
-    let provision = w.actor().kind == PrincipalKind::Agent;
+    // W-071：规划根只给 Agent 入口与服务内部的创建；User / Phone / System 缺 objective 直接报错。
+    // 服务内部的创建（quick 晋升）也补建：目标项目可能是刚建的，还没有规划。
+    let provision = w.actor().kind == PrincipalKind::Agent || internal_create.is_some();
     let need_root = items.iter().any(|i| i.objective_id.is_none());
     if need_root && !provision {
         let index = items
