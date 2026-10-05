@@ -249,4 +249,4 @@ action 成功后 `rebind::heartbeat` 刷新心跳（不推 session 版本），s
 | R11 P2-1                              | `p2_1_long_summaries_are_truncated`                                                         |
 | 02 §1.8 反馈                          | `s093_feedback`                                                                             |
 
-变异验红：`output/w2-evidence/mutations/mut-w2e.py`，证据 `output/w2-evidence/w2e-mutation-evidence.json`。
+变异验红：`output/w2-evidence/mutations/mut-w2e.py`，100 条全部 RED，证据 `output/w2-evidence/w2e-mutation-evidence.json`。
