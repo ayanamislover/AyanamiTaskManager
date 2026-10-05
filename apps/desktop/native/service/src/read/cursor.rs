@@ -3,7 +3,7 @@
 //! - 新游标：`<前缀>.<base64url(JSON)>.<签名>`，签名是库内密钥对 `<前缀>.<载荷>` 的 HMAC-SHA256 前 16 字节。
 //!   载荷带项目 id（`p`）与范围世代（`g`）：别的项目的游标是 `INVALID_OR_TAMPERED`，按范围恢复之后的旧游标是
 //!   `SCOPE_RESTORED`，两者都让调用方重新读首页。brief 为了省预算用点分格式，见 `brief.rs`。
-//! - 2.x 的前缀（`b3`、`tl1`、`rc1`、`rl1`、`sl1`、`s1`、`f2`）一律 `INVALID_CURSOR` + `FORMAT_RETIRED`，
+//! - 2.x 的前缀（`b3`、`tl1`、`rc1`、`rl1`、`sl1`、`s1`、`f2`，知识库的 `k1`）一律 `INVALID_CURSOR` + `FORMAT_RETIRED`，
 //!   不新增错误码（Q-01）。
 
 use super::Proj;
@@ -12,7 +12,7 @@ use atm_domain::error::{DomainError, ErrorCode};
 use serde_json::{Map, Value, json};
 
 /// 2.x 的游标前缀。
-pub(crate) const RETIRED: [&str; 7] = ["b3", "tl1", "rc1", "rl1", "sl1", "s1", "f2"];
+pub(crate) const RETIRED: [&str; 8] = ["b3", "tl1", "rc1", "rl1", "sl1", "s1", "f2", "k1"];
 
 pub(crate) const BRIEF: &str = "b4";
 pub(crate) const TASK_LIST: &str = "tl2";

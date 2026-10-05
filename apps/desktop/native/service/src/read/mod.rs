@@ -13,6 +13,7 @@ pub(crate) mod codec;
 pub(crate) mod cursor;
 pub mod delta;
 pub mod field;
+pub mod knowledge;
 pub mod lists;
 pub(crate) mod present;
 pub mod search;
@@ -21,6 +22,7 @@ pub(crate) mod views;
 
 pub use brief::{BeginBrief, BriefRequest};
 pub use delta::DeltaRequest;
+pub use knowledge::{KnowledgeGetRequest, KnowledgeSearchRequest, Part};
 pub use lists::{ListRequest, TaskListRequest};
 pub use search::{SearchRequest, TaskGetRequest};
 pub use views::TaskView;

@@ -453,3 +453,41 @@ L-014（begin 的 quick 分支幂等）在 W2g1 的 `a3_begin_quick_branch` 里�
 变异验红：`output/w2-evidence/mutations/mut-w2g3.py`，46 条全部 RED，证据 `output/w2-evidence/w2g3-mutation-evidence.json`。
 「useWhen 缺省时省略」起初写成了等价变异（规范化之后 use_when 恒为 Some），改成空串写 null 后变红；
 「更新把 version 重置为 1」由 l104 的归档 → 编辑 → 再归档链条抓住。
+
+## 知识库读取与搜索（`src/read/knowledge.rs`，W2g4）
+
+入口：`Service::knowledge_search`、`knowledge_get`（正文或 Agent 的元数据分页）、`knowledge_history`。主体是 Agent 时给
+Agent 视图，否则给管理视图。
+
+### 规格没写死、由实现定下的
+
+| 位置         | 做法                                                                                                                                                                                                                                                                                    | 理由                                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 游标格式     | `k2.<base64url(JSON)>.<HMAC>`，库内密钥签名；载荷 `{k 种类, d database_id, g scope_gen, s scope 哈希, o 位置, r 目录序号或修订, v editVersion, i revisionId}`，键集合必须精确                                                                                                           | 00 C-L12；与 W2f 的读游标同一套签名                            |
+| 旧游标与恢复 | 2.x 的 `k1` → `INVALID_CURSOR FORMAT_RETIRED`；世代不同 → `INVALID_CURSOR SCOPE_RESTORED`；种类、scope、库不符或被改过 → `INVALID_OR_TAMPERED`；搜索期间有知识写入 → `INVALID_CURSOR CATALOG_CHANGED`                                                                                   | 04 L-111、L-112；Q-01 不新增 CURSOR_EXPIRED，与 W2f 的决定一致 |
+| isHead       | 管理视图与 Agent 首页带 `isHead`；按 revisionId 读旧修订时 version 报 head 的值、isHead 为 false                                                                                                                                                                                        | 04 L-109、C-L13                                                |
+| 续页         | 正文续页沿用首页的 editVersion 与 revisionId；续页带了与游标不同的 revisionId → `INVALID_CURSOR REVISION_MISMATCH`                                                                                                                                                                      | 04 L-110                                                       |
+| 搜索         | 照 2.x：按空白拆词、双引号成组、不分大小写去重、最多 8 个词；≥ 3 个 code point 走 trigram FTS 短语，否则 LIKE 扫表（转义 `% _ \`）；元数据用 instr；排名按整条 query（0 精确、1 标题、2 别名或标签、3 其他元数据、4 正文），同名次 id 倒序；默认不含归档；tag 精确匹配 metadata 的 tags | 04 §5.4、L-114                                                 |
+| 预算         | 按 `JSON.stringify` 的 UTF-16 码元数：搜索取放得下的最多项，有命中却一项都放不下 `RESULT_TOO_LARGE`；正文二分取最长前缀，不劈开代理对，切点退回起点也报 `RESULT_TOO_LARGE`（不发指回原处的游标）                                                                                        | 04 L-115                                                       |
+| Agent 视图   | 命中只有 title、summary、useWhen、tags、appliesTo、id、revisionId、archived；首页目录最多 40 项、标题截到 120 字、目录预算 min(1600, max/3)；元数据放不下时退化为截断标记 + `metadataRead` 指引，不给 `edit` 块；续页只带身份与正文                                                     | 04 L-115、L-116                                                |
+| 元数据分页   | 只给 Agent（User 报 `INVALID_ARGUMENT`），不能与 section 混用；内容去掉正文后的 JSON 文本按码元无损分页，绑定修订                                                                                                                                                                       | 2.x `part:"metadata"`                                          |
+| history      | 先确认条目存在（`NOT_FOUND`），再校验 limit 1～100、beforeRevision ≥ 1（`INVALID_ARGUMENT`）；keyset 翻页，不带正文                                                                                                                                                                     | 04 L-113；2.x 的判定顺序                                       |
+| 空库         | 还没有 knowledge_meta 时搜索返回空页，读条目 `NOT_FOUND`                                                                                                                                                                                                                                | 新库第一次写知识才建身份行（W2g3）                             |
+
+### 追溯（`tests/knowledge_read.rs`）
+
+| 规则            | 用例                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 04 L-109、C-L13 | `l109_old_revisions_report_the_head_version`                                                                     |
+| 04 L-110        | `l110_body_pages_pin_the_revision_and_version`                                                                   |
+| 04 L-111        | `l111_search_cursors_bind_the_catalog`                                                                           |
+| 04 L-112、C-L12 | `l112_restores_and_old_formats_invalidate_cursors`                                                               |
+| 04 L-113        | `l113_history_pages_by_keyset`                                                                                   |
+| 04 L-114        | `l114_search_behaves_like_2x`、`read::knowledge::tests::search_terms_follow_2x`                                  |
+| 04 L-115        | `l115_budgets_never_return_empty_pages`                                                                          |
+| 04 L-116        | `l116_agent_views_and_metadata_paging`                                                                           |
+| 目录与章节      | `sections_and_an_empty_catalog`、`read::knowledge::tests::headings_follow_2x`、`surrogate_pairs_are_never_split` |
+
+变异验红：`output/w2-evidence/mutations/mut-w2g4.py`，46 条全部 RED，证据 `output/w2-evidence/w2g4-mutation-evidence.json`。
+补用例的几处：section 名为 `metadata` 的正文游标与元数据游标 scope 相同，只能靠种类区分（l116）；排名需要「精确标题 vs 标题包含」
+与同名次两条对照（l114）；截断页必须塞满预算（l110）；预算只放得下元数据时报错而不是发空页（l115）。
