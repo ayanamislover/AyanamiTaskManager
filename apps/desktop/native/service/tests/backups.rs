@@ -332,3 +332,116 @@ fn restore_with_attachments_pending_reports_the_committed_generation() {
     );
     finish_attachment_swaps(w.svc.store()).unwrap();
 }
+
+/// peer W2 r3 P1-01：登记失败、目录当时又删不掉（文件被占用）。「正在创建」标记留着，诊断看得到；
+/// 文件放开后下一次备份的清扫按标记删掉残留，新备份正常登记，目录与登记一一对应。
+#[cfg(windows)]
+#[test]
+fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::sync::mpsc::channel;
+    use std::time::{Duration, Instant};
+    let w = world("backup-failed-locked-registration");
+    let root = w.dir.join("backups");
+    w.exec(
+        "CREATE TRIGGER fail_registration BEFORE INSERT ON backups
+         BEGIN SELECT RAISE(ABORT, 'injected registration failure'); END;",
+    );
+    // 先占住写线程，让备份文件做完、停在登记那一笔写之前。
+    let (started_tx, started_rx) = channel();
+    let (release_tx, release_rx) = channel::<()>();
+    let pending = w
+        .svc
+        .store()
+        .submit(move |_| {
+            started_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let orphan = std::thread::scope(|s| {
+        let worker = s.spawn(|| w.svc.create_manual_backup(&user()));
+        let start = Instant::now();
+        let dir = loop {
+            let found = std::fs::read_dir(&root).ok().and_then(|d| {
+                d.flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.join("manifest.json").is_file())
+            });
+            if let Some(dir) = found {
+                break dir;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "backup never reached registration"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("atm.sqlite"))
+            .unwrap();
+        release_tx.send(()).unwrap();
+        pending.wait().unwrap();
+        let e = worker.join().unwrap().unwrap_err();
+        assert_eq!(e.code, ErrorCode::INTERNAL_ERROR, "{e:?}");
+        drop(held);
+        dir
+    });
+    assert_eq!(w.count("SELECT count(*) FROM backups"), 0);
+    assert!(
+        orphan.exists(),
+        "the locked file should have kept the directory"
+    );
+    let id = orphan.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(root.join(".creating").join(&id).is_file());
+    let list = w.svc.list_backups(&user(), 200).unwrap();
+    assert_eq!(list["withdrawals"]["cleanupPending"], 1);
+
+    w.exec("DROP TRIGGER fail_registration;");
+    let next = w.svc.create_manual_backup(&user()).unwrap();
+    assert!(
+        !orphan.exists(),
+        "the next backup's sweep must remove the failed one"
+    );
+    assert_eq!(backup_dirs(&w), 1);
+    assert_eq!(w.count("SELECT count(*) FROM backups"), 1);
+    assert!(
+        root.join(next["id"].as_str().unwrap())
+            .join("atm.sqlite")
+            .exists()
+    );
+    let list = w.svc.list_backups(&user(), 200).unwrap();
+    assert_eq!(list["withdrawals"]["cleanupPending"], 0);
+}
+
+/// 对照：标记只指认没登记的目录。已登记的（包括被恢复固定的）只删标记，备份本身不动。
+#[test]
+fn a_creation_marker_never_removes_a_registered_backup() {
+    let w = world("backup-marker-registered");
+    w.task("before");
+    let id = w.svc.create_manual_backup(&user()).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    w.svc
+        .restore_scope(&user(), &id, RestoreScope::Project("ATM".into()))
+        .unwrap();
+    let root = w.dir.join("backups");
+    std::fs::create_dir_all(root.join(".creating")).unwrap();
+    std::fs::write(root.join(".creating").join(&id), b"").unwrap();
+    assert_eq!(
+        atm_store::backup::sweep_withdrawn(w.svc.store(), &root).unwrap(),
+        0
+    );
+    assert!(!root.join(".creating").exists());
+    atm_store::backup::verify_backup(w.svc.store(), &id).unwrap();
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT pinned_until IS NOT NULL FROM backups WHERE id = '{id}'"
+        )),
+        1
+    );
+}

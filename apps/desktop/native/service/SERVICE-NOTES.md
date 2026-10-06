@@ -605,3 +605,20 @@ W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01�
 
 变异验红：`output/w2-evidence/mutations/mut-w2h5.py`（服务包）与 `mut-w2h5-store.py`（存储包），证据
 `output/w2-evidence/w2h5-mutation-evidence.json`、`w2h5-store-mutation-evidence.json`。
+
+## 阶段评审修订（W2h6，codex W2 r3）
+
+第三轮（`output/peer-atm3-w2-r3.md`）关闭了第二轮全部条目，新提一条 P1：备份登记失败、目录当时又删不掉（文件被占用）时，
+残留目录不在隔离区，清扫和诊断都找不到。
+
+- 创建备份前先在 `<备份根>/.creating/<id>` 落一个空标记（fsync），登记成功才删。登记前任何一步失败都删目录；删掉了（或目录本就
+  不存在）才删标记，删不掉就留着。清扫（下次备份、撤回、恢复时，都在附件锁里）按标记处理：对应 id 已登记的只删标记，
+  没登记的删目录再删标记。创建也在附件锁里，所以清扫看到的标记都不属于进行中的创建。
+- `list_backups` 的 `withdrawals.cleanupPending` 现在是隔离区条目加创建标记的数目。
+- 守卫：`tests/backups.rs::a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept`（评审反例：触发器让登记失败、
+  登记前锁住备份文件；标记留存、诊断计 1、下一次备份清掉残留）、`a_creation_marker_never_removes_a_registered_backup`
+  （标记指向已登记且被恢复固定的备份时只删标记）。变异 `output/w2-evidence/mutations/mut-w2h6.py`（5 条），证据
+  `output/w2-evidence/w2h6-mutation-evidence.json`；`mut-w2h5*.py` 两条锚点随改写更新并重跑。
+
+评审的两条 P2（清扫与诊断扫描没有工作量上限；`metrics.read` 的 `NO_DATA` 需要 W4 / W6 的界面与入口承接）是 W4 / W5 / W6 / W8 的硬门，
+已记入 ATM。

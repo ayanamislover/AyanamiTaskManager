@@ -262,11 +262,24 @@ pub(crate) fn create_backup_locked(
     let side = side_reader(store.path())?;
     let id = ulid(&side)?;
     let dir = root.join(&id);
-    fs::create_dir_all(&dir)?;
-    // 登记之前任何一步失败，目录都不留：备份根下不能有没登记的目录（W2 peer r2 P1-02）。
-    let made = write_backup(store, side, &id, &dir, kind, at);
-    if made.is_err() {
-        let _ = fs::remove_dir_all(&dir);
+    // 先落一个「正在创建」标记，登记成功才删（W2 peer r3 P1-01）。登记之前任何一步失败都删目录；
+    // 删不掉（文件被占用）就留着标记，下次清扫按它找回目录再删——备份根下没有找不回的未登记目录。
+    let marker = root.join(CREATING_DIR).join(&id);
+    fs::create_dir_all(root.join(CREATING_DIR))?;
+    fs::write(&marker, b"")?;
+    sync_file(&marker)?;
+    let made = fs::create_dir_all(&dir)
+        .map_err(BackupError::from)
+        .and_then(|()| write_backup(store, side, &id, &dir, kind, at));
+    let settled = match &made {
+        Ok(_) => true,
+        Err(_) => match fs::remove_dir_all(&dir) {
+            Ok(()) => true,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+        },
+    };
+    if settled && fs::remove_file(&marker).is_ok() {
+        let _ = fs::remove_dir(root.join(CREATING_DIR));
     }
     made
 }
@@ -365,6 +378,8 @@ fn write_backup(
 
 /// 备份根目录下的隔离区：撤回时目录先挪到这里再删登记行，删不掉的留在这里等下次清理。
 pub const WITHDRAWN_DIR: &str = ".withdrawn";
+/// 备份根下的「正在创建」标记目录：每份备份创建期间有一个以 id 命名的空文件，登记成功才删。
+pub const CREATING_DIR: &str = ".creating";
 
 /// 一次撤回的结果（W2 peer r2 P1-02）。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -458,41 +473,65 @@ pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
     Ok(Withdrawal::Withdrawn)
 }
 
-/// 清理隔离区：登记行还在的放回备份根，不在的删掉。返回清不掉的个数。
+/// 清理备份根下的残留：隔离区里登记行还在的放回备份根、不在的删掉；「正在创建」标记对应的备份
+/// 已登记的只删标记，没登记的（创建失败、目录当时删不掉）删目录再删标记。返回清不掉的个数。
+/// 调用方持附件锁，创建与撤回也都在锁里，所以这里看到的标记和隔离条目都不属于进行中的操作。
 pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<usize> {
     let _lock = attachments_lock(store, "sweep_withdrawn")?;
     Ok(sweep_withdrawn_locked(store, root))
 }
 
-/// 隔离区里还有几份没清掉（诊断用；不拿锁，可能与正在进行的撤回差一份）。
+/// 还有几份残留没清掉：隔离区条目加「正在创建」标记（诊断用；不拿锁，可能与正在进行的撤回或创建差一份）。
 pub fn withdrawn_pending(root: &Path) -> usize {
-    fs::read_dir(root.join(WITHDRAWN_DIR)).map_or(0, |d| d.count())
+    [WITHDRAWN_DIR, CREATING_DIR]
+        .iter()
+        .map(|d| fs::read_dir(root.join(d)).map_or(0, |d| d.count()))
+        .sum()
 }
 
 pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
-    let quarantine = root.join(WITHDRAWN_DIR);
-    let Ok(entries) = fs::read_dir(&quarantine) else {
-        return 0;
-    };
-    let mut left = 0;
-    for entry in entries.flatten() {
-        let id = entry.file_name().to_string_lossy().into_owned();
-        let key = id.clone();
-        let registered = store.read(move |tx| {
+    let registered = |id: &str| {
+        let key = id.to_string();
+        store.read(move |tx| {
             tx.query_row("SELECT count(*) FROM backups WHERE id = ?1", [key], |r| {
                 r.get::<_, i64>(0)
             })
-        });
-        let done = match registered {
-            Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
-            Ok(_) => fs::rename(entry.path(), root.join(&id)).is_ok(),
-            Err(_) => false,
-        };
-        if !done {
-            left += 1;
+        })
+    };
+    let mut left = 0;
+    let quarantine = root.join(WITHDRAWN_DIR);
+    if let Ok(entries) = fs::read_dir(&quarantine) {
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let done = match registered(&id) {
+                Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
+                Ok(_) => fs::rename(entry.path(), root.join(&id)).is_ok(),
+                Err(_) => false,
+            };
+            if !done {
+                left += 1;
+            }
         }
+        let _ = fs::remove_dir(&quarantine);
     }
-    let _ = fs::remove_dir(&quarantine);
+    let creating = root.join(CREATING_DIR);
+    if let Ok(entries) = fs::read_dir(&creating) {
+        for entry in entries.flatten() {
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let gone = match registered(&id) {
+                Ok(0) => match fs::remove_dir_all(root.join(&id)) {
+                    Ok(()) => true,
+                    Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                },
+                Ok(_) => true,
+                Err(_) => false,
+            };
+            if !(gone && fs::remove_file(entry.path()).is_ok()) {
+                left += 1;
+            }
+        }
+        let _ = fs::remove_dir(&creating);
+    }
     left
 }
 
