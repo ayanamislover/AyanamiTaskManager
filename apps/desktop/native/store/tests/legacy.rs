@@ -6,7 +6,7 @@
 
 use atm_store::jsjson;
 use atm_store::legacy::{
-    ConvertError, ConvertOptions, Decision, FAMILIES, FTS_SHADOWS, Home, LegacySources,
+    ConvertError, ConvertOptions, Decision, FAMILIES, FTS_SHADOWS, Home, LegacySources, MIGRATIONS,
     Normalization, Report, convert, verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
@@ -35,6 +35,14 @@ fn dir(name: &str) -> PathBuf {
 
 /// 按 2.x 的迁移文件建一个空库，并像 2.0 的迁移执行器那样登记 schema_migrations。
 fn legacy(path: &Path, kind: &str) -> Connection {
+    legacy_upto(path, kind, i64::MAX)
+}
+
+/// 只跑到第 `upto` 个迁移的 2.x 库（停在旧版本的项目库，ARCHIVED / TRASHED 常见）。
+/// 登记的内容与 2.0 `migration-runner.ts` 写的一致：完整文件名、文件内容的 sha256、`APPLIED`。
+/// 迁移在仓库根的 `migrations/` 里读，sha256 在这里另算，不用转换器嵌入的那一份。
+fn legacy_upto(path: &Path, kind: &str, upto: i64) -> Connection {
+    use sha2::Digest;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../migrations")
         .join(kind);
@@ -50,12 +58,20 @@ fn legacy(path: &Path, kind: &str) -> Connection {
     )
     .unwrap();
     for f in files {
-        let name = f.file_stem().unwrap().to_string_lossy().into_owned();
+        let name = f.file_name().unwrap().to_string_lossy().into_owned();
         let version: i64 = name[..4].parse().unwrap();
-        c.execute_batch(&fs::read_to_string(&f).unwrap()).unwrap();
+        if version > upto {
+            break;
+        }
+        let sql = fs::read(&f).unwrap();
+        let sha: String = sha2::Sha256::digest(&sql)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        c.execute_batch(std::str::from_utf8(&sql).unwrap()).unwrap();
         c.execute(
-            "INSERT INTO schema_migrations VALUES (?1, ?2, ?3, 'sha', 'APPLIED')",
-            params![version, name, T],
+            "INSERT INTO schema_migrations VALUES (?1, ?2, ?3, ?4, 'APPLIED')",
+            params![version, name, T, sha],
         )
         .unwrap();
     }
@@ -98,6 +114,11 @@ fn huge_payload() -> String {
 }
 
 fn fixture(name: &str) -> Fixture {
+    fixture_with(name, i64::MAX)
+}
+
+/// 同 [`fixture`]，P2 的库只迁移到 `p2_upto`（夹具里 P2 用到的列在 0008 之后都有）。
+fn fixture_with(name: &str, p2_upto: i64) -> Fixture {
     let d = dir(name);
     let reg = d.join("registry.sqlite");
     let r = legacy(&reg, "registry");
@@ -156,7 +177,11 @@ fn fixture(name: &str) -> Fixture {
     let mut projects = Vec::new();
     for (pid, code, meta_life) in [("P1", "AAA", "ACTIVE"), ("P2", "BBB", "ACTIVE")] {
         let path = d.join(format!("{pid}.sqlite"));
-        let p = legacy(&path, "project");
+        let p = legacy_upto(
+            &path,
+            "project",
+            if pid == "P2" { p2_upto } else { i64::MAX },
+        );
         // 两个项目刻意用相同的本地编号、序号、agent id、session id 与事件之外的 id。
         p.execute_batch(&format!(
             "INSERT INTO project_meta (singleton, project_id, project_code, name, description, lifecycle, coordination_mode, health,
@@ -715,11 +740,15 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
         },
         &|e| matches!(e, ConvertError::UnknownTable(_)),
     );
+    // 旧版本的库会在副本上补迁移（W3b3），比转换器新的才拒绝。
     check(
-        "legacy-old-schema",
+        "legacy-newer-schema",
         &|f| {
             f.project(1)
-                .execute("DELETE FROM schema_migrations WHERE version = 18", [])
+                .execute(
+                    "INSERT INTO schema_migrations VALUES (19, '0019_future.sql', 'x', 'ab', 'APPLIED')",
+                    [],
+                )
                 .unwrap();
         },
         &|e| matches!(e, ConvertError::UnsupportedSchema(_)),
@@ -2107,9 +2136,13 @@ fn verify_checks_the_lineage_time_domain_on_its_own() {
     let failures = verify_converted(&f.target(), &f.sources, &report)
         .unwrap()
         .failures();
+    // 源在转换之后被改过，来源证明也会报（W3b3）。
     assert_eq!(
         failures,
-        ["P1/agent_sessions: 1 lineage endpoints outside the N-05 time domain"]
+        [
+            "r/app_meta.sources",
+            "P1/agent_sessions: 1 lineage endpoints outside the N-05 time domain"
+        ]
     );
     for ok in [
         "2026-09-02T23:59:59.999Z",
@@ -2385,7 +2418,10 @@ fn a_damaged_source_copy_is_refused_before_conversion() {
     fs::write(&path, bytes).unwrap();
     match f.convert() {
         Err(ConvertError::Mismatch(m)) => {
-            assert!(m.contains("source quick_check: *** in database main ***"), "{m}");
+            assert!(
+                m.contains("source quick_check: *** in database main ***"),
+                "{m}"
+            );
             assert!(m.contains("Freelist"), "{m}");
         }
         other => panic!("{other:?}"),
@@ -2423,4 +2459,258 @@ fn informational_findings_are_reported_without_stopping() {
     let json: serde_json::Value = serde_json::from_str(&report.report_json()).unwrap();
     assert_eq!(json["notes"].as_array().unwrap().len(), 4);
     assert!(json["graph_violations"].as_array().unwrap().is_empty());
+}
+
+/// 目录里每个文件的（名字，内容 sha256），用来证明转换不写源目录。
+fn listing(dir: &Path) -> Vec<(String, String)> {
+    use sha2::Digest;
+    let mut out: Vec<(String, String)> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .map(|p| {
+            let sha = sha2::Sha256::digest(fs::read(&p).unwrap())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            (p.file_name().unwrap().to_string_lossy().into_owned(), sha)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn sha_of(path: &Path) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(fs::read(path).unwrap())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// W3b3：转换器嵌入的 2.x 迁移与仓库里的文件逐字节相同，固定的 sha256 也对得上；计划恰好覆盖三类库的全部文件。
+#[test]
+fn embedded_migrations_are_pinned_and_match_the_repository() {
+    use sha2::Digest;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../migrations");
+    let mut seen = Vec::new();
+    for (kind, home) in [
+        ("registry", Home::Registry),
+        ("knowledge", Home::Knowledge),
+        ("project", Home::Project),
+    ] {
+        let mut files: Vec<String> = fs::read_dir(root.join(kind))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        let plan: Vec<_> = MIGRATIONS.iter().filter(|m| m.home == home).collect();
+        assert_eq!(
+            plan.iter().map(|m| m.name.to_string()).collect::<Vec<_>>(),
+            files,
+            "{kind}"
+        );
+        for (i, m) in plan.iter().enumerate() {
+            assert_eq!(m.version, i as i64 + 1, "{kind} {}", m.name);
+            assert_eq!(
+                m.sql,
+                fs::read_to_string(root.join(kind).join(m.name)).unwrap()
+            );
+            let sha: String = sha2::Sha256::digest(m.sql.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(sha, m.sha256, "{kind} {}", m.name);
+            seen.push((kind, m.version, !m.historical.is_empty()));
+        }
+    }
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.2)
+            .map(|s| (s.0, s.1))
+            .collect::<Vec<_>>(),
+        [("project", 15)],
+        "only 0015 has a historical hash"
+    );
+}
+
+/// W3b3：停在旧版本的项目库在工作副本上按 2.0 runner 补迁移后转换；来源证明进报告与 converted_from；
+/// 源目录一个字节都不变，成功后工作副本删掉。
+#[test]
+fn an_old_schema_is_upgraded_on_a_working_copy_with_provenance() {
+    let f = fixture_with("legacy-upgrade", 9);
+    let before = listing(&f.dir);
+    let p2_sha = sha_of(&f.sources.projects[1]);
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(listing(&f.dir), before, "the source directory is untouched");
+    assert!(!f.dir.join("out").join("legacy-work").exists());
+
+    let p2 = report
+        .provenance
+        .iter()
+        .find(|p| p.role == "project:P2")
+        .unwrap();
+    assert_eq!(p2.sha256, p2_sha);
+    assert_eq!(p2.wal_sha256, None);
+    assert_eq!(p2.migrations.len(), 9);
+    assert_eq!(p2.migrations[8].1, "0009_structured_cancel.sql");
+    assert_eq!(p2.upgraded, (10..=18).collect::<Vec<i64>>());
+    let p1 = report
+        .provenance
+        .iter()
+        .find(|p| p.role == "project:P1")
+        .unwrap();
+    assert!(p1.upgraded.is_empty() && p1.migrations.len() == 18);
+    assert_eq!(
+        report
+            .provenance
+            .iter()
+            .map(|p| p.role.as_str())
+            .collect::<Vec<_>>(),
+        ["registry", "knowledge", "project:P1", "project:P2"]
+    );
+
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT converted_from ->> '$.converterVersion' FROM app_meta"
+        ),
+        "atm-store-legacy/1"
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT json_group_array(value) FROM app_meta, json_each(converted_from, '$.sources[3].upgraded')"
+        ),
+        "[10,11,12,13,14,15,16,17,18]"
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT converted_from -> '$.sources[3].sha256' FROM app_meta"
+        ),
+        format!("\"{p2_sha}\"")
+    );
+    // 补跑出来的结构照常转换：0010 补的两个计数器进了目标。
+    assert_eq!(
+        q::<i64>(
+            &t,
+            "SELECT count(*) FROM counters WHERE project_id = 'P2' AND name IN ('review_request', 'review_submission')"
+        ),
+        2
+    );
+    // 独立 VERIFY 重新做一遍副本，结论相同。
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert_eq!(again.provenance, report.provenance);
+    assert!(!f.dir.join("out").join("legacy-verify").exists());
+}
+
+/// W3b3：来源证明按 2.0 `assertAppliedMigrations` 的规则核对：名字与 hash 都要认得（0015 另认历史 hash），
+/// 来源只能是两种之一，历史不能断档，比转换器新的版本拒绝。
+#[test]
+fn migration_provenance_is_checked_like_2x() {
+    let accepted: &[(&str, &str)] = &[
+        (
+            "0015 applied from the original file",
+            "UPDATE schema_migrations SET content_sha256 = '046381e8fdfef46a32e0babe85aa49ac0ac2168eb324aaf34d3ce714ad331205' WHERE version = 15",
+        ),
+        (
+            "legacy baseline",
+            "UPDATE schema_migrations SET hash_origin = 'LEGACY_BASELINE_UNVERIFIED' WHERE version = 1",
+        ),
+    ];
+    for (name, tweak) in accepted {
+        let f = fixture("legacy-provenance-ok");
+        f.project(0).execute_batch(tweak).unwrap();
+        let report = f.convert().unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(report.failures().is_empty(), "{name}");
+    }
+    let refused: &[(&str, &str, &str)] = &[
+        (
+            "unknown hash",
+            "UPDATE schema_migrations SET content_sha256 = 'ff' WHERE version = 3",
+            "migration 3 recorded as 0003_engineering_metrics.sql with sha256 ff",
+        ),
+        (
+            "historical hash on another migration",
+            "UPDATE schema_migrations SET content_sha256 = '046381e8fdfef46a32e0babe85aa49ac0ac2168eb324aaf34d3ce714ad331205' WHERE version = 14",
+            "migration 14 recorded as",
+        ),
+        (
+            "renamed migration",
+            "UPDATE schema_migrations SET name = '0004_other.sql' WHERE version = 4",
+            "migration 4 recorded as 0004_other.sql",
+        ),
+        (
+            "history gap",
+            "DELETE FROM schema_migrations WHERE version = 5",
+            "migration history skips 5",
+        ),
+        (
+            "newer than the converter",
+            "INSERT INTO schema_migrations VALUES (19, '0019_next.sql', 'x', 'ab', 'APPLIED')",
+            "migration 19 0019_next.sql is not one this converter knows",
+        ),
+        (
+            "no migration table",
+            "DROP TABLE schema_migrations",
+            "no schema_migrations",
+        ),
+        (
+            // 2.x 的 CHECK 拦着这种值；表被改过（没有 CHECK）时转换器自己也要拦。
+            "unknown hash origin",
+            "CREATE TABLE sm AS SELECT * FROM schema_migrations; DROP TABLE schema_migrations;
+             ALTER TABLE sm RENAME TO schema_migrations;
+             UPDATE schema_migrations SET hash_origin = 'GUESSED' WHERE version = 2",
+            "migration 2 has hash_origin GUESSED",
+        ),
+    ];
+    for (name, tweak, expected) in refused {
+        let f = fixture("legacy-provenance-bad");
+        f.project(0).execute_batch(tweak).unwrap();
+        match f.convert() {
+            Err(ConvertError::UnsupportedSchema(m)) => assert!(m.contains(expected), "{name}: {m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+        assert!(!f.target().exists(), "{name}: nothing is written");
+    }
+}
+
+/// W3b3：源旁边有没合并的 WAL 时，WAL 只在工作副本里恢复（07 IMPORT）：转换读到 WAL 里的修改，
+/// 源目录的 db、-wal、-shm 一个字节都不变。
+#[test]
+fn an_unmerged_wal_is_recovered_in_the_working_copy_only() {
+    let f = fixture("legacy-wal");
+    let p2 = f.sources.projects[1].clone();
+    let writer = Connection::open(&p2).unwrap();
+    writer
+        .query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))
+        .unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA wal_autocheckpoint = 0;
+             UPDATE objectives SET title = 'only in the wal' WHERE id = 'OBJ';",
+        )
+        .unwrap();
+    let wal = PathBuf::from(format!("{}-wal", p2.display()));
+    assert!(fs::metadata(&wal).unwrap().len() > 0);
+    let before = listing(&f.dir);
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(listing(&f.dir), before, "db, -wal and -shm are untouched");
+    let p = report
+        .provenance
+        .iter()
+        .find(|p| p.role == "project:P2")
+        .unwrap();
+    assert_eq!(p.wal_sha256.as_deref(), Some(sha_of(&wal).as_str()));
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(&t, "SELECT title FROM objectives WHERE project_id = 'P2'"),
+        "only in the wal"
+    );
+    drop(writer);
 }

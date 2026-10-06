@@ -5,7 +5,7 @@
 ## 族表
 
 - **编号**沿用 05 §5.2：R1–R12（registry）、K1–K5（knowledge）、P1–P11（每个项目）、F1–F7（数据根文件）。§5.2「显式排除」表的各行编为 X1–X12，顺序与表格相同。同一编号可以有多个族，例如 P3 是十四张表。
-- **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`check_source`）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
+- **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`prepare_source`，在工作副本上）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
 - **decision**：`CONVERTED`（逐行或逐文件进新库）、`REBUILT`（派生数据，在新库重建，查询等价）、`DROPPED`（不进新库，`drop_reason` 写理由）、`REFERENCED`（不复制，只登记引用）。
 - **business_digest**：是否纳入回滚检测（05 §5.2「纳入」列）。X 类和 F7 不纳入。
 - **pending**：还没实现的族及负责的任务。DB 族都已实现；非 DB 文件族归 W3b4（附件、manifest、R / X 类路径）、W3b5（sync / dispatch）、W3b6（进行中的文件事务）。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
@@ -30,9 +30,35 @@
   - 其余 X1 派生表只记源摘要。
 - **源摘要**：每个 DB 族实例的主源表，全部列按主键排序，算 05 §5.1 的 `D(t)`（`Report::sources`），舍弃和重建的族也算。`business_digest` 用同一种摘要。
 
+## 工作副本与来源证明（W3b3）
+
+- **源文件本身不打开。** 每个源库先复制成工作副本：db 与 `-wal` 一起复制，`-shm` 不复制。工作副本放在目标库旁边的 `legacy-work/`，独立 VERIFY 另做一份，放在 `legacy-verify/`。下面这些都只在副本上做：
+  - 第一次读取时恢复 WAL（07 IMPORT「WAL 只在副本里恢复」）；
+  - `quick_check`；
+  - 核对迁移来源；
+  - 补迁移；
+  - `foreign_key_check` 与登记完整性；
+  - 最后合并 WAL、改回单文件，供只读挂载。
+
+  成功后删掉工作副本；失败时留着，随 staging 丢弃。
+
+- **迁移来源**：2.x 的 27 个迁移在编译时嵌入（`store/src/legacy/migrations.rs`），每个文件的 sha256 另外固定，用例核对两者与仓库文件一致。源里每一行 `schema_migrations` 按 2.0 `assertAppliedMigrations` 核对：
+  - 版本必须在计划里，比转换器新的拒绝；
+  - 名字（完整文件名）与 `content_sha256` 必须认得，0015 另外接受修订前原文件的历史 hash；
+  - `hash_origin` 只能是 `APPLIED` 或 `LEGACY_BASELINE_UNVERIFIED`；
+  - 低于最高版本的迁移都要在。
+- **补迁移**：缺的迁移按 2.0 runner 的语义补跑：`foreign_keys = ON`，每个迁移一个事务，`schema_migrations` 写完整文件名、sha256、`APPLIED`，`applied_at` 取转换时刻 `at`。2.0 的升级前备份在这里不需要，原始快照本身就是。
+- **来源证明**（`Report::provenance`，也写进 `app_meta.converted_from.sources`，同时记 `converterVersion`）：每个源库一条，包括：
+  - `role`（`registry` / `knowledge` / `project:<id>`）；
+  - 源 db 与 `-wal` 的 sha256；
+  - 源里 `schema_migrations` 的原样内容；
+  - 补跑的版本。
+
+  VERIFY 把这一次读到的来源证明与目标里记下的比对（检查 `r/app_meta.sources`），所以转换之后源文件被改过也看得出来。
+
 ## 源副本与业务图（05 §3.3；W3b2）
 
-- **源副本先过两项检查**（`check_source`，在写目标之前）：`PRAGMA quick_check` 必须是 `ok`；`foreign_key_check` 必须为空。违例时转换以 `Mismatch` 停下，并点名源文件、表、rowid 与父表。
+- **源副本先过两项检查**（在工作副本上、写目标之前）：`PRAGMA quick_check` 必须是 `ok`；`foreign_key_check` 必须为空。违例时转换以 `Mismatch` 停下，并点名源文件、表、rowid 与父表。
 - **业务图停级校验**（VERIFY，`Report::graph_violations`，计入 `failures()`）。在目标上按 project_id 查。源与目标逐族相等已经由摘要证明，所以在目标上查等于在源上查。每条写成 `<pid>/<表>.<方面>: <n> rows, first <主键>`：
   - `review_requests.review_work_item`：被审任务的 type 必须是 `REVIEW`；
   - `review_requests.parent_checklist`：父检查项属于父任务。提交引用的记录在同一项目，由目标的复合外键 `(project_id, record_id)` 保证，源上的悬空引用由 `foreign_key_check` 拦下；

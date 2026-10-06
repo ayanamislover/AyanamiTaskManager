@@ -1,10 +1,12 @@
 //! 2.x → 3.0 转换原型（W1f；05 §3、10 R6 / R7‴）。
 //!
-//! 输入是 2.x 的 registry、knowledge、各项目库（只读打开，路径由调用方逐个给出），输出是一个新的单库。
+//! 输入是 2.x 的 registry、knowledge、各项目库（路径由调用方逐个给出），输出是一个新的单库。
 //! 规则：
+//! - 源文件本身不打开：每个库先复制成工作副本（db 与 `-wal`），WAL 在副本里恢复，旧 schema 在副本上按 2.0 runner
+//!   补迁移；来源证明（源 sha256、原有迁移、补跑的迁移）进报告与 `app_meta.converted_from`（W3b3）；
 //! - id、序号、JSON 原文逐值保留；2.x 有、3.0 结构里放不下的原值（`projects.db_path`、整行 `project_meta`、
 //!   回执的原 op_id 与分类）存进专门的 legacy 列，VERIFY 用它们反投影；
-//! - 只接受已迁移到最新的 2.x（registry 1–8、knowledge 1、project 1–18），出现未登记的表即拒绝；
+//! - 迁移历史必须是转换器认得的（名字与 hash 逐个核对，比转换器新的拒绝），出现未登记的表即拒绝；
 //! - 进行中的生命周期（CREATING / RESTORING / MIGRATION_FAILED）留给 W3 的落定规则（05 §4.1），这里拒绝；
 //! - 转换完成后逐族比对：源表与目标反投影的规范化摘要（05 §5.1）必须相等；
 //! - 默认拒绝读取真实数据根（`%LOCALAPPDATA%\AyanamiTaskManager`）：真实数据转换需要单独授权。
@@ -21,7 +23,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 mod families;
+mod migrations;
 pub use families::{Decision, FAMILIES, FTS_SHADOWS, FamilySpec, Home};
+pub use migrations::{LegacyMigration, MIGRATIONS};
 
 #[derive(Debug)]
 pub enum ConvertError {
@@ -187,6 +191,8 @@ pub struct Report {
     pub projects: Vec<String>,
     /// 有没有知识库。
     pub knowledge: bool,
+    /// 每个源库的来源证明（W3b3），也写进 `app_meta.converted_from.sources`。
+    pub provenance: Vec<SourceProvenance>,
     /// 回执分类计数（R7‴）。
     pub receipt_classes: BTreeMap<String, usize>,
     /// 按 AGENT 处理、但形状是晋升的回执（R7‴ 第 4 类的特别标注）。
@@ -414,6 +420,7 @@ impl Report {
     }
 }
 
+/// 支持的最新版本，与嵌入的迁移计划一致（`migrations.rs`，用例核对）。
 const REGISTRY_MIGRATIONS: i64 = 8;
 const KNOWLEDGE_MIGRATIONS: i64 = 1;
 const PROJECT_MIGRATIONS: i64 = 18;
@@ -879,21 +886,17 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     if target.exists() {
         return Err(ConvertError::TargetExists(target.to_path_buf()));
     }
-    check_source(&src.registry, Home::Registry, REGISTRY_MIGRATIONS)?;
-    if let Some(k) = &src.knowledge {
-        check_source(k, Home::Knowledge, KNOWLEDGE_MIGRATIONS)?;
-    }
-    for p in &src.projects {
-        check_source(p, Home::Project, PROJECT_MIGRATIONS)?;
-    }
+    // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
+    let work = work_dir(target, WORK_DIR)?;
+    let mut report = Report::default();
+    let used = prepare_sources(src, &work, opts.at, &mut report.provenance)?;
 
     let mut t = crate::open(target)?;
     register_functions(&t)?;
-    let mut report = Report::default();
-    let gens = convert_registry(&mut t, src, opts.at, &mut report)?;
+    let gens = convert_registry(&mut t, &used, opts.at, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
-    for p in &src.projects {
+    for p in &used.projects {
         let pid = convert_project(&mut t, p, &gens, &mut report, &mut promotions)?;
         if !seen.insert(pid.clone()) {
             return Err(ConvertError::Mismatch(format!("project {pid} given twice")));
@@ -907,42 +910,245 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         }
     }
     finish(&mut t, &gens, &promotions, &mut report)?;
-    verify(&t, src, &mut report)?;
+    verify(&t, &used, &mut report)?;
     if !report.failures().is_empty() {
         return Err(ConvertError::Verify(Box::new(report)));
     }
+    drop(t);
+    // 成功后工作副本没用了；失败时留着，随 staging 一起丢弃或供诊断。
+    let _ = std::fs::remove_dir_all(&work);
     Ok(report)
 }
 
-fn refuse_real_root(root: &Path, p: &Path) -> Result<()> {
-    // 两边都规范化后再比，`..`、大小写、符号链接都绕不过去；根不存在时没有可保护的东西。
-    let Ok(root) = root.canonicalize() else {
-        return Ok(());
-    };
-    let path = p.canonicalize().map_err(ConvertError::Io)?;
-    if path.starts_with(&root) {
-        return Err(ConvertError::RealDataRoot(p.to_path_buf()));
+/// 转换与独立 VERIFY 各自的工作副本目录，放在目标库旁边（staging 里），不放 %TEMP%。
+const WORK_DIR: &str = "legacy-work";
+const VERIFY_DIR: &str = "legacy-verify";
+
+/// 转换器版本：写进 `app_meta.converted_from.converterVersion`。迁移嵌入、规范化规则、映射有变化时升。
+pub const CONVERTER_VERSION: &str = "atm-store-legacy/1";
+
+fn work_dir(target: &Path, name: &str) -> Result<PathBuf> {
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .join(name);
+    // 上一次失败留下的同名目录是本转换器自己的产物，重来前清掉。
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
     }
-    Ok(())
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
 }
 
-/// 源库的表集合必须恰好是族表登记的那些（05 §5.1 登记完整性），迁移集合必须是支持的那一组；
-/// 源副本本身要过 `quick_check` 与 `foreign_key_check`（05 §3.3，停级：源有违例就停，报告位置）。
-fn check_source(path: &Path, home: Home, migrations: i64) -> Result<()> {
-    let c = crate::backup::side_reader(path)?;
+/// 一个源库的来源证明（W3b3）：源文件的 sha256、源里登记的迁移、在副本上补跑的迁移。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceProvenance {
+    /// `registry`、`knowledge` 或 `project:<id>`。
+    pub role: String,
+    /// 源 db 文件的 sha256（转换开始时）。
+    pub sha256: String,
+    /// 源旁边 `-wal` 的 sha256；没有或为空时是 `None`。
+    pub wal_sha256: Option<String>,
+    /// 源里 `schema_migrations` 的原样内容：(version, name, content_sha256, hash_origin)。
+    pub migrations: Vec<(i64, String, String, String)>,
+    /// 在副本上按 2.0 runner 补跑的版本。
+    pub upgraded: Vec<i64>,
+}
+
+impl SourceProvenance {
+    fn json(&self) -> String {
+        let migrations: Vec<String> = self
+            .migrations
+            .iter()
+            .map(|(v, n, s, o)| {
+                format!(
+                    "{{\"version\":{v},\"name\":{},\"sha256\":{},\"origin\":{}}}",
+                    json_string(n),
+                    json_string(s),
+                    json_string(o)
+                )
+            })
+            .collect();
+        format!(
+            "{{\"role\":{},\"sha256\":{},\"walSha256\":{},\"migrations\":[{}],\"upgraded\":[{}]}}",
+            json_string(&self.role),
+            json_string(&self.sha256),
+            self.wal_sha256
+                .as_deref()
+                .map_or("null".to_string(), json_string),
+            migrations.join(","),
+            self.upgraded
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+}
+
+fn provenance_json(all: &[SourceProvenance]) -> String {
+    format!(
+        "[{}]",
+        all.iter()
+            .map(SourceProvenance::json)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// 把三类源库都做成工作副本，返回转换实际读取的那一组路径。
+fn prepare_sources(
+    src: &LegacySources,
+    work: &Path,
+    at: &str,
+    provenance: &mut Vec<SourceProvenance>,
+) -> Result<LegacySources> {
+    let mut one = |path: &Path, home: Home, slot: String| -> Result<PathBuf> {
+        let (working, p) = prepare_source(path, home, &work.join(format!("{slot}.sqlite")), at)?;
+        provenance.push(p);
+        Ok(working)
+    };
+    let registry = one(&src.registry, Home::Registry, "registry".into())?;
+    let knowledge = match &src.knowledge {
+        Some(k) => Some(one(k, Home::Knowledge, "knowledge".into())?),
+        None => None,
+    };
+    let projects = src
+        .projects
+        .iter()
+        .enumerate()
+        .map(|(i, p)| one(p, Home::Project, format!("project-{i}")))
+        .collect::<Result<_>>()?;
+    Ok(LegacySources {
+        registry,
+        knowledge,
+        projects,
+    })
+}
+
+/// 一个源库 → 工作副本（05 §3.3、07 IMPORT；W3b3）：
+/// 1. 复制 db 与 `-wal`（不复制 `-shm`），源文件只读不开；
+/// 2. 在副本上 `quick_check`（第一次读取时恢复 WAL）；
+/// 3. 核对 `schema_migrations` 的来源：每行的版本在支持的计划里、名字与 hash 认得、来源合法，版本不断档；
+/// 4. 缺的迁移按 2.0 runner 的语义补跑：`foreign_keys = ON`，每个迁移一个事务，`applied_at` 取 `at`；
+/// 5. `foreign_key_check`、登记完整性（表集合恰好是族表登记的那些）；
+/// 6. 合并 WAL、改回单文件，供转换与 VERIFY 只读挂载。
+fn prepare_source(
+    original: &Path,
+    home: Home,
+    working: &Path,
+    at: &str,
+) -> Result<(PathBuf, SourceProvenance)> {
+    let shown = original.display().to_string();
+    let wal = sidecar(original, "-wal");
+    let wal_sha256 = match std::fs::metadata(&wal) {
+        Ok(m) if m.len() > 0 => {
+            std::fs::copy(&wal, sidecar(working, "-wal"))?;
+            Some(file_sha256(&wal)?)
+        }
+        _ => None,
+    };
+    std::fs::copy(original, working)?;
+    let sha256 = file_sha256(original)?;
+    let c = Connection::open(working)?;
     let quick: Vec<String> = c
         .prepare("PRAGMA quick_check")
         .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
-        .map_err(|e| {
-            ConvertError::Mismatch(format!("{}: source quick_check: {e}", path.display()))
-        })?;
+        .map_err(|e| ConvertError::Mismatch(format!("{shown}: source quick_check: {e}")))?;
     if quick != ["ok"] {
         return Err(ConvertError::Mismatch(format!(
-            "{}: source quick_check: {}",
-            path.display(),
+            "{shown}: source quick_check: {}",
             quick.join("; ")
         )));
     }
+
+    let has_table: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_table {
+        return Err(ConvertError::UnsupportedSchema(format!(
+            "{shown}: no schema_migrations"
+        )));
+    }
+    let applied: Vec<(i64, String, String, String)> = c
+        .prepare("SELECT version, name, content_sha256, hash_origin FROM schema_migrations ORDER BY version")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let plan = migrations::plan(home);
+    for (version, name, sha, origin) in &applied {
+        let Some(m) = plan.iter().find(|m| m.version == *version) else {
+            return Err(ConvertError::UnsupportedSchema(format!(
+                "{shown}: migration {version} {name} is not one this converter knows"
+            )));
+        };
+        if !migrations::recognizes(m, name, sha) {
+            return Err(ConvertError::UnsupportedSchema(format!(
+                "{shown}: migration {version} recorded as {name} with sha256 {sha}, expected {} with {}",
+                m.name, m.sha256
+            )));
+        }
+        if origin != "APPLIED" && origin != "LEGACY_BASELINE_UNVERIFIED" {
+            return Err(ConvertError::UnsupportedSchema(format!(
+                "{shown}: migration {version} has hash_origin {origin}"
+            )));
+        }
+    }
+    // 2.0 assertAppliedMigrations：低于最高已应用版本的迁移都必须在。
+    let highest = applied.last().map_or(0, |a| a.0);
+    if let Some(gap) = plan
+        .iter()
+        .find(|m| m.version < highest && !applied.iter().any(|a| a.0 == m.version))
+    {
+        return Err(ConvertError::UnsupportedSchema(format!(
+            "{shown}: migration history skips {}",
+            gap.version
+        )));
+    }
+    let pending: Vec<_> = plan
+        .iter()
+        .filter(|m| !applied.iter().any(|a| a.0 == m.version))
+        .collect();
+    let mut c = c;
+    if !pending.is_empty() {
+        c.pragma_update(None, "foreign_keys", true)?;
+        for m in &pending {
+            let tx = c.transaction()?;
+            tx.execute_batch(m.sql).map_err(|e| {
+                ConvertError::Mismatch(format!("{shown}: upgrading to {} failed: {e}", m.name))
+            })?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at, content_sha256, hash_origin)
+                 VALUES (?1, ?2, ?3, ?4, 'APPLIED')",
+                params![m.version, m.name, at, m.sha256],
+            )?;
+            tx.commit()?;
+        }
+    }
+
     let dangling: Option<(String, Option<i64>, String)> = c
         .query_row(
             "SELECT \"table\", rowid, parent FROM pragma_foreign_key_check ORDER BY 1, 2 LIMIT 1",
@@ -952,8 +1158,7 @@ fn check_source(path: &Path, home: Home, migrations: i64) -> Result<()> {
         .optional()?;
     if let Some((table, rowid, parent)) = dangling {
         return Err(ConvertError::Mismatch(format!(
-            "{}: source foreign_key_check: {table} rowid {} -> {parent}",
-            path.display(),
+            "{shown}: source foreign_key_check: {table} rowid {} -> {parent}",
             rowid.unwrap_or_default()
         )));
     }
@@ -965,29 +1170,48 @@ fn check_source(path: &Path, home: Home, migrations: i64) -> Result<()> {
         .collect::<rusqlite::Result<_>>()?;
     for n in &names {
         if !allowed.contains(n.as_str()) {
-            return Err(ConvertError::UnknownTable(format!(
-                "{}: {n}",
-                path.display()
-            )));
+            return Err(ConvertError::UnknownTable(format!("{shown}: {n}")));
         }
     }
     for t in &tables {
         if !names.iter().any(|n| n == t) {
             return Err(ConvertError::UnsupportedSchema(format!(
-                "{}: missing {t}",
-                path.display()
+                "{shown}: missing {t}"
             )));
         }
     }
-    let versions: Vec<i64> = c
-        .prepare("SELECT version FROM schema_migrations ORDER BY version")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if versions != (1..=migrations).collect::<Vec<_>>() {
-        return Err(ConvertError::UnsupportedSchema(format!(
-            "{}: migrations {versions:?}, expected 1..={migrations}",
-            path.display()
-        )));
+    let role = match home {
+        Home::Registry => "registry".to_string(),
+        Home::Knowledge => "knowledge".to_string(),
+        _ => format!(
+            "project:{}",
+            c.query_row("SELECT project_id FROM project_meta", [], |r| r
+                .get::<_, String>(0))?
+        ),
+    };
+    c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+    c.query_row("PRAGMA journal_mode = DELETE", [], |_| Ok(()))?;
+    drop(c);
+    Ok((
+        working.to_path_buf(),
+        SourceProvenance {
+            role,
+            sha256,
+            wal_sha256,
+            migrations: applied,
+            upgraded: pending.iter().map(|m| m.version).collect(),
+        },
+    ))
+}
+
+fn refuse_real_root(root: &Path, p: &Path) -> Result<()> {
+    // 两边都规范化后再比，`..`、大小写、符号链接都绕不过去；根不存在时没有可保护的东西。
+    let Ok(root) = root.canonicalize() else {
+        return Ok(());
+    };
+    let path = p.canonicalize().map_err(ConvertError::Io)?;
+    if path.starts_with(&root) {
+        return Err(ConvertError::RealDataRoot(p.to_path_buf()));
     }
     Ok(())
 }
@@ -1134,8 +1358,17 @@ fn convert_registry(
 
         let converted_from: String = tx.query_row(
             "SELECT json_object('format', 'atm2', 'registryMigrations', ?1, 'projectMigrations', ?2,
-                                'knowledgeMigrations', ?3, 'sourceCurrentSequence', ?4, 'convertedAt', ?5)",
-            params![REGISTRY_MIGRATIONS, PROJECT_MIGRATIONS, KNOWLEDGE_MIGRATIONS, current, at],
+                                'knowledgeMigrations', ?3, 'sourceCurrentSequence', ?4, 'convertedAt', ?5,
+                                'converterVersion', ?6, 'sources', json(?7))",
+            params![
+                REGISTRY_MIGRATIONS,
+                PROJECT_MIGRATIONS,
+                KNOWLEDGE_MIGRATIONS,
+                current,
+                at,
+                CONVERTER_VERSION,
+                provenance_json(&report.provenance)
+            ],
             |r| r.get(0),
         )?;
         let (root, generation, epoch) = (ulid(&tx)?, ulid(&tx)?, ulid(&tx)?);
@@ -2100,16 +2333,28 @@ fn compare_table(
 
 /// 对一个已经转换好的库重做逐族比对（W3 的 VERIFY 阶段、以及测试用）。
 /// `conversion` 是转换时的报告：VERIFY 独立重算规范化记录与附件，与它记下的比对。
+/// 源库重新做一遍工作副本（独立于转换时的那一份），所以转换之后源有变化也看得出来：
+/// 内容不一致落在逐族比对里，源文件本身变了落在来源证明的比对里。
 pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report) -> Result<Report> {
     let t = Connection::open(target)?;
     crate::configure(&t)?;
     register_functions(&t)?;
+    let at: String = t.query_row(
+        "SELECT converted_from ->> '$.convertedAt' FROM app_meta",
+        [],
+        |r| r.get(0),
+    )?;
+    let work = work_dir(target, VERIFY_DIR)?;
     let mut report = Report {
         normalizations: conversion.normalizations.clone(),
         attachment: conversion.attachment.clone(),
         ..Report::default()
     };
-    verify(&t, src, &mut report)?;
+    let r = prepare_sources(src, &work, &at, &mut report.provenance)
+        .and_then(|used| verify(&t, &used, &mut report));
+    drop(t);
+    let _ = std::fs::remove_dir_all(&work);
+    r?;
     Ok(report)
 }
 
@@ -2206,6 +2451,22 @@ fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()
     let mut re = Recheck::default();
     let r = (|| {
         digest_sources(t, report, "r", Home::Registry, "r")?;
+        // 来源证明：这一次读到的源（sha256、原有迁移、补跑的迁移）与转换时写进目标的那一份相同。
+        let provenance = provenance_json(&report.provenance);
+        compare(
+            t,
+            report,
+            Ck {
+                spec: "schema_migrations",
+                label: "r/app_meta.sources",
+                key: &[],
+            },
+            &["sources".to_string()],
+            "SELECT json(?1)",
+            &[&provenance],
+            "SELECT converted_from -> '$.sources' FROM main.app_meta",
+            &[],
+        )?;
         verify_registry(t, report, &mut re)?;
         expect_global_begin(t)?;
         if let Some(k) = &src.knowledge {
