@@ -641,6 +641,115 @@ pub fn mirror_payload(payload: Option<&str>, fields: &str) -> Result<String, Too
     Ok(doc.stringify(root))
 }
 
+/// 解析出来的 JSON 值（W3b5 的 sync / dispatch 文件）。对象的键按 `OrdinaryOwnPropertyKeys` 顺序、
+/// 重复的键已按 `JSON.parse` 合并。
+///
+/// 转换和输出是递归的：深度受 [`MAX_DEPTH`] 限制，这些文件实际只有三四层。
+#[derive(Clone, Debug, PartialEq)]
+pub enum Value {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Array(Vec<Value>),
+    Object(Vec<(String, Value)>),
+}
+
+/// [`parse_value`] 不能给出 [`Value`] 的两种情况；转换据此显式拒绝，不当作解析失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueError {
+    TooDeep,
+    /// 字符串（或键）里有落单的代理项：JS 字符串可以有，Rust 字符串不能表示。
+    LoneSurrogate,
+}
+
+impl std::fmt::Display for ValueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ValueError::TooDeep => "JSON nested deeper than the supported depth",
+            ValueError::LoneSurrogate => "a JSON string holds a lone surrogate",
+        })
+    }
+}
+
+impl Doc {
+    fn value(&self, i: usize) -> Result<Value, ValueError> {
+        let text = |units: &[u16]| String::from_utf16(units).map_err(|_| ValueError::LoneSurrogate);
+        Ok(match &self.nodes[i] {
+            Node::Null => Value::Null,
+            Node::Bool(b) => Value::Bool(*b),
+            Node::Number(x) => Value::Number(*x),
+            Node::String(units) => Value::String(text(units)?),
+            Node::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|&i| self.value(i))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Node::Object(o) => Value::Object(
+                o.ordered()
+                    .into_iter()
+                    .map(|(k, v)| Ok((text(k)?, self.value(*v)?)))
+                    .collect::<Result<_, ValueError>>()?,
+            ),
+        })
+    }
+}
+
+/// `JSON.parse(text)` 成 [`Value`]：不合法时 `Ok(None)`。
+pub fn parse_value(text: &str) -> Result<Option<Value>, ValueError> {
+    let mut doc = Doc::default();
+    match doc.parse_into(text) {
+        Err(TooDeep) => Err(ValueError::TooDeep),
+        Ok(None) => Ok(None),
+        Ok(Some(root)) => doc.value(root).map(Some),
+    }
+}
+
+/// RFC 8785（JCS）：对象的键按 UTF-16 码元排序，字符串与数字按 `JSON.stringify` 输出，没有空白。
+/// 非有限数字（JSON 里没有，只可能来自构造的值）按 `JSON.stringify` 输出 `null`。
+pub fn jcs(v: &Value) -> String {
+    fn go(v: &Value, out: &mut String) {
+        match v {
+            Value::Null => out.push_str("null"),
+            Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Value::Number(x) if x.is_finite() => out.push_str(&number_to_string(*x)),
+            Value::Number(_) => out.push_str("null"),
+            Value::String(s) => write_string(out, &s.encode_utf16().collect::<Vec<_>>()),
+            Value::Array(items) => {
+                out.push('[');
+                for (n, item) in items.iter().enumerate() {
+                    if n > 0 {
+                        out.push(',');
+                    }
+                    go(item, out);
+                }
+                out.push(']');
+            }
+            Value::Object(entries) => {
+                let mut sorted: Vec<(Vec<u16>, &Value)> = entries
+                    .iter()
+                    .map(|(k, v)| (k.encode_utf16().collect(), v))
+                    .collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                out.push('{');
+                for (n, (key, value)) in sorted.iter().enumerate() {
+                    if n > 0 {
+                        out.push(',');
+                    }
+                    write_string(out, key);
+                    out.push(':');
+                    go(value, out);
+                }
+                out.push('}');
+            }
+        }
+    }
+    let mut out = String::new();
+    go(v, &mut out);
+    out
+}
+
 /// `JSON.parse(text)[key]`：顶层是对象、键对应的值是字符串时返回它（落单代理项无法成为 Rust 字符串，返回 None）。
 pub fn top_level_string(text: &str, key: &str) -> Result<Option<String>, TooDeep> {
     let mut doc = Doc::default();

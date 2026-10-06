@@ -52,7 +52,7 @@ pub fn sources_from_root(root: &Path) -> Result<LegacySources> {
 }
 
 /// 目录下的全部文件（不跟随链接）：(以 `/` 分隔的相对路径, 大小)，按相对路径排序。链接本身算一个条目。
-fn walk(dir: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
+pub(super) fn walk(dir: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
     let mut out = Vec::new();
     let mut stack = vec![(dir.to_path_buf(), String::new())];
     while let Some((d, prefix)) = stack.pop() {
@@ -103,8 +103,8 @@ fn is_db_file(name: &str, db: &str) -> bool {
 }
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；
-/// R / X 类按族记文件数与字节数（`Report::sources`，范围 `root`）。sync / dispatch 的内容归 W3b5。
-pub(super) fn scan(root: &Path, report: &mut Report) -> Result<()> {
+/// R / X 类按族记文件数与字节数（`Report::sources`，范围 `root`）。
+pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
     let shown = root.display();
     let mut counts: std::collections::BTreeMap<&'static str, (i64, u64)> = Default::default();
     let mut add = |family: &'static str, files: &[(String, PathBuf, u64)]| {
@@ -199,13 +199,21 @@ pub(super) fn scan(root: &Path, report: &mut Report) -> Result<()> {
             add(family, &files);
         }
     }
+    // sync / dispatch 的文件按 2.0 读盘语义先加载一遍：读不出来、形状超出接受域的在动目标之前停（W3b5）。
+    // dispatch/logs/ 按派单历史分：历史里没有的 run 的日志是 X9。
+    let loaded = super::jsonfiles::load(root, at)?;
+    add(
+        "diagnostic-copies",
+        &super::jsonfiles::classify_logs(root, &loaded)?.orphans,
+    );
     // 项目目录里的备份也是 X7。
     for p in project_dirs(root)? {
         add("backups", &walk(&p.join("backups"))?);
     }
     for f in super::FAMILIES
         .iter()
-        .filter(|f| f.home == super::Home::Root && f.pending.is_none())
+        // F 类（sync / dispatch）的源摘要由 VERIFY 按内容算（jsonfiles.rs）。
+        .filter(|f| f.home == super::Home::Root && f.pending.is_none() && !f.code.starts_with('F'))
     {
         let (files, bytes) = counts.get(f.name).copied().unwrap_or_default();
         report.sources.push(SourceDigest {
@@ -427,6 +435,38 @@ fn backup_kind(name: &str, dir: &str) -> Option<(&'static str, Option<i64>)> {
     None
 }
 
+/// 文件集合的检查：(相对路径, size, sha256) 两边相等；不等时给出第一处不同的路径。
+pub(super) fn set_check(
+    report: &mut Report,
+    spec: &'static str,
+    scope: &str,
+    label: &str,
+    source: &[(String, u64, String)],
+    target: &[(String, u64, String)],
+) {
+    let mut errors = 0i64;
+    let mut first = None;
+    for f in source
+        .iter()
+        .filter(|f| !target.contains(f))
+        .chain(target.iter().filter(|f| !source.contains(f)))
+    {
+        errors += 1;
+        first.get_or_insert_with(|| format!("{label}({})", json_string(&f.0)));
+    }
+    report.checks.push(FamilyCheck {
+        family: label.to_string(),
+        spec,
+        scope: scope.to_string(),
+        source_rows: source.len() as i64,
+        target_rows: target.len() as i64,
+        source_digest: set_digest(source),
+        target_digest: set_digest(target),
+        errors,
+        first_failure_locator: first,
+    });
+}
+
 fn set_digest(files: &[(String, u64, String)]) -> String {
     let mut h = Sha256::new();
     h.update(b"ATM-FILESET-1");
@@ -441,7 +481,7 @@ fn set_digest(files: &[(String, u64, String)]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn hashed(dir: &Path) -> Result<Vec<(String, u64, String)>> {
+pub(super) fn hashed(dir: &Path) -> Result<Vec<(String, u64, String)>> {
     walk(dir)?
         .into_iter()
         .map(|(rel, path, size)| Ok((rel, size, file_sha256(&path)?)))
@@ -466,28 +506,14 @@ pub(super) fn verify_files(
             digest: set_digest(&source),
             bytes: Some(source.iter().map(|f| f.1 as i64).sum()),
         });
-        let label = format!("{pid}/artifacts.files");
-        let mut errors = 0i64;
-        let mut first = None;
-        for f in source
-            .iter()
-            .filter(|f| !target.contains(f))
-            .chain(target.iter().filter(|f| !source.contains(f)))
-        {
-            errors += 1;
-            first.get_or_insert_with(|| format!("{label}({})", json_string(&f.0)));
-        }
-        report.checks.push(FamilyCheck {
-            family: label,
-            spec: "artifacts.files",
-            scope: pid.clone(),
-            source_rows: source.len() as i64,
-            target_rows: target.len() as i64,
-            source_digest: set_digest(&source),
-            target_digest: set_digest(&target),
-            errors,
-            first_failure_locator: first,
-        });
+        set_check(
+            report,
+            "artifacts.files",
+            &pid,
+            &format!("{pid}/artifacts.files"),
+            &source,
+            &target,
+        );
 
         // P10：manifest 的身份字段与 registry 一致。
         let manifest_path = root.join("projects").join(&pid).join("manifest.json");

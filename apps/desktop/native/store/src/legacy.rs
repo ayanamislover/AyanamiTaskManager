@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 mod families;
+mod jsonfiles;
 mod migrations;
 mod root;
 pub use families::{Decision, FAMILIES, FTS_SHADOWS, FamilySpec, Home};
@@ -156,6 +157,30 @@ pub struct ConvertOptions<'a> {
     pub real_data_root: Option<&'a Path>,
     /// 新库的 generation（07 S4 / S5：由转换状态机分配并写进 `M`）；`None` 时随机生成。
     pub generation: Option<&'a str>,
+    /// `sync/secrets.dpapi.json` 的 DPAPI 自检（05 §3.4）：宿主拿文件内容试着解密，只回答成功与否。
+    /// 存储包不碰 DPAPI；数据根里有这个文件而这里是 `None` 时转换停。
+    pub secrets_check: Option<fn(&[u8]) -> bool>,
+}
+
+/// 密文在动目标之前自检：解不开说明换了 Windows 账户或机器，手机配对要重做，由用户决定（05 §3.4）。
+fn check_secrets(root: &Path, opts: &ConvertOptions<'_>) -> Result<()> {
+    let path = root.join("sync").join("secrets.dpapi.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    match opts.secrets_check {
+        None => Err(ConvertError::Unsupported(format!(
+            "{}: sync/secrets.dpapi.json needs the host's DPAPI self-check (ConvertOptions::secrets_check)",
+            root.display()
+        ))),
+        Some(check) if !check(&bytes) => Err(ConvertError::Unsupported(format!(
+            "{}: sync/secrets.dpapi.json does not decrypt for this Windows account; phone pairing must be redone",
+            root.display()
+        ))),
+        Some(_) => Ok(()),
+    }
 }
 
 /// 2.x 的真实数据根：`%LOCALAPPDATA%\AyanamiTaskManager`。
@@ -278,15 +303,21 @@ impl Report {
         self.instances()
             .into_iter()
             .filter_map(|(scope, f)| {
-                let file = matches!(f.home, Home::Root | Home::ProjectDir);
-                f.pending
-                    .or((file && !self.root).then_some("needs the data root"))
+                self.pending_of(f)
                     .map(|w| format!("{scope}/{}: {w}", f.name))
             })
             .collect()
     }
 
-    /// 覆盖缺口：转换、重建、登记的 DB 族实例至少要有一项检查，没有的记 `<族实例>: no check ran`。
+    /// 一个族为什么还没处理：尚未实现的子任务，或文件族没给数据根。
+    fn pending_of(&self, f: &FamilySpec) -> Option<&'static str> {
+        let file = matches!(f.home, Home::Root | Home::ProjectDir);
+        f.pending
+            .or((file && !self.root).then_some("needs the data root"))
+    }
+
+    /// 覆盖缺口：转换、重建、登记的 DB 族实例至少要有一项检查，没有的记 `<族实例>: no check ran`；
+    /// 给了数据根时项目目录里的文件族和数据根下转换的文件族（F1–F6）也一样。
     /// 由 `checks` 现算，计入 [`Report::failures`]；尚未实现（pending）的族不算。
     pub fn uncovered(&self) -> Vec<String> {
         self.instances()
@@ -295,7 +326,8 @@ impl Report {
                 f.pending.is_none()
                     && f.decision != Decision::Dropped
                     && (matches!(f.home, Home::Registry | Home::Knowledge | Home::Project)
-                        || (self.root && f.home == Home::ProjectDir))
+                        || (self.root && f.home == Home::ProjectDir)
+                        || (self.root && f.home == Home::Root && f.decision == Decision::Converted))
             })
             .filter(|(scope, f)| {
                 !self
@@ -372,7 +404,7 @@ impl Report {
                 s(f.decision.as_str()),
                 opt(f.drop_reason),
                 f.business_digest,
-                opt(f.pending),
+                opt(self.pending_of(f)),
                 s(f.path_class),
                 source.map_or("null".to_string(), |x| x.rows.to_string()),
                 source
@@ -919,8 +951,9 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     let mut report = Report::default();
     // 数据根：未登记的条目、非空的 trash、进行中的事务残留，在动目标之前就停（W3b4）。
     if let Some(root) = &src.root {
-        root::scan(root, &mut report)?;
+        root::scan(root, opts.at, &mut report)?;
         report.root = true;
+        check_secrets(root, opts)?;
     }
     // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
     let work = work_dir(target, WORK_DIR)?;
@@ -947,6 +980,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     finish(&mut t, &gens, &promotions, &mut report)?;
     if let Some(root) = &src.root {
         root::convert_files(&mut t, root, &target_dir(target), &mut report)?;
+        jsonfiles::convert(&mut t, root, &target_dir(target), opts.at, &mut report)?;
     }
     verify(&t, &used, &mut report)?;
     if !report.failures().is_empty() {
@@ -2400,7 +2434,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
         ..Report::default()
     };
     if let Some(root) = &src.root {
-        root::scan(root, &mut report)?;
+        root::scan(root, &at, &mut report)?;
         report.root = true;
     }
     let work = work_dir(target, VERIFY_DIR)?;
@@ -2540,6 +2574,7 @@ fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()
         if let Some(root) = &src.root {
             let out = target_dir(Path::new(t.path().unwrap_or_default()));
             root::verify_files(t, root, &out, report)?;
+            jsonfiles::verify(t, root, &out, report)?;
         }
         Ok(())
     })();

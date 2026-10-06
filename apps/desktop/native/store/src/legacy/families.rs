@@ -361,7 +361,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "sync_state",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F2",
@@ -373,7 +373,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "sync/secrets.dpapi.json",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F3",
@@ -385,7 +385,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "dispatch_config",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F4",
@@ -397,7 +397,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "dispatch_runs",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F5",
@@ -409,7 +409,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "dispatch_requests",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F6",
@@ -424,7 +424,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "dispatch/logs",
         None,
         true,
-        "W3b5",
+        "",
     ),
     file(
         "F7",
@@ -439,7 +439,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "dispatch_runs.log_root",
         None,
         false,
-        "W3b5",
+        "",
     ),
     file(
         "X2",
@@ -541,10 +541,11 @@ pub const FAMILIES: &[FamilySpec] = &[
             "sync/config.corrupt.json",
             "dispatch/requests.corrupt.json",
             "**/*.tmp",
+            "dispatch/logs/<run not in the history>.*",
         ],
         Dropped,
         "",
-        Some("诊断副本 / 临时件；主文件已纳入"),
+        Some("诊断副本 / 临时件 / 2.0 下次保存历史就删的日志；主文件已纳入"),
         false,
         "",
     ),

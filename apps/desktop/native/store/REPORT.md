@@ -8,7 +8,7 @@
 - **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`prepare_source`，在工作副本上）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
 - **decision**：`CONVERTED`（逐行或逐文件进新库）、`REBUILT`（派生数据，在新库重建，查询等价）、`DROPPED`（不进新库，`drop_reason` 写理由）、`REFERENCED`（不复制，只登记引用）。
 - **business_digest**：是否纳入回滚检测（05 §5.2「纳入」列）。X 类和 F7 不纳入。
-- **pending**：还没实现的族及负责的任务：W3b5（sync / dispatch）、W3b6（进行中的文件事务）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
+- **pending**：还没实现的族及负责的任务：W3b6（进行中的文件事务）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
 
 ### search_documents 与 knowledge_fts：REBUILT
 
@@ -76,6 +76,43 @@
   - **核对**：所有登记的备份都要核对文件存在、sha256 与登记一致。缺失或不一致只记信息项（X 类）。
 - **generation**：`ConvertOptions::generation` 由 07 的状态机传入，写进 `app_meta.generation`；不传时随机生成。
 
+## sync 与 dispatch 文件（W3b5）
+
+F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：先按 2.0 的读盘语义加载，再写进 3.0 的表；VERIFY 把目标表反投影成同一形状的 JSON，与源的加载结果比 JCS（RFC 8785）摘要。
+
+- **zod 4 的规则照做**：
+  - 非 strict 的对象丢掉未知键，`DispatchConfigSchema` 是 strict，多一个键就算不合法；
+  - 数字必须有限，`int` 指安全整数；
+  - 字符串长度按 UTF-16 码元算；
+  - union 取第一个通过的分支；
+  - 文件按 `readFileSync(…, "utf8")` 解码：坏字节换成 U+FFFD，BOM 保留，所以带 BOM 的文件 `JSON.parse` 失败。
+- **超出接受域就停**：
+  - 读不出来（不是「不存在」）；
+  - 嵌套过深；
+  - 字符串里有落单的代理项；
+  - 水位线不是 `toISOString` 的形状（`Date.parse` 的完整语义不复现，不猜）；
+  - run、请求或已处理命令重复；
+  - `dispatch\logs\` 里有名字不合 `<run>.jsonl` / `<run>.stderr.log` 的文件，或有子目录。
+
+  这些都在动目标之前，由数据根枚举时的那次加载拦下。
+
+| 族                              | 目标                                                                                       | 要点                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| F1 `sync\config.json`           | `sync_state`、`sync_processed`（`ord` = 数组下标）、`sync_published`（`head_json` 存 JCS） | **缺失或损坏时不写 `sync_state`**，而不是写默认值。2.0 会把坏文件改名留档，下次启动从默认值开始；默认值的 deviceId 是随机的、deviceName 取主机名，3.0 首启同样生成。损坏时记信息项。                                                                                                                                                                                                                                                                                                                |
+| F2 `sync\secrets.dpapi.json`    | 目标旁的 `sync\secrets.dpapi.json`                                                         | **逐字节复制**，sha256 相等。<br>**DPAPI 自检**：由宿主通过 `ConvertOptions::secrets_check` 给出，在动目标之前做；存储包不碰 DPAPI。<br>**停的情况**：没给自检函数；自检解不开（换了 Windows 账户或机器，手机配对要重做）。                                                                                                                                                                                                                                                                         |
+| F3 `dispatch\config.json`       | `dispatch_config`                                                                          | 不存在 → 默认值、`MISSING`；坏 JSON 或不合法 → 默认值、`CORRUPT_DEFAULTED`（2.0 不重写它，记信息项）。                                                                                                                                                                                                                                                                                                                                                                                              |
+| F4 `dispatch\runs.json`         | `dispatch_runs`、`dispatch_meta.requests_since` / `runs_damaged_at_conversion`             | `loadRuns`：逐条校验，坏条目丢弃并置 damaged；整个文件坏了从空历史开始。<br>**exitCode**：2.0 的 `exitCode` 有三态，用 `exit_code` + `exit_code_set` 保留。<br>**task_id**：按 R5 补上，解析不到的计数进信息项。<br>**log_root**：运行中的 run 是 `LEGACY`，其余是 `CURRENT`。                                                                                                                                                                                                                      |
+| F5 `dispatch\requests.json`     | `dispatch_requests`、`dispatch_meta.lost_before`                                           | 照做 `loadLedgerFile` 和 `RequestLedger#reload`。<br>**丢失时**：文件损坏、有坏条目，或者文件缺失而历史显示用过手机派单（含历史损坏），这时 `lost_before = max(文件里的水位线, at)`。<br>**补回**：带 requestId 的历史补回成精确条目（`snapshotOf(toRunView(record))`）；同一个 requestId 有多条时取创建时间最近的。<br>**不做的事**：不裁剪、不补 `requestsSince`。那是 2.0 下次读盘时按当时的时钟做的，3.0 运行时按自己的时钟裁剪。丢失判断不一样：转换之后就观察不到了，所以按 `at` 落成水位线。 |
+| F6 `dispatch\logs\`（非运行中） | 目标旁的 `dispatch\logs\`                                                                  | 复制。检查 `r/dispatch.logs` 比 (名, size, sha256) 集合。                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| F7 `dispatch\logs\`（运行中）   | 原地                                                                                       | 子进程还在旧根里写，不复制，只登记数量；对应 run 的 `log_root` 必须是 `LEGACY`（图检查）。                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+- **检查**：`r/sync.config`、`r/sync.secrets`、`r/dispatch.config`、`r/dispatch.runs`、`r/dispatch.requests`、`r/dispatch.logs`。
+  - **定位**：runs 写 `r/dispatch.runs("<run>")`，请求写 `r/dispatch.requests("<id>")`；不属于某个元素的差异（damaged、水位线）只写检查名。
+  - **反投影的比较顺序**：runs 按 run 排，请求按 id 排，`processed` 保持原序。
+- **源摘要**：`business_digest` 用 `{parseState, value}` 的 JCS 摘要，`parseState ∈ {OK, MISSING, CORRUPT}`，状态不同即「变了」。F5 的源摘要只算文件本身，不含 `at` 与补回的条目；F7 只登记数量。
+- **图检查**：`log_root` 与 run 的状态不符；`task_id` 指向的任务的公开 key 与 `task_key` 不符。两者都是停级违例。
+- **X9**：历史里没有的 run 的日志（被裁剪的、坏条目的），2.0 下次保存历史就删，记 X9，不复制。
+
 ## 源副本与业务图（05 §3.3；W3b2）
 
 - **源副本先过两项检查**（在工作副本上、写目标之前）：`PRAGMA quick_check` 必须是 `ok`；`foreign_key_check` 必须为空。违例时转换以 `Mismatch` 停下，并点名源文件、表、rowid 与父表。
@@ -104,7 +141,7 @@
   "knowledge": "PRESENT" | "MISSING",
   "families": [
     { "code": "P3", "family": "<范围>/<族名>", "decision": "...", "drop_reason": str|null,
-      "business_digest": bool, "pending": "W3b4"|null,
+      "business_digest": bool, "pending": "W3b6"|"needs the data root"|null,
       "source": { "path_class": "projects/<id>/project.sqlite", "rows"|"files": n|null, "digest": hex|null },
       "target": { "table"|"dir": str|null, "rows": n|null, "digest": hex|null },
       "checks": [ { "name": str, "result": "PASS"|"FAIL", "errors": n, "first_failure_locator": str|null } ] }

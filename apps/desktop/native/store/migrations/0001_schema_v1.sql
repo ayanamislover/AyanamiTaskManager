@@ -566,6 +566,8 @@ CREATE TABLE dispatch_runs (
   origin TEXT NOT NULL CHECK (origin IN ('mobile','desktop')),
   state TEXT NOT NULL CHECK (state IN ('queued','running','succeeded','failed','cancelled','interrupted')),
   session_id TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, ended_at TEXT, exit_code INTEGER,
+  -- 2.0 的 exitCode 有三态：没有这个键、null（被信号结束）、整数。exit_code_set=0 时 exit_code 必须为 NULL。
+  exit_code_set INTEGER NOT NULL DEFAULT 0 CHECK (exit_code_set IN (0, 1) AND (exit_code_set = 1 OR exit_code IS NULL)),
   summary_json TEXT, error TEXT, cwd TEXT NOT NULL, requested_by TEXT,
   pid INTEGER, process_identity TEXT, request_id TEXT,
   log_root TEXT NOT NULL CHECK (log_root IN ('LEGACY','CURRENT'))

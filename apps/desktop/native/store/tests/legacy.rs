@@ -88,8 +88,15 @@ impl Fixture {
         self.dir.join("out").join("atm.sqlite")
     }
     fn convert(&self) -> Result<Report, ConvertError> {
+        self.convert_with(None)
+    }
+    /// 每次从空的 `out` 开始：上一次复制出去的附件、密文、日志不留到这一次。
+    fn convert_with(
+        &self,
+        secrets_check: Option<fn(&[u8]) -> bool>,
+    ) -> Result<Report, ConvertError> {
+        let _ = fs::remove_dir_all(self.dir.join("out"));
         fs::create_dir_all(self.dir.join("out")).unwrap();
-        let _ = fs::remove_file(self.target());
         convert(
             &self.sources,
             &self.target(),
@@ -98,6 +105,7 @@ impl Fixture {
                 allow_real_data_root: false,
                 real_data_root: None,
                 generation: None,
+                secrets_check,
             },
         )
     }
@@ -823,6 +831,7 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
             allow_real_data_root: false,
             real_data_root: None,
             generation: None,
+            secrets_check: None,
         },
     )
     .unwrap_err();
@@ -843,6 +852,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             allow_real_data_root: false,
             real_data_root: Some(&f.dir),
             generation: None,
+            secrets_check: None,
         },
     )
     .unwrap_err();
@@ -859,6 +869,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             allow_real_data_root: false,
             real_data_root: Some(&f.dir),
             generation: None,
+            secrets_check: None,
         },
     )
     .unwrap_err();
@@ -872,6 +883,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             allow_real_data_root: true,
             real_data_root: Some(&f.dir),
             generation: None,
+            secrets_check: None,
         },
     )
     .unwrap();
@@ -1831,8 +1843,8 @@ fn the_family_table_matches_05_and_claims_every_2x_table() {
     assert_eq!(actual, expected);
     for f in FAMILIES {
         let is_db = matches!(f.home, Home::Registry | Home::Knowledge | Home::Project);
-        // sync / dispatch（W3b5）与进行中的文件事务（W3b6）还没实现；其余都已实现。
-        let later = f.code.starts_with('F') || f.code == "X12";
+        // 进行中的文件事务（W3b6）还没实现；其余都已实现。
+        let later = f.code == "X12";
         assert_eq!(f.pending.is_some(), later, "{} {}", f.code, f.name);
         assert!(is_db || f.home == Home::Root || f.home == Home::ProjectDir);
         assert_eq!(
@@ -1948,7 +1960,7 @@ fn report_json_lists_every_family_without_bodies() {
     assert_eq!(outbox["source"]["rows"], 4);
     assert!(outbox["target"]["table"].is_null() && outbox["checks"].as_array().unwrap().is_empty());
     let sync = get("root/sync.config");
-    assert_eq!(sync["pending"], "W3b5");
+    assert_eq!(sync["pending"], "needs the data root");
     assert!(sync["source"]["files"].is_null());
     assert!(
         report
@@ -2865,7 +2877,7 @@ fn tree(dir: &Path) -> Vec<(String, String)> {
 }
 
 /// W3b4：按数据根转换。附件逐文件复制、local_path 改写、目录表之外的备份文件登记、R / X 类计数；
-/// generation 由调用方给出；数据根一个字节都不变。只剩 sync / dispatch（W3b5）和进行中的事务（W3b6）pending。
+/// generation 由调用方给出；数据根一个字节都不变。只剩进行中的事务（W3b6）pending。
 #[test]
 fn a_data_root_converts_with_its_files() {
     let (f, root) = root_fixture("legacy-root");
@@ -2879,24 +2891,13 @@ fn a_data_root_converts_with_its_files() {
             allow_real_data_root: false,
             real_data_root: None,
             generation: Some("GEN-FROM-THE-STATE-MACHINE"),
+            secrets_check: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));
     assert!(report.failures().is_empty(), "{:?}", report.failures());
     assert_eq!(tree(&root), before, "the data root is untouched");
-    assert_eq!(
-        report.pending(),
-        [
-            "root/sync.config: W3b5",
-            "root/sync.secrets: W3b5",
-            "root/dispatch.config: W3b5",
-            "root/dispatch.runs: W3b5",
-            "root/dispatch.requests: W3b5",
-            "root/dispatch.logs.final: W3b5",
-            "root/dispatch.logs.running: W3b5",
-            "root/in-flight: W3b6",
-        ]
-    );
+    assert_eq!(report.pending(), ["root/in-flight: W3b6",]);
     let t = Connection::open(f.target()).unwrap();
     assert_eq!(
         q::<String>(&t, "SELECT generation FROM app_meta"),
@@ -2986,7 +2987,8 @@ fn a_data_root_converts_with_its_files() {
     };
     assert_eq!(count("root/runtime"), (1, Some(4), true));
     assert_eq!(count("root/install-copies"), (5, Some(12), true));
-    assert_eq!(count("root/diagnostic-copies"), (2, Some(2), true));
+    // config.corrupt.json、requests.corrupt.json，加上历史里没有的 run 的日志 r1.jsonl。
+    assert_eq!(count("root/diagnostic-copies"), (3, Some(5), true));
     assert_eq!(count("root/trash"), (0, Some(0), true));
     assert_eq!(count("root/backups").0, 6);
     let json: serde_json::Value = serde_json::from_str(&report.report_json()).unwrap();
@@ -3172,4 +3174,819 @@ fn file_families_are_verified() {
         Err(ConvertError::Verify(r)) => assert_eq!(r.failures(), ["P2/manifest.json"]),
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------- W3b5：sync / dispatch 文件
+
+const AT: &str = "2026-10-03T00:00:00.000Z";
+const C1: &str = "m-0123456789ab.0000000000001deadbeef";
+const C2: &str = "m-0123456789ab.0000000000002deadbeef";
+const C3: &str = "pc-0123456789ab.0000000000003deadbeef";
+const R1: &str = "m-0123456789ab.0000000000005deadbeef";
+
+/// 测试里的 DPAPI 自检：认得出夹具的密文就算解得开。
+fn secrets_ok(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"{\"relay-token\"")
+}
+
+fn secrets_bad(_: &[u8]) -> bool {
+    false
+}
+
+const SYNC_CONFIG: &str = r#"{
+  "v": 1,
+  "enabled": true,
+  "relayUrl": "https://relay.example",
+  "appId": "atm",
+  "deviceId": "pc-0123456789ab",
+  "deviceName": "书房电脑书房电脑书房电脑书房电脑书房电脑书房电脑",
+  "spaceId": "0123456789abcdef01234567",
+  "cursor": "c-9",
+  "published": {
+    "AAA": {
+      "h": "h1",
+      "d": "d1",
+      "head": {
+        "updatedAt": "2026-09-30T00:00:00.000Z",
+        "code": "AAA",
+        "name": "Alpha",
+        "h": "0123456789abcdef0123",
+        "d": "dig",
+        "counts": { "active": 1, "ready": 0, "inProgress": 1, "blocked": 0, "waitingUser": 0, "doneRecent": 2 },
+        "extra": "dropped by zod"
+      }
+    }
+  },
+  "headDigest": "hd",
+  "processed": ["m-0123456789ab.0000000000002deadbeef", "m-0123456789ab.0000000000001deadbeef", "pc-0123456789ab.0000000000003deadbeef"],
+  "lastSyncAt": "2026-09-30T00:00:00.000Z",
+  "lastAckSweepAt": null,
+  "legacyField": "dropped by zod"
+}
+"#;
+
+const DISPATCH_CONFIG: &str = r#"{"enabled":true,"permissionMode":"acceptEdits","maxConcurrent":2,"model":"claude-opus-5-5","effort":"high"}"#;
+
+/// run-ok 成功并有摘要；run-killed 被信号结束（exitCode null），来自手机，带 requestId；
+/// run-live 运行中；run-wait 排队中（没有 exitCode 键）；run-inf 的摘要里有 1e400（JSON.parse 得 Infinity，
+/// zod 4 拒绝非有限数），最后一条缺字段，这两条丢弃。
+const RUNS: &str = r#"{
+  "v": 1,
+  "requestsSince": "2026-09-20T00:00:00.000Z",
+  "runs": [
+    {"run":"run-ok","project":"AAA","key":"AAA-T-0001","title":"t1","origin":"desktop","state":"succeeded",
+     "sessionId":"s1","createdAt":"2026-09-21T00:00:00.000Z","startedAt":"2026-09-21T00:00:01.000Z",
+     "endedAt":"2026-09-21T00:10:00.000Z","exitCode":0,
+     "summary":{"numTurns":3,"durationMs":1234.5,"totalCostUsd":0.0123,"result":"done"},
+     "cwd":"C:/work","processCreatedAt":"2026-09-21T00:00:00.000Z"},
+    {"run":"run-killed","project":"AAA","key":"AAA-T-0001","title":"t2","origin":"mobile","state":"failed",
+     "sessionId":"s2","createdAt":"2026-09-22T00:00:00.000Z","exitCode":null,"error":"killed","cwd":"C:/work",
+     "requestedBy":"phone","requestId":"m-0123456789ab.0000000000005deadbeef"},
+    {"run":"run-live","project":"AAA","key":"AAA-T-9999","title":"t3","origin":"desktop","state":"running",
+     "sessionId":"s3","createdAt":"2026-09-23T00:00:00.000Z","cwd":"C:/work","pid":4321,"processIdentity":"4321@133"},
+    {"run":"run-wait","project":"ZZZ","key":"ZZZ-T-0001","title":"t4","origin":"desktop","state":"queued",
+     "sessionId":"s4","createdAt":"2026-09-24T00:00:00.000Z","cwd":"C:/work"},
+    {"run":"run-inf","project":"AAA","key":"AAA-T-0001","title":"t5","origin":"desktop","state":"failed",
+     "sessionId":"s5","createdAt":"2026-09-25T00:00:00.000Z","cwd":"C:/work",
+     "summary":{"numTurns":1,"durationMs":1e400,"totalCostUsd":null,"result":""}},
+    {"run":"bad","project":"AAA"}
+  ]
+}
+"#;
+
+/// 一条快照、一条拒绝、一条不合法（id 不合字符集）→ 丢失；文件里的水位线比 `at` 早。
+const REQUESTS: &str = r#"{
+  "v": 1,
+  "lostBefore": "2026-09-01T00:00:00.000Z",
+  "requests": [
+    {"id":"R0","at":"2026-09-25T00:00:00.000Z","run":{"run":"run-gone","project":"AAA","key":"AAA-T-0001",
+     "title":"t0","origin":"mobile","state":"succeeded","sessionId":"s0","createdAt":"2026-09-25T00:00:00.000Z",
+     "exitCode":0,"cwd":"dropped by zod"}},
+    {"id":"R-rej","at":"2026-09-26T00:00:00.000Z","rejected":{"code":"DISPATCH_TASK_NOT_READY","message":"not ready"}},
+    {"id":"bad id!","at":"2026-09-27T00:00:00.000Z","rejected":{"code":"DISPATCH_DISABLED","message":"x"}}
+  ]
+}
+"#;
+
+/// W3b5：在数据根夹具上换上完整的 sync / dispatch 文件。
+fn json_fixture(name: &str) -> (Fixture, PathBuf) {
+    let (f, root) = root_fixture(name);
+    put(&root.join("sync/config.json"), SYNC_CONFIG.as_bytes());
+    put(
+        &root.join("sync/secrets.dpapi.json"),
+        b"{\"relay-token\":\"AQAAANCMnd8BFdERjHoAwE\"}",
+    );
+    put(
+        &root.join("dispatch/config.json"),
+        DISPATCH_CONFIG.as_bytes(),
+    );
+    put(&root.join("dispatch/runs.json"), RUNS.as_bytes());
+    put(&root.join("dispatch/requests.json"), REQUESTS.as_bytes());
+    put(
+        &root.join("dispatch/logs/run-ok.jsonl"),
+        b"{\"type\":\"result\"}\n",
+    );
+    put(&root.join("dispatch/logs/run-ok.stderr.log"), b"");
+    put(
+        &root.join("dispatch/logs/run-live.jsonl"),
+        b"{\"type\":\"init\"}\n",
+    );
+    put(&root.join("dispatch/logs/ghost.stderr.log"), b"gone");
+    (f, root)
+}
+
+fn notes_contain(report: &Report, note: &str) {
+    assert!(
+        report.notes.iter().any(|n| n == note),
+        "{note}: {:?}",
+        report.notes
+    );
+}
+
+/// W3b5：sync / dispatch 文件按 2.0 的读盘语义转换。zod 丢掉的键不进库；exitCode 的三态保留；
+/// 坏的 run 丢弃并记 damaged；账本有坏条目 → 水位线落到 `at`，带 requestId 的历史补回；
+/// 密文逐字节复制，非运行中的日志复制，运行中的留在旧根（LEGACY），历史外的日志记 X9；数据根一个字节都不变。
+#[test]
+fn sync_and_dispatch_files_convert_like_2x_reads_them() {
+    let (f, root) = json_fixture("legacy-json-files");
+    let before = tree(&root);
+    let report = f
+        .convert_with(Some(secrets_ok))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(tree(&root), before, "the data root is untouched");
+    assert_eq!(report.pending(), ["root/in-flight: W3b6"]);
+    for note in [
+        "dispatch/runs.json: invalid runs were dropped; history starts from what could be read",
+        "dispatch/requests.json: the ledger has an invalid entry; lost_before set to 2026-10-03T00:00:00.000Z",
+        "dispatch/requests.json: 1 requests restored from the run history",
+        "dispatch_runs: 2 runs point to a task that does not resolve; task_id left NULL",
+        "dispatch/logs: 2 files belong to runs that are not in the history; 2.0 deletes them on its next save, not copied",
+    ] {
+        notes_contain(&report, note);
+    }
+    for check in [
+        "r/sync.config",
+        "r/sync.secrets",
+        "r/dispatch.config",
+        "r/dispatch.runs",
+        "r/dispatch.requests",
+        "r/dispatch.logs",
+    ] {
+        let c = report.checks.iter().find(|c| c.family == check);
+        assert!(c.is_some_and(|c| c.ok()), "{check}: {c:?}");
+    }
+    let rows = |family: &str| report.source(family).unwrap().rows;
+    assert_eq!(
+        [
+            rows("root/sync.config"),
+            rows("root/sync.secrets"),
+            rows("root/dispatch.config"),
+            rows("root/dispatch.runs"),
+            rows("root/dispatch.requests"),
+            rows("root/dispatch.logs.running"),
+        ],
+        [1, 1, 1, 4, 2, 1]
+    );
+
+    let t = Connection::open(f.target()).unwrap();
+    let row = |sql: &str| -> Vec<String> {
+        t.query_row(sql, [], |r| {
+            (0..r.as_ref().column_count())
+                .map(|i| {
+                    r.get::<_, rusqlite::types::Value>(i).map(|v| match v {
+                        rusqlite::types::Value::Null => "NULL".to_string(),
+                        rusqlite::types::Value::Integer(n) => n.to_string(),
+                        rusqlite::types::Value::Real(x) => x.to_string(),
+                        rusqlite::types::Value::Text(s) => s,
+                        rusqlite::types::Value::Blob(_) => "BLOB".to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        row("SELECT v, enabled, relay_url, app_id, device_id, device_name, space_id, cursor, head_digest,
+                    last_sync_at, last_ack_sweep_at, updated_at FROM sync_state"),
+        [
+            "1",
+            "1",
+            "https://relay.example",
+            "atm",
+            "pc-0123456789ab",
+            "书房电脑书房电脑书房电脑书房电脑书房电脑书房电脑",
+            "0123456789abcdef01234567",
+            "c-9",
+            "hd",
+            "2026-09-30T00:00:00.000Z",
+            "NULL",
+            AT
+        ]
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT group_concat(command_id, ' ') FROM (SELECT command_id FROM sync_processed ORDER BY ord)"
+        ),
+        format!("{C2} {C1} {C3}")
+    );
+    // head 按 JCS 存：键排序，zod 丢掉的键不在。
+    assert_eq!(
+        row("SELECT project_code, h, d, head_json FROM sync_published"),
+        [
+            "AAA",
+            "h1",
+            "d1",
+            r#"{"code":"AAA","counts":{"active":1,"blocked":0,"doneRecent":2,"inProgress":1,"ready":0,"waitingUser":0},"d":"dig","h":"0123456789abcdef0123","name":"Alpha","updatedAt":"2026-09-30T00:00:00.000Z"}"#
+        ]
+    );
+    assert_eq!(
+        row(
+            "SELECT enabled, permission_mode, max_concurrent, model, effort, source_state, updated_at FROM dispatch_config"
+        ),
+        ["1", "acceptEdits", "2", "claude-opus-5-5", "high", "OK", AT]
+    );
+    assert_eq!(
+        row("SELECT requests_since, lost_before, runs_damaged_at_conversion FROM dispatch_meta"),
+        ["2026-09-20T00:00:00.000Z", AT, "1"]
+    );
+    let run = |id: &str| {
+        row(&format!(
+            "SELECT state, exit_code, exit_code_set, summary_json, pid, process_identity, request_id, log_root,
+                    ifnull(task_id, 'NULL') FROM dispatch_runs WHERE run = '{id}'"
+        ))
+    };
+    assert_eq!(
+        run("run-ok"),
+        [
+            "succeeded",
+            "0",
+            "1",
+            r#"{"durationMs":1234.5,"numTurns":3,"result":"done","totalCostUsd":0.0123}"#,
+            "NULL",
+            "NULL",
+            "NULL",
+            "CURRENT",
+            "W1"
+        ]
+    );
+    assert_eq!(
+        run("run-killed"),
+        [
+            "failed", "NULL", "1", "NULL", "NULL", "NULL", R1, "CURRENT", "W1"
+        ]
+    );
+    assert_eq!(
+        run("run-live"),
+        [
+            "running", "NULL", "0", "NULL", "4321", "4321@133", "NULL", "LEGACY", "NULL"
+        ]
+    );
+    assert_eq!(
+        run("run-wait"),
+        [
+            "queued", "NULL", "0", "NULL", "NULL", "NULL", "NULL", "CURRENT", "NULL"
+        ]
+    );
+    assert_eq!(q::<i64>(&t, "SELECT count(*) FROM dispatch_runs"), 4);
+    let request = |id: &str| {
+        row(&format!(
+            "SELECT at, ifnull(run_snapshot_json, 'NULL'), ifnull(rejected_code, 'NULL'), ifnull(rejected_message, 'NULL')
+             FROM dispatch_requests WHERE id = '{id}'"
+        ))
+    };
+    assert_eq!(
+        request("R0"),
+        [
+            "2026-09-25T00:00:00.000Z",
+            r#"{"createdAt":"2026-09-25T00:00:00.000Z","exitCode":0,"key":"AAA-T-0001","origin":"mobile","project":"AAA","run":"run-gone","sessionId":"s0","state":"succeeded","title":"t0"}"#,
+            "NULL",
+            "NULL"
+        ]
+    );
+    assert_eq!(
+        request("R-rej"),
+        [
+            "2026-09-26T00:00:00.000Z",
+            "NULL",
+            "DISPATCH_TASK_NOT_READY",
+            "not ready"
+        ]
+    );
+    // 补回的条目：snapshotOf(toRunView(record))，exitCode: null 照留，本机字段去掉。
+    assert_eq!(
+        request(R1),
+        [
+            "2026-09-22T00:00:00.000Z",
+            r#"{"createdAt":"2026-09-22T00:00:00.000Z","error":"killed","exitCode":null,"key":"AAA-T-0001","origin":"mobile","project":"AAA","run":"run-killed","sessionId":"s2","state":"failed","title":"t2"}"#,
+            "NULL",
+            "NULL"
+        ]
+    );
+    assert_eq!(q::<i64>(&t, "SELECT count(*) FROM dispatch_requests"), 3);
+
+    let out = f.dir.join("out");
+    assert_eq!(
+        fs::read(out.join("sync/secrets.dpapi.json")).unwrap(),
+        fs::read(root.join("sync/secrets.dpapi.json")).unwrap()
+    );
+    assert_eq!(
+        listing(&out.join("dispatch/logs"))
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>(),
+        ["run-ok.jsonl", "run-ok.stderr.log"]
+    );
+}
+
+/// W3b5：2.0 的回退照做。坏的或缺的 sync 配置 → 不写 sync_state（3.0 首启从默认值开始，与 2.0 一样）；
+/// 派单配置多一个键（strict）或是坏 JSON（含 BOM）→ 默认值、CORRUPT_DEFAULTED，缺失 → MISSING；
+/// 账本缺失时按历史判断是不是丢了；文件里比 `at` 晚的水位线保留。
+#[test]
+fn damaged_sync_and_dispatch_files_fall_back_like_2x() {
+    let write = |rel: &'static str, text: &'static str| {
+        move |root: &Path| put(&root.join(rel), text.as_bytes())
+    };
+    let remove = |rel: &'static str| move |root: &Path| fs::remove_file(root.join(rel)).unwrap();
+    let corrupt_sync = write("sync/config.json", "{");
+    let bom_sync: &dyn Fn(&Path) = &|root: &Path| {
+        put(
+            &root.join("sync/config.json"),
+            format!("\u{feff}{SYNC_CONFIG}").as_bytes(),
+        )
+    };
+    let missing_sync = remove("sync/config.json");
+    let strict_dispatch = write(
+        "dispatch/config.json",
+        r#"{"enabled":true,"permissionMode":"auto","maxConcurrent":1,"model":null,"effort":null,"extra":1}"#,
+    );
+    let four = write(
+        "dispatch/config.json",
+        r#"{"enabled":true,"permissionMode":"auto","maxConcurrent":4,"model":null,"effort":null}"#,
+    );
+    let missing_dispatch = remove("dispatch/config.json");
+    let corrupt_runs = write("dispatch/runs.json", "not json");
+    let missing_ledger = remove("dispatch/requests.json");
+    let history = |runs: &'static str| {
+        move |root: &Path| {
+            put(&root.join("dispatch/runs.json"), runs.as_bytes());
+            fs::remove_file(root.join("dispatch/requests.json")).unwrap();
+        }
+    };
+    let clean_history: &dyn Fn(&Path) = &|root: &Path| {
+        put(
+            &root.join("dispatch/runs.json"),
+            br#"{"v":1,"runs":[{"run":"run-ok","project":"AAA","key":"AAA-T-0001","title":"t","origin":"desktop","state":"succeeded","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"C:/w"}]}"#,
+        );
+        fs::remove_file(root.join("dispatch/requests.json")).unwrap();
+        fs::remove_file(root.join("dispatch/logs/run-live.jsonl")).unwrap();
+    };
+    let later_mark = write(
+        "dispatch/requests.json",
+        r#"{"v":1,"lostBefore":"2026-12-01T00:00:00.000Z","requests":[{"id":"bad id!","at":"x","rejected":{"code":"DISPATCH_DISABLED","message":"x"}}]}"#,
+    );
+    let fractional = write(
+        "dispatch/config.json",
+        r#"{"enabled":true,"permissionMode":"auto","maxConcurrent":1.5,"model":null,"effort":null}"#,
+    );
+    let bad_published = write(
+        "sync/config.json",
+        r#"{"v":1,"enabled":false,"relayUrl":null,"appId":"atm","deviceId":"pc-0123456789ab","deviceName":"d",
+            "spaceId":null,"cursor":null,"published":{"aaa":{"h":"h","d":"d","head":{"code":"AAA","name":"",
+            "h":"0123456789abcdef0123","d":"x","counts":{"active":0,"ready":0,"inProgress":0,"blocked":0,
+            "waitingUser":0,"doneRecent":0},"updatedAt":"u"}}},"headDigest":null,"processed":[],
+            "lastSyncAt":null,"lastAckSweepAt":null}"#,
+    );
+    // 账本缺失时「用过手机派单」的四种迹象，各自单独出现。
+    let mobile_only = history(
+        r#"{"v":1,"runs":[{"run":"run-m","project":"AAA","key":"AAA-T-0001","title":"t","origin":"mobile","state":"succeeded","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"C:/w"}]}"#,
+    );
+    let request_only = history(
+        r#"{"v":1,"runs":[{"run":"run-r","project":"AAA","key":"AAA-T-0001","title":"t","origin":"desktop","state":"succeeded","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"C:/w","requestId":"RQ-1"}]}"#,
+    );
+    let since_only = history(
+        r#"{"v":1,"requestsSince":"2026-09-20T00:00:00.000Z","runs":[{"run":"run-d","project":"AAA","key":"AAA-T-0001","title":"t","origin":"desktop","state":"succeeded","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"C:/w"}]}"#,
+    );
+    let damaged_only = history(
+        r#"{"v":1,"runs":[{"run":"run-d","project":"AAA","key":"AAA-T-0001","title":"t","origin":"desktop","state":"succeeded","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"C:/w"},{"run":"x"}]}"#,
+    );
+    let recorded = write(
+        "dispatch/requests.json",
+        r#"{"v":1,"requests":[{"id":"m-0123456789ab.0000000000005deadbeef","at":"2026-09-22T00:00:00.000Z","rejected":{"code":"DISPATCH_DISABLED","message":"off"}}]}"#,
+    );
+    let two_runs: &dyn Fn(&Path) = &|root: &Path| {
+        put(
+            &root.join("dispatch/runs.json"),
+            br#"{"v":1,"runs":[
+              {"run":"r-new","project":"AAA","key":"AAA-T-0001","title":"t","origin":"mobile","state":"failed","sessionId":"s","createdAt":"2026-09-22T00:00:00.000Z","cwd":"","requestId":"RQ"},
+              {"run":"r-old","project":"AAA","key":"AAA-T-0001","title":"t","origin":"mobile","state":"failed","sessionId":"s","createdAt":"2026-09-21T00:00:00.000Z","cwd":"","requestId":"RQ"}]}"#,
+        );
+        put(
+            &root.join("dispatch/requests.json"),
+            br#"{"v":1,"requests":[]}"#,
+        );
+    };
+    let quiet_mark = write(
+        "dispatch/requests.json",
+        r#"{"v":1,"lostBefore":"2026-09-01T00:00:00.000Z","requests":[]}"#,
+    );
+    // (名字, 改动, 查询, 期望, 信息项)
+    type Case<'a> = (
+        &'a str,
+        &'a dyn Fn(&Path),
+        &'a str,
+        &'a str,
+        Option<&'a str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "corrupt sync config",
+            &corrupt_sync,
+            "SELECT count(*) FROM sync_state",
+            "0",
+            Some("sync/config.json is corrupt or invalid; like 2.0 the converted store starts unpaired from defaults"),
+        ),
+        ("a BOM makes JSON.parse fail", bom_sync, "SELECT count(*) FROM sync_state", "0", None),
+        ("missing sync config", &missing_sync, "SELECT count(*) || '/' || (SELECT count(*) FROM sync_processed) FROM sync_state", "0/0", None),
+        (
+            "strict dispatch config",
+            &strict_dispatch,
+            "SELECT enabled || permission_mode || max_concurrent || ifnull(model, '-') || source_state FROM dispatch_config",
+            "0auto1-CORRUPT_DEFAULTED",
+            Some("dispatch/config.json is corrupt or invalid; defaults are used (2.0 does not rewrite it)"),
+        ),
+        ("maxConcurrent out of range", &four, "SELECT source_state FROM dispatch_config", "CORRUPT_DEFAULTED", None),
+        ("missing dispatch config", &missing_dispatch, "SELECT enabled || source_state FROM dispatch_config", "0MISSING", None),
+        (
+            "corrupt run history",
+            &corrupt_runs,
+            "SELECT (SELECT count(*) FROM dispatch_runs) || ifnull(requests_since, '-') || runs_damaged_at_conversion
+                    || (SELECT count(*) FROM dispatch_requests) FROM dispatch_meta",
+            "0-12",
+            Some("dispatch/runs.json: the file is corrupt; history starts from what could be read"),
+        ),
+        (
+            "missing ledger after phone dispatch",
+            &missing_ledger,
+            "SELECT lost_before || '/' || (SELECT group_concat(id) FROM dispatch_requests) FROM dispatch_meta",
+            "2026-10-03T00:00:00.000Z/m-0123456789ab.0000000000005deadbeef",
+            Some("dispatch/requests.json: the ledger is missing although phone dispatch was used (or the history is damaged); lost_before set to 2026-10-03T00:00:00.000Z"),
+        ),
+        (
+            "missing ledger on a desktop-only history",
+            clean_history,
+            "SELECT ifnull(lost_before, '-') || runs_damaged_at_conversion || (SELECT count(*) FROM dispatch_requests) FROM dispatch_meta",
+            "-00",
+            None,
+        ),
+        ("a later mark survives a loss", &later_mark, "SELECT lost_before FROM dispatch_meta", "2026-12-01T00:00:00.000Z", None),
+        ("a mark without a loss is kept", &quiet_mark, "SELECT lost_before FROM dispatch_meta", "2026-09-01T00:00:00.000Z", None),
+        ("a fractional concurrency", &fractional, "SELECT source_state FROM dispatch_config", "CORRUPT_DEFAULTED", None),
+        ("a published key that is not a project code", &bad_published, "SELECT count(*) FROM sync_state", "0", None),
+        ("a mobile run without a request id", &mobile_only, "SELECT ifnull(lost_before, '-') FROM dispatch_meta", AT, None),
+        ("a desktop run with a request id", &request_only, "SELECT lost_before || '/' || (SELECT group_concat(id) FROM dispatch_requests) FROM dispatch_meta", "2026-10-03T00:00:00.000Z/RQ-1", None),
+        ("only the requestsSince mark", &since_only, "SELECT ifnull(lost_before, '-') FROM dispatch_meta", AT, None),
+        ("only a damaged history", &damaged_only, "SELECT ifnull(lost_before, '-') FROM dispatch_meta", AT, None),
+        ("a recorded request is not overwritten by the history", &recorded, "SELECT rejected_code FROM dispatch_requests WHERE id = 'm-0123456789ab.0000000000005deadbeef'", "DISPATCH_DISABLED", None),
+        ("the latest of two runs answers a request", two_runs, "SELECT json_extract(run_snapshot_json, '$.run') FROM dispatch_requests WHERE id = 'RQ'", "r-new", None),
+    ];
+    for (name, edit, sql, expected, note) in cases {
+        let (f, root) = json_fixture("legacy-json-fallback");
+        edit(&root);
+        let report = f
+            .convert_with(Some(secrets_ok))
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            report.failures().is_empty(),
+            "{name}: {:?}",
+            report.failures()
+        );
+        let t = Connection::open(f.target()).unwrap();
+        let got: String = q(&t, &format!("SELECT CAST(({sql}) AS TEXT)"));
+        assert_eq!(got, expected, "{name}");
+        if let Some(note) = note {
+            notes_contain(&report, note);
+        }
+    }
+}
+
+/// W3b5：超出接受域的停下，不猜：没有宿主的 DPAPI 自检、自检失败、文件在却读不出来、水位线不是 toISOString 的形状、
+/// run / 请求 / 已处理命令重复、日志目录里的陌生文件、JS 字符串里落单的代理项。目标一个字节都不写。
+#[test]
+fn sync_and_dispatch_files_outside_the_domain_stop_the_conversion() {
+    type SecretsCheck = Option<fn(&[u8]) -> bool>;
+    let cases: Vec<(&str, &str, &str, SecretsCheck, &str)> = vec![
+        (
+            "no host self-check",
+            "",
+            "",
+            None,
+            "needs the host's DPAPI self-check",
+        ),
+        (
+            "the secrets do not decrypt",
+            "",
+            "",
+            Some(secrets_bad),
+            "does not decrypt for this Windows account; phone pairing must be redone",
+        ),
+        (
+            "a mark Date.parse would have to guess",
+            "dispatch/requests.json",
+            r#"{"v":1,"lostBefore":"2026-09-01","requests":[]}"#,
+            Some(secrets_ok),
+            "lostBefore \"2026-09-01\" is not in toISOString form",
+        ),
+        (
+            "a run listed twice",
+            "dispatch/runs.json",
+            r#"{"v":1,"runs":[
+              {"run":"x","project":"A","key":"A-T-0001","title":"","origin":"desktop","state":"failed","sessionId":"s","createdAt":"c","cwd":""},
+              {"run":"x","project":"A","key":"A-T-0001","title":"","origin":"desktop","state":"failed","sessionId":"s","createdAt":"c","cwd":""}]}"#,
+            Some(secrets_ok),
+            "dispatch/runs.json lists run \"x\" twice",
+        ),
+        (
+            "a request listed twice",
+            "dispatch/requests.json",
+            r#"{"v":1,"requests":[{"id":"R","at":"a","rejected":{"code":"DISPATCH_DISABLED","message":""}},
+                                  {"id":"R","at":"b","rejected":{"code":"DISPATCH_DISABLED","message":""}}]}"#,
+            Some(secrets_ok),
+            "dispatch/requests.json lists request \"R\" twice",
+        ),
+        (
+            "a processed command listed twice",
+            "sync/config.json",
+            r#"{"v":1,"enabled":false,"relayUrl":null,"appId":"atm","deviceId":"pc-0123456789ab","deviceName":"d",
+                "spaceId":null,"cursor":null,"published":{},"headDigest":null,
+                "processed":["m-0123456789ab.0000000000001deadbeef","m-0123456789ab.0000000000001deadbeef"],
+                "lastSyncAt":null,"lastAckSweepAt":null}"#,
+            Some(secrets_ok),
+            "sync/config.json lists processed command",
+        ),
+        (
+            "a stray file in the log directory",
+            "dispatch/logs/notes.txt",
+            "x",
+            Some(secrets_ok),
+            "unregistered entry dispatch/logs/notes.txt",
+        ),
+        (
+            "a log in a subdirectory",
+            "dispatch/logs/old/run-ok.jsonl",
+            "x",
+            Some(secrets_ok),
+            "unregistered entry dispatch/logs/old/run-ok.jsonl",
+        ),
+        (
+            "a file that exists but cannot be read",
+            "dispatch/runs.json/",
+            "",
+            Some(secrets_ok),
+            "dispatch/runs.json cannot be read",
+        ),
+        (
+            "a lone surrogate",
+            "dispatch/config.json",
+            r#"{"enabled":true,"permissionMode":"auto","maxConcurrent":1,"model":"\ud800","effort":null}"#,
+            Some(secrets_ok),
+            "dispatch/config.json: a JSON string holds a lone surrogate",
+        ),
+    ];
+    for (name, rel, text, check, expected) in cases {
+        let (f, root) = json_fixture("legacy-json-refused");
+        if rel.ends_with('/') {
+            // 同名的目录：文件「在」，但读不出来（2.0 readJsonFile 的 unreadable）。
+            fs::remove_file(root.join(rel.trim_end_matches('/'))).unwrap();
+            fs::create_dir_all(root.join(rel)).unwrap();
+        } else if !rel.is_empty() {
+            put(&root.join(rel), text.as_bytes());
+        }
+        match f.convert_with(check) {
+            Err(ConvertError::Unsupported(m)) => assert!(m.contains(expected), "{name}: {m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+        assert!(!f.target().exists(), "{name}: nothing is written");
+    }
+}
+
+/// W3b5：VERIFY 把目标表反投影回 2.0 的形状比 JCS。改一个值、删一行、动一个三态位、动复制出去的文件，
+/// 只有对应的族变红并给出第一处不同；log_root 与 task_id 这两个 3.0 自己的列另有图检查。
+#[test]
+fn sync_and_dispatch_tampering_turns_exactly_its_family_red() {
+    let (f, _) = json_fixture("legacy-json-tamper");
+    let report = f.convert_with(Some(secrets_ok)).unwrap();
+    let clean = f.dir.join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let out = f.dir.join("out");
+    // (名字, 改目标库的 SQL, 改复制出去的文件, 期望的失败, 第一处不同)；文件集合改一个文件是两处不同（两边各少一条）。
+    let cases: Vec<(&str, &str, &str, &[&str], &str)> = vec![
+        (
+            "a device renamed",
+            "UPDATE sync_state SET device_name = 'x'",
+            "",
+            &["r/sync.config"],
+            "r/sync.config",
+        ),
+        (
+            "a processed command lost",
+            "DELETE FROM sync_processed WHERE ord = 1",
+            "",
+            &["r/sync.config"],
+            "r/sync.config",
+        ),
+        (
+            "processed reordered",
+            "UPDATE sync_processed SET ord = 10 - ord",
+            "",
+            &["r/sync.config"],
+            "r/sync.config",
+        ),
+        (
+            "a head changed",
+            "UPDATE sync_published SET head_json = json_set(head_json, '$.name', 'B')",
+            "",
+            &["r/sync.config"],
+            "r/sync.config",
+        ),
+        (
+            "concurrency raised",
+            "UPDATE dispatch_config SET max_concurrent = 3",
+            "",
+            &["r/dispatch.config"],
+            "r/dispatch.config",
+        ),
+        (
+            "a source state lies",
+            "UPDATE dispatch_config SET source_state = 'MISSING'",
+            "",
+            &["r/dispatch.config"],
+            "r/dispatch.config",
+        ),
+        (
+            "exitCode null became absent",
+            "UPDATE dispatch_runs SET exit_code_set = 0 WHERE run = 'run-killed'",
+            "",
+            &["r/dispatch.runs"],
+            "r/dispatch.runs(\"run-killed\")",
+        ),
+        (
+            "a summary lost a field",
+            "UPDATE dispatch_runs SET summary_json = '{\"result\":\"done\"}' WHERE run = 'run-ok'",
+            "",
+            &["r/dispatch.runs"],
+            "r/dispatch.runs(\"run-ok\")",
+        ),
+        (
+            "an extra run",
+            "INSERT INTO dispatch_runs (run, project_code, task_key, title, origin, state, session_id, created_at, cwd, log_root) VALUES ('run-x', 'AAA', 'AAA-T-0001', '', 'desktop', 'failed', 's', 'c', '', 'CURRENT')",
+            "",
+            &["r/dispatch.runs"],
+            "r/dispatch.runs(\"run-x\")",
+        ),
+        (
+            "damage forgotten",
+            "UPDATE dispatch_meta SET runs_damaged_at_conversion = 0",
+            "",
+            &["r/dispatch.runs"],
+            "r/dispatch.runs",
+        ),
+        (
+            "a backfilled request lost",
+            "DELETE FROM dispatch_requests WHERE id = 'm-0123456789ab.0000000000005deadbeef'",
+            "",
+            &["r/dispatch.requests"],
+            "r/dispatch.requests(\"m-0123456789ab.0000000000005deadbeef\")",
+        ),
+        (
+            "a rejection reworded",
+            "UPDATE dispatch_requests SET rejected_message = 'x' WHERE id = 'R-rej'",
+            "",
+            &["r/dispatch.requests"],
+            "r/dispatch.requests(\"R-rej\")",
+        ),
+        (
+            "the mark cleared",
+            "UPDATE dispatch_meta SET lost_before = NULL",
+            "",
+            &["r/dispatch.requests"],
+            "r/dispatch.requests",
+        ),
+        (
+            "secrets rewritten",
+            "",
+            "sync/secrets.dpapi.json",
+            &["r/sync.secrets"],
+            "r/sync.secrets",
+        ),
+        (
+            "a log changed",
+            "",
+            "dispatch/logs/run-ok.jsonl",
+            &["r/dispatch.logs"],
+            "r/dispatch.logs(\"run-ok.jsonl\")",
+        ),
+        (
+            "a running log moved to the new root",
+            "UPDATE dispatch_runs SET log_root = 'CURRENT' WHERE run = 'run-live'",
+            "",
+            &["dispatch_runs: 1 runs have the wrong log_root"],
+            "",
+        ),
+        (
+            "a task id that does not match the key",
+            "UPDATE dispatch_runs SET task_id = 'W2' WHERE run = 'run-ok'",
+            "",
+            &["dispatch_runs: run-ok task_id does not match its task_key"],
+            "",
+        ),
+    ];
+    for (name, sql, file, expected, locator) in cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        t.execute_batch(sql).unwrap();
+        drop(t);
+        let saved = (!file.is_empty()).then(|| {
+            let bytes = fs::read(out.join(file)).unwrap();
+            fs::write(out.join(file), b"tampered").unwrap();
+            bytes
+        });
+        let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+        assert_eq!(again.failures(), expected, "{name}");
+        if !locator.is_empty() {
+            let bad = again
+                .checks
+                .iter()
+                .find(|c| c.family == expected[0])
+                .unwrap();
+            let errors = if file.starts_with("dispatch/logs") {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                (bad.errors, bad.first_failure_locator.as_deref()),
+                (errors, Some(locator)),
+                "{name}"
+            );
+        }
+        if let Some(bytes) = saved {
+            fs::write(out.join(file), bytes).unwrap();
+        }
+    }
+}
+
+/// W3b5：值树与 JCS。键按 UTF-16 码元排序（不是按 UTF-8 字节），数字按 JS 输出，重复键后者覆盖，
+/// 落单的代理项与过深的嵌套显式拒绝。
+#[test]
+fn jcs_sorts_by_utf16_and_prints_numbers_like_js() {
+    let v = jsjson::parse_value(
+        r#"{"b":1,"a":[1e21,0.1,-0,1.50],"😀":true,"ｚ":null,"a":{"y":"\u0007","x":"é"}}"#,
+    )
+    .unwrap()
+    .unwrap();
+    // U+FF5A（ｚ）的 UTF-16 码元 0xFF5A 大于 😀 的高代理 0xD83D；按 UTF-8 字节排则相反。
+    assert_eq!(
+        jsjson::jcs(&v),
+        "{\"a\":{\"x\":\"é\",\"y\":\"\\u0007\"},\"b\":1,\"😀\":true,\"ｚ\":null}"
+    );
+    let n = jsjson::parse_value("[1e21,0.1,-0,1.50,100,1e-7]")
+        .unwrap()
+        .unwrap();
+    assert_eq!(jsjson::jcs(&n), "[1e+21,0.1,0,1.5,100,1e-7]");
+    assert_eq!(
+        jsjson::parse_value(r#"["\ud800"]"#),
+        Err(jsjson::ValueError::LoneSurrogate)
+    );
+    assert_eq!(
+        jsjson::parse_value(&"[".repeat(jsjson::MAX_DEPTH + 1)),
+        Err(jsjson::ValueError::TooDeep)
+    );
+    assert_eq!(jsjson::parse_value("\u{feff}{}"), Ok(None));
+}
+
+/// W3b5：给了数据根时，转换的文件族（F1–F6）没跑检查也算覆盖缺口；F7 只登记、X 类不转换，不算。
+#[test]
+fn root_file_families_without_a_check_are_coverage_gaps() {
+    let report = Report {
+        root: true,
+        ..Report::default()
+    };
+    let gaps: Vec<String> = report
+        .uncovered()
+        .into_iter()
+        .filter(|g| g.starts_with("root/"))
+        .collect();
+    assert_eq!(
+        gaps,
+        [
+            "root/sync.config: no check ran",
+            "root/sync.secrets: no check ran",
+            "root/dispatch.config: no check ran",
+            "root/dispatch.runs: no check ran",
+            "root/dispatch.requests: no check ran",
+            "root/dispatch.logs.final: no check ran",
+        ]
+    );
 }
