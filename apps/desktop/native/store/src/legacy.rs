@@ -185,8 +185,6 @@ pub struct Report {
     pub normalizations: Vec<Normalization>,
     /// 报告附件：被舍弃结构（N-02）的非默认值，族 → 按主键排序的 JSON 行。可能含用户正文，与报告分开存放。
     pub attachment: BTreeMap<String, Vec<String>>,
-    /// 只报告、不改动的遗留值（O-01～O-03）：`编号 族` → 行数。
-    pub observations: BTreeMap<String, i64>,
     /// VERIFY 独立重算的规则记录或附件与转换记下的不一致。
     pub rule_mismatches: Vec<String>,
 }
@@ -315,10 +313,8 @@ const PROJECT_COPY: &[&str] = &[
     "counters",
     "objectives",
     "milestones",
-    "checklist_items",
     "progress_updates",
     "project_updates",
-    "blockers",
     "records",
     "artifacts",
     "agents",
@@ -354,11 +350,16 @@ const KEPT_RELATIONS: &str = "('BLOCKS','DISCOVERED_FROM')";
 const N04: &str = "N-04@1";
 const N05: &str = "N-05@1";
 const N05_REASONS: &[&str] = &["CROSS_AGENT", "CROSS_ROLE", "TIME_REVERSED", "SAME_INSTANT"];
-/// 只报告、不改动的遗留值。（编号，表，谓词）
-const OBSERVED: &[(&str, &str, &str)] = &[
-    ("O-01", "checklist_items", "kind <> 'ACCEPTANCE'"),
-    ("O-02", "blockers", "status = 'CANCELLED'"),
-    ("O-03", "work_items", "progress_source = 'STATUS'"),
+/// N-02g～i：00 C-16 删除的遗留取值，改写成 3.0 的取值、原值进附件。（规则，表，列，谓词）
+const N02_VALUES: &[(&str, &str, &str, &str)] = &[
+    ("N-02g@1", "checklist_items", "kind", "kind <> 'ACCEPTANCE'"),
+    ("N-02h@1", "blockers", "status", "status = 'CANCELLED'"),
+    (
+        "N-02i@1",
+        "work_items",
+        "progress_source",
+        "progress_source = 'STATUS'",
+    ),
 ];
 const NOTIFY_ENABLED: &str = "notification.enabled";
 const NOTIFY_MODE: &str = "notification.mode";
@@ -428,27 +429,22 @@ fn json_string(s: &str) -> String {
     out
 }
 
-/// 2.x 的 `notification.mode` 是否合法：JSON 字符串，值为三者之一（区分大小写，同 2.x 的 `includes`）。
-fn valid_mode(tx: &Transaction<'_>, value_json: &str) -> Result<bool> {
-    Ok(tx.query_row(
-        "SELECT CASE WHEN json_valid(?1) THEN json_type(?1) = 'text' AND (?1 ->> '$') IN ('ALL', 'CRITICAL', 'OFF')
-                ELSE 0 END",
-        [value_json],
-        |r| r.get(0),
-    )?)
+/// 2.x 的 `notification.mode` 是否合法：整段文本按 `JSON.parse` 解析成字符串，值为三者之一
+/// （区分大小写，同 2.x 的 `includes`）。用 JS 语义的解析器而不是 SQLite 的 JSON 函数：后者在原始 NUL 处
+/// 截断，会把 `"ALL"` 后面跟 NUL 与垃圾的文本当成合法（W3a peer r1 P1-02）。
+fn valid_mode(value_json: &str) -> bool {
+    matches!(
+        crate::jsjson::parse(value_json),
+        Ok(Some(doc)) if doc.as_string().is_some_and(|s| ["ALL", "CRITICAL", "OFF"].contains(&s.as_str()))
+    )
 }
 
-/// N-04 的推导值：`enabled` 恰好是 JSON `false` 时为 OFF，其余（缺失、非 JSON、其他值）为 ALL。
-fn mode_from_enabled(tx: &Transaction<'_>, enabled: Option<&str>) -> Result<&'static str> {
-    let off: bool = match enabled {
-        None => false,
-        Some(v) => tx.query_row(
-            "SELECT CASE WHEN json_valid(?1) THEN json_type(?1) = 'false' ELSE 0 END",
-            [v],
-            |r| r.get(0),
-        )?,
-    };
-    Ok(if off { "\"OFF\"" } else { "\"ALL\"" })
+/// N-04 的推导值：`enabled` 的整段文本按 `JSON.parse` 恰好是 `false` 时为 OFF，其余（缺失、不合法、其他值）为 ALL。
+fn mode_from_enabled(enabled: Option<&str>) -> &'static str {
+    match enabled.map(crate::jsjson::parse) {
+        Some(Ok(Some(doc))) if doc.as_bool() == Some(false) => "\"OFF\"",
+        _ => "\"ALL\"",
+    }
 }
 
 /// N-04：在目标库的 registry settings 上合并通知设置。返回受影响的键。
@@ -471,16 +467,16 @@ fn normalize_notification(tx: &Transaction<'_>) -> Result<Vec<String>> {
         if mode.is_none() {
             tx.execute(
                 "INSERT INTO main.settings (key, value_json, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![NOTIFY_MODE, mode_from_enabled(tx, Some(e_value))?, e_version, e_at],
+                params![NOTIFY_MODE, mode_from_enabled(Some(e_value)), e_version, e_at],
             )
             .ctx("settings")?;
             touched.push(NOTIFY_MODE.to_string());
         }
     }
     if let Some((m_value, _, _)) = &mode
-        && !valid_mode(tx, m_value)?
+        && !valid_mode(m_value)
     {
-        let derived = mode_from_enabled(tx, enabled.as_ref().map(|(v, _, _)| v.as_str()))?;
+        let derived = mode_from_enabled(enabled.as_ref().map(|(v, _, _)| v.as_str()));
         tx.execute(
             "UPDATE main.settings SET value_json = ?2 WHERE key = ?1",
             params![NOTIFY_MODE, derived],
@@ -507,6 +503,10 @@ fn normalize_project(tx: &Transaction<'_>, pid: &str, report: &mut Report) -> Re
         .map(|c| match c.as_str() {
             "claimed_by_session_id" | "claim_lease_until" => {
                 format!("CASE WHEN status IN ('DONE','CANCELLED') THEN NULL ELSE \"{c}\" END")
+            }
+            "progress_source" => {
+                "CASE WHEN progress_source = 'STATUS' THEN 'NONE' ELSE progress_source END"
+                    .to_string()
             }
             _ => format!("\"{c}\""),
         })
@@ -592,7 +592,8 @@ fn normalize_project(tx: &Transaction<'_>, pid: &str, report: &mut Report) -> Re
         report.normalizations.push(record(rule, &f, keys));
     }
 
-    // N-05：不改数据，按原因记录无效边与同一时刻的有效边。
+    // N-05：不改数据，按原因记录无效边与同一时刻的有效边。先确认时间都能比较。
+    check_lineage_times(tx, pid)?;
     let edges: Vec<(String, String)> = {
         let mut st = tx.prepare(
             "SELECT s.id,
@@ -623,16 +624,116 @@ fn normalize_project(tx: &Transaction<'_>, pid: &str, report: &mut Report) -> Re
         ));
     }
 
-    for (code, table, predicate) in OBSERVED {
-        let n: i64 = tx.query_row(
-            &format!("SELECT count(*) FROM p.{table} WHERE {predicate}"),
-            [],
-            |r| r.get(0),
+    // N-02g、h：checklist_items 的 kind 一律 ACCEPTANCE；2.0 完成门不看的 OPTIONAL 项（不必证、未完成）改为
+    // SKIPPED，3.0 完成门对它的结论与 2.0 相同。blockers 的 CANCELLED 改为 RESOLVED（完成门只看 ACTIVE）。
+    for (table, overrides) in [
+        (
+            "checklist_items",
+            &[
+                ("kind", "'ACCEPTANCE'"),
+                (
+                    "status",
+                    "CASE WHEN kind = 'OPTIONAL' AND evidence_required = 0 AND status IN ('TODO','DOING')
+                          THEN 'SKIPPED' ELSE status END",
+                ),
+            ][..],
+        ),
+        (
+            "blockers",
+            &[("status", "CASE WHEN status = 'CANCELLED' THEN 'RESOLVED' ELSE status END")][..],
+        ),
+    ] {
+        let (cols, _) = columns(tx, "p", table)?;
+        let select = cols
+            .iter()
+            .map(|c| {
+                overrides
+                    .iter()
+                    .find(|(col, _)| col == c)
+                    .map_or_else(|| format!("\"{c}\""), |(_, e)| e.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        tx.execute(
+            &format!(
+                "INSERT INTO main.{table} (project_id, {}) SELECT ?1, {select} FROM p.{table}",
+                list(&cols)
+            ),
+            [pid],
+        )
+        .ctx(table)?;
+    }
+    for (rule, table, col, predicate) in N02_VALUES {
+        let f = format!("{}.{col}", family(table));
+        let keys = key_list(tx, &format!("SELECT id FROM p.{table} WHERE {predicate}"))?;
+        let extra = if *table == "checklist_items" {
+            ", 'status', status"
+        } else {
+            ""
+        };
+        let rows = key_list(
+            tx,
+            &format!(
+                "SELECT json_object('id', id, 'value', \"{col}\"{extra}) FROM p.{table} WHERE {predicate} ORDER BY id"
+            ),
         )?;
-        *report
-            .observations
-            .entry(format!("{code} {}", family(table)))
-            .or_default() += n;
+        if !rows.is_empty() {
+            report.attachment.insert(f.clone(), rows);
+        }
+        report.normalizations.push(record(rule, &f, keys));
+    }
+    Ok(())
+}
+
+/// N-05 的时间接受域：`toISOString()` 的形状（`YYYY-MM-DDTHH:MM:SS.sssZ`），且是真实存在的日期时间。
+/// 在这个域里字符串序就是时间序，与 3.0 运行时 lineage 的比较一致。
+fn canonical_utc_millis(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 24 {
+        return false;
+    }
+    let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18, 20, 21, 22];
+    let shape = digits.iter().all(|&i| b[i].is_ascii_digit())
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[10] == b'T'
+        && b[13] == b':'
+        && b[16] == b':'
+        && b[19] == b'.'
+        && b[23] == b'Z';
+    if !shape {
+        return false;
+    }
+    let n = |a: usize, z: usize| s[a..z].parse::<u32>().unwrap_or(u32::MAX);
+    let (year, month, day) = (n(0, 4), n(5, 7), n(8, 10));
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day) && n(11, 13) < 24 && n(14, 16) < 60 && n(17, 19) < 60
+}
+
+/// N-05：参与 predecessor 边的 session，其 started_at 必须在接受域里；否则显式失败，不按字典序猜先后。
+fn check_lineage_times(tx: &Transaction<'_>, pid: &str) -> Result<()> {
+    let mut st = tx.prepare(
+        "SELECT id, started_at FROM p.agent_sessions
+         WHERE predecessor_session_id IS NOT NULL
+            OR id IN (SELECT predecessor_session_id FROM p.agent_sessions WHERE predecessor_session_id IS NOT NULL)
+         ORDER BY id",
+    )?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    for row in rows {
+        let (id, at) = row?;
+        if !canonical_utc_millis(&at) {
+            return Err(ConvertError::Unsupported(format!(
+                "project {pid}: agent_sessions {id}.started_at is not a canonical UTC timestamp, \
+                 so lineage order cannot be decided (N-05)"
+            )));
+        }
     }
     Ok(())
 }
@@ -1738,9 +1839,29 @@ impl Recheck {
                 })
                 .collect()
         };
+        // 报告契约：每个（规则，族）恰好一条，摘要是 64 位小写十六进制（W3a peer r1 P2-01、P2-02）。
+        let mut seen = std::collections::BTreeSet::new();
+        for n in &report.normalizations {
+            if !seen.insert((n.rule.clone(), n.family.clone())) {
+                report
+                    .rule_mismatches
+                    .push(format!("{} {}: duplicate record", n.rule, n.family));
+            }
+            let well_formed = n.keys_digest.len() == 64
+                && n.keys_digest
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+            if !well_formed {
+                report
+                    .rule_mismatches
+                    .push(format!("{} {}: malformed keys_digest", n.rule, n.family));
+            }
+        }
         let (ours, theirs) = (index(&self.records), index(&report.normalizations));
         let show = |n: Option<&(i64, String)>| {
-            n.map_or("missing".to_string(), |(c, d)| format!("{c} {}", &d[..12]))
+            n.map_or("missing".to_string(), |(c, d)| {
+                format!("{c} {}", d.chars().take(12).collect::<String>())
+            })
         };
         let keys: std::collections::BTreeSet<&Key> = ours.keys().chain(theirs.keys()).collect();
         for k in keys {
@@ -2114,12 +2235,24 @@ fn verify_settings(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
     let cols: Vec<String> = ["key", "value_json", "version", "updated_at"]
         .map(String::from)
         .to_vec();
-    let expected = "WITH e AS (SELECT value_json AS v, version, updated_at FROM r.settings WHERE key = 'notification.enabled'),
+    // SQLite 的 JSON 函数在原始 NUL 处截断：先排除含 NUL 的文本，再交给 json_valid；嵌套 CASE 保证
+    // 不合法的文本不会进 json_type / ->>（W3a peer r1 P1-02）。
+    let mode_ok = |v: &str| {
+        format!(
+            "CASE WHEN instr(CAST({v} AS BLOB), x'00') > 0 THEN 0
+                  WHEN NOT json_valid({v}) THEN 0
+                  WHEN json_type({v}) <> 'text' THEN 0
+                  ELSE ({v} ->> '$') IN ('ALL', 'CRITICAL', 'OFF') END"
+        )
+    };
+    let enabled_off = "CASE WHEN instr(CAST(v AS BLOB), x'00') > 0 THEN 0
+                            WHEN NOT json_valid(v) THEN 0
+                            ELSE json_type(v) = 'false' END";
+    let expected = format!(
+        "WITH e AS (SELECT value_json AS v, version, updated_at FROM r.settings WHERE key = 'notification.enabled'),
               m AS (SELECT value_json AS v, version, updated_at FROM r.settings WHERE key = 'notification.mode'),
-              ok AS (SELECT CASE WHEN json_valid(v) AND json_type(v) = 'text' AND (v ->> '$') IN ('ALL', 'CRITICAL', 'OFF')
-                                 THEN 1 ELSE 0 END AS valid FROM m),
-              derived AS (SELECT coalesce((SELECT CASE WHEN json_valid(v) AND json_type(v) = 'false' THEN '\"OFF\"' END FROM e),
-                                          '\"ALL\"') AS d)
+              ok AS (SELECT {} AS valid FROM m),
+              derived AS (SELECT coalesce((SELECT CASE WHEN {enabled_off} THEN '\"OFF\"' END FROM e), '\"ALL\"') AS d)
          SELECT key, value_json, version, updated_at FROM r.settings
            WHERE key NOT IN ('notification.enabled', 'notification.mode')
          UNION ALL
@@ -2127,26 +2260,30 @@ fn verify_settings(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
          UNION ALL
          SELECT 'notification.mode', (SELECT d FROM derived), e.version, e.updated_at FROM e
            WHERE NOT EXISTS (SELECT 1 FROM m)
-         ORDER BY 1";
+         ORDER BY 1",
+        mode_ok("v")
+    );
     compare(
         c,
         report,
         "r/settings",
         &cols,
-        expected,
+        &expected,
         &[],
         "SELECT key, value_json, version, updated_at FROM main.settings ORDER BY key",
         &[],
     )?;
     let keys = key_list(
         c,
-        "SELECT key FROM r.settings WHERE key = 'notification.enabled'
-         UNION
-         SELECT 'notification.mode' FROM r.settings
-           WHERE key = 'notification.enabled' AND NOT EXISTS (SELECT 1 FROM r.settings WHERE key = 'notification.mode')
-         UNION
-         SELECT key FROM r.settings WHERE key = 'notification.mode'
-           AND NOT (json_valid(value_json) AND json_type(value_json) = 'text' AND (value_json ->> '$') IN ('ALL', 'CRITICAL', 'OFF'))",
+        &format!(
+            "SELECT key FROM r.settings WHERE key = 'notification.enabled'
+             UNION
+             SELECT 'notification.mode' FROM r.settings
+               WHERE key = 'notification.enabled' AND NOT EXISTS (SELECT 1 FROM r.settings WHERE key = 'notification.mode')
+             UNION
+             SELECT key FROM r.settings WHERE key = 'notification.mode' AND NOT ({})",
+            mode_ok("value_json")
+        ),
     )?;
     re.push(N04, "r/settings", keys);
     Ok(())
@@ -2182,6 +2319,9 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
         .map(|col| match col.as_str() {
             "claimed_by_session_id" | "claim_lease_until" => {
                 format!("iif(status = 'DONE' OR status = 'CANCELLED', NULL, \"{col}\")")
+            }
+            "progress_source" => {
+                "iif(progress_source IS 'STATUS', 'NONE', progress_source)".to_string()
             }
             _ => format!("\"{col}\""),
         })
@@ -2292,6 +2432,94 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
                 ),
             )?,
         );
+    }
+
+    // N-02g、h：checklist_items 与 blockers 的期望目标；N-02g～i 的主键集合与附件。
+    for (table, overrides) in [
+        (
+            "checklist_items",
+            &[
+                ("kind", "'ACCEPTANCE'"),
+                (
+                    "status",
+                    "iif(kind IS 'OPTIONAL' AND evidence_required = 0 AND (status IS 'TODO' OR status IS 'DOING'),
+                         'SKIPPED', status)",
+                ),
+            ][..],
+        ),
+        ("blockers", &[("status", "iif(status IS 'CANCELLED', 'RESOLVED', status)")][..]),
+    ] {
+        let (cols, pk) = columns(c, "p", table)?;
+        let source = cols
+            .iter()
+            .map(|col| {
+                overrides
+                    .iter()
+                    .find(|(name, _)| name == col)
+                    .map_or_else(|| format!("\"{col}\""), |(_, e)| e.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order = list(&pk);
+        compare(
+            c,
+            report,
+            &family(table),
+            &cols,
+            &format!("SELECT {source} FROM p.{table} ORDER BY {order}"),
+            &[],
+            &format!("SELECT {} FROM main.{table} WHERE project_id = ?1 ORDER BY {order}", list(&cols)),
+            &[&p],
+        )?;
+    }
+    for (rule, table, col, predicate, extra) in [
+        (
+            "N-02g@1",
+            "checklist_items",
+            "kind",
+            "kind IN ('REQUIRED', 'OPTIONAL', 'VERIFICATION')",
+            ", 'status', status",
+        ),
+        ("N-02h@1", "blockers", "status", "status IS 'CANCELLED'", ""),
+        (
+            "N-02i@1",
+            "work_items",
+            "progress_source",
+            "progress_source IS 'STATUS'",
+            "",
+        ),
+    ] {
+        let f = format!("{}.{col}", family(table));
+        re.push(
+            rule,
+            &f,
+            key_list(c, &format!("SELECT id FROM p.{table} WHERE {predicate}"))?,
+        );
+        re.attach(
+            f,
+            key_list(
+                c,
+                &format!(
+                    "SELECT json_object('id', id, 'value', \"{col}\"{extra}) FROM p.{table} WHERE {predicate} ORDER BY id"
+                ),
+            )?,
+        );
+    }
+
+    // N-05 的时间接受域：用 SQLite 的日期函数另验一遍（规范形状且是真实时刻时，重新格式化后不变）。
+    let odd: i64 = c.query_row(
+        "SELECT count(*) FROM p.agent_sessions a
+         WHERE (a.predecessor_session_id IS NOT NULL
+                OR EXISTS (SELECT 1 FROM p.agent_sessions b WHERE b.predecessor_session_id = a.id))
+           AND strftime('%Y-%m-%dT%H:%M:%fZ', a.started_at) IS NOT a.started_at",
+        [],
+        |r| r.get(0),
+    )?;
+    if odd > 0 {
+        report.rule_mismatches.push(format!(
+            "{}: {odd} lineage endpoints outside the N-05 time domain",
+            family("agent_sessions")
+        ));
     }
 
     // N-05：每个原因单独一条谓词。

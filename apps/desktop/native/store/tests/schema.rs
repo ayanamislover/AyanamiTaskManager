@@ -719,14 +719,47 @@ fn c16_legacy_structures_are_not_built() {
         sql.contains("relation_type IN ('BLOCKS','DISCOVERED_FROM')"),
         "{sql}"
     );
-    for sql in [
-        "SELECT sql FROM sqlite_master WHERE name = 'checklist_items'",
-        "SELECT sql FROM sqlite_master WHERE name = 'blockers'",
+    // 00 C-16：检查项 kind 只有 ACCEPTANCE，blockers 没有 CANCELLED，progress_source 没有 STATUS。
+    // 在事务里试写再回滚：遗留取值撞 CHECK，3.0 的取值写得进去。
+    let attempt = |sql: &str| {
+        c.execute_batch("BEGIN").unwrap();
+        let r = c.execute_batch(sql).map_err(|e| e.to_string());
+        c.execute_batch("ROLLBACK").unwrap();
+        r
+    };
+    let row = |table: &str, value: &str| {
+        match table {
+        "checklist_items" => format!(
+            "INSERT INTO checklist_items (project_id, id, work_item_id, title, kind, status, created_at, updated_at)
+             VALUES ('PX', 'C', 'W', 't', '{value}', 'TODO', 't', 't')"
+        ),
+        "blockers" => format!(
+            "INSERT INTO blockers (project_id, id, local_no, severity, title, status, actor, created_at, updated_at)
+             VALUES ('PX', 'B', 1, 'LOW', 't', '{value}', 'USER', 't', 't')"
+        ),
+        _ => format!(
+            "INSERT INTO work_items (project_id, id, local_no, objective_id, type, title, status, priority,
+                                     progress_source, created_at, updated_at)
+             VALUES ('PX', 'W', 1, 'O', 'TASK', 't', 'READY', 'NORMAL', '{value}', 't', 't')"
+        ),
+    }
+    };
+    for (table, legacy, current) in [
+        (
+            "checklist_items",
+            &["OPTIONAL", "REQUIRED", "VERIFICATION"][..],
+            "ACCEPTANCE",
+        ),
+        ("blockers", &["CANCELLED"][..], "RESOLVED"),
+        ("work_items", &["STATUS"][..], "NONE"),
     ] {
-        let def: String = c.query_row(sql, [], |r| r.get(0)).unwrap();
-        assert!(
-            def.contains("'OPTIONAL'") || def.contains("'CANCELLED'"),
-            "{def}"
-        );
+        assert_eq!(attempt(&row(table, current)), Ok(()), "{table} {current}");
+        for value in legacy {
+            let e = attempt(&row(table, value)).unwrap_err();
+            assert!(
+                e.contains("CHECK constraint failed"),
+                "{table} {value}: {e}"
+            );
+        }
     }
 }

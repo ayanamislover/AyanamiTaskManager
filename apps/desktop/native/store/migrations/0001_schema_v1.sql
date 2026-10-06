@@ -219,7 +219,8 @@ CREATE TABLE work_items (
   sort_key INTEGER NOT NULL DEFAULT 0, target_date TEXT,
   started_at TEXT, completed_at TEXT,
   assignee_agent_id TEXT, claimed_by_session_id TEXT, claim_lease_until TEXT,
-  reported_progress REAL, computed_progress REAL NOT NULL DEFAULT 0, progress_source TEXT NOT NULL DEFAULT 'NONE',
+  reported_progress REAL, computed_progress REAL NOT NULL DEFAULT 0, progress_source TEXT NOT NULL DEFAULT 'NONE'
+    CHECK (progress_source IN ('CHILDREN','CHECKLIST','REPORTED','NONE')),
   weight REAL NOT NULL DEFAULT 1, blocked_reason TEXT, waiting_for TEXT,
   verification_required INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
   created_by_agent_id TEXT, created_by_session_id TEXT,
@@ -258,7 +259,7 @@ CREATE INDEX ix_relations_target ON work_item_relations(project_id, target_id, r
 
 CREATE TABLE checklist_items (
   project_id TEXT NOT NULL, id TEXT NOT NULL, work_item_id TEXT NOT NULL, title TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('REQUIRED','OPTIONAL','ACCEPTANCE','VERIFICATION')),
+  kind TEXT NOT NULL CHECK (kind = 'ACCEPTANCE'),
   status TEXT NOT NULL CHECK (status IN ('TODO','DOING','DONE','SKIPPED')),
   weight REAL NOT NULL DEFAULT 1, evidence_required INTEGER NOT NULL DEFAULT 0, evidence_json TEXT NOT NULL DEFAULT '[]',
   version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
@@ -268,7 +269,8 @@ CREATE TABLE checklist_items (
 CREATE INDEX ix_checklist_work ON checklist_items(project_id, work_item_id, status);
 
 -- labels / work_item_labels、work_items 的 archived_at / phase_inferred / planned_start_date、关系类型 RELATES / DUPLICATES
--- 不建（01 C-16、C-25；04 C-L15）。转换时非默认值进报告附件（store/NORMALIZATION.md N-02）。
+-- 不建；检查项 kind 只有 ACCEPTANCE、blockers 没有 CANCELLED、progress_source 没有 STATUS（00 C-16；01 C-25；04 C-L15）。
+-- 转换时非默认值改写或舍弃，原值进报告附件（store/NORMALIZATION.md N-02）。
 
 CREATE TABLE progress_updates (
   project_id TEXT NOT NULL, id TEXT NOT NULL, work_item_id TEXT NOT NULL,
@@ -300,7 +302,7 @@ CREATE TABLE blockers (
   project_id TEXT NOT NULL, id TEXT NOT NULL, local_no INTEGER NOT NULL, work_item_id TEXT,
   severity TEXT NOT NULL CHECK (severity IN ('LOW','MEDIUM','HIGH','CRITICAL')),
   title TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', waiting_for TEXT,
-  status TEXT NOT NULL CHECK (status IN ('ACTIVE','RESOLVED','CANCELLED')), actor TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('ACTIVE','RESOLVED')), actor TEXT NOT NULL,
   version INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT,
   PRIMARY KEY (project_id, id), UNIQUE (project_id, local_no),
   FOREIGN KEY (project_id, work_item_id) REFERENCES work_items(project_id, id) DEFERRABLE INITIALLY DEFERRED

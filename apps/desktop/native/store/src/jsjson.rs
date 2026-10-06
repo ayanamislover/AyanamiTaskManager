@@ -118,6 +118,22 @@ impl Doc {
         }
     }
 
+    /// 顶层值是布尔时返回它。
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.nodes.last() {
+            Some(Node::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// 顶层值是字符串时返回它；含落单代理项（JS 字符串可以有，Rust 不能表示）时为 None。
+    pub fn as_string(&self) -> Option<String> {
+        match self.nodes.last() {
+            Some(Node::String(units)) => String::from_utf16(units).ok(),
+            _ => None,
+        }
+    }
+
     /// 把 `text` 解析进这棵树，返回根节点下标；不合法时 `Ok(None)`（JS 会抛 SyntaxError）。
     fn parse_into(&mut self, text: &str) -> Result<Option<usize>, TooDeep> {
         let mut p = Parser {

@@ -1046,7 +1046,10 @@ fn rules_fixture(name: &str) -> Fixture {
              INSERT INTO checklist_items (id, work_item_id, title, kind, status, created_at, updated_at) VALUES
                ('C1', 'W1', 'optional step', 'OPTIONAL', 'TODO', '{T}', '{T}'),
                ('C2', 'W1', 'acceptance', 'ACCEPTANCE', 'TODO', '{T}', '{T}'),
-               ('C3', 'W1', 'verification', 'VERIFICATION', 'TODO', '{T}', '{T}');
+               ('C3', 'W1', 'verification', 'VERIFICATION', 'TODO', '{T}', '{T}'),
+               ('C4', 'W1', 'optional, evidence required', 'OPTIONAL', 'DOING', '{T}', '{T}'),
+               ('C5', 'W1', 'optional, done', 'OPTIONAL', 'DONE', '{T}', '{T}');
+             UPDATE checklist_items SET evidence_required = 1 WHERE id = 'C4';
              INSERT INTO counters (name, next_value) VALUES ('blocker', 2);
              INSERT INTO blockers (id, local_no, work_item_id, severity, title, status, actor, created_at, updated_at)
                VALUES ('B1', 1, 'W1', 'LOW', 'gone', 'CANCELLED', 'USER', '{T}', '{T}');
@@ -1156,7 +1159,7 @@ fn n01_n02_rewrite_drop_and_attach_exactly_the_registered_values() {
     );
     // 附件单独成文，报告的规则记录里只有计数与摘要。
     let jsonl = report.attachment_jsonl();
-    assert_eq!(jsonl.lines().count(), 7);
+    assert_eq!(jsonl.lines().count(), 13);
     assert!(jsonl.lines().all(|l| l.starts_with("{\"family\":\"P1/")));
     assert!(!format!("{:?}", report.normalizations).contains("紧急"));
 
@@ -1181,17 +1184,59 @@ fn n01_n02_rewrite_drop_and_attach_exactly_the_registered_values() {
         "S1"
     );
 
-    // 只报告的遗留值：原样转换并计数。
-    assert_eq!(report.observations["O-01 P1/checklist_items"], 2);
-    assert_eq!(report.observations["O-02 P1/blockers"], 1);
-    assert_eq!(report.observations["O-03 P1/work_items"], 1);
+    // N-02g～i（00 C-16）：遗留取值不入新库，改写后与 2.0 完成门结论相同，原值进附件。
+    let checklist: Vec<(String, String, String)> = t
+        .prepare("SELECT id, kind, status FROM checklist_items WHERE project_id = 'P1' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let expected: Vec<(String, String, String)> = [
+        ("C1", "ACCEPTANCE", "SKIPPED"), // OPTIONAL、不必证、未完成：2.0 完成门不看它
+        ("C2", "ACCEPTANCE", "TODO"),
+        ("C3", "ACCEPTANCE", "TODO"),  // VERIFICATION：2.0 完成门看它
+        ("C4", "ACCEPTANCE", "DOING"), // OPTIONAL 但必证：2.0 的证据谓词照样拦它
+        ("C5", "ACCEPTANCE", "DONE"),
+    ]
+    .map(|(a, b, c)| (a.into(), b.into(), c.into()))
+    .to_vec();
+    assert_eq!(checklist, expected);
+    assert_eq!(
+        report.attachment["P1/checklist_items.kind"],
+        [
+            "{\"id\":\"C1\",\"value\":\"OPTIONAL\",\"status\":\"TODO\"}",
+            "{\"id\":\"C3\",\"value\":\"VERIFICATION\",\"status\":\"TODO\"}",
+            "{\"id\":\"C4\",\"value\":\"OPTIONAL\",\"status\":\"DOING\"}",
+            "{\"id\":\"C5\",\"value\":\"OPTIONAL\",\"status\":\"DONE\"}",
+        ]
+    );
     assert_eq!(
         q::<String>(
             &t,
-            "SELECT kind FROM checklist_items WHERE project_id = 'P1' AND id = 'C1'"
+            "SELECT status FROM blockers WHERE project_id = 'P1' AND id = 'B1'"
         ),
-        "OPTIONAL"
+        "RESOLVED"
     );
+    assert_eq!(
+        report.attachment["P1/blockers.status"],
+        ["{\"id\":\"B1\",\"value\":\"CANCELLED\"}"]
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT progress_source FROM work_items WHERE project_id = 'P1' AND id = 'W2'"
+        ),
+        "NONE"
+    );
+    for (r, family, n) in [
+        ("N-02g@1", "P1/checklist_items.kind", 4),
+        ("N-02h@1", "P1/blockers.status", 1),
+        ("N-02i@1", "P1/work_items.progress_source", 1),
+        ("N-02g@1", "P2/checklist_items.kind", 0),
+    ] {
+        assert_eq!(rule(&report, r, family).count, n, "{r} {family}");
+    }
 
     // 复核：对同一组源与这份报告，VERIFY 全部通过。
     let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
@@ -1257,6 +1302,101 @@ fn n04_merges_notification_settings_like_2x_reads_them() {
             ],
             &[("notification.mode".into(), "\"OFF\"".into(), 6, T.into())],
             2,
+        ),
+        // W3a peer r1 P1-02：整段文本按 JSON.parse 判定。原始 NUL 之后的垃圾让它不合法；字符串里的 \u0000 转义合法。
+        (
+            "enabled false + raw NUL",
+            &[("notification.enabled", "false\0trailing", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "mode ALL + raw NUL",
+            &[("notification.mode", "\"ALL\"\0", 3)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 3, T.into())],
+            1,
+        ),
+        (
+            "mode OFF + raw NUL, enabled false",
+            &[
+                ("notification.enabled", "false", 4),
+                ("notification.mode", "\"OFF\"\0x", 6),
+            ],
+            &[("notification.mode".into(), "\"OFF\"".into(), 6, T.into())],
+            2,
+        ),
+        (
+            "mode with escaped NUL",
+            &[("notification.mode", "\"OFF\\u0000\"", 3)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 3, T.into())],
+            1,
+        ),
+        (
+            "enabled is a string with escaped NUL",
+            &[("notification.enabled", "\"\\u0000\"", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "mode spelled with escapes",
+            &[("notification.mode", "\"OF\\u0046\"", 3)],
+            &[(
+                "notification.mode".into(),
+                "\"OF\\u0046\"".into(),
+                3,
+                T.into(),
+            )],
+            0,
+        ),
+        (
+            "mode with whitespace",
+            &[("notification.mode", " \"CRITICAL\" ", 3)],
+            &[(
+                "notification.mode".into(),
+                " \"CRITICAL\" ".into(),
+                3,
+                T.into(),
+            )],
+            0,
+        ),
+        (
+            "mode lower case",
+            &[("notification.mode", "\"off\"", 3)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 3, T.into())],
+            1,
+        ),
+        (
+            "enabled false with whitespace",
+            &[("notification.enabled", "\n false \t", 4)],
+            &[("notification.mode".into(), "\"OFF\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "enabled 0",
+            &[("notification.enabled", "0", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "enabled null",
+            &[("notification.enabled", "null", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "enabled false with trailing comma",
+            &[("notification.enabled", "false,", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "both, mode valid, enabled true",
+            &[
+                ("notification.enabled", "true", 4),
+                ("notification.mode", "\"OFF\"", 6),
+            ],
+            &[("notification.mode".into(), "\"OFF\"".into(), 6, T.into())],
+            1,
         ),
     ];
     for (name, rows, expected, touched) in cases {
@@ -1391,4 +1531,96 @@ fn verify_rejects_changes_the_rules_do_not_explain() {
 fn wrong_keys_digest(d: &str) -> String {
     let flipped = if d.starts_with('0') { '1' } else { '0' };
     format!("{flipped}{}", &d[1..])
+}
+
+/// W3a peer r1 P1-03：lineage 边两端的 started_at 必须是规范的 UTC 毫秒时间，否则显式失败并点名 session；
+/// 不参与 predecessor 边的 session 不受约束。
+#[test]
+fn n05_lineage_times_outside_the_domain_fail_explicitly() {
+    for (name, session, at) in [
+        ("not a time", "S2", "not-a-time"),
+        ("same instant, other spelling", "S2", "2026-09-02T00:00:00Z"),
+        ("impossible date", "S1", "2026-02-30T00:00:00.000Z"),
+        ("lower-case z", "S5", "2026-09-01T00:00:00.000z"),
+    ] {
+        let f = rules_fixture("legacy-n05-time");
+        f.project(0)
+            .execute(
+                "UPDATE agent_sessions SET started_at = ?2 WHERE id = ?1",
+                params![session, at],
+            )
+            .unwrap();
+        match f.convert() {
+            Err(ConvertError::Unsupported(m)) => {
+                assert!(
+                    m.contains(&format!("agent_sessions {session}.started_at")),
+                    "{name}: {m}"
+                )
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+    // 不参与边的 session：时间不规范也照样转换。
+    let f = rules_fixture("legacy-n05-time-loose");
+    f.project(0)
+        .execute_batch(&format!(
+            "INSERT INTO agent_sessions (id, agent_id, role, work_state, connection_state, started_at, updated_at)
+             VALUES ('LONE', 'claude', 'OBSERVER', 'IDLE', 'OFFLINE', 'whenever', '{T}')"
+        ))
+        .unwrap();
+    f.convert().unwrap();
+}
+
+/// W3a peer r1 P2-01、P2-02：报告里每个（规则，族）恰好一条、摘要是 64 位十六进制；违反时给出可定位的失败，不 panic。
+#[test]
+fn verify_rejects_malformed_rule_records() {
+    let f = rules_fixture("legacy-rules-records");
+    let report = f.convert().unwrap();
+    let target = f.target();
+    let check = |r: &Report| verify_converted(&target, &f.sources, r).unwrap().failures();
+    let at = report
+        .normalizations
+        .iter()
+        .position(|n| n.rule == "N-01@1" && n.family == "P1/work_items")
+        .unwrap();
+
+    let mut wrong_first = report.clone();
+    let mut bad = wrong_first.normalizations[at].clone();
+    bad.count = 999;
+    wrong_first.normalizations.insert(at, bad);
+    let mut wrong_last = report.clone();
+    let mut bad = wrong_last.normalizations[at].clone();
+    bad.count = 999;
+    wrong_last.normalizations.push(bad);
+    let mut identical = report.clone();
+    let same = identical.normalizations[at].clone();
+    identical.normalizations.push(same);
+    for (name, r) in [
+        ("first wrong", wrong_first),
+        ("last wrong", wrong_last),
+        ("identical", identical),
+    ] {
+        let failures = check(&r);
+        assert!(
+            failures.contains(&"N-01@1 P1/work_items: duplicate record".to_string()),
+            "{name}: {failures:?}"
+        );
+    }
+
+    for digest in [
+        "",
+        "x",
+        "é".repeat(12).as_str(),
+        &"Z".repeat(64),
+        &"A".repeat(64),
+    ] {
+        let mut r = report.clone();
+        r.normalizations[at].keys_digest = digest.to_string();
+        let failures = std::panic::catch_unwind(|| check(&r))
+            .unwrap_or_else(|_| panic!("panicked on {digest:?}"));
+        assert!(
+            failures.contains(&"N-01@1 P1/work_items: malformed keys_digest".to_string()),
+            "{digest:?}: {failures:?}"
+        );
+    }
 }
