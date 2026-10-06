@@ -8,7 +8,7 @@
 - **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`prepare_source`，在工作副本上）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
 - **decision**：`CONVERTED`（逐行或逐文件进新库）、`REBUILT`（派生数据，在新库重建，查询等价）、`DROPPED`（不进新库，`drop_reason` 写理由）、`REFERENCED`（不复制，只登记引用）。
 - **business_digest**：是否纳入回滚检测（05 §5.2「纳入」列）。X 类和 F7 不纳入。
-- **pending**：还没实现的族及负责的任务。DB 族都已实现；非 DB 文件族归 W3b4（附件、manifest、R / X 类路径）、W3b5（sync / dispatch）、W3b6（进行中的文件事务）。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
+- **pending**：还没实现的族及负责的任务：W3b5（sync / dispatch）、W3b6（进行中的文件事务）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
 
 ### search_documents 与 knowledge_fts：REBUILT
 
@@ -55,6 +55,26 @@
   - 补跑的版本。
 
   VERIFY 把这一次读到的来源证明与目标里记下的比对（检查 `r/app_meta.sources`），所以转换之后源文件被改过也看得出来。
+
+## 按数据根输入（W3b4）
+
+`LegacySources::from_root(<L>)` 按 2.0 的布局取三类库，并带上数据根本身。给了数据根，转换和独立 VERIFY 都会处理文件族；没给数据根时，这些族都列在 `pending()`，提示为 `needs the data root`。
+
+- **数据根枚举**（在动目标之前；`legacy/root.rs`）：
+  - 每个顶层条目都必须命中族表，否则停；
+  - `trash\` 非空就停；
+  - 进行中的文件事务残留（`projects\.creating-*`、`*.creating`、`.restore-*`、`project.sqlite.restore-old-*`、`knowledge\` 里除库以外的文件）先拒绝，W3b6 落定之后才放行；
+  - `registry\`、项目目录、`sync\`、`dispatch\` 里未登记的文件同样停。
+- **R / X 类只登记数量**：每个族记文件数与总字节数，不读内容，`digest` 为 `null`。
+- **附件（P11）**：`projects\<id>\artifacts\**` 逐文件复制到目标旁的 `artifacts\<id>\`，用检查 `<pid>/artifacts.files` 比对两边的 (相对路径, size, sha256) 集合，定位写第一个不一致的相对路径。
+  - **改写**：`local_path` 指向本项目附件目录里的文件时，改写成 `data/artifacts/<id>/<相对路径>`（相对新根），原值留在 `legacy_local_path`。`artifacts` 表的逐行比对用 `legacy_local_path` 反投影。
+  - **只记信息项的情况**：附件行指向附件目录之外（`local_path` 保留原值）；源文件本来就不在（「源缺失」）。
+  - **停的情况**：源文件在、目标文件不在。行里的 size / sha256 与文件不一致只记信息项。
+- **manifest（P10）**：`project_id`、`project_code`、`schema_version` 必须与 registry 一致（检查 `<pid>/manifest.json`），缺失或不是 JSON 也算不一致。名字不同只记信息项：2.0 改名时不回写 manifest。
+- **备份（X7）**：
+  - **登记**：目录表之外的 2.0 备份文件登记进 `legacy_backups`，id 为 `<source>:<相对路径>`，只算 sha256，不复制。包括三类：升级前备份 `pre-migration-v<n>-*.sqlite`（registry、knowledge、各项目的备份目录，带 `schema_version = n`）、知识恢复前的现库 `before-restore-<ULID>.sqlite`、知识恢复的孤儿件 `orphan-<ULID>-restore-<ULID>.sqlite`。
+  - **核对**：所有登记的备份都要核对文件存在、sha256 与登记一致。缺失或不一致只记信息项（X 类）。
+- **generation**：`ConvertOptions::generation` 由 07 的状态机传入，写进 `app_meta.generation`；不传时随机生成。
 
 ## 源副本与业务图（05 §3.3；W3b2）
 

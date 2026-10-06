@@ -4,8 +4,8 @@
 //! §5.2「显式排除」表的各行编为 X1–X12（05 没有给编号，按表格顺序）。同一编号可以有多个族（P3 是十四张表）。
 //!
 //! 转换报告（`report.json`）按这张表逐族输出；VERIFY 结束时，每个转换、重建或登记的族都必须至少有一项
-//! 检查跑过，否则报覆盖缺口。尚未实现的族（非 DB 文件，归 W3b4～W3b6）标 `pending`，不算失败，
-//! 但 W3d 的提交门要求 `pending` 为空。
+//! 检查跑过，否则报覆盖缺口。尚未实现的族（sync / dispatch 归 W3b5，进行中的文件事务归 W3b6）标 `pending`，
+//! 不算失败，但 W3d 的提交门要求 `pending` 为空。
 
 /// 05 §3.4 的 `decision`。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +60,8 @@ pub struct FamilySpec {
     pub drop_reason: Option<&'static str>,
     /// 是否纳入 `business_digest`（05 §5.2 的「纳入」列）。
     pub business_digest: bool,
-    /// 尚未实现时，负责的任务（W3b4～W3b6）。
+    /// 尚未实现时，负责的任务（W3b5、W3b6）。数据根下的文件族另有前提：转换要按数据根输入
+    /// （[`super::LegacySources::from_root`]），否则这些族都算未覆盖（[`super::Report::pending`]）。
     pub pending: Option<&'static str>,
 }
 
@@ -127,7 +128,11 @@ const fn file(
         target,
         drop_reason,
         business_digest,
-        pending: Some(pending),
+        pending: if pending.is_empty() {
+            None
+        } else {
+            Some(pending)
+        },
     }
 }
 
@@ -331,11 +336,11 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("项目身份冗余，只核对三个字段与 registry 一致"),
         true,
-        "W3b4",
+        "",
     ),
     file(
         "P11",
-        "artifacts",
+        "artifacts.files",
         ProjectDir,
         "projects/<id>/artifacts",
         &["projects/<id>/artifacts/**"],
@@ -343,7 +348,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "data/artifacts/<id>",
         None,
         true,
-        "W3b4",
+        "",
     ),
     // ---- 数据根下的其余文件 ----
     file(
@@ -446,7 +451,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("R 类：锁、令牌、进程见证"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X3",
@@ -458,7 +463,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("R 类：诊断与更新状态"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X4",
@@ -477,7 +482,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("每次启动由安装资源覆盖，不是用户数据"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X5",
@@ -489,7 +494,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("setup / 发布链资产"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X6",
@@ -501,7 +506,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("浏览器配置目录（主题与侧栏偏好随之丢失，05 §7）"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X7",
@@ -513,7 +518,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "legacy_backups",
         None,
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X8",
@@ -525,7 +530,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "report",
         None,
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X9",
@@ -541,7 +546,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("诊断副本 / 临时件；主文件已纳入"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X10",
@@ -553,7 +558,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("standalone 开发 daemon 的明文存储，正式 core 不读"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X11",
@@ -565,7 +570,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("2.0 只创建不写入；非空则 UNKNOWN"),
         false,
-        "W3b4",
+        "",
     ),
     file(
         "X12",

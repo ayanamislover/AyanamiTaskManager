@@ -1,6 +1,7 @@
 //! 2.x → 3.0 转换原型（W1f；05 §3、10 R6 / R7‴）。
 //!
-//! 输入是 2.x 的 registry、knowledge、各项目库（路径由调用方逐个给出），输出是一个新的单库。
+//! 输入是 2.x 的 registry、knowledge、各项目库，或者整个数据根（[`LegacySources::from_root`]，附件、manifest、
+//! 备份文件与 R / X 类路径一并处理，见 `store/REPORT.md`），输出是一个新的单库与目标旁的附件目录。
 //! 规则：
 //! - 源文件本身不打开：每个库先复制成工作副本（db 与 `-wal`），WAL 在副本里恢复，旧 schema 在副本上按 2.0 runner
 //!   补迁移；来源证明（源 sha256、原有迁移、补跑的迁移）进报告与 `app_meta.converted_from`（W3b3）；
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 mod families;
 mod migrations;
+mod root;
 pub use families::{Decision, FAMILIES, FTS_SHADOWS, FamilySpec, Home};
 pub use migrations::{LegacyMigration, MIGRATIONS};
 
@@ -132,6 +134,17 @@ pub struct LegacySources {
     pub registry: PathBuf,
     pub knowledge: Option<PathBuf>,
     pub projects: Vec<PathBuf>,
+    /// 2.0 数据根。给出时，数据根下的文件族（附件、manifest、备份文件、R / X 类路径）一并处理（W3b4）；
+    /// 不给时只转三类库，这些族在 [`Report::pending`] 里。
+    pub root: Option<PathBuf>,
+}
+
+impl LegacySources {
+    /// 按数据根取三类源库：`registry/registry.sqlite`、`knowledge/knowledge.sqlite`（可以没有）、
+    /// `projects/<id>/project.sqlite`。
+    pub fn from_root(root: &Path) -> Result<LegacySources> {
+        root::sources_from_root(root)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +154,8 @@ pub struct ConvertOptions<'a> {
     pub allow_real_data_root: bool,
     /// 真实数据根的位置；`None` 取 [`real_data_root`]。测试用它指向一个假的根，不必改进程环境。
     pub real_data_root: Option<&'a Path>,
+    /// 新库的 generation（07 S4 / S5：由转换状态机分配并写进 `M`）；`None` 时随机生成。
+    pub generation: Option<&'a str>,
 }
 
 /// 2.x 的真实数据根：`%LOCALAPPDATA%\AyanamiTaskManager`。
@@ -178,8 +193,12 @@ impl FamilyCheck {
 pub struct SourceDigest {
     pub spec: &'static str,
     pub scope: String,
+    /// DB 族是行数；文件族是文件数。
     pub rows: i64,
+    /// 规范化摘要；只登记数量的 R / X 类文件族为空。
     pub digest: String,
+    /// 文件族的总字节数。
+    pub bytes: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -191,6 +210,8 @@ pub struct Report {
     pub projects: Vec<String>,
     /// 有没有知识库。
     pub knowledge: bool,
+    /// 是否按数据根处理了文件族（W3b4）。
+    pub root: bool,
     /// 每个源库的来源证明（W3b3），也写进 `app_meta.converted_from.sources`。
     pub provenance: Vec<SourceProvenance>,
     /// 回执分类计数（R7‴）。
@@ -256,7 +277,12 @@ impl Report {
     pub fn pending(&self) -> Vec<String> {
         self.instances()
             .into_iter()
-            .filter_map(|(scope, f)| f.pending.map(|w| format!("{scope}/{}: {w}", f.name)))
+            .filter_map(|(scope, f)| {
+                let file = matches!(f.home, Home::Root | Home::ProjectDir);
+                f.pending
+                    .or((file && !self.root).then_some("needs the data root"))
+                    .map(|w| format!("{scope}/{}: {w}", f.name))
+            })
             .collect()
     }
 
@@ -268,7 +294,8 @@ impl Report {
             .filter(|(_, f)| {
                 f.pending.is_none()
                     && f.decision != Decision::Dropped
-                    && matches!(f.home, Home::Registry | Home::Knowledge | Home::Project)
+                    && (matches!(f.home, Home::Registry | Home::Knowledge | Home::Project)
+                        || (self.root && f.home == Home::ProjectDir))
             })
             .filter(|(scope, f)| {
                 !self
@@ -338,7 +365,7 @@ impl Report {
                 .collect();
             families.push(format!(
                 "{{\"code\":{},\"family\":{},\"decision\":{},\"drop_reason\":{},\"business_digest\":{},\"pending\":{},\
-                 \"source\":{{\"path_class\":{},\"{src_key}\":{},\"digest\":{}}},\
+                 \"source\":{{\"path_class\":{},\"{src_key}\":{},\"bytes\":{},\"digest\":{}}},\
                  \"target\":{{\"{tgt_key}\":{},\"rows\":{},\"digest\":{}}},\"checks\":[{}]}}",
                 s(f.code),
                 s(&name),
@@ -348,7 +375,10 @@ impl Report {
                 opt(f.pending),
                 s(f.path_class),
                 source.map_or("null".to_string(), |x| x.rows.to_string()),
-                opt(source.map(|x| x.digest.as_str())),
+                source
+                    .and_then(|x| x.bytes)
+                    .map_or("null".to_string(), |b| b.to_string()),
+                opt(source.map(|x| x.digest.as_str()).filter(|d| !d.is_empty())),
                 if f.target.is_empty() { "null".to_string() } else { s(f.target) },
                 primary.map_or("null".to_string(), |c| c.target_rows.to_string()),
                 opt(primary.map(|c| c.target_digest.as_str())),
@@ -886,14 +916,19 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     if target.exists() {
         return Err(ConvertError::TargetExists(target.to_path_buf()));
     }
+    let mut report = Report::default();
+    // 数据根：未登记的条目、非空的 trash、进行中的事务残留，在动目标之前就停（W3b4）。
+    if let Some(root) = &src.root {
+        root::scan(root, &mut report)?;
+        report.root = true;
+    }
     // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
     let work = work_dir(target, WORK_DIR)?;
-    let mut report = Report::default();
     let used = prepare_sources(src, &work, opts.at, &mut report.provenance)?;
 
     let mut t = crate::open(target)?;
     register_functions(&t)?;
-    let gens = convert_registry(&mut t, &used, opts.at, &mut report)?;
+    let gens = convert_registry(&mut t, &used, opts.at, opts.generation, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for p in &used.projects {
@@ -910,6 +945,9 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         }
     }
     finish(&mut t, &gens, &promotions, &mut report)?;
+    if let Some(root) = &src.root {
+        root::convert_files(&mut t, root, &target_dir(target), &mut report)?;
+    }
     verify(&t, &used, &mut report)?;
     if !report.failures().is_empty() {
         return Err(ConvertError::Verify(Box::new(report)));
@@ -927,12 +965,17 @@ const VERIFY_DIR: &str = "legacy-verify";
 /// 转换器版本：写进 `app_meta.converted_from.converterVersion`。迁移嵌入、规范化规则、映射有变化时升。
 pub const CONVERTER_VERSION: &str = "atm-store-legacy/1";
 
-fn work_dir(target: &Path, name: &str) -> Result<PathBuf> {
-    let dir = target
+/// 目标库所在的目录（staging）：附件、工作副本都放这里。
+fn target_dir(target: &Path) -> PathBuf {
+    target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."))
-        .join(name);
+        .to_path_buf()
+}
+
+fn work_dir(target: &Path, name: &str) -> Result<PathBuf> {
+    let dir = target_dir(target).join(name);
     // 上一次失败留下的同名目录是本转换器自己的产物，重来前清掉。
     if dir.exists() {
         std::fs::remove_dir_all(&dir)?;
@@ -1045,6 +1088,7 @@ fn prepare_sources(
         registry,
         knowledge,
         projects,
+        root: src.root.clone(),
     })
 }
 
@@ -1288,6 +1332,7 @@ fn convert_registry(
     t: &mut Connection,
     src: &LegacySources,
     at: &str,
+    generation: Option<&str>,
     report: &mut Report,
 ) -> Result<Gens> {
     attach(t, &src.registry, "r")?;
@@ -1371,7 +1416,11 @@ fn convert_registry(
             ],
             |r| r.get(0),
         )?;
-        let (root, generation, epoch) = (ulid(&tx)?, ulid(&tx)?, ulid(&tx)?);
+        let (root, epoch) = (ulid(&tx)?, ulid(&tx)?);
+        let generation = match generation {
+            Some(g) => g.to_string(),
+            None => ulid(&tx)?,
+        };
         tx.execute(
             "INSERT INTO app_meta (singleton, schema_version, data_root_id, generation, instance_epoch, global_seq,
                                    scope_gen_counter, converted_from, created_at, updated_at)
@@ -2273,6 +2322,7 @@ fn digest_sources(
             scope: scope.to_string(),
             rows,
             digest,
+            bytes: None,
         });
     }
     Ok(())
@@ -2344,12 +2394,16 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
         [],
         |r| r.get(0),
     )?;
-    let work = work_dir(target, VERIFY_DIR)?;
     let mut report = Report {
         normalizations: conversion.normalizations.clone(),
         attachment: conversion.attachment.clone(),
         ..Report::default()
     };
+    if let Some(root) = &src.root {
+        root::scan(root, &mut report)?;
+        report.root = true;
+    }
+    let work = work_dir(target, VERIFY_DIR)?;
     let r = prepare_sources(src, &work, &at, &mut report.provenance)
         .and_then(|used| verify(&t, &used, &mut report));
     drop(t);
@@ -2482,7 +2536,12 @@ fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()
             detach(t, "p");
             r?;
         }
-        verify_global(t, report)
+        verify_global(t, report)?;
+        if let Some(root) = &src.root {
+            let out = target_dir(Path::new(t.path().unwrap_or_default()));
+            root::verify_files(t, root, &out, report)?;
+        }
+        Ok(())
     })();
     if r.is_ok() {
         re.settle(report);
@@ -2872,9 +2931,44 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
         "SELECT health, meta_version, project_seq, legacy_schema_version FROM main.projects WHERE id = ?1",
         &[&p],
     )?;
-    for table in PROJECT_COPY {
+    for table in PROJECT_COPY.iter().filter(|t| **t != "artifacts") {
         compare_table(c, report, "p", table, Some(p))?;
     }
+    // artifacts：local_path 可能已改写到新根（W3b4），用 legacy_local_path 反投影原值（05 §3.3）。
+    let (cols, pk) = columns(c, "p", "artifacts")?;
+    let target = cols
+        .iter()
+        .map(|col| {
+            if col == "local_path" {
+                "legacy_local_path".to_string()
+            } else {
+                format!("\"{col}\"")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let key: Vec<&str> = pk.iter().map(String::as_str).collect();
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "artifacts",
+            label: &format!("{p}/artifacts"),
+            key: &key,
+        },
+        &cols,
+        &format!(
+            "SELECT {} FROM p.artifacts ORDER BY {}",
+            list(&cols),
+            list(&pk)
+        ),
+        &[],
+        &format!(
+            "SELECT {target} FROM main.artifacts WHERE project_id = ?1 ORDER BY {}",
+            list(&pk)
+        ),
+        &[&p],
+    )?;
     verify_rules(c, report, re, p)?;
     let (cols, _) = columns(c, "p", "events")?;
     let source = list(&cols);

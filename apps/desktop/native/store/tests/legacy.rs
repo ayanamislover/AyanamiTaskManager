@@ -97,6 +97,7 @@ impl Fixture {
                 at: "2026-10-03T00:00:00.000Z",
                 allow_real_data_root: false,
                 real_data_root: None,
+                generation: None,
             },
         )
     }
@@ -309,6 +310,7 @@ fn fixture_with(name: &str, p2_upto: i64) -> Fixture {
             registry: reg,
             knowledge: Some(kpath),
             projects,
+            root: None,
         },
     }
 }
@@ -820,6 +822,7 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
             at: T,
             allow_real_data_root: false,
             real_data_root: None,
+            generation: None,
         },
     )
     .unwrap_err();
@@ -839,6 +842,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             at: T,
             allow_real_data_root: false,
             real_data_root: Some(&f.dir),
+            generation: None,
         },
     )
     .unwrap_err();
@@ -854,6 +858,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             at: T,
             allow_real_data_root: false,
             real_data_root: Some(&f.dir),
+            generation: None,
         },
     )
     .unwrap_err();
@@ -866,6 +871,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             at: T,
             allow_real_data_root: true,
             real_data_root: Some(&f.dir),
+            generation: None,
         },
     )
     .unwrap();
@@ -1798,7 +1804,7 @@ fn the_family_table_matches_05_and_claims_every_2x_table() {
         ("X1", Home::Project, "outbox", Dropped, false),
         ("X1", Home::Project, "search_documents", Rebuilt, false),
         ("P10", Home::ProjectDir, "manifest.json", Dropped, true),
-        ("P11", Home::ProjectDir, "artifacts", Converted, true),
+        ("P11", Home::ProjectDir, "artifacts.files", Converted, true),
         ("F1", Home::Root, "sync.config", Converted, true),
         ("F2", Home::Root, "sync.secrets", Converted, true),
         ("F3", Home::Root, "dispatch.config", Converted, true),
@@ -1825,8 +1831,10 @@ fn the_family_table_matches_05_and_claims_every_2x_table() {
     assert_eq!(actual, expected);
     for f in FAMILIES {
         let is_db = matches!(f.home, Home::Registry | Home::Knowledge | Home::Project);
-        // 非 DB 族都还没实现，由 W3b4～W3b6 负责；DB 族都已实现。
-        assert_eq!(f.pending.is_some(), !is_db, "{} {}", f.code, f.name);
+        // sync / dispatch（W3b5）与进行中的文件事务（W3b6）还没实现；其余都已实现。
+        let later = f.code.starts_with('F') || f.code == "X12";
+        assert_eq!(f.pending.is_some(), later, "{} {}", f.code, f.name);
+        assert!(is_db || f.home == Home::Root || f.home == Home::ProjectDir);
         assert_eq!(
             f.drop_reason.is_some(),
             f.decision == Decision::Dropped,
@@ -1943,7 +1951,9 @@ fn report_json_lists_every_family_without_bodies() {
     assert_eq!(sync["pending"], "W3b5");
     assert!(sync["source"]["files"].is_null());
     assert!(
-        report.pending().contains(&"P1/artifacts: W3b4".to_string()),
+        report
+            .pending()
+            .contains(&"P1/artifacts.files: needs the data root".to_string()),
         "{:?}",
         report.pending()
     );
@@ -2713,4 +2723,453 @@ fn an_unmerged_wal_is_recovered_in_the_working_copy_only() {
         "only in the wal"
     );
     drop(writer);
+}
+
+const KB: &str = "01J00000000000000000000KB1";
+const KO: &str = "01J00000000000000000000KZ1";
+const KR: &str = "01J00000000000000000000KR1";
+
+fn put(path: &Path, bytes: &[u8]) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+/// W3b4：按 2.0 的布局摆一个完整的数据根（05 §1.1）：三类库、manifest、附件、各种备份文件、
+/// R / X 类目录、sync / dispatch 文件。库的内容来自富夹具。
+fn root_fixture(name: &str) -> (Fixture, PathBuf) {
+    let base = rich_fixture(name);
+    let root = base.dir.join("root");
+    let _ = fs::remove_dir_all(&root);
+    let copy = |from: &Path, to: PathBuf| {
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(from, to).unwrap();
+    };
+    copy(
+        &base.sources.registry,
+        root.join("registry/registry.sqlite"),
+    );
+    copy(
+        base.sources.knowledge.as_ref().unwrap(),
+        root.join("knowledge/knowledge.sqlite"),
+    );
+    for (i, (pid, code, name)) in [
+        ("P1", "AAA", "Alpha"),
+        ("P2", "BBB", "Bravo"),
+        ("P3", "CCC", "Charlie"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let dir = root.join("projects").join(pid);
+        copy(&base.sources.projects[i], dir.join("project.sqlite"));
+        // 2.0 的写法：JSON.stringify(…, null, 2) 加换行（registry-workspace.ts:711-715）。
+        put(
+            &dir.join("manifest.json"),
+            format!(
+                "{{\n  \"schema_version\": 1,\n  \"project_id\": \"{pid}\",\n  \"project_code\": \"{code}\",\n  \"name\": \"{name}\"\n}}\n"
+            )
+            .as_bytes(),
+        );
+    }
+    let p1 = root.join("projects/P1");
+    put(&p1.join("artifacts/notes.txt"), b"abc");
+    put(&p1.join("artifacts/sub/deep/blob.bin"), &[0u8, 1, 2, 255]);
+    put(
+        &p1.join("backups/pre-migration-v14-2026-09-01T00-00-00-000Z.sqlite"),
+        b"old p1",
+    );
+    put(
+        &p1.join("backups/AAA-daily-2026-09-02T00-00-00-000Z-01J0000000000000000000BK01.sqlite"),
+        b"daily",
+    );
+    put(
+        &root.join("backups/registry/pre-migration-v7-2026-08-01T00-00-00-000Z.sqlite"),
+        b"old registry",
+    );
+    put(
+        &root.join(format!("backups/knowledge/before-restore-{KB}.sqlite")),
+        b"before",
+    );
+    put(
+        &root.join(format!("backups/knowledge/orphan-{KO}-restore-{KR}.sqlite")),
+        b"orphan",
+    );
+    put(&root.join("backups/knowledge/notes.txt"), b"not a backup");
+    put(&root.join("exports/AAA-2026.aytproj"), b"zip");
+    put(&root.join("runtime/daemon.lock"), b"1234");
+    put(&root.join("logs/host.log"), b"log line\n");
+    put(
+        &root.join("webview/Default/Local Storage/leveldb/000003.log"),
+        b"theme",
+    );
+    put(&root.join("ATM_AGENT_GUIDE.md"), b"# guide");
+    put(&root.join("docs/a.md"), b"a");
+    put(&root.join("skills/atm/SKILL.md"), b"s");
+    put(&root.join("mcp-stdio.cjs"), b"//");
+    put(&root.join("docs.staging-1/a.md"), b"a");
+    put(&root.join("updates/ATM-3.0.0.exe"), b"exe");
+    fs::create_dir_all(root.join("trash")).unwrap();
+    put(&root.join("sync/config.json"), b"{\"v\":1}");
+    put(&root.join("sync/config.corrupt.json"), b"{");
+    put(&root.join("sync/secrets.json"), b"{}");
+    put(&root.join("dispatch/config.json"), b"{}");
+    put(&root.join("dispatch/logs/r1.jsonl"), b"{}\n");
+    put(&root.join("dispatch/requests.corrupt.json"), b"[");
+
+    // 附件行：A1 指向附件目录里的真实文件，A2 指向附件目录里不存在的文件，A3 指向别处。
+    let notes = p1.join("artifacts").join("notes.txt");
+    Connection::open(p1.join("project.sqlite"))
+        .unwrap()
+        .execute_batch(&format!(
+            "UPDATE artifacts SET local_path = '{}', sha256 = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+             WHERE id = 'A1';
+             INSERT INTO artifacts (id, work_item_id, kind, name, local_path, actor, created_at) VALUES
+               ('A2', 'W1', 'FILE', 'gone.txt', '{}', 'USER', '{T}'),
+               ('A3', 'W1', 'FILE', 'elsewhere.txt', 'D:/somewhere/else.txt', 'USER', '{T}');",
+            notes.display(),
+            p1.join("artifacts").join("gone.txt").display()
+        ))
+        .unwrap();
+    let sources = LegacySources::from_root(&root).unwrap();
+    (
+        Fixture {
+            dir: base.dir.clone(),
+            sources,
+        },
+        root,
+    )
+}
+
+/// 目录树里每个文件的（相对路径，sha256）。
+fn tree(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push((
+                    p.strip_prefix(dir)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    sha_of(&p),
+                ));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// W3b4：按数据根转换。附件逐文件复制、local_path 改写、目录表之外的备份文件登记、R / X 类计数；
+/// generation 由调用方给出；数据根一个字节都不变。只剩 sync / dispatch（W3b5）和进行中的事务（W3b6）pending。
+#[test]
+fn a_data_root_converts_with_its_files() {
+    let (f, root) = root_fixture("legacy-root");
+    let before = tree(&root);
+    fs::create_dir_all(f.dir.join("out")).unwrap();
+    let report = convert(
+        &f.sources,
+        &f.target(),
+        &ConvertOptions {
+            at: "2026-10-03T00:00:00.000Z",
+            allow_real_data_root: false,
+            real_data_root: None,
+            generation: Some("GEN-FROM-THE-STATE-MACHINE"),
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(tree(&root), before, "the data root is untouched");
+    assert_eq!(
+        report.pending(),
+        [
+            "root/sync.config: W3b5",
+            "root/sync.secrets: W3b5",
+            "root/dispatch.config: W3b5",
+            "root/dispatch.runs: W3b5",
+            "root/dispatch.requests: W3b5",
+            "root/dispatch.logs.final: W3b5",
+            "root/dispatch.logs.running: W3b5",
+            "root/in-flight: W3b6",
+        ]
+    );
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(&t, "SELECT generation FROM app_meta"),
+        "GEN-FROM-THE-STATE-MACHINE"
+    );
+
+    // 附件：两个文件按相对路径复制，A1 改写成新根的相对路径，原值留在 legacy 列。
+    let out = f.dir.join("out").join("artifacts").join("P1");
+    assert_eq!(fs::read(out.join("notes.txt")).unwrap(), b"abc");
+    assert_eq!(
+        fs::read(out.join("sub/deep/blob.bin")).unwrap(),
+        [0u8, 1, 2, 255]
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A1'"
+        ),
+        "data/artifacts/P1/notes.txt"
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT legacy_local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A1'"
+        ),
+        root.join("projects/P1")
+            .join("artifacts")
+            .join("notes.txt")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A3'"
+        ),
+        "D:/somewhere/else.txt"
+    );
+    let files = report
+        .checks
+        .iter()
+        .find(|c| c.family == "P1/artifacts.files")
+        .unwrap();
+    assert!(files.ok() && files.source_rows == 2, "{files:?}");
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.family == "P3/manifest.json" && c.ok())
+    );
+
+    // 备份：目录表之外的四个 2.0 备份文件登记进 legacy_backups；不认识的文件不登记。
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT group_concat(source || ' ' || scope || ' ' || coalesce(project_id, '-') || ' ' || coalesce(schema_version, '-'), '; ')
+             FROM (SELECT * FROM legacy_backups WHERE source <> 'CATALOG' ORDER BY id)"
+        ),
+        "KNOWLEDGE_BEFORE_RESTORE KNOWLEDGE - -; KNOWLEDGE_ORPHAN KNOWLEDGE - -; \
+         PRE_MIGRATION_FILE REGISTRY - 7; PRE_MIGRATION_FILE PROJECT P1 14"
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT sha256 FROM legacy_backups WHERE source = 'KNOWLEDGE_BEFORE_RESTORE'"
+        ),
+        sha_of(&root.join(format!("backups/knowledge/before-restore-{KB}.sqlite")))
+    );
+
+    // 信息项：附件行指向不存在的源文件、指向附件目录之外；目录表里的两个备份在磁盘上找不到。
+    for note in [
+        "P1/artifacts: A2 points to a missing source file",
+        "P1/artifacts: A3 points outside the project's artifacts directory; local_path kept",
+        "r/legacy_backups: 2 missing, first B1",
+    ] {
+        assert!(
+            report.notes.contains(&note.to_string()),
+            "{note}: {:?}",
+            report.notes
+        );
+    }
+
+    // R / X 类：只登记数量。
+    let count = |family: &str| {
+        let s = report.source(family).unwrap();
+        (s.rows, s.bytes, s.digest.is_empty())
+    };
+    assert_eq!(count("root/runtime"), (1, Some(4), true));
+    assert_eq!(count("root/install-copies"), (5, Some(12), true));
+    assert_eq!(count("root/diagnostic-copies"), (2, Some(2), true));
+    assert_eq!(count("root/trash"), (0, Some(0), true));
+    assert_eq!(count("root/backups").0, 6);
+    let json: serde_json::Value = serde_json::from_str(&report.report_json()).unwrap();
+    let webview = json["families"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["family"] == "root/webview")
+        .unwrap();
+    assert_eq!(
+        (
+            &webview["source"]["files"],
+            &webview["source"]["bytes"],
+            &webview["source"]["digest"]
+        ),
+        (
+            &serde_json::json!(1),
+            &serde_json::json!(5),
+            &serde_json::Value::Null
+        )
+    );
+
+    // 独立 VERIFY 结论相同；不留工作副本。
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert!(!f.dir.join("out").join("legacy-verify").exists());
+    // 覆盖：拿掉附件集合的检查就成了缺口。
+    let mut stripped = report.clone();
+    stripped.checks.retain(|c| c.spec != "artifacts.files");
+    assert!(
+        stripped
+            .failures()
+            .contains(&"P1/artifacts.files: no check ran".to_string())
+    );
+}
+
+/// W3b4：数据根里不该有的东西在动目标之前就停：未登记的顶层条目、非空的 trash、进行中的事务残留、
+/// 项目目录与 registry、sync、dispatch 目录里未登记的文件。
+#[test]
+fn data_root_entries_that_do_not_belong_stop_the_conversion() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "a stray top-level file",
+            "notes.txt",
+            "unregistered entry in the data root: notes.txt",
+        ),
+        (
+            "trash is not empty",
+            "trash/old.sqlite",
+            "trash is not empty (1 files)",
+        ),
+        (
+            "a project still being created",
+            "projects/.creating-P9/project.sqlite",
+            "in-flight file transaction",
+        ),
+        (
+            "a restore rollback file",
+            "projects/P1/project.sqlite.restore-old-X",
+            "in-flight file transaction",
+        ),
+        (
+            "a knowledge restore journal",
+            "knowledge/restore.json",
+            "knowledge/restore.json is an in-flight restore",
+        ),
+        (
+            "a stray project file",
+            "projects/P1/readme.txt",
+            "unregistered entry projects/P1/readme.txt",
+        ),
+        (
+            "a stray registry file",
+            "registry/copy.sqlite",
+            "unregistered entry registry/copy.sqlite",
+        ),
+        (
+            "a stray sync file",
+            "sync/other.json",
+            "unregistered entry sync/other.json",
+        ),
+        (
+            "a stray dispatch file",
+            "dispatch/queue.json",
+            "unregistered entry dispatch/queue.json",
+        ),
+    ];
+    for (name, extra, expected) in cases {
+        let (f, root) = root_fixture("legacy-root-refused");
+        put(&root.join(extra), b"x");
+        let f = Fixture {
+            sources: LegacySources::from_root(&root).unwrap(),
+            ..f
+        };
+        match f.convert() {
+            Err(ConvertError::Unsupported(m)) => assert!(m.contains(expected), "{name}: {m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+        assert!(!f.target().exists(), "{name}: nothing is written");
+    }
+}
+
+/// W3b4：文件族的 VERIFY。目标附件改一个字节、少一个文件，附件集合变红并给出路径；
+/// 附件行指向的目标文件不在是停级违例；manifest 的身份字段与 registry 不一致时转换停，名字不同只记信息项。
+#[test]
+fn file_families_are_verified() {
+    let (f, _) = root_fixture("legacy-root-files");
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    let out = f.dir.join("out").join("artifacts").join("P1");
+    fs::write(out.join("sub/deep/blob.bin"), [0u8, 1, 2, 254]).unwrap();
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert_eq!(again.failures(), ["P1/artifacts.files"]);
+    let bad = again
+        .checks
+        .iter()
+        .find(|c| c.family == "P1/artifacts.files")
+        .unwrap();
+    assert_eq!(
+        (bad.errors, bad.first_failure_locator.as_deref()),
+        (2, Some("P1/artifacts.files(\"sub/deep/blob.bin\")"))
+    );
+    // A1 的行带 sha256：目标文件变了，集合变红之外再记一条信息项。
+    fs::write(out.join("notes.txt"), b"abd").unwrap();
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(
+        again
+            .notes
+            .contains(&"P1/artifacts: A1 size or sha256 differs from its row".to_string()),
+        "{:?}",
+        again.notes
+    );
+    fs::remove_file(out.join("notes.txt")).unwrap();
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert_eq!(
+        again.failures(),
+        [
+            "P1/artifacts.files",
+            "P1/artifacts: A1 points to a file missing from the target"
+        ]
+    );
+
+    // 登记过的备份文件在转换之后变了：只记信息项（X 类）。
+    let (f, root) = root_fixture("legacy-root-backup-drift");
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    fs::write(
+        root.join(format!("backups/knowledge/before-restore-{KB}.sqlite")),
+        b"changed",
+    )
+    .unwrap();
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert!(
+        again.notes.contains(&format!(
+            "r/legacy_backups: 1 sha256 differs, first KNOWLEDGE_BEFORE_RESTORE:backups/knowledge/before-restore-{KB}.sqlite"
+        )),
+        "{:?}",
+        again.notes
+    );
+
+    let (f, root) = root_fixture("legacy-root-manifest");
+    let manifest = root.join("projects/P2/manifest.json");
+    let text = fs::read_to_string(&manifest).unwrap();
+    fs::write(
+        &manifest,
+        text.replace("\"BBB\"", "\"XXX\"")
+            .replace("Bravo", "Renamed"),
+    )
+    .unwrap();
+    match f.convert() {
+        Err(ConvertError::Verify(r)) => {
+            assert_eq!(r.failures(), ["P2/manifest.json"]);
+            assert!(r.notes.contains(
+                &"P2/manifest.json: name differs from the registry (2.0 does not rewrite it on rename)".to_string()
+            ));
+        }
+        other => panic!("{other:?}"),
+    }
+    fs::write(&manifest, text.replace("Bravo", "Renamed")).unwrap();
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    fs::remove_file(&manifest).unwrap();
+    match f.convert() {
+        Err(ConvertError::Verify(r)) => assert_eq!(r.failures(), ["P2/manifest.json"]),
+        other => panic!("{other:?}"),
+    }
 }
