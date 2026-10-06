@@ -4,7 +4,8 @@
 //! 身份不回退、回执原地变墓碑、全局流打撤销标记、其他范围不受影响、失败时什么都不变。
 
 use atm_store::backup::{
-    BackupError, artifacts_root, attachment_lock_waiters, create_backup, verify_backup,
+    BackupError, WITHDRAWN_DIR, Withdrawal, artifacts_root, attachment_lock_waiters, create_backup,
+    discard_backup, sweep_withdrawn, verify_backup, withdrawn_pending,
 };
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
@@ -787,7 +788,7 @@ fn a_failed_restore_changes_nothing() {
     };
     let e = restore_project(&w.store, &b, "PA", &short).unwrap_err();
     assert!(
-        matches!(e, BackupError::Sqlite(_) | BackupError::Write(_)),
+        matches!(e, BackupError::Sqlite(_) | BackupError::Write { .. }),
         "{e:?}"
     );
     let mut after = fingerprint(&w);
@@ -1785,4 +1786,76 @@ fn l011_restores_keep_the_current_lifecycle() {
     };
     restore_project(&w.store, &active_backup, "PA", &short).unwrap_err();
     assert_eq!(lifecycle(), "TRASHED");
+}
+
+/// W2 peer r2 P1-02：撤回只删没固定、没有恢复引用的备份；隔离区里的残留按登记行放回或删掉。
+#[test]
+fn withdrawal_only_removes_unused_backups_and_sweeps_leftovers() {
+    let w = world("withdrawal");
+    let dirs = || {
+        let mut v: Vec<String> = fs::read_dir(&w.backups)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    };
+    let rows = || {
+        let all: String = q(
+            &w,
+            "SELECT coalesce(group_concat(id), '') FROM backups",
+            vec![],
+        )
+        .unwrap();
+        let mut v: Vec<String> = all
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        v.sort();
+        v
+    };
+
+    // 没人用过：行与目录都删掉，隔离区不留。
+    let unused = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
+    assert_eq!(
+        discard_backup(&w.store, &unused).unwrap(),
+        Withdrawal::Withdrawn
+    );
+    assert!(!unused.dir.exists());
+    assert_eq!(dirs(), rows());
+
+    // 被恢复选中：固定期间留着；固定解除后仍有恢复引用，也留着。
+    let used = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
+    restore_project(&w.store, &used.id, "PA", &opts(&w)).unwrap();
+    assert_eq!(
+        discard_backup(&w.store, &used).unwrap(),
+        Withdrawal::Kept("PINNED")
+    );
+    w.store
+        .write(|tx| tx.execute("UPDATE backups SET pinned_until = NULL", []))
+        .unwrap();
+    assert_eq!(
+        discard_backup(&w.store, &used).unwrap(),
+        Withdrawal::Kept("RESTORE_REFERENCE")
+    );
+    verify_backup(&w.store, &used.id).unwrap();
+    assert_eq!(dirs(), rows());
+
+    // 隔离区：登记着的放回原处，没登记的删掉，清完隔离区本身也不留。
+    let parked = create_backup(&w.store, &w.backups, "MANUAL", T2).unwrap();
+    let quarantine = w.backups.join(WITHDRAWN_DIR);
+    fs::create_dir_all(quarantine.join("ORPHAN")).unwrap();
+    fs::write(quarantine.join("ORPHAN").join("atm.sqlite"), b"x").unwrap();
+    fs::rename(&parked.dir, quarantine.join(&parked.id)).unwrap();
+    assert_eq!(withdrawn_pending(&w.backups), 2);
+    assert_eq!(sweep_withdrawn(&w.store, &w.backups).unwrap(), 0);
+    assert_eq!(withdrawn_pending(&w.backups), 0);
+    assert!(!quarantine.exists());
+    verify_backup(&w.store, &parked.id).unwrap();
+    assert_eq!(dirs(), rows());
+    assert_eq!(
+        discard_backup(&w.store, &unused).unwrap(),
+        Withdrawal::Kept("NOT_REGISTERED")
+    );
 }

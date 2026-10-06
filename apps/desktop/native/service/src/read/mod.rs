@@ -15,6 +15,7 @@ pub mod delta;
 pub mod field;
 pub mod knowledge;
 pub mod lists;
+pub mod metrics;
 pub(crate) mod present;
 pub mod search;
 pub mod trace;

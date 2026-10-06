@@ -950,8 +950,12 @@ impl Service {
     /// 第一趟不带备份走完整条流水线——重放、冲突、已经在目标上的请求在这里就有结果，不碰备份；
     /// 只有判定为新操作、而且真要迁移时，动作以 [`NEEDS_BACKUP`] 失败（整个事务回滚，零写入）。
     /// 这时做备份，再带着它写第二趟。第二趟里项目版本变了（并发迁移抢先）就重做备份；第二趟以重放、
-    /// 冲突、没迁移或失败告终时，这份备份不属于任何迁移，撤回（删行、删目录；尽力而为，见
-    /// [`Service::withdraw_backup`]）。备份失败生命周期不变。
+    /// 冲突、没迁移或失败告终时，这份备份不属于任何迁移，撤回（见 [`Service::withdraw_backup`]）。
+    /// 备份失败生命周期不变。
+    ///
+    /// 世代只在进来时读一次，每一趟都带着它（W2 peer r2 P1-01）：两趟之间项目被恢复过，第二趟报
+    /// SCOPE_RESTORED，不能因为「版本变了重做一趟」就悄悄采纳恢复后的世代、把旧请求迁移到新数据上。
+    /// 重放、撤销、冲突的裁决在世代检查之前，照旧优先。
     pub fn set_lifecycle(
         &self,
         principal: &Principal,
@@ -961,10 +965,15 @@ impl Service {
     ) -> Result<Written, DomainError> {
         capability::require(principal, transition.capability())?;
         let target_id = self.project_scope(project)?;
+        let scope = ReceiptScope::project(target_id.clone());
+        let enqueued = self
+            .store()
+            .read(|tx| crate::write::generation(tx, &scope))
+            .map_err(crate::write::read_error)?;
         let mut backup: Option<(atm_store::backup::BackupInfo, i64)> = None;
         for _ in 0..LIFECYCLE_ATTEMPTS {
             let pre = backup.as_ref().map(|(b, v)| (b.id.clone(), *v));
-            match self.lifecycle_write(principal, &target_id, transition, op_id, pre) {
+            match self.lifecycle_write(principal, &target_id, transition, op_id, enqueued, pre) {
                 Err(e) if e.details.contains_key(NEEDS_BACKUP) => {
                     if let Some((stale, _)) = backup.take() {
                         self.withdraw_backup(&stale);
@@ -1013,10 +1022,16 @@ impl Service {
         })
     }
 
-    /// 撤回一份没用上的备份。尽力而为：撤回失败时留下的是一份完整、有效的备份（W5 的保留期会清），
-    /// 不能因此把已经有结果的请求（迁移、重放、冲突）改报成错误，也不该因此中止一次还没开始的迁移。
+    /// 撤回一份这次迁移没用上的备份（W2 peer r2 P1-02）。
+    ///
+    /// 「这次没用上」不等于「谁都没用上」：两趟之间它可能已被别人选中恢复、固定。存储层在附件锁下
+    /// 有条件地删除——固定的、被恢复引用的、文件被占用的都原样保留（登记与目录都完整，归保留策略管）；
+    /// 目录先挪进隔离区再删行，删不掉的留在隔离区，下次备份或撤回时清理，`list_backups` 报告其数目。
+    /// 结果不改变已有结论的请求（迁移、重放、冲突），也不中止还没开始的迁移，所以这里只记诊断。
     fn withdraw_backup(&self, b: &atm_store::backup::BackupInfo) {
-        let _ = atm_store::backup::discard_backup(self.store(), b);
+        let outcome = atm_store::backup::discard_backup(self.store(), b)
+            .unwrap_or_else(|e| atm_store::backup::Withdrawal::Failed(e.to_string()));
+        self.note_withdrawal(&b.id, outcome);
     }
 
     /// 一趟生命周期写入。`pre` 是已经做好的备份与做备份前读到的项目版本。
@@ -1026,6 +1041,7 @@ impl Service {
         target_id: &str,
         transition: Transition,
         op_id: &str,
+        enqueued: Option<i64>,
         pre: Option<(String, i64)>,
     ) -> Result<Written, DomainError> {
         let target_id = target_id.to_owned();
@@ -1038,7 +1054,7 @@ impl Service {
                 scope: ReceiptScope::project(target_id.clone()),
                 session: None,
                 actor: None,
-                expected_generation: None,
+                expected_generation: enqueued,
                 fingerprint: fixed_fp(json!({ "project": target_id })),
                 compat_v1: None,
                 replay_guard: None,

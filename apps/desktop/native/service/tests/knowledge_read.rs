@@ -574,10 +574,25 @@ fn l114_search_behaves_like_2x() {
     w.put(content("deploy-main", "deploy", "x"));
     w.put(content("deploy-guide", "deploy guide", "x"));
     w.put(content("deploy-faq", "deploy faq", "x"));
-    assert_eq!(
-        w.found("deploy"),
-        ["deploy-main", "deploy-faq", "deploy-guide"]
-    );
+    // 同一毫秒里生成的两个 ULID 先后不定，所以期望按实际 id 排，不按插入顺序。
+    let newer_first: bool = w
+        .svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT (SELECT id FROM knowledge_entries WHERE slug = 'deploy-faq')
+                      > (SELECT id FROM knowledge_entries WHERE slug = 'deploy-guide')",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    let (a, b) = if newer_first {
+        ("deploy-faq", "deploy-guide")
+    } else {
+        ("deploy-guide", "deploy-faq")
+    };
+    assert_eq!(w.found("deploy"), ["deploy-main", a, b]);
     // 空 query 列出全部未归档条目。
     assert_eq!(w.found("").len(), 7);
     for (r, field) in [

@@ -183,3 +183,152 @@ fn records_preview_as_knowledge() {
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::RECORD_NOT_FOUND);
 }
+
+/// 同一个库、换一套存储配置的第二个 Service（备份根相同）。
+fn sibling(w: &World, config: atm_store::Config) -> atm_service::write::Service {
+    let store = atm_store::Store::open(&w.dir.join("atm.sqlite"), config).unwrap();
+    atm_service::write::Service::new(store).with_backups_root(w.dir.join("backups"))
+}
+
+/// peer W2 r2 P2-01：存储失败按类别给错误码，不一律报可重试的 STORE_BUSY。
+/// 写准入超时 → STORE_BUSY + committed:false；读连接占满 → STORE_BUSY；存储关闭 → SERVICE_UNAVAILABLE；
+/// 执行了又失败（超预算）→ INTERNAL_ERROR。失败的备份不在备份根下留没登记的目录。
+#[test]
+fn backup_store_failures_keep_their_kind() {
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+    let w = world("backup-store-failures");
+    let id = w.svc.create_manual_backup(&user()).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let project = || RestoreScope::Project("ATM".into());
+    let rows = || w.count("SELECT count(*) FROM backups") as usize;
+
+    // 执行失败：写预算为零，校验登记那一笔写超预算回滚。
+    let other = sibling(
+        &w,
+        atm_store::Config {
+            write_budget: Duration::ZERO,
+            ..Default::default()
+        },
+    );
+    let e = other.restore_scope(&user(), &id, project()).unwrap_err();
+    assert_eq!(e.code, ErrorCode::INTERNAL_ERROR, "{e:?}");
+    assert_eq!(e.details.get("committed"), None);
+    drop(other);
+
+    // 写准入超时：一个作业占着写线程、一个排满队列，第三笔等不到位置。
+    let other = sibling(
+        &w,
+        atm_store::Config {
+            queue_capacity: 1,
+            admit_wait: Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+    let (started_tx, started_rx) = channel();
+    let (gate_tx, gate_rx) = channel::<()>();
+    let a = other
+        .store()
+        .submit(move |_| {
+            started_tx.send(()).unwrap();
+            let _ = gate_rx.recv_timeout(Duration::from_secs(10));
+            Ok::<_, rusqlite::Error>(())
+        })
+        .unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let b = other
+        .store()
+        .submit(|_| Ok::<_, rusqlite::Error>(()))
+        .unwrap();
+    let e = other.restore_scope(&user(), &id, project()).unwrap_err();
+    let made = other.create_manual_backup(&user()).unwrap_err();
+    gate_tx.send(()).unwrap();
+    a.wait().unwrap();
+    b.wait().unwrap();
+    assert_eq!(e.code, ErrorCode::STORE_BUSY, "{e:?}");
+    assert_eq!(e.details["committed"], false);
+    assert_eq!(made.code, ErrorCode::STORE_BUSY, "{made:?}");
+    assert_eq!(
+        backup_dirs(&w),
+        rows(),
+        "a failed backup left an unregistered directory"
+    );
+    drop(other);
+
+    // 读连接占满。
+    let other = sibling(
+        &w,
+        atm_store::Config {
+            readers: 1,
+            read_wait: Duration::from_millis(100),
+            ..Default::default()
+        },
+    );
+    let e = std::thread::scope(|s| {
+        let (held_tx, held_rx) = channel();
+        let (gate_tx, gate_rx) = channel::<()>();
+        let store = other.store();
+        s.spawn(move || {
+            store
+                .read(|_| {
+                    held_tx.send(()).unwrap();
+                    let _ = gate_rx.recv_timeout(Duration::from_secs(10));
+                    Ok::<_, rusqlite::Error>(())
+                })
+                .unwrap();
+        });
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // 知识库范围不经服务层的项目解析，第一次读就在存储层的备份校验里。
+        let e = other
+            .restore_scope(&user(), &id, RestoreScope::Knowledge)
+            .unwrap_err();
+        gate_tx.send(()).unwrap();
+        e
+    });
+    assert_eq!(e.code, ErrorCode::STORE_BUSY, "{e:?}");
+    assert!(e.message.starts_with("store: read"), "{e:?}");
+    assert_eq!(e.details.get("committed"), None);
+
+    // 存储已关闭。
+    other.store().shutdown();
+    let e = other.create_manual_backup(&user()).unwrap_err();
+    assert_eq!(e.code, ErrorCode::SERVICE_UNAVAILABLE, "{e:?}");
+    drop(other);
+    assert_eq!(
+        backup_dirs(&w),
+        rows(),
+        "a failed backup left an unregistered directory"
+    );
+}
+
+/// 对照：库已恢复、附件没换入，不是「没提交」——INTERNAL_ERROR 带实际的世代，不带 committed:false。
+#[test]
+fn restore_with_attachments_pending_reports_the_committed_generation() {
+    use atm_store::restore::{SwapStep, finish_attachment_swaps, inject_swap_fault};
+    let w = world("backup-restore-pending");
+    w.task("before");
+    let backup = w.svc.create_manual_backup(&user()).unwrap();
+    w.task("after");
+    inject_swap_fault(w.svc.store().path(), SwapStep::MoveStagedIn);
+    let e = w
+        .svc
+        .restore_scope(
+            &user(),
+            backup["id"].as_str().unwrap(),
+            RestoreScope::Project("ATM".into()),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::INTERNAL_ERROR);
+    assert_eq!(
+        e.details["attachments_pending_generation"],
+        w.scalar("SELECT scope_gen FROM projects WHERE id = 'PA'")
+    );
+    assert_eq!(e.details.get("committed"), None);
+    assert_eq!(
+        w.count("SELECT count(*) FROM work_items WHERE project_id = 'PA'"),
+        1
+    );
+    finish_attachment_swaps(w.svc.store()).unwrap();
+}

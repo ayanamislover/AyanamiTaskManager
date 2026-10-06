@@ -27,8 +27,11 @@ const ARTIFACTS_DIR: &str = "artifacts";
 pub enum BackupError {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
-    /// 写线程拒绝或执行失败（STORE_BUSY 等），带错误码与说明。
-    Write(String),
+    /// 写线程 / 读连接池拒绝或执行失败。`failure` 区分准入与执行，服务层据它给错误码，不解析说明文字。
+    Write {
+        failure: StoreFailure,
+        message: String,
+    },
     NotFound(String),
     /// 文件、manifest、目录三者对不上，或完整性检查失败。
     Corrupt(String),
@@ -58,7 +61,7 @@ impl std::fmt::Display for BackupError {
         match self {
             BackupError::Sqlite(e) => write!(f, "sqlite: {e}"),
             BackupError::Io(e) => write!(f, "io: {e}"),
-            BackupError::Write(m) => write!(f, "write: {m}"),
+            BackupError::Write { message, .. } => write!(f, "store: {message}"),
             BackupError::NotFound(m) => write!(f, "backup not found: {m}"),
             BackupError::Corrupt(m) => write!(f, "backup corrupt: {m}"),
             BackupError::SchemaMismatch => {
@@ -99,15 +102,43 @@ impl From<std::io::Error> for BackupError {
     }
 }
 
+/// 存储执行失败的类别（W2 peer r2 P2-01）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreFailure {
+    /// 写准入超时：作业没有入队，以后也不会执行。
+    WriteBusy,
+    /// 读连接全部占用：这一次读没有执行。
+    ReadBusy,
+    /// 存储已关闭，作业没有入队。
+    Closed,
+    /// 作业执行了、失败并回滚（超预算、panic、SQLite 错误、作业自己的错误）。
+    Failed,
+}
+
 impl<E: std::fmt::Debug> From<crate::WriteError<E>> for BackupError {
     fn from(e: crate::WriteError<E>) -> Self {
-        BackupError::Write(format!("{}: {e:?}", e.code().unwrap_or("REJECTED")))
+        let failure = match e {
+            crate::WriteError::Busy => StoreFailure::WriteBusy,
+            crate::WriteError::Closed => StoreFailure::Closed,
+            _ => StoreFailure::Failed,
+        };
+        BackupError::Write {
+            failure,
+            message: format!("write: {e:?}"),
+        }
     }
 }
 
 impl<E: std::fmt::Debug> From<crate::ReadError<E>> for BackupError {
     fn from(e: crate::ReadError<E>) -> Self {
-        BackupError::Write(format!("read: {e:?}"))
+        let failure = match e {
+            crate::ReadError::Busy => StoreFailure::ReadBusy,
+            _ => StoreFailure::Failed,
+        };
+        BackupError::Write {
+            failure,
+            message: format!("read: {e:?}"),
+        }
     }
 }
 
@@ -216,6 +247,7 @@ pub(crate) fn is_internal(rel: &str) -> bool {
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
     let _lock = attachments_lock(store, "create_backup")?;
     crate::restore::finish_swaps_locked(store)?;
+    sweep_withdrawn_locked(store, root);
     create_backup_locked(store, root, kind, at)
 }
 
@@ -231,6 +263,23 @@ pub(crate) fn create_backup_locked(
     let id = ulid(&side)?;
     let dir = root.join(&id);
     fs::create_dir_all(&dir)?;
+    // 登记之前任何一步失败，目录都不留：备份根下不能有没登记的目录（W2 peer r2 P1-02）。
+    let made = write_backup(store, side, &id, &dir, kind, at);
+    if made.is_err() {
+        let _ = fs::remove_dir_all(&dir);
+    }
+    made
+}
+
+fn write_backup(
+    store: &Store,
+    side: Connection,
+    id: &str,
+    dir: &Path,
+    kind: &str,
+    at: &str,
+) -> Result<BackupInfo> {
+    let id = id.to_string();
 
     let tmp = dir.join(format!("{DB_FILE}.tmp"));
     side.execute("VACUUM INTO ?1", [path_str(&tmp)?])?;
@@ -279,7 +328,7 @@ pub(crate) fn create_backup_locked(
     let row = (
         id.clone(),
         kind.to_string(),
-        path_str(&dir)?.to_string(),
+        path_str(dir)?.to_string(),
         sha256.clone(),
         size_bytes as i64,
         attachments_sha256.clone(),
@@ -306,7 +355,7 @@ pub(crate) fn create_backup_locked(
     Ok(BackupInfo {
         id,
         kind: kind.to_string(),
-        dir,
+        dir: dir.to_path_buf(),
         sha256,
         size_bytes,
         attachments_sha256,
@@ -314,15 +363,137 @@ pub(crate) fn create_backup_locked(
     })
 }
 
-/// 撤回一份刚做、没被任何迁移用上的备份（服务层生命周期迁移在并发里被抢先时）：删行、删目录。
-/// 只给调用方自己刚建的那一份用，不是保留策略。
-pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<()> {
-    let id = info.id.clone();
-    store.write(move |tx| tx.execute("DELETE FROM backups WHERE id = ?1", [&id]))?;
-    match fs::remove_dir_all(&info.dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
-        _ => Ok(()),
+/// 备份根目录下的隔离区：撤回时目录先挪到这里再删登记行，删不掉的留在这里等下次清理。
+pub const WITHDRAWN_DIR: &str = ".withdrawn";
+
+/// 一次撤回的结果（W2 peer r2 P1-02）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Withdrawal {
+    /// 登记行和目录都删掉了。
+    Withdrawn,
+    /// 原样保留，登记与目录都完整：`PINNED`（已固定）、`RESTORE_REFERENCE`（有恢复记着它）、
+    /// `FILES_IN_USE`（目录挪不动）、`NOT_REGISTERED`（登记行已经不在，不碰目录）。
+    Kept(&'static str),
+    /// 登记行已删，目录留在隔离区，下次 [`create_backup`] / [`discard_backup`] 时清理。
+    CleanupPending,
+    /// 存储出错，状态见隔离区（下次清理会按登记行把目录放回或删掉）。
+    Failed(String),
+}
+
+impl Withdrawal {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Withdrawal::Withdrawn => "WITHDRAWN",
+            Withdrawal::Kept(_) => "KEPT",
+            Withdrawal::CleanupPending => "CLEANUP_PENDING",
+            Withdrawal::Failed(_) => "FAILED",
+        }
     }
+}
+
+/// 撤回一份调用方自己刚做、自己没用上的备份（服务层生命周期迁移在并发里被抢先时）。
+///
+/// 「自己没用上」不等于「谁都没用上」：两趟之间它可能已被别人选中恢复。所以：
+/// - 持附件锁，与按范围恢复（选中、校验、固定都在锁里）和备份串行；
+/// - 只删没固定、没有恢复引用的，条件写在 DELETE 本身里，不靠事先查一次；
+/// - 目录先改名进隔离区再删行：改名挪不动（文件被占用）就整份保留；删行没删成就改名放回；
+///   删行之后目录删不掉，登记已无、目录在隔离区，下次清理（[`sweep_withdrawn`]）。
+///
+/// 任何时刻都不会出现「目录在备份根下却没有登记」或「登记着却缺一半文件」。
+pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
+    let _lock = attachments_lock(store, "discard_backup")?;
+    let root = info.dir.parent().ok_or_else(|| {
+        BackupError::Corrupt(format!("backup dir has no parent: {}", info.dir.display()))
+    })?;
+    sweep_withdrawn_locked(store, root);
+    let key = info.id.clone();
+    let state: Option<String> = store.read(move |tx| {
+        tx.query_row(
+            "SELECT CASE WHEN b.pinned_until IS NOT NULL THEN 'PINNED'
+                         WHEN EXISTS (SELECT 1 FROM scope_generations g WHERE g.backup_id = b.id) THEN 'RESTORE_REFERENCE'
+                         ELSE '' END
+             FROM backups b WHERE b.id = ?1",
+            [key],
+            |r| r.get(0),
+        )
+        .optional()
+    })?;
+    match state.as_deref() {
+        None => return Ok(Withdrawal::Kept("NOT_REGISTERED")),
+        Some("PINNED") => return Ok(Withdrawal::Kept("PINNED")),
+        Some("RESTORE_REFERENCE") => return Ok(Withdrawal::Kept("RESTORE_REFERENCE")),
+        _ => {}
+    }
+    let quarantine = root.join(WITHDRAWN_DIR);
+    fs::create_dir_all(&quarantine)?;
+    let parked = quarantine.join(&info.id);
+    if fs::rename(&info.dir, &parked).is_err() {
+        let _ = fs::remove_dir(&quarantine);
+        return Ok(Withdrawal::Kept("FILES_IN_USE"));
+    }
+    let key = info.id.clone();
+    let deleted = store.write(move |tx| {
+        tx.execute(
+            "DELETE FROM backups WHERE id = ?1 AND pinned_until IS NULL
+               AND NOT EXISTS (SELECT 1 FROM scope_generations WHERE backup_id = ?1)",
+            [key],
+        )
+    });
+    match deleted {
+        Ok(1) => {}
+        other => {
+            // 没删成：放回原处。放不回时登记还在、目录在隔离区，下次清理按登记行放回。
+            let _ = fs::rename(&parked, &info.dir);
+            let _ = fs::remove_dir(&quarantine);
+            return match other {
+                Ok(_) => Ok(Withdrawal::Kept("RESTORE_REFERENCE")),
+                Err(e) => Err(e.into()),
+            };
+        }
+    }
+    if fs::remove_dir_all(&parked).is_err() {
+        return Ok(Withdrawal::CleanupPending);
+    }
+    let _ = fs::remove_dir(&quarantine);
+    Ok(Withdrawal::Withdrawn)
+}
+
+/// 清理隔离区：登记行还在的放回备份根，不在的删掉。返回清不掉的个数。
+pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<usize> {
+    let _lock = attachments_lock(store, "sweep_withdrawn")?;
+    Ok(sweep_withdrawn_locked(store, root))
+}
+
+/// 隔离区里还有几份没清掉（诊断用；不拿锁，可能与正在进行的撤回差一份）。
+pub fn withdrawn_pending(root: &Path) -> usize {
+    fs::read_dir(root.join(WITHDRAWN_DIR)).map_or(0, |d| d.count())
+}
+
+pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
+    let quarantine = root.join(WITHDRAWN_DIR);
+    let Ok(entries) = fs::read_dir(&quarantine) else {
+        return 0;
+    };
+    let mut left = 0;
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let key = id.clone();
+        let registered = store.read(move |tx| {
+            tx.query_row("SELECT count(*) FROM backups WHERE id = ?1", [key], |r| {
+                r.get::<_, i64>(0)
+            })
+        });
+        let done = match registered {
+            Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
+            Ok(_) => fs::rename(entry.path(), root.join(&id)).is_ok(),
+            Err(_) => false,
+        };
+        if !done {
+            left += 1;
+        }
+    }
+    let _ = fs::remove_dir(&quarantine);
+    left
 }
 
 /// 校验通过的备份：恢复需要的定位信息。

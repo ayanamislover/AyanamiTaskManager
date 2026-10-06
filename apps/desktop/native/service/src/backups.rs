@@ -15,7 +15,7 @@ use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::principal::Principal;
 use atm_domain::text::js_trim;
 use atm_domain::time::Timestamp;
-use atm_store::backup::{BackupError, BackupInfo, create_backup};
+use atm_store::backup::{BackupError, BackupInfo, StoreFailure, Withdrawal, create_backup};
 use atm_store::restore::{RestoreOptions, RestoreOutcome, restore_knowledge, restore_project};
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -25,6 +25,8 @@ pub const RESTORE_PIN_DAYS: i64 = 30;
 /// 恢复事务的时长预算。
 const RESTORE_BUDGET: Duration = Duration::from_secs(30);
 const LIST_MAX: usize = 200;
+/// 撤回诊断保留的条数。
+pub const WITHDRAWALS_KEPT: usize = 16;
 
 /// 按范围恢复的范围。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,7 +56,14 @@ pub(crate) fn backup_error(e: BackupError) -> DomainError {
         ),
         BackupError::TimelineMismatch(_) => (ErrorCode::BACKUP_PROJECT_IDENTITY_MISMATCH, None),
         BackupError::ScopeMissing(_) => (ErrorCode::BACKUP_RESTORE_SCOPE_UNSUPPORTED, None),
-        BackupError::Write(_) => (ErrorCode::STORE_BUSY, Some(("committed", json!(false)))),
+        // 只有真正没执行的才是可重试的 STORE_BUSY / SERVICE_UNAVAILABLE（W2 peer r2 P2-01）。
+        // 写准入超时保证这一次写没有提交；读忙只说明这一次读没做，之前的步骤由各自的错误说明。
+        BackupError::Write { failure, .. } => match failure {
+            StoreFailure::WriteBusy => (ErrorCode::STORE_BUSY, Some(("committed", json!(false)))),
+            StoreFailure::ReadBusy => (ErrorCode::STORE_BUSY, None),
+            StoreFailure::Closed => (ErrorCode::SERVICE_UNAVAILABLE, None),
+            StoreFailure::Failed => (ErrorCode::INTERNAL_ERROR, None),
+        },
         // 库已经恢复、附件还没换入：不能当作没发生，交给调用方看详情。
         BackupError::AttachmentsPending { generation, .. } => (
             ErrorCode::INTERNAL_ERROR,
@@ -116,7 +125,35 @@ impl Service {
                 .collect::<rusqlite::Result<_>>()
             })
             .map_err(|e| internal(format!("{e:?}")))?;
-        Ok(json!({ "backups": rows }))
+        let pending = self
+            .backups_root
+            .as_deref()
+            .map_or(0, atm_store::backup::withdrawn_pending);
+        let recent: Vec<Value> = self
+            .withdrawals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect();
+        Ok(json!({
+            "backups": rows,
+            "withdrawals": { "cleanupPending": pending, "recent": recent },
+        }))
+    }
+
+    /// 记一次撤回的结果，只留最近 [`WITHDRAWALS_KEPT`] 条。
+    pub(crate) fn note_withdrawal(&self, id: &str, outcome: Withdrawal) {
+        let reason = match &outcome {
+            Withdrawal::Kept(why) => Some((*why).to_string()),
+            Withdrawal::Failed(e) => Some(e.chars().take(200).collect()),
+            _ => None,
+        };
+        let mut log = self.withdrawals.lock().unwrap_or_else(|e| e.into_inner());
+        if log.len() == WITHDRAWALS_KEPT {
+            log.pop_front();
+        }
+        log.push_back(json!({ "id": id, "outcome": outcome.as_str(), "reason": reason }));
     }
 
     /// 手动整库备份（`backup.create_manual`，只有 User）。

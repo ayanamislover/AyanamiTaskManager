@@ -115,6 +115,8 @@ pub fn restore_project(
     let _serial = attachments_lock(store, "restore_project")?;
     // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
     finish_swaps_locked(store)?;
+    // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
+    crate::backup::sweep_withdrawn_locked(store, opts.backups_root);
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
     pin(store, backup_id, opts.pin_until)?;
@@ -164,6 +166,8 @@ pub fn restore_knowledge(
 ) -> Result<RestoreOutcome> {
     let _serial = attachments_lock(store, "restore_knowledge")?;
     finish_swaps_locked(store)?;
+    // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
+    crate::backup::sweep_withdrawn_locked(store, opts.backups_root);
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.db)?;
     let present: bool =

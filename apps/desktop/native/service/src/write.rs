@@ -150,6 +150,8 @@ pub struct Service {
     pub(crate) backups_root: Option<std::path::PathBuf>,
     /// 测试用：PRE_* 备份做完、第二趟写入之前调用，模拟并发迁移抢先。
     pub(crate) backup_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+    /// 最近几次备份撤回的结果（有界诊断，`list_backups` 返回；W2 peer r2 P1-02）。
+    pub(crate) withdrawals: std::sync::Mutex<std::collections::VecDeque<Value>>,
 }
 
 impl Service {
@@ -159,6 +161,7 @@ impl Service {
             clock: None,
             backups_root: None,
             backup_hook: None,
+            withdrawals: Default::default(),
         }
     }
 
@@ -587,7 +590,7 @@ fn conflict(op_id: &str, reason: &ConflictReason, candidates: &[CandidateSummary
     e
 }
 
-fn read_error(e: ReadError<rusqlite::Error>) -> DomainError {
+pub(crate) fn read_error(e: ReadError<rusqlite::Error>) -> DomainError {
     match e {
         ReadError::Busy => {
             DomainError::new(ErrorCode::STORE_BUSY, "存储繁忙，稍后用同一个 op_id 重试")

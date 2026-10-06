@@ -4,10 +4,11 @@ mod support;
 
 use atm_domain::error::ErrorCode;
 use atm_domain::work::Operation;
+use atm_service::backups::RestoreScope;
 use atm_service::project::{CreateProjectRequest, PathInfo, Transition};
 use atm_service::session::{BeginRequest, EndRequest, Outcome, ProjectSelector};
 use atm_service::work::Target;
-use atm_service::write::Written;
+use atm_service::write::{Service, Written};
 use atm_store::paths::path_key;
 use serde_json::{Value, json};
 use support::*;
@@ -924,7 +925,6 @@ fn l002_lifecycle_replays_and_conflicts_make_no_backups() {
     assert_eq!(w.count("SELECT count(*) FROM backups"), 2);
 }
 
-/// 同一 World，换上「备份做完后先让别人改一下项目」的钩子。
 /// 同一 World，换上「备份做完后先让别人改一下项目」的钩子（只在第一次备份后改）。返回做了几次备份。
 fn racing(
     name: &str,
@@ -1000,4 +1000,203 @@ fn l002_concurrent_archives_keep_one_backup() {
     assert_eq!(results.iter().filter(|r| r.replayed).count(), 1);
     assert_eq!(w.count("SELECT count(*) FROM backups"), 1);
     assert_eq!(backup_dirs(&w).len(), 1);
+}
+
+/// 钩子经弱引用拿到同一个 Service：模拟两趟之间同一进程里的另一个调用（恢复、同 op 归档）。只在第一次备份后触发。
+fn hooked(
+    name: &str,
+    hook: impl Fn(&Service, &std::path::Path) + Send + Sync + 'static,
+) -> (std::sync::Arc<Service>, std::path::PathBuf) {
+    let World { svc, dir, .. } = world(name);
+    let (d, once) = (dir.clone(), std::sync::atomic::AtomicBool::new(true));
+    let svc = std::sync::Arc::new_cyclic(|weak: &std::sync::Weak<Service>| {
+        let weak = weak.clone();
+        svc.with_backup_hook(std::sync::Arc::new(move || {
+            if once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                hook(&weak.upgrade().unwrap(), &d);
+            }
+        }))
+    });
+    (svc, dir)
+}
+
+fn query(svc: &Service, sql: &str) -> Value {
+    let sql = sql.to_owned();
+    let v: rusqlite::types::Value = svc
+        .store()
+        .read(move |tx| tx.query_row(&sql, [], |r| r.get(0)))
+        .unwrap();
+    match v {
+        rusqlite::types::Value::Integer(n) => json!(n),
+        rusqlite::types::Value::Text(t) => json!(t),
+        _ => Value::Null,
+    }
+}
+
+fn dirs_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir.join("backups"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+fn rows_in(svc: &Service) -> Vec<String> {
+    let mut ids: Vec<String> = svc
+        .store()
+        .read(|tx| {
+            tx.prepare("SELECT id FROM backups")?
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .unwrap();
+    ids.sort();
+    ids
+}
+
+/// peer W2 r2 P1-01：PRE_ARCHIVE 做完、第二趟之前项目被恢复。第二趟带着进来时的世代，报 SCOPE_RESTORED，
+/// 不采纳恢复后的世代继续迁移：项目仍是 ACTIVE，这个 op 没有回执、没有事件，没用上的 PRE_ARCHIVE 撤回。
+#[test]
+fn l002_a_restore_between_passes_is_scope_restored() {
+    let (svc, dir) = hooked("pj-lifecycle-restored", |other, _| {
+        let id = other.create_manual_backup(&user()).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        other
+            .restore_scope(&user(), &id, RestoreScope::Project("ATM".into()))
+            .unwrap();
+    });
+    let before = query(&svc, "SELECT scope_gen FROM projects WHERE id = 'PA'");
+    let e = svc
+        .set_lifecycle(&user(), "ATM", Transition::Archive, "old-queue")
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::SCOPE_RESTORED, "{e:?}");
+    assert_eq!(e.details["expected_generation"], before);
+    assert_eq!(
+        e.details["current_generation"],
+        query(&svc, "SELECT scope_gen FROM projects WHERE id = 'PA'")
+    );
+    assert_ne!(e.details["current_generation"], before);
+    assert_eq!(
+        query(&svc, "SELECT lifecycle FROM projects WHERE id = 'PA'"),
+        "ACTIVE"
+    );
+    for sql in [
+        "SELECT count(*) FROM idempotency_receipts WHERE op_id = 'old-queue'",
+        "SELECT count(*) FROM events WHERE op_id = 'old-queue'",
+        "SELECT count(*) FROM events WHERE type = 'project.archived'",
+        "SELECT count(*) FROM backups WHERE kind = 'PRE_ARCHIVE'",
+    ] {
+        assert_eq!(query(&svc, sql), 0, "{sql}");
+    }
+    assert_eq!(dirs_in(&dir), rows_in(&svc));
+}
+
+/// 对照：恢复也挡不住已经提交的同一个 op 的裁决。两趟之间同 op 的归档先成功，再恢复到它之后的备份
+/// （回执仍有效）→ 第二趟重放；恢复到它之前的备份（回执成了墓碑）→ OPERATION_UNDONE_BY_RESTORE。
+#[test]
+fn l002_replay_and_undone_outrank_the_generation_barrier() {
+    for (after, code) in [
+        (true, None),
+        (false, Some(ErrorCode::OPERATION_UNDONE_BY_RESTORE)),
+    ] {
+        let (svc, dir) = hooked("pj-lifecycle-restored-replay", move |other, _| {
+            let early = other.create_manual_backup(&user()).unwrap();
+            other
+                .set_lifecycle(&user(), "ATM", Transition::Archive, "same-op")
+                .unwrap();
+            let late = other.create_manual_backup(&user()).unwrap();
+            let pick = if after { late } else { early };
+            other
+                .restore_scope(
+                    &user(),
+                    pick["id"].as_str().unwrap(),
+                    RestoreScope::Project("ATM".into()),
+                )
+                .unwrap();
+        });
+        let r = svc.set_lifecycle(&user(), "ATM", Transition::Archive, "same-op");
+        match code {
+            None => assert!(r.unwrap().replayed),
+            Some(code) => assert_eq!(r.unwrap_err().code, code),
+        }
+        assert_eq!(dirs_in(&dir), rows_in(&svc));
+    }
+}
+
+/// peer W2 r2 P1-02 反例 A：两趟之间别人选中这份 PRE_ARCHIVE 恢复了（固定、被恢复引用）。
+/// 这次迁移没用上它，也不能删：登记行、目录、恢复引用都在。
+#[test]
+fn l002_withdrawal_keeps_a_backup_a_restore_selected() {
+    let picked = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let seen = picked.clone();
+    let (svc, dir) = hooked("pj-lifecycle-withdraw-pinned", move |other, _| {
+        let id = other.list_backups(&user(), 200).unwrap()["backups"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        other
+            .restore_scope(&user(), &id, RestoreScope::Project("ATM".into()))
+            .unwrap();
+        *seen.lock().unwrap() = id;
+    });
+    let e = svc
+        .set_lifecycle(&user(), "ATM", Transition::Archive, "pin-race")
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::SCOPE_RESTORED);
+    let id = picked.lock().unwrap().clone();
+    assert_eq!(
+        query(
+            &svc,
+            &format!("SELECT kind FROM backups WHERE id = '{id}' AND pinned_until IS NOT NULL")
+        ),
+        "PRE_ARCHIVE"
+    );
+    assert_eq!(
+        query(
+            &svc,
+            &format!("SELECT count(*) FROM scope_generations WHERE backup_id = '{id}'")
+        ),
+        1
+    );
+    assert!(dir.join("backups").join(&id).join("atm.sqlite").exists());
+    assert_eq!(dirs_in(&dir), rows_in(&svc));
+    let list = svc.list_backups(&user(), 200).unwrap();
+    assert_eq!(list["withdrawals"]["recent"][0]["id"], json!(id));
+    assert_eq!(list["withdrawals"]["recent"][0]["outcome"], "KEPT");
+    assert_eq!(list["withdrawals"]["recent"][0]["reason"], "PINNED");
+}
+
+/// peer W2 r2 P1-02 反例 B：要撤回的备份文件被占用（Windows 不共享打开）。目录挪不动就整份保留，
+/// 不能先删登记行再留下没登记的残留目录；外层照常重放。
+#[cfg(windows)]
+#[test]
+fn l002_withdrawal_that_cannot_move_files_keeps_the_backup_registered() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let hold = held.clone();
+    let (svc, dir) = hooked("pj-lifecycle-withdraw-locked", move |other, dir| {
+        let id = rows_in(other).pop().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("backups").join(id).join("atm.sqlite"))
+            .unwrap();
+        *hold.lock().unwrap() = Some(file);
+        other
+            .set_lifecycle(&user(), "ATM", Transition::Archive, "same-op")
+            .unwrap();
+    });
+    let r = svc
+        .set_lifecycle(&user(), "ATM", Transition::Archive, "same-op")
+        .unwrap();
+    assert!(r.replayed);
+    drop(held.lock().unwrap().take());
+    assert_eq!(rows_in(&svc).len(), 2);
+    assert_eq!(dirs_in(&dir), rows_in(&svc));
+    let list = svc.list_backups(&user(), 200).unwrap();
+    assert_eq!(list["withdrawals"]["recent"][0]["reason"], "FILES_IN_USE");
+    assert_eq!(list["withdrawals"]["cleanupPending"], 0);
 }

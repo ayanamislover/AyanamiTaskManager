@@ -575,3 +575,33 @@ W2 第一轮独立评审（`output/peer-atm3-w2-r1.md`）的五条 P1 与三条 
 | review_request 转移领取          | 不加 version、不发任务事件                                                                                         | 回执不带 Review 任务版本，加了会让发起者无谓冲突；与心跳续租同一规则 |
 
 变异验红：`output/w2-evidence/mutations/mut-w2h4.py`，证据 `output/w2-evidence/w2h4-mutation-evidence.json`。
+
+## 阶段评审修订（W2h5，codex W2 r2）
+
+W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01：
+
+- **P1-01 生命周期跨恢复**：`set_lifecycle` 进来时读一次项目范围世代，两趟（以及版本变化后的重做）都带着它作
+  `expected_generation`。两趟之间项目被恢复过就报 `SCOPE_RESTORED`（带新旧世代），不采纳恢复后的世代继续迁移；
+  重放与「被恢复撤销」的裁决在世代检查之前，照旧优先。
+- **P1-02 撤回**：`discard_backup` 持附件锁（与恢复的选中、校验、固定串行），只删没固定、没有恢复引用的备份（条件写在
+  DELETE 里）；目录先改名进 `<备份根>/.withdrawn/` 再删行——挪不动（文件被占用）就整份保留，删行没成就放回，删行后目录删不掉
+  留在隔离区。隔离区在下次备份、撤回、恢复时按登记行归位或删除。备份在登记之前失败也不留目录。结果
+  （`WITHDRAWN` / `KEPT` 带原因 / `CLEANUP_PENDING` / `FAILED`）记在服务里最近 16 条，`list_backups` 的 `withdrawals` 返回，
+  连同隔离区里待清的数目。
+- **P1-03 `metrics.read`**：`metrics_read(principal, project, task_key)` 只读已存的项目最新指标与任务基线 / 指标，不调 git、不写、
+  不排后台扫描；没有数据是 `available:false, reason:NO_DATA`，不是错误。采集与刷新仍在 W5。
+- **P2-01 备份错误码**：`BackupError::Write` 带 `StoreFailure`：写准入超时 `STORE_BUSY committed:false`，读连接占满
+  `STORE_BUSY`，存储关闭 `SERVICE_UNAVAILABLE`，执行后失败（超预算、panic、SQLite）`INTERNAL_ERROR`。不再解析说明文字。
+
+顺带：`knowledge_read.rs::l114` 的同名次排序原先假设插入顺序就是 id 顺序，同一毫秒内的 ULID 先后不定（约 1/8 失败），改按实际 id 推期望。
+
+规格没写死、由实现定下的：
+
+| 项目                  | 做法                                                                | 依据                                   |
+| --------------------- | ------------------------------------------------------------------- | -------------------------------------- |
+| 撤回被保留的备份      | 登记与目录都完整，归 W5 的保留期管（固定期内跳过）                  | 宁可多留一份有效备份，不留没登记的目录 |
+| 撤回诊断              | 内存里最近 16 条 + 隔离区计数，经 `list_backups` 返回               | 有界；持久状态就是隔离区本身           |
+| `metrics.read` 的形状 | 2.x 的 camelCase：`project` 为最新一条原文，`workItem` 为基线与指标 | 2.x `engineering-metrics-observer.ts`  |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h5.py`（服务包）与 `mut-w2h5-store.py`（存储包），证据
+`output/w2-evidence/w2h5-mutation-evidence.json`、`w2h5-store-mutation-evidence.json`。

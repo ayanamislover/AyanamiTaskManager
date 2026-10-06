@@ -62,6 +62,7 @@ U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`
 | `work.plan`                                                                | `create_objective`、`create_milestone`（Agent 要 session 与 op_id，00 02 C-11）                               | `tests/planning.rs`                                                   |
 | `import.preview`                                                           | `preview_import`（只解析，不落账）                                                                            | `tests/import.rs`                                                     |
 | `backup.list`                                                              | `list_backups`                                                                                                | `tests/backups.rs`                                                    |
+| `metrics.read`                                                             | `metrics_read`（只读已存指标，不调 git、不刷新；C-08）                                                        | `tests/metrics.rs`                                                    |
 | `*.read`、`quick.read`、`knowledge.read`                                   | 读模型与 `quick_get`、`knowledge_search` / `knowledge_get` / `knowledge_history`                              | `tests/read.rs`、`tests/knowledge_read.rs`                            |
 
 ## System 作业
@@ -76,13 +77,13 @@ U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`
 W2 交付全部**只依赖库与服务**的业务。下面这些要么依赖另一个子系统，要么本身就是宿主或后台作业，随那个子系统落地；
 边界写进了方案 `output/core-rust-plan.md` §11 的 W2 一行（ATM 记录）。
 
-| 能力                                                                                                                    | 主体                  | 归属与理由                                                                                              |
-| ----------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
-| `export.create`                                                                                                         | U、A                  | W3：`.aytproj` 是 2.x 单项目库的快照，`json` 导出的是 2.x 的表形状，都要 05 的反向映射，与转换器同一套  |
-| `backup.create_scheduled` / `backup.prune_retention`                                                                    | System（maintenance） | W5：维护作业的调度与保留期（跳过 `pinned_until` 未到的备份）；机制已在 W1，手动备份与按范围恢复已在本层 |
-| `metrics.read` / `metrics.refresh` / `metrics.capture`                                                                  | 见能力表              | W5：采集要调 git、在提交之后异步做（03 §2 metrics.capture），属于合进程后的观察者                       |
-| `sync.*`、`dispatch.*`                                                                                                  | 见能力表              | W7：atm-sync 与派单子系统                                                                               |
-| `agents.*`、`update.*`、`shell.*`、`system.status`                                                                      | U（宿主）             | W4 / W6：宿主方法                                                                                       |
-| `store.cleanup`、`store.maintain`、`notify.send`、`sync.run`、`dispatch.track`、`agents.docs_install`、`memory.release` | System                | W5 / W6 / W7：各自的后台作业                                                                            |
+| 能力                                                                                                                    | 主体                  | 归属与理由                                                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `export.create`                                                                                                         | U、A                  | W3：`.aytproj` 是 2.x 单项目库的快照，`json` 导出的是 2.x 的表形状，都要 05 的反向映射，与转换器同一套                         |
+| `backup.create_scheduled` / `backup.prune_retention`                                                                    | System（maintenance） | W5：维护作业的调度与保留期（跳过 `pinned_until` 未到的备份）；机制已在 W1，手动备份与按范围恢复已在本层                        |
+| `metrics.refresh` / `metrics.capture`                                                                                   | 见能力表              | W5：采集要调 git、在提交之后异步做（03 §2 metrics.capture），属于合进程后的观察者；`metrics.read` 已在本层（W2 peer r2 P1-03） |
+| `sync.*`、`dispatch.*`                                                                                                  | 见能力表              | W7：atm-sync 与派单子系统                                                                                                      |
+| `agents.*`、`update.*`、`shell.*`、`system.status`                                                                      | U（宿主）             | W4 / W6：宿主方法                                                                                                              |
+| `store.cleanup`、`store.maintain`、`notify.send`、`sync.run`、`dispatch.track`、`agents.docs_install`、`memory.release` | System                | W5 / W6 / W7：各自的后台作业                                                                                                   |
 
 这些能力落地时，各自的 Agent 拒绝用例按 03 §5.3 补齐（含 NS-5～NS-9），并加入 `mut-w2h1.py` 同类的变异。
