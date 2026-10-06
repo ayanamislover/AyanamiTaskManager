@@ -569,7 +569,7 @@ pub(super) fn set_check(
     });
 }
 
-fn set_digest(files: &[(String, u64, String)]) -> String {
+pub(super) fn set_digest(files: &[(String, u64, String)]) -> String {
     let mut h = Sha256::new();
     h.update(b"ATM-FILESET-1");
     for (rel, size, sha) in files {

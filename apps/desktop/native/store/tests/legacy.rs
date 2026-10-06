@@ -7,7 +7,7 @@
 use atm_store::jsjson;
 use atm_store::legacy::{
     ConvertError, ConvertOptions, Decision, FAMILIES, FTS_SHADOWS, Home, LegacySources, MIGRATIONS,
-    Normalization, Report, convert, verify_converted,
+    Normalization, Report, business_digest, convert, verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
 use rusqlite::{Connection, params};
@@ -4531,4 +4531,136 @@ fn a_committed_knowledge_restore_keeps_the_live_database() {
         ),
         1
     );
+}
+
+// ---------------------------------------------------------------- W3c：business_digest 与报告
+
+fn digest_of(f: &Fixture, root: &Path) -> BTreeMap<String, String> {
+    let sources = LegacySources::from_root(root).unwrap();
+    business_digest(
+        &sources,
+        &f.dir.join("scratch"),
+        &ConvertOptions {
+            at: "2026-10-03T00:00:00.000Z",
+            allow_real_data_root: false,
+            real_data_root: None,
+            generation: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn changed(a: &BTreeMap<String, String>, b: &BTreeMap<String, String>) -> Vec<String> {
+    a.keys()
+        .chain(b.keys().filter(|k| !a.contains_key(*k)))
+        .filter(|k| a.get(*k) != b.get(*k))
+        .cloned()
+        .collect()
+}
+
+/// W3c（05 §5.1、07 §6）：业务摘要只看业务内容。VACUUM、换成 WAL 并留着没合并的 -wal / -shm、
+/// 只动空白的 JSON、R / X 类文件的变化都不改摘要；改一行、改一个配置值、改附件的一个字节，恰好对应的族变。
+/// 摘要覆盖族表里纳入的每个族实例，scratch 用完就删。
+#[test]
+fn business_digest_ignores_storage_and_follows_business_changes() {
+    let (f, root) = json_fixture("legacy-business-digest");
+    let base = digest_of(&f, &root);
+    assert!(
+        !f.dir.join("scratch/business-digest").exists(),
+        "scratch is cleaned up"
+    );
+    for family in [
+        "r/projects",
+        "k/knowledge_entries",
+        "P1/work_items",
+        "P1/artifacts.files",
+        "P1/manifest.json",
+        "root/sync.config",
+        "root/sync.secrets",
+        "root/dispatch.runs",
+        "root/dispatch.requests",
+        "root/dispatch.logs.final",
+    ] {
+        assert!(base.contains_key(family), "{family}: {:?}", base.keys());
+    }
+    for excluded in [
+        "root/logs",
+        "root/backups",
+        "root/dispatch.logs.running",
+        "P1/search_documents",
+    ] {
+        assert!(!base.contains_key(excluded), "{excluded}");
+    }
+    // 与转换 VERIFY 记下的是同一份。
+    let report = f.convert_with(Some(secrets_ok)).unwrap();
+    assert_eq!(report.business_digest(), base);
+
+    // 存储层面的变化：VACUUM 两个库；P1 换成 WAL，建一张表再删掉（页写进 WAL、内容不变），连接不关（-wal / -shm 留在盘上）。
+    for db in ["registry/registry.sqlite", "projects/P2/project.sqlite"] {
+        Connection::open(root.join(db))
+            .unwrap()
+            .execute_batch("VACUUM")
+            .unwrap();
+    }
+    let p1 = Connection::open(root.join("projects/P1/project.sqlite")).unwrap();
+    p1.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+         CREATE TABLE scratch_pages (a); DROP TABLE scratch_pages;",
+    )
+    .unwrap();
+    std::mem::forget(p1);
+    assert!(root.join("projects/P1/project.sqlite-wal").exists());
+    let config = fs::read_to_string(root.join("dispatch/config.json")).unwrap();
+    put(
+        &root.join("dispatch/config.json"),
+        format!("  {config}\n").as_bytes(),
+    );
+    put(&root.join("logs/host.log"), b"another line\n");
+    assert_eq!(changed(&base, &digest_of(&f, &root)), Vec::<String>::new());
+
+    // 业务变化：每一处恰好让对应的族变。
+    Connection::open(root.join("projects/P2/project.sqlite"))
+        .unwrap()
+        .execute_batch("UPDATE objectives SET title = 'renamed' WHERE id = 'OBJ'")
+        .unwrap();
+    put(
+        &root.join("dispatch/config.json"),
+        DISPATCH_CONFIG
+            .replace("\"maxConcurrent\":2", "\"maxConcurrent\":3")
+            .as_bytes(),
+    );
+    put(&root.join("projects/P1/artifacts/notes.txt"), b"abd");
+    assert_eq!(
+        changed(&base, &digest_of(&f, &root)),
+        [
+            "P1/artifacts.files",
+            "P2/objectives",
+            "root/dispatch.config"
+        ]
+    );
+}
+
+/// W3c（05 §3.4、07 §3）：report.json 只有表名、主键、计数与摘要。密文、配置里的地址、正文、超大 payload 都不出现；
+/// 正文只在单独存放的附件里。
+#[test]
+fn the_report_carries_no_credentials_or_bodies() {
+    let (f, _) = json_fixture("legacy-report-secrets");
+    let report = f.convert_with(Some(secrets_ok)).unwrap();
+    let json = report.report_json();
+    for leak in [
+        "AQAAANCMnd8BFdERjHoAwE",
+        "relay.example",
+        "旧库里的",
+        "shared title words",
+        "xxxxxxxxxxxxxxxx",
+        "书房电脑",
+    ] {
+        assert!(!json.contains(leak), "{leak} leaked into report.json");
+        assert!(
+            !report.notes.iter().any(|n| n.contains(leak)),
+            "{leak} leaked into a note"
+        );
+    }
 }

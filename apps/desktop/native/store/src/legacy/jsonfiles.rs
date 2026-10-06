@@ -1478,6 +1478,13 @@ pub(super) fn verify(c: &Connection, root: &Path, out: &Path, report: &mut Repor
         .map(|(name, path, size)| Ok((name.clone(), *size, file_sha256(path)?)))
         .collect::<Result<_>>()?;
     let target = super::root::hashed(&out.join("dispatch").join("logs"))?;
+    report.sources.push(SourceDigest {
+        spec: "dispatch.logs.final",
+        scope: "root".into(),
+        rows: source.len() as i64,
+        digest: super::root::set_digest(&source),
+        bytes: Some(source.iter().map(|f| f.1 as i64).sum()),
+    });
     super::root::set_check(
         report,
         "dispatch.logs.final",

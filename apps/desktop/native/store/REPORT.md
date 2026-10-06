@@ -148,6 +148,24 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - 晋升的快任务解析到的任务，`source_quick_id` 没有指回它。
 - 夹具 `rich_fixture` 让 05 §1 的每个 DB 族都有行（项目 settings 必须为空），包括 review 的三类（APPROVED、CHANGES_REQUESTED、未提交）和一个 TRASHED 项目。每项停级校验各有一个失败用例。
 
+## business_digest 与幂等重放（W3c）
+
+- **`Report::business_digest()`**：返回 `<范围>/<族名>` → 摘要。
+  - 取值就是 VERIFY 的源摘要，用同一套规范化；只取族表里 `business_digest` 为真的族。
+  - 不在里面的：只登记数量的 R / X 类、F7、重建的索引。
+  - 07 §3 VERIFY 把它写进清单 `M`。
+- **`legacy::business_digest(src, scratch, opts)`**：07 §6 回滚检测时，对数据根重算一遍。
+  - **怎么算**：按转换同样的流程（工作副本、落定、规范化）在 `scratch\business-digest\` 里转换一次，取摘要，然后整个删掉；`L` 只读。
+  - **`opts.at`**：必须用转换时的那一个，因为落定会把它写进 registry 的工作副本。
+  - **出错时**：读失败、出现未登记的文件或表、超出接受域、源与目标对不上，都返回错误，调用方按 UNKNOWN 处理。
+- **不变量**（用例 `business_digest_ignores_storage_and_follows_business_changes`）：
+  - 不受影响：VACUUM、换成 WAL 并留着没合并的 `-wal` / `-shm`、只动空白的 JSON、R / X 类文件的变化；
+  - 恰好对应的族变：改一行、改一个配置值、改附件的一个字节。
+- **幂等重放模拟**（`service/tests/legacy_replay.rs`）：
+  - **夹具**：一个 2.x 项目库，里面的旧回执用 kernel-v1 从真实请求算指纹。
+  - **验证**：转换后由服务按同一个 session 与 op_id 重发，必须 REPLAY 出保存的结果；请求不同则 `IDEMPOTENCY_CONFLICT`；新的 op_id 照常写入，序号接着 2.x 往后排。
+- **报告不含凭据与正文**：`report.json` 只有表名、主键、计数与摘要（用例 `the_report_carries_no_credentials_or_bodies`）。正文只在单独存放的附件里。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。

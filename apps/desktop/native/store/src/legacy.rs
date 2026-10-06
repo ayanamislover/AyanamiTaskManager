@@ -328,6 +328,26 @@ impl Report {
             .collect()
     }
 
+    /// 回滚检测用的业务摘要（05 §5.2「纳入」的对象族；07 §3 VERIFY 写进 `M`，§6 重算比较）：
+    /// `<范围>/<族名>` → 摘要。就是 VERIFY 的源摘要（同一套规范化），只取族表里 `business_digest` 为真的族；
+    /// 只登记数量的 R / X 类、F7 与重建的索引不在里面。
+    pub fn business_digest(&self) -> BTreeMap<String, String> {
+        self.sources
+            .iter()
+            .filter_map(|s| {
+                let homes: &[Home] = match s.scope.as_str() {
+                    "r" => &[Home::Registry],
+                    "k" => &[Home::Knowledge],
+                    "root" => &[Home::Root],
+                    _ => &[Home::Project, Home::ProjectDir],
+                };
+                let f = homes.iter().find_map(|h| families::spec(*h, s.spec))?;
+                f.business_digest
+                    .then(|| (format!("{}/{}", s.scope, s.spec), s.digest.clone()))
+            })
+            .collect()
+    }
+
     /// 一个族为什么还没处理：尚未实现的子任务，或文件族没给数据根。
     fn pending_of(&self, f: &FamilySpec) -> Option<&'static str> {
         let file = matches!(f.home, Home::Root | Home::ProjectDir);
@@ -2494,6 +2514,25 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
     let _ = std::fs::remove_dir_all(&work);
     r?;
     Ok(report)
+}
+
+/// 07 §6 的 `business_digest'`：对数据根按转换同样的流程（工作副本、落定、规范化）重算业务摘要，
+/// 用来判断 2.x 在转换之后有没有写过。
+///
+/// - `opts.at` 必须是转换时的那一个：落定会把它写进 registry 的工作副本，换了时刻摘要就变。
+/// - 目标库与复制出的文件都写在 `scratch` 下一个专用的子目录里，算完整个删掉；`L` 只读。
+/// - 读失败、出现未登记的文件或表、超出接受域、源与目标对不上：返回错误，调用方按 UNKNOWN 处理。
+pub fn business_digest(
+    src: &LegacySources,
+    scratch: &Path,
+    opts: &ConvertOptions<'_>,
+) -> Result<BTreeMap<String, String>> {
+    let dir = scratch.join("business-digest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let r = convert(src, &dir.join("atm.sqlite"), opts).map(|r| r.business_digest());
+    let _ = std::fs::remove_dir_all(&dir);
+    r
 }
 
 /// VERIFY 从源独立重算的规则记录与附件。
