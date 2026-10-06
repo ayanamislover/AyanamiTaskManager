@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+mod families;
+pub use families::{Decision, FAMILIES, FTS_SHADOWS, FamilySpec, Home};
+
 #[derive(Debug)]
 pub enum ConvertError {
     Sqlite(rusqlite::Error),
@@ -141,14 +144,23 @@ pub fn real_data_root() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|l| PathBuf::from(l).join("AyanamiTaskManager"))
 }
 
-/// 一个对象族的比对结果。
+/// 一项检查：源与目标反投影的规范化摘要比对（05 §5.1）。归属 `scope` 范围里名为 `spec` 的族。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FamilyCheck {
+    /// 检查名，`<范围>/<表>[.<方面>]`；失败时就是 `failures()` 里的那一条。
     pub family: String,
+    /// 所属族名（[`FamilySpec::name`]）。
+    pub spec: &'static str,
+    /// `r`、`k` 或项目 id。
+    pub scope: String,
     pub source_rows: i64,
     pub target_rows: i64,
     pub source_digest: String,
     pub target_digest: String,
+    /// 摘要不等时逐行比对的结果：只在源、只在目标、内容不同的行数之和。相等时为 0。
+    pub errors: i64,
+    /// 第一处不一致：检查名 + 主键列的值，不含正文。
+    pub first_failure_locator: Option<String>,
 }
 
 impl FamilyCheck {
@@ -157,11 +169,24 @@ impl FamilyCheck {
     }
 }
 
+/// 一个 DB 族的源摘要：主源表全部列按主键排序（05 §5.1 的 `D(t)`，`business_digest` 用同一份）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceDigest {
+    pub spec: &'static str,
+    pub scope: String,
+    pub rows: i64,
+    pub digest: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
-    pub families: Vec<FamilyCheck>,
-    /// 舍弃的派生族及其源行数。
-    pub dropped: BTreeMap<String, i64>,
+    pub checks: Vec<FamilyCheck>,
+    /// 每个 DB 族实例的源摘要（含舍弃与重建的族）。
+    pub sources: Vec<SourceDigest>,
+    /// VERIFY 看过的项目，按源给出的顺序。
+    pub projects: Vec<String>,
+    /// 有没有知识库。
+    pub knowledge: bool,
     /// 回执分类计数（R7‴）。
     pub receipt_classes: BTreeMap<String, usize>,
     /// 按 AGENT 处理、但形状是晋升的回执（R7‴ 第 4 类的特别标注）。
@@ -203,14 +228,166 @@ pub struct Normalization {
 impl Report {
     pub fn failures(&self) -> Vec<String> {
         let mut out: Vec<String> = self
-            .families
+            .checks
             .iter()
             .filter(|f| !f.ok())
             .map(|f| f.family.clone())
             .collect();
         out.extend(self.receipt_violations.iter().cloned());
         out.extend(self.rule_mismatches.iter().cloned());
+        out.extend(self.uncovered());
         out
+    }
+
+    /// 尚未实现的族实例（`<范围>/<族名>: <负责任务>`）。W3d 的提交门要求为空。
+    pub fn pending(&self) -> Vec<String> {
+        self.instances()
+            .into_iter()
+            .filter_map(|(scope, f)| f.pending.map(|w| format!("{scope}/{}: {w}", f.name)))
+            .collect()
+    }
+
+    /// 覆盖缺口：转换、重建、登记的 DB 族实例至少要有一项检查，没有的记 `<族实例>: no check ran`。
+    /// 由 `checks` 现算，计入 [`Report::failures`]；尚未实现（pending）的族不算。
+    pub fn uncovered(&self) -> Vec<String> {
+        self.instances()
+            .into_iter()
+            .filter(|(_, f)| {
+                f.pending.is_none()
+                    && f.decision != Decision::Dropped
+                    && matches!(f.home, Home::Registry | Home::Knowledge | Home::Project)
+            })
+            .filter(|(scope, f)| {
+                !self
+                    .checks
+                    .iter()
+                    .any(|c| &c.scope == scope && c.spec == f.name)
+            })
+            .map(|(scope, f)| format!("{scope}/{}: no check ran", f.name))
+            .collect()
+    }
+
+    /// 某个 DB 族实例的源摘要。
+    pub fn source(&self, family: &str) -> Option<&SourceDigest> {
+        self.sources
+            .iter()
+            .find(|s| format!("{}/{}", s.scope, s.spec) == family)
+    }
+
+    /// 报告里的全部族实例：registry 与数据根各一份，知识库有就一份，每个项目一份。
+    fn instances(&self) -> Vec<(String, &'static FamilySpec)> {
+        let mut out = Vec::new();
+        for f in FAMILIES {
+            let scopes: Vec<String> = match f.home {
+                Home::Registry => vec!["r".into()],
+                Home::Knowledge if self.knowledge => vec!["k".into()],
+                Home::Knowledge => vec![],
+                Home::Project | Home::ProjectDir => self.projects.clone(),
+                Home::Root => vec!["root".into()],
+            };
+            out.extend(scopes.into_iter().map(|s| (s, f)));
+        }
+        out
+    }
+
+    /// 05 §3.4 的机器可读报告（`staging\<g>\report.json`）：逐族的源、目标、决定与检查，
+    /// 加上规则记录与回执分类。只含表名、主键、计数与摘要，不含正文与密钥；附件另见 [`Report::attachment_jsonl`]。
+    pub fn report_json(&self) -> String {
+        let s = |v: &str| json_string(v);
+        let opt = |v: Option<&str>| v.map_or("null".to_string(), json_string);
+        let mut families = Vec::new();
+        for (scope, f) in self.instances() {
+            let name = format!("{scope}/{}", f.name);
+            let checks: Vec<&FamilyCheck> = self
+                .checks
+                .iter()
+                .filter(|c| c.scope == scope && c.spec == f.name)
+                .collect();
+            let source = self.source(&name);
+            let primary = checks.iter().find(|c| c.family == name);
+            let is_db = matches!(f.home, Home::Registry | Home::Knowledge | Home::Project);
+            let (src_key, tgt_key) = if is_db {
+                ("rows", "table")
+            } else {
+                ("files", "dir")
+            };
+            let check_list: Vec<String> = checks
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{{\"name\":{},\"result\":{},\"errors\":{},\"first_failure_locator\":{}}}",
+                        s(&c.family),
+                        s(if c.ok() { "PASS" } else { "FAIL" }),
+                        c.errors,
+                        opt(c.first_failure_locator.as_deref())
+                    )
+                })
+                .collect();
+            families.push(format!(
+                "{{\"code\":{},\"family\":{},\"decision\":{},\"drop_reason\":{},\"business_digest\":{},\"pending\":{},\
+                 \"source\":{{\"path_class\":{},\"{src_key}\":{},\"digest\":{}}},\
+                 \"target\":{{\"{tgt_key}\":{},\"rows\":{},\"digest\":{}}},\"checks\":[{}]}}",
+                s(f.code),
+                s(&name),
+                s(f.decision.as_str()),
+                opt(f.drop_reason),
+                f.business_digest,
+                opt(f.pending),
+                s(f.path_class),
+                source.map_or("null".to_string(), |x| x.rows.to_string()),
+                opt(source.map(|x| x.digest.as_str())),
+                if f.target.is_empty() { "null".to_string() } else { s(f.target) },
+                primary.map_or("null".to_string(), |c| c.target_rows.to_string()),
+                opt(primary.map(|c| c.target_digest.as_str())),
+                check_list.join(",")
+            ));
+        }
+        let normalizations: Vec<String> = self
+            .normalizations
+            .iter()
+            .map(|n| {
+                let (rule, reason) = n
+                    .rule
+                    .split_once(':')
+                    .map_or((n.rule.as_str(), None), |(r, x)| (r, Some(x)));
+                format!(
+                    "{{\"rule\":{},\"reason\":{},\"family\":{},\"count\":{},\"keys_digest\":{}}}",
+                    s(rule),
+                    opt(reason),
+                    s(&n.family),
+                    n.count,
+                    s(&n.keys_digest)
+                )
+            })
+            .collect();
+        let list = |v: &[String]| v.iter().map(|x| s(x)).collect::<Vec<_>>().join(",");
+        let map = |m: &BTreeMap<String, usize>| {
+            m.iter()
+                .map(|(k, v)| format!("{}:{v}", s(k)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        format!(
+            "{{\"format\":\"atm-conversion-report\",\"version\":1,\"knowledge\":{},\"families\":[{}],\
+             \"normalizations\":[{}],\"rule_mismatches\":[{}],\"coverage_gaps\":[{}],\
+             \"receipts\":{{\"classes\":{{{}}},\"promotion_shaped_agent\":{},\"promotion_status\":{{{}}},\"violations\":[{}]}},\
+             \"global_feed\":{{\"orphans\":{},\"mirrors_replayed\":{}}},\"outbox_without_event\":{},\
+             \"unresolved_promotions\":{},\"artifact_rows\":{}}}",
+            s(if self.knowledge { "PRESENT" } else { "MISSING" }),
+            families.join(","),
+            normalizations.join(","),
+            list(&self.rule_mismatches),
+            list(&self.uncovered()),
+            map(&self.receipt_classes),
+            self.promotion_shaped_agent,
+            map(&self.promotion_status),
+            list(&self.receipt_violations),
+            self.global_orphans,
+            self.mirrors_replayed,
+            self.outbox_without_event,
+            self.unresolved_promotions,
+            self.artifact_rows
+        )
     }
 
     /// 附件的 JSON Lines 文本：每行 `{"family":…,"row":…}`，族按名字、行按主键排序。W3d 写到 `staging\<g>\`。
@@ -232,28 +409,8 @@ const REGISTRY_MIGRATIONS: i64 = 8;
 const KNOWLEDGE_MIGRATIONS: i64 = 1;
 const PROJECT_MIGRATIONS: i64 = 18;
 
-const FTS_SHADOWS: &[&str] = &["_config", "_content", "_data", "_docsize", "_idx"];
-
-const REGISTRY_TABLES: &[&str] = &[
-    "app_meta",
-    "backup_catalog",
-    "global_events",
-    "global_search_documents",
-    "import_history",
-    "project_paths",
-    "project_projection_state",
-    "project_restore_requests",
-    "project_summary_cache",
-    "projects",
-    "quick_task_updates",
-    "quick_tasks",
-    "saved_views",
-    "settings",
-    "schema_migrations",
-];
 /// 2.x project_paths 的一行：id（可能为 NULL）、project_id、canonical_path、git_common_dir、is_primary、last_seen_at。
 type PathRow = (Option<String>, String, String, Option<String>, i64, String);
-const REGISTRY_FTS: &str = "global_search_documents_fts";
 /// registry 里按列名原样搬的表。
 const REGISTRY_COPY: &[&str] = &[
     "quick_tasks",
@@ -263,51 +420,7 @@ const REGISTRY_COPY: &[&str] = &[
     "import_history",
     "project_restore_requests",
 ];
-const REGISTRY_DROPPED: &[&str] = &[
-    "global_search_documents",
-    "project_projection_state",
-    "project_summary_cache",
-];
 
-const KNOWLEDGE_TABLES: &[&str] = &[
-    "knowledge_entries",
-    "knowledge_meta",
-    "knowledge_operations",
-    "knowledge_revisions",
-    "schema_migrations",
-];
-const KNOWLEDGE_FTS: &str = "knowledge_fts";
-
-const PROJECT_TABLES_V2: &[&str] = &[
-    "agent_sessions",
-    "agents",
-    "artifacts",
-    "blockers",
-    "checklist_items",
-    "counters",
-    "engineering_project_metrics",
-    "engineering_work_item_metrics",
-    "events",
-    "handoffs",
-    "idempotency_keys",
-    "labels",
-    "milestones",
-    "objectives",
-    "outbox",
-    "progress_updates",
-    "project_meta",
-    "project_updates",
-    "records",
-    "review_requests",
-    "review_submissions",
-    "search_documents",
-    "settings",
-    "work_item_labels",
-    "work_item_relations",
-    "work_items",
-    "schema_migrations",
-];
-const PROJECT_FTS: &str = "search_documents_fts";
 /// 项目库里按列名原样搬、只加 project_id 的表。
 const PROJECT_COPY: &[&str] = &[
     "counters",
@@ -757,17 +870,12 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     if target.exists() {
         return Err(ConvertError::TargetExists(target.to_path_buf()));
     }
-    check_source(
-        &src.registry,
-        REGISTRY_TABLES,
-        &[REGISTRY_FTS],
-        REGISTRY_MIGRATIONS,
-    )?;
+    check_source(&src.registry, Home::Registry, REGISTRY_MIGRATIONS)?;
     if let Some(k) = &src.knowledge {
-        check_source(k, KNOWLEDGE_TABLES, &[KNOWLEDGE_FTS], KNOWLEDGE_MIGRATIONS)?;
+        check_source(k, Home::Knowledge, KNOWLEDGE_MIGRATIONS)?;
     }
     for p in &src.projects {
-        check_source(p, PROJECT_TABLES_V2, &[PROJECT_FTS], PROJECT_MIGRATIONS)?;
+        check_source(p, Home::Project, PROJECT_MIGRATIONS)?;
     }
 
     let mut t = crate::open(target)?;
@@ -809,28 +917,24 @@ fn refuse_real_root(root: &Path, p: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_source(path: &Path, tables: &[&str], fts: &[&str], migrations: i64) -> Result<()> {
+/// 源库的表集合必须恰好是族表登记的那些（05 §5.1 登记完整性），迁移集合必须是支持的那一组。
+fn check_source(path: &Path, home: Home, migrations: i64) -> Result<()> {
     let c = crate::backup::side_reader(path)?;
-    let mut allowed: HashSet<String> = tables.iter().map(|s| s.to_string()).collect();
-    for f in fts {
-        allowed.insert(f.to_string());
-        for s in FTS_SHADOWS {
-            allowed.insert(format!("{f}{s}"));
-        }
-    }
+    let tables = families::tables(home);
+    let allowed: HashSet<&str> = tables.iter().map(String::as_str).collect();
     let names: Vec<String> = c
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for n in &names {
-        if !allowed.contains(n) {
+        if !allowed.contains(n.as_str()) {
             return Err(ConvertError::UnknownTable(format!(
                 "{}: {n}",
                 path.display()
             )));
         }
     }
-    for t in tables {
+    for t in &tables {
         if !names.iter().any(|n| n == t) {
             return Err(ConvertError::UnsupportedSchema(format!(
                 "{}: missing {t}",
@@ -1081,11 +1185,6 @@ fn convert_registry(
             [],
         )
         .ctx("legacy_backups")?;
-        for table in REGISTRY_DROPPED {
-            let n: i64 =
-                tx.query_row(&format!("SELECT count(*) FROM r.{table}"), [], |r| r.get(0))?;
-            report.dropped.insert(format!("registry.{table}"), n);
-        }
 
         if let (Some(db), Some((g, _))) = (&knowledge_id, &gens.knowledge) {
             tx.execute(
@@ -1367,8 +1466,6 @@ fn convert_project(
 
         convert_receipts(&tx, &pid, generation, report, promotions)?;
         report.outbox_without_event += count_outbox_without_event(&tx)?;
-        let n: i64 = tx.query_row("SELECT count(*) FROM p.outbox", [], |r| r.get(0))?;
-        *report.dropped.entry("project.outbox".into()).or_default() += n;
         commit_checked(tx, &format!("project {pid}"))?;
         Ok(pid)
     })();
@@ -1688,32 +1785,14 @@ fn digest(
     let mut st = c.prepare(sql)?;
     let n = st.column_count();
     let mut q = st.query(args)?;
+    let mut buf = Vec::new();
     while let Some(row) = q.next()? {
         rows += 1;
+        buf.clear();
         for i in 0..n {
-            match row.get_ref(i)? {
-                ValueRef::Null => body.update([0x00]),
-                ValueRef::Integer(v) => {
-                    body.update([0x01]);
-                    body.update(v.to_string().as_bytes());
-                    body.update([0x00]);
-                }
-                ValueRef::Real(v) => {
-                    body.update([0x02]);
-                    body.update(v.to_be_bytes());
-                }
-                ValueRef::Text(t) => {
-                    body.update([0x03]);
-                    body.update((t.len() as u32).to_be_bytes());
-                    body.update(t);
-                }
-                ValueRef::Blob(b) => {
-                    body.update([0x04]);
-                    body.update((b.len() as u32).to_be_bytes());
-                    body.update(b);
-                }
-            }
+            encode_value(&mut buf, row.get_ref(i)?);
         }
+        body.update(&buf);
     }
     let mut h = Sha256::new();
     h.update(b"ATM-CANON-1");
@@ -1731,30 +1810,205 @@ fn digest(
     ))
 }
 
+/// 05 §5.1 的值编码：`NULL→00`、`INTEGER→01 十进制 00`、`REAL→02 大端 8 字节`、`TEXT→03 u32 长度 原字节`、`BLOB→04 u32 长度 原字节`。
+fn encode_value(buf: &mut Vec<u8>, v: ValueRef<'_>) {
+    match v {
+        ValueRef::Null => buf.push(0x00),
+        ValueRef::Integer(v) => {
+            buf.push(0x01);
+            buf.extend_from_slice(v.to_string().as_bytes());
+            buf.push(0x00);
+        }
+        ValueRef::Real(v) => {
+            buf.push(0x02);
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        ValueRef::Text(t) => {
+            buf.push(0x03);
+            buf.extend_from_slice(&(t.len() as u32).to_be_bytes());
+            buf.extend_from_slice(t);
+        }
+        ValueRef::Blob(b) => {
+            buf.push(0x04);
+            buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
+            buf.extend_from_slice(b);
+        }
+    }
+}
+
+/// 定位用的主键值：文本按 JSON 字符串写、超过 64 个字符截断；BLOB 只写长度。
+fn render_key(v: ValueRef<'_>) -> String {
+    match v {
+        ValueRef::Null => "null".into(),
+        ValueRef::Integer(v) => v.to_string(),
+        ValueRef::Real(v) => format!("{v:?}"),
+        ValueRef::Text(t) => {
+            let t = String::from_utf8_lossy(t);
+            let cut: String = t.chars().take(64).collect();
+            json_string(&if cut.len() < t.len() {
+                format!("{cut}…")
+            } else {
+                cut
+            })
+        }
+        ValueRef::Blob(b) => format!("blob({})", b.len()),
+    }
+}
+
+/// 一项检查的身份：所属族、检查名、定位用的主键列（必须在比对列里）。
+struct Ck<'a> {
+    spec: &'static str,
+    label: &'a str,
+    key: &'a [&'a str],
+}
+
+/// 一边查询结果的逐行视图：（编码后的主键，整行哈希，定位串），按查询顺序。
+type Keyed = Vec<(Vec<u8>, [u8; 32], String)>;
+
+fn keyed_rows(
+    c: &Connection,
+    label: &str,
+    key: &[usize],
+    sql: &str,
+    args: &[&dyn rusqlite::ToSql],
+) -> Result<Keyed> {
+    let mut st = c.prepare(sql)?;
+    let n = st.column_count();
+    let mut q = st.query(args)?;
+    let mut out = Vec::new();
+    while let Some(row) = q.next()? {
+        let mut whole = Vec::new();
+        for i in 0..n {
+            encode_value(&mut whole, row.get_ref(i)?);
+        }
+        let mut k = Vec::new();
+        let mut shown = Vec::new();
+        for &i in key {
+            encode_value(&mut k, row.get_ref(i)?);
+            shown.push(render_key(row.get_ref(i)?));
+        }
+        let locator = if key.is_empty() {
+            label.to_string()
+        } else {
+            format!("{label}({})", shown.join(","))
+        };
+        out.push((k, Sha256::digest(&whole).into(), locator));
+    }
+    Ok(out)
+}
+
+/// 摘要不等时的第二遍：按主键配对，数出不一致的行，记下第一处（源的顺序优先，其次目标多出来的行）。
+fn first_failure(source: Keyed, target: Keyed) -> (i64, Option<String>) {
+    let mut pool: HashMap<Vec<u8>, Vec<[u8; 32]>> = HashMap::new();
+    for (k, h, _) in &target {
+        pool.entry(k.clone()).or_default().push(*h);
+    }
+    let (mut errors, mut first) = (0i64, None);
+    for (k, h, at) in source {
+        match pool.get_mut(&k) {
+            Some(hs) if !hs.is_empty() => {
+                if let Some(i) = hs.iter().position(|x| *x == h) {
+                    hs.swap_remove(i);
+                } else {
+                    hs.pop();
+                    errors += 1;
+                    first.get_or_insert(at);
+                }
+            }
+            _ => {
+                errors += 1;
+                first.get_or_insert(at);
+            }
+        }
+    }
+    for (k, _, at) in target {
+        if let Some(hs) = pool.get_mut(&k).filter(|hs| !hs.is_empty()) {
+            errors += hs.len() as i64;
+            hs.clear();
+            first.get_or_insert(at);
+        }
+    }
+    (errors, first)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn compare(
     c: &Connection,
     report: &mut Report,
-    family: &str,
+    ck: Ck<'_>,
     cols: &[String],
     source_sql: &str,
     source_args: &[&dyn rusqlite::ToSql],
     target_sql: &str,
     target_args: &[&dyn rusqlite::ToSql],
 ) -> Result<()> {
-    let (source_rows, source_digest) = digest(c, family, cols, source_sql, source_args)?;
-    let (target_rows, target_digest) = digest(c, family, cols, target_sql, target_args)?;
-    report.families.push(FamilyCheck {
-        family: family.to_string(),
+    let label = ck.label;
+    let (source_rows, source_digest) = digest(c, label, cols, source_sql, source_args)?;
+    let (target_rows, target_digest) = digest(c, label, cols, target_sql, target_args)?;
+    let (mut errors, mut first_failure_locator) = (0, None);
+    if source_rows != target_rows || source_digest != target_digest {
+        let key = ck
+            .key
+            .iter()
+            .map(|k| {
+                cols.iter().position(|c| c == k).ok_or_else(|| {
+                    ConvertError::Unsupported(format!(
+                        "check {label}: key column {k} is not compared"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let source = keyed_rows(c, label, &key, source_sql, source_args)?;
+        let target = keyed_rows(c, label, &key, target_sql, target_args)?;
+        (errors, first_failure_locator) = first_failure(source, target);
+    }
+    report.checks.push(FamilyCheck {
+        family: label.to_string(),
+        spec: ck.spec,
+        scope: label.split('/').next().unwrap_or_default().to_string(),
         source_rows,
         target_rows,
         source_digest,
         target_digest,
+        errors,
+        first_failure_locator,
     });
     Ok(())
 }
 
-/// 按列名逐表比对：源 `schema.table` 与目标同名表（可选 project_id 过滤）。
+/// 源 DB 族的规范化摘要：主源表全部列按主键排序。舍弃、重建的族也算，供报告与 `business_digest`。
+fn digest_sources(
+    c: &Connection,
+    report: &mut Report,
+    schema: &str,
+    home: Home,
+    scope: &str,
+) -> Result<()> {
+    for f in FAMILIES.iter().filter(|f| f.home == home) {
+        let table = f.sources[0];
+        let (cols, pk) = columns(c, schema, table)?;
+        let (rows, digest) = digest(
+            c,
+            &format!("{scope}/{}", f.name),
+            &cols,
+            &format!(
+                "SELECT {} FROM {schema}.\"{table}\" ORDER BY {}",
+                list(&cols),
+                list(&pk)
+            ),
+            &[],
+        )?;
+        report.sources.push(SourceDigest {
+            spec: f.name,
+            scope: scope.to_string(),
+            rows,
+            digest,
+        });
+    }
+    Ok(())
+}
+
+/// 按列名逐表比对：源 `schema.table` 与目标同名表（可选 project_id 过滤）。族名即表名，定位用主键。
 fn compare_table(
     c: &Connection,
     report: &mut Report,
@@ -1769,11 +2023,25 @@ fn compare_table(
         Some(p) => format!("{p}/{table}"),
         None => format!("{schema}/{table}"),
     };
+    let home = match schema {
+        "r" => Home::Registry,
+        "k" => Home::Knowledge,
+        _ => Home::Project,
+    };
+    let spec = families::spec(home, table)
+        .map(|f| f.name)
+        .ok_or_else(|| ConvertError::Unsupported(format!("{table} is not a registered family")))?;
+    let key: Vec<&str> = pk.iter().map(String::as_str).collect();
+    let ck = || Ck {
+        spec,
+        label: &family,
+        key: &key,
+    };
     match project {
         Some(p) => compare(
             c,
             report,
-            &family,
+            ck(),
             &cols,
             &format!("SELECT {l} FROM {schema}.{table} ORDER BY {order}"),
             &[],
@@ -1783,7 +2051,7 @@ fn compare_table(
         None => compare(
             c,
             report,
-            &family,
+            ck(),
             &cols,
             &format!("SELECT {l} FROM {schema}.{table} ORDER BY {order}"),
             &[],
@@ -1897,13 +2165,16 @@ impl Recheck {
 
 fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
     attach(t, &src.registry, "r")?;
+    report.knowledge = src.knowledge.is_some();
     let mut re = Recheck::default();
     let r = (|| {
+        digest_sources(t, report, "r", Home::Registry, "r")?;
         verify_registry(t, report, &mut re)?;
         expect_global_begin(t)?;
         if let Some(k) = &src.knowledge {
             attach(t, k, "k")?;
-            let r = verify_knowledge(t, report);
+            let r = digest_sources(t, report, "k", Home::Knowledge, "k")
+                .and_then(|()| verify_knowledge(t, report));
             detach(t, "k");
             r?;
         }
@@ -1968,7 +2239,11 @@ fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
     compare(
         c,
         report,
-        "r/global_feed.links",
+        Ck {
+            spec: "global_events",
+            label: "r/global_feed.links",
+            key: &["global_seq"],
+        },
         &["global_seq", "project_id", "event_id"].map(String::from),
         "SELECT global_seq, project_id, event_id FROM temp.expected_links ORDER BY global_seq",
         &[],
@@ -1978,7 +2253,11 @@ fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
     compare(
         c,
         report,
-        "r/global_feed.replayed",
+        Ck {
+            spec: "global_events",
+            label: "r/global_feed.replayed",
+            key: &["global_seq"],
+        },
         &[
             "global_seq",
             "type",
@@ -2005,7 +2284,11 @@ fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
     compare(
         c,
         report,
-        "r/app_meta.global_seq",
+        Ck {
+            spec: "app_meta",
+            label: "r/app_meta.global_seq",
+            key: &[],
+        },
         &["global_seq", "mirrors_replayed", "source_current_sequence"].map(String::from),
         "SELECT ?1 + count(*), count(*), ?1 FROM temp.expected_mirrors",
         &[&baseline],
@@ -2036,7 +2319,11 @@ fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
     compare(
         c,
         report,
-        "r/projects",
+        Ck {
+            spec: "projects",
+            label: "r/projects",
+            key: &["id"],
+        },
         &cols,
         &format!("SELECT {source} FROM r.projects ORDER BY id"),
         &[],
@@ -2064,7 +2351,11 @@ fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
     compare(
         c,
         report,
-        "r/global_events",
+        Ck {
+            spec: "global_events",
+            label: "r/global_events",
+            key: &["sequence"],
+        },
         &cols,
         "SELECT sequence, type, aggregate_id, actor, payload_json, created_at, dedupe_key FROM r.global_events ORDER BY sequence",
         &[],
@@ -2089,13 +2380,46 @@ fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
     compare(
         c,
         report,
-        "r/backup_catalog",
+        Ck {
+            spec: "backup_catalog",
+            label: "r/backup_catalog",
+            key: &["id"],
+        },
         &cols,
         "SELECT id, scope, project_id, path, sha256, size_bytes, reason, schema_version, created_at, verified_at
          FROM r.backup_catalog ORDER BY id",
         &[],
         "SELECT id, scope, project_id, legacy_path, sha256, size_bytes, reason, schema_version, created_at, verified_at
          FROM main.legacy_backups WHERE source = 'CATALOG' ORDER BY id",
+        &[],
+    )?;
+    compare_migrations(c, report, "r", "r", "registryMigrations")
+}
+
+/// R12 / K5 / P9：源的迁移集合必须恰好是 `app_meta.converted_from` 记下的 1..=N。
+fn compare_migrations(
+    c: &Connection,
+    report: &mut Report,
+    schema: &str,
+    scope: &str,
+    field: &str,
+) -> Result<()> {
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "schema_migrations",
+            label: &format!("{scope}/schema_migrations"),
+            key: &["version"],
+        },
+        &["version".to_string()],
+        &format!("SELECT version FROM {schema}.schema_migrations ORDER BY version"),
+        &[],
+        &format!(
+            "WITH RECURSIVE n(v) AS (SELECT 1 UNION ALL SELECT v + 1 FROM n
+               WHERE v < (SELECT converted_from ->> '$.{field}' FROM main.app_meta))
+             SELECT v FROM n ORDER BY v"
+        ),
         &[],
     )
 }
@@ -2104,13 +2428,52 @@ fn verify_knowledge(c: &Connection, report: &mut Report) -> Result<()> {
     compare_table(c, report, "k", "knowledge_meta", None)?;
     compare_table(c, report, "k", "knowledge_entries", None)?;
     compare_table(c, report, "k", "knowledge_revisions", None)?;
+    compare_migrations(c, report, "k", "k", "knowledgeMigrations")?;
+    // knowledge_fts 在 3.0 从 head revision 重建（X1 REBUILT）。比对被索引的文本列：两边相同，同一查询命中的条目就相同。
+    // metadata 是 UNINDEXED 的展示数据，读取时再用条目行覆盖，不参与匹配。
+    let cols: Vec<String> = [
+        "entry_id",
+        "title",
+        "aliases",
+        "tags",
+        "summary",
+        "use_when",
+        "applies_to",
+        "body",
+    ]
+    .map(String::from)
+    .to_vec();
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "knowledge_fts",
+            label: "k/knowledge_fts",
+            key: &["entry_id"],
+        },
+        &cols,
+        &format!(
+            "SELECT {} FROM k.knowledge_fts ORDER BY entry_id",
+            list(&cols)
+        ),
+        &[],
+        &format!(
+            "SELECT {} FROM main.knowledge_fts ORDER BY entry_id",
+            list(&cols)
+        ),
+        &[],
+    )?;
     let cols: Vec<String> = ["op_id", "fingerprint", "receipt"]
         .map(String::from)
         .to_vec();
     compare(
         c,
         report,
-        "k/knowledge_operations",
+        Ck {
+            spec: "knowledge_operations",
+            label: "k/knowledge_operations",
+            key: &["op_id"],
+        },
         &cols,
         "SELECT op_id, fingerprint, receipt FROM k.knowledge_operations ORDER BY op_id",
         &[],
@@ -2122,6 +2485,24 @@ fn verify_knowledge(c: &Connection, report: &mut Report) -> Result<()> {
 fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Result<()> {
     let pid: String = c.query_row("SELECT project_id FROM p.project_meta", [], |r| r.get(0))?;
     let p = pid.as_str();
+    report.projects.push(pid.clone());
+    digest_sources(c, report, "p", Home::Project, p)?;
+    compare_migrations(c, report, "p", p, "projectMigrations")?;
+    // P8：项目 settings 舍弃，前提是它为空（转换入口已拒绝非空；这里独立再查一遍）。
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "settings",
+            label: &format!("{p}/settings"),
+            key: &["key"],
+        },
+        &["key", "value_json", "version", "updated_at"].map(String::from),
+        "SELECT key, value_json, version, updated_at FROM p.settings ORDER BY key",
+        &[],
+        "SELECT NULL, NULL, NULL, NULL WHERE 0",
+        &[],
+    )?;
     // project_meta：整行原值在 legacy_json 里；3.0 的派生列必须与它一致。
     let (cols, _) = columns(c, "p", "project_meta")?;
     let source = list(&cols);
@@ -2133,7 +2514,11 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
     compare(
         c,
         report,
-        &format!("{p}/project_meta"),
+        Ck {
+            spec: "project_meta",
+            label: &format!("{p}/project_meta"),
+            key: &[],
+        },
         &cols,
         &format!("SELECT {source} FROM p.project_meta"),
         &[],
@@ -2146,7 +2531,11 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
     compare(
         c,
         report,
-        &format!("{p}/project_meta(derived)"),
+        Ck {
+            spec: "project_meta",
+            label: &format!("{p}/project_meta(derived)"),
+            key: &[],
+        },
         &derived,
         "SELECT health, version, current_sequence, schema_version FROM p.project_meta",
         &[],
@@ -2173,7 +2562,11 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
     compare(
         c,
         report,
-        &format!("{p}/events"),
+        Ck {
+            spec: "events",
+            label: &format!("{p}/events"),
+            key: &["sequence"],
+        },
         &cols,
         &format!("SELECT {source} FROM p.events ORDER BY sequence"),
         &[],
@@ -2195,7 +2588,11 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
     compare(
         c,
         report,
-        &format!("{p}/idempotency_keys"),
+        Ck {
+            spec: "idempotency_keys",
+            label: &format!("{p}/idempotency_keys"),
+            key: &["key"],
+        },
         &cols,
         "SELECT key, operation, request_fingerprint, response_json, created_at, expires_at, op_id, actor_session_id
          FROM p.idempotency_keys ORDER BY key",
@@ -2217,14 +2614,126 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
     compare(
         c,
         report,
-        &format!("{p}/search_documents"),
+        Ck {
+            spec: "search_documents",
+            label: &format!("{p}/search_documents"),
+            key: &["entity_type", "entity_id"],
+        },
         &cols,
         "SELECT entity_type, entity_id, entity_key, title, body, updated_at FROM p.search_documents ORDER BY entity_type, entity_id",
         &[],
         "SELECT entity_type, entity_id, entity_key, title, body, updated_at FROM main.search_docs WHERE project_id = ?1
          ORDER BY entity_type, entity_id",
         &[&p],
-    )
+    )?;
+    verify_search_queries(c, report, p)
+}
+
+/// 搜索的查询等价（05 §2.5；search_documents 是 X1 REBUILT）。每个实体类型取一份文档（entity_id 最小），
+/// 从它抽探针：标题与正文里第一个不含空白、至少 3 个字符的片段的前 3 个字符（走 FTS），
+/// 第一组相邻的两个汉字（2.0 扫表的短词路径），以及 entity_key 本身（FTS 不索引 key，靠 LIKE）。
+/// 每个探针在源库上按 2.0 的项目搜索（`project-activity-read-model.ts:158-170`）查，在目标库上按 3.0 的
+/// [`crate::search::match_docs`] 查，命中的 entity_key 集合必须相同。定位只写实体类型与探针种类，不写探针文本。
+fn verify_search_queries(c: &Connection, report: &mut Report, p: &str) -> Result<()> {
+    use crate::search::{Scope, fts_phrase, like_pattern, match_docs, uses_fts};
+    let label = format!("{p}/search_documents.queries");
+    let docs: Vec<(String, String, String, String)> = c
+        .prepare(
+            "SELECT entity_type, entity_key, title, body FROM p.search_documents d
+             WHERE entity_id = (SELECT min(entity_id) FROM p.search_documents x WHERE x.entity_type = d.entity_type)
+             ORDER BY entity_type",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let fragment = |text: &str| {
+        text.split_whitespace()
+            .find(|w| w.chars().count() >= 3)
+            .map(|w| w.chars().take(3).collect::<String>())
+    };
+    let han = |ch: char| (0x4E00..=0x9FFF).contains(&(ch as u32));
+    let pair = |text: &str| {
+        let cs: Vec<char> = text.chars().collect();
+        cs.windows(2)
+            .find(|w| han(w[0]) && han(w[1]))
+            .map(|w| w.iter().collect::<String>())
+    };
+    let mut probes: Vec<(String, String)> = Vec::new();
+    for (kind, key, title, body) in &docs {
+        let both = format!("{title}\n{body}");
+        for (aspect, term) in [
+            ("title", fragment(title)),
+            ("body", fragment(body)),
+            ("han", pair(&both)),
+            ("key", Some(key.clone())),
+        ] {
+            if let Some(term) = term {
+                probes.push((format!("{kind}.{aspect}"), term));
+            }
+        }
+    }
+    let (mut src_body, mut tgt_body) = (Sha256::new(), Sha256::new());
+    let (mut source_rows, mut target_rows, mut errors) = (0i64, 0i64, 0i64);
+    let mut first = None;
+    for (at, term) in &probes {
+        let (predicate, args) = if uses_fts(term) {
+            (
+                "(d.entity_type, d.entity_id) IN (SELECT entity_type, entity_id FROM p.search_documents_fts
+                                                   WHERE search_documents_fts MATCH ?1)
+                 OR d.entity_key LIKE ?2 ESCAPE '\\'",
+                vec![fts_phrase(term), like_pattern(term)],
+            )
+        } else {
+            (
+                "d.title LIKE ?1 ESCAPE '\\' OR d.body LIKE ?1 ESCAPE '\\'",
+                vec![like_pattern(term)],
+            )
+        };
+        let mut st = c.prepare(&format!(
+            "SELECT d.entity_key FROM p.search_documents d WHERE {predicate} ORDER BY d.entity_key"
+        ))?;
+        let theirs: Vec<String> = st
+            .query_map(rusqlite::params_from_iter(&args), |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut ours: Vec<String> =
+            match_docs(c, std::slice::from_ref(term), &Scope::Project(p), 1_000_000)?
+                .into_iter()
+                .map(|h| h.entity_key)
+                .collect();
+        ours.sort();
+        source_rows += theirs.len() as i64;
+        target_rows += ours.len() as i64;
+        for (h, keys) in [(&mut src_body, &theirs), (&mut tgt_body, &ours)] {
+            h.update(at.as_bytes());
+            h.update([0]);
+            for k in keys {
+                h.update(k.as_bytes());
+                h.update([0]);
+            }
+            h.update([0xff]);
+        }
+        if theirs != ours {
+            errors += 1;
+            first.get_or_insert_with(|| format!("{label}({at})"));
+        }
+    }
+    let hex = |h: Sha256| {
+        h.finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    };
+    report.checks.push(FamilyCheck {
+        family: label,
+        spec: "search_documents",
+        scope: p.to_string(),
+        source_rows,
+        target_rows,
+        source_digest: hex(src_body),
+        target_digest: hex(tgt_body),
+        errors,
+        first_failure_locator: first,
+    });
+    Ok(())
 }
 
 // ===== VERIFY：规范化规则的独立重算（store/NORMALIZATION.md）=====
@@ -2266,7 +2775,11 @@ fn verify_settings(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
     compare(
         c,
         report,
-        "r/settings",
+        Ck {
+            spec: "settings",
+            label: "r/settings",
+            key: &["key"],
+        },
         &cols,
         &expected,
         &[],
@@ -2328,10 +2841,15 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
         .collect::<Vec<_>>()
         .join(", ");
     let order = list(&pk);
+    let key: Vec<&str> = pk.iter().map(String::as_str).collect();
     compare(
         c,
         report,
-        &family("work_items"),
+        Ck {
+            spec: "work_items",
+            label: &family("work_items"),
+            key: &key,
+        },
         &cols,
         &format!("SELECT {source} FROM p.work_items ORDER BY {order}"),
         &[],
@@ -2380,10 +2898,15 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
     // work_item_relations：目标只有 BLOCKS 与 DISCOVERED_FROM；其余是 N-02f 的附件。
     let (cols, pk) = columns(c, "p", "work_item_relations")?;
     let (l, order) = (list(&cols), list(&pk));
+    let key: Vec<&str> = pk.iter().map(String::as_str).collect();
     compare(
         c,
         report,
-        &family("work_item_relations"),
+        Ck {
+            spec: "work_item_relations",
+            label: &family("work_item_relations"),
+            key: &key,
+        },
         &cols,
         &format!(
             "SELECT {l} FROM p.work_item_relations
@@ -2461,10 +2984,15 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
             .collect::<Vec<_>>()
             .join(", ");
         let order = list(&pk);
+        let key: Vec<&str> = pk.iter().map(String::as_str).collect();
         compare(
             c,
             report,
-            &family(table),
+            Ck {
+                spec: table,
+                label: &family(table),
+                key: &key,
+            },
             &cols,
             &format!("SELECT {source} FROM p.{table} ORDER BY {order}"),
             &[],
@@ -2506,12 +3034,20 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
         );
     }
 
-    // N-05 的时间接受域：用 SQLite 的日期函数另验一遍（规范形状且是真实时刻时，重新格式化后不变）。
+    // N-05 的时间接受域，与转换侧的 canonical_utc_millis 分开写：形状逐位核对，时、分、秒各自查范围，
+    // 日期用 SQLite 的 date() 往返（2 月 30 日会被挪到 3 月，往返后不等）。只靠 strftime 往返会放过 24:00
+    // （W3a peer r2 P2-R2-01）。
     let odd: i64 = c.query_row(
         "SELECT count(*) FROM p.agent_sessions a
          WHERE (a.predecessor_session_id IS NOT NULL
                 OR EXISTS (SELECT 1 FROM p.agent_sessions b WHERE b.predecessor_session_id = a.id))
-           AND strftime('%Y-%m-%dT%H:%M:%fZ', a.started_at) IS NOT a.started_at",
+           AND NOT (typeof(a.started_at) = 'text'
+                    AND length(a.started_at) = 24
+                    AND a.started_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'
+                    AND CAST(substr(a.started_at, 12, 2) AS INTEGER) < 24
+                    AND CAST(substr(a.started_at, 15, 2) AS INTEGER) < 60
+                    AND CAST(substr(a.started_at, 18, 2) AS INTEGER) < 60
+                    AND date(substr(a.started_at, 1, 10)) IS substr(a.started_at, 1, 10))",
         [],
         |r| r.get(0),
     )?;

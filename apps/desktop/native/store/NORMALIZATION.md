@@ -15,7 +15,7 @@
 
 - **主键集合摘要**：`sha256("ATM-NORM-1" ‖ 规则编号 ‖ 0x00 ‖ 族名 ‖ 0x00 ‖ 每个主键)`。主键先按字节序排序；单列主键直接取原文，多列主键用 0x1F 连接；每个主键后跟 0x00。空集合也照此计算。
 - **族名**：项目表写 `<project_id>/<表>`，registry 表写 `r/<表>`，与 05 §5.1 的 VERIFY 族名一致。
-- **报告**：每条规则在每个受影响的族上**恰好**一条记录 `{rule:"N-xx@v", family, count, keys_digest}`；`keys_digest` 是 64 位小写十六进制。计数为 0 的也写，用来证明规则执行过。重复的（规则，族）或格式不对的摘要，VERIFY 报可定位的失败（不 panic）。报告不含正文与密钥（05 §3.4）。
+- **报告**：每条规则在每个受影响的族上**恰好**一条记录 `{rule:"N-xx@v", family, count, keys_digest}`；`keys_digest` 是 64 位小写十六进制。按原因分开计数的规则（目前只有 N-05），内存里的规则标识写成 `N-05@1:<原因>`，主键集合摘要的「规则编号」输入就是这整个串；`report.json` 把它拆成 `rule:"N-05@1"` 与 `reason:"<原因>"` 两个字段，其余规则的 `reason` 为 `null`（`store/REPORT.md`）。计数为 0 的也写，用来证明规则执行过。重复的（规则，族）或格式不对的摘要，VERIFY 报可定位的失败（不 panic）。报告不含正文与密钥（05 §3.4）。
 - **报告附件**：被舍弃结构的非默认值写入附件，不进报告正文。附件每个族一组，内容是一组 JSON 行，按主键排序；W3d 把它和 `report.json` 一起写到 `staging\<g>\`。附件可能含用户正文（例如标签名），所以与报告分开存放。
 
 ## N-01@1 终态任务上的残留领取（00 C-03、Q-06）
@@ -74,7 +74,7 @@ g～i 的目标值：
 记 `E` 为键 `notification.enabled` 的行，`M` 为键 `notification.mode` 的行。
 
 - **判定按整段文本做 `JSON.parse`**：`M` 合法，指 `value_json` 整段按 `JSON.parse` 解析成字符串，且值为上述三者之一（区分大小写，与 2.x 的 `includes` 相同）；`E` 为 false，指整段解析结果恰好是布尔 `false`。允许首尾空白和字符串里的转义（`"OF\u0046"` 合法且等于 `"OFF"`）；任何位置的原始 NUL（JSON 不允许未转义的控制字符）、尾随垃圾、非字符串值都不合法。SQLite 的 JSON 函数在原始 NUL 处截断，不能单独用作判定（转换侧用 `store/src/jsjson.rs` 的 JS 语义解析器；VERIFY 侧用 SQLite JSON 函数并先排除含原始 NUL 的文本）。
-- **与 2.x 运行时的关系**：合法输入上，推导值与 2.x 通知策略读到的有效值相同。2.x 的 `getSetting`（`packages/storage-sqlite/src/registry-workspace.ts:272`）直接 `JSON.parse`，坏 JSON 会抛错；本规则对坏 JSON 取 `"ALL"` 是登记的修复，不是 2.x 的原有行为。
+- **与 2.x 运行时的关系**：合法输入上，推导值与 2.x 通知策略读到的有效值相同。2.x 的 `getSetting`（`packages/storage-sqlite/src/registry-workspace.ts:272`）直接 `JSON.parse`，坏 JSON 会抛错。本规则的处理是登记的修复，不是 2.x 的原有行为，优先顺序是：`M` 合法就用 `M`；否则（`M` 缺省、不是 JSON、不是三者之一）看 `E`，`E` 恰好是 `false` 时为 `"OFF"`；其余（`E` 缺省、不是 JSON、不是 `false`）为 `"ALL"`。所以坏 JSON 的 `M` 加上合法的 `E=false` 得 `"OFF"`，不是 `"ALL"`。
 
 | 情况                       | 输入谓词                     | 目标                                                                                                                                                           |
 | -------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -99,12 +99,12 @@ g～i 的目标值：
   - `CROSS_ROLE`：`s.role <> p.role`；
   - `TIME_REVERSED`：`s.started_at < p.started_at`。
 - 有效边的时间不减，所以由有效边构成的环只可能出现在同一时刻（所有 `started_at` 相等）。lineage 按 visited 集合求连通分量，环不影响结果，也不需要断边，结果是确定的。报告单独计数 `SAME_INSTANT`：两端 `started_at` 相等的有效边。
-- **时间接受域**：参与 predecessor 边的 session（有 predecessor，或是别人的 predecessor），`started_at` 必须是 `toISOString()` 的形状 `YYYY-MM-DDTHH:MM:SS.sssZ`，且是真实存在的日期时间（不接受 2 月 30 日、小写 z、省略毫秒等）。在这个域里字符串序就是时间序，与 3.0 运行时 lineage 的比较一致；同一时刻只有一种写法。2.x 一律写 `toISOString()`。不参与边的 session 不受约束。
+- **时间接受域**：参与 predecessor 边的 session（有 predecessor，或是别人的 predecessor），`started_at` 必须是 `toISOString()` 的形状 `YYYY-MM-DDTHH:MM:SS.sssZ`（恰好 24 个字符，年份四位 0000–9999），且是真实存在的日期时间（不接受 2 月 30 日、24 点、闰秒、小写 z、省略毫秒、带偏移等）。JS 对 0000–9999 以外的年份输出带符号的六位年份（`+010000-…`），不在本域内，显式拒绝；正常 2.x 写入的墙钟时间都在域内。在这个域里字符串序就是时间序，与 3.0 运行时 lineage 的比较一致；同一时刻只有一种写法。2.x 一律写 `toISOString()`。不参与边的 session 不受约束。
 - **无法确定时显式失败**：
   - 时间不在接受域里：转换失败，错误点名项目、session 与字段（`agent_sessions <id>.started_at`），不按字典序猜先后，也不改原值；
   - `predecessor_session_id` 指向不存在的 session：转换在提交时的外键检查处失败，并报告位置；
-  - 两种情况都不删边。VERIFY 另用 SQLite 日期函数核对接受域（重新格式化后不变）。
-- 报告：每个原因一条 `{rule:"N-05@1", family, reason, count, keys_digest}`，主键为 `s.id`。
+  - 两种情况都不删边。VERIFY 另写一份接受域检查，不依赖转换侧的代码：逐位核对形状，时、分、秒分别查范围，日期用 SQLite 的 `date()` 往返（不规范的日期会被挪动，往返后不等）。只做 `strftime` 往返不够，它会原样放过 `24:00:00.000`（W3a peer r2 P2-R2-01）。
+- 报告：每个原因一条记录，内存里 `rule = "N-05@1:<原因>"`，`report.json` 写成 `{rule:"N-05@1", reason, family, count, keys_digest}`；摘要的规则输入是带原因的整串。主键为 `s.id`。
 
 OPS 效果名 `SET_BLOCKER`（C-16 的最后一项）不落库，无需处理。
 

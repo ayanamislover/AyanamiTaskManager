@@ -6,7 +6,8 @@
 
 use atm_store::jsjson;
 use atm_store::legacy::{
-    ConvertError, ConvertOptions, LegacySources, Normalization, Report, convert, verify_converted,
+    ConvertError, ConvertOptions, Decision, FAMILIES, FTS_SHADOWS, Home, LegacySources,
+    Normalization, Report, convert, verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
 use rusqlite::{Connection, params};
@@ -144,7 +145,10 @@ fn fixture(name: &str) -> Fixture {
          INSERT INTO knowledge_operations (op_id, fingerprint, receipt) VALUES
            ('USER-op-1', 'fp1', '{\"format\":\"knowledge-receipt-v2\",\"id\":\"K1\"}'),
            ('agent:abc', 'fp2', '{\"id\":\"K1\",\"revision\":1}'),
-           ('agent:list', 'fp3', '[1]');"
+           ('agent:list', 'fp3', '[1]');
+         -- 2.0 发布时写的索引行（knowledge-repository.ts:231-247）：head revision 的内容，列表字段用换行连接。
+         INSERT INTO knowledge_fts (entry_id, metadata, title, aliases, tags, summary, use_when, applies_to, body) VALUES
+           ('K1', '{\"id\":\"K1\"}', 'Single database', 'one file', 'store', 's', 'u', 'atm', 'two');"
     )
     .unwrap();
     drop(k);
@@ -168,7 +172,11 @@ fn fixture(name: &str) -> Fixture {
              INSERT INTO handoffs (id, work_item_id, from_session_id, to_agent_id, summary, next_action, created_at)
                VALUES ('H1', 'W1', 'S1', 'claude', 'sum', 'next', '{T}');
              INSERT INTO search_documents (entity_type, entity_id, entity_key, title, body, updated_at)
-               VALUES ('WORK_ITEM', 'W1', '{code}-T-0001', 'shared title words', 'body {pid}', '{T}');"
+               VALUES ('WORK_ITEM', 'W1', '{code}-T-0001', 'shared title words', 'body {pid}', '{T}'),
+                      ('RECORD', 'R1', '{code}-R-001', '单库迁移说明', '旧库里的{pid}记录', '{T}');
+             -- 2.0 的索引与文档同时写（work-item-maintenance.ts:112-116）。
+             INSERT INTO search_documents_fts (entity_type, entity_id, entity_key, title, body)
+               SELECT entity_type, entity_id, entity_key, title, body FROM search_documents;"
         ))
         .unwrap();
         let first_event = if pid == "P1" { "E1" } else { "F1" };
@@ -290,9 +298,33 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
     let report = f.convert().unwrap();
     assert!(report.failures().is_empty(), "{:?}", report.failures());
     assert!(
-        report.families.len() >= 40,
-        "only {} families checked",
-        report.families.len()
+        report.checks.len() >= 40,
+        "only {} checks ran",
+        report.checks.len()
+    );
+    assert!(report.uncovered().is_empty(), "{:?}", report.uncovered());
+    // 覆盖：拿掉一个族的全部检查，它就成了缺口，计入失败；舍弃的族与尚未实现的族不要求检查。
+    for (family, scope, spec) in [
+        ("k/knowledge_fts", "k", "knowledge_fts"),
+        ("P2/handoffs", "P2", "handoffs"),
+        ("r/backup_catalog", "r", "backup_catalog"),
+    ] {
+        let mut stripped = report.clone();
+        stripped
+            .checks
+            .retain(|c| !(c.scope == scope && c.spec == spec));
+        assert_eq!(
+            stripped.failures(),
+            [format!("{family}: no check ran")],
+            "{family}"
+        );
+    }
+    let mut stripped = report.clone();
+    stripped.checks.retain(|c| c.spec != "schema_migrations");
+    assert!(stripped.failures().is_empty(), "{:?}", stripped.failures());
+    assert!(
+        !Report::default().failures().is_empty(),
+        "an unverified report is not clean"
     );
     let t = Connection::open(f.target()).unwrap();
 
@@ -531,12 +563,20 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
     )
     .unwrap();
     assert_eq!(hits.len(), 2);
-    // 舍弃的派生族。
+    // 舍弃的派生族：源摘要照样算，供报告与 business_digest。
     assert_eq!(
-        report.dropped.get("registry.global_search_documents"),
-        Some(&1)
+        report.source("r/global_search_documents").map(|s| s.rows),
+        Some(1)
     );
-    assert_eq!(report.dropped.get("project.outbox"), Some(&4));
+    assert_eq!(report.source("P1/outbox").map(|s| s.rows), Some(4));
+    assert_eq!(report.source("P2/outbox").map(|s| s.rows), Some(0));
+    // 搜索按 2.0 与 3.0 各查一遍，命中集合相同；短词（两个汉字）也在探针里。
+    let queries = report
+        .checks
+        .iter()
+        .find(|c| c.family == "P1/search_documents.queries")
+        .unwrap();
+    assert!(queries.ok() && queries.source_rows >= 6, "{queries:?}");
     assert_eq!(q::<String>(&t, "PRAGMA integrity_check"), "ok");
     assert_eq!(
         q::<i64>(&t, "SELECT count(*) FROM pragma_foreign_key_check"),
@@ -1622,5 +1662,467 @@ fn verify_rejects_malformed_rule_records() {
             failures.contains(&"N-01@1 P1/work_items: malformed keys_digest".to_string()),
             "{digest:?}: {failures:?}"
         );
+    }
+}
+
+/// W3b1：族表与 05 §5.2 一一对应（编号、族、决定、是否纳入 business_digest），
+/// 并且 2.x 三类库的每一张表（含 FTS 影子表）恰好被一个族认领。期望值按 05 逐行手抄，不从族表生成。
+#[test]
+fn the_family_table_matches_05_and_claims_every_2x_table() {
+    use Decision::*;
+    let expected: &[(&str, Home, &str, Decision, bool)] = &[
+        ("R1", Home::Registry, "projects", Converted, true),
+        ("R2", Home::Registry, "project_paths", Converted, true),
+        ("R3", Home::Registry, "quick_tasks", Converted, true),
+        ("R4", Home::Registry, "quick_task_updates", Converted, true),
+        ("R5", Home::Registry, "saved_views", Converted, true),
+        ("R6", Home::Registry, "settings", Converted, true),
+        ("R7", Home::Registry, "import_history", Converted, true),
+        (
+            "R8",
+            Home::Registry,
+            "project_restore_requests",
+            Converted,
+            true,
+        ),
+        ("R9", Home::Registry, "global_events", Converted, true),
+        ("R10", Home::Registry, "app_meta", Converted, true),
+        ("R11", Home::Registry, "backup_catalog", Referenced, true),
+        ("R12", Home::Registry, "schema_migrations", Dropped, true),
+        (
+            "X1",
+            Home::Registry,
+            "project_summary_cache",
+            Dropped,
+            false,
+        ),
+        (
+            "X1",
+            Home::Registry,
+            "global_search_documents",
+            Dropped,
+            false,
+        ),
+        (
+            "X1",
+            Home::Registry,
+            "project_projection_state",
+            Dropped,
+            false,
+        ),
+        ("K1", Home::Knowledge, "knowledge_meta", Converted, true),
+        ("K2", Home::Knowledge, "knowledge_entries", Converted, true),
+        (
+            "K3",
+            Home::Knowledge,
+            "knowledge_revisions",
+            Converted,
+            true,
+        ),
+        (
+            "K4",
+            Home::Knowledge,
+            "knowledge_operations",
+            Converted,
+            true,
+        ),
+        ("K5", Home::Knowledge, "schema_migrations", Dropped, true),
+        ("X1", Home::Knowledge, "knowledge_fts", Rebuilt, false),
+        ("P1", Home::Project, "project_meta", Converted, true),
+        ("P2", Home::Project, "counters", Converted, true),
+        ("P3", Home::Project, "objectives", Converted, true),
+        ("P3", Home::Project, "milestones", Converted, true),
+        ("P3", Home::Project, "work_items", Converted, true),
+        ("P3", Home::Project, "work_item_relations", Converted, true),
+        ("P3", Home::Project, "checklist_items", Converted, true),
+        ("P3", Home::Project, "labels", Dropped, true),
+        ("P3", Home::Project, "work_item_labels", Dropped, true),
+        ("P3", Home::Project, "progress_updates", Converted, true),
+        ("P3", Home::Project, "project_updates", Converted, true),
+        ("P3", Home::Project, "blockers", Converted, true),
+        ("P3", Home::Project, "records", Converted, true),
+        ("P3", Home::Project, "artifacts", Converted, true),
+        ("P3", Home::Project, "review_requests", Converted, true),
+        ("P3", Home::Project, "review_submissions", Converted, true),
+        ("P4", Home::Project, "agents", Converted, true),
+        ("P4", Home::Project, "agent_sessions", Converted, true),
+        ("P4", Home::Project, "handoffs", Converted, true),
+        ("P5", Home::Project, "events", Converted, true),
+        ("P6", Home::Project, "idempotency_keys", Converted, true),
+        (
+            "P7",
+            Home::Project,
+            "engineering_project_metrics",
+            Converted,
+            true,
+        ),
+        (
+            "P7",
+            Home::Project,
+            "engineering_work_item_metrics",
+            Converted,
+            true,
+        ),
+        ("P8", Home::Project, "settings", Dropped, true),
+        ("P9", Home::Project, "schema_migrations", Dropped, true),
+        ("X1", Home::Project, "outbox", Dropped, false),
+        ("X1", Home::Project, "search_documents", Rebuilt, false),
+        ("P10", Home::ProjectDir, "manifest.json", Dropped, true),
+        ("P11", Home::ProjectDir, "artifacts", Converted, true),
+        ("F1", Home::Root, "sync.config", Converted, true),
+        ("F2", Home::Root, "sync.secrets", Converted, true),
+        ("F3", Home::Root, "dispatch.config", Converted, true),
+        ("F4", Home::Root, "dispatch.runs", Converted, true),
+        ("F5", Home::Root, "dispatch.requests", Converted, true),
+        ("F6", Home::Root, "dispatch.logs.final", Converted, true),
+        ("F7", Home::Root, "dispatch.logs.running", Referenced, false),
+        ("X2", Home::Root, "runtime", Dropped, false),
+        ("X3", Home::Root, "logs", Dropped, false),
+        ("X4", Home::Root, "install-copies", Dropped, false),
+        ("X5", Home::Root, "setup", Dropped, false),
+        ("X6", Home::Root, "webview", Dropped, false),
+        ("X7", Home::Root, "backups", Referenced, false),
+        ("X8", Home::Root, "exports", Referenced, false),
+        ("X9", Home::Root, "diagnostic-copies", Dropped, false),
+        ("X10", Home::Root, "sync.plain-secrets", Dropped, false),
+        ("X11", Home::Root, "trash", Dropped, false),
+        ("X12", Home::Root, "in-flight", Dropped, false),
+    ];
+    let actual: Vec<(&str, Home, &str, Decision, bool)> = FAMILIES
+        .iter()
+        .map(|f| (f.code, f.home, f.name, f.decision, f.business_digest))
+        .collect();
+    assert_eq!(actual, expected);
+    for f in FAMILIES {
+        let is_db = matches!(f.home, Home::Registry | Home::Knowledge | Home::Project);
+        // 非 DB 族都还没实现，由 W3b4～W3b6 负责；DB 族都已实现。
+        assert_eq!(f.pending.is_some(), !is_db, "{} {}", f.code, f.name);
+        assert_eq!(
+            f.drop_reason.is_some(),
+            f.decision == Decision::Dropped,
+            "{} {}",
+            f.code,
+            f.name
+        );
+        assert_eq!(
+            f.target.is_empty(),
+            f.decision == Decision::Dropped,
+            "{} {}",
+            f.code,
+            f.name
+        );
+    }
+
+    let d = dir("legacy-family-table");
+    for (kind, home) in [
+        ("registry", Home::Registry),
+        ("knowledge", Home::Knowledge),
+        ("project", Home::Project),
+    ] {
+        let c = legacy(&d.join(format!("{kind}.sqlite")), kind);
+        let names: Vec<String> = c
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let claims = |name: &str| {
+            FAMILIES
+                .iter()
+                .filter(|f| f.home == home)
+                .filter(|f| {
+                    f.sources.iter().any(|s| {
+                        *s == name
+                            || (s.ends_with("_fts")
+                                && FTS_SHADOWS.iter().any(|x| format!("{s}{x}") == name))
+                    })
+                })
+                .count()
+        };
+        for n in &names {
+            assert_eq!(claims(n), 1, "{kind}: {n}");
+        }
+        for f in FAMILIES.iter().filter(|f| f.home == home) {
+            for s in f.sources {
+                assert!(
+                    names.iter().any(|n| n == s),
+                    "{kind}: {s} is registered but not built by 2.x"
+                );
+            }
+        }
+    }
+}
+
+/// W3b1：report.json 是 05 §3.4 的形状——每个族实例一条，DB 族带源摘要，检查带结果、错误数与定位；
+/// 不含正文。尚未实现的族列在 pending 里。
+#[test]
+fn report_json_lists_every_family_without_bodies() {
+    let f = fixture("legacy-report-json");
+    let report = f.convert().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&report.report_json()).unwrap();
+    assert_eq!(json["format"], "atm-conversion-report");
+    assert_eq!(json["knowledge"], "PRESENT");
+    let families = json["families"].as_array().unwrap();
+    let per_project = FAMILIES
+        .iter()
+        .filter(|f| matches!(f.home, Home::Project | Home::ProjectDir))
+        .count();
+    assert_eq!(families.len(), FAMILIES.len() + per_project, "two projects");
+    let get = |name: &str| {
+        families
+            .iter()
+            .find(|x| x["family"] == name)
+            .unwrap_or_else(|| panic!("no family {name}"))
+    };
+    let wi = get("P1/work_items");
+    assert_eq!(wi["code"], "P3");
+    assert_eq!(wi["decision"], "CONVERTED");
+    assert_eq!(wi["source"]["path_class"], "projects/<id>/project.sqlite");
+    assert_eq!(wi["source"]["rows"], 1);
+    assert_eq!(wi["source"]["digest"].as_str().unwrap().len(), 64);
+    assert_eq!(wi["target"]["table"], "work_items");
+    assert_eq!(wi["target"]["rows"], 1);
+    let check = &wi["checks"][0];
+    assert_eq!(
+        (
+            check["name"].as_str(),
+            check["result"].as_str(),
+            check["errors"].as_i64()
+        ),
+        (Some("P1/work_items"), Some("PASS"), Some(0))
+    );
+    assert!(check["first_failure_locator"].is_null());
+    let search = get("P2/search_documents");
+    assert_eq!(search["decision"], "REBUILT");
+    let names: Vec<&str> = search["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["P2/search_documents", "P2/search_documents.queries"]
+    );
+    let outbox = get("P1/outbox");
+    assert_eq!(outbox["decision"], "DROPPED");
+    assert_eq!(outbox["source"]["rows"], 4);
+    assert!(outbox["target"]["table"].is_null() && outbox["checks"].as_array().unwrap().is_empty());
+    let sync = get("root/sync.config");
+    assert_eq!(sync["pending"], "W3b5");
+    assert!(sync["source"]["files"].is_null());
+    assert!(
+        report.pending().contains(&"P1/artifacts: W3b4".to_string()),
+        "{:?}",
+        report.pending()
+    );
+    assert!(
+        report
+            .pending()
+            .contains(&"root/in-flight: W3b6".to_string())
+    );
+    // N-05 等带原因的规则：规则号与原因分开写。
+    let r = rules_fixture("legacy-report-json-rules").convert().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&r.report_json()).unwrap();
+    let n05 = json["normalizations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["reason"] == "SAME_INSTANT")
+        .unwrap();
+    assert_eq!(
+        (n05["rule"].as_str(), n05["family"].as_str()),
+        (Some("N-05@1"), Some("P1/agent_sessions"))
+    );
+    // 不含正文：标题、正文、事件 payload、标签名都不出现。
+    let text = report.report_json() + &r.report_json();
+    for body in [
+        "shared title words",
+        "单库迁移说明",
+        "xxxxxxxx",
+        "Single database",
+        "紧急",
+        "not json {",
+    ] {
+        assert!(!text.contains(body), "{body}");
+    }
+}
+
+/// M-04（05 §6）：在转换好的目标上改一行、删一行、多一行、翻一个 REAL 位，只有对应的族变红，
+/// 报告给出不一致的行数与第一处不一致的主键。
+#[test]
+fn m04_tampering_one_row_turns_exactly_its_family_red() {
+    let f = fixture("legacy-m04");
+    let report = f.convert().unwrap();
+    let clean = f.dir.join("out").join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let flip = |table: &'static str, col: &'static str, pid: &'static str, id: &'static str| {
+        move |t: &Connection| {
+            let v: f64 = t
+                .query_row(
+                    &format!("SELECT {col} FROM {table} WHERE project_id = ?1 AND id = ?2"),
+                    params![pid, id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let bent = f64::from_bits(v.to_bits() ^ 1);
+            assert_ne!(v, bent);
+            t.execute(
+                &format!("UPDATE {table} SET {col} = ?3 WHERE project_id = ?1 AND id = ?2"),
+                params![pid, id, bent],
+            )
+            .unwrap();
+        }
+    };
+    let sql = |s: &'static str| move |t: &Connection| t.execute_batch(s).unwrap();
+    type Tamper = Box<dyn Fn(&Connection)>;
+    let cases: Vec<(&str, Tamper, &[&str], &str)> = vec![
+        (
+            "change a row",
+            Box::new(sql(
+                "UPDATE quick_tasks SET title = 'changed' WHERE id = 'Q2'",
+            )),
+            &["r/quick_tasks"],
+            "r/quick_tasks(\"Q2\")",
+        ),
+        (
+            "delete a row",
+            Box::new(sql(
+                "DELETE FROM handoffs WHERE project_id = 'P1' AND id = 'H1'",
+            )),
+            &["P1/handoffs"],
+            "P1/handoffs(\"H1\")",
+        ),
+        (
+            "an extra row",
+            Box::new(sql(
+                "INSERT INTO saved_views (id, scope, name, created_at, updated_at) VALUES ('V2', 'GLOBAL', 'extra', 'x', 'x')",
+            )),
+            &["r/saved_views"],
+            "r/saved_views(\"V2\")",
+        ),
+        (
+            "flip a REAL bit",
+            Box::new(flip("objectives", "weight", "P2", "OBJ")),
+            &["P2/objectives"],
+            "P2/objectives(\"OBJ\")",
+        ),
+        (
+            "flip a REAL bit in computed progress",
+            Box::new(flip("work_items", "computed_progress", "P1", "W1")),
+            &["P1/work_items"],
+            "P1/work_items(\"W1\")",
+        ),
+        (
+            "delete an event",
+            Box::new(sql(
+                "DELETE FROM events WHERE project_id = 'P2' AND seq = 4",
+            )),
+            &["P2/events"],
+            "P2/events(4)",
+        ),
+        (
+            "knowledge index drifted",
+            Box::new(sql(
+                "UPDATE knowledge_fts SET body = 'three' WHERE entry_id = 'K1'",
+            )),
+            &["k/knowledge_fts"],
+            "k/knowledge_fts(\"K1\")",
+        ),
+        (
+            "search document lost its words",
+            Box::new(sql(
+                "UPDATE search_docs SET title = 'x', body = 'y' WHERE project_id = 'P1' AND entity_type = 'RECORD'",
+            )),
+            &["P1/search_documents", "P1/search_documents.queries"],
+            "P1/search_documents(\"RECORD\",\"R1\")",
+        ),
+        (
+            "high water moved",
+            Box::new(sql("UPDATE app_meta SET global_seq = global_seq + 1")),
+            &["r/app_meta.global_seq"],
+            "r/app_meta.global_seq",
+        ),
+    ];
+    for (name, tamper, expected, locator) in cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        tamper(&t);
+        drop(t);
+        let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+        assert_eq!(again.failures(), expected, "{name}");
+        let bad = again
+            .checks
+            .iter()
+            .find(|c| c.family == expected[0])
+            .unwrap();
+        assert_eq!(
+            (bad.errors, bad.first_failure_locator.as_deref()),
+            (1, Some(locator)),
+            "{name}"
+        );
+    }
+    // 搜索的探针：定位只写实体类型与探针种类。
+    fs::copy(&clean, f.target()).unwrap();
+    Connection::open(f.target())
+        .unwrap()
+        .execute_batch(
+            "UPDATE search_docs SET body = 'y' WHERE project_id = 'P1' AND entity_type = 'RECORD'",
+        )
+        .unwrap();
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    let probe = again
+        .checks
+        .iter()
+        .find(|c| c.family == "P1/search_documents.queries")
+        .unwrap();
+    assert_eq!(
+        (probe.errors, probe.first_failure_locator.as_deref()),
+        (1, Some("P1/search_documents.queries(RECORD.body)"))
+    );
+}
+
+/// W3a peer r2 P2-R2-01：VERIFY 的 N-05 时间域检查独立于转换侧，不靠 strftime 往返；
+/// 源与目标一致、报告也没改、边分类不变时，24:00 照样报时间域失败。规范的边界时间照常通过。
+#[test]
+fn verify_checks_the_lineage_time_domain_on_its_own() {
+    let f = rules_fixture("legacy-n05-verify-domain");
+    let report = f.convert().unwrap();
+    let odd = "2026-09-02T24:00:00.000Z";
+    f.project(0)
+        .execute(
+            "UPDATE agent_sessions SET started_at = ?1 WHERE id = 'S2'",
+            [odd],
+        )
+        .unwrap();
+    Connection::open(f.target())
+        .unwrap()
+        .execute(
+            "UPDATE agent_sessions SET started_at = ?1 WHERE project_id = 'P1' AND id = 'S2'",
+            [odd],
+        )
+        .unwrap();
+    let failures = verify_converted(&f.target(), &f.sources, &report)
+        .unwrap()
+        .failures();
+    assert_eq!(
+        failures,
+        ["P1/agent_sessions: 1 lineage endpoints outside the N-05 time domain"]
+    );
+    for ok in [
+        "2026-09-02T23:59:59.999Z",
+        "2024-02-29T12:00:00.000Z",
+        "2026-09-02T00:00:00.000Z",
+    ] {
+        let f = rules_fixture("legacy-n05-verify-domain-ok");
+        f.project(0)
+            .execute(
+                "UPDATE agent_sessions SET started_at = ?1 WHERE id = 'S2'",
+                [ok],
+            )
+            .unwrap();
+        let report = f.convert().unwrap_or_else(|e| panic!("{ok}: {e}"));
+        assert!(report.failures().is_empty(), "{ok}");
     }
 }
