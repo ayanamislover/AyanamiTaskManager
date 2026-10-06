@@ -1404,3 +1404,83 @@ fn r1_review_request_respects_the_review_task_claim() {
     w.refused(ErrorCode::CLAIM_NOT_OWNED, || w.request_as("SX", &s, 2, 0));
     w.request_as("S1", &s, 2, 0).unwrap();
 }
+
+/// peer W2 r1 P1-04：R2 对 review_request 同样成立——同 lineage 的后继 S2 成功、非重放地发起请求后，Review
+/// 任务的领取转给 S2 并续租；不加 version（发起者手里的版本仍可直接用）。租约已过期时同样转移（领取仍在）。
+/// 失败与重放都不动领取和租约；别的 agent 被 R1 拒绝。
+#[test]
+fn r2_review_request_moves_the_claim_to_the_writing_session() {
+    let req = |s: &Review, rv: i64| ReviewRequest {
+        review_task_key: s.review.clone(),
+        expected_review_task_version: Some(rv),
+        parent_checklist_id: s.checklist.clone(),
+        expected_parent_checklist_version: 0,
+        candidate_hashes: hashes(&[("Source", " ABCDEF1 ")]),
+    };
+    for (name, lease) in [("rv-r2-valid", None), ("rv-r2-expired", Some(PAST))] {
+        let w = world(name);
+        let s = review_setup(&w);
+        w.patch_as(&agent(), Some("S1"), vec![p(&s.review, Operation::Claim)])
+            .unwrap();
+        if let Some(at) = lease {
+            w.exec(&format!(
+                "UPDATE work_items SET claim_lease_until = '{at}' WHERE project_id = 'PA' AND local_no = {}",
+                s.review.rsplit('-').next().unwrap().parse::<i64>().unwrap()
+            ));
+        }
+        let held_lease = w.col(&s.review, "claim_lease_until");
+        // 失败（版本不对）：领取与租约不动。
+        w.refused(ErrorCode::VERSION_CONFLICT, || {
+            w.svc
+                .request_review(&agent(), &w.target(Some("S2")), req(&s, 9))
+        });
+        // 别的 agent：租约有效时被 R1 拒绝（过期的领取别人可以接手，那是 R1 的另一支）。
+        if lease.is_none() {
+            w.refused(ErrorCode::CLAIM_NOT_OWNED, || {
+                w.svc
+                    .request_review(&agent(), &w.target(Some("SX")), req(&s, 2))
+            });
+        }
+        assert_eq!(w.col(&s.review, "claimed_by_session_id"), "S1");
+        let target = w.target(Some("S2"));
+        let r = w.svc.request_review(&agent(), &target, req(&s, 2)).unwrap();
+        assert!(!r.replayed);
+        assert_eq!(w.col(&s.review, "claimed_by_session_id"), "S2", "{name}");
+        let renewed = w.col(&s.review, "claim_lease_until");
+        assert!(
+            renewed.as_str().unwrap() > now_iso().as_str(),
+            "{name}: {renewed}"
+        );
+        assert_ne!(renewed, held_lease);
+        assert_eq!(w.version(&s.review), 2);
+        // 发起者拿手里的版本接着写这个任务。
+        w.patch_as(
+            &agent(),
+            Some("S2"),
+            vec![PatchItem {
+                expected_version: Some(2),
+                ..p(&s.review, Operation::Start)
+            }],
+        )
+        .unwrap();
+        // 重放：把领取挪回 S1 后原样重发，领取与租约保持不动。
+        w.exec(&format!(
+            "UPDATE work_items SET claimed_by_session_id = 'S1', claim_lease_until = '{PAST}'
+             WHERE project_id = 'PA' AND claimed_by_session_id = 'S2'"
+        ));
+        let before = w.snapshot();
+        let again = w.svc.request_review(&agent(), &target, req(&s, 2)).unwrap();
+        assert!(again.replayed);
+        assert_eq!(w.snapshot(), before);
+    }
+}
+
+fn now_iso() -> String {
+    atm_domain::time::Timestamp::from_millis(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64,
+    )
+    .to_string()
+}

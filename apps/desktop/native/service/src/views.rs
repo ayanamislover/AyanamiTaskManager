@@ -116,6 +116,7 @@ fn request(
         fingerprint: fixed_fp(fp),
         compat_v1: None,
         replay_guard: None,
+        prepare: None,
         rebind: Rebind::Create,
     }
 }

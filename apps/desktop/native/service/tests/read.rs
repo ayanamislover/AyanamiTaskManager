@@ -1926,3 +1926,74 @@ fn s086_feedback_is_listed_but_not_briefed() {
         b["records"]
     );
 }
+
+/// peer W2 r1 P1-01：查询的前三个字节不在字符边界上（`a中`、`😀`、`abé`）也只是普通查询，不 panic；
+/// `op:` 前缀照常按 ASCII 不分大小写识别，后面可以跟非 ASCII。
+#[test]
+fn unicode_queries_are_plain_searches() {
+    let w = world("rd-unicode");
+    w.task("a中 混排");
+    w.task("abé 变音");
+    w.task("表情 😀");
+    let q = |query: &str| SearchRequest {
+        project: Some("ATM".into()),
+        query: Some(query.into()),
+        limit: 20,
+        ..SearchRequest::default()
+    };
+    for (query, hits) in [
+        ("abc", 0),
+        ("中文", 0),
+        ("a中", 1),
+        ("😀", 1),
+        ("abé", 1),
+        ("é", 1),
+    ] {
+        let r = search(&w, q(query));
+        assert_eq!(r["returned_count"], hits, "{query}: {r}");
+    }
+    for query in ["op:中", "OP:😀", "Op:abé"] {
+        let e = w.svc.search(&agent(), &q(query)).unwrap_err();
+        assert_ne!(e.code, ErrorCode::INTERNAL_ERROR, "{query}");
+        assert_ne!(e.code, ErrorCode::VALIDATION_ERROR, "{query}: {e:?}");
+    }
+}
+
+/// peer W2 r1 P2-01 + 02 §4.4：搜索的查询哈希与任务列表的选择集先做 NFC——同一查询换成组合字符写法
+/// （`cafe` + U+0301）仍能用原游标续读；不等价的查询（`cafe`）照旧 INVALID_CURSOR。
+#[test]
+fn s065_s068_cursors_bind_the_nfc_form() {
+    let w = world("rd-nfc");
+    // 两条都同时含两种写法：两种查询各自都能命中两条，才谈得上续读。
+    w.task("café cafe\u{301} 一");
+    w.task("café cafe\u{301} 二");
+    let composed = "café";
+    let decomposed = "cafe\u{301}";
+    assert_ne!(composed, decomposed);
+    let q = |query: &str, cursor: Option<String>| SearchRequest {
+        project: Some("ATM".into()),
+        query: Some(query.into()),
+        limit: 1,
+        cursor,
+        ..SearchRequest::default()
+    };
+    let first = search(&w, q(composed, None));
+    let c = first["next_cursor"].as_str().unwrap().to_owned();
+    w.svc
+        .search(&agent(), &q(decomposed, Some(c.clone())))
+        .unwrap();
+    let e = w.svc.search(&agent(), &q("cafe", Some(c))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::INVALID_CURSOR);
+
+    let l = |query: &str, cursor: Option<String>| TaskListRequest {
+        query: Some(query.into()),
+        limit: 1,
+        cursor,
+        ..TaskListRequest::default()
+    };
+    let first = task_list(&w, l(composed, None)).unwrap();
+    let c = first["next_cursor"].as_str().unwrap().to_owned();
+    task_list(&w, l(decomposed, Some(c.clone()))).unwrap();
+    let e = task_list(&w, l("cafe", Some(c))).unwrap_err();
+    assert_eq!(e.code, ErrorCode::INVALID_CURSOR);
+}

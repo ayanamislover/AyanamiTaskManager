@@ -11,12 +11,14 @@ mod support;
 
 use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::principal::Principal;
+use atm_service::backups::RestoreScope;
 use atm_service::knowledge::{ArchiveRequest, Content, UserSave};
+use atm_service::memory::RecordRequest;
 use atm_service::project::{PathInfo, Transition};
 use atm_service::session::GitContext;
 use atm_service::settings::BackupPolicy;
 use atm_service::views::{SavedViewCreate, SavedViewUpdate};
-use atm_service::work::Target;
+use atm_service::work::{PublishRequest, Target};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -119,6 +121,14 @@ impl World {
             .clone();
         self.svc
             .set_backup_policy(&user(), BackupPolicy::default(), None, "fixture-b")
+            .unwrap();
+        // knowledge.preview_record 要一条记录（ATM-R-0001）。
+        self.svc
+            .create_record(
+                &agent(),
+                &Target::new("PA", Some("S1"), "fixture-r"),
+                RecordRequest::new("REFERENCE", "夹具记录", "摘要"),
+            )
             .unwrap();
         (entry, view)
     }
@@ -264,6 +274,48 @@ fn cases(entry: &Value, view: &Value) -> Vec<Case> {
             written(w.svc.set_notification_mode(p, "OFF", None, op))
         }),
         case("settings.read", |w, p, _| w.svc.list_settings(p)),
+        // peer W2 r1 P1-05 补上的 U-only 入口。
+        case("project_update.draft", |w, p, op| {
+            written(w.svc.draft_project_update(p, &Target::new("PA", None, op)))
+        }),
+        case("project_update.publish", |w, p, op| {
+            written(w.svc.publish_project_update(
+                p,
+                &Target::new("PA", None, op),
+                PublishRequest {
+                    summary: "周报".into(),
+                    ..PublishRequest::default()
+                },
+            ))
+        }),
+        case("import.apply", |w, p, op| {
+            written(w.svc.apply_import(
+                p,
+                &Target::new("PA", None, op),
+                "# 导入的目标
+- [ ] 导入的任务",
+                None,
+                None,
+            ))
+        }),
+        case("knowledge.preview_record.read", |w, p, _| {
+            w.svc.preview_record(p, "ATM", "ATM-R-0001")
+        }),
+        case("backup.create_manual", |w, p, _| {
+            w.svc.create_manual_backup(p)
+        }),
+        case("backup.restore_scope", |w, p, _| {
+            // User 的阳性对照里上一条刚做了手动备份；Agent 在能力检查就被拒，用不到真的 id。
+            let list = w.svc.list_backups(&user(), 200).unwrap();
+            let id = list["backups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|b| b["kind"] == "MANUAL")
+                .map_or("NONE".to_owned(), |b| b["id"].as_str().unwrap().to_owned());
+            w.svc
+                .restore_scope(p, &id, RestoreScope::Project("EMP".into()))
+        }),
     ]
 }
 
@@ -273,7 +325,7 @@ fn p005_agents_are_refused_every_user_only_capability_without_side_effects() {
     let w = world("perm-agent");
     let (entry, view) = w.fixtures();
     let list = cases(&entry, &view);
-    assert_eq!(list.len(), 19);
+    assert_eq!(list.len(), 25);
     for (i, c) in list.iter().enumerate() {
         let (db, fs) = (w.snapshot(), files(&w.dir));
         let e = (c.call)(&w, &agent(), &format!("agent-{i}"))
@@ -318,7 +370,7 @@ fn p005_the_same_calls_succeed_for_the_user() {
             );
         }
     }
-    assert_eq!(changed, 16);
+    assert_eq!(changed, 21);
     // 生命周期迁移确实做了 PRE_* 备份：Agent 用例里文件集合不变不是因为备份从来不写。
     assert!(files(&w.dir).keys().any(|k| k.starts_with("backups/")));
 }

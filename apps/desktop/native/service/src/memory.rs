@@ -48,6 +48,7 @@ fn request(
         fingerprint,
         compat_v1: None,
         replay_guard: None,
+        prepare: None,
         rebind: Rebind::Create,
     }
 }
@@ -506,6 +507,7 @@ fn project_progress(w: &mut Work<'_>, r: &ProgressRequest) -> Result<Value, Doma
         ],
     )
     .map_err(db)?;
+    crate::work::planning::set_project_health(w, &health)?;
     w.emit(
         "project.update.published",
         "PROJECT_UPDATE",
@@ -727,6 +729,23 @@ fn record_not_found(reference: &str) -> DomainError {
     )
     .detail("entity", "RECORD")
     .detail("reference", reference)
+}
+
+/// 服务内部写一条记录（agenttask 导入，03 U13）：同样的校验与插入，来源记为 IMPORT、source_ref 是源文件名。
+pub(crate) fn import_record(
+    w: &mut Work<'_>,
+    req: &RecordRequest,
+    source_ref: &str,
+) -> Result<Value, DomainError> {
+    let r = normalize_record(req, &KINDS)?;
+    let v = create_record(w, &r)?;
+    let id = v["record"]["id"].as_str().unwrap_or_default().to_owned();
+    w.tx.execute(
+        "UPDATE records SET source_type = 'IMPORT', source_ref = ?3 WHERE project_id = ?1 AND id = ?2",
+        params![w.project, id, source_ref],
+    )
+    .map_err(db)?;
+    Ok(v)
 }
 
 fn create_record(w: &mut Work<'_>, r: &Record) -> Result<Value, DomainError> {

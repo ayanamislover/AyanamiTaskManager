@@ -1331,3 +1331,27 @@ fn r4_handoffs_are_reconfirmed_after_a_restore() {
     assert_eq!(to(), n.as_str());
     assert_eq!(w.session_col("PA", &n, "connection_state"), "CLOSED");
 }
+
+/// peer W2 r1 P1-01：选择器里的项目代码含汉字、表情、二字节字符时，找不到就是 PROJECT_NOT_FOUND，
+/// 不在拼「你是不是要找」时按字节切片 panic；前缀按字符取（`AT中` 提示 ATM）。
+#[test]
+fn unicode_project_codes_are_domain_errors() {
+    let w = world("ss-begin-unicode");
+    for code in ["中文", "a中", "😀", "é", "AT中"] {
+        let e = w.refused(ErrorCode::PROJECT_NOT_FOUND, || {
+            w.svc.begin(
+                &agent(),
+                BeginRequest {
+                    selector: ProjectSelector {
+                        code: Some(code.into()),
+                        ..ProjectSelector::default()
+                    },
+                    ..begin_req("claude")
+                },
+            )
+        });
+        if code == "AT中" {
+            assert_eq!(e.details["did_you_mean"], json!(["ATM"]), "{e:?}");
+        }
+    }
+}

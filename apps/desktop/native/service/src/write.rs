@@ -73,6 +73,9 @@ pub struct SessionRef {
     pub session_id: String,
 }
 
+/// 见 [`WriteRequest::prepare`]。
+pub type Prepare = Box<dyn FnOnce(&Transaction<'_>) -> Result<(), DomainError> + Send>;
+
 pub struct WriteRequest {
     pub capability: Capability,
     pub operation: &'static str,
@@ -89,6 +92,9 @@ pub struct WriteRequest {
     /// kernel-v1 下另一个也算同一请求的形状（02 §3.3 的兼容请求）；没有就是 None。
     pub compat_v1: Option<FpInput>,
     pub replay_guard: Option<ReplayGuard>,
+    /// 新写入在世代屏障之前、同一事务里先做的准备（知识库第一次写入时建身份与世代）。动作或之后任何一步
+    /// 失败，它和整个事务一起回滚；重放、冲突与它之前的拒绝根本走不到它（peer W2 r1 P1-03）。
+    pub prepare: Option<Prepare>,
     /// session 因心跳超时关闭时：新建 successor，还是只认已有的（02 §2.4）。
     pub rebind: Rebind,
 }
@@ -142,6 +148,8 @@ pub struct Service {
     clock: Option<Clock>,
     /// 生命周期迁移前的 PRE_* 备份目录（04 L-002）。
     pub(crate) backups_root: Option<std::path::PathBuf>,
+    /// 测试用：PRE_* 备份做完、第二趟写入之前调用，模拟并发迁移抢先。
+    pub(crate) backup_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Service {
@@ -150,7 +158,15 @@ impl Service {
             store,
             clock: None,
             backups_root: None,
+            backup_hook: None,
         }
+    }
+
+    /// 测试用：见 `backup_hook`。
+    #[doc(hidden)]
+    pub fn with_backup_hook(mut self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.backup_hook = Some(hook);
+        self
     }
 
     /// 换掉读侧的时钟（只影响游标的签发与过期判断）。
@@ -295,6 +311,7 @@ where
         fingerprint,
         compat_v1,
         replay_guard,
+        prepare,
         rebind,
         ..
     } = req;
@@ -433,6 +450,10 @@ where
         }
         None => (own, author, None),
     };
+
+    if let Some(prepare) = prepare {
+        prepare(tx)?;
+    }
 
     // R4：只有新写入才看世代。
     let current = generation(tx, &scope).map_err(internal)?;

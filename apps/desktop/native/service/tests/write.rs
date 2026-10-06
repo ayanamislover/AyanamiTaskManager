@@ -164,6 +164,7 @@ fn req(
         fingerprint,
         compat_v1: None,
         replay_guard: None,
+        prepare: None,
         rebind: atm_service::write::Rebind::Create,
     }
 }

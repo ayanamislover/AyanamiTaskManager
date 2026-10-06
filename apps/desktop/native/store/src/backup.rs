@@ -314,6 +314,17 @@ pub(crate) fn create_backup_locked(
     })
 }
 
+/// 撤回一份刚做、没被任何迁移用上的备份（服务层生命周期迁移在并发里被抢先时）：删行、删目录。
+/// 只给调用方自己刚建的那一份用，不是保留策略。
+pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<()> {
+    let id = info.id.clone();
+    store.write(move |tx| tx.execute("DELETE FROM backups WHERE id = ?1", [&id]))?;
+    match fs::remove_dir_all(&info.dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 /// 校验通过的备份：恢复需要的定位信息。
 #[derive(Clone, Debug)]
 pub struct VerifiedBackup {

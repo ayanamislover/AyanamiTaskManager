@@ -387,6 +387,14 @@ fn s085_project_progress() {
         )
         .unwrap();
     assert_eq!(third.result["health"], "ON_TRACK");
+    // 发布同时改项目的 health（2.x project_meta）：三次发布，meta_version 加三。
+    assert_eq!(
+        (
+            w.scalar("SELECT health FROM projects WHERE id = 'PA'"),
+            w.count("SELECT meta_version FROM projects WHERE id = 'PA'")
+        ),
+        (json!("ON_TRACK"), 3)
+    );
 }
 
 /// S-031、S-032 + 02 §3.3：同 op_id 同请求重放；不同请求冲突；2.x kernel-v1 的旧回执也能重放。

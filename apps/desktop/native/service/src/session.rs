@@ -383,11 +383,11 @@ fn locate(tx: &Transaction<'_>, s: &ProjectSelector) -> Result<Option<Project>, 
                     .map_err(db)?
                     .collect::<rusqlite::Result<_>>()
                     .map_err(db)?;
+                // 前两个字符（不是字节）：代码里可能有汉字。
+                let head: String = code.chars().take(2).collect();
                 let near: Vec<&String> = codes
                     .iter()
-                    .filter(|c| {
-                        c.starts_with(&code[..code.len().min(2)]) || code.starts_with(c.as_str())
-                    })
+                    .filter(|c| c.starts_with(&head) || code.starts_with(c.as_str()))
                     .take(5)
                     .collect();
                 Err(
@@ -1795,6 +1795,7 @@ impl Service {
                 fingerprint,
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::ExistingOnly,
             },
             move |tx, ctx| end_action(tx, ctx, &req),
@@ -1830,6 +1831,7 @@ impl Service {
                 fingerprint,
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::ExistingOnly,
             },
             move |tx, ctx| {

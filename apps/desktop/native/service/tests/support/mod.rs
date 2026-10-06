@@ -25,6 +25,19 @@ pub struct World {
     pub dir: PathBuf,
 }
 
+/// 测试数据根：`CARGO_TARGET_DIR`（没设就是工作区的 target）下的 service-tests。测试写的文件一律落在
+/// 这里，调用方用外置的 target 隔离时不会写进源码树（peer W2 r1 P2-02）。
+pub fn test_root() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("target")
+        })
+        .join("service-tests")
+}
+
 pub fn world(name: &str) -> World {
     world_with(name, None)
 }
@@ -40,14 +53,7 @@ pub fn world_full(
     clock: Option<atm_service::write::Clock>,
     backups: Option<PathBuf>,
 ) -> World {
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("target")
-        });
-    let dir = target.join("service-tests").join(name);
+    let dir = test_root().join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let store = Store::open(

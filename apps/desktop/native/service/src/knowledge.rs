@@ -14,7 +14,7 @@ use crate::fp::JsValue;
 use crate::project::{db, dom_read_error, invalid};
 use crate::receipts::ReceiptScope;
 use crate::write::{
-    Author, Family, FpInput, Rebind, Service, SessionRef, WriteRequest, Written, internal,
+    Author, Family, FpInput, Prepare, Rebind, Service, SessionRef, WriteRequest, Written, internal,
 };
 use atm_domain::capability::{self, Capability};
 use atm_domain::error::{DomainError, ErrorCode};
@@ -418,16 +418,23 @@ fn expand(tx: &Transaction<'_>, r: &Value) -> Result<Value, DomainError> {
     Ok(entry)
 }
 
-/// 知识库的身份行。新库第一次写知识时建（新世代，reason CREATED）；转换来的库已经有。
-fn ensure_meta(tx: &Transaction<'_>, at: &str) -> Result<String, DomainError> {
-    if let Some(id) = tx
-        .query_row("SELECT database_id FROM knowledge_meta", [], |r| r.get(0))
+/// 知识库的身份行。新库第一次成功写知识时、在那次写入的事务里建（新世代，reason CREATED）；转换来的库
+/// 已经有。`id` 是事务外预先选好、回执范围已经用上的 database_id：并发的另一个首次写入先建了身份时，
+/// 范围对不上，以 [`SCOPE_MOVED`] 失败（回滚），调用方按新身份重来一次。
+fn ensure_meta(tx: &Transaction<'_>, id: &str, at: &str) -> Result<(), DomainError> {
+    if let Some(found) = tx
+        .query_row("SELECT database_id FROM knowledge_meta", [], |r| {
+            r.get::<_, String>(0)
+        })
         .optional()
         .map_err(db)?
     {
-        return Ok(id);
+        return if found == id {
+            Ok(())
+        } else {
+            Err(internal("知识库身份刚被并发建立").detail(SCOPE_MOVED, found))
+        };
     }
-    let id = store_events::ulid(tx).map_err(db)?;
     let generation_id = store_events::ulid(tx).map_err(db)?;
     let (generation, epoch) =
         atm_store::restore::allocate_generation(tx).map_err(|e| internal(format!("{e:?}")))?;
@@ -442,16 +449,20 @@ fn ensure_meta(tx: &Transaction<'_>, at: &str) -> Result<String, DomainError> {
         params![id, generation_id, generation],
     )
     .map_err(db)?;
-    Ok(id)
+    Ok(())
 }
+
+/// 知识库身份在请求读到之后被并发建立的内部标记；只在三个写入口的重试里流转，不出服务。
+const SCOPE_MOVED: &str = "__knowledge_scope_moved";
 
 fn id_field(field: &str, value: Option<&str>) -> Result<Option<String>, DomainError> {
     opt_text(field, value, 100)
 }
 
 impl Service {
-    /// 知识库的 database_id（没有就建）。
-    fn knowledge_scope(&self) -> Result<String, DomainError> {
+    /// 知识库的 database_id。还没有时只在事务外选好一个，连同在写事务里建它的准备步骤一起返回：
+    /// 身份与世代跟着第一次成功的写入提交，失败的请求不留下它们（peer W2 r1 P1-03）。
+    fn knowledge_scope(&self) -> Result<(String, Option<Prepare>), DomainError> {
         let found: Option<String> = self
             .store()
             .read(|tx| {
@@ -460,12 +471,35 @@ impl Service {
             })
             .map_err(|e| internal(format!("{e:?}")))?;
         if let Some(id) = found {
-            return Ok(id);
+            return Ok((id, None));
         }
+        let id = self
+            .store()
+            .read(|tx| store_events::ulid(tx))
+            .map_err(|e| internal(format!("{e:?}")))?;
         let at = self.clock().to_string();
-        self.store()
-            .write(move |tx| ensure_meta(tx, &at))
-            .map_err(crate::project::write_error)
+        let candidate = id.clone();
+        Ok((
+            id,
+            Some(Box::new(move |tx: &Transaction<'_>| {
+                ensure_meta(tx, &candidate, &at)
+            })),
+        ))
+    }
+
+    /// 三个写入口共用：选知识范围、写一次；范围在两者之间被并发建立时按新身份再写一次。
+    fn knowledge_write(
+        &self,
+        mut attempt: impl FnMut(&str, Option<Prepare>) -> Result<Written, DomainError>,
+    ) -> Result<Written, DomainError> {
+        let (scope, prepare) = self.knowledge_scope()?;
+        match attempt(&scope, prepare) {
+            Err(e) if e.details.contains_key(SCOPE_MOVED) => {
+                let (scope, prepare) = self.knowledge_scope()?;
+                self.knowledge_result(attempt(&scope, prepare)?)
+            }
+            other => self.knowledge_result(other?),
+        }
     }
 
     /// 回执展开成条目（新写入与重放同一条路）。
@@ -499,60 +533,63 @@ impl Service {
                 "更新知识必须带当前修订的 revisionId，防止备份恢复后版本号重用",
             ));
         }
-        let scope = self.knowledge_scope()?;
-        let (fp_content, fp_id, fp_rev, fp_ver, op) = (
-            content.clone(),
-            id.clone(),
-            expected_revision_id.clone(),
-            r.expected_version,
-            op_id.to_owned(),
-        );
-        let fingerprint: FpInput = Box::new(move |_, family, _| {
-            let tail = [
-                ("id", json!(fp_id)),
-                ("expectedVersion", json!(fp_ver)),
-                ("expectedRevisionId", json!(fp_rev)),
-            ];
-            match family {
-                Family::KnowledgeV1 => {
-                    let mut m = Map::new();
-                    m.insert("operation".into(), json!("save"));
-                    m.extend(content_json(&fp_content));
-                    m.insert("opId".into(), json!(op));
-                    Some(object(with(m, tail)))
+        self.knowledge_write(|scope, prepare| {
+            let (content, id, expected_revision_id) =
+                (content.clone(), id.clone(), expected_revision_id.clone());
+            let (fp_content, fp_id, fp_rev, fp_ver, op) = (
+                content.clone(),
+                id.clone(),
+                expected_revision_id.clone(),
+                r.expected_version,
+                op_id.to_owned(),
+            );
+            let fingerprint: FpInput = Box::new(move |_, family, _| {
+                let tail = [
+                    ("id", json!(fp_id)),
+                    ("expectedVersion", json!(fp_ver)),
+                    ("expectedRevisionId", json!(fp_rev)),
+                ];
+                match family {
+                    Family::KnowledgeV1 => {
+                        let mut m = Map::new();
+                        m.insert("operation".into(), json!("save"));
+                        m.extend(content_json(&fp_content));
+                        m.insert("opId".into(), json!(op));
+                        Some(object(with(m, tail)))
+                    }
+                    Family::CanonV2 => {
+                        let mut m = Map::new();
+                        m.insert("operation".into(), json!("save"));
+                        m.extend(content_json(&fp_content));
+                        Some(object(with(m, tail)))
+                    }
+                    Family::KernelV1 => None,
                 }
-                Family::CanonV2 => {
-                    let mut m = Map::new();
-                    m.insert("operation".into(), json!("save"));
-                    m.extend(content_json(&fp_content));
-                    Some(object(with(m, tail)))
-                }
-                Family::KernelV1 => None,
-            }
-        });
-        let w = self.write(
-            principal,
-            knowledge_request(
-                Capability::KnowledgeUserEdit,
-                SAVE_OPERATION,
-                op_id,
-                &scope,
-                None,
-                fingerprint,
-            ),
-            move |tx, ctx| {
-                save_revision(
-                    tx,
-                    &content,
-                    id.as_deref(),
-                    r.expected_version,
-                    expected_revision_id.as_deref(),
+            });
+            self.write(
+                principal,
+                knowledge_request(
+                    Capability::KnowledgeUserEdit,
+                    SAVE_OPERATION,
+                    op_id,
+                    scope,
                     None,
-                    &ctx.now.to_string(),
-                )
-            },
-        )?;
-        self.knowledge_result(w)
+                    fingerprint,
+                    prepare,
+                ),
+                move |tx, ctx| {
+                    save_revision(
+                        tx,
+                        &content,
+                        id.as_deref(),
+                        r.expected_version,
+                        expected_revision_id.as_deref(),
+                        None,
+                        &ctx.now.to_string(),
+                    )
+                },
+            )
+        })
     }
 
     /// User 归档 / 取消归档（04 L-104）：双 CAS，version+1，不产生修订。
@@ -568,7 +605,8 @@ impl Service {
         if r.expected_version < 1 {
             return Err(invalid("expected_version", "expected_version 必须是正整数"));
         }
-        let scope = self.knowledge_scope()?;
+        self.knowledge_write(|scope, prepare| {
+let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
         let (fp_id, fp_rev, op) = (id.clone(), expected_revision_id.clone(), op_id.to_owned());
         let (expected, archived) = (r.expected_version, r.archived);
         let fingerprint: FpInput = Box::new(move |_, family, _| {
@@ -587,9 +625,9 @@ impl Service {
             m.insert("archived".into(), json!(archived));
             Some(object(m))
         });
-        let w = self.write(
+        self.write(
             principal,
-            knowledge_request(Capability::KnowledgeArchive, ARCHIVE_OPERATION, op_id, &scope, None, fingerprint),
+            knowledge_request(Capability::KnowledgeArchive, ARCHIVE_OPERATION, op_id, scope, None, fingerprint, prepare),
             move |tx, _| {
                 let h = head(tx, &id)?;
                 if h.version != expected || h.revision_id != expected_revision_id {
@@ -603,8 +641,8 @@ impl Service {
                 bump_sequence(tx)?;
                 Ok(receipt(&id, &h.revision_id, h.version + 1, archived))
             },
-        )?;
-        self.knowledge_result(w)
+        )
+        })
     }
 
     /// Agent 保存（04 L-105、L-106）：作者取自 session，输入里无法指定。
@@ -628,7 +666,8 @@ impl Service {
             ));
         }
         let project_id = self.project_scope(project)?;
-        let scope = self.knowledge_scope()?;
+        self.knowledge_write(|scope, prepare| {
+let (content, id, expected_revision_id, project_id) = (content.clone(), id.clone(), expected_revision_id.clone(), project_id.clone());
         let (fp_content, fp_id, fp_rev, fp_project, op) = (
             content.clone(),
             id.clone(),
@@ -675,15 +714,16 @@ impl Service {
             project_id: project_id.clone(),
             session_id: js_trim(session).to_owned(),
         };
-        let w = self.write(
+        self.write(
             principal,
             knowledge_request(
                 Capability::KnowledgeAgentSave,
                 AGENT_SAVE_OPERATION,
                 op_id,
-                &scope,
+                scope,
                 Some(session_ref),
                 fingerprint,
+                prepare,
             ),
             move |tx, ctx| {
                 // 2.x 要先打开 session 所在的项目库，垃圾箱里的项目打不开；重放在这之前，照样拿回原回执。
@@ -712,8 +752,8 @@ impl Service {
                     &ctx.now.to_string(),
                 )
             },
-        )?;
-        self.knowledge_result(w)
+        )
+        })
     }
 }
 
@@ -724,6 +764,7 @@ fn knowledge_request(
     scope: &str,
     session: Option<SessionRef>,
     fingerprint: FpInput,
+    prepare: Option<Prepare>,
 ) -> WriteRequest {
     WriteRequest {
         capability,
@@ -736,6 +777,7 @@ fn knowledge_request(
         fingerprint,
         compat_v1: None,
         replay_guard: None,
+        prepare,
         rebind: Rebind::Create,
     }
 }

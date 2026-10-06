@@ -423,11 +423,7 @@ fn l002_refusals() {
         w.set("ARC", Transition::Untrash)
     });
     // 备份目录是个文件：备份做不成，生命周期不变，没有备份行，也没有事件。
-    let blocker = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("target")
-        .join("service-tests")
-        .join("pj-backup-root-is-a-file");
+    let blocker = test_root().join("pj-backup-root-is-a-file");
     std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
     std::fs::write(&blocker, b"not a directory").unwrap();
     let broken = world_full("pj-lifecycle-broken", None, Some(blocker));
@@ -883,4 +879,120 @@ fn l004_one_pending_restore_request_per_project() {
         w.count("SELECT count(*) FROM project_restore_requests WHERE project_id = 'PA'"),
         2
     );
+}
+
+fn backup_dirs(w: &World) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(w.dir.join("backups"))
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// peer W2 r1 P1-02：PRE_* 备份不早于幂等裁决。状态已经变过之后原样重发旧的 archive / trash 是重放，
+/// 拿已用于 unarchive / untrash 的 op_id 调 archive / trash 是冲突——两者整库与备份目录都零变化。
+#[test]
+fn l002_lifecycle_replays_and_conflicts_make_no_backups() {
+    let w = world("pj-lifecycle-replay");
+    for (forward, back) in [
+        (Transition::Archive, Transition::Unarchive),
+        (Transition::Trash, Transition::Untrash),
+    ] {
+        let (f, b) = (w.next_op(), w.next_op());
+        let first = w.svc.set_lifecycle(&user(), "ATM", forward, &f).unwrap();
+        assert!(first.result["backupId"].is_string());
+        w.svc.set_lifecycle(&user(), "ATM", back, &b).unwrap();
+        assert_eq!(w.lifecycle("ATM"), "ACTIVE");
+        let (db, files) = (w.snapshot(), backup_dirs(&w));
+        let again = w.svc.set_lifecycle(&user(), "ATM", forward, &f).unwrap();
+        assert!(again.replayed);
+        assert_eq!(again.result, first.result);
+        assert_eq!((w.snapshot(), backup_dirs(&w)), (db.clone(), files.clone()));
+        w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+            w.svc.set_lifecycle(&user(), "ATM", forward, &b)
+        });
+        assert_eq!(backup_dirs(&w), files);
+    }
+    assert_eq!(w.count("SELECT count(*) FROM backups"), 2);
+}
+
+/// 同一 World，换上「备份做完后先让别人改一下项目」的钩子。
+/// 同一 World，换上「备份做完后先让别人改一下项目」的钩子（只在第一次备份后改）。返回做了几次备份。
+fn racing(
+    name: &str,
+    sql: &'static str,
+) -> (World, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let World { svc, op, dir } = world(name);
+    let db = dir.join("atm.sqlite");
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = calls.clone();
+    let hook = move || {
+        if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            let c = rusqlite::Connection::open(&db).unwrap();
+            c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+            c.execute_batch(sql).unwrap();
+        }
+    };
+    let w = World {
+        svc: svc.with_backup_hook(std::sync::Arc::new(hook)),
+        op,
+        dir,
+    };
+    (w, calls)
+}
+
+/// peer W2 r1 P1-02：备份做完、迁移提交之前被并发迁移抢先。项目版本变了 → 撤回旧备份、按新状态重做一份；
+/// 抢先者已经把项目归档了 → 这次没有迁移，备份撤回，行与目录都不留。
+#[test]
+fn l002_a_backup_overtaken_by_another_writer_is_withdrawn() {
+    let (w, backups) = racing(
+        "pj-lifecycle-race-version",
+        "UPDATE projects SET version = version + 1 WHERE id = 'PA'",
+    );
+    let r = w.set("ATM", Transition::Archive).unwrap();
+    // 备份做了两次：第一份基于旧版本，撤回；第二份基于抢先之后的状态，留下。
+    assert_eq!(backups.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let id = r.result["backupId"].as_str().unwrap().to_owned();
+    assert_eq!(backup_dirs(&w), vec![id.clone()]);
+    assert_eq!(w.scalar("SELECT group_concat(id) FROM backups"), json!(id));
+    assert_eq!(r.result["project"]["version"], 2);
+
+    let (w, backups) = racing(
+        "pj-lifecycle-race-done",
+        "UPDATE projects SET lifecycle = 'ARCHIVED', version = version + 1 WHERE id = 'PA'",
+    );
+    let r = w.set("ATM", Transition::Archive).unwrap();
+    assert_eq!(
+        (r.result["changed"].clone(), r.result["backupId"].clone()),
+        (json!(false), Value::Null)
+    );
+    assert_eq!(w.count("SELECT count(*) FROM backups"), 0);
+    assert!(backup_dirs(&w).is_empty());
+    assert_eq!(backups.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// peer W2 r1 P1-02：两个线程同时用同一个 op_id 归档——一个迁移、一个重放，只留一份备份。
+#[test]
+fn l002_concurrent_archives_keep_one_backup() {
+    let w = world("pj-lifecycle-concurrent");
+    let results: Vec<Written> = std::thread::scope(|s| {
+        let a = s.spawn(|| {
+            w.svc
+                .set_lifecycle(&user(), "ATM", Transition::Archive, "same")
+                .unwrap()
+        });
+        let b = s.spawn(|| {
+            w.svc
+                .set_lifecycle(&user(), "ATM", Transition::Archive, "same")
+                .unwrap()
+        });
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    assert_eq!(results[0].result, results[1].result);
+    assert_eq!(results.iter().filter(|r| r.replayed).count(), 1);
+    assert_eq!(w.count("SELECT count(*) FROM backups"), 1);
+    assert_eq!(backup_dirs(&w).len(), 1);
 }

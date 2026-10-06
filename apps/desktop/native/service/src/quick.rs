@@ -373,6 +373,7 @@ impl Service {
                 fingerprint: fixed_fp(fp_value),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx| {
@@ -453,6 +454,7 @@ impl Service {
                 fingerprint: fixed_fp(fp_value),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx| {
@@ -568,6 +570,7 @@ impl Service {
                     fingerprint: fixed_fp(fp_value),
                     compat_v1: None,
                     replay_guard: None,
+                    prepare: None,
                     rebind: Rebind::Create,
                 },
                 move |tx, ctx| promote_tx(tx, ctx, &quick_id, expected),

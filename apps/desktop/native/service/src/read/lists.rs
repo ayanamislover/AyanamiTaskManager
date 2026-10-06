@@ -25,10 +25,24 @@ fn clamp(v: usize, lo: usize, hi: usize) -> usize {
     v.clamp(lo, hi)
 }
 
-/// 选择集哈希：sha256(JSON) 前 22 个 base64url 字符。
+/// 选择集哈希：sha256(JSON) 前 22 个 base64url 字符；里面的文本先做 NFC（02 §4.4），
+/// 同一个筛选换一种 Unicode 写法（预组字符 / 组合字符）仍能续读。
 fn selection_hash(selection: &Value) -> String {
-    let full = b64(&sha256(js_text(selection).as_bytes()));
+    let full = b64(&sha256(js_text(&nfc_strings(selection)).as_bytes()));
     full[..22].to_owned()
+}
+
+/// JSON 里每个字符串做 NFC。
+pub(crate) fn nfc_strings(v: &Value) -> Value {
+    use unicode_normalization::UnicodeNormalization;
+    match v {
+        Value::String(s) => Value::String(s.nfc().collect()),
+        Value::Array(a) => Value::Array(a.iter().map(nfc_strings).collect()),
+        Value::Object(o) => {
+            Value::Object(o.iter().map(|(k, v)| (k.clone(), nfc_strings(v))).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 /// 一页结果（服务层形状）：每项的游标、下一页、重试游标。

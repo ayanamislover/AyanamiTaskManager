@@ -17,20 +17,24 @@
 
 ## U-only 写能力（服务层已实现）
 
-| 能力                                                  | 服务入口                                                        | Agent 拒绝 + NS                                                           | User 阳性                                                            |
-| ----------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `session.force_close`                                 | `force_close_session`                                           | `p005_agents_are_refused_every_user_only_capability_without_side_effects` | `p005_the_same_calls_succeed_for_the_user`；`tests/session.rs` S-017 |
-| `session.git_refresh`                                 | `refresh_git_context`                                           | 同上                                                                      | 同上；`tests/session.rs`                                             |
-| `project.path_attach`                                 | `attach_path`                                                   | 同上                                                                      | 同上；`tests/project.rs` `l010_attach_path`                          |
-| `project.archive` / `unarchive` / `trash` / `untrash` | `set_lifecycle`                                                 | 同上（四条，各自无 PRE\_\* 备份）                                         | 同上；`l002_*`、`l006_l007_*`                                        |
-| `project.restore_request.decide`                      | `decide_restore_request`，列表 `trash`                          | 同上（两条）                                                              | 同上；`l005_restore_requests_are_decided_once`                       |
-| `knowledge.user_edit`                                 | `knowledge_save`                                                | 同上；另见 `tests/knowledge.rs` `l103`                                    | 同上                                                                 |
-| `knowledge.archive`                                   | `knowledge_archive`                                             | 同上；另见 `l104`                                                         | 同上                                                                 |
-| `saved_view.manage`                                   | `create_saved_view` / `update_saved_view` / `delete_saved_view` | 同上（三条）；另见 `l016_refusals`                                        | 同上                                                                 |
-| `settings.write`                                      | `set_setting`、`set_backup_policy`                              | 同上（两条）；另见 `l017_refusals`、`c06_dedicated_settings`              | 同上                                                                 |
-| `notification.mode_set`                               | `set_notification_mode`                                         | 同上；另见 `c06_dedicated_settings`                                       | 同上                                                                 |
+| 能力                                                  | 服务入口                                                        | Agent 拒绝 + NS                                                            | User 阳性                                                            |
+| ----------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `session.force_close`                                 | `force_close_session`                                           | `p005_agents_are_refused_every_user_only_capability_without_side_effects`  | `p005_the_same_calls_succeed_for_the_user`；`tests/session.rs` S-017 |
+| `session.git_refresh`                                 | `refresh_git_context`                                           | 同上                                                                       | 同上；`tests/session.rs`                                             |
+| `project.path_attach`                                 | `attach_path`                                                   | 同上                                                                       | 同上；`tests/project.rs` `l010_attach_path`                          |
+| `project.archive` / `unarchive` / `trash` / `untrash` | `set_lifecycle`                                                 | 同上（四条，各自无 PRE\_\* 备份）                                          | 同上；`l002_*`、`l006_l007_*`                                        |
+| `project.restore_request.decide`                      | `decide_restore_request`，列表 `trash`                          | 同上（两条）                                                               | 同上；`l005_restore_requests_are_decided_once`                       |
+| `knowledge.user_edit`                                 | `knowledge_save`                                                | 同上；另见 `tests/knowledge.rs` `l103`                                     | 同上                                                                 |
+| `knowledge.archive`                                   | `knowledge_archive`                                             | 同上；另见 `l104`                                                          | 同上                                                                 |
+| `saved_view.manage`                                   | `create_saved_view` / `update_saved_view` / `delete_saved_view` | 同上（三条）；另见 `l016_refusals`                                         | 同上                                                                 |
+| `settings.write`                                      | `set_setting`、`set_backup_policy`                              | 同上（两条）；另见 `l017_refusals`、`c06_dedicated_settings`               | 同上                                                                 |
+| `notification.mode_set`                               | `set_notification_mode`                                         | 同上；另见 `c06_dedicated_settings`                                        | 同上                                                                 |
+| `project_update.draft` / `project_update.publish`     | `draft_project_update` / `publish_project_update`               | 同上（两条）；另见 `tests/planning.rs` `project_updates_are_user_only`     | 同上；`project_update_draft_then_publish`                            |
+| `import.apply`                                        | `apply_import`                                                  | 同上；另见 `tests/import.rs` `preview_is_read_only_and_apply_is_user_only` | 同上；`apply_imports_everything_at_once`                             |
+| `backup.create_manual`                                | `create_manual_backup`                                          | 同上；另见 `tests/backups.rs`                                              | 同上；`backups_are_listed_and_made_by_the_user`                      |
+| `backup.restore_scope`                                | `restore_scope`                                                 | 同上；另见 `tests/backups.rs`                                              | 同上；`restore_scope_is_user_only_and_restores_one_project`          |
 
-U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`get_setting` / `list_settings`）同样在上面两条用例里。
+U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`get_setting` / `list_settings`）、`knowledge.preview_record`（`preview_record`）同样在上面两条用例里（共 25 个入口：21 写、4 读）。
 
 变异验红：`output/w2-evidence/mutations/mut-w2h1.py` 把能力表里每项上述能力的 `A false` 逐个改成 `A true`，
 `p005_agents_are_refused_*` 必须变红：15 条全部 RED，证据 `output/w2-evidence/w2h1-mutation-evidence.json`。
@@ -55,6 +59,9 @@ U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`
 | `work.create` / `work.patch` / `work.verify_complete` / `checklist.update` | `create_work_items`、`patch_work_items`、`verify_and_complete`、`update_checklist` / `update_checklist_batch` | `tests/work.rs`、`tests/composite.rs`（W2c、W2d）                     |
 | `record.create`                                                            | `create_record`                                                                                               | `tests/memory.rs`                                                     |
 | `quick.create` / `quick.update` / `quick.promote`                          | `quick_create`、`quick_update`、`quick_promote`                                                               | `tests/quick.rs`（C-12：Agent 不能以 USER / SYSTEM / PHONE 为 actor） |
+| `work.plan`                                                                | `create_objective`、`create_milestone`（Agent 要 session 与 op_id，00 02 C-11）                               | `tests/planning.rs`                                                   |
+| `import.preview`                                                           | `preview_import`（只解析，不落账）                                                                            | `tests/import.rs`                                                     |
+| `backup.list`                                                              | `list_backups`                                                                                                | `tests/backups.rs`                                                    |
 | `*.read`、`quick.read`、`knowledge.read`                                   | 读模型与 `quick_get`、`knowledge_search` / `knowledge_get` / `knowledge_history`                              | `tests/read.rs`、`tests/knowledge_read.rs`                            |
 
 ## System 作业
@@ -64,17 +71,18 @@ U-only 读能力 `saved_view.read`（`list_saved_views`）、`settings.read`（`
 | `session.recover_stale` | `startup.recover` | `sweep_sessions` | `tests/session.rs`   |
 | 读快照                  | `sync.loop`       | 读模型           | 能力表单元测试（W1） |
 
-## 尚未在服务层实现的能力（归属阶段）
+## 不在 W2 的能力（归属阶段，peer W2 r1 P1-05 之后的边界）
 
-| 能力                                                                                                                    | 主体      | 归属                                                |
-| ----------------------------------------------------------------------------------------------------------------------- | --------- | --------------------------------------------------- |
-| `work.plan`（objective / milestone 的界面编辑）                                                                         | U、A      | W4（ui_api）；Agent 的规划根由 `work.create` 补建   |
-| `project_update.publish` / `project_update.draft`                                                                       | U         | W4（ui_api）；Agent 走 `progress.add scope=project` |
-| `knowledge.preview_record`                                                                                              | U         | W4                                                  |
-| `backup.list` / `backup.create_manual` / `backup.restore_scope` / `backup.create_scheduled` / `backup.prune_retention`  | 见能力表  | W5（备份界面与维护作业；存储层的备份与恢复已在 W1） |
-| `import.preview` / `import.apply` / `export.create`                                                                     | 见能力表  | W5                                                  |
-| `metrics.*`、`sync.*`、`dispatch.*`                                                                                     | 见能力表  | W5                                                  |
-| `agents.*`、`update.*`、`shell.*`、`system.status`                                                                      | U（宿主） | W4 / W6（宿主方法）                                 |
-| `store.cleanup`、`store.maintain`、`notify.send`、`sync.run`、`dispatch.track`、`agents.docs_install`、`memory.release` | System    | W5                                                  |
+W2 交付全部**只依赖库与服务**的业务。下面这些要么依赖另一个子系统，要么本身就是宿主或后台作业，随那个子系统落地；
+边界写进了方案 `output/core-rust-plan.md` §11 的 W2 一行（ATM 记录）。
+
+| 能力                                                                                                                    | 主体                  | 归属与理由                                                                                              |
+| ----------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `export.create`                                                                                                         | U、A                  | W3：`.aytproj` 是 2.x 单项目库的快照，`json` 导出的是 2.x 的表形状，都要 05 的反向映射，与转换器同一套  |
+| `backup.create_scheduled` / `backup.prune_retention`                                                                    | System（maintenance） | W5：维护作业的调度与保留期（跳过 `pinned_until` 未到的备份）；机制已在 W1，手动备份与按范围恢复已在本层 |
+| `metrics.read` / `metrics.refresh` / `metrics.capture`                                                                  | 见能力表              | W5：采集要调 git、在提交之后异步做（03 §2 metrics.capture），属于合进程后的观察者                       |
+| `sync.*`、`dispatch.*`                                                                                                  | 见能力表              | W7：atm-sync 与派单子系统                                                                               |
+| `agents.*`、`update.*`、`shell.*`、`system.status`                                                                      | U（宿主）             | W4 / W6：宿主方法                                                                                       |
+| `store.cleanup`、`store.maintain`、`notify.send`、`sync.run`、`dispatch.track`、`agents.docs_install`、`memory.release` | System                | W5 / W6 / W7：各自的后台作业                                                                            |
 
 这些能力落地时，各自的 Agent 拒绝用例按 03 §5.3 补齐（含 NS-5～NS-9），并加入 `mut-w2h1.py` 同类的变异。

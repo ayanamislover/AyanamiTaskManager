@@ -860,3 +860,113 @@ fn c20_agent_knowledge_writes_rebind_after_a_heartbeat_timeout() {
         "S2"
     );
 }
+
+/// peer W2 r1 P1-03：库里还没有知识身份时，三个写入口的每一种失败都整库零变化——身份（knowledge_meta）、
+/// 世代（scope_generations）、app_meta 的世代计数都不留下。第一次成功的写入在同一事务里建它们，
+/// 回执的 scope_generation 就是这个新世代；同一 op_id 重发是重放，身份仍只有一个。
+#[test]
+fn l101_the_first_knowledge_write_creates_the_identity_or_nothing() {
+    let w = world("kn-first-write");
+    assert_eq!(w.count("SELECT count(*) FROM knowledge_meta"), 0);
+    w.exec("UPDATE projects SET lifecycle = 'TRASHED' WHERE id = 'PE'");
+    let missing = UserSave {
+        content: content("ghost", "不存在"),
+        id: Some("NO-SUCH-ENTRY".into()),
+        expected_version: 1,
+        expected_revision_id: Some("NO-SUCH-REV".into()),
+    };
+    type Call<'a> = Box<dyn Fn() -> Result<Written, DomainError> + 'a>;
+    let cases: Vec<(ErrorCode, Call<'_>)> = vec![
+        (
+            ErrorCode::SESSION_NOT_FOUND,
+            Box::new(|| w.agent_save("NO-SUCH", agent_new("a", "正文"), "k1")),
+        ),
+        // EX 是空项目里的 session，不属于 ATM。
+        (
+            ErrorCode::SESSION_NOT_FOUND,
+            Box::new(|| w.agent_save("EX", agent_new("a", "正文"), "k2")),
+        ),
+        (
+            ErrorCode::INVALID_ARGUMENT,
+            Box::new(|| w.agent_save("S1", agent_new("a", "正文"), "")),
+        ),
+        (
+            ErrorCode::NOT_FOUND,
+            Box::new(|| {
+                w.agent_save(
+                    "S1",
+                    AgentSave {
+                        id: Some("NO-SUCH-ENTRY".into()),
+                        expected_revision_id: Some("NO-SUCH-REV".into()),
+                        ..agent_new("a", "正文")
+                    },
+                    "k3",
+                )
+            }),
+        ),
+        (
+            ErrorCode::NOT_FOUND,
+            Box::new(|| w.svc.knowledge_save(&user(), missing.clone(), "k4")),
+        ),
+        (
+            ErrorCode::INVALID_ARGUMENT,
+            Box::new(|| w.svc.knowledge_save(&user(), create("u", "正文"), "")),
+        ),
+        (
+            ErrorCode::NOT_FOUND,
+            Box::new(|| {
+                w.svc.knowledge_archive(
+                    &user(),
+                    ArchiveRequest {
+                        id: "NO-SUCH-ENTRY".into(),
+                        expected_version: 1,
+                        expected_revision_id: "NO-SUCH-REV".into(),
+                        archived: true,
+                    },
+                    "k5",
+                )
+            }),
+        ),
+        // 垃圾箱项目里的 session：动作里拒绝。
+        (
+            ErrorCode::PROJECT_DB_UNAVAILABLE,
+            Box::new(|| {
+                w.svc
+                    .knowledge_save_agent(&agent(), "EMP", "EX", agent_new("a", "正文"), "k6")
+            }),
+        ),
+    ];
+    for (code, call) in &cases {
+        w.refused(*code, call);
+    }
+    assert_eq!(w.count("SELECT count(*) FROM knowledge_meta"), 0);
+
+    let first = w
+        .agent_save("S1", agent_new("first", "第一次"), "k-ok")
+        .unwrap();
+    assert!(!first.replayed);
+    let (db, gen_): (String, i64) = (
+        w.scalar("SELECT database_id FROM knowledge_meta")
+            .as_str()
+            .unwrap()
+            .to_owned(),
+        w.count("SELECT scope_gen FROM knowledge_meta"),
+    );
+    assert_eq!(
+        w.count("SELECT count(*) FROM scope_generations WHERE scope_kind = 'KNOWLEDGE' AND reason = 'CREATED'"),
+        1
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM idempotency_receipts WHERE scope_kind = 'KNOWLEDGE' AND scope_id = '{db}' AND scope_generation = {gen_}"
+        )),
+        1
+    );
+    let before = w.snapshot();
+    let again = w
+        .agent_save("S1", agent_new("first", "第一次"), "k-ok")
+        .unwrap();
+    assert!(again.replayed);
+    assert_eq!(w.snapshot(), before);
+    assert_eq!(w.count("SELECT count(*) FROM knowledge_meta"), 1);
+}

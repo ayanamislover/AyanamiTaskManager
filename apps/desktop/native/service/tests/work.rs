@@ -1983,3 +1983,77 @@ fn c18_closed_planning_targets_are_refused() {
     w.refused(ErrorCode::PLANNING_TARGET_CLOSED, || make(None, Some("MC")));
     make(None, Some("M1")).unwrap();
 }
+
+/// W-102：expected_fields 的形状在服务层就检查（MCP schema 在 W4 是第二道）：非空、只用于 edit、
+/// 与 assignee / depends_on / discovered_from 互斥——都 INVALID_ARGUMENT 且零写入。
+#[test]
+fn w102_expected_fields_shape_is_checked_in_the_service() {
+    let w = world("w102");
+    let k = w.task("旧");
+    let with = |expected: ExpectedFields, fields: EditFields| PatchItem {
+        expected_fields: Some(expected),
+        ..edit(&k, 1, fields)
+    };
+    let title = || ExpectedFields {
+        title: Some("旧".into()),
+        ..ExpectedFields::default()
+    };
+    let retitle = || EditFields {
+        title: Some("新".into()),
+        ..EditFields::default()
+    };
+    let cases = vec![
+        (
+            "expected_fields",
+            with(ExpectedFields::default(), retitle()),
+        ),
+        (
+            "assignee_agent_id",
+            with(
+                title(),
+                EditFields {
+                    assignee_agent_id: Some(Some("claude".into())),
+                    ..retitle()
+                },
+            ),
+        ),
+        (
+            "depends_on",
+            with(
+                title(),
+                EditFields {
+                    depends_on: Some(Vec::new()),
+                    ..retitle()
+                },
+            ),
+        ),
+        (
+            "discovered_from",
+            with(
+                title(),
+                EditFields {
+                    discovered_from: Some(None),
+                    ..retitle()
+                },
+            ),
+        ),
+        (
+            "expected_fields",
+            PatchItem {
+                expected_fields: Some(title()),
+                ..p(&k, Operation::Claim)
+            },
+        ),
+    ];
+    for (n, (field, item)) in cases.into_iter().enumerate() {
+        let e = w.refused(ErrorCode::INVALID_ARGUMENT, || {
+            w.patch_as(&user(), None, vec![item.clone()])
+        });
+        assert_eq!(e.details["field"], field, "{e:?}");
+        // 空的 expected_fields 是因为「空」被拒，不是落到后面的「缺少比较值」。
+        if n == 0 {
+            assert!(e.message.contains("至少包含一个字段"), "{e:?}");
+            assert!(e.details.get("missing").is_none(), "{e:?}");
+        }
+    }
+}

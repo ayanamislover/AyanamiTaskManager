@@ -15,3 +15,4 @@ rusqlite = "0.39"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+unicode-normalization = "0.1"

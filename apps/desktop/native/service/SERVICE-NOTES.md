@@ -538,3 +538,40 @@ Agent 视图，否则给管理视图。
 变异验红：`output/w2-evidence/mutations/mut-w2h2.py`，11 条全部 RED（追溯检查对删用例、规格加规则、未知编号、引用不存在的用例、
 矩阵过期、去掉人工判定说明、去向不写阶段都变红；三处实现修复各自变红），证据 `output/w2-evidence/w2h2-mutation-evidence.json`。
 抽取脚本 `spec-trace-extract.py --check --spec <副本>` 在规格副本里加一条规则时失败、原规格通过。
+
+## 阶段评审修订（W2h4，codex W2 r1）
+
+W2 第一轮独立评审（`output/peer-atm3-w2-r1.md`）的五条 P1 与三条 P2 都在本阶段关闭：
+
+- **P1-01 Unicode 切片**：`search` 判断 `op:` 前缀改用 `str::get`，`begin` 的「你是不是要找」按字符取前两个；全库扫过其余
+  动态字符串切片（都只作用在已确认是 ASCII 的串上）。用例覆盖 ASCII、汉字、混排、二字节、四字节。
+- **P1-02 生命周期的 PRE\_\* 备份**：先不带备份走一趟流水线（重放、冲突、已在目标上直接出结果），确认是新迁移才备份、再写
+  第二趟；并发抢先时撤回没用上的备份（`atm_store::backup::discard_backup`，尽力而为：撤回失败只多留一份有效备份，不把已有结果改报成错误）。测试钩子 `with_backup_hook` 模拟抢先。
+- **P1-03 知识库首写**：写入流水线加 `prepare` 步骤，在世代屏障之前、同一事务里建知识库身份与世代；失败与其余写入一起回滚。
+  身份在请求读到之后被并发建立时（`SCOPE_MOVED`）按新身份再写一次。
+- **P1-04 review_request 的 R2**：成功请求把 Review 任务的领取转给发起者并续租，只动领取两列，不加 version。
+- **P1-05 服务业务补齐**：`work.plan`（`create_objective` / `create_milestone`）、`project_update.draft` / `publish`、
+  `knowledge.preview_record`、`backup.list` / `create_manual` / `restore_scope`、`import.preview` / `apply`。不在 W2 的能力与理由
+  见 [`PERMISSIONS.md`](PERMISSIONS.md)「不在 W2 的能力」（方案 §11 W2 一行同步改写，ATM-D-318）。
+- **P2-01 NFC**：搜索查询哈希与列表选择集里的文本先做 NFC（`unicode-normalization`）。
+- **P2-02 测试隔离**：`support::test_root()`；`tests/isolation.rs` 扫三个 crate 的测试源码，由 `CARGO_MANIFEST_DIR` 拼出的可写路径
+  必须走 `CARGO_TARGET_DIR` 兜底。
+- **P2-03 追溯表**：改正 01/C-21、S-051、W-102 的说明，补 W-102 的服务层用例；`TRACE.md` 加「这张表证明什么、不证明什么」与
+  多通道规则（R1、R2、02/C-03、L2）的入口映射。
+
+规格没写死、由实现定下的：
+
+| 项目                             | 做法                                                                                                               | 依据                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| 新建 objective                   | 原来 ACTIVE 的降为 PLANNED（version+1），新的是 ACTIVE                                                             | 2.x `planning-commands.ts:58-63`                                     |
+| milestone 挂到已关闭的 objective | `PLANNING_TARGET_CLOSED`，与任务同一条（01 C-18）                                                                  | 挂上去的任务也会被 C-18 拒，提前拦下                                 |
+| milestone 排序键                 | 项目内最大值 + 1000                                                                                                | 2.x（单项目库里的全表最大值）                                        |
+| 项目更新发布                     | User 与 Agent（progress scope=project）都把 `projects.health` 改成发布值、`meta_version`+1                         | 2.x `project_meta`                                                   |
+| 发布的 summary / 列表上限        | summary ≤ 500，completed / risks / next 各 ≤ 20 条、每条 ≤ 500                                                     | 与 progress 同一张表、同一组上限                                     |
+| 恢复时固定备份                   | `pinned_until` = 现在 + 30 天（`RESTORE_PIN_DAYS`）；W5 的保留期清理跳过固定的备份                                 | 够用户在恢复后发现问题再回退一次                                     |
+| 按范围恢复的错误码               | 存储层错误一一映射到 `BACKUP_*`；写线程拒绝是 `STORE_BUSY committed:false`；附件未换入是 `INTERNAL_ERROR` 带世代   | 已提交的恢复不能报成「没发生」                                       |
+| agenttask 导入                   | 一个事务（2.x 逐条提交，中途失败留下半个导入）；同源同项目再导入返回当时结果并标 `alreadyImported`；内容上限 2 MiB | 单库单进程；Agent 易用                                               |
+| 导入记录标题                     | 截到 80 个 UTF-16 码元，不切开代理对                                                                               | 00 02 C-19；与 2.x 的唯一差异，向量里标出                            |
+| review_request 转移领取          | 不加 version、不发任务事件                                                                                         | 回执不带 Review 任务版本，加了会让发起者无谓冲突；与心跳续租同一规则 |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h4.py`，证据 `output/w2-evidence/w2h4-mutation-evidence.json`。

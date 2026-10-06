@@ -193,8 +193,11 @@ struct Pos {
     last: Option<(String, String, String, String)>,
 }
 
+/// sha256(NFC(trim(query))) 前 22 个字符（02 §4.4）。
 fn query_hash(query: &str) -> String {
-    b64(&sha256(js_trim(query).as_bytes()))[..22].to_owned()
+    use unicode_normalization::UnicodeNormalization;
+    let normalized: String = js_trim(query).nfc().collect();
+    b64(&sha256(normalized.as_bytes()))[..22].to_owned()
 }
 
 enum Scope<'a> {
@@ -616,7 +619,11 @@ impl Service {
             });
         }
         let query = query.unwrap_or_default();
-        if query.len() >= 3 && query[..3].eq_ignore_ascii_case("op:") {
+        // 前缀按 str::get 取：首三字节不在字符边界上（`a中`、`😀`）就不是 `op:`，不能直接切片。
+        if query
+            .get(..3)
+            .is_some_and(|p| p.eq_ignore_ascii_case("op:"))
+        {
             let Some(project) = project else {
                 return Err(project_required("op_id 精确回查要求 project"));
             };

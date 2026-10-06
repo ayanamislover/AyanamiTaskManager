@@ -651,6 +651,12 @@ impl Transition {
     }
 }
 
+/// 生命周期动作要求先做备份时的内部标记（值是做备份前的项目版本）；只在 [`Service::set_lifecycle`]
+/// 内部流转，不出服务。
+const NEEDS_BACKUP: &str = "__needs_backup";
+/// 备份期间项目版本一直在变时最多重做几次。
+const LIFECYCLE_ATTEMPTS: usize = 4;
+
 fn lifecycle_event(target: &str) -> &'static str {
     match target {
         "ARCHIVED" => "project.archived",
@@ -867,6 +873,7 @@ impl Service {
                 fingerprint: fixed_fp(fp_value),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx| {
@@ -939,8 +946,12 @@ impl Service {
 
     /// 归档、取消归档、进垃圾箱、从垃圾箱恢复（User；04 L-002、L-006、L-007）。
     ///
-    /// 需要 PRE_* 备份的迁移先做备份（文件 IO，在写事务之外）；备份失败生命周期不变。已经在目标上的
-    /// 请求不做备份，直接幂等返回。
+    /// PRE_* 备份是文件 IO，不能放进写事务；但它也不能早于幂等裁决（peer W2 r1 P1-02）。所以分两趟：
+    /// 第一趟不带备份走完整条流水线——重放、冲突、已经在目标上的请求在这里就有结果，不碰备份；
+    /// 只有判定为新操作、而且真要迁移时，动作以 [`NEEDS_BACKUP`] 失败（整个事务回滚，零写入）。
+    /// 这时做备份，再带着它写第二趟。第二趟里项目版本变了（并发迁移抢先）就重做备份；第二趟以重放、
+    /// 冲突、没迁移或失败告终时，这份备份不属于任何迁移，撤回（删行、删目录；尽力而为，见
+    /// [`Service::withdraw_backup`]）。备份失败生命周期不变。
     pub fn set_lifecycle(
         &self,
         principal: &Principal,
@@ -950,34 +961,74 @@ impl Service {
     ) -> Result<Written, DomainError> {
         capability::require(principal, transition.capability())?;
         let target_id = self.project_scope(project)?;
-        let current: String = {
-            let id = target_id.clone();
-            self.store()
-                .read(move |tx| {
-                    tx.query_row("SELECT lifecycle FROM projects WHERE id = ?1", [&id], |r| {
-                        r.get(0)
-                    })
-                })
-                .map_err(read_error)?
-        };
-        let backup = match (transition.backup(), transition.target(&current)) {
-            (Some(kind), Ok(Some(_))) => {
-                let root = self
-                    .backups_root
-                    .clone()
-                    .ok_or_else(|| internal("没有配置备份目录：生命周期迁移前的备份做不了"))?;
-                let info = atm_store::backup::create_backup(self.store(), &root, kind, &now_iso())
-                    .map_err(|e| {
-                        DomainError::new(
-                            ErrorCode::INTERNAL_ERROR,
-                            format!("{kind} 备份失败，项目生命周期没有改变：{e}"),
-                        )
-                        .detail("backup_kind", kind)
-                    })?;
-                Some(info.id)
+        let mut backup: Option<(atm_store::backup::BackupInfo, i64)> = None;
+        for _ in 0..LIFECYCLE_ATTEMPTS {
+            let pre = backup.as_ref().map(|(b, v)| (b.id.clone(), *v));
+            match self.lifecycle_write(principal, &target_id, transition, op_id, pre) {
+                Err(e) if e.details.contains_key(NEEDS_BACKUP) => {
+                    if let Some((stale, _)) = backup.take() {
+                        self.withdraw_backup(&stale);
+                    }
+                    let version = e.details[NEEDS_BACKUP].as_i64().unwrap_or_default();
+                    let kind = transition
+                        .backup()
+                        .ok_or_else(|| internal("迁移不需要备份"))?;
+                    backup = Some((self.pre_backup(kind)?, version));
+                    if let Some(hook) = &self.backup_hook {
+                        hook();
+                    }
+                }
+                other => {
+                    if let Some((b, _)) = backup.take() {
+                        let used = matches!(&other, Ok(w) if !w.replayed && w.result["backupId"] == b.id.as_str());
+                        if !used {
+                            self.withdraw_backup(&b);
+                        }
+                    }
+                    return other;
+                }
             }
-            _ => None,
-        };
+        }
+        if let Some((b, _)) = backup.take() {
+            self.withdraw_backup(&b);
+        }
+        Err(DomainError::new(
+            ErrorCode::STORE_BUSY,
+            "项目生命周期在备份期间反复被改动，这次没有迁移；稍后重试",
+        )
+        .detail("committed", false))
+    }
+
+    fn pre_backup(&self, kind: &'static str) -> Result<atm_store::backup::BackupInfo, DomainError> {
+        let root = self
+            .backups_root
+            .clone()
+            .ok_or_else(|| internal("没有配置备份目录：生命周期迁移前的备份做不了"))?;
+        atm_store::backup::create_backup(self.store(), &root, kind, &now_iso()).map_err(|e| {
+            DomainError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("{kind} 备份失败，项目生命周期没有改变：{e}"),
+            )
+            .detail("backup_kind", kind)
+        })
+    }
+
+    /// 撤回一份没用上的备份。尽力而为：撤回失败时留下的是一份完整、有效的备份（W5 的保留期会清），
+    /// 不能因此把已经有结果的请求（迁移、重放、冲突）改报成错误，也不该因此中止一次还没开始的迁移。
+    fn withdraw_backup(&self, b: &atm_store::backup::BackupInfo) {
+        let _ = atm_store::backup::discard_backup(self.store(), b);
+    }
+
+    /// 一趟生命周期写入。`pre` 是已经做好的备份与做备份前读到的项目版本。
+    fn lifecycle_write(
+        &self,
+        principal: &Principal,
+        target_id: &str,
+        transition: Transition,
+        op_id: &str,
+        pre: Option<(String, i64)>,
+    ) -> Result<Written, DomainError> {
+        let target_id = target_id.to_owned();
         self.write(
             principal,
             WriteRequest {
@@ -991,6 +1042,7 @@ impl Service {
                 fingerprint: fixed_fp(json!({ "project": target_id })),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx: &WriteCtx| {
@@ -1001,6 +1053,15 @@ impl Service {
                         .detail("lifecycle", p.lifecycle.as_str())
                         .detail("operation", transition.operation())
                 })?;
+                let backup = match (target, transition.backup(), &pre) {
+                    (Some(_), Some(_), Some((id, version))) if *version == p.version => {
+                        Some(id.clone())
+                    }
+                    (Some(_), Some(_), _) => {
+                        return Err(internal("迁移前要先做备份").detail(NEEDS_BACKUP, p.version));
+                    }
+                    _ => None,
+                };
                 let (changed, request) = match target {
                     Some(t) => (true, apply_lifecycle(tx, &p, t, &ctx.actor.id, &at)?),
                     None => (false, None),
@@ -1054,6 +1115,7 @@ impl Service {
                 fingerprint: fixed_fp(json!({ "request_id": request_id, "decision": decision })),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx| {

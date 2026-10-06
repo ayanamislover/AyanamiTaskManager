@@ -1,0 +1,468 @@
+[
+  {
+    "name": "case-0",
+    "content": "",
+    "plan": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sourceName": "agenttask.md",
+      "objectives": [],
+      "milestones": [],
+      "tasks": [],
+      "records": [],
+      "warnings": []
+    }
+  },
+  {
+    "name": "case-1",
+    "content": "   \n\t\n",
+    "plan": {
+      "sha256": "743b2cb5fa591d164c63c2343e70fde734982cc2314b93fb080ef15760c639b8",
+      "sourceName": "plan.md",
+      "objectives": [],
+      "milestones": [],
+      "tasks": [],
+      "records": [],
+      "warnings": []
+    }
+  },
+  {
+    "name": "case-2",
+    "content": "# 目标一\n## 阶段 A\n- [ ] 任务一\n- [x] 任务二\n* [X]   任务三   \n+ [ ] 任务四\n### 细节\n普通一行\n1. 第一条\n2) 第二条\n- 列表项",
+    "plan": {
+      "sha256": "c6bbd4c11a49289f01affadb039673a8fb22211726469e666afe7a36b3db92ab",
+      "sourceName": "agenttask.md",
+      "objectives": [
+        {
+          "ref": "objective-1",
+          "title": "目标一",
+          "line": 1
+        }
+      ],
+      "milestones": [
+        {
+          "ref": "milestone-2",
+          "objectiveRef": "objective-1",
+          "title": "阶段 A",
+          "line": 2
+        }
+      ],
+      "tasks": [
+        {
+          "ref": "task-3",
+          "objectiveRef": "objective-1",
+          "milestoneRef": "milestone-2",
+          "title": "任务一",
+          "completed": false,
+          "line": 3
+        },
+        {
+          "ref": "task-4",
+          "objectiveRef": "objective-1",
+          "milestoneRef": "milestone-2",
+          "title": "任务二",
+          "completed": true,
+          "line": 4
+        },
+        {
+          "ref": "task-5",
+          "objectiveRef": "objective-1",
+          "milestoneRef": "milestone-2",
+          "title": "任务三",
+          "completed": true,
+          "line": 5
+        },
+        {
+          "ref": "task-6",
+          "objectiveRef": "objective-1",
+          "milestoneRef": "milestone-2",
+          "title": "任务四",
+          "completed": false,
+          "line": 6
+        }
+      ],
+      "records": [
+        {
+          "title": "标题：细节",
+          "detail": "第 7 行\n### 细节",
+          "line": 7
+        },
+        {
+          "title": "普通一行",
+          "detail": "第 8 行\n普通一行",
+          "line": 8
+        },
+        {
+          "title": "第一条",
+          "detail": "第 9 行\n1. 第一条",
+          "line": 9
+        },
+        {
+          "title": "第二条",
+          "detail": "第 10 行\n2) 第二条",
+          "line": 10
+        },
+        {
+          "title": "列表项",
+          "detail": "第 11 行\n- 列表项",
+          "line": 11
+        }
+      ],
+      "warnings": []
+    }
+  },
+  {
+    "name": "case-3",
+    "content": "- [ ] 标题前的任务\n# 后来的目标\n- [ ] 目标下的任务",
+    "plan": {
+      "sha256": "eb04ad9adb0437369dd308eb098ddcb8444e7e603f7f7bc29dfeb1051c9cfee2",
+      "sourceName": "plan.md",
+      "objectives": [
+        {
+          "ref": "objective-imported",
+          "title": "导入任务",
+          "line": 1
+        },
+        {
+          "ref": "objective-2",
+          "title": "后来的目标",
+          "line": 2
+        }
+      ],
+      "milestones": [],
+      "tasks": [
+        {
+          "ref": "task-1",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "标题前的任务",
+          "completed": false,
+          "line": 1
+        },
+        {
+          "ref": "task-3",
+          "objectiveRef": "objective-2",
+          "milestoneRef": null,
+          "title": "目标下的任务",
+          "completed": false,
+          "line": 3
+        }
+      ],
+      "records": [],
+      "warnings": [
+        "源文件在首个一级标题前包含任务，已归入“导入任务”目标。"
+      ]
+    }
+  },
+  {
+    "name": "case-4",
+    "content": "## 没有一级标题的阶段\n- [ ] 任务",
+    "plan": {
+      "sha256": "74d77935a4522f9feb5b4b5976fa8997c164d275d41339c52f4b1a5c7108448f",
+      "sourceName": "agenttask.md",
+      "objectives": [
+        {
+          "ref": "objective-imported",
+          "title": "导入任务",
+          "line": 1
+        }
+      ],
+      "milestones": [
+        {
+          "ref": "milestone-1",
+          "objectiveRef": "objective-imported",
+          "title": "没有一级标题的阶段",
+          "line": 1
+        }
+      ],
+      "tasks": [
+        {
+          "ref": "task-2",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": "milestone-1",
+          "title": "任务",
+          "completed": false,
+          "line": 2
+        }
+      ],
+      "records": [],
+      "warnings": [
+        "源文件在首个一级标题前包含任务，已归入“导入任务”目标。"
+      ]
+    }
+  },
+  {
+    "name": "case-5",
+    "content": "####### 七级\n#没有空格\n#\t制表符标题\n######  六级  \n#  NBSP 标题",
+    "plan": {
+      "sha256": "f1ce4f2bf1c297b78a31127c77ea83f5667b2862aff96ca86683dbca582dec95",
+      "sourceName": "plan.md",
+      "objectives": [
+        {
+          "ref": "objective-3",
+          "title": "制表符标题",
+          "line": 3
+        },
+        {
+          "ref": "objective-5",
+          "title": "NBSP 标题",
+          "line": 5
+        }
+      ],
+      "milestones": [],
+      "tasks": [],
+      "records": [
+        {
+          "title": "####### 七级",
+          "detail": "第 1 行\n####### 七级",
+          "line": 1
+        },
+        {
+          "title": "#没有空格",
+          "detail": "第 2 行\n#没有空格",
+          "line": 2
+        },
+        {
+          "title": "标题：六级",
+          "detail": "第 4 行\n######  六级  ",
+          "line": 4
+        }
+      ],
+      "warnings": []
+    }
+  },
+  {
+    "name": "case-6",
+    "content": "- [ ]  \n- [x] \n-  \n- [ ]\n-[ ] 无空格\n- [y] 非法标记\n  - [ ] 缩进任务\n\t* [x]\t制表",
+    "plan": {
+      "sha256": "6fbea508902c5f6c1064c6c678cea882a6f9f5058bba8ca19c12334efed48fb8",
+      "sourceName": "agenttask.md",
+      "objectives": [
+        {
+          "ref": "objective-imported",
+          "title": "导入任务",
+          "line": 1
+        }
+      ],
+      "milestones": [],
+      "tasks": [
+        {
+          "ref": "task-1",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "",
+          "completed": false,
+          "line": 1
+        },
+        {
+          "ref": "task-7",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "缩进任务",
+          "completed": false,
+          "line": 7
+        },
+        {
+          "ref": "task-8",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "制表",
+          "completed": true,
+          "line": 8
+        }
+      ],
+      "records": [
+        {
+          "title": "[x]",
+          "detail": "第 2 行\n- [x] ",
+          "line": 2
+        },
+        {
+          "title": "",
+          "detail": "第 3 行\n-  ",
+          "line": 3
+        },
+        {
+          "title": "[ ]",
+          "detail": "第 4 行\n- [ ]",
+          "line": 4
+        },
+        {
+          "title": "-[ ] 无空格",
+          "detail": "第 5 行\n-[ ] 无空格",
+          "line": 5
+        },
+        {
+          "title": "[y] 非法标记",
+          "detail": "第 6 行\n- [y] 非法标记",
+          "line": 6
+        }
+      ],
+      "warnings": [
+        "源文件在首个一级标题前包含任务，已归入“导入任务”目标。"
+      ]
+    }
+  },
+  {
+    "name": "case-7",
+    "content": "- [ ] 标题含 分隔\n- [ ] 尾部 CR\r\n- [ ] 尾部 FEFF﻿\n- [ ] 尾部 U+0085",
+    "plan": {
+      "sha256": "669d218d12783337981dce0e1789c2843d02e0ea426a625401ab652fe5ee0daf",
+      "sourceName": "plan.md",
+      "objectives": [
+        {
+          "ref": "objective-imported",
+          "title": "导入任务",
+          "line": 2
+        }
+      ],
+      "milestones": [],
+      "tasks": [
+        {
+          "ref": "task-2",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "尾部 CR",
+          "completed": false,
+          "line": 2
+        },
+        {
+          "ref": "task-3",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "尾部 FEFF",
+          "completed": false,
+          "line": 3
+        },
+        {
+          "ref": "task-4",
+          "objectiveRef": "objective-imported",
+          "milestoneRef": null,
+          "title": "尾部 U+0085",
+          "completed": false,
+          "line": 4
+        }
+      ],
+      "records": [
+        {
+          "title": "- [ ] 标题含 分隔",
+          "detail": "第 1 行\n- [ ] 标题含 分隔",
+          "line": 1
+        }
+      ],
+      "warnings": [
+        "源文件在首个一级标题前包含任务，已归入“导入任务”目标。"
+      ]
+    }
+  },
+  {
+    "name": "case-8",
+    "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀尾巴\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy超出\n1. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+    "plan": {
+      "sha256": "f444d93085160f89c4b86358fbe79ac4db9f88e4f28dc6ade42fd0321b938805",
+      "sourceName": "agenttask.md",
+      "objectives": [],
+      "milestones": [],
+      "tasks": [],
+      "records": [
+        {
+          "title": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+          "detail": "第 1 行\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx😀尾巴",
+          "line": 1,
+          "splitSurrogate": true
+        },
+        {
+          "title": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+          "detail": "第 2 行\nyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy超出",
+          "line": 2
+        },
+        {
+          "title": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+          "detail": "第 3 行\n1. zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+          "line": 3
+        }
+      ],
+      "warnings": [
+        "未识别到标题或 checkbox，全部内容将保留为参考记录。"
+      ]
+    }
+  },
+  {
+    "name": "case-9",
+    "content": "# A\r\n## B\r\n- [ ] C\r\n\r\n3. 序号\n12. 两位\n-1. 负号",
+    "plan": {
+      "sha256": "9864453f87e347da43a5bee45fbbb04d3568ca22af09569b2b707cd1aaafd60a",
+      "sourceName": "plan.md",
+      "objectives": [
+        {
+          "ref": "objective-1",
+          "title": "A",
+          "line": 1
+        }
+      ],
+      "milestones": [
+        {
+          "ref": "milestone-2",
+          "objectiveRef": "objective-1",
+          "title": "B",
+          "line": 2
+        }
+      ],
+      "tasks": [
+        {
+          "ref": "task-3",
+          "objectiveRef": "objective-1",
+          "milestoneRef": "milestone-2",
+          "title": "C",
+          "completed": false,
+          "line": 3
+        }
+      ],
+      "records": [
+        {
+          "title": "序号",
+          "detail": "第 5 行\n3. 序号",
+          "line": 5
+        },
+        {
+          "title": "两位",
+          "detail": "第 6 行\n12. 两位",
+          "line": 6
+        },
+        {
+          "title": "-1. 负号",
+          "detail": "第 7 行\n-1. 负号",
+          "line": 7
+        }
+      ],
+      "warnings": []
+    }
+  },
+  {
+    "name": "case-10",
+    "content": "﻿# 带 BOM 的标题\n  - [ ] NBSP 缩进",
+    "plan": {
+      "sha256": "720beb2693c167afd9dcd213dbd8c1b8b3436bc68fa85061cd15f806e04b6037",
+      "sourceName": "agenttask.md",
+      "objectives": [
+        {
+          "ref": "objective-1",
+          "title": "带 BOM 的标题",
+          "line": 1
+        }
+      ],
+      "milestones": [],
+      "tasks": [
+        {
+          "ref": "task-2",
+          "objectiveRef": "objective-1",
+          "milestoneRef": null,
+          "title": "NBSP 缩进",
+          "completed": false,
+          "line": 2
+        }
+      ],
+      "records": [],
+      "warnings": []
+    }
+  }
+]

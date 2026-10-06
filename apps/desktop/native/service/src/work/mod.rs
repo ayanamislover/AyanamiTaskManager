@@ -11,15 +11,19 @@ mod checklist;
 pub(crate) mod core;
 pub(crate) mod create;
 mod graph;
+mod import;
 mod patch;
+pub(crate) mod planning;
 mod review;
 
 pub use checklist::{
     ChecklistBatch, ChecklistChange, ChecklistRef, ChecklistSingle, CompleteChecklist,
 };
 pub use create::{CreateItem, NewChecklist};
+pub use import::{ImportPlan, parse as parse_agenttask};
 pub use patch::{COMPLETE_NOTE, EditFields, ExpectedFields, PatchItem, VerifyAndComplete};
 pub(crate) use patch::{claim_not_owned, invalid_transition};
+pub use planning::{MilestoneRequest, ObjectiveRequest, PublishRequest};
 pub use review::{Hashes, ReviewRequest, ReviewSubmit, Verdict};
 
 use crate::fp::JsValue;
@@ -80,6 +84,7 @@ impl Target {
             fingerprint,
             compat_v1: None,
             replay_guard: None,
+            prepare: None,
             rebind: crate::write::Rebind::Create,
         }
     }

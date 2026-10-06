@@ -242,6 +242,7 @@ impl Service {
                 fingerprint: fixed_fp(fp),
                 compat_v1: None,
                 replay_guard: None,
+                prepare: None,
                 rebind: Rebind::Create,
             },
             move |tx, ctx| put(tx, key, &value, expected_version, &ctx.now.to_string()),

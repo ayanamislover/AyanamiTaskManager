@@ -1119,6 +1119,46 @@ fn search_rows(
         .collect()
 }
 
+impl Service {
+    /// 把一条项目记录预览成知识条目的草稿（`knowledge.preview_record`，只有 User；2.x
+    /// `knowledge-service.ts:84-100`）。只读：返回标题、摘要、正文与固定了版本的来源，保存仍走 knowledge_save。
+    pub fn preview_record(
+        &self,
+        principal: &Principal,
+        project: &str,
+        record: &str,
+    ) -> Result<Value, DomainError> {
+        self.read_project(principal, Capability::KnowledgePreviewRecord, project, |cx| {
+            let id = super::views::record_id(cx, record)?;
+            let (no, kind, title, summary, detail, version): (i64, String, String, String, String, i64) = cx
+                .tx
+                .query_row(
+                    "SELECT local_no, kind, title, summary, detail, version FROM records WHERE project_id = ?1 AND id = ?2",
+                    params![cx.p.id, id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                )
+                .map_err(db)?;
+            let letter = if kind == "DECISION" {
+                atm_domain::keys::RecordLetter::Decision
+            } else {
+                atm_domain::keys::RecordLetter::Other
+            };
+            Ok(json!({
+                "title": title,
+                "summary": summary,
+                "bodyMarkdown": detail,
+                "sourceRef": {
+                    "type": "project_record",
+                    "reference": atm_domain::keys::record_key(&cx.p.code, letter, no),
+                    "projectId": cx.p.id,
+                    "recordId": id,
+                    "sourceVersion": version,
+                },
+            }))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

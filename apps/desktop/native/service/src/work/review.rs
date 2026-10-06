@@ -1,6 +1,7 @@
 //! Review 请求与提交（01 W-057～W-061；00 C-20、C-21、C-26；10 R1 的例外、R2 对 D14 的改写）。
 //!
-//! - 请求：绑定父任务的一条检查项与它此刻的版本、规范化的候选哈希。不改 Review 任务与检查项。
+//! - 请求：绑定父任务的一条检查项与它此刻的版本、规范化的候选哈希。不改检查项；Review 任务只按 R2 转移领取、
+//!   续租（同 lineage 的后继发起时领取转给它），不加 version。
 //! - 提交：只有 Review 任务领取者所在 lineage 里、ONLINE 的同 agent REVIEWER session 能提交，且不能是请求
 //!   发起者的 agent（C-26：只防同名自审，**不**证明审查独立，W-061）。哈希逐字节等于绑定值、父检查项版本
 //!   仍是绑定版本、Review 任务过完成门，才写 VERIFICATION 记录、（APPROVED 时）父检查项 DONE、Review 任务 DONE、
@@ -342,6 +343,20 @@ pub(crate) fn request(w: &mut Work<'_>, req: &ReviewRequest) -> Result<Value, Do
         ],
     )
     .map_err(db)?;
+    // R2（10 优先于 01 W-057 的「不改 Review 任务」）：同 lineage 成员这次成功、非重放的写入把领取转给自己
+    // 并续租。和心跳续租一样只动领取两列，不加 version、不发任务事件：回执不带 Review 任务的新版本，
+    // 加了版本，发起者紧接着拿手里的版本写这个任务就会无谓冲突。失败与重放走不到这里。
+    let mut review = review;
+    let held = (review.claimed_by.clone(), review.lease.clone());
+    w.transfer_claim(&mut review);
+    if (&review.claimed_by, &review.lease) != (&held.0, &held.1) {
+        w.tx.execute(
+            "UPDATE work_items SET claimed_by_session_id = ?3, claim_lease_until = ?4
+             WHERE project_id = ?1 AND id = ?2",
+            params![w.project, review.id, review.claimed_by, review.lease],
+        )
+        .map_err(db)?;
+    }
     let key = keys::review_request_key(&w.code, no);
     w.emit(
         "review.requested",

@@ -727,7 +727,7 @@ fn first_active_milestone(w: &Work<'_>, objective: &str) -> Result<Option<String
 }
 
 /// 00 C-18：不能挂到终态的 objective / milestone 下。
-fn closed_target(kind: &str, id: &str, status: &str) -> Result<(), DomainError> {
+pub(crate) fn closed_target(kind: &str, id: &str, status: &str) -> Result<(), DomainError> {
     if matches!(status, "DONE" | "CANCELLED") {
         return Err(DomainError::new(
             ErrorCode::PLANNING_TARGET_CLOSED,
