@@ -8,7 +8,7 @@
 //! - id、序号、JSON 原文逐值保留；2.x 有、3.0 结构里放不下的原值（`projects.db_path`、整行 `project_meta`、
 //!   回执的原 op_id 与分类）存进专门的 legacy 列，VERIFY 用它们反投影；
 //! - 迁移历史必须是转换器认得的（名字与 hash 逐个核对，比转换器新的拒绝），出现未登记的表即拒绝；
-//! - 进行中的生命周期（CREATING / RESTORING / MIGRATION_FAILED）留给 W3 的落定规则（05 §4.1），这里拒绝；
+//! - 进行中的生命周期（CREATING / RESTORING / MIGRATION_FAILED）按数据根落定（W3b6，`legacy/settle.rs`），没给数据根时拒绝；
 //! - 转换完成后逐族比对：源表与目标反投影的规范化摘要（05 §5.1）必须相等；
 //! - 默认拒绝读取真实数据根（`%LOCALAPPDATA%\AyanamiTaskManager`）：真实数据转换需要单独授权。
 //!
@@ -27,6 +27,7 @@ mod families;
 mod jsonfiles;
 mod migrations;
 mod root;
+mod settle;
 pub use families::{Decision, FAMILIES, FTS_SHADOWS, FamilySpec, Home};
 pub use migrations::{LegacyMigration, MIGRATIONS};
 
@@ -160,6 +161,10 @@ pub struct ConvertOptions<'a> {
     /// `sync/secrets.dpapi.json` 的 DPAPI 自检（05 §3.4）：宿主拿文件内容试着解密，只回答成功与否。
     /// 存储包不碰 DPAPI；数据根里有这个文件而这里是 `None` 时转换停。
     pub secrets_check: Option<fn(&[u8]) -> bool>,
+    /// 05 §4.1 `migrate --accept-unconvertible <code>`：用户显式点名、2.0 的重试也救不回来的 MIGRATION_FAILED 项目，
+    /// 按「舍弃」处理——项目进回收站且没有数据，原库登记进 `legacy_backups`（`UNCONVERTIBLE_PROJECT`）。
+    /// 点名的项目码没有对应的 MIGRATION_FAILED 项目时转换停（不让拼错的码被悄悄忽略）。
+    pub accept_unconvertible: &'a [&'a str],
 }
 
 /// 密文在动目标之前自检：解不开说明换了 Windows 账户或机器，手机配对要重做，由用户决定（05 §3.4）。
@@ -270,6 +275,20 @@ pub struct Report {
     /// 信息项（05 §3.1–§3.3）：不停，只进报告。0015 投影重算不一致、SUPERSEDED 没有 ACTIVE 的替代、
     /// 知识修订号不连续、晋升的快任务与任务的 source_quick_id 对不上。
     pub notes: Vec<String>,
+    /// 进行中文件事务的落定（W3b6；05 §4.1），按 2.0 启动恢复的顺序：知识库、CREATING / RESTORING（按 id）、
+    /// MIGRATION_FAILED（按 code）。
+    pub settlements: Vec<Settlement>,
+    /// 用户点名舍弃的项目码（[`ConvertOptions::accept_unconvertible`]），独立 VERIFY 按它重做落定。
+    pub accepted_unconvertible: Vec<String>,
+}
+
+/// 一项落定：范围（`k` 或项目 id）、落定前后的状态与依据。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settlement {
+    pub scope: String,
+    pub was: String,
+    pub now: String,
+    pub how: String,
 }
 
 /// 一条规范化规则在一个族上的执行记录。
@@ -444,7 +463,7 @@ impl Report {
         };
         format!(
             "{{\"format\":\"atm-conversion-report\",\"version\":1,\"knowledge\":{},\"families\":[{}],\
-             \"normalizations\":[{}],\"rule_mismatches\":[{}],\"coverage_gaps\":[{}],\"graph_violations\":[{}],\"notes\":[{}],\
+             \"normalizations\":[{}],\"rule_mismatches\":[{}],\"coverage_gaps\":[{}],\"graph_violations\":[{}],\"notes\":[{}],\"settlements\":[{}],\
              \"receipts\":{{\"classes\":{{{}}},\"promotion_shaped_agent\":{},\"promotion_status\":{{{}}},\"violations\":[{}]}},\
              \"global_feed\":{{\"orphans\":{},\"mirrors_replayed\":{}}},\"outbox_without_event\":{},\
              \"unresolved_promotions\":{},\"artifact_rows\":{}}}",
@@ -455,6 +474,17 @@ impl Report {
             list(&self.uncovered()),
             list(&self.graph_violations),
             list(&self.notes),
+            self.settlements
+                .iter()
+                .map(|x| format!(
+                    "{{\"scope\":{},\"was\":{},\"now\":{},\"how\":{}}}",
+                    s(&x.scope),
+                    s(&x.was),
+                    s(&x.now),
+                    s(&x.how)
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
             map(&self.receipt_classes),
             self.promotion_shaped_agent,
             map(&self.promotion_status),
@@ -948,7 +978,14 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     if target.exists() {
         return Err(ConvertError::TargetExists(target.to_path_buf()));
     }
-    let mut report = Report::default();
+    let mut report = Report {
+        accepted_unconvertible: opts
+            .accept_unconvertible
+            .iter()
+            .map(|c| c.to_string())
+            .collect(),
+        ..Report::default()
+    };
     // 数据根：未登记的条目、非空的 trash、进行中的事务残留，在动目标之前就停（W3b4）。
     if let Some(root) = &src.root {
         root::scan(root, opts.at, &mut report)?;
@@ -957,7 +994,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     }
     // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
     let work = work_dir(target, WORK_DIR)?;
-    let used = prepare_sources(src, &work, opts.at, &mut report.provenance)?;
+    let used = prepare_sources(src, &work, opts.at, &mut report)?;
 
     let mut t = crate::open(target)?;
     register_functions(&t)?;
@@ -971,7 +1008,12 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         }
     }
     for id in gens.projects.keys() {
-        if !seen.contains(id) {
+        // CREATING 落定成 TRASHED 的项目没有数据（W3b6）。
+        let husk = report
+            .settlements
+            .iter()
+            .any(|s| &s.scope == id && s.now == "TRASHED");
+        if !seen.contains(id) && !husk {
             return Err(ConvertError::Mismatch(format!(
                 "project {id} is in the registry but no database was given"
             )));
@@ -1100,28 +1142,35 @@ fn prepare_sources(
     src: &LegacySources,
     work: &Path,
     at: &str,
-    provenance: &mut Vec<SourceProvenance>,
+    report: &mut Report,
 ) -> Result<LegacySources> {
-    let mut one = |path: &Path, home: Home, slot: String| -> Result<PathBuf> {
+    let one = |path: &Path, home: Home, slot: String, report: &mut Report| -> Result<PathBuf> {
         let (working, p) = prepare_source(path, home, &work.join(format!("{slot}.sqlite")), at)?;
-        provenance.push(p);
+        report.provenance.push(p);
         Ok(working)
     };
-    let registry = one(&src.registry, Home::Registry, "registry".into())?;
+    let registry = one(&src.registry, Home::Registry, "registry".into(), report)?;
     let knowledge = match &src.knowledge {
-        Some(k) => Some(one(k, Home::Knowledge, "knowledge".into())?),
+        Some(k) => Some(one(k, Home::Knowledge, "knowledge".into(), report)?),
         None => None,
     };
-    let projects = src
-        .projects
-        .iter()
-        .enumerate()
-        .map(|(i, p)| one(p, Home::Project, format!("project-{i}")))
-        .collect::<Result<_>>()?;
+    // 给了数据根时，先在 registry 的工作副本上落定进行中的事务（W3b6），决定每个项目取哪个文件。
+    let mut originals = src.projects.clone();
+    let mut prepared = Vec::new();
+    if let Some(root) = &src.root {
+        originals = settle::projects(root, &registry, &src.projects, work, at, report)?;
+        prepared = settle::migration_failed(root, &registry, &mut originals, work, at, report)?;
+    }
+    for (i, p) in originals.into_iter().enumerate() {
+        let working = one(&p, Home::Project, format!("project-{i}"), report)?;
+        prepared.push((p, working));
+    }
+    // 按源文件排序：与落定之前一样按项目目录的顺序。
+    prepared.sort();
     Ok(LegacySources {
         registry,
         knowledge,
-        projects,
+        projects: prepared.into_iter().map(|(_, w)| w).collect(),
         root: src.root.clone(),
     })
 }
@@ -1384,7 +1433,7 @@ fn convert_registry(
             .optional()?;
         if let Some((id, life)) = bad {
             return Err(ConvertError::Unsupported(format!(
-                "project {id} is {life}; in-flight lifecycles are settled by W3 (05 4.1)"
+                "project {id} is {life}; in-flight lifecycles need the data root to be settled (05 4.1)"
             )));
         }
         let (current, max_seq): (i64, i64) = tx.query_row(
@@ -2431,6 +2480,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
     let mut report = Report {
         normalizations: conversion.normalizations.clone(),
         attachment: conversion.attachment.clone(),
+        accepted_unconvertible: conversion.accepted_unconvertible.clone(),
         ..Report::default()
     };
     if let Some(root) = &src.root {
@@ -2438,7 +2488,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
         report.root = true;
     }
     let work = work_dir(target, VERIFY_DIR)?;
-    let r = prepare_sources(src, &work, &at, &mut report.provenance)
+    let r = prepare_sources(src, &work, &at, &mut report)
         .and_then(|used| verify(&t, &used, &mut report));
     drop(t);
     let _ = std::fs::remove_dir_all(&work);

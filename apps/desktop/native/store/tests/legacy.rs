@@ -95,6 +95,13 @@ impl Fixture {
         &self,
         secrets_check: Option<fn(&[u8]) -> bool>,
     ) -> Result<Report, ConvertError> {
+        self.convert_accepting(secrets_check, &[])
+    }
+    fn convert_accepting(
+        &self,
+        secrets_check: Option<fn(&[u8]) -> bool>,
+        accept_unconvertible: &[&str],
+    ) -> Result<Report, ConvertError> {
         let _ = fs::remove_dir_all(self.dir.join("out"));
         fs::create_dir_all(self.dir.join("out")).unwrap();
         convert(
@@ -106,6 +113,7 @@ impl Fixture {
                 real_data_root: None,
                 generation: None,
                 secrets_check,
+                accept_unconvertible,
             },
         )
     }
@@ -832,6 +840,7 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
             real_data_root: None,
             generation: None,
             secrets_check: None,
+            accept_unconvertible: &[],
         },
     )
     .unwrap_err();
@@ -853,6 +862,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             real_data_root: Some(&f.dir),
             generation: None,
             secrets_check: None,
+            accept_unconvertible: &[],
         },
     )
     .unwrap_err();
@@ -870,6 +880,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             real_data_root: Some(&f.dir),
             generation: None,
             secrets_check: None,
+            accept_unconvertible: &[],
         },
     )
     .unwrap_err();
@@ -884,6 +895,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             real_data_root: Some(&f.dir),
             generation: None,
             secrets_check: None,
+            accept_unconvertible: &[],
         },
     )
     .unwrap();
@@ -1843,9 +1855,8 @@ fn the_family_table_matches_05_and_claims_every_2x_table() {
     assert_eq!(actual, expected);
     for f in FAMILIES {
         let is_db = matches!(f.home, Home::Registry | Home::Knowledge | Home::Project);
-        // 进行中的文件事务（W3b6）还没实现；其余都已实现。
-        let later = f.code == "X12";
-        assert_eq!(f.pending.is_some(), later, "{} {}", f.code, f.name);
+        // 全部族都已实现（W3b6 之后没有 pending）。
+        assert!(f.pending.is_none(), "{} {}", f.code, f.name);
         assert!(is_db || f.home == Home::Root || f.home == Home::ProjectDir);
         assert_eq!(
             f.drop_reason.is_some(),
@@ -1972,7 +1983,7 @@ fn report_json_lists_every_family_without_bodies() {
     assert!(
         report
             .pending()
-            .contains(&"root/in-flight: W3b6".to_string())
+            .contains(&"root/in-flight: needs the data root".to_string())
     );
     // N-05 等带原因的规则：规则号与原因分开写。
     let r = rules_fixture("legacy-report-json-rules").convert().unwrap();
@@ -2892,12 +2903,13 @@ fn a_data_root_converts_with_its_files() {
             real_data_root: None,
             generation: Some("GEN-FROM-THE-STATE-MACHINE"),
             secrets_check: None,
+            accept_unconvertible: &[],
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));
     assert!(report.failures().is_empty(), "{:?}", report.failures());
     assert_eq!(tree(&root), before, "the data root is untouched");
-    assert_eq!(report.pending(), ["root/in-flight: W3b6",]);
+    assert!(report.pending().is_empty(), "{:?}", report.pending());
     let t = Connection::open(f.target()).unwrap();
     assert_eq!(
         q::<String>(&t, "SELECT generation FROM app_meta"),
@@ -3041,19 +3053,24 @@ fn data_root_entries_that_do_not_belong_stop_the_conversion() {
             "trash is not empty (1 files)",
         ),
         (
-            "a project still being created",
-            "projects/.creating-P9/project.sqlite",
-            "in-flight file transaction",
-        ),
-        (
-            "a restore rollback file",
-            "projects/P1/project.sqlite.restore-old-X",
-            "in-flight file transaction",
-        ),
-        (
-            "a knowledge restore journal",
+            "a knowledge restore journal that is not JSON",
             "knowledge/restore.json",
-            "knowledge/restore.json is an in-flight restore",
+            "knowledge/restore.json is damaged",
+        ),
+        (
+            "a stray knowledge file",
+            "knowledge/notes.txt",
+            "unregistered entry knowledge/notes.txt",
+        ),
+        (
+            "an unknown hidden project directory",
+            "projects/.hidden/project.sqlite",
+            "unregistered entry projects/.hidden/project.sqlite",
+        ),
+        (
+            "a rollback file nested deeper",
+            "projects/P1/artifacts2/project.sqlite.restore-old-X",
+            "unregistered entry projects/P1/artifacts2/project.sqlite.restore-old-X",
         ),
         (
             "a stray project file",
@@ -3079,11 +3096,15 @@ fn data_root_entries_that_do_not_belong_stop_the_conversion() {
     for (name, extra, expected) in cases {
         let (f, root) = root_fixture("legacy-root-refused");
         put(&root.join(extra), b"x");
-        let f = Fixture {
-            sources: LegacySources::from_root(&root).unwrap(),
-            ..f
-        };
-        match f.convert() {
+        // 恢复日志在取源时就要读（决定知识库的现库），损坏的在 from_root 就停。
+        let outcome = LegacySources::from_root(&root).and_then(|sources| {
+            Fixture {
+                sources,
+                dir: f.dir.clone(),
+            }
+            .convert()
+        });
+        match outcome {
             Err(ConvertError::Unsupported(m)) => assert!(m.contains(expected), "{name}: {m}"),
             other => panic!("{name}: {other:?}"),
         }
@@ -3315,7 +3336,7 @@ fn sync_and_dispatch_files_convert_like_2x_reads_them() {
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(report.failures().is_empty(), "{:?}", report.failures());
     assert_eq!(tree(&root), before, "the data root is untouched");
-    assert_eq!(report.pending(), ["root/in-flight: W3b6"]);
+    assert!(report.pending().is_empty(), "{:?}", report.pending());
     for note in [
         "dispatch/runs.json: invalid runs were dropped; history starts from what could be read",
         "dispatch/requests.json: the ledger has an invalid entry; lost_before set to 2026-10-03T00:00:00.000Z",
@@ -3988,5 +4009,526 @@ fn root_file_families_without_a_check_are_coverage_gaps() {
             "root/dispatch.requests: no check ran",
             "root/dispatch.logs.final: no check ran",
         ]
+    );
+}
+
+// ---------------------------------------------------------------- W3b6：进行中文件事务的落定
+
+const KJ: &str = "01J00000000000000000000KJ1";
+const KC: &str = "01J00000000000000000000KC1";
+const RA: &str = "01J0000000000000000000RBKA";
+const RB: &str = "01J0000000000000000000RBKB";
+const RC: &str = "01J0000000000000000000RBKC";
+
+/// 一个刚建好的 2.x 项目库：与 2.0 createProject 写的一样（project_meta + 五个计数器），可以只迁移到 `upto`。
+fn empty_project(path: &Path, pid: &str, code: &str, upto: i64, objective: Option<&str>) {
+    let _ = fs::remove_file(path);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let p = legacy_upto(path, "project", upto);
+    let schema: i64 = p
+        .query_row("SELECT max(version) FROM schema_migrations", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    p.execute_batch(&format!(
+        "INSERT INTO project_meta (singleton, project_id, project_code, name, description, lifecycle, coordination_mode, health,
+                                   current_sequence, schema_version, version, created_at, updated_at)
+           VALUES (1, '{pid}', '{code}', 'meta {pid}', '', 'ACTIVE', 'AUTO', 'UNKNOWN', 0, {schema}, 0, '{T}', '{T}');
+         INSERT INTO counters (name, next_value) VALUES ('objective', 1), ('milestone', 1), ('work_item', 1), ('blocker', 1), ('record', 1);"
+    ))
+    .unwrap();
+    if let Some(title) = objective {
+        p.execute_batch(&format!(
+            "UPDATE counters SET next_value = 2 WHERE name = 'objective';
+             INSERT INTO objectives (id, local_no, title, status, created_at, updated_at) VALUES ('OBJ', 1, '{title}', 'ACTIVE', '{T}', '{T}');"
+        ))
+        .unwrap();
+    }
+}
+
+fn register(root: &Path, rows: &[(&str, &str, &str)]) {
+    let r = Connection::open(root.join("registry/registry.sqlite")).unwrap();
+    for (id, code, life) in rows {
+        r.execute(
+            "INSERT INTO projects (id, code, name, description, db_path, lifecycle, coordination_mode, version, created_at, updated_at)
+             VALUES (?1, ?2, ?3, '', NULL, ?4, 'AUTO', 0, ?5, ?5)",
+            params![id, code, format!("name {id}"), life, T],
+        )
+        .unwrap();
+    }
+}
+
+fn manifest(root: &Path, pid: &str, code: &str) {
+    put(
+        &root.join(format!("projects/{pid}/manifest.json")),
+        format!("{{\n  \"schema_version\": 1,\n  \"project_id\": \"{pid}\",\n  \"project_code\": \"{code}\",\n  \"name\": \"name {pid}\"\n}}\n").as_bytes(),
+    );
+}
+
+/// W3b6：数据根里摆上 2.0 启动恢复要处理的每一种残留。
+/// - P4 CREATING，库已改名到位但 manifest 还没写；P5 CREATING，库还在 `.creating-P5`；
+/// - P6 RESTORING：现库坏了，两个回滚件里名字靠后的坏、靠前的好；还有 `.restore-*` 暂存目录；
+/// - P7 MIGRATION_FAILED：库停在旧版本；P1 ACTIVE 却留着一个回滚件；
+/// - 知识库恢复日志没提交，before-restore 在；候选件和另一个孤儿候选件也在。
+fn settle_fixture(name: &str) -> (Fixture, PathBuf) {
+    let (_, root) = json_fixture(name);
+    register(
+        &root,
+        &[
+            ("P4", "DDD", "CREATING"),
+            ("P5", "EEE", "CREATING"),
+            ("P6", "FFF", "RESTORING"),
+            ("P7", "GGG", "MIGRATION_FAILED"),
+            ("P8", "HHH", "CREATING"),
+            ("P9", "III", "RESTORING"),
+        ],
+    );
+    empty_project(
+        &root.join("projects/P4/project.sqlite"),
+        "P4",
+        "DDD",
+        i64::MAX,
+        None,
+    );
+    empty_project(
+        &root.join("projects/.creating-P5/project.sqlite"),
+        "P5",
+        "EEE",
+        i64::MAX,
+        None,
+    );
+    put(&root.join("projects/P6/project.sqlite"), b"not a database");
+    empty_project(
+        &root.join(format!("projects/P6/project.sqlite.restore-old-{RA}")),
+        "P6",
+        "FFF",
+        i64::MAX,
+        Some("older rollback"),
+    );
+    empty_project(
+        &root.join(format!("projects/P6/project.sqlite.restore-old-{RB}")),
+        "P6",
+        "FFF",
+        i64::MAX,
+        Some("rolled back"),
+    );
+    put(
+        &root.join(format!("projects/P6/project.sqlite.restore-old-{RC}")),
+        b"torn",
+    );
+    put(
+        &root.join(format!("projects/.restore-{RB}/project.sqlite")),
+        b"candidate",
+    );
+    manifest(&root, "P6", "FFF");
+    empty_project(
+        &root.join("projects/P7/project.sqlite"),
+        "P7",
+        "GGG",
+        10,
+        Some("old schema"),
+    );
+    manifest(&root, "P7", "GGG");
+    // P8：CREATING，库改名到位了但是坏的 → TRASHED，坏库不转换。P9：RESTORING，第一次改名之前就断了。
+    put(
+        &root.join("projects/P8/project.sqlite"),
+        b"torn while creating",
+    );
+    manifest(&root, "P8", "HHH");
+    empty_project(
+        &root.join("projects/P9/project.sqlite"),
+        "P9",
+        "III",
+        i64::MAX,
+        Some("never restored"),
+    );
+    manifest(&root, "P9", "III");
+    // 进行中的目录里的备份不是项目备份，不登记。
+    put(
+        &root.join(
+            "projects/.creating-P5/backups/pre-migration-v14-2026-09-01T00-00-00-000Z.sqlite",
+        ),
+        b"creating backup",
+    );
+    put(
+        &root.join(format!("projects/P1/project.sqlite.restore-old-{RA}")),
+        b"stale",
+    );
+
+    // 知识库：未提交的恢复。before-restore 是一个真正的知识库，内容与现库不同。
+    let before = root.join(format!("backups/knowledge/before-restore-{KJ}.sqlite"));
+    let k = legacy(&before, "knowledge");
+    k.execute_batch(
+        "INSERT INTO knowledge_meta (singleton, database_id, generation, sequence) VALUES (1, 'KDB', 'KG0', 1);
+         INSERT INTO knowledge_entries (id, slug, head_revision, version, archived) VALUES ('K9', 'before', 1, 1, 0);
+         INSERT INTO knowledge_revisions (entry_id, revision, revision_id, snapshot) VALUES
+           ('K9', 1, 'K9-R1', '{\"title\":\"Before restore\",\"aliases\":[],\"tags\":[],\"summary\":\"\",\"useWhen\":\"\",\"appliesTo\":[],\"bodyMarkdown\":\"b\"}');
+         INSERT INTO knowledge_fts (entry_id, metadata, title, aliases, tags, summary, use_when, applies_to, body) VALUES
+           ('K9', '{\"id\":\"K9\"}', 'Before restore', '', '', '', '', '', 'b');",
+    )
+    .unwrap();
+    drop(k);
+    put(
+        &root.join("knowledge/restore.json"),
+        format!("{{\"id\":\"{KJ}\",\"committed\":false}}").as_bytes(),
+    );
+    put(
+        &root.join(format!("knowledge/restore-{KJ}.sqlite")),
+        b"candidate",
+    );
+    put(
+        &root.join(format!("knowledge/restore-{KC}.sqlite")),
+        b"orphan candidate",
+    );
+    put(
+        &root.join(format!("knowledge/.restore-{KJ}/knowledge.sqlite")),
+        b"staging",
+    );
+    // 备份目录里没提交完的件：2.0 启动时清掉，这里只计入 X7，不登记（05 §4.1）。
+    put(
+        &root.join("backups/registry/pre-migration-v7-2026-08-02T00-00-00-000Z.sqlite.pending"),
+        b"p",
+    );
+    put(&root.join("backups/knowledge/x.sqlite.tmp"), b"t");
+    put(
+        &root.join("projects/P1/backups/y.sqlite.delete-pending"),
+        b"d",
+    );
+    let f = Fixture {
+        dir: root.parent().unwrap().to_path_buf(),
+        sources: LegacySources::from_root(&root).unwrap(),
+    };
+    (f, root)
+}
+
+/// W3b6：在工作副本上照做 2.0 的启动恢复。CREATING 有健康的库 → ACTIVE（manifest 缺失只记信息项），
+/// 没有 → TRASHED 且无数据；RESTORING 取最新的健康回滚件；MIGRATION_FAILED 补迁移后 ACTIVE 并追加全局事件；
+/// 知识库未提交的恢复以 before-restore 为现库，孤儿候选件登记成备份。数据根一个字节都不变，独立 VERIFY 重做一遍结果相同。
+#[test]
+fn in_flight_transactions_are_settled_like_2x_startup() {
+    let (f, root) = settle_fixture("legacy-settle");
+    let before = tree(&root);
+    let report = f
+        .convert_with(Some(secrets_ok))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(tree(&root), before, "the data root is untouched");
+    assert!(report.pending().is_empty(), "{:?}", report.pending());
+    let settled: Vec<String> = report
+        .settlements
+        .iter()
+        .map(|s| format!("{}: {} -> {}", s.scope, s.was, s.now))
+        .collect();
+    assert_eq!(
+        settled,
+        [
+            "k: RESTORING -> ROLLED_BACK",
+            "P4: CREATING -> ACTIVE",
+            "P5: CREATING -> TRASHED",
+            "P6: RESTORING -> ACTIVE",
+            "P8: CREATING -> TRASHED",
+            "P9: RESTORING -> ACTIVE",
+            "P7: MIGRATION_FAILED -> ACTIVE",
+        ]
+    );
+    notes_contain(
+        &report,
+        "P4/manifest.json: missing; the creation was interrupted after the rename (2.0 writes it afterwards)",
+    );
+
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT group_concat(id || ':' || lifecycle, ' ') FROM (SELECT id, lifecycle FROM projects WHERE id >= 'P4' ORDER BY id)"
+        ),
+        "P4:ACTIVE P5:TRASHED P6:ACTIVE P7:ACTIVE P8:TRASHED P9:ACTIVE"
+    );
+    // P5 只有 registry 那一行，没有项目数据。
+    assert_eq!(
+        q::<i64>(
+            &t,
+            "SELECT (SELECT count(*) FROM objectives WHERE project_id = 'P5') + (SELECT count(*) FROM counters WHERE project_id = 'P5')"
+        ),
+        0
+    );
+    assert_eq!(
+        q::<String>(&t, "SELECT title FROM objectives WHERE project_id = 'P6'"),
+        "rolled back"
+    );
+    assert_eq!(
+        q::<String>(&t, "SELECT title FROM objectives WHERE project_id = 'P7'"),
+        "old schema"
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT payload_json || ' ' || actor || ' ' || created_at FROM global_feed WHERE type = 'project.migration_recovered' AND aggregate_id = 'P7'"
+        ),
+        "{\"code\":\"GGG\"} SYSTEM 2026-10-03T00:00:00.000Z"
+    );
+    assert_eq!(
+        q::<String>(&t, "SELECT group_concat(id, ' ') FROM knowledge_entries"),
+        "K9"
+    );
+    let backups: Vec<String> = t
+        .prepare("SELECT id FROM legacy_backups ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(
+        backups.contains(&format!("KNOWLEDGE_ORPHAN:knowledge/restore-{KC}.sqlite")),
+        "{backups:?}"
+    );
+    assert!(!backups.iter().any(|b| b.contains(KJ)), "{backups:?}");
+    assert!(
+        !backups.iter().any(|b| b.contains(".creating")),
+        "{backups:?}"
+    );
+    assert_eq!(
+        q::<String>(&t, "SELECT title FROM objectives WHERE project_id = 'P9'"),
+        "never restored"
+    );
+    assert!(
+        !backups
+            .iter()
+            .any(|b| b.ends_with(".pending") || b.ends_with(".tmp")),
+        "{backups:?}"
+    );
+    assert!(!f.dir.join("out/artifacts/P5").exists());
+    // 残留件都记在 X12，不复制。
+    // .creating-P5 下两个、P6 三个回滚件、.restore-RB 一个、P1 的陈旧回滚件、知识库的日志、候选件、孤儿与暂存目录。
+    assert_eq!(report.source("root/in-flight").unwrap().rows, 11);
+
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert_eq!(again.settlements, report.settlements);
+}
+
+/// W3b6：2.0 自己也恢复不了的残留让转换整体失败并点名，不悄悄跳过；没给数据根时不落定。
+#[test]
+fn in_flight_transactions_2x_cannot_recover_stop_the_conversion() {
+    type Edit = Box<dyn Fn(&Path)>;
+    let cases: Vec<(&str, Edit, &str)> = vec![
+        (
+            "a torn knowledge journal",
+            Box::new(|root: &Path| put(&root.join("knowledge/restore.json"), b"{")),
+            "knowledge/restore.json is damaged",
+        ),
+        (
+            "a journal id that is not a ULID",
+            Box::new(|root: &Path| {
+                put(
+                    &root.join("knowledge/restore.json"),
+                    b"{\"id\":\"../x\",\"committed\":false}",
+                )
+            }),
+            "knowledge/restore.json is damaged",
+        ),
+        (
+            "a journal whose committed is not a boolean",
+            Box::new(|root: &Path| {
+                put(
+                    &root.join("knowledge/restore.json"),
+                    format!("{{\"id\":\"{KJ}\",\"committed\":\"no\"}}").as_bytes(),
+                )
+            }),
+            "knowledge/restore.json is damaged",
+        ),
+        (
+            "a failed migration without a database",
+            Box::new(|root: &Path| {
+                fs::remove_file(root.join("projects/P7/project.sqlite")).unwrap()
+            }),
+            "project GGG (P7) is MIGRATION_FAILED and 2.0's retry would not recover it: its database is missing",
+        ),
+        (
+            "a failed migration of another project",
+            Box::new(|root: &Path| {
+                empty_project(
+                    &root.join("projects/P7/project.sqlite"),
+                    "P7",
+                    "XXX",
+                    10,
+                    None,
+                )
+            }),
+            "project GGG (P7) is MIGRATION_FAILED and 2.0's retry would not recover it: project_meta does not match the registry",
+        ),
+        (
+            "a failed migration with an empty database",
+            Box::new(|root: &Path| put(&root.join("projects/P7/project.sqlite"), b"")),
+            "project GGG (P7) is MIGRATION_FAILED and 2.0's retry would not recover it: its database is empty",
+        ),
+        (
+            "a restore with no healthy database at all",
+            Box::new(|root: &Path| {
+                for r in [RA, RB] {
+                    fs::remove_file(
+                        root.join(format!("projects/P6/project.sqlite.restore-old-{r}")),
+                    )
+                    .unwrap()
+                }
+            }),
+            "project FFF (P6) is MIGRATION_FAILED and 2.0's retry would not recover it",
+        ),
+        (
+            "a rollback with a WAL 2.0 would leave behind",
+            Box::new(|root: &Path| {
+                put(
+                    &root.join(format!("projects/P6/project.sqlite.restore-old-{RB}-wal")),
+                    b"wal",
+                )
+            }),
+            "has a WAL that 2.0's recovery would leave behind",
+        ),
+    ];
+    for (name, edit, expected) in cases {
+        let (f, root) = settle_fixture("legacy-settle-refused");
+        edit(&root);
+        // 改动之后重新按数据根取源，与真实流程一样。
+        let outcome = LegacySources::from_root(&root).and_then(|sources| {
+            Fixture {
+                sources,
+                dir: f.dir.clone(),
+            }
+            .convert_with(Some(secrets_ok))
+        });
+        match outcome {
+            Err(ConvertError::Unsupported(m)) => assert!(m.contains(expected), "{name}: {m}"),
+            other => panic!("{name}: {other:?}"),
+        }
+        assert!(!f.target().exists(), "{name}: nothing is written");
+    }
+
+    // 没给数据根：看不到回滚件和日志，进行中的生命周期照旧拒绝。
+    let (f, root) = settle_fixture("legacy-settle-no-root");
+    let sources = LegacySources {
+        root: None,
+        projects: f
+            .sources
+            .projects
+            .iter()
+            .filter(|p| {
+                ["P1", "P2", "P3"]
+                    .iter()
+                    .any(|id| p.starts_with(root.join("projects").join(id)))
+            })
+            .cloned()
+            .collect(),
+        ..f.sources.clone()
+    };
+    let f = Fixture { sources, ..f };
+    match f.convert() {
+        Err(ConvertError::Unsupported(m)) => {
+            assert!(m.contains("in-flight lifecycles need the data root"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// W3b6：2.0 也救不回来的项目，只有用户点名（`accept_unconvertible`）才舍弃：进回收站、没有数据，
+/// 原库登记成 `UNCONVERTIBLE_PROJECT`，不追加恢复事件。不点名照旧停；点名的码对不上任何 MIGRATION_FAILED 项目也停。
+#[test]
+fn an_unconvertible_project_is_dropped_only_when_the_user_names_it() {
+    let (f, root) = settle_fixture("legacy-settle-accept");
+    let p7 = root.join("projects/P7/project.sqlite");
+    empty_project(&p7, "P7", "XXX", 10, None);
+    let f = Fixture {
+        sources: LegacySources::from_root(&root).unwrap(),
+        ..f
+    };
+    match f.convert_with(Some(secrets_ok)) {
+        Err(ConvertError::Unsupported(m)) => {
+            assert!(m.contains("project GGG (P7) is MIGRATION_FAILED"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    match f.convert_accepting(Some(secrets_ok), &["GGG", "ZZZ"]) {
+        Err(ConvertError::Unsupported(m)) => assert!(
+            m.contains("--accept-unconvertible ZZZ: no project with that code is MIGRATION_FAILED"),
+            "{m}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(!f.target().exists());
+
+    let report = f
+        .convert_accepting(Some(secrets_ok), &["GGG"])
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert!(
+        report
+            .settlements
+            .iter()
+            .any(|s| s.scope == "P7" && s.was == "MIGRATION_FAILED" && s.now == "TRASHED"),
+        "{:?}",
+        report.settlements
+    );
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(&t, "SELECT lifecycle FROM projects WHERE id = 'P7'"),
+        "TRASHED"
+    );
+    assert_eq!(
+        q::<i64>(
+            &t,
+            "SELECT (SELECT count(*) FROM objectives WHERE project_id = 'P7')
+                  + (SELECT count(*) FROM global_feed WHERE type = 'project.migration_recovered')"
+        ),
+        0
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT source || ' ' || scope || ' ' || project_id || ' ' || sha256 || ' ' || importable
+             FROM legacy_backups WHERE id = 'UNCONVERTIBLE_PROJECT:projects/P7/project.sqlite'"
+        ),
+        format!("UNCONVERTIBLE_PROJECT PROJECT P7 {} AS_PROJECT", sha_of(&p7))
+    );
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+    assert_eq!(again.settlements, report.settlements);
+}
+
+/// W3b6：已提交的知识恢复以现库为准，before-restore 照常登记成备份，候选件丢弃。
+#[test]
+fn a_committed_knowledge_restore_keeps_the_live_database() {
+    let (f, root) = settle_fixture("legacy-settle-committed");
+    put(
+        &root.join("knowledge/restore.json"),
+        format!("{{\"id\":\"{KJ}\",\"committed\":true}}").as_bytes(),
+    );
+    let f = Fixture {
+        sources: LegacySources::from_root(&root).unwrap(),
+        ..f
+    };
+    let report = f
+        .convert_with(Some(secrets_ok))
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(
+        (
+            report.settlements[0].scope.as_str(),
+            report.settlements[0].now.as_str()
+        ),
+        ("k", "COMMITTED")
+    );
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(&t, "SELECT group_concat(id, ' ') FROM knowledge_entries"),
+        "K1"
+    );
+    assert_eq!(
+        q::<i64>(
+            &t,
+            &format!(
+                "SELECT count(*) FROM legacy_backups
+                 WHERE id = 'KNOWLEDGE_BEFORE_RESTORE:backups/knowledge/before-restore-{KJ}.sqlite'"
+            )
+        ),
+        1
     );
 }

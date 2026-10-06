@@ -591,7 +591,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "",
         Some("按 05 §4.1 在副本上落定后不单独转换"),
         false,
-        "W3b6",
+        "",
     ),
 ];
 

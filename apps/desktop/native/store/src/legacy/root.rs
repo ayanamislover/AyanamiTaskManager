@@ -2,7 +2,8 @@
 //!
 //! - 数据根的每个顶层条目必须命中族表的某一行，否则停（05 §5.1「未登记的文件 → UNKNOWN」）；
 //!   `trash\` 非空也停。R / X 类只登记文件数与字节数，不复制、不读内容。
-//! - 进行中的文件事务残留（`.creating-*`、`.restore-*`、`restore.json` 等）由 W3b6 落定，在那之前拒绝。
+//! - 进行中的文件事务残留（`.creating-*`、`.restore-*`、`restore.json` 等）由 `settle.rs` 落定（W3b6），
+//!   残留件本身记 X12，不复制。
 //! - 附件目录逐文件复制到目标旁的 `artifacts\<pid>\`，(相对路径, size, sha256) 集合两边相等；
 //!   `artifacts.local_path` 指向本项目附件目录里的文件时改写成新根的相对路径，原值留在 `legacy_local_path`。
 //! - 不在备份目录表里的 2.0 备份文件（升级前备份、知识恢复前的现库、知识恢复的孤儿件）登记进 `legacy_backups`，
@@ -28,7 +29,8 @@ pub fn sources_from_root(root: &Path) -> Result<LegacySources> {
             root.display()
         )));
     }
-    let knowledge = root.join("knowledge").join("knowledge.sqlite");
+    // 知识库恢复日志先落定（W3b6）：未提交的恢复以 before-restore 为现库。
+    let knowledge = super::settle::knowledge(root)?.live;
     let mut projects = Vec::new();
     if let Ok(dir) = std::fs::read_dir(root.join("projects")) {
         let mut names: Vec<String> = dir
@@ -45,7 +47,7 @@ pub fn sources_from_root(root: &Path) -> Result<LegacySources> {
     }
     Ok(LegacySources {
         registry,
-        knowledge: knowledge.is_file().then_some(knowledge),
+        knowledge,
         projects,
         root: Some(root.to_path_buf()),
     })
@@ -96,6 +98,23 @@ fn top_level_family(name: &str) -> Option<&'static str> {
         n if n.contains(".staging-") || n.contains(".backup-") => "install-copies",
         _ => return None,
     })
+}
+
+/// 知识库目录里 2.0 恢复留下的件：日志（含没改名完的 `.new`）、候选件与它的 -wal / -shm、`.restore-*` 暂存目录。
+fn knowledge_residue(rel: &str) -> bool {
+    let candidate = |n: &str| {
+        let n = n
+            .strip_suffix("-wal")
+            .or_else(|| n.strip_suffix("-shm"))
+            .unwrap_or(n);
+        n.strip_prefix("restore-")
+            .and_then(|r| r.strip_suffix(".sqlite"))
+            .is_some_and(is_ulid)
+    };
+    rel == "restore.json"
+        || rel == "restore.json.new"
+        || rel.starts_with(".restore-")
+        || candidate(rel)
 }
 
 fn is_db_file(name: &str, db: &str) -> bool {
@@ -149,14 +168,22 @@ pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
                 }
             }
             "knowledge" => {
-                if let Some(f) = files.iter().find(|f| !is_db_file(&f.0, "knowledge.sqlite")) {
-                    return Err(ConvertError::Unsupported(format!(
-                        "{shown}: knowledge/{} is an in-flight restore or unregistered; settled by W3b6",
-                        f.0
-                    )));
+                let mut residue = Vec::new();
+                for f in &files {
+                    if is_db_file(&f.0, "knowledge.sqlite") {
+                        continue;
+                    }
+                    if !knowledge_residue(&f.0) {
+                        return Err(ConvertError::Unsupported(format!(
+                            "{shown}: unregistered entry knowledge/{}",
+                            f.0
+                        )));
+                    }
+                    residue.push(f.clone());
                 }
+                add("in-flight", &residue);
             }
-            "projects" => scan_projects(root, &files)?,
+            "projects" => add("in-flight", &scan_projects(root, &files)?),
             "sync" => {
                 for f in &files {
                     match f.0.as_str() {
@@ -206,6 +233,7 @@ pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
         "diagnostic-copies",
         &super::jsonfiles::classify_logs(root, &loaded)?.orphans,
     );
+    super::settle::report_knowledge(&super::settle::knowledge(root)?, report);
     // 项目目录里的备份也是 X7。
     for p in project_dirs(root)? {
         add("backups", &walk(&p.join("backups"))?);
@@ -234,6 +262,11 @@ fn project_dirs(root: &Path) -> Result<Vec<PathBuf>> {
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.is_dir())
+            // `.creating-*`、`*.creating`、`.restore-*` 是进行中的事务，不是项目目录。
+            .filter(|p| {
+                let n = p.file_name().unwrap_or_default().to_string_lossy();
+                !n.starts_with('.') && !n.ends_with(".creating")
+            })
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e.into()),
@@ -242,23 +275,30 @@ fn project_dirs(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// `projects\` 下：每个项目目录只能有项目库（含 -wal/-shm）、manifest、artifacts、backups。
-fn scan_projects(root: &Path, files: &[(String, PathBuf, u64)]) -> Result<()> {
+/// `projects\` 下：每个项目目录只能有项目库（含 -wal/-shm）、manifest、artifacts、backups；
+/// 进行中的事务残留（`.creating-*`、`*.creating`、`.restore-*` 目录，`project.sqlite.restore-old-*` 回滚件）返回给调用方记 X12。
+fn scan_projects(
+    root: &Path,
+    files: &[(String, PathBuf, u64)],
+) -> Result<Vec<(String, PathBuf, u64)>> {
+    let mut residue = Vec::new();
     for f in files {
         let mut parts = f.0.splitn(3, '/');
         let (dir, rest) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-        let in_flight =
-            dir.starts_with('.') || dir.ends_with(".creating") || rest.contains(".restore-old-");
+        let in_flight = dir.starts_with(".creating-")
+            || dir.ends_with(".creating")
+            || dir.starts_with(".restore-")
+            || (!dir.starts_with('.')
+                && rest.starts_with("project.sqlite.restore-old-")
+                && !f.0[dir.len() + 1..].contains('/'));
         if in_flight {
-            return Err(ConvertError::Unsupported(format!(
-                "{}: projects/{} is an in-flight file transaction; settled by W3b6",
-                root.display(),
-                f.0
-            )));
+            residue.push(f.clone());
+            continue;
         }
-        let known = is_db_file(rest, "project.sqlite")
-            || rest == "manifest.json"
-            || ((rest == "artifacts" || rest == "backups") && f.0.matches('/').count() >= 2);
+        let known = !dir.starts_with('.')
+            && (is_db_file(rest, "project.sqlite")
+                || rest == "manifest.json"
+                || ((rest == "artifacts" || rest == "backups") && f.0.matches('/').count() >= 2));
         if !known {
             return Err(ConvertError::Unsupported(format!(
                 "{}: unregistered entry projects/{}",
@@ -267,7 +307,7 @@ fn scan_projects(root: &Path, files: &[(String, PathBuf, u64)]) -> Result<()> {
             )));
         }
     }
-    Ok(())
+    Ok(residue)
 }
 
 /// 新根下附件的相对路径前缀：`data/artifacts/<pid>/`（目标库在 `N\data\atm.sqlite`，附件在 `N\data\artifacts\`）。
@@ -300,6 +340,17 @@ pub(super) fn convert_files(
         .prepare("SELECT id FROM projects ORDER BY id")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    // 落定成 TRASHED 的空项目没有附件可复制（W3b6）。
+    let pids: Vec<String> = pids
+        .into_iter()
+        .filter(|p| {
+            !report
+                .settlements
+                .iter()
+                .any(|s| &s.scope == p && s.now == "TRASHED")
+        })
+        .collect();
+    let knowledge = super::settle::knowledge(root)?;
     let tx = t.transaction()?;
     for pid in &pids {
         let src = root.join("projects").join(pid).join("artifacts");
@@ -339,7 +390,8 @@ pub(super) fn convert_files(
     }
     for (source, scope, pid, dir) in backup_dirs(root)? {
         for (rel, path, size) in walk(&dir)? {
-            if rel.contains('/') {
+            // 未提交的知识恢复：before-restore 是现库，不是备份（W3b6）。
+            if rel.contains('/') || knowledge.previous_is_live.as_ref() == Some(&path) {
                 continue;
             }
             let kind = backup_kind(&rel, source);
@@ -371,6 +423,56 @@ pub(super) fn convert_files(
                 error,
             })?;
         }
+    }
+    // 用户点名舍弃的项目：原库按原位置登记，可以日后单独导入（W3b6）。
+    for s in report
+        .settlements
+        .iter()
+        .filter(|s| s.was == "MIGRATION_FAILED" && s.now == "TRASHED")
+    {
+        let path = root.join("projects").join(&s.scope).join("project.sqlite");
+        if !path.is_file() {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
+                                         schema_version, created_at, verified_at, importable)
+             VALUES (?1, 'UNCONVERTIBLE_PROJECT', 'PROJECT', ?2, ?3, ?4, ?5, NULL, NULL, NULL, NULL, 'AS_PROJECT')",
+            params![
+                format!("UNCONVERTIBLE_PROJECT:projects/{}/project.sqlite", s.scope),
+                s.scope,
+                path.to_string_lossy(),
+                file_sha256(&path)?,
+                std::fs::metadata(&path)?.len() as i64
+            ],
+        )
+        .map_err(|error| ConvertError::Constraint {
+            table: "legacy_backups".into(),
+            error,
+        })?;
+    }
+    // 孤儿候选件：2.0 下次打开知识库时移进 backups\knowledge\orphan-*，这里按原位置登记（W3b6）。
+    for path in &knowledge.orphans {
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        tx.execute(
+            "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
+                                         schema_version, created_at, verified_at, importable)
+             VALUES (?1, 'KNOWLEDGE_ORPHAN', 'KNOWLEDGE', NULL, ?2, ?3, ?4, NULL, NULL, NULL, NULL, 'AS_KNOWLEDGE')",
+            params![
+                format!("KNOWLEDGE_ORPHAN:{rel}"),
+                path.to_string_lossy(),
+                file_sha256(path)?,
+                std::fs::metadata(path)?.len() as i64
+            ],
+        )
+        .map_err(|error| ConvertError::Constraint {
+            table: "legacy_backups".into(),
+            error,
+        })?;
     }
     tx.commit()?;
     Ok(())
@@ -530,21 +632,43 @@ pub(super) fn verify_files(
             bytes: manifest.as_ref().map(|m| m.len() as i64),
         });
         let cols = ["project_id", "project_code", "schema_version"].map(String::from);
-        super::compare(
-            c,
-            report,
-            super::Ck {
+        // CREATING 落定成 ACTIVE 时，库已改名到位、manifest 还没写：2.0 之后也不补写，缺失只记信息项（W3b6）。
+        let interrupted = report
+            .settlements
+            .iter()
+            .any(|s| s.scope == pid && s.was == "CREATING");
+        if manifest.is_none() && interrupted {
+            report.notes.push(format!(
+                "{pid}/manifest.json: missing; the creation was interrupted after the rename (2.0 writes it afterwards)"
+            ));
+            report.checks.push(FamilyCheck {
+                family: format!("{pid}/manifest.json"),
                 spec: "manifest.json",
-                label: &format!("{pid}/manifest.json"),
-                key: &[],
-            },
-            &cols,
-            "SELECT ?1 ->> '$.project_id', ?1 ->> '$.project_code', ?1 ->> '$.schema_version'
+                scope: pid.clone(),
+                source_rows: 0,
+                target_rows: 0,
+                source_digest: String::new(),
+                target_digest: String::new(),
+                errors: 0,
+                first_failure_locator: None,
+            });
+        } else {
+            super::compare(
+                c,
+                report,
+                super::Ck {
+                    spec: "manifest.json",
+                    label: &format!("{pid}/manifest.json"),
+                    key: &[],
+                },
+                &cols,
+                "SELECT ?1 ->> '$.project_id', ?1 ->> '$.project_code', ?1 ->> '$.schema_version'
              WHERE json_valid(?1)",
-            &[&manifest],
-            "SELECT id, code, 1 FROM main.projects WHERE id = ?1",
-            &[&pid],
-        )?;
+                &[&manifest],
+                "SELECT id, code, 1 FROM main.projects WHERE id = ?1",
+                &[&pid],
+            )?;
+        }
         let renamed: Option<String> = c
             .query_row(
                 "SELECT p.id FROM main.projects p WHERE p.id = ?1 AND json_valid(?2) AND (?2 ->> '$.name') IS NOT p.name",

@@ -8,7 +8,7 @@
 - **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`prepare_source`，在工作副本上）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
 - **decision**：`CONVERTED`（逐行或逐文件进新库）、`REBUILT`（派生数据，在新库重建，查询等价）、`DROPPED`（不进新库，`drop_reason` 写理由）、`REFERENCED`（不复制，只登记引用）。
 - **business_digest**：是否纳入回滚检测（05 §5.2「纳入」列）。X 类和 F7 不纳入。
-- **pending**：还没实现的族及负责的任务：W3b6（进行中的文件事务）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
+- **pending**：W3b6 之后族表里没有未实现的族；不按数据根输入时，数据根下的文件族都算 pending（`needs the data root`）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
 
 ### search_documents 与 knowledge_fts：REBUILT
 
@@ -113,6 +113,23 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **图检查**：`log_root` 与 run 的状态不符；`task_id` 指向的任务的公开 key 与 `task_key` 不符。两者都是停级违例。
 - **X9**：历史里没有的 run 的日志（被裁剪的、坏条目的），2.0 下次保存历史就删，记 X9，不复制。
 
+## 进行中文件事务的落定（W3b6）
+
+给了数据根时，转换先在工作副本上照做 2.0 的启动恢复（`legacy/settle.rs`），源文件只读不开。独立 VERIFY 用同一个 `at` 重做一遍，结果必须相同。每一项落定记进 `Report::settlements`，`report.json` 里是 `settlements: [{scope, was, now, how}]`。
+
+| 残留                     | 落定（与 2.0 一样）                                                                                                                                                                                                                                                                                                                                                                                                                                                    | 依据                          |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `knowledge\restore.json` | `committed=false` 且 `backups\knowledge\before-restore-<id>.sqlite` 在：它是现库（`ROLLED_BACK`），不再登记成备份。否则现库为准（`COMMITTED`）。<br>候选件 `restore-<id>.sqlite` 丢弃；别的 `restore-<ULID>.sqlite` 是孤儿，按原位置登记进 `legacy_backups`（`KNOWLEDGE_ORPHAN`）。<br>日志读不出、不是对象、id 不是 ULID、committed 不是布尔：2.0 让知识库不可用，这里停。                                                                                            | `knowledge-restore.ts:28-75`  |
+| `CREATING`               | `projects\<id>\project.sqlite` 通过 `quick_check` → ACTIVE，写 `db_path`。这时 manifest 可能还没写，2.0 之后也不补写，缺失只记信息项。<br>否则 TRASHED，只有 registry 那一行，没有项目数据。                                                                                                                                                                                                                                                                           | `startup-recovery.ts:81-103`  |
+| `RESTORING`              | 名字以 `project.sqlite.restore-old-` 开头的文件按名排序，从后往前取第一个健康的作为现库 → ACTIVE。没有回滚件且现库健康 → ACTIVE。否则 MIGRATION_FAILED，再走下一行。<br>选中的回滚件带非空 `-wal` 时停：2.0 只改名主文件，这里无法如实复现。                                                                                                                                                                                                                           | `startup-recovery.ts:122-146` |
+| ACTIVE 却有回滚件        | 现库为准，回滚件丢弃                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `startup-recovery.ts:147-150` |
+| `MIGRATION_FAILED`       | 库在且非空：在副本上补迁移、核对 `project_meta` 的身份 → ACTIVE，并追加全局事件 `project.migration_recovered`（dedupe 键已在就不追加）。<br>做不到：整体转换失败，点名项目，不悄悄跳过。<br>**舍弃**：用户用 `ConvertOptions::accept_unconvertible`（W4 的 `migrate --accept-unconvertible <code>`）显式点名时，项目进回收站且没有数据，原库按原位置登记进 `legacy_backups`（`UNCONVERTIBLE_PROJECT`，可日后单独导入）。点名的码没有对应的 MIGRATION_FAILED 项目时停。 | `manager.ts:315-356`          |
+
+- **registry 工作副本上的改动**：lifecycle、`updated_at = at`、CREATING 的 `db_path`、全局事件与 `app_meta.current_sequence`。
+- **备份目录里的 `.pending`、`.delete-pending`、`*.tmp*`**：2.0 启动时清掉，这里只计入 X7，不登记、不复制。
+- **残留件本身记 X12，不复制**：`.creating-*`、`*.creating`、`.restore-*` 目录，回滚件，知识库的日志与候选件。
+- **没给数据根时**：看不到回滚件和日志，进行中的生命周期照旧拒绝。
+
 ## 源副本与业务图（05 §3.3；W3b2）
 
 - **源副本先过两项检查**（在工作副本上、写目标之前）：`PRAGMA quick_check` 必须是 `ok`；`foreign_key_check` 必须为空。违例时转换以 `Mismatch` 停下，并点名源文件、表、rowid 与父表。
@@ -141,7 +158,7 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   "knowledge": "PRESENT" | "MISSING",
   "families": [
     { "code": "P3", "family": "<范围>/<族名>", "decision": "...", "drop_reason": str|null,
-      "business_digest": bool, "pending": "W3b6"|"needs the data root"|null,
+      "business_digest": bool, "pending": "needs the data root"|null,
       "source": { "path_class": "projects/<id>/project.sqlite", "rows"|"files": n|null, "digest": hex|null },
       "target": { "table"|"dir": str|null, "rows": n|null, "digest": hex|null },
       "checks": [ { "name": str, "result": "PASS"|"FAIL", "errors": n, "first_failure_locator": str|null } ] }
