@@ -181,6 +181,25 @@ pub struct Report {
     pub unresolved_promotions: usize,
     /// artifacts 行数（2.0 不写 artifacts，预期 0；有行时 local_path 原样保留并抄入 legacy 列）。
     pub artifact_rows: i64,
+    /// 规范化规则的执行记录（`store/NORMALIZATION.md`），按（规则，族）排序。计数为 0 的也有一条。
+    pub normalizations: Vec<Normalization>,
+    /// 报告附件：被舍弃结构（N-02）的非默认值，族 → 按主键排序的 JSON 行。可能含用户正文，与报告分开存放。
+    pub attachment: BTreeMap<String, Vec<String>>,
+    /// 只报告、不改动的遗留值（O-01～O-03）：`编号 族` → 行数。
+    pub observations: BTreeMap<String, i64>,
+    /// VERIFY 独立重算的规则记录或附件与转换记下的不一致。
+    pub rule_mismatches: Vec<String>,
+}
+
+/// 一条规范化规则在一个族上的执行记录。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Normalization {
+    /// `编号@版本`，N-05 另带原因：`N-05@1:CROSS_AGENT`。
+    pub rule: String,
+    pub family: String,
+    pub count: i64,
+    /// 受影响主键集合的摘要（NORMALIZATION.md「主键集合摘要」）。
+    pub keys_digest: String,
 }
 
 impl Report {
@@ -192,6 +211,21 @@ impl Report {
             .map(|f| f.family.clone())
             .collect();
         out.extend(self.receipt_violations.iter().cloned());
+        out.extend(self.rule_mismatches.iter().cloned());
+        out
+    }
+
+    /// 附件的 JSON Lines 文本：每行 `{"family":…,"row":…}`，族按名字、行按主键排序。W3d 写到 `staging\<g>\`。
+    pub fn attachment_jsonl(&self) -> String {
+        let mut out = String::new();
+        for (family, rows) in &self.attachment {
+            for row in rows {
+                out.push_str(&format!(
+                    "{{\"family\":{},\"row\":{row}}}\n",
+                    json_string(family)
+                ));
+            }
+        }
         out
     }
 }
@@ -281,11 +315,7 @@ const PROJECT_COPY: &[&str] = &[
     "counters",
     "objectives",
     "milestones",
-    "work_items",
-    "work_item_relations",
     "checklist_items",
-    "labels",
-    "work_item_labels",
     "progress_updates",
     "project_updates",
     "blockers",
@@ -299,6 +329,313 @@ const PROJECT_COPY: &[&str] = &[
     "engineering_project_metrics",
     "engineering_work_item_metrics",
 ];
+
+// ===== 规范化规则（10 R9′；store/NORMALIZATION.md）=====
+
+const N01: &str = "N-01@1";
+/// N-02a～c：3.0 不建的 work_items 列，各自的非默认值谓词。
+const N02_COLUMNS: &[(&str, &str, &str)] = &[
+    ("N-02a@1", "archived_at", "archived_at IS NOT NULL"),
+    ("N-02b@1", "phase_inferred", "phase_inferred <> 0"),
+    (
+        "N-02c@1",
+        "planned_start_date",
+        "planned_start_date IS NOT NULL",
+    ),
+];
+/// N-02d、e：3.0 不建的表，整表进附件。（规则，表，主键）
+const N02_TABLES: &[(&str, &str, &str)] = &[
+    ("N-02d@1", "labels", "id"),
+    ("N-02e@1", "work_item_labels", "work_item_id, label_id"),
+];
+const N02F: &str = "N-02f@1";
+/// 3.0 保留的关系类型；其余（RELATES、DUPLICATES）按 N-02f 进附件。
+const KEPT_RELATIONS: &str = "('BLOCKS','DISCOVERED_FROM')";
+const N04: &str = "N-04@1";
+const N05: &str = "N-05@1";
+const N05_REASONS: &[&str] = &["CROSS_AGENT", "CROSS_ROLE", "TIME_REVERSED", "SAME_INSTANT"];
+/// 只报告、不改动的遗留值。（编号，表，谓词）
+const OBSERVED: &[(&str, &str, &str)] = &[
+    ("O-01", "checklist_items", "kind <> 'ACCEPTANCE'"),
+    ("O-02", "blockers", "status = 'CANCELLED'"),
+    ("O-03", "work_items", "progress_source = 'STATUS'"),
+];
+const NOTIFY_ENABLED: &str = "notification.enabled";
+const NOTIFY_MODE: &str = "notification.mode";
+
+/// 主键集合摘要：`sha256("ATM-NORM-1" ‖ 规则 ‖ 0 ‖ 族 ‖ 0 ‖ 排序后的每个主键 ‖ 0)`。
+fn keys_digest(rule: &str, family: &str, mut keys: Vec<String>) -> String {
+    keys.sort();
+    let mut h = Sha256::new();
+    h.update(b"ATM-NORM-1");
+    h.update(rule.as_bytes());
+    h.update([0]);
+    h.update(family.as_bytes());
+    h.update([0]);
+    for k in &keys {
+        h.update(k.as_bytes());
+        h.update([0]);
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 一列文本结果：多列主键用 0x1F 连接成一个键。
+fn key_list(c: &Connection, sql: &str) -> Result<Vec<String>> {
+    let mut st = c.prepare(sql)?;
+    let n = st.column_count();
+    let rows = st.query_map([], |r| {
+        (0..n)
+            .map(|i| r.get::<_, String>(i))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map(|v| v.join("\u{1f}"))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn record(rule: &str, family: &str, keys: Vec<String>) -> Normalization {
+    Normalization {
+        rule: rule.to_string(),
+        family: family.to_string(),
+        count: keys.len() as i64,
+        keys_digest: keys_digest(rule, family, keys),
+    }
+}
+
+/// 一张表全部列的 `json_object(…)` 表达式（附件整行）。
+fn row_json(c: &Connection, schema: &str, table: &str) -> Result<String> {
+    let (cols, _) = columns(c, schema, table)?;
+    Ok(format!(
+        "json_object({})",
+        cols.iter()
+            .map(|col| format!("'{col}', \"{col}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// JSON 字符串字面量（附件行的族名）。
+fn json_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 2.x 的 `notification.mode` 是否合法：JSON 字符串，值为三者之一（区分大小写，同 2.x 的 `includes`）。
+fn valid_mode(tx: &Transaction<'_>, value_json: &str) -> Result<bool> {
+    Ok(tx.query_row(
+        "SELECT CASE WHEN json_valid(?1) THEN json_type(?1) = 'text' AND (?1 ->> '$') IN ('ALL', 'CRITICAL', 'OFF')
+                ELSE 0 END",
+        [value_json],
+        |r| r.get(0),
+    )?)
+}
+
+/// N-04 的推导值：`enabled` 恰好是 JSON `false` 时为 OFF，其余（缺失、非 JSON、其他值）为 ALL。
+fn mode_from_enabled(tx: &Transaction<'_>, enabled: Option<&str>) -> Result<&'static str> {
+    let off: bool = match enabled {
+        None => false,
+        Some(v) => tx.query_row(
+            "SELECT CASE WHEN json_valid(?1) THEN json_type(?1) = 'false' ELSE 0 END",
+            [v],
+            |r| r.get(0),
+        )?,
+    };
+    Ok(if off { "\"OFF\"" } else { "\"ALL\"" })
+}
+
+/// N-04：在目标库的 registry settings 上合并通知设置。返回受影响的键。
+fn normalize_notification(tx: &Transaction<'_>) -> Result<Vec<String>> {
+    type Row = (String, i64, String);
+    let get = |key: &str| -> Result<Option<Row>> {
+        Ok(tx
+            .query_row(
+                "SELECT value_json, version, updated_at FROM main.settings WHERE key = ?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    };
+    let (enabled, mode) = (get(NOTIFY_ENABLED)?, get(NOTIFY_MODE)?);
+    let mut touched = Vec::new();
+    if let Some((e_value, e_version, e_at)) = &enabled {
+        tx.execute("DELETE FROM main.settings WHERE key = ?1", [NOTIFY_ENABLED])?;
+        touched.push(NOTIFY_ENABLED.to_string());
+        if mode.is_none() {
+            tx.execute(
+                "INSERT INTO main.settings (key, value_json, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![NOTIFY_MODE, mode_from_enabled(tx, Some(e_value))?, e_version, e_at],
+            )
+            .ctx("settings")?;
+            touched.push(NOTIFY_MODE.to_string());
+        }
+    }
+    if let Some((m_value, _, _)) = &mode
+        && !valid_mode(tx, m_value)?
+    {
+        let derived = mode_from_enabled(tx, enabled.as_ref().map(|(v, _, _)| v.as_str()))?;
+        tx.execute(
+            "UPDATE main.settings SET value_json = ?2 WHERE key = ?1",
+            params![NOTIFY_MODE, derived],
+        )?;
+        touched.push(NOTIFY_MODE.to_string());
+    }
+    Ok(touched)
+}
+
+/// 项目库里按规则搬的部分：work_items（N-01、N-02a～c）、work_item_relations（N-02f）、
+/// 不建的表（N-02d、e），以及只记录的 N-05 与 O-01～O-03。
+fn normalize_project(tx: &Transaction<'_>, pid: &str, report: &mut Report) -> Result<()> {
+    let family = |table: &str| format!("{pid}/{table}");
+
+    // work_items：不建 N-02a～c 的三列；终态任务的领取两列置 NULL（N-01）。
+    let (cols, _) = columns(tx, "p", "work_items")?;
+    let kept: Vec<String> = cols
+        .iter()
+        .filter(|c| !N02_COLUMNS.iter().any(|(_, col, _)| col == c))
+        .cloned()
+        .collect();
+    let select = kept
+        .iter()
+        .map(|c| match c.as_str() {
+            "claimed_by_session_id" | "claim_lease_until" => {
+                format!("CASE WHEN status IN ('DONE','CANCELLED') THEN NULL ELSE \"{c}\" END")
+            }
+            _ => format!("\"{c}\""),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    tx.execute(
+        &format!(
+            "INSERT INTO main.work_items (project_id, {}) SELECT ?1, {select} FROM p.work_items",
+            list(&kept)
+        ),
+        [pid],
+    )
+    .ctx("work_items")?;
+    let keys = key_list(
+        tx,
+        "SELECT id FROM p.work_items WHERE status IN ('DONE','CANCELLED')
+           AND (claimed_by_session_id IS NOT NULL OR claim_lease_until IS NOT NULL)",
+    )?;
+    report
+        .normalizations
+        .push(record(N01, &family("work_items"), keys));
+    for (rule, col, predicate) in N02_COLUMNS {
+        let f = format!("{}.{col}", family("work_items"));
+        let keys = key_list(
+            tx,
+            &format!("SELECT id FROM p.work_items WHERE {predicate}"),
+        )?;
+        let rows = key_list(
+            tx,
+            &format!(
+                "SELECT json_object('id', id, 'value', \"{col}\") FROM p.work_items WHERE {predicate} ORDER BY id"
+            ),
+        )?;
+        if !rows.is_empty() {
+            report.attachment.insert(f.clone(), rows);
+        }
+        report.normalizations.push(record(rule, &f, keys));
+    }
+
+    // work_item_relations：只建 3.0 保留的两类，其余进附件（N-02f）。
+    let (cols, _) = columns(tx, "p", "work_item_relations")?;
+    let l = list(&cols);
+    tx.execute(
+        &format!(
+            "INSERT INTO main.work_item_relations (project_id, {l}) SELECT ?1, {l} FROM p.work_item_relations
+             WHERE relation_type IN {KEPT_RELATIONS}"
+        ),
+        [pid],
+    )
+    .ctx("work_item_relations")?;
+    let dropped = format!("FROM p.work_item_relations WHERE relation_type NOT IN {KEPT_RELATIONS}");
+    let keys = key_list(
+        tx,
+        &format!("SELECT source_id, target_id, relation_type {dropped}"),
+    )?;
+    let rows = key_list(
+        tx,
+        &format!(
+            "SELECT {} {dropped} ORDER BY source_id, target_id, relation_type",
+            row_json(tx, "p", "work_item_relations")?
+        ),
+    )?;
+    let f = family("work_item_relations");
+    if !rows.is_empty() {
+        report.attachment.insert(f.clone(), rows);
+    }
+    report.normalizations.push(record(N02F, &f, keys));
+
+    // labels、work_item_labels：3.0 不建，整表进附件（N-02d、e）。
+    for (rule, table, pk) in N02_TABLES {
+        let keys = key_list(tx, &format!("SELECT {pk} FROM p.{table}"))?;
+        let rows = key_list(
+            tx,
+            &format!(
+                "SELECT {} FROM p.{table} ORDER BY {pk}",
+                row_json(tx, "p", table)?
+            ),
+        )?;
+        let f = family(table);
+        if !rows.is_empty() {
+            report.attachment.insert(f.clone(), rows);
+        }
+        report.normalizations.push(record(rule, &f, keys));
+    }
+
+    // N-05：不改数据，按原因记录无效边与同一时刻的有效边。
+    let edges: Vec<(String, String)> = {
+        let mut st = tx.prepare(
+            "SELECT s.id,
+                    CASE WHEN s.agent_id <> q.agent_id THEN 'CROSS_AGENT'
+                         WHEN s.role <> q.role THEN 'CROSS_ROLE'
+                         WHEN s.started_at < q.started_at THEN 'TIME_REVERSED'
+                         WHEN s.started_at = q.started_at THEN 'SAME_INSTANT' END
+             FROM p.agent_sessions s JOIN p.agent_sessions q ON q.id = s.predecessor_session_id",
+        )?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get::<_, Option<String>>(1)?)))?
+            .filter_map(|r| match r {
+                Ok((id, Some(reason))) => Some(Ok((id, reason))),
+                Ok((_, None)) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for reason in N05_REASONS {
+        let keys = edges
+            .iter()
+            .filter(|(_, r)| r == reason)
+            .map(|(id, _)| id.clone())
+            .collect();
+        report.normalizations.push(record(
+            &format!("{N05}:{reason}"),
+            &family("agent_sessions"),
+            keys,
+        ));
+    }
+
+    for (code, table, predicate) in OBSERVED {
+        let n: i64 = tx.query_row(
+            &format!("SELECT count(*) FROM p.{table} WHERE {predicate}"),
+            [],
+            |r| r.get(0),
+        )?;
+        *report
+            .observations
+            .entry(format!("{code} {}", family(table)))
+            .or_default() += n;
+    }
+    Ok(())
+}
 
 /// 把一组 2.x 库转换成 `target` 处的新单库，并逐族校验。
 pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) -> Result<Report> {
@@ -598,6 +935,10 @@ fn convert_registry(
             )
             .ctx(table)?;
         }
+        let touched = normalize_notification(&tx)?;
+        report
+            .normalizations
+            .push(record(N04, "r/settings", touched));
         // project_paths：另算唯一键 path_key（04 C-L09）。两个项目认领同一个键会撞上唯一约束，
         // 转换就此失败，不会悄悄留下其中一条（L-009）。
         let mut st = tx.prepare(
@@ -897,6 +1238,7 @@ fn convert_project(
             )
             .ctx(table)?;
         }
+        normalize_project(&tx, &pid, report)?;
         report.artifact_rows += tx.query_row(
             "SELECT count(*) FROM main.artifacts WHERE project_id = ?1",
             [&pid],
@@ -1351,19 +1693,92 @@ fn compare_table(
 }
 
 /// 对一个已经转换好的库重做逐族比对（W3 的 VERIFY 阶段、以及测试用）。
-pub fn verify_converted(target: &Path, src: &LegacySources) -> Result<Report> {
+/// `conversion` 是转换时的报告：VERIFY 独立重算规范化记录与附件，与它记下的比对。
+pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report) -> Result<Report> {
     let t = Connection::open(target)?;
     crate::configure(&t)?;
     register_functions(&t)?;
-    let mut report = Report::default();
+    let mut report = Report {
+        normalizations: conversion.normalizations.clone(),
+        attachment: conversion.attachment.clone(),
+        ..Report::default()
+    };
     verify(&t, src, &mut report)?;
     Ok(report)
 }
 
+/// VERIFY 从源独立重算的规则记录与附件。
+#[derive(Default)]
+struct Recheck {
+    records: Vec<Normalization>,
+    attachment: BTreeMap<String, Vec<String>>,
+}
+
+impl Recheck {
+    fn push(&mut self, rule: &str, family: &str, keys: Vec<String>) {
+        self.records.push(record(rule, family, keys));
+    }
+
+    fn attach(&mut self, family: String, rows: Vec<String>) {
+        if !rows.is_empty() {
+            self.attachment.insert(family, rows);
+        }
+    }
+
+    /// 与转换记下的逐条比对；不一致的写进 `rule_mismatches`（只写规则、族、计数与摘要前缀，不写正文）。
+    fn settle(self, report: &mut Report) {
+        type Key = (String, String);
+        let index = |v: &[Normalization]| -> BTreeMap<Key, (i64, String)> {
+            v.iter()
+                .map(|n| {
+                    (
+                        (n.rule.clone(), n.family.clone()),
+                        (n.count, n.keys_digest.clone()),
+                    )
+                })
+                .collect()
+        };
+        let (ours, theirs) = (index(&self.records), index(&report.normalizations));
+        let show = |n: Option<&(i64, String)>| {
+            n.map_or("missing".to_string(), |(c, d)| format!("{c} {}", &d[..12]))
+        };
+        let keys: std::collections::BTreeSet<&Key> = ours.keys().chain(theirs.keys()).collect();
+        for k in keys {
+            if ours.get(k) != theirs.get(k) {
+                report.rule_mismatches.push(format!(
+                    "{} {}: converted {}, verify {}",
+                    k.0,
+                    k.1,
+                    show(theirs.get(k)),
+                    show(ours.get(k))
+                ));
+            }
+        }
+        let families: std::collections::BTreeSet<&String> = self
+            .attachment
+            .keys()
+            .chain(report.attachment.keys())
+            .collect();
+        let mut wrong = Vec::new();
+        for f in families {
+            let (a, b) = (self.attachment.get(f), report.attachment.get(f));
+            if a != b {
+                wrong.push(format!(
+                    "attachment {f}: converted {} rows, verify {} rows",
+                    b.map_or(0, Vec::len),
+                    a.map_or(0, Vec::len)
+                ));
+            }
+        }
+        report.rule_mismatches.extend(wrong);
+    }
+}
+
 fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
     attach(t, &src.registry, "r")?;
+    let mut re = Recheck::default();
     let r = (|| {
-        verify_registry(t, report)?;
+        verify_registry(t, report, &mut re)?;
         expect_global_begin(t)?;
         if let Some(k) = &src.knowledge {
             attach(t, k, "k")?;
@@ -1373,12 +1788,15 @@ fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()
         }
         for p in &src.projects {
             attach(t, p, "p")?;
-            let r = verify_project(t, report).and_then(|()| expect_global_project(t));
+            let r = verify_project(t, report, &mut re).and_then(|()| expect_global_project(t));
             detach(t, "p");
             r?;
         }
         verify_global(t, report)
     })();
+    if r.is_ok() {
+        re.settle(report);
+    }
     let _ = t.execute_batch(
         "DROP TABLE IF EXISTS temp.expected_links; DROP TABLE IF EXISTS temp.expected_mirrors;",
     );
@@ -1477,7 +1895,7 @@ fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
     Ok(())
 }
 
-fn verify_registry(c: &Connection, report: &mut Report) -> Result<()> {
+fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Result<()> {
     let (cols, _) = columns(c, "r", "projects")?;
     let source = list(&cols);
     let target = cols
@@ -1504,9 +1922,10 @@ fn verify_registry(c: &Connection, report: &mut Report) -> Result<()> {
         &format!("SELECT {target} FROM main.projects ORDER BY id"),
         &[],
     )?;
-    for table in REGISTRY_COPY {
+    for table in REGISTRY_COPY.iter().filter(|t| **t != "settings") {
         compare_table(c, report, "r", table, None)?;
     }
+    verify_settings(c, report, re)?;
     // 按 2.x 的列比较。3.0 多出来的 path_key 在转换时由 canonical_path 推出，靠唯一约束兜底。
     compare_table(c, report, "r", "project_paths", None)?;
     let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
@@ -1579,7 +1998,7 @@ fn verify_knowledge(c: &Connection, report: &mut Report) -> Result<()> {
     )
 }
 
-fn verify_project(c: &Connection, report: &mut Report) -> Result<()> {
+fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Result<()> {
     let pid: String = c.query_row("SELECT project_id FROM p.project_meta", [], |r| r.get(0))?;
     let p = pid.as_str();
     // project_meta：整行原值在 legacy_json 里；3.0 的派生列必须与它一致。
@@ -1616,6 +2035,7 @@ fn verify_project(c: &Connection, report: &mut Report) -> Result<()> {
     for table in PROJECT_COPY {
         compare_table(c, report, "p", table, Some(p))?;
     }
+    verify_rules(c, report, re, p)?;
     let (cols, _) = columns(c, "p", "events")?;
     let source = list(&cols);
     let target = cols
@@ -1684,4 +2104,220 @@ fn verify_project(c: &Connection, report: &mut Report) -> Result<()> {
          ORDER BY entity_type, entity_id",
         &[&p],
     )
+}
+
+// ===== VERIFY：规范化规则的独立重算（store/NORMALIZATION.md）=====
+// 这里的 SQL 与转换写入的那一份分开写：同一条规则由两段代码各自表述，互相核对。
+
+/// N-04：registry settings 的期望目标由源按 2.x 读法推出，与目标逐行比对；受影响的键另算一份。
+fn verify_settings(c: &Connection, report: &mut Report, re: &mut Recheck) -> Result<()> {
+    let cols: Vec<String> = ["key", "value_json", "version", "updated_at"]
+        .map(String::from)
+        .to_vec();
+    let expected = "WITH e AS (SELECT value_json AS v, version, updated_at FROM r.settings WHERE key = 'notification.enabled'),
+              m AS (SELECT value_json AS v, version, updated_at FROM r.settings WHERE key = 'notification.mode'),
+              ok AS (SELECT CASE WHEN json_valid(v) AND json_type(v) = 'text' AND (v ->> '$') IN ('ALL', 'CRITICAL', 'OFF')
+                                 THEN 1 ELSE 0 END AS valid FROM m),
+              derived AS (SELECT coalesce((SELECT CASE WHEN json_valid(v) AND json_type(v) = 'false' THEN '\"OFF\"' END FROM e),
+                                          '\"ALL\"') AS d)
+         SELECT key, value_json, version, updated_at FROM r.settings
+           WHERE key NOT IN ('notification.enabled', 'notification.mode')
+         UNION ALL
+         SELECT 'notification.mode', iif((SELECT valid FROM ok) = 1, m.v, (SELECT d FROM derived)), m.version, m.updated_at FROM m
+         UNION ALL
+         SELECT 'notification.mode', (SELECT d FROM derived), e.version, e.updated_at FROM e
+           WHERE NOT EXISTS (SELECT 1 FROM m)
+         ORDER BY 1";
+    compare(
+        c,
+        report,
+        "r/settings",
+        &cols,
+        expected,
+        &[],
+        "SELECT key, value_json, version, updated_at FROM main.settings ORDER BY key",
+        &[],
+    )?;
+    let keys = key_list(
+        c,
+        "SELECT key FROM r.settings WHERE key = 'notification.enabled'
+         UNION
+         SELECT 'notification.mode' FROM r.settings
+           WHERE key = 'notification.enabled' AND NOT EXISTS (SELECT 1 FROM r.settings WHERE key = 'notification.mode')
+         UNION
+         SELECT key FROM r.settings WHERE key = 'notification.mode'
+           AND NOT (json_valid(value_json) AND json_type(value_json) = 'text' AND (value_json ->> '$') IN ('ALL', 'CRITICAL', 'OFF'))",
+    )?;
+    re.push(N04, "r/settings", keys);
+    Ok(())
+}
+
+/// 项目里的 N-01、N-02、N-05：work_items 与关系的期望目标、规则主键集合与附件，都从源另算。
+fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) -> Result<()> {
+    let family = |table: &str| format!("{p}/{table}");
+    // work_items：目标 schema 没有的列即 N-02 舍弃的列，必须恰好是登记的三列。
+    let (source_cols, pk) = columns(c, "p", "work_items")?;
+    let (target_cols, _) = columns(c, "main", "work_items")?;
+    let missing: Vec<&String> = source_cols
+        .iter()
+        .filter(|col| !target_cols.contains(col))
+        .collect();
+    let mut registered: Vec<&str> = N02_COLUMNS.iter().map(|(_, col, _)| *col).collect();
+    registered.sort_unstable();
+    let mut missing_names: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+    missing_names.sort_unstable();
+    if missing_names != registered {
+        report.rule_mismatches.push(format!(
+            "{}: columns not carried over {missing_names:?}, registered {registered:?}",
+            family("work_items")
+        ));
+    }
+    let cols: Vec<String> = source_cols
+        .iter()
+        .filter(|col| target_cols.contains(col))
+        .cloned()
+        .collect();
+    let source = cols
+        .iter()
+        .map(|col| match col.as_str() {
+            "claimed_by_session_id" | "claim_lease_until" => {
+                format!("iif(status = 'DONE' OR status = 'CANCELLED', NULL, \"{col}\")")
+            }
+            _ => format!("\"{col}\""),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order = list(&pk);
+    compare(
+        c,
+        report,
+        &family("work_items"),
+        &cols,
+        &format!("SELECT {source} FROM p.work_items ORDER BY {order}"),
+        &[],
+        &format!(
+            "SELECT {} FROM main.work_items WHERE project_id = ?1 ORDER BY {order}",
+            list(&cols)
+        ),
+        &[&p],
+    )?;
+    re.push(
+        N01,
+        &family("work_items"),
+        key_list(
+            c,
+            "SELECT id FROM p.work_items
+             WHERE NOT (claimed_by_session_id IS NULL AND claim_lease_until IS NULL)
+               AND (status = 'CANCELLED' OR status = 'DONE')",
+        )?,
+    );
+    for (rule, col, predicate) in [
+        ("N-02a@1", "archived_at", "archived_at NOT NULL"),
+        ("N-02b@1", "phase_inferred", "phase_inferred IS NOT 0"),
+        (
+            "N-02c@1",
+            "planned_start_date",
+            "planned_start_date NOT NULL",
+        ),
+    ] {
+        let f = format!("{}.{col}", family("work_items"));
+        re.push(
+            rule,
+            &f,
+            key_list(c, &format!("SELECT id FROM p.work_items WHERE {predicate}"))?,
+        );
+        re.attach(
+            f,
+            key_list(
+                c,
+                &format!(
+                    "SELECT json_object('id', id, 'value', \"{col}\") FROM p.work_items WHERE {predicate} ORDER BY id"
+                ),
+            )?,
+        );
+    }
+
+    // work_item_relations：目标只有 BLOCKS 与 DISCOVERED_FROM；其余是 N-02f 的附件。
+    let (cols, pk) = columns(c, "p", "work_item_relations")?;
+    let (l, order) = (list(&cols), list(&pk));
+    compare(
+        c,
+        report,
+        &family("work_item_relations"),
+        &cols,
+        &format!(
+            "SELECT {l} FROM p.work_item_relations
+             WHERE relation_type = 'BLOCKS' OR relation_type = 'DISCOVERED_FROM' ORDER BY {order}"
+        ),
+        &[],
+        &format!("SELECT {l} FROM main.work_item_relations WHERE project_id = ?1 ORDER BY {order}"),
+        &[&p],
+    )?;
+    let other = "FROM p.work_item_relations WHERE NOT (relation_type = 'BLOCKS' OR relation_type = 'DISCOVERED_FROM')";
+    re.push(
+        N02F,
+        &family("work_item_relations"),
+        key_list(
+            c,
+            &format!("SELECT source_id, target_id, relation_type {other}"),
+        )?,
+    );
+    re.attach(
+        family("work_item_relations"),
+        key_list(
+            c,
+            &format!(
+                "SELECT {} {other} ORDER BY {order}",
+                row_json(c, "p", "work_item_relations")?
+            ),
+        )?,
+    );
+
+    // labels、work_item_labels：目标不建，附件是整表。
+    for (rule, table) in [("N-02d@1", "labels"), ("N-02e@1", "work_item_labels")] {
+        let (_, pk) = columns(c, "p", table)?;
+        let order = list(&pk);
+        re.push(
+            rule,
+            &family(table),
+            key_list(c, &format!("SELECT {order} FROM p.{table}"))?,
+        );
+        re.attach(
+            family(table),
+            key_list(
+                c,
+                &format!(
+                    "SELECT {} FROM p.{table} ORDER BY {order}",
+                    row_json(c, "p", table)?
+                ),
+            )?,
+        );
+    }
+
+    // N-05：每个原因单独一条谓词。
+    for (reason, predicate) in [
+        ("CROSS_AGENT", "a.agent_id <> b.agent_id"),
+        ("CROSS_ROLE", "a.agent_id = b.agent_id AND a.role <> b.role"),
+        (
+            "TIME_REVERSED",
+            "a.agent_id = b.agent_id AND a.role = b.role AND a.started_at < b.started_at",
+        ),
+        (
+            "SAME_INSTANT",
+            "a.agent_id = b.agent_id AND a.role = b.role AND a.started_at = b.started_at",
+        ),
+    ] {
+        re.push(
+            &format!("{N05}:{reason}"),
+            &family("agent_sessions"),
+            key_list(
+                c,
+                &format!(
+                    "SELECT a.id FROM p.agent_sessions a, p.agent_sessions b
+                     WHERE b.id = a.predecessor_session_id AND {predicate}"
+                ),
+            )?,
+        );
+    }
+    Ok(())
 }

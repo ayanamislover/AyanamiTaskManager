@@ -215,16 +215,15 @@ CREATE TABLE work_items (
   phase TEXT NOT NULL DEFAULT 'BACKLOG'
     CHECK (phase IN ('BACKLOG','READY','CLAIMED','IN_PROGRESS','BLOCKED','VERIFYING','DONE','CANCELLED')),
   waiting_on TEXT CHECK (waiting_on IS NULL OR waiting_on IN ('USER','AGENT')),
-  phase_inferred INTEGER NOT NULL DEFAULT 0 CHECK (phase_inferred IN (0,1)),
   priority TEXT NOT NULL CHECK (priority IN ('LOW','NORMAL','HIGH','CRITICAL')),
-  sort_key INTEGER NOT NULL DEFAULT 0, planned_start_date TEXT, target_date TEXT,
+  sort_key INTEGER NOT NULL DEFAULT 0, target_date TEXT,
   started_at TEXT, completed_at TEXT,
   assignee_agent_id TEXT, claimed_by_session_id TEXT, claim_lease_until TEXT,
   reported_progress REAL, computed_progress REAL NOT NULL DEFAULT 0, progress_source TEXT NOT NULL DEFAULT 'NONE',
   weight REAL NOT NULL DEFAULT 1, blocked_reason TEXT, waiting_for TEXT,
   verification_required INTEGER NOT NULL DEFAULT 0, version INTEGER NOT NULL DEFAULT 0,
   created_by_agent_id TEXT, created_by_session_id TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   source_quick_id TEXT,
   cancel_reason TEXT, duplicate_of_id TEXT, superseded_by_id TEXT,
   ever_claimed_at TEXT, last_started_at TEXT, last_session_closed_at TEXT, last_evidence_at TEXT,
@@ -245,11 +244,11 @@ CREATE INDEX ix_work_items_task_list_keyset ON work_items(
   project_id,
   (CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END),
   sort_key, created_at, local_no
-) WHERE archived_at IS NULL;
+);
 
 CREATE TABLE work_item_relations (
   project_id TEXT NOT NULL, source_id TEXT NOT NULL, target_id TEXT NOT NULL,
-  relation_type TEXT NOT NULL CHECK (relation_type IN ('BLOCKS','RELATES','DUPLICATES','DISCOVERED_FROM')),
+  relation_type TEXT NOT NULL CHECK (relation_type IN ('BLOCKS','DISCOVERED_FROM')),
   created_at TEXT NOT NULL,
   PRIMARY KEY (project_id, source_id, target_id, relation_type), CHECK (source_id <> target_id),
   FOREIGN KEY (project_id, source_id) REFERENCES work_items(project_id, id) DEFERRABLE INITIALLY DEFERRED,
@@ -268,12 +267,8 @@ CREATE TABLE checklist_items (
 );
 CREATE INDEX ix_checklist_work ON checklist_items(project_id, work_item_id, status);
 
-CREATE TABLE labels (project_id TEXT NOT NULL, id TEXT NOT NULL, name TEXT NOT NULL, color TEXT NOT NULL,
-  created_at TEXT NOT NULL, PRIMARY KEY (project_id, id), UNIQUE (project_id, name));
-CREATE TABLE work_item_labels (project_id TEXT NOT NULL, work_item_id TEXT NOT NULL, label_id TEXT NOT NULL,
-  PRIMARY KEY (project_id, work_item_id, label_id),
-  FOREIGN KEY (project_id, work_item_id) REFERENCES work_items(project_id, id) DEFERRABLE INITIALLY DEFERRED,
-  FOREIGN KEY (project_id, label_id) REFERENCES labels(project_id, id) DEFERRABLE INITIALLY DEFERRED);
+-- labels / work_item_labels、work_items 的 archived_at / phase_inferred / planned_start_date、关系类型 RELATES / DUPLICATES
+-- 不建（01 C-16、C-25；04 C-L15）。转换时非默认值进报告附件（store/NORMALIZATION.md N-02）。
 
 CREATE TABLE progress_updates (
   project_id TEXT NOT NULL, id TEXT NOT NULL, work_item_id TEXT NOT NULL,

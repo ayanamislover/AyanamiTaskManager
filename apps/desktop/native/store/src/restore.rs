@@ -37,8 +37,6 @@ pub const PROJECT_TABLES: &[&str] = &[
     "work_items",
     "work_item_relations",
     "checklist_items",
-    "labels",
-    "work_item_labels",
     "progress_updates",
     "project_updates",
     "blockers",

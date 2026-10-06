@@ -670,8 +670,6 @@ fn a_misspelled_identifier_is_an_error_not_a_string() {
 }
 
 /// 00 C-L15：projects 没有 archived_at（2.0 从没写过它；转换时原值放进 legacy_json）。
-/// 01 C-16 的其余删除（work_items 的 archived_at / phase_inferred / planned_start_date、labels、RELATES / DUPLICATES）
-/// 与转换器的「非默认值进报告附件」一起在 W3 做，见 TRACE.md。
 #[test]
 fn c_l15_projects_have_no_archived_at() {
     let c = fresh("removed");
@@ -684,4 +682,51 @@ fn c_l15_projects_have_no_archived_at() {
         .unwrap();
     assert!(columns.contains(&"lifecycle".to_owned()));
     assert!(!columns.contains(&"archived_at".to_owned()));
+}
+
+/// 01 C-16 / C-25：work_items 的三列、labels 两张表、RELATES / DUPLICATES 都不建（store/NORMALIZATION.md N-02）。
+/// 只作转换数据保留的 kind / blockers 状态仍在 CHECK 里（O-01、O-02）。
+#[test]
+fn c16_legacy_structures_are_not_built() {
+    let c = fresh("c16");
+    let columns: Vec<String> = c
+        .prepare("SELECT name FROM pragma_table_info('work_items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(columns.contains(&"target_date".to_owned()));
+    for gone in ["archived_at", "phase_inferred", "planned_start_date"] {
+        assert!(!columns.iter().any(|c| c == gone), "{gone}");
+    }
+    let tables: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('labels', 'work_item_labels')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0);
+    let sql: String = c
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'work_item_relations'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        sql.contains("relation_type IN ('BLOCKS','DISCOVERED_FROM')"),
+        "{sql}"
+    );
+    for sql in [
+        "SELECT sql FROM sqlite_master WHERE name = 'checklist_items'",
+        "SELECT sql FROM sqlite_master WHERE name = 'blockers'",
+    ] {
+        let def: String = c.query_row(sql, [], |r| r.get(0)).unwrap();
+        assert!(
+            def.contains("'OPTIONAL'") || def.contains("'CANCELLED'"),
+            "{def}"
+        );
+    }
 }

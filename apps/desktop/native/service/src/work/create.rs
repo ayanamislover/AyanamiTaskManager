@@ -383,11 +383,11 @@ pub(crate) fn run(
             .collect();
         w.tx.execute(
             "INSERT INTO work_items (project_id, id, local_no, objective_id, milestone_id, type, title, description,
-                                     acceptance_json, status, phase, waiting_on, phase_inferred, priority, sort_key,
+                                     acceptance_json, status, phase, waiting_on, priority, sort_key,
                                      target_date, completed_at, assignee_agent_id, computed_progress, progress_source,
                                      weight, verification_required, version, created_by_agent_id, created_by_session_id,
                                      created_at, updated_at, source_quick_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, ?13, ?14, ?15, ?16, ?17, 0, 'NONE', ?18, ?19, 1,
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, 0, 'NONE', ?18, ?19, 1,
                      ?20, ?21, ?22, ?22, ?23)",
             params![
                 w.project,

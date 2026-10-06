@@ -85,7 +85,7 @@ pub(crate) fn checklist_status(text: &str) -> Option<ChecklistStatus> {
     })
 }
 
-/// 一行工作项。只放服务要读写的列；C-16 删除的遗留列（phase_inferred、archived_at 等）写入时恒为默认值。
+/// 一行工作项。只放服务要读写的列（C-16 的遗留列 3.0 不建，见 store/NORMALIZATION.md N-02）。
 #[derive(Clone, Debug)]
 pub(crate) struct Task {
     pub id: String,
@@ -363,7 +363,7 @@ impl<'a> Work<'a> {
         self.tx
             .execute(
                 "UPDATE work_items SET parent_id = ?3, milestone_id = ?4, title = ?5, description = ?6, acceptance_json = ?7,
-                   status = ?8, phase = ?9, waiting_on = ?10, phase_inferred = 0, target_date = ?11, started_at = ?12,
+                   status = ?8, phase = ?9, waiting_on = ?10, target_date = ?11, started_at = ?12,
                    completed_at = ?13, assignee_agent_id = ?14, claimed_by_session_id = ?15, claim_lease_until = ?16,
                    reported_progress = ?17, computed_progress = ?18, progress_source = ?19, blocked_reason = ?20,
                    waiting_for = ?21, version = ?22, updated_at = ?23, cancel_reason = ?24, duplicate_of_id = ?25,

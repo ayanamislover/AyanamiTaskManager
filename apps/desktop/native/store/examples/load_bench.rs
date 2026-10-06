@@ -624,7 +624,7 @@ fn overview(sh: Arc<Shared>) -> Vec<Lat> {
             )?;
             n += st.query_map([&p], |_| Ok(()))?.collect::<rusqlite::Result<Vec<_>>>()?.len();
             let mut st = tx.prepare_cached(
-                "SELECT id, title, status FROM work_items WHERE project_id = ?1 AND archived_at IS NULL
+                "SELECT id, title, status FROM work_items WHERE project_id = ?1
                  ORDER BY (CASE priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END), sort_key, created_at, local_no
                  LIMIT 50",
             )?;

@@ -6,7 +6,7 @@
 
 use atm_store::jsjson;
 use atm_store::legacy::{
-    ConvertError, ConvertOptions, LegacySources, Report, convert, verify_converted,
+    ConvertError, ConvertOptions, LegacySources, Normalization, Report, convert, verify_converted,
 };
 use atm_store::search::{Scope, match_docs, terms};
 use rusqlite::{Connection, params};
@@ -545,7 +545,7 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
 
     // 复核一次：转换后的库对同一组源仍全部相等。
     assert!(
-        verify_converted(&f.target(), &f.sources)
+        verify_converted(&f.target(), &f.sources, &report)
             .unwrap()
             .failures()
             .is_empty()
@@ -555,7 +555,7 @@ fn a_synthetic_2x_data_root_converts_and_every_family_matches() {
 #[test]
 fn verify_notices_a_target_that_drifted_from_its_source() {
     let f = fixture("legacy-drift");
-    f.convert().unwrap();
+    let report = f.convert().unwrap();
     let t = Connection::open(f.target()).unwrap();
     t.execute(
         "UPDATE events SET payload_json = 'not json {' || ' ' WHERE id = 'F1-bad'",
@@ -574,7 +574,7 @@ fn verify_notices_a_target_that_drifted_from_its_source() {
     )
     .unwrap();
     drop(t);
-    let failures = verify_converted(&f.target(), &f.sources)
+    let failures = verify_converted(&f.target(), &f.sources, &report)
         .unwrap()
         .failures();
     assert_eq!(
@@ -586,7 +586,7 @@ fn verify_notices_a_target_that_drifted_from_its_source() {
 #[test]
 fn verify_rebuilds_the_global_feed_from_the_sources() {
     let f = fixture("legacy-feed-tamper");
-    f.convert().unwrap();
+    let report = f.convert().unwrap();
     let clean = f.dir.join("out").join("clean.sqlite");
     fs::copy(f.target(), &clean).unwrap();
     let cases: &[(&str, &str, &[&str])] = &[
@@ -619,7 +619,7 @@ fn verify_rebuilds_the_global_feed_from_the_sources() {
         let t = Connection::open(f.target()).unwrap();
         t.execute_batch(tamper).unwrap();
         drop(t);
-        let failures = verify_converted(&f.target(), &f.sources)
+        let failures = verify_converted(&f.target(), &f.sources, &report)
             .unwrap()
             .failures();
         assert_eq!(&failures, expected, "{name}");
@@ -1020,4 +1020,375 @@ fn field_reads_beyond_the_supported_depth_name_the_source_row() {
         msg.contains("project P1 outbox O2: payload nests deeper than"),
         "{msg}"
     );
+}
+
+// ===== 规范化规则（10 R9′；store/NORMALIZATION.md）=====
+
+/// P1 里放上每条规则的非默认值：终态任务的残留领取（N-01）、三列遗留值（N-02a～c）、标签与 RELATES /
+/// DUPLICATES（N-02d～f）、四种 lineage 边（N-05）、只报告的遗留值（O-01～O-03）。
+fn rules_fixture(name: &str) -> Fixture {
+    let f = fixture(name);
+    f.project(0)
+        .execute_batch(&format!(
+            "UPDATE counters SET next_value = 4 WHERE name = 'work_item';
+             INSERT INTO work_items (id, local_no, objective_id, type, title, status, priority, assignee_agent_id,
+                                     claimed_by_session_id, claim_lease_until, archived_at, phase_inferred,
+                                     planned_start_date, progress_source, version, created_at, updated_at) VALUES
+               ('W2', 2, 'OBJ', 'TASK', 'done but claimed', 'DONE', 'NORMAL', 'claude', 'S1', '{T2}', '{T2}', 1,
+                '2026-09-10', 'STATUS', 7, '{T}', '{T}'),
+               ('W3', 3, 'OBJ', 'TASK', 'cancelled, lease only', 'CANCELLED', 'NORMAL', NULL, NULL, '{T2}', NULL, 0,
+                NULL, 'NONE', 2, '{T}', '{T}');
+             INSERT INTO work_item_relations (source_id, target_id, relation_type, created_at) VALUES
+               ('W1', 'W2', 'BLOCKS', '{T}'), ('W1', 'W3', 'RELATES', '{T}'), ('W2', 'W3', 'DUPLICATES', '{T}'),
+               ('W3', 'W1', 'DISCOVERED_FROM', '{T}');
+             INSERT INTO labels (id, name, color, created_at) VALUES ('L1', '紧急', '#f00', '{T}');
+             INSERT INTO work_item_labels (work_item_id, label_id) VALUES ('W1', 'L1');
+             INSERT INTO checklist_items (id, work_item_id, title, kind, status, created_at, updated_at) VALUES
+               ('C1', 'W1', 'optional step', 'OPTIONAL', 'TODO', '{T}', '{T}'),
+               ('C2', 'W1', 'acceptance', 'ACCEPTANCE', 'TODO', '{T}', '{T}'),
+               ('C3', 'W1', 'verification', 'VERIFICATION', 'TODO', '{T}', '{T}');
+             INSERT INTO counters (name, next_value) VALUES ('blocker', 2);
+             INSERT INTO blockers (id, local_no, work_item_id, severity, title, status, actor, created_at, updated_at)
+               VALUES ('B1', 1, 'W1', 'LOW', 'gone', 'CANCELLED', 'USER', '{T}', '{T}');
+             INSERT INTO agents (id, display_name, client_kind, created_at, updated_at) VALUES ('codex', 'Codex', 'cli', '{T}', '{T}');
+             INSERT INTO agent_sessions (id, agent_id, role, work_state, connection_state, started_at, updated_at, predecessor_session_id) VALUES
+               ('S2', 'claude', 'PRIMARY', 'IDLE', 'OFFLINE', '{T2}', '{T2}', 'S1'),
+               ('S3', 'codex', 'PRIMARY', 'IDLE', 'OFFLINE', '{T2}', '{T2}', 'S1'),
+               ('S4', 'claude', 'REVIEWER', 'IDLE', 'OFFLINE', '{T2}', '{T2}', 'S1'),
+               ('S5', 'claude', 'PRIMARY', 'IDLE', 'OFFLINE', '{T}', '{T}', 'S2'),
+               ('S6', 'claude', 'SUBAGENT', 'IDLE', 'OFFLINE', '{T}', '{T}', 'S7'),
+               ('S7', 'claude', 'SUBAGENT', 'IDLE', 'OFFLINE', '{T}', '{T}', 'S6');"
+        ))
+        .unwrap();
+    f
+}
+
+fn rule<'a>(r: &'a Report, rule: &str, family: &str) -> &'a Normalization {
+    r.normalizations
+        .iter()
+        .find(|n| n.rule == rule && n.family == family)
+        .unwrap_or_else(|| panic!("no record {rule} {family}: {:?}", r.normalizations))
+}
+
+#[test]
+fn n01_n02_rewrite_drop_and_attach_exactly_the_registered_values() {
+    let f = rules_fixture("legacy-rules");
+    let report = f.convert().unwrap();
+    let t = Connection::open(f.target()).unwrap();
+
+    // N-01：只有终态任务的领取两列变 NULL；assignee、version、updated_at 不动；进行中的 W1 原样。
+    type Claim = (String, Option<String>, Option<String>, Option<String>, i64);
+    let claims: Vec<Claim> = t
+        .prepare(
+            "SELECT id, claimed_by_session_id, claim_lease_until, assignee_agent_id, version FROM work_items
+             WHERE project_id = 'P1' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        claims,
+        [
+            ("W1".into(), Some("S1".into()), None, None, 0),
+            ("W2".into(), None, None, Some("claude".into()), 7),
+            ("W3".into(), None, None, None, 2),
+        ]
+    );
+    assert_eq!(rule(&report, "N-01@1", "P1/work_items").count, 2);
+    assert_eq!(rule(&report, "N-01@1", "P2/work_items").count, 0);
+
+    // N-02：目标不建这些列、表与关系类型；非默认值逐条进附件。
+    let cols: Vec<String> = t
+        .prepare("SELECT name FROM pragma_table_info('work_items')")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    for gone in ["archived_at", "phase_inferred", "planned_start_date"] {
+        assert!(!cols.iter().any(|c| c == gone), "{gone}");
+    }
+    assert_eq!(
+        q::<i64>(
+            &t,
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('labels', 'work_item_labels')"
+        ),
+        0
+    );
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT group_concat(relation_type, ',') FROM (SELECT relation_type FROM work_item_relations ORDER BY 1)"
+        ),
+        "BLOCKS,DISCOVERED_FROM"
+    );
+    for (r, family, n) in [
+        ("N-02a@1", "P1/work_items.archived_at", 1),
+        ("N-02b@1", "P1/work_items.phase_inferred", 1),
+        ("N-02c@1", "P1/work_items.planned_start_date", 1),
+        ("N-02d@1", "P1/labels", 1),
+        ("N-02e@1", "P1/work_item_labels", 1),
+        ("N-02f@1", "P1/work_item_relations", 2),
+        ("N-02f@1", "P2/work_item_relations", 0),
+    ] {
+        assert_eq!(rule(&report, r, family).count, n, "{r} {family}");
+    }
+    assert_eq!(
+        report.attachment["P1/work_items.archived_at"],
+        [format!("{{\"id\":\"W2\",\"value\":\"{T2}\"}}")]
+    );
+    assert_eq!(
+        report.attachment["P1/work_items.phase_inferred"],
+        ["{\"id\":\"W2\",\"value\":1}"]
+    );
+    assert_eq!(
+        report.attachment["P1/labels"],
+        [format!(
+            "{{\"id\":\"L1\",\"name\":\"紧急\",\"color\":\"#f00\",\"created_at\":\"{T}\"}}"
+        )]
+    );
+    assert_eq!(report.attachment["P1/work_item_relations"].len(), 2);
+    assert!(
+        !report.attachment.contains_key("P2/labels"),
+        "empty families have no attachment"
+    );
+    // 附件单独成文，报告的规则记录里只有计数与摘要。
+    let jsonl = report.attachment_jsonl();
+    assert_eq!(jsonl.lines().count(), 7);
+    assert!(jsonl.lines().all(|l| l.starts_with("{\"family\":\"P1/")));
+    assert!(!format!("{:?}", report.normalizations).contains("紧急"));
+
+    // N-05：不改数据，按原因计数；同一时刻的环两条边都算 SAME_INSTANT。
+    for (reason, ids) in [
+        ("CROSS_AGENT", 1),
+        ("CROSS_ROLE", 1),
+        ("TIME_REVERSED", 1),
+        ("SAME_INSTANT", 2),
+    ] {
+        assert_eq!(
+            rule(&report, &format!("N-05@1:{reason}"), "P1/agent_sessions").count,
+            ids,
+            "{reason}"
+        );
+    }
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT predecessor_session_id FROM agent_sessions WHERE project_id = 'P1' AND id = 'S3'"
+        ),
+        "S1"
+    );
+
+    // 只报告的遗留值：原样转换并计数。
+    assert_eq!(report.observations["O-01 P1/checklist_items"], 2);
+    assert_eq!(report.observations["O-02 P1/blockers"], 1);
+    assert_eq!(report.observations["O-03 P1/work_items"], 1);
+    assert_eq!(
+        q::<String>(
+            &t,
+            "SELECT kind FROM checklist_items WHERE project_id = 'P1' AND id = 'C1'"
+        ),
+        "OPTIONAL"
+    );
+
+    // 复核：对同一组源与这份报告，VERIFY 全部通过。
+    let again = verify_converted(&f.target(), &f.sources, &report).unwrap();
+    assert!(again.failures().is_empty(), "{:?}", again.failures());
+}
+
+/// N-04 的六种情况（NORMALIZATION.md 的表）：目标的 notification.* 行与受影响的键。
+#[test]
+fn n04_merges_notification_settings_like_2x_reads_them() {
+    type Row = (String, String, i64, String);
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str, i64)], &'a [Row], usize);
+    let cases: &[Case] = &[
+        ("neither", &[], &[], 0),
+        (
+            "mode only, valid",
+            &[("notification.mode", "\"CRITICAL\"", 3)],
+            &[(
+                "notification.mode".into(),
+                "\"CRITICAL\"".into(),
+                3,
+                T.into(),
+            )],
+            0,
+        ),
+        (
+            "mode only, invalid",
+            &[("notification.mode", "\"loud\"", 3)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 3, T.into())],
+            1,
+        ),
+        (
+            "enabled false only",
+            &[("notification.enabled", "false", 4)],
+            &[("notification.mode".into(), "\"OFF\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "enabled as string",
+            &[("notification.enabled", "\"false\"", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "enabled not json",
+            &[("notification.enabled", "nope", 4)],
+            &[("notification.mode".into(), "\"ALL\"".into(), 4, T.into())],
+            2,
+        ),
+        (
+            "both, mode valid",
+            &[
+                ("notification.enabled", "false", 4),
+                ("notification.mode", "\"ALL\"", 6),
+            ],
+            &[("notification.mode".into(), "\"ALL\"".into(), 6, T.into())],
+            1,
+        ),
+        (
+            "both, mode invalid",
+            &[
+                ("notification.enabled", "false", 4),
+                ("notification.mode", "7", 6),
+            ],
+            &[("notification.mode".into(), "\"OFF\"".into(), 6, T.into())],
+            2,
+        ),
+    ];
+    for (name, rows, expected, touched) in cases {
+        let f = fixture("legacy-n04");
+        let r = f.registry();
+        for (key, value, version) in *rows {
+            r.execute(
+                "INSERT INTO settings (key, value_json, version, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![key, value, version, T],
+            )
+            .unwrap();
+        }
+        drop(r);
+        let report = f.convert().unwrap_or_else(|e| panic!("{name}: {e}"));
+        let t = Connection::open(f.target()).unwrap();
+        let got: Vec<Row> = t
+            .prepare("SELECT key, value_json, version, updated_at FROM settings WHERE key LIKE 'notification.%' ORDER BY key")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(&got, expected, "{name}");
+        assert_eq!(
+            rule(&report, "N-04@1", "r/settings").count,
+            *touched as i64,
+            "{name}"
+        );
+        assert_eq!(
+            q::<String>(&t, "SELECT value_json FROM settings WHERE key = 'theme'"),
+            "\"dark\""
+        );
+    }
+}
+
+/// VERIFY 独立重算：目标多改一个未登记的值、改错主键、报告记错计数或少一行附件，都失败。
+#[test]
+fn verify_rejects_changes_the_rules_do_not_explain() {
+    let f = rules_fixture("legacy-rules-tamper");
+    let report = f.convert().unwrap();
+    let clean = f.dir.join("out").join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let target_cases: &[(&str, &str, &[&str])] = &[
+        (
+            "claim cleared on a task that is not terminal",
+            "UPDATE work_items SET claimed_by_session_id = NULL WHERE project_id = 'P1' AND id = 'W1'",
+            &["P1/work_items"],
+        ),
+        (
+            "an unregistered column changed next to a registered one",
+            "UPDATE work_items SET assignee_agent_id = NULL WHERE project_id = 'P1' AND id = 'W2'",
+            &["P1/work_items"],
+        ),
+        (
+            "a kept relation dropped",
+            "DELETE FROM work_item_relations WHERE project_id = 'P1' AND relation_type = 'BLOCKS'",
+            &["P1/work_item_relations"],
+        ),
+        (
+            "notification mode rewritten",
+            "INSERT INTO settings (key, value_json, version, updated_at) VALUES ('notification.mode', '\"OFF\"', 0, 'x')",
+            &["r/settings"],
+        ),
+    ];
+    for (name, tamper, expected) in target_cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        t.execute_batch(tamper).unwrap();
+        drop(t);
+        let failures = verify_converted(&f.target(), &f.sources, &report)
+            .unwrap()
+            .failures();
+        assert_eq!(&failures, expected, "{name}");
+    }
+
+    fs::copy(&clean, f.target()).unwrap();
+    let mut miscounted = report.clone();
+    miscounted
+        .normalizations
+        .iter_mut()
+        .find(|n| n.rule == "N-01@1" && n.family == "P1/work_items")
+        .unwrap()
+        .count = 1;
+    let failures = verify_converted(&f.target(), &f.sources, &miscounted)
+        .unwrap()
+        .failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].starts_with("N-01@1 P1/work_items: converted 1 "),
+        "{failures:?}"
+    );
+
+    let mut wrong_keys = report.clone();
+    let n = wrong_keys
+        .normalizations
+        .iter_mut()
+        .find(|n| n.rule == "N-05@1:CROSS_AGENT")
+        .unwrap();
+    n.keys_digest = wrong_keys_digest(&n.keys_digest);
+    let failures = verify_converted(&f.target(), &f.sources, &wrong_keys)
+        .unwrap()
+        .failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].starts_with("N-05@1:CROSS_AGENT P1/agent_sessions"),
+        "{failures:?}"
+    );
+
+    let mut short = report.clone();
+    short.attachment.remove("P1/labels");
+    let failures = verify_converted(&f.target(), &f.sources, &short)
+        .unwrap()
+        .failures();
+    assert_eq!(
+        failures,
+        ["attachment P1/labels: converted 0 rows, verify 1 rows"]
+    );
+
+    let mut unrecorded = report.clone();
+    unrecorded.normalizations.retain(|n| n.rule != "N-04@1");
+    let failures = verify_converted(&f.target(), &f.sources, &unrecorded)
+        .unwrap()
+        .failures();
+    assert_eq!(failures.len(), 1, "{failures:?}");
+    assert!(
+        failures[0].starts_with("N-04@1 r/settings: converted missing"),
+        "{failures:?}"
+    );
+}
+
+/// 摘要换一个同长度的值（模拟「计数相同但主键不同」）。
+fn wrong_keys_digest(d: &str) -> String {
+    let flipped = if d.starts_with('0') { '1' } else { '0' };
+    format!("{flipped}{}", &d[1..])
 }

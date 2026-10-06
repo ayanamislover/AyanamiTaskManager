@@ -1433,7 +1433,7 @@ fn release(
                assignee_agent_id = CASE WHEN status = 'CLAIMED' THEN NULL ELSE assignee_agent_id END,
                phase = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE phase END,
                status = CASE WHEN status = 'CLAIMED' THEN 'READY' ELSE status END,
-               phase_inferred = 0, claimed_by_session_id = NULL, claim_lease_until = NULL,
+               claimed_by_session_id = NULL, claim_lease_until = NULL,
                version = version + 1, updated_at = ?3
              WHERE project_id = ?1 AND id = ?2",
             params![project, id, at],
