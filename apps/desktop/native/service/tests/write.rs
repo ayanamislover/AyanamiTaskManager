@@ -1064,6 +1064,8 @@ fn q02_w106_store_busy_means_nothing_was_committed() {
             idle_checkpoint: Duration::from_secs(3600),
             queue_capacity: 1,
             admit_wait: Duration::from_millis(200),
+            // 占位作业要一直占到断言做完；负载高时默认的 2 秒写预算会先把它判超预算。
+            write_budget: Duration::from_secs(60),
             ..Config::default()
         },
     );

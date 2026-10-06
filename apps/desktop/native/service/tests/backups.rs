@@ -224,6 +224,8 @@ fn backup_store_failures_keep_their_kind() {
         atm_store::Config {
             queue_capacity: 1,
             admit_wait: Duration::from_millis(100),
+            // 占位作业要一直占到断言做完；负载高时默认的 2 秒写预算会先把它判超预算。
+            write_budget: Duration::from_secs(60),
             ..Default::default()
         },
     );
@@ -342,6 +344,14 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
     let w = world("backup-failed-locked-registration");
+    // 占住写线程的作业要等备份做完、文件被锁住才放行；负载高时这段会超过默认的 2 秒写预算。
+    let svc = sibling(
+        &w,
+        atm_store::Config {
+            write_budget: Duration::from_secs(60),
+            ..Default::default()
+        },
+    );
     let root = w.dir.join("backups");
     w.exec(
         "CREATE TRIGGER fail_registration BEFORE INSERT ON backups
@@ -350,8 +360,7 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
     // 先占住写线程，让备份文件做完、停在登记那一笔写之前。
     let (started_tx, started_rx) = channel();
     let (release_tx, release_rx) = channel::<()>();
-    let pending = w
-        .svc
+    let pending = svc
         .store()
         .submit(move |_| {
             started_tx.send(()).unwrap();
@@ -361,7 +370,7 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
         .unwrap();
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let orphan = std::thread::scope(|s| {
-        let worker = s.spawn(|| w.svc.create_manual_backup(&user()));
+        let worker = s.spawn(|| svc.create_manual_backup(&user()));
         let start = Instant::now();
         let dir = loop {
             let found = std::fs::read_dir(&root).ok().and_then(|d| {
@@ -373,7 +382,7 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
                 break dir;
             }
             assert!(
-                start.elapsed() < Duration::from_secs(5),
+                start.elapsed() < Duration::from_secs(60),
                 "backup never reached registration"
             );
             std::thread::sleep(Duration::from_millis(5));
@@ -397,11 +406,11 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
     );
     let id = orphan.file_name().unwrap().to_string_lossy().into_owned();
     assert!(root.join(".creating").join(&id).is_file());
-    let list = w.svc.list_backups(&user(), 200).unwrap();
+    let list = svc.list_backups(&user(), 200).unwrap();
     assert_eq!(list["withdrawals"]["cleanupPending"], 1);
 
     w.exec("DROP TRIGGER fail_registration;");
-    let next = w.svc.create_manual_backup(&user()).unwrap();
+    let next = svc.create_manual_backup(&user()).unwrap();
     assert!(
         !orphan.exists(),
         "the next backup's sweep must remove the failed one"
@@ -413,7 +422,7 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
             .join("atm.sqlite")
             .exists()
     );
-    let list = w.svc.list_backups(&user(), 200).unwrap();
+    let list = svc.list_backups(&user(), 200).unwrap();
     assert_eq!(list["withdrawals"]["cleanupPending"], 0);
 }
 
