@@ -212,6 +212,12 @@ pub struct Report {
     pub attachment: BTreeMap<String, Vec<String>>,
     /// VERIFY 独立重算的规则记录或附件与转换记下的不一致。
     pub rule_mismatches: Vec<String>,
+    /// 业务图的停级违例（05 §3.3）：review 绑定、handoff 检查点、session 与 records 的环、计数器高水位、
+    /// 回执里的序号、status 与 phase 的对应。每条带项目与主键，不含正文。
+    pub graph_violations: Vec<String>,
+    /// 信息项（05 §3.1–§3.3）：不停，只进报告。0015 投影重算不一致、SUPERSEDED 没有 ACTIVE 的替代、
+    /// 知识修订号不连续、晋升的快任务与任务的 source_quick_id 对不上。
+    pub notes: Vec<String>,
 }
 
 /// 一条规范化规则在一个族上的执行记录。
@@ -235,6 +241,7 @@ impl Report {
             .collect();
         out.extend(self.receipt_violations.iter().cloned());
         out.extend(self.rule_mismatches.iter().cloned());
+        out.extend(self.graph_violations.iter().cloned());
         out.extend(self.uncovered());
         out
     }
@@ -369,7 +376,7 @@ impl Report {
         };
         format!(
             "{{\"format\":\"atm-conversion-report\",\"version\":1,\"knowledge\":{},\"families\":[{}],\
-             \"normalizations\":[{}],\"rule_mismatches\":[{}],\"coverage_gaps\":[{}],\
+             \"normalizations\":[{}],\"rule_mismatches\":[{}],\"coverage_gaps\":[{}],\"graph_violations\":[{}],\"notes\":[{}],\
              \"receipts\":{{\"classes\":{{{}}},\"promotion_shaped_agent\":{},\"promotion_status\":{{{}}},\"violations\":[{}]}},\
              \"global_feed\":{{\"orphans\":{},\"mirrors_replayed\":{}}},\"outbox_without_event\":{},\
              \"unresolved_promotions\":{},\"artifact_rows\":{}}}",
@@ -378,6 +385,8 @@ impl Report {
             normalizations.join(","),
             list(&self.rule_mismatches),
             list(&self.uncovered()),
+            list(&self.graph_violations),
+            list(&self.notes),
             map(&self.receipt_classes),
             self.promotion_shaped_agent,
             map(&self.promotion_status),
@@ -917,9 +926,37 @@ fn refuse_real_root(root: &Path, p: &Path) -> Result<()> {
     Ok(())
 }
 
-/// 源库的表集合必须恰好是族表登记的那些（05 §5.1 登记完整性），迁移集合必须是支持的那一组。
+/// 源库的表集合必须恰好是族表登记的那些（05 §5.1 登记完整性），迁移集合必须是支持的那一组；
+/// 源副本本身要过 `quick_check` 与 `foreign_key_check`（05 §3.3，停级：源有违例就停，报告位置）。
 fn check_source(path: &Path, home: Home, migrations: i64) -> Result<()> {
     let c = crate::backup::side_reader(path)?;
+    let quick: Vec<String> = c
+        .prepare("PRAGMA quick_check")
+        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+        .map_err(|e| {
+            ConvertError::Mismatch(format!("{}: source quick_check: {e}", path.display()))
+        })?;
+    if quick != ["ok"] {
+        return Err(ConvertError::Mismatch(format!(
+            "{}: source quick_check: {}",
+            path.display(),
+            quick.join("; ")
+        )));
+    }
+    let dangling: Option<(String, Option<i64>, String)> = c
+        .query_row(
+            "SELECT \"table\", rowid, parent FROM pragma_foreign_key_check ORDER BY 1, 2 LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    if let Some((table, rowid, parent)) = dangling {
+        return Err(ConvertError::Mismatch(format!(
+            "{}: source foreign_key_check: {table} rowid {} -> {parent}",
+            path.display(),
+            rowid.unwrap_or_default()
+        )));
+    }
     let tables = families::tables(home);
     let allowed: HashSet<&str> = tables.iter().map(String::as_str).collect();
     let names: Vec<String> = c
@@ -2235,6 +2272,21 @@ fn expect_global_project(c: &Connection) -> Result<()> {
 }
 
 fn verify_global(c: &Connection, report: &mut Report) -> Result<()> {
+    // 信息项：晋升的快任务解析到的任务，source_quick_id 应当指回它（05 §3.1）。
+    let unmarked: Vec<String> = c
+        .prepare(
+            "SELECT q.id FROM main.quick_tasks q JOIN main.work_items w
+               ON w.project_id = q.promoted_project_id AND w.id = q.promoted_work_item_id
+             WHERE q.status = 'PROMOTED' AND w.source_quick_id IS NOT q.id ORDER BY q.id",
+        )?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if let Some(first) = unmarked.first() {
+        report.notes.push(format!(
+            "r/quick_tasks: {} promoted tasks not marked with source_quick_id, first {first}",
+            unmarked.len()
+        ));
+    }
     let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
     compare(
         c,
@@ -2425,6 +2477,23 @@ fn compare_migrations(
 }
 
 fn verify_knowledge(c: &Connection, report: &mut Report) -> Result<()> {
+    // 信息项：每个条目的修订号从 1 连续到 head_revision（05 §3.2）。
+    let gaps: Vec<String> = c
+        .prepare(
+            "SELECT e.id FROM k.knowledge_entries e
+             WHERE (SELECT count(*) FROM k.knowledge_revisions r WHERE r.entry_id = e.id) <> e.head_revision
+                OR (SELECT min(revision) FROM k.knowledge_revisions r WHERE r.entry_id = e.id) IS NOT 1
+                OR (SELECT max(revision) FROM k.knowledge_revisions r WHERE r.entry_id = e.id) IS NOT e.head_revision
+             ORDER BY e.id",
+        )?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if let Some(first) = gaps.first() {
+        report.notes.push(format!(
+            "k/knowledge_revisions: revisions not contiguous for {} entries, first {first}",
+            gaps.len()
+        ));
+    }
     compare_table(c, report, "k", "knowledge_meta", None)?;
     compare_table(c, report, "k", "knowledge_entries", None)?;
     compare_table(c, report, "k", "knowledge_revisions", None)?;
@@ -2626,7 +2695,8 @@ fn verify_project(c: &Connection, report: &mut Report, re: &mut Recheck) -> Resu
          ORDER BY entity_type, entity_id",
         &[&p],
     )?;
-    verify_search_queries(c, report, p)
+    verify_search_queries(c, report, p)?;
+    verify_graph(c, report, p)
 }
 
 /// 搜索的查询等价（05 §2.5；search_documents 是 X1 REBUILT）。每个实体类型取一份文档（entity_id 最小），
@@ -2735,6 +2805,195 @@ fn verify_search_queries(c: &Connection, report: &mut Report, p: &str) -> Result
     });
     Ok(())
 }
+
+/// 计数器与它分配编号的表（05 §1.4、§3.3）。
+const COUNTERS: &[(&str, &str)] = &[
+    ("objective", "objectives"),
+    ("milestone", "milestones"),
+    ("work_item", "work_items"),
+    ("blocker", "blockers"),
+    ("record", "records"),
+    ("review_request", "review_requests"),
+    ("review_submission", "review_submissions"),
+];
+
+/// 项目的业务图校验（05 §3.3，停级）与信息项。在目标上按 project_id 查（与源逐族相等已由摘要证明），
+/// 0015 投影的重算在源上跑 2.0 的 SQL。违例只写项目、表与主键。
+fn verify_graph(c: &Connection, report: &mut Report, p: &str) -> Result<()> {
+    let ids = |sql: &str| -> Result<Vec<String>> {
+        Ok(c.prepare(sql)?
+            .query_map([p], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    fn stop(report: &mut Report, p: &str, what: &str, found: Vec<String>) {
+        if let Some(first) = found.first() {
+            report
+                .graph_violations
+                .push(format!("{p}/{what}: {} rows, first {first}", found.len()));
+        }
+    }
+    // review：被审任务必须是 REVIEW；父检查项属于父任务。提交引用的记录在同一项目由复合外键保证。
+    stop(
+        report,
+        p,
+        "review_requests.review_work_item",
+        ids("SELECT rr.id FROM review_requests rr
+             JOIN work_items w ON w.project_id = rr.project_id AND w.id = rr.review_work_item_id
+             WHERE rr.project_id = ?1 AND w.type IS NOT 'REVIEW' ORDER BY rr.id")?,
+    );
+    stop(
+        report,
+        p,
+        "review_requests.parent_checklist",
+        ids("SELECT rr.id FROM review_requests rr
+             LEFT JOIN checklist_items ci ON ci.project_id = rr.project_id AND ci.id = rr.parent_checklist_id
+             WHERE rr.project_id = ?1 AND ci.work_item_id IS NOT rr.parent_work_item_id ORDER BY rr.id")?,
+    );
+    // handoff 的检查点不超过项目序号。
+    stop(
+        report,
+        p,
+        "handoffs.checkpoint_sequence",
+        ids(
+            "SELECT h.id FROM handoffs h JOIN projects pr ON pr.id = h.project_id
+             WHERE h.project_id = ?1 AND h.checkpoint_sequence > pr.project_seq ORDER BY h.id",
+        )?,
+    );
+    // parent_session_id 与 supersedes_id 的链不成环（predecessor 的同刻环是 N-05 允许的，不在这里）。
+    for (what, table, link) in [
+        (
+            "agent_sessions.parent_session_id",
+            "agent_sessions",
+            "parent_session_id",
+        ),
+        ("records.supersedes_id", "records", "supersedes_id"),
+    ] {
+        stop(
+            report,
+            p,
+            what,
+            ids(&format!(
+                "WITH RECURSIVE walk(start, cur) AS (
+                   SELECT id, {link} FROM {table} WHERE project_id = ?1 AND {link} IS NOT NULL
+                   UNION
+                   SELECT w.start, t.{link} FROM walk w JOIN {table} t ON t.project_id = ?1 AND t.id = w.cur
+                   WHERE t.{link} IS NOT NULL)
+                 SELECT start FROM walk WHERE cur = start ORDER BY start"
+            ))?,
+        );
+    }
+    // 计数器高水位：表里有编号时，计数器必须存在且大于最大编号。
+    for (name, table) in COUNTERS {
+        let (max, next): (Option<i64>, Option<i64>) = c.query_row(
+            &format!(
+                "SELECT (SELECT max(local_no) FROM {table} WHERE project_id = ?1),
+                        (SELECT next_value FROM counters WHERE project_id = ?1 AND name = ?2)"
+            ),
+            params![p, name],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let Some(max) = max
+            && next.is_none_or(|n| n <= max)
+        {
+            report.graph_violations.push(format!(
+                "{p}/counters.{name}: next_value {} is not above {table} local_no {max}",
+                next.map_or("missing".to_string(), |n| n.to_string())
+            ));
+        }
+    }
+    // 回执里出现的事件序号不超过项目序号。
+    stop(
+        report,
+        p,
+        "idempotency_keys.sequence",
+        // 回执原文不一定是合法 JSON（2.x 只保证 json_valid，且原始 NUL 会骗过它）：不合法的按空数组展开。
+        ids("SELECT DISTINCT r.legacy_key FROM idempotency_receipts r,
+                  json_tree(CASE WHEN instr(CAST(r.receipt_json AS BLOB), x'00') = 0 AND json_valid(r.receipt_json)
+                                 THEN r.receipt_json ELSE '[]' END) t
+             WHERE r.scope_kind = 'PROJECT' AND r.scope_id = ?1
+               AND t.key = 'sequence' AND t.type = 'integer'
+               AND t.atom > (SELECT project_seq FROM projects WHERE id = ?1)
+             ORDER BY 1")?,
+    );
+    // status 与 (phase, waiting_on)：等待中的 status 对应 waiting_on，phase 仍是未结束的阶段；
+    // 其余 status 等于 phase，waiting_on 为空（2.0 work-item-lifecycle-commands.ts 的写法）。
+    stop(
+        report,
+        p,
+        "work_items.status",
+        ids("SELECT id FROM work_items WHERE project_id = ?1 AND NOT (
+               (status = 'WAITING_USER' AND waiting_on IS 'USER' AND phase NOT IN ('DONE', 'CANCELLED'))
+               OR (status = 'WAITING_AGENT' AND waiting_on IS 'AGENT' AND phase NOT IN ('DONE', 'CANCELLED'))
+               OR (status NOT IN ('WAITING_USER', 'WAITING_AGENT') AND status = phase AND waiting_on IS NULL))
+             ORDER BY id")?,
+    );
+
+    // 信息项：0015 的派生列按 2.0 的 SQL 在源上重算（project/0015:9-82），不一致只记报告。
+    let drift = c
+        .prepare(&format!(
+            "SELECT id FROM (SELECT w.id, w.ever_claimed_at, w.last_started_at, w.last_session_closed_at, w.last_evidence_at,
+                                    {PROJECTION_0015}
+                             FROM p.work_items w)
+             WHERE ever_claimed_at IS NOT e_ever OR last_started_at IS NOT e_started
+                OR last_session_closed_at IS NOT e_closed OR last_evidence_at IS NOT e_evidence
+             ORDER BY id"
+        ))?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if let Some(first) = drift.first() {
+        report.notes.push(format!(
+            "{p}/work_items: 0015 projection differs on {} rows, first {first}",
+            drift.len()
+        ));
+    }
+    let lonely = ids(
+        "SELECT id FROM records r WHERE project_id = ?1 AND status = 'SUPERSEDED'
+                      AND NOT EXISTS (SELECT 1 FROM records n WHERE n.project_id = r.project_id
+                                      AND n.supersedes_id = r.id AND n.status = 'ACTIVE')
+                      ORDER BY id",
+    )?;
+    if let Some(first) = lonely.first() {
+        report.notes.push(format!(
+            "{p}/records: {} SUPERSEDED without an ACTIVE successor, first {first}",
+            lonely.len()
+        ));
+    }
+    Ok(())
+}
+
+/// 2.0 迁移 0015 的四个派生列表达式（`migrations/project/0015_reconciliation_projection.sql:9-82`），
+/// 以 `w` 为当前任务、在源库 `p` 上求值，列名 e_ever / e_started / e_closed / e_evidence。
+const PROJECTION_0015: &str = "
+    COALESCE((SELECT MIN(event.created_at) FROM p.events event
+              WHERE event.aggregate_type = 'WORK_ITEM' AND event.aggregate_id = w.id
+                AND event.type IN ('work.claimed', 'work.started')), w.started_at) AS e_ever,
+    COALESCE((SELECT MAX(event.created_at) FROM p.events event
+              WHERE event.aggregate_type = 'WORK_ITEM' AND event.aggregate_id = w.id
+                AND event.type = 'work.started'), w.started_at) AS e_started,
+    (SELECT MAX(session.closed_at) FROM p.events event
+       JOIN p.agent_sessions session ON session.id = event.session_id
+     WHERE event.aggregate_type = 'WORK_ITEM' AND event.aggregate_id = w.id
+       AND event.type IN ('work.claimed', 'work.started') AND session.closed_at IS NOT NULL) AS e_closed,
+    (SELECT MAX(candidate.at) FROM (
+       SELECT progress.created_at AS at FROM p.progress_updates progress
+       WHERE progress.work_item_id = w.id AND COALESCE(json_array_length(progress.evidence_json), 0) > 0
+       UNION ALL
+       SELECT checklist.updated_at AS at FROM p.checklist_items checklist
+       WHERE checklist.work_item_id = w.id AND COALESCE(json_array_length(checklist.evidence_json), 0) > 0
+       UNION ALL
+       SELECT submission.created_at AS at FROM p.review_submissions submission
+         JOIN p.review_requests request ON request.id = submission.request_id
+       WHERE (request.review_work_item_id = w.id OR request.parent_work_item_id = w.id)
+         AND COALESCE(json_array_length(submission.evidence_json), 0) > 0
+       UNION ALL
+       SELECT project_update.created_at AS at FROM p.project_updates project_update
+         JOIN json_each(CASE WHEN json_valid(project_update.completed_json) THEN project_update.completed_json ELSE '[]' END) completed
+       WHERE project_update.status = 'PUBLISHED'
+         AND COALESCE(json_array_length(project_update.evidence_json), 0) > 0
+         AND json_type(CASE WHEN completed.type = 'object' THEN completed.value ELSE '{}' END, '$.workItemKey') = 'text'
+         AND json_extract(CASE WHEN completed.type = 'object' THEN completed.value ELSE '{}' END, '$.workItemKey') =
+             (SELECT meta.project_code || '-T-' || printf('%04d', w.local_no) FROM p.project_meta meta WHERE meta.singleton = 1)
+     ) candidate) AS e_evidence";
 
 // ===== VERIFY：规范化规则的独立重算（store/NORMALIZATION.md）=====
 // 这里的 SQL 与转换写入的那一份分开写：同一条规则由两段代码各自表述，互相核对。

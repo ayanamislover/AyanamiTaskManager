@@ -167,8 +167,8 @@ fn fixture(name: &str) -> Fixture {
              INSERT INTO agents (id, display_name, client_kind, created_at, updated_at) VALUES ('claude', 'Claude', 'cli', '{T}', '{T}');
              INSERT INTO agent_sessions (id, agent_id, role, work_state, connection_state, started_at, updated_at)
                VALUES ('S1', 'claude', 'PRIMARY', 'WORKING', 'ONLINE', '{T}', '{T}');
-             INSERT INTO work_items (id, local_no, objective_id, type, title, status, priority, claimed_by_session_id, created_at, updated_at)
-               VALUES ('W1', 1, 'OBJ', 'TASK', 'shared title words', 'IN_PROGRESS', 'NORMAL', 'S1', '{T}', '{T}');
+             INSERT INTO work_items (id, local_no, objective_id, type, title, status, phase, priority, claimed_by_session_id, created_at, updated_at)
+               VALUES ('W1', 1, 'OBJ', 'TASK', 'shared title words', 'IN_PROGRESS', 'IN_PROGRESS', 'NORMAL', 'S1', '{T}', '{T}');
              INSERT INTO handoffs (id, work_item_id, from_session_id, to_agent_id, summary, next_action, created_at)
                VALUES ('H1', 'W1', 'S1', 'claude', 'sum', 'next', '{T}');
              INSERT INTO search_documents (entity_type, entity_id, entity_key, title, body, updated_at)
@@ -1078,6 +1078,7 @@ fn rules_fixture(name: &str) -> Fixture {
                 '2026-09-10', 'STATUS', 7, '{T}', '{T}'),
                ('W3', 3, 'OBJ', 'TASK', 'cancelled, lease only', 'CANCELLED', 'NORMAL', NULL, NULL, '{T2}', NULL, 0,
                 NULL, 'NONE', 2, '{T}', '{T}');
+             UPDATE work_items SET phase = status WHERE id IN ('W2', 'W3');
              INSERT INTO work_item_relations (source_id, target_id, relation_type, created_at) VALUES
                ('W1', 'W2', 'BLOCKS', '{T}'), ('W1', 'W3', 'RELATES', '{T}'), ('W2', 'W3', 'DUPLICATES', '{T}'),
                ('W3', 'W1', 'DISCOVERED_FROM', '{T}');
@@ -2125,4 +2126,301 @@ fn verify_checks_the_lineage_time_domain_on_its_own() {
         let report = f.convert().unwrap_or_else(|e| panic!("{ok}: {e}"));
         assert!(report.failures().is_empty(), "{ok}");
     }
+}
+
+/// W3b2：在规则夹具上补齐其余 DB 族，使 05 §1 的每张表都有行（项目 settings 按规定为空）。
+/// review 三类（APPROVED / CHANGES_REQUESTED / 未提交）、records 的 supersedes 链、合法的等待中任务、
+/// 父 session、handoff 检查点、附件行、两张工程指标表、恢复申请、投影状态，以及一个 TRASHED 项目。
+fn rich_fixture(name: &str) -> Fixture {
+    let mut f = rules_fixture(name);
+    f.project(0)
+        .execute_batch(&format!(
+            "UPDATE counters SET next_value = 7 WHERE name = 'work_item';
+             INSERT INTO counters (name, next_value) VALUES ('milestone', 2), ('record', 5);
+             UPDATE counters SET next_value = 4 WHERE name = 'review_request';
+             UPDATE counters SET next_value = 3 WHERE name = 'review_submission';
+             INSERT INTO milestones (id, local_no, objective_id, title, status, weight, created_at, updated_at)
+               VALUES ('M1', 1, 'OBJ', 'first cut', 'ACTIVE', 2.5, '{T}', '{T}');
+             INSERT INTO work_items (id, local_no, objective_id, milestone_id, type, title, status, phase, waiting_on,
+                                     waiting_for, priority, created_at, updated_at) VALUES
+               ('W4', 4, 'OBJ', 'M1', 'REVIEW', 'review acceptance', 'DONE', 'DONE', NULL, NULL, 'NORMAL', '{T}', '{T}'),
+               ('W5', 5, 'OBJ', NULL, 'REVIEW', 'review verification', 'DONE', 'DONE', NULL, NULL, 'NORMAL', '{T}', '{T}'),
+               ('W6', 6, 'OBJ', NULL, 'REVIEW', 'review optional', 'WAITING_USER', 'CLAIMED', 'USER', 'a reply',
+                'NORMAL', '{T}', '{T}');
+             INSERT INTO checklist_items (id, work_item_id, title, kind, status, created_at, updated_at)
+               VALUES ('C6', 'W2', 'done step', 'ACCEPTANCE', 'DONE', '{T}', '{T}');
+             INSERT INTO records (id, local_no, kind, title, summary, importance, status, supersedes_id, actor, created_at, updated_at)
+               VALUES ('D1', 1, 'VERIFICATION', 'approved', 's', 'NORMAL', 'ACTIVE', NULL, 'codex', '{T}', '{T}'),
+                      ('D2', 2, 'VERIFICATION', 'changes', 's', 'NORMAL', 'ACTIVE', NULL, 'codex', '{T}', '{T}'),
+                      ('D4', 4, 'DECISION', 'old call', 's', 'HIGH', 'SUPERSEDED', NULL, 'USER', '{T}', '{T}'),
+                      ('D3', 3, 'DECISION', 'new call', 's', 'HIGH', 'ACTIVE', 'D4', 'USER', '{T}', '{T}');
+             INSERT INTO review_requests (id, local_no, review_work_item_id, parent_work_item_id, parent_checklist_id,
+                                          parent_checklist_version, expected_candidate_hashes_json, created_by_agent_id,
+                                          created_by_session_id, created_at, op_id) VALUES
+               ('RR1', 1, 'W4', 'W1', 'C2', 0, '[]', 'claude', 'S1', '{T}', 'rr1'),
+               ('RR2', 2, 'W5', 'W1', 'C3', 0, '[]', 'claude', 'S1', '{T}', 'rr2'),
+               ('RR3', 3, 'W6', 'W1', 'C4', 0, '[]', 'claude', 'S1', '{T}', 'rr3');
+             INSERT INTO review_submissions (id, local_no, request_id, verdict, reviewed_hashes_json, evidence_json, record_id,
+                                             reviewer_agent_id, reviewer_session_id, review_task_version,
+                                             parent_checklist_version, created_at, op_id) VALUES
+               ('RS1', 1, 'RR1', 'APPROVED', '[]', '[]', 'D1', 'codex', 'S3', 1, 0, '{T}', 'rs1'),
+               ('RS2', 2, 'RR2', 'CHANGES_REQUESTED', '[]', '[]', 'D2', 'codex', 'S3', 1, 0, '{T}', 'rs2');
+             INSERT INTO progress_updates (id, work_item_id, percent, progress_bucket, summary, summary_hash, actor, created_at)
+               VALUES ('PU1', 'W1', 37.5, 30, 'halfway-ish', 'h', 'claude', '{T}');
+             INSERT INTO project_updates (id, health, summary, from_sequence, to_sequence, status, actor, published_at,
+                                          created_at, updated_at)
+               VALUES ('PJ1', 'ON_TRACK', 'weekly', 1, 4, 'PUBLISHED', 'USER', '{T}', '{T}', '{T}');
+             INSERT INTO artifacts (id, work_item_id, kind, name, local_path, sha256, size_bytes, actor, created_at)
+               VALUES ('A1', 'W1', 'FILE', 'notes.txt', 'C:/old/projects/P1/artifacts/notes.txt', 'ab', 3, 'USER', '{T}');
+             INSERT INTO engineering_project_metrics (id, git_head, captured_at, payload_json)
+               VALUES ('EM1', 'abc123', '{T}', '{{}}');
+             INSERT INTO engineering_work_item_metrics (work_item_id, baseline_ref, baseline_captured_at, payload_json,
+                                                        captured_at, updated_at)
+               VALUES ('W1', 'abc123', '{T}', NULL, NULL, '{T}');
+             UPDATE agent_sessions SET parent_session_id = 'S1' WHERE id = 'S4';
+             UPDATE handoffs SET checkpoint_sequence = 2 WHERE id = 'H1';"
+        ))
+        .unwrap();
+    // TRASHED 项目：库在，内容最少。
+    let p3 = f.dir.join("P3.sqlite");
+    let c = legacy(&p3, "project");
+    c.execute_batch(&format!(
+        "INSERT INTO project_meta (singleton, project_id, project_code, name, description, lifecycle, coordination_mode, health,
+                                   current_sequence, schema_version, version, created_at, updated_at)
+           VALUES (1, 'P3', 'CCC', 'Charlie', '', 'TRASHED', 'AUTO', 'UNKNOWN', 0, 18, 1, '{T}', '{T}');"
+    ))
+    .unwrap();
+    drop(c);
+    f.sources.projects.push(p3);
+    f.registry()
+        .execute_batch(&format!(
+            "INSERT INTO projects (id, code, name, description, lifecycle, coordination_mode, version, created_at, updated_at)
+               VALUES ('P3', 'CCC', 'Charlie', '', 'TRASHED', 'AUTO', 2, '{T}', '{T2}');
+             INSERT INTO project_restore_requests (id, project_id, requested_by, source_cwd, status, request_count,
+                                                   created_at, updated_at)
+               VALUES ('RQ1', 'P3', 'claude', 'c:/work/charlie', 'PENDING', 3, '{T}', '{T2}');
+             INSERT INTO project_projection_state (project_id, source_sequence, projected_sequence, status, updated_at)
+               VALUES ('P1', 4, 4, 'APPLIED', '{T}'), ('P2', 4, 2, 'DEFERRED', '{T}');"
+        ))
+        .unwrap();
+    f
+}
+
+fn home_of(scope: &str) -> Home {
+    match scope {
+        "r" => Home::Registry,
+        "k" => Home::Knowledge,
+        _ => Home::Project,
+    }
+}
+
+/// W3b2：每个 DB 族在夹具里都有行（项目 settings 除外，它必须为空），逐族比对全部相等，
+/// 业务图校验没有违例，信息项只有夹具刻意留下的那一条。
+#[test]
+fn every_db_family_has_rows_in_the_rich_fixture_and_matches() {
+    let f = rich_fixture("legacy-rich");
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert!(report.graph_violations.is_empty());
+    for spec in FAMILIES
+        .iter()
+        .filter(|f| matches!(f.home, Home::Registry | Home::Knowledge | Home::Project))
+    {
+        let rows: i64 = report
+            .sources
+            .iter()
+            .filter(|s| s.spec == spec.name && spec.home == home_of(&s.scope))
+            .map(|s| s.rows)
+            .sum();
+        if spec.home == Home::Project && spec.name == "settings" {
+            assert_eq!(rows, 0, "project settings must be empty");
+        } else {
+            assert!(
+                rows > 0,
+                "{} {} has no rows in the fixture",
+                spec.code,
+                spec.name
+            );
+        }
+    }
+    // 基础夹具里的 Q1 晋升到 W1，但 W1 没有 source_quick_id：信息项，不停。
+    assert_eq!(
+        report.notes,
+        ["r/quick_tasks: 1 promoted tasks not marked with source_quick_id, first Q1"]
+    );
+    let t = Connection::open(f.target()).unwrap();
+    assert_eq!(
+        q::<String>(&t, "SELECT lifecycle FROM projects WHERE id = 'P3'"),
+        "TRASHED"
+    );
+}
+
+/// W3b2：05 §3.3 的停级校验。每一类违例都让转换失败，并点名项目、表与主键；阳性对照是上面的富夹具。
+#[test]
+fn business_graph_violations_stop_the_conversion() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "review task is not a review",
+            "UPDATE work_items SET type = 'TASK' WHERE id = 'W4'",
+            "P1/review_requests.review_work_item: 1 rows, first RR1",
+        ),
+        (
+            "parent checklist belongs to another task",
+            "UPDATE review_requests SET parent_checklist_id = 'C6' WHERE id = 'RR2'",
+            "P1/review_requests.parent_checklist: 1 rows, first RR2",
+        ),
+        (
+            "handoff checkpoint beyond the project sequence",
+            "UPDATE handoffs SET checkpoint_sequence = 99 WHERE id = 'H1'",
+            "P1/handoffs.checkpoint_sequence: 1 rows, first H1",
+        ),
+        (
+            "parent sessions form a cycle",
+            "UPDATE agent_sessions SET parent_session_id = 'S4' WHERE id = 'S1'",
+            "P1/agent_sessions.parent_session_id: 2 rows, first S1",
+        ),
+        (
+            "supersedes chain forms a cycle",
+            "UPDATE records SET supersedes_id = 'D3' WHERE id = 'D4'",
+            "P1/records.supersedes_id: 2 rows, first D3",
+        ),
+        (
+            "counter below its highest number",
+            "UPDATE counters SET next_value = 4 WHERE name = 'record'",
+            "P1/counters.record: next_value 4 is not above records local_no 4",
+        ),
+        (
+            "counter missing",
+            "DELETE FROM counters WHERE name = 'review_submission'",
+            "P1/counters.review_submission: next_value missing is not above review_submissions local_no 2",
+        ),
+        (
+            "receipt names a sequence beyond the project",
+            r#"INSERT INTO idempotency_keys (key, operation, request_fingerprint, response_json, created_at, op_id, actor_session_id)
+               VALUES ('USER:late', 'work.update', 'fp', '{"event":{"sequence":9}}', '2026-09-01T00:00:00.000Z', 'late', 'USER')"#,
+            "P1/idempotency_keys.sequence: 1 rows, first USER:late",
+        ),
+        (
+            "status disagrees with phase",
+            "UPDATE work_items SET phase = 'READY' WHERE id = 'W1'",
+            "P1/work_items.status: 1 rows, first W1",
+        ),
+        (
+            "waiting on the wrong party",
+            "UPDATE work_items SET waiting_on = 'AGENT' WHERE id = 'W6'",
+            "P1/work_items.status: 1 rows, first W6",
+        ),
+        (
+            "waiting after the task ended",
+            "UPDATE work_items SET phase = 'DONE' WHERE id = 'W6'",
+            "P1/work_items.status: 1 rows, first W6",
+        ),
+    ];
+    for (name, tamper, expected) in cases {
+        let f = rich_fixture("legacy-graph");
+        f.project(0).execute_batch(tamper).unwrap();
+        match f.convert() {
+            Err(ConvertError::Verify(r)) => {
+                assert_eq!(r.graph_violations, [expected.to_string()], "{name}");
+                assert_eq!(r.failures(), [expected.to_string()], "{name}");
+            }
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+}
+
+/// W3b2：源副本先过 quick_check 与 foreign_key_check，违例在动目标之前就停，并点名位置。
+#[test]
+fn a_damaged_source_copy_is_refused_before_conversion() {
+    // 悬空引用：2.x 不开外键时写得进去。
+    let f = rich_fixture("legacy-source-fk");
+    f.project(0)
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO handoffs (id, work_item_id, from_session_id, to_agent_id, summary, next_action, created_at)
+             VALUES ('H9', 'GONE', 'S1', 'claude', 's', 'n', '2026-09-01T00:00:00.000Z');",
+        )
+        .unwrap();
+    match f.convert() {
+        Err(ConvertError::Mismatch(m)) => {
+            assert!(
+                m.contains("source foreign_key_check: handoffs rowid"),
+                "{m}"
+            );
+            assert!(m.contains("-> work_items"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        !f.target().exists(),
+        "nothing is written for a refused source"
+    );
+
+    // 页损坏：把 objectives 根页的页类型字节改坏。
+    let f = rich_fixture("legacy-source-corrupt");
+    let path = f.sources.projects[1].clone();
+    let (root, page): (i64, i64) = {
+        let c = Connection::open(&path).unwrap();
+        (
+            q(
+                &c,
+                "SELECT rootpage FROM sqlite_master WHERE name = 'objectives'",
+            ),
+            q(&c, "PRAGMA page_size"),
+        )
+    };
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[((root - 1) * page) as usize] = 0x07;
+    fs::write(&path, bytes).unwrap();
+    match f.convert() {
+        Err(ConvertError::Mismatch(m)) => assert!(m.contains("source quick_check"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+
+    // quick_check 能读完、但报出问题（这里是文件头的空闲页计数不对）：同样停，并带上它的诊断。
+    let f = rich_fixture("legacy-source-freelist");
+    let path = f.sources.projects[0].clone();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[36..40].copy_from_slice(&5u32.to_be_bytes());
+    fs::write(&path, bytes).unwrap();
+    match f.convert() {
+        Err(ConvertError::Mismatch(m)) => {
+            assert!(m.contains("source quick_check: *** in database main ***"), "{m}");
+            assert!(m.contains("Freelist"), "{m}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// W3b2：信息项不停，只进报告：0015 投影重算不一致、SUPERSEDED 没有 ACTIVE 的替代、知识修订号不连续。
+#[test]
+fn informational_findings_are_reported_without_stopping() {
+    let f = rich_fixture("legacy-notes");
+    f.project(0)
+        .execute_batch(
+            "UPDATE work_items SET ever_claimed_at = '2026-01-01T00:00:00.000Z' WHERE id = 'W5';
+             UPDATE records SET status = 'RETRACTED' WHERE id = 'D3';",
+        )
+        .unwrap();
+    Connection::open(f.sources.knowledge.as_ref().unwrap())
+        .unwrap()
+        .execute_batch(
+            "DROP TRIGGER knowledge_revisions_no_delete;
+             DELETE FROM knowledge_revisions WHERE entry_id = 'K1' AND revision = 1;",
+        )
+        .unwrap();
+    let report = f.convert().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    assert_eq!(
+        report.notes,
+        [
+            "k/knowledge_revisions: revisions not contiguous for 1 entries, first K1",
+            "P1/work_items: 0015 projection differs on 1 rows, first W5",
+            "P1/records: 1 SUPERSEDED without an ACTIVE successor, first D4",
+            "r/quick_tasks: 1 promoted tasks not marked with source_quick_id, first Q1",
+        ]
+    );
+    let json: serde_json::Value = serde_json::from_str(&report.report_json()).unwrap();
+    assert_eq!(json["notes"].as_array().unwrap().len(), 4);
+    assert!(json["graph_violations"].as_array().unwrap().is_empty());
 }

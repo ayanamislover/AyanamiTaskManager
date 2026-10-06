@@ -30,6 +30,24 @@
   - 其余 X1 派生表只记源摘要。
 - **源摘要**：每个 DB 族实例的主源表，全部列按主键排序，算 05 §5.1 的 `D(t)`（`Report::sources`），舍弃和重建的族也算。`business_digest` 用同一种摘要。
 
+## 源副本与业务图（05 §3.3；W3b2）
+
+- **源副本先过两项检查**（`check_source`，在写目标之前）：`PRAGMA quick_check` 必须是 `ok`；`foreign_key_check` 必须为空。违例时转换以 `Mismatch` 停下，并点名源文件、表、rowid 与父表。
+- **业务图停级校验**（VERIFY，`Report::graph_violations`，计入 `failures()`）。在目标上按 project_id 查。源与目标逐族相等已经由摘要证明，所以在目标上查等于在源上查。每条写成 `<pid>/<表>.<方面>: <n> rows, first <主键>`：
+  - `review_requests.review_work_item`：被审任务的 type 必须是 `REVIEW`；
+  - `review_requests.parent_checklist`：父检查项属于父任务。提交引用的记录在同一项目，由目标的复合外键 `(project_id, record_id)` 保证，源上的悬空引用由 `foreign_key_check` 拦下；
+  - `handoffs.checkpoint_sequence`：不超过项目序号；
+  - `agent_sessions.parent_session_id`、`records.supersedes_id`：链不成环。`predecessor_session_id` 的同刻环是 N-05 允许的，不在这里查。
+  - `counters.<名字>`：七个计数器在表里有编号时必须存在，并且大于最大编号；
+  - `idempotency_keys.sequence`：回执 JSON 里任何键为 `sequence` 的整数不超过项目序号。不是合法 JSON 的回执按空数组展开。
+  - `work_items.status`：等待中的 status（`WAITING_USER` / `WAITING_AGENT`）对应同名的 `waiting_on`，phase 不是 DONE / CANCELLED。其余 status 等于 phase，并且 `waiting_on` 为空。依据是 2.0 `work-item-lifecycle-commands.ts` 的写法：wait 不改 phase，其余操作同时写两列并清空 waiting_on。
+- **信息项**（`Report::notes`，不停）：
+  - 0015 的四个派生列按 2.0 的 SQL 在源上重算，结果不一致；
+  - `SUPERSEDED` 记录没有 ACTIVE 的替代；
+  - 知识修订号没有从 1 连续到 head；
+  - 晋升的快任务解析到的任务，`source_quick_id` 没有指回它。
+- 夹具 `rich_fixture` 让 05 §1 的每个 DB 族都有行（项目 settings 必须为空），包括 review 的三类（APPROVED、CHANGES_REQUESTED、未提交）和一个 TRASHED 项目。每项停级校验各有一个失败用例。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。
@@ -46,7 +64,7 @@
       "checks": [ { "name": str, "result": "PASS"|"FAIL", "errors": n, "first_failure_locator": str|null } ] }
   ],
   "normalizations": [ { "rule": "N-05@1", "reason": "SAME_INSTANT"|null, "family": str, "count": n, "keys_digest": hex } ],
-  "rule_mismatches": [str], "coverage_gaps": [str],
+  "rule_mismatches": [str], "coverage_gaps": [str], "graph_violations": [str], "notes": [str],
   "receipts": { "classes": {…}, "promotion_shaped_agent": n, "promotion_status": {…}, "violations": [str] },
   "global_feed": { "orphans": n, "mirrors_replayed": n },
   "outbox_without_event": n, "unresolved_promotions": n, "artifact_rows": n
