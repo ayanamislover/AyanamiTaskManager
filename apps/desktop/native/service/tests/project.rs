@@ -523,6 +523,11 @@ fn l003_l004_trashed_begin_registers_a_restore_request() {
     assert_eq!(e.details["quick"]["action"], "do_not_bypass");
     let e = hit("codex", r"r:\TRASH\", false);
     assert_eq!(e.details["recovery"]["request_count"], 2);
+    // 落库的计数与回给 Agent 的一致（不只是返回值算对）。
+    assert_eq!(
+        w.count("SELECT request_count FROM project_restore_requests"),
+        2
+    );
     assert_eq!(
         w.scalar("SELECT requested_by || '|' || source_cwd FROM project_restore_requests"),
         r"codex|r:\TRASH\"
