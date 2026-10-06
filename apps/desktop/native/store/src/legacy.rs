@@ -165,6 +165,9 @@ pub struct ConvertOptions<'a> {
     /// 按「舍弃」处理——项目进回收站且没有数据，原库登记进 `legacy_backups`（`UNCONVERTIBLE_PROJECT`）。
     /// 点名的项目码没有对应的 MIGRATION_FAILED 项目时转换停（不让拼错的码被悄悄忽略）。
     pub accept_unconvertible: &'a [&'a str],
+    /// 原始数据根（W3d）：`src.root` 是 SNAPSHOT 复制出的快照时，登记与改写的路径（备份、附件的 `local_path`、
+    /// CREATING 落定的 `db_path`）仍指向原始根；X 类的备份不进快照，直接在原始根里只读登记。`None` 时就是 `src.root`。
+    pub origin_root: Option<&'a Path>,
 }
 
 /// 密文在动目标之前自检：解不开说明换了 Windows 账户或机器，手机配对要重做，由用户决定（05 §3.4）。
@@ -280,6 +283,8 @@ pub struct Report {
     pub settlements: Vec<Settlement>,
     /// 用户点名舍弃的项目码（[`ConvertOptions::accept_unconvertible`]），独立 VERIFY 按它重做落定。
     pub accepted_unconvertible: Vec<String>,
+    /// 原始数据根（[`ConvertOptions::origin_root`]），独立 VERIFY 按它重做落定。
+    pub origin_root: Option<PathBuf>,
 }
 
 /// 一项落定：范围（`k` 或项目 id）、落定前后的状态与依据。
@@ -346,6 +351,11 @@ impl Report {
                     .then(|| (format!("{}/{}", s.scope, s.spec), s.digest.clone()))
             })
             .collect()
+    }
+
+    /// 登记路径用的根：给了原始根就是它，否则是读取用的根。
+    pub(crate) fn origin<'a>(&'a self, root: &'a Path) -> &'a Path {
+        self.origin_root.as_deref().unwrap_or(root)
     }
 
     /// 一个族为什么还没处理：尚未实现的子任务，或文件族没给数据根。
@@ -987,9 +997,12 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
             .map(Path::to_path_buf)
             .or_else(real_data_root);
         if let Some(root) = root {
+            let origin = opts.origin_root.map(Path::to_path_buf);
             for p in std::iter::once(&src.registry)
                 .chain(src.knowledge.iter())
                 .chain(src.projects.iter())
+                .chain(src.root.iter())
+                .chain(origin.iter())
             {
                 refuse_real_root(&root, p)?;
             }
@@ -1004,6 +1017,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
             .iter()
             .map(|c| c.to_string())
             .collect(),
+        origin_root: opts.origin_root.map(Path::to_path_buf),
         ..Report::default()
     };
     // 数据根：未登记的条目、非空的 trash、进行中的事务残留，在动目标之前就停（W3b4）。
@@ -2501,6 +2515,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
         normalizations: conversion.normalizations.clone(),
         attachment: conversion.attachment.clone(),
         accepted_unconvertible: conversion.accepted_unconvertible.clone(),
+        origin_root: conversion.origin_root.clone(),
         ..Report::default()
     };
     if let Some(root) = &src.root {
@@ -2533,6 +2548,48 @@ pub fn business_digest(
     let r = convert(src, &dir.join("atm.sqlite"), opts).map(|r| r.business_digest());
     let _ = std::fs::remove_dir_all(&dir);
     r
+}
+
+/// 07 §3 SNAPSHOT 要复制的文件（05 §4.2）：§5.2「纳入」的族的文件，加上 §4.1 落定要读的残留件；
+/// 以 `/` 分隔的相对路径，按路径排序。先按数据根枚举一遍（未登记的条目、超出接受域的文件在这里就停）。
+///
+/// - 三类库（含 `-wal` / `-shm`）、知识库目录里的恢复残留、项目目录（库、manifest、附件、回滚件、
+///   `.creating-*` / `.restore-*` 暂存）；
+/// - `sync\config.json`、`sync\secrets.dpapi.json`，`dispatch\` 的三个 JSON 与非运行中的 run 的日志；
+/// - 知识恢复日志在时，它点名的 `before-restore-<id>.sqlite`（落定可能把它当现库）。
+///
+/// 不复制：备份（X7，原地只读登记）、运行中的 run 的日志（子进程还在写）、其余 R / X 类。
+pub fn snapshot_files(root: &Path, at: &str) -> Result<Vec<String>> {
+    let mut report = Report::default();
+    root::scan(root, at, &mut report)?;
+    let loaded = jsonfiles::load(root, at)?;
+    let running: HashSet<String> = jsonfiles::classify_logs(root, &loaded)?
+        .running
+        .into_iter()
+        .map(|f| f.0)
+        .collect();
+    let journal = settle::knowledge(root)?.journal.map(|(id, _)| id);
+    let keep = |rel: &str| -> bool {
+        let parts: Vec<&str> = rel.split('/').collect();
+        match parts.as_slice() {
+            ["registry" | "knowledge", ..] => true,
+            ["projects", _, "backups", ..] => false,
+            ["projects", ..] => true,
+            ["sync", "config.json" | "secrets.dpapi.json"] => true,
+            ["dispatch", "config.json" | "runs.json" | "requests.json"] => true,
+            ["dispatch", "logs", name] => !running.contains(*name),
+            ["backups", "knowledge", name] => journal.as_ref().is_some_and(|id| {
+                let db = format!("before-restore-{id}.sqlite");
+                *name == db || *name == format!("{db}-wal")
+            }),
+            _ => false,
+        }
+    };
+    Ok(root::walk(root)?
+        .into_iter()
+        .map(|f| f.0)
+        .filter(|rel| keep(rel))
+        .collect())
 }
 
 /// VERIFY 从源独立重算的规则记录与附件。

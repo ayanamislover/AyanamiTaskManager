@@ -201,6 +201,8 @@ pub(super) fn projects(
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    // CREATING 的 db_path 写原始根里的路径（2.0 写的是数据根里的绝对路径）。
+    let origin = report.origin(root).to_path_buf();
     let mut settle =
         |id: &str, was: &str, now: &str, how: String, db_path: Option<&Path>| -> Result<()> {
             match db_path {
@@ -231,7 +233,7 @@ pub(super) fn projects(
                     "CREATING",
                     "ACTIVE",
                     "the database passed quick_check".into(),
-                    Some(&current),
+                    Some(&origin.join("projects").join(&row.id).join("project.sqlite")),
                 )?;
                 by_id.insert(row.id.clone(), current);
             } else {

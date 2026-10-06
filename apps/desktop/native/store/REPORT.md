@@ -8,7 +8,7 @@
 - **每张 2.x 表恰好归一个族**。FTS 的影子表（`_config/_content/_data/_docsize/_idx`）随主表归族。转换入口的登记完整性检查（`prepare_source`，在工作副本上）也用这张表，所以族表里少登记一张表，转换就拒绝这个源（`UnknownTable`）。
 - **decision**：`CONVERTED`（逐行或逐文件进新库）、`REBUILT`（派生数据，在新库重建，查询等价）、`DROPPED`（不进新库，`drop_reason` 写理由）、`REFERENCED`（不复制，只登记引用）。
 - **business_digest**：是否纳入回滚检测（05 §5.2「纳入」列）。X 类和 F7 不纳入。
-- **pending**：W3b6 之后族表里没有未实现的族；不按数据根输入时，数据根下的文件族都算 pending（`needs the data root`）。不按数据根输入时，数据根下的文件族也都算 pending。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**。
+- **pending**：W3b6 之后族表里没有未实现的族；不按数据根输入时，数据根下的文件族都算 pending（`needs the data root`）。`Report::pending()` 列出这些族实例，**W3d 的提交门要求它为空**：`conversion::run` 在 VERIFY 之后检查，不空就记 FAILED、不发布。
 
 ### search_documents 与 knowledge_fts：REBUILT
 
@@ -165,6 +165,48 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **夹具**：一个 2.x 项目库，里面的旧回执用 kernel-v1 从真实请求算指纹。
   - **验证**：转换后由服务按同一个 session 与 op_id 重发，必须 REPLAY 出保存的结果；请求不同则 `IDEMPOTENCY_CONFLICT`；新的 op_id 照常写入，序号接着 2.x 往后排。
 - **报告不含凭据与正文**：`report.json` 只有表名、主键、计数与摘要（用例 `the_report_carries_no_credentials_or_bodies`）。正文只在单独存放的附件里。
+
+## 转换状态机（W3d，`src/conversion.rs`）
+
+按 07 §1–§5 实现。只管文件与状态，进程级的事（单实例、旧版是否静止、起不起入口）交给宿主，这里只给判定。
+
+- **布局**（`N` 是新根）：
+  - 清单 `M` = `conversion.json`，权威记录 `A` = `authority.json`，都先写临时文件、刷盘再改名。
+  - `staging\<g>\` 放一次尝试：`src\`（快照）、`data\`（转换结果）、`report.json`。
+  - 发布物 `data\`：`atm.sqlite` 与旁边的 `artifacts\`、`sync\`、`dispatch\`，由 `staging\<g>\data\` 整体改名而来。
+  - `quarantine\`、`superseded\`；`runtime\service.lock`（准入）、`runtime\seal.json`（进行中的封存）。
+- **准入 `admit`**：
+  - 先对 `service.lock` 做 `File::try_lock`，拿不到就是 `AlreadyRunning`。
+  - 再问宿主注入的闭包，旧版没静止就是 `WaitLegacyQuiesce`，同时放掉 lease。
+- **快照 `legacy::snapshot_files`**：只装业务文件，即 registry、knowledge、项目目录（不含 `backups\`）、sync 的两份配置、dispatch 的三份 json 与非运行中的日志，有知识恢复日志时再加它的 before-restore 文件。
+  - 不进快照：其余备份、R / X 类、运行中的日志。备份按原始根只读登记；运行中的日志 `log_root = LEGACY`，留在原地。
+  - 在快照上转换时 `origin_root = L`。数据根的枚举、未登记条目的守卫、R / X 类计数、运行中日志的计数、登记的路径都看原始根，所以报告与直接在 `L` 上转换逐字节相同（用例 `a_snapshot_conversion_publishes_and_leaves_the_2x_root_untouched`）。
+- **`run`**：
+  - **SNAPSHOT**：枚举 F0、复制、再枚举 F1，F0 ≠ F1 或副本的 sha256 与 F0 不符都记 `FAILED` 与原因，不发布。
+  - **IMPORT / VERIFY**：在快照上转换并做独立 VERIFY；`report.json` 与 `attachment.jsonl` 写进 staging，`report.json` 的 sha256 记作 `verify_digest`，同时写 `business_digest`。
+  - **提交门**：`Report::pending()` 不空就记 FAILED、不发布（用例 `conversion::tests::a_report_with_pending_families_is_not_publishable`）。
+  - **PUBLISHING**：库合并 WAL、改回 DELETE 日志模式；算出 `publication_digest`（只取 `artifacts\`、`sync\`、`dispatch\` 三个子树；库旁边实测会冒出别的程序的 `ATM.SQLITE-SHM.tmp`，随建随删还被占着，不算发布物，列出后消失的文件也跳过）；先写 `M`，再整体改名。
+  - **PUBLISHED**：先写 `M`，再写 `A = v3 by publish`（绑定 generation），最后删掉源副本。
+  - SNAPSHOT 之后数据根再变不影响这一次（用例 `the_conversion_reads_the_snapshot_not_the_live_root`）。
+- **S1 `fresh_install`**：建空库、种 `app_meta`，走同样的 PUBLISHING → PUBLISHED；`M.source_root = null`，`A = v3 by publish`。
+- **改名**：`M`、`A` 的替换、发布、封存都走 `MoveFileExW(WRITE_THROUGH)`，改名落盘之后才返回，这一步就是规格里的「fsync 目录」（Windows 上目录不能单独 fsync）。
+  - 发布与封存不带 `REPLACE_EXISTING`，目标已存在就失败。
+  - 刚写完的文件常被杀毒软件或索引器短暂占用，改名会返回 5 / 32 / 33。遇到这几种错误退避重试约 10 秒。变异运行里实际撞到过 32。
+  - 这段重试和 WRITE_THROUGH 标志没有确定性的用例能验红，属于已知的未覆盖项。
+- **启动判定 `decide`**：
+  - **ResumeSeal**：有进行中的封存，先续做。
+  - **S1 / S2**：没有 `M`，也没有发布物。
+  - **S3**：SNAPSHOT / IMPORT / VERIFY / FAILED，或停在 PUBLISHING 但还没改名。
+  - **S4**：PUBLISHING，且库内 generation 与文件摘要都一致。
+  - **S6**：PUBLISHED，且库内 generation 一致。只比 generation，因为发布后服务会写附件。
+  - **一律隔离**：`M` 缺失或损坏时有发布物（S5，不打开发布物）；generation 不符；PUBLISHING 时文件被动过；还没到 PUBLISHING 就有发布物。
+- **封存 / 隔离 `seal`**：
+  - **先写意图**：把种类与目标名写进 `seal.json` 再动手；中断后再调用，以意图为准续做。
+  - **不覆盖**：目标名撞了加后缀；目标里已有 `data\` 就移到 `data-2\`；`M`、`A` 的副本已存在就不覆盖。
+  - **封存与隔离的区别**：封存先尝试 `wal_checkpoint(TRUNCATE)`，隔离绝不打开库。
+- **用例**：`legacy.rs` 的 `w3d::*`，每个注入点中断后的续跑、源不静止、不可信发布物、封存被杀两次、准入、`M` / `A` 的形状。
+- **变异**：`output/w3-evidence/w3d-mutation-evidence.json`。
+- **留给 W3e**：§6 的权威判定、`A` 与 `M` 冲突（B3）。
 
 ## report.json
 

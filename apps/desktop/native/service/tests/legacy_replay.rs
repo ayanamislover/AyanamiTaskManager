@@ -126,6 +126,7 @@ fn converted_2x_receipts_replay_through_the_service() {
             generation: None,
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));

@@ -123,21 +123,24 @@ fn is_db_file(name: &str, db: &str) -> bool {
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；
 /// R / X 类按族记文件数与字节数（`Report::sources`，范围 `root`）。
+/// 给了原始根（W3d，`root` 是快照）时，枚举、守卫与计数都看原始根：快照只装业务文件，
+/// 未登记的条目、R / X 类都只在原始根里。sync / dispatch 与知识库的内容仍从 `root` 读。
 pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
-    let shown = root.display();
+    let origin = report.origin(root).to_path_buf();
+    let shown = origin.display();
     let mut counts: std::collections::BTreeMap<&'static str, (i64, u64)> = Default::default();
     let mut add = |family: &'static str, files: &[(String, PathBuf, u64)]| {
         let c = counts.entry(family).or_default();
         c.0 += files.len() as i64;
         c.1 += files.iter().map(|f| f.2).sum::<u64>();
     };
-    let mut names: Vec<String> = std::fs::read_dir(root)?
+    let mut names: Vec<String> = std::fs::read_dir(&origin)?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
     for name in &names {
-        let path = root.join(name);
+        let path = origin.join(name);
         let Some(family) = top_level_family(name) else {
             return Err(ConvertError::Unsupported(format!(
                 "{shown}: unregistered entry in the data root: {name}"
@@ -183,7 +186,7 @@ pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
                 }
                 add("in-flight", &residue);
             }
-            "projects" => add("in-flight", &scan_projects(root, &files)?),
+            "projects" => add("in-flight", &scan_projects(&origin, &files)?),
             "sync" => {
                 for f in &files {
                     match f.0.as_str() {
@@ -235,7 +238,7 @@ pub(super) fn scan(root: &Path, at: &str, report: &mut Report) -> Result<()> {
     );
     super::settle::report_knowledge(&super::settle::knowledge(root)?, report);
     // 项目目录里的备份也是 X7。
-    for p in project_dirs(root)? {
+    for p in project_dirs(&origin)? {
         add("backups", &walk(&p.join("backups"))?);
     }
     for f in super::FAMILIES
@@ -351,9 +354,12 @@ pub(super) fn convert_files(
         })
         .collect();
     let knowledge = super::settle::knowledge(root)?;
+    // 读取走 `root`（W3d 的快照），登记与改写的路径走原始根（没给就是 `root` 自己）。
+    let origin = report.origin(root).to_path_buf();
     let tx = t.transaction()?;
     for pid in &pids {
         let src = root.join("projects").join(pid).join("artifacts");
+        let recorded = origin.join("projects").join(pid).join("artifacts");
         let dst = out.join("artifacts").join(pid);
         for (rel, path, _) in walk(&src)? {
             let to = dst.join(&rel);
@@ -370,7 +376,7 @@ pub(super) fn convert_files(
             .collect::<rusqlite::Result<_>>()?;
         for (id, legacy) in rows {
             let Some(legacy) = legacy else { continue };
-            match relative_under(&legacy, &src) {
+            match relative_under(&legacy, &recorded) {
                 Some(rel) => {
                     tx.execute(
                         "UPDATE artifacts SET local_path = ?3 WHERE project_id = ?1 AND id = ?2",
@@ -388,10 +394,15 @@ pub(super) fn convert_files(
             }
         }
     }
-    for (source, scope, pid, dir) in backup_dirs(root)? {
+    // 备份是 X 类，快照不复制：直接在原始根里只读登记。
+    let live_previous = knowledge
+        .previous_is_live
+        .as_deref()
+        .and_then(|p| p.strip_prefix(root).ok());
+    for (source, scope, pid, dir) in backup_dirs(&origin)? {
         for (rel, path, size) in walk(&dir)? {
             // 未提交的知识恢复：before-restore 是现库，不是备份（W3b6）。
-            if rel.contains('/') || knowledge.previous_is_live.as_ref() == Some(&path) {
+            if rel.contains('/') || path.strip_prefix(&origin).ok() == live_previous {
                 continue;
             }
             let kind = backup_kind(&rel, source);
@@ -403,7 +414,7 @@ pub(super) fn convert_files(
                                              schema_version, created_at, verified_at, importable)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, NULL, NULL, ?9)",
                 params![
-                    format!("{kind}:{}", path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/")),
+                    format!("{kind}:{}", path.strip_prefix(&origin).unwrap_or(&path).to_string_lossy().replace('\\', "/")),
                     kind,
                     scope,
                     pid,
@@ -434,6 +445,10 @@ pub(super) fn convert_files(
         if !path.is_file() {
             continue;
         }
+        let recorded = origin
+            .join("projects")
+            .join(&s.scope)
+            .join("project.sqlite");
         tx.execute(
             "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
                                          schema_version, created_at, verified_at, importable)
@@ -441,7 +456,7 @@ pub(super) fn convert_files(
             params![
                 format!("UNCONVERTIBLE_PROJECT:projects/{}/project.sqlite", s.scope),
                 s.scope,
-                path.to_string_lossy(),
+                recorded.to_string_lossy(),
                 file_sha256(&path)?,
                 std::fs::metadata(&path)?.len() as i64
             ],
@@ -464,7 +479,7 @@ pub(super) fn convert_files(
              VALUES (?1, 'KNOWLEDGE_ORPHAN', 'KNOWLEDGE', NULL, ?2, ?3, ?4, NULL, NULL, NULL, NULL, 'AS_KNOWLEDGE')",
             params![
                 format!("KNOWLEDGE_ORPHAN:{rel}"),
-                path.to_string_lossy(),
+                origin.join(&rel).to_string_lossy(),
                 file_sha256(path)?,
                 std::fs::metadata(path)?.len() as i64
             ],

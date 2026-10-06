@@ -1495,12 +1495,14 @@ pub(super) fn verify(c: &Connection, root: &Path, out: &Path, report: &mut Repor
     );
 
     // F7：运行中的日志不复制、不比内容（子进程还在写），只登记数量；对应的 run 必须是 log_root='LEGACY'（见下）。
+    // 它们不进快照（W3d），数量按原始根数。
+    let running = classify_logs(report.origin(root), &loaded)?.running;
     report.sources.push(SourceDigest {
         spec: "dispatch.logs.running",
         scope: "root".into(),
-        rows: logs.running.len() as i64,
+        rows: running.len() as i64,
         digest: String::new(),
-        bytes: Some(logs.running.iter().map(|f| f.2 as i64).sum()),
+        bytes: Some(running.iter().map(|f| f.2 as i64).sum()),
     });
 
     // 3.0 自己的列：log_root 由状态决定；task_id 指向的任务公开 key 与 task_key 一致。

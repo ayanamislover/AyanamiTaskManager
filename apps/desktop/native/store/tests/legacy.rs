@@ -114,6 +114,7 @@ impl Fixture {
                 generation: None,
                 secrets_check,
                 accept_unconvertible,
+                origin_root: None,
             },
         )
     }
@@ -841,6 +842,7 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
             generation: None,
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_err();
@@ -863,6 +865,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             generation: None,
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_err();
@@ -881,6 +884,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             generation: None,
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_err();
@@ -896,6 +900,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             generation: None,
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap();
@@ -2904,6 +2909,7 @@ fn a_data_root_converts_with_its_files() {
             generation: Some("GEN-FROM-THE-STATE-MACHINE"),
             secrets_check: None,
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -4547,6 +4553,7 @@ fn digest_of(f: &Fixture, root: &Path) -> BTreeMap<String, String> {
             generation: None,
             secrets_check: Some(secrets_ok),
             accept_unconvertible: &[],
+            origin_root: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"))
@@ -4661,6 +4668,512 @@ fn the_report_carries_no_credentials_or_bodies() {
         assert!(
             !report.notes.iter().any(|n| n.contains(leak)),
             "{leak} leaked into a note"
+        );
+    }
+}
+
+// ---------------------------------------------------------------- W3d：转换状态机
+
+/// W3d（07 §1–§5）：SNAPSHOT → IMPORT / VERIFY → PUBLISHING → PUBLISHED，启动判定 S1–S6，封存与隔离。
+mod w3d {
+    use super::*;
+    use atm_store::conversion::{
+        self as cv, AdmitError, Authority, AuthorityState, Layout, Manifest, ManifestState, Phase,
+        Quiesce, RunOptions, Seal, SealStep, Startup, Step,
+    };
+
+    const G1: &str = "01J000000000000000000GEN01";
+    const G2: &str = "01J000000000000000000GEN02";
+
+    fn layout(f: &Fixture, name: &str) -> Layout {
+        let n = f.dir.join(name);
+        let _ = fs::remove_dir_all(&n);
+        Layout::new(n)
+    }
+
+    fn run(layout: &Layout, root: &Path, g: &str, stop: Option<Step>) -> cv::Result<Manifest> {
+        let mut hook = |s: Step| Some(s) != stop;
+        cv::run(
+            layout,
+            RunOptions {
+                at: AT,
+                generation: g,
+                legacy_root: root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                hook: &mut hook,
+            },
+        )
+    }
+
+    fn generation_of(db: &Path) -> String {
+        q(
+            &Connection::open(db).unwrap(),
+            "SELECT generation FROM app_meta",
+        )
+    }
+
+    fn manifest(layout: &Layout) -> Manifest {
+        match cv::read_manifest(layout) {
+            ManifestState::Present(m) => m,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 快照只装业务文件：备份、R / X 类、运行中的日志都不进；在快照上转换的结果与直接在数据根上转换一致，
+    /// 登记的路径仍指向数据根；发布后 `M`、`A`、发布物齐全，源副本删掉，数据根一个字节都不变。
+    #[test]
+    fn a_snapshot_conversion_publishes_and_leaves_the_2x_root_untouched() {
+        let (f, root) = json_fixture("w3d-publish");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let admission = cv::admit(&n, || Quiesce::Quiet).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        assert_eq!(cv::decide(&n, false), Startup::FreshInstall);
+
+        let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
+        for kept in [
+            "registry/registry.sqlite",
+            "knowledge/knowledge.sqlite",
+            "projects/P1/project.sqlite",
+            "projects/P1/manifest.json",
+            "projects/P1/artifacts/notes.txt",
+            "sync/config.json",
+            "sync/secrets.dpapi.json",
+            "dispatch/runs.json",
+            "dispatch/logs/run-ok.jsonl",
+            "dispatch/logs/ghost.stderr.log",
+            &format!("backups/knowledge/before-restore-{KB}.sqlite"),
+        ] {
+            assert_eq!(
+                files.contains(&kept.to_string()),
+                !kept.starts_with("backups/"),
+                "{kept}: {files:?}"
+            );
+        }
+        for f in &files {
+            assert!(
+                !f.contains("/backups/")
+                    && !f.starts_with("backups/")
+                    && !f.starts_with("exports/")
+                    && !f.starts_with("logs/")
+                    && !f.starts_with("runtime/")
+                    && f != "sync/secrets.json"
+                    && f != "sync/config.corrupt.json"
+                    && f != "dispatch/logs/run-live.jsonl",
+                "{f} must not be in the snapshot"
+            );
+        }
+
+        let m = run(&n, &root, G1, None).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.phase, Phase::Published);
+        assert_eq!(m.generation, G1);
+        assert_eq!(
+            m.source_root.as_deref(),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            m.source_files
+                .iter()
+                .map(|f| f.rel.clone())
+                .collect::<Vec<_>>(),
+            files
+        );
+        assert_eq!(manifest(&n), m);
+        assert_eq!(generation_of(&n.database()), G1);
+        assert!(n.data().join("artifacts/P1/notes.txt").is_file());
+        assert!(n.data().join("dispatch/logs/run-ok.jsonl").is_file());
+        assert!(!n.data().join("dispatch/logs/run-live.jsonl").exists());
+        match cv::read_authority(&n) {
+            AuthorityState::Present(a) => {
+                assert_eq!((a.authority.as_str(), a.by.as_str()), ("v3", "publish"));
+                assert_eq!(a.generation.as_deref(), Some(G1));
+            }
+            other => panic!("{other:?}"),
+        }
+        let staging = n.staging(G1);
+        assert!(
+            !staging.join("src").exists(),
+            "the source copy is removed after PUBLISHED"
+        );
+        assert_eq!(Some(sha_of(&staging.join("report.json"))), m.verify_digest);
+        assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
+        assert_eq!(tree(&root), before, "the 2.x data root changed");
+
+        // 直接在数据根上转换：报告一致（R / X 类计数、运行中日志的数量、登记路径都按数据根算）。
+        let direct = f
+            .convert_with(Some(secrets_ok))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(direct.business_digest(), m.business_digest);
+        assert_eq!(
+            fs::read_to_string(staging.join("report.json")).unwrap(),
+            direct.report_json()
+        );
+        assert_eq!(
+            fs::read_to_string(staging.join("attachment.jsonl")).unwrap(),
+            direct.attachment_jsonl()
+        );
+        let published = Connection::open(n.database()).unwrap();
+        let reference = Connection::open(f.target()).unwrap();
+        for sql in [
+            "SELECT group_concat(id || '=' || local_path, ';') FROM (SELECT * FROM artifacts ORDER BY project_id, id)",
+            "SELECT group_concat(legacy_path || '=' || source, ';') FROM (SELECT * FROM legacy_backups ORDER BY legacy_path)",
+            "SELECT group_concat(run || '=' || log_root, ';') FROM (SELECT * FROM dispatch_runs ORDER BY run)",
+        ] {
+            let got: Option<String> = q(&published, sql);
+            assert_eq!(got, q::<Option<String>>(&reference, sql), "{sql}");
+        }
+        drop(admission);
+    }
+
+    /// 每个阶段被杀之后：SNAPSHOT / IMPORT / VERIFY 与改名之前按 S3 丢弃重来，改名之后按 S4 补完；
+    /// 最后都落到同一份业务内容，数据根不变。
+    #[test]
+    fn every_interruption_resumes_to_the_same_publication() {
+        let (f, root) = json_fixture("w3d-resume");
+        let before = tree(&root);
+        let reference = run(&layout(&f, "n-ref"), &root, G1, None)
+            .unwrap()
+            .business_digest;
+        for (i, step) in [
+            Step::SnapshotCopied,
+            Step::Importing,
+            Step::Verified,
+            Step::BeforeRename,
+            Step::Renamed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n = layout(&f, &format!("n-{i}"));
+            match run(&n, &root, G1, Some(step)) {
+                Err(cv::Error::Interrupted(_)) => {}
+                other => panic!("{step:?}: {other:?}"),
+            }
+            let m = match cv::decide(&n, true) {
+                Startup::Restart { generation } if step != Step::Renamed => {
+                    assert_eq!(generation, G1);
+                    assert!(!n.data().exists(), "{step:?}: nothing may be published yet");
+                    cv::discard_attempt(&n, &generation)
+                        .unwrap_or_else(|e| panic!("{step:?}: {e:?}"));
+                    assert!(!n.staging(G1).exists());
+                    assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+                    run(&n, &root, G2, None).unwrap_or_else(|e| panic!("{step:?}: {e:?}"))
+                }
+                Startup::FinishPublishing { generation } if step == Step::Renamed => {
+                    assert_eq!(generation, G1);
+                    assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+                    cv::finish_publishing(&n, AT).unwrap_or_else(|e| panic!("{step:?}: {e:?}"))
+                }
+                other => panic!("{step:?}: {other:?}"),
+            };
+            assert_eq!(m.business_digest, reference, "{step:?}");
+            assert_eq!(
+                cv::decide(&n, true),
+                Startup::Published(m.clone()),
+                "{step:?}"
+            );
+            assert_eq!(generation_of(&n.database()), m.generation);
+            assert!(
+                matches!(cv::read_authority(&n), AuthorityState::Present(a) if a.generation.as_deref() == Some(m.generation.as_str()))
+            );
+        }
+        assert_eq!(tree(&root), before);
+    }
+
+    /// SNAPSHOT 期间源变了（改了内容、多了文件）：这次尝试记 FAILED 与原因，不发布；下次按 S3 重来。
+    #[test]
+    fn a_source_that_changes_during_snapshot_fails_the_attempt() {
+        let (f, root) = json_fixture("w3d-unquiet");
+        // 源里的文件改了、源里多了文件、复制出来的副本与源不一致。
+        for (i, (in_copy, rel)) in [
+            (false, "projects/P1/artifacts/notes.txt"),
+            (false, "projects/P1/artifacts/new.txt"),
+            (true, "projects/P1/manifest.json"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n = layout(&f, &format!("n-{i}"));
+            let change = if in_copy {
+                n.staging(G1).join("src").join(rel)
+            } else {
+                root.join(rel)
+            };
+            let mut hook = |s: Step| {
+                if s == Step::SnapshotCopied {
+                    fs::write(&change, b"changed while copying").unwrap();
+                }
+                true
+            };
+            let r = cv::run(
+                &n,
+                RunOptions {
+                    at: AT,
+                    generation: G1,
+                    legacy_root: &root,
+                    allow_real_data_root: false,
+                    real_data_root: None,
+                    secrets_check: Some(secrets_ok),
+                    accept_unconvertible: &[],
+                    hook: &mut hook,
+                },
+            );
+            assert!(matches!(r, Err(cv::Error::SourceNotQuiet(_))), "{r:?}");
+            let m = manifest(&n);
+            assert_eq!(m.phase, Phase::Failed);
+            assert!(
+                m.failure.as_deref().is_some_and(|w| w.contains("SNAPSHOT")),
+                "{:?}",
+                m.failure
+            );
+            assert!(!n.data().exists());
+            assert_eq!(
+                cv::decide(&n, true),
+                Startup::Restart {
+                    generation: G1.into()
+                }
+            );
+        }
+    }
+
+    /// SNAPSHOT 之后数据根再变也不影响这一次：转换读的是快照，不是数据根。
+    #[test]
+    fn the_conversion_reads_the_snapshot_not_the_live_root() {
+        let (f, root) = json_fixture("w3d-late");
+        let n = layout(&f, "n");
+        let notes = root.join("projects/P1/artifacts/notes.txt");
+        let mut hook = |s: Step| {
+            if s == Step::Importing {
+                fs::write(&notes, b"written after the snapshot").unwrap();
+            }
+            true
+        };
+        let m = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                hook: &mut hook,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.phase, Phase::Published);
+        assert_eq!(
+            fs::read(n.data().join("artifacts/P1/notes.txt")).unwrap(),
+            b"abc"
+        );
+    }
+
+    /// 发布物不可信时整体隔离：`M` 缺失或损坏（S5）、generation 对不上、PUBLISHING 时文件被动过、
+    /// 还没到 PUBLISHING 就有发布物。发布之后服务写进来的新附件不算（S6 只认 generation）。
+    #[test]
+    fn untrusted_publications_are_quarantined() {
+        let (f, root) = json_fixture("w3d-untrusted");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let rewrite = |change: &dyn Fn(&mut Manifest)| {
+            let mut x = m.clone();
+            change(&mut x);
+            cv::write_manifest(&n, &x).unwrap();
+        };
+        let quarantined = |why: &str| match cv::decide(&n, true) {
+            Startup::Quarantine { reason } => assert!(reason.contains(why), "{reason}"),
+            other => panic!("{why}: {other:?}"),
+        };
+
+        // 服务往发布物里写了东西：照常 S6。
+        put(&n.data().join("artifacts/P1/written-by-3.0.txt"), b"new");
+        assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
+        fs::remove_file(n.data().join("artifacts/P1/written-by-3.0.txt")).unwrap();
+
+        rewrite(&|x| x.generation = "SOMETHING-ELSE".into());
+        quarantined("the manifest says SOMETHING-ELSE");
+        rewrite(&|x| x.phase = Phase::Verify);
+        quarantined("is VERIFY");
+        rewrite(&|x| x.phase = Phase::Publishing);
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::FinishPublishing {
+                generation: G1.into()
+            }
+        );
+        // 库旁边冒出别的程序的临时文件（实测见过 `ATM.SQLITE-SHM.tmp`）：不属于发布物，不影响 S4。
+        put(&n.data().join("ATM.SQLITE-SHM.tmp"), b"someone else's");
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::FinishPublishing {
+                generation: G1.into()
+            }
+        );
+        fs::remove_file(n.data().join("ATM.SQLITE-SHM.tmp")).unwrap();
+        put(&n.data().join("artifacts/P1/notes.txt"), b"tampered");
+        quarantined("do not match the manifest");
+        cv::write_manifest(&n, &m).unwrap();
+
+        fs::write(n.manifest(), b"{\"schema\":1,").unwrap();
+        quarantined("the manifest is corrupt");
+        fs::remove_file(n.manifest()).unwrap();
+        quarantined("the manifest is missing");
+
+        // S5：整体移走，字节不变；之后按 S2 继续。
+        let data = tree(&n.data());
+        let target = cv::seal(&n, Seal::Quarantine, AT).unwrap();
+        assert_eq!(target.parent().unwrap(), n.root.join("quarantine"));
+        assert_eq!(tree(&target.join("data")), data);
+        assert!(target.join("authority.json").is_file());
+        assert!(!n.data().exists() && !n.manifest().exists() && !n.authority().exists());
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        assert_eq!(cv::decide(&n, false), Startup::FreshInstall);
+    }
+
+    /// 封存被杀在任何一步，再调用都按记下的种类与目标续做；目标名撞了换名，目标里已有的东西不覆盖。
+    #[test]
+    fn sealing_resumes_after_a_kill_and_never_overwrites() {
+        let (f, root) = json_fixture("w3d-seal");
+        let n = layout(&f, "n");
+        run(&n, &root, G1, None).unwrap();
+        let data = tree(&n.data());
+        let taken = n
+            .root
+            .join("superseded")
+            .join(format!("{G1}-2026-10-03T00-00-00-000Z"));
+        put(&taken.join("keep.txt"), b"older");
+
+        match cv::seal_with(&n, Seal::Superseded, AT, &mut |s| s != SealStep::Intended) {
+            Err(cv::Error::Interrupted(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(cv::decide(&n, true), Startup::ResumeSeal);
+        let target = n
+            .root
+            .join("superseded")
+            .join(format!("{G1}-2026-10-03T00-00-00-000Z-2"));
+        assert!(target.is_dir(), "a taken name gets a suffix");
+        put(&target.join("data/already-here.txt"), b"keep me");
+        match cv::seal_with(&n, Seal::Quarantine, AT, &mut |s| s != SealStep::Moved) {
+            Err(cv::Error::Interrupted(_)) => {}
+            other => panic!("{other:?}"),
+        }
+        assert!(!n.data().exists());
+        assert_eq!(cv::decide(&n, true), Startup::ResumeSeal);
+        // 续做时种类以意图文件为准（这里传的 Quarantine 不算数）。
+        assert_eq!(cv::seal(&n, Seal::Quarantine, AT).unwrap(), target);
+
+        assert_eq!(fs::read(taken.join("keep.txt")).unwrap(), b"older");
+        assert_eq!(
+            fs::read(target.join("data/already-here.txt")).unwrap(),
+            b"keep me"
+        );
+        assert_eq!(tree(&target.join("data-2")), data);
+        let copied =
+            Manifest::parse(&fs::read_to_string(target.join("conversion.json")).unwrap()).unwrap();
+        assert_eq!(copied.generation, G1);
+        assert!(target.join("authority.json").is_file());
+        assert!(!n.manifest().exists() && !n.authority().exists());
+        assert!(!n.runtime().join("seal.json").exists());
+        assert!(!n.root.join("quarantine").exists());
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+    }
+
+    /// S1：没有旧根时建空库并直接发布；之后每次启动都是 S6，服务能照常打开。
+    #[test]
+    fn a_fresh_install_publishes_an_empty_store() {
+        let n = Layout::new(dir("w3d-fresh").join("n"));
+        assert_eq!(cv::decide(&n, false), Startup::FreshInstall);
+        let m = cv::fresh_install(&n, G1, AT).unwrap();
+        assert_eq!((m.phase, m.source_root.clone()), (Phase::Published, None));
+        assert!(m.source_files.is_empty() && m.business_digest.is_empty());
+        assert_eq!(cv::decide(&n, false), Startup::Published(m.clone()));
+        assert!(matches!(cv::read_authority(&n), AuthorityState::Present(a)
+            if a.authority == "v3" && a.generation.as_deref() == Some(G1)));
+        assert!(!n.staging(G1).exists());
+        let c = atm_store::open(&n.database()).unwrap();
+        assert_eq!(q::<String>(&c, "SELECT generation FROM app_meta"), G1);
+        assert_eq!(
+            q::<Option<String>>(&c, "SELECT converted_from FROM app_meta"),
+            None
+        );
+        assert_eq!(q::<i64>(&c, "SELECT count(*) FROM projects"), 0);
+    }
+
+    /// 准入：同一个新根只有一个实例拿得到；旧版没静止就等，不转换。
+    #[test]
+    fn admission_is_exclusive_and_waits_for_a_quiet_2x() {
+        let (f, _root) = json_fixture("w3d-admit");
+        let n = layout(&f, "n");
+        let first = cv::admit(&n, || Quiesce::Quiet).unwrap();
+        assert!(matches!(
+            cv::admit(&n, || Quiesce::Quiet),
+            Err(AdmitError::AlreadyRunning)
+        ));
+        drop(first);
+        match cv::admit(&n, || Quiesce::Wait("2.x daemon pid 42".into())) {
+            Err(AdmitError::WaitLegacyQuiesce(why)) => assert_eq!(why, "2.x daemon pid 42"),
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            cv::admit(&n, || Quiesce::Quiet).is_ok(),
+            "waiting releases the lease"
+        );
+    }
+
+    /// `M` 与 `A` 读写往返；形状不对一律是损坏，不猜缺省值。
+    #[test]
+    fn manifests_and_authority_round_trip_and_reject_damage() {
+        let m = Manifest {
+            converter_version: "atm-store-legacy/1".into(),
+            source_root: Some("D:\\data\\AyanamiTaskManager".into()),
+            source_files: vec![cv::SourceFile {
+                rel: "registry/registry.sqlite".into(),
+                size: 4096,
+                mtime_ms: 1_790_000_000_000,
+                sha256: "ab".repeat(32),
+            }],
+            business_digest: [("db:registry/projects".to_string(), "cd".repeat(32))].into(),
+            generation: G1.into(),
+            phase: Phase::Verify,
+            verify_digest: Some("ef".repeat(32)),
+            publication_digest: None,
+            started_at: AT.into(),
+            published_at: None,
+            failure: None,
+        };
+        assert_eq!(Manifest::parse(&m.to_json()), Some(m.clone()));
+        let json = m.to_json();
+        for bad in [
+            json.replace("\"VERIFY\"", "\"DONE\""),
+            json.replace("\"schema\":1", "\"schema\":2"),
+            json.replace("\"generation\"", "\"gen\""),
+            json.replace("4096", "4096.5"),
+            json[..json.len() - 1].to_string(),
+            String::new(),
+        ] {
+            assert_eq!(Manifest::parse(&bad), None, "{bad}");
+        }
+        let a = Authority {
+            authority: "v3".into(),
+            by: "publish".into(),
+            txn: None,
+            at: AT.into(),
+            generation: Some(G1.into()),
+            accepted_source_digest: None,
+        };
+        assert_eq!(Authority::parse(&a.to_json()), Some(a.clone()));
+        assert_eq!(
+            Authority::parse(&a.to_json().replace("\"v3\"", "\"v4\"")),
+            None
+        );
+        assert_eq!(
+            Authority::parse(&a.to_json().replace("\"by\"", "\"who\"")),
+            None
         );
     }
 }
