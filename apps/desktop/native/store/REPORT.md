@@ -541,6 +541,25 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - 转换出的库用完即删，只留不含正文的报告与日志。
 - **变异**：同上。
 
+### 库的索引不进快照（P2-06 变异运行中发现）
+
+- **现象**：
+  - 关库前后，会有别的程序在库旁边随建随删 `<库名大写>-SHM.tmp`（实测 `ATM.SQLITE-SHM.tmp`、`PROJECT.SQLITE-SHM.tmp`），有时还占着。
+  - 比较时 `L` 的项目目录里正好出现它，正式扫描把它当未登记条目拒绝，比较得 UNKNOWN。失败关闭、不丢数据，但会误报数据源冲突。
+  - 另外，快照原来把 `-shm` 也算进 F0/F1：2.x 开着库时读者会改写 `-shm` 里的读标记（没有写入），关库时它又正被删除，都可能让快照误判源未静止，或者复制时找不到文件。
+  - P2-06 的变异复原后整套里，`a_dropped_database_is_compared_by_content_not_storage` 在「关库」一步偶发得到 UNKNOWN，就是这个原因。
+- **修订**：
+  - `-shm` 与 `<库名>-shm.tmp`（不分大小写）都只是库的 WAL 索引：扫描认得它们（不再是未登记条目），快照不收，舍弃项目的摘要也不算。
+  - 只认库自己的：别的名字（例如 `other.sqlite-shm.tmp`）照旧是未登记条目。
+  - 工作副本本来就不复制 `-shm`（SQLite 打开时重建）。
+- **用例**：
+  - `w3_gate_snapshot::the_wal_index_is_not_part_of_the_snapshot`：
+    - 放进 `-shm` 与两个 `*-SHM.tmp`，快照清单里都没有；
+    - 别的名字的 `-shm.tmp` 照旧拒绝；
+    - 复制之后、第二次枚举之前把它们删掉，dry-run 照样 VERIFY 通过。
+  - `a_dropped_database_is_compared_by_content_not_storage` 加一步：舍弃项目的目录里出现 `PROJECT.SQLITE-SHM.tmp`，比较不变。
+- **变异**：`output/w3-evidence/p2gate-mutation-evidence.json` 的「the WAL index is snapshotted」。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
