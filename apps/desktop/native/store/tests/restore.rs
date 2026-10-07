@@ -1341,8 +1341,10 @@ fn restore_internals_are_not_backed_up() {
 }
 
 /// 等到 `what` 停在这个库的附件锁上。不靠固定的时间窗口：没有锁、或者操作不等锁就直接做完时，这里超时失败。
+/// 等 `what` 停在附件锁上。上限只防挂死，不判快慢：机器很忙时（并行用例加变异编译）走到锁前可能要几十秒。
+/// 两个附件用例里线程之间的握手也一样，不设超时：对方 panic 时发送端被丢弃，`recv` 立即返回错误。
 fn wait_for_lock(w: &World, what: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
     while !attachment_lock_waiters(w.store.path()).contains(&what) {
         assert!(
             std::time::Instant::now() < deadline,
@@ -1379,14 +1381,14 @@ fn a_restore_waits_for_an_attachment_access_in_progress() {
             with_project_attachments(&w.store, "PA", |access| {
                 let a = fs::read_to_string(access.dir.join("a.txt"))?;
                 inside_tx.send(()).unwrap();
-                gate_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                gate_rx.recv().unwrap();
                 let b = fs::read_to_string(access.dir.join("b.txt"))?;
                 Ok((access.generation, a, b))
             })
             .unwrap()
         })
     };
-    inside_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    inside_rx.recv().unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let restorer = {
         let (w, b) = (w.clone(), b.clone());
@@ -1440,13 +1442,13 @@ fn a_backup_waits_for_an_attachment_write_in_progress() {
             with_project_attachments(&w.store, "PA", |access| {
                 fs::write(access.dir.join("a.txt"), "v3")?;
                 inside_tx.send(()).unwrap();
-                gate_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                gate_rx.recv().unwrap();
                 fs::write(access.dir.join("b.txt"), "v3")
             })
             .unwrap()
         })
     };
-    inside_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    inside_rx.recv().unwrap();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let backer = {
         let w = w.clone();

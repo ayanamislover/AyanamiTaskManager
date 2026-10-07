@@ -7065,6 +7065,12 @@ mod w3_peer_r1 {
                 future.join("n"),
                 "overlaps the 3.0 data root",
             ),
+            // 还不存在的部分不经 canonicalize，大小写不同也是同一个目录。
+            (
+                f.dir.join("FUTURE").join("N").join("dry"),
+                future.join("n"),
+                "overlaps the 3.0 data root",
+            ),
         ] {
             match dry(&root, &out, &v3) {
                 Err(cv::Error::Refused(reason)) => assert!(reason.contains(why), "{reason}"),
