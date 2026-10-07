@@ -163,11 +163,14 @@
   },
   {
     "name": "atm_task_list",
-    "description": "分页列任务。status 写 open、closed、all 或具体状态（BACKLOG|READY|CLAIMED|IN_PROGRESS|BLOCKED|WAITING_AGENT|WAITING_USER|VERIFYING|DONE|CANCELLED）；mine:true 只列本会话持有的；view=reconcile 时只看 include_active、limit、cursor、field_mask。 参数：project≤20；ready_only 默认 false；mine 默认 false；status≤100；owner≤128；parent_key≤40；milestone_id≤128；query≤500；view=core|context|full|reconcile，默认 core；include_active 默认 false；field_mask 最多 20 项；field_mask[]≤64；limit=1–100，默认 10；cursor≤4000；max_chars=500–50000，默认 12000。",
+    "description": "分页列任务。status 写 open、closed、all 或具体状态（BACKLOG|READY|CLAIMED|IN_PROGRESS|BLOCKED|WAITING_AGENT|WAITING_USER|VERIFYING|DONE|CANCELLED）；mine:true 只列本会话持有的；view=reconcile 时只看 include_active、limit、cursor、field_mask。 参数：project≤20；session≤128；ready_only 默认 false；mine 默认 false；status≤100；owner≤128；parent_key≤40；milestone_id≤128；query≤500；view=core|context|full|reconcile，默认 core；include_active 默认 false；field_mask 最多 20 项；field_mask[]≤64；limit=1–100，默认 10；cursor≤4000；max_chars=500–50000，默认 12000。",
     "inputSchema": {
       "type": "object",
       "properties": {
         "project": {
+          "type": "string"
+        },
+        "session": {
           "type": "string"
         },
         "ready_only": {
@@ -226,7 +229,7 @@
     },
     "_meta": {
       "surface_version": "v6",
-      "schema_hash": "fdc2e4e512476784"
+      "schema_hash": "bec8ff335f7c040b"
     }
   },
   {

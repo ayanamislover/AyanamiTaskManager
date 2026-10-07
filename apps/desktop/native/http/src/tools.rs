@@ -199,8 +199,9 @@ pub static BRIEF: Tool = Tool {
     destructive: false,
 };
 
-static TASK_LIST_FIELDS: [Field; 14] = [
+static TASK_LIST_FIELDS: [Field; 15] = [
     PROJECT,
+    SESSION,
     Field::new("ready_only", Ty::Bool).default("false"),
     Field::new("mine", Ty::Bool).default("false"),
     Field::new("status", Ty::Str { max: 100 }),
@@ -238,9 +239,11 @@ pub static TASK_LIST: Tool = Tool {
     destructive: false,
 };
 
-static TASK_GET_FIELDS: [Field; 7] = [
+static TASK_GET_FIELDS: [Field; 8] = [
     TASK_KEY.required(),
     PROJECT,
+    // 读时续租用（R11 P3），由桥补，只收不发布。
+    SESSION.hidden(),
     Field::new("view", Ty::Enum(&["core", "context", "full"])).default("\"core\""),
     Field::new("field_mask", FIELD_MASK),
     Field::new("last_progress", Ty::Int { min: 1, max: 10 }),

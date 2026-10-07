@@ -5,7 +5,7 @@
 
 use atm_http::mcp::Profile;
 use atm_http::schema::{Field, Ty};
-use atm_http::tools::{CORE_BUDGET, PROFILE_BUDGET, PROFILES};
+use atm_http::tools::PROFILES;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -116,11 +116,8 @@ fn each_profile_publishes_exactly_its_tools() {
 #[test]
 fn every_profile_fits_its_byte_budget() {
     for p in &PROFILES {
-        let want = if p.name == "core" {
-            CORE_BUDGET
-        } else {
-            PROFILE_BUDGET
-        };
+        // 数字写死：常量被改大时这条要变红（2.0 core 8,016 + actions 8,164；单 profile 10,240 − 512）。
+        let want = if p.name == "core" { 16_180 } else { 9_728 };
         assert_eq!(p.budget, want, "{}", p.name);
         assert!(
             p.bytes() <= p.budget,

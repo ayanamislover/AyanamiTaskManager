@@ -17,6 +17,8 @@ pub mod knowledge;
 pub mod lists;
 pub mod metrics;
 pub(crate) mod present;
+pub mod reconcile;
+pub mod scope;
 pub mod search;
 pub mod trace;
 pub(crate) mod views;
@@ -25,6 +27,8 @@ pub use brief::{BeginBrief, BriefRequest};
 pub use delta::DeltaRequest;
 pub use knowledge::{KnowledgeGetRequest, KnowledgeSearchRequest, Part};
 pub use lists::{ListRequest, TaskListRequest};
+pub use reconcile::ReconcileRequest;
+pub use scope::SessionScope;
 pub use search::{SearchRequest, TaskGetRequest};
 pub use views::TaskView;
 

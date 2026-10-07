@@ -10,8 +10,12 @@ publish.workspace = true
 
 [dependencies]
 atm-domain = { path = "../domain" }
+atm-service = { path = "../service" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+
+[dev-dependencies]
+atm-store = { path = "../store" }

@@ -12,6 +12,7 @@
     reason = "Envelope 是本 crate 唯一的错误形状，只出现在拒绝路径上；装箱只会让每个调用点更啰嗦"
 )]
 
+pub mod agent;
 pub mod mcp;
 pub mod schema;
 pub mod tools;

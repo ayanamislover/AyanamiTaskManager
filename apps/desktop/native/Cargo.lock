@@ -76,6 +76,8 @@ name = "atm-http"
 version = "0.0.0"
 dependencies = [
  "atm-domain",
+ "atm-service",
+ "atm-store",
  "axum",
  "serde",
  "serde_json",
