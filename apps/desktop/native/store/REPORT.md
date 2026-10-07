@@ -414,6 +414,22 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - `legacy.rs` 的 `w3_peer_r2::a_briefly_busy_copy_is_still_removed`：清理开始之后副本还被开着约 300 毫秒，照常删掉，结果是 Verified。
 - **变异**：`output/w3-evidence/w3r4-mutation-evidence.json`。
 
+## W3 整体评审第五轮（`output/peer-atm3-w3-r5.md`）：APPROVED
+
+绑定 core-rust 02dd92c。无 P0、P1；P1-R4-01、P2-R4-01 关闭。新登记三条 P2，与 P2-01～P2-07 一起作为 W4 之前的硬门，修订如下（在 W4 关口的分支上）：
+
+| 编号      | 问题 | 修订 |
+| --------- | ---- | ---- |
+| P2-R5-01  | 报告改名成功后刷盘失败、丢弃也失败时，错误里的路径仍是早已不存在的临时名；单独刷盘失败只有裸 IO 错误 | `NewFile::rename_into` 改名成功就记下新位置再刷盘，刷盘错误带「flush 路径」；丢弃的错误报文件实际所在的名字 |
+| P2-R5-02  | 库旁边的 `-shm` 与别的程序的 `-SHM.tmp` 会让比较误报冲突、快照误判源未静止 | 见下文「库的索引不进快照」 |
+| P2-R5-03  | 短暂占用用例的辅助线程等报告写完没有上限，dry-run 提前失败时会永久挂住 | 等待设 120 s 上限，超时照样放开文件、结束线程 |
+
+- **用例**：
+  - `pin::tests::a_failed_discard_names_where_the_file_is`：改名前双失败报临时名；改名后丢弃失败报新名、不含临时名。
+  - `an_open_new_file_keeps_its_name_until_renamed_or_discarded` 加一条：改名之后 `path()` 是新名。
+  - `w3_peer_r1::a_direct_conversion_ignores_the_wal_index_of_a_dropped_database`：直接按数据根转换（不经快照）时，舍弃项目目录里的 `-shm` 与 `-SHM.tmp` 不改变摘要。
+- **变异**：`output/w3-evidence/p2gate-mutation-evidence.json`（含「the new name is not remembered」）。
+
 ## W4a：W3 遗留硬门（P2-01、P2-03、P2-04、P2-05）
 
 W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与回滚之前做完。
@@ -500,8 +516,8 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 ### 变异
 
-- `output/w4a-evidence/w4a-store-mutation-evidence.json`（13 条）；
-- `w4a-state-mutation-evidence.json`（9 条）；
+- `output/w4a-evidence/w4a-store-mutation-evidence.json`（14 条）；
+- `w4a-state-mutation-evidence.json`（11 条）；
 - `w4a-setup-mutation-evidence.json`（2 条）。
 
 ## W4 前的 P2 关口（P2-06、P2-07）
