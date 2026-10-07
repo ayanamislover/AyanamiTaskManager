@@ -7855,3 +7855,36 @@ mod w3_gate_rehearse {
         assert!(!work.join("n").exists());
     }
 }
+
+/// `-shm` 不进快照：它只是 WAL 的索引。2.x 开着库时读者会改写它（没有写入），关库时它正被删除；
+/// 都不算源在变。
+mod w3_gate_snapshot {
+    use super::*;
+    use atm_store::conversion::{self as cv, DryRun, DryRunOptions, Quiesce};
+
+    #[test]
+    fn the_wal_index_is_not_part_of_the_snapshot() {
+        let (f, root) = json_fixture("w3-gate-shm");
+        let shm = root.join("projects/P1/project.sqlite-shm");
+        put(&shm, &[0u8; 32768]);
+        let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
+        assert!(files.contains(&"projects/P1/project.sqlite".to_string()));
+        assert!(!files.iter().any(|f| f.ends_with("-shm")), "{files:?}");
+
+        // 复制之后、第二次枚举之前 -shm 没了（2.x 关了库）：dry-run 照样 VERIFY 通过，不是「源未静止」。
+        let r = cv::dry_run(DryRunOptions {
+            at: AT,
+            source: &root,
+            out: &f.dir.join("dry"),
+            v3_root: Some(&f.dir.join("n")),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce: &mut || Quiesce::Quiet,
+            after_copy: &mut || fs::remove_file(&shm).unwrap(),
+        });
+        assert!(matches!(r, Ok(DryRun::Verified { .. })), "{r:?}");
+    }
+}
