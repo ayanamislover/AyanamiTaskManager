@@ -245,6 +245,23 @@ fn schema_rejections_point_at_the_parameter() {
         (&e["fix"]["kind"], &e["fix"]["param"]),
         (&json!("add_param"), &json!("blocked_reason"))
     );
+    // MCP 层的 schema 校验拒绝、又没法自动更正（缺必填项）：add_param 点名缺的那个参数。
+    let e = call(
+        &w,
+        "core",
+        "atm_record",
+        json!({"session": w.session, "kind": "DECISION"}),
+    )["structuredContent"]
+        .clone();
+    assert_eq!(
+        (&e["code"], &e["fix"]["kind"], &e["fix"]["param"]),
+        (
+            &json!("INVALID_ARGUMENT"),
+            &json!("add_param"),
+            &json!("summary")
+        ),
+        "{e}"
+    );
     // 2.x 单条形状 checklist_id 不带 status：要求补上，不能悄悄当成 TODO。
     let e = call(
         &w,
