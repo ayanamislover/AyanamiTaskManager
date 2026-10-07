@@ -2071,6 +2071,10 @@ fn register_functions(c: &Connection) -> rusqlite::Result<()> {
     use crate::jsjson::{MAX_DEPTH, mirror_payload, top_level_string};
     use rusqlite::functions::FunctionFlags;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    // VERIFY 重算 project_paths.path_key：与运行时查询用的是同一个函数（04 C-L09）。
+    c.create_scalar_function("atm_path_key", 1, flags, |ctx| {
+        Ok(text_arg(ctx.get_raw(0)).map(|p| crate::paths::path_key(&p)))
+    })?;
     c.create_scalar_function("atm_mirror_payload", 2, flags, |ctx| {
         let payload = text_arg(ctx.get_raw(0));
         let fields = text_arg(ctx.get_raw(1)).unwrap_or_default();
@@ -2748,7 +2752,9 @@ fn verify(
         tick(progress, "VERIFY", 0, src.projects.len());
         for (i, p) in src.projects.iter().enumerate() {
             attach(t, p, "p")?;
-            let r = verify_project(t, report, &mut re).and_then(|()| expect_global_project(t));
+            let r = verify_project(t, report, &mut re)
+                .and_then(|()| verify_artifact_paths(t, report, src.root.as_deref()))
+                .and_then(|()| expect_global_project(t));
             detach(t, "p");
             r?;
             tick(progress, "VERIFY", i + 1, src.projects.len());
@@ -2769,6 +2775,43 @@ fn verify(
     );
     detach(t, "r");
     r
+}
+
+/// 附件的 `local_path`（W3 peer r1 P2-01）：由源行（挂在 `p`）的 `local_path` 推出应有的值，逐行核对。
+/// 按数据根转换时，指向本项目附件目录（原始根下）的改写成 `data/artifacts/<pid>/<相对路径>`，其余原样；
+/// 不按数据根转换时一律原样。映射在 SQL 里另写一遍，不复用转换时的函数：两边写错同一处才会漏过。
+fn verify_artifact_paths(c: &Connection, report: &mut Report, root: Option<&Path>) -> Result<()> {
+    let pid: String = c.query_row("SELECT project_id FROM p.project_meta", [], |r| r.get(0))?;
+    let dir = root.map(|root| {
+        report
+            .origin(root)
+            .join("projects")
+            .join(&pid)
+            .join("artifacts")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    });
+    let prefix = root::artifact_prefix(&pid);
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "artifacts",
+            label: &format!("{pid}/artifacts.local_path"),
+            key: &["id"],
+        },
+        &["id".to_string(), "local_path".to_string()],
+        "SELECT id, CASE WHEN ?1 IS NOT NULL AND length(n) > length(?1) + 1
+                          AND lower(substr(n, 1, length(?1))) = lower(?1) AND substr(n, length(?1) + 1, 1) = '/'
+                         THEN ?2 || substr(n, length(?1) + 2) ELSE local_path END
+         FROM (SELECT id, local_path, rtrim(replace(local_path, '\\', '/'), '/') AS n FROM p.artifacts)
+         ORDER BY id",
+        &[&dir, &prefix],
+        "SELECT id, local_path FROM main.artifacts WHERE project_id = ?1 ORDER BY id",
+        &[&pid],
+    )
 }
 
 /// R6 的 VERIFY：全局流的预期由源库独立算出，不看转换器记下的计数。
@@ -2924,8 +2967,23 @@ fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
         compare_table(c, report, "r", table, None)?;
     }
     verify_settings(c, report, re)?;
-    // 按 2.x 的列比较。3.0 多出来的 path_key 在转换时由 canonical_path 推出，靠唯一约束兜底。
+    // 按 2.x 的列比较。
     compare_table(c, report, "r", "project_paths", None)?;
+    // 3.0 多出来的 path_key（04 C-L09）：由源的 canonical_path 用运行时查询的同一个函数重算，逐行核对（W3 peer r1 P2-01）。
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "project_paths",
+            label: "r/project_paths.path_key",
+            key: &["id"],
+        },
+        &["id".to_string(), "path_key".to_string()],
+        "SELECT id, atm_path_key(canonical_path) FROM r.project_paths ORDER BY id",
+        &[],
+        "SELECT id, path_key FROM main.project_paths ORDER BY id",
+        &[],
+    )?;
     let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
     let cols: Vec<String> = [
         "sequence",

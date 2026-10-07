@@ -316,16 +316,17 @@ fn scan_projects(
 }
 
 /// 新根下附件的相对路径前缀：`data/artifacts/<pid>/`（目标库在 `N\data\atm.sqlite`，附件在 `N\data\artifacts\`）。
-fn artifact_prefix(pid: &str) -> String {
+pub(super) fn artifact_prefix(pid: &str) -> String {
     format!("data/artifacts/{pid}/")
 }
 
-/// `p` 在 `dir` 下面时返回以 `/` 分隔的相对路径（按 Windows 规则不分大小写，两种分隔符都认）。
+/// `p` 在 `dir` 下面时返回以 `/` 分隔的相对路径（ASCII 不分大小写，两种分隔符都认）。
+/// 按字节比较前缀：`p` 的前 `d.len()` 字节不一定落在字符边界上（两边含不同的多字节字符时）。
 fn relative_under(p: &str, dir: &Path) -> Option<String> {
     let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_string();
     let (p, d) = (norm(p), norm(&dir.to_string_lossy()));
     if p.len() > d.len() + 1
-        && p[..d.len()].eq_ignore_ascii_case(&d)
+        && p.as_bytes()[..d.len()].eq_ignore_ascii_case(d.as_bytes())
         && p.as_bytes()[d.len()] == b'/'
     {
         Some(p[d.len() + 1..].to_string())

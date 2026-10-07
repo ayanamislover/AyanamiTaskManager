@@ -3304,6 +3304,84 @@ const REQUESTS: &str = r#"{
 }
 "#;
 
+/// W3 peer r1 P2-01：VERIFY 由源独立推出派生列，逐行核对。附件的 `local_path`（本项目附件目录里的改写成新根的相对路径，
+/// 目录外的原样）与 `project_paths.path_key`（运行时查询用的同一个函数）。目标里哪一列改错，只有对应的那一族失败。
+#[test]
+fn verify_checks_the_derived_paths() {
+    let (f, _root) = root_fixture("w4a-p201");
+    fs::create_dir_all(f.dir.join("out")).unwrap();
+    let report = convert(
+        &f.sources,
+        &f.target(),
+        &ConvertOptions {
+            at: "2026-10-03T00:00:00.000Z",
+            allow_real_data_root: false,
+            real_data_root: None,
+            generation: None,
+            secrets_check: None,
+            accept_unconvertible: &[],
+            origin_root: None,
+            progress: None,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    let checked: Vec<&str> = report
+        .checks
+        .iter()
+        .map(|c| c.family.as_str())
+        .filter(|f| f.ends_with(".local_path") || f.ends_with(".path_key"))
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            "r/project_paths.path_key",
+            "P1/artifacts.local_path",
+            "P2/artifacts.local_path",
+            "P3/artifacts.local_path"
+        ]
+    );
+    let clean = f.dir.join("out").join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "an attachment inside the directory left unrewritten",
+            "UPDATE artifacts SET local_path = legacy_local_path WHERE project_id = 'P1' AND id = 'A1'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "an attachment rewritten to another file",
+            "UPDATE artifacts SET local_path = 'data/artifacts/P1/gone.txt' WHERE project_id = 'P1' AND id = 'A1'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "a missing attachment left unrewritten",
+            "UPDATE artifacts SET local_path = legacy_local_path WHERE project_id = 'P1' AND id = 'A2'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "an attachment outside the directory rewritten",
+            "UPDATE artifacts SET local_path = 'data/artifacts/P1/else.txt' WHERE project_id = 'P1' AND id = 'A3'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "a path key that keeps the case",
+            "UPDATE project_paths SET path_key = canonical_path || '/'",
+            "r/project_paths.path_key",
+        ),
+    ];
+    for (name, tamper, expected) in cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        assert_eq!(t.execute(tamper, []).unwrap(), 1, "{name}");
+        drop(t);
+        let failures = verify_converted(&f.target(), &f.sources, &report)
+            .unwrap()
+            .failures();
+        assert_eq!(failures, [*expected], "{name}");
+    }
+}
+
 /// W3b5：在数据根夹具上换上完整的 sync / dispatch 文件。
 fn json_fixture(name: &str) -> (Fixture, PathBuf) {
     let (f, root) = root_fixture(name);
