@@ -366,16 +366,11 @@ impl Validation {
         let mut entries: Vec<(&String, &Value)> = map.iter().collect();
         entries.sort_by_key(|(k, _)| !fields.iter().any(|f| f.name == k.as_str()));
         for (key, value) in entries {
-            let field = fields
-                .iter()
-                .find(|f| f.name == key.as_str() || f.aliases.contains(&key.as_str()))
-                .or_else(|| {
-                    // 名字大小写不同（`Task_Key`）按别名处理。
-                    fields.iter().find(|f| {
-                        f.name.eq_ignore_ascii_case(key)
-                            || f.aliases.iter().any(|a| a.eq_ignore_ascii_case(key))
-                    })
-                });
+            // 规范名与别名都不分大小写（`Task_Key` 按别名处理）；表里没有只差大小写的两个名字。
+            let field = fields.iter().find(|f| {
+                f.name.eq_ignore_ascii_case(key)
+                    || f.aliases.iter().any(|a| a.eq_ignore_ascii_case(key))
+            });
             let Some(field) = field else {
                 let mut p = Problem::new(path(key), ProblemKind::Unknown);
                 match nearest(

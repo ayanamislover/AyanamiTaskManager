@@ -258,3 +258,31 @@ fn task_patch_accepts_one_item_flat_or_many_in_items() {
     let missing: Vec<_> = neither.problems.iter().map(|p| p.path.as_str()).collect();
     assert_eq!(missing, ["operation", "task_key"]);
 }
+
+/// 校验器按名字不分大小写找字段：同一张表（含嵌套）里，规范名与别名转小写后不能重复，否则会悄悄选错字段。
+#[test]
+fn names_and_aliases_are_unique_ignoring_case() {
+    fn check(tool: &str, path: &str, fields: &[Field]) {
+        let mut seen = BTreeSet::new();
+        for f in fields {
+            for n in std::iter::once(f.name).chain(f.aliases.iter().copied()) {
+                assert!(
+                    seen.insert(n.to_ascii_lowercase()),
+                    "{tool}: {path}{n} collides"
+                );
+            }
+            let mut ty = &f.ty;
+            if let Ty::List { of, .. } = ty {
+                ty = of;
+            }
+            if let Ty::Obj(inner) | Ty::TextOr { obj: inner, .. } = ty {
+                check(tool, &format!("{path}{}.", f.name), inner);
+            }
+        }
+    }
+    for p in &PROFILES {
+        for t in p.tools.iter().chain(p.hidden) {
+            check(t.name, "", t.fields);
+        }
+    }
+}
