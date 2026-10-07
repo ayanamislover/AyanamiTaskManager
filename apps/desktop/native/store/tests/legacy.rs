@@ -5903,3 +5903,947 @@ mod w3g {
         assert_eq!(files(&used), ["mine.txt"]);
     }
 }
+
+// ---------------------------------------------------------------- W3h：07 §10 故障注入矩阵 F1–F29
+
+/// W3h：07 §10 每一项一个用例。每项都断言：选中的分支正确、没被选中的一边完整，
+/// 并且 `L` 的业务对象集合（05 的 business_digest 对象族）没有被转换器改动——
+/// 用例自己模拟的 2.x 写入除外，断言的是「模拟写入之后」的那份摘要。
+mod fault_matrix {
+    use super::w3d::{G1, G2, layout, manifest, run};
+    use super::*;
+    use atm_install_state::ProcessIdentity;
+    use atm_install_state::startup::{
+        self as handover, Counter, ProgressWatch, RollbackAuthority, StartupProgress, WaitPolicy,
+        WaitVerdict,
+    };
+    use atm_store::conversion::{
+        self as cv, AuthorityState, Comparison, Layout, Phase, Quiesce, RunOptions, Seal, SealStep,
+        Startup, Step, Verdict,
+    };
+    use std::time::{Duration, Instant};
+
+    /// `L` 的业务对象集合：按转换的同一流程算 business_digest（只读 `L`，算完删掉 scratch）。
+    fn business(f: &Fixture, root: &Path) -> BTreeMap<String, String> {
+        let scratch = f.dir.join("business-scratch");
+        let digest = atm_store::legacy::business_digest(
+            &LegacySources::from_root(root).unwrap(),
+            &scratch,
+            &ConvertOptions {
+                at: AT,
+                allow_real_data_root: false,
+                real_data_root: None,
+                generation: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                origin_root: None,
+                progress: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let _ = fs::remove_dir_all(&scratch);
+        digest
+    }
+
+    fn run_with(
+        n: &Layout,
+        root: &Path,
+        g: &str,
+        hook: &mut dyn FnMut(Step) -> bool,
+        progress: Option<cv::ProgressFn<'_>>,
+    ) -> cv::Result<cv::Manifest> {
+        cv::run(
+            n,
+            RunOptions {
+                at: AT,
+                generation: g,
+                legacy_root: root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                hook,
+                progress,
+            },
+        )
+    }
+
+    fn authority(n: &Layout) -> cv::Authority {
+        match cv::read_authority(n) {
+            AuthorityState::Present(a) => a,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn compare(n: &Layout, root: &Path) -> Comparison {
+        let m = manifest(n);
+        let a = match cv::read_authority(n) {
+            AuthorityState::Present(a) => Some(a),
+            _ => None,
+        };
+        cv::compare(
+            n,
+            &m,
+            cv::baseline(&m, a.as_ref()),
+            &cv::CompareOptions {
+                legacy_root: root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+            },
+        )
+    }
+
+    fn judge(n: &Layout, root: &Path) -> Verdict {
+        let cmp = compare(n, root);
+        cv::judge(&cv::read_authority(n), &manifest(n), root, &cmp)
+    }
+
+    /// setup 的回滚事务（07 §8）：新进程已退出，按持久阶段写 `A=legacy`。
+    fn setup_rolls_back(n: &Layout) {
+        assert!(matches!(
+            handover::settle_for_rollback(&n.root, "TXN-ROLLBACK", 1_790_000_000_000),
+            Ok(RollbackAuthority::Written { .. })
+        ));
+        assert_eq!(authority(n).authority, "legacy");
+    }
+
+    fn sql(path: &Path, batch: &str) {
+        Connection::open(path)
+            .unwrap()
+            .execute_batch(batch)
+            .unwrap();
+    }
+
+    /// 以 2.x 为准的完整一轮：判定 Reconvert → 封存当前 generation（封存物与封存前逐字节相同）→ S2 重转；
+    /// 新发布物的业务摘要就是 `L` 现在的摘要。返回新的清单。
+    fn reconvert(f: &Fixture, n: &Layout, root: &Path) -> cv::Manifest {
+        assert_eq!(judge(n, root), Verdict::Reconvert);
+        let published = tree(&n.data());
+        let sealed = cv::choose_legacy(n, T2).unwrap();
+        assert_eq!(sealed.parent().unwrap(), n.root.join("superseded"));
+        assert_eq!(
+            tree(&sealed.join("data")),
+            published,
+            "the superseded 3.0 side is not intact"
+        );
+        assert!(
+            sealed.join("conversion.json").is_file() && sealed.join("authority.json").is_file()
+        );
+        assert_eq!(cv::decide(n, true), Startup::FirstConversion);
+        let m = run(n, root, G2, None).unwrap();
+        assert_eq!(m.business_digest, business(f, root));
+        assert_eq!(cv::decide(n, true), Startup::Published(m.clone()));
+        m
+    }
+
+    fn conflict(v: Verdict) -> String {
+        match v {
+            Verdict::Conflict(why) => why,
+            other => panic!("expected a source conflict: {other:?}"),
+        }
+    }
+
+    /// 转换跑起来之前的准备：发布一次。返回 (夹具, L, N, 清单, L 的业务摘要)。
+    fn published(
+        name: &str,
+    ) -> (
+        Fixture,
+        PathBuf,
+        Layout,
+        cv::Manifest,
+        BTreeMap<String, String>,
+    ) {
+        let (f, root) = json_fixture(name);
+        let before = business(&f, &root);
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        assert_eq!(m.business_digest, before);
+        (f, root, n, m, before)
+    }
+
+    // ---------------- F1–F9：转换本身
+
+    /// F1：SNAPSHOT 中途源文件变化或新增 → FAILED，回到等待静止（下次按 S3 重来），不发布。
+    #[test]
+    fn f01_a_source_changing_during_snapshot_fails() {
+        let (f, root) = json_fixture("f01");
+        let before = tree(&root);
+        let business_before = business(&f, &root);
+        for (i, rel) in [
+            "projects/P1/artifacts/notes.txt",
+            "projects/P1/artifacts/new.txt",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let n = layout(&f, &format!("n-{i}"));
+            let path = root.join(rel);
+            let original = fs::read(&path).ok();
+            let r = run_with(
+                &n,
+                &root,
+                G1,
+                &mut |s| {
+                    if s == Step::SnapshotCopied {
+                        fs::write(&path, b"2.x wrote this while copying").unwrap();
+                    }
+                    true
+                },
+                None,
+            );
+            assert!(matches!(r, Err(cv::Error::SourceNotQuiet(_))), "{r:?}");
+            assert_eq!(manifest(&n).phase, Phase::Failed);
+            assert!(!n.data().exists());
+            assert_eq!(
+                cv::decide(&n, true),
+                Startup::Restart {
+                    generation: G1.into()
+                }
+            );
+            match original {
+                Some(bytes) => fs::write(&path, bytes).unwrap(),
+                None => fs::remove_file(&path).unwrap(),
+            }
+        }
+        assert_eq!(tree(&root), before);
+        assert_eq!(business(&f, &root), business_before);
+    }
+
+    /// F2：复制中断（进程被杀）→ S3 重来，换新 generation 后正常发布。
+    #[test]
+    fn f02_a_killed_copy_restarts() {
+        let (f, root) = json_fixture("f02");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        assert!(matches!(
+            run_with(&n, &root, G1, &mut |s| s != Step::SnapshotCopied, None),
+            Err(cv::Error::Interrupted(_))
+        ));
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        cv::discard_attempt(&n, G1).unwrap();
+        // 丢弃之后是一次干净的首次转换，不再看到被杀那一代的 M。
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        let m = run(&n, &root, G2, None).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F3：IMPORT 中途被杀 → S3 重来，没有残留的发布物。
+    #[test]
+    fn f03_a_killed_import_leaves_no_publication() {
+        let (f, root) = json_fixture("f03");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        assert!(run_with(&n, &root, G1, &mut |s| s != Step::Importing, None).is_err());
+        assert!(!n.data().exists(), "a killed IMPORT left a publication");
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        cv::discard_attempt(&n, G1).unwrap();
+        run(&n, &root, G2, None).unwrap();
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F4：VERIFY 发现差异 → FAILED，报告指出是哪些对象，不发布。
+    #[test]
+    fn f04_a_verify_difference_fails_and_names_the_objects() {
+        let (f, root) = json_fixture("f04");
+        sql(
+            &root.join("projects/P1/project.sqlite"),
+            &format!(
+                "INSERT INTO idempotency_keys (key, operation, request_fingerprint, response_json, created_at, op_id, actor_session_id)
+                 VALUES ('S1:x1', 'work.update', 'fp', '{{}}', '{T}', 'other', NULL);"
+            ),
+        );
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        assert!(matches!(
+            run_with(&n, &root, G1, &mut |_| true, None),
+            Err(cv::Error::Convert(ConvertError::Verify(_)))
+        ));
+        let m = manifest(&n);
+        assert_eq!(m.phase, Phase::Failed);
+        assert!(
+            m.failure.as_deref().is_some_and(|w| w.contains("verify")),
+            "{:?}",
+            m.failure
+        );
+        let report = fs::read_to_string(n.staging(G1).join("report.json")).unwrap();
+        assert!(
+            report.contains("S1:x1"),
+            "the report does not name the object: {report}"
+        );
+        assert!(!n.data().exists());
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F5：改名已成功、`M` 还没写 PUBLISHED 就被杀 → S4，身份一致 → 补写 PUBLISHED。
+    #[test]
+    fn f05_killed_after_the_rename_finishes_publishing() {
+        let (f, root) = json_fixture("f05");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        assert!(run_with(&n, &root, G1, &mut |s| s != Step::Renamed, None).is_err());
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::FinishPublishing {
+                generation: G1.into()
+            }
+        );
+        let m = cv::finish_publishing(&n, AT).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        assert_eq!(authority(&n).by, "publish");
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F6：`M` 丢失或损坏、发布物还在 → S5：发布物整体隔离（原样、不打开），然后重新转换。
+    #[test]
+    fn f06_a_lost_manifest_quarantines_the_publication() {
+        let (f, root, n, _, before) = published("f06");
+        for damage in [None, Some(&b"{\"schema\":1"[..])] {
+            match damage {
+                None => fs::remove_file(n.manifest()).unwrap(),
+                Some(bytes) => fs::write(n.manifest(), bytes).unwrap(),
+            }
+            let data = tree(&n.data());
+            assert!(matches!(cv::decide(&n, true), Startup::Quarantine { .. }));
+            let target = cv::seal(&n, Seal::Quarantine, AT).unwrap();
+            assert_eq!(
+                tree(&target.join("data")),
+                data,
+                "the quarantined publication changed"
+            );
+            assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+            let m = run(&n, &root, G2, None).unwrap();
+            assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        }
+        assert_eq!(business(&f, &root), before);
+    }
+
+    /// F7：两个新实例同时启动 → 只有一个拿得到准入。
+    #[test]
+    fn f07_two_instances_get_one_admission() {
+        let (f, root) = json_fixture("f07");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let first = cv::admit(&n, || Quiesce::Quiet).unwrap();
+        assert!(matches!(
+            cv::admit(&n, || Quiesce::Quiet),
+            Err(cv::AdmitError::AlreadyRunning)
+        ));
+        run(&n, &root, G1, None).unwrap();
+        drop(first);
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F8：磁盘满（写不进 staging）→ FAILED 并写明原因；旧版照常可用（`L` 不变），下次按 S3 重来。
+    #[test]
+    fn f08_a_full_disk_fails_the_attempt() {
+        let (f, root) = json_fixture("f08");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let blocker = n.staging(G1).join("data");
+        let r = run_with(
+            &n,
+            &root,
+            G1,
+            &mut |s| {
+                if s == Step::Importing {
+                    fs::write(&blocker, b"the disk is full").unwrap();
+                }
+                true
+            },
+            None,
+        );
+        assert!(r.is_err(), "{r:?}");
+        let m = manifest(&n);
+        assert_eq!(m.phase, Phase::Failed);
+        assert!(m.failure.is_some());
+        assert!(!n.data().exists());
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F9：某个项目库损坏 → FAILED，原因指出是哪个项目，不跳过。
+    #[test]
+    fn f09_a_damaged_project_database_fails_and_is_named() {
+        let (f, root) = json_fixture("f09");
+        fs::write(root.join("projects/P2/project.sqlite"), vec![0x5au8; 8192]).unwrap();
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        assert!(run_with(&n, &root, G1, &mut |_| true, None).is_err());
+        let m = manifest(&n);
+        assert_eq!(m.phase, Phase::Failed);
+        let why = m.failure.unwrap_or_default();
+        assert!(
+            why.contains("P2"),
+            "the failure does not name the project: {why}"
+        );
+        assert!(
+            !n.data().exists(),
+            "a damaged project was skipped and published"
+        );
+        assert_eq!(tree(&root), before);
+    }
+
+    // ---------------- F10–F14、F19–F29：权威判定
+
+    /// F10：`A=v3`，源只做了 checkpoint 或 SHM 重建（VACUUM、切 WAL 后留着 `-wal` / `-shm`）→ 正常启动，不重转。
+    #[test]
+    fn f10_storage_only_changes_keep_serving() {
+        let (f, root, n, m, before) = published("f10");
+        sql(&root.join("registry/registry.sqlite"), "VACUUM;");
+        let keep = Connection::open(root.join("projects/P1/project.sqlite")).unwrap();
+        keep.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        assert!(!cv::must_compare_before_serving(
+            &cv::read_authority(&n),
+            &m
+        ));
+        assert_eq!(
+            compare(&n, &root),
+            Comparison::Unchanged(m.business_digest.clone())
+        );
+        assert_eq!(judge(&n, &root), Verdict::Serve);
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        drop(keep);
+        assert_eq!(business(&f, &root), before);
+    }
+
+    /// F11：回滚后（`A=legacy`）只改了 sync / dispatch 的 JSON → 以 2.x 为准，封存后重转。
+    #[test]
+    fn f11_rolled_back_json_changes_reconvert() {
+        let (f, root, n, _, _) = published("f11");
+        setup_rolls_back(&n);
+        let config = fs::read_to_string(root.join("sync/config.json")).unwrap();
+        fs::write(
+            root.join("sync/config.json"),
+            config.replace("\"cursor\": \"c-9\"", "\"cursor\": \"c-12\""),
+        )
+        .unwrap();
+        let after = business(&f, &root);
+        reconvert(&f, &n, &root);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F12：回滚后新增了业务数据 → 以 2.x 为准，封存后重转，封存物完整。
+    #[test]
+    fn f12_rolled_back_new_data_reconverts() {
+        let (f, root, n, _, _) = published("f12");
+        setup_rolls_back(&n);
+        sql(
+            &root.join("registry/registry.sqlite"),
+            &format!(
+                "INSERT INTO project_restore_requests (id, project_id, requested_by, source_cwd, status, request_count, created_at, updated_at)
+                 VALUES ('RR-NEW', 'P1', 'agent', 'C:/work', 'PENDING', 1, '{T2}', '{T2}');"
+            ),
+        );
+        let after = business(&f, &root);
+        let m = reconvert(&f, &n, &root);
+        let c = Connection::open(n.database()).unwrap();
+        assert_eq!(
+            q::<i64>(
+                &c,
+                "SELECT count(*) FROM project_restore_requests WHERE id = 'RR-NEW'"
+            ),
+            1
+        );
+        assert_eq!(m.business_digest, after);
+    }
+
+    /// F13：`A=v3`，旧根却有业务变化 → SOURCE_CONFLICT；两种选择各验一次。
+    #[test]
+    fn f13_a_v3_change_conflicts_and_both_choices_work() {
+        let (f, root) = json_fixture("f13");
+        let keep = layout(&f, "n-keep");
+        let back = layout(&f, "n-back");
+        let m_keep = run(&keep, &root, G1, None).unwrap();
+        let m_back = run(&back, &root, G1, None).unwrap();
+        sql(
+            &root.join("registry/registry.sqlite"),
+            "UPDATE projects SET description = 'written in 2.x' WHERE id = 'P1';",
+        );
+        let after = business(&f, &root);
+
+        // 沿用 3.0：绑定摘要，3.0 那边原样。
+        let cmp = compare(&keep, &root);
+        let why = conflict(cv::judge(&cv::read_authority(&keep), &m_keep, &root, &cmp));
+        cv::enter_conflict(&keep, &m_keep, &why, AT).unwrap();
+        assert!(matches!(
+            cv::decide(&keep, true),
+            Startup::SourceConflict(_)
+        ));
+        let data = tree(&keep.data());
+        cv::choose_v3(&keep, &m_keep, &cmp, T2).unwrap();
+        assert_eq!(cv::decide(&keep, true), Startup::Published(m_keep));
+        assert_eq!(tree(&keep.data()), data);
+
+        // 从 2.x 重转：3.0 那边封存完整。
+        let cmp = compare(&back, &root);
+        let why = conflict(cv::judge(&cv::read_authority(&back), &m_back, &root, &cmp));
+        cv::enter_conflict(&back, &m_back, &why, AT).unwrap();
+        let data = tree(&back.data());
+        let sealed = cv::choose_legacy(&back, T2).unwrap();
+        assert_eq!(tree(&sealed.join("data")), data);
+        let m = run(&back, &root, G2, None).unwrap();
+        assert_eq!(m.business_digest, after);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F14：封存途中被杀 → 重入后完成，不覆盖已有内容。
+    #[test]
+    fn f14_a_killed_seal_resumes_without_overwriting() {
+        let (f, root, n, _, before) = published("f14");
+        let data = tree(&n.data());
+        let taken = n
+            .root
+            .join("superseded")
+            .join(format!("{G1}-2026-10-03T00-00-00-000Z"));
+        put(&taken.join("keep.txt"), b"older");
+        assert!(cv::seal_with(&n, Seal::Superseded, AT, &mut |s| s != SealStep::Moved).is_err());
+        assert_eq!(cv::decide(&n, true), Startup::ResumeSeal);
+        let target = cv::seal(&n, Seal::Superseded, AT).unwrap();
+        assert_ne!(target, taken);
+        assert_eq!(fs::read(taken.join("keep.txt")).unwrap(), b"older");
+        assert_eq!(tree(&target.join("data")), data);
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        assert_eq!(business(&f, &root), before);
+    }
+
+    // ---------------- F15–F18：setup 的等待（真实的转换进度喂给 setup 的判定）
+
+    fn me() -> ProcessIdentity {
+        ProcessIdentity {
+            pid: std::process::id(),
+            started_at_ms: 1_790_000_000_000,
+            image: String::new(),
+        }
+    }
+
+    /// 转换把进度写成文件（宿主的做法），返回每次写完时 setup 读到的那一份。
+    fn converting(
+        n: &Layout,
+        root: &Path,
+        txn: &str,
+        stop: Option<Step>,
+    ) -> (cv::Result<cv::Manifest>, Vec<StartupProgress>) {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let me = me();
+        let write = |phase: &str, done: usize, total: usize| {
+            let p = StartupProgress {
+                txn: txn.into(),
+                pid: me.pid,
+                process_created_at: me.started_at_ms,
+                generation: Some(G1.into()),
+                phase: phase.into(),
+                progress: Counter {
+                    done: done as u64,
+                    total: total as u64,
+                },
+                updated_at: 0,
+            };
+            handover::write_progress(&n.root, &p).unwrap();
+            seen.borrow_mut()
+                .push(handover::read_progress(&n.root).unwrap());
+        };
+        let r = run_with(n, root, G1, &mut |s| Some(s) != stop, Some(&write));
+        (r, seen.into_inner())
+    }
+
+    /// F15：setup 等待超过 60 s，转换仍有进展 → 继续等，见证成立后成功。
+    #[test]
+    fn f15_a_long_conversion_with_progress_succeeds() {
+        let (f, root) = json_fixture("f15");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T15", None);
+        r.unwrap();
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T15", &me(), WaitPolicy::default(), t0);
+        for (i, p) in seen.iter().enumerate() {
+            let now = t0 + Duration::from_secs(90) * (i as u32 + 1);
+            assert_eq!(
+                watch.observe(now, false, true, Some(p)),
+                WaitVerdict::Waiting,
+                "{p:?}"
+            );
+        }
+        let later = t0 + Duration::from_secs(90) * (seen.len() as u32 + 1);
+        assert_eq!(
+            watch.observe(later, true, true, seen.last()),
+            WaitVerdict::Healthy
+        );
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F16：进度停止 10 min → setup 判为卡住；确认进程退出（放掉准入）后回滚，没发布就不写 `A`，
+    /// 下次再升级按 S3 重来。
+    #[test]
+    fn f16_a_stalled_conversion_is_rolled_back() {
+        let (f, root) = json_fixture("f16");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let admission = cv::admit(&n, || Quiesce::Quiet).unwrap();
+        let (r, seen) = converting(&n, &root, "T16", Some(Step::Verified));
+        assert!(r.is_err());
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T16", &me(), WaitPolicy::default(), t0);
+        let last = seen.last().unwrap();
+        assert_eq!(
+            watch.observe(t0 + Duration::from_secs(30), false, true, Some(last)),
+            WaitVerdict::Waiting
+        );
+        assert!(matches!(
+            watch.observe(t0 + Duration::from_secs(30 + 600), false, true, Some(last)),
+            WaitVerdict::Stuck(_)
+        ));
+        assert!(
+            handover::settle_for_rollback(&n.root, "T16", 0).is_err(),
+            "the stuck process still holds N"
+        );
+        drop(admission);
+        assert!(matches!(
+            handover::settle_for_rollback(&n.root, "T16", 0),
+            Ok(RollbackAuthority::NotWritten(_))
+        ));
+        assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F17：转换进程死亡 → setup 回滚到 2.x；再次升级时走 S3。
+    #[test]
+    fn f17_a_dead_conversion_rolls_back_and_restarts_later() {
+        let (f, root) = json_fixture("f17");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T17", Some(Step::Importing));
+        assert!(r.is_err());
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T17", &me(), WaitPolicy::default(), t0);
+        assert_eq!(
+            watch.observe(t0, false, false, seen.last()),
+            WaitVerdict::Dead
+        );
+        assert!(matches!(
+            handover::settle_for_rollback(&n.root, "T17", 0),
+            Ok(RollbackAuthority::NotWritten(_))
+        ));
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        cv::discard_attempt(&n, G1).unwrap();
+        run(&n, &root, G2, None).unwrap();
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F18：setup 重启后接管等待 → 接受同一 txn、同一进程的进度，拒绝旧进度。
+    #[test]
+    fn f18_a_restarted_setup_takes_over_with_the_same_txn_only() {
+        let (f, root) = json_fixture("f18");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T18", None);
+        r.unwrap();
+        let t0 = Instant::now();
+        let mut taken_over = ProgressWatch::new("T18", &me(), WaitPolicy::default(), t0);
+        let mut stale_txn = ProgressWatch::new("T-OLD", &me(), WaitPolicy::default(), t0);
+        let mut stale_process = ProgressWatch::new(
+            "T18",
+            &ProcessIdentity {
+                started_at_ms: 1,
+                ..me()
+            },
+            WaitPolicy::default(),
+            t0,
+        );
+        for p in &seen {
+            assert!(taken_over.accepts(p) && !stale_txn.accepts(p) && !stale_process.accepts(p));
+        }
+        let later = t0 + Duration::from_secs(61);
+        assert_eq!(
+            taken_over.observe(t0 + Duration::from_secs(1), false, true, seen.last()),
+            WaitVerdict::Waiting
+        );
+        assert_eq!(
+            taken_over.observe(later, false, true, seen.last()),
+            WaitVerdict::Waiting
+        );
+        assert!(matches!(
+            stale_txn.observe(later, false, true, seen.last()),
+            WaitVerdict::TimedOut(_)
+        ));
+        assert!(matches!(
+            stale_process.observe(later, false, true, seen.last()),
+            WaitVerdict::TimedOut(_)
+        ));
+        assert_eq!(tree(&root), before);
+    }
+
+    /// F19：回滚后只改了派单配置（关闭派单）→ 判「变了」→ 以 2.x 为准，派单保持关闭。
+    #[test]
+    fn f19_a_rolled_back_dispatch_switch_reconverts_and_stays_off() {
+        let (f, root, n, _, _) = published("f19");
+        setup_rolls_back(&n);
+        let config = fs::read_to_string(root.join("dispatch/config.json")).unwrap();
+        fs::write(
+            root.join("dispatch/config.json"),
+            config.replace("\"enabled\":true", "\"enabled\":false"),
+        )
+        .unwrap();
+        let after = business(&f, &root);
+        reconvert(&f, &n, &root);
+        let c = Connection::open(n.database()).unwrap();
+        assert_eq!(q::<i64>(&c, "SELECT enabled FROM dispatch_config"), 0);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F20：回滚后对已有的恢复申请续写（request_count 增加）→ 判「变了」。
+    #[test]
+    fn f20_a_repeated_restore_request_is_a_change() {
+        let (f, root) = json_fixture("f20");
+        sql(
+            &root.join("registry/registry.sqlite"),
+            &format!(
+                "INSERT INTO project_restore_requests (id, project_id, requested_by, source_cwd, status, request_count, created_at, updated_at)
+                 VALUES ('RR-1', 'P1', 'agent', 'C:/work', 'PENDING', 1, '{T}', '{T}');"
+            ),
+        );
+        let n = layout(&f, "n");
+        run(&n, &root, G1, None).unwrap();
+        setup_rolls_back(&n);
+        sql(
+            &root.join("registry/registry.sqlite"),
+            "UPDATE project_restore_requests SET request_count = request_count + 1;",
+        );
+        let after = business(&f, &root);
+        match compare(&n, &root) {
+            Comparison::Changed { families, .. } => assert_eq!(families.len(), 1, "{families:?}"),
+            other => panic!("{other:?}"),
+        }
+        reconvert(&f, &n, &root);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F21：回滚后只改了 sync 设置（deviceName / enabled）→ 判「变了」。
+    #[test]
+    fn f21_rolled_back_sync_settings_are_a_change() {
+        let (f, root, n, _, _) = published("f21");
+        setup_rolls_back(&n);
+        let config = fs::read_to_string(root.join("sync/config.json")).unwrap();
+        fs::write(
+            root.join("sync/config.json"),
+            config
+                .replace("书房电脑", "客厅电脑")
+                .replace("\"enabled\": true", "\"enabled\": false"),
+        )
+        .unwrap();
+        let after = business(&f, &root);
+        assert!(matches!(compare(&n, &root), Comparison::Changed { .. }));
+        reconvert(&f, &n, &root);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F22：回滚后只有工程指标历史变化 → 05 决定保留，所以判「变了」。
+    #[test]
+    fn f22_rolled_back_metrics_history_is_a_change() {
+        let (f, root, n, _, _) = published("f22");
+        setup_rolls_back(&n);
+        sql(
+            &root.join("projects/P1/project.sqlite"),
+            &format!(
+                "INSERT INTO engineering_project_metrics (id, git_head, captured_at, payload_json) VALUES ('M-NEW', 'abc123', '{T2}', '{{}}');"
+            ),
+        );
+        let after = business(&f, &root);
+        assert!(matches!(compare(&n, &root), Comparison::Changed { .. }));
+        reconvert(&f, &n, &root);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F23：旧根出现 05 没登记的文件或表 → UNKNOWN → 冲突（`A=v3` 与 `A=legacy` 都是）。
+    #[test]
+    fn f23_unregistered_files_or_tables_are_unknown() {
+        let (f, root, n, _, before) = published("f23");
+        let tree_before = tree(&root);
+        put(&root.join("unexpected.txt"), b"?");
+        conflict(judge(&n, &root));
+        fs::remove_file(root.join("unexpected.txt")).unwrap();
+        put(&root.join("trash/left-over.txt"), b"?");
+        conflict(judge(&n, &root));
+        fs::remove_file(root.join("trash/left-over.txt")).unwrap();
+        let registry = root.join("registry/registry.sqlite");
+        let original = fs::read(&registry).unwrap();
+        sql(&registry, "CREATE TABLE extra_table (id TEXT);");
+        assert!(matches!(compare(&n, &root), Comparison::Unknown(_)));
+        setup_rolls_back(&n);
+        conflict(judge(&n, &root));
+        fs::write(&registry, original).unwrap();
+        assert_eq!(tree(&root), tree_before);
+        assert_eq!(business(&f, &root), before);
+    }
+
+    /// F24：已发布但 `A` 没落盘；`A` 损坏或与 generation 不符 → 按冲突处理，不猜。
+    #[test]
+    fn f24_a_missing_or_mismatched_authority_is_a_conflict() {
+        let (f, root, n, _, before) = published("f24");
+        let a = authority(&n);
+        fs::remove_file(n.authority()).unwrap();
+        assert!(conflict(judge(&n, &root)).contains("missing"));
+        fs::write(n.authority(), b"{\"authority\":").unwrap();
+        assert!(conflict(judge(&n, &root)).contains("corrupt"));
+        cv::write_authority(
+            &n,
+            &cv::Authority {
+                generation: Some(G2.into()),
+                ..a
+            },
+        )
+        .unwrap();
+        assert!(conflict(judge(&n, &root)).contains(G2));
+        assert_eq!(business(&f, &root), before);
+    }
+
+    /// F25：选了「沿用 3.0」之后 2.x 又有新写入 → 识别出来，再次进入冲突。
+    #[test]
+    fn f25_new_2x_writes_after_keeping_3_0_conflict_again() {
+        let (f, root, n, m, _) = published("f25");
+        sql(
+            &root.join("registry/registry.sqlite"),
+            "UPDATE projects SET description = 'first' WHERE id = 'P1';",
+        );
+        let cmp = compare(&n, &root);
+        cv::choose_v3(&n, &m, &cmp, T2).unwrap();
+        assert_eq!(judge(&n, &root), Verdict::Serve);
+        sql(
+            &root.join("registry/registry.sqlite"),
+            "UPDATE projects SET description = 'second' WHERE id = 'P1';",
+        );
+        let after = business(&f, &root);
+        conflict(judge(&n, &root));
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// 把一个文件改成同样大小的别的内容，并把 mtime 改回原样：文件集合、size、mtime 全都相同。
+    fn same_shape_edit(path: &Path, from: &str, to: &str) {
+        assert_eq!(from.len(), to.len());
+        let mtime = fs::metadata(path).unwrap().modified().unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains(from));
+        fs::write(path, text.replace(from, to)).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), mtime);
+    }
+
+    /// F26：旧根文件集合、size、mtime 全都相同，但业务内容不同（`A=legacy`）→ 阻塞比较判「变了」→ 以 2.x 为准。
+    #[test]
+    fn f26_same_metadata_different_content_reconverts_under_legacy() {
+        let (f, root, n, _, _) = published("f26");
+        setup_rolls_back(&n);
+        let listing = |r: &Path| -> Vec<(String, u64)> {
+            tree(r)
+                .into_iter()
+                .map(|(rel, _)| {
+                    let len = fs::metadata(r.join(&rel)).unwrap().len();
+                    (rel, len)
+                })
+                .collect()
+        };
+        let shape = listing(&root);
+        same_shape_edit(&root.join("sync/config.json"), "\"c-9\"", "\"c-8\"");
+        assert_eq!(listing(&root), shape);
+        let after = business(&f, &root);
+        assert!(cv::must_compare_before_serving(
+            &cv::read_authority(&n),
+            &manifest(&n)
+        ));
+        reconvert(&f, &n, &root);
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F27：同上，`A=v3` → 后台比较判「变了」→ 进入冲突；发现之前写进 3.0 的数据都在。
+    #[test]
+    fn f27_same_metadata_different_content_conflicts_under_v3() {
+        let (f, root, n, m, _) = published("f27");
+        // 服务已经在跑，写了 3.0 自己的数据。
+        sql(
+            &n.database(),
+            "UPDATE projects SET description = 'written by 3.0' WHERE id = 'P1';",
+        );
+        same_shape_edit(&root.join("sync/config.json"), "\"c-9\"", "\"c-7\"");
+        let after = business(&f, &root);
+        let why = conflict(judge(&n, &root));
+        cv::enter_conflict(&n, &m, &why, AT).unwrap();
+        assert!(matches!(cv::decide(&n, true), Startup::SourceConflict(_)));
+        let c = Connection::open(n.database()).unwrap();
+        assert_eq!(
+            q::<String>(&c, "SELECT description FROM projects WHERE id = 'P1'"),
+            "written by 3.0"
+        );
+        assert_eq!(business(&f, &root), after);
+    }
+
+    /// F28：摘要读不出来（源文件被独占）→ UNKNOWN → 冲突，不会因为元数据相同而放行。
+    #[test]
+    fn f28_an_unreadable_source_is_unknown() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (f, root, n, _, before) = published("f28");
+        let tree_before = tree(&root);
+        let held = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("registry/registry.sqlite"))
+            .unwrap();
+        assert!(matches!(compare(&n, &root), Comparison::Unknown(_)));
+        conflict(judge(&n, &root));
+        drop(held);
+        assert_eq!(tree(&root), tree_before);
+        assert_eq!(business(&f, &root), before);
+    }
+
+    /// F29：选了「沿用 3.0」之后没有新写入 → 不会再次冲突（以被接受的摘要为基线）。
+    #[test]
+    fn f29_no_new_writes_after_keeping_3_0_keep_serving() {
+        let (f, root, n, m, _) = published("f29");
+        sql(
+            &root.join("registry/registry.sqlite"),
+            "UPDATE projects SET description = 'once' WHERE id = 'P1';",
+        );
+        let after = business(&f, &root);
+        let cmp = compare(&n, &root);
+        conflict(cv::judge(&cv::read_authority(&n), &m, &root, &cmp));
+        cv::choose_v3(&n, &m, &cmp, T2).unwrap();
+        for _ in 0..2 {
+            assert_eq!(judge(&n, &root), Verdict::Serve);
+            assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
+        }
+        assert_eq!(business(&f, &root), after);
+    }
+}

@@ -1050,6 +1050,26 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     };
     write_manifest(layout, &m)?;
 
+    match attempt(layout, opts, &mut m) {
+        Err(e @ Error::Interrupted(_)) => Err(e),
+        Err(e) => {
+            // 发布之前的任何失败（含磁盘满、写不进 staging）都记 FAILED 与原因（F8）；
+            // 已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
+            if !matches!(
+                m.phase,
+                Phase::Failed | Phase::Publishing | Phase::Published
+            ) {
+                fail(layout, &mut m, e.to_string())?;
+            }
+            Err(e)
+        }
+        ok => ok,
+    }
+}
+
+/// [`run`] 写下第一份 `M` 之后的各阶段。
+fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Manifest> {
+    let staging = layout.staging(&m.generation);
     // SNAPSHOT：枚举 F0、复制、再枚举 F1，副本的 sha256 逐个等于 F0。
     let report_progress = |stage: &str, done: usize, total: usize| {
         if let Some(p) = opts.progress {
@@ -1067,14 +1087,14 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
         Ok(files) => m.source_files = files,
         Err(e @ Error::Interrupted(_)) => return Err(e),
         Err(e) => {
-            fail(layout, &mut m, e.to_string())?;
+            fail(layout, m, e.to_string())?;
             return Err(e);
         }
     }
 
     // IMPORT + VERIFY：在副本上转换（转换器自带独立 VERIFY），登记路径指向 L。
     m.phase = Phase::Import;
-    write_manifest(layout, &m)?;
+    write_manifest(layout, m)?;
     checkpoint(opts.hook, Step::Importing, "IMPORT")?;
     let data = staging.join("data");
     std::fs::create_dir_all(&data)?;
@@ -1087,7 +1107,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
                 at: opts.at,
                 allow_real_data_root: opts.allow_real_data_root,
                 real_data_root: opts.real_data_root,
-                generation: Some(g),
+                generation: Some(opts.generation),
                 secrets_check: opts.secrets_check,
                 accept_unconvertible: opts.accept_unconvertible,
                 origin_root: Some(opts.legacy_root),
@@ -1101,7 +1121,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
             if let ConvertError::Verify(r) = &e {
                 write_atomic(&staging.join("report.json"), r.report_json().as_bytes())?;
             }
-            fail(layout, &mut m, e.to_string())?;
+            fail(layout, m, e.to_string())?;
             return Err(e.into());
         }
     };
@@ -1112,14 +1132,14 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
         report.attachment_jsonl().as_bytes(),
     )?;
     if let Err(why) = publishable(&report) {
-        fail(layout, &mut m, why.clone())?;
+        fail(layout, m, why.clone())?;
         return Err(Error::Unpublishable(why));
     }
     m.phase = Phase::Verify;
     m.verify_digest = Some(sha_hex(report_json.as_bytes()));
     m.business_digest = report.business_digest();
     m.accepted_unconvertible = report.accepted_unconvertible.clone();
-    write_manifest(layout, &m)?;
+    write_manifest(layout, m)?;
     checkpoint(opts.hook, Step::Verified, "VERIFY")?;
 
     // PUBLISHING：新库合并 WAL、改回单文件后关闭；M 先落盘，再整体改名。
@@ -1129,7 +1149,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     }
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
-    write_manifest(layout, &m)?;
+    write_manifest(layout, m)?;
     report_progress("PUBLISHING", 0, 1);
     checkpoint(opts.hook, Step::BeforeRename, "PUBLISHING")?;
     if layout.data().exists() {
@@ -1138,9 +1158,9 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     }
     rename_durable(&data, &layout.data(), false)?;
     checkpoint(opts.hook, Step::Renamed, "PUBLISHING")?;
-    publish(layout, &mut m, opts.at)?;
+    publish(layout, m, opts.at)?;
     report_progress("PUBLISHED", 1, 1);
-    Ok(m)
+    Ok(m.clone())
 }
 
 /// 发布目标被占用时的兜底：只把 `N\data\` 移进隔离区，不动 `M`（它属于正在发布的这一次）。

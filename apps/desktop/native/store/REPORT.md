@@ -296,6 +296,26 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **用例**：`legacy.rs` 的 `w3g::*`。`L` 一个字节都不变，`N` 不被创建。
 - **变异**：`output/w3-evidence/w3g-mutation-evidence.json`。
 
+## 故障注入矩阵 F1–F29（W3h）
+
+07 §10 每一项一个用例，在 `legacy.rs` 的 `fault_matrix::fNN_*`。
+
+- **每项都断言三件事**：
+  - 选中的分支正确；
+  - 没被选中的一边完整：封存物、隔离物与封存前逐字节相同，冲突期间 3.0 写的数据还在；
+  - `L` 的业务对象集合没有被转换器改动。用转换的同一流程只读算 business_digest；用例自己模拟的 2.x 写入除外，比的是写入之后的那一份。凡是用例没动 `L` 的，再加一条整棵目录树逐字节相同。
+- **几项的造法**：
+  - F4 往项目库塞一条自相矛盾的旧回执，让 VERIFY 失败，报告点名 `S1:x1`；
+  - F8 在 IMPORT 时把 `staging\<g>\data` 占成文件，模拟磁盘写不进；
+  - F9 把一个项目库写成垃圾，失败原因点名 `P2`；
+  - F10 VACUUM 加切 WAL，并留着连接；
+  - F26 / F27 改成同样长度的内容，再把 mtime 改回原样；
+  - F28 以 `share_mode(0)` 独占一个源文件；
+  - F15–F18 把真实转换写出的进度文件逐条交给 setup 的 `ProgressWatch`。
+- **为 F8 补的能力**：`run` 拆成 `run` 加 `attempt`。PUBLISHING 之前的任何失败（不只 SNAPSHOT 与转换器自己的错误）都记 FAILED 和原因。已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
+- **变异**：`output/w3-evidence/w3h-mutation-evidence.json`，21 条。F15–F18 的变异落在 install-state，由这里的矩阵用例杀死。首跑有一条存活：「重启保留旧 M」。原因是 F2 只看重启后能发布，而下一次转换反正会覆盖 M。F2 现在在 `discard_attempt` 之后断言回到 FirstConversion。
+- **没有用例的分支**：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。按设计不记 FAILED，下次按 S3 重来；矩阵里没有能确定性触发它的注入点。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。
