@@ -348,8 +348,55 @@ pub(super) fn migration_failed(
         )));
     }
     for row in rows {
+        // 先按 2.0 的重试走一遍（不落任何状态）：能不能恢复决定了舍弃许可是否成立（05 §4.1）。
+        let attempt = (|| -> std::result::Result<(usize, PathBuf, _), String> {
+            let i = sources
+                .iter()
+                .position(|p| {
+                    p.parent()
+                        .and_then(Path::file_name)
+                        .is_some_and(|n| n == row.id.as_str())
+                })
+                .ok_or("its database is missing")?;
+            if std::fs::metadata(&sources[i]).map_or(true, |m| m.len() == 0) {
+                return Err("its database is empty".into());
+            }
+            let (working, p) = prepare_source(
+                &sources[i],
+                Home::Project,
+                &work.join(format!("recovered-{}.sqlite", prepared.len())),
+                at,
+            )
+            .map_err(|e| e.to_string())?;
+            let identity: Option<(String, String)> = Connection::open(&working)
+                .and_then(|w| {
+                    w.query_row(
+                        "SELECT project_id, project_code FROM project_meta WHERE singleton = 1",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                })
+                .map_err(|e| e.to_string())?;
+            if identity.as_ref() != Some(&(row.id.clone(), row.code.clone())) {
+                return Err("project_meta does not match the registry".into());
+            }
+            Ok((i, working, p))
+        })();
         if accepted.contains(&row.code) {
+            // 重试能恢复的项目不许舍弃：许可是给「恢复不了」的（旧许可也不能拿来丢掉现在恢复得了的数据）。
+            if attempt.is_ok() {
+                return Err(ConvertError::Unsupported(format!(
+                    "{}: --accept-unconvertible {}: project {} can be recovered by 2.0's retry, so it is converted, not dropped",
+                    root.display(),
+                    row.code,
+                    row.id
+                )));
+            }
             // 用户点名舍弃：进回收站、没有数据；原库在 convert_files 里登记成 legacy 资产。
+            // 许可只对这一份内容有效：记下项目目录的文件集合摘要，计入 business_digest。
+            let digest = tree_digest(&root.join("projects").join(&row.id))?;
+            report.dropped_sources.insert(row.id.clone(), digest);
             c.execute(
                 "UPDATE projects SET lifecycle = 'TRASHED', updated_at = ?2 WHERE id = ?1",
                 params![row.id, at],
@@ -368,7 +415,7 @@ pub(super) fn migration_failed(
             });
             continue;
         }
-        let fail = |why: String| {
+        let (i, working, p) = attempt.map_err(|why| {
             ConvertError::Unsupported(format!(
                 "{}: project {} ({}) is {} and 2.0's retry would not recover it: {why}",
                 root.display(),
@@ -376,34 +423,7 @@ pub(super) fn migration_failed(
                 row.id,
                 row.lifecycle
             ))
-        };
-        let Some(i) = sources.iter().position(|p| {
-            p.parent()
-                .and_then(Path::file_name)
-                .is_some_and(|n| n == row.id.as_str())
-        }) else {
-            return Err(fail("its database is missing".into()));
-        };
-        if std::fs::metadata(&sources[i]).map_or(true, |m| m.len() == 0) {
-            return Err(fail("its database is empty".into()));
-        }
-        let (working, p) = prepare_source(
-            &sources[i],
-            Home::Project,
-            &work.join(format!("recovered-{}.sqlite", prepared.len())),
-            at,
-        )
-        .map_err(|e| fail(e.to_string()))?;
-        let identity: Option<(String, String)> = Connection::open(&working)?
-            .query_row(
-                "SELECT project_id, project_code FROM project_meta WHERE singleton = 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        if identity.as_ref() != Some(&(row.id.clone(), row.code.clone())) {
-            return Err(fail("project_meta does not match the registry".into()));
-        }
+        })?;
         // 2.0：同一个事务里改 ACTIVE、追加 `project.migration_recovered`（dedupe 键已在就不追加）。
         c.execute_batch("BEGIN IMMEDIATE;")?;
         let r = (|| -> rusqlite::Result<()> {
@@ -445,4 +465,36 @@ pub(super) fn migration_failed(
         prepared.push((sources.remove(i), working));
     }
     Ok(prepared)
+}
+
+/// 一个目录下全部文件的集合摘要：按相对路径排序的 (路径, 大小, sha256)。目录不在时是空集合的摘要。
+fn tree_digest(dir: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut files = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), String::new())];
+    while let Some((d, prefix)) = stack.pop() {
+        let entries = match std::fs::read_dir(&d) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && d == dir => break,
+            r => r?,
+        };
+        for e in entries {
+            let e = e?;
+            let rel = format!("{prefix}/{}", e.file_name().to_string_lossy());
+            if e.file_type()?.is_dir() {
+                stack.push((e.path(), rel));
+            } else {
+                files.push((rel, e.metadata()?.len(), super::file_sha256(&e.path())?));
+            }
+        }
+    }
+    files.sort();
+    let mut h = Sha256::new();
+    h.update(b"ATM-DROPPED-PROJECT-1");
+    for (rel, size, sha) in files {
+        for part in [rel.as_bytes(), size.to_string().as_bytes(), sha.as_bytes()] {
+            h.update(part);
+            h.update([0]);
+        }
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }

@@ -302,6 +302,10 @@ pub struct Report {
     pub settlements: Vec<Settlement>,
     /// 用户点名舍弃的项目码（[`ConvertOptions::accept_unconvertible`]），独立 VERIFY 按它重做落定。
     pub accepted_unconvertible: Vec<String>,
+    /// 舍弃的项目：项目 id → 当时 `projects\<id>\` 下文件集合的摘要。计入 [`Report::business_digest`]
+    /// （族 `dropped/<id>`），舍弃许可由此绑定当时的源内容：库修好了、内容改了，再比较就是「变了」，要重新选择
+    /// （W3 peer r1 P1-05）。
+    pub dropped_sources: BTreeMap<String, String>,
     /// 原始数据根（[`ConvertOptions::origin_root`]），独立 VERIFY 按它重做落定。
     pub origin_root: Option<PathBuf>,
 }
@@ -369,6 +373,11 @@ impl Report {
                 f.business_digest
                     .then(|| (format!("{}/{}", s.scope, s.spec), s.digest.clone()))
             })
+            .chain(
+                self.dropped_sources
+                    .iter()
+                    .map(|(id, d)| (format!("dropped/{id}"), d.clone())),
+            )
             .collect()
     }
 

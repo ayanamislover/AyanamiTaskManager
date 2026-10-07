@@ -5181,8 +5181,7 @@ mod w3d {
             txn: None,
             at: AT.into(),
             generation: Some(G1.into()),
-            accepted_source_digest: None,
-            accepted_unknown: Some("data root: unregistered entry x".into()),
+            accepted_source_digest: Some([("r/projects".to_string(), "ab".to_string())].into()),
         };
         assert_eq!(Authority::parse(&a.to_json()), Some(a.clone()));
         assert_eq!(
@@ -5371,19 +5370,8 @@ mod w3e {
             Verdict::Serve
         );
         conflict(verdict(&present(&v3), &changed), "r/projects");
+        // UNKNOWN 没有可接受的东西：不管之前接受过什么，v3 遇到 UNKNOWN 一律冲突（W3 peer r1 P1-01）。
         conflict(verdict(&present(&v3), &unknown), "unregistered entry x");
-        let accepted = Authority {
-            accepted_unknown: Some("data root: unregistered entry x".into()),
-            ..v3.clone()
-        };
-        assert_eq!(verdict(&present(&accepted), &unknown), Verdict::Serve);
-        conflict(
-            verdict(
-                &present(&accepted),
-                &Comparison::Unknown("something else".into()),
-            ),
-            "something else",
-        );
 
         assert_eq!(
             verdict(&present(&legacy), &unchanged),
@@ -5392,14 +5380,6 @@ mod w3e {
         assert_eq!(verdict(&present(&legacy), &changed), Verdict::Reconvert);
         conflict(verdict(&present(&legacy), &unknown), "unregistered entry x");
         conflict(verdict(&present(&legacy), &Comparison::LegacyGone), "gone");
-        let legacy_accepted = Authority {
-            accepted_unknown: Some("data root: unregistered entry x".into()),
-            ..legacy.clone()
-        };
-        conflict(
-            verdict(&present(&legacy_accepted), &unknown),
-            "unregistered entry x",
-        );
 
         // B3：不猜，一律冲突——即便比较结果是不变。
         conflict(verdict(&AuthorityState::Missing, &unchanged), "missing");
@@ -5572,7 +5552,7 @@ mod w3e {
             Verdict::Conflict(_)
         ));
 
-        // UNKNOWN：绑定原因。
+        // UNKNOWN：选「沿用 3.0」只放行这一次，沿用同一 generation 下接受过的摘要；同一个原因下次照样冲突。
         put(&root.join("unexpected.txt"), b"?");
         let unknown = compare(&n, &root);
         let Comparison::Unknown(why) = &unknown else {
@@ -5580,19 +5560,11 @@ mod w3e {
         };
         cv::enter_conflict(&n, &m, why, T2).unwrap();
         let a = cv::choose_v3(&n, &m, &unknown, T2).unwrap();
-        assert_eq!(
-            (
-                a.accepted_source_digest.clone(),
-                a.accepted_unknown.as_deref()
-            ),
-            (None, Some(why.as_str()))
-        );
-        assert_eq!(judge(&n, &root, &compare(&n, &root)), Verdict::Serve);
-        put(&root.join("aaa-unexpected.txt"), b"?");
-        assert!(matches!(
-            judge(&n, &root, &compare(&n, &root)),
-            Verdict::Conflict(_)
-        ));
+        assert_eq!(a.accepted_source_digest.as_ref(), Some(&digest));
+        assert_eq!(cv::read_startup_state(&n), None);
+        let again = compare(&n, &root);
+        assert_eq!(again, unknown);
+        assert!(matches!(judge(&n, &root, &again), Verdict::Conflict(_)));
     }
 }
 
@@ -5888,9 +5860,9 @@ mod w3g {
         put(&used.join("mine.txt"), b"keep");
         let shouting = PathBuf::from(root.join("dry").to_string_lossy().to_uppercase());
         for (out, why) in [
-            (root.join("dry"), "inside the 2.x data root"),
-            (shouting, "inside the 2.x data root"),
-            (n.root.join("dry"), "inside the 3.0 data root"),
+            (root.join("dry"), "overlaps the 2.x data root"),
+            (shouting, "overlaps the 2.x data root"),
+            (n.root.join("dry"), "overlaps the 3.0 data root"),
             (used.clone(), "not empty"),
         ] {
             match dry(&root, &out, &n.root, &mut || Quiesce::Quiet, &mut || {}) {
@@ -6845,5 +6817,373 @@ mod fault_matrix {
             assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
         }
         assert_eq!(business(&f, &root), after);
+    }
+}
+
+// ---------------------------------------------------------------- W3 peer r1：P1-01～P1-05 的正式用例
+
+/// W3 整体评审第一轮（`output/peer-atm3-w3-r1.md`）的五条 P1：评审的反例，加上同类的其他通道。
+mod w3_peer_r1 {
+    use super::w3d::{G1, G2, layout, manifest, run};
+    use super::*;
+    use atm_store::conversion::{
+        self as cv, CompareOptions, Comparison, DryRun, DryRunOptions, Layout, Manifest,
+        ManifestState, Quiesce, RunOptions, Seal, SealStep, Startup, Step, Verdict,
+    };
+    use std::os::windows::fs::OpenOptionsExt;
+
+    fn opts(root: &Path) -> CompareOptions<'_> {
+        CompareOptions {
+            legacy_root: root,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+        }
+    }
+
+    fn judge(n: &Layout, m: &Manifest, root: &Path, cmp: &Comparison) -> Verdict {
+        cv::judge(&cv::read_authority(n), m, root, cmp)
+    }
+
+    fn write_registry(root: &Path, description: &str) {
+        Connection::open(root.join("registry/registry.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE projects SET description = ?1 WHERE id = 'P1'",
+                [description],
+            )
+            .unwrap();
+    }
+
+    /// P1-01：UNKNOWN 下选「沿用 3.0」只放行当次。什么都没动、或者未登记的文件原样留着而业务表变了，
+    /// 下一次比较的错误文本都和上次相同，照样冲突；去掉未登记的文件后，业务表的变化照常识别。
+    #[test]
+    fn an_unknown_choice_does_not_hide_later_2x_writes() {
+        let (f, root) = json_fixture("w3r1-unknown");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        put(&root.join("unexpected.txt"), b"unchanged unknown file");
+        let cmp = cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        assert!(matches!(&cmp, Comparison::Unknown(_)), "{cmp:?}");
+        let a = cv::choose_v3(&n, &m, &cmp, AT).unwrap();
+        assert_eq!(a.accepted_source_digest, None);
+        let again = || cv::compare(&n, &m, cv::baseline(&m, Some(&a)), &opts(&root));
+
+        let same = again();
+        assert_eq!(same, cmp);
+        assert!(matches!(judge(&n, &m, &root, &same), Verdict::Conflict(_)));
+
+        write_registry(&root, "written after the choice");
+        let next = again();
+        assert_eq!(next, cmp, "the same error text");
+        assert!(matches!(judge(&n, &m, &root, &next), Verdict::Conflict(_)));
+
+        fs::remove_file(root.join("unexpected.txt")).unwrap();
+        match again() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["r/projects"]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// P1-01 的另一条通道：读不了的源文件一直占着（同一个原因），其间业务表变了，照样冲突。
+    #[test]
+    fn an_unknown_choice_on_an_unreadable_source_does_not_hide_later_writes() {
+        let (f, root) = json_fixture("w3r1-unreadable");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let held = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(root.join("projects/P1/artifacts/notes.txt"))
+            .unwrap();
+        let cmp = cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        assert!(matches!(&cmp, Comparison::Unknown(_)), "{cmp:?}");
+        let a = cv::choose_v3(&n, &m, &cmp, AT).unwrap();
+        write_registry(&root, "written while the file was held");
+        let next = cv::compare(&n, &m, cv::baseline(&m, Some(&a)), &opts(&root));
+        assert_eq!(next, cmp);
+        assert!(matches!(judge(&n, &m, &root, &next), Verdict::Conflict(_)));
+        drop(held);
+    }
+
+    fn seal_intent(n: &Layout) -> PathBuf {
+        n.root.join("runtime").join("seal.json")
+    }
+
+    fn sealed_target(n: &Layout) -> PathBuf {
+        fs::read_dir(n.root.join("superseded"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+    }
+
+    /// 封存到一半的现场：`N`、原件 `M` 与 `A` 的字节、封存前的发布物。
+    struct HalfSealed(Layout, Vec<u8>, Vec<u8>, Vec<(String, String)>);
+
+    /// 发布一次，读出原件 `M`、`A` 与发布物，再封存到「发布物已移走」处停下。
+    fn sealed_up_to_moved(name: &str) -> HalfSealed {
+        let (f, root) = json_fixture(name);
+        let n = layout(&f, "n");
+        run(&n, &root, G1, None).unwrap();
+        let (m0, a0) = (
+            fs::read(n.manifest()).unwrap(),
+            fs::read(n.authority()).unwrap(),
+        );
+        let data = tree(&n.data());
+        assert!(cv::seal_with(&n, Seal::Superseded, AT, &mut |s| s != SealStep::Moved).is_err());
+        HalfSealed(n, m0, a0, data)
+    }
+
+    /// P1-02：封存目录里留着 `M`、`A` 写了一半的副本（早先的复制被打断）。重入时按原件重写，两份都逐字节完整，
+    /// 之后才删原件和意图文件。
+    #[test]
+    fn a_resumed_seal_repairs_partial_copies() {
+        let HalfSealed(n, m0, a0, data) = sealed_up_to_moved("w3r1-seal-partial");
+        let target = sealed_target(&n);
+        fs::write(target.join("conversion.json"), &m0[..13]).unwrap();
+        fs::write(target.join("authority.json"), &a0[..9]).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::ResumeSeal);
+        let sealed = cv::seal(&n, Seal::Superseded, AT).unwrap();
+        assert_eq!(sealed, target);
+        assert_eq!(tree(&sealed.join("data")), data);
+        assert_eq!(fs::read(sealed.join("conversion.json")).unwrap(), m0);
+        assert_eq!(fs::read(sealed.join("authority.json")).unwrap(), a0);
+        assert!(!n.manifest().exists() && !n.authority().exists());
+        assert!(!seal_intent(&n).exists());
+    }
+
+    /// P1-02：`M` 的副本写好、`A` 的还没写时被杀。原件都还在；重入补齐 `A`。
+    #[test]
+    fn a_seal_killed_between_the_two_copies_completes() {
+        let HalfSealed(n, m0, a0, _) = sealed_up_to_moved("w3r1-seal-between");
+        assert!(
+            cv::seal_with(&n, Seal::Superseded, AT, &mut |s| s
+                != SealStep::ManifestCopied)
+            .is_err()
+        );
+        let target = sealed_target(&n);
+        assert_eq!(fs::read(target.join("conversion.json")).unwrap(), m0);
+        assert!(!target.join("authority.json").exists());
+        assert_eq!(fs::read(n.manifest()).unwrap(), m0);
+        assert_eq!(fs::read(n.authority()).unwrap(), a0);
+        let sealed = cv::seal(&n, Seal::Superseded, AT).unwrap();
+        assert_eq!(fs::read(sealed.join("authority.json")).unwrap(), a0);
+        assert!(!n.manifest().exists() && !n.authority().exists());
+        assert!(!seal_intent(&n).exists());
+    }
+
+    /// P1-02：目标里是另一份完整内容（不是原件的前缀）就拒绝，不覆盖；副本落不下（这里是读不了目标）也一样。
+    /// 两种情况原件与意图文件都留着，下次启动还是续做封存。
+    #[test]
+    fn a_seal_keeps_the_originals_when_a_copy_cannot_be_completed() {
+        let HalfSealed(n, m0, a0, _) = sealed_up_to_moved("w3r1-seal-refuse");
+        let target = sealed_target(&n);
+        let other = br#"{"another":"complete manifest"}"#;
+        fs::write(target.join("conversion.json"), other).unwrap();
+        match cv::seal(&n, Seal::Superseded, AT) {
+            Err(cv::Error::Refused(why)) => assert!(why.contains("different content"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(fs::read(target.join("conversion.json")).unwrap(), other);
+        assert_eq!(fs::read(n.manifest()).unwrap(), m0);
+        assert_eq!(fs::read(n.authority()).unwrap(), a0);
+        assert_eq!(cv::decide(&n, true), Startup::ResumeSeal);
+
+        fs::remove_file(target.join("conversion.json")).unwrap();
+        fs::create_dir_all(target.join("authority.json")).unwrap();
+        assert!(cv::seal(&n, Seal::Superseded, AT).is_err());
+        assert_eq!(fs::read(target.join("conversion.json")).unwrap(), m0);
+        assert_eq!(fs::read(n.manifest()).unwrap(), m0);
+        assert_eq!(fs::read(n.authority()).unwrap(), a0);
+        assert!(seal_intent(&n).exists());
+
+        fs::remove_dir(target.join("authority.json")).unwrap();
+        let sealed = cv::seal(&n, Seal::Superseded, AT).unwrap();
+        assert_eq!(fs::read(sealed.join("authority.json")).unwrap(), a0);
+        assert!(!seal_intent(&n).exists());
+    }
+
+    fn junction(alias: &Path, target: &Path) {
+        let _ = fs::remove_dir(alias);
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn dry(root: &Path, out: &Path, n: &Path) -> cv::Result<DryRun> {
+        cv::dry_run(DryRunOptions {
+            at: AT,
+            source: root,
+            out,
+            v3_root: Some(n),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce: &mut || Quiesce::Quiet,
+            after_copy: &mut || {},
+        })
+    }
+
+    /// P1-03：dry-run 按真实位置判断输出目录与 `L`、`N` 的关系（两个方向）：经 junction 别名进入 `N` 或 `L`、
+    /// 输出目录是尚不存在的 `N` 的祖先，都在动手之前拒绝，两个根一个字节都不变。阳性对照：放在两根之外照常成功。
+    #[test]
+    fn dry_run_checks_the_output_by_its_real_location() {
+        let (f, root) = json_fixture("w3r1-dry-alias");
+        let n = f.dir.join("n");
+        put(&n.join("keep.txt"), b"3.0");
+        let (before_l, before_n) = (tree(&root), tree(&n));
+        let (to_n, to_l) = (f.dir.join("alias-n"), f.dir.join("alias-l"));
+        junction(&to_n, &n);
+        junction(&to_l, &root);
+        let future = f.dir.join("future");
+        for (out, v3, why) in [
+            (
+                to_n.join("dry-result"),
+                n.clone(),
+                "overlaps the 3.0 data root",
+            ),
+            (to_n.clone(), n.clone(), "overlaps the 3.0 data root"),
+            (
+                to_l.join("dry-result"),
+                n.clone(),
+                "overlaps the 2.x data root",
+            ),
+            (
+                future.clone(),
+                future.join("n"),
+                "overlaps the 3.0 data root",
+            ),
+        ] {
+            match dry(&root, &out, &v3) {
+                Err(cv::Error::Refused(reason)) => assert!(reason.contains(why), "{reason}"),
+                other => panic!("{}: {other:?}", out.display()),
+            }
+        }
+        assert_eq!(tree(&root), before_l);
+        assert_eq!(tree(&n), before_n);
+        assert!(!future.exists());
+
+        let fine = dry(&root, &f.dir.join("elsewhere"), &n).unwrap();
+        assert!(matches!(fine, DryRun::Verified { .. }), "{fine:?}");
+        assert!(f.dir.join("elsewhere/report.json").is_file());
+        assert_eq!(tree(&n), before_n);
+        fs::remove_dir(&to_n).unwrap();
+        fs::remove_dir(&to_l).unwrap();
+    }
+
+    /// P1-04：S4 只认「读得出的实际摘要」等于「M 里合法的摘要」。M 的摘要为 null、缺字段、形状不对，
+    /// PUBLISHED 却没有摘要，都是损坏的 M；摘要合法而发布文件读不出来也不算相等。这些都隔离，不进 FinishPublishing。
+    #[test]
+    fn s4_fails_closed_without_a_readable_matching_digest() {
+        let (f, root) = json_fixture("w3r1-s4");
+        let n = layout(&f, "n");
+        assert!(run(&n, &root, G1, Some(Step::Renamed)).is_err());
+        let good = fs::read_to_string(n.manifest()).unwrap();
+        let digest = manifest(&n).publication_digest.unwrap();
+        let quoted = format!("\"{digest}\"");
+        for bad in [
+            good.replace(&quoted, "null"),
+            good.replace(&format!(",\"publication_digest\":{quoted}"), ""),
+            good.replace(&digest, &digest.to_uppercase()),
+            good.replace(&digest, &digest[..63]),
+            good.replace(&quoted, "null")
+                .replace("\"PUBLISHING\"", "\"PUBLISHED\""),
+        ] {
+            assert_ne!(bad, good);
+            fs::write(n.manifest(), &bad).unwrap();
+            assert_eq!(cv::read_manifest(&n), ManifestState::Corrupt, "{bad}");
+            assert!(
+                matches!(cv::decide(&n, true), Startup::Quarantine { .. }),
+                "{bad}"
+            );
+        }
+        fs::write(n.manifest(), &good).unwrap();
+        let finish = Startup::FinishPublishing {
+            generation: G1.into(),
+        };
+        assert_eq!(cv::decide(&n, true), finish);
+        let held = fs::File::options()
+            .read(true)
+            .share_mode(0)
+            .open(n.data().join("artifacts/P1/notes.txt"))
+            .unwrap();
+        assert!(matches!(cv::decide(&n, true), Startup::Quarantine { .. }));
+        drop(held);
+        assert_eq!(cv::decide(&n, true), finish);
+    }
+
+    fn run_dropping(n: &Layout, root: &Path, g: &str) -> cv::Result<Manifest> {
+        cv::run(
+            n,
+            RunOptions {
+                at: AT,
+                generation: g,
+                legacy_root: root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &["GGG"],
+                hook: &mut |_| true,
+                progress: None,
+            },
+        )
+    }
+
+    /// P1-05：舍弃许可绑定当时的项目目录内容（族 `dropped/<id>`）。原坏库不动，比较稳定；还没修好但内容动了是「变了」；
+    /// 修好了（重试能恢复）比较得 UNKNOWN，拿舍弃许可转换被拒绝，不带许可转换恢复出修好后的数据。
+    #[test]
+    fn a_drop_permission_is_bound_to_the_dropped_content() {
+        let (f, root) = settle_fixture("w3r1-dropped");
+        let path = root.join("projects/P7/project.sqlite");
+        empty_project(&path, "P7", "XXX", 10, Some("unconvertible old data"));
+        let n = layout(&f, "n");
+        let m = run_dropping(&n, &root, G1).unwrap();
+        assert!(m.business_digest.contains_key("dropped/P7"), "{m:?}");
+        let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE objectives SET title = 'edited, still unconvertible'",
+                [],
+            )
+            .unwrap();
+        match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"]),
+            other => panic!("{other:?}"),
+        }
+
+        Connection::open(&path)
+            .unwrap()
+            .execute("UPDATE project_meta SET project_code = 'GGG'", [])
+            .unwrap();
+        match compare() {
+            Comparison::Unknown(why) => assert!(why.contains("can be recovered"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let again = layout(&f, "again");
+        match run_dropping(&again, &root, G1) {
+            Err(e) => assert!(e.to_string().contains("can be recovered"), "{e}"),
+            Ok(m) => panic!("{m:?}"),
+        }
+        cv::discard_attempt(&again, G1).unwrap();
+        run(&again, &root, G2, None).unwrap();
+        assert_eq!(
+            q::<String>(
+                &Connection::open(again.database()).unwrap(),
+                "SELECT title FROM objectives WHERE project_id = 'P7'"
+            ),
+            "edited, still unconvertible"
+        );
     }
 }

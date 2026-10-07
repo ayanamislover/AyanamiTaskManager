@@ -212,6 +212,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     r
 }
 
+fn is_sha256_hex(d: &str) -> bool {
+    d.len() == 64
+        && d.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -410,6 +416,14 @@ impl Manifest {
                 .collect::<Option<_>>()?,
             _ => return None,
         };
+        // 摘要只收 64 位小写十六进制；PUBLISHING 与 PUBLISHED 必须有发布物摘要（S4 靠它认发布物）。
+        let publication_digest = opt_text(&v, "publication_digest")?;
+        let phase = Phase::parse(&text(&v, "phase")?)?;
+        match &publication_digest {
+            Some(d) if !is_sha256_hex(d) => return None,
+            None if matches!(phase, Phase::Publishing | Phase::Published) => return None,
+            _ => {}
+        }
         Some(Manifest {
             converter_version: text(&v, "converter_version")?,
             source_root: opt_text(&v, "source_root")?,
@@ -417,9 +431,9 @@ impl Manifest {
             business_digest,
             accepted_unconvertible,
             generation: text(&v, "generation")?,
-            phase: Phase::parse(&text(&v, "phase")?)?,
+            phase,
             verify_digest: opt_text(&v, "verify_digest")?,
-            publication_digest: opt_text(&v, "publication_digest")?,
+            publication_digest,
             started_at: text(&v, "started_at")?,
             published_at: opt_text(&v, "published_at")?,
             failure: opt_text(&v, "failure")?,
@@ -464,11 +478,9 @@ pub struct Authority {
     pub at: String,
     /// 这条记录绑定的 generation（B3：与 `M.generation` 对不上就按冲突处理）。
     pub generation: Option<String>,
-    /// 用户选「沿用 3.0」时接受的 business_digest'（07 §7，W3e）。
+    /// 用户选「沿用 3.0」时接受的 business_digest'（07 §7，W3e）。只有完整摘要能被接受：
+    /// 比较是 UNKNOWN 时没有东西可绑，那次选择只放行当次，下一次比较仍是 UNKNOWN 就再冲突（07 §6）。
     pub accepted_source_digest: Option<BTreeMap<String, String>>,
-    /// 用户在比较结果为 UNKNOWN 时选了「沿用 3.0」：记下当时的原因。之后 `A=v3` 再遇到同一个原因不再打扰，
-    /// 原因变了（多了别的问题，或者问题消失、能算出摘要了）照常判定（W3e 的取舍，见 REPORT.md）。
-    pub accepted_unknown: Option<String>,
 }
 
 impl Authority {
@@ -486,7 +498,6 @@ impl Authority {
             ("at".into(), s(&self.at)),
             ("generation".into(), opt(&self.generation)),
             ("accepted_source_digest".into(), accepted),
-            ("accepted_unknown".into(), opt(&self.accepted_unknown)),
         ]))
     }
 
@@ -516,10 +527,6 @@ impl Authority {
             at: text(&v, "at")?,
             generation: opt_text(&v, "generation")?,
             accepted_source_digest: accepted,
-            accepted_unknown: match field(&v, "accepted_unknown") {
-                None => None,
-                Some(_) => opt_text(&v, "accepted_unknown")?,
-            },
         })
     }
 }
@@ -727,7 +734,11 @@ pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
             generation: m.generation,
         },
         Phase::Publishing => {
-            let same_files = publication_digest(&layout.data()).ok() == m.publication_digest;
+            // 只有「实际读出的摘要」与「M 里合法的摘要」相等才算同一份；读失败不能变成可相等的缺省值。
+            let same_files = match (publication_digest(&layout.data()), &m.publication_digest) {
+                (Ok(actual), Some(expected)) => actual == *expected,
+                _ => false,
+            };
             match published_generation(layout) {
                 Some(g) if g == m.generation && same_files => Startup::FinishPublishing {
                     generation: m.generation,
@@ -812,6 +823,8 @@ pub enum SealStep {
     Intended,
     /// 发布物已移走、`M` 与 `A` 还没收尾。
     Moved,
+    /// `M` 的副本已写好、`A` 的还没写。
+    ManifestCopied,
 }
 
 /// [`seal`] 带注入点：`stop` 返回 `false` 时就地中断。
@@ -879,22 +892,60 @@ pub fn seal_with(
     if !stop(SealStep::Moved) {
         return Err(Error::Interrupted("SEAL"));
     }
-    for (from, name) in [
-        (layout.manifest(), "conversion.json"),
-        (layout.authority(), "authority.json"),
-    ] {
-        let dest = target.join(name);
-        if from.exists() && !dest.exists() {
-            std::fs::copy(&from, &dest).at("copy", &from)?;
+    let copies = [
+        (layout.manifest(), target.join("conversion.json")),
+        (layout.authority(), target.join("authority.json")),
+    ];
+    for (i, (from, dest)) in copies.iter().enumerate() {
+        copy_complete(from, dest)?;
+        if i == 0 && !stop(SealStep::ManifestCopied) {
+            return Err(Error::Interrupted("SEAL"));
         }
     }
-    for from in [layout.manifest(), layout.authority()] {
+    // 原件只在两份副本都核对完整之后才删。
+    for (from, _) in &copies {
         if from.exists() {
-            std::fs::remove_file(from)?;
+            std::fs::remove_file(from).at("remove", from)?;
         }
     }
-    std::fs::remove_file(&intent)?;
+    std::fs::remove_file(&intent).at("remove", &intent)?;
     Ok(target)
+}
+
+/// 把 `M` 或 `A` 原件的完整副本落到封存目录：原子写（临时文件、刷盘、改名），写完读回核对。
+/// 重入时目标已在：
+/// - 与原件逐字节相同：跳过；
+/// - 是原件的真前缀（早先的复制写了一半）：按残缺件重写；
+/// - 其余（另一份完整内容）：拒绝，不覆盖，原件也不删。
+fn copy_complete(from: &Path, dest: &Path) -> Result<()> {
+    let original = match std::fs::read(from) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        r => r.at("read", from)?,
+    };
+    let existing = match std::fs::read(dest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        r => Some(r.at("read", dest)?),
+    };
+    match existing {
+        Some(x) if x == original => return Ok(()),
+        Some(x) if !original.starts_with(&x) => {
+            return Err(Error::Refused(format!(
+                "{} already holds different content than {}",
+                dest.display(),
+                from.display()
+            )));
+        }
+        _ => {}
+    }
+    write_atomic(dest, &original)?;
+    if std::fs::read(dest).at("read", dest)? != original {
+        return Err(Error::Io(std::io::Error::other(format!(
+            "the copy at {} does not match {}",
+            dest.display(),
+            from.display()
+        ))));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- 执行
@@ -1191,7 +1242,6 @@ fn publish(layout: &Layout, m: &mut Manifest, at: &str) -> Result<()> {
             at: at.to_string(),
             generation: Some(m.generation.clone()),
             accepted_source_digest: None,
-            accepted_unknown: None,
         },
     )?;
     let _ = std::fs::remove_dir_all(layout.staging(&m.generation).join("src"));
@@ -1397,8 +1447,8 @@ fn same_root(recorded: &str, root: &Path) -> bool {
 ///
 /// | `A` | 比较 | 结果 |
 /// | --- | --- | --- |
-/// | v3 | 不变 / `L` 不在了 / 与用户接受过的同一个 UNKNOWN | Serve |
-/// | v3 | 变了 / 其他 UNKNOWN | Conflict（后台比较得出时立即进入） |
+/// | v3 | 不变 / `L` 不在了 | Serve |
+/// | v3 | 变了 / UNKNOWN | Conflict（后台比较得出时立即进入） |
 /// | legacy | 不变 | ResumeAfterRollback |
 /// | legacy | 变了 | Reconvert |
 /// | legacy | UNKNOWN / `L` 不在了 | Conflict |
@@ -1430,9 +1480,6 @@ pub fn judge(a: &AuthorityState, m: &Manifest, legacy_root: &Path, cmp: &Compari
     }
     match (a.authority.as_str(), cmp) {
         ("v3", Comparison::Unchanged(_) | Comparison::LegacyGone) => Verdict::Serve,
-        ("v3", Comparison::Unknown(why)) if a.accepted_unknown.as_deref() == Some(why.as_str()) => {
-            Verdict::Serve
-        }
         ("v3", Comparison::Changed { families, .. }) => Verdict::Conflict(format!(
             "the 2.x data changed after the conversion: {}",
             families.join(", ")
@@ -1470,7 +1517,6 @@ pub fn rollback_authority(
         accepted_source_digest: prev
             .filter(|a| a.generation.as_deref() == Some(m.generation.as_str()))
             .and_then(|a| a.accepted_source_digest.clone()),
-        accepted_unknown: None,
     }
 }
 
@@ -1487,7 +1533,6 @@ pub fn resume_after_rollback(
         at: at.to_string(),
         generation: prev.generation.clone(),
         accepted_source_digest: prev.accepted_source_digest.clone(),
-        accepted_unknown: None,
     };
     write_authority(layout, &a)?;
     Ok(a)
@@ -1595,18 +1640,25 @@ pub fn enter_conflict(
 
 /// 用户选「沿用 3.0（忽略 2.x 期间的修改）」（07 §7，只认 User，B2 由调用方保证）：
 /// `A=v3 by user-choice`，绑定这次比较算出的摘要；此后再比较以它为准，2.x 再有新写入还能识别出来。
-/// 比较是 UNKNOWN 时没有摘要可绑，记下原因（[`Authority::accepted_unknown`]）。先写 `A`，再清启动状态：
-/// 中间被杀的话下次启动还会再问一次，不会在没有决定的情况下放行。
+/// 比较是 UNKNOWN 时没有完整摘要可绑：只放行这一次，沿用同一 generation 下之前接受过的摘要（没有就是 `None`，
+/// 以 `M.business_digest` 为准）；下一次比较仍是 UNKNOWN 就再冲突，原因相同也一样（07 §6，W3 peer r1 P1-01）。
+/// 先写 `A`，再清启动状态：中间被杀的话下次启动还会再问一次，不会在没有决定的情况下放行。
 pub fn choose_v3(
     layout: &Layout,
     m: &Manifest,
     cmp: &Comparison,
     at: &str,
 ) -> std::io::Result<Authority> {
-    let (accepted_source_digest, accepted_unknown) = match cmp {
-        Comparison::Unchanged(d) | Comparison::Changed { digest: d, .. } => (Some(d.clone()), None),
-        Comparison::Unknown(why) => (None, Some(why.clone())),
-        Comparison::LegacyGone => (None, None),
+    let accepted_source_digest = match cmp {
+        Comparison::Unchanged(d) | Comparison::Changed { digest: d, .. } => Some(d.clone()),
+        Comparison::Unknown(_) | Comparison::LegacyGone => match read_authority(layout) {
+            AuthorityState::Present(prev)
+                if prev.generation.as_deref() == Some(m.generation.as_str()) =>
+            {
+                prev.accepted_source_digest
+            }
+            _ => None,
+        },
     };
     let a = Authority {
         authority: "v3".into(),
@@ -1615,7 +1667,6 @@ pub fn choose_v3(
         at: at.to_string(),
         generation: Some(m.generation.clone()),
         accepted_source_digest,
-        accepted_unknown,
     };
     write_authority(layout, &a)?;
     clear_startup_state(layout)?;
@@ -1667,18 +1718,58 @@ pub enum DryRun {
     SourceBusy(String),
 }
 
-fn absolute_lower(p: &Path) -> Vec<String> {
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    abs.components()
-        .filter(|c| !matches!(c, std::path::Component::CurDir))
+/// 路径的真实位置（按 Windows 规则不分大小写的分量序列）：最近一个已存在的祖先用 `canonicalize` 解析
+/// （跟随 junction 与符号链接），再接上还不存在的部分。同一个目录的不同拼写（别名、大小写、`..`）得到同一个结果。
+fn real_components(p: &Path) -> std::io::Result<Vec<String>> {
+    let abs = std::path::absolute(p).at("resolve", p)?;
+    let mut existing = abs.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing.file_name().map(|n| n.to_os_string()).ok_or(e)?);
+                existing = existing.parent().unwrap_or(existing);
+            }
+            Err(e) => return Err(e).at("stat", existing),
+        }
+    }
+    let mut real = std::fs::canonicalize(existing).at("resolve", existing)?;
+    real.extend(missing.into_iter().rev());
+    Ok(real
+        .components()
         .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-        .collect()
+        .collect())
 }
 
-/// `child` 是 `parent` 本身或在它里面（按 Windows 规则不分大小写；不要求存在）。
-fn within(child: &Path, parent: &Path) -> bool {
-    let (c, p) = (absolute_lower(child), absolute_lower(parent));
-    c.len() >= p.len() && c[..p.len()] == p[..]
+/// `child` 是 `parent` 本身或在它里面（按真实位置；不要求存在）。
+fn within(child: &Path, parent: &Path) -> std::io::Result<bool> {
+    let (c, p) = (real_components(child)?, real_components(parent)?);
+    Ok(c.len() >= p.len() && c[..p.len()] == p[..])
+}
+
+/// 两个目录有没有重叠：一个是另一个本身或在它里面。
+fn overlaps(a: &Path, b: &Path) -> std::io::Result<bool> {
+    Ok(within(a, b)? || within(b, a)?)
+}
+
+/// dry-run 的输出目录不许与 `L`、`N` 重叠（任一方向）。按真实位置判断，junction 别名绕不过去。
+fn refuse_overlap(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<()> {
+    if overlaps(out, source)? {
+        return Err(Error::Refused(format!(
+            "the output {} overlaps the 2.x data root",
+            out.display()
+        )));
+    }
+    if let Some(n) = v3_root
+        && overlaps(out, n)?
+    {
+        return Err(Error::Refused(format!(
+            "the output {} overlaps the 3.0 data root",
+            out.display()
+        )));
+    }
+    Ok(())
 }
 
 /// 07 §9：`atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。
@@ -1686,20 +1777,7 @@ fn within(child: &Path, parent: &Path) -> bool {
 /// 不写 `L`，不写 `N`（不碰 `M`、`A`、启动状态与进度），不起任何调度器。
 pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     let refuse = |why: String| Err(Error::Refused(why));
-    if within(o.out, o.source) {
-        return refuse(format!(
-            "the output {} is inside the 2.x data root",
-            o.out.display()
-        ));
-    }
-    if let Some(n) = o.v3_root
-        && within(o.out, n)
-    {
-        return refuse(format!(
-            "the output {} is inside the 3.0 data root",
-            o.out.display()
-        ));
-    }
+    refuse_overlap(o.out, o.source, o.v3_root)?;
     match std::fs::read_dir(o.out) {
         Ok(mut entries) => {
             if entries.next().is_some() {
@@ -1713,8 +1791,11 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
         return Ok(DryRun::SourceBusy(why));
     }
     std::fs::create_dir_all(o.out).at("create", o.out)?;
-    let src = o.out.join("src");
-    let data = o.out.join("data");
+    // 建好之后取它的真实路径再查一次，之后的写入都落在这个真实路径上：检查与建目录之间被换成 junction 也写不进去。
+    let out = std::fs::canonicalize(o.out).at("resolve", o.out)?;
+    refuse_overlap(&out, o.source, o.v3_root)?;
+    let src = out.join("src");
+    let data = out.join("data");
     let tidy = |keep_data: bool| {
         let _ = std::fs::remove_dir_all(&src);
         if !keep_data {
@@ -1755,9 +1836,9 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     });
     let outcome = match converted {
         Ok(report) => {
-            write_atomic(&o.out.join("report.json"), report.report_json().as_bytes())?;
+            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
             write_atomic(
-                &o.out.join("attachment.jsonl"),
+                &out.join("attachment.jsonl"),
                 report.attachment_jsonl().as_bytes(),
             )?;
             Ok(DryRun::Verified {
@@ -1766,9 +1847,9 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
             })
         }
         Err(ConvertError::Verify(report)) => {
-            write_atomic(&o.out.join("report.json"), report.report_json().as_bytes())?;
+            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
             write_atomic(
-                &o.out.join("attachment.jsonl"),
+                &out.join("attachment.jsonl"),
                 report.attachment_jsonl().as_bytes(),
             )?;
             Ok(DryRun::VerifyFailed(report.failures()))

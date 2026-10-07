@@ -197,12 +197,18 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **ResumeSeal**：有进行中的封存，先续做。
   - **S1 / S2**：没有 `M`，也没有发布物。
   - **S3**：SNAPSHOT / IMPORT / VERIFY / FAILED，或停在 PUBLISHING 但还没改名。
-  - **S4**：PUBLISHING，且库内 generation 与文件摘要都一致。
+  - **S4**：PUBLISHING，库内 generation 一致，且实际读出的文件摘要等于 `M` 里的摘要。读不出来不算相等（W3 peer r1 P1-04）。
   - **S6**：PUBLISHED，且库内 generation 一致。只比 generation，因为发布后服务会写附件。
-  - **一律隔离**：`M` 缺失或损坏时有发布物（S5，不打开发布物）；generation 不符；PUBLISHING 时文件被动过；还没到 PUBLISHING 就有发布物。
+  - **一律隔离**：`M` 缺失或损坏时有发布物（S5，不打开发布物）；generation 不符；PUBLISHING 时文件被动过或读不出来；还没到 PUBLISHING 就有发布物。
+  - **`M` 损坏**：除了读不出、形状不对，还包括摘要不是 64 位小写十六进制，以及 PUBLISHING / PUBLISHED 没有 `publication_digest`。
 - **封存 / 隔离 `seal`**：
   - **先写意图**：把种类与目标名写进 `seal.json` 再动手；中断后再调用，以意图为准续做。
-  - **不覆盖**：目标名撞了加后缀；目标里已有 `data\` 就移到 `data-2\`；`M`、`A` 的副本已存在就不覆盖。
+  - **不覆盖**：目标名撞了加后缀；目标里已有 `data\` 就移到 `data-2\`。
+  - **`M`、`A` 的副本**（W3 peer r1 P1-02）：原子写（临时文件、刷盘、改名），写完读回核对。重入时目标已在：
+    - 与原件相同就跳过；
+    - 是原件的真前缀（早先复制了一半）就重写；
+    - 其余（另一份完整内容）拒绝，不覆盖。
+      原件只在两份副本都核对完整之后才删；任何一步失败，原件和意图文件都留着，下次启动还是续做封存。
   - **封存与隔离的区别**：封存先尝试 `wal_checkpoint(TRUNCATE)`，隔离绝不打开库。
 - **用例**：`legacy.rs` 的 `w3d::*`，每个注入点中断后的续跑、源不静止、不可信发布物、封存被杀两次、准入、`M` / `A` 的形状。
 - **变异**：`output/w3-evidence/w3d-mutation-evidence.json`。
@@ -215,17 +221,20 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **`compare(N, M, 基准, L)`** 返回四种结果之一：不变、变了（列出不等的族）、UNKNOWN（带原因）、`L` 已不存在。
   - **基准**：取 `baseline(M, A)`，用户选过「沿用 3.0」就是当时接受的摘要，否则是 `M.business_digest`。
   - **怎么算**：在 `N\runtime\compare\` 里按 SNAPSHOT 同样的方式只读快照 `L`，再用转换时的 `at`、当时点名舍弃的项目（`M.accepted_unconvertible`），按转换的同一流程重算 business_digest'，用完删掉。
+  - **舍弃许可绑定内容**（W3 peer r1 P1-05）：
+    - 舍弃的项目在 business_digest 里有一族 `dropped/<id>`，是它 `projects\<id>\` 目录下文件集合的摘要。原坏库不动，比较稳定；内容一动就是「变了」。
+    - 落定对点名舍弃的项目也先按 2.0 的重试走一遍（不落状态）。重试能恢复就拒绝舍弃，比较时就得到 UNKNOWN。旧许可不能拿来丢掉现在恢复得了的数据（05 §4.1）。
   - **只看业务内容**：VACUUM、R / X 类文件都不算变（用例 `compare_tells_unchanged_changed_unknown_and_gone_apart`）。
   - **两边族集合不同**（2.x 里新建或删掉了项目）也算变了。
 - **`judge(A, M, L, 比较结果)`**：判定表如下（用例 `the_authority_table_has_a_case_for_every_cell`）。
 
-  | `A`    | 比较                                           | 结果                                                   |
-  | ------ | ---------------------------------------------- | ------------------------------------------------------ |
-  | v3     | 不变；`L` 不在了；与用户接受过的同一个 UNKNOWN | Serve                                                  |
-  | v3     | 变了；其他 UNKNOWN                             | Conflict                                               |
-  | legacy | 不变                                           | ResumeAfterRollback（`A=v3 by resume-after-rollback`） |
-  | legacy | 变了                                           | Reconvert（封存后走 S2）                               |
-  | legacy | UNKNOWN；`L` 不在了                            | Conflict                                               |
+  | `A`    | 比较                | 结果                                                   |
+  | ------ | ------------------- | ------------------------------------------------------ |
+  | v3     | 不变；`L` 不在了    | Serve                                                  |
+  | v3     | 变了；UNKNOWN       | Conflict                                               |
+  | legacy | 不变                | ResumeAfterRollback（`A=v3 by resume-after-rollback`） |
+  | legacy | 变了                | Reconvert（封存后走 S2）                               |
+  | legacy | UNKNOWN；`L` 不在了 | Conflict                                               |
 
   B3：`A` 缺失、损坏、绑定的 generation 与 `M` 不符，或 `M.source_root` 不是这次的 `L`（按 Windows 规则不分大小写），一律冲突，不猜。
 
@@ -238,10 +247,10 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **用户的两个选择**（只认 User，B2 由调用方保证）：
   - **`choose_v3`**：写 `A=v3 by user-choice`，绑定这次算出的摘要，然后清掉冲突状态。之后 2.x 不动就照常启动，再写入还能识别出来（用例 `accepting_3_0_binds_the_digest_and_later_2x_writes_are_seen_again`）。先写 `A` 再清状态：中间被杀，下次启动会再问一次。
   - **`choose_legacy`**：整个 generation 封存进 `superseded\`，之后走 S2。
-- **取舍：UNKNOWN 时选「沿用 3.0」**：没有摘要可绑，就记下原因（`A.accepted_unknown`）。之后 `A=v3` 遇到同一个原因不再打扰，原因变了照常冲突。
-  - **代价**：原因不变期间，2.x 的新写入识别不出来。
-  - **为什么这样选**：另一种做法是每次启动都问，而原因往往是 2.x 目录里一个无关文件，那样会让 3.0 一直起不来；而且用户已经明确选了忽略 2.x。
-  - 这一条只对 v3 生效，`A=legacy` 遇到 UNKNOWN 仍然冲突。留给 W3j 的 peer 评审确认。
+- **UNKNOWN 时选「沿用 3.0」只放行当次**（W3 peer r1 P1-01 推翻了原来的取舍）：
+  - 没有完整摘要，就没有可以绑定的东西。`A` 沿用同一 generation 下之前接受过的摘要，没有就是 `None`，以 `M.business_digest` 为准。
+  - 下一次比较仍是 UNKNOWN 就再冲突，原因相同也一样。原来记下原因、同一原因不再打扰的做法，会让原因不变期间 2.x 的新写入整个被放过（评审反例：未登记文件原样留着，registry 里改了项目描述，仍判 Serve）。
+  - **代价**：原因不消除，每次启动都会问。冲突状态里带着原因（例如未登记的文件名），用户可以去掉它；也可以选「从 2.x 重新转换」。
 - **`L` 不在了**（用户删了 2.x 数据）：v3 照常启动；legacy 判冲突，因为选了 2.x 为准，它的数据却没了。
 - **变异**：`output/w3-evidence/w3e-mutation-evidence.json`。
 
@@ -285,7 +294,9 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 
 - **动手之前先拒绝**（`Error::Refused`）：
   - 输出目录不是空的；
-  - 落在 `L` 里，或落在 `N` 里（按 Windows 规则不分大小写，不要求目录存在）。
+  - 与 `L` 或 `N` 重叠：任一方向的包含，按真实位置判断（W3 peer r1 P1-03）。
+    - 怎么判断：最近一个已存在的祖先 `canonicalize`（跟随 junction 与符号链接），再接上不存在的部分，不分大小写比较；
+    - 输出目录建好之后取它的真实路径再查一次，之后的写入都落在这个真实路径上。
 - **源未静止只报告**：
   - 旧版在跑或判定不了（注入的静止判定，规则同 §2）：返回 `SourceBusy`，连输出目录都不建。
   - SNAPSHOT 期间源在变：返回 `SourceNotQuiet`，复制了一半的东西清掉，不出报告。
@@ -315,6 +326,31 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **为 F8 补的能力**：`run` 拆成 `run` 加 `attempt`。PUBLISHING 之前的任何失败（不只 SNAPSHOT 与转换器自己的错误）都记 FAILED 和原因。已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
 - **变异**：`output/w3-evidence/w3h-mutation-evidence.json`，21 条。F15–F18 的变异落在 install-state，由这里的矩阵用例杀死。首跑有一条存活：「重启保留旧 M」。原因是 F2 只看重启后能发布，而下一次转换反正会覆盖 M。F2 现在在 `discard_attempt` 之后断言回到 FirstConversion。
 - **没有用例的分支**：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。按设计不记 FAILED，下次按 S3 重来；矩阵里没有能确定性触发它的注入点。
+- **范围的限度**（W3 peer r1 P2-05 指出）：
+  - F2 停在复制完成之后，F3 停在 IMPORT 写数据之前，都没有造出复制了一半或事务中途死掉的状态；
+  - F8 用文件占住 `data` 目录，造的是建不了目录，不是磁盘满或写了一半。
+    这些和 PUBLISHING 的非中断失败一起，归入 W4 接线前的硬性验收。
+
+## W3 整体评审第一轮（`output/peer-atm3-w3-r1.md`）
+
+五条 P1 已在本轮修订，各节已同步：
+
+| 编号  | 问题                                                    | 修订                                                                                 |
+| ----- | ------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| P1-01 | 接受 UNKNOWN 的原因文本，会遮住之后的业务写入           | 删掉 `accepted_unknown`；v3 遇到 UNKNOWN 一律冲突（「权威判定」一节）                |
+| P1-02 | 封存重入把残缺的 `M` / `A` 副本当完整，删掉唯一完整原件 | 副本原子写、读回核对、残缺件重写、不同内容拒绝；核对完整后才删原件（「转换状态机」） |
+| P1-03 | dry-run 的路径检查被 junction 绕过                      | 按真实位置判断两个方向的重叠，建目录后再查一次并在真实路径上写（「dry-run」）        |
+| P1-04 | S4 把两个「没有摘要」当相等                             | `M` 按阶段校验摘要；只有读得出的实际摘要等于合法摘要才认（「转换状态机」）           |
+| P1-05 | 旧的舍弃许可永久排除已可恢复的项目                      | `dropped/<id>` 族绑定内容；能恢复的项目拒绝舍弃（「权威判定」一节）                  |
+
+- **用例**：`legacy.rs` 的 `w3_peer_r1::*`，包含评审的反例，以及同类的其他通道（读不了的源文件、两份副本之间被杀、副本落不下、junction 指向 `L`、`out` 是尚不存在的 `N` 的祖先、`M` 的各种坏摘要、还没修好但内容动了）。
+- **变异**：`output/w3-evidence/w3r1-mutation-evidence.json`。
+- **P2 的验收关口**（评审定的，不在本阶段收口）：
+  - **P2-01**：VERIFY 独立核对 `project_paths.path_key`、`artifacts.local_path` 等派生列与源路径的映射。W4 使用转换输出之前完成。
+  - **P2-02**：setup 与真实自有进程的交接（START、接管、死亡、取消、超时、写 `A` 与切换的顺序），以及 `ProgressWatch` 按本次启动累计的总预算；源身份不符要在开放入口之前拦住。W4 首次接线时完成，W8 做安装与回滚全流程。
+  - **P2-03**：枚举、复制、迁移、IMPORT、VERIFY 按有界批次报进度，首条进度在开始枚举之前报。W4 之前完成。
+  - **P2-04**：store 与 setup 统一持久化契约（逐文件刷盘、元数据提交、`A` 的写入顺序），改名标志与重试要有确定性用例。W4 发布与回滚接线之前完成，掉电实验放 W8。
+  - **P2-05**：故障矩阵的范围见上一节；变异证据区分历史证据与最终候选证据，锚点随代码更新（本轮已把全部 W3 脚本的锚点对齐到当前代码并重跑）。
 
 ## report.json
 

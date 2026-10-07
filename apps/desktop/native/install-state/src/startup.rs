@@ -353,7 +353,6 @@ pub fn settle_for_rollback(n: &Path, txn: &str, at_ms: u64) -> Result<RollbackAu
         "at": iso_utc(at_ms),
         "generation": generation,
         "accepted_source_digest": accepted,
-        "accepted_unknown": null,
     });
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     write_atomic(&n.join(AUTHORITY), &bytes)
@@ -592,7 +591,7 @@ mod tests {
         fs::write(
             n.join(AUTHORITY),
             serde_json::json!({"authority": "v3", "by": "user-choice", "txn": null, "at": "x",
-                "generation": "G1", "accepted_source_digest": {"r/projects": "ab"}, "accepted_unknown": null})
+                "generation": "G1", "accepted_source_digest": {"r/projects": "ab"}})
             .to_string(),
         )
         .unwrap();
