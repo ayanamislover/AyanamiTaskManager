@@ -1,8 +1,11 @@
-//! Discovery of the running daemon through `runtime/daemon.json`.
+//! Discovery of the running service through `runtime/daemon.json` under the 3.0 data
+//! root (`ATM3_DATA_DIR`, else `%LOCALAPPDATA%\AyanamiTaskManager3`). The 2.x root is
+//! never consulted: a 3.0 bridge talking to a 2.x daemon would speak the wrong surface.
 //!
-//! The error categories mirror the JavaScript bridge, because they decide what the
-//! caller does next: `DescriptorInvalid` fails the request at once, everything else
-//! means "not up yet" and is waited out (with one wake attempt).
+//! The error categories decide what the caller does next: `DescriptorInvalid` fails the
+//! request at once, everything else means "not up yet" and is waited out (with one wake
+//! attempt) — unless `runtime/startup-state.json` says the host is waiting for the user
+//! to pick a data source (07 §7), which no amount of waiting fixes.
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -23,13 +26,44 @@ pub enum RuntimeError {
     NotReady,
 }
 
+/// The 3.0 data root `N`, resolved exactly like setup and the host
+/// (`atm_install_state::v3_root`): an empty override falls through.
 pub fn data_directory() -> Option<PathBuf> {
-    // Empty values are falsy in the old bridge and fall through, so they do here too.
-    if let Some(dir) = std::env::var_os("ATM_DATA_DIR").filter(|v| !v.is_empty()) {
+    if let Some(dir) = std::env::var_os("ATM3_DATA_DIR").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     let base = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
-    Some(PathBuf::from(base).join("AyanamiTaskManager"))
+    Some(PathBuf::from(base).join("AyanamiTaskManager3"))
+}
+
+/// `N/runtime/startup-state.json` says the host is in SOURCE_CONFLICT: it serves nothing
+/// until the user chooses a data source in the ATM window. Returns the reason to report.
+/// A file that exists but cannot be read or parsed still counts as a conflict, like the
+/// host's own reading of it: a broken file must not turn into "keep waiting".
+pub fn source_conflict() -> Option<String> {
+    let path = data_directory()?.join("runtime").join("startup-state.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("the startup state cannot be read".to_owned()),
+    };
+    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
+    match value
+        .as_ref()
+        .and_then(|v| v.get("state"))
+        .and_then(Value::as_str)
+    {
+        Some("SOURCE_CONFLICT") => Some(
+            value
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("data source conflict")
+                .to_owned(),
+        ),
+        Some(_) => None,
+        None => Some("the startup state is corrupt".to_owned()),
+    }
 }
 
 pub fn load() -> Result<Runtime, RuntimeError> {
@@ -89,11 +123,21 @@ pub fn parse(value: &Value) -> Result<Runtime, RuntimeError> {
         .get("version")
         .and_then(Value::as_str)
         .is_some_and(|v| !v.is_empty());
-    let started_ok = map
-        .get("startedAt")
-        .and_then(Value::as_str)
-        .is_some_and(parses_as_date);
-    if !version_ok || !started_ok {
+    // Optional in 3.x; validated when present.
+    let started_ok = match map.get("startedAt") {
+        None => true,
+        Some(v) => v.as_str().is_some_and(parses_as_date),
+    };
+    // 3.x: one process that is host and service, one generation (setup checks the same).
+    let layout_ok = match map.get("layout") {
+        None => true,
+        Some(v) => v.as_str() == Some("single"),
+    };
+    let generation_ok = match map.get("generation") {
+        None => true,
+        Some(v) => safe_positive_integer(v).is_some(),
+    };
+    if !version_ok || !started_ok || !layout_ok || !generation_ok {
         return Err(invalid);
     }
 
@@ -335,6 +379,9 @@ mod tests {
             ("version", json!("")),
             ("startedAt", json!("yesterday")),
             ("startedAt", json!("2026-13-01T00:00:00Z")),
+            ("layout", json!("host-and-core")),
+            ("generation", json!(0)),
+            ("generation", json!("1")),
         ];
         for (key, value) in cases {
             assert_eq!(
@@ -347,6 +394,12 @@ mod tests {
         assert!(parse(&with("token", json!("x".repeat(512)))).is_ok());
         assert!(parse(&with("token", json!("😀".repeat(257)))).is_err());
         assert!(parse(&with("pid", json!(42.0))).is_ok());
+        // What the 3.x host adds is accepted; startedAt may be absent.
+        assert!(parse(&with("layout", json!("single"))).is_ok());
+        assert!(parse(&with("generation", json!(3))).is_ok());
+        let mut bare = descriptor();
+        bare.as_object_mut().unwrap().remove("startedAt");
+        assert!(parse(&bare).is_ok());
     }
 
     #[test]

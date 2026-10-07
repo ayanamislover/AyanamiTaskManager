@@ -1,0 +1,776 @@
+//! W4g：真实的 atm-mcp.exe 经一个可注入故障的代理连真实的 atm-http（10 R11 A1、A3、A4；09 L3）。
+//!
+//! 代理记下每个请求（路径、body、X-ATM-Client），并按排好的规则对下一个匹配的请求动手：丢掉响应、
+//! 伪造 STORE_BUSY、或者在把响应交回桥之前执行一段代码（例如按范围恢复）。桥从测试自己的数据根
+//! （`ATM3_DATA_DIR`）里的 daemon.json 找到代理。
+
+mod support;
+
+use atm_domain::principal::{Principal, UiSurface};
+use atm_service::backups::RestoreScope;
+use serde_json::{Value, json};
+use std::collections::VecDeque;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+use support::*;
+
+// ---- 构建桥 -------------------------------------------------------------------------------------
+
+fn shim_crate() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("mcp-shim")
+}
+
+/// 从工作树构建桥与唤醒替身（mcp-shim 是独立 crate、独立 lock）。构建失败是硬失败，不跳过。
+fn shim() -> &'static (PathBuf, PathBuf) {
+    static BUILT: OnceLock<(PathBuf, PathBuf)> = OnceLock::new();
+    BUILT.get_or_init(|| {
+        let dir = shim_crate();
+        let status = Command::new("cargo")
+            .args(["build", "--locked", "--bins", "--examples"])
+            .current_dir(&dir)
+            .env_remove("CARGO_TARGET_DIR")
+            .status()
+            .expect("cargo");
+        assert!(status.success(), "building atm-mcp failed");
+        let debug = dir.join("target").join("debug");
+        let exe = debug.join("atm-mcp.exe");
+        let wake = debug.join("examples").join("wake-recorder.exe");
+        assert!(exe.is_file() && wake.is_file());
+        (exe, wake)
+    })
+}
+
+// ---- 故障注入代理 --------------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct Seen {
+    path: String,
+    body: Value,
+    client: Option<String>,
+}
+
+enum Act {
+    /// 照常转发，响应交回之前先执行这段代码。
+    Then(Box<dyn FnOnce() + Send>),
+    /// 转发给服务（写入照样执行），但把响应丢掉、直接断开连接。
+    Drop,
+    /// 不转发，回一个 STORE_BUSY 的工具错误。
+    Busy,
+}
+
+struct Rule {
+    path: &'static str,
+    act: Act,
+}
+
+#[derive(Default)]
+struct Script {
+    rules: VecDeque<Rule>,
+    /// 这个路径上的请求一律丢掉响应（预算耗尽的用例）。
+    always_drop: Option<&'static str>,
+    seen: Vec<Seen>,
+}
+
+struct Proxy {
+    port: u16,
+    script: Arc<Mutex<Script>>,
+}
+
+impl Proxy {
+    fn start(upstream: u16) -> Proxy {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let script = Arc::new(Mutex::new(Script::default()));
+        let shared = script.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let shared = shared.clone();
+                std::thread::spawn(move || serve(conn, upstream, &shared));
+            }
+        });
+        Proxy { port, script }
+    }
+
+    fn then(&self, path: &'static str, act: Act) {
+        self.script
+            .lock()
+            .unwrap()
+            .rules
+            .push_back(Rule { path, act });
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.script.lock().unwrap().seen.clone()
+    }
+
+    fn count(&self, path: &str) -> usize {
+        self.seen().iter().filter(|s| s.path == path).count()
+    }
+
+    fn writes(&self) -> Vec<Value> {
+        self.seen()
+            .into_iter()
+            .filter(|s| s.path.starts_with("/mcp/") && s.path != "/mcp/resolve")
+            .filter(|s| s.body["method"] == "tools/call")
+            .map(|s| s.body)
+            .collect()
+    }
+}
+
+/// 读一个 HTTP/1.1 消息（head + Content-Length 的 body）。
+fn read_message(r: &mut BufReader<&TcpStream>) -> Option<(String, Vec<u8>)> {
+    let mut head = String::new();
+    loop {
+        let mut line = String::new();
+        if r.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        head.push_str(&line);
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let length = head
+        .lines()
+        .find_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    r.read_exact(&mut body).ok()?;
+    Some((head, body))
+}
+
+fn header(head: &str, name: &str) -> Option<String> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case(name)
+            .then(|| v.trim().to_owned())
+    })
+}
+
+fn serve(conn: TcpStream, upstream: u16, script: &Mutex<Script>) {
+    let mut reader = BufReader::new(&conn);
+    let Some((head, body)) = read_message(&mut reader) else {
+        return;
+    };
+    let path = head.split(' ').nth(1).unwrap_or_default().to_owned();
+    let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let act = {
+        let mut s = script.lock().unwrap();
+        s.seen.push(Seen {
+            path: path.clone(),
+            body: parsed.clone(),
+            client: header(&head, "x-atm-client"),
+        });
+        let is_call = path == "/mcp/resolve" || parsed["method"] == "tools/call";
+        let at = s.rules.iter().position(|r| {
+            r.path == path || (r.path == "write" && is_call && path != "/mcp/resolve")
+        });
+        match at {
+            Some(i) => s.rules.remove(i).map(|r| r.act),
+            None if s.always_drop == Some("write") && is_call && path != "/mcp/resolve" => {
+                Some(Act::Drop)
+            }
+            None => None,
+        }
+    };
+    let mut out = &conn;
+    if let Some(Act::Busy) = act {
+        let reply = json!({"jsonrpc": "2.0", "id": parsed["id"], "result": {
+            "content": [{"type": "text", "text": "STORE_BUSY"}],
+            "structuredContent": {"ok": false, "code": "STORE_BUSY", "message": "busy", "retryable": true,
+                                  "committed": false, "fix": {"kind": "wait", "retry_after_ms": 100, "call": null}},
+            "isError": true}})
+        .to_string();
+        let _ = write!(
+            out,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",
+            reply.len()
+        );
+        return;
+    }
+    let Ok(up) = TcpStream::connect(("127.0.0.1", upstream)) else {
+        return;
+    };
+    // 服务只认指向自己端口的 Host：代理改写这一行，其余原样转发。
+    let head: String = head
+        .split_inclusive("\r\n")
+        .map(|l| {
+            if l.to_ascii_lowercase().starts_with("host:") {
+                format!("host: 127.0.0.1:{upstream}\r\n")
+            } else {
+                l.to_owned()
+            }
+        })
+        .collect();
+    let mut w = &up;
+    if w.write_all(head.as_bytes()).is_err() || w.write_all(&body).is_err() {
+        return;
+    }
+    let mut ur = BufReader::new(&up);
+    let Some((rhead, rbody)) = read_message(&mut ur) else {
+        return;
+    };
+    match act {
+        Some(Act::Drop) => {} // 写入已经执行，响应丢掉
+        Some(Act::Then(f)) => {
+            f();
+            let _ = out.write_all(rhead.as_bytes());
+            let _ = out.write_all(&rbody);
+        }
+        _ => {
+            let _ = out.write_all(rhead.as_bytes());
+            let _ = out.write_all(&rbody);
+        }
+    }
+}
+
+// ---- 桥进程 ---------------------------------------------------------------------------------------
+
+struct Bridge {
+    child: Child,
+    stdin: ChildStdin,
+    lines: Receiver<String>,
+    next_id: i64,
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Bridge {
+    fn spawn(cmd: Command) -> Bridge {
+        let mut cmd = cmd;
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().expect("spawn atm-mcp");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, lines) = channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Bridge {
+            child,
+            stdin,
+            lines,
+            next_id: 0,
+        }
+    }
+
+    fn request(&mut self, method: &str, params: Value, wait: Duration) -> Value {
+        self.next_id += 1;
+        let line =
+            json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params});
+        writeln!(self.stdin, "{line}").unwrap();
+        self.stdin.flush().unwrap();
+        let reply = self.lines.recv_timeout(wait).expect("bridge reply");
+        serde_json::from_str(&reply).unwrap()
+    }
+
+    fn initialize(&mut self, client: &str) -> Value {
+        self.request(
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": client, "version": "1"}}),
+            Duration::from_secs(60),
+        )
+    }
+
+    fn call(&mut self, tool: &str, args: Value) -> Value {
+        self.request(
+            "tools/call",
+            json!({"name": tool, "arguments": args}),
+            Duration::from_secs(60),
+        )["result"]
+            .clone()
+    }
+}
+
+// ---- 数据根与 daemon.json ---------------------------------------------------------------------------
+
+struct Rig {
+    w: World,
+    proxy: Proxy,
+    root: PathBuf,
+}
+
+fn rig(name: &str) -> Rig {
+    let w = world(name);
+    let proxy = Proxy::start(w.port);
+    let root = w.dir.join("n");
+    std::fs::create_dir_all(root.join("runtime")).unwrap();
+    let rig = Rig { w, proxy, root };
+    rig.publish();
+    rig
+}
+
+impl Rig {
+    fn publish(&self) {
+        let descriptor = json!({
+            "endpoint": format!("http://127.0.0.1:{}", self.proxy.port),
+            "token": TOKEN,
+            "pid": std::process::id(),
+            "instanceId": "0123456789abcdef0123456789abcdef",
+            "version": "3.0.0-test",
+            "layout": "single",
+            "generation": 1,
+        });
+        std::fs::write(
+            self.root.join("runtime").join("daemon.json"),
+            descriptor.to_string(),
+        )
+        .unwrap();
+    }
+
+    fn command(&self, exe: &Path) -> Command {
+        let mut c = Command::new(exe);
+        c.args(["--profile", "core"])
+            .env("ATM3_DATA_DIR", &self.root)
+            .env_remove("ATM_DATA_DIR");
+        c
+    }
+
+    fn bridge(&self) -> Bridge {
+        Bridge::spawn(self.command(&shim().0))
+    }
+}
+
+fn user() -> Principal {
+    Principal::trusted_ui(UiSurface::Tray)
+}
+
+fn ok(r: &Value) -> &Value {
+    assert_ne!(r["isError"], json!(true), "{r}");
+    &r["structuredContent"]
+}
+
+fn err(r: &Value) -> &Value {
+    assert_eq!(r["isError"], json!(true), "{r}");
+    &r["structuredContent"]
+}
+
+// ---- 用例 ------------------------------------------------------------------------------------------
+
+/// 签发：缺字段的调用经一次 resolve 补齐，op_id 是 auto:<ULID>；完整显式调用不 resolve；显式 op_id 原样；
+/// 连接组身份是测试进程（桥的第一个非包装祖先）加 clientInfo.name；白名单客户端拿到默认 session。
+#[test]
+fn the_bridge_signs_writes_and_names_its_client() {
+    let r = rig("bridge-sign");
+    let mut b = r.bridge();
+    assert_eq!(
+        b.initialize("claude-code")["result"]["serverInfo"]["name"],
+        json!("ayanami-task-manager")
+    );
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    assert_eq!(r.proxy.count("/mcp/resolve"), 1);
+    let writes = r.proxy.writes();
+    let args = &writes[0]["params"]["arguments"];
+    assert!(
+        args["op_id"].as_str().unwrap().starts_with("auto:"),
+        "{args}"
+    );
+    assert_eq!(args["op_id"].as_str().unwrap().len(), 5 + 26);
+    assert_eq!(args["expected_target"]["kind"], json!("EXISTING"));
+    assert!(args.get("session").is_none(), "begin 不补 session：{args}");
+
+    let me = format!("{}:", std::process::id());
+    for s in r.proxy.seen().iter().filter(|s| s.path != "/health") {
+        let client = s.client.as_deref().unwrap_or_default();
+        assert!(
+            client.starts_with(&me) && client.ends_with("@claude-code"),
+            "{client}"
+        );
+    }
+    let stored =
+        r.w.svc
+            .store()
+            .read(|tx| {
+                tx.query_row(
+                    "SELECT client_identity FROM agent_sessions WHERE id = ?1",
+                    [&session],
+                    |row| row.get::<_, String>(0),
+                )
+            })
+            .unwrap();
+    assert_eq!(Some(stored.as_str()), r.proxy.seen()[0].client.as_deref());
+
+    // 白名单：缺 session 的写入由 resolve 补上默认 session。
+    let progressed = b.call(
+        "atm_progress_add",
+        json!({"task_key": r.w.task, "summary": "开工"}),
+    );
+    ok(&progressed);
+    let last = r.proxy.writes().pop().unwrap();
+    assert_eq!(last["params"]["arguments"]["session"], json!(session));
+    assert_eq!(r.proxy.count("/mcp/resolve"), 2);
+
+    // 完整显式调用不 resolve；显式 op_id 在补字段时原样保留。
+    ok(&b.call(
+        "atm_record",
+        json!({"session": session, "project": r.w.project, "op_id": "mine-1", "kind": "FACT", "title": "t", "summary": "s"}),
+    ));
+    assert_eq!(r.proxy.count("/mcp/resolve"), 2);
+    ok(&b.call(
+        "atm_record",
+        json!({"op_id": "mine-2", "kind": "FACT", "title": "t", "summary": "s"}),
+    ));
+    assert_eq!(r.proxy.count("/mcp/resolve"), 3);
+    assert_eq!(
+        r.proxy.writes().pop().unwrap()["params"]["arguments"]["op_id"],
+        json!("mine-2")
+    );
+    // 只读工具原样转发。
+    ok(&b.call(
+        "atm_task_get",
+        json!({"task_key": r.w.task, "project": r.w.project}),
+    ));
+    assert_eq!(r.proxy.count("/mcp/resolve"), 3);
+}
+
+/// 非白名单客户端缺 session：SESSION_REQUIRED（补 session 参数），写请求根本没有发出。
+#[test]
+fn non_whitelisted_clients_get_no_default_session() {
+    let r = rig("bridge-desktop");
+    let mut b = r.bridge();
+    b.initialize("claude-ai");
+    ok(&b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-desktop", "project": r.w.project}),
+    ));
+    let before = r.proxy.writes().len();
+    let e = b.call(
+        "atm_progress_add",
+        json!({"task_key": r.w.task, "summary": "x"}),
+    );
+    let e = err(&e);
+    assert_eq!(e["code"], json!("SESSION_REQUIRED"), "{e}");
+    assert_eq!(e["fix"]["param"], json!("session"));
+    assert_eq!(r.proxy.writes().len(), before, "写请求不该发出");
+}
+
+/// 响应丢失与 STORE_BUSY：用同一份上下文重试（op_id 不换、不再 resolve），结果是一次副作用。
+#[test]
+fn lost_responses_and_busy_replies_retry_the_same_context() {
+    let r = rig("bridge-retry");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    let resolves = r.proxy.count("/mcp/resolve");
+    let before = r.proxy.writes().len();
+    r.proxy.then("write", Act::Drop);
+    r.proxy.then("write", Act::Busy);
+    let reply = b.call(
+        "atm_record",
+        json!({"session": session, "kind": "DECISION", "title": "一次", "summary": "只该写一次"}),
+    );
+    let ack = ok(&reply);
+    assert_eq!(
+        ack["replayed"],
+        json!(true),
+        "第一次已经执行，重试应当重放：{ack}"
+    );
+    let writes = r.proxy.writes();
+    let sent = &writes[before..];
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(
+        sent.windows(2).all(|p| p[0]["params"] == p[1]["params"]),
+        "重试换了上下文"
+    );
+    assert_eq!(
+        r.proxy.count("/mcp/resolve"),
+        resolves + 1,
+        "写之后又 resolve 了"
+    );
+    let records =
+        r.w.svc
+            .store()
+            .read(|tx| {
+                tx.query_row(
+                    "SELECT count(*) FROM records WHERE title = '一次'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+    assert_eq!(records, 1);
+}
+
+/// resolve 之后、写入之前项目被恢复：SCOPE_RESTORED，零写入。
+#[test]
+fn a_restore_between_resolve_and_write_is_scope_restored() {
+    let r = rig("bridge-restore");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    let svc = r.w.svc.clone();
+    let code = r.w.project.clone();
+    r.proxy.then(
+        "/mcp/resolve",
+        Act::Then(Box::new(move || {
+            let id = svc.create_manual_backup(&user()).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            svc.restore_scope(&user(), &id, RestoreScope::Project(code))
+                .unwrap();
+        })),
+    );
+    let reply = b.call(
+        "atm_record",
+        json!({"session": session, "kind": "FACT", "title": "恢复之后", "summary": "不该写入"}),
+    );
+    assert_eq!(err(&reply)["code"], json!("SCOPE_RESTORED"), "{reply}");
+    let n =
+        r.w.svc
+            .store()
+            .read(|tx| {
+                tx.query_row(
+                    "SELECT count(*) FROM records WHERE title = '恢复之后'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+    assert_eq!(n, 0);
+}
+
+/// 预算耗尽：写发出过但一直没有响应 → RESULT_UNKNOWN，fix.call 带完整上下文；照它原样重试得到重放。
+#[test]
+fn an_unconfirmed_write_ends_in_result_unknown_with_its_context() {
+    let r = rig("bridge-unknown");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    r.proxy.script.lock().unwrap().always_drop = Some("write");
+    let started = Instant::now();
+    let reply = b.call(
+        "atm_record",
+        json!({"session": session, "kind": "FACT", "title": "悬而未决", "summary": "s"}),
+    );
+    let elapsed = started.elapsed();
+    let e = err(&reply).clone();
+    assert_eq!(
+        (&e["code"], &e["committed"]),
+        (&json!("RESULT_UNKNOWN"), &json!("unknown")),
+        "{e}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(45),
+        "{elapsed:?}"
+    );
+    let args = &e["fix"]["call"]["arguments"];
+    assert!(args["op_id"].as_str().unwrap().starts_with("auto:"), "{e}");
+    assert_eq!(args["project"], json!(r.w.project));
+    assert_eq!(args["expected_target"]["kind"], json!("EXISTING"));
+    r.proxy.script.lock().unwrap().always_drop = None;
+    let again = b.call(e["fix"]["call"]["name"].as_str().unwrap(), args.clone());
+    assert_eq!(ok(&again)["replayed"], json!(true), "{again}");
+}
+
+/// 没有服务（也没有可唤醒的桌面）：写请求从未发出 → SERVICE_UNAVAILABLE、sent:false，auto id 时
+/// committed:false，fix.call 是原调用；显式 op_id 时 committed:"unknown"。
+#[test]
+fn no_service_means_service_unavailable_and_nothing_sent() {
+    let r = rig("bridge-down");
+    std::fs::remove_file(r.root.join("runtime").join("daemon.json")).unwrap();
+    let mut b = r.bridge();
+    let original = json!({"session": "S", "kind": "FACT", "title": "t", "summary": "s"});
+    let started = Instant::now();
+    let e = b.call("atm_record", original.clone());
+    let e = err(&e);
+    assert!(started.elapsed() >= Duration::from_secs(29));
+    assert_eq!(
+        (&e["code"], &e["committed"], &e["details"]["sent"]),
+        (&json!("SERVICE_UNAVAILABLE"), &json!(false), &json!(false)),
+        "{e}"
+    );
+    assert_eq!(e["fix"]["call"]["arguments"], original);
+    assert!(r.proxy.seen().is_empty());
+}
+
+/// 一个装在假安装布局里的桥：`AyanamiTaskManager.exe` 是唤醒替身，每次被拉起往 wake.jsonl 追加一行。
+fn installed_bridge(r: &Rig) -> (Bridge, PathBuf) {
+    let (exe, wake) = shim();
+    let install = r.w.dir.join("install");
+    std::fs::create_dir_all(install.join("resources")).unwrap();
+    let copied = install.join("resources").join("atm-mcp.exe");
+    std::fs::copy(exe, &copied).unwrap();
+    std::fs::copy(wake, install.join("AyanamiTaskManager.exe")).unwrap();
+    let record = r.w.dir.join("wake.jsonl");
+    let mut c = r.command(&copied);
+    c.env("ATM_WAKE_RECORD", &record);
+    (Bridge::spawn(c), record)
+}
+
+/// 等唤醒记录出现，再把服务描述发布回去（「被唤醒的桌面起来了」）。
+fn publish_after_wake(r: &Rig, record: &Path) -> std::thread::JoinHandle<()> {
+    let (root, record, port) = (r.root.clone(), record.to_owned(), r.proxy.port);
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !record.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let descriptor = json!({
+            "endpoint": format!("http://127.0.0.1:{port}"), "token": TOKEN, "pid": std::process::id(),
+            "instanceId": "fedcba9876543210fedcba9876543210", "version": "3.0.0-test",
+        });
+        std::fs::write(
+            root.join("runtime").join("daemon.json"),
+            descriptor.to_string(),
+        )
+        .unwrap();
+    })
+}
+
+fn wakes(record: &Path) -> Vec<Value> {
+    std::fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+/// 唤醒：起初没有 daemon.json，桥唤醒安装目录里的桌面（这里是唤醒替身），之后发现服务照常应答。
+#[test]
+fn a_missing_service_is_woken_and_then_used() {
+    let r = rig("bridge-wake");
+    std::fs::remove_file(r.root.join("runtime").join("daemon.json")).unwrap();
+    let (mut b, record) = installed_bridge(&r);
+    let publisher = publish_after_wake(&r, &record);
+    let reply = b.initialize("claude-code");
+    publisher.join().unwrap();
+    assert_eq!(
+        reply["result"]["serverInfo"]["name"],
+        json!("ayanami-task-manager"),
+        "{reply}"
+    );
+    let woke = wakes(&record);
+    assert_eq!(woke.len(), 1);
+    assert_eq!(woke[0]["args"], json!(["--background", "--agent-wake"]));
+}
+
+/// 服务在两次调用之间退出（daemon.json 没了）：写调用自己唤醒桌面，等新实例发布后照常写入。
+#[test]
+fn a_write_wakes_a_service_that_went_away() {
+    let r = rig("bridge-rewake");
+    let (mut b, record) = installed_bridge(&r);
+    b.initialize("claude-code");
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    assert!(wakes(&record).is_empty());
+    std::fs::remove_file(r.root.join("runtime").join("daemon.json")).unwrap();
+    let publisher = publish_after_wake(&r, &record);
+    let reply = b.call(
+        "atm_record",
+        json!({"session": session, "kind": "FACT", "title": "醒来之后", "summary": "s"}),
+    );
+    publisher.join().unwrap();
+    ok(&reply);
+    assert_eq!(wakes(&record).len(), 1);
+}
+
+/// 数据来源冲突：startup-state.json 说 SOURCE_CONFLICT 时立刻报告，不等超时。
+#[test]
+fn a_source_conflict_is_reported_at_once() {
+    let r = rig("bridge-conflict");
+    std::fs::remove_file(r.root.join("runtime").join("daemon.json")).unwrap();
+    std::fs::write(
+        r.root.join("runtime").join("startup-state.json"),
+        r#"{"generation":"G1","reason":"2.x changed after conversion","since":"2026-10-07T00:00:00.000Z","state":"SOURCE_CONFLICT"}"#,
+    )
+    .unwrap();
+    let mut b = r.bridge();
+    let started = Instant::now();
+    let reply = b.initialize("claude-code");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("ATM_SOURCE_CONFLICT"), "{message}");
+    assert!(
+        message.contains("2.x changed after conversion"),
+        "{message}"
+    );
+    let e = b.call(
+        "atm_record",
+        json!({"kind": "FACT", "title": "t", "summary": "s"}),
+    );
+    assert_eq!(
+        err(&e)["details"]["reason"]
+            .as_str()
+            .map(|s| s.starts_with("ATM_SOURCE_CONFLICT")),
+        Some(true),
+        "{e}"
+    );
+}
+
+/// 没有 --profile 的旧配置：退出码非零并提示重新安装，不转发到任何入口。
+#[test]
+fn a_missing_profile_is_refused() {
+    let r = rig("bridge-profile");
+    let out = Command::new(&shim().0)
+        .env("ATM3_DATA_DIR", &r.root)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("MCP_PROFILE_REQUIRED"));
+    assert!(r.proxy.seen().is_empty());
+}
+
+/// 经 `cmd /c` 拉起时，连接组身份仍是真正的客户端（cmd 是包装，被跳过）。
+#[test]
+fn shell_wrappers_are_skipped_in_the_client_identity() {
+    let r = rig("bridge-wrapper");
+    let mut c = Command::new("cmd");
+    c.args(["/c"])
+        .arg(&shim().0)
+        .args(["--profile", "core"])
+        .env("ATM3_DATA_DIR", &r.root)
+        .env_remove("ATM_DATA_DIR");
+    let mut b = Bridge::spawn(c);
+    b.initialize("codex-mcp-client");
+    let client = r.proxy.seen()[0].client.clone().unwrap();
+    assert!(
+        client.starts_with(&format!("{}:", std::process::id()))
+            && client.ends_with("@codex-mcp-client"),
+        "{client}"
+    );
+}

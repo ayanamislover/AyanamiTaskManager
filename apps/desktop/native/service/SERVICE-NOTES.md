@@ -656,4 +656,41 @@ W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01�
 | A3 principal 映射         | `tests/target.rs::the_call_principal_follows_session_then_actor`                                                                     |
 | A3 写工具上的上下文       | `http/tests/resolve.rs::writes_carry_the_resolved_target`                                                                            |
 
-桥的签发、重试上下文、30 s 预算与 `RESULT_UNKNOWN` 在 W4g（`atm-mcp.exe`）。
+桥的签发、重试上下文、30 s 预算与 `RESULT_UNKNOWN` 见下一节。
+
+## 桥：签发、重试、连接组身份（`mcp-shim/src/sign.rs`、`identity.rs`，W4g）
+
+`atm-mcp.exe` 是 3.x 唯一的 MCP 入口：读 3.x 数据根的 `runtime\daemon.json`，只转发到三个静态 profile，写工具的
+`tools/call` 先签发再发送。黑盒用例 `http/tests/bridge.rs` 驱动真实的 exe，经一个可注入故障的代理连真实的 atm-http。
+
+### 规格没写死、由实现定下的
+
+| 位置              | 做法                                                                                                                                                                               | 理由                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 完整显式调用      | begin 只看 op_id；知识写入看 session 与 op_id；其余写还要 project。完整的原样转发，不 resolve                                                                                      | A3：完整显式调用不生成任何东西                    |
+| 补什么            | 只补缺的 session、project、expected_target 与 `auto:<ULID>` op id；显式值一律不动；begin 的选择器（project、cwd）是 Agent 的输入，从不补                                           | A3：不覆盖 Agent 给的值                           |
+| 默认 session      | 桥自己从不挑 session：只有 resolve 给了才补；resolve 拒绝（如非白名单的 SESSION_REQUIRED）原样回给 Agent，写不发出                                                                 | A1：白名单判定只在服务端一处                      |
+| 重试              | 上下文签好后冻结；连接被拒、服务重启、STORE_BUSY 都用同一份上下文重发，不再 resolve；30 s 预算从收到调用起算，resolve 与重发共用                                                   | A3：重试换 op_id 或重新 resolve 都可能执行两次    |
+| 失败的两种结果    | 一次都没可能送达：SERVICE_UNAVAILABLE、`details.sent:false`，auto id 时 committed:false、fix.call 是原调用；可能送达过：RESULT_UNKNOWN、committed:"unknown"、fix.call 带完整上下文 | 照 fix.call 重试：已提交就重放，没提交就执行一次  |
+| 显式 op_id 没发出 | committed:"unknown"                                                                                                                                                                | 同一个 op_id 可能由别的连接发过，桥不能断言没提交 |
+| 系统随机数不可用  | 不生成可预测的 id：SERVICE_UNAVAILABLE，fix 是带上自己的 op_id                                                                                                                     |                                                   |
+| 连接组身份        | `<pid>:<FILETIME>@<clientInfo.name>`；pid 是第一个不是 shell 包装（cmd、PowerShell、pwsh、bash、sh、conhost）的祖先；父进程比子进程晚创建视为 pid 复用                             | A4；node.exe 不跳过，真实客户端在 W4j 逐个实测    |
+| 数据来源冲突      | `runtime\startup-state.json` 是 SOURCE_CONFLICT（或读不了、解析不了）时立刻报 `ATM_SOURCE_CONFLICT`，不等超时                                                                      | 07 §7：用户选好之前宿主什么都不服务               |
+| 没有 `--profile`  | 退出码 1，`MCP_PROFILE_REQUIRED`，提示从 ATM 窗口重新安装                                                                                                                          | 3.0 没有 legacy 全量入口                          |
+
+### 追溯
+
+| 规则                                 | 用例（`http/tests/bridge.rs`）                                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| A3 签发、只补缺的、显式 op_id 原样   | `the_bridge_signs_writes_and_names_its_client`                                                                          |
+| A1 非白名单不补 session              | `non_whitelisted_clients_get_no_default_session`                                                                        |
+| A3 响应丢失、STORE_BUSY 用同一上下文 | `lost_responses_and_busy_replies_retry_the_same_context`                                                                |
+| A3 恢复与 resolve 交错               | `a_restore_between_resolve_and_write_is_scope_restored`                                                                 |
+| A3 预算耗尽                          | `an_unconfirmed_write_ends_in_result_unknown_with_its_context`、`no_service_means_service_unavailable_and_nothing_sent` |
+| 唤醒                                 | `a_missing_service_is_woken_and_then_used`、`a_write_wakes_a_service_that_went_away`                                    |
+| 07 §7 来源冲突                       | `a_source_conflict_is_reported_at_once`                                                                                 |
+| 06 #97 profile 必填                  | `a_missing_profile_is_refused`                                                                                          |
+| A4 连接组身份                        | `the_bridge_signs_writes_and_names_its_client`、`shell_wrappers_are_skipped_in_the_client_identity`                     |
+
+2.x 的 JS 桥（`mcp-stdio.cjs`）仍按原来的 stdio 契约测（`apps/desktop/test/mcp-stdio-bridge.test.ts`），不再与原生桥共用。
+打包脚本里把原生桥放进 2.x 安装包的那条路径在 W4i 随发布流水线一起改。

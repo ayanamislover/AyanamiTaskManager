@@ -97,7 +97,14 @@ fn disable_syn_retransmissions(socket: &socket2::Socket) {
     }
 }
 
-pub fn post(port: u16, path: &str, token: &str, body: &str) -> Result<Response, Error> {
+/// `client` is the `X-ATM-Client` value (10 R11 A4); anything but visible ASCII is dropped.
+pub fn post(
+    port: u16,
+    path: &str,
+    token: &str,
+    body: &str,
+    client: Option<&str>,
+) -> Result<Response, Error> {
     let stream = connect_loopback(port).map_err(|error| {
         if error.kind() == io::ErrorKind::ConnectionRefused {
             Error::Refused
@@ -118,12 +125,16 @@ pub fn post(port: u16, path: &str, token: &str, body: &str) -> Result<Response, 
     } else {
         format!("127.0.0.1:{port}")
     };
+    let client = client
+        .filter(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_graphic()))
+        .map_or_else(String::new, |c| format!("x-atm-client: {c}\r\n"));
     let head = format!(
         "POST {path} HTTP/1.1\r\n\
          host: {host}\r\n\
          authorization: Bearer {token}\r\n\
          accept: application/json, text/event-stream\r\n\
          content-type: application/json\r\n\
+         {client}\
          content-length: {}\r\n\
          connection: close\r\n\r\n",
         body.len()
@@ -340,7 +351,10 @@ mod tests {
             .unwrap()
             .port();
         let started = std::time::Instant::now();
-        assert!(matches!(post(port, "/mcp", "t", "{}"), Err(Error::Refused)));
+        assert!(matches!(
+            post(port, "/mcp", "t", "{}", None),
+            Err(Error::Refused)
+        ));
         // Without SIO_TCP_INITIAL_RTO this takes about two seconds on Windows.
         let elapsed = started.elapsed();
         assert!(
