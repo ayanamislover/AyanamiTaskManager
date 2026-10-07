@@ -7708,25 +7708,28 @@ mod w3_peer_r1 {
         let mut bytes = b"SQLite format 3\0".to_vec();
         bytes.extend([0xA5u8; 200]);
         put(&path, &bytes);
+        let wal = path.with_extension("sqlite-wal");
+        put(&wal, b"frames-1");
         let n = layout(&f, "n");
         let m = run_dropping(&n, &root, G1).unwrap();
         let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        let changed = |step: &str| match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"], "{step}"),
+            other => panic!("{step}: {other:?}"),
+        };
         assert!(matches!(compare(), Comparison::Unchanged(_)));
         put(&path.with_extension("sqlite-shm"), b"index");
         assert!(matches!(compare(), Comparison::Unchanged(_)));
-        put(&path.with_extension("sqlite-wal"), b"frames");
-        match compare() {
-            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"]),
-            other => panic!("{other:?}"),
-        }
-        fs::remove_file(path.with_extension("sqlite-wal")).unwrap();
+        // WAL 的内容是绑定的一部分：同样有 -wal，字节变了就是「变了」；没了也是。
+        put(&wal, b"frames-2");
+        changed("other frames");
+        fs::remove_file(&wal).unwrap();
+        changed("no WAL");
+        put(&wal, b"frames-1");
         assert!(matches!(compare(), Comparison::Unchanged(_)));
         bytes[100] ^= 1;
         put(&path, &bytes);
-        match compare() {
-            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"]),
-            other => panic!("{other:?}"),
-        }
+        changed("a byte of the database");
     }
 }
 
