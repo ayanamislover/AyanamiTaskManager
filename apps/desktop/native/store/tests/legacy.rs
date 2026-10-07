@@ -7467,6 +7467,66 @@ mod w3_peer_r2 {
         assert_eq!((state(&root), state(&n)), before);
     }
 
+    /// W3 r4 P2-R4-01：一份副本被别的程序一直开着（不共享删除），清理退避重试之后把它与它的祖先原样留下，
+    /// `left` 写出的是那个文件；放开之后照常能删。
+    #[test]
+    fn a_busy_copy_is_left_and_named() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (f, root, n) = roots("w3r4-busy");
+        let out = f.dir.join("out");
+        let copy = out.join("src").join("dispatch").join("config.json");
+        let mut holder: Option<fs::File> = None;
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            holder = Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(&copy)
+                    .unwrap(),
+            );
+        });
+        let Err(cv::Error::CleanupIncomplete { left, outcome }) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(outcome.contains("Verified"), "{outcome}");
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("config.json"), "{left:?}");
+        assert!(copy.is_file() && out.join("src").is_dir());
+        drop(holder);
+        fs::remove_dir_all(out.join("src")).unwrap();
+    }
+
+    /// W3 r4 P2-R4-01：杀毒、索引这类短暂占用不算「留下」。副本在清理开始之后还被开着约 300 毫秒，
+    /// 清理退避重试，照常删掉，结果是 Verified。
+    #[test]
+    fn a_briefly_busy_copy_is_still_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (f, root, n) = roots("w3r4-brief");
+        let out = f.dir.join("out");
+        let copy = out.join("src").join("dispatch").join("config.json");
+        let last_report = out.join("attachment.jsonl");
+        let mut holder: Option<std::thread::JoinHandle<()>> = None;
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&copy)
+                .unwrap();
+            let last_report = last_report.clone();
+            holder = Some(std::thread::spawn(move || {
+                // 报告写完之后立刻就是清理：再开着它 300 毫秒。
+                while !last_report.exists() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                drop(file);
+            }));
+        });
+        holder.unwrap().join().unwrap();
+        assert!(matches!(result, Ok(DryRun::Verified { .. })), "{result:?}");
+        assert!(!out.join("src").exists());
+    }
+
     /// W3 r3 P1-R3-01：清理只删本次建的东西。`src` 里被放进的 junction（指向 L、N）、挪进来的一个已有目录、
     /// 被换掉的副本文件都原样留下，结果是 `CleanupIncomplete`（不是成功）；L 与 N 不变。成功、源未静止、
     /// 副本被换三条路都一样。

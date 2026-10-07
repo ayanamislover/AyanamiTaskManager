@@ -1889,10 +1889,10 @@ impl Pinned {
     fn remove(self) -> Vec<String> {
         let mut left = Vec::new();
         let mut kept: Vec<PathBuf> = Vec::new();
-        let src = self.root.path().to_path_buf();
+        // pin 的错误文本里已经带着那个文件或目录的路径。
         for (dir, mark) in self.files {
             if let Err(e) = pin::remove_file(mark) {
-                left.push(format!("{}: {e}", src.join(&dir).display()));
+                left.push(e.to_string());
                 kept.push(dir);
             }
         }
@@ -1902,36 +1902,42 @@ impl Pinned {
                 continue;
             }
             if let Err(e) = dir.remove() {
-                left.push(format!("{}: {e}", src.join(&rel).display()));
+                left.push(e.to_string());
                 kept.push(rel);
             }
         }
         if kept.is_empty()
             && let Err(e) = self.root.remove()
         {
-            left.push(format!("{}: {e}", src.display()));
+            left.push(e.to_string());
         }
         left
     }
 }
 
-/// dry-run 写报告：同目录排他新建临时文件、刷盘、不替换地改名。名字被占就失败，不会写进别人放在那里的文件。
-fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
-    let temporary = dir.join(format!("{name}.{}.tmp", std::process::id()));
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .at("create", &temporary)?;
-        f.write_all(bytes).at("write", &temporary)?;
-        f.sync_all().at("flush", &temporary)?;
+/// dry-run 写报告：在钉住的目录里排他新建临时文件、刷盘、不替换地改名。名字被占就失败，不会写进别人放在那里
+/// 的文件。临时文件从新建到改名一直开着，改名与失败时的丢弃都按句柄做（W3 r4 P1-R4-01）：这段时间里别人
+/// 改不了它的名、删不掉它，所以按名字删到别人的文件这种事不会发生。
+fn write_new(dir: &pin::Dir, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = format!("{name}.{}.tmp", std::process::id());
+    let at = dir.path().join(&temporary);
+    let mut f = pin::create_open(dir, OsStr::new(&temporary)).at("create", &at)?;
+    let written = f
+        .file()
+        .write_all(bytes)
+        .and_then(|()| f.file().sync_all())
+        .at("write", &at)
+        .and_then(|()| f.rename_into(dir, OsStr::new(name)));
+    if let Err(e) = written {
+        if let Err(d) = f.discard() {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("{e}; the temporary was not removed: {d}"),
+            ));
+        }
+        return Err(e);
     }
-    let r = rename_durable(&temporary, &dir.join(name), false);
-    if r.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    r
+    Ok(())
 }
 
 /// 07 §9：`atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。
@@ -2007,9 +2013,9 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
             Err(ConvertError::Verify(report)) => *report,
             Err(e) => return Err(e.into()),
         };
-        write_new(&out, "report.json", report.report_json().as_bytes())?;
+        write_new(out_dir, "report.json", report.report_json().as_bytes())?;
         write_new(
-            &out,
+            out_dir,
             "attachment.jsonl",
             report.attachment_jsonl().as_bytes(),
         )?;

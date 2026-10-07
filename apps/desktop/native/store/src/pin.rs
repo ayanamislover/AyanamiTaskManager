@@ -20,6 +20,31 @@ pub(crate) struct FileMark {
     id: (u32, u64),
 }
 
+/// 本次排他新建、一直开着的文件（W3 r4 P1-R4-01）：句柄带 DELETE 权限、共享方式不含 `FILE_SHARE_DELETE`，
+/// 所以从新建到改名（或丢弃）这段时间里，别人既改不了它的名、也删不掉它，名字上不会换成别的文件。
+/// 改名与丢弃都按句柄做，不按路径。
+pub(crate) struct NewFile {
+    file: File,
+    path: PathBuf,
+}
+
+impl NewFile {
+    pub(crate) fn file(&mut self) -> &mut File {
+        &mut self.file
+    }
+
+    /// 按句柄改名成钉住的 `dir` 里的 `name`；名字已存在就失败（不替换）。失败时文件仍开着、仍归调用方。
+    pub(crate) fn rename_into(&self, dir: &Dir, name: &OsStr) -> std::io::Result<()> {
+        single(name)?;
+        imp::rename_handle(&self.file, &self.path, &dir.path().join(name))
+    }
+
+    /// 按句柄删掉它（改名失败之后用）。
+    pub(crate) fn discard(self) -> std::io::Result<()> {
+        imp::discard_handle(self.file, &self.path)
+    }
+}
+
 /// 一个钉住的目录。`owned` 的是本次新建的，只有它们能 [`Dir::remove`]。
 pub(crate) struct Dir {
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -121,6 +146,14 @@ pub(crate) fn remove_file(mark: FileMark) -> std::io::Result<()> {
     imp::remove_file(mark)
 }
 
+/// 在钉住的 `parent` 里排他新建文件 `name` 并一直开着（见 [`NewFile`]）。
+pub(crate) fn create_open(parent: &Dir, name: &OsStr) -> std::io::Result<NewFile> {
+    single(name)?;
+    let path = parent.path().join(name);
+    let file = imp::create_open(&path)?;
+    Ok(NewFile { file, path })
+}
+
 fn single(name: &OsStr) -> std::io::Result<()> {
     let single = Path::new(name).components().count() == 1
         && matches!(
@@ -177,6 +210,9 @@ mod imp {
     const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x0000_4000;
     const OBJ_CASE_INSENSITIVE: u32 = 0x40;
     const FILE_DISPOSITION_INFO_CLASS: i32 = 4;
+    const FILE_RENAME_INFO_CLASS: i32 = 3;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const CREATE_NEW: u32 = 1;
     const INVALID_HANDLE_VALUE: isize = -1;
 
     #[repr(C)]
@@ -387,22 +423,54 @@ mod imp {
     fn delete_named(path: &Path, id: (u32, u64)) -> std::io::Result<()> {
         // 不跟随链接：此刻这个名字若被换成 junction，打开的是链接本身，文件号对不上。
         // 共享方式里没有 FILE_SHARE_DELETE：打开之后到删除之前，别人也改不了它的名。
-        let again = open_raw(
-            path,
-            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-        )?;
+        // 别的程序（杀毒、索引）短暂开着它时打开会得到共享冲突：退避重试约 2 秒，仍不行就原样留下并报错。
+        let again = transient(|| {
+            open_raw(
+                path,
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        })
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
         if identity(&again)? != id {
             return Err(std::io::Error::other(format!(
                 "{} was replaced; left as is",
                 path.display()
             )));
         }
+        dispose(&again)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        // 关掉句柄时真正删除。
+        drop(again);
+        Ok(())
+    }
+
+    /// 共享冲突（32）与锁冲突（33）重试约 2 秒；其余错误立即返回。
+    fn transient<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        let mut delay = std::time::Duration::from_millis(10);
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            match f() {
+                Err(e)
+                    if matches!(e.raw_os_error(), Some(32 | 33))
+                        && waited < std::time::Duration::from_secs(2) =>
+                {
+                    std::thread::sleep(delay);
+                    waited += delay;
+                    delay = (delay * 2).min(std::time::Duration::from_millis(250));
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// 标记删除：句柄关掉时删除。
+    fn dispose(file: &File) -> std::io::Result<()> {
         let flag: u8 = 1;
         // SAFETY: 句柄有效且带 DELETE 权限；信息结构是一个 BOOLEAN，长度如实传入。
         let ok = unsafe {
             SetFileInformationByHandle(
-                again.as_raw_handle(),
+                file.as_raw_handle(),
                 FILE_DISPOSITION_INFO_CLASS,
                 (&flag as *const u8).cast(),
                 1,
@@ -411,8 +479,66 @@ mod imp {
         if ok == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // 关掉句柄时目录真正删除。
-        drop(again);
+        Ok(())
+    }
+
+    pub(super) fn create_open(path: &Path) -> std::io::Result<File> {
+        let name: Vec<u16> = wide(path.as_os_str()).into_iter().chain(Some(0)).collect();
+        // SAFETY: `name` 以 0 结尾、调用期间存活；其余指针参数按文档可为空。
+        let h = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ,
+                std::ptr::null_mut(),
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                std::ptr::null_mut(),
+            )
+        };
+        if h as isize == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: 刚打开的有效句柄，所有权交给 File。
+        Ok(unsafe { File::from_raw_handle(h) })
+    }
+
+    /// FILE_RENAME_INFO（ReplaceIfExists = FALSE、RootDirectory = NULL、完整目标路径）。
+    pub(super) fn rename_handle(file: &File, from: &Path, to: &Path) -> std::io::Result<()> {
+        let name = wide(to.as_os_str());
+        let bytes = name.len() * 2;
+        // 布局（x64）：Flags u32 @0、RootDirectory @8、FileNameLength u32 @16、FileName @20。按 u64 分配保证对齐。
+        let size = 20 + bytes + 2;
+        let mut buf = vec![0u64; size.div_ceil(8)];
+        let base = buf.as_mut_ptr().cast::<u8>();
+        // SAFETY: 缓冲区至少 `size` 字节且 8 字节对齐；各字段按上面的偏移写入，名字之后留 0 结尾。
+        unsafe {
+            std::ptr::write(base.add(16).cast::<u32>(), bytes as u32);
+            std::ptr::copy_nonoverlapping(name.as_ptr().cast::<u8>(), base.add(20), bytes);
+        }
+        // SAFETY: 句柄有效且带 DELETE 权限；信息结构按上面的布局构造，长度如实传入。
+        let ok = unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FILE_RENAME_INFO_CLASS,
+                base.cast(),
+                size as u32,
+            )
+        };
+        if ok == 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("{} -> {}: {e}", from.display(), to.display()),
+            ));
+        }
+        file.sync_all()
+    }
+
+    pub(super) fn discard_handle(file: File, path: &Path) -> std::io::Result<()> {
+        dispose(&file)
+            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        drop(file);
         Ok(())
     }
 }
@@ -457,6 +583,25 @@ mod imp {
 
     pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {
         std::fs::remove_file(&mark.path)
+    }
+
+    pub(super) fn create_open(path: &Path) -> std::io::Result<File> {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    pub(super) fn rename_handle(_: &File, from: &Path, to: &Path) -> std::io::Result<()> {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        std::fs::rename(from, to)
+    }
+
+    pub(super) fn discard_handle(file: File, path: &Path) -> std::io::Result<()> {
+        drop(file);
+        std::fs::remove_file(path)
     }
 }
 
@@ -509,6 +654,42 @@ mod tests {
         drop((b, a));
         std::fs::rename(base.join("a"), base.join("a2")).unwrap();
         drop(outer);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// W3 r4 P1-R4-01：开着的临时文件别人改不了名、删不掉；改名不替换已有的名字，失败后按句柄丢弃，
+    /// 只删自己的临时文件；成功改名后内容就在新名字下。
+    #[test]
+    fn an_open_new_file_keeps_its_name_until_renamed_or_discarded() {
+        use std::io::Write;
+        let base = scratch("pin-new-file");
+        let dir = open(&base).unwrap();
+        std::fs::write(base.join("taken"), b"theirs").unwrap();
+
+        let mut f = create_open(&dir, OsStr::new("a.tmp")).unwrap();
+        assert!(
+            create_open(&dir, OsStr::new("a.tmp")).is_err(),
+            "names are exclusive"
+        );
+        f.file().write_all(b"mine").unwrap();
+        assert!(std::fs::rename(base.join("a.tmp"), base.join("moved")).is_err());
+        assert!(std::fs::remove_file(base.join("a.tmp")).is_err());
+        assert!(
+            f.rename_into(&dir, OsStr::new("taken")).is_err(),
+            "no replacing"
+        );
+        assert_eq!(std::fs::read(base.join("taken")).unwrap(), b"theirs");
+        f.discard().unwrap();
+        assert!(!base.join("a.tmp").exists());
+        assert_eq!(std::fs::read(base.join("taken")).unwrap(), b"theirs");
+
+        let mut g = create_open(&dir, OsStr::new("b.tmp")).unwrap();
+        g.file().write_all(b"report").unwrap();
+        g.rename_into(&dir, OsStr::new("report.json")).unwrap();
+        drop(g);
+        assert!(!base.join("b.tmp").exists());
+        assert_eq!(std::fs::read(base.join("report.json")).unwrap(), b"report");
+        drop(dir);
         std::fs::remove_dir_all(&base).unwrap();
     }
 
