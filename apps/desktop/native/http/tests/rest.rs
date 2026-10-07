@@ -461,6 +461,15 @@ fn tool_routes_speak_the_tool_contract() {
     );
     assert_eq!(status, 200, "{text}");
 
+    // 2.0 的 `1` / `0` 布尔照收。
+    let (status, text) = http(
+        w.port,
+        "GET",
+        &format!("{base}/work-items?mine=1&session={}", w.session),
+        "",
+    );
+    assert_eq!(status, 200, "{text}");
+
     // GET 的 query 类型不对：与工具同一个校验器报出来。
     let (status, text) = http(w.port, "GET", &format!("{base}/work-items?limit=many"), "");
     assert_eq!(status, 400, "{text}");
@@ -545,6 +554,29 @@ fn own_routes_cover_what_the_tools_do_not() {
     );
     assert_eq!(status, 200, "{text}");
     assert_eq!(parse(&text)["operation"], "quick.promote");
+
+    // 逗号分隔的列表：只要这两种事件。
+    let (status, text) = http(
+        w.port,
+        "GET",
+        &format!("{base}/events?types=objective.created,milestone.created"),
+        "",
+    );
+    assert_eq!(status, 200, "{text}");
+    let kinds: Vec<String> = parse(&text)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["type"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        kinds
+            .iter()
+            .all(|k| k == "objective.created" || k == "milestone.created")
+            && kinds.contains(&"objective.created".to_owned())
+            && kinds.contains(&"milestone.created".to_owned()),
+        "{text}"
+    );
 
     let (status, text) = http(w.port, "GET", &format!("{base}/events?limit=2"), "");
     assert_eq!(status, 200, "{text}");

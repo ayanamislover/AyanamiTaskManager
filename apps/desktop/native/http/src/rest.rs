@@ -757,24 +757,13 @@ fn decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// query 的一个值按字段类型转成 JSON：数、布尔、逗号分隔的列表；其余是字符串。转不了就原样给字符串，
-/// 由校验器报出类型错误。
+/// query 的一个值转成 JSON：校验器已经认数字字符串与 `true` / `false`，这里只补它不认的两种写法——
+/// 2.0 CLI 的 `ready=1` 这类 `1` / `0` 布尔，与逗号分隔的列表（`types=a,b`）。其余原样给字符串。
 fn coerce(ty: &Ty, raw: &str) -> Value {
-    match ty {
-        Ty::Int { .. } => raw
-            .trim()
-            .parse::<i64>()
-            .map_or_else(|_| json!(raw), |n| json!(n)),
-        Ty::Num { .. } => raw
-            .trim()
-            .parse::<f64>()
-            .map_or_else(|_| json!(raw), |n| json!(n)),
-        Ty::Bool | Ty::BoolOr(_) => match raw.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => json!(true),
-            "false" | "0" => json!(false),
-            _ => json!(raw),
-        },
-        Ty::List { of, .. } => Value::Array(
+    match (ty, raw.trim()) {
+        (Ty::Bool | Ty::BoolOr(_), "1") => json!(true),
+        (Ty::Bool | Ty::BoolOr(_), "0") => json!(false),
+        (Ty::List { of, .. }, _) => Value::Array(
             raw.split(',')
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
