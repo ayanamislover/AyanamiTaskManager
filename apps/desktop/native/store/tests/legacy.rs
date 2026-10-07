@@ -7196,3 +7196,313 @@ mod w3_peer_r1 {
         );
     }
 }
+
+/// W3 r2（peer 反例并入正式套件）：dry-run 期间把目录换成指向 `L` 或 `N` 的 junction。
+mod w3_peer_r2 {
+    use super::*;
+    use atm_store::conversion::{self as cv, DryRun, DryRunOptions, Quiesce};
+
+    fn junction(alias: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J {}", alias.display());
+    }
+
+    /// 目录集合（相对路径；链接本身记成 `-> link`，不进入）。
+    fn dirs(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let e = e.unwrap();
+                let p = e.path();
+                let rel = p
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let kind = e.file_type().unwrap();
+                if kind.is_symlink() {
+                    out.push(format!("{rel} -> link"));
+                } else if kind.is_dir() {
+                    out.push(rel);
+                    stack.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// 内容（每个文件的 sha256）与目录集合。
+    fn state(dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+        let mut files = tree(dir);
+        files.sort();
+        (files, dirs(dir))
+    }
+
+    fn dry(
+        root: &Path,
+        out: &Path,
+        n: &Path,
+        quiesce: &mut dyn FnMut() -> Quiesce,
+        after_copy: &mut dyn FnMut(),
+    ) -> cv::Result<DryRun> {
+        cv::dry_run(DryRunOptions {
+            at: AT,
+            source: root,
+            out,
+            v3_root: Some(n),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce,
+            after_copy,
+        })
+    }
+
+    /// 一个夹具：`L`（json 数据根）与一个有内容的 `N`（含 `data/`），两个根各自的初始状态。
+    fn roots(name: &str) -> (Fixture, PathBuf, PathBuf) {
+        let (f, root) = json_fixture(name);
+        let n = f.dir.join("protected-n");
+        put(&n.join("keep.txt"), b"existing N");
+        put(
+            &n.join("data/existing-business.txt"),
+            b"existing published business data",
+        );
+        (f, root, n)
+    }
+
+    /// 反例一及其变体：静止判定（quiesce）里把输出目录的父目录、更上层的缺失祖先、输出目录自己换成指向
+    /// `N` 或 `L` 的 junction，或者在空的输出目录里放进指向它们的 junction。dry-run 按钉住时的真实位置
+    /// 再查一次，一律拒绝；两个根的内容与目录集合都不变，也没有在里面建出任何目录。
+    #[test]
+    fn a_swap_before_pinning_is_refused() {
+        let (f, root, n) = roots("w3r2-swap-before");
+        let before = (state(&root), state(&n));
+        for (label, target, why) in [
+            ("n", n.clone(), "overlaps the 3.0 data root"),
+            ("l", root.clone(), "overlaps the 2.x data root"),
+        ] {
+            // 父目录存在、输出目录不存在：父目录被换。
+            let parent = f.dir.join(format!("out-parent-{label}"));
+            fs::create_dir(&parent).unwrap();
+            let parked = f.dir.join(format!("parked-parent-{label}"));
+            let result = dry(
+                &root,
+                &parent.join("dry-result"),
+                &n,
+                &mut || {
+                    fs::rename(&parent, &parked).unwrap();
+                    junction(&parent, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            let created = target.join("dry-result").exists();
+            fs::remove_dir(&parent).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} parent: {result:?}"
+            );
+            assert!(!created, "{label}: created a directory inside the root");
+
+            // 好几层都不存在：最上面那一层被放成 junction。
+            let gone = f.dir.join(format!("gone-{label}"));
+            let result = dry(
+                &root,
+                &gone.join("deep").join("dry"),
+                &n,
+                &mut || {
+                    junction(&gone, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            let created = target.join("deep").exists();
+            fs::remove_dir(&gone).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} missing ancestor: {result:?}"
+            );
+            assert!(!created, "{label}: created a directory inside the root");
+
+            // 输出目录已存在且是空的：它自己被换。
+            let out = f.dir.join(format!("empty-out-{label}"));
+            fs::create_dir(&out).unwrap();
+            let parked = f.dir.join(format!("parked-out-{label}"));
+            let result = dry(
+                &root,
+                &out,
+                &n,
+                &mut || {
+                    fs::rename(&out, &parked).unwrap();
+                    junction(&out, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            fs::remove_dir(&out).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} out itself: {result:?}"
+            );
+
+            // 空的输出目录里被放进一个指向根的 `src`。
+            fs::rename(&parked, &out).unwrap();
+            let result = dry(
+                &root,
+                &out,
+                &n,
+                &mut || {
+                    junction(&out.join("src"), &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            fs::remove_dir(out.join("src")).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains("is not empty")),
+                "{label} planted src: {result:?}"
+            );
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+        // 阳性对照：没人动手时照常成功。
+        let out = f.dir.join("out-parent-n").join("dry-result");
+        let fine = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {}).unwrap();
+        assert!(matches!(fine, DryRun::Verified { .. }), "{fine:?}");
+        assert!(out.join("report.json").is_file());
+        assert_eq!((state(&root), state(&n)), before);
+    }
+
+    /// 反例二及其变体：复制之后（after_copy）把输出目录的父目录、输出目录自己、`src` 与 `src` 下的目录改名，
+    /// 再在原处放上指向 `N` 或 `L` 的 junction。钉住的目录改不了名，所以一个都换不成；dry-run 照常完成，
+    /// 报告写在原来的输出目录里，清理只删本次建的 `src` 与 `data`，两个根的内容与目录集合都不变。
+    #[test]
+    fn pinned_directories_cannot_be_swapped_mid_run() {
+        let (f, root, n) = roots("w3r2-swap-mid");
+        let before = (state(&root), state(&n));
+        for (label, target) in [("n", n.clone()), ("l", root.clone())] {
+            let parent = f.dir.join(format!("outer-{label}"));
+            let out = parent.join("dry");
+            let victims = [
+                parent.clone(),
+                out.clone(),
+                out.join("src"),
+                out.join("src").join("dispatch"),
+                out.join("src").join("dispatch").join("logs"),
+            ];
+            let mut swapped = Vec::new();
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                for (i, victim) in victims.iter().enumerate() {
+                    assert!(victim.is_dir(), "{} should exist by now", victim.display());
+                    let parked = f.dir.join(format!("parked-{label}-{i}"));
+                    if fs::rename(victim, &parked).is_ok() {
+                        junction(victim, &target);
+                        swapped.push(victim.clone());
+                    }
+                }
+            });
+            for victim in &swapped {
+                let _ = fs::remove_dir(victim);
+            }
+            assert!(swapped.is_empty(), "{label}: swapped {swapped:?}");
+            assert!(
+                matches!(result, Ok(DryRun::Verified { .. })),
+                "{label}: {result:?}"
+            );
+            assert!(out.join("report.json").is_file());
+            assert!(!out.join("src").exists() && !out.join("data").exists());
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+    }
+
+    /// `data` 的名字在建之前被占成指向根的 junction：排他新建失败，不经它写入；`src` 照样清掉，
+    /// junction 只是留着（不是本次建的），根不变。
+    #[test]
+    fn a_planted_data_name_fails_closed() {
+        let (f, root, n) = roots("w3r2-planted-data");
+        let before = (state(&root), state(&n));
+        for (label, target) in [("n", n.clone()), ("l", root.clone())] {
+            let out = f.dir.join(format!("out-{label}"));
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                junction(&out.join("data"), &target)
+            });
+            let report = out.join("report.json").exists();
+            let src = out.join("src").exists();
+            fs::remove_dir(out.join("data")).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists),
+                "{label}: {result:?}"
+            );
+            assert!(!report && !src, "{label}: report {report}, src {src}");
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+    }
+
+    /// 报告的临时文件名被占成指向 `N` 里文件的硬链接：排他新建失败，不经硬链接写进 `N`。
+    #[test]
+    fn a_planted_report_name_fails_closed() {
+        let (f, root, n) = roots("w3r2-planted-report");
+        let before = (state(&root), state(&n));
+        let out = f.dir.join("out");
+        let temporary = out.join(format!("report.json.{}.tmp", std::process::id()));
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            fs::hard_link(n.join("keep.txt"), &temporary).unwrap()
+        });
+        fs::remove_file(&temporary).unwrap();
+        assert!(
+            matches!(&result, Err(cv::Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "{result:?}"
+        );
+        assert!(!out.join("report.json").exists());
+        assert!(!out.join("src").exists() && !out.join("data").exists());
+        assert_eq!((state(&root), state(&n)), before);
+    }
+
+    /// 清理不跟随链接：`src` 与它下面的目录里被放进指向根的 junction，成功与源未静止两条路的清理都只删链接。
+    #[test]
+    fn cleanup_unlinks_planted_junctions() {
+        let (f, root, n) = roots("w3r2-cleanup");
+        let before_n = state(&n);
+        for (label, target, noisy) in [
+            ("n-quiet", n.clone(), false),
+            ("l-quiet", root.clone(), false),
+            ("n-noisy", n.clone(), true),
+        ] {
+            let out = f.dir.join(format!("out-{label}"));
+            let dispatch = root.join("dispatch/config.json");
+            let original = fs::read(&dispatch).unwrap();
+            let before_l = state(&root);
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                junction(&out.join("src").join("planted"), &target);
+                junction(&out.join("src").join("dispatch").join("planted"), &target);
+                if noisy {
+                    fs::write(&dispatch, b"{}").unwrap();
+                }
+            });
+            if noisy {
+                fs::write(&dispatch, &original).unwrap();
+                assert!(
+                    matches!(result, Ok(DryRun::SourceNotQuiet(_))),
+                    "{label}: {result:?}"
+                );
+            } else {
+                assert!(
+                    matches!(result, Ok(DryRun::Verified { .. })),
+                    "{label}: {result:?}"
+                );
+            }
+            assert!(!out.join("src").exists(), "{label}");
+            assert_eq!(state(&root), before_l, "{label}");
+            assert_eq!(state(&n), before_n, "{label}");
+        }
+    }
+}

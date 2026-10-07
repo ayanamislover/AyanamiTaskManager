@@ -14,9 +14,11 @@
 
 use crate::jsjson::{self, Value};
 use crate::legacy::{self, ConvertError, ConvertOptions, LegacySources, Report};
+use crate::pin;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1017,22 +1019,21 @@ fn enumerate(root: &Path, at: &str) -> Result<Vec<SourceFile>> {
 
 /// 07 §3 SNAPSHOT 的复制方式：枚举 F0、复制到 `src`、调 `after_copy`、再枚举 F1；
 /// F1 ≠ F0 或副本的 sha256 与 F0 不符都是源未静止。转换与 §6 的比较共用。
+///
+/// `copy(from, rel)` 把一个源文件放到 `src` 下的 `rel`：正式转换与比较用 [`copy_under`]（按路径），
+/// dry-run 用钉住的目录树（[`Pinned`]）。
 fn snapshot(
     root: &Path,
     at: &str,
     src: &Path,
+    copy: &mut dyn FnMut(&Path, &str) -> std::io::Result<()>,
     copied: &dyn Fn(usize, usize),
     after_copy: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<SourceFile>> {
     let f0 = enumerate(root, at)?;
     copied(0, f0.len());
     for (i, f) in f0.iter().enumerate() {
-        let to = src.join(&f.rel);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let from = root.join(&f.rel);
-        std::fs::copy(&from, &to).at("copy", &from)?;
+        copy(&root.join(&f.rel), &f.rel)?;
         copied(i + 1, f0.len());
     }
     after_copy()?;
@@ -1059,6 +1060,17 @@ fn snapshot(
         }
     }
     Ok(f0)
+}
+
+/// SNAPSHOT 按路径复制到 `dst` 下（staging 与比较的 scratch 都在 `N` 里，是本程序自己的目录）。
+fn copy_under(dst: &Path) -> impl FnMut(&Path, &str) -> std::io::Result<()> + '_ {
+    move |from, rel| {
+        let to = dst.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(from, &to).at("copy", from).map(|_| ())
+    }
 }
 
 /// 提交门：报告里不能有没处理的族实例（`Report::pending`）。VERIFY 只比已处理的族，漏掉的族要在这里拦下。
@@ -1127,10 +1139,12 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
             p(stage, done, total);
         }
     };
+    let src = staging.join("src");
     let snapshot = snapshot(
         opts.legacy_root,
         opts.at,
-        &staging.join("src"),
+        &src,
+        &mut copy_under(&src),
         &|done, total| report_progress("SNAPSHOT", done, total),
         &mut || checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT"),
     );
@@ -1371,6 +1385,7 @@ pub fn compare(
             opts.legacy_root,
             &m.started_at,
             &src,
+            &mut copy_under(&src),
             &|_, _| {},
             &mut || Ok(()),
         )?;
@@ -1772,9 +1787,125 @@ fn refuse_overlap(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<(
     Ok(())
 }
 
+/// 钉住输出目录（W3 r2 P1-R2-01）：先钉住最近一个已存在的祖先，按它的真实位置查重叠，再把缺的每一层
+/// 相对父目录的句柄排他新建。返回整条链，最后一个是输出目录。链上的目录在 dry-run 期间不能改名、
+/// 不能换成 junction，所以之后按钉住的最终路径写入与清理，到达的都是这里钉住的目录。
+fn pin_out(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<Vec<pin::Dir>> {
+    let abs = std::path::absolute(out).at("resolve", out)?;
+    let mut existing = abs.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing.file_name().ok_or(e)?.to_os_string());
+                existing = existing.parent().unwrap_or(existing);
+            }
+            Err(e) => return Err(located(e, "stat", &existing.display()).into()),
+        }
+    }
+    missing.reverse();
+    let base = pin::open(existing).at("open", existing)?;
+    let mut target = base.path().to_path_buf();
+    target.extend(&missing);
+    refuse_overlap(&target, source, v3_root)?;
+    if missing.is_empty() {
+        let mut entries = std::fs::read_dir(base.path()).at("list", base.path())?;
+        if entries.next().is_some() {
+            return Err(Error::Refused(format!(
+                "the output {} is not empty",
+                out.display()
+            )));
+        }
+    }
+    let mut chain = vec![base];
+    for name in &missing {
+        let parent = chain.last().expect("the chain starts with the base");
+        let next = pin::create(parent, name).at("create", &parent.path().join(name))?;
+        chain.push(next);
+    }
+    Ok(chain)
+}
+
+/// dry-run 的 SNAPSHOT 副本：`src` 下的每一层目录都排他新建并钉住，文件排他新建（名字被占就失败）。
+struct Pinned {
+    root: pin::Dir,
+    /// (相对 `src` 的目录, 钉住的目录)，按建出的先后。
+    dirs: Vec<(PathBuf, pin::Dir)>,
+}
+
+impl Pinned {
+    fn copy(&mut self, from: &Path, rel: &str) -> std::io::Result<()> {
+        let rel = Path::new(rel);
+        let plain = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a plain relative path", rel.display()),
+            )
+        };
+        let mut at: Option<usize> = None;
+        let mut prefix = PathBuf::new();
+        for c in rel.parent().into_iter().flat_map(Path::components) {
+            let std::path::Component::Normal(name) = c else {
+                return Err(plain());
+            };
+            prefix.push(name);
+            at = Some(match self.dirs.iter().position(|(p, _)| *p == prefix) {
+                Some(i) => i,
+                None => {
+                    let parent = at.map_or(&self.root, |i| &self.dirs[i].1);
+                    let dir = pin::create(parent, name).at("create", &parent.path().join(name))?;
+                    self.dirs.push((prefix.clone(), dir));
+                    self.dirs.len() - 1
+                }
+            });
+        }
+        let parent = at.map_or(&self.root, |i| &self.dirs[i].1);
+        let to = parent.path().join(rel.file_name().ok_or_else(plain)?);
+        let mut w = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&to)
+            .at("create", &to)?;
+        let mut r = File::open(from).at("open", from)?;
+        std::io::copy(&mut r, &mut w).at("copy", from)?;
+        Ok(())
+    }
+
+    /// 删掉整个副本：最深的目录先删，最后删 `src` 自己。
+    fn remove(self) {
+        for (_, dir) in self.dirs.into_iter().rev() {
+            let _ = dir.remove();
+        }
+        let _ = self.root.remove();
+    }
+}
+
+/// dry-run 写报告：同目录排他新建临时文件、刷盘、不替换地改名。名字被占就失败，不会写进别人放在那里的文件。
+fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = dir.join(format!("{name}.{}.tmp", std::process::id()));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .at("create", &temporary)?;
+        f.write_all(bytes).at("write", &temporary)?;
+        f.sync_all().at("flush", &temporary)?;
+    }
+    let r = rename_durable(&temporary, &dir.join(name), false);
+    if r.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    r
+}
+
 /// 07 §9：`atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。
 /// 在 `out` 里执行 SNAPSHOT → IMPORT / VERIFY，写出 `report.json` 与 `attachment.jsonl`；
 /// 不写 `L`，不写 `N`（不碰 `M`、`A`、启动状态与进度），不起任何调度器。
+///
+/// 输出目录、它的祖先、`src` 与 `data` 在整个写入与清理期间都是钉住的（[`pin`]）：检查之后把哪一层换成指向
+/// `L` 或 `N` 的 junction 都做不到。`src`、`data` 与 `src` 下的每层目录都是本次排他新建的，清理只删它们。
 pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     let refuse = |why: String| Err(Error::Refused(why));
     refuse_overlap(o.out, o.source, o.v3_root)?;
@@ -1790,73 +1921,79 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     if let Quiesce::Wait(why) = (o.quiesce)() {
         return Ok(DryRun::SourceBusy(why));
     }
-    std::fs::create_dir_all(o.out).at("create", o.out)?;
-    // 建好之后取它的真实路径再查一次，之后的写入都落在这个真实路径上：检查与建目录之间被换成 junction 也写不进去。
-    let out = std::fs::canonicalize(o.out).at("resolve", o.out)?;
-    refuse_overlap(&out, o.source, o.v3_root)?;
-    let src = out.join("src");
-    let data = out.join("data");
-    let tidy = |keep_data: bool| {
-        let _ = std::fs::remove_dir_all(&src);
-        if !keep_data {
-            let _ = std::fs::remove_dir_all(&data);
-        }
+    // 静止判定之后才钉住、才建：钉住时按真实位置再查一次重叠，之后去向就不会再变。
+    let chain = pin_out(o.out, o.source, o.v3_root)?;
+    let out_dir = chain.last().expect("pin_out returns at least the base");
+    let out = out_dir.path().to_path_buf();
+    let mut src = Pinned {
+        root: pin::create(out_dir, OsStr::new("src")).at("create", &out.join("src"))?,
+        dirs: Vec::new(),
     };
+    let mut data: Option<pin::Dir> = None;
     let after_copy = o.after_copy;
-    match snapshot(o.source, o.at, &src, &|_, _| {}, &mut || {
-        after_copy();
-        Ok(())
-    }) {
-        Ok(_) => {}
-        Err(Error::SourceNotQuiet(why)) => {
-            tidy(false);
-            return Ok(DryRun::SourceNotQuiet(why));
-        }
-        Err(e) => {
-            tidy(false);
-            return Err(e);
-        }
-    }
-    std::fs::create_dir_all(&data).at("create", &data)?;
-    let converted = LegacySources::from_root(&src).and_then(|sources| {
-        legacy::convert(
-            &sources,
-            &data.join("atm.sqlite"),
-            &ConvertOptions {
-                at: o.at,
-                allow_real_data_root: o.allow_real_data_root,
-                real_data_root: o.real_data_root,
-                generation: None,
-                secrets_check: o.secrets_check,
-                accept_unconvertible: o.accept_unconvertible,
-                origin_root: Some(o.source),
-                progress: None,
+    let outcome = (|| -> Result<DryRun> {
+        let src_path = src.root.path().to_path_buf();
+        match snapshot(
+            o.source,
+            o.at,
+            &src_path,
+            &mut |from, rel| src.copy(from, rel),
+            &|_, _| {},
+            &mut || {
+                after_copy();
+                Ok(())
             },
-        )
-    });
-    let outcome = match converted {
-        Ok(report) => {
-            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
-            write_atomic(
-                &out.join("attachment.jsonl"),
-                report.attachment_jsonl().as_bytes(),
-            )?;
-            Ok(DryRun::Verified {
+        ) {
+            Ok(_) => {}
+            Err(Error::SourceNotQuiet(why)) => return Ok(DryRun::SourceNotQuiet(why)),
+            Err(e) => return Err(e),
+        }
+        let data =
+            data.insert(pin::create(out_dir, OsStr::new("data")).at("create", &out.join("data"))?);
+        let converted = LegacySources::from_root(&src_path).and_then(|sources| {
+            legacy::convert(
+                &sources,
+                &data.path().join("atm.sqlite"),
+                &ConvertOptions {
+                    at: o.at,
+                    allow_real_data_root: o.allow_real_data_root,
+                    real_data_root: o.real_data_root,
+                    generation: None,
+                    secrets_check: o.secrets_check,
+                    accept_unconvertible: o.accept_unconvertible,
+                    origin_root: Some(o.source),
+                    progress: None,
+                },
+            )
+        });
+        let report = match converted {
+            Ok(report) => report,
+            Err(ConvertError::Verify(report)) => *report,
+            Err(e) => return Err(e.into()),
+        };
+        write_new(&out, "report.json", report.report_json().as_bytes())?;
+        write_new(
+            &out,
+            "attachment.jsonl",
+            report.attachment_jsonl().as_bytes(),
+        )?;
+        let failures = report.failures();
+        Ok(if failures.is_empty() {
+            DryRun::Verified {
                 business_digest: report.business_digest(),
                 pending: report.pending(),
-            })
-        }
-        Err(ConvertError::Verify(report)) => {
-            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
-            write_atomic(
-                &out.join("attachment.jsonl"),
-                report.attachment_jsonl().as_bytes(),
-            )?;
-            Ok(DryRun::VerifyFailed(report.failures()))
-        }
-        Err(e) => Err(e.into()),
-    };
-    tidy(o.keep_data);
+            }
+        } else {
+            DryRun::VerifyFailed(failures)
+        })
+    })();
+    src.remove();
+    if let Some(data) = data
+        && !o.keep_data
+    {
+        let _ = data.remove();
+    }
+    drop(chain);
     outcome
 }
 
