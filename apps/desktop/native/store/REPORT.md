@@ -380,8 +380,8 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - 原语层面：钉住的目录与它的祖先改不了名；排他新建不复用任何已有的名字；文件号对不上就不删。
 - **变异**：`output/w3-evidence/w3r2-mutation-evidence.json`。
 - **新增的 P2 关口**（评审定的）：
-  - **P2-06**：`dropped/<id>` 的摘要含 WAL/SHM 的物理字节，checkpoint 或正常关库之后会误报 Changed。要在 W4 用这个比较驱动入口或自动重转之前修好，改成按逻辑内容取摘要。
-  - **P2-07**：W3i 只证明构造出的副本能转换。要在 W4 接真实入口之前补齐：复制集合从 `snapshot_files` 导出，保持原路径身份，失败时非零退出。在那之前，W3i 的结论只写成「真实数据的逻辑副本演练通过」。
+  - **P2-06**：`dropped/<id>` 的摘要含 WAL/SHM 的物理字节，checkpoint 或正常关库之后会误报 Changed。要在 W4 用这个比较驱动入口或自动重转之前修好，改成按逻辑内容取摘要。已修，见「W4 前的 P2 关口」。
+  - **P2-07**：W3i 只证明构造出的副本能转换。要在 W4 接真实入口之前补齐：复制集合从 `snapshot_files` 导出，保持原路径身份，失败时非零退出。在那之前，W3i 的结论只写成「真实数据的逻辑副本演练通过」。已修，见「W4 前的 P2 关口」。
 
 ## W3 整体评审第三轮（`output/peer0519-tmp/codex-w3-r3.log`）
 
@@ -413,6 +413,44 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - `legacy.rs` 的 `w3_peer_r2::a_briefly_busy_copy_is_still_removed`：清理开始之后副本还被开着约 300 毫秒，照常删掉，结果是 Verified。
 - **变异**：`output/w3-evidence/w3r4-mutation-evidence.json`。
 
+## W4 前的 P2 关口（P2-06、P2-07）
+
+### P2-06：舍弃项目的摘要按内容取
+
+- **问题**：`dropped/<id>` 原来对项目目录的每个文件取字节摘要。库开着 WAL 时，checkpoint、正常关库（WAL 合并、SHM 删掉）都会改变它，比较误报 Changed；A=legacy 时还会触发不必要的封存重转。
+- **修订**（`legacy/settle.rs` 的 `tree_digest`）：
+  - SQLite 库（文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项。库与非空的 `-wal` 复制到工作目录里打开（WAL 在副本里恢复，不开源文件），取逻辑内容：
+    - `user_version`、`application_id`；
+    - schema 的类型、名字、所属表、SQL（不含随存储变的 rootpage）；
+    - 每张表与虚表的全部行，按全部列排序，不含隐含的 rowid（VACUUM 会给没有 INTEGER PRIMARY KEY 的表重排它）；
+    - 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
+  - 打不开或读不完的库绑定原始字节：库与非空的 `-wal`；`-shm` 只是 WAL 的索引，不算。这样的库任何变化（包括 checkpoint）都是「变了」：说不清就保守，不漏报。
+  - 其他文件（附件、manifest、回滚件以外的普通文件）照旧按字节。
+  - 工作目录里上一个库的副本删不掉就失败：残留的 `-wal` 会被当成下一个库的 WAL 恢复进去。
+- **用例**（`legacy.rs` 的 `w3_peer_r1` 模块）：
+  - `a_dropped_database_is_compared_by_content_not_storage`：转换时库开着 WAL、写入还只在 WAL 里。checkpoint、关库、SHM 重建、VACUUM、ANALYZE 与 `PRAGMA optimize`、改回 DELETE 日志，比较都是 Unchanged；只在 WAL 里的业务写入是 Changed，改回原值又是 Unchanged；加一个附件是 Changed。评审的反例（checkpoint 后关库）在其中。
+  - `an_unreadable_dropped_database_is_bound_to_its_bytes`：打不开的库，加 `-shm` 不变；加非空 `-wal`、改一个字节都是 Changed。
+  - 原有的 `a_drop_permission_is_bound_to_the_dropped_content`（业务修改、修好后拒绝舍弃许可）照旧通过。
+- **变异**：`output/w3-evidence/w3gate-mutation-evidence.json`。
+
+### P2-07：演练走正式链路
+
+- **问题**：W3i 的演练脚本自己挑文件、`VACUUM INTO` 出逻辑副本，再以副本为 `L` 转换。评审的合成反例里，副本漏掉了知识库恢复依赖的回滚前库，附件路径也因为原路径不在副本里而没有映射；演练照样「通过」，退出码也是 0。
+- **修订**：
+  - 新增 `conversion::rehearse`：对 `L` 原样走正式的 dry-run、完整转换（`N` 在工作目录里）、启动判定与比较。不另做副本，所以复制集合（`snapshot_files`）、恢复依赖、路径映射都与正式转换相同。
+  - 任何一步不是正式意义上的通过就停下：枚举拒绝（`Refused`）、dry-run 没有 VERIFY 通过或 `pending` 不空（`DryRun`）、完整转换失败（`Run`）、dry-run 与完整转换两次快照的 business_digest 不同（`Moved`）、启动判定不是 Published（`Decide`）、比较不是 Unchanged（`Compare`）。
+  - 一致性边界：2.x 可以不停，静止判定按「静止」放行；副本的一致性由 SNAPSHOT 的 F0/F1 保证（复制前后两次枚举相同、副本的 sha256 逐个等于 F0）。两次快照之间、转换之后 `L` 变了，分别由 `Moved` 与 `Compare` 报出。
+  - `examples/rehearse.rs` 改为调用它，每种停下各有非零退出码（3–8），去掉了自己的复制与 `--exclude`。
+- **用例**（`legacy.rs` 的 `w3_gate_rehearse` 模块）：
+  - `a_rehearsal_converts_the_root_as_it_is`：评审的反例。演练与正式转换得到同一个知识条目 slug（回滚前的库）与同一条附件路径。
+  - `a_rehearsal_stops_at_the_first_failure`：未登记的条目在枚举时拒绝，一步都不做；两次快照之间改知识库是 `Moved`；转换之后改是 `Compare(Changed)`。
+  - `a_rehearsal_stops_when_the_dry_run_does_not_verify`：2.0 救不回来、用户也没点名舍弃的项目，停在 dry-run，不做完整转换。
+- **真实根重跑**（用户 2026-10-07 授权的 W3i 范围内，只读）：`output/w3i-real/run6/rehearse.log`，退出码 0。
+  - 正式 SNAPSHOT 104 个文件；dry-run VERIFY 通过、没有 pending；dry-run 与完整转换都是 671 个业务族，摘要相同；PUBLISHED；启动判定 Published；与真实根比较 Unchanged。
+  - 新库：24 个项目、2673 个任务、2682 个检查项、23582 条事件、170 条 legacy_backups。
+  - 转换出的库用完即删，只留不含正文的报告与日志。
+- **变异**：同上。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
@@ -427,9 +465,9 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - 规则不放宽：未登记就停（F23）。第一次演练按点名排除（`--exclude`）。
   - 用户决定不需要就删掉。核对后确认不需要：ZB-T-0050 已于 2026-08-09 完成，现库 42 MB 而它只有 2.5 MB，项目另有 2.x 的日、周备份。已移进回收站（可还原，由用户清空）。
   - 之后不带任何排除重跑：预检（正式转换对真实根的枚举与守卫）通过，要快照的 104 个文件与复制清单一致，结果同下（`output/w3i-real/run5/`）。
-- **结论的范围**（W3 peer r2 P2-07）：真实数据的逻辑副本演练通过。
+- **结论的范围**（W3 peer r2 P2-07）：本节的前五次演练是真实数据的逻辑副本演练。
   - 副本是演练脚本自己挑、自己复制的，库是 `VACUUM INTO` 出来的逻辑副本，不是原文件，也不在原路径上。
-  - 所以它不证明真实根本身（原文件、原路径、WAL 状态）的转换能走通；补齐的条件见上一节 P2-07。
+  - 所以它们不证明真实根本身（原文件、原路径、WAL 状态）的转换能走通。改走正式链路之后的第六次演练见「W4 前的 P2 关口」的 P2-07。
 - **结果**（副本 26 个库、26 个文件，162 MB）：
   - dry-run：VERIFY 通过，671 个业务族，没有 pending。
   - 完整转换：PUBLISHED；启动判定 Published；与副本比较 Unchanged。
