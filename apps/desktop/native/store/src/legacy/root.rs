@@ -120,7 +120,15 @@ fn knowledge_residue(rel: &str) -> bool {
 }
 
 fn is_db_file(name: &str, db: &str) -> bool {
-    name == db || name == format!("{db}-wal") || name == format!("{db}-shm")
+    name == db || name == format!("{db}-wal") || is_wal_index(name, db)
+}
+
+/// 库 `db` 的 WAL 索引：`-shm`，以及别的程序在关库前后随建随删的 `-shm.tmp`（实测见过 `ATM.SQLITE-SHM.tmp`、
+/// `PROJECT.SQLITE-SHM.tmp`，大小写不定）。都不是业务内容：不进快照、不进摘要，出现了也不算未登记的条目。
+/// `name` 与 `db` 可以是同一目录下的相对路径。
+pub(crate) fn is_wal_index(name: &str, db: &str) -> bool {
+    let (n, d) = (name.to_ascii_lowercase(), db.to_ascii_lowercase());
+    n == format!("{d}-shm") || n == format!("{d}-shm.tmp")
 }
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；

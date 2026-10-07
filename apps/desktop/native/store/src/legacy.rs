@@ -2615,6 +2615,12 @@ pub fn snapshot_files(root: &Path, at: &str) -> Result<Vec<String>> {
         .collect();
     let journal = settle::knowledge(root)?.journal.map(|(id, _)| id);
     let keep = |rel: &str| -> bool {
+        // -shm 只是 WAL 的索引，打开时由 SQLite 重建，工作副本也不复制它。它不进快照：2.x 开着库时读者会改写里面的
+        // 读标记（没有写入也会让 F0 ≠ F1），关库时它正被删除（复制时可能已经不在）。别的程序的 `-shm.tmp` 同理。
+        let lower = rel.to_ascii_lowercase();
+        if lower.ends_with("-shm") || lower.ends_with("-shm.tmp") {
+            return false;
+        }
         let parts: Vec<&str> = rel.split('/').collect();
         match parts.as_slice() {
             ["registry" | "knowledge", ..] => true,
