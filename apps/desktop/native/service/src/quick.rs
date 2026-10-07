@@ -238,6 +238,10 @@ pub struct QuickPromoteRequest {
     /// 省略时新建一个项目（名字取 quick 的标题）。
     pub target_project: Option<String>,
     pub actor: Option<String>,
+    /// Agent 带的 session：调用索引的 principal id 取它的 agent_id，没给 actor 时也作为事件 actor（A3）。
+    pub session: Option<String>,
+    /// 桥 resolve 时判定的目标（A3 的 expected_target）。
+    pub expected_target: Option<crate::ops::Target>,
 }
 
 /// 晋升的事务体：采用或新建工作项，标记 PROMOTED（C-L05、R5）。
@@ -544,17 +548,34 @@ impl Service {
         op_id: &str,
     ) -> Result<Written, DomainError> {
         capability::require(principal, Capability::QuickPromote)?;
-        let actor = quick_actor(principal, r.actor.as_deref())?;
         let reference = js_trim(quick).to_owned();
-        let quick_id: String = {
+        let session = r
+            .session
+            .clone()
+            .filter(|_| principal.kind() == PrincipalKind::Agent);
+        let (quick_id, session_agent): (String, Option<String>) = {
             let reference = reference.clone();
             self.store()
-                .read(move |tx| resolve(tx, &reference))
+                .read(move |tx| {
+                    let agent = session
+                        .as_deref()
+                        .map(|s| crate::project::session_agent(tx, s))
+                        .transpose()?;
+                    Ok((resolve(tx, &reference)?, agent))
+                })
                 .map_err(dom_read_error)?
         };
+        let actor = quick_actor(principal, r.actor.as_deref().or(session_agent.as_deref()))?;
+        // 调用索引的主体：session 的 agent_id → actor（A3 的 principal 映射）。
+        let principal_id = session_agent.clone().unwrap_or_else(|| actor.clone());
         if let Some(target) = r.target_project.as_deref() {
             // EXISTING(P)：落点固定，走写入流水线（垃圾箱目标由流水线拒绝）。
             let project = self.project_scope(target)?;
+            // EXISTING(P) 的落点固定：上下文里的目标必须就是 P，世代交给 R4 屏障比较。
+            let expected_generation = match &r.expected_target {
+                Some(t) => crate::ops::fixed(t, &ReceiptScope::project(project.clone()))?,
+                None => None,
+            };
             let fp_value = json!({ "quick": quick_id, "target": project, "expected_version": r.expected_version });
             let expected = r.expected_version;
             return self.write(
@@ -566,7 +587,7 @@ impl Service {
                     scope: ReceiptScope::project(project),
                     session: None,
                     actor: Some(actor),
-                    expected_generation: None,
+                    expected_generation,
                     fingerprint: fixed_fp(fp_value),
                     compat_v1: None,
                     replay_guard: None,
@@ -585,12 +606,17 @@ impl Service {
         };
         let op_id = op_id.to_owned();
         let expected = r.expected_version;
+        let expected_target = r.expected_target.clone();
         let now = self.clock();
         self.store()
             .write(move |tx| {
                 let call = CallKey {
                     principal_kind: call_kind,
-                    principal_id: actor.clone(),
+                    principal_id: if call_kind == "AGENT" {
+                        principal_id.clone()
+                    } else {
+                        "USER".to_owned()
+                    },
                     operation: PROMOTE_OPERATION.to_owned(),
                 };
                 let input = JsValue::from_json(
@@ -623,6 +649,18 @@ impl Service {
                     }
                 }
                 let current = view(tx, &quick_id)?;
+                // 目标核对（A3）：resolve 判定的是 CREATE；这期间别人已经把它晋升到某个项目，就不接到那个项目上。
+                if let Some(t) = &expected_target {
+                    let now_target = match current["promotedProjectId"].as_str() {
+                        Some(pid) if current["status"] == "PROMOTED" => {
+                            let scope = ReceiptScope::project(pid);
+                            let generation = crate::write::generation(tx, &scope).map_err(db)?;
+                            crate::ops::Target::Existing { scope, generation }
+                        }
+                        _ => crate::ops::Target::Create,
+                    };
+                    t.check(&now_target)?;
+                }
                 // 已经晋升过（不论晋升到哪里）：不带目标的重试原样返回，不再建项目（L-015）。
                 let (result, scope, generation) = if current["status"] == "PROMOTED" {
                     (
@@ -676,7 +714,7 @@ impl Service {
                         operation: PROMOTE_OPERATION,
                         fingerprint: &fp::canon_v2(&input),
                         receipt_json: &result.to_string(),
-                        author_agent: (call_kind == "AGENT").then_some(actor.as_str()),
+                        author_agent: (call_kind == "AGENT").then_some(principal_id.as_str()),
                         author_session: None,
                         actor_session_id: None,
                         scope_generation: generation,

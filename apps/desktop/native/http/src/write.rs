@@ -75,6 +75,37 @@ fn invalid(problems: Vec<Problem>) -> DomainError {
     DomainError::invalid_argument(problems)
 }
 
+/// A3 的 expected_target（桥带回来的 resolve 结果）。形状不对是参数错误。
+fn expected_target(a: &Args<'_>) -> Result<Option<atm_service::ops::Target>, DomainError> {
+    match a.get("expected_target") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => atm_service::ops::Target::from_json(v).map(Some).ok_or_else(|| {
+            invalid(vec![
+                Problem::new("expected_target", ProblemKind::Pattern)
+                    .got(v.to_string())
+                    .allowed(vec![
+                        r#"{"kind":"NONE"}"#,
+                        r#"{"kind":"EXISTING","scope":{"kind":"PROJECT","id":"..."},"generation":1}"#,
+                        r#"{"kind":"CREATE"}"#,
+                    ]),
+            ])
+        }),
+    }
+}
+
+/// 落点固定的写入：上下文里的目标必须就是这个 scope；世代取显式的 `expected_scope_generation`，
+/// 没有就取目标里的（A3：显式给的保留，不被 resolve 的值覆盖）。
+fn fixed_generation(
+    a: &Args<'_>,
+    scope: &atm_service::receipts::ReceiptScope,
+) -> Result<Option<i64>, DomainError> {
+    let from_target = match expected_target(a)? {
+        Some(t) => atm_service::ops::fixed(&t, scope)?,
+        None => None,
+    };
+    Ok(a.int("expected_scope_generation").or(from_target))
+}
+
 impl Surface {
     pub(crate) fn write(
         &self,
@@ -119,8 +150,10 @@ impl Surface {
             Some(op) => op,
             None => self.svc.auto_op_id()?,
         };
+        let scope = atm_service::receipts::ReceiptScope::project(id.clone());
+        let expected_generation = fixed_generation(a, &scope)?;
         let mut target = Target::new(id, a.str("session").as_deref(), op_id);
-        target.expected_generation = a.int("expected_scope_generation");
+        target.expected_generation = expected_generation;
         Ok(Place { code, target })
     }
 
@@ -204,6 +237,8 @@ impl Surface {
         req.single_conversation = single_conversation(p.client_group());
         req.op_id = a.str("op_id");
         req.expected_generation = a.int("expected_scope_generation");
+        req.expected_target =
+            expected_target(a).map_err(|e| self.envelope(p, tool, a.0, e, Committed::No))?;
         let written = self.svc.begin(p, req).map_err(|e| {
             let c = committed(&e);
             self.envelope(p, tool, a.0, e, c)
@@ -667,6 +702,25 @@ impl Surface {
             )
             .detail("field", "session")
         })?;
+        // 知识写入的目标是知识库（不是作者所在的项目）：上下文里的目标必须是知识库，世代也是知识库的。
+        let expected_generation = match expected_target(a)? {
+            Some(atm_service::ops::Target::Existing { scope, generation })
+                if scope.kind == atm_service::receipts::ScopeKind::Knowledge =>
+            {
+                generation
+            }
+            Some(other) => {
+                return Err(atm_service::ops::target_changed(
+                    &other,
+                    &atm_service::ops::Target::Existing {
+                        scope: atm_service::receipts::ReceiptScope::knowledge(""),
+                        generation: None,
+                    },
+                ));
+            }
+            None => None,
+        };
+        let expected_generation = a.int("expected_scope_generation").or(expected_generation);
         let op_id = match a.str("op_id") {
             Some(op) => op,
             None => self.svc.auto_op_id()?,
@@ -705,9 +759,14 @@ impl Surface {
             id: a.str("id"),
             expected_revision_id: a.str("expected_revision_id"),
         };
-        let written = self
-            .svc
-            .knowledge_save_agent(p, &code, &session, save, &op_id)?;
+        let written = self.svc.knowledge_save_agent_at(
+            p,
+            &code,
+            &session,
+            save,
+            &op_id,
+            expected_generation,
+        )?;
         // 2.x 直接回服务结果；v6 的 ACK 规则（op_id、replayed、实际的 project 与 session）补在旁边。
         let mut out = written.result.clone();
         if let Value::Object(m) = &mut out {

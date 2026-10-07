@@ -654,6 +654,20 @@ let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
         r: AgentSave,
         op_id: &str,
     ) -> Result<Written, DomainError> {
+        self.knowledge_save_agent_at(principal, project, session, r, op_id, None)
+    }
+
+    /// 同上，带上下文里的知识库世代（A3：EXISTING(知识库, g) 或显式的 `expected_scope_generation`）：
+    /// 新写入时知识库已被恢复过就 `SCOPE_RESTORED`。世代取知识库的，不取作者所在项目的。
+    pub fn knowledge_save_agent_at(
+        &self,
+        principal: &Principal,
+        project: &str,
+        session: &str,
+        r: AgentSave,
+        op_id: &str,
+        expected_generation: Option<i64>,
+    ) -> Result<Written, DomainError> {
         capability::require(principal, Capability::KnowledgeAgentSave)?;
         let content = normalize(&r.content)?;
         let id = id_field("id", r.id.as_deref())?;
@@ -714,17 +728,19 @@ let (content, id, expected_revision_id, project_id) = (content.clone(), id.clone
             project_id: project_id.clone(),
             session_id: js_trim(session).to_owned(),
         };
+        let mut request = knowledge_request(
+            Capability::KnowledgeAgentSave,
+            AGENT_SAVE_OPERATION,
+            op_id,
+            scope,
+            Some(session_ref),
+            fingerprint,
+            prepare,
+        );
+        request.expected_generation = expected_generation;
         self.write(
             principal,
-            knowledge_request(
-                Capability::KnowledgeAgentSave,
-                AGENT_SAVE_OPERATION,
-                op_id,
-                scope,
-                Some(session_ref),
-                fingerprint,
-                prepare,
-            ),
+            request,
             move |tx, ctx| {
                 // 2.x 要先打开 session 所在的项目库，垃圾箱里的项目打不开；重放在这之前，照样拿回原回执。
                 crate::project::require_writable(tx, &project_id)?;

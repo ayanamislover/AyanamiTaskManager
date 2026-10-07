@@ -79,6 +79,7 @@ dependencies = [
  "atm-service",
  "atm-store",
  "axum",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -11,7 +11,7 @@ mod checklist;
 pub(crate) mod core;
 pub(crate) mod create;
 mod graph;
-mod import;
+pub(crate) mod import;
 mod patch;
 pub(crate) mod planning;
 mod review;

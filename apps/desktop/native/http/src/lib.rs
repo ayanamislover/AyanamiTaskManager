@@ -15,6 +15,7 @@
 pub mod agent;
 pub mod fix;
 pub mod mcp;
+pub mod resolve;
 pub mod schema;
 pub mod tools;
 pub mod workspace;

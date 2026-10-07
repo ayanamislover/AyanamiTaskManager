@@ -25,6 +25,9 @@ const GENERATION: Field = Field::new(
     },
 )
 .hidden();
+/// A3 的控制字段：桥 resolve 时判定的分支目标（`{kind:"NONE"}`、`{kind:"EXISTING", scope, generation}`、
+/// `{kind:"CREATE"}`），服务在新写入执行前按当前状态重新判定并对照。由桥管理，只收不发布。
+const TARGET: Field = Field::new("expected_target", Ty::Any).hidden();
 const TASK_KEY: Field =
     Field::new("task_key", Ty::Str { max: 40 }).aliases(&["key", "task", "work_item_key"]);
 const FIELD_MASK: Ty = Ty::List {
@@ -93,7 +96,7 @@ static BEGIN_SIGNALS: [Field; 7] = [
     Field::new("has_target_date", Ty::Bool),
 ];
 
-static BEGIN_FIELDS: [Field; 21] = [
+static BEGIN_FIELDS: [Field; 22] = [
     Field::new("agent_id", Ty::Text { max: 128 }).required(),
     Field::new("cwd", Ty::Text { max: 0 }),
     PROJECT,
@@ -125,6 +128,7 @@ static BEGIN_FIELDS: [Field; 21] = [
     .default("1200"),
     OP_ID,
     GENERATION,
+    TARGET,
     Field::new("git_branch", Ty::Str { max: 256 }).hidden(),
 ];
 
@@ -339,7 +343,7 @@ static CREATE_ITEM: [Field; 21] = [
     Field::new("assignee_agent_id", Ty::Text { max: 128 }),
 ];
 
-static TASK_CREATE_FIELDS: [Field; 5] = [
+static TASK_CREATE_FIELDS: [Field; 6] = [
     Field::new(
         "items",
         Ty::List {
@@ -352,6 +356,7 @@ static TASK_CREATE_FIELDS: [Field; 5] = [
     SESSION,
     OP_ID,
     GENERATION,
+    TARGET,
 ];
 
 fn create_check(args: &Map<String, Value>) -> Vec<Problem> {
@@ -519,9 +524,9 @@ pub fn patch_item_names() -> Vec<&'static str> {
 }
 
 /// 根：单条时 item 字段直接写在顶层（R11 P1-4 第 4 条），多条时放 `items`；两者不能同时用。
-static TASK_PATCH_FIELDS: [Field; PATCH_ITEM_LEN + 5] = {
+static TASK_PATCH_FIELDS: [Field; PATCH_ITEM_LEN + 6] = {
     let item = patch_item();
-    let mut out = [PROJECT; PATCH_ITEM_LEN + 5];
+    let mut out = [PROJECT; PATCH_ITEM_LEN + 6];
     let mut i = 0;
     while i < PATCH_ITEM_LEN {
         out[i] = item[i].optional();
@@ -539,6 +544,7 @@ static TASK_PATCH_FIELDS: [Field; PATCH_ITEM_LEN + 5] = {
     out[PATCH_ITEM_LEN + 2] = SESSION;
     out[PATCH_ITEM_LEN + 3] = OP_ID;
     out[PATCH_ITEM_LEN + 4] = GENERATION;
+    out[PATCH_ITEM_LEN + 5] = TARGET;
     out
 };
 
@@ -578,7 +584,7 @@ static COMPLETED_OBJ: [Field; 2] = [
     TASK_KEY,
 ];
 
-static PROGRESS_FIELDS: [Field; 13] = [
+static PROGRESS_FIELDS: [Field; 14] = [
     Field::new("summary", Ty::Text { max: 500 })
         .required()
         .aliases(&["content", "body"]),
@@ -621,6 +627,7 @@ static PROGRESS_FIELDS: [Field; 13] = [
     SESSION,
     OP_ID,
     GENERATION,
+    TARGET,
 ];
 
 fn progress_check(args: &Map<String, Value>) -> Vec<Problem> {
@@ -661,7 +668,7 @@ const RECORD_KINDS: &[&str] = &[
     "ATM_FEEDBACK",
 ];
 
-static RECORD_FIELDS: [Field; 14] = [
+static RECORD_FIELDS: [Field; 15] = [
     Field::new("kind", Ty::Enum(RECORD_KINDS)).required(),
     Field::new("title", Ty::Text { max: 400 }).required(),
     Field::new("summary", Ty::Text { max: 0 }).required(),
@@ -680,6 +687,7 @@ static RECORD_FIELDS: [Field; 14] = [
     SESSION,
     OP_ID,
     GENERATION,
+    TARGET,
 ];
 
 pub static RECORD: Tool = Tool {
@@ -691,7 +699,7 @@ pub static RECORD: Tool = Tool {
     destructive: false,
 };
 
-static END_FIELDS: [Field; 9] = [
+static END_FIELDS: [Field; 10] = [
     Field::new("summary", Ty::Text { max: 500 })
         .required()
         .aliases(&["content", "body"]),
@@ -713,6 +721,7 @@ static END_FIELDS: [Field; 9] = [
     SESSION,
     OP_ID,
     GENERATION,
+    TARGET,
 ];
 
 pub static END: Tool = Tool {
@@ -835,7 +844,7 @@ static SOURCE_REF: [Field; 5] = [
     Field::new("recordId", Ty::Text { max: 100 }).aliases(&["record_id"]),
 ];
 
-static KNOWLEDGE_SAVE_FIELDS: [Field; 15] = [
+static KNOWLEDGE_SAVE_FIELDS: [Field; 16] = [
     Field::new("slug", Ty::Text { max: 160 }).required(),
     Field::new("title", Ty::Text { max: 240 }).required(),
     Field::new("summary", Ty::Text { max: 1000 }).required(),
@@ -877,6 +886,7 @@ static KNOWLEDGE_SAVE_FIELDS: [Field; 15] = [
     Field::new("session", Ty::Str { max: 100 }).aliases(&["session_id"]),
     Field::new("op_id", Ty::Str { max: 200 }),
     GENERATION,
+    TARGET,
 ];
 
 fn knowledge_save_check(args: &Map<String, Value>) -> Vec<Problem> {
@@ -953,7 +963,7 @@ pub static DELTA: Tool = Tool {
     destructive: false,
 };
 
-static FEEDBACK_FIELDS: [Field; 9] = [
+static FEEDBACK_FIELDS: [Field; 10] = [
     Field::new("summary", Ty::Text { max: 300 }).required(),
     Field::new("detail", Ty::Str { max: 50000 }).aliases(&["details", "content", "body"]),
     Field::new("severity", Ty::Enum(&["LOW", "NORMAL", "HIGH", "CRITICAL"])).default("\"NORMAL\""),
@@ -963,6 +973,7 @@ static FEEDBACK_FIELDS: [Field; 9] = [
     SESSION,
     OP_ID,
     GENERATION,
+    TARGET,
 ];
 
 pub static FEEDBACK: Tool = Tool {

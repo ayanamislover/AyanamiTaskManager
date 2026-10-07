@@ -847,10 +847,18 @@ fn g_restored(e: &DomainError, ctx: &Ctx<'_>, _: Option<&Value>) -> Option<Fix> 
 
 fn g_target_changed(_: &DomainError, ctx: &Ctx<'_>, _: Option<&Value>) -> Option<Fix> {
     Some(Fix::Call {
+        // 不带上下文的原调用，也就是一次新签发：去掉 resolve 带来的目标与世代，桥签发的 auto id 也不再沿用。
         call: original(ctx, |m| {
             m.remove("expected_scope_generation");
+            m.remove("expected_target");
+            if m.get("op_id")
+                .and_then(Value::as_str)
+                .is_some_and(|op| op.starts_with("auto:"))
+            {
+                m.remove("op_id");
+            }
         }),
-        why: "写入目标变了：不带旧的目标重新发起".into(),
+        why: "写入目标变了：不带旧的目标重新发起，是否发起由你决定".into(),
     })
 }
 

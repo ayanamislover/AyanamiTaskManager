@@ -622,3 +622,38 @@ W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01�
 
 评审的两条 P2（清扫与诊断扫描没有工作量上限；`metrics.read` 的 `NO_DATA` 需要 W4 / W6 的界面与入口承接）是 W4 / W5 / W6 / W8 的硬门，
 已记入 ATM。
+
+## A3 服务端：operation 映射表、resolve、目标核对（`src/ops.rs`、`src/resolve.rs`，W4f）
+
+入口：`ops::OPS`（全部写 operation 一行一条）、`Service::resolve`（只读）、begin / `project.create` / `quick.promote`
+请求上的 `expected_target`；HTTP 侧是 `POST /mcp/resolve` 与各写工具的隐藏控制字段 `expected_target`（`http/src/resolve.rs`）。
+
+### 规格没写死、由实现定下的
+
+| 位置                     | 做法                                                                                                                                                                                                         | 理由                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| 需要 session 这一列      | 不单独登记，从入口能力的「Agent 需 session」推出；一个 operation 有几个入口能力时只看 Agent 能用的（`project-update.publish` 同时是 Agent 的项目进度与 User 的发布）                                         | 03 §3 是唯一事实源，表里再写一遍会漂                     |
+| 幂等命名空间             | 调用索引的三个 operation 恒为 Call（带目标的 `quick.promote` 落点固定，除外）；其余带 session 是 SESSION，不带是 ACTOR。代码里没有 GLOBAL 命名空间：GLOBAL 是 quick 与全局实体的**范围**，命名空间仍是 ACTOR | A3 第 3 条；与写入流水线的 `admit` 一致                  |
+| 表的完整性               | 用例扫描 `src/` 全部 `pub const *_OPERATION` 与表逐项比对（两个方向），扫描本身带阳性对照                                                                                                                    | A3：不能用「其余」兜底，遗漏项要验红                     |
+| expected_target 的线格式 | `{kind:"NONE"}`、`{kind:"CREATE"}`、`{kind:"EXISTING", scope:{kind:"PROJECT"/"KNOWLEDGE", id}, generation}`；项目用内部 id；多余的键、未知的 kind 都是参数错误                                               | 项目代码可以改名，id 不变                                |
+| begin 的分支判定         | `begin_target` 一个函数供 resolve 与执行时核对共用：① TRASHED、③ quick、⑤ 报错是 NONE，② EXISTING，④ CREATE                                                                                                  | 判定只有一处，两边不会不一致                             |
+| 核对的位置               | 重放判定之后、任何写入之前；TRASHED 仍先于核对报 `PROJECT_DB_UNAVAILABLE`                                                                                                                                    | A3「只有没有可重放结果的新写入才核对」；s 不可写报业务错 |
+| CREATE 被别人建好        | begin：那个项目没有 RESTORED 世代就接上去；`project.create`：显式代码或目录已属于某个项目就是 TARGET_CHANGED；无目标 `quick.promote`：这期间已被晋升就是 TARGET_CHANGED（不接到那个项目，不写回执）          | A3 CREATE 一节                                           |
+| 落点固定的写入           | 目标必须就是这个 scope（否则 TARGET_CHANGED），世代交给 R4 屏障；显式 `expected_scope_generation` 优先于目标里的世代                                                                                         | A3：显式给的保留，不被 resolve 的值覆盖                  |
+| 知识写入                 | 目标必须是知识库（不看作者所在项目）；知识库还没有身份时 resolve 给 id 为空、世代为空的 EXISTING                                                                                                             | 知识库是数据根唯一的那个                                 |
+| 默认 session             | 只给白名单客户端：连接组身份相同、ONLINE、项目不在垃圾箱里的 session，取心跳最近的一个；begin 不取默认 session                                                                                               | A1；begin 的约定                                         |
+| principal 映射           | `project.create`、`quick.promote` 的 Agent：session 的 agent_id → actor → `AGENT_ANON`；session 写错报 SESSION_NOT_FOUND，不退回 actor；晋升没给 actor 时事件 actor 也取 session 的 agent                    | A3 的映射表                                              |
+| TARGET_CHANGED 的 fix    | 原调用去掉 `expected_target`、`expected_scope_generation` 与 `auto:` 开头的 op_id，即一次新签发                                                                                                              | A3：不带上下文的原调用                                   |
+
+### 追溯
+
+| 规则                      | 用例                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| A3 映射表                 | `tests/ops.rs` 全部三个                                                                                                              |
+| A3 resolve 只读、分支判定 | `tests/target.rs::resolve_is_read_only_and_names_the_branch`、`http/tests/resolve.rs::resolve_reads_one_snapshot_and_writes_nothing` |
+| A3 目标核对（begin）      | `tests/target.rs::begin_checks_the_resolved_target`                                                                                  |
+| A3 目标核对（创建、晋升） | `tests/target.rs::create_and_promote_check_the_target`                                                                               |
+| A3 principal 映射         | `tests/target.rs::the_call_principal_follows_session_then_actor`                                                                     |
+| A3 写工具上的上下文       | `http/tests/resolve.rs::writes_carry_the_resolved_target`                                                                            |
+
+桥的签发、重试上下文、30 s 预算与 `RESULT_UNKNOWN` 在 W4g（`atm-mcp.exe`）。

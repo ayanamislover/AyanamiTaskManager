@@ -102,7 +102,10 @@ pub fn world_with(name: &str, calls: Calls) -> World {
             AppState::new(&listener, Token::new(TOKEN).unwrap(), calls, || json!({})).unwrap();
         tokio::spawn(serve(
             listener,
-            app(state, routes(&PROFILES, surface.handler())),
+            app(
+                state,
+                routes(&PROFILES, surface.handler()).merge(surface.resolve_routes()),
+            ),
             std::future::pending::<()>(),
         ));
         port

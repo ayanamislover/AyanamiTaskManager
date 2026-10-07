@@ -57,6 +57,7 @@ impl World {
                 expected_version: version,
                 target_project: target.map(str::to_owned),
                 actor: None,
+                ..QuickPromoteRequest::default()
             },
             op,
         )
@@ -478,6 +479,7 @@ fn l015_promote_refusals() {
                 expected_version: 0,
                 target_project: Some("ATM".into()),
                 actor: Some("claude".into()),
+                ..QuickPromoteRequest::default()
             },
             "ag",
         )

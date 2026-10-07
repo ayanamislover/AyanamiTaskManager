@@ -7,6 +7,7 @@
 //! - **git 上下文**：探测（IO）在服务之外，这里只按 S-022 写入。
 
 use crate::fp::{self, JsValue};
+use crate::ops::Target as Branch;
 use crate::receipts::{self, CallKey, Candidate, NewReceipt, Rebuilt, ReceiptScope, Verdict};
 use crate::work::Target;
 use crate::write::{
@@ -121,8 +122,10 @@ pub struct BeginRequest {
     pub single_conversation: bool,
     /// 省略时不幂等（2.x 的非原子 begin）；桥总会签发一个（R11 A3）。
     pub op_id: Option<String>,
-    /// 桥 resolve 时记下的目标世代（A3 的 expected_target）。
+    /// 显式的 `expected_scope_generation`（A3 控制字段）：落到已有项目时世代必须仍是它。
     pub expected_generation: Option<i64>,
+    /// 桥 resolve 时判定的分支目标（A3 的 expected_target）：新写入执行前按当前状态重新判定并对照。
+    pub expected_target: Option<crate::ops::Target>,
 }
 
 impl BeginRequest {
@@ -150,6 +153,7 @@ impl BeginRequest {
             single_conversation: false,
             op_id: None,
             expected_generation: None,
+            expected_target: None,
         }
     }
 }
@@ -427,6 +431,54 @@ fn locate(tx: &Transaction<'_>, s: &ProjectSelector) -> Result<Option<Project>, 
         );
     }
     Ok(None)
+}
+
+/// begin 的分支目标（10 A3 的 ①–⑤，按顺序取第一个满足的；只读）。resolve 与执行时的目标核对共用这一个判定。
+pub(crate) fn begin_target(
+    tx: &Transaction<'_>,
+    selector: &ProjectSelector,
+    mode: Option<&str>,
+    allow_project_create: bool,
+) -> Result<Branch, DomainError> {
+    Ok(match locate(tx, selector)? {
+        // ①：登记恢复请求并报错，没有可写的目标。
+        Some(p) if p.lifecycle == "TRASHED" => Branch::None,
+        // ②：项目优先，无论 mode 与 allow_project_create。
+        Some(p) => existing(tx, &p.id)?,
+        None if is_quick(mode) => Branch::None,
+        None if allow_project_create => Branch::Create,
+        // ⑤：报错，不写任何东西。
+        None => Branch::None,
+    })
+}
+
+fn is_quick(mode: Option<&str>) -> bool {
+    mode.is_some_and(|m| js_trim(m).eq_ignore_ascii_case("quick"))
+}
+
+fn existing(tx: &Transaction<'_>, project: &str) -> Result<Branch, DomainError> {
+    let scope = ReceiptScope::project(project);
+    let generation = crate::write::generation(tx, &scope).map_err(db)?;
+    Ok(Branch::Existing { scope, generation })
+}
+
+/// 项目从来没有被按范围恢复过（世代仍是建项目时的初值）。
+fn never_restored(tx: &Transaction<'_>, project: &str) -> Result<bool, DomainError> {
+    tx.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM scope_generations
+                             WHERE scope_kind = 'PROJECT' AND scope_id = ?1 AND reason = 'RESTORED')",
+        [project],
+        |r| r.get(0),
+    )
+    .map_err(db)
+}
+
+/// 新写入的目标核对（A3）：带 expected_target 时，按当前状态判定的分支必须与它一致。
+fn check_target(b: &Begin, now: &Branch) -> Result<(), DomainError> {
+    match &b.req.expected_target {
+        Some(expected) => expected.check(now),
+        None => Ok(()),
+    }
 }
 
 /// S-003 / 04 L-003、L-004：TRASHED 项目登记或累加恢复请求（提交），之后报错。
@@ -1053,6 +1105,18 @@ fn begin_tx(tx: &Transaction<'_>, b: &Begin) -> Result<BeginOutcome, DomainError
         }
     }
     let generation = crate::write::generation(tx, &scope).map_err(db)?;
+    if created.is_none() {
+        let now = Branch::Existing {
+            scope: scope.clone(),
+            generation,
+        };
+        // CREATE 的目标在 resolve 之后被别人建好、而且从没恢复过：begin 接到这个项目上（A3）。
+        let adopt =
+            b.req.expected_target == Some(Branch::Create) && never_restored(tx, &project.id)?;
+        if !adopt {
+            check_target(b, &now)?;
+        }
+    }
     // CREATE 分支的新项目没有可比的世代（A3）。
     if created.is_none()
         && b.req.expected_generation.is_some()
@@ -1226,6 +1290,7 @@ fn unmatched(
         .as_deref()
         .map_or("auto".to_owned(), |m| js_trim(m).to_lowercase());
     if mode == "quick" {
+        check_target(b, &Branch::None)?;
         // ③：quick task（全局，不随范围恢复回退）；op_id 让重试拿到同一个 Q 键（03 C-11）。
         let title = b
             .req
@@ -1271,6 +1336,7 @@ fn unmatched(
         }));
     }
     if !b.req.allow_project_create {
+        check_target(b, &Branch::None)?;
         // ⑤：报错，不写任何东西（R11 P1-5：auto 不再静默建 quick）。
         return Err(with_begin_next(
             DomainError::new(
@@ -1281,6 +1347,7 @@ fn unmatched(
         ));
     }
     // ④：在同一个写事务里建项目，之后照常建 session。
+    check_target(b, &Branch::Create)?;
     let canonical = b
         .req
         .selector

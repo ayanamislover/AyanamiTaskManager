@@ -180,7 +180,11 @@ pub struct CreateProjectRequest {
     pub signals: Map<String, Value>,
     /// 无 session 的 Agent 自报的 actor（调用索引的 principal id 与事件 actor）。
     pub actor: Option<String>,
+    /// Agent 带的 session：调用索引的 principal id 取它的 agent_id，优先于 actor（A3 的 principal 映射）。
+    pub session: Option<String>,
     pub op_id: Option<String>,
+    /// 桥 resolve 时判定的目标（A3 的 expected_target，project.create 恒为 CREATE）。
+    pub expected_target: Option<crate::ops::Target>,
 }
 
 impl CreateProjectRequest {
@@ -194,7 +198,9 @@ impl CreateProjectRequest {
             creation_reason: None,
             signals: Map::new(),
             actor: None,
+            session: None,
             op_id: None,
+            expected_target: None,
         }
     }
 }
@@ -295,6 +301,44 @@ impl Created {
             })),
         })
     }
+}
+
+/// project.create 此刻的分支目标（A3）：显式代码或目录已经属于某个项目时，就是那个项目（EXISTING），
+/// 否则是 CREATE。带 expected_target 的新写入据此判 `TARGET_CHANGED`，不接到别人建的项目上。
+pub(crate) fn create_target(
+    tx: &Transaction<'_>,
+    s: &NewProjectSpec,
+) -> Result<crate::ops::Target, DomainError> {
+    let owner: Option<String> = match &s.path {
+        Some(p) => tx
+            .query_row(
+                "SELECT project_id FROM project_paths
+                  WHERE path_key = ?1 OR (?2 IS NOT NULL AND git_common_dir = ?2) LIMIT 1",
+                params![path_key(&p.canonical_path), p.git_common_dir],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db)?,
+        None => None,
+    };
+    let owner = match (owner, &s.code) {
+        (Some(id), _) => Some(id),
+        (None, Some(code)) => tx
+            .query_row("SELECT id FROM projects WHERE code = ?1", [code], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(db)?,
+        (None, None) => None,
+    };
+    Ok(match owner {
+        Some(id) => {
+            let scope = ReceiptScope::project(id);
+            let generation = crate::write::generation(tx, &scope).map_err(db)?;
+            crate::ops::Target::Existing { scope, generation }
+        }
+        None => crate::ops::Target::Create,
+    })
 }
 
 /// 一个事务里建出 ACTIVE 项目（L-001）。路径已被任何项目（含垃圾箱里的）认领时 `PROJECT_ALREADY_EXISTS`（L-009）。
@@ -417,13 +461,47 @@ fn create_fp(s: &NewProjectSpec) -> JsValue {
     }))
 }
 
-fn call_identity(principal: &Principal, actor: Option<&str>) -> (&'static str, String) {
+/// 调用索引的主体（10 A3 的 principal 映射）：Agent 取 session 的 agent_id，没有 session 取自报的 actor，
+/// 两者都没有时是常量 `AGENT_ANON`；User 恒为 `USER`。`session_agent` 由调用方在事务里查好。
+pub(crate) fn call_identity(
+    principal: &Principal,
+    session_agent: Option<&str>,
+    actor: Option<&str>,
+) -> (&'static str, String) {
     match principal.kind() {
         PrincipalKind::Agent => (
             "AGENT",
-            actor.map_or("AGENT_ANON".to_owned(), str::to_owned),
+            session_agent
+                .or(actor)
+                .map_or("AGENT_ANON".to_owned(), str::to_owned),
         ),
         _ => ("USER", "USER".to_owned()),
+    }
+}
+
+/// Agent 带的 session 属于哪个 agent（任何项目里；session id 是 ULID）。没有这个 session 时报 SESSION_NOT_FOUND，
+/// 不退回 actor：调用方显式给的 session 写错了就是错了。
+pub(crate) fn session_agent(tx: &Transaction<'_>, session: &str) -> Result<String, DomainError> {
+    let session = js_trim(session);
+    let agents: Vec<String> = tx
+        .prepare("SELECT DISTINCT agent_id FROM agent_sessions WHERE id = ?1")
+        .map_err(db)?
+        .query_map([session], |r| r.get(0))
+        .map_err(db)?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(db)?;
+    match agents.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Err(DomainError::new(
+            ErrorCode::SESSION_NOT_FOUND,
+            format!("没有 session {session}"),
+        )
+        .detail("session_id", session)),
+        _ => Err(invalid(
+            "session",
+            format!("session {session} 在不同项目里属于不同的 agent，无法确定调用者：不带 session，改带 actor"),
+        )
+        .detail("session_id", session)),
     }
 }
 
@@ -755,7 +833,6 @@ impl Service {
     ) -> Result<Written, DomainError> {
         capability::require(principal, Capability::ProjectCreate)?;
         let s = spec(&r)?;
-        let (kind, id) = call_identity(principal, r.actor.as_deref());
         let op_id = match r.op_id.as_deref().map(js_trim) {
             Some("") => return Err(invalid("op_id", "op_id 不能为空")),
             Some(op) if utf16_len(op) > 128 => {
@@ -763,14 +840,20 @@ impl Service {
             }
             other => other.map(str::to_owned),
         };
-        let actor = if kind == "AGENT" {
-            id.clone()
-        } else {
-            "USER".to_owned()
-        };
+        let principal = principal.clone();
         self.store()
             .write(move |tx| {
                 let at = now_iso();
+                let agent = match (principal.kind(), r.session.as_deref()) {
+                    (PrincipalKind::Agent, Some(s)) => Some(session_agent(tx, s)?),
+                    _ => None,
+                };
+                let (kind, id) = call_identity(&principal, agent.as_deref(), r.actor.as_deref());
+                let actor = if kind == "AGENT" {
+                    id.clone()
+                } else {
+                    "USER".to_owned()
+                };
                 let call = CallKey {
                     principal_kind: kind,
                     principal_id: id.clone(),
@@ -804,6 +887,9 @@ impl Service {
                             return Err(idempotency_conflict(op, CREATE_OPERATION));
                         }
                     }
+                }
+                if let Some(expected) = &r.expected_target {
+                    expected.check(&create_target(tx, &s)?)?;
                 }
                 let created = create_tx(tx, &s, &actor, &at)?;
                 let result = created.view(s.path.as_ref());
