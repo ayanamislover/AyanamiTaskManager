@@ -203,20 +203,31 @@ mod tests {
         let inner_report = |s: &str, d: usize, t: usize, w: u64| {
             seen.borrow_mut().push(format!("inner {s} {d}/{t} {w}"))
         };
+        // 每个作用域结束后先看线程上装的是谁（在用到它之前）：没换回来就是悬垂的指针。
+        let installed = || CURRENT.with(Cell::get).cast::<()>();
         pulse();
+        assert!(installed().is_null());
         let outer = Meter::new(&outer_report);
+        let outer_at = (&outer as *const Meter<'_>).cast::<()>();
         with(Some(&outer), || {
             set("SNAPSHOT", 0, 0);
             pulse();
             let inner = Meter::new(&inner_report);
             with(Some(&inner), || set("IMPORT", 1, 2));
+            assert_eq!(installed(), outer_at, "the inner meter is still installed");
             with(None, pulse);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 with(Some(&inner), || panic!("unwinds"))
             }));
             assert!(r.is_err());
+            assert_eq!(
+                installed(),
+                outer_at,
+                "unwinding left the inner meter installed"
+            );
             pulse();
         });
+        assert!(installed().is_null(), "the outer meter is still installed");
         pulse();
         assert_eq!(
             seen.into_inner(),

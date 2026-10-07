@@ -6781,27 +6781,38 @@ mod fault_matrix {
             .unwrap();
         let before = tree(&root);
         let (seen, clean) = ticks(&f, &root);
-        // IMPORT 里同一个 (已完成, 总数) 连着推进了几批的那一格：停在它中间。
-        let busy: Vec<u64> = seen
-            .iter()
-            .filter(|(s, d, ..)| s == "IMPORT" && *d >= 1)
-            .fold(Vec::<(usize, Vec<u64>)>::new(), |mut acc, (_, d, _, w)| {
-                match acc.last_mut() {
-                    Some((last, ws)) if last == d => ws.push(*w),
-                    _ => acc.push((*d, vec![*w])),
+        // IMPORT 的阶段上报（工作量不变的那几条）把工作批次切成段：第一段是复制源库、补迁移，
+        // 第二次报「0/n」之后到「1/n」之前是第一个项目（大项目 P1）的导入事务。停在这一段中间。
+        let mut segments: Vec<(usize, Vec<u64>)> = Vec::new();
+        let mut last_work = None;
+        for (stage, done, _, work) in &seen {
+            if stage == "IMPORT" {
+                if last_work == Some(*work) {
+                    segments.push((*done, Vec::new()));
+                } else if let Some((_, seg)) = segments.last_mut() {
+                    seg.push(*work);
                 }
-                acc
-            })
+            }
+            last_work = Some(*work);
+        }
+        let busy = segments
             .into_iter()
-            .map(|(_, ws)| ws)
-            .max_by_key(Vec::len)
+            .filter(|(done, _)| *done == 0)
+            .map(|(_, seg)| seg)
+            .nth(1)
             .unwrap();
         assert!(busy.len() >= 3, "{busy:?}");
         let n = layout(&f, "n");
         let r = atm_store::progress::stop_at(busy[busy.len() / 2], || run(&n, &root, G1, None));
         assert!(matches!(r, Err(cv::Error::Interrupted(_))), "{r:?}");
         assert_eq!(phase_on_disk(&n), Phase::Import);
-        assert!(n.staging(G1).join("data").join("atm.sqlite").is_file());
+        // 停在大项目的事务中间：那 30 万条一条都没提交。
+        let target = n.staging(G1).join("data").join("atm.sqlite");
+        let imported: i64 = q(
+            &Connection::open(&target).unwrap(),
+            "SELECT count(*) FROM progress_updates WHERE id LIKE 'PUB%'",
+        );
+        assert_eq!(imported, 0);
         restarts_cleanly(&n, &root, &clean, &before);
     }
 
