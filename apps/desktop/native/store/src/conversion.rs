@@ -75,6 +75,12 @@ pub enum Error {
     Refused(String),
     /// 测试注入的中断（模拟进程被杀）。
     Interrupted(&'static str),
+    /// dry-run 的清理没做完：输出目录里有不是本次建的东西，或者本次建的东西被换过。那些条目原样留下，
+    /// 不删；`outcome` 是清理之前的结果（报告已经写出时它就在输出目录里）。
+    CleanupIncomplete {
+        left: Vec<String>,
+        outcome: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -88,6 +94,11 @@ impl std::fmt::Display for Error {
             Error::Unpublishable(why) => write!(f, "the conversion cannot be published: {why}"),
             Error::Refused(why) => write!(f, "refused: {why}"),
             Error::Interrupted(at) => write!(f, "interrupted at {at}"),
+            Error::CleanupIncomplete { left, outcome } => write!(
+                f,
+                "the dry-run output was not fully removed (left as is: {}); the run itself ended with {outcome}",
+                left.join("; ")
+            ),
         }
     }
 }
@@ -1827,11 +1838,14 @@ fn pin_out(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<Vec<pin:
     Ok(chain)
 }
 
-/// dry-run 的 SNAPSHOT 副本：`src` 下的每一层目录都排他新建并钉住，文件排他新建（名字被占就失败）。
+/// dry-run 的 SNAPSHOT 副本：`src` 下的每一层目录都排他新建并钉住，文件排他新建（名字被占就失败）并记下身份。
+/// 清理只删这些：文件与目录都按新建时的身份核对，不认识的条目一律不碰（W3 r3 P1-R3-01）。
 struct Pinned {
     root: pin::Dir,
     /// (相对 `src` 的目录, 钉住的目录)，按建出的先后。
     dirs: Vec<(PathBuf, pin::Dir)>,
+    /// (所在目录相对 `src` 的路径, 新建的文件)。
+    files: Vec<(PathBuf, pin::FileMark)>,
 }
 
 impl Pinned {
@@ -1861,23 +1875,43 @@ impl Pinned {
             });
         }
         let parent = at.map_or(&self.root, |i| &self.dirs[i].1);
-        let to = parent.path().join(rel.file_name().ok_or_else(plain)?);
-        let mut w = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&to)
-            .at("create", &to)?;
+        let name = rel.file_name().ok_or_else(plain)?;
+        let to = parent.path().join(name);
+        let (mut w, mark) = pin::create_file(parent, name).at("create", &to)?;
+        self.files.push((prefix, mark));
         let mut r = File::open(from).at("open", from)?;
         std::io::copy(&mut r, &mut w).at("copy", from)?;
         Ok(())
     }
 
-    /// 删掉整个副本：最深的目录先删，最后删 `src` 自己。
-    fn remove(self) {
-        for (_, dir) in self.dirs.into_iter().rev() {
-            let _ = dir.remove();
+    /// 删掉整个副本：先按身份删本次建的文件，再由深到浅删本次建的目录，最后是 `src` 自己。哪一处删不掉（被换过、
+    /// 里面有别人的东西），它和它的每一层祖先都原样留下——祖先里有它，删不掉也不该删。返回留下的条目。
+    fn remove(self) -> Vec<String> {
+        let mut left = Vec::new();
+        let mut kept: Vec<PathBuf> = Vec::new();
+        let src = self.root.path().to_path_buf();
+        for (dir, mark) in self.files {
+            if let Err(e) = pin::remove_file(mark) {
+                left.push(format!("{}: {e}", src.join(&dir).display()));
+                kept.push(dir);
+            }
         }
-        let _ = self.root.remove();
+        for (rel, dir) in self.dirs.into_iter().rev() {
+            if kept.iter().any(|k| k.starts_with(&rel)) {
+                drop(dir);
+                continue;
+            }
+            if let Err(e) = dir.remove() {
+                left.push(format!("{}: {e}", src.join(&rel).display()));
+                kept.push(rel);
+            }
+        }
+        if kept.is_empty()
+            && let Err(e) = self.root.remove()
+        {
+            left.push(format!("{}: {e}", src.display()));
+        }
+        left
     }
 }
 
@@ -1905,7 +1939,8 @@ fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
 /// 不写 `L`，不写 `N`（不碰 `M`、`A`、启动状态与进度），不起任何调度器。
 ///
 /// 输出目录、它的祖先、`src` 与 `data` 在整个写入与清理期间都是钉住的（[`pin`]）：检查之后把哪一层换成指向
-/// `L` 或 `N` 的 junction 都做不到。`src`、`data` 与 `src` 下的每层目录都是本次排他新建的，清理只删它们。
+/// `L` 或 `N` 的 junction 都做不到。`src`、`data` 与 `src` 下的每层目录都是本次排他新建的，清理只删它们；
+/// `src` 里只删本次建的文件与目录（按身份），别的条目留下，并以 [`Error::CleanupIncomplete`] 报告。
 pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     let refuse = |why: String| Err(Error::Refused(why));
     refuse_overlap(o.out, o.source, o.v3_root)?;
@@ -1928,6 +1963,7 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     let mut src = Pinned {
         root: pin::create(out_dir, OsStr::new("src")).at("create", &out.join("src"))?,
         dirs: Vec::new(),
+        files: Vec::new(),
     };
     let mut data: Option<pin::Dir> = None;
     let after_copy = o.after_copy;
@@ -1987,14 +2023,25 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
             DryRun::VerifyFailed(failures)
         })
     })();
-    src.remove();
+    let mut left = src.remove();
     if let Some(data) = data
         && !o.keep_data
+        && let Err(e) = data.remove_tree()
     {
-        let _ = data.remove();
+        left.push(format!("{}: {e}", out.join("data").display()));
     }
     drop(chain);
-    outcome
+    if left.is_empty() {
+        return outcome;
+    }
+    // 清理没做完不能报成功：留下的东西要有人看（W3 r3 P1-R3-01）。
+    Err(Error::CleanupIncomplete {
+        left,
+        outcome: match &outcome {
+            Ok(r) => format!("{r:?}"),
+            Err(e) => e.to_string(),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -2017,6 +2064,51 @@ mod tests {
             differing(&base, &digest),
             ["P2/tasks", "P3/tasks", "r/projects"]
         );
+    }
+
+    /// W3 r3 P1-R3-01：清理时发现某一层目录被换过（放开钉住到按身份重开之间），它和它的每一层祖先都原样留下，
+    /// 并报告出来；它里面本次建的文件、旁支的目录照常删。
+    #[cfg(windows)]
+    #[test]
+    fn a_replaced_directory_keeps_itself_and_every_ancestor() {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("store-unit")
+            .join("pinned-replaced");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let from = base.join("from.txt");
+        std::fs::write(&from, b"x").unwrap();
+        let outer = pin::open(&base).unwrap();
+        let mut p = Pinned {
+            root: pin::create(&outer, OsStr::new("src")).unwrap(),
+            dirs: Vec::new(),
+            files: Vec::new(),
+        };
+        for rel in ["a/b/c.txt", "a/d.txt", "e/f.txt", "g.txt"] {
+            p.copy(&from, rel).unwrap();
+        }
+        p.dirs
+            .iter_mut()
+            .find(|(rel, _)| rel == Path::new("a/b"))
+            .unwrap()
+            .1
+            .forge_identity();
+        let left = p.remove();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("was replaced"), "{left:?}");
+        let src = base.join("src");
+        assert!(src.join("a/b").is_dir() && src.join("a").is_dir() && src.is_dir());
+        for gone in ["a/b/c.txt", "a/d.txt", "e/f.txt", "e", "g.txt"] {
+            assert!(!src.join(gone).exists(), "{gone}");
+        }
+        drop(outer);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// 不按数据根输入的报告：数据根下的文件族都是 pending，不能发布。

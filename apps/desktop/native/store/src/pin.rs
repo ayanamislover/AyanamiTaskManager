@@ -13,6 +13,13 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+/// 本次在钉住的目录里排他新建的一个文件：清理时按 (卷序列号, 文件号) 核对，还是它才删。
+pub(crate) struct FileMark {
+    path: PathBuf,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    id: (u32, u64),
+}
+
 /// 一个钉住的目录。`owned` 的是本次新建的，只有它们能 [`Dir::remove`]。
 pub(crate) struct Dir {
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -30,10 +37,29 @@ impl Dir {
         &self.path
     }
 
-    /// 删掉本次新建的这个目录：先删里面的条目（不跟随链接：junction、符号链接只删链接本身），
-    /// 再删目录自己：放开钉住、不跟随链接地重新打开，文件号与新建时相同才删（不同就是被换过，不删）。
+    /// 测试用：让清理时的身份核对对不上，等于「放开钉住到重新打开之间，这个名字被换成了别的目录」。
+    #[cfg(test)]
+    pub(crate) fn forge_identity(&mut self) {
+        self.id.1 ^= 1;
+    }
+
+    /// 删掉本次新建的这个目录。它必须已经是空的（本次在里面建的东西先由调用方按身份删掉）：放开钉住、不跟随
+    /// 链接地重新打开，文件号与新建时相同才删；不同就是被换过，原样留下。目录里还有别的东西时删除失败，也原样
+    /// 留下——不认识的条目一律不删（W3 r3 P1-R3-01：枚举着删，会把换进来的外来目录连同内容一起删掉）。
     /// 打开的已有目录不删。调用时它的父目录要仍是钉住的。
     pub(crate) fn remove(self) -> std::io::Result<()> {
+        if !self.owned {
+            return Err(std::io::Error::other(format!(
+                "{} was not created here",
+                self.path.display()
+            )));
+        }
+        imp::delete(self)
+    }
+
+    /// 整棵删：先删里面的条目（不跟随链接：junction、符号链接只删链接本身），再按 [`Dir::remove`] 删自己。
+    /// 只用于转换器自己写满的 `data`：那里面的目录由转换器按路径新建，不经过钉住（REPORT.md「目录身份」的边界）。
+    pub(crate) fn remove_tree(self) -> std::io::Result<()> {
         if !self.owned {
             return Err(std::io::Error::other(format!(
                 "{} was not created here",
@@ -74,6 +100,28 @@ pub(crate) fn open(path: &Path) -> std::io::Result<Dir> {
 
 /// 在 `parent` 里排他新建子目录 `name` 并钉住。`name` 必须是单个分量。
 pub(crate) fn create(parent: &Dir, name: &OsStr) -> std::io::Result<Dir> {
+    single(name)?;
+    imp::create(parent, name)
+}
+
+/// 在钉住的 `parent` 里排他新建文件 `name`（名字被占就失败），记下它的身份。
+pub(crate) fn create_file(parent: &Dir, name: &OsStr) -> std::io::Result<(File, FileMark)> {
+    single(name)?;
+    let path = parent.path().join(name);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let id = imp::file_identity(&file)?;
+    Ok((file, FileMark { path, id }))
+}
+
+/// 删掉本次新建的一个文件：不跟随链接地打开，身份与新建时相同才删；被换过就原样留下并报错。
+pub(crate) fn remove_file(mark: FileMark) -> std::io::Result<()> {
+    imp::remove_file(mark)
+}
+
+fn single(name: &OsStr) -> std::io::Result<()> {
     let single = Path::new(name).components().count() == 1
         && matches!(
             Path::new(name).components().next(),
@@ -88,7 +136,7 @@ pub(crate) fn create(parent: &Dir, name: &OsStr) -> std::io::Result<Dir> {
             ),
         ));
     }
-    imp::create(parent, name)
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -321,13 +369,26 @@ mod imp {
         checked(unsafe { File::from_raw_handle(h) }, true)
     }
 
+    pub(super) fn file_identity(file: &File) -> std::io::Result<(u32, u64)> {
+        identity(file)
+    }
+
+    pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {
+        delete_named(&mark.path, mark.id)
+    }
+
     pub(super) fn delete(dir: Dir) -> std::io::Result<()> {
         let Dir { file, path, id, .. } = dir;
         drop(file);
+        delete_named(&path, id)
+    }
+
+    /// 按名字删一个条目，但只删身份对得上的那一个。
+    fn delete_named(path: &Path, id: (u32, u64)) -> std::io::Result<()> {
         // 不跟随链接：此刻这个名字若被换成 junction，打开的是链接本身，文件号对不上。
         // 共享方式里没有 FILE_SHARE_DELETE：打开之后到删除之前，别人也改不了它的名。
         let again = open_raw(
-            &path,
+            path,
             DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             FILE_FLAG_OPEN_REPARSE_POINT,
         )?;
@@ -388,6 +449,14 @@ mod imp {
 
     pub(super) fn delete(dir: Dir) -> std::io::Result<()> {
         std::fs::remove_dir(&dir.path)
+    }
+
+    pub(super) fn file_identity(_: &File) -> std::io::Result<(u32, u64)> {
+        Ok((0, 0))
+    }
+
+    pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {
+        std::fs::remove_file(&mark.path)
     }
 }
 
@@ -479,8 +548,8 @@ mod tests {
 
     /// 清理不跟随链接：目录里的 junction 只删链接，目标里的东西还在；打开的已有目录不许删。
     #[test]
-    fn remove_unlinks_without_following() {
-        let base = scratch("pin-remove");
+    fn remove_tree_unlinks_without_following() {
+        let base = scratch("pin-remove-tree");
         let target = base.join("target");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"keep").unwrap();
@@ -491,11 +560,57 @@ mod tests {
         drop(sub);
         junction(&base.join("mine").join("link"), &target);
         std::fs::write(mine.path().join("file"), b"x").unwrap();
-        mine.remove().unwrap();
+        mine.remove_tree().unwrap();
         assert!(!base.join("mine").exists());
         assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
-        assert!(open(&target).unwrap().remove().is_err());
+        assert!(open(&target).unwrap().remove_tree().is_err());
         assert!(target.is_dir());
+        drop(outer);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// W3 r3 P1-R3-01：`remove` 只删空目录，不认识的条目（目录、文件、junction）原样留下，删除失败；
+    /// 文件按新建时的身份删，被换过就留下。
+    #[test]
+    fn remove_leaves_what_it_did_not_create() {
+        let base = scratch("pin-remove");
+        let outer = open(&base).unwrap();
+        let mine = create(&outer, OsStr::new("mine")).unwrap();
+        let foreign = base.join("mine").join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::fs::write(foreign.join("business.txt"), b"keep").unwrap();
+        let mine = match mine.remove() {
+            Ok(()) => panic!("a directory with foreign entries was removed"),
+            Err(_) => open(&base.join("mine")).unwrap(),
+        };
+        assert_eq!(
+            std::fs::read(foreign.join("business.txt")).unwrap(),
+            b"keep"
+        );
+        drop(mine);
+        std::fs::remove_dir_all(&foreign).unwrap();
+
+        let mine = create(&outer, OsStr::new("mine2")).unwrap();
+        let (f, kept) = create_file(&mine, OsStr::new("a")).unwrap();
+        drop(f);
+        let (f, swapped) = create_file(&mine, OsStr::new("b")).unwrap();
+        drop(f);
+        assert!(
+            create_file(&mine, OsStr::new("a")).is_err(),
+            "names are exclusive"
+        );
+        assert!(create_file(&mine, OsStr::new("x/y")).is_err());
+        std::fs::remove_file(mine.path().join("b")).unwrap();
+        std::fs::write(mine.path().join("b"), b"theirs").unwrap();
+        remove_file(kept).unwrap();
+        let e = remove_file(swapped).unwrap_err();
+        assert!(e.to_string().contains("was replaced"), "{e}");
+        assert_eq!(std::fs::read(mine.path().join("b")).unwrap(), b"theirs");
+        assert!(!mine.path().join("a").exists());
+        std::fs::remove_file(mine.path().join("b")).unwrap();
+        mine.remove().unwrap();
+        assert!(!base.join("mine2").exists());
+
         // 重新打开时文件号对不上（被换过）就不删。
         let mut swapped = create(&outer, OsStr::new("swapped")).unwrap();
         swapped.id.1 ^= 1;

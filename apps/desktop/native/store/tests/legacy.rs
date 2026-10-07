@@ -7467,40 +7467,77 @@ mod w3_peer_r2 {
         assert_eq!((state(&root), state(&n)), before);
     }
 
-    /// 清理不跟随链接：`src` 与它下面的目录里被放进指向根的 junction，成功与源未静止两条路的清理都只删链接。
+    /// W3 r3 P1-R3-01：清理只删本次建的东西。`src` 里被放进的 junction（指向 L、N）、挪进来的一个已有目录、
+    /// 被换掉的副本文件都原样留下，结果是 `CleanupIncomplete`（不是成功）；L 与 N 不变。成功、源未静止、
+    /// 副本被换三条路都一样。
     #[test]
-    fn cleanup_unlinks_planted_junctions() {
-        let (f, root, n) = roots("w3r2-cleanup");
+    fn cleanup_leaves_what_it_did_not_create() {
+        let (f, root, n) = roots("w3r3-cleanup");
         let before_n = state(&n);
-        for (label, target, noisy) in [
-            ("n-quiet", n.clone(), false),
-            ("l-quiet", root.clone(), false),
-            ("n-noisy", n.clone(), true),
+        for (label, noisy, swap) in [
+            ("quiet", false, false),
+            ("noisy", true, false),
+            ("swapped", false, true),
         ] {
             let out = f.dir.join(format!("out-{label}"));
+            let incoming = f.dir.join(format!("incoming-{label}"));
+            put(&incoming.join("business.txt"), b"pre-existing content");
             let dispatch = root.join("dispatch/config.json");
             let original = fs::read(&dispatch).unwrap();
             let before_l = state(&root);
+            let src = out.join("src");
             let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
-                junction(&out.join("src").join("planted"), &target);
-                junction(&out.join("src").join("dispatch").join("planted"), &target);
+                junction(&src.join("planted-n"), &n);
+                junction(&src.join("dispatch").join("planted-l"), &root);
+                fs::rename(&incoming, src.join("dispatch").join("moved-in")).unwrap();
+                if swap {
+                    let copy = src.join("dispatch").join("config.json");
+                    fs::remove_file(&copy).unwrap();
+                    fs::write(&copy, b"theirs").unwrap();
+                }
                 if noisy {
                     fs::write(&dispatch, b"{}").unwrap();
                 }
             });
             if noisy {
                 fs::write(&dispatch, &original).unwrap();
-                assert!(
-                    matches!(result, Ok(DryRun::SourceNotQuiet(_))),
-                    "{label}: {result:?}"
+            }
+            let Err(cv::Error::CleanupIncomplete { left, outcome }) = &result else {
+                panic!("{label}: {result:?}");
+            };
+            assert!(!left.is_empty(), "{label}");
+            let expected = if noisy || swap {
+                "SourceNotQuiet"
+            } else {
+                "Verified"
+            };
+            assert!(outcome.contains(expected), "{label}: {outcome}");
+            assert_eq!(
+                fs::read(src.join("dispatch/moved-in/business.txt")).unwrap(),
+                b"pre-existing content",
+                "{label}"
+            );
+            if swap {
+                assert_eq!(
+                    fs::read(src.join("dispatch/config.json")).unwrap(),
+                    b"theirs"
                 );
             } else {
                 assert!(
-                    matches!(result, Ok(DryRun::Verified { .. })),
-                    "{label}: {result:?}"
+                    !src.join("dispatch/config.json").exists(),
+                    "{label}: our copy is removed"
                 );
             }
-            assert!(!out.join("src").exists(), "{label}");
+            for link in [src.join("planted-n"), src.join("dispatch/planted-l")] {
+                assert!(
+                    fs::symlink_metadata(&link)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink(),
+                    "{label}"
+                );
+                fs::remove_dir(&link).unwrap();
+            }
             assert_eq!(state(&root), before_l, "{label}");
             assert_eq!(state(&n), before_n, "{label}");
         }
