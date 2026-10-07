@@ -7706,3 +7706,149 @@ mod w3_peer_r2 {
         }
     }
 }
+
+/// W3 peer r2 P2-07：演练对 `L` 原样走正式的 dry-run、完整转换、启动判定与比较；任何一步不是正式意义上的通过就停下。
+mod w3_gate_rehearse {
+    use super::w3d::{G1, layout, run};
+    use super::*;
+    use atm_store::conversion::{self as cv, Comparison, RehearseOptions, RehearseStop};
+
+    fn rehearse(
+        root: &Path,
+        work: &Path,
+        before: &mut dyn FnMut(&str),
+    ) -> Result<cv::Rehearsal, RehearseStop> {
+        cv::rehearse(RehearseOptions {
+            at: AT,
+            source: root,
+            work,
+            generation: G1,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            before,
+        })
+    }
+
+    /// peer 的反例：知识库恢复没提交、回滚前的库在 `backups\knowledge\` 里。演练与正式转换得到同一份业务结果，
+    /// 附件路径同样映射进 `data\artifacts\`（演练不另做副本，原路径身份保留）。
+    #[test]
+    fn a_rehearsal_converts_the_root_as_it_is() {
+        let (f, root) = json_fixture("w3-p207-formal");
+        let previous = root.join(format!("backups/knowledge/before-restore-{KJ}.sqlite"));
+        fs::copy(root.join("knowledge/knowledge.sqlite"), &previous).unwrap();
+        Connection::open(&previous)
+            .unwrap()
+            .execute(
+                "UPDATE knowledge_entries SET slug = 'pre-restore-business'",
+                [],
+            )
+            .unwrap();
+        put(
+            &root.join("knowledge/restore.json"),
+            format!("{{\"id\":\"{KJ}\",\"committed\":false}}").as_bytes(),
+        );
+        let formal = layout(&f, "formal-n");
+        run(&formal, &root, G1, None).unwrap();
+        let read = |db: &Path| {
+            let c = Connection::open(db).unwrap();
+            (
+                q::<String>(&c, "SELECT slug FROM knowledge_entries WHERE id = 'K1'"),
+                q::<String>(
+                    &c,
+                    "SELECT local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A1'",
+                ),
+            )
+        };
+        let expected = read(&formal.database());
+        assert_eq!(expected.0, "pre-restore-business");
+
+        let work = f.dir.join("rehearse");
+        let mut steps = Vec::new();
+        let r = rehearse(&root, &work, &mut |s| steps.push(s.to_string())).unwrap();
+        assert_eq!(steps, ["dry-run", "run", "compare"]);
+        assert!(
+            r.files
+                .contains(&format!("backups/knowledge/before-restore-{KJ}.sqlite"))
+        );
+        assert_eq!(r.dry_run_digest, r.manifest.business_digest);
+        assert_eq!(read(&r.layout.database()), expected);
+    }
+
+    /// 每一种停下都是失败：未登记的条目在枚举时拒绝（一步都不做）；dry-run 与完整转换之间 `L` 变了是 Moved；
+    /// 转换之后、比较之前变了是 Compare。
+    #[test]
+    fn a_rehearsal_stops_at_the_first_failure() {
+        let (f, root) = json_fixture("w3-p207-stops");
+        let knowledge = root.join("knowledge/knowledge.sqlite");
+        let edit = |slug: &str| {
+            Connection::open(&knowledge)
+                .unwrap()
+                .execute(
+                    "UPDATE knowledge_entries SET slug = ?1 WHERE id = 'K1'",
+                    [slug],
+                )
+                .unwrap();
+        };
+
+        let stray = root.join("projects/P1/project.sqlite.pre-T-1.bak");
+        put(&stray, b"a hand-made backup");
+        let mut steps = Vec::new();
+        let work = f.dir.join("refused");
+        match rehearse(&root, &work, &mut |s| steps.push(s.to_string())) {
+            Err(RehearseStop::Refused(e)) => assert!(e.to_string().contains("pre-T-1.bak"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(steps.is_empty() && !work.exists());
+        fs::remove_file(&stray).unwrap();
+
+        let work = f.dir.join("moved");
+        let r = rehearse(&root, &work, &mut |s| {
+            if s == "run" {
+                edit("moved between the snapshots");
+            }
+        });
+        match r {
+            Err(RehearseStop::Moved(families)) => {
+                assert!(
+                    families.iter().any(|f| f.contains("knowledge")),
+                    "{families:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let work = f.dir.join("changed");
+        let r = rehearse(&root, &work, &mut |s| {
+            if s == "compare" {
+                edit("moved after the conversion");
+            }
+        });
+        match r {
+            Err(RehearseStop::Compare(c)) => match *c {
+                Comparison::Changed { families, .. } => assert!(
+                    families.iter().any(|f| f.contains("knowledge")),
+                    "{families:?}"
+                ),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// dry-run 不通过就停，不做完整转换：2.0 救不回来、用户也没点名舍弃的项目。
+    #[test]
+    fn a_rehearsal_stops_when_the_dry_run_does_not_verify() {
+        let (f, root) = settle_fixture("w3-p207-dry");
+        let p7 = root.join("projects/P7/project.sqlite");
+        empty_project(&p7, "P7", "XXX", 10, Some("unconvertible old data"));
+        let mut steps = Vec::new();
+        let work = f.dir.join("rehearse");
+        match rehearse(&root, &work, &mut |s| steps.push(s.to_string())) {
+            Err(RehearseStop::DryRun(why)) => assert!(why.contains("GGG"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(steps, ["dry-run"]);
+        assert!(!work.join("n").exists());
+    }
+}

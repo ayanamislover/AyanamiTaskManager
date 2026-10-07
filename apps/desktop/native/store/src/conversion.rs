@@ -2050,6 +2050,137 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     })
 }
 
+// ---------------------------------------------------------------- 演练
+
+pub struct RehearseOptions<'a> {
+    pub at: &'a str,
+    /// 旧根 `L`：只读，原路径直接用（附件等路径按它映射），不另做副本。
+    pub source: &'a Path,
+    /// 空的工作目录：dry-run 输出到 `work\dry`，完整转换的 `N` 是 `work\n`。
+    pub work: &'a Path,
+    pub generation: &'a str,
+    pub allow_real_data_root: bool,
+    pub real_data_root: Option<&'a Path>,
+    pub secrets_check: Option<fn(&[u8]) -> bool>,
+    /// 测试注入：每一步开始之前调用，参数是步名（`dry-run`、`run`、`compare`）。
+    pub before: &'a mut dyn FnMut(&str),
+}
+
+/// 演练走完了：每一步都是正式结论。
+#[derive(Debug)]
+pub struct Rehearsal {
+    /// 正式 SNAPSHOT 的文件清单（[`crate::legacy::snapshot_files`]）。
+    pub files: Vec<String>,
+    pub dry_run_digest: BTreeMap<String, String>,
+    pub layout: Layout,
+    pub manifest: Manifest,
+}
+
+/// 演练停在哪一步。每一种都是失败：调用方以非零退出。
+#[derive(Debug)]
+pub enum RehearseStop {
+    /// 正式枚举与守卫拒绝了这个根（未登记的条目等）。
+    Refused(Error),
+    /// dry-run 没有 VERIFY 通过，或者真转换会在提交门停下（`pending` 不空）。
+    DryRun(String),
+    /// 完整转换失败。
+    Run(Error),
+    /// dry-run 与完整转换各做一次 SNAPSHOT，两次的 business_digest 不同（列出不同的族）：两次之间 `L` 变了。
+    Moved(Vec<String>),
+    /// 启动判定不是 Published。
+    Decide(Box<Startup>),
+    /// 转换之后再比较 `L` 不是 Unchanged：多半是 2.x 在这期间写了数据，换个静止的时刻重跑。
+    Compare(Box<Comparison>),
+}
+
+/// W3i 的演练方法（W3 peer r2 P2-07）：对 `L` 原样走正式的 dry-run、完整转换、启动判定与比较，任何一步不是
+/// 正式意义上的通过就停下。不自己挑文件、不另做副本，所以复制集合、恢复依赖、路径映射都与正式转换相同。
+///
+/// 一致性边界：2.x 可能还在运行（演练不停它），所以静止判定按「静止」放行；副本的一致性由 SNAPSHOT 保证——
+/// 复制前后两次枚举（F0、F1）相同、副本的 sha256 逐个等于 F0，否则 dry-run 报 [`DryRun::SourceNotQuiet`]，
+/// 完整转换失败。得到的是 `L` 在复制期间没有变过的那一刻；最后的比较再确认转换之后 `L` 仍是那一刻的内容。
+/// 只读 `L`；只写 `work`。
+pub fn rehearse(o: RehearseOptions<'_>) -> std::result::Result<Rehearsal, RehearseStop> {
+    let files = crate::legacy::snapshot_files(o.source, o.at)
+        .map_err(|e| RehearseStop::Refused(e.into()))?;
+    let n = o.work.join("n");
+    (o.before)("dry-run");
+    let dry = dry_run(DryRunOptions {
+        at: o.at,
+        source: o.source,
+        out: &o.work.join("dry"),
+        v3_root: Some(&n),
+        allow_real_data_root: o.allow_real_data_root,
+        real_data_root: o.real_data_root,
+        secrets_check: o.secrets_check,
+        accept_unconvertible: &[],
+        keep_data: false,
+        quiesce: &mut || Quiesce::Quiet,
+        after_copy: &mut || {},
+    });
+    let dry_run_digest = match dry {
+        Ok(DryRun::Verified {
+            business_digest,
+            pending,
+        }) if pending.is_empty() => business_digest,
+        Ok(other) => return Err(RehearseStop::DryRun(format!("{other:?}"))),
+        Err(e) => return Err(RehearseStop::DryRun(e.to_string())),
+    };
+    let layout = Layout::new(n);
+    (o.before)("run");
+    let manifest = run(
+        &layout,
+        RunOptions {
+            at: o.at,
+            generation: o.generation,
+            legacy_root: o.source,
+            allow_real_data_root: o.allow_real_data_root,
+            real_data_root: o.real_data_root,
+            secrets_check: o.secrets_check,
+            accept_unconvertible: &[],
+            hook: &mut |_| true,
+            progress: None,
+        },
+    )
+    .map_err(RehearseStop::Run)?;
+    let moved: Vec<String> = dry_run_digest
+        .keys()
+        .chain(manifest.business_digest.keys())
+        .filter(|k| dry_run_digest.get(*k) != manifest.business_digest.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !moved.is_empty() {
+        return Err(RehearseStop::Moved(moved));
+    }
+    match decide(&layout, true) {
+        Startup::Published(_) => {}
+        other => return Err(RehearseStop::Decide(Box::new(other))),
+    }
+    (o.before)("compare");
+    match compare(
+        &layout,
+        &manifest,
+        &manifest.business_digest,
+        &CompareOptions {
+            legacy_root: o.source,
+            allow_real_data_root: o.allow_real_data_root,
+            real_data_root: o.real_data_root,
+            secrets_check: o.secrets_check,
+        },
+    ) {
+        Comparison::Unchanged(_) => {}
+        other => return Err(RehearseStop::Compare(Box::new(other))),
+    }
+    Ok(Rehearsal {
+        files,
+        dry_run_digest,
+        layout,
+        manifest,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
