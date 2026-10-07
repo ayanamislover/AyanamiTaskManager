@@ -7253,6 +7253,12 @@ mod w3_peer_r1 {
             .execute_batch("PRAGMA journal_mode = DELETE;")
             .unwrap();
         unchanged("journal mode");
+        put(
+            &root.join("projects/P7/PROJECT.SQLITE-SHM.tmp"),
+            b"someone else's",
+        );
+        unchanged("another program's index residue");
+        fs::remove_file(root.join("projects/P7/PROJECT.SQLITE-SHM.tmp")).unwrap();
 
         let c = Connection::open(&path).unwrap();
         c.execute_batch(
@@ -7867,9 +7873,25 @@ mod w3_gate_snapshot {
         let (f, root) = json_fixture("w3-gate-shm");
         let shm = root.join("projects/P1/project.sqlite-shm");
         put(&shm, &[0u8; 32768]);
+        // 别的程序在库旁边随建随删的临时文件（实测的名字），扫描认得它、快照不收它。
+        let foreign = root.join("projects/P1/PROJECT.SQLITE-SHM.tmp");
+        put(&foreign, b"someone else's");
+        put(
+            &root.join("registry/REGISTRY.SQLITE-SHM.tmp"),
+            b"someone else's",
+        );
         let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
         assert!(files.contains(&"projects/P1/project.sqlite".to_string()));
-        assert!(!files.iter().any(|f| f.ends_with("-shm")), "{files:?}");
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.to_ascii_lowercase().contains("-shm")),
+            "{files:?}"
+        );
+        // 只认库自己的索引：别的名字照旧是未登记的条目。
+        put(&root.join("projects/P1/other.sqlite-shm.tmp"), b"x");
+        assert!(atm_store::legacy::snapshot_files(&root, AT).is_err());
+        fs::remove_file(root.join("projects/P1/other.sqlite-shm.tmp")).unwrap();
 
         // 复制之后、第二次枚举之前 -shm 没了（2.x 关了库）：dry-run 照样 VERIFY 通过，不是「源未静止」。
         let r = cv::dry_run(DryRunOptions {
@@ -7883,7 +7905,10 @@ mod w3_gate_snapshot {
             accept_unconvertible: &[],
             keep_data: false,
             quiesce: &mut || Quiesce::Quiet,
-            after_copy: &mut || fs::remove_file(&shm).unwrap(),
+            after_copy: &mut || {
+                fs::remove_file(&shm).unwrap();
+                fs::remove_file(&foreign).unwrap();
+            },
         });
         assert!(matches!(r, Ok(DryRun::Verified { .. })), "{r:?}");
     }

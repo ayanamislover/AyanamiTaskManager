@@ -501,7 +501,7 @@ fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
     for (rel, path) in files {
         if databases
             .iter()
-            .any(|db| rel == format!("{db}-wal") || rel == format!("{db}-shm"))
+            .any(|db| rel == format!("{db}-wal") || super::root::is_wal_index(&rel, db))
         {
             continue;
         }
