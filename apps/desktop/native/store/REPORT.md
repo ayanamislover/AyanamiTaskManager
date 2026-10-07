@@ -245,6 +245,40 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **`L` 不在了**（用户删了 2.x 数据）：v3 照常启动；legacy 判冲突，因为选了 2.x 为准，它的数据却没了。
 - **变异**：`output/w3-evidence/w3e-mutation-evidence.json`。
 
+## 与 setup 的启动交接（W3f）
+
+按 07 §8 实现，分在三处：
+
+- **格式与判定**：在 `install-state/src/startup.rs`。setup 与新进程共用这一份，免得各写一份、慢慢对不上。
+- **进度上报**：在本包。
+- **接入**：在 `setup/src/txn.rs` 与 `setup/src/reverse.rs`。
+
+- **进度上报**：`RunOptions.progress` 回调 `(阶段, 已完成, 总数)`。
+  - SNAPSHOT 按文件报；IMPORT、VERIFY 按项目报（`ConvertOptions.progress`），开始时各报一次 0；PUBLISHING、PUBLISHED 各报一次。
+  - 宿主把它写成 `N\runtime\startup-progress.json`，内容是 `{txn, pid, process_created_at, generation, phase, progress{done, total}, updated_at}`。
+  - 用例 `w3f::conversion_progress_reaches_setup_but_is_not_health` 把转换报的每一条交给 setup 的判定，确认一路都是「继续等」，阶段依次是 SNAPSHOT → IMPORT → VERIFY → PUBLISHING → PUBLISHED。
+- **setup 的等待 `ProgressWatch`**：
+  - **健康**：只认 SERVICE_HEALTHY 见证。进度报到 PUBLISHED 10/10 也只是「在等」。
+  - **只认本次**：只接受本次 txn、本次进程（pid 与创建时间都对得上）写的进度。
+  - **三档时限**：一条可接受的进度都没有时，60 s 判失败，不转换的启动与原来一样。有过进度后，10 min 没动判卡住；只刷新 `updated_at` 不算动。总上限 2 h。
+  - **进程死亡**：立即判死。
+  - F15–F18 各有用例，在 install-state 的 `startup::tests`。
+- **回滚 `settle_for_rollback`**：
+  - **前提**：新进程必须已放掉 `N\runtime\service.lock`，否则拒绝。
+  - **按 `M` 的实际阶段处理**：没转换、没发布、`M` 读不出都不写 `A`；已经 PUBLISHED 就写 `A={legacy, setup-rollback, txn, at, generation}`。
+  - **接受过的摘要**：同一 generation 下用户接受过的摘要会一并带上。
+  - **契约**：写出的记录与本包 `rollback_authority` 逐字段一致，判定照常走「无损接回」（用例 `w3f::setups_rollback_record_is_the_one_the_store_expects`）。
+- **setup 接入**：
+  - **START**：改为按 `WaitPolicy` 等。接管别的 setup 启动的进程时，首条进度的窗口仍是原来的 20 s。
+  - **写 `A` 的时机**：都在切换版本之前。
+    - 撤销一次到 3.x 的升级：UNDO 第 1 步停掉新进程之后。
+    - 从 3.x 主动回滚或降级：SWITCH 之前。
+    - 从 3.x 回到 Electron：R_POINTER 之前。
+  - **setup 重启时**：3.x 的 START 若发现自己启动的进程还活着，就接管等待，不再直接回滚。
+  - **新根位置**：`ATM3_DATA_DIR` 覆盖，否则 `%LOCALAPPDATA%\AyanamiTaskManager3`。演练沙箱没指定时放在沙箱里。
+- **未覆盖**：setup 侧这几处接入目前只有编译与 clippy 保证，没有端到端用例。要等 3.x 的宿主（W4 起）能真的写进度、起服务，才能在演练里跑通（W3h / W8）。
+- **变异**：`output/w3-evidence/w3f-mutation-evidence.json`（install-state）、`w3f-store-mutation-evidence.json`（本包）。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。

@@ -115,6 +115,7 @@ impl Fixture {
                 secrets_check,
                 accept_unconvertible,
                 origin_root: None,
+                progress: None,
             },
         )
     }
@@ -843,6 +844,7 @@ fn sources_in_states_the_prototype_does_not_handle_are_refused() {
             secrets_check: None,
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap_err();
@@ -866,6 +868,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             secrets_check: None,
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap_err();
@@ -885,6 +888,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             secrets_check: None,
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap_err();
@@ -901,6 +905,7 @@ fn the_real_data_root_is_refused_unless_explicitly_allowed() {
             secrets_check: None,
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap();
@@ -2910,6 +2915,7 @@ fn a_data_root_converts_with_its_files() {
             secrets_check: None,
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -4554,6 +4560,7 @@ fn digest_of(f: &Fixture, root: &Path) -> BTreeMap<String, String> {
             secrets_check: Some(secrets_ok),
             accept_unconvertible: &[],
             origin_root: None,
+            progress: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"))
@@ -4709,6 +4716,7 @@ mod w3d {
                 secrets_check: Some(secrets_ok),
                 accept_unconvertible: &[],
                 hook: &mut hook,
+                progress: None,
             },
         )
     }
@@ -4924,6 +4932,7 @@ mod w3d {
                     secrets_check: Some(secrets_ok),
                     accept_unconvertible: &[],
                     hook: &mut hook,
+                    progress: None,
                 },
             );
             assert!(matches!(r, Err(cv::Error::SourceNotQuiet(_))), "{r:?}");
@@ -4967,6 +4976,7 @@ mod w3d {
                 secrets_check: Some(secrets_ok),
                 accept_unconvertible: &[],
                 hook: &mut hook,
+                progress: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -5322,6 +5332,7 @@ mod w3e {
                 secrets_check: Some(secrets_ok),
                 accept_unconvertible: &["GGG"],
                 hook: &mut |_| true,
+                progress: None,
             },
         )
         .unwrap_or_else(|e| panic!("{e}"));
@@ -5582,5 +5593,195 @@ mod w3e {
             judge(&n, &root, &compare(&n, &root)),
             Verdict::Conflict(_)
         ));
+    }
+}
+
+// ---------------------------------------------------------------- W3f：与 setup 的启动交接
+
+/// W3f（07 §8）：转换写的进度与 setup 的等待判定、setup 写的回滚记录与存储层的判定，两边对着验。
+mod w3f {
+    use super::w3d::{G1, G2, layout};
+    use super::*;
+    use atm_install_state::ProcessIdentity;
+    use atm_install_state::startup::{
+        self as handover, Counter, ProgressWatch, RollbackAuthority, StartupProgress, WaitPolicy,
+        WaitVerdict,
+    };
+    use atm_store::conversion::{self as cv, AuthorityState, Layout, Phase, RunOptions};
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    /// 转换按阶段报进度，宿主写成 `startup-progress.json`；setup 的等待接受它、看得到它一直在动，
+    /// 但到 PUBLISHED 也只是「还在等」，不当健康证明。
+    #[test]
+    fn conversion_progress_reaches_setup_but_is_not_health() {
+        let (f, root) = json_fixture("w3f-progress");
+        let n = layout(&f, "n");
+        let me = ProcessIdentity {
+            pid: std::process::id(),
+            started_at_ms: 1_790_000_000_000,
+            image: String::new(),
+        };
+        let t0 = Instant::now();
+        let watch = RefCell::new(ProgressWatch::new("T1", &me, WaitPolicy::default(), t0));
+        let seen = RefCell::new(Vec::<(String, usize, usize)>::new());
+        let report = |phase: &str, done: usize, total: usize| {
+            let p = StartupProgress {
+                txn: "T1".into(),
+                pid: me.pid,
+                process_created_at: me.started_at_ms,
+                generation: Some(G1.into()),
+                phase: phase.into(),
+                progress: Counter {
+                    done: done as u64,
+                    total: total as u64,
+                },
+                updated_at: 0,
+            };
+            handover::write_progress(&n.root, &p).unwrap();
+            // setup 那边：读文件、判定。每条都是一分钟后读到的，一直在动就一直在等。
+            let read = handover::read_progress(&n.root).unwrap();
+            let k = seen.borrow().len() as u32 + 1;
+            let verdict = watch.borrow_mut().observe(
+                t0 + Duration::from_secs(60) * k,
+                false,
+                true,
+                Some(&read),
+            );
+            assert_eq!(verdict, WaitVerdict::Waiting, "{phase} {done}/{total}");
+            seen.borrow_mut().push((phase.to_string(), done, total));
+        };
+        let m = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                hook: &mut |_| true,
+                progress: Some(&report),
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.phase, Phase::Published);
+        let seen = seen.into_inner();
+        let phases: Vec<&str> = seen.iter().map(|(p, _, _)| p.as_str()).collect::<Vec<_>>();
+        let mut order = phases.clone();
+        order.dedup();
+        assert_eq!(
+            order,
+            ["SNAPSHOT", "IMPORT", "VERIFY", "PUBLISHING", "PUBLISHED"],
+            "{seen:?}"
+        );
+        // SNAPSHOT 按文件报到 F0 的个数；IMPORT / VERIFY 按项目报到 3。
+        assert!(seen.contains(&(
+            "SNAPSHOT".into(),
+            m.source_files.len(),
+            m.source_files.len()
+        )));
+        assert!(seen.contains(&("IMPORT".into(), 3, 3)) && seen.contains(&("VERIFY".into(), 3, 3)));
+        // 报到 PUBLISHED 了，没有见证仍然只是在等；10 min 不动就判卡住。
+        let last = handover::read_progress(&n.root).unwrap();
+        assert_eq!(last.phase, "PUBLISHED");
+        let after = t0 + Duration::from_secs(60) * (seen.len() as u32 + 11);
+        assert!(matches!(
+            watch.borrow_mut().observe(after, false, true, Some(&last)),
+            WaitVerdict::Stuck(_)
+        ));
+    }
+
+    fn authority(n: &Layout) -> cv::Authority {
+        match cv::read_authority(n) {
+            AuthorityState::Present(a) => a,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// setup 写的 `A=legacy` 与存储层 `rollback_authority` 逐字段一致，并且判定照常：
+    /// 选过「沿用 3.0」后回滚、没动过 2.x，接回时无损。发布前回滚不写 `A`。
+    #[test]
+    fn setups_rollback_record_is_the_one_the_store_expects() {
+        let (f, root) = json_fixture("w3f-rollback");
+        let n = layout(&f, "n");
+
+        // 发布之前回滚：不写 A。
+        let mut stop = |s: cv::Step| s != cv::Step::Verified;
+        let interrupted = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &[],
+                hook: &mut stop,
+                progress: None,
+            },
+        );
+        assert!(interrupted.is_err());
+        assert!(matches!(
+            handover::settle_for_rollback(&n.root, "T0", 0),
+            Ok(RollbackAuthority::NotWritten(ref why)) if why.contains("VERIFY")
+        ));
+        assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+        cv::discard_attempt(&n, G1).unwrap();
+
+        let m = super::w3d::run(&n, &root, G2, None).unwrap();
+        // 用户选过「沿用 3.0」（绑定了一份摘要）。
+        let cmp = cv::Comparison::Unchanged(m.business_digest.clone());
+        let chosen = cv::choose_v3(&n, &m, &cmp, AT).unwrap();
+
+        // 新进程还拿着准入：拒绝。
+        let admission = cv::admit(&n, || cv::Quiesce::Quiet).unwrap();
+        assert!(handover::settle_for_rollback(&n.root, "T1", 0).is_err());
+        drop(admission);
+
+        let at_ms = 1_790_000_000_004;
+        assert_eq!(
+            handover::settle_for_rollback(&n.root, "T1", at_ms).unwrap(),
+            RollbackAuthority::Written {
+                generation: G2.into()
+            }
+        );
+        let written = authority(&n);
+        let expected = cv::rollback_authority(Some(&chosen), &m, "T1", &handover::iso_utc(at_ms));
+        assert_eq!(written, expected);
+        assert_eq!(
+            written.accepted_source_digest,
+            chosen.accepted_source_digest
+        );
+        // 别的 generation 下接受的摘要不沿用（两边同一条规则）。
+        let elsewhere = cv::Authority {
+            generation: Some(G1.into()),
+            ..chosen.clone()
+        };
+        assert_eq!(
+            cv::rollback_authority(Some(&elsewhere), &m, "T1", AT).accepted_source_digest,
+            None
+        );
+
+        // 回滚后没动过 2.x：阻塞比较判不变 → 无损接回。
+        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m));
+        let base = cv::baseline(&m, Some(&written)).clone();
+        let again = cv::compare(
+            &n,
+            &m,
+            &base,
+            &cv::CompareOptions {
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+            },
+        );
+        assert_eq!(
+            cv::judge(&cv::read_authority(&n), &m, &root, &again),
+            cv::Verdict::ResumeAfterRollback
+        );
     }
 }

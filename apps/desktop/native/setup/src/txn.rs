@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use atm_install_state::startup::{self, ProgressWatch, RollbackAuthority, WaitPolicy, WaitVerdict};
 use atm_install_state::{AppPointer, Outcome, Transaction, TxnKind, TxnState};
 
 use crate::env::{self, Env};
@@ -26,6 +27,8 @@ use crate::store::{self, InstallLock, Store};
 use atm_install_state::ipc;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bringing Electron 1.x back up. A START of a new-style version waits by `WaitPolicy`
+/// instead: 60 s without progress, longer while a 3.x conversion reports progress (07 §8).
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a replay waits for the host an earlier attempt started. That host may never
 /// serve: having lost its transaction it goes through normal admission, finds the journal
@@ -380,6 +383,10 @@ impl Setup {
                 Err(error) => return Err(format!("SEAL_FAILED: {error}")),
             }
         }
+        // Leaving 3.x for an older line: settle N before the version switch (07 §8).
+        if txn.from.as_deref().is_some_and(startup::is_v3) && !startup::is_v3(&to) {
+            self.settle_v3(txn)?;
+        }
         // SWITCH (§6 step 9)
         self.enter(txn, TxnState::Switch)?;
         self.store
@@ -585,7 +592,11 @@ impl Setup {
                 "ROLLBACK_START: taking over host {} started earlier",
                 started.pid
             );
-            match self.await_healthy(txn, from, &started, TAKEOVER_TIMEOUT) {
+            let policy = WaitPolicy {
+                first_progress: TAKEOVER_TIMEOUT,
+                ..WaitPolicy::default()
+            };
+            match self.await_healthy(txn, from, &started, policy) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     say!(
@@ -626,7 +637,7 @@ impl Setup {
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
         fault::after_spawn(txn.state, &self.env, &identity);
-        self.await_healthy(txn, version, &identity, START_TIMEOUT)
+        self.await_healthy(txn, version, &identity, WaitPolicy::default())
     }
 
     /// The host this transaction started for `version`, if a replay finds it still alive:
@@ -643,37 +654,75 @@ impl Setup {
             .then_some(started)
     }
 
+    /// Wait for SERVICE_HEALTHY (07 §8): only the witness counts as health. Progress that this
+    /// transaction's own process writes into `N\runtime\startup-progress.json` keeps the wait
+    /// going past `first_progress` (up to `cap`) while it moves; `stall` without movement is
+    /// STUCK. Progress from another txn or process — a recycled pid included — is ignored, so a
+    /// setup restarted mid-conversion takes the wait over from the same process (F15–F18).
     fn await_healthy(
         &self,
         txn: &Transaction,
         version: &str,
         identity: &atm_install_state::ProcessIdentity,
-        timeout: Duration,
+        policy: WaitPolicy,
     ) -> Step {
         let identity = identity.clone();
-        let deadline = Instant::now() + timeout;
+        let mut watch = ProgressWatch::new(&txn.id, &identity, policy, Instant::now());
         let mut last = String::new();
-        while Instant::now() < deadline {
-            match runtime::service_healthy(
+        let mut reported = String::new();
+        loop {
+            let healthy = match runtime::service_healthy(
                 &self.env.health_dir(),
                 &self.env.runtime_dir(),
                 &txn.id,
                 version,
                 &identity,
-                deadline,
+                Instant::now() + Duration::from_secs(10),
             ) {
-                Ok(()) => {
+                Ok(()) => true,
+                Err(error) => {
+                    last = error;
+                    false
+                }
+            };
+            let progress = startup::read_progress(&self.env.v3_root);
+            if let Some(p) = progress.as_ref().filter(|p| watch.accepts(p)) {
+                let now = format!("{} {}/{}", p.phase, p.progress.done, p.progress.total);
+                if now != reported {
+                    say!("START {version}: {now}");
+                    reported = now;
+                }
+            }
+            match watch.observe(
+                Instant::now(),
+                healthy,
+                procs::alive(&identity),
+                progress.as_ref(),
+            ) {
+                WaitVerdict::Healthy => {
                     say!("START {version} SERVICE_HEALTHY (host {})", identity.pid);
                     return Ok(());
                 }
-                Err(error) => last = error,
+                WaitVerdict::Waiting => std::thread::sleep(Duration::from_millis(250)),
+                WaitVerdict::Dead => return Err(format!("START_HOST_EXITED: {last}")),
+                WaitVerdict::Stuck(why) => return Err(format!("START_STUCK: {why}; {last}")),
+                WaitVerdict::TimedOut(why) => return Err(format!("START_TIMEOUT: {why}; {last}")),
             }
-            if !procs::alive(&identity) {
-                return Err(format!("START_HOST_EXITED: {last}"));
-            }
-            std::thread::sleep(Duration::from_millis(250));
         }
-        Err(format!("START_TIMEOUT: {last}"))
+    }
+
+    /// Before leaving 3.x (a failed upgrade's undo, an active rollback or downgrade, back to
+    /// Electron), 07 §8: the 3.x process must have released `N`'s admission; then, by the phase
+    /// the conversion durably reached, either nothing (not published) or
+    /// `A={authority: legacy, by: setup-rollback, txn}` before the version switch.
+    pub fn settle_v3(&self, txn: &Transaction) -> Step {
+        match startup::settle_for_rollback(&self.env.v3_root, &txn.id, store::now_ms())? {
+            RollbackAuthority::Written { generation } => {
+                say!("3.x generation {generation}: authority recorded as 2.x (setup-rollback)");
+            }
+            RollbackAuthority::NotWritten(why) => say!("3.x authority unchanged: {why}"),
+        }
+        Ok(())
     }
 
     /// COMMIT never rolls back: the service is healthy. Registration failures leave
@@ -781,8 +830,15 @@ impl Setup {
     ) -> Step {
         let to_dir = self.env.app_dir(&txn.to);
         match step {
-            // UNDO_STOP
-            1 => quiesce::stop_started(&self.env, txn.started.as_ref(), &to_dir),
+            // UNDO_STOP; undoing an upgrade to 3.x also settles N (07 §8) before UNDO_RESTORE
+            // switches the version back.
+            1 => {
+                quiesce::stop_started(&self.env, txn.started.as_ref(), &to_dir)?;
+                if startup::is_v3(&txn.to) {
+                    self.settle_v3(txn)?;
+                }
+                Ok(())
+            }
             // UNDO_RESTORE
             2 => {
                 match &snap.pointer {
@@ -898,6 +954,31 @@ impl Setup {
             }
             TxnState::Fence | TxnState::Quiesce | TxnState::Isolate | TxnState::Seal => {
                 self.undo(&mut txn, Outcome::Aborted, 1)
+            }
+            // A 3.x START may be a conversion that runs for an hour: if the process this
+            // transaction started is still alive, take the wait over instead of killing it
+            // (07 §8, F18). Its own progress keeps counting; anything older does not.
+            TxnState::Start
+                if startup::is_v3(&txn.to)
+                    && self.started_host(&txn, &txn.to.clone()).is_some() =>
+            {
+                let to = txn.to.clone();
+                let started = self.started_host(&txn, &to).ok_or("START_TAKEOVER_LOST")?;
+                say!("START {to}: taking over the wait for host {}", started.pid);
+                match self.await_healthy(&txn, &to, &started, WaitPolicy::default()) {
+                    Ok(()) => {
+                        self.enter(&mut txn, TxnState::Commit)?;
+                        let snap = snapshot::load(&self.env, &txn.id)?;
+                        self.commit(&mut txn, &snap);
+                        Ok(Outcome::Committed)
+                    }
+                    Err(error) => {
+                        say!("START {to} failed after takeover: {error}");
+                        txn.error = Some(code(&error));
+                        let target = failure_outcome(&txn);
+                        self.undo(&mut txn, target, 1)
+                    }
+                }
             }
             TxnState::Switch | TxnState::Start => {
                 let target = failure_outcome(&txn);

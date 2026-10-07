@@ -14,3 +14,5 @@ sha2 = "0.10"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# 与 setup 共用的启动交接格式（07 §8）：契约用例两边对着验。
+atm-install-state = { path = "../install-state" }

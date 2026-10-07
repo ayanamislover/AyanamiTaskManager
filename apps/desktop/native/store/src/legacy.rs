@@ -149,6 +149,23 @@ impl LegacySources {
     }
 }
 
+/// 转换进度（07 §8：转换期间 watchdog 的心跳每处理一批就更新一次）：`(阶段, 已完成, 总数)`。
+/// IMPORT 与 VERIFY 各按项目报一轮，开始时报一次 `0`。
+#[derive(Clone, Copy)]
+pub struct Progress<'a>(pub &'a dyn Fn(&str, usize, usize));
+
+impl std::fmt::Debug for Progress<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Progress(..)")
+    }
+}
+
+fn tick(progress: Option<Progress<'_>>, stage: &str, done: usize, total: usize) {
+    if let Some(p) = progress {
+        (p.0)(stage, done, total);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ConvertOptions<'a> {
     pub at: &'a str,
@@ -168,6 +185,8 @@ pub struct ConvertOptions<'a> {
     /// 原始数据根（W3d）：`src.root` 是 SNAPSHOT 复制出的快照时，登记与改写的路径（备份、附件的 `local_path`、
     /// CREATING 落定的 `db_path`）仍指向原始根；X 类的备份不进快照，直接在原始根里只读登记。`None` 时就是 `src.root`。
     pub origin_root: Option<&'a Path>,
+    /// 进度回调；`None` 不报。
+    pub progress: Option<Progress<'a>>,
 }
 
 /// 密文在动目标之前自检：解不开说明换了 Windows 账户或机器，手机配对要重做，由用户决定（05 §3.4）。
@@ -1035,8 +1054,10 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     let gens = convert_registry(&mut t, &used, opts.at, opts.generation, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
-    for p in &used.projects {
+    tick(opts.progress, "IMPORT", 0, used.projects.len());
+    for (i, p) in used.projects.iter().enumerate() {
         let pid = convert_project(&mut t, p, &gens, &mut report, &mut promotions)?;
+        tick(opts.progress, "IMPORT", i + 1, used.projects.len());
         if !seen.insert(pid.clone()) {
             return Err(ConvertError::Mismatch(format!("project {pid} given twice")));
         }
@@ -1058,7 +1079,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         root::convert_files(&mut t, root, &target_dir(target), &mut report)?;
         jsonfiles::convert(&mut t, root, &target_dir(target), opts.at, &mut report)?;
     }
-    verify(&t, &used, &mut report)?;
+    verify(&t, &used, &mut report, opts.progress)?;
     if !report.failures().is_empty() {
         return Err(ConvertError::Verify(Box::new(report)));
     }
@@ -2524,7 +2545,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
     }
     let work = work_dir(target, VERIFY_DIR)?;
     let r = prepare_sources(src, &work, &at, &mut report)
-        .and_then(|used| verify(&t, &used, &mut report));
+        .and_then(|used| verify(&t, &used, &mut report, None));
     drop(t);
     let _ = std::fs::remove_dir_all(&work);
     r?;
@@ -2679,7 +2700,12 @@ impl Recheck {
     }
 }
 
-fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
+fn verify(
+    t: &Connection,
+    src: &LegacySources,
+    report: &mut Report,
+    progress: Option<Progress<'_>>,
+) -> Result<()> {
     attach(t, &src.registry, "r")?;
     report.knowledge = src.knowledge.is_some();
     let mut re = Recheck::default();
@@ -2710,11 +2736,13 @@ fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()
             detach(t, "k");
             r?;
         }
-        for p in &src.projects {
+        tick(progress, "VERIFY", 0, src.projects.len());
+        for (i, p) in src.projects.iter().enumerate() {
             attach(t, p, "p")?;
             let r = verify_project(t, report, &mut re).and_then(|()| expect_global_project(t));
             detach(t, "p");
             r?;
+            tick(progress, "VERIFY", i + 1, src.projects.len());
         }
         verify_global(t, report)?;
         if let Some(root) = &src.root {

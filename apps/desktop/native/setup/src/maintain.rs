@@ -436,6 +436,7 @@ mod tests {
         Env {
             install_root: dir.join("install"),
             data_dir: dir.join("data"),
+            v3_root: dir.join("v3-data"),
             start_menu_dir: dir.join("start-menu"),
             desktop_dir: dir.join("desktop"),
             // Never opened by these tests; a private name all the same.

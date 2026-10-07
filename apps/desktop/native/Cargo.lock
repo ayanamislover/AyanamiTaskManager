@@ -120,6 +120,7 @@ dependencies = [
 name = "atm-store"
 version = "0.0.0"
 dependencies = [
+ "atm-install-state",
  "rusqlite",
  "serde_json",
  "sha2",

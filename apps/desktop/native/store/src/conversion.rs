@@ -911,6 +911,9 @@ pub enum Step {
     Renamed,
 }
 
+/// 阶段进度回调 `(阶段, 已完成, 总数)`。
+pub type ProgressFn<'a> = &'a dyn Fn(&str, usize, usize);
+
 pub struct RunOptions<'a> {
     /// 转换时刻（`toISOString` 形状）。
     pub at: &'a str,
@@ -924,6 +927,9 @@ pub struct RunOptions<'a> {
     pub accept_unconvertible: &'a [&'a str],
     /// 每个注入点调用一次；返回 `false` 时就地中断（模拟被杀，不做任何收尾）。
     pub hook: &'a mut dyn FnMut(Step) -> bool,
+    /// 阶段进度 `(阶段, 已完成, 总数)`（07 §8）：SNAPSHOT 按文件，IMPORT / VERIFY 按项目，
+    /// PUBLISHING / PUBLISHED 各一次。宿主把它写成 `N\runtime\startup-progress.json` 交给 setup。
+    pub progress: Option<ProgressFn<'a>>,
 }
 
 fn checkpoint(hook: &mut dyn FnMut(Step) -> bool, step: Step, name: &'static str) -> Result<()> {
@@ -961,16 +967,19 @@ fn snapshot(
     root: &Path,
     at: &str,
     src: &Path,
+    copied: &dyn Fn(usize, usize),
     after_copy: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<SourceFile>> {
     let f0 = enumerate(root, at)?;
-    for f in &f0 {
+    copied(0, f0.len());
+    for (i, f) in f0.iter().enumerate() {
         let to = src.join(&f.rel);
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let from = root.join(&f.rel);
         std::fs::copy(&from, &to).at("copy", &from)?;
+        copied(i + 1, f0.len());
     }
     after_copy()?;
     let f1 = enumerate(root, at)?;
@@ -1039,9 +1048,18 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     write_manifest(layout, &m)?;
 
     // SNAPSHOT：枚举 F0、复制、再枚举 F1，副本的 sha256 逐个等于 F0。
-    let snapshot = snapshot(opts.legacy_root, opts.at, &staging.join("src"), &mut || {
-        checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT")
-    });
+    let report_progress = |stage: &str, done: usize, total: usize| {
+        if let Some(p) = opts.progress {
+            p(stage, done, total);
+        }
+    };
+    let snapshot = snapshot(
+        opts.legacy_root,
+        opts.at,
+        &staging.join("src"),
+        &|done, total| report_progress("SNAPSHOT", done, total),
+        &mut || checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT"),
+    );
     match snapshot {
         Ok(files) => m.source_files = files,
         Err(e @ Error::Interrupted(_)) => return Err(e),
@@ -1070,6 +1088,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
                 secrets_check: opts.secrets_check,
                 accept_unconvertible: opts.accept_unconvertible,
                 origin_root: Some(opts.legacy_root),
+                progress: opts.progress.map(legacy::Progress),
             },
         )
     });
@@ -1108,6 +1127,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
     write_manifest(layout, &m)?;
+    report_progress("PUBLISHING", 0, 1);
     checkpoint(opts.hook, Step::BeforeRename, "PUBLISHING")?;
     if layout.data().exists() {
         // 发布目标已经有东西（不该有：调用方应已按 S5 处理）。不覆盖，整体隔离。
@@ -1116,6 +1136,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     rename_durable(&data, &layout.data(), false)?;
     checkpoint(opts.hook, Step::Renamed, "PUBLISHING")?;
     publish(layout, &mut m, opts.at)?;
+    report_progress("PUBLISHED", 1, 1);
     Ok(m)
 }
 
@@ -1273,7 +1294,13 @@ pub fn compare(
     let _ = std::fs::remove_dir_all(&scratch);
     let digest = (|| -> Result<BTreeMap<String, String>> {
         let src = scratch.join("src");
-        snapshot(opts.legacy_root, &m.started_at, &src, &mut || Ok(()))?;
+        snapshot(
+            opts.legacy_root,
+            &m.started_at,
+            &src,
+            &|_, _| {},
+            &mut || Ok(()),
+        )?;
         let sources = LegacySources::from_root(&src)?;
         let accept: Vec<&str> = m
             .accepted_unconvertible
@@ -1291,6 +1318,7 @@ pub fn compare(
                 secrets_check: opts.secrets_check,
                 accept_unconvertible: &accept,
                 origin_root: Some(opts.legacy_root),
+                progress: None,
             },
         )?)
     })();
@@ -1402,6 +1430,8 @@ pub fn judge(a: &AuthorityState, m: &Manifest, legacy_root: &Path, cmp: &Compari
 
 /// setup 回滚事务写的 `A`（07 §8）：`A=legacy by setup-rollback`，带上 generation 与已接受的摘要。
 /// 只有带着它们，回滚后没动过 2.x 时才能按 [`Verdict::ResumeAfterRollback`] 无损接回 3.0。
+/// 只沿用同一个 generation 下接受的摘要。setup 自己按同样的规则写（`atm_install_state::startup::settle_for_rollback`），
+/// 两边由契约用例对着验。
 pub fn rollback_authority(
     prev: Option<&Authority>,
     m: &Manifest,
@@ -1414,7 +1444,9 @@ pub fn rollback_authority(
         txn: Some(txn.to_string()),
         at: at.to_string(),
         generation: Some(m.generation.clone()),
-        accepted_source_digest: prev.and_then(|a| a.accepted_source_digest.clone()),
+        accepted_source_digest: prev
+            .filter(|a| a.generation.as_deref() == Some(m.generation.as_str()))
+            .and_then(|a| a.accepted_source_digest.clone()),
         accepted_unknown: None,
     }
 }

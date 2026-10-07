@@ -246,6 +246,7 @@ mod tests {
         let env = Env {
             install_root: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop"),
             data_dir: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager"),
+            v3_root: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager3"),
             start_menu_dir: PathBuf::new(),
             desktop_dir: PathBuf::new(),
             uninstall_key: String::new(),

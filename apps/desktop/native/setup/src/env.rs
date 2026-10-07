@@ -26,6 +26,8 @@ pub const SHIM: &str = "atm-mcp.exe";
 pub struct Env {
     pub install_root: PathBuf,
     pub data_dir: PathBuf,
+    /// ATM 3 的新根 `N`（07 §1）：启动进度、转换清单、权威记录都在这里（07 §8）。
+    pub v3_root: PathBuf,
     /// `...\Start Menu\Programs\ayanami`
     pub start_menu_dir: PathBuf,
     pub desktop_dir: PathBuf,
@@ -87,6 +89,7 @@ impl Env {
         Ok(Env {
             install_root: local.join(INSTALL_DIR_NAME),
             data_dir,
+            v3_root: atm_install_state::startup::v3_root()?,
             start_menu_dir: appdata
                 .join("Microsoft")
                 .join("Windows")
@@ -115,6 +118,11 @@ impl Env {
         Env {
             install_root: sandbox.join("install"),
             data_dir,
+            // 演练绝不碰真实的新根：没有显式指定就放在沙箱里。
+            v3_root: std::env::var_os("ATM3_DATA_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| sandbox.join("v3-data")),
             start_menu_dir: sandbox.join("start-menu").join(START_MENU_FOLDER),
             desktop_dir: sandbox.join("desktop"),
             uninstall_key: format!(r"{registry}\Uninstall\{UNINSTALL_NAME}"),
