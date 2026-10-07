@@ -11,6 +11,7 @@
 //! Admission is decided here once so that the launcher, a host started from a physical
 //! path, a host woken by the MCP shim and a host started by setup cannot disagree.
 
+pub mod durable;
 #[cfg(windows)]
 pub mod ipc;
 pub mod startup;

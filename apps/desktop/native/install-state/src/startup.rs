@@ -74,22 +74,9 @@ pub struct StartupProgress {
     pub updated_at: u64,
 }
 
+/// 进度与 `A` 都按共用的持久化契约写（[`crate::durable`]；W3 peer r1 P2-04）。
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    {
-        let mut file = fs::File::create(&temporary)?;
-        io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-    }
-    let result = fs::rename(&temporary, path);
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    crate::durable::write_atomic(path, bytes)
 }
 
 /// 新进程写进度。写不成功调用方可以忽略：进度只是让 setup 多等一会儿的依据。
@@ -679,11 +666,19 @@ mod tests {
         );
         drop(lock);
         assert!(admission_released(&n));
+        // W3 peer r1 P2-04：`A` 走共用的持久化契约——刷盘后 MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)，
+        // 是这次写入里唯一的一次改名。
+        let (written, ops) =
+            crate::durable::record(|| settle_for_rollback(&n, "T1", 1_790_000_000_004));
         assert_eq!(
-            settle_for_rollback(&n, "T1", 1_790_000_000_004).unwrap(),
+            written.unwrap(),
             RollbackAuthority::Written {
                 generation: "G1".into()
             }
+        );
+        assert!(
+            matches!(&ops[..], [crate::durable::Op::Move { to, flags: 0x9, .. }] if *to == n.join(AUTHORITY)),
+            "{ops:?}"
         );
         let a: serde_json::Value =
             serde_json::from_slice(&fs::read(n.join(AUTHORITY)).unwrap()).unwrap();

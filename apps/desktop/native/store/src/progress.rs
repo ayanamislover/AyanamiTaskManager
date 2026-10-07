@@ -10,6 +10,9 @@
 //!
 //! 深处的代码（散列、复制、打开的库）不必层层传参：[`with`] 在当前线程上装一个计量，作用域结束时撤掉；
 //! 没有计量时 [`set`]、[`pulse`] 什么都不做。
+//!
+//! [`stop_at`] 是测试注入（W3 peer r1 P2-05）：工作量到第 N 批时「进程被杀」——SQLite 中断正在执行的语句，
+//! 读文件返回错误，转换不做任何收尾就返回 `Interrupted`。这样能确定性地停在复制到一半、事务做到一半。
 
 use rusqlite::Connection;
 use std::cell::{Cell, RefCell};
@@ -47,6 +50,9 @@ impl<'a> Meter<'a> {
     fn pulse(&self) {
         self.work.set(self.work.get() + 1);
         self.emit();
+        if STOP.with(Cell::get).is_some_and(|at| self.work.get() >= at) {
+            STOPPED.with(|s| s.set(true));
+        }
     }
 
     fn emit(&self) {
@@ -58,6 +64,33 @@ impl<'a> Meter<'a> {
 thread_local! {
     /// 当前线程上的计量；只在 [`with`] 的作用域内非空。
     static CURRENT: Cell<*const Meter<'static>> = const { Cell::new(std::ptr::null()) };
+    static STOP: Cell<Option<u64>> = const { Cell::new(None) };
+    static STOPPED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 测试注入：执行 `f` 期间，计量的工作量到 `at` 时要求停下（[`stopped`] 变真）。作用域结束时复原。
+pub fn stop_at<R>(at: u64, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<u64>, bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            STOP.with(|s| s.set(self.0));
+            STOPPED.with(|s| s.set(self.1));
+        }
+    }
+    let _restore = Restore(
+        STOP.with(|s| s.replace(Some(at))),
+        STOPPED.with(|s| s.replace(false)),
+    );
+    f()
+}
+
+/// 注入的停下已经发生：调用方按「进程被杀」处理，不做任何收尾。
+pub fn stopped() -> bool {
+    STOPPED.with(Cell::get)
+}
+
+fn stopped_error() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Interrupted, "stopped by injection")
 }
 
 /// 在 `f` 执行期间把 `meter` 装到当前线程上（`None` 时沿用外层的）。作用域结束（含 panic）时恢复外层的。
@@ -102,7 +135,7 @@ pub fn watch(c: &Connection) -> rusqlite::Result<()> {
         SQLITE_OPS,
         Some(|| {
             pulse();
-            false
+            stopped()
         }),
     )
 }
@@ -124,6 +157,9 @@ impl<R: std::io::Read> std::io::Read for Read<R> {
         for _ in before..self.1 / FILE_BYTES {
             pulse();
         }
+        if stopped() {
+            return Err(stopped_error());
+        }
         Ok(n)
     }
 }
@@ -143,6 +179,9 @@ pub fn copy(from: &std::path::Path, to: &mut std::fs::File) -> std::io::Result<u
         n += k as u64;
     }
     pulse();
+    if stopped() {
+        return Err(stopped_error());
+    }
     Ok(n)
 }
 

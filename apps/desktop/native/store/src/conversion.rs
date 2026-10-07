@@ -133,62 +133,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // ---------------------------------------------------------------- 原子写
 
-/// 改名，落盘之后才返回（07 §1）：Windows 上是 `MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`。
-/// `std::fs::rename` 不带 WRITE_THROUGH，而 Windows 上目录不能单独 fsync，这个标志就是「fsync 目录」那一步。
-/// 不替换时目标已存在就失败（发布与封存都不覆盖）。
-#[cfg(windows)]
+/// 改名，落盘之后才返回（07 §1）：共用的持久化契约（[`atm_install_state::durable::rename`]，
+/// `MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`，共享冲突退避重试）。不替换时目标已存在就失败（发布与封存都不覆盖）。
 fn rename_durable(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let wide = |p: &Path| {
-        p.as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<u16>>()
-    };
-    let (a, b) = (wide(from), wide(to));
-    let flags = MOVEFILE_WRITE_THROUGH
-        | if replace {
-            MOVEFILE_REPLACE_EXISTING
-        } else {
-            0
-        };
-    // 刚写完的文件常被杀毒软件或索引器短暂打开，改名会得到 ACCESS_DENIED / SHARING_VIOLATION / LOCK_VIOLATION。
-    // 这类占用几百毫秒内就会放开：退避重试约 10 秒，仍不行才报错（W3d 变异运行里实测撞到过 32）。
-    let mut delay = std::time::Duration::from_millis(10);
-    let mut waited = std::time::Duration::ZERO;
-    loop {
-        // SAFETY: 两个指针指向以 0 结尾、调用期间一直存活的 UTF-16 缓冲区；函数不保留它们。
-        if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), flags) } != 0 {
-            return Ok(());
-        }
-        let e = std::io::Error::last_os_error();
-        let transient = matches!(e.raw_os_error(), Some(5 | 32 | 33));
-        if !transient || waited >= std::time::Duration::from_secs(10) {
-            return Err(located(
-                e,
-                "move",
-                &format!("{} -> {}", from.display(), to.display()),
-            ));
-        }
-        std::thread::sleep(delay);
-        waited += delay;
-        delay = (delay * 2).min(std::time::Duration::from_millis(500));
-    }
-}
-
-#[cfg(not(windows))]
-fn rename_durable(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
-    if !replace && std::fs::symlink_metadata(to).is_ok() {
-        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-    }
-    std::fs::rename(from, to)?;
-    File::open(to.parent().unwrap_or(Path::new(".")))?.sync_all()
+    atm_install_state::durable::rename(from, to, replace)
 }
 
 /// IO 错误带上操作与路径：诊断时光有「系统找不到指定的文件」无从下手。
@@ -206,23 +154,9 @@ impl<T> Located<T> for std::io::Result<T> {
     }
 }
 
-/// 先写同目录的临时文件并刷盘，再落盘地改名替换：替换要么是旧的、要么是新的。
+/// 先写同目录的临时文件并刷盘，再落盘地改名替换：替换要么是旧的、要么是新的（[`atm_install_state::durable::write_atomic`]）。
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).at("create", parent)?;
-    }
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    {
-        let mut f = File::create(&temporary).at("create", &temporary)?;
-        f.write_all(bytes).at("write", &temporary)?;
-        f.sync_all().at("flush", &temporary)?;
-    }
-    let r = rename_durable(&temporary, path, true);
-    if r.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    r
+    atm_install_state::durable::write_atomic(path, bytes)
 }
 
 fn is_sha256_hex(d: &str) -> bool {
@@ -1024,6 +958,9 @@ fn enumerate(root: &Path, at: &str) -> Result<Vec<SourceFile>> {
             sha256: file_sha256(&path)?,
         });
         crate::progress::pulse();
+        if crate::progress::stopped() {
+            return Err(Error::Interrupted("SNAPSHOT"));
+        }
     }
     Ok(out)
 }
@@ -1097,6 +1034,10 @@ fn publishable(report: &Report) -> std::result::Result<(), String> {
 }
 
 fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
+    // 注入的「进程被杀」（`progress::stop_at`）之后什么都不写：被杀的进程写不了 FAILED。
+    if crate::progress::stopped() {
+        return Ok(());
+    }
     m.phase = Phase::Failed;
     m.failure = Some(why);
     write_manifest(layout, m)
@@ -1105,8 +1046,10 @@ fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
 /// 07 §3：从 SNAPSHOT 一直走到 PUBLISHED。调用方先拿到准入，并按 [`decide`] 处理掉 S3 / S4 / S5 的残留。
 /// 失败时 `M` 记 FAILED 与原因，staging 保留供诊断；源与发布物都不改。
 pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
-    let meter = opts.progress.map(crate::progress::Meter::new);
-    crate::progress::with(meter.as_ref(), || {
+    // 没有回调也计量：工作量还用于测试注入的停下（`progress::stop_at`）。
+    let quiet = |_: &str, _: usize, _: usize, _: u64| {};
+    let meter = crate::progress::Meter::new(opts.progress.unwrap_or(&quiet));
+    crate::progress::with(Some(&meter), || {
         // 首条进度在任何枚举、复制之前（W3 peer r1 P2-03）：setup 的首条进度预算从进程启动算起。
         crate::progress::set("SNAPSHOT", 0, 0);
         run_metered(layout, opts)
@@ -1137,6 +1080,10 @@ fn run_metered(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
 
     match attempt(layout, opts, &mut m) {
         Err(e @ Error::Interrupted(_)) => Err(e),
+        // 注入的「进程被杀」（`progress::stop_at`）：同上，不做任何收尾。
+        Err(_) if crate::progress::stopped() => {
+            Err(Error::Interrupted("a killed process (injected)"))
+        }
         Err(e) => {
             // 发布之前的任何失败（含磁盘满、写不进 staging）都记 FAILED 与原因（F8）；
             // 已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
@@ -1230,6 +1177,8 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
         let c = Connection::open(data.join("atm.sqlite"))?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
+    // 复制来的附件、日志、密文与库逐个刷盘，再写 M、再改名发布（W3 peer r1 P2-04）。
+    atm_install_state::durable::sync_tree(&data)?;
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
     write_manifest(layout, m)?;
@@ -1307,6 +1256,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
         )?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
+    atm_install_state::durable::sync_tree(&data)?;
     let mut m = Manifest {
         converter_version: legacy::CONVERTER_VERSION.to_string(),
         source_root: None,

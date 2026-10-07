@@ -6644,6 +6644,257 @@ mod fault_matrix {
         ));
     }
 
+    /// W3 peer r1 P2-04：发布走共用的持久化契约。发布物里的每个文件（库、复制来的附件、日志、密文）都先刷盘，
+    /// 之后才把 staging 的 data 不替换地改名成 `N\data`（WRITE_THROUGH）；`M` 与 `A` 都是刷盘后替换地改名
+    /// （REPLACE_EXISTING | WRITE_THROUGH），而且 `A` 在发布物改名与 `M = PUBLISHED` 之后。
+    #[test]
+    fn publishing_flushes_every_file_then_moves_through_the_shared_contract() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-durable");
+        let n = layout(&f, "n");
+        let (m, ops) = durable::record(|| run(&n, &root, G1, None));
+        m.unwrap();
+        let staged = n.staging(G1).join("data");
+        let publish = ops
+            .iter()
+            .position(
+                |op| matches!(op, Op::Move { from, to, .. } if *from == staged && *to == n.data()),
+            )
+            .unwrap_or_else(|| panic!("{ops:?}"));
+        assert!(matches!(&ops[publish], Op::Move { flags: 0x8, .. }));
+        let mut published: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![n.data()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    published.push(staged.join(p.strip_prefix(n.data()).unwrap()));
+                }
+            }
+        }
+        assert!(published.len() > 3, "{published:?}");
+        for file in &published {
+            let synced = ops[..publish]
+                .iter()
+                .any(|op| matches!(op, Op::Sync(p) if p == file));
+            assert!(
+                synced,
+                "{} was not flushed before publishing",
+                file.display()
+            );
+        }
+        let after: Vec<&PathBuf> = ops[publish + 1..]
+            .iter()
+            .map(|op| match op {
+                Op::Move { to, flags: 0x9, .. } => to,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(after, [&n.manifest(), &n.authority()]);
+        assert!(
+            ops[..publish]
+                .iter()
+                .any(|op| matches!(op, Op::Move { to, flags: 0x9, .. } if *to == n.manifest()))
+        );
+    }
+
+    // ---------------- W3 peer r1 P2-05：确定性的故障注入
+
+    /// 一次干净的转换：每条进度 (阶段, 已完成, 总数, 工作量) 与它的 `M`。
+    fn ticks(f: &Fixture, root: &Path) -> (Vec<(String, usize, usize, u64)>, cv::Manifest) {
+        let n = layout(f, "ticks");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rec =
+            |s: &str, d: usize, t: usize, w: u64| seen.borrow_mut().push((s.to_string(), d, t, w));
+        let m = run_with(&n, root, G1, &mut |_| true, Some(&rec)).unwrap();
+        (seen.into_inner(), m)
+    }
+
+    fn phase_on_disk(n: &Layout) -> Phase {
+        match cv::read_manifest(n) {
+            cv::ManifestState::Present(m) => m.phase,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 被杀或失败之后，下次启动按 S3 重来：丢掉这次尝试、换 generation 重转，业务结果与干净的一次相同，`L` 没动。
+    fn restarts_cleanly(
+        n: &Layout,
+        root: &Path,
+        clean: &cv::Manifest,
+        before: &[(String, String)],
+    ) {
+        assert_eq!(
+            cv::decide(n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        cv::discard_attempt(n, G1).unwrap();
+        let m = run(n, root, G2, None).unwrap();
+        assert_eq!(m.phase, Phase::Published);
+        assert_eq!(m.business_digest, clean.business_digest);
+        assert_eq!(tree(root), before);
+    }
+
+    /// 复制到一半被杀：staging 里只有一部分副本（再把其中一份截成半截，模拟写到一半）。`M` 停在 SNAPSHOT，不是 FAILED。
+    #[test]
+    fn a_copy_killed_halfway_restarts() {
+        let (f, root) = json_fixture("w4a-copy-killed");
+        let before = tree(&root);
+        let (seen, clean) = ticks(&f, &root);
+        let total = clean.source_files.len();
+        let (.., at) = seen
+            .iter()
+            .find(|(s, d, t, _)| s == "SNAPSHOT" && *t == total && *d == total / 2)
+            .unwrap()
+            .clone();
+        let n = layout(&f, "n");
+        let r = atm_store::progress::stop_at(at + 1, || run(&n, &root, G1, None));
+        assert!(matches!(r, Err(cv::Error::Interrupted(_))), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Snapshot);
+        let copied: Vec<(String, String)> = tree(&n.staging(G1).join("src"));
+        assert!(
+            !copied.is_empty() && copied.len() < total,
+            "{} of {total}",
+            copied.len()
+        );
+        let torn = n.staging(G1).join("src").join(&copied[0].0);
+        let bytes = fs::read(&torn).unwrap();
+        fs::write(&torn, &bytes[..bytes.len() / 2]).unwrap();
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 事务做到一半被杀：一个大项目（30 万条进度）正在 IMPORT，SQLite 的语句被中断。`M` 停在 IMPORT，不是 FAILED。
+    #[test]
+    fn an_import_killed_mid_transaction_restarts() {
+        let (f, root) = json_fixture("w4a-import-killed");
+        Connection::open(root.join("projects/P1/project.sqlite"))
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+                 INSERT INTO progress_updates (id, work_item_id, summary, summary_hash, actor, created_at)
+                 SELECT printf('PUB%06d', i), 'W1', 'bulk', 'h', 'claude', '{T}' FROM n;"
+            ))
+            .unwrap();
+        let before = tree(&root);
+        let (seen, clean) = ticks(&f, &root);
+        // IMPORT 里同一个 (已完成, 总数) 连着推进了几批的那一格：停在它中间。
+        let busy: Vec<u64> = seen
+            .iter()
+            .filter(|(s, d, ..)| s == "IMPORT" && *d >= 1)
+            .fold(Vec::<(usize, Vec<u64>)>::new(), |mut acc, (_, d, _, w)| {
+                match acc.last_mut() {
+                    Some((last, ws)) if last == d => ws.push(*w),
+                    _ => acc.push((*d, vec![*w])),
+                }
+                acc
+            })
+            .into_iter()
+            .map(|(_, ws)| ws)
+            .max_by_key(Vec::len)
+            .unwrap();
+        assert!(busy.len() >= 3, "{busy:?}");
+        let n = layout(&f, "n");
+        let r = atm_store::progress::stop_at(busy[busy.len() / 2], || run(&n, &root, G1, None));
+        assert!(matches!(r, Err(cv::Error::Interrupted(_))), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Import);
+        assert!(n.staging(G1).join("data").join("atm.sqlite").is_file());
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 磁盘满：从发布前的逐个刷盘开始，每一次写都失败（112），连 FAILED 也写不下。
+    /// `M` 留着最后一份完整的（VERIFY），下次按 S3 安全重来。
+    #[test]
+    fn a_full_disk_keeps_the_last_good_manifest() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-disk-full");
+        let before = tree(&root);
+        let (_, clean) = ticks(&f, &root);
+        let n = layout(&f, "n");
+        let full = std::rc::Rc::new(std::cell::Cell::new(false));
+        let armed = full.clone();
+        let r = durable::inject(
+            Box::new(move |op| {
+                if matches!(op, Op::Sync(_)) {
+                    armed.set(true);
+                }
+                armed.get().then(|| std::io::Error::from_raw_os_error(112))
+            }),
+            || run(&n, &root, G1, None),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert!(full.get());
+        assert_eq!(phase_on_disk(&n), Phase::Verify);
+        assert!(!n.data().exists());
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// PUBLISHING 里改名本身失败（不是被杀）：`M` 留在 PUBLISHING、不记 FAILED，发布物没到位，下次按 S3 重来。
+    #[test]
+    fn a_failed_publishing_rename_restarts() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-rename-fails");
+        let before = tree(&root);
+        let (_, clean) = ticks(&f, &root);
+        let n = layout(&f, "n");
+        let data = n.data();
+        let r = durable::inject(
+            Box::new(move |op| {
+                matches!(op, Op::Move { to, .. } if *to == data)
+                    .then(|| std::io::Error::from_raw_os_error(17))
+            }),
+            || run(&n, &root, G1, None),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Publishing);
+        assert!(!n.data().exists());
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 发布物已经改名到位，之后写 `M = PUBLISHED` 失败（不是被杀）：`M` 留在 PUBLISHING，下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+    #[test]
+    fn a_failure_after_the_publishing_rename_finishes_later() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-after-rename");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let (data, manifest) = (n.data(), n.manifest());
+        let moved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let r = durable::inject(
+            Box::new(move |op| match op {
+                Op::Move { to, .. } if *to == data => {
+                    moved.set(true);
+                    None
+                }
+                Op::Move { to, .. } if *to == manifest && moved.get() => {
+                    Some(std::io::Error::from_raw_os_error(112))
+                }
+                _ => None,
+            }),
+            || run(&n, &root, G1, None),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Publishing);
+        assert!(n.data().is_dir());
+        assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::FinishPublishing {
+                generation: G1.into()
+            }
+        );
+        let m = cv::finish_publishing(&n, AT).unwrap();
+        assert_eq!(m.phase, Phase::Published);
+        assert!(
+            matches!(cv::read_authority(&n), AuthorityState::Present(a) if a.authority == "v3")
+        );
+        assert!(matches!(cv::decide(&n, true), Startup::Published(_)));
+        assert_eq!(tree(&root), before);
+    }
+
     /// F16：进度停止 10 min → setup 判为卡住；确认进程退出（放掉准入）后回滚，没发布就不写 `A`，
     /// 下次再升级按 S3 重来。
     #[test]
