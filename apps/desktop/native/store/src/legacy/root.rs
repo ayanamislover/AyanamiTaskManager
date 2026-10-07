@@ -92,7 +92,9 @@ fn top_level_family(name: &str) -> Option<&'static str> {
         "runtime" => "runtime",
         "logs" => "logs",
         "ATM_AGENT_GUIDE.md" | "docs" | "skills" | "mcp-stdio.cjs" => "install-copies",
-        "current" | "updates" => "setup",
+        // migration-manifest.json：2.x 的数据根搬迁脚本（scripts/migrate-data-root.ts）在新根留下的记录，
+        // 只有源、目标路径、项目数与时间（W3i 在真实数据根上发现）。
+        "current" | "updates" | "migration-manifest.json" => "setup",
         "webview" => "webview",
         "trash" => "trash",
         n if n.contains(".staging-") || n.contains(".backup-") => "install-copies",

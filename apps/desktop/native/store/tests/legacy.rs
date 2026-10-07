@@ -2841,6 +2841,7 @@ fn root_fixture(name: &str) -> (Fixture, PathBuf) {
     put(&root.join("mcp-stdio.cjs"), b"//");
     put(&root.join("docs.staging-1/a.md"), b"a");
     put(&root.join("updates/ATM-3.0.0.exe"), b"exe");
+    put(&root.join("migration-manifest.json"), b"{}");
     fs::create_dir_all(root.join("trash")).unwrap();
     put(&root.join("sync/config.json"), b"{\"v\":1}");
     put(&root.join("sync/config.corrupt.json"), b"{");
@@ -3011,6 +3012,8 @@ fn a_data_root_converts_with_its_files() {
     };
     assert_eq!(count("root/runtime"), (1, Some(4), true));
     assert_eq!(count("root/install-copies"), (5, Some(12), true));
+    // updates/ATM-3.0.0.exe 与数据根搬迁留下的 migration-manifest.json（W3i 在真实数据根上发现）。
+    assert_eq!(count("root/setup"), (2, Some(5), true));
     // config.corrupt.json、requests.corrupt.json，加上历史里没有的 run 的日志 r1.jsonl。
     assert_eq!(count("root/diagnostic-copies"), (3, Some(5), true));
     assert_eq!(count("root/trash"), (0, Some(0), true));

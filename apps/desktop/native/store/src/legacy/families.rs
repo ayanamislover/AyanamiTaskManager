@@ -489,7 +489,7 @@ pub const FAMILIES: &[FamilySpec] = &[
         "setup",
         Root,
         "<setup>",
-        &["current", "updates/**"],
+        &["current", "updates/**", "migration-manifest.json"],
         Dropped,
         "",
         Some("setup / 发布链资产"),

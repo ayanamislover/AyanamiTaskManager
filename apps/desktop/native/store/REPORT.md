@@ -352,6 +352,29 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **P2-04**：store 与 setup 统一持久化契约（逐文件刷盘、元数据提交、`A` 的写入顺序），改名标志与重试要有确定性用例。W4 发布与回滚接线之前完成，掉电实验放 W8。
   - **P2-05**：故障矩阵的范围见上一节；变异证据区分历史证据与最终候选证据，锚点随代码更新（本轮已把全部 W3 脚本的锚点对齐到当前代码并重跑）。
 
+## 真实数据演练（W3i，用户 2026-10-07 授权）
+
+- **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
+  - 复制业务目录做一致副本：库用只读连接 `VACUUM INTO`，其余文件逐字节复制；令牌、运行时文件、备份、日志一概不碰。
+  - 在副本上跑 dry-run，再跑完整转换、启动判定与一次比较。
+  - 副本与转换出的库用完即删，只留不含正文的 `report.json` 与日志（`output/w3i-real/`）。
+- **发现一：族表漏登 `migration-manifest.json`**：
+  - 这是 2.x 的数据根搬迁脚本（`scripts/migrate-data-root.ts`）在新根留下的记录，只有路径、项目数与时间。
+  - 已归入 X5（setup），只计数；05 同步登记，用例 `a_data_root_converts_with_its_files` 断言它的计数。
+- **发现二：一个项目目录里有游离的手工备份**：`projects\01KZH4YKQED25FZAZ3F9QKHMKY\project.sqlite.pre-ZB-T-0050-20260809-160053.bak`。
+  - 看命名，是 Agent 在 ZB-T-0050 之前自己复制的，2.x 代码不写这种文件。
+  - 规则不放宽：未登记就停（F23）。正式升级之前要由用户移走或删掉它，演练里按用户点名排除（`--exclude`）。
+- **结果**（副本 26 个库、26 个文件，162 MB）：
+  - dry-run：VERIFY 通过，671 个业务族，没有 pending。
+  - 完整转换：PUBLISHED；启动判定 Published；与副本比较 Unchanged。
+  - 新库：24 个项目、2636 个任务、2682 个检查项、23275 条事件。
+- **报告里的差异，全部可解释**：
+  - **规范化**：都是登记过的规则。N-01 共 758 行；N-05 的 lineage 跨 Agent 8 条、跨角色 6 条；N-04 1 条。
+  - **信息项**：
+    - 0015 派生列重算不一致，482 行。2.x 运行时会推进这些列，回填 SQL 只是初值；转换按原值保留，VERIFY 逐列核对。
+    - SUPERSEDED 没有 ACTIVE 后继，10 条。这是 2.x 数据原样。
+  - **回执**：AGENT 16579、BEGIN 496、USER 34、PROMOTION_HISTORY 3；没有违规。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。
