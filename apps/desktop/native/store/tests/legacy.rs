@@ -7275,6 +7275,25 @@ mod w3_peer_r1 {
         changed("an attachment");
     }
 
+    /// 直接按数据根转换（不经快照，`legacy::convert` 的公开用法）时，舍弃项目目录里的 -shm 与别的程序的
+    /// `-SHM.tmp` 也不算进摘要。
+    #[test]
+    fn a_direct_conversion_ignores_the_wal_index_of_a_dropped_database() {
+        let (f, root) = settle_fixture("w3-p206-direct");
+        let path = root.join("projects/P7/project.sqlite");
+        empty_project(&path, "P7", "XXX", 10, Some("unconvertible old data"));
+        let digest = || {
+            f.convert_accepting(Some(secrets_ok), &["GGG"])
+                .unwrap()
+                .business_digest()["dropped/P7"]
+                .clone()
+        };
+        let plain = digest();
+        put(&path.with_extension("sqlite-shm"), &[0u8; 32768]);
+        put(&root.join("projects/P7/PROJECT.SQLITE-SHM.tmp"), b"x");
+        assert_eq!(digest(), plain);
+    }
+
     /// W3 peer r2 P2-06：打不开的库绑定原始字节（库与非空的 -wal）：任何字节变化都是「变了」，
     /// 只有 -shm（WAL 的索引）不算。
     #[test]
@@ -7627,7 +7646,10 @@ mod w3_peer_r2 {
             let last_report = last_report.clone();
             holder = Some(std::thread::spawn(move || {
                 // 报告写完之后立刻就是清理：再开着它 300 毫秒。
-                while !last_report.exists() {
+                // 等报告写完，但有上限：dry-run 在报告之前就失败时，线程照样放开文件、结束，错误照常报出来
+                // （W3 peer r5 P2-R5-03）。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                while !last_report.exists() && std::time::Instant::now() < deadline {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 std::thread::sleep(std::time::Duration::from_millis(300));

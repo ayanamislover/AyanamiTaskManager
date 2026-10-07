@@ -34,9 +34,21 @@ impl NewFile {
     }
 
     /// 按句柄改名成钉住的 `dir` 里的 `name`；名字已存在就失败（不替换）。失败时文件仍开着、仍归调用方。
-    pub(crate) fn rename_into(&self, dir: &Dir, name: &OsStr) -> std::io::Result<()> {
+    /// 改名成功就记下新位置，再刷盘：之后刷盘、丢弃的错误报的都是文件实际所在的名字（W3 peer r5 P2-R5-01）。
+    pub(crate) fn rename_into(&mut self, dir: &Dir, name: &OsStr) -> std::io::Result<()> {
         single(name)?;
-        imp::rename_handle(&self.file, &self.path, &dir.path().join(name))
+        let to = dir.path().join(name);
+        imp::rename_handle(&self.file, &self.path, &to)?;
+        self.path = to;
+        self.file.sync_all().map_err(|e| {
+            std::io::Error::new(e.kind(), format!("flush {}: {e}", self.path.display()))
+        })
+    }
+
+    /// 文件现在的位置（改名之前是临时名，之后是新名）。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
     }
 
     /// 按句柄删掉它（改名失败之后用）。
@@ -532,7 +544,7 @@ mod imp {
                 format!("{} -> {}: {e}", from.display(), to.display()),
             ));
         }
-        file.sync_all()
+        Ok(())
     }
 
     pub(super) fn discard_handle(file: File, path: &Path) -> std::io::Result<()> {
@@ -686,9 +698,48 @@ mod tests {
         let mut g = create_open(&dir, OsStr::new("b.tmp")).unwrap();
         g.file().write_all(b"report").unwrap();
         g.rename_into(&dir, OsStr::new("report.json")).unwrap();
+        assert_eq!(g.path().file_name(), Some(OsStr::new("report.json")));
         drop(g);
         assert!(!base.join("b.tmp").exists());
         assert_eq!(std::fs::read(base.join("report.json")).unwrap(), b"report");
+        drop(dir);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// W3 peer r5 P2-R5-01：丢弃失败时，错误报的是文件实际所在的名字——改名之前是临时名，改名之后是新名。
+    #[test]
+    fn a_failed_discard_names_where_the_file_is() {
+        let base = scratch("pin-discard-names");
+        let dir = open(&base).unwrap();
+        let read_only = |p: &Path| {
+            let mut perm = std::fs::metadata(p).unwrap().permissions();
+            perm.set_readonly(true);
+            std::fs::set_permissions(p, perm).unwrap();
+        };
+        let writable = |p: &Path| {
+            let mut perm = std::fs::metadata(p).unwrap().permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perm.set_readonly(false);
+            std::fs::set_permissions(p, perm).unwrap();
+        };
+
+        // 改名之前：名字被占，改名失败；临时文件只读，丢弃也失败。
+        std::fs::write(base.join("taken.json"), b"theirs").unwrap();
+        let mut f = create_open(&dir, OsStr::new("a.tmp")).unwrap();
+        assert!(f.rename_into(&dir, OsStr::new("taken.json")).is_err());
+        read_only(&base.join("a.tmp"));
+        let e = f.discard().unwrap_err().to_string();
+        assert!(e.contains("a.tmp"), "{e}");
+        writable(&base.join("a.tmp"));
+
+        // 改名之后：文件已在新名下，只读，丢弃失败——报的是新名，不是早已不存在的临时名。
+        let mut g = create_open(&dir, OsStr::new("b.tmp")).unwrap();
+        g.rename_into(&dir, OsStr::new("report.json")).unwrap();
+        read_only(&base.join("report.json"));
+        let e = g.discard().unwrap_err().to_string();
+        assert!(e.contains("report.json") && !e.contains("b.tmp"), "{e}");
+        writable(&base.join("report.json"));
+        assert_eq!(std::fs::read(base.join("taken.json")).unwrap(), b"theirs");
         drop(dir);
         std::fs::remove_dir_all(&base).unwrap();
     }

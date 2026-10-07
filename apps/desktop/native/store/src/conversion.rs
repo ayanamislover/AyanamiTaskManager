@@ -1929,10 +1929,11 @@ fn write_new(dir: &pin::Dir, name: &str, bytes: &[u8]) -> std::io::Result<()> {
         .at("write", &at)
         .and_then(|()| f.rename_into(dir, OsStr::new(name)));
     if let Err(e) = written {
+        // 丢弃的错误带着文件现在的位置（改名成功之后就是 `name`，见 `NewFile::rename_into`）。
         if let Err(d) = f.discard() {
             return Err(std::io::Error::new(
                 e.kind(),
-                format!("{e}; the temporary was not removed: {d}"),
+                format!("{e}; it was not removed: {d}"),
             ));
         }
         return Err(e);
