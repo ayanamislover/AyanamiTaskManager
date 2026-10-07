@@ -55,6 +55,18 @@ g～i 的目标值：
 
 `version`、`updated_at` 都不变（N-03）。g～i 的改写不另开规则编号，与 a～f 同属 N-02@1。
 
+N-02g 的后果。完成门的结论在改写前后相同，但下面几件事会变，升级说明要写清楚：
+
+- **进度在下一次重算时变化。** 转换不重算 `computed_progress`，读到的仍是 2.x 存下的值。W-110 不计 SKIPPED 的检查项，所以下一次涉及该任务（或它的检查项、子项）的写入会按 3.0 重算：
+  - 与一个 DONE 的检查项同列时，进度从 50 变为 99（未 DONE 最多 99）；
+  - 这类检查项是任务唯一的检查项时，进度从 0（CHECKLIST）退到上报值，例如 80（REPORTED）。
+  - 有子项的任务按子项算，不受影响。
+- **新的 Review 请求被拒绝。** 对改成 SKIPPED 的检查项发起 Review 返回 `REVIEW_CHECKLIST_CLOSED`。用检查项更新改回 `TODO` 后可以重新发起（期望版本按 N-03 保留的 `version` 算）。
+- **已有的 Review 请求照常提交。** 2.x 里已经绑定在这类检查项上的请求保持绑定（N-03 保留了版本），评审者可以提交 APPROVED 或 CHANGES_REQUESTED；APPROVED 把父检查项置为 DONE。
+- **完成门的原因列表可能变长。** 只发生在必证、未完成的 OPTIONAL 上：2.0 只报证据缺失，3.0 还报检查项未关。结论都是不通过。
+
+证明：`service/tests/legacy_replay.rs` 的三个 `n02g_*` 用例。完成门一项逐一枚举 kind × status × 必证 × 证据条数共 64 种组合，确认结论相同，并列出原因列表不同的组合；另一项在真实转换出的库上走一遍服务。
+
 - 主键：N-02a～c、g～i 为 `id`；N-02d 为 `id`；N-02e 为 `work_item_id, label_id`；N-02f 为 `source_id, target_id, relation_type`。
 - VERIFY：
   - `work_items` 的族比对去掉 a～c 三列，N-01 与 N-02i 的列按期望值比对；
