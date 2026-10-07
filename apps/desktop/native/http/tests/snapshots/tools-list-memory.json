@@ -1,0 +1,237 @@
+[
+  {
+    "name": "atm_search",
+    "description": "搜索事实。多个词须同时命中（最多 8 个），双引号括起为相邻短语；任务或记录 key 直接精确读取。op_id 回查一次写操作（可带 session）。list=records|sessions 列表模式，与 query、op_id 不同用。 参数：query≤500；op_id≤128；list=records|sessions；project≤20；session≤128；task_key≤40；field_mask 最多 20 项；field_mask[]≤64；limit=1–30，默认 20；max_chars=300–50000，默认 6000。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        },
+        "list": {
+          "type": "string",
+          "enum": [
+            "records",
+            "sessions"
+          ]
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "field_mask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "b3b9417da084c611"
+    }
+  },
+  {
+    "name": "atm_knowledge_search",
+    "description": "搜索本地共享知识的摘要与适用范围。不需要 project 或 session。 参数：query≤500；tag≤80；include_archived 默认 false；limit=1–50，默认 5；max_chars=1–50000，默认 2400；cursor≤4000。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "include_archived": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "b798d26d59d59ce9"
+    }
+  },
+  {
+    "name": "atm_knowledge_get",
+    "description": "读取一条知识的固定修订。要编辑就带 for_edit:true，沿 cursor 读完整再保存；metadataTruncated 时按 metadataRead 续读，各页 metadataJson 拼接后解析。 必填：id。 参数：id≤100；part=body|metadata，默认 body；for_edit 默认 false；revision_id≤26；section≤200；max_chars=1–50000，默认 6000；cursor≤4000。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "part": {
+          "type": "string",
+          "enum": [
+            "body",
+            "metadata"
+          ]
+        },
+        "for_edit": {
+          "type": "boolean"
+        },
+        "revision_id": {
+          "type": "string"
+        },
+        "section": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "993fc40d68457c40"
+    }
+  },
+  {
+    "name": "atm_knowledge_save",
+    "description": "直接发布共享知识。先用 atm_knowledge_search 查重；更新要带 id 和 expected_revision_id 并提交完整内容，新建省略二者。source_refs 里 type=project_record 时还要 projectId、recordId、sourceVersion。 必填：slug、title、summary、body_markdown。 参数：slug≤160；title≤240；summary≤1000；body_markdown≤500000；use_when≤2000；tags 最多 30 项；tags[]≤80；aliases 最多 30 项；aliases[]≤160；applies_to 最多 30 项；applies_to[]≤200；source_refs 最多 30 项；source_refs[] 每项必填 type、reference；source_refs[].type=project_record|file|url|manual；source_refs[].reference≤2000；source_refs[].projectId≤100；source_refs[].recordId≤100；id≤100；expected_revision_id≤100；project≤100；session≤100；op_id≤200。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "slug": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "body_markdown": {
+          "type": "string"
+        },
+        "use_when": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "applies_to": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "project_record",
+                  "file",
+                  "url",
+                  "manual"
+                ]
+              },
+              "reference": {
+                "type": "string"
+              },
+              "sourceVersion": {
+                "type": "integer"
+              },
+              "projectId": {
+                "type": "string"
+              },
+              "recordId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reference"
+            ]
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "expected_revision_id": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "slug",
+        "title",
+        "summary",
+        "body_markdown"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "130abddab77956e3"
+    }
+  }
+]

@@ -1,0 +1,277 @@
+//! W4c 描述表驱动的 schema 与校验器（R11 P1-4；11 §5 U-5）。
+
+use atm_domain::error::ProblemKind;
+use atm_http::schema::{Field, Renamed, Tool, Ty};
+use serde_json::{Value, json};
+
+static ITEM: [Field; 2] = [
+    Field::new("title", Ty::Text { max: 200 }).required(),
+    Field::new(
+        "depends_on",
+        Ty::List {
+            of: &Ty::Str { max: 64 },
+            max: 20,
+        },
+    ),
+];
+
+static FIELDS: [Field; 7] = [
+    Field::new("task_key", Ty::Str { max: 64 })
+        .required()
+        .aliases(&["key", "work_item_key"]),
+    Field::new("operation", Ty::Enum(&["start", "complete", "wait_user"]))
+        .required()
+        .aliases(&["op"]),
+    Field::new("summary", Ty::Str { max: 10 }).aliases(&["content"]),
+    Field::new("limit", Ty::Int { min: 1, max: 100 }).default("10"),
+    Field::new("ready_only", Ty::Bool),
+    Field::new("resume", Ty::BoolOr(&["auto"])).default("\"auto\""),
+    Field::new(
+        "items",
+        Ty::List {
+            of: &Ty::Obj(&ITEM),
+            max: 3,
+        },
+    ),
+];
+
+static TOOL: Tool = Tool {
+    name: "atm_demo",
+    summary: "演示工具。",
+    fields: &FIELDS,
+    check: None,
+    read_only: true,
+    destructive: false,
+};
+
+fn problems(args: Value) -> Vec<(String, ProblemKind, Option<String>)> {
+    TOOL.validate(&args)
+        .unwrap_err()
+        .problems
+        .into_iter()
+        .map(|p| (p.path, p.problem, p.did_you_mean))
+        .collect()
+}
+
+/// 别名改成规范名并记录；枚举不分大小写；显式 null 视同省略；数字字符串与 "true" 收下。
+#[test]
+fn aliases_cases_and_nulls_are_normalized() {
+    let ok = TOOL
+        .validate(&json!({
+            "key": "ATM-T-1", "OP": "Complete", "content": "done", "summary": null,
+            "limit": "5", "ready_only": "TRUE", "resume": "Auto",
+        }))
+        .unwrap();
+    assert_eq!(
+        Value::Object(ok.args),
+        json!({"task_key": "ATM-T-1", "operation": "complete", "summary": "done",
+               "limit": 5, "ready_only": true, "resume": "auto"})
+    );
+    assert_eq!(
+        ok.normalized,
+        vec![
+            Renamed {
+                from: "OP".into(),
+                to: "operation".into()
+            },
+            Renamed {
+                from: "content".into(),
+                to: "summary".into()
+            },
+            Renamed {
+                from: "key".into(),
+                to: "task_key".into()
+            },
+        ]
+    );
+    // 同一字段给了规范名和别名：值相同就收下，不同就是冲突。
+    assert!(
+        TOOL.validate(&json!({"task_key": "A", "key": "A", "operation": "start"}))
+            .is_ok()
+    );
+    assert_eq!(
+        problems(json!({"task_key": "A", "key": "B", "operation": "start"})),
+        vec![("key".into(), ProblemKind::Conflict, None)]
+    );
+    // resume 也收布尔。
+    let ok = TOOL
+        .validate(&json!({"task_key": "A", "operation": "start", "resume": false}))
+        .unwrap();
+    assert_eq!(ok.args["resume"], false);
+}
+
+/// 未知键与拼错的枚举带 did_you_mean；全部可自动更正时给出更正后的完整参数。
+#[test]
+fn guesses_get_did_you_mean_and_a_corrected_call() {
+    let r = TOOL
+        .validate(&json!({"taskkey": "ATM-T-1", "operation": "complet", "sumary": "x"}))
+        .unwrap_err();
+    let got: Vec<_> = r
+        .problems
+        .iter()
+        .map(|p| (p.path.as_str(), p.problem, p.did_you_mean.as_deref()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("operation", ProblemKind::Enum, Some("complete")),
+            ("sumary", ProblemKind::Unknown, Some("summary")),
+            ("taskkey", ProblemKind::Unknown, Some("task_key")),
+        ]
+    );
+    assert_eq!(
+        r.corrected.map(Value::Object),
+        Some(json!({"operation": "complete", "summary": "x", "task_key": "ATM-T-1"}))
+    );
+    // 太远的猜法没有建议，也就没有更正。
+    let r = TOOL
+        .validate(&json!({"task_key": "A", "operation": "start", "zzzzzz": 1}))
+        .unwrap_err();
+    assert_eq!(r.problems[0].did_you_mean, None);
+    assert_eq!(
+        r.problems[0].allowed,
+        Some(json!([
+            "task_key",
+            "operation",
+            "summary",
+            "limit",
+            "ready_only",
+            "resume",
+            "items"
+        ]))
+    );
+    assert_eq!(r.corrected, None);
+    // 缺必填项无从更正。
+    let r = TOOL.validate(&json!({"operation": "start"})).unwrap_err();
+    assert_eq!(
+        (r.problems[0].path.as_str(), r.problems[0].problem),
+        ("task_key", ProblemKind::Missing)
+    );
+    assert_eq!(r.corrected, None);
+}
+
+/// 上限、类型、嵌套路径。
+#[test]
+fn limits_types_and_nested_paths() {
+    let base = |extra: Value| {
+        let mut v = json!({"task_key": "A", "operation": "start"});
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        v
+    };
+    let r = TOOL
+        .validate(&base(json!({"summary": "一二三四五六七八九十十"})))
+        .unwrap_err();
+    assert_eq!(
+        (r.problems[0].problem, r.problems[0].over_by),
+        (ProblemKind::TooLong, Some(1))
+    );
+    assert_eq!(
+        problems(base(json!({"limit": 0})))[0].1,
+        ProblemKind::Pattern
+    );
+    assert_eq!(
+        problems(base(json!({"limit": "many"})))[0].1,
+        ProblemKind::Pattern
+    );
+    assert_eq!(
+        problems(base(json!({"ready_only": "yes"})))[0].1,
+        ProblemKind::Pattern
+    );
+    assert_eq!(
+        problems(base(
+            json!({"items": [{"title": "a"}, {"title": " "}, {"titel": "c", "depends_on": "1"}]})
+        )),
+        vec![
+            ("items[1].title".into(), ProblemKind::Empty, None),
+            (
+                "items[2].titel".into(),
+                ProblemKind::Unknown,
+                Some("title".into())
+            ),
+        ]
+    );
+    assert_eq!(
+        problems(base(
+            json!({"items": [{"title": "a"}, {"title": "b"}, {"title": "c"}, {"title": "d"}]})
+        ))[0]
+            .1,
+        ProblemKind::TooMany
+    );
+    // 单个元素不包数组也收下。
+    let ok = TOOL
+        .validate(&base(json!({"items": {"title": "a", "depends_on": "1"}})))
+        .unwrap();
+    assert_eq!(
+        ok.args["items"],
+        json!([{"title": "a", "depends_on": ["1"]}])
+    );
+    // 数字当文本传来照字面收下。
+    let ok = TOOL
+        .validate(&json!({"task_key": 42, "operation": "start"}))
+        .unwrap();
+    assert_eq!(ok.args["task_key"], "42");
+    // 参数整体不是对象。
+    assert_eq!(problems(json!([1]))[0].0, "$");
+    assert!(TOOL.validate(&Value::Null).is_err());
+}
+
+/// U-5：客户端丢掉 schema 里的 enum / required / default 之后，description 里仍有每个必填项、
+/// 枚举值和上限。
+#[test]
+fn the_description_carries_what_clients_drop() {
+    let d = TOOL.description();
+    assert!(!d.contains('\n'), "{d}");
+    for needle in [
+        "必填：task_key、operation",
+        "operation=start|complete|wait_user",
+        "summary≤10",
+        "limit=1–100，默认 10",
+        "resume=true|false|auto，默认 auto",
+        "items 最多 3 项",
+        "items[] 每项必填 title",
+        "items[].title≤200",
+        "items[].depends_on 最多 20 项",
+        "items[].depends_on[]≤64",
+    ] {
+        assert!(d.contains(needle), "{needle} missing from:\n{d}");
+    }
+}
+
+/// schema：不用 $ref、不写 additionalProperties；只有类型、枚举与必填。
+#[test]
+fn the_schema_is_flat_and_complete() {
+    let s = TOOL.input_schema();
+    let text = s.to_string();
+    assert!(
+        !text.contains("$ref") && !text.contains("additionalProperties"),
+        "{text}"
+    );
+    assert_eq!(s["required"], json!(["task_key", "operation"]));
+    assert_eq!(
+        s["properties"]["operation"]["enum"],
+        json!(["start", "complete", "wait_user"])
+    );
+    // 上限、默认值只在 description（U-5），schema 里只有类型、枚举与必填。
+    for word in [
+        "maxLength",
+        "minLength",
+        "minimum",
+        "maximum",
+        "maxItems",
+        "default",
+    ] {
+        assert!(!text.contains(word), "{word} in {text}");
+    }
+    assert_eq!(s["properties"]["summary"], json!({"type": "string"}));
+    assert_eq!(s["properties"]["limit"], json!({"type": "integer"}));
+    assert_eq!(
+        s["properties"]["resume"],
+        json!({"enum": [true, false, "auto"]})
+    );
+    assert_eq!(
+        s["properties"]["items"]["items"]["required"],
+        json!(["title"])
+    );
+}

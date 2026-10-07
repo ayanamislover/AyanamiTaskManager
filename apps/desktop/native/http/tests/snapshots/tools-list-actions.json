@@ -1,0 +1,220 @@
+[
+  {
+    "name": "atm_task_patch",
+    "description": "改任务状态。单条直接写 {task_key, operation, …}，多条放 items。complete、verify、block、wait_user、wait_agent 会自动先 start；本会话持有的任务不需要 expected_version，edit、cancel、reopen 和别人的任务需要。complete 可以同时带 note、evidence、checklist（item 写检查项 id、序号或标题）。block 填 blocked_reason，wait_* 填 waiting_for。例：{task_key:\"ATM-T-1\", operation:\"complete\", evidence:[\"cargo test 全绿\"]} 参数：task_key≤40；operation=start|complete|verify|verify_and_complete|block|wait_user|wait_agent|ready|release|claim|cancel|reopen|edit|checklist|review_request|review_submit；takeover_stale 默认 false；note≤500；evidence 最多 100 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；checklist 最多 100 项；checklist[] 每项必填 status；checklist[].item≤400；checklist[].status=TODO|DOING|DONE|SKIPPED；checklist[].evidence 最多 100 项；checklist[].evidence 每项同顶层 evidence；blocked_reason≤2000；waiting_for≤1000；cancel_reason≤2000；duplicate_of≤100；superseded_by≤100；title≤400；description≤50000；acceptance 最多 100 项；acceptance[]≤1000；target_date≤10；parent_key≤100；assignee_agent_id≤128；depends_on 最多 50 项；depends_on[]≤100；discovered_from≤100；expected_fields.title≤400；expected_fields.description≤50000；expected_fields.acceptance 最多 100 项；expected_fields.acceptance[]≤1000；expected_fields.target_date≤10；expected_fields.parent_key≤100；request_key≤128；verdict=APPROVED|CHANGES_REQUESTED；parent_checklist_id≤128；items 最多 50 项；items 每项字段与顶层相同，task_key、operation 必填；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_key": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "start",
+            "complete",
+            "verify",
+            "verify_and_complete",
+            "block",
+            "wait_user",
+            "wait_agent",
+            "ready",
+            "release",
+            "claim",
+            "cancel",
+            "reopen",
+            "edit",
+            "checklist",
+            "review_request",
+            "review_submit"
+          ]
+        },
+        "expected_version": {
+          "type": "integer"
+        },
+        "takeover_stale": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "git_sha",
+                      "atm_record",
+                      "atm_task",
+                      "test_result",
+                      "url",
+                      "file"
+                    ]
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ]
+              }
+            ]
+          }
+        },
+        "checklist": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "item": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "TODO",
+                  "DOING",
+                  "DONE",
+                  "SKIPPED"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "expected_checklist_version": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "blocked_reason": {
+          "type": "string"
+        },
+        "waiting_for": {
+          "type": "string"
+        },
+        "cancel_reason": {
+          "type": "string"
+        },
+        "duplicate_of": {
+          "type": "string"
+        },
+        "superseded_by": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_date": {
+          "type": "string"
+        },
+        "parent_key": {
+          "type": "string"
+        },
+        "assignee_agent_id": {
+          "type": "string"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "discovered_from": {
+          "type": "string"
+        },
+        "expected_fields": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "acceptance": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "target_date": {
+              "type": "string"
+            },
+            "parent_key": {
+              "type": "string"
+            }
+          }
+        },
+        "request_key": {
+          "type": "string"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "APPROVED",
+            "CHANGES_REQUESTED"
+          ]
+        },
+        "candidate_hashes": {},
+        "parent_checklist_id": {
+          "type": "string"
+        },
+        "expected_parent_checklist_version": {
+          "type": "integer"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "e080f9c1c3710fb4"
+    }
+  }
+]
