@@ -278,6 +278,9 @@ pub struct Manifest {
     pub source_root: Option<String>,
     pub source_files: Vec<SourceFile>,
     pub business_digest: BTreeMap<String, String>,
+    /// 用户点名舍弃的不可转换项目（`ConvertOptions::accept_unconvertible`）。§6 重算 business_digest' 时照样传，
+    /// 否则同一个源会因为这些项目转换失败而得出 UNKNOWN。
+    pub accepted_unconvertible: Vec<String>,
     pub generation: String,
     pub phase: Phase,
     /// `report.json` 的 sha256。
@@ -346,6 +349,10 @@ impl Manifest {
             ("source_root".into(), opt(&self.source_root)),
             ("source_files".into(), Value::Array(files)),
             ("business_digest".into(), Value::Object(digest)),
+            (
+                "accepted_unconvertible".into(),
+                Value::Array(self.accepted_unconvertible.iter().map(|p| s(p)).collect()),
+            ),
             ("generation".into(), s(&self.generation)),
             ("phase".into(), s(self.phase.as_str())),
             ("verify_digest".into(), opt(&self.verify_digest)),
@@ -390,11 +397,22 @@ impl Manifest {
                 .collect::<Option<_>>()?,
             _ => return None,
         };
+        let accepted_unconvertible = match field(&v, "accepted_unconvertible")? {
+            Value::Array(items) => items
+                .iter()
+                .map(|x| match x {
+                    Value::String(p) => Some(p.clone()),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => return None,
+        };
         Some(Manifest {
             converter_version: text(&v, "converter_version")?,
             source_root: opt_text(&v, "source_root")?,
             source_files,
             business_digest,
+            accepted_unconvertible,
             generation: text(&v, "generation")?,
             phase: Phase::parse(&text(&v, "phase")?)?,
             verify_digest: opt_text(&v, "verify_digest")?,
@@ -445,6 +463,9 @@ pub struct Authority {
     pub generation: Option<String>,
     /// 用户选「沿用 3.0」时接受的 business_digest'（07 §7，W3e）。
     pub accepted_source_digest: Option<BTreeMap<String, String>>,
+    /// 用户在比较结果为 UNKNOWN 时选了「沿用 3.0」：记下当时的原因。之后 `A=v3` 再遇到同一个原因不再打扰，
+    /// 原因变了（多了别的问题，或者问题消失、能算出摘要了）照常判定（W3e 的取舍，见 REPORT.md）。
+    pub accepted_unknown: Option<String>,
 }
 
 impl Authority {
@@ -462,6 +483,7 @@ impl Authority {
             ("at".into(), s(&self.at)),
             ("generation".into(), opt(&self.generation)),
             ("accepted_source_digest".into(), accepted),
+            ("accepted_unknown".into(), opt(&self.accepted_unknown)),
         ]))
     }
 
@@ -491,6 +513,10 @@ impl Authority {
             at: text(&v, "at")?,
             generation: opt_text(&v, "generation")?,
             accepted_source_digest: accepted,
+            accepted_unknown: match field(&v, "accepted_unknown") {
+                None => None,
+                Some(_) => opt_text(&v, "accepted_unknown")?,
+            },
         })
     }
 }
@@ -587,8 +613,11 @@ pub enum Startup {
     /// S4 的另一支与 S5：发布物不可信（身份不一致、读不出，或 `M` 缺失 / 损坏）。
     /// [`seal`]`(Quarantine)` 后重新判定（走 S2 / S1）。`M` 缺失或损坏时发布物绝不打开。
     Quarantine { reason: String },
-    /// S6：`M` 是 PUBLISHED，库内 generation 一致：进 §6 的权威判定（W3e）。
+    /// S6：`M` 是 PUBLISHED，库内 generation 一致：进 §6 的权威判定（[`judge`]）。
     Published(Manifest),
+    /// S6，但这个 generation 正处于数据源冲突（07 §7）：不起任何业务入口，等用户在窗口里
+    /// [`choose_v3`] 或 [`choose_legacy`]。
+    SourceConflict(StartupState),
 }
 
 /// 发布物在不在：`N\data\` 里有任何东西都算在。
@@ -718,7 +747,10 @@ pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
             }
         }
         Phase::Published => match published_generation(layout) {
-            Some(g) if g == m.generation => Startup::Published(m),
+            Some(g) if g == m.generation => match read_startup_state(layout) {
+                Some(state) if state.generation == m.generation => Startup::SourceConflict(state),
+                _ => Startup::Published(m),
+            },
             Some(g) => Startup::Quarantine {
                 reason: format!(
                     "the publication is generation {g}, the manifest says {}",
@@ -923,6 +955,49 @@ fn enumerate(root: &Path, at: &str) -> Result<Vec<SourceFile>> {
     Ok(out)
 }
 
+/// 07 §3 SNAPSHOT 的复制方式：枚举 F0、复制到 `src`、调 `after_copy`、再枚举 F1；
+/// F1 ≠ F0 或副本的 sha256 与 F0 不符都是源未静止。转换与 §6 的比较共用。
+fn snapshot(
+    root: &Path,
+    at: &str,
+    src: &Path,
+    after_copy: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<SourceFile>> {
+    let f0 = enumerate(root, at)?;
+    for f in &f0 {
+        let to = src.join(&f.rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let from = root.join(&f.rel);
+        std::fs::copy(&from, &to).at("copy", &from)?;
+    }
+    after_copy()?;
+    let f1 = enumerate(root, at)?;
+    let set = |v: &[SourceFile]| -> Vec<(String, u64, String)> {
+        v.iter()
+            .map(|f| (f.rel.clone(), f.size, f.sha256.clone()))
+            .collect()
+    };
+    if set(&f0) != set(&f1) {
+        let first = set(&f0)
+            .into_iter()
+            .zip(set(&f1))
+            .find(|(a, b)| a != b)
+            .map_or_else(|| "the file set changed".to_string(), |(a, _)| a.0);
+        return Err(Error::SourceNotQuiet(first));
+    }
+    for f in &f0 {
+        if file_sha256(&src.join(&f.rel))? != f.sha256 {
+            return Err(Error::SourceNotQuiet(format!(
+                "the copy of {} differs",
+                f.rel
+            )));
+        }
+    }
+    Ok(f0)
+}
+
 /// 提交门：报告里不能有没处理的族实例（`Report::pending`）。VERIFY 只比已处理的族，漏掉的族要在这里拦下。
 fn publishable(report: &Report) -> std::result::Result<(), String> {
     let pending = report.pending();
@@ -943,6 +1018,7 @@ fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
 /// 失败时 `M` 记 FAILED 与原因，staging 保留供诊断；源与发布物都不改。
 pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     let g = opts.generation;
+    clear_startup_state(layout)?;
     let staging = layout.staging(g);
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
@@ -951,6 +1027,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
         source_root: Some(opts.legacy_root.to_string_lossy().into_owned()),
         source_files: Vec::new(),
         business_digest: BTreeMap::new(),
+        accepted_unconvertible: Vec::new(),
         generation: g.to_string(),
         phase: Phase::Snapshot,
         verify_digest: None,
@@ -962,42 +1039,9 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     write_manifest(layout, &m)?;
 
     // SNAPSHOT：枚举 F0、复制、再枚举 F1，副本的 sha256 逐个等于 F0。
-    let snapshot = (|| -> Result<Vec<SourceFile>> {
-        let f0 = enumerate(opts.legacy_root, opts.at)?;
-        let src = staging.join("src");
-        for f in &f0 {
-            let to = src.join(&f.rel);
-            if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let from = opts.legacy_root.join(&f.rel);
-            std::fs::copy(&from, &to).at("copy", &from)?;
-        }
-        checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT")?;
-        let f1 = enumerate(opts.legacy_root, opts.at)?;
-        let set = |v: &[SourceFile]| -> Vec<(String, u64, String)> {
-            v.iter()
-                .map(|f| (f.rel.clone(), f.size, f.sha256.clone()))
-                .collect()
-        };
-        if set(&f0) != set(&f1) {
-            let first = set(&f0)
-                .into_iter()
-                .zip(set(&f1))
-                .find(|(a, b)| a != b)
-                .map_or_else(|| "the file set changed".to_string(), |(a, _)| a.0);
-            return Err(Error::SourceNotQuiet(first));
-        }
-        for f in &f0 {
-            if file_sha256(&src.join(&f.rel))? != f.sha256 {
-                return Err(Error::SourceNotQuiet(format!(
-                    "the copy of {} differs",
-                    f.rel
-                )));
-            }
-        }
-        Ok(f0)
-    })();
+    let snapshot = snapshot(opts.legacy_root, opts.at, &staging.join("src"), &mut || {
+        checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT")
+    });
     match snapshot {
         Ok(files) => m.source_files = files,
         Err(e @ Error::Interrupted(_)) => return Err(e),
@@ -1052,6 +1096,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     m.phase = Phase::Verify;
     m.verify_digest = Some(sha_hex(report_json.as_bytes()));
     m.business_digest = report.business_digest();
+    m.accepted_unconvertible = report.accepted_unconvertible.clone();
     write_manifest(layout, &m)?;
     checkpoint(opts.hook, Step::Verified, "VERIFY")?;
 
@@ -1102,6 +1147,7 @@ fn publish(layout: &Layout, m: &mut Manifest, at: &str) -> Result<()> {
             at: at.to_string(),
             generation: Some(m.generation.clone()),
             accepted_source_digest: None,
+            accepted_unknown: None,
         },
     )?;
     let _ = std::fs::remove_dir_all(layout.staging(&m.generation).join("src"));
@@ -1120,6 +1166,7 @@ pub fn finish_publishing(layout: &Layout, at: &str) -> Result<Manifest> {
 /// S1：`L` 不存在、也没有 `M`。建一个空库，走同样的 PUBLISHING → PUBLISHED，
 /// `M{phase: PUBLISHED, source_root: null}`、`A = v3 by publish`。中断后按 S3 / S4 续做，与转换相同。
 pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Manifest> {
+    clear_startup_state(layout)?;
     let staging = layout.staging(generation);
     let _ = std::fs::remove_dir_all(&staging);
     let data = staging.join("data");
@@ -1139,6 +1186,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
         source_root: None,
         source_files: Vec::new(),
         business_digest: BTreeMap::new(),
+        accepted_unconvertible: Vec::new(),
         generation: generation.to_string(),
         phase: Phase::Publishing,
         verify_digest: None,
@@ -1163,9 +1211,389 @@ pub fn discard_attempt(layout: &Layout, generation: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------- 权威判定与数据源冲突（07 §6–§7，W3e）
+
+/// 对 `L` 重算的 business_digest' 与基准逐族比较的结果（07 §6 第 3 条）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Comparison {
+    /// 全部对象族都相等。带上算出的摘要：用户选「沿用 3.0」时绑定的就是它。
+    Unchanged(BTreeMap<String, String>),
+    /// 至少一族不等。`families` 是不等的族（含两边只有一边有的族，例如 2.x 里新建或删掉了项目）。
+    Changed {
+        digest: BTreeMap<String, String>,
+        families: Vec<String>,
+    },
+    /// 说不清：读失败、比较期间源在变、出现 05 没有登记的文件或表、超出接受域。
+    Unknown(String),
+    /// `L` 整个不在了（用户删掉了 2.x 的数据目录）。
+    LegacyGone,
+}
+
+pub struct CompareOptions<'a> {
+    /// 旧根 `L`。
+    pub legacy_root: &'a Path,
+    pub allow_real_data_root: bool,
+    pub real_data_root: Option<&'a Path>,
+    pub secrets_check: Option<fn(&[u8]) -> bool>,
+}
+
+/// 比较的基准：用户选过「沿用 3.0」就是当时接受的摘要，否则是转换时写进 `M` 的。
+/// 回滚写的 `A=legacy` 要带着它（[`rollback_authority`]），否则回滚后没动过 2.x 也会被当成「变了」。
+pub fn baseline<'a>(m: &'a Manifest, a: Option<&'a Authority>) -> &'a BTreeMap<String, String> {
+    a.and_then(|a| a.accepted_source_digest.as_ref())
+        .unwrap_or(&m.business_digest)
+}
+
+/// 07 §6 第 1 条：`A` 不是一条与 `M` 对得上的 v3 记录时，必须在发布任何入口之前阻塞比较；
+/// 是的话服务照常启动，比较放到后台低优先级做（每次启动都做，没有元数据快速路径）。
+pub fn must_compare_before_serving(a: &AuthorityState, m: &Manifest) -> bool {
+    !matches!(a, AuthorityState::Present(a)
+        if a.authority == "v3" && a.generation.as_deref() == Some(m.generation.as_str()))
+}
+
+/// 07 §6 第 2–3 条：对 `L` 做一次只读快照（与 SNAPSHOT 同样的复制方式，放在 `N\runtime\compare\`，用完删掉），
+/// 用转换时的 `at` 与当时接受舍弃的项目按同一流程重算 business_digest'，再与 `base` 逐族比较。
+/// 只读 `L`；不碰 `N\data\`。SQLite 的物理哈希不参与，checkpoint、SHM 重建、VACUUM 都不会误判。
+pub fn compare(
+    layout: &Layout,
+    m: &Manifest,
+    base: &BTreeMap<String, String>,
+    opts: &CompareOptions<'_>,
+) -> Comparison {
+    match std::fs::symlink_metadata(opts.legacy_root) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Comparison::LegacyGone,
+        Err(e) => {
+            return Comparison::Unknown(
+                located(e, "stat", &opts.legacy_root.display()).to_string(),
+            );
+        }
+        Ok(_) => {}
+    }
+    let scratch = layout.runtime().join("compare");
+    let _ = std::fs::remove_dir_all(&scratch);
+    let digest = (|| -> Result<BTreeMap<String, String>> {
+        let src = scratch.join("src");
+        snapshot(opts.legacy_root, &m.started_at, &src, &mut || Ok(()))?;
+        let sources = LegacySources::from_root(&src)?;
+        let accept: Vec<&str> = m
+            .accepted_unconvertible
+            .iter()
+            .map(String::as_str)
+            .collect();
+        Ok(legacy::business_digest(
+            &sources,
+            &scratch,
+            &ConvertOptions {
+                at: &m.started_at,
+                allow_real_data_root: opts.allow_real_data_root,
+                real_data_root: opts.real_data_root,
+                generation: None,
+                secrets_check: opts.secrets_check,
+                accept_unconvertible: &accept,
+                origin_root: Some(opts.legacy_root),
+            },
+        )?)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    match digest {
+        Err(e) => Comparison::Unknown(e.to_string()),
+        Ok(digest) => {
+            let families = differing(base, &digest);
+            if families.is_empty() {
+                Comparison::Unchanged(digest)
+            } else {
+                Comparison::Changed { digest, families }
+            }
+        }
+    }
+}
+
+/// 两边摘要不等的族：值不同的，以及只有一边有的（2.x 里新建或删掉了项目、知识库）。
+fn differing(base: &BTreeMap<String, String>, digest: &BTreeMap<String, String>) -> Vec<String> {
+    base.keys()
+        .chain(digest.keys())
+        .filter(|k| base.get(*k) != digest.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// 07 §6 判定表的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// 正常启动（`A=v3` 且不变）。
+    Serve,
+    /// `A=legacy` 且不变（回滚后没在 2.x 写过）：[`resume_after_rollback`] 后正常启动，什么都不丢。
+    ResumeAfterRollback,
+    /// `A=legacy` 且变了：以 2.x 为准，[`seal`]`(Superseded)` 当前 generation 后按 S2 重新转换。
+    Reconvert,
+    /// 数据源冲突（§7）：[`enter_conflict`]，停掉业务入口，等用户选。
+    Conflict(String),
+}
+
+fn same_root(recorded: &str, root: &Path) -> bool {
+    let norm = |s: &str| {
+        s.replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    norm(recorded) == norm(&root.to_string_lossy())
+}
+
+/// 07 §6 的判定表，加上 B3：`A` 缺失、损坏、绑定的 generation 与 `M` 不符，或 `M.source_root` 不是这次的 `L`，
+/// 不猜 v3 还是 legacy，一律冲突。
+///
+/// | `A` | 比较 | 结果 |
+/// | --- | --- | --- |
+/// | v3 | 不变 / `L` 不在了 / 与用户接受过的同一个 UNKNOWN | Serve |
+/// | v3 | 变了 / 其他 UNKNOWN | Conflict（后台比较得出时立即进入） |
+/// | legacy | 不变 | ResumeAfterRollback |
+/// | legacy | 变了 | Reconvert |
+/// | legacy | UNKNOWN / `L` 不在了 | Conflict |
+pub fn judge(a: &AuthorityState, m: &Manifest, legacy_root: &Path, cmp: &Comparison) -> Verdict {
+    let a = match a {
+        AuthorityState::Missing => {
+            return Verdict::Conflict("the authority record is missing".into());
+        }
+        AuthorityState::Corrupt => {
+            return Verdict::Conflict("the authority record is corrupt".into());
+        }
+        AuthorityState::Present(a) => a,
+    };
+    if a.generation.as_deref() != Some(m.generation.as_str()) {
+        return Verdict::Conflict(format!(
+            "the authority record is bound to generation {}, the manifest says {}",
+            a.generation.as_deref().unwrap_or("(none)"),
+            m.generation
+        ));
+    }
+    if let Some(recorded) = &m.source_root
+        && !same_root(recorded, legacy_root)
+    {
+        return Verdict::Conflict(format!(
+            "generation {} was converted from {recorded}, not from {}",
+            m.generation,
+            legacy_root.display()
+        ));
+    }
+    match (a.authority.as_str(), cmp) {
+        ("v3", Comparison::Unchanged(_) | Comparison::LegacyGone) => Verdict::Serve,
+        ("v3", Comparison::Unknown(why)) if a.accepted_unknown.as_deref() == Some(why.as_str()) => {
+            Verdict::Serve
+        }
+        ("v3", Comparison::Changed { families, .. }) => Verdict::Conflict(format!(
+            "the 2.x data changed after the conversion: {}",
+            families.join(", ")
+        )),
+        ("v3", Comparison::Unknown(why)) => {
+            Verdict::Conflict(format!("the 2.x data cannot be compared: {why}"))
+        }
+        (_, Comparison::Unchanged(_)) => Verdict::ResumeAfterRollback,
+        (_, Comparison::Changed { .. }) => Verdict::Reconvert,
+        (_, Comparison::Unknown(why)) => {
+            Verdict::Conflict(format!("the 2.x data cannot be compared: {why}"))
+        }
+        (_, Comparison::LegacyGone) => {
+            Verdict::Conflict("2.x was chosen as the source, but its data root is gone".into())
+        }
+    }
+}
+
+/// setup 回滚事务写的 `A`（07 §8）：`A=legacy by setup-rollback`，带上 generation 与已接受的摘要。
+/// 只有带着它们，回滚后没动过 2.x 时才能按 [`Verdict::ResumeAfterRollback`] 无损接回 3.0。
+pub fn rollback_authority(
+    prev: Option<&Authority>,
+    m: &Manifest,
+    txn: &str,
+    at: &str,
+) -> Authority {
+    Authority {
+        authority: "legacy".into(),
+        by: "setup-rollback".into(),
+        txn: Some(txn.to_string()),
+        at: at.to_string(),
+        generation: Some(m.generation.clone()),
+        accepted_source_digest: prev.and_then(|a| a.accepted_source_digest.clone()),
+        accepted_unknown: None,
+    }
+}
+
+/// [`Verdict::ResumeAfterRollback`] 的落地：`A=v3 by resume-after-rollback`，沿用原来接受的摘要。
+pub fn resume_after_rollback(
+    layout: &Layout,
+    prev: &Authority,
+    at: &str,
+) -> std::io::Result<Authority> {
+    let a = Authority {
+        authority: "v3".into(),
+        by: "resume-after-rollback".into(),
+        txn: None,
+        at: at.to_string(),
+        generation: prev.generation.clone(),
+        accepted_source_digest: prev.accepted_source_digest.clone(),
+        accepted_unknown: None,
+    };
+    write_authority(layout, &a)?;
+    Ok(a)
+}
+
+/// `N\runtime\startup-state.json`（07 §7）：不含凭据。`atm-mcp.exe` 桥和 CLI 连不上服务时读它，
+/// 向 Agent 报告「需要在 ATM 窗口中选择数据来源」。只对写它的那个 generation 有效。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartupState {
+    /// 目前只有 `SOURCE_CONFLICT`。
+    pub state: String,
+    pub since: String,
+    pub generation: String,
+    pub reason: String,
+}
+
+impl StartupState {
+    pub fn to_json(&self) -> String {
+        jsjson::jcs(&Value::Object(vec![
+            ("state".into(), s(&self.state)),
+            ("since".into(), s(&self.since)),
+            ("generation".into(), s(&self.generation)),
+            ("reason".into(), s(&self.reason)),
+        ]))
+    }
+
+    pub fn parse(text_: &str) -> Option<StartupState> {
+        let v = jsjson::parse_value(text_).ok().flatten()?;
+        let state = text(&v, "state")?;
+        if state != "SOURCE_CONFLICT" {
+            return None;
+        }
+        Some(StartupState {
+            state,
+            since: text(&v, "since")?,
+            generation: text(&v, "generation")?,
+            reason: text(&v, "reason")?,
+        })
+    }
+}
+
+fn startup_state_path(layout: &Layout) -> PathBuf {
+    layout.runtime().join("startup-state.json")
+}
+
+/// 读启动状态。文件损坏时当作冲突仍在（不能因为文件坏了就放行入口），原因写明损坏。
+pub fn read_startup_state(layout: &Layout) -> Option<StartupState> {
+    let generation = || match read_manifest(layout) {
+        ManifestState::Present(m) => m.generation,
+        _ => String::new(),
+    };
+    match std::fs::read(startup_state_path(layout)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(StartupState {
+            state: "SOURCE_CONFLICT".into(),
+            since: String::new(),
+            generation: generation(),
+            reason: format!("the startup state cannot be read: {e}"),
+        }),
+        Ok(bytes) => std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(StartupState::parse)
+            .or_else(|| {
+                Some(StartupState {
+                    state: "SOURCE_CONFLICT".into(),
+                    since: String::new(),
+                    generation: generation(),
+                    reason: "the startup state is corrupt".into(),
+                })
+            }),
+    }
+}
+
+fn clear_startup_state(layout: &Layout) -> std::io::Result<()> {
+    match std::fs::remove_file(startup_state_path(layout)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(located(e, "remove", &startup_state_path(layout).display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 进入数据源冲突（07 §7）：写启动状态，之后 [`decide`] 对这个 generation 返回 [`Startup::SourceConflict`]，
+/// 宿主不起 HTTP、不写 daemon.json、不起调度器 / 同步 / 派单。已经在冲突中就保留原来的 `since`。
+/// 这里不写任何业务数据；后台比较发现冲突之前写进 3.0 的数据留在 3.0 这一边。
+pub fn enter_conflict(
+    layout: &Layout,
+    m: &Manifest,
+    reason: &str,
+    at: &str,
+) -> std::io::Result<StartupState> {
+    let since = match read_startup_state(layout) {
+        Some(prev) if prev.generation == m.generation && !prev.since.is_empty() => prev.since,
+        _ => at.to_string(),
+    };
+    let state = StartupState {
+        state: "SOURCE_CONFLICT".into(),
+        since,
+        generation: m.generation.clone(),
+        reason: reason.to_string(),
+    };
+    write_atomic(&startup_state_path(layout), state.to_json().as_bytes())?;
+    Ok(state)
+}
+
+/// 用户选「沿用 3.0（忽略 2.x 期间的修改）」（07 §7，只认 User，B2 由调用方保证）：
+/// `A=v3 by user-choice`，绑定这次比较算出的摘要；此后再比较以它为准，2.x 再有新写入还能识别出来。
+/// 比较是 UNKNOWN 时没有摘要可绑，记下原因（[`Authority::accepted_unknown`]）。先写 `A`，再清启动状态：
+/// 中间被杀的话下次启动还会再问一次，不会在没有决定的情况下放行。
+pub fn choose_v3(
+    layout: &Layout,
+    m: &Manifest,
+    cmp: &Comparison,
+    at: &str,
+) -> std::io::Result<Authority> {
+    let (accepted_source_digest, accepted_unknown) = match cmp {
+        Comparison::Unchanged(d) | Comparison::Changed { digest: d, .. } => (Some(d.clone()), None),
+        Comparison::Unknown(why) => (None, Some(why.clone())),
+        Comparison::LegacyGone => (None, None),
+    };
+    let a = Authority {
+        authority: "v3".into(),
+        by: "user-choice".into(),
+        txn: None,
+        at: at.to_string(),
+        generation: Some(m.generation.clone()),
+        accepted_source_digest,
+        accepted_unknown,
+    };
+    write_authority(layout, &a)?;
+    clear_startup_state(layout)?;
+    Ok(a)
+}
+
+/// 用户选「从 2.x 重新转换（当前 3.0 数据封存）」，或判定为 [`Verdict::Reconvert`]：
+/// [`seal`]`(Superseded)` 整个 generation，之后 [`decide`] 走 S2。启动状态由下一次 [`run`] 清掉。
+pub fn choose_legacy(layout: &Layout, at: &str) -> Result<PathBuf> {
+    seal(layout, Seal::Superseded, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 比较只按族：值不同的、只有一边有的都算变了，排好序、不重复。
+    #[test]
+    fn differing_families_include_both_sides() {
+        let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        let base = map(&[("P1/tasks", "a"), ("P2/tasks", "b"), ("r/projects", "c")]);
+        assert!(differing(&base, &base).is_empty());
+        let digest = map(&[("P1/tasks", "a"), ("P3/tasks", "d"), ("r/projects", "x")]);
+        assert_eq!(
+            differing(&base, &digest),
+            ["P2/tasks", "P3/tasks", "r/projects"]
+        );
+    }
 
     /// 不按数据根输入的报告：数据根下的文件族都是 pending，不能发布。
     #[test]

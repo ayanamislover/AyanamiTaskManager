@@ -4682,16 +4682,21 @@ mod w3d {
         Quiesce, RunOptions, Seal, SealStep, Startup, Step,
     };
 
-    const G1: &str = "01J000000000000000000GEN01";
-    const G2: &str = "01J000000000000000000GEN02";
+    pub(super) const G1: &str = "01J000000000000000000GEN01";
+    pub(super) const G2: &str = "01J000000000000000000GEN02";
 
-    fn layout(f: &Fixture, name: &str) -> Layout {
+    pub(super) fn layout(f: &Fixture, name: &str) -> Layout {
         let n = f.dir.join(name);
         let _ = fs::remove_dir_all(&n);
         Layout::new(n)
     }
 
-    fn run(layout: &Layout, root: &Path, g: &str, stop: Option<Step>) -> cv::Result<Manifest> {
+    pub(super) fn run(
+        layout: &Layout,
+        root: &Path,
+        g: &str,
+        stop: Option<Step>,
+    ) -> cv::Result<Manifest> {
         let mut hook = |s: Step| Some(s) != stop;
         cv::run(
             layout,
@@ -4715,7 +4720,7 @@ mod w3d {
         )
     }
 
-    fn manifest(layout: &Layout) -> Manifest {
+    pub(super) fn manifest(layout: &Layout) -> Manifest {
         match cv::read_manifest(layout) {
             ManifestState::Present(m) => m,
             other => panic!("{other:?}"),
@@ -5138,6 +5143,7 @@ mod w3d {
                 sha256: "ab".repeat(32),
             }],
             business_digest: [("db:registry/projects".to_string(), "cd".repeat(32))].into(),
+            accepted_unconvertible: vec!["P9".into()],
             generation: G1.into(),
             phase: Phase::Verify,
             verify_digest: Some("ef".repeat(32)),
@@ -5153,6 +5159,7 @@ mod w3d {
             json.replace("\"schema\":1", "\"schema\":2"),
             json.replace("\"generation\"", "\"gen\""),
             json.replace("4096", "4096.5"),
+            json.replace("[\"P9\"]", "[9]"),
             json[..json.len() - 1].to_string(),
             String::new(),
         ] {
@@ -5165,6 +5172,7 @@ mod w3d {
             at: AT.into(),
             generation: Some(G1.into()),
             accepted_source_digest: None,
+            accepted_unknown: Some("data root: unregistered entry x".into()),
         };
         assert_eq!(Authority::parse(&a.to_json()), Some(a.clone()));
         assert_eq!(
@@ -5175,5 +5183,404 @@ mod w3d {
             Authority::parse(&a.to_json().replace("\"by\"", "\"who\"")),
             None
         );
+    }
+}
+
+// ---------------------------------------------------------------- W3e：权威判定与数据源冲突
+
+/// W3e（07 §6–§7）：对 2.x 重算 business_digest' 比较、权威判定表、数据源冲突状态与用户的两个选择。
+mod w3e {
+    use super::w3d::{G1, G2, layout, manifest, run};
+    use super::*;
+    use atm_store::conversion::{
+        self as cv, Authority, AuthorityState, CompareOptions, Comparison, Layout, Startup, Verdict,
+    };
+
+    fn opts(root: &Path) -> CompareOptions<'_> {
+        CompareOptions {
+            legacy_root: root,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+        }
+    }
+
+    fn authority(n: &Layout) -> Authority {
+        match cv::read_authority(n) {
+            AuthorityState::Present(a) => a,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 按当前的 `M` 与 `A` 取基准，比较一次。
+    fn compare(n: &Layout, root: &Path) -> Comparison {
+        let m = manifest(n);
+        let a = match cv::read_authority(n) {
+            AuthorityState::Present(a) => Some(a),
+            _ => None,
+        };
+        cv::compare(n, &m, cv::baseline(&m, a.as_ref()), &opts(root))
+    }
+
+    fn judge(n: &Layout, root: &Path, cmp: &Comparison) -> Verdict {
+        cv::judge(&cv::read_authority(n), &manifest(n), root, cmp)
+    }
+
+    /// 2.x 在回滚之后写了业务数据。
+    fn write_in_2x(root: &Path, description: &str) {
+        Connection::open(root.join("registry/registry.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE projects SET description = ?1 WHERE id = 'P1'",
+                [description],
+            )
+            .unwrap();
+    }
+
+    fn changed(cmp: &Comparison) -> (BTreeMap<String, String>, Vec<String>) {
+        match cmp {
+            Comparison::Changed { digest, families } => (digest.clone(), families.clone()),
+            other => panic!("expected a change: {other:?}"),
+        }
+    }
+
+    /// 比较只看业务内容：VACUUM、R / X 类文件不算变；改一行业务数据恰好那一族变；未登记的文件说不清；
+    /// 数据根整个不在了单独报。比较只读 `L`，不碰发布物，用完的快照删掉。
+    #[test]
+    fn compare_tells_unchanged_changed_unknown_and_gone_apart() {
+        let (f, root) = json_fixture("w3e-compare");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let published = tree(&n.data());
+
+        assert_eq!(
+            compare(&n, &root),
+            Comparison::Unchanged(m.business_digest.clone())
+        );
+        Connection::open(root.join("registry/registry.sqlite"))
+            .unwrap()
+            .execute_batch("VACUUM;")
+            .unwrap();
+        put(&root.join("logs/another.log"), b"more log");
+        assert_eq!(
+            compare(&n, &root),
+            Comparison::Unchanged(m.business_digest.clone())
+        );
+
+        let before = tree(&root);
+        write_in_2x(&root, "edited in 2.x");
+        let (digest, families) = changed(&compare(&n, &root));
+        assert_eq!(families, vec!["r/projects".to_string()], "{families:?}");
+        assert_ne!(
+            digest.get("r/projects"),
+            m.business_digest.get("r/projects")
+        );
+        assert_ne!(tree(&root), before);
+        let after = tree(&root);
+        // 每次比较完立刻看：下一次比较开头会先清一遍，留到最后看就看不出来。
+        assert!(
+            !n.runtime().join("compare").exists(),
+            "the comparison snapshot is left behind"
+        );
+
+        put(&root.join("unexpected.txt"), b"?");
+        match compare(&n, &root) {
+            Comparison::Unknown(why) => assert!(why.contains("unexpected.txt"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        fs::remove_file(root.join("unexpected.txt")).unwrap();
+        assert_eq!(compare(&n, &root.join("not-there")), Comparison::LegacyGone);
+
+        assert_eq!(tree(&root), after, "comparing wrote into the 2.x root");
+        assert_eq!(
+            tree(&n.data()),
+            published,
+            "comparing touched the publication"
+        );
+    }
+
+    /// 转换时用户点名舍弃了不可转换的项目：清单记下名单，重算比较时照样传，同一个源比出来是「不变」。
+    #[test]
+    fn a_conversion_that_dropped_a_project_compares_unchanged() {
+        let (f, root) = settle_fixture("w3e-accepted");
+        empty_project(
+            &root.join("projects/P7/project.sqlite"),
+            "P7",
+            "XXX",
+            10,
+            None,
+        );
+        let n = layout(&f, "n");
+        let m = cv::run(
+            &n,
+            cv::RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &["GGG"],
+                hook: &mut |_| true,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(m.accepted_unconvertible, vec!["GGG".to_string()]);
+        assert_eq!(manifest(&n), m);
+        assert_eq!(
+            compare(&n, &root),
+            Comparison::Unchanged(m.business_digest.clone())
+        );
+    }
+
+    /// 07 §6 判定表的每一格，加上 B3 的四种「对不上」，以及阻塞比较的条件。
+    #[test]
+    fn the_authority_table_has_a_case_for_every_cell() {
+        let (f, root) = json_fixture("w3e-table");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let v3 = authority(&n);
+        let legacy = cv::rollback_authority(Some(&v3), &m, "txn-1", AT);
+        let unchanged = Comparison::Unchanged(m.business_digest.clone());
+        let changed = Comparison::Changed {
+            digest: BTreeMap::new(),
+            families: vec!["r/projects".into()],
+        };
+        let unknown = Comparison::Unknown("data root: unregistered entry x".into());
+        let present = |a: &Authority| AuthorityState::Present(a.clone());
+        let verdict = |a: &AuthorityState, cmp: &Comparison| cv::judge(a, &m, &root, cmp);
+        let conflict = |v: Verdict, why: &str| match v {
+            Verdict::Conflict(reason) => assert!(reason.contains(why), "{reason}"),
+            other => panic!("{why}: {other:?}"),
+        };
+
+        assert_eq!(verdict(&present(&v3), &unchanged), Verdict::Serve);
+        assert_eq!(
+            verdict(&present(&v3), &Comparison::LegacyGone),
+            Verdict::Serve
+        );
+        conflict(verdict(&present(&v3), &changed), "r/projects");
+        conflict(verdict(&present(&v3), &unknown), "unregistered entry x");
+        let accepted = Authority {
+            accepted_unknown: Some("data root: unregistered entry x".into()),
+            ..v3.clone()
+        };
+        assert_eq!(verdict(&present(&accepted), &unknown), Verdict::Serve);
+        conflict(
+            verdict(
+                &present(&accepted),
+                &Comparison::Unknown("something else".into()),
+            ),
+            "something else",
+        );
+
+        assert_eq!(
+            verdict(&present(&legacy), &unchanged),
+            Verdict::ResumeAfterRollback
+        );
+        assert_eq!(verdict(&present(&legacy), &changed), Verdict::Reconvert);
+        conflict(verdict(&present(&legacy), &unknown), "unregistered entry x");
+        conflict(verdict(&present(&legacy), &Comparison::LegacyGone), "gone");
+        let legacy_accepted = Authority {
+            accepted_unknown: Some("data root: unregistered entry x".into()),
+            ..legacy.clone()
+        };
+        conflict(
+            verdict(&present(&legacy_accepted), &unknown),
+            "unregistered entry x",
+        );
+
+        // B3：不猜，一律冲突——即便比较结果是不变。
+        conflict(verdict(&AuthorityState::Missing, &unchanged), "missing");
+        conflict(verdict(&AuthorityState::Corrupt, &unchanged), "corrupt");
+        let other_generation = Authority {
+            generation: Some(G2.into()),
+            ..v3.clone()
+        };
+        conflict(verdict(&present(&other_generation), &unchanged), G2);
+        conflict(
+            cv::judge(&present(&v3), &m, &root.join("elsewhere"), &unchanged),
+            "was converted from",
+        );
+        let shouting = PathBuf::from(root.to_string_lossy().to_uppercase().replace('\\', "/"));
+        assert_eq!(
+            cv::judge(&present(&v3), &m, &shouting, &unchanged),
+            Verdict::Serve
+        );
+
+        assert!(!cv::must_compare_before_serving(&present(&v3), &m));
+        assert!(cv::must_compare_before_serving(&present(&legacy), &m));
+        assert!(cv::must_compare_before_serving(
+            &AuthorityState::Missing,
+            &m
+        ));
+        assert!(cv::must_compare_before_serving(
+            &AuthorityState::Corrupt,
+            &m
+        ));
+        assert!(cv::must_compare_before_serving(
+            &present(&other_generation),
+            &m
+        ));
+    }
+
+    /// 回滚到 2.x（setup 写 `A=legacy`）之后再升级：没在 2.x 写过就无损接回 3.0；写过就以 2.x 为准，
+    /// 封存当前 generation、重新转换，新库里是 2.x 写过的内容。
+    #[test]
+    fn after_a_rollback_3_0_resumes_or_reconverts() {
+        let (f, root) = json_fixture("w3e-rollback");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        cv::write_authority(
+            &n,
+            &cv::rollback_authority(Some(&authority(&n)), &m, "txn-1", AT),
+        )
+        .unwrap();
+        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m));
+        let cmp = compare(&n, &root);
+        assert_eq!(judge(&n, &root, &cmp), Verdict::ResumeAfterRollback);
+        let a = cv::resume_after_rollback(&n, &authority(&n), T2).unwrap();
+        assert_eq!(
+            (a.authority.as_str(), a.by.as_str()),
+            ("v3", "resume-after-rollback")
+        );
+        assert_eq!(authority(&n), a);
+        assert_eq!(judge(&n, &root, &compare(&n, &root)), Verdict::Serve);
+        assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
+
+        cv::write_authority(&n, &cv::rollback_authority(Some(&a), &m, "txn-2", AT)).unwrap();
+        write_in_2x(&root, "written while 2.x was back");
+        let cmp = compare(&n, &root);
+        let (digest, _) = changed(&cmp);
+        assert_eq!(judge(&n, &root, &cmp), Verdict::Reconvert);
+        let sealed = cv::choose_legacy(&n, T2).unwrap();
+        assert_eq!(sealed.parent().unwrap(), n.root.join("superseded"));
+        assert!(sealed.join("data/atm.sqlite").is_file());
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        let m2 = run(&n, &root, G2, None).unwrap();
+        assert_eq!(m2.business_digest, digest);
+        let c = Connection::open(n.database()).unwrap();
+        assert_eq!(
+            q::<String>(&c, "SELECT description FROM projects WHERE id = 'P1'"),
+            "written while 2.x was back"
+        );
+    }
+
+    /// 数据源冲突：启动状态写进 runtime（不含凭据），decide 不再放行这个 generation，发布物与 2.x 都不被写；
+    /// 状态坏了也不放行；选「从 2.x 重新转换」后封存、重转，新 generation 正常启动。
+    #[test]
+    fn a_source_conflict_holds_back_the_service_and_writes_nothing() {
+        let (f, root) = json_fixture("w3e-conflict");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let published = tree(&n.data());
+        write_in_2x(&root, "edited in 2.x");
+        let source = tree(&root);
+
+        let cmp = compare(&n, &root);
+        let Verdict::Conflict(reason) = judge(&n, &root, &cmp) else {
+            panic!("expected a conflict")
+        };
+        let state = cv::enter_conflict(&n, &m, &reason, AT).unwrap();
+        assert_eq!(
+            (
+                state.state.as_str(),
+                state.since.as_str(),
+                state.generation.as_str()
+            ),
+            ("SOURCE_CONFLICT", AT, G1)
+        );
+        assert_eq!(cv::decide(&n, true), Startup::SourceConflict(state.clone()));
+        let text = fs::read_to_string(n.runtime().join("startup-state.json")).unwrap();
+        assert!(
+            text.contains("SOURCE_CONFLICT") && text.contains("r/projects"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("AQAAANCMnd8") && !text.contains("relay-token"),
+            "{text}"
+        );
+        // 再次进入（下一次启动又比出冲突）：since 不变。
+        assert_eq!(cv::enter_conflict(&n, &m, &reason, T2).unwrap().since, AT);
+
+        fs::write(n.runtime().join("startup-state.json"), b"{").unwrap();
+        match cv::decide(&n, true) {
+            Startup::SourceConflict(s) => assert!(s.reason.contains("corrupt"), "{s:?}"),
+            other => panic!("a corrupt startup state must not let the service start: {other:?}"),
+        }
+        assert_eq!(
+            tree(&n.data()),
+            published,
+            "the conflict wrote business data"
+        );
+        assert_eq!(tree(&root), source, "the conflict wrote into the 2.x root");
+
+        cv::choose_legacy(&n, T2).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::FirstConversion);
+        let m2 = run(&n, &root, G2, None).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::Published(m2));
+        assert!(cv::read_startup_state(&n).is_none());
+    }
+
+    /// 选「沿用 3.0」：`A=v3 by user-choice` 绑定这次算出的摘要，冲突解除；之后 2.x 不动就照常启动
+    /// （回滚再接回也一样），2.x 再写就再次识别出来。UNKNOWN 时绑定原因，原因变了照样冲突。
+    #[test]
+    fn accepting_3_0_binds_the_digest_and_later_2x_writes_are_seen_again() {
+        let (f, root) = json_fixture("w3e-accept");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        write_in_2x(&root, "first 2.x write");
+        let cmp = compare(&n, &root);
+        let (digest, _) = changed(&cmp);
+        let Verdict::Conflict(reason) = judge(&n, &root, &cmp) else {
+            panic!("expected a conflict")
+        };
+        cv::enter_conflict(&n, &m, &reason, AT).unwrap();
+        let a = cv::choose_v3(&n, &m, &cmp, T2).unwrap();
+        assert_eq!((a.authority.as_str(), a.by.as_str()), ("v3", "user-choice"));
+        assert_eq!(a.accepted_source_digest.as_ref(), Some(&digest));
+        assert_eq!(authority(&n), a);
+        assert_eq!(cv::decide(&n, true), Startup::Published(m.clone()));
+        assert_eq!(compare(&n, &root), Comparison::Unchanged(digest.clone()));
+        assert_eq!(judge(&n, &root, &compare(&n, &root)), Verdict::Serve);
+
+        // 回滚写的 A=legacy 带着接受的摘要，没动过 2.x 就无损接回。
+        cv::write_authority(&n, &cv::rollback_authority(Some(&a), &m, "txn-1", T2)).unwrap();
+        assert_eq!(
+            judge(&n, &root, &compare(&n, &root)),
+            Verdict::ResumeAfterRollback
+        );
+        let resumed = cv::resume_after_rollback(&n, &authority(&n), T2).unwrap();
+        assert_eq!(resumed.accepted_source_digest.as_ref(), Some(&digest));
+
+        write_in_2x(&root, "second 2.x write");
+        let (_, families) = changed(&compare(&n, &root));
+        assert_eq!(families, vec!["r/projects".to_string()]);
+        assert!(matches!(
+            judge(&n, &root, &compare(&n, &root)),
+            Verdict::Conflict(_)
+        ));
+
+        // UNKNOWN：绑定原因。
+        put(&root.join("unexpected.txt"), b"?");
+        let unknown = compare(&n, &root);
+        let Comparison::Unknown(why) = &unknown else {
+            panic!("{unknown:?}")
+        };
+        cv::enter_conflict(&n, &m, why, T2).unwrap();
+        let a = cv::choose_v3(&n, &m, &unknown, T2).unwrap();
+        assert_eq!(
+            (
+                a.accepted_source_digest.clone(),
+                a.accepted_unknown.as_deref()
+            ),
+            (None, Some(why.as_str()))
+        );
+        assert_eq!(judge(&n, &root, &compare(&n, &root)), Verdict::Serve);
+        put(&root.join("aaa-unexpected.txt"), b"?");
+        assert!(matches!(
+            judge(&n, &root, &compare(&n, &root)),
+            Verdict::Conflict(_)
+        ));
     }
 }

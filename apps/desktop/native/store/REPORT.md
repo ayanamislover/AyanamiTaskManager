@@ -206,7 +206,44 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **封存与隔离的区别**：封存先尝试 `wal_checkpoint(TRUNCATE)`，隔离绝不打开库。
 - **用例**：`legacy.rs` 的 `w3d::*`，每个注入点中断后的续跑、源不静止、不可信发布物、封存被杀两次、准入、`M` / `A` 的形状。
 - **变异**：`output/w3-evidence/w3d-mutation-evidence.json`。
-- **留给 W3e**：§6 的权威判定、`A` 与 `M` 冲突（B3）。
+
+## 权威判定与数据源冲突（W3e，`src/conversion.rs`）
+
+按 07 §6–§7 实现。何时比较、什么时候停入口由宿主决定，这里提供判定和状态。
+
+- **`must_compare_before_serving(A, M)`**：`A` 不是一条与 `M.generation` 对得上的 v3 记录时为真，即发布任何入口之前必须阻塞比较。否则服务照常启动，比较放到后台做。
+- **`compare(N, M, 基准, L)`** 返回四种结果之一：不变、变了（列出不等的族）、UNKNOWN（带原因）、`L` 已不存在。
+  - **基准**：取 `baseline(M, A)`，用户选过「沿用 3.0」就是当时接受的摘要，否则是 `M.business_digest`。
+  - **怎么算**：在 `N\runtime\compare\` 里按 SNAPSHOT 同样的方式只读快照 `L`，再用转换时的 `at`、当时点名舍弃的项目（`M.accepted_unconvertible`），按转换的同一流程重算 business_digest'，用完删掉。
+  - **只看业务内容**：VACUUM、R / X 类文件都不算变（用例 `compare_tells_unchanged_changed_unknown_and_gone_apart`）。
+  - **两边族集合不同**（2.x 里新建或删掉了项目）也算变了。
+- **`judge(A, M, L, 比较结果)`**：判定表如下（用例 `the_authority_table_has_a_case_for_every_cell`）。
+
+  | `A`    | 比较                                           | 结果                                                   |
+  | ------ | ---------------------------------------------- | ------------------------------------------------------ |
+  | v3     | 不变；`L` 不在了；与用户接受过的同一个 UNKNOWN | Serve                                                  |
+  | v3     | 变了；其他 UNKNOWN                             | Conflict                                               |
+  | legacy | 不变                                           | ResumeAfterRollback（`A=v3 by resume-after-rollback`） |
+  | legacy | 变了                                           | Reconvert（封存后走 S2）                               |
+  | legacy | UNKNOWN；`L` 不在了                            | Conflict                                               |
+
+  B3：`A` 缺失、损坏、绑定的 generation 与 `M` 不符，或 `M.source_root` 不是这次的 `L`（按 Windows 规则不分大小写），一律冲突，不猜。
+
+- **回滚记录 `rollback_authority`**：给 setup 用。写 `A=legacy by setup-rollback`，带上 generation 和已接受的摘要；否则用户选过「沿用 3.0」之后回滚、又没动 2.x，也会被当成「变了」而重转。`resume_after_rollback` 同样沿用这份摘要。
+- **冲突状态**：
+  - `enter_conflict` 写 `N\runtime\startup-state.json`，内容是 `{state: "SOURCE_CONFLICT", since, generation, reason}`，不含凭据。重复进入时保留原来的 `since`。
+  - `decide` 对这个 generation 返回 `SourceConflict`，宿主不起任何入口。文件损坏也按冲突处理，不放行。
+  - 新的一次 `run` 或 `fresh_install` 开始时清掉旧状态。
+  - 用例 `a_source_conflict_holds_back_the_service_and_writes_nothing` 验证冲突期间发布物和 2.x 都一个字节不变。
+- **用户的两个选择**（只认 User，B2 由调用方保证）：
+  - **`choose_v3`**：写 `A=v3 by user-choice`，绑定这次算出的摘要，然后清掉冲突状态。之后 2.x 不动就照常启动，再写入还能识别出来（用例 `accepting_3_0_binds_the_digest_and_later_2x_writes_are_seen_again`）。先写 `A` 再清状态：中间被杀，下次启动会再问一次。
+  - **`choose_legacy`**：整个 generation 封存进 `superseded\`，之后走 S2。
+- **取舍：UNKNOWN 时选「沿用 3.0」**：没有摘要可绑，就记下原因（`A.accepted_unknown`）。之后 `A=v3` 遇到同一个原因不再打扰，原因变了照常冲突。
+  - **代价**：原因不变期间，2.x 的新写入识别不出来。
+  - **为什么这样选**：另一种做法是每次启动都问，而原因往往是 2.x 目录里一个无关文件，那样会让 3.0 一直起不来；而且用户已经明确选了忽略 2.x。
+  - 这一条只对 v3 生效，`A=legacy` 遇到 UNKNOWN 仍然冲突。留给 W3j 的 peer 评审确认。
+- **`L` 不在了**（用户删了 2.x 数据）：v3 照常启动；legacy 判冲突，因为选了 2.x 为准，它的数据却没了。
+- **变异**：`output/w3-evidence/w3e-mutation-evidence.json`。
 
 ## report.json
 
