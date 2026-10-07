@@ -497,6 +497,27 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// W3 peer r1 P2-04：setup 的整份替换与移动走与 store 共用的持久化契约（刷盘、WRITE_THROUGH，替换才带
+    /// REPLACE_EXISTING），不是各写各的 `fs::rename`。
+    #[test]
+    fn writes_and_moves_go_through_the_shared_contract() {
+        use atm_install_state::durable::{Op, record};
+        let dir = scratch("contract");
+        let target = dir.join("app.json");
+        let ((), ops) = record(|| {
+            write_atomic(&target, b"{}").unwrap();
+            move_path(&target, &dir.join("moved").join("app.json")).unwrap();
+        });
+        assert!(
+            matches!(&ops[..], [
+                Op::Move { to: a, flags: 0x9, .. },
+                Op::Move { to: b, flags: 0x8, .. },
+            ] if *a == target && *b == dir.join("moved").join("app.json")),
+            "{ops:?}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn atomic_write_and_running_file_replacement() {
         let dir = scratch("replace");

@@ -596,6 +596,15 @@ fn published_generation(layout: &Layout) -> Option<String> {
 /// 发布物里库之外的文件：`artifacts\`、`sync\`、`dispatch\` 三个子树里 (相对路径, size, sha256) 的集合摘要。
 /// 库与它的 -wal / -shm 由 generation 认，不算。只看这三个子树：库旁边会冒出别的程序的临时文件
 /// （实测有 `ATM.SQLITE-SHM.tmp`，随建随删、还被占着），它们不属于发布物。列出后又消失的文件同理跳过。
+/// 发布物逐个刷盘：库与 [`publication_digest`] 的三个子树。库旁边别的程序的临时文件不属于发布物，不碰。
+fn flush_publication(dir: &Path) -> std::io::Result<()> {
+    atm_install_state::durable::sync_file(&dir.join("atm.sqlite"))?;
+    for sub in ["artifacts", "sync", "dispatch"] {
+        atm_install_state::durable::sync_tree(&dir.join(sub))?;
+    }
+    Ok(())
+}
+
 fn publication_digest(dir: &Path) -> std::io::Result<String> {
     let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut files = Vec::new();
@@ -1178,7 +1187,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
     // 复制来的附件、日志、密文与库逐个刷盘，再写 M、再改名发布（W3 peer r1 P2-04）。
-    atm_install_state::durable::sync_tree(&data)?;
+    flush_publication(&data)?;
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
     write_manifest(layout, m)?;
@@ -1256,7 +1265,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
         )?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
-    atm_install_state::durable::sync_tree(&data)?;
+    flush_publication(&data)?;
     let mut m = Manifest {
         converter_version: legacy::CONVERTER_VERSION.to_string(),
         source_root: None,

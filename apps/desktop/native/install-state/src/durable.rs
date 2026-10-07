@@ -185,19 +185,39 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// 把一个已经写完的文件刷到盘上（`FlushFileBuffers`）。
+/// 刷盘要可写的句柄：杀毒、索引短暂占着时打开会得到 5、32、33，与改名同样退避重试。
 pub fn sync_file(path: &Path) -> io::Result<()> {
-    injected(|| Op::Sync(path.to_path_buf()))
-        .map_err(|e| io::Error::new(e.kind(), format!("flush {}: {e}", path.display())))?;
-    fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| io::Error::new(e.kind(), format!("flush {}: {e}", path.display())))?;
+    let flush = || {
+        injected(|| Op::Sync(path.to_path_buf()))?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.sync_all())
+    };
+    let mut delay = Duration::from_millis(10);
+    let mut waited = Duration::ZERO;
+    loop {
+        match flush() {
+            Ok(()) => break,
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33)) && waited < RETRY_BUDGET => {
+                std::thread::sleep(delay);
+                waited += delay;
+                delay = (delay * 2).min(Duration::from_millis(500));
+            }
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("flush {}: {e}", path.display()),
+                ));
+            }
+        }
+    }
     note(|| Op::Sync(path.to_path_buf()));
     Ok(())
 }
 
-/// `dir` 下的每个文件逐个刷盘（不跟随链接）。目录不在时什么都不做。
+/// `dir` 下的每个文件逐个刷盘（不跟随链接）。目录不在时什么都不做；列出之后又消失的文件跳过——
+/// 那是别的程序随建随删的临时文件，不是调用方写下的。
 pub fn sync_tree(dir: &Path) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -206,11 +226,17 @@ pub fn sync_tree(dir: &Path) -> io::Result<()> {
     let mut entries: Vec<_> = entries.collect::<io::Result<_>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
-        let kind = e.file_type()?;
+        let kind = match e.file_type() {
+            Err(x) if x.kind() == io::ErrorKind::NotFound => continue,
+            k => k?,
+        };
         if kind.is_dir() {
             sync_tree(&e.path())?;
         } else if kind.is_file() {
-            sync_file(&e.path())?;
+            match sync_file(&e.path()) {
+                Err(x) if x.kind() == io::ErrorKind::NotFound => continue,
+                r => r?,
+            }
         }
     }
     Ok(())
@@ -417,6 +443,42 @@ mod tests {
         assert!(r.unwrap_err().to_string().contains("a -> b"));
         write_atomic(&d.join("m.json"), b"written").unwrap();
         assert_eq!(fs::read(d.join("m.json")).unwrap(), b"written");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// 刷盘：被短暂占着（不共享写）就等它放开；列出之后消失的文件在整树刷盘里跳过，单个刷盘时照样报错。
+    #[test]
+    fn a_briefly_held_file_is_still_flushed_and_a_vanished_one_is_skipped() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let d = scratch("sync-held");
+        fs::write(d.join("a"), b"a").unwrap();
+        fs::write(d.join("b"), b"b").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(d.join("a"))
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let (r, ops) = record(|| sync_file(&d.join("a")));
+        release.join().unwrap();
+        r.unwrap();
+        assert_eq!(ops, [Op::Sync(d.join("a"))]);
+        let gone = d.join("a");
+        let (r, ops) = record(|| {
+            inject(
+                Box::new(move |op| {
+                    matches!(op, Op::Sync(p) if *p == gone)
+                        .then(|| io::Error::from(io::ErrorKind::NotFound))
+                }),
+                || sync_tree(&d),
+            )
+        });
+        r.unwrap();
+        assert_eq!(ops, [Op::Sync(d.join("b"))]);
+        assert!(sync_file(&d.join("missing")).is_err());
         fs::remove_dir_all(&d).unwrap();
     }
 

@@ -763,3 +763,23 @@ pub(super) fn verify_files(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::relative_under;
+    use std::path::Path;
+
+    /// 前缀按字节比较（ASCII 不分大小写）：`p` 的前 `d.len()` 字节不一定落在字符边界上，按字符切会 panic。
+    #[test]
+    fn relative_under_compares_bytes_not_chars() {
+        let dir = Path::new("C:/é");
+        assert_eq!(relative_under("C:/aé/x.txt", dir), None);
+        assert_eq!(relative_under("c:\\É/x.txt", dir), None);
+        assert_eq!(
+            relative_under("c:\\é\\sub\\x.txt", dir),
+            Some("sub/x.txt".into())
+        );
+        assert_eq!(relative_under("C:/é", dir), None);
+        assert_eq!(relative_under("C:/é/", dir), None);
+    }
+}

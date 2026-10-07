@@ -262,9 +262,10 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **进度上报**：在本包。
 - **接入**：在 `setup/src/txn.rs` 与 `setup/src/reverse.rs`。
 
-- **进度上报**：`RunOptions.progress` 回调 `(阶段, 已完成, 总数)`。
-  - SNAPSHOT 按文件报；IMPORT、VERIFY 按项目报（`ConvertOptions.progress`），开始时各报一次 0；PUBLISHING、PUBLISHED 各报一次。
-  - 宿主把它写成 `N\runtime\startup-progress.json`，内容是 `{txn, pid, process_created_at, generation, phase, progress{done, total}, updated_at}`。
+- **进度上报**：`RunOptions.progress` 回调 `(阶段, 已完成, 总数, 工作量)`（`src/progress.rs`；W4a 起加了工作量，见「W4a」一节）。
+  - 首条是 SNAPSHOT 0/0，在任何枚举之前；SNAPSHOT 按文件报；IMPORT、VERIFY 按项目报（`ConvertOptions.progress`），开始时各报一次 0；PUBLISHING、PUBLISHED 各报一次。
+  - 其间每做完一个有界的工作批次，工作量加一。
+  - 宿主把它写成 `N\runtime\startup-progress.json`，内容是 `{txn, pid, process_created_at, generation, phase, progress{done, total, work}, updated_at}`。
   - 用例 `w3f::conversion_progress_reaches_setup_but_is_not_health` 把转换报的每一条交给 setup 的判定，确认一路都是「继续等」，阶段依次是 SNAPSHOT → IMPORT → VERIFY → PUBLISHING → PUBLISHED。
 - **setup 的等待 `ProgressWatch`**：
   - **健康**：只认 SERVICE_HEALTHY 见证。进度报到 PUBLISHED 10/10 也只是「在等」。
@@ -338,7 +339,7 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - F15–F18 把真实转换写出的进度文件逐条交给 setup 的 `ProgressWatch`。
 - **为 F8 补的能力**：`run` 拆成 `run` 加 `attempt`。PUBLISHING 之前的任何失败（不只 SNAPSHOT 与转换器自己的错误）都记 FAILED 和原因。已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
 - **变异**：`output/w3-evidence/w3h-mutation-evidence.json`，21 条。F15–F18 的变异落在 install-state，由这里的矩阵用例杀死。首跑有一条存活：「重启保留旧 M」。原因是 F2 只看重启后能发布，而下一次转换反正会覆盖 M。F2 现在在 `discard_attempt` 之后断言回到 FirstConversion。
-- **没有用例的分支**：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。按设计不记 FAILED，下次按 S3 重来；矩阵里没有能确定性触发它的注入点。
+- **没有用例的分支**（W3 时）：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。W4a 补上了注入点与用例，见「W4a」一节的 P2-05。
 - **范围的限度**（W3 peer r1 P2-05 指出）：
   - F2 停在复制完成之后，F3 停在 IMPORT 写数据之前，都没有造出复制了一半或事务中途死掉的状态；
   - F8 用文件占住 `data` 目录，造的是建不了目录，不是磁盘满或写了一半。
@@ -412,6 +413,95 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - `legacy.rs` 的 `w3_peer_r2::a_busy_copy_is_left_and_named`：一份副本一直被开着，结果是 `CleanupIncomplete`，`left` 只有一项、写的是那个文件。
   - `legacy.rs` 的 `w3_peer_r2::a_briefly_busy_copy_is_still_removed`：清理开始之后副本还被开着约 300 毫秒，照常删掉，结果是 Verified。
 - **变异**：`output/w3-evidence/w3r4-mutation-evidence.json`。
+
+## W4a：W3 遗留硬门（P2-01、P2-03、P2-04、P2-05）
+
+W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与回滚之前做完。
+
+### P2-01：VERIFY 独立核对派生列
+
+- **问题**：VERIFY 只按 2.x 的列比较。3.0 多出来的派生列——`project_paths.path_key` 与改写过的 `artifacts.local_path`——没有和源对过：前者只靠唯一约束兜底，后者只核对了 `legacy_local_path`。
+- **修订**（`legacy.rs`）：
+  - `r/project_paths.path_key`：由源的 `canonical_path` 用运行时查询的同一个函数（`paths::path_key`，注册成 SQL 函数 `atm_path_key`）重算，逐行核对。
+  - `<pid>/artifacts.local_path`：由源行的 `local_path` 推出应有的值，逐行核对。映射在 SQL 里另写一遍，不复用转换时的函数——两边写错同一处才会漏过。
+    - 按数据根转换时，指向本项目附件目录（原始根下）的改写成 `data/artifacts/<pid>/<相对路径>`，其余原样；
+    - 不按数据根转换时一律原样。
+  - 顺带修了转换时判断附件是否在目录下的 `relative_under`：原来按字符切前缀，两边含不同的多字节字符时会 panic，改为按字节比较（ASCII 不分大小写）。
+- **用例**：
+  - `verify_checks_the_derived_paths`：数据根转换后检查这两族都在。分别把目录里的附件改回原值、改成别的文件，把缺文件的附件改回原值，把目录外的附件改写，把 path_key 改成不折叠的。每一种都只有对应的那一族失败。
+  - `legacy::root::tests::relative_under_compares_bytes_not_chars`。
+
+### P2-03：进度按有界批次推进，首条在枚举之前
+
+- **问题**：
+  - 首条 SNAPSHOT 进度在完整枚举、散列 F0 之后才有。枚举超过 60 s，setup 在首条进度到达之前就超时。
+  - IMPORT、VERIFY 只按项目报。一个大项目处理超过 10 min，就被判卡住。
+- **修订**（`src/progress.rs`、`install-state` 的 `startup.rs`）：
+  - 回调多一项「工作量」：单调递增，每做完一个有界的工作批次加一。
+    - 读写文件：每 64 MiB 一次（散列、复制都经计量的读）；
+    - 枚举：每个文件一次；
+    - SQLite：每执行 100 万条虚拟机指令一次（`progress_handler`），装在目标库、源库的工作副本与探测副本上。迁移、IMPORT、VERIFY 都在 SQL 里做。
+  - 工作量只随真实的工作增加，不是按时间刷新的心跳，卡住的转换照样会被判卡住。
+  - `run` 一开始、任何枚举之前先报 SNAPSHOT 0/0。复制源库、补迁移算在 IMPORT 里，开始前先报 IMPORT 0/n。
+  - 计量装在当前线程上（`progress::with`），深处的散列、复制、开库不必层层传参；作用域结束（含 panic）时恢复外层的。
+  - setup 的 `ProgressWatch` 把 `(阶段, 已完成, 总数, 工作量)` 四项都算进「动没动」；`updated_at` 仍然不算。旧的进度文件没有 `work` 时按 0 读。
+- **用例**：
+  - `fault_matrix::the_first_progress_comes_before_enumeration`：根里有未登记的条目，枚举会拒绝；拒绝之前 setup 已经收到 SNAPSHOT 0/0，而且只有这一条。
+  - `fault_matrix::a_large_project_keeps_the_work_moving`：一个项目有 30 万条进度。
+    - IMPORT、VERIFY 里同一个「已完成/总数」下至少推进 5 批；
+    - 假设每批都要 9 min，setup 一直在等；最后一批之后 10 min 判卡住。
+  - `startup::tests::the_first_progress_has_until_the_first_budget_ends`：setup 每秒看一次，首条在第 59 s 到达就接着等；一直没有，第 60 s 判超时。
+  - `startup::tests::work_alone_counts_as_movement`。
+  - `progress::tests::*`：作用域与复原，SQL 与字节都推进工作量。
+  - F15 改为第 1 s 就看第一次（原来是第 90 s，漏掉了真实轮询在 60 s 的判定），并断言第一条是 SNAPSHOT 0/0、工作量为 0。
+
+### P2-04：store 与 setup 共用一份持久化契约
+
+- **问题**：store 的改名是 `MoveFileExW(WRITE_THROUGH)`，setup 写回滚用的 `A` 却是 `fs::rename`。复制来的附件等没有逐个刷盘。改名的标志与退避重试没有确定性用例。
+- **修订**：
+  - 新增 `install-state/src/durable.rs`，store 与 setup 都只走它：
+    - `rename`：`MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`，返回时改名已落盘；不替换时目标已存在就失败；共享冲突一类（5、32、33）退避重试约 10 秒，其余错误立即报错。
+    - `write_atomic`：同目录临时文件、刷盘、替换地改名。
+    - `sync_file`、`sync_tree`：逐个刷盘；被短暂占着同样退避重试；整树刷盘时，列出之后又消失的文件跳过（别的程序随建随删的临时文件）。
+  - 改走它的地方：
+    - store：转换的 `M`、`A`、报告、发布与封存的改名，备份的库与清单，恢复的目录交换；
+    - install-state：进度文件与 setup 回滚写的 `A`；
+    - setup：`fsx::write_atomic` 与全部移动（`move_path`、`replace_file`）。
+  - 发布之前把发布物逐个文件刷盘，再写 `M = PUBLISHING`，再改名发布。范围与发布摘要相同：库与 `artifacts`、`sync`、`dispatch` 三个子树。库旁边会冒出别的程序的临时文件（实测 `ATM.SQLITE-SHM.tmp`，随建随删、还被占着），它们不属于发布物，不碰——第一次全套运行里三条用例就因为去刷它而失败。
+  - `durable::record` 记下作用域内的每次改名与刷盘，用例据此核对调用方真的走了这里。
+- **用例**：
+  - `durable::tests::*`：
+    - 标志：总带 WRITE_THROUGH，只有要替换时才带 REPLACE_EXISTING；
+    - 共享冲突重试后成功（退避 10、20、40 ms）；
+    - 一直被占，约 10 秒后报错，错误里有两个路径；
+    - 其余错误不重试；
+    - 不替换就不覆盖，整份替换不留临时文件，刷盘按文件逐个记录。
+  - `startup::tests::rollback_writes_the_authority_only_after_publish`：`A` 是这次写入里唯一一次改名，标志是 REPLACE_EXISTING 加 WRITE_THROUGH。
+  - `fault_matrix::publishing_flushes_every_file_then_moves_through_the_shared_contract`：
+    - 发布物里每个文件都在发布改名之前刷过盘；
+    - 发布改名不替换、带 WRITE_THROUGH；
+    - 之后只有 `M` 与 `A` 两次替换地改名，`A` 在后。
+  - `fsx::tests::writes_and_moves_go_through_the_shared_contract`（setup）。
+  - 掉电实验仍放在 W8。
+
+### P2-05：确定性的故障注入
+
+- **注入点**：
+  - `progress::stop_at(n, …)`：工作量到第 n 批时「进程被杀」。SQLite 中断正在执行的语句，读文件返回错误，`run` 不做任何收尾（不写 FAILED），返回 `Interrupted`。
+  - `durable::inject(…)`：让作用域内被点名的写入、刷盘或改名以给定的错误失败，不重试。
+- **用例**（`fault_matrix`）：
+  - `a_copy_killed_halfway_restarts`：复制到一半被杀，staging 里只有一部分副本，再把一份截成半截。`M` 停在 SNAPSHOT。下次按 S3 重来，业务摘要与干净的一次相同，`L` 没动。
+  - `an_import_killed_mid_transaction_restarts`：30 万条进度的项目正在 IMPORT 时被杀（SQLite 语句被中断）。`M` 停在 IMPORT。之后同上。
+  - `a_full_disk_keeps_the_last_good_manifest`：从发布前的刷盘开始，每次写都失败（112），连 FAILED 也写不下。`M` 留着最后一份完整的（VERIFY），下次按 S3 安全重来。
+  - `a_failed_publishing_rename_restarts`：发布改名本身失败。`M` 留在 PUBLISHING、不记 FAILED，发布物没到位，下次按 S3 重来。
+  - `a_failure_after_the_publishing_rename_finishes_later`：发布物已改名到位，写 `M = PUBLISHED` 失败。下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+- **限度**：「被杀」是注入的停下，连接仍按正常方式关闭（未提交的事务回滚）。真被杀时留下的是未提交的 WAL 帧，SQLite 下次打开时同样丢弃它们；staging 整个按 S3 丢弃，不读它。
+
+### 变异
+
+- `output/w4a-evidence/w4a-store-mutation-evidence.json`（13 条）；
+- `w4a-state-mutation-evidence.json`（9 条）；
+- `w4a-setup-mutation-evidence.json`（2 条）。
 
 ## W4 前的 P2 关口（P2-06、P2-07）
 
