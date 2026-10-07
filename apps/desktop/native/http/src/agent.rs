@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 /// Agent 面：一个服务实例上的全部 MCP 工具。
 pub struct Surface {
-    svc: Arc<Service>,
+    pub(crate) svc: Arc<Service>,
 }
 
 impl Surface {
@@ -44,10 +44,7 @@ impl Surface {
             "atm_knowledge_search" => self.knowledge_search(p, &a),
             "atm_knowledge_get" => self.knowledge_get(p, &a),
             "atm_delta" => self.delta(p, &a),
-            _ => Err(DomainError::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("{} 还没有接到服务上", tool.name),
-            )),
+            _ => return self.write(p, tool, &a, &checked.normalized),
         };
         out.map_err(read_envelope)
     }
@@ -61,7 +58,7 @@ impl Surface {
     }
 
     /// 省略 project 时按 session 推出（R11 A3）；两者都没有就要先 begin 或补 session。
-    fn project(&self, p: &Principal, a: &Args<'_>) -> Result<String, DomainError> {
+    pub(crate) fn project(&self, p: &Principal, a: &Args<'_>) -> Result<String, DomainError> {
         if let Some(project) = a.str("project") {
             return Ok(project);
         }
@@ -234,31 +231,31 @@ impl Surface {
 
 /// 读失败的信封：读什么都没写，`committed:false`。fix 由 W4e 的生成器补全；在那之前 `details.next`
 /// 原样带出，Agent 仍能看到下一步。
-fn read_envelope(e: DomainError) -> Envelope {
+pub(crate) fn read_envelope(e: DomainError) -> Envelope {
     Envelope::new(e, Committed::No, None, Fix::None)
 }
 
 /// 规范化之后的参数（键已是规范名，枚举已是规范写法，`null` 已去掉）。
-struct Args<'a>(&'a Map<String, Value>);
+pub(crate) struct Args<'a>(pub(crate) &'a Map<String, Value>);
 
-impl Args<'_> {
-    fn str(&self, k: &str) -> Option<String> {
+impl<'a> Args<'a> {
+    pub(crate) fn str(&self, k: &str) -> Option<String> {
         self.0.get(k).and_then(Value::as_str).map(str::to_owned)
     }
 
-    fn int(&self, k: &str) -> Option<i64> {
+    pub(crate) fn int(&self, k: &str) -> Option<i64> {
         self.0.get(k).and_then(Value::as_i64)
     }
 
-    fn usize(&self, k: &str) -> Option<usize> {
+    pub(crate) fn usize(&self, k: &str) -> Option<usize> {
         self.int(k).and_then(|n| usize::try_from(n).ok())
     }
 
-    fn bool(&self, k: &str) -> bool {
+    pub(crate) fn bool(&self, k: &str) -> bool {
         self.0.get(k).and_then(Value::as_bool).unwrap_or(false)
     }
 
-    fn strs(&self, k: &str) -> Vec<String> {
+    pub(crate) fn strs(&self, k: &str) -> Vec<String> {
         self.0
             .get(k)
             .and_then(Value::as_array)
@@ -269,5 +266,35 @@ impl Args<'_> {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub(crate) fn get(&self, k: &str) -> Option<&'a Value> {
+        self.0.get(k)
+    }
+
+    pub(crate) fn has(&self, k: &str) -> bool {
+        self.0.contains_key(k)
+    }
+
+    pub(crate) fn num(&self, k: &str) -> Option<f64> {
+        self.0.get(k).and_then(Value::as_f64)
+    }
+
+    /// 布尔，省略时取 `default`。
+    pub(crate) fn flag(&self, k: &str, default: bool) -> bool {
+        self.0.get(k).and_then(Value::as_bool).unwrap_or(default)
+    }
+
+    /// nullable 字段：省略是 `None`，显式 `null` 是 `Some(None)`（清空）。
+    pub(crate) fn nullable(&self, k: &str) -> Option<Option<String>> {
+        match self.0.get(k)? {
+            Value::Null => Some(None),
+            v => Some(v.as_str().map(str::to_owned)),
+        }
+    }
+
+    /// 给了就是 `Some`（可以是空数组）。
+    pub(crate) fn list(&self, k: &str) -> Option<Vec<String>> {
+        self.0.get(k).map(|_| self.strs(k))
     }
 }

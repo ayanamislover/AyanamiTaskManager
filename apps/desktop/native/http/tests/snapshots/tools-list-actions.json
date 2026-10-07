@@ -116,10 +116,16 @@
           "type": "string"
         },
         "duplicate_of": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "superseded_by": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
           "type": "string"
@@ -134,13 +140,22 @@
           }
         },
         "target_date": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "parent_key": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "assignee_agent_id": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "depends_on": {
           "type": "array",
@@ -149,7 +164,10 @@
           }
         },
         "discovered_from": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "expected_fields": {
           "type": "object",
@@ -167,10 +185,16 @@
               }
             },
             "target_date": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "parent_key": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
             }
           }
         },
@@ -214,7 +238,7 @@
     },
     "_meta": {
       "surface_version": "v6",
-      "schema_hash": "e080f9c1c3710fb4"
+      "schema_hash": "a5d9b201ad79412d"
     }
   }
 ]

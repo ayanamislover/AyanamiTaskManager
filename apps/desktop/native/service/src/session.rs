@@ -1557,6 +1557,38 @@ fn project_code(tx: &Transaction<'_>, project: &str) -> Result<String, DomainErr
     .map_err(db)
 }
 
+/// 03 C-04：Agent 只能结束自己谱系里的 session。「自己」按连接组身份（A4 的 `X-ATM-Client`）认：
+/// 谱系里有 session 记着连接组身份时，调用方的连接组必须是其中之一；谱系里谁都没记（直连客户端开的、
+/// 或 2.x 迁移来的）时无从分辨，照 2.x 放行。结束别人的 session 走 User 的强制关闭。
+fn end_owned(tx: &Transaction<'_>, ctx: &WriteCtx, group: Option<&str>) -> Result<(), DomainError> {
+    let Some(session) = ctx.actor.session.as_deref() else {
+        return Ok(());
+    };
+    let project = ctx.scope.id.as_str();
+    let members = crate::lineage::lineage(tx, project, session).map_err(db)?;
+    let mut owners = Vec::new();
+    for m in &members {
+        let identity: Option<String> = tx
+            .query_row(
+                "SELECT client_identity FROM agent_sessions WHERE project_id = ?1 AND id = ?2",
+                [project, m.as_str()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(db)?
+            .flatten();
+        owners.extend(identity);
+    }
+    if owners.is_empty() || group.is_some_and(|g| owners.iter().any(|o| o == g)) {
+        return Ok(());
+    }
+    Err(DomainError::new(
+        ErrorCode::USER_AUTHORIZATION_REQUIRED,
+        format!("session {session} 不是这个连接开的：Agent 只能结束自己谱系里的 session，结束别人的 session 请用户在界面里强制关闭"),
+    )
+    .detail("session_id", session))
+}
+
 fn end_action(tx: &Transaction<'_>, ctx: &WriteCtx, r: &EndRequest) -> Result<Value, DomainError> {
     let project = ctx.scope.id.as_str();
     let session = ctx
@@ -1777,6 +1809,7 @@ impl Service {
         req: EndRequest,
     ) -> Result<Written, DomainError> {
         validate_end(&req)?;
+        let group = principal.client_group().map(str::to_owned);
         let fp_req = req.clone();
         let fingerprint: FpInput = Box::new(move |_, family, _: &Author| end_fp(&fp_req, family));
         self.write(
@@ -1798,7 +1831,10 @@ impl Service {
                 prepare: None,
                 rebind: Rebind::ExistingOnly,
             },
-            move |tx, ctx| end_action(tx, ctx, &req),
+            move |tx, ctx| {
+                end_owned(tx, ctx, group.as_deref())?;
+                end_action(tx, ctx, &req)
+            },
         )
     }
 

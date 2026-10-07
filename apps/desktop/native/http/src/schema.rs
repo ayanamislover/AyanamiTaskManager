@@ -66,6 +66,8 @@ pub struct Field {
     pub hidden: bool,
     /// 紧凑发布：列表只写「对象数组」，说明里用这句话代替逐字段展开（task_patch 的 `items` 与顶层同形）。
     pub compact: Option<&'static str>,
+    /// 显式 `null` 有意义（edit 的「清空」）：保留在参数里，schema 写成 `[类型, "null"]`。其余字段的 `null` 视同省略。
+    pub nullable: bool,
 }
 
 impl Field {
@@ -78,11 +80,17 @@ impl Field {
             default: None,
             hidden: false,
             compact: None,
+            nullable: false,
         }
     }
 
     pub const fn hidden(mut self) -> Field {
         self.hidden = true;
+        self
+    }
+
+    pub const fn nullable(mut self) -> Field {
+        self.nullable = true;
         self
     }
 
@@ -288,10 +296,15 @@ fn note(notes: &mut Vec<String>, path: &str, f: &Field) {
 fn object_schema(fields: &[Field]) -> Value {
     let mut properties = Map::new();
     for f in fields.iter().filter(|f| !f.hidden) {
-        let schema = match (f.compact, &f.ty) {
+        let mut schema = match (f.compact, &f.ty) {
             (Some(_), Ty::List { .. }) => json!({"type": "array", "items": {"type": "object"}}),
             _ => type_schema(&f.ty),
         };
+        if f.nullable
+            && let Some(t) = schema.get("type").cloned()
+        {
+            schema["type"] = json!([t, "null"]);
+        }
         properties.insert(f.name.into(), schema);
     }
     let required: Vec<&str> = fields
@@ -396,10 +409,14 @@ impl Validation {
                 }
                 continue;
             };
-            if value.is_null() {
+            if value.is_null() && !field.nullable {
                 continue;
             }
-            let checked = self.value(&field.ty, value, &path(field.name));
+            let checked = if value.is_null() {
+                Value::Null
+            } else {
+                self.value(&field.ty, value, &path(field.name))
+            };
             if key != field.name {
                 if let Some(existing) = out.get(field.name) {
                     if *existing != checked {

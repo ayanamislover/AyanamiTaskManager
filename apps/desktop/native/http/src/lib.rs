@@ -16,6 +16,8 @@ pub mod agent;
 pub mod mcp;
 pub mod schema;
 pub mod tools;
+pub mod workspace;
+pub mod write;
 
 use atm_domain::error::{Committed, DomainError, Envelope, ErrorCode, Fix, Problem, ProblemKind};
 use atm_domain::principal::Principal;

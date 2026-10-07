@@ -275,3 +275,32 @@ fn the_schema_is_flat_and_complete() {
         json!(["title"])
     );
 }
+
+/// nullable 字段的显式 null 是「清空」，原样保留；schema 写成 [类型, "null"]。其余字段的 null 视同省略。
+#[test]
+fn nullable_fields_keep_an_explicit_null() {
+    static NULLABLE: [Field; 2] = [
+        Field::new("parent_key", Ty::Str { max: 100 }).nullable(),
+        Field::new("title", Ty::Text { max: 400 }),
+    ];
+    static T: Tool = Tool {
+        name: "atm_nullable",
+        summary: "演示。",
+        fields: &NULLABLE,
+        check: None,
+        read_only: false,
+        destructive: false,
+    };
+    let ok = T
+        .validate(&json!({"parent_key": null, "title": null}))
+        .unwrap();
+    assert_eq!(Value::Object(ok.args), json!({"parent_key": null}));
+    let ok = T.validate(&json!({"parent_key": "ATM-T-1"})).unwrap();
+    assert_eq!(ok.args["parent_key"], "ATM-T-1");
+    let s = T.input_schema();
+    assert_eq!(
+        s["properties"]["parent_key"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(s["properties"]["title"]["type"], "string");
+}

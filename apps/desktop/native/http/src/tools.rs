@@ -314,7 +314,7 @@ static CREATE_ITEM: [Field; 21] = [
         },
     ),
     Field::new("objective_id", Ty::Text { max: 128 }),
-    Field::new("milestone_id", Ty::Str { max: 128 }),
+    Field::new("milestone_id", Ty::Str { max: 128 }).nullable(),
     Field::new("parent_key", Ty::Text { max: 100 }).hidden(),
     Field::new("parent_ref", Ty::Text { max: 100 }).hidden(),
     Field::new(
@@ -431,8 +431,8 @@ static EXPECTED_FIELDS: [Field; 5] = [
             max: 100,
         },
     ),
-    Field::new("target_date", Ty::Str { max: 10 }),
-    Field::new("parent_key", Ty::Str { max: 100 }),
+    Field::new("target_date", Ty::Str { max: 10 }).nullable(),
+    Field::new("parent_key", Ty::Str { max: 100 }).nullable(),
 ];
 
 const CHECKLIST_CHANGES: Ty = Ty::List {
@@ -462,8 +462,8 @@ const fn patch_item() -> [Field; PATCH_ITEM_LEN] {
         Field::new("blocked_reason", Ty::Text { max: 2000 }),
         Field::new("waiting_for", Ty::Text { max: 1000 }),
         Field::new("cancel_reason", Ty::Text { max: 2000 }),
-        Field::new("duplicate_of", Ty::Str { max: 100 }),
-        Field::new("superseded_by", Ty::Str { max: 100 }),
+        Field::new("duplicate_of", Ty::Str { max: 100 }).nullable(),
+        Field::new("superseded_by", Ty::Str { max: 100 }).nullable(),
         Field::new("title", Ty::Text { max: 400 }),
         Field::new("description", Ty::Str { max: 50000 }).aliases(&["detail", "details", "body"]),
         Field::new(
@@ -473,9 +473,9 @@ const fn patch_item() -> [Field; PATCH_ITEM_LEN] {
                 max: 100,
             },
         ),
-        Field::new("target_date", Ty::Str { max: 10 }),
-        Field::new("parent_key", Ty::Str { max: 100 }),
-        Field::new("assignee_agent_id", Ty::Str { max: 128 }),
+        Field::new("target_date", Ty::Str { max: 10 }).nullable(),
+        Field::new("parent_key", Ty::Str { max: 100 }).nullable(),
+        Field::new("assignee_agent_id", Ty::Str { max: 128 }).nullable(),
         Field::new(
             "depends_on",
             Ty::List {
@@ -483,7 +483,7 @@ const fn patch_item() -> [Field; PATCH_ITEM_LEN] {
                 max: 50,
             },
         ),
-        Field::new("discovered_from", Ty::Str { max: 100 }),
+        Field::new("discovered_from", Ty::Str { max: 100 }).nullable(),
         Field::new("expected_fields", Ty::Obj(&EXPECTED_FIELDS)),
         Field::new("request_key", Ty::Text { max: 128 }),
         Field::new("verdict", Ty::Enum(&["APPROVED", "CHANGES_REQUESTED"])),
@@ -512,6 +512,11 @@ const fn patch_item() -> [Field; PATCH_ITEM_LEN] {
 }
 
 static PATCH_ITEM: [Field; PATCH_ITEM_LEN] = patch_item();
+
+/// 一条 patch 能写的全部字段名（规范名）。映射层用它把根上的 project / session 等与 item 字段分开。
+pub fn patch_item_names() -> Vec<&'static str> {
+    PATCH_ITEM.iter().map(|f| f.name).collect()
+}
 
 /// 根：单条时 item 字段直接写在顶层（R11 P1-4 第 4 条），多条时放 `items`；两者不能同时用。
 static TASK_PATCH_FIELDS: [Field; PATCH_ITEM_LEN + 5] = {
