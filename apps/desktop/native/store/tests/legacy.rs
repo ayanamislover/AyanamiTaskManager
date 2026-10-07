@@ -5785,3 +5785,121 @@ mod w3f {
         );
     }
 }
+
+// ---------------------------------------------------------------- W3g：dry-run
+
+/// W3g（07 §9）：dry-run 在指定目录里做 SNAPSHOT → VERIFY、写出报告；不写 `L`，不写 `N`。
+mod w3g {
+    use super::w3d::layout;
+    use super::*;
+    use atm_store::conversion::{self as cv, DryRun, DryRunOptions, Quiesce};
+
+    fn dry(
+        root: &Path,
+        out: &Path,
+        n: &Path,
+        quiesce: &mut dyn FnMut() -> Quiesce,
+        after_copy: &mut dyn FnMut(),
+    ) -> cv::Result<DryRun> {
+        cv::dry_run(DryRunOptions {
+            at: AT,
+            source: root,
+            out,
+            v3_root: Some(n),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce,
+            after_copy,
+        })
+    }
+
+    fn files(dir: &Path) -> Vec<String> {
+        tree(dir).into_iter().map(|(rel, _)| rel).collect()
+    }
+
+    /// 报告与直接转换逐字节一致；输出目录里只留报告与附件；`L` 一个字节都不变，`N` 没有被创建。
+    #[test]
+    fn a_dry_run_reports_without_touching_either_root() {
+        let (f, root) = json_fixture("w3g-dry");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let out = f.dir.join("dry");
+        let outcome = dry(&root, &out, &n.root, &mut || Quiesce::Quiet, &mut || {}).unwrap();
+        let direct = f
+            .convert_with(Some(secrets_ok))
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            outcome,
+            DryRun::Verified {
+                business_digest: direct.business_digest(),
+                pending: Vec::new(),
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(out.join("report.json")).unwrap(),
+            direct.report_json()
+        );
+        assert_eq!(files(&out), ["attachment.jsonl", "report.json"]);
+        assert_eq!(tree(&root), before, "the dry run wrote into the 2.x root");
+        assert!(!n.root.exists(), "the dry run created the 3.0 root");
+    }
+
+    /// 源没静止：旧版在跑就什么都不做（输出目录都不建）；SNAPSHOT 期间源在变就只报告，不出报告。
+    #[test]
+    fn a_busy_or_changing_source_is_only_reported() {
+        let (f, root) = json_fixture("w3g-busy");
+        let n = layout(&f, "n");
+        let out = f.dir.join("dry");
+        let busy = dry(
+            &root,
+            &out,
+            &n.root,
+            &mut || Quiesce::Wait("2.x daemon pid 42".into()),
+            &mut || panic!("nothing may be copied while 2.x runs"),
+        )
+        .unwrap();
+        assert_eq!(busy, DryRun::SourceBusy("2.x daemon pid 42".into()));
+        assert!(!out.exists());
+
+        let notes = root.join("projects/P1/artifacts/notes.txt");
+        let changing = dry(&root, &out, &n.root, &mut || Quiesce::Quiet, &mut || {
+            fs::write(&notes, b"written while copying").unwrap()
+        })
+        .unwrap();
+        match changing {
+            DryRun::SourceNotQuiet(why) => assert!(why.contains("notes.txt"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(files(&out).is_empty(), "{:?}", files(&out));
+        assert!(!n.root.exists());
+    }
+
+    /// 输出目录放在 `L` 或 `N` 里、或者不是空的，都在动手之前拒绝。
+    #[test]
+    fn the_output_must_be_empty_and_outside_both_roots() {
+        let (f, root) = json_fixture("w3g-out");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        fs::create_dir_all(&n.root).unwrap();
+        let used = f.dir.join("used");
+        put(&used.join("mine.txt"), b"keep");
+        let shouting = PathBuf::from(root.join("dry").to_string_lossy().to_uppercase());
+        for (out, why) in [
+            (root.join("dry"), "inside the 2.x data root"),
+            (shouting, "inside the 2.x data root"),
+            (n.root.join("dry"), "inside the 3.0 data root"),
+            (used.clone(), "not empty"),
+        ] {
+            match dry(&root, &out, &n.root, &mut || Quiesce::Quiet, &mut || {}) {
+                Err(cv::Error::Refused(reason)) => assert!(reason.contains(why), "{reason}"),
+                other => panic!("{}: {other:?}", out.display()),
+            }
+        }
+        assert_eq!(tree(&root), before);
+        assert!(files(&n.root).is_empty());
+        assert_eq!(files(&used), ["mine.txt"]);
+    }
+}

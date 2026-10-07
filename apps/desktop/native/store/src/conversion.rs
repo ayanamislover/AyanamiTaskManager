@@ -69,6 +69,8 @@ pub enum Error {
     SourceNotQuiet(String),
     /// VERIFY 通过了，但报告里还有没处理的族实例（提交门，REPORT.md「pending」）。
     Unpublishable(String),
+    /// 前提不满足，动手之前就拒绝（例如 dry-run 的输出目录落在数据根里）。
+    Refused(String),
     /// 测试注入的中断（模拟进程被杀）。
     Interrupted(&'static str),
 }
@@ -82,6 +84,7 @@ impl std::fmt::Display for Error {
             Error::Convert(e) => write!(f, "{e}"),
             Error::SourceNotQuiet(m) => write!(f, "the 2.x data root changed during SNAPSHOT: {m}"),
             Error::Unpublishable(why) => write!(f, "the conversion cannot be published: {why}"),
+            Error::Refused(why) => write!(f, "refused: {why}"),
             Error::Interrupted(at) => write!(f, "interrupted at {at}"),
         }
     }
@@ -1603,6 +1606,157 @@ pub fn choose_v3(
 /// [`seal`]`(Superseded)` 整个 generation，之后 [`decide`] 走 S2。启动状态由下一次 [`run`] 清掉。
 pub fn choose_legacy(layout: &Layout, at: &str) -> Result<PathBuf> {
     seal(layout, Seal::Superseded, at)
+}
+
+// ---------------------------------------------------------------- dry-run（07 §9，W3g）
+
+pub struct DryRunOptions<'a> {
+    /// 转换时刻（`toISOString` 形状）。
+    pub at: &'a str,
+    /// 旧根 `L`：只读。
+    pub source: &'a Path,
+    /// 输出目录：不存在或是空的，不在 `L` 里，也不在 `N` 里。
+    pub out: &'a Path,
+    /// 新根 `N`（知道的话）：输出目录不许落在里面，dry-run 不写 `N`。
+    pub v3_root: Option<&'a Path>,
+    pub allow_real_data_root: bool,
+    pub real_data_root: Option<&'a Path>,
+    pub secrets_check: Option<fn(&[u8]) -> bool>,
+    pub accept_unconvertible: &'a [&'a str],
+    /// 留下转换出的库（`out\data\`），供人检查。默认不留：里面是用户数据。
+    pub keep_data: bool,
+    /// 旧版是否静止（规则同 07 §2）。不静止就只报告，什么都不做。
+    pub quiesce: &'a mut dyn FnMut() -> Quiesce,
+    /// 测试注入：复制完、第二次枚举之前调用一次。
+    pub after_copy: &'a mut dyn FnMut(),
+}
+
+/// dry-run 的结论。除 [`DryRun::SourceBusy`] 外，`out\report.json` 都已写出。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DryRun {
+    /// 转换与独立 VERIFY 都通过。`pending` 不空时真转换会在提交门停下。
+    Verified {
+        business_digest: BTreeMap<String, String>,
+        pending: Vec<String>,
+    },
+    /// VERIFY 发现差异：报告照样写出，指出是哪些族（F4）。
+    VerifyFailed(Vec<String>),
+    /// SNAPSHOT 期间源在变：只报告，不转换（`report.json` 不写）。
+    SourceNotQuiet(String),
+    /// 旧版还在运行或判定不了：只报告，什么都没做（输出目录也不建）。
+    SourceBusy(String),
+}
+
+fn absolute_lower(p: &Path) -> Vec<String> {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    abs.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect()
+}
+
+/// `child` 是 `parent` 本身或在它里面（按 Windows 规则不分大小写；不要求存在）。
+fn within(child: &Path, parent: &Path) -> bool {
+    let (c, p) = (absolute_lower(child), absolute_lower(parent));
+    c.len() >= p.len() && c[..p.len()] == p[..]
+}
+
+/// 07 §9：`atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。
+/// 在 `out` 里执行 SNAPSHOT → IMPORT / VERIFY，写出 `report.json` 与 `attachment.jsonl`；
+/// 不写 `L`，不写 `N`（不碰 `M`、`A`、启动状态与进度），不起任何调度器。
+pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
+    let refuse = |why: String| Err(Error::Refused(why));
+    if within(o.out, o.source) {
+        return refuse(format!(
+            "the output {} is inside the 2.x data root",
+            o.out.display()
+        ));
+    }
+    if let Some(n) = o.v3_root
+        && within(o.out, n)
+    {
+        return refuse(format!(
+            "the output {} is inside the 3.0 data root",
+            o.out.display()
+        ));
+    }
+    match std::fs::read_dir(o.out) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                return refuse(format!("the output {} is not empty", o.out.display()));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(located(e, "list", &o.out.display()).into()),
+    }
+    if let Quiesce::Wait(why) = (o.quiesce)() {
+        return Ok(DryRun::SourceBusy(why));
+    }
+    std::fs::create_dir_all(o.out).at("create", o.out)?;
+    let src = o.out.join("src");
+    let data = o.out.join("data");
+    let tidy = |keep_data: bool| {
+        let _ = std::fs::remove_dir_all(&src);
+        if !keep_data {
+            let _ = std::fs::remove_dir_all(&data);
+        }
+    };
+    let after_copy = o.after_copy;
+    match snapshot(o.source, o.at, &src, &|_, _| {}, &mut || {
+        after_copy();
+        Ok(())
+    }) {
+        Ok(_) => {}
+        Err(Error::SourceNotQuiet(why)) => {
+            tidy(false);
+            return Ok(DryRun::SourceNotQuiet(why));
+        }
+        Err(e) => {
+            tidy(false);
+            return Err(e);
+        }
+    }
+    std::fs::create_dir_all(&data).at("create", &data)?;
+    let converted = LegacySources::from_root(&src).and_then(|sources| {
+        legacy::convert(
+            &sources,
+            &data.join("atm.sqlite"),
+            &ConvertOptions {
+                at: o.at,
+                allow_real_data_root: o.allow_real_data_root,
+                real_data_root: o.real_data_root,
+                generation: None,
+                secrets_check: o.secrets_check,
+                accept_unconvertible: o.accept_unconvertible,
+                origin_root: Some(o.source),
+                progress: None,
+            },
+        )
+    });
+    let outcome = match converted {
+        Ok(report) => {
+            write_atomic(&o.out.join("report.json"), report.report_json().as_bytes())?;
+            write_atomic(
+                &o.out.join("attachment.jsonl"),
+                report.attachment_jsonl().as_bytes(),
+            )?;
+            Ok(DryRun::Verified {
+                business_digest: report.business_digest(),
+                pending: report.pending(),
+            })
+        }
+        Err(ConvertError::Verify(report)) => {
+            write_atomic(&o.out.join("report.json"), report.report_json().as_bytes())?;
+            write_atomic(
+                &o.out.join("attachment.jsonl"),
+                report.attachment_jsonl().as_bytes(),
+            )?;
+            Ok(DryRun::VerifyFailed(report.failures()))
+        }
+        Err(e) => Err(e.into()),
+    };
+    tidy(o.keep_data);
+    outcome
 }
 
 #[cfg(test)]

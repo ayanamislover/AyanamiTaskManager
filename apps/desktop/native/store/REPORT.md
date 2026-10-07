@@ -279,6 +279,23 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **未覆盖**：setup 侧这几处接入目前只有编译与 clippy 保证，没有端到端用例。要等 3.x 的宿主（W4 起）能真的写进度、起服务，才能在演练里跑通（W3h / W8）。
 - **变异**：`output/w3-evidence/w3f-mutation-evidence.json`（install-state）、`w3f-store-mutation-evidence.json`（本包）。
 
+## dry-run（W3g，`conversion::dry_run`）
+
+07 §9 `atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。CLI 外壳在 W6。
+
+- **动手之前先拒绝**（`Error::Refused`）：
+  - 输出目录不是空的；
+  - 落在 `L` 里，或落在 `N` 里（按 Windows 规则不分大小写，不要求目录存在）。
+- **源未静止只报告**：
+  - 旧版在跑或判定不了（注入的静止判定，规则同 §2）：返回 `SourceBusy`，连输出目录都不建。
+  - SNAPSHOT 期间源在变：返回 `SourceNotQuiet`，复制了一半的东西清掉，不出报告。
+- **执行**：在 `out\src\` 快照，在 `out\data\` 转换并做独立 VERIFY。登记路径按 `L`，所以报告与直接转换逐字节相同。
+  - **输出**：留下 `report.json` 和 `attachment.jsonl`。源副本总是删掉；转换出的库默认也删，因为里面是用户数据，`keep_data` 时保留。
+  - **VERIFY 不过**：报告照写，返回 `VerifyFailed(失败的族)`。
+- **不写 `N`**：`M`、`A`、启动状态、进度一概不碰，也不起任何调度器。
+- **用例**：`legacy.rs` 的 `w3g::*`。`L` 一个字节都不变，`N` 不被创建。
+- **变异**：`output/w3-evidence/w3g-mutation-evidence.json`。
+
 ## report.json
 
 `Report::report_json()` 输出一个 JSON 对象，W3d 写到 `staging\<g>\report.json`；附件另见 `Report::attachment_jsonl()`。只含表名、主键、计数与摘要，不含正文与密钥（用例 `report_json_lists_every_family_without_bodies`）。
