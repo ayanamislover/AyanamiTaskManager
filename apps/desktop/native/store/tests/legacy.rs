@@ -7195,6 +7195,109 @@ mod w3_peer_r1 {
             "edited, still unconvertible"
         );
     }
+
+    /// W3 peer r2 P2-06：舍弃许可绑定的是库的内容，不是存储。转换时库开着 WAL、写入还在 WAL 里；
+    /// 之后 checkpoint、关库、SHM 重建、VACUUM、ANALYZE、改回 DELETE 日志都是「没变」。
+    /// 反过来：只在 WAL 里的业务写入、附件变化都是「变了」；把业务内容改回去又是「没变」。
+    #[test]
+    fn a_dropped_database_is_compared_by_content_not_storage() {
+        let (f, root) = settle_fixture("w3-p206-storage");
+        let path = root.join("projects/P7/project.sqlite");
+        empty_project(&path, "P7", "XXX", 10, Some("unconvertible old data"));
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             UPDATE objectives SET title = 'written into the WAL';",
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(path.with_extension("sqlite-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let n = layout(&f, "n");
+        let m = run_dropping(&n, &root, G1).unwrap();
+        let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        let unchanged = |step: &str| {
+            let r = compare();
+            assert!(matches!(r, Comparison::Unchanged(_)), "{step}: {r:?}");
+        };
+        let changed = |step: &str| match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"], "{step}"),
+            other => panic!("{step}: {other:?}"),
+        };
+        unchanged("baseline");
+        c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        unchanged("checkpoint");
+        drop(c);
+        assert!(!path.with_extension("sqlite-wal").exists());
+        unchanged("close");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("SELECT count(*) FROM objectives;")
+            .unwrap();
+        unchanged("shm rebuilt");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("VACUUM;")
+            .unwrap();
+        unchanged("vacuum");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("ANALYZE; PRAGMA optimize;")
+            .unwrap();
+        unchanged("analyze");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode = DELETE;")
+            .unwrap();
+        unchanged("journal mode");
+
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             UPDATE objectives SET title = 'only in the WAL';",
+        )
+        .unwrap();
+        changed("a write still in the WAL");
+        c.execute_batch("UPDATE objectives SET title = 'written into the WAL';")
+            .unwrap();
+        unchanged("written back");
+        drop(c);
+        put(&root.join("projects/P7/artifacts/new.txt"), b"attachment");
+        changed("an attachment");
+    }
+
+    /// W3 peer r2 P2-06：打不开的库绑定原始字节（库与非空的 -wal）：任何字节变化都是「变了」，
+    /// 只有 -shm（WAL 的索引）不算。
+    #[test]
+    fn an_unreadable_dropped_database_is_bound_to_its_bytes() {
+        let (f, root) = settle_fixture("w3-p206-raw");
+        let path = root.join("projects/P7/project.sqlite");
+        let mut bytes = b"SQLite format 3\0".to_vec();
+        bytes.extend([0xA5u8; 200]);
+        put(&path, &bytes);
+        let n = layout(&f, "n");
+        let m = run_dropping(&n, &root, G1).unwrap();
+        let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        put(&path.with_extension("sqlite-shm"), b"index");
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        put(&path.with_extension("sqlite-wal"), b"frames");
+        match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"]),
+            other => panic!("{other:?}"),
+        }
+        fs::remove_file(path.with_extension("sqlite-wal")).unwrap();
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        bytes[100] ^= 1;
+        put(&path, &bytes);
+        match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"]),
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 /// W3 r2（peer 反例并入正式套件）：dry-run 期间把目录换成指向 `L` 或 `N` 的 junction。
