@@ -369,7 +369,7 @@ pub(super) fn convert_files(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&path, &to)?;
+            crate::progress::copy_path(&path, &to)?;
         }
         let rows: Vec<(String, Option<String>)> = tx
             .prepare(

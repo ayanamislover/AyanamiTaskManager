@@ -240,7 +240,7 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 fn file_sha256(path: &Path) -> std::io::Result<String> {
     let mut h = Sha256::new();
-    let mut f = File::open(path).at("open", path)?;
+    let mut f = crate::progress::Read::new(File::open(path).at("open", path)?);
     std::io::copy(&mut f, &mut h).at("read", path)?;
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -978,8 +978,7 @@ pub enum Step {
     Renamed,
 }
 
-/// 阶段进度回调 `(阶段, 已完成, 总数)`。
-pub type ProgressFn<'a> = &'a dyn Fn(&str, usize, usize);
+pub use crate::progress::ProgressFn;
 
 pub struct RunOptions<'a> {
     /// 转换时刻（`toISOString` 形状）。
@@ -1024,6 +1023,7 @@ fn enumerate(root: &Path, at: &str) -> Result<Vec<SourceFile>> {
             mtime_ms,
             sha256: file_sha256(&path)?,
         });
+        crate::progress::pulse();
     }
     Ok(out)
 }
@@ -1080,7 +1080,9 @@ fn copy_under(dst: &Path) -> impl FnMut(&Path, &str) -> std::io::Result<()> + '_
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(from, &to).at("copy", from).map(|_| ())
+        crate::progress::copy_path(from, &to)
+            .at("copy", from)
+            .map(|_| ())
     }
 }
 
@@ -1103,6 +1105,15 @@ fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
 /// 07 §3：从 SNAPSHOT 一直走到 PUBLISHED。调用方先拿到准入，并按 [`decide`] 处理掉 S3 / S4 / S5 的残留。
 /// 失败时 `M` 记 FAILED 与原因，staging 保留供诊断；源与发布物都不改。
 pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
+    let meter = opts.progress.map(crate::progress::Meter::new);
+    crate::progress::with(meter.as_ref(), || {
+        // 首条进度在任何枚举、复制之前（W3 peer r1 P2-03）：setup 的首条进度预算从进程启动算起。
+        crate::progress::set("SNAPSHOT", 0, 0);
+        run_metered(layout, opts)
+    })
+}
+
+fn run_metered(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     let g = opts.generation;
     clear_startup_state(layout)?;
     let staging = layout.staging(g);
@@ -1145,18 +1156,13 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
 fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Manifest> {
     let staging = layout.staging(&m.generation);
     // SNAPSHOT：枚举 F0、复制、再枚举 F1，副本的 sha256 逐个等于 F0。
-    let report_progress = |stage: &str, done: usize, total: usize| {
-        if let Some(p) = opts.progress {
-            p(stage, done, total);
-        }
-    };
     let src = staging.join("src");
     let snapshot = snapshot(
         opts.legacy_root,
         opts.at,
         &src,
         &mut copy_under(&src),
-        &|done, total| report_progress("SNAPSHOT", done, total),
+        &|done, total| crate::progress::set("SNAPSHOT", done, total),
         &mut || checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT"),
     );
     match snapshot {
@@ -1187,7 +1193,8 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
                 secrets_check: opts.secrets_check,
                 accept_unconvertible: opts.accept_unconvertible,
                 origin_root: Some(opts.legacy_root),
-                progress: opts.progress.map(legacy::Progress),
+                // 计量已经装在当前线程上（`run`）。
+                progress: None,
             },
         )
     });
@@ -1226,7 +1233,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
     write_manifest(layout, m)?;
-    report_progress("PUBLISHING", 0, 1);
+    crate::progress::set("PUBLISHING", 0, 1);
     checkpoint(opts.hook, Step::BeforeRename, "PUBLISHING")?;
     if layout.data().exists() {
         // 发布目标已经有东西（不该有：调用方应已按 S5 处理）。不覆盖，整体隔离。
@@ -1235,7 +1242,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     rename_durable(&data, &layout.data(), false)?;
     checkpoint(opts.hook, Step::Renamed, "PUBLISHING")?;
     publish(layout, m, opts.at)?;
-    report_progress("PUBLISHED", 1, 1);
+    crate::progress::set("PUBLISHED", 1, 1);
     Ok(m.clone())
 }
 
@@ -1879,8 +1886,7 @@ impl Pinned {
         let to = parent.path().join(name);
         let (mut w, mark) = pin::create_file(parent, name).at("create", &to)?;
         self.files.push((prefix, mark));
-        let mut r = File::open(from).at("open", from)?;
-        std::io::copy(&mut r, &mut w).at("copy", from)?;
+        crate::progress::copy(from, &mut w).at("copy", from)?;
         Ok(())
     }
 

@@ -149,10 +149,10 @@ impl LegacySources {
     }
 }
 
-/// 转换进度（07 §8：转换期间 watchdog 的心跳每处理一批就更新一次）：`(阶段, 已完成, 总数)`。
-/// IMPORT 与 VERIFY 各按项目报一轮，开始时报一次 `0`。
+/// 转换进度（07 §8）：`(阶段, 已完成, 总数, 工作量)`，见 [`crate::progress`]。
+/// IMPORT 与 VERIFY 各按项目报一轮，开始时报一次 `0`；其间按有界的工作批次推进工作量。
 #[derive(Clone, Copy)]
-pub struct Progress<'a>(pub &'a dyn Fn(&str, usize, usize));
+pub struct Progress<'a>(pub crate::progress::ProgressFn<'a>);
 
 impl std::fmt::Debug for Progress<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -160,10 +160,8 @@ impl std::fmt::Debug for Progress<'_> {
     }
 }
 
-fn tick(progress: Option<Progress<'_>>, stage: &str, done: usize, total: usize) {
-    if let Some(p) = progress {
-        (p.0)(stage, done, total);
-    }
+fn tick(stage: &str, done: usize, total: usize) {
+    crate::progress::set(stage, done, total);
 }
 
 #[derive(Clone, Debug)]
@@ -1019,6 +1017,15 @@ fn check_lineage_times(tx: &Transaction<'_>, pid: &str) -> Result<()> {
 
 /// 把一组 2.x 库转换成 `target` 处的新单库，并逐族校验。
 pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) -> Result<Report> {
+    let meter = opts.progress.map(|p| crate::progress::Meter::new(p.0));
+    crate::progress::with(meter.as_ref(), || convert_metered(src, target, opts))
+}
+
+fn convert_metered(
+    src: &LegacySources,
+    target: &Path,
+    opts: &ConvertOptions<'_>,
+) -> Result<Report> {
     if !opts.allow_real_data_root {
         let root = opts
             .real_data_root
@@ -1056,17 +1063,20 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     }
     // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
     let work = work_dir(target, WORK_DIR)?;
+    // 复制源库、补迁移也算 IMPORT（库大时这一步最慢）：先报阶段，其间按工作批次推进。
+    tick("IMPORT", 0, src.projects.len());
     let used = prepare_sources(src, &work, opts.at, &mut report)?;
 
     let mut t = crate::open(target)?;
+    crate::progress::watch(&t)?;
     register_functions(&t)?;
     let gens = convert_registry(&mut t, &used, opts.at, opts.generation, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
-    tick(opts.progress, "IMPORT", 0, used.projects.len());
+    tick("IMPORT", 0, used.projects.len());
     for (i, p) in used.projects.iter().enumerate() {
         let pid = convert_project(&mut t, p, &gens, &mut report, &mut promotions)?;
-        tick(opts.progress, "IMPORT", i + 1, used.projects.len());
+        tick("IMPORT", i + 1, used.projects.len());
         if !seen.insert(pid.clone()) {
             return Err(ConvertError::Mismatch(format!("project {pid} given twice")));
         }
@@ -1088,7 +1098,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         root::convert_files(&mut t, root, &target_dir(target), &mut report)?;
         jsonfiles::convert(&mut t, root, &target_dir(target), opts.at, &mut report)?;
     }
-    verify(&t, &used, &mut report, opts.progress)?;
+    verify(&t, &used, &mut report)?;
     if !report.failures().is_empty() {
         return Err(ConvertError::Verify(Box::new(report)));
     }
@@ -1182,7 +1192,7 @@ fn provenance_json(all: &[SourceProvenance]) -> String {
 
 fn file_sha256(path: &Path) -> Result<String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
+    let mut f = crate::progress::Read::new(std::fs::File::open(path)?);
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -1256,14 +1266,15 @@ fn prepare_source(
     let wal = sidecar(original, "-wal");
     let wal_sha256 = match std::fs::metadata(&wal) {
         Ok(m) if m.len() > 0 => {
-            std::fs::copy(&wal, sidecar(working, "-wal"))?;
+            crate::progress::copy_path(&wal, &sidecar(working, "-wal"))?;
             Some(file_sha256(&wal)?)
         }
         _ => None,
     };
-    std::fs::copy(original, working)?;
+    crate::progress::copy_path(original, working)?;
     let sha256 = file_sha256(original)?;
     let c = Connection::open(working)?;
+    crate::progress::watch(&c)?;
     let quick: Vec<String> = c
         .prepare("PRAGMA quick_check")
         .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
@@ -2558,7 +2569,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
     }
     let work = work_dir(target, VERIFY_DIR)?;
     let r = prepare_sources(src, &work, &at, &mut report)
-        .and_then(|used| verify(&t, &used, &mut report, None));
+        .and_then(|used| verify(&t, &used, &mut report));
     drop(t);
     let _ = std::fs::remove_dir_all(&work);
     r?;
@@ -2713,12 +2724,7 @@ impl Recheck {
     }
 }
 
-fn verify(
-    t: &Connection,
-    src: &LegacySources,
-    report: &mut Report,
-    progress: Option<Progress<'_>>,
-) -> Result<()> {
+fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
     attach(t, &src.registry, "r")?;
     report.knowledge = src.knowledge.is_some();
     let mut re = Recheck::default();
@@ -2749,7 +2755,7 @@ fn verify(
             detach(t, "k");
             r?;
         }
-        tick(progress, "VERIFY", 0, src.projects.len());
+        tick("VERIFY", 0, src.projects.len());
         for (i, p) in src.projects.iter().enumerate() {
             attach(t, p, "p")?;
             let r = verify_project(t, report, &mut re)
@@ -2757,7 +2763,7 @@ fn verify(
                 .and_then(|()| expect_global_project(t));
             detach(t, "p");
             r?;
-            tick(progress, "VERIFY", i + 1, src.projects.len());
+            tick("VERIFY", i + 1, src.projects.len());
         }
         verify_global(t, report)?;
         if let Some(root) = &src.root {

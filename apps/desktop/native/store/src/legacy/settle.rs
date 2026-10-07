@@ -146,13 +146,14 @@ fn healthy(path: &Path, work: &Path) -> Result<bool> {
     let probe = work.join("probe.sqlite");
     let probe_wal = sidecar(&probe, "-wal");
     let _ = std::fs::remove_file(&probe_wal);
-    std::fs::copy(path, &probe)?;
+    crate::progress::copy_path(path, &probe)?;
     let wal = sidecar(path, "-wal");
     if std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0) {
-        std::fs::copy(&wal, &probe_wal)?;
+        crate::progress::copy_path(&wal, &probe_wal)?;
     }
     let ok = (|| -> rusqlite::Result<bool> {
         let c = Connection::open(&probe)?;
+        crate::progress::watch(&c)?;
         let rows: Vec<String> = c
             .prepare("PRAGMA quick_check")?
             .query_map([], |r| r.get(0))?

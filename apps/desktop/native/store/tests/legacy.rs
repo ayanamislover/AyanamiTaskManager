@@ -5678,7 +5678,7 @@ mod w3f {
         let t0 = Instant::now();
         let watch = RefCell::new(ProgressWatch::new("T1", &me, WaitPolicy::default(), t0));
         let seen = RefCell::new(Vec::<(String, usize, usize)>::new());
-        let report = |phase: &str, done: usize, total: usize| {
+        let report = |phase: &str, done: usize, total: usize, work: u64| {
             let p = StartupProgress {
                 txn: "T1".into(),
                 pid: me.pid,
@@ -5688,15 +5688,16 @@ mod w3f {
                 progress: Counter {
                     done: done as u64,
                     total: total as u64,
+                    work,
                 },
                 updated_at: 0,
             };
             handover::write_progress(&n.root, &p).unwrap();
-            // setup 那边：读文件、判定。每条都是一分钟后读到的，一直在动就一直在等。
+            // setup 那边：读文件、判定。每条都是 10 s 后读到的，一直在动就一直在等。
             let read = handover::read_progress(&n.root).unwrap();
             let k = seen.borrow().len() as u32 + 1;
             let verdict = watch.borrow_mut().observe(
-                t0 + Duration::from_secs(60) * k,
+                t0 + Duration::from_secs(10) * k,
                 false,
                 true,
                 Some(&read),
@@ -6496,7 +6497,7 @@ mod fault_matrix {
     ) -> (cv::Result<cv::Manifest>, Vec<StartupProgress>) {
         let seen = std::cell::RefCell::new(Vec::new());
         let me = me();
-        let write = |phase: &str, done: usize, total: usize| {
+        let write = |phase: &str, done: usize, total: usize, work: u64| {
             let p = StartupProgress {
                 txn: txn.into(),
                 pid: me.pid,
@@ -6506,6 +6507,7 @@ mod fault_matrix {
                 progress: Counter {
                     done: done as u64,
                     total: total as u64,
+                    work,
                 },
                 updated_at: 0,
             };
@@ -6525,22 +6527,121 @@ mod fault_matrix {
         let n = layout(&f, "n");
         let (r, seen) = converting(&n, &root, "T15", None);
         r.unwrap();
+        let first = &seen[0];
+        assert_eq!(
+            (first.phase.as_str(), first.progress),
+            (
+                "SNAPSHOT",
+                Counter {
+                    done: 0,
+                    total: 0,
+                    work: 0
+                }
+            )
+        );
         let t0 = Instant::now();
         let mut watch = ProgressWatch::new("T15", &me(), WaitPolicy::default(), t0);
+        assert_eq!(
+            watch.observe(t0 + Duration::from_secs(1), false, true, Some(first)),
+            WaitVerdict::Waiting
+        );
+        let step = Duration::from_secs(100 * 60) / seen.len() as u32;
         for (i, p) in seen.iter().enumerate() {
-            let now = t0 + Duration::from_secs(90) * (i as u32 + 1);
+            let now = t0 + Duration::from_secs(1) + step * (i as u32 + 1);
             assert_eq!(
                 watch.observe(now, false, true, Some(p)),
                 WaitVerdict::Waiting,
                 "{p:?}"
             );
         }
-        let later = t0 + Duration::from_secs(90) * (seen.len() as u32 + 1);
+        let later = t0 + Duration::from_secs(1) + step * (seen.len() as u32 + 1);
         assert_eq!(
             watch.observe(later, true, true, seen.last()),
             WaitVerdict::Healthy
         );
         assert_eq!(tree(&root), before);
+    }
+
+    /// W3 peer r1 P2-03：首条进度在枚举之前。根里有未登记的条目，枚举（正式的扫描）会拒绝；拒绝之前
+    /// setup 已经收到了 SNAPSHOT 0/0。
+    #[test]
+    fn the_first_progress_comes_before_enumeration() {
+        let (f, root) = json_fixture("w4a-first-progress");
+        put(&root.join("projects/P1/project.sqlite.by-hand.bak"), b"x");
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T-FIRST", None);
+        match r {
+            Err(e) => assert!(e.to_string().contains("by-hand.bak"), "{e}"),
+            Ok(m) => panic!("{m:?}"),
+        }
+        let got: Vec<(&str, Counter)> = seen
+            .iter()
+            .map(|p| (p.phase.as_str(), p.progress))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                "SNAPSHOT",
+                Counter {
+                    done: 0,
+                    total: 0,
+                    work: 0
+                }
+            )]
+        );
+    }
+
+    /// W3 peer r1 P2-03：一个大项目（30 万条进度）的 IMPORT 与 VERIFY 里，done / total 长时间不变，工作量一直在涨。
+    /// 确定性时间：假设每个工作批次都要 9 min（慢盘），setup 照样一直在等；只要有一段 10 min 没有新的批次就会判卡住。
+    #[test]
+    fn a_large_project_keeps_the_work_moving() {
+        let (f, root) = json_fixture("w4a-large");
+        Connection::open(root.join("projects/P1/project.sqlite"))
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+                 INSERT INTO progress_updates (id, work_item_id, summary, summary_hash, actor, created_at)
+                 SELECT printf('PUB%06d', i), 'W1', 'bulk', 'h', 'claude', '{T}' FROM n;"
+            ))
+            .unwrap();
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T-LARGE", None);
+        r.unwrap();
+        // 同一个 (阶段, 已完成, 总数) 里有多少个不同的工作量：大项目所在的那一格至少有 5 个批次。
+        for phase in ["IMPORT", "VERIFY"] {
+            let mut most = 0;
+            for p in seen.iter().filter(|p| p.phase == phase) {
+                let same = seen
+                    .iter()
+                    .filter(|q| {
+                        q.phase == p.phase
+                            && q.progress.done == p.progress.done
+                            && q.progress.total == p.progress.total
+                    })
+                    .count();
+                most = most.max(same);
+            }
+            assert!(most >= 5, "{phase}: {most}");
+        }
+        let policy = WaitPolicy {
+            cap: Duration::from_secs(1_000 * 3600),
+            ..WaitPolicy::default()
+        };
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T-LARGE", &me(), policy, t0);
+        for (i, p) in seen.iter().enumerate() {
+            let now = t0 + Duration::from_secs(9 * 60) * (i as u32 + 1);
+            assert_eq!(
+                watch.observe(now, false, true, Some(p)),
+                WaitVerdict::Waiting,
+                "{p:?}"
+            );
+        }
+        let last = t0 + Duration::from_secs(9 * 60) * seen.len() as u32;
+        assert!(matches!(
+            watch.observe(last + Duration::from_secs(600), false, true, seen.last()),
+            WaitVerdict::Stuck(_)
+        ));
     }
 
     /// F16：进度停止 10 min → setup 判为卡住；确认进程退出（放掉准入）后回滚，没发布就不写 `A`，

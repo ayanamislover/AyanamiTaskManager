@@ -49,11 +49,14 @@ pub fn progress_path(n: &Path) -> PathBuf {
     runtime(n).join(PROGRESS_FILE)
 }
 
-/// `{done, total}`。
+/// `{done, total, work}`：`done / total` 给人看；`work` 是转换做完的有界工作批次数，单调递增，
+/// 只随真实的工作增加（见 `atm_store::progress`）。旧文件没有 `work` 时按 0 读。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counter {
     pub done: u64,
     pub total: u64,
+    #[serde(default)]
+    pub work: u64,
 }
 
 /// `N\runtime\startup-progress.json`（07 §8）。
@@ -150,7 +153,7 @@ pub struct ProgressWatch {
     identity: ProcessIdentity,
     policy: WaitPolicy,
     started: Instant,
-    last: Option<(String, u64, u64)>,
+    last: Option<(String, u64, u64, u64)>,
     changed_at: Instant,
 }
 
@@ -193,7 +196,13 @@ impl ProgressWatch {
             return WaitVerdict::Dead;
         }
         if let Some(p) = progress.filter(|p| self.accepts(p)) {
-            let key = (p.phase.clone(), p.progress.done, p.progress.total);
+            // 四项里任何一项变了都算推进：一个大项目的 IMPORT 里 done / total 长时间不变，work 在涨（W3 peer r1 P2-03）。
+            let key = (
+                p.phase.clone(),
+                p.progress.done,
+                p.progress.total,
+                p.progress.work,
+            );
             if self.last.as_ref() != Some(&key) {
                 self.last = Some(key);
                 self.changed_at = now;
@@ -212,7 +221,7 @@ impl ProgressWatch {
                 self.policy.first_progress.as_secs()
             )),
             None => WaitVerdict::Waiting,
-            Some((phase, done, total))
+            Some((phase, done, total, _))
                 if now.saturating_duration_since(self.changed_at) >= self.policy.stall =>
             {
                 WaitVerdict::Stuck(format!(
@@ -390,7 +399,11 @@ mod tests {
             process_created_at: who.started_at_ms,
             generation: Some("G1".into()),
             phase: phase.into(),
-            progress: Counter { done, total: 10 },
+            progress: Counter {
+                done,
+                total: 10,
+                work: 0,
+            },
             updated_at: 0,
         }
     }
@@ -417,6 +430,65 @@ mod tests {
             watch.observe(t0 + MIN * 101, true, true, Some(&done)),
             WaitVerdict::Healthy
         );
+    }
+
+    /// W3 peer r1 P2-03：setup 每秒看一次。首条进度在 60 s 之内到（哪怕是第 59 s）就接着等；
+    /// 一直没有，第 60 s 判超时，不早也不晚。
+    #[test]
+    fn the_first_progress_has_until_the_first_budget_ends() {
+        let t0 = Instant::now();
+        let sec = Duration::from_secs(1);
+        let mut late = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        let mut never = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        let first = progress("T1", &me(), "SNAPSHOT", 0);
+        for s in 0..60u32 {
+            let now = t0 + sec * s;
+            let p = (s == 59).then_some(&first);
+            assert_eq!(
+                late.observe(now, false, true, p),
+                WaitVerdict::Waiting,
+                "{s} s"
+            );
+            assert_eq!(
+                never.observe(now, false, true, None),
+                WaitVerdict::Waiting,
+                "{s} s"
+            );
+        }
+        assert_eq!(
+            late.observe(t0 + sec * 60, false, true, None),
+            WaitVerdict::Waiting
+        );
+        assert!(matches!(
+            never.observe(t0 + sec * 60, false, true, None),
+            WaitVerdict::TimedOut(_)
+        ));
+    }
+
+    /// W3 peer r1 P2-03：一个大项目的 IMPORT 里 done / total 长时间不变，只有工作量在涨：照样算推进。
+    /// 工作量也不动了，10 min 后判卡住。
+    #[test]
+    fn work_alone_counts_as_movement() {
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        let mut p = progress("T1", &me(), "IMPORT", 0);
+        for k in 1..=12u32 {
+            p.progress.work = u64::from(k);
+            assert_eq!(
+                watch.observe(t0 + MIN * (9 * k), false, true, Some(&p)),
+                WaitVerdict::Waiting,
+                "batch {k}"
+            );
+        }
+        let last = t0 + MIN * (9 * 12);
+        assert_eq!(
+            watch.observe(last + MIN * 9, false, true, Some(&p)),
+            WaitVerdict::Waiting
+        );
+        assert!(matches!(
+            watch.observe(last + MIN * 10, false, true, Some(&p)),
+            WaitVerdict::Stuck(_)
+        ));
     }
 
     /// 进度不是健康证明：哪怕报了 PUBLISHED 10/10，见证不成立就只是在等，最后照样超时。
