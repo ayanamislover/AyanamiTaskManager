@@ -495,6 +495,7 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - `a_full_disk_keeps_the_last_good_manifest`：从发布前的刷盘开始，每次写都失败（112），连 FAILED 也写不下。`M` 留着最后一份完整的（VERIFY），下次按 S3 安全重来。
   - `a_failed_publishing_rename_restarts`：发布改名本身失败。`M` 留在 PUBLISHING、不记 FAILED，发布物没到位，下次按 S3 重来。
   - `a_failure_after_the_publishing_rename_finishes_later`：发布物已改名到位，写 `M = PUBLISHED` 失败。下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+- **用例带出的缺陷**：失败之后写 FAILED 也失败时（磁盘满），原来报的是写 FAILED 的错误，真正的原因丢了。现在报原来的原因，并注明 FAILED 没记下；`M` 留着上一份完整的。Verify 失败时报告写不下也不再掩盖原因。磁盘满用例断言报出的是刷盘失败。
 - **限度**：「被杀」是注入的停下，连接仍按正常方式关闭（未提交的事务回滚）。真被杀时留下的是未提交的 WAL 帧，SQLite 下次打开时同样丢弃它们；staging 整个按 S3 丢弃，不读它。
 
 ### 变异
