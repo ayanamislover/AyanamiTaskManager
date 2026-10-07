@@ -4,6 +4,7 @@
 //! cargo run --release -p atm-store --example rehearse -- <2.x 数据根> <工作目录> [--exclude <相对路径>]...
 //! ```
 //!
+//! 0. **预检**：对真实根做正式转换的枚举与守卫（[`atm_store::legacy::snapshot_files`]，只读），打印通过或点名的条目。
 //! 1. **一致副本**（`<工作目录>\copy`）：只复制业务目录（`registry`、`knowledge`、`projects` 去掉各项目的
 //!    `backups\`、`sync`、`dispatch`）。库用只读连接 `VACUUM INTO`，在一个读事务里得到这一刻的一致内容，
 //!    不写真实库，`-wal` / `-shm` 不另复制；其余文件逐字节复制。令牌与运行时文件、备份、日志、更新包一概不碰。
@@ -52,6 +53,12 @@ fn main() {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let at = iso_utc(now.as_millis() as u64);
     println!("at {at}");
+
+    // 0. 预检：正式转换对真实根做的枚举与守卫（只读）。未登记的条目在这里就会被点名。
+    match atm_store::legacy::snapshot_files(real, &at) {
+        Ok(files) => println!("real root scan: OK, {} files to snapshot", files.len()),
+        Err(e) => println!("real root scan: REFUSED: {e}"),
+    }
 
     // 1. 一致副本：业务目录里的全部条目（项目的 backups\ 除外），去掉用户点名排除的。
     let t = Instant::now();
