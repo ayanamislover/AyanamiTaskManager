@@ -183,11 +183,24 @@ async fn rpc(
             let outcome = match tool.validate(&args) {
                 Ok(checked) => {
                     let handler = handler.clone();
-                    state
+                    let again = ToolCall {
+                        name: tool.name.to_owned(),
+                        arguments: Value::Object(checked.args.clone()),
+                    };
+                    match state
                         .calls
                         .run(move || handler(&agent, tool, checked))
                         .await
-                        .and_then(|r| r)
+                    {
+                        Ok(r) => r,
+                        // 没排上队：一行都没执行，稍后原样再调（11 §3：wait 带同一调用）。
+                        Err(mut busy) => {
+                            if let Fix::Wait { call, .. } = &mut busy.fix {
+                                *call = Some(again);
+                            }
+                            Err(busy)
+                        }
+                    }
                 }
                 Err(rejected) => Err(invalid_argument(tool, rejected)),
             };
@@ -202,7 +215,8 @@ async fn rpc(
     }
 }
 
-/// 参数校验失败的信封：能自动更正时 `fix.call` 是更正后的完整调用（11 §3），否则只列问题。
+/// 参数校验失败的信封：能自动更正时 `fix.call` 是更正后的完整调用（11 §3）；否则 `add_param`
+/// 指向第一个要补或要改的参数（problems 按路径排好序，缺的必填项与写错的值都在里面）。
 pub fn invalid_argument(tool: &Tool, rejected: crate::schema::Rejected) -> Envelope {
     let fix = match rejected.corrected {
         Some(args) => Fix::Call {
@@ -212,7 +226,18 @@ pub fn invalid_argument(tool: &Tool, rejected: crate::schema::Rejected) -> Envel
             },
             why: "按 did_you_mean 更正后的同一调用".to_owned(),
         },
-        None => Fix::None,
+        None => {
+            let first = rejected
+                .problems
+                .iter()
+                .find(|p| p.problem == atm_domain::error::ProblemKind::Missing)
+                .or(rejected.problems.first());
+            Fix::AddParam {
+                tool: tool.name.to_owned(),
+                param: first.map_or_else(String::new, |p| p.path.clone()),
+                why: "按 problems 补上或改正这个参数，再调同一个工具".to_owned(),
+            }
+        }
     };
     Envelope::new(
         DomainError::invalid_argument(rejected.problems),
@@ -236,7 +261,7 @@ pub fn tool_result(outcome: Result<Value, Envelope>) -> Value {
                 text.push_str("\nfix: ");
                 text.push_str(&fix);
             }
-            if let Some(problems) = envelope.details.get("problems") {
+            if let Some(problems) = &envelope.problems {
                 text.push_str("\nproblems: ");
                 text.push_str(&problems.to_string());
             }

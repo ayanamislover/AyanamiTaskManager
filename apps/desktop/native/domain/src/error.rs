@@ -141,7 +141,7 @@ catalog! {
     SESSION_CLOSED => 409, false, Call;
     SESSION_NOT_FOUND => 404, false, Call;
     SESSION_NOT_RETIRED => 409, false, Call;
-    SESSION_REQUIRED => 422, false, Call;
+    SESSION_REQUIRED => 422, false, AddParam;
     SESSION_SUCCESSOR_AGENT_MISMATCH => 409, false, Call;
     SESSION_SUCCESSOR_AMBIGUOUS => 409, false, Call;
     SESSION_SUCCESSOR_IDENTITY_MISMATCH => 409, false, Call;
@@ -196,6 +196,8 @@ pub enum FixKind {
     Reread,
     AskUser,
     Wait,
+    /// R11 A3：缺一个只有调用方知道的参数（例如 session），补上它再调同一个工具。
+    AddParam,
     None,
 }
 
@@ -242,7 +244,35 @@ pub enum Fix {
         retry_after_ms: u64,
         call: Option<ToolCall>,
     },
+    /// R11 A3（10 §A3「`{kind:"add_param", param:"session"}`」）：补上 `param` 再调 `tool`。
+    AddParam {
+        tool: String,
+        param: String,
+        why: String,
+    },
     None,
+}
+
+impl Fix {
+    pub fn kind(&self) -> FixKind {
+        match self {
+            Fix::Call { .. } => FixKind::Call,
+            Fix::Reread { .. } => FixKind::Reread,
+            Fix::AskUser { .. } => FixKind::AskUser,
+            Fix::Wait { .. } => FixKind::Wait,
+            Fix::AddParam { .. } => FixKind::AddParam,
+            Fix::None => FixKind::None,
+        }
+    }
+
+    /// fix 里可以原样执行的调用（call、reread、wait 带的那一个）。
+    pub fn call(&self) -> Option<&ToolCall> {
+        match self {
+            Fix::Call { call, .. } | Fix::Reread { call, .. } => Some(call),
+            Fix::Wait { call, .. } => call.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 /// INVALID_ARGUMENT 的逐项问题（11 §3）。
@@ -357,13 +387,19 @@ pub struct Envelope {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<Value>,
     pub fix: Fix,
+    /// INVALID_ARGUMENT 的逐项问题（11 §3 放在信封顶层）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub problems: Option<Value>,
     #[serde(skip_serializing_if = "Map::is_empty")]
     pub details: Map<String, Value>,
 }
 
 impl Envelope {
     pub fn new(error: DomainError, committed: Committed, state: Option<Value>, fix: Fix) -> Self {
+        let mut details = error.details;
+        let problems = details.remove("problems");
         Envelope {
+            problems,
             ok: false,
             code: error.code,
             retryable: error.code.retryable(),
@@ -371,7 +407,7 @@ impl Envelope {
             committed,
             state,
             fix,
-            details: error.details,
+            details,
         }
     }
 }

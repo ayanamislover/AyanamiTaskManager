@@ -103,7 +103,7 @@ fn fix_kinds_follow_the_ergonomics_table() {
         ("INVALID_TRANSITION", Call),
         ("COMPLETION_GATE_FAILED", Call),
         ("CLAIM_NOT_OWNED", Call),
-        ("SESSION_REQUIRED", Call),
+        ("SESSION_REQUIRED", AddParam),
         ("SESSION_CLOSED", Call),
         ("SESSION_SUCCESSOR_AMBIGUOUS", Call),
         ("PROJECT_REQUIRED", Call),

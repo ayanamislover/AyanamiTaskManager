@@ -1008,6 +1008,11 @@ static ACTIONS_HIDDEN: [&Tool; 10] = [
     &FEEDBACK,
 ];
 
+/// 按名字找工具（发布的与只收不发布的都算）。fix 生成器用它校验自己给出的调用。
+pub fn find(name: &str) -> Option<&'static Tool> {
+    PROFILES.iter().find_map(|p| p.find(name))
+}
+
 pub static PROFILES: [Profile; 3] = [
     Profile {
         name: "core",

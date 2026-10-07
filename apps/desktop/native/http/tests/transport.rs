@@ -258,8 +258,8 @@ fn oversized_bodies_are_refused_before_parsing() {
     );
     let (status, v) = raw(s.port, head.as_bytes());
     assert_eq!((status, code(&v)), (400, "INVALID_ARGUMENT"), "{v}");
-    assert_eq!(v["details"]["problems"][0]["problem"], "too_long");
-    assert_eq!(v["details"]["problems"][0]["over_by"], 1);
+    assert_eq!(v["problems"][0]["problem"], "too_long");
+    assert_eq!(v["problems"][0]["over_by"], 1);
 
     // 分块：一块 MAX_BODY + 1 字节的合法 JSON 字符串。
     let payload = format!("\"{}\"", "a".repeat(MAX_BODY - 1));
@@ -272,7 +272,7 @@ fn oversized_bodies_are_refused_before_parsing() {
     req.extend_from_slice(b"\r\n0\r\n\r\n");
     let (status, v) = raw(s.port, &req);
     assert_eq!((status, code(&v)), (400, "INVALID_ARGUMENT"), "{v}");
-    assert_eq!(v["details"]["problems"][0]["problem"], "too_long");
+    assert_eq!(v["problems"][0]["problem"], "too_long");
 
     // 正好在上限以内的照常处理。
     let fits = format!("\"{}\"", "a".repeat(MAX_BODY - 2));
@@ -290,7 +290,7 @@ fn bodies_must_be_valid_json() {
     ] {
         let (status, v) = post(&s, "/echo", &[ct], b"{}");
         assert_eq!((status, code(&v)), (400, "INVALID_ARGUMENT"), "{ct}: {v}");
-        assert_eq!(v["details"]["problems"][0]["path"], "header:content-type");
+        assert_eq!(v["problems"][0]["path"], "header:content-type");
     }
     let (status, _) = post(
         &s,
@@ -312,7 +312,7 @@ fn bodies_must_be_valid_json() {
         let (status, v) = post(&s, "/echo", &[], body);
         assert_eq!((status, code(&v)), (400, "INVALID_ARGUMENT"), "{v}");
         // 代理字符是精确的原因（serde_json 自己的报错原文里也可能有 surrogate 一词）；其余是解析器原文。
-        let got = v["details"]["problems"][0]["got"].as_str().unwrap_or("");
+        let got = v["problems"][0]["got"].as_str().unwrap_or("");
         match needle {
             "surrogate" => assert_eq!(got, "a lone UTF-16 surrogate"),
             _ => assert!(got.starts_with("invalid JSON: "), "{got}"),

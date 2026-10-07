@@ -61,15 +61,14 @@ struct Place {
     target: Target,
 }
 
-/// 写失败的信封：服务内部错误时不知道事务是否已经提交（`committed:"unknown"`，用同一 op_id 重试或回查），
-/// 其余错误都在提交前就被拒绝。
-fn write_envelope(e: DomainError) -> Envelope {
-    let committed = if e.code == ErrorCode::INTERNAL_ERROR {
+/// 写失败时有没有提交：服务内部错误时不知道事务是否已经提交（`committed:"unknown"`，用同一 op_id 重试或
+/// 回查），其余错误都在提交前就被拒绝。
+fn committed(e: &DomainError) -> Committed {
+    if e.code == ErrorCode::INTERNAL_ERROR {
         Committed::Unknown
     } else {
         Committed::No
-    };
-    Envelope::new(e, committed, None, Fix::None)
+    }
 }
 
 fn invalid(problems: Vec<Problem>) -> DomainError {
@@ -80,12 +79,12 @@ impl Surface {
     pub(crate) fn write(
         &self,
         p: &Principal,
-        tool: &Tool,
+        tool: &'static Tool,
         a: &Args<'_>,
         normalized: &[Renamed],
     ) -> Result<Value, Envelope> {
         let out = match tool.name {
-            "atm_begin" => return self.begin(p, a),
+            "atm_begin" => return self.begin(p, tool, a),
             "atm_task_create" => self.task_create(p, a),
             "atm_task_patch" => self.task_patch(p, a),
             "atm_progress_add" => self.progress_add(p, a),
@@ -106,7 +105,10 @@ impl Surface {
             }
             ack
         })
-        .map_err(write_envelope)
+        .map_err(|e| {
+            let c = committed(&e);
+            self.envelope(p, tool, a.0, e, c)
+        })
     }
 
     /// 写入目标（A3 的逐字段补缺）：显式给的原样用，project 省略时按 session 推出，op_id 省略时签发。
@@ -171,7 +173,7 @@ impl Surface {
 
     /// begin 的错误分两段：开会话失败时没有提交；会话已经开好、附带的 brief 读失败时已经提交，
     /// 不能让 Agent 以为没开成而重试（重试会再开一个），改为指向 atm_brief。
-    fn begin(&self, p: &Principal, a: &Args<'_>) -> Result<Value, Envelope> {
+    fn begin(&self, p: &Principal, tool: &'static Tool, a: &Args<'_>) -> Result<Value, Envelope> {
         let cwd = a.str("cwd");
         let mut req = BeginRequest::new(a.str("agent_id").unwrap_or_default());
         req.selector = workspace::selector(a.str("project"), cwd.as_deref());
@@ -202,7 +204,10 @@ impl Surface {
         req.single_conversation = single_conversation(p.client_group());
         req.op_id = a.str("op_id");
         req.expected_generation = a.int("expected_scope_generation");
-        let written = self.svc.begin(p, req).map_err(write_envelope)?;
+        let written = self.svc.begin(p, req).map_err(|e| {
+            let c = committed(&e);
+            self.envelope(p, tool, a.0, e, c)
+        })?;
         // C-L03：marker 与 git exclude 在提交之后写，写没写成如实报告（失败不影响已经开好的 session）。
         let marker_written = written
             .result
@@ -855,11 +860,13 @@ fn item_problems(a: &Args<'_>, op: &str, path: &dyn Fn(&str) -> String) -> Vec<P
                 .allowed(false),
         );
     }
-    if matches!(op, "checklist" | "checklist_single" | "checklist_batch")
-        && !a.has("checklist")
-        && !a.has("checklist_id")
-    {
-        out.push(Problem::new(path("checklist"), ProblemKind::Missing));
+    if matches!(op, "checklist" | "checklist_single" | "checklist_batch") && !a.has("checklist") {
+        if !a.has("checklist_id") {
+            out.push(Problem::new(path("checklist"), ProblemKind::Missing));
+        } else if !a.has("status") {
+            // 2.x 单条形状 checklist_id + status：没写 status 不能当成 TODO。
+            out.push(Problem::new(path("status"), ProblemKind::Missing));
+        }
     }
     out
 }

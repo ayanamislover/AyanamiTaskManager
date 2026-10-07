@@ -232,7 +232,7 @@ fn task_patch_rejects_mixed_batches_and_stray_fields() {
     ))
     .clone();
     assert_eq!(e["code"], json!("INVALID_ARGUMENT"));
-    let problems = &e["details"]["problems"];
+    let problems = &e["problems"];
     assert_eq!(problems[0]["path"], json!("items[1].operation"), "{e}");
     assert_eq!(problems[0]["problem"], json!("conflict"));
     let e = err(&call(
@@ -243,7 +243,7 @@ fn task_patch_rejects_mixed_batches_and_stray_fields() {
                "takeover_stale": true}),
     ))
     .clone();
-    assert_eq!(e["details"]["problems"][0]["path"], json!("takeover_stale"));
+    assert_eq!(e["problems"][0]["path"], json!("takeover_stale"));
     let e = err(&call(
         &w,
         "core",
@@ -252,7 +252,7 @@ fn task_patch_rejects_mixed_batches_and_stray_fields() {
                "blocked_reason": "等人"}),
     ))
     .clone();
-    let p = &e["details"]["problems"][0];
+    let p = &e["problems"][0];
     assert_eq!(
         (&p["path"], &p["problem"]),
         (&json!("blocked_reason"), &json!("unknown"))
@@ -272,7 +272,7 @@ fn task_patch_rejects_mixed_batches_and_stray_fields() {
     ))
     .clone();
     assert_eq!(
-        e["details"]["problems"][0],
+        e["problems"][0],
         json!({"path": "blocked_reason", "problem": "missing"})
     );
     // 都没写进去。
@@ -677,11 +677,7 @@ fn review_request_and_submit_map_their_fields() {
                "evidence": [{"kind": "test_result", "value": "评审通过"}]}),
     ))
     .clone();
-    assert_eq!(
-        e["details"]["problems"][0]["path"],
-        json!("candidate_hashes"),
-        "{e}"
-    );
+    assert_eq!(e["problems"][0]["path"], json!("candidate_hashes"), "{e}");
     let done = ok(&call(
         &w,
         "core",

@@ -44,6 +44,11 @@ pub fn test_dir(name: &str) -> PathBuf {
 
 /// 一个新库：建项目与 session（begin），建一个任务。
 pub fn world(name: &str) -> World {
+    world_with(name, Calls::new(4, Duration::from_secs(5)))
+}
+
+/// 同上，自己给阻塞池（例如 0 个名额，看排不上队时的信封）。
+pub fn world_with(name: &str, calls: Calls) -> World {
     let dir = test_dir(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -93,13 +98,8 @@ pub fn world(name: &str) -> World {
     let port = rt.block_on(async move {
         let listener = bind().await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let state = AppState::new(
-            &listener,
-            Token::new(TOKEN).unwrap(),
-            Calls::new(4, Duration::from_secs(5)),
-            || json!({}),
-        )
-        .unwrap();
+        let state =
+            AppState::new(&listener, Token::new(TOKEN).unwrap(), calls, || json!({})).unwrap();
         tokio::spawn(serve(
             listener,
             app(state, routes(&PROFILES, surface.handler())),
@@ -182,14 +182,22 @@ pub fn call(w: &World, profile: &str, tool: &str, args: Value) -> Value {
     call_as(w, None, profile, tool, args)
 }
 
-/// 以某个连接组的身份调用工具。
+/// 以某个连接组的身份调用工具。U-4 的动态检查在这里：任何一次出错，信封都必须有 committed 与
+/// fix.kind，fix 里的调用要能通过 schema（[`atm_http::fix::check`]）。
 pub fn call_as(w: &World, client: Option<&str>, profile: &str, tool: &str, args: Value) -> Value {
-    rpc_as(
+    let result = rpc_as(
         w,
         client,
         profile,
         "tools/call",
         json!({"name": tool, "arguments": args}),
     )["result"]
-        .clone()
+        .clone();
+    if result["isError"] == json!(true) {
+        let envelope = &result["structuredContent"];
+        if let Err(problem) = atm_http::fix::check(envelope) {
+            panic!("U-4：{tool} 的错误没有可执行的出路：{problem}\n{envelope}");
+        }
+    }
+    result
 }

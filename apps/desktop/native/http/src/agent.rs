@@ -4,7 +4,7 @@
 use crate::Agent;
 use crate::mcp::Handler;
 use crate::schema::{Checked, Tool};
-use atm_domain::error::{Committed, DomainError, Envelope, ErrorCode, Fix};
+use atm_domain::error::{Committed, DomainError, Envelope, ErrorCode};
 use atm_domain::principal::Principal;
 use atm_service::read::{
     BriefRequest, DeltaRequest, KnowledgeGetRequest, KnowledgeSearchRequest, Part,
@@ -34,7 +34,12 @@ impl Surface {
         )
     }
 
-    fn call(&self, p: &Principal, tool: &Tool, checked: Checked) -> Result<Value, Envelope> {
+    fn call(
+        &self,
+        p: &Principal,
+        tool: &'static Tool,
+        checked: Checked,
+    ) -> Result<Value, Envelope> {
         let a = Args(&checked.args);
         let out = match tool.name {
             "atm_brief" => self.brief(p, &a).inspect(|_| self.touch(p, &a)),
@@ -46,7 +51,28 @@ impl Surface {
             "atm_delta" => self.delta(p, &a),
             _ => return self.write(p, tool, &a, &checked.normalized),
         };
-        out.map_err(read_envelope)
+        out.map_err(|e| self.envelope(p, tool, &checked.args, e, Committed::No))
+    }
+
+    /// 带出路与状态的错误信封（W4e，[`crate::fix`]）。
+    pub(crate) fn envelope(
+        &self,
+        p: &Principal,
+        tool: &'static Tool,
+        args: &Map<String, Value>,
+        e: DomainError,
+        committed: Committed,
+    ) -> Envelope {
+        crate::fix::envelope(
+            e,
+            committed,
+            &crate::fix::Ctx {
+                svc: &self.svc,
+                principal: p,
+                tool,
+                args,
+            },
+        )
     }
 
     /// owner 的读也续租（R11 P3）：读成功、而且带着读者自己的 session 时，刷新心跳并给它的领取续租。
@@ -227,12 +253,6 @@ impl Surface {
         }
         self.svc.delta(p, &project, &r)
     }
-}
-
-/// 读失败的信封：读什么都没写，`committed:false`。fix 由 W4e 的生成器补全；在那之前 `details.next`
-/// 原样带出，Agent 仍能看到下一步。
-pub(crate) fn read_envelope(e: DomainError) -> Envelope {
-    Envelope::new(e, Committed::No, None, Fix::None)
 }
 
 /// 规范化之后的参数（键已是规范名，枚举已是规范写法，`null` 已去掉）。

@@ -168,7 +168,7 @@ fn invalid_arguments_come_back_as_an_envelope_with_a_fix() {
         ),
         (Some(false), Some("INVALID_ARGUMENT"), Some(false))
     );
-    let problems: Vec<(&str, &str)> = e["details"]["problems"]
+    let problems: Vec<(&str, &str)> = e["problems"]
         .as_array()
         .unwrap()
         .iter()
