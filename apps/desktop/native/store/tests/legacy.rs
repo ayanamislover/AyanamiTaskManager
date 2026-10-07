@@ -6836,7 +6836,11 @@ mod fault_matrix {
             }),
             || run(&n, &root, G1, None),
         );
-        assert!(r.is_err(), "{r:?}");
+        // 停在发布前的刷盘：报出来的是刷盘失败，不是之后写 M 失败（刷盘的错误不能被吞掉）。
+        match &r {
+            Err(e) => assert!(e.to_string().contains("flush"), "{e}"),
+            Ok(m) => panic!("{m:?}"),
+        }
         assert!(full.get());
         assert_eq!(phase_on_disk(&n), Phase::Verify);
         assert!(!n.data().exists());

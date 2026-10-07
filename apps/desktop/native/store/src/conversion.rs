@@ -1042,6 +1042,18 @@ fn publishable(report: &Report) -> std::result::Result<(), String> {
     }
 }
 
+/// 记 FAILED 并返回要报的错误。FAILED 写不下（例如磁盘满）时，报的仍是原来的失败原因，后面注明 FAILED 没记下：
+/// 不能让写 FAILED 的错误盖掉真正的原因（W3 peer r1 P2-05）。`M` 这时留着上一份完整的。
+fn failed(layout: &Layout, m: &mut Manifest, e: Error) -> Error {
+    match fail(layout, m, e.to_string()) {
+        Ok(()) => e,
+        Err(w) => Error::Io(std::io::Error::new(
+            w.kind(),
+            format!("{e}; FAILED was not recorded: {w}"),
+        )),
+    }
+}
+
 fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
     // 注入的「进程被杀」（`progress::stop_at`）之后什么都不写：被杀的进程写不了 FAILED。
     if crate::progress::stopped() {
@@ -1100,7 +1112,7 @@ fn run_metered(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
                 m.phase,
                 Phase::Failed | Phase::Publishing | Phase::Published
             ) {
-                fail(layout, &mut m, e.to_string())?;
+                return Err(failed(layout, &mut m, e));
             }
             Err(e)
         }
@@ -1124,10 +1136,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     match snapshot {
         Ok(files) => m.source_files = files,
         Err(e @ Error::Interrupted(_)) => return Err(e),
-        Err(e) => {
-            fail(layout, m, e.to_string())?;
-            return Err(e);
-        }
+        Err(e) => return Err(failed(layout, m, e)),
     }
 
     // IMPORT + VERIFY：在副本上转换（转换器自带独立 VERIFY），登记路径指向 L。
@@ -1157,11 +1166,11 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     let report: Report = match converted {
         Ok(r) => r,
         Err(e) => {
+            // 报告写不下不掩盖失败原因：照样记 FAILED、报原来的错误。
             if let ConvertError::Verify(r) = &e {
-                write_atomic(&staging.join("report.json"), r.report_json().as_bytes())?;
+                let _ = write_atomic(&staging.join("report.json"), r.report_json().as_bytes());
             }
-            fail(layout, m, e.to_string())?;
-            return Err(e.into());
+            return Err(failed(layout, m, e.into()));
         }
     };
     let report_json = report.report_json();
@@ -1171,8 +1180,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
         report.attachment_jsonl().as_bytes(),
     )?;
     if let Err(why) = publishable(&report) {
-        fail(layout, m, why.clone())?;
-        return Err(Error::Unpublishable(why));
+        return Err(failed(layout, m, Error::Unpublishable(why)));
     }
     m.phase = Phase::Verify;
     m.verify_digest = Some(sha_hex(report_json.as_bytes()));
