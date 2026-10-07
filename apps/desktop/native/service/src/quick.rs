@@ -159,7 +159,13 @@ fn quick_actor(principal: &Principal, actor: Option<&str>) -> Result<String, Dom
                     "Agent 写 quick task 要带自己的 actor（agent_id），不能用 USER / SYSTEM / PHONE:* 这类保留名",
                 )
                 .detail("field", "actor")
-                .detail("got", a));
+                .detail("got", a)
+                .detail("principal", "AGENT")
+                .detail("where", "ATM 窗口 → 快任务")
+                .detail(
+                    "next_step",
+                    "换成自己的 agent_id 作为 actor 再写；要以用户身份记，请用户在 ATM 窗口的快任务里操作",
+                ));
             }
             if utf16_len(a) > 128 {
                 return Err(invalid("actor", "actor 最多 128 个字符"));

@@ -1653,7 +1653,13 @@ fn end_owned(tx: &Transaction<'_>, ctx: &WriteCtx, group: Option<&str>) -> Resul
         ErrorCode::USER_AUTHORIZATION_REQUIRED,
         format!("session {session} 不是这个连接开的：Agent 只能结束自己谱系里的 session，结束别人的 session 请用户在界面里强制关闭"),
     )
-    .detail("session_id", session))
+    .detail("session_id", session)
+    .detail("principal", "AGENT")
+    .detail(
+        "where",
+        Capability::SessionForceClose.user_entry().unwrap_or("ATM 桌面端"),
+    )
+    .detail("next_step", atm_domain::capability::USER_NEXT_STEP))
 }
 
 fn end_action(tx: &Transaction<'_>, ctx: &WriteCtx, r: &EndRequest) -> Result<Value, DomainError> {

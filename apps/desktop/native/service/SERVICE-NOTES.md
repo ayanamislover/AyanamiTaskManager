@@ -694,3 +694,43 @@ W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01�
 
 2.x 的 JS 桥（`mcp-stdio.cjs`）仍按原来的 stdio 契约测（`apps/desktop/test/mcp-stdio-bridge.test.ts`），不再与原生桥共用。
 打包脚本里把原生桥放进 2.x 安装包的那条路径在 W4i 随发布流水线一起改。
+
+## Agent REST：路由表、拒绝桩、删除守卫（`http/src/rest.rs`，W4h）
+
+`rest::ROUTES` 是 06 §2 的 109 条路由逐条的 3.0 处置，Agent HTTP 的 REST 部分完全由它生成；MCP 入口仍由
+`mcp::routes` 注册，表里只登记供快照核对。
+
+### 规格没写死、由实现定下的
+
+| 位置                  | 做法                                                                                                                                                                                     | 理由                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| #27 导出              | U\* 拒绝桩，不是 06 写的 A+U                                                                                                                                                             | 00 C-07（v6，晚于 06）：导出只给 User                                       |
+| 有对应工具的路由      | brief、任务列表 / 读 / 建 / 改、进度、记录、两条搜索、begin、end 走 MCP 工具的同一个校验器与处理器；路径里的项目代码、任务 key、session 注入参数；回执与错误信封与工具相同               | 一套参数词汇（Agent 易用第一）；不维护第二份映射                            |
+| 路径与参数冲突        | body / query 里的值与路径不同是 `INVALID_ARGUMENT`（problem `conflict`），`fix.call` 是用路径值改正后的同一调用                                                                          | 不悄悄挑一个                                                                |
+| 2.0 的 camelCase      | 顶层与 `items` 里的对象，工具认得的 camelCase 键改成 snake_case；同名的 snake_case 已在时不动，交给校验器报                                                                              | 2.0 的 CLI 与 GUIDE 用 camelCase                                            |
+| GET 的 query          | 按字段类型转换：整数、数、布尔（`true/1/false/0`）、逗号分隔的列表；转不了的原样交给校验器报类型错                                                                                       | 与工具同一个校验器                                                          |
+| 没有工具的路由        | 项目列表与读、备份列表、导入预览、事件分页、review 请求、quick 列表 / 建 / 晋升、objective / milestone、项目创建、系统状态：各有一张参数表，走同一个校验器（别名、大小写、did_you_mean） | 同上                                                                        |
+| objective / milestone | 回执是固定形状的 ACK，另带新建实体本身（`objective` / `milestone`，含 id）                                                                                                               | 建 milestone、挂任务要用 objective 的 id，ACK 的 entities 里没有            |
+| 项目创建（#15）       | `path` 先 realpath 并取 git common dir；marker 与 git exclude 在提交之后写，如实报告 `marker_written`                                                                                    | 与 begin 同一个做法（C-L03）                                                |
+| 备份列表（#22）       | 照收 `project` 但不过滤，响应带 `scope:"store"`                                                                                                                                          | 3.0 的备份是整库的                                                          |
+| 事件分页（#79）       | `since` 是事件序号（与 `atm_delta` 的 `since_seq` 同义），升序；不给 `since` 是最新一页；不做体积裁剪                                                                                    | 它是 delta `oversized_event` 的回取入口，必须给出完整事件                   |
+| 系统状态（#1）        | 服务给单库的健康与计数（`impl:"rust"`、`layout:"single"`、项目数、全局序号）；运行时用 `RuntimeStatus` 补产品版本与转换状态，键冲突时服务的为准                                          | 服务层不知道版本与转换状态；数据来源冲突期间 HTTP 不起，冲突由桥报告（W4g） |
+| 拒绝信封（03 §5.2）   | details 是 `{principal:"AGENT", where, next_step}`，桩另带路由编号与能力名；`fix` 是 `ask_user`。服务层的 `require` 同样带 `where` 与 `next_step`（`Capability::user_entry`）            | 03 §5.2 原文；Agent 能把入口原样转告用户                                    |
+| U 与删                | 显式登记成 404：同一路径上别的方法存在、或会被同方法的参数路由接走（`ui/checklist/batch` 与拒绝桩 `ui/checklist/:id`）时，都是 404                                                       | T-GONE                                                                      |
+| 2xx                   | 新建（#15、51、52、65、75、80、85）201，其余 200                                                                                                                                         | 与 2.0 相同                                                                 |
+
+### 追溯
+
+| 验收            | 用例（`http/tests/rest.rs`）                                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| T-AG 表与快照   | `the_route_table_is_06_section_2_with_c07`（清单写死）、`every_agent_route_reaches_the_service`                                                  |
+| T-AG 工具同契约 | `tool_routes_speak_the_tool_contract`、`own_routes_cover_what_the_tools_do_not`                                                                  |
+| T-GONE          | `ui_only_and_deleted_routes_are_404`                                                                                                             |
+| T-DENY          | `every_user_only_route_is_refused_without_side_effects`（NS-1～NS-4、NS-7 与 User 阳性对照）、`an_agent_cannot_speak_as_the_user_on_quick_tasks` |
+| T-HINT          | `the_oversized_event_hint_resolves`、`the_review_request_hint_resolves`                                                                          |
+| 拒绝信封        | `domain/tests/capability.rs::every_user_side_refusal_names_where_and_the_next_step`                                                              |
+
+- **NS-5、NS-6、NS-8、NS-9**（子进程、网络、宿主、内存状态）在拒绝桩上没有通道：桩不读 body、不调服务。「桩绑上
+  处理器」的变异验红。服务层的判权仍由 W2h1 的权限矩阵（`service/tests/permissions.rs`）守着，「去掉 require」的
+  变异落在那里。
+- **CLI**：06 的 T-AG 要求 CLI 黑盒覆盖每条 A 路由。3.0 的 `atm.exe` 在 W6，到时用这张表驱动；这里先用 HTTP 黑盒逐条覆盖。

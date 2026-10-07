@@ -23,7 +23,9 @@ pub use create::{CreateItem, NewChecklist};
 pub use import::{ImportPlan, parse as parse_agenttask};
 pub use patch::{COMPLETE_NOTE, EditFields, ExpectedFields, PatchItem, VerifyAndComplete};
 pub(crate) use patch::{claim_not_owned, invalid_transition};
-pub use planning::{MilestoneRequest, ObjectiveRequest, PublishRequest};
+pub use planning::{
+    MILESTONE_OPERATION, MilestoneRequest, OBJECTIVE_OPERATION, ObjectiveRequest, PublishRequest,
+};
 pub use review::{Hashes, ReviewRequest, ReviewSubmit, Verdict};
 
 use crate::fp::JsValue;

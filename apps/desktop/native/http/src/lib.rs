@@ -16,6 +16,7 @@ pub mod agent;
 pub mod fix;
 pub mod mcp;
 pub mod resolve;
+pub mod rest;
 pub mod schema;
 pub mod tools;
 pub mod workspace;
@@ -190,7 +191,7 @@ async fn health(State(state): State<AppState>) -> Response {
     (StatusCode::OK, json((state.health)())).into_response()
 }
 
-async fn not_found() -> Response {
+pub(crate) async fn not_found() -> Response {
     reply(refuse(
         DomainError::new(ErrorCode::NOT_FOUND, "没有这个入口"),
         Fix::None,

@@ -104,7 +104,12 @@ pub fn world_with(name: &str, calls: Calls) -> World {
             listener,
             app(
                 state,
-                routes(&PROFILES, surface.handler()).merge(surface.resolve_routes()),
+                routes(&PROFILES, surface.handler())
+                    .merge(surface.resolve_routes())
+                    .merge(surface.rest_routes(
+                        surface.handler(),
+                        Arc::new(|| json!({"version": "3.0.0-test", "conversion": {"phase": "PUBLISHED"}})),
+                    )),
             ),
             std::future::pending::<()>(),
         ));

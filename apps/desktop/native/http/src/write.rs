@@ -56,9 +56,9 @@ pub fn single_conversation(group: Option<&str>) -> bool {
 }
 
 /// 写入的落点：项目代码与内部 id、session、op_id、世代。
-struct Place {
-    code: String,
-    target: Target,
+pub(crate) struct Place {
+    pub(crate) code: String,
+    pub(crate) target: Target,
 }
 
 /// 写失败时有没有提交：服务内部错误时不知道事务是否已经提交（`committed:"unknown"`，用同一 op_id 重试或
@@ -143,7 +143,7 @@ impl Surface {
     }
 
     /// 写入目标（A3 的逐字段补缺）：显式给的原样用，project 省略时按 session 推出，op_id 省略时签发。
-    fn place(&self, p: &Principal, a: &Args<'_>) -> Result<Place, DomainError> {
+    pub(crate) fn place(&self, p: &Principal, a: &Args<'_>) -> Result<Place, DomainError> {
         let code = self.project(p, a)?;
         let id = self.svc.project_id(p, &code)?;
         let op_id = match a.str("op_id") {
@@ -158,7 +158,12 @@ impl Surface {
     }
 
     /// 服务的固定形状 ACK（02 §4.7），再叠上 v6 从写结果里带出的字段。
-    fn ack(&self, place: &Place, operation: &str, written: &Written) -> Result<Value, DomainError> {
+    pub(crate) fn ack(
+        &self,
+        place: &Place,
+        operation: &str,
+        written: &Written,
+    ) -> Result<Value, DomainError> {
         let mut ack = self.svc.mutation_ack(
             &place.code,
             operation,

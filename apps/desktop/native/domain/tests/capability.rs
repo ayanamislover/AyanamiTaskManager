@@ -87,6 +87,45 @@ fn m01_agent_is_refused_every_user_only_capability() {
     }
 }
 
+/// 03 §5.2：拒绝信封的 details 是 `{principal:"AGENT", where, next_step}`。User 有、Agent 没有的每个能力
+/// （读也算）都要有具体的界面入口；只有不在界面上单列的宿主动作用「ATM 桌面端」。
+#[test]
+fn every_user_side_refusal_names_where_and_the_next_step() {
+    let generic = ["shell.clipboard_write", "shell.reveal_path", "shell.window"];
+    let mut seen = 0;
+    for &cap in Capability::ALL {
+        let g = cap.grant();
+        if !(g.user && !g.agent) {
+            assert_eq!(cap.user_entry(), None, "{}", cap.as_str());
+            continue;
+        }
+        seen += 1;
+        let err = require(&agent(), cap).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::USER_AUTHORIZATION_REQUIRED,
+            "{}",
+            cap.as_str()
+        );
+        let entry = cap
+            .user_entry()
+            .unwrap_or_else(|| panic!("{} has no entry", cap.as_str()));
+        assert_eq!(err.details["where"], entry, "{}", cap.as_str());
+        assert_eq!(
+            err.details["next_step"],
+            atm_domain::capability::USER_NEXT_STEP
+        );
+        assert!(err.message.contains(entry), "{}", err.message);
+        assert_eq!(
+            entry == "ATM 桌面端",
+            generic.contains(&cap.as_str()),
+            "{}: {entry}",
+            cap.as_str()
+        );
+    }
+    assert!(seen > 35, "{seen}");
+}
+
 #[test]
 fn decisions_on_who_may_do_what() {
     // C-07：导出只给 User；C-08：metrics.refresh 不给 Agent，metrics.read 给。

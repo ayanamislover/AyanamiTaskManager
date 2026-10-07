@@ -61,6 +61,14 @@ pub fn selector(code: Option<String>, cwd: Option<&str>) -> ProjectSelector {
     s
 }
 
+/// 目录所在仓库的 git common dir（同一仓库的其他 worktree 归同一个项目）。不在仓库里是 `None`。
+pub fn git_common_dir(dir: &str) -> Option<String> {
+    let dir = Path::new(dir);
+    git(dir, &["rev-parse", "--git-common-dir"])
+        .ok()
+        .and_then(|out| absolute(dir, &out))
+}
+
 /// `.ayanami-task/project.json` 里的 project_id（L-010）。读不出、不是 JSON、没有 id 都当没有 marker。
 fn marker(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join(".ayanami-task").join("project.json")).ok()?;

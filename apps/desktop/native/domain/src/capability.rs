@@ -157,6 +157,50 @@ impl Capability {
         g.access == Access::Write && g.user && !g.agent
     }
 
+    /// 用户在桌面端完成这一步的入口（03 §5.2 拒绝信封的 `where`）。只对 User 有、Agent 没有的能力有意义；
+    /// 其余能力返回 `None`。
+    pub fn user_entry(self) -> Option<&'static str> {
+        use Capability::*;
+        let g = self.grant();
+        if !g.user || g.agent {
+            return None;
+        }
+        Some(match self {
+            KnowledgePreviewRecord => "ATM 窗口 → 记录详情 → 预览为知识",
+            SavedViewRead | SavedViewManage => "ATM 窗口 → 项目任务列表 → 已保存的视图",
+            SettingsRead | SettingsWrite => "ATM 窗口 → 设置",
+            NotificationModeSet => "ATM 窗口 → 设置 → 通知",
+            SessionForceClose => "ATM 窗口 → Agents → 强制结束 session",
+            SessionGitRefresh => "ATM 窗口 → Agents → 刷新 git 上下文",
+            ProjectPathAttach => "ATM 窗口 → 项目 → 路径",
+            ProjectArchive => "ATM 窗口 → 项目 → 归档",
+            ProjectUnarchive => "ATM 窗口 → 项目 → 取消归档",
+            ProjectTrash => "ATM 窗口 → 项目 → 移到垃圾箱",
+            ProjectUntrash => "ATM 窗口 → 项目列表 → 垃圾箱 → 恢复",
+            ProjectRestoreRequestDecide => "ATM 窗口 → 项目列表 → 垃圾箱 → 恢复请求",
+            ProjectUpdateDraft | ProjectUpdatePublish => "ATM 窗口 → 项目概览 → 发布项目进度",
+            KnowledgeUserEdit => "ATM 窗口 → 知识库 → 编辑",
+            KnowledgeArchive => "ATM 窗口 → 知识库 → 归档",
+            BackupCreateManual => "ATM 窗口 → 项目数据 → 备份",
+            BackupRestoreScope => "ATM 窗口 → 项目数据 → 从备份恢复",
+            ImportApply => "ATM 窗口 → 项目数据 → 导入",
+            ExportCreate => "ATM 窗口 → 项目数据 → 导出",
+            MetricsRefresh => "ATM 窗口 → 项目统计 → 刷新",
+            SyncStatus | SyncConfigure | SyncTestRelay | SyncPairingCreate | SyncReset => {
+                "ATM 窗口 → 设置 → 手机同步"
+            }
+            DispatchStatus | DispatchConfigure | DispatchCancel => "ATM 窗口 → 设置 → 派单",
+            DispatchLaunch => "ATM 窗口 → 任务详情 → 派单",
+            AgentsRead | AgentsInstallMcp | AgentsManage | AgentsProfileSwitch => {
+                "ATM 窗口 → 设置 → Agent 接入"
+            }
+            UpdateStatus | UpdateCheck | UpdateApply => "ATM 窗口 → 设置 → 更新",
+            ShellAutostart => "ATM 窗口 → 设置 → 开机启动",
+            ShellClipboardWrite | ShellRevealPath | ShellWindow => "ATM 桌面端",
+            _ => return None,
+        })
+    }
+
     pub fn allows(self, principal: &Principal) -> bool {
         let g = self.grant();
         match principal.kind() {
@@ -168,6 +212,10 @@ impl Capability {
     }
 }
 
+/// 03 §1.1 拒绝信封的 `next_step`（沿用 2.0 `http-boundary.ts` 的意思）：Agent 不该换个入口再试。
+pub const USER_NEXT_STEP: &str =
+    "不要重试，也不要寻找其他入口：请用户在 ATM 桌面端按 where 完成这一步";
+
 /// P-004：入口的第一步。拒绝码按 03 §5.2：Agent 碰 User 能力是 USER_AUTHORIZATION_REQUIRED，
 /// 其余越权（Agent 碰 System 能力、User 碰 Agent 专属、Phone、System）是 PRINCIPAL_CAPABILITY_DENIED。
 pub fn require(principal: &Principal, capability: Capability) -> Result<(), DomainError> {
@@ -176,10 +224,16 @@ pub fn require(principal: &Principal, capability: Capability) -> Result<(), Doma
     }
     let kind = principal.kind();
     let error = if kind == PrincipalKind::Agent && capability.grant().user {
+        let entry = capability.user_entry().unwrap_or("ATM 桌面端");
         DomainError::new(
             ErrorCode::USER_AUTHORIZATION_REQUIRED,
-            format!("「{}」只能由用户在 ATM 桌面端操作", capability.as_str()),
+            format!(
+                "「{}」只能由用户在 ATM 桌面端操作（{entry}）",
+                capability.as_str()
+            ),
         )
+        .detail("where", entry)
+        .detail("next_step", USER_NEXT_STEP)
     } else {
         DomainError::new(
             ErrorCode::PRINCIPAL_CAPABILITY_DENIED,
