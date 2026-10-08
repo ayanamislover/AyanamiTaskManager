@@ -105,5 +105,8 @@ decide 循环（最多 8 圈）
 | ---- | ---- | ---- |
 | R2-P1-01 | 守卫只解析参数根本身：`N\runtime` 是指向 3.x 根的 junction 时，准入锁、lease、daemon.json 都写进了 3.x 根 | `guard::refuse_links`：在任何写入之前遍历三个根里已有的整棵树，有任何 reparse point（junction、符号链接等）或有不止一个名字的文件（硬链接）就拒绝，不管它指向哪里、不管哪个子目录会被写。根本身可以是链接（它的真实位置已经比过），从它的目标往下看 |
 
+| 补查 | （评审中断前在查的「启动中途出错」）`entries::publish` 在 HTTP 已开、daemon.json 已写之后出错或 panic 时直接返回：HTTP 随 tokio 运行时关掉，daemon.json 却留下了，也没走撤下 | `Entries` 在 HTTP 开起来时就建好，之后每一步出错（`?`）或 panic 都由它的 `Drop` 撤下（与 `withdraw` 同一个 `close`，只是不报 `Withdrawn`）；`withdraw` 之后的丢弃什么也不做 |
+
 - 边界：检查之后别的进程再往根里塞的链接不在开发二进制的防线里；运行时自己新建的目录和文件都是普通的。
 - **用例**：`tests/guard.rs::links_inside_a_given_root_are_refused_before_any_write`：`N\runtime` 指向 3.x 根、N 深处的目录指向不受保护的地方、N 里的文件是 3.x 根里文件的硬链接、N 本身是 junction 而它的 runtime 指向 3.x 根、`L\data` 指向 2.x 根、安装根的 state 指向默认安装根，都以退出码 2 拒绝；每个用例的根与受保护的树逐字节不变，被指向的不受保护目录也还是空的。
+- **用例**：`tests/boot.rs::a_publish_that_fails_halfway_leaves_no_entry_behind`：写见证失败（安装根的 `state` 是文件）与 observe 在 `Descriptor` 时 panic 两种，`start` 返回或展开之后旧端口不答 `/health`、daemon.json 已撤、准入已放，下一个实例照常起来。

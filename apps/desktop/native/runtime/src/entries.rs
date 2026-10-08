@@ -32,8 +32,11 @@ pub struct Publish<'a> {
     pub observe: &'a (dyn Fn(Event) + Send + Sync),
 }
 
-/// 开着的入口。丢弃时不撤：进程退出时监听随之关闭，daemon.json 由下一次启动覆盖（与 2.x 相同）。
+/// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
+/// 时，已经开起来的 HTTP 与写下的 daemon.json 不会留给下一个实例（W4i peer r2 补查）。
 pub struct Entries {
+    /// 已经撤下：`withdraw` 之后的丢弃什么也不做。
+    closed: bool,
     rt: tokio::runtime::Runtime,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
@@ -140,16 +143,29 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     let server = rt.spawn(serve(listener, router, async move {
         let _ = stopped.await;
     }));
+    // 从这里起入口归 `entries` 管：后面任何一步出错（`?`）或 panic，丢弃它就撤下 HTTP 与 daemon.json。
+    let mut entries = Entries {
+        closed: false,
+        rt,
+        shutdown: Some(shutdown),
+        server: Some(server),
+        scheduler: None,
+        runtime_dir,
+        instance_id,
+        lease_generation,
+        port,
+        svc,
+    };
     (p.observe)(Event::Http);
 
     // 3. daemon.json：atm-mcp 桥从这里找到端口与令牌。
     write_json(
-        &runtime_dir.join(DESCRIPTOR),
+        &entries.runtime_dir.join(DESCRIPTOR),
         &json!({
             "endpoint": format!("http://127.0.0.1:{port}"),
             "token": token.1,
             "pid": p.me.pid,
-            "instanceId": instance_id,
+            "instanceId": entries.instance_id,
             "version": p.version,
             "startedAt": atm_install_state::startup::iso_utc(p.me.started_at_ms),
             "layout": "single",
@@ -170,8 +186,8 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
             &json!({
                 "txnId": h.txn,
                 "version": p.version,
-                "host": {"pid": p.me.pid, "startedAtMs": p.me.started_at_ms, "runId": instance_id},
-                "core": {"pid": p.me.pid, "startedAtMs": p.me.started_at_ms, "instanceId": instance_id},
+                "host": {"pid": p.me.pid, "startedAtMs": p.me.started_at_ms, "runId": entries.instance_id},
+                "core": {"pid": p.me.pid, "startedAtMs": p.me.started_at_ms, "instanceId": entries.instance_id},
                 "layout": "single",
                 "generation": lease_generation,
             }),
@@ -180,20 +196,13 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     }
 
     // 5. 调度器。
-    let scheduler = atm_jobs::Scheduler::start(svc.clone(), p.sweep_every);
+    entries.scheduler = Some(atm_jobs::Scheduler::start(
+        entries.svc.clone(),
+        p.sweep_every,
+    ));
     (p.observe)(Event::Scheduler);
 
-    Ok(Entries {
-        rt,
-        shutdown: Some(shutdown),
-        server: Some(server),
-        scheduler: Some(scheduler),
-        runtime_dir,
-        instance_id,
-        lease_generation,
-        port,
-        svc,
-    })
+    Ok(entries)
 }
 
 impl Entries {
@@ -216,6 +225,14 @@ impl Entries {
     /// 撤下全部入口：停调度器（等当前一轮结束）→ 停 HTTP（等进行中的请求结束）→ 撤 daemon.json。
     /// lease 记录留着：进程还活着、还持有准入，setup 要能找到它。
     pub fn withdraw(mut self, observe: &(dyn Fn(Event) + Send + Sync)) {
+        self.close();
+        observe(Event::Withdrawn);
+    }
+
+    fn close(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
         if let Some(s) = self.scheduler.take() {
             s.stop();
         }
@@ -240,6 +257,11 @@ impl Entries {
         if ours {
             let _ = std::fs::remove_file(&descriptor);
         }
-        observe(Event::Withdrawn);
+    }
+}
+
+impl Drop for Entries {
+    fn drop(&mut self) {
+        self.close();
     }
 }

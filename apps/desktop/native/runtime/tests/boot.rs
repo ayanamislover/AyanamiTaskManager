@@ -349,3 +349,69 @@ fn dropping_a_serving_closes_everything_before_the_admission_goes() {
     }
     next.stop(&|_| {});
 }
+
+/// W4i peer r2 补查：入口发布到一半（HTTP 已开、daemon.json 已写）出错或 panic 时，`start` 返回之前就把
+/// 已开的入口撤干净：旧端口不再答 `/health`，daemon.json 不留给 Agent，准入随之释放，下一个实例照常起来。
+/// 出错用安装根的 `state` 是个文件（写不了见证）；panic 用 observe 在 `Descriptor` 时 panic。
+#[test]
+fn a_publish_that_fails_halfway_leaves_no_entry_behind() {
+    use std::sync::{Arc, Mutex};
+    for panics in [false, true] {
+        let d = dir(if panics {
+            "boot-half-panic"
+        } else {
+            "boot-half-error"
+        });
+        let n = d.join("N");
+        let l = d.join("L-missing");
+        let install = d.join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(
+            install.join(atm_install_state::STATE_DIR),
+            b"not a directory",
+        )
+        .unwrap();
+        let port = Arc::new(Mutex::new(None));
+        let mut o = options(&n, &l, &Events::default());
+        o.handoff = (!panics).then(|| atm_runtime::Handoff {
+            txn: "T1".into(),
+            install_root: install.clone(),
+        });
+        let (seen, nn) = (port.clone(), n.clone());
+        o.observe = Arc::new(move |e| {
+            if e == Event::Descriptor {
+                let endpoint = descriptor(&nn).unwrap()["endpoint"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                let p: u16 = endpoint.rsplit(':').next().unwrap().parse().unwrap();
+                assert_eq!(get(p, "/health").map(|r| r.0), Some(200));
+                *seen.lock().unwrap() = Some(p);
+                if panics {
+                    panic!("observer fails after the descriptor");
+                }
+            }
+        });
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| atm_runtime::start(&o)));
+        match (&result, panics) {
+            (Err(_), true) => {}
+            (Ok(Err(atm_runtime::BootError::Failed(_))), false) => {}
+            _ => panic!("panics={panics}: unexpected outcome"),
+        }
+        drop(result);
+        let p = port.lock().unwrap().expect("the descriptor was written");
+        assert_eq!(
+            get(p, "/health"),
+            None,
+            "panics={panics}: the HTTP still answers"
+        );
+        assert!(
+            descriptor(&n).is_none(),
+            "panics={panics}: daemon.json left behind"
+        );
+        assert!(atm_install_state::startup::admission_released(&n));
+        let next = serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap());
+        next.stop(&|_| {});
+    }
+}
