@@ -1861,3 +1861,91 @@ fn withdrawal_only_removes_unused_backups_and_sweeps_leftovers() {
         Withdrawal::Kept("NOT_REGISTERED")
     );
 }
+
+/// W4 关口 P2-W4A-02：撤回的「目录隔离 → 删登记行 → 删不成就放回」与清理时的放回，都按共享的持久化契约落盘
+/// （WRITE_THROUGH，经 `durable` 记录与注入）；遇占用立即留下（FILES_IN_USE），不等重试预算。
+#[test]
+fn withdrawal_moves_go_through_the_shared_contract() {
+    use atm_install_state::durable::{self, MOVEFILE_WRITE_THROUGH, Op};
+    let w = world("withdrawal-durable");
+    let quarantine = w.backups.join(WITHDRAWN_DIR);
+    let registered = |id: &str| -> i64 {
+        q(
+            &w,
+            "SELECT count(*) FROM backups WHERE id = ?1",
+            vec![id.to_owned()],
+        )
+        .unwrap()
+    };
+
+    // 正常撤回：一次落盘的目录移动，之后登记行才删。
+    let unused = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
+    let (result, ops) = durable::record(|| discard_backup(&w.store, &unused));
+    assert_eq!(result.unwrap(), Withdrawal::Withdrawn);
+    assert_eq!(
+        ops,
+        [Op::Move {
+            from: unused.dir.clone(),
+            to: quarantine.join(&unused.id),
+            flags: MOVEFILE_WRITE_THROUGH,
+        }]
+    );
+    assert_eq!(registered(&unused.id), 0);
+
+    // 占用：立即留下，不重试；目录与登记行都在。
+    let busy = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
+    let started = std::time::Instant::now();
+    let kept = durable::inject(
+        Box::new(|op| matches!(op, Op::Move { .. }).then(|| std::io::Error::from_raw_os_error(32))),
+        || discard_backup(&w.store, &busy),
+    );
+    assert_eq!(kept.unwrap(), Withdrawal::Kept("FILES_IN_USE"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(busy.dir.is_dir());
+    assert_eq!(registered(&busy.id), 1);
+
+    // 登记行没删成（这里用触发器让 DELETE 什么都不做）：隔离过去的目录落盘地放回原处。
+    w.store
+        .write(|tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER keep_backups BEFORE DELETE ON backups BEGIN SELECT RAISE(IGNORE); END;",
+            )
+        })
+        .unwrap();
+    let (result, ops) = durable::record(|| discard_backup(&w.store, &busy));
+    assert_eq!(result.unwrap(), Withdrawal::Kept("RESTORE_REFERENCE"));
+    assert_eq!(
+        ops,
+        [
+            Op::Move {
+                from: busy.dir.clone(),
+                to: quarantine.join(&busy.id),
+                flags: MOVEFILE_WRITE_THROUGH,
+            },
+            Op::Move {
+                from: quarantine.join(&busy.id),
+                to: busy.dir.clone(),
+                flags: MOVEFILE_WRITE_THROUGH,
+            },
+        ]
+    );
+    assert!(busy.dir.is_dir());
+    w.store
+        .write(|tx| tx.execute_batch("DROP TRIGGER keep_backups;"))
+        .unwrap();
+
+    // 清理：隔离区里登记着的放回备份根，同样落盘。
+    fs::create_dir_all(&quarantine).unwrap();
+    fs::rename(&busy.dir, quarantine.join(&busy.id)).unwrap();
+    let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
+    assert_eq!(left.unwrap(), 0);
+    assert_eq!(
+        ops,
+        [Op::Move {
+            from: quarantine.join(&busy.id),
+            to: w.backups.join(&busy.id),
+            flags: MOVEFILE_WRITE_THROUGH,
+        }]
+    );
+    verify_backup(&w.store, &busy.id).unwrap();
+}

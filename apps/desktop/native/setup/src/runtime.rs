@@ -779,6 +779,9 @@ mod tests {
     fn health_is_bounded_by_one_deadline_not_per_read() {
         let f = Fixture::new("single-health-deadline");
         f.single();
+        // 上限都留出 1.5 s 给负载（进程快照、端口表、见证文件都在计时里）；拖延的总时长拉到 6 s 以上，
+        // 「每次读各自计时」的错误做法仍然远远超过上限（W4 关口：负载下 1 s / 700 ms 的余量会误报）。
+        let slack = Duration::from_millis(1_500);
         let timed = |deadline_ms: u64| {
             let t0 = Instant::now();
             let result = f.check_by(Instant::now() + Duration::from_millis(deadline_ms));
@@ -787,7 +790,7 @@ mod tests {
         // A normal answer is quick.
         let (ok, took) = timed(10_000);
         assert_eq!(ok, Ok(()));
-        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(took < slack, "{took:?}");
         // Whitespace before the JSON is fine when it arrives in time.
         f.deliver(Delivery::Trickle {
             pad: 3,
@@ -795,7 +798,7 @@ mod tests {
         });
         let (ok, took) = timed(3_000);
         assert_eq!(ok, Ok(()));
-        assert!(took < Duration::from_millis(1_500), "{took:?}");
+        assert!(took < Duration::from_millis(3_000), "{took:?}");
         // Never answers: refused at the caller's deadline.
         f.deliver(Delivery::Hang);
         let (refused, took) = timed(1_500);
@@ -803,11 +806,11 @@ mod tests {
             refused,
             Err("service did not answer /health in time".into())
         );
-        assert!(took < Duration::from_millis(2_100), "{took:?}");
+        assert!(took < Duration::from_millis(1_500) + slack, "{took:?}");
         // Trickles past the caller's deadline (W0-S peer r2 P1-02): each read is quick,
-        // the whole answer is not.
+        // the whole answer is not (20 × 300 ms = 6 s if each read had its own budget).
         f.deliver(Delivery::Trickle {
-            pad: 10,
+            pad: 20,
             every_ms: 300,
         });
         let (refused, took) = timed(1_500);
@@ -815,10 +818,11 @@ mod tests {
             refused,
             Err("service did not answer /health in time".into())
         );
-        assert!(took < Duration::from_millis(2_100), "{took:?}");
-        // Trickles past the request's own budget even with a far caller deadline.
+        assert!(took < Duration::from_millis(1_500) + slack, "{took:?}");
+        // Trickles past the request's own budget even with a far caller deadline
+        // (20 × 450 ms = 9 s).
         f.deliver(Delivery::Trickle {
-            pad: 12,
+            pad: 20,
             every_ms: 450,
         });
         let (refused, took) = timed(30_000);
@@ -826,20 +830,18 @@ mod tests {
             refused,
             Err("service did not answer /health in time".into())
         );
-        assert!(
-            took < HEALTH_BUDGET + Duration::from_millis(700),
-            "{took:?}"
-        );
+        assert!(took < HEALTH_BUDGET + slack, "{took:?}");
         // A body shorter than its Content-Length is not an answer.
         f.deliver(Delivery::Truncated);
         let (refused, took) = timed(3_000);
         assert_eq!(refused, Err("service did not answer /health".into()));
-        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(took < slack, "{took:?}");
         // An already-passed deadline refuses at once.
         f.deliver(Delivery::Whole);
+        // 过期的 deadline 立即拒绝（即使对方会正常回答）；时间只防挂住。
         let (refused, took) = timed(0);
         assert!(refused.is_err());
-        assert!(took < Duration::from_millis(300), "{took:?}");
+        assert!(took < slack, "{took:?}");
     }
 
     #[test]

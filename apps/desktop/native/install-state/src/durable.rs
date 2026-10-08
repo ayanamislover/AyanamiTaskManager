@@ -109,6 +109,22 @@ pub fn rename(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
     )
 }
 
+/// 落盘地改名，但遇占用（5、32、33）不等、立即失败。给「占着就留到下次」的调用方（备份的撤回与放回）：
+/// 它们宁可立即返回，也不能让每次占用都多等 [`RETRY_BUDGET`]（W4 关口 P2-W4A-02）。
+pub fn rename_once(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+    rename_once_with(from, to, replace, &mut imp::move_file)
+}
+
+/// [`rename_once`] 的本体，`mv` 可注入。
+pub fn rename_once_with(
+    from: &Path,
+    to: &Path,
+    replace: bool,
+    mv: &mut dyn FnMut(&Path, &Path, u32) -> io::Result<()>,
+) -> io::Result<()> {
+    move_with(from, to, replace, mv, &mut |_| {}, Duration::ZERO)
+}
+
 /// [`rename`] 的本体：`mv` 做一次改名（失败给出系统错误），`sleep` 退避。用例注入它们核对标志与重试。
 pub fn rename_with(
     from: &Path,
@@ -116,6 +132,17 @@ pub fn rename_with(
     replace: bool,
     mv: &mut dyn FnMut(&Path, &Path, u32) -> io::Result<()>,
     sleep: &mut dyn FnMut(Duration),
+) -> io::Result<()> {
+    move_with(from, to, replace, mv, sleep, RETRY_BUDGET)
+}
+
+fn move_with(
+    from: &Path,
+    to: &Path,
+    replace: bool,
+    mv: &mut dyn FnMut(&Path, &Path, u32) -> io::Result<()>,
+    sleep: &mut dyn FnMut(Duration),
+    budget: Duration,
 ) -> io::Result<()> {
     let flags = MOVEFILE_WRITE_THROUGH
         | if replace {
@@ -149,7 +176,7 @@ pub fn rename_with(
             Err(e) => e,
         };
         let transient = matches!(e.raw_os_error(), Some(5 | 32 | 33));
-        if !transient || waited >= RETRY_BUDGET {
+        if !transient || waited >= budget {
             return Err(io::Error::new(
                 e.kind(),
                 format!("move {} -> {}: {e}", from.display(), to.display()),
@@ -219,6 +246,11 @@ pub fn sync_file(path: &Path) -> io::Result<()> {
 /// `dir` 下的每个文件逐个刷盘（不跟随链接）。目录不在时什么都不做；列出之后又消失的文件跳过——
 /// 那是别的程序随建随删的临时文件，不是调用方写下的。
 pub fn sync_tree(dir: &Path) -> io::Result<()> {
+    sync_tree_each(dir, &mut || {})
+}
+
+/// [`sync_tree`]，每刷完一个文件调一次 `each`（转换拿它报进度，W4 关口 P2-W4A-01）。
+pub fn sync_tree_each(dir: &Path, each: &mut dyn FnMut()) -> io::Result<()> {
     let entries = match fs::read_dir(dir) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         r => r?,
@@ -231,12 +263,13 @@ pub fn sync_tree(dir: &Path) -> io::Result<()> {
             k => k?,
         };
         if kind.is_dir() {
-            sync_tree(&e.path())?;
+            sync_tree_each(&e.path(), each)?;
         } else if kind.is_file() {
             match sync_file(&e.path()) {
                 Err(x) if x.kind() == io::ErrorKind::NotFound => continue,
                 r => r?,
             }
+            each();
         }
     }
     Ok(())
@@ -274,6 +307,35 @@ mod imp {
         }
         std::fs::rename(from, to)?;
         std::fs::File::open(to.parent().unwrap_or(Path::new(".")))?.sync_all()
+    }
+}
+
+#[cfg(test)]
+mod once_tests {
+    use super::*;
+
+    /// 不重试的改名：遇占用只试一次就失败，不睡；成功时同样带 WRITE_THROUGH，记录在案。
+    #[test]
+    fn a_single_attempt_move_never_waits() {
+        let (from, to) = (Path::new("a"), Path::new("b"));
+        let mut calls = Vec::new();
+        let busy = rename_once_with(from, to, false, &mut |_, _, flags| {
+            calls.push(flags);
+            Err(io::Error::from_raw_os_error(32))
+        });
+        let e = busy.unwrap_err();
+        assert!(e.to_string().starts_with("move a -> b"), "{e}");
+        assert_eq!(calls, [MOVEFILE_WRITE_THROUGH]);
+        let (r, ops) = record(|| rename_once_with(from, to, true, &mut |_, _, _| Ok(())));
+        r.unwrap();
+        assert_eq!(
+            ops,
+            [Op::Move {
+                from: from.into(),
+                to: to.into(),
+                flags: MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING,
+            }]
+        );
     }
 }
 
