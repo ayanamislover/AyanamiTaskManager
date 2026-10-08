@@ -6,7 +6,7 @@
 //!             [--drill-pace-ms <n>] [--drill-hold-at <阶段>]
 //! ```
 //!
-//! 两个根都必须显式给出，并且不能是真实的数据根：开发二进制不碰真实数据。
+//! 两个根都必须显式给出，并且不能与真实的数据根、安装根重叠（[`atm_runtime::guard`]）：开发二进制不碰真实数据。
 //!
 //! 退出码：2 参数不对；3 另一个实例持有准入；4 旧版未静止；5 启动失败。入口开着或处于数据源冲突时一直运行。
 
@@ -20,18 +20,6 @@ use atm_store::conversion::Quiesce;
 fn usage(why: &str) -> ! {
     eprintln!("atm-runtime: {why}");
     std::process::exit(2);
-}
-
-fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
-    let norm = |p: &std::path::Path| {
-        std::path::absolute(p)
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_ascii_lowercase()
-    };
-    norm(a) == norm(b)
 }
 
 fn main() {
@@ -63,16 +51,15 @@ fn main() {
     }
     let n = n.unwrap_or_else(|| usage("--n is required"));
     let legacy = legacy.unwrap_or_else(|| usage("--legacy is required"));
-    if let Ok(real) = atm_install_state::startup::v3_root()
-        && std::env::var_os("ATM3_DATA_DIR").is_none()
-        && same_dir(&n, &real)
-    {
-        usage("refusing the real 3.x data root");
+    // 在任何文件系统写入之前：三个根都不能碰到真实的根，彼此也不能重叠（W4i peer r1 P1-01）。
+    let mut given: Vec<(&str, &std::path::Path)> = vec![("--n", &n), ("--legacy", &legacy)];
+    if let Some(root) = &install_root {
+        given.push(("--install-root", root));
     }
-    if let Some(real) = atm_store::legacy::real_data_root()
-        && (same_dir(&legacy, &real) || same_dir(&n, &real))
+    if let Err(why) =
+        atm_runtime::guard::refuse_overlaps(&given, &atm_runtime::guard::protected_roots())
     {
-        usage("refusing the real 2.x data root");
+        usage(&why);
     }
     let handoff = match (txn, install_root) {
         (Some(txn), Some(install_root)) => Some(Handoff { txn, install_root }),

@@ -177,7 +177,10 @@ impl ProgressWatch {
         }
     }
 
-    /// 接管等待：`ledger` 是同一 txn、同一进程（pid + 创建时间）记下的，就按它续算；否则从 `now` 重新开始。
+    /// 接管等待：`ledger` 是同一 txn、同一进程（pid + 创建时间）记下的，就按它续算。
+    /// 没有可信的 ledger（缺失、损坏、首次落盘之前中断、对不上本次进程）时，总预算从被等进程的创建时间算起：
+    /// 这个进程就是本次 START 拉起的，它的创建时间不晚于等待开始；不从接管时刻重新给满预算（W4i peer r1 P2-01）。
+    /// 无推进的窗口这时从接管时刻算（之前的推进时刻不知道）。
     /// 墙钟往回拨时按「还没过去」算（只会多等，不会提前判死）。
     pub fn resume(
         txn: &str,
@@ -188,14 +191,15 @@ impl ProgressWatch {
         now_ms: u64,
     ) -> ProgressWatch {
         let mut watch = ProgressWatch::new(txn, identity, policy, now);
-        let Some(ledger) = ledger.filter(|l| {
-            l.txn == txn && l.pid == identity.pid && l.process_created_at == identity.started_at_ms
-        }) else {
-            return watch;
-        };
         let back = |ms: u64| {
             now.checked_sub(Duration::from_millis(now_ms.saturating_sub(ms)))
                 .unwrap_or(now)
+        };
+        let Some(ledger) = ledger.filter(|l| {
+            l.txn == txn && l.pid == identity.pid && l.process_created_at == identity.started_at_ms
+        }) else {
+            watch.started = back(identity.started_at_ms);
+            return watch;
         };
         watch.started = back(ledger.started_ms);
         watch.changed_at = back(ledger.changed_ms.max(ledger.started_ms));
@@ -471,6 +475,41 @@ mod tests {
 
     const MIN: Duration = Duration::from_secs(60);
 
+    /// W4i peer r1 P2-01：没有可信的记账（缺失、损坏、首次落盘之前中断、对不上本次进程）时，总预算从被等进程的
+    /// 创建时间算起，不在接管时重新给满：3 h 前拉起、进度还在动的进程，接管后立刻到总上限。
+    #[test]
+    fn a_takeover_without_a_ledger_counts_from_the_host_creation() {
+        let t = Instant::now();
+        let policy = WaitPolicy::default();
+        let who = me();
+        let at = |d: Duration| who.started_at_ms + d.as_millis() as u64;
+        let moving = progress("T3", &who, "IMPORT", 9);
+        let foreign = WaitLedger {
+            txn: "T9".into(),
+            pid: who.pid,
+            process_created_at: who.started_at_ms,
+            started_ms: at(MIN * 179),
+            changed_ms: at(MIN * 179),
+            last: None,
+        };
+        for ledger in [None, Some(&foreign)] {
+            let mut old = ProgressWatch::resume("T3", &who, policy, ledger, t, at(MIN * 180));
+            assert!(
+                matches!(
+                    old.observe(t, false, true, Some(&moving)),
+                    WaitVerdict::TimedOut(_)
+                ),
+                "{ledger:?}"
+            );
+        }
+        // 刚拉起 1 min 的进程：接管后照常等。
+        let mut young = ProgressWatch::resume("T3", &who, policy, None, t, at(MIN));
+        assert_eq!(
+            young.observe(t, false, true, Some(&moving)),
+            WaitVerdict::Waiting
+        );
+    }
+
     /// F15：进度一直在推进，过了 60 s、过了 1 h 也接着等；最后见证成立才算成功。
     #[test]
     fn progress_keeps_setup_waiting_past_the_old_60_seconds() {
@@ -719,20 +758,27 @@ mod tests {
             WaitVerdict::TimedOut(_)
         ));
 
-        // 别的进程（pid 复用）、别的 txn 的记账不算：从头开始。
+        // 别的进程（pid 复用）、别的 txn 的记账不算：里面 8 min 没推进的记录不作数，总预算从本进程的创建时间算
+        // （W4i peer r1 P2-01）。本进程 1 min 前才创建，照常等。
+        let young = ProcessIdentity {
+            started_at_ms: ms(MIN * 8),
+            ..me()
+        };
+        let moved = progress("T2", &young, "VERIFY", 3);
         for other in [
             WaitLedger {
-                process_created_at: me().started_at_ms + 1,
+                process_created_at: young.started_at_ms + 1,
                 ..ledger.clone()
             },
             WaitLedger {
                 txn: "T1".into(),
+                process_created_at: young.started_at_ms,
                 ..ledger.clone()
             },
         ] {
-            let mut w = ProgressWatch::resume("T2", &me(), policy, Some(&other), t1, ms(MIN * 9));
+            let mut w = ProgressWatch::resume("T2", &young, policy, Some(&other), t1, ms(MIN * 9));
             assert_eq!(
-                w.observe(t1 + MIN * 2, false, true, Some(&p)),
+                w.observe(t1 + MIN * 2, false, true, Some(&moved)),
                 WaitVerdict::Waiting
             );
         }

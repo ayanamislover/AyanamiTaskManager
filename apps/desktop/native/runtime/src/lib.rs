@@ -9,6 +9,7 @@
 //! 转换与阻塞比较期间把进度写给 setup（[`progress::Reporter`]）；健康只认 SERVICE_HEALTHY 见证（[`entries`]）。
 
 pub mod entries;
+pub mod guard;
 pub mod progress;
 pub mod rng;
 pub mod secrets;
@@ -129,9 +130,13 @@ pub enum Background {
 }
 
 /// 入口开着。持有准入直到被丢弃。
+///
+/// 丢弃与 [`Serving::stop`] 走同一个有序关闭：先让后台比较不再动手并等它结束，再撤入口，最后才释放准入。
+/// 后台线程持有入口的引用，只丢掉 `JoinHandle` 不会让它停下（W4i peer r1 P1-02）。
 pub struct Serving {
-    _admission: Admission,
+    // 字段按声明顺序在 `drop` 体之后释放：准入放在最后一个。
     entries: Arc<Mutex<Option<entries::Entries>>>,
+    observe: Arc<dyn Fn(Event) + Send + Sync>,
     background: Option<mpsc::Receiver<Background>>,
     /// 后台比较线程与它的取消标志：停下时先让它不再动手，等它结束，再撤入口。
     compare: Option<(std::thread::JoinHandle<()>, Arc<AtomicBool>)>,
@@ -139,6 +144,7 @@ pub struct Serving {
     instance_id: String,
     lease_generation: u64,
     generation: String,
+    _admission: Admission,
 }
 
 /// 数据源冲突：入口一个都没开，持有准入，等用户在窗口里选（W5/W6 接界面）。
@@ -172,15 +178,32 @@ impl Serving {
         self.background.as_ref()?.recv_timeout(timeout).ok()
     }
 
-    /// 撤下入口（测试与正常退出用）。
+    /// 撤下入口（测试与正常退出用）。与丢弃一样，只是事件交给 `observe`。
     pub fn stop(mut self, observe: &(dyn Fn(Event) + Send + Sync)) {
+        self.shut_down(observe);
+    }
+
+    /// 后台比较不再动手、等它结束，再撤入口。做过一次之后再调什么也不做。
+    fn shut_down(&mut self, observe: &(dyn Fn(Event) + Send + Sync)) {
         if let Some((thread, cancel)) = self.compare.take() {
             cancel.store(true, Ordering::SeqCst);
             let _ = thread.join();
         }
-        if let Some(e) = self.entries.lock().unwrap().take() {
+        let taken = match self.entries.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(e) = taken {
             e.withdraw(observe);
         }
+    }
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let observe = self.observe.clone();
+        self.shut_down(&*observe);
+        // 之后字段依次释放，准入最后。
     }
 }
 
@@ -407,13 +430,14 @@ fn serve(
         rx
     });
     Ok(Started::Serving(Serving {
-        _admission: admission,
         entries,
+        observe: o.observe.clone(),
         background: receiver,
         compare: compare_thread,
         port,
         instance_id,
         lease_generation,
         generation: m.generation,
+        _admission: admission,
     }))
 }

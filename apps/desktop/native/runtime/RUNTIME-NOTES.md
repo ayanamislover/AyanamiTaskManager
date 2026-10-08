@@ -71,9 +71,27 @@ decide 循环（最多 8 圈）
 
 - 同步、派单与其余调度任务（W7）；冲突时它们本来就不起。
 - 可信界面里的选源（W5/W6）：`Conflicted` 持有准入，等用户选。
-- 旧版静止的进程映像判定：开发二进制只看 lease，正式宿主（W6）接入 setup 已有的判定。
+- 旧版静止的判定：开发二进制直接判静止（联调里旧根由用例控制），不做任何检查；正式宿主（W6）接入 setup 已有的判定。
 - 安装与回滚全流程、掉电（W8）。
 
 ## 验红
 
-`output/w4-evidence/mutations/mut-w4i.py`（runtime、jobs、store、state、http 五组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`。
+`output/w4-evidence/mutations/mut-w4i.py`（runtime、jobs、store、state、http 五组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`；
+第一轮评审的修订 `mut-w4i-r2.py`（runtime、state 两组），证据 `w4i-r2-*-mutation-evidence.json`。
+
+## W4i 第一轮评审（`output/peer-atm3-w4i-r1.md`）：CHANGES_REQUESTED
+
+绑定 c3ee68a。无 P0。正常交接、入口顺序、SERVICE_HEALTHY 唯一成功、源身份先拦、`/health` 免令牌与 10 s 等锁释放都被接受。
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| P1-01 | 开发二进制的真实根守卫可绕过：设了 `ATM3_DATA_DIR` 就不再保护默认 3.x 根；`\\?\` 扩展路径拼同一个根也放过；守卫只是字符串比较 | `guard`：受保护的根固定列出（2.x、3.x 默认数据根、默认安装根，以及 `ATM_DATA_DIR`、`AYANAMI_TASK_DATA_DIR`、`ATM3_DATA_DIR` 指向的根），覆盖不取消保护。比较真实位置：最近一个存在的祖先经 `canonicalize` 解开 junction、符号链接、扩展前缀与短名，再接上还不存在的部分；任一方向的包含都算重叠。`--n`、`--legacy`、`--install-root` 都查，彼此也不能重叠（N 落在 L 里，写 N 就动了源数据）。查在任何写入之前 |
+| P1-02 | 直接丢弃 `Serving`（不调 `stop`）先放掉准入，后台比较线程却还持有入口：第二个实例能起来，两个 `/health` 同时答 200 | `Serving` 实现 `Drop`，与 `stop` 走同一个有序关闭：后台比较不再动手、等它结束，再撤入口；准入是最后一个释放的字段。`Serving` 自己存一份 observe 供丢弃时用 |
+| P2-01 | 没有记账（setup 在首次落盘前退出、首次落盘失败、记账损坏）时，接管从接管时刻重新给满总预算 | 没有可信的记账时，总预算从被等进程的创建时间算（它就是本次 START 拉起的）；无推进的窗口从接管时刻算。记账写不下时报一次 `START_LEDGER_UNWRITABLE`，等待照常 |
+
+- 评审的其余意见：`/health` 的注释改成实际应答的字段；上面「不在 W4i」里开发二进制的静止判定写成实际的做法（直接判静止）。比较线程的取消只在比较返回后检查、`join` 没有单独的超时，这是响应性的边界：关闭会等比较做完。
+- **用例**：
+  - `tests/guard.rs::every_spelling_of_a_protected_root_is_refused_before_any_write`：合成的 LOCALAPPDATA 下十二种拼法（默认根、带覆盖、扩展路径、junction、根内、包含根、2.x 根当源、三个覆盖变量各自指向的根、N 在 L 里、默认安装根）都以退出码 2 拒绝，受保护的目录前后一样，也没有建出 N、L。正常的沙箱根能起来由 `tests/handoff.rs` 覆盖。
+  - `guard` 的单元用例：重叠的判定（大小写、两个方向、前缀不算）；解析保留不存在的末段、扩展前缀与普通写法解到同一处。
+  - `tests/boot.rs::dropping_a_serving_closes_everything_before_the_admission_goes`：后台比较卡住时直接丢弃，丢弃要等比较放开才返回；返回时旧 `/health` 不答、daemon.json 已撤、准入已放，下一个实例这时才起来。
+  - `install-state` 的 `startup::tests::a_takeover_without_a_ledger_counts_from_the_host_creation`（没有记账、对不上的记账：3 h 前拉起的进程接管后立刻到总上限；1 min 前拉起的照常等），`handoff::tests::an_unwritable_ledger_is_reported_once_and_the_wait_goes_on`。原用例「别的进程、别的 txn 的记账不算：从头开始」随之改为「记账不算，总预算从本进程的创建时间算」。

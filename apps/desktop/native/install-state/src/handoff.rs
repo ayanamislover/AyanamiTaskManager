@@ -51,11 +51,11 @@ fn read_ledger(path: &Path) -> Option<WaitLedger> {
     crate::read_json_limited(path, 64 * 1024).ok().flatten()
 }
 
-fn write_ledger(path: &Path, ledger: &WaitLedger) {
-    // 写不下只是让接管时少一段已用的预算记录；等待本身照常。
-    if let Ok(bytes) = serde_json::to_vec(ledger) {
-        let _ = crate::durable::write_atomic(path, &bytes);
-    }
+/// 落盘记账。写不下时返回原因：接管时总预算照样从进程的创建时间算（[`ProgressWatch::resume`]），
+/// 少记的只是最后一次推进的时刻，所以等待照常，由调用方报一次（W4i peer r1 P2-01）。
+fn write_ledger(path: &Path, ledger: &WaitLedger) -> Result<(), String> {
+    let bytes = serde_json::to_vec(ledger).map_err(|e| e.to_string())?;
+    crate::durable::write_atomic(path, &bytes).map_err(|e| e.to_string())
 }
 
 /// 等到 SERVICE_HEALTHY，或者判定失败。`say` 收进度与结论，给日志。
@@ -72,7 +72,20 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
         now_ms(),
     );
     let mut saved = watch.ledger(Instant::now(), now_ms());
-    write_ledger(a.ledger, &saved);
+    // 记账写不下只报一次：等待照常，接管时总预算从进程的创建时间算。
+    let mut unwritable = false;
+    let mut keep = |ledger: &WaitLedger, say: &mut dyn FnMut(String)| {
+        if let Err(e) = write_ledger(a.ledger, ledger)
+            && !unwritable
+        {
+            unwritable = true;
+            say(format!(
+                "START_LEDGER_UNWRITABLE: {} ({e}); a takeover counts the budget from the host's creation time",
+                a.ledger.display()
+            ));
+        }
+    };
+    keep(&saved, say);
     let mut last = String::new();
     let mut reported = String::new();
     loop {
@@ -106,7 +119,7 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
         );
         let ledger = watch.ledger(Instant::now(), now_ms());
         if ledger.last != saved.last {
-            write_ledger(a.ledger, &ledger);
+            keep(&ledger, say);
             saved = ledger;
         }
         match verdict {
@@ -128,6 +141,51 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W4i peer r1 P2-01：记账写不下（这里记账的路径是个目录）时明确报一次 `START_LEDGER_UNWRITABLE`，等待照常走到结论；
+    /// 接管时的总预算由 [`ProgressWatch::resume`] 从进程的创建时间算（见 startup 的用例）。
+    #[test]
+    fn an_unwritable_ledger_is_reported_once_and_the_wait_goes_on() {
+        let root = std::path::absolute(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target")
+                }),
+        )
+        .unwrap()
+        .join("install-state-unit")
+        .join("unwritable-ledger");
+        let _ = std::fs::remove_dir_all(&root);
+        let ledger = root.join("txn").join(LEDGER_FILE);
+        std::fs::create_dir_all(&ledger).unwrap();
+        let gone = ProcessIdentity {
+            pid: u32::MAX - 7,
+            started_at_ms: 1,
+            image: r"C:\nowhere\AyanamiTaskManager.exe".into(),
+        };
+        let mut said = Vec::new();
+        let result = await_healthy(
+            &Await {
+                health_dir: &root.join("health"),
+                legacy_runtime: &root.join("legacy-runtime"),
+                v3_root: &root.join("n"),
+                ledger: &ledger,
+                txn: "T1",
+                version: "3.0.0",
+                identity: &gone,
+                policy: WaitPolicy::default(),
+                poll: Duration::from_millis(10),
+            },
+            &mut |line| said.push(line),
+        );
+        assert!(result.unwrap_err().starts_with("START_HOST_EXITED"));
+        let warnings = said
+            .iter()
+            .filter(|l| l.starts_with("START_LEDGER_UNWRITABLE"))
+            .count();
+        assert_eq!(warnings, 1, "{said:?}");
+    }
 
     /// 3.x 的 lease 与 daemon.json 在新根（与桥读的是同一份）；更早的版本在 2.x 数据根。
     #[test]

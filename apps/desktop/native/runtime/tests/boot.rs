@@ -292,3 +292,60 @@ fn a_second_instance_is_refused() {
     ));
     s.stop(&|_| {});
 }
+
+/// W4i peer r1 P1-02：后台比较还没结束时直接丢弃 `Serving`（不调 `stop`，例如作用域退出、错误返回）。
+/// 丢弃要等比较线程结束、入口撤下之后才放掉准入：丢弃返回时旧的 `/health` 已经不答、daemon.json 已撤，
+/// 下一个实例这时才能起来，两个实例不会同时服务。
+#[test]
+fn dropping_a_serving_closes_everything_before_the_admission_goes() {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Instant;
+    let d = dir("boot-drop");
+    let (n, l) = (d.join("N"), d.join("L-missing"));
+    let mut o = options(&n, &l, &Events::default());
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    o.observe = Arc::new(move |e| {
+        if e == Event::BackgroundCompare {
+            let _ = entered_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30));
+        }
+    });
+    let Started::Serving(first) = atm_runtime::start(&o).unwrap() else {
+        panic!("expected serving");
+    };
+    entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let port = first.port();
+    assert_eq!(get(port, "/health").map(|r| r.0), Some(200));
+    let released_at = Arc::new(Mutex::new(None));
+    let mark = released_at.clone();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        *mark.lock().unwrap() = Some(Instant::now());
+        release_tx.send(()).unwrap();
+    });
+    drop(first);
+    let dropped_at = Instant::now();
+    releaser.join().unwrap();
+    let released = *released_at.lock().unwrap();
+    assert!(
+        released.is_some_and(|r| r <= dropped_at),
+        "the drop returned while the background compare still held the entries"
+    );
+    assert!(atm_install_state::startup::admission_released(&n));
+    assert_eq!(get(port, "/health"), None, "the old HTTP still answers");
+    assert!(!n.join("runtime").join("daemon.json").exists());
+
+    let Started::Serving(next) = atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()
+    else {
+        panic!("expected serving");
+    };
+    if next.port() != port {
+        assert_eq!(get(port, "/health"), None);
+    }
+    next.stop(&|_| {});
+}
