@@ -2056,44 +2056,93 @@ impl Service {
         capability::require(principal, Capability::SessionGitRefresh)?;
         let (p, s) = (project.to_owned(), session.to_owned());
         self.store()
-            .write(move |tx| {
-                let at = now().to_string();
-                let agent: Option<String> = tx
-                    .query_row(
-                        "SELECT agent_id FROM agent_sessions WHERE project_id = ?1 AND id = ?2",
-                        [&p, &s],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .map_err(db)?;
-                let Some(agent) = agent else {
-                    return Err(DomainError::new(
-                        ErrorCode::SESSION_NOT_FOUND,
-                        format!("项目里没有 session {s}"),
-                    )
-                    .detail("session_id", s.as_str()));
-                };
-                if !apply_git(tx, &p, &s, &git, &at)? {
-                    let seq: i64 = tx
-                        .query_row("SELECT project_seq FROM projects WHERE id = ?1", [&p], |r| r.get(0))
-                        .map_err(db)?;
-                    return Ok(json!({ "updated": false, "sequence": seq }));
-                }
-                let seq = system_event(
-                    tx,
-                    &p,
-                    "agent.git_context.updated",
-                    ("SYSTEM", "SYSTEM"),
-                    &s,
-                    &json!({
-                        "agentId": agent, "available": git.available, "branch": git.branch, "head": git.head,
-                        "worktreeRoot": git.worktree_root, "dirty": git.dirty, "error": git.error,
-                    }),
-                    None,
-                    &at,
-                )?;
-                Ok(json!({ "updated": true, "sequence": seq }))
-            })
+            .write(move |tx| store_git(tx, &p, &s, &git))
             .map_err(write_error)
     }
+
+    /// 写入之后刷新写入者自己的 git 上下文：2.x 在进度、verify、complete、end 之后都刷新（02 S-022、
+    /// X-05）；00 C-03 只要求重放时不刷新，由调用方判定。只认 Agent 刚刚写成功的那个 session（end 之后它已关闭，照样刷新）：
+    /// cwd 从 session 行读，`inspect` 在事务之外跑 git，再按 S-022 写入（无变化不写、不发事件）。
+    /// session id 跨项目重名（只可能来自导入）或没有 cwd 时什么都不做。返回是否有变化。
+    pub fn refresh_git_after_write(
+        &self,
+        principal: &Principal,
+        session: &str,
+        inspect: &dyn Fn(&str) -> GitContext,
+    ) -> Result<bool, DomainError> {
+        if principal.kind() != atm_domain::principal::PrincipalKind::Agent {
+            return Ok(false);
+        }
+        capability::require(principal, Capability::SessionRead)?;
+        let s = session.trim().to_owned();
+        let found: Vec<(String, Option<String>)> = {
+            let s = s.clone();
+            self.store()
+                .read(move |tx| {
+                    tx.prepare("SELECT project_id, cwd FROM agent_sessions WHERE id = ?1")?
+                        .query_map([&s], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect()
+                })
+                .map_err(read_error)?
+        };
+        let [(project, Some(cwd))] = found.as_slice() else {
+            return Ok(false);
+        };
+        if cwd.trim().is_empty() {
+            return Ok(false);
+        }
+        let git = inspect(cwd);
+        let p = project.clone();
+        self.store()
+            .write(move |tx| store_git(tx, &p, &s, &git))
+            .map(|v| v["updated"] == json!(true))
+            .map_err(write_error)
+    }
+}
+
+/// S-022：available 时用新值、否则保留旧值；没有变化不写、不发事件，有变化发 `agent.git_context.updated`。
+fn store_git(
+    tx: &Transaction<'_>,
+    p: &str,
+    s: &str,
+    git: &GitContext,
+) -> Result<Value, DomainError> {
+    let at = now().to_string();
+    let agent: Option<String> = tx
+        .query_row(
+            "SELECT agent_id FROM agent_sessions WHERE project_id = ?1 AND id = ?2",
+            [p, s],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db)?;
+    let Some(agent) = agent else {
+        return Err(DomainError::new(
+            ErrorCode::SESSION_NOT_FOUND,
+            format!("项目里没有 session {s}"),
+        )
+        .detail("session_id", s));
+    };
+    if !apply_git(tx, p, s, git, &at)? {
+        let seq: i64 = tx
+            .query_row("SELECT project_seq FROM projects WHERE id = ?1", [p], |r| {
+                r.get(0)
+            })
+            .map_err(db)?;
+        return Ok(json!({ "updated": false, "sequence": seq }));
+    }
+    let seq = system_event(
+        tx,
+        p,
+        "agent.git_context.updated",
+        ("SYSTEM", "SYSTEM"),
+        s,
+        &json!({
+            "agentId": agent, "available": git.available, "branch": git.branch, "head": git.head,
+            "worktreeRoot": git.worktree_root, "dirty": git.dirty, "error": git.error,
+        }),
+        None,
+        &at,
+    )?;
+    Ok(json!({ "updated": true, "sequence": seq }))
 }

@@ -697,3 +697,106 @@ fn review_request_and_submit_map_their_fields() {
     let got = task(&w, &parent);
     assert_eq!(got["checklist"][0]["status"], json!("DONE"), "{got}");
 }
+
+/// 写入之后按 session 的 cwd 重新观察 git（02 S-022、X-05；00 C-03）：进度、complete、end 之后刷新；
+/// start 不刷新；同一 op_id 的重放不刷新。
+#[test]
+fn writes_refresh_the_git_context_but_replays_do_not() {
+    let w = world("write-git-refresh");
+    let repo = w.dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=atm",
+                "-c",
+                "user.email=atm@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+    let begun = ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_begin",
+        json!({"agent_id": "claude-code", "cwd": repo.display().to_string(), "project": w.project}),
+    ))
+    .clone();
+    let session = begun["session"]
+        .as_str()
+        .or(begun["session"]["id"].as_str())
+        .unwrap()
+        .to_owned();
+    let branch = || -> Option<String> {
+        let s = session.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row(
+                    "SELECT git_branch FROM agent_sessions WHERE id = ?1",
+                    [&s],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(branch().as_deref(), Some("main"));
+
+    git(&["checkout", "-q", "-b", "feature"]);
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_task_patch",
+        json!({"session": session, "task_key": w.task, "operation": "start"}),
+    ));
+    assert_eq!(branch().as_deref(), Some("main"), "start 不刷新");
+    let progress =
+        json!({"session": session, "task_key": w.task, "summary": "换了分支", "op_id": "git-p1"});
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_progress_add",
+        progress.clone(),
+    ));
+    assert_eq!(branch().as_deref(), Some("feature"), "进度之后刷新");
+
+    git(&["checkout", "-q", "-b", "other"]);
+    let replay = ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_progress_add",
+        progress,
+    ))
+    .clone();
+    assert_eq!(replay["replayed"], json!(true), "{replay}");
+    assert_eq!(branch().as_deref(), Some("feature"), "重放不刷新");
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_task_patch",
+        json!({"session": session, "task_key": w.task, "operation": "complete", "evidence": ["测试"]}),
+    ));
+    assert_eq!(branch().as_deref(), Some("other"), "complete 之后刷新");
+
+    git(&["checkout", "-q", "-b", "last"]);
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_end",
+        json!({"session": session, "summary": "完成"}),
+    ));
+    assert_eq!(branch().as_deref(), Some("last"), "end 之后刷新");
+}

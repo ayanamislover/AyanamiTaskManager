@@ -129,6 +129,7 @@ impl Surface {
             )),
         };
         out.map(|mut ack| {
+            self.refresh_git(p, tool, a, &ack);
             if !normalized.is_empty()
                 && let Value::Object(m) = &mut ack
             {
@@ -140,6 +141,38 @@ impl Surface {
             let c = committed(&e);
             self.envelope(p, tool, a.0, e, c)
         })
+    }
+
+    /// 写入之后刷新写入者 session 的 git 上下文（2.x 的边界：进度、verify、complete、verify_and_complete、
+    /// end）。重放不刷新（00 C-03）。尽力而为：git 或刷新失败都不影响已经提交的写入。
+    fn refresh_git(&self, p: &Principal, tool: &Tool, a: &Args<'_>, ack: &Value) {
+        if ack["replayed"] == json!(true) {
+            return;
+        }
+        let refreshes = match tool.name {
+            "atm_progress_add" | "atm_end" => true,
+            "atm_task_patch" => {
+                let flat = a.get("operation").into_iter();
+                let items = a
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| i.get("operation"));
+                flat.chain(items).filter_map(Value::as_str).any(|op| {
+                    matches!(
+                        op.to_ascii_lowercase().as_str(),
+                        "verify" | "complete" | "verify_and_complete"
+                    )
+                })
+            }
+            _ => false,
+        };
+        if let (true, Some(session)) = (refreshes, ack["session"].as_str()) {
+            let _ = self
+                .svc
+                .refresh_git_after_write(p, session, &workspace::git_context);
+        }
     }
 
     /// 写入目标（A3 的逐字段补缺）：显式给的原样用，project 省略时按 session 推出，op_id 省略时签发。
