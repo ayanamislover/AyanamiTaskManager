@@ -995,13 +995,13 @@ pub(super) fn convert(
     if secrets.is_file() {
         let to = out.join("sync").join("secrets.dpapi.json");
         std::fs::create_dir_all(out.join("sync"))?;
-        std::fs::copy(&secrets, &to)?;
+        crate::progress::copy_path(&secrets, &to)?;
     }
     if !logs.finals.is_empty() {
         let dir = out.join("dispatch").join("logs");
         std::fs::create_dir_all(&dir)?;
         for (name, path, _) in &logs.finals {
-            std::fs::copy(path, dir.join(name))?;
+            crate::progress::copy_path(path, &dir.join(name))?;
         }
     }
     if !logs.orphans.is_empty() {

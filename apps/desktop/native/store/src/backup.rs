@@ -14,7 +14,7 @@ use crate::events::ulid;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
@@ -299,7 +299,7 @@ fn write_backup(
     drop(side);
     sync_file(&tmp)?;
     let db = dir.join(DB_FILE);
-    fs::rename(&tmp, &db)?;
+    atm_install_state::durable::rename(&tmp, &db, true)?;
     let (sha256, size_bytes) = hash_file(&db)?;
 
     let files = copy_tree_filtered(
@@ -724,14 +724,9 @@ fn sync_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 共用的持久化契约（[`atm_install_state::durable::write_atomic`]）：刷盘后 WRITE_THROUGH 地替换。
 pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
+    atm_install_state::durable::write_atomic(path, bytes)?;
     Ok(())
 }
 

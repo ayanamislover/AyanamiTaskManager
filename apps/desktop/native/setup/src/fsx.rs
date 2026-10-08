@@ -3,7 +3,7 @@
 //! and deletes that refuse to leave the install root.
 
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
@@ -11,8 +11,7 @@ use std::ptr::null_mut;
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, OPEN_EXISTING,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
@@ -28,37 +27,19 @@ fn last_error() -> io::Error {
     io::Error::last_os_error()
 }
 
-fn move_file(from: &Path, to: &Path, flags: u32) -> io::Result<()> {
-    if unsafe { MoveFileExW(wide(from).as_ptr(), wide(to).as_ptr(), flags) } == 0 {
-        return Err(last_error());
-    }
-    Ok(())
+/// Durable rename through the contract shared with the store
+/// ([`atm_install_state::durable::rename`]: MoveFileEx with WRITE_THROUGH, REPLACE_EXISTING only when
+/// asked, transient sharing violations retried).
+fn move_file(from: &Path, to: &Path, replace: bool) -> io::Result<()> {
+    atm_install_state::durable::rename(from, to, replace)
 }
 
 /// Temporary file in the same directory, flushed, then MoveFileEx(REPLACE_EXISTING |
 /// WRITE_THROUGH): a reader sees the complete old or the complete new content, never
-/// a torn file, and the rename is on disk when this returns.
+/// a torn file, and the rename is on disk when this returns. Shared with the store
+/// ([`atm_install_state::durable::write_atomic`]).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let dir = path.parent().ok_or_else(|| io::Error::other("no parent"))?;
-    fs::create_dir_all(dir)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::other("no file name"))?
-        .to_string_lossy();
-    let temporary = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    {
-        let mut file = File::create(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    move_file(
-        &temporary,
-        path,
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-    )
-    .inspect_err(|_| {
-        let _ = fs::remove_file(&temporary);
-    })
+    atm_install_state::durable::write_atomic(path, bytes)
 }
 
 pub fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> io::Result<()> {
@@ -91,7 +72,7 @@ pub fn move_path(from: &Path, to: &Path) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
-    move_file(from, to, MOVEFILE_WRITE_THROUGH)
+    move_file(from, to, false)
 }
 
 pub fn sha256_file(path: &Path) -> io::Result<String> {
@@ -381,10 +362,10 @@ pub fn replace_file(target: &Path, source: &Path) -> io::Result<Option<PathBuf>>
             candidate = target.with_file_name(format!("{name}.old{index}"));
             index += 1;
         }
-        move_file(target, &candidate, MOVEFILE_WRITE_THROUGH)?;
+        move_file(target, &candidate, false)?;
         aside = Some(candidate);
     }
-    move_file(&incoming, target, MOVEFILE_WRITE_THROUGH)?;
+    move_file(&incoming, target, false)?;
     Ok(aside)
 }
 
@@ -513,6 +494,27 @@ mod tests {
         assert!(remove_tree_within(&linked_root.join("project"), &linked_root).is_err());
         assert!(sentinel.is_file());
         fs::remove_dir(&linked_root).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// W3 peer r1 P2-04：setup 的整份替换与移动走与 store 共用的持久化契约（刷盘、WRITE_THROUGH，替换才带
+    /// REPLACE_EXISTING），不是各写各的 `fs::rename`。
+    #[test]
+    fn writes_and_moves_go_through_the_shared_contract() {
+        use atm_install_state::durable::{Op, record};
+        let dir = scratch("contract");
+        let target = dir.join("app.json");
+        let ((), ops) = record(|| {
+            write_atomic(&target, b"{}").unwrap();
+            move_path(&target, &dir.join("moved").join("app.json")).unwrap();
+        });
+        assert!(
+            matches!(&ops[..], [
+                Op::Move { to: a, flags: 0x9, .. },
+                Op::Move { to: b, flags: 0x8, .. },
+            ] if *a == target && *b == dir.join("moved").join("app.json")),
+            "{ops:?}"
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

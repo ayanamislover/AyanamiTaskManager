@@ -982,10 +982,10 @@ fn swap_in(
             }
             fs::create_dir_all(root.join(OLD_DIR))?;
             fault(db, SwapStep::MoveLiveAside)?;
-            fs::rename(&live, &old)?;
+            atm_install_state::durable::rename(&live, &old, false)?;
         }
         fault(db, SwapStep::MoveStagedIn)?;
-        fs::rename(staged, &live)?;
+        atm_install_state::durable::rename(staged, &live, false)?;
     }
     if old.exists() {
         fault(db, SwapStep::RemoveOld)?;

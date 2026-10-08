@@ -3304,6 +3304,84 @@ const REQUESTS: &str = r#"{
 }
 "#;
 
+/// W3 peer r1 P2-01：VERIFY 由源独立推出派生列，逐行核对。附件的 `local_path`（本项目附件目录里的改写成新根的相对路径，
+/// 目录外的原样）与 `project_paths.path_key`（运行时查询用的同一个函数）。目标里哪一列改错，只有对应的那一族失败。
+#[test]
+fn verify_checks_the_derived_paths() {
+    let (f, _root) = root_fixture("w4a-p201");
+    fs::create_dir_all(f.dir.join("out")).unwrap();
+    let report = convert(
+        &f.sources,
+        &f.target(),
+        &ConvertOptions {
+            at: "2026-10-03T00:00:00.000Z",
+            allow_real_data_root: false,
+            real_data_root: None,
+            generation: None,
+            secrets_check: None,
+            accept_unconvertible: &[],
+            origin_root: None,
+            progress: None,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.failures().is_empty(), "{:?}", report.failures());
+    let checked: Vec<&str> = report
+        .checks
+        .iter()
+        .map(|c| c.family.as_str())
+        .filter(|f| f.ends_with(".local_path") || f.ends_with(".path_key"))
+        .collect();
+    assert_eq!(
+        checked,
+        [
+            "r/project_paths.path_key",
+            "P1/artifacts.local_path",
+            "P2/artifacts.local_path",
+            "P3/artifacts.local_path"
+        ]
+    );
+    let clean = f.dir.join("out").join("clean.sqlite");
+    fs::copy(f.target(), &clean).unwrap();
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "an attachment inside the directory left unrewritten",
+            "UPDATE artifacts SET local_path = legacy_local_path WHERE project_id = 'P1' AND id = 'A1'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "an attachment rewritten to another file",
+            "UPDATE artifacts SET local_path = 'data/artifacts/P1/gone.txt' WHERE project_id = 'P1' AND id = 'A1'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "a missing attachment left unrewritten",
+            "UPDATE artifacts SET local_path = legacy_local_path WHERE project_id = 'P1' AND id = 'A2'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "an attachment outside the directory rewritten",
+            "UPDATE artifacts SET local_path = 'data/artifacts/P1/else.txt' WHERE project_id = 'P1' AND id = 'A3'",
+            "P1/artifacts.local_path",
+        ),
+        (
+            "a path key that keeps the case",
+            "UPDATE project_paths SET path_key = canonical_path || '/'",
+            "r/project_paths.path_key",
+        ),
+    ];
+    for (name, tamper, expected) in cases {
+        fs::copy(&clean, f.target()).unwrap();
+        let t = Connection::open(f.target()).unwrap();
+        assert_eq!(t.execute(tamper, []).unwrap(), 1, "{name}");
+        drop(t);
+        let failures = verify_converted(&f.target(), &f.sources, &report)
+            .unwrap()
+            .failures();
+        assert_eq!(failures, [*expected], "{name}");
+    }
+}
+
 /// W3b5：在数据根夹具上换上完整的 sync / dispatch 文件。
 fn json_fixture(name: &str) -> (Fixture, PathBuf) {
     let (f, root) = root_fixture(name);
@@ -5600,7 +5678,7 @@ mod w3f {
         let t0 = Instant::now();
         let watch = RefCell::new(ProgressWatch::new("T1", &me, WaitPolicy::default(), t0));
         let seen = RefCell::new(Vec::<(String, usize, usize)>::new());
-        let report = |phase: &str, done: usize, total: usize| {
+        let report = |phase: &str, done: usize, total: usize, work: u64| {
             let p = StartupProgress {
                 txn: "T1".into(),
                 pid: me.pid,
@@ -5610,15 +5688,16 @@ mod w3f {
                 progress: Counter {
                     done: done as u64,
                     total: total as u64,
+                    work,
                 },
                 updated_at: 0,
             };
             handover::write_progress(&n.root, &p).unwrap();
-            // setup 那边：读文件、判定。每条都是一分钟后读到的，一直在动就一直在等。
+            // setup 那边：读文件、判定。每条都是 10 s 后读到的，一直在动就一直在等。
             let read = handover::read_progress(&n.root).unwrap();
             let k = seen.borrow().len() as u32 + 1;
             let verdict = watch.borrow_mut().observe(
-                t0 + Duration::from_secs(60) * k,
+                t0 + Duration::from_secs(10) * k,
                 false,
                 true,
                 Some(&read),
@@ -6418,7 +6497,7 @@ mod fault_matrix {
     ) -> (cv::Result<cv::Manifest>, Vec<StartupProgress>) {
         let seen = std::cell::RefCell::new(Vec::new());
         let me = me();
-        let write = |phase: &str, done: usize, total: usize| {
+        let write = |phase: &str, done: usize, total: usize, work: u64| {
             let p = StartupProgress {
                 txn: txn.into(),
                 pid: me.pid,
@@ -6428,6 +6507,7 @@ mod fault_matrix {
                 progress: Counter {
                     done: done as u64,
                     total: total as u64,
+                    work,
                 },
                 updated_at: 0,
             };
@@ -6447,21 +6527,386 @@ mod fault_matrix {
         let n = layout(&f, "n");
         let (r, seen) = converting(&n, &root, "T15", None);
         r.unwrap();
+        let first = &seen[0];
+        assert_eq!(
+            (first.phase.as_str(), first.progress),
+            (
+                "SNAPSHOT",
+                Counter {
+                    done: 0,
+                    total: 0,
+                    work: 0
+                }
+            )
+        );
         let t0 = Instant::now();
         let mut watch = ProgressWatch::new("T15", &me(), WaitPolicy::default(), t0);
+        assert_eq!(
+            watch.observe(t0 + Duration::from_secs(1), false, true, Some(first)),
+            WaitVerdict::Waiting
+        );
+        let step = Duration::from_secs(100 * 60) / seen.len() as u32;
         for (i, p) in seen.iter().enumerate() {
-            let now = t0 + Duration::from_secs(90) * (i as u32 + 1);
+            let now = t0 + Duration::from_secs(1) + step * (i as u32 + 1);
             assert_eq!(
                 watch.observe(now, false, true, Some(p)),
                 WaitVerdict::Waiting,
                 "{p:?}"
             );
         }
-        let later = t0 + Duration::from_secs(90) * (seen.len() as u32 + 1);
+        let later = t0 + Duration::from_secs(1) + step * (seen.len() as u32 + 1);
         assert_eq!(
             watch.observe(later, true, true, seen.last()),
             WaitVerdict::Healthy
         );
+        assert_eq!(tree(&root), before);
+    }
+
+    /// W3 peer r1 P2-03：首条进度在枚举之前。根里有未登记的条目，枚举（正式的扫描）会拒绝；拒绝之前
+    /// setup 已经收到了 SNAPSHOT 0/0。
+    #[test]
+    fn the_first_progress_comes_before_enumeration() {
+        let (f, root) = json_fixture("w4a-first-progress");
+        put(&root.join("projects/P1/project.sqlite.by-hand.bak"), b"x");
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T-FIRST", None);
+        match r {
+            Err(e) => assert!(e.to_string().contains("by-hand.bak"), "{e}"),
+            Ok(m) => panic!("{m:?}"),
+        }
+        let got: Vec<(&str, Counter)> = seen
+            .iter()
+            .map(|p| (p.phase.as_str(), p.progress))
+            .collect();
+        assert_eq!(
+            got,
+            [(
+                "SNAPSHOT",
+                Counter {
+                    done: 0,
+                    total: 0,
+                    work: 0
+                }
+            )]
+        );
+    }
+
+    /// W3 peer r1 P2-03：一个大项目（30 万条进度）的 IMPORT 与 VERIFY 里，done / total 长时间不变，工作量一直在涨。
+    /// 确定性时间：假设每个工作批次都要 9 min（慢盘），setup 照样一直在等；只要有一段 10 min 没有新的批次就会判卡住。
+    #[test]
+    fn a_large_project_keeps_the_work_moving() {
+        let (f, root) = json_fixture("w4a-large");
+        Connection::open(root.join("projects/P1/project.sqlite"))
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+                 INSERT INTO progress_updates (id, work_item_id, summary, summary_hash, actor, created_at)
+                 SELECT printf('PUB%06d', i), 'W1', 'bulk', 'h', 'claude', '{T}' FROM n;"
+            ))
+            .unwrap();
+        let n = layout(&f, "n");
+        let (r, seen) = converting(&n, &root, "T-LARGE", None);
+        r.unwrap();
+        // 同一个 (阶段, 已完成, 总数) 里有多少个不同的工作量：大项目所在的那一格至少有 5 个批次。
+        for phase in ["IMPORT", "VERIFY"] {
+            let mut most = 0;
+            for p in seen.iter().filter(|p| p.phase == phase) {
+                let same = seen
+                    .iter()
+                    .filter(|q| {
+                        q.phase == p.phase
+                            && q.progress.done == p.progress.done
+                            && q.progress.total == p.progress.total
+                    })
+                    .count();
+                most = most.max(same);
+            }
+            assert!(most >= 5, "{phase}: {most}");
+        }
+        let policy = WaitPolicy {
+            cap: Duration::from_secs(1_000 * 3600),
+            ..WaitPolicy::default()
+        };
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T-LARGE", &me(), policy, t0);
+        for (i, p) in seen.iter().enumerate() {
+            let now = t0 + Duration::from_secs(9 * 60) * (i as u32 + 1);
+            assert_eq!(
+                watch.observe(now, false, true, Some(p)),
+                WaitVerdict::Waiting,
+                "{p:?}"
+            );
+        }
+        let last = t0 + Duration::from_secs(9 * 60) * seen.len() as u32;
+        assert!(matches!(
+            watch.observe(last + Duration::from_secs(600), false, true, seen.last()),
+            WaitVerdict::Stuck(_)
+        ));
+    }
+
+    /// W3 peer r1 P2-04：发布走共用的持久化契约。发布物里的每个文件（库、复制来的附件、日志、密文）都先刷盘，
+    /// 之后才把 staging 的 data 不替换地改名成 `N\data`（WRITE_THROUGH）；`M` 与 `A` 都是刷盘后替换地改名
+    /// （REPLACE_EXISTING | WRITE_THROUGH），而且 `A` 在发布物改名与 `M = PUBLISHED` 之后。
+    #[test]
+    fn publishing_flushes_every_file_then_moves_through_the_shared_contract() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-durable");
+        let n = layout(&f, "n");
+        let (m, ops) = durable::record(|| run(&n, &root, G1, None));
+        m.unwrap();
+        let staged = n.staging(G1).join("data");
+        let publish = ops
+            .iter()
+            .position(
+                |op| matches!(op, Op::Move { from, to, .. } if *from == staged && *to == n.data()),
+            )
+            .unwrap_or_else(|| panic!("{ops:?}"));
+        assert!(matches!(&ops[publish], Op::Move { flags: 0x8, .. }));
+        let mut published: Vec<PathBuf> = Vec::new();
+        let mut stack = vec![n.data()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    published.push(staged.join(p.strip_prefix(n.data()).unwrap()));
+                }
+            }
+        }
+        assert!(published.len() > 3, "{published:?}");
+        for file in &published {
+            let synced = ops[..publish]
+                .iter()
+                .any(|op| matches!(op, Op::Sync(p) if p == file));
+            assert!(
+                synced,
+                "{} was not flushed before publishing",
+                file.display()
+            );
+        }
+        let after: Vec<&PathBuf> = ops[publish + 1..]
+            .iter()
+            .map(|op| match op {
+                Op::Move { to, flags: 0x9, .. } => to,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(after, [&n.manifest(), &n.authority()]);
+        assert!(
+            ops[..publish]
+                .iter()
+                .any(|op| matches!(op, Op::Move { to, flags: 0x9, .. } if *to == n.manifest()))
+        );
+    }
+
+    // ---------------- W3 peer r1 P2-05：确定性的故障注入
+
+    /// 一次干净的转换：每条进度 (阶段, 已完成, 总数, 工作量) 与它的 `M`。
+    fn ticks(f: &Fixture, root: &Path) -> (Vec<(String, usize, usize, u64)>, cv::Manifest) {
+        let n = layout(f, "ticks");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let rec =
+            |s: &str, d: usize, t: usize, w: u64| seen.borrow_mut().push((s.to_string(), d, t, w));
+        let m = run_with(&n, root, G1, &mut |_| true, Some(&rec)).unwrap();
+        (seen.into_inner(), m)
+    }
+
+    fn phase_on_disk(n: &Layout) -> Phase {
+        match cv::read_manifest(n) {
+            cv::ManifestState::Present(m) => m.phase,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 被杀或失败之后，下次启动按 S3 重来：丢掉这次尝试、换 generation 重转，业务结果与干净的一次相同，`L` 没动。
+    fn restarts_cleanly(
+        n: &Layout,
+        root: &Path,
+        clean: &cv::Manifest,
+        before: &[(String, String)],
+    ) {
+        assert_eq!(
+            cv::decide(n, true),
+            Startup::Restart {
+                generation: G1.into()
+            }
+        );
+        cv::discard_attempt(n, G1).unwrap();
+        let m = run(n, root, G2, None).unwrap();
+        assert_eq!(m.phase, Phase::Published);
+        assert_eq!(m.business_digest, clean.business_digest);
+        assert_eq!(tree(root), before);
+    }
+
+    /// 复制到一半被杀：staging 里只有一部分副本（再把其中一份截成半截，模拟写到一半）。`M` 停在 SNAPSHOT，不是 FAILED。
+    #[test]
+    fn a_copy_killed_halfway_restarts() {
+        let (f, root) = json_fixture("w4a-copy-killed");
+        let before = tree(&root);
+        let (seen, clean) = ticks(&f, &root);
+        let total = clean.source_files.len();
+        let (.., at) = seen
+            .iter()
+            .find(|(s, d, t, _)| s == "SNAPSHOT" && *t == total && *d == total / 2)
+            .unwrap()
+            .clone();
+        let n = layout(&f, "n");
+        let r = atm_store::progress::stop_at(at + 1, || run(&n, &root, G1, None));
+        assert!(matches!(r, Err(cv::Error::Interrupted(_))), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Snapshot);
+        let copied: Vec<(String, String)> = tree(&n.staging(G1).join("src"));
+        assert!(
+            !copied.is_empty() && copied.len() < total,
+            "{} of {total}",
+            copied.len()
+        );
+        let torn = n.staging(G1).join("src").join(&copied[0].0);
+        let bytes = fs::read(&torn).unwrap();
+        fs::write(&torn, &bytes[..bytes.len() / 2]).unwrap();
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 事务做到一半被杀：一个大项目（30 万条进度）正在 IMPORT，SQLite 的语句被中断。`M` 停在 IMPORT，不是 FAILED。
+    #[test]
+    fn an_import_killed_mid_transaction_restarts() {
+        let (f, root) = json_fixture("w4a-import-killed");
+        Connection::open(root.join("projects/P1/project.sqlite"))
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+                 INSERT INTO progress_updates (id, work_item_id, summary, summary_hash, actor, created_at)
+                 SELECT printf('PUB%06d', i), 'W1', 'bulk', 'h', 'claude', '{T}' FROM n;"
+            ))
+            .unwrap();
+        let before = tree(&root);
+        let (seen, clean) = ticks(&f, &root);
+        // IMPORT 的阶段上报（工作量不变的那几条）把工作批次切成段：第一段是复制源库、补迁移，
+        // 第二次报「0/n」之后到「1/n」之前是第一个项目（大项目 P1）的导入事务。停在这一段中间。
+        let mut segments: Vec<(usize, Vec<u64>)> = Vec::new();
+        let mut last_work = None;
+        for (stage, done, _, work) in &seen {
+            if stage == "IMPORT" {
+                if last_work == Some(*work) {
+                    segments.push((*done, Vec::new()));
+                } else if let Some((_, seg)) = segments.last_mut() {
+                    seg.push(*work);
+                }
+            }
+            last_work = Some(*work);
+        }
+        let busy = segments
+            .into_iter()
+            .filter(|(done, _)| *done == 0)
+            .map(|(_, seg)| seg)
+            .nth(1)
+            .unwrap();
+        assert!(busy.len() >= 3, "{busy:?}");
+        let n = layout(&f, "n");
+        let r = atm_store::progress::stop_at(busy[busy.len() / 2], || run(&n, &root, G1, None));
+        assert!(matches!(r, Err(cv::Error::Interrupted(_))), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Import);
+        // 停在大项目的事务中间：那 30 万条一条都没提交。
+        let target = n.staging(G1).join("data").join("atm.sqlite");
+        let imported: i64 = q(
+            &Connection::open(&target).unwrap(),
+            "SELECT count(*) FROM progress_updates WHERE id LIKE 'PUB%'",
+        );
+        assert_eq!(imported, 0);
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 磁盘满：从发布前的逐个刷盘开始，每一次写都失败（112），连 FAILED 也写不下。
+    /// `M` 留着最后一份完整的（VERIFY），下次按 S3 安全重来。
+    #[test]
+    fn a_full_disk_keeps_the_last_good_manifest() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-disk-full");
+        let before = tree(&root);
+        let (_, clean) = ticks(&f, &root);
+        let n = layout(&f, "n");
+        let full = std::rc::Rc::new(std::cell::Cell::new(false));
+        let armed = full.clone();
+        let r = durable::inject(
+            Box::new(move |op| {
+                if matches!(op, Op::Sync(_)) {
+                    armed.set(true);
+                }
+                armed.get().then(|| std::io::Error::from_raw_os_error(112))
+            }),
+            || run(&n, &root, G1, None),
+        );
+        // 停在发布前的刷盘：报出来的是刷盘失败，不是之后写 M 失败（刷盘的错误不能被吞掉）。
+        match &r {
+            Err(e) => assert!(e.to_string().contains("flush"), "{e}"),
+            Ok(m) => panic!("{m:?}"),
+        }
+        assert!(full.get());
+        assert_eq!(phase_on_disk(&n), Phase::Verify);
+        assert!(!n.data().exists());
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// PUBLISHING 里改名本身失败（不是被杀）：`M` 留在 PUBLISHING、不记 FAILED，发布物没到位，下次按 S3 重来。
+    #[test]
+    fn a_failed_publishing_rename_restarts() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-rename-fails");
+        let before = tree(&root);
+        let (_, clean) = ticks(&f, &root);
+        let n = layout(&f, "n");
+        let data = n.data();
+        let r = durable::inject(
+            Box::new(move |op| {
+                matches!(op, Op::Move { to, .. } if *to == data)
+                    .then(|| std::io::Error::from_raw_os_error(17))
+            }),
+            || run(&n, &root, G1, None),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Publishing);
+        assert!(!n.data().exists());
+        restarts_cleanly(&n, &root, &clean, &before);
+    }
+
+    /// 发布物已经改名到位，之后写 `M = PUBLISHED` 失败（不是被杀）：`M` 留在 PUBLISHING，下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+    #[test]
+    fn a_failure_after_the_publishing_rename_finishes_later() {
+        use atm_install_state::durable::{self, Op};
+        let (f, root) = json_fixture("w4a-after-rename");
+        let before = tree(&root);
+        let n = layout(&f, "n");
+        let (data, manifest) = (n.data(), n.manifest());
+        let moved = std::rc::Rc::new(std::cell::Cell::new(false));
+        let r = durable::inject(
+            Box::new(move |op| match op {
+                Op::Move { to, .. } if *to == data => {
+                    moved.set(true);
+                    None
+                }
+                Op::Move { to, .. } if *to == manifest && moved.get() => {
+                    Some(std::io::Error::from_raw_os_error(112))
+                }
+                _ => None,
+            }),
+            || run(&n, &root, G1, None),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert_eq!(phase_on_disk(&n), Phase::Publishing);
+        assert!(n.data().is_dir());
+        assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+        assert_eq!(
+            cv::decide(&n, true),
+            Startup::FinishPublishing {
+                generation: G1.into()
+            }
+        );
+        let m = cv::finish_publishing(&n, AT).unwrap();
+        assert_eq!(m.phase, Phase::Published);
+        assert!(
+            matches!(cv::read_authority(&n), AuthorityState::Present(a) if a.authority == "v3")
+        );
+        assert!(matches!(cv::decide(&n, true), Startup::Published(_)));
         assert_eq!(tree(&root), before);
     }
 
@@ -7194,5 +7639,744 @@ mod w3_peer_r1 {
             ),
             "edited, still unconvertible"
         );
+    }
+
+    /// W3 peer r2 P2-06：舍弃许可绑定的是库的内容，不是存储。转换时库开着 WAL、写入还在 WAL 里；
+    /// 之后 checkpoint、关库、SHM 重建、VACUUM、ANALYZE、改回 DELETE 日志都是「没变」。
+    /// 反过来：只在 WAL 里的业务写入、附件变化都是「变了」；把业务内容改回去又是「没变」。
+    #[test]
+    fn a_dropped_database_is_compared_by_content_not_storage() {
+        let (f, root) = settle_fixture("w3-p206-storage");
+        let path = root.join("projects/P7/project.sqlite");
+        empty_project(&path, "P7", "XXX", 10, Some("unconvertible old data"));
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             UPDATE objectives SET title = 'written into the WAL';",
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(path.with_extension("sqlite-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+        let n = layout(&f, "n");
+        let m = run_dropping(&n, &root, G1).unwrap();
+        let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        let unchanged = |step: &str| {
+            let r = compare();
+            assert!(matches!(r, Comparison::Unchanged(_)), "{step}: {r:?}");
+        };
+        let changed = |step: &str| match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"], "{step}"),
+            other => panic!("{step}: {other:?}"),
+        };
+        unchanged("baseline");
+        c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        unchanged("checkpoint");
+        drop(c);
+        assert!(!path.with_extension("sqlite-wal").exists());
+        unchanged("close");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("SELECT count(*) FROM objectives;")
+            .unwrap();
+        unchanged("shm rebuilt");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("VACUUM;")
+            .unwrap();
+        unchanged("vacuum");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("ANALYZE; PRAGMA optimize;")
+            .unwrap();
+        unchanged("analyze");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("PRAGMA journal_mode = DELETE;")
+            .unwrap();
+        unchanged("journal mode");
+        put(
+            &root.join("projects/P7/PROJECT.SQLITE-SHM.tmp"),
+            b"someone else's",
+        );
+        unchanged("another program's index residue");
+        fs::remove_file(root.join("projects/P7/PROJECT.SQLITE-SHM.tmp")).unwrap();
+
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             UPDATE objectives SET title = 'only in the WAL';",
+        )
+        .unwrap();
+        changed("a write still in the WAL");
+        c.execute_batch("UPDATE objectives SET title = 'written into the WAL';")
+            .unwrap();
+        unchanged("written back");
+        drop(c);
+        put(&root.join("projects/P7/artifacts/new.txt"), b"attachment");
+        changed("an attachment");
+    }
+
+    /// 直接按数据根转换（不经快照，`legacy::convert` 的公开用法）时，舍弃项目目录里的 -shm 与别的程序的
+    /// `-SHM.tmp` 也不算进摘要。
+    #[test]
+    fn a_direct_conversion_ignores_the_wal_index_of_a_dropped_database() {
+        let (f, root) = settle_fixture("w3-p206-direct");
+        let path = root.join("projects/P7/project.sqlite");
+        empty_project(&path, "P7", "XXX", 10, Some("unconvertible old data"));
+        let digest = || {
+            f.convert_accepting(Some(secrets_ok), &["GGG"])
+                .unwrap()
+                .business_digest()["dropped/P7"]
+                .clone()
+        };
+        let plain = digest();
+        put(&path.with_extension("sqlite-shm"), &[0u8; 32768]);
+        put(&root.join("projects/P7/PROJECT.SQLITE-SHM.tmp"), b"x");
+        assert_eq!(digest(), plain);
+    }
+
+    /// W3 peer r2 P2-06：打不开的库绑定原始字节（库与非空的 -wal）：任何字节变化都是「变了」，
+    /// 只有 -shm（WAL 的索引）不算。
+    #[test]
+    fn an_unreadable_dropped_database_is_bound_to_its_bytes() {
+        let (f, root) = settle_fixture("w3-p206-raw");
+        let path = root.join("projects/P7/project.sqlite");
+        let mut bytes = b"SQLite format 3\0".to_vec();
+        bytes.extend([0xA5u8; 200]);
+        put(&path, &bytes);
+        let wal = path.with_extension("sqlite-wal");
+        put(&wal, b"frames-1");
+        let n = layout(&f, "n");
+        let m = run_dropping(&n, &root, G1).unwrap();
+        let compare = || cv::compare(&n, &m, &m.business_digest, &opts(&root));
+        let changed = |step: &str| match compare() {
+            Comparison::Changed { families, .. } => assert_eq!(families, ["dropped/P7"], "{step}"),
+            other => panic!("{step}: {other:?}"),
+        };
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        put(&path.with_extension("sqlite-shm"), b"index");
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        // WAL 的内容是绑定的一部分：同样有 -wal，字节变了就是「变了」；没了也是。
+        put(&wal, b"frames-2");
+        changed("other frames");
+        fs::remove_file(&wal).unwrap();
+        changed("no WAL");
+        put(&wal, b"frames-1");
+        assert!(matches!(compare(), Comparison::Unchanged(_)));
+        bytes[100] ^= 1;
+        put(&path, &bytes);
+        changed("a byte of the database");
+    }
+}
+
+/// W3 r2（peer 反例并入正式套件）：dry-run 期间把目录换成指向 `L` 或 `N` 的 junction。
+mod w3_peer_r2 {
+    use super::*;
+    use atm_store::conversion::{self as cv, DryRun, DryRunOptions, Quiesce};
+
+    fn junction(alias: &Path, target: &Path) {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(alias)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J {}", alias.display());
+    }
+
+    /// 目录集合（相对路径；链接本身记成 `-> link`，不进入）。
+    fn dirs(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in fs::read_dir(&d).unwrap() {
+                let e = e.unwrap();
+                let p = e.path();
+                let rel = p
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let kind = e.file_type().unwrap();
+                if kind.is_symlink() {
+                    out.push(format!("{rel} -> link"));
+                } else if kind.is_dir() {
+                    out.push(rel);
+                    stack.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// 内容（每个文件的 sha256）与目录集合。
+    fn state(dir: &Path) -> (Vec<(String, String)>, Vec<String>) {
+        let mut files = tree(dir);
+        files.sort();
+        (files, dirs(dir))
+    }
+
+    fn dry(
+        root: &Path,
+        out: &Path,
+        n: &Path,
+        quiesce: &mut dyn FnMut() -> Quiesce,
+        after_copy: &mut dyn FnMut(),
+    ) -> cv::Result<DryRun> {
+        cv::dry_run(DryRunOptions {
+            at: AT,
+            source: root,
+            out,
+            v3_root: Some(n),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce,
+            after_copy,
+        })
+    }
+
+    /// 一个夹具：`L`（json 数据根）与一个有内容的 `N`（含 `data/`），两个根各自的初始状态。
+    fn roots(name: &str) -> (Fixture, PathBuf, PathBuf) {
+        let (f, root) = json_fixture(name);
+        let n = f.dir.join("protected-n");
+        put(&n.join("keep.txt"), b"existing N");
+        put(
+            &n.join("data/existing-business.txt"),
+            b"existing published business data",
+        );
+        (f, root, n)
+    }
+
+    /// 反例一及其变体：静止判定（quiesce）里把输出目录的父目录、更上层的缺失祖先、输出目录自己换成指向
+    /// `N` 或 `L` 的 junction，或者在空的输出目录里放进指向它们的 junction。dry-run 按钉住时的真实位置
+    /// 再查一次，一律拒绝；两个根的内容与目录集合都不变，也没有在里面建出任何目录。
+    #[test]
+    fn a_swap_before_pinning_is_refused() {
+        let (f, root, n) = roots("w3r2-swap-before");
+        let before = (state(&root), state(&n));
+        for (label, target, why) in [
+            ("n", n.clone(), "overlaps the 3.0 data root"),
+            ("l", root.clone(), "overlaps the 2.x data root"),
+        ] {
+            // 父目录存在、输出目录不存在：父目录被换。
+            let parent = f.dir.join(format!("out-parent-{label}"));
+            fs::create_dir(&parent).unwrap();
+            let parked = f.dir.join(format!("parked-parent-{label}"));
+            let result = dry(
+                &root,
+                &parent.join("dry-result"),
+                &n,
+                &mut || {
+                    fs::rename(&parent, &parked).unwrap();
+                    junction(&parent, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            let created = target.join("dry-result").exists();
+            fs::remove_dir(&parent).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} parent: {result:?}"
+            );
+            assert!(!created, "{label}: created a directory inside the root");
+
+            // 好几层都不存在：最上面那一层被放成 junction。
+            let gone = f.dir.join(format!("gone-{label}"));
+            let result = dry(
+                &root,
+                &gone.join("deep").join("dry"),
+                &n,
+                &mut || {
+                    junction(&gone, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            let created = target.join("deep").exists();
+            fs::remove_dir(&gone).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} missing ancestor: {result:?}"
+            );
+            assert!(!created, "{label}: created a directory inside the root");
+
+            // 输出目录已存在且是空的：它自己被换。
+            let out = f.dir.join(format!("empty-out-{label}"));
+            fs::create_dir(&out).unwrap();
+            let parked = f.dir.join(format!("parked-out-{label}"));
+            let result = dry(
+                &root,
+                &out,
+                &n,
+                &mut || {
+                    fs::rename(&out, &parked).unwrap();
+                    junction(&out, &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            fs::remove_dir(&out).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains(why)),
+                "{label} out itself: {result:?}"
+            );
+
+            // 空的输出目录里被放进一个指向根的 `src`。
+            fs::rename(&parked, &out).unwrap();
+            let result = dry(
+                &root,
+                &out,
+                &n,
+                &mut || {
+                    junction(&out.join("src"), &target);
+                    Quiesce::Quiet
+                },
+                &mut || {},
+            );
+            fs::remove_dir(out.join("src")).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Refused(r)) if r.contains("is not empty")),
+                "{label} planted src: {result:?}"
+            );
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+        // 阳性对照：没人动手时照常成功。
+        let out = f.dir.join("out-parent-n").join("dry-result");
+        let fine = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {}).unwrap();
+        assert!(matches!(fine, DryRun::Verified { .. }), "{fine:?}");
+        assert!(out.join("report.json").is_file());
+        assert_eq!((state(&root), state(&n)), before);
+    }
+
+    /// 反例二及其变体：复制之后（after_copy）把输出目录的父目录、输出目录自己、`src` 与 `src` 下的目录改名，
+    /// 再在原处放上指向 `N` 或 `L` 的 junction。钉住的目录改不了名，所以一个都换不成；dry-run 照常完成，
+    /// 报告写在原来的输出目录里，清理只删本次建的 `src` 与 `data`，两个根的内容与目录集合都不变。
+    #[test]
+    fn pinned_directories_cannot_be_swapped_mid_run() {
+        let (f, root, n) = roots("w3r2-swap-mid");
+        let before = (state(&root), state(&n));
+        for (label, target) in [("n", n.clone()), ("l", root.clone())] {
+            let parent = f.dir.join(format!("outer-{label}"));
+            let out = parent.join("dry");
+            let victims = [
+                parent.clone(),
+                out.clone(),
+                out.join("src"),
+                out.join("src").join("dispatch"),
+                out.join("src").join("dispatch").join("logs"),
+            ];
+            let mut swapped = Vec::new();
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                for (i, victim) in victims.iter().enumerate() {
+                    assert!(victim.is_dir(), "{} should exist by now", victim.display());
+                    let parked = f.dir.join(format!("parked-{label}-{i}"));
+                    if fs::rename(victim, &parked).is_ok() {
+                        junction(victim, &target);
+                        swapped.push(victim.clone());
+                    }
+                }
+            });
+            for victim in &swapped {
+                let _ = fs::remove_dir(victim);
+            }
+            assert!(swapped.is_empty(), "{label}: swapped {swapped:?}");
+            assert!(
+                matches!(result, Ok(DryRun::Verified { .. })),
+                "{label}: {result:?}"
+            );
+            assert!(out.join("report.json").is_file());
+            assert!(!out.join("src").exists() && !out.join("data").exists());
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+    }
+
+    /// `data` 的名字在建之前被占成指向根的 junction：排他新建失败，不经它写入；`src` 照样清掉，
+    /// junction 只是留着（不是本次建的），根不变。
+    #[test]
+    fn a_planted_data_name_fails_closed() {
+        let (f, root, n) = roots("w3r2-planted-data");
+        let before = (state(&root), state(&n));
+        for (label, target) in [("n", n.clone()), ("l", root.clone())] {
+            let out = f.dir.join(format!("out-{label}"));
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                junction(&out.join("data"), &target)
+            });
+            let report = out.join("report.json").exists();
+            let src = out.join("src").exists();
+            fs::remove_dir(out.join("data")).unwrap();
+            assert!(
+                matches!(&result, Err(cv::Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists),
+                "{label}: {result:?}"
+            );
+            assert!(!report && !src, "{label}: report {report}, src {src}");
+            assert_eq!((state(&root), state(&n)), before, "{label}");
+        }
+    }
+
+    /// 报告的临时文件名被占成指向 `N` 里文件的硬链接：排他新建失败，不经硬链接写进 `N`。
+    #[test]
+    fn a_planted_report_name_fails_closed() {
+        let (f, root, n) = roots("w3r2-planted-report");
+        let before = (state(&root), state(&n));
+        let out = f.dir.join("out");
+        let temporary = out.join(format!("report.json.{}.tmp", std::process::id()));
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            fs::hard_link(n.join("keep.txt"), &temporary).unwrap()
+        });
+        fs::remove_file(&temporary).unwrap();
+        assert!(
+            matches!(&result, Err(cv::Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "{result:?}"
+        );
+        assert!(!out.join("report.json").exists());
+        assert!(!out.join("src").exists() && !out.join("data").exists());
+        assert_eq!((state(&root), state(&n)), before);
+    }
+
+    /// W3 r4 P2-R4-01：一份副本被别的程序一直开着（不共享删除），清理退避重试之后把它与它的祖先原样留下，
+    /// `left` 写出的是那个文件；放开之后照常能删。
+    #[test]
+    fn a_busy_copy_is_left_and_named() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (f, root, n) = roots("w3r4-busy");
+        let out = f.dir.join("out");
+        let copy = out.join("src").join("dispatch").join("config.json");
+        let mut holder: Option<fs::File> = None;
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            holder = Some(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(&copy)
+                    .unwrap(),
+            );
+        });
+        let Err(cv::Error::CleanupIncomplete { left, outcome }) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(outcome.contains("Verified"), "{outcome}");
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("config.json"), "{left:?}");
+        assert!(copy.is_file() && out.join("src").is_dir());
+        drop(holder);
+        fs::remove_dir_all(out.join("src")).unwrap();
+    }
+
+    /// W3 r4 P2-R4-01：杀毒、索引这类短暂占用不算「留下」。副本在清理开始之后还被开着约 300 毫秒，
+    /// 清理退避重试，照常删掉，结果是 Verified。
+    #[test]
+    fn a_briefly_busy_copy_is_still_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (f, root, n) = roots("w3r4-brief");
+        let out = f.dir.join("out");
+        let copy = out.join("src").join("dispatch").join("config.json");
+        let last_report = out.join("attachment.jsonl");
+        let mut holder: Option<std::thread::JoinHandle<()>> = None;
+        let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&copy)
+                .unwrap();
+            let last_report = last_report.clone();
+            holder = Some(std::thread::spawn(move || {
+                // 报告写完之后立刻就是清理：再开着它 300 毫秒。
+                // 等报告写完，但有上限：dry-run 在报告之前就失败时，线程照样放开文件、结束，错误照常报出来
+                // （W3 peer r5 P2-R5-03）。
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                while !last_report.exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                drop(file);
+            }));
+        });
+        holder.unwrap().join().unwrap();
+        assert!(matches!(result, Ok(DryRun::Verified { .. })), "{result:?}");
+        assert!(!out.join("src").exists());
+    }
+
+    /// W3 r3 P1-R3-01：清理只删本次建的东西。`src` 里被放进的 junction（指向 L、N）、挪进来的一个已有目录、
+    /// 被换掉的副本文件都原样留下，结果是 `CleanupIncomplete`（不是成功）；L 与 N 不变。成功、源未静止、
+    /// 副本被换三条路都一样。
+    #[test]
+    fn cleanup_leaves_what_it_did_not_create() {
+        let (f, root, n) = roots("w3r3-cleanup");
+        let before_n = state(&n);
+        for (label, noisy, swap) in [
+            ("quiet", false, false),
+            ("noisy", true, false),
+            ("swapped", false, true),
+        ] {
+            let out = f.dir.join(format!("out-{label}"));
+            let incoming = f.dir.join(format!("incoming-{label}"));
+            put(&incoming.join("business.txt"), b"pre-existing content");
+            let dispatch = root.join("dispatch/config.json");
+            let original = fs::read(&dispatch).unwrap();
+            let before_l = state(&root);
+            let src = out.join("src");
+            let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
+                junction(&src.join("planted-n"), &n);
+                junction(&src.join("dispatch").join("planted-l"), &root);
+                fs::rename(&incoming, src.join("dispatch").join("moved-in")).unwrap();
+                if swap {
+                    let copy = src.join("dispatch").join("config.json");
+                    fs::remove_file(&copy).unwrap();
+                    fs::write(&copy, b"theirs").unwrap();
+                }
+                if noisy {
+                    fs::write(&dispatch, b"{}").unwrap();
+                }
+            });
+            if noisy {
+                fs::write(&dispatch, &original).unwrap();
+            }
+            let Err(cv::Error::CleanupIncomplete { left, outcome }) = &result else {
+                panic!("{label}: {result:?}");
+            };
+            assert!(!left.is_empty(), "{label}");
+            let expected = if noisy || swap {
+                "SourceNotQuiet"
+            } else {
+                "Verified"
+            };
+            assert!(outcome.contains(expected), "{label}: {outcome}");
+            assert_eq!(
+                fs::read(src.join("dispatch/moved-in/business.txt")).unwrap(),
+                b"pre-existing content",
+                "{label}"
+            );
+            if swap {
+                assert_eq!(
+                    fs::read(src.join("dispatch/config.json")).unwrap(),
+                    b"theirs"
+                );
+            } else {
+                assert!(
+                    !src.join("dispatch/config.json").exists(),
+                    "{label}: our copy is removed"
+                );
+            }
+            for link in [src.join("planted-n"), src.join("dispatch/planted-l")] {
+                assert!(
+                    fs::symlink_metadata(&link)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink(),
+                    "{label}"
+                );
+                fs::remove_dir(&link).unwrap();
+            }
+            assert_eq!(state(&root), before_l, "{label}");
+            assert_eq!(state(&n), before_n, "{label}");
+        }
+    }
+}
+
+/// W3 peer r2 P2-07：演练对 `L` 原样走正式的 dry-run、完整转换、启动判定与比较；任何一步不是正式意义上的通过就停下。
+mod w3_gate_rehearse {
+    use super::w3d::{G1, layout, run};
+    use super::*;
+    use atm_store::conversion::{self as cv, Comparison, RehearseOptions, RehearseStop};
+
+    fn rehearse(
+        root: &Path,
+        work: &Path,
+        before: &mut dyn FnMut(&str),
+    ) -> Result<cv::Rehearsal, RehearseStop> {
+        cv::rehearse(RehearseOptions {
+            at: AT,
+            source: root,
+            work,
+            generation: G1,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            before,
+        })
+    }
+
+    /// peer 的反例：知识库恢复没提交、回滚前的库在 `backups\knowledge\` 里。演练与正式转换得到同一份业务结果，
+    /// 附件路径同样映射进 `data\artifacts\`（演练不另做副本，原路径身份保留）。
+    #[test]
+    fn a_rehearsal_converts_the_root_as_it_is() {
+        let (f, root) = json_fixture("w3-p207-formal");
+        let previous = root.join(format!("backups/knowledge/before-restore-{KJ}.sqlite"));
+        fs::copy(root.join("knowledge/knowledge.sqlite"), &previous).unwrap();
+        Connection::open(&previous)
+            .unwrap()
+            .execute(
+                "UPDATE knowledge_entries SET slug = 'pre-restore-business'",
+                [],
+            )
+            .unwrap();
+        put(
+            &root.join("knowledge/restore.json"),
+            format!("{{\"id\":\"{KJ}\",\"committed\":false}}").as_bytes(),
+        );
+        let formal = layout(&f, "formal-n");
+        run(&formal, &root, G1, None).unwrap();
+        let read = |db: &Path| {
+            let c = Connection::open(db).unwrap();
+            (
+                q::<String>(&c, "SELECT slug FROM knowledge_entries WHERE id = 'K1'"),
+                q::<String>(
+                    &c,
+                    "SELECT local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A1'",
+                ),
+            )
+        };
+        let expected = read(&formal.database());
+        assert_eq!(expected.0, "pre-restore-business");
+
+        let work = f.dir.join("rehearse");
+        let mut steps = Vec::new();
+        let r = rehearse(&root, &work, &mut |s| steps.push(s.to_string())).unwrap();
+        assert_eq!(steps, ["dry-run", "run", "compare"]);
+        assert!(
+            r.files
+                .contains(&format!("backups/knowledge/before-restore-{KJ}.sqlite"))
+        );
+        assert_eq!(r.dry_run_digest, r.manifest.business_digest);
+        assert_eq!(read(&r.layout.database()), expected);
+    }
+
+    /// 每一种停下都是失败：未登记的条目在枚举时拒绝（一步都不做）；dry-run 与完整转换之间 `L` 变了是 Moved；
+    /// 转换之后、比较之前变了是 Compare。
+    #[test]
+    fn a_rehearsal_stops_at_the_first_failure() {
+        let (f, root) = json_fixture("w3-p207-stops");
+        let knowledge = root.join("knowledge/knowledge.sqlite");
+        let edit = |slug: &str| {
+            Connection::open(&knowledge)
+                .unwrap()
+                .execute(
+                    "UPDATE knowledge_entries SET slug = ?1 WHERE id = 'K1'",
+                    [slug],
+                )
+                .unwrap();
+        };
+
+        let stray = root.join("projects/P1/project.sqlite.pre-T-1.bak");
+        put(&stray, b"a hand-made backup");
+        let mut steps = Vec::new();
+        let work = f.dir.join("refused");
+        match rehearse(&root, &work, &mut |s| steps.push(s.to_string())) {
+            Err(RehearseStop::Refused(e)) => assert!(e.to_string().contains("pre-T-1.bak"), "{e}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(steps.is_empty() && !work.exists());
+        fs::remove_file(&stray).unwrap();
+
+        let work = f.dir.join("moved");
+        let r = rehearse(&root, &work, &mut |s| {
+            if s == "run" {
+                edit("moved between the snapshots");
+            }
+        });
+        match r {
+            Err(RehearseStop::Moved(families)) => {
+                assert!(
+                    families.iter().any(|f| f.contains("knowledge")),
+                    "{families:?}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let work = f.dir.join("changed");
+        let r = rehearse(&root, &work, &mut |s| {
+            if s == "compare" {
+                edit("moved after the conversion");
+            }
+        });
+        match r {
+            Err(RehearseStop::Compare(c)) => match *c {
+                Comparison::Changed { families, .. } => assert!(
+                    families.iter().any(|f| f.contains("knowledge")),
+                    "{families:?}"
+                ),
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// dry-run 不通过就停，不做完整转换：2.0 救不回来、用户也没点名舍弃的项目。
+    #[test]
+    fn a_rehearsal_stops_when_the_dry_run_does_not_verify() {
+        let (f, root) = settle_fixture("w3-p207-dry");
+        let p7 = root.join("projects/P7/project.sqlite");
+        empty_project(&p7, "P7", "XXX", 10, Some("unconvertible old data"));
+        let mut steps = Vec::new();
+        let work = f.dir.join("rehearse");
+        match rehearse(&root, &work, &mut |s| steps.push(s.to_string())) {
+            Err(RehearseStop::DryRun(why)) => assert!(why.contains("GGG"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(steps, ["dry-run"]);
+        assert!(!work.join("n").exists());
+    }
+}
+
+/// `-shm` 不进快照：它只是 WAL 的索引。2.x 开着库时读者会改写它（没有写入），关库时它正被删除；
+/// 都不算源在变。
+mod w3_gate_snapshot {
+    use super::*;
+    use atm_store::conversion::{self as cv, DryRun, DryRunOptions, Quiesce};
+
+    #[test]
+    fn the_wal_index_is_not_part_of_the_snapshot() {
+        let (f, root) = json_fixture("w3-gate-shm");
+        let shm = root.join("projects/P1/project.sqlite-shm");
+        put(&shm, &[0u8; 32768]);
+        // 别的程序在库旁边随建随删的临时文件（实测的名字），扫描认得它、快照不收它。
+        let foreign = root.join("projects/P1/PROJECT.SQLITE-SHM.tmp");
+        put(&foreign, b"someone else's");
+        put(
+            &root.join("registry/REGISTRY.SQLITE-SHM.tmp"),
+            b"someone else's",
+        );
+        let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
+        assert!(files.contains(&"projects/P1/project.sqlite".to_string()));
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.to_ascii_lowercase().contains("-shm")),
+            "{files:?}"
+        );
+        // 只认库自己的索引：别的名字照旧是未登记的条目。
+        put(&root.join("projects/P1/other.sqlite-shm.tmp"), b"x");
+        assert!(atm_store::legacy::snapshot_files(&root, AT).is_err());
+        fs::remove_file(root.join("projects/P1/other.sqlite-shm.tmp")).unwrap();
+
+        // 复制之后、第二次枚举之前 -shm 没了（2.x 关了库）：dry-run 照样 VERIFY 通过，不是「源未静止」。
+        let r = cv::dry_run(DryRunOptions {
+            at: AT,
+            source: &root,
+            out: &f.dir.join("dry"),
+            v3_root: Some(&f.dir.join("n")),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            accept_unconvertible: &[],
+            keep_data: false,
+            quiesce: &mut || Quiesce::Quiet,
+            after_copy: &mut || {
+                fs::remove_file(&shm).unwrap();
+                fs::remove_file(&foreign).unwrap();
+            },
+        });
+        assert!(matches!(r, Ok(DryRun::Verified { .. })), "{r:?}");
     }
 }

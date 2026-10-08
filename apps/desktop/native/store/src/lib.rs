@@ -15,6 +15,8 @@ pub mod events;
 pub mod jsjson;
 pub mod legacy;
 pub mod paths;
+mod pin;
+pub mod progress;
 pub mod restore;
 pub mod search;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};

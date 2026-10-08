@@ -71,6 +71,10 @@ fn wal_len(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// 等一个终将成立的条件：成立就立刻返回，期限只防挂死。并行跑变异、几条 cargo 同时编译时，
+/// 后台线程几秒才轮到一次，所以给足 30 s（原来 2–5 s，在高负载下误报过）。
+const HANG_GUARD: Duration = Duration::from_secs(30);
+
 fn eventually(limit: Duration, mut ok: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
     while Instant::now() < deadline {
@@ -195,7 +199,7 @@ fn an_admitted_write_completes_after_the_caller_stops_waiting() {
         Waited::Pending(t) => drop(t), // 不再等：作业照样执行
         Waited::Done(_) => panic!("the job sleeps 300 ms; 50 ms later it cannot be done"),
     }
-    assert!(eventually(Duration::from_secs(5), || has(&store, "slow")));
+    assert!(eventually(HANG_GUARD, || has(&store, "slow")));
 }
 
 #[test]
@@ -456,7 +460,7 @@ fn a_long_read_is_cut_off_and_truncate_then_proceeds() {
         "the reader should have held truncate off first"
     );
     assert!(
-        eventually(Duration::from_secs(5), || wal_len(&path) == 0),
+        eventually(HANG_GUARD, || wal_len(&path) == 0),
         "once the reader is gone the WAL must be truncated"
     );
     assert_eq!(Stats::get(&store.stats().read_interrupts), 1);
@@ -587,7 +591,7 @@ fn writes_are_passively_checkpointed_when_the_queue_drains() {
     let path = db_path("engine-passive");
     let store = Store::open(&path, fast()).unwrap();
     store.write(|tx| put(tx, "k")).unwrap();
-    assert!(eventually(Duration::from_secs(2), || Stats::get(
+    assert!(eventually(HANG_GUARD, || Stats::get(
         &store.stats().passive_checkpoints
     ) >= 1));
     // PASSIVE 不截断 WAL；截断留给空闲或关闭。
@@ -621,7 +625,7 @@ fn passive_checkpoints_keep_a_minimum_gap() {
         "{done} passive checkpoints in {elapsed} ms"
     );
     // 被限流的请求不丢：gap 满了之后照样做。
-    assert!(eventually(Duration::from_secs(3), || {
+    assert!(eventually(HANG_GUARD, || {
         Stats::get(&store.stats().passive_checkpoints) > done
     }));
 }
@@ -812,7 +816,7 @@ fn shutdown_during_a_passive_checkpoint_waits_for_it() {
     let hold = hold_next_passive(store.path());
     store.write(|tx| put(tx, "first")).unwrap();
     assert!(
-        eventually(Duration::from_secs(5), || hold.entered()),
+        eventually(HANG_GUARD, || hold.entered()),
         "the checkpoint thread never started a PASSIVE"
     );
     assert_eq!(Stats::get(&store.stats().passive_running), 1);
@@ -995,7 +999,7 @@ fn an_idle_writer_truncates_the_wal_and_so_does_shutdown() {
     .unwrap();
     store.write(|tx| put(tx, "k")).unwrap();
     // WAL 先被截成 0、计数随后才加：两者一起等，不在中间读计数。
-    assert!(eventually(Duration::from_secs(3), || {
+    assert!(eventually(HANG_GUARD, || {
         wal_len(&path) == 0 && Stats::get(&store.stats().truncate_checkpoints) >= 1
     }));
 

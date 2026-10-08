@@ -120,7 +120,15 @@ fn knowledge_residue(rel: &str) -> bool {
 }
 
 fn is_db_file(name: &str, db: &str) -> bool {
-    name == db || name == format!("{db}-wal") || name == format!("{db}-shm")
+    name == db || name == format!("{db}-wal") || is_wal_index(name, db)
+}
+
+/// 库 `db` 的 WAL 索引：`-shm`，以及别的程序在关库前后随建随删的 `-shm.tmp`（实测见过 `ATM.SQLITE-SHM.tmp`、
+/// `PROJECT.SQLITE-SHM.tmp`，大小写不定）。都不是业务内容：不进快照、不进摘要，出现了也不算未登记的条目。
+/// `name` 与 `db` 可以是同一目录下的相对路径。
+pub(crate) fn is_wal_index(name: &str, db: &str) -> bool {
+    let (n, d) = (name.to_ascii_lowercase(), db.to_ascii_lowercase());
+    n == format!("{d}-shm") || n == format!("{d}-shm.tmp")
 }
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；
@@ -316,16 +324,17 @@ fn scan_projects(
 }
 
 /// 新根下附件的相对路径前缀：`data/artifacts/<pid>/`（目标库在 `N\data\atm.sqlite`，附件在 `N\data\artifacts\`）。
-fn artifact_prefix(pid: &str) -> String {
+pub(super) fn artifact_prefix(pid: &str) -> String {
     format!("data/artifacts/{pid}/")
 }
 
-/// `p` 在 `dir` 下面时返回以 `/` 分隔的相对路径（按 Windows 规则不分大小写，两种分隔符都认）。
+/// `p` 在 `dir` 下面时返回以 `/` 分隔的相对路径（ASCII 不分大小写，两种分隔符都认）。
+/// 按字节比较前缀：`p` 的前 `d.len()` 字节不一定落在字符边界上（两边含不同的多字节字符时）。
 fn relative_under(p: &str, dir: &Path) -> Option<String> {
     let norm = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_string();
     let (p, d) = (norm(p), norm(&dir.to_string_lossy()));
     if p.len() > d.len() + 1
-        && p[..d.len()].eq_ignore_ascii_case(&d)
+        && p.as_bytes()[..d.len()].eq_ignore_ascii_case(d.as_bytes())
         && p.as_bytes()[d.len()] == b'/'
     {
         Some(p[d.len() + 1..].to_string())
@@ -368,7 +377,7 @@ pub(super) fn convert_files(
             if let Some(parent) = to.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&path, &to)?;
+            crate::progress::copy_path(&path, &to)?;
         }
         let rows: Vec<(String, Option<String>)> = tx
             .prepare(
@@ -761,4 +770,24 @@ pub(super) fn verify_files(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relative_under;
+    use std::path::Path;
+
+    /// 前缀按字节比较（ASCII 不分大小写）：`p` 的前 `d.len()` 字节不一定落在字符边界上，按字符切会 panic。
+    #[test]
+    fn relative_under_compares_bytes_not_chars() {
+        let dir = Path::new("C:/é");
+        assert_eq!(relative_under("C:/aé/x.txt", dir), None);
+        assert_eq!(relative_under("c:\\É/x.txt", dir), None);
+        assert_eq!(
+            relative_under("c:\\é\\sub\\x.txt", dir),
+            Some("sub/x.txt".into())
+        );
+        assert_eq!(relative_under("C:/é", dir), None);
+        assert_eq!(relative_under("C:/é/", dir), None);
+    }
 }

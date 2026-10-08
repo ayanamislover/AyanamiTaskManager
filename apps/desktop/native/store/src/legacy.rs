@@ -149,10 +149,10 @@ impl LegacySources {
     }
 }
 
-/// 转换进度（07 §8：转换期间 watchdog 的心跳每处理一批就更新一次）：`(阶段, 已完成, 总数)`。
-/// IMPORT 与 VERIFY 各按项目报一轮，开始时报一次 `0`。
+/// 转换进度（07 §8）：`(阶段, 已完成, 总数, 工作量)`，见 [`crate::progress`]。
+/// IMPORT 与 VERIFY 各按项目报一轮，开始时报一次 `0`；其间按有界的工作批次推进工作量。
 #[derive(Clone, Copy)]
-pub struct Progress<'a>(pub &'a dyn Fn(&str, usize, usize));
+pub struct Progress<'a>(pub crate::progress::ProgressFn<'a>);
 
 impl std::fmt::Debug for Progress<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -160,10 +160,8 @@ impl std::fmt::Debug for Progress<'_> {
     }
 }
 
-fn tick(progress: Option<Progress<'_>>, stage: &str, done: usize, total: usize) {
-    if let Some(p) = progress {
-        (p.0)(stage, done, total);
-    }
+fn tick(stage: &str, done: usize, total: usize) {
+    crate::progress::set(stage, done, total);
 }
 
 #[derive(Clone, Debug)]
@@ -1019,6 +1017,15 @@ fn check_lineage_times(tx: &Transaction<'_>, pid: &str) -> Result<()> {
 
 /// 把一组 2.x 库转换成 `target` 处的新单库，并逐族校验。
 pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) -> Result<Report> {
+    let meter = opts.progress.map(|p| crate::progress::Meter::new(p.0));
+    crate::progress::with(meter.as_ref(), || convert_metered(src, target, opts))
+}
+
+fn convert_metered(
+    src: &LegacySources,
+    target: &Path,
+    opts: &ConvertOptions<'_>,
+) -> Result<Report> {
     if !opts.allow_real_data_root {
         let root = opts
             .real_data_root
@@ -1056,17 +1063,20 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
     }
     // 源库一律先复制成工作副本（W3b3）：WAL 在副本里恢复，旧 schema 在副本上补迁移，源文件本身不打开。
     let work = work_dir(target, WORK_DIR)?;
+    // 复制源库、补迁移也算 IMPORT（库大时这一步最慢）：先报阶段，其间按工作批次推进。
+    tick("IMPORT", 0, src.projects.len());
     let used = prepare_sources(src, &work, opts.at, &mut report)?;
 
     let mut t = crate::open(target)?;
+    crate::progress::watch(&t)?;
     register_functions(&t)?;
     let gens = convert_registry(&mut t, &used, opts.at, opts.generation, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
-    tick(opts.progress, "IMPORT", 0, used.projects.len());
+    tick("IMPORT", 0, used.projects.len());
     for (i, p) in used.projects.iter().enumerate() {
         let pid = convert_project(&mut t, p, &gens, &mut report, &mut promotions)?;
-        tick(opts.progress, "IMPORT", i + 1, used.projects.len());
+        tick("IMPORT", i + 1, used.projects.len());
         if !seen.insert(pid.clone()) {
             return Err(ConvertError::Mismatch(format!("project {pid} given twice")));
         }
@@ -1088,7 +1098,7 @@ pub fn convert(src: &LegacySources, target: &Path, opts: &ConvertOptions<'_>) ->
         root::convert_files(&mut t, root, &target_dir(target), &mut report)?;
         jsonfiles::convert(&mut t, root, &target_dir(target), opts.at, &mut report)?;
     }
-    verify(&t, &used, &mut report, opts.progress)?;
+    verify(&t, &used, &mut report)?;
     if !report.failures().is_empty() {
         return Err(ConvertError::Verify(Box::new(report)));
     }
@@ -1182,7 +1192,7 @@ fn provenance_json(all: &[SourceProvenance]) -> String {
 
 fn file_sha256(path: &Path) -> Result<String> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
+    let mut f = crate::progress::Read::new(std::fs::File::open(path)?);
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -1256,14 +1266,15 @@ fn prepare_source(
     let wal = sidecar(original, "-wal");
     let wal_sha256 = match std::fs::metadata(&wal) {
         Ok(m) if m.len() > 0 => {
-            std::fs::copy(&wal, sidecar(working, "-wal"))?;
+            crate::progress::copy_path(&wal, &sidecar(working, "-wal"))?;
             Some(file_sha256(&wal)?)
         }
         _ => None,
     };
-    std::fs::copy(original, working)?;
+    crate::progress::copy_path(original, working)?;
     let sha256 = file_sha256(original)?;
     let c = Connection::open(working)?;
+    crate::progress::watch(&c)?;
     let quick: Vec<String> = c
         .prepare("PRAGMA quick_check")
         .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
@@ -2071,6 +2082,10 @@ fn register_functions(c: &Connection) -> rusqlite::Result<()> {
     use crate::jsjson::{MAX_DEPTH, mirror_payload, top_level_string};
     use rusqlite::functions::FunctionFlags;
     let flags = FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC;
+    // VERIFY 重算 project_paths.path_key：与运行时查询用的是同一个函数（04 C-L09）。
+    c.create_scalar_function("atm_path_key", 1, flags, |ctx| {
+        Ok(text_arg(ctx.get_raw(0)).map(|p| crate::paths::path_key(&p)))
+    })?;
     c.create_scalar_function("atm_mirror_payload", 2, flags, |ctx| {
         let payload = text_arg(ctx.get_raw(0));
         let fields = text_arg(ctx.get_raw(1)).unwrap_or_default();
@@ -2554,7 +2569,7 @@ pub fn verify_converted(target: &Path, src: &LegacySources, conversion: &Report)
     }
     let work = work_dir(target, VERIFY_DIR)?;
     let r = prepare_sources(src, &work, &at, &mut report)
-        .and_then(|used| verify(&t, &used, &mut report, None));
+        .and_then(|used| verify(&t, &used, &mut report));
     drop(t);
     let _ = std::fs::remove_dir_all(&work);
     r?;
@@ -2600,6 +2615,12 @@ pub fn snapshot_files(root: &Path, at: &str) -> Result<Vec<String>> {
         .collect();
     let journal = settle::knowledge(root)?.journal.map(|(id, _)| id);
     let keep = |rel: &str| -> bool {
+        // -shm 只是 WAL 的索引，打开时由 SQLite 重建，工作副本也不复制它。它不进快照：2.x 开着库时读者会改写里面的
+        // 读标记（没有写入也会让 F0 ≠ F1），关库时它正被删除（复制时可能已经不在）。别的程序的 `-shm.tmp` 同理。
+        let lower = rel.to_ascii_lowercase();
+        if lower.ends_with("-shm") || lower.ends_with("-shm.tmp") {
+            return false;
+        }
         let parts: Vec<&str> = rel.split('/').collect();
         match parts.as_slice() {
             ["registry" | "knowledge", ..] => true,
@@ -2709,12 +2730,7 @@ impl Recheck {
     }
 }
 
-fn verify(
-    t: &Connection,
-    src: &LegacySources,
-    report: &mut Report,
-    progress: Option<Progress<'_>>,
-) -> Result<()> {
+fn verify(t: &Connection, src: &LegacySources, report: &mut Report) -> Result<()> {
     attach(t, &src.registry, "r")?;
     report.knowledge = src.knowledge.is_some();
     let mut re = Recheck::default();
@@ -2745,13 +2761,15 @@ fn verify(
             detach(t, "k");
             r?;
         }
-        tick(progress, "VERIFY", 0, src.projects.len());
+        tick("VERIFY", 0, src.projects.len());
         for (i, p) in src.projects.iter().enumerate() {
             attach(t, p, "p")?;
-            let r = verify_project(t, report, &mut re).and_then(|()| expect_global_project(t));
+            let r = verify_project(t, report, &mut re)
+                .and_then(|()| verify_artifact_paths(t, report, src.root.as_deref()))
+                .and_then(|()| expect_global_project(t));
             detach(t, "p");
             r?;
-            tick(progress, "VERIFY", i + 1, src.projects.len());
+            tick("VERIFY", i + 1, src.projects.len());
         }
         verify_global(t, report)?;
         if let Some(root) = &src.root {
@@ -2769,6 +2787,43 @@ fn verify(
     );
     detach(t, "r");
     r
+}
+
+/// 附件的 `local_path`（W3 peer r1 P2-01）：由源行（挂在 `p`）的 `local_path` 推出应有的值，逐行核对。
+/// 按数据根转换时，指向本项目附件目录（原始根下）的改写成 `data/artifacts/<pid>/<相对路径>`，其余原样；
+/// 不按数据根转换时一律原样。映射在 SQL 里另写一遍，不复用转换时的函数：两边写错同一处才会漏过。
+fn verify_artifact_paths(c: &Connection, report: &mut Report, root: Option<&Path>) -> Result<()> {
+    let pid: String = c.query_row("SELECT project_id FROM p.project_meta", [], |r| r.get(0))?;
+    let dir = root.map(|root| {
+        report
+            .origin(root)
+            .join("projects")
+            .join(&pid)
+            .join("artifacts")
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string()
+    });
+    let prefix = root::artifact_prefix(&pid);
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "artifacts",
+            label: &format!("{pid}/artifacts.local_path"),
+            key: &["id"],
+        },
+        &["id".to_string(), "local_path".to_string()],
+        "SELECT id, CASE WHEN ?1 IS NOT NULL AND length(n) > length(?1) + 1
+                          AND lower(substr(n, 1, length(?1))) = lower(?1) AND substr(n, length(?1) + 1, 1) = '/'
+                         THEN ?2 || substr(n, length(?1) + 2) ELSE local_path END
+         FROM (SELECT id, local_path, rtrim(replace(local_path, '\\', '/'), '/') AS n FROM p.artifacts)
+         ORDER BY id",
+        &[&dir, &prefix],
+        "SELECT id, local_path FROM main.artifacts WHERE project_id = ?1 ORDER BY id",
+        &[&pid],
+    )
 }
 
 /// R6 的 VERIFY：全局流的预期由源库独立算出，不看转换器记下的计数。
@@ -2924,8 +2979,23 @@ fn verify_registry(c: &Connection, report: &mut Report, re: &mut Recheck) -> Res
         compare_table(c, report, "r", table, None)?;
     }
     verify_settings(c, report, re)?;
-    // 按 2.x 的列比较。3.0 多出来的 path_key 在转换时由 canonical_path 推出，靠唯一约束兜底。
+    // 按 2.x 的列比较。
     compare_table(c, report, "r", "project_paths", None)?;
+    // 3.0 多出来的 path_key（04 C-L09）：由源的 canonical_path 用运行时查询的同一个函数重算，逐行核对（W3 peer r1 P2-01）。
+    compare(
+        c,
+        report,
+        Ck {
+            spec: "project_paths",
+            label: "r/project_paths.path_key",
+            key: &["id"],
+        },
+        &["id".to_string(), "path_key".to_string()],
+        "SELECT id, atm_path_key(canonical_path) FROM r.project_paths ORDER BY id",
+        &[],
+        "SELECT id, path_key FROM main.project_paths ORDER BY id",
+        &[],
+    )?;
     let baseline: i64 = c.query_row("SELECT current_sequence FROM r.app_meta", [], |r| r.get(0))?;
     let cols: Vec<String> = [
         "sequence",

@@ -262,9 +262,10 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 - **进度上报**：在本包。
 - **接入**：在 `setup/src/txn.rs` 与 `setup/src/reverse.rs`。
 
-- **进度上报**：`RunOptions.progress` 回调 `(阶段, 已完成, 总数)`。
-  - SNAPSHOT 按文件报；IMPORT、VERIFY 按项目报（`ConvertOptions.progress`），开始时各报一次 0；PUBLISHING、PUBLISHED 各报一次。
-  - 宿主把它写成 `N\runtime\startup-progress.json`，内容是 `{txn, pid, process_created_at, generation, phase, progress{done, total}, updated_at}`。
+- **进度上报**：`RunOptions.progress` 回调 `(阶段, 已完成, 总数, 工作量)`（`src/progress.rs`；W4a 起加了工作量，见「W4a」一节）。
+  - 首条是 SNAPSHOT 0/0，在任何枚举之前；SNAPSHOT 按文件报；IMPORT、VERIFY 按项目报（`ConvertOptions.progress`），开始时各报一次 0；PUBLISHING、PUBLISHED 各报一次。
+  - 其间每做完一个有界的工作批次，工作量加一。
+  - 宿主把它写成 `N\runtime\startup-progress.json`，内容是 `{txn, pid, process_created_at, generation, phase, progress{done, total, work}, updated_at}`。
   - 用例 `w3f::conversion_progress_reaches_setup_but_is_not_health` 把转换报的每一条交给 setup 的判定，确认一路都是「继续等」，阶段依次是 SNAPSHOT → IMPORT → VERIFY → PUBLISHING → PUBLISHED。
 - **setup 的等待 `ProgressWatch`**：
   - **健康**：只认 SERVICE_HEALTHY 见证。进度报到 PUBLISHED 10/10 也只是「在等」。
@@ -304,7 +305,20 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **输出**：留下 `report.json` 和 `attachment.jsonl`。源副本总是删掉；转换出的库默认也删，因为里面是用户数据，`keep_data` 时保留。
   - **VERIFY 不过**：报告照写，返回 `VerifyFailed(失败的族)`。
 - **不写 `N`**：`M`、`A`、启动状态、进度一概不碰，也不起任何调度器。
-- **用例**：`legacy.rs` 的 `w3g::*`。`L` 一个字节都不变，`N` 不被创建。
+- **目录身份**（W3 peer r2 P1-R2-01，`src/pin.rs`）：
+  - 输出目录、它的祖先、`src`、`data` 以及 `src` 下的每层目录，在整个写入与清理期间都被句柄钉住：持有句柄，共享方式不含 `FILE_SHARE_DELETE`。钉住的目录不能改名、不能删除，它的祖先也不能改名，所以按句柄的最终路径写入时，到达的就是钉住的那个目录。
+  - 静止判定之后才钉住：先钉住最近一个已存在的祖先，按它的真实位置再查一次与 `L`、`N` 的重叠，然后才建目录。缺的每一层都用 `NtCreateFile(FILE_CREATE)` 相对父目录句柄排他新建；名字被目录、文件或 junction 占着就失败。已存在的输出目录在钉住之后再查一次是否为空。
+  - 文件（快照副本、报告的临时文件）一律排他新建，名字被占就失败，不会经过别人放在那里的硬链接写出去。
+  - 报告的临时文件从新建到改名一直开着（W3 peer r4 P1-R4-01）：句柄带 DELETE 权限、共享方式不含 `FILE_SHARE_DELETE`，这段时间里别人改不了它的名、删不掉它。改名（不替换已有的名字）与失败时的丢弃都按句柄做，不按路径。
+  - 清理只删本次排他新建的东西，而且按身份删（W3 peer r3 P1-R3-01）：
+    - 快照副本的文件新建时记下（卷序列号, 文件号）。删除时不跟随链接地重新打开，身份一致才删。
+    - `src` 下的目录由深到浅删。删的时候先放开钉住，再不跟随链接地重新打开，文件号与新建时一致、而且目录已经空了才删。
+    - 不认识的条目一律不碰，包括放进来的 junction、挪进来的目录、换掉的文件。哪一处删不掉，它和它的每一层祖先都原样留下。
+    - 别的程序（杀毒、索引）短暂开着某个副本时，删除会遇到共享冲突：退避重试约 2 秒，仍不行才算留下（W3 peer r4 P2-R4-01）。
+    - 清理没做完时，dry-run 返回 `Error::CleanupIncomplete { left, outcome }`，不报成功：`left` 列出留下的位置，`outcome` 是清理之前的结果。
+  - `data` 整棵删：条目不跟随链接，目录本身同样按文件号核对。删不掉也记进 `CleanupIncomplete`。
+  - **边界**：`data` 里面由转换器自己建的目录（`legacy-work`、`legacy-verify`、附件）按路径读写，和正式转换在 staging 里的做法相同。它们都在本次新建并钉住的 `data` 之下，别的程序不知道这些名字。同一用户下有意篡改的进程本来就能直接写 `L` 和 `N`，不在防护范围内。这里防的是：用户给的路径及其祖先在检查之后被改名或换成链接（同步工具、脚本、并发操作）。
+- **用例**：`legacy.rs` 的 `w3g::*`。`L` 一个字节都不变，`N` 不被创建。目录替换的用例见「W3 整体评审第二轮」。
 - **变异**：`output/w3-evidence/w3g-mutation-evidence.json`。
 
 ## 故障注入矩阵 F1–F29（W3h）
@@ -325,7 +339,7 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - F15–F18 把真实转换写出的进度文件逐条交给 setup 的 `ProgressWatch`。
 - **为 F8 补的能力**：`run` 拆成 `run` 加 `attempt`。PUBLISHING 之前的任何失败（不只 SNAPSHOT 与转换器自己的错误）都记 FAILED 和原因。已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
 - **变异**：`output/w3-evidence/w3h-mutation-evidence.json`，21 条。F15–F18 的变异落在 install-state，由这里的矩阵用例杀死。首跑有一条存活：「重启保留旧 M」。原因是 F2 只看重启后能发布，而下一次转换反正会覆盖 M。F2 现在在 `discard_attempt` 之后断言回到 FirstConversion。
-- **没有用例的分支**：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。按设计不记 FAILED，下次按 S3 重来；矩阵里没有能确定性触发它的注入点。
+- **没有用例的分支**（W3 时）：PUBLISHING 阶段、改名之前的非中断失败（例如改名本身失败）。W4a 补上了注入点与用例，见「W4a」一节的 P2-05。
 - **范围的限度**（W3 peer r1 P2-05 指出）：
   - F2 停在复制完成之后，F3 停在 IMPORT 写数据之前，都没有造出复制了一半或事务中途死掉的状态；
   - F8 用文件占住 `data` 目录，造的是建不了目录，不是磁盘满或写了一半。
@@ -352,6 +366,217 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - **P2-04**：store 与 setup 统一持久化契约（逐文件刷盘、元数据提交、`A` 的写入顺序），改名标志与重试要有确定性用例。W4 发布与回滚接线之前完成，掉电实验放 W8。
   - **P2-05**：故障矩阵的范围见上一节；变异证据区分历史证据与最终候选证据，锚点随代码更新（本轮已把全部 W3 脚本的锚点对齐到当前代码并重跑）。
 
+## W3 整体评审第二轮（`output/peer-atm3-w3-r2.md`）
+
+| 编号     | 问题                                                                                                            | 修订                                                                      |
+| -------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| P1-R2-01 | dry-run 检查之后，输出目录的父目录或输出目录自己被换成指向 `N` 的 junction：目录建进 `N`，错误清理删掉 `N/data` | 钉住目录、排他新建、按文件号核对后才清理（「dry-run」一节的「目录身份」） |
+
+- **用例**：`legacy.rs` 的 `w3_peer_r2::*` 与 `pin::tests::*`。
+  - 评审的两个反例都在其中，并扩展到同类的其他通道。指向 `N` 和指向 `L` 各跑一遍，逐个断言两个根的文件内容与目录集合都不变。
+  - 钉住之前被换：父目录、更上层还不存在的祖先、已存在的空输出目录自己、空输出目录里被放进的 `src`，一律拒绝，根里也不会建出目录。
+  - 钉住之后被换：输出目录的父目录、输出目录自己、`src`、`src\dispatch`、`src\dispatch\logs`，改名都失败，dry-run 照常完成，报告写在原处。
+  - 名字被提前占住：`data` 被占成 junction，或报告的临时文件名被占成指向 `N` 里文件的硬链接。都失败，不经过它们写入。
+  - 清理时遇到放进 `src` 的 junction：第二轮的做法是只删链接本身；第三轮改为原样留下并报告，见下一节。
+  - 原语层面：钉住的目录与它的祖先改不了名；排他新建不复用任何已有的名字；文件号对不上就不删。
+- **变异**：`output/w3-evidence/w3r2-mutation-evidence.json`。
+- **新增的 P2 关口**（评审定的）：
+  - **P2-06**：`dropped/<id>` 的摘要含 WAL/SHM 的物理字节，checkpoint 或正常关库之后会误报 Changed。要在 W4 用这个比较驱动入口或自动重转之前修好，改成按逻辑内容取摘要。已修，见「W4 前的 P2 关口」。
+  - **P2-07**：W3i 只证明构造出的副本能转换。要在 W4 接真实入口之前补齐：复制集合从 `snapshot_files` 导出，保持原路径身份，失败时非零退出。在那之前，W3i 的结论只写成「真实数据的逻辑副本演练通过」。已修，见「W4 前的 P2 关口」。
+
+## W3 整体评审第三轮（`output/peer0519-tmp/codex-w3-r3.log`）
+
+评审在写出报告之前被评审方自己的内容过滤中断。中断前，它已在日志里给出一条 P1 和复现用例（`output/peer0519-tmp/w3-r3/peer-r3-tests.rs`）。
+
+| 编号     | 问题                                                                                                                                                                                                                   | 修订                                                                                                                                            |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-R3-01 | 清理时，放开 `src\dispatch\logs` 的钉住到按文件号重开之间，把一个已有的、有内容的目录换进来。身份核对拒绝删除它，但错误被吞掉了；随后删父目录时又先枚举、整棵删掉里面的条目，换进来的内容被删，dry-run 仍报 `Verified` | 只删本次建的文件与目录，都按身份；目录只在空时删；删不掉的连同祖先原样留下；清理没做完返回 `CleanupIncomplete`（「dry-run」一节的「目录身份」） |
+
+- **用例**：
+  - `legacy.rs` 的 `w3_peer_r2::cleanup_leaves_what_it_did_not_create`：成功、源未静止、副本被换三条路。`src` 里放进指向 `L` 与 `N` 的 junction，挪进一个已有的有内容目录，换掉一份副本文件，这些都原样留下；结果是 `CleanupIncomplete`；`L` 与 `N` 不变。
+  - `conversion::tests::a_replaced_directory_keeps_itself_and_every_ancestor`：确定性地造出「重开时文件号不符」，只有它和它的祖先留下，旁支照常删。
+  - `pin::tests::remove_leaves_what_it_did_not_create`：原语层面，非空目录不删，被换的文件不删。
+- **评审的另外两个反例**在新代码上都通过：第二轮反例二的改名现在被拒绝，dry-run 照常完成；报告的两个名字与临时文件名都是排他新建。
+- **变异**：`output/w3-evidence/w3r3-mutation-evidence.json`。
+
+## W3 整体评审第四轮（`output/peer-atm3-w3-r4.md`）
+
+评审再次在写完报告之前被评审方的内容过滤中断，报告文件里留下了逐条确认的结论：P1-R3-01 的原反例在 fd92ce2 上通过（外来内容与祖先保留，返回 `CleanupIncomplete`）；另有一条 P1、一条 P2。
+
+| 编号     | 问题                                                                                                                                                  | 修订                                                             |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| P1-R4-01 | 报告临时文件写完、关闭之后到改名之间，同名位置换进一个已有文件，并让目标报告名已存在：改名失败后 `write_new` 按路径删除临时文件，删掉的是换进来的那个 | 临时文件一直开着、不共享删除；改名与丢弃都按句柄（「目录身份」） |
+| P2-R4-01 | 副本被别的程序开着（不共享删除）时清理正确地保留了它，但 `left` 只写了目录、没写文件名；短暂占用会被当成留下                                          | 错误文本带完整路径；共享冲突退避重试约 2 秒                      |
+
+- **用例**：
+  - `pin::tests::an_open_new_file_keeps_its_name_until_renamed_or_discarded`：开着的临时文件别人改不了名、删不掉；改名不替换已有名字；丢弃只删自己的临时文件。
+  - `legacy.rs` 的 `w3_peer_r2::a_busy_copy_is_left_and_named`：一份副本一直被开着，结果是 `CleanupIncomplete`，`left` 只有一项、写的是那个文件。
+  - `legacy.rs` 的 `w3_peer_r2::a_briefly_busy_copy_is_still_removed`：清理开始之后副本还被开着约 300 毫秒，照常删掉，结果是 Verified。
+- **变异**：`output/w3-evidence/w3r4-mutation-evidence.json`。
+
+## W3 整体评审第五轮（`output/peer-atm3-w3-r5.md`）：APPROVED
+
+绑定 core-rust 02dd92c。无 P0、P1；P1-R4-01、P2-R4-01 关闭。新登记三条 P2，与 P2-01～P2-07 一起作为 W4 之前的硬门，修订如下（在 W4 关口的分支上）：
+
+| 编号      | 问题 | 修订 |
+| --------- | ---- | ---- |
+| P2-R5-01  | 报告改名成功后刷盘失败、丢弃也失败时，错误里的路径仍是早已不存在的临时名；单独刷盘失败只有裸 IO 错误 | `NewFile::rename_into` 改名成功就记下新位置再刷盘，刷盘错误带「flush 路径」；丢弃的错误报文件实际所在的名字 |
+| P2-R5-02  | 库旁边的 `-shm` 与别的程序的 `-SHM.tmp` 会让比较误报冲突、快照误判源未静止 | 见下文「库的索引不进快照」 |
+| P2-R5-03  | 短暂占用用例的辅助线程等报告写完没有上限，dry-run 提前失败时会永久挂住 | 等待设 120 s 上限，超时照样放开文件、结束线程 |
+
+- **用例**：
+  - `pin::tests::a_failed_discard_names_where_the_file_is`：改名前双失败报临时名；改名后丢弃失败报新名、不含临时名。
+  - `an_open_new_file_keeps_its_name_until_renamed_or_discarded` 加一条：改名之后 `path()` 是新名。
+  - `w3_peer_r1::a_direct_conversion_ignores_the_wal_index_of_a_dropped_database`：直接按数据根转换（不经快照）时，舍弃项目目录里的 `-shm` 与 `-SHM.tmp` 不改变摘要。
+- **变异**：`output/w3-evidence/p2gate-mutation-evidence.json`（含「the new name is not remembered」）。
+
+## W4a：W3 遗留硬门（P2-01、P2-03、P2-04、P2-05）
+
+W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与回滚之前做完。
+
+### P2-01：VERIFY 独立核对派生列
+
+- **问题**：VERIFY 只按 2.x 的列比较。3.0 多出来的派生列——`project_paths.path_key` 与改写过的 `artifacts.local_path`——没有和源对过：前者只靠唯一约束兜底，后者只核对了 `legacy_local_path`。
+- **修订**（`legacy.rs`）：
+  - `r/project_paths.path_key`：由源的 `canonical_path` 用运行时查询的同一个函数（`paths::path_key`，注册成 SQL 函数 `atm_path_key`）重算，逐行核对。
+  - `<pid>/artifacts.local_path`：由源行的 `local_path` 推出应有的值，逐行核对。映射在 SQL 里另写一遍，不复用转换时的函数——两边写错同一处才会漏过。
+    - 按数据根转换时，指向本项目附件目录（原始根下）的改写成 `data/artifacts/<pid>/<相对路径>`，其余原样；
+    - 不按数据根转换时一律原样。
+  - 顺带修了转换时判断附件是否在目录下的 `relative_under`：原来按字符切前缀，两边含不同的多字节字符时会 panic，改为按字节比较（ASCII 不分大小写）。
+- **用例**：
+  - `verify_checks_the_derived_paths`：数据根转换后检查这两族都在。分别把目录里的附件改回原值、改成别的文件，把缺文件的附件改回原值，把目录外的附件改写，把 path_key 改成不折叠的。每一种都只有对应的那一族失败。
+  - `legacy::root::tests::relative_under_compares_bytes_not_chars`。
+
+### P2-03：进度按有界批次推进，首条在枚举之前
+
+- **问题**：
+  - 首条 SNAPSHOT 进度在完整枚举、散列 F0 之后才有。枚举超过 60 s，setup 在首条进度到达之前就超时。
+  - IMPORT、VERIFY 只按项目报。一个大项目处理超过 10 min，就被判卡住。
+- **修订**（`src/progress.rs`、`install-state` 的 `startup.rs`）：
+  - 回调多一项「工作量」：单调递增，每做完一个有界的工作批次加一。
+    - 读写文件：每 64 MiB 一次（散列、复制都经计量的读）；
+    - 枚举：每个文件一次；
+    - SQLite：每执行 100 万条虚拟机指令一次（`progress_handler`），装在目标库、源库的工作副本与探测副本上。迁移、IMPORT、VERIFY 都在 SQL 里做。
+  - 工作量只随真实的工作增加，不是按时间刷新的心跳，卡住的转换照样会被判卡住。
+  - `run` 一开始、任何枚举之前先报 SNAPSHOT 0/0。复制源库、补迁移算在 IMPORT 里，开始前先报 IMPORT 0/n。
+  - 计量装在当前线程上（`progress::with`），深处的散列、复制、开库不必层层传参；作用域结束（含 panic）时恢复外层的。
+  - setup 的 `ProgressWatch` 把 `(阶段, 已完成, 总数, 工作量)` 四项都算进「动没动」；`updated_at` 仍然不算。旧的进度文件没有 `work` 时按 0 读。
+- **用例**：
+  - `fault_matrix::the_first_progress_comes_before_enumeration`：根里有未登记的条目，枚举会拒绝；拒绝之前 setup 已经收到 SNAPSHOT 0/0，而且只有这一条。
+  - `fault_matrix::a_large_project_keeps_the_work_moving`：一个项目有 30 万条进度。
+    - IMPORT、VERIFY 里同一个「已完成/总数」下至少推进 5 批；
+    - 假设每批都要 9 min，setup 一直在等；最后一批之后 10 min 判卡住。
+  - `startup::tests::the_first_progress_has_until_the_first_budget_ends`：setup 每秒看一次，首条在第 59 s 到达就接着等；一直没有，第 60 s 判超时。
+  - `startup::tests::work_alone_counts_as_movement`。
+  - `progress::tests::*`：作用域与复原，SQL 与字节都推进工作量。
+  - F15 改为第 1 s 就看第一次（原来是第 90 s，漏掉了真实轮询在 60 s 的判定），并断言第一条是 SNAPSHOT 0/0、工作量为 0。
+
+### P2-04：store 与 setup 共用一份持久化契约
+
+- **问题**：store 的改名是 `MoveFileExW(WRITE_THROUGH)`，setup 写回滚用的 `A` 却是 `fs::rename`。复制来的附件等没有逐个刷盘。改名的标志与退避重试没有确定性用例。
+- **修订**：
+  - 新增 `install-state/src/durable.rs`，store 与 setup 都只走它：
+    - `rename`：`MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`，返回时改名已落盘；不替换时目标已存在就失败；共享冲突一类（5、32、33）退避重试约 10 秒，其余错误立即报错。
+    - `write_atomic`：同目录临时文件、刷盘、替换地改名。
+    - `sync_file`、`sync_tree`：逐个刷盘；被短暂占着同样退避重试；整树刷盘时，列出之后又消失的文件跳过（别的程序随建随删的临时文件）。
+  - 改走它的地方：
+    - store：转换的 `M`、`A`、报告、发布与封存的改名，备份的库与清单，恢复的目录交换；
+    - install-state：进度文件与 setup 回滚写的 `A`；
+    - setup：`fsx::write_atomic` 与全部移动（`move_path`、`replace_file`）。
+  - 发布之前把发布物逐个文件刷盘，再写 `M = PUBLISHING`，再改名发布。范围与发布摘要相同：库与 `artifacts`、`sync`、`dispatch` 三个子树。库旁边会冒出别的程序的临时文件（实测 `ATM.SQLITE-SHM.tmp`，随建随删、还被占着），它们不属于发布物，不碰——第一次全套运行里三条用例就因为去刷它而失败。
+  - `durable::record` 记下作用域内的每次改名与刷盘，用例据此核对调用方真的走了这里。
+- **用例**：
+  - `durable::tests::*`：
+    - 标志：总带 WRITE_THROUGH，只有要替换时才带 REPLACE_EXISTING；
+    - 共享冲突重试后成功（退避 10、20、40 ms）；
+    - 一直被占，约 10 秒后报错，错误里有两个路径；
+    - 其余错误不重试；
+    - 不替换就不覆盖，整份替换不留临时文件，刷盘按文件逐个记录。
+  - `startup::tests::rollback_writes_the_authority_only_after_publish`：`A` 是这次写入里唯一一次改名，标志是 REPLACE_EXISTING 加 WRITE_THROUGH。
+  - `fault_matrix::publishing_flushes_every_file_then_moves_through_the_shared_contract`：
+    - 发布物里每个文件都在发布改名之前刷过盘；
+    - 发布改名不替换、带 WRITE_THROUGH；
+    - 之后只有 `M` 与 `A` 两次替换地改名，`A` 在后。
+  - `fsx::tests::writes_and_moves_go_through_the_shared_contract`（setup）。
+  - 掉电实验仍放在 W8。
+
+### P2-05：确定性的故障注入
+
+- **注入点**：
+  - `progress::stop_at(n, …)`：工作量到第 n 批时「进程被杀」。SQLite 中断正在执行的语句，读文件返回错误，`run` 不做任何收尾（不写 FAILED），返回 `Interrupted`。
+  - `durable::inject(…)`：让作用域内被点名的写入、刷盘或改名以给定的错误失败，不重试。
+- **用例**（`fault_matrix`）：
+  - `a_copy_killed_halfway_restarts`：复制到一半被杀，staging 里只有一部分副本，再把一份截成半截。`M` 停在 SNAPSHOT。下次按 S3 重来，业务摘要与干净的一次相同，`L` 没动。
+  - `an_import_killed_mid_transaction_restarts`：30 万条进度的项目正在 IMPORT 时被杀（SQLite 语句被中断）。`M` 停在 IMPORT。之后同上。
+  - `a_full_disk_keeps_the_last_good_manifest`：从发布前的刷盘开始，每次写都失败（112），连 FAILED 也写不下。`M` 留着最后一份完整的（VERIFY），下次按 S3 安全重来。
+  - `a_failed_publishing_rename_restarts`：发布改名本身失败。`M` 留在 PUBLISHING、不记 FAILED，发布物没到位，下次按 S3 重来。
+  - `a_failure_after_the_publishing_rename_finishes_later`：发布物已改名到位，写 `M = PUBLISHED` 失败。下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+- **用例带出的缺陷**：失败之后写 FAILED 也失败时（磁盘满），原来报的是写 FAILED 的错误，真正的原因丢了。现在报原来的原因，并注明 FAILED 没记下；`M` 留着上一份完整的。Verify 失败时报告写不下也不再掩盖原因。磁盘满用例断言报出的是刷盘失败。
+- **限度**：「被杀」是注入的停下，连接仍按正常方式关闭（未提交的事务回滚）。真被杀时留下的是未提交的 WAL 帧，SQLite 下次打开时同样丢弃它们；staging 整个按 S3 丢弃，不读它。
+
+### 变异
+
+- `output/w4a-evidence/w4a-store-mutation-evidence.json`（14 条）；
+- `w4a-state-mutation-evidence.json`（11 条）；
+- `w4a-setup-mutation-evidence.json`（2 条）。
+
+## W4 前的 P2 关口（P2-06、P2-07）
+
+### P2-06：舍弃项目的摘要按内容取
+
+- **问题**：`dropped/<id>` 原来对项目目录的每个文件取字节摘要。库开着 WAL 时，checkpoint、正常关库（WAL 合并、SHM 删掉）都会改变它，比较误报 Changed；A=legacy 时还会触发不必要的封存重转。
+- **修订**（`legacy/settle.rs` 的 `tree_digest`）：
+  - SQLite 库（文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项。库与非空的 `-wal` 复制到工作目录里打开（WAL 在副本里恢复，不开源文件），取逻辑内容：
+    - `user_version`、`application_id`；
+    - schema 的类型、名字、所属表、SQL（不含随存储变的 rootpage）；
+    - 每张表与虚表的全部行，按全部列排序，不含隐含的 rowid（VACUUM 会给没有 INTEGER PRIMARY KEY 的表重排它）；
+    - 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
+  - 打不开或读不完的库绑定原始字节：库与非空的 `-wal`；`-shm` 只是 WAL 的索引，不算。这样的库任何变化（包括 checkpoint）都是「变了」：说不清就保守，不漏报。
+  - 其他文件（附件、manifest、回滚件以外的普通文件）照旧按字节。
+  - 工作目录里上一个库的副本删不掉就失败：残留的 `-wal` 会被当成下一个库的 WAL 恢复进去。
+- **用例**（`legacy.rs` 的 `w3_peer_r1` 模块）：
+  - `a_dropped_database_is_compared_by_content_not_storage`：转换时库开着 WAL、写入还只在 WAL 里。checkpoint、关库、SHM 重建、VACUUM、ANALYZE 与 `PRAGMA optimize`、改回 DELETE 日志，比较都是 Unchanged；只在 WAL 里的业务写入是 Changed，改回原值又是 Unchanged；加一个附件是 Changed。评审的反例（checkpoint 后关库）在其中。
+  - `an_unreadable_dropped_database_is_bound_to_its_bytes`：打不开的库，加 `-shm` 不变；加非空 `-wal`、改一个字节都是 Changed。
+  - 原有的 `a_drop_permission_is_bound_to_the_dropped_content`（业务修改、修好后拒绝舍弃许可）照旧通过。
+- **变异**：`output/w3-evidence/w3gate-mutation-evidence.json`。
+
+### P2-07：演练走正式链路
+
+- **问题**：W3i 的演练脚本自己挑文件、`VACUUM INTO` 出逻辑副本，再以副本为 `L` 转换。评审的合成反例里，副本漏掉了知识库恢复依赖的回滚前库，附件路径也因为原路径不在副本里而没有映射；演练照样「通过」，退出码也是 0。
+- **修订**：
+  - 新增 `conversion::rehearse`：对 `L` 原样走正式的 dry-run、完整转换（`N` 在工作目录里）、启动判定与比较。不另做副本，所以复制集合（`snapshot_files`）、恢复依赖、路径映射都与正式转换相同。
+  - 任何一步不是正式意义上的通过就停下：枚举拒绝（`Refused`）、dry-run 没有 VERIFY 通过或 `pending` 不空（`DryRun`）、完整转换失败（`Run`）、dry-run 与完整转换两次快照的 business_digest 不同（`Moved`）、启动判定不是 Published（`Decide`）、比较不是 Unchanged（`Compare`）。
+  - 一致性边界：2.x 可以不停，静止判定按「静止」放行；副本的一致性由 SNAPSHOT 的 F0/F1 保证（复制前后两次枚举相同、副本的 sha256 逐个等于 F0）。两次快照之间、转换之后 `L` 变了，分别由 `Moved` 与 `Compare` 报出。
+  - `examples/rehearse.rs` 改为调用它，每种停下各有非零退出码（3–8），去掉了自己的复制与 `--exclude`。
+- **用例**（`legacy.rs` 的 `w3_gate_rehearse` 模块）：
+  - `a_rehearsal_converts_the_root_as_it_is`：评审的反例。演练与正式转换得到同一个知识条目 slug（回滚前的库）与同一条附件路径。
+  - `a_rehearsal_stops_at_the_first_failure`：未登记的条目在枚举时拒绝，一步都不做；两次快照之间改知识库是 `Moved`；转换之后改是 `Compare(Changed)`。
+  - `a_rehearsal_stops_when_the_dry_run_does_not_verify`：2.0 救不回来、用户也没点名舍弃的项目，停在 dry-run，不做完整转换。
+- **真实根重跑**（用户 2026-10-07 授权的 W3i 范围内，只读）：`output/w3i-real/run6/rehearse.log`，退出码 0。
+  - 正式 SNAPSHOT 104 个文件；dry-run VERIFY 通过、没有 pending；dry-run 与完整转换都是 671 个业务族，摘要相同；PUBLISHED；启动判定 Published；与真实根比较 Unchanged。
+  - 新库：24 个项目、2673 个任务、2682 个检查项、23582 条事件、170 条 legacy_backups。
+  - 转换出的库用完即删，只留不含正文的报告与日志。
+- **变异**：同上。
+
+### 库的索引不进快照（P2-06 变异运行中发现）
+
+- **现象**：
+  - 关库前后，会有别的程序在库旁边随建随删 `<库名大写>-SHM.tmp`（实测 `ATM.SQLITE-SHM.tmp`、`PROJECT.SQLITE-SHM.tmp`），有时还占着。
+  - 比较时 `L` 的项目目录里正好出现它，正式扫描把它当未登记条目拒绝，比较得 UNKNOWN。失败关闭、不丢数据，但会误报数据源冲突。
+  - 另外，快照原来把 `-shm` 也算进 F0/F1：2.x 开着库时读者会改写 `-shm` 里的读标记（没有写入），关库时它又正被删除，都可能让快照误判源未静止，或者复制时找不到文件。
+  - P2-06 的变异复原后整套里，`a_dropped_database_is_compared_by_content_not_storage` 在「关库」一步偶发得到 UNKNOWN，就是这个原因。
+- **修订**：
+  - `-shm` 与 `<库名>-shm.tmp`（不分大小写）都只是库的 WAL 索引：扫描认得它们（不再是未登记条目），快照不收，舍弃项目的摘要也不算。
+  - 只认库自己的：别的名字（例如 `other.sqlite-shm.tmp`）照旧是未登记条目。
+  - 工作副本本来就不复制 `-shm`（SQLite 打开时重建）。
+- **用例**：
+  - `w3_gate_snapshot::the_wal_index_is_not_part_of_the_snapshot`：
+    - 放进 `-shm` 与两个 `*-SHM.tmp`，快照清单里都没有；
+    - 别的名字的 `-shm.tmp` 照旧拒绝；
+    - 复制之后、第二次枚举之前把它们删掉，dry-run 照样 VERIFY 通过。
+  - `a_dropped_database_is_compared_by_content_not_storage` 加一步：舍弃项目的目录里出现 `PROJECT.SQLITE-SHM.tmp`，比较不变。
+- **变异**：`output/w3-evidence/p2gate-mutation-evidence.json` 的「the WAL index is snapshotted」。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
@@ -366,6 +591,9 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
   - 规则不放宽：未登记就停（F23）。第一次演练按点名排除（`--exclude`）。
   - 用户决定不需要就删掉。核对后确认不需要：ZB-T-0050 已于 2026-08-09 完成，现库 42 MB 而它只有 2.5 MB，项目另有 2.x 的日、周备份。已移进回收站（可还原，由用户清空）。
   - 之后不带任何排除重跑：预检（正式转换对真实根的枚举与守卫）通过，要快照的 104 个文件与复制清单一致，结果同下（`output/w3i-real/run5/`）。
+- **结论的范围**（W3 peer r2 P2-07）：本节的前五次演练是真实数据的逻辑副本演练。
+  - 副本是演练脚本自己挑、自己复制的，库是 `VACUUM INTO` 出来的逻辑副本，不是原文件，也不在原路径上。
+  - 所以它们不证明真实根本身（原文件、原路径、WAL 状态）的转换能走通。改走正式链路之后的第六次演练见「W4 前的 P2 关口」的 P2-07。
 - **结果**（副本 26 个库、26 个文件，162 MB）：
   - dry-run：VERIFY 通过，671 个业务族，没有 pending。
   - 完整转换：PUBLISHED；启动判定 Published；与副本比较 Unchanged。

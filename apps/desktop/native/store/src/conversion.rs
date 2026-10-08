@@ -14,9 +14,11 @@
 
 use crate::jsjson::{self, Value};
 use crate::legacy::{self, ConvertError, ConvertOptions, LegacySources, Report};
+use crate::pin;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -73,6 +75,12 @@ pub enum Error {
     Refused(String),
     /// 测试注入的中断（模拟进程被杀）。
     Interrupted(&'static str),
+    /// dry-run 的清理没做完：输出目录里有不是本次建的东西，或者本次建的东西被换过。那些条目原样留下，
+    /// 不删；`outcome` 是清理之前的结果（报告已经写出时它就在输出目录里）。
+    CleanupIncomplete {
+        left: Vec<String>,
+        outcome: String,
+    },
 }
 
 impl std::fmt::Display for Error {
@@ -86,6 +94,11 @@ impl std::fmt::Display for Error {
             Error::Unpublishable(why) => write!(f, "the conversion cannot be published: {why}"),
             Error::Refused(why) => write!(f, "refused: {why}"),
             Error::Interrupted(at) => write!(f, "interrupted at {at}"),
+            Error::CleanupIncomplete { left, outcome } => write!(
+                f,
+                "the dry-run output was not fully removed (left as is: {}); the run itself ended with {outcome}",
+                left.join("; ")
+            ),
         }
     }
 }
@@ -120,62 +133,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // ---------------------------------------------------------------- 原子写
 
-/// 改名，落盘之后才返回（07 §1）：Windows 上是 `MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`。
-/// `std::fs::rename` 不带 WRITE_THROUGH，而 Windows 上目录不能单独 fsync，这个标志就是「fsync 目录」那一步。
-/// 不替换时目标已存在就失败（发布与封存都不覆盖）。
-#[cfg(windows)]
+/// 改名，落盘之后才返回（07 §1）：共用的持久化契约（[`atm_install_state::durable::rename`]，
+/// `MoveFileExW(WRITE_THROUGH [| REPLACE_EXISTING])`，共享冲突退避重试）。不替换时目标已存在就失败（发布与封存都不覆盖）。
 fn rename_durable(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
-    }
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
-    let wide = |p: &Path| {
-        p.as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect::<Vec<u16>>()
-    };
-    let (a, b) = (wide(from), wide(to));
-    let flags = MOVEFILE_WRITE_THROUGH
-        | if replace {
-            MOVEFILE_REPLACE_EXISTING
-        } else {
-            0
-        };
-    // 刚写完的文件常被杀毒软件或索引器短暂打开，改名会得到 ACCESS_DENIED / SHARING_VIOLATION / LOCK_VIOLATION。
-    // 这类占用几百毫秒内就会放开：退避重试约 10 秒，仍不行才报错（W3d 变异运行里实测撞到过 32）。
-    let mut delay = std::time::Duration::from_millis(10);
-    let mut waited = std::time::Duration::ZERO;
-    loop {
-        // SAFETY: 两个指针指向以 0 结尾、调用期间一直存活的 UTF-16 缓冲区；函数不保留它们。
-        if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), flags) } != 0 {
-            return Ok(());
-        }
-        let e = std::io::Error::last_os_error();
-        let transient = matches!(e.raw_os_error(), Some(5 | 32 | 33));
-        if !transient || waited >= std::time::Duration::from_secs(10) {
-            return Err(located(
-                e,
-                "move",
-                &format!("{} -> {}", from.display(), to.display()),
-            ));
-        }
-        std::thread::sleep(delay);
-        waited += delay;
-        delay = (delay * 2).min(std::time::Duration::from_millis(500));
-    }
-}
-
-#[cfg(not(windows))]
-fn rename_durable(from: &Path, to: &Path, replace: bool) -> std::io::Result<()> {
-    if !replace && std::fs::symlink_metadata(to).is_ok() {
-        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
-    }
-    std::fs::rename(from, to)?;
-    File::open(to.parent().unwrap_or(Path::new(".")))?.sync_all()
+    atm_install_state::durable::rename(from, to, replace)
 }
 
 /// IO 错误带上操作与路径：诊断时光有「系统找不到指定的文件」无从下手。
@@ -193,23 +154,9 @@ impl<T> Located<T> for std::io::Result<T> {
     }
 }
 
-/// 先写同目录的临时文件并刷盘，再落盘地改名替换：替换要么是旧的、要么是新的。
+/// 先写同目录的临时文件并刷盘，再落盘地改名替换：替换要么是旧的、要么是新的（[`atm_install_state::durable::write_atomic`]）。
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).at("create", parent)?;
-    }
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temporary = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
-    {
-        let mut f = File::create(&temporary).at("create", &temporary)?;
-        f.write_all(bytes).at("write", &temporary)?;
-        f.sync_all().at("flush", &temporary)?;
-    }
-    let r = rename_durable(&temporary, path, true);
-    if r.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    r
+    atm_install_state::durable::write_atomic(path, bytes)
 }
 
 fn is_sha256_hex(d: &str) -> bool {
@@ -227,7 +174,7 @@ fn sha_hex(bytes: &[u8]) -> String {
 
 fn file_sha256(path: &Path) -> std::io::Result<String> {
     let mut h = Sha256::new();
-    let mut f = File::open(path).at("open", path)?;
+    let mut f = crate::progress::Read::new(File::open(path).at("open", path)?);
     std::io::copy(&mut f, &mut h).at("read", path)?;
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -649,6 +596,15 @@ fn published_generation(layout: &Layout) -> Option<String> {
 /// 发布物里库之外的文件：`artifacts\`、`sync\`、`dispatch\` 三个子树里 (相对路径, size, sha256) 的集合摘要。
 /// 库与它的 -wal / -shm 由 generation 认，不算。只看这三个子树：库旁边会冒出别的程序的临时文件
 /// （实测有 `ATM.SQLITE-SHM.tmp`，随建随删、还被占着），它们不属于发布物。列出后又消失的文件同理跳过。
+/// 发布物逐个刷盘：库与 [`publication_digest`] 的三个子树。库旁边别的程序的临时文件不属于发布物，不碰。
+fn flush_publication(dir: &Path) -> std::io::Result<()> {
+    atm_install_state::durable::sync_file(&dir.join("atm.sqlite"))?;
+    for sub in ["artifacts", "sync", "dispatch"] {
+        atm_install_state::durable::sync_tree(&dir.join(sub))?;
+    }
+    Ok(())
+}
+
 fn publication_digest(dir: &Path) -> std::io::Result<String> {
     let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
     let mut files = Vec::new();
@@ -965,8 +921,7 @@ pub enum Step {
     Renamed,
 }
 
-/// 阶段进度回调 `(阶段, 已完成, 总数)`。
-pub type ProgressFn<'a> = &'a dyn Fn(&str, usize, usize);
+pub use crate::progress::ProgressFn;
 
 pub struct RunOptions<'a> {
     /// 转换时刻（`toISOString` 形状）。
@@ -1011,28 +966,31 @@ fn enumerate(root: &Path, at: &str) -> Result<Vec<SourceFile>> {
             mtime_ms,
             sha256: file_sha256(&path)?,
         });
+        crate::progress::pulse();
+        if crate::progress::stopped() {
+            return Err(Error::Interrupted("SNAPSHOT"));
+        }
     }
     Ok(out)
 }
 
 /// 07 §3 SNAPSHOT 的复制方式：枚举 F0、复制到 `src`、调 `after_copy`、再枚举 F1；
 /// F1 ≠ F0 或副本的 sha256 与 F0 不符都是源未静止。转换与 §6 的比较共用。
+///
+/// `copy(from, rel)` 把一个源文件放到 `src` 下的 `rel`：正式转换与比较用 [`copy_under`]（按路径），
+/// dry-run 用钉住的目录树（[`Pinned`]）。
 fn snapshot(
     root: &Path,
     at: &str,
     src: &Path,
+    copy: &mut dyn FnMut(&Path, &str) -> std::io::Result<()>,
     copied: &dyn Fn(usize, usize),
     after_copy: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Vec<SourceFile>> {
     let f0 = enumerate(root, at)?;
     copied(0, f0.len());
     for (i, f) in f0.iter().enumerate() {
-        let to = src.join(&f.rel);
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let from = root.join(&f.rel);
-        std::fs::copy(&from, &to).at("copy", &from)?;
+        copy(&root.join(&f.rel), &f.rel)?;
         copied(i + 1, f0.len());
     }
     after_copy()?;
@@ -1061,6 +1019,19 @@ fn snapshot(
     Ok(f0)
 }
 
+/// SNAPSHOT 按路径复制到 `dst` 下（staging 与比较的 scratch 都在 `N` 里，是本程序自己的目录）。
+fn copy_under(dst: &Path) -> impl FnMut(&Path, &str) -> std::io::Result<()> + '_ {
+    move |from, rel| {
+        let to = dst.join(rel);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::progress::copy_path(from, &to)
+            .at("copy", from)
+            .map(|_| ())
+    }
+}
+
 /// 提交门：报告里不能有没处理的族实例（`Report::pending`）。VERIFY 只比已处理的族，漏掉的族要在这里拦下。
 fn publishable(report: &Report) -> std::result::Result<(), String> {
     let pending = report.pending();
@@ -1071,7 +1042,23 @@ fn publishable(report: &Report) -> std::result::Result<(), String> {
     }
 }
 
+/// 记 FAILED 并返回要报的错误。FAILED 写不下（例如磁盘满）时，报的仍是原来的失败原因，后面注明 FAILED 没记下：
+/// 不能让写 FAILED 的错误盖掉真正的原因（W3 peer r1 P2-05）。`M` 这时留着上一份完整的。
+fn failed(layout: &Layout, m: &mut Manifest, e: Error) -> Error {
+    match fail(layout, m, e.to_string()) {
+        Ok(()) => e,
+        Err(w) => Error::Io(std::io::Error::new(
+            w.kind(),
+            format!("{e}; FAILED was not recorded: {w}"),
+        )),
+    }
+}
+
 fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
+    // 注入的「进程被杀」（`progress::stop_at`）之后什么都不写：被杀的进程写不了 FAILED。
+    if crate::progress::stopped() {
+        return Ok(());
+    }
     m.phase = Phase::Failed;
     m.failure = Some(why);
     write_manifest(layout, m)
@@ -1080,6 +1067,17 @@ fn fail(layout: &Layout, m: &mut Manifest, why: String) -> std::io::Result<()> {
 /// 07 §3：从 SNAPSHOT 一直走到 PUBLISHED。调用方先拿到准入，并按 [`decide`] 处理掉 S3 / S4 / S5 的残留。
 /// 失败时 `M` 记 FAILED 与原因，staging 保留供诊断；源与发布物都不改。
 pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
+    // 没有回调也计量：工作量还用于测试注入的停下（`progress::stop_at`）。
+    let quiet = |_: &str, _: usize, _: usize, _: u64| {};
+    let meter = crate::progress::Meter::new(opts.progress.unwrap_or(&quiet));
+    crate::progress::with(Some(&meter), || {
+        // 首条进度在任何枚举、复制之前（W3 peer r1 P2-03）：setup 的首条进度预算从进程启动算起。
+        crate::progress::set("SNAPSHOT", 0, 0);
+        run_metered(layout, opts)
+    })
+}
+
+fn run_metered(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
     let g = opts.generation;
     clear_startup_state(layout)?;
     let staging = layout.staging(g);
@@ -1103,6 +1101,10 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
 
     match attempt(layout, opts, &mut m) {
         Err(e @ Error::Interrupted(_)) => Err(e),
+        // 注入的「进程被杀」（`progress::stop_at`）：同上，不做任何收尾。
+        Err(_) if crate::progress::stopped() => {
+            Err(Error::Interrupted("a killed process (injected)"))
+        }
         Err(e) => {
             // 发布之前的任何失败（含磁盘满、写不进 staging）都记 FAILED 与原因（F8）；
             // 已经在 PUBLISHING 的不改：改名前失败按 S3 重来，改名后按 S4 认发布物。
@@ -1110,7 +1112,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
                 m.phase,
                 Phase::Failed | Phase::Publishing | Phase::Published
             ) {
-                fail(layout, &mut m, e.to_string())?;
+                return Err(failed(layout, &mut m, e));
             }
             Err(e)
         }
@@ -1122,25 +1124,19 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
 fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Manifest> {
     let staging = layout.staging(&m.generation);
     // SNAPSHOT：枚举 F0、复制、再枚举 F1，副本的 sha256 逐个等于 F0。
-    let report_progress = |stage: &str, done: usize, total: usize| {
-        if let Some(p) = opts.progress {
-            p(stage, done, total);
-        }
-    };
+    let src = staging.join("src");
     let snapshot = snapshot(
         opts.legacy_root,
         opts.at,
-        &staging.join("src"),
-        &|done, total| report_progress("SNAPSHOT", done, total),
+        &src,
+        &mut copy_under(&src),
+        &|done, total| crate::progress::set("SNAPSHOT", done, total),
         &mut || checkpoint(opts.hook, Step::SnapshotCopied, "SNAPSHOT"),
     );
     match snapshot {
         Ok(files) => m.source_files = files,
         Err(e @ Error::Interrupted(_)) => return Err(e),
-        Err(e) => {
-            fail(layout, m, e.to_string())?;
-            return Err(e);
-        }
+        Err(e) => return Err(failed(layout, m, e)),
     }
 
     // IMPORT + VERIFY：在副本上转换（转换器自带独立 VERIFY），登记路径指向 L。
@@ -1162,18 +1158,19 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
                 secrets_check: opts.secrets_check,
                 accept_unconvertible: opts.accept_unconvertible,
                 origin_root: Some(opts.legacy_root),
-                progress: opts.progress.map(legacy::Progress),
+                // 计量已经装在当前线程上（`run`）。
+                progress: None,
             },
         )
     });
     let report: Report = match converted {
         Ok(r) => r,
         Err(e) => {
+            // 报告写不下不掩盖失败原因：照样记 FAILED、报原来的错误。
             if let ConvertError::Verify(r) = &e {
-                write_atomic(&staging.join("report.json"), r.report_json().as_bytes())?;
+                let _ = write_atomic(&staging.join("report.json"), r.report_json().as_bytes());
             }
-            fail(layout, m, e.to_string())?;
-            return Err(e.into());
+            return Err(failed(layout, m, e.into()));
         }
     };
     let report_json = report.report_json();
@@ -1183,8 +1180,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
         report.attachment_jsonl().as_bytes(),
     )?;
     if let Err(why) = publishable(&report) {
-        fail(layout, m, why.clone())?;
-        return Err(Error::Unpublishable(why));
+        return Err(failed(layout, m, Error::Unpublishable(why)));
     }
     m.phase = Phase::Verify;
     m.verify_digest = Some(sha_hex(report_json.as_bytes()));
@@ -1198,10 +1194,12 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
         let c = Connection::open(data.join("atm.sqlite"))?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
+    // 复制来的附件、日志、密文与库逐个刷盘，再写 M、再改名发布（W3 peer r1 P2-04）。
+    flush_publication(&data)?;
     m.phase = Phase::Publishing;
     m.publication_digest = Some(publication_digest(&data)?);
     write_manifest(layout, m)?;
-    report_progress("PUBLISHING", 0, 1);
+    crate::progress::set("PUBLISHING", 0, 1);
     checkpoint(opts.hook, Step::BeforeRename, "PUBLISHING")?;
     if layout.data().exists() {
         // 发布目标已经有东西（不该有：调用方应已按 S5 处理）。不覆盖，整体隔离。
@@ -1210,7 +1208,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     rename_durable(&data, &layout.data(), false)?;
     checkpoint(opts.hook, Step::Renamed, "PUBLISHING")?;
     publish(layout, m, opts.at)?;
-    report_progress("PUBLISHED", 1, 1);
+    crate::progress::set("PUBLISHED", 1, 1);
     Ok(m.clone())
 }
 
@@ -1275,6 +1273,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
         )?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
+    flush_publication(&data)?;
     let mut m = Manifest {
         converter_version: legacy::CONVERTER_VERSION.to_string(),
         source_root: None,
@@ -1371,6 +1370,7 @@ pub fn compare(
             opts.legacy_root,
             &m.started_at,
             &src,
+            &mut copy_under(&src),
             &|_, _| {},
             &mut || Ok(()),
         )?;
@@ -1772,9 +1772,155 @@ fn refuse_overlap(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<(
     Ok(())
 }
 
+/// 钉住输出目录（W3 r2 P1-R2-01）：先钉住最近一个已存在的祖先，按它的真实位置查重叠，再把缺的每一层
+/// 相对父目录的句柄排他新建。返回整条链，最后一个是输出目录。链上的目录在 dry-run 期间不能改名、
+/// 不能换成 junction，所以之后按钉住的最终路径写入与清理，到达的都是这里钉住的目录。
+fn pin_out(out: &Path, source: &Path, v3_root: Option<&Path>) -> Result<Vec<pin::Dir>> {
+    let abs = std::path::absolute(out).at("resolve", out)?;
+    let mut existing = abs.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing.file_name().ok_or(e)?.to_os_string());
+                existing = existing.parent().unwrap_or(existing);
+            }
+            Err(e) => return Err(located(e, "stat", &existing.display()).into()),
+        }
+    }
+    missing.reverse();
+    let base = pin::open(existing).at("open", existing)?;
+    let mut target = base.path().to_path_buf();
+    target.extend(&missing);
+    refuse_overlap(&target, source, v3_root)?;
+    if missing.is_empty() {
+        let mut entries = std::fs::read_dir(base.path()).at("list", base.path())?;
+        if entries.next().is_some() {
+            return Err(Error::Refused(format!(
+                "the output {} is not empty",
+                out.display()
+            )));
+        }
+    }
+    let mut chain = vec![base];
+    for name in &missing {
+        let parent = chain.last().expect("the chain starts with the base");
+        let next = pin::create(parent, name).at("create", &parent.path().join(name))?;
+        chain.push(next);
+    }
+    Ok(chain)
+}
+
+/// dry-run 的 SNAPSHOT 副本：`src` 下的每一层目录都排他新建并钉住，文件排他新建（名字被占就失败）并记下身份。
+/// 清理只删这些：文件与目录都按新建时的身份核对，不认识的条目一律不碰（W3 r3 P1-R3-01）。
+struct Pinned {
+    root: pin::Dir,
+    /// (相对 `src` 的目录, 钉住的目录)，按建出的先后。
+    dirs: Vec<(PathBuf, pin::Dir)>,
+    /// (所在目录相对 `src` 的路径, 新建的文件)。
+    files: Vec<(PathBuf, pin::FileMark)>,
+}
+
+impl Pinned {
+    fn copy(&mut self, from: &Path, rel: &str) -> std::io::Result<()> {
+        let rel = Path::new(rel);
+        let plain = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a plain relative path", rel.display()),
+            )
+        };
+        let mut at: Option<usize> = None;
+        let mut prefix = PathBuf::new();
+        for c in rel.parent().into_iter().flat_map(Path::components) {
+            let std::path::Component::Normal(name) = c else {
+                return Err(plain());
+            };
+            prefix.push(name);
+            at = Some(match self.dirs.iter().position(|(p, _)| *p == prefix) {
+                Some(i) => i,
+                None => {
+                    let parent = at.map_or(&self.root, |i| &self.dirs[i].1);
+                    let dir = pin::create(parent, name).at("create", &parent.path().join(name))?;
+                    self.dirs.push((prefix.clone(), dir));
+                    self.dirs.len() - 1
+                }
+            });
+        }
+        let parent = at.map_or(&self.root, |i| &self.dirs[i].1);
+        let name = rel.file_name().ok_or_else(plain)?;
+        let to = parent.path().join(name);
+        let (mut w, mark) = pin::create_file(parent, name).at("create", &to)?;
+        self.files.push((prefix, mark));
+        crate::progress::copy(from, &mut w).at("copy", from)?;
+        Ok(())
+    }
+
+    /// 删掉整个副本：先按身份删本次建的文件，再由深到浅删本次建的目录，最后是 `src` 自己。哪一处删不掉（被换过、
+    /// 里面有别人的东西），它和它的每一层祖先都原样留下——祖先里有它，删不掉也不该删。返回留下的条目。
+    fn remove(self) -> Vec<String> {
+        let mut left = Vec::new();
+        let mut kept: Vec<PathBuf> = Vec::new();
+        // pin 的错误文本里已经带着那个文件或目录的路径。
+        for (dir, mark) in self.files {
+            if let Err(e) = pin::remove_file(mark) {
+                left.push(e.to_string());
+                kept.push(dir);
+            }
+        }
+        for (rel, dir) in self.dirs.into_iter().rev() {
+            if kept.iter().any(|k| k.starts_with(&rel)) {
+                drop(dir);
+                continue;
+            }
+            if let Err(e) = dir.remove() {
+                left.push(e.to_string());
+                kept.push(rel);
+            }
+        }
+        if kept.is_empty()
+            && let Err(e) = self.root.remove()
+        {
+            left.push(e.to_string());
+        }
+        left
+    }
+}
+
+/// dry-run 写报告：在钉住的目录里排他新建临时文件、刷盘、不替换地改名。名字被占就失败，不会写进别人放在那里
+/// 的文件。临时文件从新建到改名一直开着，改名与失败时的丢弃都按句柄做（W3 r4 P1-R4-01）：这段时间里别人
+/// 改不了它的名、删不掉它，所以按名字删到别人的文件这种事不会发生。
+fn write_new(dir: &pin::Dir, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let temporary = format!("{name}.{}.tmp", std::process::id());
+    let at = dir.path().join(&temporary);
+    let mut f = pin::create_open(dir, OsStr::new(&temporary)).at("create", &at)?;
+    let written = f
+        .file()
+        .write_all(bytes)
+        .and_then(|()| f.file().sync_all())
+        .at("write", &at)
+        .and_then(|()| f.rename_into(dir, OsStr::new(name)));
+    if let Err(e) = written {
+        // 丢弃的错误带着文件现在的位置（改名成功之后就是 `name`，见 `NewFile::rename_into`）。
+        if let Err(d) = f.discard() {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!("{e}; it was not removed: {d}"),
+            ));
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// 07 §9：`atm.exe migrate --dry-run --source <L> --out <dir>` 的库入口。
 /// 在 `out` 里执行 SNAPSHOT → IMPORT / VERIFY，写出 `report.json` 与 `attachment.jsonl`；
 /// 不写 `L`，不写 `N`（不碰 `M`、`A`、启动状态与进度），不起任何调度器。
+///
+/// 输出目录、它的祖先、`src` 与 `data` 在整个写入与清理期间都是钉住的（[`pin`]）：检查之后把哪一层换成指向
+/// `L` 或 `N` 的 junction 都做不到。`src`、`data` 与 `src` 下的每层目录都是本次排他新建的，清理只删它们；
+/// `src` 里只删本次建的文件与目录（按身份），别的条目留下，并以 [`Error::CleanupIncomplete`] 报告。
 pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     let refuse = |why: String| Err(Error::Refused(why));
     refuse_overlap(o.out, o.source, o.v3_root)?;
@@ -1790,74 +1936,223 @@ pub fn dry_run(o: DryRunOptions<'_>) -> Result<DryRun> {
     if let Quiesce::Wait(why) = (o.quiesce)() {
         return Ok(DryRun::SourceBusy(why));
     }
-    std::fs::create_dir_all(o.out).at("create", o.out)?;
-    // 建好之后取它的真实路径再查一次，之后的写入都落在这个真实路径上：检查与建目录之间被换成 junction 也写不进去。
-    let out = std::fs::canonicalize(o.out).at("resolve", o.out)?;
-    refuse_overlap(&out, o.source, o.v3_root)?;
-    let src = out.join("src");
-    let data = out.join("data");
-    let tidy = |keep_data: bool| {
-        let _ = std::fs::remove_dir_all(&src);
-        if !keep_data {
-            let _ = std::fs::remove_dir_all(&data);
-        }
+    // 静止判定之后才钉住、才建：钉住时按真实位置再查一次重叠，之后去向就不会再变。
+    let chain = pin_out(o.out, o.source, o.v3_root)?;
+    let out_dir = chain.last().expect("pin_out returns at least the base");
+    let out = out_dir.path().to_path_buf();
+    let mut src = Pinned {
+        root: pin::create(out_dir, OsStr::new("src")).at("create", &out.join("src"))?,
+        dirs: Vec::new(),
+        files: Vec::new(),
     };
+    let mut data: Option<pin::Dir> = None;
     let after_copy = o.after_copy;
-    match snapshot(o.source, o.at, &src, &|_, _| {}, &mut || {
-        after_copy();
-        Ok(())
-    }) {
-        Ok(_) => {}
-        Err(Error::SourceNotQuiet(why)) => {
-            tidy(false);
-            return Ok(DryRun::SourceNotQuiet(why));
-        }
-        Err(e) => {
-            tidy(false);
-            return Err(e);
-        }
-    }
-    std::fs::create_dir_all(&data).at("create", &data)?;
-    let converted = LegacySources::from_root(&src).and_then(|sources| {
-        legacy::convert(
-            &sources,
-            &data.join("atm.sqlite"),
-            &ConvertOptions {
-                at: o.at,
-                allow_real_data_root: o.allow_real_data_root,
-                real_data_root: o.real_data_root,
-                generation: None,
-                secrets_check: o.secrets_check,
-                accept_unconvertible: o.accept_unconvertible,
-                origin_root: Some(o.source),
-                progress: None,
+    let outcome = (|| -> Result<DryRun> {
+        let src_path = src.root.path().to_path_buf();
+        match snapshot(
+            o.source,
+            o.at,
+            &src_path,
+            &mut |from, rel| src.copy(from, rel),
+            &|_, _| {},
+            &mut || {
+                after_copy();
+                Ok(())
             },
-        )
-    });
-    let outcome = match converted {
-        Ok(report) => {
-            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
-            write_atomic(
-                &out.join("attachment.jsonl"),
-                report.attachment_jsonl().as_bytes(),
-            )?;
-            Ok(DryRun::Verified {
+        ) {
+            Ok(_) => {}
+            Err(Error::SourceNotQuiet(why)) => return Ok(DryRun::SourceNotQuiet(why)),
+            Err(e) => return Err(e),
+        }
+        let data =
+            data.insert(pin::create(out_dir, OsStr::new("data")).at("create", &out.join("data"))?);
+        let converted = LegacySources::from_root(&src_path).and_then(|sources| {
+            legacy::convert(
+                &sources,
+                &data.path().join("atm.sqlite"),
+                &ConvertOptions {
+                    at: o.at,
+                    allow_real_data_root: o.allow_real_data_root,
+                    real_data_root: o.real_data_root,
+                    generation: None,
+                    secrets_check: o.secrets_check,
+                    accept_unconvertible: o.accept_unconvertible,
+                    origin_root: Some(o.source),
+                    progress: None,
+                },
+            )
+        });
+        let report = match converted {
+            Ok(report) => report,
+            Err(ConvertError::Verify(report)) => *report,
+            Err(e) => return Err(e.into()),
+        };
+        write_new(out_dir, "report.json", report.report_json().as_bytes())?;
+        write_new(
+            out_dir,
+            "attachment.jsonl",
+            report.attachment_jsonl().as_bytes(),
+        )?;
+        let failures = report.failures();
+        Ok(if failures.is_empty() {
+            DryRun::Verified {
                 business_digest: report.business_digest(),
                 pending: report.pending(),
-            })
-        }
-        Err(ConvertError::Verify(report)) => {
-            write_atomic(&out.join("report.json"), report.report_json().as_bytes())?;
-            write_atomic(
-                &out.join("attachment.jsonl"),
-                report.attachment_jsonl().as_bytes(),
-            )?;
-            Ok(DryRun::VerifyFailed(report.failures()))
-        }
-        Err(e) => Err(e.into()),
+            }
+        } else {
+            DryRun::VerifyFailed(failures)
+        })
+    })();
+    let mut left = src.remove();
+    if let Some(data) = data
+        && !o.keep_data
+        && let Err(e) = data.remove_tree()
+    {
+        left.push(format!("{}: {e}", out.join("data").display()));
+    }
+    drop(chain);
+    if left.is_empty() {
+        return outcome;
+    }
+    // 清理没做完不能报成功：留下的东西要有人看（W3 r3 P1-R3-01）。
+    Err(Error::CleanupIncomplete {
+        left,
+        outcome: match &outcome {
+            Ok(r) => format!("{r:?}"),
+            Err(e) => e.to_string(),
+        },
+    })
+}
+
+// ---------------------------------------------------------------- 演练
+
+pub struct RehearseOptions<'a> {
+    pub at: &'a str,
+    /// 旧根 `L`：只读，原路径直接用（附件等路径按它映射），不另做副本。
+    pub source: &'a Path,
+    /// 空的工作目录：dry-run 输出到 `work\dry`，完整转换的 `N` 是 `work\n`。
+    pub work: &'a Path,
+    pub generation: &'a str,
+    pub allow_real_data_root: bool,
+    pub real_data_root: Option<&'a Path>,
+    pub secrets_check: Option<fn(&[u8]) -> bool>,
+    /// 测试注入：每一步开始之前调用，参数是步名（`dry-run`、`run`、`compare`）。
+    pub before: &'a mut dyn FnMut(&str),
+}
+
+/// 演练走完了：每一步都是正式结论。
+#[derive(Debug)]
+pub struct Rehearsal {
+    /// 正式 SNAPSHOT 的文件清单（[`crate::legacy::snapshot_files`]）。
+    pub files: Vec<String>,
+    pub dry_run_digest: BTreeMap<String, String>,
+    pub layout: Layout,
+    pub manifest: Manifest,
+}
+
+/// 演练停在哪一步。每一种都是失败：调用方以非零退出。
+#[derive(Debug)]
+pub enum RehearseStop {
+    /// 正式枚举与守卫拒绝了这个根（未登记的条目等）。
+    Refused(Error),
+    /// dry-run 没有 VERIFY 通过，或者真转换会在提交门停下（`pending` 不空）。
+    DryRun(String),
+    /// 完整转换失败。
+    Run(Error),
+    /// dry-run 与完整转换各做一次 SNAPSHOT，两次的 business_digest 不同（列出不同的族）：两次之间 `L` 变了。
+    Moved(Vec<String>),
+    /// 启动判定不是 Published。
+    Decide(Box<Startup>),
+    /// 转换之后再比较 `L` 不是 Unchanged：多半是 2.x 在这期间写了数据，换个静止的时刻重跑。
+    Compare(Box<Comparison>),
+}
+
+/// W3i 的演练方法（W3 peer r2 P2-07）：对 `L` 原样走正式的 dry-run、完整转换、启动判定与比较，任何一步不是
+/// 正式意义上的通过就停下。不自己挑文件、不另做副本，所以复制集合、恢复依赖、路径映射都与正式转换相同。
+///
+/// 一致性边界：2.x 可能还在运行（演练不停它），所以静止判定按「静止」放行；副本的一致性由 SNAPSHOT 保证——
+/// 复制前后两次枚举（F0、F1）相同、副本的 sha256 逐个等于 F0，否则 dry-run 报 [`DryRun::SourceNotQuiet`]，
+/// 完整转换失败。得到的是 `L` 在复制期间没有变过的那一刻；最后的比较再确认转换之后 `L` 仍是那一刻的内容。
+/// 只读 `L`；只写 `work`。
+pub fn rehearse(o: RehearseOptions<'_>) -> std::result::Result<Rehearsal, RehearseStop> {
+    let files = crate::legacy::snapshot_files(o.source, o.at)
+        .map_err(|e| RehearseStop::Refused(e.into()))?;
+    let n = o.work.join("n");
+    (o.before)("dry-run");
+    let dry = dry_run(DryRunOptions {
+        at: o.at,
+        source: o.source,
+        out: &o.work.join("dry"),
+        v3_root: Some(&n),
+        allow_real_data_root: o.allow_real_data_root,
+        real_data_root: o.real_data_root,
+        secrets_check: o.secrets_check,
+        accept_unconvertible: &[],
+        keep_data: false,
+        quiesce: &mut || Quiesce::Quiet,
+        after_copy: &mut || {},
+    });
+    let dry_run_digest = match dry {
+        Ok(DryRun::Verified {
+            business_digest,
+            pending,
+        }) if pending.is_empty() => business_digest,
+        Ok(other) => return Err(RehearseStop::DryRun(format!("{other:?}"))),
+        Err(e) => return Err(RehearseStop::DryRun(e.to_string())),
     };
-    tidy(o.keep_data);
-    outcome
+    let layout = Layout::new(n);
+    (o.before)("run");
+    let manifest = run(
+        &layout,
+        RunOptions {
+            at: o.at,
+            generation: o.generation,
+            legacy_root: o.source,
+            allow_real_data_root: o.allow_real_data_root,
+            real_data_root: o.real_data_root,
+            secrets_check: o.secrets_check,
+            accept_unconvertible: &[],
+            hook: &mut |_| true,
+            progress: None,
+        },
+    )
+    .map_err(RehearseStop::Run)?;
+    let moved: Vec<String> = dry_run_digest
+        .keys()
+        .chain(manifest.business_digest.keys())
+        .filter(|k| dry_run_digest.get(*k) != manifest.business_digest.get(*k))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !moved.is_empty() {
+        return Err(RehearseStop::Moved(moved));
+    }
+    match decide(&layout, true) {
+        Startup::Published(_) => {}
+        other => return Err(RehearseStop::Decide(Box::new(other))),
+    }
+    (o.before)("compare");
+    match compare(
+        &layout,
+        &manifest,
+        &manifest.business_digest,
+        &CompareOptions {
+            legacy_root: o.source,
+            allow_real_data_root: o.allow_real_data_root,
+            real_data_root: o.real_data_root,
+            secrets_check: o.secrets_check,
+        },
+    ) {
+        Comparison::Unchanged(_) => {}
+        other => return Err(RehearseStop::Compare(Box::new(other))),
+    }
+    Ok(Rehearsal {
+        files,
+        dry_run_digest,
+        layout,
+        manifest,
+    })
 }
 
 #[cfg(test)]
@@ -1880,6 +2175,51 @@ mod tests {
             differing(&base, &digest),
             ["P2/tasks", "P3/tasks", "r/projects"]
         );
+    }
+
+    /// W3 r3 P1-R3-01：清理时发现某一层目录被换过（放开钉住到按身份重开之间），它和它的每一层祖先都原样留下，
+    /// 并报告出来；它里面本次建的文件、旁支的目录照常删。
+    #[cfg(windows)]
+    #[test]
+    fn a_replaced_directory_keeps_itself_and_every_ancestor() {
+        let base = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("store-unit")
+            .join("pinned-replaced");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let from = base.join("from.txt");
+        std::fs::write(&from, b"x").unwrap();
+        let outer = pin::open(&base).unwrap();
+        let mut p = Pinned {
+            root: pin::create(&outer, OsStr::new("src")).unwrap(),
+            dirs: Vec::new(),
+            files: Vec::new(),
+        };
+        for rel in ["a/b/c.txt", "a/d.txt", "e/f.txt", "g.txt"] {
+            p.copy(&from, rel).unwrap();
+        }
+        p.dirs
+            .iter_mut()
+            .find(|(rel, _)| rel == Path::new("a/b"))
+            .unwrap()
+            .1
+            .forge_identity();
+        let left = p.remove();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains("was replaced"), "{left:?}");
+        let src = base.join("src");
+        assert!(src.join("a/b").is_dir() && src.join("a").is_dir() && src.is_dir());
+        for gone in ["a/b/c.txt", "a/d.txt", "e/f.txt", "e", "g.txt"] {
+            assert!(!src.join(gone).exists(), "{gone}");
+        }
+        drop(outer);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// 不按数据根输入的报告：数据根下的文件族都是 pending，不能发布。

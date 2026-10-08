@@ -146,13 +146,14 @@ fn healthy(path: &Path, work: &Path) -> Result<bool> {
     let probe = work.join("probe.sqlite");
     let probe_wal = sidecar(&probe, "-wal");
     let _ = std::fs::remove_file(&probe_wal);
-    std::fs::copy(path, &probe)?;
+    crate::progress::copy_path(path, &probe)?;
     let wal = sidecar(path, "-wal");
     if std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0) {
-        std::fs::copy(&wal, &probe_wal)?;
+        crate::progress::copy_path(&wal, &probe_wal)?;
     }
     let ok = (|| -> rusqlite::Result<bool> {
         let c = Connection::open(&probe)?;
+        crate::progress::watch(&c)?;
         let rows: Vec<String> = c
             .prepare("PRAGMA quick_check")?
             .query_map([], |r| r.get(0))?
@@ -394,8 +395,8 @@ pub(super) fn migration_failed(
                 )));
             }
             // 用户点名舍弃：进回收站、没有数据；原库在 convert_files 里登记成 legacy 资产。
-            // 许可只对这一份内容有效：记下项目目录的文件集合摘要，计入 business_digest。
-            let digest = tree_digest(&root.join("projects").join(&row.id))?;
+            // 许可只对这一份内容有效：记下项目目录的内容摘要，计入 business_digest。
+            let digest = tree_digest(&root.join("projects").join(&row.id), work)?;
             report.dropped_sources.insert(row.id.clone(), digest);
             c.execute(
                 "UPDATE projects SET lifecycle = 'TRASHED', updated_at = ?2 WHERE id = ?1",
@@ -467,8 +468,13 @@ pub(super) fn migration_failed(
     Ok(prepared)
 }
 
-/// 一个目录下全部文件的集合摘要：按相对路径排序的 (路径, 大小, sha256)。目录不在时是空集合的摘要。
-fn tree_digest(dir: &Path) -> Result<String> {
+/// 一个目录下全部内容的摘要：按相对路径排序的 (路径, 种类, 摘要)。目录不在时是空集合的摘要。
+///
+/// 按内容而不是按存储取（W3 peer r2 P2-06）：
+/// - SQLite 库（文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项，取 [`database_digest`]。
+///   checkpoint、正常关库、SHM 重建、VACUUM、ANALYZE 都不改变它；WAL 里还没合并的写入照样算进去。
+/// - 其他文件按字节（大小与 sha256）。
+fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut files = Vec::new();
     let mut stack = vec![(dir.to_path_buf(), String::new())];
@@ -483,18 +489,159 @@ fn tree_digest(dir: &Path) -> Result<String> {
             if e.file_type()?.is_dir() {
                 stack.push((e.path(), rel));
             } else {
-                files.push((rel, e.metadata()?.len(), super::file_sha256(&e.path())?));
+                files.push((rel, e.path()));
             }
         }
     }
-    files.sort();
+    let databases: Vec<String> = files
+        .iter()
+        .filter(|(_, p)| is_database(p))
+        .map(|(rel, _)| rel.clone())
+        .collect();
+    let mut items = Vec::new();
+    for (rel, path) in files {
+        if databases
+            .iter()
+            .any(|db| rel == format!("{db}-wal") || super::root::is_wal_index(&rel, db))
+        {
+            continue;
+        }
+        let (kind, digest) = if databases.contains(&rel) {
+            database_digest(&path, work)?
+        } else {
+            let size = std::fs::metadata(&path)?.len();
+            ("file", format!("{size}:{}", super::file_sha256(&path)?))
+        };
+        items.push((rel, kind, digest));
+    }
+    items.sort();
     let mut h = Sha256::new();
-    h.update(b"ATM-DROPPED-PROJECT-1");
-    for (rel, size, sha) in files {
-        for part in [rel.as_bytes(), size.to_string().as_bytes(), sha.as_bytes()] {
+    h.update(b"ATM-DROPPED-PROJECT-2");
+    for (rel, kind, digest) in items {
+        for part in [rel.as_bytes(), kind.as_bytes(), digest.as_bytes()] {
             h.update(part);
             h.update([0]);
         }
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn is_database(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 16];
+    std::fs::File::open(path).is_ok_and(|mut f| f.read_exact(&mut header).is_ok())
+        && &header == b"SQLite format 3\0"
+}
+
+/// 一个库的内容摘要。库与非空的 `-wal` 复制到 `work` 里打开（WAL 在副本里恢复，不开源文件）：
+/// - 读得完：种类 `sqlite`，取逻辑内容（[`logical_digest`]）。
+/// - 打不开或读不完：种类 `sqlite-raw`，绑定原始字节——库与非空的 `-wal`（`-shm` 只是 WAL 的索引，不算）。
+///   这样的库任何变化（包括 checkpoint）都是「变了」：说不清就保守，不漏报。
+fn database_digest(path: &Path, work: &Path) -> Result<(&'static str, String)> {
+    let copy = work.join("dropped-digest.sqlite");
+    let copies = [copy.clone(), sidecar(&copy, "-wal"), sidecar(&copy, "-shm")];
+    // 上一个库留下的 -wal 会被当成这个库的 WAL 恢复进去：删不掉就失败，不能忽略。
+    let clear = || -> Result<()> {
+        for f in &copies {
+            match std::fs::remove_file(f) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+        }
+        Ok(())
+    };
+    clear()?;
+    let wal = sidecar(path, "-wal");
+    let has_wal = std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0);
+    std::fs::copy(path, &copy)?;
+    if has_wal {
+        std::fs::copy(&wal, &copies[1])?;
+    }
+    let logical = logical_digest(&copy);
+    clear()?;
+    if let Ok(digest) = logical {
+        return Ok(("sqlite", digest));
+    }
+    let mut raw = super::file_sha256(path)?;
+    if has_wal {
+        raw = format!("{raw}+{}", super::file_sha256(&wal)?);
+    }
+    Ok(("sqlite-raw", raw))
+}
+
+/// 库的逻辑内容：`user_version`、`application_id`；schema（类型、名字、所属表、SQL，不含随存储变的 rootpage）；
+/// 每张表与虚表的全部行，按全部列排序（不含隐含的 rowid：VACUUM 会给没有 INTEGER PRIMARY KEY 的表重排它）。
+/// 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
+fn logical_digest(db: &Path) -> rusqlite::Result<String> {
+    use rusqlite::types::ValueRef;
+    use sha2::{Digest, Sha256};
+    let c = Connection::open(db)?;
+    let mut h = Sha256::new();
+    h.update(b"ATM-DROPPED-SQLITE-1\0");
+    for pragma in ["user_version", "application_id"] {
+        let v: i64 = c.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))?;
+        h.update(format!("{pragma}={v}\0"));
+    }
+    let not_stat = "substr(name, 1, 11) <> 'sqlite_stat'";
+    let schema: Vec<(String, String, String, Option<String>)> = c
+        .prepare(&format!(
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE {not_stat} ORDER BY type, name"
+        ))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (kind, name, table, sql) in schema {
+        for part in [kind, name, table, sql.unwrap_or_default()] {
+            h.update(part.as_bytes());
+            h.update([0]);
+        }
+    }
+    let tables: Vec<String> = c
+        .prepare(&format!(
+            "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type IN ('table', 'virtual')
+             AND (substr(name, 1, 7) <> 'sqlite_' OR name = 'sqlite_sequence') AND {not_stat} ORDER BY name"
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for table in tables {
+        let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+        let columns = c
+            .prepare(&format!("SELECT * FROM {quoted}"))?
+            .column_count();
+        let order: Vec<String> = (1..=columns).map(|i| i.to_string()).collect();
+        let mut st = c.prepare(&format!(
+            "SELECT * FROM {quoted} ORDER BY {}",
+            order.join(", ")
+        ))?;
+        h.update(format!("table\0{table}\0{columns}\0"));
+        let mut rows = st.query([])?;
+        let mut count = 0u64;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            for i in 0..columns {
+                match row.get_ref(i)? {
+                    ValueRef::Null => h.update(b"n"),
+                    ValueRef::Integer(v) => {
+                        h.update(b"i");
+                        h.update(v.to_le_bytes());
+                    }
+                    ValueRef::Real(v) => {
+                        h.update(b"r");
+                        h.update(v.to_bits().to_le_bytes());
+                    }
+                    ValueRef::Text(v) => {
+                        h.update(b"t");
+                        h.update((v.len() as u64).to_le_bytes());
+                        h.update(v);
+                    }
+                    ValueRef::Blob(v) => {
+                        h.update(b"b");
+                        h.update((v.len() as u64).to_le_bytes());
+                        h.update(v);
+                    }
+                }
+            }
+        }
+        h.update(format!("rows\0{count}\0"));
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
