@@ -5761,10 +5761,11 @@ mod w3f {
             m.source_files.len()
         )));
         assert!(seen.contains(&("IMPORT".into(), 3, 3)) && seen.contains(&("VERIFY".into(), 3, 3)));
-        // 报到 PUBLISHED 了，没有见证仍然只是在等；10 min 不动就判卡住。
+        // 报到 PUBLISHED 了，没有见证仍然只是在等；最后一次推进之后 10 min 不动就判卡住。
         let last = handover::read_progress(&n.root).unwrap();
         assert_eq!(last.phase, "PUBLISHED");
-        let after = t0 + Duration::from_secs(60) * (seen.len() as u32 + 11);
+        let after =
+            t0 + Duration::from_secs(10) * (seen.len() as u32) + Duration::from_secs(11 * 60);
         assert!(matches!(
             watch.borrow_mut().observe(after, false, true, Some(&last)),
             WaitVerdict::Stuck(_)
@@ -6594,7 +6595,7 @@ mod fault_matrix {
     }
 
     /// W3 peer r1 P2-03：首条进度在枚举之前。根里有未登记的条目，枚举（正式的扫描）会拒绝；拒绝之前
-    /// setup 已经收到了 SNAPSHOT 0/0。
+    /// setup 已经收到了 SNAPSHOT 0/0，而且在工作量为 0 时就收到了（枚举本身推进的工作量在它之后，W4 关口 P2-W4A-01）。
     #[test]
     fn the_first_progress_comes_before_enumeration() {
         let (f, root) = json_fixture("w4a-first-progress");
@@ -6610,15 +6611,22 @@ mod fault_matrix {
             .map(|p| (p.phase.as_str(), p.progress))
             .collect();
         assert_eq!(
-            got,
-            [(
+            got[0],
+            (
                 "SNAPSHOT",
                 Counter {
                     done: 0,
                     total: 0,
                     work: 0
                 }
-            )]
+            )
+        );
+        // 之后到拒绝为止都是枚举：仍是 SNAPSHOT 0/0，只有工作量在涨。
+        assert!(
+            got.windows(2).all(|w| w[1].0 == "SNAPSHOT"
+                && (w[1].1.done, w[1].1.total) == (0, 0)
+                && w[1].1.work > w[0].1.work),
+            "{got:?}"
         );
     }
 
@@ -6639,6 +6647,10 @@ mod fault_matrix {
         let (r, seen) = converting(&n, &root, "T-LARGE", None);
         r.unwrap();
         // 同一个 (阶段, 已完成, 总数) 里有多少个不同的工作量：大项目所在的那一格至少有 5 个批次。
+        // IMPORT 那一格还要看得出目标库上的 SQL 在计量：30 万行写进目标库约 15 批（SQLite 指令计数，确定的；
+        // 实测有目标计量 35 批、没有 20 批）。只看 5 批的话，枚举与源侧的计量就够了，目标不计量也看不出来
+        // （W4 关口第二轮的变异发现）。
+        let mut import_most = 0;
         for phase in ["IMPORT", "VERIFY"] {
             let mut most = 0;
             for p in seen.iter().filter(|p| p.phase == phase) {
@@ -6653,7 +6665,11 @@ mod fault_matrix {
                 most = most.max(same);
             }
             assert!(most >= 5, "{phase}: {most}");
+            if phase == "IMPORT" {
+                import_most = most;
+            }
         }
+        assert!(import_most >= 28, "IMPORT: {import_most}");
         let policy = WaitPolicy {
             cap: Duration::from_secs(1_000 * 3600),
             ..WaitPolicy::default()
@@ -8105,6 +8121,49 @@ mod w3_peer_r2 {
         fs::remove_dir_all(out.join("src")).unwrap();
     }
 
+    /// 开着 `file`，等到 `signal` 出现后再开 `linger` 才放开；`deadline` 内没等到也放开，并返回 `false`。
+    /// 调用方必须断言返回值：没等到信号就放开，说明要验的「清理时短暂占用」根本没发生（W4 关口 P2-W4A-03）。
+    fn hold_until(
+        file: fs::File,
+        signal: PathBuf,
+        deadline: std::time::Duration,
+        linger: std::time::Duration,
+    ) -> std::thread::JoinHandle<bool> {
+        std::thread::spawn(move || {
+            let until = std::time::Instant::now() + deadline;
+            while !signal.exists() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let seen = signal.exists();
+            if seen {
+                std::thread::sleep(linger);
+            }
+            drop(file);
+            seen
+        })
+    }
+
+    /// [`hold_until`] 等不到信号时立刻放开文件，并报告没等到。
+    #[test]
+    fn a_hold_that_never_sees_its_signal_says_so() {
+        let (f, _, _) = roots("w4g-hold-timeout");
+        let path = f.dir.join("held.txt");
+        fs::write(&path, b"x").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        let started = std::time::Instant::now();
+        let seen = hold_until(
+            file,
+            f.dir.join("never"),
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(60),
+        )
+        .join()
+        .unwrap();
+        assert!(!seen);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        fs::remove_file(&path).unwrap();
+    }
+
     /// W3 r4 P2-R4-01：杀毒、索引这类短暂占用不算「留下」。副本在清理开始之后还被开着约 300 毫秒，
     /// 清理退避重试，照常删掉，结果是 Verified。
     #[test]
@@ -8114,28 +8173,28 @@ mod w3_peer_r2 {
         let out = f.dir.join("out");
         let copy = out.join("src").join("dispatch").join("config.json");
         let last_report = out.join("attachment.jsonl");
-        let mut holder: Option<std::thread::JoinHandle<()>> = None;
+        let mut holder: Option<std::thread::JoinHandle<bool>> = None;
         let result = dry(&root, &out, &n, &mut || Quiesce::Quiet, &mut || {
             let file = fs::OpenOptions::new()
                 .read(true)
                 .share_mode(1)
                 .open(&copy)
                 .unwrap();
-            let last_report = last_report.clone();
-            holder = Some(std::thread::spawn(move || {
-                // 报告写完之后立刻就是清理：再开着它 300 毫秒。
-                // 等报告写完，但有上限：dry-run 在报告之前就失败时，线程照样放开文件、结束，错误照常报出来
-                // （W3 peer r5 P2-R5-03）。
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-                while !last_report.exists() && std::time::Instant::now() < deadline {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                drop(file);
-            }));
+            // 报告写完之后立刻就是清理：再开着它 300 毫秒。等报告有上限：dry-run 在报告之前就失败时，
+            // 线程照样放开文件、结束（W3 peer r5 P2-R5-03），并报告没等到（W4 关口 P2-W4A-03）。
+            holder = Some(hold_until(
+                file,
+                last_report.clone(),
+                std::time::Duration::from_secs(120),
+                std::time::Duration::from_millis(300),
+            ));
         });
-        holder.unwrap().join().unwrap();
+        let held = holder.unwrap().join().unwrap();
         assert!(matches!(result, Ok(DryRun::Verified { .. })), "{result:?}");
+        assert!(
+            held,
+            "the report never appeared: the copy was not busy when the cleanup ran"
+        );
         assert!(!out.join("src").exists());
     }
 
@@ -8411,5 +8470,128 @@ mod w3_gate_snapshot {
             },
         });
         assert!(matches!(r, Ok(DryRun::Verified { .. })), "{r:?}");
+    }
+}
+
+/// W4 关口第一轮（`output/peer-atm3-w4a-r1.md`）的两条 P1：评审反例并入正式套件。
+mod w4_gate_r1 {
+    use super::w3d::{G1, layout, run};
+    use super::*;
+    use atm_store::conversion::{self as cv, CompareOptions, Comparison, RunOptions};
+
+    /// P1-W4A-01：附件的名字以 `-shm` / `-shm.tmp` 结尾也是业务文件：进快照、被复制、改了能比较出来。
+    /// 三个库旁边真正的 WAL 索引照旧不进快照。
+    #[test]
+    fn an_attachment_named_like_a_wal_index_is_still_an_attachment() {
+        let (f, root) = json_fixture("w4g-suffix");
+        let rel = "projects/P1/artifacts/customer-shm.tmp";
+        put(&root.join(rel), b"real attachment v1");
+        put(&root.join("projects/P1/artifacts/notes-SHM"), b"also real");
+        put(&root.join("projects/P1/project.sqlite-shm"), b"index");
+        put(&root.join("registry/REGISTRY.SQLITE-SHM.tmp"), b"index");
+        Connection::open(root.join("projects/P1/project.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE artifacts SET local_path = ?1 WHERE id = 'A1'",
+                [root.join(rel).to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
+        assert!(files.contains(&rel.to_string()), "{files:?}");
+        assert!(files.contains(&"projects/P1/artifacts/notes-SHM".to_string()));
+        assert!(!files.iter().any(|f| f.ends_with("project.sqlite-shm")));
+        assert!(
+            !files
+                .iter()
+                .any(|f| f.to_ascii_lowercase().ends_with("registry.sqlite-shm.tmp"))
+        );
+
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let c = Connection::open(n.database()).unwrap();
+        let path: String = q(
+            &c,
+            "SELECT local_path FROM artifacts WHERE project_id = 'P1' AND id = 'A1'",
+        );
+        assert_eq!(fs::read(n.root.join(&path)).unwrap(), b"real attachment v1");
+        put(&root.join(rel), b"real attachment v2");
+        let cmp = cv::compare(
+            &n,
+            &m,
+            &m.business_digest,
+            &CompareOptions {
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                progress: None,
+            },
+        );
+        assert!(matches!(cmp, Comparison::Changed { .. }), "{cmp:?}");
+    }
+
+    /// P1-W4A-02：舍弃项目里用户的 SQLite 附件改了 rowid（业务关联随之断开），比较必须判「变了」。
+    #[test]
+    fn a_dropped_projects_sqlite_attachment_is_compared_by_bytes() {
+        let (f, root) = settle_fixture("w4g-dropped-attachment");
+        empty_project(
+            &root.join("projects/P7/project.sqlite"),
+            "P7",
+            "XXX",
+            10,
+            Some("unconvertible"),
+        );
+        let artifact = root.join("projects/P7/artifacts/customer.sqlite");
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        let c = Connection::open(&artifact).unwrap();
+        c.execute_batch(
+            "CREATE TABLE documents(title TEXT); CREATE TABLE links(document_id INTEGER);
+             INSERT INTO documents(rowid, title) VALUES (7, 'customer record'); INSERT INTO links VALUES (7);",
+        )
+        .unwrap();
+        drop(c);
+        let n = layout(&f, "n");
+        let m = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &["GGG"],
+                hook: &mut |_| true,
+                progress: None,
+            },
+        )
+        .unwrap();
+        let opts = CompareOptions {
+            legacy_root: &root,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+            progress: None,
+        };
+        assert!(matches!(
+            cv::compare(&n, &m, &m.business_digest, &opts),
+            Comparison::Unchanged(_)
+        ));
+        let c = Connection::open(&artifact).unwrap();
+        let joined = || {
+            q::<i64>(
+                &c,
+                "SELECT count(*) FROM links JOIN documents ON documents.rowid = links.document_id",
+            )
+        };
+        assert_eq!(joined(), 1);
+        c.execute_batch("UPDATE documents SET rowid = 9 WHERE rowid = 7")
+            .unwrap();
+        assert_eq!(joined(), 0);
+        drop(c);
+        assert!(matches!(
+            cv::compare(&n, &m, &m.business_digest, &opts),
+            Comparison::Changed { .. }
+        ));
     }
 }

@@ -65,13 +65,20 @@ pub(super) fn walk(dir: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
         };
         for e in entries {
             let e = e?;
+            // 枚举本身也是工作：大的数据根要列很久（W4 关口 P2-W4A-01）。
+            crate::progress::pulse();
             let name = e.file_name().to_string_lossy().into_owned();
             let rel = if prefix.is_empty() {
                 name
             } else {
                 format!("{prefix}/{name}")
             };
-            let meta = std::fs::symlink_metadata(e.path())?;
+            // 列出之后又消失的条目跳过：别的程序在库旁边随建随删的 `-SHM.tmp` 就是这样（W4 关口第二轮的变异运行里
+            // 实测到比较因此得 UNKNOWN）。真正的业务变化由 F0 / F1 两次枚举的比对发现。
+            let meta = match std::fs::symlink_metadata(e.path()) {
+                Err(x) if x.kind() == std::io::ErrorKind::NotFound => continue,
+                m => m?,
+            };
             if meta.is_dir() {
                 stack.push((e.path(), rel));
             } else {
@@ -129,6 +136,19 @@ fn is_db_file(name: &str, db: &str) -> bool {
 pub(crate) fn is_wal_index(name: &str, db: &str) -> bool {
     let (n, d) = (name.to_ascii_lowercase(), db.to_ascii_lowercase());
     n == format!("{d}-shm") || n == format!("{d}-shm.tmp")
+}
+
+/// `rel`（数据根里的相对路径，`/` 分隔）是不是 2.x 那三个库之一旁边的 WAL 索引：
+/// `registry/registry.sqlite`、`knowledge/knowledge.sqlite`、`projects/<pid>/project.sqlite`。
+/// 只认这三个位置：附件、日志等普通文件即使名字以 `-shm` / `-shm.tmp` 结尾也是业务文件（W4 关口 P1-W4A-01）。
+pub(crate) fn is_known_wal_index(rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    match parts.as_slice() {
+        ["registry", name] => is_wal_index(name, "registry.sqlite"),
+        ["knowledge", name] => is_wal_index(name, "knowledge.sqlite"),
+        ["projects", pid, name] => !pid.starts_with('.') && is_wal_index(name, "project.sqlite"),
+        _ => false,
+    }
 }
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；

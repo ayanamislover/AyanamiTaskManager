@@ -192,6 +192,7 @@ pub(super) fn projects(
         })
         .collect();
     let c = Connection::open(registry)?;
+    crate::progress::watch(&c)?;
     let rows: Vec<Row> = c
         .prepare("SELECT id, code, lifecycle FROM projects WHERE lifecycle IN ('CREATING', 'RESTORING') ORDER BY id")?
         .query_map([], |r| {
@@ -328,6 +329,7 @@ pub(super) fn migration_failed(
 ) -> Result<Vec<(PathBuf, PathBuf)>> {
     let mut prepared = Vec::new();
     let c = Connection::open(registry)?;
+    crate::progress::watch(&c)?;
     let rows: Vec<Row> = c
         .prepare("SELECT id, code, lifecycle FROM projects WHERE lifecycle = 'MIGRATION_FAILED' ORDER BY code")?
         .query_map([], |r| {
@@ -471,9 +473,10 @@ pub(super) fn migration_failed(
 /// 一个目录下全部内容的摘要：按相对路径排序的 (路径, 种类, 摘要)。目录不在时是空集合的摘要。
 ///
 /// 按内容而不是按存储取（W3 peer r2 P2-06）：
-/// - SQLite 库（文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项，取 [`database_digest`]。
-///   checkpoint、正常关库、SHM 重建、VACUUM、ANALYZE 都不改变它；WAL 里还没合并的写入照样算进去。
-/// - 其他文件按字节（大小与 sha256）。
+/// - 项目库（目录下的 `project.sqlite`，文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项，
+///   取 [`database_digest`]。checkpoint、正常关库、SHM 重建、VACUUM、ANALYZE 都不改变它；WAL 里还没合并的写入照样算进去。
+/// - 其他文件按字节（大小与 sha256），包括附件里的 SQLite 文件与它们的 `-wal`、`-shm`：用户自己的库里 rowid
+///   可能就是业务键，不能套用 ATM 库的规范化（W4 关口 P1-W4A-02）。
 fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
     let mut files = Vec::new();
@@ -485,6 +488,7 @@ fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
         };
         for e in entries {
             let e = e?;
+            crate::progress::pulse();
             let rel = format!("{prefix}/{}", e.file_name().to_string_lossy());
             if e.file_type()?.is_dir() {
                 stack.push((e.path(), rel));
@@ -495,7 +499,7 @@ fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
     }
     let databases: Vec<String> = files
         .iter()
-        .filter(|(_, p)| is_database(p))
+        .filter(|(rel, p)| rel.eq_ignore_ascii_case("/project.sqlite") && is_database(p))
         .map(|(rel, _)| rel.clone())
         .collect();
     let mut items = Vec::new();
@@ -534,9 +538,9 @@ fn is_database(path: &Path) -> bool {
 }
 
 /// 一个库的内容摘要。库与非空的 `-wal` 复制到 `work` 里打开（WAL 在副本里恢复，不开源文件）：
-/// - 读得完：种类 `sqlite`，取逻辑内容（[`logical_digest`]）。
-/// - 打不开或读不完：种类 `sqlite-raw`，绑定原始字节——库与非空的 `-wal`（`-shm` 只是 WAL 的索引，不算）。
-///   这样的库任何变化（包括 checkpoint）都是「变了」：说不清就保守，不漏报。
+/// - 读得完、并且是 2.x 的项目库（有 `project_meta` 表）：种类 `sqlite`，取逻辑内容（[`logical_digest`]）。
+/// - 打不开、读不完，或证明不了是项目库：种类 `sqlite-raw`，绑定原始字节——库与非空的 `-wal`
+///   （`-shm` 只是 WAL 的索引，不算）。这样的库任何变化（包括 checkpoint）都是「变了」：说不清就保守，不漏报。
 fn database_digest(path: &Path, work: &Path) -> Result<(&'static str, String)> {
     let copy = work.join("dropped-digest.sqlite");
     let copies = [copy.clone(), sidecar(&copy, "-wal"), sidecar(&copy, "-shm")];
@@ -553,9 +557,9 @@ fn database_digest(path: &Path, work: &Path) -> Result<(&'static str, String)> {
     clear()?;
     let wal = sidecar(path, "-wal");
     let has_wal = std::fs::metadata(&wal).is_ok_and(|m| m.len() > 0);
-    std::fs::copy(path, &copy)?;
+    crate::progress::copy_path(path, &copy)?;
     if has_wal {
-        std::fs::copy(&wal, &copies[1])?;
+        crate::progress::copy_path(&wal, &copies[1])?;
     }
     let logical = logical_digest(&copy);
     clear()?;
@@ -576,6 +580,17 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
     use rusqlite::types::ValueRef;
     use sha2::{Digest, Sha256};
     let c = Connection::open(db)?;
+    crate::progress::watch(&c)?;
+    // 只有 2.x 的项目库能这样规范化：它的业务主键都在显式列里，隐含的 rowid 与 FTS 影子表不承载业务。
+    // 证明不了（没有 project_meta）就按错误返回，调用方改按原始字节绑定。
+    let project: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'project_meta')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !project {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let mut h = Sha256::new();
     h.update(b"ATM-DROPPED-SQLITE-1\0");
     for pragma in ["user_version", "application_id"] {
@@ -644,4 +659,124 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
         h.update(format!("rows\0{count}\0"));
     }
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{logical_digest, tree_digest};
+    use rusqlite::Connection;
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("store-unit")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// W4 关口 P1-W4A-02：舍弃项目里用户自己的 SQLite 附件按字节绑定。rowid 在用户的库里可能就是业务键，
+    /// 改了它（业务关联随之变化）摘要必须变；项目库自己的 rowid 照旧不算（checkpoint、VACUUM 不误报）。
+    #[test]
+    fn a_sqlite_attachment_is_bound_to_its_bytes() {
+        let dir = scratch("dropped-sqlite-attachment");
+        let (tree, work) = (dir.join("project"), dir.join("work"));
+        std::fs::create_dir_all(tree.join("artifacts")).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let db = tree.join("artifacts/customer.sqlite");
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE documents(title TEXT); CREATE TABLE links(document_id INTEGER);
+             INSERT INTO documents(rowid, title) VALUES (7, 'customer record'); INSERT INTO links VALUES (7);",
+        )
+        .unwrap();
+        let before = tree_digest(&tree, &work).unwrap();
+        c.execute_batch("UPDATE documents SET rowid = 9 WHERE rowid = 7;")
+            .unwrap();
+        drop(c);
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+
+        // 附件里的库即使像项目库（有 project_meta，例如用户存的一份项目库副本）也按字节：
+        // 逻辑摘要只给目录下那一个 project.sqlite。
+        let copy = tree.join("artifacts/copy-of-project.sqlite");
+        let k = Connection::open(&copy).unwrap();
+        k.execute_batch(
+            "CREATE TABLE project_meta(singleton INTEGER); INSERT INTO project_meta VALUES (1);
+             CREATE TABLE notes(body TEXT); INSERT INTO notes(rowid, body) VALUES (5, 'a');",
+        )
+        .unwrap();
+        let before = tree_digest(&tree, &work).unwrap();
+        k.execute_batch("UPDATE notes SET rowid = 6 WHERE rowid = 5;")
+            .unwrap();
+        drop(k);
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+
+        // 同样的库放在项目库的位置、但没有 project_meta：证明不了是项目库，也按字节。
+        let fake = tree.join("project.sqlite");
+        std::fs::copy(&db, &fake).unwrap();
+        let before = tree_digest(&tree, &work).unwrap();
+        Connection::open(&fake)
+            .unwrap()
+            .execute_batch("UPDATE documents SET rowid = 11 WHERE rowid = 9;")
+            .unwrap();
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+
+        // 项目库：rowid 不算，VACUUM 前后摘要不变。
+        std::fs::remove_file(&fake).unwrap();
+        let p = Connection::open(&fake).unwrap();
+        p.execute_batch(
+            "CREATE TABLE project_meta(singleton INTEGER, name TEXT); INSERT INTO project_meta VALUES (1, 'x');
+             CREATE TABLE notes(body TEXT); INSERT INTO notes(rowid, body) VALUES (5, 'a'), (3, 'b');",
+        )
+        .unwrap();
+        let before = tree_digest(&tree, &work).unwrap();
+        p.execute_batch("DELETE FROM notes WHERE rowid = 5; INSERT INTO notes(rowid, body) VALUES (8, 'a'); VACUUM;")
+            .unwrap();
+        drop(p);
+        assert_eq!(before, tree_digest(&tree, &work).unwrap());
+    }
+
+    /// W4 关口 P2-W4A-01：大项目库的逻辑扫描在计量里推进工作量（SQLite 指令计量），不是一声不响地跑完。
+    #[test]
+    fn the_logical_scan_reports_its_work() {
+        let dir = scratch("dropped-digest-work");
+        let db = dir.join("project.sqlite");
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE project_meta(singleton INTEGER); INSERT INTO project_meta VALUES (1);
+             CREATE TABLE business(id INTEGER PRIMARY KEY, body TEXT);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+             INSERT INTO business SELECT i, printf('%010d', 300001 - i) FROM n;",
+        )
+        .unwrap();
+        drop(c);
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let digest = crate::progress::with(Some(&meter), || logical_digest(&db)).unwrap();
+        assert_eq!(digest.len(), 64);
+        assert!(work.get() > 0, "the scan moved no work");
+    }
+
+    /// W4 关口 P2-W4A-01：数据根的枚举每列一个条目推进一次。
+    #[test]
+    fn the_enumeration_reports_its_work() {
+        let dir = scratch("walk-work");
+        for i in 0..100 {
+            std::fs::write(dir.join(format!("f{i}")), b"x").unwrap();
+        }
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let files = crate::progress::with(Some(&meter), || super::super::root::walk(&dir)).unwrap();
+        assert_eq!(files.len(), 100);
+        assert!(work.get() >= 100, "{}", work.get());
+    }
 }

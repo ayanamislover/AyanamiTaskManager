@@ -597,10 +597,12 @@ fn published_generation(layout: &Layout) -> Option<String> {
 /// 库与它的 -wal / -shm 由 generation 认，不算。只看这三个子树：库旁边会冒出别的程序的临时文件
 /// （实测有 `ATM.SQLITE-SHM.tmp`，随建随删、还被占着），它们不属于发布物。列出后又消失的文件同理跳过。
 /// 发布物逐个刷盘：库与 [`publication_digest`] 的三个子树。库旁边别的程序的临时文件不属于发布物，不碰。
+/// 每刷完一个文件推进一次进度（W4 关口 P2-W4A-01）。
 fn flush_publication(dir: &Path) -> std::io::Result<()> {
     atm_install_state::durable::sync_file(&dir.join("atm.sqlite"))?;
+    crate::progress::pulse();
     for sub in ["artifacts", "sync", "dispatch"] {
-        atm_install_state::durable::sync_tree(&dir.join(sub))?;
+        atm_install_state::durable::sync_tree_each(&dir.join(sub), &mut crate::progress::pulse)?;
     }
     Ok(())
 }
@@ -629,6 +631,7 @@ fn publication_digest(dir: &Path) -> std::io::Result<String> {
                 Err(x) if gone(&x) => continue,
                 sha => files.push((rel, meta.len(), sha?)),
             }
+            crate::progress::pulse();
         }
     }
     files.sort();
@@ -1192,6 +1195,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     // PUBLISHING：新库合并 WAL、改回单文件后关闭；M 先落盘，再整体改名。
     {
         let c = Connection::open(data.join("atm.sqlite"))?;
+        crate::progress::watch(&c)?;
         c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")?;
     }
     // 复制来的附件、日志、密文与库逐个刷盘，再写 M、再改名发布（W3 peer r1 P2-04）。

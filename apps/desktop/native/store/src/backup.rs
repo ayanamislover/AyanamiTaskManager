@@ -11,6 +11,7 @@
 
 use crate::Store;
 use crate::events::ulid;
+use atm_install_state::durable;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
@@ -442,7 +443,9 @@ pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
     let quarantine = root.join(WITHDRAWN_DIR);
     fs::create_dir_all(&quarantine)?;
     let parked = quarantine.join(&info.id);
-    if fs::rename(&info.dir, &parked).is_err() {
+    // 目录先隔离、再删登记行、删不成再放回：三步都按共享的持久化契约落盘（W4 关口 P2-W4A-02）。
+    // 占着就留到下次（KEPT），不等。
+    if durable::rename_once(&info.dir, &parked, false).is_err() {
         let _ = fs::remove_dir(&quarantine);
         return Ok(Withdrawal::Kept("FILES_IN_USE"));
     }
@@ -458,7 +461,7 @@ pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
         Ok(1) => {}
         other => {
             // 没删成：放回原处。放不回时登记还在、目录在隔离区，下次清理按登记行放回。
-            let _ = fs::rename(&parked, &info.dir);
+            let _ = durable::rename_once(&parked, &info.dir, false);
             let _ = fs::remove_dir(&quarantine);
             return match other {
                 Ok(_) => Ok(Withdrawal::Kept("RESTORE_REFERENCE")),
@@ -505,7 +508,7 @@ pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
             let id = entry.file_name().to_string_lossy().into_owned();
             let done = match registered(&id) {
                 Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
-                Ok(_) => fs::rename(entry.path(), root.join(&id)).is_ok(),
+                Ok(_) => durable::rename_once(&entry.path(), &root.join(&id), false).is_ok(),
                 Err(_) => false,
             };
             if !done {
