@@ -8780,6 +8780,7 @@ mod w4_gate_r3 {
             allow_real_data_root: false,
             real_data_root: None,
             secrets_check: Some(secrets_ok),
+            progress: None,
         };
         assert!(matches!(
             cv::compare(&n, &m, &m.business_digest, &opts),
