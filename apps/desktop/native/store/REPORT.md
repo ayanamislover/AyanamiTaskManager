@@ -641,6 +641,20 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 - **没有单独验红的推进**：去重分组、sync published 的校验与 processed / published 导入、导入 runs / requests 这几处循环与已验红的 runs / requests 循环是同一写法，没有各自的用例与变异。
 - **变异**：`output/w4a-evidence/mutations-r3/`。`mut-w4a-r3-store.py` 验本轮修订；上一轮的五份脚本（锚点随修订更新：快照判断加了参数；「证明不了是项目库」改为已知 schema 的判定；「项目库的索引照收」改为「常规库的索引照收」）在新候选上重跑。结果见下节。
 
+### 第三轮的变异（候选 895ed55）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r3-w4a-gate-r2-store-mutation-evidence.json`（本轮新增，`mut-w4a-r3-store.py`） | 15 | 15 RED |
+| `r3-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
+| `r3-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
+| `r3-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r3-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r3-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r3-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+七份证据记录的源码 sha256 都与 895ed55 的对应文件一致，复原套件全绿。之前两遍的日志留在 `mutations-r3/first-pass/`（a6e177c：「目标库上的 SQL 不计量」存活）与 `second-pass/`（5bf47b4：一次复原套件遇 `-WAL.tmp` 得 UNKNOWN），对应的改动见上面两条。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
