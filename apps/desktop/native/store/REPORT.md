@@ -601,6 +601,23 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 - **变异**：`output/w4a-evidence/mutations-r2/`，绑定 92b24a1。两份新脚本验本轮修订；上一轮的四份脚本（锚点随修订更新）在新候选上重跑。结果见下节。
 - **评审执行**：setup 的 `registry::tests::values_round_trip_and_restore_is_exact` 会写真实的 HKCU 测试键；委托允许的五包测试里要显式跳过它（第一轮评审意外触发过一次，环境拒绝）。
 
+### 第二轮的变异（候选见本节末的提交）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r2-w4a-gate-store-mutation-evidence.json`（本轮新增） | 10 | 10 RED |
+| `r2-w4a-gate-state-mutation-evidence.json`（本轮新增） | 1 | 1 RED |
+| `r2-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r2-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r2-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r2-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+变异带出的两处：
+
+- **两道防线互相兜底**：「任意 SQLite 都按逻辑内容」第一次存活——过滤放宽之后，`project_meta` 检查照样把附件挡在逻辑摘要外。补上「附件里存着一份带 `project_meta` 的项目库副本」这一步，两道防线各自都能验红。
+- **大项目进度用例分不出目标库的计量**：本轮给枚举与 `verify_converted` 加了计量之后，「目标库上的 SQL 不计量」存活——大项目那一格仍有 20 批（源侧与枚举），过了「至少 5 批」的门槛。实测有目标计量 35 批（指令计数，确定的），用例对 IMPORT 加一道 28 批的门槛。VERIFY 那一格有没有目标库的计量都是 31 批：`verify_converted` 的连接计量在这个夹具里看不出贡献，留着无害，不作为验红点。
+- **列出后消失的条目**：一次复原套件里 `a_dropped_database_is_compared_by_content_not_storage` 的「关库」一步得到 UNKNOWN（`os error 2`）。`root::walk` 列出目录之后逐个 stat，别的程序随建随删的 `-SHM.tmp` 恰好在两步之间消失。`walk` 改为跳过列出后消失的条目（真正的业务变化由 F0 / F1 两次枚举的比对发现）。这是竞争，没有确定性的用例，不作为验红点；之后的全量与复原套件都是绿的。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。

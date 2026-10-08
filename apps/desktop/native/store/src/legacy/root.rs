@@ -73,7 +73,12 @@ pub(super) fn walk(dir: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
             } else {
                 format!("{prefix}/{name}")
             };
-            let meta = std::fs::symlink_metadata(e.path())?;
+            // 列出之后又消失的条目跳过：别的程序在库旁边随建随删的 `-SHM.tmp` 就是这样（W4 关口第二轮的变异运行里
+            // 实测到比较因此得 UNKNOWN）。真正的业务变化由 F0 / F1 两次枚举的比对发现。
+            let meta = match std::fs::symlink_metadata(e.path()) {
+                Err(x) if x.kind() == std::io::ErrorKind::NotFound => continue,
+                m => m?,
+            };
             if meta.is_dir() {
                 stack.push((e.path(), rel));
             } else {
