@@ -167,3 +167,144 @@ fn every_spelling_of_a_protected_root_is_refused_before_any_write() {
     assert_eq!((listing(&local), listing(&overridden)), before);
     assert!(!n.exists() && !l.exists(), "a refused start created a root");
 }
+
+fn junction(link: &Path, target: &Path) {
+    let made = Command::new("cmd")
+        .args(["/c", "mklink", "/J", &s(link), &s(target)])
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(made.success(), "mklink /J {}", link.display());
+}
+
+/// 文件的内容（目录与链接本身记空），用来确认受保护的树逐字节没变。
+fn contents(root: &Path) -> Vec<(String, bool, Vec<u8>)> {
+    listing(root)
+        .into_iter()
+        .map(|(rel, is_dir, _)| {
+            let p = root.join(&rel);
+            let file = std::fs::symlink_metadata(&p).unwrap().is_file();
+            let bytes = if file {
+                std::fs::read(&p).unwrap()
+            } else {
+                Vec::new()
+            };
+            (rel, is_dir, bytes)
+        })
+        .collect()
+}
+
+/// W4i peer r2 P1-01：参数根本身安全，但根里已有的目录或文件是链接时，写入会经它离开比较过的位置
+/// （`N\runtime` 是指向 3.x 根的 junction，准入锁、lease、descriptor 就落进 3.x 根）。三个根里已有的树
+/// 有任何 junction 或硬链接都拒绝，指向哪里都一样；拒绝在任何写入之前，受保护的树逐字节不变。
+#[test]
+fn links_inside_a_given_root_are_refused_before_any_write() {
+    let d = dir("guard-links");
+    let local = d.join("local");
+    let (v2, v3, install) = (
+        local.join("AyanamiTaskManager"),
+        local.join("AyanamiTaskManager3"),
+        local.join("AyanamiTaskManagerDesktop"),
+    );
+    for root in [&v2, &v3, &install] {
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("data").join("marker"), b"real").unwrap();
+    }
+    let elsewhere = d.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+
+    // (说明, 被检查的参数, 布局)：布局在一个新建的根里造出链接，返回 (N, L, 安装根)。
+    type Layout = Box<dyn Fn(&Path) -> (PathBuf, PathBuf, Option<PathBuf>)>;
+    let (v2c, v3c, installc, elsewherec) =
+        (v2.clone(), v3.clone(), install.clone(), elsewhere.clone());
+    let cases: Vec<(&str, Layout)> = vec![
+        (
+            "N\\runtime is a junction to the 3.x root",
+            Box::new(move |c: &Path| {
+                let n = c.join("N");
+                std::fs::create_dir_all(&n).unwrap();
+                junction(&n.join("runtime"), &v3c);
+                (n, c.join("L"), None)
+            }),
+        ),
+        (
+            "a directory deep in N is a junction to an unprotected place",
+            Box::new(move |c: &Path| {
+                let n = c.join("N");
+                std::fs::create_dir_all(n.join("data").join("projects")).unwrap();
+                junction(&n.join("data").join("projects").join("p1"), &elsewherec);
+                (n, c.join("L"), None)
+            }),
+        ),
+        (
+            "a file in N is a hard link to a file in the 3.x root",
+            Box::new({
+                let v3c = v3.clone();
+                move |c: &Path| {
+                    let n = c.join("N");
+                    std::fs::create_dir_all(n.join("data")).unwrap();
+                    std::fs::hard_link(
+                        v3c.join("data").join("marker"),
+                        n.join("data").join("atm.db"),
+                    )
+                    .unwrap();
+                    (n, c.join("L"), None)
+                }
+            }),
+        ),
+        (
+            "N is itself a junction, and its runtime one to the 3.x root",
+            Box::new({
+                let v3c = v3.clone();
+                move |c: &Path| {
+                    let real = c.join("real-N");
+                    std::fs::create_dir_all(&real).unwrap();
+                    junction(&real.join("runtime"), &v3c);
+                    let n = c.join("N");
+                    junction(&n, &real);
+                    (n, c.join("L"), None)
+                }
+            }),
+        ),
+        (
+            "L\\data is a junction to the 2.x root",
+            Box::new(move |c: &Path| {
+                let l = c.join("L");
+                std::fs::create_dir_all(&l).unwrap();
+                junction(&l.join("data"), &v2c.join("data"));
+                (c.join("N"), l, None)
+            }),
+        ),
+        (
+            "the install root's state is a junction to the install root",
+            Box::new(move |c: &Path| {
+                let i = c.join("install");
+                std::fs::create_dir_all(&i).unwrap();
+                junction(&i.join("state"), &installc);
+                (c.join("N"), c.join("L"), Some(i))
+            }),
+        ),
+    ];
+    let before = contents(&local);
+    for (i, (case, layout)) in cases.iter().enumerate() {
+        let c = d.join(format!("case{i}"));
+        std::fs::create_dir_all(&c).unwrap();
+        let (n, l, install_root) = layout(&c);
+        let mut args = vec!["--n".into(), s(&n), "--legacy".into(), s(&l)];
+        if let Some(i) = &install_root {
+            args.extend([
+                "--txn-start".into(),
+                "T1".into(),
+                "--install-root".into(),
+                s(i),
+            ]);
+        }
+        let inside = contents(&c);
+        let (code, stderr) = run(&local, &args, &[]);
+        assert_eq!(code, Some(2), "{case}: {stderr}");
+        assert!(stderr.contains("refusing"), "{case}: {stderr}");
+        assert_eq!(contents(&c), inside, "{case}: a refused start wrote");
+    }
+    assert_eq!(contents(&local), before, "a protected tree changed");
+    assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+}

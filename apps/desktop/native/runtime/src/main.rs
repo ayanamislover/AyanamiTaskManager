@@ -51,13 +51,15 @@ fn main() {
     }
     let n = n.unwrap_or_else(|| usage("--n is required"));
     let legacy = legacy.unwrap_or_else(|| usage("--legacy is required"));
-    // 在任何文件系统写入之前：三个根都不能碰到真实的根，彼此也不能重叠（W4i peer r1 P1-01）。
+    // 在任何文件系统写入之前：三个根都不能碰到真实的根，彼此也不能重叠（W4i peer r1 P1-01）；
+    // 根里已有的树也不能有链接，否则写入会经它离开比较过的位置（peer r2 P1-01）。
     let mut given: Vec<(&str, &std::path::Path)> = vec![("--n", &n), ("--legacy", &legacy)];
     if let Some(root) = &install_root {
         given.push(("--install-root", root));
     }
     if let Err(why) =
         atm_runtime::guard::refuse_overlaps(&given, &atm_runtime::guard::protected_roots())
+            .and_then(|()| atm_runtime::guard::refuse_links(&given))
     {
         usage(&why);
     }

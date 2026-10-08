@@ -78,6 +78,7 @@ decide 循环（最多 8 圈）
 
 `output/w4-evidence/mutations/mut-w4i.py`（runtime、jobs、store、state、http 五组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`；
 第一轮评审的修订 `mut-w4i-r2.py`（runtime、state 两组），证据 `w4i-r2-*-mutation-evidence.json`。
+第二轮评审的修订 `mut-w4i-r3.py`（runtime），证据 `w4i-r3-runtime-mutation-evidence.json`。
 
 ## W4i 第一轮评审（`output/peer-atm3-w4i-r1.md`）：CHANGES_REQUESTED
 
@@ -95,3 +96,14 @@ decide 循环（最多 8 圈）
   - `guard` 的单元用例：重叠的判定（大小写、两个方向、前缀不算）；解析保留不存在的末段、扩展前缀与普通写法解到同一处。
   - `tests/boot.rs::dropping_a_serving_closes_everything_before_the_admission_goes`：后台比较卡住时直接丢弃，丢弃要等比较放开才返回；返回时旧 `/health` 不答、daemon.json 已撤、准入已放，下一个实例这时才起来。
   - `install-state` 的 `startup::tests::a_takeover_without_a_ledger_counts_from_the_host_creation`（没有记账、对不上的记账：3 h 前拉起的进程接管后立刻到总上限；1 min 前拉起的照常等），`handoff::tests::an_unwritable_ledger_is_reported_once_and_the_wait_goes_on`。原用例「别的进程、别的 txn 的记账不算：从头开始」随之改为「记账不算，总预算从本进程的创建时间算」。
+
+## W4i 第二轮评审（`output/peer-atm3-w4i-r2.md`）：CHANGES_REQUESTED
+
+绑定 db72787。无 P0。P1-02（丢弃有序关闭）、P2-01（无记账时的总预算、写不下只报一次）、证据绑定、守卫对大小写、尾随分隔符、`.`、`..`、8.3 短名、junction 后接不存在末段、N=L 的拒绝都被确认。评审在补测 panic 与锁 poison 时被内容过滤中断，报告没有写完总结论。
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| R2-P1-01 | 守卫只解析参数根本身：`N\runtime` 是指向 3.x 根的 junction 时，准入锁、lease、daemon.json 都写进了 3.x 根 | `guard::refuse_links`：在任何写入之前遍历三个根里已有的整棵树，有任何 reparse point（junction、符号链接等）或有不止一个名字的文件（硬链接）就拒绝，不管它指向哪里、不管哪个子目录会被写。根本身可以是链接（它的真实位置已经比过），从它的目标往下看 |
+
+- 边界：检查之后别的进程再往根里塞的链接不在开发二进制的防线里；运行时自己新建的目录和文件都是普通的。
+- **用例**：`tests/guard.rs::links_inside_a_given_root_are_refused_before_any_write`：`N\runtime` 指向 3.x 根、N 深处的目录指向不受保护的地方、N 里的文件是 3.x 根里文件的硬链接、N 本身是 junction 而它的 runtime 指向 3.x 根、`L\data` 指向 2.x 根、安装根的 state 指向默认安装根，都以退出码 2 拒绝；每个用例的根与受保护的树逐字节不变，被指向的不受保护目录也还是空的。
