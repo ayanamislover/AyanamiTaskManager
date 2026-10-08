@@ -8702,3 +8702,111 @@ mod w4_gate_r2 {
         );
     }
 }
+
+/// W4 关口第三轮评审（`output/peer-atm3-w4a-r3.md`）的反例与对照。
+mod w4_gate_r3 {
+    use super::w3d::{G1, layout};
+    use super::*;
+    use atm_store::conversion::{self as cv, CompareOptions, Comparison, RunOptions};
+
+    /// 舍弃 P7（身份与注册库不符、明确接受舍弃）后，`change` 只改一个隐含 rowid：`observe` 看到的 2.x 结果
+    /// 从 `before` 变成 `after`，正式比较必须判「变了」。
+    fn a_rowid_change_is_seen(
+        name: &str,
+        setup: &str,
+        observe: &str,
+        change: &str,
+        before: &str,
+        after: &str,
+    ) {
+        let (f, root) = settle_fixture(name);
+        let db = root.join("projects/P7/project.sqlite");
+        empty_project(&db, "P7", "XXX", 10, Some("unconvertible"));
+        Connection::open(&db).unwrap().execute_batch(setup).unwrap();
+        let n = layout(&f, "n");
+        let m = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &["GGG"],
+                hook: &mut |_| true,
+                progress: None,
+            },
+        )
+        .unwrap();
+        let opts = CompareOptions {
+            legacy_root: &root,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+        };
+        assert!(matches!(
+            cv::compare(&n, &m, &m.business_digest, &opts),
+            Comparison::Unchanged(_)
+        ));
+        let c = Connection::open(&db).unwrap();
+        assert_eq!(q::<String>(&c, observe), before);
+        c.execute_batch(change).unwrap();
+        assert_eq!(q::<String>(&c, observe), after);
+        drop(c);
+        let result = cv::compare(&n, &m, &m.business_digest, &opts);
+        assert!(
+            matches!(result, Comparison::Changed { .. }),
+            "a business rowid change was lost: {result:?}"
+        );
+    }
+
+    /// P1-W4A-02（codex 的反例一）：2.x `searchProjectionForChanges` 以 `updated_at DESC, rowid DESC` 取同一任务的最新进度投影。
+    #[test]
+    fn the_latest_projection_follows_the_rowid() {
+        a_rowid_change_is_seen(
+            "w4g3-projection-rowid",
+            "INSERT INTO search_documents(rowid, entity_type, entity_id, entity_key, title, body, updated_at)
+             VALUES (7, 'PROGRESS', 'progress-a', 'XXX-T-0001', 'older result', '', '2026-01-01T00:00:00.000Z'),
+                    (8, 'PROGRESS', 'progress-b', 'XXX-T-0001', 'newer result', '', '2026-01-01T00:00:00.000Z');",
+            "SELECT title FROM search_documents WHERE entity_type = 'PROGRESS' AND entity_key = 'XXX-T-0001'
+             ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+            "UPDATE search_documents SET rowid = 9 WHERE rowid = 7",
+            "newer result",
+            "older result",
+        );
+    }
+
+    /// P1-W4A-02（codex 的反例二）：2.x `taskViewProjectionSql` 按 `created_at, rowid` 排同一任务的检查项。
+    #[test]
+    fn the_checklist_order_follows_the_rowid() {
+        a_rowid_change_is_seen(
+            "w4g3-checklist-rowid",
+            "INSERT INTO work_items(id, local_no, objective_id, type, title, status, priority, created_at, updated_at)
+               VALUES ('W', 1, 'OBJ', 'TASK', 'task', 'READY', 'NORMAL', 't', 't');
+             INSERT INTO checklist_items(rowid, id, work_item_id, title, kind, status, created_at, updated_at)
+               VALUES (7, 'C1', 'W', 'first', 'REQUIRED', 'TODO', 't', 't'),
+                      (8, 'C2', 'W', 'second', 'REQUIRED', 'TODO', 't', 't');",
+            "SELECT json_group_array(id) OVER (PARTITION BY work_item_id ORDER BY created_at, rowid
+               ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM checklist_items WHERE work_item_id = 'W' LIMIT 1",
+            "UPDATE checklist_items SET rowid = 9 WHERE rowid = 7",
+            r#"["C1","C2"]"#,
+            r#"["C2","C1"]"#,
+        );
+    }
+
+    /// P2-W4A-01：密文文件与别的 JSON 同一个上限，超过的在动目标之前停下。
+    #[test]
+    fn an_oversized_secrets_file_stops_the_conversion() {
+        let (f, root) = json_fixture("w4g3-secrets-limit");
+        let path = root.join("sync/secrets.dpapi.json");
+        let mut bytes = fs::read(&path).unwrap_or_else(|_| b"{}".to_vec());
+        bytes.resize(64 * 1024 * 1024 + 1, b' ');
+        put(&path, &bytes);
+        match f.convert_with(Some(secrets_ok)) {
+            Err(e) => assert!(e.to_string().contains("reads JSON files up to"), "{e}"),
+            Ok(_) => panic!("an oversized secrets file was converted"),
+        }
+        assert!(!f.target().exists());
+    }
+}

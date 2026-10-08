@@ -50,10 +50,17 @@ pub(super) fn knowledge(root: &Path) -> Result<KnowledgePlan> {
     let mut plan = KnowledgePlan::default();
     let mut live = dir.join("knowledge.sqlite");
     let mut candidate = None;
-    match std::fs::read(&journal_path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
-        Ok(bytes) => {
+    // 与 sync、dispatch 的 JSON 同一个读入：计量、有上限（W4 关口第三轮 P2-W4A-01）。
+    match super::jsonfiles::read_json_file(&journal_path)? {
+        super::jsonfiles::JsonFile::Missing => {}
+        super::jsonfiles::JsonFile::TooLarge(len) => {
+            return Err(super::jsonfiles::too_large(
+                root,
+                "knowledge/restore.json",
+                len,
+            ));
+        }
+        super::jsonfiles::JsonFile::Bytes(bytes) => {
             let damaged = || {
                 ConvertError::Unsupported(format!(
                     "{}: knowledge/restore.json is damaged; 2.0 keeps the knowledge base unavailable until it is repaired",
@@ -646,21 +653,23 @@ fn known_project_schema(c: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// 库的逻辑内容：`user_version`、`application_id`；schema（类型、名字、所属表、SQL，不含随存储变的 rootpage）；
-/// 每张表与虚表的全部行，按全部列排序（不含隐含的 rowid：VACUUM 会给没有 INTEGER PRIMARY KEY 的表重排它）。
+/// 每张表与虚表的全部行：有 rowid 的连同 rowid、按 rowid 排序，没有的按全部列排序。
 /// 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
+/// checkpoint、关库、SHM 重建、ANALYZE、改日志模式都不动这些；VACUUM 一般也保留 rowid，真改了就算「变了」——
+/// 2.x 拿 rowid 裁决同时间的记录，它变了 2.x 看到的顺序就变了。
 fn logical_digest(db: &Path) -> rusqlite::Result<String> {
     use rusqlite::types::ValueRef;
     use sha2::{Digest, Sha256};
     let c = Connection::open(db)?;
     crate::progress::watch(&c)?;
-    // 只有 2.x 的项目库能这样规范化：它的业务主键都在显式列里，隐含的 rowid 与 FTS 影子表不承载业务。
+    // 只有 2.x 的项目库能这样规范化：除了 rowid（下面照算），它的状态都在表与 FTS 虚表的行里，影子表与统计表不承载业务。
     // 这要整份 schema 都是 2.x 项目迁移推出来的那一份才成立：多一张表、一列、一个虚表模块都证明不了，
     // 按错误返回，调用方改按原始字节绑定（W4 关口第二轮 P1-W4A-02）。
     if !known_project_schema(&c)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mut h = Sha256::new();
-    h.update(b"ATM-DROPPED-SQLITE-1\0");
+    h.update(b"ATM-DROPPED-SQLITE-2\0");
     for pragma in ["user_version", "application_id"] {
         let v: i64 = c.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))?;
         h.update(format!("{pragma}={v}\0"));
@@ -678,24 +687,34 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
             h.update([0]);
         }
     }
-    let tables: Vec<String> = c
+    // 隐含的 rowid 是业务内容：2.x 的读模型拿它裁决同时间的记录（`search_documents` 的最新投影、
+    // `checklist_items` 的顺序、搜索分页的上界），FTS 虚表的 rowid 同理（W4 关口第三轮 P1-W4A-02）。
+    let tables: Vec<(String, bool)> = c
         .prepare(&format!(
-            "SELECT name FROM pragma_table_list WHERE schema = 'main' AND type IN ('table', 'virtual')
+            "SELECT name, type = 'virtual' OR wr = 0 FROM pragma_table_list WHERE schema = 'main'
+             AND type IN ('table', 'virtual')
              AND (substr(name, 1, 7) <> 'sqlite_' OR name = 'sqlite_sequence') AND {not_stat} ORDER BY name"
         ))?
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    for table in tables {
+    for (table, rowid) in tables {
         let quoted = format!("\"{}\"", table.replace('"', "\"\""));
-        let columns = c
-            .prepare(&format!("SELECT * FROM {quoted}"))?
-            .column_count();
-        let order: Vec<String> = (1..=columns).map(|i| i.to_string()).collect();
-        let mut st = c.prepare(&format!(
-            "SELECT * FROM {quoted} ORDER BY {}",
-            order.join(", ")
-        ))?;
-        h.update(format!("table\0{table}\0{columns}\0"));
+        let select = if rowid {
+            format!("SELECT rowid, * FROM {quoted}")
+        } else {
+            format!("SELECT * FROM {quoted}")
+        };
+        let columns = c.prepare(&select)?.column_count();
+        let order: Vec<String> = if rowid {
+            vec!["1".into()]
+        } else {
+            (1..=columns).map(|i| i.to_string()).collect()
+        };
+        let mut st = c.prepare(&format!("{select} ORDER BY {}", order.join(", ")))?;
+        h.update(format!(
+            "table\0{table}\0{columns}\0{}\0",
+            if rowid { "rowid" } else { "" }
+        ));
         let mut rows = st.query([])?;
         let mut count = 0u64;
         while let Some(row) = rows.next()? {
@@ -774,7 +793,7 @@ mod tests {
     }
 
     /// W4 关口 P1-W4A-02：舍弃项目里用户自己的 SQLite 附件按字节绑定。rowid 在用户的库里可能就是业务键，
-    /// 改了它（业务关联随之变化）摘要必须变；项目库自己的 rowid 照旧不算（checkpoint、VACUUM 不误报）。
+    /// 改了它（业务关联随之变化）摘要必须变。项目库按逻辑内容：VACUUM、ANALYZE 不误报，rowid 照算（第三轮）。
     #[test]
     fn a_sqlite_attachment_is_bound_to_its_bytes() {
         let dir = scratch("dropped-sqlite-attachment");
@@ -795,7 +814,7 @@ mod tests {
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
         // 附件里的库即使就是一份项目库（schema 完全是迁移推出来的，例如用户存的副本）也按字节：
-        // 逻辑摘要只给目录下那一个 project.sqlite。`settings` 的 rowid 逻辑摘要不看，字节看得见。
+        // 逻辑摘要只给目录下那一个 project.sqlite。ANALYZE 只写 `sqlite_stat*`，逻辑摘要不看，字节看得见。
         let copy = tree.join("artifacts/copy-of-project.sqlite");
         let k = project_db(&copy, usize::MAX);
         k.execute_batch(
@@ -803,8 +822,7 @@ mod tests {
         )
         .unwrap();
         let before = tree_digest(&tree, &work).unwrap();
-        k.execute_batch("UPDATE settings SET rowid = 6 WHERE rowid = 5;")
-            .unwrap();
+        k.execute_batch("ANALYZE;").unwrap();
         drop(k);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
@@ -818,21 +836,58 @@ mod tests {
             .unwrap();
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
-        // 项目库：rowid 不算，VACUUM、ANALYZE 前后摘要不变。
+        // 项目库：VACUUM、ANALYZE 前后摘要不变；表与 FTS 虚表的 rowid 是业务内容，改了就变，改回去又不变。
         std::fs::remove_file(&fake).unwrap();
         let p = project_db(&fake, usize::MAX);
         p.execute_batch(
-            "INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (5, 'a', '{}', 't'), (3, 'b', '{}', 't');",
+            "INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (5, 'a', '{}', 't'), (3, 'b', '{}', 't');
+             INSERT INTO search_documents_fts(rowid, entity_type, entity_id, entity_key, title, body)
+               VALUES (4, 'TASK', 'w', 'X-T-0001', 'title', 'body');",
         )
         .unwrap();
         let before = tree_digest(&tree, &work).unwrap();
-        p.execute_batch(
-            "DELETE FROM settings WHERE rowid = 5;
-             INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (8, 'a', '{}', 't'); VACUUM; ANALYZE;",
-        )
-        .unwrap();
-        drop(p);
+        p.execute_batch("VACUUM; ANALYZE;").unwrap();
         assert_eq!(before, tree_digest(&tree, &work).unwrap());
+        p.execute_batch("UPDATE settings SET rowid = 8 WHERE rowid = 5;")
+            .unwrap();
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+        p.execute_batch("UPDATE settings SET rowid = 5 WHERE rowid = 8;")
+            .unwrap();
+        assert_eq!(before, tree_digest(&tree, &work).unwrap());
+        p.execute_batch("UPDATE search_documents_fts SET rowid = 6 WHERE rowid = 4;")
+            .unwrap();
+        drop(p);
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+    }
+
+    /// W4 关口第三轮 P2-W4A-01：知识库的恢复日志与 sync、dispatch 的 JSON 走同一个读入：有上限，解析途中推进。
+    #[test]
+    fn the_restore_journal_is_read_within_the_limit() {
+        let limit = super::super::jsonfiles::MAX_JSON_BYTES as usize;
+        let journal = "{\"id\":\"01ARZ3NDEKTSV4RRFFQ69G5FAV\",\"committed\":false}";
+        let write = |name: &str, len: usize| {
+            let dir = scratch(name);
+            std::fs::create_dir_all(dir.join("knowledge")).unwrap();
+            std::fs::write(
+                dir.join("knowledge/restore.json"),
+                format!("{journal}{}", " ".repeat(len - journal.len())),
+            )
+            .unwrap();
+            dir
+        };
+        let over = write("journal-over-limit", limit + 1);
+        match super::knowledge(&over) {
+            Err(e) => assert!(e.to_string().contains("reads JSON files up to"), "{e}"),
+            Ok(_) => panic!("a restore journal above the limit was read"),
+        }
+        let within = write("journal-within-limit", limit);
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let plan = crate::progress::with(Some(&meter), || super::knowledge(&within)).unwrap();
+        assert!(plan.journal.is_some());
+        let batches = (limit / crate::progress::PARSE_BYTES) as u64;
+        assert!(work.get() >= batches, "{} < {batches}", work.get());
     }
 
     /// W4 关口第二轮 P1-W4A-02：只有整份 schema 都是 2.x 项目迁移推出来的那一份，才算认得。

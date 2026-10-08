@@ -655,6 +655,25 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 七份证据记录的源码 sha256 都与 895ed55 的对应文件一致，复原套件全绿。之前两遍的日志留在 `mutations-r3/first-pass/`（a6e177c：「目标库上的 SQL 不计量」存活）与 `second-pass/`（5bf47b4：一次复原套件遇 `-WAL.tmp` 得 UNKNOWN），对应的改动见上面两条。
 
+## W4 关口第三轮评审（`output/peer-atm3-w4a-r3.md`）：CHANGES_REQUESTED
+
+绑定 6e52f39。无 P0。P2-W4A-R2-01 关闭（含 `-wal.tmp` 的放宽），第二轮已关闭的各项保持。剩下一条 P1、一条 P2：
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| P1-W4A-02 | schema 认得也不能推出「隐含 rowid 不承载业务」：2.x 的读模型拿 rowid 裁决同时间的记录（`search_documents` 的最新投影按 `updated_at DESC, rowid DESC`、`checklist_items` 按 `created_at, rowid`、搜索分页以 rowid 为上界）。只改一个 rowid，2.x 看到的结果变了，正式比较仍判不变 | 逻辑摘要连同 rowid：有 rowid 的表与 FTS 虚表按 `SELECT rowid, * … ORDER BY rowid` 取，没有 rowid 的表按全部列排序（摘要格式升到 `ATM-DROPPED-SQLITE-2`）。已知 schema 的判定保留：影子表、统计表之外的状态都在这些行里，这一点仍只对迁移推出的 schema 成立 |
+| P2-W4A-01 | 解析整份做完才推进一次，没有中途批次，也没有输入上限；知识库恢复日志的读入与解析全程不推进 | converter 读的 JSON 文件（sync、dispatch、知识库恢复日志、密文文件）共用一个读入 `jsonfiles::read_json_file`，上限 64 MiB（`MAX_JSON_BYTES`），超过的在动目标之前以 Unsupported 停下。解析器每读过 8 MiB 输入推进一次（空白、字符串、数字、成员四处长循环各自推进），解析树转换成值每 65536 个节点推进一次 |
+
+- **rowid 算进去的代价**：checkpoint、关库、SHM 重建、ANALYZE、`PRAGMA optimize`、改日志模式都不动 rowid，正式链路的对照（`a_dropped_database_is_compared_by_content_not_storage`）照旧全是「没变」，其中的 VACUUM 一步实测也保留 rowid。SQLite 文档说 VACUUM 可能给没有 INTEGER PRIMARY KEY 的表重排 rowid；真重排了就判「变了」，这时 2.x 看到的顺序确实变了。2.x 自己从不 VACUUM 项目库（`packages/` 里没有）。
+- **上限为什么可以接受**：2.x 的这些文件实际是 KB 级。上限以内，读入、解析、建值树，以及之后的校验、整组克隆（`any_array`）、按请求分组、导入都与大小成线性，几秒内做完，远在 setup 的 10 min 无推进预算之内；解析与建值树另有中途批次。超过上限的数据根转换停在动目标之前，用户数据不动。读入本身不另计量（上一轮套的 `progress::Read` 每 64 MiB 才推进一次，在上限以内永远不触发，验不红，去掉了；解析完的那一次推进也由解析器的批次替代）。
+- **用例**：
+  - `w4_gate_r3::the_latest_projection_follows_the_rowid`、`the_checklist_order_follows_the_rowid`：codex 的两个正式链路反例（schema 与显式列都不变，只改 rowid）。
+  - `legacy::settle::tests::a_sqlite_attachment_is_bound_to_its_bytes`：项目库 VACUUM、ANALYZE 不变；表的 rowid 改了变、改回去不变；FTS 虚表的 rowid 改了变。附件里的项目库副本改用 ANALYZE（只写统计表，逻辑摘要看不见，字节看得见）区分位置。
+  - `jsjson::progress_tests`：尾随空白、长字符串、长数字、大量成员各让一处循环跑过 8 MiB 的整数倍，各自推进；值树按节点推进（输入不到 8 MiB）。
+  - `legacy::jsonfiles::tests::a_json_file_is_read_within_the_limit_and_parsed_in_batches`、`legacy::settle::tests::the_restore_journal_is_read_within_the_limit`：上限多一个字节停下；恰好在上限的文件解析途中至少推进 8 次。
+  - `w4_gate_r3::an_oversized_secrets_file_stops_the_conversion`：密文文件超过上限，转换停下、没有目标库。
+- **变异**：`output/w4a-evidence/mutations-r4/`。`mut-w4a-r4-store.py` 验本轮修订；之前的七份脚本在新候选上重跑（第三轮脚本里「读入不计量」「解析完不推进」两条随代码去掉，由本轮的解析器批次与上限变异替代）。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。

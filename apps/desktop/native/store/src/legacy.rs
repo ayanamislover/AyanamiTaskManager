@@ -190,10 +190,12 @@ pub struct ConvertOptions<'a> {
 /// 密文在动目标之前自检：解不开说明换了 Windows 账户或机器，手机配对要重做，由用户决定（05 §3.4）。
 fn check_secrets(root: &Path, opts: &ConvertOptions<'_>) -> Result<()> {
     let path = root.join("sync").join("secrets.dpapi.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    let bytes = match jsonfiles::read_json_file(&path)? {
+        jsonfiles::JsonFile::Bytes(b) => b,
+        jsonfiles::JsonFile::Missing => return Ok(()),
+        jsonfiles::JsonFile::TooLarge(len) => {
+            return Err(jsonfiles::too_large(root, "sync/secrets.dpapi.json", len));
+        }
     };
     match opts.secrets_check {
         None => Err(ConvertError::Unsupported(format!(

@@ -139,6 +139,7 @@ impl Doc {
         let mut p = Parser {
             text,
             i: 0,
+            next: crate::progress::PARSE_BYTES,
             doc: self,
         };
         match p.document() {
@@ -235,10 +236,22 @@ enum Frame {
 struct Parser<'a, 'd> {
     text: &'a str,
     i: usize,
+    /// 下一次推进进度的位置。
+    next: usize,
     doc: &'d mut Doc,
 }
 
 impl Parser<'_, '_> {
+    /// 每读过 [`crate::progress::PARSE_BYTES`] 字节推进一次工作量（W4 关口第三轮 P2-W4A-01）。
+    /// 会跑很长的循环（空白、字符串、数字、成员）每走一步都调它。
+    #[inline]
+    fn tick(&mut self) {
+        while self.i >= self.next {
+            crate::progress::pulse();
+            self.next += crate::progress::PARSE_BYTES;
+        }
+    }
+
     fn peek(&self) -> Option<u8> {
         self.text.as_bytes().get(self.i).copied()
     }
@@ -255,6 +268,7 @@ impl Parser<'_, '_> {
     fn ws(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             self.i += 1;
+            self.tick();
         }
     }
 
@@ -276,6 +290,7 @@ impl Parser<'_, '_> {
     fn document(&mut self) -> Result<usize, Fail> {
         let mut stack: Vec<Frame> = Vec::new();
         'value: loop {
+            self.tick();
             self.ws();
             // 读一个值的开头：容器入栈后回到这里读它的第一个成员，标量或空容器直接得到节点。
             let mut done = match self.peek() {
@@ -366,6 +381,7 @@ impl Parser<'_, '_> {
         let start = self.i;
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.i += 1;
+            self.tick();
         }
         self.i - start
     }
@@ -418,6 +434,7 @@ impl Parser<'_, '_> {
         self.i += 1; // 开头的引号
         let mut units = Vec::new();
         loop {
+            self.tick();
             match self.peek() {
                 None => return Err(Fail::Invalid),
                 Some(b'"') => {
@@ -673,7 +690,12 @@ impl std::fmt::Display for ValueError {
 }
 
 impl Doc {
-    fn value(&self, i: usize) -> Result<Value, ValueError> {
+    /// 节点 `i` 的值；`seen` 数转换过的节点，每 [`crate::progress::VALUE_NODES`] 个推进一次工作量。
+    fn value(&self, i: usize, seen: &std::cell::Cell<usize>) -> Result<Value, ValueError> {
+        seen.set(seen.get() + 1);
+        if seen.get().is_multiple_of(crate::progress::VALUE_NODES) {
+            crate::progress::pulse();
+        }
         let text = |units: &[u16]| String::from_utf16(units).map_err(|_| ValueError::LoneSurrogate);
         Ok(match &self.nodes[i] {
             Node::Null => Value::Null,
@@ -683,13 +705,13 @@ impl Doc {
             Node::Array(items) => Value::Array(
                 items
                     .iter()
-                    .map(|&i| self.value(i))
+                    .map(|&i| self.value(i, seen))
                     .collect::<Result<_, _>>()?,
             ),
             Node::Object(o) => Value::Object(
                 o.ordered()
                     .into_iter()
-                    .map(|(k, v)| Ok((text(k)?, self.value(*v)?)))
+                    .map(|(k, v)| Ok((text(k)?, self.value(*v, seen)?)))
                     .collect::<Result<_, ValueError>>()?,
             ),
         })
@@ -702,7 +724,7 @@ pub fn parse_value(text: &str) -> Result<Option<Value>, ValueError> {
     match doc.parse_into(text) {
         Err(TooDeep) => Err(ValueError::TooDeep),
         Ok(None) => Ok(None),
-        Ok(Some(root)) => doc.value(root).map(Some),
+        Ok(Some(root)) => doc.value(root, &std::cell::Cell::new(0)).map(Some),
     }
 }
 
@@ -763,4 +785,54 @@ pub fn top_level_string(text: &str, key: &str) -> Result<Option<String>, TooDeep
         },
         _ => None,
     })
+}
+
+/// W4 关口第三轮 P2-W4A-01：解析按输入字节推进（空白、字符串、数字、成员四处循环各自推进），
+/// 转换成值按节点推进。每条只让一处循环跑长，其余几处走不到 [`crate::progress::PARSE_BYTES`]。
+#[cfg(test)]
+mod progress_tests {
+    use crate::progress::{Meter, PARSE_BYTES, VALUE_NODES, with};
+
+    fn work_of<T>(f: impl FnOnce() -> T) -> u64 {
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = Meter::new(&report);
+        with(Some(&meter), f);
+        work.get()
+    }
+
+    /// 解析长度约为 `n` 个推进间隔的文本，至少推进 `n` 次。
+    fn parse_moves(text: String, n: u64) {
+        let work = work_of(|| assert!(super::parse(&text).unwrap().is_some()));
+        assert!(work >= n, "{work} < {n}");
+    }
+
+    #[test]
+    fn trailing_whitespace_reports_its_bytes() {
+        parse_moves(format!("{{\"v\":1}}{}", " ".repeat(2 * PARSE_BYTES + 1)), 2);
+    }
+
+    #[test]
+    fn a_long_string_reports_its_bytes() {
+        parse_moves(format!("[\"{}\"]", "a".repeat(2 * PARSE_BYTES + 1)), 2);
+    }
+
+    #[test]
+    fn a_long_number_reports_its_bytes() {
+        parse_moves(format!("[1{}]", "0".repeat(2 * PARSE_BYTES + 1)), 2);
+    }
+
+    #[test]
+    fn many_members_report_their_bytes() {
+        let members = PARSE_BYTES / 5 + 1;
+        parse_moves(format!("[{}true]", "true,".repeat(members)), 1);
+    }
+
+    #[test]
+    fn the_value_tree_reports_its_nodes() {
+        let text = format!("[{}0]", "0,".repeat(3 * VALUE_NODES));
+        assert!(text.len() < PARSE_BYTES);
+        let work = work_of(|| assert!(super::parse_value(&text).unwrap().is_some()));
+        assert!(work >= 3, "{work}");
+    }
 }
