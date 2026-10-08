@@ -46,7 +46,7 @@ export function renderDispatchPrompt(input: DispatchPromptInput): string {
     "请依次完成：",
     "",
     `1. 开工：调用 atm_begin(cwd=${cwd}, agent_id="claude-code", client_kind="claude-code", project_code=${code})，直接使用返回的 brief，不要紧接着再调 atm_brief。`,
-    `2. 领取：用 atm_task_get 读取 ${key}，再用 atm_task_patch 对它依次执行 claim、start。` +
+    `2. 领取：用 atm_task_get 读取 ${key}，再用 atm_task_patch 对它执行 start（start 即领取并开工）。` +
       '如果任务已被其他会话领取，或状态已不允许领取，不要抢占：调用 atm_end(outcome="cancelled") 写明原因后结束。',
     "3. 完善目标：阅读相关代码，并用 atm_search 查该任务相关的 ATM 记录与历史进度，" +
       "然后用 atm_task_patch 的 edit 操作把描述改写成清晰、可执行的目标，并补齐 2～6 条可验证的验收标准；" +

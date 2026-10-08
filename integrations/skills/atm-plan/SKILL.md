@@ -2,7 +2,7 @@
 name: atm-plan
 description: 将复杂受管开发目标拆成 ATM 中可执行、可验证、可恢复的 WorkItem 计划图。
 metadata:
-  atm-integration-version: 1
+  atm-integration-version: 2
 ---
 
 # ATM Plan
@@ -15,7 +15,7 @@ metadata:
 4. 按任务类型读取 `../_shared/planning-playbooks.md`，选择 BUGFIX、FEATURE、REVIEW、RELEASE 或 RESEARCH 骨架并按真实范围调整。
 5. 按“可交付结果 + 可验证验收”拆分；不要按文件或命令机械拆分。
 6. Objective、Milestone、EPIC 只表达目标与范围；实际执行领取 READY 的叶子 WorkItem。
-7. 使用 `parent_ref`、`depends_on_refs` 和 acceptance 批量 `atm_task_create`。
+7. 用 `parent`、`depends_on`（写已有任务 key，或本批的 `client_ref` / 序号 `"1"` 起）和 acceptance 一次批量 `atm_task_create`；新任务默认 READY，回执的 `refs` 给出对应的任务 key。
 8. 发现已有计划过粗时，在主要实现前把长期有价值的步骤同步到 ATM。
 9. 规划完成后进入 `atm-task`。
 

@@ -100,7 +100,7 @@ describe("Agent 文档正式数据根分发", () => {
     ).toEqual([]);
   });
 
-  it("随包分发交互式自动注册、原子 Session 边界与拆分规则", () => {
+  it("随包分发自动注册、begin 幂等与拆分规则", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-agent-policy-"));
     temporary.push(root);
     const dataDir = join(root, "data");
@@ -108,18 +108,18 @@ describe("Agent 文档正式数据根分发", () => {
 
     installAgentDocumentation(bundled, dataDir);
     const installed = readFileSync(join(dataDir, "docs", "agent-integration.md"), "utf8");
-    expect(installed).toContain("普通交互式开工可在受管开发任务未注册时自动创建");
-    expect(installed).toContain("需要崩溃重放的自动化控制器必须先注册项目，并携带稳定 `op_id`");
-    expect(installed).toContain("该保证的键空间是 `(project, op_id)`");
-    expect(installed).toContain("必须验证该回执");
-    expect(installed).toContain("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT");
+    expect(installed).toContain("认不出项目时报 `PROJECT_REQUIRED`");
+    expect(installed).toContain("allow_project_create: true");
+    expect(installed).toContain("### begin 的幂等");
+    expect(installed).toContain("`IDEMPOTENCY_CONFLICT`");
+    expect(installed).not.toContain("ATOMIC_BEGIN_REQUIRES_EXISTING_PROJECT");
     expect(installed).not.toContain("若项目未注册，先由用户确认是否创建");
     expect(installed).toContain("拆成多个可独立完成和验收的子 WorkItem");
     const guide = readFileSync(join(dataDir, "ATM_AGENT_GUIDE.md"), "utf8");
-    expect(guide).toContain("拆成多个可独立完成和验收的子 WorkItem");
+    expect(guide).toContain("拆成可以独立完成和验收的子任务");
   });
 
-  it("随包 Guide 与 surface v5、三 Profile 和真实发现文件保持一致", () => {
+  it("随包 Guide 与 surface v6、两个 Profile 和真实发现文件保持一致", () => {
     const root = mkdtempSync(join(tmpdir(), "atm-agent-contract-"));
     temporary.push(root);
     const dataDir = join(root, "data");
@@ -129,29 +129,31 @@ describe("Agent 文档正式数据根分发", () => {
     const guide = readFileSync(join(dataDir, "ATM_AGENT_GUIDE.md"), "utf8");
     const integration = readFileSync(join(dataDir, "docs", "agent-integration.md"), "utf8");
 
-    expect(guide).toContain("MCP Surface `v5`");
+    expect(guide).toContain("MCP surface `v6`");
+    expect(guide).toContain("AyanamiTaskManager3\\runtime\\daemon.json");
     expect(guide).toContain("`endpoint`、`token`、`pid`");
     expect(guide).toContain("ayanami-task-manager-core");
     expect(guide).toContain("ayanami-task-manager-memory");
-    expect(guide).toContain("ayanami-task-manager-actions");
-    expect(guide).toContain("`atm_feedback`");
+    // actions 只作为旧配置的别名出现。
+    expect(guide).toContain("`ayanami-task-manager-actions` 照常可用：它是 core 的别名");
+    expect(guide).toContain('atm_record(kind: "ATM_FEEDBACK"');
     expect(guide).toContain("`atm_knowledge_search`");
     expect(guide).toContain("`id@revisionId`");
     expect(guide).toContain("不会自动上传到 GitHub 或任何外部服务");
-    expect(guide).toContain('operation="checklist_batch"');
+    expect(guide).toContain('operation: "checklist"');
+    expect(guide).toContain("`expected_checklist_version`");
     expect(guide).not.toContain("`atm_checklist`");
-    expect(integration).toContain("MCP 工具面当前为 v5");
-    expect(integration).toContain("三个默认同时登记、工具名不重叠的静态 Profile");
+    expect(integration).toContain("当前为 6");
+    expect(integration).toContain("MCP 登记两个 Profile");
     expect(integration).toContain("topic=atm-agent-feedback");
     expect(integration).toContain("`atm_knowledge_get`");
     expect(integration).toContain("local-knowledge.md");
     expect(integration).not.toContain("`atm_checklist`");
     for (const content of [guide, integration]) {
-      expect(content).toContain("### 固定 mutation ACK");
+      expect(content).toContain("### 写入回执（自动生成）");
       expect(content).toContain("`entities_truncated`");
       expect(content).toContain('"name": "atm_search"');
-      expect(content).toContain("operation.mutations[].response.planningRootProvisioned");
-      expect(content).not.toContain('planning_root: "PROVISIONED"');
+      expect(content).not.toContain("`projection`");
     }
     expect(
       readFileSync(join(dataDir, "docs", "generated", "mutation-acknowledgement.md"), "utf8"),

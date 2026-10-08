@@ -252,17 +252,17 @@ type TaskCard = {
 `state ∈ disabled | connecting | online | error`，细分原因写在 `lastError`（中文）；`paired` 每项是设备文档去掉 `v`，只列其它设备；
 `configured` 表示地址、app、token 三者齐备；`secretStore ∈ os-encrypted | plaintext`。
 
-| 方法 | 路径                                                 | 权限      | 说明                                                                                                                                                                     |
-| ---- | ---------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| GET  | `/api/v1/sync/status`                                | 两种令牌  | 状态，**不含任何密钥**：`{enabled, configured, relayUrl, appId, deviceName, state, lastError, lastSyncAt, longPoll, secretStore, paired: DeviceView[], pendingCommands}` |
-| PUT  | `/api/v1/sync/config`                                | USER_ONLY | `{enabled?, relayUrl?, appId?, token?, deviceName?}`；`token` 只写不读，传空字符串表示清除                                                                               |
-| POST | `/api/v1/sync/test`                                  | USER_ONLY | 用给定或已存配置探测中继：`{ok, latencyMs, longPoll, server?, error?}`                                                                                                   |
-| POST | `/api/v1/sync/pairing`                               | USER_ONLY | 返回 `{pairingCode, spaceId}`；没有空间时先创建                                                                                                                          |
-| POST | `/api/v1/sync/reset`                                 | USER_ONLY | 轮换空间（旧手机失效）                                                                                                                                                   |
-| GET  | `/api/v1/dispatch/status`                            | 两种令牌  | `{enabled, permissionMode, maxConcurrent, model, effort, claude:{found, path, version?}, runs: DispatchRunView[]}`                                                       |
-| PUT  | `/api/v1/dispatch/config`                            | USER_ONLY | `{enabled?, permissionMode?, maxConcurrent?, model?, effort?}`                                                                                                           |
-| POST | `/api/v1/projects/:code/ui/work-items/:key/dispatch` | USER_ONLY | 桌面端「交给 Claude」按钮                                                                                                                                                |
-| POST | `/api/v1/dispatch/runs/:run/cancel`                  | USER_ONLY | 结束一次派单：核验进程身份、确认进程树已结束才回 `cancelled`；没结束掉回 500 `DISPATCH_CANCEL_FAILED`（retryable，派单仍运行、名额不释放）                               |
+| 方法 | 路径                                                 | 权限                     | 说明                                                                                                                                                                     |
+| ---- | ---------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| GET  | `/api/v1/sync/status`                                | 两种令牌（3.0 起仅界面） | 状态，**不含任何密钥**：`{enabled, configured, relayUrl, appId, deviceName, state, lastError, lastSyncAt, longPoll, secretStore, paired: DeviceView[], pendingCommands}` |
+| PUT  | `/api/v1/sync/config`                                | USER_ONLY                | `{enabled?, relayUrl?, appId?, token?, deviceName?}`；`token` 只写不读，传空字符串表示清除                                                                               |
+| POST | `/api/v1/sync/test`                                  | USER_ONLY                | 用给定或已存配置探测中继：`{ok, latencyMs, longPoll, server?, error?}`                                                                                                   |
+| POST | `/api/v1/sync/pairing`                               | USER_ONLY                | 返回 `{pairingCode, spaceId}`；没有空间时先创建                                                                                                                          |
+| POST | `/api/v1/sync/reset`                                 | USER_ONLY                | 轮换空间（旧手机失效）                                                                                                                                                   |
+| GET  | `/api/v1/dispatch/status`                            | 两种令牌（3.0 起仅界面） | `{enabled, permissionMode, maxConcurrent, model, effort, claude:{found, path, version?}, runs: DispatchRunView[]}`                                                       |
+| PUT  | `/api/v1/dispatch/config`                            | USER_ONLY                | `{enabled?, permissionMode?, maxConcurrent?, model?, effort?}`                                                                                                           |
+| POST | `/api/v1/projects/:code/ui/work-items/:key/dispatch` | USER_ONLY                | 桌面端「交给 Claude」按钮                                                                                                                                                |
+| POST | `/api/v1/dispatch/runs/:run/cancel`                  | USER_ONLY                | 结束一次派单：核验进程身份、确认进程树已结束才回 `cancelled`；没结束掉回 500 `DISPATCH_CANCEL_FAILED`（retryable，派单仍运行、名额不释放）                               |
 
 ## 8. Claude 自动派单（packages/agent-dispatch）
 
@@ -371,11 +371,11 @@ ATM 仓库不内置这个地址，也不引用它。
 
 ## 12. 威胁模型摘要
 
-| 攻击者                           | 能做到                                              | 做不到                                                              |
-| -------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------- |
-| 中继运营者 / 拿到中继 token 的人 | 看到键名、大小、时间；删改或重放密文；拒绝服务      | 读内容；伪造命令（没有空间密钥过不了 GCM）；把文档挪到别的键（AAD） |
-| 拿到手机的人                     | 用已配对手机看任务、发任务（和本人一样）            | 在电脑上做白名单以外的任何操作                                      |
-| 本机其它 Agent                   | 读 `/api/v1/sync/status`、`/api/v1/dispatch/status` | 拿配对码、token、secret；改同步或派单配置（USER_ONLY）              |
+| 攻击者                           | 能做到                                                                                    | 做不到                                                              |
+| -------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 中继运营者 / 拿到中继 token 的人 | 看到键名、大小、时间；删改或重放密文；拒绝服务                                            | 读内容；伪造命令（没有空间密钥过不了 GCM）；把文档挪到别的键（AAD） |
+| 拿到手机的人                     | 用已配对手机看任务、发任务（和本人一样）                                                  | 在电脑上做白名单以外的任何操作                                      |
+| 本机其它 Agent                   | 读 `/api/v1/sync/status`、`/api/v1/dispatch/status`（3.0 起这两条只给界面，Agent 读不到） | 拿配对码、token、secret；改同步或派单配置（USER_ONLY）              |
 
 重放：命令 ID 唯一且作为幂等键，重放同一条命令不会建第二个任务（`op_id`），也不会再起一次 Claude
 （派单请求账本，即使那次派单已结束、任务又能派）；过期命令被拒。详见 §6。

@@ -518,8 +518,9 @@ describe("原生 shim 优先", () => {
     const shimPath = `%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\resources\\${MCP_SHIM_FILENAME}`;
     const guide = readFileSync("ATM_AGENT_GUIDE.md", "utf8");
     const commands = guide.match(/^claude mcp add-json .*$/gmu) ?? [];
-    expect(commands).toHaveLength(3);
-    for (const [index, profile] of ["core", "memory", "actions"].entries()) {
+    // surface v6 只登记 core 与 memory；actions 是 core 的别名，只为旧配置保留。
+    expect(commands).toHaveLength(2);
+    for (const [index, profile] of ["core", "memory"].entries()) {
       const json = /'(\{.*\})'/u.exec(commands[index] ?? "")?.[1] ?? "{}";
       expect(JSON.parse(json)).toEqual({ command: "<atm-mcp.exe>", args: ["--profile", profile] });
     }
@@ -528,11 +529,8 @@ describe("原生 shim 优先", () => {
     const portable = readFileSync("docs/portable-usage.md", "utf8");
     expect(portable).toContain(`命令指向解压目录下的 \`resources\\${MCP_SHIM_FILENAME}\``);
     expect(portable).not.toContain(shimPath);
-    // shim 缺失时的回落就是 mcpLaunch 的另一支：宿主自己的 --mcp-stdio，不带环境变量。
-    expect(guide).toContain(
-      '`{"command":"<ATM.exe>","args":["--mcp-stdio","--profile","core"]}`，`<ATM.exe>` 是 ' +
-        `\`%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\AyanamiTaskManager.exe\``,
-    );
+    // 3.0 没有 Node 宿主，Guide 不再教 --mcp-stdio 回落。
+    expect(guide).not.toContain("--mcp-stdio");
     expect(readFileSync("docs/troubleshooting.md", "utf8")).toContain(
       `使用 \`${shimPath}\`，参数只有 \`--profile <name>\`，不带环境变量`,
     );

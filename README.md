@@ -164,11 +164,11 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 最短工作流：
 
 1. `atm_begin` 开工，并直接使用返回的 brief。
-2. 按需读取 READY 叶子 WorkItem，使用 `atm_task_patch` 领取并开始。
+2. 按需读取 READY 叶子 WorkItem，`atm_task_patch(operation: "start")` 领取并开工。
 3. 只在状态真正变化时写 progress；长期事实、决策、风险和证据写 record。
-4. 验证后完成 WorkItem，Session 结束调用 `atm_end`。
+4. 验证后 `complete`（可同时带证据），会话结束调用 `atm_end`。
 
-只有上下文压缩、长时间离开或明确恢复 working set 时才调用 `atm_brief`。任务过大时，应先按“可交付结果 + 可验证验收”拆成独立叶子 WorkItem。
+只有上下文压缩、长时间离开或明确恢复 working set 时才调用 `atm_brief`（Claude Code、Codex 上可以不带参数）。出错时照错误里的 `fix` 执行。任务过大时，应先按“可交付结果 + 可验证验收”拆成独立叶子 WorkItem。
 
 安装后让 Agent 从这里开始，无需记住源码仓库在哪：
 
@@ -176,17 +176,14 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 完整规则和字段约定见 [Agent 接入指南](./docs/agent-integration.md) 与 [Agent Guide 在线版](./ATM_AGENT_GUIDE.md)。受管项目未注册时自动创建；只有无法可靠确定项目名称、代码或目录时才请求确认。
 
-| Profile   | 做什么                             | 主要入口                                                                                |
-| --------- | ---------------------------------- | --------------------------------------------------------------------------------------- |
-| `core`    | 开工、找任务、拆任务、恢复与交接   | `atm_begin`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_brief`、`atm_end` |
-| `actions` | 领取、开始、检查项、验证与完成     | `atm_task_patch`                                                                        |
-| `memory`  | 阶段进度、长期记录、反馈与按需检索 | `atm_progress_add`、`atm_record`、`atm_feedback`、`atm_search`、`atm_delta`             |
-| `memory`  | 跨项目知识，只读且按需             | `atm_knowledge_search` → `atm_knowledge_get`                                            |
-| `memory`  | 直接发布、更新共享知识             | `atm_knowledge_save`（先查重，更新带旧修订 ID）                                         |
+| Profile  | 做什么                                         | 工具                                                                                                                                        |
+| -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `core`   | 开工、找任务、拆任务、改状态、进度与记录、交接 | `atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_end` |
+| `memory` | 搜索与跨项目共享知识                           | `atm_search`、`atm_knowledge_search` → `atm_knowledge_get`、`atm_knowledge_save`（先查重，更新带旧修订 ID）                                 |
 
 需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。有可复用结论时由 Agent 直接发布，不要求用户逐篇导入。更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文和编辑元数据。项目 Record 只存项目事实，不复制整篇知识。若升级后看不到新工具，请重载客户端 MCP。
 
-工具表拆成 `core` / `memory` / `actions` 三个 profile。工具数量、每个 profile 的 descriptor 字节数、预算与余量由 registry 和预算常量生成，避免文档数字漂移。
+旧配置里的 `actions` profile 是 core 的别名，照常可用；`atm_delta`、`atm_feedback` 并入了 `atm_brief(since_seq)` 与 `atm_record(kind: "ATM_FEEDBACK")`，旧名仍可调用。下面的工具数、字节数、预算与余量由代码生成，避免文档数字漂移。
 
 <!-- MCP_TOOL_STATS:BEGIN -->
 
