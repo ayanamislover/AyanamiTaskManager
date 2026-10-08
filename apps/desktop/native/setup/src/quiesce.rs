@@ -33,7 +33,7 @@ pub fn service(env: &Env) -> Option<(Proc, bool)> {
 }
 
 fn service_with_layout(env: &Env) -> Option<(Proc, bool, Layout)> {
-    let (pid, layout) = runtime::lease(&env.runtime_dir())?;
+    let (pid, layout) = env.service_lease()?;
     let proc = procs::find(pid)?;
     let legacy = is_legacy(&proc.image, layout, &env.install_root);
     Some((proc, legacy, layout))

@@ -1,0 +1,133 @@
+//! 开发用的无头运行时（W4i）：端到端交接用例与本机联调拉起它。不进安装包；正式宿主（W6）链接同一个库。
+//!
+//! ```text
+//! atm-runtime --n <新根> --legacy <旧根> [--version 3.0.0-dev]
+//!             [--txn-start <txn> --install-root <安装根>] [--background]
+//!             [--drill-pace-ms <n>] [--drill-hold-at <阶段>]
+//! ```
+//!
+//! 两个根都必须显式给出，并且不能是真实的数据根：开发二进制不碰真实数据。
+//!
+//! 退出码：2 参数不对；3 另一个实例持有准入；4 旧版未静止；5 启动失败。入口开着或处于数据源冲突时一直运行。
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use atm_runtime::{Background, BootError, Drill, Event, Handoff, Options, Started};
+use atm_store::conversion::Quiesce;
+
+fn usage(why: &str) -> ! {
+    eprintln!("atm-runtime: {why}");
+    std::process::exit(2);
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let norm = |p: &std::path::Path| {
+        std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let (mut n, mut legacy, mut txn, mut install_root) = (None, None, None, None);
+    let mut version = "3.0.0-dev".to_string();
+    let mut drill = Drill::default();
+    while let Some(arg) = args.next() {
+        let mut value = || {
+            args.next()
+                .unwrap_or_else(|| usage(&format!("{arg} needs a value")))
+        };
+        match arg.as_str() {
+            "--n" => n = Some(PathBuf::from(value())),
+            "--legacy" => legacy = Some(PathBuf::from(value())),
+            "--version" => version = value(),
+            "--txn-start" => txn = Some(value()),
+            "--install-root" => install_root = Some(PathBuf::from(value())),
+            "--background" => {}
+            "--drill-pace-ms" => {
+                let ms: u64 = value().parse().unwrap_or_else(|_| usage("bad --drill-pace-ms"));
+                drill.pace = Some(Duration::from_millis(ms));
+            }
+            "--drill-hold-at" => drill.hold_at = Some(value()),
+            other => usage(&format!("unknown argument {other}")),
+        }
+    }
+    let n = n.unwrap_or_else(|| usage("--n is required"));
+    let legacy = legacy.unwrap_or_else(|| usage("--legacy is required"));
+    if let Ok(real) = atm_install_state::startup::v3_root()
+        && std::env::var_os("ATM3_DATA_DIR").is_none()
+        && same_dir(&n, &real)
+    {
+        usage("refusing the real 3.x data root");
+    }
+    if let Some(real) = atm_store::legacy::real_data_root()
+        && (same_dir(&legacy, &real) || same_dir(&n, &real))
+    {
+        usage("refusing the real 2.x data root");
+    }
+    let handoff = match (txn, install_root) {
+        (Some(txn), Some(install_root)) => Some(Handoff { txn, install_root }),
+        (None, None) => None,
+        _ => usage("--txn-start and --install-root go together"),
+    };
+    let observe: Arc<dyn Fn(Event) + Send + Sync> =
+        Arc::new(|e| eprintln!("atm-runtime: {e:?}"));
+    let options = Options {
+        n,
+        legacy,
+        version,
+        handoff,
+        // 联调里旧版由用例自己控制：旧根里没有存活的 lease 就算静止。
+        quiesce: Box::new(|| Quiesce::Quiet),
+        allow_real_data_root: false,
+        real_data_root: None,
+        secrets_check: Some(atm_runtime::secrets::check),
+        sweep_every: Duration::from_secs(60),
+        drill,
+        observe: observe.clone(),
+    };
+    let started = match atm_runtime::start(&options) {
+        Ok(started) => started,
+        Err(e) => {
+            eprintln!("atm-runtime: {e}");
+            std::process::exit(match e {
+                BootError::AlreadyRunning => 3,
+                BootError::WaitLegacyQuiesce(_) => 4,
+                BootError::Failed(_) => 5,
+            });
+        }
+    };
+    match started {
+        Started::Serving(serving) => {
+            eprintln!("atm-runtime: serving on 127.0.0.1:{}", serving.port());
+            if let Some(outcome) = serving.background(Duration::MAX) {
+                match outcome {
+                    Background::Unchanged => {}
+                    Background::Conflict(state) => {
+                        eprintln!("atm-runtime: SOURCE_CONFLICT: {}", state.reason)
+                    }
+                    Background::Failed(e) => eprintln!("atm-runtime: {e}"),
+                }
+            }
+            park(serving);
+        }
+        Started::Conflict(conflicted) => {
+            eprintln!("atm-runtime: SOURCE_CONFLICT: {}", conflicted.state.reason);
+            park(conflicted);
+        }
+    }
+}
+
+/// 一直运行，持有准入（由 setup 或用例按身份结束）。
+fn park<T>(_held: T) -> ! {
+    loop {
+        std::thread::sleep(Duration::from_secs(3600));
+    }
+}

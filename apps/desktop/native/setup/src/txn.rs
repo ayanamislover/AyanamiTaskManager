@@ -10,7 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use atm_install_state::startup::{self, ProgressWatch, RollbackAuthority, WaitPolicy, WaitVerdict};
+use atm_install_state::handoff;
+use atm_install_state::startup::{self, RollbackAuthority, WaitPolicy};
 use atm_install_state::{AppPointer, Outcome, Transaction, TxnKind, TxnState};
 
 use crate::env::{self, Env};
@@ -666,49 +667,23 @@ impl Setup {
         identity: &atm_install_state::ProcessIdentity,
         policy: WaitPolicy,
     ) -> Step {
-        let identity = identity.clone();
-        let mut watch = ProgressWatch::new(&txn.id, &identity, policy, Instant::now());
-        let mut last = String::new();
-        let mut reported = String::new();
-        loop {
-            let healthy = match runtime::service_healthy(
-                &self.env.health_dir(),
-                &self.env.runtime_dir(),
-                &txn.id,
+        let health_dir = self.env.health_dir();
+        let legacy_runtime = self.env.runtime_dir();
+        let ledger = self.env.txn_dir(&txn.id).join(handoff::LEDGER_FILE);
+        handoff::await_healthy(
+            &handoff::Await {
+                health_dir: &health_dir,
+                legacy_runtime: &legacy_runtime,
+                v3_root: &self.env.v3_root,
+                ledger: &ledger,
+                txn: &txn.id,
                 version,
-                &identity,
-                Instant::now() + Duration::from_secs(10),
-            ) {
-                Ok(()) => true,
-                Err(error) => {
-                    last = error;
-                    false
-                }
-            };
-            let progress = startup::read_progress(&self.env.v3_root);
-            if let Some(p) = progress.as_ref().filter(|p| watch.accepts(p)) {
-                let now = format!("{} {}/{}", p.phase, p.progress.done, p.progress.total);
-                if now != reported {
-                    say!("START {version}: {now}");
-                    reported = now;
-                }
-            }
-            match watch.observe(
-                Instant::now(),
-                healthy,
-                procs::alive(&identity),
-                progress.as_ref(),
-            ) {
-                WaitVerdict::Healthy => {
-                    say!("START {version} SERVICE_HEALTHY (host {})", identity.pid);
-                    return Ok(());
-                }
-                WaitVerdict::Waiting => std::thread::sleep(Duration::from_millis(250)),
-                WaitVerdict::Dead => return Err(format!("START_HOST_EXITED: {last}")),
-                WaitVerdict::Stuck(why) => return Err(format!("START_STUCK: {why}; {last}")),
-                WaitVerdict::TimedOut(why) => return Err(format!("START_TIMEOUT: {why}; {last}")),
-            }
-        }
+                identity,
+                policy,
+                poll: Duration::from_millis(250),
+            },
+            &mut |line| say!("{line}"),
+        )
     }
 
     /// Before leaving 3.x (a failed upgrade's undo, an active rollback or downgrade, back to

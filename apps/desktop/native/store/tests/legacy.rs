@@ -5292,6 +5292,7 @@ mod w3e {
             allow_real_data_root: false,
             real_data_root: None,
             secrets_check: Some(secrets_ok),
+            progress: None,
         }
     }
 
@@ -5480,19 +5481,34 @@ mod w3e {
             Verdict::Serve
         );
 
-        assert!(!cv::must_compare_before_serving(&present(&v3), &m));
-        assert!(cv::must_compare_before_serving(&present(&legacy), &m));
+        assert!(!cv::must_compare_before_serving(&present(&v3), &m, &root));
+        assert!(cv::must_compare_before_serving(&present(&legacy), &m, &root));
         assert!(cv::must_compare_before_serving(
             &AuthorityState::Missing,
-            &m
+            &m,
+            &root
         ));
         assert!(cv::must_compare_before_serving(
             &AuthorityState::Corrupt,
-            &m
+            &m,
+            &root
         ));
         assert!(cv::must_compare_before_serving(
             &present(&other_generation),
-            &m
+            &m,
+            &root
+        ));
+        // W3 peer r1 P2-02：`A=v3` 与 `M` 对得上，但这次的 `L` 不是转换时的源：在开放入口之前阻塞比较
+        // （[`cv::judge`] 随后判冲突）。大小写与分隔符不同的同一路径不算换了源。
+        assert!(cv::must_compare_before_serving(
+            &present(&v3),
+            &m,
+            &root.join("elsewhere")
+        ));
+        assert!(!cv::must_compare_before_serving(
+            &present(&v3),
+            &m,
+            &PathBuf::from(root.to_string_lossy().to_uppercase().replace('\\', "/"))
         ));
     }
 
@@ -5508,7 +5524,7 @@ mod w3e {
             &cv::rollback_authority(Some(&authority(&n)), &m, "txn-1", AT),
         )
         .unwrap();
-        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m));
+        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m, &root));
         let cmp = compare(&n, &root);
         assert_eq!(judge(&n, &root, &cmp), Verdict::ResumeAfterRollback);
         let a = cv::resume_after_rollback(&n, &authority(&n), T2).unwrap();
@@ -5820,7 +5836,7 @@ mod w3f {
         );
 
         // 回滚后没动过 2.x：阻塞比较判不变 → 无损接回。
-        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m));
+        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m, &root));
         let base = cv::baseline(&m, Some(&written)).clone();
         let again = cv::compare(
             &n,
@@ -5831,6 +5847,7 @@ mod w3f {
                 allow_real_data_root: false,
                 real_data_root: None,
                 secrets_check: Some(secrets_ok),
+                progress: None,
             },
         );
         assert_eq!(
@@ -6044,6 +6061,7 @@ mod fault_matrix {
                 allow_real_data_root: false,
                 real_data_root: None,
                 secrets_check: Some(secrets_ok),
+                progress: None,
             },
         )
     }
@@ -6366,7 +6384,8 @@ mod fault_matrix {
             .unwrap();
         assert!(!cv::must_compare_before_serving(
             &cv::read_authority(&n),
-            &m
+            &m,
+            &root
         ));
         assert_eq!(
             compare(&n, &root),
@@ -7202,7 +7221,8 @@ mod fault_matrix {
         let after = business(&f, &root);
         assert!(cv::must_compare_before_serving(
             &cv::read_authority(&n),
-            &manifest(&n)
+            &manifest(&n),
+            &root
         ));
         reconvert(&f, &n, &root);
         assert_eq!(business(&f, &root), after);
@@ -7286,6 +7306,7 @@ mod w3_peer_r1 {
             allow_real_data_root: false,
             real_data_root: None,
             secrets_check: Some(secrets_ok),
+            progress: None,
         }
     }
 

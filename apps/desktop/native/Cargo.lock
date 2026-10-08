@@ -105,6 +105,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-runtime"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-http",
+ "atm-install-state",
+ "atm-service",
+ "atm-store",
+ "rusqlite",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "atm-service"
 version = "0.0.0"
 dependencies = [

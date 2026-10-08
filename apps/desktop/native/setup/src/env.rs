@@ -159,6 +159,19 @@ impl Env {
     pub fn runtime_dir(&self) -> PathBuf {
         self.data_dir.join("runtime")
     }
+    /// `N\runtime`: where a 3.x service keeps its lease and daemon.json (the bridge reads the
+    /// same descriptor there).
+    pub fn v3_runtime_dir(&self) -> PathBuf {
+        self.v3_root.join("runtime")
+    }
+    /// The service lease wherever a new-style service keeps it: the 2.x data root, else a 3.x
+    /// single-process lease under `N\runtime`.
+    pub fn service_lease(&self) -> Option<(u32, crate::runtime::Layout)> {
+        crate::runtime::lease(&self.runtime_dir()).or_else(|| {
+            crate::runtime::lease(&self.v3_runtime_dir())
+                .filter(|(_, layout)| *layout == crate::runtime::Layout::Single)
+        })
+    }
     pub fn start_menu_shortcut(&self) -> PathBuf {
         self.start_menu_dir.join(SHORTCUT_NAME)
     }

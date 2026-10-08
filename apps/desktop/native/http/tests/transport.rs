@@ -346,8 +346,27 @@ fn unknown_routes_and_methods_use_the_envelope() {
         (status, &v),
         (200, &json!({"impl": "rust", "layout": "single"}))
     );
+    // W4i：setup 不带令牌探 `/health`（它从不读令牌）。不要令牌，但 Host 照样要对，别的入口照样要令牌。
     let (status, v) = get("/health", "wrong-token-wrong-token-wrong-token-xx");
+    assert_eq!((status, &v), (200, &json!({"impl": "rust", "layout": "single"})));
+    let (status, _) = raw(
+        s.port,
+        format!("GET /health HTTP/1.1\r\nConnection: close\r\nHost: {host}\r\n\r\n").as_bytes(),
+    );
+    assert_eq!(status, 200);
+    let (status, v) = raw(
+        s.port,
+        b"GET /health HTTP/1.1\r\nConnection: close\r\nHost: localhost\r\n\r\n",
+    );
+    assert_eq!((status, code(&v)), (403, "FORBIDDEN"));
+    let (status, v) = get("/echo", "wrong-token-wrong-token-wrong-token-xx");
     assert_eq!((status, code(&v)), (401, "UNAUTHORIZED"));
+    let (status, v) = raw(
+        s.port,
+        format!("POST /health HTTP/1.1\r\nConnection: close\r\nHost: {host}\r\nContent-Length: 0\r\n\r\n")
+            .as_bytes(),
+    );
+    assert_eq!((status, code(&v)), (401, "UNAUTHORIZED"), "only GET /health goes without a token");
 }
 
 /// 阻塞池满：准入等不到就回 STORE_BUSY（503、可重试、committed:false），而且那次调用确实没有执行。

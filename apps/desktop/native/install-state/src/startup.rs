@@ -144,6 +144,22 @@ pub struct ProgressWatch {
     changed_at: Instant,
 }
 
+/// 一次 START 等待的预算记账，setup 落盘（txn 目录下）。setup 重启后接管同一个进程的等待时按它续算：
+/// 总上限、首条进度期限与「多久没动」都从这个进程被拉起时算起，不因为重建 [`ProgressWatch`] 而重来
+/// （W3 peer r1 P2-02）。时间用墙钟毫秒，只有落盘与续算时才与 `Instant` 互换。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitLedger {
+    pub txn: String,
+    pub pid: u32,
+    pub process_created_at: u64,
+    /// 等待开始（墙钟毫秒）。
+    pub started_ms: u64,
+    /// 进度最后一次推进（墙钟毫秒）。
+    pub changed_ms: u64,
+    /// 最后看到的 (phase, done, total, work)。
+    pub last: Option<(String, u64, u64, u64)>,
+}
+
 impl ProgressWatch {
     pub fn new(
         txn: &str,
@@ -158,6 +174,45 @@ impl ProgressWatch {
             started: now,
             last: None,
             changed_at: now,
+        }
+    }
+
+    /// 接管等待：`ledger` 是同一 txn、同一进程（pid + 创建时间）记下的，就按它续算；否则从 `now` 重新开始。
+    /// 墙钟往回拨时按「还没过去」算（只会多等，不会提前判死）。
+    pub fn resume(
+        txn: &str,
+        identity: &ProcessIdentity,
+        policy: WaitPolicy,
+        ledger: Option<&WaitLedger>,
+        now: Instant,
+        now_ms: u64,
+    ) -> ProgressWatch {
+        let mut watch = ProgressWatch::new(txn, identity, policy, now);
+        let Some(ledger) = ledger.filter(|l| {
+            l.txn == txn && l.pid == identity.pid && l.process_created_at == identity.started_at_ms
+        }) else {
+            return watch;
+        };
+        let back = |ms: u64| {
+            now.checked_sub(Duration::from_millis(now_ms.saturating_sub(ms)))
+                .unwrap_or(now)
+        };
+        watch.started = back(ledger.started_ms);
+        watch.changed_at = back(ledger.changed_ms.max(ledger.started_ms));
+        watch.last = ledger.last.clone();
+        watch
+    }
+
+    /// 现在的记账，供落盘。
+    pub fn ledger(&self, now: Instant, now_ms: u64) -> WaitLedger {
+        let at = |t: Instant| now_ms.saturating_sub(now.saturating_duration_since(t).as_millis() as u64);
+        WaitLedger {
+            txn: self.txn.clone(),
+            pid: self.identity.pid,
+            process_created_at: self.identity.started_at_ms,
+            started_ms: at(self.started),
+            changed_ms: at(self.changed_at),
+            last: self.last.clone(),
         }
     }
 
@@ -586,6 +641,76 @@ mod tests {
             taken_over.observe(t0 + MIN * 5, false, true, Some(&mine)),
             WaitVerdict::Waiting
         );
+    }
+
+    /// W3 peer r1 P2-02：setup 重启后接管同一个进程，预算从那个进程的等待开始时算，不因重建 watch 重来。
+    /// 墙钟毫秒 `base` 对应 `t0`。
+    #[test]
+    fn a_takeover_keeps_the_budget_of_the_same_process() {
+        let t0 = Instant::now();
+        let base = 1_800_000_000_000u64;
+        let ms = |d: Duration| base + d.as_millis() as u64;
+        let policy = WaitPolicy::default();
+        let p = progress("T2", &me(), "VERIFY", 3);
+
+        // 1 min 时有过一次进度，之后没动；第 9 min setup 被杀，记账已落盘。
+        let mut first = ProgressWatch::new("T2", &me(), policy, t0);
+        assert_eq!(first.observe(t0 + MIN, false, true, Some(&p)), WaitVerdict::Waiting);
+        let ledger = first.ledger(t0 + MIN * 9, ms(MIN * 9));
+        assert_eq!(ledger.started_ms, base);
+        assert_eq!(ledger.changed_ms, ms(MIN));
+
+        // 接管后再过 2 min：从最后一次推进算已经 11 min，判卡住。重新开始计时的话还在等。
+        let t1 = t0 + MIN * 9;
+        let mut resumed = ProgressWatch::resume("T2", &me(), policy, Some(&ledger), t1, ms(MIN * 9));
+        match resumed.observe(t1 + MIN * 2, false, true, Some(&p)) {
+            WaitVerdict::Stuck(why) => assert!(why.contains("VERIFY 3/10"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        let mut fresh = ProgressWatch::new("T2", &me(), policy, t1);
+        assert_eq!(fresh.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
+
+        // 总上限：119 min 前开始等，进度一直在动，接管 1 min 后到上限。
+        let mut long = ledger.clone();
+        long.started_ms = ms(MIN * 9) - 119 * 60_000;
+        let mut capped = ProgressWatch::resume("T2", &me(), policy, Some(&long), t1, ms(MIN * 9));
+        let moving = progress("T2", &me(), "IMPORT", 9);
+        assert!(matches!(
+            capped.observe(t1 + MIN, false, true, Some(&moving)),
+            WaitVerdict::TimedOut(_)
+        ));
+
+        // 首条进度期限：50 s 前开始等、还没有进度，接管 10 s 后到期。
+        let silent = WaitLedger {
+            started_ms: ms(MIN * 9) - 50_000,
+            changed_ms: ms(MIN * 9) - 50_000,
+            last: None,
+            ..ledger.clone()
+        };
+        let mut late = ProgressWatch::resume("T2", &me(), policy, Some(&silent), t1, ms(MIN * 9));
+        assert!(matches!(
+            late.observe(t1 + Duration::from_secs(10), false, true, None),
+            WaitVerdict::TimedOut(_)
+        ));
+
+        // 别的进程（pid 复用）、别的 txn 的记账不算：从头开始。
+        for other in [
+            WaitLedger {
+                process_created_at: me().started_at_ms + 1,
+                ..ledger.clone()
+            },
+            WaitLedger {
+                txn: "T1".into(),
+                ..ledger.clone()
+            },
+        ] {
+            let mut w = ProgressWatch::resume("T2", &me(), policy, Some(&other), t1, ms(MIN * 9));
+            assert_eq!(w.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
+        }
+
+        // 墙钟往回拨：按「还没过去」算，只会多等。
+        let mut back = ProgressWatch::resume("T2", &me(), policy, Some(&ledger), t1, base - 1);
+        assert_eq!(back.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
     }
 
     #[test]

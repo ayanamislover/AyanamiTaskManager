@@ -51,19 +51,7 @@ pub fn read_json_limited<T: for<'de> serde::Deserialize<'de>>(
     path: &Path,
     limit: u64,
 ) -> io::Result<Option<T>> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let mut bytes = Vec::new();
-    file.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(io::Error::other(format!("{} too large", path.display())));
-    }
-    serde_json::from_slice(&bytes)
-        .map(Some)
-        .map_err(io::Error::other)
+    atm_install_state::read_json_limited(path, limit)
 }
 
 /// Same-volume rename of a file or directory. Never copies: a move that would need a copy

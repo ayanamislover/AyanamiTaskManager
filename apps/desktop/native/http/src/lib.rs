@@ -232,11 +232,14 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
     {
         return reply(too_large(len as usize - MAX_BODY));
     }
+    // `GET /health` 不要令牌（W4i）：setup 核对 SERVICE_HEALTHY 时探它，而 setup 从不读、不留令牌。
+    // 它只答 pid、实例 id 与 lease 序号；Host、Origin 与 Sec-Fetch 的检查照旧在前面。
+    let health = request.method() == Method::GET && request.uri().path() == "/health";
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.as_bytes().strip_prefix(b"Bearer "))
         .unwrap_or_default();
-    if !state.token.matches(presented) {
+    if !health && !state.token.matches(presented) {
         return reply(refuse(
             DomainError::new(ErrorCode::UNAUTHORIZED, "ATM 令牌不对或已失效"),
             Fix::AskUser {

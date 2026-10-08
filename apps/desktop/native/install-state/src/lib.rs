@@ -13,7 +13,13 @@
 
 pub mod durable;
 #[cfg(windows)]
+pub mod handoff;
+#[cfg(windows)]
 pub mod ipc;
+#[cfg(windows)]
+pub mod procs;
+#[cfg(windows)]
+pub mod service;
 pub mod startup;
 
 use serde::{Deserialize, Serialize};
@@ -222,6 +228,27 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, Sta
     serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|error| StateError::Invalid(path.to_path_buf(), error.to_string()))
+}
+
+/// A small JSON file, `None` when it does not exist; larger than `limit` is an error.
+pub fn read_json_limited<T: for<'de> Deserialize<'de>>(
+    path: &Path,
+    limit: u64,
+) -> io::Result<Option<T>> {
+    use std::io::Read;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::other(format!("{} too large", path.display())));
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(io::Error::other)
 }
 
 /// Same rule as `resolveDaemonDataDirectory` in apps/daemon/src/runtime-discovery.ts. Host,

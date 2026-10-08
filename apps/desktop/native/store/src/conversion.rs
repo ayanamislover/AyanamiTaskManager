@@ -1328,6 +1328,9 @@ pub struct CompareOptions<'a> {
     pub allow_real_data_root: bool,
     pub real_data_root: Option<&'a Path>,
     pub secrets_check: Option<fn(&[u8]) -> bool>,
+    /// 进度（与 [`RunOptions::progress`] 同一种回调）。阻塞比较时宿主把它写成启动进度交给 setup：
+    /// 大的 `L` 比较起来与转换一样久，不能让 setup 当成卡住（W4i）。首条是 `COMPARE 0/0`，在任何枚举之前。
+    pub progress: Option<ProgressFn<'a>>,
 }
 
 /// 比较的基准：用户选过「沿用 3.0」就是当时接受的摘要，否则是转换时写进 `M` 的。
@@ -1339,9 +1342,16 @@ pub fn baseline<'a>(m: &'a Manifest, a: Option<&'a Authority>) -> &'a BTreeMap<S
 
 /// 07 §6 第 1 条：`A` 不是一条与 `M` 对得上的 v3 记录时，必须在发布任何入口之前阻塞比较；
 /// 是的话服务照常启动，比较放到后台低优先级做（每次启动都做，没有元数据快速路径）。
-pub fn must_compare_before_serving(a: &AuthorityState, m: &Manifest) -> bool {
-    !matches!(a, AuthorityState::Present(a)
-        if a.authority == "v3" && a.generation.as_deref() == Some(m.generation.as_str()))
+/// 这次的 `L` 不是 `M` 记下的转换源时也阻塞（B3，W3 peer r1 P2-02）：[`judge`] 会判冲突，
+/// 而后台比较得出结论之前入口已经开着了。
+pub fn must_compare_before_serving(a: &AuthorityState, m: &Manifest, legacy_root: &Path) -> bool {
+    let bound = matches!(a, AuthorityState::Present(a)
+        if a.authority == "v3" && a.generation.as_deref() == Some(m.generation.as_str()));
+    let same_source = m
+        .source_root
+        .as_deref()
+        .is_none_or(|recorded| same_root(recorded, legacy_root));
+    !(bound && same_source)
 }
 
 /// 07 §6 第 2–3 条：对 `L` 做一次只读快照（与 SNAPSHOT 同样的复制方式，放在 `N\runtime\compare\`，用完删掉），
@@ -1362,6 +1372,18 @@ pub fn compare(
         }
         Ok(_) => {}
     }
+    let quiet = |_: &str, _: usize, _: usize, _: u64| {};
+    let meter = crate::progress::Meter::new(opts.progress.unwrap_or(&quiet));
+    crate::progress::with(Some(&meter), || compare_metered(layout, m, base, opts))
+}
+
+fn compare_metered(
+    layout: &Layout,
+    m: &Manifest,
+    base: &BTreeMap<String, String>,
+    opts: &CompareOptions<'_>,
+) -> Comparison {
+    crate::progress::set("COMPARE", 0, 0);
     let scratch = layout.runtime().join("compare");
     let _ = std::fs::remove_dir_all(&scratch);
     let digest = (|| -> Result<BTreeMap<String, String>> {
@@ -1371,7 +1393,7 @@ pub fn compare(
             &m.started_at,
             &src,
             &mut copy_under(&src),
-            &|_, _| {},
+            &|done, total| crate::progress::set("COMPARE", done, total),
             &mut || Ok(()),
         )?;
         let sources = LegacySources::from_root(&src)?;
@@ -2142,6 +2164,7 @@ pub fn rehearse(o: RehearseOptions<'_>) -> std::result::Result<Rehearsal, Rehear
             allow_real_data_root: o.allow_real_data_root,
             real_data_root: o.real_data_root,
             secrets_check: o.secrets_check,
+            progress: None,
         },
     ) {
         Comparison::Unchanged(_) => {}

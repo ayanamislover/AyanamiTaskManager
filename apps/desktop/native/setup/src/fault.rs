@@ -114,7 +114,7 @@ pub fn after_spawn(
         return;
     };
     let lease = || {
-        crate::runtime::lease(&env.runtime_dir()).is_some_and(|(pid, layout)| match layout {
+        env.service_lease().is_some_and(|(pid, layout)| match layout {
             crate::runtime::Layout::Single => pid == host.pid,
             crate::runtime::Layout::HostAndCore => crate::procs::parent_of(pid) == Some(host.pid),
         })
