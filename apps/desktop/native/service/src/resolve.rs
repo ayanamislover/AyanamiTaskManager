@@ -119,11 +119,13 @@ fn session_project(
     }
 }
 
-/// 连接组的默认 session：这个连接组最近用过的 ONLINE session（begin 接回、写入都会刷新心跳）。
+/// 连接组的默认 session：这个连接组最近用过的 ONLINE **PRIMARY** session（begin 接回、写入都会刷新心跳）。
+/// 子代理、复核会话开在同一个连接组里也不会顶替它：它们必须显式带 session（11 P1-2；U-6 子代理场景）。
 fn default_session(tx: &Transaction<'_>, group: &str) -> Result<Option<String>, DomainError> {
     tx.query_row(
         "SELECT s.id FROM agent_sessions s JOIN projects p ON p.id = s.project_id
-          WHERE s.client_identity = ?1 AND s.connection_state = 'ONLINE' AND p.lifecycle <> 'TRASHED'
+          WHERE s.client_identity = ?1 AND s.connection_state = 'ONLINE' AND s.role = 'PRIMARY'
+            AND p.lifecycle <> 'TRASHED'
           ORDER BY COALESCE(s.heartbeat_at, s.started_at) DESC, s.id DESC LIMIT 1",
         [group],
         |r| r.get(0),

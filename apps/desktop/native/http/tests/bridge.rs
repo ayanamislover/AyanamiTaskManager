@@ -815,6 +815,16 @@ impl Agent {
         r["structuredContent"].clone()
     }
 
+    /// 反例：这次调用必须被拒，返回错误码。不计入正常路径。
+    fn refused(&mut self, tool: &str, args: Value) -> String {
+        let r = self.b.call(tool, args);
+        assert_eq!(r["isError"], json!(true), "{tool} 应当被拒：{r}");
+        r["structuredContent"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     /// 一个流程：`run` 里发出的调用数必须恰好是 11 §1「提案后」那一列。
     fn flow(&mut self, name: &str, proposed: usize, run: impl FnOnce(&mut Agent)) {
         let before = self.calls;
@@ -948,4 +958,257 @@ fn u2_golden_scripts_take_the_proposed_number_of_calls() {
         json!({"task_key": keys[2], "operation": "complete", "evidence": ["重启后完成"]}),
     );
     assert_eq!(status_of(&r, &project, &keys[2]), "DONE");
+}
+
+// ---- U-6 安全规则零摩擦（11 §5，10 R11）-----------------------------------------------------------
+//
+// 正常路径上 Agent 只照 instructions 做，每一次调用都必须成功（于是 CLAIM_NOT_OWNED、VERSION_CONFLICT、
+// IDEMPOTENCY_CONFLICT 一个都没有）；反例照常被拒。全部经真实桥，Agent 由替身进程扮演。
+
+/// 新仓库开工、建一个任务并开工，返回 (项目代码, 任务 key)。
+fn u6_open(a: &mut Agent, cwd: &str) -> (String, String) {
+    let begun = a.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "cwd": cwd, "allow_project_create": true}),
+    );
+    let project = begun["project"]["code"]
+        .as_str()
+        .or(begun["project"].as_str())
+        .unwrap()
+        .to_owned();
+    let created = a.call("atm_task_create", json!({"items": [{"title": "实现"}]}));
+    let task = created["refs"]["1"].as_str().unwrap().to_owned();
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "start"}),
+    );
+    (project, task)
+}
+
+fn u6_repo(r: &Rig, name: &str) -> String {
+    let repo = r.w.dir.join(name);
+    std::fs::create_dir_all(&repo).unwrap();
+    repo.display().to_string()
+}
+
+/// 单 Agent：开工、记进度、记决策、带证据完成、结束，一路零错误。
+#[test]
+fn u6_single_agent_has_no_friction() {
+    let r = rig("bridge-u6-single");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    a.call(
+        "atm_progress_add",
+        json!({"task_key": task, "summary": "写了一半"}),
+    );
+    a.call(
+        "atm_record",
+        json!({"kind": "DECISION", "title": "选型", "summary": "用 Rust"}),
+    );
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["测试全绿"]}),
+    );
+    a.call("atm_end", json!({"summary": "完成"}));
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 上下文压缩：Agent 丢了 session 等一切上下文。照 instructions 调无参 brief 接着写自己的任务；
+/// 压缩后误以为要重新 begin（10 §419）也一样：同一连接组接回同一个 PRIMARY，继续写自己领取的任务。
+#[test]
+fn u6_compaction_keeps_the_agent_on_its_own_task() {
+    let r = rig("bridge-u6-compact");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    let brief = a.call("atm_brief", json!({}));
+    assert_eq!(brief["own"], json!([task]), "{brief}");
+    a.call(
+        "atm_progress_add",
+        json!({"task_key": task, "summary": "压缩后继续"}),
+    );
+    let again = a.call("atm_begin", json!({"agent_id": "claude-code", "cwd": cwd}));
+    assert_eq!(again["own"], json!([task]), "{again}");
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["压缩后完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 崩溃重启：Agent 进程没了，新进程 begin 自动接上旧会话（客户端已退出就立即关闭，R11 P1-3），
+/// 领取随之转过来，直接写自己的任务。
+#[test]
+fn u6_a_crashed_agent_picks_up_its_own_task() {
+    let r = rig("bridge-u6-crash");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    drop(a);
+    let mut a = Agent::start(&r, "claude-code");
+    let begun = a.call("atm_begin", json!({"agent_id": "claude-code", "cwd": cwd}));
+    assert_eq!(begun["outcome"], json!("SUCCESSOR"), "{begun}");
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["重启后完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 丢响应重试：写入执行了、响应丢了，桥用同一份上下文重试，结果是重放，不是 IDEMPOTENCY_CONFLICT；
+/// 之后照常写。
+#[test]
+fn u6_a_lost_response_is_replayed_not_refused() {
+    let r = rig("bridge-u6-lost");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    r.proxy.then("write", Act::Drop);
+    let progressed = a.call(
+        "atm_progress_add",
+        json!({"task_key": task, "summary": "只该写一次"}),
+    );
+    assert_eq!(progressed["replayed"], json!(true), "{progressed}");
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 子代理：同一个 Agent 进程（同一连接组）里开 SUBAGENT 会话，显式带 session 做自己的任务；它不顶替
+/// PRIMARY，主代理照旧省略 session 写自己的任务。
+#[test]
+fn u6_a_subagent_does_not_displace_the_primary() {
+    let r = rig("bridge-u6-sub");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    let sub = a.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "cwd": cwd, "role": "SUBAGENT"}),
+    );
+    let sub_session = sub["session"].as_str().unwrap().to_owned();
+    let created = a.call(
+        "atm_task_create",
+        json!({"session": sub_session, "items": [{"title": "子任务"}]}),
+    );
+    let side = created["refs"]["1"].as_str().unwrap().to_owned();
+    a.call(
+        "atm_task_patch",
+        json!({"session": sub_session, "task_key": side, "operation": "complete", "evidence": ["子代理完成"]}),
+    );
+    // 主代理：不带 session，还是自己的 PRIMARY 会话。
+    a.call(
+        "atm_progress_add",
+        json!({"task_key": task, "summary": "主代理继续"}),
+    );
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["主代理完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &side), "DONE");
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 静默编码 30 分钟：这段时间没有任何调用，心跳与领取租约都过了期。客户端进程还活着，扫描不关它的会话
+/// （只按 120 分钟兜底），回来照常写自己的任务。
+#[test]
+fn u6_thirty_silent_minutes_cost_nothing() {
+    let r = rig("bridge-u6-silent");
+    let cwd = u6_repo(&r, "repo");
+    let mut a = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut a, &cwd);
+    let ago = {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        atm_domain::time::Timestamp::from_millis(ms - 30 * 60_000).to_string()
+    };
+    r.w.svc
+        .store()
+        .write(move |tx| {
+            tx.execute(
+                "UPDATE agent_sessions SET heartbeat_at = ?1, updated_at = ?1 WHERE client_identity LIKE '%@claude-code' AND connection_state = 'ONLINE'",
+                [&ago],
+            )?;
+            tx.execute(
+                "UPDATE work_items SET claim_lease_until = ?1 WHERE claimed_by_session_id IS NOT NULL",
+                [&ago],
+            )
+        })
+        .unwrap();
+    let swept =
+        r.w.svc
+            .sweep_sessions(
+                &Principal::system_job(atm_domain::principal::JobId::StartupRecover),
+                atm_service::session::SweepPolicy::default(),
+                &atm_jobs::liveness::alive,
+            )
+            .unwrap();
+    // 本 Agent 的会话（客户端还活着）不被关；夹具里另一个没有客户端身份的旧会话不在这次断言里。
+    let ours: Vec<String> = r
+        .w
+        .svc
+        .store()
+        .read(|tx| {
+            tx.prepare("SELECT id FROM agent_sessions WHERE client_identity LIKE '%@claude-code'")?
+                .query_map([], |row| row.get(0))?
+                .collect()
+        })
+        .unwrap();
+    assert!(!ours.is_empty());
+    assert!(
+        swept.closed.iter().all(|(_, id, _)| !ours.contains(id)),
+        "{:?}",
+        swept.closed
+    );
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "complete", "evidence": ["30 分钟后完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 反例照常被拒：别的 Agent 改不了我领取的任务；它改我的任务内容要带版本；我自己改任务内容
+/// （edit）也要带版本。正常路径的放宽没有漏到这些地方。
+#[test]
+fn u6_the_rules_still_refuse_what_they_should() {
+    let r = rig("bridge-u6-refuse");
+    let cwd = u6_repo(&r, "repo");
+    let mut mine = Agent::start(&r, "claude-code");
+    let (project, task) = u6_open(&mut mine, &cwd);
+    let mut other = Agent::start(&r, "codex-mcp-client");
+    other.call(
+        "atm_begin",
+        json!({"agent_id": "codex", "project": project}),
+    );
+    assert_eq!(
+        other.refused(
+            "atm_task_patch",
+            json!({"task_key": task, "operation": "complete", "evidence": ["抢着完成"]})
+        ),
+        "CLAIM_NOT_OWNED"
+    );
+    let cross = other.refused(
+        "atm_task_patch",
+        json!({"task_key": task, "operation": "edit", "title": "被改名"}),
+    );
+    assert!(
+        matches!(
+            cross.as_str(),
+            "CLAIM_NOT_OWNED" | "EXPECTED_VERSION_REQUIRED"
+        ),
+        "{cross}"
+    );
+    assert_eq!(
+        mine.refused(
+            "atm_task_patch",
+            json!({"task_key": task, "operation": "edit", "title": "改名"})
+        ),
+        "EXPECTED_VERSION_REQUIRED"
+    );
+    assert_eq!(status_of(&r, &project, &task), "IN_PROGRESS");
 }
