@@ -17,6 +17,7 @@ path = "src/main.rs"
 atm-domain = { path = "../domain" }
 atm-http = { path = "../http" }
 atm-install-state = { path = "../install-state" }
+atm-jobs = { path = "../jobs" }
 atm-service = { path = "../service" }
 atm-store = { path = "../store" }
 serde_json = { workspace = true }

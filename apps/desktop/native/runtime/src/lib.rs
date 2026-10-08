@@ -9,8 +9,6 @@
 //! 转换与阻塞比较期间把进度写给 setup（[`progress::Reporter`]）；健康只认 SERVICE_HEALTHY 见证（[`entries`]）。
 
 pub mod entries;
-pub mod jobs;
-pub mod liveness;
 pub mod progress;
 pub mod rng;
 pub mod secrets;

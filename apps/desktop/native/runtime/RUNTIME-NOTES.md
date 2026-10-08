@@ -2,6 +2,7 @@
 
 `atm-runtime` 是 ATM 3 单进程服务的运行时库：准入 → 启动判定 / 转换 → 权威判定 → 开放 Agent 入口 → 调度。
 正式宿主（W6）链接这个库；`atm-runtime.exe` 是开发与端到端用例用的无头二进制，不进安装包。
+调度器与客户端存活判定在 `atm-jobs`：System 主体只许在 `jobs` crate 里构造（`domain/tests/principal_guard.rs`）。
 
 规格：`output/atm3-spec/07-conversion-state-machine.md` §2–§8；W3 peer r1 的 P2-02（`output/peer-atm3-w3-r1.md`）。
 
@@ -57,7 +58,7 @@ decide 循环（最多 8 圈）
 
 `--drill-pace-ms`、`--drill-hold-at` 只在开发二进制里：前者把小样本的转换拉长，后者让进度停在某一阶段（模拟卡住）。
 
-## 进程内用例（`tests/boot.rs`、`tests/jobs.rs`）
+## 进程内用例（`tests/boot.rs`；sweep 在 `jobs/tests/sweep.rs`）
 
 - 入口顺序固定（lease → HTTP → daemon.json → 见证 → 调度器）；撤下后不再监听、daemon.json 不在。
 - 源身份不符：阻塞比较判冲突，没有 lease 记录、HTTP、daemon.json、调度器。
@@ -75,4 +76,4 @@ decide 循环（最多 8 圈）
 
 ## 验红
 
-`output/w4-evidence/mutations/mut-w4i.py`（runtime、store、state、http 四组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`。
+`output/w4-evidence/mutations/mut-w4i.py`（runtime、jobs、store、state、http 五组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`。

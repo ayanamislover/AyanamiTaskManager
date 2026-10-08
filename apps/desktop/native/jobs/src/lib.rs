@@ -1,5 +1,9 @@
 //! 调度器（W4i 的最小集合）：每分钟按客户端存活扫一次过期 session（S-012、R11 P1-3）。
-//! 只在入口开放之后起，数据源冲突时先于启动状态停下。
+//! 只在入口开放之后起，数据源冲突时先于启动状态停下（由 `atm-runtime` 起停）。
+//!
+//! System 主体只在这个 crate 里构造（`domain/tests/principal_guard.rs`）。
+
+pub mod liveness;
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};

@@ -37,7 +37,7 @@ pub struct Entries {
     rt: tokio::runtime::Runtime,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
-    scheduler: Option<crate::jobs::Scheduler>,
+    scheduler: Option<atm_jobs::Scheduler>,
     runtime_dir: PathBuf,
     instance_id: String,
     lease_generation: u64,
@@ -180,7 +180,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     }
 
     // 5. 调度器。
-    let scheduler = crate::jobs::Scheduler::start(svc.clone(), p.sweep_every);
+    let scheduler = atm_jobs::Scheduler::start(svc.clone(), p.sweep_every);
     (p.observe)(Event::Scheduler);
 
     Ok(Entries {

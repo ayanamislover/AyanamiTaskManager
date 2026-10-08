@@ -96,6 +96,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-jobs"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-install-state",
+ "atm-service",
+ "atm-store",
+]
+
+[[package]]
 name = "atm-launcher"
 version = "0.0.0"
 dependencies = [
@@ -111,6 +121,7 @@ dependencies = [
  "atm-domain",
  "atm-http",
  "atm-install-state",
+ "atm-jobs",
  "atm-service",
  "atm-store",
  "rusqlite",

@@ -1,14 +1,29 @@
 //! 调度器的 session 扫描按客户端存活（S-012、R11 P1-3，W4i）：客户端进程还在的，30 min 没心跳也不收；
 //! 退出了的立刻收；没有身份的按普通超时。
 
-mod support;
-
 use atm_domain::principal::Principal;
 use atm_install_state::procs;
 use atm_service::session::BeginRequest;
 use atm_service::write::Service;
 use atm_store::{Config, Store};
-use support::*;
+use std::path::PathBuf;
+
+/// 测试的可写目录：跟着 `CARGO_TARGET_DIR` 走（W2 r1 P2-02）。
+fn dir(name: &str) -> PathBuf {
+    let root = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("target")
+        })
+        .join("jobs-tests")
+        .join(name);
+    let d = std::path::absolute(root).unwrap();
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
 
 fn begin(svc: &Service, client: Option<String>, op: &str) -> (String, String) {
     let agent = Principal::authenticated_agent(client);
@@ -81,7 +96,7 @@ fn the_sweep_respects_client_liveness() {
         })
         .unwrap();
 
-    let report = atm_runtime::jobs::sweep_once(&svc).unwrap();
+    let report = atm_jobs::sweep_once(&svc).unwrap();
     assert_eq!(report.closed.len(), 2, "{:?}", report.closed);
     assert_eq!(state(&svc, &live), ("ONLINE".into(), None));
     assert_eq!(
