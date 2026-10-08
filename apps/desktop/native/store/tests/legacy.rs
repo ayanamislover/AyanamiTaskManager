@@ -6616,6 +6616,10 @@ mod fault_matrix {
         let (r, seen) = converting(&n, &root, "T-LARGE", None);
         r.unwrap();
         // 同一个 (阶段, 已完成, 总数) 里有多少个不同的工作量：大项目所在的那一格至少有 5 个批次。
+        // IMPORT 那一格还要看得出目标库上的 SQL 在计量：30 万行写进目标库约 15 批（SQLite 指令计数，确定的；
+        // 实测有目标计量 35 批、没有 20 批）。只看 5 批的话，枚举与源侧的计量就够了，目标不计量也看不出来
+        // （W4 关口第二轮的变异发现）。
+        let mut import_most = 0;
         for phase in ["IMPORT", "VERIFY"] {
             let mut most = 0;
             for p in seen.iter().filter(|p| p.phase == phase) {
@@ -6630,7 +6634,11 @@ mod fault_matrix {
                 most = most.max(same);
             }
             assert!(most >= 5, "{phase}: {most}");
+            if phase == "IMPORT" {
+                import_most = most;
+            }
         }
+        assert!(import_most >= 28, "IMPORT: {import_most}");
         let policy = WaitPolicy {
             cap: Duration::from_secs(1_000 * 3600),
             ..WaitPolicy::default()
