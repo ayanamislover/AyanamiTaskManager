@@ -418,11 +418,11 @@ F1–F7 在给了数据根时处理（`legacy/jsonfiles.rs`）。**读盘**：�
 
 绑定 core-rust 02dd92c。无 P0、P1；P1-R4-01、P2-R4-01 关闭。新登记三条 P2，与 P2-01～P2-07 一起作为 W4 之前的硬门，修订如下（在 W4 关口的分支上）：
 
-| 编号      | 问题 | 修订 |
-| --------- | ---- | ---- |
-| P2-R5-01  | 报告改名成功后刷盘失败、丢弃也失败时，错误里的路径仍是早已不存在的临时名；单独刷盘失败只有裸 IO 错误 | `NewFile::rename_into` 改名成功就记下新位置再刷盘，刷盘错误带「flush 路径」；丢弃的错误报文件实际所在的名字 |
-| P2-R5-02  | 库旁边的 `-shm` 与别的程序的 `-SHM.tmp` 会让比较误报冲突、快照误判源未静止 | 见下文「库的索引不进快照」 |
-| P2-R5-03  | 短暂占用用例的辅助线程等报告写完没有上限，dry-run 提前失败时会永久挂住 | 等待设 120 s 上限，超时照样放开文件、结束线程 |
+| 编号     | 问题                                                                                                 | 修订                                                                                                        |
+| -------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| P2-R5-01 | 报告改名成功后刷盘失败、丢弃也失败时，错误里的路径仍是早已不存在的临时名；单独刷盘失败只有裸 IO 错误 | `NewFile::rename_into` 改名成功就记下新位置再刷盘，刷盘错误带「flush 路径」；丢弃的错误报文件实际所在的名字 |
+| P2-R5-02 | 库旁边的 `-shm` 与别的程序的 `-SHM.tmp` 会让比较误报冲突、快照误判源未静止                           | 见下文「库的索引不进快照」                                                                                  |
+| P2-R5-03 | 短暂占用用例的辅助线程等报告写完没有上限，dry-run 提前失败时会永久挂住                               | 等待设 120 s 上限，超时照样放开文件、结束线程                                                               |
 
 - **用例**：
   - `pin::tests::a_failed_discard_names_where_the_file_is`：改名前双失败报临时名；改名后丢弃失败报新名、不含临时名。
@@ -581,13 +581,13 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 绑定 e52d64c。无 P0。P2-01、P2-05、P2-R5-01 关闭；P2-07 方法成立。两条 P1、三条 P2 残留，修订在 w4a 92b24a1：
 
-| 编号 | 问题 | 修订 |
-| ---- | ---- | ---- |
-| P1-W4A-01 | 快照按后缀排除 `-shm` / `-shm.tmp`，把同样结尾的附件也漏掉了：照样 PUBLISHED，`local_path` 指向不存在的文件，附件改了也比较不出来 | 只排除三个库旁边的 WAL 索引（`root::is_known_wal_index`：`registry/registry.sqlite`、`knowledge/knowledge.sqlite`、`projects/<pid>/project.sqlite`）；附件、日志即使同样结尾也进快照 |
-| P1-W4A-02 | 舍弃项目里任何 SQLite 文件都按逻辑内容取摘要，不含 rowid：用户自己的 SQLite 附件改了 rowid（业务关联随之断开），比较仍判不变 | 只有项目目录下的 `project.sqlite`、并且有 `project_meta` 表，才按逻辑内容；其余 SQLite 文件（附件里的库与它们的 `-wal`、`-shm`）一律按字节；打得开但证明不了是项目库的也按字节 |
-| P2-W4A-01 | 还有不报进度的耗时路径：数据根枚举、舍弃项目库的复制与逻辑扫描、VERIFY 与注册库的连接、发布前的 checkpoint、逐文件刷盘 | `root::walk` 每个条目推进一次；舍弃库的复制改走 `progress::copy_path`；上述连接都装 `progress::watch`；`publication_digest` 每个文件推进一次；刷盘改用 `durable::sync_tree_each`，每刷完一个文件推进一次 |
-| P2-W4A-02 | backup 的撤回、放回与清理时的放回还是 `fs::rename`，绕过共用的持久化契约 | 新增 `durable::rename_once`（WRITE_THROUGH、经记录与注入，但遇占用不等、立即失败），三处都走它；撤回遇占用照旧立即 `KEPT(FILES_IN_USE)` |
-| P2-W4A-03 | 短暂占用用例的辅助线程等不到报告时照样放开文件、返回，用例可能在前提没成立时变绿 | `hold_until` 返回有没有等到信号，用例断言它；另加一条不必等 120 s 的受控超时用例 |
+| 编号      | 问题                                                                                                                              | 修订                                                                                                                                                                                                     |
+| --------- | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-W4A-01 | 快照按后缀排除 `-shm` / `-shm.tmp`，把同样结尾的附件也漏掉了：照样 PUBLISHED，`local_path` 指向不存在的文件，附件改了也比较不出来 | 只排除三个库旁边的 WAL 索引（`root::is_known_wal_index`：`registry/registry.sqlite`、`knowledge/knowledge.sqlite`、`projects/<pid>/project.sqlite`）；附件、日志即使同样结尾也进快照                     |
+| P1-W4A-02 | 舍弃项目里任何 SQLite 文件都按逻辑内容取摘要，不含 rowid：用户自己的 SQLite 附件改了 rowid（业务关联随之断开），比较仍判不变      | 只有项目目录下的 `project.sqlite`、并且有 `project_meta` 表，才按逻辑内容；其余 SQLite 文件（附件里的库与它们的 `-wal`、`-shm`）一律按字节；打得开但证明不了是项目库的也按字节                           |
+| P2-W4A-01 | 还有不报进度的耗时路径：数据根枚举、舍弃项目库的复制与逻辑扫描、VERIFY 与注册库的连接、发布前的 checkpoint、逐文件刷盘            | `root::walk` 每个条目推进一次；舍弃库的复制改走 `progress::copy_path`；上述连接都装 `progress::watch`；`publication_digest` 每个文件推进一次；刷盘改用 `durable::sync_tree_each`，每刷完一个文件推进一次 |
+| P2-W4A-02 | backup 的撤回、放回与清理时的放回还是 `fs::rename`，绕过共用的持久化契约                                                          | 新增 `durable::rename_once`（WRITE_THROUGH、经记录与注入，但遇占用不等、立即失败），三处都走它；撤回遇占用照旧立即 `KEPT(FILES_IN_USE)`                                                                  |
+| P2-W4A-03 | 短暂占用用例的辅助线程等不到报告时照样放开文件、返回，用例可能在前提没成立时变绿                                                  | `hold_until` 返回有没有等到信号，用例断言它；另加一条不必等 120 s 的受控超时用例                                                                                                                         |
 
 - **用例**：
   - `w4_gate_r1::an_attachment_named_like_a_wal_index_is_still_an_attachment`：附件 `customer-shm.tmp`、`notes-SHM` 进快照、被复制，改了比较判变了；库旁边的 `project.sqlite-shm`、`REGISTRY.SQLITE-SHM.tmp` 照旧不进快照。
@@ -603,14 +603,14 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 ### 第二轮的变异（候选 8078b1b）
 
-| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
-| ------------------------------ | ---- | ---- |
-| `r2-w4a-gate-store-mutation-evidence.json`（本轮新增） | 10 | 10 RED |
-| `r2-w4a-gate-state-mutation-evidence.json`（本轮新增） | 1 | 1 RED |
-| `r2-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
-| `r2-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
-| `r2-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
-| `r2-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+| 证据（`output/w4a-evidence/`）                         | 条数 | 结论   |
+| ------------------------------------------------------ | ---- | ------ |
+| `r2-w4a-gate-store-mutation-evidence.json`（本轮新增） | 10   | 10 RED |
+| `r2-w4a-gate-state-mutation-evidence.json`（本轮新增） | 1    | 1 RED  |
+| `r2-p2gate-mutation-evidence.json`（重跑）             | 13   | 13 RED |
+| `r2-w4a-store-mutation-evidence.json`（重跑）          | 14   | 14 RED |
+| `r2-w4a-state-mutation-evidence.json`（重跑）          | 11   | 11 RED |
+| `r2-w4a-setup-mutation-evidence.json`（重跑）          | 2    | 2 RED  |
 
 变异带出的两处：
 
@@ -622,11 +622,11 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 绑定 7d7ff51。无 P0。P2-W4A-02、P2-W4A-03 关闭，setup 计时用例的改法接受；P1-W4A-01 的附件遗漏关闭。剩下一条 P1、两条 P2：
 
-| 编号 | 问题 | 修订 |
-| ---- | ---- | ---- |
-| P1-W4A-02 | 「项目目录下的 `project.sqlite` + `project_meta`」证明不了整份 schema：在项目库里加用户自己的表，改它的隐含 rowid（业务关联 1 → 0），正式比较仍判不变 | 逻辑摘要只给 schema 认得的项目库（`settle::known_project_schema`）：`schema_migrations` 的列与 2.0 执行器建的一样（`version` 是 INTEGER 主键）；登记的迁移从第一个起逐个与转换器嵌入的项目迁移同号同名；在内存库里依次执行这些迁移，推出的 schema（类型、名字、所属表、空白合并后的 SQL；不含 `sqlite_stat*` 与 `schema_migrations`）与这个库逐项相等。多一张表、一列、一个索引或视图，少一张表，登记不连续或名字不对，一律按字节 |
-| P2-W4A-01 | JSON 的读入与解析、runs / requests 的逐条校验没有进度：65 MiB 的合法 `runs.json` 载入完 work=0 | 读入走按字节计量的 `progress::Read`（每 64 MiB 一次），解析完推进一次；runs、requests、去重分组、sync 的 published 校验与 processed / published 导入、导入 runs / requests 的循环每条推进一次 |
-| P2-W4A-R2-01 | 快照只排除三个常规库的索引：知识库恢复候选 `restore-<id>.sqlite` 的 `-shm` 仍进快照 | 共用一个判断（`root::is_known_wal_index`）：在 `registry/`、`knowledge/`、`projects/` 下（附件目录 `projects/<pid>/artifacts/` 除外），去掉 `-shm` / `-shm.tmp`（大小写不定）后的那个文件也在同一次枚举里，并且文件头是 SQLite，才算索引。这样覆盖扫描认得的全部库：三个常规库、知识库恢复候选与 `.restore-*` 暂存、项目的 `.creating-*` / `.restore-*` 残留与 `restore-old` 回滚件。扫描阶段的口径跟着对齐：知识库恢复候选旁边认的文件改用与常规库相同的 `is_db_file`（原来只认 `-wal` / `-shm`，别的程序留下的 `-SHM.tmp` 会让扫描以「未登记的条目」拒绝，本轮新用例跑出来的） |
+| 编号         | 问题                                                                                                                                                  | 修订                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-W4A-02    | 「项目目录下的 `project.sqlite` + `project_meta`」证明不了整份 schema：在项目库里加用户自己的表，改它的隐含 rowid（业务关联 1 → 0），正式比较仍判不变 | 逻辑摘要只给 schema 认得的项目库（`settle::known_project_schema`）：`schema_migrations` 的列与 2.0 执行器建的一样（`version` 是 INTEGER 主键）；登记的迁移从第一个起逐个与转换器嵌入的项目迁移同号同名；在内存库里依次执行这些迁移，推出的 schema（类型、名字、所属表、空白合并后的 SQL；不含 `sqlite_stat*` 与 `schema_migrations`）与这个库逐项相等。多一张表、一列、一个索引或视图，少一张表，登记不连续或名字不对，一律按字节                                                                                                                                                |
+| P2-W4A-01    | JSON 的读入与解析、runs / requests 的逐条校验没有进度：65 MiB 的合法 `runs.json` 载入完 work=0                                                        | 读入走按字节计量的 `progress::Read`（每 64 MiB 一次），解析完推进一次；runs、requests、去重分组、sync 的 published 校验与 processed / published 导入、导入 runs / requests 的循环每条推进一次                                                                                                                                                                                                                                                                                                                                                                                    |
+| P2-W4A-R2-01 | 快照只排除三个常规库的索引：知识库恢复候选 `restore-<id>.sqlite` 的 `-shm` 仍进快照                                                                   | 共用一个判断（`root::is_known_wal_index`）：在 `registry/`、`knowledge/`、`projects/` 下（附件目录 `projects/<pid>/artifacts/` 除外），去掉 `-shm` / `-shm.tmp`（大小写不定）后的那个文件也在同一次枚举里，并且文件头是 SQLite，才算索引。这样覆盖扫描认得的全部库：三个常规库、知识库恢复候选与 `.restore-*` 暂存、项目的 `.creating-*` / `.restore-*` 残留与 `restore-old` 回滚件。扫描阶段的口径跟着对齐：知识库恢复候选旁边认的文件改用与常规库相同的 `is_db_file`（原来只认 `-wal` / `-shm`，别的程序留下的 `-SHM.tmp` 会让扫描以「未登记的条目」拒绝，本轮新用例跑出来的） |
 
 - **2.x 的项目库都认得**：2.x 只在迁移里建项目库的表（`packages/storage-sqlite` 里迁移之外唯一的 DDL 是 temp 库里的 trigram 探测虚表，不在 main）；2.0 执行器建 `schema_migrations` 的语句与判定核对的列一致。0015 的历史版本与现行版本只差回填用的 UPDATE，推出的 schema 相同。停在旧版本的库按它登记的前 n 个迁移推。认不出的库按字节绑定，代价是 checkpoint 也算「变了」——这是保守的一边。
 - **用例**：
@@ -643,15 +643,15 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 ### 第三轮的变异（候选 895ed55）
 
-| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
-| ------------------------------ | ---- | ---- |
-| `r3-w4a-gate-r2-store-mutation-evidence.json`（本轮新增，`mut-w4a-r3-store.py`） | 15 | 15 RED |
-| `r3-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
-| `r3-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
-| `r3-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
-| `r3-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
-| `r3-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
-| `r3-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+| 证据（`output/w4a-evidence/`）                                                   | 条数 | 结论   |
+| -------------------------------------------------------------------------------- | ---- | ------ |
+| `r3-w4a-gate-r2-store-mutation-evidence.json`（本轮新增，`mut-w4a-r3-store.py`） | 15   | 15 RED |
+| `r3-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑）         | 10   | 10 RED |
+| `r3-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑）         | 1    | 1 RED  |
+| `r3-p2gate-mutation-evidence.json`（重跑）                                       | 13   | 13 RED |
+| `r3-w4a-store-mutation-evidence.json`（重跑）                                    | 14   | 14 RED |
+| `r3-w4a-state-mutation-evidence.json`（重跑）                                    | 11   | 11 RED |
+| `r3-w4a-setup-mutation-evidence.json`（重跑）                                    | 2    | 2 RED  |
 
 七份证据记录的源码 sha256 都与 895ed55 的对应文件一致，复原套件全绿。之前两遍的日志留在 `mutations-r3/first-pass/`（a6e177c：「目标库上的 SQL 不计量」存活）与 `second-pass/`（5bf47b4：一次复原套件遇 `-WAL.tmp` 得 UNKNOWN），对应的改动见上面两条。
 
@@ -659,10 +659,10 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 绑定 6e52f39。无 P0。P2-W4A-R2-01 关闭（含 `-wal.tmp` 的放宽），第二轮已关闭的各项保持。剩下一条 P1、一条 P2：
 
-| 编号 | 问题 | 修订 |
-| ---- | ---- | ---- |
-| P1-W4A-02 | schema 认得也不能推出「隐含 rowid 不承载业务」：2.x 的读模型拿 rowid 裁决同时间的记录（`search_documents` 的最新投影按 `updated_at DESC, rowid DESC`、`checklist_items` 按 `created_at, rowid`、搜索分页以 rowid 为上界）。只改一个 rowid，2.x 看到的结果变了，正式比较仍判不变 | 逻辑摘要连同 rowid：有 rowid 的表与 FTS 虚表按 `SELECT rowid, * … ORDER BY rowid` 取，没有 rowid 的表按全部列排序（摘要格式升到 `ATM-DROPPED-SQLITE-2`）。已知 schema 的判定保留：影子表、统计表之外的状态都在这些行里，这一点仍只对迁移推出的 schema 成立 |
-| P2-W4A-01 | 解析整份做完才推进一次，没有中途批次，也没有输入上限；知识库恢复日志的读入与解析全程不推进 | converter 读的 JSON 文件（sync、dispatch、知识库恢复日志、密文文件）共用一个读入 `jsonfiles::read_json_file`，上限 64 MiB（`MAX_JSON_BYTES`），超过的在动目标之前以 Unsupported 停下。解析器每读过 8 MiB 输入推进一次（空白、字符串、数字、成员四处长循环各自推进），解析树转换成值每 65536 个节点推进一次 |
+| 编号      | 问题                                                                                                                                                                                                                                                                            | 修订                                                                                                                                                                                                                                                                                                       |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-W4A-02 | schema 认得也不能推出「隐含 rowid 不承载业务」：2.x 的读模型拿 rowid 裁决同时间的记录（`search_documents` 的最新投影按 `updated_at DESC, rowid DESC`、`checklist_items` 按 `created_at, rowid`、搜索分页以 rowid 为上界）。只改一个 rowid，2.x 看到的结果变了，正式比较仍判不变 | 逻辑摘要连同 rowid：有 rowid 的表与 FTS 虚表按 `SELECT rowid, * … ORDER BY rowid` 取，没有 rowid 的表按全部列排序（摘要格式升到 `ATM-DROPPED-SQLITE-2`）。已知 schema 的判定保留：影子表、统计表之外的状态都在这些行里，这一点仍只对迁移推出的 schema 成立                                                 |
+| P2-W4A-01 | 解析整份做完才推进一次，没有中途批次，也没有输入上限；知识库恢复日志的读入与解析全程不推进                                                                                                                                                                                      | converter 读的 JSON 文件（sync、dispatch、知识库恢复日志、密文文件）共用一个读入 `jsonfiles::read_json_file`，上限 64 MiB（`MAX_JSON_BYTES`），超过的在动目标之前以 Unsupported 停下。解析器每读过 8 MiB 输入推进一次（空白、字符串、数字、成员四处长循环各自推进），解析树转换成值每 65536 个节点推进一次 |
 
 - **rowid 算进去的代价**：checkpoint、关库、SHM 重建、ANALYZE、`PRAGMA optimize`、改日志模式都不动 rowid，正式链路的对照（`a_dropped_database_is_compared_by_content_not_storage`）照旧全是「没变」，其中的 VACUUM 一步实测也保留 rowid。SQLite 文档说 VACUUM 可能给没有 INTEGER PRIMARY KEY 的表重排 rowid；真重排了就判「变了」，这时 2.x 看到的顺序确实变了。2.x 自己从不 VACUUM 项目库（`packages/` 里没有）。
 - **已知 schema 判定的作用随之收窄**：rowid 算进去之后，「项目库位置上的冒名库改 rowid」不靠 schema 判定也能发现，「证明不了 schema 也照样规范化」在重跑里存活。判定剩下的作用是排除 `SELECT rowid` 看不见的状态，例如一列就叫 `rowid`、把隐含的 rowid 遮住。用例里的冒名库改成这一种，判定去掉就红。
@@ -677,16 +677,16 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 ### 第四轮的变异（候选 3048f2a）
 
-| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
-| ------------------------------ | ---- | ---- |
-| `r4-w4a-gate-r3-store-mutation-evidence.json`（本轮新增，`mut-w4a-r4-store.py`） | 10 | 10 RED |
-| `r4-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑） | 13 | 13 RED |
-| `r4-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
-| `r4-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
-| `r4-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
-| `r4-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
-| `r4-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
-| `r4-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+| 证据（`output/w4a-evidence/`）                                                   | 条数 | 结论   |
+| -------------------------------------------------------------------------------- | ---- | ------ |
+| `r4-w4a-gate-r3-store-mutation-evidence.json`（本轮新增，`mut-w4a-r4-store.py`） | 10   | 10 RED |
+| `r4-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑）      | 13   | 13 RED |
+| `r4-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑）         | 10   | 10 RED |
+| `r4-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑）         | 1    | 1 RED  |
+| `r4-p2gate-mutation-evidence.json`（重跑）                                       | 13   | 13 RED |
+| `r4-w4a-store-mutation-evidence.json`（重跑）                                    | 14   | 14 RED |
+| `r4-w4a-state-mutation-evidence.json`（重跑）                                    | 11   | 11 RED |
+| `r4-w4a-setup-mutation-evidence.json`（重跑）                                    | 2    | 2 RED  |
 
 八份证据记录的源码 sha256 都与 3048f2a 的对应文件一致，复原套件全绿。第一遍（c5bb33a）的日志留在 `mutations-r4/first-pass/`：「证明不了 schema 也照样规范化」存活，改法见上一节「已知 schema 判定的作用随之收窄」。
 
@@ -694,10 +694,10 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 绑定 bc4df59。无 P0。rowid 的两条反例与存储操作对照通过，文件上限与解析批次成立；第二轮、第三轮已关闭的各项保持。剩下：
 
-| 编号 | 问题 | 修订 |
-| ---- | ---- | ---- |
+| 编号      | 问题                                                                                                                                                                          | 修订                                                                                                                                                                                                                                                                                                                                                                                 |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | P1-W4A-02 | 已知 schema 证明不了 FTS 的倒排索引与内容一致：清空 FTS 后只放回内容行，虚表的 rowid 与内容不变，2.x 的搜索命中 1 → 0，正式比较仍判不变。舍弃的库恰恰可能是损坏或迁移失败的库 | 取逻辑摘要之前，在副本上 `PRAGMA integrity_check` 必须恰好一行 `ok`（b-tree 索引与 FTS5 的倒排索引都核对：SQLite 3.44 起 integrity_check 含 FTS5 的 xIntegrity，内置的是 3.51.3：`Cargo.lock` 锁定 libsqlite3-sys 0.37.0 的 bundled），否则按字节。FTS5 的 `_config` 影子表（rank 等设置会改 MATCH 的结果顺序）算进摘要；其余影子表是由行推出的索引，一致性已由 integrity_check 证明 |
-| P2-W4A-01 | 数据库里的 JSON（正式 SQL 函数 `atm_mirror_payload` 的 payload）不经文件上限，展开与输出没有中途推进：65 MiB 的 payload 只有解析那 8 次 | 输出（`stringify` 与 JCS，含长字符串的逐码元写出）每长过 8 MiB 推进一次，长字符串在写的途中推进；展开（`from_items`，数组与字符串都走它，字符串逐码元建节点与展开在同一趟）与键排序前的遍历（`ordered`）每 65536 项推进一次 |
+| P2-W4A-01 | 数据库里的 JSON（正式 SQL 函数 `atm_mirror_payload` 的 payload）不经文件上限，展开与输出没有中途推进：65 MiB 的 payload 只有解析那 8 次                                       | 输出（`stringify` 与 JCS，含长字符串的逐码元写出）每长过 8 MiB 推进一次，长字符串在写的途中推进；展开（`from_items`，数组与字符串都走它，字符串逐码元建节点与展开在同一趟）与键排序前的遍历（`ordered`）每 65536 项推进一次                                                                                                                                                          |
 
 - **推进不补账**：输出的推进点到了就推进一次，下一个点从当前长度往后算。追赶式的写法会在长字符串写完后的下一个检查点把欠的几次一并补上，批次数看起来对，中途却没有推进；变异也就验不出「长字符串写的途中不推进」。
 - **仍是单次调用、没有内部批次的段**：对象键与 JCS 键的排序（一次 n log n）、UTF-16 / UTF-8 整串转换（一次线性）、浮点解析。它们的规模都由已推进的上一段（解析、遍历）限定，不再随某一段单独放大。
@@ -710,17 +710,17 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 ### 第五轮的变异（候选 da38ddb）
 
-| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
-| ------------------------------ | ---- | ---- |
-| `r5-w4a-gate-r4-store-mutation-evidence.json`（本轮新增，`mut-w4a-r5-store.py`） | 7 | 7 RED |
-| `r5-w4a-gate-r3-store-mutation-evidence.json`（`mut-w4a-r4-store.py` 重跑） | 10 | 10 RED |
-| `r5-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑） | 13 | 13 RED |
-| `r5-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
-| `r5-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
-| `r5-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
-| `r5-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
-| `r5-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
-| `r5-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+| 证据（`output/w4a-evidence/`）                                                   | 条数 | 结论   |
+| -------------------------------------------------------------------------------- | ---- | ------ |
+| `r5-w4a-gate-r4-store-mutation-evidence.json`（本轮新增，`mut-w4a-r5-store.py`） | 7    | 7 RED  |
+| `r5-w4a-gate-r3-store-mutation-evidence.json`（`mut-w4a-r4-store.py` 重跑）      | 10   | 10 RED |
+| `r5-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑）      | 13   | 13 RED |
+| `r5-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑）         | 10   | 10 RED |
+| `r5-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑）         | 1    | 1 RED  |
+| `r5-p2gate-mutation-evidence.json`（重跑）                                       | 13   | 13 RED |
+| `r5-w4a-store-mutation-evidence.json`（重跑）                                    | 14   | 14 RED |
+| `r5-w4a-state-mutation-evidence.json`（重跑）                                    | 11   | 11 RED |
+| `r5-w4a-setup-mutation-evidence.json`（重跑）                                    | 2    | 2 RED  |
 
 九份证据记录的源码 sha256 都与 da38ddb 的对应文件一致，复原套件全绿；一遍跑完，没有存活。
 
