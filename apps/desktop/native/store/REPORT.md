@@ -675,6 +675,21 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - `w4_gate_r3::an_oversized_secrets_file_stops_the_conversion`：密文文件超过上限，转换停下、没有目标库。
 - **变异**：`output/w4a-evidence/mutations-r4/`。`mut-w4a-r4-store.py` 验本轮修订；之前的七份脚本在新候选上重跑（第三轮脚本里「读入不计量」「解析完不推进」两条随代码去掉，由本轮的解析器批次与上限变异替代）。
 
+### 第四轮的变异（候选 3048f2a）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r4-w4a-gate-r3-store-mutation-evidence.json`（本轮新增，`mut-w4a-r4-store.py`） | 10 | 10 RED |
+| `r4-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑） | 13 | 13 RED |
+| `r4-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
+| `r4-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
+| `r4-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r4-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r4-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r4-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+八份证据记录的源码 sha256 都与 3048f2a 的对应文件一致，复原套件全绿。第一遍（c5bb33a）的日志留在 `mutations-r4/first-pass/`：「证明不了 schema 也照样规范化」存活，改法见上一节「已知 schema 判定的作用随之收窄」。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
