@@ -826,14 +826,19 @@ mod tests {
         drop(k);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
-        // 同样的库放在项目库的位置：schema 不是项目迁移推出来的，证明不了，也按字节。
+        // 项目库的位置上、schema 不是项目迁移推出来的库按字节：逻辑摘要只对认得的 schema 成立。
+        // 例如一列就叫 `rowid`，`SELECT rowid` 取到的是这一列，隐含的 rowid 被它遮住，按逻辑内容就看不见。
         let fake = tree.join("project.sqlite");
-        std::fs::copy(&db, &fake).unwrap();
+        let f = Connection::open(&fake).unwrap();
+        f.execute_batch(
+            "CREATE TABLE documents(title TEXT, rowid TEXT);
+             INSERT INTO documents(_rowid_, title, rowid) VALUES (9, 'customer record', 'shown');",
+        )
+        .unwrap();
         let before = tree_digest(&tree, &work).unwrap();
-        Connection::open(&fake)
-            .unwrap()
-            .execute_batch("UPDATE documents SET rowid = 11 WHERE rowid = 9;")
+        f.execute_batch("UPDATE documents SET _rowid_ = 11 WHERE _rowid_ = 9;")
             .unwrap();
+        drop(f);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
         // 项目库：VACUUM、ANALYZE 前后摘要不变；表与 FTS 虚表的 rowid 是业务内容，改了就变，改回去又不变。

@@ -665,6 +665,7 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 | P2-W4A-01 | 解析整份做完才推进一次，没有中途批次，也没有输入上限；知识库恢复日志的读入与解析全程不推进 | converter 读的 JSON 文件（sync、dispatch、知识库恢复日志、密文文件）共用一个读入 `jsonfiles::read_json_file`，上限 64 MiB（`MAX_JSON_BYTES`），超过的在动目标之前以 Unsupported 停下。解析器每读过 8 MiB 输入推进一次（空白、字符串、数字、成员四处长循环各自推进），解析树转换成值每 65536 个节点推进一次 |
 
 - **rowid 算进去的代价**：checkpoint、关库、SHM 重建、ANALYZE、`PRAGMA optimize`、改日志模式都不动 rowid，正式链路的对照（`a_dropped_database_is_compared_by_content_not_storage`）照旧全是「没变」，其中的 VACUUM 一步实测也保留 rowid。SQLite 文档说 VACUUM 可能给没有 INTEGER PRIMARY KEY 的表重排 rowid；真重排了就判「变了」，这时 2.x 看到的顺序确实变了。2.x 自己从不 VACUUM 项目库（`packages/` 里没有）。
+- **已知 schema 判定的作用随之收窄**：rowid 算进去之后，「项目库位置上的冒名库改 rowid」不靠 schema 判定也能发现，「证明不了 schema 也照样规范化」在重跑里存活。判定剩下的作用是排除 `SELECT rowid` 看不见的状态，例如一列就叫 `rowid`、把隐含的 rowid 遮住。用例里的冒名库改成这一种，判定去掉就红。
 - **上限为什么可以接受**：2.x 的这些文件实际是 KB 级。上限以内，读入、解析、建值树，以及之后的校验、整组克隆（`any_array`）、按请求分组、导入都与大小成线性，几秒内做完，远在 setup 的 10 min 无推进预算之内；解析与建值树另有中途批次。超过上限的数据根转换停在动目标之前，用户数据不动。读入本身不另计量（上一轮套的 `progress::Read` 每 64 MiB 才推进一次，在上限以内永远不触发，验不红，去掉了；解析完的那一次推进也由解析器的批次替代）。
 - **用例**：
   - `w4_gate_r3::the_latest_projection_follows_the_rowid`、`the_checklist_order_follows_the_rowid`：codex 的两个正式链路反例（schema 与显式列都不变，只改 rowid）。
