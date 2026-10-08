@@ -530,7 +530,7 @@ fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn is_database(path: &Path) -> bool {
+pub(super) fn is_database(path: &Path) -> bool {
     use std::io::Read;
     let mut header = [0u8; 16];
     std::fs::File::open(path).is_ok_and(|mut f| f.read_exact(&mut header).is_ok())
@@ -573,6 +573,78 @@ fn database_digest(path: &Path, work: &Path) -> Result<(&'static str, String)> {
     Ok(("sqlite-raw", raw))
 }
 
+/// 一份库的 schema：(类型, 名字, 所属表, 规范化的 SQL)，不含 `sqlite_stat*`（ANALYZE 会建）与 `schema_migrations`
+/// （由迁移执行器建，另外核对）。SQL 只把空白合并，其余逐字比较。
+fn schema_of(
+    c: &Connection,
+) -> rusqlite::Result<std::collections::BTreeSet<(String, String, String, String)>> {
+    c.prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema
+         WHERE substr(name, 1, 11) <> 'sqlite_stat' AND tbl_name <> 'schema_migrations'",
+    )?
+    .query_map([], |r| {
+        let sql: Option<String> = r.get(3)?;
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            sql.unwrap_or_default()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ))
+    })?
+    .collect()
+}
+
+/// 舍弃项目库的 schema 是不是 2.x 的项目迁移推出来的那一份：
+/// - `schema_migrations` 的列与 2.0 迁移执行器建的一样（`version` 是 INTEGER 主键，rowid 就是它）；
+/// - 登记的迁移从 1 起连续，名字与转换器嵌入的项目迁移逐个相同；
+/// - 在内存库里依次执行这些迁移，得到的 schema 与这个库的逐项相等（多一张表、一列、一个索引都不算）。
+fn known_project_schema(c: &Connection) -> rusqlite::Result<bool> {
+    let columns: Vec<(String, String, i64)> = c
+        .prepare("SELECT name, type, pk FROM pragma_table_info('schema_migrations') ORDER BY cid")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let expected = [
+        ("version", "INTEGER", 1),
+        ("name", "TEXT", 0),
+        ("applied_at", "TEXT", 0),
+        ("content_sha256", "TEXT", 0),
+        ("hash_origin", "TEXT", 0),
+    ];
+    if columns.len() != expected.len()
+        || columns
+            .iter()
+            .zip(expected)
+            .any(|((n, t, pk), (en, et, epk))| n != en || !t.eq_ignore_ascii_case(et) || *pk != epk)
+    {
+        return Ok(false);
+    }
+    let applied: Vec<(i64, String)> = c
+        .prepare("SELECT version, name FROM schema_migrations ORDER BY version")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let known: Vec<&super::LegacyMigration> = super::MIGRATIONS
+        .iter()
+        .filter(|m| m.home == Home::Project)
+        .collect();
+    if applied.is_empty()
+        || applied.len() > known.len()
+        || applied
+            .iter()
+            .zip(&known)
+            .any(|((v, n), m)| *v != m.version || n != m.name)
+    {
+        return Ok(false);
+    }
+    let reference = Connection::open_in_memory()?;
+    for m in &known[..applied.len()] {
+        reference.execute_batch(m.sql)?;
+    }
+    Ok(schema_of(c)? == schema_of(&reference)?)
+}
+
 /// 库的逻辑内容：`user_version`、`application_id`；schema（类型、名字、所属表、SQL，不含随存储变的 rootpage）；
 /// 每张表与虚表的全部行，按全部列排序（不含隐含的 rowid：VACUUM 会给没有 INTEGER PRIMARY KEY 的表重排它）。
 /// 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
@@ -582,13 +654,9 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
     let c = Connection::open(db)?;
     crate::progress::watch(&c)?;
     // 只有 2.x 的项目库能这样规范化：它的业务主键都在显式列里，隐含的 rowid 与 FTS 影子表不承载业务。
-    // 证明不了（没有 project_meta）就按错误返回，调用方改按原始字节绑定。
-    let project: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'project_meta')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !project {
+    // 这要整份 schema 都是 2.x 项目迁移推出来的那一份才成立：多一张表、一列、一个虚表模块都证明不了，
+    // 按错误返回，调用方改按原始字节绑定（W4 关口第二轮 P1-W4A-02）。
+    if !known_project_schema(&c)? {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mut h = Sha256::new();
@@ -663,9 +731,32 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{logical_digest, tree_digest};
+    use super::{known_project_schema, logical_digest, tree_digest};
     use rusqlite::Connection;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    /// 按转换器嵌入的前 `upto` 个项目迁移建一份 2.x 项目库，登记方式与 2.0 迁移执行器相同。
+    fn project_db(path: &Path, upto: usize) -> Connection {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL,
+               content_sha256 TEXT NOT NULL, hash_origin TEXT NOT NULL CHECK(hash_origin IN ('APPLIED','LEGACY_BASELINE_UNVERIFIED')))",
+        )
+        .unwrap();
+        for m in super::super::MIGRATIONS
+            .iter()
+            .filter(|m| m.home == super::Home::Project)
+            .take(upto)
+        {
+            c.execute_batch(m.sql).unwrap();
+            c.execute(
+                "INSERT INTO schema_migrations VALUES (?1, ?2, '2026-01-01T00:00:00.000Z', ?3, 'APPLIED')",
+                rusqlite::params![m.version, m.name, m.sha256],
+            )
+            .unwrap();
+        }
+        c
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::var_os("CARGO_TARGET_DIR")
@@ -703,22 +794,21 @@ mod tests {
         drop(c);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
-        // 附件里的库即使像项目库（有 project_meta，例如用户存的一份项目库副本）也按字节：
-        // 逻辑摘要只给目录下那一个 project.sqlite。
+        // 附件里的库即使就是一份项目库（schema 完全是迁移推出来的，例如用户存的副本）也按字节：
+        // 逻辑摘要只给目录下那一个 project.sqlite。`settings` 的 rowid 逻辑摘要不看，字节看得见。
         let copy = tree.join("artifacts/copy-of-project.sqlite");
-        let k = Connection::open(&copy).unwrap();
+        let k = project_db(&copy, usize::MAX);
         k.execute_batch(
-            "CREATE TABLE project_meta(singleton INTEGER); INSERT INTO project_meta VALUES (1);
-             CREATE TABLE notes(body TEXT); INSERT INTO notes(rowid, body) VALUES (5, 'a');",
+            "INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (5, 'a', '{}', 't');",
         )
         .unwrap();
         let before = tree_digest(&tree, &work).unwrap();
-        k.execute_batch("UPDATE notes SET rowid = 6 WHERE rowid = 5;")
+        k.execute_batch("UPDATE settings SET rowid = 6 WHERE rowid = 5;")
             .unwrap();
         drop(k);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
-        // 同样的库放在项目库的位置、但没有 project_meta：证明不了是项目库，也按字节。
+        // 同样的库放在项目库的位置：schema 不是项目迁移推出来的，证明不了，也按字节。
         let fake = tree.join("project.sqlite");
         std::fs::copy(&db, &fake).unwrap();
         let before = tree_digest(&tree, &work).unwrap();
@@ -728,19 +818,92 @@ mod tests {
             .unwrap();
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
-        // 项目库：rowid 不算，VACUUM 前后摘要不变。
+        // 项目库：rowid 不算，VACUUM、ANALYZE 前后摘要不变。
         std::fs::remove_file(&fake).unwrap();
-        let p = Connection::open(&fake).unwrap();
+        let p = project_db(&fake, usize::MAX);
         p.execute_batch(
-            "CREATE TABLE project_meta(singleton INTEGER, name TEXT); INSERT INTO project_meta VALUES (1, 'x');
-             CREATE TABLE notes(body TEXT); INSERT INTO notes(rowid, body) VALUES (5, 'a'), (3, 'b');",
+            "INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (5, 'a', '{}', 't'), (3, 'b', '{}', 't');",
         )
         .unwrap();
         let before = tree_digest(&tree, &work).unwrap();
-        p.execute_batch("DELETE FROM notes WHERE rowid = 5; INSERT INTO notes(rowid, body) VALUES (8, 'a'); VACUUM;")
-            .unwrap();
+        p.execute_batch(
+            "DELETE FROM settings WHERE rowid = 5;
+             INSERT INTO settings(rowid, key, value_json, updated_at) VALUES (8, 'a', '{}', 't'); VACUUM; ANALYZE;",
+        )
+        .unwrap();
         drop(p);
         assert_eq!(before, tree_digest(&tree, &work).unwrap());
+    }
+
+    /// W4 关口第二轮 P1-W4A-02：只有整份 schema 都是 2.x 项目迁移推出来的那一份，才算认得。
+    /// 停在旧版本的项目库认得；多一张表、多一列、多一个索引、登记的名字或 `schema_migrations` 的列不对都不认得。
+    #[test]
+    fn only_the_migrated_project_schema_is_known() {
+        let dir = scratch("known-project-schema");
+        let known = |name: &str, upto: usize, change: &str| -> bool {
+            let path = dir.join(format!("{name}.sqlite"));
+            let c = project_db(&path, upto);
+            c.execute_batch(change).unwrap();
+            known_project_schema(&c).unwrap()
+        };
+        assert!(known("current", usize::MAX, ""));
+        assert!(known("older", 10, ""));
+        assert!(known("analyzed", usize::MAX, "ANALYZE;"));
+        assert!(!known(
+            "extra-table",
+            usize::MAX,
+            "CREATE TABLE documents(title TEXT);"
+        ));
+        assert!(!known(
+            "extra-table-old",
+            10,
+            "CREATE TABLE documents(title TEXT);"
+        ));
+        assert!(!known(
+            "extra-column",
+            usize::MAX,
+            "ALTER TABLE settings ADD COLUMN note TEXT;"
+        ));
+        assert!(!known(
+            "extra-index",
+            usize::MAX,
+            "CREATE INDEX x ON settings(updated_at);"
+        ));
+        assert!(!known(
+            "extra-view",
+            usize::MAX,
+            "CREATE VIEW v AS SELECT 1;"
+        ));
+        assert!(!known(
+            "dropped-trigger-or-index",
+            usize::MAX,
+            "DROP INDEX IF EXISTS idx_work_items_status; DROP TABLE IF EXISTS labels;"
+        ));
+        assert!(!known(
+            "renamed",
+            usize::MAX,
+            "UPDATE schema_migrations SET name = 'other.sql' WHERE version = 3;"
+        ));
+        assert!(!known(
+            "gap",
+            usize::MAX,
+            "DELETE FROM schema_migrations WHERE version = 3;"
+        ));
+        assert!(!known(
+            "claims-more",
+            10,
+            "INSERT INTO schema_migrations VALUES (11, '0011_x.sql', 't', 'h', 'APPLIED');"
+        ));
+        assert!(!known("empty", 0, ""));
+        // 登记一样、schema 一样，只是 `version` 不是主键（rowid 不再是它）：不是 2.0 执行器建的，不认。
+        assert!(!known(
+            "other-runner",
+            usize::MAX,
+            "CREATE TABLE sm AS SELECT * FROM schema_migrations; DROP TABLE schema_migrations;
+             CREATE TABLE schema_migrations (version INTEGER NOT NULL, name TEXT NOT NULL, applied_at TEXT NOT NULL,
+               content_sha256 TEXT NOT NULL, hash_origin TEXT NOT NULL);
+             INSERT INTO schema_migrations SELECT * FROM sm; DROP TABLE sm;",
+        ));
     }
 
     /// W4 关口 P2-W4A-01：大项目库的逻辑扫描在计量里推进工作量（SQLite 指令计量），不是一声不响地跑完。
@@ -748,12 +911,10 @@ mod tests {
     fn the_logical_scan_reports_its_work() {
         let dir = scratch("dropped-digest-work");
         let db = dir.join("project.sqlite");
-        let c = Connection::open(&db).unwrap();
+        let c = project_db(&db, usize::MAX);
         c.execute_batch(
-            "CREATE TABLE project_meta(singleton INTEGER); INSERT INTO project_meta VALUES (1);
-             CREATE TABLE business(id INTEGER PRIMARY KEY, body TEXT);
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
-             INSERT INTO business SELECT i, printf('%010d', 300001 - i) FROM n;",
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 300000)
+             INSERT INTO settings SELECT printf('%010d', 300001 - i), '{}', i, 't' FROM n;",
         )
         .unwrap();
         drop(c);

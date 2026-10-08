@@ -74,7 +74,7 @@ pub(super) fn walk(dir: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
                 format!("{prefix}/{name}")
             };
             // 列出之后又消失的条目跳过：别的程序在库旁边随建随删的 `-SHM.tmp` 就是这样（W4 关口第二轮的变异运行里
-            // 实测到比较因此得 UNKNOWN）。真正的业务变化由 F0 / F1 两次枚举的比对发现。
+            // 实测到比较因此得 UNKNOWN）。F0 / F1 的比对只看得见两次观测之间的差异；源的静止由接入口的准入保证。
             let meta = match std::fs::symlink_metadata(e.path()) {
                 Err(x) if x.kind() == std::io::ErrorKind::NotFound => continue,
                 m => m?,
@@ -109,16 +109,20 @@ fn top_level_family(name: &str) -> Option<&'static str> {
     })
 }
 
-/// 知识库目录里 2.0 恢复留下的件：日志（含没改名完的 `.new`）、候选件与它的 -wal / -shm、`.restore-*` 暂存目录。
+/// 知识库目录里 2.0 恢复留下的件：日志（含没改名完的 `.new`）、候选件与它的 -wal 和 WAL 索引、`.restore-*` 暂存目录。
+/// 候选件旁边认的文件与常规库一样（[`is_db_file`]）：快照阶段按同一个口径把索引排除在外（W4 关口第二轮 P2-W4A-R2-01）。
 fn knowledge_residue(rel: &str) -> bool {
     let candidate = |n: &str| {
-        let n = n
-            .strip_suffix("-wal")
-            .or_else(|| n.strip_suffix("-shm"))
-            .unwrap_or(n);
-        n.strip_prefix("restore-")
+        let lower = n.to_ascii_lowercase();
+        let cut = ["-wal", "-shm", "-shm.tmp"]
+            .iter()
+            .find(|s| lower.ends_with(*s))
+            .map_or(0, |s| s.len());
+        let db = &n[..n.len() - cut];
+        db.strip_prefix("restore-")
             .and_then(|r| r.strip_suffix(".sqlite"))
             .is_some_and(is_ulid)
+            && is_db_file(n, db)
     };
     rel == "restore.json"
         || rel == "restore.json.new"
@@ -138,17 +142,36 @@ pub(crate) fn is_wal_index(name: &str, db: &str) -> bool {
     n == format!("{d}-shm") || n == format!("{d}-shm.tmp")
 }
 
-/// `rel`（数据根里的相对路径，`/` 分隔）是不是 2.x 那三个库之一旁边的 WAL 索引：
-/// `registry/registry.sqlite`、`knowledge/knowledge.sqlite`、`projects/<pid>/project.sqlite`。
-/// 只认这三个位置：附件、日志等普通文件即使名字以 `-shm` / `-shm.tmp` 结尾也是业务文件（W4 关口 P1-W4A-01）。
-pub(crate) fn is_known_wal_index(rel: &str) -> bool {
+/// `rel`（数据根里的相对路径，`/` 分隔）是不是扫描认得的某个库旁边的 WAL 索引（`-shm`、`-shm.tmp`，大小写不定）。
+/// `listed` 是同一次枚举的全部文件，键是小写的相对路径：去掉后缀的那个库必须也在，并且文件头是 SQLite。
+///
+/// 认得的库都在 `registry/`、`knowledge/`、`projects/` 下：三个常规库、知识库的恢复候选 `restore-<id>.sqlite`
+/// 与 `.restore-*` 暂存、项目的 `.creating` / `.restore` 残留与 `project.sqlite.restore-old-*`。
+/// 附件目录 `projects/<pid>/artifacts/` 里的文件即使同样结尾、旁边也有同名的库，也是业务文件，照常进快照
+/// （W4 关口 P1-W4A-01、第二轮 P2-W4A-R2-01）。
+pub(crate) fn is_known_wal_index(
+    rel: &str,
+    listed: &std::collections::HashMap<String, PathBuf>,
+) -> bool {
     let parts: Vec<&str> = rel.split('/').collect();
-    match parts.as_slice() {
-        ["registry", name] => is_wal_index(name, "registry.sqlite"),
-        ["knowledge", name] => is_wal_index(name, "knowledge.sqlite"),
-        ["projects", pid, name] => !pid.starts_with('.') && is_wal_index(name, "project.sqlite"),
-        _ => false,
+    let in_db_tree = matches!(
+        parts.first(),
+        Some(&("registry" | "knowledge" | "projects"))
+    );
+    let in_artifacts = matches!(parts.as_slice(), ["projects", _, "artifacts", ..]);
+    if !in_db_tree || in_artifacts {
+        return false;
     }
+    let lower = rel.to_ascii_lowercase();
+    let Some(base) = lower
+        .strip_suffix("-shm")
+        .or_else(|| lower.strip_suffix("-shm.tmp"))
+    else {
+        return false;
+    };
+    listed
+        .get(base)
+        .is_some_and(|p| super::settle::is_database(p))
 }
 
 /// 数据根枚举：未登记的条目、非空的 trash、进行中的事务残留都在动目标之前停下；

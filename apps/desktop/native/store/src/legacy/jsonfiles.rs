@@ -41,14 +41,23 @@ enum Parsed {
 }
 
 fn read(root: &Path, rel: &str) -> Result<Parsed> {
-    let bytes = match std::fs::read(root.join(rel)) {
+    // 按字节计量地读，解析完再推进一次（W4 关口第二轮 P2-W4A-01）：历史文件可以很大。
+    let read_all = |path: &Path| -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        crate::progress::Read::new(std::fs::File::open(path)?).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    let bytes = match read_all(&root.join(rel)) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Parsed::Missing),
         // 读不出来：内容未知，2.0 也不判断（派单账本据此 503）。转换停。
         Err(e) => return Err(unsupported(root, format!("{rel} cannot be read ({e})"))),
     };
     // `readFileSync(path, "utf8")`：坏字节换成 U+FFFD，BOM 保留（JSON.parse 因此失败）。
-    match jsjson::parse_value(&String::from_utf8_lossy(&bytes)) {
+    let parsed = jsjson::parse_value(&String::from_utf8_lossy(&bytes));
+    crate::progress::pulse();
+    match parsed {
         Ok(Some(v)) => Ok(Parsed::Ok(v)),
         Ok(None) => Ok(Parsed::Corrupt),
         Err(e) => Err(unsupported(root, format!("{rel}: {e}"))),
@@ -288,6 +297,7 @@ fn published(v: &Value) -> Option<Value> {
     };
     let mut out = Vec::new();
     for (code, entry) in entries {
+        crate::progress::pulse();
         if !project_code(code) {
             return None;
         }
@@ -583,6 +593,7 @@ pub(super) fn load(root: &Path, at: &str) -> Result<Loaded> {
             Some(file) => {
                 requests_since = text(&file, "requestsSince").map(String::from);
                 for entry in items(get(&file, "runs").unwrap_or(&Value::Null)) {
+                    crate::progress::pulse();
                     match run_record(entry) {
                         Some(r) => runs.push(r),
                         None => damaged = true,
@@ -647,6 +658,7 @@ pub(super) fn load(root: &Path, at: &str) -> Result<Loaded> {
                     file_lost_before = Some(mark.to_string());
                 }
                 for raw in items(get(&file, "requests").unwrap_or(&Value::Null)) {
+                    crate::progress::pulse();
                     match ledger_entry(raw) {
                         Some(e) => file_entries.push(e),
                         None => loss = Some("the ledger has an invalid entry"),
@@ -678,6 +690,7 @@ pub(super) fn load(root: &Path, at: &str) -> Result<Loaded> {
     // （2.0 按 createdAt 的 localeCompare 排序后倒着取；这里只在 toISOString 形状里比较，其余停下）。
     let mut groups: BTreeMap<&str, Vec<(usize, &Value)>> = BTreeMap::new();
     for (i, r) in runs.iter().enumerate() {
+        crate::progress::pulse();
         if let Some(id) = text(r, "requestId")
             && !known.contains(id)
         {
@@ -687,6 +700,7 @@ pub(super) fn load(root: &Path, at: &str) -> Result<Loaded> {
     let mut entries = file_entries.clone();
     let mut backfilled = 0;
     for (id, group) in groups {
+        crate::progress::pulse();
         let winner = if group.len() == 1 {
             group[0].1
         } else {
@@ -848,6 +862,7 @@ pub(super) fn convert(
             .iter()
             .enumerate()
         {
+            crate::progress::pulse();
             let Value::String(id) = id else { continue };
             tx.execute(
                 "INSERT INTO sync_processed (ord, command_id) VALUES (?1, ?2)",
@@ -857,6 +872,7 @@ pub(super) fn convert(
         }
         if let Some(Value::Object(entries)) = get(c, "published") {
             for (code, entry) in entries {
+                crate::progress::pulse();
                 tx.execute(
                     "INSERT INTO sync_published (project_code, h, d, head_json) VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -913,6 +929,7 @@ pub(super) fn convert(
     }
 
     for r in &loaded.runs {
+        crate::progress::pulse();
         let state = text(r, "state").unwrap_or("");
         tx.execute(
             "INSERT INTO dispatch_runs (run, project_code, task_key, title, task_id, origin, state, session_id, created_at,
@@ -962,6 +979,7 @@ pub(super) fn convert(
     }
 
     for e in &loaded.entries {
+        crate::progress::pulse();
         let rejected = get(e, "rejected");
         tx.execute(
             "INSERT INTO dispatch_requests (id, at, run_snapshot_json, rejected_code, rejected_message)
@@ -1535,4 +1553,69 @@ pub(super) fn verify(c: &Connection, root: &Path, out: &Path, report: &mut Repor
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("store-unit")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("dispatch")).unwrap();
+        d
+    }
+
+    /// 在计量里载入 `root` 的 JSON，返回推进的工作量（载入的结论不管：这里只看计量）。
+    fn work_of(root: &std::path::Path) -> u64 {
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let _ = crate::progress::with(Some(&meter), || {
+            super::load(root, "2026-10-08T00:00:00.000Z")
+        });
+        work.get()
+    }
+
+    /// W4 关口第二轮 P2-W4A-01：大 JSON 的读入按字节推进（每 64 MiB 一次），解析完再推进一次。
+    /// 65 MiB、没有条目的 runs.json：读入一次、解析一次，少了哪个都不到 2。
+    #[test]
+    fn a_large_json_file_reports_its_read_and_parse() {
+        let dir = scratch("json-read-work");
+        let payload = format!("{}{{\"v\":1,\"runs\":[]}}", " ".repeat(65 * 1024 * 1024));
+        std::fs::write(dir.join("dispatch/runs.json"), payload).unwrap();
+        let work = work_of(&dir);
+        assert!(work >= 2, "65 MiB dispatch/runs.json moved {work}");
+    }
+
+    /// W4 关口第二轮 P2-W4A-01：派发历史与请求账本逐条推进。
+    #[test]
+    fn each_history_entry_reports_its_work() {
+        let entries = vec!["{}"; 3000].join(",");
+        let runs = scratch("json-runs-work");
+        std::fs::write(
+            runs.join("dispatch/runs.json"),
+            format!("{{\"v\":1,\"runs\":[{entries}]}}"),
+        )
+        .unwrap();
+        let work = work_of(&runs);
+        assert!(work >= 3000, "3000 runs moved {work}");
+
+        let ledger = scratch("json-requests-work");
+        std::fs::write(
+            ledger.join("dispatch/requests.json"),
+            format!("{{\"v\":1,\"requests\":[{entries}]}}"),
+        )
+        .unwrap();
+        let work = work_of(&ledger);
+        assert!(work >= 3000, "3000 requests moved {work}");
+    }
 }
