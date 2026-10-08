@@ -8709,8 +8709,8 @@ mod w4_gate_r3 {
     use super::*;
     use atm_store::conversion::{self as cv, CompareOptions, Comparison, RunOptions};
 
-    /// 舍弃 P7（身份与注册库不符、明确接受舍弃）后，`change` 只改一个隐含 rowid：`observe` 看到的 2.x 结果
-    /// 从 `before` 变成 `after`，正式比较必须判「变了」。
+    /// 舍弃 P7（身份与注册库不符、明确接受舍弃）后，`change` 只改表里的行看不见的状态（隐含的 rowid、FTS 的索引）：
+    /// `observe` 看到的 2.x 结果从 `before` 变成 `after`，正式比较必须判「变了」。
     fn a_rowid_change_is_seen(
         name: &str,
         setup: &str,
@@ -8792,6 +8792,26 @@ mod w4_gate_r3 {
             "UPDATE checklist_items SET rowid = 9 WHERE rowid = 7",
             r#"["C1","C2"]"#,
             r#"["C2","C1"]"#,
+        );
+    }
+
+    /// P1-W4A-02（第四轮，codex 的正式链路反例）：FTS 的倒排索引被清空、内容行原样放回，虚表的 rowid 与内容都不变，
+    /// 2.x 的搜索（`IN (SELECT … MATCH …)`）命中 1 → 0。索引与行对不上，按字节绑定，判「变了」。
+    #[test]
+    fn an_fts_index_out_of_step_with_its_rows_is_seen() {
+        a_rowid_change_is_seen(
+            "w4g4-fts-index",
+            "INSERT INTO search_documents(entity_type, entity_id, entity_key, title, body, updated_at)
+               VALUES ('TASK', 'w', 'XXX-T-0001', 'hello world', '', '2026-01-01T00:00:00.000Z');
+             INSERT INTO search_documents_fts(rowid, entity_type, entity_id, entity_key, title, body)
+               VALUES (7, 'TASK', 'w', 'XXX-T-0001', 'hello world', '');",
+            "SELECT CAST(count(*) AS TEXT) FROM search_documents WHERE (entity_type, entity_id) IN
+               (SELECT entity_type, entity_id FROM search_documents_fts WHERE search_documents_fts MATCH 'hello')",
+            "DELETE FROM search_documents_fts;
+             INSERT INTO search_documents_fts_content(id, c0, c1, c2, c3, c4)
+               VALUES (7, 'TASK', 'w', 'XXX-T-0001', 'hello world', '');",
+            "1",
+            "0",
         );
     }
 

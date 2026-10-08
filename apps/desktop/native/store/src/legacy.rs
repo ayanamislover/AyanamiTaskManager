@@ -4024,6 +4024,30 @@ mod tests {
         work.get()
     }
 
+    /// W4 关口第四轮 P2-W4A-01（codex 的补验）：数据库里的 payload 不经文件上限，经正式的 `atm_mirror_payload`
+    /// 解析、展开、输出。约 17 MiB 的字符串：解析推进 2 次、输出再推进 2 次，少了输出那一段就不到 4。
+    #[test]
+    fn a_large_payload_reports_its_parse_and_output() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        super::register_functions(&c).unwrap();
+        crate::progress::watch(&c).unwrap();
+        let payload = format!(
+            "{{\"body\":\"{}\"}}",
+            "a".repeat(2 * crate::progress::PARSE_BYTES)
+        );
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let out: String = crate::progress::with(Some(&meter), || {
+            c.query_row("SELECT atm_mirror_payload(?1, '{}')", [&payload], |r| {
+                r.get(0)
+            })
+        })
+        .unwrap();
+        assert_eq!(out, payload);
+        assert!(work.get() >= 4, "{}", work.get());
+    }
+
     /// W4 关口第二轮的建议：直接验目标库连接的计量，不靠大项目用例里与别的计量点混在一起的批数。
     /// 对照：不经 `open_target` 打开的同一个库，同样的 SQL 不推进。
     #[test]

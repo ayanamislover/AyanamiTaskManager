@@ -481,7 +481,8 @@ pub(super) fn migration_failed(
 ///
 /// 按内容而不是按存储取（W3 peer r2 P2-06）：
 /// - 项目库（目录下的 `project.sqlite`，文件头是 `SQLite format 3\0`）连同旁边的 `-wal`、`-shm` 算一项，
-///   取 [`database_digest`]。checkpoint、正常关库、SHM 重建、VACUUM、ANALYZE 都不改变它；WAL 里还没合并的写入照样算进去。
+///   取 [`database_digest`]。checkpoint、正常关库、SHM 重建、ANALYZE 都不改变它，保留 rowid 的 VACUUM 也不改变
+///   （重排了 rowid 就算「变了」）；WAL 里还没合并的写入照样算进去。认不出 schema、索引与行对不上时按字节。
 /// - 其他文件按字节（大小与 sha256），包括附件里的 SQLite 文件与它们的 `-wal`、`-shm`：用户自己的库里 rowid
 ///   可能就是业务键，不能套用 ATM 库的规范化（W4 关口 P1-W4A-02）。
 fn tree_digest(dir: &Path, work: &Path) -> Result<String> {
@@ -654,7 +655,8 @@ fn known_project_schema(c: &Connection) -> rusqlite::Result<bool> {
 
 /// 库的逻辑内容：`user_version`、`application_id`；schema（类型、名字、所属表、SQL，不含随存储变的 rootpage）；
 /// 每张表与虚表的全部行：有 rowid 的连同 rowid、按 rowid 排序，没有的按全部列排序。
-/// 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的影子表（optimize、merge 会重排；虚表本身的行照算）。
+/// 不算 `sqlite_stat*`（ANALYZE、`PRAGMA optimize` 会写）与 FTS 的索引影子表（optimize、merge 会重排；虚表本身的行与
+/// `_config` 照算）。只在 `integrity_check` 恰好为 `ok`、索引与行一致时才这样取；否则按字节。
 /// checkpoint、关库、SHM 重建、ANALYZE、改日志模式都不动这些；VACUUM 一般也保留 rowid，真改了就算「变了」——
 /// 2.x 拿 rowid 裁决同时间的记录，它变了 2.x 看到的顺序就变了。
 fn logical_digest(db: &Path) -> rusqlite::Result<String> {
@@ -666,6 +668,16 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
     // 这要整份 schema 都是 2.x 项目迁移推出来的那一份才成立：多一张表、一列、一个虚表模块都证明不了，
     // 按错误返回，调用方改按原始字节绑定（W4 关口第二轮 P1-W4A-02）。
     if !known_project_schema(&c)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    // 只看表里的行，还要先证明索引与行一致：2.x 的查询走 b-tree 索引与 FTS5 的倒排索引，它们与行对不上时
+    // 2.x 看到的结果就不是这些行。`integrity_check` 两样都核对（SQLite 3.44 起含 FTS5 的 xIntegrity），
+    // 不是恰好一行 `ok` 就按字节绑定（W4 关口第四轮 P1-W4A-02）。
+    let check: Vec<String> = c
+        .prepare("PRAGMA integrity_check")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if check != ["ok"] {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mut h = Sha256::new();
@@ -689,10 +701,12 @@ fn logical_digest(db: &Path) -> rusqlite::Result<String> {
     }
     // 隐含的 rowid 是业务内容：2.x 的读模型拿它裁决同时间的记录（`search_documents` 的最新投影、
     // `checklist_items` 的顺序、搜索分页的上界），FTS 虚表的 rowid 同理（W4 关口第三轮 P1-W4A-02）。
+    // FTS5 的 `_config` 影子表（rank 等设置会改 MATCH 的结果顺序）也算；其余影子表是由行推出的索引，
+    // 上面的 integrity_check 已证明它们与行一致（第四轮）。
     let tables: Vec<(String, bool)> = c
         .prepare(&format!(
             "SELECT name, type = 'virtual' OR wr = 0 FROM pragma_table_list WHERE schema = 'main'
-             AND type IN ('table', 'virtual')
+             AND (type IN ('table', 'virtual') OR (type = 'shadow' AND substr(name, -7) = '_config'))
              AND (substr(name, 1, 7) <> 'sqlite_' OR name = 'sqlite_sequence') AND {not_stat} ORDER BY name"
         ))?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -863,6 +877,70 @@ mod tests {
             .unwrap();
         drop(p);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
+    }
+
+    /// W4 关口第四轮 P1-W4A-02：FTS 的倒排索引与内容对不上（codex 的构造：清空虚表后只放回内容行，MATCH 1 → 0）
+    /// 时按字节，摘要变；FTS 的 rank 设置算内容，改了变；optimize、merge 只重排索引，不变。
+    #[test]
+    fn fts_state_beyond_its_rows_is_bound() {
+        let dir = scratch("dropped-fts-state");
+        let (tree, work) = (dir.join("project"), dir.join("work"));
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        let db = tree.join("project.sqlite");
+        let c = project_db(&db, 10);
+        c.execute_batch(
+            "INSERT INTO search_documents_fts(rowid, entity_type, entity_id, entity_key, title, body)
+               VALUES (7, 'TASK', 'w', 'X-T-0001', 'hello world', '');",
+        )
+        .unwrap();
+        let matches = || -> i64 {
+            c.query_row(
+                "SELECT count(*) FROM search_documents_fts WHERE search_documents_fts MATCH 'hello'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let before = tree_digest(&tree, &work).unwrap();
+        c.execute_batch(
+            "INSERT INTO search_documents_fts(search_documents_fts) VALUES ('optimize');
+             INSERT INTO search_documents_fts(search_documents_fts, rank) VALUES ('merge', 16);",
+        )
+        .unwrap();
+        assert_eq!(
+            before,
+            tree_digest(&tree, &work).unwrap(),
+            "optimize / merge"
+        );
+
+        c.execute_batch(
+            "INSERT INTO search_documents_fts(search_documents_fts, rank) VALUES ('rank', 'bm25(10.0, 5.0)');",
+        )
+        .unwrap();
+        assert_ne!(before, tree_digest(&tree, &work).unwrap(), "rank setting");
+        c.execute_batch("DELETE FROM search_documents_fts_config WHERE k = 'rank';")
+            .unwrap();
+        assert_eq!(
+            before,
+            tree_digest(&tree, &work).unwrap(),
+            "rank setting removed"
+        );
+
+        assert_eq!(matches(), 1);
+        c.execute_batch(
+            "DELETE FROM search_documents_fts;
+             INSERT INTO search_documents_fts_content(id, c0, c1, c2, c3, c4)
+               VALUES (7, 'TASK', 'w', 'X-T-0001', 'hello world', '');",
+        )
+        .unwrap();
+        assert_eq!(matches(), 0);
+        drop(c);
+        assert_ne!(
+            before,
+            tree_digest(&tree, &work).unwrap(),
+            "index out of step with the rows"
+        );
     }
 
     /// W4 关口第三轮 P2-W4A-01：知识库的恢复日志与 sync、dispatch 的 JSON 走同一个读入：有上限，解析途中推进。
