@@ -1067,9 +1067,7 @@ fn convert_metered(
     tick("IMPORT", 0, src.projects.len());
     let used = prepare_sources(src, &work, opts.at, &mut report)?;
 
-    let mut t = crate::open(target)?;
-    crate::progress::watch(&t)?;
-    register_functions(&t)?;
+    let mut t = open_target(target)?;
     let gens = convert_registry(&mut t, &used, opts.at, opts.generation, &mut report)?;
     let mut promotions: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
@@ -2078,6 +2076,14 @@ fn mirror_rows(
 ///   `row` 是这一行在源库里的位置（项目 + 全局序号或 outbox id），只用于报错（W1 peer r4 P2-09）。
 ///
 /// 嵌套超过上限时两者都报错，转换或 VERIFY 失败并在错误里写明事件，不静默回退。
+/// 转换写入的目标库连接：装计量（目标上的 SQL 是 IMPORT 里最重的工作，W3 peer r1 P2-03）与转换用的函数。
+fn open_target(target: &Path) -> Result<Connection> {
+    let t = crate::open(target)?;
+    crate::progress::watch(&t)?;
+    register_functions(&t)?;
+    Ok(t)
+}
+
 fn register_functions(c: &Connection) -> rusqlite::Result<()> {
     use crate::jsjson::{MAX_DEPTH, mirror_payload, top_level_string};
     use rusqlite::functions::FunctionFlags;
@@ -3992,4 +3998,50 @@ fn verify_rules(c: &Connection, report: &mut Report, re: &mut Recheck, p: &str) 
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    /// 在计量里执行一条约 100 万行的 SQL，返回推进的工作量。
+    fn work_of(c: &rusqlite::Connection) -> u64 {
+        let work = std::cell::Cell::new(0u64);
+        let report = |_: &str, _: usize, _: usize, w: u64| work.set(w);
+        let meter = crate::progress::Meter::new(&report);
+        let rows: i64 = crate::progress::with(Some(&meter), || {
+            c.query_row(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000000)
+                 SELECT count(*) FROM n",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+        assert_eq!(rows, 1_000_000);
+        work.get()
+    }
+
+    /// W4 关口第二轮的建议：直接验目标库连接的计量，不靠大项目用例里与别的计量点混在一起的批数。
+    /// 对照：不经 `open_target` 打开的同一个库，同样的 SQL 不推进。
+    #[test]
+    fn the_target_connection_reports_its_sql() {
+        let dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("store-unit")
+            .join("target-metering");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("atm.sqlite");
+        let metered = super::open_target(&target).unwrap();
+        let work = work_of(&metered);
+        assert!(work >= 3, "the target connection moved {work}");
+        drop(metered);
+        assert_eq!(work_of(&crate::open(&target).unwrap()), 0);
+    }
 }
