@@ -26,6 +26,12 @@ pub const SQLITE_OPS: i32 = 1_000_000;
 /// 读写文件每这么多字节推进一次工作量。
 pub const FILE_BYTES: u64 = 64 << 20;
 
+/// 解析 JSON 每读过这么多字节的输入推进一次工作量（空白、字符串、数字与成员都可以很长）。
+pub const PARSE_BYTES: usize = 8 << 20;
+
+/// JSON 解析树转换成值时每这么多个节点推进一次工作量。
+pub const VALUE_NODES: usize = 1 << 16;
+
 /// 一次转换的进度计量。
 pub struct Meter<'a> {
     report: ProgressFn<'a>,

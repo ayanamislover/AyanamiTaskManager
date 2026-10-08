@@ -40,24 +40,56 @@ enum Parsed {
     Ok(Value),
 }
 
-fn read(root: &Path, rel: &str) -> Result<Parsed> {
-    // 按字节计量地读，解析完再推进一次（W4 关口第二轮 P2-W4A-01）：历史文件可以很大。
-    let read_all = |path: &Path| -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        crate::progress::Read::new(std::fs::File::open(path)?).read_to_end(&mut bytes)?;
-        Ok(bytes)
+/// 转换读的 JSON 文件（sync、dispatch、知识库的恢复日志）的大小上限。2.x 的这些文件实际是 KB 级；
+/// 上限以内，读入、解析、建值树与之后的校验、分组、导入都与大小成线性，几秒内做完，
+/// 远在 setup 的 10 min 无推进预算之内。超过上限在动目标之前停下（W4 关口第三轮 P2-W4A-01）。
+pub(super) const MAX_JSON_BYTES: u64 = 64 << 20;
+
+pub(super) enum JsonFile {
+    Missing,
+    TooLarge(u64),
+    Bytes(Vec<u8>),
+}
+
+/// 读一个 JSON 文件，不超过 [`MAX_JSON_BYTES`]（读的途中文件变大也只读到上限多一个字节）。
+/// 读入不另计量：上限以内的读是有界的；解析途中按输入字节推进（[`crate::progress::PARSE_BYTES`]）。
+pub(super) fn read_json_file(path: &Path) -> std::io::Result<JsonFile> {
+    use std::io::Read;
+    let file = match std::fs::File::open(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(JsonFile::Missing),
+        f => f?,
     };
-    let bytes = match read_all(&root.join(rel)) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Parsed::Missing),
+    let len = file.metadata()?.len();
+    if len > MAX_JSON_BYTES {
+        return Ok(JsonFile::TooLarge(len));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_JSON_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        return Ok(JsonFile::TooLarge(bytes.len() as u64));
+    }
+    Ok(JsonFile::Bytes(bytes))
+}
+
+pub(super) fn too_large(root: &Path, rel: &str, len: u64) -> ConvertError {
+    unsupported(
+        root,
+        format!(
+            "{rel} is {len} bytes; the conversion reads JSON files up to {MAX_JSON_BYTES} bytes"
+        ),
+    )
+}
+
+fn read(root: &Path, rel: &str) -> Result<Parsed> {
+    let bytes = match read_json_file(&root.join(rel)) {
+        Ok(JsonFile::Bytes(b)) => b,
+        Ok(JsonFile::Missing) => return Ok(Parsed::Missing),
+        Ok(JsonFile::TooLarge(len)) => return Err(too_large(root, rel, len)),
         // 读不出来：内容未知，2.0 也不判断（派单账本据此 503）。转换停。
         Err(e) => return Err(unsupported(root, format!("{rel} cannot be read ({e})"))),
     };
     // `readFileSync(path, "utf8")`：坏字节换成 U+FFFD，BOM 保留（JSON.parse 因此失败）。
-    let parsed = jsjson::parse_value(&String::from_utf8_lossy(&bytes));
-    crate::progress::pulse();
-    match parsed {
+    match jsjson::parse_value(&String::from_utf8_lossy(&bytes)) {
         Ok(Some(v)) => Ok(Parsed::Ok(v)),
         Ok(None) => Ok(Parsed::Corrupt),
         Err(e) => Err(unsupported(root, format!("{rel}: {e}"))),
@@ -1585,15 +1617,35 @@ mod tests {
         work.get()
     }
 
-    /// W4 关口第二轮 P2-W4A-01：大 JSON 的读入按字节推进（每 64 MiB 一次），解析完再推进一次。
-    /// 65 MiB、没有条目的 runs.json：读入一次、解析一次，少了哪个都不到 2。
+    /// W4 关口第三轮 P2-W4A-01：JSON 文件有大小上限，超过的在载入时以 Unsupported 停下；
+    /// 上限以内的大文件在解析途中按输入字节推进（不只是解析完推进一次）。
     #[test]
-    fn a_large_json_file_reports_its_read_and_parse() {
-        let dir = scratch("json-read-work");
-        let payload = format!("{}{{\"v\":1,\"runs\":[]}}", " ".repeat(65 * 1024 * 1024));
-        std::fs::write(dir.join("dispatch/runs.json"), payload).unwrap();
-        let work = work_of(&dir);
-        assert!(work >= 2, "65 MiB dispatch/runs.json moved {work}");
+    fn a_json_file_is_read_within_the_limit_and_parsed_in_batches() {
+        let limit = super::MAX_JSON_BYTES as usize;
+        let over = scratch("json-over-limit");
+        let body = "{\"v\":1,\"runs\":[]}";
+        std::fs::write(
+            over.join("dispatch/runs.json"),
+            format!("{body}{}", " ".repeat(limit + 1 - body.len())),
+        )
+        .unwrap();
+        match super::load(&over, "2026-10-08T00:00:00.000Z") {
+            Err(e) => assert!(e.to_string().contains("reads JSON files up to"), "{e}"),
+            Ok(_) => panic!("a JSON file above the limit was loaded"),
+        }
+
+        let within = scratch("json-read-work");
+        std::fs::write(
+            within.join("dispatch/runs.json"),
+            format!("{body}{}", " ".repeat(limit - body.len())),
+        )
+        .unwrap();
+        let work = work_of(&within);
+        let batches = (limit / crate::progress::PARSE_BYTES) as u64;
+        assert!(
+            work >= batches,
+            "a JSON file at the limit moved {work} < {batches}"
+        );
     }
 
     /// W4 关口第二轮 P2-W4A-01：派发历史与请求账本逐条推进。
