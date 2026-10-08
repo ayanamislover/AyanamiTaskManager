@@ -80,6 +80,7 @@ decide 循环（最多 8 圈）
 第一轮评审的修订 `mut-w4i-r2.py`（runtime、state 两组），证据 `w4i-r2-*-mutation-evidence.json`。
 第二轮评审的修订 `mut-w4i-r3.py`（runtime），证据 `w4i-r3-runtime-mutation-evidence.json`。
 第三轮评审的修订 `mut-w4i-r4.py`（runtime、store、state 三组），证据 `w4i-r4-*-mutation-evidence.json`。
+第四轮评审的修订 `mut-w4i-r5.py`（state、setup、runtime 三组），证据 `w4i-r5-*-mutation-evidence.json`。
 
 ## W4i 第一轮评审（`output/peer-atm3-w4i-r1.md`）：CHANGES_REQUESTED
 
@@ -127,3 +128,17 @@ decide 循环（最多 8 圈）
   - `store/tests/names.rs::a_generation_that_is_not_one_name_is_refused_before_any_write`：`run`、`fresh_install`、`discard_attempt` 拿 `..\..\victim` 等都 `Refused`，`N\staging\..\..\victim` 指着的目录原样不动，N 也没建。
   - `guard` 的单元用例 `an_entry_that_vanished_is_skipped_but_other_errors_refuse`、`concurrent_atomic_writes_in_a_root_do_not_refuse_it`（一个线程在根里不停写临时文件再改名，守卫 3 s 内反复检查都通过）。
   - `runtime`：`tests/guard.rs::a_txn_that_is_not_one_name_is_refused_before_any_write`（评审的反例原样与另四种写法，退出 2，安装根空、N 与 L 没建、受保护的树逐字节不变）；`tests/boot.rs::a_txn_that_is_not_one_name_is_refused_before_admission`；`tests/boot.rs::names_persisted_in_n_never_lead_outside_it`（封存意图的 name 是 N 外的绝对路径、`M` 的 generation 是 `..\..\outside`：都隔离在 N 里，N 旁边什么也没多出来，之后照常起来）。
+
+## W4i 第四轮评审（`output/peer-atm3-w4i-r4.md`）：CHANGES_REQUESTED
+
+绑定 b3b0154。无 P0。R3-P1-01 的拼接点清单、损坏状态的恢复去向、消失条目的竞争修订（在已披露的开发守卫边界内）与 38 条变异的源码绑定都被确认。
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| R4-P1-01 | bda1abd 的 journal / `app.json` 校验把 setup 自己写出的 `legacy:<1.x>` 判成损坏：迁移后的 `previous`、反向迁移的 `to` 与之后的 `current`。回滚、恢复、维护受阻，迁移成功后的正常准入也会走 NeedsRecovery | `atm_install_state::is_version_ref`：普通版本号，或恰好一个 `LEGACY_PREFIX` 加普通版本号；journal 的 `to`、`from` 与 `app.json` 的 `current`、`previous` 都用它。前缀只认一次，剩下的照旧按单层版本号核对（`legacy:legacy:…`、`legacy:..\x`、`legacy:` 不算）。前缀常量移进 install-state，setup 的 `legacy::LEGACY_PREFIX` 就是它，两边只有一个来源 |
+| R4-P2-01 | reparse 判定的变异只因为 junction 用例的提示措辞变红，新加的文件符号链接那一种没跑到 | 文件符号链接拆成单独的用例，断言行为：退出 2、没有拿到准入（`N\runtime` 没建出来）、受保护的树逐字节不变。建不了文件符号链接（ERROR_PRIVILEGE_NOT_HELD，评审的沙箱就是这样）时明确打印 SKIPPED 返回，不当作通过的证据 |
+
+- **用例**：
+  - `setup` 的 `store::tests::every_state_setup_writes_reads_back`：用 setup 自己的 `new_txn_id`、`legacy::legacy_pointer`、`store::enter` / `Store::set_pointer` 写出迁移（`from = legacy:1.4.0`）、反向迁移（`to = legacy:1.4.0`）、普通更新、首次安装（带预发布与构建号的版本）的事务，以及迁移后、反向迁移后、更新后、回滚后、首次安装后的 `app.json`，逐个经 `Store::load` / `Store::pointer` 原样读回。
+  - `install-state` 的 `tests::state_whose_names_are_not_plain_is_invalid` 加上合法的 `legacy:` 引用（每个字段）与嵌套前缀、空版本、带盘符的反例。
+  - `tests/guard.rs::a_file_symbolic_link_inside_a_root_is_refused_before_admission`。

@@ -136,3 +136,75 @@ pub fn new_txn_id() -> String {
     }
     format!("t{:x}{:08x}", now_ms(), hash as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::legacy::legacy_pointer;
+    use atm_install_state::TxnKind;
+
+    fn scratch_env(name: &str) -> Env {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("target")
+            .join("setup-tests")
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let dir = std::path::absolute(dir).unwrap();
+        Env {
+            install_root: dir.join("install"),
+            data_dir: dir.join("data"),
+            v3_root: dir.join("v3-data"),
+            start_menu_dir: dir.join("start-menu"),
+            desktop_dir: dir.join("desktop"),
+            // Never opened by these tests; a private name all the same.
+            uninstall_key: r"Software\AyanamiTaskManagerUnitTest\Uninstall".into(),
+            run_key: r"Software\AyanamiTaskManagerUnitTest\Run".into(),
+            sandbox: true,
+        }
+    }
+
+    /// W4i peer r4 P1-01：setup 自己写出的事务与 `app.json` 都读得回来，包括 `legacy:` 引用——迁移
+    /// （`from = legacy:1.x`，之后 `previous = legacy:1.x`）、反向迁移（`to = legacy:1.x`，之后
+    /// `current = legacy:1.x`）、普通更新与回滚。读不回来时恢复、维护、回滚与正常准入都会停在「状态损坏」。
+    #[test]
+    fn every_state_setup_writes_reads_back() {
+        let env = scratch_env("store-read-back");
+        fs::create_dir_all(env.state_dir()).unwrap();
+        let store = Store::new(&env);
+        let legacy = legacy_pointer("1.4.0");
+        for (from, to, kind) in [
+            (Some(legacy.clone()), "3.0.0".to_string(), TxnKind::Migrate),
+            (Some("3.0.0".to_string()), legacy.clone(), TxnKind::Legacy),
+            (
+                Some("2.0.0".to_string()),
+                "3.0.0".to_string(),
+                TxnKind::Install,
+            ),
+            (None, "3.0.0-beta.1+build.7".to_string(), TxnKind::Install),
+        ] {
+            let mut txn = Transaction::new(new_txn_id(), from, to, kind);
+            for state in [TxnState::Lock, TxnState::Switch, TxnState::Start] {
+                enter(&store, &mut txn, state).unwrap();
+                assert_eq!(
+                    store.load(&env).unwrap().as_ref(),
+                    Some(&txn),
+                    "{kind:?} {state:?}"
+                );
+            }
+        }
+        for (current, previous) in [
+            ("3.0.0".to_string(), Some(legacy.clone())),
+            (legacy.clone(), Some("3.0.0".to_string())),
+            ("3.0.0".to_string(), Some("2.0.0".to_string())),
+            ("2.0.0".to_string(), Some("3.0.0".to_string())),
+            ("3.0.0".to_string(), None),
+        ] {
+            let pointer = AppPointer { current, previous };
+            store.set_pointer(&pointer).unwrap();
+            assert_eq!(store.pointer(&env).unwrap(), Some(pointer));
+        }
+        let _ = fs::remove_dir_all(env.install_root.parent().unwrap());
+    }
+}

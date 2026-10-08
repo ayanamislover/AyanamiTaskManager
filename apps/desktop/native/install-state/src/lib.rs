@@ -287,6 +287,17 @@ fn is_version(version: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
+/// setup 记下的 Electron 1.x 安装：`legacy:<1.x 版本>`（迁移前的 `from`、迁移后的 `previous`、
+/// 反向迁移的 `to` 与之后的 `current`）。setup 的 `legacy::LEGACY_PREFIX` 就是它。
+pub const LEGACY_PREFIX: &str = "legacy:";
+
+/// 版本引用：普通版本号，或恰好一个 [`LEGACY_PREFIX`] 加普通版本号（W4i peer r4 P1-01：setup 自己写出的
+/// `legacy:` 引用是合法状态）。前缀只认一次，剩下的仍按单层版本号核对：`legacy:legacy:1.4.0`、
+/// `legacy:..\x`、`legacy:` 都不算。
+pub fn is_version_ref(version: &str) -> bool {
+    is_version(version.strip_prefix(LEGACY_PREFIX).unwrap_or(version))
+}
+
 /// 读出来的名字有一个不能安全拼进路径，整份状态就按损坏处理。
 fn plain_names(path: &Path, ok: bool) -> Result<(), StateError> {
     if ok {
@@ -305,7 +316,7 @@ pub fn read_pointer(install_root: &Path) -> Result<Option<AppPointer>, StateErro
     if let Some(p) = &pointer {
         plain_names(
             &path,
-            is_version(&p.current) && p.previous.as_deref().is_none_or(is_version),
+            is_version_ref(&p.current) && p.previous.as_deref().is_none_or(is_version_ref),
         )?;
     }
     Ok(pointer)
@@ -315,11 +326,11 @@ pub fn read_journal(install_root: &Path) -> Result<Option<Transaction>, StateErr
     let path = install_root.join(STATE_DIR).join(JOURNAL);
     let txn: Option<Transaction> = read_json(&path)?;
     if let Some(t) = &txn {
-        // `from` 是上一个版本，迁移时是 `legacy:<1.x>`（setup 的 `LEGACY_PREFIX`）。
-        let from = |f: &str| is_version(f.strip_prefix("legacy:").unwrap_or(f));
         plain_names(
             &path,
-            is_path_name(&t.id) && is_version(&t.to) && t.from.as_deref().is_none_or(from),
+            is_path_name(&t.id)
+                && is_version_ref(&t.to)
+                && t.from.as_deref().is_none_or(is_version_ref),
         )?;
     }
     Ok(txn)
@@ -772,6 +783,12 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // 反向迁移的事务：`to` 是 1.x（W4i peer r4 P1-01）。
+        assert!(
+            journal("T1", Some("3.0.0"), "legacy:1.4.0")
+                .unwrap()
+                .is_some()
+        );
         assert!(
             journal("T1", Some("2.0.0"), "3.0.0-beta.1+x")
                 .unwrap()
@@ -782,6 +799,9 @@ mod tests {
             ("T1", None, r"..\..\x"),
             ("T1", None, r"C:\x"),
             ("T1", Some(r"legacy:..\x"), "3.0.0"),
+            ("T1", Some("legacy:legacy:1.4.0"), "3.0.0"),
+            ("T1", None, "legacy:"),
+            ("T1", None, r"legacy:C:\x"),
             ("T1", Some("a/b"), "3.0.0"),
         ] {
             assert!(
@@ -798,7 +818,15 @@ mod tests {
             read_pointer(&root.0)
         };
         assert!(pointer("3.0.0", Some("2.0.0")).unwrap().is_some());
-        for (current, previous) in [(r"..\x", None), ("3.0.0", Some(r"C:\x"))] {
+        // 迁移之后与反向迁移之后（W4i peer r4 P1-01）。
+        assert!(pointer("3.0.0", Some("legacy:1.4.0")).unwrap().is_some());
+        assert!(pointer("legacy:1.4.0", Some("3.0.0")).unwrap().is_some());
+        for (current, previous) in [
+            (r"..\x", None),
+            ("3.0.0", Some(r"C:\x")),
+            ("legacy:legacy:1.4.0", None),
+            ("3.0.0", Some(r"legacy:..\x")),
+        ] {
             assert!(
                 matches!(pointer(current, previous), Err(StateError::Invalid(..))),
                 "{current} {previous:?}"

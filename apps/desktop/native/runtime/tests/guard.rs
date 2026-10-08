@@ -253,24 +253,6 @@ fn links_inside_a_given_root_are_refused_before_any_write() {
             }),
         ),
         (
-            // 目录 junction 去掉 reparse 判定后也会因为打不开而被拒；文件符号链接能正常打开（硬链接数 1），
-            // 只有 reparse 判定拦得住它。建它要特权或开发者模式。
-            "a file in N is a symbolic link to a file in the 3.x root",
-            Box::new({
-                let v3c = v3.clone();
-                move |c: &Path| {
-                    let n = c.join("N");
-                    std::fs::create_dir_all(n.join("data")).unwrap();
-                    std::os::windows::fs::symlink_file(
-                        v3c.join("data").join("marker"),
-                        n.join("data").join("atm.sqlite"),
-                    )
-                    .expect("creating a file symbolic link needs Developer Mode or the privilege");
-                    (n, c.join("L"), None)
-                }
-            }),
-        ),
-        (
             "N is itself a junction, and its runtime one to the 3.x root",
             Box::new({
                 let v3c = v3.clone();
@@ -325,6 +307,39 @@ fn links_inside_a_given_root_are_refused_before_any_write() {
     }
     assert_eq!(contents(&local), before, "a protected tree changed");
     assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+}
+
+/// W4i peer r4 P2-01：N 里的文件是指向 3.x 根里文件的符号链接。目录 junction 即使没有 reparse 判定也会因为
+/// 取不到硬链接数而被拒；文件符号链接能正常打开、只有一个名字，只有 reparse 判定拦得住它。所以这一种单独成用例，
+/// 断言的是行为：退出 2、没有拿到准入（`N\runtime` 没建出来）、受保护的树逐字节不变。
+/// 建文件符号链接要开发者模式或特权；建不了（ERROR_PRIVILEGE_NOT_HELD）时明确说出跳过，不算通过的证据。
+#[test]
+fn a_file_symbolic_link_inside_a_root_is_refused_before_admission() {
+    let d = dir("guard-symlink");
+    let local = d.join("local");
+    let v3 = local.join("AyanamiTaskManager3");
+    std::fs::create_dir_all(v3.join("data")).unwrap();
+    std::fs::write(v3.join("data").join("marker"), b"real").unwrap();
+    let n = d.join("N");
+    std::fs::create_dir_all(n.join("data")).unwrap();
+    if let Err(e) = std::os::windows::fs::symlink_file(
+        v3.join("data").join("marker"),
+        n.join("data").join("atm.sqlite"),
+    ) {
+        const ERROR_PRIVILEGE_NOT_HELD: i32 = 1314;
+        assert_eq!(e.raw_os_error(), Some(ERROR_PRIVILEGE_NOT_HELD), "{e}");
+        eprintln!("SKIPPED: creating a file symbolic link needs Developer Mode or the privilege");
+        return;
+    }
+    let before = contents(&local);
+    let args = vec!["--n".into(), s(&n), "--legacy".into(), s(&d.join("L"))];
+    let (code, stderr) = run(&local, &args, &[]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        !n.join("runtime").exists(),
+        "the start was admitted: {stderr}"
+    );
+    assert_eq!(contents(&local), before, "a protected tree changed");
 }
 
 /// W4i peer r3 P1-01：`--txn-start` 拼进见证的文件名（`service-<txn>.json`），带 `..`、分隔符或盘符时，

@@ -18,7 +18,7 @@ pub struct Legacy {
     pub items: Vec<String>,
 }
 
-pub const LEGACY_PREFIX: &str = "legacy:";
+pub const LEGACY_PREFIX: &str = atm_install_state::LEGACY_PREFIX;
 
 pub fn is_electron_dir(dir: &Path) -> bool {
     dir.join("resources").join("app.asar").is_file()
