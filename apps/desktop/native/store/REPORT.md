@@ -637,8 +637,23 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - `restore::a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep`：评审建议纳入的 P2-W4A-02 组合（DELETE 报错、放回再遇占用，之后 sweep 落盘放回）。
   - `legacy::jsonfiles::tests::a_large_json_file_reports_its_read_and_parse`（65 MiB，读入与解析各推进，少一个都不到 2）、`each_history_entry_reports_its_work`（3000 条 runs、3000 条 requests 各至少 3000）。
 - **目标库连接的计量改为直接验**：本轮的逐条推进让大项目用例 IMPORT 那一格不靠目标计量也有 50 批（有目标计量 65 批），第二轮加的「IMPORT ≥ 28」门槛失去区分力，「目标库上的 SQL 不计量」在重跑里存活。照评审的建议改成直接验：打开目标库、装计量、注册函数收成 `open_target`，`legacy::tests::the_target_connection_reports_its_sql` 在它返回的连接上执行约 100 万行的 SQL，工作量要涨；不经它打开的同一个库执行同样的 SQL 不涨（阴性对照）。大项目用例撤掉那道随计量点漂移的门槛，只保留「至少 5 批」。
+- **`-WAL.tmp`**：重跑时一次复原套件里 `a_dropped_database_is_compared_by_content_not_storage` 得 UNKNOWN：快照列表里有一个 `projects/P7/PROJECT.SQLITE-WAL.tmp`，列出之后、`enumerate` stat 之前消失了。与之前见过的 `-SHM.tmp` 同源（大写的文件名说明是别的程序按路径生成的），也不是 SQLite 会读的 WAL。`is_wal_index` 与快照判断都把 `-wal.tmp` 当作同一类随建随删件：扫描认它、快照与摘要不收；附件里同样结尾的照收。业务文件在列出后消失照旧让快照失败（保守的一边）。
 - **没有单独验红的推进**：去重分组、sync published 的校验与 processed / published 导入、导入 runs / requests 这几处循环与已验红的 runs / requests 循环是同一写法，没有各自的用例与变异。
 - **变异**：`output/w4a-evidence/mutations-r3/`。`mut-w4a-r3-store.py` 验本轮修订；上一轮的五份脚本（锚点随修订更新：快照判断加了参数；「证明不了是项目库」改为已知 schema 的判定；「项目库的索引照收」改为「常规库的索引照收」）在新候选上重跑。结果见下节。
+
+### 第三轮的变异（候选 895ed55）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r3-w4a-gate-r2-store-mutation-evidence.json`（本轮新增，`mut-w4a-r3-store.py`） | 15 | 15 RED |
+| `r3-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
+| `r3-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
+| `r3-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r3-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r3-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r3-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+七份证据记录的源码 sha256 都与 895ed55 的对应文件一致，复原套件全绿。之前两遍的日志留在 `mutations-r3/first-pass/`（a6e177c：「目标库上的 SQL 不计量」存活）与 `second-pass/`（5bf47b4：一次复原套件遇 `-WAL.tmp` 得 UNKNOWN），对应的改动见上面两条。
 
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 

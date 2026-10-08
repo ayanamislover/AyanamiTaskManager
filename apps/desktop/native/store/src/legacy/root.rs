@@ -114,7 +114,7 @@ fn top_level_family(name: &str) -> Option<&'static str> {
 fn knowledge_residue(rel: &str) -> bool {
     let candidate = |n: &str| {
         let lower = n.to_ascii_lowercase();
-        let cut = ["-wal", "-shm", "-shm.tmp"]
+        let cut = ["-wal", "-shm", "-shm.tmp", "-wal.tmp"]
             .iter()
             .find(|s| lower.ends_with(*s))
             .map_or(0, |s| s.len());
@@ -134,15 +134,18 @@ fn is_db_file(name: &str, db: &str) -> bool {
     name == db || name == format!("{db}-wal") || is_wal_index(name, db)
 }
 
-/// 库 `db` 的 WAL 索引：`-shm`，以及别的程序在关库前后随建随删的 `-shm.tmp`（实测见过 `ATM.SQLITE-SHM.tmp`、
-/// `PROJECT.SQLITE-SHM.tmp`，大小写不定）。都不是业务内容：不进快照、不进摘要，出现了也不算未登记的条目。
-/// `name` 与 `db` 可以是同一目录下的相对路径。
+/// 库 `db` 的 WAL 索引 `-shm`，以及别的程序在关库前后随建随删的 `-shm.tmp`、`-wal.tmp`（实测见过 `ATM.SQLITE-SHM.tmp`、
+/// `PROJECT.SQLITE-SHM.tmp`、`PROJECT.SQLITE-WAL.tmp`，大小写不定；`-wal.tmp` 不是 SQLite 会读的 WAL）。
+/// 都不是业务内容：不进快照、不进摘要，出现了也不算未登记的条目。`name` 与 `db` 可以是同一目录下的相对路径。
 pub(crate) fn is_wal_index(name: &str, db: &str) -> bool {
     let (n, d) = (name.to_ascii_lowercase(), db.to_ascii_lowercase());
-    n == format!("{d}-shm") || n == format!("{d}-shm.tmp")
+    ["-shm", "-shm.tmp", "-wal.tmp"]
+        .iter()
+        .any(|s| n == format!("{d}{s}"))
 }
 
-/// `rel`（数据根里的相对路径，`/` 分隔）是不是扫描认得的某个库旁边的 WAL 索引（`-shm`、`-shm.tmp`，大小写不定）。
+/// `rel`（数据根里的相对路径，`/` 分隔）是不是扫描认得的某个库旁边的 WAL 索引或随建随删件
+/// （`-shm`、`-shm.tmp`、`-wal.tmp`，大小写不定，见 [`is_wal_index`]）。
 /// `listed` 是同一次枚举的全部文件，键是小写的相对路径：去掉后缀的那个库必须也在，并且文件头是 SQLite。
 ///
 /// 认得的库都在 `registry/`、`knowledge/`、`projects/` 下：三个常规库、知识库的恢复候选 `restore-<id>.sqlite`
@@ -163,9 +166,9 @@ pub(crate) fn is_known_wal_index(
         return false;
     }
     let lower = rel.to_ascii_lowercase();
-    let Some(base) = lower
-        .strip_suffix("-shm")
-        .or_else(|| lower.strip_suffix("-shm.tmp"))
+    let Some(base) = ["-shm", "-shm.tmp", "-wal.tmp"]
+        .iter()
+        .find_map(|s| lower.strip_suffix(s))
     else {
         return false;
     };

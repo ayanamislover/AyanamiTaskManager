@@ -8689,6 +8689,7 @@ mod w4_gate_r2 {
             put(&root.join(format!("{db}-wal")), b"wal");
             put(&root.join(format!("{db}-shm")), b"index");
             put(&root.join(format!("{db}-SHM.tmp")), b"index");
+            put(&root.join(format!("{db}-WAL.tmp")), b"transient");
         }
         put(
             &root.join(format!("knowledge/.restore-{id}/notes")),
@@ -8711,12 +8712,17 @@ mod w4_gate_r2 {
                 !has(&format!("{db}-SHM.tmp")),
                 "{db}-SHM.tmp was snapshotted"
             );
+            assert!(
+                !has(&format!("{db}-WAL.tmp")),
+                "{db}-WAL.tmp was snapshotted"
+            );
         }
         let attachment = &databases[5];
         for rel in [
             attachment.clone(),
             format!("{attachment}-shm"),
             format!("{attachment}-SHM.tmp"),
+            format!("{attachment}-WAL.tmp"),
         ] {
             assert!(has(&rel), "{rel} is a business file: {files:?}");
         }
