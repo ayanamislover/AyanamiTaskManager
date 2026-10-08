@@ -79,6 +79,7 @@ decide 循环（最多 8 圈）
 `output/w4-evidence/mutations/mut-w4i.py`（runtime、jobs、store、state、http 五组），证据 `output/w4-evidence/w4i-*-mutation-evidence.json`；
 第一轮评审的修订 `mut-w4i-r2.py`（runtime、state 两组），证据 `w4i-r2-*-mutation-evidence.json`。
 第二轮评审的修订 `mut-w4i-r3.py`（runtime），证据 `w4i-r3-runtime-mutation-evidence.json`。
+第三轮评审的修订 `mut-w4i-r4.py`（runtime、store、state 三组），证据 `w4i-r4-*-mutation-evidence.json`。
 
 ## W4i 第一轮评审（`output/peer-atm3-w4i-r1.md`）：CHANGES_REQUESTED
 
@@ -110,3 +111,17 @@ decide 循环（最多 8 圈）
 - 边界：检查之后别的进程再往根里塞的链接不在开发二进制的防线里；运行时自己新建的目录和文件都是普通的。
 - **用例**：`tests/guard.rs::links_inside_a_given_root_are_refused_before_any_write`：`N\runtime` 指向 3.x 根、N 深处的目录指向不受保护的地方、N 里的文件是 3.x 根里文件的硬链接、N 本身是 junction 而它的 runtime 指向 3.x 根、`L\data` 指向 2.x 根、安装根的 state 指向默认安装根，都以退出码 2 拒绝；每个用例的根与受保护的树逐字节不变，被指向的不受保护目录也还是空的。
 - **用例**：`tests/boot.rs::a_publish_that_fails_halfway_leaves_no_entry_behind`：写见证失败（安装根的 `state` 是文件）与 observe 在 `Descriptor` 时 panic 两种，`start` 返回或展开之后旧端口不答 `/health`、daemon.json 已撤、准入已放，下一个实例照常起来。
+
+## W4i 第三轮评审（`output/peer-atm3-w4i-r3.md`）：CHANGES_REQUESTED
+
+绑定 4636f76。无 P0。守卫在任何写入之前、遍历出错即拒绝、根是链接时从目标往下看，`Entries` 的丢弃撤下与 `withdraw` 不重复、在展开时先撤入口再放准入，都被确认。评审同样在中途被内容过滤中断，没有写完总结论。
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| R3-P1-01 | 路径片段仍能越出已检查的根，而且不需要链接：`--txn-start x/../../../../…` 让见证写进受保护根；`N\runtime\seal.json` 的 name 写成绝对路径，封存续做时 `join` 换掉基路径，`N\data` 被移出 N | 拼进路径的名字一律先过 `atm_install_state::is_path_name`：1–128 个 ASCII 字母、数字或 `-`，不是 Windows 保留设备名，所以 `join` 之后恰好是基目录下的一层。从磁盘读来的不合格就按损坏处理：`M` 的 generation（`M` 损坏，有发布物就隔离进 `N\quarantine\unknown-…`）、封存意图的 name（当作没有可续做的意图，按新的一次封存走）、setup 的 journal（id、`to`、`from`）与 `app.json`（`current`、`previous`，它们经 `app_dir_for` 拼进安装根）。从参数、调用方来的不合格就在动手之前拒绝：开发二进制的 `--txn-start`（退出 2）、`start` 的 handoff txn（准入之前失败）、`run` / `fresh_install` / `discard_attempt` 的 generation（`Refused`，`discard_attempt` 不会再拿它去 `remove_dir_all`）、`service_healthy` 的 txn（读见证之前） |
+
+- 其余拼路径的点都不取外来的名字：封存的新目录名由合格的 generation 与时间戳（只留字母、数字、`-`）组成；SNAPSHOT 的 `rel` 来自对 `L` 的现场枚举，`M.source_files` 只拿来比较、不拼路径；`staging`、`quarantine`、`superseded`、`health`、`runtime` 都是常量。
+- **用例**：
+  - `install-state`：`tests::path_names_are_one_plain_component`（`.`、`..`、分隔符、盘符、扩展前缀、空格、设备名、非 ASCII、超长都不算）；`tests::state_whose_names_are_not_plain_is_invalid`（journal 的 id / `to` / `from`、`app.json` 的 `current` / `previous` 带 `..`、盘符、分隔符时 `Invalid`，`legacy:1.4.0` 与 `3.0.0-beta.1+x` 照常）；`service::tests::a_txn_that_is_not_a_plain_name_is_refused_before_reading`（`x\..\service-T1` 指向一份内容自洽的见证，读之前就拒绝）。
+  - `store/tests/names.rs::a_generation_that_is_not_one_name_is_refused_before_any_write`：`run`、`fresh_install`、`discard_attempt` 拿 `..\..\victim` 等都 `Refused`，`N\staging\..\..\victim` 指着的目录原样不动，N 也没建。
+  - `runtime`：`tests/guard.rs::a_txn_that_is_not_one_name_is_refused_before_any_write`（评审的反例原样与另四种写法，退出 2，安装根空、N 与 L 没建、受保护的树逐字节不变）；`tests/boot.rs::a_txn_that_is_not_one_name_is_refused_before_admission`；`tests/boot.rs::names_persisted_in_n_never_lead_outside_it`（封存意图的 name 是 N 外的绝对路径、`M` 的 generation 是 `..\..\outside`：都隔离在 N 里，N 旁边什么也没多出来，之后照常起来）。

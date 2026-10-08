@@ -303,6 +303,10 @@ pub fn service_healthy(
     host: &crate::ProcessIdentity,
     deadline: Instant,
 ) -> Result<(), String> {
+    // 拼进见证文件名之前：`x\..\..\y` 会让它读到健康目录外面（W4i peer r3 P1-01）。
+    if !crate::is_path_name(txn) {
+        return Err("not a transaction id".into());
+    }
     let witness: Witness =
         crate::read_json_limited(&health_dir.join(format!("service-{txn}.json")), 64 * 1024)
             .map_err(|error| error.to_string())?
@@ -638,6 +642,27 @@ mod tests {
         assert_eq!(lease(&f.runtime), Some((f.me.pid, Layout::Single)));
         assert_eq!(lease_holder(&f.runtime), Some(f.me.pid));
         assert_eq!(port_owner(f.port), Some(f.me.pid));
+    }
+
+    /// W4i peer r3 P1-01：txn 拼进见证文件名之前必须是单独一层。`x\..\service-T1` 会读到另一个文件
+    /// （这里正好是一份内容自洽的见证），所以在读之前就拒绝。
+    #[test]
+    fn a_txn_that_is_not_a_plain_name_is_refused_before_reading() {
+        let f = Fixture::new("single-txn-name");
+        f.single();
+        let txn = r"x\..\service-T1";
+        let mut w = f.single_witness(&f.me);
+        w["txnId"] = json!(txn);
+        f.witness(w);
+        let result = service_healthy(
+            &f.health,
+            &f.runtime,
+            txn,
+            "9.0.0",
+            &f.me.identity(),
+            Instant::now() + Duration::from_secs(10),
+        );
+        assert_eq!(result, Err("not a transaction id".to_string()));
     }
 
     #[test]

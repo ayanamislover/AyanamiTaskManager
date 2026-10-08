@@ -415,3 +415,82 @@ fn a_publish_that_fails_halfway_leaves_no_entry_behind() {
         next.stop(&|_| {});
     }
 }
+
+/// W4i peer r3 P1-01：持久状态里拼进路径的名字不是单独一层时不跟随，写入、移动都留在 N 里。
+/// - 封存意图 `seal.json` 的 name 是 N 外面的绝对路径：当作没有可续做的意图，按新的一次隔离走；
+/// - `M` 的 generation 是 `..\..\outside`：`M` 按损坏处理，发布物隔离进 `N\quarantine\unknown-…`，
+///   不会拿它拼出 `N\quarantine\..\..\outside-…`。
+///
+/// 两种之后都照常起来（S1 重新建库），N 外面什么也没有多出来。
+#[test]
+fn names_persisted_in_n_never_lead_outside_it() {
+    for case in ["seal-name", "generation"] {
+        let d = dir(&format!("boot-names-{case}"));
+        let (n, l) = (d.join("N"), d.join("L-missing"));
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // 先正常起一次，得到一份真实的发布物与 M。
+        serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+        let layout = Layout::new(&n);
+        std::fs::write(layout.data().join("marker"), b"published").unwrap();
+        match case {
+            "seal-name" => {
+                let intent = serde_json::json!({"kind": "quarantine", "name": outside.display().to_string()});
+                std::fs::write(layout.runtime().join("seal.json"), intent.to_string()).unwrap();
+            }
+            _ => {
+                let mut m: Value =
+                    serde_json::from_slice(&std::fs::read(layout.manifest()).unwrap()).unwrap();
+                m["generation"] = Value::from(r"..\..\outside");
+                std::fs::write(layout.manifest(), m.to_string()).unwrap();
+            }
+        }
+        let before: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let s = serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap());
+        s.stop(&|_| {});
+        let after: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(after, before, "{case}: something was written next to N");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "{case}: something was moved outside N"
+        );
+        let quarantined: Vec<_> = std::fs::read_dir(n.join("quarantine"))
+            .unwrap()
+            .map(|e| e.unwrap().path().join("data").join("marker"))
+            .filter(|p| p.is_file())
+            .collect();
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "{case}: the publication was not quarantined inside N"
+        );
+    }
+}
+
+/// W4i peer r3 P1-01：进程内的 `start` 在任何写入之前核对 txn：不是单独一层就失败，N 都不建。
+#[test]
+fn a_txn_that_is_not_one_name_is_refused_before_admission() {
+    let d = dir("boot-bad-txn");
+    let (n, l) = (d.join("N"), d.join("L-missing"));
+    for txn in [r"x\..\..\outside", "..", r"C:\x", "CON"] {
+        let mut o = options(&n, &l, &Events::default());
+        o.handoff = Some(atm_runtime::Handoff {
+            txn: txn.into(),
+            install_root: d.join("install"),
+        });
+        assert!(
+            matches!(
+                atm_runtime::start(&o),
+                Err(atm_runtime::BootError::Failed(_))
+            ),
+            "{txn}"
+        );
+        assert!(!n.exists() && !d.join("install").exists(), "{txn}");
+    }
+}

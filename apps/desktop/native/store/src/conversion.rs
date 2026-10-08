@@ -15,6 +15,7 @@
 use crate::jsjson::{self, Value};
 use crate::legacy::{self, ConvertError, ConvertOptions, LegacySources, Report};
 use crate::pin;
+use atm_install_state::is_path_name;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -377,7 +378,8 @@ impl Manifest {
             source_files,
             business_digest,
             accepted_unconvertible,
-            generation: text(&v, "generation")?,
+            // generation 拼进 `N\staging\<g>` 与封存目录名：不是单独一层就按损坏处理（W4i peer r3 P1-01）。
+            generation: text(&v, "generation").filter(|g| is_path_name(g))?,
             phase,
             verify_digest: opt_text(&v, "verify_digest")?,
             publication_digest,
@@ -755,6 +757,15 @@ impl Seal {
     }
 }
 
+/// 要拼进路径的 generation 在动手之前核对：只能是单独一层（[`is_path_name`]）。
+fn path_name(name: &str) -> Result<&str> {
+    if is_path_name(name) {
+        Ok(name)
+    } else {
+        Err(Error::Refused(format!("{name:?} is not a plain name")))
+    }
+}
+
 fn stamp(at: &str) -> String {
     at.chars()
         .map(|c| {
@@ -802,7 +813,8 @@ pub fn seal_with(
             "quarantine" => Seal::Quarantine,
             _ => return None,
         };
-        Some((kind, text(&v, "name")?))
+        // name 拼在 `N\<kind>\` 下：绝对路径或 `..` 会让移动离开 N，当作没有可续做的意图（W4i peer r3 P1-01）。
+        Some((kind, text(&v, "name").filter(|n| is_path_name(n))?))
     });
     let (kind, target) = match resumed {
         Some((kind, name)) => (kind, layout.root.join(kind.dir()).join(name)),
@@ -1081,7 +1093,7 @@ pub fn run(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
 }
 
 fn run_metered(layout: &Layout, opts: RunOptions<'_>) -> Result<Manifest> {
-    let g = opts.generation;
+    let g = path_name(opts.generation)?;
     clear_startup_state(layout)?;
     let staging = layout.staging(g);
     let _ = std::fs::remove_dir_all(&staging);
@@ -1262,6 +1274,7 @@ pub fn finish_publishing(layout: &Layout, at: &str) -> Result<Manifest> {
 /// S1：`L` 不存在、也没有 `M`。建一个空库，走同样的 PUBLISHING → PUBLISHED，
 /// `M{phase: PUBLISHED, source_root: null}`、`A = v3 by publish`。中断后按 S3 / S4 续做，与转换相同。
 pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Manifest> {
+    let generation = path_name(generation)?;
     clear_startup_state(layout)?;
     let staging = layout.staging(generation);
     let _ = std::fs::remove_dir_all(&staging);
@@ -1301,7 +1314,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
 
 /// S3：丢弃上一次尝试的 staging 与 `M`（换新 generation 重来之前）。
 pub fn discard_attempt(layout: &Layout, generation: &str) -> Result<()> {
-    let _ = std::fs::remove_dir_all(layout.staging(generation));
+    let _ = std::fs::remove_dir_all(layout.staging(path_name(generation)?));
     if layout.manifest().exists() {
         std::fs::remove_file(layout.manifest())?;
     }

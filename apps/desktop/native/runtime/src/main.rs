@@ -63,6 +63,13 @@ fn main() {
     {
         usage(&why);
     }
+    // txn 拼进见证的文件名：只能是单独一层（W4i peer r3 P1-01）。
+    if txn
+        .as_deref()
+        .is_some_and(|t| !atm_install_state::is_path_name(t))
+    {
+        usage("refusing --txn-start: it is not a transaction id");
+    }
     let handoff = match (txn, install_root) {
         (Some(txn), Some(install_root)) => Some(Handoff { txn, install_root }),
         (None, None) => None,

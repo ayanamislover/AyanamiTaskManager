@@ -213,6 +213,12 @@ fn now_iso() -> String {
 
 /// 启动到「入口开着」或「数据源冲突」为止。判定最多绕 8 圈（封存 → 重转 → 再判定），绕不完就是有缺陷，报失败。
 pub fn start(o: &Options) -> Result<Started, BootError> {
+    // txn 拼进见证的文件名（`service-<txn>.json`）：在任何写入之前核对它是单独一层（W4i peer r3 P1-01）。
+    if let Some(h) = &o.handoff
+        && !atm_install_state::is_path_name(&h.txn)
+    {
+        return Err(failed(format!("{:?} is not a transaction id", h.txn)));
+    }
     let layout = Layout::new(&o.n);
     let admission = cv::admit(&layout, || (o.quiesce)()).map_err(|e| match e {
         AdmitError::AlreadyRunning => BootError::AlreadyRunning,

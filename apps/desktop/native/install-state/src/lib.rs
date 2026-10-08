@@ -263,12 +263,66 @@ pub fn data_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(local).join("AyanamiTaskManager"))
 }
 
+/// 会拼进路径的名字（txn、generation、封存目录名）：1–128 个 ASCII 字母、数字或 `-`，也不是 Windows 的保留设备名。
+/// 没有分隔符、盘符、`.` 与 `..`，所以 `join` 之后一定恰好是基目录下的一层。从磁盘、参数读来的名字在拼路径之前都要过它：
+/// 持久状态里写着 `..\..\x` 或绝对路径时，`join` 会让写入、移动、删除离开它的根（W4i peer r3 P1-01）。
+pub fn is_path_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    let device = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (upper.len() == 4
+            && (upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.as_bytes()[3].is_ascii_digit());
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !device
+}
+
+/// 版本号（`app-<version>` 的后半，[`app_dir_version`] 的同一套字符）：拼上前缀之后是单独一层。
+fn is_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// 读出来的名字有一个不能安全拼进路径，整份状态就按损坏处理。
+fn plain_names(path: &Path, ok: bool) -> Result<(), StateError> {
+    if ok {
+        Ok(())
+    } else {
+        Err(StateError::Invalid(
+            path.to_path_buf(),
+            "a transaction id or version is not a plain name".into(),
+        ))
+    }
+}
+
 pub fn read_pointer(install_root: &Path) -> Result<Option<AppPointer>, StateError> {
-    read_json(&install_root.join(APP_POINTER))
+    let path = install_root.join(APP_POINTER);
+    let pointer: Option<AppPointer> = read_json(&path)?;
+    if let Some(p) = &pointer {
+        plain_names(
+            &path,
+            is_version(&p.current) && p.previous.as_deref().is_none_or(is_version),
+        )?;
+    }
+    Ok(pointer)
 }
 
 pub fn read_journal(install_root: &Path) -> Result<Option<Transaction>, StateError> {
-    read_json(&install_root.join(STATE_DIR).join(JOURNAL))
+    let path = install_root.join(STATE_DIR).join(JOURNAL);
+    let txn: Option<Transaction> = read_json(&path)?;
+    if let Some(t) = &txn {
+        // `from` 是上一个版本，迁移时是 `legacy:<1.x>`（setup 的 `LEGACY_PREFIX`）。
+        let from = |f: &str| is_version(f.strip_prefix("legacy:").unwrap_or(f));
+        plain_names(
+            &path,
+            is_path_name(&t.id) && is_version(&t.to) && t.from.as_deref().is_none_or(from),
+        )?;
+    }
+    Ok(txn)
 }
 
 /// `app-2.0.0` → `2.0.0`. The directory name is the version identity of a layout.
@@ -653,5 +707,102 @@ mod tests {
             read_pointer(&root.0),
             Err(StateError::TooLarge(..))
         ));
+    }
+
+    /// W4i peer r3 P1-01：拼进路径的名字只能是单独一层。
+    #[test]
+    fn path_names_are_one_plain_component() {
+        for ok in [
+            "T1",
+            "t18f3a2b4c5d6e7f8",
+            "01J000000000000000000GEN01",
+            "GEN-FROM-X",
+            "COM10",
+            "CONX",
+        ] {
+            assert!(is_path_name(ok), "{ok}");
+        }
+        let long = "a".repeat(129);
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a.b",
+            "a/b",
+            r"a\b",
+            r"..\..\x",
+            r"C:\x",
+            "C:x",
+            r"\\?\C:\x",
+            "a b",
+            "CON",
+            "nul",
+            "Com1",
+            "LPT9",
+            "ü",
+            long.as_str(),
+        ] {
+            assert!(!is_path_name(bad), "{bad:?}");
+        }
+    }
+
+    /// W4i peer r3 P1-01：journal 与 app.json 里拼进路径的 id、版本号不是单独一层时，整份状态按损坏处理，
+    /// 不会让 `app_dir_for`、`service-<txn>.json` 指到安装根外面去。
+    #[test]
+    fn state_whose_names_are_not_plain_is_invalid() {
+        let root = scratch("plain-names");
+        fs::create_dir_all(root.0.join(STATE_DIR)).unwrap();
+        let journal = |id: &str, from: Option<&str>, to: &str| {
+            let mut t = Transaction::new(
+                id.into(),
+                from.map(str::to_string),
+                to.into(),
+                TxnKind::Install,
+            );
+            t.state = TxnState::Start;
+            fs::write(
+                root.0.join(STATE_DIR).join(JOURNAL),
+                serde_json::to_vec(&t).unwrap(),
+            )
+            .unwrap();
+            read_journal(&root.0)
+        };
+        assert!(
+            journal("T1", Some("legacy:1.4.0"), "3.0.0")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            journal("T1", Some("2.0.0"), "3.0.0-beta.1+x")
+                .unwrap()
+                .is_some()
+        );
+        for (id, from, to) in [
+            (r"..\..\x", None, "3.0.0"),
+            ("T1", None, r"..\..\x"),
+            ("T1", None, r"C:\x"),
+            ("T1", Some(r"legacy:..\x"), "3.0.0"),
+            ("T1", Some("a/b"), "3.0.0"),
+        ] {
+            assert!(
+                matches!(journal(id, from, to), Err(StateError::Invalid(..))),
+                "{id} {from:?} {to}"
+            );
+        }
+        let pointer = |current: &str, previous: Option<&str>| {
+            let p = AppPointer {
+                current: current.into(),
+                previous: previous.map(str::to_string),
+            };
+            fs::write(root.0.join(APP_POINTER), serde_json::to_vec(&p).unwrap()).unwrap();
+            read_pointer(&root.0)
+        };
+        assert!(pointer("3.0.0", Some("2.0.0")).unwrap().is_some());
+        for (current, previous) in [(r"..\x", None), ("3.0.0", Some(r"C:\x"))] {
+            assert!(
+                matches!(pointer(current, previous), Err(StateError::Invalid(..))),
+                "{current} {previous:?}"
+            );
+        }
     }
 }

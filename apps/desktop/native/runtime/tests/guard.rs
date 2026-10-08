@@ -308,3 +308,48 @@ fn links_inside_a_given_root_are_refused_before_any_write() {
     assert_eq!(contents(&local), before, "a protected tree changed");
     assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
 }
+
+/// W4i peer r3 P1-01：`--txn-start` 拼进见证的文件名（`service-<txn>.json`），带 `..`、分隔符或盘符时，
+/// 三个根都不重叠、也没有链接，见证照样会写到安装根外面（例如合成的 3.x 根里）。只能是单独一层，否则退出 2。
+#[test]
+fn a_txn_that_is_not_one_name_is_refused_before_any_write() {
+    let d = dir("guard-txn");
+    let local = d.join("local");
+    let v3 = local.join("AyanamiTaskManager3");
+    std::fs::create_dir_all(v3.join("data")).unwrap();
+    std::fs::write(v3.join("data").join("marker"), b"real").unwrap();
+    let before = contents(&local);
+    let (n, l, install) = (d.join("N"), d.join("L"), d.join("install"));
+    std::fs::create_dir_all(&install).unwrap();
+    let absolute = s(&v3.join("witness"));
+    for txn in [
+        "x/../../../../local/AyanamiTaskManager3/witness",
+        r"x\..\..\..\..\local\AyanamiTaskManager3\witness",
+        "..",
+        absolute.as_str(),
+        "CON",
+    ] {
+        let args = vec![
+            "--n".into(),
+            s(&n),
+            "--legacy".into(),
+            s(&l),
+            "--txn-start".into(),
+            txn.to_string(),
+            "--install-root".into(),
+            s(&install),
+        ];
+        let (code, stderr) = run(&local, &args, &[]);
+        assert_eq!(code, Some(2), "{txn}: {stderr}");
+        assert!(stderr.contains("refusing"), "{txn}: {stderr}");
+        assert!(
+            !n.exists() && !l.exists(),
+            "{txn}: a refused start created a root"
+        );
+        assert!(
+            std::fs::read_dir(&install).unwrap().next().is_none(),
+            "{txn}"
+        );
+    }
+    assert_eq!(contents(&local), before, "a protected tree changed");
+}
