@@ -5737,10 +5737,11 @@ mod w3f {
             m.source_files.len()
         )));
         assert!(seen.contains(&("IMPORT".into(), 3, 3)) && seen.contains(&("VERIFY".into(), 3, 3)));
-        // 报到 PUBLISHED 了，没有见证仍然只是在等；10 min 不动就判卡住。
+        // 报到 PUBLISHED 了，没有见证仍然只是在等；最后一次推进之后 10 min 不动就判卡住。
         let last = handover::read_progress(&n.root).unwrap();
         assert_eq!(last.phase, "PUBLISHED");
-        let after = t0 + Duration::from_secs(60) * (seen.len() as u32 + 11);
+        let after =
+            t0 + Duration::from_secs(10) * (seen.len() as u32) + Duration::from_secs(11 * 60);
         assert!(matches!(
             watch.borrow_mut().observe(after, false, true, Some(&last)),
             WaitVerdict::Stuck(_)
@@ -6563,7 +6564,7 @@ mod fault_matrix {
     }
 
     /// W3 peer r1 P2-03：首条进度在枚举之前。根里有未登记的条目，枚举（正式的扫描）会拒绝；拒绝之前
-    /// setup 已经收到了 SNAPSHOT 0/0。
+    /// setup 已经收到了 SNAPSHOT 0/0，而且在工作量为 0 时就收到了（枚举本身推进的工作量在它之后，W4 关口 P2-W4A-01）。
     #[test]
     fn the_first_progress_comes_before_enumeration() {
         let (f, root) = json_fixture("w4a-first-progress");
@@ -6579,15 +6580,22 @@ mod fault_matrix {
             .map(|p| (p.phase.as_str(), p.progress))
             .collect();
         assert_eq!(
-            got,
-            [(
+            got[0],
+            (
                 "SNAPSHOT",
                 Counter {
                     done: 0,
                     total: 0,
                     work: 0
                 }
-            )]
+            )
+        );
+        // 之后到拒绝为止都是枚举：仍是 SNAPSHOT 0/0，只有工作量在涨。
+        assert!(
+            got.windows(2).all(|w| w[1].0 == "SNAPSHOT"
+                && (w[1].1.done, w[1].1.total) == (0, 0)
+                && w[1].1.work > w[0].1.work),
+            "{got:?}"
         );
     }
 

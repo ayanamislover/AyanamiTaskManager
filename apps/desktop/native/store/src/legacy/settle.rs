@@ -703,6 +703,21 @@ mod tests {
         drop(c);
         assert_ne!(before, tree_digest(&tree, &work).unwrap());
 
+        // 附件里的库即使像项目库（有 project_meta，例如用户存的一份项目库副本）也按字节：
+        // 逻辑摘要只给目录下那一个 project.sqlite。
+        let copy = tree.join("artifacts/copy-of-project.sqlite");
+        let k = Connection::open(&copy).unwrap();
+        k.execute_batch(
+            "CREATE TABLE project_meta(singleton INTEGER); INSERT INTO project_meta VALUES (1);
+             CREATE TABLE notes(body TEXT); INSERT INTO notes(rowid, body) VALUES (5, 'a');",
+        )
+        .unwrap();
+        let before = tree_digest(&tree, &work).unwrap();
+        k.execute_batch("UPDATE notes SET rowid = 6 WHERE rowid = 5;")
+            .unwrap();
+        drop(k);
+        assert_ne!(before, tree_digest(&tree, &work).unwrap());
+
         // 同样的库放在项目库的位置、但没有 project_meta：证明不了是项目库，也按字节。
         let fake = tree.join("project.sqlite");
         std::fs::copy(&db, &fake).unwrap();

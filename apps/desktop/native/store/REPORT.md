@@ -577,6 +577,30 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - `a_dropped_database_is_compared_by_content_not_storage` 加一步：舍弃项目的目录里出现 `PROJECT.SQLITE-SHM.tmp`，比较不变。
 - **变异**：`output/w3-evidence/p2gate-mutation-evidence.json` 的「the WAL index is snapshotted」。
 
+## W4 关口第一轮评审（`output/peer-atm3-w4a-r1.md`）：CHANGES_REQUESTED
+
+绑定 e52d64c。无 P0。P2-01、P2-05、P2-R5-01 关闭；P2-07 方法成立。两条 P1、三条 P2 残留，修订在 w4a 92b24a1：
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| P1-W4A-01 | 快照按后缀排除 `-shm` / `-shm.tmp`，把同样结尾的附件也漏掉了：照样 PUBLISHED，`local_path` 指向不存在的文件，附件改了也比较不出来 | 只排除三个库旁边的 WAL 索引（`root::is_known_wal_index`：`registry/registry.sqlite`、`knowledge/knowledge.sqlite`、`projects/<pid>/project.sqlite`）；附件、日志即使同样结尾也进快照 |
+| P1-W4A-02 | 舍弃项目里任何 SQLite 文件都按逻辑内容取摘要，不含 rowid：用户自己的 SQLite 附件改了 rowid（业务关联随之断开），比较仍判不变 | 只有项目目录下的 `project.sqlite`、并且有 `project_meta` 表，才按逻辑内容；其余 SQLite 文件（附件里的库与它们的 `-wal`、`-shm`）一律按字节；打得开但证明不了是项目库的也按字节 |
+| P2-W4A-01 | 还有不报进度的耗时路径：数据根枚举、舍弃项目库的复制与逻辑扫描、VERIFY 与注册库的连接、发布前的 checkpoint、逐文件刷盘 | `root::walk` 每个条目推进一次；舍弃库的复制改走 `progress::copy_path`；上述连接都装 `progress::watch`；`publication_digest` 每个文件推进一次；刷盘改用 `durable::sync_tree_each`，每刷完一个文件推进一次 |
+| P2-W4A-02 | backup 的撤回、放回与清理时的放回还是 `fs::rename`，绕过共用的持久化契约 | 新增 `durable::rename_once`（WRITE_THROUGH、经记录与注入，但遇占用不等、立即失败），三处都走它；撤回遇占用照旧立即 `KEPT(FILES_IN_USE)` |
+| P2-W4A-03 | 短暂占用用例的辅助线程等不到报告时照样放开文件、返回，用例可能在前提没成立时变绿 | `hold_until` 返回有没有等到信号，用例断言它；另加一条不必等 120 s 的受控超时用例 |
+
+- **用例**：
+  - `w4_gate_r1::an_attachment_named_like_a_wal_index_is_still_an_attachment`：附件 `customer-shm.tmp`、`notes-SHM` 进快照、被复制，改了比较判变了；库旁边的 `project.sqlite-shm`、`REGISTRY.SQLITE-SHM.tmp` 照旧不进快照。
+  - `w4_gate_r1::a_dropped_projects_sqlite_attachment_is_compared_by_bytes`：评审的正式链路反例。
+  - `legacy::settle::tests::a_sqlite_attachment_is_bound_to_its_bytes`：附件库与「冒名」的项目库（没有 `project_meta`）按字节；真正的项目库 VACUUM、重排 rowid 不误报。
+  - `legacy::settle::tests::the_logical_scan_reports_its_work`、`the_enumeration_reports_its_work`：30 万行的逻辑扫描、100 个文件的枚举都推进工作量。
+  - `restore::withdrawal_moves_go_through_the_shared_contract`：撤回一次落盘移动后才删登记行；注入占用立即 `FILES_IN_USE`；DELETE 没删成（触发器）时落盘地放回；清理时的放回同样落盘。
+  - `durable::once_tests::a_single_attempt_move_never_waits`：遇占用只试一次、不睡。
+  - `w3_peer_r2::a_hold_that_never_sees_its_signal_says_so`。
+- **setup 计时用例**：`health_is_bounded_by_one_deadline_not_per_read` 在负载下两次越过 1 s / 700 ms 的余量（评审如实记录）。改成拖延总时长 6 s 以上（20 段）、上限是期限加 1.5 s：「每次读各自计时」的错误做法仍远超上限，区分力不变。
+- **变异**：`output/w4a-evidence/mutations-r2/`，绑定 92b24a1。两份新脚本验本轮修订；上一轮的四份脚本（锚点随修订更新）在新候选上重跑。结果见下节。
+- **评审执行**：setup 的 `registry::tests::values_round_trip_and_restore_is_exact` 会写真实的 HKCU 测试键；委托允许的五包测试里要显式跳过它（第一轮评审意外触发过一次，环境拒绝）。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
