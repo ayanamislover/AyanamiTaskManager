@@ -126,29 +126,38 @@ pub fn refuse_links(given: &[(&str, &Path)]) -> Result<(), String> {
         };
         let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
-            let entries = std::fs::read_dir(&dir)
-                .map_err(|e| format!("cannot inspect {}: {e}", dir.display()))?;
+            let Some(entries) = present(std::fs::read_dir(&dir), &dir)? else {
+                continue;
+            };
             for entry in entries {
                 let path = entry
                     .map_err(|e| format!("cannot inspect {}: {e}", dir.display()))?
                     .path();
-                let meta = std::fs::symlink_metadata(&path)
-                    .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+                let Some(meta) = present(std::fs::symlink_metadata(&path), &path)? else {
+                    continue;
+                };
                 if is_reparse_point(&meta) {
                     return refuse(&path, "is a link");
                 }
                 if meta.is_dir() {
                     stack.push(path);
-                } else if names(&path)
-                    .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?
-                    > 1
-                {
+                } else if present(names(&path), &path)?.is_some_and(|n| n > 1) {
                     return refuse(&path, "has another name (a hard link)");
                 }
             }
         }
     }
     Ok(())
+}
+
+/// 列出之后、检查之前就不见了的条目（别的进程正在根里原子写入：临时文件刚被改名）跳过：它已经不在，
+/// 写入不会经过它。别的读不出来的错误照旧拒绝。setup 在拉起本进程的同时就往安装根里写记账，这个窗口是常态。
+fn present<T>(r: std::io::Result<T>, path: &Path) -> Result<Option<T>, String> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("cannot inspect {}: {e}", path.display())),
+    }
 }
 
 #[cfg(windows)]
@@ -201,6 +210,58 @@ mod tests {
         assert!(overlaps(&p(r"C:\A"), &p(r"C:\A\B")));
         assert!(!overlaps(&p(r"C:\A\B"), &p(r"C:\A\BC")));
         assert!(!overlaps(&p(r"C:\A\B"), &p(r"C:\A\C")));
+    }
+
+    /// 检查时正好被改名走的条目跳过，别的读不出来的错误拒绝：setup 与本进程同时在安装根里写。
+    #[test]
+    fn an_entry_that_vanished_is_skipped_but_other_errors_refuse() {
+        let p = Path::new("x");
+        let gone = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(present::<u32>(Err(gone), p), Ok(None));
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(present::<u32>(Err(denied), p).is_err());
+        assert_eq!(present(Ok(3u32), p), Ok(Some(3)));
+    }
+
+    /// 一个线程在根里不停地原子写入（写临时文件再改名、再删），守卫反复检查：每一次都通过，
+    /// 不会因为列出之后被改名走的临时文件把正常的启动拒掉。
+    #[test]
+    fn concurrent_atomic_writes_in_a_root_do_not_refuse_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = std::path::absolute(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target")),
+        )
+        .unwrap()
+        .join("runtime-unit")
+        .join("guard-churn");
+        let _ = std::fs::remove_dir_all(&root);
+        let txn = root.join("state").join("txn").join("T1");
+        std::fs::create_dir_all(&txn).unwrap();
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let mut i = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let tmp = txn.join(format!("ledger.json.{i}.tmp"));
+                    std::fs::write(&tmp, b"{}").unwrap();
+                    std::fs::rename(&tmp, txn.join("ledger.json")).unwrap();
+                    i += 1;
+                }
+            });
+            let started = std::time::Instant::now();
+            let mut checks = 0;
+            while started.elapsed() < std::time::Duration::from_secs(3) {
+                let r = refuse_links(&[("--install-root", &root)]);
+                if r.is_err() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                assert_eq!(r, Ok(()), "after {checks} checks");
+                checks += 1;
+            }
+            stop.store(true, Ordering::Relaxed);
+        });
     }
 
     #[test]

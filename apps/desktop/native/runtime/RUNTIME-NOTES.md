@@ -119,9 +119,11 @@ decide 循环（最多 8 圈）
 | 编号 | 问题 | 修订 |
 | ---- | ---- | ---- |
 | R3-P1-01 | 路径片段仍能越出已检查的根，而且不需要链接：`--txn-start x/../../../../…` 让见证写进受保护根；`N\runtime\seal.json` 的 name 写成绝对路径，封存续做时 `join` 换掉基路径，`N\data` 被移出 N | 拼进路径的名字一律先过 `atm_install_state::is_path_name`：1–128 个 ASCII 字母、数字或 `-`，不是 Windows 保留设备名，所以 `join` 之后恰好是基目录下的一层。从磁盘读来的不合格就按损坏处理：`M` 的 generation（`M` 损坏，有发布物就隔离进 `N\quarantine\unknown-…`）、封存意图的 name（当作没有可续做的意图，按新的一次封存走）、setup 的 journal（id、`to`、`from`）与 `app.json`（`current`、`previous`，它们经 `app_dir_for` 拼进安装根）。从参数、调用方来的不合格就在动手之前拒绝：开发二进制的 `--txn-start`（退出 2）、`start` 的 handoff txn（准入之前失败）、`run` / `fresh_install` / `discard_attempt` 的 generation（`Refused`，`discard_attempt` 不会再拿它去 `remove_dir_all`）、`service_healthy` 的 txn（读见证之前） |
+| 自查 | 第二轮修订的链接守卫（93fcfb3）有竞争：setup 拉起本进程的同时就往安装根里原子写记账，列出之后被改名走的临时文件让 `symlink_metadata` 报 NotFound，守卫按「无法检查」拒绝了正常的启动（变异复原套件里 `handoff.rs` 的一次 `START_HOST_EXITED` 由此而来） | 列出之后、检查之前就不见的条目跳过（它已经不在，写入不会经过它），别的读不出来的错误照旧拒绝 |
 
 - 其余拼路径的点都不取外来的名字：封存的新目录名由合格的 generation 与时间戳（只留字母、数字、`-`）组成；SNAPSHOT 的 `rel` 来自对 `L` 的现场枚举，`M.source_files` 只拿来比较、不拼路径；`staging`、`quarantine`、`superseded`、`health`、`runtime` 都是常量。
 - **用例**：
   - `install-state`：`tests::path_names_are_one_plain_component`（`.`、`..`、分隔符、盘符、扩展前缀、空格、设备名、非 ASCII、超长都不算）；`tests::state_whose_names_are_not_plain_is_invalid`（journal 的 id / `to` / `from`、`app.json` 的 `current` / `previous` 带 `..`、盘符、分隔符时 `Invalid`，`legacy:1.4.0` 与 `3.0.0-beta.1+x` 照常）；`service::tests::a_txn_that_is_not_a_plain_name_is_refused_before_reading`（`x\..\service-T1` 指向一份内容自洽的见证，读之前就拒绝）。
   - `store/tests/names.rs::a_generation_that_is_not_one_name_is_refused_before_any_write`：`run`、`fresh_install`、`discard_attempt` 拿 `..\..\victim` 等都 `Refused`，`N\staging\..\..\victim` 指着的目录原样不动，N 也没建。
+  - `guard` 的单元用例 `an_entry_that_vanished_is_skipped_but_other_errors_refuse`、`concurrent_atomic_writes_in_a_root_do_not_refuse_it`（一个线程在根里不停写临时文件再改名，守卫 3 s 内反复检查都通过）。
   - `runtime`：`tests/guard.rs::a_txn_that_is_not_one_name_is_refused_before_any_write`（评审的反例原样与另四种写法，退出 2，安装根空、N 与 L 没建、受保护的树逐字节不变）；`tests/boot.rs::a_txn_that_is_not_one_name_is_refused_before_admission`；`tests/boot.rs::names_persisted_in_n_never_lead_outside_it`（封存意图的 name 是 N 外的绝对路径、`M` 的 generation 是 `..\..\outside`：都隔离在 N 里，N 旁边什么也没多出来，之后照常起来）。
