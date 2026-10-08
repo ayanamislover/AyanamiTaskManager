@@ -20,7 +20,7 @@ use atm_install_state::Outcome;
 
 const INSTALLER_WAIT: Duration = Duration::from_secs(60);
 const RECOVERY_WAIT: Duration = Duration::from_secs(300);
-const LEGACY_PREFIX: &str = "legacy:";
+use atm_install_state::LEGACY_PREFIX;
 
 const GUI_ARGS: &[&str] = &[
     "--background",
@@ -86,6 +86,30 @@ fn fail(headless: bool, text: &str, code: i32) -> i32 {
         message(text);
     }
     code
+}
+
+/// `app.json` 指着什么。
+#[derive(Debug, PartialEq, Eq)]
+enum Pointed {
+    /// 新式宿主 `app-<current>\AyanamiTaskManager.exe`（文件在不在由调用方看）。
+    Host(PathBuf),
+    /// `legacy:<1.x>`：装着的是 Electron 1.x，没有新式宿主可以启动。
+    Legacy,
+    /// 没有 `app.json`，或读不出来。
+    Missing,
+}
+
+/// 读 `app.json` 并把 `legacy:` 分流出去，再拼宿主路径。首次读取和 `--recover` 之后的再读都只走这里：
+/// 恢复期间指针可能变成 `legacy:`，直接拼会得到 `app-legacy:1.4.0`（冒号在 Windows 路径里是备用数据流）
+/// （W4i peer r5 P2-01）。
+fn pointed(root: &Path) -> Pointed {
+    match atm_install_state::read_pointer(root) {
+        Ok(Some(pointer)) if pointer.current.starts_with(LEGACY_PREFIX) => Pointed::Legacy,
+        Ok(Some(pointer)) => Pointed::Host(
+            atm_install_state::app_dir_for(root, &pointer.current).join("AyanamiTaskManager.exe"),
+        ),
+        _ => Pointed::Missing,
+    }
 }
 
 fn setup_candidates(root: &Path) -> Vec<PathBuf> {
@@ -214,34 +238,32 @@ fn real_main() -> i32 {
     if let Err(code) = barrier(&root, headless) {
         return code;
     }
-    let pointer = match atm_install_state::read_pointer(&root) {
-        Ok(Some(pointer)) if !pointer.current.starts_with(LEGACY_PREFIX) => pointer,
-        _ => {
-            return fail(
-                headless,
-                "没有找到已安装的版本，请运行开始菜单里的「ATM 修复」。",
-                3,
-            );
-        }
+    let Pointed::Host(mut host) = pointed(&root) else {
+        return fail(
+            headless,
+            "没有找到已安装的版本，请运行开始菜单里的「ATM 修复」。",
+            3,
+        );
     };
-    let mut host =
-        atm_install_state::app_dir_for(&root, &pointer.current).join("AyanamiTaskManager.exe");
     if !host.is_file() {
         run_setup(&root, &["--recover", "--quiet"], true);
-        let pointer = atm_install_state::read_pointer(&root).ok().flatten();
-        host = pointer
-            .map(|pointer| {
-                atm_install_state::app_dir_for(&root, &pointer.current)
-                    .join("AyanamiTaskManager.exe")
-            })
-            .unwrap_or_default();
-        if !host.is_file() {
-            return fail(
-                headless,
-                "当前版本的文件不完整，请运行开始菜单里的「ATM 修复」。",
-                3,
-            );
-        }
+        host = match pointed(&root) {
+            Pointed::Host(host) if host.is_file() => host,
+            Pointed::Legacy => {
+                return fail(
+                    headless,
+                    "恢复把 ATM 装回了旧版（1.x），请从旧版的开始菜单项启动。",
+                    3,
+                );
+            }
+            _ => {
+                return fail(
+                    headless,
+                    "当前版本的文件不完整，请运行开始菜单里的「ATM 修复」。",
+                    3,
+                );
+            }
+        };
     }
     let mut command = Command::new(&host);
     command.args(&args);
@@ -274,6 +296,41 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    /// W4i peer r5 P2-01：`app.json` 的 `legacy:` 指针不会被拼成宿主路径；普通版本指向 `app-<v>` 下的宿主。
+    #[test]
+    fn a_legacy_pointer_never_becomes_a_host_path() {
+        let root = std::path::absolute(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target")),
+        )
+        .unwrap()
+        .join("launcher-unit")
+        .join("pointed");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(pointed(&root), Pointed::Missing);
+        let write = |current: &str| {
+            std::fs::write(
+                root.join(atm_install_state::APP_POINTER),
+                format!(r#"{{"current":"{current}"}}"#),
+            )
+            .unwrap();
+        };
+        write("legacy:1.4.0");
+        assert_eq!(pointed(&root), Pointed::Legacy);
+        write("3.0.0");
+        assert_eq!(
+            pointed(&root),
+            Pointed::Host(
+                atm_install_state::app_dir_for(&root, "3.0.0").join("AyanamiTaskManager.exe")
+            )
+        );
+        std::fs::write(root.join(atm_install_state::APP_POINTER), b"{nope").unwrap();
+        assert_eq!(pointed(&root), Pointed::Missing);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

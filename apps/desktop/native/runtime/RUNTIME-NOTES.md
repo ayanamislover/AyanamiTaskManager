@@ -81,6 +81,7 @@ decide 循环（最多 8 圈）
 第二轮评审的修订 `mut-w4i-r3.py`（runtime），证据 `w4i-r3-runtime-mutation-evidence.json`。
 第三轮评审的修订 `mut-w4i-r4.py`（runtime、store、state 三组），证据 `w4i-r4-*-mutation-evidence.json`。
 第四轮评审的修订 `mut-w4i-r5.py`（state、setup、runtime 三组），证据 `w4i-r5-*-mutation-evidence.json`。
+第五轮评审留下的 P2 的修订 `mut-w4i-r6.py`（launcher），证据 `w4i-r6-launcher-mutation-evidence.json`。
 
 ## W4i 第一轮评审（`output/peer-atm3-w4i-r1.md`）：CHANGES_REQUESTED
 
@@ -142,3 +143,15 @@ decide 循环（最多 8 圈）
   - `setup` 的 `store::tests::every_state_setup_writes_reads_back`：用 setup 自己的 `new_txn_id`、`legacy::legacy_pointer`、`store::enter` / `Store::set_pointer` 写出迁移（`from = legacy:1.4.0`）、反向迁移（`to = legacy:1.4.0`）、普通更新、首次安装（带预发布与构建号的版本）的事务，以及迁移后、反向迁移后、更新后、回滚后、首次安装后的 `app.json`，逐个经 `Store::load` / `Store::pointer` 原样读回。
   - `install-state` 的 `tests::state_whose_names_are_not_plain_is_invalid` 加上合法的 `legacy:` 引用（每个字段）与嵌套前缀、空版本、带盘符的反例。
   - `tests/guard.rs::a_file_symbolic_link_inside_a_root_is_refused_before_admission`。
+
+## W4i 第五轮评审（`output/peer-atm3-w4i-r5.md`）：APPROVED
+
+绑定 f60ce0e。无 P0、P1。R4-P1-01 的合法状态读回（含独立把读取恢复成 b3b0154 语义后 setup 读回用例变红）、R4-P2-01 的行为用例与 42 条变异的绑定都被确认；评审的沙箱建不了文件符号链接，那一条用例在那里是 SKIPPED，评审明确没有把它算作独立复现。结论限于 W4i 声明的范围，不替代正式宿主、完整安装 / 回滚与掉电验收。
+
+留下一条非阻断的 P2，与 R4-P1-01 同一个根因（拼进 `app_dir_for` 之前没把 `legacy:` 分流出去），随后修掉，交给 W4 整体评审复核：
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| R5-P2-01 | launcher 首次读 `app.json` 分流了 `legacy:`，但宿主不在、跑完 `--recover` 之后的再读没有：恢复把指针改成 `legacy:1.4.0` 时会拼出 `app-legacy:1.4.0\AyanamiTaskManager.exe` | `launcher` 的 `pointed`：读 `app.json`、分流 `legacy:`、拼宿主路径收在一处，首次读取与恢复后的再读都只走它；恢复后是 `legacy:` 时明确说已回到旧版，从旧版入口启动。launcher 自己那份 `LEGACY_PREFIX` 也改为引用 install-state 的，三处只有一个来源 |
+
+- **用例**：`launcher` 的 `tests::a_legacy_pointer_never_becomes_a_host_path`（没有 `app.json`、`legacy:` 指针、普通版本、读不出来四种）。
