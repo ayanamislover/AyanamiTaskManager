@@ -253,6 +253,24 @@ fn links_inside_a_given_root_are_refused_before_any_write() {
             }),
         ),
         (
+            // 目录 junction 去掉 reparse 判定后也会因为打不开而被拒；文件符号链接能正常打开（硬链接数 1），
+            // 只有 reparse 判定拦得住它。建它要特权或开发者模式。
+            "a file in N is a symbolic link to a file in the 3.x root",
+            Box::new({
+                let v3c = v3.clone();
+                move |c: &Path| {
+                    let n = c.join("N");
+                    std::fs::create_dir_all(n.join("data")).unwrap();
+                    std::os::windows::fs::symlink_file(
+                        v3c.join("data").join("marker"),
+                        n.join("data").join("atm.sqlite"),
+                    )
+                    .expect("creating a file symbolic link needs Developer Mode or the privilege");
+                    (n, c.join("L"), None)
+                }
+            }),
+        ),
+        (
             "N is itself a junction, and its runtime one to the 3.x root",
             Box::new({
                 let v3c = v3.clone();
