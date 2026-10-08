@@ -708,6 +708,22 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
   - `legacy::tests::a_large_payload_reports_its_parse_and_output`：codex 的正式 SQL 函数补验，约 17 MiB 的 payload 解析推进 2 次、输出再推进 2 次。
 - **变异**：`output/w4a-evidence/mutations-r5/`。`mut-w4a-r5-store.py` 验本轮修订；之前的八份脚本在新候选上重跑。
 
+### 第五轮的变异（候选 da38ddb）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r5-w4a-gate-r4-store-mutation-evidence.json`（本轮新增，`mut-w4a-r5-store.py`） | 7 | 7 RED |
+| `r5-w4a-gate-r3-store-mutation-evidence.json`（`mut-w4a-r4-store.py` 重跑） | 10 | 10 RED |
+| `r5-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑） | 13 | 13 RED |
+| `r5-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
+| `r5-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
+| `r5-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r5-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r5-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r5-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+九份证据记录的源码 sha256 都与 da38ddb 的对应文件一致，复原套件全绿；一遍跑完，没有存活。
+
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
 - **方式**：`examples/rehearse.rs`。真实根正在被 2.x 使用，不停它，只读。
