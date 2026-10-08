@@ -22,7 +22,10 @@ fn begin(svc: &Service, client: Option<String>, op: &str) -> (String, String) {
         begun.result["project"]["id"]
             .as_str()
             .map(str::to_owned)
-            .unwrap_or_else(|| svc.project_id(&agent, begun.result["project"]["code"].as_str().unwrap()).unwrap()),
+            .unwrap_or_else(|| {
+                svc.project_id(&agent, begun.result["project"]["code"].as_str().unwrap())
+                    .unwrap()
+            }),
         begun.result["session"]["id"].as_str().unwrap().to_owned(),
     )
 }
@@ -56,8 +59,16 @@ fn the_sweep_respects_client_liveness() {
         .unwrap();
     let svc = Service::new(store);
     let me = procs::find(std::process::id()).unwrap();
-    let (_, live) = begin(&svc, Some(format!("{}:{}@live", me.pid, me.created)), "b-live");
-    let (_, gone) = begin(&svc, Some(format!("{}:{}@gone", me.pid, me.created + 1)), "b-gone");
+    let (_, live) = begin(
+        &svc,
+        Some(format!("{}:{}@live", me.pid, me.created)),
+        "b-live",
+    );
+    let (_, gone) = begin(
+        &svc,
+        Some(format!("{}:{}@gone", me.pid, me.created + 1)),
+        "b-gone",
+    );
     let (_, anonymous) = begin(&svc, None, "b-anon");
     // 三个 session 的心跳都停在 30 min 前。
     svc.store()

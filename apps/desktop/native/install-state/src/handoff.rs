@@ -124,3 +124,18 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 3.x 的 lease 与 daemon.json 在新根（与桥读的是同一份）；更早的版本在 2.x 数据根。
+    #[test]
+    fn a_3x_service_is_looked_up_under_the_new_root() {
+        let (legacy, n) = (Path::new(r"C:\L\runtime"), Path::new(r"C:\N"));
+        assert_eq!(runtime_dir_for("3.0.0", legacy, n), n.join("runtime"));
+        assert_eq!(runtime_dir_for("3.1.0-beta", legacy, n), n.join("runtime"));
+        assert_eq!(runtime_dir_for("2.0.0", legacy, n), legacy);
+        assert_eq!(runtime_dir_for("legacy:1.4.0", legacy, n), legacy);
+    }
+}

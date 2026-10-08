@@ -114,10 +114,13 @@ pub fn after_spawn(
         return;
     };
     let lease = || {
-        env.service_lease().is_some_and(|(pid, layout)| match layout {
-            crate::runtime::Layout::Single => pid == host.pid,
-            crate::runtime::Layout::HostAndCore => crate::procs::parent_of(pid) == Some(host.pid),
-        })
+        env.service_lease()
+            .is_some_and(|(pid, layout)| match layout {
+                crate::runtime::Layout::Single => pid == host.pid,
+                crate::runtime::Layout::HostAndCore => {
+                    crate::procs::parent_of(pid) == Some(host.pid)
+                }
+            })
     };
     let primary = || {
         atm_install_state::ipc::read_host_record(&env.data_dir)

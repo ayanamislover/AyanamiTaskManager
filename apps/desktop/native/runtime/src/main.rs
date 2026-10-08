@@ -52,7 +52,9 @@ fn main() {
             "--install-root" => install_root = Some(PathBuf::from(value())),
             "--background" => {}
             "--drill-pace-ms" => {
-                let ms: u64 = value().parse().unwrap_or_else(|_| usage("bad --drill-pace-ms"));
+                let ms: u64 = value()
+                    .parse()
+                    .unwrap_or_else(|_| usage("bad --drill-pace-ms"));
                 drill.pace = Some(Duration::from_millis(ms));
             }
             "--drill-hold-at" => drill.hold_at = Some(value()),
@@ -77,8 +79,7 @@ fn main() {
         (None, None) => None,
         _ => usage("--txn-start and --install-root go together"),
     };
-    let observe: Arc<dyn Fn(Event) + Send + Sync> =
-        Arc::new(|e| eprintln!("atm-runtime: {e:?}"));
+    let observe: Arc<dyn Fn(Event) + Send + Sync> = Arc::new(|e| eprintln!("atm-runtime: {e:?}"));
     let options = Options {
         n,
         legacy,

@@ -87,10 +87,9 @@ pub fn lease(runtime_dir: &Path) -> Option<(u32, Layout)> {
 
 /// The lock, only if its holder is alive and is the process that took it.
 fn held_lock(runtime_dir: &Path) -> Option<LockOwner> {
-    let owner: LockOwner =
-        crate::read_json_limited(&runtime_dir.join("daemon.lock"), 64 * 1024)
-            .ok()
-            .flatten()?;
+    let owner: LockOwner = crate::read_json_limited(&runtime_dir.join("daemon.lock"), 64 * 1024)
+        .ok()
+        .flatten()?;
     let proc = procs::find(owner.pid)?;
     let layout = layout_of(owner.layout.as_deref());
     let believed = match &owner.process_identity {
@@ -219,7 +218,11 @@ fn health_answer(port: u16, deadline: Instant) -> Result<HealthAnswer, String> {
         .set_write_timeout(Some(left()?))
         .map_err(|_| "service did not answer /health")?;
     stream
-        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        // Host 带端口：3.x 的 Agent HTTP 要求它逐字节等于 `127.0.0.1:<端口>`（挡 DNS 重绑定，W4i）。
+        .write_all(
+            format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .map_err(|_| "service did not answer /health")?;
     let mut raw: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -460,7 +463,16 @@ mod tests {
                     // One thread per connection: a hanging answer never blocks the next one.
                     std::thread::spawn(move || {
                         let mut buffer = [0u8; 1024];
-                        let _ = stream.read(&mut buffer);
+                        let read = stream.read(&mut buffer).unwrap_or(0);
+                        // 与 3.x 的 Agent HTTP 一样：Host 不是 `127.0.0.1:<端口>` 就 403。
+                        let host = format!("\r\nHost: 127.0.0.1:{port}\r\n");
+                        if !String::from_utf8_lossy(&buffer[..read]).contains(&host) {
+                            let _ = write!(
+                                stream,
+                                "HTTP/1.1 403 X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            );
+                            return;
+                        }
                         let Some(body) = body else { return };
                         let body = body.to_string();
                         let head = |length: usize| {

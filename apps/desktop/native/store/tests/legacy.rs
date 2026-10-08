@@ -5482,7 +5482,11 @@ mod w3e {
         );
 
         assert!(!cv::must_compare_before_serving(&present(&v3), &m, &root));
-        assert!(cv::must_compare_before_serving(&present(&legacy), &m, &root));
+        assert!(cv::must_compare_before_serving(
+            &present(&legacy),
+            &m,
+            &root
+        ));
         assert!(cv::must_compare_before_serving(
             &AuthorityState::Missing,
             &m,
@@ -5524,7 +5528,11 @@ mod w3e {
             &cv::rollback_authority(Some(&authority(&n)), &m, "txn-1", AT),
         )
         .unwrap();
-        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m, &root));
+        assert!(cv::must_compare_before_serving(
+            &cv::read_authority(&n),
+            &m,
+            &root
+        ));
         let cmp = compare(&n, &root);
         assert_eq!(judge(&n, &root, &cmp), Verdict::ResumeAfterRollback);
         let a = cv::resume_after_rollback(&n, &authority(&n), T2).unwrap();
@@ -5836,7 +5844,11 @@ mod w3f {
         );
 
         // 回滚后没动过 2.x：阻塞比较判不变 → 无损接回。
-        assert!(cv::must_compare_before_serving(&cv::read_authority(&n), &m, &root));
+        assert!(cv::must_compare_before_serving(
+            &cv::read_authority(&n),
+            &m,
+            &root
+        ));
         let base = cv::baseline(&m, Some(&written)).clone();
         let again = cv::compare(
             &n,

@@ -11,7 +11,12 @@ use atm_store::conversion::{self as cv, AuthorityState, Layout};
 use serde_json::Value;
 use support::*;
 
-const ENTRIES: [Event; 4] = [Event::Lease, Event::Http, Event::Descriptor, Event::Scheduler];
+const ENTRIES: [Event; 4] = [
+    Event::Lease,
+    Event::Http,
+    Event::Descriptor,
+    Event::Scheduler,
+];
 
 fn serving(started: Started) -> atm_runtime::Serving {
     match started {
@@ -40,7 +45,10 @@ fn a_fresh_install_opens_the_entries_in_order() {
     let n = d.join("N");
     let events = Events::default();
     let s = serving(atm_runtime::start(&options(&n, &d.join("L-missing"), &events)).unwrap());
-    assert_eq!(s.background(Duration::from_secs(60)), Some(Background::Unchanged));
+    assert_eq!(
+        s.background(Duration::from_secs(60)),
+        Some(Background::Unchanged)
+    );
     let seen = events.take();
     assert_eq!(
         seen,
@@ -54,7 +62,10 @@ fn a_fresh_install_opens_the_entries_in_order() {
     let published = descriptor(&n).unwrap();
     assert_eq!(published["layout"], "single");
     assert_eq!(published["pid"], std::process::id());
-    assert_eq!(published["endpoint"], format!("http://127.0.0.1:{}", s.port()));
+    assert_eq!(
+        published["endpoint"],
+        format!("http://127.0.0.1:{}", s.port())
+    );
     assert_eq!(published["instanceId"], s.instance_id());
     assert_eq!(published["generation"], s.lease_generation());
     assert_eq!(published["token"].as_str().unwrap().len(), 64);
@@ -103,7 +114,13 @@ fn a_conversion_reports_progress_before_any_entry() {
     assert_eq!(&seen[..2], [Event::Admitted, Event::Published]);
     assert_eq!(
         &seen[2..7],
-        [Event::Lease, Event::Http, Event::Descriptor, Event::Witness, Event::Scheduler]
+        [
+            Event::Lease,
+            Event::Http,
+            Event::Descriptor,
+            Event::Witness,
+            Event::Scheduler
+        ]
     );
     let progress = atm_install_state::startup::read_progress(&n).unwrap();
     assert_eq!(progress.txn, "T1");
@@ -118,7 +135,10 @@ fn a_conversion_reports_progress_before_any_entry() {
     .unwrap();
     assert_eq!(witness["core"]["instanceId"], s.instance_id());
     assert_eq!(witness["generation"], s.lease_generation());
-    assert_eq!(s.background(Duration::from_secs(60)), Some(Background::Unchanged));
+    assert_eq!(
+        s.background(Duration::from_secs(60)),
+        Some(Background::Unchanged)
+    );
     s.stop(&|_| {});
 }
 
@@ -139,7 +159,11 @@ fn a_different_source_is_stopped_before_any_entry() {
     let Started::Conflict(c) = started else {
         panic!("the moved source must not be served")
     };
-    assert!(c.state.reason.contains("was converted from"), "{}", c.state.reason);
+    assert!(
+        c.state.reason.contains("was converted from"),
+        "{}",
+        c.state.reason
+    );
     assert_eq!(
         events.take(),
         [Event::Admitted, Event::BlockingCompare, Event::Conflict]
@@ -184,7 +208,11 @@ fn a_legacy_authority_is_compared_before_serving() {
     assert_eq!(resumed.generation(), g1);
     assert_eq!(
         events.take(),
-        [vec![Event::Admitted, Event::BlockingCompare], ENTRIES.to_vec()].concat()
+        [
+            vec![Event::Admitted, Event::BlockingCompare],
+            ENTRIES.to_vec()
+        ]
+        .concat()
     );
     assert_eq!(authority(&n).by, "resume-after-rollback");
     assert_eq!(resumed.background(Duration::from_millis(10)), None);

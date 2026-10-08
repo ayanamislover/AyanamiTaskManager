@@ -190,5 +190,8 @@ pub fn get(port: u16, path: &str) -> Option<(u16, String)> {
     let _ = s.read_to_end(&mut out);
     let text = String::from_utf8_lossy(&out).into_owned();
     let status = text.split(' ').nth(1)?.parse().ok()?;
-    Some((status, text.split("\r\n\r\n").nth(1).unwrap_or_default().to_owned()))
+    Some((
+        status,
+        text.split("\r\n\r\n").nth(1).unwrap_or_default().to_owned(),
+    ))
 }

@@ -52,7 +52,10 @@ mod tests {
         let (a, b) = (hex(32), hex(32));
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
-        assert!(a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
         let (u, v) = (ulid(), ulid());
         assert_eq!(u.len(), 26);
         assert_ne!(u, v);

@@ -116,14 +116,20 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         })
     });
     let token = Token::new(token.clone()).map(|t| (t, token))?;
-    let (listener, port) = rt.block_on(async {
-        let listener = bind().await?;
-        let port = listener.local_addr()?.port();
-        Ok::<_, std::io::Error>((listener, port))
-    })
-    .map_err(|e| format!("bind 127.0.0.1: {e}"))?;
-    let state = AppState::new(&listener, token.0, Calls::new(8, Duration::from_secs(5)), health)
-        .map_err(|e| e.to_string())?;
+    let (listener, port) = rt
+        .block_on(async {
+            let listener = bind().await?;
+            let port = listener.local_addr()?.port();
+            Ok::<_, std::io::Error>((listener, port))
+        })
+        .map_err(|e| format!("bind 127.0.0.1: {e}"))?;
+    let state = AppState::new(
+        &listener,
+        token.0,
+        Calls::new(8, Duration::from_secs(5)),
+        health,
+    )
+    .map_err(|e| e.to_string())?;
     let router = app(
         state,
         routes(&PROFILES, surface.handler())
@@ -217,15 +223,19 @@ impl Entries {
             let _ = tx.send(());
         }
         if let Some(server) = self.server.take() {
-            let _ = self.rt.block_on(async {
-                tokio::time::timeout(Duration::from_secs(30), server).await
-            });
+            let _ = self
+                .rt
+                .block_on(async { tokio::time::timeout(Duration::from_secs(30), server).await });
         }
         let descriptor = self.runtime_dir.join(DESCRIPTOR);
         let ours = atm_install_state::read_json_limited::<Value>(&descriptor, 64 * 1024)
             .ok()
             .flatten()
-            .and_then(|v| v.get("instanceId").and_then(Value::as_str).map(str::to_string))
+            .and_then(|v| {
+                v.get("instanceId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .is_some_and(|id| id == self.instance_id);
         if ours {
             let _ = std::fs::remove_file(&descriptor);

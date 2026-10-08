@@ -205,7 +205,8 @@ impl ProgressWatch {
 
     /// 现在的记账，供落盘。
     pub fn ledger(&self, now: Instant, now_ms: u64) -> WaitLedger {
-        let at = |t: Instant| now_ms.saturating_sub(now.saturating_duration_since(t).as_millis() as u64);
+        let at =
+            |t: Instant| now_ms.saturating_sub(now.saturating_duration_since(t).as_millis() as u64);
         WaitLedger {
             txn: self.txn.clone(),
             pid: self.identity.pid,
@@ -327,6 +328,24 @@ pub fn admission_released(n: &Path) -> bool {
     }
 }
 
+/// 进程结束之后，系统释放它持有的文件锁是异步的（`LockFileEx` 的文档如此），刚确认进程退出时锁可能还在。
+/// 写 `A` 之前给它这么久放掉准入（W4i 的真实进程用例里实测到过）。
+pub const ADMISSION_GRACE: Duration = Duration::from_secs(10);
+
+/// 在 `timeout` 内等 [`admission_released`] 成立。
+pub fn await_admission_released(n: &Path, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if admission_released(n) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// [`settle_for_rollback`] 做了什么。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RollbackAuthority {
@@ -360,14 +379,14 @@ pub fn iso_utc(ms: u64) -> String {
 
 /// 07 §8：setup 回滚到 2.x、切换版本目录之前调用。
 ///
-/// 1. 新进程必须已经放掉 `N` 的准入，否则拒绝（它可能还在写 `M`）。
+/// 1. 新进程必须已经放掉 `N` 的准入（给 [`ADMISSION_GRACE`] 等系统释放锁），否则拒绝（它可能还在写 `M`）。
 /// 2. 按 `M` 的实际阶段：没到 PUBLISHED（或没转换过）不写 `A`；PUBLISHED 了写
 ///    `A={authority: legacy, by: setup-rollback, txn, at, generation}`，并带上原来 `A` 里同一个 generation
 ///    下用户接受过的摘要——否则回滚后没动过 2.x 也会被当成「变了」而重转（07 §6，W3e）。
 ///
 /// 可以重复调用：同一个 txn 再写一次结果相同。
 pub fn settle_for_rollback(n: &Path, txn: &str, at_ms: u64) -> Result<RollbackAuthority, String> {
-    if !admission_released(n) {
+    if !await_admission_released(n, ADMISSION_GRACE) {
         return Err(
             "V3_STILL_ADMITTED: the new process still holds N\\runtime\\service.lock".into(),
         );
@@ -655,20 +674,27 @@ mod tests {
 
         // 1 min 时有过一次进度，之后没动；第 9 min setup 被杀，记账已落盘。
         let mut first = ProgressWatch::new("T2", &me(), policy, t0);
-        assert_eq!(first.observe(t0 + MIN, false, true, Some(&p)), WaitVerdict::Waiting);
+        assert_eq!(
+            first.observe(t0 + MIN, false, true, Some(&p)),
+            WaitVerdict::Waiting
+        );
         let ledger = first.ledger(t0 + MIN * 9, ms(MIN * 9));
         assert_eq!(ledger.started_ms, base);
         assert_eq!(ledger.changed_ms, ms(MIN));
 
         // 接管后再过 2 min：从最后一次推进算已经 11 min，判卡住。重新开始计时的话还在等。
         let t1 = t0 + MIN * 9;
-        let mut resumed = ProgressWatch::resume("T2", &me(), policy, Some(&ledger), t1, ms(MIN * 9));
+        let mut resumed =
+            ProgressWatch::resume("T2", &me(), policy, Some(&ledger), t1, ms(MIN * 9));
         match resumed.observe(t1 + MIN * 2, false, true, Some(&p)) {
             WaitVerdict::Stuck(why) => assert!(why.contains("VERIFY 3/10"), "{why}"),
             other => panic!("{other:?}"),
         }
         let mut fresh = ProgressWatch::new("T2", &me(), policy, t1);
-        assert_eq!(fresh.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
+        assert_eq!(
+            fresh.observe(t1 + MIN * 2, false, true, Some(&p)),
+            WaitVerdict::Waiting
+        );
 
         // 总上限：119 min 前开始等，进度一直在动，接管 1 min 后到上限。
         let mut long = ledger.clone();
@@ -705,12 +731,18 @@ mod tests {
             },
         ] {
             let mut w = ProgressWatch::resume("T2", &me(), policy, Some(&other), t1, ms(MIN * 9));
-            assert_eq!(w.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
+            assert_eq!(
+                w.observe(t1 + MIN * 2, false, true, Some(&p)),
+                WaitVerdict::Waiting
+            );
         }
 
         // 墙钟往回拨：按「还没过去」算，只会多等。
         let mut back = ProgressWatch::resume("T2", &me(), policy, Some(&ledger), t1, base - 1);
-        assert_eq!(back.observe(t1 + MIN * 2, false, true, Some(&p)), WaitVerdict::Waiting);
+        assert_eq!(
+            back.observe(t1 + MIN * 2, false, true, Some(&p)),
+            WaitVerdict::Waiting
+        );
     }
 
     #[test]

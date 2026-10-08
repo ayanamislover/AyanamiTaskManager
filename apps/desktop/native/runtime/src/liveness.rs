@@ -26,7 +26,10 @@ mod tests {
         assert_eq!(alive(&mine), Some(true));
         assert_eq!(alive(&format!("{}:{}", me.pid, me.created)), Some(true));
         // 同一个 pid、不同的出生时间：被复用的 pid，原来的客户端已经退出。
-        assert_eq!(alive(&format!("{}:{}@x", me.pid, me.created + 1)), Some(false));
+        assert_eq!(
+            alive(&format!("{}:{}@x", me.pid, me.created + 1)),
+            Some(false)
+        );
         for junk in ["", "claude", "12@x", "x:1", "0:5", "5:0", ":"] {
             assert_eq!(alive(junk), None, "{junk}");
         }

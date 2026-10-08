@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use atm_install_state::procs;
 use atm_store::conversion::{
-    self as cv, AdmitError, Admission, AuthorityState, Comparison, CompareOptions, Layout,
+    self as cv, Admission, AdmitError, AuthorityState, CompareOptions, Comparison, Layout,
     Manifest, Quiesce, RunOptions, Seal, Startup, StartupState, Verdict,
 };
 
@@ -199,6 +199,14 @@ pub fn start(o: &Options) -> Result<Started, BootError> {
         AdmitError::Io(e) => failed(e),
     })?;
     (o.observe)(Event::Admitted);
+    // 拿到准入就没有别的实例在服务：上一个进程被杀时留下的 daemon.json 是过期的，先撤掉，
+    // 免得桥在冲突或转换期间连向一个不存在的服务。
+    match std::fs::remove_file(layout.runtime().join(entries::DESCRIPTOR)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(failed(format!("remove the stale daemon.json: {e}")));
+        }
+        _ => {}
+    }
     let me = Me::current();
     let txn = o.handoff.as_ref().map_or("", |h| h.txn.as_str());
     let reporter = progress::Reporter::new(o.n.clone(), txn, me.started_at_ms, o.drill.clone());
