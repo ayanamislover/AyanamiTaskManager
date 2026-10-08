@@ -8595,3 +8595,145 @@ mod w4_gate_r1 {
         ));
     }
 }
+
+/// W4 关口第二轮评审（`output/peer-atm3-w4a-r2.md`）的反例与对照。
+mod w4_gate_r2 {
+    use super::w3d::{G1, layout};
+    use super::*;
+    use atm_store::conversion::{self as cv, CompareOptions, Comparison, RunOptions};
+
+    /// P1-W4A-02（codex 的正式链路反例）：项目库位置上的库，schema 不是 2.x 项目迁移推出来的（多了用户的表），
+    /// 按字节绑定。改一个隐含 rowid（业务关联 1 → 0）比较得「变了」。
+    #[test]
+    fn an_unknown_schema_in_the_project_position_is_bound_to_its_bytes() {
+        let (f, root) = settle_fixture("w4g2-unknown-schema");
+        let db = root.join("projects/P7/project.sqlite");
+        empty_project(&db, "P7", "XXX", 10, Some("unconvertible"));
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(
+            "CREATE TABLE documents(title TEXT); CREATE TABLE links(document_id INTEGER);
+             INSERT INTO documents(rowid, title) VALUES (7, 'customer record'); INSERT INTO links VALUES (7);",
+        )
+        .unwrap();
+        drop(c);
+        let n = layout(&f, "n");
+        let m = cv::run(
+            &n,
+            RunOptions {
+                at: AT,
+                generation: G1,
+                legacy_root: &root,
+                allow_real_data_root: false,
+                real_data_root: None,
+                secrets_check: Some(secrets_ok),
+                accept_unconvertible: &["GGG"],
+                hook: &mut |_| true,
+                progress: None,
+            },
+        )
+        .unwrap();
+        let opts = CompareOptions {
+            legacy_root: &root,
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(secrets_ok),
+        };
+        assert!(matches!(
+            cv::compare(&n, &m, &m.business_digest, &opts),
+            Comparison::Unchanged(_)
+        ));
+        let c = Connection::open(&db).unwrap();
+        let joined = || {
+            q::<i64>(
+                &c,
+                "SELECT count(*) FROM links JOIN documents ON documents.rowid = links.document_id",
+            )
+        };
+        assert_eq!(joined(), 1);
+        c.execute_batch("UPDATE documents SET rowid = 9 WHERE rowid = 7")
+            .unwrap();
+        assert_eq!(joined(), 0);
+        drop(c);
+        let result = cv::compare(&n, &m, &m.business_digest, &opts);
+        assert!(
+            matches!(result, Comparison::Changed { .. }),
+            "a business rowid change was lost: {result:?}"
+        );
+    }
+
+    fn database(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        Connection::open(path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+            .unwrap();
+    }
+
+    /// P2-W4A-R2-01：扫描认得的每个库（知识库的恢复候选与 `.restore-*` 暂存、项目的 `.creating-*` / `.restore-*`
+    /// 残留与 `restore-old` 回滚件）旁边的 `-shm` / `-shm.tmp` 都不进快照，库与 `-wal` 照收。
+    /// 对照：before-restore 只收库与 `-wal`；附件里与库同名的 `-shm` 是业务文件；旁边那个不是 SQLite 时也不是索引。
+    #[test]
+    fn indexes_beside_every_scanned_database_stay_out_of_the_snapshot() {
+        let (_f, root) = json_fixture("w4g2-restore-indexes");
+        let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        put(
+            &root.join("knowledge/restore.json"),
+            format!(r#"{{"id":"{id}","committed":false}}"#).as_bytes(),
+        );
+        let previous = format!("backups/knowledge/before-restore-{id}.sqlite");
+        let databases = [
+            format!("knowledge/restore-{id}.sqlite"),
+            format!("knowledge/.restore-{id}/knowledge.sqlite"),
+            format!("projects/.creating-{id}/project.sqlite"),
+            format!("projects/.restore-{id}/project.sqlite"),
+            format!("projects/P1/project.sqlite.restore-old-{id}"),
+            "projects/P1/artifacts/customer.sqlite".to_string(),
+        ];
+        for db in databases.iter().chain([&previous]) {
+            database(&root.join(db));
+            put(&root.join(format!("{db}-wal")), b"wal");
+            put(&root.join(format!("{db}-shm")), b"index");
+            put(&root.join(format!("{db}-SHM.tmp")), b"index");
+        }
+        put(
+            &root.join(format!("knowledge/.restore-{id}/notes")),
+            b"text",
+        );
+        put(
+            &root.join(format!("knowledge/.restore-{id}/notes-shm")),
+            b"text",
+        );
+        put(
+            &root.join(format!("knowledge/.restore-{id}/orphan-shm")),
+            b"text",
+        );
+        let files = atm_store::legacy::snapshot_files(&root, AT).unwrap();
+        let has = |rel: &str| files.iter().any(|f| f == rel);
+        for db in &databases[..5] {
+            assert!(has(db) && has(&format!("{db}-wal")), "{db}: {files:?}");
+            assert!(!has(&format!("{db}-shm")), "{db}-shm was snapshotted");
+            assert!(
+                !has(&format!("{db}-SHM.tmp")),
+                "{db}-SHM.tmp was snapshotted"
+            );
+        }
+        let attachment = &databases[5];
+        for rel in [
+            attachment.clone(),
+            format!("{attachment}-shm"),
+            format!("{attachment}-SHM.tmp"),
+        ] {
+            assert!(has(&rel), "{rel} is a business file: {files:?}");
+        }
+        assert!(has(&previous) && has(&format!("{previous}-wal")));
+        assert!(!has(&format!("{previous}-shm")));
+        assert!(
+            has(&format!("knowledge/.restore-{id}/notes-shm")),
+            "{files:?}"
+        );
+        assert!(
+            has(&format!("knowledge/.restore-{id}/orphan-shm")),
+            "{files:?}"
+        );
+    }
+}

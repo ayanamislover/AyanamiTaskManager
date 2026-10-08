@@ -1949,3 +1949,75 @@ fn withdrawal_moves_go_through_the_shared_contract() {
     );
     verify_backup(&w.store, &busy.id).unwrap();
 }
+
+/// W4 关口第二轮评审建议纳入的组合（codex 的独立补验）：撤回先落盘移走、登记行在；DELETE 报错（触发器），
+/// 放回又遇占用失败——原来的 SQL 错误照报，目录留在隔离区、登记行在；解除之后 sweep 落盘放回，备份完好。
+#[test]
+fn a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep() {
+    use atm_install_state::durable::{self, MOVEFILE_WRITE_THROUGH, Op};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let w = world("w4g2-delete-putback");
+    let backup = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
+    let parked = w.backups.join(WITHDRAWN_DIR).join(&backup.id);
+    w.store.write(|tx| tx.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON backups BEGIN SELECT RAISE(ABORT, 'deletion failure'); END;")).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let db = w.store.path().to_path_buf();
+    let id = backup.id.clone();
+    let source = backup.dir.clone();
+    let destination = parked.clone();
+    let result = durable::inject(
+        Box::new(move |op| {
+            if let Op::Move { from, to, flags } = op {
+                assert_eq!(*flags, MOVEFILE_WRITE_THROUGH);
+                let n = observed.fetch_add(1, Ordering::SeqCst);
+                let c = rusqlite::Connection::open(&db).unwrap();
+                let rows: i64 = c
+                    .query_row("SELECT count(*) FROM backups WHERE id=?1", [&id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(rows, 1, "DELETE must not precede the first move");
+                if n == 0 {
+                    assert_eq!((from, to), (&source, &destination));
+                    assert!(source.is_dir() && !destination.exists());
+                    None
+                } else {
+                    assert_eq!((from, to), (&destination, &source));
+                    assert!(destination.is_dir() && !source.exists());
+                    Some(std::io::Error::from_raw_os_error(32))
+                }
+            } else {
+                None
+            }
+        }),
+        || discard_backup(&w.store, &backup),
+    );
+    assert!(result.unwrap_err().to_string().contains("deletion failure"));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(parked.is_dir() && !backup.dir.exists());
+    let rows: i64 = q(
+        &w,
+        "SELECT count(*) FROM backups WHERE id=?1",
+        vec![backup.id.clone()],
+    )
+    .unwrap();
+    assert_eq!(rows, 1);
+    w.store
+        .write(|tx| tx.execute_batch("DROP TRIGGER fail_delete"))
+        .unwrap();
+    let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
+    assert_eq!(left.unwrap(), 0);
+    assert_eq!(
+        ops,
+        [Op::Move {
+            from: parked,
+            to: backup.dir.clone(),
+            flags: MOVEFILE_WRITE_THROUGH
+        }]
+    );
+    verify_backup(&w.store, &backup.id).unwrap();
+}

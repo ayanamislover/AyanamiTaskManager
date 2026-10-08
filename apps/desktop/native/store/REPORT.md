@@ -616,7 +616,28 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 - **两道防线互相兜底**：「任意 SQLite 都按逻辑内容」第一次存活——过滤放宽之后，`project_meta` 检查照样把附件挡在逻辑摘要外。补上「附件里存着一份带 `project_meta` 的项目库副本」这一步，两道防线各自都能验红。
 - **大项目进度用例分不出目标库的计量**：本轮给枚举与 `verify_converted` 加了计量之后，「目标库上的 SQL 不计量」存活——大项目那一格仍有 20 批（源侧与枚举），过了「至少 5 批」的门槛。实测有目标计量 35 批（指令计数，确定的），用例对 IMPORT 加一道 28 批的门槛。VERIFY 那一格有没有目标库的计量都是 31 批：`verify_converted` 的连接计量在这个夹具里看不出贡献，留着无害，不作为验红点。
-- **列出后消失的条目**：一次复原套件里 `a_dropped_database_is_compared_by_content_not_storage` 的「关库」一步得到 UNKNOWN（`os error 2`）。`root::walk` 列出目录之后逐个 stat，别的程序随建随删的 `-SHM.tmp` 恰好在两步之间消失。`walk` 改为跳过列出后消失的条目（真正的业务变化由 F0 / F1 两次枚举的比对发现）。这是竞争，没有确定性的用例，不作为验红点；之后的全量与复原套件都是绿的。
+- **列出后消失的条目**：一次复原套件里 `a_dropped_database_is_compared_by_content_not_storage` 的「关库」一步得到 UNKNOWN（`os error 2`）。`root::walk` 列出目录之后逐个 stat，别的程序随建随删的 `-SHM.tmp` 恰好在两步之间消失。`walk` 改为跳过列出后消失的条目。F0 / F1 两次枚举的比对只能发现两次观测之间的差异：枚举之前、两次观测之外的变化它看不见，也代替不了 W4i 接入口的静止准入（源进程停下、拿到准入之后才转换）。这是竞争，没有确定性的用例，不作为验红点；之后的全量与复原套件都是绿的。
+
+## W4 关口第二轮评审（`output/peer-atm3-w4a-r2.md`）：CHANGES_REQUESTED
+
+绑定 7d7ff51。无 P0。P2-W4A-02、P2-W4A-03 关闭，setup 计时用例的改法接受；P1-W4A-01 的附件遗漏关闭。剩下一条 P1、两条 P2：
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| P1-W4A-02 | 「项目目录下的 `project.sqlite` + `project_meta`」证明不了整份 schema：在项目库里加用户自己的表，改它的隐含 rowid（业务关联 1 → 0），正式比较仍判不变 | 逻辑摘要只给 schema 认得的项目库（`settle::known_project_schema`）：`schema_migrations` 的列与 2.0 执行器建的一样（`version` 是 INTEGER 主键）；登记的迁移从第一个起逐个与转换器嵌入的项目迁移同号同名；在内存库里依次执行这些迁移，推出的 schema（类型、名字、所属表、空白合并后的 SQL；不含 `sqlite_stat*` 与 `schema_migrations`）与这个库逐项相等。多一张表、一列、一个索引或视图，少一张表，登记不连续或名字不对，一律按字节 |
+| P2-W4A-01 | JSON 的读入与解析、runs / requests 的逐条校验没有进度：65 MiB 的合法 `runs.json` 载入完 work=0 | 读入走按字节计量的 `progress::Read`（每 64 MiB 一次），解析完推进一次；runs、requests、去重分组、sync 的 published 校验与 processed / published 导入、导入 runs / requests 的循环每条推进一次 |
+| P2-W4A-R2-01 | 快照只排除三个常规库的索引：知识库恢复候选 `restore-<id>.sqlite` 的 `-shm` 仍进快照 | 共用一个判断（`root::is_known_wal_index`）：在 `registry/`、`knowledge/`、`projects/` 下（附件目录 `projects/<pid>/artifacts/` 除外），去掉 `-shm` / `-shm.tmp`（大小写不定）后的那个文件也在同一次枚举里，并且文件头是 SQLite，才算索引。这样覆盖扫描认得的全部库：三个常规库、知识库恢复候选与 `.restore-*` 暂存、项目的 `.creating-*` / `.restore-*` 残留与 `restore-old` 回滚件。扫描阶段的口径跟着对齐：知识库恢复候选旁边认的文件改用与常规库相同的 `is_db_file`（原来只认 `-wal` / `-shm`，别的程序留下的 `-SHM.tmp` 会让扫描以「未登记的条目」拒绝，本轮新用例跑出来的） |
+
+- **2.x 的项目库都认得**：2.x 只在迁移里建项目库的表（`packages/storage-sqlite` 里迁移之外唯一的 DDL 是 temp 库里的 trigram 探测虚表，不在 main）；2.0 执行器建 `schema_migrations` 的语句与判定核对的列一致。0015 的历史版本与现行版本只差回填用的 UPDATE，推出的 schema 相同。停在旧版本的库按它登记的前 n 个迁移推。认不出的库按字节绑定，代价是 checkpoint 也算「变了」——这是保守的一边。
+- **用例**：
+  - `w4_gate_r2::an_unknown_schema_in_the_project_position_is_bound_to_its_bytes`：评审的正式链路反例（P7 的项目库加 documents / links，改 rowid → Changed）。
+  - `legacy::settle::tests::only_the_migrated_project_schema_is_known`：现行、停在第 10 个、ANALYZE 过的项目库认得；多表（新旧两种）、多列、多索引、多视图、少表、改名、缺号、多登记、空登记、`version` 不是主键都不认得。
+  - `legacy::settle::tests::a_sqlite_attachment_is_bound_to_its_bytes` 改用迁移建的真项目库：附件里的项目库副本改 rowid 判变了；项目库的位置上 schema 不认得的库按字节；认得的项目库 VACUUM、ANALYZE、重排 rowid 不误报。已知 schema 在正式链路上的 checkpoint / VACUUM 对照仍是 `a_dropped_database_is_compared_by_content_not_storage`。
+  - `w4_gate_r2::indexes_beside_every_scanned_database_stay_out_of_the_snapshot`：五种库旁边的 `-shm`、`-SHM.tmp` 不进快照，库与 `-wal` 照收；before-restore 只收库与 `-wal`；附件里与库同名的 `-shm` 照收；旁边不是 SQLite、旁边没有文件的 `-shm` 照收。
+  - `restore::a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep`：评审建议纳入的 P2-W4A-02 组合（DELETE 报错、放回再遇占用，之后 sweep 落盘放回）。
+  - `legacy::jsonfiles::tests::a_large_json_file_reports_its_read_and_parse`（65 MiB，读入与解析各推进，少一个都不到 2）、`each_history_entry_reports_its_work`（3000 条 runs、3000 条 requests 各至少 3000）。
+- **没有单独验红的推进**：去重分组、sync published 的校验与 processed / published 导入、导入 runs / requests 这几处循环与已验红的 runs / requests 循环是同一写法，没有各自的用例与变异。
+- **变异**：`output/w4a-evidence/mutations-r3/`。`mut-w4a-r3-store.py` 验本轮修订；上一轮的五份脚本（锚点随修订更新：快照判断加了参数；「证明不了是项目库」改为已知 schema 的判定；「项目库的索引照收」改为「常规库的索引照收」）在新候选上重跑。结果见下节。
 
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 
