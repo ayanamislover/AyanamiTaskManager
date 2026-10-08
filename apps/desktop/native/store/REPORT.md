@@ -666,7 +666,7 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 
 - **rowid 算进去的代价**：checkpoint、关库、SHM 重建、ANALYZE、`PRAGMA optimize`、改日志模式都不动 rowid，正式链路的对照（`a_dropped_database_is_compared_by_content_not_storage`）照旧全是「没变」，其中的 VACUUM 一步实测也保留 rowid。SQLite 文档说 VACUUM 可能给没有 INTEGER PRIMARY KEY 的表重排 rowid；真重排了就判「变了」，这时 2.x 看到的顺序确实变了。2.x 自己从不 VACUUM 项目库（`packages/` 里没有）。
 - **已知 schema 判定的作用随之收窄**：rowid 算进去之后，「项目库位置上的冒名库改 rowid」不靠 schema 判定也能发现，「证明不了 schema 也照样规范化」在重跑里存活。判定剩下的作用是排除 `SELECT rowid` 看不见的状态，例如一列就叫 `rowid`、把隐含的 rowid 遮住。用例里的冒名库改成这一种，判定去掉就红。
-- **上限为什么可以接受**：2.x 的这些文件实际是 KB 级。上限以内，读入、解析、建值树，以及之后的校验、整组克隆（`any_array`）、按请求分组、导入都与大小成线性，几秒内做完，远在 setup 的 10 min 无推进预算之内；解析与建值树另有中途批次。超过上限的数据根转换停在动目标之前，用户数据不动。读入本身不另计量（上一轮套的 `progress::Read` 每 64 MiB 才推进一次，在上限以内永远不触发，验不红，去掉了；解析完的那一次推进也由解析器的批次替代）。
+- **上限为什么可以接受**：2.x 的这些文件实际是 KB 级。上限以内，读入、解析、建值树，以及之后的校验、整组克隆（`any_array`）、按请求分组、导入都随大小线性或 n log n（对象键与分组的排序）增长，几秒内做完，远在 setup 的 10 min 无推进预算之内；解析与建值树另有中途批次。超过上限的数据根转换停在动目标之前，用户数据不动。读入本身不另计量（上一轮套的 `progress::Read` 每 64 MiB 才推进一次，在上限以内永远不触发，验不红，去掉了；解析完的那一次推进也由解析器的批次替代）。
 - **用例**：
   - `w4_gate_r3::the_latest_projection_follows_the_rowid`、`the_checklist_order_follows_the_rowid`：codex 的两个正式链路反例（schema 与显式列都不变，只改 rowid）。
   - `legacy::settle::tests::a_sqlite_attachment_is_bound_to_its_bytes`：项目库 VACUUM、ANALYZE 不变；表的 rowid 改了变、改回去不变；FTS 虚表的 rowid 改了变。附件里的项目库副本改用 ANALYZE（只写统计表，逻辑摘要看不见，字节看得见）区分位置。
@@ -689,6 +689,40 @@ W3 第一轮评审登记的 P2，要在 W4 使用转换输出、接线发布与�
 | `r4-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
 
 八份证据记录的源码 sha256 都与 3048f2a 的对应文件一致，复原套件全绿。第一遍（c5bb33a）的日志留在 `mutations-r4/first-pass/`：「证明不了 schema 也照样规范化」存活，改法见上一节「已知 schema 判定的作用随之收窄」。
+
+## W4 关口第四轮评审（`output/peer-atm3-w4a-r4.md`）：CHANGES_REQUESTED
+
+绑定 bc4df59。无 P0。rowid 的两条反例与存储操作对照通过，文件上限与解析批次成立；第二轮、第三轮已关闭的各项保持。剩下：
+
+| 编号 | 问题 | 修订 |
+| ---- | ---- | ---- |
+| P1-W4A-02 | 已知 schema 证明不了 FTS 的倒排索引与内容一致：清空 FTS 后只放回内容行，虚表的 rowid 与内容不变，2.x 的搜索命中 1 → 0，正式比较仍判不变。舍弃的库恰恰可能是损坏或迁移失败的库 | 取逻辑摘要之前，在副本上 `PRAGMA integrity_check` 必须恰好一行 `ok`（b-tree 索引与 FTS5 的倒排索引都核对：SQLite 3.44 起 integrity_check 含 FTS5 的 xIntegrity，内置的是 3.50 系列），否则按字节。FTS5 的 `_config` 影子表（rank 等设置会改 MATCH 的结果顺序）算进摘要；其余影子表是由行推出的索引，一致性已由 integrity_check 证明 |
+| P2-W4A-01 | 数据库里的 JSON（正式 SQL 函数 `atm_mirror_payload` 的 payload）不经文件上限，展开与输出没有中途推进：65 MiB 的 payload 只有解析那 8 次 | 输出（`stringify` 与 JCS，含长字符串的逐码元写出）每长过 8 MiB 推进一次，长字符串在写的途中推进；展开（`from_items`，数组与字符串都走它，字符串逐码元建节点与展开在同一趟）与键排序前的遍历（`ordered`）每 65536 项推进一次 |
+
+- **推进不补账**：输出的推进点到了就推进一次，下一个点从当前长度往后算。追赶式的写法会在长字符串写完后的下一个检查点把欠的几次一并补上，批次数看起来对，中途却没有推进；变异也就验不出「长字符串写的途中不推进」。
+- **仍是单次调用、没有内部批次的段**：对象键与 JCS 键的排序（一次 n log n）、UTF-16 / UTF-8 整串转换（一次线性）、浮点解析。它们的规模都由已推进的上一段（解析、遍历）限定，不再随某一段单独放大。
+- **用例**：
+  - `legacy::settle::tests::fts_state_beyond_its_rows_is_bound`：FTS optimize、merge 不变；rank 设置改了变、删掉又不变；索引与行对不上（codex 的构造）变。
+  - `w4_gate_r3::an_fts_index_out_of_step_with_its_rows_is_seen`：codex 的正式链路反例（2.x 的 `IN (SELECT … MATCH …)` 命中 1 → 0，判「变了」）。
+  - `jsjson::progress_tests` 新增六条：长字符串与大量值的输出（`stringify`、JCS 各两条，计量只装在输出那一段）、展开、键排序前的遍历。
+  - `legacy::tests::a_large_payload_reports_its_parse_and_output`：codex 的正式 SQL 函数补验，约 17 MiB 的 payload 解析推进 2 次、输出再推进 2 次。
+- **变异**：`output/w4a-evidence/mutations-r5/`。`mut-w4a-r5-store.py` 验本轮修订；之前的八份脚本在新候选上重跑。
+
+### 第五轮的变异（候选 da38ddb）
+
+| 证据（`output/w4a-evidence/`） | 条数 | 结论 |
+| ------------------------------ | ---- | ---- |
+| `r5-w4a-gate-r4-store-mutation-evidence.json`（本轮新增，`mut-w4a-r5-store.py`） | 7 | 7 RED |
+| `r5-w4a-gate-r3-store-mutation-evidence.json`（`mut-w4a-r4-store.py` 重跑） | 10 | 10 RED |
+| `r5-w4a-gate-r2-store-mutation-evidence.json`（`mut-w4a-r3-store.py` 重跑） | 13 | 13 RED |
+| `r5-w4a-gate-store-mutation-evidence.json`（`mut-w4a-r2-store.py` 重跑） | 10 | 10 RED |
+| `r5-w4a-gate-state-mutation-evidence.json`（`mut-w4a-r2-state.py` 重跑） | 1 | 1 RED |
+| `r5-p2gate-mutation-evidence.json`（重跑） | 13 | 13 RED |
+| `r5-w4a-store-mutation-evidence.json`（重跑） | 14 | 14 RED |
+| `r5-w4a-state-mutation-evidence.json`（重跑） | 11 | 11 RED |
+| `r5-w4a-setup-mutation-evidence.json`（重跑） | 2 | 2 RED |
+
+九份证据记录的源码 sha256 都与 da38ddb 的对应文件一致，复原套件全绿；一遍跑完，没有存活。
 
 ## 真实数据演练（W3i，用户 2026-10-07 授权）
 

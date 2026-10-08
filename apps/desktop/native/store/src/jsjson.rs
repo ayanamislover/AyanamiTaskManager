@@ -66,6 +66,9 @@ impl Object {
         let mut indices = Vec::new();
         let mut rest = Vec::new();
         for (i, (key, _)) in self.entries.iter().enumerate() {
+            if (i + 1).is_multiple_of(crate::progress::VALUE_NODES) {
+                crate::progress::pulse();
+            }
             match array_index(key) {
                 Some(n) => indices.push((n, i)),
                 None => rest.push(i),
@@ -80,9 +83,13 @@ impl Object {
             .collect()
     }
 
+    /// 按下标展开成对象（`{ ...数组 }`、`{ ...字符串 }`），每 [`crate::progress::VALUE_NODES`] 项推进一次工作量。
     fn from_items(items: impl IntoIterator<Item = usize>) -> Object {
         let mut o = Object::default();
         for (i, v) in items.into_iter().enumerate() {
+            if (i + 1).is_multiple_of(crate::progress::VALUE_NODES) {
+                crate::progress::pulse();
+            }
             o.set(i.to_string().encode_utf16().collect(), v);
         }
         o
@@ -159,12 +166,9 @@ impl Doc {
         match root.map(|r| self.take(r)) {
             Some(Node::Object(o)) => o,
             Some(Node::Array(items)) => Object::from_items(items),
+            // 逐个码元建节点与展开是同一趟（`from_items` 里推进），不先整串建完再展开。
             Some(Node::String(units)) => {
-                let items: Vec<usize> = units
-                    .into_iter()
-                    .map(|u| self.push(Node::String(vec![u])))
-                    .collect();
-                Object::from_items(items)
+                Object::from_items(units.into_iter().map(|u| self.push(Node::String(vec![u]))))
             }
             _ => Object::default(),
         }
@@ -178,12 +182,14 @@ impl Doc {
             Punct(&'static str),
         }
         let mut out = String::new();
+        let mut next = crate::progress::PARSE_BYTES;
         let mut tasks = vec![Task::Value(root)];
         while let Some(task) = tasks.pop() {
+            emitted(&out, &mut next);
             match task {
                 Task::Punct(p) => out.push_str(p),
                 Task::Key(k) => {
-                    write_string(&mut out, k);
+                    write_string(&mut out, k, &mut next);
                     out.push(':');
                 }
                 Task::Value(i) => match &self.nodes[i] {
@@ -191,7 +197,7 @@ impl Doc {
                     Node::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
                     Node::Number(x) if x.is_finite() => out.push_str(&number_to_string(*x)),
                     Node::Number(_) => out.push_str("null"),
-                    Node::String(units) => write_string(&mut out, units),
+                    Node::String(units) => write_string(&mut out, units, &mut next),
                     Node::Array(items) => {
                         out.push('[');
                         tasks.push(Task::Punct("]"));
@@ -478,11 +484,23 @@ impl Parser<'_, '_> {
     }
 }
 
+/// 输出长到 `next` 时推进一次工作量，下一次在再长 [`crate::progress::PARSE_BYTES`] 字节处（W4 关口第四轮 P2-W4A-01）：
+/// 数据库里的 payload 不经文件上限，展开后的输出可以很长。一次写很多的地方（长字符串）在写的途中调它；
+/// 事后的调用不补推进，漏了中途的计量就少推进。
+#[inline]
+fn emitted(out: &str, next: &mut usize) {
+    if out.len() >= *next {
+        crate::progress::pulse();
+        *next = out.len() + crate::progress::PARSE_BYTES;
+    }
+}
+
 /// `QuoteJSONString`：短转义；其余控制字符和落单的代理项用小写四位十六进制转义；成对的代理项输出字符本身。
-fn write_string(out: &mut String, units: &[u16]) {
+fn write_string(out: &mut String, units: &[u16], next: &mut usize) {
     out.push('"');
     let mut i = 0;
     while i < units.len() {
+        emitted(out, next);
         let u = units[i];
         match u {
             0x08 => out.push_str("\\b"),
@@ -731,20 +749,21 @@ pub fn parse_value(text: &str) -> Result<Option<Value>, ValueError> {
 /// RFC 8785（JCS）：对象的键按 UTF-16 码元排序，字符串与数字按 `JSON.stringify` 输出，没有空白。
 /// 非有限数字（JSON 里没有，只可能来自构造的值）按 `JSON.stringify` 输出 `null`。
 pub fn jcs(v: &Value) -> String {
-    fn go(v: &Value, out: &mut String) {
+    fn go(v: &Value, out: &mut String, next: &mut usize) {
+        emitted(out, next);
         match v {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
             Value::Number(x) if x.is_finite() => out.push_str(&number_to_string(*x)),
             Value::Number(_) => out.push_str("null"),
-            Value::String(s) => write_string(out, &s.encode_utf16().collect::<Vec<_>>()),
+            Value::String(s) => write_string(out, &s.encode_utf16().collect::<Vec<_>>(), next),
             Value::Array(items) => {
                 out.push('[');
                 for (n, item) in items.iter().enumerate() {
                     if n > 0 {
                         out.push(',');
                     }
-                    go(item, out);
+                    go(item, out, next);
                 }
                 out.push(']');
             }
@@ -759,16 +778,16 @@ pub fn jcs(v: &Value) -> String {
                     if n > 0 {
                         out.push(',');
                     }
-                    write_string(out, key);
+                    write_string(out, key, next);
                     out.push(':');
-                    go(value, out);
+                    go(value, out, next);
                 }
                 out.push('}');
             }
         }
     }
     let mut out = String::new();
-    go(v, &mut out);
+    go(v, &mut out, &mut crate::progress::PARSE_BYTES.clone());
     out
 }
 
@@ -826,6 +845,56 @@ mod progress_tests {
     fn many_members_report_their_bytes() {
         let members = PARSE_BYTES / 5 + 1;
         parse_moves(format!("[{}true]", "true,".repeat(members)), 1);
+    }
+
+    /// 第四轮：输出与展开各自推进，只在那一段装计量（解析在计量之外做完）。
+    #[test]
+    fn a_long_string_reports_its_output() {
+        let mut doc = super::Doc::default();
+        let root = doc
+            .parse_into(&format!("[\"{}\"]", "a".repeat(2 * PARSE_BYTES)))
+            .unwrap()
+            .unwrap();
+        let work = work_of(|| doc.stringify(root));
+        assert!(work >= 2, "{work}");
+    }
+
+    #[test]
+    fn many_values_report_their_output() {
+        let mut doc = super::Doc::default();
+        let root = doc
+            .parse_into(&format!("[{}true]", "true,".repeat(PARSE_BYTES / 5 + 1)))
+            .unwrap()
+            .unwrap();
+        let work = work_of(|| doc.stringify(root));
+        assert!(work >= 1, "{work}");
+    }
+
+    #[test]
+    fn a_long_jcs_string_reports_its_output() {
+        let v = super::Value::String("a".repeat(2 * PARSE_BYTES));
+        let work = work_of(|| super::jcs(&v));
+        assert!(work >= 2, "{work}");
+    }
+
+    #[test]
+    fn many_jcs_values_report_their_output() {
+        let v = super::Value::Array(vec![super::Value::Bool(true); PARSE_BYTES / 4]);
+        let work = work_of(|| super::jcs(&v));
+        assert!(work >= 1, "{work}");
+    }
+
+    #[test]
+    fn spreading_reports_its_items() {
+        let work = work_of(|| super::Object::from_items(0..3 * VALUE_NODES));
+        assert!(work >= 3, "{work}");
+    }
+
+    #[test]
+    fn ordering_keys_reports_its_entries() {
+        let o = super::Object::from_items(0..3 * VALUE_NODES);
+        let work = work_of(|| o.ordered().len());
+        assert!(work >= 3, "{work}");
     }
 
     #[test]
