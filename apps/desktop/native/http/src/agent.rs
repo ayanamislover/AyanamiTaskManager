@@ -40,7 +40,8 @@ impl Surface {
         tool: &'static Tool,
         checked: Checked,
     ) -> Result<Value, Envelope> {
-        let a = Args(&checked.args);
+        let defaulted = self.connection_session(p, tool, &checked.args);
+        let a = Args(defaulted.as_ref().unwrap_or(&checked.args));
         let out = match tool.name {
             "atm_brief" => self.brief(p, &a).inspect(|_| self.touch(p, &a)),
             "atm_task_list" => self.task_list(p, &a).inspect(|_| self.touch(p, &a)),
@@ -73,6 +74,28 @@ impl Surface {
                 args,
             },
         )
+    }
+
+    /// 无参的 `atm_brief()`、`atm_task_list` 既没带 project 也没带 session 时，用本连接的默认 session
+    /// （与写入经 resolve 拿到的同一个，A1：只给白名单单对话客户端）。上下文压缩后照 instructions 调
+    /// 无参的 brief 就能拿回 working set，不用再找 session（U-2 W7）。其余情况原样不动。
+    fn connection_session(
+        &self,
+        p: &Principal,
+        tool: &'static Tool,
+        args: &Map<String, Value>,
+    ) -> Option<Map<String, Value>> {
+        if !matches!(tool.name, "atm_brief" | "atm_task_list")
+            || args.contains_key("session")
+            || args.contains_key("project")
+        {
+            return None;
+        }
+        let single = crate::write::single_conversation(p.client_group());
+        let session = self.svc.connection_session(p, single).ok().flatten()?;
+        let mut filled = args.clone();
+        filled.insert("session".into(), Value::String(session));
+        Some(filled)
     }
 
     /// owner 的读也续租（R11 P3）：读成功、而且带着读者自己的 session 时，刷新心跳并给它的领取续租。

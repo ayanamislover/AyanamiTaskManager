@@ -774,3 +774,178 @@ fn shell_wrappers_are_skipped_in_the_client_identity() {
         "{client}"
     );
 }
+
+// ---- U-2 金标脚本（11 §5）-----------------------------------------------------------------------
+
+/// Agent 替身（`mcp-shim/examples/agent-standin.rs`）：它拉起桥，桥认它做客户端。杀掉一个、再起一个，
+/// 就是「Agent 崩溃后重启」——新替身是另一个进程，旧会话的客户端已经退出。
+fn standin() -> PathBuf {
+    shim();
+    let exe = shim_crate()
+        .join("target")
+        .join("debug")
+        .join("examples")
+        .join("agent-standin.exe");
+    assert!(exe.is_file());
+    exe
+}
+
+/// 一个经替身连上的 Agent：只记它自己发出的 tools/call 次数，每次都必须成功。
+struct Agent {
+    b: Bridge,
+    calls: usize,
+}
+
+impl Agent {
+    fn start(r: &Rig, client: &str) -> Agent {
+        let mut c = Command::new(standin());
+        c.arg(&shim().0)
+            .args(["--profile", "core"])
+            .env("ATM3_DATA_DIR", &r.root)
+            .env_remove("ATM_DATA_DIR");
+        let mut b = Bridge::spawn(c);
+        b.initialize(client);
+        Agent { b, calls: 0 }
+    }
+
+    fn call(&mut self, tool: &str, args: Value) -> Value {
+        self.calls += 1;
+        let r = self.b.call(tool, args);
+        assert_ne!(r["isError"], json!(true), "{tool}: {r}");
+        r["structuredContent"].clone()
+    }
+
+    /// 一个流程：`run` 里发出的调用数必须恰好是 11 §1「提案后」那一列。
+    fn flow(&mut self, name: &str, proposed: usize, run: impl FnOnce(&mut Agent)) {
+        let before = self.calls;
+        run(self);
+        assert_eq!(
+            self.calls - before,
+            proposed,
+            "{name}: 11 §1 的提案后调用数是 {proposed}"
+        );
+    }
+}
+
+/// 旁路读任务状态：直接对服务调 atm_task_get，不经桥，不算进 Agent 的调用数。
+fn status_of(r: &Rig, project: &str, key: &str) -> String {
+    let got = call(
+        &r.w,
+        "core",
+        "atm_task_get",
+        json!({"project": project, "task_key": key}),
+    );
+    assert_ne!(got["isError"], json!(true), "{got}");
+    got["structuredContent"]["status"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{got}"))
+        .to_owned()
+}
+
+/// U-2：不经 LLM，按 11 §1 每个流程的最少调用序列，经真实桥执行，参数只用「提案后必填」。全部成功，
+/// 而且每个流程的调用数恰好是提案后那一列：任何一步要多补一次调用（先 ready、先 claim、带版本、
+/// 再 begin、补 outcome……），这里的某一次调用就会失败。
+///
+/// 顺序：W2 新仓库开工 → W3 建 5 个任务（带依赖与 2 条检查项）→ W4 开工并带证据完成 → W5 进度与决策
+/// → W6 等用户 → W9 结束 → W1 已有项目开工 → W7 压缩后继续 → W8 崩溃后重启，再写自己领取的任务。
+#[test]
+fn u2_golden_scripts_take_the_proposed_number_of_calls() {
+    let r = rig("bridge-golden");
+    let repo = r.w.dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let cwd = repo.display().to_string();
+    let mut a = Agent::start(&r, "claude-code");
+    let mut project = String::new();
+
+    a.flow("W2 新仓库首次开工", 1, |a| {
+        let begun = a.call(
+            "atm_begin",
+            json!({"agent_id": "claude-code", "cwd": cwd, "allow_project_create": true}),
+        );
+        assert!(begun["session"].is_string(), "{begun}");
+        project = begun["project"]["code"]
+            .as_str()
+            .or(begun["project"].as_str())
+            .unwrap_or_else(|| panic!("{begun}"))
+            .to_owned();
+    });
+    let mut keys = Vec::new();
+    a.flow("W3 建 5 个任务（带依赖）", 1, |a| {
+        let created = a.call(
+            "atm_task_create",
+            json!({"items": [
+                {"title": "A", "checklist": [{"title": "一"}, {"title": "二"}]},
+                {"title": "B", "depends_on": ["1"]},
+                {"title": "C", "depends_on": ["1"]},
+                {"title": "D", "depends_on": ["2", "3"]},
+                {"title": "E"}
+            ]}),
+        );
+        // 回执的 refs 把批内序号（没写 client_ref 时）映射到 key（11 P2-4）。
+        keys = (1..=5)
+            .map(|i| created["refs"][i.to_string()].as_str().unwrap().to_owned())
+            .collect();
+    });
+    assert_eq!(keys.len(), 5);
+    a.flow(
+        "W4 领任务 → 带证据完成（2 条检查项）",
+        2,
+        |a| {
+            a.call(
+                "atm_task_patch",
+                json!({"task_key": keys[0], "operation": "start"}),
+            );
+            a.call(
+            "atm_task_patch",
+            json!({"task_key": keys[0], "operation": "complete", "evidence": ["cargo test 全绿"],
+                   "checklist": [{"item": 1, "status": "DONE"}, {"item": 2, "status": "DONE"}]}),
+        );
+        },
+    );
+    assert_eq!(status_of(&r, &project, &keys[0]), "DONE");
+    a.flow("W5 记进度 + 记决策", 2, |a| {
+        a.call("atm_progress_add", json!({"summary": "A 做完了"}));
+        a.call(
+            "atm_record",
+            json!({"kind": "DECISION", "title": "用金标脚本", "summary": "U-2 经真实桥"}),
+        );
+    });
+    a.flow("W6 等用户", 1, |a| {
+        a.call(
+            "atm_task_patch",
+            json!({"task_key": keys[1], "operation": "wait_user", "waiting_for": "请确认 B 的口径"}),
+        );
+    });
+    assert_eq!(status_of(&r, &project, &keys[1]), "WAITING_USER");
+    a.flow("W9 结束", 1, |a| {
+        a.call("atm_end", json!({"summary": "今天到这里"}));
+    });
+
+    a.flow("W1 已有项目开工", 1, |a| {
+        a.call("atm_begin", json!({"agent_id": "claude-code", "cwd": cwd}));
+    });
+    a.flow("W7 上下文压缩后继续", 1, |a| {
+        let brief = a.call("atm_brief", json!({}));
+        assert!(brief.is_object(), "{brief}");
+    });
+    // 开工一个任务，然后 Agent 崩溃：替身被杀，桥随 stdin 关闭退出。
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": keys[2], "operation": "start"}),
+    );
+    drop(a);
+
+    let mut a = Agent::start(&r, "claude-code");
+    a.flow("W8 崩溃后重启", 1, |a| {
+        let begun = a.call("atm_begin", json!({"agent_id": "claude-code", "cwd": cwd}));
+        // 客户端已经退出的旧 session 就地关闭并被接上（R11 P1-3），领取跟着过来。
+        assert_eq!(begun["outcome"], json!("SUCCESSOR"), "{begun}");
+        assert_eq!(begun["own"], json!([keys[2]]), "{begun}");
+    });
+    // 自己领取的任务照常写：领取随 auto resume 接过来，不报 CLAIM_NOT_OWNED。
+    a.call(
+        "atm_task_patch",
+        json!({"task_key": keys[2], "operation": "complete", "evidence": ["重启后完成"]}),
+    );
+    assert_eq!(status_of(&r, &project, &keys[2]), "DONE");
+}

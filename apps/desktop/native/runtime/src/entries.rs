@@ -72,7 +72,11 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     std::fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
     let store = Store::open(&p.layout.database(), Config::default())
         .map_err(|e| format!("open {}: {e}", p.layout.database().display()))?;
-    let svc = Arc::new(Service::new(store).with_backups_root(p.layout.root.join("backups")));
+    let svc = Arc::new(
+        Service::new(store)
+            .with_backups_root(p.layout.root.join("backups"))
+            .with_liveness(Arc::new(atm_jobs::liveness::alive)),
+    );
     let token = crate::rng::hex(32);
     let instance_id = crate::rng::hex(16);
     let lease_generation = next_lease_generation(&runtime_dir);

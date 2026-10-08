@@ -166,6 +166,24 @@ fn knowledge(tx: &Transaction<'_>) -> Result<Target, DomainError> {
 }
 
 impl Service {
+    /// 本连接组的默认 session（与写入的 resolve 同一条规则，A1）：给无参的读用，例如上下文压缩后的
+    /// `atm_brief()`（11 §4）。是不是白名单里的单对话客户端由调用方判定（`single_conversation`）；
+    /// 不是，或者没有连接组身份，就没有默认 session。
+    pub fn connection_session(
+        &self,
+        principal: &Principal,
+        single_conversation: bool,
+    ) -> Result<Option<String>, DomainError> {
+        capability::require(principal, Capability::SessionRead)?;
+        let Some(group) = principal.client_group().filter(|_| single_conversation) else {
+            return Ok(None);
+        };
+        let group = group.to_owned();
+        self.store()
+            .read(move |tx| default_session(tx, &group))
+            .map_err(read_error)
+    }
+
     /// 在一个只读快照里判定 session 与分支目标。
     pub fn resolve(
         &self,

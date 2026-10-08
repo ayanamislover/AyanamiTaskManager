@@ -1007,6 +1007,7 @@ impl Service {
     pub fn begin(&self, principal: &Principal, req: BeginRequest) -> Result<Written, DomainError> {
         capability::require(principal, Capability::SessionBegin)?;
         let b = normalize(req, principal.client_group().map(str::to_owned))?;
+        self.close_exited_clients(&b)?;
         let outcome = self
             .store()
             .write(move |tx| begin_tx(tx, &b))
@@ -1822,6 +1823,16 @@ impl Service {
         if decided.is_empty() {
             return Ok(SweepReport::default());
         }
+        self.close_sessions(decided, at)
+    }
+
+    /// 把判定为客户端退出或心跳超时的 ONLINE session 关闭（周期扫描与 begin 共用）。每一条都先核对读快照之后
+    /// 没有被写过、也还没关闭；领取不释放，等接续时转移或按过期接手。
+    fn close_sessions(
+        &self,
+        decided: Vec<(String, String, String, &'static str, String)>,
+        at: Timestamp,
+    ) -> Result<SweepReport, DomainError> {
         self.store()
             .write(move |tx| {
                 let at_iso = at.to_string();
@@ -1872,6 +1883,50 @@ impl Service {
                 Ok(report)
             })
             .map_err(write_error)
+    }
+
+    /// R11 P1-3 第 2 条：客户端进程一退出就关闭它的 session。周期扫描每分钟才看一次；Agent 崩溃后马上重启时，
+    /// auto resume 要先看到旧 session 已经按 CLIENT_EXITED 关闭才接得上（否则新 session 写自己领取的任务就是
+    /// CLAIM_NOT_OWNED，U-2 W8）。只看同 agent、同 role、同 cwd、带客户端身份的 ONLINE session，本连接组自己的
+    /// 不看；存活由 [`Service::with_liveness`] 给的探测判定，没给就什么也不做。客户端还活着的永远不关。
+    fn close_exited_clients(&self, b: &Begin) -> Result<(), DomainError> {
+        if !matches!(b.resume(), Resume::Auto) {
+            return Ok(());
+        }
+        let Some(alive) = self.liveness.clone() else {
+            return Ok(());
+        };
+        let (agent, role, cwd, own) = (
+            b.agent.clone(),
+            b.role.clone(),
+            b.req.cwd.clone(),
+            b.client_identity.clone(),
+        );
+        let rows: Vec<(String, String, String, String)> = self
+            .store()
+            .read(move |tx| {
+                tx.prepare(
+                    "SELECT s.project_id, s.id, s.client_identity, COALESCE(s.heartbeat_at, s.updated_at)
+                     FROM agent_sessions s JOIN projects p ON p.id = s.project_id
+                     WHERE p.lifecycle = 'ACTIVE' AND s.connection_state = 'ONLINE'
+                       AND s.agent_id = ?1 AND s.role = ?2 AND s.cwd IS ?3
+                       AND s.client_identity IS NOT NULL AND s.client_identity IS NOT ?4",
+                )?
+                .query_map(params![agent, role, cwd, own], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(read_error)?;
+        let decided: Vec<_> = rows
+            .into_iter()
+            .filter(|(_, _, identity, _)| alive(identity) == Some(false))
+            .map(|(project, id, _, last)| (project, id, b.agent.clone(), "CLIENT_EXITED", last))
+            .collect();
+        if !decided.is_empty() {
+            self.close_sessions(decided, now())?;
+        }
+        Ok(())
     }
 
     /// atm_end（02 §2.6）。心跳超时的旧 session 有唯一在线 successor 时结束的是 successor，没有就 SESSION_CLOSED（S-021）。

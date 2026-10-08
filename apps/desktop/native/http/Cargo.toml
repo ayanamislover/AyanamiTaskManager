@@ -22,3 +22,5 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "
 [dev-dependencies]
 # 用例核对整库零写入（与 service 同一个版本，不新增下载）。
 rusqlite = "0.39"
+# 用例里的服务与常驻进程用同一个客户端存活探测（R11 A4）。
+atm-jobs = { path = "../jobs" }

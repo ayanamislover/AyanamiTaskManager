@@ -61,7 +61,11 @@ pub fn world_with(name: &str, calls: Calls) -> World {
             )
         })
         .unwrap();
-    let svc = Arc::new(Service::new(store).with_backups_root(dir.join("backups")));
+    let svc = Arc::new(
+        Service::new(store)
+            .with_backups_root(dir.join("backups"))
+            .with_liveness(Arc::new(atm_jobs::liveness::alive)),
+    );
     let agent = Principal::authenticated_agent(None);
     let mut begin = BeginRequest::new("claude-code");
     begin.title = Some("演示".into());

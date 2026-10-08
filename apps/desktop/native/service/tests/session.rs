@@ -627,6 +627,73 @@ fn p1_3_auto_resume() {
     );
 }
 
+/// R11 P1-3 第 2 条「客户端进程一退出就关闭」：不等周期扫描，begin 自己把客户端已经退出的同 agent / role / cwd
+/// ONLINE session 按 CLIENT_EXITED 关掉，于是 auto resume 立即接上它（Agent 崩溃后马上重启，U-2 W8）。
+/// 客户端还活着的、探测说不清的（`None`）、别的 cwd 的、resume:false 的，都不动。
+#[test]
+fn p1_3_a_crashed_client_is_closed_and_resumed_at_begin() {
+    let w = world("ss-crash");
+    let w = World {
+        svc: w.svc.with_liveness(std::sync::Arc::new(|id: &str| {
+            if id.starts_with("pid:dead") {
+                Some(false)
+            } else if id.starts_with("pid:live") {
+                Some(true)
+            } else {
+                None
+            }
+        })),
+        ..w
+    };
+    w.fresh_fixture();
+    let at = |cwd: &str| BeginRequest {
+        cwd: Some(cwd.into()),
+        ..begin_req("codex")
+    };
+    let crashed = sid(&w.svc.begin(&agent_in("pid:dead-1"), at("D:/repo")).unwrap());
+    let alive = sid(&w.svc.begin(&agent_in("pid:live-1"), at("D:/live")).unwrap());
+    let unknown = sid(&w
+        .svc
+        .begin(&agent_in("pid:unknown-1"), at("D:/unknown"))
+        .unwrap());
+    let elsewhere = sid(&w
+        .svc
+        .begin(&agent_in("pid:dead-2"), at("D:/other"))
+        .unwrap());
+
+    // resume:false 不碰别人：崩溃的那个还是 ONLINE。
+    let no = w
+        .svc
+        .begin(
+            &agent_in("pid:live-9"),
+            BeginRequest {
+                resume: Some(Resume::No),
+                ..at("D:/repo")
+            },
+        )
+        .unwrap();
+    assert_eq!(no.result["outcome"], "CREATED");
+    let state = |id: &str| {
+        w.scalar(&format!("SELECT connection_state || ':' || COALESCE(close_reason, '') FROM agent_sessions WHERE id = '{id}'"))
+    };
+    assert_eq!(state(&crashed), "ONLINE:");
+
+    // 新进程在同一个 cwd begin：崩溃的就地关闭并被接上。
+    let n = w.svc.begin(&agent_in("pid:live-2"), at("D:/repo")).unwrap();
+    assert_eq!(n.result["outcome"], "SUCCESSOR", "{}", n.result);
+    assert_eq!(n.result["predecessorSessionId"], crashed.as_str());
+    assert_eq!(state(&crashed), "CLOSED:CLIENT_EXITED");
+    // 别的 cwd 下客户端也退出了的那个不在这次 begin 的范围里，留给扫描。
+    assert_eq!(state(&elsewhere), "ONLINE:");
+
+    // 客户端还活着、探测说不清：都不关、不接回。
+    for (cwd, id) in [("D:/live", &alive), ("D:/unknown", &unknown)] {
+        let r = w.svc.begin(&agent_in("pid:live-3"), at(cwd)).unwrap();
+        assert_eq!(r.result["outcome"], "CREATED", "{cwd}");
+        assert_eq!(state(id), "ONLINE:", "{cwd}");
+    }
+}
+
 /// R11 A1：白名单客户端的同一连接组再 begin → 同一个 PRIMARY（CURRENT）；resume:false 新建；
 /// 非白名单不接回；REVIEWER 不替换 PRIMARY。
 #[test]

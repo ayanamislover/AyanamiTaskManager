@@ -143,6 +143,9 @@ pub struct Written {
 /// 读侧用的时钟（游标过期）。测试可以换成固定时间。
 pub type Clock = std::sync::Arc<dyn Fn() -> Timestamp + Send + Sync>;
 
+/// 客户端进程还在不在：参数是 `X-ATM-Client` 记下的身份；`None` 是说不清（格式不对、没有身份）。
+pub type ClientLiveness = std::sync::Arc<dyn Fn(&str) -> Option<bool> + Send + Sync>;
+
 pub struct Service {
     store: Store,
     clock: Option<Clock>,
@@ -152,6 +155,9 @@ pub struct Service {
     pub(crate) backup_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// 最近几次备份撤回的结果（有界诊断，`list_backups` 返回；W2 peer r2 P1-02）。
     pub(crate) withdrawals: std::sync::Mutex<std::collections::VecDeque<Value>>,
+    /// 客户端进程还在不在（`X-ATM-Client` 的 `<pid>:<创建时间>`；R11 A4）。begin 用它立即关闭客户端已经
+    /// 退出的旧 session（R11 P1-3 第 2 条）；没给就只靠周期扫描。
+    pub(crate) liveness: Option<ClientLiveness>,
 }
 
 impl Service {
@@ -162,7 +168,14 @@ impl Service {
             backups_root: None,
             backup_hook: None,
             withdrawals: Default::default(),
+            liveness: None,
         }
+    }
+
+    /// 客户端存活探测（常驻进程给 `atm_jobs::liveness::alive`）。见 `liveness` 字段。
+    pub fn with_liveness(mut self, alive: ClientLiveness) -> Self {
+        self.liveness = Some(alive);
+        self
     }
 
     /// 测试用：见 `backup_hook`。
