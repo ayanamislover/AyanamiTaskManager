@@ -190,26 +190,26 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 <!-- MCP_TOOL_STATS:BEGIN -->
 
+<!-- prettier-ignore-start -->
+
 ### MCP 工具面统计（生成）
 
-> 以下数字由 `ToolDefinitionRegistry` 的已发布工具和 `schema-budget.ts` 生成；运行 `pnpm generate:mcp-contracts` 更新。
+> 由 `atm-http` 的工具表生成，逐项含义见 [docs/generated/mcp-tool-contracts.md](docs/generated/mcp-tool-contracts.md)。重新生成：`ATM_DOCS_BLESS=1 cargo test -p atm-http --test docs`。
 
-<!-- prettier-ignore -->
 | 指标 | 当前值 |
 | --- | ---: |
-| MCP surface | v5 |
-| 正式 Profile 数 | 3 |
-| 正式工具总数 | 15 |
-| 每个 Profile schema 上限 | 10,240 bytes |
-| 每个 Profile 预留 | 512 bytes |
-| 每个 Profile 可用预算 | 9,728 bytes |
+| MCP surface | v6 |
+| Profile 数 | 3 |
+| 发布的工具（去重） | 13 |
+| 只收不发布的旧名（`atm_delta`、`atm_feedback`） | 2 |
 
-<!-- prettier-ignore -->
-| Profile | 工具数 | Descriptor bytes | 可用预算 | 余量 |
+| Profile | 工具数 | tools 字节 | 预算 | 余量 |
 | --- | ---: | ---: | ---: | ---: |
-| core | 6 | 8,016 bytes | 9,728 bytes | 1,712 bytes |
-| memory | 8 | 9,198 bytes | 9,728 bytes | 530 bytes |
-| actions | 1 | 8,164 bytes | 9,728 bytes | 1,564 bytes |
+| core | 9 | 15,976 bytes | 16,180 bytes | 204 bytes |
+| memory | 4 | 4,280 bytes | 9,728 bytes | 5,448 bytes |
+| actions | 1 | 4,178 bytes | 9,728 bytes | 5,550 bytes |
+
+<!-- prettier-ignore-end -->
 
 <!-- MCP_TOOL_STATS:END -->
 

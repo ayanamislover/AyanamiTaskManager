@@ -17,6 +17,7 @@ apps/desktop/native/service/tests/data/knowledge-v1-vectors.json
 apps/desktop/native/service/tests/data/agenttask-vectors.json
 # 文末矩阵由 spec_trace 测试生成并逐字核对（ATM_TRACE_BLESS=1 重写）。
 apps/desktop/native/service/TRACE.md
-docs/generated/mcp-tool-contracts.md
+# 由 atm-http 的 docs 用例生成并逐字核对（ATM_DOCS_BLESS=1 重写）。
+docs/generated/
 apps/mobile/android
 .local

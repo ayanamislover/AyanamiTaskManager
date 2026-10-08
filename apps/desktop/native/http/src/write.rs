@@ -819,7 +819,7 @@ impl Link<'_> {
 // ---- task_patch 的逐条映射 ---------------------------------------------------------------------
 
 /// 复合操作：服务层各是独立入口，只能单条（W-050）。
-const COMPOSITE: &[&str] = &[
+pub const COMPOSITE: &[&str] = &[
     "verify_and_complete",
     "review_request",
     "review_submit",
@@ -829,7 +829,7 @@ const COMPOSITE: &[&str] = &[
 ];
 
 /// 每条 item 都能写的字段。
-const COMMON: &[&str] = &[
+pub const COMMON: &[&str] = &[
     "task_key",
     "operation",
     "expected_version",
@@ -837,7 +837,7 @@ const COMMON: &[&str] = &[
 ];
 
 /// 一个 operation 额外接受的字段，与其中必填的。
-fn operation_fields(op: &str) -> (&'static [&'static str], &'static [&'static str]) {
+pub fn operation_fields(op: &str) -> (&'static [&'static str], &'static [&'static str]) {
     match op {
         "block" => (&["blocked_reason"], &["blocked_reason"]),
         "wait_agent" | "wait_user" => (&["waiting_for"], &["waiting_for"]),

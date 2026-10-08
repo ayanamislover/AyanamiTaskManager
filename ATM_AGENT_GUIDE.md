@@ -110,154 +110,119 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 <!-- WORK_ITEM_OPERATIONS:BEGIN -->
 
+<!-- prettier-ignore-start -->
+
 ### 状态与操作（自动生成）
 
-> 本表由 canonical `WorkItemOperations` registry 生成；不要手工维护状态机副本。
+> 由 `atm_domain::work` 的状态机生成。这里只有状态机这一层；依赖、领取、完成门等前置条件另行判定，被拒时照错误里的 `fix` 执行。
 
-<!-- prettier-ignore -->
-| 状态 | 显示名 | 合法操作 |
+| 状态 | 可用操作 → 之后的状态 |
+| --- | --- |
+| `BACKLOG` | `claim` → `CLAIMED`、`start` → `IN_PROGRESS`、`ready` → `READY`、`complete` → `DONE`、`cancel` → `CANCELLED`、`edit` → `BACKLOG` |
+| `READY` | `claim` → `CLAIMED`、`start` → `IN_PROGRESS`、`ready` → `READY`、`complete` → `DONE`、`cancel` → `CANCELLED`、`edit` → `READY` |
+| `CLAIMED` | `claim` → `CLAIMED`、`start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`complete` → `DONE`、`cancel` → `CANCELLED`、`edit` → `CLAIMED` |
+| `IN_PROGRESS` | `start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`wait_agent` → `WAITING_AGENT`、`wait_user` → `WAITING_USER`、`verify` → `VERIFYING`、`complete` → `DONE`、`cancel` → `CANCELLED`、`edit` → `IN_PROGRESS` |
+| `BLOCKED` | `start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`wait_agent` → `WAITING_AGENT`、`wait_user` → `WAITING_USER`、`complete` → `DONE`、`cancel` → `CANCELLED`、`reopen` → `IN_PROGRESS`、`edit` → `BLOCKED` |
+| `WAITING_AGENT` | `start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`wait_agent` → `WAITING_AGENT`、`verify` → `VERIFYING`、`complete` → `DONE`、`cancel` → `CANCELLED`、`reopen` → `IN_PROGRESS`、`edit` → `WAITING_AGENT` |
+| `WAITING_USER` | `start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`wait_user` → `WAITING_USER`、`verify` → `VERIFYING`、`complete` → `DONE`、`cancel` → `CANCELLED`、`reopen` → `IN_PROGRESS`、`edit` → `WAITING_USER` |
+| `VERIFYING` | `start` → `IN_PROGRESS`、`release` → `READY`、`block` → `BLOCKED`、`wait_agent` → `WAITING_AGENT`、`wait_user` → `WAITING_USER`、`verify` → `VERIFYING`、`complete` → `DONE`、`cancel` → `CANCELLED`、`reopen` → `IN_PROGRESS`、`edit` → `VERIFYING` |
+| `DONE` | `reopen` → `IN_PROGRESS`、`edit` → `DONE` |
+| `CANCELLED` | `reopen` → `BACKLOG`、`edit` → `CANCELLED` |
+
+`IN_PROGRESS` 上的 `claim` 只在同一条会话链的后继会话接回领取时成立，上表没有列出。
+
+| 操作 | 可以从这些状态发起 | 任务被别人领取时拒绝 |
 | --- | --- | --- |
-| `BACKLOG` | 待整理 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
-| `READY` | 可开始 | `claim`, `start`, `ready`, `complete`, `cancel`, `edit` |
-| `CLAIMED` | 已领取 | `claim`, `start`, `release`, `block`, `complete`, `cancel`, `edit` |
-| `IN_PROGRESS` | 进行中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `edit` |
-| `BLOCKED` | 已阻塞 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `complete`, `cancel`, `reopen`, `edit` |
-| `WAITING_USER` | 等待用户 | `start`, `release`, `block`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
-| `WAITING_AGENT` | 等待 Agent | `start`, `release`, `block`, `wait_agent`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
-| `VERIFYING` | 验收中 | `start`, `release`, `block`, `wait_agent`, `wait_user`, `verify`, `complete`, `cancel`, `reopen`, `edit` |
-| `DONE` | 已完成 | `reopen`, `edit` |
-| `CANCELLED` | 已取消 | `reopen`, `edit` |
+| `claim` | `BACKLOG`、`READY`、`CLAIMED`、`IN_PROGRESS` | 否 |
+| `start` | `BACKLOG`、`READY`、`CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 否 |
+| `release` | `CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 否 |
+| `ready` | `BACKLOG`、`READY` | 是 |
+| `block` | `CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 是 |
+| `wait_agent` | `IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`VERIFYING` | 是 |
+| `wait_user` | `IN_PROGRESS`、`BLOCKED`、`WAITING_USER`、`VERIFYING` | 是 |
+| `verify` | `IN_PROGRESS`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 是 |
+| `complete` | `BACKLOG`、`READY`、`CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 是 |
+| `cancel` | `BACKLOG`、`READY`、`CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING` | 是 |
+| `reopen` | `BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING`、`DONE`、`CANCELLED` | 是 |
+| `edit` | `BACKLOG`、`READY`、`CLAIMED`、`IN_PROGRESS`、`BLOCKED`、`WAITING_AGENT`、`WAITING_USER`、`VERIFYING`、`DONE`、`CANCELLED` | 是 |
 
-<!-- prettier-ignore -->
-| 操作 | 显示名 | 可进入的当前状态 | 前置条件 |
-| --- | --- | --- | --- |
-| `claim` | 领取 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS` | DEPENDENCIES_READY, CLAIM_AVAILABLE, SAME_ASSIGNEE_WHEN_RUNNING |
-| `start` | 开始 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | DEPENDENCIES_READY, CLAIM_AVAILABLE |
-| `release` | 释放过期领取 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CLAIM_OWNER |
-| `ready` | 设为就绪 | `BACKLOG`, `READY` | - |
-| `block` | 阻塞 | `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | BLOCKED_REASON |
-| `wait_agent` | 等待 Agent | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_AGENT` | WAITING_FOR |
-| `wait_user` | 等待用户 | `IN_PROGRESS`, `VERIFYING`, `BLOCKED`, `WAITING_USER` | WAITING_FOR |
-| `verify` | 提交验收 | `IN_PROGRESS`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | - |
-| `complete` | 完成 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | COMPLETION_GATE |
-| `cancel` | 取消 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING` | CANCEL_REFERENCES |
-| `reopen` | 重新打开 | `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
-| `edit` | 编辑 | `BACKLOG`, `READY`, `CLAIMED`, `IN_PROGRESS`, `BLOCKED`, `WAITING_AGENT`, `WAITING_USER`, `VERIFYING`, `DONE`, `CANCELLED` | - |
+`claim`、`start`、`release` 本身就是领取规则：能不能接手由领取是否过期、是否同一条会话链决定。
 
-> `COMPLETION_GATE` 在上表之外还要求当前状态属于 `IN_PROGRESS` 或 `VERIFYING`：没开工过的任务不能直接 `complete`，先 `start`。
+#### 自动补 start
+
+下列写入遇到还没开工的任务时，在同一事务里先 `start` 再执行（调用方能领取时）；遇到 `BLOCKED` / `WAITING_*` 不补（`start` 会解除阻塞），被拒时 `fix` 就是那条 `start`。
+
+| 写入 | `BACKLOG` | `READY` | `CLAIMED` | `IN_PROGRESS` | `BLOCKED` | `WAITING_AGENT` | `WAITING_USER` | `VERIFYING` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `block` | 先 start | 先 start | 先 start | — | — | — | — | — |
+| `wait_agent` | 先 start | 先 start | 先 start | — | — | — | 拒绝，fix 给 start | — |
+| `wait_user` | 先 start | 先 start | 先 start | — | — | 拒绝，fix 给 start | — | — |
+| `verify` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | — | — | — |
+| `complete` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | 拒绝，fix 给 start | 拒绝，fix 给 start | — |
+| `verify_and_complete` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | — | — | — |
+
+「—」：不涉及自动 start，按上面的状态表处理。
+
+#### 什么时候要带 `expected_version`
+
+| 写入 | 本会话链持有领取 | 没有持有（别人的任务、未领取） |
+| --- | --- | --- |
+| `claim` | 可省略 | 必填 |
+| `start` | 可省略 | 必填 |
+| `release` | 可省略 | 必填 |
+| `ready` | 可省略 | 必填 |
+| `block` | 可省略 | 必填 |
+| `wait_agent` | 可省略 | 必填 |
+| `wait_user` | 可省略 | 必填 |
+| `verify` | 可省略 | 必填 |
+| `complete` | 可省略 | 必填 |
+| `cancel` | 必填 | 必填 |
+| `reopen` | 必填 | 必填 |
+| `edit` | 必填 | 必填 |
+| `verify_and_complete` | 可省略 | 必填 |
+| `checklist`（1 条） | 可省略 | 必填 |
+| `checklist`（多条） | 可省略 | 必填 |
+| `review_request` | 必填 | 必填 |
+| `review_submit` | 必填 | 必填 |
+
+「持有领取」以执行那一刻为准，包括这次 `claim` / `start` / 自动 start 刚拿到的领取。版本号用上一次回执里的 `entities[].version`，不要自己加一。
+
+<!-- prettier-ignore-end -->
 
 <!-- WORK_ITEM_OPERATIONS:END -->
 
 <!-- TASK_PATCH_COMPOSITE:BEGIN -->
 
-### composite 任务操作（自动生成）
+<!-- prettier-ignore-start -->
 
-上一张表只列状态机操作。`atm_task_patch` 还接受下列 composite 操作，它们**不可与其他操作同批**：
-`items` 只允许一个元素。
+### task_patch 的操作与字段（自动生成）
 
-所有条目共用 `task_key` + `expected_version` 骨架。**`expected_version` 的语义按操作而异**：
-`checklist_single` 比的是那条检查项自己的版本，其余操作都比任务版本。字段名相同不代表语义相同。
+> 由 `atm-http` 的 task_patch 映射生成（`write::COMMON`、`write::operation_fields`、`write::COMPOSITE`）。
 
-#### `verify_and_complete`
+单条直接把字段写在顶层：`{task_key, operation, …}`；多条放进 `items`，每条同形，两种写法不能混用。每条都能写的字段：`task_key`、`operation`、`expected_version`、`takeover_stale`。
 
-一次调用完成 verify 与 complete，省掉中间那次版本读取。
+| operation | 额外字段（粗体必填） | 只能单条 |
+| --- | --- | --- |
+| `start` | — |  |
+| `complete` | `note`、`evidence`、`checklist` |  |
+| `verify` | — |  |
+| `verify_and_complete` | — | 是 |
+| `block` | **`blocked_reason`** |  |
+| `wait_user` | **`waiting_for`** |  |
+| `wait_agent` | **`waiting_for`** |  |
+| `ready` | — |  |
+| `release` | — |  |
+| `claim` | — |  |
+| `cancel` | `cancel_reason`、`duplicate_of`、`superseded_by` |  |
+| `reopen` | — |  |
+| `edit` | `title`、`description`、`acceptance`、`target_date`、`parent_key`、`assignee_agent_id`、`depends_on`、`discovered_from`、`expected_fields` |  |
+| `checklist` | `checklist`、`evidence` | 是 |
+| `review_request` | **`parent_checklist_id`**、**`expected_parent_checklist_version`**、**`candidate_hashes`** | 是 |
+| `review_submit` | **`request_key`**、**`verdict`**、**`candidate_hashes`**、**`evidence`** | 是 |
 
-```json
-{
-  "operation": "verify_and_complete",
-  "task_key": "ATM-T-0001",
-  "expected_version": 7
-}
-```
+只能单条的操作不放进多条的 `items`，也不收 `takeover_stale`。旧名 `checklist_single`、`checklist_batch` 照收，等同于 `checklist`（按条数分派）。
 
-#### `checklist_single`
-
-改一条检查项。`checklist_items` 必须恰好一个元素，不是把 id 放到条目顶层。**`expected_version` 是检查项自己的版本，不是任务版本**（`atm_task_get(view="full")` 的 `checklist[].version`）。`task_key` 会校验归属，检查项不属于它就报 `CHECKLIST_TASK_MISMATCH`。
-
-```json
-{
-  "operation": "checklist_single",
-  "task_key": "ATM-T-0001",
-  "expected_version": 0,
-  "checklist_items": [
-    {
-      "id": "01M0W8440REDVKEFXQ9TW54HQX",
-      "status": "DONE",
-      "evidence": [
-        {
-          "kind": "test_result",
-          "value": "186 passed",
-          "note": "聚焦回归"
-        }
-      ]
-    }
-  ]
-}
-```
-
-#### `checklist_batch`
-
-整批改检查项，任一条失败则整批回滚。`expected_version` 是**任务**的版本，并会校验每条检查项确实属于该任务，否则报 `TASK_MISMATCH`。
-
-```json
-{
-  "operation": "checklist_batch",
-  "task_key": "ATM-T-0001",
-  "expected_version": 7,
-  "checklist_items": [
-    {
-      "id": "01M0W8440REDVKEFXQ9TW54HQX",
-      "status": "DONE",
-      "evidence": ["docs/report.md"]
-    },
-    {
-      "id": "01M0W8440REDVKEFXQ9TW54HQY",
-      "status": "SKIPPED"
-    }
-  ]
-}
-```
-
-#### `review_request`
-
-对 REVIEW 任务发起复核请求，并钉住候选哈希。
-
-```json
-{
-  "operation": "review_request",
-  "task_key": "ATM-T-0002",
-  "expected_version": 3,
-  "parent_checklist_id": "01M0W8440REDVKEFXQ9TW54HQX",
-  "expected_parent_checklist_version": 0,
-  "candidate_hashes": {
-    "source": "695feabb8d32f02c"
-  }
-}
-```
-
-#### `review_submit`
-
-提交复核结论；`evidence` 至少一条。
-
-```json
-{
-  "operation": "review_submit",
-  "task_key": "ATM-T-0002",
-  "expected_version": 4,
-  "request_key": "ATM-RR-0001",
-  "verdict": "APPROVED",
-  "candidate_hashes": {
-    "source": "695feabb8d32f02c"
-  },
-  "evidence": [
-    {
-      "kind": "git_sha",
-      "value": "695feabb8d32f02c",
-      "note": "复核基线"
-    }
-  ]
-}
-```
+<!-- prettier-ignore-end -->
 
 <!-- TASK_PATCH_COMPOSITE:END -->
 
@@ -275,56 +240,173 @@ MCP 参数使用 `snake_case`；直接调用 REST 时 JSON 字段改用 `camelCa
 
 <!-- MUTATION_ACK_CONTRACT:BEGIN -->
 
-### 固定 mutation ACK
+<!-- prettier-ignore-start -->
 
-项目 mutation 工具只返回同一组有界字段；不要依赖操作特有的顶层字段。共享知识的 atm_knowledge_save 使用独立知识库事务与引用回执，不适用本表。
+### 写入回执（自动生成）
 
-| 字段                 | 语义                                                                                                                                                                                                                                                                                                |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ok`                 | 写操作是否被 ATM 接受。                                                                                                                                                                                                                                                                             |
-| `op_id`              | 调用方提交的幂等操作 ID；重试必须复用。                                                                                                                                                                                                                                                             |
-| `project`            | 规范化后的项目代码。                                                                                                                                                                                                                                                                                |
-| `session`            | 实际承载写操作的 Session。                                                                                                                                                                                                                                                                          |
-| `session_rebound`    | Session 过期并由 ATM 安全接续时为 `true`。                                                                                                                                                                                                                                                          |
-| `projection`         | Registry 投影持久回执；含 `status`、`source_seq`、`projected_seq`、`retry_scheduled`、`last_error` 与累计 `retry_count`。`DEFERRED` 表示权威写已成功且后台会重试。                                                                                                                                  |
-| `entities`           | 受影响实体的有界预览，每项含 `entity_type`、`key`、`version`。任务写入有状态快照时还含 `status`、`waiting_on`、`claimed_by_session_id`、`claim_lease_until`；旧回执可能无这些字段。它们是该次写入的结果，幂等重放不是当前状态查询。下一次写同一实体使用返回版本，不要自行加一；并发变更仍可能冲突。 |
-| `entity_count`       | 完整受影响实体数量，不受预览截断影响。                                                                                                                                                                                                                                                              |
-| `entities_truncated` | 实体预览是否被条数或字符预算截断。                                                                                                                                                                                                                                                                  |
-| `details_cursor`     | 可直接作为 MCP 工具调用执行的有界 durable 实体回查描述符。                                                                                                                                                                                                                                          |
+`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_end` 等项目写入都返回同一形状的回执；`atm_knowledge_save` 写的是共享知识库，回执另有形状，不适用本节。
 
-`entities` 最多预览 12 项且不超过 1800 个 JSON 字符。以 `entity_count` 判断精确总数；`entities_truncated=true` 时可直接执行返回的 `details_cursor` 做一次最多 50000 字符的 durable 回查：
+| 字段 | 出现 | 含义 |
+| --- | --- | --- |
+| `ok` | 总有 | 恒为 `true`。写入失败时返回的是错误信封（见下一节），不是 `ok:false` 的回执。 |
+| `op_id` | 总有 | 这次写入的幂等键。省略时由 ATM 生成；同一写入要自己重试时，带上这个值，结果是重放而不是再执行一次。 |
+| `project` | 总有 | 规范化后的项目代码。 |
+| `session` | 总有 | 回执所属的会话：会话被接续时是后继会话，重放时是当初写下回执的那个会话。 |
+| `session_rebound` | 总有 | 原会话已经失效、ATM 把这次写入接到了同一条会话链的后继会话上时为 `true`。 |
+| `replayed` | 总有 | 同一 `op_id` 的重放：这次没有再执行，返回的是当初的结果。 |
+| `entities` | 总有 | 受影响实体的有界预览。每项有 `entity_type`、`key`、`version`；任务还有 `status`、`waiting_on`、`claimed_by_session_id`、`claim_lease_until`。版本是这次写入之后的版本，下一次写同一实体直接用它，不要自己加一。 |
+| `entity_count` | 总有 | 受影响实体的总数，不受预览截断影响。 |
+| `entities_truncated` | 总有 | 预览被截断时为 `true`；这时原样执行 `details_cursor` 取全部实体。 |
+| `details_cursor` | 总有 | 可以原样执行的 `atm_search` 调用，回查这次写入的全部实体。 |
+| `normalized` | 按需 | 参数里用了别名或非规范写法时出现：`[{from, to}]`，说明改成了哪个规范名。下次直接用规范名。 |
+| `auto_applied` | 按需 | 自动补了 `start` 时出现：`[{task_key, operations}]`。 |
+| `refs` | 按需 | `atm_task_create`：本批序号（`"1"` 起）与 `client_ref` 到任务 key 的对照。 |
+| `checklist` | 按需 | `atm_task_create`：每个新任务的检查项 id，按任务 key 分组。 |
+| `adjusted` | 按需 | 服务端调整了参数时出现，例如 summary 太长被截断、全文移到 detail：`[{field, action, moved_to}]`。 |
+| `deprecations` | 按需 | 用了仍然照收的旧写法时出现，说明该换成什么。 |
+| `merges` | 按需 | `edit` 带 `expected_fields` 时，与并发修改安全合并的字段。 |
 
-```json
-{
-  "name": "atm_search",
-  "arguments": {
-    "project": "ATM",
-    "op_id": "<same-op-id>",
-    "session": "<returned-session>",
-    "field_mask": ["op_id", "entities"],
-    "max_chars": 50000
-  }
-}
-```
-
-需要操作特有结果时，仍以同一 `project`、`op_id` 和返回的 `session` 精确读取 durable operation receipt，只把 `field_mask` 改为下例；不要重新执行 mutation：
+下例是一次真实的 `atm_task_patch` 回执：用了别名 `key`，任务还没开工所以先自动 `start` 再 `verify`。会话 id 与租约时间换成了占位符。
 
 ```json
 {
-  "name": "atm_search",
-  "arguments": {
-    "project": "ATM",
-    "op_id": "<same-op-id>",
-    "session": "<returned-session>",
-    "field_mask": ["op_id", "mutations"],
-    "max_chars": 50000
-  }
+  "ok": true,
+  "op_id": "op-example",
+  "project": "AYT-0001",
+  "session": "<session>",
+  "session_rebound": false,
+  "replayed": false,
+  "entities": [
+    {
+      "entity_type": "WORK_ITEM",
+      "key": "AYT-0001-T-0001",
+      "version": 3,
+      "status": "VERIFYING",
+      "waiting_on": null,
+      "claimed_by_session_id": "<session>",
+      "claim_lease_until": "<lease>"
+    }
+  ],
+  "entity_count": 1,
+  "entities_truncated": false,
+  "details_cursor": {
+    "name": "atm_search",
+    "arguments": {
+      "project": "AYT-0001",
+      "op_id": "op-example",
+      "session": "<session>",
+      "field_mask": [
+        "op_id",
+        "entities"
+      ],
+      "max_chars": 50000
+    }
+  },
+  "auto_applied": [
+    {
+      "task_key": "AYT-0001-T-0001",
+      "operations": [
+        "start"
+      ]
+    }
+  ],
+  "normalized": [
+    {
+      "from": "key",
+      "to": "task_key"
+    }
+  ]
 }
 ```
 
-例如自动补建规划根的事实位于 `operation.mutations[].response.planningRootProvisioned`；mutation ACK 顶层不再返回 `planning_root`。字段读取若返回 `done=false`，把 `next_cursor` 作为 `cursor` 加回同一个 `atm_search` 调用继续读，直到 `done=true`。
+<!-- prettier-ignore-end -->
 
 <!-- MUTATION_ACK_CONTRACT:END -->
+
+<!-- ERROR_ENVELOPE:BEGIN -->
+
+<!-- prettier-ignore-start -->
+
+### 错误信封（自动生成）
+
+工具调用出错时 `isError: true`，`structuredContent` 是下面的信封。照 `fix` 执行就是下一步，不需要读文档。
+
+| 字段 | 出现 | 含义 |
+| --- | --- | --- |
+| `ok` | 总有 | 恒为 `false`。 |
+| `code` | 总有 | 错误码，全表见 `docs/generated/error-codes.md`。 |
+| `message` | 总有 | 给人看的说明。 |
+| `retryable` | 总有 | 原样重试同一调用有没有可能成功（等待后）。 |
+| `committed` | 总有 | 这次写入有没有落库：`false` 没有，`true` 已经落库（不要重试，按 fix 往下走），`"unknown"` 不确定（按 fix 原样重试，同一 `op_id` 会得到重放）。 |
+| `fix` | 总有 | 下一步怎么做，`kind` 见下表。带 `call` 的可以原样执行：参数已经补齐并通过 schema。 |
+| `problems` | 参数错误 | `INVALID_ARGUMENT` 的逐项问题：`path`、`problem`，以及按需的 `got`、`allowed`、`did_you_mean`。 |
+| `state` | 按需 | 与错误有关的当前状态（例如任务现在的状态与版本），先读再决定时不必再查一次。 |
+| `details` | 按需 | 其余结构化细节。 |
+
+| `fix.kind` | 怎么做 |
+| --- | --- |
+| `call` | 执行 `fix.call`：改正后的同一调用，或者先做的那一步（例如 `start`）。 |
+| `reread` | 先执行 `fix.call` 读一次当前状态，再决定下一步。 |
+| `ask_user` | 把 `fix.message` 转告用户，由用户处理。 |
+| `wait` | 等 `fix.retry_after_ms` 毫秒后重试；有 `fix.call` 时执行它。 |
+| `add_param` | 补上 `fix.param` 再调 `fix.tool`（例如带上 `atm_begin` 返回的 session）。 |
+| `none` | 内部错误，或者 Agent 碰不到的错误；不要重试，告诉用户。 |
+
+下例是一次真实的出错调用：`operation` 写成了 `complet`。`fix.call` 是改正后的完整调用，可以原样执行。会话 id 换成了占位符。
+
+```json
+{
+  "ok": false,
+  "code": "INVALID_ARGUMENT",
+  "message": "参数不合法：operation",
+  "retryable": false,
+  "committed": false,
+  "fix": {
+    "kind": "call",
+    "call": {
+      "name": "atm_task_patch",
+      "arguments": {
+        "project": "AYT-0001",
+        "session": "<session>",
+        "task_key": "AYT-0001-T-0001",
+        "operation": "complete",
+        "op_id": "op-typo"
+      }
+    },
+    "why": "按 did_you_mean 更正后的同一调用"
+  },
+  "problems": [
+    {
+      "path": "operation",
+      "problem": "enum",
+      "got": "complet",
+      "did_you_mean": "complete",
+      "allowed": [
+        "start",
+        "complete",
+        "verify",
+        "verify_and_complete",
+        "block",
+        "wait_user",
+        "wait_agent",
+        "ready",
+        "release",
+        "claim",
+        "cancel",
+        "reopen",
+        "edit",
+        "checklist",
+        "review_request",
+        "review_submit"
+      ]
+    }
+  ]
+}
+```
+
+<!-- prettier-ignore-end -->
+
+<!-- ERROR_ENVELOPE:END -->
 
 `atm_begin(op_id=...)` 的原子键作用域是 `(project, op_id)`。它要求项目已经存在且可解析；不得把 quick task 或自动创建项目混入这次原子恢复。调用方必须验证返回的 `atomicBegin.operationId` 及 `CREATED|RECOVERED` disposition；缺失回执表示服务端没有证明原子能力。同一 `op_id` 的请求身份发生变化会得到 `IDEMPOTENCY_CONFLICT`，不能改 key 或退化为枚举 Session 后猜测。
 
