@@ -14,8 +14,6 @@ mod dpapi;
 mod headless;
 mod health;
 mod identity;
-// Toasts come back with the notification observer (W5f).
-#[allow(dead_code)]
 mod notify;
 mod paths;
 mod probe;

@@ -234,10 +234,27 @@ struct Queue {
     closed: bool,
 }
 
+/// 见 [`Store::write_mark`]。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteMark {
+    pub jobs: u64,
+    pub wakes: u64,
+}
+
+#[derive(Default)]
+struct Done {
+    jobs: u64,
+    closed: bool,
+    wakes: u64,
+}
+
 struct Shared {
     queue: Mutex<Queue>,
     not_empty: Condvar,
     not_full: Condvar,
+    /// 写线程执行完的作业数、写线程是否已结束、[`Store::wake_waiters`] 的次数，见 [`Store::wait_for_writes`]。
+    done: Mutex<Done>,
+    done_changed: Condvar,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -349,6 +366,8 @@ impl Store {
             }),
             not_empty: Condvar::new(),
             not_full: Condvar::new(),
+            done: Mutex::new(Done::default()),
+            done_changed: Condvar::new(),
         });
         let stats = Arc::new(Stats::default());
         let writer = {
@@ -489,6 +508,54 @@ impl Store {
         drop(q);
         self.shared.not_empty.notify_one();
         Ok(())
+    }
+
+    /// 现在的写入标记：写线程执行完的作业数（提交与否都算）与 [`Store::wake_waiters`] 的次数。
+    pub fn write_mark(&self) -> WriteMark {
+        let done = lock(&self.shared.done);
+        WriteMark {
+            jobs: done.jobs,
+            wakes: done.wakes,
+        }
+    }
+
+    /// 等到标记与 `seen` 不同（又有作业执行完，或有人调了 [`Store::wake_waiters`]）或到了 `limit`，返回当时的标记；
+    /// 写线程已经结束（关闭）返回 `None`。`seen` 之后发生的变化都算，哪怕发生在调用之前。
+    ///
+    /// 给观察者（托盘计数、系统通知）当「可能有新数据」的信号用：标记变了只说明有作业执行过，不说明提交了什么，
+    /// 观察者自己去读。调用方照常设兜底的 `limit`。
+    pub fn wait_for_writes(&self, seen: WriteMark, limit: Duration) -> Option<WriteMark> {
+        let deadline = Instant::now() + limit;
+        let mut done = lock(&self.shared.done);
+        loop {
+            let now = WriteMark {
+                jobs: done.jobs,
+                wakes: done.wakes,
+            };
+            if done.closed {
+                return None;
+            }
+            if now != seen {
+                return Some(now);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Some(now);
+            }
+            done = self
+                .shared
+                .done_changed
+                .wait_timeout(done, left)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+        }
+    }
+
+    /// 改一下写入标记，让 [`Store::wait_for_writes`] 里等的线程（以及之后拿旧标记来等的）都返回。
+    /// 观察者停下时用：它们自己再看停止标志。
+    pub fn wake_waiters(&self) {
+        lock(&self.shared.done).wakes += 1;
+        self.shared.done_changed.notify_all();
     }
 
     /// 在一个只读事务里读。闭包里不要做网络、进程或文件 IO，也不要做长计算：快照在闭包返回前一直占着，
@@ -697,6 +764,8 @@ fn writer_loop(
         stats
             .job_max_us
             .fetch_max(micros(started), Ordering::SeqCst);
+        lock(&shared.done).jobs += 1;
+        shared.done_changed.notify_all();
         dirty = true;
         // 每个作业之后都请求：队列一直有积压时也要有 checkpoint（W1 peer r1 P1-02）。
         // 请求只是置位，checkpoint 线程合并并按 gap 限流。
@@ -709,6 +778,8 @@ fn writer_loop(
     if dirty {
         truncate(&conn, &stats);
     }
+    lock(&shared.done).closed = true;
+    shared.done_changed.notify_all();
 }
 
 fn checkpoint(conn: &Connection, mode: &str) -> rusqlite::Result<bool> {

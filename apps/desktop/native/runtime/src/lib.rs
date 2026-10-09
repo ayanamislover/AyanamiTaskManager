@@ -93,6 +93,8 @@ pub struct Options {
     pub sweep_every: Duration,
     pub drill: Drill,
     pub observe: Arc<dyn Fn(Event) + Send + Sync>,
+    /// 托盘计数与系统通知的去处（宿主给；W5f）。`None` 不起观察器（e2e、独立运行时）。
+    pub notify: Option<atm_jobs::notify::Sink>,
 }
 
 #[derive(Debug)]
@@ -117,6 +119,9 @@ impl std::fmt::Display for BootError {
 fn failed(e: impl std::fmt::Display) -> BootError {
     BootError::Failed(e.to_string())
 }
+
+/// 托盘计数与系统通知（W5f）：观察器交给宿主的东西。
+pub use atm_jobs::notify::{Notice, Observation, Sink, TrayCounts};
 
 /// 后台比较的结论。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -400,6 +405,7 @@ fn serve(
         me: &me,
         sweep_every: o.sweep_every,
         observe: &*o.observe,
+        notify: o.notify.clone(),
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -427,6 +433,7 @@ fn serve(
             sweep_every: o.sweep_every,
             drill: Drill::default(),
             observe: o.observe.clone(),
+            notify: o.notify.clone(),
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()

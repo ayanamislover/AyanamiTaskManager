@@ -110,6 +110,7 @@ fn main() {
         sweep_every: Duration::from_secs(60),
         drill: Drill::default(),
         observe,
+        notify: None,
     };
     let serving = match atm_runtime::start(&options) {
         Ok(Started::Serving(serving)) => serving,

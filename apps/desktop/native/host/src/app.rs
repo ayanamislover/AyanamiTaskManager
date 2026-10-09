@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use atm_runtime::{Background, BootError, Conflicted, Handoff, Serving, Started};
+use atm_runtime::{Background, BootError, Conflicted, Handoff, Observation, Serving, Started};
 use atm_ui_bridge::{Reply, Ui};
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -61,6 +61,10 @@ pub enum UserEvent {
     Menu(MenuEvent),
     StartupDelayElapsed,
     RetryService,
+    /// 观察器（W5f）：要弹的通知、托盘计数的变化、或一轮读失败。
+    Observed(Observation),
+    /// 托盘切换通知方式的写入结束了（成功时观察器会随后推来新的托盘快照）。
+    ModeSet(Result<(), String>),
     /// 一次界面请求在工作线程上分发完了。投递前再核对 `(generation, epoch)`（03 U4）。
     UiReply {
         generation: u64,
@@ -116,6 +120,8 @@ pub struct App {
     /// 进程内的界面 API（W5e），服务开始服务后第一次界面请求时建好。
     ui: Option<Arc<Ui>>,
     ui_in_flight: usize,
+    /// 托盘切换通知方式的次数：给每次写入一个不重复的 op_id。
+    mode_writes: u64,
 
     web_context: WebContext,
     window: Option<Window>,
@@ -298,6 +304,7 @@ pub fn run(
         queued: Vec::new(),
         ui: None,
         ui_in_flight: 0,
+        mode_writes: 0,
         web_context,
         window: None,
         webview: None,
@@ -417,7 +424,12 @@ impl App {
         self.startup_delay_pending = false;
         self.boot_attempt += 1;
         self.service = Service::Booting;
-        let options = crate::service::options(&self.layout, &self.version, self.handoff.clone());
+        let options = crate::service::options(
+            &self.layout,
+            &self.version,
+            self.handoff.clone(),
+            self.proxy.clone(),
+        );
         crate::service::spawn(options, self.boot_attempt, self.proxy.clone());
     }
 
@@ -516,6 +528,11 @@ impl App {
             UserEvent::StartupDelayElapsed | UserEvent::RetryService => self.start_service(),
             UserEvent::Booted(attempt, booted) => self.on_booted(attempt, booted),
             UserEvent::Background(outcome) => self.on_background(outcome),
+            UserEvent::Observed(observation) => self.on_observed(observation),
+            UserEvent::ModeSet(Ok(())) => {}
+            UserEvent::ModeSet(Err(error)) => {
+                crate::log(&self.layout.v3_root, &format!("notification mode: {error}"))
+            }
             UserEvent::UiReply {
                 generation,
                 epoch,
@@ -566,15 +583,65 @@ impl App {
                 Some(tray::Action::Settings) => {
                     self.request_show(Some(Route::Settings.as_str()), target)
                 }
-                // Notification mode (W5f) and installing an update (W5g) are wired to the
-                // service in their own steps; until then the tray items do nothing.
-                Some(tray::Action::NotificationMode(_)) | Some(tray::Action::InstallUpdate) => {
+                Some(tray::Action::NotificationMode(mode)) => self.set_notification_mode(mode),
+                // Installing an update is wired with the update coordinator (W5g).
+                Some(tray::Action::InstallUpdate) => {
                     crate::log(&self.layout.v3_root, "tray action not wired yet");
                 }
                 Some(tray::Action::Quit) => self.quit(),
                 None => {}
             },
         }
+    }
+
+    /// 观察器的结果（W5f）。通知照方式与去重的决定直接弹；托盘只在快照变了时才推来。
+    /// 日志只记有没有弹出去，不记任务内容。
+    fn on_observed(&mut self, observation: Observation) {
+        match observation {
+            Observation::Notice(notice) => {
+                crate::notify::show(&self.layout.v3_root, &notice.title, &notice.body)
+            }
+            Observation::Tray(counts) => {
+                self.snapshot.blocked = counts.blocked;
+                self.snapshot.waiting = counts.waiting;
+                self.snapshot.notification_mode = counts.mode.to_owned();
+                if let Some(tray) = &self.tray {
+                    tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
+                }
+            }
+            Observation::Failed(error) => {
+                crate::log(&self.layout.v3_root, &format!("notify observer: {error}"))
+            }
+        }
+    }
+
+    /// 托盘的「系统通知」子菜单（03 §2.4：User{Tray}，能力 notification.mode_set）。写入在入口的工作线程上做，
+    /// 不阻塞事件循环；成功后观察器读到这次写入，推来新的托盘快照（勾选项随之改变）。
+    fn set_notification_mode(&mut self, mode: &'static str) {
+        let Service::Serving(serving) = &self.service else {
+            crate::log(
+                &self.layout.v3_root,
+                "notification mode: service unavailable",
+            );
+            return;
+        };
+        let Some((svc, handle)) = serving.service() else {
+            crate::log(&self.layout.v3_root, "notification mode: entries withdrawn");
+            return;
+        };
+        self.mode_writes += 1;
+        let op_id = format!(
+            "tray.notification-mode:{}:{}",
+            self.run_id, self.mode_writes
+        );
+        let proxy = self.proxy.clone();
+        drop(handle.spawn_blocking(move || {
+            let outcome = svc
+                .set_notification_mode(&atm_ui_bridge::tray(), mode, None, &op_id)
+                .map(|_| ())
+                .map_err(|e| format!("{}: {}", e.code.as_str(), e.message));
+            let _ = proxy.send_event(UserEvent::ModeSet(outcome));
+        }));
     }
 
     fn on_second_instance(&mut self, command: Command, target: &EventLoopWindowTarget<UserEvent>) {

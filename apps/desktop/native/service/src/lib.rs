@@ -8,6 +8,7 @@ pub mod knowledge;
 pub mod lineage;
 pub mod listing;
 pub mod memory;
+pub mod observe;
 pub mod ops;
 pub mod project;
 pub mod quick;

@@ -19,7 +19,7 @@ mod pin;
 pub mod progress;
 pub mod restore;
 pub mod search;
-pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError};
+pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError, WriteMark};
 #[doc(hidden)]
 pub use engine::{PassiveHold, hold_next_passive};
 

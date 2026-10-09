@@ -121,6 +121,8 @@ dependencies = [
  "atm-install-state",
  "atm-service",
  "atm-store",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

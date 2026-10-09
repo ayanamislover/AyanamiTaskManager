@@ -1086,3 +1086,88 @@ fn crash_child() {
         .unwrap();
     thread::sleep(Duration::from_secs(120));
 }
+
+#[test]
+fn observers_wake_on_each_finished_job_and_on_shutdown() {
+    let store = Arc::new(Store::open(&db_path("wait-for-writes"), fast()).unwrap());
+    let seen = store.write_mark();
+    // 没有作业：等满时限，标记不变。
+    let started = Instant::now();
+    assert_eq!(store.wait_for_writes(seen, MS(150)), Some(seen));
+    assert!(started.elapsed() >= MS(150));
+
+    // 一个等着的观察者，被另一条线程的写入叫醒（不是等满时限）。
+    let (tx, rx) = channel();
+    let waiter = {
+        let store = store.clone();
+        thread::spawn(move || {
+            let started = Instant::now();
+            tx.send((
+                store.wait_for_writes(seen, Duration::from_secs(20)),
+                started.elapsed(),
+            ))
+            .unwrap();
+        })
+    };
+    thread::sleep(MS(100));
+    store.write(|tx| put(tx, "a")).unwrap();
+    let (woke, after) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    waiter.join().unwrap();
+    assert_eq!(woke.map(|m| m.jobs), Some(seen.jobs + 1));
+    assert!(after < Duration::from_secs(10), "{after:?}");
+
+    // 失败回滚的作业也算执行完；拿旧标记来等，立刻返回。
+    let _ = store.write(|_| Err::<(), _>("no"));
+    assert_eq!(store.write_mark().jobs, seen.jobs + 2);
+    let started = Instant::now();
+    assert_eq!(
+        store.wait_for_writes(seen, Duration::from_secs(20)),
+        Some(store.write_mark())
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+
+    // 叫醒在等之前发生也算：观察者记下标记之后、进入等待之前被叫停，不会白等一个时限。
+    let before = store.write_mark();
+    store.wake_waiters();
+    let started = Instant::now();
+    let after = store
+        .wait_for_writes(before, Duration::from_secs(20))
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!((after.jobs, after.wakes), (before.jobs, before.wakes + 1));
+
+    // 叫醒正在等的线程。
+    let current = store.write_mark();
+    let (tx, rx) = channel();
+    let waiter = {
+        let store = store.clone();
+        thread::spawn(move || {
+            tx.send(store.wait_for_writes(current, Duration::from_secs(20)))
+                .unwrap();
+        })
+    };
+    thread::sleep(MS(100));
+    store.wake_waiters();
+    let woke = rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    waiter.join().unwrap();
+    assert_eq!(woke.jobs, current.jobs);
+
+    // 关闭叫醒等着的观察者，之后的等待立刻返回 None。
+    let current = store.write_mark();
+    let (tx, rx) = channel();
+    let waiter = {
+        let store = store.clone();
+        thread::spawn(move || {
+            tx.send(store.wait_for_writes(current, Duration::from_secs(20)))
+                .unwrap();
+        })
+    };
+    thread::sleep(MS(100));
+    store.shutdown();
+    assert_eq!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), None);
+    waiter.join().unwrap();
+    assert_eq!(
+        store.wait_for_writes(current, Duration::from_secs(20)),
+        None
+    );
+}

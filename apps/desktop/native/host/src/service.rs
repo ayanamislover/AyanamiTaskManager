@@ -31,7 +31,14 @@ impl std::fmt::Debug for Booted {
 
 /// 启动参数。`L` 是宿主一直用的数据根（`ATM_DATA_DIR` 可覆盖），`N` 是 3.x 根（`ATM3_DATA_DIR` 可覆盖）。
 /// 正式宿主允许转换真实的 2.x 根（conversion 的真实根保护只拦开发与演练入口）。
-pub fn options(layout: &Layout, version: &str, handoff: Option<Handoff>) -> Options {
+///
+/// 托盘计数与通知经 `proxy` 交回事件循环（观察器在服务的线程上，toast 与托盘菜单在 UI 线程上做）。
+pub fn options(
+    layout: &Layout,
+    version: &str,
+    handoff: Option<Handoff>,
+    proxy: EventLoopProxy<UserEvent>,
+) -> Options {
     let log_root = layout.v3_root.clone();
     let observe: Arc<dyn Fn(Event) + Send + Sync> =
         Arc::new(move |e| crate::log(&log_root, &format!("runtime: {e:?}")));
@@ -49,6 +56,9 @@ pub fn options(layout: &Layout, version: &str, handoff: Option<Handoff>) -> Opti
         sweep_every: Duration::from_secs(60),
         drill: atm_runtime::Drill::default(),
         observe,
+        notify: Some(Arc::new(move |observation| {
+            let _ = proxy.send_event(UserEvent::Observed(observation));
+        })),
     }
 }
 

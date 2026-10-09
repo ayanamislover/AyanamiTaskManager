@@ -17,3 +17,6 @@ atm-service = { path = "../service" }
 
 [dev-dependencies]
 atm-store = { path = "../store" }
+# notify 用例借用服务层验收的夹具（service/tests/support），它要这两样。
+rusqlite = "0.39"
+serde_json = { workspace = true }

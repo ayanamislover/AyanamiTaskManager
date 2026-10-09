@@ -89,6 +89,7 @@ fn main() {
         sweep_every: Duration::from_secs(60),
         drill,
         observe: observe.clone(),
+        notify: None,
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,

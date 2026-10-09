@@ -12,6 +12,8 @@
  *   - frame 里的脚本用 chrome.webview / window.ipc 发桥消息：宿主一条都不受理。
  *   - 顶层文档导航到入口以外（外站、data:、about:blank）被拦下，window.open 被拒。
  *   - 导航竞态：旧文档发出的请求在重载之后才回来，回包不得投递给新文档（generation + epoch，03 U4）。
+ *   - 关窗之后通知照常（W5f）：窗口与 WebView 销毁后，Agent 经 HTTP 让任务受阻，宿主照样收到通知
+ *     （host.log 出现 toast 的结果）；宿主不随窗口退出。
  *
  * 观测方法：宿主每次投递回包都是一次 `evaluate_script("window.__atmBridge&&…resolve({…})")`，
  * 在页面里就是一段新编译的脚本。CDP Debugger.scriptParsed 能看到每一段，所以「宿主有没有受理、
@@ -30,7 +32,7 @@
  */
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { get as httpGet } from "node:http";
+import { get as httpGet, request as httpRequest } from "node:http";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -403,6 +405,44 @@ function agentGet(url: string, token: string): Promise<number> {
   });
 }
 
+/** 像 Agent 一样发一条 JSON POST（只带 Authorization 与 Content-Type），回状态码与 JSON。 */
+function agentPost(
+  url: string,
+  token: string,
+  body: unknown,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  return new Promise((done, fail) => {
+    const payload = JSON.stringify(body);
+    const request = httpRequest(
+      url,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          let json: Record<string, unknown> = {};
+          try {
+            json = JSON.parse(text) as Record<string, unknown>;
+          } catch {
+            json = { raw: text.slice(0, 300) };
+          }
+          done({ status: response.statusCode ?? 0, json });
+        });
+      },
+    );
+    request.on("error", fail);
+    request.end(payload);
+  });
+}
+
 /** Agent 经 daemon.json 找服务（与 atm-mcp 桥同一份描述）。 */
 function agentDescriptor(n: string): { endpoint: string; token: string } {
   return JSON.parse(readFileSync(join(n, "runtime", "daemon.json"), "utf8")) as {
@@ -411,7 +451,8 @@ function agentDescriptor(n: string): { endpoint: string; token: string } {
   };
 }
 
-async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Promise<void> {
+/** 返回界面建的项目代码（关窗之后的通知检查还要用它）。 */
+async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Promise<string> {
   const statusAnswer = await ui(page, { path: "/api/v1/system/status" });
   log.check(
     "界面读 /system/status 经 ui-bridge 成功",
@@ -528,6 +569,7 @@ async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Pr
     flood.held === UI_IN_FLIGHT && flood.SERVICE_BUSY === 16,
     JSON.stringify(flood),
   );
+  return code;
 }
 
 /** 旧文档发一条要停 3 s 的请求，随即重载；新文档的请求先回来，旧的那条回来时不得投递给新文档。 */
@@ -619,6 +661,105 @@ async function topLevelNavigation(
 /** 运行中见过的宿主子孙进程，收尾时用来清理孤儿。 */
 const seenTree: TreeEntry[] = [];
 
+/** host.log 里 toast 的结果行（只有「shown / failed」，不含任务内容）。 */
+function toastLines(n: string): string[] {
+  const path = join(n, "logs", "host.log");
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split(/\r?\n/u)
+    .filter((line) => line.includes("toast shown") || line.includes("toast failed"));
+}
+
+/**
+ * 关窗之后通知照常（W5f；06 §2「订阅由常驻 service 持有，关窗后照常工作」）：界面让宿主关窗（WebView 整个销毁），
+ * 之后 Agent 经 HTTP 让一条任务受阻，宿主的观察器照样决定发通知、交给 toast。沙箱里没有开始菜单快捷方式，
+ * toast 可能报 failed——那也说明通知已经到了宿主；要验的是「到没到」，不是 Windows 的通知设置。
+ */
+async function notifyAfterClose(renderer: SmokeRenderer, n: string, code: string): Promise<void> {
+  const before = toastLines(n).length;
+  const disconnected = new Promise<boolean>((done) => {
+    renderer.browser.on("disconnected", () => done(true));
+    setTimeout(() => done(false), 20_000);
+  });
+  await renderer.page.evaluate("window.ayanamiDesktop.closeWindow()").catch(() => undefined);
+  log.check("关窗：WebView 已销毁（CDP 断开）", await disconnected);
+
+  const agent = agentDescriptor(n);
+  const api = `${agent.endpoint}/api/v1`;
+  const begun = await agentPost(`${api}/sessions`, agent.token, {
+    cwd: repoRoot,
+    projectCode: code,
+    mode: "project",
+    agentId: "bridge-smoke-notify",
+    displayName: "Bridge Smoke Notify",
+    clientKind: "smoke",
+    role: "PRIMARY",
+    resume: false,
+    allowProjectCreate: false,
+  });
+  const session = String(begun.json.session ?? "");
+  log.check(
+    "关窗后 Agent 照常 begin",
+    begun.status === 201 && session !== "",
+    JSON.stringify(begun).slice(0, 300),
+  );
+  const created = await agentPost(`${api}/projects/${code}/work-items`, agent.token, {
+    session,
+    opId: "bridge-smoke-notify-create",
+    items: [
+      {
+        title: "关窗之后受阻",
+        type: "TASK",
+        priority: "NORMAL",
+        status: "READY",
+        acceptance: ["关窗之后照样通知"],
+        checklist: [],
+        verificationRequired: false,
+      },
+    ],
+  });
+  const entity = ((created.json.entities as Array<Record<string, unknown>> | undefined) ?? [])[0];
+  let taskKey = String(entity?.key ?? "");
+  let version = Number(entity?.version ?? 0);
+  log.check(
+    "关窗后 Agent 建任务",
+    created.status === 201 && taskKey !== "",
+    JSON.stringify(created).slice(0, 300),
+  );
+  for (const [operation, extra] of [
+    ["claim", {}],
+    ["start", {}],
+    ["block", { blockedReason: "关窗之后卡住" }],
+  ] as const) {
+    const patched = await agentPost(`${api}/projects/${code}/work-items/patch`, agent.token, {
+      session,
+      opId: `bridge-smoke-notify-${operation}`,
+      items: [{ taskKey, expectedVersion: version, operation, ...extra }],
+    });
+    const next = ((patched.json.entities as Array<Record<string, unknown>> | undefined) ?? [])[0];
+    taskKey = String(next?.key ?? taskKey);
+    version = Number(next?.version ?? version);
+    log.check(
+      `关窗后 Agent ${operation}`,
+      patched.status === 200,
+      JSON.stringify(patched).slice(0, 300),
+    );
+  }
+  const after = await waitUntil(
+    async () => {
+      const lines = toastLines(n);
+      return lines.length > before ? lines : null;
+    },
+    20_000,
+    "关窗后的 toast",
+  ).catch(() => toastLines(n));
+  log.check(
+    "关窗之后任务受阻，宿主照样收到通知（host.log 有新的 toast 结果）",
+    after.length > before,
+    after.slice(before).join("\n"),
+  );
+}
+
 async function run(host: SmokeHost, n: string): Promise<void> {
   await waitUntil(
     async () => (existsSync(join(n, "runtime", "daemon.json")) ? true : null),
@@ -639,13 +780,15 @@ async function run(host: SmokeHost, n: string): Promise<void> {
     // 阳性对照：顶层文档自己发的消息，回包能被观测到。
     log.check("观测有效：顶层文档的桥消息有回包", await sentinel(page, deliveries, 900_001));
 
-    await uiBridgeCases(page, deliveries, n);
+    const code = await uiBridgeCases(page, deliveries, n);
     await frameCases(page, cdp, deliveries);
     await navigationRace(page, deliveries);
     await page.waitForSelector(".atm-shell", { timeout: 30_000 });
     await topLevelNavigation(page, renderer, cdp);
     seenTree.push(...descendants(host.pid));
     await cdp.detach().catch(() => undefined);
+    // 放在最后：关窗会销毁 WebView，之后 --smoke-quit 也验证了宿主没有随窗口退出。
+    await notifyAfterClose(renderer, n, code);
   } finally {
     await renderer.browser.close().catch(() => undefined);
   }

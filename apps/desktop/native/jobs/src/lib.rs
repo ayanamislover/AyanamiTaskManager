@@ -4,6 +4,7 @@
 //! System 主体只在这个 crate 里构造（`domain/tests/principal_guard.rs`）。
 
 pub mod liveness;
+pub mod notify;
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};

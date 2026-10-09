@@ -160,6 +160,7 @@ pub fn options(n: &Path, legacy: &Path, events: &Events) -> Options {
         sweep_every: Duration::from_secs(3600),
         drill: Drill::default(),
         observe: events.observer(),
+        notify: None,
     }
 }
 

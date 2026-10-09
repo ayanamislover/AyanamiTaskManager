@@ -20,6 +20,8 @@ use crate::{Event, Handoff, Me};
 
 pub const DESCRIPTOR: &str = "daemon.json";
 pub const LEASE: &str = "daemon.lock";
+/// 没有写入时观察器也读一轮的间隔（兜底；正常靠写线程的作业计数唤醒）。
+const NOTIFY_FALLBACK: Duration = Duration::from_secs(5 * 60);
 
 pub struct Publish<'a> {
     pub layout: &'a Layout,
@@ -30,6 +32,7 @@ pub struct Publish<'a> {
     pub me: &'a Me,
     pub sweep_every: Duration,
     pub observe: &'a (dyn Fn(Event) + Send + Sync),
+    pub notify: Option<atm_jobs::notify::Sink>,
 }
 
 /// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
@@ -41,6 +44,7 @@ pub struct Entries {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     scheduler: Option<atm_jobs::Scheduler>,
+    notifier: Option<atm_jobs::notify::Notifier>,
     runtime_dir: PathBuf,
     instance_id: String,
     lease_generation: u64,
@@ -154,6 +158,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         shutdown: Some(shutdown),
         server: Some(server),
         scheduler: None,
+        notifier: None,
         runtime_dir,
         instance_id,
         lease_generation,
@@ -205,6 +210,14 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         p.sweep_every,
     ));
     (p.observe)(Event::Scheduler);
+    // 6. 托盘与通知的观察器（W5f）：与调度器一起归入口管，撤下入口时先停。
+    if let Some(sink) = &p.notify {
+        entries.notifier = Some(atm_jobs::notify::Notifier::start(
+            entries.svc.clone(),
+            sink.clone(),
+            NOTIFY_FALLBACK,
+        ));
+    }
 
     Ok(entries)
 }
@@ -241,6 +254,9 @@ impl Entries {
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
+        }
+        if let Some(n) = self.notifier.take() {
+            n.stop();
         }
         if let Some(s) = self.scheduler.take() {
             s.stop();
