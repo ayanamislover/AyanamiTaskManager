@@ -1894,13 +1894,24 @@ fn withdrawal_moves_go_through_the_shared_contract() {
 
     // 占用：立即留下，不重试；目录与登记行都在。
     let busy = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
-    let started = std::time::Instant::now();
+    // 「不重试」直接数移动的次数：原来按耗时（< 2 s）判，整套并行跑时会被负载拖过线。
+    let moves = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = moves.clone();
     let kept = durable::inject(
-        Box::new(|op| matches!(op, Op::Move { .. }).then(|| std::io::Error::from_raw_os_error(32))),
+        Box::new(move |op| {
+            matches!(op, Op::Move { .. }).then(|| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::io::Error::from_raw_os_error(32)
+            })
+        }),
         || discard_backup(&w.store, &busy),
     );
     assert_eq!(kept.unwrap(), Withdrawal::Kept("FILES_IN_USE"));
-    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(
+        moves.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "占用时不重试"
+    );
     assert!(busy.dir.is_dir());
     assert_eq!(registered(&busy.id), 1);
 
