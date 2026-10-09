@@ -76,7 +76,7 @@ impl Surface {
         )
     }
 
-    /// 要项目的读（`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_delta`，以及按列表或 op_id
+    /// 要项目的读（`atm_brief`、`atm_task_list`、`atm_task_get`，以及按列表或 op_id
     /// 回查的 `atm_search`）既没带 project 也没带 session 时，用本连接的默认 session
     /// （与写入经 resolve 拿到的同一个，A1：只给白名单单对话客户端）。上下文压缩后照 instructions 调
     /// 无参的 brief 就能拿回 working set，不用再找 session（U-2 W7）。其余情况原样不动。
@@ -89,7 +89,7 @@ impl Surface {
         // 要项目的读（U-1：W4 里 Claude Code 不带 session 调 task_get 拿检查项 id）。atm_search 只有
         // 列表与操作回查要项目，全文搜索不受影响。
         let needs_project = match tool.name {
-            "atm_brief" | "atm_task_list" | "atm_task_get" | "atm_delta" => true,
+            "atm_brief" | "atm_task_list" | "atm_task_get" => true,
             "atm_search" => args.contains_key("list") || args.contains_key("op_id"),
             _ => false,
         };
@@ -224,9 +224,12 @@ impl Surface {
             task_key: a.str("task_key"),
             ..SearchRequest::default()
         };
-        // 列表与操作回查要项目：省略时按 session 推出。
+        // 列表与操作回查要项目：省略时按 session 推出。列表里的 session 只用来推项目（服务不收）。
         if r.project.is_none() && (r.list.is_some() || r.op_id.is_some()) && r.session.is_some() {
             r.project = Some(self.project(p, a)?);
+            if r.list.is_some() {
+                r.session = None;
+            }
         }
         if let Some(n) = a.usize("limit") {
             r.limit = n;

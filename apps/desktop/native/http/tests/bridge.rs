@@ -811,7 +811,11 @@ impl Agent {
     fn call(&mut self, tool: &str, args: Value) -> Value {
         self.calls += 1;
         let r = self.b.call(tool, args);
-        assert_ne!(r["isError"], json!(true), "{tool}: {r}");
+        // 协议层的错误（例如工具不在这个 profile 上）没有 result：只看 isError 会把它当成功。
+        assert!(
+            r.is_object() && r["structuredContent"].is_object() && r["isError"] != json!(true),
+            "{tool}: {r}"
+        );
         r["structuredContent"].clone()
     }
 
@@ -819,10 +823,9 @@ impl Agent {
     fn refused(&mut self, tool: &str, args: Value) -> String {
         let r = self.b.call(tool, args);
         assert_eq!(r["isError"], json!(true), "{tool} 应当被拒：{r}");
-        r["structuredContent"]["code"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned()
+        let code = r["structuredContent"]["code"].as_str().unwrap_or_default();
+        assert!(!code.is_empty(), "{tool} 的拒绝没有错误码：{r}");
+        code.to_owned()
     }
 
     /// 一个流程：`run` 里发出的调用数必须恰好是 11 §1「提案后」那一列。
@@ -1027,8 +1030,6 @@ fn u6_compaction_keeps_the_agent_on_its_own_task() {
     // 要项目的其他读同样不用带 session（U-1：W4 里 task_get 拿检查项 id）。
     let got = a.call("atm_task_get", json!({"task_key": task}));
     assert_eq!(got["key"], json!(task), "{got}");
-    a.call("atm_delta", json!({}));
-    a.call("atm_search", json!({"list": "records"}));
     a.call(
         "atm_progress_add",
         json!({"task_key": task, "summary": "压缩后继续"}),

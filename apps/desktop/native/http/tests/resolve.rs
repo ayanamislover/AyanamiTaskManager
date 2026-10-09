@@ -160,6 +160,46 @@ fn resolve_reads_one_snapshot_and_writes_nothing() {
         (&session, &json!(true)),
         "{r}"
     );
+
+    // 要项目的读同样补默认 session（U-1：W4 里 task_get 拿检查项 id）；memory 上的按列表搜索也一样。
+    let got = call_as(
+        &w,
+        Some(CLAUDE),
+        "core",
+        "atm_task_get",
+        json!({"task_key": w.task}),
+    );
+    assert_eq!(got["structuredContent"]["key"], json!(w.task), "{got}");
+    let listed = call_as(
+        &w,
+        Some(CLAUDE),
+        "memory",
+        "atm_search",
+        json!({"list": "records"}),
+    );
+    assert_ne!(listed["isError"], json!(true), "{listed}");
+    // 全文搜索不补：补了 session 会被当成 op_id 回查的参数拒掉。
+    let found = call_as(
+        &w,
+        Some(CLAUDE),
+        "memory",
+        "atm_search",
+        json!({"query": "登录"}),
+    );
+    assert_ne!(found["isError"], json!(true), "{found}");
+    // 非白名单客户端照旧要 session。
+    let refused = call_as(
+        &w,
+        Some(DESKTOP),
+        "core",
+        "atm_task_get",
+        json!({"task_key": w.task}),
+    );
+    assert_eq!(
+        refused["structuredContent"]["code"],
+        json!("SESSION_REQUIRED"),
+        "{refused}"
+    );
 }
 
 /// 写工具带上 resolve 的结果：目标一致就执行；scope 不一致是 TARGET_CHANGED（fix 是不带上下文的原调用）；

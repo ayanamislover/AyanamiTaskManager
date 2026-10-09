@@ -149,20 +149,21 @@ fn progress_on_an_unstarted_task_reports_the_auto_start() {
     let w = world("write-progress-start");
     let ack = ok(&call(
         &w,
-        "memory",
+        "core",
         "atm_progress_add",
         json!({"session": w.session, "task_key": w.task, "summary": "接口设计完成，开始写实现"}),
     ))
     .clone();
     assert_eq!(
         ack["auto_applied"],
-        json!([{"task_key": w.task, "operations": ["start"]}])
+        json!([{"task_key": w.task, "operations": ["start"]}]),
+        "{ack}"
     );
     assert_eq!(task(&w, &w.task)["status"], json!("IN_PROGRESS"));
     // 已经开工的不再补。
     let ack = ok(&call(
         &w,
-        "memory",
+        "core",
         "atm_progress_add",
         json!({"session": w.session, "task_key": w.task, "summary": "实现写了一半"}),
     ))

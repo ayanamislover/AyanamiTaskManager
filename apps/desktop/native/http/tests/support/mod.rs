@@ -197,14 +197,19 @@ pub fn call(w: &World, profile: &str, tool: &str, args: Value) -> Value {
 /// 以某个连接组的身份调用工具。U-4 的动态检查在这里：任何一次出错，信封都必须有 committed 与
 /// fix.kind，fix 里的调用要能通过 schema（[`atm_http::fix::check`]）。
 pub fn call_as(w: &World, client: Option<&str>, profile: &str, tool: &str, args: Value) -> Value {
-    let result = rpc_as(
+    let reply = rpc_as(
         w,
         client,
         profile,
         "tools/call",
         json!({"name": tool, "arguments": args}),
-    )["result"]
-        .clone();
+    );
+    // 协议层的错误（例如工具不在这个 profile 上）没有 result：调用方只看 isError 会把它当成功。
+    let result = reply["result"].clone();
+    assert!(
+        result.is_object() && result["structuredContent"].is_object(),
+        "{tool} 在 {profile} 上没有工具结果：{reply}"
+    );
     if result["isError"] == json!(true) {
         let envelope = &result["structuredContent"];
         if let Err(problem) = atm_http::fix::check(envelope) {
