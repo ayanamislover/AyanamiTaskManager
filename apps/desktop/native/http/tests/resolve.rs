@@ -313,7 +313,7 @@ fn writes_carry_the_resolved_target() {
         &w,
         None,
         "atm_knowledge_save",
-        json!({"session": w.session, "slug": "w4f"}),
+        json!({"session": w.session, "slug": "w4f", "title": "t", "summary": "s", "body_markdown": "b"}),
     );
     assert_eq!(
         k["expected_target"]["scope"]["kind"],
@@ -350,7 +350,7 @@ fn knowledge_save_checks_the_knowledge_base_identity() {
         &w,
         None,
         "atm_knowledge_save",
-        json!({"session": w.session, "slug": "first"}),
+        json!({"session": w.session, "slug": "first", "title": "t", "summary": "s", "body_markdown": "b"}),
     );
     let blank = k["expected_target"].clone();
     assert_eq!(
@@ -385,7 +385,7 @@ fn knowledge_save_checks_the_knowledge_base_identity() {
         &w,
         None,
         "atm_knowledge_save",
-        json!({"session": w.session, "slug": "second"}),
+        json!({"session": w.session, "slug": "second", "title": "t", "summary": "s", "body_markdown": "b"}),
     );
     let real = k["expected_target"].clone();
     let id = real["scope"]["id"].as_str().unwrap().to_owned();
@@ -414,4 +414,55 @@ fn knowledge_save_checks_the_knowledge_base_identity() {
     // 对照：身份、世代都对。
     let r = save("k-ok", "second", &real);
     assert_ne!(r["isError"], json!(true), "{r}");
+}
+
+/// 工具入口与桥对「给没给」同一个判断（peer W4 r1 P1-02）：空白的 op_id、session、project 视同省略，
+/// 不会拿空白当操作身份；resolve 应答里的 arguments 就是这份规范化结果。
+#[test]
+fn blank_identity_fields_are_absent_at_every_entry() {
+    let w = world("w4-r1-p1-02");
+    let r = call(
+        &w,
+        "core",
+        "atm_record",
+        json!({"session": w.session, "project": " ", "op_id": "  ", "kind": "FACT", "title": "t", "summary": "s"}),
+    );
+    assert_ne!(r["isError"], json!(true), "{r}");
+    let op = r["structuredContent"]["op_id"].as_str().unwrap();
+    assert!(op.starts_with("auto:"), "空白 op_id 被当成了操作身份：{r}");
+
+    let (status, k) = resolve(
+        &w,
+        None,
+        "atm_record",
+        json!({"Session_Id": w.session, "op_id": 7, "project": "", "kind": "fact", "title": "t", "summary": "s"}),
+    );
+    assert_eq!(status, 200, "{k}");
+    assert_eq!(
+        k["arguments"],
+        json!({"session": w.session, "op_id": "7", "kind": "FACT", "title": "t", "summary": "s"}),
+        "{k}"
+    );
+    // 无法解释的值：resolve 就拒绝，与 tools/call 同一个信封。
+    let (status, e) = resolve(
+        &w,
+        None,
+        "atm_record",
+        json!({"session": w.session, "op_id": false, "kind": "FACT", "title": "t", "summary": "s"}),
+    );
+    assert_eq!(
+        (status, &e["code"], &e["problems"][0]["path"]),
+        (400, &json!("INVALID_ARGUMENT"), &json!("op_id")),
+        "{e}"
+    );
+    // 布尔字符串：resolve 判的分支与正式调用一致。
+    let fresh = w.dir.join("p1-02-fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let (_, b) = resolve(
+        &w,
+        None,
+        "atm_begin",
+        json!({"agent_id": "a", "cwd": fresh.to_str().unwrap(), "allow_project_create": "TRUE"}),
+    );
+    assert_eq!(b["expected_target"], json!({"kind": "CREATE"}), "{b}");
 }

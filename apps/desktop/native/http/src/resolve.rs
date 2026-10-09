@@ -1,9 +1,10 @@
 //! `POST /mcp/resolve`（10 R11 A3）：桥签发缺字段的写调用之前，在同一个只读快照里拿到最终生效的 session
 //! 与分支目标，写进这次调用的不可变重试上下文（`session`、`project`、`expected_target`）。
 //!
-//! 请求体是桥手里的原调用：`{"tool": "...", "arguments": {...}}`。operation 由工具与参数推出（与
-//! `tools/call` 的映射一致）；只读工具不写任何东西，不需要 resolve。错误与 `tools/call` 同一个信封，
-//! fix 指向原工具（例如缺 session 时补 session 参数，或先 atm_begin）。
+//! 请求体是桥手里的原调用：`{"tool": "...", "arguments": {...}}`。参数先过工具的 schema（与 `tools/call`
+//! 同一个校验器），应答里的 `arguments` 就是规范化之后的参数，桥在它上面补字段、签发。operation 由工具与
+//! 规范化后的参数推出（与 `tools/call` 的映射一致）；只读工具不写任何东西，不需要 resolve。错误与
+//! `tools/call` 同一个信封，fix 指向原工具（例如缺 session 时补 session 参数，或先 atm_begin）。
 
 use crate::agent::{Args, Surface};
 use crate::{Agent, AppState, read_json, reply, workspace, write};
@@ -112,17 +113,19 @@ impl Surface {
             .get("tool")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let empty = Map::new();
-        let args = message
-            .get("arguments")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty);
         let Some(tool) = crate::tools::find(name) else {
             return Err(refuse(
                 DomainError::new(ErrorCode::INVALID_ARGUMENT, format!("没有工具 {name:?}"))
                     .detail("field", "tool"),
             ));
         };
+        // 与 tools/call 同一个校验器、同一份规范化结果（规范名、数字当文本、空白身份字段视同省略、
+        // 布尔字符串）：resolve 判定的就是正式调用会看到的参数，桥签发的也是它（peer W4 r1 P1-02）。
+        // 无法解释的值在这里就拒绝，与 tools/call 同一个信封，什么都没写。
+        let checked = tool
+            .validate(message.get("arguments").unwrap_or(&Value::Null))
+            .map_err(|rejected| crate::mcp::invalid_argument(tool, rejected))?;
+        let args = &checked.args;
         let a = Args(args);
         let Some(operation) = operation_of(tool.name, &a) else {
             return Err(refuse(
@@ -151,7 +154,7 @@ impl Surface {
                 Default::default()
             },
             mode: first(args, &["mode"]),
-            allow_project_create: args.get("allow_project_create") == Some(&Value::Bool(true)),
+            allow_project_create: a.bool("allow_project_create"),
             target_project: None,
             single_conversation: write::single_conversation(p.client_group()),
         };
@@ -160,6 +163,7 @@ impl Surface {
                 let mut out = resolved.to_json();
                 out["operation"] = json!(operation);
                 out["tool"] = json!(tool.name);
+                out["arguments"] = Value::Object(args.clone());
                 Ok(out)
             }
             Err(e) => Err(self.envelope(p, tool, args, e, Committed::No)),

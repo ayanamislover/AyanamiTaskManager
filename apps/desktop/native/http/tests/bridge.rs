@@ -462,6 +462,108 @@ fn the_bridge_signs_writes_and_names_its_client() {
     assert_eq!(r.proxy.count("/mcp/resolve"), 3);
 }
 
+/// 桥、resolve 与工具入口对参数是同一个读法（peer W4 r1 P1-02）：服务照收的显式 op_id（数字、大小写不同
+/// 的键名）原样保留，同一个调用再发一次是重放；空白与 null 视同没给，由桥补 auto；无法解释的值在写入前
+/// 拒绝；布尔字符串在 resolve 与正式调用里是同一个分支。
+#[test]
+fn the_bridge_reads_arguments_the_way_the_service_does() {
+    let r = rig("bridge-normalize");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    let record = |extra: Value| {
+        let mut a =
+            json!({"kind": "FACT", "title": "same explicit operation", "summary": "one record"});
+        a.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        a
+    };
+    let twice = |b: &mut Bridge, args: Value, op: &str| {
+        let first = b.call("atm_record", args.clone());
+        assert_eq!(ok(&first)["op_id"], json!(op), "{first}");
+        assert_eq!(ok(&first)["replayed"], json!(false), "{first}");
+        let second = b.call("atm_record", args);
+        assert_eq!(ok(&second)["op_id"], json!(op), "{second}");
+        assert_eq!(
+            ok(&second)["replayed"],
+            json!(true),
+            "同一个显式操作又执行了一次：{second}"
+        );
+    };
+    // 数字 op_id：完整显式调用（不经 resolve）与缺 project 的调用（经 resolve）都按 "42" 签发。
+    twice(
+        &mut b,
+        record(json!({"project": r.w.project, "session": r.w.session, "op_id": 42})),
+        "42",
+    );
+    twice(
+        &mut b,
+        record(json!({"session": r.w.session, "op_id": 43})),
+        "43",
+    );
+    // 键名大小写不同、别名：服务认得，桥就不会再塞一个 op_id 或 session 进去。
+    twice(
+        &mut b,
+        record(json!({"OP_ID": "case-1", "Session_Id": r.w.session})),
+        "case-1",
+    );
+    let signed = r.proxy.writes().pop().unwrap();
+    let keys: Vec<&String> = signed["params"]["arguments"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k.as_str() == "OP_ID" || k.as_str() == "Session_Id"),
+        "签发的是规范化之后的参数：{signed}"
+    );
+
+    // 空白与 null 是没给：桥补 auto，服务不会拿空白当 op_id。
+    for blank in [json!("  "), Value::Null] {
+        let done = b.call(
+            "atm_record",
+            record(
+                json!({"session": r.w.session, "op_id": blank, "title": format!("blank {blank}")}),
+            ),
+        );
+        assert!(
+            ok(&done)["op_id"].as_str().unwrap().starts_with("auto:"),
+            "{done}"
+        );
+    }
+
+    // 无法解释的显式值：写入前拒绝，什么都没发出。
+    let before = r.proxy.writes().len();
+    for bad in [json!(true), json!({"id": 1}), json!(["x"])] {
+        let e = b.call(
+            "atm_record",
+            record(json!({"session": r.w.session, "op_id": bad})),
+        );
+        let e = err(&e);
+        assert_eq!(e["code"], json!("INVALID_ARGUMENT"), "{e}");
+        assert_eq!(e["problems"][0]["path"], json!("op_id"), "{e}");
+    }
+    assert_eq!(r.proxy.writes().len(), before, "拒绝的调用不该发出写请求");
+
+    // 布尔字符串：resolve 与正式调用都判 CREATE。
+    let fresh = r.w.dir.join("normalize-fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let begun = b.call(
+        "atm_begin",
+        json!({"agent_id": "peer", "cwd": fresh.to_str().unwrap(), "title": "new project",
+               "allow_project_create": "true"}),
+    );
+    ok(&begun);
+    let signed = r.proxy.writes().pop().unwrap();
+    assert_eq!(
+        signed["params"]["arguments"]["expected_target"],
+        json!({"kind": "CREATE"}),
+        "{signed}"
+    );
+}
+
 /// 非白名单客户端缺 session：SESSION_REQUIRED（补 session 参数），写请求根本没有发出。
 #[test]
 fn non_whitelisted_clients_get_no_default_session() {

@@ -45,12 +45,24 @@ pub struct Link<'a> {
     pub client: Option<&'a str>,
 }
 
+/// A usable value under one of these names, read the way the service's schema reads it:
+/// non-blank text, or a number (taken literally as text). Blank text and `null` are absent.
 fn has(args: &Map<String, Value>, names: &[&str]) -> bool {
-    names.iter().any(|n| {
-        args.get(*n)
-            .and_then(Value::as_str)
-            .is_some_and(|s| !json::js_trim(s).is_empty())
+    names.iter().any(|n| match args.get(*n) {
+        Some(Value::String(s)) => !json::js_trim(s).is_empty(),
+        Some(Value::Number(_)) => true,
+        _ => false,
     })
+}
+
+/// The Agent wrote something under this name (even something the service will refuse):
+/// it is never replaced by a value the bridge made up.
+fn given(args: &Map<String, Value>, name: &str) -> bool {
+    match args.get(name) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(s)) => !json::js_trim(s).is_empty(),
+        Some(_) => true,
+    }
 }
 
 /// All applicable fields are explicit (A3 「完整显式调用」): begin needs only op_id; the
@@ -144,7 +156,7 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
     let params = &message["params"];
     let tool = params["name"].as_str().unwrap_or_default().to_owned();
     let original: Map<String, Value> = params["arguments"].as_object().cloned().unwrap_or_default();
-    let explicit_op = has(&original, &["op_id"]);
+    let explicit_op = given(&original, "op_id");
     let mut woken = false;
 
     // ---- the retry context
@@ -179,8 +191,14 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
                 ),
             );
         };
+        // Sign what the service's own schema made of the call (canonical names, numbers as
+        // text, blank identity fields dropped), not the bridge's reading of the original:
+        // an op id the service accepts is never mistaken for a missing one and replaced.
+        if let Some(normalized) = resolved.get("arguments").and_then(Value::as_object) {
+            context = normalized.clone();
+        }
         fill(&tool, &mut context, &resolved);
-        if !explicit_op {
+        if !given(&context, "op_id") {
             match ulid::new() {
                 Some(u) => {
                     context.insert("op_id".into(), json!(format!("auto:{u}")));
@@ -415,6 +433,19 @@ mod tests {
         assert!(complete(
             "atm_knowledge_save",
             &args(json!({"op_id": "x", "session": "S"}))
+        ));
+    }
+
+    #[test]
+    fn values_are_read_the_way_the_schema_reads_them() {
+        let a = args(json!({"n": 42, "s": "x", "blank": " ", "null": null, "flag": true}));
+        assert!(has(&a, &["n"]) && has(&a, &["s"]));
+        assert!(!has(&a, &["blank"]) && !has(&a, &["null"]) && !has(&a, &["flag"]));
+        assert!(given(&a, "n") && given(&a, "s") && given(&a, "flag"));
+        assert!(!given(&a, "blank") && !given(&a, "null") && !given(&a, "missing"));
+        assert!(complete(
+            "atm_record",
+            &args(json!({"op_id": 42, "session": "S", "project": "P"}))
         ));
     }
 

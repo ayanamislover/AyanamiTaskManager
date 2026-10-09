@@ -13,9 +13,13 @@ use serde_json::{Map, Value};
 
 // ---- 共用字段 -------------------------------------------------------------------------------
 
-const PROJECT: Field = Field::new("project", Ty::Str { max: 20 }).aliases(&["project_code"]);
-const SESSION: Field = Field::new("session", Ty::Str { max: 128 }).aliases(&["session_id"]);
-const OP_ID: Field = Field::new("op_id", Ty::Str { max: 128 });
+const PROJECT: Field = Field::new("project", Ty::Str { max: 20 })
+    .aliases(&["project_code"])
+    .blank_absent();
+const SESSION: Field = Field::new("session", Ty::Str { max: 128 })
+    .aliases(&["session_id"])
+    .blank_absent();
+const OP_ID: Field = Field::new("op_id", Ty::Str { max: 128 }).blank_absent();
 /// A3 的控制字段：显式给出时桥原样保留，服务按它判 `SCOPE_RESTORED`。由桥管理，只收不发布。
 const GENERATION: Field = Field::new(
     "expected_scope_generation",
@@ -737,7 +741,7 @@ pub static END: Tool = Tool {
 
 static SEARCH_FIELDS: [Field; 9] = [
     Field::new("query", Ty::Text { max: 500 }),
-    Field::new("op_id", Ty::Str { max: 128 }),
+    Field::new("op_id", Ty::Str { max: 128 }).blank_absent(),
     Field::new("list", Ty::Enum(&["records", "sessions"])),
     PROJECT,
     SESSION,
@@ -887,9 +891,13 @@ static KNOWLEDGE_SAVE_FIELDS: [Field; 16] = [
     ),
     Field::new("id", Ty::Text { max: 100 }),
     Field::new("expected_revision_id", Ty::Text { max: 100 }),
-    Field::new("project", Ty::Str { max: 100 }).aliases(&["project_code"]),
-    Field::new("session", Ty::Str { max: 100 }).aliases(&["session_id"]),
-    Field::new("op_id", Ty::Str { max: 200 }),
+    Field::new("project", Ty::Str { max: 100 })
+        .aliases(&["project_code"])
+        .blank_absent(),
+    Field::new("session", Ty::Str { max: 100 })
+        .aliases(&["session_id"])
+        .blank_absent(),
+    Field::new("op_id", Ty::Str { max: 200 }).blank_absent(),
     GENERATION,
     TARGET,
 ];

@@ -68,6 +68,9 @@ pub struct Field {
     pub compact: Option<&'static str>,
     /// 显式 `null` 有意义（edit 的「清空」）：保留在参数里，schema 写成 `[类型, "null"]`。其余字段的 `null` 视同省略。
     pub nullable: bool,
+    /// 空白字符串视同省略（op_id、session、project 这类身份字段）：桥、resolve 与工具入口对「给没给」
+    /// 是同一个判断，桥不会把一个服务端照收的值当成没给而覆盖掉（peer W4 r1 P1-02）。
+    pub blank_absent: bool,
 }
 
 impl Field {
@@ -81,6 +84,21 @@ impl Field {
             hidden: false,
             compact: None,
             nullable: false,
+            blank_absent: false,
+        }
+    }
+
+    pub const fn blank_absent(mut self) -> Field {
+        self.blank_absent = true;
+        self
+    }
+
+    /// 这个值等于没给：显式 `null`（nullable 字段除外），或者 `blank_absent` 字段的空白字符串。
+    fn absent(&self, value: &Value) -> bool {
+        match value {
+            Value::Null => !self.nullable,
+            Value::String(s) => self.blank_absent && atm_domain::text::js_trim(s).is_empty(),
+            _ => false,
         }
     }
 
@@ -424,9 +442,9 @@ impl Validation {
                 ) {
                     Some(name) if !map.contains_key(name) => {
                         p.did_you_mean = Some(name.to_owned());
-                        if !value.is_null() {
-                            let checked =
-                                self.value(&field_named(fields, name).ty, value, &path(name));
+                        let target = field_named(fields, name);
+                        if !value.is_null() && !target.absent(value) {
+                            let checked = self.value(&target.ty, value, &path(name));
                             out.insert(name.to_owned(), checked);
                         }
                         self.fail(p, true);
@@ -438,7 +456,7 @@ impl Validation {
                 }
                 continue;
             };
-            if value.is_null() && !field.nullable {
+            if field.absent(value) {
                 continue;
             }
             let checked = if value.is_null() {
