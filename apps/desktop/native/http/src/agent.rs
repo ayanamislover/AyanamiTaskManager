@@ -76,7 +76,8 @@ impl Surface {
         )
     }
 
-    /// 无参的 `atm_brief()`、`atm_task_list` 既没带 project 也没带 session 时，用本连接的默认 session
+    /// 要项目的读（`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_delta`，以及按列表或 op_id
+    /// 回查的 `atm_search`）既没带 project 也没带 session 时，用本连接的默认 session
     /// （与写入经 resolve 拿到的同一个，A1：只给白名单单对话客户端）。上下文压缩后照 instructions 调
     /// 无参的 brief 就能拿回 working set，不用再找 session（U-2 W7）。其余情况原样不动。
     fn connection_session(
@@ -85,7 +86,14 @@ impl Surface {
         tool: &'static Tool,
         args: &Map<String, Value>,
     ) -> Option<Map<String, Value>> {
-        if !matches!(tool.name, "atm_brief" | "atm_task_list")
+        // 要项目的读（U-1：W4 里 Claude Code 不带 session 调 task_get 拿检查项 id）。atm_search 只有
+        // 列表与操作回查要项目，全文搜索不受影响。
+        let needs_project = match tool.name {
+            "atm_brief" | "atm_task_list" | "atm_task_get" | "atm_delta" => true,
+            "atm_search" => args.contains_key("list") || args.contains_key("op_id"),
+            _ => false,
+        };
+        if !needs_project
             || args.contains_key("session")
             || args.contains_key("project")
         {

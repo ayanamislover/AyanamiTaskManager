@@ -1024,6 +1024,11 @@ fn u6_compaction_keeps_the_agent_on_its_own_task() {
     let (project, task) = u6_open(&mut a, &cwd);
     let brief = a.call("atm_brief", json!({}));
     assert_eq!(brief["own"], json!([task]), "{brief}");
+    // 要项目的其他读同样不用带 session（U-1：W4 里 task_get 拿检查项 id）。
+    let got = a.call("atm_task_get", json!({"task_key": task}));
+    assert_eq!(got["key"], json!(task), "{got}");
+    a.call("atm_delta", json!({}));
+    a.call("atm_search", json!({"list": "records"}));
     a.call(
         "atm_progress_add",
         json!({"task_key": task, "summary": "压缩后继续"}),
