@@ -1076,7 +1076,9 @@ impl Service {
                 other => {
                     if let Some((b, _)) = backup.take() {
                         let used = matches!(&other, Ok(w) if !w.replayed && w.result["backupId"] == b.id.as_str());
-                        if !used {
+                        if used {
+                            self.prune_after(&b.kind, &now_iso());
+                        } else {
                             self.withdraw_backup(&b);
                         }
                     }

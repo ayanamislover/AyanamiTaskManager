@@ -7,6 +7,7 @@ pub mod fp;
 pub mod knowledge;
 pub mod lineage;
 pub mod listing;
+pub mod maintenance;
 pub mod memory;
 pub mod observe;
 pub mod ops;

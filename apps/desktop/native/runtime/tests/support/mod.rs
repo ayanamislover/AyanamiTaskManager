@@ -161,6 +161,7 @@ pub fn options(n: &Path, legacy: &Path, events: &Events) -> Options {
         drill: Drill::default(),
         observe: events.observer(),
         notify: None,
+        maintenance: false,
     }
 }
 

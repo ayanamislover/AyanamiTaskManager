@@ -417,19 +417,31 @@ impl Withdrawal {
 ///
 /// 任何时刻都不会出现「目录在备份根下却没有登记」或「登记着却缺一半文件」。
 pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
+    withdraw(store, info, None)
+}
+
+/// 按保留策略修剪一份备份（W5h，job `maintenance` 与手动备份之后）。与 [`discard_backup`] 同一套撤回，
+/// 只是固定到 `now` 之前（已过期）的不再挡着；固定还没到期的、被恢复引用着的照样保留。
+pub fn prune_backup(store: &Store, info: &BackupInfo, now: &str) -> Result<Withdrawal> {
+    withdraw(store, info, Some(now))
+}
+
+/// `now` 为 `None`：任何固定都挡着（撤回自己刚做的备份）；给了 `now`：只有 `pinned_until > now` 才挡着。
+fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withdrawal> {
     let _lock = attachments_lock(store, "discard_backup")?;
     let root = info.dir.parent().ok_or_else(|| {
         BackupError::Corrupt(format!("backup dir has no parent: {}", info.dir.display()))
     })?;
     sweep_withdrawn_locked(store, root);
     let key = info.id.clone();
+    let at = now.map(str::to_owned);
     let state: Option<String> = store.read(move |tx| {
         tx.query_row(
-            "SELECT CASE WHEN b.pinned_until IS NOT NULL THEN 'PINNED'
+            "SELECT CASE WHEN b.pinned_until IS NOT NULL AND (?2 IS NULL OR b.pinned_until > ?2) THEN 'PINNED'
                          WHEN EXISTS (SELECT 1 FROM scope_generations g WHERE g.backup_id = b.id) THEN 'RESTORE_REFERENCE'
                          ELSE '' END
              FROM backups b WHERE b.id = ?1",
-            [key],
+            params![key, at],
             |r| r.get(0),
         )
         .optional()
@@ -450,11 +462,13 @@ pub fn discard_backup(store: &Store, info: &BackupInfo) -> Result<Withdrawal> {
         return Ok(Withdrawal::Kept("FILES_IN_USE"));
     }
     let key = info.id.clone();
+    let at = now.map(str::to_owned);
     let deleted = store.write(move |tx| {
         tx.execute(
-            "DELETE FROM backups WHERE id = ?1 AND pinned_until IS NULL
+            "DELETE FROM backups WHERE id = ?1
+               AND (pinned_until IS NULL OR (?2 IS NOT NULL AND pinned_until <= ?2))
                AND NOT EXISTS (SELECT 1 FROM scope_generations WHERE backup_id = ?1)",
-            [key],
+            params![key, at],
         )
     });
     match deleted {

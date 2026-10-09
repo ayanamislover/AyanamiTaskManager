@@ -1872,12 +1872,13 @@ fn c09_r2_failures_and_replays_do_not_renew() {
 fn c11_dependency_lists_are_capped_and_use_public_keys() {
     let w = world("c11-cap");
     let target = w.task("等很多前置");
-    let deps: Vec<String> = (0..2)
+    // 分 6 批建：一笔写 30 条在整套连跑、磁盘忙时会超过默认的 2 秒写预算（这条用例测的是上限，不是时序）。
+    let deps: Vec<String> = (0..6)
         .flat_map(|b| {
             w.create_as(
                 &agent(),
                 Some("S1"),
-                (0..30).map(|i| item(&format!("前置{b}-{i}"))).collect(),
+                (0..10).map(|i| item(&format!("前置{b}-{i}"))).collect(),
             )
             .unwrap()
             .result["items"]

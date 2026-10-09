@@ -159,13 +159,10 @@ impl Service {
     /// 手动整库备份（`backup.create_manual`，只有 User）。
     pub fn create_manual_backup(&self, principal: &Principal) -> Result<Value, DomainError> {
         capability::require(principal, Capability::BackupCreateManual)?;
-        let info = create_backup(
-            self.store(),
-            &self.backups_dir()?,
-            "MANUAL",
-            &now().to_string(),
-        )
-        .map_err(backup_error)?;
+        let at = now().to_string();
+        let info = create_backup(self.store(), &self.backups_dir()?, "MANUAL", &at)
+            .map_err(backup_error)?;
+        self.prune_after("MANUAL", &at);
         Ok(info_view(&info))
     }
 
@@ -207,6 +204,7 @@ impl Service {
                 (out, json!({ "kind": "KNOWLEDGE" }))
             }
         };
+        self.prune_after("PRE_RESTORE", &at);
         Ok(json!({
             "backupId": backup_id,
             "scope": scope_view,

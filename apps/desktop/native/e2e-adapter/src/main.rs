@@ -111,6 +111,7 @@ fn main() {
         drill: Drill::default(),
         observe,
         notify: None,
+        maintenance: false,
     };
     let serving = match atm_runtime::start(&options) {
         Ok(Started::Serving(serving)) => serving,

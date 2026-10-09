@@ -90,6 +90,7 @@ fn main() {
         drill,
         observe: observe.clone(),
         notify: None,
+        maintenance: false,
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,

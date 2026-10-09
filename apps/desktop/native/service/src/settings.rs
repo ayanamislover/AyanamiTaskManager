@@ -157,6 +157,31 @@ fn row(tx: &Transaction<'_>, key: &str) -> Result<Option<(Value, i64, String)>, 
     .map_err(db)
 }
 
+/// 存着的保留策略（W5h 维护作业用）。2.x 的读法：没有或不是对象就用默认；每项缺了、不是有限数就用默认，
+/// 否则取整后夹到 1～上限；`enabled` 只有明确是 false 才关。
+pub(crate) fn stored_backup_policy(tx: &Transaction<'_>) -> Result<BackupPolicy, DomainError> {
+    let value = row(tx, BACKUP_POLICY)?
+        .map(|(v, _, _)| v)
+        .unwrap_or(Value::Null);
+    let default = BackupPolicy::default();
+    let bounded = |key: &str, fallback: i64, max: i64| -> i64 {
+        match value
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|f| f.is_finite())
+        {
+            Some(f) => (f.trunc() as i64).clamp(1, max),
+            None => fallback,
+        }
+    };
+    Ok(BackupPolicy {
+        enabled: value.get("enabled") != Some(&Value::Bool(false)),
+        daily_keep: bounded("dailyKeep", default.daily_keep, 90),
+        weekly_keep: bounded("weeklyKeep", default.weekly_keep, 52),
+        other_keep: bounded("otherKeep", default.other_keep, 20),
+    })
+}
+
 fn setting_view(key: &str, row: Option<(Value, i64, String)>) -> Value {
     match row {
         Some((value, version, at)) => {

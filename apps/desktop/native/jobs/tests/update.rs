@@ -143,10 +143,13 @@ fn the_feed_scan_picks_the_highest_complete_newer_version_and_lists_what_is_cons
     );
 }
 
+/// 一种坏投递：在投放目录里把一份好的投递弄坏。
+type Breakage = Box<dyn Fn(&Path)>;
+
 #[test]
 fn a_broken_delivery_of_the_highest_version_is_reported_not_installed() {
     let root = dir("update-broken");
-    let cases: [(&str, Box<dyn Fn(&Path)>); 5] = [
+    let cases: [(&str, Breakage); 5] = [
         (
             "PACKAGE_SIZE_MISMATCH",
             Box::new(|f| {

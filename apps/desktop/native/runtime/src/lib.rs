@@ -95,6 +95,8 @@ pub struct Options {
     pub observe: Arc<dyn Fn(Event) + Send + Sync>,
     /// 托盘计数与系统通知的去处（宿主给；W5f）。`None` 不起观察器（e2e、独立运行时）。
     pub notify: Option<atm_jobs::notify::Sink>,
+    /// 起 job `maintenance`（W5h：DAILY / WEEKLY 备份与保留策略）。宿主起；e2e、独立运行时不起。
+    pub maintenance: bool,
 }
 
 #[derive(Debug)]
@@ -408,6 +410,7 @@ fn serve(
         sweep_every: o.sweep_every,
         observe: &*o.observe,
         notify: o.notify.clone(),
+        maintenance: o.maintenance,
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -436,6 +439,7 @@ fn serve(
             drill: Drill::default(),
             observe: o.observe.clone(),
             notify: o.notify.clone(),
+            maintenance: o.maintenance,
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()

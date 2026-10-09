@@ -59,6 +59,7 @@ pub fn options(
         notify: Some(Arc::new(move |observation| {
             let _ = proxy.send_event(UserEvent::Observed(observation));
         })),
+        maintenance: true,
     }
 }
 

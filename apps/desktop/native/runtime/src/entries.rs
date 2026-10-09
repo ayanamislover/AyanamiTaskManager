@@ -33,6 +33,7 @@ pub struct Publish<'a> {
     pub sweep_every: Duration,
     pub observe: &'a (dyn Fn(Event) + Send + Sync),
     pub notify: Option<atm_jobs::notify::Sink>,
+    pub maintenance: bool,
 }
 
 /// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
@@ -45,6 +46,7 @@ pub struct Entries {
     server: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     scheduler: Option<atm_jobs::Scheduler>,
     notifier: Option<atm_jobs::notify::Notifier>,
+    maintenance: Option<atm_jobs::maintenance::Maintenance>,
     runtime_dir: PathBuf,
     instance_id: String,
     lease_generation: u64,
@@ -159,6 +161,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         server: Some(server),
         scheduler: None,
         notifier: None,
+        maintenance: None,
         runtime_dir,
         instance_id,
         lease_generation,
@@ -218,6 +221,14 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
             NOTIFY_FALLBACK,
         ));
     }
+    // 7. 维护（W5h）：开放后 2.5 s 第一轮，之后每小时。
+    if p.maintenance {
+        entries.maintenance = Some(atm_jobs::maintenance::Maintenance::start(
+            entries.svc.clone(),
+            atm_jobs::maintenance::FIRST_RUN,
+            atm_jobs::maintenance::EVERY,
+        ));
+    }
 
     Ok(entries)
 }
@@ -254,6 +265,9 @@ impl Entries {
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
+        }
+        if let Some(m) = self.maintenance.take() {
+            m.stop();
         }
         if let Some(n) = self.notifier.take() {
             n.stop();
