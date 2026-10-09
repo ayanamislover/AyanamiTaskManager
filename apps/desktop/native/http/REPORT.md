@@ -9,7 +9,7 @@
 | U-1 冷启动 Agent   | 真实 Claude Code 与 Codex 经真实 `atm-mcp.exe` 跑 W1–W9；执行器 `output/u1/u1.py`，被测服务 `http/examples/u1-server.rs`。用户 2026-10-09 定的规模：先每个流程 3 次 | 通过（第三轮两边各 27/27，§4） |
 | U-2 金标脚本       | `tests/bridge.rs` `u2_golden_scripts_take_the_proposed_number_of_calls`：经真实桥，W1–W9 每个流程的调用数等于 11 §1「提案后」列                                     | 通过                           |
 | U-3 猜错语料       | `tests/fix.rs` `u3_guesses_succeed_directly_or_after_one_fix`（W4e）                                                                                                | 通过                           |
-| U-4 错误必有下一步 | `tests/fix.rs` 静态、全码扫与动态检查；`support::call_as` 对每次出错都核对信封（W4e）                                                                               | 通过                           |
+| U-4 错误必有下一步 | `tests/fix.rs` 静态、全码扫与动态检查；`support::call_as` 对每次出错都核对信封（W4e）；REST 由 `tests/rest.rs` 的 `rest()` 同样核对（W4 r1 P1-04）                  | 通过                           |
 | U-5 剥离 schema    | `tests/tools.rs` `descriptions_survive_a_stripped_schema`、`tests/schema.rs`（W4c）                                                                                 | 通过                           |
 | U-6 安全规则零摩擦 | `tests/bridge.rs` 的七个 `u6_` 场景：单 Agent、压缩、崩溃重启、丢响应、子代理、静默 30 分钟、反例                                                                   | 通过                           |
 | U-7 体积           | `tests/tools.rs` `every_profile_fits_its_byte_budget`；数字见 `docs/generated/mcp-tool-contracts.md`（core 16,018 / 16,180）                                        | 通过                           |
@@ -132,3 +132,30 @@ U-1 第二轮（Codex 与 Claude Code 各 27 次）又查出两处：
 这次修订改了 `schema.rs`、`bridge.rs`，`w4j-clamp`、`w4j-unused`、`w4j-reads` 三份证据随之在新候选上重跑。`w4j-unused` 的第一条变异的锚点因缩进变化改写过。
 
 W4 整体评审准备时的一处更正：befd0ae 以为 `atm_delta` 不在任何 MCP profile 上，把它从默认会话名单里去掉了。实际上它是并入 brief 之后保留的可调用旧名（`tools.rs` 开头的说明），照 2.x 恢复流程不带 session 调它的 Agent 会被 SESSION_REQUIRED 挡住。已加回名单，`tests/resolve.rs` 补了这一条，`mut-w4j-reads.py` 加了对应的变异。
+
+## 6. W4 整体评审
+
+| 轮次 | 报告                                        | 结论                                               |
+| ---- | ------------------------------------------- | -------------------------------------------------- |
+| 1    | `output/peer-atm3-w4-r1.md`（绑定 81c46a0） | CHANGES_REQUESTED：W4-R1-P1-01～P1-05，W4-R1-P2-01 |
+
+第一轮的修订（每条一个提交，回归用例与变异证据同提交一起交付）：
+
+| 编号  | 问题                                                                                                                                              | 修订                                                                                                                                                                                                                                                         | 用例                                                                                                                                                                                                        |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-01 | `atm_knowledge_save` 只核对目标的 kind 与世代，丢掉了 database_id：同为 KNOWLEDGE、id 不对的目标照样写入                                          | `90c1a67`：http 把 id 送进服务；服务在写事务里、重放裁决之后与世代屏障之前核对（`knowledge.rs` `check_scope`），对不上是 TARGET_CHANGED、零写入。空 id（resolve 时知识库还没有身份）只对建身份的那一次写入成立                                               | `tests/resolve.rs` `knowledge_save_checks_the_knowledge_base_identity`                                                                                                                                      |
+| P1-02 | 桥只认字符串值：`op_id: 42` 被当成没给、换成新的 auto id，同一显式操作写了两次；resolve 只认 JSON 的 `true`，与 schema 收下的 `"true"` 分支不一致 | `aaaacd6`：resolve 先过工具 schema（与 tools/call 同一个校验器），无法解释的值在写之前拒绝；应答带规范化后的 `arguments`，桥在它上面补字段、签发。`op_id`、`session`、`project` 的空白字符串在每个入口都视同省略                                             | `tests/bridge.rs` `the_bridge_reads_arguments_the_way_the_service_does`；`tests/resolve.rs` `blank_identity_fields_are_absent_at_every_entry`；shim 单元 `values_are_read_the_way_the_schema_reads_them`    |
+| P1-03 | 30 秒预算只在两次尝试之间判断；一次 POST 可以连接等 10 秒、每次读等 300 秒，慢速分块每来一个字节就重新计时                                        | `baa4342`：`http::post` 收绝对 deadline，connect、每次写、每次读只等剩余预算。请求没写完整是新的 `Unsent`（证明没送达，sent:false）；写完整之后失败才是 RESULT_UNKNOWN                                                                                       | `tests/bridge.rs` `a_held_or_trickled_write_answer_ends_at_the_budget`、`a_held_resolve_answer_ends_at_the_budget_with_nothing_sent`；shim 单元四条                                                         |
+| P1-04 | REST 路径冲突提前返回一个没校验过的 fix.call（还带着越界的 limit）；自有路由不在 fix 校验的工具表里，缺 session 时退回 fix:none                   | `365f4fb`：冲突与校验器的问题一起报，参数的每种写法都比，fix.call 只给通过同一校验的更正调用；fix 校验认得 REST 自有路由的参数表，add_param 指回这条路由                                                                                                     | `tests/rest.rs` `rest_errors_hand_out_fixes_that_pass_their_schema`；helper `rest()` 出错时一律跑 `fix::check`                                                                                              |
+| P1-05 | TRASHED 的 begin 已经提交了恢复请求，信封按错误码推断成 committed:false                                                                           | `f263eb5`：`DomainError` 带显式 `committed`，信封以服务的声明为准（`details.retryable` 的覆盖同样生效）。ACK 在提交之后读失败：已提交，出路是按 op_id 回查。begin 之前那个独立的关闭事务：begin 随后失败时在 `closed_exited_sessions` 里列出已关掉的 session | `tests/write.rs` `begin_on_a_trashed_project_reports_the_committed_restore_request`；`service/tests/session.rs` `p1_05_a_failed_begin_lists_what_its_maintenance_already_closed`；http 与 domain 的单元用例 |
+| P2-01 | 免令牌的 `/health` 还答 status、version                                                                                                           | `02313a5`：只答 `pid`、`instanceId`、`generation`；`runtime/tests/boot.rs` 守精确字段集合                                                                                                                                                                    | `runtime/tests/boot.rs` `a_fresh_install_opens_the_entries_in_order`                                                                                                                                        |
+
+变异验红：`output/w4-evidence/w4-r1-*-mutation-evidence.json`，8 份 30 条，全部 RED。
+
+- `mut-w4-r1-shim.py` 跑 mcp-shim 自己的单元测试（独立 workspace），为此给 `mutrun.py` 加了 `bin` 目标。
+- 有一条没有变异守：P1-05 里 http 的 `ack()` 调 `after_commit` 的那一处。ACK 的读只在存储出错时失败，黑盒造不出来。`committed_write` 的判定由单元用例验红。
+
+这些修订改了 schema、resolve、write、fix、rest、桥与 session，W4b～W4j 的 21 份证据随之在新候选上重跑：
+
+- 有四条锚点因代码修改失配，改写过：W4c 两条（「等于没给」集中到了 `Field::absent`）、W4g 两条（发送处与 op_id 判定改写过）、W4j 一条（begin 现在留下关闭的 session）。变异的意思不变。
+- W4f「知识写入接受项目目标」在新候选上 SURVIVED。原因是 P1-01 之后，服务在写事务里核对 database_id，项目目标的 id 对不上，照样报 TARGET_CHANGED，http 的 kind 检查成了等价的纵深防御。这一条改为与服务端核对同时关掉；服务端核对单独的作用由 `mut-w4-r1-p101.py` 验红。
