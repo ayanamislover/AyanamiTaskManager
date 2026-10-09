@@ -583,6 +583,51 @@ fn rest_errors_hand_out_fixes_that_pass_their_schema() {
     );
 }
 
+/// REST 自有路由在提交之后读 ACK 失败：同 MCP 写工具一样报 committed:true、按 op_id 回查（W4 r2 P1-01）。
+#[test]
+fn an_own_route_reports_a_commit_whose_ack_could_not_be_read() {
+    let w = world("rest-after-commit");
+    w.svc
+        .set_after_commit_read_fault(Some(std::sync::Arc::new(|site: &str| {
+            (site == "mutation.ack").then(|| {
+                atm_domain::error::DomainError::new(
+                    atm_domain::error::ErrorCode::STORE_BUSY,
+                    "注入：提交之后的读繁忙",
+                )
+            })
+        })));
+    let (status, v) = rest(
+        &w,
+        "POST",
+        &format!("/api/v1/projects/{}/objectives", w.project),
+        &json!({"session": w.session, "title": "after-commit"}).to_string(),
+    );
+    assert_eq!(
+        (status, &v["committed"], &v["fix"]["kind"]),
+        (503, &json!(true), &json!("reread")),
+        "{v}"
+    );
+    assert!(
+        v["fix"]["call"]["arguments"]["op_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("auto:"),
+        "{v}"
+    );
+    let objectives: i64 = w
+        .svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM objectives WHERE title = 'after-commit'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(objectives, 1);
+}
+
 // ---- 没有工具的路由 --------------------------------------------------------------------------------
 
 #[test]

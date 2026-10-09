@@ -158,6 +158,18 @@ pub struct Service {
     /// 客户端进程还在不在（`X-ATM-Client` 的 `<pid>:<创建时间>`；R11 A4）。begin 用它立即关闭客户端已经
     /// 退出的旧 session（R11 P1-3 第 2 条）；没给就只靠周期扫描。
     pub(crate) liveness: Option<ClientLiveness>,
+    /// 测试用：写入提交之后的那次读（回执展开、ACK）在这里注入故障，见 [`Service::after_commit_read`]。
+    pub(crate) after_commit_fault: std::sync::Mutex<Option<AfterCommitFault>>,
+}
+
+/// 见 [`Service::set_after_commit_read_fault`]：参数是读的位置（`knowledge.result`、`mutation.ack`）。
+pub type AfterCommitFault = std::sync::Arc<dyn Fn(&str) -> Option<DomainError> + Send + Sync>;
+
+/// 写入已经提交、之后的读失败了（peer W4 r1 P1-05、r2 P1-01）：提交状态是「已提交」，`written` 记下这次
+/// 写入的操作身份（至少 op_id），适配层据此给回查或同一 op_id 的重放，而不是会重新签发身份的重做。
+pub fn after_commit_failure(e: DomainError, written: Value) -> DomainError {
+    e.committed(atm_domain::error::Committed::Yes)
+        .detail("written", written)
 }
 
 impl Service {
@@ -169,6 +181,29 @@ impl Service {
             backup_hook: None,
             withdrawals: Default::default(),
             liveness: None,
+            after_commit_fault: Default::default(),
+        }
+    }
+
+    /// 测试用：让写入提交之后的读按 `fault` 的结果失败（`None` 照常读）；传 `None` 撤掉。
+    #[doc(hidden)]
+    pub fn set_after_commit_read_fault(&self, fault: Option<AfterCommitFault>) {
+        *self
+            .after_commit_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = fault;
+    }
+
+    /// 提交之后的读的入口检查：测试注入的故障在这里生效。
+    pub(crate) fn after_commit_read(&self, at: &str) -> Result<(), DomainError> {
+        let fault = self
+            .after_commit_fault
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        match fault.and_then(|f| f(at)) {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 

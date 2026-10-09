@@ -71,28 +71,37 @@ fn committed(e: &DomainError) -> Committed {
     }
 }
 
-/// 写入已经提交、之后拼 ACK 的读失败了：提交状态是「已提交」，并记下这次写入的落点，出路据此回查
-/// （peer W4 r1 P1-05）。
-fn after_commit(e: DomainError, code: &str, op_id: &str) -> DomainError {
-    e.committed(Committed::Yes).detail(
-        "written",
-        json!({"project": atm_domain::keys::normalize(code), "op_id": op_id}),
-    )
-}
-
-/// [`after_commit`] 标过的错误的信封：已提交，出路是按 op_id 回查这次写入——不是重做（op_id 是自动签发的
-/// 时候，原样重发原调用会再写一次）。别的错误原样交回。
-fn committed_write(e: DomainError) -> Result<Envelope, DomainError> {
+/// 服务标为「提交之后的读失败」的错误（`atm_service::write::after_commit_failure`，带 `written`）的信封：
+/// 已提交，出路保持这次写入的操作身份——不是重做（op_id 是自动签发的时候，原样重发原调用会再写一次）：
+/// - 知识写入（`written.retry` 由 [`Surface::knowledge_save`] 补上）：同一 op_id 的同一调用，就是重放；
+/// - 项目内的写入：按项目与 op_id 回查（`atm_search`）。
+///
+/// 别的错误原样交回（peer W4 r1 P1-05、r2 P1-01）。
+pub(crate) fn committed_write(e: DomainError) -> Result<Envelope, DomainError> {
     let written = match (e.committed, e.details.get("written")) {
         (Some(Committed::Yes), Some(w)) => w.clone(),
         _ => return Err(e),
     };
-    let fix = Fix::Reread {
-        call: ToolCall {
-            name: "atm_search".into(),
-            arguments: json!({"project": written["project"], "op_id": written["op_id"]}),
+    let retry = written["retry"]["name"]
+        .as_str()
+        .zip(written["retry"]["arguments"].as_object());
+    let fix = match retry {
+        Some((name, arguments)) => Fix::Call {
+            call: ToolCall {
+                name: name.to_owned(),
+                arguments: Value::Object(arguments.clone()),
+            },
+            why: "写入已经提交，只是回执没读出来：用同一个 op_id 重发就是重放，拿回原回执，不会再写一次"
+                .into(),
         },
-        why: "写入已经提交，只是回执没读出来：按 op_id 回查这次写入，不要重做".into(),
+        None if written["project"].is_string() && written["op_id"].is_string() => Fix::Reread {
+            call: ToolCall {
+                name: "atm_search".into(),
+                arguments: json!({"project": written["project"], "op_id": written["op_id"]}),
+            },
+            why: "写入已经提交，只是回执没读出来：按 op_id 回查这次写入，不要重做".into(),
+        },
+        None => return Err(e),
     };
     Ok(Envelope::new(e, Committed::Yes, None, fix))
 }
@@ -226,16 +235,14 @@ impl Surface {
         operation: &str,
         written: &Written,
     ) -> Result<Value, DomainError> {
-        let mut ack = self
-            .svc
-            .mutation_ack(
-                &place.code,
-                operation,
-                &place.target.op_id,
-                place.target.session.as_deref(),
-                written,
-            )
-            .map_err(|e| after_commit(e, &place.code, &place.target.op_id))?;
+        // 写入已经提交：ACK 的读失败由服务标成「已提交」并带上 op_id（见 committed_write）。
+        let mut ack = self.svc.mutation_ack(
+            &place.code,
+            operation,
+            &place.target.op_id,
+            place.target.session.as_deref(),
+            written,
+        )?;
         let r = &written.result;
         if let Value::Object(m) = &mut ack {
             // 01 Q-04：安全合并在 ACK 顶层，Agent 不必再去 details 里找。
@@ -830,15 +837,35 @@ impl Surface {
             id: a.str("id"),
             expected_revision_id: a.str("expected_revision_id"),
         };
-        let written = self.svc.knowledge_save_agent_at(
-            p,
-            &code,
-            &session,
-            save,
-            &op_id,
-            expected_scope_id.as_deref(),
-            expected_generation,
-        )?;
+        let written = self
+            .svc
+            .knowledge_save_agent_at(
+                p,
+                &code,
+                &session,
+                save,
+                &op_id,
+                expected_scope_id.as_deref(),
+                expected_generation,
+            )
+            .map_err(|e| {
+                // 已经提交、回执没读出来：出路是带着实际 op_id 与 session 的同一调用，也就是重放
+                // （peer W4 r2 P1-01；知识写入不在项目里，没有按项目的回查）。
+                if e.committed != Some(Committed::Yes) {
+                    return e;
+                }
+                let mut retry = a.0.clone();
+                retry.insert("op_id".into(), json!(op_id));
+                retry.insert("session".into(), json!(session));
+                let mut e = e;
+                if let Some(Value::Object(w)) = e.details.get_mut("written") {
+                    w.insert(
+                        "retry".into(),
+                        json!({"name": "atm_knowledge_save", "arguments": retry}),
+                    );
+                }
+                e
+            })?;
         // 2.x 直接回服务结果；v6 的 ACK 规则（op_id、replayed、实际的 project 与 session）补在旁边。
         let mut out = written.result.clone();
         if let Value::Object(m) = &mut out {
@@ -1186,12 +1213,12 @@ mod tests {
     use super::*;
 
     /// ACK 在提交之后读失败：已提交，出路是按 op_id 回查（能过 atm_search 的 schema），不是重做。
+    /// 经真实服务的故障注入见 `tests/write.rs` 的 `reads_after_a_commit_that_fail_still_say_committed`。
     #[test]
     fn an_ack_failure_after_the_commit_is_committed_and_rereads() {
-        let e = after_commit(
+        let e = atm_service::write::after_commit_failure(
             DomainError::new(ErrorCode::STORE_BUSY, "busy"),
-            "atm",
-            "auto:X",
+            json!({"project": "ATM", "op_id": "auto:X"}),
         );
         let envelope = committed_write(e).unwrap();
         assert_eq!(envelope.committed, Committed::Yes);

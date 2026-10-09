@@ -873,3 +873,143 @@ fn begin_on_a_trashed_project_reports_the_committed_restore_request() {
     assert_eq!(requests(), 1, "恢复请求确实落库了：{e}");
     atm_http::fix::check(e).unwrap();
 }
+
+/// 写入提交之后的读（ACK、知识回执展开）失败了：信封如实报 committed:true，出路保持原操作身份——项目内
+/// 写入按 op_id 回查，知识写入是同一 op_id 的重放；照出路走不会再写一笔（peer W4 r1 P1-05、r2 P1-01）。
+/// 新写入与重放、自动与显式 op_id 都过一遍，并对照库里的实际行数。故障由服务的测试钩子注入。
+#[test]
+fn reads_after_a_commit_that_fail_still_say_committed() {
+    let w = world("write-after-commit-read");
+    let failing = std::sync::Arc::new(std::sync::Mutex::new(None::<&'static str>));
+    let at = failing.clone();
+    w.svc
+        .set_after_commit_read_fault(Some(std::sync::Arc::new(move |site: &str| {
+            (*at.lock().unwrap() == Some(site)).then(|| {
+                atm_domain::error::DomainError::new(
+                    atm_domain::error::ErrorCode::STORE_BUSY,
+                    "注入：提交之后的读繁忙",
+                )
+            })
+        })));
+    let fail_at = |site: Option<&'static str>| *failing.lock().unwrap() = site;
+    let count = |sql: &str| -> i64 {
+        let sql = sql.to_owned();
+        w.svc
+            .store()
+            .read(move |tx| tx.query_row(&sql, [], |r| r.get(0)))
+            .unwrap()
+    };
+    let committed = |r: &Value| -> Value {
+        let e = err(r).clone();
+        assert_eq!(
+            (&e["committed"], &e["code"]),
+            (&json!(true), &json!("STORE_BUSY")),
+            "{e}"
+        );
+        atm_http::fix::check(&e).unwrap();
+        e
+    };
+
+    // 项目内的写入，自动 op_id：回查的就是签发的那个 op_id。
+    fail_at(Some("mutation.ack"));
+    let record = |op: Option<&str>, title: &str| {
+        let mut a = json!({"session": w.session, "kind": "FACT", "title": title, "summary": "s"});
+        if let Some(op) = op {
+            a["op_id"] = json!(op);
+        }
+        call(&w, "core", "atm_record", a)
+    };
+    let e = committed(&record(None, "after-commit-auto"));
+    assert_eq!(e["fix"]["kind"], json!("reread"), "{e}");
+    let op = e["fix"]["call"]["arguments"]["op_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(op.starts_with("auto:"), "{e}");
+    assert_eq!(
+        count("SELECT count(*) FROM records WHERE title = 'after-commit-auto'"),
+        1
+    );
+    // 显式 op_id：新写入与重放都报已提交，库里只有一笔。
+    for _ in 0..2 {
+        let e = committed(&record(Some("rec-explicit"), "after-commit-explicit"));
+        assert_eq!(
+            e["fix"]["call"]["arguments"]["op_id"],
+            json!("rec-explicit"),
+            "{e}"
+        );
+    }
+    assert_eq!(
+        count("SELECT count(*) FROM records WHERE title = 'after-commit-explicit'"),
+        1
+    );
+    fail_at(None);
+    let found = call(
+        &w,
+        "memory",
+        e["fix"]["call"]["name"].as_str().unwrap(),
+        e["fix"]["call"]["arguments"].clone(),
+    );
+    assert_ne!(found["isError"], json!(true), "照出路回查：{found}");
+    assert!(
+        found.to_string().contains(&op),
+        "回查到的就是那次写入：{found}"
+    );
+
+    // 知识写入，自动 op_id：出路是带着签发的 op_id 与 session 的同一调用，照做就是重放。
+    fail_at(Some("knowledge.result"));
+    let save = |op: Option<&str>, slug: &str| {
+        let mut a = json!({"session": w.session, "slug": slug, "title": "t", "summary": "s", "body_markdown": "b"});
+        if let Some(op) = op {
+            a["op_id"] = json!(op);
+        }
+        call(&w, "memory", "atm_knowledge_save", a)
+    };
+    let e = committed(&save(None, "after-commit-auto"));
+    let retry = e["fix"]["call"].clone();
+    assert_eq!(
+        (
+            &e["fix"]["kind"],
+            &retry["name"],
+            &retry["arguments"]["session"]
+        ),
+        (
+            &json!("call"),
+            &json!("atm_knowledge_save"),
+            &json!(w.session)
+        ),
+        "{e}"
+    );
+    assert!(
+        retry["arguments"]["op_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("auto:"),
+        "{e}"
+    );
+    let revisions = || count("SELECT count(*) FROM knowledge_revisions");
+    assert_eq!(revisions(), 1);
+    // 显式 op_id：新写入与重放都报已提交。
+    for _ in 0..2 {
+        let e = committed(&save(Some("k-explicit"), "after-commit-explicit"));
+        assert_eq!(
+            e["fix"]["call"]["arguments"]["op_id"],
+            json!("k-explicit"),
+            "{e}"
+        );
+    }
+    assert_eq!(revisions(), 2);
+    fail_at(None);
+    let replayed = call(
+        &w,
+        "memory",
+        "atm_knowledge_save",
+        retry["arguments"].clone(),
+    );
+    assert_eq!(
+        ok(&replayed)["replayed"],
+        json!(true),
+        "照出路重发是重放：{replayed}"
+    );
+    assert_eq!(revisions(), 2, "重放不该再写一笔");
+}

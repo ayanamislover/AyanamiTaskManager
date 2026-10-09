@@ -257,6 +257,19 @@ impl Service {
         requested_session: Option<&str>,
         written: &Written,
     ) -> Result<Value, DomainError> {
+        // 写入已经提交（或是重放）：这里的读失败了也是「已提交」，出路按 op_id 回查（peer W4 r1 P1-05）。
+        let committed = |e: DomainError| {
+            crate::write::after_commit_failure(
+                e,
+                json!({
+                    "project": atm_domain::keys::normalize(project_code),
+                    "op_id": op_id,
+                    "replayed": written.replayed,
+                    "session": written.rebound_to.as_deref().or(requested_session),
+                }),
+            )
+        };
+        self.after_commit_read("mutation.ack").map_err(committed)?;
         let receipt_session: Option<String> = if written.receipt_id > 0 {
             let id = written.receipt_id;
             self.store()
@@ -270,7 +283,7 @@ impl Service {
                     .optional()
                     .map(Option::flatten)
                 })
-                .map_err(|e| crate::write::internal(format!("{e:?}")))?
+                .map_err(|e| committed(crate::write::internal(format!("{e:?}"))))?
         } else {
             None
         };

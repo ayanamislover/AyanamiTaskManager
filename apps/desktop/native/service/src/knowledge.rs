@@ -538,25 +538,48 @@ impl Service {
     /// 三个写入口共用：选知识范围、写一次；范围在两者之间被并发建立时按新身份再写一次。
     fn knowledge_write(
         &self,
+        op_id: &str,
         mut attempt: impl FnMut(&str, Option<Prepare>) -> Result<Written, DomainError>,
     ) -> Result<Written, DomainError> {
         let (scope, prepare) = self.knowledge_scope()?;
-        match attempt(&scope, prepare) {
+        let (scope, w) = match attempt(&scope, prepare) {
             Err(e) if e.details.contains_key(SCOPE_MOVED) => {
                 let (scope, prepare) = self.knowledge_scope()?;
-                self.knowledge_result(attempt(&scope, prepare)?)
+                let w = attempt(&scope, prepare)?;
+                (scope, w)
             }
-            other => self.knowledge_result(other?),
-        }
+            other => (scope, other?),
+        };
+        self.knowledge_result(w, &scope, op_id)
     }
 
-    /// 回执展开成条目（新写入与重放同一条路）。
-    fn knowledge_result(&self, w: Written) -> Result<Written, DomainError> {
+    /// 回执展开成条目（新写入与重放同一条路）。这时写入已经提交（或是重放）：展开的读失败了也是
+    /// 「已提交」，带上知识范围与 op_id，出路是同一 op_id 的重放（peer W4 r2 P1-01）。
+    fn knowledge_result(
+        &self,
+        w: Written,
+        scope: &str,
+        op_id: &str,
+    ) -> Result<Written, DomainError> {
         let receipt = w.result.clone();
         let entry = self
-            .store()
-            .read(move |tx| expand(tx, &receipt))
-            .map_err(dom_read_error)?;
+            .after_commit_read("knowledge.result")
+            .and_then(|()| {
+                self.store()
+                    .read(move |tx| expand(tx, &receipt))
+                    .map_err(dom_read_error)
+            })
+            .map_err(|e| {
+                crate::write::after_commit_failure(
+                    e,
+                    json!({
+                        "scope": { "kind": "KNOWLEDGE", "id": scope },
+                        "op_id": op_id,
+                        "replayed": w.replayed,
+                        "session": w.rebound_to,
+                    }),
+                )
+            })?;
         Ok(Written { result: entry, ..w })
     }
 
@@ -581,7 +604,7 @@ impl Service {
                 "更新知识必须带当前修订的 revisionId，防止备份恢复后版本号重用",
             ));
         }
-        self.knowledge_write(|scope, prepare| {
+        self.knowledge_write(op_id, |scope, prepare| {
             let (content, id, expected_revision_id) =
                 (content.clone(), id.clone(), expected_revision_id.clone());
             let (fp_content, fp_id, fp_rev, fp_ver, op) = (
@@ -653,7 +676,7 @@ impl Service {
         if r.expected_version < 1 {
             return Err(invalid("expected_version", "expected_version 必须是正整数"));
         }
-        self.knowledge_write(|scope, prepare| {
+        self.knowledge_write(op_id, |scope, prepare| {
 let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
         let (fp_id, fp_rev, op) = (id.clone(), expected_revision_id.clone(), op_id.to_owned());
         let (expected, archived) = (r.expected_version, r.archived);
@@ -731,7 +754,7 @@ let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
             ));
         }
         let project_id = self.project_scope(project)?;
-        self.knowledge_write(|scope, prepare| {
+        self.knowledge_write(op_id, |scope, prepare| {
 let (content, id, expected_revision_id, project_id) = (content.clone(), id.clone(), expected_revision_id.clone(), project_id.clone());
         let (fp_content, fp_id, fp_rev, fp_project, op) = (
             content.clone(),

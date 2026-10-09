@@ -1102,8 +1102,13 @@ impl Surface {
             .calls
             .run(move || {
                 let p = &agent.0;
-                self.own(n, p, tool, &checked, &runtime)
-                    .map_err(|(e, c)| self.envelope(p, tool, &checked, e, c))
+                self.own(n, p, tool, &checked, &runtime).map_err(|(e, c)| {
+                    match crate::write::committed_write(e) {
+                        // 提交之后的读失败：同 MCP 写工具一样回查，不是重做（W4 r2 P1-01）。
+                        Ok(envelope) => envelope,
+                        Err(e) => self.envelope(p, tool, &checked, e, c),
+                    }
+                })
             })
             .await
         {
