@@ -122,3 +122,10 @@ U-1 第二轮（Codex 与 Claude Code 各 27 次）又查出两处：
 | R1-P1-01 | 字段问题可以确定地更正（夹取、别名）时不再跑组合规则：`atm_search {project, session, list, limit:50}` 的 fix.call 夹了 limit 却留着 session，照做还要再改一次；`{list, query, limit:50}` 的 list / query 真冲突也给了更正 | `Tool::validate`：字段问题都能更正时，在更正过的参数上照样跑组合规则；Unused 一并去掉，真冲突就不给更正。对外给出的 `corrected` 再校验一遍，过不了就不给（MCP 与 REST 的参数错误都经这里）。用例 `tests/schema.rs` `field_corrections_still_meet_the_combination_rules`，U-3 语料加上这条组合猜错 |
 | R1-P2-01 | `bridge.rs` 的旧 `Bridge::call` / `ok()` 仍把协议层错误（null 结果）当成功                                                                                                                                                | `Bridge::call` 断言拿到了工具结果（工具级错误也有 result，只有协议错误没有）；`ok()` 另断言结果是对象。要测协议错误的用例本来就直接用 `request`                                                                                                                                                   |
 | R1-P2-02 | §4.3 把第一轮写成「全部完成」，原始记录是 21/27；上限写成「提案后列加开工一次」，W7、W8 不是这样                                                                                                                          | §4.3 第一轮照原记录列出（21/27，原因无法重算的如实写明），并列出当时口径下的超限；§4.2 列出每个流程上限的准备、被测动作、验证三部分。第 5 条缺陷的出现范围也按原始记录改正                                                                                                                        |
+
+第一轮修订的变异验红：`output/w4-evidence/w4j-r1-mutation-evidence.json`，5 RED。其中：
+
+- 两条是 `Bridge::call` / `ok()` 的阳性对照。
+- 单独去掉「真冲突不给更正」那一行是等价变异：外层的再校验会拦下仍有冲突的更正，它在上一版证据里 SURVIVED。所以这一条改为与再校验同时关掉；再校验单独的作用另有一条，由 `a_correction_that_would_not_pass_is_withheld` 验红。
+
+这次修订改了 `schema.rs`、`bridge.rs`，`w4j-clamp`、`w4j-unused`、`w4j-reads` 三份证据随之在新候选上重跑。`w4j-unused` 的第一条变异的锚点因缩进变化改写过。
