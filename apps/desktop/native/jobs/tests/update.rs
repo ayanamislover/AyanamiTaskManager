@@ -500,6 +500,19 @@ fn details_are_redacted_and_bounded() {
             "GET /feed?token=s3cr3t&x=1",
             "GET /feed?token=<redacted>&x=1",
         ),
+        // peer W5 r3：转义引号不结束值；括号包着的引号路径整段隐藏；Unicode 空白旁的键照样识别。
+        (
+            r#"{"password":"public\"SYNTHETIC_REVIEW_SECRET","n":1}"#,
+            r#"{"password":<redacted>,"n":1}"#,
+        ),
+        (
+            r#"open ("C:\Program Files\SYNTHETIC_REVIEW_SECRET\db") failed"#,
+            "open <local-path> failed",
+        ),
+        (
+            "日志\u{3000}token=SYNTHETIC_REVIEW_SECRET\u{3000}之后",
+            "日志 token=<redacted> 之后",
+        ),
         // peer W5 r2 P1-01：同一个词里第二个键的值也要换掉。
         (
             r#"{"token":"public","authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,

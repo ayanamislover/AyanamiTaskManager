@@ -1,13 +1,16 @@
-//! 日志里的密钥脱敏：宿主日志（`host.log`）与更新日志共用一套语义（peer W5 r1 P1-02、r2 P1-01）。
+//! 日志里的密钥脱敏：宿主日志（`host.log`）与更新日志共用一套语义（peer W5 r1 P1-02、r2 P1-01、r3 P1-01）。
 //!
-//! 在原字符串上逐个位置扫描「键 → 分隔符 → 值」，不先按空白切词：同一个词里的多个键值对
+//! 在原字符串上按字符边界扫描「键 → 分隔符 → 值」，不先按空白切词：同一个词里的多个键值对
 //! （`{"token":"a","authorization":"Bearer x"}`）、键与冒号之间的空白（`{"token" : "x"}`）、
 //! 带空格的引号值（`password="a b"`）都按值本身的边界换成占位。
 //!
+//! - 空白：一律是 Unicode 空白（`char::is_whitespace`），与最后压空白用的 `split_whitespace` 同一个口径，
+//!   全角空格、不换行空格旁边的键与值照样识别。
 //! - 键：`token=`、`api_key:`、`"secret": "x"`……键后可以夹一个引号，键与分隔符、分隔符与值之间可以有空白；
 //!   键前面只能是开头、空白或 `?` `&` `_` `-` `.` `=` `:`、引号、括号、逗号、分号，免得把 `monkey=` 当成 `key=`。
-//! - 值：引号开头的到配对的引号为止（没有配对就到结尾），否则到空白或 `&` `,` `;` `)` `]` `}` 为止。
-//! - `Authorization` 的值是「[认证方案] 密钥」，整段一个占位；引号包着的整段同样。
+//! - 值：引号开头的到配对的引号为止，反斜杠转义下一个字符（`\"` 不结束，`\\"` 结束），没有配对就到结尾；
+//!   否则到空白或 `&` `,` `;` `)` `]` `}` 为止。
+//! - `Authorization` 的值是「[认证方案] 密钥」，整段一个占位；引号包着的整段同样，引号里只有方案时连同下一个词。
 //! - 单独出现的 `Bearer x`：`x` 是密钥。`Basic` 是常用词，只在 `Authorization` 之后才算方案。
 //!
 //! 路径怎么处理由调用方决定：宿主日志要留路径定位问题，更新日志换成占位。最后空白压成单个空格；截断由调用方做。
@@ -42,47 +45,61 @@ const KEYS: [&str; 13] = [
 /// 认证方案：`Authorization: <方案> <密钥>` 里方案本身不是密钥，但和密钥一起只留一个占位。
 const SCHEMES: [&str; 5] = ["bearer", "basic", "digest", "negotiate", "token"];
 
-/// 键前面允许的字符（另加开头与空白）。
-fn opens_key(c: u8) -> bool {
-    c.is_ascii_whitespace() || b"?&_-.=:\"'([{,;".contains(&c)
+/// 不跟在 `Authorization` 后面也认的方案：`Bearer x` 的 `x` 是密钥。
+const LONE_SCHEMES: [&str; 1] = ["bearer"];
+
+/// `i` 处的字符（`i` 在字符边界上）。
+fn char_at(s: &str, i: usize) -> Option<char> {
+    s[i..].chars().next()
+}
+
+/// 键前面允许的字符（另加开头）。
+fn opens_key(c: char) -> bool {
+    c.is_whitespace() || "?&_-.=:\"'([{,;".contains(c)
 }
 
 /// 不带引号的值在这些字符处结束。
-fn ends_value(c: u8) -> bool {
-    c.is_ascii_whitespace() || b"&,;)]}".contains(&c)
+fn ends_value(c: char) -> bool {
+    c.is_whitespace() || "&,;)]}".contains(c)
 }
 
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while i < b.len() && b[i].is_ascii_whitespace() {
-        i += 1;
+fn skip_space(s: &str, mut i: usize) -> usize {
+    while let Some(c) = char_at(s, i).filter(|c| c.is_whitespace()) {
+        i += c.len_utf8();
     }
     i
 }
 
-/// 从 `i` 开始的一个值的结束位置（不含）。
-fn value_end(b: &[u8], i: usize) -> usize {
-    match b.get(i) {
-        Some(&q @ (b'"' | b'\'')) => b[i + 1..]
-            .iter()
-            .position(|&c| c == q)
-            .map_or(b.len(), |at| i + 1 + at + 1),
-        _ => {
-            let mut j = i;
-            while j < b.len() && !ends_value(b[j]) {
-                j += 1;
-            }
-            j
+/// `i` 处是引号时，到配对引号之后的位置；反斜杠转义下一个字符，没有配对就到结尾。
+fn quoted_end(s: &str, i: usize) -> Option<usize> {
+    let q = char_at(s, i).filter(|c| matches!(c, '"' | '\''))?;
+    let mut chars = s[i + 1..].char_indices();
+    while let Some((at, c)) = chars.next() {
+        if c == '\\' {
+            chars.next();
+        } else if c == q {
+            return Some(i + 1 + at + 1);
         }
     }
+    Some(s.len())
 }
 
-/// `Authorization` 的值：引号包着的整段，或「[方案] 密钥」。
-fn authorization_end(lower: &[u8], i: usize) -> usize {
-    if matches!(lower.get(i), Some(b'"' | b'\'')) {
-        return value_end(lower, i);
+/// 从 `i` 开始的一个值的结束位置（不含）。
+fn value_end(s: &str, i: usize) -> usize {
+    if let Some(end) = quoted_end(s, i) {
+        return end;
     }
+    let mut j = i;
+    while let Some(c) = char_at(s, j).filter(|&c| !ends_value(c)) {
+        j += c.len_utf8();
+    }
+    j
+}
+
+/// `Authorization` 的值：「[方案] 密钥」，方案可以单独被引号包着；整段引号同样是一个值。
+fn authorization_end(lower: &str, i: usize) -> usize {
     let first = value_end(lower, i);
-    let word = std::str::from_utf8(&lower[i..first]).unwrap_or("");
+    let word = lower[i..first].trim_matches(|c| c == '"' || c == '\'');
     if !SCHEMES.contains(&word) {
         return first;
     }
@@ -92,25 +109,28 @@ fn authorization_end(lower: &[u8], i: usize) -> usize {
 }
 
 /// `i` 处起的密钥：`(值开始, 值结束)`。
-fn secret_at(lower: &[u8], i: usize) -> Option<(usize, usize)> {
+fn secret_at(lower: &str, i: usize) -> Option<(usize, usize)> {
     let rest = &lower[i..];
-    if rest.starts_with(b"bearer") && lower.get(i + 6).is_some_and(u8::is_ascii_whitespace) {
-        let start = skip_space(lower, i + 6);
-        let end = value_end(lower, start);
-        return (end > start).then_some((start, end));
+    for word in LONE_SCHEMES {
+        let after = i + word.len();
+        if rest.starts_with(word) && char_at(lower, after).is_some_and(char::is_whitespace) {
+            let start = skip_space(lower, after);
+            let end = value_end(lower, start);
+            return (end > start).then_some((start, end));
+        }
     }
     let key = KEYS.iter().find(|key| {
-        if !rest.starts_with(key.as_bytes()) {
+        if !rest.starts_with(**key) {
             return false;
         }
         let mut j = i + key.len();
-        if matches!(lower.get(j), Some(b'"' | b'\'')) {
+        if matches!(char_at(lower, j), Some('"' | '\'')) {
             j += 1;
         }
-        matches!(lower.get(skip_space(lower, j)), Some(b'=' | b':'))
+        matches!(char_at(lower, skip_space(lower, j)), Some('=' | ':'))
     })?;
     let mut j = i + key.len();
-    if matches!(lower.get(j), Some(b'"' | b'\'')) {
+    if matches!(char_at(lower, j), Some('"' | '\'')) {
         j += 1;
     }
     let start = skip_space(lower, skip_space(lower, j) + 1);
@@ -122,11 +142,15 @@ fn secret_at(lower: &[u8], i: usize) -> Option<(usize, usize)> {
     (end > start).then_some((start, end))
 }
 
-/// `i` 处（开头或空白之后）起的本机路径的结束位置：引号包着的到配对引号，否则到空白。
+/// `i` 处（开头或空白之后）起的本机路径的结束位置。前面可以包着括号与引号：有引号时到配对引号
+/// （与值同一套转义规则），再连同紧跟的括号等到空白为止；没有引号时到空白为止。
 fn local_path_end(text: &str, i: usize) -> Option<usize> {
-    let b = text.as_bytes();
     let mut start = i;
-    while matches!(b.get(start), Some(b'"' | b'\'' | b'(')) {
+    let mut quote = None;
+    while let Some(c) = char_at(text, start).filter(|c| matches!(c, '"' | '\'' | '(')) {
+        if c != '(' {
+            quote = Some(start);
+        }
         start += 1;
     }
     let t = text[start..]
@@ -141,32 +165,23 @@ fn local_path_end(text: &str, i: usize) -> Option<usize> {
     if !is_path {
         return None;
     }
-    let end = match b[i] {
-        q @ (b'"' | b'\'') => b[i + 1..]
-            .iter()
-            .position(|&c| c == q)
-            .map_or(b.len(), |at| i + 1 + at + 1),
-        _ => {
-            i + b[i..]
-                .iter()
-                .position(u8::is_ascii_whitespace)
-                .unwrap_or(b.len() - i)
-        }
-    };
+    let mut end = quote.and_then(|q| quoted_end(text, q)).unwrap_or(start);
+    while let Some(c) = char_at(text, end).filter(|c| !c.is_whitespace()) {
+        end += c.len_utf8();
+    }
     Some(end)
 }
 
 /// 脱敏一段文本：密钥换成 `<redacted>`，按 `paths` 处理本机路径，空白压成单个空格。
 pub fn redact_secrets(text: &str, paths: Paths) -> String {
-    // 只把 ASCII 变小写，字节位置不变；匹配用的字符都是 ASCII，切片都落在字符边界上。
+    // 只把 ASCII 变小写，字节位置不变；`i` 每次前进一个字符，切片都落在字符边界上。
     let lower = text.to_ascii_lowercase();
-    let b = lower.as_bytes();
     let mut out = String::with_capacity(text.len());
     let (mut i, mut copied) = (0, 0);
-    while i < b.len() {
-        let after_space = i == 0 || b[i - 1].is_ascii_whitespace();
+    while let Some(c) = char_at(text, i) {
+        let before = text[..i].chars().next_back();
         if paths == Paths::Hide
-            && after_space
+            && before.is_none_or(char::is_whitespace)
             && let Some(end) = local_path_end(text, i)
         {
             out.push_str(&text[copied..i]);
@@ -174,15 +189,15 @@ pub fn redact_secrets(text: &str, paths: Paths) -> String {
             (i, copied) = (end, end);
             continue;
         }
-        if (i == 0 || opens_key(b[i - 1]))
-            && let Some((start, end)) = secret_at(b, i)
+        if before.is_none_or(opens_key)
+            && let Some((start, end)) = secret_at(&lower, i)
         {
             out.push_str(&text[copied..start]);
             out.push_str(PLACEHOLDER);
             (i, copied) = (end, end);
             continue;
         }
-        i += 1;
+        i += c.len_utf8();
     }
     out.push_str(&text[copied..]);
     out.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -194,9 +209,13 @@ mod tests {
 
     const SECRET: &str = "SYNTHETIC_SECRET_9f3";
 
-    /// 各种写法里，合成密钥一个字符都不能留下（peer W5 r1 P1-02 的反例在第一条，r2 的反例在后面一组）。
+    /// 各种写法里，合成密钥一个字符都不能留下（peer W5 r1 P1-02 的反例在第一条，r2、r3 的反例在后面两组）。
     #[test]
     fn secrets_never_survive() {
+        let long = format!(
+            "password=\"{}\\\"SYNTHETIC_SECRET_9f3\" tail",
+            "x".repeat(20_000)
+        );
         for line in [
             "GET /x Authorization: Bearer SYNTHETIC_SECRET_9f3",
             "authorization: bearer SYNTHETIC_SECRET_9f3 tail",
@@ -221,7 +240,7 @@ mod tests {
             r#"{"token":"public","authorization":"Bearer SYNTHETIC_SECRET_9f3"}"#,
             r#"{"token":"public","password":"SYNTHETIC_SECRET_9f3","n":1}"#,
             r#"{"token" : "SYNTHETIC_SECRET_9f3"}"#,
-            r#"{"token"	:	"SYNTHETIC_SECRET_9f3"}"#,
+            "{\"token\"\t:\t\"SYNTHETIC_SECRET_9f3\"}",
             "token = SYNTHETIC_SECRET_9f3",
             r#"password="public SYNTHETIC_SECRET_9f3" operation failed"#,
             "secret='a b SYNTHETIC_SECRET_9f3'",
@@ -229,6 +248,19 @@ mod tests {
             "token=a&password=SYNTHETIC_SECRET_9f3",
             "token=a,api_key=SYNTHETIC_SECRET_9f3",
             r#"password="unterminated SYNTHETIC_SECRET_9f3"#,
+            // r3：引号值里的转义引号、Unicode 空白、引号里只有方案、很长的前半段。
+            r#"{"password":"public\"SYNTHETIC_SECRET_9f3"}"#,
+            r#"Authorization: "public\"SYNTHETIC_SECRET_9f3""#,
+            r#"password="a\\\"SYNTHETIC_SECRET_9f3" tail"#,
+            "日志\u{3000}token=SYNTHETIC_SECRET_9f3",
+            "token\u{a0}=SYNTHETIC_SECRET_9f3",
+            "password=\u{3000}\"public SYNTHETIC_SECRET_9f3\"",
+            "Bearer\u{a0}SYNTHETIC_SECRET_9f3",
+            "Authorization:\u{3000}Bearer\u{3000}SYNTHETIC_SECRET_9f3",
+            r#"Authorization: "Bearer" SYNTHETIC_SECRET_9f3"#,
+            "key=,token=SYNTHETIC_SECRET_9f3",
+            "key=&password=SYNTHETIC_SECRET_9f3",
+            &long,
         ] {
             for paths in [Paths::Keep, Paths::Hide] {
                 let got = redact_secrets(line, paths);
@@ -268,15 +300,29 @@ mod tests {
                 "password=<redacted> operation failed",
             ),
             (
+                r#"{"password":"a\"b","n":1}"#,
+                r#"{"password":<redacted>,"n":1}"#,
+            ),
+            (
+                r#"password="public\\" status=ok"#,
+                "password=<redacted> status=ok",
+            ),
+            (
                 "basic database validation failed",
                 "basic database validation failed",
             ),
             ("bearers are fine", "bearers are fine"),
             ("tokens counted: 5", "tokens counted: 5"),
             ("authorized: yes", "authorized: yes"),
+            ("key=, status=ok", "key=, status=ok"),
+            ("token=; status=ok", "token=; status=ok"),
             ("token: ", "token:"),
             ("  many \n spaces\t", "many spaces"),
             ("数据库 token=秘密 之后", "数据库 token=<redacted> 之后"),
+            (
+                "日志\u{3000}token=x\u{3000}之后",
+                "日志 token=<redacted> 之后",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(redact_secrets(input, Paths::Keep), want, "{input:?}");
@@ -291,9 +337,20 @@ mod tests {
             redact_secrets(line, Paths::Hide),
             "open <local-path> denied <local-path> <local-path>"
         );
-        assert_eq!(
-            redact_secrets("open \"C:\\Program Files\\atm\\x.db\" failed", Paths::Hide),
-            "open <local-path> failed"
-        );
+        for (input, want) in [
+            (
+                "open \"C:\\Program Files\\atm\\x.db\" failed",
+                "open <local-path> failed",
+            ),
+            // peer W5 r3 P2-01：括号包着引号。
+            (
+                "open (\"C:\\Program Files\\atm\\x.db\") failed",
+                "open <local-path> failed",
+            ),
+            ("open ('D:\\My Data\\x') next", "open <local-path> next"),
+            ("open (C:\\data\\x) next", "open <local-path> next"),
+        ] {
+            assert_eq!(redact_secrets(input, Paths::Hide), want, "{input:?}");
+        }
     }
 }

@@ -513,6 +513,10 @@ mod tests {
             r#"{"token":"public","authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,
             r#"{"token" : "SYNTHETIC_REVIEW_SECRET"}"#,
             r#"password="public SYNTHETIC_REVIEW_SECRET" operation failed"#,
+            // peer W5 r3 P1-01：引号值里的转义引号、Unicode 空白。
+            r#"{"password":"public\"SYNTHETIC_REVIEW_SECRET"}"#,
+            "日志\u{3000}token=SYNTHETIC_REVIEW_SECRET",
+            "Bearer\u{a0}SYNTHETIC_REVIEW_SECRET",
         ] {
             assert!(
                 !redact_line(line).contains("SYNTHETIC_REVIEW_SECRET"),
