@@ -174,6 +174,38 @@ fn bounded_numbers_are_clamped_and_unbounded_ones_are_not() {
     assert_eq!(r.corrected, None);
 }
 
+/// 只剩「不起作用的参数」时，更正就是去掉它们的同一调用（U-3）；与别的组合规则问题同时出现就不猜。
+#[test]
+fn unused_parameters_are_dropped_by_the_correction() {
+    let search = &atm_http::tools::SEARCH;
+    let r = search
+        .validate(&json!({"project": "P", "query": "登录", "session": "S"}))
+        .unwrap_err();
+    assert_eq!(r.problems[0].problem, ProblemKind::Unused);
+    assert_eq!(
+        r.corrected.map(Value::Object),
+        Some(json!({"project": "P", "query": "登录"}))
+    );
+    let r = search
+        .validate(&json!({"project": "P", "list": "records", "session": "S"}))
+        .unwrap_err();
+    assert_eq!(
+        r.corrected.map(Value::Object),
+        Some(json!({"project": "P", "list": "records"}))
+    );
+    // 没有 project 时列表的 session 用来推出项目，不是多余的。
+    assert!(
+        search
+            .validate(&json!({"list": "records", "session": "S"}))
+            .is_ok()
+    );
+    // list 与 query 同时给是真冲突：不知道调用方要哪一种，不给更正。
+    let r = search
+        .validate(&json!({"project": "P", "list": "records", "query": "x", "session": "S"}))
+        .unwrap_err();
+    assert_eq!(r.corrected, None);
+}
+
 /// 上限、类型、嵌套路径。
 #[test]
 fn limits_types_and_nested_paths() {

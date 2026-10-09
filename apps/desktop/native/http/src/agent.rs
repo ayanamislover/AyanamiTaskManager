@@ -93,10 +93,7 @@ impl Surface {
             "atm_search" => args.contains_key("list") || args.contains_key("op_id"),
             _ => false,
         };
-        if !needs_project
-            || args.contains_key("session")
-            || args.contains_key("project")
-        {
+        if !needs_project || args.contains_key("session") || args.contains_key("project") {
             return None;
         }
         let single = crate::write::single_conversation(p.client_group());

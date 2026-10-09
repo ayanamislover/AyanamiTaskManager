@@ -265,7 +265,9 @@ fn r1_r2_progress_respects_the_claim() {
 fn u1_progress_on_an_unstarted_task_starts_it() {
     let w = world("mm-auto-start");
     let k = w.task("一");
-    let r = w.progress("S1", ProgressRequest::task(&k, "开始写了")).unwrap();
+    let r = w
+        .progress("S1", ProgressRequest::task(&k, "开始写了"))
+        .unwrap();
     assert_eq!(
         r.result["autoApplied"],
         json!([{ "taskKey": k, "operations": ["start"] }])
@@ -277,7 +279,9 @@ fn u1_progress_on_an_unstarted_task_starts_it() {
         ["work.created", "work.started", "work.progressed"]
     );
     // 已经开工的不再补。
-    let r = w.progress("S1", ProgressRequest::task(&k, "又写了一点")).unwrap();
+    let r = w
+        .progress("S1", ProgressRequest::task(&k, "又写了一点"))
+        .unwrap();
     assert!(r.result.get("autoApplied").is_none(), "{}", r.result);
     // 前置没完成：start 补不上，进度照记，任务仍是 READY、没人领。
     let pre = w.task("前置");
@@ -295,7 +299,9 @@ fn u1_progress_on_an_unstarted_task_starts_it() {
         .as_str()
         .unwrap()
         .to_owned();
-    let r = w.progress("S1", ProgressRequest::task(&c, "先看了看")).unwrap();
+    let r = w
+        .progress("S1", ProgressRequest::task(&c, "先看了看"))
+        .unwrap();
     assert!(r.result.get("autoApplied").is_none(), "{}", r.result);
     assert_eq!(w.col(&c, "status"), "READY");
     assert!(w.col(&c, "claimed_by_session_id").is_null());

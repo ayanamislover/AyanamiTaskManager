@@ -426,7 +426,7 @@ MCP 之外，Agent 令牌还能用这些 REST 入口：项目列表与详情、�
         "op_id": "op-typo"
       }
     },
-    "why": "按 did_you_mean 更正后的同一调用"
+    "why": "按 problems 更正后的同一调用（did_you_mean 已代入，不起作用的参数已去掉）"
   },
   "problems": [
     {

@@ -16,7 +16,9 @@
 use crate::schema::Tool;
 use crate::tools;
 use crate::write::client_name;
-use atm_domain::error::{Committed, DomainError, Envelope, ErrorCode, Fix, FixKind, ToolCall};
+use atm_domain::error::{
+    Committed, DomainError, Envelope, ErrorCode, Fix, FixKind, ProblemKind, ToolCall,
+};
 use atm_domain::principal::Principal;
 use atm_domain::work::{Phase, WaitingOn, WorkState, legal_operations};
 use atm_service::read::{TaskGetRequest, TaskView};
@@ -179,6 +181,16 @@ fn call(ctx: &Ctx<'_>, name: &str, mut args: Map<String, Value>) -> ToolCall {
             && let Some(p) = ctx.project()
         {
             args.insert("project".into(), json!(p));
+        }
+        // 补上的上下文在这个调用里可能不起作用（例如列表搜索里的 session）：去掉，免得出路自己过不了 schema。
+        if let Err(r) = tool.validate(&Value::Object(args.clone())) {
+            for p in r
+                .problems
+                .iter()
+                .filter(|p| p.problem == ProblemKind::Unused)
+            {
+                args.remove(&p.path);
+            }
         }
     }
     ToolCall {

@@ -224,7 +224,8 @@ pub fn invalid_argument(tool: &Tool, rejected: crate::schema::Rejected) -> Envel
                 name: tool.name.to_owned(),
                 arguments: Value::Object(args),
             },
-            why: "按 did_you_mean 更正后的同一调用".to_owned(),
+            why: "按 problems 更正后的同一调用（did_you_mean 已代入，不起作用的参数已去掉）"
+                .to_owned(),
         },
         None => {
             let first = rejected

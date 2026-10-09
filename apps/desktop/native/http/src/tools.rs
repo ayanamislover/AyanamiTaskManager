@@ -769,12 +769,17 @@ fn search_check(args: &Map<String, Value>) -> Vec<Problem> {
                 out.push(Problem::new(k, ProblemKind::Conflict).allowed("list"));
             }
         }
+        // 列表不按 session 过滤：带了也不起作用。
+        if has("session") && has("project") {
+            out.push(Problem::new("session", ProblemKind::Unused));
+        }
     } else {
         if !has("query") && !has("op_id") {
             out.push(Problem::new("query", ProblemKind::Missing).allowed("query or op_id or list"));
         }
+        // session 只用于 op_id 回查；全文搜索带了也不起作用。
         if has("session") && !has("op_id") {
-            out.push(Problem::new("session", ProblemKind::Conflict).allowed("op_id"));
+            out.push(Problem::new("session", ProblemKind::Unused).allowed("op_id"));
         }
     }
     out

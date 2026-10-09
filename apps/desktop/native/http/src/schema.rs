@@ -211,11 +211,23 @@ impl Tool {
         };
         let mut v = Validation::default();
         let args = v.object(self.fields, map, "");
+        let mut args = args;
         if v.problems.is_empty()
             && let Some(check) = self.check
         {
-            v.problems.extend(check(&args));
-            v.fixable = false;
+            let found = check(&args);
+            // 只剩「不起作用的参数」时，更正就是去掉它们（U-3）；其余组合规则不猜。
+            if !found.is_empty() && found.iter().all(|p| p.problem == ProblemKind::Unused) {
+                for p in &found {
+                    args.remove(&p.path);
+                }
+                // check 只在前面没有问题时才跑，这是第一批问题。
+                v.started = true;
+                v.fixable = true;
+            } else {
+                v.fixable = false;
+            }
+            v.problems.extend(found);
         }
         // 输出顺序与调用方写键的顺序无关。
         v.problems.sort_by(|a, b| a.path.cmp(&b.path));

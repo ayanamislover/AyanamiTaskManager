@@ -338,6 +338,17 @@ fn u3_guesses_succeed_directly_or_after_one_fix() {
         "atm_task_get",
         json!({"project": w.project, "task_key": a, "last_progress": 99}),
     );
+    // 习惯性地处处带 session：列表与全文搜索不收，fix.call 是去掉它的原调用，不是再补一次。
+    guess(
+        &w,
+        "atm_search",
+        json!({"project": w.project, "session": s, "list": "records"}),
+    );
+    guess(
+        &w,
+        "atm_search",
+        json!({"project": w.project, "session": s, "query": "甲"}),
+    );
     guess(
         &w,
         "atm_progress_add",

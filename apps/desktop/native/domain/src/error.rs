@@ -332,6 +332,9 @@ pub enum ProblemKind {
     Duplicate,
     Empty,
     Conflict,
+    /// 这个参数在这里不起作用（例如 atm_search 不带 op_id 时的 session）：去掉它不改变调用的意思，
+    /// 所以只有这类问题时自动更正就是去掉它们的同一调用。
+    Unused,
 }
 
 /// 领域与服务的错误：码、中文消息、结构化 details。信封其余字段（committed、state、fix）由服务补。
