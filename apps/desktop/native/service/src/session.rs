@@ -1954,7 +1954,7 @@ impl Service {
         let group = principal.client_group().map(str::to_owned);
         let fp_req = req.clone();
         let fingerprint: FpInput = Box::new(move |_, family, _: &Author| end_fp(&fp_req, family));
-        self.write(
+        let written = self.write(
             principal,
             WriteRequest {
                 capability: Capability::SessionEnd,
@@ -1977,7 +1977,18 @@ impl Service {
                 end_owned(tx, ctx, group.as_deref())?;
                 end_action(tx, ctx, &req)
             },
-        )
+        )?;
+        // atm_end 释放的任务补扫工程指标（2.x session-commands.ts:239）。
+        if !written.replayed {
+            let released: Vec<String> = written.result["releasedItems"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r["key"].as_str().map(str::to_owned))
+                .collect();
+            self.metrics_signal(&target.project_id, released, false);
+        }
+        Ok(written)
     }
 
     /// 强制关闭（USER_ONLY，02 §2.8，S-017）。默认释放领取；已关闭的也照样执行（覆盖 close_reason）。

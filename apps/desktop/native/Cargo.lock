@@ -120,6 +120,7 @@ version = "0.0.0"
 dependencies = [
  "atm-domain",
  "atm-install-state",
+ "atm-metrics",
  "atm-service",
  "atm-store",
  "rusqlite",
@@ -134,6 +135,14 @@ dependencies = [
  "atm-build-support",
  "atm-install-state",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "atm-metrics"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "serde_json",
 ]
 
 [[package]]
@@ -158,6 +167,7 @@ name = "atm-service"
 version = "0.0.0"
 dependencies = [
  "atm-domain",
+ "atm-metrics",
  "atm-store",
  "rusqlite",
  "serde",

@@ -1,0 +1,14 @@
+[package]
+name = "atm-metrics"
+version = "0.0.0"
+description = "ATM 3 engineering metrics: read-only git and file scans (2.x packages/engineering-metrics)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# 只读扫描：调 git、读工作区文件，产出 2.x 形状的 JSON 载荷。不碰库，不知道主体。
+[dependencies]
+atm-domain = { path = "../domain" }
+serde_json = { workspace = true }

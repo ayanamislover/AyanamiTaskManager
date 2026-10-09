@@ -97,6 +97,8 @@ pub struct Options {
     pub notify: Option<atm_jobs::notify::Sink>,
     /// 起 job `maintenance`（W5h：DAILY / WEEKLY 备份与保留策略）。宿主起；e2e、独立运行时不起。
     pub maintenance: bool,
+    /// 起 job `metrics.capture`（W5h2：任务操作之后的工程指标采集）。宿主起；e2e、独立运行时不起。
+    pub metrics_capture: bool,
 }
 
 #[derive(Debug)]
@@ -411,6 +413,7 @@ fn serve(
         observe: &*o.observe,
         notify: o.notify.clone(),
         maintenance: o.maintenance,
+        metrics_capture: o.metrics_capture,
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -440,6 +443,7 @@ fn serve(
             observe: o.observe.clone(),
             notify: o.notify.clone(),
             maintenance: o.maintenance,
+            metrics_capture: o.metrics_capture,
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()

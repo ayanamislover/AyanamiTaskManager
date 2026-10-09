@@ -325,14 +325,16 @@ fn route_call(ui: &Ui, p: &Principal, n: u16, i: &Input) -> Out {
                 .to_owned();
             created(s.ui_project(p, &code))
         }
-        // 工程指标的采集与刷新在 W5h（P-009 / P-014）；在那之前界面看到的是「还没有采集」。
-        18 => Ok(Reply::ok(json!({
-            "available": false,
-            "reason": "NOT_CAPTURED",
-            "message": "工程指标还没有采集",
-            "project": null,
-            "workItem": null,
-        }))),
+        // 工程指标（W5h2，C-08 / P-014）：只读视图不调 git、不写行；带 `refresh` 是「刷新统计」按钮，
+        // 走 `metrics.refresh` 当场扫一次（在派发线程上，不占事件循环）。
+        18 => {
+            let (code, task) = (i.param("code"), i.q("task"));
+            if i.q_bool("refresh")?.unwrap_or(false) {
+                ok(s.metrics_refresh(p, code, task))
+            } else {
+                ok(s.metrics_read(p, code, task))
+            }
+        }
         19..=21 => {
             let code = i.param("code");
             let transition = match n {

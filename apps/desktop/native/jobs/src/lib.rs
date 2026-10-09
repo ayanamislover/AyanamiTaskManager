@@ -5,6 +5,7 @@
 
 pub mod liveness;
 pub mod maintenance;
+pub mod metrics;
 pub mod notify;
 pub mod update;
 

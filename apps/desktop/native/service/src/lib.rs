@@ -9,6 +9,7 @@ pub mod lineage;
 pub mod listing;
 pub mod maintenance;
 pub mod memory;
+pub mod metrics;
 pub mod observe;
 pub mod ops;
 pub mod project;

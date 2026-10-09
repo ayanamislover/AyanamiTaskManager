@@ -2,10 +2,11 @@
 //!
 //! 2.x 的 `GET …/engineering-metrics` 读时会刷新：超过 5 分钟没扫或带 `refresh=1` 就调 git、写指标行
 //! （03 §3 :314、F-04）。ATM 3 拆成两项：这里只返回已存的值，不调 git、不写任何行、不排后台扫描；
-//! 采集（`metrics.capture`）与刷新（`metrics.refresh`）随合进程后的观察者在 W5 落地。
+//! 采集（`metrics.capture`）与刷新（`metrics.refresh`）在 [`crate::metrics`]。
 //!
 //! 形状沿用 2.x 的 camelCase 载荷：`project` 是最新一条项目指标的原文，`workItem` 是任务的基线与指标。
-//! 没有任何已存指标时 `available=false`、`reason="NO_DATA"`——不是错误，界面据此提示去刷新。
+//! 项目没有源码目录时 `available=false`、`reason="NO_SOURCE_PATH"`（2.x 先看这个）；有目录但没有任何已存指标时
+//! `reason="NO_DATA"`——不是错误，界面据此提示去刷新。
 
 use super::views;
 use crate::write::Service;
@@ -32,21 +33,44 @@ impl Service {
         task_key: Option<&str>,
     ) -> Result<Value, DomainError> {
         self.read_project(principal, Capability::MetricsRead, project, |cx| {
-            let latest: Option<(String, String, Option<String>)> = cx
-                .tx
-                .query_row(
-                    "SELECT git_head, captured_at, payload_json FROM engineering_project_metrics
+            metrics_view(cx, task_key)
+        })
+    }
+
+    /// 刷新之后的视图（调用方已经核过 `metrics.refresh`）。
+    pub(crate) fn metrics_view(
+        &self,
+        project: &str,
+        task_key: Option<&str>,
+    ) -> Result<Value, DomainError> {
+        self.read_located(project, |cx| metrics_view(cx, task_key))
+    }
+}
+
+fn metrics_view(cx: &super::Ctx<'_>, task_key: Option<&str>) -> Result<Value, DomainError> {
+    let has_source: bool = cx
+        .tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM project_paths WHERE project_id = ?1)",
+            [&cx.p.id],
+            |r| r.get(0),
+        )
+        .map_err(db)?;
+    let latest: Option<(String, String, Option<String>)> = cx
+        .tx
+        .query_row(
+            "SELECT git_head, captured_at, payload_json FROM engineering_project_metrics
                      WHERE project_id = ?1 ORDER BY captured_at DESC, id DESC LIMIT 1",
-                    [&cx.p.id],
-                    |r| Ok((r.get(0)?, r.get(1)?, Some(r.get(2)?))),
-                )
-                .optional()
-                .map_err(db)?;
-            let work_item = match task_key {
-                None => Value::Null,
-                Some(reference) => {
-                    let t = views::task_by_key(cx, reference)?;
-                    cx.tx
+            [&cx.p.id],
+            |r| Ok((r.get(0)?, r.get(1)?, Some(r.get(2)?))),
+        )
+        .optional()
+        .map_err(db)?;
+    let work_item = match task_key {
+        None => Value::Null,
+        Some(reference) => {
+            let t = views::task_by_key(cx, reference)?;
+            cx.tx
                         .query_row(
                             "SELECT baseline_ref, baseline_captured_at, payload_json, captured_at, updated_at
                              FROM engineering_work_item_metrics WHERE project_id = ?1 AND work_item_id = ?2",
@@ -65,23 +89,40 @@ impl Service {
                         .optional()
                         .map_err(db)?
                         .unwrap_or(Value::Null)
-                }
-            };
-            let has_item_metrics = !work_item["metrics"].is_null();
-            let (head, captured_at, project_payload) = match latest {
-                Some((h, c, p)) => (Value::from(h), Value::from(c), payload(p)),
-                None => (Value::Null, Value::Null, Value::Null),
-            };
-            let available = !project_payload.is_null() || has_item_metrics;
-            Ok(json!({
-                "available": available,
-                "reason": if available { Value::Null } else { json!("NO_DATA") },
-                "projectCode": cx.p.code,
-                "project": project_payload,
-                "projectHead": head,
-                "projectCapturedAt": captured_at,
-                "workItem": work_item,
-            }))
-        })
+        }
+    };
+    // 没有源码目录：与 2.x 一样不给任何指标（旧的也不给），任务键照样先校验。
+    if !has_source {
+        return Ok(json!({
+            "available": false,
+            "reason": "NO_SOURCE_PATH",
+            "message": "项目没有源码目录",
+            "projectCode": cx.p.code,
+            "project": null,
+            "projectHead": null,
+            "projectCapturedAt": null,
+            "workItem": null,
+        }));
     }
+    let has_item_metrics = !work_item["metrics"].is_null();
+    let (head, captured_at, project_payload) = match latest {
+        Some((h, c, p)) => (Value::from(h), Value::from(c), payload(p)),
+        None => (Value::Null, Value::Null, Value::Null),
+    };
+    let available = !project_payload.is_null() || has_item_metrics;
+    let (reason, message) = if available {
+        (Value::Null, Value::Null)
+    } else {
+        (json!("NO_DATA"), json!("还没有统计：点「刷新统计」"))
+    };
+    Ok(json!({
+        "available": available,
+        "reason": reason,
+        "message": message,
+        "projectCode": cx.p.code,
+        "project": project_payload,
+        "projectHead": head,
+        "projectCapturedAt": captured_at,
+        "workItem": work_item,
+    }))
 }

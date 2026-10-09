@@ -60,6 +60,7 @@ pub fn options(
             let _ = proxy.send_event(UserEvent::Observed(observation));
         })),
         maintenance: true,
+        metrics_capture: true,
     }
 }
 

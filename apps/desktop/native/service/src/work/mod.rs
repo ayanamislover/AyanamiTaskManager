@@ -133,14 +133,31 @@ impl Service {
         let project = target.project_id.clone();
         let fingerprint: FpInput =
             Box::new(move |tx, family, _| patch_fp(tx, &project, family, &fp_items));
-        self.write(
+        // 工程指标（2.x work-item-commands.ts:160-169）：claim / start 记 baseline，complete / cancel 补扫。
+        let keys_of = |ops: &[Operation]| -> Vec<String> {
+            items
+                .iter()
+                .filter(|i| ops.contains(&i.operation))
+                .map(|i| i.task_key.clone())
+                .collect()
+        };
+        let (starts, finishes) = (
+            keys_of(&[Operation::Claim, Operation::Start]),
+            keys_of(&[Operation::Complete, Operation::Cancel]),
+        );
+        let written = self.write(
             principal,
             target.request(Capability::WorkPatch, PATCH_OPERATION, fingerprint),
             move |tx, ctx| {
                 let mut w = core::Work::open(tx, ctx)?;
                 patch::run(&mut w, &items)
             },
-        )
+        )?;
+        if !written.replayed {
+            self.metrics_signal(&target.project_id, starts, true);
+            self.metrics_signal(&target.project_id, finishes, false);
+        }
+        Ok(written)
     }
 
     /// W-052 verify_and_complete。
@@ -159,6 +176,7 @@ impl Service {
             ));
         }
         let fp_req = req.clone();
+        let finished = vec![req.task_key.clone()];
         let fingerprint: FpInput = Box::new(move |_, family, _| {
             let value = match family {
                 Family::CanonV2 => {
@@ -177,7 +195,7 @@ impl Service {
             };
             Some(JsValue::from_json(&value))
         });
-        self.write(
+        let written = self.write(
             principal,
             target.request(
                 Capability::WorkVerifyComplete,
@@ -188,7 +206,11 @@ impl Service {
                 let mut w = core::Work::open(tx, ctx)?;
                 patch::verify_and_complete(&mut w, &req)
             },
-        )
+        )?;
+        if !written.replayed {
+            self.metrics_signal(&target.project_id, finished, false);
+        }
+        Ok(written)
     }
 
     /// W-053 checklist_single。

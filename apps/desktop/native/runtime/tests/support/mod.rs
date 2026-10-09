@@ -162,6 +162,7 @@ pub fn options(n: &Path, legacy: &Path, events: &Events) -> Options {
         observe: events.observer(),
         notify: None,
         maintenance: false,
+        metrics_capture: false,
     }
 }
 

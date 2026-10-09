@@ -160,6 +160,10 @@ pub struct Service {
     pub(crate) liveness: Option<ClientLiveness>,
     /// 测试用：写入提交之后的那次读（回执展开、ACK）在这里注入故障，见 [`Service::after_commit_read`]。
     pub(crate) after_commit_fault: std::sync::Mutex<Option<AfterCommitFault>>,
+    /// 任务操作之后的工程指标采集去处（W5h2，`atm_jobs::metrics` 登记）。
+    pub(crate) metrics_sink: std::sync::Mutex<Option<crate::metrics::SignalSink>>,
+    /// 扫描与落库逐个进行：后开始的后落库。
+    pub(crate) metrics_lock: std::sync::Mutex<()>,
 }
 
 /// 见 [`Service::set_after_commit_read_fault`]：参数是读的位置（`knowledge.result`、`mutation.ack`）。
@@ -182,6 +186,8 @@ impl Service {
             withdrawals: Default::default(),
             liveness: None,
             after_commit_fault: Default::default(),
+            metrics_sink: Default::default(),
+            metrics_lock: Default::default(),
         }
     }
 

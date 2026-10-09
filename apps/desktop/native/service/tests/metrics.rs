@@ -40,6 +40,7 @@ fn files(root: &Path) -> BTreeMap<String, Vec<u8>> {
 /// PE 的任务与 ATM-T-0001 用同一个 id（id 只在项目内唯一），漏了 `project_id` 条件就会串到别的项目。
 fn seeded(name: &str) -> World {
     let w = world(name);
+    with_paths(&w, &["PA", "PE"]);
     let (a1, a2) = (w.task("有指标"), w.task("只有基线"));
     assert_eq!((a1.as_str(), a2.as_str()), ("ATM-T-0001", "ATM-T-0002"));
     w.exec(
@@ -64,6 +65,16 @@ fn seeded(name: &str) -> World {
            FROM work_items WHERE project_id = 'PE' AND local_no = 1;",
     );
     w
+}
+
+/// 给项目登记源码目录（读只看有没有，不去访问它）。
+fn with_paths(w: &World, projects: &[&str]) {
+    for p in projects {
+        w.exec(&format!(
+            "INSERT INTO project_paths (id, project_id, path_key, canonical_path, is_primary, last_seen_at)
+             VALUES ('PATH-{p}', '{p}', 'c:/src/{p}', 'C:/src/{p}', 1, '{T0}')"
+        ));
+    }
 }
 
 #[test]
@@ -103,8 +114,9 @@ fn metrics_read_returns_stored_values_for_user_and_agent() {
 fn metrics_read_without_data_or_target() {
     let w = world("metrics-read-empty");
     w.task("没有指标的任务");
-    // 没有任何指标不是错误；任务存在但没有指标行，workItem 为 null。
-    for project in ["ATM", "EMP"] {
+    with_paths(&w, &["PA"]);
+    // 没有任何指标不是错误；任务存在但没有指标行，workItem 为 null。没有源码目录先报这个（2.x 一样）。
+    for (project, reason) in [("ATM", "NO_DATA"), ("EMP", "NO_SOURCE_PATH")] {
         let r = w.svc.metrics_read(&agent(), project, None).unwrap();
         assert_eq!(
             (
@@ -112,9 +124,25 @@ fn metrics_read_without_data_or_target() {
                 r["reason"].clone(),
                 r["project"].clone()
             ),
-            (json!(false), json!("NO_DATA"), Value::Null)
+            (json!(false), json!(reason), Value::Null)
         );
+        assert!(r["message"].is_string());
     }
+    // 源码目录被移除、旧指标还在：照样是 NO_SOURCE_PATH，不回显旧的（2.x 先看目录）。
+    w.exec(&format!(
+        "INSERT INTO engineering_project_metrics (project_id, id, git_head, captured_at, payload_json)
+         VALUES ('PE', 'M-PE', 'h', '{T0}', '{{\"head\":\"h\"}}')"
+    ));
+    let r = w.svc.metrics_read(&agent(), "EMP", None).unwrap();
+    assert_eq!(
+        (
+            r["available"].clone(),
+            r["reason"].clone(),
+            r["project"].clone()
+        ),
+        (json!(false), json!("NO_SOURCE_PATH"), Value::Null),
+        "{r}"
+    );
     let r = w
         .svc
         .metrics_read(&agent(), "ATM", Some("ATM-T-0001"))

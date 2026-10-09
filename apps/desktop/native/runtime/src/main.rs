@@ -91,6 +91,7 @@ fn main() {
         observe: observe.clone(),
         notify: None,
         maintenance: false,
+        metrics_capture: false,
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,

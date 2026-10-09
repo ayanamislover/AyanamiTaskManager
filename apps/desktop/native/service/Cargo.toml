@@ -10,6 +10,8 @@ publish.workspace = true
 
 [dependencies]
 atm-domain = { path = "../domain" }
+# W5h2：工程指标的扫描（只读 git 与文件）。
+atm-metrics = { path = "../metrics" }
 atm-store = { path = "../store" }
 rusqlite = "0.39"
 serde = { workspace = true }

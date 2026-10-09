@@ -97,4 +97,4 @@ User 主体只在两处构造：
 | #24 备份恢复 | 必须带 scope：`PROJECT` 加 `project`，或 `KNOWLEDGE`。否则 422 `BACKUP_RESTORE_SCOPE_UNSUPPORTED` | 05 §2.7，整库备份 |
 | #22 / #23 备份 | `scope` 是 `STORE`，`reason` 是备份的种类，没有单项目字段 | 方案 §4 |
 | #1 状态 | 没有投影汇总。`projectCounts` 按生命周期给 `{total, failed: 0}`，因为单库没有逐库失败 | 00 §6 |
-| #18 工程指标 | W5h 之前回 `{available: false, reason: "NOT_CAPTURED"}` | 方案 §10 |
+| #18 工程指标 | 不带 `refresh` 只读已存的指标，不调 git、不写行；没有源码目录回 `NO_SOURCE_PATH`，还没统计过回 `NO_DATA`。带 `refresh=true` 走 `metrics.refresh` 当场扫（2.0 读时超过 5 分钟就扫） | C-08、P-014 |

@@ -132,6 +132,15 @@ impl Service {
         f: impl FnOnce(&Ctx<'_>) -> Result<R, DomainError>,
     ) -> Result<R, DomainError> {
         capability::require(principal, capability)?;
+        self.read_located(project, f)
+    }
+
+    /// [`Service::read_project`] 的读本身：调用方已经核过能力（刷新之后给出视图的那次读）。
+    pub(crate) fn read_located<R>(
+        &self,
+        project: &str,
+        f: impl FnOnce(&Ctx<'_>) -> Result<R, DomainError>,
+    ) -> Result<R, DomainError> {
         self.store()
             .read(|tx| {
                 let p = locate(tx, project)?;

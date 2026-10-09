@@ -34,6 +34,7 @@ pub struct Publish<'a> {
     pub observe: &'a (dyn Fn(Event) + Send + Sync),
     pub notify: Option<atm_jobs::notify::Sink>,
     pub maintenance: bool,
+    pub metrics_capture: bool,
 }
 
 /// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
@@ -47,6 +48,7 @@ pub struct Entries {
     scheduler: Option<atm_jobs::Scheduler>,
     notifier: Option<atm_jobs::notify::Notifier>,
     maintenance: Option<atm_jobs::maintenance::Maintenance>,
+    metrics: Option<atm_jobs::metrics::MetricsCapture>,
     runtime_dir: PathBuf,
     instance_id: String,
     lease_generation: u64,
@@ -162,6 +164,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         scheduler: None,
         notifier: None,
         maintenance: None,
+        metrics: None,
         runtime_dir,
         instance_id,
         lease_generation,
@@ -229,6 +232,12 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
             atm_jobs::maintenance::EVERY,
         ));
     }
+    // 8. 工程指标采集（W5h2）：任务操作提交之后由服务把信号交过来。
+    if p.metrics_capture {
+        entries.metrics = Some(atm_jobs::metrics::MetricsCapture::start(
+            entries.svc.clone(),
+        ));
+    }
 
     Ok(entries)
 }
@@ -265,6 +274,9 @@ impl Entries {
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
+        }
+        if let Some(m) = self.metrics.take() {
+            m.stop();
         }
         if let Some(m) = self.maintenance.take() {
             m.stop();
