@@ -71,6 +71,32 @@ fn committed(e: &DomainError) -> Committed {
     }
 }
 
+/// 写入已经提交、之后拼 ACK 的读失败了：提交状态是「已提交」，并记下这次写入的落点，出路据此回查
+/// （peer W4 r1 P1-05）。
+fn after_commit(e: DomainError, code: &str, op_id: &str) -> DomainError {
+    e.committed(Committed::Yes).detail(
+        "written",
+        json!({"project": atm_domain::keys::normalize(code), "op_id": op_id}),
+    )
+}
+
+/// [`after_commit`] 标过的错误的信封：已提交，出路是按 op_id 回查这次写入——不是重做（op_id 是自动签发的
+/// 时候，原样重发原调用会再写一次）。别的错误原样交回。
+fn committed_write(e: DomainError) -> Result<Envelope, DomainError> {
+    let written = match (e.committed, e.details.get("written")) {
+        (Some(Committed::Yes), Some(w)) => w.clone(),
+        _ => return Err(e),
+    };
+    let fix = Fix::Reread {
+        call: ToolCall {
+            name: "atm_search".into(),
+            arguments: json!({"project": written["project"], "op_id": written["op_id"]}),
+        },
+        why: "写入已经提交，只是回执没读出来：按 op_id 回查这次写入，不要重做".into(),
+    };
+    Ok(Envelope::new(e, Committed::Yes, None, fix))
+}
+
 fn invalid(problems: Vec<Problem>) -> DomainError {
     DomainError::invalid_argument(problems)
 }
@@ -137,9 +163,12 @@ impl Surface {
             }
             ack
         })
-        .map_err(|e| {
-            let c = committed(&e);
-            self.envelope(p, tool, a.0, e, c)
+        .map_err(|e| match committed_write(e) {
+            Ok(envelope) => envelope,
+            Err(e) => {
+                let c = committed(&e);
+                self.envelope(p, tool, a.0, e, c)
+            }
         })
     }
 
@@ -197,13 +226,16 @@ impl Surface {
         operation: &str,
         written: &Written,
     ) -> Result<Value, DomainError> {
-        let mut ack = self.svc.mutation_ack(
-            &place.code,
-            operation,
-            &place.target.op_id,
-            place.target.session.as_deref(),
-            written,
-        )?;
+        let mut ack = self
+            .svc
+            .mutation_ack(
+                &place.code,
+                operation,
+                &place.target.op_id,
+                place.target.session.as_deref(),
+                written,
+            )
+            .map_err(|e| after_commit(e, &place.code, &place.target.op_id))?;
         let r = &written.result;
         if let Value::Object(m) = &mut ack {
             // 01 Q-04：安全合并在 ACK 顶层，Agent 不必再去 details 里找。
@@ -1147,4 +1179,32 @@ fn hashes(a: &Args<'_>, path: &str) -> Result<Vec<(String, String)>, DomainError
             ])),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ACK 在提交之后读失败：已提交，出路是按 op_id 回查（能过 atm_search 的 schema），不是重做。
+    #[test]
+    fn an_ack_failure_after_the_commit_is_committed_and_rereads() {
+        let e = after_commit(
+            DomainError::new(ErrorCode::STORE_BUSY, "busy"),
+            "atm",
+            "auto:X",
+        );
+        let envelope = committed_write(e).unwrap();
+        assert_eq!(envelope.committed, Committed::Yes);
+        let v = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(v["fix"]["kind"], json!("reread"), "{v}");
+        assert_eq!(
+            v["fix"]["call"]["arguments"],
+            json!({"project": "ATM", "op_id": "auto:X"}),
+            "{v}"
+        );
+        crate::fix::check(&v).unwrap();
+        // 没有标过的错误原样交回，由惯例判定。
+        let plain = DomainError::new(ErrorCode::STORE_BUSY, "busy");
+        assert!(committed_write(plain).is_err());
+    }
 }

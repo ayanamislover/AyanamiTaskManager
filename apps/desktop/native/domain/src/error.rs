@@ -343,6 +343,9 @@ pub struct DomainError {
     pub code: ErrorCode,
     pub message: String,
     pub details: Map<String, Value>,
+    /// 报错的服务确知这次请求的提交状态时写在这里（例如 begin 遇到垃圾箱里的项目：恢复请求已经提交，
+    /// 再报错）。信封以它为准，不按错误码推断（peer W4 r1 P1-05）。`None` 时由适配层按惯例判定。
+    pub committed: Option<Committed>,
 }
 
 impl DomainError {
@@ -351,11 +354,18 @@ impl DomainError {
             code,
             message: message.into(),
             details: Map::new(),
+            committed: None,
         }
     }
 
     pub fn detail(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.details.insert(key.to_owned(), value.into());
+        self
+    }
+
+    /// 见 [`DomainError::committed`]。
+    pub fn committed(mut self, committed: Committed) -> Self {
+        self.committed = Some(committed);
         self
     }
 
@@ -398,19 +408,46 @@ pub struct Envelope {
 }
 
 impl Envelope {
+    /// `committed` 是适配层的判定；服务在错误上写明了提交状态时以服务的为准。
     pub fn new(error: DomainError, committed: Committed, state: Option<Value>, fix: Fix) -> Self {
         let mut details = error.details;
         let problems = details.remove("problems");
+        // 服务按情形覆盖目录里的 retryable（02 §7：垃圾箱里的项目重试也没用）。
+        let retryable = details
+            .get("retryable")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| error.code.retryable());
         Envelope {
             problems,
             ok: false,
             code: error.code,
-            retryable: error.code.retryable(),
+            retryable,
             message: error.message,
-            committed,
+            committed: error.committed.unwrap_or(committed),
             state,
             fix,
             details,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 服务在错误上写明的提交状态与 retryable 覆盖适配层的判定（peer W4 r1 P1-05）。
+    #[test]
+    fn the_service_s_own_statement_wins_in_the_envelope() {
+        let stated = DomainError::new(ErrorCode::PROJECT_DB_UNAVAILABLE, "trashed")
+            .detail("retryable", false)
+            .committed(Committed::Yes);
+        let e = Envelope::new(stated, Committed::No, None, Fix::None);
+        assert_eq!((e.committed, e.retryable), (Committed::Yes, false));
+        let plain = DomainError::new(ErrorCode::STORE_BUSY, "busy");
+        let e = Envelope::new(plain, Committed::No, None, Fix::None);
+        assert_eq!(
+            (e.committed, e.retryable),
+            (Committed::No, ErrorCode::STORE_BUSY.retryable())
+        );
     }
 }

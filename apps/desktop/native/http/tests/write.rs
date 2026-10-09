@@ -828,3 +828,48 @@ fn writes_refresh_the_git_context_but_replays_do_not() {
     ));
     assert_eq!(branch().as_deref(), Some("last"), "end 之后刷新");
 }
+
+/// begin 遇到垃圾箱里的项目：恢复请求已经在这次 begin 的事务里登记并提交，信封如实报 committed:true、
+/// retryable:false（peer W4 r1 P1-05），与库里的实际状态一致。
+#[test]
+fn begin_on_a_trashed_project_reports_the_committed_restore_request() {
+    let w = world("write-trashed-begin");
+    let user = atm_domain::principal::Principal::trusted_ui(atm_domain::principal::UiSurface::Tray);
+    w.svc
+        .set_lifecycle(
+            &user,
+            &w.project,
+            atm_service::project::Transition::Trash,
+            "trash-for-begin",
+        )
+        .unwrap();
+    let requests = || -> i64 {
+        w.svc
+            .store()
+            .read(|tx| {
+                tx.query_row("SELECT count(*) FROM project_restore_requests", [], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    assert_eq!(requests(), 0);
+    let r = call(
+        &w,
+        "core",
+        "atm_begin",
+        json!({"agent_id": "codex", "project": w.project, "op_id": "begin-trashed"}),
+    );
+    let e = err(&r);
+    assert_eq!(
+        (&e["code"], &e["committed"], &e["retryable"]),
+        (
+            &json!("PROJECT_DB_UNAVAILABLE"),
+            &json!(true),
+            &json!(false)
+        ),
+        "{e}"
+    );
+    assert_eq!(requests(), 1, "恢复请求确实落库了：{e}");
+    atm_http::fix::check(e).unwrap();
+}

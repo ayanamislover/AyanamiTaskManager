@@ -1422,3 +1422,41 @@ fn unicode_project_codes_are_domain_errors() {
         }
     }
 }
+
+/// begin 之前关闭已退出客户端的 session 是一个独立的维护事务：begin 本身随后失败（这里是 op_id 冲突）时，
+/// begin 没有提交，但那次关闭已经提交了——错误里如实列出关掉的 session（peer W4 r1 P1-05）。
+#[test]
+fn p1_05_a_failed_begin_lists_what_its_maintenance_already_closed() {
+    let w = world("ss-p105");
+    let w = World {
+        svc: w.svc.with_liveness(std::sync::Arc::new(|id: &str| {
+            Some(!id.starts_with("pid:dead"))
+        })),
+        ..w
+    };
+    w.fresh_fixture();
+    let at = |title: &str| BeginRequest {
+        cwd: Some("D:/repo".into()),
+        title: Some(title.into()),
+        op_id: Some("p105".into()),
+        ..begin_req("codex")
+    };
+    let crashed = sid(&w.svc.begin(&agent_in("pid:dead-1"), at("first")).unwrap());
+    let e = w
+        .svc
+        .begin(&agent_in("pid:live-2"), at("second"))
+        .unwrap_err();
+    assert_eq!(e.code.as_str(), "IDEMPOTENCY_CONFLICT", "{e:?}");
+    assert_eq!(e.committed, None, "begin 自己没有提交：{e:?}");
+    assert_eq!(
+        e.details["closed_exited_sessions"],
+        serde_json::json!([crashed]),
+        "{e:?}"
+    );
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT connection_state || ':' || close_reason FROM agent_sessions WHERE id = '{crashed}'"
+        )),
+        "CLOSED:CLIENT_EXITED"
+    );
+}

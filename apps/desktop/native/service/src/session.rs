@@ -14,7 +14,7 @@ use crate::write::{
     Author, Family, FpInput, Rebind, Service, SessionRef, WriteCtx, WriteRequest, Written, internal,
 };
 use atm_domain::capability::{self, Capability};
-use atm_domain::error::{DomainError, ErrorCode};
+use atm_domain::error::{Committed, DomainError, ErrorCode};
 use atm_domain::keys;
 use atm_domain::principal::Principal;
 use atm_domain::text::{js_trim, utf16_len};
@@ -1007,14 +1007,22 @@ impl Service {
     pub fn begin(&self, principal: &Principal, req: BeginRequest) -> Result<Written, DomainError> {
         capability::require(principal, Capability::SessionBegin)?;
         let b = normalize(req, principal.client_group().map(str::to_owned))?;
-        self.close_exited_clients(&b)?;
+        let closed = self.close_exited_clients(&b)?;
+        let with_closed = |e: DomainError| {
+            if closed.is_empty() {
+                e
+            } else {
+                e.detail("closed_exited_sessions", closed.clone())
+            }
+        };
         let outcome = self
             .store()
             .write(move |tx| begin_tx(tx, &b))
-            .map_err(write_error)?;
+            .map_err(write_error)
+            .map_err(with_closed)?;
         match outcome {
             BeginOutcome::Written(w) => Ok(w),
-            BeginOutcome::Trashed { code, request } => Err(DomainError::new(
+            BeginOutcome::Trashed { code, request } => Err(with_closed(DomainError::new(
                 ErrorCode::PROJECT_DB_UNAVAILABLE,
                 format!("项目 {code} 在垃圾箱里：已登记恢复请求，等用户在界面里决定；不要另建项目或 quick 绕过"),
             )
@@ -1026,7 +1034,9 @@ impl Service {
                 "recovery",
                 json!({ "action": "await_user_restore_authorization", "request_id": request["request_id"], "request_count": request["request_count"] }),
             )
-            .detail("quick", json!({ "action": "do_not_bypass" }))),
+            .detail("quick", json!({ "action": "do_not_bypass" }))
+            // 恢复请求在这次 begin 的事务里登记并提交了：这是一次已经落库的写入（peer W4 r1 P1-05）。
+            .committed(Committed::Yes))),
         }
     }
 }
@@ -1889,12 +1899,15 @@ impl Service {
     /// auto resume 要先看到旧 session 已经按 CLIENT_EXITED 关闭才接得上（否则新 session 写自己领取的任务就是
     /// CLAIM_NOT_OWNED，U-2 W8）。只看同 agent、同 role、同 cwd、带客户端身份的 ONLINE session，本连接组自己的
     /// 不看；存活由 [`Service::with_liveness`] 给的探测判定，没给就什么也不做。客户端还活着的永远不关。
-    fn close_exited_clients(&self, b: &Begin) -> Result<(), DomainError> {
+    ///
+    /// 这是 begin 之前一个独立的维护事务（与周期扫描同一个动作，幂等）：返回它关掉的 session，begin
+    /// 本身随后失败时如实列在错误里——begin 没有提交，但这些关闭已经提交了（peer W4 r1 P1-05）。
+    fn close_exited_clients(&self, b: &Begin) -> Result<Vec<String>, DomainError> {
         if !matches!(b.resume(), Resume::Auto) {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let Some(alive) = self.liveness.clone() else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let (agent, role, cwd, own) = (
             b.agent.clone(),
@@ -1923,10 +1936,11 @@ impl Service {
             .filter(|(_, _, identity, _)| alive(identity) == Some(false))
             .map(|(project, id, _, last)| (project, id, b.agent.clone(), "CLIENT_EXITED", last))
             .collect();
-        if !decided.is_empty() {
-            self.close_sessions(decided, now())?;
+        if decided.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(())
+        let report = self.close_sessions(decided, now())?;
+        Ok(report.closed.into_iter().map(|(_, id, _)| id).collect())
     }
 
     /// atm_end（02 §2.6）。心跳超时的旧 session 有唯一在线 successor 时结束的是 successor，没有就 SESSION_CLOSED（S-021）。
