@@ -18,7 +18,6 @@ import type {
 } from "../contracts.js";
 import { McpBridgePanel } from "../mcp-bridge-panel.js";
 import { agentClientLabel, agentIntegrationErrorMessage, formatTime } from "../presentation.js";
-import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { ServiceStatus } from "../shell/service-status.js";
 import { AgentIntegrationCard } from "./agent-integration-card.js";
 import { DispatchPanel } from "./dispatch-panel.js";
@@ -217,22 +216,16 @@ export function SettingsPage({
               </div>
               <div className="atm-row">
                 <div>
-                  <div className="atm-row-title">项目数据库</div>
-                  <div className="atm-row-sub">独立文件并通过 quick_check</div>
+                  <div className="atm-row-title">项目</div>
+                  <div className="atm-row-sub">
+                    全部项目在同一个数据库里，启动时通过 quick_check
+                  </div>
                 </div>
                 <span className="atm-key">{String(query.data!.projectCount)}</span>
               </div>
             </div>
           )}
         </section>
-        {query.data ? (
-          <SystemProjectionPanel
-            client={client}
-            summary={query.data.projectionSummary}
-            failures={query.data.projectionFailures}
-            notify={notify}
-          />
-        ) : null}
         <KnowledgeBackupPanel client={client} notify={notify} />
         <section className="atm-panel atm-settings-integrations">
           <div className="atm-panel-head">

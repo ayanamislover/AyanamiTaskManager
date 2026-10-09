@@ -1,4 +1,4 @@
-import type { ProjectionReconcileReceipt, RecordPage, SessionPage } from "@ayanami-task/protocol";
+import type { RecordPage, SessionPage } from "@ayanami-task/protocol";
 import { drainCursorPages, type CursorDrainOptions } from "../cursor-drain.js";
 import { AyanamiClientError, queryString, type ClientRequest } from "../http.js";
 import type {
@@ -100,11 +100,6 @@ export function createProjectsSurface(request: ClientRequest) {
       request<ReconciliationResult>(
         "GET",
         `/api/v1/projects/${encodeURIComponent(code)}/reconciliation${queryString({ include_active: includeActive ? 1 : undefined })}`,
-      ),
-    reconcileProjection: (code: string) =>
-      request<ProjectionReconcileReceipt>(
-        "POST",
-        `/api/v1/projects/${encodeURIComponent(code)}/projection/reconcile`,
       ),
     recordPage: (code: string, limit = 100, cursor?: string) =>
       request<RecordPage>(

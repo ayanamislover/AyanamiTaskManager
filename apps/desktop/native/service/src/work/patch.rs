@@ -382,10 +382,10 @@ pub(crate) fn run(w: &mut Work<'_>, items: &[PatchItem]) -> Result<Value, Domain
         ids.push(outcome.task_id);
     }
     w.finish()?;
-    // 视图取事务提交时的最终状态：末尾的统一重算（C-21）也已反映在里面。
+    // 视图取事务提交时的最终状态：末尾的统一重算（C-21）也已反映在里面。形状是 2.0 回执的 hydrated 任务。
     let views = ids
         .iter()
-        .map(|id| w.view(id))
+        .map(|id| crate::ui::hydrated(w.tx, &w.project, &w.code, id))
         .collect::<Result<Vec<_>, _>>()?;
     let mut result = json!({ "items": views, "sequence": w.sequence });
     if !merges.is_empty() {

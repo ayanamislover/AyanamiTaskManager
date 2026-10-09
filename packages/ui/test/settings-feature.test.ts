@@ -42,8 +42,6 @@ function renderSettings(
     projectFailures: overrides.ok === false ? [{ code: "BROKEN" }] : [],
     projectCount: 3,
     sqlite: { fts5: true, trigram: true, wal: true, sqliteVersion: "3.50.0" },
-    projectionSummary: { healthy: 3, deferred: 0, failed: 0 },
-    projectionFailures: [],
   });
   queryClient.setQueryData(
     ["settings"],

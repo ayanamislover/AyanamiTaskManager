@@ -1,4 +1,4 @@
-import type { ProjectionBatchReceipt, SearchPage } from "@ayanami-task/protocol";
+import type { SearchPage } from "@ayanami-task/protocol";
 import { queryString, requestJson } from "./http.js";
 import { createProjectsSurface } from "./surfaces/projects.js";
 import { createTasksSurface } from "./surfaces/tasks.js";
@@ -96,11 +96,6 @@ export class AyanamiClient {
   readonly projects = createProjectsSurface(this.request.bind(this));
   readonly knowledge = createKnowledgeSurface(this.request.bind(this));
 
-  readonly projections = {
-    reconcileAll: () =>
-      this.request<ProjectionBatchReceipt>("POST", "/api/v1/system/projections/reconcile"),
-  };
-
   readonly sessions = {
     begin: (input: Record<string, unknown>) =>
       this.request<Record<string, unknown>>("POST", "/api/v1/sessions", input),
@@ -174,8 +169,9 @@ export class AyanamiClient {
       expectedSha256?: string;
     }) => this.request<Record<string, any>>("POST", "/api/v1/imports/agenttask-md/apply", input),
     exportProject: (project: string, format: "aytproj" | "json" | "csv" = "aytproj") =>
+      // 3.0：导出写文件，是 User 才能做的 POST（00 C-07、10 R8）。
       this.request<Record<string, any>>(
-        "GET",
+        "POST",
         `/api/v1/exports/${encodeURIComponent(project)}${queryString({ format })}`,
       ),
   };

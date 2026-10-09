@@ -141,6 +141,12 @@ fn fixed_generation(
     Ok(a.int("expected_scope_generation").or(from_target))
 }
 
+thread_local! {
+    /// [`crate::rest::call_tool_raw_as`] 打开时，[`Surface::ack`] 把服务的原始写结果放在这里。
+    /// 工具调用是同步的，同一线程上进出，不会串到别的调用。
+    pub(crate) static RAW: std::cell::RefCell<Option<Option<Value>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Surface {
     pub(crate) fn write(
         &self,
@@ -235,6 +241,11 @@ impl Surface {
         operation: &str,
         written: &Written,
     ) -> Result<Value, DomainError> {
+        RAW.with(|slot| {
+            if let Some(raw) = slot.borrow_mut().as_mut() {
+                *raw = Some(written.result.clone());
+            }
+        });
         // 写入已经提交：ACK 的读失败由服务标成「已提交」并带上 op_id（见 committed_write）。
         let mut ack = self.svc.mutation_ack(
             &place.code,

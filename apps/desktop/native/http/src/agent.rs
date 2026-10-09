@@ -34,7 +34,7 @@ impl Surface {
         )
     }
 
-    fn call(
+    pub(crate) fn call(
         &self,
         p: &Principal,
         tool: &'static Tool,

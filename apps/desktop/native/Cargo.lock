@@ -171,6 +171,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-ui-bridge"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-http",
+ "atm-service",
+ "atm-store",
+ "serde_json",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

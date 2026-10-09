@@ -1,0 +1,499 @@
+{
+  "about": "界面 API 形状兼容（06 T-COMPAT）的共用场景：2.0 的 TS daemon 跑一遍录下形状（capture-2.0.ts → ui-shapes-2.0.json），Rust 的 ui-bridge 跑同一份场景逐项比对（tests/compat.rs）。{{名字}} 取前面步骤 save 下来的值；agent 步骤是 MCP 工具调用，只用来铺数据，不比形状。",
+  "steps": [
+    {
+      "name": "projects.create",
+      "method": "POST",
+      "path": "/api/v1/projects",
+      "status": 201,
+      "body": {
+        "name": "兼容",
+        "code": "CMP",
+        "sourcePath": null,
+        "description": "说明",
+        "coordinationMode": "SOLO"
+      },
+      "save": { "projectId": "/id" }
+    },
+    {
+      "name": "projects.create.other",
+      "method": "POST",
+      "path": "/api/v1/projects",
+      "status": 201,
+      "body": { "name": "另一个", "code": "OTH", "sourcePath": null }
+    },
+    {
+      "name": "agent.begin",
+      "agent": "atm_begin",
+      "args": {
+        "op_id": "compat-begin",
+        "project_code": "CMP",
+        "mode": "project",
+        "agent_id": "compat-agent"
+      },
+      "save": { "session": "/session" }
+    },
+    {
+      "name": "objectives.create",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/objectives",
+      "status": 201,
+      "body": {
+        "opId": "compat-objective",
+        "title": "目标一",
+        "description": "",
+        "definitionOfDone": []
+      },
+      "save": { "objectiveId": "/id" }
+    },
+    {
+      "name": "milestones.create",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/milestones",
+      "status": 201,
+      "body": {
+        "opId": "compat-milestone",
+        "objectiveId": "{{objectiveId}}",
+        "title": "里程碑一",
+        "description": ""
+      },
+      "save": { "milestoneId": "/id" }
+    },
+    {
+      "name": "work-items.create",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/work-items",
+      "status": 201,
+      "body": {
+        "opId": "compat-tasks",
+        "items": [
+          {
+            "clientRef": "a",
+            "objectiveId": "{{objectiveId}}",
+            "milestoneId": "{{milestoneId}}",
+            "title": "第一项",
+            "description": "描述",
+            "type": "TASK",
+            "priority": "HIGH",
+            "status": "READY",
+            "acceptance": ["做完"],
+            "checklist": [{ "title": "检查一", "evidenceRequired": false }],
+            "dependsOn": [],
+            "dependsOnRefs": []
+          },
+          {
+            "clientRef": "b",
+            "objectiveId": "{{objectiveId}}",
+            "title": "第二项",
+            "description": "",
+            "type": "TASK",
+            "priority": "NORMAL",
+            "status": "READY",
+            "acceptance": [],
+            "checklist": [],
+            "dependsOn": [],
+            "dependsOnRefs": ["a"]
+          }
+        ]
+      }
+    },
+    {
+      "name": "work-items.page",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/ui/work-items?limit=50",
+      "status": 200,
+      "save": {
+        "taskA": "/items/title=第一项/key",
+        "taskB": "/items/title=第二项/key",
+        "taskBVersion": "/items/title=第二项/version"
+      }
+    },
+    {
+      "name": "work-items.one",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/ui/work-items/{{taskA}}",
+      "status": 200,
+      "save": { "checklistId": "/checklist/0/id", "checklistVersion": "/checklist/0/version" }
+    },
+    {
+      "name": "work-items.full",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/work-items/{{taskA}}?view=full",
+      "status": 200
+    },
+    {
+      "name": "checklist.patch",
+      "method": "PATCH",
+      "path": "/api/v1/projects/CMP/ui/checklist/{{checklistId}}",
+      "status": 200,
+      "body": {
+        "opId": "compat-check",
+        "checklistId": "{{checklistId}}",
+        "expectedVersion": "{{checklistVersion}}",
+        "status": "DONE",
+        "evidence": []
+      }
+    },
+    {
+      "name": "work-items.patch",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/work-items/patch",
+      "status": 200,
+      "body": {
+        "opId": "compat-block",
+        "items": [
+          {
+            "taskKey": "{{taskB}}",
+            "expectedVersion": "{{taskBVersion}}",
+            "operation": "edit",
+            "title": "第二项（改）"
+          }
+        ]
+      }
+    },
+    {
+      "name": "work-items.patch.stale",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/work-items/patch",
+      "status": 409,
+      "body": {
+        "opId": "compat-block-stale",
+        "items": [
+          {
+            "taskKey": "{{taskB}}",
+            "expectedVersion": "{{taskBVersion}}",
+            "operation": "edit",
+            "title": "第二项（再改）"
+          }
+        ]
+      }
+    },
+    {
+      "name": "work-items.strip",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/ui/progress-strip",
+      "status": 200
+    },
+    {
+      "name": "work-items.closed",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/ui/work-items/closed?limit=5",
+      "status": 200
+    },
+    {
+      "name": "work-items.missing",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/ui/work-items/CMP-T-9999",
+      "status": 404
+    },
+    {
+      "name": "records.create",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/ui/records",
+      "status": 201,
+      "body": {
+        "opId": "compat-record",
+        "kind": "DECISION",
+        "importance": "HIGH",
+        "title": "决定一",
+        "summary": "摘要",
+        "detail": "细节",
+        "scope": "PROJECT"
+      },
+      "save": { "recordKey": "/key" }
+    },
+    {
+      "name": "records.page",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/records?limit=100",
+      "status": 200
+    },
+    {
+      "name": "knowledge.preview-record",
+      "method": "GET",
+      "path": "/api/v1/knowledge/preview-record?project=CMP&record={{recordKey}}",
+      "status": 200
+    },
+    {
+      "name": "knowledge.save",
+      "method": "POST",
+      "path": "/api/v1/knowledge",
+      "status": 201,
+      "body": {
+        "opId": "compat-knowledge",
+        "slug": "compat-entry",
+        "title": "条目",
+        "summary": "摘要",
+        "bodyMarkdown": "# 正文\n\n内容",
+        "tags": ["兼容"],
+        "expectedVersion": 0
+      },
+      "save": { "knowledgeId": "/id", "knowledgeRevision": "/revisionId" }
+    },
+    {
+      "name": "knowledge.search",
+      "method": "GET",
+      "path": "/api/v1/knowledge?query=%E6%9D%A1%E7%9B%AE",
+      "status": 200
+    },
+    {
+      "name": "knowledge.get",
+      "method": "GET",
+      "path": "/api/v1/knowledge/{{knowledgeId}}",
+      "status": 200
+    },
+    {
+      "name": "knowledge.update",
+      "method": "PATCH",
+      "path": "/api/v1/knowledge/{{knowledgeId}}",
+      "status": 200,
+      "body": {
+        "opId": "compat-knowledge-2",
+        "id": "{{knowledgeId}}",
+        "slug": "compat-entry",
+        "title": "条目二",
+        "summary": "摘要",
+        "bodyMarkdown": "# 正文\n\n改过",
+        "expectedVersion": 1,
+        "expectedRevisionId": "{{knowledgeRevision}}"
+      },
+      "save": { "knowledgeRevision2": "/revisionId" }
+    },
+    {
+      "name": "knowledge.history",
+      "method": "GET",
+      "path": "/api/v1/knowledge/{{knowledgeId}}/history",
+      "status": 200
+    },
+    {
+      "name": "knowledge.archive",
+      "method": "POST",
+      "path": "/api/v1/knowledge/{{knowledgeId}}/archive",
+      "status": 200,
+      "body": {
+        "opId": "compat-knowledge-archive",
+        "id": "{{knowledgeId}}",
+        "expectedVersion": 2,
+        "expectedRevisionId": "{{knowledgeRevision2}}",
+        "archived": true
+      }
+    },
+    {
+      "name": "objectives.list",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/objectives",
+      "status": 200
+    },
+    {
+      "name": "milestones.list",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/milestones",
+      "status": 200
+    },
+    {
+      "name": "agents.page",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/agents?limit=100",
+      "status": 200
+    },
+    {
+      "name": "reconciliation",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/reconciliation?include_active=1",
+      "status": 200
+    },
+    {
+      "name": "project-updates.draft",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/project-updates/draft",
+      "status": 201,
+      "body": { "opId": "compat-draft" },
+      "save": { "draftId": "/id" }
+    },
+    {
+      "name": "project-updates.publish",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/project-updates",
+      "status": 201,
+      "body": {
+        "opId": "compat-publish",
+        "draftId": "{{draftId}}",
+        "health": "ON_TRACK",
+        "summary": "顺利",
+        "completed": [],
+        "risks": [],
+        "next": []
+      }
+    },
+    {
+      "name": "project-updates.list",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/project-updates",
+      "status": 200
+    },
+    { "name": "brief", "method": "GET", "path": "/api/v1/projects/CMP/brief", "status": 200 },
+    {
+      "name": "saved-views.create",
+      "method": "POST",
+      "path": "/api/v1/saved-views",
+      "status": 201,
+      "body": {
+        "scope": "PROJECT",
+        "project": "CMP",
+        "name": "视图",
+        "query": { "status": "READY", "search": "第一" },
+        "sort": { "field": "priority", "direction": "desc" }
+      },
+      "save": { "viewId": "/id", "viewVersion": "/version" }
+    },
+    {
+      "name": "saved-views.list",
+      "method": "GET",
+      "path": "/api/v1/saved-views?project=CMP",
+      "status": 200
+    },
+    {
+      "name": "saved-views.delete",
+      "method": "DELETE",
+      "path": "/api/v1/saved-views/{{viewId}}?expectedVersion={{viewVersion}}",
+      "status": 200
+    },
+    {
+      "name": "settings.order",
+      "method": "PUT",
+      "path": "/api/v1/settings/projects.order",
+      "status": 200,
+      "body": { "value": { "ids": ["{{projectId}}"] } }
+    },
+    {
+      "name": "settings.notification",
+      "method": "PUT",
+      "path": "/api/v1/settings/notification.mode",
+      "status": 200,
+      "body": { "value": "CRITICAL" }
+    },
+    { "name": "settings.list", "method": "GET", "path": "/api/v1/settings", "status": 200 },
+    {
+      "name": "quick.create",
+      "method": "POST",
+      "path": "/api/v1/quick-tasks",
+      "status": 201,
+      "body": { "title": "临时一", "note": "", "actor": "USER" },
+      "save": { "quickId": "/id", "quickVersion": "/version" }
+    },
+    {
+      "name": "quick.create.second",
+      "method": "POST",
+      "path": "/api/v1/quick-tasks",
+      "status": 201,
+      "body": { "title": "临时二", "note": "", "actor": "USER" },
+      "save": { "quick2Id": "/id", "quick2Version": "/version" }
+    },
+    {
+      "name": "quick.patch",
+      "method": "PATCH",
+      "path": "/api/v1/quick-tasks/{{quickId}}",
+      "status": 200,
+      "body": { "status": "DONE", "expectedVersion": "{{quickVersion}}", "actor": "USER" }
+    },
+    {
+      "name": "quick.promote",
+      "method": "POST",
+      "path": "/api/v1/quick-tasks/{{quick2Id}}/promote",
+      "status": 200,
+      "body": {
+        "expectedVersion": "{{quick2Version}}",
+        "targetProjectCode": "CMP",
+        "actor": "USER"
+      }
+    },
+    { "name": "quick.list", "method": "GET", "path": "/api/v1/quick-tasks", "status": 200 },
+    {
+      "name": "search.global",
+      "method": "GET",
+      "path": "/api/v1/search?query=%E7%AC%AC%E4%B8%80&limit=20",
+      "status": 200
+    },
+    {
+      "name": "search.project",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/search?query=%E7%AC%AC%E4%B8%80&limit=20",
+      "status": 200
+    },
+    {
+      "name": "events",
+      "method": "GET",
+      "path": "/api/v1/projects/CMP/events?since=0&limit=50",
+      "status": 200
+    },
+    {
+      "name": "imports.preview",
+      "method": "POST",
+      "path": "/api/v1/imports/agenttask-md/preview",
+      "status": 200,
+      "body": { "project": "CMP", "content": "# 交付\n- [ ] 导出", "sourceName": "AgentTask.md" },
+      "save": { "importSha": "/sha256" }
+    },
+    {
+      "name": "imports.apply",
+      "method": "POST",
+      "path": "/api/v1/imports/agenttask-md/apply",
+      "status": 200,
+      "body": {
+        "project": "CMP",
+        "content": "# 交付\n- [ ] 导出",
+        "sourceName": "AgentTask.md",
+        "expectedSha256": "{{importSha}}"
+      }
+    },
+    {
+      "name": "sessions.git-context",
+      "method": "POST",
+      "path": "/api/v1/projects/CMP/sessions/{{session}}/git-context/refresh",
+      "status": 200
+    },
+    {
+      "name": "sessions.force-close",
+      "method": "POST",
+      "path": "/api/v1/sessions/{{session}}/force-close",
+      "status": 200,
+      "body": { "project": "CMP", "releaseClaims": true }
+    },
+    {
+      "name": "backups.create",
+      "method": "POST",
+      "path": "/api/v1/backups",
+      "status": 201,
+      "body": { "scope": "PROJECT", "project": "CMP" }
+    },
+    { "name": "backups.list", "method": "GET", "path": "/api/v1/backups", "status": 200 },
+    {
+      "name": "projects.archive",
+      "method": "POST",
+      "path": "/api/v1/projects/OTH/archive",
+      "status": 200
+    },
+    {
+      "name": "projects.unarchive",
+      "method": "POST",
+      "path": "/api/v1/projects/OTH/restore",
+      "status": 200
+    },
+    {
+      "name": "projects.trash",
+      "method": "POST",
+      "path": "/api/v1/projects/OTH/trash",
+      "status": 200
+    },
+    { "name": "trash.list", "method": "GET", "path": "/api/v1/trash/projects", "status": 200 },
+    { "name": "projects.list", "method": "GET", "path": "/api/v1/projects", "status": 200 },
+    {
+      "name": "projects.missing",
+      "method": "GET",
+      "path": "/api/v1/projects/NOPE/objectives",
+      "status": 404
+    },
+    { "name": "overview", "method": "GET", "path": "/api/v1/overview", "status": 200 },
+    { "name": "status", "method": "GET", "path": "/api/v1/system/status", "status": 200 }
+  ]
+}

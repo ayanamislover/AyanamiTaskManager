@@ -46,11 +46,11 @@ pub(crate) fn nfc_strings(v: &Value) -> Value {
 }
 
 /// 一页结果（服务层形状）：每项的游标、下一页、重试游标。
-struct Page {
-    items: Vec<Value>,
-    item_cursors: Vec<String>,
-    has_more: bool,
-    retry_cursor: String,
+pub(crate) struct Page {
+    pub(crate) items: Vec<Value>,
+    pub(crate) item_cursors: Vec<String>,
+    pub(crate) has_more: bool,
+    pub(crate) retry_cursor: String,
 }
 
 /// 一条都放不下时，按条目与预算给出 `oversized_item`。
@@ -518,7 +518,7 @@ fn open_keyset(
     }
 }
 
-fn record_page(cx: &Ctx<'_>, r: &ListRequest) -> Result<Page, DomainError> {
+pub(crate) fn record_page(cx: &Ctx<'_>, r: &ListRequest) -> Result<Page, DomainError> {
     let selection = selection_hash(&json!(["records"]));
     let last = match &r.cursor {
         Some(t) => open_keyset(cx, RECORD_LIST, &selection, t)?,
@@ -566,7 +566,7 @@ fn record_page(cx: &Ctx<'_>, r: &ListRequest) -> Result<Page, DomainError> {
     })
 }
 
-fn session_page(cx: &Ctx<'_>, r: &ListRequest) -> Result<Page, DomainError> {
+pub(crate) fn session_page(cx: &Ctx<'_>, r: &ListRequest) -> Result<Page, DomainError> {
     let task_filter = r.task_key.as_deref().map(js_trim);
     let selection = selection_hash(&json!(["sessions", task_filter]));
     let last = match &r.cursor {

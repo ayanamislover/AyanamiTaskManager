@@ -93,8 +93,14 @@ pub const ROUTES: &[Route] = &[
     // §2.1 系统、视图、设置、项目
     r(1, "GET", "/api/v1/system/status", Au),
     r(2, "GET", "/api/v1/overview", U),
-    r(3, "POST", "/api/v1/projects/:code/projection/reconcile", U),
-    r(4, "POST", "/api/v1/system/projections/reconcile", U),
+    // #3、#4：投影健康面板的两条重试，随面板在 W5 删除（00 §6）。
+    r(
+        3,
+        "POST",
+        "/api/v1/projects/:code/projection/reconcile",
+        Gone,
+    ),
+    r(4, "POST", "/api/v1/system/projections/reconcile", Gone),
     r(5, "GET", "/api/v1/saved-views", U),
     r(
         6,
@@ -941,27 +947,85 @@ fn snake_case(tool: &Tool, args: &mut Map<String, Value>) {
             }
         }
     }
+    /// 按 schema 往下走：对象数组、对象里的键也照收 camelCase（任务的 `checklist[].evidenceRequired`）。
+    fn nested(ty: &Ty, value: &mut Value) {
+        match (ty, value) {
+            (Ty::List { of, .. }, Value::Array(items)) => {
+                items.iter_mut().for_each(|item| nested(of, item))
+            }
+            (Ty::Obj(fields) | Ty::TextOr { obj: fields, .. }, Value::Object(m)) => {
+                let known = |k: &str| fields.iter().any(|f| f.name == k || f.aliases.contains(&k));
+                rename(m, &known);
+                for (name, inner) in m.iter_mut() {
+                    if let Some(f) = fields
+                        .iter()
+                        .find(|f| f.name == name || f.aliases.contains(&name.as_str()))
+                    {
+                        nested(&f.ty, inner);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let top = |k: &str| field(tool, k).is_some();
     rename(args, &top);
     for (name, value) in args.iter_mut() {
-        let Some(Field {
-            ty: Ty::List {
-                of: Ty::Obj(inner), ..
-            },
-            ..
-        }) = field(tool, name)
-        else {
-            continue;
-        };
-        let known = |k: &str| inner.iter().any(|f| f.name == k || f.aliases.contains(&k));
-        if let Value::Array(items) = value {
-            for item in items.iter_mut() {
-                if let Value::Object(m) = item {
-                    rename(m, &known);
-                }
-            }
+        if let Some(f) = field(tool, name) {
+            nested(&f.ty, value);
         }
     }
+}
+
+/// ui-bridge（W5）：界面上有 MCP 工具对应的写，与 Agent 入口走同一份参数 schema 与同一个工具处理器（03 A6）：
+/// camelCase 照收（[`snake_case`]），`pairs` 是路径里的值（`(工具字段, 值)`，与 body 里同名的值冲突时报
+/// CONFLICT），然后校验、交给处理器。主体由调用方给（ui-bridge 构造的 User）。
+pub fn call_tool_as(
+    surface: &Surface,
+    p: &atm_domain::principal::Principal,
+    tool_name: &str,
+    mut args: Map<String, Value>,
+    pairs: &[(&str, &str)],
+) -> Result<Value, Envelope> {
+    let Some(tool) = crate::tools::find(tool_name) else {
+        return Err(refuse(
+            DomainError::new(ErrorCode::INTERNAL_ERROR, format!("没有工具 {tool_name}")),
+            Fix::None,
+        ));
+    };
+    snake_case(tool, &mut args);
+    let params: HashMap<String, String> = pairs
+        .iter()
+        .map(|(field, value)| ((*field).to_owned(), (*value).to_owned()))
+        .collect();
+    let same: Vec<(&str, &str)> = pairs.iter().map(|(field, _)| (*field, *field)).collect();
+    let conflicts = inject(tool, &mut args, &params, &same);
+    let checked = checked(tool, args, conflicts)?;
+    surface.call(p, tool, checked)
+}
+
+/// 同 [`call_tool_as`]，另外带回服务的原始写结果（`Written::result`，2.0 界面路由回的就是它的形状）。
+/// 参数校验、处理器、错误信封都与 Agent 入口同一份；只有回给界面的形状不同（06 T-COMPAT）。
+/// 原始结果是 `None`：这个工具不经过写回执（读工具），或者在写入之前就失败了。
+pub fn call_tool_raw_as(
+    surface: &Surface,
+    p: &atm_domain::principal::Principal,
+    tool_name: &str,
+    args: Map<String, Value>,
+    pairs: &[(&str, &str)],
+) -> Result<(Value, Option<Value>), Envelope> {
+    struct Close;
+    impl Drop for Close {
+        fn drop(&mut self) {
+            crate::write::RAW.with(|slot| slot.borrow_mut().take());
+        }
+    }
+    crate::write::RAW.with(|slot| *slot.borrow_mut() = Some(None));
+    let close = Close;
+    let ack = call_tool_as(surface, p, tool_name, args, pairs)?;
+    let raw = crate::write::RAW.with(|slot| slot.borrow_mut().take().flatten());
+    drop(close);
+    Ok((ack, raw))
 }
 
 /// 一个请求的全部输入：路径参数、query、body（GET 没有 body），校验、规范化之后。

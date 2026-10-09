@@ -298,10 +298,10 @@ pub(super) fn create_milestone(
         &id,
         &json!({ "id": id, "objectiveId": r.objective_id, "localNo": no, "title": r.title }),
     )?;
+    // 回执是 2.x `createMilestone` 的形状：不回 objectiveId（界面与 Agent 都不读）。
     Ok(json!({
         "id": id,
         "localNo": no,
-        "objectiveId": r.objective_id,
         "title": r.title,
         "status": "ACTIVE",
         "version": 0,

@@ -1,0 +1,1603 @@
+{
+  "projects.create": {
+    "status": 201,
+    "shape": {
+      "code": "string",
+      "coordinationMode": "string",
+      "databasePath": "string",
+      "description": "string",
+      "id": "string",
+      "lifecycle": "string",
+      "name": "string",
+      "sourcePaths": "[]",
+      "version": "number"
+    }
+  },
+  "projects.create.other": {
+    "status": 201,
+    "shape": {
+      "code": "string",
+      "coordinationMode": "string",
+      "databasePath": "string",
+      "description": "string",
+      "id": "string",
+      "lifecycle": "string",
+      "name": "string",
+      "sourcePaths": "[]",
+      "version": "number"
+    }
+  },
+  "objectives.create": {
+    "status": 201,
+    "shape": {
+      "id": "string",
+      "localNo": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number",
+      "status": "string",
+      "title": "string",
+      "version": "number"
+    }
+  },
+  "milestones.create": {
+    "status": 201,
+    "shape": {
+      "id": "string",
+      "localNo": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number",
+      "status": "string",
+      "title": "string",
+      "version": "number"
+    }
+  },
+  "work-items.create": {
+    "status": 201,
+    "shape": {
+      "items": {
+        "[]": {
+          "acceptance": {
+            "[]": "string"
+          },
+          "assigneeAgentId": "null",
+          "blockedReason": "null",
+          "cancelReason": "null",
+          "claimLeaseUntil": "null",
+          "claimedBySessionId": "null",
+          "description": "string",
+          "discoveredCount": "number",
+          "discoveredFrom": "null",
+          "duplicateOf": "null",
+          "everClaimedAt": "null",
+          "id": "string",
+          "key": "string",
+          "lastEvidenceAt": "null",
+          "lastSessionClosedAt": "null",
+          "lastStartedAt": "null",
+          "localNo": "number",
+          "milestoneId": "string",
+          "objectiveId": "string",
+          "parentId": "null",
+          "parentKey": "null",
+          "phase": "string",
+          "phaseInferred": "boolean",
+          "priority": "string",
+          "progress": "number",
+          "progressBreakdown": {
+            "blocker": "null",
+            "computed": "number",
+            "doneStages": "number",
+            "doneWeight": "number",
+            "reported": "null",
+            "source": "string",
+            "totalStages": "number",
+            "totalWeight": "number"
+          },
+          "progressSource": "string",
+          "reportedProgress": "null",
+          "status": "string",
+          "supersededBy": "null",
+          "targetDate": "null",
+          "title": "string",
+          "type": "string",
+          "updatedAt": "string",
+          "version": "number",
+          "waitingFor": "null",
+          "waitingOn": "null",
+          "weight": "number"
+        }
+      },
+      "planningRootProvisioned": "boolean",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number"
+    }
+  },
+  "work-items.page": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "items": {
+        "[]": {
+          "acceptance": {
+            "[]": "string"
+          },
+          "assigneeAgentId": "null",
+          "blockedReason": "null",
+          "cancelReason": "null",
+          "claimLeaseUntil": "null",
+          "claimedBySessionId": "null",
+          "description": "string",
+          "discoveredCount": "number",
+          "discoveredFrom": "null",
+          "duplicateOf": "null",
+          "everClaimedAt": "null",
+          "id": "string",
+          "key": "string",
+          "lastEvidenceAt": "null",
+          "lastSessionClosedAt": "null",
+          "lastStartedAt": "null",
+          "localNo": "number",
+          "milestoneId": "string",
+          "objectiveId": "string",
+          "parentId": "null",
+          "parentKey": "null",
+          "phase": "string",
+          "phaseInferred": "boolean",
+          "priority": "string",
+          "progress": "number",
+          "progressBreakdown": {
+            "blocker": "null",
+            "computed": "number",
+            "doneStages": "number",
+            "doneWeight": "number",
+            "reported": "null",
+            "source": "string",
+            "totalStages": "number",
+            "totalWeight": "number"
+          },
+          "progressSource": "string",
+          "reportedProgress": "null",
+          "status": "string",
+          "supersededBy": "null",
+          "targetDate": "null",
+          "title": "string",
+          "type": "string",
+          "updatedAt": "string",
+          "version": "number",
+          "waitingFor": "null",
+          "waitingOn": "null",
+          "weight": "number"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "work-items.one": {
+    "status": 200,
+    "shape": {
+      "acceptance": {
+        "[]": "string"
+      },
+      "assigneeAgentId": "null",
+      "blockedReason": "null",
+      "cancelReason": "null",
+      "checklist": {
+        "[]": {
+          "evidence": "[]",
+          "evidenceRequired": "boolean",
+          "id": "string",
+          "kind": "string",
+          "status": "string",
+          "title": "string",
+          "version": "number",
+          "weight": "number"
+        }
+      },
+      "claimLeaseUntil": "null",
+      "claimedBySessionId": "null",
+      "dependencies": "[]",
+      "description": "string",
+      "discovered": "[]",
+      "discoveredCount": "number",
+      "discoveredFrom": "null",
+      "duplicateOf": "null",
+      "everClaimedAt": "null",
+      "executionSession": "null",
+      "id": "string",
+      "key": "string",
+      "lastEvidenceAt": "null",
+      "lastSessionClosedAt": "null",
+      "lastStartedAt": "null",
+      "localNo": "number",
+      "milestoneId": "string",
+      "objectiveId": "string",
+      "parentId": "null",
+      "parentKey": "null",
+      "phase": "string",
+      "phaseInferred": "boolean",
+      "priority": "string",
+      "progress": "number",
+      "progressBreakdown": {
+        "blocker": "null",
+        "computed": "number",
+        "doneStages": "number",
+        "doneWeight": "number",
+        "reported": "null",
+        "source": "string",
+        "totalStages": "number",
+        "totalWeight": "number"
+      },
+      "progressSource": "string",
+      "reportedProgress": "null",
+      "status": "string",
+      "supersededBy": "null",
+      "targetDate": "null",
+      "title": "string",
+      "type": "string",
+      "updatedAt": "string",
+      "version": "number",
+      "waitingFor": "null",
+      "waitingOn": "null",
+      "weight": "number"
+    }
+  },
+  "work-items.full": {
+    "status": 200,
+    "shape": {
+      "acceptance": {
+        "[]": "string"
+      },
+      "assigneeAgentId": "null",
+      "blockedReason": "null",
+      "checklist": {
+        "[]": {
+          "evidence": "[]",
+          "evidenceRequired": "boolean",
+          "id": "string",
+          "kind": "string",
+          "status": "string",
+          "title": "string",
+          "version": "number",
+          "weight": "number"
+        }
+      },
+      "checklistSummary": {
+        "doing": "number",
+        "done": "number",
+        "evidenceMissing": "number",
+        "evidenceRequired": "number",
+        "skipped": "number",
+        "todo": "number",
+        "total": "number"
+      },
+      "claimLeaseUntil": "null",
+      "claimedBySessionId": "null",
+      "description": "string",
+      "descriptionPreview": "string",
+      "key": "string",
+      "phase": "string",
+      "progress": "number",
+      "progressSource": "string",
+      "relations": {
+        "[]": {
+          "direction": "string",
+          "taskKey": "string",
+          "type": "string"
+        }
+      },
+      "status": "string",
+      "title": "string",
+      "updatedAt": "string",
+      "version": "number",
+      "waitingFor": "null",
+      "waitingOn": "null"
+    }
+  },
+  "checklist.patch": {
+    "status": 200,
+    "shape": {
+      "checklist": {
+        "evidence": "[]",
+        "evidenceRequired": "boolean",
+        "id": "string",
+        "kind": "string",
+        "status": "string",
+        "title": "string",
+        "version": "number",
+        "weight": "number"
+      },
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number",
+      "taskProgress": "number",
+      "taskVersion": "number"
+    }
+  },
+  "work-items.patch": {
+    "status": 200,
+    "shape": {
+      "items": {
+        "[]": {
+          "acceptance": "[]",
+          "assigneeAgentId": "null",
+          "blockedReason": "null",
+          "cancelReason": "null",
+          "claimLeaseUntil": "null",
+          "claimedBySessionId": "null",
+          "description": "string",
+          "discoveredCount": "number",
+          "discoveredFrom": "null",
+          "duplicateOf": "null",
+          "everClaimedAt": "null",
+          "id": "string",
+          "key": "string",
+          "lastEvidenceAt": "null",
+          "lastSessionClosedAt": "null",
+          "lastStartedAt": "null",
+          "localNo": "number",
+          "milestoneId": "null",
+          "objectiveId": "string",
+          "parentId": "null",
+          "parentKey": "null",
+          "phase": "string",
+          "phaseInferred": "boolean",
+          "priority": "string",
+          "progress": "number",
+          "progressBreakdown": {
+            "blocker": "null",
+            "computed": "number",
+            "doneStages": "number",
+            "doneWeight": "number",
+            "reported": "null",
+            "source": "string",
+            "totalStages": "number",
+            "totalWeight": "number"
+          },
+          "progressSource": "string",
+          "reportedProgress": "null",
+          "status": "string",
+          "supersededBy": "null",
+          "targetDate": "null",
+          "title": "string",
+          "type": "string",
+          "updatedAt": "string",
+          "version": "number",
+          "waitingFor": "null",
+          "waitingOn": "null",
+          "weight": "number"
+        }
+      },
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number"
+    }
+  },
+  "work-items.patch.stale": {
+    "status": 409,
+    "code": "VERSION_CONFLICT",
+    "shape": {
+      "error": {
+        "code": "string",
+        "details": {
+          "actual": "number",
+          "changes_complete": "boolean",
+          "current": {
+            "assignee_agent_id": "null",
+            "cancel_reason": "null",
+            "claimed_by_session_id": "null",
+            "description": "string",
+            "duplicate_of": "null",
+            "key": "string",
+            "parent_key": "null",
+            "phase": "string",
+            "status": "string",
+            "superseded_by": "null",
+            "target_date": "null",
+            "title": "string",
+            "updated_at": "string",
+            "version": "number"
+          },
+          "current_version": "number",
+          "entity": "string",
+          "expected": "number",
+          "expected_version": "number",
+          "key": "string",
+          "recent_changes": {
+            "[]": {
+              "at": "string",
+              "key": "string",
+              "op_id": "string",
+              "seq": "number",
+              "summary": "string",
+              "type": "string"
+            }
+          },
+          "task_key": "string",
+          "version_gap": "number"
+        },
+        "message": "string",
+        "retryable": "boolean"
+      },
+      "request_id": "string"
+    }
+  },
+  "work-items.strip": {
+    "status": 200,
+    "shape": {
+      "active": "number",
+      "done": "number",
+      "ready": "number",
+      "since": "string",
+      "waiting": "number"
+    }
+  },
+  "work-items.closed": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "items": "[]",
+      "nextCursor": "null",
+      "total": "number"
+    }
+  },
+  "work-items.missing": {
+    "status": 404,
+    "code": "WORK_ITEM_NOT_FOUND",
+    "shape": {
+      "error": {
+        "code": "string",
+        "details": {
+          "candidate_count": "number",
+          "candidate_scan_count": "number",
+          "candidate_scan_truncated": "boolean",
+          "candidates": {
+            "[]": {
+              "key": "string",
+              "status": "string"
+            }
+          },
+          "candidates_truncated": "boolean",
+          "did_you_mean": "null",
+          "entity": "string",
+          "reference": "string"
+        },
+        "message": "string",
+        "retryable": "boolean"
+      },
+      "request_id": "string"
+    }
+  },
+  "records.create": {
+    "status": 201,
+    "shape": {
+      "key": "string",
+      "ok": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "relatedRecords": "[]",
+      "seq": "number",
+      "v": "number"
+    }
+  },
+  "records.page": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "items": {
+        "[]": {
+          "createdAt": "string",
+          "detail": "string",
+          "id": "string",
+          "importance": "string",
+          "key": "string",
+          "kind": "string",
+          "opId": "string",
+          "relatedRecords": "[]",
+          "scope": "string",
+          "sourceActorId": "string",
+          "sourceRef": "null",
+          "sourceSessionId": "null",
+          "sourceType": "string",
+          "status": "string",
+          "subjectKey": "null",
+          "summary": "string",
+          "supersedes": "null",
+          "title": "string",
+          "topic": "null",
+          "updatedAt": "string",
+          "workItemKey": "null"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "knowledge.preview-record": {
+    "status": 200,
+    "shape": {
+      "bodyMarkdown": "string",
+      "sourceRef": {
+        "projectId": "string",
+        "recordId": "string",
+        "reference": "string",
+        "sourceVersion": "number",
+        "type": "string"
+      },
+      "summary": "string",
+      "title": "string"
+    }
+  },
+  "knowledge.save": {
+    "status": 201,
+    "shape": {
+      "aliases": "[]",
+      "appliesTo": "[]",
+      "archived": "boolean",
+      "bodyMarkdown": "string",
+      "createdAt": "string",
+      "id": "string",
+      "revision": "number",
+      "revisionId": "string",
+      "slug": "string",
+      "sourceRefs": "[]",
+      "summary": "string",
+      "tags": {
+        "[]": "string"
+      },
+      "title": "string",
+      "useWhen": "string",
+      "version": "number"
+    }
+  },
+  "knowledge.search": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "hits": {
+        "[]": {
+          "appliesTo": "[]",
+          "archived": "boolean",
+          "createdAt": "string",
+          "id": "string",
+          "revision": "number",
+          "revisionId": "string",
+          "slug": "string",
+          "summary": "string",
+          "tags": {
+            "[]": "string"
+          },
+          "title": "string",
+          "useWhen": "string",
+          "version": "number"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "knowledge.get": {
+    "status": 200,
+    "shape": {
+      "aliases": "[]",
+      "appliesTo": "[]",
+      "archived": "boolean",
+      "bodyMarkdown": "string",
+      "createdAt": "string",
+      "id": "string",
+      "nextCursor": "null",
+      "revision": "number",
+      "revisionId": "string",
+      "slug": "string",
+      "sourceRefs": "[]",
+      "summary": "string",
+      "tags": {
+        "[]": "string"
+      },
+      "title": "string",
+      "toc": {
+        "[]": {
+          "id": "string",
+          "level": "number",
+          "title": "string"
+        }
+      },
+      "truncated": "boolean",
+      "useWhen": "string",
+      "version": "number"
+    }
+  },
+  "knowledge.update": {
+    "status": 200,
+    "shape": {
+      "aliases": "[]",
+      "appliesTo": "[]",
+      "archived": "boolean",
+      "bodyMarkdown": "string",
+      "createdAt": "string",
+      "id": "string",
+      "revision": "number",
+      "revisionId": "string",
+      "slug": "string",
+      "sourceRefs": "[]",
+      "summary": "string",
+      "tags": "[]",
+      "title": "string",
+      "useWhen": "string",
+      "version": "number"
+    }
+  },
+  "knowledge.history": {
+    "status": 200,
+    "shape": {
+      "nextRevision": "null",
+      "revisions": {
+        "[]": {
+          "aliases": "[]",
+          "appliesTo": "[]",
+          "createdAt": "string",
+          "id": "string",
+          "revision": "number",
+          "revisionId": "string",
+          "slug": "string",
+          "sourceRefs": "[]",
+          "summary": "string",
+          "tags": {
+            "[]": "string"
+          },
+          "title": "string",
+          "useWhen": "string"
+        }
+      }
+    }
+  },
+  "knowledge.archive": {
+    "status": 200,
+    "shape": {
+      "aliases": "[]",
+      "appliesTo": "[]",
+      "archived": "boolean",
+      "bodyMarkdown": "string",
+      "createdAt": "string",
+      "id": "string",
+      "revision": "number",
+      "revisionId": "string",
+      "slug": "string",
+      "sourceRefs": "[]",
+      "summary": "string",
+      "tags": "[]",
+      "title": "string",
+      "useWhen": "string",
+      "version": "number"
+    }
+  },
+  "objectives.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "created_at": "string",
+        "definition_of_done_json": "string",
+        "description": "string",
+        "id": "string",
+        "local_no": "number",
+        "status": "string",
+        "title": "string",
+        "updated_at": "string",
+        "version": "number",
+        "weight": "number"
+      }
+    }
+  },
+  "milestones.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "created_at": "string",
+        "description": "string",
+        "id": "string",
+        "local_no": "number",
+        "objective_id": "string",
+        "planned_start_date": "null",
+        "sort_key": "number",
+        "status": "string",
+        "target_date": "null",
+        "title": "string",
+        "updated_at": "string",
+        "version": "number",
+        "weight": "number"
+      }
+    }
+  },
+  "agents.page": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "items": {
+        "[]": {
+          "agentId": "string",
+          "capabilities": "[]",
+          "clientKind": "string",
+          "closeReason": "null",
+          "closedAt": "null",
+          "connectionState": "string",
+          "currentTaskKey": "null",
+          "cwd": "null",
+          "displayName": "string",
+          "git": {
+            "available": "boolean",
+            "branch": "null",
+            "commonDir": "null",
+            "detached": "null",
+            "dirty": "null",
+            "error": "null",
+            "head": "null",
+            "isLinkedWorktree": "null",
+            "repoRoot": "null",
+            "worktreeRoot": "null"
+          },
+          "heartbeatAt": "string",
+          "id": "string",
+          "lastSeenAt": "string",
+          "parentSessionId": "null",
+          "predecessorSessionId": "null",
+          "retirementReason": "null",
+          "role": "string",
+          "startedAt": "string",
+          "threadId": "null",
+          "updatedAt": "string",
+          "version": "number",
+          "workState": "string"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "reconciliation": {
+    "status": 200,
+    "shape": {
+      "attentionCount": "number",
+      "counts": {
+        "ACTIVE": "number",
+        "LEASE_EXPIRED_ONLINE": "number",
+        "POSSIBLY_COMPLETE": "number",
+        "STALLED": "number"
+      },
+      "generatedAt": "string",
+      "items": {
+        "[]": {
+          "ageSeconds": "number",
+          "classification": "string",
+          "evidencePaths": "[]",
+          "reason": "string",
+          "session": "null",
+          "status": "string",
+          "suggestedAction": "string",
+          "taskKey": "string",
+          "title": "string"
+        }
+      },
+      "project": {
+        "code": "string",
+        "name": "string",
+        "sourceRoot": "null"
+      }
+    }
+  },
+  "project-updates.draft": {
+    "status": 201,
+    "shape": {
+      "actor": "string",
+      "completed": "[]",
+      "createdAt": "string",
+      "evidence": "[]",
+      "fromSequence": "number",
+      "health": "string",
+      "id": "string",
+      "next": {
+        "[]": "string"
+      },
+      "opId": "string",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "publishedAt": "null",
+      "risks": "[]",
+      "seq": "number",
+      "sessionId": "null",
+      "status": "string",
+      "summary": "string",
+      "toSequence": "number",
+      "updatedAt": "string"
+    }
+  },
+  "project-updates.publish": {
+    "status": 201,
+    "shape": {
+      "actor": "string",
+      "completed": "[]",
+      "createdAt": "string",
+      "evidence": "[]",
+      "fromSequence": "number",
+      "health": "string",
+      "id": "string",
+      "next": "[]",
+      "opId": "string",
+      "openWorkItemCount": "number",
+      "openWorkItems": {
+        "[]": "string"
+      },
+      "openWorkItemsTruncated": "boolean",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "publishedAt": "string",
+      "risks": "[]",
+      "seq": "number",
+      "sessionId": "null",
+      "status": "string",
+      "summary": "string",
+      "toSequence": "number",
+      "unlinked": "boolean",
+      "updatedAt": "string"
+    }
+  },
+  "project-updates.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "actor": "string",
+        "completed": "[]",
+        "createdAt": "string",
+        "evidence": "[]",
+        "fromSequence": "number",
+        "health": "string",
+        "id": "string",
+        "next": "[]",
+        "opId": "string",
+        "publishedAt": "string",
+        "risks": "[]",
+        "sessionId": "null",
+        "status": "string",
+        "summary": "string",
+        "toSequence": "number",
+        "updatedAt": "string"
+      }
+    }
+  },
+  "brief": {
+    "status": 200,
+    "shape": {
+      "active": "number",
+      "artifacts": "[]",
+      "blocked": "number",
+      "currentTask": "null",
+      "handoff": "null",
+      "milestone": "string",
+      "next": {
+        "[]": "string"
+      },
+      "objective": "string",
+      "own": "[]",
+      "project": "string",
+      "recentProgress": "null",
+      "records": {
+        "[]": {
+          "importance": "string",
+          "kind": "string",
+          "source_actor_id": "string",
+          "source_ref": "null",
+          "source_session_id": "null",
+          "source_type": "string",
+          "summary": "string"
+        }
+      },
+      "seq": "number",
+      "truncated": "boolean",
+      "waitingAgent": "number",
+      "waitingUser": "number"
+    }
+  },
+  "saved-views.create": {
+    "status": 201,
+    "shape": {
+      "createdAt": "string",
+      "id": "string",
+      "name": "string",
+      "projectCode": "string",
+      "projectId": "string",
+      "query": {
+        "search": "string",
+        "status": "string"
+      },
+      "scope": "string",
+      "sort": {
+        "direction": "string",
+        "field": "string"
+      },
+      "updatedAt": "string",
+      "version": "number"
+    }
+  },
+  "saved-views.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "createdAt": "string",
+        "id": "string",
+        "name": "string",
+        "projectCode": "string",
+        "projectId": "string",
+        "query": {
+          "search": "string",
+          "status": "string"
+        },
+        "scope": "string",
+        "sort": {
+          "direction": "string",
+          "field": "string"
+        },
+        "updatedAt": "string",
+        "version": "number"
+      }
+    }
+  },
+  "saved-views.delete": {
+    "status": 200,
+    "shape": {
+      "id": "string",
+      "ok": "number"
+    }
+  },
+  "settings.order": {
+    "status": 200,
+    "shape": {
+      "key": "string",
+      "updatedAt": "string",
+      "value": {
+        "ids": {
+          "[]": "string"
+        }
+      },
+      "version": "number"
+    }
+  },
+  "settings.notification": {
+    "status": 200,
+    "shape": {
+      "key": "string",
+      "updatedAt": "string",
+      "value": "string",
+      "version": "number"
+    }
+  },
+  "settings.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "key": "string",
+        "updatedAt": "string",
+        "value": "object|string",
+        "version": "number"
+      }
+    }
+  },
+  "quick.create": {
+    "status": 201,
+    "shape": {
+      "dueDate": "null",
+      "id": "string",
+      "key": "string",
+      "latestSummary": "null",
+      "note": "string",
+      "percent": "null",
+      "promotedProjectId": "null",
+      "promotedWorkItemKey": "null",
+      "sourceCwd": "null",
+      "status": "string",
+      "title": "string",
+      "updatedAt": "string",
+      "version": "number"
+    }
+  },
+  "quick.create.second": {
+    "status": 201,
+    "shape": {
+      "dueDate": "null",
+      "id": "string",
+      "key": "string",
+      "latestSummary": "null",
+      "note": "string",
+      "percent": "null",
+      "promotedProjectId": "null",
+      "promotedWorkItemKey": "null",
+      "sourceCwd": "null",
+      "status": "string",
+      "title": "string",
+      "updatedAt": "string",
+      "version": "number"
+    }
+  },
+  "quick.patch": {
+    "status": 200,
+    "shape": {
+      "dueDate": "null",
+      "id": "string",
+      "key": "string",
+      "latestSummary": "null",
+      "note": "string",
+      "percent": "number",
+      "promotedProjectId": "null",
+      "promotedWorkItemKey": "null",
+      "sourceCwd": "null",
+      "status": "string",
+      "title": "string",
+      "updatedAt": "string",
+      "version": "number"
+    }
+  },
+  "quick.promote": {
+    "status": 200,
+    "shape": {
+      "dueDate": "null",
+      "id": "string",
+      "key": "string",
+      "latestSummary": "null",
+      "note": "string",
+      "percent": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "promotedProjectId": "string",
+      "promotedWorkItemKey": "string",
+      "sourceCwd": "null",
+      "status": "string",
+      "title": "string",
+      "updatedAt": "string",
+      "version": "number"
+    }
+  },
+  "quick.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "dueDate": "null",
+        "id": "string",
+        "key": "string",
+        "latestSummary": "null",
+        "note": "string",
+        "percent": "number",
+        "promotedProjectId": "string",
+        "promotedWorkItemKey": "string",
+        "sourceCwd": "null",
+        "status": "string",
+        "title": "string",
+        "updatedAt": "string",
+        "version": "number"
+      }
+    }
+  },
+  "search.global": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "hits": {
+        "[]": {
+          "entityKey": "string",
+          "entityType": "string",
+          "project": "string",
+          "snippet": "string",
+          "title": "string",
+          "updatedAt": "string"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "search.project": {
+    "status": 200,
+    "shape": {
+      "hasMore": "boolean",
+      "hits": {
+        "[]": {
+          "entityKey": "string",
+          "entityType": "string",
+          "snippet": "string",
+          "title": "string",
+          "updatedAt": "string"
+        }
+      },
+      "nextCursor": "null"
+    }
+  },
+  "events": {
+    "status": 200,
+    "shape": {
+      "currentSequence": "number",
+      "events": {
+        "[]": {
+          "actor": "string",
+          "at": "string",
+          "detail": "string",
+          "key": "string",
+          "opId": "string",
+          "project": {
+            "code": "string",
+            "id": "string",
+            "name": "string"
+          },
+          "projectCode": "string",
+          "projectName": "string",
+          "seq": "number",
+          "summary": "string",
+          "title": "string",
+          "type": "string"
+        }
+      },
+      "hasMore": "boolean"
+    }
+  },
+  "imports.preview": {
+    "status": 200,
+    "shape": {
+      "alreadyImported": "boolean",
+      "milestoneCount": "number",
+      "milestones": "[]",
+      "objectiveCount": "number",
+      "objectives": {
+        "[]": {
+          "line": "number",
+          "ref": "string",
+          "title": "string"
+        }
+      },
+      "project": {
+        "code": "string",
+        "id": "string",
+        "name": "string"
+      },
+      "recordCount": "number",
+      "records": "[]",
+      "sha256": "string",
+      "sourceName": "string",
+      "taskCount": "number",
+      "tasks": {
+        "[]": {
+          "completed": "boolean",
+          "line": "number",
+          "milestoneRef": "null",
+          "objectiveRef": "string",
+          "ref": "string",
+          "title": "string"
+        }
+      },
+      "warnings": "[]"
+    }
+  },
+  "imports.apply": {
+    "status": 200,
+    "shape": {
+      "alreadyImported": "boolean",
+      "importedMilestones": "number",
+      "importedObjectives": "number",
+      "importedRecords": "number",
+      "importedTasks": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sha256": "string",
+      "sourceName": "string",
+      "warnings": "[]"
+    }
+  },
+  "sessions.git-context": {
+    "status": 200,
+    "shape": {
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "sequence": "number",
+      "session": {
+        "agentId": "string",
+        "capabilities": "[]",
+        "clientKind": "string",
+        "closeReason": "null",
+        "closedAt": "null",
+        "connectionState": "string",
+        "currentTaskKey": "null",
+        "cwd": "null",
+        "displayName": "string",
+        "git": {
+          "available": "boolean",
+          "branch": "null",
+          "commonDir": "null",
+          "detached": "null",
+          "dirty": "null",
+          "error": "null",
+          "head": "null",
+          "isLinkedWorktree": "null",
+          "repoRoot": "null",
+          "worktreeRoot": "null"
+        },
+        "heartbeatAt": "string",
+        "id": "string",
+        "lastSeenAt": "string",
+        "parentSessionId": "null",
+        "predecessorSessionId": "null",
+        "retirementReason": "null",
+        "role": "string",
+        "startedAt": "string",
+        "threadId": "null",
+        "updatedAt": "string",
+        "version": "number",
+        "workState": "string"
+      },
+      "updated": "boolean"
+    }
+  },
+  "sessions.force-close": {
+    "status": 200,
+    "shape": {
+      "ok": "number",
+      "projection": {
+        "lag": "number",
+        "lastError": "null",
+        "projectedSeq": "number",
+        "retryCount": "number",
+        "retryScheduled": "boolean",
+        "sourceSeq": "number",
+        "status": "string"
+      },
+      "released": "number",
+      "seq": "number",
+      "session": "string"
+    }
+  },
+  "backups.create": {
+    "status": 201,
+    "shape": {
+      "createdAt": "string",
+      "id": "string",
+      "path": "string",
+      "projectCode": "string",
+      "projectId": "string",
+      "reason": "string",
+      "schemaVersion": "number",
+      "scope": "string",
+      "sha256": "string",
+      "sizeBytes": "number",
+      "verifiedAt": "string"
+    }
+  },
+  "backups.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "createdAt": "string",
+        "id": "string",
+        "path": "string",
+        "projectCode": "string",
+        "projectId": "string",
+        "reason": "string",
+        "schemaVersion": "number",
+        "scope": "string",
+        "sha256": "string",
+        "sizeBytes": "number",
+        "verifiedAt": "string"
+      }
+    }
+  },
+  "projects.archive": {
+    "status": 200,
+    "shape": {
+      "code": "string",
+      "coordinationMode": "string",
+      "databasePath": "string",
+      "description": "string",
+      "id": "string",
+      "lifecycle": "string",
+      "name": "string",
+      "sourcePaths": "[]",
+      "version": "number"
+    }
+  },
+  "projects.unarchive": {
+    "status": 200,
+    "shape": {
+      "code": "string",
+      "coordinationMode": "string",
+      "databasePath": "string",
+      "description": "string",
+      "id": "string",
+      "lifecycle": "string",
+      "name": "string",
+      "sourcePaths": "[]",
+      "version": "number"
+    }
+  },
+  "projects.trash": {
+    "status": 200,
+    "shape": {
+      "code": "string",
+      "coordinationMode": "string",
+      "databasePath": "string",
+      "description": "string",
+      "id": "string",
+      "lifecycle": "string",
+      "name": "string",
+      "sourcePaths": "[]",
+      "version": "number"
+    }
+  },
+  "trash.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "code": "string",
+        "coordinationMode": "string",
+        "databasePath": "string",
+        "description": "string",
+        "id": "string",
+        "lifecycle": "string",
+        "name": "string",
+        "restoreRequest": "null",
+        "sourcePaths": "[]",
+        "version": "number"
+      }
+    }
+  },
+  "projects.list": {
+    "status": 200,
+    "shape": {
+      "[]": {
+        "code": "string",
+        "coordinationMode": "string",
+        "databasePath": "string",
+        "description": "string",
+        "id": "string",
+        "lifecycle": "string",
+        "name": "string",
+        "sourcePaths": "[]",
+        "version": "number"
+      }
+    }
+  },
+  "projects.missing": {
+    "status": 404,
+    "code": "PROJECT_NOT_FOUND",
+    "shape": {
+      "error": {
+        "code": "string",
+        "details": {
+          "candidates": {
+            "[]": {
+              "code": "string",
+              "name": "string"
+            }
+          },
+          "did_you_mean": "null",
+          "entity": "string",
+          "reference": "string"
+        },
+        "message": "string",
+        "retryable": "boolean"
+      },
+      "request_id": "string"
+    }
+  },
+  "overview": {
+    "status": 200,
+    "shape": {
+      "lastBackup": {
+        "actor": "string",
+        "at": "string",
+        "detail": "string",
+        "key": "string",
+        "payload_json": "string",
+        "project": {
+          "code": "string",
+          "id": "string",
+          "name": "string"
+        },
+        "projectCode": "string",
+        "projectName": "string",
+        "seq": "number",
+        "sequence": "number",
+        "summary": "string",
+        "title": "string",
+        "type": "string"
+      },
+      "projectionFailures": "[]",
+      "projectionSummary": {
+        "appliedCount": "number",
+        "deferredCount": "number",
+        "lagging": "number",
+        "maxLag": "number",
+        "missingCount": "number",
+        "retryScheduledCount": "number",
+        "status": "string",
+        "total": "number",
+        "totalLag": "number"
+      },
+      "projects": {
+        "[]": {
+          "active_agent_count": "number",
+          "active_count": "number",
+          "blocked_count": "number",
+          "code": "string",
+          "current_milestone": "null",
+          "current_objective": "string",
+          "health": "string",
+          "id": "string",
+          "last_activity_at": "string",
+          "last_project_update_at": "string",
+          "lifecycle": "string",
+          "name": "string",
+          "next_target_date": "null",
+          "overdue_count": "number",
+          "progress": "number",
+          "progress_source": "string",
+          "project_sequence": "number",
+          "projection": {
+            "lag": "number",
+            "lastError": "null",
+            "project": {
+              "code": "string",
+              "id": "string",
+              "lifecycle": "string",
+              "name": "string"
+            },
+            "projectedSeq": "number",
+            "retryCount": "number",
+            "retryScheduled": "boolean",
+            "sourceSeq": "number",
+            "status": "string",
+            "updatedAt": "string"
+          },
+          "ready_count": "number",
+          "stale_claim_count": "number",
+          "waiting_agent_count": "number",
+          "waiting_user_count": "number"
+        }
+      },
+      "quick": {
+        "blocked": "number",
+        "open": "number",
+        "total": "number"
+      },
+      "recentEvents": {
+        "[]": {
+          "actor": "string",
+          "at": "string",
+          "detail": "string",
+          "key": "string",
+          "payload_json": "string",
+          "project": {
+            "code": "string",
+            "id": "string",
+            "name": "string"
+          },
+          "projectCode": "string",
+          "projectName": "string",
+          "seq": "number",
+          "sequence": "number",
+          "summary": "string",
+          "title": "string",
+          "type": "string"
+        }
+      },
+      "sequence": "number"
+    }
+  },
+  "status": {
+    "status": 200,
+    "shape": {
+      "at": "string",
+      "ok": "boolean",
+      "projectCount": "number",
+      "projectCounts": {
+        "ACTIVE": {
+          "failed": "number",
+          "total": "number"
+        },
+        "TRASHED": {
+          "failed": "number",
+          "total": "number"
+        }
+      },
+      "projectFailures": "[]",
+      "projectionFailures": "[]",
+      "projectionSummary": {
+        "appliedCount": "number",
+        "deferredCount": "number",
+        "lagging": "number",
+        "maxLag": "number",
+        "missingCount": "number",
+        "retryScheduledCount": "number",
+        "status": "string",
+        "total": "number",
+        "totalLag": "number"
+      },
+      "sqlite": {
+        "fts5": "boolean",
+        "ok": "boolean",
+        "sqliteVersion": "string",
+        "trigram": "boolean",
+        "wal": "boolean"
+      },
+      "startedAt": "string",
+      "version": "string"
+    }
+  }
+}

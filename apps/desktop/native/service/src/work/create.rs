@@ -489,9 +489,10 @@ pub(crate) fn run(
     }
     w.finish()?;
 
+    // 2.0 的回执 items 是 hydrated 的任务（与界面列表同形，06 T-COMPAT）。
     let views = planned
         .iter()
-        .map(|p| w.view(&p.id))
+        .map(|p| crate::ui::hydrated(w.tx, &w.project, &w.code, &p.id))
         .collect::<Result<Vec<_>, _>>()?;
     let refs_map: serde_json::Map<String, Value> = refs
         .iter()

@@ -436,7 +436,7 @@ fn snapshot(cx: &Ctx<'_>, session: Option<&str>) -> Result<Map<String, Value>, D
 
     let records: Vec<Value> = tx
         .prepare_cached(
-            "SELECT local_no, kind, summary, importance, source_type FROM records
+            "SELECT local_no, kind, summary, importance, source_type, source_actor_id, source_session_id, source_ref FROM records
              WHERE project_id = ?1 AND status = 'ACTIVE' AND scope NOT IN ('ATM_FEEDBACK')
                AND ((kind = 'CONSTRAINT' AND source_type = 'USER')
                  OR (kind IN ('DECISION','CONSTRAINT','FACT','RISK') AND importance IN ('HIGH','CRITICAL')))
@@ -453,6 +453,10 @@ fn snapshot(cx: &Ctx<'_>, session: Option<&str>) -> Result<Map<String, Value>, D
                 "summary": r.get::<_, String>(2)?,
                 "importance": r.get::<_, String>(3)?,
                 "source_type": r.get::<_, String>(4)?,
+                // Agent 的 brief 在预算时去掉这三项（record_view）；界面的 2.0 brief 原样带着。
+                "source_actor_id": r.get::<_, Option<String>>(5)?,
+                "source_session_id": r.get::<_, Option<String>>(6)?,
+                "source_ref": r.get::<_, Option<String>>(7)?,
             }))
         })
         .map_err(db)?
@@ -1052,6 +1056,29 @@ fn resolve(
 
 impl Service {
     /// atm_brief（S-050～S-059）。
+    /// 界面的 brief（`GET /projects/:code/brief`，#41 的界面形状）：2.0 的整份快照，不分预算、不分段。
+    /// 与 Agent 的 brief 同一份快照；3.0 给 Agent 加的 `ready`、`open`、`nextTitles` 与记录 `key` 不在 2.0 里。
+    pub fn ui_brief(
+        &self,
+        principal: &Principal,
+        project: &str,
+        session: Option<&str>,
+    ) -> Result<Value, DomainError> {
+        self.read_project(principal, Capability::ProjectRead, project, |cx| {
+            let session = session.map(str::trim).filter(|s| !s.is_empty());
+            let mut m = snapshot(cx, session)?;
+            for k in ["ready", "open", "nextTitles"] {
+                m.remove(k);
+            }
+            if let Some(Value::Array(records)) = m.get_mut("records") {
+                for r in records.iter_mut().filter_map(Value::as_object_mut) {
+                    r.remove("key");
+                }
+            }
+            Ok(Value::Object(m))
+        })
+    }
+
     pub fn brief(
         &self,
         principal: &Principal,

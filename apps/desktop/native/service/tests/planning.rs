@@ -176,18 +176,18 @@ fn work_plan_milestones() {
         .unwrap();
     let id = r.result["id"].as_str().unwrap().to_owned();
     assert_eq!(
-        (
-            r.result["objectiveId"].clone(),
-            r.result["title"].clone(),
-            r.result["localNo"].clone()
-        ),
-        (json!("O1"), json!("第二阶段"), json!(3))
+        (r.result["title"].clone(), r.result["localNo"].clone()),
+        (json!("第二阶段"), json!(3))
+    );
+    assert!(
+        r.result.get("objectiveId").is_none(),
+        "2.x 的回执不带 objectiveId"
     );
     assert_eq!(
         w.scalar(&format!(
-            "SELECT sort_key || ':' || target_date FROM milestones WHERE id = '{id}'"
+            "SELECT objective_id || ':' || sort_key || ':' || target_date FROM milestones WHERE id = '{id}'"
         )),
-        "2000:2026-12-31"
+        "O1:2000:2026-12-31"
     );
     let again = w
         .svc
