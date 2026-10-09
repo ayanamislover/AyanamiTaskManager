@@ -545,6 +545,11 @@ mod tests {
             assert_eq!(js_string_number(input), expected, "{input:?}");
         }
         for (input, expected) in [
+            // 2.x 原样转来的字符串值走的是这一支（peer W5 r1 P1-01 的 `"20"`）。
+            (json!("20"), Some(20.0)),
+            (json!(" 3.9 "), Some(3.9)),
+            (json!(""), Some(0.0)),
+            (json!("x"), nan),
             (json!(true), Some(1.0)),
             (json!(false), Some(0.0)),
             (json!(null), Some(0.0)),
