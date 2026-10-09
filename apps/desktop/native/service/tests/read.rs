@@ -170,6 +170,12 @@ fn s052_c10_include_and_sections() {
     // next 最多 3 个 ready 任务，按优先级、sort_key、创建顺序。
     let b = brief(&w, BriefRequest::default());
     assert_eq!(b["next"], json!([k, more[0], more[1]]));
+    // U-1：next 里的任务带标题，计数里有 READY 与未完成的总数，冷启动的 Agent 不必再 task_list。
+    assert_eq!(
+        b["nextTitles"],
+        json!({k.as_str(): "一", more[0].as_str(): "任务2", more[1].as_str(): "任务3"})
+    );
+    assert_eq!((b["ready"].clone(), b["open"].clone()), (json!(4), json!(4)));
     let b = brief(
         &w,
         BriefRequest {
@@ -186,6 +192,8 @@ fn s052_c10_include_and_sections() {
             "blocked",
             "waitingUser",
             "waitingAgent",
+            "ready",
+            "open",
             "truncated"
         ]
     );

@@ -13,6 +13,7 @@
 
 - **可以省略**：begin 之后的写操作省略 `project` 与 `op_id`；Claude Code、Codex 还可以省略 `session`，其他客户端带上 begin 返回的 `session`。本会话持有的任务不需要 `expected_version`，只有 `edit`、`cancel`、`reopen` 和别人的任务需要。
 - **出错时**：照错误里的 `fix` 执行（见附录「错误信封」）。`fix.call` 是参数已经补齐的完整调用，可以原样执行。
+- **读 brief**：`next` 与 `nextTitles` 是可以开工的任务及标题，`ready`、`open` 是 READY 与未完成的任务数，`own` 是你已经领取的任务（直接写，不用再 `start`）。
 - **上下文压缩后**：调无参的 `atm_brief()`，不要重新 begin。
 - **子代理、复核**：`atm_begin(role: "SUBAGENT" | "REVIEWER")` 开自己的会话，之后显式传 `session`；它们不会顶替主会话。
 

@@ -20,7 +20,7 @@
 
 ### `core`
 
-> MCP surface v6 · core。ATM 是本机任务账本。流程：atm_begin(agent_id, cwd) 只调一次，直接用返回的 brief → atm_task_patch(task_key, operation:"start") → 干活 → atm_task_patch(task_key, operation:"complete", note, evidence) → atm_end(summary)。在仓库里首次使用时 begin 加 allow_project_create:true。begin 之后写操作可以省略 project 和 op_id；Claude Code、Codex 还可以省略 session，其他客户端带上 begin 返回的 session。子代理和复核会话用 role 开自己的会话并显式传 session。只有 edit、cancel、reopen 和别人的任务需要 expected_version。出错时照 error.fix 执行。上下文压缩后调无参的 atm_brief()，不要重新 begin。
+> MCP surface v6 · core。ATM 是本机任务账本。流程：atm_begin(agent_id, cwd) 只调一次，直接用返回的 brief（next 与 nextTitles 是可以开工的任务及标题，own 是你已领取的任务，直接写、不用再 start）→ atm_task_patch(task_key, operation:"start") → 干活 → atm_task_patch(task_key, operation:"complete", note, evidence) → atm_end(summary)。在仓库里首次使用时 begin 加 allow_project_create:true。begin 之后写操作可以省略 project 和 op_id；Claude Code、Codex 还可以省略 session，其他客户端带上 begin 返回的 session。子代理和复核会话用 role 开自己的会话并显式传 session。只有 edit、cancel、reopen 和别人的任务需要 expected_version。出错时照 error.fix 执行。上下文压缩后调无参的 atm_brief()，不要重新 begin。
 
 ### `memory`
 

@@ -26,10 +26,17 @@ const SECTIONS: [(&str, &[&str]); 11] = [
     ("objective", &["objective", "milestone"]),
     (
         "counts",
-        &["active", "blocked", "waitingUser", "waitingAgent"],
+        &[
+            "active",
+            "blocked",
+            "waitingUser",
+            "waitingAgent",
+            "ready",
+            "open",
+        ],
     ),
     ("own", &["own"]),
-    ("next", &["next"]),
+    ("next", &["next", "nextTitles"]),
     ("records", &["records"]),
     ("current", &["currentTask"]),
     ("handoff", &["handoff"]),
@@ -288,28 +295,41 @@ fn snapshot(cx: &Ctx<'_>, session: Option<&str>) -> Result<Map<String, Value>, D
             .map_err(db)?,
         None => None,
     };
-    let counts: (i64, i64, i64, i64) = tx
+    // U-1：冷启动的 Agent 要回答「还有几个没做完」、按标题找到要做的任务，原来只能再调一次 task_list。
+    // 计数加上 ready 与 open（未终态），next 里的任务另给标题（nextTitles，key → 标题）。
+    let counts: (i64, i64, i64, i64, i64, i64) = tx
         .query_row(
             "SELECT COALESCE(SUM(status IN ('CLAIMED','IN_PROGRESS','VERIFYING')), 0),
                     COALESCE(SUM(status = 'BLOCKED'), 0), COALESCE(SUM(status = 'WAITING_USER'), 0),
-                    COALESCE(SUM(status = 'WAITING_AGENT'), 0)
+                    COALESCE(SUM(status = 'WAITING_AGENT'), 0), COALESCE(SUM(status = 'READY'), 0),
+                    COALESCE(SUM(status NOT IN ('DONE','CANCELLED')), 0)
              FROM work_items WHERE project_id = ?1",
             [pid],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .map_err(db)?;
-    let ready: Vec<String> = tx
+    let ready_titled: Vec<(String, String)> = tx
         .prepare_cached(&format!(
-            "SELECT w.local_no FROM work_items w WHERE w.project_id = ?1 AND {READY_SQL}
+            "SELECT w.local_no, w.title FROM work_items w WHERE w.project_id = ?1 AND {READY_SQL}
              ORDER BY CASE w.priority WHEN 'CRITICAL' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'NORMAL' THEN 2 ELSE 3 END,
                       w.sort_key, w.created_at, w.local_no LIMIT 3"
         ))
         .map_err(db)?
-        .query_map([pid], |r| r.get::<_, i64>(0))
+        .query_map([pid], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
         .map_err(db)?
-        .map(|n| n.map(|n| views::task_key(cx, n)))
+        .map(|n| n.map(|(n, title)| (views::task_key(cx, n), title)))
         .collect::<rusqlite::Result<_>>()
         .map_err(db)?;
+    let ready: Vec<String> = ready_titled.iter().map(|(k, _)| k.clone()).collect();
 
     let who = match session {
         Some(s) => Some(who(cx, s)?),
@@ -494,6 +514,11 @@ fn snapshot(cx: &Ctx<'_>, session: Option<&str>) -> Result<Map<String, Value>, D
         }
     }
     next.truncate(3);
+    let next_titles: Map<String, Value> = ready_titled
+        .into_iter()
+        .filter(|(k, _)| next.contains(k))
+        .map(|(k, title)| (k, json!(title)))
+        .collect();
 
     let mut m = Map::new();
     m.insert("truncated".into(), json!(false));
@@ -505,8 +530,11 @@ fn snapshot(cx: &Ctx<'_>, session: Option<&str>) -> Result<Map<String, Value>, D
     m.insert("blocked".into(), json!(counts.1));
     m.insert("waitingUser".into(), json!(counts.2));
     m.insert("waitingAgent".into(), json!(counts.3));
+    m.insert("ready".into(), json!(counts.4));
+    m.insert("open".into(), json!(counts.5));
     m.insert("own".into(), json!(own));
     m.insert("next".into(), json!(next));
+    m.insert("nextTitles".into(), Value::Object(next_titles));
     m.insert("records".into(), Value::Array(records));
     m.insert("currentTask".into(), current_task);
     m.insert("handoff".into(), handoff.unwrap_or(Value::Null));
