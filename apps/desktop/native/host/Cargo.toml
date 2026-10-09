@@ -22,6 +22,8 @@ atm-domain = { path = "../domain" }
 atm-install-state = { path = "../install-state" }
 # W5a：服务在宿主进程里（不再拉起 Node core）。
 atm-runtime = { path = "../runtime" }
+# W5e：WebView 的界面请求在进程内分发。
+atm-ui-bridge = { path = "../ui-bridge" }
 serde.workspace = true
 serde_json.workspace = true
 tao = "0.35"

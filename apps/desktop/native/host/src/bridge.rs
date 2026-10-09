@@ -15,7 +15,6 @@ pub enum Local {
     NotifyRendererReady,
     GetAutoLaunch,
     SetAutoLaunch,
-    ShowItemInFolder,
     CopyText,
     MinimizeWindow,
     ToggleMaximizeWindow,
@@ -35,7 +34,6 @@ fn method(name: &str) -> Option<Method> {
         "notifyRendererReady" => Method::Local(Local::NotifyRendererReady),
         "getAutoLaunch" => Method::Local(Local::GetAutoLaunch),
         "setAutoLaunch" => Method::Local(Local::SetAutoLaunch),
-        "showItemInFolder" => Method::Local(Local::ShowItemInFolder),
         "copyText" => Method::Local(Local::CopyText),
         "minimizeWindow" => Method::Local(Local::MinimizeWindow),
         "toggleMaximizeWindow" => Method::Local(Local::ToggleMaximizeWindow),
@@ -74,7 +72,7 @@ pub enum Rejected {
 
 fn arity(method: &Method) -> usize {
     match method {
-        Method::Local(Local::SetAutoLaunch | Local::ShowItemInFolder | Local::CopyText) => 1,
+        Method::Local(Local::SetAutoLaunch | Local::CopyText) => 1,
         Method::Core("runtimeRequest" | "setMemoryProfile" | "installMcp") => 1,
         Method::Core("manageAgentIntegration") => 2,
         _ => 0,
@@ -88,9 +86,6 @@ fn arguments_valid(method: &Method, args: &[Value]) -> bool {
     }
     match method {
         Method::Local(Local::SetAutoLaunch) => args[0].is_boolean(),
-        Method::Local(Local::ShowItemInFolder) => {
-            args[0].as_str().is_some_and(|path| path.len() <= 4096)
-        }
         Method::Local(Local::CopyText) => {
             args[0].as_str().is_some_and(|text| text.len() <= 1 << 20)
         }
@@ -201,7 +196,6 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     getUpdateStatus: () => call("getUpdateStatus", []),
     checkForUpdates: () => call("checkForUpdates", []),
     applyUpdate: () => call("applyUpdate", []),
-    showItemInFolder: (path) => call("showItemInFolder", [path]),
     getMcpConfigs: () => call("getMcpConfigs", []),
     getMcpBridges: () => call("getMcpBridges", []),
     getMemoryProfile: () => call("getMemoryProfile", []),

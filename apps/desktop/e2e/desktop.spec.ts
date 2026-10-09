@@ -2008,7 +2008,6 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
           version: "9.0.1",
         }),
         copyText: async () => true,
-        showItemInFolder: async () => undefined,
         minimizeWindow: async () => undefined,
         toggleMaximizeWindow: async () => false,
         isWindowMaximized: async () => false,

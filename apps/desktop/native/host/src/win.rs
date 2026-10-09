@@ -4,7 +4,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::process::Command;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GlobalFree, HANDLE};
@@ -116,22 +115,6 @@ pub fn set_clipboard_text(text: &str) -> bool {
         CloseClipboard();
         ok
     }
-}
-
-/// `explorer /select,<path>` for an existing absolute path; anything else is ignored.
-pub fn show_item_in_folder(path: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    let candidate = Path::new(path);
-    if !candidate.is_absolute() || path.len() > 4096 || path.contains('"') || !candidate.exists() {
-        return false;
-    }
-    let explorer = std::env::var_os("SystemRoot")
-        .map(|root| Path::new(&root).join("explorer.exe"))
-        .unwrap_or_else(|| "explorer.exe".into());
-    Command::new(explorer)
-        .raw_arg(format!("/select,\"{path}\""))
-        .spawn()
-        .is_ok()
 }
 
 struct Key(HKEY);

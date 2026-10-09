@@ -2,9 +2,11 @@
 //! in-process ATM 3 service (W5a; de-electron §4, §5, §8 for the window and the bridge).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use atm_runtime::{Background, BootError, Conflicted, Handoff, Serving, Started};
+use atm_ui_bridge::{Reply, Ui};
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
@@ -34,6 +36,8 @@ const BOOT_RETRY_LIMIT: usize = 5;
 /// The 2.x service has not quiesced yet: look again this often (not counted as a failure).
 const LEGACY_RECHECK: Duration = Duration::from_secs(5);
 const MAX_QUEUED_CALLS: usize = 256;
+/// 同时在途的界面请求（W5e）：超过就回 SERVICE_BUSY，不排队（一个失控的渲染端占不满入口的工作线程）。
+const MAX_UI_IN_FLIGHT: usize = 64;
 const LIGHT_BACKGROUND: (u8, u8, u8, u8) = (0xFB, 0xF7, 0xFF, 0xFF);
 const DARK_BACKGROUND: (u8, u8, u8, u8) = (0x24, 0x1E, 0x30, 0xFF);
 
@@ -57,12 +61,21 @@ pub enum UserEvent {
     Menu(MenuEvent),
     StartupDelayElapsed,
     RetryService,
+    /// 一次界面请求在工作线程上分发完了。投递前再核对 `(generation, epoch)`（03 U4）。
+    UiReply {
+        generation: u64,
+        epoch: u64,
+        js_id: u64,
+        reply: Option<Reply>,
+    },
 }
 
 struct QueuedCall {
     generation: u64,
     epoch: u64,
     js_id: u64,
+    method: Method,
+    args: Vec<Value>,
 }
 
 /// Where the in-process service is.
@@ -100,6 +113,9 @@ pub struct App {
     /// The last reason the 2.x service was waited for, logged once per change.
     legacy_wait: Option<String>,
     queued: Vec<QueuedCall>,
+    /// 进程内的界面 API（W5e），服务开始服务后第一次界面请求时建好。
+    ui: Option<Arc<Ui>>,
+    ui_in_flight: usize,
 
     web_context: WebContext,
     window: Option<Window>,
@@ -280,6 +296,8 @@ pub fn run(
         boot_failures: Vec::new(),
         legacy_wait: None,
         queued: Vec::new(),
+        ui: None,
+        ui_in_flight: 0,
         web_context,
         window: None,
         webview: None,
@@ -475,13 +493,17 @@ impl App {
             Background::Unchanged => {}
             // The runtime already withdrew every entry before writing the startup state; the
             // admission stays held (the user chooses the source, W6).
-            Background::Conflict(state) => crate::log(
-                &self.layout.v3_root,
-                &format!(
-                    "SOURCE_CONFLICT after the background comparison: {}",
-                    state.reason
-                ),
-            ),
+            Background::Conflict(state) => {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!(
+                        "SOURCE_CONFLICT after the background comparison: {}",
+                        state.reason
+                    ),
+                );
+                // 入口已经撤下：界面也不再分发（`Serving::service` 从此是 None），缓存的分发器一并丢掉。
+                self.ui = None;
+            }
             Background::Failed(error) => crate::log(
                 &self.layout.v3_root,
                 &format!("background comparison: {error}"),
@@ -494,6 +516,12 @@ impl App {
             UserEvent::StartupDelayElapsed | UserEvent::RetryService => self.start_service(),
             UserEvent::Booted(attempt, booted) => self.on_booted(attempt, booted),
             UserEvent::Background(outcome) => self.on_background(outcome),
+            UserEvent::UiReply {
+                generation,
+                epoch,
+                js_id,
+                reply,
+            } => self.on_ui_reply(generation, epoch, js_id, reply),
             UserEvent::Second(command) => self.on_second_instance(command, target),
             UserEvent::Ipc {
                 generation,
@@ -568,26 +596,153 @@ impl App {
     }
 
     /// What a renderer call that needs the service gets while the service cannot take it.
-    /// `None`: still starting, keep it queued.
+    /// `None`: still starting (keep it queued) or serving. Serving but withdrawn (a background
+    /// comparison found a source conflict) answers like a conflict: the entries are closed.
     fn unavailable(&self) -> Option<(&'static str, &'static str)> {
-        match self.service {
+        match &self.service {
             Service::Idle | Service::Booting | Service::Retrying => None,
             Service::Conflict { .. } => Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源")),
             Service::Unavailable => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
-            // The in-process UI dispatch arrives with the ui-bridge (W5e).
-            Service::Serving(_) => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
+            Service::Serving(serving) if serving.service().is_none() => {
+                Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源"))
+            }
+            Service::Serving(_) => None,
         }
     }
 
+    /// The service settled (serving, conflict or given up): answer what waited for it.
     fn answer_queued(&mut self) {
-        let Some((code, message)) = self.unavailable() else {
+        let serving = matches!(self.service, Service::Serving(_));
+        if !serving && self.unavailable().is_none() {
             return;
-        };
+        }
         let queued = std::mem::take(&mut self.queued);
         for call in queued {
             if call.generation == self.generation && call.epoch == self.epoch {
-                self.deliver(&bridge::error(call.js_id, code, message));
+                self.on_core(call.js_id, &call.method, call.args);
             }
+        }
+    }
+
+    /// 要服务的宿主方法。`runtimeRequest` 进 ui-bridge（W5e）；其余在各自的阶段接上之前回明确的「不可用」，
+    /// 界面按出错显示，不会等不到回答：更新（W5g）、Agent 接入与 MCP 观测（W6，atm-agents）。
+    fn on_core(&mut self, id: u64, method: &Method, args: Vec<Value>) {
+        if let Some((code, message)) = self.unavailable() {
+            self.deliver(&bridge::error(id, code, message));
+            return;
+        }
+        if !matches!(self.service, Service::Serving(_)) {
+            if self.queued.len() < MAX_QUEUED_CALLS {
+                self.queued.push(QueuedCall {
+                    generation: self.generation,
+                    epoch: self.epoch,
+                    js_id: id,
+                    method: method.clone(),
+                    args,
+                });
+            } else {
+                self.deliver(&bridge::error(id, "SERVICE_BUSY", "服务尚未就绪"));
+            }
+            return;
+        }
+        match method {
+            Method::Core("runtimeRequest") => self.dispatch_ui(id, &args[0]),
+            // 还没有更新状态（更新协调在 W5g）：与 2.0「没有状态」同一个回答。
+            Method::Core("getUpdateStatus") => self.deliver(&bridge::ok(id, Value::Null)),
+            Method::Core("checkForUpdates" | "applyUpdate") => self.deliver(&bridge::error(
+                id,
+                "UPDATE_UNAVAILABLE",
+                "更新功能在这个版本里还不可用",
+            )),
+            _ => self.deliver(&bridge::error(
+                id,
+                "AGENTS_UNAVAILABLE",
+                "Agent 接入管理在这个版本里还不可用",
+            )),
+        }
+    }
+
+    /// 界面请求在入口的 tokio 运行时上分发（`spawn_blocking`，与 Agent 入口共用工作线程），主体是这一代
+    /// WebView 的 User（`webview(generation, epoch)`）。结果经事件循环交回，投递前再核对代次。
+    fn dispatch_ui(&mut self, id: u64, input: &Value) {
+        let Service::Serving(serving) = &self.service else {
+            return;
+        };
+        let Some((svc, handle)) = serving.service() else {
+            self.deliver(&bridge::error(
+                id,
+                "SOURCE_CONFLICT",
+                "数据源冲突，需要先选择数据源",
+            ));
+            return;
+        };
+        let call = match crate::ui_api::parse(input) {
+            Ok(call) => call,
+            Err(code) => {
+                self.deliver(&bridge::error(id, code, "界面请求不合格"));
+                return;
+            }
+        };
+        if self.ui_in_flight >= MAX_UI_IN_FLIGHT {
+            self.deliver(&bridge::error(id, "SERVICE_BUSY", "界面请求太多，稍后再试"));
+            return;
+        }
+        let version = self.version.clone();
+        let ui = self
+            .ui
+            .get_or_insert_with(|| {
+                let started_at =
+                    atm_install_state::startup::iso_utc(crate::health::process_started_at_ms());
+                let runtime: atm_ui_bridge::RuntimeStatus =
+                    Arc::new(move || json!({ "version": version }));
+                Arc::new(Ui::new(svc, runtime, started_at))
+            })
+            .clone();
+        self.ui_in_flight += 1;
+        let principal = atm_ui_bridge::webview(self.generation, self.epoch);
+        let mut reply = PendingReply {
+            proxy: self.proxy.clone(),
+            generation: self.generation,
+            epoch: self.epoch,
+            js_id: id,
+            sent: false,
+        };
+        // 运行时已经关闭时任务不会执行：PendingReply 在丢弃时照样交回一个「不可用」，计数与渲染端都不会悬着。
+        drop(handle.spawn_blocking(move || {
+            #[cfg(feature = "smoke")]
+            if let Some((hold, marker)) = crate::ui_api::smoke_hold(&call.target) {
+                std::thread::sleep(hold);
+                reply.send(Some(Reply {
+                    status: 200,
+                    body: json!({ "held": marker }),
+                }));
+                return;
+            }
+            let answer = ui.dispatch(
+                &principal,
+                atm_ui_bridge::Request {
+                    method: &call.method,
+                    target: &call.target,
+                    body: call.body.as_deref(),
+                },
+            );
+            reply.send(Some(answer));
+        }));
+    }
+
+    fn on_ui_reply(&mut self, generation: u64, epoch: u64, js_id: u64, reply: Option<Reply>) {
+        self.ui_in_flight = self.ui_in_flight.saturating_sub(1);
+        // 应答只交给发出请求的那一代页面（03 U4、P-013）：窗口关过、页面重新加载过，就丢掉。
+        if generation != self.generation || epoch != self.epoch {
+            return;
+        }
+        match reply {
+            Some(reply) => self.deliver(&bridge::ok(js_id, crate::ui_api::response(&reply))),
+            None => self.deliver(&bridge::error(
+                js_id,
+                "SERVICE_UNAVAILABLE",
+                "服务暂时不可用",
+            )),
         }
     }
 
@@ -617,19 +772,7 @@ impl App {
         let Call { id, method, args } = call;
         match method {
             Method::Local(local) => self.on_local(id, local, &args),
-            Method::Core(_) => {
-                if let Some((code, message)) = self.unavailable() {
-                    self.deliver(&bridge::error(id, code, message));
-                } else if self.queued.len() < MAX_QUEUED_CALLS {
-                    self.queued.push(QueuedCall {
-                        generation: self.generation,
-                        epoch: self.epoch,
-                        js_id: id,
-                    });
-                } else {
-                    self.deliver(&bridge::error(id, "SERVICE_BUSY", "服务尚未就绪"));
-                }
-            }
+            core @ Method::Core(_) => self.on_core(id, &core, args),
         }
     }
 
@@ -646,10 +789,6 @@ impl App {
                 let enabled = args[0].as_bool().unwrap_or(false);
                 win::set_autostart(&self.autostart_target, enabled);
                 json!(win::autostart_enabled(&self.autostart_target))
-            }
-            Local::ShowItemInFolder => {
-                win::show_item_in_folder(args[0].as_str().unwrap_or_default());
-                Value::Null
             }
             Local::CopyText => json!(win::set_clipboard_text(
                 args[0].as_str().unwrap_or_default()
@@ -908,5 +1047,34 @@ impl App {
             serving.stop(&move |e| crate::log(&log_root, &format!("runtime: {e:?}")));
         }
         crate::log(&self.layout.v3_root, "host quit");
+    }
+}
+
+/// 一次分发的回执：任务执行完就带结果交回；没执行就被丢掉（运行时关了）时交回 `None`。
+struct PendingReply {
+    proxy: EventLoopProxy<UserEvent>,
+    generation: u64,
+    epoch: u64,
+    js_id: u64,
+    sent: bool,
+}
+
+impl PendingReply {
+    fn send(&mut self, reply: Option<Reply>) {
+        self.sent = true;
+        let _ = self.proxy.send_event(UserEvent::UiReply {
+            generation: self.generation,
+            epoch: self.epoch,
+            js_id: self.js_id,
+            reply,
+        });
+    }
+}
+
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.send(None);
+        }
     }
 }

@@ -23,6 +23,7 @@ mod service;
 mod session_end;
 mod single_instance;
 mod tray;
+mod ui_api;
 // Installing an update comes back with the update coordinator (W5g).
 #[allow(dead_code)]
 mod update;
