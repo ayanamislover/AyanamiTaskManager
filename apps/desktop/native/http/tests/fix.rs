@@ -326,6 +326,18 @@ fn u3_guesses_succeed_directly_or_after_one_fix() {
         .collect();
     // 参数名猜法：key、content、details、work_item_key；枚举大小写。
     guess(&w, "atm_task_get", json!({"project": w.project, "key": a}));
+    // 展示上限猜大了：fix.call 是夹到上限的同一调用。
+    let found = guess(
+        &w,
+        "atm_search",
+        json!({"project": w.project, "list": "records", "limit": 50}),
+    );
+    assert!(found.is_object(), "{found}");
+    guess(
+        &w,
+        "atm_task_get",
+        json!({"project": w.project, "task_key": a, "last_progress": 99}),
+    );
     guess(
         &w,
         "atm_progress_add",

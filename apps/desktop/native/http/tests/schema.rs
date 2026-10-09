@@ -150,6 +150,30 @@ fn guesses_get_did_you_mean_and_a_corrected_call() {
     assert_eq!(r.corrected, None);
 }
 
+/// 有界数值越界时夹到边界（U-3）；没有上限的不猜。
+#[test]
+fn bounded_numbers_are_clamped_and_unbounded_ones_are_not() {
+    // 有界的数值越界：夹到边界，可以自动更正（fix.call 就是夹过的同一调用）。
+    let r = TOOL
+        .validate(&json!({"task_key": "A", "operation": "start", "limit": 500}))
+        .unwrap_err();
+    assert_eq!(r.problems[0].did_you_mean.as_deref(), Some("100"));
+    assert_eq!(r.corrected.unwrap()["limit"], json!(100));
+    let r = TOOL
+        .validate(&json!({"task_key": "A", "operation": "start", "limit": 0}))
+        .unwrap_err();
+    assert_eq!(r.corrected.unwrap()["limit"], json!(1));
+    // 没有上限的（版本号）不猜：负数照样拒绝，不给更正。
+    let r = atm_http::tools::TASK_PATCH
+        .validate(
+            &json!({"task_key": "A", "operation": "edit", "expected_version": -1, "title": "x"}),
+        )
+        .unwrap_err();
+    assert_eq!(r.problems[0].problem, ProblemKind::Pattern);
+    assert_eq!(r.problems[0].did_you_mean, None);
+    assert_eq!(r.corrected, None);
+}
+
 /// 上限、类型、嵌套路径。
 #[test]
 fn limits_types_and_nested_paths() {

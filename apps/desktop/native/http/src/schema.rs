@@ -486,6 +486,17 @@ impl Validation {
                     _ => None,
                 };
                 match n {
+                    // 有界的参数（limit、max_chars、last_progress 这类展示上限）越界时夹到边界，
+                    // fix.call 就是夹过的同一调用（U-3）。没有上限的（版本号）不猜：夹出来的值会误导。
+                    Some(n) if (n < *min || n > *max) && *max != i64::MAX => {
+                        let clamped = n.clamp(*min, *max);
+                        let mut p = Problem::new(path, ProblemKind::Pattern)
+                            .got(value.clone())
+                            .allowed(format!("{min}..={max}"));
+                        p.did_you_mean = Some(clamped.to_string());
+                        self.fail(p, true);
+                        json!(clamped)
+                    }
                     Some(n) if n < *min || n > *max => {
                         self.fail(
                             Problem::new(path, ProblemKind::Pattern)
@@ -506,14 +517,15 @@ impl Validation {
                     _ => None,
                 };
                 match n {
+                    // 同上：percent 这类有界数值越界时夹到边界。
                     Some(n) if n < *min || n > *max => {
-                        self.fail(
-                            Problem::new(path, ProblemKind::Pattern)
-                                .got(value.clone())
-                                .allowed(format!("{min}..={max}")),
-                            false,
-                        );
-                        value.clone()
+                        let clamped = n.clamp(*min, *max);
+                        let mut p = Problem::new(path, ProblemKind::Pattern)
+                            .got(value.clone())
+                            .allowed(format!("{min}..={max}"));
+                        p.did_you_mean = Some(clamped.to_string());
+                        self.fail(p, true);
+                        json!(clamped)
                     }
                     Some(n) => json!(n),
                     None => mismatch(self, "number"),
