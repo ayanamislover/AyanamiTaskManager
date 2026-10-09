@@ -1171,3 +1171,48 @@ fn observers_wake_on_each_finished_job_and_on_shutdown() {
         None
     );
 }
+
+#[test]
+fn the_watchdog_sees_the_running_job_and_its_budget() {
+    let store = Arc::new(Store::open(&db_path("current-job"), fast()).unwrap());
+    assert_eq!(store.current_job(), None);
+    let (entered, inside) = channel();
+    let (release, gate) = channel::<()>();
+    let ticket = store
+        .submit_with(Duration::from_secs(7), move |_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(Duration::from_secs(20)).unwrap();
+            Ok::<(), ()>(())
+        })
+        .map_err(|_| "not admitted")
+        .unwrap();
+    inside.recv_timeout(Duration::from_secs(10)).unwrap();
+    thread::sleep(MS(150));
+    let (elapsed, budget) = store.current_job().expect("a job is running");
+    assert_eq!(budget, Duration::from_secs(7));
+    assert!(
+        elapsed >= MS(150) && elapsed < Duration::from_secs(10),
+        "{elapsed:?}"
+    );
+    release.send(()).unwrap();
+    assert!(ticket.wait().is_ok());
+    assert_eq!(store.current_job(), None);
+    // 默认预算的作业报默认预算。
+    let (entered, inside) = channel();
+    let (release, gate) = channel::<()>();
+    let ticket = store
+        .submit(move |_| {
+            entered.send(()).unwrap();
+            gate.recv_timeout(Duration::from_secs(20)).unwrap();
+            Ok::<(), ()>(())
+        })
+        .map_err(|_| "not admitted")
+        .unwrap();
+    inside.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        store.current_job().map(|(_, b)| b),
+        Some(fast().write_budget)
+    );
+    release.send(()).unwrap();
+    assert!(ticket.wait().is_ok());
+}

@@ -14,6 +14,7 @@ mod dpapi;
 mod headless;
 mod health;
 mod identity;
+mod lifecycle;
 mod notify;
 mod paths;
 mod probe;
@@ -22,9 +23,8 @@ mod session_end;
 mod single_instance;
 mod tray;
 mod ui_api;
-// Installing an update comes back with the update coordinator (W5g).
-#[allow(dead_code)]
 mod update;
+mod watchdog;
 mod webview_frames;
 mod win;
 
@@ -44,25 +44,35 @@ const _: () = assert!(
 
 const INSTALLER_WAIT: Duration = Duration::from_secs(60);
 const MAX_HOST_LOG_BYTES: u64 = 512 * 1024;
+const HOST_LOG_FILES: usize = 3;
 
+/// 宿主日志 `<N>\logs\host.log`：一行一条，令牌脱敏（`lifecycle::redact_line`），512 KiB × 3 轮换（W5g）。
 pub fn log(data_dir: &Path, line: &str) {
     let dir = data_dir.join("logs");
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join("host.log");
-    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_HOST_LOG_BYTES) {
-        let _ = fs::rename(&path, dir.join("host.1.log"));
-    }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or_default();
-        let _ = writeln!(
-            file,
-            "{secs} pid={} {}",
-            std::process::id(),
-            line.replace('\n', " ")
-        );
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let text = format!(
+        "{secs} pid={} {}\n",
+        std::process::id(),
+        lifecycle::redact_line(line)
+    );
+    lifecycle::rotate(
+        &dir,
+        "host",
+        "log",
+        text.len() as u64,
+        MAX_HOST_LOG_BYTES,
+        HOST_LOG_FILES,
+    );
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("host.log"))
+    {
+        let _ = file.write_all(text.as_bytes());
     }
 }
 
@@ -298,7 +308,7 @@ fn real_main() -> i32 {
         let command = if parsed.smoke_quit {
             single_instance::Command::SmokeQuit
         } else {
-            command
+            parsed.smoke_command.clone().unwrap_or(command)
         };
         single_instance::send(&layout.data_dir, &command, Duration::from_secs(5));
         return 0;
@@ -307,6 +317,10 @@ fn real_main() -> i32 {
     notify::set_process_identity();
     let version =
         atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
+    // lifecycle（W5g）：只有主实例记；上次没有干净退出就在这里报出来。
+    let lifecycle = lifecycle::install(layout.v3_root.join("logs"), &version);
+    lifecycle::install_panic_hook();
+    lifecycle.start(parsed.background, parsed.agent_wake);
     let target = autostart_target(&layout, &context);
     // setup 拉起（`--txn-start`）：SERVICE_HEALTHY 见证由 runtime 在入口开好之后写。
     let handoff = match &context {

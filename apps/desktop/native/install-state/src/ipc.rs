@@ -54,6 +54,15 @@ pub enum Command {
     Quit,
     #[cfg(feature = "smoke")]
     SmokeQuit,
+    /// lifecycle 冒烟：做一遍 Windows 结束会话时的记录（W5g）。
+    #[cfg(feature = "smoke")]
+    SmokeSessionEnd,
+    /// 看门狗冒烟：让事件循环停住（W5g）。
+    #[cfg(feature = "smoke")]
+    SmokeStallUi,
+    /// 看门狗冒烟：让写线程卡在一个预算很小的作业里（W5g）。
+    #[cfg(feature = "smoke")]
+    SmokeStallWriter,
 }
 
 /// The only routes a second instance may ask for (tray items, deep links of the old app).

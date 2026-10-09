@@ -122,6 +122,8 @@ fn failed(e: impl std::fmt::Display) -> BootError {
 
 /// 托盘计数与系统通知（W5f）：观察器交给宿主的东西。
 pub use atm_jobs::notify::{Notice, Observation, Sink, TrayCounts};
+/// 本地更新的协调（W5g）：宿主持有，与服务的入口无关（冲突、不可用时也能查更新）。
+pub use atm_jobs::update;
 
 /// 后台比较的结论。
 #[derive(Clone, Debug, PartialEq, Eq)]

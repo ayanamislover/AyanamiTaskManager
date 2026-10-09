@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use atm_runtime::update::{self as updates, Coordinator, Schedule};
 use atm_runtime::{Background, BootError, Conflicted, Handoff, Observation, Serving, Started};
 use atm_ui_bridge::{Reply, Ui};
 use serde_json::{Value, json};
@@ -20,10 +21,12 @@ use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtW
 use crate::args::Args;
 use crate::assets;
 use crate::bridge::{self, Call, Local, Method};
+use crate::lifecycle::{self as life, Event as Life};
 use crate::paths::Layout;
 use crate::service::Booted;
 use crate::single_instance::{Command, Primary, Route};
 use crate::tray::{self, Snapshot};
+use crate::watchdog::{self, Probes, Pulse, Watchdog};
 use crate::win;
 
 /// Upper bound for waiting on the renderer's ready signal (window-readiness.ts).
@@ -61,10 +64,23 @@ pub enum UserEvent {
     Menu(MenuEvent),
     StartupDelayElapsed,
     RetryService,
+    /// 看门狗的 ping（W5g）：事件循环处理它就说明事件循环还活着。
+    Ping,
     /// 观察器（W5f）：要弹的通知、托盘计数的变化、或一轮读失败。
     Observed(Observation),
     /// 托盘切换通知方式的写入结束了（成功时观察器会随后推来新的托盘快照）。
     ModeSet(Result<(), String>),
+    /// 待安装的版本变了（W5g）：刷托盘，有了新版本时按通知方式提示。
+    UpdatePending(Option<String>),
+    /// 「立即更新」确认了包：在 UI 线程上复核路径并拉起 setup。
+    InstallUpdate(PathBuf),
+    /// 宿主方法在工作线程上做完了（更新检查与应用）。投递前核对代次，与界面请求一样。
+    HostReply {
+        generation: u64,
+        epoch: u64,
+        js_id: u64,
+        result: Result<Value, (String, String)>,
+    },
     /// 一次界面请求在工作线程上分发完了。投递前再核对 `(generation, epoch)`（03 U4）。
     UiReply {
         generation: u64,
@@ -122,6 +138,12 @@ pub struct App {
     ui_in_flight: usize,
     /// 托盘切换通知方式的次数：给每次写入一个不重复的 op_id。
     mode_writes: u64,
+    /// 本地更新的协调与周期检查（W5g），第一次启动服务时建好。
+    updates: Option<(Arc<Coordinator>, Schedule)>,
+    /// 看门狗（W5g）：事件循环的脉搏与写线程的探针。
+    pulse: Arc<Pulse>,
+    writer_probe: WriterProbe,
+    watchdog: Option<Watchdog>,
 
     web_context: WebContext,
     window: Option<Window>,
@@ -305,6 +327,10 @@ pub fn run(
         ui: None,
         ui_in_flight: 0,
         mode_writes: 0,
+        updates: None,
+        pulse: Pulse::new(),
+        writer_probe: Arc::new(std::sync::Mutex::new(None)),
+        watchdog: None,
         web_context,
         window: None,
         webview: None,
@@ -352,6 +378,7 @@ enum Gate {
 
 impl App {
     fn on_init(&mut self) {
+        self.start_watchdog();
         match tray::build(&self.snapshot) {
             Ok(tray) => self.tray = Some(tray),
             Err(error) => crate::log(&self.layout.v3_root, &format!("tray unavailable: {error}")),
@@ -422,6 +449,7 @@ impl App {
             }
         }
         self.startup_delay_pending = false;
+        self.start_updates();
         self.boot_attempt += 1;
         self.service = Service::Booting;
         let options = crate::service::options(
@@ -451,6 +479,20 @@ impl App {
                 if let Some(receiver) = serving.take_background() {
                     crate::service::watch_background(receiver, self.proxy.clone());
                 }
+                record(
+                    Life::Ready,
+                    &[
+                        ("generation", json!(serving.lease_generation())),
+                        ("instanceId", json!(serving.instance_id())),
+                    ],
+                );
+                if let Some((svc, _)) = serving.service() {
+                    let service = Arc::downgrade(&svc);
+                    *self.writer_probe.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Box::new(move || {
+                            service.upgrade().and_then(|svc| svc.store().current_job())
+                        }));
+                }
                 self.legacy_wait = None;
                 self.service = Service::Serving(serving);
                 self.answer_queued();
@@ -460,6 +502,7 @@ impl App {
                     &self.layout.v3_root,
                     &format!("SOURCE_CONFLICT: {}", conflicted.state.reason),
                 );
+                record(Life::Conflict, &[]);
                 self.service = Service::Conflict { _held: conflicted };
                 self.answer_queued();
             }
@@ -475,6 +518,10 @@ impl App {
                 crate::log(
                     &self.layout.v3_root,
                     &format!("service start failed: {error}"),
+                );
+                record(
+                    Life::BootstrapFailed,
+                    &life::error_detail("BootError", &error.to_string()),
                 );
                 self.schedule_retry();
             }
@@ -515,6 +562,8 @@ impl App {
                 );
                 // 入口已经撤下：界面也不再分发（`Serving::service` 从此是 None），缓存的分发器一并丢掉。
                 self.ui = None;
+                *self.writer_probe.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                record(Life::Conflict, &[("reason", json!("background"))]);
             }
             Background::Failed(error) => crate::log(
                 &self.layout.v3_root,
@@ -528,7 +577,25 @@ impl App {
             UserEvent::StartupDelayElapsed | UserEvent::RetryService => self.start_service(),
             UserEvent::Booted(attempt, booted) => self.on_booted(attempt, booted),
             UserEvent::Background(outcome) => self.on_background(outcome),
+            UserEvent::Ping => self.pulse.beat(),
             UserEvent::Observed(observation) => self.on_observed(observation),
+            UserEvent::UpdatePending(version) => self.on_update_pending(version),
+            UserEvent::InstallUpdate(manifest) => self.install_update(&manifest),
+            UserEvent::HostReply {
+                generation,
+                epoch,
+                js_id,
+                result,
+            } => {
+                if generation == self.generation && epoch == self.epoch {
+                    match result {
+                        Ok(value) => self.deliver(&bridge::ok(js_id, value)),
+                        Err((code, message)) => {
+                            self.deliver(&bridge::error(js_id, &code, &message))
+                        }
+                    }
+                }
+            }
             UserEvent::ModeSet(Ok(())) => {}
             UserEvent::ModeSet(Err(error)) => {
                 crate::log(&self.layout.v3_root, &format!("notification mode: {error}"))
@@ -584,10 +651,7 @@ impl App {
                     self.request_show(Some(Route::Settings.as_str()), target)
                 }
                 Some(tray::Action::NotificationMode(mode)) => self.set_notification_mode(mode),
-                // Installing an update is wired with the update coordinator (W5g).
-                Some(tray::Action::InstallUpdate) => {
-                    crate::log(&self.layout.v3_root, "tray action not wired yet");
-                }
+                Some(tray::Action::InstallUpdate) => self.apply_update(atm_ui_bridge::tray(), None),
                 Some(tray::Action::Quit) => self.quit(),
                 None => {}
             },
@@ -644,6 +708,164 @@ impl App {
         }));
     }
 
+    /// 本地更新（W5g）：启动服务时建一次，此后与服务的状态无关。版本在 `N\updates`，诊断在 `N\logs`。
+    fn start_updates(&mut self) {
+        if self.updates.is_some() {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        let coordinator = Arc::new(Coordinator::new(updates::Options {
+            data_dir: self.layout.v3_root.clone(),
+            current_version: self.version.clone(),
+            install_root: updates::install_root_of(&self.layout.app_dir),
+            on_pending: Arc::new(move |version| {
+                let _ = proxy.send_event(UserEvent::UpdatePending(version));
+            }),
+            now: None,
+        }));
+        let schedule = Schedule::start(coordinator.clone(), updates::CHECK_INTERVAL);
+        self.updates = Some((coordinator, schedule));
+    }
+
+    fn on_update_pending(&mut self, version: Option<String>) {
+        let announce = version.is_some() && self.snapshot.notification_mode != "OFF";
+        self.snapshot.pending_update = version.clone();
+        if let Some(tray) = &self.tray {
+            tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
+        }
+        if let (true, Some(version)) = (announce, version) {
+            crate::notify::show(
+                &self.layout.v3_root,
+                "AyanamiTaskManager 有新版本",
+                &format!("{version} 已就绪，在托盘或设置里点「立即更新」。"),
+            );
+        }
+    }
+
+    /// 更新的宿主方法（W5g）：不要服务。读状态就地回；检查与应用会读写文件，在工作线程上做。
+    fn on_update_call(&mut self, id: u64, name: &str) {
+        let Some((coordinator, _)) = &self.updates else {
+            self.deliver(&bridge::error(
+                id,
+                "UPDATE_UNAVAILABLE",
+                "更新协调还没有启动",
+            ));
+            return;
+        };
+        let principal = atm_ui_bridge::webview(self.generation, self.epoch);
+        match name {
+            "getUpdateStatus" => {
+                let answer = match coordinator.status(&principal) {
+                    Ok(status) => bridge::ok(id, json!(status)),
+                    Err(e) => bridge::error(id, e.code.as_str(), &e.message),
+                };
+                self.deliver(&answer);
+            }
+            "checkForUpdates" => {
+                let (coordinator, proxy) = (coordinator.clone(), self.proxy.clone());
+                let (generation, epoch) = (self.generation, self.epoch);
+                std::thread::spawn(move || {
+                    let result = coordinator
+                        .check(&principal)
+                        .map(|status| json!(status))
+                        .map_err(|e| (e.code.as_str().to_owned(), e.message.clone()));
+                    let _ = proxy.send_event(UserEvent::HostReply {
+                        generation,
+                        epoch,
+                        js_id: id,
+                        result,
+                    });
+                });
+            }
+            _ => self.apply_update(principal, Some(id)),
+        }
+    }
+
+    /// 「立即更新」（窗口或托盘，都是 User）：工作线程上重新确认包，有包就交回 UI 线程拉起 setup。
+    /// 窗口发起的回 INSTALLING 状态（与 2.0 一样，不等 setup）；托盘发起的不回。
+    fn apply_update(&mut self, principal: atm_domain::principal::Principal, id: Option<u64>) {
+        let Some((coordinator, _)) = &self.updates else {
+            if let Some(id) = id {
+                self.deliver(&bridge::error(
+                    id,
+                    "UPDATE_UNAVAILABLE",
+                    "更新协调还没有启动",
+                ));
+            }
+            return;
+        };
+        let (coordinator, proxy) = (coordinator.clone(), self.proxy.clone());
+        let (generation, epoch) = (self.generation, self.epoch);
+        std::thread::spawn(move || {
+            let result = match coordinator.apply(&principal) {
+                Ok(applied) => {
+                    if let Some(manifest) = applied.manifest {
+                        let _ = proxy.send_event(UserEvent::InstallUpdate(manifest));
+                    }
+                    Ok(json!(applied.status))
+                }
+                Err(e) => Err((e.code.as_str().to_owned(), e.message.clone())),
+            };
+            if let Some(js_id) = id {
+                let _ = proxy.send_event(UserEvent::HostReply {
+                    generation,
+                    epoch,
+                    js_id,
+                    result,
+                });
+            }
+        });
+    }
+
+    /// 复核路径后拉起 `atm-setup --update`（`update.rs`）：它会停掉本实例、装好后带窗口启动新版本。
+    /// 复核不过或没能拉起时记 INSTALL_FAILED，当前版本照常用。
+    fn install_update(&mut self, manifest: &std::path::Path) {
+        let Some((coordinator, _)) = &self.updates else {
+            return;
+        };
+        match crate::update::install(
+            &self.layout.app_dir,
+            &self.layout.v3_root,
+            &manifest.to_string_lossy(),
+        ) {
+            Ok(()) => crate::log(&self.layout.v3_root, "update installer started"),
+            Err(error) => {
+                coordinator.launch_failed();
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!("update not started: {error}"),
+                );
+            }
+        }
+    }
+
+    /// 看门狗（W5g）：事件循环靠 ping、写线程靠当前作业的时长；挂住就记诊断并结束进程。
+    fn start_watchdog(&mut self) {
+        let Some(lifecycle) = life::global() else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        let probe = self.writer_probe.clone();
+        self.watchdog = Some(Watchdog::start(
+            lifecycle,
+            Probes {
+                ping: Box::new(move || {
+                    let _ = proxy.send_event(UserEvent::Ping);
+                }),
+                pulse: self.pulse.clone(),
+                writer: Box::new(move || {
+                    probe
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_ref()
+                        .and_then(|current| current())
+                }),
+                on_stall: Box::new(watchdog::terminate),
+            },
+            watchdog_config(),
+        ));
+    }
+
     fn on_second_instance(&mut self, command: Command, target: &EventLoopWindowTarget<UserEvent>) {
         match command {
             Command::Show => {
@@ -659,6 +881,23 @@ impl App {
             Command::Quit => self.quit(),
             #[cfg(feature = "smoke")]
             Command::SmokeQuit => self.quit(),
+            // lifecycle 冒烟：Windows 结束会话时窗口过程做的事；之后由冒烟脚本把进程杀掉。
+            #[cfg(feature = "smoke")]
+            Command::SmokeSessionEnd => crate::session_end::ended(),
+            // 看门狗冒烟：让事件循环停住，或让写线程卡在一个预算很小的作业里。
+            #[cfg(feature = "smoke")]
+            Command::SmokeStallUi => std::thread::sleep(Duration::from_secs(60)),
+            #[cfg(feature = "smoke")]
+            Command::SmokeStallWriter => {
+                if let Service::Serving(serving) = &self.service
+                    && let Some((svc, _)) = serving.service()
+                {
+                    drop(svc.store().submit_with(Duration::from_millis(200), |_| {
+                        std::thread::sleep(Duration::from_secs(60));
+                        Ok::<(), ()>(())
+                    }));
+                }
+            }
         }
     }
 
@@ -691,9 +930,14 @@ impl App {
         }
     }
 
-    /// 要服务的宿主方法。`runtimeRequest` 进 ui-bridge（W5e）；其余在各自的阶段接上之前回明确的「不可用」，
-    /// 界面按出错显示，不会等不到回答：更新（W5g）、Agent 接入与 MCP 观测（W6，atm-agents）。
+    /// 要服务的宿主方法。`runtimeRequest` 进 ui-bridge（W5e）；更新（W5g）不要服务，先拦下；
+    /// Agent 接入与 MCP 观测（W6，atm-agents）接上之前回明确的「不可用」，界面按出错显示，不会等不到回答。
     fn on_core(&mut self, id: u64, method: &Method, args: Vec<Value>) {
+        if let Method::Core(name @ ("getUpdateStatus" | "checkForUpdates" | "applyUpdate")) = method
+        {
+            self.on_update_call(id, name);
+            return;
+        }
         if let Some((code, message)) = self.unavailable() {
             self.deliver(&bridge::error(id, code, message));
             return;
@@ -714,13 +958,6 @@ impl App {
         }
         match method {
             Method::Core("runtimeRequest") => self.dispatch_ui(id, &args[0]),
-            // 还没有更新状态（更新协调在 W5g）：与 2.0「没有状态」同一个回答。
-            Method::Core("getUpdateStatus") => self.deliver(&bridge::ok(id, Value::Null)),
-            Method::Core("checkForUpdates" | "applyUpdate") => self.deliver(&bridge::error(
-                id,
-                "UPDATE_UNAVAILABLE",
-                "更新功能在这个版本里还不可用",
-            )),
             _ => self.deliver(&bridge::error(
                 id,
                 "AGENTS_UNAVAILABLE",
@@ -1042,6 +1279,7 @@ impl App {
         }
         self.window = Some(window);
         self.ready_deadline = Some(Instant::now() + RENDERER_READY_TIMEOUT);
+        record(Life::WindowShown, &rss());
     }
 
     /// Closing drops the whole WebView (its WebView2 processes exit) and the window; the
@@ -1059,8 +1297,12 @@ impl App {
         if let Some(window) = &self.window {
             self.saved.maximized = window.is_maximized();
         }
+        let had_window = self.window.is_some();
         self.webview = None;
         self.window = None;
+        if had_window {
+            record(Life::WindowClosed, &rss());
+        }
         self.ready_deadline = None;
         self.show_pending = false;
         self.route_pending = None;
@@ -1106,12 +1348,23 @@ impl App {
             return;
         }
         self.quitting = true;
+        record(Life::ShutdownBegin, &[]);
         self.close_window();
         self.tray = None;
+        if let Some((_, schedule)) = self.updates.take() {
+            schedule.stop();
+        }
         let service = std::mem::replace(&mut self.service, Service::Idle);
         if let Service::Serving(serving) = service {
             let log_root = self.layout.v3_root.clone();
             serving.stop(&move |e| crate::log(&log_root, &format!("runtime: {e:?}")));
+        }
+        record(Life::ShutdownComplete, &[]);
+        if let Some(watchdog) = self.watchdog.take() {
+            watchdog.stop();
+        }
+        if let Some(lifecycle) = life::global() {
+            lifecycle.finish(self.exit_code, true);
         }
         crate::log(&self.layout.v3_root, "host quit");
     }
@@ -1144,4 +1397,38 @@ impl Drop for PendingReply {
             self.send(None);
         }
     }
+}
+
+/// 写线程探针：服务在服务时读它当前的作业（`(已跑的时间, 预算)`），撤下或退出后为空。
+type WriterProbe =
+    Arc<std::sync::Mutex<Option<Box<dyn Fn() -> Option<(Duration, Duration)> + Send>>>>;
+
+fn record(event: Life, detail: &[(&str, Value)]) {
+    if let Some(lifecycle) = life::global() {
+        lifecycle.record(event, detail);
+    }
+}
+
+fn rss() -> Vec<(&'static str, Value)> {
+    watchdog::working_set()
+        .map(|rss| vec![("rss", json!(rss))])
+        .unwrap_or_default()
+}
+
+/// smoke 构建可以用 `ATM_SMOKE_WATCHDOG_MS` 把阈值与心跳调短（lifecycle 冒烟）；正式构建固定 120 s / 60 s。
+fn watchdog_config() -> watchdog::Config {
+    #[cfg(feature = "smoke")]
+    if let Some(ms) = std::env::var("ATM_SMOKE_WATCHDOG_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| (500..=600_000).contains(ms))
+    {
+        return watchdog::Config {
+            tick: Duration::from_millis(ms / 4),
+            // 心跳比阈值长一些：会话结束的标记写下之后到被杀之间，少被心跳覆盖。
+            heartbeat: Duration::from_millis(ms * 3),
+            threshold: Duration::from_millis(ms),
+        };
+    }
+    watchdog::Config::default()
 }

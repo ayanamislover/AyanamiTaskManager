@@ -14,9 +14,11 @@ publish.workspace = true
 atm-domain = { path = "../domain" }
 atm-install-state = { path = "../install-state" }
 atm-service = { path = "../service" }
+# W5g 更新协调：清单、事务日志与诊断状态是 JSON。
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 atm-store = { path = "../store" }
-# notify 用例借用服务层验收的夹具（service/tests/support），它要这两样。
+# notify 用例借用服务层验收的夹具（service/tests/support），它还要 rusqlite。
 rusqlite = "0.39"
-serde_json = { workspace = true }

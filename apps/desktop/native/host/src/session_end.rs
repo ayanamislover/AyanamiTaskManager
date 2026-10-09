@@ -4,8 +4,8 @@
 //! hidden top-level window of our own — message-only windows do not receive these
 //! broadcasts. It lives on the event-loop thread, whose pump dispatches to it.
 //!
-//! W5a logs the session end only; the lifecycle marker that keeps a normal logoff from being
-//! reported as previous.unclean comes with the lifecycle diagnostics (W5g).
+//! The lifecycle marker `session-end` (W5g) keeps a normal logoff from being reported as
+//! previous.unclean on the next start: it is the last record Windows lets us write.
 
 use std::sync::Mutex;
 
@@ -32,14 +32,23 @@ unsafe extern "system" fn window_proc(
         // Never veto: ATM has nothing unsaved that would justify blocking a logoff.
         WM_QUERYENDSESSION => 1,
         WM_ENDSESSION => {
-            if wparam != 0
-                && let Some(dir) = LOG_ROOT.lock().ok().and_then(|dir| dir.clone())
-            {
-                crate::log(&dir, "session end");
+            if wparam != 0 {
+                ended();
             }
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+/// The session is ending: log it and leave the lifecycle marker. Also the smoke build's
+/// stand-in for a real logoff.
+pub fn ended() {
+    if let Some(dir) = LOG_ROOT.lock().ok().and_then(|dir| dir.clone()) {
+        crate::log(&dir, "session end");
+    }
+    if let Some(lifecycle) = crate::lifecycle::global() {
+        lifecycle.record(crate::lifecycle::Event::SessionEnd, &[]);
     }
 }
 

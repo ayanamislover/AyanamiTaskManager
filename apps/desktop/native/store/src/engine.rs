@@ -227,7 +227,13 @@ impl Budget {
     }
 }
 
-type Job = Box<dyn FnOnce(&mut Connection, &Budget, &Stats) + Send>;
+type Run = Box<dyn FnOnce(&mut Connection, &Budget, &Stats) + Send>;
+
+/// 一个写作业与它的时长预算（看门狗用预算判断「跑得久」还是「卡住了」）。
+struct Job {
+    budget: Duration,
+    run: Run,
+}
 
 struct Queue {
     jobs: VecDeque<Job>,
@@ -254,6 +260,8 @@ struct Shared {
     not_full: Condvar,
     /// 写线程执行完的作业数、写线程是否已结束、[`Store::wake_waiters`] 的次数，见 [`Store::wait_for_writes`]。
     done: Mutex<Done>,
+    /// 正在执行的作业：开始的时刻与它的预算（[`Store::current_job`]）。
+    running: Mutex<Option<(Instant, Duration)>>,
     done_changed: Condvar,
 }
 
@@ -367,6 +375,7 @@ impl Store {
             not_empty: Condvar::new(),
             not_full: Condvar::new(),
             done: Mutex::new(Done::default()),
+            running: Mutex::new(None),
             done_changed: Condvar::new(),
         });
         let stats = Arc::new(Stats::default());
@@ -435,11 +444,14 @@ impl Store {
             ready: Condvar::new(),
         });
         let out = slot.clone();
-        let job: Job = Box::new(move |conn, b, stats| {
-            let result = run_write(conn, b, stats, budget, f);
-            *lock(&out.value) = Some(result);
-            out.ready.notify_all();
-        });
+        let job = Job {
+            budget,
+            run: Box::new(move |conn, b, stats| {
+                let result = run_write(conn, b, stats, budget, f);
+                *lock(&out.value) = Some(result);
+                out.ready.notify_all();
+            }),
+        };
         self.enqueue(job)?;
         Ok(Ticket { slot })
     }
@@ -468,11 +480,14 @@ impl Store {
             ready: Condvar::new(),
         });
         let out = slot.clone();
-        let job: Job = Box::new(move |conn, b, stats| {
-            let result = run_exclusive(conn, b, stats, budget, f);
-            *lock(&out.value) = Some(result);
-            out.ready.notify_all();
-        });
+        let job = Job {
+            budget,
+            run: Box::new(move |conn, b, stats| {
+                let result = run_exclusive(conn, b, stats, budget, f);
+                *lock(&out.value) = Some(result);
+                out.ready.notify_all();
+            }),
+        };
         self.enqueue(job)?;
         Ok(Ticket { slot })
     }
@@ -549,6 +564,12 @@ impl Store {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+    }
+
+    /// 正在执行的写作业：`(已经跑了多久, 它的预算)`；空闲时 `None`。看门狗用它判断写线程是否卡住
+    /// （超过自己的预算 SQL 会被中断；再过很久还没结束，就是卡在 Rust 或 FFI 里了）。
+    pub fn current_job(&self) -> Option<(Duration, Duration)> {
+        lock(&self.shared.running).map(|(started, budget)| (started.elapsed(), budget))
     }
 
     /// 改一下写入标记，让 [`Store::wait_for_writes`] 里等的线程（以及之后拿旧标记来等的）都返回。
@@ -760,7 +781,9 @@ fn writer_loop(
         };
         let Some(job) = job else { break };
         let started = Instant::now();
-        job(&mut conn, &budget, &stats);
+        *lock(&shared.running) = Some((started, job.budget));
+        (job.run)(&mut conn, &budget, &stats);
+        *lock(&shared.running) = None;
         stats
             .job_max_us
             .fetch_max(micros(started), Ordering::SeqCst);

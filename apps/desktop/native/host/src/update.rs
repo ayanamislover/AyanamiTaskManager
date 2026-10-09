@@ -1,14 +1,12 @@
-//! Installing a delivered update (de-electron §8 update bridge): the core finds the
-//! package in `<dataDir>\updates` and asks; the host starts the stable installer.
+//! Installing a delivered update (de-electron §8 update bridge; W5g): the update coordinator
+//! (`atm_jobs::update`) finds the package in `<N>\updates` and the user asks; the host starts
+//! the stable installer from the UI thread.
 //!
-//! The host, not the core, starts it. The core runs on Node, whose children inherit every
-//! inheritable handle — the core's own protocol pipes included. A setup holding the core's
-//! stdout keeps the host from ever seeing the core exit during QUIESCE, while setup waits
-//! for the host: both stall until the timeout. The host's pipe ends are not inheritable
-//! and its std handles were made non-inheritable at start.
+//! The host's std handles were made non-inheritable at start: a setup holding one of our
+//! pipes would keep us from looking exited during QUIESCE while setup waits for us.
 //!
-//! The core is trusted to pick the version, not the paths: the installer is always this
-//! install root's `atm-setup.exe`, and the manifest must be a plainly named file directly
+//! The coordinator is trusted to pick the version, not the paths: the installer is always
+//! this install root's `atm-setup.exe`, and the manifest must be a plainly named file directly
 //! in the data root's `updates` folder.
 
 use std::os::windows::process::CommandExt;

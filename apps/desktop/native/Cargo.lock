@@ -80,6 +80,7 @@ dependencies = [
  "atm-ui-bridge",
  "serde",
  "serde_json",
+ "sha2",
  "tao",
  "tray-icon",
  "webview2-com",
@@ -122,6 +123,7 @@ dependencies = [
  "atm-service",
  "atm-store",
  "rusqlite",
+ "serde",
  "serde_json",
 ]
 

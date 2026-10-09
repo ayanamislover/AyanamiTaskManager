@@ -25,6 +25,8 @@ atm-runtime = { path = "../runtime" }
 # W5e：WebView 的界面请求在进程内分发。
 atm-ui-bridge = { path = "../ui-bridge" }
 serde.workspace = true
+# W5g lifecycle：错误消息只留指纹、runId 散列。
+sha2 = "0.10"
 serde_json.workspace = true
 tao = "0.35"
 wry = "0.55"
@@ -45,6 +47,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_System_IO",

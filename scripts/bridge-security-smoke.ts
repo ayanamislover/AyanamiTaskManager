@@ -520,7 +520,8 @@ async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Pr
     !deliveries.scripts.some((entry) => hasId(930_001)(entry.source)),
   );
 
-  // 还没接上的宿主方法：回明确的错误码（W5g 更新、W6 Agent 接入），不悬着。
+  // 更新（W5g）：源码运行没有安装根，不参与自动更新——状态与检查都是 UPDATE_UNSUPPORTED，「立即更新」
+  // 不拉起安装。还没接上的宿主方法（W6 Agent 接入）回明确的错误码，不悬着。
   // 页内脚本用字符串传：tsx 会给具名函数包 __name()，页面里没有这个辅助函数。
   const pendingMethods = await page.evaluate(`(async () => {
     const desktop = window.ayanamiDesktop;
@@ -532,18 +533,21 @@ async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Pr
         ),
         new Promise((done) => setTimeout(() => done({ error: "TIMEOUT" }), 5000)),
       ]);
+    const code = (answer) => ("value" in answer ? (answer.value?.code ?? null) : answer);
     return {
-      status: await settle(desktop.getUpdateStatus()),
-      check: await settle(desktop.checkForUpdates()),
+      check: code(await settle(desktop.checkForUpdates())),
+      status: code(await settle(desktop.getUpdateStatus())),
+      apply: code(await settle(desktop.applyUpdate())),
       configs: await settle(desktop.getMcpConfigs()),
     };
   })()`);
   log.check(
-    "还没接上的宿主方法回明确的结果",
+    "更新：源码运行不参与（UPDATE_UNSUPPORTED），还没接上的宿主方法回明确的错误码",
     JSON.stringify(pendingMethods) ===
       JSON.stringify({
-        status: { value: null },
-        check: { error: "UPDATE_UNAVAILABLE" },
+        check: "UPDATE_UNSUPPORTED",
+        status: "UPDATE_UNSUPPORTED",
+        apply: "UPDATE_UNSUPPORTED",
         configs: { error: "AGENTS_UNAVAILABLE" },
       }),
     JSON.stringify(pendingMethods),

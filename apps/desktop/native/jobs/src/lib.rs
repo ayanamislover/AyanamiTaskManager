@@ -5,6 +5,7 @@
 
 pub mod liveness;
 pub mod notify;
+pub mod update;
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};

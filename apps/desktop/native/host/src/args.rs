@@ -11,6 +11,9 @@ pub struct Args {
     pub headless: Option<Headless>,
     #[cfg(feature = "smoke")]
     pub smoke_quit: bool,
+    /// lifecycle / 看门狗冒烟要发给主实例的命令（W5g）。
+    #[cfg(feature = "smoke")]
+    pub smoke_command: Option<atm_install_state::ipc::Command>,
 }
 
 /// Modes that run a Node entry with inherited stdio instead of the GUI.
@@ -97,6 +100,18 @@ pub fn parse(argv: &[String], electron_run_as_node: bool) -> Result<Args, String
             },
             #[cfg(feature = "smoke")]
             "--smoke-quit" => args.smoke_quit = true,
+            #[cfg(feature = "smoke")]
+            "--smoke-session-end" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeSessionEnd)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-stall-ui" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeStallUi)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-stall-writer" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeStallWriter)
+            }
             other => return Err(format!("ARGUMENT_UNKNOWN: {other}")),
         }
     }
