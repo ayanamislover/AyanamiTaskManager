@@ -24,19 +24,21 @@ export function KnowledgeBackupPanel({
     mutationFn: () => client.backups.createKnowledge(),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["backups", "knowledge"] });
-      notify("知识库备份已创建并校验");
+      notify("备份已创建并校验");
     },
   });
   const restore = useMutation({
-    mutationFn: (id: string) => client.backups.restore(id),
+    // 只恢复知识库：3.0 的备份是整库的，要指明范围（2.0 忽略这个请求体）。
+    mutationFn: (id: string) => client.backups.restore(id, { scope: "KNOWLEDGE" }),
     onSuccess: async () => {
       await queryClient.invalidateQueries();
       notify("知识库已从备份恢复");
     },
   });
-  const knowledgeBackups = (backups.data ?? []).filter((backup) => backup.scope === "KNOWLEDGE");
-  // ATM 3 的备份是整库的（scope STORE），知识库在里面；按知识库恢复的入口还没有，不能说「会显示在这里」。
-  const storeBackups = (backups.data ?? []).filter((backup) => backup.scope === "STORE");
+  // 2.0 的知识库备份是 KNOWLEDGE；3.0 的备份是整库的（STORE），知识库在里面，按知识库范围恢复（peer W5 r2）。
+  const knowledgeBackups = (backups.data ?? []).filter(
+    (backup) => backup.scope === "KNOWLEDGE" || backup.scope === "STORE",
+  );
   return (
     <section className="atm-panel" data-testid="knowledge-backup-panel">
       <MutationErrorAlert errors={[create.error, restore.error]} />
@@ -44,9 +46,7 @@ export function KnowledgeBackupPanel({
         <div>
           <h2>知识库备份</h2>
           <div className="atm-row-sub">
-            {storeBackups.length && !knowledgeBackups.length
-              ? "立即备份会备份整个本地数据库，知识库在其中。"
-              : "仅备份本地共享知识数据库，不依赖项目是否存在。"}
+            备份包含本地共享知识库，恢复时只替换知识库，不依赖项目是否存在。
           </div>
         </div>
         <button
@@ -71,6 +71,7 @@ export function KnowledgeBackupPanel({
               <div className="atm-row" key={String(backup.id)}>
                 <div>
                   <div className="atm-row-title">
+                    {backup.scope === "STORE" ? "整库备份 · " : ""}
                     {String(backup.reason ?? "手动备份")} ·{" "}
                     {(Number(backup.sizeBytes ?? 0) / 1024).toFixed(1)} KB
                   </div>
@@ -114,11 +115,6 @@ export function KnowledgeBackupPanel({
             </div>
           ) : null}
         </>
-      ) : storeBackups.length ? (
-        <Empty
-          title="知识库在整库备份里"
-          text={`备份是整库的，知识库随整库一起备份（已有 ${storeBackups.length} 份）；按知识库单独恢复将在后续版本提供。`}
-        />
       ) : (
         <Empty title="没有知识库备份" text="创建首个手动备份后会显示在这里。" />
       )}

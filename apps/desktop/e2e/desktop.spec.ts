@@ -1679,6 +1679,78 @@ test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口"
   await expect(openData).toBeFocused();
 });
 
+// peer W5 r2：3.0 的备份是整库的，恢复必须指明范围。两个备份入口都要真的能备份、列出、按自己的范围恢复。
+test("项目与知识库的备份入口：立即备份后列出，并按项目、按知识库恢复", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const existing = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+    }>;
+    if (!existing.some((project) => project.code === "BACKUPUI")) {
+      const created = await api.post(`${apiUrl}/projects`, {
+        data: { name: "备份验收项目", sourcePath: null, code: "BACKUPUI", description: "e2e" },
+      });
+      expect(created.ok()).toBeTruthy();
+    }
+
+    await page.goto("/#project:BACKUPUI");
+    await page.getByRole("button", { name: "数据工具", exact: true }).click();
+    const dataDialog = page.getByRole("dialog", { name: "备份、恢复与数据交换" });
+    await dataDialog.getByRole("button", { name: "立即备份" }).click();
+    await expect(page.getByText("项目备份已创建并校验")).toBeVisible();
+    const projectRestore = dataDialog.getByRole("button", { name: "恢复", exact: true }).first();
+    await expect(projectRestore).toBeVisible();
+    await projectRestore.click();
+    const confirmProject = page.getByRole("alertdialog", { name: "恢复项目" });
+    await confirmProject.getByRole("button", { name: "恢复", exact: true }).click();
+    await expect(page.getByText("项目已从备份恢复")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dataDialog).toBeHidden();
+
+    // 备份里要有知识库：先存一条（kept），备份之后再存一条（dropped），恢复后只剩前一条。
+    const suffix = Date.now().toString(36);
+    const saveKnowledge = async (slug: string, title: string) => {
+      const saved = await api.post(`${apiUrl}/knowledge`, {
+        data: {
+          opId: `backup-ui-${slug}`,
+          expectedVersion: 0,
+          slug,
+          title,
+          summary: "备份入口验收",
+          bodyMarkdown: "# body",
+        },
+      });
+      expect(saved.ok()).toBeTruthy();
+    };
+    const kept = `备份前的知识 ${suffix}`;
+    const dropped = `备份后的知识 ${suffix}`;
+    await saveKnowledge(`backup-kept-${suffix}`, kept);
+
+    // 只改 hash 的 goto 不会重新载入，先离开再进设置页。
+    await page.goto("about:blank");
+    await page.goto("/#settings");
+    const panel = page.getByTestId("knowledge-backup-panel");
+    await expect(panel.getByText("备份包含本地共享知识库")).toBeVisible();
+    await panel.getByRole("button", { name: "立即备份" }).click();
+    await expect(page.getByText("备份已创建并校验", { exact: true })).toBeVisible();
+    await saveKnowledge(`backup-dropped-${suffix}`, dropped);
+    const knowledgeRestore = panel.getByRole("button", { name: "恢复", exact: true }).first();
+    await expect(knowledgeRestore).toBeVisible();
+    await knowledgeRestore.click();
+    const confirmKnowledge = page.getByRole("alertdialog", { name: "恢复知识库" });
+    await confirmKnowledge.getByRole("button", { name: "恢复", exact: true }).click();
+    await expect(page.getByText("知识库已从备份恢复")).toBeVisible();
+
+    await page.goto("about:blank");
+    await page.goto("/#knowledge");
+    const list = page.locator(".atm-knowledge-list-item");
+    await expect(list.filter({ hasText: kept })).toHaveCount(1);
+    await expect(list.filter({ hasText: dropped })).toHaveCount(0);
+  } finally {
+    await api.dispose();
+  }
+});
+
 test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。

@@ -152,10 +152,15 @@ export class AyanamiClient {
       this.request<Record<string, any>>("POST", "/api/v1/backups", {
         scope: "KNOWLEDGE",
       }),
-    restore: (id: string) =>
+    // 恢复哪一部分：3.0 的备份是整库的，必须指明（项目或知识库）；2.0 按备份自己的范围恢复，忽略请求体。
+    restore: (
+      id: string,
+      target?: { scope: "PROJECT"; project: string } | { scope: "KNOWLEDGE" },
+    ) =>
       this.request<Record<string, any>>(
         "POST",
         `/api/v1/backups/${encodeURIComponent(id)}/restore`,
+        target,
       ),
   };
 

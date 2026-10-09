@@ -44,7 +44,14 @@ fn now() -> Timestamp {
 }
 
 pub(crate) fn backup_error(e: BackupError) -> DomainError {
-    let message = e.to_string();
+    // 界面直接显示这条消息（设置页与项目数据工具的恢复按钮）：备份里没有要恢复的范围时说人话。
+    let message = match &e {
+        BackupError::ScopeMissing(m) if m.starts_with("knowledge") => {
+            "这份备份里没有知识库数据，无法按知识库恢复".to_owned()
+        }
+        BackupError::ScopeMissing(_) => "这份备份里没有这个项目，无法按项目恢复".to_owned(),
+        _ => e.to_string(),
+    };
     let (code, extra): (ErrorCode, Option<(&str, Value)>) = match e {
         BackupError::NotFound(_) => (ErrorCode::BACKUP_NOT_FOUND, None),
         BackupError::Corrupt(_) | BackupError::Unsupported(_) => {

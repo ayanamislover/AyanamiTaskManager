@@ -38,7 +38,8 @@ export function ProjectDataModal({
     },
   });
   const restore = useMutation({
-    mutationFn: (id: string) => client.backups.restore(id),
+    // 只恢复这个项目：3.0 的备份是整库的，要指明范围（2.0 忽略这个请求体）。
+    mutationFn: (id: string) => client.backups.restore(id, { scope: "PROJECT", project }),
     onSuccess: async () => {
       await queryClient.invalidateQueries();
       notify("项目已从备份恢复");
@@ -116,6 +117,7 @@ export function ProjectDataModal({
                     <div className="atm-row" key={backup.id}>
                       <div>
                         <div className="atm-row-title">
+                          {backup.scope === "STORE" ? "整库备份 · " : ""}
                           {backup.reason} · {(Number(backup.sizeBytes) / 1024).toFixed(1)} KB
                         </div>
                         <div className="atm-row-sub">

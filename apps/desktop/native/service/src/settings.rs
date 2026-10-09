@@ -219,6 +219,36 @@ fn js_join(v: &Value) -> String {
     }
 }
 
+/// 二、八、十六进制整数按 JS 的读法变成最近的 f64（逢中取偶，超出范围是 Infinity）。
+/// 逐位 `acc * radix + d` 会在超过 2^53 之后每一步都舍入一次，结果可能差一个 ulp（peer W5 r2）：
+/// 这里把位串的高 128 位放进 u128，丢掉的低位只记「是否非零」并折进最低位，再一次性转成 f64。
+fn radix_integer(digits: &str, radix: u32) -> Option<f64> {
+    let width = radix.trailing_zeros();
+    let mut top: u128 = 0;
+    let mut dropped: i32 = 0;
+    let mut sticky = false;
+    for c in digits.chars() {
+        let d = c.to_digit(radix)?;
+        for k in (0..width).rev() {
+            let bit = u128::from((d >> k) & 1);
+            if top.leading_zeros() == 0 {
+                sticky |= bit == 1;
+                dropped = dropped.saturating_add(1);
+            } else {
+                top = (top << 1) | bit;
+            }
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    if dropped > 1100 {
+        return Some(f64::INFINITY);
+    }
+    // 2^dropped 是精确的，乘法只在越过最大有限数时变成 Infinity，与 JS 相同。
+    Some((top | u128::from(sticky)) as f64 * 2f64.powi(dropped))
+}
+
 /// 字符串转数（ECMAScript StringNumericLiteral）：去掉首尾空白，空串是 0；`Infinity` 带可选符号；
 /// `0x` / `0o` / `0b` 不带符号；十进制允许符号、小数点与指数。其余（包括 Rust 认的 `inf`、`nan`、`1_0`）是 NaN。
 fn js_string_number(s: &str) -> Option<f64> {
@@ -245,10 +275,7 @@ fn js_string_number(s: &str) -> Option<f64> {
         if body.len() != t.len() || body.len() == 2 {
             return None;
         }
-        return body[2..].chars().try_fold(0.0_f64, |acc, c| {
-            c.to_digit(radix)
-                .map(|d| acc * f64::from(radix) + f64::from(d))
-        });
+        return radix_integer(&body[2..], radix);
     }
     let bytes = body.as_bytes();
     let mut i = 0;
@@ -564,6 +591,46 @@ mod tests {
             (json!({"n": 3}), nan),
         ] {
             assert_eq!(js_number(&input), expected, "{input}");
+        }
+    }
+
+    /// 超过 2^53 的进制整数也要和 JS 一样只舍入一次（peer W5 r2 的观察）。期望值按位给出，
+    /// 是任意精度整数逢中取偶转成 f64 的结果（与 JS `Number()` 相同）。
+    #[test]
+    fn large_radix_integers_round_once_like_javascript() {
+        let value = 0x1000_0000_0000_0081_u64;
+        let cases = [
+            ("0x1000000000000081".to_owned(), 0x43b0_0000_0000_0001),
+            (format!("0o{value:o}"), 0x43b0_0000_0000_0001),
+            (format!("0b{value:b}"), 0x43b0_0000_0000_0001),
+            // 2^53 + 1 与 2^53 + 3：正好在中间，取偶数那一边。
+            ("0x20000000000001".to_owned(), 0x4340_0000_0000_0000),
+            ("0x20000000000003".to_owned(), 0x4340_0000_0000_0002),
+            // 超过 128 位：中间值取偶，中间值之下再多一个 1 就进位。
+            (
+                format!("0x1{}8{}", "0".repeat(13), "0".repeat(36)),
+                0x4c70_0000_0000_0000,
+            ),
+            (
+                format!("0x1{}8{}1", "0".repeat(13), "0".repeat(35)),
+                0x4c70_0000_0000_0001,
+            ),
+            // 最大有限数之下一点点仍是最大有限数，到中间值就是 Infinity。
+            (
+                format!("0x{}7{}", "f".repeat(13), "f".repeat(242)),
+                0x7fef_ffff_ffff_ffff,
+            ),
+            (
+                format!("0x{}c{}", "f".repeat(13), "0".repeat(242)),
+                f64::INFINITY.to_bits(),
+            ),
+        ];
+        for (input, bits) in cases {
+            assert_eq!(
+                js_string_number(&input).map(f64::to_bits),
+                Some(bits),
+                "{input}"
+            );
         }
     }
 

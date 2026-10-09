@@ -86,7 +86,7 @@ User 主体只在两处构造：
 | --- | --- | --- |
 | #13 / #14 恢复请求的批准与拒绝 | 要先有 Agent 在垃圾箱项目的目录里 begin | 服务层的用例覆盖；e2e 在 W5d |
 | #18 工程指标 | 采集与刷新在 W5h 才接上 | W5h |
-| #24 备份恢复 | 3.0 要求指明范围 | `restore_scope` 的服务层用例 |
+| #24 备份恢复 | 3.0 要求指明范围 | `restore_scope` 的服务层用例；界面带范围的恢复由 e2e「项目与知识库的备份入口」走真实点击（W5 r2） |
 | #27 导出 | 导出在 W6 才有 | W6 |
 | #88–#96 派单与手机同步 | 在 W7 之前回 404 `DISPATCH_UNAVAILABLE` / `SYNC_UNAVAILABLE` | W7 |
 
@@ -94,7 +94,7 @@ User 主体只在两处构造：
 
 | 路由 | 3.0 的行为 | 依据 |
 | --- | --- | --- |
-| #24 备份恢复 | 必须带 scope：`PROJECT` 加 `project`，或 `KNOWLEDGE`。否则 422 `BACKUP_RESTORE_SCOPE_UNSUPPORTED` | 05 §2.7，整库备份 |
+| #24 备份恢复 | 必须带 scope：`PROJECT` 加 `project`，或 `KNOWLEDGE`。否则 422 `BACKUP_RESTORE_SCOPE_UNSUPPORTED`。界面的两个入口（项目数据工具、设置的知识库备份）各自带上范围；2.0 忽略这个请求体 | 05 §2.7，整库备份 |
 | #22 / #23 备份 | `scope` 是 `STORE`，`reason` 是备份的种类，没有单项目字段 | 方案 §4 |
 | #1 状态 | 没有投影汇总。`projectCounts` 按生命周期给 `{total, failed: 0}`，因为单库没有逐库失败 | 00 §6 |
 | #18 工程指标 | 不带 `refresh` 只读已存的指标，不调 git、不写行；没有源码目录回 `NO_SOURCE_PATH`，还没统计过回 `NO_DATA`。带 `refresh=true` 走 `metrics.refresh` 当场扫（2.0 读时超过 5 分钟就扫） | C-08、P-014 |

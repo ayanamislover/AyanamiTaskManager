@@ -147,6 +147,8 @@ fn restore_scope_is_user_only_and_restores_one_project() {
         .restore_scope(&user(), &id, RestoreScope::Knowledge)
         .unwrap_err();
     assert_eq!(e.code, ErrorCode::BACKUP_RESTORE_SCOPE_UNSUPPORTED, "{e:?}");
+    // 界面直接显示这条消息（peer W5 r2 的 e2e 里出现过英文的 "scope not in backup"）。
+    assert_eq!(e.message, "这份备份里没有知识库数据，无法按知识库恢复");
     assert_eq!(
         (backup_dirs(&w), w.count("SELECT count(*) FROM backups")),
         (files, rows)

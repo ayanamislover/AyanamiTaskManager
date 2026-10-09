@@ -496,7 +496,19 @@ fn details_are_redacted_and_bounded() {
             "got bearer xyz from server",
             "got bearer <redacted> from server",
         ),
-        ("GET /feed?token=s3cr3t&x=1", "GET /feed?token=<redacted>"),
+        (
+            "GET /feed?token=s3cr3t&x=1",
+            "GET /feed?token=<redacted>&x=1",
+        ),
+        // peer W5 r2 P1-01：同一个词里第二个键的值也要换掉。
+        (
+            r#"{"token":"public","authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,
+            r#"{"token":<redacted>,"authorization":<redacted>}"#,
+        ),
+        (
+            r#"password="public SYNTHETIC_REVIEW_SECRET" at "C:\Program Files\atm\x.db""#,
+            "password=<redacted> at <local-path>",
+        ),
         ("api_key=K1 monkey=fine", "api_key=<redacted> monkey=fine"),
         (
             "C:\\Users\\ayanami\\AppData\\x.json missing",

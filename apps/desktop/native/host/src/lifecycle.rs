@@ -509,6 +509,10 @@ mod tests {
             "GET /x Authorization: Bearer SYNTHETIC_REVIEW_SECRET",
             "Authorization:Bearer SYNTHETIC_REVIEW_SECRET",
             r#"{"authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,
+            // peer W5 r2 P1-01：一个词里多个键、键与冒号之间有空白、引号值里有空格。
+            r#"{"token":"public","authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,
+            r#"{"token" : "SYNTHETIC_REVIEW_SECRET"}"#,
+            r#"password="public SYNTHETIC_REVIEW_SECRET" operation failed"#,
         ] {
             assert!(
                 !redact_line(line).contains("SYNTHETIC_REVIEW_SECRET"),
@@ -518,7 +522,11 @@ mod tests {
         assert_eq!(redact_line("got bearer xyz ok"), "got bearer <redacted> ok");
         assert_eq!(
             redact_line("url ?token=abc&x user_key=k monkey=fine"),
-            "url ?token=<redacted> user_key=<redacted> monkey=fine"
+            "url ?token=<redacted>&x user_key=<redacted> monkey=fine"
+        );
+        assert_eq!(
+            redact_line("basic database validation failed"),
+            "basic database validation failed"
         );
         assert_eq!(
             redact_line("open C:\\data\\atm.sqlite: denied"),

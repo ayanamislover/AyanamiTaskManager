@@ -159,7 +159,7 @@ describe("Knowledge feature", () => {
     expect(styles).toContain(".atm-knowledge-body-editor");
   });
 
-  it("says knowledge lives in whole-store backups instead of an empty state that never fills", () => {
+  it("lists whole-store backups as restorable knowledge backups instead of an empty state that never fills", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(
       ["backups", "knowledge"],
@@ -181,11 +181,11 @@ describe("Knowledge feature", () => {
         createElement(KnowledgeBackupPanel, { client: client(), notify: vi.fn() }),
       ),
     );
-    expect(markup).toContain("知识库在整库备份里");
-    expect(markup).toContain("已有 1 份");
-    expect(markup).not.toContain("创建首个手动备份后会显示在这里");
-    expect(markup).not.toContain(">恢复<");
-    expect(markup).toContain("立即备份会备份整个本地数据库");
+    // peer W5 r2：3.0 的备份是整库的（STORE），按知识库范围恢复；文案对 2.0、3.0 都成立。
+    expect(markup).toContain("整库备份 · DAILY");
+    expect(markup).toContain(">恢复<");
+    expect(markup).not.toContain("没有知识库备份");
+    expect(markup).toContain("备份包含本地共享知识库");
     expect(markup).not.toContain("仅备份本地共享知识数据库");
   });
 
