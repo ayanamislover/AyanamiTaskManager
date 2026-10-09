@@ -206,6 +206,63 @@ fn unused_parameters_are_dropped_by_the_correction() {
     assert_eq!(r.corrected, None);
 }
 
+/// 给出的更正一定能通过同一次校验：去掉一个「不起作用」的参数后反而缺了必填项时，不给更正。
+#[test]
+fn a_correction_that_would_not_pass_is_withheld() {
+    static FIELDS: [Field; 2] = [
+        Field::new("a", Ty::Str { max: 10 }).required(),
+        Field::new("b", Ty::Bool),
+    ];
+    // 故意写错的组合规则：有 b 就说 a 不起作用。去掉 a 之后缺必填项。
+    fn check(args: &serde_json::Map<String, Value>) -> Vec<atm_domain::error::Problem> {
+        if args.contains_key("b") {
+            vec![atm_domain::error::Problem::new("a", ProblemKind::Unused)]
+        } else {
+            Vec::new()
+        }
+    }
+    static T: Tool = Tool {
+        name: "atm_withheld",
+        summary: "演示。",
+        fields: &FIELDS,
+        check: Some(check),
+        read_only: true,
+        destructive: false,
+    };
+    let r = T.validate(&json!({"a": "x", "b": true})).unwrap_err();
+    assert_eq!(r.problems[0].problem, ProblemKind::Unused);
+    assert_eq!(r.corrected, None);
+}
+
+/// R1-P1-01：字段更正（夹取、别名）之后组合规则照样要看。能一并更正的一次给全，有真冲突就不给；
+/// 给出的更正一定能通过校验。
+#[test]
+fn field_corrections_still_meet_the_combination_rules() {
+    let search = &atm_http::tools::SEARCH;
+    // 夹取 + 不起作用的 session：一次更正两处。
+    let r = search
+        .validate(&json!({"project": "P", "session": "S", "list": "records", "limit": 50}))
+        .unwrap_err();
+    let corrected = Value::Object(r.corrected.expect("夹取与去掉 session 都能确定"));
+    assert_eq!(
+        corrected,
+        json!({"project": "P", "list": "records", "limit": 30})
+    );
+    assert!(search.validate(&corrected).is_ok(), "{corrected}");
+    // 夹取 + list 与 query 的真冲突：不给更正。
+    let r = search
+        .validate(&json!({"project": "P", "list": "records", "query": "x", "limit": 50}))
+        .unwrap_err();
+    assert_eq!(r.corrected, None, "{:?}", r.problems);
+    assert!(
+        r.problems
+            .iter()
+            .any(|p| p.problem == ProblemKind::Conflict && p.path == "query"),
+        "{:?}",
+        r.problems
+    );
+}
+
 /// 上限、类型、嵌套路径。
 #[test]
 fn limits_types_and_nested_paths() {

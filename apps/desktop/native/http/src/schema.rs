@@ -192,8 +192,22 @@ impl Tool {
         object_schema(self.fields)
     }
 
-    /// 校验并规范化。`args` 缺省（`null`）视同空对象。
+    /// 校验并规范化。`args` 缺省（`null`）视同空对象。给出的 `corrected` 一定能通过同一次校验
+    /// （fix.call 就是它，U-4）：再校验一遍，过不了就不给。
     pub fn validate(&self, args: &Value) -> Result<Checked, Rejected> {
+        let mut r = match self.validate_once(args) {
+            Ok(checked) => return Ok(checked),
+            Err(r) => r,
+        };
+        if let Some(c) = &r.corrected
+            && self.validate_once(&Value::Object(c.clone())).is_err()
+        {
+            r.corrected = None;
+        }
+        Err(r)
+    }
+
+    fn validate_once(&self, args: &Value) -> Result<Checked, Rejected> {
         let empty = Map::new();
         let map = match args {
             Value::Object(m) => m,
@@ -210,24 +224,27 @@ impl Tool {
             }
         };
         let mut v = Validation::default();
-        let args = v.object(self.fields, map, "");
-        let mut args = args;
-        if v.problems.is_empty()
-            && let Some(check) = self.check
-        {
+        let mut args = v.object(self.fields, map, "");
+        // 组合规则在字段都对、或者字段问题都已确定地更正（别名、拼写、夹取）之后照样要看：
+        // 更正过的参数也得满足它们（R1-P1-01）。字段问题更正不了时参数不完整，组合规则无从判断。
+        let fields_settled = v.problems.is_empty() || v.fixable;
+        if fields_settled && let Some(check) = self.check {
             let found = check(&args);
-            // 只剩「不起作用的参数」时，更正就是去掉它们（U-3）；其余组合规则不猜。
-            if !found.is_empty() && found.iter().all(|p| p.problem == ProblemKind::Unused) {
-                for p in &found {
-                    args.remove(&p.path);
+            if !found.is_empty() {
+                // 「不起作用的参数」去掉就是更正（U-3）；其余组合规则不猜。
+                let unused = found.iter().all(|p| p.problem == ProblemKind::Unused);
+                if unused {
+                    for p in &found {
+                        args.remove(&p.path);
+                    }
                 }
-                // check 只在前面没有问题时才跑，这是第一批问题。
-                v.started = true;
-                v.fixable = true;
-            } else {
-                v.fixable = false;
+                if !v.started {
+                    v.started = true;
+                    v.fixable = true;
+                }
+                v.fixable &= unused;
+                v.problems.extend(found);
             }
-            v.problems.extend(found);
         }
         // 输出顺序与调用方写键的顺序无关。
         v.problems.sort_by(|a, b| a.path.cmp(&b.path));

@@ -349,6 +349,12 @@ fn u3_guesses_succeed_directly_or_after_one_fix() {
         "atm_search",
         json!({"project": w.project, "session": s, "query": "甲"}),
     );
+    // 两种猜错叠在一起（R1-P1-01）：limit 越界又带了 session，一次 fix 两处都改好。
+    guess(
+        &w,
+        "atm_search",
+        json!({"project": w.project, "session": s, "list": "records", "limit": 50}),
+    );
     guess(
         &w,
         "atm_progress_add",

@@ -296,13 +296,19 @@ impl Bridge {
         )
     }
 
+    /// 一次工具调用的结果（成功或工具级错误都有 result）。协议层的错误没有 result，这里直接失败，
+    /// 免得调用方把 null 当成功（R1-P2-01）；要测协议错误的用例用 `request`。
     fn call(&mut self, tool: &str, args: Value) -> Value {
-        self.request(
+        let reply = self.request(
             "tools/call",
             json!({"name": tool, "arguments": args}),
             Duration::from_secs(60),
-        )["result"]
-            .clone()
+        );
+        assert!(
+            reply["result"].is_object(),
+            "{tool}：没有工具结果（协议层错误）：{reply}"
+        );
+        reply["result"].clone()
     }
 }
 
@@ -359,8 +365,13 @@ fn user() -> Principal {
     Principal::trusted_ui(UiSurface::Tray)
 }
 
+/// 成功的工具结果。协议层的错误（工具不在这个 profile 上）没有 result，`Bridge::call` 给的是 null：
+/// 只看 isError 会把它当成功（R1-P2-01），所以先断言结果在。要测协议错误的用例直接用 `request`。
 fn ok(r: &Value) -> &Value {
-    assert_ne!(r["isError"], json!(true), "{r}");
+    assert!(
+        r.is_object() && r["structuredContent"].is_object() && r["isError"] != json!(true),
+        "{r}"
+    );
     &r["structuredContent"]
 }
 
