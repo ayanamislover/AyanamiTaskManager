@@ -175,7 +175,25 @@ fn s052_c10_include_and_sections() {
         b["nextTitles"],
         json!({k.as_str(): "一", more[0].as_str(): "任务2", more[1].as_str(): "任务3"})
     );
-    assert_eq!((b["ready"].clone(), b["open"].clone()), (json!(4), json!(4)));
+    assert_eq!(
+        (b["ready"].clone(), b["open"].clone()),
+        (json!(4), json!(4))
+    );
+    // 做完一个：它不再算 READY，也不再算未完成。
+    w.patch_as(
+        &agent(),
+        Some("S1"),
+        vec![
+            p(&more[2], Operation::Start),
+            p(&more[2], Operation::Complete),
+        ],
+    )
+    .unwrap();
+    let done = brief(&w, BriefRequest::default());
+    assert_eq!(
+        (done["ready"].clone(), done["open"].clone()),
+        (json!(3), json!(3))
+    );
     let b = brief(
         &w,
         BriefRequest {

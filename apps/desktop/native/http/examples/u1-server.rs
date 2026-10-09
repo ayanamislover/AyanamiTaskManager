@@ -207,7 +207,7 @@ fn dump(svc: &Service, rpc: &Rpc, setup: &Value) -> Value {
         let records = rpc.call(
             SETUP,
             "atm_search",
-            json!({"project": code, "list": "records", "limit": 50}),
+            json!({"project": code, "list": "records", "limit": 30}),
         );
         detail.push(json!({"code": code, "tasks": tasks, "records": records}));
     }
