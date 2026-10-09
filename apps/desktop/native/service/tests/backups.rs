@@ -75,6 +75,45 @@ fn backups_are_listed_and_made_by_the_user() {
     );
 }
 
+/// 10 R6：读全局流默认带上被恢复撤销的行并标注出来，界面「最近变化」把它们显示为已撤销。
+/// 成功例：备份之前的行照常、不带标注；反例：备份之后的行没有被藏起来，也没有被当成没撤销。
+#[test]
+fn r6_restored_away_events_stay_in_the_feed_marked_as_undone() {
+    let w = world("bk-feed-undone");
+    w.task("备份前的任务");
+    let backup = w.svc.create_manual_backup(&user()).unwrap();
+    let id = backup["id"].as_str().unwrap().to_owned();
+    w.task("备份后的任务");
+    w.svc
+        .restore_scope(&user(), &id, RestoreScope::Project("ATM".into()))
+        .unwrap();
+    let overview = w.svc.ui_overview(&user()).unwrap();
+    let events = overview["recentEvents"].as_array().unwrap();
+    let find = |title: &str| {
+        events
+            .iter()
+            .find(|e| {
+                e["type"] == "work.created" && e["detail"].as_str().unwrap_or("").contains(title)
+            })
+            .unwrap_or_else(|| panic!("{title}: {overview}"))
+    };
+    let (before, after) = (find("备份前的任务"), find("备份后的任务"));
+    assert!(
+        !before["detail"].as_str().unwrap().contains("撤销"),
+        "{before}"
+    );
+    // 界面 API 保持 2.0 的形状：标注只在正文里，不加字段。
+    assert!(after.get("undoneByRestore").is_none(), "{after}");
+    assert!(
+        after["detail"]
+            .as_str()
+            .unwrap()
+            .ends_with("（已被恢复撤销）"),
+        "{after}"
+    );
+    assert_eq!(after["summary"], after["detail"]);
+}
+
 /// backup.restore_scope：只有 User。项目恢复到备份时的样子（之后新建的任务没了），选中的备份固定
 /// RESTORE_PIN_DAYS 天，先做 PRE_RESTORE；编号不回退（R5）。反例都零变化。
 #[test]

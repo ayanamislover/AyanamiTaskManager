@@ -124,7 +124,15 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn load_tests() -> Vec<TestFn> {
     let root = native();
     let mut files = Vec::new();
-    for krate in ["domain", "store", "service", "http", "jobs"] {
+    for krate in [
+        "domain",
+        "store",
+        "service",
+        "http",
+        "jobs",
+        "host",
+        "ui-bridge",
+    ] {
         rust_files(&root.join(krate), &mut files);
     }
     files.sort();

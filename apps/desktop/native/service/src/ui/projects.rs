@@ -13,8 +13,8 @@ use serde_json::{Map, Value, json};
 const SYSTEM_EVENT_SQL: &str =
     "(COALESCE(actor, 'SYSTEM') = 'SYSTEM' OR substr(type, 1, 7) = 'backup.'
       OR type IN ('project.creating', 'agent.git_context.updated', 'database.recovered'))";
-const VISIBLE_EVENT_SQL: &str =
-    "type <> 'project.summary.updated' AND undone_by_restore_gen IS NULL";
+/// 被按范围恢复撤销的行照样读出来（10 R6：默认带上并标注），由 `feed_rows` 标成已撤销。
+const VISIBLE_EVENT_SQL: &str = "type <> 'project.summary.updated'";
 
 /// 一个项目的 2.0 `RegistryProjectView`。`databasePath` 在单库里是库文件本身。
 fn registered(
@@ -470,11 +470,20 @@ fn summary(
 }
 
 /// 全局流的行 → 2.0 `#presentGlobalRow`（`presentEvent` 加 seq / sequence / at / payload_json / projectCode / projectName）。
+/// 全局流的行配上它的项目。项目事件有 `project_id`；全局的项目事件（`project.created`、恢复请求……）没有，
+/// 按 2.x `#projectContextForGlobalEvent` 的顺序认：payload 的 `projectId` / `project_id`（id 或代码），再看
+/// `aggregate_id` 是不是项目 id。
 fn feed_rows(tx: &Transaction<'_>, tail: &str) -> Result<Vec<Value>, DomainError> {
     let sql = format!(
-        "SELECT f.global_seq, f.type, f.aggregate_id, f.actor, f.payload_json, f.created_at, p.id, p.code, p.name
+        "SELECT f.global_seq, f.type, f.aggregate_id, f.actor, f.payload_json, f.created_at, p.id, p.code, p.name,
+                f.project_id IS NULL, f.undone_by_restore_gen
          FROM (SELECT * FROM global_feed WHERE {tail}) f
-         LEFT JOIN projects p ON p.id = f.project_id"
+         LEFT JOIN projects p ON p.id = COALESCE(f.project_id, (
+           SELECT q.id FROM projects q,
+                  (SELECT COALESCE(json_extract(f.payload_json, '$.projectId'),
+                                   json_extract(f.payload_json, '$.project_id')) AS ref) r
+            WHERE (r.ref IS NOT NULL AND (q.id = r.ref OR q.code = r.ref)) OR q.id = f.aggregate_id
+            LIMIT 1))"
     );
     tx.prepare(&sql)
         .map_err(db)?
@@ -489,18 +498,36 @@ fn feed_rows(tx: &Transaction<'_>, tail: &str) -> Result<Vec<Value>, DomainError
                 Some(id) => json!({ "id": id, "code": r.get::<_, String>(7)?, "name": r.get::<_, String>(8)? }),
                 None => Value::Null,
             };
-            let payload = match serde_json::from_str::<Value>(&payload_json) {
+            let global: bool = r.get(9)?;
+            let undone: Option<i64> = r.get(10)?;
+            let mut payload = match serde_json::from_str::<Value>(&payload_json) {
                 Ok(Value::Object(m)) => m,
                 _ => Map::new(),
             };
+            // 全局的项目事件（建项目、归档……，不在项目流里）没有自己的 key，2.x 会退回 aggregate id（一串 ULID）：
+            // 界面上换成项目代码。项目流里的项目事件（项目摘要）2.x 本来就没有键，不补。
+            // 只改界面的这份呈现；Agent 的 delta 与通知照旧（W4 已定的形状）。
+            if global
+                && kind.starts_with("project.")
+                && !payload.contains_key("key")
+                && let Some(code) = project.get("code").cloned()
+            {
+                payload.insert("key".into(), code);
+            }
             let shown = present::present(&kind, Some(&aggregate), Some(&actor), &payload);
+            // 10 R6：这一行之后被按范围恢复撤销了。界面只显示正文，标注写进正文，「最近变化」与时间线都看得见；
+            // 不加字段：界面 API 保持 2.0 的形状（ui-bridge tests/compat.rs）。
+            let detail = match undone {
+                Some(_) => format!("{}（已被恢复撤销）", shown.detail),
+                None => shown.detail,
+            };
             Ok(json!({
                 "type": kind,
                 "key": shown.key,
-                "summary": shown.detail,
+                "summary": detail,
                 "actor": shown.actor,
                 "title": shown.title,
-                "detail": shown.detail,
+                "detail": detail,
                 "project": project,
                 "seq": seq,
                 "sequence": seq,

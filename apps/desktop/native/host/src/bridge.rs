@@ -318,6 +318,40 @@ mod tests {
         }
     }
 
+    /// P-015：剪贴板只收 1 MiB 以内的文本；超出的整条拒掉，不截断。
+    #[test]
+    fn p015_copy_text_is_limited_to_one_mib() {
+        let message = |len: usize| {
+            format!(
+                r#"{{"id":4,"method":"copyText","args":["{}"]}}"#,
+                "x".repeat(len)
+            )
+        };
+        let call = parse(SOURCE, &message(1 << 20)).unwrap();
+        assert_eq!(call.method, Method::Local(Local::CopyText));
+        // 反例：多一个字节就拒，整条消息仍远在 MAX_MESSAGE_BYTES 以内，拒它的是 copyText 自己的上限。
+        assert_eq!(
+            parse(SOURCE, &message((1 << 20) + 1)),
+            Err(Rejected::Arguments)
+        );
+        assert_eq!(
+            parse(SOURCE, r#"{"id":4,"method":"copyText","args":[7]}"#),
+            Err(Rejected::Arguments)
+        );
+        // 2.x 宿主的 showItemInFolder / setNotificationMode 在 3.0 不是桥方法（通知方式只走托盘菜单的固定几项）：
+        // 页面送来的路径和任意字符串根本到不了宿主。
+        for name in ["showItemInFolder", "setNotificationMode", "openPath"] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":5,"method":"{name}","args":["..\\x"]}}"#)
+                ),
+                Err(Rejected::UnknownMethod),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn responses_cannot_break_out_of_the_script() {
         let script = resolve_script(&ok(1, json!("\"); alert(1); (\" \u{2028}")));

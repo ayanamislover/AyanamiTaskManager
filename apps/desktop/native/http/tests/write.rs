@@ -617,6 +617,39 @@ fn begin_writes_the_marker_after_commit() {
     assert!(again.get("marker_written").is_none(), "{again}");
 }
 
+/// C-L03 反例：marker 写不成（目录里已有同名文件挡着），项目照样建成，回执如实报告 `marker_written: false`；
+/// 挡路的文件原样不动。
+#[test]
+fn c_l03_begin_reports_a_marker_it_could_not_write() {
+    let w = world("write-marker-blocked");
+    let cwd = w.dir.join("blocked");
+    std::fs::create_dir_all(&cwd).unwrap();
+    std::fs::write(cwd.join(".ayanami-task"), "not a directory").unwrap();
+    let r = ok(&call(
+        &w,
+        "core",
+        "atm_begin",
+        json!({"agent_id": "codex", "cwd": cwd.display().to_string(), "allow_project_create": true,
+               "title": "挡住的仓库", "brief": "minimal"}),
+    ))
+    .clone();
+    assert_eq!(r["project_created"], json!(true), "{r}");
+    assert_eq!(r["marker_written"], json!(false), "{r}");
+    assert_eq!(
+        std::fs::read_to_string(cwd.join(".ayanami-task")).unwrap(),
+        "not a directory"
+    );
+    // 项目确实建成了：再从同一目录 begin，按路径认出同一个项目。
+    let again = ok(&call(
+        &w,
+        "core",
+        "atm_begin",
+        json!({"agent_id": "codex", "cwd": cwd.display().to_string(), "brief": "none"}),
+    ))
+    .clone();
+    assert_eq!(again["project"], r["project"], "{again}");
+}
+
 /// knowledge_save：作者取自 session，回执带 op_id、project、session。
 #[test]
 fn knowledge_save_reports_the_receipt() {

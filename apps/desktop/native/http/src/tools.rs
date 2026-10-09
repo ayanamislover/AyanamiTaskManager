@@ -19,7 +19,10 @@ const PROJECT: Field = Field::new("project", Ty::Str { max: 20 })
 const SESSION: Field = Field::new("session", Ty::Str { max: 128 })
     .aliases(&["session_id"])
     .blank_absent();
-const OP_ID: Field = Field::new("op_id", Ty::Str { max: 128 }).blank_absent();
+/// `operation_id`：2.0 REST 的 begin 写 `operationId`（原子 begin，02 §2.1），转成 snake_case 之后是它。只收不发布。
+const OP_ID: Field = Field::new("op_id", Ty::Str { max: 128 })
+    .aliases(&["operation_id"])
+    .blank_absent();
 /// A3 的控制字段：显式给出时桥原样保留，服务按它判 `SCOPE_RESTORED`。由桥管理，只收不发布。
 const GENERATION: Field = Field::new(
     "expected_scope_generation",

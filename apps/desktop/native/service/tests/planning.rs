@@ -231,6 +231,32 @@ fn project_updates_are_user_only() {
     });
 }
 
+/// 发布改了 health，但项目列表的顺序不变：`projects.updated_at` 是 2.x 注册表那一行的时间（列表按它排），
+/// 2.x 的 health 在项目库里，改它从不碰注册表（W5i 截图对照里侧栏顺序跟着发布跳动）。
+#[test]
+fn publishing_health_keeps_the_project_list_order() {
+    let w = world("pu-order");
+    w.exec("UPDATE projects SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = 'PA'");
+    w.svc
+        .publish_project_update(
+            &user(),
+            &w.target(None),
+            PublishRequest {
+                health: Some("AT_RISK".into()),
+                ..publish("周报")
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        w.scalar("SELECT health FROM projects WHERE id = 'PA'"),
+        json!("AT_RISK")
+    );
+    assert_eq!(
+        w.scalar("SELECT updated_at FROM projects WHERE id = 'PA'"),
+        json!("2000-01-01T00:00:00.000Z")
+    );
+}
+
 /// U14：草稿按 2.x 汇总——上次发布之后完成的任务、当前阻塞 / 等待、排在前面的待办；health 取项目当前值。
 /// U15：带草稿 id 发布时草稿行就地转为 PUBLISHED，序号区间沿用草稿，没给的列表取草稿里的；项目 health 跟着改。
 #[test]

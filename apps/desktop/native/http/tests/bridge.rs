@@ -9,7 +9,7 @@ mod support;
 use atm_domain::principal::{Principal, UiSurface};
 use atm_service::backups::RestoreScope;
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -376,8 +376,12 @@ impl Rig {
     }
 
     fn command(&self, exe: &Path) -> Command {
+        self.command_on(exe, "core")
+    }
+
+    fn command_on(&self, exe: &Path, profile: &str) -> Command {
         let mut c = Command::new(exe);
-        c.args(["--profile", "core"])
+        c.args(["--profile", profile])
             .env("ATM3_DATA_DIR", &self.root)
             .env_remove("ATM_DATA_DIR");
         c
@@ -385,6 +389,10 @@ impl Rig {
 
     fn bridge(&self) -> Bridge {
         Bridge::spawn(self.command(&shim().0))
+    }
+
+    fn bridge_on(&self, profile: &str) -> Bridge {
+        Bridge::spawn(self.command_on(&shim().0, profile))
     }
 }
 
@@ -592,6 +600,62 @@ fn the_bridge_reads_arguments_the_way_the_service_does() {
 }
 
 /// 非白名单客户端缺 session：SESSION_REQUIRED（补 session 参数），写请求根本没有发出。
+/// R11 A4：同一个 Agent 实例的几个 profile 是同一个连接组——core 上开的 session，memory 上缺 session 的写入（知识）
+/// 照样补上它，两个桥发出的 `X-ATM-Client` 一字不差。另一个实例（同一个客户端名、另一个祖先进程）不是同一组：
+/// 它缺 session 的写入拿不到这里的默认 session。
+#[test]
+fn r11_a4_profiles_of_one_instance_share_a_group_and_other_instances_do_not() {
+    let r = rig("bridge-group");
+    let mut core = r.bridge();
+    let mut memory = r.bridge_on("memory");
+    core.initialize("claude-code");
+    memory.initialize("claude-code");
+    let begun = core.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "project": r.w.project}),
+    );
+    let session = ok(&begun)["session"].as_str().unwrap().to_owned();
+    ok(&memory.call(
+        "atm_knowledge_save",
+        json!({"slug": "from-memory", "title": "从 memory 写", "summary": "缺 session", "body": "正文"}),
+    ));
+    let last = r.proxy.writes().pop().unwrap();
+    assert_eq!(
+        last["params"]["arguments"]["session"],
+        json!(session),
+        "{last}"
+    );
+    let groups: BTreeSet<String> = r
+        .proxy
+        .seen()
+        .into_iter()
+        .filter(|s| s.path != "/health")
+        .filter_map(|s| s.client)
+        .collect();
+    assert_eq!(groups.len(), 1, "{groups:?}");
+
+    let mine = groups.into_iter().next().unwrap();
+    let other = "1:1@claude-code";
+    assert_ne!(mine, other);
+    let body =
+        json!({"tool": "atm_progress_add", "arguments": {"task_key": r.w.task, "summary": "x"}})
+            .to_string();
+    let (status, text) = http_as(r.w.port, Some(other), "POST", "/mcp/resolve", &body);
+    let e: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    assert_eq!(
+        (status, &e["code"]),
+        (422, &json!("SESSION_REQUIRED")),
+        "{text}"
+    );
+    let (status, text) = http_as(r.w.port, Some(&mine), "POST", "/mcp/resolve", &body);
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&text).unwrap()["session"],
+        json!(session),
+        "{text}"
+    );
+}
+
 #[test]
 fn non_whitelisted_clients_get_no_default_session() {
     let r = rig("bridge-desktop");
@@ -1299,6 +1363,7 @@ fn u6_a_subagent_does_not_displace_the_primary() {
     let cwd = u6_repo(&r, "repo");
     let mut a = Agent::start(&r, "claude-code");
     let (project, task) = u6_open(&mut a, &cwd);
+    let primary = primary_session(&r);
     let sub = a.call(
         "atm_begin",
         json!({"agent_id": "claude-code", "cwd": cwd, "role": "SUBAGENT"}),
@@ -1318,12 +1383,56 @@ fn u6_a_subagent_does_not_displace_the_primary() {
         "atm_progress_add",
         json!({"task_key": task, "summary": "主代理继续"}),
     );
+    // R11 A2：同一连接里不带 session 的写入记在主 session 名下，子代理的 begin 不顶替它。
+    assert_eq!(progress_session(&r, "主代理继续"), primary);
+    assert_ne!(primary, sub_session);
+    // `resume:false` 的 SUBAGENT begin 也不顶替（A1 的独立不变量）。
+    let fresh = a.call(
+        "atm_begin",
+        json!({"agent_id": "claude-code", "cwd": cwd, "role": "SUBAGENT", "resume": false}),
+    );
+    let fresh = fresh["session"].as_str().unwrap().to_owned();
+    assert_ne!(fresh, primary);
+    a.call(
+        "atm_progress_add",
+        json!({"task_key": task, "summary": "子代理开过之后"}),
+    );
+    assert_eq!(progress_session(&r, "子代理开过之后"), primary);
     a.call(
         "atm_task_patch",
         json!({"task_key": task, "operation": "complete", "evidence": ["主代理完成"]}),
     );
     assert_eq!(status_of(&r, &project, &side), "DONE");
     assert_eq!(status_of(&r, &project, &task), "DONE");
+}
+
+/// 这个连接组唯一的 ONLINE PRIMARY session。
+fn primary_session(r: &Rig) -> String {
+    r.w.svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT id FROM agent_sessions WHERE client_identity LIKE '%@claude-code'
+                   AND role = 'PRIMARY' AND connection_state = 'ONLINE'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
+}
+
+/// 按摘要找到的那条任务进度记在哪个 session 名下。
+fn progress_session(r: &Rig, summary: &str) -> String {
+    r.w.svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT session_id FROM progress_updates WHERE summary = ?1",
+                [summary],
+                |row| row.get(0),
+            )
+        })
+        .unwrap()
 }
 
 /// 静默编码 30 分钟：这段时间没有任何调用，心跳与领取租约都过了期。客户端进程还活着，扫描不关它的会话

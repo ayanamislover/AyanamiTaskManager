@@ -219,6 +219,29 @@ fn on_some_monitor(
     })
 }
 
+/// 应答、排队的调用只交给发出它的那一代页面（03 U4、P-013）：`(generation, epoch)` 两个都要相同。
+/// 窗口关过再开 generation 加一，同一个窗口里页面重新加载 epoch 加一；任何一个变了，旧页面的 Promise
+/// 已经不在了，答给新页面就是答错了人。
+fn same_page(sent: (u64, u64), current: (u64, u64)) -> bool {
+    sent == current
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::same_page;
+
+    #[test]
+    fn p013_only_the_page_that_asked_gets_the_answer() {
+        assert!(same_page((3, 7), (3, 7)));
+        // 反例：页面在同一个窗口里重新加载过（epoch + 1）。
+        assert!(!same_page((3, 7), (3, 8)));
+        // 反例：窗口关过又开（generation + 1，epoch 也跟着加一）。
+        assert!(!same_page((3, 7), (4, 8)));
+        // 反例：只有 generation 变了。
+        assert!(!same_page((3, 7), (4, 7)));
+    }
+}
+
 #[cfg(test)]
 mod route_tests {
     use super::route_from_url;
@@ -587,7 +610,7 @@ impl App {
                 js_id,
                 result,
             } => {
-                if generation == self.generation && epoch == self.epoch {
+                if same_page((generation, epoch), (self.generation, self.epoch)) {
                     match result {
                         Ok(value) => self.deliver(&bridge::ok(js_id, value)),
                         Err((code, message)) => {
@@ -924,7 +947,7 @@ impl App {
         }
         let queued = std::mem::take(&mut self.queued);
         for call in queued {
-            if call.generation == self.generation && call.epoch == self.epoch {
+            if same_page((call.generation, call.epoch), (self.generation, self.epoch)) {
                 self.on_core(call.js_id, &call.method, call.args);
             }
         }
@@ -1037,7 +1060,7 @@ impl App {
     fn on_ui_reply(&mut self, generation: u64, epoch: u64, js_id: u64, reply: Option<Reply>) {
         self.ui_in_flight = self.ui_in_flight.saturating_sub(1);
         // 应答只交给发出请求的那一代页面（03 U4、P-013）：窗口关过、页面重新加载过，就丢掉。
-        if generation != self.generation || epoch != self.epoch {
+        if !same_page((generation, epoch), (self.generation, self.epoch)) {
             return;
         }
         match reply {

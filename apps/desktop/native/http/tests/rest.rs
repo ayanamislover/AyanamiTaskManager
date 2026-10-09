@@ -223,6 +223,41 @@ type Print = (
     BTreeMap<String, Vec<u8>>,
 );
 
+/// C-L03：REST 建项目在提交之后写 marker；写不成（`.ayanami-task` 是个文件）项目照样建成，
+/// 回执报告 `marker_written: false`。
+#[test]
+fn c_l03_rest_project_create_reports_the_marker_honestly() {
+    let w = world("rest-marker");
+    let blocked = w.dir.join("blocked");
+    std::fs::create_dir_all(&blocked).unwrap();
+    std::fs::write(blocked.join(".ayanami-task"), "not a directory").unwrap();
+    let (status, text) = http(
+        w.port,
+        "POST",
+        "/api/v1/projects",
+        &json!({"name": "Blocked", "code": "BLOK", "path": blocked.to_string_lossy(), "op_id": "blok-proj"})
+            .to_string(),
+    );
+    assert_eq!(status, 201, "{text}");
+    assert_eq!(parse(&text)["marker_written"], false, "{text}");
+    assert_eq!(
+        std::fs::read_to_string(blocked.join(".ayanami-task")).unwrap(),
+        "not a directory"
+    );
+    let count: i64 = w
+        .svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM projects WHERE code = 'BLOK'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
 fn print(w: &World, project_dir: &Path) -> Print {
     (database(w), files(&w.dir), files(project_dir))
 }
@@ -460,6 +495,19 @@ fn tool_routes_speak_the_tool_contract() {
         &json!({"summary": "收工"}).to_string(),
     );
     assert_eq!(status, 200, "{text}");
+
+    // 2.0 REST 的 begin 体照收：`operationId`（原子 begin）与其余 camelCase 字段；同一个 operationId 再来一次
+    // 拿回同一个 session，不再建一个。
+    let body = json!({"operationId": "rest-atomic", "projectCode": w.project, "mode": "project",
+                      "agentId": "release-cli", "displayName": "发布流水线", "clientKind": "cli", "role": "SUBAGENT"})
+    .to_string();
+    let (status, text) = http(w.port, "POST", "/api/v1/sessions", &body);
+    assert_eq!(status, 201, "{text}");
+    let first = parse(&text)["session"].clone();
+    assert!(first.is_string(), "{text}");
+    let (status, again) = http(w.port, "POST", "/api/v1/sessions", &body);
+    assert!(status == 200 || status == 201, "{again}");
+    assert_eq!(parse(&again)["session"], first, "{again}");
 
     // 2.0 的 `1` / `0` 布尔照收。
     let (status, text) = http(

@@ -7,7 +7,7 @@ use atm_domain::work::Operation;
 use atm_service::backups::RestoreScope;
 use atm_service::project::{CreateProjectRequest, PathInfo, Transition};
 use atm_service::session::{BeginRequest, EndRequest, Outcome, ProjectSelector};
-use atm_service::work::Target;
+use atm_service::work::{PublishRequest, Target};
 use atm_service::write::{Service, Written};
 use atm_store::paths::path_key;
 use serde_json::{Value, json};
@@ -140,6 +140,66 @@ fn l001_create_project_in_one_transaction() {
     // 新项目立即可用：读与写都按普通项目走。
     let b = w.svc.brief(&agent(), "as", &Default::default()).unwrap();
     assert_eq!(b["project"], "AS");
+}
+
+/// 「最近变化」里的全局项目事件（2.x `#projectContextForGlobalEvent`）：建项目不在项目流里，也配上它的项目，
+/// 键是项目代码而不是 ULID。2.x 转换来的全局事件按 payload 的 `projectId`（代码或 id）/ `project_id` 认项目。
+/// 反例：项目流里的项目事件（项目摘要）2.x 没有键，不补成项目代码。
+#[test]
+fn global_project_events_carry_their_project_in_the_feed() {
+    let w = world("pj-feed");
+    let made = w.svc.create_project(&user(), create("Feed 示例")).unwrap();
+    let code = made.result["project"]["code"].as_str().unwrap().to_owned();
+    w.svc
+        .publish_project_update(
+            &user(),
+            &w.target(None),
+            PublishRequest {
+                summary: "周报".into(),
+                ..PublishRequest::default()
+            },
+        )
+        .unwrap();
+    // 2.x 转换来的两行：payload 里只有项目引用，aggregate 不是项目。
+    for (kind, payload) in [
+        (
+            "quick.promoted",
+            r#"{"projectId":"ATM","title":"按代码认"}"#,
+        ),
+        (
+            "quick.archived",
+            r#"{"project_id":"PA","title":"按 id 认"}"#,
+        ),
+    ] {
+        w.exec(&format!(
+            "INSERT INTO global_feed (global_seq, type, aggregate_id, actor, payload_json, created_at)
+             VALUES ((SELECT MAX(global_seq) + 1 FROM global_feed), '{kind}', 'Q-LEGACY', 'USER', '{payload}',
+                     '2026-01-01T00:00:00.000Z')"
+        ));
+    }
+    let overview = w.svc.ui_overview(&user()).unwrap();
+    let events = overview["recentEvents"].as_array().unwrap();
+    let of = |kind: &str| {
+        events
+            .iter()
+            .find(|e| e["type"] == kind)
+            .unwrap_or_else(|| panic!("{kind}: {overview}"))
+    };
+    let created = of("project.created");
+    assert_eq!(created["projectCode"], code.as_str(), "{created}");
+    assert_eq!(created["projectName"], "Feed 示例", "{created}");
+    assert_eq!(created["key"], code.as_str(), "{created}");
+    assert_eq!(
+        created["detail"],
+        format!("创建项目（{code}）"),
+        "{created}"
+    );
+    for kind in ["quick.promoted", "quick.archived"] {
+        assert_eq!(of(kind)["projectCode"], "ATM", "{}", of(kind));
+    }
+    let published = of("project.update.published");
+    assert_eq!(published["projectCode"], "ATM", "{published}");
+    assert_ne!(published["key"], "ATM", "{published}");
 }
 
 /// L-012：派生、后缀、显式代码的校验与冲突；L-001 的反例：失败的创建零写入。

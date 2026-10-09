@@ -166,10 +166,12 @@ fn object(m: Map<String, Value>) -> Option<JsValue> {
 }
 
 /// 发布与 Agent 项目进度共用：项目的 health 改成这次发布的值（2.x `project_meta` 的 health 与 version）。
+/// `updated_at` 不动：它是 2.x 注册表那一行的时间（项目列表按它排），2.x 的 health 在项目库里，改它从不碰注册表；
+/// 合并时 `project_meta` 只取 health / version / current_sequence，它的 `updated_at` 舍弃了（05-data-mapping）。
 pub(crate) fn set_project_health(w: &Work<'_>, health: &str) -> Result<(), DomainError> {
     w.tx.execute(
-        "UPDATE projects SET health = ?2, meta_version = meta_version + 1, updated_at = ?3 WHERE id = ?1",
-        params![w.project, health, w.now_iso],
+        "UPDATE projects SET health = ?2, meta_version = meta_version + 1 WHERE id = ?1",
+        params![w.project, health],
     )
     .map_err(db)?;
     Ok(())
