@@ -741,11 +741,12 @@ impl Surface {
             .detail("field", "session")
         })?;
         // 知识写入的目标是知识库（不是作者所在的项目）：上下文里的目标必须是知识库，世代也是知识库的。
-        let expected_generation = match expected_target(a)? {
+        // 身份（database_id）交给服务在写事务里核对，不在这里丢掉（peer W4 r1 P1-01）。
+        let (expected_scope_id, expected_generation) = match expected_target(a)? {
             Some(atm_service::ops::Target::Existing { scope, generation })
                 if scope.kind == atm_service::receipts::ScopeKind::Knowledge =>
             {
-                generation
+                (Some(scope.id), generation)
             }
             Some(other) => {
                 return Err(atm_service::ops::target_changed(
@@ -756,7 +757,7 @@ impl Surface {
                     },
                 ));
             }
-            None => None,
+            None => (None, None),
         };
         let expected_generation = a.int("expected_scope_generation").or(expected_generation);
         let op_id = match a.str("op_id") {
@@ -803,6 +804,7 @@ impl Surface {
             &session,
             save,
             &op_id,
+            expected_scope_id.as_deref(),
             expected_generation,
         )?;
         // 2.x 直接回服务结果；v6 的 ACK 规则（op_id、replayed、实际的 project 与 session）补在旁边。

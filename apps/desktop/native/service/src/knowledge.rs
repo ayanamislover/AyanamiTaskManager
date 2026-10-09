@@ -455,6 +455,54 @@ fn ensure_meta(tx: &Transaction<'_>, id: &str, at: &str) -> Result<(), DomainErr
 /// 知识库身份在请求读到之后被并发建立的内部标记；只在三个写入口的重试里流转，不出服务。
 const SCOPE_MOVED: &str = "__knowledge_scope_moved";
 
+/// 上下文里带着的知识库身份（A3 的 EXISTING(知识库, g)）要在新写入的事务里核对（peer W4 r1 P1-01）：
+/// 接在建身份的准备步骤之后、世代屏障之前，所以重放、冲突照旧先裁决，对不上时零写入。
+///
+/// `expected` 为空串是 resolve 时知识库还没有身份：只有这次写入正是建身份的那一次（`prepare` 存在）才算对上；
+/// 期间别的写入先建了身份，就是落点变了（`TARGET_CHANGED`），由调用方不带上下文重新发起。
+fn check_scope(
+    expected: Option<String>,
+    expected_generation: Option<i64>,
+    prepare: Option<Prepare>,
+) -> Option<Prepare> {
+    let Some(expected) = expected else {
+        return prepare;
+    };
+    let fresh = prepare.is_some();
+    Some(Box::new(move |tx: &Transaction<'_>| {
+        if let Some(prepare) = prepare {
+            prepare(tx)?;
+        }
+        let current: Option<(String, Option<i64>)> = tx
+            .query_row(
+                "SELECT database_id, scope_gen FROM knowledge_meta",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(db)?;
+        let matches = if expected.is_empty() {
+            fresh
+        } else {
+            current.as_ref().is_some_and(|c| c.0 == expected)
+        };
+        if matches {
+            return Ok(());
+        }
+        let (id, generation) = current.unwrap_or_default();
+        Err(crate::ops::target_changed(
+            &crate::ops::Target::Existing {
+                scope: ReceiptScope::knowledge(expected),
+                generation: expected_generation,
+            },
+            &crate::ops::Target::Existing {
+                scope: ReceiptScope::knowledge(id),
+                generation,
+            },
+        ))
+    }))
+}
+
 fn id_field(field: &str, value: Option<&str>) -> Result<Option<String>, DomainError> {
     opt_text(field, value, 100)
 }
@@ -654,11 +702,13 @@ let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
         r: AgentSave,
         op_id: &str,
     ) -> Result<Written, DomainError> {
-        self.knowledge_save_agent_at(principal, project, session, r, op_id, None)
+        self.knowledge_save_agent_at(principal, project, session, r, op_id, None, None)
     }
 
-    /// 同上，带上下文里的知识库世代（A3：EXISTING(知识库, g) 或显式的 `expected_scope_generation`）：
-    /// 新写入时知识库已被恢复过就 `SCOPE_RESTORED`。世代取知识库的，不取作者所在项目的。
+    /// 同上，带上下文里的知识库身份与世代（A3：EXISTING(知识库, g)；世代也可以是显式的
+    /// `expected_scope_generation`）：新写入时知识库不是 `expected_scope_id` 那一个就 `TARGET_CHANGED`
+    /// （空串的含义见 [`check_scope`]），已被恢复过就 `SCOPE_RESTORED`。世代取知识库的，不取作者所在项目的。
+    #[allow(clippy::too_many_arguments)]
     pub fn knowledge_save_agent_at(
         &self,
         principal: &Principal,
@@ -666,6 +716,7 @@ let (id, expected_revision_id) = (id.clone(), expected_revision_id.clone());
         session: &str,
         r: AgentSave,
         op_id: &str,
+        expected_scope_id: Option<&str>,
         expected_generation: Option<i64>,
     ) -> Result<Written, DomainError> {
         capability::require(principal, Capability::KnowledgeAgentSave)?;
@@ -735,7 +786,11 @@ let (content, id, expected_revision_id, project_id) = (content.clone(), id.clone
             scope,
             Some(session_ref),
             fingerprint,
-            prepare,
+            check_scope(
+                expected_scope_id.map(str::to_owned),
+                expected_generation,
+                prepare,
+            ),
         );
         request.expected_generation = expected_generation;
         self.write(

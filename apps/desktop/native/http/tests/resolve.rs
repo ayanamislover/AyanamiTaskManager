@@ -329,3 +329,89 @@ fn writes_carry_the_resolved_target() {
     );
     assert_ne!(r["isError"], json!(true), "{r}");
 }
+
+/// 知识写入的 expected_target 连知识库身份一起核对（peer W4 r1 P1-01）：同为 KNOWLEDGE 但 database_id 不对是
+/// TARGET_CHANGED 且零写入；身份对、世代不对是 SCOPE_RESTORED；resolve 时还没有身份（空 id）只对建身份的那次
+/// 写入成立；重放先于核对，照样拿回原回执。
+#[test]
+fn knowledge_save_checks_the_knowledge_base_identity() {
+    let w = world("w4-r1-p1-01");
+    let save = |op: &str, slug: &str, target: &Value| {
+        call(
+            &w,
+            "memory",
+            "atm_knowledge_save",
+            json!({"session": w.session, "op_id": op, "slug": slug, "title": "t", "summary": "s",
+                   "body_markdown": "b", "expected_target": target}),
+        )
+    };
+    // 首次创建：resolve 看到的知识库还没有身份。
+    let (_, k) = resolve(
+        &w,
+        None,
+        "atm_knowledge_save",
+        json!({"session": w.session, "slug": "first"}),
+    );
+    let blank = k["expected_target"].clone();
+    assert_eq!(
+        (&blank["scope"]["id"], &blank["generation"]),
+        (&json!(""), &Value::Null),
+        "{k}"
+    );
+    let first = save("k-first", "first", &blank);
+    assert_ne!(first["isError"], json!(true), "{first}");
+
+    // 重放：同一 op_id、同一（如今已过时的）空 id，先裁决重放，拿回原回执。
+    let again = save("k-first", "first", &blank);
+    assert_ne!(again["isError"], json!(true), "{again}");
+    assert_eq!(
+        again["structuredContent"]["replayed"],
+        json!(true),
+        "{again}"
+    );
+    assert_eq!(
+        again["structuredContent"]["revisionId"], first["structuredContent"]["revisionId"],
+        "{again}"
+    );
+
+    // 身份已经建好之后，空 id 的新写入是落点变了。
+    let before = snapshot(&w);
+    let r = save("k-blank", "blank", &blank);
+    let e = error(&r);
+    assert_eq!(e["code"], json!("TARGET_CHANGED"), "{e}");
+    assert_eq!(snapshot(&w), before, "空 id 的新写入不该留下任何东西");
+
+    let (_, k) = resolve(
+        &w,
+        None,
+        "atm_knowledge_save",
+        json!({"session": w.session, "slug": "second"}),
+    );
+    let real = k["expected_target"].clone();
+    let id = real["scope"]["id"].as_str().unwrap().to_owned();
+    assert!(!id.is_empty(), "{k}");
+
+    // 同为 KNOWLEDGE、database_id 不对。
+    let mut wrong = real.clone();
+    wrong["scope"]["id"] = json!(format!("{id}X"));
+    let r = save("k-wrong-id", "wrong", &wrong);
+    let e = error(&r);
+    assert_eq!(e["code"], json!("TARGET_CHANGED"), "{e}");
+    assert_eq!(
+        e["details"]["current_target"]["scope"]["id"],
+        json!(id),
+        "{e}"
+    );
+    assert_eq!(snapshot(&w), before, "错 id 的写入不该留下任何东西");
+
+    // 身份对、世代不对。
+    let mut stale = real.clone();
+    stale["generation"] = json!(real["generation"].as_i64().unwrap() + 1000);
+    let r = save("k-stale", "stale", &stale);
+    assert_eq!(error(&r)["code"], json!("SCOPE_RESTORED"), "{r}");
+    assert_eq!(snapshot(&w), before, "世代不对的写入不该留下任何东西");
+
+    // 对照：身份、世代都对。
+    let r = save("k-ok", "second", &real);
+    assert_ne!(r["isError"], json!(true), "{r}");
+}
