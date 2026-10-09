@@ -693,6 +693,28 @@ static T_REVIEW: Tool = rest_tool(
     true,
 );
 
+static OWN_TOOLS: [&Tool; 13] = [
+    &T_STATUS,
+    &T_PROJECTS,
+    &T_PROJECT,
+    &T_BACKUPS,
+    &T_IMPORT_PREVIEW,
+    &T_PROJECT_CREATE,
+    &T_OBJECTIVE,
+    &T_MILESTONE,
+    &T_REVIEW,
+    &T_EVENTS,
+    &T_QUICK_LIST,
+    &T_QUICK_CREATE,
+    &T_QUICK_PROMOTE,
+];
+
+/// 按名字（`方法 路径模板`）找没有工具的路由的参数表：这些路由的 fix 指向自己（例如缺 session 时
+/// `add_param` 的 tool 就是这条路由），出路的校验用它（peer W4 r1 P1-04）。
+pub(crate) fn own_tool_named(name: &str) -> Option<&'static Tool> {
+    OWN_TOOLS.iter().copied().find(|t| t.name == name)
+}
+
 /// 没有工具的 A / A+U 路由用哪张参数表。
 fn own_tool(n: u16) -> Option<&'static Tool> {
     Some(match n {
@@ -804,44 +826,76 @@ fn query_args(tool: &Tool, query: Option<&str>) -> Map<String, Value> {
     out
 }
 
-/// 路径参数写进参数表。body / query 里已经有不同的值是参数冲突（不悄悄挑一个）；出路是用路径里的值
-/// 重发的同一调用。
+/// 路径参数写进参数表，返回与路径不一致的参数（冲突，不悄悄挑一个）。body / query 里写这个参数的每一种
+/// 写法（规范名、别名，大小写不论，与校验器同一个认法）都要比：不一致的报一条冲突并去掉，参数表里留下的
+/// 就是以路径为准的同一调用。冲突不在这里提前返回：要和校验器的问题一起报，fix.call 也要过同一个校验
+/// （peer W4 r1 P1-04）。
 fn inject(
     tool: &Tool,
     args: &mut Map<String, Value>,
     params: &HashMap<String, String>,
     pairs: &[(&str, &str)],
-) -> Result<(), Envelope> {
+) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (from, to) in pairs {
         let Some(v) = params.get(*from) else { continue };
-        if let Some(existing) = args.get(*to).and_then(Value::as_str)
-            && !existing.trim().eq_ignore_ascii_case(v.trim())
-        {
-            problems.push(
-                Problem::new(*to, ProblemKind::Conflict)
-                    .got(existing.to_owned())
-                    .allowed(v.clone()),
-            );
+        let named = |k: &str| {
+            k.eq_ignore_ascii_case(to)
+                || tool
+                    .fields
+                    .iter()
+                    .any(|f| f.name == *to && f.aliases.iter().any(|a| a.eq_ignore_ascii_case(k)))
+        };
+        let keys: Vec<String> = args.keys().filter(|k| named(k)).cloned().collect();
+        for key in keys {
+            let given = match &args[&key] {
+                Value::Null => continue,
+                Value::String(s) if s.trim().is_empty() => continue,
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            if !given.trim().eq_ignore_ascii_case(v.trim()) {
+                problems.push(
+                    Problem::new(key.as_str(), ProblemKind::Conflict)
+                        .got(args[&key].clone())
+                        .allowed(v.clone()),
+                );
+            }
+            args.remove(&key);
         }
         args.insert((*to).to_owned(), json!(v));
     }
-    if problems.is_empty() {
-        return Ok(());
+    problems
+}
+
+/// 参数表的最终判定（U-4）：路径冲突与校验器的问题一起报；fix.call 只给两者都更正过、并且通过同一个
+/// 校验的调用（校验器给的更正本身已经再校验过；没有冲突之外的问题时，以路径为准的参数表就是它）。
+fn checked(
+    tool: &'static Tool,
+    args: Map<String, Value>,
+    conflicts: Vec<Problem>,
+) -> Result<crate::schema::Checked, Envelope> {
+    let result = tool.validate(&Value::Object(args));
+    if conflicts.is_empty() {
+        return result.map_err(|r| invalid_argument(tool, r));
     }
-    Err(Envelope::new(
-        DomainError::invalid_argument(problems),
-        Committed::No,
-        None,
-        Fix::Call {
-            call: atm_domain::error::ToolCall {
-                name: tool.name.to_owned(),
-                arguments: Value::Object(args.clone()),
-            },
-            why: "路径里的值为准：去掉 body / query 里与路径不一致的那一项，或改成路径里的值"
-                .to_owned(),
+    let (mut problems, corrected) = match result {
+        Ok(c) => (Vec::new(), Some(c.args)),
+        Err(r) => (r.problems, r.corrected),
+    };
+    problems.extend(conflicts);
+    problems.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut envelope = invalid_argument(
+        tool,
+        crate::schema::Rejected {
+            problems,
+            corrected,
         },
-    ))
+    );
+    if let Fix::Call { why, .. } = &mut envelope.fix {
+        *why = "路径里的值为准、其余按 problems 更正后的同一调用".to_owned();
+    }
+    Err(envelope)
 }
 
 fn ok(value: Value, created: bool) -> Response {
@@ -910,15 +964,15 @@ fn snake_case(tool: &Tool, args: &mut Map<String, Value>) {
     }
 }
 
-/// 一个请求的全部输入：路径参数、query、body（GET 没有 body）。
+/// 一个请求的全部输入：路径参数、query、body（GET 没有 body），校验、规范化之后。
 async fn arguments(
     route: &Route,
-    tool: &Tool,
+    tool: &'static Tool,
     params: Result<Path<HashMap<String, String>>, PathRejection>,
     query: Option<String>,
     body: Body,
     pairs: &[(&str, &str)],
-) -> Result<Map<String, Value>, Envelope> {
+) -> Result<crate::schema::Checked, Envelope> {
     let params = params.map(|Path(p)| p).unwrap_or_default();
     let mut args = if route.method == "GET" {
         query_args(tool, query.as_deref())
@@ -938,8 +992,8 @@ async fn arguments(
         }
     };
     snake_case(tool, &mut args);
-    inject(tool, &mut args, &params, pairs)?;
-    Ok(args)
+    let conflicts = inject(tool, &mut args, &params, pairs);
+    checked(tool, args, conflicts)
 }
 
 impl Surface {
@@ -1017,13 +1071,9 @@ impl Surface {
                     Fix::None,
                 ));
             };
-            let args = match arguments(route, tool, params, query, body, spec.inject).await {
-                Ok(a) => a,
-                Err(e) => return reply(e),
-            };
-            let checked = match tool.validate(&Value::Object(args)) {
+            let checked = match arguments(route, tool, params, query, body, spec.inject).await {
                 Ok(c) => c,
-                Err(rejected) => return reply(invalid_argument(tool, rejected)),
+                Err(e) => return reply(e),
             };
             return match state
                 .calls
@@ -1043,13 +1093,9 @@ impl Surface {
                 Fix::None,
             ));
         };
-        let args = match arguments(route, tool, params, query, body, own_inject(route.n)).await {
-            Ok(a) => a,
-            Err(e) => return reply(e),
-        };
-        let checked = match tool.validate(&Value::Object(args)) {
+        let checked = match arguments(route, tool, params, query, body, own_inject(route.n)).await {
             Ok(c) => c.args,
-            Err(rejected) => return reply(invalid_argument(tool, rejected)),
+            Err(e) => return reply(e),
         };
         let n = route.n;
         match state

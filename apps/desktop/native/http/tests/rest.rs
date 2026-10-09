@@ -475,6 +475,114 @@ fn tool_routes_speak_the_tool_contract() {
     assert_eq!(status, 400, "{text}");
 }
 
+/// 一次 REST 调用；出错时信封必须兑现 U-4（有下一步、不退回兜底、fix 里的调用过对应的参数表）。
+fn rest(w: &World, method: &str, path: &str, body: &str) -> (u16, Value) {
+    let (status, text) = http(w.port, method, path, body);
+    let v = parse(&text);
+    if status >= 400 {
+        atm_http::fix::check(&v).unwrap_or_else(|e| panic!("{method} {path}: {e}: {text}"));
+    }
+    (status, v)
+}
+
+fn paths(v: &Value) -> Vec<String> {
+    v["problems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// REST 的错误路径同样兑现 U-4（peer W4 r1 P1-04）：路径冲突与越界、未知字段、组合约束一起报，fix.call 是
+/// 都更正过并且能直接执行的同一调用；自有路由缺 session 时出路指回这条路由，不退回 none。
+#[test]
+fn rest_errors_hand_out_fixes_that_pass_their_schema() {
+    let w = world("rest-u4");
+    let base = format!("/api/v1/projects/{}", w.project);
+
+    // 冲突 + 越界：fix.call 两处都改过，照着调就成。
+    let (status, v) = rest(
+        &w,
+        "GET",
+        &format!("{base}/work-items?project=WRONG&limit=999"),
+        "",
+    );
+    assert_eq!(
+        (status, &v["code"]),
+        (400, &json!("INVALID_ARGUMENT")),
+        "{v}"
+    );
+    assert_eq!(paths(&v), ["limit", "project"], "{v}");
+    let call_args = v["fix"]["call"]["arguments"].clone();
+    assert_eq!(call_args["project"], json!(w.project), "{v}");
+    assert_ne!(call_args["limit"], json!(999), "{v}");
+    let followed = call(
+        &w,
+        "core",
+        v["fix"]["call"]["name"].as_str().unwrap(),
+        call_args,
+    );
+    assert_ne!(followed["isError"], json!(true), "{followed}");
+
+    // 别名写的冲突 + 拼错的字段：冲突的那一项去掉，拼错的按 did_you_mean 改名。
+    let (_, v) = rest(
+        &w,
+        "GET",
+        &format!("{base}/work-items?Project_Code=WRONG&limt=5"),
+        "",
+    );
+    assert_eq!(paths(&v), ["Project_Code", "limt"], "{v}");
+    let call_args = &v["fix"]["call"]["arguments"];
+    assert_eq!(
+        (&call_args["project"], &call_args["limit"]),
+        (&json!(w.project), &json!(5)),
+        "{v}"
+    );
+    assert!(call_args.get("Project_Code").is_none(), "{v}");
+
+    // 冲突 + 组合约束（搜索既没有 query 也没有 op_id）：更正不了，给 add_param。
+    let (_, v) = rest(&w, "GET", &format!("{base}/search?project=WRONG"), "");
+    assert!(paths(&v).contains(&"project".to_owned()), "{v}");
+    assert_eq!(v["fix"]["kind"], json!("add_param"), "{v}");
+
+    // 自有路由：冲突 + 越界，fix.call 指回这条路由的参数表。
+    let (_, v) = rest(
+        &w,
+        "GET",
+        &format!("{base}/events?project=WRONG&limit=999"),
+        "",
+    );
+    assert_eq!(paths(&v), ["limit", "project"], "{v}");
+    assert_eq!(
+        v["fix"]["call"]["name"],
+        json!("GET /api/v1/projects/:code/events"),
+        "{v}"
+    );
+
+    // 自有路由缺 session：SESSION_REQUIRED，出路是给这条路由补 session，不是 none。
+    let (status, v) = rest(
+        &w,
+        "POST",
+        &format!("{base}/objectives"),
+        &json!({"title": "no-session"}).to_string(),
+    );
+    assert_eq!(
+        (status, &v["code"]),
+        (422, &json!("SESSION_REQUIRED")),
+        "{v}"
+    );
+    assert_eq!(
+        (&v["fix"]["kind"], &v["fix"]["param"], &v["fix"]["tool"]),
+        (
+            &json!("add_param"),
+            &json!("session"),
+            &json!("POST /api/v1/projects/:code/objectives")
+        ),
+        "{v}"
+    );
+}
+
 // ---- 没有工具的路由 --------------------------------------------------------------------------------
 
 #[test]

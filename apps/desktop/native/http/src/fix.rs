@@ -64,10 +64,16 @@ pub fn generator(code: ErrorCode) -> Option<Gen> {
     GENERATORS.iter().find(|(c, _)| *c == code).map(|(_, g)| *g)
 }
 
+/// fix 能指向的参数表：MCP 工具，或者 REST 自有路由（`POST /api/v1/projects/:code/objectives` 这类
+/// 没有工具的路由，出路指回它自己；peer W4 r1 P1-04）。
+pub fn tool_named(name: &str) -> Option<&'static Tool> {
+    tools::find(name).or_else(|| crate::rest::own_tool_named(name))
+}
+
 /// fix 里的调用能不能通过对应工具的 schema（不需要任何更正）。没有调用的出路恒为真。
 pub fn valid(fix: &Fix) -> bool {
     match fix {
-        Fix::AddParam { tool, .. } => tools::find(tool).is_some(),
+        Fix::AddParam { tool, .. } => tool_named(tool).is_some(),
         _ => fix.call().is_none_or(call_is_valid),
     }
 }
@@ -98,7 +104,7 @@ pub fn check(envelope: &Value) -> Result<(), String> {
     }
     if let Some(call) = fix.get("call").filter(|c| !c.is_null()) {
         let name = call["name"].as_str().unwrap_or_default();
-        let tool = tools::find(name).ok_or_else(|| format!("{code}: 没有工具 {name}"))?;
+        let tool = tool_named(name).ok_or_else(|| format!("{code}: 没有工具 {name}"))?;
         tool.validate(&call["arguments"])
             .map_err(|r| format!("{code}: fix.call 过不了 {name} 的 schema：{:?}", r.problems))?;
     } else if matches!(kind, "call" | "reread") {
@@ -108,7 +114,7 @@ pub fn check(envelope: &Value) -> Result<(), String> {
 }
 
 pub fn call_is_valid(call: &ToolCall) -> bool {
-    tools::find(&call.name).is_some_and(|t| t.validate(&call.arguments).is_ok())
+    tool_named(&call.name).is_some_and(|t| t.validate(&call.arguments).is_ok())
 }
 
 // ---- 上下文的取值 -----------------------------------------------------------------------------
@@ -167,7 +173,7 @@ impl Ctx<'_> {
 
 /// 一个工具调用：补上调用方的 project 与 session（工具有这两个参数、调用里又没写时）。
 fn call(ctx: &Ctx<'_>, name: &str, mut args: Map<String, Value>) -> ToolCall {
-    if let Some(tool) = tools::find(name) {
+    if let Some(tool) = tool_named(name) {
         let has = |f: &str| tool.fields.iter().any(|x| x.name == f);
         if has("session")
             && !args.contains_key("session")
