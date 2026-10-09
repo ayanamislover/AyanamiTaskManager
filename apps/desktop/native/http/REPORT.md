@@ -31,7 +31,7 @@ U-1 第一轮（Codex，27 次）又查出两处：
 U-1 第二轮（Codex 与 Claude Code 各 27 次）又查出两处：
 
 7. **给没开工的任务记进度，任务停在 READY**（Codex W5 每次先补一次 `start`，第一轮里没补的两次留下了「有进度却没人领」的任务）。11 §1 的 W5 默认任务已经在做，冷启动时不是。修订：任务进度遇到 BACKLOG / READY / CLAIMED 时在同一事务里先 `start`，回执的 `auto_applied` 写明（`StateWrite::Progress`，`service/src/work/patch.rs` `auto_start_for_progress`）。和状态写入不同，这一步尽力而为：前置没完成或领不到时不补、不报错，进度照记。带 blocker 的进度与 `task_patch` 的 `block` 一致，先 `start` 再阻塞；补不上时 READY 上照旧拒绝、零写入。用例 `service/tests/memory.rs` `u1_progress_on_an_unstarted_task_starts_it`、`tests/write.rs` `progress_on_an_unstarted_task_reports_the_auto_start`、`domain/tests/ergonomics.rs`。
-8. **只有 brief 和 task_list 用默认会话**（Claude Code W4 三次都先不带 session 调 `atm_task_get` 拿检查项 id，SESSION_REQUIRED 后重试）。修订 1 只覆盖了压缩后的那两个工具。修订：要项目的读（`atm_task_get`，以及按列表或 op_id 回查的 `atm_search`）同样补默认 session；全文搜索不补（服务只在 op_id 回查时收 session）。列表搜索里的 session 只用来推出项目，推完就去掉。instructions 与 GUIDE 改为「读写都可以省略 session」。用例 `tests/resolve.rs`、`tests/bridge.rs` 的压缩场景。
+8. **只有 brief 和 task_list 用默认会话**（Claude Code W4 三次都先不带 session 调 `atm_task_get` 拿检查项 id，SESSION_REQUIRED 后重试）。修订 1 只覆盖了压缩后的那两个工具。修订：要项目的读（`atm_task_get`、不在 tools/list 里但仍可调用的旧名 `atm_delta`，以及按列表或 op_id 回查的 `atm_search`）同样补默认 session；全文搜索不补（服务只在 op_id 回查时收 session）。列表搜索里的 session 只用来推出项目，推完就去掉。instructions 与 GUIDE 改为「读写都可以省略 session」。用例 `tests/resolve.rs`、`tests/bridge.rs` 的压缩场景。
 
 修订 8 的变异验红又引出一处：
 
@@ -130,3 +130,5 @@ U-1 第二轮（Codex 与 Claude Code 各 27 次）又查出两处：
 - 单独去掉「真冲突不给更正」那一行是等价变异：外层的再校验会拦下仍有冲突的更正，它在上一版证据里 SURVIVED。所以这一条改为与再校验同时关掉；再校验单独的作用另有一条，由 `a_correction_that_would_not_pass_is_withheld` 验红。
 
 这次修订改了 `schema.rs`、`bridge.rs`，`w4j-clamp`、`w4j-unused`、`w4j-reads` 三份证据随之在新候选上重跑。`w4j-unused` 的第一条变异的锚点因缩进变化改写过。
+
+W4 整体评审准备时的一处更正：befd0ae 以为 `atm_delta` 不在任何 MCP profile 上，把它从默认会话名单里去掉了。实际上它是并入 brief 之后保留的可调用旧名（`tools.rs` 开头的说明），照 2.x 恢复流程不带 session 调它的 Agent 会被 SESSION_REQUIRED 挡住。已加回名单，`tests/resolve.rs` 补了这一条，`mut-w4j-reads.py` 加了对应的变异。

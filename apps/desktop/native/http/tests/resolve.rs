@@ -178,6 +178,9 @@ fn resolve_reads_one_snapshot_and_writes_nothing() {
         json!({"list": "records"}),
     );
     assert_ne!(listed["isError"], json!(true), "{listed}");
+    // atm_delta 不在 tools/list 里，但旧名可调用；照 2.x 恢复流程不带 session 调它也一样。
+    let delta = call_as(&w, Some(CLAUDE), "memory", "atm_delta", json!({}));
+    assert_ne!(delta["isError"], json!(true), "{delta}");
     // 全文搜索不补：补了 session 会被当成 op_id 回查的参数拒掉。
     let found = call_as(
         &w,
