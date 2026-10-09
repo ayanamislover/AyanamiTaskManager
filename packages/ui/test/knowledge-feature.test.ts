@@ -159,6 +159,36 @@ describe("Knowledge feature", () => {
     expect(styles).toContain(".atm-knowledge-body-editor");
   });
 
+  it("says knowledge lives in whole-store backups instead of an empty state that never fills", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(
+      ["backups", "knowledge"],
+      [
+        {
+          id: "store-1",
+          scope: "STORE",
+          reason: "DAILY",
+          sizeBytes: 4096,
+          createdAt: "2026-10-09T00:00:00.000Z",
+          verifiedAt: "2026-10-09T00:00:01.000Z",
+        },
+      ],
+    );
+    const markup = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(KnowledgeBackupPanel, { client: client(), notify: vi.fn() }),
+      ),
+    );
+    expect(markup).toContain("知识库在整库备份里");
+    expect(markup).toContain("已有 1 份");
+    expect(markup).not.toContain("创建首个手动备份后会显示在这里");
+    expect(markup).not.toContain(">恢复<");
+    expect(markup).toContain("立即备份会备份整个本地数据库");
+    expect(markup).not.toContain("仅备份本地共享知识数据库");
+  });
+
   it("exposes the global KNOWLEDGE backup and restore entry in settings", () => {
     const queryClient = new QueryClient();
     queryClient.setQueryData(

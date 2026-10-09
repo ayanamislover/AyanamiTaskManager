@@ -610,6 +610,7 @@ impl App {
                 js_id,
                 result,
             } => {
+                self.ui_in_flight = self.ui_in_flight.saturating_sub(1);
                 if same_page((generation, epoch), (self.generation, self.epoch)) {
                     match result {
                         Ok(value) => self.deliver(&bridge::ok(js_id, value)),
@@ -785,7 +786,11 @@ impl App {
                 self.deliver(&answer);
             }
             "checkForUpdates" => {
-                let (coordinator, proxy) = (coordinator.clone(), self.proxy.clone());
+                let coordinator = coordinator.clone();
+                if !self.take_ui_slot(id) {
+                    return;
+                }
+                let proxy = self.proxy.clone();
                 let (generation, epoch) = (self.generation, self.epoch);
                 std::thread::spawn(move || {
                     let result = coordinator
@@ -817,7 +822,14 @@ impl App {
             }
             return;
         };
-        let (coordinator, proxy) = (coordinator.clone(), self.proxy.clone());
+        let coordinator = coordinator.clone();
+        // 窗口发起的要回答，占一个在途名额；托盘发起的不回答，也不占。
+        if let Some(id) = id
+            && !self.take_ui_slot(id)
+        {
+            return;
+        }
+        let proxy = self.proxy.clone();
         let (generation, epoch) = (self.generation, self.epoch);
         std::thread::spawn(move || {
             let result = match coordinator.apply(&principal) {
@@ -989,6 +1001,18 @@ impl App {
         }
     }
 
+    /// 占一个界面在途名额：`runtimeRequest` 与更新的检查 / 应用共用（它们各开一个工作线程，不占名额就不受
+    /// 上限约束，peer W5 r1 P2-01）。满了就回 SERVICE_BUSY，不排队。名额在应答回到事件循环时释放
+    /// （`UiReply` / `HostReply`），旧页面的应答也释放。
+    fn take_ui_slot(&mut self, id: u64) -> bool {
+        if self.ui_in_flight >= MAX_UI_IN_FLIGHT {
+            self.deliver(&bridge::error(id, "SERVICE_BUSY", "界面请求太多，稍后再试"));
+            return false;
+        }
+        self.ui_in_flight += 1;
+        true
+    }
+
     /// 界面请求在入口的 tokio 运行时上分发（`spawn_blocking`，与 Agent 入口共用工作线程），主体是这一代
     /// WebView 的 User（`webview(generation, epoch)`）。结果经事件循环交回，投递前再核对代次。
     fn dispatch_ui(&mut self, id: u64, input: &Value) {
@@ -1010,8 +1034,7 @@ impl App {
                 return;
             }
         };
-        if self.ui_in_flight >= MAX_UI_IN_FLIGHT {
-            self.deliver(&bridge::error(id, "SERVICE_BUSY", "界面请求太多，稍后再试"));
+        if !self.take_ui_slot(id) {
             return;
         }
         let version = self.version.clone();
@@ -1025,7 +1048,6 @@ impl App {
                 Arc::new(Ui::new(svc, runtime, started_at))
             })
             .clone();
-        self.ui_in_flight += 1;
         let principal = atm_ui_bridge::webview(self.generation, self.epoch);
         let mut reply = PendingReply {
             proxy: self.proxy.clone(),

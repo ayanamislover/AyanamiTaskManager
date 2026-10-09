@@ -553,24 +553,50 @@ async function uiBridgeCases(page: Page, deliveries: DeliveryLog, n: string): Pr
     JSON.stringify(pendingMethods),
   );
 
-  // 在途上限：同时发 64 + 16 条要停 1.5 s 的请求，正好 16 条回 SERVICE_BUSY。
+  // 在途上限：同时发 64 + 16 条要停 1.5 s 的请求，正好 16 条回 SERVICE_BUSY。满额时的检查更新也占名额
+  // （它在宿主里开工作线程，peer W5 r1 P2-01），同样回 SERVICE_BUSY；洪峰过去名额释放，检查照常回答。
   const flood = (await page.evaluate(`(async () => {
     const desktop = window.ayanamiDesktop;
-    const answers = await Promise.all(
-      Array.from({ length: ${UI_IN_FLIGHT + 16} }, (_, index) =>
-        desktop.runtimeRequest({ path: "/__smoke/hold?ms=1500&marker=flood-" + index }).then(
-          () => "held",
-          (failure) => failure.code ?? "unknown",
-        ),
-      ),
+    const outcome = (promise, ok) =>
+      promise.then(
+        () => ok,
+        (failure) => failure.code ?? "unknown",
+      );
+    const holds = Array.from({ length: ${UI_IN_FLIGHT} }, (_, index) =>
+      outcome(desktop.runtimeRequest({ path: "/__smoke/hold?ms=1500&marker=flood-" + index }), "held"),
+    );
+    const check = outcome(desktop.checkForUpdates(), "checked");
+    const extra = Array.from({ length: 16 }, (_, index) =>
+      outcome(desktop.runtimeRequest({ path: "/__smoke/hold?ms=1500&marker=extra-" + index }), "held"),
     );
     const counts = {};
-    for (const answer of answers) counts[answer] = (counts[answer] ?? 0) + 1;
-    return counts;
-  })()`)) as Record<string, number>;
+    for (const answer of await Promise.all([...holds, ...extra])) counts[answer] = (counts[answer] ?? 0) + 1;
+    // 洪峰过去之后顺序检查 ${UI_IN_FLIGHT + 1} 次：每次的应答都要把名额还回来，否则最后几次会回 SERVICE_BUSY。
+    const after = [];
+    for (let index = 0; index <= ${UI_IN_FLIGHT}; index += 1)
+      after.push(
+        await desktop.checkForUpdates().then(
+          (status) => status?.code ?? null,
+          (failure) => failure.code ?? "unknown",
+        ),
+      );
+    return { counts, check: await check, after: [...new Set(after)], checks: after.length };
+  })()`)) as {
+    counts: Record<string, number>;
+    check: string;
+    after: Array<string | null>;
+    checks: number;
+  };
   log.check(
     `在途超过 ${UI_IN_FLIGHT} 条回 SERVICE_BUSY`,
-    flood.held === UI_IN_FLIGHT && flood.SERVICE_BUSY === 16,
+    flood.counts.held === UI_IN_FLIGHT && flood.counts.SERVICE_BUSY === 16,
+    JSON.stringify(flood),
+  );
+  log.check(
+    "满额时检查更新也回 SERVICE_BUSY，名额释放后照常回答",
+    flood.check === "SERVICE_BUSY" &&
+      flood.checks === UI_IN_FLIGHT + 1 &&
+      JSON.stringify(flood.after) === JSON.stringify(["UPDATE_UNSUPPORTED"]),
     JSON.stringify(flood),
   );
   return code;

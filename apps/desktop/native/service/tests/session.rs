@@ -627,6 +627,69 @@ fn p1_3_auto_resume() {
     );
 }
 
+/// 00 C-08「超时阈值沿用 2.0」：扫描读存着的 `recovery.sessionTimeoutMinutes`，读法与 2.x 一样
+/// （`Math.min(1440, Math.max(1, Number(value ?? 5)))`：2.x 原样转来的字符串照样认、不取整、越界夹取；
+/// 不是数时退回默认 5）。反例：没存这个设置时 10 分钟没心跳就关；存了 30 分钟就不关。
+#[test]
+fn c08_the_sweep_uses_the_stored_timeout_read_like_2_x() {
+    let w = world("ss-timeout");
+    let s = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    }));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let ago = atm_domain::time::Timestamp::from_millis(now_ms - 10 * 60_000).to_string();
+    w.exec(&format!(
+        "UPDATE agent_sessions SET heartbeat_at = '{ago}', updated_at = '{ago}', client_identity = NULL WHERE id = '{s}'"
+    ));
+    let store = |json: &str| {
+        w.exec(&format!(
+            "INSERT INTO settings (key, value_json, version, updated_at)
+             VALUES ('recovery.sessionTimeoutMinutes', '{json}', 1, '2026-01-01T00:00:00.000Z')
+             ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json"
+        ))
+    };
+    let timeout = || w.svc.stored_sweep_policy().unwrap().timeout_ms;
+    assert_eq!(timeout(), 5 * 60_000);
+    for (json, ms) in [
+        (r#""30""#, 30 * 60_000),
+        (r#""12.5""#, 750_000),
+        ("12.5", 750_000),
+        (r#""abc""#, 5 * 60_000),
+        ("null", 5 * 60_000),
+        ("0", 60_000),
+        (r#""""#, 60_000),
+        ("true", 60_000),
+        ("5000", 1440 * 60_000),
+        (r#""Infinity""#, 1440 * 60_000),
+    ] {
+        store(json);
+        assert_eq!(timeout(), ms, "{json}");
+    }
+    let unknown = |_: &str| None;
+    store(r#""30""#);
+    let report = w
+        .svc
+        .sweep_sessions(&system(), w.svc.stored_sweep_policy().unwrap(), &unknown)
+        .unwrap();
+    // 夹具里别的 session 心跳早就旧了，只看这一个。
+    assert!(!report.closed.iter().any(|c| c.1 == s), "{report:?}");
+    w.exec("DELETE FROM settings WHERE key = 'recovery.sessionTimeoutMinutes'");
+    let report = w
+        .svc
+        .sweep_sessions(&system(), w.svc.stored_sweep_policy().unwrap(), &unknown)
+        .unwrap();
+    assert!(
+        report
+            .closed
+            .contains(&("PA".into(), s.clone(), "HEARTBEAT_TIMEOUT".into())),
+        "{report:?}"
+    );
+}
+
 /// R11 P1-3 第 2 条「客户端进程一退出就关闭」：不等周期扫描，begin 自己把客户端已经退出的同 agent / role / cwd
 /// ONLINE session 按 CLIENT_EXITED 关掉，于是 auto resume 立即接上它（Agent 崩溃后马上重启，U-2 W8）。
 /// 客户端还活着的、探测说不清的（`None`）、别的 cwd 的、resume:false 的，都不动。

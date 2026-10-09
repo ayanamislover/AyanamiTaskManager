@@ -11,7 +11,7 @@ use crate::write::{Rebind, Service, WriteRequest, Written};
 use atm_domain::capability::{self, Capability};
 use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::principal::Principal;
-use atm_domain::text::utf16_len;
+use atm_domain::text::{js_trim, utf16_len};
 use atm_store::events as store_events;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
@@ -157,21 +157,22 @@ fn row(tx: &Transaction<'_>, key: &str) -> Result<Option<(Value, i64, String)>, 
     .map_err(db)
 }
 
-/// 存着的保留策略（W5h 维护作业用）。2.x 的读法：没有或不是对象就用默认；每项缺了、不是有限数就用默认，
-/// 否则取整后夹到 1～上限；`enabled` 只有明确是 false 才关。
+/// 存着的保留策略（W5h 维护作业用）。2.x 的读法（`backup-retention.ts` `bounded`）：
+/// `Number(value ?? fallback)`，不是有限数就用默认，否则取整后夹到 1～上限；`enabled` 只有明确是 false 才关。
+/// 存着的值是 2.x 原样转换来的（不经校验），`"20"`、`""`、`true` 这类值要和 2.x 读出同一个数（peer W5 r1 P1-01）。
 pub(crate) fn stored_backup_policy(tx: &Transaction<'_>) -> Result<BackupPolicy, DomainError> {
     let value = row(tx, BACKUP_POLICY)?
         .map(|(v, _, _)| v)
         .unwrap_or(Value::Null);
     let default = BackupPolicy::default();
     let bounded = |key: &str, fallback: i64, max: i64| -> i64 {
-        match value
-            .get(key)
-            .and_then(Value::as_f64)
-            .filter(|f| f.is_finite())
-        {
-            Some(f) => (f.trunc() as i64).clamp(1, max),
-            None => fallback,
+        match value.get(key) {
+            // `??`：缺了与 null 都换成默认值。
+            None | Some(Value::Null) => fallback,
+            Some(v) => match js_number(v).filter(|f| f.is_finite()) {
+                Some(f) => (f.trunc().max(1.0).min(max as f64)) as i64,
+                None => fallback,
+            },
         }
     };
     Ok(BackupPolicy {
@@ -180,6 +181,106 @@ pub(crate) fn stored_backup_policy(tx: &Transaction<'_>) -> Result<BackupPolicy,
         weekly_keep: bounded("weeklyKeep", default.weekly_keep, 52),
         other_keep: bounded("otherKeep", default.other_keep, 20),
     })
+}
+
+/// 存着的会话超时，毫秒。2.x（`startup-recovery.ts` `recoverProjectSessions`）：
+/// `Math.min(1440, Math.max(1, Number(value ?? 5)))` 分钟，不取整；2.x 原样转来的 `"30"` 照样是 30 分钟。
+/// 不是数时 2.x 的截止时间是 Invalid Date、整轮恢复抛错；这里退回默认 5 分钟，扫描照常进行。
+/// 截止时间在 2.x 是 `new Date(now - m * 60000)`，Date 取整后等于减去向上取整的毫秒数。
+pub(crate) fn stored_session_timeout_ms(tx: &Transaction<'_>) -> Result<i64, DomainError> {
+    let minutes = match row(tx, SESSION_TIMEOUT)?.map(|(v, _, _)| v) {
+        None | Some(Value::Null) => 5.0,
+        Some(v) => js_number(&v).filter(|m| !m.is_nan()).unwrap_or(5.0),
+    };
+    Ok((minutes.clamp(1.0, 1440.0) * 60_000.0).ceil() as i64)
+}
+
+/// JS 的 `Number(value)`：`None` 是 NaN。数组先按 `Array.prototype.join` 变成字符串，对象是 NaN。
+fn js_number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Null => Some(0.0),
+        Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => js_string_number(s),
+        Value::Array(_) => js_string_number(&js_join(v)),
+        Value::Object(_) => None,
+    }
+}
+
+/// `String(value)`，只用于数组元素：null 是空串，嵌套数组递归 join，对象是 `[object Object]`。
+fn js_join(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items.iter().map(js_join).collect::<Vec<_>>().join(","),
+        Value::Object(_) => "[object Object]".to_owned(),
+    }
+}
+
+/// 字符串转数（ECMAScript StringNumericLiteral）：去掉首尾空白，空串是 0；`Infinity` 带可选符号；
+/// `0x` / `0o` / `0b` 不带符号；十进制允许符号、小数点与指数。其余（包括 Rust 认的 `inf`、`nan`、`1_0`）是 NaN。
+fn js_string_number(s: &str) -> Option<f64> {
+    let t = js_trim(s);
+    if t.is_empty() {
+        return Some(0.0);
+    }
+    let (sign, body) = match t.as_bytes()[0] {
+        b'+' => (1.0, &t[1..]),
+        b'-' => (-1.0, &t[1..]),
+        _ => (1.0, t),
+    };
+    if body == "Infinity" {
+        return Some(sign * f64::INFINITY);
+    }
+    let radix = match body.get(..2) {
+        Some("0x" | "0X") => Some(16),
+        Some("0o" | "0O") => Some(8),
+        Some("0b" | "0B") => Some(2),
+        _ => None,
+    };
+    if let Some(radix) = radix {
+        // 带进制前缀的不许有符号。
+        if body.len() != t.len() || body.len() == 2 {
+            return None;
+        }
+        return body[2..].chars().try_fold(0.0_f64, |acc, c| {
+            c.to_digit(radix)
+                .map(|d| acc * f64::from(radix) + f64::from(d))
+        });
+    }
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        *i - start
+    };
+    let whole = digits(&mut i);
+    let mut fraction = 0;
+    if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        fraction = digits(&mut i);
+    }
+    if whole + fraction == 0 {
+        return None;
+    }
+    if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
+        i += 1;
+        if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
+            i += 1;
+        }
+        if digits(&mut i) == 0 {
+            return None;
+        }
+    }
+    if i != bytes.len() {
+        return None;
+    }
+    body.parse::<f64>().ok().map(|f| sign * f)
 }
 
 fn setting_view(key: &str, row: Option<(Value, i64, String)>) -> Value {
@@ -408,6 +509,58 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 与 JS `Number(x)` 逐条对照（期望值是在 Node 里求出来的）。
+    #[test]
+    fn numbers_are_read_like_javascript() {
+        let nan = None::<f64>;
+        for (input, expected) in [
+            ("20", Some(20.0)),
+            (" 3.9\n", Some(3.9)),
+            ("", Some(0.0)),
+            ("\u{feff}\u{a0} 7 \t", Some(7.0)),
+            ("+5", Some(5.0)),
+            ("-4", Some(-4.0)),
+            (".5", Some(0.5)),
+            ("5.", Some(5.0)),
+            ("1e3", Some(1000.0)),
+            ("1E+2", Some(100.0)),
+            ("0x10", Some(16.0)),
+            ("0o17", Some(15.0)),
+            ("0b101", Some(5.0)),
+            ("Infinity", Some(f64::INFINITY)),
+            ("-Infinity", Some(f64::NEG_INFINITY)),
+            ("x", nan),
+            ("20 days", nan),
+            ("1_0", nan),
+            ("inf", nan),
+            ("NaN", nan),
+            ("infinity", nan),
+            ("-0x10", nan),
+            ("0x", nan),
+            (".", nan),
+            ("1e", nan),
+            ("\u{85}5", nan),
+        ] {
+            assert_eq!(js_string_number(input), expected, "{input:?}");
+        }
+        for (input, expected) in [
+            (json!(true), Some(1.0)),
+            (json!(false), Some(0.0)),
+            (json!(null), Some(0.0)),
+            (json!(12.5), Some(12.5)),
+            (json!([]), Some(0.0)),
+            (json!(["6"]), Some(6.0)),
+            (json!([[8]]), Some(8.0)),
+            (json!([null]), Some(0.0)),
+            (json!([1, 2]), nan),
+            (json!([true]), nan),
+            (json!({}), nan),
+            (json!({"n": 3}), nan),
+        ] {
+            assert_eq!(js_number(&input), expected, "{input}");
+        }
+    }
 
     #[test]
     fn key_shape_follows_2x() {

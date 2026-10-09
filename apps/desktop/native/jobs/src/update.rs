@@ -274,81 +274,10 @@ fn action_for(code: &str) -> &'static str {
     }
 }
 
-fn redact_assignment(token: &str) -> Option<String> {
-    let lower = token.to_ascii_lowercase();
-    for key in [
-        "access_token",
-        "access-token",
-        "accesstoken",
-        "api_key",
-        "api-key",
-        "apikey",
-        "token",
-        "signature",
-        "auth",
-        "key",
-    ] {
-        for sep in ['=', ':'] {
-            if let Some(at) = lower.find(&format!("{key}{sep}")) {
-                // 键前面只能是开头或 URL 的 `?` / `&`，免得把 `monkey=` 这类当成 `key=`。
-                let before = lower[..at].chars().last();
-                if at == 0 || matches!(before, Some('?' | '&')) {
-                    let cut = at + key.len() + 1;
-                    return Some(format!("{}<redacted>", &token[..cut]));
-                }
-            }
-        }
-    }
-    None
-}
-
-fn is_local_path(token: &str) -> bool {
-    let t = token
-        .trim_start_matches(['"', '\'', '('])
-        .trim_start_matches("file:///");
-    let b = t.as_bytes();
-    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
-        || t.starts_with("\\\\")
-}
-
-/// 2.0 `sanitizeUpdateDetail`：空白归一，令牌（Authorization / Bearer / token= 一类）与本机路径换成占位，
-/// 最长 512 字。
+/// 2.0 `sanitizeUpdateDetail`：空白归一，令牌（Authorization / Bearer / token= 一类）与本机路径换成占位
+/// （[`atm_domain::redact`]，与宿主日志同一套语义），最长 512 字。
 pub fn sanitize_detail(detail: &str) -> String {
-    // 下一个词要换成占位：`Bearer <x>`；`Authorization: [Bearer] <x>` 整段只留一个占位。
-    #[derive(PartialEq)]
-    enum Next {
-        Plain,
-        Secret,
-        AfterAuthorization,
-    }
-    let mut out: Vec<String> = Vec::new();
-    let mut next = Next::Plain;
-    for token in detail.split_whitespace() {
-        let lower = token.to_ascii_lowercase();
-        if next == Next::AfterAuthorization && lower == "bearer" {
-            next = Next::Secret;
-            continue;
-        }
-        if next != Next::Plain {
-            out.push("<redacted>".into());
-            next = Next::Plain;
-            continue;
-        }
-        if lower == "bearer" {
-            out.push(token.to_owned());
-            next = Next::Secret;
-        } else if lower == "authorization:" {
-            out.push("Authorization:".into());
-            next = Next::AfterAuthorization;
-        } else if is_local_path(token) {
-            out.push("<local-path>".into());
-        } else if let Some(redacted) = redact_assignment(token) {
-            out.push(redacted);
-        } else {
-            out.push(token.to_owned());
-        }
-    }
-    let joined = out.join(" ");
+    let joined = atm_domain::redact::redact_secrets(detail, atm_domain::redact::Paths::Hide);
     if joined.chars().count() <= MAX_DETAIL_CHARS {
         return joined;
     }

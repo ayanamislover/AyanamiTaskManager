@@ -214,7 +214,18 @@ async function theme(page: Page, wanted: "light" | "dark"): Promise<void> {
   }
 }
 
-async function shot(page: Page, name: string): Promise<void> {
+/**
+ * 截一张。默认先把页面滚回顶部：上一页的滚动位置会留下来（暗色项目页曾继承设置页滚到底的位置，
+ * 两端截到的不是同一块，peer W5 r1）。要截页尾的（工程统计、设置下半屏）传 `keepScroll`。
+ */
+async function shot(page: Page, name: string, keepScroll = false): Promise<void> {
+  if (!keepScroll) {
+    await page.evaluate(() => {
+      for (const el of [document.scrollingElement, ...document.querySelectorAll("*")])
+        if (el && el.scrollTop > 0) el.scrollTop = 0;
+    });
+    await delay(300);
+  }
   const path = join(shotsDir, `${name}.png`);
   await page.screenshot({ path });
   report.shots.push(`${name}.png`);
@@ -288,7 +299,7 @@ async function shots(page: Page): Promise<void> {
         .evaluate((el) => el.scrollIntoView({ block: "center" }))
         .catch(() => undefined);
       await delay(400);
-      await shot(page, `engineering-${mode}`);
+      await shot(page, `engineering-${mode}`, true);
     }
     if (mode === "light")
       for (const [label, name] of [
@@ -319,7 +330,7 @@ async function shots(page: Page): Promise<void> {
             if (el && el.scrollHeight > el.clientHeight + 10) el.scrollTop = el.scrollHeight;
         });
         await delay(600);
-        await shot(page, `settings-bottom-${mode}`);
+        await shot(page, `settings-bottom-${mode}`, true);
       }
     }
   }

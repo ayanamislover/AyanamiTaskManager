@@ -321,36 +321,11 @@ pub fn rotate(dir: &Path, stem: &str, ext: &str, incoming: u64, max: u64, files:
     }
 }
 
-/// 宿主日志（`host.log`）一行的脱敏：令牌（Authorization / Bearer / token= 一类）换成占位，
-/// 换行压成空格，最长 1000 字。路径照留：宿主日志要能定位安装与数据根的问题。
+/// 宿主日志（`host.log`）一行的脱敏：令牌（Authorization / Bearer / token= 一类）换成占位
+/// （[`atm_domain::redact`]，与更新日志同一套语义），换行压成空格，最长 1000 字。路径照留：
+/// 宿主日志要能定位安装与数据根的问题。
 pub fn redact_line(line: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut hide_next = false;
-    for token in line.split_whitespace() {
-        if hide_next {
-            out.push("<redacted>".into());
-            hide_next = false;
-            continue;
-        }
-        let lower = token.to_ascii_lowercase();
-        if lower == "bearer" || lower == "authorization:" {
-            out.push(token.to_owned());
-            hide_next = true;
-            continue;
-        }
-        let mut redacted = None;
-        for key in ["token=", "token:", "key=", "secret=", "password="] {
-            if let Some(at) = lower.find(key) {
-                let before = lower[..at].chars().last();
-                if at == 0 || matches!(before, Some('?' | '&' | '_' | '-' | '"')) {
-                    redacted = Some(format!("{}<redacted>", &token[..at + key.len()]));
-                    break;
-                }
-            }
-        }
-        out.push(redacted.unwrap_or_else(|| token.to_owned()));
-    }
-    let joined = out.join(" ");
+    let joined = atm_domain::redact::redact_secrets(line, atm_domain::redact::Paths::Keep);
     if joined.chars().count() <= 1000 {
         joined
     } else {
@@ -525,10 +500,21 @@ mod tests {
 
     #[test]
     fn host_log_lines_lose_their_secrets() {
+        // peer W5 r1 P1-02：`Authorization:` 之后的方案与密钥整段换成一个占位，密钥一个字符都不留。
         assert_eq!(
             redact_line("GET /x Authorization: Bearer abc\nnext"),
-            "GET /x Authorization: <redacted> abc next"
+            "GET /x Authorization: <redacted> next"
         );
+        for line in [
+            "GET /x Authorization: Bearer SYNTHETIC_REVIEW_SECRET",
+            "Authorization:Bearer SYNTHETIC_REVIEW_SECRET",
+            r#"{"authorization":"Bearer SYNTHETIC_REVIEW_SECRET"}"#,
+        ] {
+            assert!(
+                !redact_line(line).contains("SYNTHETIC_REVIEW_SECRET"),
+                "{line}"
+            );
+        }
         assert_eq!(redact_line("got bearer xyz ok"), "got bearer <redacted> ok");
         assert_eq!(
             redact_line("url ?token=abc&x user_key=k monkey=fine"),

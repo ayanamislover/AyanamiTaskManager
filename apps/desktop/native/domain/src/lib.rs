@@ -11,6 +11,7 @@
 //! - [`progress`]：进度（01 §6；00 C-02、C-04、C-23、C-24）。
 //! - [`evidence`]：证据与候选哈希的格式（01 W-010、W-011）。
 //! - [`keys`] / [`time`] / [`text`]：公开 key、时间戳、与 JS 一致的字符串工具。
+//! - [`redact`]：日志里的密钥脱敏（宿主日志与更新日志共用）。
 
 pub mod capability;
 pub mod error;
@@ -20,6 +21,7 @@ pub mod keys;
 pub mod ownership;
 pub mod principal;
 pub mod progress;
+pub mod redact;
 pub mod text;
 pub mod time;
 pub mod work;

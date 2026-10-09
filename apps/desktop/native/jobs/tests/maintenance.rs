@@ -177,6 +177,36 @@ fn daily_and_weekly_backups_are_made_when_due_and_pruned_by_policy() {
     assert_eq!(kinds(&w, "DAILY").len(), 3);
 }
 
+/// 2.x 原样转换来的保留数是字符串、布尔、空串、数组时，读出来的数和 2.x 的 `Number(value ?? fallback)` 一样
+/// （peer W5 r1 P1-01）：`"20"` 留 20 份而不是退回默认 2 份；`""` 与 `false` 是 0，夹到 1；`null` 用默认。
+#[test]
+fn legacy_policy_values_are_read_like_2_x() {
+    let w = world("mt-legacy-values");
+    store_policy(&w, r#"{"otherKeep":"20"}"#);
+    for _ in 0..4 {
+        w.svc.create_manual_backup(&user()).unwrap();
+    }
+    assert_dirs_match(&w);
+    assert_eq!(kinds(&w, "MANUAL").len(), 4);
+    store_policy(&w, r#"{"otherKeep":" 3.9 "}"#);
+    w.svc.create_manual_backup(&user()).unwrap();
+    assert_dirs_match(&w);
+    assert_eq!(kinds(&w, "MANUAL").len(), 3);
+    store_policy(&w, r#"{"otherKeep":["2"]}"#);
+    w.svc.create_manual_backup(&user()).unwrap();
+    assert_eq!(kinds(&w, "MANUAL").len(), 2);
+    store_policy(&w, r#"{"otherKeep":null}"#);
+    w.svc.create_manual_backup(&user()).unwrap();
+    assert_eq!(kinds(&w, "MANUAL").len(), 2);
+    store_policy(&w, r#"{"otherKeep":""}"#);
+    w.svc.create_manual_backup(&user()).unwrap();
+    assert_dirs_match(&w);
+    assert_eq!(kinds(&w, "MANUAL").len(), 1);
+    store_policy(&w, r#"{"otherKeep":true}"#);
+    w.svc.create_manual_backup(&user()).unwrap();
+    assert_eq!(kinds(&w, "MANUAL").len(), 1);
+}
+
 /// 修剪跳过固定还没到期的、被恢复引用着的（A4）；固定已经到期的照常修剪。
 #[test]
 fn retention_skips_live_pins_and_restore_references() {

@@ -1764,8 +1764,9 @@ fn end_action(tx: &Transaction<'_>, ctx: &WriteCtx, r: &EndRequest) -> Result<Va
 /// 扫描策略。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SweepPolicy {
-    /// 没有客户端身份时的超时（设置 `recovery.sessionTimeoutMinutes`，默认 5，夹到 [1, 1440]）。
-    pub timeout_minutes: i64,
+    /// 没有客户端身份时的超时，毫秒（设置 `recovery.sessionTimeoutMinutes`，默认 5 分钟，夹到 [1, 1440] 分钟；
+    /// 2.x 不取整，所以按毫秒存，见 [`Service::stored_sweep_policy`]）。
+    pub timeout_ms: i64,
     /// 客户端进程仍存活时的兜底阈值（R11 P1-3：120 分钟）。
     pub alive_fallback_minutes: i64,
 }
@@ -1773,7 +1774,7 @@ pub struct SweepPolicy {
 impl Default for SweepPolicy {
     fn default() -> Self {
         SweepPolicy {
-            timeout_minutes: 5,
+            timeout_ms: 5 * 60_000,
             alive_fallback_minutes: 120,
         }
     }
@@ -1789,6 +1790,19 @@ pub struct SweepReport {
 }
 
 impl Service {
+    /// 按存着的设置得出的扫描策略（00 C-08「超时阈值沿用 2.0」）：`recovery.sessionTimeoutMinutes` 的读法见
+    /// [`crate::settings::stored_session_timeout_ms`]。
+    pub fn stored_sweep_policy(&self) -> Result<SweepPolicy, DomainError> {
+        let timeout_ms = self
+            .store()
+            .read(|tx| Ok(crate::settings::stored_session_timeout_ms(tx)))
+            .map_err(read_error)??;
+        Ok(SweepPolicy {
+            timeout_ms,
+            ..SweepPolicy::default()
+        })
+    }
+
     /// 常驻周期扫描（每分钟一次）。只扫 ACTIVE 项目（S-012）。不释放领取。
     pub fn sweep_sessions(
         &self,
@@ -1810,19 +1824,19 @@ impl Service {
                 .collect::<rusqlite::Result<Vec<_>>>()
             })
             .map_err(read_error)?;
-        let timeout = policy.timeout_minutes.clamp(1, 1440);
+        let timeout = policy.timeout_ms.clamp(60_000, 1440 * 60_000);
         let mut decided = Vec::new();
         for (project, id, agent, identity, last) in rows {
             let liveness = identity.as_deref().and_then(alive);
             let reason = match liveness {
                 Some(false) => Some("CLIENT_EXITED"),
                 _ => {
-                    let minutes = if liveness == Some(true) {
-                        policy.alive_fallback_minutes
+                    let ms = if liveness == Some(true) {
+                        policy.alive_fallback_minutes * 60_000
                     } else {
                         timeout
                     };
-                    let cutoff = Timestamp::from_millis(at.millis() - minutes * 60_000).to_string();
+                    let cutoff = Timestamp::from_millis(at.millis() - ms).to_string();
                     (last < cutoff).then_some("HEARTBEAT_TIMEOUT")
                 }
             };

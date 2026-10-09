@@ -15,15 +15,16 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use atm_domain::principal::{JobId, Principal};
-use atm_service::session::{SweepPolicy, SweepReport};
+use atm_service::session::SweepReport;
 use atm_service::write::Service;
 
 /// 扫一次。客户端是否存活按 [`crate::liveness::alive`]：活着的客户端只在 120 min 没心跳时才收，
-/// 退出了的立刻收，没有身份的按普通超时。
+/// 退出了的立刻收，没有身份的按存着的超时（`recovery.sessionTimeoutMinutes`，00 C-08 沿用 2.0）。
 pub fn sweep_once(svc: &Service) -> Result<SweepReport, String> {
+    let policy = svc.stored_sweep_policy().map_err(|e| e.to_string())?;
     svc.sweep_sessions(
         &Principal::system_job(JobId::StartupRecover),
-        SweepPolicy::default(),
+        policy,
         &crate::liveness::alive,
     )
     .map_err(|e| e.to_string())

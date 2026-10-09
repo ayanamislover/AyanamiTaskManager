@@ -108,3 +108,48 @@ fn the_sweep_respects_client_liveness() {
         ("CLOSED".into(), Some("HEARTBEAT_TIMEOUT".into()))
     );
 }
+
+/// 没有身份的 session 按存着的 `recovery.sessionTimeoutMinutes` 收（00 C-08 沿用 2.0；2.x 原样转来的字符串照样认）：
+/// 存了 60 分钟，30 分钟没心跳不收；删掉设置回到默认 5 分钟，同一个 session 就收了。
+#[test]
+fn the_sweep_uses_the_stored_timeout() {
+    let d = dir("sweep-timeout");
+    let store = Store::open(&d.join("atm.sqlite"), Config::default()).unwrap();
+    store
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO app_meta (singleton, schema_version, data_root_id, generation, instance_epoch, created_at, updated_at)
+                 VALUES (1, 1, 'ROOT', 'G', 'EPOCH', '2026-10-07T00:00:00.000Z', '2026-10-07T00:00:00.000Z');
+                 INSERT INTO settings (key, value_json, version, updated_at)
+                 VALUES ('recovery.sessionTimeoutMinutes', '\"60\"', 1, '2026-10-07T00:00:00.000Z');",
+            )
+        })
+        .unwrap();
+    let svc = Service::new(store);
+    let (_, anonymous) = begin(&svc, None, "b-anon");
+    svc.store()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE agent_sessions SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes'),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')",
+                [],
+            )
+        })
+        .unwrap();
+    let report = atm_jobs::sweep_once(&svc).unwrap();
+    assert!(report.closed.is_empty(), "{:?}", report.closed);
+    assert_eq!(state(&svc, &anonymous), ("ONLINE".into(), None));
+    svc.store()
+        .write(|tx| {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'recovery.sessionTimeoutMinutes'",
+                [],
+            )
+        })
+        .unwrap();
+    atm_jobs::sweep_once(&svc).unwrap();
+    assert_eq!(
+        state(&svc, &anonymous),
+        ("CLOSED".into(), Some("HEARTBEAT_TIMEOUT".into()))
+    );
+}
