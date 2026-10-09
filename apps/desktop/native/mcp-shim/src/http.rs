@@ -3,10 +3,15 @@
 //! The body is framed by `Content-Length` or chunked encoding, never by EOF. The daemon's
 //! MCP transport answers `Connection: keep-alive` even when asked to close, so reading to
 //! EOF would stall every request until the server's idle timeout (measured: over a minute).
+//!
+//! A caller with a total budget (the signed writes, 10 R11 A3) passes an absolute deadline:
+//! the connect, every write and every single read then waits at most for what is left of
+//! it, so a service that holds its answer or trickles it out a byte at a time cannot keep
+//! the bridge past the budget.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Same limits the old bridge had through undici's defaults.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -25,7 +30,11 @@ pub struct Response {
 pub enum Error {
     /// Nothing accepted the connection: the request provably never reached a daemon.
     Refused,
-    /// Failed before a complete response head arrived (undici: "fetch failed").
+    /// The connection failed, or the request was not written in full: the service never
+    /// had a complete request, so it cannot have acted on it.
+    Unsent,
+    /// The whole request was written, then the response head did not arrive in full
+    /// (undici: "fetch failed").
     Request,
     /// The head arrived but the body did not (undici: "terminated").
     Body,
@@ -38,14 +47,57 @@ pub enum Error {
 /// (measured: 2010 ms, against 0-1 ms for Node). libuv turns SYN retransmissions off for
 /// loopback connects with SIO_TCP_INITIAL_RTO; doing the same keeps the stale-descriptor
 /// retry as fast as it was in the JavaScript bridge.
-fn connect_loopback(port: u16) -> io::Result<TcpStream> {
+fn connect_loopback(port: u16, deadline: Option<Instant>) -> io::Result<TcpStream> {
     use socket2::{Domain, Protocol, Socket, Type};
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     #[cfg(windows)]
     disable_syn_retransmissions(&socket);
-    socket.connect_timeout(&address.into(), CONNECT_TIMEOUT)?;
+    socket.connect_timeout(&address.into(), left(deadline, CONNECT_TIMEOUT)?)?;
     Ok(socket.into())
+}
+
+/// What one IO step may wait: `cap`, or less when the deadline is nearer. A deadline that
+/// has passed is a timeout before the step starts.
+fn left(deadline: Option<Instant>, cap: Duration) -> io::Result<Duration> {
+    let Some(deadline) = deadline else {
+        return Ok(cap);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "deadline passed"));
+    }
+    Ok(remaining.min(cap))
+}
+
+/// The stream with every read and write bounded by the deadline (re-armed per call, so a
+/// trickling peer cannot reset it).
+struct Timed<'a> {
+    stream: &'a TcpStream,
+    deadline: Option<Instant>,
+}
+
+impl Read for Timed<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream
+            .set_read_timeout(Some(left(self.deadline, IO_TIMEOUT)?))?;
+        let mut stream = self.stream;
+        stream.read(buf)
+    }
+}
+
+impl Write for Timed<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream
+            .set_write_timeout(Some(left(self.deadline, IO_TIMEOUT)?))?;
+        let mut stream = self.stream;
+        stream.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut stream = self.stream;
+        stream.flush()
+    }
 }
 
 #[cfg(windows)]
@@ -98,26 +150,23 @@ fn disable_syn_retransmissions(socket: &socket2::Socket) {
 }
 
 /// `client` is the `X-ATM-Client` value (10 R11 A4); anything but visible ASCII is dropped.
+/// `deadline` bounds the whole exchange (see the module notes); `None` keeps only the
+/// per-step limits.
 pub fn post(
     port: u16,
     path: &str,
     token: &str,
     body: &str,
     client: Option<&str>,
+    deadline: Option<Instant>,
 ) -> Result<Response, Error> {
-    let stream = connect_loopback(port).map_err(|error| {
+    let stream = connect_loopback(port, deadline).map_err(|error| {
         if error.kind() == io::ErrorKind::ConnectionRefused {
             Error::Refused
         } else {
-            Error::Request
+            Error::Unsent
         }
     })?;
-    stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|_| Error::Request)?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|_| Error::Request)?;
     let _ = stream.set_nodelay(true);
 
     let host = if port == 80 {
@@ -139,16 +188,24 @@ pub fn post(
          connection: close\r\n\r\n",
         body.len()
     );
-    let mut writer = &stream;
+    // Content-Length frames the request: until its last byte is written the service has
+    // nothing it could act on.
+    let mut writer = Timed {
+        stream: &stream,
+        deadline,
+    };
     writer
         .write_all(head.as_bytes())
-        .map_err(|_| Error::Request)?;
+        .map_err(|_| Error::Unsent)?;
     writer
         .write_all(body.as_bytes())
-        .map_err(|_| Error::Request)?;
+        .map_err(|_| Error::Unsent)?;
     writer.flush().map_err(|_| Error::Request)?;
 
-    let mut reader = BufReader::new(&stream);
+    let mut reader = BufReader::new(Timed {
+        stream: &stream,
+        deadline,
+    });
     read_response(&mut reader)
 }
 
@@ -352,7 +409,7 @@ mod tests {
             .port();
         let started = std::time::Instant::now();
         assert!(matches!(
-            post(port, "/mcp", "t", "{}", None),
+            post(port, "/mcp", "t", "{}", None, None),
             Err(Error::Refused)
         ));
         // Without SIO_TCP_INITIAL_RTO this takes about two seconds on Windows.
@@ -361,5 +418,59 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "refusal took {elapsed:?}"
         );
+    }
+
+    /// A peer that reads the request and then answers through `respond`.
+    fn peer(respond: impl FnOnce(&std::net::TcpStream) + Send + 'static) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = (&conn).read(&mut buf);
+            respond(&conn);
+        });
+        port
+    }
+
+    const BUDGET: Duration = Duration::from_millis(600);
+
+    fn timed(port: u16) -> (Result<Response, Error>, Duration) {
+        let started = Instant::now();
+        let r = post(port, "/mcp", "t", "{}", None, Some(started + BUDGET));
+        (r, started.elapsed())
+    }
+
+    #[test]
+    fn a_held_answer_ends_at_the_deadline() {
+        let port = peer(|_| std::thread::sleep(Duration::from_secs(5)));
+        let (r, took) = timed(port);
+        assert!(matches!(r, Err(Error::Request)), "{r:?}");
+        assert!(took < BUDGET + Duration::from_millis(300), "{took:?}");
+    }
+
+    #[test]
+    fn a_trickled_answer_ends_at_the_deadline() {
+        // Each byte arrives well inside any per-read timeout; only the total is too slow.
+        let port = peer(|conn| {
+            let mut w = conn;
+            let _ = w.write_all(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n");
+            for _ in 0..100 {
+                if w.write_all(b"1\r\nx\r\n").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (r, took) = timed(port);
+        assert!(matches!(r, Err(Error::Body)), "{r:?}");
+        assert!(took < BUDGET + Duration::from_millis(300), "{took:?}");
+    }
+
+    #[test]
+    fn a_spent_deadline_sends_nothing() {
+        let port = peer(|_| {});
+        let r = post(port, "/mcp", "t", "{}", None, Some(Instant::now()));
+        assert!(matches!(r, Err(Error::Unsent)), "{r:?}");
     }
 }

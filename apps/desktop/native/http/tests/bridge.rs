@@ -63,6 +63,8 @@ enum Act {
     Drop,
     /// 不转发，回一个 STORE_BUSY 的工具错误。
     Busy,
+    /// 照常转发（写入照样执行），响应头立即交回，body 改成分块、每 200 ms 一个字节地交回。
+    Drip,
 }
 
 struct Rule {
@@ -229,6 +231,31 @@ fn serve(conn: TcpStream, upstream: u16, script: &Mutex<Script>) {
             f();
             let _ = out.write_all(rhead.as_bytes());
             let _ = out.write_all(&rbody);
+        }
+        Some(Act::Drip) => {
+            let head: String = rhead
+                .split_inclusive("\r\n")
+                .filter(|l| !l.to_ascii_lowercase().starts_with("content-length:"))
+                .map(|l| {
+                    if l == "\r\n" {
+                        "transfer-encoding: chunked\r\n\r\n".to_owned()
+                    } else {
+                        l.to_owned()
+                    }
+                })
+                .collect();
+            if out.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            for b in rbody {
+                let mut chunk = b"1\r\n".to_vec();
+                chunk.extend([b, b'\r', b'\n']);
+                if out.write_all(&chunk).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let _ = out.write_all(b"0\r\n\r\n");
         }
         _ => {
             let _ = out.write_all(rhead.as_bytes());
@@ -714,6 +741,74 @@ fn an_unconfirmed_write_ends_in_result_unknown_with_its_context() {
     r.proxy.script.lock().unwrap().always_drop = None;
     let again = b.call(e["fix"]["call"]["name"].as_str().unwrap(), args.clone());
     assert_eq!(ok(&again)["replayed"], json!(true), "{again}");
+}
+
+/// 30 秒总预算约束到每一次 IO（peer W4 r1 P1-03）：服务拿着写入的应答不放、或者一个字节一个字节地挤，
+/// 桥都在预算到点时停下，报 RESULT_UNKNOWN（写入可能已经送达），带着冻结的上下文；照 fix.call 重试是重放。
+#[test]
+fn a_held_or_trickled_write_answer_ends_at_the_budget() {
+    let r = rig("bridge-held-write");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    for (n, act) in [
+        Act::Then(Box::new(|| std::thread::sleep(Duration::from_secs(40)))),
+        Act::Drip,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        r.proxy.then("write", act);
+        let started = Instant::now();
+        let reply = b.call(
+            "atm_record",
+            json!({"session": r.w.session, "kind": "FACT", "title": format!("held {n}"), "summary": "s"}),
+        );
+        let elapsed = started.elapsed();
+        let e = err(&reply).clone();
+        assert_eq!(
+            (&e["code"], &e["committed"], &e["details"]["sent"]),
+            (&json!("RESULT_UNKNOWN"), &json!("unknown"), &json!(true)),
+            "{e}"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(33),
+            "第 {n} 种：{elapsed:?}"
+        );
+        let args = &e["fix"]["call"]["arguments"];
+        assert!(args["op_id"].as_str().unwrap().starts_with("auto:"), "{e}");
+        assert_eq!(args["expected_target"]["kind"], json!("EXISTING"), "{e}");
+        let again = b.call("atm_record", args.clone());
+        assert_eq!(ok(&again)["replayed"], json!(true), "{again}");
+    }
+}
+
+/// resolve 的应答被拿着不放：桥在预算到点时停下，写请求从没发出 → SERVICE_UNAVAILABLE、sent:false。
+#[test]
+fn a_held_resolve_answer_ends_at_the_budget_with_nothing_sent() {
+    let r = rig("bridge-held-resolve");
+    let mut b = r.bridge();
+    b.initialize("claude-code");
+    r.proxy.then(
+        "/mcp/resolve",
+        Act::Then(Box::new(|| std::thread::sleep(Duration::from_secs(40)))),
+    );
+    let started = Instant::now();
+    let reply = b.call(
+        "atm_record",
+        json!({"session": r.w.session, "kind": "FACT", "title": "held resolve", "summary": "s"}),
+    );
+    let elapsed = started.elapsed();
+    let e = err(&reply);
+    assert_eq!(
+        (&e["code"], &e["committed"], &e["details"]["sent"]),
+        (&json!("SERVICE_UNAVAILABLE"), &json!(false), &json!(false)),
+        "{e}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(29) && elapsed < Duration::from_secs(33),
+        "{elapsed:?}"
+    );
+    assert!(r.proxy.writes().is_empty(), "写请求不该发出");
 }
 
 /// 没有服务（也没有可唤醒的桌面）：写请求从未发出 → SERVICE_UNAVAILABLE、sent:false，auto id 时

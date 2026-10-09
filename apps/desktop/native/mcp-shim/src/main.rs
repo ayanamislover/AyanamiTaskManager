@@ -163,14 +163,15 @@ fn emit(output: &mut impl Write, line: &str) -> io::Result<()> {
 /// restart instead of holding on to a stale endpoint and token.
 fn exchange(body: &str, path: &str, client: Option<&str>) -> Result<Vec<String>, String> {
     let current = wait_for_runtime(None)?;
-    let response = match http::post(current.port, path, &current.token, body, client) {
+    let response = match http::post(current.port, path, &current.token, body, client, None) {
         Ok(response) => response,
         // Nothing listens on the recorded endpoint: the descriptor outlived its service
         // even if its PID looks alive (it may have been reused). Only a refusal proves
         // the request was never delivered, so only a refusal is retried, exactly once.
         Err(http::Error::Refused) => {
             let next = wait_for_runtime(Some(&current))?;
-            http::post(next.port, path, &next.token, body, client).map_err(transport_message)?
+            http::post(next.port, path, &next.token, body, client, None)
+                .map_err(transport_message)?
         }
         Err(error) => return Err(transport_message(error)),
     };
@@ -202,7 +203,9 @@ fn exchange(body: &str, path: &str, client: Option<&str>) -> Result<Vec<String>,
 
 fn transport_message(error: http::Error) -> String {
     match error {
-        http::Error::Refused | http::Error::Request => "fetch failed".to_owned(),
+        http::Error::Refused | http::Error::Unsent | http::Error::Request => {
+            "fetch failed".to_owned()
+        }
         http::Error::Body => "terminated".to_owned(),
     }
 }

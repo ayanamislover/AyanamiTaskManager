@@ -239,10 +239,23 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
                 break;
             }
         };
-        match http::post(current.port, link.path, &current.token, &body, link.client) {
+        // Every step of the exchange waits only for what is left of the budget (P1-03).
+        match http::post(
+            current.port,
+            link.path,
+            &current.token,
+            &body,
+            link.client,
+            Some(deadline),
+        ) {
             Err(http::Error::Refused) => {
                 // Provably never delivered: wait for a newly published instance.
                 stale = Some(current);
+            }
+            Err(e) if !may_have_arrived(&e) => {
+                // The service never had the whole request: still provably not delivered.
+                reason = "ATM_REQUEST_NOT_SENT".to_owned();
+                std::thread::sleep(POLL);
             }
             Err(_) => {
                 // The request may have reached the service; only a replay can tell.
@@ -293,6 +306,12 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
             json!({"sent": false, "reason": reason}),
         ),
     )
+}
+
+/// Whether a failed exchange could still have delivered the whole request. Only then is
+/// the outcome unknown (A3 RESULT_UNKNOWN); a refusal or an unsent request is provably not.
+fn may_have_arrived(e: &http::Error) -> bool {
+    matches!(e, http::Error::Request | http::Error::Body)
 }
 
 fn unavailable_message(reason: &str) -> String {
@@ -350,6 +369,7 @@ fn resolve(
             &current.token,
             body,
             link.client,
+            Some(deadline),
         ) {
             Err(http::Error::Refused) => stale = Some(current),
             // Resolve is read-only: any transport failure is simply tried again.
@@ -434,6 +454,14 @@ mod tests {
             "atm_knowledge_save",
             &args(json!({"op_id": "x", "session": "S"}))
         ));
+    }
+
+    #[test]
+    fn only_a_fully_written_request_may_have_arrived() {
+        assert!(!may_have_arrived(&http::Error::Refused));
+        assert!(!may_have_arrived(&http::Error::Unsent));
+        assert!(may_have_arrived(&http::Error::Request));
+        assert!(may_have_arrived(&http::Error::Body));
     }
 
     #[test]
