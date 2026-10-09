@@ -14,6 +14,7 @@ fn r11_auto_start_applies_before_state_writes_on_unstarted_tasks() {
         StateWrite::Basic(Operation::WaitUser),
         StateWrite::Basic(Operation::Block),
         StateWrite::VerifyAndComplete,
+        StateWrite::Progress,
     ];
     for w in writes {
         for s in [Status::Backlog, Status::Ready, Status::Claimed] {
@@ -62,6 +63,8 @@ fn r11_blocked_and_waiting_are_never_auto_started() {
         (StateWrite::Basic(Operation::Block), [Na, Na, Na]),
         (StateWrite::Basic(Operation::WaitAgent), [Na, Na, Suggest]),
         (StateWrite::Basic(Operation::WaitUser), [Na, Suggest, Na]),
+        // 进度在这三种状态上本来就能记。
+        (StateWrite::Progress, [Na, Na, Na]),
     ];
     for (w, expected) in cases {
         for (s, e) in [Status::Blocked, Status::WaitingAgent, Status::WaitingUser]

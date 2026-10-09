@@ -368,10 +368,13 @@ fn work_item_operations() -> String {
     let writes: Vec<(String, StateWrite)> = Operation::ALL
         .iter()
         .map(|&op| (op.as_str().to_owned(), StateWrite::Basic(op)))
-        .chain([(
-            "verify_and_complete".to_owned(),
-            StateWrite::VerifyAndComplete,
-        )])
+        .chain([
+            (
+                "verify_and_complete".to_owned(),
+                StateWrite::VerifyAndComplete,
+            ),
+            ("atm_progress_add（任务进度）".to_owned(), StateWrite::Progress),
+        ])
         .filter(|(_, w)| {
             open.iter()
                 .any(|&s| work::auto_start(*w, s) != AutoStart::NotApplicable)
@@ -397,6 +400,8 @@ fn work_item_operations() -> String {
     let head: Vec<&str> = head.iter().map(String::as_str).collect();
     out.push_str(&table(&head, &[], &rows));
     out.push_str("\n「—」：不涉及自动 start，按上面的状态表处理。\n\n");
+    out.push_str("任务进度的 start 是尽力而为：前置没完成或领不到时不补、不报错，进度照记，任务保持原状态；");
+    out.push_str("带 `blocker` 时补上 start 再阻塞，补不上就按原状态判定（`READY` 上不能阻塞）。\n\n");
 
     // expected_version。
     out.push_str("#### 什么时候要带 `expected_version`\n\n");

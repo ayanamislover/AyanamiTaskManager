@@ -12,7 +12,7 @@
 
 | Profile | 发布 | 只收不发布 | 字节 | 预算 | 余量 | tools SHA-256 |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `core` | 9 | 2 | 15,976 | 16,180 | 204 | `71c6db468bccd06511ffb582b6aecf6075d37f330da13d403daa99f49e3f51c7` |
+| `core` | 9 | 2 | 16,018 | 16,180 | 162 | `893c52592553e6fc02171b60d0a3609b22b9d80b6e3fff5ada5c20cac25dfe49` |
 | `memory` | 4 | 2 | 4,280 | 9,728 | 5,448 | `27562ff43277e6af819ac1a18d5020bc1a90bb4e17570688e087017b99d6dfdf` |
 | `actions` | 1 | 10 | 4,178 | 9,728 | 5,550 | `2321da0384e3ee0bb7c493b8686b2e7d07954b8315a7c068804cbcaf889986f9` |
 
@@ -87,7 +87,7 @@
 
 ### `atm_progress_add`
 
-写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。要阻塞任务请用 atm_task_patch 的 block。 必填：summary。 参数：summary≤500；task_key≤40；scope=task|project；percent=0–100；evidence 最多 20 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；next 最多 20 项；next[]≤500；completed 最多 20 项；completed[] 是文本≤500或对象；completed[] 每项必填 text；completed[].text≤500；completed[].task_key≤40；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN；blocker≤1000；project≤20；session≤128；op_id≤128。
+写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。任务还没开工时会自动先 start。要阻塞任务请用 atm_task_patch 的 block。 必填：summary。 参数：summary≤500；task_key≤40；scope=task|project；percent=0–100；evidence 最多 20 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；next 最多 20 项；next[]≤500；completed 最多 20 项；completed[] 是文本≤500或对象；completed[] 每项必填 text；completed[].text≤500；completed[].task_key≤40；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN；blocker≤1000；project≤20；session≤128；op_id≤128。
 
 ### `atm_record`
 

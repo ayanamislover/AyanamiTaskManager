@@ -258,6 +258,77 @@ fn r1_r2_progress_respects_the_claim() {
     });
 }
 
+/// U-1：给还没开工的任务记进度就是在做它，同一事务里先 start，回执带 autoApplied；
+/// 补不上（前置没完成）时只记进度、不报错。带 blocker 的进度与 task_patch 的 block 一致：
+/// 先 start 再阻塞；补不上时 READY 上照旧拒绝，零写入。
+#[test]
+fn u1_progress_on_an_unstarted_task_starts_it() {
+    let w = world("mm-auto-start");
+    let k = w.task("一");
+    let r = w.progress("S1", ProgressRequest::task(&k, "开始写了")).unwrap();
+    assert_eq!(
+        r.result["autoApplied"],
+        json!([{ "taskKey": k, "operations": ["start"] }])
+    );
+    assert_eq!(r.result["state"]["status"], "IN_PROGRESS");
+    assert_eq!(r.result["state"]["claimedBySessionId"], "S1");
+    assert_eq!(
+        w.events(&k),
+        ["work.created", "work.started", "work.progressed"]
+    );
+    // 已经开工的不再补。
+    let r = w.progress("S1", ProgressRequest::task(&k, "又写了一点")).unwrap();
+    assert!(r.result.get("autoApplied").is_none(), "{}", r.result);
+    // 前置没完成：start 补不上，进度照记，任务仍是 READY、没人领。
+    let pre = w.task("前置");
+    let c = w
+        .create_as(
+            &agent(),
+            Some("S1"),
+            vec![atm_service::work::CreateItem {
+                depends_on: vec![pre],
+                ..item("后续")
+            }],
+        )
+        .unwrap()
+        .result["items"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let r = w.progress("S1", ProgressRequest::task(&c, "先看了看")).unwrap();
+    assert!(r.result.get("autoApplied").is_none(), "{}", r.result);
+    assert_eq!(w.col(&c, "status"), "READY");
+    assert!(w.col(&c, "claimed_by_session_id").is_null());
+    // 带 blocker：先 start 再 BLOCKED。
+    let b = w.task("三");
+    let r = w
+        .progress(
+            "S1",
+            ProgressRequest {
+                blocker: Some("等上游".into()),
+                ..ProgressRequest::task(&b, "卡住了")
+            },
+        )
+        .unwrap();
+    assert_eq!(r.result["autoApplied"][0]["operations"], json!(["start"]));
+    assert_eq!(r.result["state"]["status"], "BLOCKED");
+    assert_eq!(
+        w.events(&b),
+        ["work.created", "work.started", "work.blocked"]
+    );
+    // 前置没完成又带 blocker：补不上 start，READY 上不能 block，整笔拒绝、零写入。
+    let e = w.refused(ErrorCode::INVALID_TRANSITION, || {
+        w.progress(
+            "S1",
+            ProgressRequest {
+                blocker: Some("等上游".into()),
+                ..ProgressRequest::task(&c, "卡住了")
+            },
+        )
+    });
+    assert_eq!(e.details["reason"], "progress blocker");
+}
+
 /// 02 §5.1：参数校验，全部零写入。
 #[test]
 fn progress_arguments_are_validated_with_zero_writes() {

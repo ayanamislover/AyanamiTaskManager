@@ -651,7 +651,7 @@ fn progress_check(args: &Map<String, Value>) -> Vec<Problem> {
 
 pub static PROGRESS_ADD: Tool = Tool {
     name: "atm_progress_add",
-    summary: "写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。要阻塞任务请用 atm_task_patch 的 block。",
+    summary: "写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。任务还没开工时会自动先 start。要阻塞任务请用 atm_task_patch 的 block。",
     fields: &PROGRESS_FIELDS,
     check: Some(progress_check),
     read_only: false,

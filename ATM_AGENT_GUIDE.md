@@ -222,8 +222,11 @@ MCP 之外，Agent 令牌还能用这些 REST 入口：项目列表与详情、�
 | `verify` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | — | — | — |
 | `complete` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | 拒绝，fix 给 start | 拒绝，fix 给 start | — |
 | `verify_and_complete` | 先 start | 先 start | 先 start | — | 拒绝，fix 给 start | — | — | — |
+| `atm_progress_add（任务进度）` | 先 start | 先 start | 先 start | — | — | — | — | — |
 
 「—」：不涉及自动 start，按上面的状态表处理。
+
+任务进度的 start 是尽力而为：前置没完成或领不到时不补、不报错，进度照记，任务保持原状态；带 `blocker` 时补上 start 再阻塞，补不上就按原状态判定（`READY` 上不能阻塞）。
 
 #### 什么时候要带 `expected_version`
 

@@ -376,6 +376,9 @@ pub fn legal_operations(from: WorkState) -> Vec<(Operation, Status)> {
 pub enum StateWrite {
     Basic(Operation),
     VerifyAndComplete,
+    /// 不带 blocker 的任务进度（U-1）：记进度就是在做这件事。和状态写入不同，补不上
+    /// （前置没完成、领不到）时不报错，进度照记、不开工。
+    Progress,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,6 +403,13 @@ pub fn auto_start(write: StateWrite, current: Status) -> AutoStart {
         StateWrite::Basic(_) => return AutoStart::NotApplicable,
         // verify_and_complete 的第一步就是 verify（W-052）。
         StateWrite::VerifyAndComplete => Operation::Verify,
+        // 进度在任何未终结状态上都能记，BLOCKED / WAITING_* 上不需要提示。
+        StateWrite::Progress => {
+            return match current {
+                Status::Backlog | Status::Ready | Status::Claimed => AutoStart::Apply,
+                _ => AutoStart::NotApplicable,
+            };
+        }
     };
     match current {
         Status::Backlog | Status::Ready | Status::Claimed => AutoStart::Apply,

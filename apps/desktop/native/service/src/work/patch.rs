@@ -957,6 +957,25 @@ fn check_dependencies(w: &Work<'_>, task: &Task, key: &str) -> Result<(), Domain
         .detail("truncated", total > gate::REASON_LIMIT_PER_PREDICATE))
 }
 
+/// 任务进度的自动补 start（U-1，`StateWrite::Progress`）：尽力而为。前置没完成、
+/// 领不到或状态机不放行时不补、不报错，进度照记。返回是否补了。
+pub(crate) fn auto_start_for_progress(
+    w: &mut Work<'_>,
+    task: &mut Task,
+    key: &str,
+) -> Result<bool, DomainError> {
+    if auto_start(StateWrite::Progress, task.status()) != AutoStart::Apply
+        || start_preconditions(w, task, key, false).is_err()
+    {
+        return Ok(false);
+    }
+    let Ok(target) = resolve(Operation::Start, task.state, false) else {
+        return Ok(false);
+    };
+    claim_and_start(w, task, target, Operation::Start, key)?;
+    Ok(true)
+}
+
 /// claim / start 的写入（W-023、W-026、W-027）。`target` 已经由状态机给出。
 fn claim_and_start(
     w: &mut Work<'_>,

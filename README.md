@@ -202,7 +202,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 | Profile | 工具数 | tools 字节 | 预算 | 余量 |
 | --- | ---: | ---: | ---: | ---: |
-| core | 9 | 15,976 bytes | 16,180 bytes | 204 bytes |
+| core | 9 | 16,018 bytes | 16,180 bytes | 162 bytes |
 | memory | 4 | 4,280 bytes | 9,728 bytes | 5,448 bytes |
 | actions | 1 | 4,178 bytes | 9,728 bytes | 5,550 bytes |
 

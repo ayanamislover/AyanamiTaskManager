@@ -668,7 +668,7 @@
   },
   {
     "name": "atm_progress_add",
-    "description": "写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。要阻塞任务请用 atm_task_patch 的 block。 必填：summary。 参数：summary≤500；task_key≤40；scope=task|project；percent=0–100；evidence 最多 20 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；next 最多 20 项；next[]≤500；completed 最多 20 项；completed[] 是文本≤500或对象；completed[] 每项必填 text；completed[].text≤500；completed[].task_key≤40；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN；blocker≤1000；project≤20；session≤128；op_id≤128。",
+    "description": "写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。任务还没开工时会自动先 start。要阻塞任务请用 atm_task_patch 的 block。 必填：summary。 参数：summary≤500；task_key≤40；scope=task|project；percent=0–100；evidence 最多 20 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；next 最多 20 项；next[]≤500；completed 最多 20 项；completed[] 是文本≤500或对象；completed[] 每项必填 text；completed[].text≤500；completed[].task_key≤40；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN；blocker≤1000；project≤20；session≤128；op_id≤128。",
     "inputSchema": {
       "type": "object",
       "properties": {

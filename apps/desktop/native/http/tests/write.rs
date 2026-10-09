@@ -143,6 +143,33 @@ fn task_create_links_keys_and_batch_refs() {
     assert!(deps.contains(&a) && deps.contains(&b), "{deps:?}");
 }
 
+/// U-1：给还没开工的任务记进度会先 start，回执的 auto_applied 写明；任务进入 IN_PROGRESS。
+#[test]
+fn progress_on_an_unstarted_task_reports_the_auto_start() {
+    let w = world("write-progress-start");
+    let ack = ok(&call(
+        &w,
+        "memory",
+        "atm_progress_add",
+        json!({"session": w.session, "task_key": w.task, "summary": "接口设计完成，开始写实现"}),
+    ))
+    .clone();
+    assert_eq!(
+        ack["auto_applied"],
+        json!([{"task_key": w.task, "operations": ["start"]}])
+    );
+    assert_eq!(task(&w, &w.task)["status"], json!("IN_PROGRESS"));
+    // 已经开工的不再补。
+    let ack = ok(&call(
+        &w,
+        "memory",
+        "atm_progress_add",
+        json!({"session": w.session, "task_key": w.task, "summary": "实现写了一半"}),
+    ))
+    .clone();
+    assert!(ack.get("auto_applied").is_none(), "{ack}");
+}
+
 /// 单条写在顶层；complete 自动补 start（auto_applied）；安全合并的 merges 在 ACK 顶层（01 Q-04）。
 #[test]
 fn task_patch_flat_auto_start_and_top_level_merges() {

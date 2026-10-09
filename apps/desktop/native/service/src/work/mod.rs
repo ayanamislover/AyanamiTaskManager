@@ -22,7 +22,7 @@ pub use checklist::{
 pub use create::{CreateItem, NewChecklist};
 pub use import::{ImportPlan, parse as parse_agenttask};
 pub use patch::{COMPLETE_NOTE, EditFields, ExpectedFields, PatchItem, VerifyAndComplete};
-pub(crate) use patch::{claim_not_owned, invalid_transition};
+pub(crate) use patch::{auto_start_for_progress, claim_not_owned, invalid_transition};
 pub use planning::{
     MILESTONE_OPERATION, MilestoneRequest, OBJECTIVE_OPERATION, ObjectiveRequest, PublishRequest,
 };

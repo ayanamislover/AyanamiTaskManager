@@ -327,12 +327,6 @@ fn task_progress(w: &mut Work<'_>, r: &ProgressRequest) -> Result<Value, DomainE
         return Err(crate::work::claim_not_owned(&key, e));
     }
     let blocker = blocker_text(r);
-    let block_target = match blocker {
-        Some(_) => Some(resolve(Operation::Block, task.state, false).map_err(|e| {
-            crate::work::invalid_transition(&key, e, false).detail("reason", "progress blocker")
-        })?),
-        None => None,
-    };
     let summary = js_trim(&r.summary).to_owned();
     let bucket = r.percent.map(bucket);
     // S-081：同一任务最近一条进度桶相同、摘要相同、没有证据、没有 blocker → noop。
@@ -364,6 +358,16 @@ fn task_progress(w: &mut Work<'_>, r: &ProgressRequest) -> Result<Value, DomainE
         return progress_receipt(w, &task.id, &key, last_id, true, seq);
     }
 
+    // U-1：给还没开工的任务记进度就是在做它，先补 start（补不上就只记进度）。带 blocker 时
+    // 与 task_patch 的 block 一致：先 start 再阻塞；补不上就按原状态判定，READY 上照旧拒绝。
+    // 之后的拒绝都在同一事务里，补的 start 一起回滚。
+    let auto_started = crate::work::auto_start_for_progress(w, &mut task, &key)?;
+    let block_target = match blocker {
+        Some(_) => Some(resolve(Operation::Block, task.state, false).map_err(|e| {
+            crate::work::invalid_transition(&key, e, false).detail("reason", "progress blocker")
+        })?),
+        None => None,
+    };
     let completed = completed_json(&r.completed, |k| json!(k));
     let progress_id = w.add_progress(
         &task,
@@ -400,7 +404,11 @@ fn task_progress(w: &mut Work<'_>, r: &ProgressRequest) -> Result<Value, DomainE
     w.recompute_from(&task.id);
     w.finish()?;
     let seq = w.sequence;
-    progress_receipt(w, &task.id, &key, &progress_id, false, seq)
+    let mut receipt = progress_receipt(w, &task.id, &key, &progress_id, false, seq)?;
+    if auto_started {
+        receipt["autoApplied"] = json!([{ "taskKey": key, "operations": ["start"] }]);
+    }
+    Ok(receipt)
 }
 
 fn progress_receipt(
