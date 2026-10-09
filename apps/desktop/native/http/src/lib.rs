@@ -233,7 +233,7 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
         return reply(too_large(len as usize - MAX_BODY));
     }
     // `GET /health` 不要令牌（W4i）：setup 核对 SERVICE_HEALTHY 时探它，而 setup 从不读、不留令牌。
-    // 它只答运行状态（status、version、pid、实例 id、lease 序号），没有令牌，也没有业务内容；
+    // 它只答 setup 交叉核对的三项（pid、实例 id、lease 序号），没有令牌、版本，也没有业务内容；
     // Host、Origin 与 Sec-Fetch 的检查照旧在前面。
     let health = request.method() == Method::GET && request.uri().path() == "/health";
     let presented = headers

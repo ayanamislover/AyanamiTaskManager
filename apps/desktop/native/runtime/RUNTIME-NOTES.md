@@ -40,7 +40,8 @@ decide 循环（最多 8 圈）
 - **预算按这个进程的这次启动累计**：`ProgressWatch::resume` 从 txn 目录里的 `start-wait.json`（`WaitLedger`）续算总上限、首条进度期限
   与「多久没动」。只认同一 txn、同一进程（pid + 创建时间）的记账。时间用墙钟毫秒落盘；墙钟往回拨按「还没过去」算（只会多等）。
 - **`/health` 不要令牌**：setup 从不读令牌。Host、Origin、Sec-Fetch 照旧检查；setup 的探测带 `Host: 127.0.0.1:<端口>`。
-  只有 `GET /health` 豁免，`POST /health` 照样要令牌。
+  只有 `GET /health` 豁免，`POST /health` 照样要令牌。应答只有 setup 核对用的 `pid`、`instanceId`、
+  `generation`（lease 序号）三项，没有版本与别的状态（W4 r1 P2-01；`tests/boot.rs` 守精确的字段集合）。
 - **写 `A` 之前等准入放掉**：进程结束之后系统释放文件锁是异步的；`settle_for_rollback` 最多等 `ADMISSION_GRACE`（10 s），
   还没放掉才拒绝（`V3_STILL_ADMITTED`）。真实进程用例实测到过刚退出时锁还在。
 

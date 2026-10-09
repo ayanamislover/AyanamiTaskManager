@@ -74,6 +74,16 @@ fn a_fresh_install_opens_the_entries_in_order() {
     let health: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(health["instanceId"], s.instance_id());
     assert_eq!(health["generation"], s.lease_generation());
+    // 不要令牌的入口只答这三项（peer W4 r1 P2-01），多一项都是红。
+    let mut keys: Vec<&str> = health
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["generation", "instanceId", "pid"], "{body}");
+    assert_eq!(health["pid"], published["pid"], "{body}");
     // 没有令牌的业务请求照样被挡。
     assert_eq!(get(s.port(), "/api/v1/projects").unwrap().0, 401);
     assert!(!n.join("runtime/startup-state.json").exists());

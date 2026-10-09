@@ -103,15 +103,15 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         .map_err(|e| e.to_string())?;
     let surface = Surface::new(svc.clone());
     let (pid, version, generation) = (p.me.pid, p.version.to_string(), p.generation.to_string());
+    // 不要令牌的 `/health` 只答 setup 交叉核对用的三项：pid、实例 id、lease 序号（peer W4 r1 P2-01）。
+    // 版本与别的运行状态在要令牌的 `/api/v1/system/status`。
     let health = {
-        let (instance_id, version) = (instance_id.clone(), version.clone());
+        let instance_id = instance_id.clone();
         move || {
             json!({
-                "status": "ok",
                 "pid": pid,
                 "instanceId": instance_id,
                 "generation": lease_generation,
-                "version": version,
             })
         }
     };
