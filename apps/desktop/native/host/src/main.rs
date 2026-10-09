@@ -37,6 +37,12 @@ use std::time::{Duration, Instant};
 
 use atm_install_state::{Admission, Context, LaunchIntent};
 
+// 正式宿主永远不带 e2e 的界面来源（09 §2）：e2e 适配器只在测试构建里，特性一旦被合并进宿主的构建就编译失败。
+const _: () = assert!(
+    !atm_domain::principal::E2E_SURFACE,
+    "atm-host must never be built with atm-domain/e2e"
+);
+
 const INSTALLER_WAIT: Duration = Duration::from_secs(60);
 const MAX_HOST_LOG_BYTES: u64 = 512 * 1024;
 

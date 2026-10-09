@@ -17,6 +17,8 @@ path = "src/main.rs"
 smoke = ["atm-install-state/smoke"]
 
 [dependencies]
+# 只为编译期的发布守卫（E2E_SURFACE）：主体由 ui-bridge 构造，宿主自己不构造。
+atm-domain = { path = "../domain" }
 atm-install-state = { path = "../install-state" }
 # W5a：服务在宿主进程里（不再拉起 Node core）。
 atm-runtime = { path = "../runtime" }

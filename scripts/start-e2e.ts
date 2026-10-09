@@ -1,7 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 
+// 3.0 的 e2e（W5d）：服务是 Rust 的 atm-core-e2e（与正式宿主同一个运行时库），界面在 Vite 里。
+// - 界面经 4394 进 ui-bridge（主体 User/E2eTest），只认用户 token；
+// - 用例里的 Agent 照真实 Agent 的做法从 N\runtime\daemon.json 读端点与令牌（e2e/agent.ts）。
 const workspace = resolve(process.cwd());
 const output = resolve(workspace, "output", "e2e");
 const dataDir = resolve(output, "data");
@@ -11,22 +14,43 @@ if (!dataDir.toLowerCase().startsWith(`${workspace.toLowerCase()}${sep}`)) {
 rmSync(dataDir, { recursive: true, force: true });
 mkdirSync(dataDir, { recursive: true });
 
+const native = join(workspace, "apps", "desktop", "native");
+const target = join(native, "target");
+const build = spawnSync(
+  "cargo",
+  ["build", "--locked", "-p", "atm-e2e-adapter", "--features", "e2e", "--bin", "atm-core-e2e"],
+  {
+    cwd: native,
+    stdio: "inherit",
+    windowsHide: true,
+    env: { ...process.env, CARGO_TARGET_DIR: target },
+  },
+);
+if (build.status !== 0) throw new Error(`E2E_ADAPTER_BUILD_FAILED: ${build.status}`);
+
+// 数据根只在 output/e2e 下；不从环境继承任何 ATM 数据根变量。
+const env = { ...process.env };
+for (const name of ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"]) delete env[name];
+
 const node = process.execPath;
 const children: ChildProcess[] = [];
-const daemon = spawn(node, ["node_modules/tsx/dist/cli.mjs", "apps/daemon/src/main.ts"], {
-  cwd: workspace,
-  stdio: "inherit",
-  windowsHide: true,
-  env: {
-    ...process.env,
-    ATM_DATA_DIR: dataDir,
-    AYANAMI_TASK_TOKEN: "e2e-test-token",
-    // 分离凭证（ATM-T-0503）：界面用用户 token，daemon.json 里只有 Agent token。
-    AYANAMI_TASK_USER_TOKEN: "e2e-user-token",
-    AYANAMI_TASK_PORT: "4394",
-  },
-});
-children.push(daemon);
+const core = spawn(
+  join(target, "debug", "atm-core-e2e.exe"),
+  [
+    "--n",
+    join(dataDir, "v3"),
+    "--legacy",
+    join(dataDir, "legacy"),
+    "--port",
+    "4394",
+    "--origin",
+    "http://127.0.0.1:9999",
+    "--user-token",
+    "e2e-user-token",
+  ],
+  { cwd: workspace, stdio: "inherit", windowsHide: true, env },
+);
+children.push(core);
 const vite = spawn(
   node,
   [
@@ -44,7 +68,7 @@ const vite = spawn(
     stdio: "inherit",
     windowsHide: true,
     env: {
-      ...process.env,
+      ...env,
       VITE_ATM_ENDPOINT: "http://127.0.0.1:4394",
       VITE_ATM_TOKEN: "e2e-user-token",
     },

@@ -56,10 +56,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-e2e-adapter"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-install-state",
+ "atm-runtime",
+ "atm-store",
+ "atm-ui-bridge",
+ "axum",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "atm-host"
 version = "0.0.0"
 dependencies = [
  "atm-build-support",
+ "atm-domain",
  "atm-install-state",
  "atm-runtime",
  "serde",

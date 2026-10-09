@@ -7,12 +7,20 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import Database from "better-sqlite3";
+import { agentApi, agentContext } from "./agent.js";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 // 分离凭证（ATM-T-0503）：场景搭建与界面走用户 token；daemon.json 里的是 Agent token。
 const headers = { authorization: "Bearer e2e-user-token" };
-const agentHeaders = { authorization: "Bearer e2e-test-token" };
+
+/** Agent 建任务的回执（atm_task_create 的 ACK）里新任务的 key。 */
+function workItemKey(ack: any): string {
+  const entity = (ack.entities as Array<{ entity_type: string; key: string }>).find(
+    (e) => e.entity_type === "WORK_ITEM",
+  );
+  if (!entity) throw new Error(`no WORK_ITEM in ${JSON.stringify(ack)}`);
+  return entity.key;
+}
 const longSidebarProjectName =
   "Codex Agent Permission Preflight And Deployment Readiness Verification";
 
@@ -431,10 +439,10 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
   const suffix = Date.now().toString(36);
   const code = `RQ${suffix.slice(-4).toUpperCase()}`;
   const name = `请求恢复验收 ${suffix}`;
-  // Agent 只有 daemon.json 里的那份 token。
-  const agent = await createRequest.newContext({ extraHTTPHeaders: agentHeaders });
+  // Agent 只有 daemon.json 里的那份 token，走的是 Agent HTTP，不是界面的入口。
+  const agent = await agentContext();
   const agentBegin = () =>
-    agent.post(`${apiUrl}/sessions`, {
+    agent.post(`${agentApi()}/sessions`, {
       data: { mode: "project", projectCode: code, agentId: "e2e-restore-agent" },
     });
   const caret = page.locator(".atm-project-trash .atm-engineering-toggle > svg");
@@ -448,15 +456,16 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
 
     const blocked = await agentBegin();
     expect(blocked.ok()).toBeFalsy();
+    // 3.0 的 Agent 信封是平的（02 §4）：`{ok: false, code, message, details, fix, …}`。
     const blockedBody = (await blocked.json()) as {
-      error: { details: { recovery: { request_id: string } } };
+      details: { recovery: { request_id: string } };
     };
-    expect(blockedBody.error.details.recovery).toMatchObject({
+    expect(blockedBody.details.recovery).toMatchObject({
       action: "await_user_restore_authorization",
     });
     // ATM-T-0503：拿着 daemon.json 令牌直接调授权接口，也过不去。
     const selfApproved = await agent.post(
-      `${apiUrl}/trash/restore-requests/${blockedBody.error.details.recovery.request_id}/approve`,
+      `${agentApi()}/trash/restore-requests/${blockedBody.details.recovery.request_id}/approve`,
     );
     expect(selfApproved.status()).toBe(403);
     expect(await selfApproved.text()).toContain("USER_AUTHORIZATION_REQUIRED");
@@ -978,6 +987,8 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
 
 test("全局与项目时间线展示真实任务、进度和记录语义", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const projectCode = `TL${suffix.toUpperCase()}`;
   const projectName = `时间线语义验收 ${suffix}`;
@@ -993,7 +1004,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
   };
   const patchTask = async (key: string, operation: string, opId: string) => {
     const current = await task(key);
-    const response = await api.post(`${apiUrl}/projects/${projectCode}/work-items/patch`, {
+    const response = await agent.post(`${agentApi()}/projects/${projectCode}/work-items/patch`, {
       data: {
         session: sessionId,
         opId,
@@ -1024,7 +1035,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     expect(objective.ok()).toBeTruthy();
     const objectiveId = String(((await objective.json()) as Record<string, any>).id);
 
-    const begin = await api.post(`${apiUrl}/sessions`, {
+    const begin = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode,
@@ -1040,7 +1051,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     expect(begin.ok()).toBeTruthy();
     sessionId = String((await begin.json()).session);
 
-    const created = await api.post(`${apiUrl}/projects/${projectCode}/work-items`, {
+    const created = await agent.post(`${agentApi()}/projects/${projectCode}/work-items`, {
       data: {
         session: sessionId,
         opId: `e2e-timeline-create-${suffix}`,
@@ -1061,11 +1072,11 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
       },
     });
     expect(created.ok()).toBeTruthy();
-    const key = String(((await created.json()) as any).items[0].key);
+    const key = String(workItemKey(await created.json()));
 
     await patchTask(key, "claim", `e2e-timeline-claim-${suffix}`);
     await patchTask(key, "start", `e2e-timeline-start-${suffix}`);
-    const progress = await api.post(`${apiUrl}/projects/${projectCode}/progress-updates`, {
+    const progress = await agent.post(`${agentApi()}/projects/${projectCode}/progress-updates`, {
       data: {
         project: projectCode,
         session: sessionId,
@@ -1127,7 +1138,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     });
   } finally {
     if (sessionId) {
-      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      const close = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
         data: {
           project: projectCode,
           opId: `e2e-timeline-close-${suffix}`,
@@ -1471,6 +1482,8 @@ test("forced-colors 与 reduced-transparency 保留焦点并关闭透明材质",
 
 test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const title = `表格键盘验收 ${suffix}`;
   let sessionId = "";
@@ -1480,7 +1493,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     const objectives = (await objectivesResponse.json()) as Array<{ id: string }>;
     expect(objectives.length).toBeGreaterThan(0);
 
-    const begin = await api.post(`${apiUrl}/sessions`, {
+    const begin = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1496,7 +1509,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     expect(begin.ok()).toBeTruthy();
     sessionId = String((await begin.json()).session);
 
-    const created = await api.post(`${apiUrl}/projects/E2E/work-items`, {
+    const created = await agent.post(`${agentApi()}/projects/E2E/work-items`, {
       data: {
         session: sessionId,
         opId: `e2e-table-keyboard-create-${suffix}`,
@@ -1517,12 +1530,12 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
       },
     });
     expect(created.ok()).toBeTruthy();
-    const taskKey = String(((await created.json()) as any).items[0].key);
+    const taskKey = String(workItemKey(await created.json()));
     const patchTask = async (operation: "claim" | "start") => {
       const currentResponse = await api.get(`${apiUrl}/projects/E2E/work-items/${taskKey}`);
       expect(currentResponse.ok()).toBeTruthy();
       const current = (await currentResponse.json()) as { version: number };
-      const response = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+      const response = await agent.post(`${agentApi()}/projects/E2E/work-items/patch`, {
         data: {
           session: sessionId,
           opId: `e2e-table-keyboard-${operation}-${suffix}`,
@@ -1583,7 +1596,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     });
   } finally {
     if (sessionId) {
-      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      const close = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
         data: {
           project: "E2E",
           opId: `e2e-table-keyboard-close-${suffix}`,
@@ -1668,11 +1681,13 @@ test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口"
 
 test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const agentId = `e2e-dedupe-${suffix}`;
   const displayName = `E2E Duplicate Agent ${suffix}`;
   const begin = async () => {
-    const response = await api.post(`${apiUrl}/sessions`, {
+    const response = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1689,7 +1704,7 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
     return String((await response.json()).session);
   };
   const close = async (sessionId: string) => {
-    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+    const response = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-close-${crypto.randomUUID()}`,
@@ -1734,10 +1749,12 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
 
 test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const sessions: string[] = [];
   const begin = async (label: string) => {
-    const response = await api.post(`${apiUrl}/sessions`, {
+    const response = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1756,7 +1773,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     return sessionId;
   };
   const close = async (sessionId: string) => {
-    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+    const response = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-git-context-close-${crypto.randomUUID()}`,
@@ -1776,7 +1793,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
   const taskList = ((await listedTasks.json()) as { items: Array<Record<string, any>> }).items;
   const task = taskList.find((item) => item.title === "验证键盘与焦点");
   expect(task).toBeTruthy();
-  const claim = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+  const claim = await agent.post(`${agentApi()}/projects/E2E/work-items/patch`, {
     data: {
       session: primarySession,
       opId: `e2e-git-context-claim-${suffix}`,
@@ -2093,19 +2110,22 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
     [...ascendingTaskNumbers].sort((left, right) => left - right),
   );
   await taskSort.click();
-  // 投影与对账面板收在默认折叠的诊断区里，量间距前先展开。
+  // 对账与工程统计收在默认折叠的诊断区里，量间距前先展开。两块都在展开体内量，不受入场位移影响
+  // （3.0 没有投影面板：原来量投影到对账，现在量对账到工程统计）。
   await page
     .getByRole("region", { name: "项目诊断" })
     .getByRole("button", { name: "展开项目诊断" })
     .click();
   await expect(page.locator(".atm-project-reconcile")).toBeVisible();
   const spacing = await page.evaluate(() => {
-    const projection = document.querySelector(".atm-projection-panel")?.getBoundingClientRect();
+    const engineering = document
+      .querySelector('.atm-diagnostics-body [aria-label="工程统计"]')
+      ?.getBoundingClientRect();
     const reconcile = document.querySelector(".atm-project-reconcile")?.getBoundingClientRect();
     const metrics = document.querySelector(".atm-metrics")?.getBoundingClientRect();
     const taskPanel = document.querySelector("#project-task-panel")?.getBoundingClientRect();
     return {
-      reconcileGap: projection && reconcile ? reconcile.top - projection.bottom : -1,
+      reconcileGap: engineering && reconcile ? engineering.top - reconcile.bottom : -1,
       // 加载状态条只在出错或续读时出现，改用指标卡与任务面板之间的间距。
       taskPanelGap: metrics && taskPanel ? taskPanel.top - metrics.bottom : -1,
     };
@@ -2282,93 +2302,32 @@ test("新品牌、抽屉空间层与 reduced motion 降级可用", async ({ page
   await page.keyboard.press("Escape");
 });
 
-test("投影健康状态可在总览、项目和设置中查看并安全重试", async ({ page }) => {
+// 3.0 是单库，没有数据投影（00 §6）：2.0 的投影健康面板、「立即重试」与 registry 触发器用例随之退役。
+// 这里守的是它确实不在了：总览卡片、项目诊断、设置页都不再出现投影状态，诊断区也不因缺投影自动展开。
+test("单库没有数据投影：总览、项目诊断和设置都不再显示投影状态", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/#overview");
   const overviewProject = page.locator(".atm-overview-project").filter({ hasText: "E2E 验收项目" });
-  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("已追平");
-  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 0");
-  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
-  const projectResponse = await api.get(`${apiUrl}/projects/E2E`);
-  expect(projectResponse.ok()).toBeTruthy();
-  const project = (await projectResponse.json()) as { id: string };
-  const escapedProjectId = project.id.replaceAll("'", "''");
-  const registry = new Database(resolve("output", "e2e", "data", "registry", "registry.sqlite"));
-  const trigger = "fail_e2e_projection_health";
+  await expect(overviewProject).toBeVisible();
+  await expect(page.locator(".atm-projection-summary")).toHaveCount(0);
+  await expect(page.getByText(/数据投影/u)).toHaveCount(0);
 
-  try {
-    registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
-    registry.exec(`
-      CREATE TRIGGER ${trigger}
-      BEFORE UPDATE OF project_sequence ON project_summary_cache
-      WHEN NEW.project_id = '${escapedProjectId}'
-      BEGIN
-        SELECT RAISE(ABORT, 'injected E2E projection failure');
-      END;
-    `);
-    const record = await api.post(`${apiUrl}/projects/E2E/ui/records`, {
-      data: {
-        opId: "e2e-projection-deferred",
-        kind: "FACT",
-        title: "Projection E2E failure injection",
-        summary: "A committed project write remains durable while Registry projection is deferred.",
-      },
-    });
-    expect(record.status()).toBe(201);
-    expect(await record.json()).toMatchObject({
-      projection: {
-        status: "DEFERRED",
-        retryScheduled: true,
-        lastError: expect.stringContaining("injected E2E projection failure"),
-      },
-    });
+  await page.locator(".atm-sidebar").getByRole("button", { name: "E2E 验收项目" }).click();
+  const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await expect(diagnostics).toBeVisible();
+  await expect(diagnostics).not.toHaveAttribute("data-attention", "true");
+  await expect(diagnostics.getByRole("button", { name: "展开项目诊断" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(diagnostics.getByText("任务对账与工程统计")).toBeVisible();
+  await expect(page.getByRole("region", { name: "数据投影" })).toHaveCount(0);
 
-    await page.reload();
-    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("等待重试");
-    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 1");
-    await expect(page.getByText("E2E 数据投影等待重试（lag 1）", { exact: true })).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-deferred-overview-dark.png"),
-      fullPage: true,
-    });
-
-    await page.locator(".atm-sidebar").getByRole("button", { name: "E2E 验收项目" }).click();
-    const projectPanel = page.getByRole("region", { name: "数据投影" });
-    await expect(projectPanel).toBeVisible();
-    await expect(projectPanel.getByText("等待重试", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("lag 1", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText(/injected E2E projection failure/u)).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-deferred-project-dark.png"),
-      fullPage: true,
-    });
-
-    registry.exec(`DROP TRIGGER ${trigger}`);
-    await projectPanel.getByRole("button", { name: "立即重试" }).click();
-    await expect(page.getByText("E2E 数据投影已追平", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("已追平", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("lag 0", { exact: true })).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-recovered-project-dark.png"),
-      fullPage: true,
-    });
-
-    await page.locator(".atm-sidebar").getByRole("button", { name: "设置" }).click();
-    const systemPanel = page.getByRole("region", { name: "全局投影状态" });
-    await expect(systemPanel).toBeVisible();
-    await expect(systemPanel.getByText("已追平", { exact: true })).toBeVisible();
-    await expect(systemPanel.getByText("待重试 0", { exact: true })).toBeVisible();
-  } finally {
-    try {
-      registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
-    } finally {
-      registry.close();
-      await api.dispose();
-    }
-  }
+  await page.locator(".atm-sidebar").getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("region", { name: "全局投影状态" })).toHaveCount(0);
+  await expect(page.getByText(/数据投影|投影状态/u)).toHaveCount(0);
 });
 
-// ATM-T-0517 复审：首屏读取失败时「重试」曾是空操作——首屏失败被当成续读，续读要求已有行。
 test("总览「等你处理」首屏读取失败后点重试会真的重新读取", async ({ page }) => {
   let failing = true;
   let requests = 0;
@@ -2917,8 +2876,10 @@ for (const { route, done, status, conclusion } of [
 test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先出来，并说明还在读", async ({ page }) => {
   await ensureSwitchTargetProject();
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const agentId = `e2e-partial-${Date.now().toString(36)}`;
-  const begun = await api.post(`${apiUrl}/sessions`, {
+  const begun = await agent.post(`${agentApi()}/sessions`, {
     data: {
       cwd: process.cwd(),
       projectCode: "E2E",
@@ -2950,7 +2911,7 @@ test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先�
     await expect(status).toHaveCount(0);
     await expect(card).toBeVisible();
   } finally {
-    await api.post(`${apiUrl}/sessions/${session}/close`, {
+    await agent.post(`${agentApi()}/sessions/${session}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-close-${crypto.randomUUID()}`,

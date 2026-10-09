@@ -20,6 +20,10 @@ pub enum UiSurface {
     E2eTest,
 }
 
+/// 这次构建带不带 e2e 的界面来源。正式宿主编译期断言它是 false（`host/src/main.rs`）：
+/// 与 e2e 适配器合在同一次构建里、特性被合并进来时，宿主就编译不过（W5d 发布守卫）。
+pub const E2E_SURFACE: bool = cfg!(feature = "e2e");
+
 /// 03 §2.4 的 job。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum JobId {

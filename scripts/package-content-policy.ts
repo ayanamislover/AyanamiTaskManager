@@ -206,6 +206,8 @@ const forbiddenEntryPatterns = [
   // runtime 只带 better-sqlite3 的运行时部分：没有它的 C 源码、构建目录，也没有别的包。
   /^runtime\/node_modules\/(?!better-sqlite3(?:$|\/))/u,
   /^runtime\/node_modules\/better-sqlite3\/(?:src|deps|build)(?:\/|$)/u,
+  // 3.0 的开发与 e2e 二进制（W4i、W5d）：无头运行时与 e2e 适配器只给用例用，不进包。
+  /(?:^|\/)atm-(?:runtime|core-e2e)\.exe$/u,
 ] as const;
 
 export function findForbiddenPackagedEntries(entries: Iterable<string>): string[] {

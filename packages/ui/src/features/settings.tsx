@@ -83,10 +83,8 @@ export function SettingsPage({
   useEffect(() => {
     if (!settings.data) return;
     const backup = settings.data.find((entry) => entry.key === "backup.policy")?.value as any;
+    // 3.0 只有 notification.mode 一个开关（03 C-06）：2.x 的开关键在转换时已并入。
     const notification = settings.data.find((entry) => entry.key === "notification.mode")?.value;
-    const legacyNotification = settings.data.find(
-      (entry) => entry.key === "notification.enabled",
-    )?.value;
     if (backup) {
       setDailyEnabled(backup.enabled !== false);
       setDailyKeep(Number(backup.dailyKeep ?? 2));
@@ -95,17 +93,12 @@ export function SettingsPage({
     }
     if (["ALL", "CRITICAL", "OFF"].includes(String(notification))) {
       setNotificationMode(notification as NotificationMode);
-    } else if (legacyNotification === false) {
-      setNotificationMode("OFF");
     }
   }, [settings.data]);
   const savePolicy = useMutation({
     mutationFn: async () => {
       const backup = settings.data?.find((entry) => entry.key === "backup.policy");
       const notification = settings.data?.find((entry) => entry.key === "notification.mode");
-      const legacyNotification = settings.data?.find(
-        (entry) => entry.key === "notification.enabled",
-      );
       await client.settings.put(
         "backup.policy",
         { enabled: dailyEnabled, dailyKeep, weeklyKeep, otherKeep },
@@ -115,11 +108,6 @@ export function SettingsPage({
         "notification.mode",
         notificationMode,
         Number(notification?.version ?? -1),
-      );
-      await client.settings.put(
-        "notification.enabled",
-        notificationMode !== "OFF",
-        Number(legacyNotification?.version ?? -1),
       );
     },
     onSuccess: async () => {

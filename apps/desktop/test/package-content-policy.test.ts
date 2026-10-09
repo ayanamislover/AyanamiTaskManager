@@ -79,9 +79,20 @@ describe("packaged application content policy", () => {
       "runtime/node_modules/better-sqlite3/deps/sqlite3/sqlite3.c",
       "runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
       ".github/workflows/ci.yml",
+      "atm-core-e2e.exe",
+      "runtime/atm-runtime.exe",
     ]);
 
-    expect(forbidden).toHaveLength(11);
+    expect(forbidden).toHaveLength(13);
+    // 正式的二进制不受影响。
+    expect(
+      findForbiddenPackagedEntries([
+        "AyanamiTaskManager.exe",
+        "resources/atm-mcp.exe",
+        "atm-setup.exe",
+        "runtime/atm-core.exe",
+      ]),
+    ).toEqual([]);
   });
 
   it("reports missing runtime anchors", () => {

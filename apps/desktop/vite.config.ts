@@ -24,6 +24,9 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 9999,
     strictPort: true,
+    // 根是 apps/desktop：不监视原生构建目录（cargo 的 target 有几十 GB、上百万个文件）。
+    // e2e 启动时刚在里面构建过适配器，监视器爬它会把首屏的模块转换拖住（W5d）。
+    watch: { ignored: ["**/native/target/**", "**/native/target-*/**"] },
   },
   build: {
     outDir: "dist/renderer",
