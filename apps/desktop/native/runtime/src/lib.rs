@@ -147,7 +147,7 @@ pub struct Serving {
     _admission: Admission,
 }
 
-/// 数据源冲突：入口一个都没开，持有准入，等用户在窗口里选（W5/W6 接界面）。
+/// 数据源冲突：入口一个都没开，持有准入，等用户在窗口里选（选源界面在 W6，B2）。
 pub struct Conflicted {
     _admission: Admission,
     pub state: StartupState,
@@ -178,6 +178,21 @@ impl Serving {
         self.background.as_ref()?.recv_timeout(timeout).ok()
     }
 
+    /// 交出后台比较的结论通道（宿主在自己的线程上等它，不阻塞事件循环）。之后 [`Serving::background`] 返回 `None`。
+    pub fn take_background(&mut self) -> Option<mpsc::Receiver<Background>> {
+        self.background.take()
+    }
+
+    /// 入口开着时的服务与入口的 tokio 运行时：同进程的界面派发用（W5）。后台比较撤下入口之后是 `None`，
+    /// 界面这时也不许再写（与 Agent 入口同一个开关）。
+    pub fn service(&self) -> Option<(Arc<atm_service::write::Service>, tokio::runtime::Handle)> {
+        let guard = match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().map(|e| (e.service().clone(), e.handle()))
+    }
+
     /// 撤下入口（测试与正常退出用）。与丢弃一样，只是事件交给 `observe`。
     pub fn stop(mut self, observe: &(dyn Fn(Event) + Send + Sync)) {
         self.shut_down(observe);
@@ -204,6 +219,16 @@ impl Drop for Serving {
         let observe = self.observe.clone();
         self.shut_down(&*observe);
         // 之后字段依次释放，准入最后。
+    }
+}
+
+/// 正式宿主的旧版静止判定（07 §2 第 2 条）：`L\runtime\daemon.lock` 的持有者还活着（pid 与创建时间都对得上，
+/// 与 setup 的 `service_lease` 同一口径）就不静止。旧版的宿主与 3.0 宿主共用同一把单实例互斥，
+/// 两者不会同时是主实例；这里拦的是没有宿主、单独跑着的 2.x 服务（以及 1.x 主进程，它也持有这份 lease）。
+pub fn legacy_quiesce(legacy: &std::path::Path) -> Quiesce {
+    match atm_install_state::service::lease_holder(&legacy.join("runtime")) {
+        Some(pid) => Quiesce::Wait(format!("the 2.x service (pid {pid}) still holds its lease")),
+        None => Quiesce::Quiet,
     }
 }
 

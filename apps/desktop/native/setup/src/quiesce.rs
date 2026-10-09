@@ -59,17 +59,28 @@ pub fn service_running(env: &Env) -> bool {
 }
 
 /// The primary host as `runtime\host.json` records it — only if that process is alive,
-/// started when the record says, and is a host image of this install.
+/// started when the record says, and is a host image of this install. A 3.x host keeps the
+/// record under `N` (it writes nothing in the 2.x root), a 2.x host under the data root.
 pub fn recorded_host(env: &Env) -> Option<Proc> {
-    let record = ipc::read_host_record(&env.data_dir)?;
-    let proc = procs::find(record.pid)?;
-    let ours = proc.started_at_ms() == record.started_at_ms
-        && file_name_is(&proc.image, crate::env::LAUNCHER)
-        && proc
-            .image
-            .as_ref()
-            .is_some_and(|image| fsx::is_within(image, &env.install_root));
-    ours.then_some(proc)
+    host_records(env).into_iter().find_map(|record| {
+        let proc = procs::find(record.pid)?;
+        let ours = proc.started_at_ms() == record.started_at_ms
+            && file_name_is(&proc.image, crate::env::LAUNCHER)
+            && proc
+                .image
+                .as_ref()
+                .is_some_and(|image| fsx::is_within(image, &env.install_root));
+        ours.then_some(proc)
+    })
+}
+
+/// Every `runtime\host.json` there is: a 2.x host's under the data root first, then a 3.x
+/// host's under `N` (since W5a the 3.x host writes nothing in the 2.x root).
+pub fn host_records(env: &Env) -> Vec<ipc::HostRecord> {
+    [&env.data_dir, &env.v3_root]
+        .into_iter()
+        .filter_map(|root| ipc::read_host_record(root))
+        .collect()
 }
 
 /// Any new-style instance for this data root: a lease holder, or a primary host without
@@ -308,6 +319,43 @@ pub fn stop_started(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn host_records_are_found_under_the_data_root_and_under_n() {
+        let dir = std::path::absolute(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("target")
+                .join("setup-tests")
+                .join("host-records"),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let env = Env {
+            install_root: dir.join("install"),
+            data_dir: dir.join("data"),
+            v3_root: dir.join("v3-data"),
+            start_menu_dir: dir.join("start-menu"),
+            desktop_dir: dir.join("desktop"),
+            uninstall_key: r"Software\AyanamiTaskManagerUnitTest\Uninstall".into(),
+            run_key: r"Software\AyanamiTaskManagerUnitTest\Run".into(),
+            sandbox: true,
+        };
+        let write = |root: &Path, pid: u32| {
+            let path = ipc::host_record_path(root);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!(r#"{{"pid":{pid},"startedAtMs":1}}"#)).unwrap();
+        };
+        let pids = |env: &Env| -> Vec<u32> { host_records(env).iter().map(|r| r.pid).collect() };
+        assert!(pids(&env).is_empty());
+        // A 3.x host records itself only under N.
+        write(&env.v3_root, 30);
+        assert_eq!(pids(&env), vec![30]);
+        // A 2.x host's record comes first.
+        write(&env.data_dir, 20);
+        assert_eq!(pids(&env), vec![20, 30]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_lease_layout_tells_3x_from_electron() {

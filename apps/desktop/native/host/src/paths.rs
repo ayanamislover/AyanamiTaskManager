@@ -8,7 +8,11 @@ pub struct Layout {
     pub host_exe: PathBuf,
     pub app_dir: PathBuf,
     pub renderer_dir: PathBuf,
+    /// 2.x 数据根 `L`：3.0 宿主只用它的路径给单实例互斥与管道起名，不写它（W5a）。
+    /// Node 入口（`--cli`、`--doctor`、`--mcp-stdio`、安装探测）在 W6 换掉之前仍用它。
     pub data_dir: PathBuf,
+    /// 3.x 根 `N`：服务、宿主日志、`host.json`、WebView2 数据都在这里。
+    pub v3_root: PathBuf,
     pub core: CoreCommand,
     pub cli: CoreCommand,
     pub mcp_stdio: CoreCommand,
@@ -52,6 +56,7 @@ pub fn resolve() -> Result<Layout, String> {
     let host_exe = dunce(std::fs::canonicalize(&host_exe).unwrap_or(host_exe));
     let app_dir = host_exe.parent().ok_or("HOST_PATH_INVALID")?.to_path_buf();
     let data_dir = data_dir()?;
+    let v3_root = atm_install_state::startup::v3_root()?;
     let packaged_core = app_dir.join("runtime").join("core.mjs");
     if packaged_core.is_file() {
         let node = app_dir.join("runtime").join("atm-core.exe");
@@ -67,10 +72,11 @@ pub fn resolve() -> Result<Layout, String> {
             host_exe,
             app_dir,
             data_dir,
+            v3_root,
             packaged: true,
         });
     }
-    development_layout(host_exe, app_dir, data_dir)
+    development_layout(host_exe, app_dir, data_dir, v3_root)
 }
 
 /// Source checkout: only debug builds, only with an explicit repository root.
@@ -79,11 +85,13 @@ fn development_layout(
     host_exe: PathBuf,
     app_dir: PathBuf,
     data_dir: PathBuf,
+    v3_root: PathBuf,
 ) -> Result<Layout, String> {
     let repo = env::var_os("ATM_DEV_REPOSITORY_ROOT")
         .map(PathBuf::from)
         .ok_or("LAYOUT_UNKNOWN: packaged runtime missing and ATM_DEV_REPOSITORY_ROOT not set")?;
-    let node = which_node()?;
+    // 窗口与服务不要 Node（W5a）；只有仍是 Node 的无头入口要它，找不到时它们启动失败、报出这个名字。
+    let node = which_node().unwrap_or_else(|_| PathBuf::from("node.exe"));
     let tsx = repo
         .join("node_modules")
         .join("tsx")
@@ -132,12 +140,13 @@ fn development_layout(
         host_exe,
         app_dir,
         data_dir,
+        v3_root,
         packaged: false,
     })
 }
 
 #[cfg(not(debug_assertions))]
-fn development_layout(_: PathBuf, _: PathBuf, _: PathBuf) -> Result<Layout, String> {
+fn development_layout(_: PathBuf, _: PathBuf, _: PathBuf, _: PathBuf) -> Result<Layout, String> {
     Err("LAYOUT_UNKNOWN: packaged runtime missing".into())
 }
 

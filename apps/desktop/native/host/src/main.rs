@@ -1,22 +1,30 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! AyanamiTaskManager desktop host: a WebView2 window, the tray and the core supervisor.
-//! Replaces the Electron main process (de-electron plan).
+//! AyanamiTaskManager desktop host: a WebView2 window, the tray and the ATM 3 service in this
+//! same process (W5a: `atm-runtime` is linked, no Node core). Replaces the Electron main process.
 
 mod app;
 mod args;
 mod assets;
 mod bridge;
+// Node entries only (`--cli`, `--doctor`, `--mcp-stdio`, the install probe): the GUI path no
+// longer starts a core (W5a, guarded by tests/single_process.rs). Goes with the Node entries in W6.
+#[allow(dead_code)]
 mod core_process;
 mod dpapi;
 mod headless;
 mod health;
 mod identity;
+// Toasts come back with the notification observer (W5f).
+#[allow(dead_code)]
 mod notify;
 mod paths;
 mod probe;
+mod service;
 mod session_end;
 mod single_instance;
 mod tray;
+// Installing an update comes back with the update coordinator (W5g).
+#[allow(dead_code)]
 mod update;
 mod webview_frames;
 mod win;
@@ -194,7 +202,7 @@ fn admit(layout: &paths::Layout, parsed: &args::Args, argv: &[String]) -> Result
                 return Err(3);
             }
             Admission::Reject(reason) => {
-                log(&layout.data_dir, &format!("admission rejected: {reason}"));
+                log(&layout.v3_root, &format!("admission rejected: {reason}"));
                 return Err(2);
             }
         }
@@ -210,10 +218,10 @@ fn autostart_target(layout: &paths::Layout, context: &Context) -> PathBuf {
     }
 }
 
-/// `runtime\host.json`: who holds the primary mutex, so setup can stop this host by
-/// identity even before (or between) core leases. Stale records are harmless: setup checks
-/// pid *and* start time.
-fn publish_host_record(data_dir: &Path) {
+/// `N\runtime\host.json`: who holds the primary mutex, so setup can stop this host by
+/// identity even before the service lease exists (login delay, a long conversion). Stale
+/// records are harmless: setup checks pid *and* start time.
+fn publish_host_record(v3_root: &Path) {
     let pid = std::process::id();
     let record = atm_install_state::ipc::HostRecord {
         pid,
@@ -222,8 +230,8 @@ fn publish_host_record(data_dir: &Path) {
     let Ok(body) = serde_json::to_value(&record) else {
         return;
     };
-    if let Err(error) = health::write_atomically(&data_dir.join("runtime"), "host.json", &body) {
-        log(data_dir, &format!("host record not written: {error}"));
+    if let Err(error) = health::write_atomically(&v3_root.join("runtime"), "host.json", &body) {
+        log(v3_root, &format!("host record not written: {error}"));
     }
 }
 
@@ -290,21 +298,22 @@ fn real_main() -> i32 {
         single_instance::send(&layout.data_dir, &command, Duration::from_secs(5));
         return 0;
     };
-    publish_host_record(&layout.data_dir);
+    publish_host_record(&layout.v3_root);
     notify::set_process_identity();
     let version =
         atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
     let target = autostart_target(&layout, &context);
-    let witness = match &context {
+    // setup 拉起（`--txn-start`）：SERVICE_HEALTHY 见证由 runtime 在入口开好之后写。
+    let handoff = match &context {
         Context::TxnStart {
             install_root, txn, ..
-        } => Some(health::Witness {
+        } => Some(atm_runtime::Handoff {
             install_root: install_root.clone(),
             txn: txn.clone(),
         }),
         _ => None,
     };
-    app::run(layout, parsed, primary, target, version, witness)
+    app::run(layout, parsed, primary, target, version, handoff)
 }
 
 fn main() {

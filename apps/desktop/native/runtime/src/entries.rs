@@ -226,6 +226,11 @@ impl Entries {
         &self.svc
     }
 
+    /// 入口所在的 tokio 运行时：同进程的界面派发（W5）在它上面跑，与 Agent 入口共用同一组工作线程。
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.rt.handle().clone()
+    }
+
     /// 撤下全部入口：停调度器（等当前一轮结束）→ 停 HTTP（等进行中的请求结束）→ 撤 daemon.json。
     /// lease 记录留着：进程还活着、还持有准入，setup 要能找到它。
     pub fn withdraw(mut self, observe: &(dyn Fn(Event) + Send + Sync)) {

@@ -123,8 +123,9 @@ pub fn after_spawn(
             })
     };
     let primary = || {
-        atm_install_state::ipc::read_host_record(&env.data_dir)
-            .is_some_and(|record| record.pid == host.pid)
+        crate::quiesce::host_records(env)
+            .iter()
+            .any(|record| record.pid == host.pid)
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     let reached = loop {

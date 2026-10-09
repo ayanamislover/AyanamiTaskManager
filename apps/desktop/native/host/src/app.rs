@@ -1,10 +1,10 @@
 //! Event loop: window/WebView lifecycle, renderer bridge, tray, second instance and the
-//! core supervisor (de-electron §4, §5, §8).
+//! in-process ATM 3 service (W5a; de-electron §4, §5, §8 for the window and the bridge).
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use atm_runtime::{Background, BootError, Conflicted, Handoff, Serving, Started};
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, StartCause, WindowEvent};
@@ -18,8 +18,8 @@ use wry::{PageLoadEvent, WebContext, WebView, WebViewBuilder, WebViewBuilderExtW
 use crate::args::Args;
 use crate::assets;
 use crate::bridge::{self, Call, Local, Method};
-use crate::core_process::{CORE_EXIT_REJECTED, Core, CoreEvent, Launch, Spawn};
 use crate::paths::Layout;
+use crate::service::Booted;
 use crate::single_instance::{Command, Primary, Route};
 use crate::tray::{self, Snapshot};
 use crate::win;
@@ -27,15 +27,22 @@ use crate::win;
 /// Upper bound for waiting on the renderer's ready signal (window-readiness.ts).
 const RENDERER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 const STARTUP_DELAY_MAX_MS: u64 = 5_000;
-const CORE_RESTART_WINDOW: Duration = Duration::from_secs(600);
-const CORE_RESTART_LIMIT: usize = 5;
+/// A failed start is retried with backoff, at most this many times in this window; then the
+/// host keeps its window and tray and says the service is unavailable until the next start.
+const BOOT_RETRY_WINDOW: Duration = Duration::from_secs(600);
+const BOOT_RETRY_LIMIT: usize = 5;
+/// The 2.x service has not quiesced yet: look again this often (not counted as a failure).
+const LEGACY_RECHECK: Duration = Duration::from_secs(5);
 const MAX_QUEUED_CALLS: usize = 256;
 const LIGHT_BACKGROUND: (u8, u8, u8, u8) = (0xFB, 0xF7, 0xFF, 0xFF);
 const DARK_BACKGROUND: (u8, u8, u8, u8) = (0x24, 0x1E, 0x30, 0xFF);
 
 #[derive(Debug)]
 pub enum UserEvent {
-    Core(u64, CoreEvent),
+    /// The boot thread finished attempt `n`.
+    Booted(u64, Booted),
+    /// The background comparison of a serving start reached its verdict.
+    Background(Background),
     Second(Command),
     Ipc {
         generation: u64,
@@ -49,43 +56,50 @@ pub enum UserEvent {
     Tray(TrayIconEvent),
     Menu(MenuEvent),
     StartupDelayElapsed,
-    RestartCore,
-}
-
-struct PendingCall {
-    generation: u64,
-    epoch: u64,
-    js_id: u64,
+    RetryService,
 }
 
 struct QueuedCall {
     generation: u64,
     epoch: u64,
     js_id: u64,
-    method: &'static str,
-    args: Vec<Value>,
+}
+
+/// Where the in-process service is.
+enum Service {
+    /// Not started yet: login delay, or waiting for an install transaction's lock.
+    Idle,
+    /// The boot thread is running attempt `boot_attempt`.
+    Booting,
+    /// A retry is scheduled.
+    Retrying,
+    Serving(Serving),
+    /// Source conflict: no entry is open; the admission is held (by keeping this value) until
+    /// the user chooses (W6, B2).
+    Conflict {
+        _held: Conflicted,
+    },
+    /// Gave up after repeated failures; the next start tries again.
+    Unavailable,
 }
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     layout: Layout,
-    args: Args,
     run_id: String,
     version: String,
-    /// Set when setup started this host with `--txn-start`: the SERVICE_HEALTHY witness goes
-    /// to that transaction once the core is ready.
-    witness: Option<crate::health::Witness>,
+    /// Set when setup started this host with `--txn-start`: the runtime writes the
+    /// SERVICE_HEALTHY witness for that transaction once its entries are open.
+    handoff: Option<Handoff>,
     autostart_target: PathBuf,
     _primary: Primary,
 
-    core: Option<Core>,
-    core_generation: u64,
-    core_ready: bool,
-    core_starting: bool,
-    core_restarts: Vec<Instant>,
+    service: Service,
+    boot_attempt: u64,
+    boot_failures: Vec<Instant>,
+    /// The last reason the 2.x service was waited for, logged once per change.
+    legacy_wait: Option<String>,
     queued: Vec<QueuedCall>,
-    pending: HashMap<u64, PendingCall>,
-    next_core_id: u64,
 
     web_context: WebContext,
     window: Option<Window>,
@@ -207,17 +221,25 @@ fn random_delay() -> Duration {
     Duration::from_millis(nanos % (STARTUP_DELAY_MAX_MS + 1))
 }
 
+fn after(delay: Duration, proxy: &EventLoopProxy<UserEvent>, event: UserEvent) {
+    let proxy = proxy.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let _ = proxy.send_event(event);
+    });
+}
+
 pub fn run(
     layout: Layout,
     args: Args,
     primary: Primary,
     autostart_target: PathBuf,
     version: String,
-    witness: Option<crate::health::Witness>,
+    handoff: Option<Handoff>,
 ) -> i32 {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
-    crate::session_end::install(&layout.data_dir);
+    crate::session_end::install(&layout.v3_root);
     {
         let proxy = proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
@@ -232,35 +254,32 @@ pub fn run(
     }
     {
         let proxy = proxy.clone();
+        // Named after `L` like the mutex: setup's QUIT and the launcher's SHOW / WAKE find it.
         if let Err(error) = crate::single_instance::serve(&layout.data_dir, move |command| {
             let _ = proxy.send_event(UserEvent::Second(command));
         }) {
             crate::log(
-                &layout.data_dir,
+                &layout.v3_root,
                 &format!("second-instance pipe unavailable: {error}"),
             );
         }
     }
-    let web_context = WebContext::new(Some(layout.data_dir.join("webview")));
+    let web_context = WebContext::new(Some(layout.v3_root.join("webview")));
     let mut app = App {
         proxy,
         show_pending: !args.background,
         startup_delay_pending: args.random_startup_delay && !args.agent_wake,
         layout,
-        args,
         run_id: run_id(),
         version,
-        witness,
+        handoff,
         autostart_target,
         _primary: primary,
-        core: None,
-        core_generation: 0,
-        core_ready: false,
-        core_starting: false,
-        core_restarts: Vec::new(),
+        service: Service::Idle,
+        boot_attempt: 0,
+        boot_failures: Vec::new(),
+        legacy_wait: None,
         queued: Vec::new(),
-        pending: HashMap::new(),
-        next_core_id: 1,
         web_context,
         window: None,
         webview: None,
@@ -293,7 +312,7 @@ pub fn run(
             Event::WindowEvent { event, .. } => app.on_window_event(event),
             _ => {}
         }
-        if app.quitting && app.core.is_none() {
+        if app.quitting {
             *control_flow = ControlFlow::ExitWithCode(app.exit_code);
         }
     })
@@ -310,24 +329,24 @@ impl App {
     fn on_init(&mut self) {
         match tray::build(&self.snapshot) {
             Ok(tray) => self.tray = Some(tray),
-            Err(error) => crate::log(&self.layout.data_dir, &format!("tray unavailable: {error}")),
+            Err(error) => crate::log(&self.layout.v3_root, &format!("tray unavailable: {error}")),
         }
         if self.startup_delay_pending {
-            let proxy = self.proxy.clone();
-            let delay = random_delay();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                let _ = proxy.send_event(UserEvent::StartupDelayElapsed);
-            });
+            after(random_delay(), &self.proxy, UserEvent::StartupDelayElapsed);
         } else {
-            self.start_core();
+            self.start_service();
+        }
+        // The window does not wait for the service: a conversion can take minutes, and the
+        // renderer reports its own loading and unavailable states.
+        if self.show_pending {
+            self.request_show_later();
         }
     }
 
-    /// Admission was decided once, at start; a delayed start or a core restart can come
-    /// after a setup began a transaction (Codex review P1-1). Checked before every core start.
+    /// Admission was decided once, at start; a delayed start or a retry can come after a
+    /// setup began a transaction (Codex review P1-1). Checked before every start attempt.
     fn install_gate(&self) -> Gate {
-        if self.witness.is_some() || !self.layout.packaged {
+        if self.handoff.is_some() || !self.layout.packaged {
             return Gate::Open;
         }
         let Some(root) = self.layout.app_dir.parent() else {
@@ -357,94 +376,124 @@ impl App {
         }
     }
 
-    fn start_core(&mut self) {
-        if self.core.is_some() || self.core_starting || self.quitting {
+    fn start_service(&mut self) {
+        if !matches!(self.service, Service::Idle | Service::Retrying) || self.quitting {
             return;
         }
         match self.install_gate() {
             Gate::Open => {}
             Gate::Wait => {
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_secs(1));
-                    let _ = proxy.send_event(UserEvent::RestartCore);
-                });
+                self.service = Service::Retrying;
+                after(Duration::from_secs(1), &self.proxy, UserEvent::RetryService);
                 return;
             }
             Gate::Closed => {
                 crate::log(
-                    &self.layout.data_dir,
-                    "core not started: an install transaction began after this host started",
+                    &self.layout.v3_root,
+                    "service not started: an install transaction began after this host started",
                 );
                 self.quit();
                 return;
             }
         }
         self.startup_delay_pending = false;
-        self.core_starting = true;
-        self.core_generation += 1;
-        let generation = self.core_generation;
-        let proxy = self.proxy.clone();
-        let launch = Launch {
-            background: self.args.background,
-            agent_wake: self.args.agent_wake,
-            random_startup_delay: self.args.random_startup_delay,
-        };
-        match Core::spawn(
-            &self.layout.core,
-            &self.layout.data_dir,
-            Spawn {
-                run_id: &self.run_id,
-                version: &self.version,
-                launch,
-                probe_txn: None,
-                stderr_log: Some(self.layout.data_dir.join("logs").join("core-stderr.log")),
-            },
-            move |event| {
-                let _ = proxy.send_event(UserEvent::Core(generation, event));
-            },
-        ) {
-            Ok(core) => {
-                crate::session_end::set_core(Some(core.session_marker()));
-                self.core = Some(core);
+        self.boot_attempt += 1;
+        self.service = Service::Booting;
+        let options = crate::service::options(&self.layout, &self.version, self.handoff.clone());
+        crate::service::spawn(options, self.boot_attempt, self.proxy.clone());
+    }
+
+    fn on_booted(&mut self, attempt: u64, booted: Booted) {
+        if attempt != self.boot_attempt || !matches!(self.service, Service::Booting) {
+            return;
+        }
+        match booted.0 {
+            Ok(Started::Serving(mut serving)) => {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!(
+                        "service serving on 127.0.0.1:{} (instance {}, lease {})",
+                        serving.port(),
+                        serving.instance_id(),
+                        serving.lease_generation()
+                    ),
+                );
+                if let Some(receiver) = serving.take_background() {
+                    crate::service::watch_background(receiver, self.proxy.clone());
+                }
+                self.legacy_wait = None;
+                self.service = Service::Serving(serving);
+                self.answer_queued();
+            }
+            Ok(Started::Conflict(conflicted)) => {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!("SOURCE_CONFLICT: {}", conflicted.state.reason),
+                );
+                self.service = Service::Conflict { _held: conflicted };
+                self.answer_queued();
+            }
+            Err(BootError::WaitLegacyQuiesce(why)) => {
+                if self.legacy_wait.as_deref() != Some(why.as_str()) {
+                    crate::log(&self.layout.v3_root, &format!("WAIT_LEGACY_QUIESCE: {why}"));
+                    self.legacy_wait = Some(why);
+                }
+                self.service = Service::Retrying;
+                after(LEGACY_RECHECK, &self.proxy, UserEvent::RetryService);
             }
             Err(error) => {
-                self.core_starting = false;
-                crate::log(&self.layout.data_dir, &error);
-                self.schedule_core_restart();
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!("service start failed: {error}"),
+                );
+                self.schedule_retry();
             }
         }
     }
 
-    fn schedule_core_restart(&mut self) {
+    fn schedule_retry(&mut self) {
         let now = Instant::now();
-        self.core_restarts
-            .retain(|at| now.duration_since(*at) < CORE_RESTART_WINDOW);
-        if self.core_restarts.len() >= CORE_RESTART_LIMIT {
+        self.boot_failures
+            .retain(|at| now.duration_since(*at) < BOOT_RETRY_WINDOW);
+        if self.boot_failures.len() >= BOOT_RETRY_LIMIT {
             crate::log(
-                &self.layout.data_dir,
-                "core keeps failing; giving up until the next start",
+                &self.layout.v3_root,
+                "service keeps failing; giving up until the next start",
             );
-            self.reject_all_calls("CORE_UNAVAILABLE");
+            self.service = Service::Unavailable;
+            self.answer_queued();
             return;
         }
-        self.core_restarts.push(now);
-        let backoff = Duration::from_secs(1 << self.core_restarts.len().min(4));
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(backoff);
-            let _ = proxy.send_event(UserEvent::RestartCore);
-        });
+        self.boot_failures.push(now);
+        self.service = Service::Retrying;
+        let backoff = Duration::from_secs(1 << self.boot_failures.len().min(4));
+        after(backoff, &self.proxy, UserEvent::RetryService);
+    }
+
+    fn on_background(&mut self, outcome: Background) {
+        match outcome {
+            Background::Unchanged => {}
+            // The runtime already withdrew every entry before writing the startup state; the
+            // admission stays held (the user chooses the source, W6).
+            Background::Conflict(state) => crate::log(
+                &self.layout.v3_root,
+                &format!(
+                    "SOURCE_CONFLICT after the background comparison: {}",
+                    state.reason
+                ),
+            ),
+            Background::Failed(error) => crate::log(
+                &self.layout.v3_root,
+                &format!("background comparison: {error}"),
+            ),
+        }
     }
 
     fn on_user_event(&mut self, event: UserEvent, target: &EventLoopWindowTarget<UserEvent>) {
         match event {
-            UserEvent::StartupDelayElapsed => self.start_core(),
-            UserEvent::RestartCore => self.start_core(),
-            UserEvent::Core(generation, event) if generation == self.core_generation => {
-                self.on_core_event(event, target)
-            }
-            UserEvent::Core(..) => {}
+            UserEvent::StartupDelayElapsed | UserEvent::RetryService => self.start_service(),
+            UserEvent::Booted(attempt, booted) => self.on_booted(attempt, booted),
+            UserEvent::Background(outcome) => self.on_background(outcome),
             UserEvent::Second(command) => self.on_second_instance(command, target),
             UserEvent::Ipc {
                 generation,
@@ -489,20 +538,10 @@ impl App {
                 Some(tray::Action::Settings) => {
                     self.request_show(Some(Route::Settings.as_str()), target)
                 }
-                Some(tray::Action::NotificationMode(mode)) => {
-                    if let Some(core) = self.core.as_ref().filter(|_| self.core_ready) {
-                        let id = self.next_core_id;
-                        self.next_core_id += 1;
-                        core.request(id, "setNotificationMode", json!([mode]));
-                    }
-                }
-                // The core re-checks the feed and answers with an install-update frame.
-                Some(tray::Action::InstallUpdate) => {
-                    if let Some(core) = self.core.as_ref().filter(|_| self.core_ready) {
-                        let id = self.next_core_id;
-                        self.next_core_id += 1;
-                        core.request(id, "applyUpdate", json!([]));
-                    }
+                // Notification mode (W5f) and installing an update (W5g) are wired to the
+                // service in their own steps; until then the tray items do nothing.
+                Some(tray::Action::NotificationMode(_)) | Some(tray::Action::InstallUpdate) => {
+                    crate::log(&self.layout.v3_root, "tray action not wired yet");
                 }
                 Some(tray::Action::Quit) => self.quit(),
                 None => {}
@@ -513,172 +552,43 @@ impl App {
     fn on_second_instance(&mut self, command: Command, target: &EventLoopWindowTarget<UserEvent>) {
         match command {
             Command::Show => {
-                self.start_core();
+                self.start_service();
                 self.request_show(None, target);
             }
             Command::Navigate { route } => {
-                self.start_core();
+                self.start_service();
                 self.request_show(Some(route.as_str()), target);
             }
             // An Agent woke us: cancel the login delay, stay in the background.
-            Command::Wake => self.start_core(),
+            Command::Wake => self.start_service(),
             Command::Quit => self.quit(),
             #[cfg(feature = "smoke")]
             Command::SmokeQuit => self.quit(),
         }
     }
 
-    fn on_core_event(&mut self, event: CoreEvent, target: &EventLoopWindowTarget<UserEvent>) {
-        match event {
-            CoreEvent::Ready(frame) => {
-                if let (Some(witness), Some(core)) = (&self.witness, &self.core) {
-                    crate::health::service_witness(
-                        witness,
-                        &self.version,
-                        &self.run_id,
-                        &frame,
-                        core.pid,
-                    );
-                }
-                self.core_starting = false;
-                self.core_ready = true;
-                let queued = std::mem::take(&mut self.queued);
-                for call in queued {
-                    self.forward(call);
-                }
-                if self.show_pending && self.window.is_none() {
-                    self.ensure_window(target);
-                }
-            }
-            CoreEvent::Response { id, frame } => {
-                let Some(pending) = self.pending.remove(&id) else {
-                    return;
-                };
-                if pending.generation != self.generation || pending.epoch != self.epoch {
-                    return;
-                }
-                let mut answer = json!({ "id": pending.js_id, "ok": frame.get("ok").cloned().unwrap_or(Value::Bool(false)) });
-                if let Some(value) = frame.get("value") {
-                    answer["value"] = value.clone();
-                }
-                if let Some(error) = frame.get("error") {
-                    answer["error"] = error.clone();
-                }
-                self.deliver(&answer);
-            }
-            CoreEvent::Tray(snapshot) => {
-                if let Ok(snapshot) = serde_json::from_value::<Snapshot>(snapshot)
-                    && snapshot != self.snapshot
-                {
-                    // One line when the tray starts offering a version: "update ready" can be
-                    // traced from the core to the tray.
-                    if let Some(version) = &snapshot.pending_update
-                        && self.snapshot.pending_update.as_ref() != Some(version)
-                    {
-                        crate::log(
-                            &self.layout.data_dir,
-                            &format!("tray offers update {version}"),
-                        );
-                    }
-                    self.snapshot = snapshot;
-                    if let Some(tray) = &self.tray {
-                        tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
-                    }
-                }
-            }
-            // Only the install probe asks for this; a service core never sends it.
-            CoreEvent::Probed(_) => {}
-            CoreEvent::Notify { title, body } => {
-                crate::notify::show(&self.layout.data_dir, &title, &body)
-            }
-            CoreEvent::InstallUpdate { manifest } => {
-                let result =
-                    crate::update::install(&self.layout.app_dir, &self.layout.data_dir, &manifest);
-                if let Err(error) = &result {
-                    crate::log(
-                        &self.layout.data_dir,
-                        &format!("install-update refused: {error}"),
-                    );
-                    if let Some(core) = &self.core {
-                        core.event("update-launch-failed");
-                    }
-                }
-            }
-            CoreEvent::Fatal { code, message } => {
-                crate::log(
-                    &self.layout.data_dir,
-                    &format!("core fatal {code}: {message}"),
-                );
-            }
-            CoreEvent::Exited(code) => {
-                crate::session_end::set_core(None);
-                self.core = None;
-                self.core_ready = false;
-                self.core_starting = false;
-                let lost: Vec<u64> = self.pending.keys().copied().collect();
-                for id in lost {
-                    if let Some(pending) = self.pending.remove(&id)
-                        && pending.generation == self.generation
-                        && pending.epoch == self.epoch
-                    {
-                        // A write may or may not have happened; say so instead of retrying.
-                        self.deliver(&bridge::error(
-                            pending.js_id,
-                            "CORE_RESTARTED",
-                            "服务已重启，这次操作的结果未知，请刷新后确认",
-                        ));
-                    }
-                }
-                if self.quitting {
-                    return;
-                }
-                if code == Some(CORE_EXIT_REJECTED) {
-                    crate::log(&self.layout.data_dir, "core rejected this host (exit 64)");
-                    self.exit_code = 1;
-                    self.quit();
-                    return;
-                }
-                crate::log(
-                    &self.layout.data_dir,
-                    &format!("core exited unexpectedly: {code:?}"),
-                );
-                self.schedule_core_restart();
-            }
+    /// What a renderer call that needs the service gets while the service cannot take it.
+    /// `None`: still starting, keep it queued.
+    fn unavailable(&self) -> Option<(&'static str, &'static str)> {
+        match self.service {
+            Service::Idle | Service::Booting | Service::Retrying => None,
+            Service::Conflict { .. } => Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源")),
+            Service::Unavailable => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
+            // The in-process UI dispatch arrives with the ui-bridge (W5e).
+            Service::Serving(_) => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
         }
     }
 
-    fn reject_all_calls(&mut self, code: &str) {
+    fn answer_queued(&mut self) {
+        let Some((code, message)) = self.unavailable() else {
+            return;
+        };
         let queued = std::mem::take(&mut self.queued);
         for call in queued {
             if call.generation == self.generation && call.epoch == self.epoch {
-                self.deliver(&bridge::error(call.js_id, code, "服务暂时不可用"));
+                self.deliver(&bridge::error(call.js_id, code, message));
             }
         }
-    }
-
-    fn forward(&mut self, call: QueuedCall) {
-        if call.generation != self.generation || call.epoch != self.epoch {
-            return;
-        }
-        let Some(core) = self.core.as_ref() else {
-            self.deliver(&bridge::error(
-                call.js_id,
-                "CORE_UNAVAILABLE",
-                "服务暂时不可用",
-            ));
-            return;
-        };
-        let id = self.next_core_id;
-        self.next_core_id += 1;
-        self.pending.insert(
-            id,
-            PendingCall {
-                generation: call.generation,
-                epoch: call.epoch,
-                js_id: call.js_id,
-            },
-        );
-        core.request(id, call.method, Value::Array(call.args));
     }
 
     fn deliver(&self, answer: &Value) {
@@ -698,7 +608,7 @@ impl App {
             Ok(call) => call,
             Err(rejected) => {
                 crate::log(
-                    &self.layout.data_dir,
+                    &self.layout.v3_root,
                     &format!("renderer message rejected: {rejected:?}"),
                 );
                 return;
@@ -707,20 +617,17 @@ impl App {
         let Call { id, method, args } = call;
         match method {
             Method::Local(local) => self.on_local(id, local, &args),
-            Method::Core(name) => {
-                let queued = QueuedCall {
-                    generation: self.generation,
-                    epoch: self.epoch,
-                    js_id: id,
-                    method: name,
-                    args,
-                };
-                if self.core_ready {
-                    self.forward(queued);
+            Method::Core(_) => {
+                if let Some((code, message)) = self.unavailable() {
+                    self.deliver(&bridge::error(id, code, message));
                 } else if self.queued.len() < MAX_QUEUED_CALLS {
-                    self.queued.push(queued);
+                    self.queued.push(QueuedCall {
+                        generation: self.generation,
+                        epoch: self.epoch,
+                        js_id: id,
+                    });
                 } else {
-                    self.deliver(&bridge::error(id, "CORE_BUSY", "服务尚未就绪"));
+                    self.deliver(&bridge::error(id, "SERVICE_BUSY", "服务尚未就绪"));
                 }
             }
         }
@@ -730,9 +637,6 @@ impl App {
         let value = match local {
             Local::NotifyRendererReady => {
                 self.renderer_ready = true;
-                if let Some(core) = &self.core {
-                    core.event("renderer-ready");
-                }
                 crate::health::ui_confirmed(&self.layout, &self.version, &self.run_id);
                 self.drain_readiness();
                 return;
@@ -775,6 +679,12 @@ impl App {
         self.deliver(&bridge::ok(id, value));
     }
 
+    /// The first window of a foreground start is built on the first turn of the loop that
+    /// has a target (`on_init` has none).
+    fn request_show_later(&mut self) {
+        let _ = self.proxy.send_event(UserEvent::Second(Command::Show));
+    }
+
     fn request_show(
         &mut self,
         route: Option<&'static str>,
@@ -787,7 +697,7 @@ impl App {
             self.saved.route = None;
         }
         if self.startup_delay_pending {
-            self.start_core();
+            self.start_service();
         }
         if self.window.is_none() {
             self.ensure_window(target);
@@ -823,7 +733,7 @@ impl App {
         // The renderer will not report in (load failure, crash). Showing a window the user
         // can close beats a tray icon that never opens anything.
         crate::log(
-            &self.layout.data_dir,
+            &self.layout.v3_root,
             "renderer did not report ready in time",
         );
         self.renderer_ready = true;
@@ -859,7 +769,7 @@ impl App {
             Ok(window) => window,
             Err(error) => {
                 crate::log(
-                    &self.layout.data_dir,
+                    &self.layout.v3_root,
                     &format!("window creation failed: {error}"),
                 );
                 return;
@@ -908,7 +818,7 @@ impl App {
             })
             .with_url(assets::ENTRY_URL);
         // Test builds only: a DevTools endpoint on a port the OS picks. Chromium writes it to
-        // `<data>\webview\EBWebView\DevToolsActivePort`, where the smoke scripts read it —
+        // `<N>\webview\EBWebView\DevToolsActivePort`, where the smoke scripts read it —
         // nobody guesses a port. Setting the args replaces wry's defaults, so they are repeated.
         #[cfg(feature = "smoke")]
         let builder = builder.with_additional_browser_args(
@@ -920,19 +830,16 @@ impl App {
                 self.webview = Some(webview);
             }
             Err(error) => crate::log(
-                &self.layout.data_dir,
+                &self.layout.v3_root,
                 &format!("webview creation failed: {error}"),
             ),
         }
         self.window = Some(window);
         self.ready_deadline = Some(Instant::now() + RENDERER_READY_TIMEOUT);
-        if let Some(core) = &self.core {
-            core.event("window-shown");
-        }
     }
 
     /// Closing drops the whole WebView (its WebView2 processes exit) and the window; the
-    /// core, tray and notifications keep running.
+    /// service, tray and notifications keep running.
     fn close_window(&mut self) {
         if let Some(route) = self
             .webview
@@ -951,14 +858,9 @@ impl App {
         self.ready_deadline = None;
         self.show_pending = false;
         self.route_pending = None;
-        self.pending
-            .retain(|_, pending| pending.generation != self.generation);
         self.queued
             .retain(|call| call.generation != self.generation);
         self.generation += 1;
-        if let Some(core) = &self.core {
-            core.event("window-closed");
-        }
     }
 
     /// Maximized or minimized bounds are not the ones to come back to. They are tracked on
@@ -990,6 +892,9 @@ impl App {
         }
     }
 
+    /// Window and tray go first; then the service shuts down in order (scheduler → HTTP →
+    /// daemon.json, the admission last). A boot still running (a conversion) is left to the
+    /// process exit: every conversion step is resumable (07 §4).
     fn quit(&mut self) {
         if self.quitting {
             return;
@@ -997,9 +902,11 @@ impl App {
         self.quitting = true;
         self.close_window();
         self.tray = None;
-        if let Some(core) = self.core.take() {
-            core.shutdown();
-            core.wait_or_kill(Duration::from_secs(8));
+        let service = std::mem::replace(&mut self.service, Service::Idle);
+        if let Service::Serving(serving) = service {
+            let log_root = self.layout.v3_root.clone();
+            serving.stop(&move |e| crate::log(&log_root, &format!("runtime: {e:?}")));
         }
+        crate::log(&self.layout.v3_root, "host quit");
     }
 }

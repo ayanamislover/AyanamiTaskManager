@@ -1,7 +1,7 @@
 # atm-runtime：3.x 无头运行时（W4i）
 
 `atm-runtime` 是 ATM 3 单进程服务的运行时库：准入 → 启动判定 / 转换 → 权威判定 → 开放 Agent 入口 → 调度。
-正式宿主（W6）链接这个库；`atm-runtime.exe` 是开发与端到端用例用的无头二进制，不进安装包。
+正式宿主（`atm-host`，W5a 起）链接这个库，在自己的进程里跑服务；`atm-runtime.exe` 是开发与端到端用例用的无头二进制，不进安装包。
 调度器与客户端存活判定在 `atm-jobs`：System 主体只许在 `jobs` crate 里构造（`domain/tests/principal_guard.rs`）。
 
 规格：`output/atm3-spec/07-conversion-state-machine.md` §2–§8；W3 peer r1 的 P2-02（`output/peer-atm3-w3-r1.md`）。
@@ -71,8 +71,24 @@ decide 循环（最多 8 圈）
 ## 不在 W4i
 
 - 同步、派单与其余调度任务（W7）；冲突时它们本来就不起。
-- 可信界面里的选源（W5/W6）：`Conflicted` 持有准入，等用户选。
-- 旧版静止的判定：开发二进制直接判静止（联调里旧根由用例控制），不做任何检查；正式宿主（W6）接入 setup 已有的判定。
+- 可信界面里的选源（W6，B2）：`Conflicted` 持有准入，等用户选。
+- 旧版静止的判定：开发二进制直接判静止（联调里旧根由用例控制），不做任何检查；正式宿主用 [`legacy_quiesce`]（W5a，见下）。
+
+## 正式宿主（W5a）
+
+- `atm-host` 在工作线程上调 `start`，事件循环与托盘不等它；结果经事件循环交回，宿主持有 `Serving` / `Conflicted` 到退出。
+  退出时 `Serving::stop`：后台比较不再动手 → 撤入口 → 最后放准入。
+- 嵌入用的句柄：`Serving::service()` 给出服务与入口的 tokio `Handle`（界面派发用，入口撤下后是 `None`）；
+  `Serving::take_background()` 交出后台比较的结论通道，宿主在自己的线程上等。
+- `legacy_quiesce(L)`：`L\runtime\daemon.lock` 的持有者还活着（pid 与创建时间对得上，与 setup 的 `service_lease` 同一口径）就 `Wait`。
+  宿主每 5 s 再试一次，不计入失败重试的节流（10 min 内最多 5 次，退避 2、4、8、16 s）。
+- 文件归属：宿主日志（`N\logs\host.log`）、`N\runtime\host.json`、WebView2 数据（`N\webview`）都在 `N`；
+  旧根 `L` 只用它的路径给单实例互斥与管道起名（setup 的 QUIT、launcher 的 SHOW / WAKE 照旧），不写任何文件。
+  setup 找 host.json 时两处都看（`quiesce::host_records`）。
+- 用例：`host/tests/single_process.rs`（GUI 路径不引用 Node core 的静态守卫；真实进程：`/health` 答宿主 pid、
+  没有子进程、`L` 没有文件、QUIT 后 daemon.json 撤下；旧版 lease 在时不开入口，走了再开）。
+  验红：`output/w5-evidence/mutations/mut-w5a.py`。
+- Node 入口（`--cli`、`--doctor`、`--mcp-stdio`、安装探测）在 W6 换掉之前照旧，它们还用 `L`。
 - 安装与回滚全流程、掉电（W8）。
 
 ## 验红
