@@ -2,6 +2,7 @@
 //! AyanamiTaskManager desktop host: a WebView2 window, the tray and the ATM 3 service in this
 //! same process (W5a: `atm-runtime` is linked, no Node core). Replaces the Electron main process.
 
+mod agents;
 mod app;
 mod args;
 mod assets;

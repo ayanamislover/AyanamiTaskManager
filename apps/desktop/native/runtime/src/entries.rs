@@ -55,6 +55,8 @@ pub struct Entries {
     instance_id: String,
     lease_generation: u64,
     port: u16,
+    /// Agent 入口的令牌：只在内存里交给设置页的「复制配置」（getMcpConfigs），不进日志。
+    token: String,
     svc: Arc<Service>,
 }
 
@@ -180,6 +182,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         instance_id,
         lease_generation,
         port,
+        token: token.1.clone(),
         svc,
     };
     (p.observe)(Event::Http);
@@ -264,6 +267,10 @@ impl Entries {
 
     pub fn lease_generation(&self) -> u64 {
         self.lease_generation
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     pub fn service(&self) -> &Arc<Service> {

@@ -74,12 +74,12 @@ pub enum UserEvent {
     UpdatePending(Option<String>),
     /// 「立即更新」确认了包：在 UI 线程上复核路径并拉起 setup。
     InstallUpdate(PathBuf),
-    /// 宿主方法在工作线程上做完了（更新检查与应用）。投递前核对代次，与界面请求一样。
+    /// 宿主方法在工作线程上做完了（更新检查与应用、Agent 接入）。投递前核对代次，与界面请求一样。
     HostReply {
         generation: u64,
         epoch: u64,
         js_id: u64,
-        result: Result<Value, (String, String)>,
+        result: Result<Value, crate::agents::Failure>,
     },
     /// 一次界面请求在工作线程上分发完了。投递前再核对 `(generation, epoch)`（03 U4）。
     UiReply {
@@ -135,6 +135,8 @@ pub struct App {
     queued: Vec<QueuedCall>,
     /// 进程内的界面 API（W5e），服务开始服务后第一次界面请求时建好。
     ui: Option<Arc<Ui>>,
+    /// Agent 接入（W6d），服务开始服务时建好。
+    agents: Option<Arc<atm_agents::integrations::Agents>>,
     ui_in_flight: usize,
     /// 托盘切换通知方式的次数：给每次写入一个不重复的 op_id。
     mode_writes: u64,
@@ -348,6 +350,7 @@ pub fn run(
         legacy_wait: None,
         queued: Vec::new(),
         ui: None,
+        agents: None,
         ui_in_flight: 0,
         mode_writes: 0,
         updates: None,
@@ -510,6 +513,16 @@ impl App {
                     ],
                 );
                 if let Some((svc, _)) = serving.service() {
+                    let agents = crate::agents::build(&self.layout, svc.clone());
+                    let (job, layout) = (agents.clone(), self.layout.clone());
+                    let _ = std::thread::Builder::new()
+                        .name("atm-agents-startup".into())
+                        .spawn(move || {
+                            for line in crate::agents::startup(&job, &layout) {
+                                crate::log(&layout.v3_root, &line);
+                            }
+                        });
+                    self.agents = Some(agents);
                     let service = Arc::downgrade(&svc);
                     *self.writer_probe.lock().unwrap_or_else(|e| e.into_inner()) =
                         Some(Box::new(move || {
@@ -614,8 +627,8 @@ impl App {
                 if same_page((generation, epoch), (self.generation, self.epoch)) {
                     match result {
                         Ok(value) => self.deliver(&bridge::ok(js_id, value)),
-                        Err((code, message)) => {
-                            self.deliver(&bridge::error(js_id, &code, &message))
+                        Err((code, message, details)) => {
+                            self.deliver(&bridge::error_with(js_id, &code, &message, details))
                         }
                     }
                 }
@@ -796,7 +809,7 @@ impl App {
                     let result = coordinator
                         .check(&principal)
                         .map(|status| json!(status))
-                        .map_err(|e| (e.code.as_str().to_owned(), e.message.clone()));
+                        .map_err(|e| (e.code.as_str().to_owned(), e.message.clone(), None));
                     let _ = proxy.send_event(UserEvent::HostReply {
                         generation,
                         epoch,
@@ -839,7 +852,7 @@ impl App {
                     }
                     Ok(json!(applied.status))
                 }
-                Err(e) => Err((e.code.as_str().to_owned(), e.message.clone())),
+                Err(e) => Err((e.code.as_str().to_owned(), e.message.clone(), None)),
             };
             if let Some(js_id) = id {
                 let _ = proxy.send_event(UserEvent::HostReply {
@@ -966,7 +979,7 @@ impl App {
     }
 
     /// 要服务的宿主方法。`runtimeRequest` 进 ui-bridge（W5e）；更新（W5g）不要服务，先拦下；
-    /// Agent 接入与 MCP 观测（W6，atm-agents）接上之前回明确的「不可用」，界面按出错显示，不会等不到回答。
+    /// Agent 接入与 MCP 观测（W6d）交给 atm-agents，在工作线程上做。
     fn on_core(&mut self, id: u64, method: &Method, args: Vec<Value>) {
         if let Method::Core(name @ ("getUpdateStatus" | "checkForUpdates" | "applyUpdate")) = method
         {
@@ -993,11 +1006,41 @@ impl App {
         }
         match method {
             Method::Core("runtimeRequest") => self.dispatch_ui(id, &args[0]),
-            _ => self.deliver(&bridge::error(
-                id,
-                "AGENTS_UNAVAILABLE",
-                "Agent 接入管理在这个版本里还不可用",
-            )),
+            Method::Core(name) => self.dispatch_agents(id, name, args),
+            Method::Local(_) => {}
+        }
+    }
+
+    /// Agent 接入的七个方法（W6d）：主体是这一代 WebView 的 User，与界面请求共用在途名额。
+    fn dispatch_agents(&mut self, id: u64, name: &'static str, args: Vec<Value>) {
+        let Service::Serving(serving) = &self.service else {
+            return;
+        };
+        let endpoint = serving.agent_endpoint();
+        let Some(agents) = self.agents.clone() else {
+            self.deliver(&bridge::error(id, "SERVICE_UNAVAILABLE", "服务暂时不可用"));
+            return;
+        };
+        if !self.take_ui_slot(id) {
+            return;
+        }
+        let principal = atm_ui_bridge::webview(self.generation, self.epoch);
+        let proxy = self.proxy.clone();
+        let (generation, epoch) = (self.generation, self.epoch);
+        let spawned = std::thread::Builder::new()
+            .name("atm-agents".into())
+            .spawn(move || {
+                let result = crate::agents::call(&agents, &principal, name, &args, endpoint);
+                let _ = proxy.send_event(UserEvent::HostReply {
+                    generation,
+                    epoch,
+                    js_id: id,
+                    result,
+                });
+            });
+        if spawned.is_err() {
+            self.ui_in_flight = self.ui_in_flight.saturating_sub(1);
+            self.deliver(&bridge::error(id, "SERVICE_BUSY", "服务尚未就绪"));
         }
     }
 

@@ -19,6 +19,9 @@ smoke = ["atm-install-state/smoke"]
 [dependencies]
 # 只为编译期的发布守卫（E2E_SURFACE）：主体由 ui-bridge 构造，宿主自己不构造。
 atm-domain = { path = "../domain" }
+# W6d：Agent 接入（MCP 配置、规则块、Skills、memory profile、Agent 文档、修复作业）。
+atm-agents = { path = "../agents" }
+atm-service = { path = "../service" }
 atm-install-state = { path = "../install-state" }
 # W5a：服务在宿主进程里（不再拉起 Node core）。
 atm-runtime = { path = "../runtime" }

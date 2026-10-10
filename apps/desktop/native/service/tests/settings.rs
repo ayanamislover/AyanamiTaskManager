@@ -429,4 +429,33 @@ fn c06_dedicated_settings() {
     w.refused(ErrorCode::USER_AUTHORIZATION_REQUIRED, || {
         w.svc.set_backup_policy(&agent(), policy, None, "b4")
     });
+
+    // memory profile（06 §4 #245）：缺省开着，只有存着布尔 false 才关；写入要 agents.profile_switch。
+    assert!(w.svc.memory_profile_enabled());
+    let r = w.svc.set_memory_profile(&user(), false, "m1").unwrap();
+    assert_eq!(r.result["setting"]["key"], "mcp.memory-profile-enabled");
+    assert_eq!(r.result["setting"]["value"], false);
+    assert!(!w.svc.memory_profile_enabled());
+    assert_eq!(
+        w.svc
+            .set_memory_profile(&user(), true, "m2")
+            .unwrap()
+            .result["setting"]["version"],
+        1
+    );
+    assert!(w.svc.memory_profile_enabled());
+    w.refused(ErrorCode::USER_AUTHORIZATION_REQUIRED, || {
+        w.svc.set_memory_profile(&agent(), false, "m3")
+    });
+    // 2.x 原样转来的怪值（字符串 "false"、0）都按开着。
+    for raw in ["'\"false\"'", "'0'", "'null'"] {
+        w.exec(&format!(
+            "UPDATE settings SET value_json = {raw} WHERE key = 'mcp.memory-profile-enabled'"
+        ));
+        assert!(w.svc.memory_profile_enabled(), "{raw}");
+    }
+    assert_eq!(
+        w.count("SELECT count(*) FROM global_feed WHERE type = 'setting.updated' AND aggregate_id = 'mcp.memory-profile-enabled'"),
+        2
+    );
 }

@@ -241,6 +241,10 @@
   color: var(--atm-text-muted);
   font-size: 12px;
 }
+/* 第二列被「未检测到，安装/卸载不可用」这类长说明撑宽时，状态胶囊不跟着拉长：靠右、按内容宽。 */
+.atm-integration-checks > .atm-integration-status {
+  justify-self: end;
+}
 .atm-integration-status {
   display: inline-flex;
   min-height: 22px;

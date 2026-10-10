@@ -234,12 +234,12 @@ export function SettingsPage({
                     {desktop?.setMemoryProfile ? (
                       <div className="atm-row" data-testid="memory-profile-toggle">
                         <div>
-                          <div className="atm-row-title">完整工具面（memory + actions）</div>
+                          <div className="atm-row-title">完整工具面（core + memory）</div>
                           <div className="atm-row-sub">
-                            默认开启完整工具面。关闭会同时移除 memory 与 actions 两个静态
-                            Profile，只保留 core，但关闭后将失去
-                            atm_task_patch、atm_progress_add、atm_record、atm_feedback、atm_search、atm_delta
-                            六个工具。切换后请重载或重启 Agent 客户端。
+                            默认开启完整工具面。关闭会移除 memory 这个静态 Profile，只保留
+                            core（任务、进度与记录都在 core 里），但关闭后将失去
+                            atm_search、atm_knowledge_search、atm_knowledge_get、atm_knowledge_save
+                            四个工具。切换后请重载或重启 Agent 客户端。
                           </div>
                           {memoryProfileError ? (
                             <div className="atm-inline-error" role="alert">

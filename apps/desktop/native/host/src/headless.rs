@@ -1,8 +1,9 @@
 //! `--cli`, `--doctor`, `--mcp-stdio` and the Electron-as-node legacy command: run the
 //! matching entry with inherited stdio and pass its exit code through (§3.1). `--cli` and
 //! `--doctor` go to atm.exe (W6a: the host no longer carries a CLI, 06 §6); `--mcp-stdio`
-//! is still the Node bridge until W6d. These entries only ever carry the Agent credential
-//! from daemon.json.
+//! and the legacy form go to the native shim atm-mcp.exe (W6d: no Node bridge in 3.0), which
+//! finds the service through `N\runtime\daemon.json` and wakes the desktop itself. These
+//! entries only ever carry the Agent credential from daemon.json.
 
 use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
@@ -58,21 +59,12 @@ pub fn run(layout: &Layout, mode: &Headless) -> i32 {
     match mode {
         Headless::Cli(args) => run_entry(&layout.cli, layout, args, true),
         Headless::McpStdio(args) => {
-            // The JS bridge wakes the desktop when no daemon is published. Under Electron it
-            // ran as the desktop exe and used its own path; on the bundled Node it is told.
-            // Installed: wake through the root launcher, so the woken host passes the
-            // barrier and lands on app.json.current (§8). Portable/dev: this host.
-            let wake = layout
-                .app_dir
-                .parent()
-                .filter(|root| root.join(atm_install_state::APP_POINTER).is_file())
-                .map(|root| root.join("AyanamiTaskManager.exe"))
-                .filter(|launcher| launcher.is_file())
-                .unwrap_or_else(|| layout.host_exe.clone());
+            // The shim looks for daemon.json under the 3.x root: tell it which one this host
+            // uses (an `ATM3_DATA_DIR` override reached the host, not necessarily the shim).
             let mut entry = layout.mcp_stdio.clone();
             entry.env.push((
-                "ATM_DESKTOP_EXECUTABLE".into(),
-                wake.to_string_lossy().into_owned(),
+                "ATM3_DATA_DIR".into(),
+                layout.v3_root.to_string_lossy().into_owned(),
             ));
             run_entry(&entry, layout, args, false)
         }

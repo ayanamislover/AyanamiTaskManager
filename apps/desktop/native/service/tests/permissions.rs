@@ -274,6 +274,10 @@ fn cases(entry: &Value, view: &Value) -> Vec<Case> {
             written(w.svc.set_notification_mode(p, "OFF", None, op))
         }),
         case("settings.read", |w, p, _| w.svc.list_settings(p)),
+        // W6d：memory profile 开关只记偏好（客户端同步在 atm-agents）。
+        case("agents.profile_switch", |w, p, op| {
+            written(w.svc.set_memory_profile(p, false, op))
+        }),
         // peer W2 r1 P1-05 补上的 U-only 入口。
         case("project_update.draft", |w, p, op| {
             written(w.svc.draft_project_update(p, &Target::new("PA", None, op)))
@@ -325,7 +329,7 @@ fn p005_agents_are_refused_every_user_only_capability_without_side_effects() {
     let w = world("perm-agent");
     let (entry, view) = w.fixtures();
     let list = cases(&entry, &view);
-    assert_eq!(list.len(), 25);
+    assert_eq!(list.len(), 26);
     for (i, c) in list.iter().enumerate() {
         let (db, fs) = (w.snapshot(), files(&w.dir));
         let e = (c.call)(&w, &agent(), &format!("agent-{i}"))
@@ -370,7 +374,7 @@ fn p005_the_same_calls_succeed_for_the_user() {
             );
         }
     }
-    assert_eq!(changed, 21);
+    assert_eq!(changed, 22);
     // 生命周期迁移确实做了 PRE_* 备份：Agent 用例里文件集合不变不是因为备份从来不写。
     assert!(files(&w.dir).keys().any(|k| k.starts_with("backups/")));
 }

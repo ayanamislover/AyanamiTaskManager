@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 pub const SET_OPERATION: &str = "setting.set";
 pub const NOTIFICATION_MODE_OPERATION: &str = "notification.mode-set";
 pub const BACKUP_POLICY_OPERATION: &str = "backup.policy-set";
+pub const MEMORY_PROFILE_OPERATION: &str = "agents.profile-switch";
+pub const MEMORY_PROFILE: &str = "mcp.memory-profile-enabled";
 
 pub const PROJECT_ORDER: &str = "projects.order";
 pub const SESSION_TIMEOUT: &str = "recovery.sessionTimeoutMinutes";
@@ -83,7 +85,7 @@ fn check_key(key: &str) -> Result<(), DomainError> {
             "backup.policy_set",
             "备份保留策略要用备份设置改，那里会校验每种备份的份数",
         )),
-        "mcp.memory-profile-enabled" => Some((
+        MEMORY_PROFILE => Some((
             "agents.profile_switch",
             "memory profile 要用 Agent 集成里的开关切换，那里会同步客户端配置并在失败时回滚",
         )),
@@ -498,6 +500,38 @@ impl Service {
             expected_version,
             op_id,
         )
+    }
+
+    /// memory profile 开关（User；06 §4 #245）。只记偏好：客户端配置的同步与回滚在 atm-agents 里，全部同步成功
+    /// 之后才调这里（2.0 `runMcpProfileSwitch` 的 commit）。last-write-wins，与 2.0 读出当前版本再写等价。
+    pub fn set_memory_profile(
+        &self,
+        principal: &Principal,
+        enabled: bool,
+        op_id: &str,
+    ) -> Result<Written, DomainError> {
+        capability::require(principal, Capability::AgentsProfileSwitch)?;
+        self.put_setting(
+            principal,
+            Slot {
+                capability: Capability::AgentsProfileSwitch,
+                operation: MEMORY_PROFILE_OPERATION,
+                key: MEMORY_PROFILE,
+            },
+            json!(enabled),
+            None,
+            op_id,
+        )
+    }
+
+    /// 存着的 memory profile 开关：只有布尔 false 才是关（2.0 `memoryProfileEnabledValue`），缺了、读不了、
+    /// 值不对都按开着。宿主内部用（修复作业与设置页共用），不经能力检查：它只是一个不敏感的布尔。
+    pub fn memory_profile_enabled(&self) -> bool {
+        self.store()
+            .read(|tx| Ok::<_, DomainError>(row(tx, MEMORY_PROFILE)?.map(|r| r.0)))
+            .ok()
+            .flatten()
+            != Some(Value::Bool(false))
     }
 
     /// 读一个设置；不存在时 version 为 -1、value 为 null。

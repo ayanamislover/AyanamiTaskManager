@@ -41,6 +41,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-agents"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "serde_json",
+ "sha2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "atm-build-support"
 version = "0.0.0"
 dependencies = [
@@ -89,10 +99,12 @@ dependencies = [
 name = "atm-host"
 version = "0.0.0"
 dependencies = [
+ "atm-agents",
  "atm-build-support",
  "atm-domain",
  "atm-install-state",
  "atm-runtime",
+ "atm-service",
  "atm-ui-bridge",
  "serde",
  "serde_json",

@@ -9,13 +9,14 @@ pub struct Layout {
     pub app_dir: PathBuf,
     pub renderer_dir: PathBuf,
     /// 2.x 数据根 `L`：3.0 宿主只用它的路径给单实例互斥与管道起名，不写它（W5a）。
-    /// Node 入口（`--mcp-stdio`、安装探测）在 W6 换掉之前仍用它。
+    /// 安装探测在 W6 换掉之前仍用它。
     pub data_dir: PathBuf,
     /// 3.x 根 `N`：服务、宿主日志、`host.json`、WebView2 数据都在这里。
     pub v3_root: PathBuf,
     pub core: CoreCommand,
     /// `--cli` / `--doctor` 转交的 atm.exe（W6a）：安装布局在 `resources\atm.exe`，开发构建与宿主同目录。
     pub cli: CoreCommand,
+    /// 旧配置里的 `--mcp-stdio` 转交的原生 shim（W6d）：与 atm.exe 同一处。
     pub mcp_stdio: CoreCommand,
     pub packaged: bool,
 }
@@ -64,6 +65,20 @@ pub fn cli_entry(app_dir: &Path, packaged: bool) -> CoreCommand {
     }
 }
 
+/// atm-mcp.exe 在哪：安装布局 `<app>\resources\atm-mcp.exe`，开发构建放在宿主旁边（W6d：不再有 Node 桥）。
+pub fn mcp_entry(app_dir: &Path, packaged: bool) -> CoreCommand {
+    let exe = if packaged {
+        app_dir.join("resources").join("atm-mcp.exe")
+    } else {
+        app_dir.join("atm-mcp.exe")
+    };
+    CoreCommand {
+        exe,
+        args: Vec::new(),
+        env: Vec::new(),
+    }
+}
+
 pub fn resolve() -> Result<Layout, String> {
     let host_exe = env::current_exe().map_err(|error| error.to_string())?;
     // A junction (current → install root) must not decide which app dir we are in:
@@ -78,11 +93,7 @@ pub fn resolve() -> Result<Layout, String> {
         return Ok(Layout {
             core: with_core_flags(node_entry(&node, packaged_core, Vec::new())),
             cli: cli_entry(&app_dir, true),
-            mcp_stdio: node_entry(
-                &node,
-                app_dir.join("resources").join("mcp-stdio.cjs"),
-                Vec::new(),
-            ),
+            mcp_stdio: mcp_entry(&app_dir, true),
             renderer_dir: app_dir.join("renderer"),
             host_exe,
             app_dir,
@@ -139,14 +150,7 @@ fn development_layout(
     Ok(Layout {
         core: with_core_flags(ts_entry("core-main.ts")),
         cli: cli_entry(&app_dir, false),
-        mcp_stdio: node_entry(
-            &node,
-            repo.join("apps")
-                .join("desktop")
-                .join("resources")
-                .join("mcp-stdio.cjs"),
-            Vec::new(),
-        ),
+        mcp_stdio: mcp_entry(&app_dir, false),
         renderer_dir: repo
             .join("apps")
             .join("desktop")

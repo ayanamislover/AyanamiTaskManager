@@ -204,6 +204,20 @@ impl Serving {
         guard.as_ref().map(|e| (e.service().clone(), e.handle()))
     }
 
+    /// Agent 入口的地址与令牌（入口开着时）：设置页「复制配置」里的 HTTP 配置要它们。只在内存里传，不进日志。
+    pub fn agent_endpoint(&self) -> Option<(String, String)> {
+        let guard = match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().map(|e| {
+            (
+                format!("http://127.0.0.1:{}", e.port()),
+                e.token().to_owned(),
+            )
+        })
+    }
+
     /// 撤下入口（测试与正常退出用）。与丢弃一样，只是事件交给 `observe`。
     pub fn stop(mut self, observe: &(dyn Fn(Event) + Send + Sync)) {
         self.shut_down(observe);

@@ -149,7 +149,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 /// No ATM_DATA_DIR / AYANAMI_TASK_DATA_DIR override reached the host, and LOCALAPPDATA is
 /// the real Local AppData known folder — so `data_dir` is `<Local AppData>\AyanamiTaskManager`
 /// because it is the product root, not because a sandbox redirected LOCALAPPDATA.
-fn product_default_data_root(data_dir: &Path) -> bool {
+pub(crate) fn product_default_data_root(data_dir: &Path) -> bool {
     let overridden = ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"]
         .iter()
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));

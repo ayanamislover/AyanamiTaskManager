@@ -147,6 +147,15 @@ pub fn error(id: u64, code: &str, message: &str) -> Value {
     json!({ "id": id, "ok": false, "error": { "code": code, "message": message } })
 }
 
+/// 带细节的错误（切换 memory profile 失败时的整份报告）。
+pub fn error_with(id: u64, code: &str, message: &str, details: Option<Value>) -> Value {
+    let mut frame = error(id, code, message);
+    if let Some(details) = details {
+        frame["error"]["details"] = details;
+    }
+    frame
+}
+
 pub fn emit_script(name: &str, value: Value) -> String {
     call_script("emit", &json!({ "event": name, "value": value }))
 }

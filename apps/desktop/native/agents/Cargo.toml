@@ -1,0 +1,22 @@
+[package]
+name = "atm-agents"
+version = "0.0.0"
+description = "ATM 3 Agent integration: MCP client configs, rule block, skills, profile switch, docs install and the repair job"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-domain = { path = "../domain" }
+serde_json = { workspace = true }
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
