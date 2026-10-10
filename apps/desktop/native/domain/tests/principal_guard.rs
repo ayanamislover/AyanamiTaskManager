@@ -5,8 +5,11 @@
 //! 入口 crate 按目录名认：`ui-bridge`、`e2e-adapter`（User）、`http`（Agent）、`sync`（Phone）、`jobs`（System）。
 //! 新建这些 crate 时请沿用这些目录名，否则这里会变红。
 //!
-//! 唯一的例外：同步连接器自己的后台循环是 System 作业 `sync.loop`（03 §2 的读快照、同步账本），由 `sync` 构造，
-//! 而且在那里只认 `system_job(JobId::SyncLoop)` 这一种写法——换成任何别的作业仍然算越界。
+//! 例外只有两个，都是 crate 自己的后台作业，而且各自只认一种写法——换成任何别的作业仍然算越界：
+//! - 同步连接器的后台循环是 System 作业 `sync.loop`（03 §2 的读快照、同步账本），由 `sync` 构造，只认
+//!   `system_job(JobId::SyncLoop)`；
+//! - 派单的跟踪作业是 `dispatch.track`（核对进程身份、定结局、写派单历史；不能起会话），由 `dispatch` 构造，只认
+//!   `system_job(JobId::DispatchTrack)`。
 
 use std::path::{Path, PathBuf};
 
@@ -17,8 +20,11 @@ const CONSTRUCTORS: [(&str, &[&str]); 4] = [
     ("system_job(", &["jobs"]),
 ];
 
-/// `sync` 里唯一允许的 System 主体。
-const SYNC_LOOP: &str = "system_job(JobId::SyncLoop)";
+/// crate 目录 → 那里唯一允许的 System 主体。
+const JOB_EXCEPTIONS: [(&str, &str); 2] = [
+    ("sync", "system_job(JobId::SyncLoop)"),
+    ("dispatch", "system_job(JobId::DispatchTrack)"),
+];
 
 /// 返回越界的 `(相对路径, 构造函数)`，以及被允许的出现次数。
 fn scan(files: &[(String, String)]) -> (Vec<(String, &'static str)>, usize) {
@@ -36,10 +42,11 @@ fn scan(files: &[(String, String)]) -> (Vec<(String, &'static str)>, usize) {
             if hits == 0 {
                 continue;
             }
-            let sync_loop_only = ctor == "system_job("
-                && crate_dir == "sync"
-                && text.matches(SYNC_LOOP).count() == hits;
-            if in_tests || owners.contains(&crate_dir) || sync_loop_only {
+            let own_job_only = ctor == "system_job("
+                && JOB_EXCEPTIONS
+                    .iter()
+                    .any(|(dir, only)| *dir == crate_dir && text.matches(only).count() == hits);
+            if in_tests || owners.contains(&crate_dir) || own_job_only {
                 allowed_hits += hits;
             } else {
                 violations.push((rel.clone(), ctor));
@@ -129,6 +136,18 @@ fn the_scan_recognises_violations() {
             "Principal::system_job(JobId::SyncLoop); Principal::system_job(JobId::Maintenance)",
         ),
         f("http/src/jobs.rs", "Principal::system_job(JobId::SyncLoop)"),
+        f(
+            "dispatch/src/dispatcher.rs",
+            "Principal::system_job(JobId::DispatchTrack)",
+        ),
+        f(
+            "dispatch/src/port.rs",
+            "Principal::system_job(JobId::SyncLoop)",
+        ),
+        f(
+            "sync/src/commands.rs",
+            "Principal::system_job(JobId::DispatchTrack)",
+        ),
     ]);
     assert_eq!(
         v,
@@ -139,9 +158,11 @@ fn the_scan_recognises_violations() {
             ("host/src/bridge.rs".to_owned(), "verified_phone("),
             ("sync/src/connector.rs".to_owned(), "system_job("),
             ("http/src/jobs.rs".to_owned(), "system_job("),
+            ("dispatch/src/port.rs".to_owned(), "system_job("),
+            ("sync/src/commands.rs".to_owned(), "system_job("),
         ]
     );
-    assert_eq!(allowed, 5);
+    assert_eq!(allowed, 6);
 }
 
 /// P-001：主体不能从输入反序列化出来。

@@ -110,6 +110,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-dispatch"
+version = "0.0.0"
+dependencies = [
+ "atm-agents",
+ "atm-domain",
+ "atm-service",
+ "atm-store",
+ "atm-sync",
+ "atm-sync-protocol",
+ "rusqlite",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "atm-domain"
 version = "0.0.0"
 dependencies = [
