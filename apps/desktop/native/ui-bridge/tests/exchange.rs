@@ -8,6 +8,8 @@
 
 mod support;
 
+use atm_domain::error::ErrorCode;
+use atm_service::exchange::ImportFrom;
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use sha2::Digest;
@@ -79,6 +81,11 @@ fn a_project_exports_and_imports_back_as_a_new_project() {
     );
     let denied = w.call_as(&agent(), "POST", "/api/v1/exports/ALPHA", None);
     assert_ne!(denied.status, 200, "{}", denied.body);
+    // 服务层自己也拒绝 Agent（界面入口之外的调用方），在写任何文件之前（P-004）。
+    let exports = listing(&w.dir.join("exports"));
+    let e = w.svc.export_project(&agent(), "ALPHA", "csv").unwrap_err();
+    assert_eq!(e.code, ErrorCode::USER_AUTHORIZATION_REQUIRED, "{e:?}");
+    assert_eq!(listing(&w.dir.join("exports")), exports);
 
     // 列表：只有 .aytproj，JSON / CSV 不在。
     let list = w.get("/api/v1/imports/packages");
@@ -167,6 +174,18 @@ fn a_project_exports_and_imports_back_as_a_new_project() {
         Some(json!({"source": package_source(&name), "code": "ZED"})),
     );
     assert_ne!(agent_apply.status, 200, "{}", agent_apply.body);
+    let from = ImportFrom::from_json(&package_source(&name)).unwrap();
+    let e = w
+        .svc
+        .import_source(&agent(), &from, Some("ZED"))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::USER_AUTHORIZATION_REQUIRED, "{e:?}");
+    // 列表与预览 Agent 也可以（import.preview 是 A+U），只读。
+    assert!(w.svc.import_sources(&agent()).is_ok());
+    assert_eq!(
+        w.svc.preview_import_source(&agent(), &from).unwrap()["project"]["code"],
+        "ALPHA"
+    );
     assert_eq!(w.get("/api/v1/projects"), projects_before);
 
     // 导入：代码转大写；任务按新代码编号、内容相同。
