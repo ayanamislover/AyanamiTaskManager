@@ -87,6 +87,8 @@ impl Pinned {
             std::io::ErrorKind::NotADirectory => ChainError::NotADirectory(root.to_path_buf()),
             _ => ChainError::Io(e),
         })?;
+        // UNC 写法落在本机的卷上：拒绝（`engine::refuse_loopback`）。
+        crate::engine::refuse_loopback(root, top.id().0).map_err(ChainError::Io)?;
         Ok(Self {
             root: top.path().to_path_buf(),
             literal: root.to_path_buf(),
