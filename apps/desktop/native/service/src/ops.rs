@@ -253,6 +253,12 @@ pub const OPS: &[Op] = &[
         indexed: false,
     },
     Op {
+        operation: crate::settings::MEMORY_PROFILE_OPERATION,
+        capabilities: &[C::AgentsProfileSwitch],
+        targets: &[NoTarget],
+        indexed: false,
+    },
+    Op {
         operation: crate::views::CREATE_OPERATION,
         capabilities: &[C::SavedViewManage],
         targets: &[NoTarget],

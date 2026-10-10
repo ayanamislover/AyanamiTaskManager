@@ -11,6 +11,8 @@ publish.workspace = true
 # 主体构造的静态守卫（domain/tests/principal_guard.rs）只许 `jobs` 目录里构造 System 主体：
 # 调度器与它用的客户端存活判定都在这里，运行时只负责起停。
 [dependencies]
+# W6d：Agent 接入的启动作业（agents.docs、agents.repair）。
+atm-agents = { path = "../agents" }
 atm-domain = { path = "../domain" }
 atm-install-state = { path = "../install-state" }
 atm-service = { path = "../service" }

@@ -3,6 +3,7 @@
 //!
 //! System 主体只在这个 crate 里构造（`domain/tests/principal_guard.rs`）。
 
+pub mod agents;
 pub mod liveness;
 pub mod maintenance;
 pub mod metrics;

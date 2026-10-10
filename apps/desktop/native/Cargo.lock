@@ -103,6 +103,7 @@ dependencies = [
  "atm-build-support",
  "atm-domain",
  "atm-install-state",
+ "atm-jobs",
  "atm-runtime",
  "atm-service",
  "atm-ui-bridge",
@@ -146,6 +147,7 @@ dependencies = [
 name = "atm-jobs"
 version = "0.0.0"
 dependencies = [
+ "atm-agents",
  "atm-domain",
  "atm-install-state",
  "atm-metrics",

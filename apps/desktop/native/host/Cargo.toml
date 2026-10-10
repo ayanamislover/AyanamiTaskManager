@@ -21,6 +21,8 @@ smoke = ["atm-install-state/smoke"]
 atm-domain = { path = "../domain" }
 # W6d：Agent 接入（MCP 配置、规则块、Skills、memory profile、Agent 文档、修复作业）。
 atm-agents = { path = "../agents" }
+# 两个启动作业的 System 主体只在 atm-jobs 里构造。
+atm-jobs = { path = "../jobs" }
 atm-service = { path = "../service" }
 atm-install-state = { path = "../install-state" }
 # W5a：服务在宿主进程里（不再拉起 Node core）。

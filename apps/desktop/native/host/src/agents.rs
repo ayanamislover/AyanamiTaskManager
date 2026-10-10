@@ -14,7 +14,7 @@ use std::sync::Arc;
 use atm_agents::env::AgentEnv;
 use atm_agents::integrations::{Agents, Gate};
 use atm_agents::{AgentError, Settings};
-use atm_domain::principal::{JobId, Principal};
+use atm_domain::principal::Principal;
 use atm_service::write::Service;
 use serde_json::Value;
 
@@ -179,26 +179,13 @@ fn bundled_docs(layout: &Layout) -> Option<PathBuf> {
     (layout.packaged && p.is_dir()).then_some(p)
 }
 
-/// 入口开着之后跑一次：先换 Agent 文档（Skills 的来源在里面），再修旧配置、补 Skill。都只在 [`gate`] 放行时做；
-/// 出错只记日志，不影响服务。
+/// 入口开着之后跑一次：先换 Agent 文档（Skills 的来源在里面），再修旧配置、补 Skill（atm-jobs 的两个作业）。
+/// 都只在 [`gate`] 放行时做；出错只记日志，不影响服务。
 pub fn startup(agents: &Agents, layout: &Layout) -> Vec<String> {
-    let mut lines = Vec::new();
     if !gate(layout, &agents.env) {
-        lines.push("agents: repair skipped (not the product data root)".to_owned());
-        return lines;
+        return vec!["agents: repair skipped (not the product data root)".to_owned()];
     }
-    if let Some(bundled) = bundled_docs(layout) {
-        let job = Principal::system_job(JobId::AgentsDocs);
-        match agents.install_docs(&job, &bundled) {
-            Ok(outcome) => lines.push(format!("agents.docs: {outcome:?}")),
-            Err(e) => lines.push(format!("agents.docs failed: {}", e.message)),
-        }
-    }
-    match agents.repair(&Principal::system_job(JobId::AgentsRepair)) {
-        Ok(done) => lines.push(format!("agents.repair: {}", done.view())),
-        Err(e) => lines.push(format!("agents.repair failed: {}", e.message)),
-    }
-    lines
+    atm_jobs::agents::run(agents, bundled_docs(layout).as_deref())
 }
 
 #[cfg(test)]
