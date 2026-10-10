@@ -513,10 +513,15 @@ fn details_are_redacted_and_bounded() {
             "日志\u{3000}token=SYNTHETIC_REVIEW_SECRET\u{3000}之后",
             "日志 token=<redacted> 之后",
         ),
-        // peer W5 r5 P1-01：路径后紧跟的密钥键交回密钥扫描。
+        // peer W5 r5 P1-01：路径后紧跟的密钥键连同值和路径一起换成占位，密码不会从空格处露出。
         (
             r#"open 'C:\My Data\';password="public SYNTHETIC_REVIEW_SECRET" tail"#,
-            "open <local-path>;password=<redacted> tail",
+            "open <local-path> tail",
+        ),
+        // peer W5 r6 P2-01：路径里的键名不让路径的后半段露出来。
+        (
+            r#"open C:\data\token=public,SYNTHETIC_PRIVATE\report.txt failed"#,
+            "open <local-path> failed",
         ),
         // peer W5 r4 P2-01：目录以分隔符结尾的引号路径，后面的失败原因不能被吞掉。
         (

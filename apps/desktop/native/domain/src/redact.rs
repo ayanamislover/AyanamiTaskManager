@@ -156,7 +156,9 @@ fn secret_at(lower: &str, i: usize) -> Option<(usize, usize)> {
 
 /// `i` 处（开头或空白之后）起的本机路径的结束位置。前面可以包着括号与引号：有引号时到下一个同样的引号
 /// （路径里的反斜杠是分隔符，不当转义），再连同紧跟的括号等到空白为止；没有引号时到空白为止。
-/// 尾部碰到密钥键就停下，把键交回密钥扫描（peer W5 r5 P1-01：`'C:\x\';password="a b"`、`C:\x;token=y`）。
+/// 尾部碰到密钥键时，连同键的值一起算进路径（值是带空格的引号值也整段算进去），再接着往后：
+/// 路径整段都隐藏（peer W5 r6 P2-01：`C:\data\token=a,b\report.txt`），密钥也不会从值里的空格处露出尾巴
+/// （peer W5 r5 P1-01：`'C:\x\';password="a b"`）。
 fn local_path_end(text: &str, lower: &str, i: usize) -> Option<usize> {
     let mut start = i;
     let mut quote = None;
@@ -180,15 +182,13 @@ fn local_path_end(text: &str, lower: &str, i: usize) -> Option<usize> {
     }
     let mut end = quote.and_then(|q| raw_quoted_end(text, q)).unwrap_or(start);
     while let Some(c) = char_at(text, end).filter(|c| !c.is_whitespace()) {
-        let next = end + c.len_utf8();
-        let key_here = text[..end].chars().next_back().is_some_and(opens_key)
-            && secret_at(lower, end).is_some();
-        // 分隔符留给后面的键：`<local-path>;password=<redacted>`。
-        let key_next = opens_key(c) && secret_at(lower, next).is_some();
-        if key_here || key_next {
-            break;
+        if text[..end].chars().next_back().is_some_and(opens_key)
+            && let Some((_, value_end)) = secret_at(lower, end)
+        {
+            end = value_end;
+            continue;
         }
-        end = next;
+        end += c.len_utf8();
     }
     Some(end)
 }
@@ -389,21 +389,37 @@ mod tests {
             }
         }
         assert!(leaks.is_empty(), "{}:\n{}", leaks.len(), leaks.join("\n"));
+        // 路径与紧跟它的键值一起换成一个占位：路径信息与密钥都不留，后面的正常尾文留着。
         for (input, want) in [
             (
                 "open 'C:\\My Data\\';password=\"a b\" tail",
-                "open <local-path>;password=<redacted> tail",
+                "open <local-path> tail",
             ),
-            (
-                "open C:\\data\\x;token=y tail",
-                "open <local-path>;token=<redacted> tail",
-            ),
+            ("open C:\\data\\x;token=y tail", "open <local-path> tail"),
             (
                 "open (\"C:\\My Data\\\"),api_key=k tail",
-                "open <local-path>,api_key=<redacted> tail",
+                "open <local-path> tail",
             ),
             (
                 "open C:\\keys\\api_key.txt failed",
+                "open <local-path> failed",
+            ),
+            // peer W5 r6 P2-01：路径里的键名不让路径的后半段露出来。
+            (
+                "open C:\\data\\token=public,SYNTHETIC_PRIVATE\\report.txt failed",
+                "open <local-path> failed",
+            ),
+            (
+                "open \\\\server\\share\\password=a;SYNTHETIC_PRIVATE\\x failed",
+                "open <local-path> failed",
+            ),
+            (
+                "open file:///D:/data/key=a,SYNTHETIC_PRIVATE/x failed",
+                "open <local-path> failed",
+            ),
+            ("open C:\\私token=public failed", "open <local-path> failed"),
+            (
+                "open C:\\data\\x;password=\"a b\"\\SYNTHETIC_PRIVATE failed",
                 "open <local-path> failed",
             ),
         ] {
