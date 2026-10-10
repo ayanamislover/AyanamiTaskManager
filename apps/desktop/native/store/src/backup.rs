@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 pub const MANIFEST_FORMAT: &str = "atm3-backup-1";
 const DB_FILE: &str = "atm.sqlite";
@@ -241,9 +241,22 @@ impl AttachmentsGuard {
         Ok(self.pinned.ensure(&Self::rel(sub))?)
     }
 
-    /// 钉住附件根下 `sub` 上已经存在的各层（不建）。
-    pub(crate) fn pin_existing(&mut self, sub: &[&str]) -> Result<()> {
-        Ok(self.pinned.pin_existing(&Self::rel(sub))?)
+    /// 附件根下 `sub` 整条链都在、都钉住时的真实位置；不在时 `None`（不建）。取得守卫之后才出现的层同样逐层核对，
+    /// 是链接就拒绝（peer W6 r4 P1-01）。要枚举、读、删的位置都先经过这里。
+    pub(crate) fn existing(&mut self, sub: &[&str]) -> Result<Option<PathBuf>> {
+        Ok(self.pinned.existing(&Self::rel(sub))?)
+    }
+
+    /// 附件根下钉住的 `sub` 这一层的句柄；没钉住时 `None`。
+    pub(crate) fn dir(&self, sub: &[&str]) -> Option<&crate::pin::Dir> {
+        self.pinned.dir(&Self::rel(sub))
+    }
+
+    /// 库文件在钉住的数据根里的真实位置（peer W6 r4 P1-02）：旁路连接（备份、导出的快照）从这里打开，与附件读的
+    /// 是同一个数据根；不再按 `store.path()` 的字面写法重新解析——那上面数据根以上的链接在持锁期间可以被换掉。
+    pub(crate) fn database(&self, store: &Store) -> PathBuf {
+        let name = store.path().file_name().unwrap_or_default();
+        self.pinned.real(Path::new(name))
     }
 
     /// 在钉住的 `parent`（附件根下）里排他新建 `name` 并钉住，交给调用方；删它、改它的名之前先放开。
@@ -297,6 +310,13 @@ impl BackupsRoot {
         let mut rel = self.name.clone();
         rel.extend(sub);
         Ok(self.pinned.ensure(&rel)?)
+    }
+
+    /// 备份根（或 `sub`）整条链都在、都钉住时的真实位置，不在时 `None`（见 [`AttachmentsGuard::existing`]）。
+    fn existing(&mut self, sub: Option<&str>) -> Result<Option<PathBuf>> {
+        let mut rel = self.name.clone();
+        rel.extend(sub);
+        Ok(self.pinned.existing(&rel)?)
     }
 
     /// 登记进库的路径：调用方给的备份根下的 `id`。
@@ -385,19 +405,20 @@ pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result
     crate::restore::finish_swaps_locked(store, &mut lock)?;
     let mut backups = BackupsRoot::pin(root)?;
     sweep_withdrawn_locked(store, &mut backups);
-    create_backup_locked(store, &mut backups, &lock, kind, at)
+    create_backup_locked(store, &mut backups, &mut lock, kind, at)
 }
 
 /// 已持有 [`attachments_lock`] 时用（按范围恢复里的 PRE_RESTORE）。有已提交、未换入的附件就拒绝。
 pub(crate) fn create_backup_locked(
     store: &Store,
     backups: &mut BackupsRoot,
-    attachments: &AttachmentsGuard,
+    attachments: &mut AttachmentsGuard,
     kind: &str,
     at: &str,
 ) -> Result<BackupInfo> {
     crate::restore::refuse_pending_swaps(store, attachments)?;
-    let side = side_reader(store.path())?;
+    // 库与附件出自同一个钉住的数据根（peer W6 r4 P1-02）。
+    let side = side_reader(&attachments.database(store))?;
     let id = ulid(&side)?;
     // 读写都在真实位置；登记的是调用方给的备份根下的路径。
     let root = backups.ensure(None)?;
@@ -440,7 +461,7 @@ fn write_backup(
     side: Connection,
     id: &str,
     (dir, registered): (&Path, &Path),
-    attachments: &AttachmentsGuard,
+    attachments: &mut AttachmentsGuard,
     kind: &str,
     at: &str,
 ) -> Result<BackupInfo> {
@@ -455,9 +476,13 @@ fn write_backup(
     atm_install_state::durable::rename(&tmp, &db, true)?;
     let (sha256, size_bytes) = hash_file(&db)?;
 
-    let files = copy_tree_filtered(&attachments.artifacts(), &dir.join(ARTIFACTS_DIR), &|rel| {
-        !is_internal(rel)
-    })?;
+    // 附件根在取得守卫时不存在、之后才出现的，照样核对；不在就是没有附件。
+    let files = match attachments.existing(&[])? {
+        Some(source) => {
+            copy_tree_filtered(&source, &dir.join(ARTIFACTS_DIR), &|rel| !is_internal(rel))?
+        }
+        None => Vec::new(),
+    };
     let attachments_sha256 = attachments_digest(&files);
 
     // manifest 的内容全部从快照本身读出，保证与库一致。
@@ -665,8 +690,9 @@ pub fn withdrawn_pending(root: &Path) -> usize {
         .sum()
 }
 
+/// 只碰整条链都钉住的位置（peer W6 r4 P1-01）：取得守卫时不存在、之后才出现的备份根、隔离区、「正在创建」先核对，
+/// 是链接就不清（计进返回的个数），不跟着它枚举、删除。
 pub(crate) fn sweep_withdrawn_locked(store: &Store, backups: &mut BackupsRoot) -> usize {
-    let root = backups.real(None);
     let registered = |id: &str| {
         let key = id.to_string();
         store.read(move |tx| {
@@ -676,45 +702,66 @@ pub(crate) fn sweep_withdrawn_locked(store: &Store, backups: &mut BackupsRoot) -
         })
     };
     let mut left = 0;
-    let quarantine = root.join(WITHDRAWN_DIR);
-    if let Ok(entries) = fs::read_dir(&quarantine) {
-        for entry in entries.flatten() {
-            let id = entry.file_name().to_string_lossy().into_owned();
-            let done = match registered(&id) {
-                Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
-                Ok(_) => durable::rename_once(&entry.path(), &root.join(&id), false).is_ok(),
-                Err(_) => false,
-            };
-            if !done {
-                left += 1;
+    let root = match backups.existing(None) {
+        Ok(Some(root)) => root,
+        Ok(None) => return 0,
+        Err(_) => return 1,
+    };
+    match backups.existing(Some(WITHDRAWN_DIR)) {
+        Ok(Some(quarantine)) => {
+            if let Ok(entries) = fs::read_dir(&quarantine) {
+                for entry in entries.flatten() {
+                    let id = entry.file_name().to_string_lossy().into_owned();
+                    let done = match registered(&id) {
+                        Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
+                        Ok(_) => {
+                            durable::rename_once(&entry.path(), &root.join(&id), false).is_ok()
+                        }
+                        Err(_) => false,
+                    };
+                    if !done {
+                        left += 1;
+                    }
+                }
             }
+            backups.release(WITHDRAWN_DIR);
+            let _ = fs::remove_dir(&quarantine);
         }
-        backups.release(WITHDRAWN_DIR);
-        let _ = fs::remove_dir(&quarantine);
+        Ok(None) => {}
+        Err(_) => left += 1,
     }
-    let creating = root.join(CREATING_DIR);
-    if let Ok(entries) = fs::read_dir(&creating) {
-        for entry in entries.flatten() {
-            let id = entry.file_name().to_string_lossy().into_owned();
-            let gone = match registered(&id) {
-                Ok(0) => match fs::remove_dir_all(root.join(&id)) {
-                    Ok(()) => true,
-                    Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-                },
-                Ok(_) => true,
-                Err(_) => false,
-            };
-            if !(gone && fs::remove_file(entry.path()).is_ok()) {
-                left += 1;
+    match backups.existing(Some(CREATING_DIR)) {
+        Ok(Some(creating)) => {
+            if let Ok(entries) = fs::read_dir(&creating) {
+                for entry in entries.flatten() {
+                    let id = entry.file_name().to_string_lossy().into_owned();
+                    let gone = match registered(&id) {
+                        Ok(0) => match fs::remove_dir_all(root.join(&id)) {
+                            Ok(()) => true,
+                            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                        },
+                        Ok(_) => true,
+                        Err(_) => false,
+                    };
+                    if !(gone && fs::remove_file(entry.path()).is_ok()) {
+                        left += 1;
+                    }
+                }
             }
+            backups.release(CREATING_DIR);
+            let _ = fs::remove_dir(&creating);
         }
-        backups.release(CREATING_DIR);
-        let _ = fs::remove_dir(&creating);
+        Ok(None) => {}
+        Err(_) => left += 1,
     }
     left
 }
 
 /// 校验通过的备份：恢复需要的定位信息。
+///
+/// `dir`、`db` 是登记的路径（展示用）。校验与之后的读取都走 [`VerifiedBackup::source_db`] /
+/// [`VerifiedBackup::source_artifacts`]：备份目录在校验时钉住，这份值活着就一直钉着（peer W6 r4 P1-02 的同类通道）——
+/// 登记路径上的链接在校验之后被换向，读到的仍是校验过的那一份。
 #[derive(Clone, Debug)]
 pub struct VerifiedBackup {
     pub id: String,
@@ -724,11 +771,38 @@ pub struct VerifiedBackup {
     /// 备份时的 global_seq：全局流里比它大的行都在备份点之后。
     pub global_seq: i64,
     pub attachments: Vec<FileEntry>,
+    source: Arc<PinnedBackup>,
+}
+
+/// 钉住的备份目录与它的 `artifacts/`（在的话）。
+struct PinnedBackup {
+    _pinned: crate::chain::Pinned,
+    root: PathBuf,
+    artifacts: Option<PathBuf>,
+}
+
+impl std::fmt::Debug for PinnedBackup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PinnedBackup")
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 impl VerifiedBackup {
+    /// 登记路径下的附件目录（展示用）。
     pub fn artifacts_dir(&self) -> PathBuf {
         self.dir.join(ARTIFACTS_DIR)
+    }
+
+    /// 校验过的库文件：钉住的备份目录里的真实位置。
+    pub(crate) fn source_db(&self) -> PathBuf {
+        self.source.root.join(DB_FILE)
+    }
+
+    /// 校验过的附件目录：钉住的真实位置；备份里没有附件时 `None`。
+    pub(crate) fn source_artifacts(&self) -> Option<&Path> {
+        self.source.artifacts.as_deref()
     }
 }
 
@@ -750,16 +824,26 @@ pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
     if !db.is_file() {
         return Err(BackupError::Corrupt(format!("{} is missing", db.display())));
     }
-    let (actual_sha, actual_size) = hash_file(&db)?;
+    // 从这里起只读钉住的真实位置：校验的与之后恢复读的是同一份。
+    let mut pinned = crate::chain::Pinned::open(&dir)?;
+    let root = pinned.real(Path::new(""));
+    let artifacts = pinned.existing(Path::new(ARTIFACTS_DIR))?;
+    let source = Arc::new(PinnedBackup {
+        _pinned: pinned,
+        root: root.clone(),
+        artifacts: artifacts.clone(),
+    });
+    let real_db = root.join(DB_FILE);
+    let (actual_sha, actual_size) = hash_file(&real_db)?;
     if actual_sha != sha || actual_size as i64 != size {
         return Err(BackupError::Corrupt(
             "database file differs from the catalog".into(),
         ));
     }
 
-    let manifest = fs::read_to_string(dir.join(MANIFEST_FILE))
+    let manifest = fs::read_to_string(root.join(MANIFEST_FILE))
         .map_err(|e| BackupError::Corrupt(format!("manifest unreadable: {e}")))?;
-    let side = side_reader(&db)?;
+    let side = side_reader(&real_db)?;
     struct Head {
         format: Option<String>,
         id: Option<String>,
@@ -792,7 +876,10 @@ pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
         ));
     }
 
-    let attachments = list_tree(&dir.join(ARTIFACTS_DIR))?;
+    let attachments = match &artifacts {
+        Some(a) => list_tree(a)?,
+        None => Vec::new(),
+    };
     let digest = attachments_digest(&attachments);
     if m_att.as_deref() != Some(digest.as_str())
         || attachments_sha.as_deref() != Some(digest.as_str())
@@ -840,6 +927,7 @@ pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
         created_at,
         global_seq,
         attachments,
+        source,
     })
 }
 
@@ -958,6 +1046,12 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<Vec<FileEntry>> {
     copy_tree_filtered(from, to, &|_| true)
 }
 
+/// `base` 下 `/` 分隔的相对路径 `rel`，逐段拼（peer W6 r4 P2-01）：`base` 可能是 `\\?\` 完整写法，那种写法下
+/// `/` 不会被当成分隔符，整段拼上去就打不开了。
+pub fn under(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(base.to_path_buf(), |p, c| p.join(c))
+}
+
 /// 同 [`copy_tree`]，只复制 `keep(相对路径)` 为真的文件。
 fn copy_tree_filtered(
     from: &Path,
@@ -969,7 +1063,7 @@ fn copy_tree_filtered(
             if !keep(rel) {
                 return Ok(());
             }
-            let dest = to.join(rel);
+            let dest = under(to, rel);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }

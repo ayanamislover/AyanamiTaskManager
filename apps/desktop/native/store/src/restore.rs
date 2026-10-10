@@ -119,7 +119,7 @@ pub fn restore_project(
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup_locked(store, &mut backups, &serial, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, &mut backups, &mut serial, "PRE_RESTORE", opts.at)?;
 
     // 附件：先暂存，事务里只写世代标记的「意图」，提交后换入。
     let staging = stage_attachments(&mut serial, &vb, project_id)?;
@@ -132,7 +132,7 @@ pub fn restore_project(
         at: opts.at.to_string(),
         staging_marker: staging.marker.clone(),
     };
-    let uri = readonly_uri(&vb.db)?;
+    let uri = readonly_uri(&vb.source_db())?;
     let db = store.path().to_path_buf();
     let outcome = run(store, opts.budget, move |conn| {
         conn.execute("ATTACH DATABASE ?1 AS bk", [uri])?;
@@ -169,7 +169,7 @@ pub fn restore_knowledge(
     let mut backups = BackupsRoot::pin(opts.backups_root)?;
     crate::backup::sweep_withdrawn_locked(store, &mut backups);
     let vb = verify_backup(store, backup_id)?;
-    let side = side_reader(&vb.db)?;
+    let side = side_reader(&vb.source_db())?;
     let present: bool =
         side.query_row("SELECT EXISTS (SELECT 1 FROM knowledge_meta)", [], |r| {
             r.get(0)
@@ -179,13 +179,13 @@ pub fn restore_knowledge(
         return Err(BackupError::ScopeMissing("knowledge".into()));
     }
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup_locked(store, &mut backups, &serial, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, &mut backups, &mut serial, "PRE_RESTORE", opts.at)?;
     let ctx = KnowledgeCtx {
         backup_id: backup_id.to_string(),
         pre_id: pre.id.clone(),
         at: opts.at.to_string(),
     };
-    let uri = readonly_uri(&vb.db)?;
+    let uri = readonly_uri(&vb.source_db())?;
     run(store, opts.budget, move |conn| {
         conn.execute("ATTACH DATABASE ?1 AS bk", [uri])?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -207,7 +207,7 @@ where
 }
 
 fn require_project(store: &Store, vb: &VerifiedBackup, project_id: &str) -> Result<()> {
-    let side = side_reader(&vb.db)?;
+    let side = side_reader(&vb.source_db())?;
     let in_backup: bool = side.query_row(
         "SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1)",
         [project_id],
@@ -229,8 +229,26 @@ fn require_project(store: &Store, vb: &VerifiedBackup, project_id: &str) -> Resu
 }
 
 /// `file:` URI，只读打开。路径里的 `%`、`?`、`#` 要转义，反斜杠换成 `/`。
+///
+/// `\\?\` 完整写法（钉住的真实位置，peer W6 r4 P2-01）换成 `/` 就不再是完整写法了：反斜杠原样转义成 `%5C`、
+/// 不加 `//`，SQLite 解码后拿到的正是原来的路径。
 pub(crate) fn readonly_uri(path: &Path) -> Result<String> {
-    let raw = path_str(path)?.replace('\\', "/");
+    let text = path_str(path)?;
+    if text.starts_with(r"\\?\") {
+        let mut s = String::from("file:");
+        for c in text.chars() {
+            match c {
+                '%' => s.push_str("%25"),
+                '?' => s.push_str("%3F"),
+                '#' => s.push_str("%23"),
+                '\\' => s.push_str("%5C"),
+                _ => s.push(c),
+            }
+        }
+        s.push_str("?mode=ro");
+        return Ok(s);
+    }
+    let raw = text.replace('\\', "/");
     let mut s = String::from("file:");
     if raw.starts_with('/') {
         s.push_str("//");
@@ -723,8 +741,11 @@ fn stage_attachments(
     }
     // 备份里这个项目没有附件时也要有暂存目录：换入后，备份点之后新增的附件随之移走。
     let owned = guard.create_owned(&[STAGING_DIR], project_id)?;
-    let source = vb.artifacts_dir().join(project_id);
-    let copied = copy_tree(&source, &staged)?;
+    // 读的是校验时钉住的那份备份（peer W6 r4 P1-02 的同类通道）。
+    let copied = match vb.source_artifacts() {
+        Some(a) => copy_tree(&a.join(project_id), &staged)?,
+        None => Vec::new(),
+    };
     drop(owned);
     let prefix = format!("{project_id}/");
     let expected: Vec<_> = vb
@@ -762,6 +783,7 @@ pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
 #[derive(Debug)]
 pub struct ProjectAttachments<'a> {
     /// 这个项目的附件目录（真实位置，读写用它）。项目存在时它一定存在，回调期间一直钉着：改不了名、换不成链接。
+    /// 它是 `\\?\` 完整写法：拼 `/` 分隔的相对路径要逐段拼（见 [`crate::backup::under`]），整段 `join("a/b")` 打不开。
     /// 项目不存在时不建，也不该往里写。要写进库（附件行的 `local_path`）的路径照旧按
     /// [`crate::backup::artifacts_root`]`(store.path())` 拼，与库里别的附件行同一种写法。
     pub dir: &'a Path,
@@ -880,7 +902,21 @@ pub fn inject_swap_exit(db_path: &Path, step: SwapStep) {
     ));
 }
 
+/// 单元测试用：每走到一步先调一次，在两步之间安排「另一个进程」的动作（peer W6 r4 P1-03 的交错）。
+#[cfg(test)]
+type Interleave = Box<dyn FnMut(&Path, SwapStep) + Send>;
+#[cfg(test)]
+static INTERLEAVE: Mutex<Option<Interleave>> = Mutex::new(None);
+
 fn fault(db_path: &Path, step: SwapStep) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(f) = INTERLEAVE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_mut()
+    {
+        f(db_path, step);
+    }
     let mut faults = SWAP_FAULTS.lock().unwrap_or_else(|e| e.into_inner());
     match faults
         .iter()
@@ -914,11 +950,13 @@ impl Marker {
     }
 }
 
-fn markers(store: &Store, staging_root: &Path) -> Result<Vec<Marker>> {
-    if !staging_root.exists() {
-        return Ok(Vec::new());
-    }
-    let mut paths: Vec<PathBuf> = fs::read_dir(staging_root)?
+/// `.restore-staging` 整条链都钉住了才读（peer W6 r4 P1-01）：取得守卫时不存在、之后才出现的照样核对，是链接
+/// 就拒绝；不在就没有标记。返回暂存根的真实位置与其中的标记。
+fn markers(store: &Store, guard: &mut AttachmentsGuard) -> Result<(PathBuf, Vec<Marker>)> {
+    let Some(staging_root) = guard.existing(&[STAGING_DIR])? else {
+        return Ok((PathBuf::new(), Vec::new()));
+    };
+    let mut paths: Vec<PathBuf> = fs::read_dir(&staging_root)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "gen"))
         .collect();
@@ -946,12 +984,12 @@ fn markers(store: &Store, staging_root: &Path) -> Result<Vec<Marker>> {
             current,
         });
     }
-    Ok(out)
+    Ok((staging_root, out))
 }
 
 /// 有已提交、未换入的附件就拒绝（持锁的调用方用，例如 PRE_RESTORE 备份）。
-pub(crate) fn refuse_pending_swaps(store: &Store, guard: &AttachmentsGuard) -> Result<()> {
-    for m in markers(store, &guard.artifacts().join(STAGING_DIR))? {
+pub(crate) fn refuse_pending_swaps(store: &Store, guard: &mut AttachmentsGuard) -> Result<()> {
+    for m in markers(store, guard)?.1 {
         if let Some(g) = m.committed() {
             return Err(BackupError::AttachmentsPending {
                 project: m.project,
@@ -966,9 +1004,9 @@ pub(crate) fn refuse_pending_swaps(store: &Store, guard: &AttachmentsGuard) -> R
 /// 读写都在 `guard` 钉住的真实位置（peer W6 r3 P1-01）。
 pub(crate) fn finish_swaps_locked(store: &Store, guard: &mut AttachmentsGuard) -> Result<usize> {
     let db = store.path();
-    let staging_root = guard.artifacts().join(STAGING_DIR);
+    let (staging_root, found) = markers(store, guard)?;
     let mut done = 0;
-    for m in markers(store, &staging_root)? {
+    for m in found {
         let staged = staging_root.join(&m.project);
         if let Some(g) = m.committed() {
             swap_in(db, guard, &staged, &m.path, &m.project, g).map_err(|e| {
@@ -992,8 +1030,9 @@ pub(crate) fn finish_swaps_locked(store: &Store, guard: &mut AttachmentsGuard) -
 /// 已提交的换入：live → `.restore-old/<项目>-<世代>`，暂存 → live，删旧目录，删标记。
 /// 中断在任何一步，重来一次都能走完：暂存还在就继续换入；旧目录还在就删；最后删标记。
 ///
-/// 附件根、`.restore-staging`、`.restore-old` 由 `guard` 钉着（`.restore-old` 不存在就排他新建）。暂存目录
-/// 放开之后被换成链接的话不换入（换进去的会是一个指向别处的附件目录）。
+/// 附件根、`.restore-staging` 由 `guard` 钉着；`.restore-old` 只经 `guard` 访问（要用时排他新建，已有的先核对，
+/// peer W6 r4 P1-01）。暂存目录按句柄打开、核对、一直开着到按句柄改名生效（peer W6 r4 P1-03）：核对之后它既改不了名
+/// 也换不成链接；打开时它已经是链接或别的东西，就不换入、留着标记（换进去的会是一个指向别处的附件目录）。
 fn swap_in(
     db: &Path,
     guard: &mut AttachmentsGuard,
@@ -1002,41 +1041,186 @@ fn swap_in(
     project: &str,
     generation: i64,
 ) -> Result<()> {
-    let root = guard.artifacts();
-    let live = root.join(project);
-    let old = root.join(OLD_DIR).join(format!("{project}-{generation}"));
-    if let Ok(meta) = fs::symlink_metadata(staged) {
-        if !meta.is_dir() || is_link(&meta) {
-            return Err(BackupError::LinkedPath(staged.display().to_string()));
-        }
-        if live.exists() {
-            if old.exists() {
+    let live = guard.artifacts().join(project);
+    let old_name = format!("{project}-{generation}");
+    let name = std::ffi::OsStr::new(project);
+    let linked = || BackupError::LinkedPath(staged.display().to_string());
+    let opened = match guard.dir(&[STAGING_DIR]) {
+        Some(parent) => match crate::pin::open_movable(parent, name) {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Err(linked()),
+            Err(e) => return Err(e.into()),
+        },
+        None => None,
+    };
+    if let Some(stage) = opened {
+        if fs::symlink_metadata(&live).is_ok() {
+            let old = guard.ensure(&[OLD_DIR])?.join(&old_name);
+            if fs::symlink_metadata(&old).is_ok() {
                 // 上一次中断在「live 移走之后、暂存换入之前」，然后 live 又被重建过：旧的那份作废。
                 fs::remove_dir_all(&old)?;
             }
-            guard.ensure(&[OLD_DIR])?;
             fault(db, SwapStep::MoveLiveAside)?;
             atm_install_state::durable::rename(&live, &old, false)?;
         }
         fault(db, SwapStep::MoveStagedIn)?;
-        atm_install_state::durable::rename(staged, &live, false)?;
+        let root = guard.dir(&[]).ok_or_else(linked)?;
+        stage.move_into(root, name)?;
     }
-    if old.exists() {
-        fault(db, SwapStep::RemoveOld)?;
-        fs::remove_dir_all(&old)?;
+    if let Some(old_root) = guard.existing(&[OLD_DIR])? {
+        let old = old_root.join(&old_name);
+        if fs::symlink_metadata(&old).is_ok() {
+            fault(db, SwapStep::RemoveOld)?;
+            fs::remove_dir_all(&old)?;
+        }
     }
     fault(db, SwapStep::RemoveMarker)?;
     fs::remove_file(marker)?;
     Ok(())
 }
 
-#[cfg(windows)]
-fn is_link(meta: &fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0
-}
+#[cfg(all(test, windows))]
+mod late_swap {
+    use super::*;
+    use std::sync::Arc;
 
-#[cfg(not(windows))]
-fn is_link(meta: &fs::Metadata) -> bool {
-    meta.file_type().is_symlink()
+    fn base(name: &str) -> PathBuf {
+        let d = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("target")
+            })
+            .join("store-unit")
+            .join(format!("restore-{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn junction(link: &Path, target: &Path) -> bool {
+        std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    /// peer W6 r4 P1-03：暂存核对通过之后、换入之前，另一方想把它挪走、在原名上放一个指向外面的 junction。
+    /// 核对用的句柄一直开着，挪不走、名字也占着；换入照常完成，live 是恢复出来的那份真实目录。
+    #[test]
+    fn the_checked_staging_cannot_be_replaced_before_it_moves_in() {
+        let b = base("late-swap");
+        fs::create_dir_all(b.join("N/artifacts/.restore-staging/PA")).unwrap();
+        fs::create_dir_all(b.join("N/artifacts/PA")).unwrap();
+        let store = Store::open(&b.join("N/atm.sqlite"), crate::Config::default()).unwrap();
+        let mut guard = attachments_lock(&store, "late_swap").unwrap();
+        let root = guard.artifacts();
+        let staged = root.join(STAGING_DIR).join("PA");
+        let marker = root.join(STAGING_DIR).join("PA.gen");
+        fs::write(&marker, b"1").unwrap();
+        fs::write(staged.join("a.txt"), b"restored").unwrap();
+        fs::write(root.join("PA/a.txt"), b"live").unwrap();
+        let outside = b.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("a.txt"), b"external").unwrap();
+
+        let tried: Arc<Mutex<Vec<String>>> = Arc::default();
+        let (seen, db) = (tried.clone(), store.path().to_path_buf());
+        let (stage, kept, out) = (staged.clone(), b.join("kept"), outside.clone());
+        *INTERLEAVE.lock().unwrap() = Some(Box::new(move |at, step| {
+            if at != db || step != SwapStep::MoveStagedIn {
+                return;
+            }
+            let moved = fs::rename(&stage, &kept);
+            let linked = junction(&stage, &out);
+            seen.lock()
+                .unwrap()
+                .push(format!("rename={} junction={linked}", moved.is_ok()));
+        }));
+        let result = swap_in(store.path(), &mut guard, &staged, &marker, "PA", 1);
+        *INTERLEAVE.lock().unwrap() = None;
+
+        assert_eq!(*tried.lock().unwrap(), ["rename=false junction=false"]);
+        result.unwrap();
+        let live = root.join("PA");
+        let meta = fs::symlink_metadata(&live).unwrap();
+        assert!(meta.is_dir() && !meta.file_type().is_symlink());
+        assert_eq!(fs::read(live.join("a.txt")).unwrap(), b"restored");
+        assert!(!marker.exists() && !staged.exists());
+        assert_eq!(fs::read(outside.join("a.txt")).unwrap(), b"external");
+    }
+
+    /// peer W6 r4 P1-01 的 `.restore-old` 一路：取得守卫时它不存在，之后被建成指向外面的 junction（外面恰好有
+    /// 同名的 `PA-1`）。不论是收尾删旧目录，还是把 live 挪进去，都拒绝，外面原样还在。
+    #[test]
+    fn a_restore_old_that_appears_as_a_link_is_neither_emptied_nor_used() {
+        for staged_too in [false, true] {
+            let b = base(&format!("late-old-{staged_too}"));
+            fs::create_dir_all(b.join("N/artifacts/.restore-staging")).unwrap();
+            fs::create_dir_all(b.join("N/artifacts/PA")).unwrap();
+            let store = Store::open(&b.join("N/atm.sqlite"), crate::Config::default()).unwrap();
+            let mut guard = attachments_lock(&store, "late_swap").unwrap();
+            let root = guard.artifacts();
+            let staged = root.join(STAGING_DIR).join("PA");
+            if staged_too {
+                fs::create_dir(&staged).unwrap();
+            }
+            let marker = root.join(STAGING_DIR).join("PA.gen");
+            fs::write(&marker, b"1").unwrap();
+            let outside = b.join("outside");
+            fs::create_dir_all(outside.join("PA-1")).unwrap();
+            fs::write(outside.join("PA-1/keep.txt"), b"external").unwrap();
+            let old = root.join(OLD_DIR);
+            assert!(junction(&old, &outside));
+            let result = swap_in(store.path(), &mut guard, &staged, &marker, "PA", 1);
+            assert!(
+                matches!(result, Err(BackupError::LinkedPath(_))),
+                "{staged_too}: {result:?}"
+            );
+            assert_eq!(
+                fs::read(outside.join("PA-1/keep.txt")).unwrap(),
+                b"external"
+            );
+            assert!(marker.is_file() && root.join("PA").is_dir());
+            assert!(fs::read_dir(&outside).unwrap().count() == 1);
+            drop(guard);
+            fs::remove_dir(&old).unwrap();
+        }
+    }
+
+    /// 打开之前暂存就已经被换成链接：不换入，标记留着（还是 Pending），live 与外面都不变。
+    #[test]
+    fn a_staging_that_is_already_a_link_stays_pending() {
+        let b = base("linked-stage");
+        fs::create_dir_all(b.join("N/artifacts/.restore-staging")).unwrap();
+        fs::create_dir_all(b.join("N/artifacts/PA")).unwrap();
+        let store = Store::open(&b.join("N/atm.sqlite"), crate::Config::default()).unwrap();
+        let mut guard = attachments_lock(&store, "late_swap").unwrap();
+        let root = guard.artifacts();
+        let staged = root.join(STAGING_DIR).join("PA");
+        let marker = root.join(STAGING_DIR).join("PA.gen");
+        fs::write(&marker, b"1").unwrap();
+        fs::write(root.join("PA/a.txt"), b"live").unwrap();
+        let outside = b.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("a.txt"), b"external").unwrap();
+        assert!(junction(&staged, &outside));
+        let result = swap_in(store.path(), &mut guard, &staged, &marker, "PA", 1);
+        assert!(
+            matches!(result, Err(BackupError::LinkedPath(_))),
+            "{result:?}"
+        );
+        assert!(marker.is_file());
+        assert_eq!(fs::read(root.join("PA/a.txt")).unwrap(), b"live");
+        assert_eq!(fs::read(outside.join("a.txt")).unwrap(), b"external");
+        fs::remove_dir(&staged).unwrap();
+    }
 }

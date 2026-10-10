@@ -280,6 +280,28 @@ fn files(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// 去掉 `\\?\`：store 内部按钉住的真实位置读写，那是完整写法（peer W6 r4 P2-01）；用例按普通写法比。
+fn plain(p: &Path) -> PathBuf {
+    p.to_str()
+        .and_then(|s| s.strip_prefix(r"\\?\"))
+        .map_or_else(|| p.to_path_buf(), PathBuf::from)
+}
+
+/// 记录下来的移动，路径按 [`plain`] 比。
+fn plain_ops(ops: Vec<atm_install_state::durable::Op>) -> Vec<atm_install_state::durable::Op> {
+    use atm_install_state::durable::Op;
+    ops.into_iter()
+        .map(|op| match op {
+            Op::Move { from, to, flags } => Op::Move {
+                from: plain(&from),
+                to: plain(&to),
+                flags,
+            },
+            other => other,
+        })
+        .collect()
+}
+
 fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
     v.iter()
         .map(|(a, b)| (a.to_string(), b.to_string()))
@@ -1268,7 +1290,7 @@ fn a_restore_whose_attachments_did_not_swap_blocks_backups_until_finished() {
     );
     assert!(!root.join(".restore-staging").join("PA.gen").exists());
     assert_eq!(
-        with_project_attachments(&w.store, "PA", |a| Ok(a.dir.to_path_buf())).unwrap(),
+        plain(&with_project_attachments(&w.store, "PA", |a| Ok(a.dir.to_path_buf())).unwrap()),
         root.join("PA")
     );
 }
@@ -1882,6 +1904,7 @@ fn withdrawal_moves_go_through_the_shared_contract() {
     // 正常撤回：一次落盘的目录移动，之后登记行才删。
     let unused = create_backup(&w.store, &w.backups, "PRE_ARCHIVE", T1).unwrap();
     let (result, ops) = durable::record(|| discard_backup(&w.store, &unused));
+    let ops = plain_ops(ops);
     assert_eq!(result.unwrap(), Withdrawal::Withdrawn);
     assert_eq!(
         ops,
@@ -1925,6 +1948,7 @@ fn withdrawal_moves_go_through_the_shared_contract() {
         })
         .unwrap();
     let (result, ops) = durable::record(|| discard_backup(&w.store, &busy));
+    let ops = plain_ops(ops);
     assert_eq!(result.unwrap(), Withdrawal::Kept("RESTORE_REFERENCE"));
     assert_eq!(
         ops,
@@ -1950,6 +1974,7 @@ fn withdrawal_moves_go_through_the_shared_contract() {
     fs::create_dir_all(&quarantine).unwrap();
     fs::rename(&busy.dir, quarantine.join(&busy.id)).unwrap();
     let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
+    let ops = plain_ops(ops);
     assert_eq!(left.unwrap(), 0);
     assert_eq!(
         ops,
@@ -1994,11 +2019,17 @@ fn a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep() {
                     .unwrap();
                 assert_eq!(rows, 1, "DELETE must not precede the first move");
                 if n == 0 {
-                    assert_eq!((from, to), (&source, &destination));
+                    assert_eq!(
+                        (plain(from), plain(to)),
+                        (source.clone(), destination.clone())
+                    );
                     assert!(source.is_dir() && !destination.exists());
                     None
                 } else {
-                    assert_eq!((from, to), (&destination, &source));
+                    assert_eq!(
+                        (plain(from), plain(to)),
+                        (destination.clone(), source.clone())
+                    );
                     assert!(destination.is_dir() && !source.exists());
                     Some(std::io::Error::from_raw_os_error(32))
                 }
@@ -2022,6 +2053,7 @@ fn a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep() {
         .write(|tx| tx.execute_batch("DROP TRIGGER fail_delete"))
         .unwrap();
     let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
+    let ops = plain_ops(ops);
     assert_eq!(left.unwrap(), 0);
     assert_eq!(
         ops,
