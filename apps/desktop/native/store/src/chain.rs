@@ -100,6 +100,11 @@ impl Pinned {
         &self.root
     }
 
+    /// 钉住的数据根的 (卷序列号, 文件号)。
+    pub(crate) fn root_id(&self) -> (u32, u64) {
+        self.dirs[0].1.id()
+    }
+
     /// `rel` 在数据根真实位置里的路径（不论钉没钉住、存不存在）。
     pub(crate) fn real(&self, rel: &Path) -> PathBuf {
         let mut p = self.root.clone();

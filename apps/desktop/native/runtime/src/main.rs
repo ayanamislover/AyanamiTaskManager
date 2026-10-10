@@ -98,6 +98,7 @@ fn main() {
         maintenance: false,
         metrics_capture: false,
         mobile: drill_mobile.then(drill_mobile_config),
+        may_open: None,
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,

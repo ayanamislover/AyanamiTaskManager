@@ -283,7 +283,7 @@ pub fn export_project(
 ) -> Result<Exported> {
     let mut lock = attachments_lock(store, "export_project")?;
     crate::restore::finish_swaps_locked(store, &mut lock)?;
-    let staging = fresh_staging(opts.exports_dir)?;
+    let staging = fresh_staging(&store.rebase(opts.exports_dir)?)?;
     let result = export_in(store, project_id, format, opts, &staging, &mut lock);
     staging.remove();
     result
@@ -1251,7 +1251,7 @@ pub fn import_project(
 ) -> Result<Imported> {
     let mut lock = attachments_lock(store, "import_project")?;
     crate::restore::finish_swaps_locked(store, &mut lock)?;
-    let staging = fresh_staging(opts.exports_dir)?;
+    let staging = fresh_staging(&store.rebase(opts.exports_dir)?)?;
     let result = import_in(store, source, opts, &staging.dir, &mut lock);
     staging.remove();
     result
@@ -1568,7 +1568,7 @@ pub fn import_legacy_knowledge(
         return Err(PackageError::NotFound(source.display().to_string()));
     }
     let _lock = attachments_lock(store, "import_knowledge")?;
-    let work = fresh_staging(opts.exports_dir)?;
+    let work = fresh_staging(&store.rebase(opts.exports_dir)?)?;
     let staging = work.dir.clone();
     let result = (|| {
         let converted = convert_legacy(source, Home::Knowledge, &staging.join("legacy"), opts.at)?;

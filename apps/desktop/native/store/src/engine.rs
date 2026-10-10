@@ -331,7 +331,16 @@ struct Pool {
 }
 
 pub struct Store {
+    /// 调用方给的库路径：只用于展示、登记与日志。
     path: PathBuf,
+    /// 打开时钉住的数据根（库所在目录，跟随链接解析一次；peer W6 r5 P1-01）。整个 Store 生命周期都持有：
+    /// 写连接、读池、checkpoint、附件守卫与旁路读都从它的真实位置出发，`path` 上数据根以上的链接之后再被换向，
+    /// 也换不走这个 Store 读写的数据根；它自己与它的祖先在持有期间改不了名（不共享删除）。
+    root: crate::pin::Dir,
+    /// 库文件在 `root` 真实位置里的路径。
+    real: PathBuf,
+    /// 打开时数据根字面写法的位置（[`Location`]），[`Store::rebase`] 用它认「在数据根下」。
+    literal_root: Location,
     config: Config,
     shared: Arc<Shared>,
     stats: Arc<Stats>,
@@ -342,6 +351,26 @@ pub struct Store {
 impl Store {
     /// 打开（或新建）数据库，迁移到最新，启动写线程，打开只读连接。
     pub fn open(path: &Path, config: Config) -> Result<Store, StoreError> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = path
+            .file_name()
+            .ok_or_else(|| StoreError::Io(format!("{} has no file name", path.display())))?;
+        // 打开时就记下字面写法的位置键：之后当前目录变了，相对写法的数据根也认得出来。
+        let literal_root = Location::of(parent);
+        // 数据根的写法认不出来，之后就判断不了调用方给的位置在不在它下面（peer W6 r9 P1-01）。
+        if !literal_root.supported() {
+            return Err(StoreError::Io(unsupported_spelling(parent).to_string()));
+        }
+        let root = crate::pin::open(parent)
+            .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
+        let real = root.path().join(name);
+        #[cfg(test)]
+        after_pin(path);
+        let path_given = path;
+        let path = real.as_path();
         let conn = Connection::open(path)?;
         configure(&conn)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -380,7 +409,7 @@ impl Store {
         });
         let stats = Arc::new(Stats::default());
         let writer = {
-            let checkpointer = Checkpointer::start(path, &config, stats.clone())?;
+            let checkpointer = Checkpointer::start(path, path_given, &config, stats.clone())?;
             let (shared, stats, idle) = (shared.clone(), stats.clone(), config.idle_checkpoint);
             std::thread::Builder::new()
                 .name(WRITER_THREAD.into())
@@ -388,7 +417,10 @@ impl Store {
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
         Ok(Store {
-            path: path.to_path_buf(),
+            path: path_given.to_path_buf(),
+            real: real.clone(),
+            literal_root,
+            root,
             config,
             shared,
             stats,
@@ -402,6 +434,59 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 库文件的真实位置（`\\?\` 完整写法），即连接实际打开的那个文件。
+    pub fn real_path(&self) -> &Path {
+        &self.real
+    }
+
+    /// 打开时钉住的数据根。
+    pub(crate) fn root(&self) -> &crate::pin::Dir {
+        &self.root
+    }
+
+    /// 测试用：让守卫的身份核对对不上，等于「打开之后数据根被换成了别的目录」。
+    #[cfg(test)]
+    pub(crate) fn forge_root_identity(&mut self) {
+        self.root.forge_identity();
+    }
+
+    /// 调用方给的、在数据根字面写法之下的位置，换算到 Store 钉住的数据根的真实位置里；不在数据根下的原样返回
+    /// （调用方另选的外部位置，照它的写法用）。「在数据根下」按 Windows 的同一位置比（[`Location`]）：
+    /// 大小写、`\\?\` 与普通写法、相对写法、普通写法的 `.` / `..` 都认得出（peer W6 r6 P1-02），不按字符串前缀。
+    ///
+    /// 数据根以下的部分原样接在真实位置后面（按 `\` 拼字符串，不经 `PathBuf::push`：它在 `\\?\` 写法上会把
+    /// `.`、`..` 归一掉，peer W6 r7 P1-02）。所以 `\\?\` 写法里 Windows 本来不解释的 `.`、`..`、`/`，换算后
+    /// 仍是名字：原来打不开的路径换算后照样打不开，不会变成兄弟目录。
+    ///
+    /// `\\?\` 写法中间有空段（连续的 `\`）的，不论在不在数据根下都拒绝：Windows 打不开它，而之后按
+    /// `std::path` 拆父目录与名字时空段会被并掉、变成一个打得开的位置（peer W6 r8 P1-02）。
+    pub(crate) fn rebase(&self, literal: &Path) -> std::io::Result<PathBuf> {
+        let key = Location::of(literal);
+        if key.gaps {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} has an empty segment in a \\\\?\\ path (Windows does not open it)",
+                    literal.display()
+                ),
+            ));
+        }
+        if !key.supported() {
+            return Err(unsupported_spelling(literal));
+        }
+        let Some(rest) = key.below(&self.literal_root) else {
+            return Ok(literal.to_path_buf());
+        };
+        let mut s = self.root.path().as_os_str().to_owned();
+        for c in rest {
+            if !s.to_string_lossy().ends_with('\\') {
+                s.push("\\");
+            }
+            s.push(c);
+        }
+        Ok(PathBuf::from(s))
     }
 
     pub fn stats(&self) -> &Stats {
@@ -832,7 +917,13 @@ struct Signal {
 }
 
 impl Checkpointer {
-    fn start(path: &Path, config: &Config, stats: Arc<Stats>) -> Result<Checkpointer, StoreError> {
+    /// `path` 是打开的真实位置；`given` 是调用方给的写法，只用来认测试挂的 [`hold_next_passive`]。
+    fn start(
+        path: &Path,
+        given: &Path,
+        config: &Config,
+        stats: Arc<Stats>,
+    ) -> Result<Checkpointer, StoreError> {
         let conn = Connection::open(path)?;
         configure(&conn)?;
         conn.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -849,8 +940,8 @@ impl Checkpointer {
             std::thread::Builder::new()
                 .name("atm-store-checkpoint".into())
                 .spawn({
-                    let path = path.to_path_buf();
-                    move || checkpointer_loop(conn, &path, &signal, limit, &stats)
+                    let given = given.to_path_buf();
+                    move || checkpointer_loop(conn, &given, &signal, limit, &stats)
                 })
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
@@ -962,6 +1053,340 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     } else {
         &stats.restart_busy
     });
+}
+
+/// Windows 上的一个位置。写法交给 Windows 自己换成 NT 路径（[`nt_path`]：`RtlDosPathNameToNtPathName_U_WithStatus`，
+/// 与 `CreateFileW` 打开文件前做的是同一步，只按字面换算，不碰文件系统、不跟随链接）：普通写法、`\\.\` 写法照
+/// Win32 规则补全当前目录、归一 `/`、`.`、`..`、连续分隔符与尾部的点和空格，`\\?\` 写法原样。之后只认两种命名
+/// 空间——`\??\<盘符>:\…` 与 `\??\UNC\<服务器>\<共享>\…`；subst 盘符与网络映射盘符按 `QueryDosDeviceW` 换成
+/// 它指向的位置。其余（`GLOBALROOT`、卷 GUID、设备对象……）不比较、不支持（peer W6 r9 P1-01）：[`Store::open`] 与
+/// [`Store::rebase`] 都拒绝，不当成外部位置放行。名字保留 UTF-16 原样，比较见 [`same_name`]。
+#[derive(Clone, Debug)]
+pub(crate) struct Location {
+    /// `None`：不支持的命名空间。
+    kind: Option<Space>,
+    /// 中间有空段（只会出现在 `\\?\` 写法里）：Windows 打不开这个路径。
+    pub(crate) gaps: bool,
+    parts: Vec<std::ffi::OsString>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Space {
+    Drive,
+    Unc,
+}
+
+/// subst 套 subst 最多跟几层。
+const DOS_DEVICE_DEPTH: u8 = 4;
+
+impl Location {
+    pub(crate) fn of(p: &Path) -> Location {
+        match nt_path(p) {
+            Some(nt) => Location::of_nt(&nt, 0, &dos_device),
+            None => Location::unsupported(),
+        }
+    }
+
+    fn unsupported() -> Location {
+        Location {
+            kind: None,
+            gaps: false,
+            parts: Vec::new(),
+        }
+    }
+
+    /// 能比较、Windows 也打得开的写法。
+    pub(crate) fn supported(&self) -> bool {
+        self.kind.is_some() && !self.gaps
+    }
+
+    /// 用例换盘符映射（造真的 subst 要改本机的盘符映射）。
+    #[cfg(test)]
+    pub(crate) fn of_with(p: &Path, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+        match nt_path(p) {
+            Some(nt) => Location::of_nt(&nt, 0, dev),
+            None => Location::unsupported(),
+        }
+    }
+
+    fn of_nt(nt: &[u16], depth: u8, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+        let Some(rest) = strip_ascii_ci(nt, r"\??\") else {
+            return Location::unsupported();
+        };
+        let (kind, rest) = match strip_ascii_ci(rest, r"UNC\") {
+            Some(r) => (Space::Unc, r),
+            None if is_drive(rest) => (Space::Drive, rest),
+            None => return Location::unsupported(),
+        };
+        let mut segments: Vec<&[u16]> = rest.split(|u| *u == u16::from(b'\\')).collect();
+        // 末尾的分隔符不算一段（目录带不带它都一样）。普通写法里连续的分隔符已由 Win32 归一；`\\?\` 写法里
+        // 中间的空段 Windows 不归一、打不开，记下来由 [`Store::rebase`] 拒绝（peer W6 r8 P1-02）。
+        if segments.last().is_some_and(|s| s.is_empty()) {
+            segments.pop();
+        }
+        let gaps = segments.iter().any(|s| s.is_empty());
+        if kind == Space::Drive
+            && depth < DOS_DEVICE_DEPTH
+            && let Some(target) = dev(segments[0])
+        {
+            let below = &segments[1..];
+            if starts_ascii_ci(&target, r"\??\") {
+                // subst：换成它指向的位置再认一次。
+                let mut joined = target;
+                for s in below {
+                    joined.push(u16::from(b'\\'));
+                    joined.extend_from_slice(s);
+                }
+                return Location::of_nt(&joined, depth + 1, dev);
+            }
+            if let Some(share) = redirected_share(&target) {
+                // 网络映射盘符：`\Device\LanmanRedirector\;Z:…\<服务器>\<共享>`，就是那个 UNC 位置。
+                let parts = share
+                    .into_iter()
+                    .chain(below.iter().filter(|c| !c.is_empty()).map(|c| from_wide(c)))
+                    .collect();
+                return Location {
+                    kind: Some(Space::Unc),
+                    gaps,
+                    parts,
+                };
+            }
+        }
+        let parts = segments
+            .into_iter()
+            .filter(|c| !c.is_empty())
+            .map(from_wide)
+            .collect();
+        Location {
+            kind: Some(kind),
+            gaps,
+            parts,
+        }
+    }
+
+    /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。不支持的写法不在任何
+    /// 位置之下。
+    pub(crate) fn below<'a>(&'a self, base: &Location) -> Option<&'a [std::ffi::OsString]> {
+        let inside = self.kind.is_some()
+            && self.kind == base.kind
+            && self.parts.len() >= base.parts.len()
+            && self
+                .parts
+                .iter()
+                .zip(&base.parts)
+                .all(|(a, b)| same_name(a, b));
+        inside.then(|| &self.parts[base.parts.len()..])
+    }
+}
+
+#[cfg(windows)]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().collect()
+}
+
+#[cfg(windows)]
+fn from_wide(units: &[u16]) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    std::ffi::OsString::from_wide(units)
+}
+
+#[cfg(not(windows))]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    s.to_string_lossy()
+        .replace('/', "\\")
+        .encode_utf16()
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn from_wide(units: &[u16]) -> std::ffi::OsString {
+    String::from_utf16_lossy(units).into()
+}
+
+fn unsupported_spelling(p: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "{} is not a drive or UNC path (other Windows namespaces are not supported here)",
+            p.display()
+        ),
+    )
+}
+
+fn ascii_lower(u: u16) -> u16 {
+    if (65..=90).contains(&u) { u + 32 } else { u }
+}
+
+fn starts_ascii_ci(units: &[u16], prefix: &str) -> bool {
+    let p: Vec<u16> = prefix.encode_utf16().collect();
+    units.len() >= p.len()
+        && units
+            .iter()
+            .zip(&p)
+            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
+}
+
+/// 去掉一个只含 ASCII 的前缀（不分大小写：`UNC`、`GLOBALROOT` 这类对象名不分大小写）。
+fn strip_ascii_ci<'a>(units: &'a [u16], prefix: &str) -> Option<&'a [u16]> {
+    starts_ascii_ci(units, prefix).then(|| &units[prefix.encode_utf16().count()..])
+}
+
+/// `X:` 开头（之后是结尾或分隔符）。
+fn is_drive(units: &[u16]) -> bool {
+    let letter = |u: u16| (65..=90).contains(&u) || (97..=122).contains(&u);
+    units.len() >= 2
+        && letter(units[0])
+        && units[1] == u16::from(b':')
+        && (units.len() == 2 || units[2] == u16::from(b'\\'))
+}
+
+/// 网络重定向器下的 `\<服务器>\<共享>…`：`\Device\LanmanRedirector\;Z:…\srv\share`、`\Device\Mup\;…\srv\share`
+/// 这类写法里以 `;` 开头的是重定向器自己的段，去掉之后就是 UNC 的那几段。
+fn redirected_share(target: &[u16]) -> Option<Vec<std::ffi::OsString>> {
+    let rest = strip_ascii_ci(target, r"\Device\LanmanRedirector\")
+        .or_else(|| strip_ascii_ci(target, r"\Device\Mup\"))?;
+    let parts: Vec<std::ffi::OsString> = rest
+        .split(|u| *u == u16::from(b'\\'))
+        .filter(|c| !c.is_empty() && c[0] != u16::from(b';'))
+        .map(from_wide)
+        .collect();
+    (parts.len() >= 2).then_some(parts)
+}
+
+/// 按 Windows 自己的规则把写法换成 NT 路径（`RtlDosPathNameToNtPathName_U_WithStatus`：`CreateFileW` 打开之前
+/// 做的就是这一步）。只按字面，不访问文件系统。
+#[cfg(windows)]
+fn nt_path(p: &Path) -> Option<Vec<u16>> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlDosPathNameToNtPathName_U_WithStatus(
+            dos: *const u16,
+            nt: *mut UnicodeString,
+            file_part: *mut *mut u16,
+            relative: *mut std::ffi::c_void,
+        ) -> i32;
+        fn RtlFreeUnicodeString(s: *mut UnicodeString);
+    }
+    let mut dos = wide(p.as_os_str());
+    if dos.is_empty() || dos.contains(&0) {
+        return None;
+    }
+    dos.push(0);
+    let mut nt = UnicodeString {
+        length: 0,
+        maximum_length: 0,
+        buffer: std::ptr::null_mut(),
+    };
+    // SAFETY: `dos` 以 0 结尾、调用期间有效；`nt` 由函数填写，成功时缓冲由它分配、用 RtlFreeUnicodeString 释放。
+    let status = unsafe {
+        RtlDosPathNameToNtPathName_U_WithStatus(
+            dos.as_ptr(),
+            &mut nt,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if status < 0 || nt.buffer.is_null() {
+        return None;
+    }
+    // SAFETY: 成功时 `buffer` 指向 `length` 字节的 UTF-16。
+    let units =
+        unsafe { std::slice::from_raw_parts(nt.buffer, usize::from(nt.length) / 2) }.to_vec();
+    // SAFETY: 释放上面分配的缓冲，之后不再用它。
+    unsafe { RtlFreeUnicodeString(&mut nt) };
+    Some(units)
+}
+
+#[cfg(not(windows))]
+fn nt_path(p: &Path) -> Option<Vec<u16>> {
+    let abs = std::path::absolute(p).ok()?;
+    let mut units: Vec<u16> = r"\??\".encode_utf16().collect();
+    units.extend(wide(abs.as_os_str()));
+    Some(units)
+}
+
+/// 盘符指向的目标（`QueryDosDeviceW`）：subst 是 `\??\…`，网络映射是重定向器下的路径，本地卷是 `\Device\…`。
+#[cfg(windows)]
+fn dos_device(drive: &[u16]) -> Option<Vec<u16>> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn QueryDosDeviceW(device: *const u16, target: *mut u16, max: u32) -> u32;
+    }
+    let mut name = drive.get(..2)?.to_vec();
+    name.push(0);
+    let mut buf = vec![0u16; 4096];
+    // SAFETY: `name` 以 0 结尾；`buf` 的长度如实给出，函数只在其中写。
+    let n = unsafe { QueryDosDeviceW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n == 0 {
+        return None;
+    }
+    // 结果是以两个 0 结尾的多串，只取第一个（当前生效的那个）。
+    let end = buf.iter().position(|u| *u == 0).unwrap_or(n as usize);
+    buf.truncate(end);
+    Some(buf)
+}
+
+#[cfg(not(windows))]
+fn dos_device(_drive: &[u16]) -> Option<Vec<u16>> {
+    None
+}
+
+/// 同一个名字：Windows 的序数比较、不分大小写（`CompareStringOrdinal(…, TRUE)`：用系统的大写表逐个 UTF-16 码元比，
+/// 与 NTFS 判两个名字相同用的是同一种规则）。不做 Unicode 的多字符展开：`straße` 与 `STRASSE` 是两个名字
+/// （peer W6 r7 P1-01）。
+#[cfg(windows)]
+pub(crate) fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CompareStringOrdinal(
+            string1: *const u16,
+            count1: i32,
+            string2: *const u16,
+            count2: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    const CSTR_EQUAL: i32 = 2;
+    let (a, b) = (wide(a), wide(b));
+    let (Ok(na), Ok(nb)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: 两个缓冲在调用期间有效，长度如实给出（不要求以 0 结尾）。
+    unsafe { CompareStringOrdinal(a.as_ptr(), na, b.as_ptr(), nb, 1) == CSTR_EQUAL }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    a == b
+}
+#[cfg(test)]
+type AfterPin = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static AFTER_PIN: Mutex<Vec<(PathBuf, AfterPin)>> = Mutex::new(Vec::new());
+
+/// 测试用：从 `db_path` 打开 Store 时，钉住数据根之后、打开连接之前跑一次 `f`（peer W6 r5 P1-01 的窗口）。
+#[cfg(test)]
+pub(crate) fn on_next_open_after_pin(db_path: &Path, f: impl FnOnce() + Send + 'static) {
+    lock(&AFTER_PIN).push((db_path.to_path_buf(), Box::new(f)));
+}
+
+#[cfg(test)]
+fn after_pin(path: &Path) {
+    let f = {
+        let mut all = lock(&AFTER_PIN);
+        match all.iter().position(|(p, _)| p == path) {
+            Some(i) => all.remove(i).1,
+            None => return,
+        }
+    };
+    f();
 }
 
 type Hold = Arc<(Mutex<(bool, bool)>, Condvar)>;

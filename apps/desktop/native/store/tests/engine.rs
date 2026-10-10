@@ -506,8 +506,22 @@ fn a_read_that_is_slow_in_rust_is_over_budget() {
     );
     assert_eq!(Stats::get(&store.stats().read_overruns), 1);
     assert_eq!(Stats::get(&store.stats().read_interrupts), 0);
-    // 预算内的读不受影响。
-    assert!(has(&store, "seed"));
+    // 预算内的读不受影响。100 ms 的预算在机器很忙时（全量并行）偶尔连普通查询也会超（peer W6 r9 的首次全量），
+    // 超了不算这里要验的事：重试到一次在预算内答完为止，答出来的必须是 seed 在。
+    let answered = (0..20).find_map(|_| {
+        match store.read(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM settings WHERE key = 'seed'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+        }) {
+            Ok(n) => Some(n),
+            Err(ReadError::OverBudget) => None,
+            Err(e) => panic!("{e:?}"),
+        }
+    });
+    assert_eq!(answered, Some(1), "an ordinary read still answers");
 }
 
 /// W1 peer r4 P2-01：写预算从 BEGIN 成功开始计。等别的连接放开写锁的时间不算，

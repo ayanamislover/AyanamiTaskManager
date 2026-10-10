@@ -59,6 +59,7 @@ pub struct Publish<'a> {
     pub maintenance: bool,
     pub metrics_capture: bool,
     pub mobile: Option<&'a Mobile>,
+    pub may_open: Option<&'a (dyn Fn() -> bool + Send + Sync)>,
 }
 
 /// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
@@ -130,6 +131,10 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     let instance_id = crate::rng::hex(16);
     let lease_generation = next_lease_generation(&runtime_dir);
 
+    // 开放入口之前问一次：宿主正在退出就不开（之后的每一步都对外可见）。
+    if p.may_open.is_some_and(|may| !may()) {
+        return Err("the host is exiting: the entries were not opened".into());
+    }
     // 1. lease 记录：持有 `service.lock` 的就是本进程（单进程布局，没有 core 子进程）。
     write_json(
         &runtime_dir.join(LEASE),

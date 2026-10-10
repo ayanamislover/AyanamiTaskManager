@@ -146,6 +146,7 @@ fn main() {
             feature_wait: atm_runtime::dispatch::mobile::FEATURE_WAIT,
             track_every: atm_runtime::dispatch::dispatcher::TRACK_INTERVAL,
         }),
+        may_open: None,
     };
     let serving = match atm_runtime::start(&options) {
         Ok(Started::Serving(serving)) => serving,

@@ -114,7 +114,7 @@ pub fn restore_project(
     // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
     finish_swaps_locked(store, &mut serial)?;
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
-    let mut backups = BackupsRoot::pin(opts.backups_root)?;
+    let mut backups = BackupsRoot::pin_for(store, opts.backups_root)?;
     crate::backup::sweep_withdrawn_locked(store, &mut backups);
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
@@ -166,7 +166,7 @@ pub fn restore_knowledge(
     let mut serial = attachments_lock(store, "restore_knowledge")?;
     finish_swaps_locked(store, &mut serial)?;
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
-    let mut backups = BackupsRoot::pin(opts.backups_root)?;
+    let mut backups = BackupsRoot::pin_for(store, opts.backups_root)?;
     crate::backup::sweep_withdrawn_locked(store, &mut backups);
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.source_db())?;

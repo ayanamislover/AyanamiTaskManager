@@ -164,6 +164,7 @@ pub fn options(n: &Path, legacy: &Path, events: &Events) -> Options {
         maintenance: false,
         metrics_capture: false,
         mobile: None,
+        may_open: None,
     }
 }
 

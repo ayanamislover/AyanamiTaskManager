@@ -571,3 +571,38 @@ fn an_offline_recovery_is_settled_before_serving() {
     drop(svc);
     s.stop(&|_| {});
 }
+
+/// 宿主正在退出（`may_open` 答 false）：入口一样都不开——没有 lease、HTTP、daemon.json，也没有观察到 Lease；
+/// 启动以失败结束、放掉准入，下一次照常开放（peer W6 r9 P2-01）。
+#[test]
+fn a_host_that_is_exiting_opens_no_entry() {
+    let d = dir("may-open-refused");
+    let n = d.join("N");
+    let events = Events::default();
+    let mut o = options(&n, &d.join("L-missing"), &events);
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = asked.clone();
+    o.may_open = Some(std::sync::Arc::new(move || {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        false
+    }));
+    match atm_runtime::start(&o) {
+        Err(atm_runtime::BootError::Failed(why)) => assert!(why.contains("exiting"), "{why}"),
+        Ok(_) => panic!("the entries opened"),
+        Err(other) => panic!("{other}"),
+    }
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(descriptor(&n).is_none(), "daemon.json written");
+    let files = runtime_files(&n);
+    assert!(
+        !files
+            .iter()
+            .any(|f| f == "daemon.json" || f == "daemon.lock"),
+        "{files:?}"
+    );
+    assert!(!events.seen().contains(&Event::Lease));
+    o.may_open = None;
+    let s = serving(atm_runtime::start(&o).unwrap());
+    assert!(descriptor(&n).is_some());
+    s.stop(&|_| {});
+}

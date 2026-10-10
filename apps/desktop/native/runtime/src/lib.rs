@@ -101,6 +101,9 @@ pub struct Options {
     pub metrics_capture: bool,
     /// 手机同步与 Claude 派单（W7e）：入口发布之后在后台起。`None` 不起（独立运行时）。
     pub mobile: Option<entries::Mobile>,
+    /// 开放入口之前问一次（写 lease 之前）：返回 false 就不开、启动以失败结束。宿主用它让「退出」与「开始开放入口」
+    /// 互斥（peer W6 r9 P2-01）。`None` 一律开。
+    pub may_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -455,6 +458,7 @@ fn serve(
         maintenance: o.maintenance,
         metrics_capture: o.metrics_capture,
         mobile: o.mobile.as_ref(),
+        may_open: o.may_open.as_deref(),
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -487,6 +491,7 @@ fn serve(
             metrics_capture: o.metrics_capture,
             // 比较线程不发布入口。
             mobile: None,
+            may_open: None,
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()
