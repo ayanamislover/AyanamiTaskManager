@@ -1116,6 +1116,7 @@ impl App {
             return;
         };
         let conversion = serving.conversion();
+        let mobile = serving.mobile();
         let call = match crate::ui_api::parse(input) {
             Ok(call) => call,
             Err(code) => {
@@ -1134,7 +1135,11 @@ impl App {
                     atm_install_state::startup::iso_utc(crate::health::process_started_at_ms());
                 let runtime: atm_ui_bridge::RuntimeStatus =
                     Arc::new(move || json!({ "version": version, "conversion": conversion }));
-                Arc::new(Ui::new(svc, runtime, started_at))
+                let ui = Ui::new(svc, runtime, started_at);
+                Arc::new(match mobile {
+                    Some(m) => ui.with_mobile(m),
+                    None => ui,
+                })
             })
             .clone();
         let principal = atm_ui_bridge::webview(self.generation, self.epoch);

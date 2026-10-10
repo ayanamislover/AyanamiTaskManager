@@ -54,15 +54,57 @@ fn invalid(message: &str) -> Reply {
     )
 }
 
-/// W7 才有的功能：2.0 在没有这个功能时就回 404 加这个码，界面按「功能不可用」安静处理。
-fn unavailable_feature(code: &str, what: &str) -> Reply {
+/// 宿主没有启用这个功能（2.0 独立 daemon 的应答）：404，界面按「功能不可用」安静处理。
+fn not_enabled(code: &str, what: &str) -> Reply {
     error_reply(
         404,
         code,
-        &format!("{what}在这个版本里还不可用"),
+        &format!("当前 ATM 宿主没有启用{what}"),
         false,
         None,
     )
+}
+
+/// 还在启动（503，界面自动重试）、起不来、正在退出（404）。
+fn unavailable(u: atm_dispatch::mobile::Unavailable) -> Reply {
+    error_reply(u.status, u.code, u.message, u.retryable, None)
+}
+
+/// 派单器的错误：`DISPATCH_*` 原样回（状态码、可否重试、details，与 2.0 一致），其余按服务错误回。
+fn dispatch_error(e: atm_dispatch::errors::Error) -> Reply {
+    match e {
+        atm_dispatch::errors::Error::Dispatch(e) => error_reply(
+            e.code.http_status(),
+            e.code.as_str(),
+            &e.message,
+            e.retryable(),
+            e.details.map(Value::Object),
+        ),
+        atm_dispatch::errors::Error::Domain(e) => domain_reply(e),
+    }
+}
+
+fn dispatcher(
+    ui: &Ui,
+    act: impl FnOnce(&atm_dispatch::Dispatcher) -> Result<Value, atm_dispatch::errors::Error>,
+) -> Result<Value, Reply> {
+    let Some(m) = &ui.mobile else {
+        return Err(not_enabled("DISPATCH_UNAVAILABLE", " Claude 派单"));
+    };
+    let d = m.dispatch().map_err(unavailable)?;
+    act(&d).map_err(dispatch_error)
+}
+
+/// 连接器自己的错误是服务错误（INVALID_ARGUMENT、VALIDATION_ERROR……），与 2.0 交给全局处理一致。
+fn sync(
+    ui: &Ui,
+    act: impl FnOnce(&dyn atm_dispatch::mobile::SyncSettings) -> Result<Value, DomainError>,
+) -> Out {
+    let Some(m) = &ui.mobile else {
+        return Err(not_enabled("SYNC_UNAVAILABLE", "手机同步"));
+    };
+    let c = m.sync().map_err(unavailable)?;
+    act(&*c).map(Reply::ok).map_err(svc)
 }
 
 pub(crate) fn handle(ui: &Ui, p: &Principal, route: &UiRoute, i: &Input) -> Reply {
@@ -723,9 +765,37 @@ fn route_call(ui: &Ui, p: &Principal, n: u16, i: &Input) -> Out {
             let w = s.quick_promote(p, i.param("id"), r, &op).map_err(svc)?;
             Ok(Reply::ok(quick_view(w.result["quick"].clone())))
         }
-        // 派单与手机同步在 W7。
-        88..=91 => Err(unavailable_feature("DISPATCH_UNAVAILABLE", "Claude 派单")),
-        92..=96 => Err(unavailable_feature("SYNC_UNAVAILABLE", "手机同步")),
+        // Claude 派单（2.x `apps/daemon/src/dispatch-routes.ts`）。
+        88 => dispatcher(ui, |d| d.status(p)).map(Reply::ok),
+        89 => {
+            let patch = Value::Object(i.body.clone());
+            dispatcher(ui, |d| d.update_config(p, &patch)).map(Reply::ok)
+        }
+        90 => {
+            let input = atm_dispatch::Enqueue {
+                project: i.param("code").to_owned(),
+                key: i.param("taskKey").to_owned(),
+                mobile: false,
+                requested_by: None,
+                request_id: None,
+            };
+            dispatcher(ui, |d| d.enqueue(p, &input).map(Value::Object)).map(Reply::created)
+        }
+        91 => dispatcher(ui, |d| d.cancel(p, i.param("run")).map(Value::Object)).map(Reply::ok),
+        // 手机同步（2.x `apps/daemon/src/sync-routes.ts`）。
+        92 => sync(ui, |c| c.status(p)),
+        93 => {
+            let patch = Value::Object(i.body.clone());
+            sync(ui, |c| c.update_config(p, &patch))
+        }
+        94 => {
+            let candidate = Value::Object(i.body.clone());
+            sync(ui, |c| c.test_relay(p, &candidate))
+        }
+        // 2.0 给这条加 `cache-control: no-store`：3.0 的界面应答不经 HTTP 缓存（WebView 的 runtimeRequest
+        // 与 e2e 适配器都不缓存），不需要。
+        95 => sync(ui, |c| c.create_pairing(p)),
+        96 => sync(ui, |c| c.reset_space(p)),
         _ => Err(error_reply(
             500,
             ErrorCode::INTERNAL_ERROR.as_str(),

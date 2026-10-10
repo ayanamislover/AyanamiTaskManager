@@ -13,7 +13,14 @@ publish.workspace = true
 name = "atm-runtime"
 path = "src/main.rs"
 
+# W7e 崩溃演练当作 claude 拉起的假程序：与 atm-dispatch 用例同一个源文件，本包的用例才拿得到它的路径
+# （`CARGO_BIN_EXE_atm-drill-claude`）。同样不进安装包。
+[[bin]]
+name = "atm-drill-claude"
+path = "../dispatch/src/bin/fake_claude.rs"
+
 [dependencies]
+atm-dispatch = { path = "../dispatch" }
 atm-domain = { path = "../domain" }
 atm-http = { path = "../http" }
 atm-install-state = { path = "../install-state" }
@@ -29,6 +36,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time"] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
+  # 假 claude（atm-drill-claude）看自己有没有控制台、启动信息里的窗口显示方式。
+  "Win32_System_Console",
+  "Win32_System_Threading",
 ] }
 
 [target.'cfg(windows)'.dev-dependencies]
@@ -39,5 +49,8 @@ windows-sys = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+# W7e：用例借 sync 的内存中继与手机一侧（`sync/tests/support`）。
+atm-sync-protocol = { path = "../sync-protocol" }
+url = "2"
 rusqlite = "0.39"
 sha2 = "0.10"

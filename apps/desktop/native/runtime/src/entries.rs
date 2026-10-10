@@ -1,5 +1,6 @@
-//! 发布 Agent 入口（07 §2 第 3 条之后、§6 判定放行之后）：lease 记录 → HTTP → daemon.json → 见证 → 调度器。
-//! 撤下（后台比较发现数据源冲突，07 §6 末行）按相反的顺序：先停调度器与 HTTP，再撤 daemon.json，
+//! 发布 Agent 入口（07 §2 第 3 条之后、§6 判定放行之后）：lease 记录 → HTTP → daemon.json → 见证 → 调度器
+//! → 观察器、维护、指标 → 手机同步与派单（W7e）。撤下（后台比较发现数据源冲突，07 §6 末行）按相反的顺序：
+//! 先停手机同步与派单（冲突时不再消费手机命令，07 §7），再停调度器与 HTTP，再撤 daemon.json，
 //! 之后才由调用方写启动状态；撤下之后不会再有任何业务写入。
 
 use std::path::{Path, PathBuf};
@@ -23,6 +24,26 @@ pub const LEASE: &str = "daemon.lock";
 /// 没有写入时观察器也读一轮的间隔（兜底；正常靠写线程的作业计数唤醒）。
 const NOTIFY_FALLBACK: Duration = Duration::from_secs(5 * 60);
 
+/// 手机同步与 Claude 派单要的宿主资源（W7e）。
+#[derive(Clone)]
+pub struct Mobile {
+    /// 找本机的 claude（宿主按 Agent 环境找；smoke 构建换成沙箱）。
+    pub resolve_claude: Arc<dyn Fn() -> Option<PathBuf> + Send + Sync>,
+    /// 连中继（正式是 WinHTTP）。
+    pub transport: Arc<dyn atm_sync::transport::Transport>,
+    pub log: Arc<dyn atm_sync::host::Log>,
+    /// 派单会话继承的宿主环境（派单器再剥掉宿主会话变量）。
+    pub base_env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
+    /// `%ComSpec%`：npm 装的 claude.cmd 经它起。
+    pub comspec: Option<PathBuf>,
+    /// 默认设备名（缺省取主机名）。
+    pub device_name: Option<String>,
+    /// 路由等功能起来的上限（正式 [`atm_dispatch::mobile::FEATURE_WAIT`]）。
+    pub feature_wait: Duration,
+    /// 派单跟踪的间隔（正式 [`atm_dispatch::dispatcher::TRACK_INTERVAL`]）。
+    pub track_every: Duration,
+}
+
 pub struct Publish<'a> {
     pub layout: &'a Layout,
     /// 旧根 `L`：只读。2.0 导出的 `.aytproj` v1 在它的 `exports\` 里，可以导入（W6c）。
@@ -37,6 +58,7 @@ pub struct Publish<'a> {
     pub notify: Option<atm_jobs::notify::Sink>,
     pub maintenance: bool,
     pub metrics_capture: bool,
+    pub mobile: Option<&'a Mobile>,
 }
 
 /// 开着的入口。丢弃时与 [`Entries::withdraw`] 一样撤下（只是不报 `Withdrawn`）：发布到一半出错或 panic
@@ -51,6 +73,7 @@ pub struct Entries {
     notifier: Option<atm_jobs::notify::Notifier>,
     maintenance: Option<atm_jobs::maintenance::Maintenance>,
     metrics: Option<atm_jobs::metrics::MetricsCapture>,
+    mobile: Option<Arc<atm_dispatch::mobile::Features>>,
     runtime_dir: PathBuf,
     instance_id: String,
     lease_generation: u64,
@@ -183,6 +206,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         notifier: None,
         maintenance: None,
         metrics: None,
+        mobile: None,
         runtime_dir,
         instance_id,
         lease_generation,
@@ -257,8 +281,78 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
             entries.svc.clone(),
         ));
     }
+    // 9. 手机同步与 Claude 派单（W7e）：后台起，慢了不耽误入口；起好之前界面拿到的是 503 STARTING。
+    if let Some(m) = p.mobile {
+        entries.mobile = Some(start_mobile(m, &entries.svc, p.layout, p.legacy, p.version));
+    }
 
     Ok(entries)
+}
+
+fn start_mobile(
+    m: &Mobile,
+    svc: &Arc<Service>,
+    layout: &Layout,
+    legacy: &Path,
+    version: &str,
+) -> Arc<atm_dispatch::mobile::Features> {
+    use atm_dispatch::mobile::{self, MakeSync, SyncSettings};
+    use atm_dispatch::process::Native;
+    let features = mobile::Features::new(m.feature_wait);
+    // 转换把 `sync\` 与非运行中会话的 `dispatch\logs\` 复制到了库旁边；运行中的会话还在往旧根写。
+    let data = layout.data();
+    let dispatch = atm_dispatch::Options {
+        service: svc.clone(),
+        logs: data.join("dispatch").join("logs"),
+        legacy_logs: Some(legacy.join("dispatch").join("logs")),
+        resolve_claude: m.resolve_claude.clone(),
+        spawner: Arc::new(Native),
+        probe: Arc::new(Native),
+        runner: Arc::new(atm_dispatch::probe::ProcessRunner {
+            comspec: m.comspec.clone(),
+            probe: Arc::new(Native),
+        }),
+        base_env: m.base_env.clone(),
+        comspec: m.comspec.clone(),
+        now: Arc::new(atm_sync::time::now_ms),
+        log: m.log.clone(),
+        poll: m.track_every,
+        auth_timeout: atm_dispatch::probe::AUTH_PROBE_TIMEOUT,
+    };
+    let (svc, version, transport, log, device_name) = (
+        svc.clone(),
+        version.to_string(),
+        m.transport.clone(),
+        m.log.clone(),
+        m.device_name.clone(),
+    );
+    let make_sync: MakeSync = Box::new(move |port| {
+        let connector =
+            atm_sync::connector::Connector::new(atm_sync::connector::ConnectorOptions {
+                service: svc,
+                secrets: atm_sync::connector::default_secrets(&data),
+                app_version: version,
+                dispatch: port,
+                transport,
+                log: Some(log),
+                now: None,
+                device_name,
+                timings: atm_sync::connector::Timings {
+                    stop_timeout: mobile::SYNC_STOP_BUDGET,
+                    ..Default::default()
+                },
+                sleep: None,
+            })
+            .map_err(|e| e.message)?;
+        if let Err(e) = connector.start() {
+            // 起到一半（例如已开始观察任务变化）也要停干净。
+            connector.stop();
+            return Err(format!("{e:?}"));
+        }
+        Ok(Arc::new(connector) as Arc<dyn SyncSettings>)
+    });
+    mobile::start(&features, dispatch, make_sync, m.log.clone());
+    features
 }
 
 impl Entries {
@@ -282,6 +376,11 @@ impl Entries {
         &self.svc
     }
 
+    /// 手机同步与派单的状态槽（起了这两个功能时）。
+    pub fn mobile(&self) -> Option<Arc<atm_dispatch::mobile::Features>> {
+        self.mobile.clone()
+    }
+
     /// 入口所在的 tokio 运行时：同进程的界面派发（W5）在它上面跑，与 Agent 入口共用同一组工作线程。
     pub fn handle(&self) -> tokio::runtime::Handle {
         self.rt.handle().clone()
@@ -297,6 +396,10 @@ impl Entries {
     fn close(&mut self) {
         if std::mem::replace(&mut self.closed, true) {
             return;
+        }
+        // 手机同步先停（写离线状态要在关库之前；冲突时不再消费手机命令），派单器随后关。
+        if let Some(f) = self.mobile.take() {
+            f.close();
         }
         if let Some(m) = self.metrics.take() {
             m.stop();

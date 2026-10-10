@@ -3,8 +3,11 @@
 //! ```text
 //! atm-runtime --n <新根> --legacy <旧根> [--version 3.0.0-dev]
 //!             [--txn-start <txn> --install-root <安装根>] [--background]
-//!             [--drill-pace-ms <n>] [--drill-hold-at <阶段>]
+//!             [--drill-pace-ms <n>] [--drill-hold-at <阶段>] [--drill-mobile]
 //! ```
+//!
+//! `--drill-mobile`（W7e 崩溃演练）：起手机同步与 Claude 派单（中继走 WinHttp；claude 只认 `ATM_DRILL_CLAUDE` 给的，
+//! 不按 PATH 找本机真的那个），托盘计数与通知打到 stderr。两者照常默认关闭，开没开由数据根里的设置决定。
 //!
 //! 两个根都必须显式给出，并且不能与真实的数据根、安装根重叠（[`atm_runtime::guard`]）：开发二进制不碰真实数据。
 //!
@@ -27,6 +30,7 @@ fn main() {
     let (mut n, mut legacy, mut txn, mut install_root) = (None, None, None, None);
     let mut version = "3.0.0-dev".to_string();
     let mut drill = Drill::default();
+    let mut drill_mobile = false;
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -46,6 +50,7 @@ fn main() {
                 drill.pace = Some(Duration::from_millis(ms));
             }
             "--drill-hold-at" => drill.hold_at = Some(value()),
+            "--drill-mobile" => drill_mobile = true,
             other => usage(&format!("unknown argument {other}")),
         }
     }
@@ -89,9 +94,10 @@ fn main() {
         sweep_every: Duration::from_secs(60),
         drill,
         observe: observe.clone(),
-        notify: None,
+        notify: drill_mobile.then(drill_notify),
         maintenance: false,
         metrics_capture: false,
+        mobile: drill_mobile.then(drill_mobile_config),
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,
@@ -122,6 +128,50 @@ fn main() {
             eprintln!("atm-runtime: SOURCE_CONFLICT: {}", conflicted.state.reason);
             park(conflicted);
         }
+    }
+}
+
+fn drill_notify() -> atm_runtime::Sink {
+    Arc::new(|o| match o {
+        atm_runtime::Observation::Tray(t) => eprintln!(
+            "atm-runtime: tray blocked={} waiting={} mode={}",
+            t.blocked, t.waiting, t.mode
+        ),
+        atm_runtime::Observation::Notice(n) => eprintln!("atm-runtime: notice {}", n.title),
+        atm_runtime::Observation::Failed(why) => eprintln!("atm-runtime: notify failed {why}"),
+    })
+}
+
+struct StderrLog;
+
+impl atm_runtime::sync::host::Log for StderrLog {
+    fn info(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-runtime: {m} {v}");
+    }
+    fn warn(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-runtime: warn: {m} {v}");
+    }
+    fn error(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-runtime: error: {m} {v}");
+    }
+}
+
+fn drill_mobile_config() -> atm_runtime::entries::Mobile {
+    atm_runtime::entries::Mobile {
+        resolve_claude: Arc::new(|| {
+            std::env::var_os("ATM_DRILL_CLAUDE")
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+        }),
+        transport: Arc::new(atm_runtime::sync::winhttp::WinHttp::new(
+            "AyanamiTaskManager/3.0.0-dev",
+        )),
+        log: Arc::new(StderrLog),
+        base_env: std::env::vars_os().collect(),
+        comspec: std::env::var_os("ComSpec").map(PathBuf::from),
+        device_name: Some("ATM drill".into()),
+        feature_wait: atm_runtime::dispatch::mobile::FEATURE_WAIT,
+        track_every: atm_runtime::dispatch::dispatcher::TRACK_INTERVAL,
     }
 }
 

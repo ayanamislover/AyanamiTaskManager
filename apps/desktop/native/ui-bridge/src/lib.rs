@@ -61,6 +61,8 @@ pub struct Ui {
     pub(crate) runtime: RuntimeStatus,
     /// 本次服务启动的时间：进度条（#61）的 `since`（2.0 用 daemon 的 startedAt）。
     pub(crate) started_at: String,
+    /// 手机同步与 Claude 派单（W7e，#88–96）。`None`：这个宿主没有启用（2.0 的独立 daemon 也是这样）。
+    pub(crate) mobile: Option<Arc<atm_dispatch::mobile::Features>>,
 }
 
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
@@ -180,7 +182,14 @@ impl Ui {
             svc,
             runtime,
             started_at: started_at.into(),
+            mobile: None,
         }
+    }
+
+    /// 接上手机同步与派单（宿主在入口发布后起的那一份）。
+    pub fn with_mobile(mut self, mobile: Arc<atm_dispatch::mobile::Features>) -> Ui {
+        self.mobile = Some(mobile);
+        self
     }
 
     /// 分发一次界面请求。主体由调用方给：宿主的 [`webview`]、[`tray`]，或 e2e 适配器。

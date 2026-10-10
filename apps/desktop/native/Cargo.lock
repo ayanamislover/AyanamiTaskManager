@@ -231,6 +231,7 @@ dependencies = [
 name = "atm-runtime"
 version = "0.0.0"
 dependencies = [
+ "atm-dispatch",
  "atm-domain",
  "atm-http",
  "atm-install-state",
@@ -238,10 +239,12 @@ dependencies = [
  "atm-service",
  "atm-store",
  "atm-sync",
+ "atm-sync-protocol",
  "rusqlite",
  "serde_json",
  "sha2",
  "tokio",
+ "url",
  "windows-sys 0.61.2",
 ]
 
@@ -315,10 +318,12 @@ dependencies = [
 name = "atm-ui-bridge"
 version = "0.0.0"
 dependencies = [
+ "atm-dispatch",
  "atm-domain",
  "atm-http",
  "atm-service",
  "atm-store",
+ "atm-sync",
  "rusqlite",
  "serde_json",
  "sha2",

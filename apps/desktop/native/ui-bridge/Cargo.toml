@@ -13,12 +13,15 @@ publish.workspace = true
 e2e = ["atm-domain/e2e"]
 
 [dependencies]
+# W7e：设置页的手机同步与派单（#88–96）。
+atm-dispatch = { path = "../dispatch" }
 atm-domain = { path = "../domain" }
 atm-http = { path = "../http" }
 atm-service = { path = "../service" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+atm-sync = { path = "../sync" }
 atm-store = { path = "../store" }
 rusqlite = { version = "0.39", features = ["bundled"] }
 sha2 = "0.10"

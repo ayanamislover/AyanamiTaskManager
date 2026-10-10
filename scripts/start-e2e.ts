@@ -27,10 +27,26 @@ const build = spawnSync(
   },
 );
 if (build.status !== 0) throw new Error(`E2E_ADAPTER_BUILD_FAILED: ${build.status}`);
+// 设置页的「Claude Code」一行探测的是真实的程序（W7e）：给它派单用例里的假 claude，不按 PATH 找本机真的那个。
+// 只探测版本与登录状态；e2e 不派单。
+const fakeClaudeBuild = spawnSync(
+  "cargo",
+  ["build", "--locked", "-p", "atm-dispatch", "--bin", "atm-fake-claude"],
+  {
+    cwd: native,
+    stdio: "inherit",
+    windowsHide: true,
+    env: { ...process.env, CARGO_TARGET_DIR: target },
+  },
+);
+if (fakeClaudeBuild.status !== 0) {
+  throw new Error(`E2E_FAKE_CLAUDE_BUILD_FAILED: ${fakeClaudeBuild.status}`);
+}
 
 // 数据根只在 output/e2e 下；不从环境继承任何 ATM 数据根变量。
 const env = { ...process.env };
 for (const name of ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"]) delete env[name];
+env.ATM_E2E_CLAUDE = join(target, "debug", "atm-fake-claude.exe");
 
 const node = process.execPath;
 const children: ChildProcess[] = [];

@@ -61,6 +61,39 @@ pub fn options(
         })),
         maintenance: true,
         metrics_capture: true,
+        mobile: Some(mobile(layout, version)),
+    }
+}
+
+/// 手机同步与派单的日志：进宿主日志。连接器自己会抹掉 token 与空间密钥，派单器只写错误说明与命令 ID。
+struct MobileLog(std::path::PathBuf);
+
+impl atm_sync::host::Log for MobileLog {
+    fn info(&self, m: &str, v: &serde_json::Value) {
+        crate::log(&self.0, &format!("mobile: {m} {v}"));
+    }
+    fn warn(&self, m: &str, v: &serde_json::Value) {
+        crate::log(&self.0, &format!("mobile warn: {m} {v}"));
+    }
+    fn error(&self, m: &str, v: &serde_json::Value) {
+        crate::log(&self.0, &format!("mobile error: {m} {v}"));
+    }
+}
+
+/// W7e：手机同步与 Claude 派单。claude 按 Agent 环境找（烟测里是合成的家目录，找不到真的 claude）。
+fn mobile(layout: &Layout, version: &str) -> atm_runtime::entries::Mobile {
+    let env = crate::agents::agent_env(layout);
+    atm_runtime::entries::Mobile {
+        resolve_claude: Arc::new(move || env.find_claude_cli()),
+        transport: Arc::new(atm_sync::winhttp::WinHttp::new(format!(
+            "AyanamiTaskManager/{version}"
+        ))),
+        log: Arc::new(MobileLog(layout.v3_root.clone())),
+        base_env: std::env::vars_os().collect(),
+        comspec: std::env::var_os("ComSpec").map(std::path::PathBuf::from),
+        device_name: None,
+        feature_wait: atm_runtime::dispatch::mobile::FEATURE_WAIT,
+        track_every: atm_runtime::dispatch::dispatcher::TRACK_INTERVAL,
     }
 }
 

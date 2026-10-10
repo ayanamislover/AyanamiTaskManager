@@ -5,7 +5,7 @@
 //! - [`ledger`]：手机派单的请求账本（同一个命令 ID 只起一次会话）；[`record`]：派单历史的一条；
 //! - [`launch`]：claude 的参数、命令行与子进程环境；[`prompt`]：提示词；[`outcome`]：按日志定结局；
 //! - [`process`]：拉起、出生标识、结束进程树（直接调 Windows）；[`probe`]：claude 的版本与登录探测；
-//! - [`port`]：接到手机同步连接器上。
+//! - [`port`]：接到手机同步连接器上；[`mobile`]：宿主里两个手机功能的起停与状态槽。
 //!
 //! 状态在库里（`atm_service::dispatch_state`），日志在 `<数据根>\dispatch\logs`。
 
@@ -14,6 +14,7 @@ pub mod dispatcher;
 pub mod errors;
 pub mod launch;
 pub mod ledger;
+pub mod mobile;
 pub mod outcome;
 pub mod port;
 pub mod probe;

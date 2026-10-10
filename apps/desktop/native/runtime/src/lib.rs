@@ -99,6 +99,8 @@ pub struct Options {
     pub maintenance: bool,
     /// 起 job `metrics.capture`（W5h2：任务操作之后的工程指标采集）。宿主起；e2e、独立运行时不起。
     pub metrics_capture: bool,
+    /// 手机同步与 Claude 派单（W7e）：入口发布之后在后台起。`None` 不起（独立运行时）。
+    pub mobile: Option<entries::Mobile>,
 }
 
 #[derive(Debug)]
@@ -124,10 +126,13 @@ fn failed(e: impl std::fmt::Display) -> BootError {
     BootError::Failed(e.to_string())
 }
 
+/// 手机同步与 Claude 派单（W7e）：宿主与界面拿状态槽、常量用。
+pub use atm_dispatch as dispatch;
 /// 托盘计数与系统通知（W5f）：观察器交给宿主的东西。
 pub use atm_jobs::notify::{Notice, Observation, Sink, TrayCounts};
 /// 本地更新的协调（W5g）：宿主持有，与服务的入口无关（冲突、不可用时也能查更新）。
 pub use atm_jobs::update;
+pub use atm_sync as sync;
 
 /// 后台比较的结论。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -207,6 +212,15 @@ impl Serving {
             Err(poisoned) => poisoned.into_inner(),
         };
         guard.as_ref().map(|e| (e.service().clone(), e.handle()))
+    }
+
+    /// 手机同步与派单的状态槽（入口开着、且起了这两个功能时）：设置页与任务抽屉经它拿功能（W7e）。
+    pub fn mobile(&self) -> Option<Arc<atm_dispatch::mobile::Features>> {
+        let guard = match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.as_ref().and_then(|e| e.mobile())
     }
 
     /// Agent 入口的地址与令牌（入口开着时）：设置页「复制配置」里的 HTTP 配置要它们。只在内存里传，不进日志。
@@ -440,6 +454,7 @@ fn serve(
         notify: o.notify.clone(),
         maintenance: o.maintenance,
         metrics_capture: o.metrics_capture,
+        mobile: o.mobile.as_ref(),
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -470,6 +485,8 @@ fn serve(
             notify: o.notify.clone(),
             maintenance: o.maintenance,
             metrics_capture: o.metrics_capture,
+            // 比较线程不发布入口。
+            mobile: None,
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()

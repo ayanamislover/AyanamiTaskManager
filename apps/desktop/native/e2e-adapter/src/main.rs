@@ -87,6 +87,21 @@ struct Adapter {
     bearer: Arc<str>,
 }
 
+/// 手机同步与派单的日志进 stderr（用例的数据，没有密钥：连接器自己抹掉 token 与空间密钥）。
+struct StderrLog;
+
+impl atm_runtime::sync::host::Log for StderrLog {
+    fn info(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-core-e2e: {m} {v}");
+    }
+    fn warn(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-core-e2e: warn: {m} {v}");
+    }
+    fn error(&self, m: &str, v: &serde_json::Value) {
+        eprintln!("atm-core-e2e: error: {m} {v}");
+    }
+}
+
 fn main() {
     let c = config();
     let given: Vec<(&str, &std::path::Path)> = vec![("--n", &c.n), ("--legacy", &c.legacy)];
@@ -113,6 +128,24 @@ fn main() {
         notify: None,
         maintenance: false,
         metrics_capture: false,
+        // 设置页的手机同步与派单走真实的连接器与派单器（W7e）。两者默认关闭：不联网、不起会话。claude 只认
+        // `ATM_E2E_CLAUDE` 给的（用例的假 claude），不按 PATH 找本机真的那个。
+        mobile: Some(atm_runtime::entries::Mobile {
+            resolve_claude: Arc::new(|| {
+                std::env::var_os("ATM_E2E_CLAUDE")
+                    .filter(|p| !p.is_empty())
+                    .map(std::path::PathBuf::from)
+            }),
+            transport: Arc::new(atm_runtime::sync::winhttp::WinHttp::new(
+                "AyanamiTaskManager/3.0.0-e2e",
+            )),
+            log: Arc::new(StderrLog),
+            base_env: std::env::vars_os().collect(),
+            comspec: std::env::var_os("ComSpec").map(std::path::PathBuf::from),
+            device_name: Some("ATM e2e".into()),
+            feature_wait: atm_runtime::dispatch::mobile::FEATURE_WAIT,
+            track_every: atm_runtime::dispatch::dispatcher::TRACK_INTERVAL,
+        }),
     };
     let serving = match atm_runtime::start(&options) {
         Ok(Started::Serving(serving)) => serving,
@@ -135,8 +168,13 @@ fn main() {
     // 进度条（#61）的 since：本次服务启动的时间，与宿主一样取进程启动时刻。
     let started_at = atm_install_state::startup::iso_utc(atm_runtime::Me::current().started_at_ms);
     let runtime: RuntimeStatus = Arc::new(|| json!({ "version": "3.0.0-e2e" }));
+    let bridge = Ui::new(svc, runtime, started_at);
+    let bridge = match serving.mobile() {
+        Some(m) => bridge.with_mobile(m),
+        None => bridge,
+    };
     let adapter = Adapter {
-        ui: Arc::new(Ui::new(svc, runtime, started_at)),
+        ui: Arc::new(bridge),
         host: format!("127.0.0.1:{}", c.port).into(),
         origin: c.origin.into(),
         bearer: format!("Bearer {}", c.user_token).into(),

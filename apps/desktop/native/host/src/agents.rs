@@ -145,7 +145,7 @@ fn decide(
 }
 
 /// 本进程的 Agent 环境。烟测里宿主留着真实的用户目录（WebView2 要它），Agent 配置在合成的家目录里。
-fn agent_env(layout: &Layout) -> AgentEnv {
+pub(crate) fn agent_env(layout: &Layout) -> AgentEnv {
     let shim = crate::paths::mcp_entry(&layout.app_dir, layout.packaged).exe;
     #[allow(unused_mut)]
     let mut env = AgentEnv::from_process(&layout.data_dir, &shim);
