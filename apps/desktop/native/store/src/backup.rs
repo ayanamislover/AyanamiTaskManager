@@ -44,6 +44,8 @@ pub enum BackupError {
     ScopeMissing(String),
     /// 附件目录里有符号链接 / 重解析点。
     Unsupported(String),
+    /// 数据根往下的这一层是链接（junction、符号链接）：在任何副作用之前拒绝（peer W6 r2 P1-01）。
+    LinkedPath(String),
     /// 一次按范围恢复已经提交（这个项目的库已是 `generation` 代），附件还没换入。
     /// [`crate::restore::finish_attachment_swaps`] 成功之前，整库备份、再次恢复、读这个项目的附件都会拒绝，
     /// 免得把恢复后的库和恢复前的附件拼成一份（W1 peer r1 P1-05）。
@@ -71,6 +73,7 @@ impl std::fmt::Display for BackupError {
             BackupError::TimelineMismatch(m) => write!(f, "backup is from another timeline: {m}"),
             BackupError::ScopeMissing(m) => write!(f, "scope not in backup: {m}"),
             BackupError::Unsupported(m) => write!(f, "unsupported file: {m}"),
+            BackupError::LinkedPath(p) => write!(f, "{p} is a link (junction or symbolic link)"),
             BackupError::AttachmentsPending {
                 project,
                 generation,
@@ -90,6 +93,18 @@ impl std::fmt::Display for BackupError {
 }
 
 impl std::error::Error for BackupError {}
+
+impl From<crate::chain::ChainError> for BackupError {
+    fn from(e: crate::chain::ChainError) -> Self {
+        match e {
+            crate::chain::ChainError::Linked(p) => BackupError::LinkedPath(p.display().to_string()),
+            crate::chain::ChainError::NotADirectory(p) => {
+                BackupError::Unsupported(format!("{} is not a directory", p.display()))
+            }
+            crate::chain::ChainError::Io(e) => BackupError::Io(e),
+        }
+    }
+}
 
 impl From<rusqlite::Error> for BackupError {
     fn from(e: rusqlite::Error) -> Self {
@@ -199,10 +214,35 @@ static ATTACHMENTS_LOCK: Mutex<()> = Mutex::new(());
 /// 供测试确认一个操作确实停在锁上，而不是还没走到那里（W1 peer r3 P2-07）。
 static WAITING: Mutex<Vec<(PathBuf, &'static str)>> = Mutex::new(Vec::new());
 
-pub(crate) fn attachments_lock(
-    store: &Store,
-    what: &'static str,
-) -> Result<MutexGuard<'static, ()>> {
+/// 附件锁，外加从库所在目录往下钉住的附件根、恢复暂存与换下来的旧版本目录（peer W6 r2 P1-01）：拿到它之后、
+/// 任何副作用（包括上一次恢复的收尾清理）之前，这条链上没有链接；持有期间也换不成链接。拿着它直到操作结束。
+pub(crate) struct AttachmentsGuard {
+    _pinned: crate::chain::Pinned,
+    _lock: MutexGuard<'static, ()>,
+}
+
+pub(crate) fn attachments_lock(store: &Store, what: &'static str) -> Result<AttachmentsGuard> {
+    let lock = lock_attachments(store, what)?;
+    let db_dir = store
+        .path()
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let artifacts = Path::new(ARTIFACTS_DIR);
+    let pinned = crate::chain::pin_inside(
+        db_dir,
+        &[
+            &artifacts.join(crate::restore::STAGING_DIR),
+            &artifacts.join(crate::restore::OLD_DIR),
+        ],
+    )?;
+    Ok(AttachmentsGuard {
+        _pinned: pinned,
+        _lock: lock,
+    })
+}
+
+fn lock_attachments(store: &Store, what: &'static str) -> Result<MutexGuard<'static, ()>> {
     if std::thread::current().name() == Some(crate::engine::WRITER_THREAD) {
         return Err(BackupError::Reentrant(what));
     }

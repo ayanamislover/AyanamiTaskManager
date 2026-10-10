@@ -168,7 +168,22 @@ impl From<BackupError> for PackageError {
         match e {
             BackupError::Sqlite(e) => PackageError::Sqlite(e),
             BackupError::Io(e) => PackageError::Io(e),
+            BackupError::LinkedPath(p) => PackageError::LinkedPath(p),
             other => PackageError::Backup(other),
+        }
+    }
+}
+
+impl From<crate::chain::ChainError> for PackageError {
+    fn from(e: crate::chain::ChainError) -> Self {
+        match e {
+            crate::chain::ChainError::Linked(p) => {
+                PackageError::LinkedPath(p.display().to_string())
+            }
+            crate::chain::ChainError::NotADirectory(p) => {
+                PackageError::Invalid(format!("{} is not a directory", p.display()))
+            }
+            crate::chain::ChainError::Io(e) => PackageError::Io(e),
         }
     }
 }
@@ -268,7 +283,7 @@ pub fn export_project(
 ) -> Result<Exported> {
     let _lock = attachments_lock(store, "export_project")?;
     crate::restore::finish_swaps_locked(store)?;
-    let staging = fresh_staging(opts.exports_dir)?;
+    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
     let result = export_in(store, project_id, format, opts, &staging);
     let _ = fs::remove_dir_all(&staging);
     result
@@ -288,11 +303,7 @@ fn export_in(
     }
     let artifacts = crate::backup::artifacts_root(store.path());
     let prefix = artifacts.join(project_id);
-    refuse_links(&[
-        artifacts.parent().unwrap_or(&artifacts),
-        &artifacts,
-        &prefix,
-    ])?;
+    let _pinned = pin_artifacts(&artifacts, Some(project_id))?;
     let db = staging.join(DB_ENTRY);
     let (code, name) = extract_project(&snapshot, &db, project_id, &prefix)?;
     remove_db(&snapshot);
@@ -1229,7 +1240,7 @@ pub fn import_project(
 ) -> Result<Imported> {
     let _lock = attachments_lock(store, "import_project")?;
     crate::restore::finish_swaps_locked(store)?;
-    let staging = fresh_staging(opts.exports_dir)?;
+    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
     let result = import_in(store, source, opts, &staging);
     let _ = fs::remove_dir_all(&staging);
     result
@@ -1498,11 +1509,9 @@ fn import_tx(
     // 附件换入：新 id 的目录不可能已经存在；挪进去之后事务失败由调用方挪走。
     let attachments = if c.staged_artifacts.exists() {
         let n = list_tree(&c.staged_artifacts)?.len();
-        refuse_links(&[
-            c.artifacts_root.parent().unwrap_or(&c.artifacts_root),
-            &c.artifacts_root,
-        ])?;
+        // 附件根可能还不存在：建了再钉住核对（已有的链接在这里被拒，建目录本身不碰链接目标里的东西）。
         fs::create_dir_all(&c.artifacts_root)?;
+        let _pinned = pin_artifacts(&c.artifacts_root, None)?;
         atm_install_state::durable::rename(&c.staged_artifacts, &dir, false)?;
         *placed.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
         n
@@ -1540,7 +1549,7 @@ pub fn import_legacy_knowledge(
         return Err(PackageError::NotFound(source.display().to_string()));
     }
     let _lock = attachments_lock(store, "import_knowledge")?;
-    let staging = fresh_staging(opts.exports_dir)?;
+    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
     let result = (|| {
         let converted = convert_legacy(source, Home::Knowledge, &staging.join("legacy"), opts.at)?;
         let (sha, _) = hash_file(source)?;
@@ -1661,41 +1670,49 @@ fn is_link(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
-/// 这些路径里已经存在的都必须是普通目录，不能是链接（junction、符号链接等 reparse point）：删除、解包、换入、
-/// 复制之前先查，链接会把副作用带到数据根外面（peer W6 r1 P1-02）。不存在的跳过（之后由我们自己建）。
-fn refuse_links(paths: &[&Path]) -> Result<()> {
-    for p in paths {
-        match fs::symlink_metadata(p) {
-            Ok(m) if is_link(&m) => return Err(PackageError::LinkedPath(p.display().to_string())),
-            Ok(m) if !m.is_dir() => {
-                return Err(PackageError::Invalid(format!(
-                    "{} is not a directory",
-                    p.display()
-                )));
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
-        }
+/// 从库所在目录往下钉住附件根（以及其中一个项目的目录）：都不能是链接（peer W6 r1 P1-02、r2 P1-01）。
+fn pin_artifacts(artifacts: &Path, project: Option<&str>) -> Result<crate::chain::Pinned> {
+    let db_dir = artifacts
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut rel = PathBuf::from(artifacts.file_name().unwrap_or_default());
+    if let Some(id) = project {
+        rel.push(id);
     }
-    Ok(())
+    Ok(crate::chain::pin_inside(db_dir, &[&rel])?)
 }
 
-/// ATM 自己起的暂存目录名（ULID）：清理只认这些。
+/// ATM 自己起的暂存目录名：规范的 ULID（26 位 Crockford base32，首位 0–7，128 位放得下）。清理只认这些，
+/// 认不出的条目一律留着（peer W6 r2 P2-03）。
 fn owned_staging_name(name: &str) -> bool {
-    name.len() == 26
-        && name
-            .bytes()
-            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+    let b = name.as_bytes();
+    b.len() == 26
+        && (b'0'..=b'7').contains(&b[0])
+        && b.iter()
+            .all(|c| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c))
 }
 
 /// `exports\.staging\<新目录>`：先清掉上一次中断留下的（调用方持有附件锁，同一时间只有一个导出或导入）。
-/// 数据根、exports、.staging 都不能是链接；只删名字是 ULID 的暂存（ATM 自己起的），里面的链接只删链接本身。
-fn fresh_staging(exports_dir: &Path) -> Result<PathBuf> {
+/// 从数据根（`exports` 的上一层）往下钉住 `exports`、`.staging`：哪一层是链接就在任何删除之前拒绝；数据根以上
+/// 的链接不管（那是把整个数据根搬了地方，见 [`crate::chain`]）。只删名字是 ULID 的暂存（ATM 自己起的），里面
+/// 的链接只删链接本身；删不掉的留着，不报错（清理尽力而为，下一次再清）。返回的 [`crate::chain::Pinned`]
+/// （数据根、`exports`、`.staging`）要拿到操作结束。
+fn fresh_staging(exports_dir: &Path) -> Result<(PathBuf, crate::chain::Pinned)> {
+    let data_root = exports_dir
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let exports_name = exports_dir.file_name().ok_or_else(|| {
+        PackageError::Invalid(format!("{} has no directory name", exports_dir.display()))
+    })?;
+    let rel = Path::new(exports_name).join(STAGING_DIR);
+    // 先核对已有的链再建：`exports`、`.staging` 已经是链接时，连 create_dir_all 都不做。
+    drop(crate::chain::pin_inside(data_root, &[&rel])?);
     let root = exports_dir.join(STAGING_DIR);
-    let data_root = exports_dir.parent().unwrap_or(exports_dir);
-    refuse_links(&[data_root, exports_dir, &root])?;
-    if root.exists() {
+    fs::create_dir_all(&root)?;
+    let pinned = crate::chain::pin_inside(data_root, &[&rel])?;
+    {
         for e in fs::read_dir(&root)? {
             let e = e?;
             if !e.file_name().to_str().is_some_and(owned_staging_name) {
@@ -1718,9 +1735,11 @@ fn fresh_staging(exports_dir: &Path) -> Result<PathBuf> {
         let c = Connection::open_in_memory()?;
         ulid(&c)?
     };
-    let dir = root.join(name);
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
+    // 新目录不钉：操作结束时要删掉它。它的上一层（`.staging`）一直钉着，名字是随机的；就算被换成链接，
+    // 结束时的 remove_dir_all 也只删链接本身。
+    let dir = root.join(&name);
+    fs::create_dir(&dir)?;
+    Ok((dir, pinned))
 }
 
 fn sync(path: &Path) -> Result<()> {

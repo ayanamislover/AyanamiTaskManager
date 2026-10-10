@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 pub mod backup;
+mod chain;
 pub mod conversion;
 mod engine;
 pub mod events;

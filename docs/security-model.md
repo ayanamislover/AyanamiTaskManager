@@ -59,6 +59,7 @@ Task、Record、Session、Search 和长字段 cursor 包含版本、选择条件
 
 - 正式数据根必须是有界绝对路径；迁移拒绝盘符根、相同/嵌套根，以及把 symlink/junction 直接作为源或目标根（`DATA_ROOT_LINK_NOT_ALLOWED`）。源、目标或备份根内的 `runtime` 目录也不得是 symlink/junction（`DATA_ROOT_RUNTIME_LINK_NOT_ALLOWED`）。
 - 迁移复制时不跟随数据根内的 symlink/junction，尤其不会展开指向完整安装目录的 `current` junction。
+- 导出、导入、备份、按范围恢复、附件访问在第一个副作用之前，从数据根往下逐层钉住要碰的目录（`exports`、`exports\.staging`、库目录下的 `artifacts`、`artifacts\.restore-staging`、`artifacts\.restore-old`、项目附件目录）：任何一层是 symlink/junction 就拒绝（`BACKUP_INTEGRITY_FAILED`，`reason: LINKED_PATH`），包括上一次恢复的收尾清理在内什么都不做；钉住的目录在操作结束前改不了名、删不掉，链不会中途被换掉。数据根以上的链接（把整个目录挪到别的盘再链回来）不受影响：那只是数据根换了位置，ATM 碰的仍是这个数据根里面的东西。导出暂存只清名字是规范 ULID 的条目（ATM 自己起的），认不出的一律留着。
 - 迁移使用目标级独占 lease、staging、manifest、SQLite `quick_check` 和原子 rename；运行时发现文件与旧 token 文件不会进入新数据根或备份。
 
 这些规则保护正常产品入口免于路径别名、嵌套复制和部分提交；它们不把同一用户主动篡改 Registry 中受信路径视为隔离边界。

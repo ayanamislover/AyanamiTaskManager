@@ -50,6 +50,9 @@ pub(crate) fn backup_error(e: BackupError) -> DomainError {
             "这份备份里没有知识库数据，无法按知识库恢复".to_owned()
         }
         BackupError::ScopeMissing(_) => "这份备份里没有这个项目，无法按项目恢复".to_owned(),
+        BackupError::LinkedPath(p) => format!(
+            "数据目录里的 {p} 是链接（junction 或符号链接）：为了不碰数据根以外的内容，没有做任何改动"
+        ),
         _ => e.to_string(),
     };
     let (code, extra): (ErrorCode, Option<(&str, Value)>) = match e {
@@ -57,6 +60,10 @@ pub(crate) fn backup_error(e: BackupError) -> DomainError {
         BackupError::Corrupt(_) | BackupError::Unsupported(_) => {
             (ErrorCode::BACKUP_INTEGRITY_FAILED, None)
         }
+        BackupError::LinkedPath(_) => (
+            ErrorCode::BACKUP_INTEGRITY_FAILED,
+            Some(("reason", json!("LINKED_PATH"))),
+        ),
         BackupError::SchemaMismatch => (
             ErrorCode::BACKUP_MANIFEST_MISMATCH,
             Some(("reason", json!("SCHEMA"))),

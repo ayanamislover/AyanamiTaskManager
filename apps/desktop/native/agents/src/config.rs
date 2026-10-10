@@ -21,6 +21,9 @@ pub struct Installed {
     pub core: Option<Launch>,
     pub memory: Option<Launch>,
     pub actions: Option<Launch>,
+    /// ATM 的 server 不是写成 `[mcp_servers.<名字>]` 段，而是行内表、点分键（peer W6 r2 P1-02）：算已接入、
+    /// 算过期，修复时改写成段。
+    pub noncanonical: bool,
 }
 
 impl Installed {
@@ -48,11 +51,13 @@ impl Installed {
             || self.core.is_some()
             || self.memory.is_some()
             || self.actions.is_some()
+            || self.noncanonical
     }
 
     /// 档位集合与启用的完全一致，且没有旧单入口（2.0 `installedProfileSetMatches`；actions 从不启用）。
     pub fn matches(&self, profiles: &[Profile]) -> bool {
         self.legacy.is_none()
+            && !self.noncanonical
             && [Profile::Core, Profile::Memory, Profile::Actions]
                 .iter()
                 .all(|p| self.get(*p).is_some() == profiles.contains(p))
@@ -64,7 +69,7 @@ impl Installed {
         if !self.any() {
             return false;
         }
-        if self.legacy.is_some() {
+        if self.legacy.is_some() || self.noncanonical {
             return true;
         }
         for p in [Profile::Core, Profile::Memory, Profile::Actions] {
@@ -286,8 +291,8 @@ enum TomlLine {
     Header(Vec<String>),
     /// 空行或只有注释（不在字符串、数组里）。
     Comment,
-    /// 键值行，或多行值的一部分。
-    Content,
+    /// 一条键值语句的第一行，带它的点分键（相对当前表）；`None` 是多行值的后续行。
+    Content(Option<Vec<String>>),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -332,10 +337,8 @@ fn toml_basic_key(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// 表头 `[`…`]` / `[[`…`]]` 的点分键；后面只许空白或注释。解析不了返回 None。
-fn toml_header_keys(t: &str) -> Option<Vec<String>> {
-    let array = t.starts_with("[[");
-    let mut rest = &t[if array { 2 } else { 1 }..];
+/// 从 `rest` 开头读一个点分键（裸键、"基本"、'字面'，段间可有空白）：返回各段（解码后）与剩下的部分。
+fn toml_keys(mut rest: &str) -> Option<(Vec<String>, &str)> {
     let mut keys = Vec::new();
     loop {
         rest = rest.trim_start_matches([' ', '\t']);
@@ -355,14 +358,26 @@ fn toml_header_keys(t: &str) -> Option<Vec<String>> {
         };
         keys.push(key);
         rest = after.trim_start_matches([' ', '\t']);
-        if let Some(r) = rest.strip_prefix('.') {
-            rest = r;
-            continue;
+        match rest.strip_prefix('.') {
+            Some(r) => rest = r,
+            None => return Some((keys, rest)),
         }
-        rest = rest.strip_prefix(if array { "]]" } else { "]" })?;
-        let tail = rest.trim_start_matches([' ', '\t']);
-        return (tail.is_empty() || tail.starts_with('#')).then_some(keys);
     }
+}
+
+/// 表头 `[`…`]` / `[[`…`]]` 的点分键；后面只许空白或注释。解析不了返回 None。
+fn toml_header_keys(t: &str) -> Option<Vec<String>> {
+    let array = t.starts_with("[[");
+    let (keys, rest) = toml_keys(&t[if array { 2 } else { 1 }..])?;
+    let rest = rest.strip_prefix(if array { "]]" } else { "]" })?;
+    let tail = rest.trim_start_matches([' ', '\t']);
+    (tail.is_empty() || tail.starts_with('#')).then_some(keys)
+}
+
+/// 键值语句 `a.b = …` 的点分键与 `=` 后面的部分。
+fn toml_statement_keys(t: &str) -> Option<(Vec<String>, &str)> {
+    let (keys, rest) = toml_keys(t)?;
+    Some((keys, rest.strip_prefix('=')?))
 }
 
 /// 扫一行的值部分（不是表头时），更新多行字符串与数组的状态。单行字符串必须在本行闭合。
@@ -442,8 +457,14 @@ fn toml_lines(content: &str) -> Result<Vec<(&str, TomlLine)>> {
         } else if s.multiline.is_none() && s.depth == 0 && (t.is_empty() || t.starts_with('#')) {
             TomlLine::Comment
         } else {
+            let start = s.multiline.is_none() && s.depth == 0;
+            let keys = if start {
+                Some(toml_statement_keys(t).ok_or_else(|| invalid(n + 1))?.0)
+            } else {
+                None
+            };
             toml_scan_value(line, &mut s).ok_or_else(|| invalid(n + 1))?;
-            TomlLine::Content
+            TomlLine::Content(keys)
         };
         out.push((raw, kind));
     }
@@ -458,29 +479,112 @@ fn managed_codex_section(keys: &[String]) -> bool {
     keys.len() >= 2 && keys[0] == "mcp_servers" && names::ALL.contains(&keys[1].as_str())
 }
 
-/// 去掉 ATM 自己的段：段里的键值行与空行。注释一律留着（ATM 从不写注释，注释都是用户的），用户段原样
-/// （行尾也原样）。文末的空白去掉，与 2.0 一样。
-fn without_own_codex_sections(content: &str) -> Result<String> {
-    let mut out = String::new();
+/// 去掉 ATM 自己的定义之后的配置。
+struct WithoutOwn {
+    text: String,
+    /// 顶层 `mcp_servers = { … }`（整张表写成行内表）所在的行：行内表不能再往里加段，ATM 没法保真地加入
+    /// 自己的条目。
+    inline_servers: Option<usize>,
+    /// 那张行内表里有 ATM 的名字（删不掉，也就卸不掉）。
+    inline_has_ours: bool,
+}
+
+/// 去掉 ATM 自己的定义：`[mcp_servers.<名字>]` 段（含子表）里的键值行与空行，以及别处键路径落在
+/// `mcp_servers.<名字>` 下面的语句（`[mcp_servers]` 下的行内表、点分键，顶层的点分键；连同它的多行值，
+/// peer W6 r2 P1-02）。注释一律留着（ATM 从不写注释，注释都是用户的），用户的语句原样（行尾也原样）。
+/// 文末的空白去掉，与 2.0 一样。
+fn without_own_codex_sections(content: &str) -> Result<WithoutOwn> {
+    let mut out = WithoutOwn {
+        text: String::new(),
+        inline_servers: None,
+        inline_has_ours: false,
+    };
+    let mut table: Vec<String> = Vec::new();
     let mut skipping = false;
-    for (raw, kind) in toml_lines(content)? {
+    let mut skip_statement = false;
+    let mut in_inline_servers = false;
+    for (n, (raw, kind)) in toml_lines(content)?.into_iter().enumerate() {
         match kind {
             TomlLine::Header(keys) => {
                 skipping = managed_codex_section(&keys);
+                skip_statement = false;
+                in_inline_servers = false;
                 if !skipping {
-                    out.push_str(raw);
+                    out.text.push_str(raw);
+                }
+                table = keys;
+            }
+            TomlLine::Comment => {
+                if !skipping || !raw.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+                    out.text.push_str(raw);
                 }
             }
-            TomlLine::Comment if skipping => {
-                if !raw.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
-                    out.push_str(raw);
+            TomlLine::Content(Some(keys)) => {
+                let full: Vec<String> = table.iter().chain(&keys).cloned().collect();
+                in_inline_servers = full == ["mcp_servers"];
+                if in_inline_servers {
+                    out.inline_servers.get_or_insert(n + 1);
+                }
+                skip_statement = skipping || managed_codex_section(&full);
+                if !skip_statement {
+                    out.text.push_str(raw);
                 }
             }
-            _ if skipping => {}
-            _ => out.push_str(raw),
+            TomlLine::Content(None) => {
+                if !skip_statement {
+                    out.text.push_str(raw);
+                }
+            }
+        }
+        if in_inline_servers && names::ALL.iter().any(|name| raw.contains(name)) {
+            out.inline_has_ours = true;
         }
     }
-    Ok(js_trim_end(&out).to_string())
+    out.text = js_trim_end(&out.text).to_string();
+    Ok(out)
+}
+
+fn inline_servers_unsupported(line: usize) -> AgentError {
+    AgentError::new(
+        "CODEX_CONFIG_UNSUPPORTED",
+        format!(
+            "Codex 的 config.toml 第 {line} 行把整个 mcp_servers 写成了行内表，ATM 没法在不改写你的内容的前提下\
+             加入或去掉自己的条目。请改成 [mcp_servers.<名字>] 段的写法后再试；没有改动这个文件"
+        ),
+    )
+}
+
+/// 读出现有的 config.toml，算出去掉 ATM 定义之后的文本；ATM 改不了的写法报错（零写入）。
+fn codex_plan(path: &Path, uninstall: bool) -> Result<(String, String)> {
+    let existing = read_text(path)
+        .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
+        .unwrap_or_default();
+    let own = without_own_codex_sections(&existing)?;
+    if let Some(line) = own.inline_servers {
+        // 安装要往里加段：行内表在就加不了。卸载只在行内表里有 ATM 的条目时才做不到。
+        if !uninstall || own.inline_has_ours {
+            return Err(inline_servers_unsupported(line));
+        }
+    }
+    Ok((existing, own.text))
+}
+
+/// 写动作之前先把要改的配置读一遍、算出结果（peer W6 r2 P2-02）：认不出的、ATM 改不了的，在动规则、Skill、
+/// 任何配置之前就报错，整个操作零写入。Claude Code 经它的命令行改，由命令行自己校验。
+pub fn preflight(env: &AgentEnv, client: Client, uninstall: bool) -> Result<()> {
+    match client {
+        Client::Codex => codex_plan(&env.codex_config(), uninstall).map(|_| ()),
+        Client::Claude => {
+            for p in env.claude_desktop_configs() {
+                read_object(&p, "CLAUDE_CONFIG_INVALID_JSON")?;
+            }
+            Ok(())
+        }
+        Client::KimiCode => {
+            read_object(&env.kimi_config(), "KIMI_CODE_CONFIG_INVALID_JSON").map(|_| ())
+        }
+        Client::ClaudeCode => Ok(()),
+    }
 }
 
 /// 原文用 CRLF 的，ATM 写的段也用 CRLF。
@@ -497,10 +601,7 @@ fn toml_string(s: &str) -> String {
 }
 
 pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Result<Written> {
-    let existing = read_text(path)
-        .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
-        .unwrap_or_default();
-    let base = without_own_codex_sections(&existing)?;
+    let (existing, base) = codex_plan(path, false)?;
     let eol = codex_eol(&existing);
     let sections: Vec<String> = profiles
         .iter()
@@ -554,10 +655,7 @@ pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Resu
 }
 
 pub fn codex_uninstall(path: &Path) -> Result<Written> {
-    let existing = read_text(path)
-        .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
-        .unwrap_or_default();
-    let next = without_own_codex_sections(&existing)?;
+    let (existing, next) = codex_plan(path, true)?;
     let content = if next.is_empty() {
         String::new()
     } else {
@@ -617,65 +715,106 @@ fn json_string_prefix(s: &str) -> Option<(String, &str)> {
     None
 }
 
+/// 一个受管 server 读到的东西。
+#[derive(Default)]
+struct CodexDraft {
+    command: Option<String>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+}
+
+/// `= ` 后面的值：只认单行的基本串（不是的话给一个与任何字符串都不相等的值，判为过期）。
+fn codex_env_value(v: &str) -> String {
+    let v = atm_domain::text::js_trim(v);
+    match json_string_prefix(v) {
+        Some((s, rest)) if atm_domain::text::js_trim(rest).is_empty() => s,
+        _ => format!("\0unparsed {v}"),
+    }
+}
+
 pub fn codex_installed(path: &Path) -> Installed {
     let mut found = Installed::default();
     let Some(text) = read_text(path).ok().flatten() else {
         return found;
     };
-    // 2.0 `codexProfileLaunches`：写了 command 的段才算登记（空串也算），args / env 缺省为空。
-    let mut active: Option<String> = None;
-    let mut command: Option<String> = None;
-    let mut cur = Launch::new("");
-    let flush = |found: &mut Installed,
-                 active: &Option<String>,
-                 command: &mut Option<String>,
-                 cur: &mut Launch| {
-        if let (Some(name), Some(c)) = (active, command.take()) {
-            cur.command = c;
-            found.set(name, std::mem::replace(cur, Launch::new("")));
-        }
-        *cur = Launch::new("");
-    };
     // 认不出的文件当作什么都没登记：启动修复不碰它，显式安装时由写入那一步报 CODEX_CONFIG_INVALID_TOML。
     let Ok(lines) = toml_lines(&text) else {
         return found;
     };
+    // 2.0 `codexProfileLaunches`：写了 command 的段才算登记（空串也算），args / env 缺省为空。3.0 还读
+    // `[mcp_servers.<名字>.env]` 子表与段里的 `env.K = …`（peer W6 r2 P2-01：只有 env 不对也算过期）；
+    // 段以外写的 ATM 定义（行内表、点分键）记为非规范。段里别的键（用户加的超时之类）照 2.0 不看。
+    let mut drafts: BTreeMap<String, CodexDraft> = BTreeMap::new();
+    let mut table: Vec<String> = Vec::new();
     for (raw, kind) in lines {
-        let line = raw.trim_end_matches(['\n', '\r']);
-        if let TomlLine::Header(keys) = &kind {
-            flush(&mut found, &active, &mut command, &mut cur);
-            active = match keys.as_slice() {
-                [table, name] if table == "mcp_servers" && names::managed(name) => {
-                    Some(name.clone())
-                }
-                _ => None,
-            };
-            continue;
-        }
-        if active.is_none() || kind != TomlLine::Content {
-            continue;
-        }
-        let t = atm_domain::text::js_trim(line);
-        let value = |key: &str| -> Option<&str> {
-            let rest = t.strip_prefix(key)?;
-            let rest = rest
-                .trim_start_matches(is_js_whitespace)
-                .strip_prefix('=')?;
-            Some(rest.trim_start_matches(is_js_whitespace))
+        let keys = match kind {
+            TomlLine::Header(keys) => {
+                table = keys;
+                continue;
+            }
+            TomlLine::Content(Some(keys)) => keys,
+            _ => continue,
         };
-        if let Some(v) = value("command").filter(|v| v.starts_with('"') && v.ends_with('"')) {
-            if let Ok(c) = serde_json::from_str::<String>(v) {
-                command = Some(c);
+        let full: Vec<&str> = table.iter().chain(&keys).map(String::as_str).collect();
+        if full == ["mcp_servers"] {
+            if names::ALL.iter().any(|n| raw.contains(n)) {
+                found.noncanonical = true;
             }
-        } else if let Some(v) = value("args").filter(|v| v.starts_with('[') && v.ends_with(']')) {
-            if let Ok(Value::Array(a)) = serde_json::from_str::<Value>(v) {
-                cur.args = a.iter().map(js_string_of).collect();
+            continue;
+        }
+        if full.len() < 2 || full[0] != "mcp_servers" || !names::managed(full[1]) {
+            continue;
+        }
+        let name = full[1];
+        if table.len() < 2 {
+            // `[mcp_servers]` 下的 `<名字> = { … }` / `<名字>.command = …`，或顶层的点分键。
+            found.noncanonical = true;
+            continue;
+        }
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let Some((_, value)) = toml_statement_keys(line.trim_start_matches([' ', '\t'])) else {
+            continue;
+        };
+        let value = value.trim_start_matches(is_js_whitespace);
+        let d = drafts.entry(name.to_owned()).or_default();
+        match &full[2..] {
+            ["command"] => {
+                if let Some(c) = (value.starts_with('"') && js_trim_end(value).ends_with('"'))
+                    .then(|| serde_json::from_str::<String>(js_trim_end(value)).ok())
+                    .flatten()
+                {
+                    d.command = Some(c);
+                }
             }
-        } else if let Some(v) = value("env").filter(|v| v.starts_with('{') && v.ends_with('}')) {
-            cur.env = toml_inline_strings(v).unwrap_or_default();
+            ["args"] => {
+                let v = js_trim_end(value);
+                if v.starts_with('[')
+                    && v.ends_with(']')
+                    && let Ok(Value::Array(a)) = serde_json::from_str::<Value>(v)
+                {
+                    d.args = a.iter().map(js_string_of).collect();
+                }
+            }
+            ["env"] => {
+                let v = js_trim_end(value);
+                if v.starts_with('{') && v.ends_with('}') {
+                    d.env = toml_inline_strings(v).unwrap_or_default();
+                }
+            }
+            ["env", var] => {
+                d.env.insert((*var).to_owned(), codex_env_value(value));
+            }
+            _ => {}
         }
     }
-    flush(&mut found, &active, &mut command, &mut cur);
+    for (name, d) in drafts {
+        if let Some(command) = d.command {
+            let mut l = Launch::new(&command);
+            l.args = d.args;
+            l.env = d.env;
+            found.set(&name, l);
+        }
+    }
     found
 }
 

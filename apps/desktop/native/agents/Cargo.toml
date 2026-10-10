@@ -20,3 +20,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_ProcessStatus",
   "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+# 独立的 TOML 解析器：核对改写后的 Codex 配置仍是合法 TOML（peer W6 r2 P1-02），不进产品。
+toml = "0.8"

@@ -1373,3 +1373,204 @@ fn links_in_the_data_root_are_refused_before_any_side_effect() {
     fs::remove_dir(&root).unwrap();
     assert_eq!(tree(&outside), before);
 }
+
+/// 数据根外面一棵像附件根的树：里面有像上一次恢复留下的暂存标记、暂存目录与换下来的旧版本（用户的东西）。
+#[cfg(windows)]
+fn outside_artifacts(w: &World) -> PathBuf {
+    let outside = w.dir.join("outside-artifacts");
+    let staging = outside.join(".restore-staging");
+    fs::create_dir_all(staging.join("USER-DATA")).unwrap();
+    fs::write(staging.join("USER-DATA.gen"), b"7").unwrap();
+    fs::write(staging.join("USER-DATA").join("keep.txt"), b"keep").unwrap();
+    fs::create_dir_all(outside.join(".restore-old").join("X-1")).unwrap();
+    fs::write(
+        outside.join(".restore-old").join("X-1").join("old.txt"),
+        b"old",
+    )
+    .unwrap();
+    fs::create_dir_all(outside.join("PA")).unwrap();
+    fs::write(outside.join("PA").join("a.txt"), b"a").unwrap();
+    outside
+}
+
+/// 每个拿附件锁的入口：附件根（或其中的恢复暂存）是链接时，都在第一个副作用之前拒绝，包括上一次恢复的
+/// 收尾清理（它原来在检查之前，会顺着链接删掉外面的「暂存」）。
+#[cfg(windows)]
+fn every_attachment_entry_refuses(w: &World, package: &Path, outside: &Path) {
+    use atm_store::backup::{BackupError, create_backup};
+    use atm_store::restore::{
+        RestoreOptions, finish_attachment_swaps, restore_knowledge, restore_project,
+        with_project_attachments,
+    };
+    let before = tree(outside);
+    let linked_pkg = |r: Result<(), PackageError>, what: &str| {
+        assert!(
+            matches!(r, Err(PackageError::LinkedPath(_))),
+            "{what}: {r:?}"
+        )
+    };
+    let linked = |r: Result<(), BackupError>, what: &str| {
+        assert!(
+            matches!(r, Err(BackupError::LinkedPath(_))),
+            "{what}: {r:?}"
+        )
+    };
+    let opts = ExportOptions {
+        exports_dir: &w.exports,
+        at: T2,
+        app_version: "t",
+    };
+    linked_pkg(
+        package::export_project(&w.store, "PA", Format::Json, &opts).map(|_| ()),
+        "export",
+    );
+    linked_pkg(
+        import(w, ImportSource::Package(package), Some("PZ")).map(|_| ()),
+        "import",
+    );
+    let iopts = ImportOptions {
+        exports_dir: &w.exports,
+        at: T2,
+        code: None,
+        source_label: "test",
+    };
+    linked_pkg(
+        package::import_legacy_knowledge(&w.store, package, &iopts).map(|_| ()),
+        "knowledge import",
+    );
+    let backups = w.dir.join("backups");
+    linked(
+        create_backup(&w.store, &backups, "MANUAL", T2).map(|_| ()),
+        "backup",
+    );
+    let ropts = RestoreOptions {
+        backups_root: &backups,
+        at: T2,
+        pin_until: T2,
+        budget: Duration::from_secs(30),
+    };
+    linked(
+        restore_project(&w.store, "B-NONE", "PA", &ropts).map(|_| ()),
+        "restore project",
+    );
+    linked(
+        restore_knowledge(&w.store, "B-NONE", &ropts).map(|_| ()),
+        "restore knowledge",
+    );
+    linked(
+        finish_attachment_swaps(&w.store).map(|_| ()),
+        "finish swaps",
+    );
+    linked(
+        with_project_attachments(&w.store, "PA", |_| Ok(())),
+        "attachments",
+    );
+    assert_eq!(
+        tree(outside),
+        before,
+        "nothing outside the data root changed"
+    );
+}
+
+/// peer W6 r2 P1-01：附件根是 junction，或附件根里的 `.restore-staging` 是 junction。
+#[cfg(windows)]
+#[test]
+fn a_linked_artifacts_root_is_refused_before_restore_cleanup() {
+    let w = world("package-link-restore-cleanup");
+    let good = export(&w, "PA", Format::Package, T1).path;
+    let outside = outside_artifacts(&w);
+    let root = artifacts_root(w.store.path());
+    let kept = w.dir.join("artifacts-kept");
+    fs::rename(&root, &kept).unwrap();
+    junction(&root, &outside);
+    every_attachment_entry_refuses(&w, &good, &outside);
+    fs::remove_dir(&root).unwrap(); // 只删链接本身
+    fs::rename(&kept, &root).unwrap();
+
+    // 附件根是普通目录，里面的 .restore-staging 是 junction。
+    let staging = root.join(".restore-staging");
+    let _ = fs::remove_dir_all(&staging);
+    junction(&staging, &outside.join(".restore-staging"));
+    every_attachment_entry_refuses(&w, &good, &outside);
+    fs::remove_dir(&staging).unwrap();
+
+    // 链接拿掉以后一切照常。
+    export(&w, "PA", Format::Json, T2);
+}
+
+/// 数据根本身经由上层的 junction 到达（用户把整个目录搬了地方再链回来）：这不是数据根里的链接，照常导出；
+/// 清理的是这个数据根自己的暂存（ULID 名字的），别的条目留着（peer W6 r2 P1-01 复现 B 的边界）。
+#[cfg(windows)]
+#[test]
+fn a_data_root_reached_through_a_link_above_it_still_works() {
+    let w = world("package-link-above-root");
+    let alias = w
+        .dir
+        .parent()
+        .unwrap()
+        .join("package-link-above-root-alias");
+    let _ = fs::remove_dir(&alias);
+    junction(&alias, &w.dir);
+    let staging = w.exports.join(".staging");
+    fs::create_dir_all(staging.join("01J0000000000000000000000C")).unwrap();
+    fs::write(staging.join("01J0000000000000000000000C").join("x"), b"x").unwrap();
+    fs::create_dir_all(staging.join("user-notes")).unwrap();
+    fs::write(staging.join("user-notes").join("n.txt"), b"n").unwrap();
+    let exported = package::export_project(
+        &w.store,
+        "PA",
+        Format::Json,
+        &ExportOptions {
+            exports_dir: &alias.join("exports"),
+            at: T1,
+            app_version: "t",
+        },
+    )
+    .unwrap();
+    assert!(
+        exported.path.starts_with(alias.join("exports")),
+        "{}",
+        exported.path.display()
+    );
+    assert!(w.exports.join(exported.path.file_name().unwrap()).is_file());
+    assert!(
+        !staging.join("01J0000000000000000000000C").exists(),
+        "our stale staging is cleaned"
+    );
+    assert_eq!(
+        fs::read(staging.join("user-notes").join("n.txt")).unwrap(),
+        b"n"
+    );
+    fs::remove_dir(&alias).unwrap();
+}
+
+/// peer W6 r2 P2-03：只删规范的 ULID（首位 0–7）。`Z` 重复 26 次、首位是 8 的、长度不对的、小写的都不是 ATM
+/// 起的，原样留着；规范的旧暂存照删。
+#[test]
+fn only_canonical_ulid_staging_entries_are_cleaned() {
+    let w = world("package-staging-ulid");
+    let staging = w.exports.join(".staging");
+    let foreign = [
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "8ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        "01J000000000000000000000",
+        "01j0000000000000000000000d",
+        "01J0000000000000000000000I",
+    ];
+    for name in foreign {
+        fs::create_dir_all(staging.join(name)).unwrap();
+        fs::write(staging.join(name).join("user.txt"), name).unwrap();
+    }
+    for name in ["01J0000000000000000000000C", "7ZZZZZZZZZZZZZZZZZZZZZZZZZ"] {
+        fs::create_dir_all(staging.join(name)).unwrap();
+    }
+    export(&w, "PA", Format::Json, T1);
+    for name in foreign {
+        assert_eq!(
+            fs::read_to_string(staging.join(name).join("user.txt")).unwrap(),
+            name
+        );
+    }
+    assert!(!staging.join("01J0000000000000000000000C").exists());
+    assert!(!staging.join("7ZZZZZZZZZZZZZZZZZZZZZZZZZ").exists());
+}

@@ -1210,3 +1210,252 @@ fn an_explicit_repair_rewrites_a_stale_launch_with_the_right_profile_names() {
     assert!(fixed.starts_with(other), "{fixed}");
     assert_eq!(fixed.matches("old-version.exe").count(), 1, "{fixed}");
 }
+
+/// 用独立的解析器（toml crate）读 Codex 配置：必须是合法 TOML。
+fn codex_toml(w: &World) -> toml::Table {
+    let text = w.read(".codex/config.toml");
+    toml::from_str(&text).unwrap_or_else(|e| panic!("not valid TOML: {e}\n{text}"))
+}
+
+fn codex_server<'a>(table: &'a toml::Table, name: &str) -> Option<&'a toml::Value> {
+    table.get("mcp_servers")?.get(name)
+}
+
+/// peer W6 r2 P1-02：ATM 的 server 写成 `[mcp_servers]` 下的行内表、点分键（裸键、带引号的键、跨行的值），
+/// 或顶层的点分键，都是合法 TOML。启动修复、安装把它们换成 ATM 的段，不重复定义；卸载去掉它们；用户的
+/// server 原样；每一步之后独立解析都合法，再做一遍字节不变。
+#[test]
+fn codex_inline_and_dotted_definitions_are_replaced_not_duplicated() {
+    let cases = [
+        (
+            "inline",
+            "[mcp_servers]\nayanami-task-manager-core = { command = \"old.exe\", args = [] }\nother = { command = \"keep.exe\" }\n",
+        ),
+        (
+            "quoted inline",
+            "[mcp_servers]\n\"ayanami-task-manager-core\" = { command = \"old.exe\" }\nother = { command = \"keep.exe\" }\n",
+        ),
+        (
+            "dotted",
+            "[mcp_servers]\nayanami-task-manager-core.command = \"old.exe\"\nayanami-task-manager-core.args = [\n  \"a\",\n  \"b\",\n]\nother.command = \"keep.exe\"\n",
+        ),
+        (
+            "top-level dotted",
+            "mcp_servers.ayanami-task-manager-core.command = \"old.exe\"\nmcp_servers.other.command = \"keep.exe\"\n",
+        ),
+        (
+            "memory inline next to a core section",
+            "[mcp_servers]\nayanami-task-manager-memory = { command = \"old.exe\" }\nother = { command = \"keep.exe\" }\n\n[mcp_servers.ayanami-task-manager-core]\ncommand = \"old.exe\"\n",
+        ),
+    ];
+    for (i, (name, original)) in cases.into_iter().enumerate() {
+        let w = World::new(&format!("codex-inline-{i}"), true);
+        w.write(".codex/config.toml", original);
+        toml::from_str::<toml::Table>(original)
+            .unwrap_or_else(|e| panic!("{name}: the fixture is not TOML: {e}"));
+        // 启动修复认得出这是 ATM 的（过期的）定义。
+        let done = w.agents.repair(&repair_job()).unwrap();
+        assert!(
+            done.configs.contains(&atm_agents::Client::Codex),
+            "{name}: {done:?}"
+        );
+        let repaired = codex_toml(&w);
+        assert_eq!(
+            codex_server(&repaired, "other")
+                .and_then(|s| s.get("command"))
+                .and_then(|c| c.as_str()),
+            Some("keep.exe"),
+            "{name}"
+        );
+        assert_eq!(
+            codex_server(&repaired, CORE)
+                .and_then(|s| s.get("command"))
+                .and_then(|c| c.as_str()),
+            Some(w.shim.as_str()),
+            "{name}"
+        );
+        let text = w.read(".codex/config.toml");
+        assert!(!text.contains("old.exe"), "{name}: {text}");
+        // 再修、再装：不变。
+        assert!(
+            w.agents.repair(&repair_job()).unwrap().configs.is_empty(),
+            "{name}"
+        );
+        w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+        assert_eq!(w.read(".codex/config.toml"), text, "{name}");
+        // 卸载：ATM 的都没了，用户的还在。
+        w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+        let removed = codex_toml(&w);
+        for n in atm_agents::names::ALL {
+            assert!(codex_server(&removed, n).is_none(), "{name}: {n} left");
+        }
+        assert!(codex_server(&removed, "other").is_some(), "{name}");
+    }
+
+    // 用户自己装的状态（还没修过）直接卸载，也去得掉。
+    let w = World::new("codex-inline-uninstall", false);
+    w.write(".codex/config.toml", cases[2].1);
+    w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+    let removed = codex_toml(&w);
+    assert!(codex_server(&removed, CORE).is_none());
+    assert_eq!(
+        codex_server(&removed, "other")
+            .and_then(|s| s.get("command"))
+            .and_then(|c| c.as_str()),
+        Some("keep.exe")
+    );
+}
+
+/// 顶层 `mcp_servers = { … }`：行内表不能再往里加段，ATM 加不进自己的条目。安装在动任何文件之前拒绝；
+/// 卸载只在行内表里有 ATM 的条目时拒绝（没有的话无事可做）；启动修复不碰它。整个家目录逐字节不变。
+#[test]
+fn a_whole_inline_mcp_servers_table_is_refused_before_any_write() {
+    let w = World::new("codex-inline-whole", true);
+    let mine = "mcp_servers = { other = { command = \"keep.exe\" } }\n";
+    w.write(".codex/config.toml", mine);
+    let before = tree(&w.home);
+    let e = w.agents.manage(&user(), "CODEX", "INSTALL").unwrap_err();
+    assert_eq!(e.code, "CODEX_CONFIG_UNSUPPORTED", "{}", e.message);
+    assert_eq!(tree(&w.home), before, "install wrote something");
+    assert!(w.agents.repair(&repair_job()).unwrap().configs.is_empty());
+    assert_eq!(tree(&w.home), before, "repair wrote something");
+    w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+    assert_eq!(w.read(".codex/config.toml"), mine);
+
+    let w = World::new("codex-inline-whole-ours", true);
+    w.write(
+        ".codex/config.toml",
+        "mcp_servers = { ayanami-task-manager-core = { command = \"old.exe\" }, other = { command = \"keep.exe\" } }\n",
+    );
+    let before = tree(&w.home);
+    for action in ["INSTALL", "UNINSTALL", "REPAIR", "UPDATE"] {
+        let e = w.agents.manage(&user(), "CODEX", action).unwrap_err();
+        assert_eq!(
+            e.code, "CODEX_CONFIG_UNSUPPORTED",
+            "{action}: {}",
+            e.message
+        );
+        assert_eq!(tree(&w.home), before, "{action} wrote something");
+    }
+    // 启动修复：认得出是 ATM 的，但改不了配置；记下原因，配置一个字节不动。（修复的各步互相独立：这个客户端
+    // 接着 ATM，缺的 Skill 照常补上，与配置能不能改无关。）
+    let config = w.read(".codex/config.toml");
+    let done = w.agents.repair(&repair_job()).unwrap();
+    assert!(
+        done.failures
+            .iter()
+            .any(|(c, _)| *c == atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    assert!(
+        !done.configs.contains(&atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    assert_eq!(
+        w.read(".codex/config.toml"),
+        config,
+        "repair rewrote the config"
+    );
+}
+
+/// peer W6 r2 P2-01：档位名字、command、args 都对，只有 env 不对（`.env` 子表或段里的 `env.K`）：显式修复与
+/// 启动修复都算过期，改回应当写入的；用户自己 server 的 env 子表原样。
+#[test]
+fn a_codex_env_difference_alone_is_stale() {
+    for (i, extra) in [
+        "\n[mcp_servers.ayanami-task-manager-core.env]\nATM_DATA_DIR = \"old-root\"\n",
+        "env.ATM_DATA_DIR = \"old-root\"\n",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mine = "\n[mcp_servers.other]\ncommand = \"keep.exe\"\n\n[mcp_servers.other.env]\nATM_DATA_DIR = \"user-root\"\n";
+        for gate in [false, true] {
+            let w = World::new(&format!("codex-env-{i}-{gate}"), gate);
+            w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+            let good = w.read(".codex/config.toml");
+            // 子表写成单独的段接在后面；`env.K` 插在 core 段表头的下一行。
+            let stale = if extra.starts_with('\n') {
+                format!("{good}{extra}{mine}")
+            } else {
+                let header = "[mcp_servers.\"ayanami-task-manager-core\"]\n";
+                let at = good.find(header).unwrap() + header.len();
+                format!("{}{extra}{}{mine}", &good[..at], &good[at..])
+            };
+            w.write(".codex/config.toml", &stale);
+            let parsed = codex_toml(&w);
+            assert_eq!(
+                codex_server(&parsed, CORE)
+                    .and_then(|s| s.get("env"))
+                    .and_then(|e| e.get("ATM_DATA_DIR"))
+                    .and_then(|v| v.as_str()),
+                Some("old-root"),
+                "the fixture puts env into ATM's core server"
+            );
+            if gate {
+                let done = w.agents.repair(&repair_job()).unwrap();
+                assert!(
+                    done.configs.contains(&atm_agents::Client::Codex),
+                    "{done:?}"
+                );
+            } else {
+                assert!(w.agents.repair(&repair_job()).unwrap().configs.is_empty());
+                w.agents.manage(&user(), "CODEX", "REPAIR").unwrap();
+            }
+            let fixed = w.read(".codex/config.toml");
+            assert!(!fixed.contains("old-root"), "{fixed}");
+            let parsed = codex_toml(&w);
+            assert_eq!(
+                codex_server(&parsed, "other")
+                    .and_then(|s| s.get("env"))
+                    .and_then(|e| e.get("ATM_DATA_DIR"))
+                    .and_then(|v| v.as_str()),
+                Some("user-root")
+            );
+        }
+    }
+}
+
+/// peer W6 r2 P2-02：认不出的 config.toml。安装、更新、修复、卸载都在动规则文件、Skill、任何配置之前报错：
+/// 整个家目录逐字节不变（原来只比较 config.toml 自己，规则文件已经被改了）。
+#[test]
+fn an_unreadable_codex_config_means_no_write_anywhere() {
+    let broken = "[mcp_servers.ayanami-task-manager-core\ncommand = \"old.exe\"\n";
+    // 没接入过：安装。
+    let w = World::new("codex-bad-fresh", false);
+    w.write(".codex/config.toml", broken);
+    let before = tree(&w.home);
+    for action in ["INSTALL", "UPDATE", "REPAIR", "UNINSTALL"] {
+        let e = w.agents.manage(&user(), "CODEX", action).unwrap_err();
+        assert_eq!(
+            e.code, "CODEX_CONFIG_INVALID_TOML",
+            "{action}: {}",
+            e.message
+        );
+        assert_eq!(tree(&w.home), before, "{action} wrote something");
+    }
+    // 接入过（规则块、Skill 都在），之后配置坏了：卸载不能拆一半。
+    let w = World::new("codex-bad-installed", false);
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    w.write(".codex/config.toml", broken);
+    let before = tree(&w.home);
+    for action in ["UNINSTALL", "REPAIR", "INSTALL"] {
+        let e = w.agents.manage(&user(), "CODEX", action).unwrap_err();
+        assert_eq!(
+            e.code, "CODEX_CONFIG_INVALID_TOML",
+            "{action}: {}",
+            e.message
+        );
+        assert_eq!(tree(&w.home), before, "{action} wrote something");
+    }
+    // 坏的 JSON 客户端配置也一样。
+    let w = World::new("kimi-bad", false);
+    w.write(".kimi-code/mcp.json", "{ not json");
+    let before = tree(&w.home);
+    let e = w
+        .agents
+        .manage(&user(), "KIMI_CODE", "INSTALL")
+        .unwrap_err();
+    assert_eq!(e.code, "KIMI_CODE_CONFIG_INVALID_JSON", "{}", e.message);
+    assert_eq!(tree(&w.home), before);
+}

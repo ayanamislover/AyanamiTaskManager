@@ -696,8 +696,8 @@ pub fn ensure_generation(
 
 // ===== 附件的暂存与换入 =====
 
-const STAGING_DIR: &str = ".restore-staging";
-const OLD_DIR: &str = ".restore-old";
+pub(crate) const STAGING_DIR: &str = ".restore-staging";
+pub(crate) const OLD_DIR: &str = ".restore-old";
 
 struct Staging {
     dir: PathBuf,
