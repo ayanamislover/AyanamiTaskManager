@@ -535,6 +535,15 @@ mod tests {
         std::fs::write(p.join("ok.txt"), b"ours").unwrap();
         let fresh = guarded.ensure(Path::new("exports/new/deeper")).unwrap();
         std::fs::write(fresh.join("f"), b"x").unwrap();
+        // 别处按 `/` 分隔的相对路径（附件清单）直接 `join` 到真实位置上：Rust 遇到 `\\?\` 前缀会把 `/` 归一成 `\`。
+        std::fs::create_dir(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub/inner.txt"), b"nested").unwrap();
+        let nested = long
+            .join("exports")
+            .join(".staging")
+            .join("sub")
+            .join("inner.txt");
+        assert_eq!(std::fs::read(nested).unwrap(), b"nested");
         let back = long.join("exports").join(".staging").join("ok.txt");
         assert_eq!(std::fs::read(back).unwrap(), b"ours");
         drop(guarded);

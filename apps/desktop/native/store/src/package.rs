@@ -494,8 +494,7 @@ fn write_zip(
     std::io::copy(&mut File::open(db)?, &mut zip)?;
     for f in files {
         zip.start_file(format!("{ARTIFACTS_PREFIX}{}", f.path), opts)?;
-        let source = crate::backup::under(artifacts, &f.path);
-        std::io::copy(&mut File::open(source)?, &mut zip)?;
+        std::io::copy(&mut File::open(artifacts.join(&f.path))?, &mut zip)?;
     }
     zip.start_file(MANIFEST_ENTRY, opts)?;
     zip.write_all(manifest)?;

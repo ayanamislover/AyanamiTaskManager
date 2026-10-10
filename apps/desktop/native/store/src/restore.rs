@@ -783,7 +783,8 @@ pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
 #[derive(Debug)]
 pub struct ProjectAttachments<'a> {
     /// 这个项目的附件目录（真实位置，读写用它）。项目存在时它一定存在，回调期间一直钉着：改不了名、换不成链接。
-    /// 它是 `\\?\` 完整写法：拼 `/` 分隔的相对路径要逐段拼（见 [`crate::backup::under`]），整段 `join("a/b")` 打不开。
+    /// 它是 `\\?\` 完整写法。用 `Path::join` / `push` 往上拼没问题（Rust 遇到这种前缀会把 `/` 归一成 `\`），
+    /// 但不要按字符串拼接：完整写法下系统不再把 `/` 当分隔符。
     /// 项目不存在时不建，也不该往里写。要写进库（附件行的 `local_path`）的路径照旧按
     /// [`crate::backup::artifacts_root`]`(store.path())` 拼，与库里别的附件行同一种写法。
     pub dir: &'a Path,

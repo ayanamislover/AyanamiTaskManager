@@ -1046,12 +1046,6 @@ pub fn copy_tree(from: &Path, to: &Path) -> Result<Vec<FileEntry>> {
     copy_tree_filtered(from, to, &|_| true)
 }
 
-/// `base` 下 `/` 分隔的相对路径 `rel`，逐段拼（peer W6 r4 P2-01）：`base` 可能是 `\\?\` 完整写法，那种写法下
-/// `/` 不会被当成分隔符，整段拼上去就打不开了。
-pub fn under(base: &Path, rel: &str) -> PathBuf {
-    rel.split('/').fold(base.to_path_buf(), |p, c| p.join(c))
-}
-
 /// 同 [`copy_tree`]，只复制 `keep(相对路径)` 为真的文件。
 fn copy_tree_filtered(
     from: &Path,
@@ -1063,7 +1057,7 @@ fn copy_tree_filtered(
             if !keep(rel) {
                 return Ok(());
             }
-            let dest = under(to, rel);
+            let dest = to.join(rel);
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent)?;
             }
