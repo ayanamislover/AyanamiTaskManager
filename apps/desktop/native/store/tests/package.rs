@@ -1149,3 +1149,227 @@ fn a_2x_knowledge_backup_merges_without_overwriting() {
     assert!(package::inspect_legacy(&pdb, atm_store::legacy::Home::Knowledge).is_err());
     assert_eq!(fingerprint(&w), fp);
 }
+
+/// 把一个正常导出的包改成项目代码是 `code` 的（库、manifest、SHA256SUMS 一致，包本身校验得过）。
+fn package_with_code(w: &World, good: &Path, code: &str, name: &str) -> PathBuf {
+    let mut zip_entries = entries(good);
+    let db = w.dir.join(format!("{name}.sqlite"));
+    fs::write(
+        &db,
+        &zip_entries
+            .iter()
+            .find(|(n, _)| n == "project.sqlite")
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute("UPDATE projects SET code = ?1", [code])
+        .unwrap();
+    let bytes = fs::read(&db).unwrap();
+    let _ = fs::remove_file(&db);
+    for (n, body) in &mut zip_entries {
+        if n == "project.sqlite" {
+            *body = bytes.clone();
+        }
+        if n == "manifest.json" {
+            let mut m: serde_json::Value = serde_json::from_slice(body).unwrap();
+            m["project"]["code"] = code.into();
+            m["snapshotSha256"] = sha(&bytes).into();
+            m["sizeBytes"] = (bytes.len() as u64).into();
+            *body = serde_json::to_vec(&m).unwrap();
+        }
+    }
+    let sums: String = zip_entries
+        .iter()
+        .filter(|(n, _)| n != "manifest.json" && n != "SHA256SUMS.txt")
+        .map(|(n, b)| format!("{}  {n}\n", sha(b)))
+        .collect();
+    zip_entries
+        .iter_mut()
+        .find(|(n, _)| n == "SHA256SUMS.txt")
+        .unwrap()
+        .1 = sums.into_bytes();
+    let out = w.dir.join(format!("{name}.aytproj"));
+    write_zip(&out, &zip_entries);
+    out
+}
+
+/// peer W6 r1 P1-01：包（或 2.x 库）带来的项目代码不可信。没有另给代码时按项目代码的规则校验，不合格不导入、
+/// 零写入；另给一个合格代码就能导入。导出文件名只用代码里安全的字符，落在 exports 里，不覆盖已有的同名文件。
+#[test]
+fn a_package_code_that_is_not_a_project_code_is_refused_and_exports_stay_inside() {
+    let w = world("package-bad-code");
+    let good = export(&w, "PA", Format::Package, T1).path;
+    let outside = w.dir.join("outside-root");
+    fs::create_dir_all(&outside).unwrap();
+    let sentinel = outside.join(format!("owned-{}.json", T1.replace([':', '.'], "-")));
+    fs::write(&sentinel, b"user original bytes").unwrap();
+    let absolute = outside.join("owned").to_string_lossy().into_owned();
+    for (i, bad) in [
+        absolute.as_str(),
+        "../UP",
+        "AB/CD",
+        "lower",
+        "A",
+        "TOO-LONG-CODE1",
+        "1AB",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pkg = package_with_code(&w, &good, bad, &format!("bad-{i}"));
+        package::inspect_package(&pkg).unwrap();
+        let before = fingerprint(&w);
+        match import(&w, ImportSource::Package(&pkg), None) {
+            Err(PackageError::BadCode { code }) => assert_eq!(code, bad),
+            other => panic!("{bad}: {other:?}"),
+        }
+        assert_eq!(fingerprint(&w), before, "{bad}: nothing written");
+        // 另给一个合格代码就能导入（给定的代码优先）。
+        let code = format!("OK{i}");
+        let imported = import(&w, ImportSource::Package(&pkg), Some(&code)).unwrap();
+        assert_eq!(imported.code, code);
+    }
+    assert_eq!(fs::read(&sentinel).unwrap(), b"user original bytes");
+    assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+    // 库里的代码就算被改坏了，导出也只在 exports 里、名字是一个安全组件；已有的同名文件不动。
+    let w = world("package-export-name");
+    w.store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE projects SET code = '..\\..\\EVIL' WHERE id = 'PA'",
+                [],
+            )
+        })
+        .unwrap();
+    let exported = export(&w, "PA", Format::Json, T1);
+    assert_eq!(exported.path.parent().unwrap(), w.exports.as_path());
+    let name = exported
+        .path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        !name.contains("..") && !name.contains('\\') && !name.contains('/'),
+        "{name}"
+    );
+    let w = world("package-export-existing");
+    let first = export(&w, "PA", Format::Json, T1).path;
+    fs::write(&first, b"kept").unwrap();
+    let second = export(&w, "PA", Format::Json, T1).path;
+    assert_ne!(first, second);
+    assert_eq!(fs::read(&first).unwrap(), b"kept");
+}
+
+#[cfg(windows)]
+fn junction(link: &Path, target: &Path) {
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(made.success(), "mklink /J {}", link.display());
+}
+
+/// 数据根外面的一棵树（用户的东西），逐字节。
+#[cfg(windows)]
+fn outside_tree(w: &World) -> PathBuf {
+    let outside = w.dir.join("outside-root");
+    fs::create_dir_all(outside.join("user-folder")).unwrap();
+    fs::write(outside.join("user-folder").join("keep.txt"), b"keep").unwrap();
+    // 名字像 ATM 暂存的也一样：在数据根外面就不是 ATM 的。
+    fs::create_dir_all(outside.join("01J0000000000000000000000A")).unwrap();
+    fs::write(outside.join("01J0000000000000000000000A").join("x"), b"x").unwrap();
+    outside
+}
+
+/// peer W6 r1 P1-02：exports、.staging、附件根是链接（junction）时，导出、导入在任何副作用之前拒绝；暂存清理只删
+/// ATM 起的（ULID 名字）暂存，里面的链接只删链接本身，不跟进去。数据根外面的树逐字节不变。
+#[cfg(windows)]
+#[test]
+fn links_in_the_data_root_are_refused_before_any_side_effect() {
+    // 1. `.staging` 本身是 junction：拒绝，外面的树原样。
+    let w = world("package-link-staging");
+    let outside = outside_tree(&w);
+    let before = tree(&outside);
+    fs::create_dir_all(&w.exports).unwrap();
+    let staging = w.exports.join(".staging");
+    junction(&staging, &outside);
+    let r = package::export_project(
+        &w.store,
+        "PA",
+        Format::Json,
+        &ExportOptions {
+            exports_dir: &w.exports,
+            at: T1,
+            app_version: "t",
+        },
+    );
+    assert!(matches!(r, Err(PackageError::LinkedPath(_))), "{r:?}");
+    let pkg = w.dir.join("none.aytproj");
+    assert!(matches!(
+        import(&w, ImportSource::Package(&pkg), None),
+        Err(PackageError::LinkedPath(_))
+    ));
+    assert_eq!(tree(&outside), before);
+    fs::remove_dir(&staging).unwrap(); // 只删链接本身
+
+    // 2. `.staging` 是普通目录，里面有一个 ULID 名字的 junction 与一个不是 ATM 起的目录：前者只删链接，后者不碰。
+    let w = world("package-link-inside");
+    let outside = outside_tree(&w);
+    let before = tree(&outside);
+    let staging = w.exports.join(".staging");
+    fs::create_dir_all(staging.join("user-notes")).unwrap();
+    fs::write(staging.join("user-notes").join("n.txt"), b"n").unwrap();
+    let ulid_link = staging.join("01J0000000000000000000000B");
+    junction(&ulid_link, &outside);
+    let exported = export(&w, "PA", Format::Json, T1);
+    assert!(exported.path.is_file());
+    assert!(
+        fs::symlink_metadata(&ulid_link).is_err(),
+        "the stale link is gone"
+    );
+    assert_eq!(
+        fs::read(staging.join("user-notes").join("n.txt")).unwrap(),
+        b"n"
+    );
+    assert_eq!(tree(&outside), before);
+
+    // 3. 附件：项目的附件目录是 junction → 导出拒绝；附件根是 junction → 导入拒绝、零写入。
+    let w = world("package-link-artifacts");
+    let outside = outside_tree(&w);
+    let good = export(&w, "PA", Format::Package, T1).path;
+    let before = tree(&outside);
+    let pa = artifacts_root(w.store.path()).join("PA");
+    fs::remove_dir_all(&pa).unwrap();
+    junction(&pa, &outside);
+    assert!(matches!(
+        package::export_project(
+            &w.store,
+            "PA",
+            Format::Package,
+            &ExportOptions {
+                exports_dir: &w.exports,
+                at: T2,
+                app_version: "t"
+            }
+        ),
+        Err(PackageError::LinkedPath(_))
+    ));
+    fs::remove_dir(&pa).unwrap();
+    let root = artifacts_root(w.store.path());
+    fs::remove_dir_all(&root).unwrap();
+    junction(&root, &outside);
+    let fp = fingerprint(&w);
+    let r = import(&w, ImportSource::Package(&good), Some("PZ"));
+    assert!(matches!(r, Err(PackageError::LinkedPath(_))), "{r:?}");
+    assert_eq!(fingerprint(&w), fp, "nothing committed");
+    fs::remove_dir(&root).unwrap();
+    assert_eq!(tree(&outside), before);
+}

@@ -204,10 +204,22 @@ impl Agents {
 
     /// `manageAgentIntegration`：规则块、Skills 与 MCP 一起装、修、卸。Claude 与 Claude Code 共用规则和 Skills，
     /// 卸其中一个时另一个还接着 ATM，就只卸 MCP。
+    ///
+    /// PREVIEW 属于 `agents.read`；写动作只给 User（03 §4.3、P-016）：System 的 `agents.repair` 只能走
+    /// [`Agents::repair`]（只修已接入的），不能借这里给没接入的客户端装或卸。
     pub fn manage(&self, p: &Principal, client: &str, action: &str) -> Result<Value> {
-        check(p, Capability::AgentsManage)?;
-        let c = Client::parse(client)?;
+        check(p, Capability::AgentsRead)?;
         let action = Action::parse(action)?;
+        if action != Action::Preview {
+            check(p, Capability::AgentsManage)?;
+            if p.kind() != atm_domain::principal::PrincipalKind::User {
+                return Err(AgentError::new(
+                    "USER_AUTHORIZATION_REQUIRED",
+                    "安装、更新、修复、卸载 Agent 接入只能由用户在 ATM 桌面端操作",
+                ));
+            }
+        }
+        let c = Client::parse(client)?;
         let skills_root = self.skills_path(c);
         let source = self.env.skills_source();
         let skill_state = skills::inspect(&source, &skills_root).state;
@@ -242,7 +254,10 @@ impl Agents {
             }
         } else {
             let profiles = self.profiles();
-            if !config::installed(&self.env, c, &profiles) {
+            // 档位名字齐了还不够：启动方式（command / args / env，Kimi 的 transport）与应当写入的不一致也要写
+            // （peer W6 r1 P2-01，与启动修复同一个判据）。
+            if !config::installed(&self.env, c, &profiles) || config::stale(&self.env, c, &profiles)
+            {
                 config::install(&self.env, c, &profiles)?;
             }
             if skill_state != State::Installed {

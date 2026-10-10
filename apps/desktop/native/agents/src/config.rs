@@ -278,39 +278,218 @@ fn js_trim_end(s: &str) -> &str {
     s.trim_end_matches(is_js_whitespace)
 }
 
-fn toml_header(line: &str) -> Option<&str> {
-    let t = atm_domain::text::js_trim(line);
-    let inner = t.strip_prefix('[')?.strip_suffix(']')?;
-    (!inner.is_empty() && !inner.contains(']')).then_some(inner)
+/// Codex `config.toml` 的一行在 TOML 里是什么（peer W6 r1 P1-03）。只做找段需要的那一点词法：表头的点分键、
+/// 注释、单行与多行字符串、跨行的数组。多行字符串与数组里面以 `[`、`#` 开头的行都不是表头或注释。
+#[derive(Debug, PartialEq, Eq)]
+enum TomlLine {
+    /// `[a.b]` 或 `[[a.b]]`：键按 TOML 解码（裸键、"基本"、'字面'）。
+    Header(Vec<String>),
+    /// 空行或只有注释（不在字符串、数组里）。
+    Comment,
+    /// 键值行，或多行值的一部分。
+    Content,
 }
 
-fn managed_codex_section(header: &str) -> bool {
-    names::ALL.iter().any(|name| {
-        [
-            format!("mcp_servers.{name}"),
-            format!("mcp_servers.\"{name}\""),
-        ]
-        .iter()
-        .any(|root| header == root || header.starts_with(&format!("{root}.")))
-    })
+#[derive(Clone, Copy, Default)]
+struct TomlScan {
+    /// 正在多行字符串里：`"""` 或 `'''`。
+    multiline: Option<char>,
+    /// 跨行的数组 / 内联表还没闭合的层数。
+    depth: usize,
 }
 
-fn without_own_codex_sections(content: &str) -> String {
-    let mut out = Vec::new();
-    let mut skipping = false;
-    for line in content.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(h) = toml_header(line) {
-            skipping = managed_codex_section(h);
-            if skipping {
-                continue;
+/// 一个 TOML 键（基本串）从 `s` 开头读到闭合引号：返回解码后的值与剩余部分。
+fn toml_basic_key(s: &str) -> Option<(String, &str)> {
+    let mut out = String::new();
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '"' => return Some((out, &s[i + 1..])),
+            '\\' => {
+                let (_, e) = chars.next()?;
+                match e {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    'b' => out.push('\u{8}'),
+                    't' => out.push('\t'),
+                    'n' => out.push('\n'),
+                    'f' => out.push('\u{c}'),
+                    'r' => out.push('\r'),
+                    'u' | 'U' => {
+                        let n = if e == 'u' { 4 } else { 8 };
+                        let hex: String = (0..n)
+                            .filter_map(|_| chars.next().map(|(_, h)| h))
+                            .collect();
+                        out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                    }
+                    _ => return None,
+                }
             }
-        }
-        if !skipping {
-            out.push(line);
+            '\n' | '\r' => return None,
+            c => out.push(c),
         }
     }
-    js_trim_end(&out.join("\n")).to_string()
+    None
+}
+
+/// 表头 `[`…`]` / `[[`…`]]` 的点分键；后面只许空白或注释。解析不了返回 None。
+fn toml_header_keys(t: &str) -> Option<Vec<String>> {
+    let array = t.starts_with("[[");
+    let mut rest = &t[if array { 2 } else { 1 }..];
+    let mut keys = Vec::new();
+    loop {
+        rest = rest.trim_start_matches([' ', '\t']);
+        let (key, after) = if let Some(r) = rest.strip_prefix('"') {
+            toml_basic_key(r)?
+        } else if let Some(r) = rest.strip_prefix('\'') {
+            let end = r.find('\'')?;
+            (r[..end].to_string(), &r[end + 1..])
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return None;
+            }
+            (rest[..end].to_string(), &rest[end..])
+        };
+        keys.push(key);
+        rest = after.trim_start_matches([' ', '\t']);
+        if let Some(r) = rest.strip_prefix('.') {
+            rest = r;
+            continue;
+        }
+        rest = rest.strip_prefix(if array { "]]" } else { "]" })?;
+        let tail = rest.trim_start_matches([' ', '\t']);
+        return (tail.is_empty() || tail.starts_with('#')).then_some(keys);
+    }
+}
+
+/// 扫一行的值部分（不是表头时），更新多行字符串与数组的状态。单行字符串必须在本行闭合。
+fn toml_scan_value(line: &str, s: &mut TomlScan) -> Option<()> {
+    let b = line.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if let Some(q) = s.multiline {
+            let close: &[u8] = if q == '"' { b"\"\"\"" } else { b"'''" };
+            if q == '"' && b[i] == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b[i..].starts_with(close) {
+                i += 3;
+                // `""""` 之类：闭合引号前面最多再带两个引号作内容。
+                let mut extra = 0;
+                while extra < 2 && i < b.len() && b[i] == close[0] {
+                    i += 1;
+                    extra += 1;
+                }
+                s.multiline = None;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        match b[i] {
+            b'#' => return Some(()),
+            b'"' | b'\'' => {
+                let q = b[i];
+                if b[i..].starts_with(&[q, q, q]) {
+                    s.multiline = Some(q as char);
+                    i += 3;
+                    continue;
+                }
+                i += 1;
+                loop {
+                    let c = *b.get(i)?;
+                    i += 1;
+                    if q == b'"' && c == b'\\' {
+                        i += 1;
+                    } else if c == q {
+                        break;
+                    }
+                }
+            }
+            b'[' | b'{' => {
+                s.depth += 1;
+                i += 1;
+            }
+            b']' | b'}' => {
+                s.depth = s.depth.checked_sub(1)?;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    Some(())
+}
+
+/// 整个文件逐行分类。行保留原样（含行尾）；不认得的写法返回 Err，调用方不猜删除范围。
+fn toml_lines(content: &str) -> Result<Vec<(&str, TomlLine)>> {
+    let invalid = |n: usize| {
+        AgentError::new(
+            "CODEX_CONFIG_INVALID_TOML",
+            format!("Codex 的 config.toml 第 {n} 行无法识别；没有改动这个文件"),
+        )
+    };
+    let mut out = Vec::new();
+    let mut s = TomlScan::default();
+    for (n, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let t = line.trim_start_matches([' ', '\t']);
+        let kind = if s.multiline.is_none() && s.depth == 0 && t.starts_with('[') {
+            TomlLine::Header(toml_header_keys(t).ok_or_else(|| invalid(n + 1))?)
+        } else if s.multiline.is_none() && s.depth == 0 && (t.is_empty() || t.starts_with('#')) {
+            TomlLine::Comment
+        } else {
+            toml_scan_value(line, &mut s).ok_or_else(|| invalid(n + 1))?;
+            TomlLine::Content
+        };
+        out.push((raw, kind));
+    }
+    if s.multiline.is_some() || s.depth > 0 {
+        return Err(invalid(out.len()));
+    }
+    Ok(out)
+}
+
+/// `[mcp_servers.<ATM 的名字>]` 及它的子表（`.env` 之类）。
+fn managed_codex_section(keys: &[String]) -> bool {
+    keys.len() >= 2 && keys[0] == "mcp_servers" && names::ALL.contains(&keys[1].as_str())
+}
+
+/// 去掉 ATM 自己的段：段里的键值行与空行。注释一律留着（ATM 从不写注释，注释都是用户的），用户段原样
+/// （行尾也原样）。文末的空白去掉，与 2.0 一样。
+fn without_own_codex_sections(content: &str) -> Result<String> {
+    let mut out = String::new();
+    let mut skipping = false;
+    for (raw, kind) in toml_lines(content)? {
+        match kind {
+            TomlLine::Header(keys) => {
+                skipping = managed_codex_section(&keys);
+                if !skipping {
+                    out.push_str(raw);
+                }
+            }
+            TomlLine::Comment if skipping => {
+                if !raw.trim_matches([' ', '\t', '\r', '\n']).is_empty() {
+                    out.push_str(raw);
+                }
+            }
+            _ if skipping => {}
+            _ => out.push_str(raw),
+        }
+    }
+    Ok(js_trim_end(&out).to_string())
+}
+
+/// 原文用 CRLF 的，ATM 写的段也用 CRLF。
+fn codex_eol(content: &str) -> &'static str {
+    if content.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
 }
 
 fn toml_string(s: &str) -> String {
@@ -321,7 +500,8 @@ pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Resu
     let existing = read_text(path)
         .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
         .unwrap_or_default();
-    let base = without_own_codex_sections(&existing);
+    let base = without_own_codex_sections(&existing)?;
+    let eol = codex_eol(&existing);
     let sections: Vec<String> = profiles
         .iter()
         .map(|p| {
@@ -348,13 +528,17 @@ pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Resu
                         .join(", ")
                 ));
             }
-            lines.join("\n")
+            lines.join(eol)
         })
         .collect();
     let content = format!(
-        "{base}{}{}\n",
-        if base.is_empty() { "" } else { "\n\n" },
-        sections.join("\n\n")
+        "{base}{}{}{eol}",
+        if base.is_empty() {
+            String::new()
+        } else {
+            eol.repeat(2)
+        },
+        sections.join(&eol.repeat(2))
     );
     let backup = if existing == content {
         None
@@ -373,11 +557,11 @@ pub fn codex_uninstall(path: &Path) -> Result<Written> {
     let existing = read_text(path)
         .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
         .unwrap_or_default();
-    let next = without_own_codex_sections(&existing);
+    let next = without_own_codex_sections(&existing)?;
     let content = if next.is_empty() {
         String::new()
     } else {
-        format!("{next}\n")
+        format!("{next}{}", codex_eol(&existing))
     };
     let backup = if existing == content {
         None
@@ -452,21 +636,23 @@ pub fn codex_installed(path: &Path) -> Installed {
         }
         *cur = Launch::new("");
     };
-    for line in text.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(h) = toml_header(line) {
+    // 认不出的文件当作什么都没登记：启动修复不碰它，显式安装时由写入那一步报 CODEX_CONFIG_INVALID_TOML。
+    let Ok(lines) = toml_lines(&text) else {
+        return found;
+    };
+    for (raw, kind) in lines {
+        let line = raw.trim_end_matches(['\n', '\r']);
+        if let TomlLine::Header(keys) = &kind {
             flush(&mut found, &active, &mut command, &mut cur);
-            let name = h.strip_prefix("mcp_servers.").map(|n| {
-                n.strip_prefix('"')
-                    .and_then(|q| q.strip_suffix('"'))
-                    .filter(|q| !q.contains('"'))
-                    .unwrap_or(n)
-                    .to_string()
-            });
-            active = name.filter(|n| names::managed(n));
+            active = match keys.as_slice() {
+                [table, name] if table == "mcp_servers" && names::managed(name) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            };
             continue;
         }
-        if active.is_none() {
+        if active.is_none() || kind != TomlLine::Content {
             continue;
         }
         let t = atm_domain::text::js_trim(line);

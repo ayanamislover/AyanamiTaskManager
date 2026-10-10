@@ -109,6 +109,10 @@ pub enum PackageError {
     Invalid(String),
     /// v2 包的迁移集合与本程序不同。
     SchemaMismatch(String),
+    /// 导入后的项目代码不合格（包或 2.x 库里带来的，没有另给代码）：不导入（peer W6 r1 P1-01）。
+    BadCode {
+        code: String,
+    },
     /// 项目代码已被占用；`suggested` 是一个空着的代码。
     CodeTaken {
         code: String,
@@ -121,6 +125,8 @@ pub enum PackageError {
     Io(std::io::Error),
     /// 写入没有执行或没有提交（存储忙、正在关闭）。
     Write(String),
+    /// 数据目录里本该是普通目录的地方是链接（junction、符号链接）：什么都没改（peer W6 r1 P1-02）。
+    LinkedPath(String),
 }
 
 impl std::fmt::Display for PackageError {
@@ -129,6 +135,7 @@ impl std::fmt::Display for PackageError {
             PackageError::NotFound(m) => write!(f, "not found: {m}"),
             PackageError::Invalid(m) => write!(f, "invalid package: {m}"),
             PackageError::SchemaMismatch(m) => write!(f, "schema mismatch: {m}"),
+            PackageError::BadCode { code } => write!(f, "project code {code:?} is not valid"),
             PackageError::CodeTaken { code, suggested } => {
                 write!(f, "project code {code} is taken (try {suggested})")
             }
@@ -136,6 +143,7 @@ impl std::fmt::Display for PackageError {
             PackageError::Backup(e) => write!(f, "{e}"),
             PackageError::Sqlite(e) => write!(f, "sqlite: {e}"),
             PackageError::Io(e) => write!(f, "io: {e}"),
+            PackageError::LinkedPath(p) => write!(f, "{p} is a link"),
             PackageError::Write(m) => write!(f, "write: {m}"),
         }
     }
@@ -278,12 +286,19 @@ fn export_in(
         let side = side_reader(store.path())?;
         side.execute("VACUUM INTO ?1", [path_str(&snapshot)?])?;
     }
-    let prefix = crate::backup::artifacts_root(store.path()).join(project_id);
+    let artifacts = crate::backup::artifacts_root(store.path());
+    let prefix = artifacts.join(project_id);
+    refuse_links(&[
+        artifacts.parent().unwrap_or(&artifacts),
+        &artifacts,
+        &prefix,
+    ])?;
     let db = staging.join(DB_ENTRY);
     let (code, name) = extract_project(&snapshot, &db, project_id, &prefix)?;
     remove_db(&snapshot);
     let stamp = opts.at.replace([':', '.'], "-");
-    let file_name = format!("{code}-{stamp}.{}", format.as_str());
+    let stem = file_component(&code);
+    let file_name = format!("{stem}-{stamp}.{}", format.as_str());
     let out = staging.join(&file_name);
     let attachments = match format {
         Format::Package => {
@@ -307,7 +322,7 @@ fn export_in(
     while target.exists() {
         target = opts
             .exports_dir
-            .join(format!("{code}-{stamp}-{n}.{}", format.as_str()));
+            .join(format!("{stem}-{stamp}-{n}.{}", format.as_str()));
         n += 1;
     }
     sync(&out)?;
@@ -1143,6 +1158,37 @@ pub enum ImportSource<'a> {
     LegacyProject(&'a Path),
 }
 
+/// 项目代码的规则（04 L-012，2.x `domain/src/index.ts`）：大写字母开头，2–12 位大写字母、数字或连字符。
+/// 服务的新建、导入时给的代码与这里的导入、导出共用这一条。
+pub fn valid_project_code(code: &str) -> bool {
+    let b = code.as_bytes();
+    (2..=12).contains(&b.len())
+        && b[0].is_ascii_uppercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// 导出文件名里的项目代码：只留一个路径组件里安全的字符（库里的代码都合规，这里只是不让任何值拼出别的路径）。
+fn file_component(code: &str) -> String {
+    let s: String = code
+        .chars()
+        .take(40)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.trim_matches('_').is_empty() {
+        "project".into()
+    } else {
+        s
+    }
+}
+
 /// 一个空着的代码：原代码，或在末尾加数字（总长不超过 12，与新建项目的分配规则相同）。
 pub fn suggest_code(base: &str, taken: &dyn Fn(&str) -> bool) -> String {
     if !taken(base) {
@@ -1337,6 +1383,10 @@ fn import_tx(
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
     let code = c.code.clone().unwrap_or_else(|| src_code.clone());
+    // 包或 2.x 库带来的代码不可信：与给定的代码同一条规则，不合格就不导入（导出会拿它拼文件名）。
+    if !valid_project_code(&code) {
+        return Err(PackageError::BadCode { code });
+    }
     let taken = |x: &str| -> bool {
         tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM main.projects WHERE code = ?1)",
@@ -1448,6 +1498,10 @@ fn import_tx(
     // 附件换入：新 id 的目录不可能已经存在；挪进去之后事务失败由调用方挪走。
     let attachments = if c.staged_artifacts.exists() {
         let n = list_tree(&c.staged_artifacts)?.len();
+        refuse_links(&[
+            c.artifacts_root.parent().unwrap_or(&c.artifacts_root),
+            &c.artifacts_root,
+        ])?;
         fs::create_dir_all(&c.artifacts_root)?;
         atm_install_state::durable::rename(&c.staged_artifacts, &dir, false)?;
         *placed.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
@@ -1596,13 +1650,68 @@ fn merge_knowledge_tx(
 
 // ---------- 暂存 ----------
 
+#[cfg(windows)]
+fn is_link(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
+}
+
+/// 这些路径里已经存在的都必须是普通目录，不能是链接（junction、符号链接等 reparse point）：删除、解包、换入、
+/// 复制之前先查，链接会把副作用带到数据根外面（peer W6 r1 P1-02）。不存在的跳过（之后由我们自己建）。
+fn refuse_links(paths: &[&Path]) -> Result<()> {
+    for p in paths {
+        match fs::symlink_metadata(p) {
+            Ok(m) if is_link(&m) => return Err(PackageError::LinkedPath(p.display().to_string())),
+            Ok(m) if !m.is_dir() => {
+                return Err(PackageError::Invalid(format!(
+                    "{} is not a directory",
+                    p.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// ATM 自己起的暂存目录名（ULID）：清理只认这些。
+fn owned_staging_name(name: &str) -> bool {
+    name.len() == 26
+        && name
+            .bytes()
+            .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
+}
+
 /// `exports\.staging\<新目录>`：先清掉上一次中断留下的（调用方持有附件锁，同一时间只有一个导出或导入）。
+/// 数据根、exports、.staging 都不能是链接；只删名字是 ULID 的暂存（ATM 自己起的），里面的链接只删链接本身。
 fn fresh_staging(exports_dir: &Path) -> Result<PathBuf> {
     let root = exports_dir.join(STAGING_DIR);
+    let data_root = exports_dir.parent().unwrap_or(exports_dir);
+    refuse_links(&[data_root, exports_dir, &root])?;
     if root.exists() {
         for e in fs::read_dir(&root)? {
-            let p = e?.path();
-            let _ = fs::remove_dir_all(&p).or_else(|_| fs::remove_file(&p));
+            let e = e?;
+            if !e.file_name().to_str().is_some_and(owned_staging_name) {
+                continue;
+            }
+            let p = e.path();
+            let meta = fs::symlink_metadata(&p)?;
+            let _ = if is_link(&meta) {
+                // 链接本身（不跟进去）：目录型 junction 用 remove_dir，文件型符号链接用 remove_file。
+                fs::remove_dir(&p).or_else(|_| fs::remove_file(&p))
+            } else if meta.is_dir() {
+                // std 的 remove_dir_all 遇到里面的链接只删链接，不跟进去。
+                fs::remove_dir_all(&p)
+            } else {
+                fs::remove_file(&p)
+            };
         }
     }
     let name = {

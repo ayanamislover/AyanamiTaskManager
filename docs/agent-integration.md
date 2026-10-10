@@ -19,6 +19,10 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 
 已经接入过 ATM 的客户端，ATM 每次启动核对一次：2.x 写进去的旧入口（`--mcp-stdio`、`mcp-stdio.cjs`、`ayanami-task-manager-actions`、没有 `--profile` 的单入口、钉着旧版本目录的路径）改成 `atm-mcp.exe --profile core|memory`，缺的 Skill 补上；没接入过的客户端一个字节都不动，你自己改过的规则块和 Skill 也不动（要在设置里点「修复」才会换回 ATM 的版本）。Skill 的备份放在 skills 目录旁边的 `.atm-skill-backups\`（例如 `~/.codex/.atm-skill-backups`），每个 Skill 只留最近 5 份；2.x 留在 skills 目录里的 `atm-*.bak-*` 会被挪过去，免得 Agent 把旧备份当成又一个 Skill 加载。
 
+ATM 改 Codex 的 `config.toml` 时只动 `[mcp_servers.ayanami-task-manager-*]` 这几段：你自己的 server 和其他设置原样保留，包括表头后面的注释、引号键、`[[数组表]]`、多行字符串和行尾（CRLF 也照旧）；ATM 段里你写的注释也会留下。如果文件里有 ATM 认不出的写法（例如表头没闭合、多行字符串没结束），安装和修复会报 `CODEX_CONFIG_INVALID_TOML`，文件一个字节都不改，启动时也不会去修它；改好文件后在设置里点「修复」即可。
+
+只有正式安装、并且用的是默认数据目录时，ATM 启动才会自动修复：`ATM_DATA_DIR`、`AYANAMI_TASK_DATA_DIR`、`ATM3_DATA_DIR` 任何一个指到别处，或 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE` 被改到别的位置时，都不会自动改你的 Agent 配置。设置里的「安装」「修复」「卸载」不受这条影响。
+
 Kimi Code 的 VS Code 扩展与 CLI 共用 `~/.kimi-code`，装一次两边都生效。ATM 直接最小合并 `mcp.json`：只替换 ATM 自己的服务并写明 `"transport": "stdio"`，其他服务与顶层键原样保留；原来手工写在 `AGENTS.md` 里、没有 ATM 标记的规则文字不会被删，确认受管区块生效后可自行删掉那份手写副本。
 
 本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token 和端口，并原子发布 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`（设置了 `ATM3_DATA_DIR` 时在它下面）；旧 endpoint/token 不可复用。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。完整威胁边界见 [security-model.md](./security-model.md)。

@@ -96,12 +96,7 @@ pub(crate) fn require_writable(tx: &Transaction<'_>, project_id: &str) -> Result
 // ---------- 项目代码（L-012；2.x domain/src/index.ts） ----------
 
 pub(crate) fn valid_code(code: &str) -> bool {
-    let b = code.as_bytes();
-    (2..=12).contains(&b.len())
-        && b[0].is_ascii_uppercase()
-        && b[1..]
-            .iter()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'-')
+    atm_store::package::valid_project_code(code)
 }
 
 /// 2.x `codeCandidate`：驼峰拆词，非字母数字当分隔；多词时首字母 + 短尾词，或各词首字母；单词取前 6 个字符。

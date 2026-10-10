@@ -780,6 +780,38 @@ fn mcp_configs_name_the_shim_and_the_profiles() {
 
 #[test]
 fn agents_and_jobs_get_only_their_own_capabilities() {
+    // P-016 的主体 × 动作矩阵：manage 的写动作只给 User；System（启动修复、文档作业）与 Agent 一律拒绝、零写入，
+    // 包括给没接入的客户端 INSTALL、给 User 装好的 UNINSTALL（peer W6 r1 P1-05）。
+    let m = World::new("caps-manage", true);
+    let docs = Principal::system_job(JobId::AgentsDocs);
+    for p in [agent(), repair_job(), docs.clone()] {
+        for action in ["INSTALL", "UPDATE", "REPAIR", "UNINSTALL", "PREVIEW"] {
+            let r = m.agents.manage(&p, "CODEX", action);
+            assert!(r.is_err(), "{p:?} {action} was accepted");
+            assert!(
+                !m.path(".codex/config.toml").exists() && !m.path(".codex/AGENTS.md").exists(),
+                "{p:?} {action} wrote"
+            );
+        }
+    }
+    m.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    let installed = fs::read(m.path(".codex/config.toml")).unwrap();
+    let rules = fs::read(m.path(".codex/AGENTS.md")).unwrap();
+    for p in [agent(), repair_job(), docs] {
+        for action in ["UNINSTALL", "INSTALL", "REPAIR"] {
+            assert!(
+                m.agents.manage(&p, "CODEX", action).is_err(),
+                "{p:?} {action}"
+            );
+        }
+    }
+    assert_eq!(fs::read(m.path(".codex/config.toml")).unwrap(), installed);
+    assert_eq!(fs::read(m.path(".codex/AGENTS.md")).unwrap(), rules);
+    // User 的 PREVIEW 只读；启动修复照常（成功例）。
+    m.agents.manage(&user(), "CODEX", "PREVIEW").unwrap();
+    assert_eq!(fs::read(m.path(".codex/config.toml")).unwrap(), installed);
+    assert!(m.agents.repair(&repair_job()).unwrap().ran);
+
     let w = World::new("caps", true);
     let code = |r: Result<Value, AgentError>| r.unwrap_err().code;
     assert_eq!(
@@ -1014,4 +1046,159 @@ fn every_pointer_to_the_guide_names_where_the_docs_are_installed() {
         }
     }
     assert!(pointed >= 2, "{pointed}");
+}
+
+/// peer W6 r1 P1-03：Codex 的 config.toml 里用户写的合法 TOML 在安装、修复、卸载之后原样留着，再做一遍不变。
+/// 表头带注释、带空白和引号的点分键、数组表、多行字符串里像表头的行、受管段后面的用户注释、CRLF 都在内。
+#[test]
+fn codex_user_toml_survives_install_repair_and_uninstall() {
+    let user_blocks = [
+        "[mcp_servers.other] # user server\ncommand = \"other.exe\"\nargs = [\"keep-me\"]\n",
+        "[ mcp_servers . \"two words\" ]\ncommand = 'two.exe'\n",
+        "[[profiles]]\nname = \"a\"\n",
+        "[notes]\ntext = \"\"\"\n[mcp_servers.ayanami-task-manager-core]\n# not a comment\n\"\"\"\nafter = 1\n",
+        "[lists]\nnested = [\n  [\"[x]\"],\n  [\"y\"],\n]\n",
+    ];
+    let own = "[mcp_servers.ayanami-task-manager-core]\ncommand = \"old.exe\"\nargs = []\n\
+               [mcp_servers.ayanami-task-manager-core.env]\nK = \"v\"\n";
+    for crlf in [false, true] {
+        let w = World::new(
+            if crlf {
+                "codex-toml-crlf"
+            } else {
+                "codex-toml"
+            },
+            true,
+        );
+        let fix = |s: &str| {
+            if crlf {
+                s.replace('\n', "\r\n")
+            } else {
+                s.to_owned()
+            }
+        };
+        // 受管段夹在用户段中间，后面跟一行用户的注释。
+        let original = fix(&format!(
+            "{}\n{own}\n# my other server below\n{}\n{}\n{}\n{}",
+            user_blocks[0], user_blocks[1], user_blocks[2], user_blocks[3], user_blocks[4]
+        ));
+        w.write(".codex/config.toml", &original);
+        let keeps = |text: &str| {
+            for b in user_blocks {
+                assert!(text.contains(&fix(b)), "lost {b:?} in:\n{text}");
+            }
+            assert!(text.contains(&fix("# my other server below\n")), "{text}");
+        };
+        let done = w.agents.repair(&repair_job()).unwrap();
+        assert!(
+            done.configs.contains(&atm_agents::Client::Codex),
+            "{done:?}"
+        );
+        let repaired = w.read(".codex/config.toml");
+        keeps(&repaired);
+        assert!(!repaired.contains("old.exe") && repaired.contains(&w.shim.replace('\\', "\\\\")));
+        assert_eq!(repaired.contains("\r\n"), crlf);
+        assert!(
+            !crlf || !repaired.replace("\r\n", "").contains('\n'),
+            "mixed line endings"
+        );
+        // 再修一次、再装一次：字节不变。
+        w.agents.repair(&repair_job()).unwrap();
+        w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+        assert_eq!(w.read(".codex/config.toml"), repaired);
+        // 卸载：ATM 的段没了，用户的全在；再卸一次不变。
+        w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+        let removed = w.read(".codex/config.toml");
+        keeps(&removed);
+        // 剩下的那一处是用户多行字符串里的假表头。
+        assert_eq!(
+            removed
+                .matches("[mcp_servers.ayanami-task-manager-core]")
+                .count(),
+            1
+        );
+        assert!(
+            !removed.contains("old.exe")
+                && !removed.contains("[mcp_servers.ayanami-task-manager-core.env]")
+        );
+        assert!(!removed.contains(&w.shim.replace('\\', "\\\\")));
+        w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+        assert_eq!(w.read(".codex/config.toml"), removed);
+    }
+
+    // 认不出的文件：不猜删除范围。安装报错、零写入；启动修复不碰。
+    for (name, broken) in [
+        (
+            "header",
+            "[mcp_servers.ayanami-task-manager-core\ncommand = \"old.exe\"\n",
+        ),
+        (
+            "string",
+            "[mcp_servers.ayanami-task-manager-core]\ncommand = \"old.exe\"\n[x]\ns = \"\"\"\nnever closed\n",
+        ),
+        (
+            "array",
+            "[x]\na = [\n  1,\n[mcp_servers.ayanami-task-manager-core]\n",
+        ),
+    ] {
+        let w = World::new(&format!("codex-toml-bad-{name}"), true);
+        w.write(".codex/config.toml", broken);
+        let e = w.agents.manage(&user(), "CODEX", "INSTALL").unwrap_err();
+        assert_eq!(e.code, "CODEX_CONFIG_INVALID_TOML", "{name}: {}", e.message);
+        assert_eq!(w.read(".codex/config.toml"), broken, "{name}");
+        let done = w.agents.repair(&repair_job()).unwrap();
+        assert!(!done.configs.contains(&atm_agents::Client::Codex), "{name}");
+        assert_eq!(w.read(".codex/config.toml"), broken, "{name}");
+        assert!(backups(&w.path(".codex/config.toml")).is_empty(), "{name}");
+    }
+}
+
+/// peer W6 r1 P2-01：显式「修复」与启动修复用同一个判据：档位名字齐全、启动方式不对（旧版本的 command、错的 args、
+/// Kimi 缺 transport）的也改成应当写入的；只碰受管条目。开发布局（启动修复不放行）下也一样。
+#[test]
+fn an_explicit_repair_rewrites_a_stale_launch_with_the_right_profile_names() {
+    let w = World::new("explicit-repair", false);
+    w.with_claude_cli();
+    let shim_json = serde_json::to_string(&w.shim).unwrap();
+    for (client, rel) in [
+        ("CODEX", ".codex/config.toml"),
+        (
+            "CLAUDE",
+            "AppData/Roaming/Claude/claude_desktop_config.json",
+        ),
+        ("KIMI_CODE", ".kimi-code/mcp.json"),
+        ("CLAUDE_CODE", ".claude.json"),
+    ] {
+        w.agents.manage(&user(), client, "INSTALL").unwrap();
+        let good = w.read(rel);
+        assert!(good.contains(&shim_json), "{client}: {good}");
+        let stale = good
+            .replace(&shim_json, "\"C:\\\\L\\\\app-2.4.0\\\\old-version.exe\"")
+            .replace("\"transport\": \"stdio\"", "\"transport\": \"http\"");
+        w.write(rel, &stale);
+        assert!(
+            w.agents.repair(&repair_job()).unwrap().configs.is_empty(),
+            "gate is off"
+        );
+        assert_eq!(w.read(rel), stale);
+        w.agents.manage(&user(), client, "REPAIR").unwrap();
+        let fixed = w.read(rel);
+        assert!(!fixed.contains("old-version.exe"), "{client}: {fixed}");
+        assert!(fixed.contains(&shim_json), "{client}: {fixed}");
+        if client == "KIMI_CODE" {
+            assert!(!fixed.contains("\"http\""), "{fixed}");
+        }
+    }
+    // 只碰受管条目：Codex 里用户自己的 server 原样。
+    let w = World::new("explicit-repair-other", false);
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    let other = "[mcp_servers.mine]\ncommand = \"old-version.exe\"\n";
+    let text = w
+        .read(".codex/config.toml")
+        .replace(&shim_json, "\"old-version.exe\"");
+    w.write(".codex/config.toml", &format!("{other}\n{text}"));
+    w.agents.manage(&user(), "CODEX", "REPAIR").unwrap();
+    let fixed = w.read(".codex/config.toml");
+    assert!(fixed.starts_with(other), "{fixed}");
+    assert_eq!(fixed.matches("old-version.exe").count(), 1, "{fixed}");
 }

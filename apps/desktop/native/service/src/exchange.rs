@@ -109,6 +109,12 @@ pub(crate) fn package_error(e: PackageError) -> DomainError {
             format!("项目包来自数据结构不同的版本，不能直接导入：{m}"),
         )
         .detail("reason", "SCHEMA"),
+        PackageError::BadCode { code } => DomainError::new(
+            ErrorCode::INVALID_ARGUMENT,
+            "包里的项目代码不合格（须以大写字母开头，2–12 位大写字母、数字或连字符）：导入时另给一个代码",
+        )
+        .detail("field", "code")
+        .detail("packageCode", code.as_str()),
         PackageError::CodeTaken { code, suggested } => DomainError::new(
             ErrorCode::PROJECT_CODE_CONFLICT,
             format!("项目代码 {code} 已被占用：换一个代码再导入（例如 {suggested}）"),
@@ -124,6 +130,13 @@ pub(crate) fn package_error(e: PackageError) -> DomainError {
             DomainError::new(ErrorCode::STORE_BUSY, "存储繁忙，稍后重试").detail("committed", false)
         }
         PackageError::Backup(e) => crate::backups::backup_error(e),
+        PackageError::LinkedPath(path) => DomainError::new(
+            ErrorCode::BACKUP_INTEGRITY_FAILED,
+            format!(
+                "数据目录里的 {path} 是链接（junction 或符号链接）：为了不碰数据根以外的内容，没有做任何改动"
+            ),
+        )
+        .detail("reason", "LINKED_PATH"),
         other => internal(other.to_string()),
     }
 }

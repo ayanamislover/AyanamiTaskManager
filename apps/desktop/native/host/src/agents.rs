@@ -3,8 +3,9 @@
 //!
 //! 能不能动用户的 Agent 配置（修复作业、切换时同步客户端、装 Agent 文档）由这里判定（[`gate`]，2.0
 //! `shouldRepairMcpConfigs`）：打包运行在产品默认数据根上；或者打包烟测把全部配置根都隔离进
-//! `ATM_SMOKE_AGENT_CONFIG_ROOT`。开发构建、`ATM_DATA_DIR` 指到别处的隔离运行都不修，也不在切换时改客户端：
-//! 那时写进全局配置的启动方式会指向一个临时目录。用户在设置页点的安装 / 修复 / 卸载不受限制。
+//! `ATM_SMOKE_AGENT_CONFIG_ROOT`。开发构建、任何一个数据根覆盖（`ATM_DATA_DIR`、`AYANAMI_TASK_DATA_DIR`、只覆盖 N
+//! 的 `ATM3_DATA_DIR`）或被重定向的配置根下的隔离运行都不修，也不在切换时改客户端：那时写进全局配置的启动方式
+//! 与这次运行的服务对不上。用户在设置页点的安装 / 修复 / 卸载不受限制。
 //!
 //! 令牌只在 `getMcpConfigs` 的返回里（给用户复制的 HTTP 配置），不进日志。
 
@@ -56,10 +57,61 @@ fn inside(root: &Path, candidate: &Path) -> bool {
 pub fn gate(layout: &Layout, env: &AgentEnv) -> bool {
     decide(
         layout.packaged,
-        || crate::core_process::product_default_data_root(&layout.data_dir),
+        || {
+            crate::core_process::product_default_data_root(&layout.data_dir)
+                && defaults_match(
+                    Roots {
+                        l: &layout.data_dir,
+                        n: &layout.v3_root,
+                        localappdata: &env.localappdata,
+                        appdata: &env.appdata,
+                        home: &env.home,
+                    },
+                    crate::win::known_local_app_data(),
+                    crate::win::known_roaming_app_data(),
+                    crate::win::known_profile(),
+                )
+        },
         var,
         [&env.appdata, &env.localappdata, &env.home],
     )
+}
+
+/// 这次运行实际用的根：共享的 L、服务的 N、三个客户端配置根。
+struct Roots<'a> {
+    l: &'a Path,
+    n: &'a Path,
+    localappdata: &'a Path,
+    appdata: &'a Path,
+    home: &'a Path,
+}
+
+fn same(a: &Path, b: &Path) -> bool {
+    let normal = |p: &Path| {
+        p.to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    };
+    normal(a) == normal(b)
+}
+
+/// 产品默认（peer W6 r1 P1-04）：L 与 N 都是这个用户 Local AppData 下的产品根，三个客户端配置根就是这个用户
+/// 真实的已知文件夹（不是被环境变量重定向的）。只把 N（`ATM3_DATA_DIR`）指到演练位置的运行不算：那时修复写进
+/// 全局配置的启动方式、切换时同步的客户端，都与这次运行的服务对不上。
+fn defaults_match(
+    r: Roots<'_>,
+    local: Option<PathBuf>,
+    roaming: Option<PathBuf>,
+    profile: Option<PathBuf>,
+) -> bool {
+    let (Some(local), Some(roaming), Some(profile)) = (local, roaming, profile) else {
+        return false;
+    };
+    same(r.l, &local.join("AyanamiTaskManager"))
+        && same(r.n, &local.join(atm_install_state::startup::V3_DIR_NAME))
+        && same(r.localappdata, &local)
+        && same(r.appdata, &roaming)
+        && same(r.home, &profile)
 }
 
 /// [`gate`] 的判定本身：环境变量与「是不是产品默认数据根」由调用方给（用例里换成假的）。
@@ -75,7 +127,11 @@ fn decide(
     let packaged_smoke = var("ATM_PACKAGED_SMOKE").as_deref() == Some("1");
     let repair_flag = var("ATM_SMOKE_MCP_CONFIG_REPAIR");
     if !packaged_smoke && repair_flag.is_none() {
-        return product_root();
+        // 三个数据根覆盖里任何一个指到别处都是隔离运行（N 的 `ATM3_DATA_DIR` 也算）。
+        let overridden = ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"]
+            .iter()
+            .any(|k| var(k).is_some_and(|v| !v.is_empty()));
+        return !overridden && product_root();
     }
     // 烟测标记一律走这一支：全部配置根都要在隔离根里。
     if !packaged_smoke || repair_flag.as_deref() != Some("1") {
@@ -253,6 +309,81 @@ mod tests {
             true,
             &[smoke[0], smoke[1], ("ATM_SMOKE_AGENT_CONFIG_ROOT", "")],
             sandbox
+        ));
+    }
+
+    /// peer W6 r1 P1-04：任何一个数据根覆盖（包括只覆盖 N 的 `ATM3_DATA_DIR`）都关掉无人值守的修复与同步；
+    /// 「产品默认」要 L、N 与三个客户端配置根全是这个用户真实的已知文件夹。
+    #[test]
+    fn an_isolated_root_disables_unattended_repair() {
+        let sandbox = r"C:\sandbox\agents";
+        for key in ["ATM3_DATA_DIR", "ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"] {
+            assert!(
+                !run(true, true, &[(key, r"C:\isolated-v3")], sandbox),
+                "{key}"
+            );
+            // 空值不算覆盖（与 v3_root 的读法一致）。
+            assert!(run(true, true, &[(key, "")], sandbox), "{key} empty");
+        }
+        let local = PathBuf::from(r"C:\Users\u\AppData\Local");
+        let roaming = PathBuf::from(r"C:\Users\u\AppData\Roaming");
+        let profile = PathBuf::from(r"C:\Users\u");
+        let l = local.join("AyanamiTaskManager");
+        let n = local.join("AyanamiTaskManager3");
+        let check = |l: &Path, n: &Path, lad: &Path, ad: &Path, home: &Path| {
+            defaults_match(
+                Roots {
+                    l,
+                    n,
+                    localappdata: lad,
+                    appdata: ad,
+                    home,
+                },
+                Some(local.clone()),
+                Some(roaming.clone()),
+                Some(profile.clone()),
+            )
+        };
+        assert!(check(&l, &n, &local, &roaming, &profile));
+        assert!(check(
+            Path::new(r"c:\users\U\appdata\local\ayanamitaskmanager\"),
+            &n,
+            &local,
+            &roaming,
+            &profile
+        ));
+        let elsewhere = Path::new(r"C:\isolated");
+        assert!(
+            !check(&l, elsewhere, &local, &roaming, &profile),
+            "N elsewhere"
+        );
+        assert!(
+            !check(elsewhere, &n, &local, &roaming, &profile),
+            "L elsewhere"
+        );
+        assert!(
+            !check(&l, &n, elsewhere, &roaming, &profile),
+            "LOCALAPPDATA redirected"
+        );
+        assert!(
+            !check(&l, &n, &local, elsewhere, &profile),
+            "APPDATA redirected"
+        );
+        assert!(
+            !check(&l, &n, &local, &roaming, elsewhere),
+            "USERPROFILE redirected"
+        );
+        assert!(!defaults_match(
+            Roots {
+                l: &l,
+                n: &n,
+                localappdata: &local,
+                appdata: &roaming,
+                home: &profile
+            },
+            Some(local.clone()),
+            None,
+            Some(profile.clone())
         ));
     }
 

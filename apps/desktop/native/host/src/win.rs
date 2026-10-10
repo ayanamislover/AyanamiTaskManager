@@ -31,22 +31,27 @@ const MAX_CLIPBOARD_CHARS: usize = 1 << 20;
 /// The user's Local AppData from the shell (FOLDERID_LocalAppData), not from the
 /// environment: tests and sandboxes redirect LOCALAPPDATA, the known folder they do not.
 pub fn known_local_app_data() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+}
+
+/// Roaming AppData (FOLDERID_RoamingAppData): where APPDATA points unless something redirected it.
+pub fn known_roaming_app_data() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_RoamingAppData)
+}
+
+/// The user profile (FOLDERID_Profile): where USERPROFILE points unless something redirected it.
+pub fn known_profile() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Profile)
+}
+
+fn known_folder(id: &windows_sys::core::GUID) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    };
+    use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     let mut raw: windows_sys::core::PWSTR = null_mut();
     // SAFETY: the out pointer is ours; the shell allocates and we free it below either way.
-    let status = unsafe {
-        SHGetKnownFolderPath(
-            &FOLDERID_LocalAppData,
-            KF_FLAG_DEFAULT as u32,
-            null_mut(),
-            &mut raw,
-        )
-    };
+    let status = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT as u32, null_mut(), &mut raw) };
     let path = (status >= 0 && !raw.is_null()).then(|| {
         // SAFETY: on success the shell returns a NUL-terminated wide string.
         let length = (0..)
