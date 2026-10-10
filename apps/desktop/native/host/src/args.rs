@@ -19,7 +19,8 @@ pub struct Args {
 /// Modes that run a Node entry with inherited stdio instead of the GUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Headless {
-    /// `--cli <args…>` and `--doctor`
+    /// `--cli <args…>` and `--doctor`: handed to atm.exe (06 §6, W6a); the host itself no
+    /// longer carries a CLI.
     Cli(Vec<String>),
     /// `--mcp-stdio [--profile p]`, or the Electron-as-node legacy form
     /// `<dataDir>\mcp-stdio.cjs [--profile p]` with ELECTRON_RUN_AS_NODE=1.
@@ -64,7 +65,7 @@ pub fn parse(argv: &[String], electron_run_as_node: bool) -> Result<Args, String
             return Ok(args);
         }
         Some("--doctor") if argv.len() == 1 => {
-            args.headless = Some(Headless::Cli(vec!["--doctor".into()]));
+            args.headless = Some(Headless::Cli(vec!["doctor".into()]));
             return Ok(args);
         }
         Some("--mcp-stdio") => {
@@ -178,7 +179,7 @@ mod tests {
         assert!(parse(&v(&[r"C:\evil.js"]), true).is_err());
         assert_eq!(
             parse(&v(&["--doctor"]), false).unwrap().headless,
-            Some(Headless::Cli(v(&["--doctor"])))
+            Some(Headless::Cli(v(&["doctor"])))
         );
         assert_eq!(
             parse(&v(&["--cli", "project", "list"]), false)

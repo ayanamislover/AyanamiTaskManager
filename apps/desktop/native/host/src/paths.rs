@@ -9,11 +9,12 @@ pub struct Layout {
     pub app_dir: PathBuf,
     pub renderer_dir: PathBuf,
     /// 2.x 数据根 `L`：3.0 宿主只用它的路径给单实例互斥与管道起名，不写它（W5a）。
-    /// Node 入口（`--cli`、`--doctor`、`--mcp-stdio`、安装探测）在 W6 换掉之前仍用它。
+    /// Node 入口（`--mcp-stdio`、安装探测）在 W6 换掉之前仍用它。
     pub data_dir: PathBuf,
     /// 3.x 根 `N`：服务、宿主日志、`host.json`、WebView2 数据都在这里。
     pub v3_root: PathBuf,
     pub core: CoreCommand,
+    /// `--cli` / `--doctor` 转交的 atm.exe（W6a）：安装布局在 `resources\atm.exe`，开发构建与宿主同目录。
     pub cli: CoreCommand,
     pub mcp_stdio: CoreCommand,
     pub packaged: bool,
@@ -49,6 +50,20 @@ fn node_entry(exe: &Path, script: PathBuf, env: Vec<(String, String)>) -> CoreCo
     }
 }
 
+/// atm.exe 在哪：安装布局 `<app>\resources\atm.exe`（与 atm-mcp.exe 同一处），开发构建 `cargo build` 放在宿主旁边。
+pub fn cli_entry(app_dir: &Path, packaged: bool) -> CoreCommand {
+    let exe = if packaged {
+        app_dir.join("resources").join("atm.exe")
+    } else {
+        app_dir.join("atm.exe")
+    };
+    CoreCommand {
+        exe,
+        args: Vec::new(),
+        env: Vec::new(),
+    }
+}
+
 pub fn resolve() -> Result<Layout, String> {
     let host_exe = env::current_exe().map_err(|error| error.to_string())?;
     // A junction (current → install root) must not decide which app dir we are in:
@@ -62,7 +77,7 @@ pub fn resolve() -> Result<Layout, String> {
         let node = app_dir.join("runtime").join("atm-core.exe");
         return Ok(Layout {
             core: with_core_flags(node_entry(&node, packaged_core, Vec::new())),
-            cli: node_entry(&node, app_dir.join("runtime").join("cli.mjs"), Vec::new()),
+            cli: cli_entry(&app_dir, true),
             mcp_stdio: node_entry(
                 &node,
                 app_dir.join("resources").join("mcp-stdio.cjs"),
@@ -123,7 +138,7 @@ fn development_layout(
     };
     Ok(Layout {
         core: with_core_flags(ts_entry("core-main.ts")),
-        cli: ts_entry("cli-main.ts"),
+        cli: cli_entry(&app_dir, false),
         mcp_stdio: node_entry(
             &node,
             repo.join("apps")
@@ -176,6 +191,17 @@ pub fn dunce(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--cli` / `--doctor` 不再起 Node：安装布局交给 `resources\atm.exe`（atm-mcp.exe 的旁边），
+    /// 开发构建交给与宿主同目录的 atm.exe；不带任何固定参数与额外环境。
+    #[test]
+    fn the_cli_is_atm_exe_next_to_the_bridge() {
+        let app = Path::new(r"C:\ATM\app-3.0.0");
+        let packaged = cli_entry(app, true);
+        assert_eq!(packaged.exe, app.join("resources").join("atm.exe"));
+        assert!(packaged.args.is_empty() && packaged.env.is_empty());
+        assert_eq!(cli_entry(app, false).exe, app.join("atm.exe"));
+    }
 
     #[test]
     fn only_the_core_command_gets_node_flags_and_they_come_before_the_script() {

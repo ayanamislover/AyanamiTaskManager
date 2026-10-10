@@ -1,6 +1,8 @@
 //! `--cli`, `--doctor`, `--mcp-stdio` and the Electron-as-node legacy command: run the
-//! matching Node entry with inherited stdio and pass its exit code through (§3.1).
-//! These entries only ever carry the Agent credential from daemon.json.
+//! matching entry with inherited stdio and pass its exit code through (§3.1). `--cli` and
+//! `--doctor` go to atm.exe (W6a: the host no longer carries a CLI, 06 §6); `--mcp-stdio`
+//! is still the Node bridge until W6d. These entries only ever carry the Agent credential
+//! from daemon.json.
 
 use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
@@ -46,7 +48,7 @@ fn run_entry(entry: &CoreCommand, layout: &Layout, extra: &[String], console: bo
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
-            eprintln!("ATM_NODE_ENTRY_FAILED: {error}");
+            eprintln!("ATM_ENTRY_FAILED: {}: {error}", entry.exe.display());
             1
         }
     }

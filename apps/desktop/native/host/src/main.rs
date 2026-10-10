@@ -6,7 +6,7 @@ mod app;
 mod args;
 mod assets;
 mod bridge;
-// Node entries only (`--cli`, `--doctor`, `--mcp-stdio`, the install probe): the GUI path no
+// Node entries only (`--mcp-stdio`, the install probe; `--cli` / `--doctor` go to atm.exe): the GUI path no
 // longer starts a core (W5a, guarded by tests/single_process.rs). Goes with the Node entries in W6.
 #[allow(dead_code)]
 mod core_process;

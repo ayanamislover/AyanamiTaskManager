@@ -48,6 +48,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-cli"
+version = "0.0.0"
+dependencies = [
+ "atm-domain",
+ "atm-http",
+ "atm-install-state",
+ "atm-jobs",
+ "atm-service",
+ "atm-store",
+ "rusqlite",
+ "serde_json",
+ "socket2",
+ "tokio",
+]
+
+[[package]]
 name = "atm-domain"
 version = "0.0.0"
 dependencies = [

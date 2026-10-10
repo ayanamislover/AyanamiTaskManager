@@ -106,7 +106,7 @@ impl Service {
             .ok_or_else(|| internal("没有配置备份目录"))
     }
 
-    /// 备份列表（`backup.list`），最新的在前，最多 `limit`（1–200）条。
+    /// 备份列表（`backup.list`），最新的在前，3.0 整库备份与 2.x 备份登记各最多 `limit`（1–200）条。
     pub fn list_backups(&self, principal: &Principal, limit: usize) -> Result<Value, DomainError> {
         capability::require(principal, Capability::BackupList)?;
         let limit = limit.clamp(1, LIST_MAX) as i64;
@@ -132,6 +132,36 @@ impl Service {
                 .collect::<rusqlite::Result<_>>()
             })
             .map_err(|e| internal(format!("{e:?}")))?;
+        // 06 #22：2.x 的备份只读登记（05 §2.2 `legacy_backups`），不受 3.0 保留策略管理，也不能按 3.0 的范围恢复；
+        // 能导入的（AS_PROJECT / AS_KNOWLEDGE）在应用内作为项目或知识库导入。
+        let legacy: Vec<Value> = self
+            .store()
+            .read(|tx| {
+                tx.prepare(
+                    "SELECT l.id, l.source, l.scope, p.code, l.legacy_path, l.sha256, l.size_bytes, l.reason,
+                            l.schema_version, l.created_at, l.verified_at, l.importable
+                     FROM legacy_backups l LEFT JOIN projects p ON p.id = l.project_id
+                     ORDER BY l.created_at DESC, l.id DESC LIMIT ?1",
+                )?
+                .query_map([limit], |r| {
+                    Ok(json!({
+                        "id": r.get::<_, String>(0)?,
+                        "source": r.get::<_, String>(1)?,
+                        "scope": r.get::<_, String>(2)?,
+                        "project": r.get::<_, Option<String>>(3)?,
+                        "legacyPath": r.get::<_, String>(4)?,
+                        "sha256": r.get::<_, Option<String>>(5)?,
+                        "sizeBytes": r.get::<_, Option<i64>>(6)?,
+                        "reason": r.get::<_, Option<String>>(7)?,
+                        "schemaVersion": r.get::<_, Option<i64>>(8)?,
+                        "createdAt": r.get::<_, Option<String>>(9)?,
+                        "verifiedAt": r.get::<_, Option<String>>(10)?,
+                        "importable": r.get::<_, String>(11)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<_>>()
+            })
+            .map_err(|e| internal(format!("{e:?}")))?;
         let pending = self
             .backups_root
             .as_deref()
@@ -145,6 +175,7 @@ impl Service {
             .collect();
         Ok(json!({
             "backups": rows,
+            "legacyBackups": legacy,
             "withdrawals": { "cleanupPending": pending, "recent": recent },
         }))
     }

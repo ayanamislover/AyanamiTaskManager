@@ -75,6 +75,47 @@ fn backups_are_listed_and_made_by_the_user() {
     );
 }
 
+/// 06 #22（W6a）：列表分两类，2.x 的备份登记（05 §2.2）列在 `legacyBackups`，带项目代码与能否导入；
+/// 不进 3.0 的 `backups`，limit 两类各自生效。
+#[test]
+fn legacy_backups_are_listed_beside_the_store_backups() {
+    let w = world("bk-legacy-list");
+    w.exec(
+        "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
+                                     schema_version, created_at, verified_at, importable)
+         VALUES ('cat-1', 'CATALOG', 'PROJECT', 'PE', 'L:\\backups\\cat-1', 'ab', 10, 'MANUAL', 8,
+                 '2026-09-01T00:00:00.000Z', NULL, 'AS_PROJECT'),
+                ('file:cd', 'KNOWLEDGE_ORPHAN', 'KNOWLEDGE', NULL, 'L:\\knowledge\\orphan.db', 'cd', NULL, NULL, NULL,
+                 '2026-09-02T00:00:00.000Z', NULL, 'AS_KNOWLEDGE')",
+    );
+    let list = w.svc.list_backups(&agent(), 50).unwrap();
+    assert_eq!(list["backups"], serde_json::json!([]), "{list}");
+    let legacy = list["legacyBackups"].as_array().unwrap();
+    assert_eq!(
+        legacy
+            .iter()
+            .map(|r| (
+                r["id"].clone(),
+                r["project"].clone(),
+                r["importable"].clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("file:cd".into(), Value::Null, "AS_KNOWLEDGE".into()),
+            ("cat-1".into(), "EMP".into(), "AS_PROJECT".into()),
+        ],
+        "{list}"
+    );
+    assert_eq!(legacy[1]["legacyPath"], "L:\\backups\\cat-1");
+    assert_eq!(
+        w.svc.list_backups(&agent(), 1).unwrap()["legacyBackups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// 10 R6：读全局流默认带上被恢复撤销的行并标注出来，界面「最近变化」把它们显示为已撤销。
 /// 成功例：备份之前的行照常、不带标注；反例：备份之后的行没有被藏起来，也没有被当成没撤销。
 #[test]
