@@ -295,10 +295,12 @@ fn agents_are_refused_every_settings_entry_without_side_effects() {
     };
     let before = (tree(&w.dir), tables(), memory(), outbound());
     let elsewhere = "https://agent-chosen.example.net";
-    let checks: Vec<(&str, Result<Value, atm_domain::error::DomainError>)> = vec![
-        ("status", c.status(&agent())),
+    // 第二项是入口自己要的能力：拒绝必须发生在入口的第一步（P-004），而不是更深处的账本读写替它兜住。
+    let checks: Vec<(&str, &str, Result<Value, atm_domain::error::DomainError>)> = vec![
+        ("status", "sync.status", c.status(&agent())),
         (
             "configure",
+            "sync.configure",
             c.update_config(
                 &agent(),
                 &json!({ "enabled": false, "relayUrl": elsewhere, "token": "agent-token-123" }),
@@ -306,17 +308,19 @@ fn agents_are_refused_every_settings_entry_without_side_effects() {
         ),
         (
             "test",
+            "sync.test_relay",
             c.test_relay(
                 &agent(),
                 &json!({ "relayUrl": elsewhere, "token": "agent-token-123" }),
             ),
         ),
-        ("pairing", c.create_pairing(&agent())),
-        ("reset", c.reset_space(&agent())),
+        ("pairing", "sync.pairing_create", c.create_pairing(&agent())),
+        ("reset", "sync.reset", c.reset_space(&agent())),
     ];
-    for (name, r) in checks {
+    for (name, capability, r) in checks {
         let e = r.unwrap_err();
         assert_eq!(e.code.as_str(), "USER_AUTHORIZATION_REQUIRED", "{name}");
+        assert_eq!(e.details["capability"], capability, "{name}");
         assert!(!e.message.contains(&pairing), "{name}");
         assert!(!format!("{e:?}").contains("agent-token-123"), "{name}");
     }
@@ -415,12 +419,22 @@ fn going_offline_backs_off_with_a_chinese_reason_then_recovers() {
 
 #[test]
 fn an_expired_cursor_rereads_commands_and_rewrites_every_snapshot() {
-    let w = world("relay-410", &[("PA", "ALPHA", true)]);
+    // BETA 停机前后都没变：只有「游标过期就强制全量」才会重写它。
+    let w = world("relay-410", &[("PA", "ALPHA", true), ("PB", "BETA", true)]);
     let c = w.connector();
     let pairing = connect(&c, &w.relay);
     let phone = phone_for(&w.relay, &pairing);
-    wait_for(|| !head_projects(&phone).is_empty(), "首次发布");
-    std::thread::sleep(Duration::from_millis(50));
+    wait_for(|| head_projects(&phone).len() == 2, "首次发布");
+    // 游标落盘之后再停：否则重启时没有旧游标，走的是「第一次拿游标」而不是「游标过期」。
+    wait_for(
+        || {
+            w.service
+                .sync_ledger(&user())
+                .unwrap()
+                .is_some_and(|l| l.cursor.is_some())
+        },
+        "游标落盘",
+    );
     c.stop();
     // 停机期间发命令，中继裁掉变更（保存的游标过期）。
     let id = phone.send(json!({ "type": "task.create", "body": { "project": "ALPHA", "title": "游标过期期间发的" } }));
@@ -433,15 +447,15 @@ fn an_expired_cursor_rereads_commands_and_rewrites_every_snapshot() {
     let again = w.connector();
     again.start().unwrap();
     assert_eq!(phone.await_ack(&id)["ok"], true);
-    let alpha_hash = c.config().published["ALPHA"].h.clone();
+    let beta_hash = c.config().published["BETA"].h.clone();
     wait_for(
         || {
             w.relay
                 .puts_since(mark)
                 .iter()
-                .any(|k| k.ends_with(&alpha_hash))
+                .any(|k| k.ends_with(&beta_hash))
         },
-        "强制重写快照",
+        "没变过的项目也强制重写",
     );
     again.stop();
 }
@@ -552,15 +566,31 @@ type HangIf = Box<dyn Fn(&HttpRequest) -> bool + Send + Sync>;
 struct Hanging {
     inner: MemoryRelay,
     hang: Mutex<HangIf>,
+    /// 卡住的请求里，被令牌掐断（Cancelled）返回的个数。
+    cut: std::sync::atomic::AtomicUsize,
+}
+
+impl Hanging {
+    fn new(inner: MemoryRelay, hang: HangIf) -> Hanging {
+        Hanging {
+            inner,
+            hang: Mutex::new(hang),
+            cut: Default::default(),
+        }
+    }
 }
 
 impl Transport for Hanging {
     fn send(&self, r: &HttpRequest, cancel: &[&Cancel]) -> Result<HttpResponse, NetFailure> {
         if (self.hang.lock().unwrap())(r) {
-            return atm_sync::transport::run_cancellable(cancel, None, || {
+            let out = atm_sync::transport::run_cancellable(cancel, None, || {
                 std::thread::sleep(Duration::from_secs(30));
                 Err(NetFailure::Timeout)
             });
+            if matches!(out, Err(NetFailure::Cancelled)) {
+                self.cut.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            return out;
         }
         self.inner.send(r, cancel)
     }
@@ -576,10 +606,7 @@ fn budget() -> Timings {
 #[test]
 fn stopping_while_the_relay_is_still_being_probed_cuts_the_probe() {
     let w = world("stop-probe", &[("PA", "ALPHA", true)]);
-    let hanging = Arc::new(Hanging {
-        inner: w.relay.clone(),
-        hang: Mutex::new(Box::new(|_| true)),
-    });
+    let hanging = Arc::new(Hanging::new(w.relay.clone(), Box::new(|_| true)));
     let c = w.connector_with(Opts {
         transport: Some(hanging),
         timings: budget(),
@@ -605,10 +632,7 @@ fn stopping_while_the_relay_is_still_being_probed_cuts_the_probe() {
 #[test]
 fn a_stuck_relay_write_is_cut_within_the_budget_and_no_offline_presence_is_attempted() {
     let w = world("stop-stuck", &[("PA", "ALPHA", true)]);
-    let hanging = Arc::new(Hanging {
-        inner: w.relay.clone(),
-        hang: Mutex::new(Box::new(|_| false)),
-    });
+    let hanging = Arc::new(Hanging::new(w.relay.clone(), Box::new(|_| false)));
     let c = w.connector_with(Opts {
         transport: Some(hanging.clone()),
         timings: budget(),
@@ -626,7 +650,11 @@ fn a_stuck_relay_write_is_cut_within_the_budget_and_no_offline_presence_is_attem
     c.stop();
     let took = began.elapsed();
     assert!(took < Duration::from_millis(1500), "{took:?}");
-    std::thread::sleep(Duration::from_millis(50));
+    // 卡住的那个请求被掐断了（会话作废），而不是留在后台再挂 30 秒。
+    wait_for(
+        || hanging.cut.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "卡住的请求被掐断",
+    );
     let after = w.relay.state().requests[mark..]
         .iter()
         .filter(|r| r.method == "PUT" && r.key.as_deref().is_some_and(|k| k.contains("/dev/")))
