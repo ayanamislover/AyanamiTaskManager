@@ -20,3 +20,5 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 atm-store = { path = "../store" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.10"

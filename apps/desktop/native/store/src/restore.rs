@@ -227,7 +227,7 @@ fn require_project(store: &Store, vb: &VerifiedBackup, project_id: &str) -> Resu
 }
 
 /// `file:` URI，只读打开。路径里的 `%`、`?`、`#` 要转义，反斜杠换成 `/`。
-fn readonly_uri(path: &Path) -> Result<String> {
+pub(crate) fn readonly_uri(path: &Path) -> Result<String> {
     let raw = path_str(path)?.replace('\\', "/");
     let mut s = String::from("file:");
     if raw.starts_with('/') {

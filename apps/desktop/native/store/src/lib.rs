@@ -14,6 +14,7 @@ mod engine;
 pub mod events;
 pub mod jsjson;
 pub mod legacy;
+pub mod package;
 pub mod paths;
 mod pin;
 pub mod progress;

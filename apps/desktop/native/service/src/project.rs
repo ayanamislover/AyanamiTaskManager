@@ -95,7 +95,7 @@ pub(crate) fn require_writable(tx: &Transaction<'_>, project_id: &str) -> Result
 
 // ---------- 项目代码（L-012；2.x domain/src/index.ts） ----------
 
-fn valid_code(code: &str) -> bool {
+pub(crate) fn valid_code(code: &str) -> bool {
     let b = code.as_bytes();
     (2..=12).contains(&b.len())
         && b[0].is_ascii_uppercase()

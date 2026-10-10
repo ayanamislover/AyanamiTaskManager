@@ -37,7 +37,14 @@ function client(): AyanamiClient {
     },
     recordAsUser: vi.fn(),
     backups: { list: vi.fn(), create: vi.fn(), restore: vi.fn() },
-    data: { exportProject: vi.fn(), previewAgentTask: vi.fn(), applyAgentTask: vi.fn() },
+    data: {
+      exportProject: vi.fn(),
+      previewAgentTask: vi.fn(),
+      applyAgentTask: vi.fn(),
+      importSources: vi.fn(),
+      previewImport: vi.fn(),
+      applyImport: vi.fn(),
+    },
   } as unknown as AyanamiClient;
 }
 
@@ -74,7 +81,10 @@ describe("project modal features", () => {
       [CreateTaskModal, ["新建任务", "标题", "说明", "优先级", "验收标准", "创建任务"]],
       [CreateRecordModal, ["新建项目记录", "类型", "重要性", "摘要", "详细内容", "保存记录"]],
       [ProjectUpdateModal, ["发布项目更新", "生成确定性草稿", "生成更新草稿", "取消"]],
-      [ProjectDataModal, ["备份、恢复与数据交换", "项目备份", "导出项目", "导入旧 agenttask.md"]],
+      [
+        ProjectDataModal,
+        ["备份、恢复与数据交换", "项目备份", "导出项目", "导入项目包", "导入旧 agenttask.md"],
+      ],
     ];
 
     for (const [Component, texts] of cases) {
@@ -131,6 +141,9 @@ describe("project modal features", () => {
           "client.backups.create",
           "client.backups.restore",
           "client.data.exportProject",
+          'queryKey: ["import-sources"]',
+          "client.data.previewImport",
+          "client.data.applyImport",
           "client.data.previewAgentTask",
           "client.data.applyAgentTask",
           "queryClient.invalidateQueries()",

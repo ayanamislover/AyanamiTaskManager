@@ -51,7 +51,15 @@ pub fn world(name: &str) -> World {
             )
         })
         .unwrap();
-    let svc = Arc::new(Service::new(store).with_backups_root(dir.join("backups")));
+    let svc = Arc::new(
+        Service::new(store)
+            .with_backups_root(dir.join("backups"))
+            .with_exchange(atm_service::exchange::ExchangeConfig {
+                exports: dir.join("exports"),
+                legacy_exports: Some(dir.join("L").join("exports")),
+                app_version: "3.0.0-test".into(),
+            }),
+    );
     let runtime: atm_ui_bridge::RuntimeStatus =
         Arc::new(|| json!({ "version": "3.0.0-test", "conversion": { "phase": "PUBLISHED" } }));
     World {

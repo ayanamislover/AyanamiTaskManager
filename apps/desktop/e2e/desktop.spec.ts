@@ -1679,6 +1679,58 @@ test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口"
   await expect(openData).toBeFocused();
 });
 
+// W6c：数据工具里导出 .aytproj，再从「导入项目包」把它导入为新项目（代码被占时预填空着的代码）。
+test("数据工具导出项目包后，从导入项目包导入为新项目", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const existing = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+    }>;
+    if (!existing.some((project) => project.code === "PKGUI")) {
+      const created = await api.post(`${apiUrl}/projects`, {
+        data: { name: "项目包验收", sourcePath: null, code: "PKGUI", description: "e2e" },
+      });
+      expect(created.ok()).toBeTruthy();
+    }
+    await page.goto("/#project:PKGUI");
+    await page.getByRole("button", { name: "数据工具", exact: true }).click();
+    const dataDialog = page.getByRole("dialog", { name: "备份、恢复与数据交换" });
+    await dataDialog.getByRole("button", { name: "导出 .aytproj" }).click();
+    const exported = page.getByText(/导出完成：.*PKGUI-.*\.aytproj/u);
+    await expect(exported).toBeVisible();
+    const path = ((await exported.textContent()) ?? "").replace(/^.*导出完成：/u, "").trim();
+    const name = path.split(/[\\/]/u).pop() ?? "";
+    expect(name).toMatch(/^PKGUI-.*\.aytproj$/u);
+
+    const row = dataDialog.locator(".atm-row", { hasText: name });
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: "预览" }).click();
+    const preview = dataDialog.getByTestId("package-preview");
+    await expect(preview).toContainText("PKGUI · 项目包验收");
+    await expect(preview).toContainText("已被占用");
+    const code = dataDialog.getByLabel("导入后的项目代码");
+    await expect(code).toHaveValue("PKGUI2");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-project-package-import.png"),
+      fullPage: true,
+    });
+    await code.fill("pkgcopy");
+    await expect(code).toHaveValue("PKGCOPY");
+    await preview.getByRole("button", { name: "导入为新项目" }).click();
+    await expect(page.getByText("已导入为新项目 PKGCOPY")).toBeVisible();
+    await expect(preview).toBeHidden();
+
+    const projects = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+      name: string;
+    }>;
+    expect(projects.find((project) => project.code === "PKGCOPY")?.name).toBe("项目包验收");
+    expect(projects.some((project) => project.code === "PKGUI")).toBeTruthy();
+  } finally {
+    await api.dispose();
+  }
+});
+
 // peer W5 r2：3.0 的备份是整库的，恢复必须指明范围。两个备份入口都要真的能备份、列出、按自己的范围恢复。
 test("项目与知识库的备份入口：立即备份后列出，并按项目、按知识库恢复", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });

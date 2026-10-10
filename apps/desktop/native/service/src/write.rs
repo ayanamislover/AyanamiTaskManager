@@ -151,6 +151,8 @@ pub struct Service {
     clock: Option<Clock>,
     /// 生命周期迁移前的 PRE_* 备份目录（04 L-002）。
     pub(crate) backups_root: Option<std::path::PathBuf>,
+    /// 导出与导入的位置（[`crate::exchange::ExchangeConfig`]）。
+    pub(crate) exchange: Option<crate::exchange::ExchangeConfig>,
     /// 测试用：PRE_* 备份做完、第二趟写入之前调用，模拟并发迁移抢先。
     pub(crate) backup_hook: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// 最近几次备份撤回的结果（有界诊断，`list_backups` 返回；W2 peer r2 P1-02）。
@@ -182,6 +184,7 @@ impl Service {
             store,
             clock: None,
             backups_root: None,
+            exchange: None,
             backup_hook: None,
             withdrawals: Default::default(),
             liveness: None,

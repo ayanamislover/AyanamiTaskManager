@@ -21,6 +21,11 @@ export type * from "./types.js";
 export type * from "./surfaces/sync.js";
 export type * from "./surfaces/dispatch.js";
 
+/** 一个可导入的来源：导出目录里的 `.aytproj`（按文件名点名），或一份 2.x 备份登记。 */
+export type ImportSourceRef =
+  | { kind: "PACKAGE"; origin: "EXPORTS" | "LEGACY_EXPORTS"; name: string }
+  | { kind: "LEGACY_BACKUP"; id: string };
+
 type SyncSurface = ReturnType<typeof createSyncSurface>;
 type DispatchSurface = ReturnType<typeof createDispatchSurface>;
 
@@ -179,6 +184,19 @@ export class AyanamiClient {
         "POST",
         `/api/v1/exports/${encodeURIComponent(project)}${queryString({ format })}`,
       ),
+    // 3.0：项目包（导出目录里的 .aytproj，含 2.0 的导出）与 2.x 备份的导入（W6c）。
+    importSources: () =>
+      this.request<{
+        packages: Array<Record<string, any>>;
+        legacyBackups: Array<Record<string, any>>;
+      }>("GET", "/api/v1/imports/packages"),
+    previewImport: (source: ImportSourceRef) =>
+      this.request<Record<string, any>>("POST", "/api/v1/imports/packages/preview", { source }),
+    applyImport: (source: ImportSourceRef, code?: string) =>
+      this.request<Record<string, any>>("POST", "/api/v1/imports/packages/apply", {
+        source,
+        ...(code ? { code } : {}),
+      }),
   };
 
   readonly tasks = createTasksSurface(this.request.bind(this));

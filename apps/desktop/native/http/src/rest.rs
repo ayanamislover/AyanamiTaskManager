@@ -418,6 +418,16 @@ pub const ROUTES: &[Route] = &[
     r(107, "GET", "/mcp/actions", Mcp),
     r(108, "DELETE", "/mcp/actions", Mcp),
     r(109, "GET", "/api/v1/ws", Gone),
+    // 3.0 新增（W6c，方案 §4）：项目包与 2.x 备份的导入。来源列表与预览只在 ui-bridge；导入只有 User，
+    // Agent HTTP 上是拒绝桩（说清楚去哪里操作，而不是 404）。
+    r(110, "GET", "/api/v1/imports/packages", U),
+    r(111, "POST", "/api/v1/imports/packages/preview", U),
+    r(
+        112,
+        "POST",
+        "/api/v1/imports/packages/apply",
+        UStar(Cap(C::ImportApply)),
+    ),
 ];
 
 /// 运行时补进 `/api/v1/system/status` 的部分（产品版本、启动时间、转换状态……）。服务层不知道这些。

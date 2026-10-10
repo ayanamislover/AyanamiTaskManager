@@ -25,6 +25,8 @@ const NOTIFY_FALLBACK: Duration = Duration::from_secs(5 * 60);
 
 pub struct Publish<'a> {
     pub layout: &'a Layout,
+    /// 旧根 `L`：只读。2.0 导出的 `.aytproj` v1 在它的 `exports\` 里，可以导入（W6c）。
+    pub legacy: &'a std::path::Path,
     pub version: &'a str,
     /// 发布物的 generation（`M.generation`），给 `/api/v1/system/status`。
     pub generation: &'a str,
@@ -87,6 +89,11 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     let svc = Arc::new(
         Service::new(store)
             .with_backups_root(p.layout.root.join("backups"))
+            .with_exchange(atm_service::exchange::ExchangeConfig {
+                exports: p.layout.root.join("exports"),
+                legacy_exports: Some(p.legacy.join("exports")),
+                app_version: p.version.to_string(),
+            })
             .with_liveness(Arc::new(atm_jobs::liveness::alive)),
     );
     let token = crate::rng::hex(32);

@@ -13,6 +13,7 @@ use atm_domain::evidence::{Evidence, EvidenceKind};
 use atm_domain::gate::ChecklistStatus;
 use atm_domain::principal::Principal;
 use atm_service::backups::RestoreScope;
+use atm_service::exchange::ImportFrom;
 use atm_service::knowledge::{ArchiveRequest, Content, SourceRef, UserSave};
 use atm_service::project::{CreateProjectRequest, PathInfo, Transition};
 use atm_service::quick::{QuickCreateRequest, QuickPromoteRequest, QuickUpdateRequest};
@@ -37,6 +38,10 @@ fn ok(v: Result<Value, DomainError>) -> Out {
 
 fn created(v: Result<Value, DomainError>) -> Out {
     v.map(Reply::created).map_err(svc)
+}
+
+fn import_from(i: &Input) -> Result<ImportFrom, Reply> {
+    ImportFrom::from_json(i.get("source").unwrap_or(&Value::Null)).map_err(svc)
 }
 
 fn invalid(message: &str) -> Reply {
@@ -402,15 +407,17 @@ fn route_call(ui: &Ui, p: &Principal, n: u16, i: &Input) -> Out {
                 .map_err(svc)?;
             Ok(Reply::ok(without(w.result, &["sequence"])))
         }
-        // `.aytproj` v2 的导出在 W6（方案 §4）；路由已按 R8 改成 User 的 POST。
-        27 => Err(error_reply(
-            503,
-            "SERVICE_UNAVAILABLE",
-            "导出功能在这个版本里还不可用",
-            false,
-            None,
+        // `.aytproj` v2 / JSON / CSV（方案 §4）；R8：User 的 POST，format 在查询串里（缺省 aytproj，与 2.0 相同）。
+        27 => ok(s.export_project(
+            p,
+            i.param("projectCode"),
+            i.q("format").unwrap_or("aytproj"),
         )),
         28 => ok(s.ui_objectives(p, i.param("code"))),
+        // 项目包与 2.x 备份的导入（W6c）：来源列表、只读预览、作为新项目 / 知识库导入。
+        110 => ok(s.import_sources(p)),
+        111 => ok(s.preview_import_source(p, &import_from(i)?)),
+        112 => ok(s.import_source(p, &import_from(i)?, i.str("code").as_deref())),
         29 => ok(s.ui_milestones(p, i.param("code"), i.q("objective"))),
         30 => ok(s.ui_sessions(
             p,

@@ -3,6 +3,7 @@
 
 pub mod backups;
 pub(crate) mod evidence;
+pub mod exchange;
 pub mod fp;
 pub mod knowledge;
 pub mod lineage;

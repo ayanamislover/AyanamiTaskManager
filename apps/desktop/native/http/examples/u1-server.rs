@@ -237,6 +237,11 @@ fn main() {
     let svc = Arc::new(
         Service::new(store)
             .with_backups_root(root.join("backups"))
+            .with_exchange(atm_service::exchange::ExchangeConfig {
+                exports: root.join("exports"),
+                legacy_exports: None,
+                app_version: "3.0.0-u1".into(),
+            })
             .with_liveness(Arc::new(atm_jobs::liveness::alive)),
     );
     let token = random_hex(64);

@@ -104,6 +104,10 @@ pub const UI_ROUTES: &[UiRoute] = &[
     r(94, "POST", "/api/v1/sync/test"),
     r(95, "POST", "/api/v1/sync/pairing"),
     r(96, "POST", "/api/v1/sync/reset"),
+    // 项目包与 2.x 备份的导入（W6c，3.0 新增）
+    r(110, "GET", "/api/v1/imports/packages"),
+    r(111, "POST", "/api/v1/imports/packages/preview"),
+    r(112, "POST", "/api/v1/imports/packages/apply"),
 ];
 
 /// 路径参数：`(名字, 已解码的值)`。

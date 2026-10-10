@@ -411,6 +411,7 @@ fn serve(
 ) -> Result<Started, BootError> {
     let opened = entries::publish(&entries::Publish {
         layout: &layout,
+        legacy: &o.legacy,
         version: &o.version,
         generation: &m.generation,
         handoff: o.handoff.as_ref(),
