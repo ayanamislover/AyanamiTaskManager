@@ -257,6 +257,42 @@ fn the_service_runs_inside_the_host_process() {
     );
 }
 
+/// 宿主的依赖声明打开 e2e 特性的地方（`features = [... "e2e" ...]` 或 `[features]` 里转发 `/e2e`）。
+fn e2e_features(manifest: &str) -> Vec<String> {
+    manifest
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter(|l| l.contains("\"e2e\"") || l.contains("/e2e\""))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// P-012：e2e 的界面来源（`User{E2eTest}`）只在测试构建里。成功例：这次构建里 `E2E_SURFACE` 是 false，宿主的
+/// 编译期断言在、依赖声明没打开 e2e。反例：依赖声明打开 e2e 的写法守卫认得出（阳性对照）；真被打开时宿主编译
+/// 不过（`main.rs` 的 `const _: () = assert!`）。最终候选二进制的符号与监听检查在 W8 打包时绑定哈希。
+#[test]
+fn p012_the_host_is_never_built_with_the_e2e_surface() {
+    const { assert!(!atm_domain::principal::E2E_SURFACE) };
+    let main = source("main.rs");
+    assert!(
+        main.contains("const _: () = assert!(\n    !atm_domain::principal::E2E_SURFACE"),
+        "the compile-time guard is in main.rs"
+    );
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    let found = e2e_features(&manifest);
+    assert!(found.is_empty(), "host/Cargo.toml enables e2e: {found:?}");
+    assert_eq!(
+        e2e_features(
+            "atm-domain = { path = \"../domain\", features = [\"e2e\"] }\n\
+             [features]\nui = [\"atm-ui-bridge/e2e\"]\n# \"e2e\" in a comment"
+        )
+        .len(),
+        2
+    );
+}
+
 /// `fn on_second_instance` 的函数体（到下一个同级方法为止）。
 fn second_instance_body(app: &str) -> &str {
     let start = app

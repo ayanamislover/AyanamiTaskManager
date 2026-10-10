@@ -862,6 +862,120 @@ fn writes_refresh_the_git_context_but_replays_do_not() {
     assert_eq!(branch().as_deref(), Some("last"), "end 之后刷新");
 }
 
+/// 00 C-20：review_submit 完成 Review 任务，提交后观测与 complete 一致：刷新评审者 session 的 git 上下文；
+/// 同一 op_id 的重放不刷新。
+#[test]
+fn c20_review_submit_refreshes_the_reviewers_git_context() {
+    let w = world("write-review-git");
+    let repo = w.dir.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=atm",
+                "-c",
+                "user.email=atm@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"])
+            .args(args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+    let created = ok(&call(
+        &w,
+        "core",
+        "atm_task_create",
+        json!({"session": w.session, "items": [
+            {"title": "被审任务", "checklist": [{"title": "独立评审"}]},
+            {"title": "评审", "type": "review", "parent": "1"},
+        ]}),
+    ))
+    .clone();
+    let parent = created["refs"]["1"].as_str().unwrap().to_owned();
+    let review = created["refs"]["2"].as_str().unwrap().to_owned();
+    let checklist = created["checklist"][&parent][0]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let asked = ok(&call(
+        &w,
+        "core",
+        "atm_task_patch",
+        json!({"session": w.session, "task_key": review, "operation": "review_request", "expected_version": 1,
+               "parent_checklist_id": checklist, "expected_parent_checklist_version": 0,
+               "candidate_hashes": {"source": "abcdef1"}}),
+    ))
+    .clone();
+    let request = asked["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["entity_type"] == "REVIEW_REQUEST")
+        .and_then(|e| e["key"].as_str())
+        .unwrap()
+        .to_owned();
+    let reviewer = ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_begin",
+        json!({"agent_id": "codex", "project": w.project, "role": "reviewer", "resume": false,
+               "brief": "none", "cwd": repo.display().to_string()}),
+    ))["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let branch = || -> Option<String> {
+        let s = reviewer.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row(
+                    "SELECT git_branch FROM agent_sessions WHERE id = ?1",
+                    [&s],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap()
+    };
+    assert_eq!(branch().as_deref(), Some("main"));
+    git(&["checkout", "-q", "-b", "review"]);
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_task_patch",
+        json!({"session": reviewer, "task_key": review, "operation": "start", "expected_version": 1}),
+    ));
+    assert_eq!(branch().as_deref(), Some("main"), "start 不刷新");
+    let submit = json!({"session": reviewer, "task_key": review, "operation": "review_submit",
+                        "expected_version": 2, "request_key": request, "verdict": "approved",
+                        "candidate_hashes": {"source": "abcdef1"}, "op_id": "c20-submit",
+                        "evidence": [{"kind": "test_result", "value": "评审通过"}]});
+    ok(&call_as(
+        &w,
+        Some(CLI),
+        "core",
+        "atm_task_patch",
+        submit.clone(),
+    ));
+    assert_eq!(
+        branch().as_deref(),
+        Some("review"),
+        "review_submit 之后刷新"
+    );
+
+    git(&["checkout", "-q", "-b", "later"]);
+    let replay = ok(&call_as(&w, Some(CLI), "core", "atm_task_patch", submit)).clone();
+    assert_eq!(replay["replayed"], json!(true), "{replay}");
+    assert_eq!(branch().as_deref(), Some("review"), "重放不刷新");
+}
+
 /// begin 遇到垃圾箱里的项目：恢复请求已经在这次 begin 的事务里登记并提交，信封如实报 committed:true、
 /// retryable:false（peer W4 r1 P1-05），与库里的实际状态一致。
 #[test]

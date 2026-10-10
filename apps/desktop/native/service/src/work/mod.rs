@@ -375,7 +375,7 @@ impl Service {
             };
             Some(JsValue::from_json(&value))
         });
-        self.write(
+        let written = self.write(
             principal,
             target.request(
                 Capability::ReviewSubmit,
@@ -386,7 +386,14 @@ impl Service {
                 let mut w = core::Work::open(tx, ctx)?;
                 review::submit(&mut w, &req)
             },
-        )
+        )?;
+        // 00 C-20：完成 Review 任务的提交后观测与 complete 一致（2.x 漏了）：已有 baseline 就补扫工程指标。
+        if !written.replayed
+            && let Some(review) = written.result["reviewTask"]["key"].as_str()
+        {
+            self.metrics_signal(&target.project_id, vec![review.to_owned()], false);
+        }
+        Ok(written)
     }
 }
 

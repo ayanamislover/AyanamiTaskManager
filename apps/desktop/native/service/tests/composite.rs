@@ -1263,6 +1263,50 @@ fn w063_review_submit_replays() {
     assert_eq!(w.snapshot(), before);
 }
 
+/// 00 C-20：review_submit 完成 Review 任务后的提交后观测与 complete 一致：交出 Review 任务的补扫信号；
+/// 重放与失败的提交都不交。
+#[test]
+fn c20_review_submit_signals_the_metrics_capture_like_complete() {
+    let w = world("rv-c20");
+    let s = review_setup(&w);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    w.svc.set_metrics_sink(Some(std::sync::Arc::new(move |sig| {
+        sink.lock().unwrap().push(sig)
+    })));
+    let take = || std::mem::take(&mut *seen.lock().unwrap());
+    w.request_as("S1", &s, 1, 0).unwrap();
+    assert!(take().is_empty(), "review_request sends nothing");
+    w.start_as("RV", &s.review);
+    take();
+    // 失败（版本不对）：没有提交，不交。
+    let bad = Target::new("PA", Some("RV"), "c20-bad");
+    assert!(
+        w.svc
+            .submit_review(&agent(), &bad, submission(&s, 99, Verdict::Approved))
+            .is_err()
+    );
+    let t = Target::new("PA", Some("RV"), "c20-submit");
+    assert!(take().is_empty(), "a failed submit sends nothing");
+    w.svc
+        .submit_review(&agent(), &t, submission(&s, 2, Verdict::Approved))
+        .unwrap();
+    assert_eq!(
+        take(),
+        [atm_service::metrics::Signal {
+            project_id: "PA".into(),
+            task_keys: vec![s.review.clone()],
+            establish: false,
+        }]
+    );
+    let again = w
+        .svc
+        .submit_review(&agent(), &t, submission(&s, 2, Verdict::Approved))
+        .unwrap();
+    assert!(again.replayed);
+    assert!(take().is_empty(), "a replay sends nothing");
+}
+
 // ---------- 追溯补齐（W2h2） ----------
 
 /// W-114：三层链 G→P→C，C 的检查项更新后 C、P、G 都重算并各 +1；只重算 C 会让 P、G 的聚合过期。

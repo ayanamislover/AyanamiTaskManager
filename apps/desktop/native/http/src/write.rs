@@ -188,7 +188,8 @@ impl Surface {
     }
 
     /// 写入之后刷新写入者 session 的 git 上下文（2.x 的边界：进度、verify、complete、verify_and_complete、
-    /// end）。重放不刷新（00 C-03）。尽力而为：git 或刷新失败都不影响已经提交的写入。
+    /// end；00 C-20 补上完成 Review 任务的 review_submit）。重放不刷新（00 C-03）。尽力而为：git 或刷新失败
+    /// 都不影响已经提交的写入。
     fn refresh_git(&self, p: &Principal, tool: &Tool, a: &Args<'_>, ack: &Value) {
         if ack["replayed"] == json!(true) {
             return;
@@ -206,7 +207,7 @@ impl Surface {
                 flat.chain(items).filter_map(Value::as_str).any(|op| {
                     matches!(
                         op.to_ascii_lowercase().as_str(),
-                        "verify" | "complete" | "verify_and_complete"
+                        "verify" | "complete" | "verify_and_complete" | "review_submit"
                     )
                 })
             }

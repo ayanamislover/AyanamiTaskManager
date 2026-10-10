@@ -5,8 +5,8 @@
 //!   返回与 [`Service::metrics_read`] 同形状的视图。界面的「刷新统计」走这里；读（GET）永远不扫（P-014）。
 //! - **采集**（job `metrics.capture`）：任务操作提交之后，入口把「哪些任务、要不要记 baseline」交给
 //!   [`Service::set_metrics_sink`] 登记的去处（2.x 在同样的位置调 `captureWorkItemEngineeringMetrics`）：
-//!   claim / start 记 baseline，complete / cancel、`verify_and_complete`、atm_end 释放的任务只在已有 baseline
-//!   时补扫。采集线程再调 [`Service::metrics_capture`]。
+//!   claim / start 记 baseline，complete / cancel、`verify_and_complete`、完成 Review 任务的 `review_submit`
+//!   （00 C-20）、atm_end 释放的任务只在已有 baseline 时补扫。采集线程再调 [`Service::metrics_capture`]。
 //! - baseline 只记一次（2.x `ON CONFLICT DO NOTHING`）：它锚的是任务从哪个 commit 开始。
 //! - git 永远不在事务里跑：先读源码目录（读事务），再扫（无事务），最后一笔短写落库。扫描在
 //!   `metrics_lock` 下逐个进行，后开始的后落库，界面刚刷出来的数字不会被更早开始的补扫盖掉。

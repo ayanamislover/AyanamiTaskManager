@@ -1744,6 +1744,16 @@ fn is_ulid(s: &str) -> bool {
             .all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b))
 }
 
+/// R7‴ 晋升历史的关联状态（只进报告）：quick 的 `(status, promoted_project_id)` 对照这一行所在的项目。
+fn promotion_status(quick: Option<&(String, Option<String>)>, project: &str) -> &'static str {
+    match quick {
+        None => "QUICK_MISSING",
+        Some((s, Some(target))) if s == "PROMOTED" && target == project => "MATCHED",
+        Some((s, Some(_))) if s == "PROMOTED" => "OTHER_TARGET",
+        Some(_) => "UNMARKED",
+    }
+}
+
 /// R7‴：前缀 = key 去掉末尾的 `:` + op_id；key 等于 op_id 时前缀为空。返回 None 表示 F1。
 fn prefix_of<'a>(key: &'a str, op: &str) -> Option<&'a str> {
     if key == op {
@@ -2234,12 +2244,7 @@ fn finish(
         }
     }
     for (pid, q) in promotions {
-        let status = match quick.get(q) {
-            None => "QUICK_MISSING",
-            Some((s, Some(target))) if s == "PROMOTED" && target == pid => "MATCHED",
-            Some((s, Some(_))) if s == "PROMOTED" => "OTHER_TARGET",
-            Some(_) => "UNMARKED",
-        };
+        let status = promotion_status(quick.get(q), pid);
         *report
             .promotion_status
             .entry(status.to_string())
@@ -4069,5 +4074,165 @@ mod tests {
         assert!(work >= 3, "the target connection moved {work}");
         drop(metered);
         assert_eq!(work_of(&crate::open(&target).unwrap()), 0);
+    }
+
+    /// 10 R7‴ 的验收向量，逐条照规格的编号（期望类直接写在这里，不由分类函数生成）。第 5 类是
+    /// PROMOTION_HISTORY，第 6 类是 LEGACY_UNCLASSIFIED。整库形状的向量（夹具里的回执、F1–F3 让转换失败、
+    /// 逐值相等）在 `tests/legacy.rs`；第 9 条是 3.0 的晋升，在 `service/tests/quick.rs`。
+    #[test]
+    fn r7_acceptance_vectors_classify_as_the_spec_lists() {
+        use super::{LegacyRow, classify, promotion_status};
+        use std::collections::HashSet;
+        const ULID: &str = "01J0000000000000000000000A";
+        let sessions: HashSet<String> = ["S1".to_string()].into();
+        let promoters: HashSet<String> = [
+            "codex",
+            "review-agent-42",
+            "S1",
+            "session-begin",
+            "review:agent-42",
+            "session-begin:worker",
+            "S1:worker",
+        ]
+        .map(String::from)
+        .into();
+        let row =
+            |key: &str, operation: &str, op_id: Option<&str>, actor: Option<&str>| LegacyRow {
+                key: key.into(),
+                operation: operation.into(),
+                op_id: op_id.map(String::from),
+                actor_session_id: actor.map(String::from),
+            };
+        let class = |r: LegacyRow| {
+            let c =
+                classify(&r, &sessions, &promoters).unwrap_or_else(|e| panic!("{}: {e}", r.key));
+            (
+                c.class,
+                c.ns.map(|(k, v)| format!("{k}/{v}")),
+                c.promotion_shaped_agent,
+            )
+        };
+        let promotion = |key: &str, actor: Option<&str>| {
+            let op = key.rsplit(':').next().unwrap().to_owned();
+            row(key, "work.create.batch", Some(&op), actor)
+        };
+        let objective = |prefix: &str| {
+            let op = format!("objective-{ULID}");
+            row(
+                &format!("{prefix}:{op}"),
+                "objective.create",
+                Some(&op),
+                None,
+            )
+        };
+        let history = ("PROMOTION_HISTORY", None, false);
+        let unclassified = ("LEGACY_UNCLASSIFIED", None, false);
+
+        // 1–3、10、12：动态 actor、本项目的 session S、`session-begin`、含冒号的 actor 的实时晋升，
+        // 已有规划与补建规划两种 → 第 5 类（不是 AGENT，也不是 BEGIN）。
+        for prefix in [
+            "codex",
+            "review-agent-42",
+            "S1",
+            "session-begin",
+            "review:agent-42",
+            "session-begin:worker",
+            "S1:worker",
+        ] {
+            assert_eq!(
+                class(promotion(&format!("{prefix}:promote-Q"), None)),
+                history,
+                "{prefix}"
+            );
+            assert_eq!(class(objective(prefix)), history, "{prefix} supplement");
+        }
+        // 5：0007 回填形状。动态 actor 的 actor_session_id 等于前缀 → 第 5 类；恰好等于 session S → AGENT，
+        // 标 PROMOTION_SHAPED_AGENT。
+        assert_eq!(class(promotion("codex:promote-Q", Some("codex"))), history);
+        assert_eq!(
+            class(promotion("S1:promote-Q", Some("S1"))),
+            ("AGENT", Some("SESSION/S1".into()), true)
+        );
+        // 6：Agent 自选 `promote-xxx` 的实时写入 → AGENT，S 的 lineage 能重放。
+        assert_eq!(class(promotion("S1:promote-mine", Some("S1"))).0, "AGENT");
+        // 7：USER 行只看前缀（分类不读时间，时钟回拨、未来、相等都一样）→ 第 2 类。
+        assert_eq!(
+            class(row("USER:u1", "work.update", Some("u1"), None)),
+            ("USER", Some("ACTOR/USER".into()), false)
+        );
+        // 8：前缀未知、没有来源的自洽行，以及前缀为空 → 第 6 类。
+        assert_eq!(
+            class(row("mystery:m1", "work.update", Some("m1"), None)),
+            unclassified
+        );
+        assert_eq!(
+            class(row("loneop", "work.update", Some("loneop"), None)),
+            unclassified
+        );
+        // 11：同一个 key 的回填形状（op_id 只取首冒号之后、actor 为 `review`）→ 前缀 `review`，不是晋升形状，第 6 类。
+        assert_eq!(
+            class(row(
+                "review:agent-42:promote-Q",
+                "work.create.batch",
+                Some("agent-42:promote-Q"),
+                Some("review")
+            )),
+            unclassified
+        );
+        // 13：`S1:worker:promote-Q` 的回填形状（op_id `worker:promote-Q`、actor 为 S）→ AGENT。
+        assert_eq!(
+            class(row(
+                "S1:worker:promote-Q",
+                "work.create.batch",
+                Some("worker:promote-Q"),
+                Some("S1")
+            )),
+            ("AGENT", Some("SESSION/S1".into()), false)
+        );
+
+        // 14–16：F1（key 不以 `:op_id` 结尾、op_id 为 NULL）、F2（actor 是别的 session）、F3（begin 配了别的前缀，
+        // 或者带了 actor）。
+        let fail = |r: LegacyRow| {
+            classify(&r, &sessions, &promoters)
+                .err()
+                .unwrap_or_default()
+        };
+        assert!(fail(row("S1:x1", "work.update", Some("other"), None)).starts_with("F1"));
+        assert!(fail(row("S1:x1", "work.update", None, None)).starts_with("F1"));
+        assert!(fail(row("S1:x2", "work.update", Some("x2"), Some("T9"))).starts_with("F2"));
+        assert!(fail(row("S1:b1", "session.recover-or-begin", Some("b1"), None)).starts_with("F3"));
+        assert!(
+            fail(row(
+                "session-begin:b2",
+                "session.recover-or-begin",
+                Some("b2"),
+                Some("session-begin")
+            ))
+            .starts_with("F3")
+        );
+        assert_eq!(
+            class(row(
+                "session-begin:b3",
+                "session.recover-or-begin",
+                Some("b3"),
+                None
+            ))
+            .0,
+            "BEGIN"
+        );
+
+        // 4：关联状态。过期版本没标上 → UNMARKED；同一目标重试成功 → MATCHED；换目标 B 成功 → A 的行 OTHER_TARGET；
+        // registry 里没有这个 quick → QUICK_MISSING。
+        let q = |status: &str, target: Option<&str>| (status.to_string(), target.map(String::from));
+        assert_eq!(promotion_status(Some(&q("OPEN", None)), "PA"), "UNMARKED");
+        assert_eq!(
+            promotion_status(Some(&q("PROMOTED", Some("PA"))), "PA"),
+            "MATCHED"
+        );
+        assert_eq!(
+            promotion_status(Some(&q("PROMOTED", Some("PB"))), "PA"),
+            "OTHER_TARGET"
+        );
+        assert_eq!(promotion_status(None, "PA"), "QUICK_MISSING");
     }
 }

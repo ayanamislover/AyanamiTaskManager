@@ -3,7 +3,7 @@
 //! 输入三样：
 //! - `trace/rules.tsv`：从规格抽出的编号快照（规格目录不进仓库；`output/w2-evidence/spec-trace-extract.py --check`
 //!   负责确认快照没过期）；
-//! - 工作区 domain / store / service / http / jobs 里全部 `#[test]` 函数：测试名里的 `w052`、`s080`、`p005`、`l112` 这类 token 自动算作覆盖；
+//! - 工作区 domain / store / service / http / jobs / host / ui-bridge / runtime / cli / agents 里全部 `#[test]` 函数：测试名里的 `w052`、`s080`、`p005`、`l112` 这类 token 自动算作覆盖；
 //! - `TRACE.md` 的映射表：测试名里没带编号的覆盖、被裁决取代的规则、留给后续阶段的去向。
 //!
 //! 失败条件：
@@ -12,10 +12,23 @@
 //! - 测试名引用了不存在的编号；
 //! - 映射表写了不存在的编号或用例，或者结论写法不对；
 //! - TRACE.md 里生成的 D01–D35 矩阵和汇总与当前计算结果不一致（`ATM_TRACE_BLESS=1` 重写）。
+//! - 去向指向已经过了关口的阶段（[`PHASES_DONE`]）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// 已经过了关口的阶段（W3–W6）：表里再写 `PARTIAL(Wn)` / `DEFERRED(Wn)` 且 n 不大于它，就是把没做完的
+/// 留在了已经关上的阶段里（W6i 验收：TRACE 无 DEFERRED(W6) / PARTIAL(W6)）。
+const PHASES_DONE: u8 = 6;
+
+/// 去向指向已经关上的阶段。
+fn stale(verdict: &Verdict) -> Option<u8> {
+    match verdict {
+        Verdict::Partial(n) | Verdict::Deferred(n) if *n <= PHASES_DONE => Some(*n),
+        _ => None,
+    }
+}
 
 const MAP_BEGIN: &str = "<!-- trace:map -->";
 const MAP_END: &str = "<!-- /trace:map -->";
@@ -132,6 +145,9 @@ fn load_tests() -> Vec<TestFn> {
         "jobs",
         "host",
         "ui-bridge",
+        "runtime",
+        "cli",
+        "agents",
     ] {
         rust_files(&root.join(krate), &mut files);
     }
@@ -336,6 +352,12 @@ fn every_rule_is_traced_to_tests_or_a_later_phase() {
         {
             errors.push(format!("TRACE.md {id}: {:?} needs a note", row.verdict));
         }
+        if let Some(n) = stale(&row.verdict) {
+            errors.push(format!(
+                "TRACE.md {id}: {:?} points at W{n}, which has passed its gate",
+                row.verdict
+            ));
+        }
         let entry = resolved.entry(id.clone()).or_default();
         for r in &row.tests {
             if by_ref.contains_key(r) {
@@ -479,4 +501,21 @@ fn render(rules: &BTreeMap<String, Rule>, resolved: &BTreeMap<String, Resolved>)
     }
     s.push('\n');
     s
+}
+
+/// 阳性对照：指向已经关上的阶段的去向认得出来，后续阶段与其他结论放行。
+#[test]
+fn a_verdict_on_a_closed_phase_is_recognised() {
+    for (text, closed) in [
+        ("PARTIAL(W6)", Some(6)),
+        ("DEFERRED(W6)", Some(6)),
+        ("PARTIAL(W3)", Some(3)),
+        ("DEFERRED(W7)", None),
+        ("PARTIAL(W8)", None),
+        ("COVERED", None),
+        ("NA", None),
+    ] {
+        let v = parse_verdict(text).unwrap();
+        assert_eq!(stale(&v), closed, "{text}");
+    }
 }

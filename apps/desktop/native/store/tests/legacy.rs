@@ -4324,6 +4324,15 @@ fn in_flight_transactions_are_settled_like_2x_startup() {
             "P7: MIGRATION_FAILED -> ACTIVE",
         ]
     );
+    // 04 C-L02：没有健康库的 CREATING 不导入数据，报告写明舍弃的理由。
+    for scope in ["P5", "P8"] {
+        let s = report
+            .settlements
+            .iter()
+            .find(|s| s.scope == scope)
+            .unwrap();
+        assert!(s.how.contains("no healthy database"), "{scope}: {}", s.how);
+    }
     notes_contain(
         &report,
         "P4/manifest.json: missing; the creation was interrupted after the rename (2.0 writes it afterwards)",
