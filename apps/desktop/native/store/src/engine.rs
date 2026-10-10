@@ -366,6 +366,7 @@ impl Store {
         }
         let root = crate::pin::open(parent)
             .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
+        refuse_loopback(parent, root.id().0).map_err(|e| StoreError::Io(e.to_string()))?;
         let real = root.path().join(name);
         #[cfg(test)]
         after_pin(path);
@@ -1190,6 +1191,11 @@ impl Location {
         Location::unsupported()
     }
 
+    /// UNC 写法（含映射到网络共享的盘符）。
+    pub(crate) fn unc(&self) -> bool {
+        self.kind == Some(Space::Unc) && !self.gaps
+    }
+
     /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。不支持的写法不在任何
     /// 位置之下。
     pub(crate) fn below<'a>(&'a self, base: &Location) -> Option<&'a [std::ffi::OsString]> {
@@ -1347,6 +1353,86 @@ fn nt_path(p: &Path) -> Option<Vec<u16>> {
     let mut units: Vec<u16> = r"\??\".encode_utf16().collect();
     units.extend(wide(abs.as_os_str()));
     Some(units)
+}
+
+/// UNC 写法（含映射到网络共享的盘符）打开的目录落在本机的卷上就拒绝：本机的目录要用盘符写。
+///
+/// 经本机共享回到本机的写法（`\\localhost\C$\…`、本机名、映射到本机共享的盘符……）在字面上认不出是数据根的哪种
+/// 写法，当成外部位置就会跟着它路径上的链接走，换向之后落到别处（与 peer W6 r9 的 `GLOBALROOT` 同一类）。服务器名
+/// 的别名列举不完，所以不按名字判断，按打开之后句柄所在的卷判断：卷序列号与本机任一个卷相同（含没有盘符、挂在目录
+/// 上的卷）就拒绝。`volume` 是打开的句柄的卷序列号；数据根与外部位置钉住时都过这一道。
+pub(crate) fn refuse_loopback(spelled: &Path, volume: u32) -> std::io::Result<()> {
+    if Location::of(spelled).unc() && local_volume_serials().contains(&volume) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} is a network path to a volume of this machine; use its drive path instead",
+                spelled.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 本机所有卷（`FindFirstVolumeW` 列出的，含没有盘符的）的序列号；读不到的卷（没插盘的光驱之类）跳过。
+#[cfg(windows)]
+pub(crate) fn local_volume_serials() -> Vec<u32> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FindFirstVolumeW(name: *mut u16, len: u32) -> isize;
+        fn FindNextVolumeW(find: isize, name: *mut u16, len: u32) -> i32;
+        fn FindVolumeClose(find: isize) -> i32;
+        fn GetVolumeInformationW(
+            root: *const u16,
+            name: *mut u16,
+            name_len: u32,
+            serial: *mut u32,
+            max_component: *mut u32,
+            flags: *mut u32,
+            fs_name: *mut u16,
+            fs_name_len: u32,
+        ) -> i32;
+    }
+    const INVALID: isize = -1;
+    let mut serials = Vec::new();
+    let mut name = vec![0u16; 1024];
+    // SAFETY: 缓冲长度如实给出；返回的查找句柄在下面用 FindVolumeClose 关掉。
+    let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+    if find == INVALID {
+        return serials;
+    }
+    loop {
+        let mut serial = 0u32;
+        // SAFETY: `name` 是 FindFirstVolumeW / FindNextVolumeW 写下的、以 0 结尾的卷名（`\\?\Volume{…}\`）；
+        // 不要的输出给空指针。
+        let ok = unsafe {
+            GetVolumeInformationW(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+                &mut serial,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ok != 0 {
+            serials.push(serial);
+        }
+        // SAFETY: 同上。
+        if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } == 0 {
+            break;
+        }
+    }
+    // SAFETY: `find` 是上面拿到的有效查找句柄，只关一次。
+    unsafe { FindVolumeClose(find) };
+    serials
+}
+
+#[cfg(not(windows))]
+pub(crate) fn local_volume_serials() -> Vec<u32> {
+    Vec::new()
 }
 
 /// 盘符指向的目标（`QueryDosDeviceW`）：subst 是 `\??\…`，网络映射是重定向器下的路径，本地卷是 `\Device\…`。

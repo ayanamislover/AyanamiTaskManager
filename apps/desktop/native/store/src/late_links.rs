@@ -1166,3 +1166,89 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
         unlink(&alias);
     }
 }
+
+/// 同类通道（r10 之后自查）：经本机共享回到本机的写法字面上认不出是数据根，当成外部位置会跟着路径上的链接走。
+/// 用例把数据根所在的盘符 L 注入成「映射到本机共享的网络盘符」（`\Device\LanmanRedirector\;L:…\localhost\L$`），
+/// 于是同一个路径在位置判定里是 UNC、打开的却是本机的卷。提前换向之后：
+/// - `create_backup`、`export_project` 以这种写法的数据根下的位置调用：拒绝（错误说明是本机的卷），FOREIGN 的哨兵与
+///   标记都在，ORIGINAL 也什么都没多；
+/// - `Store::open` 用这种写法打开：拒绝。
+#[test]
+fn a_network_path_back_to_this_machine_is_refused() {
+    for entry in ["backup", "export", "open"] {
+        let (_b, real, foreign, alias, store, other) = two_roots(&format!("loopback-{entry}"));
+        let kept = foreign_sentinels(&foreign);
+        let s = alias.to_string_lossy().into_owned();
+        let own = s[..2].to_ascii_uppercase();
+        let share: Vec<u16> = format!(
+            r"\Device\LanmanRedirector\;{own}0000000000012345\localhost\{}$",
+            &own[..1]
+        )
+        .encode_utf16()
+        .collect();
+        let _guard = DosDevices::set(move |d| {
+            if String::from_utf16_lossy(d).eq_ignore_ascii_case(&own) {
+                Some(share.clone())
+            } else {
+                crate::engine::query_dos_device(d)
+            }
+        });
+        let before = fs::read_dir(real.join("N"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let old = swing(&alias, &foreign);
+        let why = match entry {
+            "backup" => create_backup(
+                &store,
+                &alias.join("N").join("backups"),
+                "MANUAL",
+                "2026-10-10T12:00:00Z",
+            )
+            .map(|i| i.id)
+            .map_err(|e| e.to_string()),
+            "export" => crate::package::export_project(
+                &store,
+                "PA",
+                crate::package::Format::Json,
+                &crate::package::ExportOptions {
+                    exports_dir: &alias.join("N").join("exports"),
+                    at: "2026-10-10T12:00:00Z",
+                    app_version: "test",
+                },
+            )
+            .map(|e| e.path.display().to_string())
+            .map_err(|e| e.to_string()),
+            _ => Store::open(&alias.join("N").join("atm.sqlite"), Config::default())
+                .map(|_| "opened".to_owned())
+                .map_err(|e| e.to_string()),
+        };
+        swing_back(&alias, &old);
+        let why = why.expect_err(entry);
+        assert!(
+            why.contains("is a network path to a volume of this machine"),
+            "{entry}: {why}"
+        );
+        for f in &kept {
+            assert!(f.exists(), "{entry}: {} was removed", f.display());
+        }
+        let after = fs::read_dir(real.join("N"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(before, after, "{entry}");
+        drop(store);
+        drop(other);
+        unlink(&alias);
+    }
+}
+
+/// 本机卷的列举认得出数据根所在的卷；不是 UNC 的写法不过这一道。
+#[test]
+fn the_volumes_of_this_machine_are_listed() {
+    let b = base("volumes");
+    fs::create_dir_all(&b).unwrap();
+    let serial = crate::pin::open(&b).unwrap().id().0;
+    assert!(crate::engine::local_volume_serials().contains(&serial));
+    assert!(crate::engine::refuse_loopback(&b, serial).is_ok());
+}
