@@ -247,7 +247,9 @@ impl Agents {
         };
         // 先把要改的配置读一遍、算出结果：认不出的、改不了的在动规则与 Skill 之前就拒绝（peer W6 r2 P2-02）。
         if action != Action::Preview {
-            config::preflight(&self.env, c, action == Action::Uninstall)?;
+            let profiles = self.profiles();
+            let plan = (action != Action::Uninstall).then_some(profiles.as_slice());
+            config::preflight(&self.env, c, plan)?;
         }
         let rule = rules::manage(&self.rule_path(c), rule_action)?;
         if action == Action::Preview {

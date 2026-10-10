@@ -17,8 +17,8 @@
 
 use crate::Store;
 use crate::backup::{
-    BackupError, Result, VerifiedBackup, artifacts_root, attachments_lock, copy_tree,
-    create_backup_locked, path_str, pin, side_reader, verify_backup,
+    AttachmentsGuard, BackupError, BackupsRoot, Result, VerifiedBackup, attachments_lock,
+    copy_tree, create_backup_locked, path_str, pin, side_reader, verify_backup,
 };
 use crate::events::{HighWater, NewEvent, append_event, append_global, ulid};
 use crate::search::rebuild_knowledge_fts;
@@ -110,18 +110,19 @@ pub fn restore_project(
     project_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock(store, "restore_project")?;
+    let mut serial = attachments_lock(store, "restore_project")?;
     // 上一次恢复没换完的附件先换完；换不完就拒绝，不覆盖它的暂存。
-    finish_swaps_locked(store)?;
+    finish_swaps_locked(store, &mut serial)?;
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
-    crate::backup::sweep_withdrawn_locked(store, opts.backups_root);
+    let mut backups = BackupsRoot::pin(opts.backups_root)?;
+    crate::backup::sweep_withdrawn_locked(store, &mut backups);
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup_locked(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, &mut backups, &serial, "PRE_RESTORE", opts.at)?;
 
     // 附件：先暂存，事务里只写世代标记的「意图」，提交后换入。
-    let staging = stage_attachments(store.path(), &vb, project_id)?;
+    let staging = stage_attachments(&mut serial, &vb, project_id)?;
 
     let ctx = ProjectCtx {
         project_id: project_id.to_string(),
@@ -147,7 +148,7 @@ pub fn restore_project(
     // 成功：标记里的世代已在库里，换入暂存。失败：事务回滚，世代不在库里，丢弃暂存；
     // 作业在写标记之前就失败时没有标记，暂存目录在这里直接删。
     // 库已提交而换入失败时返回 AttachmentsPending：调用方不能把它当作已回滚。
-    let finished = finish_swaps_locked(store);
+    let finished = finish_swaps_locked(store, &mut serial);
     if outcome.is_err() && !staging.marker.exists() && staging.dir.exists() {
         let _ = fs::remove_dir_all(&staging.dir);
     }
@@ -162,10 +163,11 @@ pub fn restore_knowledge(
     backup_id: &str,
     opts: &RestoreOptions<'_>,
 ) -> Result<RestoreOutcome> {
-    let _serial = attachments_lock(store, "restore_knowledge")?;
-    finish_swaps_locked(store)?;
+    let mut serial = attachments_lock(store, "restore_knowledge")?;
+    finish_swaps_locked(store, &mut serial)?;
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
-    crate::backup::sweep_withdrawn_locked(store, opts.backups_root);
+    let mut backups = BackupsRoot::pin(opts.backups_root)?;
+    crate::backup::sweep_withdrawn_locked(store, &mut backups);
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.db)?;
     let present: bool =
@@ -177,7 +179,7 @@ pub fn restore_knowledge(
         return Err(BackupError::ScopeMissing("knowledge".into()));
     }
     pin(store, backup_id, opts.pin_until)?;
-    let pre = create_backup_locked(store, opts.backups_root, "PRE_RESTORE", opts.at)?;
+    let pre = create_backup_locked(store, &mut backups, &serial, "PRE_RESTORE", opts.at)?;
     let ctx = KnowledgeCtx {
         backup_id: backup_id.to_string(),
         pre_id: pre.id.clone(),
@@ -705,17 +707,25 @@ struct Staging {
 }
 
 /// 把备份里属于 `project_id` 的附件复制进暂存目录，并核对与 manifest 一致。
-fn stage_attachments(db_path: &Path, vb: &VerifiedBackup, project_id: &str) -> Result<Staging> {
-    let root = artifacts_root(db_path);
-    let staging_root = root.join(STAGING_DIR);
+///
+/// 附件根与 `.restore-staging` 钉住（不存在就排他新建）；这个项目的暂存目录排他新建、复制与核对期间一直钉着
+/// （peer W6 r3 P1-01）。返回前放开：提交之后要把它改名换入。
+fn stage_attachments(
+    guard: &mut AttachmentsGuard,
+    vb: &VerifiedBackup,
+    project_id: &str,
+) -> Result<Staging> {
+    let staging_root = guard.ensure(&[STAGING_DIR])?;
     let staged = staging_root.join(project_id);
-    if staged.exists() {
+    // 上一次留下的：放在钉住的 `.restore-staging` 里；是链接的话 remove_dir_all 只删链接本身。
+    if fs::symlink_metadata(&staged).is_ok() {
         fs::remove_dir_all(&staged)?;
     }
     // 备份里这个项目没有附件时也要有暂存目录：换入后，备份点之后新增的附件随之移走。
-    fs::create_dir_all(&staged)?;
+    let owned = guard.create_owned(&[STAGING_DIR], project_id)?;
     let source = vb.artifacts_dir().join(project_id);
     let copied = copy_tree(&source, &staged)?;
+    drop(owned);
     let prefix = format!("{project_id}/");
     let expected: Vec<_> = vb
         .attachments
@@ -744,14 +754,16 @@ fn stage_attachments(db_path: &Path, vb: &VerifiedBackup, project_id: &str) -> R
 /// 再调用一次都会走到同一个终态。已提交的换入失败时返回 [`BackupError::AttachmentsPending`]。
 /// 返回处理过的标记数。
 pub fn finish_attachment_swaps(store: &Store) -> Result<usize> {
-    let _serial = attachments_lock(store, "finish_attachment_swaps")?;
-    finish_swaps_locked(store)
+    let mut serial = attachments_lock(store, "finish_attachment_swaps")?;
+    finish_swaps_locked(store, &mut serial)
 }
 
 /// 一次附件访问拿到的东西，只在回调里有效。
 #[derive(Debug)]
 pub struct ProjectAttachments<'a> {
-    /// 这个项目的附件目录，可能还不存在。
+    /// 这个项目的附件目录（真实位置，读写用它）。项目存在时它一定存在，回调期间一直钉着：改不了名、换不成链接。
+    /// 项目不存在时不建，也不该往里写。要写进库（附件行的 `local_path`）的路径照旧按
+    /// [`crate::backup::artifacts_root`]`(store.path())` 拼，与库里别的附件行同一种写法。
     pub dir: &'a Path,
     /// 锁内读到的项目当前世代，项目不存在时为 None。持锁期间没有恢复能提交，所以整个访问里它不变。
     pub generation: Option<i64>,
@@ -761,14 +773,21 @@ pub struct ProjectAttachments<'a> {
 ///
 /// 先换完这个库没换完的附件，换不完就拒绝；`f` 执行的整段时间里持锁，备份、恢复、收尾都要等它结束，
 /// 所以一次访问看到的要么是恢复前、要么是恢复后的完整一份，写入也不会和备份交错。
+///
+/// 项目目录与导出、备份同一条链接边界（peer W6 r3 P1-02）：已有的项目目录是链接就拒绝
+/// （[`BackupError::LinkedPath`]）；没有就排他新建；回调期间从附件根到项目目录一直钉着。`project_id` 只能是
+/// 一个普通的名字。
 /// `f` 里不要调用 Store 的写入、读取、备份或恢复，也不要做和附件无关的长操作：锁是全进程的。
 pub fn with_project_attachments<R>(
     store: &Store,
     project_id: &str,
     f: impl FnOnce(ProjectAttachments<'_>) -> std::io::Result<R>,
 ) -> Result<R> {
-    let _serial = attachments_lock(store, "with_project_attachments")?;
-    finish_swaps_locked(store)?;
+    if !single_name(project_id) {
+        return Err(BackupError::NotFound(format!("project {project_id}")));
+    }
+    let mut serial = attachments_lock(store, "with_project_attachments")?;
+    finish_swaps_locked(store, &mut serial)?;
     let id = project_id.to_string();
     let generation: Option<i64> = store.read(move |tx| {
         tx.query_row("SELECT scope_gen FROM projects WHERE id = ?1", [id], |r| {
@@ -776,12 +795,21 @@ pub fn with_project_attachments<R>(
         })
         .optional()
     })?;
-    let dir = artifacts_root(store.path()).join(project_id);
+    let dir = if generation.is_some() {
+        serial.ensure(&[project_id])?
+    } else {
+        serial.artifacts().join(project_id)
+    };
     f(ProjectAttachments {
         dir: &dir,
         generation,
     })
     .map_err(BackupError::Io)
+}
+
+fn single_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
 }
 
 /// 恢复的各个步骤，供测试注入故障：在这一步返回错误（之后再调用一次收尾，等同于重启），
@@ -886,12 +914,11 @@ impl Marker {
     }
 }
 
-fn markers(store: &Store) -> Result<Vec<Marker>> {
-    let staging_root = artifacts_root(store.path()).join(STAGING_DIR);
+fn markers(store: &Store, staging_root: &Path) -> Result<Vec<Marker>> {
     if !staging_root.exists() {
         return Ok(Vec::new());
     }
-    let mut paths: Vec<PathBuf> = fs::read_dir(&staging_root)?
+    let mut paths: Vec<PathBuf> = fs::read_dir(staging_root)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "gen"))
         .collect();
@@ -923,8 +950,8 @@ fn markers(store: &Store) -> Result<Vec<Marker>> {
 }
 
 /// 有已提交、未换入的附件就拒绝（持锁的调用方用，例如 PRE_RESTORE 备份）。
-pub(crate) fn refuse_pending_swaps(store: &Store) -> Result<()> {
-    for m in markers(store)? {
+pub(crate) fn refuse_pending_swaps(store: &Store, guard: &AttachmentsGuard) -> Result<()> {
+    for m in markers(store, &guard.artifacts().join(STAGING_DIR))? {
         if let Some(g) = m.committed() {
             return Err(BackupError::AttachmentsPending {
                 project: m.project,
@@ -936,15 +963,15 @@ pub(crate) fn refuse_pending_swaps(store: &Store) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn finish_swaps_locked(store: &Store) -> Result<usize> {
+/// 读写都在 `guard` 钉住的真实位置（peer W6 r3 P1-01）。
+pub(crate) fn finish_swaps_locked(store: &Store, guard: &mut AttachmentsGuard) -> Result<usize> {
     let db = store.path();
-    let root = artifacts_root(db);
-    let staging_root = root.join(STAGING_DIR);
+    let staging_root = guard.artifacts().join(STAGING_DIR);
     let mut done = 0;
-    for m in markers(store)? {
+    for m in markers(store, &staging_root)? {
         let staged = staging_root.join(&m.project);
         if let Some(g) = m.committed() {
-            swap_in(db, &root, &staged, &m.path, &m.project, g).map_err(|e| {
+            swap_in(db, guard, &staged, &m.path, &m.project, g).map_err(|e| {
                 BackupError::AttachmentsPending {
                     project: m.project.clone(),
                     generation: g,
@@ -964,23 +991,30 @@ pub(crate) fn finish_swaps_locked(store: &Store) -> Result<usize> {
 
 /// 已提交的换入：live → `.restore-old/<项目>-<世代>`，暂存 → live，删旧目录，删标记。
 /// 中断在任何一步，重来一次都能走完：暂存还在就继续换入；旧目录还在就删；最后删标记。
+///
+/// 附件根、`.restore-staging`、`.restore-old` 由 `guard` 钉着（`.restore-old` 不存在就排他新建）。暂存目录
+/// 放开之后被换成链接的话不换入（换进去的会是一个指向别处的附件目录）。
 fn swap_in(
     db: &Path,
-    root: &Path,
+    guard: &mut AttachmentsGuard,
     staged: &Path,
     marker: &Path,
     project: &str,
     generation: i64,
-) -> std::io::Result<()> {
+) -> Result<()> {
+    let root = guard.artifacts();
     let live = root.join(project);
     let old = root.join(OLD_DIR).join(format!("{project}-{generation}"));
-    if staged.exists() {
+    if let Ok(meta) = fs::symlink_metadata(staged) {
+        if !meta.is_dir() || is_link(&meta) {
+            return Err(BackupError::LinkedPath(staged.display().to_string()));
+        }
         if live.exists() {
             if old.exists() {
                 // 上一次中断在「live 移走之后、暂存换入之前」，然后 live 又被重建过：旧的那份作废。
                 fs::remove_dir_all(&old)?;
             }
-            fs::create_dir_all(root.join(OLD_DIR))?;
+            guard.ensure(&[OLD_DIR])?;
             fault(db, SwapStep::MoveLiveAside)?;
             atm_install_state::durable::rename(&live, &old, false)?;
         }
@@ -992,5 +1026,17 @@ fn swap_in(
         fs::remove_dir_all(&old)?;
     }
     fault(db, SwapStep::RemoveMarker)?;
-    fs::remove_file(marker)
+    fs::remove_file(marker)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_link(meta: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    meta.file_type().is_symlink() || meta.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_link(meta: &fs::Metadata) -> bool {
+    meta.file_type().is_symlink()
 }

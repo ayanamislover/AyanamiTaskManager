@@ -36,8 +36,9 @@ fn dir(name: &str) -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
                 .join("target")
         });
     let d = target.join("store-tests").join(name);
@@ -47,7 +48,11 @@ fn dir(name: &str) -> PathBuf {
 }
 
 fn world(name: &str) -> World {
-    let d = dir(name);
+    world_in(dir(name))
+}
+
+/// 同 [`world`]，数据目录由调用方给（比如经由一个 junction 的路径）。
+fn world_in(d: PathBuf) -> World {
     fs::create_dir_all(d.join("data")).unwrap();
     let store = Store::open(
         &d.join("data").join("atm.sqlite"),
@@ -1541,6 +1546,128 @@ fn a_data_root_reached_through_a_link_above_it_still_works() {
         fs::read(staging.join("user-notes").join("n.txt")).unwrap(),
         b"n"
     );
+    fs::remove_dir(&alias).unwrap();
+}
+
+/// peer W6 r3 P1-02：附件根是普通目录、项目目录是 junction：附件访问在回调之前拒绝，导出也拒绝（同一条边界），
+/// 外面一个字节都不变。
+#[cfg(windows)]
+#[test]
+fn a_linked_project_directory_is_refused_by_attachment_access_and_export() {
+    use atm_store::backup::BackupError;
+    use atm_store::restore::with_project_attachments;
+    let w = world("package-link-project-dir");
+    let outside = w.dir.join("outside-project");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("keep.txt"), b"original").unwrap();
+    let live = artifacts_root(w.store.path()).join("PA");
+    let kept = w.dir.join("kept-PA");
+    fs::rename(&live, &kept).unwrap();
+    junction(&live, &outside);
+    let mut ran = false;
+    let access = with_project_attachments(&w.store, "PA", |a| {
+        ran = true;
+        fs::write(a.dir.join("keep.txt"), b"escaped write")
+    });
+    let exported = package::export_project(
+        &w.store,
+        "PA",
+        Format::Package,
+        &ExportOptions {
+            exports_dir: &w.exports,
+            at: T1,
+            app_version: "t",
+        },
+    );
+    fs::remove_dir(&live).unwrap(); // 只删链接本身
+    fs::rename(&kept, &live).unwrap();
+    assert!(
+        matches!(access, Err(BackupError::LinkedPath(_))),
+        "{access:?}"
+    );
+    assert!(!ran, "the callback must not run");
+    assert!(
+        matches!(exported, Err(PackageError::LinkedPath(_))),
+        "{exported:?}"
+    );
+    assert_eq!(fs::read(outside.join("keep.txt")).unwrap(), b"original");
+}
+
+/// 附件访问的目录协议（peer W6 r3 P1-02）：项目在、目录还没有时排他新建；回调期间从附件根到项目目录一直钉着，
+/// 改不了名；项目不在时什么都不建；`project_id` 不是一个名字就拒绝。
+#[cfg(windows)]
+#[test]
+fn attachment_access_hands_over_a_pinned_project_directory() {
+    use atm_store::restore::with_project_attachments;
+    let w = world("package-attachment-protocol");
+    let root = artifacts_root(w.store.path());
+    fs::remove_dir_all(&root).unwrap();
+    let moved = w.dir.join("moved-root");
+    let pinned = with_project_attachments(&w.store, "PA", |a| {
+        assert!(a.dir.is_dir());
+        fs::write(a.dir.join("new.txt"), b"x")?;
+        Ok((
+            fs::rename(a.dir, a.dir.with_file_name("PA-moved")).is_err(),
+            fs::rename(&root, &moved).is_err(),
+        ))
+    })
+    .unwrap();
+    assert_eq!(pinned, (true, true));
+    assert_eq!(fs::read(root.join("PA").join("new.txt")).unwrap(), b"x");
+    // 访问结束就放开了。
+    fs::rename(root.join("PA"), root.join("PA-moved")).unwrap();
+    fs::rename(root.join("PA-moved"), root.join("PA")).unwrap();
+
+    fs::remove_dir_all(&root).unwrap();
+    let seen =
+        with_project_attachments(&w.store, "NOPE", |a| Ok((a.generation, a.dir.exists()))).unwrap();
+    assert_eq!(seen, (None, false));
+    assert!(!root.exists(), "nothing is created for a missing project");
+    for bad in ["../PA", "PA/x", ""] {
+        assert!(
+            with_project_attachments(&w.store, bad, |_| Ok(())).is_err(),
+            "{bad:?}"
+        );
+    }
+    assert!(!root.exists());
+}
+
+/// peer W6 r3：读写改走真实位置以后，库里附件行仍是按库路径写的。库经由数据根以上的 junction 打开时，导出照样
+/// 把附件行改写成包内路径；导入写进附件行的也是按库路径的写法，附件文件挪进了真实位置。
+#[cfg(windows)]
+#[test]
+fn attachment_rows_keep_the_store_spelling_when_the_root_is_reached_through_a_link() {
+    let real = dir("package-alias-rows");
+    let alias = real.with_file_name("package-alias-rows-link");
+    let _ = fs::remove_dir(&alias);
+    junction(&alias, &real);
+    let w = world_in(alias.clone());
+    let exported = export(&w, "PA", Format::Package, T1);
+    let imported = import(&w, ImportSource::Package(&exported.path), Some("PZ")).unwrap();
+    let id = imported.project_id.clone();
+    let paths: Vec<String> = w
+        .store
+        .read(move |tx| {
+            tx.prepare("SELECT local_path FROM artifacts WHERE project_id = ?1 AND kind = 'FILE'")?
+                .query_map([id], |r| r.get(0))?
+                .collect()
+        })
+        .unwrap();
+    let recorded = artifacts_root(w.store.path()).join(&imported.project_id);
+    assert!(!paths.is_empty());
+    for p in &paths {
+        assert!(Path::new(p).starts_with(&recorded), "{p}");
+        assert!(Path::new(p).is_file(), "{p}");
+    }
+    assert!(
+        real.join("data")
+            .join("artifacts")
+            .join(&imported.project_id)
+            .join("docs")
+            .join("notes.txt")
+            .is_file()
+    );
+    drop(w);
     fs::remove_dir(&alias).unwrap();
 }
 

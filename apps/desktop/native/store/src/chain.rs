@@ -1,25 +1,38 @@
-//! 数据根里的目录链（peer W6 r2 P1-01）：删除、解包、复制、换入之前，把要碰的目录从数据根往下逐层钉住，
-//! 每一层都必须是上一层里真实的子目录，不能是链接（junction、符号链接等 reparse point）。
+//! 数据根里的目录链（peer W6 r2 P1-01、r3 P1-01）：删除、解包、复制、换入之前，把要碰的目录从数据根往下逐层
+//! 钉住，每一层都必须是上一层里真实的子目录，不能是链接（junction、符号链接等 reparse point）。
 //!
 //! 不变量是「ATM 写入、删除的位置都在数据根的真实位置里面」：
 //! - 数据根本身按链接打开（它以上的链接，比如用户把 AppData 挪到别的盘再链回来，只是把整个数据根搬了地方，
 //!   里面的东西仍是这个数据根的；一律拒绝的话这类用户就再也导出、备份不了）；
 //! - 数据根往下的每一层：钉住后句柄的最终路径（不含任何链接）必须等于「上一层的最终路径 + 这一层的名字」。
-//!   哪一层是链接，最终路径就会落到别处，拒绝，此时还没有任何副作用。
+//!   哪一层是链接，最终路径就会落到别处，拒绝，此时还没有任何副作用；
+//! - **之后的读写一律从数据根的真实位置拼路径**（[`Pinned::real`]），不再经过调用方给的字面路径：字面路径上
+//!   数据根以上的链接在操作中途可以被换掉（r3 复现 A），真实位置不能——钉住的句柄不给 `FILE_SHARE_DELETE`
+//!   （见 [`crate::pin`]），持有期间这些目录和它们的每一层祖先都改不了名、删不掉；
+//! - 还不存在的层用 [`Pinned::ensure`] 相对上一层的句柄排他新建，建出来就是钉住的（r3 复现 B：先按路径建、
+//!   之后才钉，中间可以被换成链接）。
 //!
-//! 钉住的句柄不给 `FILE_SHARE_DELETE`（见 [`crate::pin`]）：持有期间这些目录和它们的祖先都改不了名、删不掉，
-//! 所以检查之后到操作结束，链不会被换成别的。[`Pinned`] 要一直拿到操作结束。
-//! 还不存在的那层不钉（之后由 ATM 自己按路径新建），从那层起的下面也不再看；是普通文件的那层也一样
-//! （文件不是链接，挡不挡路由后面的操作照原样报错，比如恢复把 `.restore-old` 当目录用时）。
+//! [`Pinned`] 要一直拿到操作结束（包括失败后的回滚与清理）。操作要删掉或改名的那一层先 [`Pinned::release`]：
+//! 放开以后它若被换成链接，`remove_dir_all`、改名作用的都是链接本身，碰不到链接目标里的东西。
+//! 钉住的层里面由 ATM 自己新建的子目录按路径读写（与 REPORT.md「目录身份」的边界相同）。同一个边界：防的是
+//! 路径与祖先在检查之后被改名、换成链接（同步工具、脚本、并发操作）；有意构造 `FSCTL_SET_REPARSE_POINT` 把一个
+//! 钉住的空目录原地变成链接，属于同一用户下有意篡改的进程，它本来就能直接写数据根，不在防护范围。
+//! `pin_existing` 遇到不存在的层就停在那里，是普通文件的那层也一样（文件不是链接，挡不挡路由后面的操作照原样报错，
+//! 比如恢复把 `.restore-old` 当目录用时）。
 
-use std::path::{Component, Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use crate::pin::{self, Dir};
 
-/// 钉住的一串目录：持有期间链不变。
+/// 钉住的数据根与它下面的若干层：持有期间链不变。
 pub(crate) struct Pinned {
-    #[allow(dead_code)]
-    dirs: Vec<Dir>,
+    /// 数据根的真实位置（句柄的最终路径，能去掉 `\\?\` 就去掉）。
+    root: PathBuf,
+    /// 调用方给的数据根：只用于报错，不用于读写。
+    literal: PathBuf,
+    /// (相对数据根的路径，小写、以 `\` 连接；钉住的目录)。第一项是数据根本身（空路径）。
+    dirs: Vec<(String, Dir)>,
 }
 
 #[derive(Debug)]
@@ -35,50 +48,206 @@ fn same_name(a: &Path, b: &Path) -> bool {
     a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
 }
 
-/// 钉住 `root`（跟随链接），再对 `rels` 里的每个相对路径从 `root` 往下逐层钉住、核对。`rels` 只能由普通的名字
-/// 组成（不能有 `..`、盘符、根）。
-pub(crate) fn pin_inside(root: &Path, rels: &[&Path]) -> Result<Pinned, ChainError> {
-    let top = pin::open(root).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotADirectory => ChainError::NotADirectory(root.to_path_buf()),
-        _ => ChainError::Io(e),
-    })?;
-    let mut dirs = vec![top];
-    for rel in rels {
-        let mut lexical = root.to_path_buf();
-        let mut parent_final = dirs[0].path().to_path_buf();
+fn invalid(rel: &Path) -> ChainError {
+    ChainError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("{} is not a plain relative path", rel.display()),
+    ))
+}
+
+/// 相对路径的每一段，只能是普通名字（不能有 `..`、盘符、根）。
+fn names(rel: &Path) -> Result<Vec<&OsStr>, ChainError> {
+    rel.components()
+        .map(|c| match c {
+            Component::Normal(n) => Ok(n),
+            _ => Err(invalid(rel)),
+        })
+        .collect()
+}
+
+fn key(names: &[&OsStr]) -> String {
+    names
+        .iter()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\\")
+}
+
+/// 句柄给的 `\\?\C:\…`、`\\?\UNC\server\share\…` 换回普通写法，好让后面照常 `join("a/b")`。哪一段以点或空格
+/// 结尾（普通写法下会被系统去掉，指到别的名字）就保留 `\\?\`。
+fn plain(p: &Path) -> PathBuf {
+    let mut parts = p.components();
+    let Some(Component::Prefix(prefix)) = parts.next() else {
+        return p.to_path_buf();
+    };
+    let rest: Vec<&OsStr> = parts
+        .filter(|c| !matches!(c, Component::RootDir))
+        .map(|c| c.as_os_str())
+        .collect();
+    if rest.iter().any(|n| {
+        let n = n.to_string_lossy();
+        n.ends_with('.') || n.ends_with(' ')
+    }) {
+        return p.to_path_buf();
+    }
+    let mut out = match prefix.kind() {
+        Prefix::VerbatimDisk(d) => PathBuf::from(format!("{}:\\", char::from(d))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut s = std::ffi::OsString::from("\\\\");
+            s.push(server);
+            s.push("\\");
+            s.push(share);
+            s.push("\\");
+            PathBuf::from(s)
+        }
+        _ => return p.to_path_buf(),
+    };
+    for n in rest {
+        out.push(n);
+    }
+    out
+}
+
+impl Pinned {
+    /// 钉住数据根（跟随链接）。
+    pub(crate) fn open(root: &Path) -> Result<Self, ChainError> {
+        let top = pin::open(root).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotADirectory => ChainError::NotADirectory(root.to_path_buf()),
+            _ => ChainError::Io(e),
+        })?;
+        Ok(Self {
+            root: plain(top.path()),
+            literal: root.to_path_buf(),
+            dirs: vec![(String::new(), top)],
+        })
+    }
+
+    /// 数据根的真实位置。
+    #[cfg(test)]
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `rel` 在数据根真实位置里的路径（不论钉没钉住、存不存在）。
+    pub(crate) fn real(&self, rel: &Path) -> PathBuf {
+        let mut p = self.root.clone();
         for c in rel.components() {
-            let Component::Normal(name) = c else {
-                return Err(ChainError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("{} is not a plain relative path", rel.display()),
-                )));
-            };
-            lexical.push(name);
-            let meta = match std::fs::symlink_metadata(&lexical) {
-                Ok(m) => m,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-                Err(e) => return Err(ChainError::Io(e)),
-            };
-            if !meta.is_dir() && !meta.file_type().is_symlink() && !is_reparse(&meta) {
-                break;
+            p.push(c.as_os_str());
+        }
+        p
+    }
+
+    fn index(&self, k: &str) -> Option<usize> {
+        self.dirs.iter().position(|(d, _)| d == k)
+    }
+
+    /// 钉住 `rel` 上已经存在的各层；遇到不存在或是普通文件的那层就停下。
+    pub(crate) fn pin_existing(&mut self, rel: &Path) -> Result<(), ChainError> {
+        self.walk(rel, false)
+    }
+
+    /// 钉住 `rel` 的每一层，不存在的相对上一层的句柄排他新建（建出来就是钉住的）。返回真实路径。
+    pub(crate) fn ensure(&mut self, rel: &Path) -> Result<PathBuf, ChainError> {
+        self.walk(rel, true)?;
+        Ok(self.real(rel))
+    }
+
+    fn walk(&mut self, rel: &Path, create: bool) -> Result<(), ChainError> {
+        let names = names(rel)?;
+        let mut parent = 0;
+        for depth in 1..=names.len() {
+            let k = key(&names[..depth]);
+            if let Some(i) = self.index(&k) {
+                parent = i;
+                continue;
             }
-            let dir = match pin::open(&lexical) {
-                Ok(d) => d,
-                // 指向不存在的目标的链接、指向文件的链接：都是链接。
-                Err(_) if meta.file_type().is_symlink() || is_reparse(&meta) => {
-                    return Err(ChainError::Linked(lexical));
+            let name = names[depth - 1];
+            let lexical = self.real(&names[..depth].iter().collect::<PathBuf>());
+            let dir = match std::fs::symlink_metadata(&lexical) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    if !create {
+                        return Ok(());
+                    }
+                    match pin::create(&self.dirs[parent].1, name) {
+                        Ok(d) => d,
+                        // 刚好被别人建了：按已存在的核对。
+                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                            self.open_checked(&names[..depth], parent, None)?
+                        }
+                        Err(e) => return Err(ChainError::Io(e)),
+                    }
                 }
                 Err(e) => return Err(ChainError::Io(e)),
+                Ok(m) if !m.is_dir() && !m.file_type().is_symlink() && !is_reparse(&m) => {
+                    if !create {
+                        return Ok(());
+                    }
+                    return Err(ChainError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        format!("{} is not a directory", lexical.display()),
+                    )));
+                }
+                Ok(m) => self.open_checked(&names[..depth], parent, Some(&m))?,
             };
-            let expected = parent_final.join(name);
-            if !same_name(dir.path(), &expected) {
-                return Err(ChainError::Linked(lexical));
-            }
-            parent_final = dir.path().to_path_buf();
-            dirs.push(dir);
+            self.dirs.push((k, dir));
+            parent = self.dirs.len() - 1;
         }
+        Ok(())
     }
-    Ok(Pinned { dirs })
+
+    /// 打开已有的一层并核对：最终路径必须是上一层的最终路径加这一层的名字。
+    fn open_checked(
+        &self,
+        names: &[&OsStr],
+        parent: usize,
+        meta: Option<&std::fs::Metadata>,
+    ) -> Result<Dir, ChainError> {
+        let rel: PathBuf = names.iter().collect();
+        let lexical = self.real(&rel);
+        let linked = || ChainError::Linked(self.literal.join(&rel));
+        let dir = match pin::open(&lexical) {
+            Ok(d) => d,
+            // 指向不存在的目标的链接、指向文件的链接：都是链接。
+            Err(_) if meta.is_none_or(|m| m.file_type().is_symlink() || is_reparse(m)) => {
+                return Err(linked());
+            }
+            Err(e) => return Err(ChainError::Io(e)),
+        };
+        let expected = self.dirs[parent].1.path().join(names[names.len() - 1]);
+        if !same_name(dir.path(), &expected) {
+            return Err(linked());
+        }
+        Ok(dir)
+    }
+
+    /// 在已钉住的 `parent` 里排他新建 `name`，钉住交给调用方（导出暂存、恢复暂存这类用完要删或改名的目录）。
+    /// 调用方删它、改它的名之前先放开（drop）。
+    pub(crate) fn create_owned(&self, parent: &Path, name: &OsStr) -> Result<Dir, ChainError> {
+        let i = self
+            .index(&key(&names(parent)?))
+            .ok_or_else(|| invalid(parent))?;
+        pin::create(&self.dirs[i].1, name).map_err(ChainError::Io)
+    }
+
+    /// 放开 `rel` 以及它下面钉住的层（接下来要删掉或改名它们）。
+    pub(crate) fn release(&mut self, rel: &Path) {
+        let Ok(names) = names(rel) else {
+            return;
+        };
+        let k = key(&names);
+        let below = format!("{k}\\");
+        self.dirs
+            .retain(|(d, _)| d.is_empty() || !(*d == k || d.starts_with(&below)));
+    }
+}
+
+/// 钉住 `root`（跟随链接），再对 `rels` 里的每个相对路径从 `root` 往下钉住已经存在的各层、逐层核对。
+pub(crate) fn pin_inside(root: &Path, rels: &[&Path]) -> Result<Pinned, ChainError> {
+    let mut pinned = Pinned::open(root)?;
+    for rel in rels {
+        pinned.pin_existing(rel)?;
+    }
+    Ok(pinned)
 }
 
 #[cfg(windows)]
@@ -113,8 +282,9 @@ mod tests {
         let d = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
                     .join("target")
             })
             .join("store-unit")
@@ -192,5 +362,149 @@ mod tests {
         drop(pinned);
         std::fs::rename(d.join("N").join("artifacts"), d.join("N").join("moved")).unwrap();
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// r3 复现 A：钉住之后把数据根以上的 junction 换成指向别处的，经真实路径的读写仍落在原来的数据根里。
+    #[test]
+    fn io_through_the_real_root_ignores_a_swapped_upper_link() {
+        let d = scratch("upper-swap");
+        let real = d.join("real");
+        let other = d.join("other");
+        for t in [&real, &other] {
+            std::fs::create_dir_all(t.join("N").join("exports").join(".staging")).unwrap();
+        }
+        std::fs::write(
+            other
+                .join("N")
+                .join("exports")
+                .join(".staging")
+                .join("keep.txt"),
+            b"keep",
+        )
+        .unwrap();
+        let alias = d.join("alias");
+        junction(&alias, &real);
+        let staging = Path::new("exports/.staging");
+        let pinned = pin_inside(&alias.join("N"), &[staging]).unwrap();
+        assert!(
+            !pinned.root().starts_with(&alias),
+            "{}",
+            pinned.root().display()
+        );
+        assert!(
+            same_name(pinned.root(), &real.join("N")),
+            "{}",
+            pinned.root().display()
+        );
+
+        // 链接本身没被钉住，换得掉。
+        std::fs::rename(&alias, d.join("alias-old")).unwrap();
+        junction(&alias, &other);
+        std::fs::write(pinned.real(staging).join("ours.txt"), b"ours").unwrap();
+        assert!(real.join("N/exports/.staging/ours.txt").is_file());
+        assert!(!other.join("N/exports/.staging/ours.txt").exists());
+        // 删的也是真实位置里的东西。
+        std::fs::remove_file(pinned.real(staging).join("ours.txt")).unwrap();
+        assert_eq!(
+            std::fs::read(other.join("N/exports/.staging/keep.txt")).unwrap(),
+            b"keep"
+        );
+        drop(pinned);
+        for l in [&alias, &d.join("alias-old")] {
+            std::fs::remove_dir(l).unwrap();
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// r3 复现 B：钉住时还不存在的层由 `ensure` 相对父句柄建出来，一直钉着，换不成链接。
+    #[test]
+    fn missing_layers_are_created_pinned_and_released_on_demand() {
+        let d = scratch("ensure");
+        std::fs::create_dir_all(d.join("N")).unwrap();
+        let mut pinned =
+            pin_inside(&d.join("N"), &[Path::new("artifacts/.restore-staging")]).unwrap();
+        assert!(!d.join("N/artifacts").exists());
+        let made = pinned
+            .ensure(Path::new("artifacts/.restore-staging"))
+            .unwrap();
+        assert!(made.is_dir());
+        assert!(std::fs::rename(d.join("N/artifacts"), d.join("N/moved")).is_err());
+        assert!(std::fs::rename(&made, d.join("N/artifacts/moved")).is_err());
+        // 已钉住的层再 ensure 一次不变。
+        assert_eq!(
+            pinned.ensure(Path::new("artifacts")).unwrap(),
+            pinned.real(Path::new("artifacts"))
+        );
+
+        // 交给调用方的目录：钉着时改不了名，放开以后可以。
+        let owned = pinned
+            .create_owned(Path::new("artifacts/.restore-staging"), OsStr::new("P1"))
+            .unwrap();
+        let p1 = made.join("P1");
+        std::fs::write(p1.join("f"), b"x").unwrap();
+        assert!(std::fs::rename(&p1, made.join("P2")).is_err());
+        drop(owned);
+        std::fs::rename(&p1, made.join("P2")).unwrap();
+        // 已存在的名字不能排他新建。
+        assert!(
+            pinned
+                .create_owned(Path::new("artifacts/.restore-staging"), OsStr::new("P2"))
+                .is_err()
+        );
+
+        // 放开 `.restore-staging` 以后它可以改名，`artifacts` 仍钉着。
+        pinned.release(Path::new("artifacts/.restore-staging"));
+        std::fs::rename(&made, d.join("N/artifacts/renamed")).unwrap();
+        assert!(std::fs::rename(d.join("N/artifacts"), d.join("N/moved")).is_err());
+        drop(pinned);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// `ensure` 遇到已经存在的链接照样拒绝，什么都不建；遇到普通文件报不是目录。
+    #[test]
+    fn ensure_refuses_links_and_files() {
+        let d = scratch("ensure-links");
+        std::fs::create_dir_all(d.join("N")).unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = d.join("N").join("artifacts");
+        junction(&link, &outside);
+        let mut pinned = Pinned::open(&d.join("N")).unwrap();
+        assert!(matches!(
+            pinned.ensure(Path::new("artifacts/.restore-old")),
+            Err(ChainError::Linked(_))
+        ));
+        assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+        std::fs::write(d.join("N/file"), b"x").unwrap();
+        assert!(matches!(
+            pinned.ensure(Path::new("file/below")),
+            Err(ChainError::Io(e)) if e.kind() == std::io::ErrorKind::NotADirectory
+        ));
+        assert!(matches!(
+            pinned.ensure(Path::new("../x")),
+            Err(ChainError::Io(_))
+        ));
+        drop(pinned);
+        std::fs::remove_dir(&link).unwrap();
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn verbatim_paths_turn_plain_unless_a_name_would_change() {
+        assert_eq!(plain(Path::new(r"\\?\C:\a\b")), PathBuf::from(r"C:\a\b"));
+        assert_eq!(plain(Path::new(r"\\?\C:\")), PathBuf::from(r"C:\"));
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\server\share\a")),
+            PathBuf::from(r"\\server\share\a")
+        );
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\a.\b")),
+            PathBuf::from(r"\\?\C:\a.\b")
+        );
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\a \b")),
+            PathBuf::from(r"\\?\C:\a \b")
+        );
+        assert_eq!(plain(Path::new(r"C:\a")), PathBuf::from(r"C:\a"));
     }
 }

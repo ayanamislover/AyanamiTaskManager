@@ -12,6 +12,9 @@ publish.workspace = true
 atm-domain = { path = "../domain" }
 serde_json = { workspace = true }
 sha2 = "0.10"
+# Codex 的 config.toml 按 TOML 解析（与 Codex 自己用的同一个解析器）：装了什么、谁是 ATM 的、节点类型，以及
+# 改写之后的核对（peer W6 r3 P2-01–03）。
+toml = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
@@ -21,6 +24,3 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Threading",
 ] }
 
-[dev-dependencies]
-# 独立的 TOML 解析器：核对改写后的 Codex 配置仍是合法 TOML（peer W6 r2 P1-02），不进产品。
-toml = "0.8"

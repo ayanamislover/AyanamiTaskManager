@@ -4060,8 +4060,9 @@ mod tests {
         let dir = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("..")
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
                     .join("target")
             })
             .join("store-unit")

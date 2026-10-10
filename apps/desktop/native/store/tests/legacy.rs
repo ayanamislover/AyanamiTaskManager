@@ -23,8 +23,9 @@ fn dir(name: &str) -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
                 .join("target")
         });
     let d = target.join("store-tests").join(name);

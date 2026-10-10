@@ -216,9 +216,104 @@ static WAITING: Mutex<Vec<(PathBuf, &'static str)>> = Mutex::new(Vec::new());
 
 /// 附件锁，外加从库所在目录往下钉住的附件根、恢复暂存与换下来的旧版本目录（peer W6 r2 P1-01）：拿到它之后、
 /// 任何副作用（包括上一次恢复的收尾清理）之前，这条链上没有链接；持有期间也换不成链接。拿着它直到操作结束。
+///
+/// 附件的读写一律走 [`AttachmentsGuard::artifacts`] 给的真实位置（peer W6 r3 P1-01）：库路径上数据根以上的
+/// 链接在持锁期间可以被换掉，真实位置不能。附件根下还不存在的层用 [`AttachmentsGuard::ensure`] 排他新建并钉住。
 pub(crate) struct AttachmentsGuard {
-    _pinned: crate::chain::Pinned,
+    pinned: crate::chain::Pinned,
     _lock: MutexGuard<'static, ()>,
+}
+
+impl AttachmentsGuard {
+    /// 附件根的真实位置（可能还不存在）。
+    pub(crate) fn artifacts(&self) -> PathBuf {
+        self.pinned.real(Path::new(ARTIFACTS_DIR))
+    }
+
+    fn rel(sub: &[&str]) -> PathBuf {
+        let mut rel = PathBuf::from(ARTIFACTS_DIR);
+        rel.extend(sub);
+        rel
+    }
+
+    /// 钉住附件根下 `sub` 的每一层，不存在的排他新建。返回真实位置。
+    pub(crate) fn ensure(&mut self, sub: &[&str]) -> Result<PathBuf> {
+        Ok(self.pinned.ensure(&Self::rel(sub))?)
+    }
+
+    /// 钉住附件根下 `sub` 上已经存在的各层（不建）。
+    pub(crate) fn pin_existing(&mut self, sub: &[&str]) -> Result<()> {
+        Ok(self.pinned.pin_existing(&Self::rel(sub))?)
+    }
+
+    /// 在钉住的 `parent`（附件根下）里排他新建 `name` 并钉住，交给调用方；删它、改它的名之前先放开。
+    pub(crate) fn create_owned(&self, parent: &[&str], name: &str) -> Result<crate::pin::Dir> {
+        Ok(self
+            .pinned
+            .create_owned(&Self::rel(parent), std::ffi::OsStr::new(name))?)
+    }
+}
+
+/// 备份根（peer W6 r3 P1-01，与附件同一类问题）：从它的上一层往下钉住备份根、隔离区与「正在创建」，
+/// 之后的创建、撤回、清扫都走真实位置。登记进库的路径照旧是调用方给的备份根下的路径。
+pub(crate) struct BackupsRoot {
+    pinned: crate::chain::Pinned,
+    name: PathBuf,
+    literal: PathBuf,
+}
+
+impl BackupsRoot {
+    pub(crate) fn pin(root: &Path) -> Result<Self> {
+        let parent = root
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = PathBuf::from(root.file_name().ok_or_else(|| {
+            BackupError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} has no directory name", root.display()),
+            ))
+        })?);
+        let pinned = crate::chain::pin_inside(
+            parent,
+            &[&name.join(WITHDRAWN_DIR), &name.join(CREATING_DIR)],
+        )?;
+        Ok(Self {
+            pinned,
+            name,
+            literal: root.to_path_buf(),
+        })
+    }
+
+    /// 备份根（或它下面的 `sub`）的真实位置。
+    pub(crate) fn real(&self, sub: Option<&str>) -> PathBuf {
+        let mut rel = self.name.clone();
+        rel.extend(sub);
+        self.pinned.real(&rel)
+    }
+
+    /// 钉住备份根（以及 `sub`），不存在的排他新建。
+    pub(crate) fn ensure(&mut self, sub: Option<&str>) -> Result<PathBuf> {
+        let mut rel = self.name.clone();
+        rel.extend(sub);
+        Ok(self.pinned.ensure(&rel)?)
+    }
+
+    /// 登记进库的路径：调用方给的备份根下的 `id`。
+    fn registered(&self, id: &str) -> PathBuf {
+        self.literal.join(id)
+    }
+
+    /// 放开 `sub`（要删掉它了）。
+    fn release(&mut self, sub: &str) {
+        self.pinned.release(&self.name.join(sub));
+    }
+
+    fn create_owned(&self, name: &str) -> Result<crate::pin::Dir> {
+        Ok(self
+            .pinned
+            .create_owned(&self.name, std::ffi::OsStr::new(name))?)
+    }
 }
 
 pub(crate) fn attachments_lock(store: &Store, what: &'static str) -> Result<AttachmentsGuard> {
@@ -237,7 +332,7 @@ pub(crate) fn attachments_lock(store: &Store, what: &'static str) -> Result<Atta
         ],
     )?;
     Ok(AttachmentsGuard {
-        _pinned: pinned,
+        pinned,
         _lock: lock,
     })
 }
@@ -286,32 +381,46 @@ pub(crate) fn is_internal(rel: &str) -> bool {
 /// 先把上一次恢复没换完的附件换完；换不完就拒绝（[`BackupError::AttachmentsPending`]），
 /// 不会把恢复后的库和恢复前的附件打进同一份备份。
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
-    let _lock = attachments_lock(store, "create_backup")?;
-    crate::restore::finish_swaps_locked(store)?;
-    sweep_withdrawn_locked(store, root);
-    create_backup_locked(store, root, kind, at)
+    let mut lock = attachments_lock(store, "create_backup")?;
+    crate::restore::finish_swaps_locked(store, &mut lock)?;
+    let mut backups = BackupsRoot::pin(root)?;
+    sweep_withdrawn_locked(store, &mut backups);
+    create_backup_locked(store, &mut backups, &lock, kind, at)
 }
 
 /// 已持有 [`attachments_lock`] 时用（按范围恢复里的 PRE_RESTORE）。有已提交、未换入的附件就拒绝。
 pub(crate) fn create_backup_locked(
     store: &Store,
-    root: &Path,
+    backups: &mut BackupsRoot,
+    attachments: &AttachmentsGuard,
     kind: &str,
     at: &str,
 ) -> Result<BackupInfo> {
-    crate::restore::refuse_pending_swaps(store)?;
+    crate::restore::refuse_pending_swaps(store, attachments)?;
     let side = side_reader(store.path())?;
     let id = ulid(&side)?;
+    // 读写都在真实位置；登记的是调用方给的备份根下的路径。
+    let root = backups.ensure(None)?;
     let dir = root.join(&id);
     // 先落一个「正在创建」标记，登记成功才删（W2 peer r3 P1-01）。登记之前任何一步失败都删目录；
     // 删不掉（文件被占用）就留着标记，下次清扫按它找回目录再删——备份根下没有找不回的未登记目录。
-    let marker = root.join(CREATING_DIR).join(&id);
-    fs::create_dir_all(root.join(CREATING_DIR))?;
+    let marker = backups.ensure(Some(CREATING_DIR))?.join(&id);
     fs::write(&marker, b"")?;
     sync_file(&marker)?;
-    let made = fs::create_dir_all(&dir)
-        .map_err(BackupError::from)
-        .and_then(|()| write_backup(store, side, &id, &dir, kind, at));
+    // 备份目录排他新建，写完之前一直钉着；删它之前先放开。
+    let made = backups.create_owned(&id).and_then(|owned| {
+        let made = write_backup(
+            store,
+            side,
+            &id,
+            (&dir, &backups.registered(&id)),
+            attachments,
+            kind,
+            at,
+        );
+        drop(owned);
+        made
+    });
     let settled = match &made {
         Ok(_) => true,
         Err(_) => match fs::remove_dir_all(&dir) {
@@ -320,6 +429,7 @@ pub(crate) fn create_backup_locked(
         },
     };
     if settled && fs::remove_file(&marker).is_ok() {
+        backups.release(CREATING_DIR);
         let _ = fs::remove_dir(root.join(CREATING_DIR));
     }
     made
@@ -329,10 +439,12 @@ fn write_backup(
     store: &Store,
     side: Connection,
     id: &str,
-    dir: &Path,
+    (dir, registered): (&Path, &Path),
+    attachments: &AttachmentsGuard,
     kind: &str,
     at: &str,
 ) -> Result<BackupInfo> {
+    // `dir` 是写在哪（真实位置），`registered` 是登记成什么（调用方给的备份根下的路径）。
     let id = id.to_string();
 
     let tmp = dir.join(format!("{DB_FILE}.tmp"));
@@ -343,11 +455,9 @@ fn write_backup(
     atm_install_state::durable::rename(&tmp, &db, true)?;
     let (sha256, size_bytes) = hash_file(&db)?;
 
-    let files = copy_tree_filtered(
-        &artifacts_root(store.path()),
-        &dir.join(ARTIFACTS_DIR),
-        &|rel| !is_internal(rel),
-    )?;
+    let files = copy_tree_filtered(&attachments.artifacts(), &dir.join(ARTIFACTS_DIR), &|rel| {
+        !is_internal(rel)
+    })?;
     let attachments_sha256 = attachments_digest(&files);
 
     // manifest 的内容全部从快照本身读出，保证与库一致。
@@ -382,7 +492,7 @@ fn write_backup(
     let row = (
         id.clone(),
         kind.to_string(),
-        path_str(dir)?.to_string(),
+        path_str(registered)?.to_string(),
         sha256.clone(),
         size_bytes as i64,
         attachments_sha256.clone(),
@@ -409,7 +519,7 @@ fn write_backup(
     Ok(BackupInfo {
         id,
         kind: kind.to_string(),
-        dir: dir.to_path_buf(),
+        dir: registered.to_path_buf(),
         sha256,
         size_bytes,
         attachments_sha256,
@@ -469,10 +579,16 @@ pub fn prune_backup(store: &Store, info: &BackupInfo, now: &str) -> Result<Withd
 /// `now` 为 `None`：任何固定都挡着（撤回自己刚做的备份）；给了 `now`：只有 `pinned_until > now` 才挡着。
 fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withdrawal> {
     let _lock = attachments_lock(store, "discard_backup")?;
-    let root = info.dir.parent().ok_or_else(|| {
-        BackupError::Corrupt(format!("backup dir has no parent: {}", info.dir.display()))
-    })?;
-    sweep_withdrawn_locked(store, root);
+    let (Some(root), Some(name)) = (info.dir.parent(), info.dir.file_name()) else {
+        return Err(BackupError::Corrupt(format!(
+            "backup dir has no parent: {}",
+            info.dir.display()
+        )));
+    };
+    let mut backups = BackupsRoot::pin(root)?;
+    sweep_withdrawn_locked(store, &mut backups);
+    // 登记的是字面路径；挪、删都走真实位置。
+    let dir = backups.real(None).join(name);
     let key = info.id.clone();
     let at = now.map(str::to_owned);
     let state: Option<String> = store.read(move |tx| {
@@ -492,12 +608,12 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
         Some("RESTORE_REFERENCE") => return Ok(Withdrawal::Kept("RESTORE_REFERENCE")),
         _ => {}
     }
-    let quarantine = root.join(WITHDRAWN_DIR);
-    fs::create_dir_all(&quarantine)?;
+    let quarantine = backups.ensure(Some(WITHDRAWN_DIR))?;
     let parked = quarantine.join(&info.id);
     // 目录先隔离、再删登记行、删不成再放回：三步都按共享的持久化契约落盘（W4 关口 P2-W4A-02）。
     // 占着就留到下次（KEPT），不等。
-    if durable::rename_once(&info.dir, &parked, false).is_err() {
+    if durable::rename_once(&dir, &parked, false).is_err() {
+        backups.release(WITHDRAWN_DIR);
         let _ = fs::remove_dir(&quarantine);
         return Ok(Withdrawal::Kept("FILES_IN_USE"));
     }
@@ -515,7 +631,8 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
         Ok(1) => {}
         other => {
             // 没删成：放回原处。放不回时登记还在、目录在隔离区，下次清理按登记行放回。
-            let _ = durable::rename_once(&parked, &info.dir, false);
+            let _ = durable::rename_once(&parked, &dir, false);
+            backups.release(WITHDRAWN_DIR);
             let _ = fs::remove_dir(&quarantine);
             return match other {
                 Ok(_) => Ok(Withdrawal::Kept("RESTORE_REFERENCE")),
@@ -526,6 +643,7 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
     if fs::remove_dir_all(&parked).is_err() {
         return Ok(Withdrawal::CleanupPending);
     }
+    backups.release(WITHDRAWN_DIR);
     let _ = fs::remove_dir(&quarantine);
     Ok(Withdrawal::Withdrawn)
 }
@@ -535,7 +653,8 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
 /// 调用方持附件锁，创建与撤回也都在锁里，所以这里看到的标记和隔离条目都不属于进行中的操作。
 pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<usize> {
     let _lock = attachments_lock(store, "sweep_withdrawn")?;
-    Ok(sweep_withdrawn_locked(store, root))
+    let mut backups = BackupsRoot::pin(root)?;
+    Ok(sweep_withdrawn_locked(store, &mut backups))
 }
 
 /// 还有几份残留没清掉：隔离区条目加「正在创建」标记（诊断用；不拿锁，可能与正在进行的撤回或创建差一份）。
@@ -546,7 +665,8 @@ pub fn withdrawn_pending(root: &Path) -> usize {
         .sum()
 }
 
-pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
+pub(crate) fn sweep_withdrawn_locked(store: &Store, backups: &mut BackupsRoot) -> usize {
+    let root = backups.real(None);
     let registered = |id: &str| {
         let key = id.to_string();
         store.read(move |tx| {
@@ -569,6 +689,7 @@ pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
                 left += 1;
             }
         }
+        backups.release(WITHDRAWN_DIR);
         let _ = fs::remove_dir(&quarantine);
     }
     let creating = root.join(CREATING_DIR);
@@ -587,6 +708,7 @@ pub(crate) fn sweep_withdrawn_locked(store: &Store, root: &Path) -> usize {
                 left += 1;
             }
         }
+        backups.release(CREATING_DIR);
         let _ = fs::remove_dir(&creating);
     }
     left

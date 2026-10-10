@@ -1,7 +1,9 @@
 //! 四种客户端的 MCP 配置（2.0 `mcp-install.ts`、`mcp-inspection.ts`、`kimi-code-config.ts`）。
 //!
 //! 只动 ATM 自己的几个 server（[`crate::names`]），别的 server 与顶层键原样保留；内容没变就不写。
-//! - Codex：`~/.codex/config.toml` 里的 `[mcp_servers."<name>"]` 段（连同 `.env` 之类的子表）按行替换；
+//! - Codex：`~/.codex/config.toml` 里的 `[mcp_servers."<name>"]` 段（连同 `.env` 之类的子表）按行替换。
+//!   装了什么、谁是 ATM 的、节点是什么类型，按 TOML 解析器（`toml`，与 Codex 自己用的同一个）读出的结构判断；
+//!   手写的逐行扫描只决定删哪几行、写法规不规范。写之前把结果再解析一遍核对（peer W6 r3 P2-01–03）；
 //! - Claude Desktop：每份 `claude_desktop_config.json` 的 `mcpServers`；
 //! - Kimi Code：`~/.kimi-code/mcp.json` 的 `mcpServers`，每个 server 要写明 `transport: "stdio"`；
 //! - Claude Code：`~/.claude.json` 只读，写入经 `claude mcp remove / add-json --scope user`，失败按逆序回滚。
@@ -287,7 +289,7 @@ fn js_trim_end(s: &str) -> &str {
 /// 注释、单行与多行字符串、跨行的数组。多行字符串与数组里面以 `[`、`#` 开头的行都不是表头或注释。
 #[derive(Debug, PartialEq, Eq)]
 enum TomlLine {
-    /// `[a.b]` 或 `[[a.b]]`：键按 TOML 解码（裸键、"基本"、'字面'）。
+    /// `[a.b]` 或 `[[a.b]]`：键按 TOML 解码（裸键、"基本"、'字面'）。是不是数组表由解析器判断。
     Header(Vec<String>),
     /// 空行或只有注释（不在字符串、数组里）。
     Comment,
@@ -366,12 +368,12 @@ fn toml_keys(mut rest: &str) -> Option<(Vec<String>, &str)> {
 }
 
 /// 表头 `[`…`]` / `[[`…`]]` 的点分键；后面只许空白或注释。解析不了返回 None。
-fn toml_header_keys(t: &str) -> Option<Vec<String>> {
+fn toml_header_keys(t: &str) -> Option<TomlLine> {
     let array = t.starts_with("[[");
     let (keys, rest) = toml_keys(&t[if array { 2 } else { 1 }..])?;
     let rest = rest.strip_prefix(if array { "]]" } else { "]" })?;
     let tail = rest.trim_start_matches([' ', '\t']);
-    (tail.is_empty() || tail.starts_with('#')).then_some(keys)
+    (tail.is_empty() || tail.starts_with('#')).then_some(TomlLine::Header(keys))
 }
 
 /// 键值语句 `a.b = …` 的点分键与 `=` 后面的部分。
@@ -453,7 +455,7 @@ fn toml_lines(content: &str) -> Result<Vec<(&str, TomlLine)>> {
         let line = raw.trim_end_matches(['\n', '\r']);
         let t = line.trim_start_matches([' ', '\t']);
         let kind = if s.multiline.is_none() && s.depth == 0 && t.starts_with('[') {
-            TomlLine::Header(toml_header_keys(t).ok_or_else(|| invalid(n + 1))?)
+            toml_header_keys(t).ok_or_else(|| invalid(n + 1))?
         } else if s.multiline.is_none() && s.depth == 0 && (t.is_empty() || t.starts_with('#')) {
             TomlLine::Comment
         } else {
@@ -483,10 +485,8 @@ fn managed_codex_section(keys: &[String]) -> bool {
 struct WithoutOwn {
     text: String,
     /// 顶层 `mcp_servers = { … }`（整张表写成行内表）所在的行：行内表不能再往里加段，ATM 没法保真地加入
-    /// 自己的条目。
+    /// 自己的条目；里面有 ATM 的条目时也删不掉。
     inline_servers: Option<usize>,
-    /// 那张行内表里有 ATM 的名字（删不掉，也就卸不掉）。
-    inline_has_ours: bool,
 }
 
 /// 去掉 ATM 自己的定义：`[mcp_servers.<名字>]` 段（含子表）里的键值行与空行，以及别处键路径落在
@@ -497,18 +497,15 @@ fn without_own_codex_sections(content: &str) -> Result<WithoutOwn> {
     let mut out = WithoutOwn {
         text: String::new(),
         inline_servers: None,
-        inline_has_ours: false,
     };
     let mut table: Vec<String> = Vec::new();
     let mut skipping = false;
     let mut skip_statement = false;
-    let mut in_inline_servers = false;
     for (n, (raw, kind)) in toml_lines(content)?.into_iter().enumerate() {
         match kind {
             TomlLine::Header(keys) => {
                 skipping = managed_codex_section(&keys);
                 skip_statement = false;
-                in_inline_servers = false;
                 if !skipping {
                     out.text.push_str(raw);
                 }
@@ -521,8 +518,7 @@ fn without_own_codex_sections(content: &str) -> Result<WithoutOwn> {
             }
             TomlLine::Content(Some(keys)) => {
                 let full: Vec<String> = table.iter().chain(&keys).cloned().collect();
-                in_inline_servers = full == ["mcp_servers"];
-                if in_inline_servers {
+                if full == ["mcp_servers"] {
                     out.inline_servers.get_or_insert(n + 1);
                 }
                 skip_statement = skipping || managed_codex_section(&full);
@@ -535,9 +531,6 @@ fn without_own_codex_sections(content: &str) -> Result<WithoutOwn> {
                     out.text.push_str(raw);
                 }
             }
-        }
-        if in_inline_servers && names::ALL.iter().any(|name| raw.contains(name)) {
-            out.inline_has_ours = true;
         }
     }
     out.text = js_trim_end(&out.text).to_string();
@@ -554,26 +547,200 @@ fn inline_servers_unsupported(line: usize) -> AgentError {
     )
 }
 
-/// 读出现有的 config.toml，算出去掉 ATM 定义之后的文本；ATM 改不了的写法报错（零写入）。
-fn codex_plan(path: &Path, uninstall: bool) -> Result<(String, String)> {
+fn unsupported(why: &str) -> AgentError {
+    AgentError::new(
+        "CODEX_CONFIG_UNSUPPORTED",
+        format!("Codex 的 config.toml {why}，ATM 没法保真地改写它；没有改动这个文件"),
+    )
+}
+
+/// 按 TOML 解析整份配置（与 Codex 用同一个解析器）。
+fn codex_doc(text: &str) -> Result<toml::Table> {
+    text.parse::<toml::Table>().map_err(|e| {
+        AgentError::new(
+            "CODEX_CONFIG_INVALID_TOML",
+            format!(
+                "Codex 的 config.toml 不是合法的 TOML（{}）；没有改动这个文件",
+                e.message()
+            ),
+        )
+    })
+}
+
+/// 一个值里（`mcp_servers` 的表或数组）有没有 ATM 的条目：只看解码后的键，不看值和注释。
+fn has_managed(v: &toml::Value) -> bool {
+    match v {
+        toml::Value::Table(t) => t.keys().any(|k| names::managed(k)),
+        toml::Value::Array(a) => a.iter().any(has_managed),
+        _ => false,
+    }
+}
+
+/// 去掉 ATM 的条目之后的整份配置（用来核对用户的内容一个字都没变）。去掉之后空了的 `mcp_servers` 也去掉。
+fn without_managed(doc: &toml::Table) -> toml::Table {
+    let mut doc = doc.clone();
+    if let Some(toml::Value::Table(servers)) = doc.get_mut("mcp_servers") {
+        servers.retain(|k, _| !names::managed(k));
+        if servers.is_empty() {
+            doc.remove("mcp_servers");
+        }
+    }
+    doc
+}
+
+/// ATM 写的一个 server 应当是什么样。
+fn codex_entry(l: &Launch) -> toml::Value {
+    let mut t = toml::Table::new();
+    t.insert("command".into(), l.command.clone().into());
+    t.insert(
+        "args".into(),
+        toml::Value::Array(l.args.iter().cloned().map(Into::into).collect()),
+    );
+    if !l.env.is_empty() {
+        t.insert(
+            "env".into(),
+            toml::Value::Table(
+                l.env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone().into()))
+                    .collect(),
+            ),
+        );
+    }
+    toml::Value::Table(t)
+}
+
+/// 改写之后再解析一遍：必须是合法 TOML，ATM 以外的内容与改写前完全相同，`mcp_servers` 是表，ATM 的条目
+/// 正好是应当写入的那几个（卸载时一个都没有）。任何一条不成立都不写。
+fn verify_codex(
+    before: &toml::Table,
+    content: &str,
+    desired: &[(String, toml::Value)],
+) -> Result<()> {
+    let after = content
+        .parse::<toml::Table>()
+        .map_err(|_| unsupported("改写之后不再是合法的 TOML"))?;
+    if toml::to_string(&without_managed(before)).ok()
+        != toml::to_string(&without_managed(&after)).ok()
+    {
+        return Err(unsupported("改写之后 ATM 以外的内容变了"));
+    }
+    let ours: Vec<(String, toml::Value)> = match after.get("mcp_servers") {
+        None => Vec::new(),
+        Some(toml::Value::Table(servers)) => servers
+            .iter()
+            .filter(|(k, _)| names::managed(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        // 不是表：卸载、而且里面本来就没有 ATM 的条目时用不着动它。
+        Some(v) if desired.is_empty() && !has_managed(v) => Vec::new(),
+        Some(_) => return Err(unsupported("里的 mcp_servers 不是表")),
+    };
+    let mut ours = ours;
+    ours.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut want = desired.to_vec();
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    if ours != want {
+        return Err(unsupported("改写之后 ATM 的条目不是应当写入的样子"));
+    }
+    Ok(())
+}
+
+/// 读出现有的 config.toml，算出改写后的全文：`desired` 为 `Some` 是按这些档位安装，`None` 是卸载。ATM 改不了
+/// 的写法报错（零写入）。返回（现有全文，改写后的全文）。
+fn codex_plan(path: &Path, desired: Option<(&Launch, &[Profile])>) -> Result<(String, String)> {
     let existing = read_text(path)
         .map_err(|e| AgentError::io("AGENT_CONFIG_READ_FAILED", e))?
         .unwrap_or_default();
+    let doc = codex_doc(&existing)?;
     let own = without_own_codex_sections(&existing)?;
-    if let Some(line) = own.inline_servers {
-        // 安装要往里加段：行内表在就加不了。卸载只在行内表里有 ATM 的条目时才做不到。
-        if !uninstall || own.inline_has_ours {
-            return Err(inline_servers_unsupported(line));
-        }
+    let servers = doc.get("mcp_servers");
+    let ours_inside = servers.is_some_and(has_managed);
+    // 安装要往里加段；卸载只在里面有 ATM 的条目时才需要动它。
+    let needs_room = desired.is_some() || ours_inside;
+    if let Some(v) = servers
+        && !v.is_table()
+        && needs_room
+    {
+        return Err(unsupported(
+            "里的 mcp_servers 不是表（比如写成了 [[mcp_servers]] 数组表）",
+        ));
     }
-    Ok((existing, own.text))
+    if let Some(line) = own.inline_servers
+        && needs_room
+    {
+        return Err(inline_servers_unsupported(line));
+    }
+    let eol = codex_eol(&existing);
+    let (content, entries) = match desired {
+        Some((launch, profiles)) => {
+            let sections: Vec<String> = profiles
+                .iter()
+                .map(|p| codex_section(&launch.for_profile(*p), p.server_name(), eol))
+                .collect();
+            let content = format!(
+                "{}{}{}{eol}",
+                own.text,
+                if own.text.is_empty() {
+                    String::new()
+                } else {
+                    eol.repeat(2)
+                },
+                sections.join(&eol.repeat(2))
+            );
+            let entries = profiles
+                .iter()
+                .map(|p| {
+                    (
+                        p.server_name().to_string(),
+                        codex_entry(&launch.for_profile(*p)),
+                    )
+                })
+                .collect();
+            (content, entries)
+        }
+        None if own.text.is_empty() => (String::new(), Vec::new()),
+        None => (format!("{}{eol}", own.text), Vec::new()),
+    };
+    verify_codex(&doc, &content, &entries)?;
+    Ok((existing, content))
+}
+
+/// `[mcp_servers."<名字>"]` 段。
+fn codex_section(l: &Launch, name: &str, eol: &str) -> String {
+    let mut lines = vec![
+        format!("[mcp_servers.{}]", toml_string(name)),
+        format!("command = {}", toml_string(&l.command)),
+        format!(
+            "args = [{}]",
+            l.args
+                .iter()
+                .map(|a| toml_string(a))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    ];
+    if !l.env.is_empty() {
+        lines.push(format!(
+            "env = {{ {} }}",
+            l.env
+                .iter()
+                .map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    lines.join(eol)
 }
 
 /// 写动作之前先把要改的配置读一遍、算出结果（peer W6 r2 P2-02）：认不出的、ATM 改不了的，在动规则、Skill、
-/// 任何配置之前就报错，整个操作零写入。Claude Code 经它的命令行改，由命令行自己校验。
-pub fn preflight(env: &AgentEnv, client: Client, uninstall: bool) -> Result<()> {
+/// 任何配置之前就报错，整个操作零写入。Codex 照真正要写的档位算一遍并核对（与写入时同一个计划）。
+/// Claude Code 经它的命令行改，由命令行自己校验。`profiles` 为 `None` 是卸载。
+pub fn preflight(env: &AgentEnv, client: Client, profiles: Option<&[Profile]>) -> Result<()> {
     match client {
-        Client::Codex => codex_plan(&env.codex_config(), uninstall).map(|_| ()),
+        Client::Codex => {
+            codex_plan(&env.codex_config(), profiles.map(|p| (&env.launch, p))).map(|_| ())
+        }
         Client::Claude => {
             for p in env.claude_desktop_configs() {
                 read_object(&p, "CLAUDE_CONFIG_INVALID_JSON")?;
@@ -601,46 +768,7 @@ fn toml_string(s: &str) -> String {
 }
 
 pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Result<Written> {
-    let (existing, base) = codex_plan(path, false)?;
-    let eol = codex_eol(&existing);
-    let sections: Vec<String> = profiles
-        .iter()
-        .map(|p| {
-            let l = launch.for_profile(*p);
-            let mut lines = vec![
-                format!("[mcp_servers.{}]", toml_string(p.server_name())),
-                format!("command = {}", toml_string(&l.command)),
-                format!(
-                    "args = [{}]",
-                    l.args
-                        .iter()
-                        .map(|a| toml_string(a))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            ];
-            if !l.env.is_empty() {
-                lines.push(format!(
-                    "env = {{ {} }}",
-                    l.env
-                        .iter()
-                        .map(|(k, v)| format!("{} = {}", toml_string(k), toml_string(v)))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-            lines.join(eol)
-        })
-        .collect();
-    let content = format!(
-        "{base}{}{}{eol}",
-        if base.is_empty() {
-            String::new()
-        } else {
-            eol.repeat(2)
-        },
-        sections.join(&eol.repeat(2))
-    );
+    let (existing, content) = codex_plan(path, Some((launch, profiles)))?;
     let backup = if existing == content {
         None
     } else {
@@ -655,12 +783,7 @@ pub fn codex_install(path: &Path, launch: &Launch, profiles: &[Profile]) -> Resu
 }
 
 pub fn codex_uninstall(path: &Path) -> Result<Written> {
-    let (existing, next) = codex_plan(path, true)?;
-    let content = if next.is_empty() {
-        String::new()
-    } else {
-        format!("{next}{}", codex_eol(&existing))
-    };
+    let (existing, content) = codex_plan(path, None)?;
     let backup = if existing == content {
         None
     } else {
@@ -674,62 +797,16 @@ pub fn codex_uninstall(path: &Path) -> Result<Written> {
     })
 }
 
-/// `{ "k" = "v", ... }`，只认字符串值（2.0 `tomlInlineStringTable`）。
-fn toml_inline_strings(v: &str) -> Option<BTreeMap<String, String>> {
-    let t = atm_domain::text::js_trim(v);
-    let inner = atm_domain::text::js_trim(t.strip_prefix('{')?.strip_suffix('}')?);
-    let mut out = BTreeMap::new();
-    let mut rest = inner;
-    loop {
-        rest = rest.trim_start_matches(|c: char| c == ',' || is_js_whitespace(c));
-        if rest.is_empty() {
-            return Some(out);
-        }
-        let (k, after) = json_string_prefix(rest)?;
-        let after = after.trim_start().strip_prefix('=')?.trim_start();
-        let (val, after) = json_string_prefix(after)?;
-        out.insert(k, val);
-        rest = after;
+/// 不是字符串的值：给一个与任何字符串都不相等的值，判为过期。
+fn codex_text(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        other => unparsed(other),
     }
 }
 
-/// 开头的一个 JSON 字符串字面量与剩下的部分。
-fn json_string_prefix(s: &str) -> Option<(String, &str)> {
-    if !s.starts_with('"') {
-        return None;
-    }
-    let bytes = s.as_bytes();
-    let mut i = 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => i += 2,
-            b'"' => {
-                let lit = &s[..=i];
-                return serde_json::from_str::<String>(lit)
-                    .ok()
-                    .map(|v| (v, &s[i + 1..]));
-            }
-            _ => i += 1,
-        }
-    }
-    None
-}
-
-/// 一个受管 server 读到的东西。
-#[derive(Default)]
-struct CodexDraft {
-    command: Option<String>,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-}
-
-/// `= ` 后面的值：只认单行的基本串（不是的话给一个与任何字符串都不相等的值，判为过期）。
-fn codex_env_value(v: &str) -> String {
-    let v = atm_domain::text::js_trim(v);
-    match json_string_prefix(v) {
-        Some((s, rest)) if atm_domain::text::js_trim(rest).is_empty() => s,
-        _ => format!("\0unparsed {v}"),
-    }
+fn unparsed(v: &toml::Value) -> String {
+    format!("\0unparsed {v}")
 }
 
 pub fn codex_installed(path: &Path) -> Installed {
@@ -737,16 +814,54 @@ pub fn codex_installed(path: &Path) -> Installed {
     let Some(text) = read_text(path).ok().flatten() else {
         return found;
     };
-    // 认不出的文件当作什么都没登记：启动修复不碰它，显式安装时由写入那一步报 CODEX_CONFIG_INVALID_TOML。
-    let Ok(lines) = toml_lines(&text) else {
+    // 不是合法 TOML：当作什么都没登记。启动修复不碰它，显式安装时由写入那一步报 CODEX_CONFIG_INVALID_TOML。
+    let Ok(doc) = text.parse::<toml::Table>() else {
         return found;
     };
-    // 2.0 `codexProfileLaunches`：写了 command 的段才算登记（空串也算），args / env 缺省为空。3.0 还读
-    // `[mcp_servers.<名字>.env]` 子表与段里的 `env.K = …`（peer W6 r2 P2-01：只有 env 不对也算过期）；
-    // 段以外写的 ATM 定义（行内表、点分键）记为非规范。段里别的键（用户加的超时之类）照 2.0 不看。
-    let mut drafts: BTreeMap<String, CodexDraft> = BTreeMap::new();
+    let Some(servers) = doc.get("mcp_servers") else {
+        return found;
+    };
+    let toml::Value::Table(servers) = servers else {
+        // `[[mcp_servers]]` 之类：里面有 ATM 的条目就算接入了、但写法不对。
+        found.noncanonical = has_managed(servers);
+        return found;
+    };
+    // 2.0 `codexProfileLaunches`：写了 command 的才算登记（空串也算），args / env 缺省为空。值按 TOML 解码，
+    // 不是字符串的、类型不对的记成与任何期望都不等（peer W6 r3 P2-01）。段里别的键（用户加的超时之类）照 2.0 不看。
+    for (name, v) in servers.iter().filter(|(k, _)| names::managed(k)) {
+        let toml::Value::Table(s) = v else {
+            // `[[mcp_servers."<名字>"]]` 数组表、`<名字> = "…"`（peer W6 r3 P2-03）。
+            found.noncanonical = true;
+            continue;
+        };
+        let Some(command) = s.get("command") else {
+            continue;
+        };
+        let mut l = Launch::new(codex_text(command));
+        l.args = match s.get("args") {
+            None => Vec::new(),
+            Some(toml::Value::Array(a)) => a.iter().map(codex_text).collect(),
+            Some(other) => vec![unparsed(other)],
+        };
+        l.env = match s.get("env") {
+            None => BTreeMap::new(),
+            Some(toml::Value::Table(e)) => {
+                e.iter().map(|(k, v)| (k.clone(), codex_text(v))).collect()
+            }
+            Some(other) => BTreeMap::from([(String::new(), unparsed(other))]),
+        };
+        found.set(name, l);
+    }
+    // 写法：ATM 的条目只能是 `[mcp_servers."<名字>"]` 段（含它的子表、段里的 `env.K`）。整张行内表、
+    // `[mcp_servers]` 下的行内表或点分键、顶层点分键、数组表都算非规范（peer W6 r2 P1-02、r3 P2-03）。
+    // 扫描认不出的写法同样算非规范：修复去改写时由写入那一步报错，不会悄悄当作规范。
+    let ours = servers.keys().any(|k| names::managed(k));
+    let Ok(lines) = toml_lines(&text) else {
+        found.noncanonical |= ours;
+        return found;
+    };
     let mut table: Vec<String> = Vec::new();
-    for (raw, kind) in lines {
+    for (_, kind) in lines {
         let keys = match kind {
             TomlLine::Header(keys) => {
                 table = keys;
@@ -756,63 +871,10 @@ pub fn codex_installed(path: &Path) -> Installed {
             _ => continue,
         };
         let full: Vec<&str> = table.iter().chain(&keys).map(String::as_str).collect();
-        if full == ["mcp_servers"] {
-            if names::ALL.iter().any(|n| raw.contains(n)) {
-                found.noncanonical = true;
-            }
-            continue;
-        }
-        if full.len() < 2 || full[0] != "mcp_servers" || !names::managed(full[1]) {
-            continue;
-        }
-        let name = full[1];
-        if table.len() < 2 {
-            // `[mcp_servers]` 下的 `<名字> = { … }` / `<名字>.command = …`，或顶层的点分键。
+        let defines_ours = (full == ["mcp_servers"] && ours)
+            || (full.len() >= 2 && full[0] == "mcp_servers" && names::managed(full[1]));
+        if defines_ours && table.len() < 2 {
             found.noncanonical = true;
-            continue;
-        }
-        let line = raw.trim_end_matches(['\n', '\r']);
-        let Some((_, value)) = toml_statement_keys(line.trim_start_matches([' ', '\t'])) else {
-            continue;
-        };
-        let value = value.trim_start_matches(is_js_whitespace);
-        let d = drafts.entry(name.to_owned()).or_default();
-        match &full[2..] {
-            ["command"] => {
-                if let Some(c) = (value.starts_with('"') && js_trim_end(value).ends_with('"'))
-                    .then(|| serde_json::from_str::<String>(js_trim_end(value)).ok())
-                    .flatten()
-                {
-                    d.command = Some(c);
-                }
-            }
-            ["args"] => {
-                let v = js_trim_end(value);
-                if v.starts_with('[')
-                    && v.ends_with(']')
-                    && let Ok(Value::Array(a)) = serde_json::from_str::<Value>(v)
-                {
-                    d.args = a.iter().map(js_string_of).collect();
-                }
-            }
-            ["env"] => {
-                let v = js_trim_end(value);
-                if v.starts_with('{') && v.ends_with('}') {
-                    d.env = toml_inline_strings(v).unwrap_or_default();
-                }
-            }
-            ["env", var] => {
-                d.env.insert((*var).to_owned(), codex_env_value(value));
-            }
-            _ => {}
-        }
-    }
-    for (name, d) in drafts {
-        if let Some(command) = d.command {
-            let mut l = Launch::new(&command);
-            l.args = d.args;
-            l.env = d.env;
-            found.set(&name, l);
         }
     }
     found
@@ -1056,5 +1118,61 @@ pub fn uninstall(env: &AgentEnv, client: Client) -> Result<Written> {
         }
         Client::ClaudeCode => claude_code_uninstall(env),
         Client::KimiCode => kimi_uninstall(&env.kimi_config()),
+    }
+}
+
+#[cfg(test)]
+mod r3_tests {
+    use super::*;
+
+    fn doc(s: &str) -> toml::Table {
+        s.parse().unwrap()
+    }
+
+    /// 改写之后的核对（peer W6 r3）：用户的内容少了、变了，ATM 的条目多了、少了、和应当写入的不同，结果不是合法
+    /// TOML，`mcp_servers` 不是表，都拒绝；对的照常通过。手写扫描与解析器对不上的写法由它兜底。
+    #[test]
+    fn the_rewrite_is_checked_with_the_parser() {
+        let before = doc("x = 1\n[mcp_servers.other]\ncommand = \"keep\"\n");
+        let l = Launch::new("atm.exe");
+        let want = vec![(names::CORE.to_string(), codex_entry(&l))];
+        let good = "x = 1\n[mcp_servers.other]\ncommand = \"keep\"\n\n[mcp_servers.\"ayanami-task-manager-core\"]\ncommand = \"atm.exe\"\nargs = []\n";
+        verify_codex(&before, good, &want).unwrap();
+        verify_codex(
+            &before,
+            "x = 1\n[mcp_servers.other]\ncommand = \"keep\"\n",
+            &[],
+        )
+        .unwrap();
+        let cases: Vec<(String, &str)> = vec![
+            (
+                good.replace("[mcp_servers.other]\ncommand = \"keep\"\n", ""),
+                "user server lost",
+            ),
+            (good.replace("x = 1", "x = 2"), "user value changed"),
+            (good.replace("atm.exe", "old.exe"), "our entry differs"),
+            (
+                good.replace(
+                    "args = []",
+                    "args = []\n[mcp_servers.\"ayanami-task-manager-memory\"]\ncommand = \"m\"",
+                ),
+                "an extra entry",
+            ),
+            (
+                "x = 1\n[mcp_servers.other]\ncommand = \"keep\"\n".to_string(),
+                "our entry missing",
+            ),
+            (good.replace("args = []", "args = ["), "not TOML"),
+        ];
+        for (bad, why) in &cases {
+            assert_eq!(
+                verify_codex(&before, bad, &want).unwrap_err().code,
+                "CODEX_CONFIG_UNSUPPORTED",
+                "{why}"
+            );
+        }
+        let array = doc("[[mcp_servers]]\nother = 1\n");
+        assert!(verify_codex(&array, "[[mcp_servers]]\nother = 1\n", &[]).is_ok());
+        assert!(verify_codex(&array, "[[mcp_servers]]\nother = 1\n", &want).is_err());
     }
 }

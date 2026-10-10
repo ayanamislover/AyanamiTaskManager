@@ -20,7 +20,8 @@ fn dir(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
+                .parent()
+                .unwrap()
                 .join("target")
         });
     let dir = target.join("store-tests").join(format!("recover-{name}"));

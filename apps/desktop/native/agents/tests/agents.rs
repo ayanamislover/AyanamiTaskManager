@@ -1345,6 +1345,12 @@ fn a_whole_inline_mcp_servers_table_is_refused_before_any_write() {
     let before = tree(&w.home);
     let e = w.agents.manage(&user(), "CODEX", "INSTALL").unwrap_err();
     assert_eq!(e.code, "CODEX_CONFIG_UNSUPPORTED", "{}", e.message);
+    // 原因要说到点子上：是哪一行写成了行内表（不是笼统的「改不了」）。
+    assert!(
+        e.message.contains("第 1 行") && e.message.contains("行内表"),
+        "{}",
+        e.message
+    );
     assert_eq!(tree(&w.home), before, "install wrote something");
     assert!(w.agents.repair(&repair_job()).unwrap().configs.is_empty());
     assert_eq!(tree(&w.home), before, "repair wrote something");
@@ -1364,6 +1370,7 @@ fn a_whole_inline_mcp_servers_table_is_refused_before_any_write() {
             "{action}: {}",
             e.message
         );
+        assert!(e.message.contains("行内表"), "{action}: {}", e.message);
         assert_eq!(tree(&w.home), before, "{action} wrote something");
     }
     // 启动修复：认得出是 ATM 的，但改不了配置；记下原因，配置一个字节不动。（修复的各步互相独立：这个客户端
@@ -1487,4 +1494,166 @@ fn an_unreadable_codex_config_means_no_write_anywhere() {
         .unwrap_err();
     assert_eq!(e.code, "KIMI_CODE_CONFIG_INVALID_JSON", "{}", e.message);
     assert_eq!(tree(&w.home), before);
+}
+
+/// peer W6 r3 P2-02 复现 A：整张行内 `mcp_servers` 里 ATM 的键写成了转义（解码后就是 ATM 的名字）。卸载、安装都
+/// 做不到保真：报 CODEX_CONFIG_UNSUPPORTED，什么都不写——不能报成功却留着它。
+#[test]
+fn an_inline_table_with_an_escaped_atm_key_is_refused_not_reported_removed() {
+    let w = World::new("codex-r3-escaped-inline", true);
+    let text = "mcp_servers = { \"\\u0061yanami-task-manager-core\" = { command = \"old.exe\" }, other = { command = \"keep.exe\" } }\n";
+    w.write(".codex/config.toml", text);
+    assert!(codex_server(&codex_toml(&w), CORE).is_some());
+    let before = tree(&w.home);
+    for action in ["UNINSTALL", "INSTALL"] {
+        let e = w.agents.manage(&user(), "CODEX", action).unwrap_err();
+        assert_eq!(e.code, "CODEX_CONFIG_UNSUPPORTED", "{action}");
+        assert_eq!(tree(&w.home), before, "{action}");
+    }
+    assert_eq!(w.read(".codex/config.toml"), text);
+}
+
+/// peer W6 r3 P2-02 复现 B：用户自己的 server 的值、注释里提到 ATM 的名字，不等于 ATM 接入了。卸载照常成功、
+/// 文件不动；启动修复什么都不做（不写配置，也不替没接入的客户端装 Skill）。
+#[test]
+fn a_user_value_or_comment_naming_atm_is_not_an_atm_server() {
+    for (i, text) in [
+        "mcp_servers = { other = { command = \"keep.exe\", args = [\"ayanami-task-manager\"] } }\n",
+        "mcp_servers = { other = { command = \"keep.exe\" } } # ayanami-task-manager-core\n",
+        "[mcp_servers.other]\ncommand = \"keep.exe\"\nargs = [\"ayanami-task-manager-core\"]\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let w = World::new(&format!("codex-r3-user-mention-{i}"), true);
+        w.write(".codex/config.toml", text);
+        let before = tree(&w.home);
+        let done = w.agents.repair(&repair_job()).unwrap();
+        assert!(
+            done.configs.is_empty() && done.skills.is_empty(),
+            "{text}: {done:?}"
+        );
+        assert_eq!(tree(&w.home), before, "{text}");
+        w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+        assert_eq!(w.read(".codex/config.toml"), *text);
+    }
+}
+
+/// peer W6 r3 P2-01：只有 env 不对，而 env 写成了别的合法 TOML（裸键、字面串、带行尾注释）：按 TOML 读出来，
+/// 算过期；启动修复与显式安装都改回应当写入的样子。装对了的不算过期。
+#[test]
+fn env_in_any_valid_toml_form_is_read_for_staleness() {
+    let header = "[mcp_servers.\"ayanami-task-manager-core\"]\n";
+    for (i, env) in [
+        "env = { ATM_DATA_DIR = \"old-root\" }",
+        "env = { \"ATM_DATA_DIR\" = 'old-root' }",
+        "env = { 'ATM_DATA_DIR' = \"old-root\" } # left by hand",
+        "env.ATM_DATA_DIR = 'old-root'",
+        "env = \"old-root\"",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for explicit in [false, true] {
+            let w = World::new(&format!("codex-r3-env-{i}-{explicit}"), true);
+            w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+            assert!(w.agents.repair(&repair_job()).unwrap().configs.is_empty());
+            let good = w.read(".codex/config.toml");
+            let stale = good.replace(header, &format!("{header}{env}\n"));
+            assert_ne!(stale, good);
+            w.write(".codex/config.toml", &stale);
+            codex_toml(&w);
+            if explicit {
+                w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+            } else {
+                let done = w.agents.repair(&repair_job()).unwrap();
+                assert!(
+                    done.configs.contains(&atm_agents::Client::Codex),
+                    "{env}: {done:?}"
+                );
+            }
+            assert_eq!(
+                w.read(".codex/config.toml"),
+                good,
+                "{env} explicit={explicit}"
+            );
+        }
+    }
+}
+
+/// peer W6 r3 P2-03 复现 A：ATM 的 server 写成数组表 `[[mcp_servers."<名字>"]]`，里面的启动方式完全正确：
+/// 这不是 Codex 要的表，算过期，修复改写成段。
+#[test]
+fn an_array_table_for_an_atm_server_is_rewritten_as_a_table() {
+    let w = World::new("codex-r3-array-server", true);
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    let good = w.read(".codex/config.toml");
+    let input = good.replace(
+        "[mcp_servers.\"ayanami-task-manager-core\"]",
+        "[[mcp_servers.\"ayanami-task-manager-core\"]]",
+    );
+    w.write(".codex/config.toml", &input);
+    assert!(codex_server(&codex_toml(&w), CORE).unwrap().is_array());
+    let done = w.agents.repair(&repair_job()).unwrap();
+    assert!(
+        done.configs.contains(&atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    assert!(codex_server(&codex_toml(&w), CORE).unwrap().is_table());
+    assert_eq!(w.read(".codex/config.toml"), good);
+}
+
+/// peer W6 r3 P2-03 复现 B：整个 `mcp_servers` 是数组表。安装往里加段会落进最后一个数组元素：在任何写入之前
+/// 拒绝。里面有 ATM 的条目时卸载也拒绝；没有就什么都不用做。
+#[test]
+fn an_array_of_mcp_servers_is_refused_before_any_write() {
+    for (i, (text, ours)) in [
+        (
+            "[[mcp_servers]]\nother = { command = \"keep.exe\" }\n",
+            false,
+        ),
+        (
+            "[[mcp_servers]]\n\"ayanami-task-manager-core\" = { command = \"old.exe\" }\n",
+            true,
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let w = World::new(&format!("codex-r3-array-root-{i}"), true);
+        w.write(".codex/config.toml", text);
+        let before = tree(&w.home);
+        let e = w.agents.manage(&user(), "CODEX", "INSTALL").unwrap_err();
+        assert_eq!(e.code, "CODEX_CONFIG_UNSUPPORTED", "{text}");
+        assert!(e.message.contains("数组表"), "{}", e.message);
+        assert_eq!(tree(&w.home), before, "{text}");
+        let un = w.agents.manage(&user(), "CODEX", "UNINSTALL");
+        if *ours {
+            let e = un.unwrap_err();
+            assert_eq!(e.code, "CODEX_CONFIG_UNSUPPORTED");
+            assert!(e.message.contains("数组表"), "{}", e.message);
+        } else {
+            un.unwrap();
+        }
+        assert_eq!(w.read(".codex/config.toml"), *text);
+    }
+}
+
+/// 改写之后的核对（peer W6 r3）：用户用顶层点分键写自己的 server、又有 ATM 的段时，安装、卸载之后独立解析
+/// 合法，用户的 server 一个值都不变。
+#[test]
+fn user_servers_survive_install_and_uninstall_byte_for_value() {
+    let w = World::new("codex-r3-dotted-user", true);
+    let text =
+        "mcp_servers.other.command = 'C:\\tools\\keep.exe'\nmcp_servers.other.args = [\"--x\"]\n";
+    w.write(".codex/config.toml", text);
+    let user_server = codex_server(&codex_toml(&w), "other").unwrap().clone();
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    assert_eq!(
+        codex_server(&codex_toml(&w), "other").unwrap(),
+        &user_server
+    );
+    assert!(codex_server(&codex_toml(&w), CORE).unwrap().is_table());
+    w.agents.manage(&user(), "CODEX", "UNINSTALL").unwrap();
+    assert_eq!(w.read(".codex/config.toml"), text);
 }

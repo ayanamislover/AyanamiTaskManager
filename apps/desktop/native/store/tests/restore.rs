@@ -4,8 +4,8 @@
 //! 身份不回退、回执原地变墓碑、全局流打撤销标记、其他范围不受影响、失败时什么都不变。
 
 use atm_store::backup::{
-    BackupError, WITHDRAWN_DIR, Withdrawal, artifacts_root, attachment_lock_waiters, create_backup,
-    discard_backup, sweep_withdrawn, verify_backup, withdrawn_pending,
+    BackupError, CREATING_DIR, WITHDRAWN_DIR, Withdrawal, artifacts_root, attachment_lock_waiters,
+    create_backup, discard_backup, sweep_withdrawn, verify_backup, withdrawn_pending,
 };
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
@@ -37,8 +37,9 @@ fn world(name: &str) -> World {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
                 .join("target")
         });
     let dir = target.join("store-tests").join(name);
@@ -2031,4 +2032,140 @@ fn a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep() {
         }]
     );
     verify_backup(&w.store, &backup.id).unwrap();
+}
+
+/// peer W6 r3 P1-01，备份根一侧（同一类问题）：备份根里的隔离区或「正在创建」是 junction 时，创建、撤回、清扫
+/// 都在删任何东西之前拒绝——清扫原来会把链接目标里名字像备份 id 的目录当成撤回残留删掉。备份根经上层的
+/// junction 到达时照常工作，登记的仍是调用方给的路径。
+#[cfg(windows)]
+#[test]
+fn linked_layers_in_the_backups_root_are_refused_before_any_removal() {
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success(), "mklink /J {}", link.display());
+    }
+    fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        for e in fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                out.extend(files(&p));
+            } else {
+                out.push((p.clone(), fs::read(&p).unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+    let w = world("restore-backups-links");
+    let first = create_backup(&w.store, &w.backups, "MANUAL", T1).unwrap();
+    let outside = w.backups.parent().unwrap().join("outside-backups");
+    let _ = fs::remove_dir_all(&outside);
+    // 名字像备份 id、像「正在创建」标记的：在备份根外面就不是 ATM 的。
+    fs::create_dir_all(outside.join("01J0000000000000000000000B")).unwrap();
+    fs::write(
+        outside.join("01J0000000000000000000000B").join("keep.txt"),
+        b"keep",
+    )
+    .unwrap();
+    fs::write(outside.join("01J0000000000000000000000C"), b"").unwrap();
+    let before = files(&outside);
+    for layer in [WITHDRAWN_DIR, CREATING_DIR] {
+        let link = w.backups.join(layer);
+        let _ = fs::remove_dir_all(&link);
+        junction(&link, &outside);
+        let linked = |r: Result<(), BackupError>, what: &str| {
+            assert!(
+                matches!(r, Err(BackupError::LinkedPath(_))),
+                "{layer} {what}: {r:?}"
+            )
+        };
+        linked(
+            create_backup(&w.store, &w.backups, "MANUAL", T2).map(|_| ()),
+            "backup",
+        );
+        linked(sweep_withdrawn(&w.store, &w.backups).map(|_| ()), "sweep");
+        linked(discard_backup(&w.store, &first).map(|_| ()), "discard");
+        fs::remove_dir(&link).unwrap(); // 只删链接本身
+        assert_eq!(files(&outside), before, "{layer}");
+    }
+    verify_backup(&w.store, &first.id).unwrap();
+
+    // 备份根以上的链接：整个数据根搬了地方，照常创建、撤回；登记的是经由链接的路径。
+    let alias = w
+        .backups
+        .parent()
+        .unwrap()
+        .with_file_name("restore-backups-links-alias");
+    let _ = fs::remove_dir(&alias);
+    junction(&alias, w.backups.parent().unwrap());
+    let via = alias.join("backups");
+    let second = create_backup(&w.store, &via, "MANUAL", T2).unwrap();
+    assert_eq!(second.dir, via.join(&second.id));
+    verify_backup(&w.store, &second.id).unwrap();
+    assert_eq!(
+        discard_backup(&w.store, &second).unwrap(),
+        Withdrawal::Withdrawn
+    );
+    assert!(!w.backups.join(&second.id).exists());
+    fs::remove_dir(&alias).unwrap();
+    assert_eq!(files(&outside), before);
+}
+
+/// peer W6 r3：提交之后、换入之前，暂存目录被换成指向外面的 junction：不换入（换进去的会是一个指向别处的附件
+/// 目录），报 AttachmentsPending；live 目录和外面一个字节都不变。拿掉链接、放回暂存后收尾照常走完。
+#[cfg(windows)]
+#[test]
+fn a_staged_directory_replaced_by_a_link_is_not_swapped_in() {
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success(), "mklink /J {}", link.display());
+    }
+    let w = world("restore-staged-link");
+    let root = artifacts_root(w.store.path());
+    fs::create_dir_all(root.join("PA")).unwrap();
+    fs::write(root.join("PA").join("a.txt"), b"v1").unwrap();
+    let backup = create_backup(&w.store, &w.backups, "MANUAL", T1).unwrap();
+    fs::write(root.join("PA").join("a.txt"), b"v2").unwrap();
+    inject_swap_fault(w.store.path(), SwapStep::AfterCommit);
+    let opts = RestoreOptions {
+        backups_root: &w.backups,
+        at: T2,
+        pin_until: T3,
+        budget: Duration::from_secs(30),
+    };
+    assert!(restore_project(&w.store, &backup.id, "PA", &opts).is_err());
+    let staged = root.join(".restore-staging").join("PA");
+    assert!(staged.is_dir());
+    let outside = root.parent().unwrap().join("outside-staged");
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("a.txt"), b"outside").unwrap();
+    let kept = root.parent().unwrap().join("kept-staged");
+    let _ = fs::remove_dir_all(&kept);
+    fs::rename(&staged, &kept).unwrap();
+    junction(&staged, &outside);
+    let r = finish_attachment_swaps(&w.store);
+    assert!(
+        matches!(r, Err(BackupError::AttachmentsPending { .. })),
+        "{r:?}"
+    );
+    assert_eq!(fs::read(root.join("PA").join("a.txt")).unwrap(), b"v2");
+    assert_eq!(fs::read(outside.join("a.txt")).unwrap(), b"outside");
+    fs::remove_dir(&staged).unwrap(); // 只删链接本身
+    fs::rename(&kept, &staged).unwrap();
+    assert_eq!(finish_attachment_swaps(&w.store).unwrap(), 1);
+    assert_eq!(fs::read(root.join("PA").join("a.txt")).unwrap(), b"v1");
 }

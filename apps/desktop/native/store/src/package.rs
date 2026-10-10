@@ -23,8 +23,8 @@
 
 use crate::Store;
 use crate::backup::{
-    BackupError, FileEntry, attachments_digest, attachments_lock, copy_tree, hash_file, list_tree,
-    path_str, side_reader,
+    AttachmentsGuard, BackupError, FileEntry, attachments_digest, attachments_lock, copy_tree,
+    hash_file, list_tree, path_str, side_reader,
 };
 use crate::events::ulid;
 use crate::legacy::{ConvertError, ConvertOptions, Home, LegacySources};
@@ -281,11 +281,11 @@ pub fn export_project(
     format: Format,
     opts: &ExportOptions<'_>,
 ) -> Result<Exported> {
-    let _lock = attachments_lock(store, "export_project")?;
-    crate::restore::finish_swaps_locked(store)?;
-    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
-    let result = export_in(store, project_id, format, opts, &staging);
-    let _ = fs::remove_dir_all(&staging);
+    let mut lock = attachments_lock(store, "export_project")?;
+    crate::restore::finish_swaps_locked(store, &mut lock)?;
+    let staging = fresh_staging(opts.exports_dir)?;
+    let result = export_in(store, project_id, format, opts, &staging, &mut lock);
+    staging.remove();
     result
 }
 
@@ -294,18 +294,22 @@ fn export_in(
     project_id: &str,
     format: Format,
     opts: &ExportOptions<'_>,
-    staging: &Path,
+    work: &ExportStaging,
+    guard: &mut AttachmentsGuard,
 ) -> Result<Exported> {
+    let staging = work.dir.as_path();
     let snapshot = staging.join("snapshot.sqlite");
     {
         let side = side_reader(store.path())?;
         side.execute("VACUUM INTO ?1", [path_str(&snapshot)?])?;
     }
-    let artifacts = crate::backup::artifacts_root(store.path());
-    let prefix = artifacts.join(project_id);
-    let _pinned = pin_artifacts(&artifacts, Some(project_id))?;
+    // 附件从真实位置读，项目目录（已有的话）钉住：是链接就拒绝（peer W6 r1 P1-02、r3 P1-01）。库里附件行记的是
+    // 按库路径写的位置，改写成包内路径时按那个前缀比对。
+    let prefix = guard.artifacts().join(project_id);
+    guard.pin_existing(&[project_id])?;
+    let recorded = crate::backup::artifacts_root(store.path()).join(project_id);
     let db = staging.join(DB_ENTRY);
-    let (code, name) = extract_project(&snapshot, &db, project_id, &prefix)?;
+    let (code, name) = extract_project(&snapshot, &db, project_id, &recorded)?;
     remove_db(&snapshot);
     let stamp = opts.at.replace([':', '.'], "-");
     let stem = file_component(&code);
@@ -327,22 +331,26 @@ fn export_in(
             0
         }
     };
-    fs::create_dir_all(opts.exports_dir)?;
-    let mut target = opts.exports_dir.join(&file_name);
+    // `exports` 由暂存一起钉着，结果写在它的真实位置。
+    let mut target = work.exports.join(&file_name);
     let mut n = 2;
     while target.exists() {
-        target = opts
-            .exports_dir
+        target = work
+            .exports
             .join(format!("{stem}-{stamp}-{n}.{}", format.as_str()));
         n += 1;
     }
     sync(&out)?;
     atm_install_state::durable::rename(&out, &target, false)?;
     let (sha256, size_bytes) = hash_file(&target)?;
+    // 报给调用方的是它给的 `exports` 下的路径（与备份登记的路径一样），读写走的是真实位置。
+    let shown = opts
+        .exports_dir
+        .join(target.file_name().unwrap_or_default());
     Ok(Exported {
         format,
         project_code: code,
-        path: target,
+        path: shown,
         sha256,
         size_bytes,
         created_at: opts.at.to_string(),
@@ -1238,11 +1246,11 @@ pub fn import_project(
     source: ImportSource<'_>,
     opts: &ImportOptions<'_>,
 ) -> Result<Imported> {
-    let _lock = attachments_lock(store, "import_project")?;
-    crate::restore::finish_swaps_locked(store)?;
-    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
-    let result = import_in(store, source, opts, &staging);
-    let _ = fs::remove_dir_all(&staging);
+    let mut lock = attachments_lock(store, "import_project")?;
+    crate::restore::finish_swaps_locked(store, &mut lock)?;
+    let staging = fresh_staging(opts.exports_dir)?;
+    let result = import_in(store, source, opts, &staging.dir, &mut lock);
+    staging.remove();
     result
 }
 
@@ -1251,6 +1259,7 @@ fn import_in(
     source: ImportSource<'_>,
     opts: &ImportOptions<'_>,
     staging: &Path,
+    guard: &mut AttachmentsGuard,
 ) -> Result<Imported> {
     let (db, artifacts, format, package_sha) = match source {
         ImportSource::Package(path) => {
@@ -1309,7 +1318,12 @@ fn import_in(
             return Err(invalid(format!("project.sqlite: quick_check: {quick}")));
         }
     }
-    let artifacts_root = crate::backup::artifacts_root(store.path());
+    // 有附件要换入时附件根先钉住（不存在就排他新建），一直钉到下面失败时的回滚清理结束（peer W6 r3 P1-01）。
+    let artifacts_root = if artifacts.exists() {
+        guard.ensure(&[])?
+    } else {
+        guard.artifacts()
+    };
     let uri = readonly_uri(&db)?;
     let ctx = ImportCtx {
         code: opts.code.map(str::to_owned),
@@ -1318,6 +1332,7 @@ fn import_in(
         package_sha256: package_sha,
         source_label: opts.source_label.to_string(),
         artifacts_root: artifacts_root.clone(),
+        recorded_root: crate::backup::artifacts_root(store.path()),
         staged_artifacts: artifacts,
     };
     let placed = std::sync::Arc::new(std::sync::Mutex::new(None::<PathBuf>));
@@ -1370,7 +1385,10 @@ struct ImportCtx {
     format: String,
     package_sha256: Option<String>,
     source_label: String,
+    /// 附件根的真实位置：挪进去用它。
     artifacts_root: PathBuf,
+    /// 按库路径写的附件根：写进附件行的是它（与库里别的附件行同一种写法）。
+    recorded_root: PathBuf,
     staged_artifacts: PathBuf,
 }
 
@@ -1464,7 +1482,7 @@ fn import_tx(
     )?;
     // 附件行：包里的 `artifacts/<相对路径>` 换成这台电脑上的位置。
     let dir = c.artifacts_root.join(&id);
-    let dir_text = path_str(&dir)?.to_string();
+    let dir_text = path_str(&c.recorded_root.join(&id))?.to_string();
     tx.execute(
         "UPDATE main.artifacts SET local_path = ?2 || char(92) || replace(substr(local_path, 11), '/', char(92))
          WHERE project_id = ?1 AND local_path LIKE 'artifacts/%'",
@@ -1509,9 +1527,7 @@ fn import_tx(
     // 附件换入：新 id 的目录不可能已经存在；挪进去之后事务失败由调用方挪走。
     let attachments = if c.staged_artifacts.exists() {
         let n = list_tree(&c.staged_artifacts)?.len();
-        // 附件根可能还不存在：建了再钉住核对（已有的链接在这里被拒，建目录本身不碰链接目标里的东西）。
-        fs::create_dir_all(&c.artifacts_root)?;
-        let _pinned = pin_artifacts(&c.artifacts_root, None)?;
+        // 附件根由调用方钉着（见 import_in）。
         atm_install_state::durable::rename(&c.staged_artifacts, &dir, false)?;
         *placed.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
         n
@@ -1549,7 +1565,8 @@ pub fn import_legacy_knowledge(
         return Err(PackageError::NotFound(source.display().to_string()));
     }
     let _lock = attachments_lock(store, "import_knowledge")?;
-    let (staging, _pinned) = fresh_staging(opts.exports_dir)?;
+    let work = fresh_staging(opts.exports_dir)?;
+    let staging = work.dir.clone();
     let result = (|| {
         let converted = convert_legacy(source, Home::Knowledge, &staging.join("legacy"), opts.at)?;
         let (sha, _) = hash_file(source)?;
@@ -1571,7 +1588,7 @@ pub fn import_legacy_knowledge(
                 other => PackageError::Write(format!("{other:?}")),
             })
     })();
-    let _ = fs::remove_dir_all(&staging);
+    work.remove();
     result
 }
 
@@ -1670,19 +1687,6 @@ fn is_link(meta: &fs::Metadata) -> bool {
     meta.file_type().is_symlink()
 }
 
-/// 从库所在目录往下钉住附件根（以及其中一个项目的目录）：都不能是链接（peer W6 r1 P1-02、r2 P1-01）。
-fn pin_artifacts(artifacts: &Path, project: Option<&str>) -> Result<crate::chain::Pinned> {
-    let db_dir = artifacts
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut rel = PathBuf::from(artifacts.file_name().unwrap_or_default());
-    if let Some(id) = project {
-        rel.push(id);
-    }
-    Ok(crate::chain::pin_inside(db_dir, &[&rel])?)
-}
-
 /// ATM 自己起的暂存目录名：规范的 ULID（26 位 Crockford base32，首位 0–7，128 位放得下）。清理只认这些，
 /// 认不出的条目一律留着（peer W6 r2 P2-03）。
 fn owned_staging_name(name: &str) -> bool {
@@ -1693,12 +1697,33 @@ fn owned_staging_name(name: &str) -> bool {
             .all(|c| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c))
 }
 
-/// `exports\.staging\<新目录>`：先清掉上一次中断留下的（调用方持有附件锁，同一时间只有一个导出或导入）。
-/// 从数据根（`exports` 的上一层）往下钉住 `exports`、`.staging`：哪一层是链接就在任何删除之前拒绝；数据根以上
-/// 的链接不管（那是把整个数据根搬了地方，见 [`crate::chain`]）。只删名字是 ULID 的暂存（ATM 自己起的），里面
-/// 的链接只删链接本身；删不掉的留着，不报错（清理尽力而为，下一次再清）。返回的 [`crate::chain::Pinned`]
-/// （数据根、`exports`、`.staging`）要拿到操作结束。
-fn fresh_staging(exports_dir: &Path) -> Result<(PathBuf, crate::chain::Pinned)> {
+/// 一次导出或导入的暂存：`exports\.staging\<新目录>`。
+struct ExportStaging {
+    /// 数据根、`exports`、`.staging`：拿到操作结束。
+    _pinned: crate::chain::Pinned,
+    /// `exports` 的真实位置。
+    exports: PathBuf,
+    /// 本次的暂存目录（真实位置）。
+    dir: PathBuf,
+    /// 暂存目录本身：排他新建，用的时候一直钉着，删之前放开。
+    owned: Option<crate::pin::Dir>,
+}
+
+impl ExportStaging {
+    /// 放开暂存目录再整棵删：此时它若被换成链接，`remove_dir_all` 只删链接本身。删不掉的留给下一次清理。
+    fn remove(mut self) {
+        drop(self.owned.take());
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// 先清掉上一次中断留下的暂存（调用方持有附件锁，同一时间只有一个导出或导入），再排他新建本次的。
+///
+/// 从数据根（`exports` 的上一层）往下钉住 `exports`、`.staging`：已有的哪一层是链接就在任何删除之前拒绝；
+/// 不存在的层相对上一层的句柄排他新建，建出来就钉着（peer W6 r3 P1-01：先建再钉中间有空档）。数据根以上的
+/// 链接不管（那是把整个数据根搬了地方，见 [`crate::chain`]），读写都走数据根的真实位置。只删名字是 ULID 的
+/// 暂存（ATM 自己起的），里面的链接只删链接本身；删不掉的留着，不报错（清理尽力而为，下一次再清）。
+fn fresh_staging(exports_dir: &Path) -> Result<ExportStaging> {
     let data_root = exports_dir
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1707,11 +1732,8 @@ fn fresh_staging(exports_dir: &Path) -> Result<(PathBuf, crate::chain::Pinned)> 
         PackageError::Invalid(format!("{} has no directory name", exports_dir.display()))
     })?;
     let rel = Path::new(exports_name).join(STAGING_DIR);
-    // 先核对已有的链再建：`exports`、`.staging` 已经是链接时，连 create_dir_all 都不做。
-    drop(crate::chain::pin_inside(data_root, &[&rel])?);
-    let root = exports_dir.join(STAGING_DIR);
-    fs::create_dir_all(&root)?;
-    let pinned = crate::chain::pin_inside(data_root, &[&rel])?;
+    let mut pinned = crate::chain::pin_inside(data_root, &[&rel])?;
+    let root = pinned.ensure(&rel)?;
     {
         for e in fs::read_dir(&root)? {
             let e = e?;
@@ -1735,14 +1757,109 @@ fn fresh_staging(exports_dir: &Path) -> Result<(PathBuf, crate::chain::Pinned)> 
         let c = Connection::open_in_memory()?;
         ulid(&c)?
     };
-    // 新目录不钉：操作结束时要删掉它。它的上一层（`.staging`）一直钉着，名字是随机的；就算被换成链接，
-    // 结束时的 remove_dir_all 也只删链接本身。
-    let dir = root.join(&name);
-    fs::create_dir(&dir)?;
-    Ok((dir, pinned))
+    let owned = pinned.create_owned(&rel, std::ffi::OsStr::new(&name))?;
+    Ok(ExportStaging {
+        exports: pinned.real(Path::new(exports_name)),
+        dir: root.join(&name),
+        owned: Some(owned),
+        _pinned: pinned,
+    })
 }
 
 fn sync(path: &Path) -> Result<()> {
     fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod r3_staging {
+    use super::*;
+
+    fn base(name: &str) -> PathBuf {
+        let d = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("target")
+            })
+            .join("store-unit")
+            .join(format!("package-{name}"));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(made.success(), "mklink /J {}", link.display());
+    }
+
+    /// peer W6 r3 复现 A：拿着暂存的时候把数据根以上的 junction 换成指向别处的，往暂存里写、结束时整棵删，
+    /// 都还在原来的数据根里；别处同名的目录一个字节都不变。
+    #[test]
+    fn staging_stays_in_the_real_root_after_an_upper_link_is_swapped() {
+        let b = base("upper-swap");
+        let (real, foreign) = (b.join("real"), b.join("foreign"));
+        fs::create_dir_all(real.join("N")).unwrap();
+        fs::create_dir_all(foreign.join("N").join("exports").join(STAGING_DIR)).unwrap();
+        let (alias, old) = (b.join("alias"), b.join("old-alias"));
+        junction(&alias, &real);
+        let staging = fresh_staging(&alias.join("N").join("exports")).unwrap();
+        let name = staging.dir.file_name().unwrap().to_owned();
+        let external = foreign
+            .join("N")
+            .join("exports")
+            .join(STAGING_DIR)
+            .join(&name);
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep.txt"), b"external bytes").unwrap();
+
+        fs::rename(&alias, &old).unwrap();
+        junction(&alias, &foreign);
+        fs::write(staging.dir.join("ours.txt"), b"ours").unwrap();
+        let ours = real.join("N").join("exports").join(STAGING_DIR).join(&name);
+        assert!(ours.join("ours.txt").is_file());
+        assert!(
+            !staging.exports.starts_with(&alias),
+            "{}",
+            staging.exports.display()
+        );
+        staging.remove();
+        assert!(!ours.exists());
+        assert_eq!(
+            fs::read(external.join("keep.txt")).unwrap(),
+            b"external bytes"
+        );
+        for l in [&alias, &old] {
+            fs::remove_dir(l).unwrap();
+        }
+        fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// peer W6 r3 复现 B（导出暂存一侧）：`exports`、`.staging` 不存在时排他新建，和本次的暂存目录一起钉到结束。
+    #[test]
+    fn missing_staging_layers_are_created_pinned() {
+        let b = base("ensure");
+        let n = b.join("N");
+        fs::create_dir_all(&n).unwrap();
+        let staging = fresh_staging(&n.join("exports")).unwrap();
+        let root = n.join("exports").join(STAGING_DIR);
+        assert!(staging.dir.is_dir() && staging.dir.starts_with(&root));
+        assert!(fs::rename(n.join("exports"), n.join("moved")).is_err());
+        assert!(fs::rename(&root, n.join("exports").join("moved")).is_err());
+        assert!(fs::rename(&staging.dir, root.join("moved")).is_err());
+        let dir = staging.dir.clone();
+        staging.remove();
+        assert!(!dir.exists());
+        fs::rename(n.join("exports"), n.join("moved")).unwrap();
+        fs::remove_dir_all(&b).unwrap();
+    }
 }
