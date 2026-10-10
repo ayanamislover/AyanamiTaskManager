@@ -113,6 +113,7 @@ fn main() {
         notify: None,
         maintenance: false,
         metrics_capture: false,
+        may_open: None,
     };
     let serving = match atm_runtime::start(&options) {
         Ok(Started::Serving(serving)) => serving,

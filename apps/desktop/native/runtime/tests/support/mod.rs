@@ -163,6 +163,7 @@ pub fn options(n: &Path, legacy: &Path, events: &Events) -> Options {
         notify: None,
         maintenance: false,
         metrics_capture: false,
+        may_open: None,
     }
 }
 

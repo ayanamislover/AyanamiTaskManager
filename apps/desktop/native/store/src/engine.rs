@@ -360,6 +360,10 @@ impl Store {
             .ok_or_else(|| StoreError::Io(format!("{} has no file name", path.display())))?;
         // 打开时就记下字面写法的位置键：之后当前目录变了，相对写法的数据根也认得出来。
         let literal_root = Location::of(parent);
+        // 数据根的写法认不出来，之后就判断不了调用方给的位置在不在它下面（peer W6 r9 P1-01）。
+        if !literal_root.supported() {
+            return Err(StoreError::Io(unsupported_spelling(parent).to_string()));
+        }
         let root = crate::pin::open(parent)
             .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
         let real = root.path().join(name);
@@ -468,6 +472,9 @@ impl Store {
                     literal.display()
                 ),
             ));
+        }
+        if !key.supported() {
+            return Err(unsupported_spelling(literal));
         }
         let Some(rest) = key.below(&self.literal_root) else {
             return Ok(literal.to_path_buf());
@@ -1048,62 +1055,120 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     });
 }
 
-/// Windows 上的一个位置：按当前目录补成绝对路径（`std::path::absolute`，不跟随链接；普通写法由它照 Win32 规则
-/// 归一 `/`、`.`、`..`——与打开文件时 Windows 自己做的是同一步；`\\?\` 写法它原样返回，Windows 也不解释其中的
-/// `.`、`..`、`/`），再拆成前缀（`\\?\UNC\`、`\\.\UNC\` 与 `\\` 同为 UNC；`\\?\`、`\\.\` 之后是
-/// 盘符路径）与逐段的名字。名字保留 UTF-16 原样，比较见 [`same_name`]。
+/// Windows 上的一个位置。写法交给 Windows 自己换成 NT 路径（[`nt_path`]：`RtlDosPathNameToNtPathName_U_WithStatus`，
+/// 与 `CreateFileW` 打开文件前做的是同一步，只按字面换算，不碰文件系统、不跟随链接）：普通写法、`\\.\` 写法照
+/// Win32 规则补全当前目录、归一 `/`、`.`、`..`、连续分隔符与尾部的点和空格，`\\?\` 写法原样。之后只认两种命名
+/// 空间——`\??\<盘符>:\…` 与 `\??\UNC\<服务器>\<共享>\…`；subst 盘符与网络映射盘符按 `QueryDosDeviceW` 换成
+/// 它指向的位置。其余（`GLOBALROOT`、卷 GUID、设备对象……）不比较、不支持（peer W6 r9 P1-01）：[`Store::open`] 与
+/// [`Store::rebase`] 都拒绝，不当成外部位置放行。名字保留 UTF-16 原样，比较见 [`same_name`]。
 #[derive(Clone, Debug)]
 pub(crate) struct Location {
-    unc: bool,
-    /// `\\?\` 写法中间有空段：Windows 打不开这个路径。
+    /// `None`：不支持的命名空间。
+    kind: Option<Space>,
+    /// 中间有空段（只会出现在 `\\?\` 写法里）：Windows 打不开这个路径。
     pub(crate) gaps: bool,
     parts: Vec<std::ffi::OsString>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Space {
+    Drive,
+    Unc,
+}
+
+/// subst 套 subst 最多跟几层。
+const DOS_DEVICE_DEPTH: u8 = 4;
+
 impl Location {
     pub(crate) fn of(p: &Path) -> Location {
-        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-        let units = wide(abs.as_os_str());
-        // 前缀里的 `UNC` 不分大小写（对象管理器里的名字）；其余是标点。
-        let starts = |prefix: &str| {
-            let p: Vec<u16> = prefix.encode_utf16().collect();
-            let lower = |u: &u16| if (65..=90).contains(u) { u + 32 } else { *u };
-            (units.len() >= p.len() && units.iter().zip(&p).all(|(a, b)| lower(a) == lower(b)))
-                .then_some(p.len())
+        match nt_path(p) {
+            Some(nt) => Location::of_nt(&nt, 0, &dos_device),
+            None => Location::unsupported(),
+        }
+    }
+
+    fn unsupported() -> Location {
+        Location {
+            kind: None,
+            gaps: false,
+            parts: Vec::new(),
+        }
+    }
+
+    /// 能比较、Windows 也打得开的写法。
+    pub(crate) fn supported(&self) -> bool {
+        self.kind.is_some() && !self.gaps
+    }
+
+    /// 用例换盘符映射（造真的 subst 要改本机的盘符映射）。
+    #[cfg(test)]
+    pub(crate) fn of_with(p: &Path, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+        match nt_path(p) {
+            Some(nt) => Location::of_nt(&nt, 0, dev),
+            None => Location::unsupported(),
+        }
+    }
+
+    fn of_nt(nt: &[u16], depth: u8, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+        let Some(rest) = strip_ascii_ci(nt, r"\??\") else {
+            return Location::unsupported();
         };
-        // `\\?\` 不经 Win32 的归一（`std::path::absolute` 也原样返回）；`\\.\` 是设备命名空间，照样归一过，
-        // `\\.\C:\x` 与 `C:\x` 是同一个位置（peer W6 r8）。
-        let (unc, verbatim, skip) = if let Some(n) = starts(r"\\?\UNC\") {
-            (true, true, n)
-        } else if let Some(n) = starts(r"\\?\") {
-            (false, true, n)
-        } else if let Some(n) = starts(r"\\.\UNC\") {
-            (true, false, n)
-        } else if let Some(n) = starts(r"\\.\") {
-            (false, false, n)
-        } else if let Some(n) = starts(r"\\") {
-            (true, false, n)
-        } else {
-            (false, false, 0)
+        let (kind, rest) = match strip_ascii_ci(rest, r"UNC\") {
+            Some(r) => (Space::Unc, r),
+            None if is_drive(rest) => (Space::Drive, rest),
+            None => return Location::unsupported(),
         };
-        let mut segments: Vec<&[u16]> = units[skip..].split(|u| *u == u16::from(b'\\')).collect();
+        let mut segments: Vec<&[u16]> = rest.split(|u| *u == u16::from(b'\\')).collect();
         // 末尾的分隔符不算一段（目录带不带它都一样）。普通写法里连续的分隔符已由 Win32 归一；`\\?\` 写法里
         // 中间的空段 Windows 不归一、打不开，记下来由 [`Store::rebase`] 拒绝（peer W6 r8 P1-02）。
         if segments.last().is_some_and(|s| s.is_empty()) {
             segments.pop();
         }
-        let gaps = verbatim && segments.iter().any(|s| s.is_empty());
+        let gaps = segments.iter().any(|s| s.is_empty());
+        if kind == Space::Drive
+            && depth < DOS_DEVICE_DEPTH
+            && let Some(target) = dev(segments[0])
+        {
+            let below = &segments[1..];
+            if starts_ascii_ci(&target, r"\??\") {
+                // subst：换成它指向的位置再认一次。
+                let mut joined = target;
+                for s in below {
+                    joined.push(u16::from(b'\\'));
+                    joined.extend_from_slice(s);
+                }
+                return Location::of_nt(&joined, depth + 1, dev);
+            }
+            if let Some(share) = redirected_share(&target) {
+                // 网络映射盘符：`\Device\LanmanRedirector\;Z:…\<服务器>\<共享>`，就是那个 UNC 位置。
+                let parts = share
+                    .into_iter()
+                    .chain(below.iter().filter(|c| !c.is_empty()).map(|c| from_wide(c)))
+                    .collect();
+                return Location {
+                    kind: Some(Space::Unc),
+                    gaps,
+                    parts,
+                };
+            }
+        }
         let parts = segments
             .into_iter()
             .filter(|c| !c.is_empty())
             .map(from_wide)
             .collect();
-        Location { unc, gaps, parts }
+        Location {
+            kind: Some(kind),
+            gaps,
+            parts,
+        }
     }
 
-    /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。
+    /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。不支持的写法不在任何
+    /// 位置之下。
     pub(crate) fn below<'a>(&'a self, base: &Location) -> Option<&'a [std::ffi::OsString]> {
-        let inside = self.unc == base.unc
+        let inside = self.kind.is_some()
+            && self.kind == base.kind
             && self.parts.len() >= base.parts.len()
             && self
                 .parts
@@ -1137,6 +1202,140 @@ fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
 #[cfg(not(windows))]
 fn from_wide(units: &[u16]) -> std::ffi::OsString {
     String::from_utf16_lossy(units).into()
+}
+
+fn unsupported_spelling(p: &Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "{} is not a drive or UNC path (other Windows namespaces are not supported here)",
+            p.display()
+        ),
+    )
+}
+
+fn ascii_lower(u: u16) -> u16 {
+    if (65..=90).contains(&u) { u + 32 } else { u }
+}
+
+fn starts_ascii_ci(units: &[u16], prefix: &str) -> bool {
+    let p: Vec<u16> = prefix.encode_utf16().collect();
+    units.len() >= p.len()
+        && units
+            .iter()
+            .zip(&p)
+            .all(|(a, b)| ascii_lower(*a) == ascii_lower(*b))
+}
+
+/// 去掉一个只含 ASCII 的前缀（不分大小写：`UNC`、`GLOBALROOT` 这类对象名不分大小写）。
+fn strip_ascii_ci<'a>(units: &'a [u16], prefix: &str) -> Option<&'a [u16]> {
+    starts_ascii_ci(units, prefix).then(|| &units[prefix.encode_utf16().count()..])
+}
+
+/// `X:` 开头（之后是结尾或分隔符）。
+fn is_drive(units: &[u16]) -> bool {
+    let letter = |u: u16| (65..=90).contains(&u) || (97..=122).contains(&u);
+    units.len() >= 2
+        && letter(units[0])
+        && units[1] == u16::from(b':')
+        && (units.len() == 2 || units[2] == u16::from(b'\\'))
+}
+
+/// 网络重定向器下的 `\<服务器>\<共享>…`：`\Device\LanmanRedirector\;Z:…\srv\share`、`\Device\Mup\;…\srv\share`
+/// 这类写法里以 `;` 开头的是重定向器自己的段，去掉之后就是 UNC 的那几段。
+fn redirected_share(target: &[u16]) -> Option<Vec<std::ffi::OsString>> {
+    let rest = strip_ascii_ci(target, r"\Device\LanmanRedirector\")
+        .or_else(|| strip_ascii_ci(target, r"\Device\Mup\"))?;
+    let parts: Vec<std::ffi::OsString> = rest
+        .split(|u| *u == u16::from(b'\\'))
+        .filter(|c| !c.is_empty() && c[0] != u16::from(b';'))
+        .map(from_wide)
+        .collect();
+    (parts.len() >= 2).then_some(parts)
+}
+
+/// 按 Windows 自己的规则把写法换成 NT 路径（`RtlDosPathNameToNtPathName_U_WithStatus`：`CreateFileW` 打开之前
+/// 做的就是这一步）。只按字面，不访问文件系统。
+#[cfg(windows)]
+fn nt_path(p: &Path) -> Option<Vec<u16>> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u16,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlDosPathNameToNtPathName_U_WithStatus(
+            dos: *const u16,
+            nt: *mut UnicodeString,
+            file_part: *mut *mut u16,
+            relative: *mut std::ffi::c_void,
+        ) -> i32;
+        fn RtlFreeUnicodeString(s: *mut UnicodeString);
+    }
+    let mut dos = wide(p.as_os_str());
+    if dos.is_empty() || dos.contains(&0) {
+        return None;
+    }
+    dos.push(0);
+    let mut nt = UnicodeString {
+        length: 0,
+        maximum_length: 0,
+        buffer: std::ptr::null_mut(),
+    };
+    // SAFETY: `dos` 以 0 结尾、调用期间有效；`nt` 由函数填写，成功时缓冲由它分配、用 RtlFreeUnicodeString 释放。
+    let status = unsafe {
+        RtlDosPathNameToNtPathName_U_WithStatus(
+            dos.as_ptr(),
+            &mut nt,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if status < 0 || nt.buffer.is_null() {
+        return None;
+    }
+    // SAFETY: 成功时 `buffer` 指向 `length` 字节的 UTF-16。
+    let units =
+        unsafe { std::slice::from_raw_parts(nt.buffer, usize::from(nt.length) / 2) }.to_vec();
+    // SAFETY: 释放上面分配的缓冲，之后不再用它。
+    unsafe { RtlFreeUnicodeString(&mut nt) };
+    Some(units)
+}
+
+#[cfg(not(windows))]
+fn nt_path(p: &Path) -> Option<Vec<u16>> {
+    let abs = std::path::absolute(p).ok()?;
+    let mut units: Vec<u16> = r"\??\".encode_utf16().collect();
+    units.extend(wide(abs.as_os_str()));
+    Some(units)
+}
+
+/// 盘符指向的目标（`QueryDosDeviceW`）：subst 是 `\??\…`，网络映射是重定向器下的路径，本地卷是 `\Device\…`。
+#[cfg(windows)]
+fn dos_device(drive: &[u16]) -> Option<Vec<u16>> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn QueryDosDeviceW(device: *const u16, target: *mut u16, max: u32) -> u32;
+    }
+    let mut name = drive.get(..2)?.to_vec();
+    name.push(0);
+    let mut buf = vec![0u16; 4096];
+    // SAFETY: `name` 以 0 结尾；`buf` 的长度如实给出，函数只在其中写。
+    let n = unsafe { QueryDosDeviceW(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+    if n == 0 {
+        return None;
+    }
+    // 结果是以两个 0 结尾的多串，只取第一个（当前生效的那个）。
+    let end = buf.iter().position(|u| *u == 0).unwrap_or(n as usize);
+    buf.truncate(end);
+    Some(buf)
+}
+
+#[cfg(not(windows))]
+fn dos_device(_drive: &[u16]) -> Option<Vec<u16>> {
+    None
 }
 
 /// 同一个名字：Windows 的序数比较、不分大小写（`CompareStringOrdinal(…, TRUE)`：用系统的大写表逐个 UTF-16 码元比，

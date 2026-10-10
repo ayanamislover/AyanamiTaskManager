@@ -92,6 +92,7 @@ fn main() {
         notify: None,
         maintenance: false,
         metrics_capture: false,
+        may_open: None,
     };
     let started = match atm_runtime::start(&options) {
         Ok(started) => started,

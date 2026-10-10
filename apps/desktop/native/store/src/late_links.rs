@@ -709,6 +709,64 @@ fn locations_follow_windows_path_equality() {
     assert!(gaps(r"\\?\C:\Data\\N\child"));
     assert!(gaps(r"\\?\UNC\server\share\\N"));
     assert!(!gaps(r"\\?\C:\Data\N\backups\"));
+    // 只认盘符与 UNC 两种命名空间；GLOBALROOT、卷 GUID、设备对象都不支持，也不在任何位置之下（peer r9 P1-01）。
+    for p in [
+        r"\\?\GLOBALROOT\??\C:\Data\N\backups",
+        r"\\.\GLOBALROOT\??\C:\Data\N\backups",
+        r"\\?\GLOBALROOT\GLOBAL??\C:\Data\N\backups",
+        r"\\?\Volume{00000000-0000-0000-0000-000000000000}\Data\N",
+        r"\\.\PIPE\N",
+    ] {
+        let l = Location::of(Path::new(p));
+        assert!(!l.supported(), "{p}");
+        assert_eq!(inside(p, base), None, "{p}");
+    }
+    assert!(Location::of(Path::new(base)).supported());
+    assert!(Location::of(Path::new(r"\\server\share\N")).supported());
+    // subst 与网络映射盘符换成它指向的位置（用例换掉 QueryDosDeviceW；本地卷原样）。
+    let dev = |d: &[u16]| -> Option<Vec<u16>> {
+        let target = match String::from_utf16_lossy(d).to_ascii_uppercase().as_str() {
+            "Z:" => r"\??\C:\Data",
+            "Y:" => r"\Device\LanmanRedirector\;Y:0000000000012345\server\share",
+            "X:" => r"\Device\Mup\;LanmanRedirector\;X:0000000000012345\server\share",
+            "C:" => r"\Device\HarddiskVolume3",
+            // subst 套 subst：V → U → T → S → R → Q；P 指向自己。
+            "V:" => r"\??\U:\v",
+            "U:" => r"\??\T:\u",
+            "T:" => r"\??\S:\t",
+            "S:" => r"\??\R:\s",
+            "R:" => r"\??\Q:\r",
+            "P:" => r"\??\P:\p",
+            _ => return None,
+        };
+        Some(target.encode_utf16().collect())
+    };
+    let with = |p: &str, b: &str| {
+        Location::of_with(Path::new(p), &dev)
+            .below(&Location::of_with(Path::new(b), &dev))
+            .map(|rest| {
+                rest.iter()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+    };
+    assert_eq!(
+        with(r"Z:\N\backups", base),
+        Some(vec!["backups".to_owned()])
+    );
+    assert_eq!(with(r"C:\Data\N\x", r"z:\N"), Some(vec!["x".to_owned()]));
+    for p in [r"Y:\N\x", r"X:\N\x"] {
+        assert_eq!(
+            with(p, r"\\server\share\N"),
+            Some(vec!["x".to_owned()]),
+            "{p}"
+        );
+    }
+    assert_eq!(with(r"W:\Data\N", base), None);
+    // 至多跟 4 层：U 经四层到 Q；V 要五层，停在 R，不在 Q 之下。指向自己的也会停下。
+    assert_eq!(with(r"U:\x", r"Q:\r\s\t\u"), Some(vec!["x".to_owned()]));
+    assert_eq!(with(r"V:\x", r"Q:\r\s\t\u\v"), None);
+    assert_eq!(with(r"P:\x", base), None);
     assert_eq!(
         inside(r"\\?\C:\Data\N\backups\", base),
         Some(vec!["backups".to_owned()])
@@ -886,4 +944,74 @@ fn a_store_opened_through_the_device_namespace_still_knows_its_root() {
     drop(store);
     drop(other);
     unlink(&alias);
+}
+
+/// r9 P1-01：`GLOBALROOT` 一类写法 Windows 打得开、能指向同一个数据根，但不是盘符或 UNC，判断不了在不在数据根
+/// 下：在任何创建、清扫之前就拒绝，不当作外部位置放行。换向之后 FOREIGN 的哨兵与标记都在，里面什么也不多；
+/// 导出也一样。Store 自己用这种写法打开也拒绝。
+#[test]
+fn a_globalroot_spelling_is_refused_before_anything_is_written() {
+    for (n, prefix) in [
+        r"\\?\GLOBALROOT\??\",
+        r"\\.\GLOBALROOT\??\",
+        r"\\?\GLOBALROOT\GLOBAL??\",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_b, real, foreign, alias, store, other) = two_roots(&format!("globalroot-{n}"));
+        let spelled = |p: &Path| PathBuf::from(format!("{prefix}{}", p.display()));
+        assert_eq!(
+            crate::pin::open(&spelled(&alias.join("N"))).unwrap().id(),
+            crate::pin::open(&alias.join("N")).unwrap().id(),
+            "{prefix}: Windows 打得开，是同一个目录"
+        );
+        let kept = foreign_sentinels(&foreign);
+        let before: Vec<_> = fs::read_dir(foreign.join("N").join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        let old = swing(&alias, &foreign);
+        let made = create_backup(
+            &store,
+            &spelled(&alias.join("N").join("backups")),
+            "MANUAL",
+            "2026-10-10T12:00:00Z",
+        );
+        let exported = crate::package::export_project(
+            &store,
+            "PA",
+            crate::package::Format::Json,
+            &crate::package::ExportOptions {
+                exports_dir: &spelled(&alias.join("N").join("exports")),
+                at: "2026-10-10T12:00:00Z",
+                app_version: "test",
+            },
+        );
+        swing_back(&alias, &old);
+        assert!(made.is_err(), "{prefix}: {made:?}");
+        assert!(
+            exported.is_err(),
+            "{prefix}: {:?}",
+            exported.map(|e| e.path)
+        );
+        for f in &kept {
+            assert!(f.exists(), "{prefix}: {} was removed", f.display());
+        }
+        let after: Vec<_> = fs::read_dir(foreign.join("N").join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(before, after, "{prefix}");
+        assert!(!real.join("N").join("backups").exists(), "{prefix}");
+        // Store 自己用这种写法打开：拒绝。
+        let opened = Store::open(
+            &spelled(&alias.join("N").join("atm.sqlite")),
+            Config::default(),
+        );
+        assert!(opened.is_err(), "{prefix}");
+        drop(store);
+        drop(other);
+        unlink(&alias);
+    }
 }

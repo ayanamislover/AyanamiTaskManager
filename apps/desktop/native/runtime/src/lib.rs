@@ -99,6 +99,9 @@ pub struct Options {
     pub maintenance: bool,
     /// 起 job `metrics.capture`（W5h2：任务操作之后的工程指标采集）。宿主起；e2e、独立运行时不起。
     pub metrics_capture: bool,
+    /// 开放入口之前问一次（写 lease 之前）：返回 false 就不开、启动以失败结束。宿主用它让「退出」与「开始开放入口」
+    /// 互斥（peer W6 r9 P2-01）。`None` 一律开。
+    pub may_open: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 #[derive(Debug)]
@@ -440,6 +443,7 @@ fn serve(
         notify: o.notify.clone(),
         maintenance: o.maintenance,
         metrics_capture: o.metrics_capture,
+        may_open: o.may_open.as_deref(),
     })
     .map_err(BootError::Failed)?;
     let (port, instance_id, lease_generation) = (
@@ -470,6 +474,7 @@ fn serve(
             notify: o.notify.clone(),
             maintenance: o.maintenance,
             metrics_capture: o.metrics_capture,
+            may_open: None,
         };
         let m = m.clone();
         let thread = std::thread::Builder::new()

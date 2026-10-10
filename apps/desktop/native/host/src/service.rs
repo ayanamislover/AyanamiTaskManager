@@ -61,6 +61,7 @@ pub fn options(
         })),
         maintenance: true,
         metrics_capture: true,
+        may_open: None,
     }
 }
 
@@ -72,7 +73,7 @@ pub const OPENING_WAIT: Duration = Duration::from_secs(30);
 ///
 /// 只靠事件交回会漏一种情况：入口已经开了（daemon.json 写了、`/health` 答了），结果还没被事件循环处理，
 /// 这时退出——事件循环不再处理事件，进程照常以 0 退出，daemon.json 留在那里。所以：
-/// - 启动开始开放入口时记下（[`BootSlot::opening`]）；
+/// - 启动开始开放入口之前先问（[`BootSlot::begin_opening`]）：已经在退出就不开；
 /// - 退出时（[`BootSlot::quit`]）：结果已经交回但没处理的，拿走由退出这一侧收尾；已经在开放入口、还没做完的，
 ///   等它做完（至多 [`OPENING_WAIT`]），启动线程看到正在退出，自己收尾（[`BootSlot::finish`] 交回 `Some`）；
 ///   还没开始开放入口的不等。
@@ -107,9 +108,15 @@ impl<T> BootSlot<T> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 启动开始开放入口。
-    pub fn opening(&self) {
-        self.lock().opening = true;
+    /// 启动要开始开放入口了（写 lease 之前，runtime 的 `may_open`）：已经在退出就不许（返回 false），否则记下、
+    /// 之后的退出会等它做完。与 [`BootSlot::quit`] 在同一把锁里，两者互斥（peer W6 r9 P2-01）。
+    pub fn begin_opening(&self) -> bool {
+        let mut s = self.lock();
+        if s.quitting {
+            return false;
+        }
+        s.opening = true;
+        true
     }
 
     /// 启动做完：没有在退出就放进来、返回 `None`（调用方再发通知）；正在退出就原样还给启动线程收尾。
@@ -179,19 +186,6 @@ pub fn settle(booted: Booted, log_root: &std::path::Path) {
     }
 }
 
-/// 包一层观察：启动开始开放入口（拿到 lease，之后是 HTTP、daemon.json……）时记到槽里。
-fn mark_opening<T: Send + 'static>(
-    slot: Arc<BootSlot<T>>,
-    observe: Arc<dyn Fn(Event) + Send + Sync>,
-) -> Arc<dyn Fn(Event) + Send + Sync> {
-    Arc::new(move |e| {
-        if matches!(e, Event::Lease) {
-            slot.opening();
-        }
-        observe(e)
-    })
-}
-
 /// 在工作线程上启动；结果放进 `slot`，再带着 `attempt` 通知事件循环，过期的通知（宿主已经退出或重试过）由事件循环丢掉。
 pub fn spawn(
     mut options: Options,
@@ -200,20 +194,12 @@ pub fn spawn(
     slot: Arc<BootSlot<Booted>>,
 ) {
     let fallback = (proxy.clone(), slot.clone());
-    let log_root = options.n.clone();
-    options.observe = mark_opening(slot.clone(), options.observe.clone());
+    gate(&mut options, &slot);
     let started = std::thread::Builder::new()
         .name("atm-boot".into())
         .spawn(move || {
-            let result = Booted(atm_runtime::start(&options));
-            match slot.finish(result) {
-                None => {
-                    let _ = proxy.send_event(UserEvent::Booted(attempt));
-                }
-                Some(left) => {
-                    settle(left, &log_root);
-                    slot.settled();
-                }
+            if boot(&options, &slot) {
+                let _ = proxy.send_event(UserEvent::Booted(attempt));
             }
         });
     if let Err(error) = started {
@@ -222,6 +208,25 @@ pub fn spawn(
         let (proxy, slot) = fallback;
         if slot.finish(Booted(Err(failed))).is_none() {
             let _ = proxy.send_event(UserEvent::Booted(attempt));
+        }
+    }
+}
+
+/// 让 runtime 开放入口之前先问交接槽：已经在退出就不开（[`BootSlot::begin_opening`]）。
+fn gate(options: &mut Options, slot: &Arc<BootSlot<Booted>>) {
+    let slot = slot.clone();
+    options.may_open = Some(Arc::new(move || slot.begin_opening()));
+}
+
+/// 在当前线程上启动一次，结果交给交接槽；正在退出就自己收尾。返回 true 时调用方要通知事件循环。
+fn boot(options: &Options, slot: &BootSlot<Booted>) -> bool {
+    let result = Booted(atm_runtime::start(options));
+    match slot.finish(result) {
+        None => true,
+        Some(left) => {
+            settle(left, &options.n);
+            slot.settled();
+            false
         }
     }
 }
@@ -256,7 +261,7 @@ mod tests {
     #[test]
     fn a_result_handed_over_is_taken_by_the_event_loop() {
         let slot = BootSlot::default();
-        slot.opening();
+        assert!(slot.begin_opening());
         assert_eq!(slot.finish(1), None);
         assert_eq!(slot.take(), Some(1));
         assert_eq!(quit(&slot, Duration::from_secs(5)), None);
@@ -266,7 +271,7 @@ mod tests {
     #[test]
     fn quitting_before_the_event_loop_took_the_result_settles_it() {
         let slot = BootSlot::default();
-        slot.opening();
+        assert!(slot.begin_opening());
         assert_eq!(slot.finish(7), None);
         assert_eq!(quit(&slot, Duration::from_secs(5)), Some(7));
         assert_eq!(slot.take(), None);
@@ -276,7 +281,7 @@ mod tests {
     #[test]
     fn quitting_while_the_entries_open_waits_for_the_boot_to_withdraw_them() {
         let slot = Arc::new(BootSlot::default());
-        slot.opening();
+        assert!(slot.begin_opening());
         let withdrawn = Arc::new(AtomicBool::new(false));
         let boot = {
             let (slot, withdrawn) = (slot.clone(), withdrawn.clone());
@@ -311,7 +316,7 @@ mod tests {
     #[test]
     fn a_stuck_opening_is_waited_for_only_up_to_the_limit() {
         let slot = BootSlot::<u8>::default();
-        slot.opening();
+        assert!(slot.begin_opening());
         let began = Instant::now();
         assert_eq!(quit(&slot, Duration::from_millis(200)), None);
         let took = began.elapsed();
@@ -321,36 +326,146 @@ mod tests {
         );
     }
 
-    /// 观察到 lease 才算开始开放入口：之前的事件（准入、转换）不让退出等。
+    /// 退出与开始开放入口互斥：先退出的，之后的启动不许再开（不留 daemon.json）；先开始开放的，退出等它。
     #[test]
-    fn the_lease_marks_the_boot_as_opening() {
-        let slot = Arc::new(BootSlot::<u8>::default());
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let observe = {
-            let seen = seen.clone();
-            super::mark_opening(
-                slot.clone(),
-                Arc::new(move |e| seen.lock().unwrap().push(format!("{e:?}"))),
-            )
-        };
-        observe(atm_runtime::Event::Admitted);
-        observe(atm_runtime::Event::Published);
+    fn quitting_and_opening_exclude_each_other() {
+        let slot = BootSlot::<u8>::default();
+        assert_eq!(quit(&slot, Duration::from_secs(5)), None);
+        assert!(!slot.begin_opening(), "退出之后不许再开放入口");
+        let slot = BootSlot::<u8>::default();
+        assert!(slot.begin_opening());
         let began = Instant::now();
-        assert_eq!(quit(&*slot, Duration::from_millis(300)), None);
-        assert!(
-            began.elapsed() < Duration::from_millis(300),
-            "还没开放入口，不等"
-        );
-        let slot = Arc::new(BootSlot::<u8>::default());
-        let observe = super::mark_opening(slot.clone(), Arc::new(|_| {}));
-        observe(atm_runtime::Event::Lease);
-        let began = Instant::now();
-        assert_eq!(quit(&*slot, Duration::from_millis(300)), None);
+        assert_eq!(quit(&slot, Duration::from_millis(300)), None);
         assert!(
             began.elapsed() >= Duration::from_millis(300),
             "开放入口中，等到上限"
         );
-        assert_eq!(seen.lock().unwrap().len(), 2, "原来的观察照样收到");
+    }
+
+    /// 真实的 runtime 在子进程里启动，在固定的观察点停住启动线程，再退出（peer W6 r9 P2-01 的反例）：
+    /// - 开放入口之前退出：之后启动线程被放行，runtime 问 `may_open` 得到 false，什么入口都不开；
+    /// - 开始开放入口之后退出：退出等启动线程做完、撤下入口才返回。
+    ///
+    /// 宿主在退出返回后就结束进程。开放入口之前退出的那一种里，启动线程一旦写下 `daemon.json`（`Descriptor`）
+    /// 子进程就立即结束，模拟宿主在开放到一半时退出；正确时走不到那一步。走完的子进程留一个 `ran` 标记，父进程
+    /// 查标记与 `daemon.json` 在不在，不读内容。
+    #[test]
+    #[ignore = "由 the_boot_never_leaves_a_descriptor_behind_a_quit 拉起"]
+    fn quit_against_a_real_boot_child() {
+        let root = std::path::PathBuf::from(std::env::var_os("ATM_TEST_BOOT_ROOT").unwrap());
+        let after_gate = std::env::var("ATM_TEST_BOOT_AFTER_GATE").as_deref() == Ok("1");
+        let slot = Arc::new(BootSlot::<super::Booted>::default());
+        let (paused_tx, paused_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let go_rx = Mutex::new(go_rx);
+        let stop_at = if after_gate {
+            atm_runtime::Event::Lease
+        } else {
+            atm_runtime::Event::Published
+        };
+        let quiesce_root = root.join("L-missing");
+        let mut options = atm_runtime::Options {
+            n: root.join("N"),
+            legacy: root.join("L-missing"),
+            version: "3.0.0-test".into(),
+            handoff: None,
+            quiesce: Box::new(move || atm_runtime::legacy_quiesce(&quiesce_root)),
+            allow_real_data_root: false,
+            real_data_root: None,
+            secrets_check: Some(atm_runtime::secrets::check),
+            sweep_every: Duration::from_secs(3600),
+            drill: atm_runtime::Drill::default(),
+            observe: Arc::new(move |e| {
+                if !after_gate && e == atm_runtime::Event::Descriptor {
+                    std::process::exit(0);
+                }
+                if e == stop_at {
+                    paused_tx.send(()).unwrap();
+                    go_rx.lock().unwrap().recv().unwrap();
+                }
+            }),
+            notify: None,
+            maintenance: false,
+            metrics_capture: false,
+            may_open: None,
+        };
+        super::gate(&mut options, &slot);
+        let job = slot.clone();
+        let booting = std::thread::spawn(move || super::boot(&options, &job));
+        paused_rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        let descriptor = root.join("N").join("runtime").join("daemon.json");
+        if after_gate {
+            let job = slot.clone();
+            let quitting = std::thread::spawn(move || {
+                job.quit(super::OPENING_WAIT, |_| {
+                    panic!("the boot has no result yet")
+                })
+            });
+            std::thread::sleep(Duration::from_millis(200));
+            assert!(!quitting.is_finished(), "退出等着开放入口的启动");
+            go_tx.send(()).unwrap();
+            quitting.join().unwrap();
+        } else {
+            slot.quit(super::OPENING_WAIT, |_| {
+                panic!("the boot has no result yet")
+            });
+            go_tx.send(()).unwrap();
+            assert!(!booting.join().unwrap(), "启动线程自己收尾，不交回");
+        }
+        assert!(!descriptor.exists(), "退出返回时 daemon.json 还在");
+        std::fs::write(root.join("ran"), b"").unwrap();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn the_boot_never_leaves_a_descriptor_behind_a_quit() {
+        let deps = std::env::current_exe().unwrap();
+        let target = deps.parent().unwrap().parent().unwrap().to_path_buf();
+        for after_gate in [false, true] {
+            let root = target
+                .join("host-unit")
+                .join(format!("boot-quit-{after_gate}"));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("local")).unwrap();
+            let mut cmd = std::process::Command::new(&deps);
+            cmd.args([
+                "--exact",
+                "service::tests::quit_against_a_real_boot_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("ATM_TEST_BOOT_ROOT", &root)
+            .env(
+                "ATM_TEST_BOOT_AFTER_GATE",
+                if after_gate { "1" } else { "0" },
+            )
+            .env("LOCALAPPDATA", root.join("local"));
+            for key in ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"] {
+                cmd.env_remove(key);
+            }
+            let mut child = cmd.spawn().unwrap();
+            let began = Instant::now();
+            let status = loop {
+                if let Some(s) = child.try_wait().unwrap() {
+                    break s;
+                }
+                if began.elapsed() > Duration::from_secs(120) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the child did not finish");
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            assert!(status.success(), "after_gate={after_gate}: {status}");
+            assert!(
+                root.join("ran").exists(),
+                "after_gate={after_gate}: 子进程没有走完"
+            );
+            assert!(
+                !root.join("N").join("runtime").join("daemon.json").exists(),
+                "after_gate={after_gate}: daemon.json 留在了退出之后"
+            );
+        }
     }
 
     /// `fn quit(&mut self)` 的函数体（到下一个同级 `fn` 为止）。
