@@ -557,13 +557,16 @@ fn export_and_import_staging_stays_with_the_live_store() {
 /// ORIGINAL，FOREIGN 的标记与备份不动。对照：数据根以外的备份根照调用方的写法用。
 #[test]
 fn a_backup_root_spelled_another_way_is_still_inside_the_store() {
-    for mode in ["exact", "case", "verbatim", "slashes", "dots", "external"] {
+    for mode in [
+        "exact", "case", "verbatim", "device", "slashes", "dots", "external",
+    ] {
         let (b, real, foreign, alias, store, other) = two_roots(&format!("spelling-{mode}"));
         let kept = foreign_sentinels(&foreign);
         let plain = alias.join("N").join("backups");
         let root = match mode {
             "case" => PathBuf::from(plain.to_string_lossy().to_uppercase()),
             "verbatim" => PathBuf::from(format!(r"\\?\{}", plain.display())),
+            "device" => PathBuf::from(format!(r"\\.\{}", plain.display())),
             "slashes" => PathBuf::from(plain.to_string_lossy().replace('\\', "/")),
             "dots" => alias
                 .join("N")
@@ -673,6 +676,43 @@ fn locations_follow_windows_path_equality() {
         inside(r"\\?\C:\Data\N\a/b", base),
         Some(vec!["a/b".to_owned()])
     );
+    // 设备命名空间 `\\.\` 与普通写法是同一个位置（peer r8）；`UNC` 不分大小写。
+    assert_eq!(
+        inside(r"\\.\C:\Data\N\backups", base),
+        Some(vec!["backups".to_owned()])
+    );
+    for p in [r"\\.\UNC\server\share\N\x", r"\\?\unc\server\share\N\x"] {
+        assert_eq!(
+            inside(p, r"\\server\share\N"),
+            Some(vec!["x".to_owned()]),
+            "{p}"
+        );
+        assert_eq!(inside(p, r"C:\server\share\N"), None, "{p}");
+    }
+    // 设备命名空间照样经 Win32 归一；Store 自己用这种写法打开、调用方用普通写法，也是同一个位置。
+    assert_eq!(
+        inside(r"\\.\C:\Data\N\x\..\backups", base),
+        Some(vec!["backups".to_owned()])
+    );
+    assert_eq!(
+        inside(r"C:\Data\N\backups", r"\\.\C:\Data\N"),
+        Some(vec!["backups".to_owned()])
+    );
+    // 普通写法里连续的分隔符由 Win32 归一；`\\?\` 写法中间的空段记作打不开（peer r8 P1-02），末尾的分隔符不算。
+    let gaps = |p: &str| Location::of(Path::new(p)).gaps;
+    assert_eq!(
+        inside(r"C:\Data\N\\child", base),
+        Some(vec!["child".to_owned()])
+    );
+    assert!(!gaps(r"C:\Data\N\\child"));
+    assert!(gaps(r"\\?\C:\Data\N\\child"));
+    assert!(gaps(r"\\?\C:\Data\\N\child"));
+    assert!(gaps(r"\\?\UNC\server\share\\N"));
+    assert!(!gaps(r"\\?\C:\Data\N\backups\"));
+    assert_eq!(
+        inside(r"\\?\C:\Data\N\backups\", base),
+        Some(vec!["backups".to_owned()])
+    );
 }
 
 /// r7 P1-01：名字只是「Unicode 全量大写后相同」的另一个目录（`straße` 与 `STRASSE`）是真正的外部位置：备份落在
@@ -750,4 +790,100 @@ fn a_verbatim_dot_dot_below_the_root_does_not_become_a_sibling() {
         .map(|e| e.unwrap().file_name())
         .collect();
     assert_eq!(entries.len(), 2, "兄弟目录里多了东西：{entries:?}");
+}
+
+/// r8 P1-02：`\\?\` 写法中间的空段（连续的 `\`）Windows 打不开；之后按 `std::path` 拆父目录与名字时空段会被并掉、
+/// 变成一个打得开的邻近目录。在任何创建、清扫之前拒绝，数据根之下与之外都一样：邻近目录里的哨兵与标记都在、
+/// 什么也不多。
+#[test]
+fn a_verbatim_empty_segment_is_refused_before_anything_is_written() {
+    let b = base("verbatim-gap");
+    let real = b.join("real");
+    fs::create_dir_all(real.join("N")).unwrap();
+    let alias = b.join("alias");
+    junction(&alias, &real);
+    let store = store_with_identity(&alias.join("N").join("atm.sqlite"), "ORIGINAL");
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    for (case, near, literal) in [
+        (
+            "inside",
+            real.join("N").join("folder").join("backups"),
+            PathBuf::from(format!(r"\\?\{}\N\\folder\backups", alias.display())),
+        ),
+        (
+            "inside-last",
+            real.join("N").join("backups"),
+            PathBuf::from(format!(r"\\?\{}\N\\backups", alias.display())),
+        ),
+        (
+            "external",
+            b.join("ext").join("backups"),
+            PathBuf::from(format!(r"\\?\{}\ext\\backups", b.display())),
+        ),
+    ] {
+        let keep = near.join(id).join("keep.txt");
+        fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        fs::write(&keep, b"keep").unwrap();
+        fs::create_dir_all(near.join(".creating")).unwrap();
+        fs::write(near.join(".creating").join(id), b"").unwrap();
+        assert!(
+            crate::pin::open(&literal).is_err(),
+            "{case}: 原路径本来就打不开"
+        );
+        let made = create_backup(&store, &literal, "MANUAL", "2026-10-10T12:00:00Z");
+        assert!(made.is_err(), "{case}: {made:?}");
+        assert!(
+            keep.exists() && near.join(".creating").join(id).exists(),
+            "{case}: 邻近目录的标记被清了"
+        );
+        let entries: Vec<_> = fs::read_dir(&near)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries.len(), 2, "{case}: 邻近目录里多了东西：{entries:?}");
+    }
+    drop(store);
+    unlink(&alias);
+}
+
+/// r8 P1-01 的反向：Store 自己经设备命名空间（`\\.\`）打开，调用方用普通写法给 alias 下的备份根；换向之后
+/// 仍认得出在数据根下，落在钉住的真实位置，FOREIGN 原样。
+#[test]
+fn a_store_opened_through_the_device_namespace_still_knows_its_root() {
+    let b = base("device-store");
+    let (real, foreign) = (b.join("real"), b.join("foreign"));
+    for p in [&real, &foreign] {
+        fs::create_dir_all(p.join("N")).unwrap();
+    }
+    let alias = b.join("alias");
+    junction(&alias, &real);
+    let device = PathBuf::from(format!(
+        r"\\.\{}",
+        alias.join("N").join("atm.sqlite").display()
+    ));
+    let store = store_with_identity(&device, "ORIGINAL");
+    let other = store_with_identity(&foreign.join("N").join("atm.sqlite"), "FOREIGN");
+    let kept = foreign_sentinels(&foreign);
+    let old = swing(&alias, &foreign);
+    let made = create_backup(
+        &store,
+        &alias.join("N").join("backups"),
+        "MANUAL",
+        "2026-10-10T12:00:00Z",
+    );
+    swing_back(&alias, &old);
+    let info = made.unwrap();
+    for f in &kept {
+        assert!(f.exists(), "{} was removed", f.display());
+    }
+    assert!(
+        real.join("N")
+            .join("backups")
+            .join(&info.id)
+            .join(DB_FILE)
+            .is_file()
+    );
+    drop(store);
+    drop(other);
+    unlink(&alias);
 }

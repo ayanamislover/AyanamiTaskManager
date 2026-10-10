@@ -455,10 +455,22 @@ impl Store {
     /// 数据根以下的部分原样接在真实位置后面（按 `\` 拼字符串，不经 `PathBuf::push`：它在 `\\?\` 写法上会把
     /// `.`、`..` 归一掉，peer W6 r7 P1-02）。所以 `\\?\` 写法里 Windows 本来不解释的 `.`、`..`、`/`，换算后
     /// 仍是名字：原来打不开的路径换算后照样打不开，不会变成兄弟目录。
-    pub(crate) fn rebase(&self, literal: &Path) -> PathBuf {
+    ///
+    /// `\\?\` 写法中间有空段（连续的 `\`）的，不论在不在数据根下都拒绝：Windows 打不开它，而之后按
+    /// `std::path` 拆父目录与名字时空段会被并掉、变成一个打得开的位置（peer W6 r8 P1-02）。
+    pub(crate) fn rebase(&self, literal: &Path) -> std::io::Result<PathBuf> {
         let key = Location::of(literal);
+        if key.gaps {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "{} has an empty segment in a \\\\?\\ path (Windows does not open it)",
+                    literal.display()
+                ),
+            ));
+        }
         let Some(rest) = key.below(&self.literal_root) else {
-            return literal.to_path_buf();
+            return Ok(literal.to_path_buf());
         };
         let mut s = self.root.path().as_os_str().to_owned();
         for c in rest {
@@ -467,7 +479,7 @@ impl Store {
             }
             s.push(c);
         }
-        PathBuf::from(s)
+        Ok(PathBuf::from(s))
     }
 
     pub fn stats(&self) -> &Stats {
@@ -1038,11 +1050,13 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
 
 /// Windows 上的一个位置：按当前目录补成绝对路径（`std::path::absolute`，不跟随链接；普通写法由它照 Win32 规则
 /// 归一 `/`、`.`、`..`——与打开文件时 Windows 自己做的是同一步；`\\?\` 写法它原样返回，Windows 也不解释其中的
-/// `.`、`..`、`/`），再拆成前缀（`\\?\UNC\` 与 `\\` 同为 UNC）与逐段的名字。名字保留 UTF-16 原样，比较见
-/// [`same_name`]。
+/// `.`、`..`、`/`），再拆成前缀（`\\?\UNC\`、`\\.\UNC\` 与 `\\` 同为 UNC；`\\?\`、`\\.\` 之后是
+/// 盘符路径）与逐段的名字。名字保留 UTF-16 原样，比较见 [`same_name`]。
 #[derive(Clone, Debug)]
 pub(crate) struct Location {
     unc: bool,
+    /// `\\?\` 写法中间有空段：Windows 打不开这个路径。
+    pub(crate) gaps: bool,
     parts: Vec<std::ffi::OsString>,
 }
 
@@ -1050,25 +1064,41 @@ impl Location {
     pub(crate) fn of(p: &Path) -> Location {
         let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
         let units = wide(abs.as_os_str());
+        // 前缀里的 `UNC` 不分大小写（对象管理器里的名字）；其余是标点。
         let starts = |prefix: &str| {
             let p: Vec<u16> = prefix.encode_utf16().collect();
-            units.starts_with(&p).then_some(p.len())
+            let lower = |u: &u16| if (65..=90).contains(u) { u + 32 } else { *u };
+            (units.len() >= p.len() && units.iter().zip(&p).all(|(a, b)| lower(a) == lower(b)))
+                .then_some(p.len())
         };
-        let (unc, skip) = if let Some(n) = starts(r"\\?\UNC\") {
-            (true, n)
+        // `\\?\` 不经 Win32 的归一（`std::path::absolute` 也原样返回）；`\\.\` 是设备命名空间，照样归一过，
+        // `\\.\C:\x` 与 `C:\x` 是同一个位置（peer W6 r8）。
+        let (unc, verbatim, skip) = if let Some(n) = starts(r"\\?\UNC\") {
+            (true, true, n)
         } else if let Some(n) = starts(r"\\?\") {
-            (false, n)
+            (false, true, n)
+        } else if let Some(n) = starts(r"\\.\UNC\") {
+            (true, false, n)
+        } else if let Some(n) = starts(r"\\.\") {
+            (false, false, n)
         } else if let Some(n) = starts(r"\\") {
-            (true, n)
+            (true, false, n)
         } else {
-            (false, 0)
+            (false, false, 0)
         };
-        let parts = units[skip..]
-            .split(|u| *u == u16::from(b'\\'))
+        let mut segments: Vec<&[u16]> = units[skip..].split(|u| *u == u16::from(b'\\')).collect();
+        // 末尾的分隔符不算一段（目录带不带它都一样）。普通写法里连续的分隔符已由 Win32 归一；`\\?\` 写法里
+        // 中间的空段 Windows 不归一、打不开，记下来由 [`Store::rebase`] 拒绝（peer W6 r8 P1-02）。
+        if segments.last().is_some_and(|s| s.is_empty()) {
+            segments.pop();
+        }
+        let gaps = verbatim && segments.iter().any(|s| s.is_empty());
+        let parts = segments
+            .into_iter()
             .filter(|c| !c.is_empty())
             .map(from_wide)
             .collect();
-        Location { unc, parts }
+        Location { unc, gaps, parts }
     }
 
     /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。

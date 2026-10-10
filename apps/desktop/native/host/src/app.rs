@@ -23,7 +23,7 @@ use crate::assets;
 use crate::bridge::{self, Call, Local, Method};
 use crate::lifecycle::{self as life, Event as Life};
 use crate::paths::Layout;
-use crate::service::Booted;
+use crate::service::{BootSlot, Booted};
 use crate::single_instance::{Command, Primary, Route};
 use crate::tray::{self, Snapshot};
 use crate::watchdog::{self, Probes, Pulse, Watchdog};
@@ -46,8 +46,8 @@ const DARK_BACKGROUND: (u8, u8, u8, u8) = (0x24, 0x1E, 0x30, 0xFF);
 
 #[derive(Debug)]
 pub enum UserEvent {
-    /// The boot thread finished attempt `n`.
-    Booted(u64, Booted),
+    /// The boot thread finished attempt `n`; the result is in that attempt's [`BootSlot`].
+    Booted(u64),
     /// The background comparison of a serving start reached its verdict.
     Background(Background),
     Second(Command),
@@ -129,6 +129,8 @@ pub struct App {
 
     service: Service,
     boot_attempt: u64,
+    /// The running (or last) boot's hand-over slot.
+    boot: Option<Arc<BootSlot<Booted>>>,
     boot_failures: Vec<Instant>,
     /// The last reason the 2.x service was waited for, logged once per change.
     legacy_wait: Option<String>,
@@ -389,6 +391,7 @@ pub fn run(
         _primary: primary,
         service: Service::Idle,
         boot_attempt: 0,
+        boot: None,
         boot_failures: Vec::new(),
         legacy_wait: None,
         queued: Vec::new(),
@@ -527,7 +530,9 @@ impl App {
             self.handoff.clone(),
             self.proxy.clone(),
         );
-        crate::service::spawn(options, self.boot_attempt, self.proxy.clone());
+        let slot = Arc::new(BootSlot::default());
+        self.boot = Some(slot.clone());
+        crate::service::spawn(options, self.boot_attempt, self.proxy.clone(), slot);
     }
 
     fn on_booted(&mut self, attempt: u64, booted: Booted) {
@@ -654,7 +659,14 @@ impl App {
     fn on_user_event(&mut self, event: UserEvent, target: &EventLoopWindowTarget<UserEvent>) {
         match event {
             UserEvent::StartupDelayElapsed | UserEvent::RetryService => self.start_service(),
-            UserEvent::Booted(attempt, booted) => self.on_booted(attempt, booted),
+            UserEvent::Booted(attempt) => {
+                let booted = (attempt == self.boot_attempt)
+                    .then(|| self.boot.as_ref().and_then(|slot| slot.take()))
+                    .flatten();
+                if let Some(booted) = booted {
+                    self.on_booted(attempt, booted);
+                }
+            }
             UserEvent::Background(outcome) => self.on_background(outcome),
             UserEvent::Ping => self.pulse.beat(),
             UserEvent::Observed(observation) => self.on_observed(observation),
@@ -1492,6 +1504,15 @@ impl App {
         if let Service::Serving(serving) = service {
             let log_root = self.layout.v3_root.clone();
             serving.stop(&move |e| crate::log(&log_root, &format!("runtime: {e:?}")));
+        }
+        // A boot whose result has not reached the event loop yet: if it already began opening the
+        // entries, wait for it and withdraw them here (or the boot thread does, seeing the quit);
+        // otherwise daemon.json would outlive the process (peer W6 r8).
+        if let Some(slot) = self.boot.take() {
+            let root = self.layout.v3_root.clone();
+            slot.quit(crate::service::OPENING_WAIT, |left| {
+                crate::service::settle(left, &root)
+            });
         }
         record(Life::ShutdownComplete, &[]);
         if let Some(watchdog) = self.watchdog.take() {

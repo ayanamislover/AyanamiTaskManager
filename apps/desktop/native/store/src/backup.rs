@@ -279,7 +279,7 @@ impl BackupsRoot {
     /// 备份根在数据根下时（通常如此），换算到 Store 打开时钉住的数据根的真实位置里再钉（peer W6 r5 P1-01：
     /// 与附件同一个根因）；登记的路径仍是调用方给的。
     pub(crate) fn pin_for(store: &Store, root: &Path) -> Result<Self> {
-        let mut pinned = Self::pin(&store.rebase(root))?;
+        let mut pinned = Self::pin(&store.rebase(root)?)?;
         pinned.literal = root.to_path_buf();
         Ok(pinned)
     }
@@ -838,7 +838,7 @@ pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
     let dir = PathBuf::from(dir);
     let db = dir.join(DB_FILE);
     // 登记的是调用方给的写法；在数据根下的换算到 Store 钉住的真实位置里再找（peer W6 r6 P2-01）。
-    let located = store.rebase(&dir);
+    let located = store.rebase(&dir)?;
     if !located.join(DB_FILE).is_file() {
         return Err(BackupError::Corrupt(format!("{} is missing", db.display())));
     }
