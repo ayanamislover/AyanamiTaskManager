@@ -247,11 +247,26 @@ mod tests {
         assert!(!run(false, false, &smoke, sandbox));
         assert!(!run(true, true, &smoke[..2], sandbox));
         assert!(!run(true, true, &[smoke[0], smoke[2]], sandbox));
-        assert!(!run(true, true, &[("ATM_SMOKE_MCP_CONFIG_REPAIR", "1"), smoke[2]], sandbox));
-        assert!(!run(true, true, &[smoke[0], ("ATM_SMOKE_MCP_CONFIG_REPAIR", "0"), smoke[2]], sandbox));
+        assert!(!run(
+            true,
+            true,
+            &[("ATM_SMOKE_MCP_CONFIG_REPAIR", "1"), smoke[2]],
+            sandbox
+        ));
+        assert!(!run(
+            true,
+            true,
+            &[smoke[0], ("ATM_SMOKE_MCP_CONFIG_REPAIR", "0"), smoke[2]],
+            sandbox
+        ));
         // 烟测标记在、但配置根有一个是真的：不修，也不走「产品数据根」的捷径。
         assert!(!run(true, true, &smoke, r"C:\Users\real"));
-        assert!(!run(true, true, &[smoke[0], smoke[1], ("ATM_SMOKE_AGENT_CONFIG_ROOT", "")], sandbox));
+        assert!(!run(
+            true,
+            true,
+            &[smoke[0], smoke[1], ("ATM_SMOKE_AGENT_CONFIG_ROOT", "")],
+            sandbox
+        ));
     }
 
     #[test]

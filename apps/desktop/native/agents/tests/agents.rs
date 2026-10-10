@@ -40,11 +40,11 @@ fn dir(name: &str) -> PathBuf {
     d
 }
 
-/// 假的 `claude` 命令行：照 `mcp remove` / `mcp add-json` 改合成的 `~/.claude.json`；`fail` 里的调用序号失败。
+/// 假的 `claude` 命令行：照 `mcp remove` / `mcp add-json` 改合成的 `~/.claude.json`；接下来 `fail_adds` 次 add-json 失败。
 struct FakeCli {
     config: PathBuf,
     calls: Mutex<Vec<Vec<String>>>,
-    fail: Mutex<Vec<usize>>,
+    fail_adds: Mutex<usize>,
 }
 
 impl Cli for FakeCli {
@@ -54,8 +54,12 @@ impl Cli for FakeCli {
             calls.push(args.to_vec());
             calls.len() - 1
         };
-        if self.fail.lock().unwrap().contains(&n) {
-            return Err(format!("CLAUDE_CODE_CLI_FAILED: injected failure #{n}"));
+        if args[1] == "add-json" {
+            let mut left = self.fail_adds.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return Err(format!("CLAUDE_CODE_CLI_FAILED: injected failure #{n}"));
+            }
         }
         let mut v: Value = fs::read_to_string(&self.config)
             .ok()
@@ -143,7 +147,7 @@ impl World {
         let cli = Arc::new(FakeCli {
             config: home.join(".claude.json"),
             calls: Mutex::new(Vec::new()),
-            fail: Mutex::new(Vec::new()),
+            fail_adds: Mutex::new(0),
         });
         let settings = Arc::new(FakeSettings {
             memory: Mutex::new(true),
@@ -278,7 +282,8 @@ fn seed_2x(w: &World) -> Vec<(PathBuf, String)> {
         "AppData/Roaming/Claude/claude_desktop_config.json",
         &serde_json::to_string_pretty(&json!({
             "theme": "dark",
-            "mcpServers": {"keep": {"command": "k.exe", "args": []}, CORE: old("core")},
+            // core + memory 都对，只多一个旧单入口。
+            "mcpServers": {"keep": {"command": "k.exe", "args": []}, CORE: w.expected("core"), MEMORY: w.expected("memory"), LEGACY: old("core")},
             "tail": 1
         }))
         .unwrap(),
@@ -286,7 +291,8 @@ fn seed_2x(w: &World) -> Vec<(PathBuf, String)> {
     let msix = w.write(
         "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/claude_desktop_config.json",
         &serde_json::to_string_pretty(&json!({
-            "mcpServers": {CORE: old("core"), MEMORY: old("memory"), ACTIONS: old("actions")}
+            // core + memory 都对，只多一个 -actions。
+            "mcpServers": {CORE: w.expected("core"), MEMORY: w.expected("memory"), ACTIONS: old("actions")}
         }))
         .unwrap(),
     );
@@ -298,7 +304,7 @@ fn seed_2x(w: &World) -> Vec<(PathBuf, String)> {
     );
     w.write(
         ".claude.json",
-        &serde_json::to_string_pretty(&json!({"numStartups": 3, "mcpServers": {LEGACY: {"command": "node", "args": [r"C:\L\mcp-stdio.cjs"]}}})).unwrap(),
+        &serde_json::to_string_pretty(&json!({"numStartups": 3, "mcpServers": {CORE: {"command": r"C:\L\app-2.4.0\AyanamiTaskManager.exe", "args": ["--mcp-stdio", "--profile", "core"]}, MEMORY: w.expected("memory")}})).unwrap(),
     );
     w.with_claude_cli();
     [codex, classic, msix, kimi]
@@ -366,8 +372,19 @@ fn repair_rewrites_every_2x_entry_into_the_3_0_form_and_is_idempotent() {
         json!({CORE: w.expected("core"), MEMORY: w.expected("memory")})
     );
     let calls = w.cli.calls.lock().unwrap().clone();
-    assert_eq!(calls[0], ["mcp", "remove", LEGACY, "--scope", "user"]);
-    assert_eq!(calls.len(), 3);
+    let verbs: Vec<(&str, &str)> = calls
+        .iter()
+        .map(|c| (c[1].as_str(), c[2].as_str()))
+        .collect();
+    assert_eq!(
+        verbs,
+        [
+            ("remove", CORE),
+            ("remove", MEMORY),
+            ("add-json", CORE),
+            ("add-json", MEMORY)
+        ]
+    );
 
     // 每个改过的文件旁边恰好一份备份，内容是改之前的字节。
     for (p, before) in &originals {
@@ -396,7 +413,7 @@ fn repair_rewrites_every_2x_entry_into_the_3_0_form_and_is_idempotent() {
         assert_eq!(&fs::read_to_string(p).unwrap(), s);
         assert_eq!(backups(p).len(), 1);
     }
-    assert_eq!(w.calls(), 3);
+    assert_eq!(w.calls(), 4);
 }
 
 #[test]
@@ -560,8 +577,8 @@ fn a_failed_profile_switch_puts_every_original_byte_back() {
     let w = World::new("switch", true);
     let originals = seed_2x(&w);
     let cc_before = json_of(&w.path(".claude.json"));
-    // Claude Code 在最后：前面的文件都改过了，它的 add-json（第 2 次调用）失败。
-    w.cli.fail.lock().unwrap().push(1);
+    // Claude Code 在最后：前面的文件都改过了，它的第一次 add-json 失败（自己的回滚成功）。
+    *w.cli.fail_adds.lock().unwrap() = 1;
     let e = w.agents.set_memory_profile(&user(), false).unwrap_err();
     assert_eq!(e.code, "MCP_PROFILE_SWITCH_FAILED", "{e:?}");
     let report = &e.details.as_ref().unwrap()["report"];
@@ -590,15 +607,13 @@ fn a_failed_profile_switch_puts_every_original_byte_back() {
     assert!(w.settings.commits.lock().unwrap().is_empty());
 
     // Claude Code 自己的回滚失败、但切换按原文重新登记成功：一切都放回了，仍是 FAILED。
-    let n = w.calls();
-    *w.cli.fail.lock().unwrap() = vec![n + 1, n + 2];
+    *w.cli.fail_adds.lock().unwrap() = 2;
     let e = w.agents.set_memory_profile(&user(), false).unwrap_err();
     assert_eq!(e.code, "MCP_PROFILE_SWITCH_FAILED", "{e:?}");
     assert_eq!(json_of(&w.path(".claude.json")), cc_before);
 
     // 按原文重新登记也失败：PARTIAL（remove 成功、add-json 失败、两层回滚的 add-json 都失败）。
-    let n = w.calls();
-    *w.cli.fail.lock().unwrap() = vec![n + 1, n + 2, n + 3];
+    *w.cli.fail_adds.lock().unwrap() = 3;
     let e = w.agents.set_memory_profile(&user(), false).unwrap_err();
     assert_eq!(e.code, "MCP_PROFILE_SWITCH_PARTIAL", "{e:?}");
     assert!(e.message.starts_with("MCP_PROFILE_SWITCH_PARTIAL: "));
@@ -609,7 +624,7 @@ fn a_failed_profile_switch_puts_every_original_byte_back() {
     for (p, before) in &originals {
         assert_eq!(&fs::read_to_string(p).unwrap(), before);
     }
-    w.cli.fail.lock().unwrap().clear();
+    *w.cli.fail_adds.lock().unwrap() = 0;
     fs::write(
         w.path(".claude.json"),
         serde_json::to_string_pretty(&cc_before).unwrap(),
@@ -890,12 +905,16 @@ fn agent_docs_are_replaced_together_and_an_interrupted_rollback_is_finished_firs
     fs::create_dir_all(w.l.join("skills.staging-fedcba9876543210")).unwrap();
     // 不是 ATM 的名字，不碰。
     fs::create_dir_all(w.l.join("docs.backup-NOTHEX")).unwrap();
+    fs::create_dir_all(w.l.join("docs.backup-0123abcd")).unwrap();
+    fs::write(w.l.join("docs.backup-0123abcd").join("x.md"), "not ours").unwrap();
     bundle(&bundled, "guide v4\n", "doc v4\n");
     assert_eq!(
         w.agents.install_docs(&job, &bundled).unwrap(),
         docs::Outcome::Installed
     );
-    assert_eq!(artifacts(&w.l), ["docs.backup-NOTHEX"]);
+    let mut left = artifacts(&w.l);
+    left.sort();
+    assert_eq!(left, ["docs.backup-0123abcd", "docs.backup-NOTHEX"]);
     assert_eq!(
         fs::read_to_string(w.l.join("docs").join("sub").join("a.md")).unwrap(),
         "doc v4\n"
