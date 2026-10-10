@@ -7,7 +7,7 @@
 //! - 空白：一律是 Unicode 空白（`char::is_whitespace`），与最后压空白用的 `split_whitespace` 同一个口径，
 //!   全角空格、不换行空格旁边的键与值照样识别。
 //! - 键：`token=`、`api_key:`、`"secret": "x"`……键后可以夹一个引号，键与分隔符、分隔符与值之间可以有空白；
-//!   键前面只能是开头、空白或 `?` `&` `_` `-` `.` `=` `:`、引号、括号、逗号、分号，免得把 `monkey=` 当成 `key=`。
+//!   键前面只能是开头或不是 ASCII 字母、数字的字符，免得把 `monkey=` 当成 `key=`。
 //! - 值：引号开头的到配对的引号为止，反斜杠转义下一个字符（`\"` 不结束，`\\"` 结束），没有配对就到结尾；
 //!   否则到空白或 `&` `,` `;` `)` `]` `}` 为止。
 //! - `Authorization` 的值是「[认证方案] 密钥」，整段一个占位；引号包着的整段同样，引号里只有方案时连同下一个词。
@@ -53,9 +53,10 @@ fn char_at(s: &str, i: usize) -> Option<char> {
     s[i..].chars().next()
 }
 
-/// 键前面允许的字符（另加开头）。
+/// 键前面允许的字符（另加开头）：不是 ASCII 字母、数字就行。`monkey=` 的 `key` 前面是 `n`，不算键；
+/// `)password=`、`日志token=`、零宽字符后的键都算（peer W5 r5：路径的右括号紧贴着键）。
 fn opens_key(c: char) -> bool {
-    c.is_whitespace() || "?&_-.=:\"'([{,;".contains(c)
+    !c.is_ascii_alphanumeric()
 }
 
 /// 不带引号的值在这些字符处结束。
@@ -155,7 +156,8 @@ fn secret_at(lower: &str, i: usize) -> Option<(usize, usize)> {
 
 /// `i` 处（开头或空白之后）起的本机路径的结束位置。前面可以包着括号与引号：有引号时到下一个同样的引号
 /// （路径里的反斜杠是分隔符，不当转义），再连同紧跟的括号等到空白为止；没有引号时到空白为止。
-fn local_path_end(text: &str, i: usize) -> Option<usize> {
+/// 尾部碰到密钥键就停下，把键交回密钥扫描（peer W5 r5 P1-01：`'C:\x\';password="a b"`、`C:\x;token=y`）。
+fn local_path_end(text: &str, lower: &str, i: usize) -> Option<usize> {
     let mut start = i;
     let mut quote = None;
     while let Some(c) = char_at(text, start).filter(|c| matches!(c, '"' | '\'' | '(')) {
@@ -178,7 +180,15 @@ fn local_path_end(text: &str, i: usize) -> Option<usize> {
     }
     let mut end = quote.and_then(|q| raw_quoted_end(text, q)).unwrap_or(start);
     while let Some(c) = char_at(text, end).filter(|c| !c.is_whitespace()) {
-        end += c.len_utf8();
+        let next = end + c.len_utf8();
+        let key_here = text[..end].chars().next_back().is_some_and(opens_key)
+            && secret_at(lower, end).is_some();
+        // 分隔符留给后面的键：`<local-path>;password=<redacted>`。
+        let key_next = opens_key(c) && secret_at(lower, next).is_some();
+        if key_here || key_next {
+            break;
+        }
+        end = next;
     }
     Some(end)
 }
@@ -193,7 +203,7 @@ pub fn redact_secrets(text: &str, paths: Paths) -> String {
         let before = text[..i].chars().next_back();
         if paths == Paths::Hide
             && before.is_none_or(char::is_whitespace)
-            && let Some(end) = local_path_end(text, i)
+            && let Some(end) = local_path_end(text, &lower, i)
         {
             out.push_str(&text[copied..i]);
             out.push_str(LOCAL_PATH);
@@ -337,6 +347,67 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(redact_secrets(input, Paths::Keep), want, "{input:?}");
+        }
+    }
+
+    /// 路径后面紧跟的密钥键（peer W5 r5 P1-01）：盘符 / UNC × 单双引号 / 不带引号 × 有无括号 ×
+    /// 空格、紧贴、分号、逗号 × 普通值、带空格的引号值、带转义引号的值，两种模式都不留密钥。
+    #[test]
+    fn secrets_right_after_a_path_are_still_found() {
+        let mut leaks = Vec::new();
+        for path in ["C:\\My Data\\", "\\\\server\\My Share\\", "D:\\data"] {
+            for q in ["'", "\"", ""] {
+                for (left, right) in [("", ""), ("(", ")")] {
+                    for gap in [" ", "", ";", ","] {
+                        for value in [
+                            SECRET.to_owned(),
+                            format!("\"public {SECRET}\""),
+                            format!("\"public\\\" {SECRET}\""),
+                        ] {
+                            for key in ["password", "authorization", "token"] {
+                                // `D:\datapassword=` 与 `monkeypassword=` 分不开：键直接粘在字母后面不算键。
+                                if q.is_empty()
+                                    && right.is_empty()
+                                    && gap.is_empty()
+                                    && path == "D:\\data"
+                                {
+                                    continue;
+                                }
+                                let line = format!(
+                                    "open {left}{q}{path}{q}{right}{gap}{key}={value} tail"
+                                );
+                                for paths in [Paths::Keep, Paths::Hide] {
+                                    let got = redact_secrets(&line, paths);
+                                    if got.contains(SECRET) || !got.ends_with(" tail") {
+                                        leaks.push(format!("{paths:?} {line:?} -> {got:?}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(leaks.is_empty(), "{}:\n{}", leaks.len(), leaks.join("\n"));
+        for (input, want) in [
+            (
+                "open 'C:\\My Data\\';password=\"a b\" tail",
+                "open <local-path>;password=<redacted> tail",
+            ),
+            (
+                "open C:\\data\\x;token=y tail",
+                "open <local-path>;token=<redacted> tail",
+            ),
+            (
+                "open (\"C:\\My Data\\\"),api_key=k tail",
+                "open <local-path>,api_key=<redacted> tail",
+            ),
+            (
+                "open C:\\keys\\api_key.txt failed",
+                "open <local-path> failed",
+            ),
+        ] {
+            assert_eq!(redact_secrets(input, Paths::Hide), want, "{input:?}");
         }
     }
 
