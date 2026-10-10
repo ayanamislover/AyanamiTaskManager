@@ -1058,25 +1058,34 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
 /// Windows 上的一个位置。写法交给 Windows 自己换成 NT 路径（[`nt_path`]：`RtlDosPathNameToNtPathName_U_WithStatus`，
 /// 与 `CreateFileW` 打开文件前做的是同一步，只按字面换算，不碰文件系统、不跟随链接）：普通写法、`\\.\` 写法照
 /// Win32 规则补全当前目录、归一 `/`、`.`、`..`、连续分隔符与尾部的点和空格，`\\?\` 写法原样。之后只认两种命名
-/// 空间——`\??\<盘符>:\…` 与 `\??\UNC\<服务器>\<共享>\…`；subst 盘符与网络映射盘符按 `QueryDosDeviceW` 换成
-/// 它指向的位置。其余（`GLOBALROOT`、卷 GUID、设备对象……）不比较、不支持（peer W6 r9 P1-01）：[`Store::open`] 与
-/// [`Store::rebase`] 都拒绝，不当成外部位置放行。名字保留 UTF-16 原样，比较见 [`same_name`]。
+/// 空间——`\??\<盘符>:\…` 与 `\??\UNC\<服务器>\<共享>\…`。其余（`GLOBALROOT`、卷 GUID、设备对象……）不比较、
+/// 不支持（peer W6 r9 P1-01）：[`Store::open`] 与 [`Store::rebase`] 都拒绝，不当成外部位置放行。
+///
+/// 盘符不按字母比，按它在 `QueryDosDeviceW` 里指向的东西比（peer W6 r10 P1-01）：
+/// - 指向设备（`\Device\HarddiskVolume3`）：位置是「这个设备 + 之下的各段」，同一个卷的两个盘符是同一个位置；
+/// - subst（指向 `\??\…`）：换成它指向的路径再认，至多 [`DOS_DEVICE_DEPTH`] 层，超过就不支持；
+/// - 网络映射盘符（重定向器之下的 `\<服务器>\<共享>…`）：就是那个 UNC 位置；
+/// - 查不到（没有这个盘符、查询失败）：不支持。
+///
+/// 证明不了「是同一个位置」或「是另一个位置」的写法一律不支持，不按剩下的字面当外部位置。名字保留 UTF-16
+/// 原样，比较见 [`same_name`]。
 #[derive(Clone, Debug)]
 pub(crate) struct Location {
-    /// `None`：不支持的命名空间。
+    /// `None`：不支持的写法。
     kind: Option<Space>,
     /// 中间有空段（只会出现在 `\\?\` 写法里）：Windows 打不开这个路径。
     pub(crate) gaps: bool,
     parts: Vec<std::ffi::OsString>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Space {
-    Drive,
+    /// 盘符指向的设备名（ASCII 小写；`\Device\…`）。
+    Volume(Vec<u16>),
     Unc,
 }
 
-/// subst 套 subst 最多跟几层。
+/// subst 套 subst 最多跟几层；再往下还是 subst 就不支持。
 const DOS_DEVICE_DEPTH: u8 = 4;
 
 impl Location {
@@ -1113,9 +1122,9 @@ impl Location {
         let Some(rest) = strip_ascii_ci(nt, r"\??\") else {
             return Location::unsupported();
         };
-        let (kind, rest) = match strip_ascii_ci(rest, r"UNC\") {
-            Some(r) => (Space::Unc, r),
-            None if is_drive(rest) => (Space::Drive, rest),
+        let (unc, rest) = match strip_ascii_ci(rest, r"UNC\") {
+            Some(r) => (true, r),
+            None if is_drive(rest) => (false, rest),
             None => return Location::unsupported(),
         };
         let mut segments: Vec<&[u16]> = rest.split(|u| *u == u16::from(b'\\')).collect();
@@ -1124,50 +1133,68 @@ impl Location {
         if segments.last().is_some_and(|s| s.is_empty()) {
             segments.pop();
         }
-        let gaps = segments.iter().any(|s| s.is_empty());
-        if kind == Space::Drive
-            && depth < DOS_DEVICE_DEPTH
-            && let Some(target) = dev(segments[0])
-        {
-            let below = &segments[1..];
-            if starts_ascii_ci(&target, r"\??\") {
-                // subst：换成它指向的位置再认一次。
-                let mut joined = target;
-                for s in below {
+        if segments.iter().any(|s| s.is_empty()) {
+            // 在换算盘符之前就定下：换算会重新拼接、再去一次末尾分隔符，原来打不开的写法不能因此变得打得开
+            // （peer W6 r10 P1-03）。
+            return Location {
+                kind: None,
+                gaps: true,
+                parts: Vec::new(),
+            };
+        }
+        if unc {
+            return Location {
+                kind: Some(Space::Unc),
+                gaps: false,
+                parts: segments.into_iter().map(from_wide).collect(),
+            };
+        }
+        let below = &segments[1..];
+        let Some(target) = dev(segments[0]) else {
+            return Location::unsupported();
+        };
+        if starts_ascii_ci(&target, r"\??\") {
+            // subst：换成它指向的位置再认一次。指向卷根（`\??\C:\`）时不再多拼一个分隔符（peer W6 r10 P2-01）。
+            if depth >= DOS_DEVICE_DEPTH {
+                return Location::unsupported();
+            }
+            let mut joined = target;
+            for s in below {
+                if joined.last() != Some(&u16::from(b'\\')) {
                     joined.push(u16::from(b'\\'));
-                    joined.extend_from_slice(s);
                 }
-                return Location::of_nt(&joined, depth + 1, dev);
+                joined.extend_from_slice(s);
             }
-            if let Some(share) = redirected_share(&target) {
-                // 网络映射盘符：`\Device\LanmanRedirector\;Z:…\<服务器>\<共享>`，就是那个 UNC 位置。
-                let parts = share
+            return Location::of_nt(&joined, depth + 1, dev);
+        }
+        if let Some(share) = redirected_share(&target) {
+            // 网络映射盘符：`\Device\LanmanRedirector\;Z:…\<服务器>\<共享>`，就是那个 UNC 位置。
+            return Location {
+                kind: Some(Space::Unc),
+                gaps: false,
+                parts: share
                     .into_iter()
-                    .chain(below.iter().filter(|c| !c.is_empty()).map(|c| from_wide(c)))
-                    .collect();
-                return Location {
-                    kind: Some(Space::Unc),
-                    gaps,
-                    parts,
-                };
-            }
+                    .chain(below.iter().map(|c| from_wide(c)))
+                    .collect(),
+            };
         }
-        let parts = segments
-            .into_iter()
-            .filter(|c| !c.is_empty())
-            .map(from_wide)
-            .collect();
-        Location {
-            kind: Some(kind),
-            gaps,
-            parts,
+        if starts_ascii_ci(&target, r"\Device\") {
+            return Location {
+                kind: Some(Space::Volume(
+                    target.iter().map(|u| ascii_lower(*u)).collect(),
+                )),
+                gaps: false,
+                parts: below.iter().map(|c| from_wide(c)).collect(),
+            };
         }
+        Location::unsupported()
     }
 
     /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。不支持的写法不在任何
     /// 位置之下。
     pub(crate) fn below<'a>(&'a self, base: &Location) -> Option<&'a [std::ffi::OsString]> {
-        let inside = self.kind.is_some()
+        let inside = self.supported()
+            && base.supported()
             && self.kind == base.kind
             && self.parts.len() >= base.parts.len()
             && self
@@ -1208,7 +1235,8 @@ fn unsupported_spelling(p: &Path) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidInput,
         format!(
-            "{} is not a drive or UNC path (other Windows namespaces are not supported here)",
+            "{} is not a drive or UNC path whose location can be compared with the data root (other Windows \
+             namespaces, drive letters that do not resolve, and subst chains deeper than 4 are not supported here)",
             p.display()
         ),
     )
@@ -1242,16 +1270,25 @@ fn is_drive(units: &[u16]) -> bool {
 }
 
 /// 网络重定向器下的 `\<服务器>\<共享>…`：`\Device\LanmanRedirector\;Z:…\srv\share`、`\Device\Mup\;…\srv\share`
-/// 这类写法里以 `;` 开头的是重定向器自己的段，去掉之后就是 UNC 的那几段。
+/// 这类写法里打头的、以 `;` 开头的几段是重定向器自己的（`;LanmanRedirector`、`;Z:<登录会话>`），去掉之后就是
+/// UNC 的那几段。只去打头的：服务器与共享之后的段原样保留，以 `;` 开头的目录名也是名字（peer W6 r10 P1-02）。
+/// 中间有空段的认不出来。
 fn redirected_share(target: &[u16]) -> Option<Vec<std::ffi::OsString>> {
     let rest = strip_ascii_ci(target, r"\Device\LanmanRedirector\")
         .or_else(|| strip_ascii_ci(target, r"\Device\Mup\"))?;
-    let parts: Vec<std::ffi::OsString> = rest
-        .split(|u| *u == u16::from(b'\\'))
-        .filter(|c| !c.is_empty() && c[0] != u16::from(b';'))
-        .map(from_wide)
-        .collect();
-    (parts.len() >= 2).then_some(parts)
+    let mut segments: Vec<&[u16]> = rest.split(|u| *u == u16::from(b'\\')).collect();
+    if segments.last().is_some_and(|s| s.is_empty()) {
+        segments.pop();
+    }
+    let lead = segments
+        .iter()
+        .take_while(|c| c.first() == Some(&u16::from(b';')))
+        .count();
+    let parts = &segments[lead..];
+    if parts.len() < 2 || parts.iter().any(|c| c.is_empty()) {
+        return None;
+    }
+    Some(parts.iter().map(|c| from_wide(c)).collect())
 }
 
 /// 按 Windows 自己的规则把写法换成 NT 路径（`RtlDosPathNameToNtPathName_U_WithStatus`：`CreateFileW` 打开之前
@@ -1313,8 +1350,26 @@ fn nt_path(p: &Path) -> Option<Vec<u16>> {
 }
 
 /// 盘符指向的目标（`QueryDosDeviceW`）：subst 是 `\??\…`，网络映射是重定向器下的路径，本地卷是 `\Device\…`。
-#[cfg(windows)]
 fn dos_device(drive: &[u16]) -> Option<Vec<u16>> {
+    #[cfg(test)]
+    if let Some(given) = DOS_DEVICES.with(|o| o.borrow().as_ref().map(|f| f(drive))) {
+        return given;
+    }
+    query_dos_device(drive)
+}
+
+/// 用例换掉本线程的盘符映射（经公开入口验 subst 与映射盘符；造真的要改本机的盘符映射）。
+#[cfg(test)]
+type DosDevices = Box<dyn Fn(&[u16]) -> Option<Vec<u16>>>;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DOS_DEVICES: std::cell::RefCell<Option<DosDevices>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(windows)]
+pub(crate) fn query_dos_device(drive: &[u16]) -> Option<Vec<u16>> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn QueryDosDeviceW(device: *const u16, target: *mut u16, max: u32) -> u32;
@@ -1334,8 +1389,10 @@ fn dos_device(drive: &[u16]) -> Option<Vec<u16>> {
 }
 
 #[cfg(not(windows))]
-fn dos_device(_drive: &[u16]) -> Option<Vec<u16>> {
-    None
+pub(crate) fn query_dos_device(drive: &[u16]) -> Option<Vec<u16>> {
+    let mut d: Vec<u16> = r"\Device\".encode_utf16().collect();
+    d.extend_from_slice(drive.get(..2)?);
+    Some(d)
 }
 
 /// 同一个名字：Windows 的序数比较、不分大小写（`CompareStringOrdinal(…, TRUE)`：用系统的大写表逐个 UTF-16 码元比，

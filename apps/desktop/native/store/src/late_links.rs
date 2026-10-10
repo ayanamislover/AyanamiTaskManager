@@ -723,50 +723,69 @@ fn locations_follow_windows_path_equality() {
     }
     assert!(Location::of(Path::new(base)).supported());
     assert!(Location::of(Path::new(r"\\server\share\N")).supported());
-    // subst 与网络映射盘符换成它指向的位置（用例换掉 QueryDosDeviceW；本地卷原样）。
+    // 盘符按 QueryDosDeviceW 指向的东西比（用例换掉它）：subst 换成它指向的路径，网络映射盘符换成 UNC，本地卷
+    // 按设备名比——同一个卷的两个盘符是同一个位置（peer r10 P1-01）。
     let dev = |d: &[u16]| -> Option<Vec<u16>> {
-        let target = match String::from_utf16_lossy(d).to_ascii_uppercase().as_str() {
-            "Z:" => r"\??\C:\Data",
-            "Y:" => r"\Device\LanmanRedirector\;Y:0000000000012345\server\share",
-            "X:" => r"\Device\Mup\;LanmanRedirector\;X:0000000000012345\server\share",
-            "C:" => r"\Device\HarddiskVolume3",
+        let letter = String::from_utf16_lossy(d).to_ascii_uppercase();
+        let target = match letter.as_str() {
+            "Z:" => r"\??\C:\Data".to_owned(),
+            "G:" => r"\??\C:\".to_owned(),
+            "Y:" => r"\Device\LanmanRedirector\;Y:0000000000012345\server\share".to_owned(),
+            "X:" => r"\Device\Mup\;LanmanRedirector\;X:0000000000012345\server\share".to_owned(),
+            "M:" => r"\Device\LanmanRedirector\;M:0000000000012345\server\share\;team".to_owned(),
+            "C:" | "K:" => r"\Device\HarddiskVolume3".to_owned(),
             // subst 套 subst：V → U → T → S → R → Q；P 指向自己。
-            "V:" => r"\??\U:\v",
-            "U:" => r"\??\T:\u",
-            "T:" => r"\??\S:\t",
-            "S:" => r"\??\R:\s",
-            "R:" => r"\??\Q:\r",
-            "P:" => r"\??\P:\p",
-            _ => return None,
+            "V:" => r"\??\U:\v".to_owned(),
+            "U:" => r"\??\T:\u".to_owned(),
+            "T:" => r"\??\S:\t".to_owned(),
+            "S:" => r"\??\R:\s".to_owned(),
+            "R:" => r"\??\Q:\r".to_owned(),
+            "P:" => r"\??\P:\p".to_owned(),
+            // 没有这个盘符。
+            "E:" => return None,
+            other => format!(r"\Device\HarddiskVolume{}", other.as_bytes()[0]),
         };
         Some(target.encode_utf16().collect())
     };
+    let key = |p: &str| Location::of_with(Path::new(p), &dev);
     let with = |p: &str, b: &str| {
-        Location::of_with(Path::new(p), &dev)
-            .below(&Location::of_with(Path::new(b), &dev))
-            .map(|rest| {
-                rest.iter()
-                    .map(|c| c.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-            })
+        key(p).below(&key(b)).map(|rest| {
+            rest.iter()
+                .map(|c| c.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
     };
+    let x = || Some(vec!["x".to_owned()]);
     assert_eq!(
         with(r"Z:\N\backups", base),
         Some(vec!["backups".to_owned()])
     );
-    assert_eq!(with(r"C:\Data\N\x", r"z:\N"), Some(vec!["x".to_owned()]));
+    assert_eq!(with(r"C:\Data\N\x", r"z:\N"), x());
+    // subst 指向卷根：不多拼分隔符（peer r10 P2-01）。
+    assert_eq!(with(r"G:\Data\N\x", base), x());
+    assert!(key(r"G:\Data\N").supported());
     for p in [r"Y:\N\x", r"X:\N\x"] {
-        assert_eq!(
-            with(p, r"\\server\share\N"),
-            Some(vec!["x".to_owned()]),
-            "{p}"
-        );
+        assert_eq!(with(p, r"\\server\share\N"), x(), "{p}");
     }
+    // 重定向器只去掉打头的 `;` 段：共享之后以 `;` 开头的目录名照样是名字（peer r10 P1-02）。
+    assert_eq!(with(r"M:\N\x", r"\\server\share\;team\N"), x());
+    assert_eq!(with(r"M:\N\x", r"\\server\share\N"), None);
+    // 同一个卷的另一个盘符是同一个位置；别的卷不是（peer r10 P1-01）。
+    assert_eq!(with(r"K:\Data\N\x", base), x());
     assert_eq!(with(r"W:\Data\N", base), None);
-    // 至多跟 4 层：U 经四层到 Q；V 要五层，停在 R，不在 Q 之下。指向自己的也会停下。
-    assert_eq!(with(r"U:\x", r"Q:\r\s\t\u"), Some(vec!["x".to_owned()]));
-    assert_eq!(with(r"V:\x", r"Q:\r\s\t\u\v"), None);
-    assert_eq!(with(r"P:\x", base), None);
+    assert!(key(r"W:\Data\N").supported());
+    // 至多跟 4 层 subst：U 经四层到 Q；V 要五层，不支持（不当外部位置）。指向自己的、没有的盘符也不支持。
+    assert_eq!(with(r"U:\x", r"Q:\r\s\t\u"), x());
+    for p in [r"V:\x", r"P:\x", r"E:\x"] {
+        assert!(!key(p).supported(), "{p}");
+        assert_eq!(with(p, r"Q:\r\s\t\u\v"), None, "{p}");
+    }
+    // 空段在换算盘符之前就定下：经 subst 换算也照样打不开（peer r10 P1-03）。
+    for p in [r"\\?\Z:\N\\", r"\\?\Z:\N\\x", r"\\?\G:\Data\\N"] {
+        let k = key(p);
+        assert!(k.gaps && !k.supported(), "{p}");
+        assert_eq!(with(p, base), None, "{p}");
+    }
     assert_eq!(
         inside(r"\\?\C:\Data\N\backups\", base),
         Some(vec!["backups".to_owned()])
@@ -1010,6 +1029,128 @@ fn a_globalroot_spelling_is_refused_before_anything_is_written() {
             Config::default(),
         );
         assert!(opened.is_err(), "{prefix}");
+        drop(store);
+        drop(other);
+        unlink(&alias);
+    }
+}
+
+/// 换掉本线程的盘符映射，离开作用域时还原。
+struct DosDevices;
+
+impl DosDevices {
+    fn set(f: impl Fn(&[u16]) -> Option<Vec<u16>> + 'static) -> DosDevices {
+        crate::engine::DOS_DEVICES.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+        DosDevices
+    }
+}
+
+impl Drop for DosDevices {
+    fn drop(&mut self) {
+        crate::engine::DOS_DEVICES.with(|o| *o.borrow_mut() = None);
+    }
+}
+
+/// r10 P1-01 / P1-03 / P2-01（公开入口）：本线程的盘符映射换成注入的（`engine::DOS_DEVICES`；造真的 subst 要改
+/// 本机的盘符映射）。数据根所在的盘符记作 L，提前换向之后：
+/// - `subst G: L:\`（指向卷根）、L 所在卷的另一个盘符 K：经它们写的数据根下的备份根，备份照样落在 ORIGINAL，
+///   FOREIGN 的哨兵与标记都在；
+/// - 经 G 的 `\\?\` 写法、末尾两个分隔符（Windows 打不开）：拒绝，什么都不写；
+/// - 要跟五层 subst 才到 L 的盘符：拒绝，不当作外部位置。
+#[test]
+fn drive_letter_aliases_keep_the_location_or_are_refused() {
+    for mode in [
+        "volume-root-subst",
+        "second-letter",
+        "gap-through-subst",
+        "too-deep",
+    ] {
+        let (_b, real, foreign, alias, store, other) = two_roots(&format!("letters-{mode}"));
+        let kept = foreign_sentinels(&foreign);
+        let plain = alias.join("N").join("backups");
+        let s = plain.to_string_lossy().into_owned();
+        let own = s[..2].to_ascii_uppercase();
+        let tail = s[3..].to_owned();
+        let wide = |t: &str| t.encode_utf16().collect::<Vec<u16>>();
+        let real_dev = crate::engine::query_dos_device(&wide(&own)).unwrap();
+        // 注入的盘符不能与 L 相同。
+        let mut letters = "GKVUTSHJ".chars().filter(|c| !own.starts_with(*c));
+        let mut next = || format!("{}:", letters.next().unwrap());
+        let (g, k) = (next(), next());
+        let chain: Vec<String> = (0..5).map(|_| next()).collect();
+        let mut map: Vec<(String, Vec<u16>)> = vec![
+            (g.clone(), wide(&format!(r"\??\{own}\"))),
+            (k.clone(), real_dev),
+        ];
+        // chain[0] → chain[1] → … → chain[4] → L：五层 subst。
+        for w in chain.windows(2) {
+            map.push((w[0].clone(), wide(&format!(r"\??\{}\", w[1]))));
+        }
+        map.push((chain[4].clone(), wide(&format!(r"\??\{own}\"))));
+        let _guard = DosDevices::set(move |d| {
+            let asked = String::from_utf16_lossy(d).to_ascii_uppercase();
+            match map.iter().find(|(l, _)| *l == asked) {
+                Some((_, t)) => Some(t.clone()),
+                None => crate::engine::query_dos_device(d),
+            }
+        });
+        let root = PathBuf::from(match mode {
+            "volume-root-subst" => format!(r"{g}\{tail}"),
+            "second-letter" => format!(r"{k}\{tail}"),
+            "gap-through-subst" => format!(r"\\?\{g}\{tail}\\"),
+            _ => format!(r"{}\{tail}", chain[0]),
+        });
+        if mode == "gap-through-subst" {
+            fs::create_dir_all(real.join("N").join("backups")).unwrap();
+            assert!(
+                crate::pin::open(Path::new(&format!(r"\\?\{s}\\"))).is_err(),
+                "Windows 打不开末尾两个分隔符的写法"
+            );
+        }
+        let before = fs::read_dir(real.join("N"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>();
+        let old = swing(&alias, &foreign);
+        let made = create_backup(&store, &root, "MANUAL", "2026-10-10T12:00:00Z");
+        swing_back(&alias, &old);
+        for f in &kept {
+            assert!(f.exists(), "{mode}: {} was removed", f.display());
+        }
+        match mode {
+            "volume-root-subst" | "second-letter" => {
+                let info = made.unwrap_or_else(|e| panic!("{mode}: {e}"));
+                assert!(
+                    real.join("N")
+                        .join("backups")
+                        .join(&info.id)
+                        .join(DB_FILE)
+                        .is_file(),
+                    "{mode}"
+                );
+                assert!(
+                    !foreign.join("N").join("backups").join(&info.id).exists(),
+                    "{mode}"
+                );
+            }
+            _ => {
+                assert!(made.is_err(), "{mode}: {:?}", made.map(|i| i.id));
+                let after = fs::read_dir(real.join("N"))
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name())
+                    .collect::<Vec<_>>();
+                assert_eq!(before, after, "{mode}");
+                if real.join("N").join("backups").exists() {
+                    assert_eq!(
+                        fs::read_dir(real.join("N").join("backups"))
+                            .unwrap()
+                            .count(),
+                        0,
+                        "{mode}"
+                    );
+                }
+            }
+        }
         drop(store);
         drop(other);
         unlink(&alias);
