@@ -15,8 +15,9 @@ use std::io::{Read, Write};
 
 pub const FLAG: &str = "--dpapi";
 
-/// Purpose binding: a blob another program sealed for the same user does not open here.
-const ENTROPY: &[u8] = b"AyanamiTaskManager/sync-secret/v1";
+/// Purpose binding: a blob another program sealed for the same user does not open here. The
+/// conversion's self-check opens 2.x blobs with the same value, so there is one definition.
+const ENTROPY: &[u8] = atm_runtime::secrets::ENTROPY;
 /// Secrets are short (a relay token, a pairing secret); the cap bounds memory for any input.
 const MAX_INPUT_HEX: usize = 64 * 1024;
 
@@ -141,6 +142,33 @@ fn transform(data: &[u8], protect: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2.x 的密文就是这里加密的：转换前的自检（`atm_runtime::secrets::check`）必须解得开，
+    /// 否则每个真实用户都会被判成手机配对要重做。
+    #[test]
+    fn a_secret_the_2x_host_sealed_passes_the_conversion_check() {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let sealed = transform(b"space:secret", true).unwrap();
+        let mut b64 = String::new();
+        for chunk in sealed.chunks(3) {
+            let mut b = [0u8; 3];
+            b[..chunk.len()].copy_from_slice(chunk);
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                b64.push(if i <= chunk.len() {
+                    char::from(A[(n >> (18 - 6 * i) & 63) as usize])
+                } else {
+                    '='
+                });
+            }
+        }
+        let file = format!(r#"{{"relay-token":"{b64}","space-secret":"{b64}"}}"#);
+        assert!(atm_runtime::secrets::check(file.as_bytes()));
+        assert_eq!(
+            transform(&sealed, false).as_deref(),
+            Some(&b"space:secret"[..])
+        );
+    }
 
     #[test]
     fn hex_round_trips_and_rejects_malformed_text() {

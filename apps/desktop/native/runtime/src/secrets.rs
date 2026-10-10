@@ -7,6 +7,10 @@ use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
 };
 
+/// 2.x 加密时绑定的用途（entropy）：宿主的 `--dpapi` 一直带着它（`host/src/dpapi.rs` 引用这里）。
+/// 解密时 entropy 不同就解不开，所以自检必须带同一个，不带的话每个真实用户都会被判成「配对要重做」。
+pub const ENTROPY: &[u8] = b"AyanamiTaskManager/sync-secret/v1";
+
 /// [`atm_store::legacy::ConvertOptions::secrets_check`] 的实现。
 pub fn check(bytes: &[u8]) -> bool {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_slice::<serde_json::Value>(bytes)
@@ -25,6 +29,10 @@ fn opens(sealed: &[u8]) -> bool {
         cbData: sealed.len() as u32,
         pbData: sealed.as_ptr() as *mut u8,
     };
+    let entropy = CRYPT_INTEGER_BLOB {
+        cbData: ENTROPY.len() as u32,
+        pbData: ENTROPY.as_ptr() as *mut u8,
+    };
     let mut output = CRYPT_INTEGER_BLOB {
         cbData: 0,
         pbData: std::ptr::null_mut(),
@@ -33,7 +41,7 @@ fn opens(sealed: &[u8]) -> bool {
         CryptUnprotectData(
             &input,
             std::ptr::null_mut(),
-            std::ptr::null(),
+            &entropy,
             std::ptr::null(),
             std::ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,
@@ -84,10 +92,19 @@ mod tests {
     use windows_sys::Win32::Security::Cryptography::CryptProtectData;
 
     fn protect(plain: &[u8]) -> Vec<u8> {
+        protect_with(plain, Some(ENTROPY))
+    }
+
+    /// `entropy` 为 `None` 时不绑定用途（别的程序为同一账户加密的东西）。
+    fn protect_with(plain: &[u8], entropy: Option<&[u8]>) -> Vec<u8> {
         let input = CRYPT_INTEGER_BLOB {
             cbData: plain.len() as u32,
             pbData: plain.as_ptr() as *mut u8,
         };
+        let purpose = entropy.map(|e| CRYPT_INTEGER_BLOB {
+            cbData: e.len() as u32,
+            pbData: e.as_ptr() as *mut u8,
+        });
         let mut output = CRYPT_INTEGER_BLOB {
             cbData: 0,
             pbData: std::ptr::null_mut(),
@@ -96,7 +113,7 @@ mod tests {
             CryptProtectData(
                 &input,
                 std::ptr::null(),
-                std::ptr::null(),
+                purpose.as_ref().map_or(std::ptr::null(), |p| p as *const _),
                 std::ptr::null(),
                 std::ptr::null(),
                 CRYPTPROTECT_UI_FORBIDDEN,
@@ -141,6 +158,20 @@ mod tests {
         assert!(!check(tampered.as_bytes()));
         for junk in [&b"not json"[..], b"[]", br#"{"a":1}"#, br#"{"a":"@@@"}"#] {
             assert!(!check(junk));
+        }
+    }
+
+    /// 2.x 的密文绑定了 [`ENTROPY`]：带它的解得开；不带、或带别的用途的，同一账户也解不开。
+    #[test]
+    fn only_secrets_sealed_for_atm_sync_pass() {
+        let ours = encode(&protect_with(b"relay-secret", Some(ENTROPY)));
+        assert!(check(format!(r#"{{"relay-token":"{ours}"}}"#).as_bytes()));
+        for other in [None, Some(&b"AyanamiTaskManager/other/v1"[..])] {
+            let theirs = encode(&protect_with(b"relay-secret", other));
+            assert!(
+                !check(format!(r#"{{"relay-token":"{theirs}"}}"#).as_bytes()),
+                "{other:?}"
+            );
         }
     }
 
