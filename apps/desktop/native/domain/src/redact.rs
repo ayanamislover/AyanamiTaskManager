@@ -84,6 +84,17 @@ fn quoted_end(s: &str, i: usize) -> Option<usize> {
     Some(s.len())
 }
 
+/// `i` 处是引号时，到下一个同样的引号之后的位置，反斜杠不转义（Windows 路径里它是分隔符，
+/// `"C:\Program Files\"` 的结尾就是那个引号，peer W5 r4 P2-01）；没有配对就到结尾。
+fn raw_quoted_end(s: &str, i: usize) -> Option<usize> {
+    let q = char_at(s, i).filter(|c| matches!(c, '"' | '\''))?;
+    Some(
+        s[i + 1..]
+            .find(q)
+            .map_or(s.len(), |at| i + 1 + at + q.len_utf8()),
+    )
+}
+
 /// 从 `i` 开始的一个值的结束位置（不含）。
 fn value_end(s: &str, i: usize) -> usize {
     if let Some(end) = quoted_end(s, i) {
@@ -142,8 +153,8 @@ fn secret_at(lower: &str, i: usize) -> Option<(usize, usize)> {
     (end > start).then_some((start, end))
 }
 
-/// `i` 处（开头或空白之后）起的本机路径的结束位置。前面可以包着括号与引号：有引号时到配对引号
-/// （与值同一套转义规则），再连同紧跟的括号等到空白为止；没有引号时到空白为止。
+/// `i` 处（开头或空白之后）起的本机路径的结束位置。前面可以包着括号与引号：有引号时到下一个同样的引号
+/// （路径里的反斜杠是分隔符，不当转义），再连同紧跟的括号等到空白为止；没有引号时到空白为止。
 fn local_path_end(text: &str, i: usize) -> Option<usize> {
     let mut start = i;
     let mut quote = None;
@@ -165,7 +176,7 @@ fn local_path_end(text: &str, i: usize) -> Option<usize> {
     if !is_path {
         return None;
     }
-    let mut end = quote.and_then(|q| quoted_end(text, q)).unwrap_or(start);
+    let mut end = quote.and_then(|q| raw_quoted_end(text, q)).unwrap_or(start);
     while let Some(c) = char_at(text, end).filter(|c| !c.is_whitespace()) {
         end += c.len_utf8();
     }
@@ -349,6 +360,17 @@ mod tests {
             ),
             ("open ('D:\\My Data\\x') next", "open <local-path> next"),
             ("open (C:\\data\\x) next", "open <local-path> next"),
+            // peer W5 r4 P2-01：目录以分隔符结尾时，结尾的引号就是路径的结尾，后面的失败原因留着。
+            (
+                "open \"C:\\Program Files\\\" failed: access denied",
+                "open <local-path> failed: access denied",
+            ),
+            (
+                "open '\\\\server\\share\\' failed",
+                "open <local-path> failed",
+            ),
+            ("open (\"D:\\data\\\") next", "open <local-path> next"),
+            ("open ('E:\\x\\') next", "open <local-path> next"),
         ] {
             assert_eq!(redact_secrets(input, Paths::Hide), want, "{input:?}");
         }
