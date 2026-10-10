@@ -239,9 +239,13 @@ pub(crate) fn run(
         }
     }
 
-    // W-071：规划根只给 Agent 入口与服务内部的创建；User / Phone / System 缺 objective 直接报错。
+    // W-071：规划根只给 Agent 入口与服务内部的创建；User / System 缺 objective 直接报错。
     // 服务内部的创建（quick 晋升）也补建：目标项目可能是刚建的，还没有规划。
-    let provision = w.actor().kind == PrincipalKind::Agent || internal_create.is_some();
+    // Phone 也补建：2.x 的手机建任务在项目没有 ACTIVE 目标时走 `ensurePlanningRoot`（新项目头一个任务多半
+    // 就是从手机发来的，sync/commands.ts）；有目标时 atm-sync 按创建顺序挑第一个 ACTIVE 的显式传进来，
+    // 走不到这里。3.0 把补建放进建任务的同一个事务（2.x 是先补建、再建任务两步）。
+    let provision = matches!(w.actor().kind, PrincipalKind::Agent | PrincipalKind::Phone)
+        || internal_create.is_some();
     let need_root = items.iter().any(|i| i.objective_id.is_none());
     if need_root && !provision {
         let index = items

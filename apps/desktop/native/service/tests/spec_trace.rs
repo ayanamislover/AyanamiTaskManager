@@ -148,6 +148,7 @@ fn load_tests() -> Vec<TestFn> {
         "runtime",
         "cli",
         "agents",
+        "sync",
     ] {
         rust_files(&root.join(krate), &mut files);
     }

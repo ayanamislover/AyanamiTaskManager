@@ -21,6 +21,7 @@ pub mod receipts;
 pub mod resolve;
 pub mod session;
 pub mod settings;
+pub mod sync_state;
 pub mod ui;
 pub mod views;
 pub mod work;

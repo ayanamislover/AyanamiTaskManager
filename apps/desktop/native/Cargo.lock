@@ -273,8 +273,13 @@ dependencies = [
 name = "atm-sync"
 version = "0.0.0"
 dependencies = [
+ "atm-domain",
+ "atm-service",
+ "atm-store",
  "atm-sync-protocol",
+ "rusqlite",
  "serde_json",
+ "url",
  "windows-sys 0.61.2",
 ]
 

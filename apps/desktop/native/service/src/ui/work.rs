@@ -431,6 +431,21 @@ impl Service {
         })
     }
 
+    /// 某任务最近 `n`（1～10）条进度，新的在前（2.0 `recentTaskProgress`，手机快照的 `recent` 用）。
+    /// 形状与 Agent 读的进度相同（snake_case）。
+    pub fn ui_recent_progress(
+        &self,
+        principal: &Principal,
+        project: &str,
+        task: &str,
+        n: i64,
+    ) -> Result<Vec<Value>, DomainError> {
+        self.read_project(principal, Capability::WorkRead, project, |cx| {
+            let row = views::task_by_key(cx, task)?;
+            views::recent_progress(cx, &row.id, n.clamp(1, 10))
+        })
+    }
+
     /// `GET /projects/:code/ui/work-items/:taskKey`（#63）：`WorkItemView` 加清单、依赖、发现关系与执行中的 session（原始行，snake_case）。
     pub fn ui_work_item(
         &self,

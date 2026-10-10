@@ -4,6 +4,9 @@
 //! 每个构造函数只允许出现在对应的入口 crate 里，以及各 crate 的 `tests/` 目录。
 //! 入口 crate 按目录名认：`ui-bridge`、`e2e-adapter`（User）、`http`（Agent）、`sync`（Phone）、`jobs`（System）。
 //! 新建这些 crate 时请沿用这些目录名，否则这里会变红。
+//!
+//! 唯一的例外：同步连接器自己的后台循环是 System 作业 `sync.loop`（03 §2 的读快照、同步账本），由 `sync` 构造，
+//! 而且在那里只认 `system_job(JobId::SyncLoop)` 这一种写法——换成任何别的作业仍然算越界。
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +16,9 @@ const CONSTRUCTORS: [(&str, &[&str]); 4] = [
     ("verified_phone(", &["sync"]),
     ("system_job(", &["jobs"]),
 ];
+
+/// `sync` 里唯一允许的 System 主体。
+const SYNC_LOOP: &str = "system_job(JobId::SyncLoop)";
 
 /// 返回越界的 `(相对路径, 构造函数)`，以及被允许的出现次数。
 fn scan(files: &[(String, String)]) -> (Vec<(String, &'static str)>, usize) {
@@ -30,7 +36,10 @@ fn scan(files: &[(String, String)]) -> (Vec<(String, &'static str)>, usize) {
             if hits == 0 {
                 continue;
             }
-            if in_tests || owners.contains(&crate_dir) {
+            let sync_loop_only = ctor == "system_job("
+                && crate_dir == "sync"
+                && text.matches(SYNC_LOOP).count() == hits;
+            if in_tests || owners.contains(&crate_dir) || sync_loop_only {
                 allowed_hits += hits;
             } else {
                 violations.push((rel.clone(), ctor));
@@ -111,6 +120,15 @@ fn the_scan_recognises_violations() {
             "service/tests/flows.rs",
             "Principal::trusted_ui(s); Principal::system_job(j)",
         ),
+        f(
+            "sync/src/session.rs",
+            "Principal::system_job(JobId::SyncLoop)",
+        ),
+        f(
+            "sync/src/connector.rs",
+            "Principal::system_job(JobId::SyncLoop); Principal::system_job(JobId::Maintenance)",
+        ),
+        f("http/src/jobs.rs", "Principal::system_job(JobId::SyncLoop)"),
     ]);
     assert_eq!(
         v,
@@ -119,9 +137,11 @@ fn the_scan_recognises_violations() {
             ("mcp-shim/src/main.rs".to_owned(), "authenticated_agent("),
             ("service/src/lib.rs".to_owned(), "system_job("),
             ("host/src/bridge.rs".to_owned(), "verified_phone("),
+            ("sync/src/connector.rs".to_owned(), "system_job("),
+            ("http/src/jobs.rs".to_owned(), "system_job("),
         ]
     );
-    assert_eq!(allowed, 4);
+    assert_eq!(allowed, 5);
 }
 
 /// P-001：主体不能从输入反序列化出来。

@@ -83,8 +83,29 @@ W2 交付全部**只依赖库与服务**的业务。下面这些要么依赖另�
 | ----------------------------------------------------------------------------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | `backup.create_scheduled` / `backup.prune_retention`                                                                    | System（maintenance） | W5：维护作业的调度与保留期（跳过 `pinned_until` 未到的备份）；机制已在 W1，手动备份与按范围恢复已在本层                        |
 | `metrics.refresh` / `metrics.capture`                                                                                   | 见能力表              | W5：采集要调 git、在提交之后异步做（03 §2 metrics.capture），属于合进程后的观察者；`metrics.read` 已在本层（W2 peer r2 P1-03） |
-| `sync.*`、`dispatch.*`                                                                                                  | 见能力表              | W7：atm-sync 与派单子系统                                                                                                      |
+| `sync.*`（W7c 已落地，见下节）、`dispatch.*`                                                                            | 见能力表              | W7：atm-sync 与派单子系统；派单在 W7d                                                                                          |
 | `agents.*`、`update.*`、`shell.*`、`system.status`                                                                      | U（宿主）             | W4 / W6：宿主方法；`agents.*` 的入口在 atm-agents `integrations.rs`（W6d，拒绝用例在它的 `tests/agents.rs`）                   |
 | `store.cleanup`、`store.maintain`、`notify.send`、`sync.run`、`dispatch.track`、`agents.docs_install`、`memory.release` | System                | W5 / W6 / W7：各自的后台作业                                                                                                   |
 
 这些能力落地时，各自的 Agent 拒绝用例按 03 §5.3 补齐（含 NS-5～NS-9），并加入 `mut-w2h1.py` 同类的变异。
+
+## 手机同步（W7c，atm-sync）
+
+设置页的五个入口都在 `sync/src/connector.rs`，第一步是 `capability::require`（经 `Service::sync_ledger` / `save_sync_ledger`
+或在入口处直接检查），Agent 一律 `USER_AUTHORIZATION_REQUIRED`：
+
+| 入口             | 能力                  | Agent 拒绝 + NS                                                                          | User 阳性                                                               |
+| ---------------- | --------------------- | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `status`         | `sync.status`         | `sync/tests/connector.rs` `agents_are_refused_every_settings_entry_without_side_effects` | `status_carries_no_secret_and_matches_the_desktop_contract`             |
+| `update_config`  | `sync.configure`      | 同上                                                                                     | `a_rejected_token_stops_until_a_new_one_is_saved`                       |
+| `test_relay`     | `sync.test_relay`     | 同上                                                                                     | `test_relay_reports_without_reflecting_relay_text`                      |
+| `create_pairing` | `sync.pairing_create` | 同上                                                                                     | `concurrent_pairing_requests_create_one_space_and_return_the_same_code` |
+| `reset_space`    | `sync.reset`          | 同上                                                                                     | `reset_space_leaves_only_a_revocation_and_the_new_code_works`           |
+
+拒绝用例比对的副作用：库里每张表（NS-1/2）、数据根下的文件（NS-3）、出站请求（NS-6：后台循环自己的 `GET /changes`
+之外零请求，Agent 给的地址与 token 不出现在任何请求里）、宿主状态与内存队列（NS-8/9：阶段、状态、内存账本、待发布的脏集合）。
+atm-sync 没有子进程与 Agent 配置的通道（NS-5、NS-7），由 `sync/tests/guards.rs` 扫源码与依赖看着。
+
+Phone 主体只在 sync crate 里构造（`Principal::verified_phone`），只有 `work.create` 与 `dispatch.launch`；同步循环自己的
+System 主体只能是 `system_job(JobId::SyncLoop)`（`domain/tests/principal_guard.rs` 的唯一例外）。手机端到端见
+`sync/tests/commands.rs`（P-008、03 C-05）。
