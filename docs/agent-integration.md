@@ -17,6 +17,8 @@ AyanamiTaskManager（ATM）把 Agent 的任务状态、进度、阻塞、记录�
 
 Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~/.claude.json`：该文件由 Claude Code 持有并高频整体重写，第三方读-改-写会丢失对方更新。找不到 CLI 时安装会以 `CLAUDE_CODE_CLI_NOT_FOUND` 失败，不会退化成直接改文件。由于规则与技能同 Desktop 共用，卸载其中一个客户端时，只要另一个仍装着 MCP，共用的规则和技能会被保留。
 
+已经接入过 ATM 的客户端，ATM 每次启动核对一次：2.x 写进去的旧入口（`--mcp-stdio`、`mcp-stdio.cjs`、`ayanami-task-manager-actions`、没有 `--profile` 的单入口、钉着旧版本目录的路径）改成 `atm-mcp.exe --profile core|memory`，缺的 Skill 补上；没接入过的客户端一个字节都不动，你自己改过的规则块和 Skill 也不动（要在设置里点「修复」才会换回 ATM 的版本）。Skill 的备份放在 skills 目录旁边的 `.atm-skill-backups\`（例如 `~/.codex/.atm-skill-backups`），每个 Skill 只留最近 5 份；2.x 留在 skills 目录里的 `atm-*.bak-*` 会被挪过去，免得 Agent 把旧备份当成又一个 Skill 加载。
+
 Kimi Code 的 VS Code 扩展与 CLI 共用 `~/.kimi-code`，装一次两边都生效。ATM 直接最小合并 `mcp.json`：只替换 ATM 自己的服务并写明 `"transport": "stdio"`，其他服务与顶层键原样保留；原来手工写在 `AGENTS.md` 里、没有 ATM 标记的规则文字不会被删，确认受管区块生效后可自行删掉那份手写副本。
 
 本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token 和端口，并原子发布 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`（设置了 `ATM3_DATA_DIR` 时在它下面）；旧 endpoint/token 不可复用。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。完整威胁边界见 [security-model.md](./security-model.md)。

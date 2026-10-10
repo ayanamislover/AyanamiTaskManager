@@ -253,30 +253,23 @@ fn json_of(p: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(p).unwrap()).unwrap()
 }
 
-/// 每个 2.x 旧入口的样子（宿主钉着 app-版本、Node 桥、actions、无 profile）。
-const CODEX_2X: &str = r#"model = "gpt"
-
-[mcp_servers.other]
-command = "other.exe"
-args = []
-
-[mcp_servers.ayanami-task-manager]
-command = "C:\\L\\app-2.4.0\\AyanamiTaskManager.exe"
-args = ["--mcp-stdio"]
-
-[mcp_servers."ayanami-task-manager-actions"]
-command = "node"
-args = ["C:\\L\\mcp-stdio.cjs", "--profile", "actions"]
-
-[mcp_servers."ayanami-task-manager-actions".env]
-ATM_DATA_DIR = "C:\\L"
-
-[profiles.fast]
-model = "mini"
-"#;
+/// Codex 的 2.x 配置：core 与 memory 已经是 3.0 的写法，只多一个带 `.env` 子表的 `-actions` 段。
+/// 每份配置只靠一种「过期」成立：单拿掉哪一条判据，就有一个客户端漏修（Claude Desktop 一次写全部
+/// 配置文件，所以两种「多出来的条目」分在 Codex 与 Claude Desktop 两个客户端上）。
+fn codex_2x(w: &World) -> String {
+    let s = w.shim.replace('\\', "\\\\");
+    format!(
+        "model = \"gpt\"\n\n[mcp_servers.other]\ncommand = \"other.exe\"\nargs = []\n\n\
+         [mcp_servers.\"{CORE}\"]\ncommand = \"{s}\"\nargs = [\"--profile\", \"core\"]\n\n\
+         [mcp_servers.\"{MEMORY}\"]\ncommand = \"{s}\"\nargs = [\"--profile\", \"memory\"]\n\n\
+         [mcp_servers.\"{ACTIONS}\"]\ncommand = \"node\"\nargs = [\"C:\\\\L\\\\mcp-stdio.cjs\", \"--profile\", \"actions\"]\n\n\
+         [mcp_servers.\"{ACTIONS}\".env]\nATM_DATA_DIR = \"C:\\\\L\"\n\n\
+         [profiles.fast]\nmodel = \"mini\"\n"
+    )
+}
 
 fn seed_2x(w: &World) -> Vec<(PathBuf, String)> {
-    let codex = w.write(".codex/config.toml", CODEX_2X);
+    let codex = w.write(".codex/config.toml", &codex_2x(w));
     let old = |p: &str| json!({"command": r"C:\L\current\AyanamiTaskManager.exe", "args": ["--mcp-stdio", "--profile", p], "env": {}});
     let classic = w.write(
         "AppData/Roaming/Claude/claude_desktop_config.json",
@@ -291,8 +284,8 @@ fn seed_2x(w: &World) -> Vec<(PathBuf, String)> {
     let msix = w.write(
         "AppData/Local/Packages/Claude_pzs8sxrjxfjjc/LocalCache/Roaming/Claude/claude_desktop_config.json",
         &serde_json::to_string_pretty(&json!({
-            // core + memory 都对，只多一个 -actions。
-            "mcpServers": {CORE: w.expected("core"), MEMORY: w.expected("memory"), ACTIONS: old("actions")}
+            // 同上：core + memory 都对，只多一个旧单入口。
+            "mcpServers": {CORE: w.expected("core"), MEMORY: w.expected("memory"), LEGACY: old("memory")}
         }))
         .unwrap(),
     );
@@ -930,4 +923,95 @@ fn agent_docs_are_replaced_together_and_an_interrupted_rollback_is_finished_firs
         fs::read_to_string(w.l.join(docs::GUIDE)).unwrap(),
         "guide v4\n"
     );
+}
+
+/// `L` 下所有文件（相对路径 → 字节）。
+fn tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
+        for e in fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            let rel = p
+                .strip_prefix(base)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if p.is_dir() {
+                out.insert(format!("{rel}/"), Vec::new());
+                walk(base, &p, out);
+            } else {
+                out.insert(rel, fs::read(&p).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// W6e：换到一半换不下去（`docs` 里有一个被独占打开的文件，整个目录改不了名）：已经挪走的按逆序放回，
+/// 暂存删掉，`L` 逐字节回到换之前；`L` 里不归 ATM 管的文件从头到尾不碰。放开之后再装一次就成。
+#[cfg(windows)]
+#[test]
+fn a_docs_swap_that_cannot_finish_puts_everything_back() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let w = World::new("docs-rollback", true);
+    let job = Principal::system_job(JobId::AgentsDocs);
+    let bundled = w.root.join("bundled");
+    bundle(&bundled, "guide v3\n", "doc v3\n");
+    fs::create_dir_all(w.l.join("docs")).unwrap();
+    fs::write(w.l.join("docs").join("held.md"), "old doc").unwrap();
+    fs::write(w.l.join(docs::GUIDE), "guide v2\n").unwrap();
+    fs::write(w.l.join("my-notes.md"), "用户自己的").unwrap();
+    fs::create_dir_all(w.l.join("data")).unwrap();
+    fs::write(w.l.join("data").join("atm.sqlite"), "2.x data").unwrap();
+    let before = tree(&w.l);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(w.l.join("docs").join("held.md"))
+        .unwrap();
+    let e = w.agents.install_docs(&job, &bundled).unwrap_err();
+    drop(held);
+    assert_eq!(e.code, "AGENT_DOCUMENTATION_RENAME_FAILED", "{e:?}");
+    // 指南已经挪进了备份名：回滚把它放回，暂存三件都删掉，没有一步失败。
+    assert!(e.message.contains("[rollback attempted="), "{}", e.message);
+    assert!(e.message.contains(",failed=0]"), "{}", e.message);
+    assert!(e.message.contains("succeeded=4"), "{}", e.message);
+    assert_eq!(tree(&w.l), before);
+
+    assert_eq!(
+        w.agents.install_docs(&job, &bundled).unwrap(),
+        docs::Outcome::Installed
+    );
+    let after = tree(&w.l);
+    assert_eq!(after["my-notes.md"], "用户自己的".as_bytes());
+    assert_eq!(after["data/atm.sqlite"], b"2.x data");
+    assert!(!after.contains_key("docs/held.md"));
+    assert_eq!(after[docs::GUIDE], b"guide v3\n");
+    assert!(artifacts(&w.l).is_empty());
+}
+
+/// W6e：Agent 读的路径与 ATM 装文档的位置是同一处。规则块、Agent 最短规则与安装包里的 Skills 都指向
+/// `%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md`，文档装进的 `L` 就是 `<LOCALAPPDATA>\AyanamiTaskManager`
+/// （00 决定 #6）；仓库里的 Skills 也只指这一处。
+#[test]
+fn every_pointer_to_the_guide_names_where_the_docs_are_installed() {
+    let guide = r"%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md";
+    assert!(rules::render().contains(guide));
+    assert!(rules::AGENT_RULE_SNIPPET.contains(guide));
+    let w = World::new("guide-path", true);
+    assert_eq!(
+        w.agents.env.legacy_root,
+        w.agents.env.localappdata.join("AyanamiTaskManager")
+    );
+    let skills = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../integrations/skills");
+    let mut pointed = 0;
+    for name in skills::SKILL_NAMES {
+        let text = fs::read_to_string(skills.join(name).join("SKILL.md")).unwrap();
+        for line in text.lines().filter(|l| l.contains("ATM_AGENT_GUIDE.md")) {
+            assert!(line.contains(guide), "{name}: {line}");
+            pointed += 1;
+        }
+    }
+    assert!(pointed >= 2, "{pointed}");
 }
