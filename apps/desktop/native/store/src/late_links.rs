@@ -1134,7 +1134,17 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
                 );
             }
             _ => {
-                assert!(made.is_err(), "{mode}: {:?}", made.map(|i| i.id));
+                // 拒绝的是位置判定本身（注入的盘符在本机并不存在，其他原因的失败不算）。
+                let why = match made {
+                    Err(e) => e.to_string(),
+                    Ok(i) => panic!("{mode}: made {}", i.id),
+                };
+                let expected = if mode == "gap-through-subst" {
+                    "has an empty segment"
+                } else {
+                    "is not a drive or UNC path whose location can be compared"
+                };
+                assert!(why.contains(expected), "{mode}: {why}");
                 let after = fs::read_dir(real.join("N"))
                     .unwrap()
                     .map(|e| e.unwrap().file_name())
