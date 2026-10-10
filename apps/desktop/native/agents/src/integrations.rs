@@ -205,12 +205,14 @@ impl Agents {
     /// `manageAgentIntegration`：规则块、Skills 与 MCP 一起装、修、卸。Claude 与 Claude Code 共用规则和 Skills，
     /// 卸其中一个时另一个还接着 ATM，就只卸 MCP。
     ///
-    /// PREVIEW 属于 `agents.read`；写动作只给 User（03 §4.3、P-016）：System 的 `agents.repair` 只能走
-    /// [`Agents::repair`]（只修已接入的），不能借这里给没接入的客户端装或卸。
+    /// PREVIEW 属于 `agents.read`；写动作只给 User（03 §4.3、P-016）：System 的 `agents.repair` 持有
+    /// `agents.manage`，但只能走 [`Agents::repair`]（只修已接入的），不能借这里给没接入的客户端装或卸——挡它的是
+    /// 下面的 User 判断，不是 `agents.read`。
     pub fn manage(&self, p: &Principal, client: &str, action: &str) -> Result<Value> {
-        check(p, Capability::AgentsRead)?;
         let action = Action::parse(action)?;
-        if action != Action::Preview {
+        if action == Action::Preview {
+            check(p, Capability::AgentsRead)?;
+        } else {
             check(p, Capability::AgentsManage)?;
             if p.kind() != atm_domain::principal::PrincipalKind::User {
                 return Err(AgentError::new(

@@ -45,8 +45,8 @@ describe("关窗后释放内存", () => {
     const paths = readFileSync("apps/desktop/native/host/src/paths.rs", "utf8");
     expect(paths).toContain('const CORE_NODE_FLAGS: [&str; 1] = ["--expose-gc"];');
     expect(paths).toContain("core: with_core_flags(node_entry(&node, packaged_core, Vec::new())),");
-    expect(paths).toContain(
-      'cli: node_entry(&node, app_dir.join("runtime").join("cli.mjs"), Vec::new()),',
-    );
+    // CLI 是 atm.exe（ATM 3 W6a），不是带 GC 开关的 Node 入口。
+    expect(paths).toContain("cli: cli_entry(&app_dir, true),");
+    expect(paths).not.toContain('join("cli.mjs")');
   });
 });

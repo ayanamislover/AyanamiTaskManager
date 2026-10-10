@@ -27,6 +27,7 @@ import {
   killProcessTree,
   outputRoot,
   repoRoot,
+  snapshotLoginItems,
   startSmokeHost,
   stopSmokeHost,
   waitUntil,
@@ -143,12 +144,6 @@ async function send(host: SmokeHost, flag: string): Promise<void> {
       done();
     });
   });
-}
-
-async function start(executable: string, box: ReturnType<typeof sandbox>): Promise<SmokeHost> {
-  const host = startSmokeHost({ executable, dataDir: box.n, env: box.env });
-  await waitFor(box.n, host.pid, "ready", 120_000);
-  return host;
 }
 
 function previousOf(n: string, pid: number): Line | undefined {
@@ -269,9 +264,11 @@ async function scenarios(executable: string, box: ReturnType<typeof sandbox>): P
 
 const executable = smokeHost();
 const box = sandbox();
+// 先拍 Run 快照再启动宿主：读不到就什么都不启动；宿主改过的 Run 项最后照快照还原。
+const loginItems = snapshotLoginItems([executable]);
 let error: unknown;
 try {
-  await scenarios(executable, box);
+  await loginItems.restoreAfter(() => scenarios(executable, box));
 } catch (caught) {
   error = caught;
 }
@@ -294,3 +291,9 @@ await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 rmSync(box.home, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
 if (!passed) process.exitCode = 1;
+
+async function start(executable: string, box: ReturnType<typeof sandbox>): Promise<SmokeHost> {
+  const host = startSmokeHost({ executable, dataDir: box.n, env: box.env });
+  await waitFor(box.n, host.pid, "ready", 120_000);
+  return host;
+}

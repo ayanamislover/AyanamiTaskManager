@@ -794,6 +794,14 @@ fn agents_and_jobs_get_only_their_own_capabilities() {
             );
         }
     }
+    // 启动修复持有 `agents.manage`（给 `Agents::repair` 用）：挡它的是 User 判断本身，不是别的能力。
+    assert_eq!(
+        m.agents
+            .manage(&repair_job(), "CODEX", "INSTALL")
+            .unwrap_err()
+            .code,
+        "USER_AUTHORIZATION_REQUIRED"
+    );
     m.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
     let installed = fs::read(m.path(".codex/config.toml")).unwrap();
     let rules = fs::read(m.path(".codex/AGENTS.md")).unwrap();
