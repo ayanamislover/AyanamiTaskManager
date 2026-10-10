@@ -84,7 +84,7 @@ fn t_sync_the_runtime_handles_phone_commands_and_stops_within_the_budget() {
     );
     let features = s.mobile().expect("入口发布之后起了手机功能");
     let dispatch = features.dispatch().unwrap();
-    assert_eq!(dispatch.config().enabled, false, "派单默认关闭");
+    assert!(!dispatch.config().enabled, "派单默认关闭");
     assert_eq!(sync_status(&s)["state"], "disabled", "同步默认关闭");
     assert_eq!(relay.request_count(), 0, "默认关闭：一个请求都不发");
 
