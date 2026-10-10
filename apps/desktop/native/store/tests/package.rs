@@ -1271,7 +1271,7 @@ fn a_package_code_that_is_not_a_project_code_is_refused_and_exports_stay_inside(
         .filter(|n| n != ".staging")
         .collect();
     entries.sort();
-    assert_eq!(entries, [name.clone()]);
+    assert_eq!(entries, std::slice::from_ref(&name));
     let w = world("package-export-existing");
     let first = export(&w, "PA", Format::Json, T1).path;
     fs::write(&first, b"kept").unwrap();
