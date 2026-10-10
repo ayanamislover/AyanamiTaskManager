@@ -504,3 +504,60 @@ fn a_txn_that_is_not_one_name_is_refused_before_admission() {
         assert!(!n.exists() && !d.join("install").exists(), "{txn}");
     }
 }
+
+/// W6b（03 §2.5 R3、R4）：离线恢复做到一半（意图文件在）时不启动、一个入口都不开；做完之后的第一次启动
+/// 先收尾——推进范围世代、记一条 `database.recovered`、删掉标记——再开放入口。
+#[test]
+fn an_offline_recovery_is_settled_before_serving() {
+    use atm_store::recover::{self, RecoverOptions, Step};
+    let d = dir("offline-recovery");
+    let n = d.join("N");
+    let l = d.join("L-missing");
+    serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+    let layout = Layout::new(&n);
+    let store = atm_store::Store::open(&layout.database(), atm_store::Config::default()).unwrap();
+    let id = atm_store::backup::create_backup(
+        &store,
+        &n.join("backups"),
+        "MANUAL",
+        "2026-10-10T00:00:00.000Z",
+    )
+    .unwrap()
+    .id;
+    drop(store);
+    let o = RecoverOptions {
+        at: "2026-10-10T01:00:00.000Z",
+        pin_until: "2026-11-10T01:00:00.000Z",
+    };
+    recover::recover_with(&layout, &id, o, &mut |s| s != Step::Quarantined).unwrap_err();
+
+    let events = Events::default();
+    match atm_runtime::start(&options(&n, &l, &events)) {
+        Err(atm_runtime::BootError::Failed(why)) => {
+            assert!(why.contains("unfinished") && why.contains(&id), "{why}")
+        }
+        Err(other) => panic!("{other}"),
+        Ok(_) => panic!("started with an unfinished recovery"),
+    }
+    assert_eq!(events.take(), [Event::Admitted]);
+    assert!(descriptor(&n).is_none());
+
+    recover::recover(&layout, &id, o).unwrap();
+    assert!(n.join("runtime").join(recover::MARKER).is_file());
+    let s = serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap());
+    assert!(!n.join("runtime").join(recover::MARKER).exists());
+    let (svc, _) = s.service().unwrap();
+    let recovered: i64 = svc
+        .store()
+        .read(|tx| {
+            tx.query_row(
+                "SELECT count(*) FROM global_feed WHERE type = 'database.recovered' AND aggregate_id = ?1",
+                [&id],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(recovered, 1);
+    drop(svc);
+    s.stop(&|_| {});
+}

@@ -262,6 +262,12 @@ pub fn start(o: &Options) -> Result<Started, BootError> {
         AdmitError::Io(e) => failed(e),
     })?;
     (o.observe)(Event::Admitted);
+    // 离线恢复做到一半（03 §2.5 R3）：库可能已经移走、暂存的还没换进来。不启动，等用户再跑一次 recover 续做。
+    if let Some(backup) = atm_store::recover::interrupted(&layout) {
+        return Err(failed(format!(
+            "an offline recovery to backup {backup} is unfinished; run `atm recover --offline` again to complete it"
+        )));
+    }
     // 拿到准入就没有别的实例在服务：上一个进程被杀时留下的 daemon.json 是过期的，先撤掉，
     // 免得桥在冲突或转换期间连向一个不存在的服务。
     match std::fs::remove_file(layout.runtime().join(entries::DESCRIPTOR)) {

@@ -221,7 +221,9 @@ pub fn tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
                     .unwrap()
                     .to_string_lossy()
                     .into_owned();
-                out.insert(rel, std::fs::read(&path).unwrap());
+                // 被别的进程锁住的文件（服务的准入锁）读不了：记一个占位值，名字照样比对。
+                let bytes = std::fs::read(&path).unwrap_or_else(|_| b"<locked>".to_vec());
+                out.insert(rel, bytes);
             }
         }
     }
@@ -271,7 +273,20 @@ pub fn atm_in(root: &Path, args: &[&str]) -> Run {
 }
 
 pub fn atm_with(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_atm"));
+    atm_full(Path::new(env!("CARGO_BIN_EXE_atm")), root, args, env, None)
+}
+
+/// 任意位置的 atm.exe（例如拷进合成的安装布局），可选地从 stdin 喂一段输入（不喂就是立即 EOF）。
+pub fn atm_full(
+    exe: &Path,
+    root: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: Option<&str>,
+) -> Run {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut command = Command::new(exe);
     command
         .args(args)
         .current_dir(root)
@@ -280,11 +295,24 @@ pub fn atm_with(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Run {
         .env_remove("ATM_ENDPOINT")
         .env_remove("ATM_TOKEN")
         .env_remove("ATM_DATA_DIR")
-        .env_remove("AYANAMI_TASK_DATA_DIR");
+        .env_remove("AYANAMI_TASK_DATA_DIR")
+        .env_remove("ATM_TEST_MODE")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     for (key, value) in env {
         command.env(key, value);
     }
-    let output = command.output().expect("run atm.exe");
+    let mut child = command.spawn().expect("run atm.exe");
+    if let Some(input) = input {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+    }
+    let output = child.wait_with_output().expect("wait for atm.exe");
     Run {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

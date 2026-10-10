@@ -7,11 +7,16 @@
 //!   `--json` 时 stdout 是 `{"error":{"code":"USER_AUTHORIZATION_REQUIRED",…}}`。服务端照样会拒（双保险）。
 //! - `doctor --offline` 只读文件，不连服务（[`offline`]）。
 //!
-//! 退出码：0 成功；1 服务回了错误（或响应没收全）；2 用法错误；3 只能由用户操作；4 服务不可用。
+//! - `recover --offline` 在独占准入之后从整库备份恢复（[`recover`]），同样不连服务。
+//!
+//! 退出码：0 成功；1 服务回了错误（或响应没收全）；2 用法错误；3 只能由用户操作；4 服务不可用；
+//! 5 recover 的准入冲突（ATM 或安装程序在跑）。
 
 mod discover;
 mod http;
+mod migrate;
 mod offline;
+mod recover;
 mod ulid;
 
 use atm_domain::capability::Capability;
@@ -37,6 +42,10 @@ AyanamiTaskManager 命令行
 
   status                                   服务状态
   doctor [--offline]                       健康检查；--offline 不连服务、只读文件
+  recover --offline [--from <备份 id>] [--list]
+                                           服务不在时从整库备份恢复（先在托盘退出 ATM）
+  migrate --dry-run --source <2.x 根> --out <目录> [--keep-data]
+                                           演练 2.x → 3.0 转换，只写 --out
   project list | open <代码>
   project create <路径> --name <名称> [--code <短代码>] [--mode solo|auto|multi]
   quick add <标题> [--note <备注>]
@@ -61,7 +70,8 @@ AyanamiTaskManager 命令行
 --json   输出单行 JSON（错误也是，形如 {\"error\":{\"code\":…}}）
 --compact 省略空字段与列表字段
 
-退出码：0 成功；1 服务回了错误；2 用法错误；3 只能由用户操作；4 服务不可用。
+退出码：0 成功；1 服务回了错误；2 用法错误；3 只能由用户操作；4 服务不可用；
+5 recover 时 ATM 或安装程序在跑。
 发现服务：ATM_ENDPOINT + ATM_TOKEN（只允许 http://127.0.0.1），否则读 ATM3_DATA_DIR 或
 %LOCALAPPDATA%\\AyanamiTaskManager3 下的 runtime\\daemon.json。
 ";
@@ -277,6 +287,8 @@ enum Plan {
     Status,
     Doctor,
     DoctorOffline,
+    Recover(recover::Request),
+    Migrate(migrate::Request),
     /// 读：`list` 是人读输出时按行展开的列表字段（按顺序，每个一节）。
     Get {
         path: String,
@@ -342,6 +354,26 @@ fn plan(args: &[String]) -> Result<Plan, Usage> {
     Ok(match name.as_str() {
         "status" => Plan::Status,
         "doctor" if p.flag("offline") => Plan::DoctorOffline,
+        "recover" if !p.flag("offline") => {
+            return Err(bad(
+                "recover 只有离线形式：atm recover --offline（服务在跑时会被拒绝）".into(),
+            ));
+        }
+        "migrate" if !p.flag("dry-run") => {
+            return Err(bad(
+                "migrate 只有演练形式：atm migrate --dry-run --source <2.x 根> --out <目录>（真正的转换由 ATM 启动时完成）".into(),
+            ));
+        }
+        "migrate" => Plan::Migrate(migrate::Request {
+            source: p.opt("source").unwrap_or_default().to_owned(),
+            out: p.opt("out").unwrap_or_default().to_owned(),
+            keep_data: p.flag("keep-data"),
+        }),
+        "recover" => Plan::Recover(recover::Request {
+            from: p.opt("from").map(str::to_owned),
+            list: p.flag("list"),
+            yes: p.flag("yes"),
+        }),
         "doctor" => Plan::Doctor,
         "project list" => Plan::Get {
             path: "/api/v1/projects".into(),
@@ -597,6 +629,20 @@ fn spec(name: &str) -> Option<&'static Spec> {
     Some(match name {
         "status" => s!("atm status", [], [], [], []),
         "doctor" => s!("atm doctor [--offline]", [], [], [], ["offline"]),
+        "migrate" => s!(
+            "atm migrate --dry-run --source <2.x 根> --out <目录> [--keep-data]",
+            [],
+            ["source", "out"],
+            ["source", "out"],
+            ["dry-run", "keep-data"]
+        ),
+        "recover" => s!(
+            "atm recover --offline [--from <备份 id>] [--list]",
+            [],
+            ["from"],
+            [],
+            ["offline", "list", "yes"]
+        ),
         "project list" => s!("atm project list", [], [], [], []),
         "project open" => s!("atm project open <代码>", ["<代码>"], [], [], []),
         "project create" => s!(
@@ -805,9 +851,12 @@ fn call(
 }
 
 fn execute(out: Out, plan: Plan) -> i32 {
-    if let Plan::DoctorOffline = plan {
-        return doctor_offline(out);
-    }
+    let plan = match plan {
+        Plan::DoctorOffline => return doctor_offline(out),
+        Plan::Recover(r) => return recover::run(out, r),
+        Plan::Migrate(r) => return migrate::run(out, r),
+        plan => plan,
+    };
     let target = match discover::discover() {
         Ok(target) => target,
         Err(why) => return unavailable(out, &why, matches!(plan, Plan::Status | Plan::Doctor)),
@@ -827,7 +876,9 @@ fn execute(out: Out, plan: Plan) -> i32 {
             body,
         } => in_session(&target, project, title, path, body),
         Plan::TaskList { path, query, limit } => task_list(&target, path, query, *limit),
-        Plan::DoctorOffline => unreachable!("answered before discovery"),
+        Plan::DoctorOffline | Plan::Recover(_) | Plan::Migrate(_) => {
+            unreachable!("answered before discovery")
+        }
     };
     match result {
         Ok(value) => {

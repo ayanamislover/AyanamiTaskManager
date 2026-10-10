@@ -80,6 +80,10 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     std::fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
     let store = Store::open(&p.layout.database(), Config::default())
         .map_err(|e| format!("open {}: {e}", p.layout.database().display()))?;
+    // 离线恢复之后的第一次启动（R4）：推进各范围的 scope generation，记 `database.recovered`，删标记。
+    let at = atm_install_state::startup::iso_utc(atm_install_state::handoff::now_ms());
+    atm_store::recover::settle(&store, p.layout, &at)
+        .map_err(|e| format!("settle the offline recovery: {e}"))?;
     let svc = Arc::new(
         Service::new(store)
             .with_backups_root(p.layout.root.join("backups"))
