@@ -8,16 +8,14 @@
 //!
 //! Protocol: one line of hex on stdin, the result as one line of lowercase hex on stdout. The
 //! data never travels on the command line. Exit code 1 and no output for an unknown operation,
-//! malformed or oversized input, or a failed call. Blobs are bound to the current Windows user
-//! (no CRYPTPROTECT_LOCAL_MACHINE) and to [`ENTROPY`], and the calls never show UI.
+//! malformed or oversized input, or a failed call. The calls are `atm_sync::dpapi` (current
+//! Windows user, bound to its `ENTROPY`, never any UI), the same code the 3.0 sync store and the
+//! conversion's self-check use, so there is one definition of the purpose binding.
 
 use std::io::{Read, Write};
 
 pub const FLAG: &str = "--dpapi";
 
-/// Purpose binding: a blob another program sealed for the same user does not open here. The
-/// conversion's self-check opens 2.x blobs with the same value, so there is one definition.
-const ENTROPY: &[u8] = atm_runtime::secrets::ENTROPY;
 /// Secrets are short (a relay token, a pairing secret); the cap bounds memory for any input.
 const MAX_INPUT_HEX: usize = 64 * 1024;
 
@@ -87,56 +85,11 @@ fn decode(text: &str) -> Option<Vec<u8>> {
 }
 
 fn transform(data: &[u8], protect: bool) -> Option<Vec<u8>> {
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Cryptography::{
-        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
-    };
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: u32::try_from(data.len()).ok()?,
-        pbData: data.as_ptr().cast_mut(),
-    };
-    let entropy = CRYPT_INTEGER_BLOB {
-        cbData: u32::try_from(ENTROPY.len()).ok()?,
-        pbData: ENTROPY.as_ptr().cast_mut(),
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    // SAFETY: `input` and `entropy` point at live buffers of the stated sizes, which the calls
-    // only read; `output` is a local the call fills with a LocalAlloc'd buffer, freed below.
-    let ok = unsafe {
-        if protect {
-            CryptProtectData(
-                &input,
-                std::ptr::null(),
-                &entropy,
-                std::ptr::null(),
-                std::ptr::null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        } else {
-            CryptUnprotectData(
-                &input,
-                std::ptr::null_mut(),
-                &entropy,
-                std::ptr::null(),
-                std::ptr::null(),
-                CRYPTPROTECT_UI_FORBIDDEN,
-                &mut output,
-            )
-        }
-    } != 0;
-    if !ok || output.pbData.is_null() {
-        return None;
+    if protect {
+        atm_sync::dpapi::protect(data)
+    } else {
+        atm_sync::dpapi::unprotect(data)
     }
-    // SAFETY: on success the call hands back `cbData` bytes at `pbData`.
-    let result =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
-    // SAFETY: allocated by the call with LocalAlloc and not used after this.
-    unsafe { LocalFree(output.pbData.cast()) };
-    Some(result)
 }
 
 #[cfg(test)]

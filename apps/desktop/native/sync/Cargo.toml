@@ -1,0 +1,26 @@
+[package]
+name = "atm-sync"
+version = "0.0.0"
+description = "ATM 3 phone sync on the desktop: sync secrets sealed with Windows DPAPI (byte-compatible with 2.x), relay client and connector"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-sync-protocol = { path = "../sync-protocol" }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# 用例里独立写一份 2.x 宿主的 DPAPI 调用（tests/secrets.rs 的 `legacy`）。
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+] }

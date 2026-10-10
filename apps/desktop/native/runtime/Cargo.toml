@@ -20,14 +20,22 @@ atm-install-state = { path = "../install-state" }
 atm-jobs = { path = "../jobs" }
 atm-service = { path = "../service" }
 atm-store = { path = "../store" }
+# W7b：手机同步的密钥（DPAPI、secrets.dpapi.json）。
+atm-sync = { path = "../sync" }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
-  "Win32_Security_Cryptography",
   "Win32_Storage_FileSystem",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# 自检的用例自己加密：带与不带 entropy。
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
 ] }
 
 [dev-dependencies]

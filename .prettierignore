@@ -15,6 +15,10 @@ packages/mcp/src/legacy-tools-list-v1.0.18.json
 apps/desktop/native/service/tests/data/fp-vectors.json
 apps/desktop/native/service/tests/data/knowledge-v1-vectors.json
 apps/desktop/native/service/tests/data/agenttask-vectors.json
+# 手机同步的向量（tests/data 下的 tsx 生成器与 ATM_SYNC_BLESS=1 产出），保持生成器原样输出。
+apps/desktop/native/sync-protocol/tests/data/sync-vectors.json
+apps/desktop/native/sync-protocol/tests/data/rust-sealed.json
+apps/desktop/native/sync/tests/data/secret-vectors.json
 # 文末矩阵由 spec_trace 测试生成并逐字核对（ATM_TRACE_BLESS=1 重写）。
 apps/desktop/native/service/TRACE.md
 # atm-http 的 tools/list 快照，tools 用例逐字节比对（ATM_UPDATE_SNAPSHOTS=1 重写）。

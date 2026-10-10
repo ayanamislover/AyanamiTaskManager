@@ -225,6 +225,9 @@ type TaskCard = {
   状态里写明原因，**绝不退回明文**；
   独立 daemon（开发 / e2e，需设 `ATM_SYNC=1` 才创建连接器）用明文 `sync/secrets.json` 并在状态里标注。
   **两者都不进 Registry 的 settings 表**（那张表 Agent 令牌可读）。
+  ATM 3：同一个文件由宿主进程里的 `atm-sync`（`apps/desktop/native/sync`）直接用 DPAPI 读写，不再经 `--dpapi`；
+  entropy、自检与文件格式与上面逐字节相同（向量见 `sync/tests/data/secret-vectors.json`），2.x 留下的密钥
+  转换后原样可用。3.0 只有桌面宿主一种形态，没有明文的 `secrets.json`。
 - 启用且地址、app、token 齐全时自动建空间；并发请求配对码也只会建一次（单飞）。
   换中继地址或 app、重置配对时清空游标、已发布摘要与修订号缓存，走一次全量重同步。
 - 快照：订阅进程内全局事件，把受影响项目标脏，1.5 s 去抖后重建该项目的 `TaskCard` 列表；摘要不变就不写。

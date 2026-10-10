@@ -142,6 +142,7 @@ dependencies = [
  "atm-jobs",
  "atm-runtime",
  "atm-service",
+ "atm-sync",
  "atm-ui-bridge",
  "serde",
  "serde_json",
@@ -221,6 +222,7 @@ dependencies = [
  "atm-jobs",
  "atm-service",
  "atm-store",
+ "atm-sync",
  "rusqlite",
  "serde_json",
  "sha2",
@@ -265,6 +267,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "zip",
+]
+
+[[package]]
+name = "atm-sync"
+version = "0.0.0"
+dependencies = [
+ "atm-sync-protocol",
+ "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

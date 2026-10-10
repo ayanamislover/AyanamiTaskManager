@@ -2,14 +2,9 @@
 //! 当前 Windows 账户逐个解得开才算通过。解不开说明换了账户或机器，手机配对要重做，由用户决定。
 //! 只判断能不能解开，明文不留、不记。
 
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
-};
-
-/// 2.x 加密时绑定的用途（entropy）：宿主的 `--dpapi` 一直带着它（`host/src/dpapi.rs` 引用这里）。
-/// 解密时 entropy 不同就解不开，所以自检必须带同一个，不带的话每个真实用户都会被判成「配对要重做」。
-pub const ENTROPY: &[u8] = b"AyanamiTaskManager/sync-secret/v1";
+/// 2.x 加密时绑定的用途（entropy），定义在 [`atm_sync::dpapi`]：解密时 entropy 不同就解不开，所以自检必须带
+/// 同一个，不带的话每个真实用户都会被判成「配对要重做」。
+pub use atm_sync::dpapi::ENTROPY;
 
 /// [`atm_store::legacy::ConvertOptions::secrets_check`] 的实现。
 pub fn check(bytes: &[u8]) -> bool {
@@ -25,37 +20,11 @@ pub fn check(bytes: &[u8]) -> bool {
 }
 
 fn opens(sealed: &[u8]) -> bool {
-    let input = CRYPT_INTEGER_BLOB {
-        cbData: sealed.len() as u32,
-        pbData: sealed.as_ptr() as *mut u8,
-    };
-    let entropy = CRYPT_INTEGER_BLOB {
-        cbData: ENTROPY.len() as u32,
-        pbData: ENTROPY.as_ptr() as *mut u8,
-    };
-    let mut output = CRYPT_INTEGER_BLOB {
-        cbData: 0,
-        pbData: std::ptr::null_mut(),
-    };
-    let ok = unsafe {
-        CryptUnprotectData(
-            &input,
-            std::ptr::null_mut(),
-            &entropy,
-            std::ptr::null(),
-            std::ptr::null(),
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut output,
-        )
-    };
-    if !output.pbData.is_null() {
-        // 明文立刻抹掉再释放。
-        unsafe {
-            std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
-            LocalFree(output.pbData.cast());
-        }
-    }
-    ok != 0
+    // 明文不留：解出来就抹掉。
+    atm_sync::dpapi::unprotect(sealed).is_some_and(|mut plain| {
+        plain.fill(0);
+        true
+    })
 }
 
 /// 标准 base64（Node 的 `toString("base64")`），带或不带补位。
@@ -89,7 +58,10 @@ fn base64(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Security::Cryptography::CryptProtectData;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+    };
 
     fn protect(plain: &[u8]) -> Vec<u8> {
         protect_with(plain, Some(ENTROPY))

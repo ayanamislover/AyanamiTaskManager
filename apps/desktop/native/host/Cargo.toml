@@ -27,6 +27,8 @@ atm-service = { path = "../service" }
 atm-install-state = { path = "../install-state" }
 # W5a：服务在宿主进程里（不再拉起 Node core）。
 atm-runtime = { path = "../runtime" }
+# --dpapi 与 3.0 的同步密钥共用一份 DPAPI（ATM-D-429：随 W8 去掉 Node 时删掉 --dpapi）。
+atm-sync = { path = "../sync" }
 # W5e：WebView 的界面请求在进程内分发。
 atm-ui-bridge = { path = "../ui-bridge" }
 serde.workspace = true
