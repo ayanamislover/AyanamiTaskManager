@@ -12,6 +12,13 @@
 //! - 还不存在的层用 [`Pinned::ensure`] 相对上一层的句柄排他新建，建出来就是钉住的（r3 复现 B：先按路径建、
 //!   之后才钉，中间可以被换成链接）。
 //!
+//! - 钉的时候还不存在的层，之后可能被别人建出来（甚至建成链接，peer W6 r4 P1-01）。要枚举、读标记、删除或改名
+//!   某个位置，先用 [`Pinned::existing`] 重新钉一次：新出现的层照样逐层核对、钉住，是链接就拒绝；整条链都钉住了
+//!   才给出真实位置，否则说明这次操作里它不存在，跳过。不能拿 [`Pinned::real`] 拼出来的路径直接去枚举、删除。
+//!
+//! 内部读写一律用句柄给出的 `\\?\` 完整写法（peer W6 r4 P2-01）：普通写法下超过 MAX_PATH 的路径打不开，
+//! 尾点、尾空格、保留设备名（`CON.txt`）也会被系统改写成别的名字。
+//!
 //! [`Pinned`] 要一直拿到操作结束（包括失败后的回滚与清理）。操作要删掉或改名的那一层先 [`Pinned::release`]：
 //! 放开以后它若被换成链接，`remove_dir_all`、改名作用的都是链接本身，碰不到链接目标里的东西。
 //! 钉住的层里面由 ATM 自己新建的子目录按路径读写（与 REPORT.md「目录身份」的边界相同）。同一个边界：防的是
@@ -21,13 +28,13 @@
 //! 比如恢复把 `.restore-old` 当目录用时）。
 
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Component, Path, PathBuf};
 
 use crate::pin::{self, Dir};
 
 /// 钉住的数据根与它下面的若干层：持有期间链不变。
 pub(crate) struct Pinned {
-    /// 数据根的真实位置（句柄的最终路径，能去掉 `\\?\` 就去掉）。
+    /// 数据根的真实位置：句柄的最终路径，`\\?\` 完整写法。
     root: PathBuf,
     /// 调用方给的数据根：只用于报错，不用于读写。
     literal: PathBuf,
@@ -73,41 +80,6 @@ fn key(names: &[&OsStr]) -> String {
         .join("\\")
 }
 
-/// 句柄给的 `\\?\C:\…`、`\\?\UNC\server\share\…` 换回普通写法，好让后面照常 `join("a/b")`。哪一段以点或空格
-/// 结尾（普通写法下会被系统去掉，指到别的名字）就保留 `\\?\`。
-fn plain(p: &Path) -> PathBuf {
-    let mut parts = p.components();
-    let Some(Component::Prefix(prefix)) = parts.next() else {
-        return p.to_path_buf();
-    };
-    let rest: Vec<&OsStr> = parts
-        .filter(|c| !matches!(c, Component::RootDir))
-        .map(|c| c.as_os_str())
-        .collect();
-    if rest.iter().any(|n| {
-        let n = n.to_string_lossy();
-        n.ends_with('.') || n.ends_with(' ')
-    }) {
-        return p.to_path_buf();
-    }
-    let mut out = match prefix.kind() {
-        Prefix::VerbatimDisk(d) => PathBuf::from(format!("{}:\\", char::from(d))),
-        Prefix::VerbatimUNC(server, share) => {
-            let mut s = std::ffi::OsString::from("\\\\");
-            s.push(server);
-            s.push("\\");
-            s.push(share);
-            s.push("\\");
-            PathBuf::from(s)
-        }
-        _ => return p.to_path_buf(),
-    };
-    for n in rest {
-        out.push(n);
-    }
-    out
-}
-
 impl Pinned {
     /// 钉住数据根（跟随链接）。
     pub(crate) fn open(root: &Path) -> Result<Self, ChainError> {
@@ -116,7 +88,7 @@ impl Pinned {
             _ => ChainError::Io(e),
         })?;
         Ok(Self {
-            root: plain(top.path()),
+            root: top.path().to_path_buf(),
             literal: root.to_path_buf(),
             dirs: vec![(String::new(), top)],
         })
@@ -144,6 +116,22 @@ impl Pinned {
     /// 钉住 `rel` 上已经存在的各层；遇到不存在或是普通文件的那层就停下。
     pub(crate) fn pin_existing(&mut self, rel: &Path) -> Result<(), ChainError> {
         self.walk(rel, false)
+    }
+
+    /// `rel` 的每一层现在都钉住了吗（不存在的层、是普通文件的层都不算）。
+    fn complete(&self, rel: &Path) -> bool {
+        let Ok(names) = names(rel) else {
+            return false;
+        };
+        (1..=names.len()).all(|depth| self.index(&key(&names[..depth])).is_some())
+    }
+
+    /// 要枚举、读、删或改名 `rel` 之前用（peer W6 r4 P1-01）：再钉一次 `rel` 上已经存在的各层——取得守卫之后才
+    /// 出现的层也照样核对，是链接就拒绝（[`ChainError::Linked`]）。整条链都钉住时返回真实位置；还缺某一层
+    /// （不存在，或是普通文件）时返回 `None`：这次操作里它不存在。
+    pub(crate) fn existing(&mut self, rel: &Path) -> Result<Option<PathBuf>, ChainError> {
+        self.walk(rel, false)?;
+        Ok(self.complete(rel).then(|| self.real(rel)))
     }
 
     /// 钉住 `rel` 的每一层，不存在的相对上一层的句柄排他新建（建出来就是钉住的）。返回真实路径。
@@ -218,6 +206,12 @@ impl Pinned {
             return Err(linked());
         }
         Ok(dir)
+    }
+
+    /// 钉住的 `rel` 这一层的句柄；没钉住时 `None`。
+    pub(crate) fn dir(&self, rel: &Path) -> Option<&Dir> {
+        let i = self.index(&key(&names(rel).ok()?))?;
+        Some(&self.dirs[i].1)
     }
 
     /// 在已钉住的 `parent` 里排他新建 `name`，钉住交给调用方（导出暂存、恢复暂存这类用完要删或改名的目录）。
@@ -386,16 +380,11 @@ mod tests {
         junction(&alias, &real);
         let staging = Path::new("exports/.staging");
         let pinned = pin_inside(&alias.join("N"), &[staging]).unwrap();
-        assert!(
-            !pinned.root().starts_with(&alias),
-            "{}",
-            pinned.root().display()
-        );
-        assert!(
-            same_name(pinned.root(), &real.join("N")),
-            "{}",
-            pinned.root().display()
-        );
+        // 真实位置是 `\\?\` 完整写法，不经过 alias。
+        let shown = pinned.root().to_string_lossy().into_owned();
+        let plain = Path::new(shown.strip_prefix(r"\\?\").unwrap());
+        assert!(!plain.starts_with(&alias), "{shown}");
+        assert!(same_name(plain, &real.join("N")), "{shown}");
 
         // 链接本身没被钉住，换得掉。
         std::fs::rename(&alias, d.join("alias-old")).unwrap();
@@ -489,22 +478,77 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// peer W6 r4 P1-01：钉的时候不存在的层，之后被建成链接，`existing` 拒绝；建成普通目录就钉住它；
+    /// 原先是普通文件、后来换成目录的也一样钉住。
     #[test]
-    fn verbatim_paths_turn_plain_unless_a_name_would_change() {
-        assert_eq!(plain(Path::new(r"\\?\C:\a\b")), PathBuf::from(r"C:\a\b"));
-        assert_eq!(plain(Path::new(r"\\?\C:\")), PathBuf::from(r"C:\"));
-        assert_eq!(
-            plain(Path::new(r"\\?\UNC\server\share\a")),
-            PathBuf::from(r"\\server\share\a")
-        );
-        assert_eq!(
-            plain(Path::new(r"\\?\C:\a.\b")),
-            PathBuf::from(r"\\?\C:\a.\b")
-        );
-        assert_eq!(
-            plain(Path::new(r"\\?\C:\a \b")),
-            PathBuf::from(r"\\?\C:\a \b")
-        );
-        assert_eq!(plain(Path::new(r"C:\a")), PathBuf::from(r"C:\a"));
+    fn layers_that_appear_after_pinning_are_checked_before_use() {
+        let d = scratch("late");
+        std::fs::create_dir_all(d.join("N")).unwrap();
+        let outside = d.join("outside");
+        std::fs::create_dir_all(outside.join(".withdrawn")).unwrap();
+        let mut pinned = pin_inside(&d.join("N"), &[Path::new("backups/.withdrawn")]).unwrap();
+        let rel = Path::new("backups/.withdrawn");
+        assert!(pinned.existing(rel).unwrap().is_none());
+        // 守卫拿到之后才出现、而且是链接：拒绝，什么都不给。
+        junction(&d.join("N").join("backups"), &outside);
+        assert!(matches!(pinned.existing(rel), Err(ChainError::Linked(_))));
+        std::fs::remove_dir(d.join("N").join("backups")).unwrap();
+        // 出现的是普通目录：钉住，此后改不了名。
+        std::fs::create_dir_all(d.join("N").join("backups").join(".withdrawn")).unwrap();
+        assert_eq!(pinned.existing(rel).unwrap(), Some(pinned.real(rel)));
+        assert!(std::fs::rename(d.join("N").join("backups"), d.join("N").join("moved")).is_err());
+        // 普通文件那一层不算存在；换成目录之后钉住。
+        let below = Path::new("file/below");
+        std::fs::write(d.join("N").join("file"), b"x").unwrap();
+        assert!(pinned.existing(below).unwrap().is_none());
+        std::fs::remove_file(d.join("N").join("file")).unwrap();
+        std::fs::create_dir_all(d.join("N").join("file").join("below")).unwrap();
+        assert!(pinned.existing(below).unwrap().is_some());
+        assert!(std::fs::rename(d.join("N").join("file"), d.join("N").join("file2")).is_err());
+        drop(pinned);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// peer W6 r4 P2-01：内部路径保留 `\\?\`：超过 MAX_PATH 的数据根，以及尾点、尾空格、保留设备名的数据根，
+    /// 都能照常钉住已有的层、新建缺的层、读写。
+    #[test]
+    fn long_and_special_roots_keep_working() {
+        let d = scratch("long");
+        let parent = pin::open(&d).unwrap();
+        for name in ["ending.", "ending ", "CON.txt"] {
+            let own = pin::create(&parent, OsStr::new(name)).unwrap();
+            let mut guarded = Pinned::open(own.path()).unwrap();
+            assert!(guarded.root().to_string_lossy().starts_with(r"\\?\"));
+            let p = guarded.ensure(Path::new("exports/.staging")).unwrap();
+            std::fs::write(p.join("ok.txt"), b"ours").unwrap();
+            let back = own.path().join("exports").join(".staging").join("ok.txt");
+            assert_eq!(std::fs::read(back).unwrap(), b"ours");
+        }
+        let mut long = parent.path().to_path_buf();
+        for _ in 0..14 {
+            long.push("long-name-1234567890");
+        }
+        std::fs::create_dir_all(long.join("exports").join(".staging")).unwrap();
+        assert!(long.as_os_str().len() > 300);
+        let mut guarded = Pinned::open(&long).unwrap();
+        let p = guarded.ensure(Path::new("exports/.staging")).unwrap();
+        std::fs::write(p.join("ok.txt"), b"ours").unwrap();
+        let fresh = guarded.ensure(Path::new("exports/new/deeper")).unwrap();
+        std::fs::write(fresh.join("f"), b"x").unwrap();
+        // 别处按 `/` 分隔的相对路径（附件清单）直接 `join` 到真实位置上：Rust 遇到 `\\?\` 前缀会把 `/` 归一成 `\`。
+        std::fs::create_dir(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub/inner.txt"), b"nested").unwrap();
+        let nested = long
+            .join("exports")
+            .join(".staging")
+            .join("sub")
+            .join("inner.txt");
+        assert_eq!(std::fs::read(nested).unwrap(), b"nested");
+        let back = long.join("exports").join(".staging").join("ok.txt");
+        assert_eq!(std::fs::read(back).unwrap(), b"ours");
+        drop(guarded);
+        let verbatim = parent.path().to_path_buf();
+        drop(parent);
+        std::fs::remove_dir_all(verbatim).unwrap();
     }
 }

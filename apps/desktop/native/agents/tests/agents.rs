@@ -1603,6 +1603,47 @@ fn an_array_table_for_an_atm_server_is_rewritten_as_a_table() {
     assert_eq!(w.read(".codex/config.toml"), good);
 }
 
+/// 同上，但 ATM 只剩这一个数组表条目（没有别的规范条目替它报「过期」）：认出它是 ATM 的，修复改写成段。
+/// 另一种只能由写法判定的情形：ATM 的条目写成行内表、内容与应当写入的完全相同，也要改写成段。
+#[test]
+fn a_lone_noncanonical_atm_entry_is_still_rewritten() {
+    let w = World::new("codex-r4-lone-array", true);
+    w.write(
+        ".codex/config.toml",
+        "[[mcp_servers.\"ayanami-task-manager-core\"]]\ncommand = \"old.exe\"\n",
+    );
+    let done = w.agents.repair(&repair_job()).unwrap();
+    assert!(
+        done.configs.contains(&atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    let repaired = codex_toml(&w);
+    assert!(codex_server(&repaired, CORE).unwrap().is_table());
+    assert!(!w.read(".codex/config.toml").contains("old.exe"));
+
+    let w = World::new("codex-r4-inline-current", true);
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    let good = w.read(".codex/config.toml");
+    let installed = codex_toml(&w);
+    let servers = installed["mcp_servers"].as_table().unwrap();
+    let mut inline = String::from("[mcp_servers]\n");
+    for (name, server) in servers {
+        inline.push_str(&format!("\"{name}\" = {server}\n"));
+    }
+    w.write(".codex/config.toml", &inline);
+    // 内容与应当写入的相同：只有写法不对。
+    assert_eq!(codex_toml(&w), installed, "{inline}");
+    let done = w.agents.repair(&repair_job()).unwrap();
+    assert!(
+        done.configs.contains(&atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    // 写成了段（输入里那行 `[mcp_servers]` 是用户的，原样留着）。
+    let text = w.read(".codex/config.toml");
+    assert_eq!(codex_toml(&w), installed);
+    assert!(text.ends_with(&good) && !text.contains("= {"), "{text}");
+}
+
 /// peer W6 r3 P2-03 复现 B：整个 `mcp_servers` 是数组表。安装往里加段会落进最后一个数组元素：在任何写入之前
 /// 拒绝。里面有 ATM 的条目时卸载也拒绝；没有就什么都不用做。
 #[test]

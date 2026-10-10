@@ -57,6 +57,39 @@ impl NewFile {
     }
 }
 
+/// 要搬走的一个已有目录（peer W6 r4 P1-03：恢复把暂存换入成项目附件目录）。不跟随链接地打开，句柄带 DELETE
+/// 权限、共享方式不含 `FILE_SHARE_DELETE`；打开时核对它是目录、不是链接、最终路径就是钉住的父目录里的那个名字。
+/// 从打开到 [`Movable::move_into`] 生效，别人改不了它的名、删不掉它，这个名字上也换不成别的东西——核对的
+/// 与搬走的是同一个对象。改名按句柄做。
+pub(crate) struct Movable {
+    file: File,
+    path: PathBuf,
+}
+
+/// [`open_movable`] 发现这个名字上是链接、不是目录，或者打开的不是父目录里的这一项。
+pub(crate) const NOT_MOVABLE: &str = "not a plain directory inside its pinned parent";
+
+/// 打开 `parent` 里的 `name` 准备搬走（见 [`Movable`]）。不存在时报 NotFound；是链接、普通文件或别处的目录时报
+/// [`NOT_MOVABLE`]（`ErrorKind::InvalidData`）。
+pub(crate) fn open_movable(parent: &Dir, name: &OsStr) -> std::io::Result<Movable> {
+    single(name)?;
+    let path = parent.path().join(name);
+    let file = imp::open_movable(&path)?;
+    Ok(Movable { file, path })
+}
+
+impl Movable {
+    /// 按句柄改名成钉住的 `dir` 里的 `name`；名字已存在就失败（不替换）。成功后刷盘。
+    pub(crate) fn move_into(self, dir: &Dir, name: &OsStr) -> std::io::Result<()> {
+        single(name)?;
+        let to = dir.path().join(name);
+        imp::rename_handle(&self.file, &self.path, &to)?;
+        self.file
+            .sync_all()
+            .map_err(|e| std::io::Error::new(e.kind(), format!("flush {}: {e}", to.display())))
+    }
+}
+
 /// 一个钉住的目录。`owned` 的是本次新建的，只有它们能 [`Dir::remove`]。
 pub(crate) struct Dir {
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -346,13 +379,20 @@ mod imp {
     }
 
     fn open_raw(path: &Path, access: u32, flags: u32) -> std::io::Result<File> {
+        open_shared(path, access, SHARE, flags)
+    }
+
+    /// 要搬走的目录打开时的共享方式：同样不含 FILE_SHARE_DELETE，打开期间别人改不了它的名（peer W6 r4 P1-03）。
+    const MOVABLE_SHARE: u32 = SHARE;
+
+    fn open_shared(path: &Path, access: u32, share: u32, flags: u32) -> std::io::Result<File> {
         let name: Vec<u16> = wide(path.as_os_str()).into_iter().chain(Some(0)).collect();
         // SAFETY: `name` 以 0 结尾、调用期间存活；其余指针参数按文档可为空。
         let h = unsafe {
             CreateFileW(
                 name.as_ptr(),
                 access,
-                SHARE,
+                share,
                 std::ptr::null_mut(),
                 OPEN_EXISTING,
                 FILE_FLAG_BACKUP_SEMANTICS | flags,
@@ -419,6 +459,40 @@ mod imp {
 
     pub(super) fn file_identity(file: &File) -> std::io::Result<(u32, u64)> {
         identity(file)
+    }
+
+    /// 见 [`super::open_movable`]。FILE_ADD_FILE（目录的写数据权限）是为了改名后能刷盘。
+    pub(super) fn open_movable(path: &Path) -> std::io::Result<File> {
+        const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        let file = transient(|| {
+            open_shared(
+                path,
+                DELETE | FILE_ADD_FILE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                MOVABLE_SHARE,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+            )
+        })?;
+        let mut info = [0u32; 13];
+        // SAFETY: 同 `identity`；第 0 个 DWORD 是文件属性。
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let refused = || {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{}: {}", path.display(), super::NOT_MOVABLE),
+            )
+        };
+        if info[0] & FILE_ATTRIBUTE_DIRECTORY == 0 || info[0] & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(refused());
+        }
+        // 不跟随链接打开的就是这个名字本身；最终路径再对一次，确认它就在钉住的父目录里。
+        let actual = final_path(&file)?;
+        if actual.to_string_lossy().to_lowercase() != path.to_string_lossy().to_lowercase() {
+            return Err(refused());
+        }
+        Ok(file)
     }
 
     pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {
@@ -591,6 +665,17 @@ mod imp {
 
     pub(super) fn file_identity(_: &File) -> std::io::Result<(u32, u64)> {
         Ok((0, 0))
+    }
+
+    pub(super) fn open_movable(path: &Path) -> std::io::Result<File> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                super::NOT_MOVABLE,
+            ));
+        }
+        File::open(path)
     }
 
     pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {

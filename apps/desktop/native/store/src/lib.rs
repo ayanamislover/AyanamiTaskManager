@@ -14,6 +14,8 @@ pub mod conversion;
 mod engine;
 pub mod events;
 pub mod jsjson;
+#[cfg(all(test, windows))]
+mod late_links;
 pub mod legacy;
 pub mod package;
 pub mod paths;

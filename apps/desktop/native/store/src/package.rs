@@ -300,13 +300,13 @@ fn export_in(
     let staging = work.dir.as_path();
     let snapshot = staging.join("snapshot.sqlite");
     {
-        let side = side_reader(store.path())?;
+        // 库与附件出自同一个钉住的数据根（peer W6 r4 P1-02）：不按 `store.path()` 的字面写法重新解析。
+        let side = side_reader(&guard.database(store))?;
         side.execute("VACUUM INTO ?1", [path_str(&snapshot)?])?;
     }
-    // 附件从真实位置读，项目目录（已有的话）钉住：是链接就拒绝（peer W6 r1 P1-02、r3 P1-01）。库里附件行记的是
-    // 按库路径写的位置，改写成包内路径时按那个前缀比对。
-    let prefix = guard.artifacts().join(project_id);
-    guard.pin_existing(&[project_id])?;
+    // 附件从真实位置读，项目目录（已有的话）钉住：是链接就拒绝（peer W6 r1 P1-02、r3 P1-01、r4 P1-01）。库里附件行
+    // 记的是按库路径写的位置，改写成包内路径时按那个前缀比对。
+    let prefix = guard.existing(&[project_id])?;
     let recorded = crate::backup::artifacts_root(store.path()).join(project_id);
     let db = staging.join(DB_ENTRY);
     let (code, name) = extract_project(&snapshot, &db, project_id, &recorded)?;
@@ -317,7 +317,10 @@ fn export_in(
     let out = staging.join(&file_name);
     let attachments = match format {
         Format::Package => {
-            let files = copy_tree(&prefix, &staging.join("artifacts"))?;
+            let files = match &prefix {
+                Some(dir) => copy_tree(dir, &staging.join("artifacts"))?,
+                None => Vec::new(),
+            };
             let manifest = manifest(&db, project_id, &code, &name, &files, opts)?;
             write_zip(&out, &db, &manifest, &staging.join("artifacts"), &files)?;
             files.len()
@@ -1844,6 +1847,109 @@ mod r3_staging {
         fs::remove_dir_all(&b).unwrap();
     }
 
+    /// peer W6 r4 P1-02（导出）：取得附件守卫与暂存之后，把数据根以上的 alias 换向另一个数据根（那边没有这个项目）。
+    /// 导出的快照仍出自原来的数据根，照常导出这个项目。
+    #[test]
+    fn export_reads_the_database_from_the_pinned_root() {
+        let b = base("db-alias");
+        let (real, foreign) = (b.join("real"), b.join("foreign"));
+        for p in [&real, &foreign] {
+            fs::create_dir_all(p.join("N")).unwrap();
+        }
+        let (alias, old) = (b.join("alias"), b.join("old-alias"));
+        junction(&alias, &real);
+        let store = Store::open(
+            &alias.join("N").join("atm.sqlite"),
+            crate::Config::default(),
+        )
+        .unwrap();
+        let other = Store::open(
+            &foreign.join("N").join("atm.sqlite"),
+            crate::Config::default(),
+        )
+        .unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO app_meta (singleton, schema_version, data_root_id, generation, instance_epoch, scope_gen_counter, created_at, updated_at)
+                       VALUES (1, 1, 'ROOT', 'G', 'E', 1, 't', 't');
+                     INSERT INTO scope_generations (gen, scope_kind, scope_id, reason, epoch, created_at)
+                       VALUES (1, 'PROJECT', 'PA', 'CREATED', 'EPA', 't');
+                     INSERT INTO projects (id, code, name, lifecycle, health, meta_version, scope_gen, epoch, created_at, updated_at)
+                       VALUES ('PA', 'ALPHA', '项目 A', 'ACTIVE', 'ON_TRACK', 0, 1, 'EPA', 't', 't');",
+                )
+            })
+            .unwrap();
+        let mut guard = attachments_lock(&store, "export_project").unwrap();
+        let exports = alias.join("N").join("exports");
+        let staging = fresh_staging(&exports).unwrap();
+        fs::rename(&alias, &old).unwrap();
+        junction(&alias, &foreign);
+        let opts = ExportOptions {
+            exports_dir: &exports,
+            at: "2026-10-10T12:00:00.000Z",
+            app_version: "3.0.0-test",
+        };
+        let result = export_in(&store, "PA", Format::Json, &opts, &staging, &mut guard);
+        staging.remove();
+        drop(guard);
+        fs::remove_dir(&alias).unwrap();
+        fs::rename(&old, &alias).unwrap();
+        let exported = result.unwrap();
+        assert_eq!(exported.project_code, "ALPHA");
+        drop(store);
+        drop(other);
+        fs::remove_dir(&alias).unwrap();
+    }
+
+    /// peer W6 r4 P1-01（导出一路）：项目附件目录在取得守卫时不存在，导出之前被建成指向外面的 junction。
+    /// 导出拒绝，不把外面的文件打进包里。
+    #[test]
+    fn export_does_not_follow_a_late_project_link() {
+        let b = base("late-project");
+        fs::create_dir_all(b.join("N").join("artifacts")).unwrap();
+        let store = Store::open(&b.join("N").join("atm.sqlite"), crate::Config::default()).unwrap();
+        store
+            .write(|tx| {
+                tx.execute_batch(
+                    "INSERT INTO app_meta (singleton, schema_version, data_root_id, generation, instance_epoch, scope_gen_counter, created_at, updated_at)
+                       VALUES (1, 1, 'ROOT', 'G', 'E', 1, 't', 't');
+                     INSERT INTO scope_generations (gen, scope_kind, scope_id, reason, epoch, created_at)
+                       VALUES (1, 'PROJECT', 'PA', 'CREATED', 'EPA', 't');
+                     INSERT INTO projects (id, code, name, lifecycle, health, meta_version, scope_gen, epoch, created_at, updated_at)
+                       VALUES ('PA', 'ALPHA', '项目 A', 'ACTIVE', 'ON_TRACK', 0, 1, 'EPA', 't', 't');",
+                )
+            })
+            .unwrap();
+        let mut guard = attachments_lock(&store, "export_project").unwrap();
+        let exports = b.join("N").join("exports");
+        let staging = fresh_staging(&exports).unwrap();
+        let outside = b.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), b"not ours").unwrap();
+        let link = b.join("N").join("artifacts").join("PA");
+        junction(&link, &outside);
+        let opts = ExportOptions {
+            exports_dir: &exports,
+            at: "2026-10-10T12:00:00.000Z",
+            app_version: "3.0.0-test",
+        };
+        let result = export_in(&store, "PA", Format::Package, &opts, &staging, &mut guard);
+        staging.remove();
+        drop(guard);
+        fs::remove_dir(&link).unwrap();
+        assert!(
+            matches!(result, Err(PackageError::LinkedPath(_))),
+            "{result:?}"
+        );
+        assert!(
+            fs::read_dir(&exports)
+                .unwrap()
+                .flatten()
+                .all(|e| e.file_name() == STAGING_DIR)
+        );
+    }
+
     /// peer W6 r3 复现 B（导出暂存一侧）：`exports`、`.staging` 不存在时排他新建，和本次的暂存目录一起钉到结束。
     #[test]
     fn missing_staging_layers_are_created_pinned() {
@@ -1852,7 +1958,9 @@ mod r3_staging {
         fs::create_dir_all(&n).unwrap();
         let staging = fresh_staging(&n.join("exports")).unwrap();
         let root = n.join("exports").join(STAGING_DIR);
-        assert!(staging.dir.is_dir() && staging.dir.starts_with(&root));
+        let shown = staging.dir.to_string_lossy().into_owned();
+        let plain = Path::new(shown.strip_prefix(r"\\?\").unwrap());
+        assert!(staging.dir.is_dir() && plain.starts_with(&root), "{shown}");
         assert!(fs::rename(n.join("exports"), n.join("moved")).is_err());
         assert!(fs::rename(&root, n.join("exports").join("moved")).is_err());
         assert!(fs::rename(&staging.dir, root.join("moved")).is_err());

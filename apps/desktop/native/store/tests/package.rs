@@ -1262,6 +1262,16 @@ fn a_package_code_that_is_not_a_project_code_is_refused_and_exports_stay_inside(
         !name.contains("..") && !name.contains('\\') && !name.contains('/'),
         "{name}"
     );
+    // 报出的路径上就是写出来的那个文件（返回值按调用方给的 exports 拼，不能因此掩盖实际写到了别处）。
+    let bytes = fs::read(&exported.path).unwrap();
+    assert_eq!(bytes.len() as u64, exported.size_bytes);
+    let mut entries: Vec<String> = fs::read_dir(&w.exports)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n != ".staging")
+        .collect();
+    entries.sort();
+    assert_eq!(entries, std::slice::from_ref(&name));
     let w = world("package-export-existing");
     let first = export(&w, "PA", Format::Json, T1).path;
     fs::write(&first, b"kept").unwrap();
