@@ -108,7 +108,10 @@ pub fn check(s: &S, v: &Value) -> Option<Value> {
             let n = v.as_f64()?;
             (n.is_finite() && *min <= n && n <= *max).then(|| js_number(n))?
         }
-        S::Int { min, max } => int_in(v, *min, *max).map(Value::from),
+        // zod 的 `.int()` 只收安全整数：范围收进 ±(2^53−1)。
+        S::Int { min, max } => {
+            int_in(v, (*min).max(-MAX_SAFE), (*max).min(MAX_SAFE)).map(Value::from)
+        }
         S::One => (v.as_f64()? == 1.0).then(|| Value::from(1)),
         S::Bool => v.as_bool().map(Value::from),
         S::BoolLit(b) => (v.as_bool()? == *b).then(|| Value::from(*b)),
@@ -143,10 +146,10 @@ pub fn check(s: &S, v: &Value) -> Option<Value> {
     }
 }
 
-/// 安全整数且在 `min..=max` 里。
+/// 整数值且在 `min..=max` 里（`1.0` 算 1）。
 pub fn int_in(v: &Value, min: i64, max: i64) -> Option<i64> {
     let n = v.as_f64()?;
-    if n.fract() != 0.0 || n.abs() > MAX_SAFE as f64 {
+    if n.fract() != 0.0 {
         return None;
     }
     let n = n as i64;
@@ -206,9 +209,10 @@ static TEXT_200: S = S::Str { min: 0, max: 200 };
 static TEXT_500: S = S::Str { min: 0, max: 500 };
 static TEXT_2000: S = S::Str { min: 0, max: 2000 };
 static TEXT_8000: S = S::Str { min: 0, max: 8000 };
+/// `z.number().int().min(0)`。
 static COUNT: S = S::Int {
     min: 0,
-    max: MAX_SAFE,
+    max: i64::MAX,
 };
 static PERCENT: S = S::Num {
     min: 0.0,
