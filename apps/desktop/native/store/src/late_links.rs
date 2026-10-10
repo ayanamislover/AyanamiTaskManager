@@ -723,8 +723,10 @@ fn locations_follow_windows_path_equality() {
     }
     assert!(Location::of(Path::new(base)).supported());
     assert!(Location::of(Path::new(r"\\server\share\N")).supported());
-    // 盘符按 QueryDosDeviceW 指向的东西比（用例换掉它）：subst 换成它指向的路径，网络映射盘符换成 UNC，本地卷
-    // 按设备名比——同一个卷的两个盘符是同一个位置（peer r10 P1-01）。
+    // 盘符的两种查询都换掉：QueryDosDeviceW 给 subst、网络映射与设备目标；GetVolumeNameForVolumeMountPointW 只对
+    // 「卷的根」给卷名（这里按 Windows 的样子：目标正好是 `\Device\HarddiskVolumeN`，不带后缀）。subst 换成它指向的
+    // 路径，网络映射盘符换成 UNC，其余按卷名比——同一个卷的两个盘符是同一个位置（peer r10 P1-01）；不是卷根的
+    // 设备目标、认不出的重定向器都不支持（peer r11 P1-01）。
     let dev = |d: &[u16]| -> Option<Vec<u16>> {
         let letter = String::from_utf16_lossy(d).to_ascii_uppercase();
         let target = match letter.as_str() {
@@ -733,6 +735,16 @@ fn locations_follow_windows_path_equality() {
             "Y:" => r"\Device\LanmanRedirector\;Y:0000000000012345\server\share".to_owned(),
             "X:" => r"\Device\Mup\;LanmanRedirector\;X:0000000000012345\server\share".to_owned(),
             "M:" => r"\Device\LanmanRedirector\;M:0000000000012345\server\share\;team".to_owned(),
+            // 不是卷根的设备目标、认不出的重定向器与格式。
+            "D:" => r"\Device\HarddiskVolume3\Data".to_owned(),
+            "F:" => {
+                r"\Device\WebDavRedirector\;F:0000000000012345\server@SSL\DavWWWRoot".to_owned()
+            }
+            "H:" => r"\Device\Mup\;WebDavRedirector\;H:0000000000012345\server\share".to_owned(),
+            "I:" => r"\Device\Mup\;LanmanRedirector\;I:0000000000012345".to_owned(),
+            "J:" => r"\Device\LanmanRedirector\;J:0000000000012345\server\\share".to_owned(),
+            "L:" => r"\Device\LanmanRedirector\;L:0000000000012345\;server\share".to_owned(),
+            "N:" => r"\Device\LanmanRedirector\;N:0000000000012345\server".to_owned(),
             "C:" | "K:" => r"\Device\HarddiskVolume3".to_owned(),
             // subst 套 subst：V → U → T → S → R → Q；P 指向自己。
             "V:" => r"\??\U:\v".to_owned(),
@@ -747,7 +759,13 @@ fn locations_follow_windows_path_equality() {
         };
         Some(target.encode_utf16().collect())
     };
-    let key = |p: &str| Location::of_with(Path::new(p), &dev);
+    let vol = |d: &[u16]| -> Option<Vec<u16>> {
+        let target = String::from_utf16_lossy(&dev(d)?);
+        let device = target.strip_prefix(r"\Device\")?;
+        (device.starts_with("HarddiskVolume") && !device.contains('\\'))
+            .then(|| format!(r"\\?\Volume{{{device}}}\").encode_utf16().collect())
+    };
+    let key = |p: &str| Location::of_with(Path::new(p), &dev, &vol);
     let with = |p: &str, b: &str| {
         key(p).below(&key(b)).map(|rest| {
             rest.iter()
@@ -774,6 +792,16 @@ fn locations_follow_windows_path_equality() {
     assert_eq!(with(r"K:\Data\N\x", base), x());
     assert_eq!(with(r"W:\Data\N", base), None);
     assert!(key(r"W:\Data\N").supported());
+    // 证明不了的盘符一律不支持，不当外部位置（peer r11 P1-01）：设备目标带路径后缀（与 `C:\Data` 是同一个位置，
+    // 但不是卷的根）、WebDAV、Mup 下的其他重定向器、残缺的 Mup 目标、目标里有空段、服务器名以 `;` 开头、只有服务器
+    // 没有共享。
+    for p in [
+        r"D:\N\x", r"F:\N\x", r"H:\N\x", r"I:\N\x", r"J:\N\x", r"L:\N\x", r"N:\N\x",
+    ] {
+        assert!(!key(p).supported(), "{p}");
+        assert!(!key(p).unc(), "{p}");
+        assert_eq!(with(p, base), None, "{p}");
+    }
     // 至多跟 4 层 subst：U 经四层到 Q；V 要五层，不支持（不当外部位置）。指向自己的、没有的盘符也不支持。
     assert_eq!(with(r"U:\x", r"Q:\r\s\t\u"), x());
     for p in [r"V:\x", r"P:\x", r"E:\x"] {
@@ -1035,28 +1063,57 @@ fn a_globalroot_spelling_is_refused_before_anything_is_written() {
     }
 }
 
-/// 换掉本线程的盘符映射，离开作用域时还原。
-struct DosDevices;
+/// 换掉本线程的盘符查询（`engine::DOS_DEVICES`、`engine::VOLUME_NAMES`）与读到的本机卷（`engine::LOCAL_VOLUMES`），
+/// 离开作用域时还原。造真的 subst、映射盘符要改本机的盘符映射。
+#[derive(Default)]
+struct Injected;
 
-impl DosDevices {
-    fn set(f: impl Fn(&[u16]) -> Option<Vec<u16>> + 'static) -> DosDevices {
+impl Injected {
+    fn devices(self, f: impl Fn(&[u16]) -> Option<Vec<u16>> + 'static) -> Injected {
         crate::engine::DOS_DEVICES.with(|o| *o.borrow_mut() = Some(Box::new(f)));
-        DosDevices
+        self
+    }
+
+    fn volume_names(self, f: impl Fn(&[u16]) -> Option<Vec<u16>> + 'static) -> Injected {
+        crate::engine::VOLUME_NAMES.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+        self
+    }
+
+    fn local_volumes(self, v: Result<Vec<u32>, String>) -> Injected {
+        crate::engine::LOCAL_VOLUMES.with(|o| *o.borrow_mut() = Some(v));
+        self
     }
 }
 
-impl Drop for DosDevices {
+impl Drop for Injected {
     fn drop(&mut self) {
         crate::engine::DOS_DEVICES.with(|o| *o.borrow_mut() = None);
+        crate::engine::VOLUME_NAMES.with(|o| *o.borrow_mut() = None);
+        crate::engine::LOCAL_VOLUMES.with(|o| *o.borrow_mut() = None);
     }
 }
 
-/// r10 P1-01 / P1-03 / P2-01（公开入口）：本线程的盘符映射换成注入的（`engine::DOS_DEVICES`；造真的 subst 要改
-/// 本机的盘符映射）。数据根所在的盘符记作 L，提前换向之后：
-/// - `subst G: L:\`（指向卷根）、L 所在卷的另一个盘符 K：经它们写的数据根下的备份根，备份照样落在 ORIGINAL，
+fn wide(t: &str) -> Vec<u16> {
+    t.encode_utf16().collect()
+}
+
+/// 盘符 `d` 的注入：`map` 里有的用注入的，没有的查本机。
+fn lookup(map: &[(String, Vec<u16>)], d: &[u16]) -> Option<Option<Vec<u16>>> {
+    let asked = String::from_utf16_lossy(d).to_ascii_uppercase();
+    map.iter()
+        .find(|(l, _)| *l == asked)
+        .map(|(_, t)| (!t.is_empty()).then(|| t.clone()))
+}
+
+/// r10 P1-01 / P1-03 / P2-01、r11 P1-01（公开入口）：本线程的盘符查询换成注入的。数据根所在的盘符记作 L，提前换向之后：
+/// - `subst G: L:\`（指向卷根）、与 L 同一个卷的另一个盘符 K：经它们写的数据根下的备份根，备份照样落在 ORIGINAL，
 ///   FOREIGN 的哨兵与标记都在；
 /// - 经 G 的 `\\?\` 写法、末尾两个分隔符（Windows 打不开）：拒绝，什么都不写；
-/// - 要跟五层 subst 才到 L 的盘符：拒绝，不当作外部位置。
+/// - 要跟五层 subst 才到 L 的盘符：拒绝，不当作外部位置；
+/// - 指向「L 的设备 + 数据根的上级目录」的盘符 D（与数据根是同一个位置，先核对 Windows 经这个设备路径打开的确实是
+///   同一个目录；但它不是卷的根）：拒绝，不当作外部位置（r11 P1-01）。
+///
+/// 拒绝都断言了原因：注入的盘符在本机并不存在，只断言「失败」的话其他原因的失败也会算进来。
 #[test]
 fn drive_letter_aliases_keep_the_location_or_are_refused() {
     for mode in [
@@ -1064,6 +1121,7 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
         "second-letter",
         "gap-through-subst",
         "too-deep",
+        "device-dir",
     ] {
         let (_b, real, foreign, alias, store, other) = two_roots(&format!("letters-{mode}"));
         let kept = foreign_sentinels(&foreign);
@@ -1071,33 +1129,48 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
         let s = plain.to_string_lossy().into_owned();
         let own = s[..2].to_ascii_uppercase();
         let tail = s[3..].to_owned();
-        let wide = |t: &str| t.encode_utf16().collect::<Vec<u16>>();
         let real_dev = crate::engine::query_dos_device(&wide(&own)).unwrap();
+        let real_volume = crate::engine::query_volume_name(&wide(&own)).unwrap();
         // 注入的盘符不能与 L 相同。
-        let mut letters = "GKVUTSHJ".chars().filter(|c| !own.starts_with(*c));
+        let mut letters = "GKVUTSHJD".chars().filter(|c| !own.starts_with(*c));
         let mut next = || format!("{}:", letters.next().unwrap());
         let (g, k) = (next(), next());
         let chain: Vec<String> = (0..5).map(|_| next()).collect();
-        let mut map: Vec<(String, Vec<u16>)> = vec![
+        let d = next();
+        let parent = alias.parent().unwrap().to_string_lossy().into_owned();
+        let device_dir = format!("{}\\{}", String::from_utf16_lossy(&real_dev), &parent[3..]);
+        if mode == "device-dir" {
+            let through = format!(r"\\?\GLOBALROOT{device_dir}\alias\N");
+            assert_eq!(
+                crate::pin::open(Path::new(&through)).unwrap().id(),
+                crate::pin::open(&alias.join("N")).unwrap().id(),
+                "Windows 经这个设备路径打开的是同一个目录"
+            );
+        }
+        let mut devices: Vec<(String, Vec<u16>)> = vec![
             (g.clone(), wide(&format!(r"\??\{own}\"))),
             (k.clone(), real_dev),
+            (d.clone(), wide(&device_dir)),
         ];
         // chain[0] → chain[1] → … → chain[4] → L：五层 subst。
         for w in chain.windows(2) {
-            map.push((w[0].clone(), wide(&format!(r"\??\{}\", w[1]))));
+            devices.push((w[0].clone(), wide(&format!(r"\??\{}\", w[1]))));
         }
-        map.push((chain[4].clone(), wide(&format!(r"\??\{own}\"))));
-        let _guard = DosDevices::set(move |d| {
-            let asked = String::from_utf16_lossy(d).to_ascii_uppercase();
-            match map.iter().find(|(l, _)| *l == asked) {
-                Some((_, t)) => Some(t.clone()),
-                None => crate::engine::query_dos_device(d),
-            }
-        });
+        devices.push((chain[4].clone(), wide(&format!(r"\??\{own}\"))));
+        // K 是 L 所在卷的另一个盘符；D 不是卷的根（挂载管理器给不出卷名）。
+        let volumes = vec![(k.clone(), real_volume), (d.clone(), Vec::new())];
+        let _injected = Injected
+            .devices(move |x| {
+                lookup(&devices, x).unwrap_or_else(|| crate::engine::query_dos_device(x))
+            })
+            .volume_names(move |x| {
+                lookup(&volumes, x).unwrap_or_else(|| crate::engine::query_volume_name(x))
+            });
         let root = PathBuf::from(match mode {
             "volume-root-subst" => format!(r"{g}\{tail}"),
             "second-letter" => format!(r"{k}\{tail}"),
             "gap-through-subst" => format!(r"\\?\{g}\{tail}\\"),
+            "device-dir" => format!(r"{d}\alias\N\backups"),
             _ => format!(r"{}\{tail}", chain[0]),
         });
         if mode == "gap-through-subst" {
@@ -1134,7 +1207,6 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
                 );
             }
             _ => {
-                // 拒绝的是位置判定本身（注入的盘符在本机并不存在，其他原因的失败不算）。
                 let why = match made {
                     Err(e) => e.to_string(),
                     Ok(i) => panic!("{mode}: made {}", i.id),
@@ -1167,88 +1239,223 @@ fn drive_letter_aliases_keep_the_location_or_are_refused() {
     }
 }
 
-/// 同类通道（r10 之后自查）：经本机共享回到本机的写法字面上认不出是数据根，当成外部位置会跟着路径上的链接走。
-/// 用例把数据根所在的盘符 L 注入成「映射到本机共享的网络盘符」（`\Device\LanmanRedirector\;L:…\localhost\L$`），
-/// 于是同一个路径在位置判定里是 UNC、打开的却是本机的卷。提前换向之后：
-/// - `create_backup`、`export_project` 以这种写法的数据根下的位置调用：拒绝（错误说明是本机的卷），FOREIGN 的哨兵与
-///   标记都在，ORIGINAL 也什么都没多；
-/// - `Store::open` 用这种写法打开：拒绝。
+/// 同类通道（r10 之后自查；r11 P1-02）：经本机共享回到本机的写法字面上认不出是数据根，当成外部位置会跟着路径上的
+/// 链接走。用例把数据根所在的盘符 L 注入成「映射到本机共享的网络盘符」（`\Device\LanmanRedirector\;L:…\localhost\L$`），
+/// 于是同一个路径在位置判定里是 UNC、打开的却是本机的卷。提前换向之后，两种本机卷的读法下都拒绝：
+/// - 读到了本机的卷：数据根所在的卷就在里面；
+/// - 本机的卷没读全（注入成读不全）：证明不了不在本机。
+///
+/// 四个入口：`create_backup`、`export_project`（这两个先钉 Store 自己的数据根，那里同样是 L 的写法，也在那里被拒）、
+/// 直接钉外部位置（`chain::Pinned::open`，只走外部那一处）、`Store::open`。都拒绝，错误说明是哪一种，FOREIGN 的
+/// 哨兵与标记都在，ORIGINAL 什么都没多。
 #[test]
 fn a_network_path_back_to_this_machine_is_refused() {
-    for entry in ["backup", "export", "open"] {
-        let (_b, real, foreign, alias, store, other) = two_roots(&format!("loopback-{entry}"));
-        let kept = foreign_sentinels(&foreign);
-        let s = alias.to_string_lossy().into_owned();
-        let own = s[..2].to_ascii_uppercase();
-        let share: Vec<u16> = format!(
-            r"\Device\LanmanRedirector\;{own}0000000000012345\localhost\{}$",
-            &own[..1]
-        )
-        .encode_utf16()
-        .collect();
-        let _guard = DosDevices::set(move |d| {
-            if String::from_utf16_lossy(d).eq_ignore_ascii_case(&own) {
-                Some(share.clone())
-            } else {
-                crate::engine::query_dos_device(d)
+    for unreadable in [false, true] {
+        for entry in ["backup", "export", "external-pin", "open"] {
+            let (_b, real, foreign, alias, store, other) =
+                two_roots(&format!("loopback-{entry}-{unreadable}"));
+            let kept = foreign_sentinels(&foreign);
+            let s = alias.to_string_lossy().into_owned();
+            let own = s[..2].to_ascii_uppercase();
+            let share = wide(&format!(
+                r"\Device\LanmanRedirector\;{own}0000000000012345\localhost\{}$",
+                &own[..1]
+            ));
+            let devices = vec![(own.clone(), share)];
+            let mut injected = Injected.devices(move |x| {
+                lookup(&devices, x).unwrap_or_else(|| crate::engine::query_dos_device(x))
+            });
+            if unreadable {
+                injected = injected.local_volumes(Err("injected: FindNextVolumeW failed".into()));
             }
-        });
-        let before = fs::read_dir(real.join("N"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect::<Vec<_>>();
-        let old = swing(&alias, &foreign);
-        let why = match entry {
-            "backup" => create_backup(
-                &store,
-                &alias.join("N").join("backups"),
-                "MANUAL",
-                "2026-10-10T12:00:00Z",
-            )
-            .map(|i| i.id)
-            .map_err(|e| e.to_string()),
-            "export" => crate::package::export_project(
-                &store,
-                "PA",
-                crate::package::Format::Json,
-                &crate::package::ExportOptions {
-                    exports_dir: &alias.join("N").join("exports"),
-                    at: "2026-10-10T12:00:00Z",
-                    app_version: "test",
-                },
-            )
-            .map(|e| e.path.display().to_string())
-            .map_err(|e| e.to_string()),
-            _ => Store::open(&alias.join("N").join("atm.sqlite"), Config::default())
-                .map(|_| "opened".to_owned())
+            let before = fs::read_dir(real.join("N"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>();
+            let old = swing(&alias, &foreign);
+            let why = match entry {
+                "backup" => create_backup(
+                    &store,
+                    &alias.join("N").join("backups"),
+                    "MANUAL",
+                    "2026-10-10T12:00:00Z",
+                )
+                .map(|i| i.id)
                 .map_err(|e| e.to_string()),
-        };
-        swing_back(&alias, &old);
-        let why = why.expect_err(entry);
-        assert!(
-            why.contains("is a network path to a volume of this machine"),
-            "{entry}: {why}"
-        );
-        for f in &kept {
-            assert!(f.exists(), "{entry}: {} was removed", f.display());
+                "export" => crate::package::export_project(
+                    &store,
+                    "PA",
+                    crate::package::Format::Json,
+                    &crate::package::ExportOptions {
+                        exports_dir: &alias.join("N").join("exports"),
+                        at: "2026-10-10T12:00:00Z",
+                        app_version: "test",
+                    },
+                )
+                .map(|e| e.path.display().to_string())
+                .map_err(|e| e.to_string()),
+                "external-pin" => crate::chain::Pinned::open(&alias.join("N"))
+                    .map(|_| "pinned".to_owned())
+                    .map_err(|e| format!("{e:?}")),
+                _ => Store::open(&alias.join("N").join("atm.sqlite"), Config::default())
+                    .map(|_| "opened".to_owned())
+                    .map_err(|e| e.to_string()),
+            };
+            swing_back(&alias, &old);
+            drop(injected);
+            let label = format!("{entry} unreadable={unreadable}");
+            let why = why.expect_err(&label);
+            let expected = if unreadable {
+                "the volumes of this machine could not all be read"
+            } else {
+                "its volume has the same serial number as a volume of this machine"
+            };
+            assert!(
+                why.contains("cannot be confirmed to be outside this machine")
+                    && why.contains(expected),
+                "{label}: {why}"
+            );
+            for f in &kept {
+                assert!(f.exists(), "{label}: {} was removed", f.display());
+            }
+            let after = fs::read_dir(real.join("N"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(before, after, "{label}");
+            drop(store);
+            drop(other);
+            unlink(&alias);
         }
-        let after = fs::read_dir(real.join("N"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect::<Vec<_>>();
-        assert_eq!(before, after, "{entry}");
-        drop(store);
-        drop(other);
-        unlink(&alias);
     }
 }
 
-/// 本机卷的列举认得出数据根所在的卷；不是 UNC 的写法不过这一道。
+/// 本机卷的列举认得出数据根所在的卷；不是 UNC 的写法不过这一道。UNC 写法：卷序列号不同就放行，相同、或本机的卷
+/// 读不全就拒绝（r11 P1-02、P2-01：拒绝的说明如实写「证明不了不在本机」，不只说「改用盘符」）。
 #[test]
 fn the_volumes_of_this_machine_are_listed() {
     let b = base("volumes");
     fs::create_dir_all(&b).unwrap();
     let serial = crate::pin::open(&b).unwrap().id().0;
-    assert!(crate::engine::local_volume_serials().contains(&serial));
+    assert!(
+        crate::engine::local_volume_serials()
+            .unwrap()
+            .contains(&serial)
+    );
     assert!(crate::engine::refuse_loopback(&b, serial).is_ok());
+    let remote = Path::new(r"\\server\share\N");
+    {
+        let _i = Injected.local_volumes(Ok(vec![1, 2]));
+        assert!(crate::engine::refuse_loopback(remote, 3).is_ok());
+        let why = crate::engine::refuse_loopback(remote, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("same serial number"), "{why}");
+        assert!(why.contains("remote share"), "{why}");
+    }
+    let _i = Injected.local_volumes(Err("injected".into()));
+    let why = crate::engine::refuse_loopback(remote, 3)
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("could not all be read"), "{why}");
+}
+
+mod volume_list {
+    //! 本机卷的枚举（`engine::volume_serials_with`）：每一种失败都读不全，只有列完了才算读全。卷名按顺序是
+    //! v1、v2、v3：v1 有序列号 11，v2 没插盘（不算），v3 有序列号 33。
+
+    use crate::engine::{VolumeApi, volume_serials_with};
+    use std::cell::Cell;
+
+    thread_local! {
+        static CLOSED: Cell<u32> = const { Cell::new(0) };
+    }
+
+    fn put(name: &mut [u16], s: &str) {
+        let w: Vec<u16> = s.encode_utf16().chain([0]).collect();
+        name[..w.len()].copy_from_slice(&w);
+    }
+
+    fn read(name: &[u16]) -> String {
+        let end = name.iter().position(|u| *u == 0).unwrap();
+        String::from_utf16_lossy(&name[..end])
+    }
+
+    fn first(name: &mut [u16]) -> Result<isize, u32> {
+        put(name, "v1");
+        Ok(7)
+    }
+
+    fn next(_: isize, name: &mut [u16]) -> Result<bool, u32> {
+        match read(name).as_str() {
+            "v1" => put(name, "v2"),
+            "v2" => put(name, "v3"),
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn serial(name: &[u16]) -> Result<Option<u32>, u32> {
+        Ok(match read(name).as_str() {
+            "v1" => Some(11),
+            "v2" => None,
+            _ => Some(33),
+        })
+    }
+
+    fn close(find: isize) {
+        assert_eq!(find, 7);
+        CLOSED.with(|c| c.set(c.get() + 1));
+    }
+
+    const OK: VolumeApi = VolumeApi {
+        first,
+        next,
+        serial,
+        close,
+    };
+
+    #[test]
+    fn every_failure_leaves_the_list_unread() {
+        assert_eq!(volume_serials_with(&OK), Ok(vec![11, 33]));
+        let cases: [(&str, VolumeApi); 3] = [
+            (
+                "FindFirstVolumeW",
+                VolumeApi {
+                    first: |_| Err(5),
+                    ..OK
+                },
+            ),
+            (
+                "FindNextVolumeW",
+                VolumeApi {
+                    next: |_, name| match read(name).as_str() {
+                        "v1" => {
+                            put(name, "v2");
+                            Ok(true)
+                        }
+                        _ => Err(5),
+                    },
+                    ..OK
+                },
+            ),
+            (
+                "GetVolumeInformationW",
+                VolumeApi {
+                    serial: |name| match read(name).as_str() {
+                        "v3" => Err(5),
+                        _ => Ok(Some(11)),
+                    },
+                    ..OK
+                },
+            ),
+        ];
+        for (step, api) in cases {
+            let got = volume_serials_with(&api);
+            let why = got.expect_err(step);
+            assert!(why.contains(step) && why.contains("error 5"), "{why}");
+        }
+        // 开始就失败的没有句柄要关；其余每次都关一次。
+        assert_eq!(CLOSED.with(|c| c.get()), 3);
+    }
 }
