@@ -240,8 +240,6 @@ struct Inner<C: Cipher> {
     state: Mutex<State<C>>,
     chain: Chain,
     admin: Mutex<()>,
-    /// 建配对空间单飞：同步循环与配对请求并发时也只建一次。
-    space_creation: Mutex<()>,
     /// 进行中的停下（改连接设置、重置配对、停止各自发起）：停止要等它们全部收尾。
     halts: Mutex<usize>,
     halts_changed: Condvar,
@@ -460,26 +458,24 @@ impl<C: Cipher + Send + Sync + 'static> Inner<C> {
         })
     }
 
-    /// 没有配对空间就建一个（单飞）。
+    /// 没有配对空间就建一个（单飞）：检查与新建在同一把状态锁里，同步循环与配对请求并发时也只建一次。
     fn ensure_space(&self, principal: &Principal) -> Result<(), Failure> {
-        let _one = self
-            .space_creation
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        {
-            let s = self.lock();
-            if s.config.space_id.is_some() && s.vault.secret().is_some() {
-                return Ok(());
-            }
+        let mut s = self.lock();
+        if s.config.space_id.is_some() && s.vault.secret().is_some() {
+            return Ok(());
         }
-        self.create_space(principal)
+        self.create_space_locked(&mut s, principal)
+    }
+
+    fn create_space(&self, principal: &Principal) -> Result<(), Failure> {
+        let mut s = self.lock();
+        self.create_space_locked(&mut s, principal)
     }
 
     /// 新空间：先落密钥再改配置；游标、已发布摘要一并作废（新会话的修订号缓存也从零开始）。
-    fn create_space(&self, principal: &Principal) -> Result<(), Failure> {
+    fn create_space_locked(&self, s: &mut State<C>, principal: &Principal) -> Result<(), Failure> {
         let (space_id, secret) = generate_space()
             .ok_or_else(|| Failure::Other("系统随机数不可用，建不了配对空间".into()))?;
-        let mut s = self.lock();
         s.vault
             .set_space(&space_id, &secret)
             .map_err(|e| Failure::Domain(secret_failure(e)))?;
@@ -925,7 +921,6 @@ impl<C: Cipher + Send + Sync + 'static> Connector<C> {
             }),
             chain: Chain::default(),
             admin: Mutex::new(()),
-            space_creation: Mutex::new(()),
             halts: Mutex::new(0),
             halts_changed: Condvar::new(),
             next_loop: AtomicU64::new(0),
@@ -1246,11 +1241,19 @@ impl<C: Cipher + Send + Sync + 'static> Connector<C> {
         capability::require(principal, Capability::SyncReset)?;
         let i = &self.inner;
         let _admin = i.admin.lock().unwrap_or_else(|e| e.into_inner());
-        let (previous, relay_url, app_id, device, token, previous_secret, management) = {
+        {
             let mut s = i.lock();
             let space = s.config.space_id.clone();
             s.vault.load(space.as_deref());
             s.vault.assert_writable().map_err(secret_failure)?;
+        }
+        // 先停循环再认旧空间：循环停下之后不会再建空间，正在建的也已在状态锁里建完，
+        // 不会有刚建出来、既没清理也没撤销标记的空间。
+        i.halt(false);
+        let (previous, relay_url, app_id, device, token, previous_secret, management) = {
+            let mut s = i.lock();
+            let space = s.config.space_id.clone();
+            s.vault.load(space.as_deref());
             (
                 s.config.space_id.clone(),
                 s.config.relay_url.clone(),
@@ -1261,9 +1264,6 @@ impl<C: Cipher + Send + Sync + 'static> Connector<C> {
                 s.management.clone(),
             )
         };
-        // 正在建的空间先建完。
-        drop(i.space_creation.lock().unwrap_or_else(|e| e.into_inner()));
-        i.halt(false);
         let mut removed = 0;
         let mut errors: Vec<String> = Vec::new();
         if let (Some(previous), Some(relay_url), Some(token)) = (&previous, &relay_url, &token) {
