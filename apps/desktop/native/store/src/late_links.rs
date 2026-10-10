@@ -1,5 +1,6 @@
 //! peer W6 r4 的反例（P1-01、P1-02）：守卫拿到之后，才把上层链接换向，或者把当时不存在的层建成链接；
 //! 之后清扫、备份、恢复读到的、删掉的都还必须在原来的数据根里。外面那份一个字节都不能变。
+//! peer W6 r5 P1-01：把换向提前到 Store 打开之后、守卫取得之前，走公开的备份与导出入口，结论一样。
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -269,4 +270,189 @@ fn a_backup_does_not_copy_attachments_through_a_late_link() {
     drop(backups);
     drop(lock);
     unlink(&link);
+}
+
+/// 数据根 `real/N` 与 `foreign/N` 各有一个库、一个附件；`alias` 先指向 `real`，从 `alias/N` 打开 ORIGINAL。
+/// 返回 (base, real, foreign, alias, ORIGINAL, FOREIGN)。
+fn two_roots(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, Store, Store) {
+    let b = base(name);
+    let (real, foreign) = (b.join("real"), b.join("foreign"));
+    for p in [&real, &foreign] {
+        fs::create_dir_all(p.join("N").join("artifacts").join("PA")).unwrap();
+    }
+    let alias = b.join("alias");
+    junction(&alias, &real);
+    let store = store_with_identity(&alias.join("N").join("atm.sqlite"), "ORIGINAL");
+    let other = store_with_identity(&foreign.join("N").join("atm.sqlite"), "FOREIGN");
+    for (s, code) in [(&store, "ORIGINALP"), (&other, "FOREIGNP")] {
+        s.write(move |tx| {
+            tx.execute_batch(
+                "INSERT INTO scope_generations (gen, scope_kind, scope_id, reason, epoch, created_at)
+                 VALUES (1, 'PROJECT', 'PA', 'CREATED', 'EPA', 't');",
+            )?;
+            tx.execute(
+                "INSERT INTO projects (id, code, name, lifecycle, health, meta_version, scope_gen, epoch, created_at, updated_at)
+                 VALUES ('PA', ?1, ?1, 'ACTIVE', 'ON_TRACK', 0, 1, 'EPA', 't', 't')",
+                [code],
+            )
+        })
+        .unwrap();
+    }
+    fs::write(
+        real.join("N/artifacts/PA/source.txt"),
+        b"original attachments",
+    )
+    .unwrap();
+    fs::write(
+        foreign.join("N/artifacts/PA/source.txt"),
+        b"foreign attachments",
+    )
+    .unwrap();
+    (b, real, foreign, alias, store, other)
+}
+
+/// 把 `alias` 换向 `to`（原来那个链接改名留着），返回改名后的位置。
+fn swing(alias: &Path, to: &Path) -> PathBuf {
+    let old = alias.with_file_name("alias-old");
+    fs::rename(alias, &old).unwrap();
+    junction(alias, to);
+    old
+}
+
+fn swing_back(alias: &Path, old: &Path) {
+    unlink(alias);
+    fs::rename(old, alias).unwrap();
+}
+
+/// r5 P1-01（备份一路）：Store 已打开、守卫还没取得时把 alias 换向 FOREIGN，再走公开的 `create_backup`
+/// （备份根也写成 alias 下的路径）。备份里的库与附件都出自 ORIGINAL，备份目录也落在 ORIGINAL 里；FOREIGN 原样。
+#[test]
+fn a_backup_after_an_early_alias_swing_still_reads_the_live_store() {
+    let (b, real, foreign, alias, store, other) = two_roots("early-backup");
+    let old = swing(&alias, &foreign);
+    let made = create_backup(
+        &store,
+        &alias.join("N").join("backups"),
+        "MANUAL",
+        "2026-10-10T12:00:00Z",
+    );
+    // 换向期间写进 Store 的东西也还在 ORIGINAL。
+    store
+        .write(|tx| {
+            tx.execute(
+                "UPDATE projects SET name = 'still original' WHERE id = 'PA'",
+                [],
+            )
+        })
+        .unwrap();
+    swing_back(&alias, &old);
+    let info = made.unwrap();
+    // 登记的是调用方给的路径；文件在 ORIGINAL 的真实位置里。
+    assert_eq!(info.dir, alias.join("N").join("backups").join(&info.id));
+    let on_disk = real.join("N").join("backups").join(&info.id);
+    let c = side_reader(&on_disk.join("atm.sqlite")).unwrap();
+    let id: String = c
+        .query_row("SELECT data_root_id FROM app_meta", [], |r| r.get(0))
+        .unwrap();
+    drop(c);
+    assert_eq!(id, "ORIGINAL");
+    assert_eq!(
+        fs::read(on_disk.join("artifacts").join("PA").join("source.txt")).unwrap(),
+        b"original attachments"
+    );
+    assert!(!foreign.join("N").join("backups").exists());
+    verify_backup(&store, &info.id).unwrap();
+    let name: String = other
+        .read(|tx| tx.query_row("SELECT name FROM projects", [], |r| r.get(0)))
+        .unwrap();
+    assert_eq!(name, "FOREIGNP");
+    drop(store);
+    drop(other);
+    unlink(&alias);
+    let _ = b;
+}
+
+/// r5 P1-01（导出一路）：同样的提前换向之后，公开的 `export_project` 导出的仍是 ORIGINAL 的项目与附件。
+#[test]
+fn an_export_after_an_early_alias_swing_still_reads_the_live_store() {
+    let (b, _real, foreign, alias, store, other) = two_roots("early-export");
+    let old = swing(&alias, &foreign);
+    let exports = b.join("exports");
+    let made = crate::package::export_project(
+        &store,
+        "PA",
+        crate::package::Format::Json,
+        &crate::package::ExportOptions {
+            exports_dir: &exports,
+            at: "2026-10-10T12:00:00Z",
+            app_version: "test",
+        },
+    );
+    swing_back(&alias, &old);
+    let ex = made.unwrap();
+    assert_eq!(ex.project_code, "ORIGINALP");
+    let text = String::from_utf8_lossy(&fs::read(&ex.path).unwrap()).into_owned();
+    assert!(text.contains("ORIGINALP") && !text.contains("FOREIGNP"));
+    assert!(!foreign.join("N").join("exports").exists());
+    drop(store);
+    drop(other);
+    unlink(&alias);
+}
+
+/// r5 P1-01 的守卫：钉住的数据根与 Store 打开时不是同一个目录（这里伪造身份来模拟）就在任何副作用之前拒绝。
+#[test]
+fn a_guard_on_a_different_root_than_the_store_opened_is_refused() {
+    let b = base("root-identity");
+    fs::create_dir_all(b.join("N")).unwrap();
+    let mut store = store_with_identity(&b.join("N").join("atm.sqlite"), "ORIGINAL");
+    store.forge_root_identity();
+    let refused = attachments_lock(&store, "late_links");
+    assert!(
+        matches!(refused, Err(crate::backup::BackupError::LinkedPath(_))),
+        "{:?}",
+        refused.err()
+    );
+    let made = create_backup(
+        &store,
+        &b.join("N").join("backups"),
+        "MANUAL",
+        "2026-10-10T12:00:00Z",
+    );
+    assert!(made.is_err());
+    assert!(!b.join("N").join("backups").exists());
+}
+/// r5 P1-01（打开一路）：钉住数据根之后、打开连接之前 alias 被换向——写连接、读池、checkpoint 都从钉住的真实位置
+/// 打开，Store 读写的仍是 ORIGINAL，FOREIGN 一个字节都不变。
+#[test]
+fn connections_open_in_the_root_that_was_pinned() {
+    let b = base("open-window");
+    let (real, foreign) = (b.join("real"), b.join("foreign"));
+    for p in [&real, &foreign] {
+        fs::create_dir_all(p.join("N")).unwrap();
+    }
+    let alias = b.join("alias");
+    junction(&alias, &real);
+    let original = store_with_identity(&real.join("N").join("atm.sqlite"), "ORIGINAL");
+    drop(original);
+    let other = store_with_identity(&foreign.join("N").join("atm.sqlite"), "FOREIGN");
+    drop(other);
+    let foreign_db = foreign.join("N").join("atm.sqlite");
+    let before = fs::read(&foreign_db).unwrap();
+    let db = alias.join("N").join("atm.sqlite");
+    let (a, f) = (alias.clone(), foreign.clone());
+    crate::engine::on_next_open_after_pin(&db, move || {
+        swing(&a, &f);
+    });
+    let store = Store::open(&db, Config::default()).unwrap();
+    let id: String = store
+        .read(|tx| tx.query_row("SELECT data_root_id FROM app_meta", [], |r| r.get(0)))
+        .unwrap();
+    store
+        .write(|tx| tx.execute("UPDATE app_meta SET updated_at = 'written'", []))
+        .unwrap();
+    drop(store);
+    swing_back(&alias, &alias.with_file_name("alias-old"));
+    assert_eq!(id, "ORIGINAL");
+    assert_eq!(fs::read(&foreign_db).unwrap(), before);
+    unlink(&alias);
 }

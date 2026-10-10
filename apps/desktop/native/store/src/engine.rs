@@ -331,7 +331,14 @@ struct Pool {
 }
 
 pub struct Store {
+    /// 调用方给的库路径：只用于展示、登记与日志。
     path: PathBuf,
+    /// 打开时钉住的数据根（库所在目录，跟随链接解析一次；peer W6 r5 P1-01）。整个 Store 生命周期都持有：
+    /// 写连接、读池、checkpoint、附件守卫与旁路读都从它的真实位置出发，`path` 上数据根以上的链接之后再被换向，
+    /// 也换不走这个 Store 读写的数据根；它自己与它的祖先在持有期间改不了名（不共享删除）。
+    root: crate::pin::Dir,
+    /// 库文件在 `root` 真实位置里的路径。
+    real: PathBuf,
     config: Config,
     shared: Arc<Shared>,
     stats: Arc<Stats>,
@@ -342,6 +349,20 @@ pub struct Store {
 impl Store {
     /// 打开（或新建）数据库，迁移到最新，启动写线程，打开只读连接。
     pub fn open(path: &Path, config: Config) -> Result<Store, StoreError> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = path
+            .file_name()
+            .ok_or_else(|| StoreError::Io(format!("{} has no file name", path.display())))?;
+        let root = crate::pin::open(parent)
+            .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
+        let real = root.path().join(name);
+        #[cfg(test)]
+        after_pin(path);
+        let path_given = path;
+        let path = real.as_path();
         let conn = Connection::open(path)?;
         configure(&conn)?;
         conn.busy_timeout(Duration::from_secs(5))?;
@@ -380,7 +401,7 @@ impl Store {
         });
         let stats = Arc::new(Stats::default());
         let writer = {
-            let checkpointer = Checkpointer::start(path, &config, stats.clone())?;
+            let checkpointer = Checkpointer::start(path, path_given, &config, stats.clone())?;
             let (shared, stats, idle) = (shared.clone(), stats.clone(), config.idle_checkpoint);
             std::thread::Builder::new()
                 .name(WRITER_THREAD.into())
@@ -388,7 +409,9 @@ impl Store {
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
         Ok(Store {
-            path: path.to_path_buf(),
+            path: path_given.to_path_buf(),
+            real: real.clone(),
+            root,
             config,
             shared,
             stats,
@@ -402,6 +425,41 @@ impl Store {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 库文件的真实位置（`\\?\` 完整写法），即连接实际打开的那个文件。
+    pub fn real_path(&self) -> &Path {
+        &self.real
+    }
+
+    /// 打开时钉住的数据根。
+    pub(crate) fn root(&self) -> &crate::pin::Dir {
+        &self.root
+    }
+
+    /// 测试用：让守卫的身份核对对不上，等于「打开之后数据根被换成了别的目录」。
+    #[cfg(test)]
+    pub(crate) fn forge_root_identity(&mut self) {
+        self.root.forge_identity();
+    }
+
+    /// 调用方给的、在数据根字面路径之下的位置，换算到数据根的真实位置里；不在数据根下的原样返回。
+    pub(crate) fn rebase(&self, literal: &Path) -> PathBuf {
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match literal.strip_prefix(parent) {
+            Ok(rest) => {
+                let mut p = self.root.path().to_path_buf();
+                for c in rest.components() {
+                    p.push(c.as_os_str());
+                }
+                p
+            }
+            Err(_) => literal.to_path_buf(),
+        }
     }
 
     pub fn stats(&self) -> &Stats {
@@ -832,7 +890,13 @@ struct Signal {
 }
 
 impl Checkpointer {
-    fn start(path: &Path, config: &Config, stats: Arc<Stats>) -> Result<Checkpointer, StoreError> {
+    /// `path` 是打开的真实位置；`given` 是调用方给的写法，只用来认测试挂的 [`hold_next_passive`]。
+    fn start(
+        path: &Path,
+        given: &Path,
+        config: &Config,
+        stats: Arc<Stats>,
+    ) -> Result<Checkpointer, StoreError> {
         let conn = Connection::open(path)?;
         configure(&conn)?;
         conn.pragma_update(None, "wal_autocheckpoint", 0)?;
@@ -849,8 +913,8 @@ impl Checkpointer {
             std::thread::Builder::new()
                 .name("atm-store-checkpoint".into())
                 .spawn({
-                    let path = path.to_path_buf();
-                    move || checkpointer_loop(conn, &path, &signal, limit, &stats)
+                    let given = given.to_path_buf();
+                    move || checkpointer_loop(conn, &given, &signal, limit, &stats)
                 })
                 .map_err(|e| StoreError::Io(e.to_string()))?
         };
@@ -962,6 +1026,29 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     } else {
         &stats.restart_busy
     });
+}
+
+#[cfg(test)]
+type AfterPin = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static AFTER_PIN: Mutex<Vec<(PathBuf, AfterPin)>> = Mutex::new(Vec::new());
+
+/// 测试用：从 `db_path` 打开 Store 时，钉住数据根之后、打开连接之前跑一次 `f`（peer W6 r5 P1-01 的窗口）。
+#[cfg(test)]
+pub(crate) fn on_next_open_after_pin(db_path: &Path, f: impl FnOnce() + Send + 'static) {
+    lock(&AFTER_PIN).push((db_path.to_path_buf(), Box::new(f)));
+}
+
+#[cfg(test)]
+fn after_pin(path: &Path) {
+    let f = {
+        let mut all = lock(&AFTER_PIN);
+        match all.iter().position(|(p, _)| p == path) {
+            Some(i) => all.remove(i).1,
+            None => return,
+        }
+    };
+    f();
 }
 
 type Hold = Arc<(Mutex<(bool, bool)>, Condvar)>;

@@ -276,6 +276,14 @@ pub(crate) struct BackupsRoot {
 }
 
 impl BackupsRoot {
+    /// 备份根在数据根下时（通常如此），换算到 Store 打开时钉住的数据根的真实位置里再钉（peer W6 r5 P1-01：
+    /// 与附件同一个根因）；登记的路径仍是调用方给的。
+    pub(crate) fn pin_for(store: &Store, root: &Path) -> Result<Self> {
+        let mut pinned = Self::pin(&store.rebase(root))?;
+        pinned.literal = root.to_path_buf();
+        Ok(pinned)
+    }
+
     pub(crate) fn pin(root: &Path) -> Result<Self> {
         let parent = root
             .parent()
@@ -336,21 +344,29 @@ impl BackupsRoot {
     }
 }
 
+/// 从 Store 打开时钉住的数据根往下钉（peer W6 r5 P1-01）：不再按 `store.path()` 的字面写法重新选根——Store 打开
+/// 之后、守卫取得之前，那上面的链接可以被换向，换到的数据根不是这个 Store 的连接读写的那个。钉住之后再核对一次
+/// 身份，与打开时的数据根不是同一个目录就在任何副作用之前拒绝。
 pub(crate) fn attachments_lock(store: &Store, what: &'static str) -> Result<AttachmentsGuard> {
     let lock = lock_attachments(store, what)?;
-    let db_dir = store
-        .path()
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
     let artifacts = Path::new(ARTIFACTS_DIR);
     let pinned = crate::chain::pin_inside(
-        db_dir,
+        store.root().path(),
         &[
             &artifacts.join(crate::restore::STAGING_DIR),
             &artifacts.join(crate::restore::OLD_DIR),
         ],
     )?;
+    if pinned.root_id() != store.root().id() {
+        return Err(BackupError::LinkedPath(
+            store
+                .path()
+                .parent()
+                .unwrap_or(Path::new("."))
+                .display()
+                .to_string(),
+        ));
+    }
     Ok(AttachmentsGuard {
         pinned,
         _lock: lock,
@@ -403,7 +419,7 @@ pub(crate) fn is_internal(rel: &str) -> bool {
 pub fn create_backup(store: &Store, root: &Path, kind: &str, at: &str) -> Result<BackupInfo> {
     let mut lock = attachments_lock(store, "create_backup")?;
     crate::restore::finish_swaps_locked(store, &mut lock)?;
-    let mut backups = BackupsRoot::pin(root)?;
+    let mut backups = BackupsRoot::pin_for(store, root)?;
     sweep_withdrawn_locked(store, &mut backups);
     create_backup_locked(store, &mut backups, &mut lock, kind, at)
 }
@@ -610,7 +626,7 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
             info.dir.display()
         )));
     };
-    let mut backups = BackupsRoot::pin(root)?;
+    let mut backups = BackupsRoot::pin_for(store, root)?;
     sweep_withdrawn_locked(store, &mut backups);
     // 登记的是字面路径；挪、删都走真实位置。
     let dir = backups.real(None).join(name);
@@ -678,7 +694,7 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
 /// 调用方持附件锁，创建与撤回也都在锁里，所以这里看到的标记和隔离条目都不属于进行中的操作。
 pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<usize> {
     let _lock = attachments_lock(store, "sweep_withdrawn")?;
-    let mut backups = BackupsRoot::pin(root)?;
+    let mut backups = BackupsRoot::pin_for(store, root)?;
     Ok(sweep_withdrawn_locked(store, &mut backups))
 }
 

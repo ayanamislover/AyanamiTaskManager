@@ -107,6 +107,11 @@ impl Dir {
         &self.path
     }
 
+    /// (卷序列号, 文件号)：同一个目录任何时候读到的都相同。
+    pub(crate) fn id(&self) -> (u32, u64) {
+        self.id
+    }
+
     /// 测试用：让清理时的身份核对对不上，等于「放开钉住到重新打开之间，这个名字被换成了别的目录」。
     #[cfg(test)]
     pub(crate) fn forge_identity(&mut self) {
