@@ -1292,6 +1292,35 @@ fn codex_inline_and_dotted_definitions_are_replaced_not_duplicated() {
         assert!(codex_server(&removed, "other").is_some(), "{name}");
     }
 
+    // 规范的段全对，旁边还留着一条非规范的 ATM 定义（`[mcp_servers]` 下手写的 -actions）：只有这一条也算过期，
+    // 启动修复把它去掉，用户的 server 原样。
+    let w = World::new("codex-inline-leftover", true);
+    w.agents.manage(&user(), "CODEX", "INSTALL").unwrap();
+    let good = w.read(".codex/config.toml");
+    assert!(
+        w.agents.repair(&repair_job()).unwrap().configs.is_empty(),
+        "the sections alone are current"
+    );
+    w.write(
+        ".codex/config.toml",
+        &format!("{good}\n[mcp_servers]\nayanami-task-manager-actions = {{ command = \"old.exe\" }}\nother = {{ command = \"keep.exe\" }}\n"),
+    );
+    codex_toml(&w);
+    let done = w.agents.repair(&repair_job()).unwrap();
+    assert!(
+        done.configs.contains(&atm_agents::Client::Codex),
+        "{done:?}"
+    );
+    let fixed = codex_toml(&w);
+    assert!(codex_server(&fixed, "ayanami-task-manager-actions").is_none());
+    assert_eq!(
+        codex_server(&fixed, "other")
+            .and_then(|s| s.get("command"))
+            .and_then(|c| c.as_str()),
+        Some("keep.exe")
+    );
+    assert!(!w.read(".codex/config.toml").contains("old.exe"));
+
     // 用户自己装的状态（还没修过）直接卸载，也去得掉。
     let w = World::new("codex-inline-uninstall", false);
     w.write(".codex/config.toml", cases[2].1);
