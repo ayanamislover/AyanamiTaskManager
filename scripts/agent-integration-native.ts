@@ -9,6 +9,7 @@
  *   别的 server 留着，旁边有 `.bak-`，规则块与 Skills 装进合成家目录。
  * - 切换 memory profile：开发布局只记设置、不改客户端；再读一次开关是新值。
  * - MCP bridge 观测能展开（这台机器上没有合成的桥进程，读到 0 个）。
+ * - 界面版 status（W6f）：单库，带这份发布物的转换状态。
  * - 截图（浅色、深色）在 `output/agent-integration-native/`，报告 `report.json`。复制按钮一个都不点：
  *   HTTP 配置里有令牌，复制会把它放进本机剪贴板。
  *
@@ -258,6 +259,27 @@ async function run(): Promise<void> {
           "桥观测读得到（0 个合成桥）",
           bridges?.metric === "PRIVATE_BYTES" && Array.isArray(bridges.bridges),
           JSON.stringify(bridges).slice(0, 200),
+        );
+        // 界面版 status（W6f，06 #1、07 §7）：单库，转换状态是这份发布物（宿主交给 ui-bridge 的那一份）。
+        const status = await page.evaluate(() =>
+          (window as any).ayanamiDesktop
+            .runtimeRequest({ path: "/api/v1/system/status", method: "GET" })
+            .then((r: any) => ({ code: r.status, body: JSON.parse(r.body) })),
+        );
+        check(
+          "界面版 status 是单库与转换状态",
+          status.code === 200 &&
+            status.body.layout === "single" &&
+            status.body.conversion?.phase === "PUBLISHED" &&
+            typeof status.body.conversion?.generation === "string" &&
+            status.body.conversion.generation.length > 0 &&
+            Array.isArray(status.body.projectFailures) &&
+            status.body.projectFailures.length === 0,
+          JSON.stringify({
+            code: status.code,
+            layout: status.body.layout,
+            conversion: status.body.conversion,
+          }),
         );
         // Agent 主体不经界面：界面上的 User 能读，错误文案以错误码开头（这里拿不存在的客户端试）。
         const refused = await page.evaluate(() =>

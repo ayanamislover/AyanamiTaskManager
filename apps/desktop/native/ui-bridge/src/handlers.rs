@@ -193,11 +193,15 @@ fn content(i: &Input) -> Result<Content, Reply> {
 }
 
 /// 2.0 的 `/system/status`：单库的健康加运行时状态。投影健康随面板删除（00 §6），单库没有逐库失败。
+/// 转换状态（07 §7）由运行时给：能答到这里就是已发布、在服务；数据源冲突时入口不开，宿主直接答 SOURCE_CONFLICT。
 fn status(ui: &Ui, p: &Principal) -> Out {
     let s = ui.svc.system_status(p).map_err(svc)?;
     let runtime = (ui.runtime)();
     let out = json!({
         "ok": s["ok"],
+        "impl": s["impl"],
+        "layout": s["layout"],
+        "conversion": runtime.get("conversion").cloned().unwrap_or(Value::Null),
         "version": runtime.get("version").cloned().unwrap_or(Value::Null),
         "sqlite": {
             "ok": s["ok"],

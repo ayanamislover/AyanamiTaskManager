@@ -257,6 +257,89 @@ fn the_service_runs_inside_the_host_process() {
     );
 }
 
+/// `fn on_second_instance` 的函数体（到下一个同级方法为止）。
+fn second_instance_body(app: &str) -> &str {
+    let start = app
+        .find("fn on_second_instance")
+        .expect("app.rs has on_second_instance");
+    let rest = &app[start..];
+    let end = rest[1..].find("\n    fn ").map_or(rest.len(), |i| i + 1);
+    &rest[..end]
+}
+
+/// 第二实例的命令走到用户主体、界面分发或数据写入的痕迹（03 P-009：只能控制窗口和生命周期）。
+/// smoke 构建的看门狗命令会让写线程卡住，但不写数据，不在此列。
+fn user_paths(text: &str) -> Vec<&'static str> {
+    const FORBIDDEN: [&str; 8] = [
+        "webview(",
+        "tray()",
+        "trusted_ui",
+        "Principal",
+        ".dispatch(",
+        "dispatch_ui",
+        "dispatch_agents",
+        ".write(",
+    ];
+    FORBIDDEN
+        .into_iter()
+        .filter(|needle| text.contains(needle))
+        .collect()
+}
+
+/// P-009：第二实例（同一用户的另一个进程）把 Show / Navigate / Wake / Quit 交给主实例就退出，不开第二份服务；
+/// 主实例处理这些命令时不构造 User，也不碰数据。
+#[test]
+fn a_second_instance_hands_its_command_over_and_leaves() {
+    let app = source("app.rs");
+    let body = second_instance_body(&app);
+    assert!(body.contains("Command::Quit"), "{body}");
+    let found = user_paths(body);
+    assert!(found.is_empty(), "on_second_instance reaches {found:?}");
+    // 阳性对照：守卫认得出「第二实例的命令走界面分发」的写法。
+    let wrong = "let principal = atm_ui_bridge::webview(self.generation, self.epoch);\n\
+                 ui.dispatch(&principal, request);";
+    assert_eq!(user_paths(wrong), ["webview(", ".dispatch("]);
+
+    let sandbox = Sandbox::new("second");
+    let mut first = sandbox.start();
+    let pid = first.0.id();
+    let Some(started) = wait_for(Duration::from_secs(60), || descriptor(&sandbox.n())) else {
+        panic!(
+            "no daemon.json under N within 60 s:\n{}",
+            sandbox.host_log()
+        );
+    };
+    // 第二个进程（`--background` 是 Agent 唤醒）：交出命令、退出码 0，主实例照常服务。
+    let mut second = sandbox.start();
+    let exited = wait_for(Duration::from_secs(20), || {
+        second.0.try_wait().ok().flatten()
+    });
+    assert_eq!(
+        exited.and_then(|s| s.code()),
+        Some(0),
+        "the second instance hands over and exits"
+    );
+    let now = descriptor(&sandbox.n()).expect("the first instance still serves");
+    assert_eq!(
+        now["instanceId"], started["instanceId"],
+        "no second service"
+    );
+    assert_eq!(now["pid"].as_u64(), Some(u64::from(pid)));
+    assert_eq!(
+        health(port_of(&now)).and_then(|h| h["pid"].as_u64()),
+        Some(u64::from(pid))
+    );
+    assert_eq!(
+        ipc::read_host_record(&sandbox.n()).map(|r| r.pid),
+        Some(pid),
+        "host.json still names the first instance"
+    );
+
+    // 另一个进程发 QUIT：主实例干净退出。
+    assert_eq!(quit_and_wait(&sandbox, &mut first), Some(0));
+    assert!(descriptor(&sandbox.n()).is_none());
+}
+
 #[test]
 fn no_entry_opens_while_the_legacy_service_holds_its_lease() {
     let sandbox = Sandbox::new("legacy");

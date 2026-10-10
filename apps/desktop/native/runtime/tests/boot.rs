@@ -86,6 +86,16 @@ fn a_fresh_install_opens_the_entries_in_order() {
     assert_eq!(health["pid"], published["pid"], "{body}");
     // 没有令牌的业务请求照样被挡。
     assert_eq!(get(s.port(), "/api/v1/projects").unwrap().0, 401);
+    // 带令牌的 status（06 #1、07 §7）：单库，转换状态是这份发布物；界面版拿的是同一份（`Serving::conversion`）。
+    let token = published["token"].as_str().unwrap();
+    let (code, body) = get_authorized(s.port(), "/api/v1/system/status", token).unwrap();
+    assert_eq!(code, 200, "{body}");
+    let status: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(status["layout"], "single", "{body}");
+    assert_eq!(status["conversion"]["phase"], "PUBLISHED", "{body}");
+    assert_eq!(status["conversion"]["generation"], s.generation(), "{body}");
+    assert!(!s.generation().is_empty());
+    assert_eq!(status["conversion"], s.conversion());
     assert!(!n.join("runtime/startup-state.json").exists());
     let lease: Value =
         serde_json::from_slice(&std::fs::read(n.join("runtime/daemon.lock")).unwrap()).unwrap();

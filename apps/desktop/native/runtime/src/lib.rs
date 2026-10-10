@@ -184,6 +184,11 @@ impl Serving {
         &self.generation
     }
 
+    /// `/system/status` 的转换状态（07 §7）：Agent 入口与界面答同一份。
+    pub fn conversion(&self) -> serde_json::Value {
+        entries::conversion_status(&self.generation)
+    }
+
     /// 后台比较的结论；没有后台比较（启动时已经阻塞比较过）或等不到时 `None`。
     pub fn background(&self, timeout: Duration) -> Option<Background> {
         self.background.as_ref()?.recv_timeout(timeout).ok()

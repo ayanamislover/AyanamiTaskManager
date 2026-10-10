@@ -2,7 +2,7 @@
 //! 真实的 atm-mcp.exe；`<root>/stop` 出现后把任务、记录、会话与项目导出到 `<root>/state.json`，撤下
 //! daemon.json 退出。只用于沙箱：数据根、仓库目录都在 `<root>` 下，token 只写进 daemon.json。
 //!
-//! 用法：`u1-server <root> <W1..W9> <agent_id> <client_name>`。`client_name` 是被测 CLI 的
+//! 用法：`u1-server <root> <W1..W9|A4> <agent_id> <client_name>`。`client_name` 是被测 CLI 的
 //! `clientInfo.name`（W8 用它伪造一个已经退出的前任客户端）。
 
 use atm_http::agent::Surface;
@@ -21,6 +21,40 @@ use std::time::{Duration, Instant};
 
 /// 预置数据用的连接组：不在单对话白名单里，所以每次都显式带 session。
 const SETUP: &str = "1:1@u1-setup";
+
+/// 每个 profile 上见过的连接组身份（`X-ATM-Client`，R11 A4）与带着它的 JSON-RPC 方法：真实客户端拉起的
+/// core 与 memory 两个桥是不是同一组，没有客户端名的是哪些请求。
+static SEEN: std::sync::Mutex<std::collections::BTreeSet<(String, String, String)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+async fn record_client(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let Some(profile) = req.uri().path().strip_prefix("/mcp/").map(str::to_owned) else {
+        return next.run(req).await;
+    };
+    let client = req
+        .headers()
+        .get("x-atm-client")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let method = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v["method"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| parts.method.to_string());
+    SEEN.lock().unwrap().insert((profile, client, method));
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
 
 struct Rpc {
     port: u16,
@@ -176,7 +210,15 @@ fn dump(svc: &Service, rpc: &Rpc, setup: &Value) -> Value {
             .collect()
         })
         .expect("read projects");
-    let mut out = json!({"setup": setup, "sessions": sessions, "projects": projects});
+    let clients: Vec<Value> = SEEN
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, c, _)| c != SETUP)
+        .map(|(profile, client, method)| json!({"profile": profile, "client": client, "method": method}))
+        .collect();
+    let mut out =
+        json!({"setup": setup, "sessions": sessions, "projects": projects, "clients": clients});
     // 每个项目的任务（含检查项、证据、最近进度）与记录：经同一个服务的读接口取，口径与 Agent 看到的一致。
     let mut detail = Vec::new();
     for p in &projects {
@@ -218,7 +260,7 @@ fn dump(svc: &Service, rpc: &Rpc, setup: &Value) -> Value {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let [_, root, flow, agent, client] = args.as_slice() else {
-        eprintln!("用法：u1-server <root> <W1..W9> <agent_id> <client_name>");
+        eprintln!("用法：u1-server <root> <W1..W9|A4> <agent_id> <client_name>");
         std::process::exit(2);
     };
     let root = PathBuf::from(root);
@@ -274,7 +316,8 @@ fn main() {
                             || json!({"version": "3.0.0-u1", "conversion": {"phase": "PUBLISHED"}}),
                         ),
                     )),
-            ),
+            )
+            .layer(axum::middleware::from_fn(record_client)),
             std::future::pending::<()>(),
         ));
         port

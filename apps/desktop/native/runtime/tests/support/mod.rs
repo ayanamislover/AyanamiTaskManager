@@ -180,6 +180,15 @@ pub fn runtime_files(n: &Path) -> Vec<String> {
 
 /// 原始 HTTP GET（不带令牌）：返回 (状态码, body)。连不上返回 `None`。
 pub fn get(port: u16, path: &str) -> Option<(u16, String)> {
+    get_with(port, path, "")
+}
+
+/// 带 daemon.json 里的令牌（只在用例进程的内存里）。
+pub fn get_authorized(port: u16, path: &str, token: &str) -> Option<(u16, String)> {
+    get_with(port, path, &format!("Authorization: Bearer {token}\r\n"))
+}
+
+fn get_with(port: u16, path: &str, headers: &str) -> Option<(u16, String)> {
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
@@ -187,7 +196,9 @@ pub fn get(port: u16, path: &str) -> Option<(u16, String)> {
     )
     .ok()?;
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{headers}Connection: close\r\n\r\n"
+    );
     s.write_all(req.as_bytes()).ok()?;
     let mut out = Vec::new();
     let _ = s.read_to_end(&mut out);

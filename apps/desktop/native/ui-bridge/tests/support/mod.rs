@@ -60,8 +60,9 @@ pub fn world(name: &str) -> World {
                 app_version: "3.0.0-test".into(),
             }),
     );
-    let runtime: atm_ui_bridge::RuntimeStatus =
-        Arc::new(|| json!({ "version": "3.0.0-test", "conversion": { "phase": "PUBLISHED" } }));
+    let runtime: atm_ui_bridge::RuntimeStatus = Arc::new(
+        || json!({ "version": "3.0.0-test", "conversion": { "phase": "PUBLISHED", "generation": "G-test" } }),
+    );
     World {
         ui: Ui::new(svc.clone(), runtime, STARTED),
         svc,

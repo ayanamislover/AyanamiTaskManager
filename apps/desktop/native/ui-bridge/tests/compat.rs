@@ -28,6 +28,25 @@ const REMOVED: &[(&str, &str, &str)] = &[
     ("", "projectionFailures", "同上（00 §6）"),
 ];
 
+/// 3.0 有意加上的键：`(步骤名, 键, 依据)`。界面按键读，多出的键不影响 2.0 的读法。
+const ADDED: &[(&str, &str, &str)] = &[
+    (
+        "status",
+        "impl",
+        "06 #1：status 改为单库健康与转换状态（07 §7）",
+    ),
+    ("status", "layout", "同上：单库（`single`）"),
+    (
+        "status",
+        "conversion",
+        "同上：转换阶段与发布物的 generation",
+    ),
+];
+
+fn added(step: &str, key: &str) -> bool {
+    ADDED.iter().any(|(s, k, _)| *k == key && step == *s)
+}
+
 fn fixtures() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"))
 }
@@ -140,7 +159,10 @@ fn compare(step: &str, path: &str, expected: &Value, actual: &Value, diffs: &mut
                     None => diffs.push(format!("{step}: {path}.{k} 缺失（2.0 是 {ev}）")),
                 }
             }
-            for k in a.keys().filter(|k| !e.contains_key(*k)) {
+            for k in a
+                .keys()
+                .filter(|k| !e.contains_key(*k) && !(path == "$" && added(step, k)))
+            {
                 diffs.push(format!("{step}: {path}.{k} 多出（{}）", a[k]));
             }
         }
@@ -311,4 +333,33 @@ fn the_comparison_catches_shape_drift() {
         &mut diffs,
     );
     assert!(diffs.is_empty(), "{diffs:?}");
+    // 只有登记过的步骤、登记过的键、在顶层，才可以多出。
+    let status = |step: &str, actual: Value| {
+        let mut diffs = Vec::new();
+        compare(
+            step,
+            "$",
+            &skeleton(&json!({ "ok": true, "sqlite": { "ok": true } })),
+            &skeleton(&actual),
+            &mut diffs,
+        );
+        diffs
+    };
+    let with_conversion = json!({ "ok": true, "sqlite": { "ok": true }, "conversion": {} });
+    assert!(status("status", with_conversion.clone()).is_empty());
+    assert!(!status("overview", with_conversion).is_empty());
+    assert!(
+        !status(
+            "status",
+            json!({ "ok": true, "sqlite": { "ok": true, "layout": "x" } })
+        )
+        .is_empty()
+    );
+    assert!(
+        !status(
+            "status",
+            json!({ "ok": true, "sqlite": { "ok": true }, "extra": 0 })
+        )
+        .is_empty()
+    );
 }

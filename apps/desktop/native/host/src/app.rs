@@ -228,6 +228,49 @@ fn same_page(sent: (u64, u64), current: (u64, u64)) -> bool {
     sent == current
 }
 
+/// 宿主眼里服务走到了哪一步：只用来决定要服务的界面调用怎么答。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Starting,
+    Conflict,
+    Unavailable,
+    /// `open`：入口还开着。后台比较发现数据源冲突时入口撤下，宿主还没换到 Conflict。
+    Serving {
+        open: bool,
+    },
+}
+
+/// 服务接不了时，要服务的界面调用得到什么（07 §7）。`None`：还在启动（先排队）或在服务。
+/// 入口撤下的在服务与数据源冲突一样答：入口关了，不再写业务数据。
+fn unavailable_in(phase: Phase) -> Option<(&'static str, &'static str)> {
+    match phase {
+        Phase::Starting | Phase::Serving { open: true } => None,
+        Phase::Conflict | Phase::Serving { open: false } => {
+            Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源"))
+        }
+        Phase::Unavailable => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
+    }
+}
+
+#[cfg(test)]
+mod phase_tests {
+    use super::{Phase, unavailable_in};
+
+    #[test]
+    fn a_source_conflict_answers_every_service_call_and_starting_queues_them() {
+        let code = |phase| unavailable_in(phase).map(|(code, _)| code);
+        assert_eq!(code(Phase::Conflict), Some("SOURCE_CONFLICT"));
+        // 后台比较撤下了入口：同样是冲突，不是「暂时不可用」，也不能当成还在服务。
+        assert_eq!(
+            code(Phase::Serving { open: false }),
+            Some("SOURCE_CONFLICT")
+        );
+        assert_eq!(code(Phase::Unavailable), Some("SERVICE_UNAVAILABLE"));
+        assert_eq!(code(Phase::Starting), None);
+        assert_eq!(code(Phase::Serving { open: true }), None);
+    }
+}
+
 #[cfg(test)]
 mod page_tests {
     use super::same_page;
@@ -949,19 +992,21 @@ impl App {
         }
     }
 
-    /// What a renderer call that needs the service gets while the service cannot take it.
-    /// `None`: still starting (keep it queued) or serving. Serving but withdrawn (a background
-    /// comparison found a source conflict) answers like a conflict: the entries are closed.
-    fn unavailable(&self) -> Option<(&'static str, &'static str)> {
+    fn phase(&self) -> Phase {
         match &self.service {
-            Service::Idle | Service::Booting | Service::Retrying => None,
-            Service::Conflict { .. } => Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源")),
-            Service::Unavailable => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
-            Service::Serving(serving) if serving.service().is_none() => {
-                Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源"))
-            }
-            Service::Serving(_) => None,
+            Service::Idle | Service::Booting | Service::Retrying => Phase::Starting,
+            Service::Conflict { .. } => Phase::Conflict,
+            Service::Unavailable => Phase::Unavailable,
+            Service::Serving(serving) => Phase::Serving {
+                open: serving.service().is_some(),
+            },
         }
+    }
+
+    /// What a renderer call that needs the service gets while the service cannot take it
+    /// ([`unavailable_in`]).
+    fn unavailable(&self) -> Option<(&'static str, &'static str)> {
+        unavailable_in(self.phase())
     }
 
     /// The service settled (serving, conflict or given up): answer what waited for it.
@@ -1070,6 +1115,7 @@ impl App {
             ));
             return;
         };
+        let conversion = serving.conversion();
         let call = match crate::ui_api::parse(input) {
             Ok(call) => call,
             Err(code) => {
@@ -1087,7 +1133,7 @@ impl App {
                 let started_at =
                     atm_install_state::startup::iso_utc(crate::health::process_started_at_ms());
                 let runtime: atm_ui_bridge::RuntimeStatus =
-                    Arc::new(move || json!({ "version": version }));
+                    Arc::new(move || json!({ "version": version, "conversion": conversion }));
                 Arc::new(Ui::new(svc, runtime, started_at))
             })
             .clone();

@@ -60,6 +60,11 @@ pub struct Entries {
     svc: Arc<Service>,
 }
 
+/// 入口开着时的转换状态（07 §7）：开得起入口就是已发布。数据源冲突时入口不开，答不到这里。
+pub fn conversion_status(generation: &str) -> Value {
+    json!({"phase": "PUBLISHED", "generation": generation})
+}
+
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
     durable::write_atomic(path, value.to_string().as_bytes())
         .map_err(|e| format!("write {}: {e}", path.display()))
@@ -140,7 +145,7 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
         json!({
             "version": version,
             "impl": "rust",
-            "conversion": {"phase": "PUBLISHED", "generation": generation},
+            "conversion": conversion_status(&generation),
         })
     });
     let token = Token::new(token.clone()).map(|t| (t, token))?;
