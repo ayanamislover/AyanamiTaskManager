@@ -71,7 +71,7 @@ fn every_refusal_has_its_own_code() {
         code(d.enqueue(&user(), &desktop(&key)).unwrap_err()),
         "DISPATCH_CLAUDE_NOT_FOUND"
     );
-    *w.claude.lock().unwrap() = Some(FAKE_CLAUDE.into());
+    *w.claude.lock().unwrap() = Some(w.fake.clone());
     w.behave(json!({ "mode": "slow", "delayMs": 3000 }));
     let first = d.enqueue(&user(), &desktop(&key)).unwrap();
     let again = d.enqueue(&user(), &desktop(&key)).unwrap_err();

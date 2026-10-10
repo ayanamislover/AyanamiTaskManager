@@ -581,8 +581,11 @@ mod tests {
             panic!()
         };
         l.record_run(&r, snapshot("run-old", "succeeded"), NOW);
-        assert!(l.find("old", NOW + REQUEST_RETENTION_MS).is_some());
-        assert!(l.find("old", NOW + REQUEST_RETENTION_MS + 1).is_none());
+        // 2.x：7 天有效期 + 2 天余量 = 9 天，上限 2000 条。写成字面值：常量改了用例要跟着红。
+        const NINE_DAYS: i64 = 9 * 24 * 60 * 60 * 1000;
+        assert_eq!(REQUEST_LIMIT, 2000);
+        assert!(l.find("old", NOW + NINE_DAYS).is_some());
+        assert!(l.find("old", NOW + NINE_DAYS + 1).is_none());
         assert!(l.take_changes().delete.contains("old"));
         let mut held = Vec::new();
         for i in 0..REQUEST_LIMIT {

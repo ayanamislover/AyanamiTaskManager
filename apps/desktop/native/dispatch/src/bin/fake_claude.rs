@@ -188,11 +188,12 @@ fn session(args: &[String]) {
     }
 }
 
-/// 有没有控制台：`DETACHED_PROCESS` 起的会话没有，继承了宿主控制台的有。
+/// 有没有挂着控制台：`DETACHED_PROCESS` 起的会话没有；继承了宿主的（哪怕是没有窗口的）或新开了一个的都有。
+/// 不用 `GetConsoleWindow`：宿主自己是无窗口控制台时它也是空。
 #[cfg(windows)]
 fn has_console() -> bool {
-    // SAFETY: 只查询。
-    !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null()
+    // SAFETY: 只查询；没有控制台时返回 0。
+    unsafe { windows_sys::Win32::System::Console::GetConsoleCP() != 0 }
 }
 
 #[cfg(not(windows))]

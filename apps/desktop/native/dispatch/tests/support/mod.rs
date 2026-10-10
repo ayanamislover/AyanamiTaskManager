@@ -152,6 +152,8 @@ pub struct World {
     pub probe: Arc<Probing>,
     pub log: Arc<Logs>,
     pub claude: Arc<Mutex<Option<PathBuf>>>,
+    /// 这个世界里的假 claude（`FAKE_CLAUDE` 的副本）。
+    pub fake: PathBuf,
     pub auth_file: PathBuf,
 }
 
@@ -209,6 +211,9 @@ pub fn world(name: &str) -> World {
         })
         .unwrap();
     let auth_file = dir.join("auth.json");
+    // 用例拉起的是这一份副本：变异里没结束干净、还睡着的假 claude 只锁住它，锁不住 cargo 要重写的那个 exe。
+    let fake = dir.join(format!("claude-{}.exe", std::process::id()));
+    std::fs::copy(FAKE_CLAUDE, &fake).unwrap();
     World {
         logs: dir.join("data").join("dispatch").join("logs"),
         db,
@@ -218,7 +223,8 @@ pub fn world(name: &str) -> World {
         spawner: Arc::new(Counting::default()),
         probe: Arc::new(Probing::default()),
         log: Arc::new(Logs::default()),
-        claude: Arc::new(Mutex::new(Some(PathBuf::from(FAKE_CLAUDE)))),
+        claude: Arc::new(Mutex::new(Some(fake.clone()))),
+        fake,
         auth_file,
     }
 }
