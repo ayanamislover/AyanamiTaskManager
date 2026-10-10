@@ -339,6 +339,8 @@ pub struct Store {
     root: crate::pin::Dir,
     /// 库文件在 `root` 真实位置里的路径。
     real: PathBuf,
+    /// 打开时数据根字面写法的位置键（[`location_key`]），[`Store::rebase`] 用它认「在数据根下」。
+    literal_root: Vec<(String, String)>,
     config: Config,
     shared: Arc<Shared>,
     stats: Arc<Stats>,
@@ -356,6 +358,8 @@ impl Store {
         let name = path
             .file_name()
             .ok_or_else(|| StoreError::Io(format!("{} has no file name", path.display())))?;
+        // 打开时就记下字面写法的位置键：之后当前目录变了，相对写法的数据根也认得出来。
+        let literal_root = location_key(parent);
         let root = crate::pin::open(parent)
             .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
         let real = root.path().join(name);
@@ -411,6 +415,7 @@ impl Store {
         Ok(Store {
             path: path_given.to_path_buf(),
             real: real.clone(),
+            literal_root,
             root,
             config,
             shared,
@@ -443,23 +448,20 @@ impl Store {
         self.root.forge_identity();
     }
 
-    /// 调用方给的、在数据根字面路径之下的位置，换算到数据根的真实位置里；不在数据根下的原样返回。
+    /// 调用方给的、在数据根字面写法之下的位置，换算到 Store 钉住的数据根的真实位置里；不在数据根下的原样返回
+    /// （调用方另选的外部位置，照它的写法用）。「在数据根下」按 Windows 的同一位置比（[`location_key`]）：
+    /// 大小写、`\\?\` 与普通写法、相对写法、`.` / `..` 都认得出（peer W6 r6 P1-02），不按字符串前缀。
     pub(crate) fn rebase(&self, literal: &Path) -> PathBuf {
-        let parent = self
-            .path
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        match literal.strip_prefix(parent) {
-            Ok(rest) => {
-                let mut p = self.root.path().to_path_buf();
-                for c in rest.components() {
-                    p.push(c.as_os_str());
-                }
-                p
-            }
-            Err(_) => literal.to_path_buf(),
+        let base = &self.literal_root;
+        let key = location_key(literal);
+        if key.len() < base.len() || key.iter().zip(base).any(|(a, b)| a.1 != b.1) {
+            return literal.to_path_buf();
         }
+        let mut p = self.root.path().to_path_buf();
+        for (c, _) in &key[base.len()..] {
+            p.push(c);
+        }
+        p
     }
 
     pub fn stats(&self) -> &Stats {
@@ -1028,6 +1030,27 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     });
 }
 
+/// Windows 上「同一个位置」的比较键：按当前目录补成绝对路径（`std::path::absolute`，不跟随链接；普通写法由它照
+/// Win32 规则归一分隔符、`.`、`..`，`\\?\` 写法 Windows 本来就不解释这些，原样当名字），`\\?\UNC\` 换成 `\\`、
+/// `\\?\` 去掉，再逐段比、不分大小写（NTFS 默认）。每段是 (原样, 折叠后)；第一段是前缀（UNC 是 `\\`，盘符路径是空串）。
+pub(crate) fn location_key(p: &Path) -> Vec<(String, String)> {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let text = abs.to_string_lossy().into_owned();
+    let (head, rest) = if let Some(r) = text.strip_prefix(r"\\?\UNC\") {
+        (r"\\", r)
+    } else if let Some(r) = text.strip_prefix(r"\\?\") {
+        ("", r)
+    } else if let Some(r) = text.strip_prefix(r"\\") {
+        (r"\\", r)
+    } else {
+        ("", text.as_str())
+    };
+    let mut out = vec![(head.to_owned(), head.to_owned())];
+    for c in rest.split(['\\', '/']).filter(|c| !c.is_empty()) {
+        out.push((c.to_owned(), c.to_uppercase()));
+    }
+    out
+}
 #[cfg(test)]
 type AfterPin = Box<dyn FnOnce() + Send>;
 #[cfg(test)]

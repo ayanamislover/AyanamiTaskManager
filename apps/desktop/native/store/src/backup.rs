@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
 
 pub const MANIFEST_FORMAT: &str = "atm3-backup-1";
-const DB_FILE: &str = "atm.sqlite";
+pub(crate) const DB_FILE: &str = "atm.sqlite";
 const MANIFEST_FILE: &str = "manifest.json";
 const ARTIFACTS_DIR: &str = "artifacts";
 
@@ -837,11 +837,13 @@ pub fn verify_backup(store: &Store, id: &str) -> Result<VerifiedBackup> {
         row.ok_or_else(|| BackupError::NotFound(id.to_string()))?;
     let dir = PathBuf::from(dir);
     let db = dir.join(DB_FILE);
-    if !db.is_file() {
+    // 登记的是调用方给的写法；在数据根下的换算到 Store 钉住的真实位置里再找（peer W6 r6 P2-01）。
+    let located = store.rebase(&dir);
+    if !located.join(DB_FILE).is_file() {
         return Err(BackupError::Corrupt(format!("{} is missing", db.display())));
     }
     // 从这里起只读钉住的真实位置：校验的与之后恢复读的是同一份。
-    let mut pinned = crate::chain::Pinned::open(&dir)?;
+    let mut pinned = crate::chain::Pinned::open(&located)?;
     let root = pinned.real(Path::new(""));
     let artifacts = pinned.existing(Path::new(ARTIFACTS_DIR))?;
     let source = Arc::new(PinnedBackup {

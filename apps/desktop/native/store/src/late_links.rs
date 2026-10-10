@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::backup::{
-    BackupsRoot, attachments_lock, create_backup, create_backup_locked, side_reader,
+    BackupsRoot, DB_FILE, attachments_lock, create_backup, create_backup_locked, side_reader,
     sweep_withdrawn_locked, verify_backup,
 };
 use crate::{Config, Store};
@@ -455,4 +455,196 @@ fn connections_open_in_the_root_that_was_pinned() {
     assert_eq!(id, "ORIGINAL");
     assert_eq!(fs::read(&foreign_db).unwrap(), before);
     unlink(&alias);
+}
+
+/// FOREIGN 里一个 ATM 自己会清的暂存（名字是 ULID）与一个备份标记：被误认成本 Store 的就会被删。
+fn foreign_sentinels(foreign: &Path) -> Vec<PathBuf> {
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let staged = foreign
+        .join("N")
+        .join("exports")
+        .join(".staging")
+        .join(id)
+        .join("foreign.txt");
+    let backup = foreign
+        .join("N")
+        .join("backups")
+        .join(id)
+        .join("foreign.txt");
+    for f in [&staged, &backup] {
+        fs::create_dir_all(f.parent().unwrap()).unwrap();
+        fs::write(f, b"FOREIGN keep").unwrap();
+    }
+    let creating = foreign.join("N").join("backups").join(".creating");
+    fs::create_dir_all(&creating).unwrap();
+    fs::write(creating.join(id), b"").unwrap();
+    vec![staged, backup, creating.join(id)]
+}
+
+/// r6 P1-01：导出与两种导入的暂存（`exports\.staging`）也跟着 Store 的数据根走。提前换向之后以 alias 下的
+/// `exports` 调三个公开入口：暂存建在 ORIGINAL 里，FOREIGN 的暂存与备份一个都不删，导出文件也不落进 FOREIGN。
+/// 两种导入给的是坏来源：它们在暂存之后才失败，暂存那一步照样走到。
+#[test]
+fn export_and_import_staging_stays_with_the_live_store() {
+    for entry in ["export", "import-package", "import-knowledge"] {
+        let (b, real, foreign, alias, store, other) = two_roots(&format!("staging-{entry}"));
+        let kept = foreign_sentinels(&foreign);
+        let garbage = b.join("not-a-package.bin");
+        fs::write(&garbage, b"not a package").unwrap();
+        let old = swing(&alias, &foreign);
+        let exports = alias.join("N").join("exports");
+        let import = crate::package::ImportOptions {
+            exports_dir: &exports,
+            at: "2026-10-10T12:00:00Z",
+            code: None,
+            source_label: "late_links",
+        };
+        let outcome: Result<Option<PathBuf>, String> = match entry {
+            "export" => crate::package::export_project(
+                &store,
+                "PA",
+                crate::package::Format::Json,
+                &crate::package::ExportOptions {
+                    exports_dir: &exports,
+                    at: "2026-10-10T12:00:00Z",
+                    app_version: "test",
+                },
+            )
+            .map(|e| Some(e.path))
+            .map_err(|e| e.to_string()),
+            "import-package" => crate::package::import_project(
+                &store,
+                crate::package::ImportSource::Package(&b.join("missing.aytproj")),
+                &import,
+            )
+            .map(|_| None)
+            .map_err(|e| e.to_string()),
+            _ => crate::package::import_legacy_knowledge(&store, &garbage, &import)
+                .map(|_| None)
+                .map_err(|e| e.to_string()),
+        };
+        swing_back(&alias, &old);
+        for f in &kept {
+            assert!(f.exists(), "{entry}: {} was removed", f.display());
+        }
+        let foreign_exports: Vec<_> = fs::read_dir(foreign.join("N").join("exports"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(foreign_exports, [".staging"], "{entry}");
+        assert!(
+            real.join("N").join("exports").join(".staging").is_dir(),
+            "{entry}: the staging was not made in ORIGINAL"
+        );
+        if entry == "export" {
+            let out = outcome.unwrap().unwrap();
+            assert!(
+                real.join("N")
+                    .join("exports")
+                    .join(out.file_name().unwrap())
+                    .is_file()
+            );
+        } else {
+            assert!(outcome.is_err(), "{entry}: {outcome:?}");
+        }
+        drop(store);
+        drop(other);
+        unlink(&alias);
+    }
+}
+
+/// r6 P1-02：同一个位置换种写法（大小写、`\\?\`、正斜杠、`.` 与 `..`）还是 Store 的数据根下，备份与清扫都落在
+/// ORIGINAL，FOREIGN 的标记与备份不动。对照：数据根以外的备份根照调用方的写法用。
+#[test]
+fn a_backup_root_spelled_another_way_is_still_inside_the_store() {
+    for mode in ["exact", "case", "verbatim", "slashes", "dots", "external"] {
+        let (b, real, foreign, alias, store, other) = two_roots(&format!("spelling-{mode}"));
+        let kept = foreign_sentinels(&foreign);
+        let plain = alias.join("N").join("backups");
+        let root = match mode {
+            "case" => PathBuf::from(plain.to_string_lossy().to_uppercase()),
+            "verbatim" => PathBuf::from(format!(r"\\?\{}", plain.display())),
+            "slashes" => PathBuf::from(plain.to_string_lossy().replace('\\', "/")),
+            "dots" => alias
+                .join("N")
+                .join(".")
+                .join("x")
+                .join("..")
+                .join("backups"),
+            "external" => b.join("external-backups"),
+            _ => plain.clone(),
+        };
+        let old = swing(&alias, &foreign);
+        let made = create_backup(&store, &root, "MANUAL", "2026-10-10T12:00:00Z");
+        swing_back(&alias, &old);
+        let info = made.unwrap_or_else(|e| panic!("{mode}: {e}"));
+        for f in &kept {
+            assert!(f.exists(), "{mode}: {} was removed", f.display());
+        }
+        assert!(
+            !foreign.join("N").join("backups").join(&info.id).exists(),
+            "{mode}"
+        );
+        let landed = if mode == "external" {
+            b.join("external-backups")
+        } else {
+            real.join("N").join("backups")
+        };
+        assert!(landed.join(&info.id).join(DB_FILE).is_file(), "{mode}");
+        drop(store);
+        drop(other);
+        unlink(&alias);
+    }
+}
+
+/// r6 P2-01：alias 还指着别处时，刚建的备份照样校验得过（按 Store 钉住的位置找，不按登记的写法）。
+#[test]
+fn a_backup_verifies_while_the_alias_still_points_elsewhere() {
+    let (_b, real, foreign, alias, store, other) = two_roots("verify-swung");
+    let old = swing(&alias, &foreign);
+    let made = create_backup(
+        &store,
+        &alias.join("N").join("backups"),
+        "MANUAL",
+        "2026-10-10T12:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        real.join("N")
+            .join("backups")
+            .join(&made.id)
+            .join(DB_FILE)
+            .is_file()
+    );
+    let verified = verify_backup(&store, &made.id).map(|_| ());
+    swing_back(&alias, &old);
+    verified.unwrap();
+    drop(store);
+    drop(other);
+    unlink(&alias);
+}
+
+/// `location_key`：Windows 上的同一个位置得同一个键；段的边界不跨（`N` 不是 `N2` 的前缀）。
+#[test]
+fn location_keys_follow_windows_path_equality() {
+    let key = |p: &str| {
+        crate::engine::location_key(Path::new(p))
+            .into_iter()
+            .map(|(_, f)| f)
+            .collect::<Vec<_>>()
+    };
+    let same = key(r"C:\Data\N\backups");
+    for p in [
+        r"c:\data\n\BACKUPS",
+        r"\\?\C:\Data\N\backups",
+        "C:/Data/N/backups",
+        r"C:\Data\.\N\x\..\backups\",
+    ] {
+        assert_eq!(key(p), same, "{p}");
+    }
+    assert_eq!(key(r"\\?\UNC\server\share\N"), key(r"\\server\share\N"));
+    assert_ne!(key(r"\\server\share\N"), key(r"C:\server\share\N"));
+    let base = key(r"C:\Data\N");
+    let other = key(r"C:\Data\N2\backups");
+    assert!(other.len() > base.len() && other[..base.len()] != base[..]);
 }
