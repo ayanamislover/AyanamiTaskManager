@@ -624,27 +624,130 @@ fn a_backup_verifies_while_the_alias_still_points_elsewhere() {
     unlink(&alias);
 }
 
-/// `location_key`：Windows 上的同一个位置得同一个键；段的边界不跨（`N` 不是 `N2` 的前缀）。
+/// `Location`：Windows 上的同一个位置认作同一个；段的边界不跨（`N` 不是 `N2` 的前缀）；不做多字符的大小写展开；
+/// `\\?\` 写法里的 `..`、`/` 是名字（Windows 不解释它们）。
 #[test]
-fn location_keys_follow_windows_path_equality() {
-    let key = |p: &str| {
-        crate::engine::location_key(Path::new(p))
-            .into_iter()
-            .map(|(_, f)| f)
-            .collect::<Vec<_>>()
+fn locations_follow_windows_path_equality() {
+    use crate::engine::Location;
+    let inside = |p: &str, base: &str| {
+        Location::of(Path::new(p))
+            .below(&Location::of(Path::new(base)))
+            .map(|rest| {
+                rest.iter()
+                    .map(|c| c.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
     };
-    let same = key(r"C:\Data\N\backups");
+    let base = r"C:\Data\N";
     for p in [
         r"c:\data\n\BACKUPS",
         r"\\?\C:\Data\N\backups",
         "C:/Data/N/backups",
         r"C:\Data\.\N\x\..\backups\",
     ] {
-        assert_eq!(key(p), same, "{p}");
+        // 之下的部分保留调用方的写法。
+        let rest = inside(p, base).unwrap_or_else(|| panic!("{p}"));
+        assert_eq!(rest.len(), 1, "{p}");
+        assert!(rest[0].eq_ignore_ascii_case("backups"), "{p}");
     }
-    assert_eq!(key(r"\\?\UNC\server\share\N"), key(r"\\server\share\N"));
-    assert_ne!(key(r"\\server\share\N"), key(r"C:\server\share\N"));
-    let base = key(r"C:\Data\N");
-    let other = key(r"C:\Data\N2\backups");
-    assert!(other.len() > base.len() && other[..base.len()] != base[..]);
+    assert_eq!(inside(base, base), Some(vec![]));
+    assert_eq!(
+        inside(r"\\?\UNC\server\share\N\x", r"\\server\share\N"),
+        Some(vec!["x".to_owned()])
+    );
+    assert_eq!(inside(r"C:\server\share\N", r"\\server\share\N"), None);
+    assert_eq!(inside(r"C:\Data\N2\backups", base), None);
+    // ß 的大写是 SS（两个字符），NTFS 不这样比：两个名字不同。单个码元的大小写照常等价。
+    assert_eq!(inside(r"C:\STRASSE\N", r"C:\straße\N"), None);
+    assert_eq!(
+        inside(r"C:\STRAßE\N\b", r"C:\straße\N"),
+        Some(vec!["b".to_owned()])
+    );
+    assert_eq!(inside(r"C:\ÄRGER\N", r"C:\ärger\N"), Some(vec![]));
+    // `\\?\` 写法：`..` 与 `/` 原样是名字，不归一。
+    assert_eq!(
+        inside(r"\\?\C:\Data\N\..\N2", base),
+        Some(vec!["..".to_owned(), "N2".to_owned()])
+    );
+    assert_eq!(
+        inside(r"\\?\C:\Data\N\a/b", base),
+        Some(vec!["a/b".to_owned()])
+    );
+}
+
+/// r7 P1-01：名字只是「Unicode 全量大写后相同」的另一个目录（`straße` 与 `STRASSE`）是真正的外部位置：备份落在
+/// 调用方给的那里，Store 自己的备份根一个标记都不清。
+#[test]
+fn an_external_root_that_only_upper_cases_alike_stays_external() {
+    let b = base("unicode-external");
+    let (ours, theirs) = (b.join("straße"), b.join("STRASSE"));
+    fs::create_dir_all(ours.join("N")).unwrap();
+    fs::create_dir_all(theirs.join("N")).unwrap();
+    let (a, z) = (
+        crate::pin::open(&ours).unwrap().id(),
+        crate::pin::open(&theirs).unwrap().id(),
+    );
+    assert_ne!(a, z, "两个不同的目录");
+    let store = store_with_identity(&ours.join("N").join("atm.sqlite"), "ORIGINAL");
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let keep = ours.join("N").join("backups").join(id).join("keep.txt");
+    fs::create_dir_all(keep.parent().unwrap()).unwrap();
+    fs::write(&keep, b"keep").unwrap();
+    let creating = ours.join("N").join("backups").join(".creating");
+    fs::create_dir_all(&creating).unwrap();
+    fs::write(creating.join(id), b"").unwrap();
+    let made = create_backup(
+        &store,
+        &theirs.join("N").join("backups"),
+        "MANUAL",
+        "2026-10-10T12:00:00Z",
+    )
+    .unwrap();
+    assert!(
+        theirs
+            .join("N")
+            .join("backups")
+            .join(&made.id)
+            .join(DB_FILE)
+            .is_file()
+    );
+    assert!(!ours.join("N").join("backups").join(&made.id).exists());
+    assert!(
+        keep.exists() && creating.join(id).exists(),
+        "Store 自己的标记被清了"
+    );
+}
+
+/// r7 P1-02：`\\?\` 写法里数据根之下的 `..` 不会被换算成兄弟目录：原来打不开的路径换算后照样打不开，兄弟目录里
+/// 什么都不写、什么都不清。
+#[test]
+fn a_verbatim_dot_dot_below_the_root_does_not_become_a_sibling() {
+    let b = base("verbatim-dots");
+    let real = b.join("real");
+    fs::create_dir_all(real.join("N")).unwrap();
+    let alias = b.join("alias");
+    junction(&alias, &real);
+    let store = store_with_identity(&alias.join("N").join("atm.sqlite"), "ORIGINAL");
+    let id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    let sibling = real.join("N2").join("backups");
+    let keep = sibling.join(id).join("keep.txt");
+    fs::create_dir_all(keep.parent().unwrap()).unwrap();
+    fs::write(&keep, b"keep").unwrap();
+    fs::create_dir_all(sibling.join(".creating")).unwrap();
+    fs::write(sibling.join(".creating").join(id), b"").unwrap();
+    let literal = PathBuf::from(format!(r"\\?\{}\N\..\N2\backups", alias.display()));
+    assert!(
+        crate::pin::open(literal.parent().unwrap()).is_err(),
+        "原路径本来就打不开"
+    );
+    let made = create_backup(&store, &literal, "MANUAL", "2026-10-10T12:00:00Z");
+    drop(store);
+    unlink(&alias);
+    assert!(made.is_err(), "{made:?}");
+    assert!(keep.exists() && sibling.join(".creating").join(id).exists());
+    let entries: Vec<_> = fs::read_dir(&sibling)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(entries.len(), 2, "兄弟目录里多了东西：{entries:?}");
 }

@@ -339,8 +339,8 @@ pub struct Store {
     root: crate::pin::Dir,
     /// 库文件在 `root` 真实位置里的路径。
     real: PathBuf,
-    /// 打开时数据根字面写法的位置键（[`location_key`]），[`Store::rebase`] 用它认「在数据根下」。
-    literal_root: Vec<(String, String)>,
+    /// 打开时数据根字面写法的位置（[`Location`]），[`Store::rebase`] 用它认「在数据根下」。
+    literal_root: Location,
     config: Config,
     shared: Arc<Shared>,
     stats: Arc<Stats>,
@@ -359,7 +359,7 @@ impl Store {
             .file_name()
             .ok_or_else(|| StoreError::Io(format!("{} has no file name", path.display())))?;
         // 打开时就记下字面写法的位置键：之后当前目录变了，相对写法的数据根也认得出来。
-        let literal_root = location_key(parent);
+        let literal_root = Location::of(parent);
         let root = crate::pin::open(parent)
             .map_err(|e| StoreError::Io(format!("{}: {e}", parent.display())))?;
         let real = root.path().join(name);
@@ -449,19 +449,25 @@ impl Store {
     }
 
     /// 调用方给的、在数据根字面写法之下的位置，换算到 Store 钉住的数据根的真实位置里；不在数据根下的原样返回
-    /// （调用方另选的外部位置，照它的写法用）。「在数据根下」按 Windows 的同一位置比（[`location_key`]）：
-    /// 大小写、`\\?\` 与普通写法、相对写法、`.` / `..` 都认得出（peer W6 r6 P1-02），不按字符串前缀。
+    /// （调用方另选的外部位置，照它的写法用）。「在数据根下」按 Windows 的同一位置比（[`Location`]）：
+    /// 大小写、`\\?\` 与普通写法、相对写法、普通写法的 `.` / `..` 都认得出（peer W6 r6 P1-02），不按字符串前缀。
+    ///
+    /// 数据根以下的部分原样接在真实位置后面（按 `\` 拼字符串，不经 `PathBuf::push`：它在 `\\?\` 写法上会把
+    /// `.`、`..` 归一掉，peer W6 r7 P1-02）。所以 `\\?\` 写法里 Windows 本来不解释的 `.`、`..`、`/`，换算后
+    /// 仍是名字：原来打不开的路径换算后照样打不开，不会变成兄弟目录。
     pub(crate) fn rebase(&self, literal: &Path) -> PathBuf {
-        let base = &self.literal_root;
-        let key = location_key(literal);
-        if key.len() < base.len() || key.iter().zip(base).any(|(a, b)| a.1 != b.1) {
+        let key = Location::of(literal);
+        let Some(rest) = key.below(&self.literal_root) else {
             return literal.to_path_buf();
+        };
+        let mut s = self.root.path().as_os_str().to_owned();
+        for c in rest {
+            if !s.to_string_lossy().ends_with('\\') {
+                s.push("\\");
+            }
+            s.push(c);
         }
-        let mut p = self.root.path().to_path_buf();
-        for (c, _) in &key[base.len()..] {
-            p.push(c);
-        }
-        p
+        PathBuf::from(s)
     }
 
     pub fn stats(&self) -> &Stats {
@@ -1030,26 +1036,106 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
     });
 }
 
-/// Windows 上「同一个位置」的比较键：按当前目录补成绝对路径（`std::path::absolute`，不跟随链接；普通写法由它照
-/// Win32 规则归一分隔符、`.`、`..`，`\\?\` 写法 Windows 本来就不解释这些，原样当名字），`\\?\UNC\` 换成 `\\`、
-/// `\\?\` 去掉，再逐段比、不分大小写（NTFS 默认）。每段是 (原样, 折叠后)；第一段是前缀（UNC 是 `\\`，盘符路径是空串）。
-pub(crate) fn location_key(p: &Path) -> Vec<(String, String)> {
-    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
-    let text = abs.to_string_lossy().into_owned();
-    let (head, rest) = if let Some(r) = text.strip_prefix(r"\\?\UNC\") {
-        (r"\\", r)
-    } else if let Some(r) = text.strip_prefix(r"\\?\") {
-        ("", r)
-    } else if let Some(r) = text.strip_prefix(r"\\") {
-        (r"\\", r)
-    } else {
-        ("", text.as_str())
-    };
-    let mut out = vec![(head.to_owned(), head.to_owned())];
-    for c in rest.split(['\\', '/']).filter(|c| !c.is_empty()) {
-        out.push((c.to_owned(), c.to_uppercase()));
+/// Windows 上的一个位置：按当前目录补成绝对路径（`std::path::absolute`，不跟随链接；普通写法由它照 Win32 规则
+/// 归一 `/`、`.`、`..`——与打开文件时 Windows 自己做的是同一步；`\\?\` 写法它原样返回，Windows 也不解释其中的
+/// `.`、`..`、`/`），再拆成前缀（`\\?\UNC\` 与 `\\` 同为 UNC）与逐段的名字。名字保留 UTF-16 原样，比较见
+/// [`same_name`]。
+#[derive(Clone, Debug)]
+pub(crate) struct Location {
+    unc: bool,
+    parts: Vec<std::ffi::OsString>,
+}
+
+impl Location {
+    pub(crate) fn of(p: &Path) -> Location {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        let units = wide(abs.as_os_str());
+        let starts = |prefix: &str| {
+            let p: Vec<u16> = prefix.encode_utf16().collect();
+            units.starts_with(&p).then_some(p.len())
+        };
+        let (unc, skip) = if let Some(n) = starts(r"\\?\UNC\") {
+            (true, n)
+        } else if let Some(n) = starts(r"\\?\") {
+            (false, n)
+        } else if let Some(n) = starts(r"\\") {
+            (true, n)
+        } else {
+            (false, 0)
+        };
+        let parts = units[skip..]
+            .split(|u| *u == u16::from(b'\\'))
+            .filter(|c| !c.is_empty())
+            .map(from_wide)
+            .collect();
+        Location { unc, parts }
     }
-    out
+
+    /// `self` 在 `base` 之下时，返回之下的那几段（`base` 自己是空切片）；不在之下是 `None`。
+    pub(crate) fn below<'a>(&'a self, base: &Location) -> Option<&'a [std::ffi::OsString]> {
+        let inside = self.unc == base.unc
+            && self.parts.len() >= base.parts.len()
+            && self
+                .parts
+                .iter()
+                .zip(&base.parts)
+                .all(|(a, b)| same_name(a, b));
+        inside.then(|| &self.parts[base.parts.len()..])
+    }
+}
+
+#[cfg(windows)]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    s.encode_wide().collect()
+}
+
+#[cfg(windows)]
+fn from_wide(units: &[u16]) -> std::ffi::OsString {
+    use std::os::windows::ffi::OsStringExt;
+    std::ffi::OsString::from_wide(units)
+}
+
+#[cfg(not(windows))]
+fn wide(s: &std::ffi::OsStr) -> Vec<u16> {
+    s.to_string_lossy()
+        .replace('/', "\\")
+        .encode_utf16()
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn from_wide(units: &[u16]) -> std::ffi::OsString {
+    String::from_utf16_lossy(units).into()
+}
+
+/// 同一个名字：Windows 的序数比较、不分大小写（`CompareStringOrdinal(…, TRUE)`：用系统的大写表逐个 UTF-16 码元比，
+/// 与 NTFS 判两个名字相同用的是同一种规则）。不做 Unicode 的多字符展开：`straße` 与 `STRASSE` 是两个名字
+/// （peer W6 r7 P1-01）。
+#[cfg(windows)]
+pub(crate) fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CompareStringOrdinal(
+            string1: *const u16,
+            count1: i32,
+            string2: *const u16,
+            count2: i32,
+            ignore_case: i32,
+        ) -> i32;
+    }
+    const CSTR_EQUAL: i32 = 2;
+    let (a, b) = (wide(a), wide(b));
+    let (Ok(na), Ok(nb)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: 两个缓冲在调用期间有效，长度如实给出（不要求以 0 结尾）。
+    unsafe { CompareStringOrdinal(a.as_ptr(), na, b.as_ptr(), nb, 1) == CSTR_EQUAL }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn same_name(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    a == b
 }
 #[cfg(test)]
 type AfterPin = Box<dyn FnOnce() + Send>;
