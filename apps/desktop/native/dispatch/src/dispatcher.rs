@@ -41,6 +41,9 @@ use crate::record::{self, ExitCode, Record, State};
 
 /// 接管的进程连续这么多次查不到出生标识（身份核验不了）就停止跟踪；进程本身不动。
 pub const IDENTITY_MISS_LIMIT: u32 = 3;
+/// 接管的会话多久重核一次 PID + 出生标识（2.x `TRACK_INTERVAL_MS = 5000`）。宿主把它作为 [`Options::poll`] 传入，
+/// 用例传更短的间隔。
+pub const TRACK_INTERVAL: Duration = Duration::from_secs(5);
 /// 可以派单的任务状态：还没人开工的。
 const DISPATCHABLE: &[&str] = &["READY", "BACKLOG"];
 /// 关闭时等在途步骤的间隔。
@@ -1548,6 +1551,11 @@ mod tests {
             claimed_by_session_id: claimed.map(str::to_owned),
             claim_lease_until: lease.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn the_tracking_interval_is_the_2x_five_seconds() {
+        assert_eq!(TRACK_INTERVAL, Duration::from_millis(5000));
     }
 
     #[test]

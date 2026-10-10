@@ -5044,6 +5044,63 @@ mod w3d {
         }
     }
 
+    /// M-08：2.x 派单还在跑的会话一直往旧根的日志里写（`.jsonl` 变长、`.stderr.log` 这时才出现）。它的日志不进快照，
+    /// 所以 SNAPSHOT 前后两次枚举不因此不同，转换照常完成；那份日志留在旧根，派单行登记 LEGACY。
+    /// 对照：已结束的会话的日志变了，照样是源未静止。
+    #[test]
+    fn m08_a_running_session_writing_its_legacy_log_does_not_unsettle_the_snapshot() {
+        for (name, rel, settles) in [
+            ("w3d-live-log", "dispatch/logs/run-live.jsonl", true),
+            ("w3d-live-new", "dispatch/logs/run-live.stderr.log", true),
+            ("w3d-ended-log", "dispatch/logs/run-ok.jsonl", false),
+        ] {
+            let (f, root) = json_fixture(name);
+            let n = layout(&f, "n");
+            let log = root.join(rel);
+            let mut hook = |s: Step| {
+                if s == Step::SnapshotCopied {
+                    let mut text = fs::read(&log).unwrap_or_default();
+                    text.extend_from_slice(b"{\"type\":\"assistant\"}\n");
+                    fs::write(&log, text).unwrap();
+                }
+                true
+            };
+            let r = cv::run(
+                &n,
+                RunOptions {
+                    at: AT,
+                    generation: G1,
+                    legacy_root: &root,
+                    allow_real_data_root: false,
+                    real_data_root: None,
+                    secrets_check: Some(secrets_ok),
+                    accept_unconvertible: &[],
+                    hook: &mut hook,
+                    progress: None,
+                },
+            );
+            if settles {
+                let m = r.unwrap_or_else(|e| panic!("{rel}: {e}"));
+                assert_eq!(m.phase, Phase::Published, "{rel}");
+                let t = Connection::open(n.database()).unwrap();
+                let home: String = t
+                    .query_row(
+                        "SELECT log_root FROM dispatch_runs WHERE run = 'run-live'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(home, "LEGACY", "{rel}");
+                assert!(!n.data().join("dispatch/logs/run-live.jsonl").exists());
+            } else {
+                assert!(
+                    matches!(&r, Err(cv::Error::SourceNotQuiet(why)) if why.contains("run-ok.jsonl")),
+                    "{rel}: {r:?}"
+                );
+            }
+        }
+    }
+
     /// SNAPSHOT 之后数据根再变也不影响这一次：转换读的是快照，不是数据根。
     #[test]
     fn the_conversion_reads_the_snapshot_not_the_live_root() {

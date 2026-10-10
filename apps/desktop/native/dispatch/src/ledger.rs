@@ -65,8 +65,8 @@ pub fn request_timestamp(id: &str) -> Option<i64> {
         return None;
     }
     let at = i64::from_str_radix(stamp, 36).ok()?;
-    // Number.isSafeInteger。
-    (at <= (1i64 << 53) - 1).then_some(at)
+    // Number.isSafeInteger：不超过 2^53 − 1。
+    (at < (1i64 << 53)).then_some(at)
 }
 
 /// 一条账本记录。

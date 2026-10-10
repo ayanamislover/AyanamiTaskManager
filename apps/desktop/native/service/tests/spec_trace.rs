@@ -3,7 +3,7 @@
 //! 输入三样：
 //! - `trace/rules.tsv`：从规格抽出的编号快照（规格目录不进仓库；`output/w2-evidence/spec-trace-extract.py --check`
 //!   负责确认快照没过期）；
-//! - 工作区 domain / store / service / http / jobs / host / ui-bridge / runtime / cli / agents 里全部 `#[test]` 函数：测试名里的 `w052`、`s080`、`p005`、`l112` 这类 token 自动算作覆盖；
+//! - 工作区 domain / store / service / http / jobs / host / ui-bridge / runtime / cli / agents / sync / dispatch 里全部 `#[test]` 函数：测试名里的 `w052`、`s080`、`p005`、`l112` 这类 token 自动算作覆盖；
 //! - `TRACE.md` 的映射表：测试名里没带编号的覆盖、被裁决取代的规则、留给后续阶段的去向。
 //!
 //! 失败条件：
@@ -149,6 +149,7 @@ fn load_tests() -> Vec<TestFn> {
         "cli",
         "agents",
         "sync",
+        "dispatch",
     ] {
         rust_files(&root.join(krate), &mut files);
     }

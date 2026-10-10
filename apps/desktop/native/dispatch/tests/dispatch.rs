@@ -158,6 +158,9 @@ fn a_successful_session_gets_its_arguments_prompt_cwd_logs_and_a_clean_environme
     assert!(!names.contains(&"CLAUDE_CODE_ENTRYPOINT".to_owned()));
     assert_eq!(dump["env"]["ATM_DISPATCH_RUN"], run.as_str());
     assert_eq!(dump["env"]["KEEP_DISPATCH_VALUE"], "kept");
+    // detached + windowsHide：没有继承宿主（用例进程）的控制台，窗口要求隐藏（SW_HIDE = 0）。
+    assert_eq!(dump["console"], false);
+    assert_eq!(dump["showWindow"], 0);
     // 日志落盘；摘要从 result 行来，按 500 字截断。
     let log = std::fs::read_to_string(w.logs.join(format!("{run}.jsonl"))).unwrap();
     assert!(log.contains("\"type\":\"result\""));

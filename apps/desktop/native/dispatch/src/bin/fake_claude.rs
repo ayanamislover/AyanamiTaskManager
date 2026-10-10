@@ -5,7 +5,8 @@
 //!   `tree` 再起一个孙进程一起睡着，用例据此核对「结束整棵进程树」。
 //! - `auth status` 由环境变量 `FAKE_CLAUDE_AUTH_FILE` 指向的 JSON 决定：`{ "mode": "in" | "out" | "hang" | "garbage" }`，
 //!   没有这个变量时视为已登录；每探一次往 `<文件>.count` 追加一行，用例据此数探测次数。
-//! - 每次会话都把收到的参数、stdin、工作目录与环境变量名写进 `fake-claude-dump-<ATM_DISPATCH_RUN>.json`。
+//! - 每次会话都把收到的参数、stdin、工作目录与环境变量名写进 `fake-claude-dump-<ATM_DISPATCH_RUN>.json`，
+//!   外加它有没有控制台（脱离宿主控制台起的就没有）与启动信息里要求的窗口显示方式（隐藏是 0）。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -133,6 +134,8 @@ fn session(args: &[String]) {
         "env": env,
         "pid": std::process::id(),
         "grandchild": grandchild,
+        "console": has_console(),
+        "showWindow": show_window(),
     });
     let _ = std::fs::write(
         cwd.join(format!("fake-claude-dump-{run}.json")),
@@ -183,4 +186,33 @@ fn session(args: &[String]) {
             }));
         }
     }
+}
+
+/// 有没有控制台：`DETACHED_PROCESS` 起的会话没有，继承了宿主控制台的有。
+#[cfg(windows)]
+fn has_console() -> bool {
+    // SAFETY: 只查询。
+    !unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null()
+}
+
+#[cfg(not(windows))]
+fn has_console() -> bool {
+    false
+}
+
+/// 启动信息里要求的窗口显示方式（`STARTF_USESHOWWINDOW` 没置位是 `None`）。
+#[cfg(windows)]
+fn show_window() -> Option<u16> {
+    use windows_sys::Win32::System::Threading::{
+        GetStartupInfoW, STARTF_USESHOWWINDOW, STARTUPINFOW,
+    };
+    // SAFETY: 全零是 STARTUPINFOW 的合法初值；GetStartupInfoW 只写这个结构。
+    let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
+    unsafe { GetStartupInfoW(&mut si) };
+    (si.dwFlags & STARTF_USESHOWWINDOW != 0).then_some(si.wShowWindow)
+}
+
+#[cfg(not(windows))]
+fn show_window() -> Option<u16> {
+    None
 }
