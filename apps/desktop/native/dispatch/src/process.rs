@@ -698,4 +698,24 @@ mod tests {
         assert_eq!(Native.identity(0x7fff_fffd), None);
         assert_eq!(Native.kill_tree(0x7fff_fffd), KillResult::Gone);
     }
+
+    /// 已经退出、句柄还在的进程（取消时持有着、它恰好自己结束了）：PID 打得开，taskkill 照样起，找不到进程退出
+    /// 128，记为不在。只碰本用例自己起的 `cmd /c exit`。
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_process_that_is_still_held_is_gone_by_taskkill_128() {
+        let mut child = std::process::Command::new(system32("cmd.exe"))
+            .args(["/d", "/c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let pid = child.id();
+        let Hold::Held(held) = Native.hold(pid) else {
+            panic!("句柄还在，PID 应该打得开");
+        };
+        assert!(!held.alive());
+        assert_eq!(Native.kill_tree(pid), KillResult::Gone);
+        drop(held);
+        drop(child);
+    }
 }
