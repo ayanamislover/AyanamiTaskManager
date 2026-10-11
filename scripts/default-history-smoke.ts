@@ -10,6 +10,7 @@
  *
  * 截图写 output/playwright/default-history-restored.png，报告写 output/history-smoke-report.json。
  */
+import { agentFetch } from "./agent-fetch.js";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -54,7 +55,7 @@ const sandbox = await prepareSandbox("history-smoke", { dataDir, fresh: false })
 async function systemStatus(
   runtime: SmokeRuntime,
 ): Promise<{ ok?: boolean; projectCount?: number }> {
-  const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+  const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
     headers: { authorization: `Bearer ${runtime.token}` },
   });
   if (!response.ok) throw new Error(`读取服务状态失败：${response.status}`);
@@ -84,7 +85,7 @@ async function seed(renderer: SmokeRenderer): Promise<void> {
 
 // 先拍 Run 快照再启动宿主：读不到就什么都不启动。
 const loginItems = snapshotLoginItems();
-let host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+let host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
 let renderer: SmokeRenderer | null = null;
 let error: unknown;
 let seeded = false;
@@ -100,7 +101,7 @@ try {
         await opened.renderer.browser.close();
         renderer = null;
         log.record("种子写入后宿主干净退出", await stopSmokeHost(host), host.stderr.join(""));
-        host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+        host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
         opened = await open(host);
         renderer = opened.renderer;
       }
@@ -134,7 +135,7 @@ try {
     } finally {
       await (renderer as SmokeRenderer | null)?.browser.close().catch(() => undefined);
       log.record("--smoke-quit 干净退出", await stopSmokeHost(host), host.stderr.join(""));
-      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.dataDir)));
+      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.v3Dir)));
     }
   });
 } catch (caught) {

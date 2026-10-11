@@ -442,7 +442,7 @@ async function measure(renderer: SmokeRenderer, window: NativeWindowState): Prom
   );
 }
 
-const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+const host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
 try {
   await loginItems.restoreAfter(async () => {
     let renderer: SmokeRenderer | null = null;

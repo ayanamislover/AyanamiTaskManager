@@ -11,6 +11,7 @@
  * 数据根固定在 output/window-smoke-data，报告写 output/window-smoke-report.json，
  * 截图写 output/playwright/。
  */
+import { agentFetch } from "./agent-fetch.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -236,7 +237,7 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
       () => page.getByText("设置已保存", { exact: true }).isVisible(),
       Boolean,
     );
-    const settingsResponse = await fetch(`${runtime.endpoint}/api/v1/settings`, {
+    const settingsResponse = await agentFetch(`${runtime.endpoint}/api/v1/settings`, {
       headers: { authorization: `Bearer ${runtime.token}` },
     });
     const storedSettings = (await settingsResponse.json()) as Array<{
@@ -447,7 +448,7 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
       !exited(host.child),
       `pid ${host.pid} exit ${String(host.child.exitCode ?? host.child.signalCode)}`,
     );
-    check("关到托盘后服务仍健康", (await readRuntime(host.dataDir)) !== null);
+    check("关到托盘后服务仍健康", (await readRuntime(host.v3Dir)) !== null);
     await requestShow(host);
     const reopened = await visibleWindow(host, "关到托盘后重新打开");
     check("重新打开的是新窗口", reopened.hwnd !== shown.hwnd, String(reopened.hwnd));
@@ -606,7 +607,7 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   }
 }
 
-const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+const host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
 let error: unknown;
 let details: Record<string, unknown> = {};
 try {
@@ -616,7 +617,7 @@ try {
     } finally {
       const clean = await stopSmokeHost(host);
       log.record("--smoke-quit 干净退出", clean, host.stderr.join(""));
-      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.dataDir)));
+      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.v3Dir)));
     }
   });
 } catch (caught) {

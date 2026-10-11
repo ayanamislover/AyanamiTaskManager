@@ -110,7 +110,7 @@ async function main(executable: string): Promise<void> {
     ATM_SMOKE_WATCHDOG_MS: String(WATCHDOG_MS),
   };
   const begun = Date.now();
-  const host = startSmokeHost({ executable, dataDir: n, env });
+  const host = startSmokeHost({ executable, v3Dir: n, env });
   try {
     const progressPath = join(n, "runtime", "startup-progress.json");
     let last = "";

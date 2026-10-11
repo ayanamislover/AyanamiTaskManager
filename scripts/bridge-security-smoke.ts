@@ -828,8 +828,8 @@ const executable = smokeHost();
 const box = sandbox();
 // 先拍 Run 快照再启动宿主：读不到就什么都不启动。
 const loginItems = snapshotLoginItems([executable]);
-// dataDir 给 N：CDP 端口文件在 N\webview，daemon.json 在 N\runtime（3.0 的文件都在新根）。
-const host = startSmokeHost({ executable, dataDir: box.n, env: box.env });
+// v3Dir 给 N：CDP 端口文件在 N\webview，daemon.json 在 N\runtime（3.0 的文件都在新根）。
+const host = startSmokeHost({ executable, v3Dir: box.n, env: box.env });
 let error: unknown;
 try {
   await loginItems.restoreAfter(async () => {

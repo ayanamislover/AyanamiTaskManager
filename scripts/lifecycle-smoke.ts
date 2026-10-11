@@ -397,7 +397,7 @@ async function start(
 ): Promise<SmokeHost> {
   const host = startSmokeHost({
     executable,
-    dataDir: box.n,
+    v3Dir: box.n,
     env: box.env,
     ...(args === undefined ? {} : { args }),
   });

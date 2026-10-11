@@ -457,7 +457,7 @@ async function runV3(): Promise<void> {
     ATM_DEV_REPOSITORY_ROOT: repoRoot,
   };
   const loginItems = snapshotLoginItems([executable]);
-  const host: SmokeHost = startSmokeHost({ executable, dataDir: n, env });
+  const host: SmokeHost = startSmokeHost({ executable, v3Dir: n, env });
   try {
     await loginItems.restoreAfter(async () => {
       let renderer: SmokeRenderer | null = null;

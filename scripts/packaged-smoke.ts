@@ -1,3 +1,4 @@
+import { agentFetch } from "./agent-fetch.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
@@ -81,12 +82,20 @@ const reportPath = resolve(
 const agentConfigPrefix = "packaged-smoke-agent-config-";
 const agentConfigRoot = resolve(join(outputDir, `${agentConfigPrefix}${randomUUID()}`));
 const smokeHome = join(agentConfigRoot, "Home");
-const smokeAppData = join(agentConfigRoot, "Roaming");
-const smokeLocalAppData = join(agentConfigRoot, "Local");
+// 与真实 profile 同样的相对位置：smoke 宿主的 Agent 接入按 ATM_SMOKE_CORE_USERPROFILE 推出
+// AppData\Roaming / AppData\Local（host/src/agents.rs），Claude Desktop 的配置在前者。
+const smokeAppData = join(smokeHome, "AppData", "Roaming");
+const smokeLocalAppData = join(smokeHome, "AppData", "Local");
 const codexConfigPath = join(smokeHome, ".codex", "config.toml");
 const claudeConfigPath = join(smokeAppData, "Claude", "claude_desktop_config.json");
 const kimiConfigPath = join(smokeHome, ".kimi-code", "mcp.json");
-const runtimePath = join(dataDir, "runtime", "daemon.json");
+/**
+ * 3.0 根 N：3.x 是单进程，宿主自己就是服务，运行文件（daemon.json、daemon.lock、host.json）、
+ * WebView 数据与 lifecycle / host 日志都在这里。显式指到合成 LOCALAPPDATA 下（与产品默认的相对位置
+ * 一样），继承来的 ATM3_DATA_DIR 一律不用。dataDir 是 2.x 根 L：转换的来源、Agent 文档与 current 链接。
+ */
+const v3Dir = join(smokeLocalAppData, "AyanamiTaskManager3");
+const runtimePath = join(v3Dir, "runtime", "daemon.json");
 const hostileInheritedTokenOverride = "packaged-smoke-inherited-token-must-be-ignored";
 const inheritedEnvironment = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -94,6 +103,7 @@ const inheritedEnvironment = Object.fromEntries(
 const smokeEnvironment = {
   ...inheritedEnvironment,
   ATM_DATA_DIR: dataDir,
+  ATM3_DATA_DIR: v3Dir,
   AYANAMI_TASK_TOKEN: hostileInheritedTokenOverride,
   ATM_PACKAGED_SMOKE: "1",
   ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
@@ -105,8 +115,8 @@ const smokeEnvironment = {
 };
 /**
  * 宿主进程用的环境：WebView2 在合成的 USERPROFILE 下起不来，宿主保留真实 profile；
- * smoke 构建的宿主把 ATM_SMOKE_CORE_USERPROFILE 交给它拉起的 Node（core 与 stdio 桥），
- * Agent 配置的位置由它们的 os.homedir() 决定，于是仍落在合成 home 里。
+ * smoke 构建的宿主用 ATM_SMOKE_CORE_USERPROFILE 作 Agent 接入的 home（agents.rs），
+ * Agent 配置仍落在合成 home 里。
  */
 const hostEnvironment = {
   ...smokeEnvironment,
@@ -155,8 +165,8 @@ async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): 
 }
 
 // smoke 宿主让 WebView2 以 --remote-debugging-port=0 启动，Chromium 把实际端口写在
-// WebView2 用户数据目录（<数据根>\webview）下——不猜端口。
-const devToolsPortFile = join(dataDir, "webview", "EBWebView", "DevToolsActivePort");
+// WebView2 用户数据目录（N\webview）下——不猜端口。
+const devToolsPortFile = join(v3Dir, "webview", "EBWebView", "DevToolsActivePort");
 
 function startApp(): RunningApp {
   rmSync(devToolsPortFile, { force: true });
@@ -223,7 +233,7 @@ async function waitForRuntime(app: RunningApp): Promise<Runtime> {
       throw new Error(`应用提前退出（${app.child.exitCode}）：${app.stderr.join("")}`);
     if (!existsSync(runtimePath)) return null;
     const runtime = JSON.parse(await readFile(runtimePath, "utf8")) as Runtime;
-    const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+    const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
       headers: { authorization: `Bearer ${runtime.token}` },
     });
     return response.ok ? runtime : null;
@@ -431,7 +441,7 @@ async function rejectedByHost(
   method: string,
   ...args: unknown[]
 ): Promise<boolean> {
-  const logPath = join(dataDir, "logs", "host.log");
+  const logPath = join(v3Dir, "logs", "host.log");
   const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0;
   const settled = await Promise.race([
     call(method, ...args).then(
@@ -577,7 +587,7 @@ async function checkShimWakesApp(): Promise<void> {
   try {
     const tools = await packagedProfileTools("core");
     check("应用退出后 shim 唤醒宿主并完成握手", tools.includes("atm_begin"), tools.join(","));
-    const lifecycle = join(dataDir, "logs", "lifecycle-core.ndjson");
+    const lifecycle = join(v3Dir, "logs", "lifecycle.ndjson");
     const startups = readFileSync(lifecycle, "utf8")
       .split(/\r?\n/u)
       .filter(Boolean)
@@ -1049,7 +1059,7 @@ await writeFile(
 );
 
 // Keep this parent PID alive: a PID-only lock implementation must fail this real EXE probe.
-const lockPath = join(dataDir, "runtime", "daemon.lock");
+const lockPath = join(v3Dir, "runtime", "daemon.lock");
 await mkdir(dirname(lockPath), { recursive: true });
 await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-boot" }));
 const previousBoot = new Date("2020-01-01T00:00:00Z");
@@ -1074,12 +1084,12 @@ try {
   );
   recordedAgentProfiles = await waitForPackagedAgentProfiles();
   // runtime.token 是 Agent 凭证：读和 Agent 写走它；用户操作走 user（真实 renderer 路径）。
-  const client = new AyanamiClient(runtime);
+  const client = new AyanamiClient({ ...runtime, fetchImpl: agentFetch });
   user = await connectUserRenderer();
   const status = await client.status();
   check("打包应用健康检查", status.ok === true);
   check("正式桌面忽略继承的固定 token override", runtime.token !== hostileInheritedTokenOverride);
-  check("live runtime 不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
+  check("live runtime 不存在旧 local.token", !existsSync(join(v3Dir, "runtime", "local.token")));
   check(
     "打包 native SQLite 可用",
     Boolean((status.sqlite as Record<string, unknown>)?.sqliteVersion),
@@ -1224,9 +1234,13 @@ try {
   check("用户路径以用户身份创建 Objective", objective.status === 201, JSON.stringify(objective));
   check("创建独立项目数据库", existsSync(project.databasePath), project.databasePath);
 
-  // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
-  const bridgePath = join(dataDir, "mcp-stdio.cjs");
-  check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
+  // 3.x 没有 Node：Agent 配置走原生 shim（下面核对），数据根里不再装 Node 桥接脚本。
+  const bridgePaths = [join(dataDir, "mcp-stdio.cjs"), join(v3Dir, "mcp-stdio.cjs")];
+  check(
+    "数据根里没有 Node 桥接脚本",
+    bridgePaths.every((path) => !existsSync(path)),
+    bridgePaths.join(", "),
+  );
 
   // 写进 Agent 配置的 command 不能带版本号：客户端在会话开始时把配置读进内存，之后盘上
   // 怎么改都影响不到它。安装态走数据根下由 atm-setup 维护的 current 链接；便携版没有安装
@@ -1344,7 +1358,7 @@ try {
 
   // 分离凭证在安装态生效：Agent 凭证新建备份被拒（它会淘汰用户的手动备份），且不落账。
   const backupsBefore = (await client.backups.list(project.code)).length;
-  const agentBackup = await fetch(`${runtime.endpoint}/api/v1/backups`, {
+  const agentBackup = await agentFetch(`${runtime.endpoint}/api/v1/backups`, {
     method: "POST",
     headers: { authorization: `Bearer ${runtime.token}`, "content-type": "application/json" },
     body: JSON.stringify({ scope: "PROJECT", project: project.code }),
@@ -1420,7 +1434,7 @@ try {
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));
   await checkShimWakesApp();
-  check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
+  check("完全退出后不存在旧 local.token", !existsSync(join(v3Dir, "runtime", "local.token")));
 
   await writeFile(
     lockPath,
@@ -1437,9 +1451,12 @@ try {
     "daemon 重启后 token 与 instanceId 均轮换",
     restartedRuntime.token !== runtime.token && restartedRuntime.instanceId !== runtime.instanceId,
   );
-  const staleCredentialResponse = await fetch(`${restartedRuntime.endpoint}/api/v1/system/status`, {
-    headers: { authorization: `Bearer ${runtime.token}` },
-  });
+  const staleCredentialResponse = await agentFetch(
+    `${restartedRuntime.endpoint}/api/v1/system/status`,
+    {
+      headers: { authorization: `Bearer ${runtime.token}` },
+    },
+  );
   const staleCredentialBody = await staleCredentialResponse.text();
   check(
     "旧 token 在新 daemon 上返回 401 且不回显新旧 secret",
@@ -1449,9 +1466,9 @@ try {
   );
   check(
     "restart live runtime 不存在旧 local.token",
-    !existsSync(join(dataDir, "runtime", "local.token")),
+    !existsSync(join(v3Dir, "runtime", "local.token")),
   );
-  const restartedClient = new AyanamiClient(restartedRuntime);
+  const restartedClient = new AyanamiClient({ ...restartedRuntime, fetchImpl: agentFetch });
   const projects = await restartedClient.projects.list();
   const persistedTasks = await restartedClient.tasks.list(project.code);
   check(
@@ -1461,7 +1478,7 @@ try {
   await stopApp(app);
   check(
     "restart 完全退出后不存在旧 local.token",
-    !existsSync(join(dataDir, "runtime", "local.token")),
+    !existsSync(join(v3Dir, "runtime", "local.token")),
   );
 
   const report = {

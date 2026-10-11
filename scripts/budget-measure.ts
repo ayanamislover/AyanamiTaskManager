@@ -8,12 +8,13 @@
  * 量什么、怎么量：
  *   - 活动版本净 payload：output/package/app-<version> 递归字节；压缩更新包：zip 字节。
  *   - 后台（无窗口）常驻：生产便携包（portable zip 解到 output/budget-portable）以 --background
- *     拉起，数据根是真实规模样本库的副本；量宿主 + core 的 Private Bytes 与 Working Set。
+ *     拉起，2.x 根 L 是真实规模样本库的副本（3.x 首次启动把它转换进 N）；量宿主（3.x 单进程，
+ *     服务就在宿主里）的 Private Bytes 与 Working Set。
  *     先空闲量一轮，再用 Agent 凭证打一批读请求（HTTP、定时器、订阅都在跑）后再量一轮。
  *   - 开窗：第二实例发 SHOW（用户再点一次入口），窗口可见后静置再量整棵进程树
- *     （宿主 + core + 本应用的 WebView2 全部进程）；WM_CLOSE 关窗（与点标题栏关闭同一条路径），
+ *     （宿主 + 本应用的 WebView2 全部进程）；WM_CLOSE 关窗（与点标题栏关闭同一条路径），
  *     等 WebView2 进程全部退出、静置后再量；关开 5 次，看是否回到开窗前的后台水位 ±10%。
- *   - 冷启动（不含 0–5 s 登录随机延迟）：生产包前台启动量 daemon.json 出现、服务健康、窗口可见；
+ *   - 冷启动（不含 0–5 s 登录随机延迟）：生产包前台启动量 N\runtime\daemon.json 出现、服务健康、窗口可见；
  *     --background 启动量 daemon.json。renderer-ready 与可交互只有 smoke 构建能看（生产包没有
  *     CDP），用 smoke 构建另跑几轮：页内 MutationObserver 记 .atm-shell 挂载（= renderer 报到的
  *     条件）与侧栏项目列表出数据的时刻。
@@ -25,6 +26,7 @@
  *   - 只结束自己拉起的宿主：优先经它的 second-instance 管道发 QUIT，不行再按 PID 结束进程树。
  *   - daemon.json 里的 Agent 令牌只在本进程内存里用来发读请求，不写日志、不进报告。
  */
+import { agentFetch } from "./agent-fetch.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { connect } from "node:net";
@@ -38,7 +40,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "@playwright/test";
 import { unzipSync } from "fflate";
@@ -57,6 +59,7 @@ import {
   smokeExecutable,
   smokeHostEnvironment,
   sourceVersion,
+  v3Root,
   withLoginItemsRestored,
 } from "./smoke-host.js";
 import { powershellScratch } from "./powershell-scratch.js";
@@ -89,6 +92,8 @@ const memoryOnly = process.argv.includes("--memory-only");
 const seedDir = assertSandboxDataDir(join(outputRoot, "budget-seed-data"));
 const runDir = assertSandboxDataDir(join(outputRoot, "budget-run-data"));
 const homeDir = assertSandboxDataDir(join(outputRoot, "budget-run-home"));
+/** 3.0 根 N（smokeHostEnvironment 把 ATM3_DATA_DIR 指到这里）：运行文件、WebView 数据与 lifecycle 日志。 */
+const v3Dir = v3Root(homeDir);
 const portableRoot = assertSandboxDataDir(join(outputRoot, "budget-portable"));
 const packageDir = join(outputRoot, "package");
 
@@ -196,12 +201,11 @@ async function ensureSeed(): Promise<Record<string, unknown>> {
   return seed;
 }
 
+/** 下一轮的数据：L 换回样本副本，N 清空（首次启动重新转换）；keepWebview 时留下 N\webview。 */
 function freshRunData(keepWebview = false): void {
-  const webview = join(runDir, "webview");
+  const webview = join(v3Dir, "webview");
   const keep = keepWebview && existsSync(webview);
-  for (const entry of existsSync(runDir) ? readdirSync(runDir) : [])
-    if (!(keep && entry === "webview"))
-      rmSync(join(runDir, entry), { recursive: true, force: true });
+  rmSync(runDir, { recursive: true, force: true });
   mkdirSync(runDir, { recursive: true });
   cpSync(seedDir, runDir, {
     recursive: true,
@@ -221,7 +225,16 @@ function freshRunData(keepWebview = false): void {
   } finally {
     registry.close();
   }
-  rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
+  const clear = (dir: string, except: string | null) => {
+    for (const entry of existsSync(dir) ? readdirSync(dir) : [])
+      if (entry !== except)
+        rmSync(join(dir, entry), { recursive: true, force: true, maxRetries: 2 });
+  };
+  if (keep) {
+    clear(homeDir, "Local");
+    clear(join(homeDir, "Local"), basename(v3Dir));
+    clear(v3Dir, "webview");
+  } else rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
   mkdirSync(join(homeDir, "Roaming"), { recursive: true });
   mkdirSync(join(homeDir, "Local"), { recursive: true });
 }
@@ -360,26 +373,24 @@ type Sample = {
   atMs: number;
   processes: number;
   webview2: number;
-  hostCorePrivate: number;
-  hostCoreWs: number;
+  hostPrivate: number;
+  hostWs: number;
   totalPrivate: number;
   totalWs: number;
   rows?: ProcessRow[];
 };
 
 function summarize(rows: ProcessRow[], hostPid: number, keepRows = false): Sample {
-  const hostCore = rows.filter(
-    (row) =>
-      row.pid === hostPid || (row.ppid === hostPid && row.exe.toLowerCase() === "atm-core.exe"),
-  );
+  // 3.x 单进程：服务在宿主里，没有 core 子进程。
+  const host = rows.filter((row) => row.pid === hostPid);
   const sum = (list: ProcessRow[], key: "ws" | "priv") =>
     list.reduce((total, row) => total + row[key], 0);
   return {
     atMs: Date.now(),
     processes: rows.length,
     webview2: rows.filter((row) => row.exe.toLowerCase() === "msedgewebview2.exe").length,
-    hostCorePrivate: sum(hostCore, "priv"),
-    hostCoreWs: sum(hostCore, "ws"),
+    hostPrivate: sum(host, "priv"),
+    hostWs: sum(host, "ws"),
     totalPrivate: sum(rows, "priv"),
     totalWs: sum(rows, "ws"),
     ...(keepRows ? { rows } : {}),
@@ -404,8 +415,8 @@ async function sampleSeries(
     median: {
       processes: pick("processes"),
       webview2: pick("webview2"),
-      hostCorePrivate: pick("hostCorePrivate"),
-      hostCoreWs: pick("hostCoreWs"),
+      hostPrivate: pick("hostPrivate"),
+      hostWs: pick("hostWs"),
       totalPrivate: pick("totalPrivate"),
       totalWs: pick("totalWs"),
     },
@@ -440,14 +451,14 @@ async function until<T>(
 }
 
 async function healthy(): Promise<{ token: string; endpoint: string; pid: number } | null> {
-  if (!existsSync(runtimeFile(runDir))) return null;
+  if (!existsSync(runtimeFile(v3Dir))) return null;
   try {
-    const runtime = JSON.parse(readFileSync(runtimeFile(runDir), "utf8")) as {
+    const runtime = JSON.parse(readFileSync(runtimeFile(v3Dir), "utf8")) as {
       token: string;
       endpoint: string;
       pid: number;
     };
-    const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+    const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
       headers: { authorization: `Bearer ${runtime.token}` },
     });
     return response.ok ? runtime : null;
@@ -599,7 +610,7 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
     const statuses: Record<string, number> = {};
     for (let round = 0; round < 10; round += 1)
       for (const path of paths) {
-        const response = await fetch(`${runtime.endpoint}${path}`, { headers: auth });
+        const response = await agentFetch(`${runtime.endpoint}${path}`, { headers: auth });
         await response.arrayBuffer();
         statuses[path] = response.status;
       }
@@ -642,8 +653,8 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
       const closed = await sampleSeries(probe, host.pid, 3, 2_000);
       cyclesOut.push({ cycle, visibleMs, webviewGoneMs, open, closed });
     }
-    // core 自己每分钟记一次 rss/heapUsed（core-main.ts heartbeat）：用来区分 V8 堆与堆外增长。
-    const lifecycle = join(runDir, "logs", "lifecycle-core.ndjson");
+    // 宿主每分钟记一次 rss（lifecycle heartbeat），与开关窗事件放在一起看有没有缓慢上涨。
+    const lifecycle = join(v3Dir, "logs", "lifecycle.ndjson");
     const heartbeats = existsSync(lifecycle)
       ? readFileSync(lifecycle, "utf8")
           .split(/\r?\n/u)
@@ -676,7 +687,7 @@ async function coldStartProduction(
   const started = performance.now();
   try {
     const daemonJson = await until(
-      () => (existsSync(runtimeFile(runDir)) ? performance.now() - started : null),
+      () => (existsSync(runtimeFile(v3Dir)) ? performance.now() - started : null),
       30_000,
       "daemon.json",
       10,
@@ -711,19 +722,19 @@ async function coldStartProduction(
  * 页面里的时刻用 Date.now()，与本进程同一个系统时钟。
  */
 async function coldStartSmoke(executable: string, probe: ProcessProbe, windows: NativeWindowProbe) {
-  rmSync(devToolsPortFile(runDir), { force: true });
+  rmSync(devToolsPortFile(v3Dir), { force: true });
   const host = startHost(executable, []);
   const startedWall = Date.now();
   const started = performance.now();
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   try {
     const daemonJson = await until(
-      () => (existsSync(runtimeFile(runDir)) ? performance.now() - started : null),
+      () => (existsSync(runtimeFile(v3Dir)) ? performance.now() - started : null),
       30_000,
       "daemon.json",
       10,
     );
-    const port = await until(() => readDevToolsPort(runDir), 30_000, "DevTools 端口", 10);
+    const port = await until(() => readDevToolsPort(v3Dir), 30_000, "DevTools 端口", 10);
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     const connectedWall = Date.now();
     const page = await until(

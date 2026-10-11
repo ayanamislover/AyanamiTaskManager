@@ -148,7 +148,7 @@ async function run(): Promise<void> {
       { windowsHide: true },
     );
   const loginItems = snapshotLoginItems([executable]);
-  const host: SmokeHost = startSmokeHost({ executable, dataDir: n, env });
+  const host: SmokeHost = startSmokeHost({ executable, v3Dir: n, env });
   try {
     await loginItems.restoreAfter(async () => {
       let renderer: SmokeRenderer | null = null;

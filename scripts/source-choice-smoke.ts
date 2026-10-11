@@ -131,7 +131,7 @@ async function run(
   dataDir: string | undefined,
   body: (host: SmokeHost) => Promise<void>,
 ): Promise<void> {
-  const host = startSmokeHost({ executable, dataDir: n, env: environment(dataDir) });
+  const host = startSmokeHost({ executable, v3Dir: n, env: environment(dataDir) });
   try {
     await body(host);
   } finally {
