@@ -767,9 +767,12 @@ async function scenarioReview(pkg: Packages): Promise<void> {
       (await until(() => sandbox.journal()?.outcome === "ROLLED_BACK", 90_000)),
     { recovered, journal: sandbox.journal(), log: sandbox.log(8) },
   );
+  // When the orphan's own --recover wins, the spawned host is its parent, blocked on it: it
+  // is replaced at once. Either way exactly one host is left (next check).
   check(
-    "the recovery took the spawned host over instead of starting a second",
-    sandbox.log(12).includes("taking over host"),
+    "the recovery took the spawned host over, or replaced the one waiting on it",
+    sandbox.log(12).includes("taking over host") ||
+      sandbox.log(12).includes("never served (it started this recovery and waits for it)"),
     sandbox.log(12),
   );
   check(
@@ -2049,9 +2052,11 @@ async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
     ["COMMIT", "COMMITTED"],
   ];
   // 只复现其中几点：ATM_DRILL_POINTS=SPAWNED:START,COMMIT。
-  const points = process.env.ATM_DRILL_POINTS?.split(",");
+  // An empty value means "all": a wrapper that clears the variable may leave it empty, and
+  // [""] would silently skip every point.
+  const points = process.env.ATM_DRILL_POINTS?.split(",").filter(Boolean);
   for (const [point, outcome] of expected) {
-    if (points && !points.includes(point)) continue;
+    if (points?.length && !points.includes(point)) continue;
     process.stdout.write(`\n[${currentScenario}] 2.0 → ${VERSION_A}, die after ${point}\n`);
     reset(sandbox);
     if (!(await install20(sandbox))) continue;
@@ -2150,6 +2155,13 @@ async function main(): Promise<void> {
     ["v2-v3-faults", scenarioV2V3Faults],
   ];
   for (const [name, run] of scenarios) if (!only || only.includes(name)) await run(pkg);
+  // A scenario that ran without a single check skipped itself (an empty filter once did):
+  // that is a failure, not a pass.
+  for (const [name] of scenarios)
+    if ((!only || only.includes(name)) && !results.some((result) => result.scenario === name)) {
+      currentScenario = name;
+      check(`${name}: ran at least one check`, false);
+    }
   const failed = results.filter((result) => !result.passed);
   const report = {
     at: new Date().toISOString(),
