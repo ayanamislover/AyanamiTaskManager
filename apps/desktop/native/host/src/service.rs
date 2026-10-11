@@ -245,6 +245,49 @@ pub fn spawn(
     }
 }
 
+/// 用户对数据源冲突的选择（W8h）：在启动线程上落下选择，再照常启动一次，结果同样交给交接槽。
+/// `held` 是还持有准入的冲突；后台比较才发现的冲突（入口已撤、服务已停）没有它，这时先启动一次拿到冲突。
+/// 选择做不成（比如沿用 3.0 但它是从别的数据根转换来的）就以启动失败交回：下一次启动还是冲突，再问一次。
+pub fn spawn_choice(
+    mut options: Options,
+    attempt: u64,
+    proxy: EventLoopProxy<UserEvent>,
+    slot: Arc<BootSlot<Booted>>,
+    held: Option<atm_runtime::Conflicted>,
+    choice: atm_runtime::SourceChoice,
+) {
+    let fallback = (proxy.clone(), slot.clone());
+    gate(&mut options, &slot);
+    let started = std::thread::Builder::new()
+        .name("atm-boot".into())
+        .spawn(move || {
+            let conflicted = match held {
+                Some(held) => held,
+                None => match atm_runtime::start(&options) {
+                    Ok(Started::Conflict(c)) => c,
+                    // 冲突已经不在了（别处做了决定）：照常交回这次启动的结果。
+                    other => {
+                        if hand_over(&options, &slot, Booted(other)) {
+                            let _ = proxy.send_event(UserEvent::Booted(attempt));
+                        }
+                        return;
+                    }
+                },
+            };
+            let result = Booted(conflicted.choose(&options, choice));
+            if hand_over(&options, &slot, result) {
+                let _ = proxy.send_event(UserEvent::Booted(attempt));
+            }
+        });
+    if let Err(error) = started {
+        let failed = BootError::Failed(format!("spawn the boot thread: {error}"));
+        let (proxy, slot) = fallback;
+        if slot.finish(Booted(Err(failed))).is_none() {
+            let _ = proxy.send_event(UserEvent::Booted(attempt));
+        }
+    }
+}
+
 /// 让 runtime 开放入口之前先问交接槽：已经在退出就不开（[`BootSlot::begin_opening`]）。
 fn gate(options: &mut Options, slot: &Arc<BootSlot<Booted>>) {
     let slot = slot.clone();
@@ -253,7 +296,11 @@ fn gate(options: &mut Options, slot: &Arc<BootSlot<Booted>>) {
 
 /// 在当前线程上启动一次，结果交给交接槽；正在退出就自己收尾。返回 true 时调用方要通知事件循环。
 fn boot(options: &Options, slot: &BootSlot<Booted>) -> bool {
-    let result = Booted(atm_runtime::start(options));
+    hand_over(options, slot, Booted(atm_runtime::start(options)))
+}
+
+/// 把一次启动的结果交给交接槽；正在退出就自己收尾。返回 true 时调用方要通知事件循环。
+fn hand_over(options: &Options, slot: &BootSlot<Booted>, result: Booted) -> bool {
     match slot.finish(result) {
         None => true,
         Some(left) => {

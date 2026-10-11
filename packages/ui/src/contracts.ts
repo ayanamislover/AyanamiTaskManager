@@ -72,6 +72,28 @@ export type McpBridgeObservation = {
   }>;
 };
 
+/** 数据源冲突的原因归类（宿主按运行时的原因原文归的类，07 §7）。 */
+export type DataSourceConflictCause =
+  | "CHANGED"
+  | "UNREADABLE"
+  | "LEGACY_GONE"
+  | "OTHER_SOURCE"
+  | "RECORD";
+
+export type DataSourceChoice = "KEEP_V3" | "RECONVERT";
+
+/** 宿主里服务走到了哪一步。`error` 是上一次选择没能做成的原因。 */
+export type DataSourceState =
+  | {
+      state: "SOURCE_CONFLICT";
+      cause: DataSourceConflictCause;
+      reason: string;
+      since: string;
+      error: string | null;
+    }
+  | { state: "STARTING"; choosing: boolean; error?: string | null }
+  | { state: "SERVING" | "UNAVAILABLE"; choosing: false; error: string | null };
+
 export type DesktopBridge = {
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
   getAutoLaunch?: () => Promise<boolean>;
@@ -99,6 +121,10 @@ export type DesktopBridge = {
   }>;
   copyText?: (text: string) => Promise<boolean>;
   onNavigate?: (listener: (route: string) => void) => () => void;
+  getDataSource?: () => Promise<DataSourceState>;
+  /** 只有桌面窗口里的用户能选（07 §7）；返回选择之后的状态。 */
+  chooseDataSource?: (choice: DataSourceChoice) => Promise<DataSourceState>;
+  onDataSourceChange?: (listener: (state: DataSourceState) => void) => () => void;
 };
 
 export type AyanamiTaskManagerProps = {

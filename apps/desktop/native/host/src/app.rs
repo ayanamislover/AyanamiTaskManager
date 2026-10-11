@@ -6,7 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use atm_runtime::update::{self as updates, Coordinator, Schedule};
-use atm_runtime::{Background, BootError, Conflicted, Handoff, Observation, Serving, Started};
+use atm_runtime::{
+    Background, BootError, Conflicted, Handoff, Observation, Serving, SourceChoice, Started,
+};
+use atm_store::conversion::{StartupState, conflict_cause};
 use atm_ui_bridge::{Reply, Ui};
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -108,9 +111,9 @@ enum Service {
     Retrying,
     Serving(Serving),
     /// Source conflict: no entry is open; the admission is held (by keeping this value) until
-    /// the user chooses (W6, B2).
+    /// the user chooses in the window (W8h, B2).
     Conflict {
-        _held: Conflicted,
+        held: Conflicted,
     },
     /// Gave up after repeated failures; the next start tries again.
     Unavailable,
@@ -166,6 +169,13 @@ pub struct App {
 
     tray: Option<TrayIcon>,
     snapshot: Snapshot,
+    /// The data-source conflict the service is in (07 §7): at boot, or found by the
+    /// background comparison after the entries opened. Cleared once it serves again.
+    conflict: Option<StartupState>,
+    /// The user's choice is being carried out (the boot after it is running).
+    choosing: bool,
+    /// Why the last choice could not be carried out, shown next to the choice again.
+    choice_error: Option<String>,
     startup_delay_pending: bool,
     quitting: bool,
     exit_code: i32,
@@ -415,6 +425,9 @@ pub fn run(
         maximized: false,
         saved: SavedWindow::default(),
         tray: None,
+        conflict: None,
+        choosing: false,
+        choice_error: None,
         snapshot: Snapshot {
             notification_mode: "ALL".into(),
             ..Snapshot::default()
@@ -580,6 +593,7 @@ impl App {
                 self.legacy_wait = None;
                 self.service = Service::Serving(serving);
                 self.answer_queued();
+                self.source_settled(None);
             }
             Ok(Started::Conflict(conflicted)) => {
                 crate::log(
@@ -587,8 +601,10 @@ impl App {
                     &format!("SOURCE_CONFLICT: {}", conflicted.state.reason),
                 );
                 record(Life::Conflict, &[]);
-                self.service = Service::Conflict { _held: conflicted };
+                let state = conflicted.state.clone();
+                self.service = Service::Conflict { held: conflicted };
                 self.answer_queued();
+                self.source_settled(Some(state));
             }
             Err(BootError::WaitLegacyQuiesce(why)) => {
                 if self.legacy_wait.as_deref() != Some(why.as_str()) {
@@ -607,7 +623,14 @@ impl App {
                     Life::BootstrapFailed,
                     &life::error_detail("BootError", &error.to_string()),
                 );
+                if self.choosing {
+                    // The next boot finds the conflict again (nothing was decided) and asks
+                    // again, with this reason next to the choice.
+                    self.choosing = false;
+                    self.choice_error = Some(error.to_string());
+                }
                 self.schedule_retry();
+                self.emit_data_source();
             }
         }
     }
@@ -623,6 +646,7 @@ impl App {
             );
             self.service = Service::Unavailable;
             self.answer_queued();
+            self.emit_data_source();
             return;
         }
         self.boot_failures.push(now);
@@ -648,6 +672,7 @@ impl App {
                 self.ui = None;
                 *self.writer_probe.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 record(Life::Conflict, &[("reason", json!("background"))]);
+                self.source_settled(Some(state));
             }
             Background::Failed(error) => crate::log(
                 &self.layout.v3_root,
@@ -1269,8 +1294,125 @@ impl App {
                 self.close_window();
                 return;
             }
+            Local::GetDataSource => self.data_source(),
+            Local::ChooseDataSource => {
+                let choice = match args[0].as_str() {
+                    Some("KEEP_V3") => SourceChoice::KeepV3,
+                    _ => SourceChoice::Reconvert,
+                };
+                match self.choose_source(choice) {
+                    Ok(()) => self.data_source(),
+                    Err((code, message)) => {
+                        self.deliver(&bridge::error(id, code, message));
+                        return;
+                    }
+                }
+            }
         };
         self.deliver(&bridge::ok(id, value));
+    }
+
+    /// Where the service is, for the window (07 §7). Conflict details carry no credential.
+    fn data_source(&self) -> Value {
+        if self.choosing {
+            return json!({ "state": "STARTING", "choosing": true });
+        }
+        if let Some(state) = &self.conflict {
+            return json!({
+                "state": "SOURCE_CONFLICT",
+                "cause": conflict_cause(&state.reason),
+                "reason": state.reason,
+                "since": state.since,
+                "error": self.choice_error,
+            });
+        }
+        let state = match &self.service {
+            Service::Serving(_) => "SERVING",
+            Service::Unavailable => "UNAVAILABLE",
+            _ => "STARTING",
+        };
+        json!({ "state": state, "choosing": false, "error": self.choice_error })
+    }
+
+    /// Carry out the user's choice (B2: only this trusted WebView reaches here): hand the
+    /// held conflict to a boot thread that records the choice, releases the admission and
+    /// starts again. After a background conflict the withdrawn service is stopped first;
+    /// that boot finds the conflict on disk and records the choice the same way.
+    fn choose_source(&mut self, choice: SourceChoice) -> Result<(), (&'static str, &'static str)> {
+        if self.choosing {
+            return Err(("SOURCE_CHOICE_RUNNING", "正在按上一次的选择启动"));
+        }
+        if self.conflict.is_none() || self.quitting {
+            return Err(("SOURCE_NOT_IN_CONFLICT", "现在没有需要选择的数据来源"));
+        }
+        let held = match std::mem::replace(&mut self.service, Service::Booting) {
+            Service::Conflict { held } => Some(held),
+            Service::Serving(serving) => {
+                let root = self.layout.v3_root.clone();
+                serving.stop(&move |e| crate::log(&root, &format!("runtime: {e:?}")));
+                None
+            }
+            other => {
+                self.service = other;
+                return Err(("SOURCE_NOT_IN_CONFLICT", "现在没有需要选择的数据来源"));
+            }
+        };
+        crate::log(
+            &self.layout.v3_root,
+            &format!("data source chosen by the user: {choice:?}"),
+        );
+        record(
+            Life::SourceChosen,
+            &[("reason", json!(format!("{choice:?}")))],
+        );
+        self.ui = None;
+        self.choosing = true;
+        self.choice_error = None;
+        self.boot_attempt += 1;
+        let options = crate::service::options(
+            &self.layout,
+            &self.version,
+            self.handoff.clone(),
+            self.proxy.clone(),
+        );
+        let slot = Arc::new(BootSlot::default());
+        self.boot = Some(slot.clone());
+        crate::service::spawn_choice(
+            options,
+            self.boot_attempt,
+            self.proxy.clone(),
+            slot,
+            held,
+            choice,
+        );
+        self.emit_data_source();
+        Ok(())
+    }
+
+    /// The service settled into serving (`None`) or a conflict: tell the window, mark the
+    /// tray, and bring the window up for a conflict (only the user can resolve it).
+    fn source_settled(&mut self, conflict: Option<StartupState>) {
+        let entered = conflict.is_some();
+        self.conflict = conflict;
+        self.choosing = false;
+        if !entered {
+            self.choice_error = None;
+        }
+        if self.snapshot.needs_source != entered {
+            self.snapshot.needs_source = entered;
+            if let Some(tray) = &self.tray {
+                tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
+                let _ = tray.set_tooltip(Some(tray::tooltip(&self.snapshot)));
+            }
+        }
+        self.emit_data_source();
+        if entered {
+            self.request_show_later();
+        }
+    }
+
+    fn emit_data_source(&self) {
+        self.emit("dataSource", self.data_source());
     }
 
     /// The first window of a foreground start is built on the first turn of the loop that

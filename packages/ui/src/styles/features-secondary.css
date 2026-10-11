@@ -346,3 +346,28 @@
 .agent-history-name .atm-row-title {
   flex: 0 1 auto;
 }
+
+/* 数据源冲突的选源页（07 §7）：选项沿用设置页「系统通知」那组卡片，原因原文用等宽小字。 */
+.atm-source-choice {
+  max-width: 760px;
+}
+.atm-source-choice-body {
+  display: grid;
+  gap: 14px;
+}
+.atm-source-choice-detail {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.atm-source-choice-detail dt {
+  color: var(--atm-text-muted);
+}
+.atm-source-choice-detail dd {
+  margin: 0;
+  color: var(--atm-text-muted);
+  font: 12px var(--atm-mono);
+  overflow-wrap: anywhere;
+}

@@ -266,6 +266,8 @@ fn real_main() -> i32 {
 }
 
 fn main() {
+    #[cfg(feature = "drill")]
+    env::pin_sandbox_v3_root();
     atm_install_state::stop_std_handle_inheritance();
     fault::capture();
     std::process::exit(real_main());

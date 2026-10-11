@@ -158,6 +158,7 @@ describe("packaged application content policy", () => {
       "drill:ATM_SETUP_FAIL_AT",
       "drill:ATM_SETUP_FAIL_UNDO",
       "drill:ATM_SETUP_SQUIRREL_ADDS",
+      "drill:ATM_SETUP_WAIT_SECS",
     ]);
     // setup 的包校验里写着禁止的文件名 atm-core-e2e.exe：那不是 e2e 构建。
     expect(findTestBuildMarkers(Buffer.from('"resources/atm-core-e2e.exe"', "utf8"))).toEqual([]);
@@ -182,6 +183,7 @@ describe("packaged application content policy", () => {
       ATM_SETUP_FAIL_AT: read("setup/src/fault.rs"),
       ATM_SETUP_FAIL_UNDO: read("setup/src/fault.rs"),
       ATM_SETUP_SQUIRREL_ADDS: read("setup/src/fault.rs") + read("setup/src/env.rs"),
+      ATM_SETUP_WAIT_SECS: read("setup/src/fault.rs"),
     };
     for (const { marker } of TEST_BUILD_MARKERS) expect(sources[marker], marker).toContain(marker);
   });

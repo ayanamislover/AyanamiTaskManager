@@ -2,7 +2,9 @@
  * 安装/更新/迁移/回滚演练（ATM-T-0554，de-electron §6、§9）。全部在沙箱里：
  *
  *   output/drill/<场景>/install     安装根（ATM_SETUP_SANDBOX 把它、快捷方式目录一起换走）
- *   output/drill/<场景>/data        数据根（ATM_DATA_DIR）
+ *   output/drill/<场景>/data        数据根 L（ATM_DATA_DIR）
+ *   output/drill/<场景>/v3-data     3.x 根 N（ATM3_DATA_DIR；不设的话 3.x 宿主会落到真实的
+ *                                   %LOCALAPPDATA%\AyanamiTaskManager3）
  *   HKCU\Software\AyanamiTaskManagerDrill\<hash>\  Uninstall 与 Run（结束时删掉）
  *
  * 用的是 drill 构建的 setup（带沙箱与故障注入）；真实安装根、真实注册表和用户正在跑的 ATM
@@ -11,6 +13,11 @@
  *
  *   pnpm exec tsx scripts/install-drill.ts            # 需要已构建的原生产物与 renderer/core
  *   pnpm exec tsx scripts/install-drill.ts --only update,faults
+ *
+ * 2.0 ⇄ 3.0 的场景（v2-v3、v2-v3-faults）还要一份 2.0 时代 drill 构建的包：
+ * output/drill/package-2.0.0/{atm-setup.exe, atm-2.0.0-win-x64.json, atm-2.0.0-win-x64.zip}。
+ * 它不在仓库里：从 2.0 的检出（v2.0.0）里 `package-native.ts --drill output/drill/package-2.0.0
+ * --drill-version 2.0.0` 打一份，或者复制 2.0 时代演练留下的那份。生产 2.0 的 setup 没有沙箱，不能用。
  */
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
@@ -25,7 +32,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
+import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
 import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
 
 const root = resolve(process.cwd());
@@ -95,11 +104,14 @@ class Sandbox {
   readonly dir: string;
   readonly install: string;
   readonly data: string;
+  /** N: the 3.x root. */
+  readonly v3: string;
   readonly registry: string;
   constructor(name: string) {
     this.dir = join(drillRoot, name);
     this.install = join(this.dir, "install");
     this.data = join(this.dir, "data");
+    this.v3 = join(this.dir, "v3-data");
     this.registry = registryBase(this.dir);
   }
   env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -107,6 +119,10 @@ class Sandbox {
       ...process.env,
       ATM_SETUP_SANDBOX: this.dir,
       ATM_DATA_DIR: this.data,
+      ATM3_DATA_DIR: this.v3,
+      // 合成的 LOCALAPPDATA / APPDATA：宿主、WebView2 与任何按已知文件夹找东西的代码都落在沙箱里。
+      LOCALAPPDATA: join(this.dir, "localappdata"),
+      APPDATA: join(this.dir, "appdata"),
       ...extra,
     };
     for (const key of [
@@ -115,6 +131,7 @@ class Sandbox {
       "ATM_SETUP_FAIL_UNDO",
       "ATM_SETUP_SQUIRREL_ADDS",
       "ATM_SETUP_PAUSE_UNLOCKED",
+      "ATM_SETUP_WAIT_SECS",
     ])
       if (!(key in extra)) delete env[key];
     return env;
@@ -127,15 +144,27 @@ class Sandbox {
     const path = join(this.install, "state", "install.json");
     return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Journal) : null;
   }
-  /** Version the running service publishes (daemon.json; the token field is never read out). */
+  /**
+   * Version the running service publishes: a 2.x core in `L\runtime\daemon.json`, a 3.x
+   * host in `N\runtime\daemon.json`. Only a descriptor whose pid is alive in the sandbox
+   * counts (the other root may keep a stale one). The token field is never read out.
+   */
   serviceVersion(): string | null {
-    const path = join(this.data, "runtime", "daemon.json");
-    if (!existsSync(path)) return null;
-    const { version, pid } = JSON.parse(readFileSync(path, "utf8")) as {
-      version: string;
-      pid: number;
-    };
-    return processes(this.dir).some((proc) => proc.pid === pid) ? version : null;
+    const alive = processes(this.dir);
+    for (const runtime of [join(this.v3, "runtime"), join(this.data, "runtime")]) {
+      const path = join(runtime, "daemon.json");
+      if (!existsSync(path)) continue;
+      try {
+        const { version, pid } = JSON.parse(readFileSync(path, "utf8")) as {
+          version: string;
+          pid: number;
+        };
+        if (alive.some((proc) => proc.pid === pid)) return version;
+      } catch {
+        // Being rewritten; the next poll reads it.
+      }
+    }
+    return null;
   }
   log(lines = 12): string {
     const path = join(this.install, "state", "setup.log");
@@ -280,7 +309,8 @@ function reset(sandbox: Sandbox): void {
   killAll(sandbox.dir);
   reg(["delete", sandbox.registry, "/f"]);
   rmSync(sandbox.dir, { recursive: true, force: true });
-  mkdirSync(sandbox.dir, { recursive: true });
+  mkdirSync(join(sandbox.dir, "localappdata"), { recursive: true });
+  mkdirSync(join(sandbox.dir, "appdata"), { recursive: true });
 }
 
 function teardown(sandbox: Sandbox): void {
@@ -1557,12 +1587,506 @@ async function scenarioUninstallRace(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+// ---------------------------------------------------------------- 2.0 ⇄ 3.0（W8b）
+
+/**
+ * The 2.0 package and its drill setup (sandbox and fault injection), from the 2.0-era drill
+ * build: `output/drill/package-2.0.0`. The production 2.0 setup has no sandbox, so it must
+ * never be used here.
+ */
+const PACKAGE_20 = {
+  setup: join(drillRoot, "package-2.0.0", "atm-setup.exe"),
+  manifest: join(drillRoot, "package-2.0.0", "atm-2.0.0-win-x64.json"),
+};
+const V20 = "2.0.0";
+
+type Step = {
+  scenario: string;
+  step: string;
+  current: string | null;
+  L: Business | null;
+  N: Business | null;
+  authority: { authority: string; by: string; generation: string | null } | null;
+  generation: string | null;
+};
+const business: Step[] = [];
+
+function authorityOf(sandbox: Sandbox): Step["authority"] {
+  const path = join(sandbox.v3, "authority.json");
+  if (!existsSync(path)) return null;
+  const a = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  return {
+    authority: String(a.authority),
+    by: String(a.by),
+    generation: (a.generation as string | null) ?? null,
+  };
+}
+
+function generationOf(sandbox: Sandbox): string | null {
+  const path = join(sandbox.v3, "conversion.json");
+  if (!existsSync(path)) return null;
+  const m = JSON.parse(readFileSync(path, "utf8")) as { phase?: string; generation?: string };
+  return m.phase === "PUBLISHED" ? (m.generation ?? null) : null;
+}
+
+/** Both roots' business content, the authority record and the generation, for the report. */
+function summarize(sandbox: Sandbox, step: string): Step {
+  const row: Step = {
+    scenario: currentScenario,
+    step,
+    current: sandbox.pointer()?.current ?? null,
+    L: legacyBusiness(sandbox.data),
+    N: v3Business(sandbox.v3),
+    authority: authorityOf(sandbox),
+    generation: generationOf(sandbox),
+  };
+  business.push(row);
+  process.stdout.write(
+    `    · ${step}: L ${row.L?.records.length ?? "-"} records, N ${row.N?.records.length ?? "-"} records, A ${row.authority ? `${row.authority.authority}/${row.authority.by}` : "-"}, g ${row.generation ?? "-"}\n`,
+  );
+  return row;
+}
+
+/** The 2.0 command line (`runtime\atm-core.exe runtime\cli.mjs`); its service must be up. */
+function cli20(sandbox: Sandbox, args: string[]): SpawnSyncReturns<string> {
+  const app = join(sandbox.install, `app-${V20}`, "runtime");
+  return spawnSync(join(app, "atm-core.exe"), [join(app, "cli.mjs"), "--json", ...args], {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+  });
+}
+
+/** The 3.x command line of `version` (`resources\atm.exe`), through N\runtime\daemon.json. */
+function cli3(sandbox: Sandbox, version: string, args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(
+    join(sandbox.install, `app-${version}`, "resources", "atm.exe"),
+    ["--json", ...args],
+    { env: sandbox.env(), encoding: "utf8", windowsHide: true, timeout: 60_000 },
+  );
+}
+
+function record(
+  run: (args: string[]) => SpawnSyncReturns<string>,
+  title: string,
+  summary: string,
+): boolean {
+  const result = run([
+    "record",
+    "DRL",
+    "--kind",
+    "DECISION",
+    "--title",
+    title,
+    "--summary",
+    summary,
+  ]);
+  return result.status === 0;
+}
+
+const hasRecord = (side: Business | null, title: string) =>
+  side?.records.some((row) => row.includes(` ${title} `)) ?? false;
+
+async function install20(sandbox: Sandbox): Promise<boolean> {
+  if (!existsSync(PACKAGE_20.setup) || !existsSync(PACKAGE_20.manifest)) {
+    check(
+      "the 2.0 drill package is in output/drill/package-2.0.0 (see the header)",
+      false,
+      PACKAGE_20,
+    );
+    return false;
+  }
+  const code = runSetup(sandbox, PACKAGE_20.setup, ["install", PACKAGE_20.manifest, "--quiet"]);
+  check(`2.0 install exit 0 (${code})`, code === 0, sandbox.log(4));
+  check(
+    "2.0 serving (two-process, L\\runtime)",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  const source = join(sandbox.dir, "src");
+  mkdirSync(source, { recursive: true });
+  const created = cli20(sandbox, [
+    "project",
+    "create",
+    source,
+    "--name",
+    "演练项目",
+    "--code",
+    "DRL",
+  ]);
+  check("2.0 CLI creates project DRL", created.status === 0, created.stderr.slice(0, 300));
+  check(
+    "2.0 CLI writes DRL-D-001",
+    record((args) => cli20(sandbox, args), "升级前写入", "2.0 写的"),
+  );
+  // 真实用户的 2.0 跑过一阵：新项目当天的自动备份已经做过。2.0 每次启动先做当天还没做的 DAILY / WEEKLY
+  // 备份（backup_catalog + global_events 的 backup.created），这些都在回滚检测摘要里（05 §5.2，保守方向）；
+  // 不先让它做完，回滚后 2.0 一重启就会写这一笔，「没动过 2.x」就不成立。
+  killAll(sandbox.dir);
+  check("2.0 restarts", runLauncher(sandbox, ["--background"]).status === 0);
+  check(
+    "2.0 made the new project's daily backup",
+    await until(() => projectBackups(sandbox.data) >= 1, 60_000),
+    projectBackups(sandbox.data),
+  );
+  check(
+    "2.0 serving after the restart",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  return sandbox.serviceVersion() === V20;
+}
+
+/** 2.x 的项目备份条数（只读打开 registry）。 */
+function projectBackups(root: string): number {
+  const path = join(root, "registry", "registry.sqlite");
+  if (!existsSync(path)) return 0;
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = db
+      .prepare("SELECT count(*) AS n FROM backup_catalog WHERE scope = 'PROJECT'")
+      .get() as { n: number };
+    return Number(row.n);
+  } finally {
+    db.close();
+  }
+}
+
+/** registry 的全局事件条数：2.0 在两次比较之间有没有自己写过东西。 */
+function globalEvents(root: string): number {
+  const db = new DatabaseSync(join(root, "registry", "registry.sqlite"), { readOnly: true });
+  try {
+    return Number((db.prepare("SELECT count(*) AS n FROM global_events").get() as { n: number }).n);
+  } finally {
+    db.close();
+  }
+}
+
+async function rollbackTo20(sandbox: Sandbox, label: string): Promise<void> {
+  const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
+  check(`${label}: rollback exit 0 (${code})`, code === 0, sandbox.log(6));
+  check(
+    `${label}: app.json.current = ${V20}`,
+    sandbox.pointer()?.current === V20,
+    sandbox.pointer(),
+  );
+  check(
+    `${label}: 2.0 serving again`,
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  const a = authorityOf(sandbox);
+  check(
+    `${label}: A=legacy by setup-rollback, bound to ${generationOf(sandbox)}`,
+    a?.authority === "legacy" &&
+      a.by === "setup-rollback" &&
+      a.generation === generationOf(sandbox),
+    a,
+  );
+  check(
+    `${label}: no 3.x process left under app-${VERSION_A}`,
+    processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+  );
+}
+
+async function upgradeTo3(sandbox: Sandbox, label: string): Promise<number> {
+  const code = runSetup(sandbox, pkg3().setup, ["install", pkg3().manifest, "--quiet"]);
+  check(`${label}: upgrade exit 0 (${code})`, code === 0, sandbox.log(8));
+  await installed(sandbox, VERSION_A, V20);
+  return code;
+}
+
+let packagesForV3: Packages | null = null;
+const pkg3 = () => packagesForV3!.a;
+
+/**
+ * 2.0 (two processes) → 3.x (single process, converts L into N) → undo → rollback to 2.0 →
+ * re-upgrade, in the three ways 07 §6 tells apart after a rollback: 2.x untouched (resume
+ * with nothing lost), 2.x written (reconvert from 2.x), 2.x not comparable (SOURCE_CONFLICT:
+ * setup waits for the user's choice, not for "progress"; nobody chooses, the cap ends the
+ * wait, setup confirms the process exited and rolls back). Each step records both roots'
+ * business content.
+ */
+async function scenarioV2V3(pkg: Packages): Promise<void> {
+  currentScenario = "v2-v3";
+  packagesForV3 = pkg;
+  const sandbox = new Sandbox("v2-v3");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] 2.0 installed, data written by 2.0\n`);
+  if (!(await install20(sandbox))) return teardown(sandbox);
+  const before = summarize(sandbox, "2.0 installed");
+  check("L has DRL and DRL-D-001", hasRecord(before.L, "升级前写入"), before.L);
+  check("no N yet", before.N === null && before.authority === null, before);
+
+  process.stdout.write(`[${currentScenario}] upgrade 2.0 → ${VERSION_A} (conversion)\n`);
+  await upgradeTo3(sandbox, "upgrade");
+  const upgraded = summarize(sandbox, `upgraded to ${VERSION_A}`);
+  const g1 = upgraded.generation;
+  check("N has exactly L's business content", sameBusiness(upgraded.L, upgraded.N), upgraded);
+  check("L is unchanged by the conversion", sameBusiness(upgraded.L, before.L), upgraded.L);
+  check(
+    "A=v3 by publish, bound to the published generation",
+    upgraded.authority?.authority === "v3" &&
+      upgraded.authority.by === "publish" &&
+      upgraded.authority.generation === g1 &&
+      g1 !== null,
+    upgraded.authority,
+  );
+  check(
+    "2.0 no longer serves (L\\runtime lease released)",
+    processes(join(sandbox.install, `app-${V20}`)).length === 0,
+  );
+  check(
+    "3.x CLI writes DRL-D-002 into N",
+    record((args) => cli3(sandbox, VERSION_A, args), "升级后写入", "3.0 写的"),
+  );
+  const written3 = summarize(sandbox, "written in 3.x");
+  check(
+    "the 3.x write is in N, not in L",
+    hasRecord(written3.N, "升级后写入") && !hasRecord(written3.L, "升级后写入"),
+  );
+
+  process.stdout.write(`[${currentScenario}] roll back to 2.0\n`);
+  const eventsBefore = globalEvents(sandbox.data);
+  await rollbackTo20(sandbox, "rollback 1");
+  const back1 = summarize(sandbox, "rolled back to 2.0");
+  check(
+    "2.0 restarted by the rollback wrote nothing of its own (no new global event)",
+    globalEvents(sandbox.data) === eventsBefore,
+    { before: eventsBefore, after: globalEvents(sandbox.data) },
+  );
+  check("2.0 serves L as it was before the upgrade", sameBusiness(back1.L, before.L), back1.L);
+  check("N is kept as it was (3.x write included)", sameBusiness(back1.N, written3.N), back1.N);
+
+  process.stdout.write(`[${currentScenario}] re-upgrade, 2.x untouched → resume\n`);
+  await upgradeTo3(sandbox, "re-upgrade unchanged");
+  const resumed = summarize(sandbox, "re-upgraded, 2.x untouched");
+  check(
+    "same generation (resumed, not reconverted)",
+    resumed.generation === g1,
+    resumed.generation,
+  );
+  check(
+    "A=v3 by resume-after-rollback",
+    resumed.authority?.authority === "v3" && resumed.authority.by === "resume-after-rollback",
+    resumed.authority,
+  );
+  check("nothing lost: N still has the 3.x write", sameBusiness(resumed.N, written3.N), resumed.N);
+
+  process.stdout.write(`[${currentScenario}] roll back, write in 2.0, re-upgrade → reconvert\n`);
+  await rollbackTo20(sandbox, "rollback 2");
+  check(
+    "2.0 CLI writes DRL-D-002 after the rollback",
+    record((args) => cli20(sandbox, args), "回滚后写入", "回到 2.0 之后写的"),
+  );
+  const written2 = summarize(sandbox, "written in 2.0 after the rollback");
+  await upgradeTo3(sandbox, "re-upgrade changed");
+  const reconverted = summarize(sandbox, "re-upgraded, 2.x written");
+  const g2 = reconverted.generation;
+  check("a new generation (reconverted from 2.x)", g2 !== null && g2 !== g1, { g1, g2 });
+  check("N is 2.x's content now", sameBusiness(reconverted.N, written2.L), reconverted);
+  check(
+    "the 2.x write is in, the superseded 3.x-only write is not",
+    hasRecord(reconverted.N, "回滚后写入") && !hasRecord(reconverted.N, "升级后写入"),
+    reconverted.N,
+  );
+  check(
+    "the superseded generation is sealed under N\\superseded, not deleted",
+    existsSync(join(sandbox.v3, "superseded")) &&
+      readdirSync(join(sandbox.v3, "superseded")).length > 0,
+    readdirSync(sandbox.v3),
+  );
+
+  process.stdout.write(
+    `[${currentScenario}] roll back, 2.x not comparable, re-upgrade → SOURCE_CONFLICT\n`,
+  );
+  await rollbackTo20(sandbox, "rollback 3");
+  const back3 = summarize(sandbox, "rolled back again");
+  writeFileSync(join(sandbox.data, "stray.bin"), "not a 2.x file");
+  const mark = sandbox.logMark();
+  const started = Date.now();
+  // Drill-only wait budget (first progress 60 s, stall 5 s, cap 40 s): a stall rule that still
+  // applied would end the wait 5 s after the conflict; the cap ends it instead.
+  const code = runSetup(sandbox, pkg3().setup, ["install", pkg3().manifest, "--quiet"], {
+    ATM_SETUP_WAIT_SECS: "60,5,40",
+  });
+  const waited = (Date.now() - started) / 1000;
+  const log = sandbox.since(mark);
+  check(
+    `unknown: setup did not commit (exit ${code}, ${waited.toFixed(0)} s)`,
+    code !== 0,
+    log.slice(-600),
+  );
+  check(
+    "unknown: setup saw the conflict and waited for the user's choice",
+    /SOURCE_CONFLICT, waiting for the user to choose the data source/u.test(log),
+    log.slice(-800),
+  );
+  check(
+    "unknown: the cap ended the wait, not the stall rule",
+    /START_TIMEOUT: the data source was not chosen within/u.test(log) && !/START_STUCK/u.test(log),
+    log.slice(-800),
+  );
+  check(
+    "unknown: journal ROLLED_BACK",
+    sandbox.journal()?.outcome === "ROLLED_BACK",
+    sandbox.journal(),
+  );
+  check(
+    `unknown: app.json.current = ${V20}`,
+    sandbox.pointer()?.current === V20,
+    sandbox.pointer(),
+  );
+  check(
+    "unknown: 2.0 serving again",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  check(
+    `unknown: the 3.x host exited before the rollback (no process under app-${VERSION_A})`,
+    processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+  );
+  const conflicted = summarize(sandbox, "re-upgrade with 2.x not comparable, rolled back");
+  check("unknown: L untouched", sameBusiness(conflicted.L, back3.L), conflicted.L);
+  check(
+    "unknown: N untouched (same generation, same content)",
+    conflicted.generation === g2 && sameBusiness(conflicted.N, back3.N),
+    conflicted,
+  );
+  check(
+    "unknown: A=legacy by setup-rollback again",
+    conflicted.authority?.authority === "legacy" && conflicted.authority.by === "setup-rollback",
+    conflicted.authority,
+  );
+  check(
+    "unknown: the rollback cleared the conflict state (2.x is the source again)",
+    !existsSync(join(sandbox.v3, "runtime", "startup-state.json")),
+  );
+
+  process.stdout.write(`[${currentScenario}] 2.x readable again, re-upgrade → resume\n`);
+  rmSync(join(sandbox.data, "stray.bin"));
+  await upgradeTo3(sandbox, "re-upgrade after the conflict");
+  const last = summarize(sandbox, "re-upgraded after the conflict");
+  check("resumed the same generation", last.generation === g2, last.generation);
+  check("N is what it was", sameBusiness(last.N, back3.N), last.N);
+  teardown(sandbox);
+}
+
+/**
+ * 2.0 → 3.x with setup killed at every commit point (and in the middle of the undo a failed
+ * START began, and right after it spawned the converting host). The next ordinary start —
+ * whichever launcher the root has at that moment — recovers: committed with N holding L's
+ * business content, or back on 2.0 with L untouched and `A` matching how far the
+ * conversion durably got (not published: no `A`; published: `A=legacy by setup-rollback`).
+ */
+async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
+  currentScenario = "v2-v3-faults";
+  packagesForV3 = pkg;
+  const sandbox = new Sandbox("v2-v3-faults");
+  const expected: Array<[string, "ABORTED" | "ROLLED_BACK" | "COMMITTED"]> = [
+    ["STAGE", "ABORTED"],
+    ["PROBE", "ABORTED"],
+    ["SNAPSHOT", "ABORTED"],
+    ["FENCE", "ABORTED"],
+    ["QUIESCE", "ABORTED"],
+    ["SEAL", "ABORTED"],
+    ["SWITCH", "ROLLED_BACK"],
+    ["START", "ROLLED_BACK"],
+    // 刚拉起转换宿主就死：宿主准入时自己跑 --recover 并等它；那一轮 recover 不接管这个卡在准入的宿主，
+    // 先确认它退出再回滚（以前是互等到首条进度期限 60 s）。
+    ["SPAWNED:START", "ROLLED_BACK"],
+    // 宿主已经转换完、拿到 lease 才死：下一次启动的 recover 接管同一个宿主的等待，提交。
+    ["LEASED:START", "COMMITTED"],
+    ["UNDO:2", "ROLLED_BACK"],
+    ["COMMIT", "COMMITTED"],
+  ];
+  // 只复现其中几点：ATM_DRILL_POINTS=SPAWNED:START,COMMIT。
+  const points = process.env.ATM_DRILL_POINTS?.split(",");
+  for (const [point, outcome] of expected) {
+    if (points && !points.includes(point)) continue;
+    process.stdout.write(`\n[${currentScenario}] 2.0 → ${VERSION_A}, die after ${point}\n`);
+    reset(sandbox);
+    if (!(await install20(sandbox))) continue;
+    const before = legacyBusiness(sandbox.data);
+    const extra: Record<string, string> =
+      point === "UNDO:2"
+        ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" }
+        : { ATM_SETUP_DIE_AFTER: point };
+    const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], extra);
+    check(`${point}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
+    check(
+      `${point}: journal left unfinished`,
+      sandbox.journal()?.outcome == null,
+      sandbox.journal(),
+    );
+    const mark = sandbox.logMark();
+    const begun = Date.now();
+    const start = runLauncher(sandbox, ["--background"]);
+    check(
+      `${point}: the root launcher's start exits 0 within 90 s (${((Date.now() - begun) / 1000).toFixed(1)} s)`,
+      start.status === 0 && Date.now() - begun < 90_000,
+      { status: start.status, err: start.stderr.slice(0, 300) },
+    );
+    check(
+      `${point}: recovered to ${outcome}`,
+      await until(
+        () => sandbox.journal()?.state === "DONE" && sandbox.journal()?.outcome === outcome,
+        240_000,
+      ),
+      { journal: sandbox.journal(), log: sandbox.since(mark).slice(-800) },
+    );
+    const version = outcome === "COMMITTED" ? VERSION_A : V20;
+    check(
+      `${point}: app.json.current = ${version}`,
+      sandbox.pointer()?.current === version,
+      sandbox.pointer(),
+    );
+    check(
+      `${point}: service running ${version}`,
+      await until(() => sandbox.serviceVersion() === version, 60_000),
+      sandbox.serviceVersion(),
+    );
+    const after = summarize(sandbox, `die after ${point} → ${outcome}`);
+    check(`${point}: L untouched`, sameBusiness(after.L, before), after.L);
+    if (outcome === "COMMITTED") {
+      check(`${point}: N holds L's business content`, sameBusiness(after.N, before), after.N);
+      check(
+        `${point}: A=v3, bound to the published generation`,
+        after.authority?.authority === "v3" && after.authority.generation === after.generation,
+        after.authority,
+      );
+    } else {
+      check(
+        `${point}: no 3.x process left`,
+        processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+      );
+      check(
+        `${point}: A matches the durable phase (published → legacy, otherwise none)`,
+        after.generation === null
+          ? after.authority === null
+          : after.authority?.authority === "legacy" &&
+              after.authority.generation === after.generation,
+        { generation: after.generation, authority: after.authority },
+      );
+    }
+    if (point === "LEASED:START")
+      check(
+        `${point}: the recovery took over the same host's wait`,
+        /taking over the wait for host/u.test(sandbox.since(mark)),
+        sandbox.since(mark).slice(-600),
+      );
+  }
+  teardown(sandbox);
+}
+
 async function main(): Promise<void> {
-  if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
   const only = process.argv.includes("--only")
     ? process.argv[process.argv.indexOf("--only") + 1]!.split(",")
     : null;
   const pkg = packages(process.argv.includes("--rebuild-packages"));
+  // 演练用的假 Electron 与 job-runner 是 drill 构建的 examples：构建包之后才一定在。
+  if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
   const scenarios: Array<[string, (pkg: Packages) => Promise<void>]> = [
     ["lifecycle", scenarioLifecycle],
     ["update", scenarioUpdate],
@@ -1575,6 +2099,8 @@ async function main(): Promise<void> {
     ["reverse-replay", scenarioReverseReplay],
     ["legacy-record", scenarioLegacyRecord],
     ["uninstall-race", scenarioUninstallRace],
+    ["v2-v3", scenarioV2V3],
+    ["v2-v3-faults", scenarioV2V3Faults],
   ];
   for (const [name, run] of scenarios) if (!only || only.includes(name)) await run(pkg);
   const failed = results.filter((result) => !result.passed);
@@ -1584,6 +2110,7 @@ async function main(): Promise<void> {
     total: results.length,
     failed: failed.length,
     results,
+    business,
   };
   writeFileSync(join(drillRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(

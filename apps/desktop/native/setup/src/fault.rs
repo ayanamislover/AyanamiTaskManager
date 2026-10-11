@@ -9,7 +9,9 @@
 //! `ATM_SETUP_SQUIRREL_ADDS=<name>` plays Squirrel's updater producing an Electron version
 //! directory after the SNAPSHOT. `ATM_SETUP_PAUSE_UNLOCKED=<dir>` holds a finishing
 //! uninstall right after it released the install lock (writes `<dir>\paused`, waits for
-//! `<dir>\resume`), so a drill can run another setup in that gap. Release builds compile all
+//! `<dir>\resume`), so a drill can run another setup in that gap.
+//! `ATM_SETUP_WAIT_SECS=<first>,<stall>,<cap>` shortens the START wait budget (07 §8) so a
+//! drill can see which rule ends a wait without waiting hours. Release builds compile all
 //! of them to nothing.
 //!
 //! The variables are taken out of the environment at startup ([`capture`]): they are meant
@@ -20,12 +22,13 @@
 use atm_install_state::TxnState;
 
 #[cfg(feature = "drill")]
-const VARIABLES: [&str; 5] = [
+const VARIABLES: [&str; 6] = [
     "ATM_SETUP_DIE_AFTER",
     "ATM_SETUP_FAIL_AT",
     "ATM_SETUP_FAIL_UNDO",
     "ATM_SETUP_SQUIRREL_ADDS",
     "ATM_SETUP_PAUSE_UNLOCKED",
+    "ATM_SETUP_WAIT_SECS",
 ];
 
 #[cfg(feature = "drill")]
@@ -89,6 +92,33 @@ pub fn fail_at(state: TxnState) -> bool {
 #[cfg(not(feature = "drill"))]
 pub fn fail_at(_state: TxnState) -> bool {
     false
+}
+
+/// The START wait budget: 07 §8's defaults, or the drill's `ATM_SETUP_WAIT_SECS`.
+#[cfg(feature = "drill")]
+pub fn wait_policy() -> atm_install_state::startup::WaitPolicy {
+    use std::time::Duration;
+    let default = atm_install_state::startup::WaitPolicy::default();
+    let Some(secs) = var("ATM_SETUP_WAIT_SECS") else {
+        return default;
+    };
+    let parts: Vec<u64> = secs
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    match parts.as_slice() {
+        [first, stall, cap] => atm_install_state::startup::WaitPolicy {
+            first_progress: Duration::from_secs(*first),
+            stall: Duration::from_secs(*stall),
+            cap: Duration::from_secs(*cap),
+        },
+        _ => default,
+    }
+}
+
+#[cfg(not(feature = "drill"))]
+pub fn wait_policy() -> atm_install_state::startup::WaitPolicy {
+    atm_install_state::startup::WaitPolicy::default()
 }
 
 /// Where a START / ROLLBACK_START host can be when setup dies: `SPAWNED` right after it was

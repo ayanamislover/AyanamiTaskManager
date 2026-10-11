@@ -606,3 +606,141 @@ fn a_host_that_is_exiting_opens_no_entry() {
     assert!(descriptor(&n).is_some());
     s.stop(&|_| {});
 }
+
+/// W8h（07 §7）：用户在窗口里选数据来源。
+///
+/// - `A=legacy` 且 2.x 比较不了（多了一个未登记的文件）→ 冲突；「沿用 3.0」绑进 `A=v3 by user-choice`，清掉启动状态，
+///   再启动就服务同一个 generation，3.0 里的数据都在；
+/// - 2.x 写过（`A=v3`，后台比较发现）→ 冲突；「从 2.x 重新转换」封存当前 generation，再启动换了 generation、带着 2.x 写的数据；
+/// - 3.0 是从另一个数据根转换来的：「沿用 3.0」拒绝（绑不住，下次还会冲突），什么都不写；「重新转换」照常。
+#[test]
+fn the_users_choice_settles_a_source_conflict() {
+    let d = dir("source-choice");
+    let (n, l) = (d.join("N"), legacy_root(&d));
+    let layout = Layout::new(&n);
+    let events = Events::default();
+    let first = serving(atm_runtime::start(&options(&n, &l, &events)).unwrap());
+    let g1 = first.generation().to_string();
+    first.stop(&|_| {});
+    let m = match cv::read_manifest(&layout) {
+        cv::ManifestState::Present(m) => m,
+        other => panic!("{other:?}"),
+    };
+    cv::write_authority(
+        &layout,
+        &cv::rollback_authority(Some(&authority(&n)), &m, "txn-r", T),
+    )
+    .unwrap();
+    std::fs::write(l.join("stray.bin"), b"not a 2.x file").unwrap();
+
+    let Started::Conflict(c) = atm_runtime::start(&options(&n, &l, &events)).unwrap() else {
+        panic!("an uncomparable 2.x after a rollback must ask")
+    };
+    assert_eq!(
+        cv::conflict_cause(&c.state.reason),
+        "UNREADABLE",
+        "{}",
+        c.state.reason
+    );
+    let kept = serving(
+        c.choose(&options(&n, &l, &events), atm_runtime::SourceChoice::KeepV3)
+            .unwrap(),
+    );
+    let a = authority(&n);
+    assert_eq!(
+        (a.authority.as_str(), a.by.as_str(), a.generation.as_deref()),
+        ("v3", "user-choice", Some(g1.as_str()))
+    );
+    assert!(!n.join("runtime/startup-state.json").exists());
+    assert_eq!(kept.generation(), g1);
+    // 按选择启动的这一轮不再后台比较：同样的 UNKNOWN 不会当场推翻用户刚做的决定。
+    assert_eq!(kept.background(Duration::from_secs(5)), None);
+    assert!(descriptor(&n).is_some());
+    kept.stop(&|_| {});
+    // 只放行这一次：下一次正常启动照常开放入口、后台比较，仍比较不了就再问（07 §6：v3 + UNKNOWN）。
+    let next = serving(atm_runtime::start(&options(&n, &l, &events)).unwrap());
+    match next.background(Duration::from_secs(120)) {
+        Some(Background::Conflict(state)) => {
+            assert_eq!(
+                cv::conflict_cause(&state.reason),
+                "UNREADABLE",
+                "{}",
+                state.reason
+            )
+        }
+        other => panic!("an uncomparable 2.x asks again on the next start: {other:?}"),
+    }
+    drop(next);
+    // 冲突一旦写下就一直在，直到用户再选：2.x 恢复可比较了也照样问。这次比较得出完整摘要，沿用 3.0 就绑定它。
+    std::fs::remove_file(l.join("stray.bin")).unwrap();
+    let Started::Conflict(again) = atm_runtime::start(&options(&n, &l, &events)).unwrap() else {
+        panic!("the conflict found in the background stays")
+    };
+    let healed = serving(
+        again
+            .choose(&options(&n, &l, &events), atm_runtime::SourceChoice::KeepV3)
+            .unwrap(),
+    );
+    assert_eq!(healed.generation(), g1);
+    assert!(authority(&n).accepted_source_digest.is_some());
+    healed.stop(&|_| {});
+
+    // 2.x 写过：后台比较发现，冲突；选重新转换。
+    touch_legacy(&l);
+    let s = serving(atm_runtime::start(&options(&n, &l, &events)).unwrap());
+    let outcome = s.background(Duration::from_secs(120)).unwrap();
+    let Background::Conflict(state) = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert_eq!(
+        cv::conflict_cause(&state.reason),
+        "CHANGED",
+        "{}",
+        state.reason
+    );
+    drop(s);
+    let Started::Conflict(c) = atm_runtime::start(&options(&n, &l, &events)).unwrap() else {
+        panic!("the conflict stays until the user chooses")
+    };
+    let reconverted = serving(
+        c.choose(
+            &options(&n, &l, &events),
+            atm_runtime::SourceChoice::Reconvert,
+        )
+        .unwrap(),
+    );
+    let g2 = reconverted.generation().to_string();
+    assert_ne!(g2, g1);
+    assert!(!n.join("runtime/startup-state.json").exists());
+    reconverted.stop(&|_| {});
+
+    // 换了数据根：沿用 3.0 绑不住，拒绝且不写 A；重新转换照常。
+    let moved = d.join("L-moved");
+    copy_tree(&l, &moved);
+    let Started::Conflict(c) = atm_runtime::start(&options(&n, &moved, &events)).unwrap() else {
+        panic!("a moved source must ask")
+    };
+    assert_eq!(cv::conflict_cause(&c.state.reason), "OTHER_SOURCE");
+    let before = std::fs::read(n.join("authority.json")).unwrap();
+    let refused = match c.choose(
+        &options(&n, &moved, &events),
+        atm_runtime::SourceChoice::KeepV3,
+    ) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("keeping 3.0 converted from another root must be refused"),
+    };
+    assert!(refused.starts_with("SOURCE_KEEP_UNAVAILABLE"), "{refused}");
+    assert_eq!(std::fs::read(n.join("authority.json")).unwrap(), before);
+    let Started::Conflict(c) = atm_runtime::start(&options(&n, &moved, &events)).unwrap() else {
+        panic!("still in conflict after a refused choice")
+    };
+    let from_moved = serving(
+        c.choose(
+            &options(&n, &moved, &events),
+            atm_runtime::SourceChoice::Reconvert,
+        )
+        .unwrap(),
+    );
+    assert_ne!(from_moved.generation(), g2);
+    from_moved.stop(&|_| {});
+}

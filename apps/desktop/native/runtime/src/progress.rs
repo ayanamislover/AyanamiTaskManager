@@ -52,21 +52,16 @@ impl Reporter {
         self.state.lock().unwrap().generation = generation.map(str::to_string);
     }
 
-    /// 转换 / 比较的进度回调（`atm_store::progress::ProgressFn`）。
-    pub fn report(&self, phase: &str, done: usize, total: usize, work: u64) {
-        if self.drill.hold_at.as_deref() == Some(phase) {
-            loop {
-                std::thread::sleep(Duration::from_secs(3600));
-            }
-        }
-        if let Some(pace) = self.drill.pace {
-            std::thread::sleep(pace);
-        }
+    /// 进入数据源冲突：告诉等着的 setup「在等用户选」（[`startup::AWAITING_USER`]），不是卡住。
+    /// 不走联调注入，也不受落盘间隔限制：这是这个进程的最后一条进度。
+    pub fn awaiting_user(&self) {
         let mut state = self.state.lock().unwrap();
-        let due = state.phase != phase || state.written.is_none_or(|t| t.elapsed() >= MIN_WRITE);
-        if !due {
-            return;
-        }
+        self.write(&state, startup::AWAITING_USER, 0, 0, 0);
+        state.phase = startup::AWAITING_USER.to_string();
+        state.written = Some(Instant::now());
+    }
+
+    fn write(&self, state: &State, phase: &str, done: usize, total: usize, work: u64) {
         let progress = StartupProgress {
             txn: self.txn.clone(),
             pid: self.pid,
@@ -82,6 +77,24 @@ impl Reporter {
         };
         // 写不下只是让 setup 少一条推进的证据；不能因此中断转换。
         let _ = startup::write_progress(&self.n, &progress);
+    }
+
+    /// 转换 / 比较的进度回调（`atm_store::progress::ProgressFn`）。
+    pub fn report(&self, phase: &str, done: usize, total: usize, work: u64) {
+        if self.drill.hold_at.as_deref() == Some(phase) {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+        if let Some(pace) = self.drill.pace {
+            std::thread::sleep(pace);
+        }
+        let mut state = self.state.lock().unwrap();
+        let due = state.phase != phase || state.written.is_none_or(|t| t.elapsed() >= MIN_WRITE);
+        if !due {
+            return;
+        }
+        self.write(&state, phase, done, total, work);
         state.phase = phase.to_string();
         state.written = Some(Instant::now());
     }

@@ -307,7 +307,8 @@ fn the_rollback_authority_is_written_only_after_the_process_is_gone() {
 }
 
 /// 冲突（B3、07 §7）：转换时的源是 `L`，这次给的是同样内容的另一个路径。进程活着、持有准入，
-/// 但没有任何入口：没有 daemon.json、没有见证，`N\runtime` 里只多出启动状态；setup 永远等不到健康。
+/// 但没有任何入口：没有 daemon.json、没有见证，`N\runtime` 里只多出启动状态；没人选就等不到健康。
+/// 进程写的进度是「在等用户选」（W8b）：setup 不按「多久没动」判卡住（这里 3 s），只到总上限（12 s）才放弃。
 #[test]
 fn a_conflicting_start_never_publishes_an_entry() {
     let s = Site::new("handoff-conflict", true);
@@ -323,8 +324,21 @@ fn a_conflicting_start_never_publishes_an_entry() {
     before.retain(|f| f != "daemon.json" && f != "compare");
 
     let p = s.launch("T2", &moved, &[]);
-    let waited = s.wait("T2", &p.0, policy(60, 3, 600)).unwrap_err();
-    assert!(waited.starts_with("START_STUCK"), "{waited}");
+    let begun = std::time::Instant::now();
+    let waited = s.wait("T2", &p.0, policy(60, 3, 12)).unwrap_err();
+    assert!(
+        waited.starts_with("START_TIMEOUT") && waited.contains("not chosen"),
+        "{waited}"
+    );
+    assert!(
+        begun.elapsed() >= std::time::Duration::from_secs(10),
+        "{:?}",
+        begun.elapsed()
+    );
+    assert_eq!(
+        startup::read_progress(&s.n).unwrap().phase,
+        startup::AWAITING_USER
+    );
     assert!(procs::alive(&p.0));
     assert!(!startup::admission_released(&s.n));
     assert!(!s.n.join("runtime/daemon.json").exists());

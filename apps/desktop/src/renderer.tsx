@@ -30,6 +30,16 @@ type UpdateStatus = {
   at: string;
   version: string | null;
 };
+type DataSourceState =
+  | {
+      state: "SOURCE_CONFLICT";
+      cause: "CHANGED" | "UNREADABLE" | "LEGACY_GONE" | "OTHER_SOURCE" | "RECORD";
+      reason: string;
+      since: string;
+      error: string | null;
+    }
+  | { state: "STARTING"; choosing: boolean; error?: string | null }
+  | { state: "SERVING" | "UNAVAILABLE"; choosing: false; error: string | null };
 type McpBridgeObservation = {
   sampledAt: string;
   metric: "PRIVATE_BYTES";
@@ -83,6 +93,9 @@ type DesktopBridge = {
   closeWindow(): Promise<void>;
   onWindowMaximizedChange(listener: (maximized: boolean) => void): () => void;
   onNavigate(listener: (route: string) => void): () => void;
+  getDataSource(): Promise<DataSourceState>;
+  chooseDataSource(choice: "KEEP_V3" | "RECONVERT"): Promise<DataSourceState>;
+  onDataSourceChange(listener: (state: DataSourceState) => void): () => void;
 };
 
 function RendererReadySignal({ desktop }: { desktop: DesktopBridge }) {

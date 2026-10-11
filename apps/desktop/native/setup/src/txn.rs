@@ -70,6 +70,19 @@ fn code(error: &str) -> String {
         .collect()
 }
 
+/// `host` is the process that started this setup. A START host whose setup died before it
+/// was admitted runs `--recover` itself and waits for it to finish: it writes no progress
+/// until then, so taking over its wait would only wait out the first-progress budget.
+/// Such a host is not a live START to take over; the undo stops it like any other.
+fn started_us(host: &atm_install_state::ProcessIdentity) -> bool {
+    // Only the process snapshot carries the parent pid (`procs::find` does not).
+    let me = std::process::id();
+    procs::snapshot()
+        .into_iter()
+        .find(|proc| proc.pid == me)
+        .is_some_and(|me| me.parent == host.pid && procs::alive(host))
+}
+
 /// Where a failed or interrupted forward path ends. Before SWITCH nothing changed:
 /// ABORTED. After it, ROLLED_BACK — unless nothing was installed before: a first install
 /// has nothing to roll back to, it is ABORTED as well (Codex P2-2).
@@ -638,7 +651,7 @@ impl Setup {
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
         fault::after_spawn(txn.state, &self.env, &identity);
-        self.await_healthy(txn, version, &identity, WaitPolicy::default())
+        self.await_healthy(txn, version, &identity, fault::wait_policy())
     }
 
     /// The host this transaction started for `version`, if a replay finds it still alive:
@@ -651,8 +664,10 @@ impl Setup {
     ) -> Option<atm_install_state::ProcessIdentity> {
         let started = txn.started.clone()?;
         let dir = self.env.app_dir(version);
-        (procs::alive(&started) && fsx::is_within(std::path::Path::new(&started.image), &dir))
-            .then_some(started)
+        (procs::alive(&started)
+            && fsx::is_within(std::path::Path::new(&started.image), &dir)
+            && !started_us(&started))
+        .then_some(started)
     }
 
     /// Wait for SERVICE_HEALTHY (07 §8): only the witness counts as health. Progress that this
@@ -940,7 +955,7 @@ impl Setup {
                 let to = txn.to.clone();
                 let started = self.started_host(&txn, &to).ok_or("START_TAKEOVER_LOST")?;
                 say!("START {to}: taking over the wait for host {}", started.pid);
-                match self.await_healthy(&txn, &to, &started, WaitPolicy::default()) {
+                match self.await_healthy(&txn, &to, &started, fault::wait_policy()) {
                     Ok(()) => {
                         self.enter(&mut txn, TxnState::Commit)?;
                         let snap = snapshot::load(&self.env, &txn.id)?;
@@ -1062,5 +1077,29 @@ impl Setup {
         }
         fsx::sweep_aside(&self.env.install_root);
         fsx::sweep_aside(&self.env.install_root.join("resources"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W8b：只有真正拉起本进程的那个宿主（pid 与创建时间都对得上）算「卡在准入、等我们」的 START 宿主。
+    #[test]
+    fn only_the_process_that_started_us_is_waiting_on_us() {
+        let me = std::process::id();
+        let parent_pid = procs::snapshot()
+            .into_iter()
+            .find(|proc| proc.pid == me)
+            .unwrap()
+            .parent;
+        let parent = procs::find(parent_pid).unwrap().identity();
+        assert!(started_us(&parent));
+        let reused = atm_install_state::ProcessIdentity {
+            started_at_ms: parent.started_at_ms + 1,
+            ..parent.clone()
+        };
+        assert!(!started_us(&reused));
+        assert!(!started_us(&procs::find(me).unwrap().identity()));
     }
 }

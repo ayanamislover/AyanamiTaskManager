@@ -47,15 +47,15 @@ decide 循环（最多 8 圈）
 
 ## 端到端用例（`tests/handoff.rs`，真实自有进程）
 
-| 用例                                                               | 场景                                                                                                     |
-| ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `a_start_is_healthy_only_through_its_own_witness`                  | START：全新安装到 SERVICE_HEALTHY；别的 txn 去等同一个健康的进程，永远超时                               |
-| `a_long_conversion_is_waited_out_through_its_progress`             | F15：转换比首条进度期限长，靠进度一直等到健康；记账落盘                                                  |
-| `a_restarted_setup_takes_over_with_the_budget_already_spent`       | F18 / P2-02：setup 重启接管同一进程，已用掉的总预算不重来                                                |
-| `a_stuck_start_is_given_up_and_cancelled_without_authority`        | F16 与取消：卡住判 START_STUCK；进程活着时拒绝写 `A`；结束它之后按持久阶段（未发布）不写 `A`             |
-| `a_dead_conversion_fails_the_start_and_the_next_one_restarts`      | F17：转换中途进程死了 → START_HOST_EXITED、不写 `A`；再次启动走 S3，换新 generation                      |
-| `the_rollback_authority_is_written_only_after_the_process_is_gone` | 回滚事务：已发布的进程退出之后才写 `A=legacy`；再升级无损接回（resume-after-rollback）                   |
-| `a_conflicting_start_never_publishes_an_entry`                     | 源身份不符：进程活着、持有准入，没有 daemon.json、没有见证，`N\runtime` 只多出启动状态；setup 等不到健康 |
+| 用例                                                               | 场景                                                                                                                                                |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `a_start_is_healthy_only_through_its_own_witness`                  | START：全新安装到 SERVICE_HEALTHY；别的 txn 去等同一个健康的进程，永远超时                                                                          |
+| `a_long_conversion_is_waited_out_through_its_progress`             | F15：转换比首条进度期限长，靠进度一直等到健康；记账落盘                                                                                             |
+| `a_restarted_setup_takes_over_with_the_budget_already_spent`       | F18 / P2-02：setup 重启接管同一进程，已用掉的总预算不重来                                                                                           |
+| `a_stuck_start_is_given_up_and_cancelled_without_authority`        | F16 与取消：卡住判 START_STUCK；进程活着时拒绝写 `A`；结束它之后按持久阶段（未发布）不写 `A`                                                        |
+| `a_dead_conversion_fails_the_start_and_the_next_one_restarts`      | F17：转换中途进程死了 → START_HOST_EXITED、不写 `A`；再次启动走 S3，换新 generation                                                                 |
+| `the_rollback_authority_is_written_only_after_the_process_is_gone` | 回滚事务：已发布的进程退出之后才写 `A=legacy`；再升级无损接回（resume-after-rollback）                                                              |
+| `a_conflicting_start_never_publishes_an_entry`                     | 源身份不符：进程活着、持有准入，没有 daemon.json、没有见证，`N\runtime` 只多出启动状态；进度是「在等用户选」，setup 不判卡住、到总上限才放弃（W8b） |
 
 `--drill-pace-ms`、`--drill-hold-at` 只在开发二进制里：前者把小样本的转换拉长，后者让进度停在某一阶段（模拟卡住）。
 
@@ -71,8 +71,21 @@ decide 循环（最多 8 圈）
 ## 不在 W4i
 
 - 同步、派单与其余调度任务（W7）；冲突时它们本来就不起。
-- 可信界面里的选源（W6，B2）：`Conflicted` 持有准入，等用户选。
+- 可信界面里的选源：W8h 补上，见下。
 - 旧版静止的判定：开发二进制直接判静止（联调里旧根由用例控制），不做任何检查；正式宿主用 [`legacy_quiesce`]（W5a，见下）。
+
+## 数据源冲突与选择（W8b / W8h）
+
+- 冲突时运行时把进度写成 `SOURCE_CONFLICT`（`Reporter::awaiting_user`）：等着的 setup 知道它在等用户选，不按 10 min 没动判卡住，
+  只按总上限（2 h）等；用户选好、服务开起来，同一个 txn 照常见证健康、提交。没人选就到上限超时，setup 确认进程退出后回滚到 2.x，
+  `settle_for_rollback` 写 `A=legacy` 并清掉启动状态（回到 2.x 就以 2.x 为准，再升级按 §6 正常判定）。
+- `Conflicted::choose(o, KeepV3 | Reconvert)`：落下用户的选择（`choose_v3` 重新比较并绑定这次的摘要；`choose_legacy` 封存当前 generation），
+  放掉准入，再按选择启动一次。这一轮不做后台比较：用户刚看着这次比较做的决定，比较不了（UNKNOWN）时后台比较会当场推翻它；
+  下一次正常启动照旧比较。3.0 是从另一个数据根转换来的（B3）时拒绝沿用（`SOURCE_KEEP_UNAVAILABLE`），重新转换照常。
+- 宿主只从可信的 WebView 收选择（`getDataSource` / `chooseDataSource` / `onDataSourceChange`，B2）；冲突时托盘显示「需要选择数据来源」，
+  窗口自己出来。界面在内容区显示二选一（`packages/ui/src/features/data-source-choice.tsx`），原因原文照给。
+- 用例：`tests/boot.rs::the_users_choice_settles_a_source_conflict`；真实宿主：`scripts/source-choice-smoke.ts`（CDP 点选两种选择）；
+  长转换不触发看门狗：`scripts/conversion-watchdog-smoke.ts`（阈值 500 ms，四十万条临时任务转换约 14 s）。
 
 ## 正式宿主（W5a）
 

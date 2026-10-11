@@ -18,8 +18,13 @@ use std::time::{Duration, Instant};
 /// `%LOCALAPPDATA%` 下新根的目录名（07 §1）。
 pub const V3_DIR_NAME: &str = "AyanamiTaskManager3";
 pub const PROGRESS_FILE: &str = "startup-progress.json";
+/// 进入数据源冲突（07 §7）的新进程写的阶段：它在等用户在窗口里选数据来源，不是卡住。
+/// setup 这时不按「多久没动」判卡住，只按总上限等（用户可能不在机器前）。
+pub const AWAITING_USER: &str = "SOURCE_CONFLICT";
 const MANIFEST: &str = "conversion.json";
 const AUTHORITY: &str = "authority.json";
+/// `N\runtime\startup-state.json`：数据源冲突的启动状态（07 §7，由 3.x 写）。
+const STARTUP_STATE: &str = "startup-state.json";
 /// 这几个文件都很小；大得离谱就是坏了。
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -67,7 +72,7 @@ pub struct StartupProgress {
     /// 进程创建时间，Unix 毫秒（与 [`ProcessIdentity::started_at_ms`] 同一口径）。
     pub process_created_at: u64,
     pub generation: Option<String>,
-    /// `SNAPSHOT`、`IMPORT`、`VERIFY`、`PUBLISHING`、`PUBLISHED`。
+    /// `SNAPSHOT`、`IMPORT`、`VERIFY`、`PUBLISHING`、`PUBLISHED`、`COMPARE`，以及 [`AWAITING_USER`]。
     pub phase: String,
     pub progress: Counter,
     /// Unix 毫秒。只给人看，判定不用（判定只看 phase / done / total 有没有动）。
@@ -141,6 +146,8 @@ pub struct ProgressWatch {
     policy: WaitPolicy,
     started: Instant,
     last: Option<(String, u64, u64, u64)>,
+    /// `last` 是哪个 generation 的：重转（Reconvert、Restart）换了 generation 从头报，同样的数字也是新的推进。
+    last_generation: Option<String>,
     changed_at: Instant,
 }
 
@@ -158,6 +165,9 @@ pub struct WaitLedger {
     pub changed_ms: u64,
     /// 最后看到的 (phase, done, total, work)。
     pub last: Option<(String, u64, u64, u64)>,
+    /// `last` 所属的 generation。旧记账没有这一项时按没有读。
+    #[serde(default)]
+    pub last_generation: Option<String>,
 }
 
 impl ProgressWatch {
@@ -173,6 +183,7 @@ impl ProgressWatch {
             policy,
             started: now,
             last: None,
+            last_generation: None,
             changed_at: now,
         }
     }
@@ -204,6 +215,7 @@ impl ProgressWatch {
         watch.started = back(ledger.started_ms);
         watch.changed_at = back(ledger.changed_ms.max(ledger.started_ms));
         watch.last = ledger.last.clone();
+        watch.last_generation = ledger.last_generation.clone();
         watch
     }
 
@@ -218,6 +230,7 @@ impl ProgressWatch {
             started_ms: at(self.started),
             changed_ms: at(self.changed_at),
             last: self.last.clone(),
+            last_generation: self.last_generation.clone(),
         }
     }
 
@@ -244,23 +257,39 @@ impl ProgressWatch {
         }
         if let Some(p) = progress.filter(|p| self.accepts(p)) {
             // 四项里任何一项变了都算推进：一个大项目的 IMPORT 里 done / total 长时间不变，work 在涨（W3 peer r1 P2-03）。
+            // 换了 generation 也算：重转从头报，数字可能和上一代停下时一样。
             let key = (
                 p.phase.clone(),
                 p.progress.done,
                 p.progress.total,
                 p.progress.work,
             );
-            if self.last.as_ref() != Some(&key) {
+            if self.last.as_ref() != Some(&key) || self.last_generation != p.generation {
                 self.last = Some(key);
+                self.last_generation = p.generation.clone();
                 self.changed_at = now;
             }
         }
         let waited = now.saturating_duration_since(self.started);
+        let awaiting_user = self
+            .last
+            .as_ref()
+            .is_some_and(|(phase, ..)| phase == AWAITING_USER);
         if waited >= self.policy.cap {
-            return WaitVerdict::TimedOut(format!(
-                "still not healthy after {} min",
-                self.policy.cap.as_secs() / 60
-            ));
+            return WaitVerdict::TimedOut(if awaiting_user {
+                format!(
+                    "the data source was not chosen within {} min",
+                    self.policy.cap.as_secs() / 60
+                )
+            } else {
+                format!(
+                    "still not healthy after {} min",
+                    self.policy.cap.as_secs() / 60
+                )
+            });
+        }
+        if awaiting_user {
+            return WaitVerdict::Waiting;
         }
         match &self.last {
             None if waited >= self.policy.first_progress => WaitVerdict::TimedOut(format!(
@@ -431,6 +460,14 @@ pub fn settle_for_rollback(n: &Path, txn: &str, at_ms: u64) -> Result<RollbackAu
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     write_atomic(&n.join(AUTHORITY), &bytes)
         .map_err(|error| format!("AUTHORITY_WRITE: {error}"))?;
+    // 回到 2.x 就是以 2.x 为准：之前那次数据源冲突（等用户在 3.0 里选）随之了结。留着它，再升级时
+    // 3.0 会直接再问一次，而不是按 `A=legacy` 正常判定（没动过就接回、动过就重转、比较不了才再问）。
+    match fs::remove_file(runtime(n).join(STARTUP_STATE)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(format!("STARTUP_STATE_CLEAR: {error}"));
+        }
+        _ => {}
+    }
     Ok(RollbackAuthority::Written { generation })
 }
 
@@ -491,6 +528,7 @@ mod tests {
             started_ms: at(MIN * 179),
             changed_ms: at(MIN * 179),
             last: None,
+            last_generation: None,
         };
         for ledger in [None, Some(&foreign)] {
             let mut old = ProgressWatch::resume("T3", &who, policy, ledger, t, at(MIN * 180));
@@ -589,6 +627,94 @@ mod tests {
             watch.observe(last + MIN * 10, false, true, Some(&p)),
             WaitVerdict::Stuck(_)
         ));
+    }
+
+    /// W8b（A5）：重转换了 generation 从头报，数字可能与上一代停下时一样；换了 generation 就是新的推进，
+    /// 不能被当成「10 min 没动」。同一个 generation 里数字不动仍然判卡住。
+    #[test]
+    fn a_new_generation_counts_as_movement() {
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        let first = progress("T1", &me(), "SNAPSHOT", 0);
+        assert_eq!(
+            watch.observe(t0, false, true, Some(&first)),
+            WaitVerdict::Waiting
+        );
+        let again = StartupProgress {
+            generation: Some("G2".into()),
+            ..first.clone()
+        };
+        assert_eq!(
+            watch.observe(t0 + MIN * 9, false, true, Some(&again)),
+            WaitVerdict::Waiting
+        );
+        assert_eq!(
+            watch.observe(t0 + MIN * 18, false, true, Some(&again)),
+            WaitVerdict::Waiting
+        );
+        assert!(matches!(
+            watch.observe(t0 + MIN * 19, false, true, Some(&again)),
+            WaitVerdict::Stuck(_)
+        ));
+        // 记账带着 generation：接管后同一代同样的数字不算推进，另一代算。
+        let ledger = watch.ledger(t0 + MIN * 9, 1_800_000_000_000);
+        assert_eq!(ledger.last_generation.as_deref(), Some("G2"));
+        let json = serde_json::to_value(&ledger).unwrap();
+        assert_eq!(serde_json::from_value::<WaitLedger>(json).unwrap(), ledger);
+        // 旧记账没有 last_generation：照样读得出。
+        let mut old = serde_json::to_value(&ledger).unwrap();
+        old.as_object_mut().unwrap().remove("last_generation");
+        assert_eq!(
+            serde_json::from_value::<WaitLedger>(old)
+                .unwrap()
+                .last_generation,
+            None
+        );
+    }
+
+    /// W8b：进入数据源冲突的进程写 [`AWAITING_USER`]：在等用户选，不按 10 min 判卡住；
+    /// 总上限照样算，超时的说明写明是没选数据来源。
+    #[test]
+    fn a_source_conflict_waits_for_the_user_until_the_cap() {
+        let t0 = Instant::now();
+        let mut watch = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        let compare = progress("T1", &me(), "COMPARE", 5);
+        assert_eq!(
+            watch.observe(t0, false, true, Some(&compare)),
+            WaitVerdict::Waiting
+        );
+        let conflict = StartupProgress {
+            phase: AWAITING_USER.into(),
+            progress: Counter {
+                done: 0,
+                total: 0,
+                work: 0,
+            },
+            ..compare.clone()
+        };
+        for minute in [1u32, 11, 60, 119] {
+            assert_eq!(
+                watch.observe(t0 + MIN * minute, false, true, Some(&conflict)),
+                WaitVerdict::Waiting,
+                "minute {minute}"
+            );
+        }
+        match watch.observe(t0 + MIN * 120, false, true, Some(&conflict)) {
+            WaitVerdict::TimedOut(why) => assert!(why.contains("not chosen"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        // 用户选好了，服务开起来：见证成立就是健康。
+        let mut chosen = ProgressWatch::new("T1", &me(), WaitPolicy::default(), t0);
+        chosen.observe(t0, false, true, Some(&conflict));
+        assert_eq!(
+            chosen.observe(t0 + MIN * 30, true, true, Some(&conflict)),
+            WaitVerdict::Healthy
+        );
+        // 冲突中的进程没了，照样立刻判死。
+        assert_eq!(
+            chosen.observe(t0 + MIN * 31, false, false, Some(&conflict)),
+            WaitVerdict::Dead
+        );
     }
 
     /// 进度不是健康证明：哪怕报了 PUBLISHED 10/10，见证不成立就只是在等，最后照样超时。
@@ -869,6 +995,12 @@ mod tests {
         );
         drop(lock);
         assert!(admission_released(&n));
+        // W8b：之前那次数据源冲突随回滚了结（以 2.x 为准）；写 `A` 之后清掉启动状态。
+        fs::write(
+            runtime(&n).join(STARTUP_STATE),
+            br#"{"state":"SOURCE_CONFLICT","since":"x","generation":"G1","reason":"r"}"#,
+        )
+        .unwrap();
         // W3 peer r1 P2-04：`A` 走共用的持久化契约——刷盘后 MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)，
         // 是这次写入里唯一的一次改名。
         let (written, ops) =
@@ -883,6 +1015,7 @@ mod tests {
             matches!(&ops[..], [crate::durable::Op::Move { to, flags: 0x9, .. }] if *to == n.join(AUTHORITY)),
             "{ops:?}"
         );
+        assert!(!runtime(&n).join(STARTUP_STATE).exists());
         let a: serde_json::Value =
             serde_json::from_slice(&fs::read(n.join(AUTHORITY)).unwrap()).unwrap();
         assert_eq!(a["authority"], "legacy");

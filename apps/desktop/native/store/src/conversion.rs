@@ -1537,6 +1537,34 @@ pub fn judge(a: &AuthorityState, m: &Manifest, legacy_root: &Path, cmp: &Compari
     }
 }
 
+/// `m` 是不是从 `legacy_root` 转换来的（没记源的旧发布物算是）。B3：不是的话「沿用 3.0」也绑不住，下一次判定还是冲突。
+pub fn converted_from(m: &Manifest, legacy_root: &Path) -> bool {
+    m.source_root
+        .as_deref()
+        .is_none_or(|recorded| same_root(recorded, legacy_root))
+}
+
+/// 数据源冲突的原因归类（给界面挑说明用；原文照样给出）。和 [`judge`] 里写原因的地方一一对应：
+///
+/// - `CHANGED`：`A=v3`，转换之后 2.x 又写过；
+/// - `UNREADABLE`：2.x 的数据比较不了（读不出、出现未登记的文件……）；
+/// - `LEGACY_GONE`：选了 2.x 为准，它的数据根却不在了；
+/// - `OTHER_SOURCE`：3.0 是从另一个数据根转换来的；
+/// - `RECORD`：权威记录缺失、损坏或与发布物对不上，以及启动状态本身读不出来。
+pub fn conflict_cause(reason: &str) -> &'static str {
+    if reason.starts_with("the 2.x data changed after the conversion") {
+        "CHANGED"
+    } else if reason.starts_with("the 2.x data cannot be compared") {
+        "UNREADABLE"
+    } else if reason.starts_with("2.x was chosen as the source, but its data root is gone") {
+        "LEGACY_GONE"
+    } else if reason.contains(" was converted from ") {
+        "OTHER_SOURCE"
+    } else {
+        "RECORD"
+    }
+}
+
 /// setup 回滚事务写的 `A`（07 §8）：`A=legacy by setup-rollback`，带上 generation 与已接受的摘要。
 /// 只有带着它们，回滚后没动过 2.x 时才能按 [`Verdict::ResumeAfterRollback`] 无损接回 3.0。
 /// 只沿用同一个 generation 下接受的摘要。setup 自己按同样的规则写（`atm_install_state::startup::settle_for_rollback`），

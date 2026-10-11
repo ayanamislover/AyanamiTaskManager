@@ -39,6 +39,8 @@ pub enum Event {
     Exit,
     /// 看门狗判定挂住，随即 abort（方案 §5）。
     WatchdogStall,
+    /// 用户在窗口里选了数据来源（07 §7），随即按选择重新启动服务。
+    SourceChosen,
 }
 
 impl Event {
@@ -59,6 +61,7 @@ impl Event {
             Event::ShutdownComplete => "shutdown.complete",
             Event::Exit => "exit",
             Event::WatchdogStall => "watchdog.stall",
+            Event::SourceChosen => "source.chosen",
         }
     }
 }

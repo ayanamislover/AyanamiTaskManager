@@ -5492,6 +5492,11 @@ mod w3e {
         );
     }
 
+    /// 同一个路径换成大写、`/` 分隔：仍是同一个源。
+    fn shouting_root(root: &Path) -> PathBuf {
+        PathBuf::from(root.to_string_lossy().to_uppercase().replace('\\', "/"))
+    }
+
     /// 07 §6 判定表的每一格，加上 B3 的四种「对不上」，以及阻塞比较的条件。
     #[test]
     fn the_authority_table_has_a_case_for_every_cell() {
@@ -5508,27 +5513,44 @@ mod w3e {
         let unknown = Comparison::Unknown("data root: unregistered entry x".into());
         let present = |a: &Authority| AuthorityState::Present(a.clone());
         let verdict = |a: &AuthorityState, cmp: &Comparison| cv::judge(a, &m, &root, cmp);
-        let conflict = |v: Verdict, why: &str| match v {
-            Verdict::Conflict(reason) => assert!(reason.contains(why), "{reason}"),
+        // W8h：界面按原因归类挑说明，每一种冲突都归到对的那一类。
+        let conflict_as = |v: Verdict, why: &str, cause: &str| match v {
+            Verdict::Conflict(reason) => {
+                assert!(reason.contains(why), "{reason}");
+                assert_eq!(cv::conflict_cause(&reason), cause, "{reason}");
+            }
             other => panic!("{why}: {other:?}"),
         };
+        let conflict = |v: Verdict, why: &str| conflict_as(v, why, "RECORD");
 
         assert_eq!(verdict(&present(&v3), &unchanged), Verdict::Serve);
         assert_eq!(
             verdict(&present(&v3), &Comparison::LegacyGone),
             Verdict::Serve
         );
-        conflict(verdict(&present(&v3), &changed), "r/projects");
+        conflict_as(verdict(&present(&v3), &changed), "r/projects", "CHANGED");
         // UNKNOWN 没有可接受的东西：不管之前接受过什么，v3 遇到 UNKNOWN 一律冲突（W3 peer r1 P1-01）。
-        conflict(verdict(&present(&v3), &unknown), "unregistered entry x");
+        conflict_as(
+            verdict(&present(&v3), &unknown),
+            "unregistered entry x",
+            "UNREADABLE",
+        );
 
         assert_eq!(
             verdict(&present(&legacy), &unchanged),
             Verdict::ResumeAfterRollback
         );
         assert_eq!(verdict(&present(&legacy), &changed), Verdict::Reconvert);
-        conflict(verdict(&present(&legacy), &unknown), "unregistered entry x");
-        conflict(verdict(&present(&legacy), &Comparison::LegacyGone), "gone");
+        conflict_as(
+            verdict(&present(&legacy), &unknown),
+            "unregistered entry x",
+            "UNREADABLE",
+        );
+        conflict_as(
+            verdict(&present(&legacy), &Comparison::LegacyGone),
+            "gone",
+            "LEGACY_GONE",
+        );
 
         // B3：不猜，一律冲突——即便比较结果是不变。
         conflict(verdict(&AuthorityState::Missing, &unchanged), "missing");
@@ -5538,10 +5560,13 @@ mod w3e {
             ..v3.clone()
         };
         conflict(verdict(&present(&other_generation), &unchanged), G2);
-        conflict(
+        conflict_as(
             cv::judge(&present(&v3), &m, &root.join("elsewhere"), &unchanged),
             "was converted from",
+            "OTHER_SOURCE",
         );
+        assert!(cv::converted_from(&m, &shouting_root(&root)));
+        assert!(!cv::converted_from(&m, &root.join("elsewhere")));
         let shouting = PathBuf::from(root.to_string_lossy().to_uppercase().replace('\\', "/"));
         assert_eq!(
             cv::judge(&present(&v3), &m, &shouting, &unchanged),

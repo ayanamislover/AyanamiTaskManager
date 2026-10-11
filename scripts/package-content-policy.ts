@@ -243,6 +243,7 @@ export const TEST_BUILD_MARKERS = [
   { build: "drill", marker: "ATM_SETUP_FAIL_AT" },
   { build: "drill", marker: "ATM_SETUP_FAIL_UNDO" },
   { build: "drill", marker: "ATM_SETUP_SQUIRREL_ADDS" },
+  { build: "drill", marker: "ATM_SETUP_WAIT_SECS" },
 ] as const;
 
 export type TestBuild = (typeof TEST_BUILD_MARKERS)[number]["build"];

@@ -20,6 +20,10 @@ pub enum Local {
     ToggleMaximizeWindow,
     IsWindowMaximized,
     CloseWindow,
+    /// 服务处在哪一步，数据源冲突时带上原因（07 §7）。服务没开也答得了。
+    GetDataSource,
+    /// 用户对数据源冲突的选择（`KEEP_V3` / `RECONVERT`）。只有这个可信的 WebView 能发（B2）。
+    ChooseDataSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +43,8 @@ fn method(name: &str) -> Option<Method> {
         "toggleMaximizeWindow" => Method::Local(Local::ToggleMaximizeWindow),
         "isWindowMaximized" => Method::Local(Local::IsWindowMaximized),
         "closeWindow" => Method::Local(Local::CloseWindow),
+        "getDataSource" => Method::Local(Local::GetDataSource),
+        "chooseDataSource" => Method::Local(Local::ChooseDataSource),
         "runtimeRequest" => Method::Core("runtimeRequest"),
         "getUpdateStatus" => Method::Core("getUpdateStatus"),
         "checkForUpdates" => Method::Core("checkForUpdates"),
@@ -72,7 +78,7 @@ pub enum Rejected {
 
 fn arity(method: &Method) -> usize {
     match method {
-        Method::Local(Local::SetAutoLaunch | Local::CopyText) => 1,
+        Method::Local(Local::SetAutoLaunch | Local::CopyText | Local::ChooseDataSource) => 1,
         Method::Core("runtimeRequest" | "setMemoryProfile" | "installMcp") => 1,
         Method::Core("manageAgentIntegration") => 2,
         _ => 0,
@@ -88,6 +94,9 @@ fn arguments_valid(method: &Method, args: &[Value]) -> bool {
         Method::Local(Local::SetAutoLaunch) => args[0].is_boolean(),
         Method::Local(Local::CopyText) => {
             args[0].as_str().is_some_and(|text| text.len() <= 1 << 20)
+        }
+        Method::Local(Local::ChooseDataSource) => {
+            matches!(args[0].as_str(), Some("KEEP_V3" | "RECONVERT"))
         }
         Method::Core("runtimeRequest") => args[0].is_object(),
         Method::Core("setMemoryProfile") => args[0].is_boolean(),
@@ -172,7 +181,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     pending.set(id, { resolve, reject });
     post({ id, method, args });
   });
-  const listeners = { maximized: new Set(), navigate: new Set() };
+  const listeners = { maximized: new Set(), navigate: new Set(), dataSource: new Set() };
   const subscribe = (set) => (listener) => {
     set.add(listener);
     return () => set.delete(listener);
@@ -192,7 +201,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
         }
       },
       emit(message) {
-        const set = message.event === "maximized" ? listeners.maximized : message.event === "navigate" ? listeners.navigate : null;
+        const set = message.event === "maximized" ? listeners.maximized : message.event === "navigate" ? listeners.navigate : message.event === "dataSource" ? listeners.dataSource : null;
         if (set) for (const listener of set) listener(message.value);
       },
     }),
@@ -217,6 +226,9 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     toggleMaximizeWindow: () => call("toggleMaximizeWindow", []),
     isWindowMaximized: () => call("isWindowMaximized", []),
     closeWindow: () => call("closeWindow", []),
+    getDataSource: () => call("getDataSource", []),
+    chooseDataSource: (choice) => call("chooseDataSource", [choice]),
+    onDataSourceChange: subscribe(listeners.dataSource),
     onWindowMaximizedChange: subscribe(listeners.maximized),
     onNavigate: subscribe(listeners.navigate),
   };
@@ -271,6 +283,41 @@ mod tests {
             .unwrap()
             .method,
             Method::Core("runtimeRequest")
+        );
+    }
+
+    /// W8h：选数据来源只收两个取值；别的（含大小写不同、数组、对象）在桥上就被拒，到不了宿主。
+    #[test]
+    fn the_data_source_choice_takes_one_of_two_values() {
+        for choice in ["KEEP_V3", "RECONVERT"] {
+            let call = parse(
+                SOURCE,
+                &format!(r#"{{"id":4,"method":"chooseDataSource","args":["{choice}"]}}"#),
+            )
+            .unwrap();
+            assert_eq!(call.method, Method::Local(Local::ChooseDataSource));
+        }
+        for args in [
+            r#"["keep_v3"]"#,
+            r#"["V3"]"#,
+            r#"[1]"#,
+            r#"[]"#,
+            r#"["KEEP_V3","RECONVERT"]"#,
+        ] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":4,"method":"chooseDataSource","args":{args}}}"#)
+                ),
+                Err(Rejected::Arguments),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            parse(SOURCE, r#"{"id":5,"method":"getDataSource","args":[]}"#)
+                .unwrap()
+                .method,
+            Method::Local(Local::GetDataSource)
         );
     }
 

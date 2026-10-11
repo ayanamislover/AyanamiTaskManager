@@ -286,6 +286,11 @@ pub fn stop_legacy(
 
 /// UNDO_STOP: the host setup itself started (START / ROLLBACK_START), and any service
 /// whose core runs from `app_dir`.
+///
+/// Only returns `Ok` once they are gone (07 §8: a cancelled or timed-out START confirms the
+/// conversion process exited before anything is rolled back). One still alive after the
+/// terminate is an error: the undo step retries once, then the transaction is
+/// RECOVERY_FAILED instead of switching versions under a live process.
 pub fn stop_started(
     env: &Env,
     started: Option<&ProcessIdentity>,
@@ -305,14 +310,34 @@ pub fn stop_started(
         let _ = ipc::send(&env.data_dir, &Command::Quit, Duration::from_secs(3));
         if !procs::wait_all_gone(std::slice::from_ref(started), Duration::from_secs(20)) {
             procs::terminate(started);
-            procs::wait_all_gone(std::slice::from_ref(started), Duration::from_secs(10));
+            confirm_gone(std::slice::from_ref(started), Duration::from_secs(10))?;
         }
     }
     // Probe or START leftovers from this version (setup started them; they are ours).
-    for proc in procs::under(app_dir) {
-        procs::terminate(&proc.identity());
+    let leftovers: Vec<ProcessIdentity> = procs::under(app_dir)
+        .iter()
+        .map(|proc| proc.identity())
+        .collect();
+    for proc in &leftovers {
+        procs::terminate(proc);
     }
-    Ok(())
+    confirm_gone(&leftovers, Duration::from_secs(10))
+}
+
+/// `Ok` once every one of `targets` has exited (within `timeout`); otherwise the ones still
+/// running, by pid.
+fn confirm_gone(targets: &[ProcessIdentity], timeout: Duration) -> Result<(), String> {
+    if procs::wait_all_gone(targets, timeout) {
+        return Ok(());
+    }
+    let alive: Vec<u32> = targets
+        .iter()
+        .filter(|proc| procs::alive(proc))
+        .map(|proc| proc.pid)
+        .collect();
+    Err(format!(
+        "UNDO_STOP: processes {alive:?} are still running after they were told to stop"
+    ))
 }
 
 #[cfg(test)]
@@ -355,6 +380,32 @@ mod tests {
         write(&env.data_dir, 20);
         assert_eq!(pids(&env), vec![20, 30]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 07 §8：撤销之前确认进程真的退出了。还活着的照实报出来（undo 重试一次后 RECOVERY_FAILED），
+    /// 不当作已经停了接着切版本。
+    #[test]
+    fn a_process_that_has_not_exited_is_reported_not_assumed_gone() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping", "-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let me = procs::find(child.id()).unwrap().identity();
+        let still = confirm_gone(std::slice::from_ref(&me), Duration::from_millis(300));
+        assert!(
+            still
+                .as_ref()
+                .is_err_and(|e| e.contains(&me.pid.to_string())),
+            "{still:?}"
+        );
+        procs::terminate(&me);
+        let _ = child.wait();
+        assert_eq!(
+            confirm_gone(std::slice::from_ref(&me), Duration::from_secs(5)),
+            Ok(())
+        );
+        assert_eq!(confirm_gone(&[], Duration::ZERO), Ok(()));
     }
 
     #[test]

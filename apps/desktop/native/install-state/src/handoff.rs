@@ -107,7 +107,15 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
         if let Some(p) = progress.as_ref().filter(|p| watch.accepts(p)) {
             let now = format!("{} {}/{}", p.phase, p.progress.done, p.progress.total);
             if now != reported {
-                say(format!("START {}: {now}", a.version));
+                if p.phase == startup::AWAITING_USER {
+                    say(format!(
+                        "START {}: SOURCE_CONFLICT, waiting for the user to choose the data source in the ATM window (at most {} min in all)",
+                        a.version,
+                        a.policy.cap.as_secs() / 60
+                    ));
+                } else {
+                    say(format!("START {}: {now}", a.version));
+                }
                 reported = now;
             }
         }
@@ -118,7 +126,7 @@ pub fn await_healthy(a: &Await<'_>, say: &mut dyn FnMut(String)) -> Result<(), S
             progress.as_ref(),
         );
         let ledger = watch.ledger(Instant::now(), now_ms());
-        if ledger.last != saved.last {
+        if (&ledger.last, &ledger.last_generation) != (&saved.last, &saved.last_generation) {
             keep(&ledger, say);
             saved = ledger;
         }

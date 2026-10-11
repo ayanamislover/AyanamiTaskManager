@@ -69,6 +69,19 @@ pub fn check_roots_apart(install_root: &Path, data_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// 演练沙箱没有显式给 N 时，把沙箱里的 `v3-data` 写进本进程环境：setup 拉起的宿主、探针与
+/// 转换都继承同一个根，不会退回真实的 `%LOCALAPPDATA%\AyanamiTaskManager3`。
+#[cfg(feature = "drill")]
+pub fn pin_sandbox_v3_root() {
+    let Some(sandbox) = env_path("ATM_SETUP_SANDBOX") else {
+        return;
+    };
+    if env_path("ATM3_DATA_DIR").is_none() {
+        // SAFETY: main 的第一件事，此时还没有别的线程读环境。
+        unsafe { std::env::set_var("ATM3_DATA_DIR", sandbox.join("v3-data")) };
+    }
+}
+
 impl Env {
     pub fn detect() -> Result<Env, String> {
         let env = Env::locate()?;

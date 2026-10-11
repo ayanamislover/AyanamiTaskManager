@@ -166,10 +166,68 @@ pub struct Serving {
     _admission: Admission,
 }
 
-/// 数据源冲突：入口一个都没开，持有准入，等用户在窗口里选（选源界面在 W6，B2）。
+/// 数据源冲突：入口一个都没开，持有准入，等用户在窗口里选（[`Conflicted::choose`]，B2）。
 pub struct Conflicted {
     _admission: Admission,
     pub state: StartupState,
+}
+
+/// 用户在窗口里对数据源冲突的选择（07 §7）。只认 User（B2）：宿主只从可信的 WebView 收它。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceChoice {
+    /// 「沿用 3.0（忽略 2.x 期间的修改）」。
+    KeepV3,
+    /// 「从 2.x 重新转换（当前 3.0 数据封存）」。
+    Reconvert,
+}
+
+impl Conflicted {
+    /// 落下用户的选择，放掉准入，再按选择启动一次（同一个 handoff：setup 等的还是这个进程）。
+    ///
+    /// - 沿用 3.0：重新比较一次，把这次的 business_digest' 绑进 `A=v3 by user-choice`；比较不了时只放行这一次
+    ///   （见 `choose_v3`）。3.0 的数据是从另一个数据根转换来的（B3）时拒绝：这里的比较绑不到那个根，下一次启动还会冲突。
+    /// - 重新转换：封存当前 generation（Superseded），下一次启动走 S2。
+    ///
+    /// 这一次启动不做后台比较：用户刚刚就是看着这次比较做的决定。2.x 比较不了时（UNKNOWN），后台比较会立刻
+    /// 得出同样的 UNKNOWN、当场推翻这个决定；下一次正常启动照旧比较，仍比较不了就再问（07 §6）。
+    ///
+    /// 选择本身不写任何业务数据。做到一半被杀，下一次启动还是冲突，再问一次（`choose_v3` 先写 `A` 再清启动状态）。
+    pub fn choose(self, o: &Options, choice: SourceChoice) -> Result<Started, BootError> {
+        let layout = Layout::new(&o.n);
+        let at = now_iso();
+        match choice {
+            SourceChoice::KeepV3 => {
+                let cv::ManifestState::Present(m) = cv::read_manifest(&layout) else {
+                    return Err(failed(
+                        "SOURCE_KEEP_UNAVAILABLE: there is no 3.0 publication to keep",
+                    ));
+                };
+                if !cv::converted_from(&m, &o.legacy) {
+                    return Err(failed(format!(
+                        "SOURCE_KEEP_UNAVAILABLE: the 3.0 data was converted from {}, not from {}",
+                        m.source_root.as_deref().unwrap_or("?"),
+                        o.legacy.display()
+                    )));
+                }
+                let a = cv::read_authority(&layout);
+                let cmp = compare(&layout, &m, &a, o, None);
+                cv::choose_v3(&layout, &m, &cmp, &at).map_err(failed)?;
+            }
+            SourceChoice::Reconvert => {
+                cv::choose_legacy(&layout, &at).map_err(failed)?;
+            }
+        }
+        drop(self);
+        boot(o, Compare::NotThisTime)
+    }
+}
+
+/// 入口开放之后要不要在后台再比较一次 2.x（07 §6 末行）。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Compare {
+    InBackground,
+    /// 刚按用户的选择落下决定（[`Conflicted::choose`]）。
+    NotThisTime,
 }
 
 pub enum Started {
@@ -285,6 +343,10 @@ fn now_iso() -> String {
 
 /// 启动到「入口开着」或「数据源冲突」为止。判定最多绕 8 圈（封存 → 重转 → 再判定），绕不完就是有缺陷，报失败。
 pub fn start(o: &Options) -> Result<Started, BootError> {
+    boot(o, Compare::InBackground)
+}
+
+fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
     // txn 拼进见证的文件名（`service-<txn>.json`）：在任何写入之前核对它是单独一层（W4i peer r3 P1-01）。
     if let Some(h) = &o.handoff
         && !atm_install_state::is_path_name(&h.txn)
@@ -370,6 +432,7 @@ pub fn start(o: &Options) -> Result<Started, BootError> {
                 continue;
             }
             Startup::SourceConflict(state) => {
+                reporter.awaiting_user();
                 (o.observe)(Event::Conflict);
                 return Ok(Started::Conflict(Conflicted {
                     _admission: admission,
@@ -381,7 +444,8 @@ pub fn start(o: &Options) -> Result<Started, BootError> {
         reporter.set_generation(Some(&m.generation));
         let a = cv::read_authority(&layout);
         if !cv::must_compare_before_serving(&a, &m, &o.legacy) {
-            return serve(o, layout, admission, me, m, Some(a));
+            let background = (background == Compare::InBackground).then_some(a);
+            return serve(o, layout, admission, me, m, background);
         }
         (o.observe)(Event::BlockingCompare);
         let cmp = compare(&layout, &m, &a, o, Some(&report));
@@ -399,6 +463,7 @@ pub fn start(o: &Options) -> Result<Started, BootError> {
             }
             Verdict::Conflict(why) => {
                 let state = cv::enter_conflict(&layout, &m, &why, &at).map_err(failed)?;
+                reporter.awaiting_user();
                 (o.observe)(Event::Conflict);
                 return Ok(Started::Conflict(Conflicted {
                     _admission: admission,
