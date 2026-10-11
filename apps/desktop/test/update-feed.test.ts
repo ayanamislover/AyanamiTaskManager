@@ -100,7 +100,7 @@ describe("本地更新源", () => {
       "atm-1.0.0-rc.1-win-x64.json",
     ])
       writeFileSync(join(feed, name), "x");
-    expect(consumedFeedFiles(feed, "2.0.0")).toEqual(["atm-1.0.0-rc.1-win-x64.json"]);
+    expect(consumedFeedFiles(feed, "8.0.0")).toEqual(["atm-1.0.0-rc.1-win-x64.json"]);
     expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
     // 与 compare_versions 一样只按「.」切段：「0-rc」取 0，其后的「1」算第四段。
     expect(compareVersions("3.0.0-rc.1", "3.0.0")).toBe(1);
