@@ -153,8 +153,11 @@ pub fn settle(env: &Env, version: &str) {
             current_user().as_deref(),
             &trigger_start(crate::store::now_ms()),
         );
-        record(env, s.put(TASK_NAME, &xml).map(|()| true), "");
-        say!("keepalive: task registered for {version}");
+        let put = s.put(TASK_NAME, &xml);
+        if put.is_ok() {
+            say!("keepalive: task registered for {version}");
+        }
+        record(env, put.map(|()| true), "");
     } else {
         let deleted = delete_ours(env, s.as_ref());
         if let Ok(true) = deleted {

@@ -31,6 +31,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { get as httpGet } from "node:http";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -341,6 +342,416 @@ function packages(rebuild: boolean): {
 
 type Packages = ReturnType<typeof packages>;
 
+// ---------------------------------------------------------------- 保活任务（W8c，方案 §5、B1）
+
+const KEEPALIVE_TASK = "AyanamiTaskManager 保活";
+
+/** The sandbox's scheduler: setup's drill build registers the task here, never in the real Task Scheduler. */
+function scheduledTask(sandbox: Sandbox): string | null {
+  try {
+    return readFileSync(join(sandbox.dir, "scheduler", `${KEEPALIVE_TASK}.xml`), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+type TaskRegistration = { registered: boolean; at: string; reason?: string };
+
+/** What setup last did with the task (`<install>\state\keepalive-task.json`). */
+function taskRegistration(sandbox: Sandbox): TaskRegistration | null {
+  try {
+    return JSON.parse(
+      readFileSync(join(sandbox.install, "state", "keepalive-task.json"), "utf8"),
+    ) as TaskRegistration;
+  } catch {
+    return null;
+  }
+}
+
+/** The task is there and runs this install's root launcher `--ensure-running`, both triggers every 5 min. */
+function taskRunsLauncher(sandbox: Sandbox): boolean {
+  const xml = scheduledTask(sandbox);
+  const command = xml?.match(/<Command>([^<]*)<\/Command>/u)?.[1] ?? null;
+  return (
+    xml !== null &&
+    samePath(command, join(sandbox.install, "AyanamiTaskManager.exe")) &&
+    xml.includes("<Arguments>--ensure-running</Arguments>") &&
+    (xml.match(/<Interval>PT5M<\/Interval>/gu) ?? []).length === 2 &&
+    xml.includes("<LogonType>InteractiveToken</LogonType>")
+  );
+}
+
+/** A 3.x version installed, updated, undone to or repaired: the task is registered, and recorded so. */
+function keepaliveOn(sandbox: Sandbox, label = ""): void {
+  check(
+    `${label}keepalive task → root launcher --ensure-running every 5 min, recorded registered`,
+    taskRunsLauncher(sandbox) && taskRegistration(sandbox)?.registered === true,
+    { task: scheduledTask(sandbox)?.slice(-300), registration: taskRegistration(sandbox) },
+  );
+}
+
+/** Uninstalled, back on 2.x (no `--ensure-running`) or Electron (the root exe is Squirrel's stub): no task. */
+function keepaliveOff(sandbox: Sandbox, why: string, label = ""): void {
+  check(
+    `${label}no keepalive task (${why})`,
+    scheduledTask(sandbox) === null,
+    scheduledTask(sandbox),
+  );
+}
+
+/** This logon as the launcher and the host name it: `whoami /logonid` = S-1-5-5-X-Y, X and Y in 8 hex digits. */
+function thisLogon(): string | null {
+  const sid = spawnSync("whoami.exe", ["/logonid"], { encoding: "utf8", windowsHide: true })
+    .stdout.trim()
+    .match(/^S-1-5-5-(\d+)-(\d+)$/u);
+  if (sid === null) return null;
+  const hex = (part: string | undefined) => Number(part).toString(16).padStart(8, "0");
+  return `${hex(sid[1])}${hex(sid[2])}`;
+}
+
+type Descriptor3 = { pid: number; endpoint: string };
+
+/** N's service descriptor; only pid and endpoint are read (never the token). */
+function descriptor3(sandbox: Sandbox): Descriptor3 | null {
+  try {
+    const { pid, endpoint } = JSON.parse(
+      readFileSync(join(sandbox.v3, "runtime", "daemon.json"), "utf8"),
+    ) as Descriptor3;
+    return { pid, endpoint };
+  } catch {
+    return null;
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `GET /health` (no token) answers, and from the descriptor's own process. */
+async function healthyAt(descriptor: Descriptor3): Promise<boolean> {
+  // node:http, not fetch: undici always sends `Sec-Fetch-Mode`, which the service refuses
+  // like a browser's request.
+  return new Promise((done) => {
+    const request = httpGet(`${descriptor.endpoint}/health`, { timeout: 1000 }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => (body += chunk));
+      response.on("end", () => {
+        try {
+          done(
+            response.statusCode === 200 &&
+              (JSON.parse(body) as { pid?: number }).pid === descriptor.pid,
+          );
+        } catch {
+          done(false);
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => done(false));
+  });
+}
+
+function keepaliveLog(sandbox: Sandbox): string {
+  try {
+    return readFileSync(join(sandbox.v3, "logs", "keepalive.log"), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function lastKeepaliveLine(sandbox: Sandbox): string {
+  return keepaliveLog(sandbox).trim().split("\n").at(-1) ?? "";
+}
+
+/** What the Task Scheduler does on every trigger: run the task's action once. */
+function trigger(sandbox: Sandbox): { status: number | null; ms: number } {
+  const started = performance.now();
+  const result = runLauncher(sandbox, ["--ensure-running"]);
+  return { status: result.status, ms: Math.round(performance.now() - started) };
+}
+
+function offlineDoctor(sandbox: Sandbox): Record<string, unknown> | null {
+  const result = runLauncher(sandbox, ["--cli", "--json", "doctor", "--offline"]);
+  try {
+    return (JSON.parse(result.stdout) as { keepalive?: Record<string, unknown> }).keepalive ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Holds `state\install.lock` the way a running setup does (no sharing), until killed. */
+function holdInstallLock(sandbox: Sandbox): ReturnType<typeof spawn> {
+  const lock = join(sandbox.install, "state", "install.lock");
+  return spawn(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'OpenOrCreate', 'ReadWrite', 'None'); Start-Sleep -Seconds 120; $f.Close()`,
+    ],
+    { stdio: "ignore", windowsHide: true },
+  );
+}
+
+type Recovery = { case: string; decisionMs: number; startToHealthyMs: number };
+const recoveries: Recovery[] = [];
+
+/**
+ * Crash → trigger → back, measured in the three segments B1 names: the trigger wait (the
+ * task's interval, ≤ PT5M; here the drill triggers at once), the decision (the launcher's
+ * own run, process creation included) and start → healthy (until a new process's descriptor
+ * answers /health).
+ */
+async function crashAndRecover(sandbox: Sandbox, label: string): Promise<void> {
+  const before = descriptor3(sandbox)?.pid ?? -1;
+  killAll(sandbox.install);
+  check(`${label}: ATM killed`, await until(() => !alive(before), 15_000), before);
+  const fired = trigger(sandbox);
+  const decided = performance.now();
+  check(
+    `${label}: --ensure-running exits 0 at once (${fired.ms} ms)`,
+    fired.status === 0 && fired.ms < 10_000,
+    fired,
+  );
+  let up = false;
+  while (performance.now() - decided < 60_000) {
+    const now = descriptor3(sandbox);
+    if (now !== null && now.pid !== before && alive(now.pid) && (await healthyAt(now))) {
+      up = true;
+      break;
+    }
+    await sleep(100);
+  }
+  const startToHealthyMs = Math.round(performance.now() - decided);
+  check(
+    `${label}: a new ATM answers /health (${startToHealthyMs} ms after the decision)`,
+    up,
+    keepaliveLog(sandbox).slice(-600),
+  );
+  check(
+    `${label}: keepalive.log records the launch after an abnormal exit`,
+    /Launch .* after Abnormal/u.test(lastKeepaliveLine(sandbox)),
+    lastKeepaliveLine(sandbox),
+  );
+  if (up) recoveries.push({ case: label, decisionMs: fired.ms, startToHealthyMs });
+}
+
+/** Kill ATM, trigger: nothing may start; the log names why. */
+async function noRecovery(sandbox: Sandbox, label: string, decision: string): Promise<void> {
+  killAll(sandbox.install);
+  await until(() => hostsUnder(sandbox.install).length === 0, 15_000);
+  const fired = trigger(sandbox);
+  check(`${label}: --ensure-running exits 0 (${fired.ms} ms)`, fired.status === 0, fired);
+  await sleep(3000);
+  check(
+    `${label}: nothing started`,
+    hostsUnder(sandbox.install).length === 0,
+    hostsUnder(sandbox.install),
+  );
+  check(
+    `${label}: keepalive.log says ${decision}`,
+    lastKeepaliveLine(sandbox).endsWith(decision),
+    lastKeepaliveLine(sandbox),
+  );
+}
+
+function lifecycleLines(sandbox: Sandbox): Array<Record<string, unknown>> {
+  try {
+    return readFileSync(join(sandbox.v3, "logs", "lifecycle.ndjson"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+async function scenarioKeepalive(pkg: Packages): Promise<void> {
+  currentScenario = "keepalive";
+  const sandbox = new Sandbox("keepalive");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] first install registers the task\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  await installed(sandbox, VERSION_A, null);
+  const doctor = offlineDoctor(sandbox);
+  check(
+    "doctor --offline (the installed CLI): auto recovery on, registered",
+    doctor?.auto_recovery === true && doctor.registered === true && doctor.reason === null,
+    doctor,
+  );
+
+  process.stdout.write(`[${currentScenario}] a trigger while ATM serves does nothing\n`);
+  const serving = descriptor3(sandbox);
+  const idle = trigger(sandbox);
+  check(`--ensure-running while serving exits 0 (${idle.ms} ms)`, idle.status === 0, idle);
+  await sleep(2000);
+  check(
+    "…starts nothing and logs nothing",
+    hostsUnder(sandbox.install).length === 1 &&
+      descriptor3(sandbox)?.pid === serving?.pid &&
+      keepaliveLog(sandbox) === "",
+    { hosts: hostsUnder(sandbox.install), log: keepaliveLog(sandbox) },
+  );
+
+  process.stdout.write(`[${currentScenario}] crash → trigger → back (twice, measured)\n`);
+  await crashAndRecover(sandbox, "crash 1");
+  await crashAndRecover(sandbox, "crash 2");
+
+  process.stdout.write(
+    `[${currentScenario}] the third abnormal exit in 30 min trips the breaker\n`,
+  );
+  await noRecovery(sandbox, "crash 3", "Tripped");
+  const breakerPath = join(sandbox.v3, "runtime", "keepalive.json");
+  const breaker = existsSync(breakerPath)
+    ? (JSON.parse(readFileSync(breakerPath, "utf8")) as { exits: unknown[]; trippedAtMs?: number })
+    : null;
+  check(
+    "the breaker is kept across processes: 3 exits, tripped",
+    breaker?.exits.length === 3 && typeof breaker.trippedAtMs === "number",
+    breaker,
+  );
+  const later = trigger(sandbox);
+  await sleep(2000);
+  check(
+    "a later trigger still starts nothing",
+    later.status === 0 && hostsUnder(sandbox.install).length === 0,
+    hostsUnder(sandbox.install),
+  );
+  const tripped = offlineDoctor(sandbox);
+  check(
+    "doctor --offline: no auto recovery, tripped, 3 recent abnormal exits",
+    tripped?.auto_recovery === false &&
+      tripped.breaker_tripped === true &&
+      tripped.recent_abnormal_exits === 3,
+    tripped,
+  );
+
+  process.stdout.write(`[${currentScenario}] the user starts ATM: breaker reset, user told why\n`);
+  check("launcher (the user's start) exits 0", runLauncher(sandbox, []).status === 0);
+  check(
+    `service running ${VERSION_A}`,
+    await until(() => sandbox.serviceVersion() === VERSION_A, 30_000),
+  );
+  check("the breaker was reset", !existsSync(breakerPath));
+  const resetLine = lifecycleLines(sandbox).find((line) => line.event === "keepalive.reset");
+  check(
+    "lifecycle records keepalive.reset (abnormalExits 3)",
+    resetLine?.abnormalExits === 3,
+    resetLine,
+  );
+  check(
+    "keepalive.log records the reset",
+    keepaliveLog(sandbox).includes("Reset by the user's start (3 abnormal exits)"),
+    keepaliveLog(sandbox).slice(-400),
+  );
+
+  process.stdout.write(`[${currentScenario}] a quit marker from another logon does not hold\n`);
+  const quitPath = join(sandbox.v3, "runtime", "user-quit.json");
+  writeFileSync(
+    quitPath,
+    JSON.stringify({ logon: "ffffffffffffffff", at: new Date().toISOString() }),
+  );
+  await crashAndRecover(sandbox, "another logon's quit marker");
+
+  process.stdout.write(
+    `[${currentScenario}] the user quit in this logon: no start until the user starts it\n`,
+  );
+  const logon = thisLogon();
+  check("this logon is known (whoami /logonid)", logon !== null);
+  writeFileSync(quitPath, JSON.stringify({ logon, at: new Date().toISOString() }));
+  await noRecovery(sandbox, "quit in this logon", "UserQuit");
+  check("launcher (the user's start) exits 0", runLauncher(sandbox, []).status === 0);
+  check(
+    "the user's start serves and clears the marker",
+    (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)) && !existsSync(quitPath),
+  );
+
+  process.stdout.write(
+    `[${currentScenario}] an install transaction holds the lock: no start, no recovery\n`,
+  );
+  const holder = holdInstallLock(sandbox);
+  check("the install lock is held", await until(() => installLockHeld(sandbox), 10_000));
+  const mark = sandbox.logMark();
+  const journalBefore = JSON.stringify(sandbox.journal());
+  await noRecovery(sandbox, "lock held", "InstallBusy");
+  check(
+    "…and no recovery, no setup run",
+    sandbox.since(mark) === "" && JSON.stringify(sandbox.journal()) === journalBefore,
+    sandbox.since(mark).slice(-400),
+  );
+  holder.kill();
+  check("the lock is released", await until(() => !installLockHeld(sandbox), 10_000));
+  await crashAndRecover(sandbox, "lock released");
+
+  process.stdout.write(`[${currentScenario}] repair rebuilds a lost task\n`);
+  rmSync(join(sandbox.dir, "scheduler", `${KEEPALIVE_TASK}.xml`), { force: true });
+  check(
+    "ATM 修复 exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--repair", "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  keepaliveOn(sandbox, "after the repair: ");
+
+  process.stdout.write(
+    `[${currentScenario}] the task cannot be registered: the update commits anyway\n`,
+  );
+  rmSync(join(sandbox.dir, "scheduler"), { recursive: true, force: true });
+  writeFileSync(join(sandbox.dir, "scheduler"), "not a folder");
+  check(
+    "update exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+      "install",
+      pkg.b.manifest,
+      "--quiet",
+    ]) === 0,
+    sandbox.log(6),
+  );
+  check(
+    `COMMITTED, ${VERSION_B} serving`,
+    sandbox.journal()?.outcome === "COMMITTED" &&
+      (await until(() => sandbox.serviceVersion() === VERSION_B, 30_000)),
+    sandbox.journal(),
+  );
+  const failed = taskRegistration(sandbox);
+  check(
+    "recorded: not registered, with the reason",
+    failed?.registered === false && (failed.reason ?? "").includes("KEEPALIVE_REGISTER"),
+    failed,
+  );
+  const unregistered = offlineDoctor(sandbox);
+  check(
+    "doctor --offline: no auto recovery claimed, the reason given",
+    unregistered?.auto_recovery === false &&
+      unregistered.registered === false &&
+      String(unregistered.reason).includes("KEEPALIVE_REGISTER"),
+    unregistered,
+  );
+  rmSync(join(sandbox.dir, "scheduler"), { force: true });
+  check(
+    "ATM 修复 exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--repair", "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  keepaliveOn(sandbox, "repaired: ");
+
+  process.stdout.write(`[${currentScenario}] uninstall removes the task\n`);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  check("install root removed", await until(() => !existsSync(sandbox.install), 60_000));
+  keepaliveOff(sandbox, "uninstalled");
+  teardown(sandbox);
+}
+
 async function installed(
   sandbox: Sandbox,
   version: string,
@@ -368,6 +779,7 @@ async function installed(
     samePath(junctionTarget(join(sandbox.data, "current")), sandbox.install),
     junctionTarget(join(sandbox.data, "current")),
   );
+  keepaliveOn(sandbox);
 }
 
 async function scenarioLifecycle(pkg: Packages): Promise<void> {
@@ -527,6 +939,7 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   check("current junction removed", junctionTarget(join(sandbox.data, "current")) === null);
   // 3.x keeps its data in N; uninstall removes the program, never the data.
   check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
+  keepaliveOff(sandbox, "uninstalled");
   teardown(sandbox);
 }
 
@@ -683,6 +1096,7 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     "nothing left installed",
     sandbox.pointer() === null && !existsSync(join(sandbox.install, `app-${VERSION_A}`)),
   );
+  keepaliveOff(sandbox, "a first install that failed registers nothing");
   teardown(sandbox);
 
   sandbox = new Sandbox("review-repair");
@@ -744,6 +1158,7 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     authorityOf(sandbox)?.authority === "v3",
     authorityOf(sandbox),
   );
+  keepaliveOn(sandbox, "after the repair finished the undo: ");
 
   process.stdout.write(
     `[${currentScenario}] killed after ROLLBACK_START spawned the host (P1-7)\n`,
@@ -781,6 +1196,7 @@ async function scenarioReview(pkg: Packages): Promise<void> {
       (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)),
     hostsUnder(sandbox.install),
   );
+  keepaliveOn(sandbox, "after the recovery: ");
   teardown(sandbox);
 
   sandbox = new Sandbox("review-overlap");
@@ -949,6 +1365,7 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
       null,
   );
   check("atm-setup.exe kept for that", existsSync(join(sandbox.install, "atm-setup.exe")));
+  keepaliveOff(sandbox, "it went with the entry points, before the files");
   holder.kill();
   await sleep(1000);
   runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
@@ -964,6 +1381,7 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
   );
   // 3.x keeps its data in N; uninstall removes the program, never the data.
   check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
+  keepaliveOff(sandbox, "uninstalled");
   teardown(sandbox);
 }
 
@@ -1048,6 +1466,7 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
       await until(() => sandbox.serviceVersion() === version, 30_000),
       sandbox.serviceVersion(),
     );
+    keepaliveOn(sandbox, `${state}: `);
     if (outcome !== "COMMITTED") {
       check(
         `${state}: staged app-${VERSION_B} removed`,
@@ -1086,6 +1505,7 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
       await until(() => sandbox.serviceVersion() === VERSION_A, 30_000),
       sandbox.serviceVersion(),
     );
+    keepaliveOn(sandbox, `fail at ${state}: `);
   }
   const refused = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
     "install",
@@ -1318,6 +1738,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     "no new-style process left",
     processes(join(sandbox.install, "state", "rollback", "newstyle")).length === 0,
   );
+  keepaliveOff(sandbox, "back on Electron: the root exe is Squirrel's stub");
 
   process.stdout.write(`[${currentScenario}] migrate again, then die after ISOLATE and recover\n`);
   const code = runSetup(
@@ -1838,6 +2259,7 @@ async function rollbackTo20(sandbox: Sandbox, label: string): Promise<void> {
     `${label}: no 3.x process left under app-${VERSION_A}`,
     processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
   );
+  keepaliveOff(sandbox, "2.0 does not know --ensure-running", `${label}: `);
 }
 
 async function upgradeTo3(sandbox: Sandbox, label: string): Promise<number> {
@@ -2178,6 +2600,7 @@ async function main(): Promise<void> {
     ["reverse-replay", scenarioReverseReplay],
     ["legacy-record", scenarioLegacyRecord],
     ["uninstall-race", scenarioUninstallRace],
+    ["keepalive", scenarioKeepalive],
     ["v2-v3", scenarioV2V3],
     ["v2-v3-faults", scenarioV2V3Faults],
   ];
@@ -2197,6 +2620,8 @@ async function main(): Promise<void> {
     failed: failed.length,
     results,
     business,
+    // B1: crash → back = trigger wait (≤ the task's PT5M) + decision + start → healthy.
+    keepalive: { triggerWaitMaxMs: 5 * 60_000, recoveries },
   };
   writeFileSync(join(drillRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(
