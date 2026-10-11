@@ -558,10 +558,13 @@ mod imp {
         }
         // 标记删除得到「目录不是空的」（145）：整棵删的，在 `again` 开着时（没有 FILE_SHARE_DELETE，别人改不了它的
         // 名、换不走它）再清一次再标记；只删空目录的不清，只等挂着的条目消失。都退避约 2 秒，仍不行就原样留下并报错。
+        let mut tried = false;
         retry(&[145], || {
-            if let Some(clear) = clear {
+            // 头一次直接标记（调用方已经清过）；之后每次先清再标记。
+            if let Some(clear) = clear.filter(|_| tried) {
                 clear(path)?;
             }
+            tried = true;
             dispose(&again)
         })
         .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
