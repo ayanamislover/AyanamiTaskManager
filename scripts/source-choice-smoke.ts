@@ -115,6 +115,11 @@ const descriptor = () => join(n, "runtime", "daemon.json");
 /** 3.0 这一边的项目（只读打开 N 的库）。 */
 const v3Projects = (): string[] => v3Business(n)?.projects ?? [];
 
+if (!existsSync(fixture)) throw new Error(`找不到 2.x 夹具：${fixture}`);
+// 先拍 Run 快照再起宿主：快照读不到时宿主还没起来，没有要收拾的。
+const executable = smokeHostExe();
+const loginItems = snapshotLoginItems([executable]);
+
 async function shot(page: Page, name: string): Promise<void> {
   const path = join(shotsDir, `${name}.png`);
   await page.screenshot({ path });
@@ -265,9 +270,6 @@ async function main(executable: string): Promise<void> {
   });
 }
 
-if (!existsSync(fixture)) throw new Error(`找不到 2.x 夹具：${fixture}`);
-const executable = smokeHostExe();
-const loginItems = snapshotLoginItems([executable]);
 let failure: unknown = null;
 try {
   await loginItems.restoreAfter(() => main(executable));

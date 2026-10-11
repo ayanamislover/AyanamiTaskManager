@@ -1598,7 +1598,11 @@ const PACKAGE_20 = {
   setup: join(drillRoot, "package-2.0.0", "atm-setup.exe"),
   manifest: join(drillRoot, "package-2.0.0", "atm-2.0.0-win-x64.json"),
 };
-const V20 = "2.0.0";
+// The version comes from the package itself, not a literal: the release chain treats a literal of
+// the current version outside the version sites as a leftover of a version bump.
+const V20 = existsSync(PACKAGE_20.manifest)
+  ? (JSON.parse(readFileSync(PACKAGE_20.manifest, "utf8")) as { version: string }).version
+  : "2.x (package missing)";
 
 type Step = {
   scenario: string;

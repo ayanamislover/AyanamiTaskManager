@@ -65,6 +65,10 @@ function hostExe(): string {
   return executable;
 }
 
+// 先拍 Run 快照再起宿主：快照读不到时宿主还没起来，没有要收拾的。
+const executable = hostExe();
+const loginItems = snapshotLoginItems([executable]);
+
 /** 四十万条临时任务，写法同 runtime/tests/support 的 `touch_legacy`。 */
 function amplify(root: string): void {
   const db = new DatabaseSync(join(root, "registry", "registry.sqlite"));
@@ -159,8 +163,6 @@ async function main(executable: string): Promise<void> {
   }
 }
 
-const executable = hostExe();
-const loginItems = snapshotLoginItems([executable]);
 let failure: unknown = null;
 try {
   await loginItems.restoreAfter(() => main(executable));
