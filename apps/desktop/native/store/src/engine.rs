@@ -1062,11 +1062,14 @@ fn restart(conn: &Connection, wait: Duration, stats: &Stats) {
 /// 空间——`\??\<盘符>:\…` 与 `\??\UNC\<服务器>\<共享>\…`。其余（`GLOBALROOT`、卷 GUID、设备对象……）不比较、
 /// 不支持（peer W6 r9 P1-01）：[`Store::open`] 与 [`Store::rebase`] 都拒绝，不当成外部位置放行。
 ///
-/// 盘符不按字母比，按它在 `QueryDosDeviceW` 里指向的东西比（peer W6 r10 P1-01）：
-/// - 指向设备（`\Device\HarddiskVolume3`）：位置是「这个设备 + 之下的各段」，同一个卷的两个盘符是同一个位置；
-/// - subst（指向 `\??\…`）：换成它指向的路径再认，至多 [`DOS_DEVICE_DEPTH`] 层，超过就不支持；
-/// - 网络映射盘符（重定向器之下的 `\<服务器>\<共享>…`）：就是那个 UNC 位置；
-/// - 查不到（没有这个盘符、查询失败）：不支持。
+/// 盘符不按字母比，也不按 `QueryDosDeviceW` 给的字符串比（设备名可以带路径后缀、可以是别的设备对象的别名，
+/// 字符串认不全，peer W6 r10 P1-01、r11 P1-01）。按下面的顺序认，每一步都要有确定的结论：
+/// - subst（`QueryDosDeviceW` 指向 `\??\…`）：换成它指向的路径再认，至多 [`DOS_DEVICE_DEPTH`] 层，超过就不支持；
+/// - 网络映射盘符：只认格式完全对得上的 LanmanRedirector（含经 Mup 的）目标，就是那个 UNC 位置；其余重定向器
+///   （WebDAV……）或解析不了的，不支持；
+/// - 其余：盘符必须是挂载管理器登记的卷的根——`GetVolumeNameForVolumeMountPointW("X:\")` 给出
+///   `\\?\Volume{GUID}\`，位置是「这个卷 + 之下的各段」，同一个卷的两个盘符是同一个位置；给不出（目标带路径后缀、
+///   不是卷、没有这个盘符、查询失败）就不支持。
 ///
 /// 证明不了「是同一个位置」或「是另一个位置」的写法一律不支持，不按剩下的字面当外部位置。名字保留 UTF-16
 /// 原样，比较见 [`same_name`]。
@@ -1081,7 +1084,7 @@ pub(crate) struct Location {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Space {
-    /// 盘符指向的设备名（ASCII 小写；`\Device\…`）。
+    /// 挂载管理器给的卷名（ASCII 小写；`\\?\volume{…}\`）。
     Volume(Vec<u16>),
     Unc,
 }
@@ -1089,10 +1092,22 @@ enum Space {
 /// subst 套 subst 最多跟几层；再往下还是 subst 就不支持。
 const DOS_DEVICE_DEPTH: u8 = 4;
 
+/// 盘符的两种查询（用例换掉它们，造真的 subst、映射盘符要改本机的盘符映射）。
+struct Drives<'a> {
+    /// `QueryDosDeviceW`：盘符指向的目标。
+    target: &'a dyn Fn(&[u16]) -> Option<Vec<u16>>,
+    /// `GetVolumeNameForVolumeMountPointW`：盘符是卷的根时，那个卷的名字。
+    volume: &'a dyn Fn(&[u16]) -> Option<Vec<u16>>,
+}
+
 impl Location {
     pub(crate) fn of(p: &Path) -> Location {
+        let drives = Drives {
+            target: &dos_device,
+            volume: &volume_name,
+        };
         match nt_path(p) {
-            Some(nt) => Location::of_nt(&nt, 0, &dos_device),
+            Some(nt) => Location::of_nt(&nt, 0, &drives),
             None => Location::unsupported(),
         }
     }
@@ -1110,16 +1125,20 @@ impl Location {
         self.kind.is_some() && !self.gaps
     }
 
-    /// 用例换盘符映射（造真的 subst 要改本机的盘符映射）。
+    /// 用例换盘符的两种查询。
     #[cfg(test)]
-    pub(crate) fn of_with(p: &Path, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+    pub(crate) fn of_with(
+        p: &Path,
+        target: &dyn Fn(&[u16]) -> Option<Vec<u16>>,
+        volume: &dyn Fn(&[u16]) -> Option<Vec<u16>>,
+    ) -> Location {
         match nt_path(p) {
-            Some(nt) => Location::of_nt(&nt, 0, dev),
+            Some(nt) => Location::of_nt(&nt, 0, &Drives { target, volume }),
             None => Location::unsupported(),
         }
     }
 
-    fn of_nt(nt: &[u16], depth: u8, dev: &dyn Fn(&[u16]) -> Option<Vec<u16>>) -> Location {
+    fn of_nt(nt: &[u16], depth: u8, drives: &Drives<'_>) -> Location {
         let Some(rest) = strip_ascii_ci(nt, r"\??\") else {
             return Location::unsupported();
         };
@@ -1151,7 +1170,7 @@ impl Location {
             };
         }
         let below = &segments[1..];
-        let Some(target) = dev(segments[0]) else {
+        let Some(target) = (drives.target)(segments[0]) else {
             return Location::unsupported();
         };
         if starts_ascii_ci(&target, r"\??\") {
@@ -1166,10 +1185,14 @@ impl Location {
                 }
                 joined.extend_from_slice(s);
             }
-            return Location::of_nt(&joined, depth + 1, dev);
+            return Location::of_nt(&joined, depth + 1, drives);
         }
-        if let Some(share) = redirected_share(&target) {
-            // 网络映射盘符：`\Device\LanmanRedirector\;Z:…\<服务器>\<共享>`，就是那个 UNC 位置。
+        if let Some(redirected) = redirected_share(&target) {
+            // 网络映射盘符：格式对得上就是那个 UNC 位置；重定向器认不出、目标解析不了的不支持，也不再往下当卷
+            // （peer W6 r11 P1-01）。
+            let Some(share) = redirected else {
+                return Location::unsupported();
+            };
             return Location {
                 kind: Some(Space::Unc),
                 gaps: false,
@@ -1179,16 +1202,17 @@ impl Location {
                     .collect(),
             };
         }
-        if starts_ascii_ci(&target, r"\Device\") {
-            return Location {
-                kind: Some(Space::Volume(
-                    target.iter().map(|u| ascii_lower(*u)).collect(),
-                )),
-                gaps: false,
-                parts: below.iter().map(|c| from_wide(c)).collect(),
-            };
+        // 其余只认挂载管理器登记的卷的根（peer W6 r11 P1-01）。
+        let Some(volume) = (drives.volume)(segments[0]) else {
+            return Location::unsupported();
+        };
+        Location {
+            kind: Some(Space::Volume(
+                volume.iter().map(|u| ascii_lower(*u)).collect(),
+            )),
+            gaps: false,
+            parts: below.iter().map(|c| from_wide(c)).collect(),
         }
-        Location::unsupported()
     }
 
     /// UNC 写法（含映射到网络共享的盘符）。
@@ -1275,26 +1299,50 @@ fn is_drive(units: &[u16]) -> bool {
         && (units.len() == 2 || units[2] == u16::from(b'\\'))
 }
 
-/// 网络重定向器下的 `\<服务器>\<共享>…`：`\Device\LanmanRedirector\;Z:…\srv\share`、`\Device\Mup\;…\srv\share`
-/// 这类写法里打头的、以 `;` 开头的几段是重定向器自己的（`;LanmanRedirector`、`;Z:<登录会话>`），去掉之后就是
-/// UNC 的那几段。只去打头的：服务器与共享之后的段原样保留，以 `;` 开头的目录名也是名字（peer W6 r10 P1-02）。
-/// 中间有空段的认不出来。
-fn redirected_share(target: &[u16]) -> Option<Vec<std::ffi::OsString>> {
-    let rest = strip_ascii_ci(target, r"\Device\LanmanRedirector\")
-        .or_else(|| strip_ascii_ci(target, r"\Device\Mup\"))?;
+/// 网络映射盘符的目标。`None`：不是重定向器下的目标；`Some(None)`：是，但认不出（交给调用方拒绝）；
+/// `Some(Some(段))`：就是 UNC 的 `\<服务器>\<共享>…` 那几段。
+///
+/// 只认 LanmanRedirector 的两种格式，打头的重定向器段要恰好对得上（peer W6 r11 P1-01）：
+/// - `\Device\LanmanRedirector\;Z:<登录会话>\<服务器>\<共享>…`
+/// - `\Device\Mup\;LanmanRedirector\;Z:<登录会话>\<服务器>\<共享>…`
+///
+/// 服务器与共享之后的段原样保留，以 `;` 开头的目录名也是名字（peer W6 r10 P1-02）。其余重定向器（WebDAV 之类，
+/// `\Device\…Redirector\`）、Mup 下的其他格式、中间有空段、服务器名以 `;` 开头的，都认不出。
+fn redirected_share(target: &[u16]) -> Option<Option<Vec<std::ffi::OsString>>> {
+    let (rest, lead) = if let Some(r) = strip_ascii_ci(target, r"\Device\LanmanRedirector\") {
+        (r, &[][..])
+    } else if let Some(r) = strip_ascii_ci(target, r"\Device\Mup\") {
+        (r, &[";LanmanRedirector"][..])
+    } else {
+        let device = strip_ascii_ci(target, r"\Device\")?;
+        let name = device.split(|u| *u == u16::from(b'\\')).next()?;
+        let name = String::from_utf16_lossy(name);
+        // 其余名字以 Redirector 结尾的设备也是重定向器（WebDAV、RDP 的客户端驱动……），认不出。
+        return name
+            .to_ascii_lowercase()
+            .ends_with("redirector")
+            .then_some(None);
+    };
     let mut segments: Vec<&[u16]> = rest.split(|u| *u == u16::from(b'\\')).collect();
     if segments.last().is_some_and(|s| s.is_empty()) {
         segments.pop();
     }
-    let lead = segments
-        .iter()
-        .take_while(|c| c.first() == Some(&u16::from(b';')))
-        .count();
-    let parts = &segments[lead..];
-    if parts.len() < 2 || parts.iter().any(|c| c.is_empty()) {
-        return None;
+    let semicolon = |c: &[u16]| c.first() == Some(&u16::from(b';'));
+    let fixed = lead.len();
+    let understood = segments.len() >= fixed + 3
+        && lead
+            .iter()
+            .zip(&segments)
+            .all(|(want, got)| String::from_utf16_lossy(got).eq_ignore_ascii_case(want))
+        && semicolon(segments[fixed])
+        && !semicolon(segments[fixed + 1])
+        && segments.iter().all(|c| !c.is_empty());
+    if !understood {
+        return Some(None);
     }
-    Some(parts.iter().map(|c| from_wide(c)).collect())
+    Some(Some(
+        segments[fixed + 1..].iter().map(|c| from_wide(c)).collect(),
+    ))
 }
 
 /// 按 Windows 自己的规则把写法换成 NT 路径（`RtlDosPathNameToNtPathName_U_WithStatus`：`CreateFileW` 打开之前
@@ -1355,28 +1403,91 @@ fn nt_path(p: &Path) -> Option<Vec<u16>> {
     Some(units)
 }
 
-/// UNC 写法（含映射到网络共享的盘符）打开的目录落在本机的卷上就拒绝：本机的目录要用盘符写。
+/// UNC 写法（含映射到网络共享的盘符）钉住的目录，证明不了不在本机就拒绝。
 ///
 /// 经本机共享回到本机的写法（`\\localhost\C$\…`、本机名、映射到本机共享的盘符……）在字面上认不出是数据根的哪种
 /// 写法，当成外部位置就会跟着它路径上的链接走，换向之后落到别处（与 peer W6 r9 的 `GLOBALROOT` 同一类）。服务器名
-/// 的别名列举不完，所以不按名字判断，按打开之后句柄所在的卷判断：卷序列号与本机任一个卷相同（含没有盘符、挂在目录
-/// 上的卷）就拒绝。`volume` 是打开的句柄的卷序列号；数据根与外部位置钉住时都过这一道。
+/// 的别名列举不完，所以不按名字判断，按打开之后句柄所在的卷判断。`volume` 是钉住的句柄的卷序列号；数据根与外部
+/// 位置钉住时都过这一道。拒绝的两种情形：
+/// - 卷序列号与本机某个卷相同（含没有盘符、挂在目录上的卷）：可能就是本机；序列号碰巧相同的远端共享也一并拒绝
+///   （32 位序列号证明不了是同一台机器，peer W6 r11 P2-01）；
+/// - 本机的卷没能全部读到（枚举失败、中途出错、某个卷读不到序列号）：证明不了不在本机（peer W6 r11 P1-02）。
 pub(crate) fn refuse_loopback(spelled: &Path, volume: u32) -> std::io::Result<()> {
-    if Location::of(spelled).unc() && local_volume_serials().contains(&volume) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "{} is a network path to a volume of this machine; use its drive path instead",
-                spelled.display()
-            ),
-        ));
+    if !Location::of(spelled).unc() {
+        return Ok(());
     }
-    Ok(())
+    let why = match local_volume_serials() {
+        Err(why) => format!("the volumes of this machine could not all be read ({why})"),
+        Ok(serials) if serials.contains(&volume) => {
+            "its volume has the same serial number as a volume of this machine".to_owned()
+        }
+        Ok(_) => return Ok(()),
+    };
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "{} cannot be confirmed to be outside this machine: {why}. A network path back to this machine is \
+             refused, and so is a remote share whose volume serial number cannot be told apart from a local one; \
+             a directory on this machine has to be written with its drive path",
+            spelled.display()
+        ),
+    ))
 }
 
-/// 本机所有卷（`FindFirstVolumeW` 列出的，含没有盘符的）的序列号；读不到的卷（没插盘的光驱之类）跳过。
+/// 本机所有卷（`FindFirstVolumeW` 列出的，含没有盘符的）的序列号。读不全就是 `Err`（说明哪一步、错误码）：
+/// 枚举开始就失败、`FindNextVolumeW` 不是因为列完了（`ERROR_NO_MORE_FILES`）才停、某个卷读序列号失败。只有两种
+/// 读不到不算：没插盘的可移动卷（`ERROR_NOT_READY`）与没有文件系统的卷（`ERROR_UNRECOGNIZED_VOLUME`），句柄不会
+/// 落在它们上面。
+pub(crate) fn local_volume_serials() -> Result<Vec<u32>, String> {
+    #[cfg(test)]
+    if let Some(given) = LOCAL_VOLUMES.with(|o| o.borrow().clone()) {
+        return given;
+    }
+    volume_serials_with(&VolumeApi::REAL)
+}
+
+/// 枚举本机卷要用的几个调用（用例换掉它们，验每一种失败）。
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeApi {
+    /// `FindFirstVolumeW`：查找句柄，或错误码。
+    pub(crate) first: fn(&mut [u16]) -> Result<isize, u32>,
+    /// `FindNextVolumeW`：`Ok(true)` 又一个，`Ok(false)` 列完了，`Err` 错误码。
+    pub(crate) next: fn(isize, &mut [u16]) -> Result<bool, u32>,
+    /// `GetVolumeInformationW`：`Ok(Some)` 序列号，`Ok(None)` 不算的卷，`Err` 错误码。
+    pub(crate) serial: fn(&[u16]) -> Result<Option<u32>, u32>,
+    /// `FindVolumeClose`。
+    pub(crate) close: fn(isize),
+}
+
+pub(crate) fn volume_serials_with(api: &VolumeApi) -> Result<Vec<u32>, String> {
+    let mut name = vec![0u16; 1024];
+    let find =
+        (api.first)(&mut name).map_err(|e| format!("FindFirstVolumeW failed with error {e}"))?;
+    let mut serials = Vec::new();
+    let outcome = loop {
+        match (api.serial)(&name) {
+            Ok(Some(s)) => serials.push(s),
+            Ok(None) => {}
+            Err(e) => {
+                let end = name.iter().position(|u| *u == 0).unwrap_or(name.len());
+                break Err(format!(
+                    "GetVolumeInformationW failed with error {e} on {}",
+                    String::from_utf16_lossy(&name[..end])
+                ));
+            }
+        }
+        match (api.next)(find, &mut name) {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(e) => break Err(format!("FindNextVolumeW failed with error {e}")),
+        }
+    };
+    (api.close)(find);
+    outcome.map(|()| serials)
+}
+
 #[cfg(windows)]
-pub(crate) fn local_volume_serials() -> Vec<u32> {
+mod volume_ffi {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn FindFirstVolumeW(name: *mut u16, len: u32) -> isize;
@@ -1393,15 +1504,37 @@ pub(crate) fn local_volume_serials() -> Vec<u32> {
             fs_name_len: u32,
         ) -> i32;
     }
+
     const INVALID: isize = -1;
-    let mut serials = Vec::new();
-    let mut name = vec![0u16; 1024];
-    // SAFETY: 缓冲长度如实给出；返回的查找句柄在下面用 FindVolumeClose 关掉。
-    let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
-    if find == INVALID {
-        return serials;
+    const ERROR_NO_MORE_FILES: i32 = 18;
+    const ERROR_NOT_READY: i32 = 21;
+    const ERROR_UNRECOGNIZED_VOLUME: i32 = 1005;
+
+    fn last_error() -> i32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
     }
-    loop {
+
+    pub(super) fn first(name: &mut [u16]) -> Result<isize, u32> {
+        // SAFETY: 缓冲长度如实给出；返回的查找句柄由调用方用 `close` 关掉。
+        let find = unsafe { FindFirstVolumeW(name.as_mut_ptr(), name.len() as u32) };
+        if find == INVALID {
+            return Err(last_error() as u32);
+        }
+        Ok(find)
+    }
+
+    pub(super) fn next(find: isize, name: &mut [u16]) -> Result<bool, u32> {
+        // SAFETY: `find` 是 `first` 给的有效查找句柄；缓冲长度如实给出。
+        if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } != 0 {
+            return Ok(true);
+        }
+        match last_error() {
+            ERROR_NO_MORE_FILES => Ok(false),
+            e => Err(e as u32),
+        }
+    }
+
+    pub(super) fn serial(name: &[u16]) -> Result<Option<u32>, u32> {
         let mut serial = 0u32;
         // SAFETY: `name` 是 FindFirstVolumeW / FindNextVolumeW 写下的、以 0 结尾的卷名（`\\?\Volume{…}\`）；
         // 不要的输出给空指针。
@@ -1418,21 +1551,93 @@ pub(crate) fn local_volume_serials() -> Vec<u32> {
             )
         };
         if ok != 0 {
-            serials.push(serial);
+            return Ok(Some(serial));
         }
-        // SAFETY: 同上。
-        if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } == 0 {
-            break;
+        match last_error() {
+            ERROR_NOT_READY | ERROR_UNRECOGNIZED_VOLUME => Ok(None),
+            e => Err(e as u32),
         }
     }
-    // SAFETY: `find` 是上面拿到的有效查找句柄，只关一次。
-    unsafe { FindVolumeClose(find) };
-    serials
+
+    pub(super) fn close(find: isize) {
+        // SAFETY: `find` 是 `first` 给的有效查找句柄，只关一次。
+        unsafe { FindVolumeClose(find) };
+    }
+}
+
+#[cfg(windows)]
+impl VolumeApi {
+    pub(crate) const REAL: VolumeApi = VolumeApi {
+        first: volume_ffi::first,
+        next: volume_ffi::next,
+        serial: volume_ffi::serial,
+        close: volume_ffi::close,
+    };
 }
 
 #[cfg(not(windows))]
-pub(crate) fn local_volume_serials() -> Vec<u32> {
-    Vec::new()
+impl VolumeApi {
+    pub(crate) const REAL: VolumeApi = VolumeApi {
+        first: |_| Err(0),
+        next: |_, _| Ok(false),
+        serial: |_| Ok(None),
+        close: |_| {},
+    };
+}
+
+// 用例换掉本线程读到的本机卷（经公开入口验读不全时的拒绝）。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOCAL_VOLUMES: std::cell::RefCell<Option<Result<Vec<u32>, String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 盘符是挂载管理器登记的卷的根时，那个卷的名字（`GetVolumeNameForVolumeMountPointW("X:\")`：`\\?\Volume{…}\`）。
+fn volume_name(drive: &[u16]) -> Option<Vec<u16>> {
+    #[cfg(test)]
+    if let Some(given) = VOLUME_NAMES.with(|o| o.borrow().as_ref().map(|f| f(drive))) {
+        return given;
+    }
+    query_volume_name(drive)
+}
+
+#[cfg(test)]
+type VolumeNames = Box<dyn Fn(&[u16]) -> Option<Vec<u16>>>;
+
+// 用例换掉本线程的「盘符 → 卷名」（与 [`DOS_DEVICES`] 一起用）。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static VOLUME_NAMES: std::cell::RefCell<Option<VolumeNames>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(windows)]
+pub(crate) fn query_volume_name(drive: &[u16]) -> Option<Vec<u16>> {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetVolumeNameForVolumeMountPointW(mount: *const u16, name: *mut u16, len: u32) -> i32;
+    }
+    let mut mount = drive.get(..2)?.to_vec();
+    mount.extend([u16::from(b'\\'), 0]);
+    let mut buf = vec![0u16; 260];
+    // SAFETY: `mount` 以 0 结尾；`buf` 的长度如实给出，函数只在其中写、以 0 结尾。
+    let ok = unsafe {
+        GetVolumeNameForVolumeMountPointW(mount.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+    };
+    if ok == 0 {
+        return None;
+    }
+    let end = buf.iter().position(|u| *u == 0)?;
+    buf.truncate(end);
+    Some(buf)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn query_volume_name(drive: &[u16]) -> Option<Vec<u16>> {
+    let mut d: Vec<u16> = r"\\?\Volume{".encode_utf16().collect();
+    d.extend_from_slice(drive.get(..1)?);
+    d.extend("}\\".encode_utf16());
+    Some(d)
 }
 
 /// 盘符指向的目标（`QueryDosDeviceW`）：subst 是 `\??\…`，网络映射是重定向器下的路径，本地卷是 `\Device\…`。
