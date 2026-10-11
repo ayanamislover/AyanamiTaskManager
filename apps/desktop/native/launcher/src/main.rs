@@ -10,6 +10,9 @@
 //! 3. route — GUI starts are handed over without waiting; `--cli`/`--doctor`/`--mcp-stdio`
 //!    and the Electron-as-node legacy form are run with inherited stdio and their exit code
 //!    passed through; Squirrel events exit 0; anything else is an error, never a GUI.
+//!
+//! `--ensure-running` (the "AyanamiTaskManager 保活" scheduled task, every 5 minutes) is
+//! answered before all of this: it decides and leaves — no waiting, no recovery, no dialog.
 #![windows_subsystem = "windows"]
 
 use std::path::{Path, PathBuf};
@@ -17,6 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use atm_install_state::Outcome;
+use atm_install_state::keepalive::{self, Decision, Facts};
 
 const INSTALLER_WAIT: Duration = Duration::from_secs(60);
 const RECOVERY_WAIT: Duration = Duration::from_secs(300);
@@ -212,8 +216,92 @@ fn barrier(root: &Path, headless: bool) -> Result<(), i32> {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+/// The install root: the directory of this executable. Started through `<dataDir>\current`,
+/// that is the junction's target.
+fn root_dir() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    let me = std::fs::canonicalize(&me).unwrap_or(me);
+    let me = PathBuf::from(me.to_string_lossy().trim_start_matches(r"\\?\"));
+    me.parent().map(Path::to_path_buf)
+}
+
+/// `--ensure-running` (B1): decide and leave. An unfinished install transaction (the barrier)
+/// means nothing is done here — no recovery, no dialog: that is the user's or setup's. Only
+/// the version `app.json` points at is started, `--background`, out of the task's job. The
+/// exit code is always 0 (the task history keeps no meaningless failures); what was decided
+/// goes to `N\logs\keepalive.log`.
+fn ensure_running(root: &Path) -> i32 {
+    let (Ok(n), Ok(l)) = (
+        atm_install_state::startup::v3_root(),
+        atm_install_state::data_dir(),
+    ) else {
+        return 0;
+    };
+    let install_busy = atm_install_state::lock_held(root)
+        || match atm_install_state::read_journal(root) {
+            Ok(Some(journal)) => {
+                !journal.is_terminal() || journal.outcome == Some(Outcome::RecoveryFailed)
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
+    let host = match atm_install_state::read_pointer(root) {
+        Ok(Some(pointer)) if atm_install_state::startup::is_v3(&pointer.current) => Some(
+            atm_install_state::app_dir_for(root, &pointer.current).join("AyanamiTaskManager.exe"),
+        ),
+        _ => None,
+    }
+    .filter(|host| host.is_file());
+    let facts = Facts {
+        install_busy,
+        current_v3: host.is_some(),
+        running: atm_install_state::ipc::primary_alive(&l),
+        user_quit: keepalive::user_quit_applies(&n, keepalive::logon_id().as_deref()),
+        last_exit: keepalive::last_exit(&n),
+    };
+    let mut breaker = keepalive::read_breaker(&n);
+    let before = breaker.clone();
+    let now = now_ms();
+    let decision = keepalive::decide(&facts, &mut breaker, now);
+    if breaker != before {
+        let _ = keepalive::write_breaker(&n, &breaker);
+    }
+    let note = match (&decision, host) {
+        (Decision::Running, _) => return 0,
+        (Decision::Launch, Some(host)) => {
+            match atm_install_state::procs::spawn(&host, &["--background"]) {
+                Ok((_child, started)) => {
+                    format!(
+                        "Launch {} (pid {}) after {:?}",
+                        host.display(),
+                        started.pid,
+                        facts.last_exit
+                    )
+                }
+                Err(error) => format!("Launch failed: {error}"),
+            }
+        }
+        (other, _) => format!("{other:?}"),
+    };
+    keepalive::log(&n, now, &note);
+    0
+}
+
 fn real_main() -> i32 {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some(keepalive::ENSURE_RUNNING) {
+        return match root_dir() {
+            Some(root) if argv.len() == 1 => ensure_running(&root),
+            _ => 2,
+        };
+    }
     let electron_as_node =
         std::env::var_os("ELECTRON_RUN_AS_NODE").is_some_and(|value| value == "1");
     let decision = route(&argv, electron_as_node);
@@ -226,13 +314,7 @@ fn real_main() -> i32 {
         }
         Route::Gui(args) | Route::Headless(args) => args,
     };
-    let Ok(me) = std::env::current_exe() else {
-        return 2;
-    };
-    // Canonicalize: started through `<dataDir>\current`, the root is the junction target.
-    let me = std::fs::canonicalize(&me).unwrap_or(me);
-    let me = PathBuf::from(me.to_string_lossy().trim_start_matches(r"\\?\"));
-    let Some(root) = me.parent().map(Path::to_path_buf) else {
+    let Some(root) = root_dir() else {
         return 2;
     };
     if let Err(code) = barrier(&root, headless) {

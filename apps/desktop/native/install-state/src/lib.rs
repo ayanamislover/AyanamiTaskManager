@@ -16,6 +16,7 @@ pub mod durable;
 pub mod handoff;
 #[cfg(windows)]
 pub mod ipc;
+pub mod keepalive;
 #[cfg(windows)]
 pub mod procs;
 #[cfg(windows)]
