@@ -878,18 +878,27 @@ impl Surface {
                 }
                 e
             })?;
-        // 2.x 直接回服务结果；v6 的 ACK 规则（op_id、replayed、实际的 project 与 session）补在旁边。
-        let mut out = written.result.clone();
-        if let Value::Object(m) = &mut out {
-            m.insert("op_id".into(), json!(op_id));
-            m.insert("replayed".into(), json!(written.replayed));
-            m.insert("project".into(), json!(atm_domain::keys::normalize(&code)));
-            m.insert(
-                "session".into(),
-                json!(written.rebound_to.clone().unwrap_or(session)),
-            );
-        }
-        Ok(out)
+        // 2.x 的知识回执（knowledge-service.ts saveForAgent）：ok、op_id、id、revisionId、version、
+        // reference、publishedBy——不回正文（指南与 agent-integration 承诺的就是这几个键）。
+        // v6 的 ACK 规则（replayed、实际的 project 与 session）补在旁边。
+        let entry = &written.result;
+        let reference = format!(
+            "{}@{}",
+            entry["id"].as_str().unwrap_or_default(),
+            entry["revisionId"].as_str().unwrap_or_default()
+        );
+        Ok(json!({
+            "ok": true,
+            "op_id": op_id,
+            "id": entry["id"],
+            "revisionId": entry["revisionId"],
+            "version": entry["version"],
+            "reference": reference,
+            "publishedBy": entry["publishedBy"],
+            "replayed": written.replayed,
+            "project": atm_domain::keys::normalize(&code),
+            "session": written.rebound_to.clone().unwrap_or(session),
+        }))
     }
 }
 

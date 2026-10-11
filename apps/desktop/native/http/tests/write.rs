@@ -650,7 +650,8 @@ fn c_l03_begin_reports_a_marker_it_could_not_write() {
     assert_eq!(again["project"], r["project"], "{again}");
 }
 
-/// knowledge_save：作者取自 session，回执带 op_id、project、session。
+/// knowledge_save：作者取自 session，回执带 op_id、project、session；知识本身的回执是 2.x 那几个键
+/// （ok、id、revisionId、version、reference = id@revisionId、publishedBy），不回正文。
 #[test]
 fn knowledge_save_reports_the_receipt() {
     let w = world("write-knowledge");
@@ -667,6 +668,18 @@ fn knowledge_save_reports_the_receipt() {
         (&ack["project"], &ack["session"]),
         (&json!(w.project), &json!(w.session))
     );
+    let (id, revision) = (
+        ack["id"].as_str().unwrap(),
+        ack["revisionId"].as_str().unwrap(),
+    );
+    assert_eq!(ack["ok"], json!(true), "{ack}");
+    assert_eq!(ack["version"], json!(1), "{ack}");
+    assert_eq!(ack["reference"], json!(format!("{id}@{revision}")), "{ack}");
+    assert_eq!(ack["publishedBy"]["type"], json!("AGENT"), "{ack}");
+    assert_eq!(ack["publishedBy"]["sessionId"], json!(w.session), "{ack}");
+    for leaked in ["bodyMarkdown", "slug", "title", "summary", "tags"] {
+        assert!(ack.get(leaked).is_none(), "回执不带内容 {leaked}: {ack}");
+    }
     let e = err(&call(
         &w,
         "memory",
