@@ -37,7 +37,7 @@ const FIXTURE_FILES = [
   "packages/application/src/index.ts",
   "packages/domain/src/index.ts",
   "migrations/project/0001_initial.sql",
-  "scripts/benchmark.ts",
+  "scripts/budget-measure.ts",
   "scripts/start-e2e.ts",
   "scripts/release.ts",
   "scripts/version-sites.ts",
@@ -94,9 +94,19 @@ describe("非签发按阶段依赖复用", () => {
   // 便宜的阶段一律照跑：lint/format/typecheck/test 合计 26 秒就跑完全部用例，
   // 省它们没收益还要担风险。build/package/packaged-smoke 要产出并验证本
   // 版本的产物，也不能跳。
-  it("只有三个昂贵且作用域明确的阶段声明了依赖", () => {
-    expect(Object.keys(STAGE_INPUTS).sort()).toEqual(["benchmark", "distribution-smoke", "e2e"]);
-    for (const cheap of ["lint", "format", "typecheck", "test", "build", "package"]) {
+  // install-drill 与 budget 测的是这次的候选二进制（L6 绑定哈希），复用上一轮就等于没测。
+  it("只有两个昂贵且作用域明确的阶段声明了依赖", () => {
+    expect(Object.keys(STAGE_INPUTS).sort()).toEqual(["distribution-smoke", "e2e"]);
+    for (const cheap of [
+      "lint",
+      "format",
+      "typecheck",
+      "test",
+      "build",
+      "package",
+      "install-drill",
+      "budget",
+    ]) {
       expect(
         decideNonReleaseStageReuse(cheap, fingerprintWith({}), fingerprintWith({}), 0).reuse,
       ).toBe(false);
@@ -104,9 +114,9 @@ describe("非签发按阶段依赖复用", () => {
   });
 
   it("输入没变才复用，变了就重跑，上次没绿也重跑", () => {
-    const before = fingerprintWith({ e2e: "AAA", benchmark: "BBB", "distribution-smoke": "CCC" });
-    const same = fingerprintWith({ e2e: "AAA", benchmark: "BBB", "distribution-smoke": "CCC" });
-    const changed = fingerprintWith({ e2e: "ZZZ", benchmark: "BBB", "distribution-smoke": "CCC" });
+    const before = fingerprintWith({ e2e: "AAA", "distribution-smoke": "CCC" });
+    const same = fingerprintWith({ e2e: "AAA", "distribution-smoke": "CCC" });
+    const changed = fingerprintWith({ e2e: "ZZZ", "distribution-smoke": "CCC" });
 
     expect(decideNonReleaseStageReuse("e2e", before, same, 0)).toEqual({
       reuse: true,
@@ -129,17 +139,16 @@ describe("非签发按阶段依赖复用", () => {
     expect(decideNonReleaseStageReuse("e2e", null, same, 0).reuse).toBe(false);
   });
 
-  it("改界面时 benchmark 与 distribution-smoke 复用，改 scripts 时后者必定重跑", async () => {
+  it("改界面时 distribution-smoke 复用，改 scripts 时后者必定重跑", async () => {
     const base = await computeStageHashes(root, FIXTURE_FILES, currentVersion);
 
-    // 拿掉 scripts/release.ts：distribution-smoke 的哈希必须跟着变，benchmark 不受影响。
+    // 拿掉 scripts/release.ts：distribution-smoke 的哈希必须跟着变。
     const withoutReleaseScript = await computeStageHashes(
       root,
       FIXTURE_FILES.filter((file) => file !== "scripts/release.ts"),
       currentVersion,
     );
     expect(withoutReleaseScript["distribution-smoke"]).not.toBe(base["distribution-smoke"]);
-    expect(withoutReleaseScript["benchmark"]).toBe(base["benchmark"]);
     expect(withoutReleaseScript["e2e"]).toBe(base["e2e"]);
 
     // 拿掉一个只属于 e2e 的界面文件：只有 e2e 变。
@@ -149,17 +158,15 @@ describe("非签发按阶段依赖复用", () => {
       currentVersion,
     );
     expect(withoutUi["e2e"]).not.toBe(base["e2e"]);
-    expect(withoutUi["benchmark"]).toBe(base["benchmark"]);
     expect(withoutUi["distribution-smoke"]).toBe(base["distribution-smoke"]);
 
-    // 原生 shim 随包安装：改它必须重跑安装烟测，与存储性能无关。
+    // 原生 shim 随包安装：改它必须重跑安装烟测。
     const withoutShimSource = await computeStageHashes(
       root,
       FIXTURE_FILES.filter((file) => file !== "apps/desktop/native/mcp-shim/src/main.rs"),
       currentVersion,
     );
     expect(withoutShimSource["distribution-smoke"]).not.toBe(base["distribution-smoke"]);
-    expect(withoutShimSource["benchmark"]).toBe(base["benchmark"]);
   });
 
   // 版本号散落在 package.json 和多个 src 文件里，而这些正好落在三个阶段的
@@ -174,9 +181,10 @@ describe("非签发按阶段依赖复用", () => {
     expect(absent).toEqual(notNormalized);
     // 归一确实改变了哈希，说明当前版本号真的被从内容里摘掉了——摘掉之后，
     // 换成任何新版本号都不会再影响这些哈希。
-    for (const stage of ["distribution-smoke", "benchmark", "e2e"]) {
-      expect(normalized[stage]).not.toBe(notNormalized[stage]);
-    }
+    expect(normalized["distribution-smoke"]).not.toBe(notNormalized["distribution-smoke"]);
+    // 3.x 的版本只有 package.json 一个来源（原生版本资源由 build-support 从它读）；e2e 的输入里
+    // 本来就没有当前版本号——2.x daemon 里那几处钉在 LEGACY_VERSION，不随升版变。
+    expect(normalized["e2e"]).toBe(notNormalized["e2e"]);
   });
 
   // e2e 的 testDir 是 apps/desktop/e2e；apps/desktop/test 等目录里是 vitest 单测，

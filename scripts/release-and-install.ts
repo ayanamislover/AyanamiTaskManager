@@ -41,6 +41,7 @@ import {
   assertReleaseChecklistIsDynamic,
   bumpVersion,
   findVersionLeftovers,
+  isV3,
   VERSIONED_FILES,
 } from "./version-sites.js";
 
@@ -88,11 +89,6 @@ const packageJsonPath = join(root, "package.json");
 const currentVersion = JSON.parse(readFileSync(packageJsonPath, "utf8")).version as string;
 const target = value("version") ?? currentVersion;
 
-/** 主版本 ≥ 3 是 3.x：与 install-state/src/startup.rs `is_v3` 同一规则。 */
-function isV3(version: string): boolean {
-  const major = Number(version.split(/[.\-+]/u)[0]);
-  return Number.isSafeInteger(major) && major >= 3;
-}
 // 3.x 的升级、转换、保活都按主版本认 3.x：版本号不是 3.x 的候选装上去会被当成 2.x。
 if (!isV3(target)) throw new Error(`TARGET_NOT_V3: ${target}（3.x 的发布链只发 3.x）`);
 

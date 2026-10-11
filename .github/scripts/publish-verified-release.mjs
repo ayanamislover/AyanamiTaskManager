@@ -84,11 +84,12 @@ const stages = [
   "typecheck",
   "test",
   "e2e",
-  "benchmark",
   "build",
   "package",
   "packaged-smoke",
   "distribution-smoke",
+  "install-drill",
+  "budget",
 ];
 assert.equal(verification.commands.length, stages.length);
 for (const stage of stages)
@@ -105,7 +106,18 @@ for (const name of ["packaged", "portable", "installed", "distribution"]) {
 const e2e = await readJson(join(releaseRoot, "test-report/e2e-results.json"));
 assert.ok(e2e.stats.expected > 0);
 assert.equal(e2e.stats.unexpected, 0);
-assert.equal((await readJson(join(releaseRoot, "test-report/benchmark-report.json"))).passed, true);
+const drill = await readJson(join(releaseRoot, "test-report/install-drill-report.json"));
+assert.equal(drill.passed, true);
+assert.ok(drill.total > 0);
+assert.equal(drill.failed, 0);
+const budget = await readJson(join(releaseRoot, "test-report/budget-report.json"));
+assert.equal(budget.error, undefined);
+assert.equal(typeof budget.completedAt, "string");
+// 候选绑定（L6）：打包时记下的 exe 哈希就是这次发布的版本。
+assert.equal(
+  (await readJson(join(releaseRoot, "test-report/candidate-binaries.json"))).version,
+  version,
+);
 for (const layer of summary.evidenceLayers) {
   assert.equal(layer.candidateSha256, manifest.candidate.candidateSha256);
   assert.ok(layer.evidence.length > 0);

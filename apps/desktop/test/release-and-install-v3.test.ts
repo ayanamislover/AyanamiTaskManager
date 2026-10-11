@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { isV3 } from "../../../scripts/version-sites.js";
 
 // ATM-R-475 / W8d-3：一条命令发版在用户自己的机器上跑。3.x 起它不卸载用户的安装，按已有安装
 // 的世代装上候选，运行文件、lifecycle 日志与本地更新源都从 3.0 根 N 读。
@@ -41,8 +42,32 @@ describe("release-and-install（3.x）", () => {
       "utf8",
     );
     expect(rust).toMatch(/\.split\(\['\.', '-', '\+'\]\)[\s\S]{0,200}major >= 3/u);
-    expect(source).toContain("const major = Number(version.split(/[.\\-+]/u)[0]);");
-    expect(source).toContain("return Number.isSafeInteger(major) && major >= 3;");
+    for (const version of ["3.2.1", "3.4.0-rc.1", "3.1.0+build", "10.0.0"])
+      expect(isV3(version), version).toBe(true);
+    for (const version of ["2.0.0", "2.99.99", "0.3.0", "", "v3.0.0", "x.y.z"])
+      expect(isV3(version), version).toBe(false);
+    // 判据只有 version-sites 一份：这里引用它，不再自己写一遍。
+    expect(source).toMatch(/^\s+isV3,$/mu);
+    expect(source).not.toMatch(/function isV3\(/u);
+    expect(source).toContain("if (!isV3(target)) throw new Error(`TARGET_NOT_V3: ");
     expect(source.indexOf("TARGET_NOT_V3")).toBeLessThan(source.indexOf("bumpVersion(root"));
+  });
+
+  // release.ts 与 assemble-release 也只认 3.x：前者在跑任何阶段之前拒，后者在读任何报告之前拒。
+  it("发布流水线与组装用同一个 isV3，在动手之前拒绝 2.x 的版本号", () => {
+    const release = readFileSync(join(process.cwd(), "scripts", "release.ts"), "utf8");
+    const assemble = readFileSync(join(process.cwd(), "scripts", "assemble-release.ts"), "utf8");
+    for (const [text, first] of [
+      [release, "const releaseMode = parseReleaseRunMode("],
+      [assemble, 'const output = join(root, "output");'],
+    ] as const) {
+      expect(text).toContain('import { isV3 } from "./version-sites.js";');
+      expect(text).not.toContain(".split(/[.\\-+]/u)");
+      const refusal = text.search(
+        /if \(!isV3\([^)]+\)\)\s+throw new Error\(`RELEASE_VERSION_NOT_V3: /u,
+      );
+      expect(refusal).toBeGreaterThan(0);
+      expect(refusal).toBeLessThan(text.indexOf(first));
+    }
   });
 });

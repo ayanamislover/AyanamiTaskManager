@@ -33,11 +33,6 @@ const releaseGateContracts = [
   },
   { name: "unit tests", source: "releaseRunner", needle: '{ name: "test", args: ["test"] },' },
   { name: "desktop E2E", source: "releaseRunner", needle: '{ name: "e2e", args: ["test:e2e"] },' },
-  {
-    name: "benchmark",
-    source: "releaseRunner",
-    needle: '{ name: "benchmark", args: ["benchmark"] },',
-  },
   { name: "build", source: "releaseRunner", needle: '{ name: "build", args: ["build"] },' },
   {
     name: "native package",
@@ -54,6 +49,17 @@ const releaseGateContracts = [
     source: "releaseRunner",
     needle:
       '{ name: "distribution-smoke", args: ["exec", "tsx", "scripts/distribution-smoke.ts"] },',
+  },
+  {
+    name: "install drill",
+    source: "releaseRunner",
+    needle: '{ name: "install-drill", args: ["exec", "tsx", "scripts/install-drill.ts"] },',
+  },
+  {
+    name: "budget",
+    source: "releaseRunner",
+    needle:
+      'args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],',
   },
   {
     name: "portable smoke",

@@ -628,7 +628,7 @@ const projectHead = {
 };
 const headDoc = {
   v: 1,
-  host: { id: "pc-0123456789ab", name: "PC", app: "3.0.0" },
+  host: { id: "pc-0123456789ab", name: "PC", app: "9.9.9" },
   at: "t",
   dispatch: { enabled: true, mode: "auto", running: 0 },
   projects: [projectHead],

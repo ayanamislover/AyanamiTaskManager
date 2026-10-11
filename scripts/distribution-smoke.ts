@@ -30,10 +30,13 @@ import {
   waitUntil,
   writeSmokeReport,
 } from "./distribution-common.js";
+import { binariesOf, type BinarySet } from "./candidate-binaries.js";
 import { portableZipName } from "./package-native.js";
 import { resolveSystemTar } from "./system-tar.js";
 
 const cleanMachine = process.env.ATM_DISTRIBUTION_CLEAN_MACHINE === "1";
+/** 便携那一半实际运行的那份 exe（候选绑定 L6）。 */
+let portableBinaries: BinarySet | null = null;
 
 /** 真实 N 里宿主记下的 pid（没有 N 或没有 host.json 是 null）。 */
 function realHostPid(): number | null {
@@ -81,7 +84,8 @@ async function portable(): Promise<void> {
     ),
     String(hostPid),
   );
-  await writeSmokeReport("portable", dataDir, from);
+  portableBinaries = binariesOf(appDir);
+  await writeSmokeReport("portable", dataDir, from, portableBinaries);
 }
 
 /** 安装那一半：只在声明了干净机器时加载；否则记跳过，什么都不碰。 */
@@ -110,6 +114,7 @@ try {
     packageDir,
     installRoot,
     installed: installedState,
+    binaries: portableBinaries,
     checks,
   };
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
@@ -121,6 +126,7 @@ try {
     packageDir,
     installRoot,
     installed: installedState,
+    binaries: portableBinaries,
     checks,
     error: error instanceof Error ? (error.stack ?? error.message) : String(error),
   };

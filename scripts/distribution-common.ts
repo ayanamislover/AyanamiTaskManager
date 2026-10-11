@@ -11,6 +11,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { agentFetch } from "./agent-fetch.js";
 import { parseTasklistCsv, type AppProcess } from "./app-processes.js";
+import type { BinarySet } from "./candidate-binaries.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
 
 export type Check = { name: string; passed: boolean; detail?: string };
@@ -213,10 +214,12 @@ export function killTree(pid: number): void {
   });
 }
 
+/** 一半的报告；`binaries` 是这一半实际运行的那份 exe 的哈希（候选绑定 L6）。 */
 export async function writeSmokeReport(
   label: string,
   dataDir: string,
   from: number,
+  binaries: BinarySet,
 ): Promise<void> {
   const own = checks.slice(from);
   await writeFile(
@@ -226,6 +229,7 @@ export async function writeSmokeReport(
         passed: own.every((entry) => entry.passed),
         completedAt: new Date().toISOString(),
         dataDir,
+        binaries,
         checks: own,
       },
       null,

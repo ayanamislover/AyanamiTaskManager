@@ -103,9 +103,9 @@ describe("本地更新源", () => {
     expect(consumedFeedFiles(feed, "8.0.0")).toEqual(["atm-1.0.0-rc.1-win-x64.json"]);
     expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
     // 与 compare_versions 一样只按「.」切段：「0-rc」取 0，其后的「1」算第四段。
-    expect(compareVersions("3.0.0-rc.1", "3.0.0")).toBe(1);
-    expect(compareVersions("3.0.0-rc", "3.0.0")).toBe(0);
-    expect(compareVersions("3.0", "3.0.0")).toBe(0);
+    expect(compareVersions("7.0.0-rc.1", "7.0.0")).toBe(1);
+    expect(compareVersions("7.0.0-rc", "7.0.0")).toBe(0);
+    expect(compareVersions("7.0", "7.0.0")).toBe(0);
   });
 
   // 「feed 在哪」和「快捷方式在哪」是同一类问题：两处各存一份认知，迟早一处投递、另一处清理，

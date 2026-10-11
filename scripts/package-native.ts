@@ -37,6 +37,7 @@ import { zipSync, type Zippable } from "fflate";
 import { stampAgentGuide } from "../apps/desktop/src/agent-guide-stamp.js";
 import { resolveAgentGuideBuild } from "./agent-guide-build.js";
 import { APP_LAYOUT, assembleAppDirectory } from "./app-layout.js";
+import { writeCandidateBinaries } from "./candidate-binaries.js";
 import { buildMcpShim, MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
 import { cargoHome, releaseRustEnv } from "./rust-build-env.js";
 import { buildThirdPartyNotices, THIRD_PARTY_NOTICES } from "./third-party-notices.js";
@@ -435,16 +436,24 @@ export function packagePortable(release: NativeRelease): string {
   return zipPath;
 }
 
-/** 发布流水线的打包阶段：一次构建，生产包、便携 zip、烟测包。 */
+/**
+ * 发布流水线的打包阶段：一次构建，生产包、便携 zip、烟测包；最后记下两套 exe 的哈希
+ * （候选绑定 L6，candidate-binaries.ts），之后的验收报告逐份对它。
+ */
 export function packageRelease(root: string): { release: NativeRelease; portable: string } {
   buildAll(root, false, true);
   const release = packageNative({ root, build: false, outDir: join(root, "output", "package") });
   const portable = packagePortable(release);
-  packageNative({
+  const smoke = packageNative({
     root,
     build: false,
     smoke: true,
     outDir: join(root, "output", "package-smoke"),
+  });
+  writeCandidateBinaries(root, {
+    version: release.version,
+    releaseAppDir: release.appDir,
+    smokeAppDir: smoke.appDir,
   });
   return { release, portable };
 }

@@ -1,4 +1,5 @@
 import { agentFetch } from "./agent-fetch.js";
+import { binariesOf } from "./candidate-binaries.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
@@ -1568,6 +1569,8 @@ try {
   const report = {
     passed: true,
     executable,
+    // 候选绑定（L6）：这份报告测的是哪份二进制（smoke 包，对 candidate-binaries.json 的 smoke 那套）。
+    binaries: binariesOf(dirname(executable)),
     dataDir,
     completedAt: new Date().toISOString(),
     checks,

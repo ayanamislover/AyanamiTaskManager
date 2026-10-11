@@ -16,8 +16,8 @@
  *
  * 2.0 ⇄ 3.0 的场景（v2-v3、v2-v3-faults）还要一份 2.0 时代 drill 构建的包：
  * output/drill/package-2.0.0/{atm-setup.exe, atm-2.0.0-win-x64.json, atm-2.0.0-win-x64.zip}。
- * 它不在仓库里：从 2.0 的检出（v2.0.0）里 `package-native.ts --drill output/drill/package-2.0.0
- * --drill-version 2.0.0` 打一份，或者复制 2.0 时代演练留下的那份。生产 2.0 的 setup 没有沙箱，不能用。
+ * 它不在仓库里：`pnpm exec tsx scripts/build-drill-package-20.ts` 从 2.0.0 的提交打一份（CI 在
+ * release 之前跑它）。生产 2.0 的 setup 没有沙箱，不能用。
  */
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
@@ -36,6 +36,7 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
+import { binariesOf, sha256File } from "./candidate-binaries.js";
 import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
 
 const root = resolve(process.cwd());
@@ -2581,6 +2582,17 @@ async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+/** What the drill actually installed (package A), and which 2.0 drill package the 2.x scenarios used. */
+function drillBinaries(): Record<string, unknown> {
+  const app = join(drillRoot, `package-${VERSION_A}`, `app-${VERSION_A}`);
+  return {
+    ...(existsSync(app) ? binariesOf(app) : {}),
+    package20: existsSync(PACKAGE_20.setup)
+      ? { setup: sha256File(PACKAGE_20.setup), manifest: sha256File(PACKAGE_20.manifest) }
+      : null,
+  };
+}
+
 async function main(): Promise<void> {
   const only = process.argv.includes("--only")
     ? process.argv[process.argv.indexOf("--only") + 1]!.split(",")
@@ -2622,6 +2634,9 @@ async function main(): Promise<void> {
     business,
     // B1: crash → back = trigger wait (≤ the task's PT5M) + decision + start → healthy.
     keepalive: { triggerWaitMaxMs: 5 * 60_000, recoveries },
+    // Candidate binding (L6): the drill packages carry the release host, launcher, CLI and shim
+    // from target/release; their setup is the drill build, which assemble-release does not compare.
+    binaries: drillBinaries(),
   };
   writeFileSync(join(drillRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(

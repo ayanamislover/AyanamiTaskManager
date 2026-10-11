@@ -223,7 +223,8 @@ export function renderThirdPartyNotices(input: { components: readonly Component[
   );
 }
 
-export function buildThirdPartyNotices(root: string): string {
+/** 实际随包分发的第三方组件（去重）：notices 与 SBOM 用同一份清单。 */
+export function shippedComponents(root: string): Component[] {
   const native = join(root, "apps", "desktop", "native");
   const components = [
     ...cargoComponents(native, PACKAGED_CRATES),
@@ -233,7 +234,88 @@ export function buildThirdPartyNotices(root: string): string {
   const unique = new Map(
     components.map((entry) => [`${entry.ecosystem}:${entry.name}@${entry.version}`, entry]),
   );
-  return renderThirdPartyNotices({ components: [...unique.values()] });
+  return [...unique.values()];
+}
+
+export function buildThirdPartyNotices(root: string): string {
+  return renderThirdPartyNotices({ components: shippedComponents(root) });
+}
+
+/**
+ * SPDX 2.3 的 SBOM：产品本身，加上实际随包分发的组件（Rust crate 与 renderer 里的 npm 包）——
+ * 不是 package.json 的依赖表（那里大半是只在构建与测试里用的开发依赖，3.0 的包里没有 Node）。
+ */
+export function buildSbom(input: {
+  product: string;
+  version: string;
+  license: string;
+  namespace: string;
+  created: string;
+  components: ReadonlyArray<Pick<Component, "ecosystem" | "name" | "version" | "license">>;
+}): Record<string, unknown> {
+  const id = (component: { ecosystem: string; name: string; version: string }) =>
+    `SPDXRef-Package-${component.ecosystem}-${component.name}-${component.version}`.replace(
+      /[^A-Za-z0-9.-]+/gu,
+      "-",
+    );
+  const sorted = [...input.components].sort(
+    (left, right) =>
+      left.ecosystem.localeCompare(right.ecosystem) ||
+      left.name.localeCompare(right.name) ||
+      left.version.localeCompare(right.version),
+  );
+  // 声明的许可证是 SPDX 表达式（MIT OR Apache-2.0、Apache-2.0 WITH LLVM-exception）才照写，其余写 NOASSERTION。
+  const spdxLicense = (license: string) =>
+    /^[A-Za-z0-9.+-]+(?: (?:AND|OR|WITH) [A-Za-z0-9.+-]+)*$/u.test(license.replaceAll("/", " OR "))
+      ? license.replaceAll("/", " OR ")
+      : "NOASSERTION";
+  return {
+    spdxVersion: "SPDX-2.3",
+    dataLicense: "CC0-1.0",
+    SPDXID: "SPDXRef-DOCUMENT",
+    name: `${input.product}-${input.version}`,
+    documentNamespace: input.namespace,
+    creationInfo: {
+      created: input.created,
+      creators: ["Tool: AyanamiTaskManager release assembler"],
+    },
+    documentDescribes: ["SPDXRef-Package-AyanamiTaskManager"],
+    packages: [
+      {
+        name: input.product,
+        SPDXID: "SPDXRef-Package-AyanamiTaskManager",
+        versionInfo: input.version,
+        downloadLocation: "NOASSERTION",
+        filesAnalyzed: false,
+        licenseConcluded: input.license,
+        licenseDeclared: input.license,
+        copyrightText: "NOASSERTION",
+      },
+      ...sorted.map((component) => ({
+        name: component.name,
+        SPDXID: id(component),
+        versionInfo: component.version,
+        downloadLocation: "NOASSERTION",
+        filesAnalyzed: false,
+        licenseConcluded: "NOASSERTION",
+        licenseDeclared: spdxLicense(component.license),
+        copyrightText: "NOASSERTION",
+        externalRefs: [
+          {
+            referenceCategory: "PACKAGE-MANAGER",
+            referenceType: "purl",
+            // purl：npm 作用域的 @ 要编码成 %40（pkg:npm/%40scope/name@1.0.0）。
+            referenceLocator: `pkg:${component.ecosystem}/${component.name.replace(/^@/u, "%40")}@${component.version}`,
+          },
+        ],
+      })),
+    ],
+    relationships: sorted.map((component) => ({
+      spdxElementId: "SPDXRef-Package-AyanamiTaskManager",
+      relationshipType: "CONTAINS",
+      relatedSpdxElement: id(component),
+    })),
+  };
 }
 
 export type ReleaseNoticesStatus = { distributable: boolean; sha256: string };

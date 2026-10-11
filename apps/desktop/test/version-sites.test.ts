@@ -8,8 +8,11 @@ import {
 } from "../../../scripts/release-checklist-contract.js";
 import {
   assertReleaseChecklistIsDynamic,
+  bumpVersion,
   findVersionLeftovers,
   isVersionSiteLine,
+  LEGACY_VERSION,
+  LEGACY_VERSION_SITES,
   VERSIONED_FILES,
 } from "../../../scripts/version-sites.js";
 
@@ -20,14 +23,53 @@ const currentVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8
 describe("版本号站点清单", () => {
   // 漏改一处版本号，Squirrel 会拿同名不同哈希的包当升级处理，装出来的还是旧版。
   it("清单里每个文件都确实含有当前版本号", () => {
-    // Six current sites remain after daemon entrypoints switched to the
-    // single runtime-discovery version source.
-    expect(VERSIONED_FILES.length).toBeGreaterThanOrEqual(6);
+    // 3.x 的版本只有 package.json 一个来源（外加用户指南里写给人看的那一处）。
+    expect([...VERSIONED_FILES]).toEqual(["package.json", "docs/user-guide.md"]);
     expect(currentVersion).toMatch(/^\d+\.\d+\.\d+$/u);
     const missing = VERSIONED_FILES.filter(
       (file) => !readFileSync(join(root, file), "utf8").includes(currentVersion),
     );
     expect(missing).toEqual([]);
+  });
+
+  // 3.x 的 install-state `is_v3`：主版本 ≥ 3。2.0.0 的候选装上去会被当成 2.x（升级、转换、保活都按它分支）。
+  it("当前产品版本是 3.x，2.x 的 Node 实现钉在 2.0.0", () => {
+    expect(Number(currentVersion.split(".")[0])).toBeGreaterThanOrEqual(3);
+    expect(LEGACY_VERSION).toBe("2.0.0");
+    for (const file of LEGACY_VERSION_SITES)
+      expect(readFileSync(join(root, file), "utf8"), file).toContain(`"${LEGACY_VERSION}"`);
+  });
+
+  // 原生 exe 的版本从 package.json 来：build-support（宿主、启动器、setup、CLI）与 shim 的 build.rs 都读它。
+  it("原生版本来源是 package.json", () => {
+    for (const file of [
+      "apps/desktop/native/build-support/src/lib.rs",
+      "apps/desktop/native/mcp-shim/build.rs",
+    ]) {
+      const source = readFileSync(join(root, file), "utf8");
+      expect(source, file).toContain('.join("../../../../package.json")');
+      expect(source, file).toMatch(/manifest\["version"\]/u);
+    }
+    const host = readFileSync(join(root, "apps/desktop/native/host/src/main.rs"), "utf8");
+    expect(host).toContain("atm_install_state::product_version(&layout.app_dir)");
+  });
+
+  it("升版只改产品站点，2.x 的 Node 实现不跟着改", () => {
+    const scratch = mkdtempSync(join(root, "output", "version-bump-test-"));
+    try {
+      for (const file of [...VERSIONED_FILES, ...LEGACY_VERSION_SITES]) {
+        mkdirSync(join(scratch, file, ".."), { recursive: true });
+        writeFileSync(join(scratch, file), `version: "8.8.8"\n`, "utf8");
+      }
+      expect(bumpVersion(scratch, "8.8.8", "9.9.9").sort()).toEqual([...VERSIONED_FILES].sort());
+      for (const file of LEGACY_VERSION_SITES)
+        expect(readFileSync(join(scratch, file), "utf8")).toContain('"8.8.8"');
+      // 残留检查也不把它们算成没改干净。
+      const stdout = LEGACY_VERSION_SITES.map((file) => `${file}:1:version: "8.8.8"`).join("\n");
+      expect(findVersionLeftovers("8.8.8", () => ({ status: 0, stdout }))).toEqual([]);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   it("源码里凡是硬编码了版本号的文件，都必须在清单里", () => {
@@ -51,9 +93,12 @@ describe("版本号站点清单", () => {
     );
     const outside = hardcoded.filter((file) => !VERSIONED_FILES.includes(file as never));
     expect(outside).toEqual([]);
-    // 阳性对照：扫描确实找得到当前三个源码版本站点（daemon runtime discovery、
+    // 阳性对照：同一个扫描找得到钉在 2.0.0 的三个 2.x 源码站点（daemon runtime discovery、
     // MCP server、SQLite manager），否则上面的断言只是在对空集成立。
-    expect(hardcoded.length).toBeGreaterThanOrEqual(3);
+    const legacy = files.filter((file) =>
+      readFileSync(join(root, file), "utf8").includes(`"${LEGACY_VERSION}"`),
+    );
+    expect(legacy.filter((file) => LEGACY_VERSION_SITES.includes(file as never)).length).toBe(3);
   });
 });
 

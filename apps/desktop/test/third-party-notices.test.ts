@@ -6,6 +6,7 @@ import { strToU8, zipSync } from "fflate";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { packageOfModule, rendererPackages } from "../scripts/renderer-packages.js";
 import {
+  buildSbom,
   buildThirdPartyNotices,
   LICENSE_TEXT_PENDING,
   npmComponents,
@@ -222,5 +223,92 @@ describe("第三方许可证声明", () => {
     expect(readFileSync(".github/scripts/publish-verified-release.mjs", "utf8")).toContain(
       'assert.equal(manifest.distributable, true, "Candidate is not distributable");',
     );
+  });
+});
+
+// SBOM 列的是包里实际有的东西：链接进 exe 的 Rust crate 与 renderer 里的 npm 包，和 notices
+// 同一份清单。package.json 的依赖表大半是构建与测试用的开发依赖，3.0 的包里没有 Node。
+describe("SBOM", () => {
+  const components = [
+    { ecosystem: "npm" as const, name: "@scope/ui-kit", version: "1.2.0", license: "MIT" },
+    {
+      ecosystem: "cargo" as const,
+      name: "serde",
+      version: "1.0.200",
+      license: "MIT OR Apache-2.0",
+    },
+    {
+      ecosystem: "cargo" as const,
+      name: "windows-sys",
+      version: "0.59.0",
+      license: "MIT/Apache-2.0",
+    },
+    { ecosystem: "cargo" as const, name: "odd", version: "0.1.0", license: "(see license file)" },
+  ];
+  const sbom = buildSbom({
+    product: "AyanamiTaskManager",
+    version: "8.1.2",
+    license: "AGPL-3.0-only",
+    namespace: "https://ayanami.local/spdx/x/8.1.2/abc",
+    created: "2026-10-11T00:00:00Z",
+    components,
+  }) as {
+    spdxVersion: string;
+    packages: Array<{
+      name: string;
+      SPDXID: string;
+      versionInfo: string;
+      licenseDeclared: string;
+      externalRefs?: Array<{ referenceLocator: string }>;
+    }>;
+    relationships: Array<{
+      spdxElementId: string;
+      relationshipType: string;
+      relatedSpdxElement: string;
+    }>;
+  };
+
+  it("产品之外逐个列出 crate 与 npm 包，带 purl，产品 CONTAINS 每一个", () => {
+    expect(sbom.spdxVersion).toBe("SPDX-2.3");
+    const [product, ...rest] = sbom.packages;
+    expect(product).toMatchObject({
+      name: "AyanamiTaskManager",
+      versionInfo: "8.1.2",
+      licenseDeclared: "AGPL-3.0-only",
+    });
+    expect(rest.map((entry) => entry.externalRefs?.[0]?.referenceLocator)).toEqual([
+      "pkg:cargo/odd@0.1.0",
+      "pkg:cargo/serde@1.0.200",
+      "pkg:cargo/windows-sys@0.59.0",
+      "pkg:npm/%40scope/ui-kit@1.2.0",
+    ]);
+    expect(new Set(rest.map((entry) => entry.SPDXID)).size).toBe(rest.length);
+    for (const id of rest.map((entry) => entry.SPDXID))
+      expect(id).toMatch(/^SPDXRef-[A-Za-z0-9.-]+$/u);
+    expect(sbom.relationships).toEqual(
+      rest.map((entry) => ({
+        spdxElementId: product!.SPDXID,
+        relationshipType: "CONTAINS",
+        relatedSpdxElement: entry.SPDXID,
+      })),
+    );
+  });
+
+  it("许可证只照写 SPDX 表达式（斜杠写法换成 OR），其余写 NOASSERTION", () => {
+    const declared = Object.fromEntries(
+      sbom.packages.map((entry) => [entry.name, entry.licenseDeclared]),
+    );
+    expect(declared).toMatchObject({
+      serde: "MIT OR Apache-2.0",
+      "windows-sys": "MIT OR Apache-2.0",
+      odd: "NOASSERTION",
+      "@scope/ui-kit": "MIT",
+    });
+  });
+
+  it("组装用的是随包分发的组件清单，不读 package.json 的依赖表", () => {
+    const assembler = readFileSync("scripts/assemble-release.ts", "utf8");
+    expect(assembler).toContain("components: shippedComponents(root),");
+    expect(assembler).not.toMatch(/\b(?:dev)?[dD]ependencies\b/u);
   });
 });

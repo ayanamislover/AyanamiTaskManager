@@ -65,22 +65,10 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "packages/protocol/test/",
     ],
   },
-  // 性能阈值只跟存储与查询路径有关。
-  benchmark: {
-    include: [
-      "packages/storage-sqlite/",
-      "packages/application/",
-      "packages/domain/",
-      "migrations/",
-      "scripts/benchmark.ts",
-    ],
-    exclude: [
-      "packages/storage-sqlite/test/",
-      "packages/application/test/",
-      "packages/domain/test/",
-    ],
-  },
-  // 它验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
+  // 2.x 的 benchmark（Node 服务）不在 3.0 的链上；install-drill 与 budget 测的是这次的候选二进制，
+  // 每次都跑，不声明可复用的输入。
+
+  // distribution-smoke 验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
   // 一遍安装卸载，证明不了任何新东西。
   //
   // 这里不排任何东西。scripts/ 收得宽是有意的：安装链会外调其中一批脚本，

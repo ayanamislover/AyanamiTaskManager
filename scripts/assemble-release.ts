@@ -23,7 +23,15 @@ import {
 } from "./release-report.js";
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
 import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
-import { releaseNoticesStatus } from "./third-party-notices.js";
+import { buildSbom, releaseNoticesStatus, shippedComponents } from "./third-party-notices.js";
+import {
+  candidateBindingMismatches,
+  readCandidateBinaries,
+  zipBinaries,
+  type BinarySet,
+  type BoundReports,
+} from "./candidate-binaries.js";
+import { isV3 } from "./version-sites.js";
 
 type Artifact = ReleaseArtifactIdentity;
 type Verification = {
@@ -44,10 +52,15 @@ type SmokeReport = {
   passed: boolean;
   completedAt: string;
   checks: Array<{ passed: boolean }>;
+  /** 这份报告测的那份 exe 的哈希（候选绑定 L6）。 */
+  binaries?: Partial<BinarySet>;
 };
 
-/** distribution-smoke 记下安装验收是做了还是因为机器上已有安装而显式跳过。 */
-type DistributionReport = SmokeReport & { installed: "verified" | "skipped" };
+/** distribution-smoke 记下安装验收是做了还是因为不是声明过的干净机器而跳过。 */
+type DistributionReport = Omit<SmokeReport, "binaries"> & {
+  installed: "verified" | "skipped";
+  binaries?: Partial<BinarySet> | null;
+};
 
 const assembleArguments = process.argv.slice(2);
 const unknownArguments = assembleArguments.filter((argument) => argument !== "--local-only");
@@ -65,8 +78,6 @@ const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"
   productName: string;
   version: string;
   license: string;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
 };
 
 async function digest(path: string): Promise<string> {
@@ -77,7 +88,7 @@ async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-function assertSmokeReport(name: string, report: SmokeReport): void {
+function assertSmokeReport(name: string, report: Pick<SmokeReport, "passed" | "checks">): void {
   if (
     report.passed !== true ||
     report.checks.length === 0 ||
@@ -111,9 +122,8 @@ function bundledSqliteCrate(): string {
   return `libsqlite3-sys ${match[1]}`;
 }
 
-function spdxId(name: string): string {
-  return `SPDXRef-Package-${name.replace(/[^A-Za-z0-9.-]+/gu, "-")}`;
-}
+// 3.x 的升级、转换与保活都按主版本认 3.x（install-state `is_v3`）：2.x 号的候选装上去会被当成 2.x。
+if (!isV3(packageJson.version)) throw new Error(`RELEASE_VERSION_NOT_V3: ${packageJson.version}`);
 
 const output = join(root, "output");
 const verification = await readJson<Verification>(join(output, "release-verification.json"));
@@ -124,11 +134,12 @@ const requiredCommands = [
   "typecheck",
   "test",
   "e2e",
-  "benchmark",
   "build",
   "package",
   "packaged-smoke",
   "distribution-smoke",
+  "install-drill",
+  "budget",
 ] as const;
 const commandNames = verification.commands.map((command) => command.name);
 if (
@@ -141,9 +152,15 @@ if (
 }
 const source = await verifyReleaseSource(root, verification.fingerprint);
 const e2e = await readJson<{ stats: Record<string, number> }>(join(output, "e2e", "results.json"));
-const benchmark = await readJson<{ passed: boolean; metrics: Record<string, unknown> }>(
-  join(output, "benchmark-report.json"),
-);
+// 2.x 的 benchmark（测的是 Node 服务）不在 3.0 的链上：原生的内存、冷启动与 Agent 负载由 budget 量。
+type DrillReport = BoundReports["drill"] & { passed: boolean; total: number; failed: number };
+type BudgetReport = BoundReports["budget"] & { completedAt?: string; error?: string };
+const drill = await readJson<DrillReport>(join(output, "drill", "report.json"));
+const budget = await readJson<BudgetReport>(join(output, "budget-report.json"));
+if (drill.passed !== true || !(drill.total > 0) || drill.failed !== 0)
+  throw new Error("DRILL_REPORT_INPUT_FAILED");
+if (budget.error !== undefined || typeof budget.completedAt !== "string")
+  throw new Error("BUDGET_REPORT_INPUT_FAILED");
 const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
 const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));
 const distributionSmoke = await readJson<DistributionReport>(
@@ -158,7 +175,6 @@ const installedSmoke =
     ? await readJson<SmokeReport>(join(output, "installed-smoke-report.json"))
     : null;
 if (
-  !benchmark.passed ||
   !packagedSmoke.passed ||
   !portableSmoke.passed ||
   (installedSmoke !== null && !installedSmoke.passed) ||
@@ -185,6 +201,34 @@ if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missin
 // 声明从将要发出去的归档里取，不看旁边的松散目录。有组件缺许可文本（LICENSE_TEXT_PENDING）
 // 的候选不可分发：只有本机安装验收（--local-only，release-and-install 传）能继续组装，
 // release.json 记 distributable:false，发布入口见到就拒绝。
+// 候选绑定（09 §3，L6）：打包阶段记下的五个 exe 就是归档里发出去的那份，每份验收报告测的也是它。
+const candidateBinaries = readCandidateBinaries(root);
+if (candidateBinaries.version !== packageJson.version)
+  throw new Error(`CANDIDATE_BINARY_MISMATCH: version ${candidateBinaries.version}`);
+const archived = [
+  ["package", zipBinaries(readFileSync(join(packageDir, packageName)))],
+  [
+    "portable",
+    zipBinaries(
+      readFileSync(join(packageDir, portableName)),
+      `AyanamiTaskManager-${packageJson.version}/`,
+    ),
+  ],
+] as const;
+for (const [label, set] of archived)
+  for (const [key, sha] of Object.entries(set))
+    if (candidateBinaries.release[key as keyof typeof set] !== sha)
+      throw new Error(`CANDIDATE_BINARY_MISMATCH: ${label}.${key}`);
+const unbound = candidateBindingMismatches(candidateBinaries, {
+  packaged: packagedSmoke,
+  portable: portableSmoke,
+  distribution: distributionSmoke,
+  installed: installedSmoke,
+  drill,
+  budget,
+});
+if (unbound.length > 0) throw new Error(`CANDIDATE_BINARY_MISMATCH: ${unbound.join(", ")}`);
+
 const notices = releaseNoticesStatus({
   packageZip: readFileSync(join(packageDir, packageName)),
   portableZip: readFileSync(join(packageDir, portableName)),
@@ -232,7 +276,9 @@ if (githubActionsRun && process.env.GITHUB_SHA?.toLowerCase() !== candidate.gitH
 
 const reportInputs = [
   ["e2e/results.json", "e2e-results.json"],
-  ["benchmark-report.json", "benchmark-report.json"],
+  ["budget-report.json", "budget-report.json"],
+  ["drill/report.json", "install-drill-report.json"],
+  ["package/candidate-binaries.json", "candidate-binaries.json"],
   ["packaged-smoke-report.json", "packaged-smoke-report.json"],
   ["portable-smoke-report.json", "portable-smoke-report.json"],
   ...(installedSmoke
@@ -344,7 +390,8 @@ const summary = {
       checks: distributionSmoke.checks.length,
       reused: reused("distribution-smoke"),
     },
-    benchmark: { metrics: benchmark.metrics, reused: reused("benchmark") },
+    installDrill: { checks: drill.total },
+    budget: { completedAt: budget.completedAt },
   },
   screenshots: screenshots.map((name) => `screenshots/${name}`),
   stages: verification.stages ?? {},
@@ -374,7 +421,8 @@ await writeFile(
     `- portable smoke：${portableSmoke.checks.length} 项通过\n` +
     `- installed smoke：${installedSmoke ? `${installedSmoke.checks.length} 项通过` : "跳过（机器上已有安装）"}\n` +
     `- distribution smoke：${distributionSmoke.checks.length} 项通过${provenance("distribution-smoke")}\n` +
-    `- benchmark：全部阈值通过${provenance("benchmark")}\n` +
+    `- install-drill：${drill.total} 项通过\n` +
+    `- budget：已量（${String(budget.completedAt)}）\n` +
     `- 已知非阻塞剩余项：${remaining.length === 0 ? "无" : `${remaining.length} 条\n${remaining.map((item) => `  - ${item}`).join("\n")}`}\n\n` +
     `原始 JSON、命令日志和 1366/1920/3440 截图均位于本目录。\n`,
   "utf8",
@@ -407,50 +455,15 @@ const release = {
 };
 await writeFile(join(releaseDir, "release.json"), `${JSON.stringify(release, null, 2)}\n`, "utf8");
 
-const dependencies = Object.entries({
-  ...packageJson.dependencies,
-  ...packageJson.devDependencies,
-}).sort(([a], [b]) => a.localeCompare(b));
 const namespace = `https://ayanami.local/spdx/${packageJson.name}/${packageJson.version}/${artifacts[0]!.sha256.slice(0, 16).toLowerCase()}`;
-const sbom = {
-  spdxVersion: "SPDX-2.3",
-  dataLicense: "CC0-1.0",
-  SPDXID: "SPDXRef-DOCUMENT",
-  name: `${packageJson.productName}-${packageJson.version}`,
-  documentNamespace: namespace,
-  creationInfo: {
-    created: new Date().toISOString().replace(/\.\d{3}Z$/u, "Z"),
-    creators: ["Tool: AyanamiTaskManager release assembler"],
-  },
-  documentDescribes: ["SPDXRef-Package-AyanamiTaskManager"],
-  packages: [
-    {
-      name: packageJson.productName,
-      SPDXID: "SPDXRef-Package-AyanamiTaskManager",
-      versionInfo: packageJson.version,
-      downloadLocation: "NOASSERTION",
-      filesAnalyzed: false,
-      licenseConcluded: packageJson.license,
-      licenseDeclared: packageJson.license,
-      copyrightText: "NOASSERTION",
-    },
-    ...dependencies.map(([name, version]) => ({
-      name,
-      SPDXID: spdxId(name),
-      versionInfo: version,
-      downloadLocation: "NOASSERTION",
-      filesAnalyzed: false,
-      licenseConcluded: "NOASSERTION",
-      licenseDeclared: "NOASSERTION",
-      copyrightText: "NOASSERTION",
-    })),
-  ],
-  relationships: dependencies.map(([name]) => ({
-    spdxElementId: "SPDXRef-Package-AyanamiTaskManager",
-    relationshipType: "DEPENDS_ON",
-    relatedSpdxElement: spdxId(name),
-  })),
-};
+const sbom = buildSbom({
+  product: packageJson.productName,
+  version: packageJson.version,
+  license: packageJson.license,
+  namespace,
+  created: new Date().toISOString().replace(/\.\d{3}Z$/u, "Z"),
+  components: shippedComponents(root),
+});
 await writeFile(join(releaseDir, "sbom.spdx.json"), `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
 
 const checksumNames = [...releaseNames, "release.json", "sbom.spdx.json"];

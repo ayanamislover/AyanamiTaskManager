@@ -13,6 +13,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describeAppProcesses } from "./app-processes.js";
+import { binariesOf } from "./candidate-binaries.js";
 import {
   appProcesses,
   check,
@@ -130,6 +131,8 @@ export async function installed(): Promise<"verified"> {
       join(installRoot, "state", "health"),
     );
 
+    // 候选绑定（L6）：装上的就是这次的候选——卸载之前记下安装根里那份 exe 的哈希。
+    const binaries = binariesOf(join(installRoot, `app-${packageVersion}`));
     const preservedMarker = join(realN, "uninstall-preservation.marker");
     await writeFile(preservedMarker, "AyanamiTaskManager user data preservation proof\n", "utf8");
     check(
@@ -158,7 +161,7 @@ export async function installed(): Promise<"verified"> {
       installRoot,
     );
     check("卸载后用户数据仍保留", existsSync(preservedMarker), preservedMarker);
-    await writeSmokeReport("installed", realN, from);
+    await writeSmokeReport("installed", realN, from, binaries);
     return "verified";
   } finally {
     // 安装写的自启指向安装根的启动器（现值还指向它就是本轮写的）；卸载删掉的是上面记下的那些名字。

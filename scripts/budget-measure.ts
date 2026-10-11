@@ -27,6 +27,7 @@
  *   - daemon.json 里的 Agent 令牌只在本进程内存里用来发读请求，不写日志、不进报告。
  */
 import { agentFetch } from "./agent-fetch.js";
+import { binariesOf } from "./candidate-binaries.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { connect } from "node:net";
@@ -40,7 +41,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "@playwright/test";
 import { unzipSync } from "fflate";
@@ -837,6 +838,11 @@ report.seed = await ensureSeed();
 const production = ensurePortable();
 const smoke = smokeExecutable();
 report.executables = { production, smoke };
+// 候选绑定（L6）：量的是哪份二进制。生产便携包对 release 那套，smoke 构建对 smoke 那套。
+report.binaries = {
+  production: binariesOf(dirname(production)),
+  smoke: binariesOf(dirname(smoke)),
+};
 save();
 
 const probe = new ProcessProbe();
