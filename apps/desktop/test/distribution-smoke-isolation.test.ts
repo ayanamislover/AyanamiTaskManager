@@ -17,7 +17,10 @@ afterEach(() => {
 describe("distribution-smoke 的两半", () => {
   it("安装那一半只在声明干净机器之后动态加载，没有静态导入", () => {
     const source = read("distribution-smoke.ts");
-    expect(source).not.toMatch(/from "\.\/distribution-installed\.js"/u);
+    // 任何形式的静态导入（含无绑定的副作用导入、再导出）都不行。
+    expect(source).not.toMatch(
+      /^\s*(?:import|export)\b[^;]*?["']\.\/distribution-installed(?:\.js)?["']/mu,
+    );
     const gate = source.indexOf("if (!cleanMachine) {");
     const load = source.indexOf('await import("./distribution-installed.js")');
     expect(gate).toBeGreaterThan(0);

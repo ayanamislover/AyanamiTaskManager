@@ -105,6 +105,23 @@ describe("烟测数据根沙箱", () => {
     }
   });
 
+  // Windows 的变量名不分大小写：外面以别的大小写设过的数据根变量，也不能和沙箱的那份并存。
+  it("继承来的数据根变量换了大小写也去掉，子进程环境里只有沙箱的那一份", () => {
+    const previous = process.env.ATM3_DATA_DIR;
+    delete process.env.ATM3_DATA_DIR;
+    process.env.Atm3_Data_Dir = "C:\\real-v3";
+    try {
+      const env = smokeHostEnvironment("C:\\sandbox\\data", "C:\\sandbox\\home");
+      const same = (name: string) => Object.keys(env).filter((key) => key.toUpperCase() === name);
+      for (const name of ["ATM_DATA_DIR", "ATM3_DATA_DIR", "APPDATA", "LOCALAPPDATA"])
+        expect(same(name), name).toEqual([name]);
+      expect(Object.values(env)).not.toContain("C:\\real-v3");
+    } finally {
+      delete process.env.Atm3_Data_Dir;
+      if (previous !== undefined) process.env.ATM3_DATA_DIR = previous;
+    }
+  });
+
   it("真实的 L、N 与安装根都在拒绝之列", () => {
     const roots = realInstallRoots({ LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" });
     for (const name of ["AyanamiTaskManager", "AyanamiTaskManager3", "AyanamiTaskManagerDesktop"])

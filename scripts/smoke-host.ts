@@ -172,21 +172,25 @@ export function assertSandboxDataDir(
  * 集成状态时，读到的是沙箱里的空配置，不是这台机器上真实的 Agent 配置。
  */
 export function smokeHostEnvironment(dataDir: string, home: string): NodeJS.ProcessEnv {
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined &&
-        !["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"].includes(entry[0]),
-    ),
-  );
-  return {
-    ...inherited,
+  const own = {
     ATM_DATA_DIR: dataDir,
     ATM3_DATA_DIR: v3Root(home),
     APPDATA: join(home, "Roaming"),
     LOCALAPPDATA: join(home, "Local"),
     ATM_SMOKE_CORE_USERPROFILE: home,
   };
+  // Windows 的变量名不分大小写：继承来的 `Atm3_Data_Dir` 和这里的 ATM3_DATA_DIR 是同一个变量，
+  // 留着它，子进程环境里就有两份，谁生效说不准。按大写比较一并去掉。
+  const replaced = new Set(
+    [...Object.keys(own), "AYANAMI_TASK_DATA_DIR"].map((key) => key.toUpperCase()),
+  );
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && !replaced.has(entry[0].toUpperCase()),
+    ),
+  );
+  return { ...inherited, ...own };
 }
 
 /**
