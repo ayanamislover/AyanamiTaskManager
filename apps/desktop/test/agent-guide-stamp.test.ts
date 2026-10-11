@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -82,17 +82,12 @@ describe("Agent Guide 构建戳", () => {
     const dir = scratch();
     const stub = join(dir, "stub.exe");
     writeFileSync(stub, "");
-    const core = join(dir, "core");
-    mkdirSync(core);
-    for (const bundle of ["core.mjs", "cli.mjs"]) writeFileSync(join(core, bundle), "");
     const resourcesOf = (target: string, stampedGuide?: string) =>
       join(
         assembleAppDirectory({
           root,
           target: join(dir, target),
           hostExe: stub,
-          nodeExe: stub,
-          coreDir: core,
           ...(stampedGuide === undefined ? {} : { stampedGuide }),
         }),
         APP_LAYOUT.resources,

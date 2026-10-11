@@ -67,3 +67,7 @@ windows-sys = { workspace = true, features = [
 
 [build-dependencies]
 atm-build-support = { path = "../build-support" }
+
+[dev-dependencies]
+# 探测的真实进程用例（tests/health_probe.rs）：按 2.x 的迁移建合成的旧根。
+rusqlite = { version = "0.39", features = ["bundled"] }

@@ -4,6 +4,9 @@ const normalized = (entry: string): string =>
 /**
  * 版本目录（app-<v>，de-electron §3）里必须有的文件：缺任何一个，装上去要么起不来，要么少了
  * 一块要交付的东西。路径相对版本目录、用 `/`，和清单 files[].path 同一写法。
+ *
+ * 3.0 是单进程（W8a）：服务在宿主里，命令行是 atm.exe，迁移编译进了二进制。与 setup 的
+ * `package.rs` REQUIRED 是同一份清单（外加两份文本），两边各自校验。
  */
 export const REQUIRED_PACKAGED_ENTRIES = [
   "AyanamiTaskManager.exe",
@@ -11,19 +14,10 @@ export const REQUIRED_PACKAGED_ENTRIES = [
   "atm-setup.exe",
   "LICENSE",
   "THIRD_PARTY_NOTICES.txt",
-  "runtime/atm-core.exe",
-  "runtime/core.mjs",
-  "runtime/cli.mjs",
-  "runtime/node_modules/better-sqlite3/package.json",
-  "runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node",
   "renderer/index.html",
   "resources/ATM_AGENT_GUIDE.md",
-  "resources/mcp-stdio.cjs",
+  "resources/atm.exe",
   "resources/atm-mcp.exe",
-  "migrations/registry/0001_initial.sql",
-  "migrations/project/0001_initial.sql",
-  "migrations/knowledge/0001_initial.sql",
-  "migrations/registry/0008_global_event_class_indexes.sql",
 ] as const;
 
 export const PUBLISHED_LOGO_MAX_EDGE = 256;
@@ -203,9 +197,11 @@ const forbiddenEntryPatterns = [
   /(?:^|\/)\.(?:claude|crossagent|github|git)(?:\/|$)/u,
   /^(?:apps|packages|scripts|src)(?:\/|$)/u,
   /\.(?:ts|tsx|map|pdb|ilk|exp|lib)$/u,
-  // runtime 只带 better-sqlite3 的运行时部分：没有它的 C 源码、构建目录，也没有别的包。
-  /^runtime\/node_modules\/(?!better-sqlite3(?:$|\/))/u,
-  /^runtime\/node_modules\/better-sqlite3\/(?:src|deps|build)(?:\/|$)/u,
+  // 3.0 没有 Node（W8a）：Node 运行时、Node 模块与原生扩展、2.x 的 runtime\ 与随包迁移目录都不该再出现。
+  /(?:^|\/)node_modules(?:\/|$)/u,
+  /\.(?:mjs|cjs|node)$/u,
+  /(?:^|\/)(?:node|atm-core)\.exe$/u,
+  /^(?:runtime|migrations)(?:\/|$)/u,
   // 3.0 的开发与 e2e 二进制（W4i、W5d）：无头运行时与 e2e 适配器只给用例用，不进包。
   /(?:^|\/)atm-(?:runtime|core-e2e)\.exe$/u,
 ] as const;
@@ -223,4 +219,40 @@ export function findForbiddenPackagedEntries(entries: Iterable<string>): string[
 export function missingRequiredPackagedEntries(entries: Iterable<string>): string[] {
   const normalizedEntries = new Set([...entries].map(normalized));
   return REQUIRED_PACKAGED_ENTRIES.filter((entry) => !normalizedEntries.has(entry));
+}
+
+/**
+ * 只出现在测试构建里的字面量（P-012）：发出去的任何一个 exe 里出现，就是拿错了二进制。
+ *
+ * - smoke：宿主的 CDP 端口、lifecycle 冒烟的心跳阈值、烟测的合成家目录（都在 `cfg(feature = "smoke")` 下）；
+ * - e2e：界面来源 `User{E2eTest}`（`cfg(feature = "e2e")`，Debug 名留在二进制里）、e2e 适配器的日志前缀
+ *   与它读的环境变量——改了名的适配器也认得出；
+ * - drill：setup 的沙箱与故障注入开关。
+ *
+ * setup 自己的包校验里写着 `atm-core-e2e.exe` 这个禁止的文件名，所以适配器的标记带上日志的冒号。
+ */
+export const TEST_BUILD_MARKERS = [
+  { build: "smoke", marker: "--remote-debugging-port" },
+  { build: "smoke", marker: "ATM_SMOKE_WATCHDOG_MS" },
+  { build: "smoke", marker: "ATM_SMOKE_CORE_USERPROFILE" },
+  { build: "e2e", marker: "E2eTest" },
+  { build: "e2e", marker: "atm-core-e2e: " },
+  { build: "e2e", marker: "ATM_E2E_" },
+  { build: "drill", marker: "ATM_SETUP_SANDBOX" },
+  { build: "drill", marker: "ATM_SETUP_DIE_AFTER" },
+  { build: "drill", marker: "ATM_SETUP_FAIL_AT" },
+  { build: "drill", marker: "ATM_SETUP_FAIL_UNDO" },
+  { build: "drill", marker: "ATM_SETUP_SQUIRREL_ADDS" },
+] as const;
+
+export type TestBuild = (typeof TEST_BUILD_MARKERS)[number]["build"];
+
+/** 二进制里出现的测试构建标记（UTF-8 与 UTF-16LE 都查）；`allowed` 里的构建不算。 */
+export function findTestBuildMarkers(bytes: Buffer, allowed: readonly TestBuild[] = []): string[] {
+  return TEST_BUILD_MARKERS.filter(
+    ({ build, marker }) =>
+      !allowed.includes(build) &&
+      (bytes.includes(Buffer.from(marker, "utf8")) ||
+        bytes.includes(Buffer.from(marker, "utf16le"))),
+  ).map(({ build, marker }) => `${build}:${marker}`);
 }

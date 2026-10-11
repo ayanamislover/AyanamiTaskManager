@@ -278,13 +278,15 @@ describe("发布报告的证据出处", () => {
     }
   });
 
-  it("assembler 从发行包里的运行时读取 Node ABI，而不是开发机上的 node", () => {
-    expect(ASSEMBLER).toMatch(
-      /join\(\s*root,\s*"output",\s*"package",\s*`app-\$\{packageJson\.version\}`,\s*APP_LAYOUT\.coreExe/u,
-    );
+  // 3.0 的包里没有 Node（W8a）：发布清单不再写 Node ABI，SQLite 记的是静态链接进 exe 的那一份。
+  it("assembler 不问任何 node，SQLite 版本取自原生构建的 Cargo.lock", () => {
     expect(ASSEMBLER).not.toContain("process.execPath");
+    expect(ASSEMBLER).not.toContain("better-sqlite3");
+    expect(ASSEMBLER).not.toMatch(/nodeAbi|napi|coreExe/u);
     expect(ASSEMBLER).not.toMatch(/electron/iu);
-    expect(ASSEMBLER).toContain("if (probe.error)");
+    expect(ASSEMBLER).toContain('runtime: "native"');
+    expect(ASSEMBLER).toContain('join(root, "apps", "desktop", "native", "Cargo.lock")');
+    expect(ASSEMBLER).toContain("RELEASE_SQLITE_CRATE_MISSING");
   });
 
   // 安装验收只在干净机器上做；跳过时不能假装有 INSTALLED 层。

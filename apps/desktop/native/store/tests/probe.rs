@@ -211,6 +211,16 @@ fn a_published_store_must_carry_only_migrations_this_build_knows() {
     );
     let e = probe(&n, &l, None).unwrap_err();
     assert_eq!((e.code, e.scope), ("V3_SCHEMA_UNKNOWN", "v3"), "{e:?}");
+
+    // 同一个版本号、文本不同（别的构建写的）：同样拒绝。
+    add_migration(
+        &layout.database(),
+        "DELETE FROM schema_migrations WHERE version = 9999;
+         UPDATE schema_migrations SET sha256 = 'ab' WHERE version = 1",
+    );
+    let e = probe(&n, &l, None).unwrap_err();
+    assert_eq!((e.code, e.scope), ("V3_SCHEMA_UNKNOWN", "v3"), "{e:?}");
+    assert!(e.detail.contains("differs"), "{e:?}");
 }
 
 fn opens(_: &[u8]) -> bool {

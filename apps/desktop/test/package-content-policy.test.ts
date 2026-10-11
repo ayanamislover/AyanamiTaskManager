@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   assertExecutableIdentity,
@@ -8,8 +8,10 @@ import {
   buildMachinePathNeedles,
   findBuildMachinePath,
   findForbiddenPackagedEntries,
+  findTestBuildMarkers,
   missingRequiredPackagedEntries,
   REQUIRED_PACKAGED_ENTRIES,
+  TEST_BUILD_MARKERS,
 } from "../../../scripts/package-content-policy.js";
 import { releaseRustEnv } from "../../../scripts/rust-build-env.js";
 import { ensureNativeShim } from "./native-shim.js";
@@ -40,14 +42,11 @@ function pngHeader(width: number, height: number, bytes = 24): Buffer {
 }
 
 describe("packaged application content policy", () => {
-  it("accepts the minimal version directory", () => {
+  it("accepts the minimal 3.0 version directory", () => {
     const entries = [
       ...REQUIRED_PACKAGED_ENTRIES,
       "renderer/assets/index-BeYpKEDu.js",
       "renderer/assets/logo-DNGVc3qF.png",
-      "migrations/project/0018_session_list_keyset.sql",
-      "runtime/node_modules/better-sqlite3/LICENSE",
-      "runtime/node_modules/better-sqlite3/lib/index.js",
       "resources/docs/user-guide.md",
       "resources/integrations/claude-code/README.md",
     ];
@@ -56,41 +55,55 @@ describe("packaged application content policy", () => {
     expect(missingRequiredPackagedEntries(entries)).toEqual([]);
   });
 
-  // 打包漏了最新的 Registry 迁移，装上后首启就会停在旧 schema；清单得跟着迁移目录走。
-  it("requires the newest registry migration", () => {
-    const newest = readdirSync("migrations/registry")
-      .filter((name) => name.endsWith(".sql"))
-      .sort()
-      .at(-1);
-    expect(newest).toBeDefined();
-    expect(REQUIRED_PACKAGED_ENTRIES).toContain(`migrations/registry/${newest}`);
+  // 3.0 是单进程（W8a）：与 setup 的 package.rs REQUIRED 是同一份 exe 清单，两边不能各说各的。
+  it("requires the same executables as setup's package validation", () => {
+    const setup = readFileSync("apps/desktop/native/setup/src/package.rs", "utf8");
+    const required = /pub const REQUIRED: &\[&str\] = &\[([^\]]*)\]/u.exec(setup);
+    expect(required).not.toBeNull();
+    const setupEntries = [...required![1]!.matchAll(/"([^"]+)"/gu)].map((match) => match[1]);
+    expect(setupEntries.length).toBeGreaterThan(0);
+    for (const entry of setupEntries) expect(REQUIRED_PACKAGED_ENTRIES).toContain(entry);
+    expect(REQUIRED_PACKAGED_ENTRIES.filter((entry) => entry.endsWith(".exe")).sort()).toEqual(
+      setupEntries.filter((entry) => entry!.endsWith(".exe")).sort(),
+    );
   });
 
-  it("rejects repository sources, source maps, native debug output and stray packages", () => {
+  it("rejects repository sources, source maps, native debug output and the 2.x Node runtime", () => {
     const forbidden = findForbiddenPackagedEntries([
       "/packages/domain/src/index.ts",
       "/scripts/release.ts",
       "apps/desktop/src/core-main.ts",
-      "runtime/core.mjs.map",
+      "renderer/assets/index.js.map",
       "AyanamiTaskManager.pdb",
       "launcher/atm_launcher.exp",
-      "runtime/node_modules/zod/package.json",
-      "runtime/node_modules/better-sqlite3/src/better_sqlite3.cpp",
-      "runtime/node_modules/better-sqlite3/deps/sqlite3/sqlite3.c",
-      "runtime/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
       ".github/workflows/ci.yml",
       "atm-core-e2e.exe",
-      "runtime/atm-runtime.exe",
+      "resources/atm-runtime.exe",
+      // 2.x 的两进程布局：任何一件都不该再进 3.0 的包。
+      "runtime/atm-core.exe",
+      "runtime/core.mjs",
+      "runtime/cli.mjs",
+      "runtime/node_modules/better-sqlite3/package.json",
+      "runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node",
+      "resources/mcp-stdio.cjs",
+      "migrations/registry/0001_initial.sql",
+      // 换个位置、换个名字也认得出。
+      "resources/node.exe",
+      "resources/atm-core.exe",
+      "renderer/node_modules/react/index.js",
+      "resources/bridge.mjs",
+      "resources/addon.node",
     ]);
 
-    expect(forbidden).toHaveLength(13);
+    expect(forbidden).toHaveLength(21);
     // 正式的二进制不受影响。
     expect(
       findForbiddenPackagedEntries([
         "AyanamiTaskManager.exe",
+        "launcher/AyanamiTaskManager.exe",
+        "resources/atm.exe",
         "resources/atm-mcp.exe",
         "atm-setup.exe",
-        "runtime/atm-core.exe",
       ]),
     ).toEqual([]);
   });
@@ -100,23 +113,88 @@ describe("packaged application content policy", () => {
     expect(missing).not.toContain("AyanamiTaskManager.exe");
     for (const anchor of [
       "LICENSE",
-      "runtime/atm-core.exe",
-      "runtime/node_modules/better-sqlite3/prebuilds/win32-x64.node",
+      "THIRD_PARTY_NOTICES.txt",
+      "launcher/AyanamiTaskManager.exe",
+      "atm-setup.exe",
+      "resources/atm.exe",
       "resources/atm-mcp.exe",
-      "migrations/knowledge/0001_initial.sql",
+      "renderer/index.html",
     ])
       expect(missing).toContain(anchor);
   });
 
-  it("rejects user knowledge while requiring its schema migration", () => {
+  it("rejects user knowledge and databases", () => {
     expect(
       findForbiddenPackagedEntries([
         "knowledge/private.md",
         "knowledge/knowledge.sqlite",
         "data/registry.sqlite-wal",
-        "migrations/knowledge/0001_initial.sql",
+        "resources/docs/local-knowledge.md",
       ]),
     ).toEqual(["data/registry.sqlite-wal", "knowledge/knowledge.sqlite", "knowledge/private.md"]);
+  });
+
+  // P-012：smoke、e2e、drill 构建的字面量出现在发出去的 exe 里，就是拿错了二进制。
+  it("finds test-build markers in UTF-8 and UTF-16LE, except the builds a package allows", () => {
+    for (const { build, marker } of TEST_BUILD_MARKERS) {
+      for (const encoding of ["utf8", "utf16le"] as const) {
+        const bytes = Buffer.concat([Buffer.alloc(16), Buffer.from(marker, encoding)]);
+        expect(findTestBuildMarkers(bytes), `${marker} ${encoding}`).toEqual([
+          `${build}:${marker}`,
+        ]);
+        expect(findTestBuildMarkers(bytes, [build]), `${marker} ${encoding}`).toEqual([]);
+      }
+    }
+    // 名单钉住：少一条，那种拿错的二进制就漏过去了。
+    expect(TEST_BUILD_MARKERS.map(({ build, marker }) => `${build}:${marker}`)).toEqual([
+      "smoke:--remote-debugging-port",
+      "smoke:ATM_SMOKE_WATCHDOG_MS",
+      "smoke:ATM_SMOKE_CORE_USERPROFILE",
+      "e2e:E2eTest",
+      "e2e:atm-core-e2e: ",
+      "e2e:ATM_E2E_",
+      "drill:ATM_SETUP_SANDBOX",
+      "drill:ATM_SETUP_DIE_AFTER",
+      "drill:ATM_SETUP_FAIL_AT",
+      "drill:ATM_SETUP_FAIL_UNDO",
+      "drill:ATM_SETUP_SQUIRREL_ADDS",
+    ]);
+    // setup 的包校验里写着禁止的文件名 atm-core-e2e.exe：那不是 e2e 构建。
+    expect(findTestBuildMarkers(Buffer.from('"resources/atm-core-e2e.exe"', "utf8"))).toEqual([]);
+    expect(findTestBuildMarkers(Buffer.from("atm-core-e2e: listening", "utf8"))).toEqual([
+      "e2e:atm-core-e2e: ",
+    ]);
+  });
+
+  // 标记要对得上源码里真有的字面量，否则扫描永远是空的。它们只在测试特性或测试二进制里，
+  // 由打出来的生产二进制本身来证明（打包时逐个 exe 扫，见下一条）。
+  it("every marker is a literal the test builds really contain", () => {
+    const read = (path: string) => readFileSync(`apps/desktop/native/${path}`, "utf8");
+    const sources: Record<string, string> = {
+      "--remote-debugging-port": read("host/src/app.rs"),
+      ATM_SMOKE_WATCHDOG_MS: read("host/src/app.rs"),
+      ATM_SMOKE_CORE_USERPROFILE: read("host/src/agents.rs") + read("host/src/child_env.rs"),
+      E2eTest: read("domain/src/principal.rs"),
+      "atm-core-e2e: ": read("e2e-adapter/src/main.rs"),
+      ATM_E2E_: read("e2e-adapter/src/main.rs"),
+      ATM_SETUP_SANDBOX: read("setup/src/env.rs"),
+      ATM_SETUP_DIE_AFTER: read("setup/src/fault.rs"),
+      ATM_SETUP_FAIL_AT: read("setup/src/fault.rs"),
+      ATM_SETUP_FAIL_UNDO: read("setup/src/fault.rs"),
+      ATM_SETUP_SQUIRREL_ADDS: read("setup/src/fault.rs") + read("setup/src/env.rs"),
+    };
+    for (const { marker } of TEST_BUILD_MARKERS) expect(sources[marker], marker).toContain(marker);
+  });
+
+  it("packaging scans every executable for test-build markers before the manifest", () => {
+    const source = readFileSync("scripts/package-native.ts", "utf8");
+    const manifest = source.indexOf("const files: ManifestFile[] = [];");
+    const scan = source.indexOf("assertNoTestBuildMarkers(appDir, payload, {");
+    expect(scan).toBeGreaterThan(0);
+    expect(scan).toBeLessThan(manifest);
+    // 生产包一个都不许；烟测包只放过宿主的 smoke，演练包只放过 setup 的 drill。
+    expect(source).toContain('...(smoke ? { [APP_LAYOUT.host]: ["smoke"] } : {}),');
+    expect(source).toContain('...(drill ? { [APP_LAYOUT.setup]: ["drill"] } : {}),');
   });
 
   it("rejects a high-resolution or oversized published logo", () => {

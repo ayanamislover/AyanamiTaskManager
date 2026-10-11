@@ -97,6 +97,7 @@ dependencies = [
 name = "atm-cli"
 version = "0.0.0"
 dependencies = [
+ "atm-build-support",
  "atm-domain",
  "atm-http",
  "atm-install-state",
@@ -160,6 +161,7 @@ dependencies = [
  "atm-store",
  "atm-sync",
  "atm-ui-bridge",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

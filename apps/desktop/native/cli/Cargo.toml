@@ -26,6 +26,10 @@ serde_json = { workspace = true }
 # 回环探活要关掉 SYN 重传（与 atm-mcp 同一个做法，见 src/http.rs）。
 socket2 = "0.6"
 
+# 版本资源（与宿主、setup 同一套）：打包要求 atm.exe 带本版本的 ProductVersion（W8a）。
+[build-dependencies]
+atm-build-support = { path = "../build-support" }
+
 [dev-dependencies]
 # 黑盒用例：真实服务 + 真实 Agent HTTP，atm.exe 作为子进程连它（与 http/tests/support 同一套夹具）。
 atm-http = { path = "../http" }

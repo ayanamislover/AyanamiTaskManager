@@ -1,12 +1,13 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { strToU8, zipSync } from "fflate";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { packageOfModule, rendererPackages } from "../../../scripts/renderer-packages.js";
 import {
   buildThirdPartyNotices,
-  NODE_LICENSE_PENDING,
+  LICENSE_TEXT_PENDING,
   npmComponents,
   releaseNoticesStatus,
   renderThirdPartyNotices,
@@ -17,44 +18,32 @@ afterEach(() => {
   for (const directory of temporary.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function fixtureRoot(nodeLicense?: { version: string; text: string }): string {
-  const root = mkdtempSync(join(tmpdir(), "atm-notices-"));
+function fixtureRoot(): string {
+  const scratch = resolve(process.cwd(), "output");
+  mkdirSync(scratch, { recursive: true });
+  const root = mkdtempSync(join(scratch, "atm-notices-"));
   temporary.push(root);
-  if (nodeLicense) {
-    mkdirSync(join(root, "third_party", "node"), { recursive: true });
-    writeFileSync(join(root, "third_party", "node", "VERSION"), `${nodeLicense.version}\n`, "utf8");
-    writeFileSync(join(root, "third_party", "node", "LICENSE"), nodeLicense.text, "utf8");
-  }
   return root;
 }
 
-// 二进制分发要随附第三方许可证：随包的 Node、静态链接的 crate、打包进 core/renderer 的 npm 依赖。
+// 二进制分发要随附第三方许可证：链接进原生程序的 crate、renderer bundle 里实际打进去的 npm 包。
+// 3.0 的包里没有 Node（W8a），不再有 Node 运行时一节。
 describe("第三方许可证声明", () => {
-  it("缺 Node 许可证或版本对不上时写入待补标记，对上了就收原文", () => {
-    const components = [] as const;
-    expect(
-      renderThirdPartyNotices({ root: fixtureRoot(), nodeVersion: "v9.9.9", components }),
-    ).toContain(NODE_LICENSE_PENDING);
-    expect(
-      renderThirdPartyNotices({
-        root: fixtureRoot({ version: "v9.9.8", text: "Node license text" }),
-        nodeVersion: "v9.9.9",
-        components,
-      }),
-    ).toContain(NODE_LICENSE_PENDING);
-    const complete = renderThirdPartyNotices({
-      root: fixtureRoot({ version: "v9.9.9", text: "Node license text" }),
-      nodeVersion: "v9.9.9",
-      components,
+  beforeAll(() => {
+    // 真实依赖图那一条要 renderer 的打包清单：构建一次（约 2 秒），与打包走同一份 vite 配置。
+    // 先删掉上一次的清单：插件没接上时这里留下的旧文件会让下面照样绿。
+    rmSync(join(process.cwd(), "apps", "desktop", "dist", "renderer-packages.json"), {
+      force: true,
     });
-    expect(complete).not.toContain(NODE_LICENSE_PENDING);
-    expect(complete).toContain("Node license text");
-  });
+    execFileSync(
+      process.execPath,
+      ["node_modules/vite/bin/vite.js", "build", "--config", "apps/desktop/vite.config.ts"],
+      { cwd: process.cwd(), stdio: "ignore", windowsHide: true },
+    );
+  }, 120_000);
 
-  it("包里自带许可证文件就收原文；只声明 MIT 没带文件的按作者补标准 MIT 文本", () => {
+  it("包里自带许可证文件就收原文；只声明 MIT 没带文件的按作者补标准 MIT 文本；都没有的留待补标记", () => {
     const text = renderThirdPartyNotices({
-      root: fixtureRoot(),
-      nodeVersion: "v9.9.9",
       components: [
         {
           ecosystem: "cargo",
@@ -78,65 +67,105 @@ describe("第三方许可证声明", () => {
     expect(text).toContain("--- LICENSE-MIT ---\nCopyright (c) Someone");
     expect(text).toContain("Copyright (c) Jane Doe");
     expect(text).toContain("Permission is hereby granted");
+    expect(text).not.toContain(LICENSE_TEXT_PENDING);
+    expect(text).not.toMatch(/Node\.js/u);
+    const bare = renderThirdPartyNotices({
+      components: [
+        {
+          ecosystem: "npm",
+          name: "bare-bsd",
+          version: "1.0.0",
+          license: "BSD-3-Clause",
+          authors: [],
+          texts: [],
+        },
+      ],
+    });
+    expect(bare).toContain(`${LICENSE_TEXT_PENDING}: no license file is shipped in this package`);
   });
 
-  it("真实依赖图：宿主与 shim 的 crate、core/renderer 的 npm 依赖都在，每一项都有许可文本", () => {
+  it("真实依赖图：五个 exe 的 crate、renderer bundle 里的 npm 包都在，每一项都有许可文本", () => {
     const text = buildThirdPartyNotices(process.cwd());
     for (const heading of [
       /^wry \S+ \(cargo\)/mu,
       /^tao \S+ \(cargo\)/mu,
       /^serde_json \S+ \(cargo\)/mu,
       /^zip \S+ \(cargo\)/mu,
+      // atm.exe 与宿主都静态链接 SQLite。
+      /^libsqlite3-sys \S+ \(cargo\)/mu,
+      // atm.exe 与 atm-mcp 的回环探活。
+      /^socket2 \S+ \(cargo\)/mu,
       /^react \S+ \(npm\)/mu,
-      /^fastify \S+ \(npm\)/mu,
-      /^better-sqlite3 \S+ \(npm\)/mu,
-      /^@modelcontextprotocol\/sdk \S+ \(npm\)/mu,
+      /^react-dom \S+ \(npm\)/mu,
+      /^@tanstack\/react-query \S+ \(npm\)/mu,
     ])
       expect(text).toMatch(heading);
+    // 只给 2.x core 用的 npm 包不在 3.0 的包里，不该列。
+    for (const absent of [
+      /^fastify /mu,
+      /^better-sqlite3 /mu,
+      /^@modelcontextprotocol\/sdk /mu,
+      /^commander /mu,
+    ])
+      expect(text).not.toMatch(absent);
     // 本仓自己的 crate 与 workspace 包不是第三方。
-    expect(text).not.toMatch(/^atm-(?:host|setup|launcher|install-state|mcp) /mu);
+    expect(text).not.toMatch(/^atm-(?:host|setup|launcher|install-state|mcp|cli) /mu);
     expect(text).not.toMatch(/^@ayanami-task\//mu);
     // 没有许可文本、也补不上标准 MIT 的组件要人工核对；现在一个都不能有。
-    expect(text).not.toContain("No license file is shipped in this package");
+    expect(text).not.toContain(LICENSE_TEXT_PENDING);
   });
 
-  it("npm：装了的 peer 依赖要收；必需依赖没装要报错，可选的没装跳过", () => {
-    const root = fixtureRoot();
-    mkdirSync(join(root, "apps"));
-    mkdirSync(join(root, "packages"));
-    const write = (path: string, manifest: object) => {
-      mkdirSync(join(root, path), { recursive: true });
-      writeFileSync(join(root, path, "package.json"), JSON.stringify(manifest), "utf8");
-      writeFileSync(join(root, path, "LICENSE"), `license of ${path}`, "utf8");
-    };
-    writeFileSync(
-      join(root, "package.json"),
-      JSON.stringify({ dependencies: { host: "1.0.0" } }),
-      "utf8",
+  it("bundle 的模块 id 归到包：pnpm 的 .pnpm 目录、scope 包、虚拟模块与查询串", () => {
+    expect(packageOfModule("R:/x/node_modules/.pnpm/react@19/node_modules/react/index.js")).toEqual(
+      { name: "react", dir: "R:/x/node_modules/.pnpm/react@19/node_modules/react" },
     );
-    write("node_modules/host", {
-      name: "host",
-      version: "1.0.0",
-      peerDependencies: { "runtime-peer": "*", "absent-peer": "*" },
-      optionalDependencies: { "other-platform": "*" },
-    });
-    write("node_modules/runtime-peer", { name: "runtime-peer", version: "9.0.0" });
     expect(
-      npmComponents(root)
-        .map((entry) => entry.name)
-        .sort(),
-    ).toEqual(["host", "runtime-peer"]);
-    write("node_modules/host", {
-      name: "host",
-      version: "1.0.0",
-      dependencies: { "broken-required": "*" },
-    });
-    expect(() => npmComponents(root)).toThrow(/NOTICES_DEPENDENCY_MISSING: broken-required/u);
+      packageOfModule(
+        "\0R:\\x\\node_modules\\@tanstack\\query-core\\build\\a.js?commonjs-es-import",
+      ),
+    ).toEqual({ name: "@tanstack/query-core", dir: "R:/x/node_modules/@tanstack/query-core" });
+    expect(packageOfModule("R:/x/apps/desktop/src/main.tsx")).toBeNull();
+    expect(packageOfModule("\0commonjsHelpers.js")).toBeNull();
+    expect(
+      rendererPackages(
+        [
+          "R:/x/node_modules/react/index.js",
+          "R:/x/node_modules/react/cjs/react.production.js",
+          "R:/x/packages/ui/src/a.ts",
+        ],
+        "R:/x",
+      ),
+    ).toEqual([{ name: "react", dir: "node_modules/react" }]);
+  });
+
+  it("npm 按 renderer 的打包清单收；清单缺了或列的包不在都报错，不拿空集当没有", () => {
+    const root = fixtureRoot();
+    expect(() => npmComponents(root)).toThrow(/NOTICES_RENDERER_PACKAGES_MISSING/u);
+    const dist = join(root, "apps", "desktop", "dist");
+    mkdirSync(dist, { recursive: true });
+    mkdirSync(join(root, "node_modules", "bundled"), { recursive: true });
+    writeFileSync(
+      join(root, "node_modules", "bundled", "package.json"),
+      JSON.stringify({ name: "bundled", version: "1.0.0", license: "MIT" }),
+    );
+    writeFileSync(join(root, "node_modules", "bundled", "LICENSE"), "license of bundled");
+    const listing = (entries: object[]) =>
+      writeFileSync(join(dist, "renderer-packages.json"), JSON.stringify(entries));
+    listing([{ name: "bundled", dir: "node_modules/bundled" }]);
+    expect(npmComponents(root)).toMatchObject([
+      {
+        name: "bundled",
+        version: "1.0.0",
+        texts: [{ file: "LICENSE", text: "license of bundled" }],
+      },
+    ]);
+    listing([{ name: "gone", dir: "node_modules/gone" }]);
+    expect(() => npmComponents(root)).toThrow(/NOTICES_DEPENDENCY_MISSING: gone/u);
   });
 
   it("从将要发出去的归档里核声明：两份 zip 一致、与清单哈希相同，没有待补标记才可分发", () => {
-    const complete = strToU8("notices\nNode license text\n");
-    const pending = strToU8(`notices\n${NODE_LICENSE_PENDING}: missing\n`);
+    const complete = strToU8("notices\nlicense text\n");
+    const pending = strToU8(`notices\n${LICENSE_TEXT_PENDING}: missing\n`);
     const archives = (inPackage: Uint8Array, inPortable = inPackage, listed = inPackage) => ({
       packageZip: zipSync({ "THIRD_PARTY_NOTICES.txt": inPackage, LICENSE: strToU8("x") }),
       portableZip: zipSync({

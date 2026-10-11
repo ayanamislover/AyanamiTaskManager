@@ -1,8 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import Database from "better-sqlite3";
 import {
   createReleaseResumeEvidence,
   identifyReleaseArtifact,
@@ -24,7 +22,6 @@ import {
   type StageDecisions,
 } from "./release-report.js";
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
-import { APP_LAYOUT } from "./app-layout.js";
 import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
 import { releaseNoticesStatus } from "./third-party-notices.js";
 
@@ -104,26 +101,14 @@ function latestSchema(directory: string): number {
 }
 
 /**
- * 发布清单描述的是实际交付的运行时：直接问包里那个改了名的 node（runtime\atm-core.exe），
- * 它也是已经通过烟测的那一份。开发机上的 node 不是交付物。
+ * 3.0 的包里没有 Node（W8a）：SQLite 是 rusqlite 静态链接进各个 exe 的那一份，版本以 `--locked`
+ * 构建所用的 Cargo.lock 为准（libsqlite3-sys 的 bundled 版本）。
  */
-function runtimeVersions(): Record<string, string> {
-  const executable = join(
-    root,
-    "output",
-    "package",
-    `app-${packageJson.version}`,
-    APP_LAYOUT.coreExe,
-  );
-  const probe = spawnSync(executable, ["-p", "JSON.stringify(process.versions)"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (probe.error) throw new Error(`无法启动发行包里的运行时：${probe.error.message}`);
-  if (probe.status !== 0) {
-    throw new Error(`无法读取运行时版本：${String(probe.stderr ?? "").slice(0, 500)}`);
-  }
-  return JSON.parse(probe.stdout.trim()) as Record<string, string>;
+function bundledSqliteCrate(): string {
+  const lock = readFileSync(join(root, "apps", "desktop", "native", "Cargo.lock"), "utf8");
+  const match = /\[\[package\]\]\r?\nname = "libsqlite3-sys"\r?\nversion = "([^"]+)"/u.exec(lock);
+  if (!match) throw new Error("RELEASE_SQLITE_CRATE_MISSING: Cargo.lock 里没有 libsqlite3-sys");
+  return `libsqlite3-sys ${match[1]}`;
 }
 
 function spdxId(name: string): string {
@@ -197,7 +182,7 @@ const portableName = portableZipName(packageJson.version);
 const releaseNames = [setupName, packageName, manifestName, portableName];
 const missing = releaseNames.filter((name) => !existsSync(join(packageDir, name)));
 if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missing.join("、")}`);
-// 声明从将要发出去的归档里取，不看旁边的松散目录。缺 Node 许可证原文（NODE_LICENSE_PENDING）
+// 声明从将要发出去的归档里取，不看旁边的松散目录。有组件缺许可文本（LICENSE_TEXT_PENDING）
 // 的候选不可分发：只有本机安装验收（--local-only，release-and-install 传）能继续组装，
 // release.json 记 distributable:false，发布入口见到就拒绝。
 const notices = releaseNoticesStatus({
@@ -212,7 +197,7 @@ const notices = releaseNoticesStatus({
 });
 if (!notices.distributable && !localOnly)
   throw new Error(
-    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明没有随包 Node 的许可证（third_party/node/）；" +
+    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明有组件缺许可文本（LICENSE_TEXT_PENDING）；" +
       "只做本机安装验收时用 --local-only",
   );
 
@@ -395,25 +380,19 @@ await writeFile(
   "utf8",
 );
 
-const versions = runtimeVersions();
-const sqlite = new Database(":memory:");
-const sqliteVersion = String(
-  (sqlite.prepare("SELECT sqlite_version() AS version").get() as { version: string }).version,
-);
-sqlite.close();
 const release = {
   product: packageJson.productName,
   version: packageJson.version,
   distributable: notices.distributable,
   platform: "win32-x64",
-  node: versions.node,
-  nodeAbi: versions.modules,
-  napi: versions.napi,
+  runtime: "native",
   webview2Min: MIN_WEBVIEW2,
-  sqlite: sqliteVersion,
+  sqlite: bundledSqliteCrate(),
   schema: {
-    registry: latestSchema(join(root, "migrations", "registry")),
-    project: latestSchema(join(root, "migrations", "project")),
+    v3: latestSchema(join(root, "apps", "desktop", "native", "store", "migrations")),
+    // 2.x 数据根里转换器认得的最新迁移（转换时只读打开 L）。
+    legacyRegistry: latestSchema(join(root, "migrations", "registry")),
+    legacyProject: latestSchema(join(root, "migrations", "project")),
   },
   commit: source.gitHead,
   source,
