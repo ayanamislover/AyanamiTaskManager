@@ -154,12 +154,22 @@ const source = await verifyReleaseSource(root, verification.fingerprint);
 const e2e = await readJson<{ stats: Record<string, number> }>(join(output, "e2e", "results.json"));
 // 2.x 的 benchmark（测的是 Node 服务）不在 3.0 的链上：原生的内存、冷启动与 Agent 负载由 budget 量。
 type DrillReport = BoundReports["drill"] & { passed: boolean; total: number; failed: number };
-type BudgetReport = BoundReports["budget"] & { completedAt?: string; error?: string };
+type BudgetReport = BoundReports["budget"] & {
+  completedAt?: string;
+  error?: string;
+  /** 08 §3 逐条判定（budget-verdicts.ts）：全部达标才组装；预算不放宽，除非用户同意。 */
+  summary?: { allPass?: boolean; verdicts?: Array<{ item: string; pass: boolean }> };
+};
 const drill = await readJson<DrillReport>(join(output, "drill", "report.json"));
 const budget = await readJson<BudgetReport>(join(output, "budget-report.json"));
 if (drill.passed !== true || !(drill.total > 0) || drill.failed !== 0)
   throw new Error("DRILL_REPORT_INPUT_FAILED");
-if (budget.error !== undefined || typeof budget.completedAt !== "string")
+if (
+  budget.error !== undefined ||
+  typeof budget.completedAt !== "string" ||
+  budget.summary?.allPass !== true ||
+  !(budget.summary.verdicts?.length ?? 0)
+)
   throw new Error("BUDGET_REPORT_INPUT_FAILED");
 const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
 const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));

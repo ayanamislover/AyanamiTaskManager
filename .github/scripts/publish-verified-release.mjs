@@ -113,6 +113,9 @@ assert.equal(drill.failed, 0);
 const budget = await readJson(join(releaseRoot, "test-report/budget-report.json"));
 assert.equal(budget.error, undefined);
 assert.equal(typeof budget.completedAt, "string");
+// 08 §3 的验收线逐条达标（budget-verdicts.ts）。
+assert.equal(budget.summary?.allPass, true);
+assert.ok(budget.summary.verdicts.length > 0);
 // 候选绑定（L6）：打包时记下的 exe 哈希就是这次发布的版本。
 assert.equal(
   (await readJson(join(releaseRoot, "test-report/candidate-binaries.json"))).version,
