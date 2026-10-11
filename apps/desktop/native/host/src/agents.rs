@@ -229,10 +229,15 @@ pub fn call(
     .map_err(failure)
 }
 
-/// 安装包里的 Agent 文档（`<app>\resources\agent`）；开发构建没有。
+/// 安装包里的 Agent 文档：`<app>\resources` 下的 Guide、`docs\` 与 `integrations\skills\`（package-native
+/// 的布局，[`atm_agents::docs::bundled_manifest`] 按它读）；开发构建没有。
 fn bundled_docs(layout: &Layout) -> Option<PathBuf> {
-    let p = layout.app_dir.join("resources").join("agent");
-    (layout.packaged && p.is_dir()).then_some(p)
+    bundled_docs_in(&layout.app_dir, layout.packaged)
+}
+
+fn bundled_docs_in(app_dir: &Path, packaged: bool) -> Option<PathBuf> {
+    let resources = app_dir.join("resources");
+    (packaged && resources.join(atm_agents::docs::GUIDE).is_file()).then_some(resources)
 }
 
 /// 入口开着之后跑一次：先换 Agent 文档（Skills 的来源在里面），再修旧配置、补 Skill（atm-jobs 的两个作业）。
@@ -393,5 +398,25 @@ mod tests {
         assert!(inside(Path::new(r"C:\a\b\"), Path::new(r"C:\a\b")));
         assert!(!inside(Path::new(r"C:\a\b"), Path::new(r"C:\a\bc")));
         assert!(!inside(Path::new(r"C:\a\b"), Path::new(r"C:\a")));
+    }
+
+    /// 打包的 Agent 文档就在 `<app>\resources`（package-native 把 Guide、`docs\`、`integrations\skills\` 放在这里）。
+    /// 曾经找的是 `resources\agent`：打包里没有这一层，文档与 Skills 从不安装，Agent 修复一律 AGENT_SKILL_MISSING。
+    #[test]
+    fn the_bundled_docs_are_the_packaged_resources() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("target")
+            .join("host-tests")
+            .join("bundled-docs");
+        let _ = std::fs::remove_dir_all(&root);
+        let app = root.join("app-3.0.0");
+        let resources = app.join("resources");
+        std::fs::create_dir_all(resources.join("integrations").join("skills")).unwrap();
+        assert_eq!(bundled_docs_in(&app, true), None, "no Guide: not a package");
+        std::fs::write(resources.join(atm_agents::docs::GUIDE), "guide").unwrap();
+        assert_eq!(bundled_docs_in(&app, true), Some(resources.clone()));
+        assert_eq!(bundled_docs_in(&app, false), None, "a dev build has none");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
