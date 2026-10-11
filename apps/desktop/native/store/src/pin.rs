@@ -129,7 +129,7 @@ impl Dir {
                 self.path.display()
             )));
         }
-        imp::delete(self)
+        imp::delete(self, None)
     }
 
     /// 整棵删：先删里面的条目（不跟随链接：junction、符号链接只删链接本身），再按 [`Dir::remove`] 删自己。
@@ -141,19 +141,45 @@ impl Dir {
                 self.path.display()
             )));
         }
-        for entry in std::fs::read_dir(&self.path)? {
-            let entry = entry?;
-            let (kind, p) = (entry.file_type()?, entry.path());
-            if kind.is_symlink() {
-                unlink(&p)?;
-            } else if kind.is_dir() {
-                std::fs::remove_dir_all(&p)?;
-            } else {
-                std::fs::remove_file(&p)?;
+        clear(&self.path)?;
+        #[cfg(test)]
+        AFTER_CLEAR.with(|h| {
+            if let Some(f) = h.borrow_mut().take() {
+                f(&self.path)
             }
-        }
-        imp::delete(self)
+        });
+        // 删自己时目录又不是空的（列完之后里面又冒出了条目，或者有条目删了但还挂着）：在删除句柄还开着、别人
+        // 换不走这个目录的时候再清一次，再删（W6 r11 的全量里遇到过一次）。
+        imp::delete(self, Some(&clear))
     }
+}
+
+/// 删目录时「目录不是空的」，先拿它把目录再清一次（只有整棵删才给）。
+type Again<'a> = Option<&'a dyn Fn(&Path) -> std::io::Result<()>>;
+
+/// 删掉目录里的全部条目（不跟随链接：junction、符号链接只删链接本身）。
+fn clear(dir: &Path) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let (kind, p) = (entry.file_type()?, entry.path());
+        if kind.is_symlink() {
+            unlink(&p)?;
+        } else if kind.is_dir() {
+            std::fs::remove_dir_all(&p)?;
+        } else {
+            std::fs::remove_file(&p)?;
+        }
+    }
+    Ok(())
+}
+
+/// 用例在 `remove_tree` 清完、删自己之前往目录里放东西（造「列完之后又冒出条目」）。只用一次。
+#[cfg(test)]
+type AfterClear = Box<dyn FnOnce(&Path)>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_CLEAR: std::cell::RefCell<Option<AfterClear>> = const { std::cell::RefCell::new(None) };
 }
 
 /// 删一个链接本身：目录链接（junction、目录符号链接）用 remove_dir，其余用 remove_file。都不碰目标。
@@ -501,17 +527,18 @@ mod imp {
     }
 
     pub(super) fn remove_file(mark: super::FileMark) -> std::io::Result<()> {
-        delete_named(&mark.path, mark.id)
+        delete_named(&mark.path, mark.id, None)
     }
 
-    pub(super) fn delete(dir: Dir) -> std::io::Result<()> {
+    /// `again`：标记删除得到「目录不是空的」时，先用它把目录再清一次（只有整棵删才给）。
+    pub(super) fn delete(dir: Dir, again: super::Again<'_>) -> std::io::Result<()> {
         let Dir { file, path, id, .. } = dir;
         drop(file);
-        delete_named(&path, id)
+        delete_named(&path, id, again)
     }
 
     /// 按名字删一个条目，但只删身份对得上的那一个。
-    fn delete_named(path: &Path, id: (u32, u64)) -> std::io::Result<()> {
+    fn delete_named(path: &Path, id: (u32, u64), clear: super::Again<'_>) -> std::io::Result<()> {
         // 不跟随链接：此刻这个名字若被换成 junction，打开的是链接本身，文件号对不上。
         // 共享方式里没有 FILE_SHARE_DELETE：打开之后到删除之前，别人也改不了它的名。
         // 别的程序（杀毒、索引）短暂开着它时打开会得到共享冲突：退避重试约 2 秒，仍不行就原样留下并报错。
@@ -529,21 +556,33 @@ mod imp {
                 path.display()
             )));
         }
-        dispose(&again)
-            .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        // 标记删除得到「目录不是空的」（145）：整棵删的，在 `again` 开着时（没有 FILE_SHARE_DELETE，别人改不了它的
+        // 名、换不走它）再清一次再标记；只删空目录的不清，只等挂着的条目消失。都退避约 2 秒，仍不行就原样留下并报错。
+        retry(&[145], || {
+            if let Some(clear) = clear {
+                clear(path)?;
+            }
+            dispose(&again)
+        })
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
         // 关掉句柄时真正删除。
         drop(again);
         Ok(())
     }
 
     /// 共享冲突（32）与锁冲突（33）重试约 2 秒；其余错误立即返回。
-    fn transient<T>(mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    fn transient<T>(f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        retry(&[32, 33], f)
+    }
+
+    /// 给定的几种错误码退避重试约 2 秒；其余错误立即返回。
+    fn retry<T>(codes: &[i32], mut f: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
         let mut delay = std::time::Duration::from_millis(10);
         let mut waited = std::time::Duration::ZERO;
         loop {
             match f() {
                 Err(e)
-                    if matches!(e.raw_os_error(), Some(32 | 33))
+                    if e.raw_os_error().is_some_and(|c| codes.contains(&c))
                         && waited < std::time::Duration::from_secs(2) =>
                 {
                     std::thread::sleep(delay);
@@ -664,7 +703,10 @@ mod imp {
         })
     }
 
-    pub(super) fn delete(dir: Dir) -> std::io::Result<()> {
+    pub(super) fn delete(dir: Dir, again: super::Again<'_>) -> std::io::Result<()> {
+        if let Some(clear) = again {
+            clear(&dir.path)?;
+        }
         std::fs::remove_dir(&dir.path)
     }
 
@@ -888,6 +930,29 @@ mod tests {
         assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"keep");
         assert!(open(&target).unwrap().remove_tree().is_err());
         assert!(target.is_dir());
+        drop(outer);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 整棵删时，列完之后目录里又冒出条目（W6 r11 的全量里 `pinned_directories_cannot_be_swapped_mid_run` 收尾时
+    /// 「目录不是空的」）：删自己之前再清一次，照样删掉。只删空目录的 `remove` 不清：冒出来的条目原样留下、报错。
+    #[test]
+    fn a_tree_removal_clears_what_appears_after_it_was_listed() {
+        let base = scratch("pin-late-entry");
+        let outer = open(&base).unwrap();
+        let mine = create(&outer, OsStr::new("mine")).unwrap();
+        std::fs::write(mine.path().join("first"), b"x").unwrap();
+        super::AFTER_CLEAR.with(|h| {
+            *h.borrow_mut() = Some(Box::new(|dir: &Path| {
+                std::fs::write(dir.join("late"), b"x").unwrap()
+            }))
+        });
+        mine.remove_tree().unwrap();
+        assert!(!base.join("mine").exists());
+        let strict = create(&outer, OsStr::new("strict")).unwrap();
+        std::fs::write(strict.path().join("late"), b"x").unwrap();
+        assert!(strict.remove().is_err());
+        assert!(base.join("strict").join("late").is_file());
         drop(outer);
         std::fs::remove_dir_all(&base).unwrap();
     }
