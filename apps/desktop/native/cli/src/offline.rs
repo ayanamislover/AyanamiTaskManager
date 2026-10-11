@@ -3,6 +3,8 @@
 //! 读的东西：转换清单 `conversion.json`、启动状态 `runtime\startup-state.json`、服务描述 `runtime\daemon.json`
 //! （只看 pid 是否活着，令牌与端口不输出）、整库 `data\atm.sqlite`（只读打开：`app_meta` 的版本与 generation、
 //! 项目数、`PRAGMA quick_check`），以及备份目录里的文件数。`app_meta.cursor_key` 是游标密钥，不读。
+//! 另外报崩溃后的自动恢复（`keepalive`）：安装根 `state\keepalive-task.json` 的登记、`runtime\keepalive.json`
+//! 的熔断、`runtime\user-quit.json` 的用户退出标记。
 //!
 //! 只读的意思是不改任何文件，也不取服务的准入锁（取了会让同时启动的服务以为另一个实例在跑）。
 //! 整库没有 `-wal` 时按 `immutable` 打开，SQLite 不会建 `-wal` / `-shm`；有 `-wal` 时说明服务在跑或上次没正常退出，
@@ -12,7 +14,7 @@ use crate::discover::{self, Unavailable};
 use atm_store::conversion::{Layout, ManifestState, read_manifest};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 报告与发现的问题（问题为空才算健康）。
 pub struct Report {
@@ -89,9 +91,55 @@ pub fn doctor(root: &Path) -> Report {
             "service": service,
             "database": database,
             "backups": backups,
+            "keepalive": keepalive(root, installed_root().as_deref()),
         }),
         problems,
     }
+}
+
+/// 这个 `atm.exe` 所在的安装根；便携版、开发构建没有。
+fn installed_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    atm_install_state::keepalive::install_root_of(&exe)
+}
+
+/// 崩溃后的自动恢复（方案 §5、B1）。只报事实，不算问题：便携版、开发构建本来就没有，
+/// 熔断与用户退出是有意的停手。`auto_recovery` 只在任务登记成功、没熔断、这次登录里用户没退出时为真
+/// ——注册失败时不声称有自动恢复。`reason` 说明为什么没有（setup 登记的原因照原文）。
+pub fn keepalive(n: &Path, install_root: Option<&Path>) -> Value {
+    use atm_install_state::keepalive as k;
+    let registration = install_root.and_then(k::read_registration);
+    let breaker = k::read_breaker(n);
+    let now = atm_install_state::handoff::now_ms();
+    let recent = breaker
+        .exits
+        .iter()
+        .filter(|exit| now.saturating_sub(exit.at_ms) < k::BREAKER_WINDOW_MS)
+        .count();
+    let user_quit = k::user_quit_applies(n, k::logon_id().as_deref());
+    let reason = match (install_root, &registration) {
+        (None, _) => Some("不是安装版（便携版或开发构建）：没有保活任务".to_owned()),
+        (Some(_), None) => Some("setup 没有登记保活任务".to_owned()),
+        (Some(_), Some(r)) if !r.registered => Some(
+            r.reason
+                .clone()
+                .unwrap_or_else(|| "保活任务没有注册".to_owned()),
+        ),
+        _ if breaker.tripped() => {
+            Some("熔断：30 分钟内异常退出 3 次，等用户自己启动一次".to_owned())
+        }
+        _ if user_quit => Some("这次登录里用户从托盘退出过".to_owned()),
+        _ => None,
+    };
+    json!({
+        "auto_recovery": reason.is_none(),
+        "registered": registration.as_ref().is_some_and(|r| r.registered),
+        "registered_at": registration.as_ref().map(|r| r.at.clone()),
+        "reason": reason,
+        "breaker_tripped": breaker.tripped(),
+        "recent_abnormal_exits": recent,
+        "user_quit": user_quit,
+    })
 }
 
 fn database(path: &Path, problems: &mut Vec<String>) -> Value {
@@ -172,4 +220,114 @@ fn read_database(path: &Path, immutable: bool) -> rusqlite::Result<Value> {
         "projects": projects,
         "quick_check": check.join("; "),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atm_install_state::keepalive as k;
+    use std::fs;
+
+    fn dir(name: &str) -> PathBuf {
+        let d = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("target")
+            })
+            .join("cli-tests")
+            .join("offline-keepalive")
+            .join(name);
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn registered(root: &Path, registered: bool, reason: Option<&str>) {
+        k::write_registration(
+            root,
+            &k::Registration {
+                registered,
+                at: "2026-10-11T00:00:00.000Z".into(),
+                reason: reason.map(str::to_owned),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_recovery_is_claimed_only_for_a_registered_install() {
+        let base = dir("claimed");
+        let (n, root) = (base.join("n"), base.join("root"));
+        fs::create_dir_all(&n).unwrap();
+        fs::create_dir_all(&root).unwrap();
+
+        let v = keepalive(&n, None);
+        assert_eq!(v["auto_recovery"], false, "{v}");
+        assert!(v["reason"].as_str().unwrap().contains("不是安装版"), "{v}");
+
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], false, "nothing recorded: {v}");
+        assert_eq!(v["registered"], false, "{v}");
+
+        registered(&root, false, Some("TaskScheduler: access denied"));
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], false, "{v}");
+        assert_eq!(v["reason"], "TaskScheduler: access denied", "{v}");
+
+        registered(&root, true, None);
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], true, "{v}");
+        assert_eq!(v["registered"], true, "{v}");
+        assert_eq!(v["reason"], Value::Null, "{v}");
+        assert_eq!(v["breaker_tripped"], false, "{v}");
+        assert_eq!(v["user_quit"], false, "{v}");
+    }
+
+    #[test]
+    fn a_tripped_breaker_and_a_user_quit_suspend_it() {
+        let base = dir("suspended");
+        let (n, root) = (base.join("n"), base.join("root"));
+        fs::create_dir_all(&root).unwrap();
+        registered(&root, true, None);
+        let now = atm_install_state::handoff::now_ms();
+        let mut breaker = k::Breaker::default();
+        // One exit from an hour ago is no longer recent.
+        breaker.record("old", now - 60 * 60 * 1000);
+        for run in ["a", "b", "c"] {
+            breaker.record(run, now);
+        }
+        k::write_breaker(&n, &breaker).unwrap();
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], false, "{v}");
+        assert_eq!(v["breaker_tripped"], true, "{v}");
+        assert_eq!(v["recent_abnormal_exits"], 3, "{v}");
+        assert!(v["reason"].as_str().unwrap().contains("熔断"), "{v}");
+
+        k::reset_breaker(&n);
+        k::mark_user_quit(
+            &n,
+            &k::UserQuit {
+                logon: k::logon_id().unwrap_or_default(),
+                at: "2026-10-11T00:00:00.000Z".into(),
+            },
+        )
+        .unwrap();
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], false, "{v}");
+        assert_eq!(v["user_quit"], true, "{v}");
+
+        // Another logon's marker no longer applies.
+        k::mark_user_quit(
+            &n,
+            &k::UserQuit {
+                logon: "another".into(),
+                at: "2026-10-11T00:00:00.000Z".into(),
+            },
+        )
+        .unwrap();
+        let v = keepalive(&n, Some(&root));
+        assert_eq!(v["auto_recovery"], true, "{v}");
+    }
 }

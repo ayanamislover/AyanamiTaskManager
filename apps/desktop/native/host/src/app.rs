@@ -769,7 +769,7 @@ impl App {
                 }
                 Some(tray::Action::NotificationMode(mode)) => self.set_notification_mode(mode),
                 Some(tray::Action::InstallUpdate) => self.apply_update(atm_ui_bridge::tray(), None),
-                Some(tray::Action::Quit) => self.quit(),
+                Some(tray::Action::Quit) => self.quit_by_user(),
                 None => {}
             },
         }
@@ -1637,6 +1637,23 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// 托盘「退出」：只有这一条路留 `user_quit` 标记（方案 B1：它只代表用户主动退出）。setup 的
+    /// QUIT、事务开始后关门、冒烟退出都走 [`App::quit`]，保活照旧。标记写不进去只记日志：退出照常。
+    fn quit_by_user(&mut self) {
+        use atm_install_state::keepalive;
+        let quit = keepalive::UserQuit {
+            logon: keepalive::logon_id().unwrap_or_default(),
+            at: atm_install_state::startup::iso_utc(atm_install_state::handoff::now_ms()),
+        };
+        if let Err(error) = keepalive::mark_user_quit(&self.layout.v3_root, &quit) {
+            crate::log(
+                &self.layout.v3_root,
+                &format!("user quit not marked: {error}"),
+            );
+        }
+        self.quit();
     }
 
     /// Window and tray go first; then the service shuts down in order (scheduler → HTTP →

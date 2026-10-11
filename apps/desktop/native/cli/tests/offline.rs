@@ -38,6 +38,12 @@ fn doctor_offline_reads_files_only() {
     write_descriptor(&root, mock.port, TOKEN);
     std::fs::create_dir_all(root.join("backups")).unwrap();
     std::fs::write(root.join("backups").join("a.atmbak"), b"x").unwrap();
+    // A tripped keepalive breaker is reported, never a problem: the stop is deliberate.
+    std::fs::write(
+        root.join("runtime").join("keepalive.json"),
+        br#"{"exits":[],"trippedAtMs":1}"#,
+    )
+    .unwrap();
     let before = tree(&root);
 
     let run = atm_in(&root, &["--json", "doctor", "--offline"]);
@@ -45,6 +51,10 @@ fn doctor_offline_reads_files_only() {
     let v = run.json();
     assert_eq!(v["mode"], "offline");
     assert_eq!(v["healthy"], true, "{v}");
+    // The test binary is not an installed copy: no auto recovery is claimed.
+    assert_eq!(v["keepalive"]["auto_recovery"], false, "{v}");
+    assert_eq!(v["keepalive"]["registered"], false, "{v}");
+    assert_eq!(v["keepalive"]["breaker_tripped"], true, "{v}");
     assert_eq!(v["problems"], json!([]));
     assert_eq!(v["database"]["projects"], 0, "{v}");
     assert_eq!(v["database"]["schema_version"], 1, "{v}");

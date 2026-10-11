@@ -105,6 +105,16 @@ pub fn runs_launcher(xml: &str, launcher: &Path) -> bool {
     ))
 }
 
+/// 一个打包进来的程序（`<安装根>\app-<v>\…\x.exe`）所在的安装根：往上三层内带 `app.json` 的那一层。
+/// 开发构建、便携版没有：它们不注册任务，也就没有自动恢复。
+pub fn install_root_of(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(3)
+        .find(|dir| dir.join(crate::APP_POINTER).is_file())
+        .map(Path::to_path_buf)
+}
+
 /// setup 注册（或删除）任务的结果。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -595,6 +605,23 @@ mod tests {
         let logs = n.join("logs");
         assert!(logs.join("keepalive.log.1").is_file());
         assert!(fs::metadata(logs.join("keepalive.log")).unwrap().len() <= LOG_BYTES + 2048);
+    }
+
+    #[test]
+    fn a_packaged_program_finds_its_install_root() {
+        let root = dir("install-root");
+        let exe = root.join("app-3.0.0").join("resources").join("atm.exe");
+        assert_eq!(install_root_of(&exe), None, "no app.json: not installed");
+        fs::write(root.join(crate::APP_POINTER), br#"{"current":"3.0.0"}"#).unwrap();
+        assert_eq!(install_root_of(&exe), Some(root.clone()));
+        assert_eq!(
+            install_root_of(&root.join("app-3.0.0").join("AyanamiTaskManager.exe")),
+            Some(root.clone())
+        );
+        assert_eq!(
+            install_root_of(&root.join("a").join("b").join("c").join("d.exe")),
+            None
+        );
     }
 
     #[test]

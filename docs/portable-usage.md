@@ -2,7 +2,7 @@
 
 完整解压后直接运行 `AyanamiTaskManager.exe`。关闭窗口后服务继续驻留托盘；使用托盘菜单“完全退出”才会停止服务。
 
-解压目录里的 `portable` 空文件是便携版的标记，不要删除：没有它，程序认不出自己的布局，会拒绝启动。便携版不经安装器，也不做自动更新；换新版本就是解压新的 ZIP。
+解压目录里的 `portable` 空文件是便携版的标记，不要删除：没有它，程序认不出自己的布局，会拒绝启动。便携版不经安装器，也不做自动更新；换新版本就是解压新的 ZIP。便携版也不注册「保活」计划任务：意外退出后不会自动重新启动，`--cli doctor --offline` 的 `keepalive.auto_recovery` 为 `false`。
 
 - 健康检查：`AyanamiTaskManager.exe --doctor`
 - CLI：`AyanamiTaskManager.exe --cli doctor`

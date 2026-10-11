@@ -41,6 +41,8 @@ pub enum Event {
     WatchdogStall,
     /// 用户在窗口里选了数据来源（07 §7），随即按选择重新启动服务。
     SourceChosen,
+    /// 用户自己启动，复位了保活的熔断（方案 §5）：此前 30 分钟内异常退出了 `abnormalExits` 次。
+    KeepaliveReset,
 }
 
 impl Event {
@@ -62,19 +64,21 @@ impl Event {
             Event::Exit => "exit",
             Event::WatchdogStall => "watchdog.stall",
             Event::SourceChosen => "source.chosen",
+            Event::KeepaliveReset => "keepalive.reset",
         }
     }
 }
 
 /// 可以进记录的键与它们的类型。别的键一律丢掉，不在这里展开任意载荷。
 const BOOLEAN_KEYS: [&str; 3] = ["background", "agentWake", "clean"];
-const NUMBER_KEYS: [&str; 6] = [
+const NUMBER_KEYS: [&str; 7] = [
     "exitCode",
     "rss",
     "generation",
     "stalledMs",
     "previousPid",
     "uptimeMs",
+    "abnormalExits",
 ];
 const STRING_KEYS: [&str; 8] = [
     "reason",

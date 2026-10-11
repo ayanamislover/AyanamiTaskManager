@@ -10,6 +10,8 @@ mod bridge;
 mod child_env;
 mod headless;
 mod health;
+#[cfg(test)]
+mod keepalive_guard;
 mod lifecycle;
 mod notify;
 mod paths;
@@ -246,6 +248,34 @@ fn publish_host_record(v3_root: &Path) {
     }
 }
 
+/// 用户自己启动：托盘「退出」留下的标记作废，熔断复位。熔断过的，用通知说明自动恢复为什么停过
+/// （方案 §5：「下次由用户启动时，用通知说明原因」）。
+fn keepalive_user_started(v3_root: &Path, lifecycle: &lifecycle::Lifecycle) {
+    use atm_install_state::keepalive;
+    keepalive::clear_user_quit(v3_root);
+    let Some(breaker) = keepalive::reset_breaker(v3_root) else {
+        return;
+    };
+    let exits = breaker.exits.len();
+    lifecycle.record(
+        lifecycle::Event::KeepaliveReset,
+        &[("abnormalExits", serde_json::json!(exits))],
+    );
+    keepalive::log(
+        v3_root,
+        atm_install_state::handoff::now_ms(),
+        &format!("Reset by the user's start ({exits} abnormal exits)"),
+    );
+    notify::show(
+        v3_root,
+        "AyanamiTaskManager 曾停止自动恢复",
+        &format!(
+            "30 分钟内异常退出了 {exits} 次，所以没有再自动拉起。这次由你启动，自动恢复已重新打开；\
+             如果还反复退出，请按排障指南查看日志。"
+        ),
+    );
+}
+
 fn real_main() -> i32 {
     scrub_own_environment();
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -317,6 +347,11 @@ fn real_main() -> i32 {
     let lifecycle = lifecycle::install(layout.v3_root.join("logs"), &version);
     lifecycle::install_panic_hook();
     lifecycle.start(parsed.background, parsed.agent_wake);
+    // 保活（方案 §5、B1）：只有用户自己的启动才算数。登录自启与保活任务都是 `--background`，
+    // Agent 唤醒和 setup 拉起也不是用户的意思。
+    if !parsed.background && !parsed.agent_wake && !matches!(context, Context::TxnStart { .. }) {
+        keepalive_user_started(&layout.v3_root, lifecycle);
+    }
     let target = autostart_target(&layout, &context);
     // setup 拉起（`--txn-start`）：SERVICE_HEALTHY 见证由 runtime 在入口开好之后写。
     let handoff = match &context {
