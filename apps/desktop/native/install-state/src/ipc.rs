@@ -63,6 +63,9 @@ pub enum Command {
     /// 看门狗冒烟：让写线程卡在一个预算很小的作业里（W5g）。
     #[cfg(feature = "smoke")]
     SmokeStallWriter,
+    /// 保活冒烟：像用户点了托盘「完全退出」那样走托盘菜单的分支（W8c）。
+    #[cfg(feature = "smoke")]
+    SmokeTrayQuit,
 }
 
 /// The only routes a second instance may ask for (tray items, deep links of the old app).

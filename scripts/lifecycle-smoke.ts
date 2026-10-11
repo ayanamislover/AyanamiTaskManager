@@ -6,6 +6,8 @@
  *   3. 会话结束（注销 / 关机，Windows 在退出链跑完之前结束进程）：下次报 previous.session-end，不算异常。
  *   4. 看门狗：事件循环停住、写线程卡在作业里，各自在阈值后记 watchdog.stall 并以退出码 3 结束进程；
  *      下次启动报 previous.unclean，previousEvent 是 watchdog.stall。
+ *   5. 保活（W8c）：用户自己启动复位熔断（keepalive.reset + 通知）、清掉托盘退出标记；setup 的 QUIT
+ *      不留标记，托盘「完全退出」留下这次登录的标记，后台启动不清它。
  *
  * 会话结束与两种挂住用 smoke 构建才认的管道命令（`--smoke-session-end`、`--smoke-stall-ui`、
  * `--smoke-stall-writer`）触发；阈值与心跳用 `ATM_SMOKE_WATCHDOG_MS` 调短（正式构建固定 120 s / 60 s）。
@@ -15,7 +17,7 @@
  *   pnpm exec tsx scripts/lifecycle-smoke.ts
  */
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertSmokeHost } from "./package-native.js";
@@ -260,6 +262,91 @@ async function scenarios(executable: string, box: ReturnType<typeof sandbox>): P
   );
   log.check("最后一次 --smoke-quit 干净退出", await stopSmokeHost(sixth));
   await delay(200);
+  await keepalive(executable, box);
+}
+
+/**
+ * 7. 保活（W8c，方案 §5、B1）：`user_quit` 只代表用户主动退出，熔断只由用户自己的启动复位。
+ *    托盘「完全退出」与 setup 的 QUIT 都用真实的管道命令触发（`--smoke-tray-quit` 走托盘菜单的分支）。
+ */
+async function keepalive(executable: string, box: ReturnType<typeof sandbox>): Promise<void> {
+  const { n } = box;
+  const breakerPath = join(n, "runtime", "keepalive.json");
+  const quitPath = join(n, "runtime", "user-quit.json");
+  const now = Date.now();
+  mkdirSync(join(n, "runtime"), { recursive: true });
+  writeFileSync(
+    breakerPath,
+    JSON.stringify({
+      exits: ["k1", "k2", "k3"].map((runId) => ({ runId, atMs: now })),
+      trippedAtMs: now,
+    }),
+  );
+  writeFileSync(quitPath, JSON.stringify({ logon: "another-logon", at: new Date().toISOString() }));
+
+  // 用户自己启动（没有 --background）：熔断复位、记 keepalive.reset、弹通知；旧标记作废。
+  const hostLog = () => readFileSync(join(n, "logs", "host.log"), "utf8");
+  const toasts = () => (hostLog().match(/toast (shown|failed)/gu) ?? []).length;
+  const toastsBefore = toasts();
+  const user = await start(executable, box, []);
+  const reset = run(n, user.pid).find((line) => line.event === "keepalive.reset");
+  log.check(
+    "用户自己启动：熔断复位并记 keepalive.reset(abnormalExits=3)",
+    reset?.abnormalExits === 3 && !existsSync(breakerPath),
+    JSON.stringify(reset),
+  );
+  log.check("用户自己启动：托盘退出标记作废", !existsSync(quitPath));
+  log.check(
+    "熔断复位的那次启动弹了通知（结果进 host.log）",
+    toasts() === toastsBefore + 1,
+    `${toastsBefore} → ${toasts()}`,
+  );
+  log.check(
+    "keepalive.log 记下复位",
+    readFileSync(join(n, "logs", "keepalive.log"), "utf8").includes(
+      "Reset by the user's start (3 abnormal exits)",
+    ),
+  );
+
+  // setup 的 QUIT：干净退出，不留标记。
+  await send(user, "--smoke-setup-quit");
+  const setupCode = await exitCode(user, 15_000);
+  log.check(
+    "setup 的 QUIT：干净退出，不留用户退出标记",
+    setupCode === 0 && run(n, user.pid).at(-1)?.clean === true && !existsSync(quitPath),
+    JSON.stringify({ setupCode, last: run(n, user.pid).at(-1) }),
+  );
+
+  // 托盘「完全退出」：干净退出，留下这次登录的标记。
+  const tray = await start(executable, box);
+  await send(tray, "--smoke-tray-quit");
+  const trayCode = await exitCode(tray, 15_000);
+  const marker = existsSync(quitPath)
+    ? (JSON.parse(readFileSync(quitPath, "utf8")) as { logon?: unknown })
+    : undefined;
+  log.check(
+    "托盘「完全退出」：干净退出，留下这次登录（LUID）的标记",
+    trayCode === 0 &&
+      run(n, tray.pid).at(-1)?.clean === true &&
+      typeof marker?.logon === "string" &&
+      /^[0-9a-f]{16}$/u.test(marker.logon),
+    JSON.stringify({ trayCode, marker }),
+  );
+
+  // 登录自启与保活任务（--background）不是用户的意思：标记留着。
+  const background = await start(executable, box);
+  log.check("后台启动不清标记", existsSync(quitPath));
+  log.check("后台启动的 --smoke-quit 干净退出", await stopSmokeHost(background));
+  log.check("--smoke-quit 不留也不清标记", existsSync(quitPath));
+
+  // 用户再启动一次：标记清掉；没熔断就不记 keepalive.reset。
+  const again = await start(executable, box, []);
+  log.check(
+    "用户再启动：标记清掉，没熔断不记 keepalive.reset",
+    !existsSync(quitPath) && !events(n, again.pid).includes("keepalive.reset"),
+  );
+  log.check("收尾的 --smoke-quit 干净退出", await stopSmokeHost(again));
+  await delay(200);
 }
 
 const executable = smokeHost();
@@ -292,8 +379,17 @@ process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 rmSync(box.home, { recursive: true, force: true, maxRetries: 4, retryDelay: 250 });
 if (!passed) process.exitCode = 1;
 
-async function start(executable: string, box: ReturnType<typeof sandbox>): Promise<SmokeHost> {
-  const host = startSmokeHost({ executable, dataDir: box.n, env: box.env });
+async function start(
+  executable: string,
+  box: ReturnType<typeof sandbox>,
+  args?: string[],
+): Promise<SmokeHost> {
+  const host = startSmokeHost({
+    executable,
+    dataDir: box.n,
+    env: box.env,
+    ...(args === undefined ? {} : { args }),
+  });
   await waitFor(box.n, host.pid, "ready", 120_000);
   return host;
 }

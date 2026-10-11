@@ -1015,6 +1015,14 @@ impl App {
             Command::Quit => self.quit(),
             #[cfg(feature = "smoke")]
             Command::SmokeQuit => self.quit(),
+            // 保活冒烟：与托盘菜单同一个事件、同一个分支。
+            #[cfg(feature = "smoke")]
+            Command::SmokeTrayQuit => self.on_user_event(
+                UserEvent::Menu(MenuEvent {
+                    id: tray_icon::menu::MenuId::new(tray::QUIT),
+                }),
+                target,
+            ),
             // lifecycle 冒烟：Windows 结束会话时窗口过程做的事；之后由冒烟脚本把进程杀掉。
             #[cfg(feature = "smoke")]
             Command::SmokeSessionEnd => crate::session_end::ended(),

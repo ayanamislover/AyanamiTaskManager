@@ -113,6 +113,15 @@ pub fn parse(argv: &[String], electron_run_as_node: bool) -> Result<Args, String
             "--smoke-stall-writer" => {
                 args.smoke_command = Some(atm_install_state::ipc::Command::SmokeStallWriter)
             }
+            // 保活冒烟（W8c）：托盘「完全退出」的分支，与 setup 发的那条 QUIT。
+            #[cfg(feature = "smoke")]
+            "--smoke-tray-quit" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeTrayQuit)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-setup-quit" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::Quit)
+            }
             other => return Err(format!("ARGUMENT_UNKNOWN: {other}")),
         }
     }
