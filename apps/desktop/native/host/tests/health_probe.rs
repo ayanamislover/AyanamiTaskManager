@@ -214,8 +214,18 @@ fn a_bound_probe_checks_the_2x_root_in_process_and_writes_only_its_report() {
     drop(lock);
     let report = install.report("txn-1").expect("the report");
     assert_eq!(
-        (&report["ok"], &report["code"], &report["txnId"], &report["version"]),
-        (&Value::Bool(true), &Value::Null, &Value::from("txn-1"), &Value::from(VERSION)),
+        (
+            &report["ok"],
+            &report["code"],
+            &report["txnId"],
+            &report["version"]
+        ),
+        (
+            &Value::Bool(true),
+            &Value::Null,
+            &Value::from("txn-1"),
+            &Value::from(VERSION)
+        ),
         "{report}"
     );
     assert_eq!(report["startup"], "FIRST_CONVERSION");
@@ -267,7 +277,11 @@ fn data_this_version_cannot_open_fails_the_probe_with_a_code_and_a_scope() {
     fs::create_dir_all(install.legacy().join("sync")).unwrap();
     let secrets = install.legacy().join("sync").join("secrets.dpapi.json");
     let sealed = base64(&atm_sync::dpapi::protect(b"relay token").unwrap());
-    fs::write(&secrets, serde_json::json!({ "relayToken": sealed }).to_string()).unwrap();
+    fs::write(
+        &secrets,
+        serde_json::json!({ "relayToken": sealed }).to_string(),
+    )
+    .unwrap();
     install.journal("txn-2", VERSION, "PROBE");
     let lock = install.hold_lock();
     assert_eq!(install.probe("txn-2"), 0, "{:?}", install.report("txn-2"));

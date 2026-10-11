@@ -93,7 +93,7 @@ ATM 3 规格（`output/atm3-spec`，不进仓库）的每个规则编号，都�
 | P-009 | COVERED | `domain/tests/capability.rs::m12_system_job_snapshot`、`service/tests/session.rs::s012_c08_p1_3_sweep`、`jobs/tests/maintenance.rs::daily_and_weekly_backups_are_made_when_due_and_pruned_by_policy`、`jobs/tests/maintenance.rs::maintenance_cannot_make_user_decisions`、`host/tests/single_process.rs::a_second_instance_hands_its_command_over_and_leaves` | 成功例：maintenance 建 DAILY / WEEKLY 并按策略修剪；反例：maintenance 调 restore_scope、set_lifecycle(Trash)、create_manual_backup 都被拒且零变化。第二实例（W6f）：交出命令后码 0 退出、不开第二份服务，`on_second_instance` 不构造 User、不进界面分发、不写数据；另一个进程的 QUIT 让主实例干净退出 |
 | P-010 | COVERED | `cli/tests/refuse.rs::user_only_commands_are_refused_locally_without_a_single_request`、`cli/tests/refuse.rs::help_names_the_user_only_commands`、`cli/tests/online.rs::backups_list_both_kinds_and_import_previews` | 成功例：`atm backup list` 对 Rust 服务可用；反例：USER_ONLY 子命令本地拒绝、退出码 3、带指引，mock 服务器收到 0 个请求 |
 | P-011 | COVERED | `cli/tests/recover.rs::recover_restores_the_newest_usable_backup_after_confirmation`、`cli/tests/recover.rs::recover_without_offline_or_with_a_bad_backup_changes_nothing`、`cli/tests/recover.rs::recover_is_refused_while_anything_holds_the_admission`、`cli/tests/recover.rs::no_remote_entry_reaches_the_offline_recovery` | 成功例：服务已退出时 `recover --offline` 先封存再恢复到最近的已校验备份，写下 recovered 标记；反例：准入被占（服务在跑或挂住）立即退出、零写入，坏备份零变化，HTTP / MCP 没有 recover 入口（静态扫描） |
-| P-012 | PARTIAL(W8) | `host/tests/single_process.rs::p012_the_host_is_never_built_with_the_e2e_surface` | 成功例：e2e 构建跑 69 条（W5d，Playwright）；这次构建 `E2E_SURFACE` 是 false，宿主的编译期断言在、依赖声明不开 e2e。反例：开 e2e 的依赖写法守卫认得出，真开了宿主编译不过。余 W8：最终候选二进制没有 e2e 符号与监听代码，检查绑定候选哈希 |
+| P-012 | COVERED | `host/tests/single_process.rs::p012_the_host_is_never_built_with_the_e2e_surface` | 成功例：e2e 构建跑 69 条（W5d，Playwright）；这次构建 `E2E_SURFACE` 是 false，宿主的编译期断言在、依赖声明不开 e2e。反例：开 e2e 的依赖写法守卫认得出，真开了宿主编译不过。候选二进制（W8a）：每次打包都逐个 exe 扫 smoke / e2e / drill 构建的字面量（`scripts/package-content-policy.ts` 的 `TEST_BUILD_MARKERS`，扫到就不出包；vitest 用例与 `output/w8-evidence/mutations/mut-w8a.py` 的 ts 组验红），`output/w8-evidence/w8a-binaries.json` 记下生产包五个 exe 的 sha256、零标记、与清单哈希一致；阳性对照：烟测宿主带 smoke 标记、e2e 适配器带 e2e 标记、drill 版 setup 带 drill 标记。发布候选由 W8d 的打包产出，同一扫描在出包前强制执行 |
 | P-013 | COVERED | `host/src/app.rs::p013_only_the_page_that_asked_gets_the_answer`、`store/tests/engine.rs::an_admitted_write_completes_after_the_caller_stops_waiting` | 成功例：(generation, epoch) 相同才投递；反例：epoch+1（页面重载）、generation+1、只有 generation 变了都不投递。窗口途中关闭时服务照常完成（受理的写入一定执行到底） |
 | P-014 | COVERED | `store/tests/engine.rs::readers_are_read_only_and_bounded`、`service/tests/permissions.rs::p005_the_same_calls_succeed_for_the_user`、`service/tests/metrics.rs::metrics_read_writes_nothing`、`ui-bridge/tests/metrics.rs::engineering_metrics_are_read_without_scanning_and_refreshed_on_request`、`http/tests/rest.rs::ui_only_and_deleted_routes_are_404` | 成功例：refresh=true 才扫描并写一行；反例：普通读之后指标行数、整库与数据根文件不变、不起进程；Agent HTTP 访问 #18 得 404 |
 | P-015 | COVERED | `host/src/bridge.rs::p015_copy_text_is_limited_to_one_mib`、`host/src/bridge.rs::source_method_and_arguments_are_checked` | 成功例：1 MiB 的 copyText 收下；反例：多一个字节拒（Arguments），showItemInFolder / setNotificationMode / openPath 不是桥方法（UnknownMethod），setAutoLaunch 收到非布尔值拒 |
@@ -324,8 +324,7 @@ ATM 3 规格（`output/atm3-spec`，不进仓库）的每个规则编号，都�
 | 10 裁决 | 无可测行为 | 2 |
 | 10 裁决 | 部分覆盖，余下后续阶段 | 1 |
 | L | 已覆盖 | 34 |
-| P | 已覆盖 | 16 |
-| P | 部分覆盖，余下后续阶段 | 1 |
+| P | 已覆盖 | 17 |
 | S | 已覆盖 | 65 |
 | S | 按裁决改写后覆盖 | 2 |
 | W | 已覆盖 | 77 |
