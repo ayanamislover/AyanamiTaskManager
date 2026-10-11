@@ -2055,90 +2055,106 @@ async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
   // An empty value means "all": a wrapper that clears the variable may leave it empty, and
   // [""] would silently skip every point.
   const points = process.env.ATM_DRILL_POINTS?.split(",").filter(Boolean);
-  for (const [point, outcome] of expected) {
+  for (const [point, planned] of expected) {
     if (points?.length && !points.includes(point)) continue;
-    process.stdout.write(`\n[${currentScenario}] 2.0 → ${VERSION_A}, die after ${point}\n`);
-    reset(sandbox);
-    if (!(await install20(sandbox))) continue;
-    const before = legacyBusiness(sandbox.data);
-    const extra: Record<string, string> =
-      point === "UNDO:2"
-        ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" }
-        : { ATM_SETUP_DIE_AFTER: point };
-    const beforeSetup = sandbox.logMark();
-    const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], extra);
-    check(`${point}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
-    if (point === "SPAWNED:START") {
-      // The orphaned host runs its own `atm-setup --recover` (no --quiet) from its admission.
-      // Let it take the lock first — the case this point is about; when the launcher's
-      // recovery wins instead it is an ordinary takeover (LEASED:START covers that).
+    // SPAWNED:START races setup's death against the host's admission (see below): repeat until
+    // a round meets the case this point exists for.
+    const rounds = point === "SPAWNED:START" ? 4 : 1;
+    let exercised = point !== "SPAWNED:START";
+    for (let round = 1; round <= rounds; round += 1) {
+      const label = rounds > 1 ? `${point} round ${round}` : point;
+      process.stdout.write(`\n[${currentScenario}] 2.0 → ${VERSION_A}, die after ${label}\n`);
+      reset(sandbox);
+      if (!(await install20(sandbox))) break;
+      const before = legacyBusiness(sandbox.data);
+      const extra: Record<string, string> =
+        point === "UNDO:2"
+          ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" }
+          : { ATM_SETUP_DIE_AFTER: point };
+      const beforeSetup = sandbox.logMark();
+      const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], extra);
+      check(`${label}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
+      let outcome = planned;
+      if (point === "SPAWNED:START") {
+        // The host checks its admission right after it is spawned. Setup already gone (the
+        // lock free): it runs its own `atm-setup --recover` (no --quiet) and waits on it — that
+        // recovery must not take over the host waiting on it (W8b); it undoes. Setup still
+        // alive: the host was admitted as this START and converts; the launcher's recovery
+        // then takes its wait over and commits (LEASED:START's path).
+        const orphan = await until(
+          () => sandbox.since(beforeSetup).includes('["--recover"] root='),
+          15_000,
+        );
+        exercised ||= orphan;
+        outcome = orphan ? "ROLLED_BACK" : "COMMITTED";
+        process.stdout.write(
+          `    · ${orphan ? "the orphaned host recovered itself" : "admitted before setup died: a takeover"}\n`,
+        );
+      } else
+        check(
+          `${label}: journal left unfinished`,
+          sandbox.journal()?.outcome == null,
+          sandbox.journal(),
+        );
+      const mark = sandbox.logMark();
+      const begun = Date.now();
+      const start = runLauncher(sandbox, ["--background"]);
       check(
-        `${point}: the orphaned host started its own recovery`,
-        await until(() => sandbox.since(beforeSetup).includes('["--recover"] root='), 30_000),
-        sandbox.since(beforeSetup).slice(-800),
-      );
-    } else
-      check(
-        `${point}: journal left unfinished`,
-        sandbox.journal()?.outcome == null,
-        sandbox.journal(),
-      );
-    const mark = sandbox.logMark();
-    const begun = Date.now();
-    const start = runLauncher(sandbox, ["--background"]);
-    check(
-      `${point}: the root launcher's start exits 0 within 90 s (${((Date.now() - begun) / 1000).toFixed(1)} s)`,
-      start.status === 0 && Date.now() - begun < 90_000,
-      { status: start.status, err: start.stderr.slice(0, 300) },
-    );
-    check(
-      `${point}: recovered to ${outcome}`,
-      await until(
-        () => sandbox.journal()?.state === "DONE" && sandbox.journal()?.outcome === outcome,
-        240_000,
-      ),
-      { journal: sandbox.journal(), log: sandbox.since(mark).slice(-800) },
-    );
-    const version = outcome === "COMMITTED" ? VERSION_A : V20;
-    check(
-      `${point}: app.json.current = ${version}`,
-      sandbox.pointer()?.current === version,
-      sandbox.pointer(),
-    );
-    check(
-      `${point}: service running ${version}`,
-      await until(() => sandbox.serviceVersion() === version, 60_000),
-      sandbox.serviceVersion(),
-    );
-    const after = summarize(sandbox, `die after ${point} → ${outcome}`);
-    check(`${point}: L untouched`, sameBusiness(after.L, before), after.L);
-    if (outcome === "COMMITTED") {
-      check(`${point}: N holds L's business content`, sameBusiness(after.N, before), after.N);
-      check(
-        `${point}: A=v3, bound to the published generation`,
-        after.authority?.authority === "v3" && after.authority.generation === after.generation,
-        after.authority,
-      );
-    } else {
-      check(
-        `${point}: no 3.x process left`,
-        processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+        `${label}: the root launcher's start exits 0 within 90 s (${((Date.now() - begun) / 1000).toFixed(1)} s)`,
+        start.status === 0 && Date.now() - begun < 90_000,
+        { status: start.status, err: start.stderr.slice(0, 300) },
       );
       check(
-        `${point}: A matches the durable phase (published → legacy, otherwise none)`,
-        after.generation === null
-          ? after.authority === null
-          : after.authority?.authority === "legacy" &&
-              after.authority.generation === after.generation,
-        { generation: after.generation, authority: after.authority },
+        `${label}: recovered to ${outcome}`,
+        await until(
+          () => sandbox.journal()?.state === "DONE" && sandbox.journal()?.outcome === outcome,
+          240_000,
+        ),
+        { journal: sandbox.journal(), log: sandbox.since(mark).slice(-800) },
       );
+      const version = outcome === "COMMITTED" ? VERSION_A : V20;
+      check(
+        `${label}: app.json.current = ${version}`,
+        sandbox.pointer()?.current === version,
+        sandbox.pointer(),
+      );
+      check(
+        `${label}: service running ${version}`,
+        await until(() => sandbox.serviceVersion() === version, 60_000),
+        sandbox.serviceVersion(),
+      );
+      const after = summarize(sandbox, `die after ${label} → ${outcome}`);
+      check(`${label}: L untouched`, sameBusiness(after.L, before), after.L);
+      if (outcome === "COMMITTED") {
+        check(`${label}: N holds L's business content`, sameBusiness(after.N, before), after.N);
+        check(
+          `${label}: A=v3, bound to the published generation`,
+          after.authority?.authority === "v3" && after.authority.generation === after.generation,
+          after.authority,
+        );
+      } else {
+        check(
+          `${label}: no 3.x process left`,
+          processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+        );
+        check(
+          `${label}: A matches the durable phase (published → legacy, otherwise none)`,
+          after.generation === null
+            ? after.authority === null
+            : after.authority?.authority === "legacy" &&
+                after.authority.generation === after.generation,
+          { generation: after.generation, authority: after.authority },
+        );
+      }
+      if (point === "LEASED:START")
+        check(
+          `${label}: the recovery took over the same host's wait`,
+          /taking over the wait for host/u.test(sandbox.since(mark)),
+          sandbox.since(mark).slice(-600),
+        );
+      if (exercised) break;
     }
-    if (point === "LEASED:START")
-      check(
-        `${point}: the recovery took over the same host's wait`,
-        /taking over the wait for host/u.test(sandbox.since(mark)),
-        sandbox.since(mark).slice(-600),
-      );
+    check(`${point}: a round met the case the point is about`, exercised);
   }
   teardown(sandbox);
 }
