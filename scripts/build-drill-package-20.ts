@@ -93,9 +93,18 @@ export function buildDrillPackage20(input: { root: string; outDir: string; force
     if (declared !== LEGACY_VERSION)
       throw new Error(`DRILL_PACKAGE_SOURCE_VERSION: ${declared} ≠ ${LEGACY_VERSION}`);
     run("pnpm", ["install", "--frozen-lockfile"], source);
-    // 2.0 的两个 Rust 工作区各自钉了工具链；rustup 不再自动安装，先装上。
-    run("rustup", ["toolchain", "install"], join(source, "apps", "desktop", "native", "mcp-shim"));
-    run("rustup", ["toolchain", "install"], join(source, "apps", "desktop", "native"));
+    // 2.0 的两个 Rust 工作区各自钉了工具链；rustup 不再自动安装，先装上。不许顺手自更新：
+    // 那会改调用者机器上的 rustup，而且替换 rustup.exe 的同时再调它会 EBUSY（W8d-5 实测）。
+    run(
+      "rustup",
+      ["toolchain", "install", "--no-self-update"],
+      join(source, "apps", "desktop", "native", "mcp-shim"),
+    );
+    run(
+      "rustup",
+      ["toolchain", "install", "--no-self-update"],
+      join(source, "apps", "desktop", "native"),
+    );
     const built = join("output", "drill", `package-${LEGACY_VERSION}`);
     run(
       process.execPath,

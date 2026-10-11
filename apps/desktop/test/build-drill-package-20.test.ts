@@ -61,6 +61,10 @@ describe("2.0 演练包", () => {
       'run("git", ["worktree", "add", "--detach", source, RELEASE_20_COMMIT], root);',
     );
     expect(source).toMatch(/\} finally \{\s+removeSource\(root, source\);\s+\}/u);
+    // 装工具链不许顺带自更新 rustup（改调用者的机器；替换 rustup.exe 时再调它会 EBUSY）。
+    const rustup = source.match(/run\(\s*"rustup",\s*\[[^\]]*\]/gu) ?? [];
+    expect(rustup).toHaveLength(2);
+    for (const call of rustup) expect(call).toContain('"--no-self-update"');
     // 只用 drill setup 的那份构建：生产 2.0 的 setup 没有沙箱。
     expect(source).toContain('"scripts/package-native.ts", "--drill", built]');
   });
