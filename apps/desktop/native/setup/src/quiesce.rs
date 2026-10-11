@@ -364,6 +364,7 @@ mod tests {
             desktop_dir: dir.join("desktop"),
             uninstall_key: r"Software\AyanamiTaskManagerUnitTest\Uninstall".into(),
             run_key: r"Software\AyanamiTaskManagerUnitTest\Run".into(),
+            scheduler_dir: Some(dir.join("scheduler")),
             sandbox: true,
         };
         let write = |root: &Path, pid: u32| {

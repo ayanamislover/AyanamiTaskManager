@@ -35,6 +35,7 @@ fn live(env: &Env) -> Result<Snapshot, String> {
         run: registry::read_value(&env.run_key, env::RUN_VALUE)?,
         shortcuts,
         legacy: None,
+        keepalive: crate::keepalive::Kept::Unknown,
     })
 }
 
@@ -442,6 +443,7 @@ mod tests {
             // Never opened by these tests; a private name all the same.
             uninstall_key: r"Software\AyanamiTaskManagerUnitTest\Uninstall".into(),
             run_key: r"Software\AyanamiTaskManagerUnitTest\Run".into(),
+            scheduler_dir: Some(dir.join("scheduler")),
             sandbox: true,
         }
     }

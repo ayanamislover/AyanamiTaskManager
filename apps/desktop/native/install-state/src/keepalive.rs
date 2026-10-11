@@ -97,6 +97,14 @@ pub fn task_xml(launcher: &Path, user: Option<&str>, start: &str) -> String {
     )
 }
 
+/// 这份任务定义是不是跑这个根启动器的：卸载、回滚只删自己的任务，同名的别的安装的任务留着。
+pub fn runs_launcher(xml: &str, launcher: &Path) -> bool {
+    xml.contains(&format!(
+        "<Command>{}</Command>",
+        xml_text(&launcher.display().to_string())
+    ))
+}
+
 /// setup 注册（或删除）任务的结果。
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -408,6 +416,14 @@ mod tests {
         assert!(xml.contains("<RunLevel>LeastPrivilege</RunLevel>"));
         assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
         assert!(!xml.contains("a&b"), "unescaped");
+        assert!(runs_launcher(
+            &xml,
+            Path::new(r"C:\Users\a&b\AppData\Local\AyanamiTaskManager\AyanamiTaskManager.exe")
+        ));
+        assert!(!runs_launcher(
+            &xml,
+            Path::new(r"D:\Other\AyanamiTaskManager.exe")
+        ));
         // 不知道用户名时不写 UserId（注册时按调用者）。
         assert!(!task_xml(Path::new("x"), None, "s").contains("<UserId>"));
     }

@@ -34,6 +34,9 @@ pub struct Env {
     /// HKCU-relative.
     pub uninstall_key: String,
     pub run_key: String,
+    /// The keepalive task's scheduler: `None` is the Windows Task Scheduler; a drill and the
+    /// unit tests give a folder, so they never register a real task.
+    pub scheduler_dir: Option<PathBuf>,
     pub sandbox: bool,
 }
 
@@ -114,6 +117,7 @@ impl Env {
                 r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UNINSTALL_NAME}"
             ),
             run_key: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
+            scheduler_dir: None,
             sandbox: false,
         })
     }
@@ -140,6 +144,7 @@ impl Env {
             desktop_dir: sandbox.join("desktop"),
             uninstall_key: format!(r"{registry}\Uninstall\{UNINSTALL_NAME}"),
             run_key: format!(r"{registry}\Run"),
+            scheduler_dir: Some(sandbox.join("scheduler")),
             sandbox: true,
         }
     }

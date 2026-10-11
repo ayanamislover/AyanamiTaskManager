@@ -7,6 +7,7 @@ mod log;
 mod env;
 mod fault;
 mod fsx;
+mod keepalive;
 mod legacy;
 mod maintain;
 mod package;
