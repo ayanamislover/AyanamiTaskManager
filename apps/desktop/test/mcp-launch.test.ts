@@ -279,15 +279,20 @@ describe("过期判定", () => {
         true,
       ),
     ).toBe(false);
-    // 宿主只在没有继承覆盖、LOCALAPPDATA 等于系统已知文件夹时才设它，并清掉继承来的同名变量。
-    const core = readFileSync(
-      join(process.cwd(), "apps/desktop/native/host/src/core_process.rs"),
-      "utf8",
+    // 3.0 没有 Node core（W8a）：判定留在宿主自己（Agent 配置修复在 agents.rs），只在没有继承覆盖、
+    // LOCALAPPDATA 等于系统已知文件夹时成立；这个标记不再设给任何子进程，继承来的同名变量照样清掉。
+    const hostSource = (name: string) =>
+      readFileSync(join(process.cwd(), "apps/desktop/native/host/src", name), "utf8");
+    const childEnv = hostSource("child_env.rs");
+    expect(childEnv).toContain(
+      "pub(crate) fn product_default_data_root(data_dir: &Path) -> bool {",
     );
-    expect(core).toContain('process.env("ATM_DATA_DIR", data_dir);');
-    expect(core).toContain("if product_default_data_root(data_dir) {");
-    expect(core).toContain("crate::win::known_local_app_data()");
-    expect(core).toContain("|| upper == PRODUCT_DATA_ROOT");
+    expect(childEnv).toContain("crate::win::known_local_app_data()");
+    expect(childEnv).toContain("|| upper == PRODUCT_DATA_ROOT");
+    expect(childEnv).not.toMatch(/\.env\(\s*(?:PRODUCT_DATA_ROOT|"ATM_PRODUCT_DATA_ROOT")/u);
+    expect(hostSource("agents.rs")).toContain(
+      "crate::child_env::product_default_data_root(&layout.data_dir)",
+    );
   });
 
   it("开发态默认数据根不覆盖正式 current 与 Agent 配置", () => {

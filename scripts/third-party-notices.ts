@@ -3,7 +3,10 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
-import { RENDERER_PACKAGES_FILE, type RendererPackage } from "./renderer-packages.js";
+import {
+  RENDERER_PACKAGES_FILE,
+  type RendererPackage,
+} from "../apps/desktop/scripts/renderer-packages.js";
 
 /**
  * 版本目录里的 THIRD_PARTY_NOTICES.txt：随包分发的第三方组件及其许可证原文。

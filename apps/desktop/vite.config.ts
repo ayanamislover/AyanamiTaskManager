@@ -2,7 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { RENDERER_PACKAGES_FILE, rendererPackages } from "../../scripts/renderer-packages.js";
+import { RENDERER_PACKAGES_FILE, rendererPackages } from "./scripts/renderer-packages.js";
 
 // index.html 写的是生产 CSP（与宿主 assets.rs 下发的响应头一致，connect-src 'none'）。
 // 只有 dev server 需要让页面直连本机 daemon 和 HMR 的 websocket。

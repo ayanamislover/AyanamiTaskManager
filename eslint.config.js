@@ -16,6 +16,9 @@ export default tseslint.config(
       "node_modules/**",
       "apps/mobile/android/**",
       "**/.local/**",
+      // cargo 的构建目录：用例在里面生成 .ts / .mjs 夹具（例如 metrics 的合成项目）。
+      "apps/desktop/native/target*/**",
+      "apps/desktop/native/mcp-shim/target/**",
       // Agent worktrees of other branches live here (with their own build output); each
       // branch is linted in its own checkout.
       ".claude/**",

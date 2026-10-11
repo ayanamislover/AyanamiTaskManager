@@ -224,6 +224,7 @@ const random = () => {
 const u32 = () => Math.floor(random() * 4294967296);
 // 最短位数下两个候选与 x 等距（x 的精确十进制展开恰好多一位、末位是 5）时，JS 取末位为偶数的那个
 // （W1 peer r4 P2-08）。二进制分数 a + b / 2^k 的精确展开短，这种情况多。
+// eslint-disable-next-line no-loss-of-precision -- 这两个字面量就是要 JS 自己按最短位数取整的输入
 [1951.0000610351562, -1951.0000610351562].forEach(add);
 for (let i = 0; i < 4000; i++) {
   const k = 8 + Math.floor(random() * 40);

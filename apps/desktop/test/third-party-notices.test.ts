@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { join, resolve } from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { packageOfModule, rendererPackages } from "../../../scripts/renderer-packages.js";
+import { packageOfModule, rendererPackages } from "../scripts/renderer-packages.js";
 import {
   buildThirdPartyNotices,
   LICENSE_TEXT_PENDING,

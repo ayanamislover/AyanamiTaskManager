@@ -21,7 +21,8 @@ describe("runtime secret safety guards", () => {
       "apps/desktop/src/core-main.ts",
       "apps/desktop/src/renderer.tsx",
       "apps/desktop/native/host/src/bridge.rs",
-      "apps/desktop/native/host/src/core_process.rs",
+      "apps/desktop/native/host/src/child_env.rs",
+      "apps/desktop/native/host/src/headless.rs",
       "packages/cli/src/index.ts",
       "packages/cli/src/runtime.ts",
       "scripts/migrate-data-root.ts",
@@ -78,7 +79,7 @@ describe("runtime secret safety guards", () => {
     };
     const core = read("apps/desktop/src/core-main.ts");
     const integrations = read("apps/desktop/src/main-agent-integrations.ts");
-    const host = ["bridge.rs", "core_process.rs", "app.rs"]
+    const host = ["bridge.rs", "child_env.rs", "headless.rs", "app.rs"]
       .map((name) => read(`apps/desktop/native/host/src/${name}`))
       .join("\n");
     expect(leaks(core, integrations, host)).toEqual([]);
