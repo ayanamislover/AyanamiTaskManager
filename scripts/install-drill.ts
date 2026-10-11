@@ -2065,13 +2065,24 @@ async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
       point === "UNDO:2"
         ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" }
         : { ATM_SETUP_DIE_AFTER: point };
+    const beforeSetup = sandbox.logMark();
     const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], extra);
     check(`${point}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
-    check(
-      `${point}: journal left unfinished`,
-      sandbox.journal()?.outcome == null,
-      sandbox.journal(),
-    );
+    if (point === "SPAWNED:START") {
+      // The orphaned host runs its own `atm-setup --recover` (no --quiet) from its admission.
+      // Let it take the lock first — the case this point is about; when the launcher's
+      // recovery wins instead it is an ordinary takeover (LEASED:START covers that).
+      check(
+        `${point}: the orphaned host started its own recovery`,
+        await until(() => sandbox.since(beforeSetup).includes('["--recover"] root='), 30_000),
+        sandbox.since(beforeSetup).slice(-800),
+      );
+    } else
+      check(
+        `${point}: journal left unfinished`,
+        sandbox.journal()?.outcome == null,
+        sandbox.journal(),
+      );
     const mark = sandbox.logMark();
     const begun = Date.now();
     const start = runLauncher(sandbox, ["--background"]);
