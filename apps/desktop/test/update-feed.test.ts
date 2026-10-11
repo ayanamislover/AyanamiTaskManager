@@ -2,8 +2,13 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { scanUpdateFeed } from "../src/update-coordinator.js";
-import { deliverUpdate, pruneConsumedFeed } from "../../../scripts/update-feed.js";
+import {
+  compareVersions,
+  consumedFeedFiles,
+  deliverUpdate,
+  pruneConsumedFeed,
+  updateFeedDir,
+} from "../../../scripts/update-feed.js";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -48,7 +53,7 @@ describe("本地更新源", () => {
     expect(source.indexOf("rmSync(join(feed, manifestName)")).toBeGreaterThan(0);
   });
 
-  // 投递是一次性的，装完没人负责收。清理的判据必须和运行中的 core 是同一份，
+  // 投递是一次性的，装完没人负责收。清理的判据必须和宿主的 scan_feed 是同一份，
   // 否则一边把包当「还没装」提示更新，另一边已经把它删了。
   it("装好之后只清已消费的：不高于已装版本的包与 Squirrel 遗留，更新的与无关文件都留下", () => {
     const feed = join(scratch(), "feed");
@@ -76,21 +81,42 @@ describe("本地更新源", () => {
       "atm-9.0.2-win-x64.zip",
       "notes.txt",
     ]);
-    // 与 core 同口径：剩下的正是 core 会当成待装候选的那个版本。
-    expect(scanUpdateFeed(feed, "9.0.1").consumed).toEqual([]);
+    // 剩下的正是宿主会当成待装候选的那个版本，再扫一遍没有可清的。
+    expect(consumedFeedFiles(feed, "9.0.1")).toEqual([]);
     // 幂等。
     expect(pruneConsumedFeed(feed, "9.0.1")).toEqual([]);
   });
 
-  // 「feed 在哪」和「快捷方式在哪」是同一类问题：两处各存一份认知，迟早一处
-  // 投递、另一处清理，对不上。updater.ts 是应用读 feed 的地方，就以它为准。
-  it("只有 updater.ts 知道 feed 的目录名", () => {
+  // 名字不合模式的不碰：与宿主的 version_valid / squirrel_name 同一规则。
+  it("只清合模式的名字：坏版本号、多一层后缀、目录都留下", () => {
+    const feed = join(scratch(), "feed");
+    mkdirSync(join(feed, "atm-1.0.0-win-x64.zip"), { recursive: true });
+    for (const name of [
+      "atm-1.0-win-x64.json",
+      "atm-1.0.0.0-win-x64.zip",
+      "atm-1.0.0-win-x64.json.partial",
+      "atm-01234567890.0.0-win-x64.json",
+      "-bad.nupkg",
+      "atm-1.0.0-rc.1-win-x64.json",
+    ])
+      writeFileSync(join(feed, name), "x");
+    expect(consumedFeedFiles(feed, "2.0.0")).toEqual(["atm-1.0.0-rc.1-win-x64.json"]);
+    expect(compareVersions("1.1.0", "1.0.27")).toBe(1);
+    // 与 compare_versions 一样只按「.」切段：「0-rc」取 0，其后的「1」算第四段。
+    expect(compareVersions("3.0.0-rc.1", "3.0.0")).toBe(1);
+    expect(compareVersions("3.0.0-rc", "3.0.0")).toBe(0);
+    expect(compareVersions("3.0", "3.0.0")).toBe(0);
+  });
+
+  // 「feed 在哪」和「快捷方式在哪」是同一类问题：两处各存一份认知，迟早一处投递、另一处清理，
+  // 对不上。读 feed 的是宿主（jobs/src/update.rs，data_dir 由宿主传 N）；脚本这边只有
+  // update-feed.ts 知道目录名。
+  it("只有 update-feed.ts 知道 feed 的目录名，且与宿主读的是同一处（N 下的 updates）", () => {
     const sources = [
       "scripts/release-and-install.ts",
-      "scripts/update-feed.ts",
       "scripts/distribution-smoke.ts",
-      "apps/desktop/src/core-main.ts",
-      "apps/desktop/src/update-coordinator.ts",
+      "scripts/distribution-common.ts",
+      "scripts/distribution-installed.ts",
     ];
     for (const source of sources) {
       const content = readFileSync(join(process.cwd(), source), "utf8");
@@ -99,9 +125,19 @@ describe("本地更新源", () => {
         hardcoded: false,
       });
     }
-    // 阳性对照：扫描面本身是活的——updater.ts 里确实有这个字面量。
-    expect(readFileSync(join(process.cwd(), "apps/desktop/src/updater.ts"), "utf8")).toContain(
-      `"updates"`,
+    const native = (path: string) =>
+      readFileSync(join(process.cwd(), "apps/desktop/native", path), "utf8");
+    expect(readFileSync(join(process.cwd(), "scripts/update-feed.ts"), "utf8")).toContain(
+      `return join(v3Root, "updates");`,
+    );
+    expect(native("jobs/src/update.rs")).toContain(`feed: o.data_dir.join("updates"),`);
+    expect(native("host/src/app.rs")).toMatch(
+      /Coordinator::new\(updates::Options \{\s*data_dir: self\.layout\.v3_root\.clone\(\),/u,
+    );
+    expect(updateFeedDir("C:\\N")).toBe("C:\\N\\updates");
+    // 不再借 2.x Node 的更新协调。
+    expect(readFileSync(join(process.cwd(), "scripts/update-feed.ts"), "utf8")).not.toMatch(
+      /update-coordinator|updater\.js/u,
     );
   });
 });

@@ -64,17 +64,18 @@ describe("非签发按阶段依赖复用", () => {
     for (const path of ["scripts/release.ts", "scripts/release-and-install.ts"]) {
       const source = readFileSync(`${root}/${path}`, "utf8");
       expect(source, path).not.toContain("decideNonReleaseStageReuse");
-      expect(source, path).toContain("selectReusableReleaseCommands");
     }
     const releaseSource = readFileSync(`${root}/scripts/release.ts`, "utf8");
+    expect(releaseSource).toContain("selectReusableReleaseCommands");
     expect(releaseSource).toContain("parseReleaseRunMode(process.argv.slice(2))");
     expect(releaseSource).toContain('releaseMode === "full"');
+    // 3.x 起 release-and-install 不再清场，沿用旧证据与否只由 release.ts 按完整指纹判定：
+    // 这里只把 --resume 原样交给它。
     const installSource = readFileSync(`${root}/scripts/release-and-install.ts`, "utf8");
     expect(installSource).toContain('flag("resume")');
-    expect(installSource).toContain("previousRun?.passed === true");
+    expect(installSource).toContain('"pnpm exec tsx scripts/release.ts --resume --local-only"');
     expect(installSource).not.toContain("stage-inputs-unchanged");
     expect(releaseSource).toContain("assertReleaseResumeEvidence");
-    expect(installSource).toContain("assertReleaseResumeEvidence");
     expect(installSource).toContain("assertReleaseCandidateIdentity");
     expect(installSource).toContain("assertReleaseArtifact");
     expect(installSource).toContain(
