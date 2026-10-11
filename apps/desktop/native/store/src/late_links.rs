@@ -793,15 +793,10 @@ fn locations_follow_windows_path_equality() {
     assert_eq!(with(r"W:\Data\N", base), None);
     assert!(key(r"W:\Data\N").supported());
     // 证明不了的盘符一律不支持，不当外部位置（peer r11 P1-01）：设备目标带路径后缀（与 `C:\Data` 是同一个位置，
-    // 但不是卷的根）、WebDAV、Mup 下的其他重定向器、残缺的 Mup 目标、目标里有空段、服务器名以 `;` 开头、只有服务器
-    // 没有共享。
-    for p in [
-        r"D:\N\x", r"F:\N\x", r"H:\N\x", r"I:\N\x", r"J:\N\x", r"L:\N\x", r"N:\N\x",
-    ] {
-        assert!(!key(p).supported(), "{p}");
-        assert!(!key(p).unc(), "{p}");
-        assert_eq!(with(p, base), None, "{p}");
-    }
+    // 但不是卷的根）。认不出的重定向器另有一条用例（`unrecognised_redirector_targets_are_refused`）。
+    assert!(!key(r"D:\N\x").supported());
+    assert!(!key(r"D:\N\x").unc());
+    assert_eq!(with(r"D:\N\x", base), None);
     // 至多跟 4 层 subst：U 经四层到 Q；V 要五层，不支持（不当外部位置）。指向自己的、没有的盘符也不支持。
     assert_eq!(with(r"U:\x", r"Q:\r\s\t\u"), x());
     for p in [r"V:\x", r"P:\x", r"E:\x"] {
@@ -818,6 +813,46 @@ fn locations_follow_windows_path_equality() {
         inside(r"\\?\C:\Data\N\backups\", base),
         Some(vec!["backups".to_owned()])
     );
+}
+
+/// r11 P1-01（r12 P2-01 拆成单独一条：变异要能打在这几种重定向器目标上，不被别的断言先挡住）：映射盘符的目标
+/// 只认格式完全对得上的 LanmanRedirector。其余的不支持、也不是 UNC：WebDAV、Mup 下的其他重定向器、残缺的 Mup
+/// 目标、目标里有空段、服务器名以 `;` 开头、只有服务器没有共享。卷名查询照 Windows 的样子给不出（这些盘符不是卷的
+/// 根）。对照：格式对得上的两种是那个 UNC 位置。
+#[test]
+fn unrecognised_redirector_targets_are_refused() {
+    use crate::engine::Location;
+    let dev = |d: &[u16]| -> Option<Vec<u16>> {
+        let target = match String::from_utf16_lossy(d).to_ascii_uppercase().as_str() {
+            "Y:" => r"\Device\LanmanRedirector\;Y:0000000000012345\server\share",
+            "X:" => r"\Device\Mup\;LanmanRedirector\;X:0000000000012345\server\share",
+            "F:" => r"\Device\WebDavRedirector\;F:0000000000012345\server@SSL\DavWWWRoot",
+            "H:" => r"\Device\Mup\;WebDavRedirector\;H:0000000000012345\server\share",
+            "I:" => r"\Device\Mup\;LanmanRedirector\;I:0000000000012345",
+            "J:" => r"\Device\LanmanRedirector\;J:0000000000012345\server\\share",
+            "L:" => r"\Device\LanmanRedirector\;L:0000000000012345\;server\share",
+            "N:" => r"\Device\LanmanRedirector\;N:0000000000012345\server",
+            _ => return None,
+        };
+        Some(target.encode_utf16().collect())
+    };
+    let vol = |_: &[u16]| -> Option<Vec<u16>> { None };
+    let key = |p: &str| Location::of_with(Path::new(p), &dev, &vol);
+    let share = key(r"\\server\share\N");
+    for p in [r"Y:\N\x", r"X:\N\x"] {
+        assert!(key(p).unc(), "{p}");
+        assert_eq!(key(p).below(&share).map(|r| r.len()), Some(1), "{p}");
+    }
+    let mut accepted = Vec::new();
+    for p in [
+        r"F:\N\x", r"H:\N\x", r"I:\N\x", r"J:\N\x", r"L:\N\x", r"N:\N\x",
+    ] {
+        let k = key(p);
+        if k.supported() || k.unc() {
+            accepted.push(format!("{p}: {k:?}"));
+        }
+    }
+    assert!(accepted.is_empty(), "accepted: {accepted:?}");
 }
 
 /// r7 P1-01：名字只是「Unicode 全量大写后相同」的另一个目录（`straße` 与 `STRASSE`）是真正的外部位置：备份落在
