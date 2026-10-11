@@ -156,13 +156,40 @@ export function assertNoTestBuildMarkers(
   }
 }
 
-function buildNative(root: string, drill: boolean, smoke: boolean): void {
-  const cwd = join(root, NATIVE_CRATE_DIR);
-  const env = {
+function nativeBuildEnv(root: string): NodeJS.ProcessEnv {
+  return {
     ...releaseRustEnv(root),
     CARGO_TARGET_DIR: "target",
     ATM_REQUIRE_VERSION_RESOURCE: "1",
   };
+}
+
+/**
+ * 只构建演练用 setup（drill feature，连同演练要的 examples）。cargo 是增量的：源码没变就什么都不做。
+ * install-drill 每次都先调它——演练包里的 setup 必须是这份源码的，不能是上回留下的。
+ */
+export function buildDrillSetup(root: string): void {
+  run(
+    "cargo",
+    [
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "atm-setup",
+      "--features",
+      "drill",
+      "--bins",
+      "--examples",
+    ],
+    join(root, NATIVE_CRATE_DIR),
+    { ...nativeBuildEnv(root), CARGO_TARGET_DIR: "target-drill" },
+  );
+}
+
+function buildNative(root: string, drill: boolean, smoke: boolean): void {
+  const cwd = join(root, NATIVE_CRATE_DIR);
+  const env = nativeBuildEnv(root);
   run(
     "cargo",
     [
@@ -181,26 +208,7 @@ function buildNative(root: string, drill: boolean, smoke: boolean): void {
     cwd,
     env,
   );
-  if (drill)
-    run(
-      "cargo",
-      [
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "atm-setup",
-        "--features",
-        "drill",
-        "--bins",
-        "--examples",
-      ],
-      cwd,
-      {
-        ...env,
-        CARGO_TARGET_DIR: "target-drill",
-      },
-    );
+  if (drill) buildDrillSetup(root);
   if (smoke)
     run("cargo", ["build", "--release", "--locked", "-p", "atm-host", "--features", "smoke"], cwd, {
       ...env,

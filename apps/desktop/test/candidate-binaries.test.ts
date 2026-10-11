@@ -10,6 +10,7 @@ import {
   candidateBindingMismatches,
   candidateBinariesPath,
   readCandidateBinaries,
+  staleBinaryKeys,
   writeCandidateBinaries,
   zipBinaries,
   type BinarySet,
@@ -224,6 +225,40 @@ describe("候选与报告两头都写了哈希", () => {
     const drill = read("install-drill.ts");
     expect(drill).toContain("...(existsSync(app) ? binariesOf(app) : {}),");
     expect(drill).toContain("binaries: drillBinaries(),");
+  });
+});
+
+// W8d-5 全链实测：install-drill 复用了上回留下的演练包，报告里的 exe 哈希与候选对不上——演练测的
+// 是旧构建。包只有在里面的 exe 就是当前构建时才能复用；发布链干脆每次重打。
+describe("演练包必须是当前构建打的", () => {
+  it("版本目录里的 exe 与期望逐个比，对不上的点名，不完整的算缺", () => {
+    const root = scratch();
+    const dir = appDir(root, "app-9.0.0", "release");
+    expect(staleBinaryKeys(dir, set("release"))).toEqual([]);
+    expect(staleBinaryKeys(dir, { ...set("release"), cli: sha("new:cli") })).toEqual([
+      "package.cli",
+    ]);
+    rmSync(join(dir, APP_LAYOUT.launcher));
+    expect(staleBinaryKeys(dir, set("release"))).toEqual(["package.missing"]);
+    expect(staleBinaryKeys(join(root, "absent"), set("release"))).toEqual(["package.missing"]);
+  });
+
+  it("install-drill 先构建 drill setup，再拿当前构建比包，对不上就重打", () => {
+    const drill = readFileSync(join(process.cwd(), "scripts", "install-drill.ts"), "utf8");
+    const body = drill.slice(
+      drill.indexOf("function packages(rebuild: boolean)"),
+      drill.indexOf("type Packages = "),
+    );
+    expect(body.indexOf("buildDrillSetup(root);")).toBeGreaterThan(0);
+    expect(body.indexOf("buildDrillSetup(root);")).toBeLessThan(
+      body.indexOf("const expected = currentDrillBinaries();"),
+    );
+    expect(body).toContain("staleBinaryKeys(join(out(version), `app-${version}`), expected)");
+    expect(body).toMatch(/rebuild \|\|\s+stale\.length > 0 \|\|/u);
+    // 期望的五个 exe：当前的生产宿主、启动器、CLI、shim，加这份源码的 drill setup。
+    expect(drill).toMatch(
+      /host: release\.host,\s+launcher: release\.launcher,\s+setup: drillSetup\(root\),\s+cli: release\.cli,\s+mcpShim: join\(root, MCP_SHIM_RELEASE_EXE\),/u,
+    );
   });
 });
 

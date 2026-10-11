@@ -46,7 +46,11 @@ const commands: Array<{ name: string; args: string[] }> = [
   { name: "packaged-smoke", args: ["smoke:packaged"] },
   { name: "distribution-smoke", args: ["exec", "tsx", "scripts/distribution-smoke.ts"] },
   // 安装、更新、回滚、2.x→3.0 转换与保活的沙箱演练；2.x 场景要 output/drill/package-2.0.0。
-  { name: "install-drill", args: ["exec", "tsx", "scripts/install-drill.ts"] },
+  // 演练包从这次构建重打：上回留下的包里是旧的 exe，演练就不是在测候选。
+  {
+    name: "install-drill",
+    args: ["exec", "tsx", "scripts/install-drill.ts", "--rebuild-packages"],
+  },
   // 3.0 预算（08 §3）：体积、内存、冷启动，量的是生产便携包与 smoke 构建。
   {
     name: "budget",

@@ -130,3 +130,15 @@ export function bindingMismatches(
     .filter((key) => actual?.[key]?.toLowerCase() !== expected[key])
     .map((key) => `${label}.${key}`);
 }
+
+/**
+ * 一个版本目录里的 exe 与期望的哪些对不上（`package.<key>`）；目录不完整就是 `package.missing`。
+ * install-drill 用它判定上回留下的演练包还是不是当前构建打的。
+ */
+export function staleBinaryKeys(appDir: string, expected: BinarySet): string[] {
+  try {
+    return bindingMismatches("package", expected, binariesOf(appDir));
+  } catch {
+    return ["package.missing"];
+  }
+}

@@ -36,8 +36,21 @@ import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
 import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
-import { binariesOf, sha256File } from "./candidate-binaries.js";
-import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
+import {
+  BINARY_KEYS,
+  binariesOf,
+  sha256File,
+  staleBinaryKeys,
+  type BinarySet,
+} from "./candidate-binaries.js";
+import { MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
+import {
+  buildDrillSetup,
+  drillSetup,
+  NATIVE_CRATE_DIR,
+  nativeRelease,
+  packageNative,
+} from "./package-native.js";
 
 const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
@@ -320,13 +333,40 @@ function teardown(sandbox: Sandbox): void {
   reg(["delete", sandbox.registry, "/f"]);
 }
 
+/**
+ * 演练包里该有的五个 exe：当前构建出的宿主、启动器、CLI、shim（就是候选那份，L6 拿报告里的哈希对它），
+ * 加这份源码的 drill setup。
+ */
+function currentDrillBinaries(): BinarySet {
+  const release = nativeRelease(root);
+  const paths = {
+    host: release.host,
+    launcher: release.launcher,
+    setup: drillSetup(root),
+    cli: release.cli,
+    mcpShim: join(root, MCP_SHIM_RELEASE_EXE),
+  };
+  return Object.fromEntries(BINARY_KEYS.map((key) => [key, sha256File(paths[key])])) as BinarySet;
+}
+
 function packages(rebuild: boolean): {
   a: { setup: string; manifest: string };
   b: { setup: string; manifest: string };
 } {
   const out = (version: string) => join(drillRoot, `package-${version}`);
-  for (const version of [VERSION_A, VERSION_B])
-    if (rebuild || !existsSync(join(out(version), `atm-${version}-win-x64.json`)))
+  // 上回留下的包可能是旧构建打的：那样演练测的就不是这次的候选（W8d-5 全链实测，绑定对不上）。
+  // drill setup 每次增量构建一遍，包里的 exe 与当前构建逐个比哈希，对不上就重打。
+  buildDrillSetup(root);
+  const expected = currentDrillBinaries();
+  for (const version of [VERSION_A, VERSION_B]) {
+    const stale = staleBinaryKeys(join(out(version), `app-${version}`), expected);
+    if (stale.length > 0)
+      process.stdout.write(`package ${version} is stale: ${stale.join(", ")}\n`);
+    if (
+      rebuild ||
+      stale.length > 0 ||
+      !existsSync(join(out(version), `atm-${version}-win-x64.json`))
+    )
       packageNative({
         root,
         build: false,
@@ -334,6 +374,7 @@ function packages(rebuild: boolean): {
         drillVersion: version,
         outDir: out(version),
       });
+  }
   const at = (version: string) => ({
     setup: join(out(version), "atm-setup.exe"),
     manifest: join(out(version), `atm-${version}-win-x64.json`),

@@ -53,13 +53,14 @@ const releaseGateContracts = [
   {
     name: "install drill",
     source: "releaseRunner",
-    needle: '{ name: "install-drill", args: ["exec", "tsx", "scripts/install-drill.ts"] },',
+    needle:
+      'name: "install-drill",\n    args: ["exec", "tsx", "scripts/install-drill.ts", "--rebuild-packages"],',
   },
   {
     name: "budget",
     source: "releaseRunner",
     needle:
-      'args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],',
+      'name: "budget",\n    args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],',
   },
   {
     name: "portable smoke",
