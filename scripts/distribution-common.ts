@@ -8,7 +8,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { agentFetch } from "./agent-fetch.js";
 import { parseTasklistCsv, type AppProcess } from "./app-processes.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
@@ -128,12 +128,23 @@ function appWindowVisible(pid: number): boolean {
 /** 宿主这次运行用的根。`l` 为 null：用产品默认的根（只在干净机器上的安装那一半）。 */
 export type HostRoots = { l: string; n: string } | { l: null; n: string };
 
-/** 宿主的环境：隔离运行把两个根都显式给出；产品默认运行去掉所有数据根覆盖。 */
+/**
+ * 宿主的环境：隔离运行把两个根都显式给出，LOCALAPPDATA 也指到它们旁边（宿主里还有按它找默认根的
+ * 地方，一律落进 output/）；产品默认运行去掉所有数据根覆盖。变量名按大写比较（Windows 不分大小写）。
+ */
 export function hostEnvironment(roots: HostRoots): NodeJS.ProcessEnv {
+  const replaced =
+    roots.l === null ? DATA_ROOT_OVERRIDES : [...DATA_ROOT_OVERRIDES, "LOCALAPPDATA"];
   const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !DATA_ROOT_OVERRIDES.includes(key.toUpperCase())),
+    Object.entries(process.env).filter(([key]) => !replaced.includes(key.toUpperCase())),
   );
-  return roots.l === null ? env : { ...env, ATM_DATA_DIR: roots.l, ATM3_DATA_DIR: roots.n };
+  if (roots.l === null) return env;
+  return {
+    ...env,
+    ATM_DATA_DIR: roots.l,
+    ATM3_DATA_DIR: roots.n,
+    LOCALAPPDATA: join(dirname(roots.n), "LocalAppData"),
+  };
 }
 
 /**

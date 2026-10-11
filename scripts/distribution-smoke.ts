@@ -55,7 +55,12 @@ async function portable(): Promise<void> {
   check("便携 zip 可解压", run(resolveSystemTar(), ["-xf", zip, "-C", portableRoot]) === 0, zip);
   const appDir = join(portableRoot, `AyanamiTaskManager-${packageVersion}`);
   const executable = join(appDir, "AyanamiTaskManager.exe");
-  check("便携目录带 portable 标记", existsSync(join(appDir, "portable")), appDir);
+  const marker = join(appDir, "portable");
+  check(
+    "便携目录带 portable 标记，写着本次版本",
+    existsSync(marker) && readFileSync(marker, "utf8").trim() === packageVersion,
+    marker,
+  );
   const dataDir = join(outputRoot, "portable-data");
   const roots = { l: join(dataDir, "L"), n: join(dataDir, "N") };
   const realNBefore = existsSync(realN);

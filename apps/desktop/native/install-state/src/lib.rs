@@ -341,12 +341,31 @@ pub fn read_journal(install_root: &Path) -> Result<Option<Transaction>, StateErr
 pub fn app_dir_version(app_dir: &Path) -> Option<String> {
     let name = app_dir.file_name()?.to_str()?;
     let version = name.strip_prefix(APP_DIR_PREFIX)?;
-    let valid = !version.is_empty()
+    version_text(version).then(|| version.to_owned())
+}
+
+fn version_text(version: &str) -> bool {
+    !version.is_empty()
         && version.len() <= 64
         && version
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
-    valid.then(|| version.to_owned())
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// The version this layout runs as. Installed: the `app-<version>` directory name. Portable:
+/// the version packaging wrote into the `portable` marker — the user may unpack or rename the
+/// folder to anything, so its name says nothing. `None` is a source run (or a marker without a
+/// valid version), which reports itself as `dev`.
+pub fn product_version(app_dir: &Path) -> Option<String> {
+    if let Some(version) = app_dir_version(app_dir) {
+        return Some(version);
+    }
+    let marker = fs::read(app_dir.join(PORTABLE_MARKER)).ok()?;
+    if marker.len() > 64 {
+        return None;
+    }
+    let text = std::str::from_utf8(&marker).ok()?.trim();
+    version_text(text).then(|| text.to_owned())
 }
 
 pub fn app_dir_for(install_root: &Path, version: &str) -> PathBuf {
@@ -586,6 +605,27 @@ mod tests {
         assert_eq!(app_dir_version(Path::new("C:/x/app-")), None);
         assert_eq!(app_dir_version(Path::new("C:/x/app-1 2")), None);
         assert_eq!(app_dir_version(Path::new("C:/x/current")), None);
+    }
+
+    /// 便携版的目录名随用户解压、改名，不能当版本：版本在打包写进的 portable 标记里。
+    #[test]
+    fn a_portable_layout_runs_as_the_version_in_its_marker() {
+        let root = scratch("portable-version");
+        let app = root.0.join("AyanamiTaskManager-whatever");
+        fs::create_dir_all(&app).unwrap();
+        assert_eq!(product_version(&app), None, "no marker: a source run");
+        fs::write(app.join(PORTABLE_MARKER), b"3.0.1\r\n").unwrap();
+        assert_eq!(product_version(&app).as_deref(), Some("3.0.1"));
+        fs::write(app.join(PORTABLE_MARKER), b"").unwrap();
+        assert_eq!(product_version(&app), None, "an empty marker");
+        fs::write(app.join(PORTABLE_MARKER), b"3.0 1").unwrap();
+        assert_eq!(product_version(&app), None, "not a version");
+        fs::write(app.join(PORTABLE_MARKER), vec![b'1'; 65]).unwrap();
+        assert_eq!(product_version(&app), None, "too long");
+        // 安装布局以目录名为准，标记里写什么都不看。
+        let installed = root.0.join("app-2.0.0");
+        fs::write(installed.join(PORTABLE_MARKER), b"9.9.9").unwrap();
+        assert_eq!(product_version(&installed).as_deref(), Some("2.0.0"));
     }
 
     #[test]

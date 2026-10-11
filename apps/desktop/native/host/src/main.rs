@@ -342,7 +342,7 @@ fn real_main() -> i32 {
     publish_host_record(&layout.v3_root);
     notify::set_process_identity();
     let version =
-        atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
+        atm_install_state::product_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
     // lifecycle（W5g）：只有主实例记；上次没有干净退出就在这里报出来。
     let lifecycle = lifecycle::install(layout.v3_root.join("logs"), &version);
     lifecycle::install_panic_hook();

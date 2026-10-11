@@ -415,7 +415,9 @@ export function portableZipName(version: string): string {
 
 /**
  * 便携版：同一个版本目录加上 portable 标记，放在 `AyanamiTaskManager-<v>\` 下打成 zip。
- * 内容逐字节就是安装包里的那些文件，只多一个空标记——便携与安装验的是同一份二进制。
+ * 内容逐字节就是安装包里的那些文件，只多一个标记——便携与安装验的是同一份二进制。
+ * 标记里写版本号：安装版的版本是 `app-<v>` 目录名，便携目录用户爱怎么改名就怎么改，
+ * 宿主从标记读（install-state `product_version`），否则自报 dev。
  */
 export function packagePortable(release: NativeRelease): string {
   const folder = `AyanamiTaskManager-${release.version}`;
@@ -424,7 +426,10 @@ export function packagePortable(release: NativeRelease): string {
     const name = relative(release.appDir, path).split(sep).join("/");
     zippable[`${folder}/${name}`] = [readFileSync(path), { mtime: FIXED_MTIME, level: 9 }];
   }
-  zippable[`${folder}/${PORTABLE_MARKER}`] = [new Uint8Array(), { mtime: FIXED_MTIME }];
+  zippable[`${folder}/${PORTABLE_MARKER}`] = [
+    new TextEncoder().encode(release.version),
+    { mtime: FIXED_MTIME },
+  ];
   const zipPath = join(release.dir, portableZipName(release.version));
   writeFileSync(zipPath, zipSync(zippable));
   return zipPath;

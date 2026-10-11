@@ -43,9 +43,20 @@ describe("distribution-smoke 的两半", () => {
     expect(isolated.ATM_DATA_DIR).toBe("C:\\sandbox\\L");
     expect(isolated.ATM3_DATA_DIR).toBe("C:\\sandbox\\N");
     expect(isolated.AYANAMI_TASK_DATA_DIR).toBeUndefined();
+    expect(isolated.LOCALAPPDATA).toBe("C:\\sandbox\\LocalAppData");
+    // 继承来的同名变量（不论大小写）只剩一份。
+    expect(Object.keys(isolated).filter((key) => key.toUpperCase() === "LOCALAPPDATA")).toEqual([
+      "LOCALAPPDATA",
+    ]);
     const product = hostEnvironment({ l: null, n: "C:\\real\\N" });
     for (const key of ["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR", "ATM3_DATA_DIR"])
       expect(product[key], key).toBeUndefined();
+    expect(product.LOCALAPPDATA).toBe(process.env.LOCALAPPDATA);
+    // 外面以别的大小写设的数据根变量同样去掉（Windows 上是同一个变量）。
+    delete process.env.ATM3_DATA_DIR;
+    process.env.Atm3_Data_Dir = "C:\\elsewhere\\N";
+    const cased = hostEnvironment({ l: null, n: "C:\\real\\N" });
+    expect(Object.keys(cased).filter((key) => key.toUpperCase() === "ATM3_DATA_DIR")).toEqual([]);
     expect(product.PATH ?? product.Path).toBeTruthy();
   });
 
