@@ -226,7 +226,11 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
     await page.getByRole("button", { name: "设置", exact: true }).click();
     const criticalNotifications = page.getByRole("radio", { name: /仅严重事件/u });
     await criticalNotifications.click();
-    await page.getByRole("button", { name: "保存设置" }).click();
+    // 派单可用时「Claude 自动开工」面板也有一个「保存设置」，点维护区的那个。
+    await page
+      .locator(".atm-settings-maintenance")
+      .getByRole("button", { name: "保存设置" })
+      .click();
     await log.eventually(
       "设置保存提示出现",
       () => page.getByText("设置已保存", { exact: true }).isVisible(),

@@ -2389,7 +2389,8 @@ test("系统通知可在全部、仅严重和不通知三档间持久化切换",
   await expect(critical).toBeFocused();
   await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
 
-  await page.getByRole("button", { name: "保存设置" }).click();
+  // 「Claude 自动开工」面板也有一个「保存设置」（派单可用时才出现），这里点的是维护区的那个。
+  await page.locator(".atm-settings-maintenance").getByRole("button", { name: "保存设置" }).click();
   await expect(page.getByText("设置已保存", { exact: true })).toBeVisible();
   await page.reload();
   await expect(critical).toHaveAttribute("aria-checked", "true");

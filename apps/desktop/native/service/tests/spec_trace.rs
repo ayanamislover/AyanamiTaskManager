@@ -18,9 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// 已经过了关口的阶段（W3–W6）：表里再写 `PARTIAL(Wn)` / `DEFERRED(Wn)` 且 n 不大于它，就是把没做完的
-/// 留在了已经关上的阶段里（W6i 验收：TRACE 无 DEFERRED(W6) / PARTIAL(W6)）。
-const PHASES_DONE: u8 = 6;
+/// 已经过了关口的阶段（W3–W7）：表里再写 `PARTIAL(Wn)` / `DEFERRED(Wn)` 且 n 不大于它，就是把没做完的
+/// 留在了已经关上的阶段里（W6i 验收：TRACE 无 DEFERRED(W6) / PARTIAL(W6)；W7e 验收：无 DEFERRED(W7) / PARTIAL(W7)）。
+const PHASES_DONE: u8 = 7;
 
 /// 去向指向已经关上的阶段。
 fn stale(verdict: &Verdict) -> Option<u8> {
@@ -512,7 +512,9 @@ fn a_verdict_on_a_closed_phase_is_recognised() {
         ("PARTIAL(W6)", Some(6)),
         ("DEFERRED(W6)", Some(6)),
         ("PARTIAL(W3)", Some(3)),
-        ("DEFERRED(W7)", None),
+        ("DEFERRED(W7)", Some(7)),
+        ("PARTIAL(W7)", Some(7)),
+        ("DEFERRED(W8)", None),
         ("PARTIAL(W8)", None),
         ("COVERED", None),
         ("NA", None),
