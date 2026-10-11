@@ -254,6 +254,45 @@ mod imp {
         String::from_utf16_lossy(&wide[..wrote as usize])
     }
 
+    /// 跑一次 taskkill（没有窗口，至多 [`TASKKILL_TIMEOUT`]）：退出码（超时或被结束是 `None`）与给人看的文案
+    /// （先 stderr 后 stdout）。`CREATE_NO_WINDOW` 下它拿到一个新的控制台，用系统的 OEM 代码页写，按它解码。
+    pub(super) fn taskkill(args: &[&str]) -> std::io::Result<(Option<i32>, String)> {
+        let mut child = std::process::Command::new(system32("taskkill.exe"))
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        let deadline = std::time::Instant::now() + TASKKILL_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let text = child
+            .wait_with_output()
+            .ok()
+            .map(|o| {
+                let err = oem(&o.stderr).trim().to_owned();
+                if err.is_empty() {
+                    oem(&o.stdout).trim().to_owned()
+                } else {
+                    err
+                }
+            })
+            .unwrap_or_default();
+        Ok((status.and_then(|s| s.code()), text))
+    }
+
     /// 打开着的进程句柄：活着期间这个 PID 不会被回收。
     struct NativeHeld(Owned);
 
@@ -308,43 +347,11 @@ mod imp {
             if let Err(false) = open(pid) {
                 return KillResult::Gone;
             }
-            let mut command = std::process::Command::new(system32("taskkill.exe"));
-            command
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .creation_flags(CREATE_NO_WINDOW);
-            let mut child = match command.spawn() {
-                Ok(c) => c,
+            let (status, text) = match taskkill(&["/PID", &pid.to_string(), "/T", "/F"]) {
+                Ok(done) => done,
                 Err(e) => return KillResult::Failed(clip(&format!("taskkill 没有正常运行：{e}"))),
             };
-            let deadline = std::time::Instant::now() + TASKKILL_TIMEOUT;
-            let status = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(20))
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
-                    }
-                }
-            };
-            let output = child.wait_with_output().ok();
-            let text = output
-                .map(|o| {
-                    let err = oem(&o.stderr).trim().to_owned();
-                    if err.is_empty() {
-                        oem(&o.stdout).trim().to_owned()
-                    } else {
-                        err
-                    }
-                })
-                .unwrap_or_default();
-            match status.and_then(|s| s.code()) {
+            match status {
                 Some(0) => KillResult::Killed,
                 Some(TASKKILL_NOT_FOUND_EXIT_CODE) => KillResult::Gone,
                 Some(code) => KillResult::Failed(clip(&format!("taskkill 退出码 {code}：{text}"))),
@@ -668,13 +675,15 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn taskkill_text_is_decoded_from_the_oem_code_page() {
-        let out = std::process::Command::new(system32("taskkill.exe"))
-            .arg("/?")
-            .output()
-            .unwrap();
-        let text = imp::oem(&out.stdout);
-        assert!(text.contains("/PID"), "{text}");
-        assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
+        // 与结束进程树同一条路（没有窗口、新控制台）。`/?` 只打帮助；4 的倍数以外的 PID 不会分配，结束它只会报「找不到」。
+        let (code, help) = imp::taskkill(&["/?"]).unwrap();
+        assert_eq!(code, Some(0));
+        assert!(help.contains("/PID"), "{help}");
+        assert!(!help.contains(char::REPLACEMENT_CHARACTER), "{help}");
+        let (code, missing) = imp::taskkill(&["/PID", "2147483645"]).unwrap();
+        assert_eq!(code, Some(TASKKILL_NOT_FOUND_EXIT_CODE));
+        assert!(missing.contains("2147483645"), "{missing}");
+        assert!(!missing.contains(char::REPLACEMENT_CHARACTER), "{missing}");
         assert_eq!(imp::oem(b"ERROR: 128"), "ERROR: 128");
         assert_eq!(imp::oem(b""), "");
     }
