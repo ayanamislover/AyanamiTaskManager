@@ -292,12 +292,21 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         registered(&root, true, None);
         let now = atm_install_state::handoff::now_ms();
-        let mut breaker = k::Breaker::default();
-        // One exit from an hour ago is no longer recent.
-        breaker.record("old", now - 60 * 60 * 1000);
-        for run in ["a", "b", "c"] {
-            breaker.record(run, now);
-        }
+        // As the launcher leaves the file: an exit from an hour ago stays in it until the
+        // next one is recorded. It is no longer recent.
+        let exit = |run: &str, at_ms| k::AbnormalExit {
+            run_id: run.into(),
+            at_ms,
+        };
+        let breaker = k::Breaker {
+            exits: vec![
+                exit("old", now - 60 * 60 * 1000),
+                exit("a", now),
+                exit("b", now),
+                exit("c", now),
+            ],
+            tripped_at_ms: Some(now),
+        };
         k::write_breaker(&n, &breaker).unwrap();
         let v = keepalive(&n, Some(&root));
         assert_eq!(v["auto_recovery"], false, "{v}");
