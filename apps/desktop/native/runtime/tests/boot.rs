@@ -38,6 +38,47 @@ fn authority(n: &std::path::Path) -> cv::Authority {
     }
 }
 
+/// S1 的另一种样子（W8b 演练）：从没装过 2.x 的机器首装，setup 的 FENCE 已经在 `L` 里建好 `current` junction，
+/// 宿主才判定。只有它的 `L` 不是 2.x 数据根：建空库开放入口，不去转换；后台比较也不当成冲突；`L` 原样不动。
+#[test]
+fn a_first_install_is_fresh_beside_setups_junction() {
+    let d = dir("fresh-junction");
+    let (n, l, install) = (d.join("N"), d.join("L"), d.join("install"));
+    std::fs::create_dir_all(&l).unwrap();
+    std::fs::create_dir_all(&install).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(l.join("current"))
+        .arg(&install)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let events = Events::default();
+    let s = serving(atm_runtime::start(&options(&n, &l, &events)).unwrap());
+    let m = match cv::read_manifest(&Layout::new(&n)) {
+        cv::ManifestState::Present(m) => m,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(m.source_root, None, "a fresh install has no 2.x source");
+    assert!(
+        !n.join("staging").exists()
+            || std::fs::read_dir(n.join("staging"))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    assert!(!matches!(
+        s.background(Duration::from_secs(60)),
+        Some(Background::Conflict(_))
+    ));
+    let names: Vec<_> = std::fs::read_dir(&l)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["current"]);
+    assert!(descriptor(&n).is_some());
+}
+
 /// S1：没有 `L`，建空库后开放入口，顺序固定；`/health` 与 daemon.json、lease 对得上；没有启动状态。
 #[test]
 fn a_fresh_install_opens_the_entries_in_order() {

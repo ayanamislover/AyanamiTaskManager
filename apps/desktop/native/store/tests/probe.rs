@@ -168,11 +168,14 @@ fn a_2x_database_this_converter_does_not_know_is_refused() {
 }
 
 /// `L` 在但没有 registry：这一次就要转换时转不了；已经发布了 3.0 时不碍事。
+/// 空的 `L`、只有 setup 的 `current` 的 `L` 不算在（07 §1），是全新安装（W8b）。
 #[test]
 fn a_2x_root_without_a_registry_only_fails_when_it_would_be_converted() {
     let d = dir("no-registry");
     let (n, l) = (d.join("n"), d.join("l"));
-    fs::create_dir_all(&l).unwrap();
+    fs::create_dir_all(l.join("current")).unwrap();
+    assert_eq!(probe(&n, &l, None).unwrap().startup, "FRESH_INSTALL");
+    fs::create_dir_all(l.join("projects")).unwrap();
     let e = probe(&n, &l, None).unwrap_err();
     assert_eq!(
         (e.code, e.scope),

@@ -650,7 +650,24 @@ fn publication_digest(dir: &Path) -> std::io::Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// 07 §4：只看 `M`、发布物的身份与有没有进行中的封存。`legacy_exists` 是 `L` 在不在。
+/// `L` 在不在（07 §4 S1 / S2、§6 的 `LegacyGone`）。setup 维护的 `current` junction 不属于业务数据（07 §1）：
+/// 只剩它、或者什么都没有的 `L` 当作不在。从没装过 2.x 的机器首装 3.x，setup 的 FENCE 先在 `L` 里建好
+/// `current`，宿主随后才判定；把它当成 2.x 数据根，就会去转换一个空目录，永远失败（W8b 演练）。
+/// 读不了目录时返回错误，由调用方 fail closed。
+pub fn legacy_present(legacy: &Path) -> std::io::Result<bool> {
+    let entries = match std::fs::read_dir(legacy) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        other => other?,
+    };
+    for entry in entries {
+        if !entry?.file_name().eq_ignore_ascii_case("current") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// 07 §4：只看 `M`、发布物的身份与有没有进行中的封存。`legacy_exists` 是 `L` 在不在（[`legacy_present`]）。
 /// 发布之后服务会往附件、sync、dispatch 里写，所以 S6 只认库内 generation；文件摘要只在 S4（服务还没起过）比。
 pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
     if layout.seal_intent().exists() {
@@ -1380,14 +1397,14 @@ pub fn compare(
     base: &BTreeMap<String, String>,
     opts: &CompareOptions<'_>,
 ) -> Comparison {
-    match std::fs::symlink_metadata(opts.legacy_root) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Comparison::LegacyGone,
+    match legacy_present(opts.legacy_root) {
+        Ok(false) => return Comparison::LegacyGone,
         Err(e) => {
             return Comparison::Unknown(
-                located(e, "stat", &opts.legacy_root.display()).to_string(),
+                located(e, "list", &opts.legacy_root.display()).to_string(),
             );
         }
-        Ok(_) => {}
+        Ok(true) => {}
     }
     let quiet = |_: &str, _: usize, _: usize, _: u64| {};
     let meter = crate::progress::Meter::new(opts.progress.unwrap_or(&quiet));

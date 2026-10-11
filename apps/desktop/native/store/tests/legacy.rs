@@ -5346,6 +5346,35 @@ mod w3d {
 // ---------------------------------------------------------------- W3e：权威判定与数据源冲突
 
 /// W3e（07 §6–§7）：对 2.x 重算 business_digest' 比较、权威判定表、数据源冲突状态与用户的两个选择。
+/// `L` 在不在（07 §1、§4）：setup 的 `current` junction 不算业务数据。
+#[test]
+fn a_legacy_root_with_only_setups_junction_is_not_there() {
+    use atm_store::conversion::legacy_present;
+    let base = dir("legacy-present");
+    let l = base.join("L");
+    assert!(!legacy_present(&l).unwrap(), "missing");
+    fs::create_dir_all(&l).unwrap();
+    assert!(!legacy_present(&l).unwrap(), "empty");
+    let target = base.join("install");
+    fs::create_dir_all(&target).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(l.join("CURRENT"))
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(!legacy_present(&l).unwrap(), "only setup's junction");
+    fs::create_dir_all(l.join("registry")).unwrap();
+    assert!(legacy_present(&l).unwrap(), "a 2.x entry");
+    fs::remove_dir(l.join("registry")).unwrap();
+    put(&l.join("current.txt"), b"?");
+    assert!(legacy_present(&l).unwrap(), "anything else counts");
+    // 不是目录：读不了，交给调用方 fail closed。
+    put(&base.join("L-file"), b"?");
+    assert!(legacy_present(&base.join("L-file")).is_err());
+}
+
 mod w3e {
     use super::w3d::{G1, G2, layout, manifest, run};
     use super::*;
@@ -5448,6 +5477,10 @@ mod w3e {
         }
         fs::remove_file(root.join("unexpected.txt")).unwrap();
         assert_eq!(compare(&n, &root.join("not-there")), Comparison::LegacyGone);
+        // 2.x 的数据删了，只剩 setup 的 `current`：同样是不在，不是「比较不了」。
+        let only_current = root.with_file_name("L-only-current");
+        fs::create_dir_all(only_current.join("current")).unwrap();
+        assert_eq!(compare(&n, &only_current), Comparison::LegacyGone);
 
         assert_eq!(tree(&root), after, "comparing wrote into the 2.x root");
         assert_eq!(

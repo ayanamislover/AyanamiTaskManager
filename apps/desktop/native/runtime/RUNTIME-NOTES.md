@@ -63,6 +63,9 @@ decide 循环（最多 8 圈）
 ## 进程内用例（`tests/boot.rs`；sweep 在 `jobs/tests/sweep.rs`）
 
 - 入口顺序固定（lease → HTTP → daemon.json → 见证 → 调度器）；撤下后不再监听、daemon.json 不在。
+- `L` 在不在看 `conversion::legacy_present`：只剩 setup 的 `current` junction（07 §1：不属于业务数据）当作不在。
+  首装时 setup 的 FENCE 先在 `L` 里建 `current`、宿主后判定，按「目录在」判会去转换空目录（W8b 演练发现）。
+  启动判定（S1 / S2）、PROBE、§6 比较（`LegacyGone`）用的是同一个函数。
 - 源身份不符：阻塞比较判冲突，没有 lease 记录、HTTP、daemon.json、调度器。
 - `A=legacy`：比较完才有入口；没动过 2.x 无损接回，动过就封存重转。
 - 后台比较判冲突：先撤下全部入口，再写启动状态。

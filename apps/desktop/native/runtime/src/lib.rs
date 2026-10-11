@@ -382,7 +382,8 @@ fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
     };
     for _ in 0..8 {
         let at = now_iso();
-        let legacy_exists = std::fs::symlink_metadata(&o.legacy).is_ok();
+        // 读不了 `L` 就当它在：转换会报出具体原因，不会当成全新安装建空库。
+        let legacy_exists = cv::legacy_present(&o.legacy).unwrap_or(true);
         let m = match cv::decide(&layout, legacy_exists) {
             Startup::ResumeSeal => {
                 // 续做时以意图文件里记下的种类为准，这里给的种类不用。

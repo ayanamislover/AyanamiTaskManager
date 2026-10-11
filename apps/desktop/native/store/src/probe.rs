@@ -97,7 +97,8 @@ pub fn run(
     secrets_check: Option<fn(&[u8]) -> bool>,
 ) -> Result<Report, Failure> {
     let layout = Layout::new(n);
-    let legacy_exists = std::fs::symlink_metadata(legacy).is_ok();
+    // 读不了 `L` 就当它在：下面的检查会报出具体原因。
+    let legacy_exists = crate::conversion::legacy_present(legacy).unwrap_or(true);
     let startup = decide(&layout, legacy_exists);
     let mut databases = Vec::new();
 
