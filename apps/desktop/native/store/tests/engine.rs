@@ -915,7 +915,9 @@ fn shutdown_during_a_restart_waits_it_out_and_truncate_reports_the_reader() {
             Config {
                 checkpoint_gap: MS(10),
                 wal_soft_limit: 64 << 10,
-                wal_restart_wait: Duration::from_secs(2),
+                // RESTART 等读者的时限。看到它开始之后才发起关闭，要求关闭在 300 ms 内不返回：时限要比「看到开始
+                // → 发起关闭」长得多。2 s 在全量并行时被挤到过（W6 r11 的全量），留到 5 s。
+                wal_restart_wait: Duration::from_secs(5),
                 ..fast()
             },
         )
