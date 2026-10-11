@@ -4,7 +4,7 @@
 //!
 //! 状态都在 3.x 的数据根 `N\runtime`，跨进程保存：
 //! - `keepalive.json`：熔断。30 分钟内异常退出 3 次就不再自动拉起，直到用户自己启动一次（宿主复位并用通知说明）。
-//! - `user-quit.json`：用户在托盘点了「完全退出」。只在那一次登录里有效（记登录会话的 LUID）：下次登录或用户自己
+//! - `user-quit.json`：用户在托盘点了「完全退出」。只在那一次登录里有效（记登录 SID）：下次登录或用户自己
 //!   启动就失效。setup 发的退出（升级时的 QUIESCE）、会话结束都不写它。
 //!
 //! 注册的结果在 `<安装根>\state\keepalive-task.json`：只有注册成功，`--doctor` 与文档才说「崩溃后会自动恢复」。
@@ -212,7 +212,7 @@ pub fn reset_breaker(n: &Path) -> Option<Breaker> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UserQuit {
-    /// 那一次登录会话（LUID，十六进制）。
+    /// 那一次登录：登录 SID `S-1-5-5-X-Y` 的 X、Y，各 8 位十六进制（[`logon_id`]）。
     pub logon: String,
     pub at: String,
 }
@@ -226,7 +226,7 @@ pub fn clear_user_quit(n: &Path) {
     let _ = std::fs::remove_file(runtime(n).join(USER_QUIT_FILE));
 }
 
-/// 标记还管不管这一次：同一次登录才管。不知道当前登录（读不出 LUID）时按管算——宁可不拉起，也不违背用户的退出。
+/// 标记还管不管这一次：同一次登录才管。不知道当前登录（读不出登录 SID）时按管算——宁可不拉起，也不违背用户的退出。
 /// 读不出标记本身（坏了）按没有算：那不是用户留下的意思。
 pub fn user_quit_applies(n: &Path, logon: Option<&str>) -> bool {
     match crate::read_json_limited::<UserQuit>(&runtime(n).join(USER_QUIT_FILE), MAX_BYTES) {
@@ -235,36 +235,56 @@ pub fn user_quit_applies(n: &Path, logon: Option<&str>) -> bool {
     }
 }
 
-/// 当前进程所在的登录会话（token 的 AuthenticationId），每次登录都不同。
+/// 当前进程所在的这次登录：token 里的登录 SID（`S-1-5-5-X-Y`，即 `whoami /logonid`）写成 16 位十六进制，
+/// 每次登录都不同。不用 token 的 AuthenticationId：开着 UAC 时同一次登录的提权令牌与普通令牌是两个
+/// 登录会话、两个 AuthenticationId，提权运行的 ATM 从托盘退出、保活任务以普通令牌来看，就对不上了；
+/// 登录 SID 是两者共用的。
 #[cfg(windows)]
 pub fn logon_id() -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
-        GetTokenInformation, TOKEN_QUERY, TOKEN_STATISTICS, TokenStatistics,
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_GROUPS,
+        TOKEN_QUERY, TokenGroups,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    /// `SE_GROUP_LOGON_ID`：这个组是登录 SID。
+    const LOGON_ID: u32 = 0xC000_0000;
     let mut token: HANDLE = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return None;
     }
-    let mut stats: TOKEN_STATISTICS = unsafe { std::mem::zeroed() };
-    let mut returned = 0u32;
+    let mut needed = 0u32;
+    unsafe { GetTokenInformation(token, TokenGroups, std::ptr::null_mut(), 0, &mut needed) };
+    // u64 的缓冲区：TOKEN_GROUPS 里有指针，要按 8 字节对齐。
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
     let ok = unsafe {
         GetTokenInformation(
             token,
-            TokenStatistics,
-            (&mut stats as *mut TOKEN_STATISTICS).cast(),
-            std::mem::size_of::<TOKEN_STATISTICS>() as u32,
-            &mut returned,
+            TokenGroups,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            &mut needed,
         )
     };
     unsafe { CloseHandle(token) };
-    (ok != 0).then(|| {
-        format!(
-            "{:08x}{:08x}",
-            stats.AuthenticationId.HighPart as u32, stats.AuthenticationId.LowPart
-        )
-    })
+    if ok == 0 {
+        return None;
+    }
+    let groups = unsafe { &*buffer.as_ptr().cast::<TOKEN_GROUPS>() };
+    let groups =
+        unsafe { std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize) };
+    groups
+        .iter()
+        .filter(|group| group.Attributes & LOGON_ID == LOGON_ID)
+        .find_map(|group| unsafe {
+            (*GetSidSubAuthorityCount(group.Sid) == 3).then(|| {
+                format!(
+                    "{:08x}{:08x}",
+                    *GetSidSubAuthority(group.Sid, 1),
+                    *GetSidSubAuthority(group.Sid, 2)
+                )
+            })
+        })
 }
 
 #[cfg(not(windows))]
@@ -513,11 +533,24 @@ mod tests {
         assert!(!user_quit_applies(&n, None));
     }
 
+    /// 与 `whoami /logonid` 报的登录 SID 是同一个（不是 token 的 AuthenticationId：提权与否两者不同）。
     #[test]
-    fn the_logon_id_is_this_sessions_and_stable() {
-        let id = logon_id().expect("the process token has statistics");
+    fn the_logon_id_is_the_logon_sid_whoami_reports() {
+        let id = logon_id().expect("the process token has a logon SID");
         assert_eq!(id.len(), 16);
         assert_eq!(logon_id().as_deref(), Some(id.as_str()));
+        let out = std::process::Command::new("whoami.exe")
+            .arg("/logonid")
+            .output()
+            .unwrap();
+        let sid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        let parts: Vec<u32> = sid
+            .strip_prefix("S-1-5-5-")
+            .unwrap_or_else(|| panic!("{sid}"))
+            .split('-')
+            .map(|part| part.parse().unwrap())
+            .collect();
+        assert_eq!(id, format!("{:08x}{:08x}", parts[0], parts[1]), "{sid}");
     }
 
     /// 上一次怎么结束的：没记录、干净退出都不是崩溃；会话结束（注销、关机）不是崩溃；其余 `clean:false` 是。

@@ -265,6 +265,16 @@ async function scenarios(executable: string, box: ReturnType<typeof sandbox>): P
   await keepalive(executable, box);
 }
 
+/** 这次登录：`whoami /logonid` 的 `S-1-5-5-X-Y` 写成宿主记的样子（X、Y 各 8 位十六进制）。 */
+function thisLogon(): string | null {
+  const sid = spawnSync("whoami.exe", ["/logonid"], { encoding: "utf8", windowsHide: true })
+    .stdout.trim()
+    .match(/^S-1-5-5-(\d+)-(\d+)$/u);
+  if (sid === null) return null;
+  const hex = (part: string | undefined) => Number(part).toString(16).padStart(8, "0");
+  return `${hex(sid[1])}${hex(sid[2])}`;
+}
+
 /**
  * 7. 保活（W8c，方案 §5、B1）：`user_quit` 只代表用户主动退出，熔断只由用户自己的启动复位。
  *    托盘「完全退出」与 setup 的 QUIT 都用真实的管道命令触发（`--smoke-tray-quit` 走托盘菜单的分支）。
@@ -324,13 +334,14 @@ async function keepalive(executable: string, box: ReturnType<typeof sandbox>): P
   const marker = existsSync(quitPath)
     ? (JSON.parse(readFileSync(quitPath, "utf8")) as { logon?: unknown })
     : undefined;
+  const logon = thisLogon();
   log.check(
-    "托盘「完全退出」：干净退出，留下这次登录（LUID）的标记",
+    "托盘「完全退出」：干净退出，留下这次登录（登录 SID，同 whoami /logonid）的标记",
     trayCode === 0 &&
       run(n, tray.pid).at(-1)?.clean === true &&
-      typeof marker?.logon === "string" &&
-      /^[0-9a-f]{16}$/u.test(marker.logon),
-    JSON.stringify({ trayCode, marker }),
+      logon !== null &&
+      marker?.logon === logon,
+    JSON.stringify({ trayCode, marker, logon }),
   );
 
   // 登录自启与保活任务（--background）不是用户的意思：标记留着。
