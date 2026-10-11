@@ -83,6 +83,15 @@ fn started_us(host: &atm_install_state::ProcessIdentity) -> bool {
         .is_some_and(|me| me.parent == host.pid && procs::alive(host))
 }
 
+/// Whether undoing `from → to` leaves the 3.x line, so `N` is settled first (07 §8:
+/// `A=legacy` when the conversion was published). Only when there is an older line to go
+/// back to: undoing a 3.x → 3.x update stays on 3.x (`N` stays the source), and undoing a
+/// first install hands nothing back. Writing `A=legacy` there made the restored 3.x compare
+/// against a 2.x root that does not exist and wait for the user (`LEGACY_GONE`; W8b drill).
+fn undo_leaves_v3(from: Option<&str>, to: &str) -> bool {
+    startup::is_v3(to) && from.is_some_and(|from| !startup::is_v3(from))
+}
+
 /// Where a failed or interrupted forward path ends. Before SWITCH nothing changed:
 /// ABORTED. After it, ROLLED_BACK — unless nothing was installed before: a first install
 /// has nothing to roll back to, it is ABORTED as well (Codex P2-2).
@@ -820,11 +829,11 @@ impl Setup {
     ) -> Step {
         let to_dir = self.env.app_dir(&txn.to);
         match step {
-            // UNDO_STOP; undoing an upgrade to 3.x also settles N (07 §8) before UNDO_RESTORE
-            // switches the version back.
+            // UNDO_STOP; undoing an upgrade from an older line to 3.x also settles N (07 §8)
+            // before UNDO_RESTORE switches the version back.
             1 => {
                 quiesce::stop_started(&self.env, txn.started.as_ref(), &to_dir)?;
-                if startup::is_v3(&txn.to) {
+                if undo_leaves_v3(txn.from.as_deref(), &txn.to) {
                     self.settle_v3(txn)?;
                 }
                 Ok(())
@@ -1083,6 +1092,17 @@ impl Setup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W8b：撤销只在回到更早的版本线时结算 N；3.x 之间、首装都不写 `A=legacy`。
+    #[test]
+    fn only_an_undo_back_to_an_older_line_settles_n() {
+        assert!(undo_leaves_v3(Some("2.0.0"), "3.0.0"));
+        assert!(undo_leaves_v3(Some("legacy:1.4.0"), "3.0.0"));
+        assert!(!undo_leaves_v3(Some("3.0.0"), "3.0.1"));
+        assert!(!undo_leaves_v3(Some("9.0.0"), "9.0.1"));
+        assert!(!undo_leaves_v3(None, "3.0.0"));
+        assert!(!undo_leaves_v3(Some("2.0.0"), "2.0.1"));
+    }
 
     /// W8b：只有真正拉起本进程的那个宿主（pid 与创建时间都对得上）算「卡在准入、等我们」的 START 宿主。
     #[test]

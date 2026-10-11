@@ -428,9 +428,10 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   const doctor = runLauncher(sandbox, ["--doctor"]);
   check(
     "launcher --doctor exits 0 and reports this version",
+    // 3.x: `atm.exe --doctor` prints `service: {json}` (the running service's own report).
     doctor.status === 0 &&
-      doctor.stdout.includes("ok: true") &&
-      doctor.stdout.includes(`version: ${VERSION_A}`),
+      doctor.stdout.includes('"ok":true') &&
+      doctor.stdout.includes(`"version":"${VERSION_A}"`),
     { status: doctor.status, out: doctor.stdout.slice(0, 200), err: doctor.stderr.slice(0, 200) },
   );
   const hostsBefore = processes(sandbox.install).filter((proc) =>
@@ -498,11 +499,16 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   );
 
   process.stdout.write(`[${currentScenario}] rollback → ${VERSION_A}\n`);
-  check(
-    "rollback exit 0",
-    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]) === 0,
-    sandbox.log(),
-  );
+  const rolledBack = spawnSync(join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"], {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 240_000,
+  });
+  check(`rollback exit 0 (${rolledBack.status})`, rolledBack.status === 0, {
+    out: `${rolledBack.stdout}${rolledBack.stderr}`.slice(-600),
+    log: sandbox.log(3),
+  });
   await installed(sandbox, VERSION_A, VERSION_B);
 
   process.stdout.write(`[${currentScenario}] uninstall\n`);
@@ -519,7 +525,8 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
     !existsSync(startMenu) && !existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")),
   );
   check("current junction removed", junctionTarget(join(sandbox.data, "current")) === null);
-  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  // 3.x keeps its data in N; uninstall removes the program, never the data.
+  check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
   teardown(sandbox);
 }
 
@@ -528,7 +535,7 @@ type UpdateStatusFile = { code: string; version: string | null; outcome: string 
 function updateStatus(sandbox: Sandbox): UpdateStatusFile | null {
   try {
     return JSON.parse(
-      readFileSync(join(sandbox.data, "logs", "update-status.json"), "utf8"),
+      readFileSync(join(sandbox.v3, "logs", "update-status.json"), "utf8"),
     ) as UpdateStatusFile;
   } catch {
     return null;
@@ -536,10 +543,10 @@ function updateStatus(sandbox: Sandbox): UpdateStatusFile | null {
 }
 
 /**
- * The update bridge: a package delivered to `<data>\updates` is found by the packaged core,
- * then installed by exactly the command the host runs for "立即更新"
- * (`atm-setup --update <manifest> --quiet --show`). The core → host frame and the host's
- * path checks are covered by update-coordinator.test.ts and host update.rs tests.
+ * The update bridge: a package delivered to `N\updates` is found by the service's update
+ * coordinator, then installed by exactly the command the host runs for "立即更新"
+ * (`atm-setup --update <manifest> --quiet --show`). The coordinator and the host's path
+ * checks are covered by the `atm-jobs` update tests and host update.rs tests.
  */
 async function scenarioUpdate(pkg: Packages): Promise<void> {
   currentScenario = "update";
@@ -552,7 +559,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
     sandbox.log(),
   );
   killAll(sandbox.dir);
-  const feed = join(sandbox.data, "updates");
+  const feed = join(sandbox.v3, "updates");
   mkdirSync(feed, { recursive: true });
   // Delivery order: the zip first, the manifest last. Plus leftovers of the Squirrel era.
   copyFileSync(
@@ -564,7 +571,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   writeFileSync(join(feed, "AyanamiTaskManager-1.0.0-full.nupkg"), "drill");
   check("launcher start exits 0", runLauncher(sandbox, ["--background"]).status === 0);
   check(
-    `packaged core reports ${VERSION_B} ready`,
+    `the service reports ${VERSION_B} ready`,
     await until(() => updateStatus(sandbox)?.code === "UPDATE_READY", 30_000),
     updateStatus(sandbox),
   );
@@ -572,7 +579,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   // both; a toast that Windows refused logs "toast failed").
   const hostLog = () => {
     try {
-      return readFileSync(join(sandbox.data, "logs", "host.log"), "utf8");
+      return readFileSync(join(sandbox.v3, "logs", "host.log"), "utf8");
     } catch {
       return "";
     }
@@ -596,7 +603,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   process.stdout.write(`[${currentScenario}] 立即更新 → ${VERSION_B}\n`);
   // What UpdateCoordinator.apply() records before asking the host.
   writeFileSync(
-    join(sandbox.data, "logs", "update-status.json"),
+    join(sandbox.v3, "logs", "update-status.json"),
     JSON.stringify({
       ...updateStatus(sandbox),
       phase: "INSTALL",
@@ -730,6 +737,13 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     { pointer: sandbox.pointer(), service: sandbox.serviceVersion() },
   );
   check(`staged app-${VERSION_B} removed`, !existsSync(join(sandbox.install, `app-${VERSION_B}`)));
+  // Undoing a 3.x → 3.x update stays on 3.x: N is still the source (07 §8 settles N only when
+  // leaving for an older line).
+  check(
+    "a 3.x → 3.x undo leaves A=v3 (no setup-rollback)",
+    authorityOf(sandbox)?.authority === "v3",
+    authorityOf(sandbox),
+  );
 
   process.stdout.write(
     `[${currentScenario}] killed after ROLLBACK_START spawned the host (P1-7)\n`,
@@ -803,14 +817,14 @@ async function scenarioDelayed(pkg: Packages): Promise<void> {
   let exercised = false;
   for (let round = 1; round <= 6 && !exercised; round += 1) {
     killAll(sandbox.dir);
-    rmSync(join(sandbox.data, "runtime", "host.json"), { force: true });
+    rmSync(join(sandbox.v3, "runtime", "host.json"), { force: true });
     if (sandbox.pointer()?.current !== VERSION_A)
       runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
     killAll(sandbox.dir);
     // Killed lease holders leave their lease file behind; with it gone, the file's presence
     // alone says a core has come up. serviceVersion() enumerates processes, which takes
     // seconds — longer than the window this scenario is after.
-    const lease = join(sandbox.data, "runtime", "daemon.json");
+    const lease = join(sandbox.v3, "runtime", "daemon.json");
     rmSync(lease, { force: true });
     spawn(
       join(sandbox.install, "AyanamiTaskManager.exe"),
@@ -822,7 +836,7 @@ async function scenarioDelayed(pkg: Packages): Promise<void> {
         detached: true,
       },
     ).unref();
-    await until(() => existsSync(join(sandbox.data, "runtime", "host.json")), 10_000);
+    await until(() => existsSync(join(sandbox.v3, "runtime", "host.json")), 10_000);
     if (existsSync(lease)) continue;
     const before = sandbox.log(400).split("\n").length;
     const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
@@ -945,7 +959,8 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
     regValue(`${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`, "UninstallString") ===
       null,
   );
-  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  // 3.x keeps its data in N; uninstall removes the program, never the data.
+  check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
   teardown(sandbox);
 }
 

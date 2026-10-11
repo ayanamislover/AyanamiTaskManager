@@ -849,6 +849,12 @@ impl App {
         self.snapshot.pending_update = version.clone();
         if let Some(tray) = &self.tray {
             tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
+            if let Some(version) = &version {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!("tray offers update {version}"),
+                );
+            }
         }
         if let (true, Some(version)) = (announce, version) {
             crate::notify::show(

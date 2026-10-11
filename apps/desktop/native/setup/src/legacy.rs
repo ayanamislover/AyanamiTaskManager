@@ -24,8 +24,14 @@ pub fn is_electron_dir(dir: &Path) -> bool {
     dir.join("resources").join("app.asar").is_file()
 }
 
+/// One of our own version directories (not Electron's): 2.x carries the Node core
+/// (`runtime\core.mjs`), 3.x the command line that marks the packaged layout
+/// (`resources\atm.exe`, the host's `paths::PACKAGED_MARKER`). Rollback, repair, cleanup and
+/// the way back to Electron all ask this; knowing only the 2.x shape made a 3.x previous
+/// "missing", a 3.x repair fail, and left old 3.x directories behind (W8b drill).
 pub fn is_new_style_dir(dir: &Path) -> bool {
     dir.join("runtime").join("core.mjs").is_file()
+        || dir.join("resources").join("atm.exe").is_file()
 }
 
 fn version_of(dir: &Path) -> Option<String> {
@@ -167,6 +173,24 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         std::path::absolute(dir).unwrap()
+    }
+
+    #[test]
+    fn both_our_layouts_are_new_style_and_electron_is_not() {
+        let dir = scratch("new-style");
+        let file = |relative: &str| {
+            let path = dir.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"").unwrap();
+        };
+        file(r"app-2.0.0\runtime\core.mjs");
+        file(r"app-3.0.0\resources\atm.exe");
+        file(r"app-1.4.0\resources\app.asar");
+        fs::create_dir_all(dir.join("app-9.9.9")).unwrap();
+        assert!(is_new_style_dir(&dir.join("app-2.0.0")));
+        assert!(is_new_style_dir(&dir.join("app-3.0.0")));
+        assert!(!is_new_style_dir(&dir.join("app-1.4.0")));
+        assert!(!is_new_style_dir(&dir.join("app-9.9.9")));
     }
 
     /// Round trip to Electron and forward again leaves `newstyle\app-2.0.0` behind; the next
