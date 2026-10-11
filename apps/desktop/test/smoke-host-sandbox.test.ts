@@ -219,6 +219,22 @@ describe("烟测宿主与子进程", () => {
   });
 
   // 先启动宿主、后拍 Run 快照的话，快照读失败时宿主已经起来了却没人收拾（Codex R5-P2-3）。
+  // 单实例管道在进程退出时才放开，运行文件在 Withdrawn 时就删了：只等文件消失，下一次启动会被
+  // 转交给还没退干净的那个实例，自己以 0 退出（W8d-5 全链实测）。
+  it("shim 唤醒的实例退出后，按 pid 等到进程真的没了再往下走", () => {
+    const source = readFileSync("scripts/packaged-smoke.ts", "utf8");
+    const body = source.slice(
+      source.indexOf("async function checkShimWakesApp("),
+      source.indexOf("async function checkMcpProcessOutlivesHandshake("),
+    );
+    expect(body).toContain('(JSON.parse(readFileSync(runtimePath, "utf8")) as Runtime).pid');
+    expect(body).toMatch(/existsSync\(runtimePath\) \|\| \(woken !== null && alive\(woken\)\)/u);
+    expect(body).toContain("wokenGone = woken !== null && !alive(woken);");
+    expect(body).toContain(
+      'check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath) && wokenGone);',
+    );
+  });
+
   it("每个直接启动烟测宿主的脚本都先拍 Run 快照", () => {
     const scripts = join(process.cwd(), "scripts");
     const starting = readdirSync(scripts)

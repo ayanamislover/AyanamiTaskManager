@@ -607,6 +607,7 @@ async function checkBridgeParity(
  */
 async function checkShimWakesApp(): Promise<void> {
   // 被唤醒的实例不是烟测自己拉起的子进程：断言失败也要经 --smoke-quit 让它退出，不留进程。
+  let wokenGone = false;
   try {
     const tools = await packagedProfileTools("core");
     check("应用退出后 shim 唤醒宿主并完成握手", tools.includes("atm_begin"), tools.join(","));
@@ -622,6 +623,11 @@ async function checkShimWakesApp(): Promise<void> {
       JSON.stringify(startups.at(-1)),
     );
   } finally {
+    // 运行文件在 Withdrawn 时就删了，进程还要再过一会儿才退、才放开单实例管道；只等文件消失，
+    // 紧接着的下一次启动会被当成第二个实例转交给它、自己以 0 退出（W8d-5 全链实测）。按 pid 等到进程没了。
+    const woken = existsSync(runtimePath)
+      ? (JSON.parse(readFileSync(runtimePath, "utf8")) as Runtime).pid
+      : null;
     const quit = spawn(executable, ["--smoke-quit"], {
       cwd: root,
       env: hostEnvironment,
@@ -629,11 +635,22 @@ async function checkShimWakesApp(): Promise<void> {
       stdio: "ignore",
     });
     await waitForExit(quit, 5_000);
-    await waitUntil(async () => (existsSync(runtimePath) ? null : true), 15_000).catch(
-      () => undefined,
-    );
+    await waitUntil(
+      async () => (existsSync(runtimePath) || (woken !== null && alive(woken)) ? null : true),
+      15_000,
+    ).catch(() => undefined);
+    wokenGone = woken !== null && !alive(woken);
   }
-  check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath));
+  check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath) && wokenGone);
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function checkMcpProcessOutlivesHandshake(): Promise<void> {
