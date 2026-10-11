@@ -1249,43 +1249,14 @@ fn prepare_sources(
     })
 }
 
-/// 一个源库 → 工作副本（05 §3.3、07 IMPORT；W3b3）：
-/// 1. 复制 db 与 `-wal`（不复制 `-shm`），源文件只读不开；
-/// 2. 在副本上 `quick_check`（第一次读取时恢复 WAL）；
-/// 3. 核对 `schema_migrations` 的来源：每行的版本在支持的计划里、名字与 hash 认得、来源合法，版本不断档；
-/// 4. 缺的迁移按 2.0 runner 的语义补跑：`foreign_keys = ON`，每个迁移一个事务，`applied_at` 取 `at`；
-/// 5. `foreign_key_check`、登记完整性（表集合恰好是族表登记的那些）；
-/// 6. 合并 WAL、改回单文件，供转换与 VERIFY 只读挂载。
-fn prepare_source(
-    original: &Path,
+/// 2.x 源库已应用的迁移都是这个转换器认得的（05 §3.3）：版本在支持的计划里、名字与 hash 认得、来源合法，
+/// 版本不断档（2.0 `assertAppliedMigrations`）。返回 `schema_migrations` 的原样内容。只读：转换时用在工作副本上，
+/// 安装探测用在只读打开的源库上（[`crate::probe`]）。
+pub(crate) fn check_legacy_applied(
+    c: &Connection,
     home: Home,
-    working: &Path,
-    at: &str,
-) -> Result<(PathBuf, SourceProvenance)> {
-    let shown = original.display().to_string();
-    let wal = sidecar(original, "-wal");
-    let wal_sha256 = match std::fs::metadata(&wal) {
-        Ok(m) if m.len() > 0 => {
-            crate::progress::copy_path(&wal, &sidecar(working, "-wal"))?;
-            Some(file_sha256(&wal)?)
-        }
-        _ => None,
-    };
-    crate::progress::copy_path(original, working)?;
-    let sha256 = file_sha256(original)?;
-    let c = Connection::open(working)?;
-    crate::progress::watch(&c)?;
-    let quick: Vec<String> = c
-        .prepare("PRAGMA quick_check")
-        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
-        .map_err(|e| ConvertError::Mismatch(format!("{shown}: source quick_check: {e}")))?;
-    if quick != ["ok"] {
-        return Err(ConvertError::Mismatch(format!(
-            "{shown}: source quick_check: {}",
-            quick.join("; ")
-        )));
-    }
-
+    shown: &str,
+) -> Result<Vec<(i64, String, String, String)>> {
     let has_table: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
         [],
@@ -1330,6 +1301,48 @@ fn prepare_source(
             gap.version
         )));
     }
+    Ok(applied)
+}
+
+/// 一个源库 → 工作副本（05 §3.3、07 IMPORT；W3b3）：
+/// 1. 复制 db 与 `-wal`（不复制 `-shm`），源文件只读不开；
+/// 2. 在副本上 `quick_check`（第一次读取时恢复 WAL）；
+/// 3. 核对 `schema_migrations` 的来源：每行的版本在支持的计划里、名字与 hash 认得、来源合法，版本不断档；
+/// 4. 缺的迁移按 2.0 runner 的语义补跑：`foreign_keys = ON`，每个迁移一个事务，`applied_at` 取 `at`；
+/// 5. `foreign_key_check`、登记完整性（表集合恰好是族表登记的那些）；
+/// 6. 合并 WAL、改回单文件，供转换与 VERIFY 只读挂载。
+fn prepare_source(
+    original: &Path,
+    home: Home,
+    working: &Path,
+    at: &str,
+) -> Result<(PathBuf, SourceProvenance)> {
+    let shown = original.display().to_string();
+    let wal = sidecar(original, "-wal");
+    let wal_sha256 = match std::fs::metadata(&wal) {
+        Ok(m) if m.len() > 0 => {
+            crate::progress::copy_path(&wal, &sidecar(working, "-wal"))?;
+            Some(file_sha256(&wal)?)
+        }
+        _ => None,
+    };
+    crate::progress::copy_path(original, working)?;
+    let sha256 = file_sha256(original)?;
+    let c = Connection::open(working)?;
+    crate::progress::watch(&c)?;
+    let quick: Vec<String> = c
+        .prepare("PRAGMA quick_check")
+        .and_then(|mut st| st.query_map([], |r| r.get(0))?.collect())
+        .map_err(|e| ConvertError::Mismatch(format!("{shown}: source quick_check: {e}")))?;
+    if quick != ["ok"] {
+        return Err(ConvertError::Mismatch(format!(
+            "{shown}: source quick_check: {}",
+            quick.join("; ")
+        )));
+    }
+
+    let applied = check_legacy_applied(&c, home, &shown)?;
+    let plan = migrations::plan(home);
     let pending: Vec<_> = plan
         .iter()
         .filter(|m| !applied.iter().any(|a| a.0 == m.version))

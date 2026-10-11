@@ -7,14 +7,9 @@ mod app;
 mod args;
 mod assets;
 mod bridge;
-// Node entries only (`--mcp-stdio`, the install probe; `--cli` / `--doctor` go to atm.exe): the GUI path no
-// longer starts a core (W5a, guarded by tests/single_process.rs). Goes with the Node entries in W6.
-#[allow(dead_code)]
-mod core_process;
-mod dpapi;
+mod child_env;
 mod headless;
 mod health;
-mod identity;
 mod lifecycle;
 mod notify;
 mod paths;
@@ -337,14 +332,6 @@ fn real_main() -> i32 {
 }
 
 fn main() {
-    // Read-only query for the core and daemon; nothing else of the host runs (identity.rs).
-    let mut argv = std::env::args().skip(1);
-    match argv.next().as_deref() {
-        Some(identity::FLAG) => std::process::exit(identity::run(argv.next().as_deref())),
-        // Sealing the phone-sync secrets for the core (dpapi.rs); also nothing else of the host.
-        Some(dpapi::FLAG) => std::process::exit(dpapi::run(argv.next().as_deref())),
-        _ => {}
-    }
     atm_install_state::stop_std_handle_inheritance();
     std::process::exit(real_main());
 }

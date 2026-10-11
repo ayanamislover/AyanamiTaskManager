@@ -20,6 +20,7 @@ pub mod legacy;
 pub mod package;
 pub mod paths;
 mod pin;
+pub mod probe;
 pub mod progress;
 pub mod recover;
 pub mod restore;
@@ -116,6 +117,33 @@ pub fn migrate(conn: &Connection) -> Result<()> {
            version INTEGER PRIMARY KEY, name TEXT NOT NULL,
            sha256 TEXT NOT NULL, applied_at TEXT NOT NULL)",
     )?;
+    let applied = check_applied(conn)?;
+    for m in MIGRATIONS
+        .iter()
+        .filter(|m| !applied.iter().any(|(v, _)| *v == m.version))
+    {
+        let tx = conn.unchecked_transaction()?;
+        tx.execute_batch(m.sql)?;
+        tx.execute(
+            "INSERT INTO schema_migrations (version, name, sha256, applied_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+            params![m.version, m.name, m.sha256()],
+        )?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// 库里已应用的迁移都是这个构建认得的（版本在、文本一致），返回 (版本, sha256)。不写任何东西：没有
+/// `schema_migrations` 就是什么都还没应用；只读打开的连接也能用（安装探测，[`probe`]）。
+pub fn check_applied(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_table {
+        return Ok(Vec::new());
+    }
     let applied: Vec<(i64, String)> = {
         let mut st =
             conn.prepare("SELECT version, sha256 FROM schema_migrations ORDER BY version")?;
@@ -138,19 +166,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             Some(_) => {}
         }
     }
-    for m in MIGRATIONS
-        .iter()
-        .filter(|m| !applied.iter().any(|(v, _)| *v == m.version))
-    {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(m.sql)?;
-        tx.execute(
-            "INSERT INTO schema_migrations (version, name, sha256, applied_at) VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-            params![m.version, m.name, m.sha256()],
-        )?;
-        tx.commit()?;
-    }
-    Ok(())
+    Ok(applied)
 }
 
 /// 当前库的 schema 版本（已应用的最大迁移号）。

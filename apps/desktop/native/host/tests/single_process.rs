@@ -1,7 +1,8 @@
 //! W5a：宿主与服务是同一个进程。
 //!
-//! - 静态守卫：GUI 路径（`app.rs`、`service.rs`）不引用 Node core 的监管（`core_process`、`Core::spawn`、
-//!   `layout.core`、host-control 帧）。
+//! - 静态守卫（W8a 起扩到整个 `src/`）：宿主的代码里没有任何 Node 入口——不监管 Node core（`core_process`、
+//!   `Core::spawn`、`layout.core`、host-control 帧），不认 2.x 的打包布局（`atm-core.exe`、`core.mjs`、`cli.mjs`、
+//!   `mcp-stdio.cjs`），不再替 Node 做 `--dpapi` / `--process-identity`。注释里提到这些不算。
 //! - 真实进程：在合成的 LOCALAPPDATA 下后台启动开发版宿主。服务在宿主进程里开起来（`/health` 答的就是宿主的 pid），
 //!   宿主没有任何子进程，旧根 `L` 一个文件也没写；QUIT 之后入口撤干净、进程退出码 0。
 //! - 旧版没静止（`L\runtime\daemon.lock` 的持有者还活着）时不开任何入口，持有者走了之后再开。
@@ -22,9 +23,37 @@ fn source(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// GUI 路径里出现的 Node core 监管痕迹。
-fn node_core_references(text: &str) -> Vec<&'static str> {
-    const FORBIDDEN: [&str; 7] = [
+fn sources() -> Vec<(String, String)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out: Vec<(String, String)> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("list {}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+        .map(|p| {
+            let text =
+                std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+            (p.file_name().unwrap().to_string_lossy().into_owned(), text)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// 产品代码：去掉文件末尾的 `#[cfg(test)] mod tests`（用例里会造 2.x 的布局当反例）和 `//` 注释（含文档注释）。
+fn code(text: &str) -> String {
+    let product = text
+        .find("#[cfg(test)]\nmod tests")
+        .map_or(text, |at| &text[..at]);
+    product
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 代码里出现的 Node 入口痕迹。
+fn node_references(text: &str) -> Vec<&'static str> {
+    const FORBIDDEN: [&str; 13] = [
         "core_process",
         "Core::spawn",
         "CoreEvent",
@@ -32,24 +61,39 @@ fn node_core_references(text: &str) -> Vec<&'static str> {
         "core-stderr",
         "host-control",
         "CORE_EXIT_REJECTED",
+        "atm-core.exe",
+        "core.mjs",
+        "cli.mjs",
+        "mcp-stdio.cjs",
+        "--dpapi",
+        "--process-identity",
     ];
+    let code = code(text);
     FORBIDDEN
         .into_iter()
-        .filter(|needle| text.contains(needle))
+        .filter(|needle| code.contains(needle))
         .collect()
 }
 
 #[test]
-fn the_gui_path_never_supervises_a_node_core() {
-    for file in ["app.rs", "service.rs"] {
-        let found = node_core_references(&source(file));
-        assert!(found.is_empty(), "{file} still references {found:?}");
+fn the_host_has_no_node_entry_left() {
+    let files = sources();
+    assert!(files.iter().any(|(name, _)| name == "app.rs"), "{files:?}");
+    // 唯一的例外：旧 Agent 配置里的命令行 `AyanamiTaskManager.exe <L>\mcp-stdio.cjs`（ELECTRON_RUN_AS_NODE=1）
+    // 要认出来、转给原生 shim（args.rs，从不运行那个脚本）。
+    const ALLOWED: [(&str, &str); 1] = [("args.rs", "mcp-stdio.cjs")];
+    for (name, text) in &files {
+        let found: Vec<_> = node_references(text)
+            .into_iter()
+            .filter(|needle| !ALLOWED.contains(&(name.as_str(), *needle)))
+            .collect();
+        assert!(found.is_empty(), "{name} still references {found:?}");
     }
-    // 阳性对照：守卫认得出 W4 时的写法。
+    // 阳性对照：守卫认得出 W4 时的监管写法、W7 时的打包布局与两个辅助入口；只在注释里提到不算。
     let w4 = "use crate::core_process::{CORE_EXIT_REJECTED, Core, CoreEvent, Launch, Spawn};\n\
               match Core::spawn(&self.layout.core, &self.layout.data_dir, spawn) {}";
     assert_eq!(
-        node_core_references(w4),
+        node_references(w4),
         [
             "core_process",
             "Core::spawn",
@@ -58,6 +102,21 @@ fn the_gui_path_never_supervises_a_node_core() {
             "CORE_EXIT_REJECTED"
         ]
     );
+    let w7 = "let packaged_core = app_dir.join(\"runtime\").join(\"core.mjs\");\n\
+              let node = app_dir.join(\"runtime\").join(\"atm-core.exe\");\n\
+              pub const FLAG: &str = \"--dpapi\";\n\
+              pub const FLAG: &str = \"--process-identity\";";
+    assert_eq!(
+        node_references(w7),
+        ["atm-core.exe", "core.mjs", "--dpapi", "--process-identity"]
+    );
+    assert!(
+        node_references("/// 2.x 的 runtime\\core.mjs 与 atm-core.exe\nlet x = 1; // --dpapi")
+            .is_empty()
+    );
+    let with_tests =
+        "let a = \"cli.mjs\";\n#[cfg(test)]\nmod tests {\n    let b = \"core.mjs\";\n}";
+    assert_eq!(node_references(with_tests), ["cli.mjs"]);
 }
 
 struct Sandbox {

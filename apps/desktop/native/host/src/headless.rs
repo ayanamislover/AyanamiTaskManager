@@ -14,8 +14,8 @@ use windows_sys::Win32::System::Console::{
 };
 
 use crate::args::Headless;
-use crate::core_process::scrub_environment;
-use crate::paths::{CoreCommand, Layout};
+use crate::child_env::scrub_environment;
+use crate::paths::{Entry, Layout};
 
 /// A GUI-subsystem exe started from a terminal has no std handles; attach to the parent
 /// console and hand the child explicit console handles so output is not lost.
@@ -35,7 +35,7 @@ fn console_stdio() -> Option<(Stdio, Stdio, Stdio)> {
     Some((Stdio::from(input), Stdio::from(output), Stdio::from(error)))
 }
 
-fn run_entry(entry: &CoreCommand, layout: &Layout, extra: &[String], console: bool) -> i32 {
+fn run_entry(entry: &Entry, layout: &Layout, extra: &[String], console: bool) -> i32 {
     let mut command = Command::new(&entry.exe);
     command.args(&entry.args).args(extra);
     scrub_environment(&mut command);

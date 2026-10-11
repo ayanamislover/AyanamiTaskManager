@@ -58,7 +58,7 @@ pub fn gate(layout: &Layout, env: &AgentEnv) -> bool {
     decide(
         layout.packaged,
         || {
-            crate::core_process::product_default_data_root(&layout.data_dir)
+            crate::child_env::product_default_data_root(&layout.data_dir)
                 && defaults_match(
                     Roots {
                         l: &layout.data_dir,

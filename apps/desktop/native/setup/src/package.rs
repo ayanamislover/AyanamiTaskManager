@@ -22,16 +22,16 @@ const MAX_FILES: usize = 20_000;
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Files the transaction itself depends on; a payload without them is not a version.
+/// Files the transaction itself depends on; a payload without them is not a version. 3.0 is one
+/// process (W8a): the host is the service, atm.exe the CLI, atm-mcp.exe the Agent bridge — no Node
+/// runtime. A 2.x version is only ever returned to from its kept directory, never installed from a
+/// package by this setup.
 pub const REQUIRED: &[&str] = &[
     "AyanamiTaskManager.exe",
     "atm-setup.exe",
     "launcher/AyanamiTaskManager.exe",
+    "resources/atm.exe",
     "resources/atm-mcp.exe",
-    "resources/mcp-stdio.cjs",
-    "runtime/atm-core.exe",
-    "runtime/core.mjs",
-    "runtime/cli.mjs",
     "renderer/index.html",
 ];
 
@@ -156,8 +156,30 @@ impl Manifest {
                 return Err(format!("missing {required}"));
             }
         }
+        if let Some(file) = self.files.iter().find(|f| forbidden(&f.path)) {
+            return Err(format!("forbidden {}", file.path));
+        }
         Ok(())
     }
+}
+
+/// What a 3.0 payload never carries (09 :31; the packager refuses them too, scripts/package-content-policy.ts):
+/// a Node runtime or its modules and scripts, and the binaries that exist only for tests (the headless
+/// development runtime, the e2e core).
+fn forbidden(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    lower.split('/').any(|part| part == "node_modules")
+        || [".mjs", ".cjs", ".node"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+        || [
+            "node.exe",
+            "atm-core.exe",
+            "atm-runtime.exe",
+            "atm-core-e2e.exe",
+        ]
+        .contains(&name)
 }
 
 pub fn load(manifest_path: &Path) -> io::Result<Package> {
@@ -356,5 +378,89 @@ mod tests {
         assert_eq!(compare_versions("2.0.0", "2.0"), Equal);
         assert_eq!(compare_versions("2.0.0-rc.1", "2.0.0"), Less);
         assert_eq!(compare_versions("1.2.2", "2.0.0"), Less);
+    }
+
+    fn manifest(paths: &[&str]) -> Manifest {
+        let files: Vec<FileEntry> = paths
+            .iter()
+            .map(|p| FileEntry {
+                path: (*p).to_owned(),
+                size: 1,
+                sha256: "0".repeat(64),
+            })
+            .collect();
+        Manifest {
+            format: MANIFEST_FORMAT,
+            version: "3.0.0".into(),
+            arch: "x64".into(),
+            package: "atm-3.0.0-win-x64.zip".into(),
+            package_sha256: "0".repeat(64),
+            package_bytes: 1,
+            unpacked_bytes: files.len() as u64,
+            min_web_view2: "120.0".into(),
+            schema_set: String::new(),
+            files,
+        }
+    }
+
+    /// W8a：3.0 的包是单进程布局。缺任何一个必需文件、或带着 Node 运行时 / 测试专用二进制，都不是一个版本；
+    /// 2.x 形状的包（`runtime\` 里的 Node core，没有 atm.exe）也不认。
+    #[test]
+    fn a_3_0_payload_is_one_process_without_node() {
+        let good = [
+            "AyanamiTaskManager.exe",
+            "atm-setup.exe",
+            "launcher/AyanamiTaskManager.exe",
+            "resources/atm.exe",
+            "resources/atm-mcp.exe",
+            "resources/ATM_AGENT_GUIDE.md",
+            "renderer/index.html",
+            "renderer/assets/index-abc.js",
+            "LICENSE",
+        ];
+        assert_eq!(manifest(&good).validate(), Ok(()));
+        for required in REQUIRED {
+            let without: Vec<&str> = good.iter().copied().filter(|p| p != required).collect();
+            assert_eq!(
+                manifest(&without).validate(),
+                Err(format!("missing {required}")),
+                "{required}"
+            );
+        }
+        for extra in [
+            "runtime/atm-core.exe",
+            "runtime/core.mjs",
+            "runtime/cli.mjs",
+            "resources/mcp-stdio.cjs",
+            "runtime/node_modules/better-sqlite3/package.json",
+            r"runtime\node_modules\better-sqlite3\prebuilds\win32-x64.node",
+            "node.exe",
+            "resources/NODE.EXE",
+            "atm-runtime.exe",
+            "resources/atm-core-e2e.exe",
+        ] {
+            let mut with: Vec<&str> = good.to_vec();
+            with.push(extra);
+            assert_eq!(
+                manifest(&with).validate(),
+                Err(format!("forbidden {extra}")),
+                "{extra}"
+            );
+        }
+        let two_x = [
+            "AyanamiTaskManager.exe",
+            "atm-setup.exe",
+            "launcher/AyanamiTaskManager.exe",
+            "resources/atm-mcp.exe",
+            "resources/mcp-stdio.cjs",
+            "runtime/atm-core.exe",
+            "runtime/core.mjs",
+            "runtime/cli.mjs",
+            "renderer/index.html",
+        ];
+        assert_eq!(
+            manifest(&two_x).validate(),
+            Err("missing resources/atm.exe".into())
+        );
     }
 }

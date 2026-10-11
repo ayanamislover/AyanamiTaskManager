@@ -157,6 +157,7 @@ dependencies = [
  "atm-jobs",
  "atm-runtime",
  "atm-service",
+ "atm-store",
  "atm-sync",
  "atm-ui-bridge",
  "serde",
