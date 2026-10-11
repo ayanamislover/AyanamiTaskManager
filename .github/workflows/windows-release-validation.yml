@@ -45,7 +45,11 @@ jobs:
       - name: Install the Playwright browser
         run: pnpm exec playwright install chromium
 
+      # A fresh runner is a clean machine: the installed half of distribution-smoke registers the real
+      # uninstall entry, Start menu and keepalive task, so it runs only where this is declared.
       - name: Run full E2E, benchmark, package, and distribution validation
+        env:
+          ATM_DISTRIBUTION_CLEAN_MACHINE: "1"
         run: pnpm release --full
 
       - name: Upload release validation evidence

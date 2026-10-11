@@ -116,8 +116,8 @@ describe("smokes must not damage the real autostart entry", () => {
   // 于是收尾只删本轮新加的、从不放回或复活什么。
   it("distribution-smoke installs only where the shared Run value is absent, and never restores one", () => {
     expect(RUN_VALUE).toBe(NAME);
-    const source = readFileSync(join(process.cwd(), "scripts/distribution-smoke.ts"), "utf8");
-    const precondition = "findRunEntry(runBefore, RUN_VALUE) !== undefined;";
+    const source = readFileSync(join(process.cwd(), "scripts/distribution-installed.ts"), "utf8");
+    const precondition = "findRunEntry(runBefore, RUN_VALUE) !== undefined && `Run ${RUN_VALUE}`,";
     expect(source).toContain(precondition);
     expect(source).not.toMatch(/RUN_VALUE in |\[RUN_VALUE\]/u);
     expect(source.indexOf(precondition)).toBeLessThan(source.indexOf('run(setup, ["install"'));

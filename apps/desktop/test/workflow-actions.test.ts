@@ -63,7 +63,12 @@ const releaseGateContracts = [
   {
     name: "installed smoke",
     source: "distributionSmoke",
-    needle: "  installedState = await installed();",
+    needle: "  installedState = await installedHalf();",
+  },
+  {
+    name: "clean machine declaration",
+    source: "workflow",
+    needle: 'ATM_DISTRIBUTION_CLEAN_MACHINE: "1"',
   },
 ] as const satisfies ReadonlyArray<{
   name: string;
@@ -170,7 +175,9 @@ describe("GitHub Actions runtime policy", () => {
   // distribution-smoke 验的是用户拿到的生产二进制：不能借 smoke 构建的钩子退出，
   // 并且要主动塞调试参数，证明生产宿主把它们清掉了。
   it("checks the production binaries without smoke hooks, and tries to open a debug port", () => {
-    const source = readFileSync(distributionSmokePath, "utf8");
+    const source = ["distribution-smoke.ts", "distribution-common.ts", "distribution-installed.ts"]
+      .map((name) => readFileSync(resolve(root, "scripts", name), "utf8"))
+      .join("\n");
 
     expect(source).not.toContain("pnpm.cmd");
     expect(source).not.toContain("--smoke-quit");
