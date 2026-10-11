@@ -1097,8 +1097,26 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
-/** A Squirrel 1.x layout with its registrations, served by the fake Electron. */
+/**
+ * A Squirrel 1.x layout with its registrations, served by the fake Electron.
+ *
+ * 1.x and 2.x share the data root L (same registry and project databases), and a real 1.x
+ * user's L always holds them. The fake Electron writes none, and 3.x converts L, so the
+ * data comes first: the real 2.0 writes it (2.0's format) and is uninstalled again, which
+ * keeps L. Then the 1.x layout goes on top.
+ */
 async function squirrelLayout(sandbox: Sandbox): Promise<void> {
+  if (await install20(sandbox)) {
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+    check(
+      "1.x data root seeded (written by 2.0, which was uninstalled again)",
+      (await until(() => !existsSync(sandbox.install), 60_000)) &&
+        existsSync(join(sandbox.data, "registry", "registry.sqlite")),
+      existsSync(sandbox.install) ? readdirSync(sandbox.install) : readdirSync(sandbox.data),
+    );
+    killAll(sandbox.dir);
+    reg(["delete", sandbox.registry, "/f"]);
+  }
   const app = join(sandbox.install, `app-${LEGACY}`);
   mkdirSync(join(app, "resources"), { recursive: true });
   copyFileSync(fakeElectron, join(app, "AyanamiTaskManager.exe"));
@@ -1162,6 +1180,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     `\n[${currentScenario}] Squirrel ${LEGACY} layout with a running (fake) Electron\n`,
   );
   await squirrelLayout(sandbox);
+  const seeded = legacyBusiness(sandbox.data);
   const stub = readFileSync(join(sandbox.install, "AyanamiTaskManager.exe"));
   check(
     `fake Electron serves ${LEGACY}`,
@@ -1244,8 +1263,11 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     desktop,
   );
   check(
-    "user data still readable by the new core (same registry DB)",
-    existsSync(join(sandbox.data, "registry", "registry.sqlite")),
+    "N holds the 1.x root's business content; L untouched",
+    seeded !== null &&
+      sameBusiness(v3Business(sandbox.v3), seeded) &&
+      sameBusiness(legacyBusiness(sandbox.data), seeded),
+    { seeded, n: v3Business(sandbox.v3), l: legacyBusiness(sandbox.data) },
   );
 
   process.stdout.write(`[${currentScenario}] back to Electron\n`);
@@ -1408,9 +1430,15 @@ async function scenarioReverseReplay(pkg: Packages): Promise<void> {
       { code, journal: sandbox.journal(), log: sandbox.since(mark).slice(-1500) },
     );
     const log = sandbox.since(mark);
+    // SPAWNED: when the orphan's own --recover wins the lock, the host it would take over is
+    // its parent, blocked on it — it is replaced at once rather than waited for.
     check(
       `${label}: the replay took over the host started earlier`,
-      log.includes(`ROLLBACK_START: taking over host ${started}`),
+      log.includes(`ROLLBACK_START: taking over host ${started}`) ||
+        (point === "SPAWNED" &&
+          log.includes(
+            `ROLLBACK_START: host ${started} never served (it started this recovery and waits for it)`,
+          )),
       log.slice(-1500),
     );
     if (point !== "SPAWNED")

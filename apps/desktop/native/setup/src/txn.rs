@@ -73,7 +73,8 @@ fn code(error: &str) -> String {
 /// `host` is the process that started this setup. A START host whose setup died before it
 /// was admitted runs `--recover` itself and waits for it to finish: it writes no progress
 /// until then, so taking over its wait would only wait out the first-progress budget.
-/// Such a host is not a live START to take over; the undo stops it like any other.
+/// Such a host is not a live START to take over: a forward replay undoes and stops it like
+/// any other, and ROLLBACK_START replaces it at once instead of waiting out the takeover.
 fn started_us(host: &atm_install_state::ProcessIdentity) -> bool {
     // Only the process snapshot carries the parent pid (`procs::find` does not).
     let me = std::process::id();
@@ -611,15 +612,21 @@ impl Setup {
         step: u8,
     ) -> Step {
         if let Some(started) = self.started_host(txn, from) {
-            say!(
-                "ROLLBACK_START: taking over host {} started earlier",
-                started.pid
-            );
-            let policy = WaitPolicy {
-                first_progress: TAKEOVER_TIMEOUT,
-                ..WaitPolicy::default()
+            let waited = if started_us(&started) {
+                // It is blocked on this very recovery: it cannot serve before we finish.
+                Err("it started this recovery and waits for it".to_owned())
+            } else {
+                say!(
+                    "ROLLBACK_START: taking over host {} started earlier",
+                    started.pid
+                );
+                let policy = WaitPolicy {
+                    first_progress: TAKEOVER_TIMEOUT,
+                    ..WaitPolicy::default()
+                };
+                self.await_healthy(txn, from, &started, policy)
             };
-            match self.await_healthy(txn, from, &started, policy) {
+            match waited {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     say!(
@@ -673,10 +680,8 @@ impl Setup {
     ) -> Option<atm_install_state::ProcessIdentity> {
         let started = txn.started.clone()?;
         let dir = self.env.app_dir(version);
-        (procs::alive(&started)
-            && fsx::is_within(std::path::Path::new(&started.image), &dir)
-            && !started_us(&started))
-        .then_some(started)
+        (procs::alive(&started) && fsx::is_within(std::path::Path::new(&started.image), &dir))
+            .then_some(started)
     }
 
     /// Wait for SERVICE_HEALTHY (07 §8): only the witness counts as health. Progress that this
@@ -959,7 +964,9 @@ impl Setup {
             // (07 §8, F18). Its own progress keeps counting; anything older does not.
             TxnState::Start
                 if startup::is_v3(&txn.to)
-                    && self.started_host(&txn, &txn.to.clone()).is_some() =>
+                    && self
+                        .started_host(&txn, &txn.to.clone())
+                        .is_some_and(|started| !started_us(&started)) =>
             {
                 let to = txn.to.clone();
                 let started = self.started_host(&txn, &to).ok_or("START_TAKEOVER_LOST")?;
