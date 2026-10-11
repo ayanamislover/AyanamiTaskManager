@@ -169,10 +169,11 @@ impl Service {
                 .collect::<rusqlite::Result<_>>()
             })
             .map_err(|e| internal(format!("{e:?}")))?;
-        let pending = self
-            .backups_root
-            .as_deref()
-            .map_or(0, atm_store::backup::withdrawn_pending);
+        // 数目有界（W8g）：数到上限就标 TRUNCATED，读不出来标 SCAN_FAILED，不当成 0。
+        let (pending, counted) = self.backups_root.as_deref().map_or(
+            (0, atm_store::backup::PendingCount::Exact),
+            atm_store::backup::withdrawn_pending,
+        );
         let recent: Vec<Value> = self
             .withdrawals
             .lock()
@@ -183,7 +184,11 @@ impl Service {
         Ok(json!({
             "backups": rows,
             "legacyBackups": legacy,
-            "withdrawals": { "cleanupPending": pending, "recent": recent },
+            "withdrawals": {
+                "cleanupPending": pending,
+                "cleanupPendingCount": counted.as_str(),
+                "recent": recent,
+            },
         }))
     }
 

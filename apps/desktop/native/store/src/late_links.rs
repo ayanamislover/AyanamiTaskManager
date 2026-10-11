@@ -154,7 +154,7 @@ fn a_plain_layer_that_appears_after_pinning_is_still_swept() {
     let parked = root.join(".withdrawn").join("01J0000000000000000000000C");
     fs::create_dir_all(&parked).unwrap();
     fs::write(parked.join("f"), b"x").unwrap();
-    assert_eq!(sweep_withdrawn_locked(&store, &mut pinned), 0);
+    assert!(sweep_withdrawn_locked(&store, &mut pinned).clean());
     assert!(!parked.exists());
 }
 

@@ -70,9 +70,6 @@ export const COMPLETION_GATE_REQUIRED_STATUSES = [
   "VERIFYING",
 ] as const satisfies readonly WorkItemStatus[];
 
-export const WORK_ITEM_OPERATION_TABLE_BEGIN = "<!-- WORK_ITEM_OPERATIONS:BEGIN -->";
-export const WORK_ITEM_OPERATION_TABLE_END = "<!-- WORK_ITEM_OPERATIONS:END -->";
-
 const fixedTarget =
   (target: WorkItemStatus) =>
   (_context: WorkItemOperationContext): WorkItemStatus =>
@@ -346,43 +343,4 @@ export function workItemOperationHasEffect(
 ): boolean {
   const effects: readonly WorkItemOperationEffect[] = WorkItemOperations[operation].effects;
   return effects.includes(effect);
-}
-
-export function generateWorkItemOperationTable(): string {
-  const statuses = Object.keys(WORK_ITEM_STATUS_LABELS) as WorkItemStatus[];
-  const statusRows = statuses.map((status) => {
-    const operations = legalWorkItemOperations(status)
-      .map(({ operation }) => `\`${operation}\``)
-      .join(", ");
-    return `| \`${status}\` | ${WORK_ITEM_STATUS_LABELS[status]} | ${operations || "-"} |`;
-  });
-  const operationRows = WORK_ITEM_OPERATION_NAMES.map((operation) => {
-    const definition = WorkItemOperations[operation];
-    return `| \`${operation}\` | ${definition.ui.label} | ${definition.allowedFrom
-      .map((status) => `\`${status}\``)
-      .join(", ")} | ${definition.preconditions.join(", ") || "-"} |`;
-  });
-  return [
-    WORK_ITEM_OPERATION_TABLE_BEGIN,
-    "",
-    "### 状态与操作（自动生成）",
-    "",
-    "> 本表由 canonical `WorkItemOperations` registry 生成；不要手工维护状态机副本。",
-    "",
-    "<!-- prettier-ignore -->",
-    "| 状态 | 显示名 | 合法操作 |",
-    "| --- | --- | --- |",
-    ...statusRows,
-    "",
-    "<!-- prettier-ignore -->",
-    "| 操作 | 显示名 | 可进入的当前状态 | 前置条件 |",
-    "| --- | --- | --- | --- |",
-    ...operationRows,
-    "",
-    `> \`COMPLETION_GATE\` 在上表之外还要求当前状态属于 ${COMPLETION_GATE_REQUIRED_STATUSES.map(
-      (status) => `\`${status}\``,
-    ).join(" 或 ")}：没开工过的任务不能直接 \`complete\`，先 \`start\`。`,
-    "",
-    WORK_ITEM_OPERATION_TABLE_END,
-  ].join("\n");
 }

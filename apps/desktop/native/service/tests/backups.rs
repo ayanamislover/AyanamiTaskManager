@@ -490,6 +490,8 @@ fn a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept() {
     assert!(root.join(".creating").join(&id).is_file());
     let list = svc.list_backups(&user(), 200).unwrap();
     assert_eq!(list["withdrawals"]["cleanupPending"], 1);
+    // 数目怎么来的也给出来（W8g）：这里数全了。
+    assert_eq!(list["withdrawals"]["cleanupPendingCount"], "EXACT");
 
     w.exec("DROP TRIGGER fail_registration;");
     let next = svc.create_manual_backup(&user()).unwrap();
@@ -525,7 +527,7 @@ fn a_creation_marker_never_removes_a_registered_backup() {
     std::fs::write(root.join(".creating").join(&id), b"").unwrap();
     assert_eq!(
         atm_store::backup::sweep_withdrawn(w.svc.store(), &root).unwrap(),
-        0
+        atm_store::backup::Swept::default()
     );
     assert!(!root.join(".creating").exists());
     atm_store::backup::verify_backup(w.svc.store(), &id).unwrap();

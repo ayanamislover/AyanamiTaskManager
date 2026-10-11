@@ -4,8 +4,9 @@
 //! 身份不回退、回执原地变墓碑、全局流打撤销标记、其他范围不受影响、失败时什么都不变。
 
 use atm_store::backup::{
-    BackupError, CREATING_DIR, WITHDRAWN_DIR, Withdrawal, artifacts_root, attachment_lock_waiters,
-    create_backup, discard_backup, sweep_withdrawn, verify_backup, withdrawn_pending,
+    BackupError, CREATING_DIR, PENDING_SCAN_LIMIT, PendingCount, SWEEP_MAX_ENTRIES, WITHDRAWN_DIR,
+    Withdrawal, artifacts_root, attachment_lock_waiters, create_backup, discard_backup,
+    sweep_withdrawn, verify_backup, withdrawn_pending,
 };
 use atm_store::events::{NewEvent, append_event, next_number};
 use atm_store::restore::{
@@ -1873,9 +1874,9 @@ fn withdrawal_only_removes_unused_backups_and_sweeps_leftovers() {
     fs::create_dir_all(quarantine.join("ORPHAN")).unwrap();
     fs::write(quarantine.join("ORPHAN").join("atm.sqlite"), b"x").unwrap();
     fs::rename(&parked.dir, quarantine.join(&parked.id)).unwrap();
-    assert_eq!(withdrawn_pending(&w.backups), 2);
-    assert_eq!(sweep_withdrawn(&w.store, &w.backups).unwrap(), 0);
-    assert_eq!(withdrawn_pending(&w.backups), 0);
+    assert_eq!(withdrawn_pending(&w.backups), (2, PendingCount::Exact));
+    assert!(sweep_withdrawn(&w.store, &w.backups).unwrap().clean());
+    assert_eq!(withdrawn_pending(&w.backups), (0, PendingCount::Exact));
     assert!(!quarantine.exists());
     verify_backup(&w.store, &parked.id).unwrap();
     assert_eq!(dirs(), rows());
@@ -1975,7 +1976,7 @@ fn withdrawal_moves_go_through_the_shared_contract() {
     fs::rename(&busy.dir, quarantine.join(&busy.id)).unwrap();
     let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
     let ops = plain_ops(ops);
-    assert_eq!(left.unwrap(), 0);
+    assert!(left.unwrap().clean());
     assert_eq!(
         ops,
         [Op::Move {
@@ -2054,7 +2055,7 @@ fn a_delete_error_with_a_failed_put_back_is_recovered_by_the_sweep() {
         .unwrap();
     let (left, ops) = durable::record(|| sweep_withdrawn(&w.store, &w.backups));
     let ops = plain_ops(ops);
-    assert_eq!(left.unwrap(), 0);
+    assert!(left.unwrap().clean());
     assert_eq!(
         ops,
         [Op::Move {
@@ -2200,4 +2201,77 @@ fn a_staged_directory_replaced_by_a_link_is_not_swapped_in() {
     fs::rename(&kept, &staged).unwrap();
     assert_eq!(finish_attachment_swaps(&w.store).unwrap(), 1);
     assert_eq!(fs::read(root.join("PA").join("a.txt")).unwrap(), b"v1");
+}
+
+/// W8g（W2 peer r3 P2-01）：一轮清扫最多处理 [`SWEEP_MAX_ENTRIES`] 条，没轮到的留到下一轮；恢复选中的那份即使
+/// 在隔离区里排在这一轮之外，也先单独放回，照样校验、恢复成功；一轮一轮清下去最终清干净。
+#[test]
+fn a_sweep_round_is_bounded_and_the_chosen_backup_is_reinstated_anyway() {
+    let w = world("sweep-bounded");
+    let b = create_backup(&w.store, &w.backups, "MANUAL", T1).unwrap();
+    let quarantine = w.backups.join(WITHDRAWN_DIR);
+    let orphans = SWEEP_MAX_ENTRIES + 8;
+    // 名字排在 ULID 之前：NTFS 按名字枚举，这一轮先轮到的是孤儿。
+    for i in 0..orphans {
+        let d = quarantine.join(format!("00ORPHAN{i:03}"));
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("atm.sqlite"), b"x").unwrap();
+    }
+    fs::rename(&b.dir, quarantine.join(&b.id)).unwrap();
+    assert_eq!(
+        withdrawn_pending(&w.backups),
+        (orphans + 1, PendingCount::Exact)
+    );
+
+    restore_project(&w.store, &b.id, "PA", &opts(&w)).unwrap();
+    assert!(
+        b.dir.join("atm.sqlite").is_file(),
+        "the chosen backup is back"
+    );
+    // 恢复里那一轮只清了 SWEEP_MAX_ENTRIES 条孤儿。
+    assert_eq!(
+        withdrawn_pending(&w.backups),
+        (orphans - SWEEP_MAX_ENTRIES, PendingCount::Exact)
+    );
+
+    let round = sweep_withdrawn(&w.store, &w.backups).unwrap();
+    assert_eq!((round.left, round.more), (0, false), "{round:?}");
+    assert_eq!(withdrawn_pending(&w.backups), (0, PendingCount::Exact));
+    verify_backup(&w.store, &b.id).unwrap();
+
+    // 一轮正好碰上预算：多出来的那些标 more，下一轮接着清。
+    for i in 0..(SWEEP_MAX_ENTRIES + 1) {
+        fs::create_dir_all(quarantine.join(format!("00LEFT{i:03}"))).unwrap();
+    }
+    let round = sweep_withdrawn(&w.store, &w.backups).unwrap();
+    assert_eq!((round.left, round.more), (0, true), "{round:?}");
+    assert!(sweep_withdrawn(&w.store, &w.backups).unwrap().clean());
+}
+
+/// 诊断的数目有界并且如实：数全了是 EXACT；某一处超过 [`PENDING_SCAN_LIMIT`] 只数到上限、标 TRUNCATED；
+/// 读不出来（不是不存在）标 SCAN_FAILED，不当成 0。
+#[test]
+fn the_pending_count_is_bounded_and_says_how_it_was_counted() {
+    let w = world("sweep-pending-count");
+    assert_eq!(withdrawn_pending(&w.backups), (0, PendingCount::Exact));
+    let quarantine = w.backups.join(WITHDRAWN_DIR);
+    for i in 0..(PENDING_SCAN_LIMIT + 5) {
+        fs::create_dir_all(quarantine.join(format!("{i:05}"))).unwrap();
+    }
+    fs::create_dir_all(w.backups.join(CREATING_DIR)).unwrap();
+    fs::write(
+        w.backups
+            .join(CREATING_DIR)
+            .join("01J0000000000000000000000Q"),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(
+        withdrawn_pending(&w.backups),
+        (PENDING_SCAN_LIMIT + 1, PendingCount::Truncated)
+    );
+    fs::remove_dir_all(&quarantine).unwrap();
+    // 隔离区的位置上是个文件：读不出来。
+    fs::write(&quarantine, b"not a directory").unwrap();
+    assert_eq!(withdrawn_pending(&w.backups), (1, PendingCount::ScanFailed));
 }

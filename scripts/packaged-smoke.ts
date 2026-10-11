@@ -6,7 +6,6 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chromium, type Browser, type Page } from "@playwright/test";
-import { format } from "prettier";
 import { AyanamiClient } from "../packages/client/src/index.js";
 import {
   applyRunRestore,
@@ -15,11 +14,6 @@ import {
   readRunSnapshot,
 } from "./login-item-guard.js";
 import { assertSandboxDataDir } from "./smoke-host.js";
-import {
-  generateMutationAcknowledgementDocumentation,
-  MUTATION_ACK_DOCUMENTATION_BEGIN,
-  MUTATION_ACK_DOCUMENTATION_END,
-} from "../packages/mcp/src/mutation-ack-contract.js";
 import {
   buildAgentDocumentationManifest,
   compareAgentDocumentationManifests,
@@ -131,6 +125,11 @@ function check(name: string, condition: unknown, detail?: string): asserts condi
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
+
+// 写入回执契约的标记段。3.0 起由 atm-http 的 tests/docs.rs 从 Rust 的表生成，并与仓库里的 Guide 逐字节核对
+// （W4j-3，ATM-D-386）；这里核对装出去的三份文档里这一段与源码仓库的 Guide 逐字一致。
+const MUTATION_ACK_DOCUMENTATION_BEGIN = "<!-- MUTATION_ACK_CONTRACT:BEGIN -->";
+const MUTATION_ACK_DOCUMENTATION_END = "<!-- MUTATION_ACK_CONTRACT:END -->";
 
 function mutationAcknowledgementSection(content: string): string | null {
   const start = content.indexOf(MUTATION_ACK_DOCUMENTATION_BEGIN);
@@ -1149,9 +1148,10 @@ try {
   const guideContent = await readFile(installedGuide, "utf8");
   const agentDocsContent = await readFile(installedAgentDocs, "utf8");
   const mutationAckDocsContent = await readFile(installedMutationAckDocs, "utf8");
-  const expectedMutationAck = (
-    await format(generateMutationAcknowledgementDocumentation(), { parser: "markdown" })
-  ).trim();
+  const expectedMutationAck = mutationAcknowledgementSection(
+    await readFile(join(root, "ATM_AGENT_GUIDE.md"), "utf8"),
+  );
+  check("源码 Guide 带写入回执契约段", expectedMutationAck !== null);
   check(
     "Agent Guide 使用设备无关路径",
     guideContent.includes("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md") &&

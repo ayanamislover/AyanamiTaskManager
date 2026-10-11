@@ -54,7 +54,9 @@ U-1 第二轮（Codex 与 Claude Code 各 27 次）又查出两处：
 
 仓库里的文件与生成结果必须逐字节一致（`ATM_DOCS_BLESS=1` 重写）。写入回执和错误信封的字段表各对照几次真实调用：回执里出现字段表没写的字段，或字段表里的字段一次都没出现，都会红（`merges` 有专门用例，不要求在样本里出现）。表格每行列数一致。
 
-锁定 v5 TS 生成结果的 6 条 TS 断言与两个 TS 生成脚本已退役（ATM-D-386）；TS 的生成函数随 W8 去掉 Node 时一并删除。
+锁定 v5 TS 生成结果的 6 条 TS 断言与两个 TS 生成脚本已退役（ATM-D-386）。TS 的生成函数已在 W8g 删除：
+`generateMcpToolStatsDocumentation`、`generateMcpToolContractMarkdown`、`generateWorkItemOperationTable`、`generateMutationAcknowledgementDocumentation`、`generateCompositeTaskPatchDocumentation`，连同它们的标记常量与只给它们用的辅助函数。
+`scripts/packaged-smoke.ts` 原来拿 v5 生成器的输出当期望值，现在改成与源码仓库 Guide 里的同一段逐字比对。
 
 ## 4. U-1 冷启动 Agent
 

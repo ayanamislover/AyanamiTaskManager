@@ -1,5 +1,6 @@
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   expect,
   request as createRequest,
@@ -856,6 +857,62 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
     "false",
   );
   expect(engineeringRequests).toBe(1);
+});
+
+// W8g（W2 peer r3 P2-02）：读从不当场扫。有源码目录、还没统计过的项目显示「还没有统计」并指向刷新，
+// 不说目录有问题；用户点「刷新统计」才当场扫一次（refresh=true 只出现在这一次请求里）。
+test("有源码目录但还没统计过：提示去刷新，点「刷新统计」当场算出来", async ({ page }) => {
+  const code = `EM${Date.now().toString(36).slice(-4).toUpperCase()}`;
+  const repo = resolve("output", `e2e-metrics-${code}`);
+  rmSync(repo, { recursive: true, force: true });
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "main.rs"), "fn main() {}\nfn other() {}\n");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", ...args], {
+      cwd: repo,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "init");
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const created = await api.post(`${apiUrl}/projects`, {
+      data: { name: "工程统计验收", sourcePath: repo, code, description: "" },
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+
+    const metricsRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/engineering-metrics")) metricsRequests.push(request.url());
+    });
+    await page.goto(`/#project:${code}`);
+    const diagnostics = page.getByRole("region", { name: "项目诊断" });
+    await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
+    const region = page.getByRole("region", { name: "工程统计" });
+    await region.getByRole("button", { name: "展开工程统计" }).click();
+    await expect(region.getByText("还没有统计", { exact: true })).toBeVisible();
+    await expect(region.getByText("点「刷新统计」，按本地 Git 与文件算一次")).toBeVisible();
+    await expect(region.getByText("此项目暂不可统计")).toHaveCount(0);
+    expect(metricsRequests).toHaveLength(1);
+    expect(metricsRequests[0]).not.toContain("refresh");
+    await region.screenshot({
+      path: resolve("output", "playwright", "e2e-engineering-no-data.png"),
+    });
+
+    await region.getByRole("button", { name: "刷新统计" }).click();
+    await expect(region.getByText("Source LOC")).toBeVisible();
+    await expect(region.getByText(/^HEAD [0-9a-f]{10}/u)).toBeVisible();
+    expect(metricsRequests).toHaveLength(2);
+    expect(metricsRequests[1]).toContain("refresh=true");
+    await region.screenshot({
+      path: resolve("output", "playwright", "e2e-engineering-refreshed.png"),
+    });
+  } finally {
+    await api.dispose();
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async ({ page }) => {

@@ -116,6 +116,8 @@ pub fn restore_project(
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
     let mut backups = BackupsRoot::pin_for(store, opts.backups_root)?;
     crate::backup::sweep_withdrawn_locked(store, &mut backups);
+    // 一轮清扫有上限（W8g）：选中的那份不论轮没轮到，都先单独放回。
+    crate::backup::reinstate_locked(store, &mut backups, backup_id);
     let vb = verify_backup(store, backup_id)?;
     require_project(store, &vb, project_id)?;
     pin(store, backup_id, opts.pin_until)?;
@@ -168,6 +170,8 @@ pub fn restore_knowledge(
     // 撤回放不回来的备份目录先归位，选中的那份才校验得过（W2 peer r2 P1-02）。
     let mut backups = BackupsRoot::pin_for(store, opts.backups_root)?;
     crate::backup::sweep_withdrawn_locked(store, &mut backups);
+    // 一轮清扫有上限（W8g）：选中的那份不论轮没轮到，都先单独放回。
+    crate::backup::reinstate_locked(store, &mut backups, backup_id);
     let vb = verify_backup(store, backup_id)?;
     let side = side_reader(&vb.source_db())?;
     let present: bool =

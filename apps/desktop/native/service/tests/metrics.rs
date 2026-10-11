@@ -161,6 +161,44 @@ fn metrics_read_without_data_or_target() {
     }
 }
 
+/// 只有任务指标、还没有项目指标（W8g，W2 peer r3 P2-02）：`available` 为真、`project` 为空、没有 reason——
+/// 界面据 `project` 为空提示去刷新，不去读空的项目指标；只有基线（指标为 null）的任务不算有数据。
+#[test]
+fn metrics_read_with_only_task_metrics() {
+    let w = world("metrics-read-task-only");
+    let (a1, a2) = (w.task("有指标"), w.task("只有基线"));
+    with_paths(&w, &["PA"]);
+    w.exec(&format!(
+        "INSERT INTO engineering_work_item_metrics (project_id, work_item_id, baseline_ref, baseline_captured_at, payload_json, captured_at, updated_at)
+           SELECT 'PA', id, 'b1', '{T0}', '{{\"added\":3}}', '{T0}', '{T0}' FROM work_items WHERE project_id = 'PA' AND local_no = 1;
+         INSERT INTO engineering_work_item_metrics (project_id, work_item_id, baseline_ref, baseline_captured_at, payload_json, captured_at, updated_at)
+           SELECT 'PA', id, 'b2', '{T0}', NULL, NULL, '{T0}' FROM work_items WHERE project_id = 'PA' AND local_no = 2"
+    ));
+    for who in [user(), agent()] {
+        let r = w.svc.metrics_read(&who, "ATM", Some(&a1)).unwrap();
+        assert_eq!(
+            (
+                r["available"].clone(),
+                r["reason"].clone(),
+                r["project"].clone(),
+                r["projectHead"].clone()
+            ),
+            (json!(true), Value::Null, Value::Null, Value::Null),
+            "{r}"
+        );
+        assert_eq!(r["workItem"]["metrics"], json!({ "added": 3 }));
+        let r = w.svc.metrics_read(&who, "ATM", Some(&a2)).unwrap();
+        assert_eq!(
+            (r["available"].clone(), r["reason"].clone()),
+            (json!(false), json!("NO_DATA")),
+            "{r}"
+        );
+        assert_eq!(r["workItem"]["baseline"], "b2");
+        let r = w.svc.metrics_read(&who, "ATM", None).unwrap();
+        assert_eq!(r["reason"], "NO_DATA", "{r}");
+    }
+}
+
 /// 只看本项目：EMP 的项目指标更新也不会成为 ATM 的「最新」；别的项目的任务键在这里找不到。
 #[test]
 fn metrics_read_is_project_scoped() {

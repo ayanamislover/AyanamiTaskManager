@@ -621,7 +621,25 @@ W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01�
   `output/w2-evidence/w2h6-mutation-evidence.json`；`mut-w2h5*.py` 两条锚点随改写更新并重跑。
 
 评审的两条 P2（清扫与诊断扫描没有工作量上限；`metrics.read` 的 `NO_DATA` 需要 W4 / W6 的界面与入口承接）是 W4 / W5 / W6 / W8 的硬门，
-已记入 ATM。
+已记入 ATM。W8g（ATM-T-0895）关闭：
+
+- **清扫有界**（`store/src/backup.rs`）：
+  - 一轮最多 `SWEEP_MAX_ENTRIES`（32）条、`SWEEP_BUDGET`（1.5 s）。时长在条目之间检查，超出的最多是正在处理的那一条：一次改名，或者删一份备份的目录，与在同一把附件锁里做一份备份同一量级。
+  - 一批条目的登记一次读库查完（`json_each`），读池占满时一轮只等一次 `read_wait`。查不了登记就一条都不动。
+  - 先放回仍登记的，再删没登记的。没轮到的留到下一轮，`Swept::more` 为真。
+  - 两个恢复入口在清扫之后对选中的那份单独 `reinstate_locked`：它不论轮没轮到都先回到备份根，不会被当成缺失。
+  - 用例：`store/src/sweep_budget.rs`（时长为 0 时先放回登记的；读池占满时 32 条只等一次）、`tests/restore.rs::a_sweep_round_is_bounded_and_the_chosen_backup_is_reinstated_anyway`。
+- **诊断有界且如实**：`withdrawn_pending` 每一处最多数 `PENDING_SCAN_LIMIT`（1000）条，返回 `(数目, EXACT | TRUNCATED | SCAN_FAILED)`。读不出来不再当成 0。
+  - `list_backups` 的 `withdrawals` 多了 `cleanupPendingCount`。
+  - 用例：`tests/restore.rs::the_pending_count_is_bounded_and_says_how_it_was_counted`。
+- **NO_DATA 的承接**：
+  - 服务端：读从不扫、不排队（`jobs/tests/metrics.rs::reading_has_no_side_effects_and_refreshing_is_user_or_capture_only`），刷新只给 User 与采集作业。只有任务指标时是 `available:true, project:null`（`tests/metrics.rs::metrics_read_with_only_task_metrics`）。
+  - 界面（`packages/ui/src/project-statistics-panel.tsx`）分四种显示：
+    - `NO_DATA`，或只有任务指标：「还没有统计」并指向「刷新统计」，不再说目录不是 Git 仓库、不去读空的项目指标；
+    - `NO_SOURCE_PATH`：「项目没有源码目录」；
+    - 刷新失败：服务端的说明；
+    - 读失败：可重试的行内错误。
+  - e2e「有源码目录但还没统计过」走真实点击：先读（不带 refresh），点刷新（`refresh=true`），刷新后显示的 HEAD 与时间来自采集载荷里的 `head` / `capturedAt`。
 
 ## A3 服务端：operation 映射表、resolve、目标核对（`src/ops.rs`、`src/resolve.rs`，W4f）
 

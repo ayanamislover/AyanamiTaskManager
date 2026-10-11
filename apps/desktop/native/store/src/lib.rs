@@ -25,6 +25,8 @@ pub mod progress;
 pub mod recover;
 pub mod restore;
 pub mod search;
+#[cfg(all(test, windows))]
+mod sweep_budget;
 pub use engine::{Config, ReadError, Stats, Store, Ticket, Waited, WriteError, WriteMark};
 #[doc(hidden)]
 pub use engine::{PassiveHold, hold_next_passive};

@@ -689,88 +689,243 @@ fn withdraw(store: &Store, info: &BackupInfo, now: Option<&str>) -> Result<Withd
     Ok(Withdrawal::Withdrawn)
 }
 
+/// 一轮清扫最多处理的条目数（隔离区与「正在创建」各算各的）与时长（W8g，W2 peer r3 P2-01）。
+///
+/// 清扫在附件锁里跑，创建备份、撤回、两个恢复入口都要先等它，所以一轮的工作量要有上限：
+/// - 条目数与时长两道闸，时长在条目之间检查——超出的最多是正在处理的那一条。一条的代价是放回（一次改名）
+///   或删一份备份的目录，与在同一把锁里做一份备份同一量级；
+/// - 一批条目的登记只查一次库（不是每条借一次读连接，读池占满时 N 条残留不会累计等 N 次）；
+/// - 先放回、再删：仍登记、暂在隔离区的备份先回到备份根；
+/// - 没处理到的留到下一轮（下一次备份、撤回、恢复、维护），[`Swept::more`] 为真。
+pub const SWEEP_MAX_ENTRIES: usize = 32;
+pub const SWEEP_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+/// 诊断（[`withdrawn_pending`]）每一处最多数到这么多条，再多就报截断。
+pub const PENDING_SCAN_LIMIT: usize = 1000;
+
+/// 一轮清扫的结果。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Swept {
+    /// 这一轮试过、没清掉的条目（文件被占用、链接、查不了登记）。
+    pub left: usize,
+    /// 预算用完、还有没轮到的条目。
+    pub more: bool,
+}
+
+impl Swept {
+    pub fn clean(&self) -> bool {
+        self.left == 0 && !self.more
+    }
+}
+
 /// 清理备份根下的残留：隔离区里登记行还在的放回备份根、不在的删掉；「正在创建」标记对应的备份
-/// 已登记的只删标记，没登记的（创建失败、目录当时删不掉）删目录再删标记。返回清不掉的个数。
-/// 调用方持附件锁，创建与撤回也都在锁里，所以这里看到的标记和隔离条目都不属于进行中的操作。
-pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<usize> {
+/// 已登记的只删标记，没登记的（创建失败、目录当时删不掉）删目录再删标记。一轮有上限（[`SWEEP_MAX_ENTRIES`]、
+/// [`SWEEP_BUDGET`]）。调用方持附件锁，创建与撤回也都在锁里，所以这里看到的标记和隔离条目都不属于进行中的操作。
+pub fn sweep_withdrawn(store: &Store, root: &Path) -> Result<Swept> {
     let _lock = attachments_lock(store, "sweep_withdrawn")?;
     let mut backups = BackupsRoot::pin_for(store, root)?;
     Ok(sweep_withdrawn_locked(store, &mut backups))
 }
 
+/// 诊断里残留的数目是怎么来的。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingCount {
+    /// 数全了。
+    Exact,
+    /// 某一处超过 [`PENDING_SCAN_LIMIT`]，只数到上限。
+    Truncated,
+    /// 某一处读不出来（不是不存在），数目不可信。
+    ScanFailed,
+}
+
+impl PendingCount {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PendingCount::Exact => "EXACT",
+            PendingCount::Truncated => "TRUNCATED",
+            PendingCount::ScanFailed => "SCAN_FAILED",
+        }
+    }
+}
+
 /// 还有几份残留没清掉：隔离区条目加「正在创建」标记（诊断用；不拿锁，可能与正在进行的撤回或创建差一份）。
-pub fn withdrawn_pending(root: &Path) -> usize {
-    [WITHDRAWN_DIR, CREATING_DIR]
-        .iter()
-        .map(|d| fs::read_dir(root.join(d)).map_or(0, |d| d.count()))
-        .sum()
+/// 每一处最多数 [`PENDING_SCAN_LIMIT`] 条；读不出来与数不全都如实标出来，不当成 0。
+pub fn withdrawn_pending(root: &Path) -> (usize, PendingCount) {
+    let mut count = 0;
+    let mut state = PendingCount::Exact;
+    for dir in [WITHDRAWN_DIR, CREATING_DIR] {
+        match fs::read_dir(root.join(dir)) {
+            Ok(entries) => {
+                let mut seen = 0;
+                for entry in entries {
+                    if seen == PENDING_SCAN_LIMIT {
+                        if state == PendingCount::Exact {
+                            state = PendingCount::Truncated;
+                        }
+                        break;
+                    }
+                    if entry.is_err() {
+                        state = PendingCount::ScanFailed;
+                        break;
+                    }
+                    seen += 1;
+                }
+                count += seen;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => state = PendingCount::ScanFailed,
+        }
+    }
+    (count, state)
+}
+
+/// 一批条目里哪些 id 还登记着：一次读、一条语句（`json_each` 带进整批 id）。
+fn registered_ids(store: &Store, ids: &[String]) -> Result<std::collections::HashSet<String>> {
+    if ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let list = serde_json::to_string(ids).map_err(|e| BackupError::Io(std::io::Error::other(e)))?;
+    Ok(store.read(move |tx| {
+        let mut st = tx.prepare(
+            "SELECT j.value FROM json_each(?1) j WHERE EXISTS (SELECT 1 FROM backups b WHERE b.id = j.value)",
+        )?;
+        st.query_map([list], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()
+    })?)
+}
+
+/// 一处（隔离区或「正在创建」）里最多 `limit` 条的名字；读到一半出错就停在那里，并且计一条清不掉。
+fn first_entries(dir: &Path, limit: usize, swept: &mut Swept) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        swept.left += 1;
+        return out;
+    };
+    for entry in entries {
+        if out.len() == limit {
+            swept.more = true;
+            break;
+        }
+        match entry {
+            Ok(e) => out.push((e.file_name().to_string_lossy().into_owned(), e.path())),
+            Err(_) => {
+                swept.left += 1;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// 恢复选中的那份如果还在隔离区、又仍登记着，先放回备份根（不受一轮清扫的上限影响：恢复要的就是它）。
+pub(crate) fn reinstate_locked(store: &Store, backups: &mut BackupsRoot, id: &str) {
+    if !atm_install_state::is_path_name(id) {
+        return;
+    }
+    let (Ok(Some(root)), Ok(Some(quarantine))) = (
+        backups.existing(None),
+        backups.existing(Some(WITHDRAWN_DIR)),
+    ) else {
+        return;
+    };
+    let parked = quarantine.join(id);
+    if fs::symlink_metadata(&parked).is_err() {
+        return;
+    }
+    if registered_ids(store, &[id.to_owned()]).is_ok_and(|r| r.contains(id)) {
+        let _ = durable::rename_once(&parked, &root.join(id), false);
+    }
 }
 
 /// 只碰整条链都钉住的位置（peer W6 r4 P1-01）：取得守卫时不存在、之后才出现的备份根、隔离区、「正在创建」先核对，
 /// 是链接就不清（计进返回的个数），不跟着它枚举、删除。
-pub(crate) fn sweep_withdrawn_locked(store: &Store, backups: &mut BackupsRoot) -> usize {
-    let registered = |id: &str| {
-        let key = id.to_string();
-        store.read(move |tx| {
-            tx.query_row("SELECT count(*) FROM backups WHERE id = ?1", [key], |r| {
-                r.get::<_, i64>(0)
-            })
-        })
-    };
-    let mut left = 0;
+pub(crate) fn sweep_withdrawn_locked(store: &Store, backups: &mut BackupsRoot) -> Swept {
+    sweep_within(store, backups, SWEEP_MAX_ENTRIES, SWEEP_BUDGET)
+}
+
+/// 同 [`sweep_withdrawn_locked`]，上限由调用方给（用例里把时长压到 0）。
+pub(crate) fn sweep_within(
+    store: &Store,
+    backups: &mut BackupsRoot,
+    max_entries: usize,
+    budget: std::time::Duration,
+) -> Swept {
+    let started = std::time::Instant::now();
+    let over = || started.elapsed() >= budget;
+    let mut swept = Swept::default();
     let root = match backups.existing(None) {
         Ok(Some(root)) => root,
-        Ok(None) => return 0,
-        Err(_) => return 1,
+        Ok(None) => return swept,
+        Err(_) => {
+            swept.left = 1;
+            return swept;
+        }
     };
     match backups.existing(Some(WITHDRAWN_DIR)) {
         Ok(Some(quarantine)) => {
-            if let Ok(entries) = fs::read_dir(&quarantine) {
-                for entry in entries.flatten() {
-                    let id = entry.file_name().to_string_lossy().into_owned();
-                    let done = match registered(&id) {
-                        Ok(0) => fs::remove_dir_all(entry.path()).is_ok(),
-                        Ok(_) => {
-                            durable::rename_once(&entry.path(), &root.join(&id), false).is_ok()
+            let batch = first_entries(&quarantine, max_entries, &mut swept);
+            let ids: Vec<String> = batch.iter().map(|(id, _)| id.clone()).collect();
+            match registered_ids(store, &ids) {
+                Ok(registered) => {
+                    // 先放回仍登记的（一次改名），再删没登记的。
+                    let (back, gone): (Vec<_>, Vec<_>) =
+                        batch.iter().partition(|(id, _)| registered.contains(id));
+                    for (i, (id, path)) in back.iter().chain(gone.iter()).enumerate() {
+                        if i > 0 && over() {
+                            swept.more = true;
+                            break;
                         }
-                        Err(_) => false,
-                    };
-                    if !done {
-                        left += 1;
+                        let done = if registered.contains(id) {
+                            durable::rename_once(path, &root.join(id), false).is_ok()
+                        } else {
+                            fs::remove_dir_all(path).is_ok()
+                        };
+                        if !done {
+                            swept.left += 1;
+                        }
                     }
                 }
+                Err(_) => swept.left += batch.len(),
             }
             backups.release(WITHDRAWN_DIR);
             let _ = fs::remove_dir(&quarantine);
         }
         Ok(None) => {}
-        Err(_) => left += 1,
+        Err(_) => swept.left += 1,
+    }
+    if over() {
+        swept.more = true;
+        return swept;
     }
     match backups.existing(Some(CREATING_DIR)) {
         Ok(Some(creating)) => {
-            if let Ok(entries) = fs::read_dir(&creating) {
-                for entry in entries.flatten() {
-                    let id = entry.file_name().to_string_lossy().into_owned();
-                    let gone = match registered(&id) {
-                        Ok(0) => match fs::remove_dir_all(root.join(&id)) {
-                            Ok(()) => true,
-                            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-                        },
-                        Ok(_) => true,
-                        Err(_) => false,
-                    };
-                    if !(gone && fs::remove_file(entry.path()).is_ok()) {
-                        left += 1;
+            let batch = first_entries(&creating, max_entries, &mut swept);
+            let ids: Vec<String> = batch.iter().map(|(id, _)| id.clone()).collect();
+            match registered_ids(store, &ids) {
+                Ok(registered) => {
+                    for (i, (id, marker)) in batch.iter().enumerate() {
+                        if i > 0 && over() {
+                            swept.more = true;
+                            break;
+                        }
+                        let gone = registered.contains(id)
+                            || match fs::remove_dir_all(root.join(id)) {
+                                Ok(()) => true,
+                                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+                            };
+                        if !(gone && fs::remove_file(marker).is_ok()) {
+                            swept.left += 1;
+                        }
                     }
                 }
+                Err(_) => swept.left += batch.len(),
             }
             backups.release(CREATING_DIR);
             let _ = fs::remove_dir(&creating);
         }
         Ok(None) => {}
-        Err(_) => left += 1,
+        Err(_) => swept.left += 1,
     }
-    left
+    swept
 }
 
 /// 校验通过的备份：恢复需要的定位信息。
