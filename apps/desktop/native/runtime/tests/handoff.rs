@@ -353,3 +353,54 @@ fn a_conflicting_start_never_publishes_an_entry() {
             .unwrap();
     assert_eq!(state["state"], "SOURCE_CONFLICT");
 }
+
+/// 冲突之后用户选了（W8h）：进程写的是「在等用户选」，setup 不按 3 s 没动判卡住；选好后同一个进程按选择启动、
+/// 给同一个 txn 写见证，setup 的等待照常成功（随后提交）。两种选择各走一次：回滚后 2.x 比较不了时沿用 3.0
+/// （同一代，`A=v3 by user-choice`），换了数据根时从 2.x 重新转换（新的一代）。
+#[test]
+fn a_chosen_source_completes_the_same_start() {
+    for choice in ["KEEP_V3", "RECONVERT"] {
+        let s = Site::new(&format!("handoff-chosen-{choice}"), true);
+        let first = s.launch("T1", &s.legacy, &[]);
+        s.wait("T1", &first.0, policy(60, 600, 600)).unwrap();
+        let g1 = s.generation().unwrap();
+        first.kill();
+        let legacy = if choice == "KEEP_V3" {
+            startup::settle_for_rollback(&s.n, "T-RB", handoff::now_ms()).unwrap();
+            std::fs::write(s.legacy.join("stray.bin"), b"not a 2.x file").unwrap();
+            s.legacy.clone()
+        } else {
+            let moved = s.dir.join("L-moved");
+            copy_tree(&s.legacy, &moved);
+            moved
+        };
+        let p = s.launch(
+            "T2",
+            &legacy,
+            &["--drill-choose", choice, "--drill-choose-after-ms", "6000"],
+        );
+        let begun = Instant::now();
+        s.wait("T2", &p.0, policy(60, 3, 120)).unwrap();
+        assert!(
+            begun.elapsed() >= Duration::from_secs(6),
+            "{choice}: {:?}",
+            begun.elapsed()
+        );
+        assert!(procs::alive(&p.0), "{choice}");
+        assert!(
+            s.install.join("state/health/service-T2.json").exists(),
+            "{choice}"
+        );
+        assert!(!s.n.join("runtime/startup-state.json").exists(), "{choice}");
+        let by = match s.authority() {
+            AuthorityState::Present(a) if a.authority == "v3" => a.by,
+            other => panic!("{choice}: {other:?}"),
+        };
+        let g2 = s.generation().unwrap();
+        if choice == "KEEP_V3" {
+            assert_eq!((by.as_str(), g2.as_str()), ("user-choice", g1.as_str()));
+        } else {
+            assert_ne!(g2, g1, "{by}");
+        }
+    }
+}

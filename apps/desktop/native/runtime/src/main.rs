@@ -4,7 +4,11 @@
 //! atm-runtime --n <新根> --legacy <旧根> [--version 3.0.0-dev]
 //!             [--txn-start <txn> --install-root <安装根>] [--background]
 //!             [--drill-pace-ms <n>] [--drill-hold-at <阶段>] [--drill-mobile]
+//!             [--drill-choose <KEEP_V3|RECONVERT> [--drill-choose-after-ms <n>]]
 //! ```
+//!
+//! `--drill-choose`（W8h 交接用例）：遇到数据源冲突时，等 `--drill-choose-after-ms` 之后替用户做这个选择，
+//! 再按选择启动。正式宿主只从可信的 WebView 收这个选择（B2）；开发二进制不进安装包。
 //!
 //! `--drill-mobile`（W7e 崩溃演练）：起手机同步与 Claude 派单（中继走 WinHttp；claude 只认 `ATM_DRILL_CLAUDE` 给的，
 //! 不按 PATH 找本机真的那个），托盘计数与通知打到 stderr。两者照常默认关闭，开没开由数据根里的设置决定。
@@ -17,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use atm_runtime::{Background, BootError, Drill, Event, Handoff, Options, Started};
+use atm_runtime::{Background, BootError, Drill, Event, Handoff, Options, SourceChoice, Started};
 use atm_store::conversion::Quiesce;
 
 fn usage(why: &str) -> ! {
@@ -31,6 +35,7 @@ fn main() {
     let mut version = "3.0.0-dev".to_string();
     let mut drill = Drill::default();
     let mut drill_mobile = false;
+    let (mut drill_choose, mut drill_choose_after) = (None, Duration::ZERO);
     while let Some(arg) = args.next() {
         let mut value = || {
             args.next()
@@ -51,6 +56,19 @@ fn main() {
             }
             "--drill-hold-at" => drill.hold_at = Some(value()),
             "--drill-mobile" => drill_mobile = true,
+            "--drill-choose" => {
+                drill_choose = Some(match value().as_str() {
+                    "KEEP_V3" => SourceChoice::KeepV3,
+                    "RECONVERT" => SourceChoice::Reconvert,
+                    _ => usage("--drill-choose is KEEP_V3 or RECONVERT"),
+                })
+            }
+            "--drill-choose-after-ms" => {
+                let ms: u64 = value()
+                    .parse()
+                    .unwrap_or_else(|_| usage("bad --drill-choose-after-ms"));
+                drill_choose_after = Duration::from_millis(ms);
+            }
             other => usage(&format!("unknown argument {other}")),
         }
     }
@@ -127,7 +145,25 @@ fn main() {
         }
         Started::Conflict(conflicted) => {
             eprintln!("atm-runtime: SOURCE_CONFLICT: {}", conflicted.state.reason);
-            park(conflicted);
+            let Some(choice) = drill_choose else {
+                park(conflicted)
+            };
+            std::thread::sleep(drill_choose_after);
+            eprintln!("atm-runtime: chosen {choice:?}");
+            match conflicted.choose(&options, choice) {
+                Ok(Started::Serving(serving)) => {
+                    eprintln!("atm-runtime: serving on 127.0.0.1:{}", serving.port());
+                    park(serving)
+                }
+                Ok(Started::Conflict(again)) => {
+                    eprintln!("atm-runtime: SOURCE_CONFLICT: {}", again.state.reason);
+                    park(again)
+                }
+                Err(e) => {
+                    eprintln!("atm-runtime: {e}");
+                    std::process::exit(5);
+                }
+            }
         }
     }
 }
