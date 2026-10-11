@@ -560,6 +560,81 @@ fn a_rate_limit_waits_at_least_as_long_as_the_relay_asks() {
     c.stop();
 }
 
+/// 中继要的等待超过一分钟也照等：一分钟的上限只管退避自己（W7 r1 P2-01；2.x 把两者合起来截到 60 s）。
+/// 中继给的值在解析时限到 600 s（`relay` 的用例）。
+#[test]
+fn a_rate_limit_above_a_minute_is_waited_out_in_full() {
+    for seconds in [60u64, 61, 120, 600] {
+        let w = world(&format!("relay-429-{seconds}"), &[("PA", "ALPHA", true)]);
+        let asked: Arc<Mutex<Vec<Duration>>> = Arc::default();
+        let sleep: atm_sync::transport::Sleeper = {
+            let asked = asked.clone();
+            Arc::new(move |d| {
+                asked.lock().unwrap().push(d);
+                std::thread::sleep(d.min(Duration::from_millis(5)));
+                true
+            })
+        };
+        let c = w.connector_with(Opts {
+            sleep: Some(sleep),
+            ..Default::default()
+        });
+        connect(&c, &w.relay);
+        {
+            let mut s = w.relay.state();
+            s.retry_after = Some(seconds);
+            s.faults
+                .push(("GET", "/changes".into(), 429, "RATE_LIMITED".into()));
+        }
+        let want = Duration::from_secs(seconds);
+        wait_for(
+            || {
+                asked
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|d| *d >= Duration::from_secs(1))
+            },
+            "限流之后等待",
+        );
+        c.stop();
+        let waits = asked.lock().unwrap().clone();
+        assert!(waits.contains(&want), "Retry-After {seconds}: {waits:?}");
+        assert!(
+            waits.iter().all(|d| *d <= want),
+            "Retry-After {seconds}: {waits:?}"
+        );
+    }
+}
+
+/// 中继要等十分钟：停下时不等它，马上返回（夹具的 `stop_timeout` 是 1 s：等待打断不了，停止要等满它才返回）。
+#[test]
+fn a_stop_during_a_long_rate_limit_wait_returns_at_once() {
+    let w = world("relay-429-stop", &[("PA", "ALPHA", true)]);
+    let c = w.connector_with(Opts {
+        real_sleep: true,
+        ..Default::default()
+    });
+    connect(&c, &w.relay);
+    {
+        let mut s = w.relay.state();
+        s.retry_after = Some(600);
+        s.faults
+            .push(("GET", "/changes".into(), 429, "RATE_LIMITED".into()));
+    }
+    wait_for(
+        || c.status(&user()).unwrap()["state"] == "error",
+        "限流之后在等",
+    );
+    let began = Instant::now();
+    c.stop();
+    assert!(
+        began.elapsed() < Duration::from_millis(500),
+        "{:?}",
+        began.elapsed()
+    );
+}
+
 /// 一直不回的中继：只在令牌取消时失败。`hang` 为假时转给内存中继。
 type HangIf = Box<dyn Fn(&HttpRequest) -> bool + Send + Sync>;
 

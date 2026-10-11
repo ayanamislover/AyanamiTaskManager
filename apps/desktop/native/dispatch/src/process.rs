@@ -5,7 +5,10 @@
 //!   两份日志（`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`），绝不把宿主别的管道带进一个常驻的子进程。
 //! - **出生标识**：`win32:<FILETIME>`，即 `GetProcessTimes` 的创建时刻原值（100 ns 整数）。与 2.x 用 PowerShell 打印的
 //!   `StartTime.ToFileTimeUtc()` 是同一个数，2.x 记下的标识照样能核对。
-//! - **结束进程树**：`taskkill /PID <pid> /T /F`，退出码 128 是「进程不在」（文案随系统语言变，只认退出码）。
+//! - **结束进程树**：`taskkill /PID <pid> /T /F`，退出码 128 是「进程不在」（文案随系统语言变，只认退出码；
+//!   给人看的文案按 OEM 代码页解码）。按 PID 结束之前，调用方必须持有这个进程（本宿主起的 [`Child`]，或接管的会话
+//!   经 [`Probe::hold`] 打开的 [`Held`]）：只要进程对象还有句柄，系统就不会把这个 PID 分给别的进程，核对身份与结束
+//!   之间 PID 不会换主。
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -31,7 +34,27 @@ pub trait Probe: Send + Sync {
     fn is_alive(&self, pid: u32) -> bool;
     /// 出生标识；进程不在、无权查询是 `None`。
     fn identity(&self, pid: u32) -> Option<String>;
+    /// 结束进程树。调用方要持有这个进程（见模块说明），否则 PID 可能已经换了主。
     fn kill_tree(&self, pid: u32) -> KillResult;
+    /// 打开这个 PID 并持有：返回值活着期间句柄不关，PID 不会被系统回收再分配。
+    fn hold(&self, pid: u32) -> Hold<'_>;
+}
+
+/// [`Probe::hold`] 的结果。
+pub enum Hold<'a> {
+    /// 没有这个进程。
+    Gone,
+    /// 进程在，但打不开（无权查询）：身份无法确认。
+    Denied,
+    Held(Box<dyn Held + 'a>),
+}
+
+/// 持有着的进程：存活与出生标识都从同一个句柄读，读到的一定是这一个进程。
+pub trait Held: Send {
+    /// 还没退出。
+    fn alive(&self) -> bool;
+    /// 出生标识；读不到是 `None`。
+    fn identity(&self) -> Option<String>;
 }
 
 /// 2.x `checkProcessIdentity` 的四种结论。
@@ -60,6 +83,32 @@ pub fn check(probe: &dyn Probe, pid: u32, recorded: Option<&str>) -> Verdict {
         None => Verdict::Gone,
         Some(actual) if actual == recorded => Verdict::Same,
         Some(_) => Verdict::Different,
+    }
+}
+
+/// [`check`] 的持有版：结论是 [`Verdict::Same`] 时连同持有着的进程一起交回，调用方在它活着期间结束进程树，
+/// 核对与结束之间 PID 不会换主（只核对、不结束的地方用 [`check`] 就够了）。
+pub fn check_held<'a>(
+    probe: &'a dyn Probe,
+    pid: u32,
+    recorded: Option<&str>,
+) -> (Verdict, Option<Box<dyn Held + 'a>>) {
+    let held = match probe.hold(pid) {
+        Hold::Gone => return (Verdict::Gone, None),
+        Hold::Denied => return (Verdict::Unknown, None),
+        Hold::Held(held) => held,
+    };
+    if !held.alive() {
+        return (Verdict::Gone, None);
+    }
+    let Some(recorded) = recorded.filter(|r| !r.is_empty()) else {
+        return (Verdict::Unknown, None);
+    };
+    match held.identity() {
+        None if held.alive() => (Verdict::Unknown, None),
+        None => (Verdict::Gone, None),
+        Some(actual) if actual == recorded => (Verdict::Same, Some(held)),
+        Some(_) => (Verdict::Different, None),
     }
 }
 
@@ -120,6 +169,7 @@ mod imp {
         CloseHandle, ERROR_ACCESS_DENIED, FILETIME, GetLastError, HANDLE, HANDLE_FLAG_INHERIT,
         SetHandleInformation, WAIT_OBJECT_0,
     };
+    use windows_sys::Win32::Globalization::{CP_OEMCP, MultiByteToWideChar};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
     use windows_sys::Win32::Storage::FileSystem::WriteFile;
     use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -178,39 +228,84 @@ mod imp {
         creation(handle).map(|ft| format!("win32:{ft}"))
     }
 
+    /// 控制台程序（taskkill）的输出是 OEM 代码页，中文系统上按 UTF-8 解就成了乱码。
+    pub(super) fn oem(bytes: &[u8]) -> String {
+        let Ok(len) = i32::try_from(bytes.len()) else {
+            return String::from_utf8_lossy(bytes).into_owned();
+        };
+        if len == 0 {
+            return String::new();
+        }
+        // SAFETY: 输入切片有效；先问长度，再写进同样大小的缓冲。
+        let need = unsafe {
+            MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0)
+        };
+        if need <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        let mut wide = vec![0u16; need as usize];
+        // SAFETY: 缓冲大小就是上一步问到的长度。
+        let wrote = unsafe {
+            MultiByteToWideChar(CP_OEMCP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), need)
+        };
+        if wrote <= 0 {
+            return String::from_utf8_lossy(bytes).into_owned();
+        }
+        String::from_utf16_lossy(&wide[..wrote as usize])
+    }
+
+    /// 打开着的进程句柄：活着期间这个 PID 不会被回收。
+    struct NativeHeld(Owned);
+
+    impl Held for NativeHeld {
+        fn alive(&self) -> bool {
+            exit_code(self.0.0) == Some(STILL_ACTIVE)
+        }
+        fn identity(&self) -> Option<String> {
+            if !self.alive() {
+                return None;
+            }
+            identity_of(self.0.0)
+        }
+    }
+
+    /// 只读地打开进程：没有这个 PID 是 `Err(false)`，有但无权打开是 `Err(true)`。
+    fn open(pid: u32) -> Result<Owned, bool> {
+        if pid == 0 {
+            return Err(false);
+        }
+        // SAFETY: 只查询。
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            // SAFETY: 紧接在失败的调用之后。
+            return Err(unsafe { GetLastError() } == ERROR_ACCESS_DENIED);
+        }
+        Ok(Owned(handle))
+    }
+
     impl Probe for Native {
         fn is_alive(&self, pid: u32) -> bool {
-            if pid == 0 {
-                return false;
+            match open(pid) {
+                Ok(handle) => exit_code(handle.0) == Some(STILL_ACTIVE),
+                Err(denied) => denied,
             }
-            // SAFETY: 只查询。
-            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-            if handle.is_null() {
-                // SAFETY: 紧接在失败的调用之后。
-                return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
-            }
-            let handle = Owned(handle);
-            exit_code(handle.0) == Some(STILL_ACTIVE)
         }
 
         fn identity(&self, pid: u32) -> Option<String> {
-            if pid == 0 {
-                return None;
+            NativeHeld(open(pid).ok()?).identity()
+        }
+
+        fn hold(&self, pid: u32) -> Hold<'_> {
+            match open(pid) {
+                Ok(handle) => Hold::Held(Box::new(NativeHeld(handle))),
+                Err(true) => Hold::Denied,
+                Err(false) => Hold::Gone,
             }
-            // SAFETY: 只查询。
-            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-            if handle.is_null() {
-                return None;
-            }
-            let handle = Owned(handle);
-            if exit_code(handle.0) != Some(STILL_ACTIVE) {
-                return None;
-            }
-            identity_of(handle.0)
         }
 
         fn kill_tree(&self, pid: u32) -> KillResult {
-            if pid == 0 {
+            // 没有这个 PID 就不起 taskkill：「不在」不靠它的退出码（受限的令牌下它对不存在的 PID 也可能答 1）。
+            if let Err(false) = open(pid) {
                 return KillResult::Gone;
             }
             let mut command = std::process::Command::new(system32("taskkill.exe"));
@@ -241,9 +336,9 @@ mod imp {
             let output = child.wait_with_output().ok();
             let text = output
                 .map(|o| {
-                    let err = String::from_utf8_lossy(&o.stderr).trim().to_owned();
+                    let err = oem(&o.stderr).trim().to_owned();
                     if err.is_empty() {
-                        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+                        oem(&o.stdout).trim().to_owned()
                     } else {
                         err
                     }
@@ -491,6 +586,9 @@ mod imp {
         fn kill_tree(&self, _pid: u32) -> KillResult {
             KillResult::Failed("只支持 Windows".into())
         }
+        fn hold(&self, _pid: u32) -> Hold<'_> {
+            Hold::Gone
+        }
     }
 
     impl Spawner for Native {
@@ -517,6 +615,22 @@ mod tests {
         }
         fn kill_tree(&self, _pid: u32) -> KillResult {
             KillResult::Gone
+        }
+        fn hold(&self, _pid: u32) -> Hold<'_> {
+            if !self.alive {
+                return Hold::Gone;
+            }
+            Hold::Held(Box::new(FakeHeld(self.identity)))
+        }
+    }
+
+    struct FakeHeld(Option<&'static str>);
+    impl Held for FakeHeld {
+        fn alive(&self) -> bool {
+            true
+        }
+        fn identity(&self) -> Option<String> {
+            self.0.map(str::to_owned)
         }
     }
 
@@ -547,6 +661,22 @@ mod tests {
             identity: None,
         };
         assert_eq!(check(&gone, 7, Some("win32:1")), Verdict::Gone);
+    }
+
+    /// taskkill 的文案是 OEM 代码页（中文系统 936）：按它解码，给人看的失败原因不是乱码。在 OEM 代码页就是
+    /// UTF-8 的系统上，这条与按 UTF-8 解等价。
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_text_is_decoded_from_the_oem_code_page() {
+        let out = std::process::Command::new(system32("taskkill.exe"))
+            .arg("/?")
+            .output()
+            .unwrap();
+        let text = imp::oem(&out.stdout);
+        assert!(text.contains("/PID"), "{text}");
+        assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
+        assert_eq!(imp::oem(b"ERROR: 128"), "ERROR: 128");
+        assert_eq!(imp::oem(b""), "");
     }
 
     #[cfg(windows)]

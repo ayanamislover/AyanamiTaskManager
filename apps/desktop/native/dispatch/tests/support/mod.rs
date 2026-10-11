@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use atm_dispatch::dispatcher::{Dispatcher, Enqueue, Options};
 use atm_dispatch::probe::{ProbeOutput, ProcessRunner, Runner};
-use atm_dispatch::process::{Child, KillResult, Native, Probe, SpawnRequest, Spawner};
+use atm_dispatch::process::{Child, Held, Hold, KillResult, Native, Probe, SpawnRequest, Spawner};
 use atm_domain::principal::{JobId, Principal, UiSurface};
 use atm_service::write::Service;
 use atm_store::{Config, Store};
@@ -125,6 +125,38 @@ impl Probe for Probing {
             return KillResult::Failed(reason);
         }
         Native.kill_tree(pid)
+    }
+    fn hold(&self, pid: u32) -> Hold<'_> {
+        static NATIVE: Native = Native;
+        let over = self
+            .identity_override
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|(p, _)| *p == pid)
+            .map(|(_, id)| id);
+        match NATIVE.hold(pid) {
+            Hold::Held(inner) => Hold::Held(Box::new(Overridden { inner, over })),
+            other => other,
+        }
+    }
+}
+
+/// 真实持有的进程，出生标识按 `identity_override` 改写。
+struct Overridden {
+    inner: Box<dyn Held>,
+    over: Option<Option<String>>,
+}
+
+impl Held for Overridden {
+    fn alive(&self) -> bool {
+        self.inner.alive()
+    }
+    fn identity(&self) -> Option<String> {
+        match &self.over {
+            Some(id) => id.clone(),
+            None => self.inner.identity(),
+        }
     }
 }
 

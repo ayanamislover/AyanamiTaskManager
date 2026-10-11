@@ -242,8 +242,10 @@ pub(crate) fn run(
     // W-071：规划根只给 Agent 入口与服务内部的创建；User / System 缺 objective 直接报错。
     // 服务内部的创建（quick 晋升）也补建：目标项目可能是刚建的，还没有规划。
     // Phone 也补建：2.x 的手机建任务在项目没有 ACTIVE 目标时走 `ensurePlanningRoot`（新项目头一个任务多半
-    // 就是从手机发来的，sync/commands.ts）；有目标时 atm-sync 按创建顺序挑第一个 ACTIVE 的显式传进来，
-    // 走不到这里。3.0 把补建放进建任务的同一个事务（2.x 是先补建、再建任务两步）。
+    // 就是从手机发来的，sync/commands.ts）。3.0 把补建放进建任务的同一个事务（2.x 是先补建、再建任务两步）。
+    // 手机的目标也在这里挑（按创建顺序第一个 ACTIVE，与 2.x 和桌面「新建任务」同一规则），atm-sync 不传
+    // objective_id：挑出来的目标不进请求，同一条命令重做时指纹不变，回放的是第一次的结果——不然第一次补建
+    // 之后，重做时就成了「带着刚补建的目标」的另一个请求（IDEMPOTENCY_CONFLICT）。
     let provision = matches!(w.actor().kind, PrincipalKind::Agent | PrincipalKind::Phone)
         || internal_create.is_some();
     let need_root = items.iter().any(|i| i.objective_id.is_none());
@@ -261,7 +263,12 @@ pub(crate) fn run(
     }
     let mut root = Root::default();
     if need_root {
-        root.objective = Some(match latest_active_objective(w)? {
+        let existing = if w.actor().kind == PrincipalKind::Phone {
+            first_active_objective(w)?
+        } else {
+            latest_active_objective(w)?
+        };
+        root.objective = Some(match existing {
             Some(id) => (id, false),
             None => (w.ulid()?, true),
         });
@@ -516,6 +523,17 @@ pub(crate) fn run(
     }))
 }
 
+/// 手机建任务的目标：按创建顺序第一个 ACTIVE（`ui_objectives` 的顺序）。
+fn first_active_objective(w: &Work<'_>) -> Result<Option<String>, DomainError> {
+    w.tx.query_row(
+        "SELECT id FROM objectives WHERE project_id = ?1 AND status = 'ACTIVE' ORDER BY created_at, id LIMIT 1",
+        [&w.project],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(db)
+}
+
 fn latest_active_objective(w: &Work<'_>) -> Result<Option<String>, DomainError> {
     w.tx.query_row(
         "SELECT id FROM objectives WHERE project_id = ?1 AND status = 'ACTIVE' ORDER BY updated_at DESC, id DESC LIMIT 1",
@@ -572,6 +590,16 @@ fn plan(
                 .ok_or_else(|| internal("planning root missing"))?;
             let milestone = match &item.milestone_id {
                 Some(m) => m.clone(),
+                // 手机（2.x sync/commands.ts）：任务只带 objectiveId，不挂 milestone；项目原本没有目标时
+                // `ensurePlanningRoot` 连「执行」这个 milestone 一起补建，只是任务不挂上去。
+                None if w.actor().kind == PrincipalKind::Phone => {
+                    if root.milestone.is_none()
+                        && root.objective.as_ref().is_some_and(|(_, new)| *new)
+                    {
+                        root.milestone = Some((w.ulid()?, true));
+                    }
+                    None
+                }
                 None => {
                     if root.milestone.is_none() {
                         let found = if root.objective.as_ref().is_some_and(|(_, new)| *new) {

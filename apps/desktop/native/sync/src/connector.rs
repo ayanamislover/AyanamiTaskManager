@@ -615,14 +615,14 @@ impl<C: Cipher + Send + Sync + 'static> Inner<C> {
                         "同步失败，稍后重试",
                         &json!({ "error": message, "failures": failures }),
                     );
-                    // 中继限流（429）给了 retry_after 就至少等那么久。
+                    // 中继限流（429）给了 retry_after 就至少等那么久。一分钟的上限只管退避自己：中继要求的
+                    // 时长在解析时已经限到 600 秒（`relay::retry_after_seconds`），这里照它等，停下时随时打断。
+                    // 2.x 把两者合起来再截到 60 秒，要两分钟的限流会被提前一分钟撞回去。
                     let asked = e
                         .relay()
                         .and_then(|r| r.retry_after)
                         .map_or(Duration::ZERO, Duration::from_secs_f64);
-                    let delay = backoff_delay(failures)
-                        .max(asked)
-                        .min(Duration::from_secs(60));
+                    let delay = backoff_delay(failures).max(asked);
                     self.sleep_in(l, delay);
                 }
             }

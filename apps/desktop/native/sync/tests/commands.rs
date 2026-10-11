@@ -4,6 +4,7 @@
 mod support;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use atm_sync::dispatch::DispatchPort;
 use atm_sync_protocol::keys::command_key;
@@ -49,6 +50,8 @@ fn task_create_runs_as_the_phone_and_acks_before_deleting_the_command() {
     assert_eq!(task["priority"], "HIGH");
     assert_eq!(task["status"], "READY");
     assert_eq!(task["objectiveId"], "O-PA");
+    // 2.x 的手机任务只带 objectiveId，不挂 milestone。
+    assert_eq!(task["milestoneId"], Value::Null);
     // 03 C-05：写入者记为 PHONE:<设备>（事件的 actor_type 是 USER）。
     let created: Vec<_> = events(&w, "ALPHA")
         .into_iter()
@@ -227,6 +230,15 @@ fn a_project_without_objectives_gets_a_planning_root_and_missing_projects_fail()
         w.task_keys("BARE"),
         [ack["result"]["key"].as_str().unwrap().to_owned()]
     );
+    // 与 2.x `ensurePlanningRoot` 一样连「执行」milestone 一起补建，任务只挂目标、不挂 milestone。
+    let milestones = w.service.ui_milestones(&user(), "BARE", None).unwrap();
+    let milestones = milestones.as_array().unwrap();
+    assert_eq!(milestones.len(), 1, "{milestones:?}");
+    assert_eq!(milestones[0]["title"], "执行");
+    assert_eq!(milestones[0]["objective_id"], objectives[0]["id"]);
+    let task = w.task("BARE", ack["result"]["key"].as_str().unwrap());
+    assert_eq!(task["objectiveId"], objectives[0]["id"]);
+    assert_eq!(task["milestoneId"], Value::Null);
     for (code, title) in [("NOPE", "没有这个项目"), ("OLD", "已归档")] {
         let id = phone
             .send(json!({ "type": "task.create", "body": { "project": code, "title": title } }));
@@ -409,6 +421,107 @@ fn a_failed_ack_write_is_retried_without_a_second_task() {
         .count();
     assert_eq!(puts, 2, "第一次失败，第二次成功");
     c.stop();
+}
+
+/// 没有目标的项目，回执第一次写失败：第一次在建任务的事务里补建了规划根，重做时请求不能因此变样
+/// （目标不进请求），拿回的是同一个任务，不是 IDEMPOTENCY_CONFLICT（W7 r1 P1-01）。
+#[test]
+fn a_failed_ack_write_after_a_planning_root_returns_the_same_task() {
+    let w = world("cmd-ackfail-root", &[("PB", "BARE", false)]);
+    let c = w.connector();
+    let pairing = connect(&c, &w.relay);
+    let phone = phone_for(&w.relay, &pairing);
+    w.relay
+        .state()
+        .faults
+        .push(("PUT", "/ack/".into(), 503, "INTERNAL".into()));
+    let id = phone.send(json!({ "type": "task.create", "body": { "project": "BARE", "title": "新项目，回执第一次写不进去" } }));
+    let ack = phone.await_ack(&id);
+    let keys = w.task_keys("BARE");
+    let objectives = w.service.ui_objectives(&user(), "BARE").unwrap();
+    let puts = requests_for(&w.relay, &format!("/ack/{id}"))
+        .into_iter()
+        .filter(|(m, _)| m == "PUT")
+        .count();
+    c.stop();
+    assert_eq!(ack["ok"], true, "{ack}");
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!(ack["result"]["key"], keys[0]);
+    assert_eq!(
+        objectives.as_array().unwrap().len(),
+        1,
+        "只补建一次：{objectives}"
+    );
+    assert_eq!(puts, 2, "第一次失败，第二次成功");
+}
+
+/// 手机的任务挂在按创建顺序第一个 ACTIVE 的目标下（2.x 与桌面「新建任务」同一规则），不是最近更新的那个；
+/// 两次尝试之间目标变了（第一个被取消），重做拿回的仍是第一次建的那条（W7 r1 P1-01）。
+#[test]
+fn the_first_active_objective_is_chosen_once_even_if_objectives_change_before_the_retry() {
+    let w = world("cmd-ackfail-objectives", &[("PA", "ALPHA", true)]);
+    w.service
+        .store()
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO objectives (project_id, id, local_no, title, status, created_at, updated_at) VALUES ('PA', 'O-PA2', 2, '后建的目标', 'ACTIVE', '2026-10-02T00:00:00.000Z', '2026-10-03T00:00:00.000Z')",
+                [],
+            )
+        })
+        .unwrap();
+    // 退避的那一次等待：任务已经建出来、回执写失败之后，把第一个目标取消，再让它重做。
+    let service = w.service.clone();
+    let flipped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flip = flipped.clone();
+    let sleep: atm_sync::transport::Sleeper = Arc::new(move |d| {
+        let tasks: i64 = service
+            .store()
+            .write(|tx| {
+                tx.query_row(
+                    "SELECT count(*) FROM work_items WHERE project_id = 'PA'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .unwrap();
+        if tasks > 0 && !flip.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            service
+                .store()
+                .write(|tx| {
+                    tx.execute(
+                        "UPDATE objectives SET status = 'CANCELLED' WHERE id = 'O-PA'",
+                        [],
+                    )
+                })
+                .unwrap();
+        }
+        std::thread::sleep(d.min(Duration::from_millis(5)));
+        true
+    });
+    let c = w.connector_with(Opts {
+        sleep: Some(sleep),
+        ..Default::default()
+    });
+    let pairing = connect(&c, &w.relay);
+    let phone = phone_for(&w.relay, &pairing);
+    w.relay
+        .state()
+        .faults
+        .push(("PUT", "/ack/".into(), 503, "INTERNAL".into()));
+    let id = phone.send(json!({ "type": "task.create", "body": { "project": "ALPHA", "title": "目标在重做之前变了" } }));
+    let ack = phone.await_ack(&id);
+    let keys = w.task_keys("ALPHA");
+    c.stop();
+    assert!(
+        flipped.load(std::sync::atomic::Ordering::SeqCst),
+        "两次尝试之间取消了第一个目标"
+    );
+    assert_eq!(ack["ok"], true, "{ack}");
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!(ack["result"]["key"], keys[0]);
+    let task = w.task("ALPHA", &keys[0]);
+    assert_eq!(task["objectiveId"], "O-PA");
+    assert_eq!(task["milestoneId"], Value::Null);
 }
 
 /// 读不出来的命令（别的密钥写的）：写 COMMAND_UNREADABLE 回执并删掉。

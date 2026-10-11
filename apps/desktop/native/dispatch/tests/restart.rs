@@ -3,9 +3,12 @@
 
 mod support;
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use atm_dispatch::process::{Native, Probe as _};
+use atm_dispatch::process::{Held, Hold, KillResult, Native, Probe};
+use atm_service::dispatch_state::{DispatchWrite, RunRow};
 use serde_json::json;
 use support::*;
 
@@ -177,6 +180,165 @@ fn cancelling_an_adopted_session_rechecks_its_identity_first() {
         "进程树结束",
     );
     second.close();
+}
+
+/// 按 Windows 的规矩模拟 PID 复用：进程对象还有句柄时 PID 不会换主；最后一个句柄关上之后，原进程可能已经退出、
+/// PID 被新进程占用。`replace_after` 置位后，下一次查询的句柄一关就换主。不碰任何真实进程。
+#[derive(Default)]
+struct Reused {
+    replace_after: AtomicBool,
+    replaced: AtomicBool,
+    held: AtomicUsize,
+    pending: AtomicBool,
+    denied: AtomicBool,
+    kills: Mutex<Vec<(u32, bool)>>,
+}
+
+impl Reused {
+    fn current(&self) -> String {
+        if self.replaced.load(Ordering::SeqCst) {
+            "win32:200".into()
+        } else {
+            "win32:100".into()
+        }
+    }
+    /// 一个查询句柄关上：没有别的句柄、又该换主了，就换。
+    fn closed(&self) {
+        if self.held.load(Ordering::SeqCst) == 0
+            && (self.pending.swap(false, Ordering::SeqCst)
+                || self.replace_after.swap(false, Ordering::SeqCst))
+        {
+            self.replaced.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Probe for Reused {
+    fn is_alive(&self, _: u32) -> bool {
+        true
+    }
+    fn identity(&self, _: u32) -> Option<String> {
+        let id = self.current();
+        self.closed();
+        Some(id)
+    }
+    fn kill_tree(&self, pid: u32) -> KillResult {
+        self.kills
+            .lock()
+            .unwrap()
+            .push((pid, self.replaced.load(Ordering::SeqCst)));
+        KillResult::Killed
+    }
+    fn hold(&self, _: u32) -> Hold<'_> {
+        if self.denied.load(Ordering::SeqCst) {
+            return Hold::Denied;
+        }
+        self.held.fetch_add(1, Ordering::SeqCst);
+        Hold::Held(Box::new(ReusedHeld(self)))
+    }
+}
+
+struct ReusedHeld<'a>(&'a Reused);
+
+impl Held for ReusedHeld<'_> {
+    fn alive(&self) -> bool {
+        true
+    }
+    fn identity(&self) -> Option<String> {
+        // 持有期间只能记下「该换主了」，等句柄全关上才换。
+        if self.0.replace_after.swap(false, Ordering::SeqCst) {
+            self.0.pending.store(true, Ordering::SeqCst);
+        }
+        Some(self.0.current())
+    }
+}
+
+impl Drop for ReusedHeld<'_> {
+    fn drop(&mut self) {
+        self.0.held.fetch_sub(1, Ordering::SeqCst);
+        self.0.closed();
+    }
+}
+
+/// 接管的会话在跑（合成的一行，PID 与出生标识都是假的）。
+fn adopted(w: &World, probe: Arc<Reused>, identity: &str) -> atm_dispatch::Dispatcher {
+    let key = w.seed_task("ATM", "接管之后取消");
+    let row = RunRow {
+        run: "mv300000-12345678".into(),
+        project_code: "ATM".into(),
+        task_key: key,
+        title: "接管之后取消".into(),
+        task_id: None,
+        origin: "desktop".into(),
+        state: "running".into(),
+        session_id: "0b7a9c1e-3f2d-4c5b-8a6e-1d2c3b4a5f60".into(),
+        created_at: "2026-10-11T00:00:00.000Z".into(),
+        started_at: Some("2026-10-11T00:00:00.000Z".into()),
+        ended_at: None,
+        exit_code: None,
+        exit_code_set: false,
+        summary_json: None,
+        error: None,
+        cwd: w.work.to_string_lossy().into_owned(),
+        requested_by: None,
+        pid: Some(424_242),
+        process_identity: Some(identity.into()),
+        request_id: None,
+        log_root: "CURRENT".into(),
+    };
+    w.service
+        .dispatch_save(
+            &user(),
+            &DispatchWrite {
+                upsert_runs: vec![row],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut options = w.options();
+    options.probe = probe;
+    options.poll = Duration::from_secs(3600);
+    w.dispatcher_with(options)
+}
+
+/// 取消接管的会话：核对身份与结束进程树在同一次持有之内，核对之后原进程退出、PID 换主，结束的也不是新进程
+/// （W7 r1 P1-02）。核对不了、身份不同都不结束任何进程。
+#[test]
+fn cancelling_an_adopted_session_holds_the_process_from_the_check_to_the_kill() {
+    let w = world("adopt-cancel-held");
+    let probe = Arc::new(Reused::default());
+    let d = adopted(&w, probe.clone(), "win32:100");
+    assert_eq!(d.list_runs()[0]["state"], "running");
+    probe.replace_after.store(true, Ordering::SeqCst);
+    let cancelled = d.cancel(&user(), "mv300000-12345678").unwrap();
+    d.close();
+    assert_eq!(cancelled["state"], "cancelled");
+    assert_eq!(
+        *probe.kills.lock().unwrap(),
+        [(424_242, false)],
+        "结束的是核对过的那个进程"
+    );
+    assert!(probe.replaced.load(Ordering::SeqCst), "句柄关上之后才换主");
+
+    // 打不开（无权查询）：确认不了身份，不结束，派单还在跑。
+    let w = world("adopt-cancel-denied");
+    let probe = Arc::new(Reused::default());
+    let d = adopted(&w, probe.clone(), "win32:100");
+    probe.denied.store(true, Ordering::SeqCst);
+    let e = d.cancel(&user(), "mv300000-12345678").unwrap_err();
+    assert_eq!(e.code(), "DISPATCH_CANCEL_FAILED");
+    assert_eq!(d.list_runs()[0]["state"], "running");
+    d.close();
+    assert!(probe.kills.lock().unwrap().is_empty());
+
+    // 出生标识不同：PID 早换了主，不结束，派单记为结束。
+    let w = world("adopt-cancel-different");
+    let probe = Arc::new(Reused::default());
+    probe.replaced.store(true, Ordering::SeqCst);
+    let d = adopted(&w, probe.clone(), "win32:100");
+    let _ = d.cancel(&user(), "mv300000-12345678");
+    d.close();
+    assert!(probe.kills.lock().unwrap().is_empty());
 }
 
 #[test]

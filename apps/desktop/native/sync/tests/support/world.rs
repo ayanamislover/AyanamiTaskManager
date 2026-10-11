@@ -136,6 +136,8 @@ pub struct Opts {
     pub timings: Timings,
     /// 连接器的等待（退避、轮询间隔）；默认最多睡 5 ms。
     pub sleep: Option<Sleeper>,
+    /// 用连接器自己的等待（停下时打断），不注入 `sleep`。
+    pub real_sleep: bool,
 }
 
 impl Default for Opts {
@@ -145,6 +147,7 @@ impl Default for Opts {
             transport: None,
             timings: fast(),
             sleep: None,
+            real_sleep: false,
         }
     }
 }
@@ -165,7 +168,11 @@ impl World {
             now: None,
             device_name: Some("测试电脑".into()),
             timings: o.timings,
-            sleep: Some(o.sleep.unwrap_or_else(quick_sleep)),
+            sleep: if o.real_sleep {
+                None
+            } else {
+                Some(o.sleep.unwrap_or_else(quick_sleep))
+            },
         })
         .unwrap()
     }

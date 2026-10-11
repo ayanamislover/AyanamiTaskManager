@@ -1442,7 +1442,10 @@ impl Inner {
         let Some(pid) = pid else {
             return Ok(true);
         };
-        let result = match process::check(self.probe.as_ref(), pid, identity) {
+        // 接管的：打开并持有这个进程，从同一个句柄核对出生标识，持有到结束完进程树——中间 PID 不会被回收给
+        // 别的进程（只核对一次再按裸 PID 结束，核对之后原进程退出、PID 换主，结束的就是别人）。
+        let (verdict, held) = process::check_held(self.probe.as_ref(), pid, identity);
+        let result = match verdict {
             Verdict::Gone | Verdict::Different => Ok(true),
             Verdict::Unknown => Err(failed(
                 pid,
@@ -1450,8 +1453,9 @@ impl Inner {
                     "暂时确认不了 PID {pid} 还是不是这次派单的 Claude 进程，为免误杀别的程序没有结束任何进程；请稍后重试，或在任务管理器里手动结束"
                 ),
             )),
-            Verdict::Same => kill(pid, &|| self.probe.is_alive(pid)),
+            Verdict::Same => kill(pid, &|| held.as_ref().is_some_and(|h| h.alive())),
         };
+        drop(held);
         if result.is_err()
             && let Some(w) = watching
             && !self.is_closed()

@@ -84,19 +84,6 @@ fn active_project(host: &Host, code: &str) -> Result<(String, String), Failure> 
     ))
 }
 
-/// 与桌面端「新建任务」同一规则：项目目标按创建顺序，取第一个 ACTIVE 的。还没有时返回 `None`，建任务时由
-/// 服务在同一个事务里补建规划根（标题带「自动补建」，W-071；2.x 走 `ensurePlanningRoot`）。
-fn first_active_objective(host: &Host, code: &str) -> Result<Option<String>, Failure> {
-    let objectives = host.service()?.ui_objectives(&reader(), code)?;
-    Ok(objectives
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|o| o["status"] == "ACTIVE")
-        .and_then(|o| o["id"].as_str())
-        .map(str::to_owned))
-}
-
 /// 派单。命令 ID 作 `request_id` 交给派单层：它按这个 ID 持久幂等，同一条命令无论被中继重放、还是回执写失败
 /// 后重做，拿到的都是当初那次派单（或当初的拒绝），绝不会再起一次会话。
 fn dispatch_outcome(
@@ -145,11 +132,12 @@ fn dispatch_outcome(
 fn create_task(host: &Host, phone: &Principal, doc: &Value) -> Result<Value, Failure> {
     let body = &doc["body"];
     let (project_id, project) = active_project(host, body["project"].as_str().unwrap_or_default())?;
-    let objective_id = first_active_objective(host, &project)?;
     let id = doc["id"].as_str().unwrap_or_default();
+    // 不传 objective_id：目标由服务在建任务的同一个事务里挑（按创建顺序第一个 ACTIVE，没有就补建规划根，
+    // W-071），请求里只有命令本身的字段。同一条命令重做（回执写失败、崩溃恢复、中继重放）时请求不变，
+    // `mobile:<id>` 回放的就是第一次建出来的那条；在这里先挑好再传，第一次补建之后重做的请求就变了。
     let item = CreateItem {
         client_ref: Some("mobile".into()),
-        objective_id,
         title: js_trim(body["title"].as_str().unwrap_or_default()).to_owned(),
         description: Some(body["description"].as_str().unwrap_or_default().to_owned()),
         kind: Some("TASK".into()),
