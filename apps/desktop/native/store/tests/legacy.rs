@@ -5365,14 +5365,61 @@ fn a_legacy_root_with_only_setups_junction_is_not_there() {
         .unwrap();
     assert!(made.status.success(), "{made:?}");
     assert!(!legacy_present(&l).unwrap(), "only setup's junction");
+    // 共享的 Agent 文档资产（00 决定 #6）：3.x 每次启动都装，连同装到一半的 staging / backup。
+    put(&l.join("ATM_AGENT_GUIDE.md"), b"guide");
+    fs::create_dir_all(l.join("docs")).unwrap();
+    fs::create_dir_all(l.join("Skills")).unwrap();
+    fs::create_dir_all(l.join("docs.staging-0123456789abcdef")).unwrap();
+    fs::create_dir_all(l.join("skills.backup-committed-fedcba9876543210")).unwrap();
+    put(
+        &l.join("ATM_AGENT_GUIDE.md.backup-00000000000000ff"),
+        b"old",
+    );
+    assert!(
+        !legacy_present(&l).unwrap(),
+        "only the shared Agent documents"
+    );
     fs::create_dir_all(l.join("registry")).unwrap();
     assert!(legacy_present(&l).unwrap(), "a 2.x entry");
     fs::remove_dir(l.join("registry")).unwrap();
+    // 只认 ATM 自己的名字：差一点的都算 2.x 的东西。
+    for near in [
+        "docs.staging-FEDCBA9876543210",
+        "docs.staging-0123",
+        "docs.old",
+        "ATM_AGENT_GUIDE.md.bak",
+        "skills2",
+    ] {
+        put(&l.join(near), b"?");
+        assert!(legacy_present(&l).unwrap(), "{near} counts");
+        fs::remove_file(l.join(near)).unwrap();
+    }
     put(&l.join("current.txt"), b"?");
     assert!(legacy_present(&l).unwrap(), "anything else counts");
     // 不是目录：读不了，交给调用方 fail closed。
     put(&base.join("L-file"), b"?");
     assert!(legacy_present(&base.join("L-file")).is_err());
+}
+
+/// 共享资产的名字与装它们的 agents/src/docs.rs 是同一份：那边多装一件或改了中间产物的名字，这里要跟着变。
+#[test]
+fn the_shared_agent_assets_are_the_ones_agents_installs() {
+    use atm_store::conversion::shared_agent_asset;
+    let docs = include_str!("../../agents/src/docs.rs");
+    assert!(docs.contains(r#"pub const GUIDE: &str = "ATM_AGENT_GUIDE.md";"#));
+    assert!(docs.contains(r#"const COMPONENTS: [&str; 3] = [GUIDE, "docs", "skills"];"#));
+    assert!(
+        docs.contains(r#"const KINDS: [&str; 3] = ["staging", "backup", "backup-committed"];"#)
+    );
+    assert!(docs.contains(r#"l.join(format!("{c}.staging-{nonce}"))"#));
+    assert!(docs.contains(r#"l.join(format!("{c}.backup-committed-{nonce}"))"#));
+    for c in ["ATM_AGENT_GUIDE.md", "docs", "skills"] {
+        assert!(shared_agent_asset(c), "{c}");
+        for k in ["staging", "backup", "backup-committed"] {
+            let name = format!("{c}.{k}-0123456789abcdef");
+            assert!(shared_agent_asset(&name), "{name}");
+        }
+    }
 }
 
 mod w3e {

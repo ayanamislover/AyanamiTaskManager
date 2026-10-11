@@ -79,6 +79,29 @@ fn a_first_install_is_fresh_beside_setups_junction() {
     assert!(descriptor(&n).is_some());
 }
 
+/// 全新安装的第二次启动（W8d packaged-smoke）：第一次启动后宿主往 `L` 里装了指南、docs 与 skills。它们是共享的
+/// Agent 文档资产（00 决定 #6），不是 2.x 数据根：照常服务，后台比较也不当成「2.x 比较不了」的冲突。
+#[test]
+fn a_fresh_install_restarts_beside_the_shared_agent_documents() {
+    let d = dir("fresh-docs");
+    let (n, l) = (d.join("N"), d.join("L"));
+    let first = Events::default();
+    drop(serving(
+        atm_runtime::start(&options(&n, &l, &first)).unwrap(),
+    ));
+    std::fs::create_dir_all(l.join("docs")).unwrap();
+    std::fs::create_dir_all(l.join("skills").join("atm-task")).unwrap();
+    std::fs::write(l.join("ATM_AGENT_GUIDE.md"), "guide").unwrap();
+    let again = Events::default();
+    let s = serving(atm_runtime::start(&options(&n, &l, &again)).unwrap());
+    assert!(!matches!(
+        s.background(Duration::from_secs(60)),
+        Some(Background::Conflict(_))
+    ));
+    assert!(descriptor(&n).is_some());
+    assert_eq!(authority(&n).authority, "v3");
+}
+
 /// S1：没有 `L`，建空库后开放入口，顺序固定；`/health` 与 daemon.json、lease 对得上；没有启动状态。
 #[test]
 fn a_fresh_install_opens_the_entries_in_order() {

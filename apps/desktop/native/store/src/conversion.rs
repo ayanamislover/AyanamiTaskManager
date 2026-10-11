@@ -654,17 +654,50 @@ fn publication_digest(dir: &Path) -> std::io::Result<String> {
 /// 只剩它、或者什么都没有的 `L` 当作不在。从没装过 2.x 的机器首装 3.x，setup 的 FENCE 先在 `L` 里建好
 /// `current`，宿主随后才判定；把它当成 2.x 数据根，就会去转换一个空目录，永远失败（W8b 演练）。
 /// 读不了目录时返回错误，由调用方 fail closed。
+///
+/// 共享的 Agent 文档资产（[`shared_agent_asset`]）同理：3.x 每次启动都往 `L` 里装指南、docs 与 skills。
+/// 把它们算成 2.x 数据根，全新安装第二次启动就要拿一个没有 registry 的目录去比较，「比较不了」直接进
+/// 数据源冲突（W8d packaged-smoke）。
 pub fn legacy_present(legacy: &Path) -> std::io::Result<bool> {
     let entries = match std::fs::read_dir(legacy) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         other => other?,
     };
     for entry in entries {
-        if !entry?.file_name().eq_ignore_ascii_case("current") {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if !name.eq_ignore_ascii_case("current") && !shared_agent_asset(&name) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// `L` 下共享的 Agent 文档资产（00 决定 #6）：`ATM_AGENT_GUIDE.md`、`docs`、`skills` 三件本体，以及装它们
+/// 时的 `<件>.<staging|backup|backup-committed>-<16 位小写十六进制>`。当前运行的版本每次启动维护它们，和 setup
+/// 的 `current` 一样不是 2.x 的业务数据，也不进 business_digest（05 §「不是用户数据」）。名字与
+/// agents/src/docs.rs 的 `COMPONENTS` / `KINDS` 是同一份，用例钉住两边。
+pub fn shared_agent_asset(name: &str) -> bool {
+    const COMPONENTS: [&str; 3] = ["ATM_AGENT_GUIDE.md", "docs", "skills"];
+    const KINDS: [&str; 3] = ["backup-committed", "staging", "backup"];
+    COMPONENTS.iter().any(|c| {
+        if name.eq_ignore_ascii_case(c) {
+            return true;
+        }
+        let Some(rest) = name.strip_prefix(c).and_then(|r| r.strip_prefix('.')) else {
+            return false;
+        };
+        KINDS.iter().any(|k| {
+            rest.strip_prefix(k)
+                .and_then(|r| r.strip_prefix('-'))
+                .is_some_and(|nonce| {
+                    nonce.len() == 16
+                        && nonce
+                            .bytes()
+                            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                })
+        })
+    })
 }
 
 /// 07 §4：只看 `M`、发布物的身份与有没有进行中的封存。`legacy_exists` 是 `L` 在不在（[`legacy_present`]）。
