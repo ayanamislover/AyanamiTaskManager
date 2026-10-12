@@ -12,6 +12,7 @@ import { useProjectOrder } from "./project-order.js";
 import { ServiceStatus } from "./shell/service-status.js";
 import { CommandPalette } from "./features/command-palette.js";
 import { DataSourceChoicePage } from "./features/data-source-choice.js";
+import { DamagedDatabasePage } from "./features/damaged-database.js";
 import { TaskDrawer } from "./features/task-drawer.js";
 import { AppRouter } from "./routes/app-router.js";
 import type { KnowledgeDraftSeed } from "./features/knowledge.js";
@@ -51,7 +52,9 @@ function useDataSource(desktop: DesktopBridge | undefined) {
     };
   }, [desktop]);
   const blocking =
-    source?.state === "SOURCE_CONFLICT" || (source?.state === "STARTING" && source.choosing);
+    source?.state === "SOURCE_CONFLICT" ||
+    source?.state === "DAMAGED" ||
+    (source?.state === "STARTING" && source.choosing);
   const [wasBlocking, setWasBlocking] = useState(false);
   useEffect(() => {
     if (blocking) setWasBlocking(true);
@@ -111,7 +114,16 @@ function App({
       theme={theme}
       statusSlot={<ServiceStatus error={projects.error} loading={projects.isPending} />}
       content={
-        dataSource.source ? (
+        dataSource.source?.state === "DAMAGED" ? (
+          <DamagedDatabasePage
+            source={dataSource.source}
+            copy={async (text, label) => {
+              if (desktop?.copyText) await desktop.copyText(text);
+              else await navigator.clipboard.writeText(text);
+              notify(`${label}已复制`);
+            }}
+          />
+        ) : dataSource.source ? (
           <DataSourceChoicePage source={dataSource.source} choose={dataSource.choose} />
         ) : (
           <AppRouter

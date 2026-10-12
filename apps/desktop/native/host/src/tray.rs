@@ -15,6 +15,9 @@ pub struct Snapshot {
     /// 数据源冲突，等用户选（07 §7）。宿主自己设，不来自核心的快照。
     #[serde(skip)]
     pub needs_source: bool,
+    /// 已发布的库读不出，等用户恢复（W8f-3）。宿主自己设。
+    #[serde(skip)]
+    pub damaged: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +66,15 @@ fn mode_label(mode: &str) -> &'static str {
 
 pub fn menu(snapshot: &Snapshot) -> Menu {
     let menu = Menu::new();
-    if snapshot.needs_source {
+    if snapshot.damaged {
+        let _ = menu.append(&MenuItem::with_id(
+            SOURCE,
+            "数据库读不出，需要从备份恢复，点击查看",
+            true,
+            None,
+        ));
+        let _ = menu.append(&PredefinedMenuItem::separator());
+    } else if snapshot.needs_source {
         let _ = menu.append(&MenuItem::with_id(
             SOURCE,
             "需要选择数据来源，点击打开",
@@ -115,7 +126,9 @@ pub fn icon() -> Option<Icon> {
 
 /// 托盘提示：数据源冲突时直接说要做什么（07 §7）。
 pub fn tooltip(snapshot: &Snapshot) -> String {
-    if snapshot.needs_source {
+    if snapshot.damaged {
+        "AyanamiTaskManager：数据库需要从备份恢复".into()
+    } else if snapshot.needs_source {
         "AyanamiTaskManager：需要选择数据来源".into()
     } else {
         "AyanamiTaskManager".into()
@@ -148,5 +161,20 @@ mod tests {
         );
         assert_eq!(action(&MenuId::new("atm.mode.bogus")), None);
         assert_eq!(mode_label("OFF"), "不通知");
+    }
+
+    /// 库读不出时托盘先说要做什么（W8f-3），盖过数据源冲突的提示。
+    #[test]
+    fn a_damaged_database_is_named_first() {
+        let damaged = Snapshot {
+            damaged: true,
+            needs_source: true,
+            ..Snapshot::default()
+        };
+        assert_eq!(
+            tooltip(&damaged),
+            "AyanamiTaskManager：数据库需要从备份恢复"
+        );
+        assert_eq!(tooltip(&Snapshot::default()), "AyanamiTaskManager");
     }
 }

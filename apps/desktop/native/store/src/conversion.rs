@@ -574,6 +574,10 @@ pub enum Startup {
     Quarantine { reason: String },
     /// S6：`M` 是 PUBLISHED，库内 generation 一致：进 §6 的权威判定（[`judge`]）。
     Published(Manifest),
+    /// S6 之前：`M` 是 PUBLISHED，可这一代的库缺失或读不出（页损坏、被别的程序锁着）。3.0 里可能已经有用户写入，
+    /// 隔离后重新转换或建空库会让它们悄悄消失（W8f-3 掉电演练）：不服务、不动任何文件，等用户用
+    /// `atm recover --offline` 从这一代的备份恢复。与 generation 对不上（S5）不同，这里没有证据说库不是这一代的。
+    Damaged { generation: String, reason: String },
     /// S6，但这个 generation 正处于数据源冲突（07 §7）：不起任何业务入口，等用户在窗口里
     /// [`choose_v3`] 或 [`choose_legacy`]。
     SourceConflict(StartupState),
@@ -586,13 +590,19 @@ fn publication_exists(layout: &Layout) -> bool {
 
 /// 库内的 `app_meta.generation`（只读打开）。只在 `M` 可信时调用。
 fn published_generation(layout: &Layout) -> Option<String> {
+    read_published_generation(layout).ok()
+}
+
+/// 同上，读不出时说明原因（[`Startup::Damaged`] 带给用户）。
+fn read_published_generation(layout: &Layout) -> std::result::Result<String, String> {
     let db = layout.database();
     if !db.is_file() {
-        return None;
+        return Err("the database is missing".into());
     }
-    let c = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let c = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("the database cannot be opened: {e}"))?;
     c.query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
-        .ok()
+        .map_err(|e| format!("the database cannot be read: {e}"))
 }
 
 /// 发布物里库之外的文件：`artifacts\`、`sync\`、`dispatch\` 三个子树里 (相对路径, size, sha256) 的集合摘要。
@@ -771,19 +781,20 @@ pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
                 },
             }
         }
-        Phase::Published => match published_generation(layout) {
-            Some(g) if g == m.generation => match read_startup_state(layout) {
+        Phase::Published => match read_published_generation(layout) {
+            Ok(g) if g == m.generation => match read_startup_state(layout) {
                 Some(state) if state.generation == m.generation => Startup::SourceConflict(state),
                 _ => Startup::Published(m),
             },
-            Some(g) => Startup::Quarantine {
+            Ok(g) => Startup::Quarantine {
                 reason: format!(
                     "the publication is generation {g}, the manifest says {}",
                     m.generation
                 ),
             },
-            None => Startup::Quarantine {
-                reason: format!("generation {} has no readable publication", m.generation),
+            Err(reason) => Startup::Damaged {
+                generation: m.generation,
+                reason,
             },
         },
     }

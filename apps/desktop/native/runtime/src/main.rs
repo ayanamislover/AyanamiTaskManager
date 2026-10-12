@@ -15,7 +15,7 @@
 //!
 //! 两个根都必须显式给出，并且不能与真实的数据根、安装根重叠（[`atm_runtime::guard`]）：开发二进制不碰真实数据。
 //!
-//! 退出码：2 参数不对；3 另一个实例持有准入；4 旧版未静止；5 启动失败。入口开着或处于数据源冲突时一直运行。
+//! 退出码：2 参数不对；3 另一个实例持有准入；4 旧版未静止；5 启动失败；6 已发布的库读不出（等 `atm recover --offline`）。入口开着或处于数据源冲突时一直运行。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -125,6 +125,7 @@ fn main() {
             std::process::exit(match e {
                 BootError::AlreadyRunning => 3,
                 BootError::WaitLegacyQuiesce(_) => 4,
+                BootError::Damaged { .. } => 6,
                 BootError::Failed(_) => 5,
             });
         }

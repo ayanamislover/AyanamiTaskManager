@@ -5197,6 +5197,54 @@ mod w3d {
         assert_eq!(cv::decide(&n, false), Startup::FreshInstall);
     }
 
+    /// W8f-3：`M` 是 PUBLISHED、generation 也没有别的说法，只是这一代的库读不出（页坏了、被别的程序独占、
+    /// 文件不见了）：判为 Damaged，不隔离。隔离之后会按 S2 / S1 重新转换或建空库，3.0 里的写入就悄悄没了，
+    /// 这一代的备份也因为 generation 换了而用不上。判定本身不改任何文件；库能读了就照常 S6。
+    #[test]
+    fn an_unreadable_published_database_is_damaged_not_quarantined() {
+        let (f, root) = json_fixture("w8f3-damaged");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let db = n.database();
+        let good = fs::read(&db).unwrap();
+        let decide_damaged = |why: &str| match cv::decide(&n, true) {
+            Startup::Damaged { generation, reason } => {
+                assert_eq!(generation, G1);
+                assert!(reason.contains(why), "{reason}");
+            }
+            other => panic!("{why}: {other:?}"),
+        };
+        let damaged = |why: &str| {
+            let before = tree(&n.root);
+            decide_damaged(why);
+            assert_eq!(tree(&n.root), before, "{why}: deciding changed files");
+        };
+
+        let mut garbage = good.clone();
+        garbage[..100].fill(0x5a);
+        fs::write(&db, &garbage).unwrap();
+        damaged("cannot be read");
+        // 别的程序独占着库（杀毒、备份软件）：同样不服务，更不能隔离。
+        fs::write(&db, &good).unwrap();
+        let before = tree(&n.root);
+        let held = {
+            use std::os::windows::fs::OpenOptionsExt;
+            fs::File::options()
+                .read(true)
+                .share_mode(0)
+                .open(&db)
+                .unwrap()
+        };
+        decide_damaged("cannot be");
+        drop(held);
+        assert_eq!(tree(&n.root), before, "held: deciding changed files");
+        fs::remove_file(&db).unwrap();
+        damaged("missing");
+
+        fs::write(&db, &good).unwrap();
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+    }
+
     /// 封存被杀在任何一步，再调用都按记下的种类与目标续做；目标名撞了换名，目标里已有的东西不覆盖。
     #[test]
     fn sealing_resumes_after_a_kill_and_never_overwrites() {

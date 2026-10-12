@@ -636,6 +636,69 @@ fn an_offline_recovery_is_settled_before_serving() {
     s.stop(&|_| {});
 }
 
+/// W8f-3 掉电演练：已发布的库读不出时不服务、不隔离、不建空库（否则 3.0 的写入悄悄消失，备份也因 generation
+/// 换了而用不上）。启动以 Damaged 结束、放掉准入，再启动还是一样；`atm recover --offline` 从这一代的备份恢复后照常服务。
+#[test]
+fn a_damaged_database_waits_for_an_offline_recovery() {
+    use atm_store::recover::{self, RecoverOptions};
+    let d = dir("damaged-database");
+    let n = d.join("N");
+    let l = d.join("L-missing");
+    serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+    let layout = Layout::new(&n);
+    let generation = match cv::read_manifest(&layout) {
+        cv::ManifestState::Present(m) => m.generation,
+        other => panic!("{other:?}"),
+    };
+    let store = atm_store::Store::open(&layout.database(), atm_store::Config::default()).unwrap();
+    let id = atm_store::backup::create_backup(
+        &store,
+        &n.join("backups"),
+        "MANUAL",
+        "2026-10-12T00:00:00.000Z",
+    )
+    .unwrap()
+    .id;
+    drop(store);
+    let mut bytes = std::fs::read(layout.database()).unwrap();
+    bytes[..100].fill(0x5a);
+    std::fs::write(layout.database(), &bytes).unwrap();
+
+    for _ in 0..2 {
+        let events = Events::default();
+        match atm_runtime::start(&options(&n, &l, &events)) {
+            Err(atm_runtime::BootError::Damaged {
+                generation: g,
+                reason,
+            }) => {
+                assert_eq!(g, generation);
+                assert!(reason.contains("cannot be read"), "{reason}");
+            }
+            Err(other) => panic!("{other}"),
+            Ok(_) => panic!("served a database that cannot be read"),
+        }
+        assert_eq!(events.take(), [Event::Admitted]);
+        assert!(descriptor(&n).is_none());
+        assert!(
+            !n.join("quarantine").exists(),
+            "the publication was quarantined"
+        );
+        assert_eq!(std::fs::read(layout.database()).unwrap(), bytes);
+    }
+
+    let o = RecoverOptions {
+        at: "2026-10-12T01:00:00.000Z",
+        pin_until: "2026-11-12T01:00:00.000Z",
+    };
+    recover::recover(&layout, &id, o).unwrap();
+    let s = serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap());
+    match cv::read_manifest(&layout) {
+        cv::ManifestState::Present(m) => assert_eq!(m.generation, generation),
+        other => panic!("{other:?}"),
+    }
+    s.stop(&|_| {});
+}
+
 /// 宿主正在退出（`may_open` 答 false）：入口一样都不开——没有 lease、HTTP、daemon.json，也没有观察到 Lease；
 /// 启动以失败结束、放掉准入，下一次照常开放（peer W6 r9 P2-01）。
 #[test]

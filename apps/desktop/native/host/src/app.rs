@@ -117,6 +117,13 @@ enum Service {
     },
     /// Gave up after repeated failures; the next start tries again.
     Unavailable,
+    /// The published database is missing or unreadable (W8f-3): nothing is served and no file
+    /// is touched; the window tells the user to quit and run `atm recover --offline`. Retrying
+    /// cannot help, so there is none; the admission is not held, so recover can take it.
+    Damaged {
+        generation: String,
+        reason: String,
+    },
 }
 
 pub struct App {
@@ -246,6 +253,7 @@ enum Phase {
     Starting,
     Conflict,
     Unavailable,
+    Damaged,
     /// `open`：入口还开着。后台比较发现数据源冲突时入口撤下，宿主还没换到 Conflict。
     Serving {
         open: bool,
@@ -261,6 +269,7 @@ fn unavailable_in(phase: Phase) -> Option<(&'static str, &'static str)> {
             Some(("SOURCE_CONFLICT", "数据源冲突，需要先选择数据源"))
         }
         Phase::Unavailable => Some(("SERVICE_UNAVAILABLE", "服务暂时不可用")),
+        Phase::Damaged => Some(("DATABASE_DAMAGED", "数据库读不出，需要先从备份恢复")),
     }
 }
 
@@ -278,6 +287,8 @@ mod phase_tests {
             Some("SOURCE_CONFLICT")
         );
         assert_eq!(code(Phase::Unavailable), Some("SERVICE_UNAVAILABLE"));
+        // 库读不出：等恢复，不排队（排着也等不到服务）。
+        assert_eq!(code(Phase::Damaged), Some("DATABASE_DAMAGED"));
         assert_eq!(code(Phase::Starting), None);
         assert_eq!(code(Phase::Serving { open: true }), None);
     }
@@ -605,6 +616,29 @@ impl App {
                 self.service = Service::Conflict { held: conflicted };
                 self.answer_queued();
                 self.source_settled(Some(state));
+            }
+            Err(BootError::Damaged { generation, reason }) => {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!("DATABASE_DAMAGED: generation {generation}: {reason}"),
+                );
+                record(
+                    Life::BootstrapFailed,
+                    &life::error_detail("DatabaseDamaged", &reason),
+                );
+                self.choosing = false;
+                self.service = Service::Damaged { generation, reason };
+                self.answer_queued();
+                if !self.snapshot.damaged {
+                    self.snapshot.damaged = true;
+                    if let Some(tray) = &self.tray {
+                        tray.set_menu(Some(Box::new(tray::menu(&self.snapshot))));
+                        let _ = tray.set_tooltip(Some(tray::tooltip(&self.snapshot)));
+                    }
+                }
+                self.emit_data_source();
+                // Only the user can act on it: bring the window up, like a source conflict.
+                self.request_show_later();
             }
             Err(BootError::WaitLegacyQuiesce(why)) => {
                 if self.legacy_wait.as_deref() != Some(why.as_str()) {
@@ -1048,6 +1082,7 @@ impl App {
             Service::Idle | Service::Booting | Service::Retrying => Phase::Starting,
             Service::Conflict { .. } => Phase::Conflict,
             Service::Unavailable => Phase::Unavailable,
+            Service::Damaged { .. } => Phase::Damaged,
             Service::Serving(serving) => Phase::Serving {
                 open: serving.service().is_some(),
             },
@@ -1338,6 +1373,17 @@ impl App {
                 "reason": state.reason,
                 "since": state.since,
                 "error": self.choice_error,
+            });
+        }
+        if let Service::Damaged { generation, reason } = &self.service {
+            // The exact atm.exe of this version, so the command can be copied and run as is
+            // (atm.exe is not on PATH). recover asks for the backup id on stdin.
+            return json!({
+                "state": "DAMAGED",
+                "generation": generation,
+                "reason": reason,
+                "command": format!("\"{}\" recover --offline", self.layout.cli.exe.display()),
+                "dataDir": self.layout.v3_root.display().to_string(),
             });
         }
         let state = match &self.service {

@@ -17,24 +17,35 @@
  *               强杀，原样重启，共 8 轮。每轮：库 integrity_check 为 ok；已确认的写入都在、各只有一份；任务数
  *               与 work.created 事件数一致；断电时在途的那一条用同一 op_id 重放后恰好一份（断电前已提交的
  *               认出回执、没提交的写入一次）；全部已确认的重放都认出回执，库里一条没多。
+ *   recover     smoke 构建开窗，Agent 写一批，经界面建整库备份，再写一批；干净退出后破坏库（中段若干页写成
+ *               乱码）。坏库上（07 S5′）：生产宿主记下 DATABASE_DAMAGED，不服务、不隔离、不建新库、库的字节不变，
+ *               开着时 recover 以退出码 5 拒绝；smoke 构建的窗口显示恢复页，命令指向自带的 atm.exe。之后候选的
+ *               atm.exe recover --offline --from <备份>（控制台输入 ID 确认）恢复：坏库进隔离区；lifecycle 记
+ *               offline.recover；生产宿主健康、库完整、业务内容等于备份那一刻；服务在跑时 recover 以退出码 5
+ *               拒绝、什么都不改。
  *
  * 报告写 output/power-loss/report.json。
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseSync } from "node:sqlite";
+import { chromium, type Browser, type Page } from "@playwright/test";
 import { agentFetch } from "./agent-fetch.js";
 import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
 import { binariesOf } from "./candidate-binaries.js";
 import { unpackPortable } from "./portable-unpack.js";
+import { rendererRequest } from "./renderer-user-request.js";
 import { copySampleLibrary, ensureSampleLibrary } from "./sample-library.js";
 import {
   assertSandboxDataDir,
+  devToolsPortFile,
   outputRoot,
+  readDevToolsPort,
   repoRoot,
   runtimeFile,
+  smokeExecutable,
   smokeHostEnvironment,
   v3Root,
   withLoginItemsRestored,
@@ -107,6 +118,25 @@ async function healthy(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** 宿主日志（`N\logs\host*.log`，含轮转的）里出现了 `needle`。 */
+function hostLogged(needle: string): boolean {
+  const logs = join(n, "logs");
+  if (!existsSync(logs)) return false;
+  return readdirSync(logs)
+    .filter((name) => name.startsWith("host") && name.endsWith(".log"))
+    .some((name) => readFileSync(join(logs, name), "utf8").includes(needle));
+}
+
+async function untilLogged(host: Host, needle: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (hostLogged(needle)) return true;
+    if (host.child.exitCode !== null) return false;
+    await sleep(200);
+  }
+  return false;
 }
 
 async function untilHealthy(host: Host, timeoutMs: number): Promise<boolean> {
@@ -575,6 +605,320 @@ async function scenarioWrites(executable: string): Promise<void> {
   await powerCut(host);
 }
 
+// ---------------------------------------------------------------- 场景：recover --offline
+
+const RECOVER_PROJECT = "RCV";
+
+/** 宿主自带的 CLI（候选的那一份）。 */
+const cliOf = (executable: string) => join(dirname(executable), "resources", "atm.exe");
+
+function runCli(
+  executable: string,
+  args: string[],
+  stdin = "",
+): { code: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(cliOf(executable), args, {
+    cwd: repoRoot,
+    env: smokeHostEnvironment(dataDir, homeDir),
+    input: stdin,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 120_000,
+  });
+  if (result.error) throw result.error;
+  return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/** smoke 构建开窗起来（用户的界面路径要经 CDP 驱动）；只有它认 --smoke-quit。 */
+function startWindowedSmoke(smoke: string): Host {
+  rmSync(devToolsPortFile(n), { force: true });
+  const child = spawn(smoke, [], {
+    cwd: repoRoot,
+    env: smokeHostEnvironment(dataDir, homeDir),
+    windowsHide: true,
+    stdio: "ignore",
+  });
+  if (child.pid === undefined) throw new Error(`smoke 宿主没能启动：${smoke}`);
+  return { child, pid: child.pid };
+}
+
+async function quitSmoke(smoke: string, host: Host): Promise<boolean> {
+  spawnSync(smoke, ["--smoke-quit"], {
+    cwd: repoRoot,
+    env: smokeHostEnvironment(dataDir, homeDir),
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  if (await exited(host, 15_000)) return true;
+  await powerCut(host);
+  return false;
+}
+
+async function rendererPage(): Promise<{ browser: Browser; page: Page }> {
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const port = await readDevToolsPort(n);
+    if (port !== null) {
+      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+      const page = browser
+        .contexts()
+        .flatMap((context) => context.pages())
+        .find((candidate) => candidate.url().startsWith("https://atm.localhost"));
+      if (page) return { browser, page };
+      await browser.close().catch(() => undefined);
+    }
+    await sleep(250);
+  }
+  throw new Error("等 WebView 的 CDP 连接超时");
+}
+
+async function agentWrites(rt: Runtime, session: string, prefix: string, count: number) {
+  for (let index = 0; index < count; index += 1) {
+    const task = await post(rt, `/api/v1/projects/${RECOVER_PROJECT}/work-items`, {
+      op_id: `${prefix}-${index}-task`,
+      session,
+      items: [{ client_ref: "t", title: `${prefix}-${index}`, status: "READY" }],
+    });
+    const record = await post(rt, `/api/v1/projects/${RECOVER_PROJECT}/records`, {
+      op_id: `${prefix}-${index}-record`,
+      session,
+      kind: "FACT",
+      title: `${prefix}-${index}`,
+      summary: prefix,
+    });
+    if (task.json?.ok !== true || record.json?.ok !== true)
+      throw new Error(`写入失败：${task.text.slice(0, 200)} / ${record.text.slice(0, 200)}`);
+  }
+}
+
+/** 破坏库：把文件中段的若干页写成乱码（模拟坏扇区 / 被别的程序改坏），保留文件头。 */
+function corrupt(path: string): { offset: number; bytes: number } {
+  const content = readFileSync(path);
+  const offset = 4096 * 4;
+  const bytes = Math.min(4096 * 16, content.length - offset);
+  if (bytes <= 0) throw new Error(`库太小，破坏不了：${content.length} 字节`);
+  for (let index = 0; index < bytes; index += 1) content[offset + index] = (index * 131 + 7) & 0xff;
+  writeFileSync(path, content);
+  return { offset, bytes };
+}
+
+async function scenarioRecover(executable: string): Promise<void> {
+  scenario = "recover";
+  const smoke = smokeExecutable();
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 2 });
+  mkdirSync(dataDir, { recursive: true });
+  rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
+  mkdirSync(join(homeDir, "Roaming"), { recursive: true });
+  mkdirSync(join(homeDir, "Local"), { recursive: true });
+
+  // 1. 写数据，经界面建整库备份，再写一批（恢复之后它们应当不在）。
+  const host = startWindowedSmoke(smoke);
+  let atBackup: Business | null = null;
+  let backupId = "";
+  try {
+    if (!check("smoke 宿主健康", await untilHealthy(host, 60_000))) return;
+    const rt = runtime();
+    const created = await post(rt, "/api/v1/projects", {
+      name: "恢复演练",
+      code: RECOVER_PROJECT,
+      op_id: "recover-project",
+    });
+    const begun = await post(rt, "/api/v1/sessions", {
+      project_code: RECOVER_PROJECT,
+      mode: "project",
+      agent_id: "power-loss-drill",
+      client_kind: "release-drill",
+    });
+    const session = String(
+      (begun.json?.session as string | undefined) ??
+        ((begun.json?.result as Record<string, unknown> | undefined)?.session as
+          | string
+          | undefined) ??
+        "",
+    );
+    if (
+      !check(
+        "建项目、开会话",
+        created.json?.ok === true && session.length > 0,
+        created.text.slice(0, 200),
+      )
+    )
+      return;
+    await agentWrites(rt, session, "before", 30);
+    const { browser, page } = await rendererPage();
+    try {
+      const backup = await rendererRequest<Record<string, unknown>>(
+        page,
+        "POST",
+        "/api/v1/backups",
+        {},
+      );
+      backupId = String(backup.body?.id ?? "");
+      if (
+        !check(
+          "经界面建整库备份",
+          backup.status >= 200 && backup.status < 300 && backupId.length > 0,
+          backup,
+        )
+      )
+        return;
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+    atBackup = v3Business(n);
+    check(
+      "备份那一刻的业务内容有数据",
+      (atBackup?.records.length ?? 0) >= 30,
+      atBackup?.records.length,
+    );
+    await agentWrites(rt, session, "after", 10);
+    check(
+      "备份之后又写了一批",
+      (v3Business(n)?.records.length ?? 0) > (atBackup?.records.length ?? 0),
+    );
+  } finally {
+    check("smoke 宿主经 --smoke-quit 干净退出", await quitSmoke(smoke, host));
+  }
+
+  // 2. 破坏库。坏库上（07 S5′，W8f-3）：不服务、不隔离、不建新库、不改库，等用户退出后恢复。
+  const db = join(n, "data", "atm.sqlite");
+  // WAL 在不在只影响破坏落在哪一层，不是验收项，如实记下。
+  check(
+    `退出后的 WAL：${existsSync(`${db}-wal`) ? `${readFileSync(`${db}-wal`).length} 字节` : "没有"}`,
+    true,
+  );
+  const damage = corrupt(db);
+  const damaged = readFileSync(db);
+  check(`库的第 ${damage.offset / 4096} 页起 ${damage.bytes / 4096} 页写成乱码`, true);
+  const untouched = () =>
+    !existsSync(join(n, "quarantine")) && existsSync(db) && readFileSync(db).equals(damaged);
+  const broken = startHost(executable);
+  try {
+    check(
+      "坏库上的生产宿主记下 DATABASE_DAMAGED",
+      await untilLogged(broken, "DATABASE_DAMAGED", 60_000),
+    );
+    check(
+      "坏库上的生产宿主不服务、进程还在（等用户）",
+      !(await untilHealthy(broken, 5_000)) && broken.child.exitCode === null,
+      { exitCode: broken.child.exitCode },
+    );
+    check("坏库没有被隔离，也没有建新库，字节不变", untouched());
+    const refused = runCli(
+      executable,
+      ["--json", "recover", "--offline", "--from", backupId],
+      `${backupId}\n`,
+    );
+    check("宿主开着时 recover 被拒绝（退出码 5），库没动", refused.code === 5 && untouched(), {
+      code: refused.code,
+      stderr: refused.stderr.slice(0, 300),
+    });
+  } finally {
+    await powerCut(broken);
+  }
+  // 界面：smoke 构建（同一份源码，带 CDP）在坏库上显示恢复页。
+  const shown = startWindowedSmoke(smoke);
+  try {
+    const { browser, page } = await rendererPage();
+    try {
+      const title = page.getByText("数据库读不出，需要从备份恢复");
+      const visible = await title
+        .waitFor({ timeout: 60_000 })
+        .then(() => true)
+        .catch(() => false);
+      const command = visible
+        ? ((await page.locator(".atm-damaged-command").textContent()) ?? "")
+        : "";
+      check(
+        "smoke 宿主的窗口显示恢复页，命令是它自带的 atm.exe recover --offline",
+        visible && /atm\.exe" recover --offline$/u.test(command),
+        command,
+      );
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  } finally {
+    check("smoke 宿主经 --smoke-quit 干净退出（坏库上）", await quitSmoke(smoke, shown));
+  }
+  check("看过恢复页之后库仍然没动", untouched());
+
+  const listed = runCli(executable, ["--json", "recover", "--offline", "--list"]);
+  const list = (() => {
+    try {
+      return JSON.parse(listed.stdout) as { backups: Array<{ id: string; status: string }> };
+    } catch {
+      return null;
+    }
+  })();
+  check(
+    "--list 列出这份备份且可用",
+    list?.backups.some((b) => b.id === backupId && b.status === "USABLE") === true,
+    listed.stdout.slice(0, 400),
+  );
+
+  // 3. 恢复：控制台输入备份 ID 确认（不用测试模式的 --yes）。
+  const recovered = runCli(
+    executable,
+    ["--json", "recover", "--offline", "--from", backupId],
+    `${backupId}\n`,
+  );
+  const result = (() => {
+    try {
+      return JSON.parse(recovered.stdout) as { backup_id: string; quarantine?: string };
+    } catch {
+      return null;
+    }
+  })();
+  check(
+    "recover --offline 恢复成功",
+    recovered.code === 0 && result?.backup_id === backupId,
+    recovered,
+  );
+  check(
+    "坏库移进了隔离区，没有删",
+    typeof result?.quarantine === "string" && existsSync(result.quarantine),
+    result,
+  );
+  const lifecycle = readFileSync(join(n, "logs", "lifecycle.ndjson"), "utf8")
+    .trim()
+    .split(/\r?\n/u);
+  check(
+    "lifecycle 记了 offline.recover",
+    lifecycle.some((line) => line.includes('"offline.recover"') && line.includes(backupId)),
+  );
+
+  // 4. 生产宿主在恢复后的库上：健康、完整、业务内容等于备份那一刻。
+  const after = startHost(executable);
+  try {
+    check("恢复后生产宿主健康", await untilHealthy(after, 60_000));
+    const health = integrity();
+    check(
+      "恢复后库 integrity_check 为 ok",
+      Object.values(health).every((v) => v === "ok") && Object.keys(health).length > 0,
+      health,
+    );
+    check("业务内容等于备份那一刻（备份之后写的那批不在）", sameBusiness(v3Business(n), atBackup), {
+      atBackup: atBackup?.records.length,
+      now: v3Business(n)?.records.length,
+    });
+    const refused = runCli(
+      executable,
+      ["--json", "recover", "--offline", "--from", backupId],
+      `${backupId}\n`,
+    );
+    check(
+      "服务在跑时 recover 被拒绝（退出码 5），什么都没改",
+      refused.code === 5 && sameBusiness(v3Business(n), atBackup),
+      {
+        code: refused.code,
+        stderr: refused.stderr.slice(0, 300),
+      },
+    );
+  } finally {
+    await powerCut(after);
+  }
+}
+
 // ---------------------------------------------------------------- 主流程
 
 const only = process.argv.includes("--only")
@@ -583,6 +927,7 @@ const only = process.argv.includes("--only")
 const SCENARIOS: Array<[string, (executable: string) => Promise<void>]> = [
   ["conversion", scenarioConversion],
   ["writes", scenarioWrites],
+  ["recover", scenarioRecover],
 ];
 for (const name of only)
   if (!SCENARIOS.some(([known]) => known === name)) throw new Error(`没有这个场景：${name}`);
@@ -595,7 +940,7 @@ try {
   await withLoginItemsRestored(async () => {
     for (const [name, run] of SCENARIOS)
       if (only.length === 0 || only.includes(name)) await run(executable);
-  }, [executable]);
+  }, [executable, smokeExecutable()]);
 } catch (caught) {
   error = caught instanceof Error ? (caught.stack ?? caught.message) : String(caught);
   process.stderr.write(`${error}\n`);

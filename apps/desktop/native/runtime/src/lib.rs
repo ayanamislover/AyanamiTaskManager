@@ -112,6 +112,12 @@ pub enum BootError {
     AlreadyRunning,
     /// 旧版还没静止：不转换、不发布。
     WaitLegacyQuiesce(String),
+    /// 已发布的这一代库缺失或读不出（[`Startup::Damaged`]）：不服务、不动文件，等用户 `atm recover --offline`。
+    /// 重试没有用，宿主不自动重试。
+    Damaged {
+        generation: String,
+        reason: String,
+    },
     Failed(String),
 }
 
@@ -120,6 +126,9 @@ impl std::fmt::Display for BootError {
         match self {
             BootError::AlreadyRunning => write!(f, "another instance holds the admission"),
             BootError::WaitLegacyQuiesce(why) => write!(f, "WAIT_LEGACY_QUIESCE: {why}"),
+            BootError::Damaged { generation, reason } => {
+                write!(f, "DATABASE_DAMAGED: generation {generation}: {reason}")
+            }
             BootError::Failed(why) => write!(f, "{why}"),
         }
     }
@@ -394,6 +403,11 @@ fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
                 eprintln!("atm-runtime: quarantining the publication: {reason}");
                 cv::seal(&layout, Seal::Quarantine, &at).map_err(failed)?;
                 continue;
+            }
+            Startup::Damaged { generation, reason } => {
+                // 不封存、不隔离、不重建：3.0 里的写入只能从这一代的备份找回（W8f-3）。
+                eprintln!("atm-runtime: generation {generation} cannot be served: {reason}");
+                return Err(BootError::Damaged { generation, reason });
             }
             Startup::FreshInstall => {
                 let g = rng::ulid();

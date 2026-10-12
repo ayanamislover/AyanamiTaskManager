@@ -57,6 +57,7 @@ fn startup_name(s: &Startup) -> &'static str {
         Startup::Restart { .. } => "RESTART",
         Startup::FinishPublishing { .. } => "FINISH_PUBLISHING",
         Startup::Quarantine { .. } => "QUARANTINE",
+        Startup::Damaged { .. } => "DAMAGED",
         Startup::Published(_) => "PUBLISHED",
         Startup::SourceConflict(_) => "SOURCE_CONFLICT",
     }

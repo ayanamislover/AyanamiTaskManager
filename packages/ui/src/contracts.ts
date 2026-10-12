@@ -92,7 +92,15 @@ export type DataSourceState =
       error: string | null;
     }
   | { state: "STARTING"; choosing: boolean; error?: string | null }
-  | { state: "SERVING" | "UNAVAILABLE"; choosing: false; error: string | null };
+  | { state: "SERVING" | "UNAVAILABLE"; choosing: false; error: string | null }
+  | {
+      /** 已发布的库读不出（W8f-3）：不服务、不动文件，等用户退出后运行 `command`（atm.exe 的完整路径）。 */
+      state: "DAMAGED";
+      generation: string;
+      reason: string;
+      command: string;
+      dataDir: string;
+    };
 
 export type DesktopBridge = {
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;
