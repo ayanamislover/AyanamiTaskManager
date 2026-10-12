@@ -10,7 +10,7 @@
 //! 整库没有 `-wal` 时按 `immutable` 打开，SQLite 不会建 `-wal` / `-shm`；有 `-wal` 时说明服务在跑或上次没正常退出，
 //! 按只读打开，读得到 `-wal` 里已提交的内容。服务在跑时照样能用：诊断挂住的服务正需要它。
 //! 有 `-journal` 时也不用 `immutable`：那是上次写到一半被中断留下的回滚日志，`immutable` 会无视它、读到半截的页。
-//! 只读连接回滚不了它，打不开时如实说「正常启动一次会回滚」，不说库坏了（W8 关口，ATM-D-526）。
+//! 只读连接回滚不了它，打不开时如实说「正常启动一次会回滚」，不说库坏了（W8 关口，ATM-D-529）。
 
 use crate::discover::{self, Unavailable};
 use atm_store::conversion::{Layout, ManifestState, read_manifest};
