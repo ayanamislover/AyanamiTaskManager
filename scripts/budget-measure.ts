@@ -49,9 +49,8 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "@playwright/test";
-import { unzipSync } from "fflate";
-import Database from "better-sqlite3";
-import { AyanamiTaskService } from "../packages/application/src/index.js";
+import { copySampleLibrary, ensureSampleLibrary } from "./sample-library.js";
+import { unpackPortable } from "./portable-unpack.js";
 import { NativeWindowProbe } from "./native-window.js";
 import {
   assertSandboxDataDir,
@@ -134,104 +133,9 @@ function directoryBytes(path: string): { bytes: number; files: number } {
 
 // ---------------------------------------------------------------- 样本库
 
-const SEED = { projects: 100, workItems: 10_000, searchDocuments: 40_000 } as const;
-
-/** 与 scripts/benchmark.ts 同一规模与同一做法：100 个项目、主项目 1 万条任务、4 万条检索文档。 */
-async function ensureSeed(): Promise<Record<string, unknown>> {
-  const marker = join(seedDir, "budget-seed.json");
-  if (existsSync(marker)) return JSON.parse(readFileSync(marker, "utf8"));
-  rmSync(seedDir, { recursive: true, force: true });
-  mkdirSync(seedDir, { recursive: true });
-  const started = performance.now();
-  const service = await AyanamiTaskService.open({
-    dataDir: seedDir,
-    migrationsRoot: join(repoRoot, "migrations"),
-  });
-  const primary = await service.createProject({ name: "预算基准", sourcePath: null, code: "PFM" });
-  for (let index = 1; index < SEED.projects; index += 1)
-    await service.createProject({
-      name: `预算项目 ${index}`,
-      sourcePath: null,
-      code: `P${String(index).padStart(3, "0")}`,
-    });
-  const objective = await service.createObjectiveAsUser(primary.code, "budget-objective", {
-    title: "预算基准目标",
-    description: "真实规模样本库",
-    definitionOfDone: [],
-  });
-  for (let batch = 0; batch < SEED.workItems / 50; batch += 1)
-    await service.createWorkItemsAsUser(
-      primary.code,
-      `budget-batch-${batch}`,
-      Array.from({ length: 50 }, (_, offset) => {
-        const index = batch * 50 + offset;
-        return {
-          clientRef: `budget-${index}`,
-          objectiveId: objective.id,
-          title: `预算任务 ${String(index).padStart(5, "0")}`,
-          description: `真实规模样本任务 ${index}`,
-          type: "TASK" as const,
-          priority: index % 20 === 0 ? ("HIGH" as const) : ("NORMAL" as const),
-          status: index % 3 === 0 ? ("BACKLOG" as const) : ("READY" as const),
-          acceptance: [],
-          checklist: [],
-          verificationRequired: false,
-        };
-      }),
-    );
-  service.close();
-  const direct = new Database(primary.databasePath);
-  direct.pragma("journal_mode = WAL");
-  const insertDocument = direct.prepare(
-    "INSERT INTO search_documents(entity_type, entity_id, entity_key, title, body, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-  );
-  const insertFts = direct.prepare(
-    "INSERT INTO search_documents_fts(entity_type, entity_id, entity_key, title, body) VALUES (?, ?, ?, ?, ?)",
-  );
-  direct.transaction(() => {
-    const now = new Date().toISOString();
-    for (let index = 0; index < SEED.searchDocuments; index += 1) {
-      const id = `budget-document-${index}`;
-      const key = `DOC-${index}`;
-      const title = `中文预算文档 ${index}`;
-      const body = `项目验证关键词 任务管理 本地优先 第 ${index} 条`;
-      insertDocument.run("RECORD", id, key, title, body, now);
-      insertFts.run("RECORD", id, key, title, body);
-    }
-  })();
-  direct.pragma("wal_checkpoint(TRUNCATE)");
-  direct.close();
-  const seed = {
-    ...SEED,
-    seededMs: Math.round(performance.now() - started),
-    bytes: directoryBytes(seedDir).bytes,
-  };
-  writeFileSync(marker, JSON.stringify(seed, null, 2));
-  return seed;
-}
-
 /** 首次转换用的数据：L 换回样本副本，N 清空。 */
 function freshRunData(): void {
-  rmSync(runDir, { recursive: true, force: true });
-  mkdirSync(runDir, { recursive: true });
-  cpSync(seedDir, runDir, {
-    recursive: true,
-    filter: (source) => !source.endsWith("budget-seed.json"),
-  });
-  // registry 记的是项目库的绝对路径：不改写的话，副本里的服务会去开样本目录里的那些库，
-  // 每一轮都改写同一份样本（实测第一版就是这样把备份写进了样本目录）。
-  const registry = new Database(join(runDir, "registry", "registry.sqlite"));
-  try {
-    registry
-      .prepare("UPDATE projects SET db_path = replace(db_path, ?, ?)")
-      .run(seedDir, resolve(runDir));
-    const leaked = registry
-      .prepare("SELECT count(*) AS count FROM projects WHERE instr(lower(db_path), lower(?)) > 0")
-      .get(seedDir) as { count: number };
-    if (leaked.count > 0) throw new Error("副本 registry 仍指向样本目录");
-  } finally {
-    registry.close();
-  }
+  copySampleLibrary(seedDir, runDir);
   resetHome(false);
 }
 
@@ -281,33 +185,6 @@ function resetHome(keepWebview: boolean): void {
 }
 
 // ---------------------------------------------------------------- 生产便携包
-
-function ensurePortable(): string {
-  const zip = readdirSync(packageDir).find((name) => name.endsWith("-portable.zip"));
-  if (!zip) throw new Error(`output/package 里没有便携 zip`);
-  const marker = join(portableRoot, "source.json");
-  const source = { zip, bytes: statSync(join(packageDir, zip)).size };
-  const stale =
-    !existsSync(marker) ||
-    JSON.stringify(JSON.parse(readFileSync(marker, "utf8"))) !== JSON.stringify(source);
-  if (stale) {
-    rmSync(portableRoot, { recursive: true, force: true });
-    const files = unzipSync(readFileSync(join(packageDir, zip)));
-    for (const [name, bytes] of Object.entries(files)) {
-      if (name.endsWith("/")) continue;
-      const target = join(portableRoot, ...name.split("/"));
-      mkdirSync(resolve(target, ".."), { recursive: true });
-      writeFileSync(target, bytes);
-    }
-    writeFileSync(marker, JSON.stringify(source));
-  }
-  const folder = readdirSync(portableRoot).find((name) => name.startsWith("AyanamiTaskManager-"));
-  if (!folder) throw new Error("便携 zip 里没有版本目录");
-  const executable = join(portableRoot, folder, "AyanamiTaskManager.exe");
-  if (!existsSync(join(portableRoot, folder, "portable")))
-    throw new Error("便携目录缺 portable 标记");
-  return executable;
-}
 
 // ---------------------------------------------------------------- 进程探针（Toolhelp32 + 标量）
 
@@ -1043,8 +920,8 @@ report.sizes = {
 };
 save();
 
-report.seed = await ensureSeed();
-const production = ensurePortable();
+report.seed = await ensureSampleLibrary(seedDir, repoRoot);
+const production = unpackPortable(packageDir, portableRoot);
 const smoke = smokeExecutable();
 report.executables = { production, smoke };
 // 候选绑定（L6）：量的是哪份二进制。生产便携包对 release 那套，smoke 构建对 smoke 那套。
