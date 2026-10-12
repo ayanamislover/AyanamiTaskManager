@@ -9,6 +9,8 @@
 //! 只读的意思是不改任何文件，也不取服务的准入锁（取了会让同时启动的服务以为另一个实例在跑）。
 //! 整库没有 `-wal` 时按 `immutable` 打开，SQLite 不会建 `-wal` / `-shm`；有 `-wal` 时说明服务在跑或上次没正常退出，
 //! 按只读打开，读得到 `-wal` 里已提交的内容。服务在跑时照样能用：诊断挂住的服务正需要它。
+//! 有 `-journal` 时也不用 `immutable`：那是上次写到一半被中断留下的回滚日志，`immutable` 会无视它、读到半截的页。
+//! 只读连接回滚不了它，打不开时如实说「正常启动一次会回滚」，不说库坏了（W8 关口，ATM-D-526）。
 
 use crate::discover::{self, Unavailable};
 use atm_store::conversion::{Layout, ManifestState, read_manifest};
@@ -151,12 +153,18 @@ fn database(path: &Path, problems: &mut Vec<String>) -> Value {
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     let wal_bytes = std::fs::metadata(&wal).ok().map(|m| m.len());
+    let journal = path.with_file_name(format!(
+        "{}-journal",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let journal_bytes = std::fs::metadata(&journal).ok().map(|m| m.len());
     let mut out = json!({
         "exists": true,
         "size_bytes": meta.len(),
         "wal_bytes": wal_bytes,
+        "journal_bytes": journal_bytes,
     });
-    match read_database(path, wal_bytes.is_none()) {
+    match read_database(path, wal_bytes.is_none() && journal_bytes.is_none()) {
         Ok(facts) => {
             if facts["quick_check"] != "ok" {
                 problems.push(format!("整库完整性检查没有通过：{}", facts["quick_check"]));
@@ -164,6 +172,14 @@ fn database(path: &Path, problems: &mut Vec<String>) -> Value {
             if let (Value::Object(o), Value::Object(f)) = (&mut out, facts) {
                 o.extend(f);
             }
+        }
+        Err(e) if journal_bytes.is_some() => {
+            problems.push(format!(
+                "整库旁边有没回滚的日志 {}：上次写到一半被中断。正常启动一次 ATM 会先回滚它再用；\
+                 这不是库坏了，不要因此从备份恢复（只读诊断回滚不了它：{e}）",
+                journal.display()
+            ));
+            out["error"] = json!(e.to_string());
         }
         Err(e) => {
             problems.push(format!("整库打不开：{e}"));

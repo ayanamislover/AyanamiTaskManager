@@ -81,6 +81,53 @@ fn doctor_offline_reads_files_only() {
     assert!(human.stdout.contains("healthy: true\n"), "{}", human.stdout);
 }
 
+/// 上次写到一半被杀、留下热回滚日志：诊断不能拿 `immutable` 读半截的页，也不能把它说成库坏了，
+/// 而且不动它（回滚是下次正常启动的事）。
+#[test]
+fn doctor_offline_names_an_unrolled_journal_and_leaves_it() {
+    let root = bare_root("cli-doctor-hot-journal");
+    let db = root.join("data").join("atm.sqlite");
+    let side = root.join("side.sqlite");
+    std::fs::copy(&db, &side).unwrap();
+    let _ = std::fs::remove_file(root.join("data").join("atm.sqlite-wal"));
+    let _ = std::fs::remove_file(root.join("data").join("atm.sqlite-shm"));
+    let c = rusqlite::Connection::open(&side).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
+         CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+    )
+    .unwrap();
+    for _ in 0..2000 {
+        c.execute(
+            "INSERT INTO hot_journal_probe VALUES (?1)",
+            [&"y".repeat(500)],
+        )
+        .unwrap();
+    }
+    std::fs::copy(&side, &db).unwrap();
+    std::fs::copy(
+        root.join("side.sqlite-journal"),
+        root.join("data").join("atm.sqlite-journal"),
+    )
+    .unwrap();
+    drop(c);
+    let _ = std::fs::remove_file(&side);
+    let _ = std::fs::remove_file(root.join("side.sqlite-journal"));
+    let before = tree(&root);
+
+    let run = atm_in(&root, &["--json", "doctor", "--offline"]);
+    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    let v = run.json();
+    assert_ne!(v["database"]["generation"], "NOT-COMMITTED", "{v}");
+    let problem = v["problems"][0].as_str().unwrap();
+    assert!(
+        problem.contains("atm.sqlite-journal") && problem.contains("不是库坏了"),
+        "{v}"
+    );
+    assert!(v["database"]["journal_bytes"].as_u64().unwrap() > 0, "{v}");
+    assert_eq!(tree(&root), before, "doctor --offline touched the journal");
+}
+
 /// 服务在跑（库开着、有 `-wal`）时照样能诊断，读得到已提交的内容。
 #[test]
 fn doctor_offline_works_beside_a_running_service() {
